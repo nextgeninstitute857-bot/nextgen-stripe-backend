@@ -59,11 +59,11 @@ app.post("/stripe/create-checkout", async (req, res) => {
 
       success_url:
         successUrl ||
-        "https://lightcoral-mantis-722630.hostingersite.com/payment-success",
+        "https://live.nextgenusmlelms.com/payment-success",
 
       cancel_url:
         cancelUrl ||
-        "https://lightcoral-mantis-722630.hostingersite.com/payment-cancel",
+        "https://live.nextgenusmlelms.com/payment-cancel",
     });
 
     res.json({
