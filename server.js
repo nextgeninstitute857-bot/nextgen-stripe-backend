@@ -16,26 +16,6 @@ app.use(cors({ origin: "*" }));
 
 const POCKETBASE_URL = process.env.POCKETBASE_URL;
 
-async function getPocketBaseAdminToken() {
-  if (!POCKETBASE_URL) {
-    throw new Error("POCKETBASE_URL is missing");
-  }
-
-  if (!process.env.POCKETBASE_ADMIN_EMAIL || !process.env.POCKETBASE_ADMIN_PASSWORD) {
-    throw new Error("PocketBase admin credentials are missing");
-  }
-
-  const response = await axios.post(
-    `${POCKETBASE_URL}/api/admins/auth-with-password`,
-    {
-      identity: process.env.POCKETBASE_ADMIN_EMAIL,
-      password: process.env.POCKETBASE_ADMIN_PASSWORD,
-    }
-  );
-
-  return response.data.token;
-}
-
 app.get("/", (req, res) => {
   res.send("NextGen Backend Running");
 });
@@ -45,14 +25,20 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
     const { sessionId } = req.params;
 
     if (!sessionId) {
-      return res.status(400).json({ allowed: false, error: "sessionId is required" });
+      return res.status(400).json({
+        allowed: false,
+        error: "sessionId is required",
+      });
     }
 
     const authHeader = req.headers.authorization || "";
     const token = authHeader.replace("Bearer ", "").trim();
 
     if (!token) {
-      return res.status(401).json({ allowed: false, error: "User not authenticated" });
+      return res.status(401).json({
+        allowed: false,
+        error: "User not authenticated",
+      });
     }
 
     if (!POCKETBASE_URL) {
@@ -65,32 +51,49 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
     const userRefresh = await axios.post(
       `${POCKETBASE_URL}/api/collections/users/auth-refresh`,
       {},
-      { headers: { Authorization: `Bearer ${token}` } }
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
     );
 
     const user = userRefresh.data.record;
 
     if (!user?.id) {
-      return res.status(401).json({ allowed: false, error: "Invalid user token" });
+      return res.status(401).json({
+        allowed: false,
+        error: "Invalid user token",
+      });
     }
 
     const userId = user.id;
 
     const sessionResponse = await axios.get(
       `${POCKETBASE_URL}/api/collections/live_sessions/records/${sessionId}`,
-      { headers: { Authorization: `Bearer ${token}` } }
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
     );
 
     const session = sessionResponse.data;
 
     if (!session?.id) {
-      return res.status(404).json({ allowed: false, error: "Session not found" });
+      return res.status(404).json({
+        allowed: false,
+        error: "Session not found",
+      });
     }
 
     const courseId = session.course_id;
 
     if (!courseId) {
-      return res.status(400).json({ allowed: false, error: "Session missing course_id" });
+      return res.status(400).json({
+        allowed: false,
+        error: "Session missing course_id",
+      });
     }
 
     let allowed = false;
@@ -108,7 +111,11 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
 
         const enrollmentResponse = await axios.get(
           `${POCKETBASE_URL}/api/collections/enrollments/records?filter=${filter}`,
-          { headers: { Authorization: `Bearer ${token}` } }
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          }
         );
 
         if (enrollmentResponse.data?.items?.length > 0) {
@@ -120,7 +127,10 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
     }
 
     if (!allowed) {
-      return res.json({ allowed: false, reason });
+      return res.json({
+        allowed: false,
+        reason,
+      });
     }
 
     return res.json({
@@ -167,21 +177,32 @@ app.post("/stripe/create-checkout", async (req, res) => {
         {
           price_data: {
             currency: "usd",
-            product_data: { name: "NextGen USMLE Enrollment" },
+            product_data: {
+              name: "NextGen USMLE Enrollment",
+            },
             unit_amount: amountInCents,
           },
           quantity: 1,
         },
       ],
-      metadata: { enrollmentId, studentId, courseId },
+      metadata: {
+        enrollmentId,
+        studentId,
+        courseId,
+      },
       success_url: successUrl || "https://live.nextgenusmlelms.com/payment-success",
       cancel_url: cancelUrl || "https://live.nextgenusmlelms.com/payment-cancel",
     });
 
-    res.json({ url: session.url });
+    res.json({
+      url: session.url,
+    });
   } catch (err) {
     console.error("Stripe Error:", err.response?.data || err.message);
-    res.status(500).json({ error: err.message });
+
+    res.status(500).json({
+      error: err.message,
+    });
   }
 });
 
@@ -292,10 +313,15 @@ app.post("/zoom/generate-signature", async (req, res) => {
       algorithm: "HS256",
     });
 
-    res.json({ signature });
+    res.json({
+      signature,
+    });
   } catch (error) {
     console.error("Signature Error:", error.response?.data || error.message);
-    res.status(500).json({ error: error.message });
+
+    res.status(500).json({
+      error: error.message,
+    });
   }
 });
 
@@ -335,7 +361,10 @@ app.post("/zoom/webhook", async (req, res) => {
         recordingFiles[0];
 
       const recordingUrl =
-        videoFile?.play_url || videoFile?.download_url || null;
+        videoFile?.play_url ||
+        recordingObject.share_url ||
+        videoFile?.download_url ||
+        null;
 
       console.log("Recording completed:");
       console.log("Meeting ID:", zoomMeetingId);
@@ -355,54 +384,40 @@ app.post("/zoom/webhook", async (req, res) => {
         });
       }
 
-      const adminToken = await getPocketBaseAdminToken();
-
-      const filter = encodeURIComponent(`zoom_meeting_id="${zoomMeetingId}"`);
-
-      const sessionSearch = await axios.get(
-        `${POCKETBASE_URL}/api/collections/live_sessions/records?filter=${filter}`,
-        {
-          headers: {
-            Authorization: `Bearer ${adminToken}`,
-          },
-        }
-      );
-
-      const liveSession = sessionSearch.data?.items?.[0];
-
-      if (!liveSession?.id) {
-        console.log("No matching live session found for Zoom meeting ID:", zoomMeetingId);
-
-        return res.status(200).json({
-          received: true,
-          saved: false,
-          reason: "No matching live session found",
-          zoomMeetingId,
-        });
+      if (!process.env.HORIZONS_RECORDING_UPDATE_URL) {
+        throw new Error("HORIZONS_RECORDING_UPDATE_URL is missing");
       }
 
-      await axios.patch(
-        `${POCKETBASE_URL}/api/collections/live_sessions/records/${liveSession.id}`,
+      if (!process.env.RECORDING_UPDATE_SECRET) {
+        throw new Error("RECORDING_UPDATE_SECRET is missing");
+      }
+
+      const updateResponse = await axios.post(
+        process.env.HORIZONS_RECORDING_UPDATE_URL,
         {
+          zoom_meeting_id: zoomMeetingId,
           recording_url: recordingUrl,
+          secret_key: process.env.RECORDING_UPDATE_SECRET,
         },
         {
           headers: {
-            Authorization: `Bearer ${adminToken}`,
+            "Content-Type": "application/json",
           },
         }
       );
 
-      console.log("Recording saved to live_sessions record:", liveSession.id);
+      console.log("Horizons recording update response:", updateResponse.data);
 
       return res.status(200).json({
         received: true,
         saved: true,
-        liveSessionId: liveSession.id,
+        horizons_response: updateResponse.data,
       });
     }
 
-    return res.status(200).json({ received: true });
+    return res.status(200).json({
+      received: true,
+    });
   } catch (error) {
     console.error("Zoom webhook error:", error.response?.data || error.message);
 
