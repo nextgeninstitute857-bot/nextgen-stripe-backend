@@ -15,6 +15,25 @@ app.use(express.json());
 app.use(cors({ origin: "*" }));
 
 const POCKETBASE_URL = process.env.POCKETBASE_URL;
+async function getPocketBaseAdminToken() {
+  if (!POCKETBASE_URL) {
+    throw new Error("POCKETBASE_URL is missing");
+  }
+
+  if (!process.env.POCKETBASE_ADMIN_EMAIL || !process.env.POCKETBASE_ADMIN_PASSWORD) {
+    throw new Error("PocketBase admin credentials are missing");
+  }
+
+  const response = await axios.post(
+    `${POCKETBASE_URL}/api/admins/auth-with-password`,
+    {
+      identity: process.env.POCKETBASE_ADMIN_EMAIL,
+      password: process.env.POCKETBASE_ADMIN_PASSWORD,
+    }
+  );
+
+  return response.data.token;
+}
 
 app.get("/", (req, res) => {
   res.send("NextGen Backend Running");
