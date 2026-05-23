@@ -15,6 +15,7 @@ app.use(express.json());
 app.use(cors({ origin: "*" }));
 
 const POCKETBASE_URL = process.env.POCKETBASE_URL;
+
 async function getPocketBaseAdminToken() {
   if (!POCKETBASE_URL) {
     throw new Error("POCKETBASE_URL is missing");
@@ -179,7 +180,7 @@ app.post("/stripe/create-checkout", async (req, res) => {
 
     res.json({ url: session.url });
   } catch (err) {
-    console.error("Stripe Error:", err);
+    console.error("Stripe Error:", err.response?.data || err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -293,10 +294,11 @@ app.post("/zoom/generate-signature", async (req, res) => {
 
     res.json({ signature });
   } catch (error) {
-    console.error("Signature Error:", error);
+    console.error("Signature Error:", error.response?.data || error.message);
     res.status(500).json({ error: error.message });
   }
 });
+
 app.post("/zoom/webhook", async (req, res) => {
   try {
     const event = req.body.event;
@@ -321,7 +323,7 @@ app.post("/zoom/webhook", async (req, res) => {
     if (event === "recording.completed") {
       const recordingObject = req.body.payload.object;
 
-      const zoomMeetingId = recordingObject.id;
+      const zoomMeetingId = String(recordingObject.id);
       const zoomUuid = recordingObject.uuid;
       const topic = recordingObject.topic;
       const startTime = recordingObject.start_time;
@@ -342,6 +344,62 @@ app.post("/zoom/webhook", async (req, res) => {
       console.log("Start Time:", startTime);
       console.log("Duration:", duration);
       console.log("Recording URL:", recordingUrl);
+
+      if (!recordingUrl) {
+        console.log("No recording URL found in Zoom webhook.");
+
+        return res.status(200).json({
+          received: true,
+          saved: false,
+          reason: "No recording URL",
+        });
+      }
+
+      const adminToken = await getPocketBaseAdminToken();
+
+      const filter = encodeURIComponent(`zoom_meeting_id="${zoomMeetingId}"`);
+
+      const sessionSearch = await axios.get(
+        `${POCKETBASE_URL}/api/collections/live_sessions/records?filter=${filter}`,
+        {
+          headers: {
+            Authorization: `Bearer ${adminToken}`,
+          },
+        }
+      );
+
+      const liveSession = sessionSearch.data?.items?.[0];
+
+      if (!liveSession?.id) {
+        console.log("No matching live session found for Zoom meeting ID:", zoomMeetingId);
+
+        return res.status(200).json({
+          received: true,
+          saved: false,
+          reason: "No matching live session found",
+          zoomMeetingId,
+        });
+      }
+
+      await axios.patch(
+        `${POCKETBASE_URL}/api/collections/live_sessions/records/${liveSession.id}`,
+        {
+          recording_url: recordingUrl,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${adminToken}`,
+          },
+        }
+      );
+
+      console.log("Recording saved to live_sessions record:", liveSession.id);
+
+      return res.status(200).json({
+        received: true,
+        saved: true,
+        liveSessionId: liveSession.id,
+      });
     }
 
     return res.status(200).json({ received: true });
@@ -354,6 +412,7 @@ app.post("/zoom/webhook", async (req, res) => {
     });
   }
 });
+
 app.get("/health", (req, res) => {
   res.json({
     success: true,
