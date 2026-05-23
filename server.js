@@ -427,7 +427,64 @@ app.post("/zoom/webhook", async (req, res) => {
     });
   }
 });
+app.get("/zoom/recordings", async (req, res) => {
+  try {
+    const accessToken = await getZoomAccessToken();
 
+    const today = new Date();
+    const to = today.toISOString().slice(0, 10);
+
+    const fromDate = new Date();
+    fromDate.setDate(today.getDate() - 30);
+    const from = fromDate.toISOString().slice(0, 10);
+
+    const response = await axios.get(
+      `https://api.zoom.us/v2/users/me/recordings?from=${from}&to=${to}&page_size=30`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      }
+    );
+
+    const meetings = response.data?.meetings || [];
+
+    const recordings = meetings.flatMap((meeting) => {
+      const files = meeting.recording_files || [];
+
+      return files
+        .filter((file) => file.file_type === "MP4")
+        .map((file) => ({
+          meeting_id: String(meeting.id),
+          uuid: meeting.uuid,
+          topic: meeting.topic,
+          start_time: meeting.start_time,
+          duration: meeting.duration,
+          share_url: meeting.share_url,
+          recording_url: file.play_url || meeting.share_url || file.download_url,
+          download_url: file.download_url,
+          file_type: file.file_type,
+          recording_type: file.recording_type,
+          status: file.status,
+        }));
+    });
+
+    return res.json({
+      success: true,
+      from,
+      to,
+      count: recordings.length,
+      recordings,
+    });
+  } catch (error) {
+    console.error("Zoom recordings fetch error:", error.response?.data || error.message);
+
+    return res.status(500).json({
+      success: false,
+      error: error.response?.data || error.message,
+    });
+  }
+});
 app.get("/health", (req, res) => {
   res.json({
     success: true,
