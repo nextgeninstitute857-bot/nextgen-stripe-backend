@@ -11,7 +11,6 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 app.use(express.json());
-
 app.use(cors({ origin: "*" }));
 
 const POCKETBASE_URL = process.env.POCKETBASE_URL;
@@ -20,28 +19,19 @@ app.get("/", (req, res) => {
   res.send("NextGen Backend Running");
 });
 
-//
-// LIVE CLASSROOM ACCESS CHECK
-//
 app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
   try {
     const { sessionId } = req.params;
 
     if (!sessionId) {
-      return res.status(400).json({
-        allowed: false,
-        error: "sessionId is required",
-      });
+      return res.status(400).json({ allowed: false, error: "sessionId is required" });
     }
 
     const authHeader = req.headers.authorization || "";
     const token = authHeader.replace("Bearer ", "").trim();
 
     if (!token) {
-      return res.status(401).json({
-        allowed: false,
-        error: "User not authenticated",
-      });
+      return res.status(401).json({ allowed: false, error: "User not authenticated" });
     }
 
     if (!POCKETBASE_URL) {
@@ -54,49 +44,32 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
     const userRefresh = await axios.post(
       `${POCKETBASE_URL}/api/collections/users/auth-refresh`,
       {},
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      }
+      { headers: { Authorization: `Bearer ${token}` } }
     );
 
     const user = userRefresh.data.record;
 
     if (!user?.id) {
-      return res.status(401).json({
-        allowed: false,
-        error: "Invalid user token",
-      });
+      return res.status(401).json({ allowed: false, error: "Invalid user token" });
     }
 
     const userId = user.id;
 
     const sessionResponse = await axios.get(
       `${POCKETBASE_URL}/api/collections/live_sessions/records/${sessionId}`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      }
+      { headers: { Authorization: `Bearer ${token}` } }
     );
 
     const session = sessionResponse.data;
 
     if (!session?.id) {
-      return res.status(404).json({
-        allowed: false,
-        error: "Session not found",
-      });
+      return res.status(404).json({ allowed: false, error: "Session not found" });
     }
 
     const courseId = session.course_id;
 
     if (!courseId) {
-      return res.status(400).json({
-        allowed: false,
-        error: "Session missing course_id",
-      });
+      return res.status(400).json({ allowed: false, error: "Session missing course_id" });
     }
 
     let allowed = false;
@@ -114,26 +87,19 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
 
         const enrollmentResponse = await axios.get(
           `${POCKETBASE_URL}/api/collections/enrollments/records?filter=${filter}`,
-          {
-            headers: {
-              Authorization: `Bearer ${token}`,
-            },
-          }
+          { headers: { Authorization: `Bearer ${token}` } }
         );
 
         if (enrollmentResponse.data?.items?.length > 0) {
           allowed = true;
         }
-      } catch (err) {
+      } catch {
         allowed = false;
       }
     }
 
     if (!allowed) {
-      return res.json({
-        allowed: false,
-        reason,
-      });
+      return res.json({ allowed: false, reason });
     }
 
     return res.json({
@@ -167,9 +133,6 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
   }
 });
 
-//
-// STRIPE CHECKOUT
-//
 app.post("/stripe/create-checkout", async (req, res) => {
   try {
     const { enrollmentId, amount, studentId, courseId, successUrl, cancelUrl } = req.body;
@@ -219,6 +182,31 @@ async function getZoomAccessToken() {
   return response.data.access_token;
 }
 
+app.get("/zoom/zak", async (req, res) => {
+  try {
+    const accessToken = await getZoomAccessToken();
+
+    const response = await axios.get(
+      "https://api.zoom.us/v2/users/me/token?type=zak",
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      }
+    );
+
+    res.json({
+      zak: response.data.token,
+    });
+  } catch (error) {
+    console.error("ZAK Error:", error.response?.data || error.message);
+
+    res.status(500).json({
+      error: error.response?.data || error.message,
+    });
+  }
+});
+
 app.post("/zoom/create-meeting", async (req, res) => {
   try {
     const { topic, start_time, duration } = req.body;
@@ -254,6 +242,7 @@ app.post("/zoom/create-meeting", async (req, res) => {
     });
   } catch (error) {
     console.error("Zoom Error:", error.response?.data || error.message);
+
     res.status(500).json({
       success: false,
       error: error.response?.data || error.message,
