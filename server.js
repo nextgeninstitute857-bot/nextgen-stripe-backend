@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import Stripe from "stripe";
 import axios from "axios";
 import jwt from "jsonwebtoken";
+import crypto from "crypto";
 
 dotenv.config();
 
@@ -277,7 +278,63 @@ app.post("/zoom/generate-signature", async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+app.post("/zoom/webhook", async (req, res) => {
+  try {
+    const event = req.body.event;
 
+    console.log("Zoom webhook received:", event);
+    console.log("Zoom webhook body:", JSON.stringify(req.body, null, 2));
+
+    if (event === "endpoint.url_validation") {
+      const plainToken = req.body.payload.plainToken;
+
+      const encryptedToken = crypto
+        .createHmac("sha256", process.env.ZOOM_WEBHOOK_SECRET_TOKEN)
+        .update(plainToken)
+        .digest("hex");
+
+      return res.status(200).json({
+        plainToken,
+        encryptedToken,
+      });
+    }
+
+    if (event === "recording.completed") {
+      const recordingObject = req.body.payload.object;
+
+      const zoomMeetingId = recordingObject.id;
+      const zoomUuid = recordingObject.uuid;
+      const topic = recordingObject.topic;
+      const startTime = recordingObject.start_time;
+      const duration = recordingObject.duration;
+      const recordingFiles = recordingObject.recording_files || [];
+
+      const videoFile =
+        recordingFiles.find((file) => file.file_type === "MP4") ||
+        recordingFiles[0];
+
+      const recordingUrl =
+        videoFile?.play_url || videoFile?.download_url || null;
+
+      console.log("Recording completed:");
+      console.log("Meeting ID:", zoomMeetingId);
+      console.log("Zoom UUID:", zoomUuid);
+      console.log("Topic:", topic);
+      console.log("Start Time:", startTime);
+      console.log("Duration:", duration);
+      console.log("Recording URL:", recordingUrl);
+    }
+
+    return res.status(200).json({ received: true });
+  } catch (error) {
+    console.error("Zoom webhook error:", error.response?.data || error.message);
+
+    return res.status(500).json({
+      success: false,
+      error: error.response?.data || error.message,
+    });
+  }
+});
 app.get("/health", (req, res) => {
   res.json({
     success: true,
