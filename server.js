@@ -15,7 +15,14 @@ app.use(express.json({ limit: "10mb" }));
 app.use(cors({ origin: "*" }));
 
 const POCKETBASE_URL = process.env.POCKETBASE_URL;
+const DEFAULT_TIMEZONE = "America/New_York";
+const DEFAULT_ZOOM_DURATION_MINUTES = 120;
 
+/**
+ * Timezone helpers
+ * We use America/New_York for Eastern Time.
+ * This handles EST/EDT correctly depending on date.
+ */
 function getTimezoneOffsetMs(timeZone, date) {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone,
@@ -51,7 +58,7 @@ function getTimezoneOffsetMs(timeZone, date) {
 function getSessionStartUtc(
   scheduledDate,
   scheduledTime,
-  timezone = "America/New_York"
+  timezone = DEFAULT_TIMEZONE
 ) {
   if (!scheduledDate || !scheduledTime) {
     return null;
@@ -105,6 +112,16 @@ function buildClassDates({ startDate, classCount, skipSundays }) {
   return dates;
 }
 
+function getNextClassDateAfter(dateString, skipSundays = true) {
+  let cursor = addDays(new Date(`${dateString}T00:00:00`), 1);
+
+  while (skipSundays && cursor.getDay() === 0) {
+    cursor = addDays(cursor, 1);
+  }
+
+  return toDateString(cursor);
+}
+
 function isAdminOrInstructor(user, session) {
   return (
     user?.role === "admin" ||
@@ -117,7 +134,6 @@ function isSessionLocked(session) {
   return (
     session.status === "completed" ||
     session.status === "cancelled" ||
-    session.status === "holiday" ||
     Boolean(session.zoom_meeting_id)
   );
 }
@@ -154,10 +170,8 @@ async function getZoomAccessToken() {
   return response.data.access_token;
 }
 
-async function createZoomMeetingForLiveSession(session) {
+async function createZoomMeetingForLiveSession(session, timezone = DEFAULT_TIMEZONE) {
   const accessToken = await getZoomAccessToken();
-
-  const timezone = session.scheduled_timezone || "America/New_York";
 
   const sessionStartUtc = getSessionStartUtc(
     session.scheduled_date,
@@ -169,15 +183,13 @@ async function createZoomMeetingForLiveSession(session) {
     throw new Error("Session scheduled date/time is invalid");
   }
 
-  const duration = Number(session.duration || 120);
-
   const response = await axios.post(
     "https://api.zoom.us/v2/users/me/meetings",
     {
       topic: session.topic || "Live Class",
       type: 2,
       start_time: sessionStartUtc.toISOString(),
-      duration,
+      duration: DEFAULT_ZOOM_DURATION_MINUTES,
       timezone,
       settings: {
         host_video: true,
@@ -212,14 +224,49 @@ async function getLastScheduledSessionForCourse(courseId, token) {
   return response.data?.items?.[0] || null;
 }
 
-function getNextClassDateAfter(dateString, skipSundays = true) {
-  let cursor = addDays(new Date(`${dateString}T00:00:00`), 1);
+async function tryCreateAnnouncement(token, payload) {
+  try {
+    const response = await axios.post(
+      `${POCKETBASE_URL}/api/collections/announcements/records`,
+      payload,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    );
 
-  while (skipSundays && cursor.getDay() === 0) {
-    cursor = addDays(cursor, 1);
+    return response.data;
+  } catch (firstError) {
+    console.warn(
+      "Announcement create failed. Retrying with title/content only:",
+      firstError.response?.data || firstError.message
+    );
+
+    try {
+      const response = await axios.post(
+        `${POCKETBASE_URL}/api/collections/announcements/records`,
+        {
+          title: payload.title,
+          content: payload.content,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      return response.data;
+    } catch (secondError) {
+      console.warn(
+        "Announcement fallback failed:",
+        secondError.response?.data || secondError.message
+      );
+
+      return null;
+    }
   }
-
-  return toDateString(cursor);
 }
 
 app.get("/", (req, res) => {
@@ -233,6 +280,14 @@ app.get("/health", (req, res) => {
   });
 });
 
+/**
+ * Live classroom access.
+ * This enforces:
+ * - Access check
+ * - Join opens only 1 minute before class
+ * - Students cannot generate Zoom
+ * - Tutor/admin generates Zoom only when classroom opens
+ */
 app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
   try {
     const { sessionId } = req.params;
@@ -336,13 +391,12 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
       });
     }
 
-    if (session.status === "holiday") {
+    if (session.status === "cancelled") {
       return res.json({
         allowed: true,
         can_join: false,
         join_reason:
-          session.holiday_reason ||
-          "Tutor is unavailable today. This class has been marked as a holiday.",
+          "Tutor is unavailable today, or this session has been cancelled.",
         join_opens_at: null,
         session: {
           id: session.id,
@@ -351,32 +405,30 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
           meeting_password: null,
           scheduled_date: session.scheduled_date || null,
           scheduled_time: session.scheduled_time || null,
-          scheduled_timezone: session.scheduled_timezone || "America/New_York",
+          scheduled_timezone: DEFAULT_TIMEZONE,
           course_id: session.course_id || null,
           instructor_id: session.instructor_id || null,
           instructor_name: session.instructor_name || null,
-          status: session.status || "holiday",
+          status: session.status || "cancelled",
           zoom_join_url: null,
           recording_url: session.recording_url || null,
         },
       });
     }
 
-    const timezone = session.scheduled_timezone || "America/New_York";
-
     const sessionStartUtc = getSessionStartUtc(
       session.scheduled_date,
       session.scheduled_time,
-      timezone
+      DEFAULT_TIMEZONE
     );
 
     let canJoin = false;
     let joinReason = null;
     let joinOpensAt = null;
 
-    if (session.status === "completed" || session.status === "cancelled") {
+    if (session.status === "completed") {
       canJoin = false;
-      joinReason = `Session is ${session.status}`;
+      joinReason = "Session is completed";
     } else if (!sessionStartUtc) {
       canJoin = false;
       joinReason = "Session date/time is not configured correctly";
@@ -398,8 +450,7 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
       canJoin &&
       !session.zoom_meeting_id &&
       session.status !== "completed" &&
-      session.status !== "cancelled" &&
-      session.status !== "holiday"
+      session.status !== "cancelled"
     ) {
       if (!userCanGenerateZoom) {
         return res.json({
@@ -414,7 +465,7 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
             meeting_password: null,
             scheduled_date: session.scheduled_date || null,
             scheduled_time: session.scheduled_time || null,
-            scheduled_timezone: timezone,
+            scheduled_timezone: DEFAULT_TIMEZONE,
             course_id: session.course_id || null,
             instructor_id: session.instructor_id || null,
             instructor_name: session.instructor_name || null,
@@ -427,7 +478,10 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
 
       console.log("Generating Zoom meeting for live session:", session.id);
 
-      const meeting = await createZoomMeetingForLiveSession(session);
+      const meeting = await createZoomMeetingForLiveSession(
+        session,
+        DEFAULT_TIMEZONE
+      );
 
       const updateResponse = await axios.patch(
         `${POCKETBASE_URL}/api/collections/live_sessions/records/${session.id}`,
@@ -435,7 +489,6 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
           zoom_meeting_id: String(meeting.id),
           meeting_password: meeting.password || "",
           zoom_meeting_url: meeting.join_url || "",
-          zoom_generation_status: "generated",
         },
         {
           headers: {
@@ -464,7 +517,7 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
         meeting_password: canJoin ? session.meeting_password || null : null,
         scheduled_date: session.scheduled_date || null,
         scheduled_time: session.scheduled_time || null,
-        scheduled_timezone: timezone,
+        scheduled_timezone: DEFAULT_TIMEZONE,
         course_id: session.course_id || null,
         instructor_id: session.instructor_id || null,
         instructor_name: session.instructor_name || null,
@@ -488,6 +541,12 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
   }
 });
 
+/**
+ * Course schedule sync.
+ * Schema-safe version:
+ * Does NOT save schedule settings to courses.
+ * It only creates/updates live_sessions.
+ */
 app.post("/course-schedule/sync", async (req, res) => {
   try {
     const authHeader = req.headers.authorization || "";
@@ -523,9 +582,7 @@ app.post("/course-schedule/sync", async (req, res) => {
       schedule_start_date,
       class_count,
       class_time,
-      scheduled_timezone = "America/New_York",
       skip_sundays = true,
-      default_duration = 120,
     } = req.body;
 
     if (!course_id) {
@@ -581,8 +638,6 @@ app.post("/course-schedule/sync", async (req, res) => {
         instructor_name: instructor_name || "Admin",
         scheduled_date: scheduledDate,
         scheduled_time: class_time,
-        scheduled_timezone,
-        duration: Number(default_duration || 120),
         course_id,
         status: "scheduled",
       };
@@ -595,10 +650,7 @@ app.post("/course-schedule/sync", async (req, res) => {
 
         await axios.patch(
           `${POCKETBASE_URL}/api/collections/live_sessions/records/${existing.id}`,
-          {
-            ...payload,
-            zoom_generation_status: existing.zoom_generation_status || "pending",
-          },
+          payload,
           {
             headers: {
               Authorization: `Bearer ${token}`,
@@ -615,7 +667,6 @@ app.post("/course-schedule/sync", async (req, res) => {
             zoom_meeting_id: "",
             meeting_password: "",
             zoom_meeting_url: "",
-            zoom_generation_status: "pending",
           },
           {
             headers: {
@@ -636,7 +687,8 @@ app.post("/course-schedule/sync", async (req, res) => {
       created: createdCount,
       updated: updatedCount,
       skipped_locked_sessions: skippedCount,
-      timezone: scheduled_timezone,
+      timezone: DEFAULT_TIMEZONE,
+      timezone_label: "Eastern Time (EST/EDT)",
       class_time,
       skip_sundays: Boolean(skip_sundays),
     });
@@ -655,6 +707,13 @@ app.post("/course-schedule/sync", async (req, res) => {
   }
 });
 
+/**
+ * Holiday / tutor unavailable.
+ * Schema-safe:
+ * - marks the session as cancelled
+ * - optionally creates a replacement class at the end
+ * - optionally creates an announcement
+ */
 app.post("/course-schedule/holiday", async (req, res) => {
   try {
     const authHeader = req.headers.authorization || "";
@@ -688,6 +747,7 @@ app.post("/course-schedule/holiday", async (req, res) => {
       reason = "Tutor is unavailable today.",
       notify_students = true,
       create_replacement = true,
+      skip_sundays = true,
     } = req.body;
 
     if (!session_id) {
@@ -718,23 +778,21 @@ app.post("/course-schedule/holiday", async (req, res) => {
     if (session.zoom_meeting_id) {
       return res.status(400).json({
         success: false,
-        error: "Cannot mark holiday after Zoom meeting has already been generated",
+        error: "Cannot mark tutor unavailable after Zoom meeting has already been generated",
       });
     }
 
     if (session.status === "completed") {
       return res.status(400).json({
         success: false,
-        error: "Cannot mark completed session as holiday",
+        error: "Cannot mark completed session as tutor unavailable",
       });
     }
 
     await axios.patch(
       `${POCKETBASE_URL}/api/collections/live_sessions/records/${session.id}`,
       {
-        status: "holiday",
-        holiday_reason: reason,
-        zoom_generation_status: "holiday",
+        status: "cancelled",
       },
       {
         headers: {
@@ -746,46 +804,33 @@ app.post("/course-schedule/holiday", async (req, res) => {
     let replacementSession = null;
 
     if (create_replacement && session.course_id) {
-      const courseResponse = await axios.get(
-        `${POCKETBASE_URL}/api/collections/courses/records/${session.course_id}`,
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        }
+      const lastSession = await getLastScheduledSessionForCourse(
+        session.course_id,
+        token
       );
-
-      const course = courseResponse.data;
-      const lastSession = await getLastScheduledSessionForCourse(session.course_id, token);
 
       const lastDate =
         lastSession?.scheduled_date ||
         session.scheduled_date ||
-        course.schedule_start_date;
+        toDateString(new Date());
 
       const replacementDate = getNextClassDateAfter(
         lastDate,
-        course.skip_sundays !== false
+        Boolean(skip_sundays)
       );
 
       const createResponse = await axios.post(
         `${POCKETBASE_URL}/api/collections/live_sessions/records`,
         {
-          topic: `${course.name || session.topic || "Course"} - Replacement Class`,
-          instructor_name: session.instructor_name || course.instructor_name || "Admin",
+          topic: `${session.topic || "Class"} - Replacement`,
+          instructor_name: session.instructor_name || "Admin",
           scheduled_date: replacementDate,
-          scheduled_time: course.class_time || session.scheduled_time,
-          scheduled_timezone:
-            course.scheduled_timezone ||
-            session.scheduled_timezone ||
-            "America/New_York",
-          duration: Number(course.default_duration || session.duration || 120),
+          scheduled_time: session.scheduled_time,
           course_id: session.course_id,
           status: "scheduled",
           zoom_meeting_id: "",
           meeting_password: "",
           zoom_meeting_url: "",
-          zoom_generation_status: "pending",
         },
         {
           headers: {
@@ -799,35 +844,18 @@ app.post("/course-schedule/holiday", async (req, res) => {
 
     let announcement = null;
 
-    if (notify_students && session.course_id) {
-      try {
-        const announcementResponse = await axios.post(
-          `${POCKETBASE_URL}/api/collections/announcements/records`,
-          {
-            title: "Class Holiday: Tutor Unavailable",
-            content: `${session.topic || "Today's class"} has been marked as a holiday. Reason: ${reason}`,
-            course_id: session.course_id,
-            type: "holiday",
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${token}`,
-            },
-          }
-        );
-
-        announcement = announcementResponse.data;
-      } catch (announcementError) {
-        console.warn(
-          "Failed to create holiday announcement:",
-          announcementError.response?.data || announcementError.message
-        );
-      }
+    if (notify_students) {
+      announcement = await tryCreateAnnouncement(token, {
+        title: "Class Holiday: Tutor Unavailable",
+        content: `${session.topic || "Today's class"} has been cancelled because the tutor is unavailable. Reason: ${reason}`,
+        course_id: session.course_id,
+        type: "holiday",
+      });
     }
 
     return res.json({
       success: true,
-      message: "Session marked as holiday",
+      message: "Session marked as tutor unavailable",
       session_id: session.id,
       replacement_session_id: replacementSession?.id || null,
       announcement_id: announcement?.id || null,
@@ -841,7 +869,7 @@ app.post("/course-schedule/holiday", async (req, res) => {
         error.response?.data?.message ||
         error.response?.data?.error ||
         error.message ||
-        "Failed to mark session as holiday",
+        "Failed to mark tutor unavailable",
       details: error.response?.data || null,
     });
   }
@@ -919,8 +947,8 @@ app.post("/zoom/create-meeting", async (req, res) => {
     const {
       topic,
       start_time,
-      duration,
-      timezone = "America/New_York",
+      duration = DEFAULT_ZOOM_DURATION_MINUTES,
+      timezone = DEFAULT_TIMEZONE,
     } = req.body;
 
     const accessToken = await getZoomAccessToken();
