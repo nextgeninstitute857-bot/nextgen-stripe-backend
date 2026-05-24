@@ -17,6 +17,19 @@ app.use(cors({ origin: "*" }));
 const POCKETBASE_URL = process.env.POCKETBASE_URL;
 const DEFAULT_TIMEZONE = "America/New_York";
 const DEFAULT_ZOOM_DURATION_MINUTES = 120;
+const PENDING_ZOOM_PREFIX = "PENDING_ZOOM_";
+
+function buildPendingZoomId(courseId, classNumber) {
+  return `${PENDING_ZOOM_PREFIX}${courseId}_${classNumber}_${Date.now()}`;
+}
+
+function isPendingZoomId(value) {
+  return String(value || "").startsWith(PENDING_ZOOM_PREFIX);
+}
+
+function hasRealZoomMeetingId(value) {
+  return Boolean(value) && !isPendingZoomId(value);
+}
 
 /**
  * Timezone helpers
@@ -134,7 +147,7 @@ function isSessionLocked(session) {
   return (
     session.status === "completed" ||
     session.status === "cancelled" ||
-    Boolean(session.zoom_meeting_id)
+    hasRealZoomMeetingId(session.zoom_meeting_id)
   );
 }
 
@@ -448,7 +461,7 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
 
     if (
       canJoin &&
-      !session.zoom_meeting_id &&
+      !hasRealZoomMeetingId(session.zoom_meeting_id) &&
       session.status !== "completed" &&
       session.status !== "cancelled"
     ) {
@@ -487,8 +500,8 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
         `${POCKETBASE_URL}/api/collections/live_sessions/records/${session.id}`,
         {
           zoom_meeting_id: String(meeting.id),
-          meeting_password: meeting.password || "",
-          zoom_meeting_url: meeting.join_url || "",
+          meeting_password: meeting.password || "pending",
+          zoom_meeting_url: meeting.join_url || "pending",
         },
         {
           headers: {
@@ -502,19 +515,23 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
       console.log("Zoom meeting generated and saved for session:", session.id);
     }
 
+    const sessionHasRealZoom = hasRealZoomMeetingId(session.zoom_meeting_id);
+
     return res.json({
       allowed: true,
-      can_join: canJoin && Boolean(session.zoom_meeting_id),
+      can_join: canJoin && sessionHasRealZoom,
       join_reason:
-        canJoin && session.zoom_meeting_id
+        canJoin && sessionHasRealZoom
           ? "Classroom is open"
           : joinReason || "Waiting for Zoom meeting generation",
       join_opens_at: joinOpensAt,
       session: {
         id: session.id,
         topic: session.topic || null,
-        zoom_meeting_id: canJoin ? session.zoom_meeting_id || null : null,
-        meeting_password: canJoin ? session.meeting_password || null : null,
+        zoom_meeting_id:
+          canJoin && sessionHasRealZoom ? session.zoom_meeting_id : null,
+        meeting_password:
+          canJoin && sessionHasRealZoom ? session.meeting_password || null : null,
         scheduled_date: session.scheduled_date || null,
         scheduled_time: session.scheduled_time || null,
         scheduled_timezone: DEFAULT_TIMEZONE,
@@ -522,7 +539,8 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
         instructor_id: session.instructor_id || null,
         instructor_name: session.instructor_name || null,
         status: session.status || "scheduled",
-        zoom_join_url: canJoin ? session.zoom_meeting_url || null : null,
+        zoom_join_url:
+          canJoin && sessionHasRealZoom ? session.zoom_meeting_url || null : null,
         recording_url: session.recording_url || null,
       },
     });
@@ -664,9 +682,9 @@ app.post("/course-schedule/sync", async (req, res) => {
           `${POCKETBASE_URL}/api/collections/live_sessions/records`,
           {
             ...payload,
-            zoom_meeting_id: "",
-            meeting_password: "",
-            zoom_meeting_url: "",
+            zoom_meeting_id: buildPendingZoomId(course_id, classNumber),
+            meeting_password: "pending",
+            zoom_meeting_url: "pending",
           },
           {
             headers: {
@@ -775,7 +793,7 @@ app.post("/course-schedule/holiday", async (req, res) => {
       });
     }
 
-    if (session.zoom_meeting_id) {
+    if (hasRealZoomMeetingId(session.zoom_meeting_id)) {
       return res.status(400).json({
         success: false,
         error: "Cannot mark tutor unavailable after Zoom meeting has already been generated",
@@ -828,9 +846,9 @@ app.post("/course-schedule/holiday", async (req, res) => {
           scheduled_time: session.scheduled_time,
           course_id: session.course_id,
           status: "scheduled",
-          zoom_meeting_id: "",
-          meeting_password: "",
-          zoom_meeting_url: "",
+          zoom_meeting_id: buildPendingZoomId(session.course_id, "replacement"),
+          meeting_password: "pending",
+          zoom_meeting_url: "pending",
         },
         {
           headers: {
