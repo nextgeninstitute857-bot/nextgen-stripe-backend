@@ -5,10 +5,13 @@ import Stripe from "stripe";
 import axios from "axios";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
+import fs from "fs/promises";
+import path from "path";
 
 dotenv.config();
 
 const app = express();
+
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 app.use(express.json({ limit: "10mb" }));
@@ -18,6 +21,140 @@ const POCKETBASE_URL = process.env.POCKETBASE_URL;
 const DEFAULT_TIMEZONE = "America/New_York";
 const DEFAULT_ZOOM_DURATION_MINUTES = 120;
 const PENDING_ZOOM_PREFIX = "PENDING_ZOOM_";
+
+const DATA_DIR = process.env.DATA_DIR || "/tmp";
+const LIVE_DB_PATH = path.join(DATA_DIR, "live-session-db.json");
+
+/* -------------------------------------------------------------------------- */
+/* Render persistent JSON storage                                              */
+/* -------------------------------------------------------------------------- */
+
+const DEFAULT_LIVE_DB = {
+  recordings: {},
+  attendance: {},
+  streaks: {},
+  courseProgress: {},
+  leaderboard: {},
+  communityMessages: {},
+  quizAttempts: {},
+  notes: {},
+  updatedAt: null,
+};
+
+let writeQueue = Promise.resolve();
+
+async function ensureDataDir() {
+  await fs.mkdir(DATA_DIR, { recursive: true });
+}
+
+async function readLiveDb() {
+  try {
+    await ensureDataDir();
+
+    const raw = await fs.readFile(LIVE_DB_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+
+    return {
+      ...DEFAULT_LIVE_DB,
+      ...parsed,
+      recordings: parsed.recordings || {},
+      attendance: parsed.attendance || {},
+      streaks: parsed.streaks || {},
+      courseProgress: parsed.courseProgress || {},
+      leaderboard: parsed.leaderboard || {},
+      communityMessages: parsed.communityMessages || {},
+      quizAttempts: parsed.quizAttempts || {},
+      notes: parsed.notes || {},
+    };
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return { ...DEFAULT_LIVE_DB };
+    }
+
+    console.error("Live DB read error:", error.message);
+    return { ...DEFAULT_LIVE_DB };
+  }
+}
+
+async function writeLiveDb(db) {
+  writeQueue = writeQueue.then(async () => {
+    await ensureDataDir();
+
+    const nextDb = {
+      ...DEFAULT_LIVE_DB,
+      ...db,
+      updatedAt: new Date().toISOString(),
+    };
+
+    const tempPath = `${LIVE_DB_PATH}.tmp`;
+
+    await fs.writeFile(tempPath, JSON.stringify(nextDb, null, 2), "utf8");
+    await fs.rename(tempPath, LIVE_DB_PATH);
+  });
+
+  return writeQueue;
+}
+
+function getTodayKey(date = new Date()) {
+  return date.toISOString().slice(0, 10);
+}
+
+function buildUserSessionKey(userId, sessionId) {
+  return `${userId}:${sessionId}`;
+}
+
+function buildCourseUserKey(courseId, userId) {
+  return `${courseId}:${userId}`;
+}
+
+function buildLeaderboardKey(courseId, userId) {
+  return `${courseId}:${userId}`;
+}
+
+function calculateStreakFromAttendance(attendanceItems) {
+  const dates = [...new Set(attendanceItems.map((item) => item.date))]
+    .filter(Boolean)
+    .sort();
+
+  if (dates.length === 0) return 0;
+
+  let streak = 1;
+
+  for (let i = dates.length - 1; i > 0; i -= 1) {
+    const current = new Date(`${dates[i]}T00:00:00Z`);
+    const previous = new Date(`${dates[i - 1]}T00:00:00Z`);
+
+    const diffDays = Math.round(
+      (current.getTime() - previous.getTime()) / (24 * 60 * 60 * 1000)
+    );
+
+    if (diffDays === 1) {
+      streak += 1;
+    } else if (diffDays > 1) {
+      break;
+    }
+  }
+
+  return streak;
+}
+
+function sanitizePublicRecording(recording) {
+  return {
+    meeting_id: recording.meeting_id || null,
+    uuid: recording.uuid || null,
+    topic: recording.topic || null,
+    start_time: recording.start_time || null,
+    duration: recording.duration || null,
+    recording_url: recording.recording_url || recording.share_url || null,
+    share_url: recording.share_url || null,
+    file_type: recording.file_type || null,
+    recording_type: recording.recording_type || null,
+    status: recording.status || null,
+    published: Boolean(recording.published),
+    session_id: recording.session_id || null,
+    course_id: recording.course_id || null,
+  };
+}
 
 function buildPendingZoomId(courseId, classNumber) {
   return `${PENDING_ZOOM_PREFIX}${courseId}_${classNumber}_${Date.now()}`;
@@ -31,11 +168,10 @@ function hasRealZoomMeetingId(value) {
   return Boolean(value) && !isPendingZoomId(value);
 }
 
-/**
- * Timezone helpers
- * We use America/New_York for Eastern Time.
- * This handles EST/EDT correctly depending on date.
- */
+/* -------------------------------------------------------------------------- */
+/* Timezone helpers                                                            */
+/* -------------------------------------------------------------------------- */
+
 function getTimezoneOffsetMs(timeZone, date) {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone,
@@ -135,6 +271,10 @@ function getNextClassDateAfter(dateString, skipSundays = true) {
   return toDateString(cursor);
 }
 
+/* -------------------------------------------------------------------------- */
+/* Auth / external helpers                                                     */
+/* -------------------------------------------------------------------------- */
+
 function isAdminOrInstructor(user, session) {
   return (
     user?.role === "admin" ||
@@ -163,6 +303,33 @@ async function getPocketBaseUserFromToken(token) {
   );
 
   return userRefresh.data.record;
+}
+
+async function getAuthenticatedUser(req) {
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.replace("Bearer ", "").trim();
+
+  if (!token) {
+    const error = new Error("User not authenticated");
+    error.statusCode = 401;
+    throw error;
+  }
+
+  if (!POCKETBASE_URL) {
+    const error = new Error("POCKETBASE_URL is missing in backend environment variables");
+    error.statusCode = 500;
+    throw error;
+  }
+
+  const user = await getPocketBaseUserFromToken(token);
+
+  if (!user?.id) {
+    const error = new Error("Invalid user token");
+    error.statusCode = 401;
+    throw error;
+  }
+
+  return { user, token };
 }
 
 async function getZoomAccessToken() {
@@ -282,25 +449,46 @@ async function tryCreateAnnouncement(token, payload) {
   }
 }
 
+async function fetchPocketBaseSession(sessionId, token) {
+  const response = await axios.get(
+    `${POCKETBASE_URL}/api/collections/live_sessions/records/${sessionId}`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    }
+  );
+
+  return response.data;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Basic routes                                                                */
+/* -------------------------------------------------------------------------- */
+
 app.get("/", (req, res) => {
   res.send("NextGen Backend Running");
 });
 
-app.get("/health", (req, res) => {
+app.get("/health", async (req, res) => {
+  const liveDbExists = await fs
+    .access(LIVE_DB_PATH)
+    .then(() => true)
+    .catch(() => false);
+
   res.json({
     success: true,
     message: "Backend running",
+    data_dir: DATA_DIR,
+    live_db_path: LIVE_DB_PATH,
+    live_db_exists: liveDbExists,
   });
 });
 
-/**
- * Live classroom access.
- * This enforces:
- * - Access check
- * - Join opens only 1 minute before class
- * - Students cannot generate Zoom
- * - Tutor/admin generates Zoom only when classroom opens
- */
+/* -------------------------------------------------------------------------- */
+/* Live classroom access                                                       */
+/* -------------------------------------------------------------------------- */
+
 app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
   try {
     const { sessionId } = req.params;
@@ -312,44 +500,10 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
       });
     }
 
-    const authHeader = req.headers.authorization || "";
-    const token = authHeader.replace("Bearer ", "").trim();
-
-    if (!token) {
-      return res.status(401).json({
-        allowed: false,
-        error: "User not authenticated",
-      });
-    }
-
-    if (!POCKETBASE_URL) {
-      return res.status(500).json({
-        allowed: false,
-        error: "POCKETBASE_URL is missing in backend environment variables",
-      });
-    }
-
-    const user = await getPocketBaseUserFromToken(token);
-
-    if (!user?.id) {
-      return res.status(401).json({
-        allowed: false,
-        error: "Invalid user token",
-      });
-    }
-
+    const { user, token } = await getAuthenticatedUser(req);
     const userId = user.id;
 
-    const sessionResponse = await axios.get(
-      `${POCKETBASE_URL}/api/collections/live_sessions/records/${sessionId}`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      }
-    );
-
-    let session = sessionResponse.data;
+    let session = await fetchPocketBaseSession(sessionId, token);
 
     if (!session?.id) {
       return res.status(404).json({
@@ -547,7 +701,7 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
   } catch (error) {
     console.error("Live classroom error:", error.response?.data || error.message);
 
-    return res.status(error.response?.status || 500).json({
+    return res.status(error.statusCode || error.response?.status || 500).json({
       allowed: false,
       error:
         error.response?.data?.message ||
@@ -559,32 +713,13 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
   }
 });
 
-/**
- * Course schedule sync.
- * Schema-safe version:
- * Does NOT save schedule settings to courses.
- * It only creates/updates live_sessions.
- */
+/* -------------------------------------------------------------------------- */
+/* Course schedule sync                                                        */
+/* -------------------------------------------------------------------------- */
+
 app.post("/course-schedule/sync", async (req, res) => {
   try {
-    const authHeader = req.headers.authorization || "";
-    const token = authHeader.replace("Bearer ", "").trim();
-
-    if (!token) {
-      return res.status(401).json({
-        success: false,
-        error: "User not authenticated",
-      });
-    }
-
-    if (!POCKETBASE_URL) {
-      return res.status(500).json({
-        success: false,
-        error: "POCKETBASE_URL is missing",
-      });
-    }
-
-    const user = await getPocketBaseUserFromToken(token);
+    const { user, token } = await getAuthenticatedUser(req);
 
     if (!user?.id || user.role !== "admin") {
       return res.status(403).json({
@@ -713,7 +848,7 @@ app.post("/course-schedule/sync", async (req, res) => {
   } catch (error) {
     console.error("Course schedule sync error:", error.response?.data || error.message);
 
-    return res.status(error.response?.status || 500).json({
+    return res.status(error.statusCode || error.response?.status || 500).json({
       success: false,
       error:
         error.response?.data?.message ||
@@ -725,33 +860,13 @@ app.post("/course-schedule/sync", async (req, res) => {
   }
 });
 
-/**
- * Holiday / tutor unavailable.
- * Schema-safe:
- * - marks the session as cancelled
- * - optionally creates a replacement class at the end
- * - optionally creates an announcement
- */
+/* -------------------------------------------------------------------------- */
+/* Holiday / tutor unavailable                                                 */
+/* -------------------------------------------------------------------------- */
+
 app.post("/course-schedule/holiday", async (req, res) => {
   try {
-    const authHeader = req.headers.authorization || "";
-    const token = authHeader.replace("Bearer ", "").trim();
-
-    if (!token) {
-      return res.status(401).json({
-        success: false,
-        error: "User not authenticated",
-      });
-    }
-
-    if (!POCKETBASE_URL) {
-      return res.status(500).json({
-        success: false,
-        error: "POCKETBASE_URL is missing",
-      });
-    }
-
-    const user = await getPocketBaseUserFromToken(token);
+    const { user, token } = await getAuthenticatedUser(req);
 
     if (!user?.id || (user.role !== "admin" && user.role !== "instructor")) {
       return res.status(403).json({
@@ -775,16 +890,7 @@ app.post("/course-schedule/holiday", async (req, res) => {
       });
     }
 
-    const sessionResponse = await axios.get(
-      `${POCKETBASE_URL}/api/collections/live_sessions/records/${session_id}`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      }
-    );
-
-    const session = sessionResponse.data;
+    const session = await fetchPocketBaseSession(session_id, token);
 
     if (!session?.id) {
       return res.status(404).json({
@@ -881,7 +987,7 @@ app.post("/course-schedule/holiday", async (req, res) => {
   } catch (error) {
     console.error("Holiday error:", error.response?.data || error.message);
 
-    return res.status(error.response?.status || 500).json({
+    return res.status(error.statusCode || error.response?.status || 500).json({
       success: false,
       error:
         error.response?.data?.message ||
@@ -892,6 +998,10 @@ app.post("/course-schedule/holiday", async (req, res) => {
     });
   }
 });
+
+/* -------------------------------------------------------------------------- */
+/* Stripe                                                                      */
+/* -------------------------------------------------------------------------- */
 
 app.post("/stripe/create-checkout", async (req, res) => {
   try {
@@ -934,6 +1044,10 @@ app.post("/stripe/create-checkout", async (req, res) => {
     });
   }
 });
+
+/* -------------------------------------------------------------------------- */
+/* Zoom                                                                        */
+/* -------------------------------------------------------------------------- */
 
 app.get("/zoom/zak", async (req, res) => {
   try {
@@ -1070,21 +1184,45 @@ app.post("/zoom/webhook", async (req, res) => {
         recordingFiles.find((file) => file.file_type === "MP4") ||
         recordingFiles[0];
 
-      console.log("Recording completed:");
-      console.log("Meeting ID:", String(recordingObject.id));
-      console.log("Zoom UUID:", recordingObject.uuid);
-      console.log("Topic:", recordingObject.topic);
-      console.log("Start Time:", recordingObject.start_time);
-      console.log("Duration:", recordingObject.duration);
-      console.log(
-        "Recording URL:",
-        videoFile?.play_url || recordingObject.share_url || videoFile?.download_url || null
-      );
+      const recordingPayload = {
+        meeting_id: String(recordingObject.id),
+        uuid: recordingObject.uuid,
+        topic: recordingObject.topic,
+        start_time: recordingObject.start_time,
+        duration: recordingObject.duration,
+        share_url: recordingObject.share_url || null,
+        recording_url:
+          videoFile?.play_url ||
+          recordingObject.share_url ||
+          videoFile?.download_url ||
+          null,
+        download_url: videoFile?.download_url || null,
+        file_type: videoFile?.file_type || null,
+        recording_type: videoFile?.recording_type || null,
+        status: videoFile?.status || null,
+        published: false,
+        received_at: new Date().toISOString(),
+      };
+
+      const db = await readLiveDb();
+
+      db.recordings[recordingPayload.meeting_id] = {
+        ...(db.recordings[recordingPayload.meeting_id] || {}),
+        ...recordingPayload,
+      };
+
+      await writeLiveDb(db);
+
+      console.log("Recording completed and metadata saved:");
+      console.log("Meeting ID:", recordingPayload.meeting_id);
+      console.log("Zoom UUID:", recordingPayload.uuid);
+      console.log("Topic:", recordingPayload.topic);
+      console.log("Recording URL:", recordingPayload.recording_url);
 
       return res.status(200).json({
         received: true,
-        saved: false,
-        note: "Recording received. Recordings are fetched directly from Zoom via /zoom/recordings.",
+        saved: true,
+        note: "Recording metadata saved. Actual video remains on Zoom Cloud.",
       });
     }
 
@@ -1121,6 +1259,7 @@ app.get("/zoom/recordings", async (req, res) => {
       }
     );
 
+    const db = await readLiveDb();
     const meetings = response.data?.meetings || [];
 
     const recordings = meetings.flatMap((meeting) => {
@@ -1128,19 +1267,27 @@ app.get("/zoom/recordings", async (req, res) => {
 
       return files
         .filter((file) => file.file_type === "MP4")
-        .map((file) => ({
-          meeting_id: String(meeting.id),
-          uuid: meeting.uuid,
-          topic: meeting.topic,
-          start_time: meeting.start_time,
-          duration: meeting.duration,
-          share_url: meeting.share_url,
-          recording_url: file.play_url || meeting.share_url || file.download_url,
-          download_url: file.download_url,
-          file_type: file.file_type,
-          recording_type: file.recording_type,
-          status: file.status,
-        }));
+        .map((file) => {
+          const meetingId = String(meeting.id);
+          const saved = db.recordings[meetingId] || {};
+
+          return {
+            meeting_id: meetingId,
+            uuid: meeting.uuid,
+            topic: meeting.topic,
+            start_time: meeting.start_time,
+            duration: meeting.duration,
+            share_url: meeting.share_url,
+            recording_url: file.play_url || meeting.share_url || file.download_url,
+            download_url: file.download_url,
+            file_type: file.file_type,
+            recording_type: file.recording_type,
+            status: file.status,
+            published: Boolean(saved.published),
+            session_id: saved.session_id || null,
+            course_id: saved.course_id || null,
+          };
+        });
     });
 
     return res.json({
@@ -1160,8 +1307,735 @@ app.get("/zoom/recordings", async (req, res) => {
   }
 });
 
+/* -------------------------------------------------------------------------- */
+/* Recording publish / unpublish                                                */
+/* -------------------------------------------------------------------------- */
+
+app.post("/live/recordings/publish", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+
+    if (user.role !== "admin" && user.role !== "instructor") {
+      return res.status(403).json({
+        success: false,
+        error: "Only admins or instructors can publish recordings",
+      });
+    }
+
+    const {
+      meeting_id,
+      session_id = null,
+      course_id = null,
+      topic = null,
+      recording_url = null,
+      share_url = null,
+      published = true,
+    } = req.body;
+
+    if (!meeting_id) {
+      return res.status(400).json({
+        success: false,
+        error: "meeting_id is required",
+      });
+    }
+
+    const db = await readLiveDb();
+    const key = String(meeting_id);
+
+    db.recordings[key] = {
+      ...(db.recordings[key] || {}),
+      meeting_id: key,
+      session_id,
+      course_id,
+      topic,
+      recording_url,
+      share_url,
+      published: Boolean(published),
+      published_at: Boolean(published) ? new Date().toISOString() : null,
+      published_by: user.id,
+    };
+
+    await writeLiveDb(db);
+
+    return res.json({
+      success: true,
+      recording: db.recordings[key],
+    });
+  } catch (error) {
+    console.error("Publish recording error:", error.response?.data || error.message);
+
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to publish recording",
+    });
+  }
+});
+
+app.post("/live/recordings/unpublish", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+
+    if (user.role !== "admin" && user.role !== "instructor") {
+      return res.status(403).json({
+        success: false,
+        error: "Only admins or instructors can unpublish recordings",
+      });
+    }
+
+    const { meeting_id } = req.body;
+
+    if (!meeting_id) {
+      return res.status(400).json({
+        success: false,
+        error: "meeting_id is required",
+      });
+    }
+
+    const db = await readLiveDb();
+    const key = String(meeting_id);
+
+    db.recordings[key] = {
+      ...(db.recordings[key] || {}),
+      meeting_id: key,
+      published: false,
+      unpublished_at: new Date().toISOString(),
+      unpublished_by: user.id,
+    };
+
+    await writeLiveDb(db);
+
+    return res.json({
+      success: true,
+      recording: db.recordings[key],
+    });
+  } catch (error) {
+    console.error("Unpublish recording error:", error.response?.data || error.message);
+
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to unpublish recording",
+    });
+  }
+});
+
+app.get("/live/recordings/published", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const { course_id } = req.query;
+
+    const db = await readLiveDb();
+
+    let recordings = Object.values(db.recordings || {}).filter((recording) =>
+      Boolean(recording.published)
+    );
+
+    if (course_id) {
+      recordings = recordings.filter(
+        (recording) => String(recording.course_id || "") === String(course_id)
+      );
+    }
+
+    recordings = recordings.map(sanitizePublicRecording);
+
+    return res.json({
+      success: true,
+      user_id: user.id,
+      count: recordings.length,
+      recordings,
+    });
+  } catch (error) {
+    console.error("Published recordings error:", error.response?.data || error.message);
+
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to load published recordings",
+    });
+  }
+});
+
+/* -------------------------------------------------------------------------- */
+/* Attendance / streaks / progress / leaderboard                               */
+/* -------------------------------------------------------------------------- */
+
+app.post("/live/attendance/mark", async (req, res) => {
+  try {
+    const { user, token } = await getAuthenticatedUser(req);
+
+    const {
+      session_id,
+      course_id: bodyCourseId = null,
+      source = "classroom_opened",
+    } = req.body;
+
+    if (!session_id) {
+      return res.status(400).json({
+        success: false,
+        error: "session_id is required",
+      });
+    }
+
+    let courseId = bodyCourseId;
+    let session = null;
+
+    try {
+      session = await fetchPocketBaseSession(session_id, token);
+      courseId = courseId || session.course_id || null;
+    } catch {
+      // Allows attendance to be marked by provided course_id if session fetch fails.
+    }
+
+    if (!courseId) {
+      return res.status(400).json({
+        success: false,
+        error: "course_id is required when session cannot provide course_id",
+      });
+    }
+
+    const db = await readLiveDb();
+
+    const key = buildUserSessionKey(user.id, session_id);
+    const today = getTodayKey();
+
+    db.attendance[key] = {
+      id: key,
+      user_id: user.id,
+      user_name: user.name || user.username || user.email || "Student",
+      session_id,
+      course_id: courseId,
+      date: today,
+      source,
+      marked_at: new Date().toISOString(),
+    };
+
+    const userAttendanceForCourse = Object.values(db.attendance).filter(
+      (item) => item.user_id === user.id && item.course_id === courseId
+    );
+
+    const streak = calculateStreakFromAttendance(userAttendanceForCourse);
+    const streakKey = buildCourseUserKey(courseId, user.id);
+
+    db.streaks[streakKey] = {
+      course_id: courseId,
+      user_id: user.id,
+      current_streak: streak,
+      total_attended: userAttendanceForCourse.length,
+      updated_at: new Date().toISOString(),
+    };
+
+    const progressKey = buildCourseUserKey(courseId, user.id);
+    const attendedSessions = new Set(
+      userAttendanceForCourse.map((item) => item.session_id)
+    );
+
+    db.courseProgress[progressKey] = {
+      course_id: courseId,
+      user_id: user.id,
+      attended_sessions: attendedSessions.size,
+      last_session_id: session_id,
+      last_attended_at: new Date().toISOString(),
+    };
+
+    const leaderboardKey = buildLeaderboardKey(courseId, user.id);
+
+    db.leaderboard[leaderboardKey] = {
+      ...(db.leaderboard[leaderboardKey] || {}),
+      course_id: courseId,
+      user_id: user.id,
+      user_name: user.name || user.username || user.email || "Student",
+      attendance_points: attendedSessions.size * 10,
+      quiz_points: db.leaderboard[leaderboardKey]?.quiz_points || 0,
+      total_points:
+        attendedSessions.size * 10 + (db.leaderboard[leaderboardKey]?.quiz_points || 0),
+      updated_at: new Date().toISOString(),
+    };
+
+    await writeLiveDb(db);
+
+    return res.json({
+      success: true,
+      attendance: db.attendance[key],
+      streak: db.streaks[streakKey],
+      progress: db.courseProgress[progressKey],
+      leaderboard: db.leaderboard[leaderboardKey],
+    });
+  } catch (error) {
+    console.error("Attendance mark error:", error.response?.data || error.message);
+
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to mark attendance",
+    });
+  }
+});
+
+app.get("/live/attendance/me", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const { course_id } = req.query;
+
+    const db = await readLiveDb();
+
+    let attendance = Object.values(db.attendance).filter(
+      (item) => item.user_id === user.id
+    );
+
+    if (course_id) {
+      attendance = attendance.filter(
+        (item) => String(item.course_id) === String(course_id)
+      );
+    }
+
+    return res.json({
+      success: true,
+      count: attendance.length,
+      attendance,
+    });
+  } catch (error) {
+    console.error("My attendance error:", error.response?.data || error.message);
+
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to load attendance",
+    });
+  }
+});
+
+app.get("/live/streaks/me", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const { course_id } = req.query;
+
+    const db = await readLiveDb();
+
+    let streaks = Object.values(db.streaks).filter(
+      (item) => item.user_id === user.id
+    );
+
+    if (course_id) {
+      streaks = streaks.filter(
+        (item) => String(item.course_id) === String(course_id)
+      );
+    }
+
+    return res.json({
+      success: true,
+      count: streaks.length,
+      streaks,
+    });
+  } catch (error) {
+    console.error("My streaks error:", error.response?.data || error.message);
+
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to load streaks",
+    });
+  }
+});
+
+app.get("/live/progress/me", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const { course_id } = req.query;
+
+    const db = await readLiveDb();
+
+    let progress = Object.values(db.courseProgress).filter(
+      (item) => item.user_id === user.id
+    );
+
+    if (course_id) {
+      progress = progress.filter(
+        (item) => String(item.course_id) === String(course_id)
+      );
+    }
+
+    return res.json({
+      success: true,
+      count: progress.length,
+      progress,
+    });
+  } catch (error) {
+    console.error("My progress error:", error.response?.data || error.message);
+
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to load progress",
+    });
+  }
+});
+
+app.get("/live/leaderboard", async (req, res) => {
+  try {
+    await getAuthenticatedUser(req);
+
+    const { course_id } = req.query;
+    const db = await readLiveDb();
+
+    let leaderboard = Object.values(db.leaderboard || {});
+
+    if (course_id) {
+      leaderboard = leaderboard.filter(
+        (item) => String(item.course_id) === String(course_id)
+      );
+    }
+
+    leaderboard = leaderboard
+      .map((item) => ({
+        ...item,
+        total_points:
+          Number(item.attendance_points || 0) + Number(item.quiz_points || 0),
+      }))
+      .sort((a, b) => b.total_points - a.total_points)
+      .slice(0, 50)
+      .map((item, index) => ({
+        rank: index + 1,
+        ...item,
+      }));
+
+    return res.json({
+      success: true,
+      count: leaderboard.length,
+      leaderboard,
+    });
+  } catch (error) {
+    console.error("Leaderboard error:", error.response?.data || error.message);
+
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to load leaderboard",
+    });
+  }
+});
+
+/* -------------------------------------------------------------------------- */
+/* Community messages                                                          */
+/* -------------------------------------------------------------------------- */
+
+app.get("/live/community/:sessionId", async (req, res) => {
+  try {
+    await getAuthenticatedUser(req);
+
+    const { sessionId } = req.params;
+    const db = await readLiveDb();
+
+    const messages = db.communityMessages[sessionId] || [];
+
+    return res.json({
+      success: true,
+      session_id: sessionId,
+      count: messages.length,
+      messages,
+    });
+  } catch (error) {
+    console.error("Community load error:", error.response?.data || error.message);
+
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to load community messages",
+    });
+  }
+});
+
+app.post("/live/community/:sessionId", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const { sessionId } = req.params;
+    const { message, course_id = null } = req.body;
+
+    if (!message || !String(message).trim()) {
+      return res.status(400).json({
+        success: false,
+        error: "message is required",
+      });
+    }
+
+    const db = await readLiveDb();
+
+    const item = {
+      id: crypto.randomUUID(),
+      session_id: sessionId,
+      course_id,
+      user_id: user.id,
+      user_name: user.name || user.username || user.email || "Student",
+      message: String(message).trim().slice(0, 2000),
+      created_at: new Date().toISOString(),
+    };
+
+    db.communityMessages[sessionId] = [...(db.communityMessages[sessionId] || []), item];
+
+    await writeLiveDb(db);
+
+    return res.json({
+      success: true,
+      message: item,
+    });
+  } catch (error) {
+    console.error("Community post error:", error.response?.data || error.message);
+
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to post community message",
+    });
+  }
+});
+
+/* -------------------------------------------------------------------------- */
+/* Quiz / mini mock attempts                                                   */
+/* -------------------------------------------------------------------------- */
+
+app.post("/live/quiz/attempt", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+
+    const {
+      session_id,
+      course_id,
+      quiz_id = "session-mini-mock",
+      score,
+      total,
+      answers = null,
+    } = req.body;
+
+    if (!session_id || !course_id) {
+      return res.status(400).json({
+        success: false,
+        error: "session_id and course_id are required",
+      });
+    }
+
+    if (score === undefined || total === undefined) {
+      return res.status(400).json({
+        success: false,
+        error: "score and total are required",
+      });
+    }
+
+    const numericScore = Number(score);
+    const numericTotal = Number(total);
+
+    if (
+      Number.isNaN(numericScore) ||
+      Number.isNaN(numericTotal) ||
+      numericTotal <= 0
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: "score and total must be valid numbers",
+      });
+    }
+
+    const db = await readLiveDb();
+
+    const attempt = {
+      id: crypto.randomUUID(),
+      user_id: user.id,
+      user_name: user.name || user.username || user.email || "Student",
+      session_id,
+      course_id,
+      quiz_id,
+      score: numericScore,
+      total: numericTotal,
+      percentage: Math.round((numericScore / numericTotal) * 100),
+      answers,
+      created_at: new Date().toISOString(),
+    };
+
+    const attemptKey = buildCourseUserKey(course_id, user.id);
+
+    db.quizAttempts[attemptKey] = [
+      ...(db.quizAttempts[attemptKey] || []),
+      attempt,
+    ];
+
+    const userAttempts = db.quizAttempts[attemptKey] || [];
+    const quizPoints = userAttempts.reduce((sum, item) => {
+      return sum + Math.round(Number(item.percentage || 0) / 10);
+    }, 0);
+
+    const leaderboardKey = buildLeaderboardKey(course_id, user.id);
+    const current = db.leaderboard[leaderboardKey] || {};
+
+    db.leaderboard[leaderboardKey] = {
+      ...current,
+      course_id,
+      user_id: user.id,
+      user_name: user.name || user.username || user.email || "Student",
+      attendance_points: current.attendance_points || 0,
+      quiz_points: quizPoints,
+      total_points: Number(current.attendance_points || 0) + quizPoints,
+      updated_at: new Date().toISOString(),
+    };
+
+    await writeLiveDb(db);
+
+    return res.json({
+      success: true,
+      attempt,
+      leaderboard: db.leaderboard[leaderboardKey],
+    });
+  } catch (error) {
+    console.error("Quiz attempt error:", error.response?.data || error.message);
+
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to save quiz attempt",
+    });
+  }
+});
+
+app.get("/live/quiz/attempts/me", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const { course_id } = req.query;
+
+    const db = await readLiveDb();
+
+    let attempts = [];
+
+    for (const item of Object.values(db.quizAttempts || {})) {
+      attempts = attempts.concat(item || []);
+    }
+
+    attempts = attempts.filter((item) => item.user_id === user.id);
+
+    if (course_id) {
+      attempts = attempts.filter(
+        (item) => String(item.course_id) === String(course_id)
+      );
+    }
+
+    return res.json({
+      success: true,
+      count: attempts.length,
+      attempts,
+    });
+  } catch (error) {
+    console.error("Quiz attempts load error:", error.response?.data || error.message);
+
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to load quiz attempts",
+    });
+  }
+});
+
+/* -------------------------------------------------------------------------- */
+/* Notes / transcript metadata                                                 */
+/* -------------------------------------------------------------------------- */
+
+app.post("/live/notes/:sessionId", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+
+    if (user.role !== "admin" && user.role !== "instructor") {
+      return res.status(403).json({
+        success: false,
+        error: "Only admins or instructors can save notes",
+      });
+    }
+
+    const { sessionId } = req.params;
+    const { course_id = null, notes = "", transcript_url = null } = req.body;
+
+    const db = await readLiveDb();
+
+    db.notes[sessionId] = {
+      session_id: sessionId,
+      course_id,
+      notes: String(notes || ""),
+      transcript_url,
+      updated_by: user.id,
+      updated_at: new Date().toISOString(),
+    };
+
+    await writeLiveDb(db);
+
+    return res.json({
+      success: true,
+      notes: db.notes[sessionId],
+    });
+  } catch (error) {
+    console.error("Save notes error:", error.response?.data || error.message);
+
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to save notes",
+    });
+  }
+});
+
+app.get("/live/notes/:sessionId", async (req, res) => {
+  try {
+    await getAuthenticatedUser(req);
+
+    const { sessionId } = req.params;
+    const db = await readLiveDb();
+
+    return res.json({
+      success: true,
+      notes: db.notes[sessionId] || null,
+    });
+  } catch (error) {
+    console.error("Load notes error:", error.response?.data || error.message);
+
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to load notes",
+    });
+  }
+});
+
+/* -------------------------------------------------------------------------- */
+/* Debug route for admin                                                       */
+/* -------------------------------------------------------------------------- */
+
+app.get("/live/debug/storage", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+
+    if (user.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        error: "Only admins can view storage debug",
+      });
+    }
+
+    const db = await readLiveDb();
+
+    return res.json({
+      success: true,
+      data_dir: DATA_DIR,
+      live_db_path: LIVE_DB_PATH,
+      counts: {
+        recordings: Object.keys(db.recordings || {}).length,
+        attendance: Object.keys(db.attendance || {}).length,
+        streaks: Object.keys(db.streaks || {}).length,
+        courseProgress: Object.keys(db.courseProgress || {}).length,
+        leaderboard: Object.keys(db.leaderboard || {}).length,
+        communitySessions: Object.keys(db.communityMessages || {}).length,
+        quizAttemptUsers: Object.keys(db.quizAttempts || {}).length,
+        notes: Object.keys(db.notes || {}).length,
+      },
+      updatedAt: db.updatedAt || null,
+    });
+  } catch (error) {
+    console.error("Storage debug error:", error.response?.data || error.message);
+
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to load storage debug",
+    });
+  }
+});
+
+/* -------------------------------------------------------------------------- */
+/* Start server                                                                */
+/* -------------------------------------------------------------------------- */
+
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(`DATA_DIR=${DATA_DIR}`);
+  console.log(`LIVE_DB_PATH=${LIVE_DB_PATH}`);
 });
