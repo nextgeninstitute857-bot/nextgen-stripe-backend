@@ -15,6 +15,107 @@ app.use(express.json());
 app.use(cors({ origin: "*" }));
 
 const POCKETBASE_URL = process.env.POCKETBASE_URL;
+function getTimezoneOffsetMs(timeZone, date) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(date);
+
+  const values = {};
+  for (const part of parts) {
+    if (part.type !== "literal") {
+      values[part.type] = part.value;
+    }
+  }
+
+  const asUtc = Date.UTC(
+    Number(values.year),
+    Number(values.month) - 1,
+    Number(values.day),
+    Number(values.hour),
+    Number(values.minute),
+    Number(values.second)
+  );
+
+  return asUtc - date.getTime();
+}
+
+function getSessionStartUtc(scheduledDate, scheduledTime, timezone = "America/New_York") {
+  if (!scheduledDate || !scheduledTime) {
+    return null;
+  }
+
+  const dateStr = String(scheduledDate).split(" ")[0];
+  const timeStr = String(scheduledTime).trim();
+
+  const [year, month, day] = dateStr.split("-").map(Number);
+  const [hour, minute] = timeStr.split(":").map(Number);
+
+  if (!year || !month || !day || Number.isNaN(hour) || Number.isNaN(minute)) {
+    return null;
+  }
+
+  const utcGuess = new Date(Date.UTC(year, month - 1, day, hour, minute, 0));
+  const offset = getTimezoneOffsetMs(timezone, utcGuess);
+
+  return new Date(utcGuess.getTime() - offset);
+}
+
+function isAdminOrInstructor(user, session) {
+  return (
+    user?.role === "admin" ||
+    user?.role === "instructor" ||
+    session?.instructor_id === user?.id
+  );
+}
+
+async function createZoomMeetingForLiveSession(session) {
+  const accessToken = await getZoomAccessToken();
+
+  const timezone = session.scheduled_timezone || "America/New_York";
+  const sessionStartUtc = getSessionStartUtc(
+    session.scheduled_date,
+    session.scheduled_time,
+    timezone
+  );
+
+  if (!sessionStartUtc) {
+    throw new Error("Session scheduled date/time is invalid");
+  }
+
+  const duration = Number(session.duration || 60);
+
+  const response = await axios.post(
+    "https://api.zoom.us/v2/users/me/meetings",
+    {
+      topic: session.topic || "Live Class",
+      type: 2,
+      start_time: sessionStartUtc.toISOString(),
+      duration,
+      timezone,
+      settings: {
+        host_video: true,
+        participant_video: true,
+        join_before_host: false,
+        waiting_room: true,
+        auto_recording: "cloud",
+      },
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }
+  );
+
+  return response.data;
+}
 
 app.get("/", (req, res) => {
   res.send("NextGen Backend Running");
@@ -78,7 +179,7 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
       }
     );
 
-    const session = sessionResponse.data;
+    let session = sessionResponse.data;
 
     if (!session?.id) {
       return res.status(404).json({
@@ -133,20 +234,112 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
       });
     }
 
+    const timezone = session.scheduled_timezone || "America/New_York";
+    const sessionStartUtc = getSessionStartUtc(
+      session.scheduled_date,
+      session.scheduled_time,
+      timezone
+    );
+
+    let canJoin = false;
+    let joinReason = null;
+    let joinOpensAt = null;
+
+    if (session.status === "completed" || session.status === "cancelled") {
+      canJoin = false;
+      joinReason = `Session is ${session.status}`;
+    } else if (!sessionStartUtc) {
+      canJoin = false;
+      joinReason = "Session date/time is not configured correctly";
+    } else {
+      const now = new Date();
+      const joinOpenTime = new Date(sessionStartUtc.getTime() - 60 * 1000);
+      joinOpensAt = joinOpenTime.toISOString();
+
+      canJoin = now.getTime() >= joinOpenTime.getTime();
+
+      if (!canJoin) {
+        joinReason = "Classroom opens 1 minute before class starts";
+      }
+    }
+
+    const userCanGenerateZoom = isAdminOrInstructor(user, session);
+
+    if (
+      canJoin &&
+      !session.zoom_meeting_id &&
+      session.status !== "completed" &&
+      session.status !== "cancelled"
+    ) {
+      if (!userCanGenerateZoom) {
+        return res.json({
+          allowed: true,
+          can_join: false,
+          join_reason: "Waiting for tutor to open the classroom",
+          join_opens_at: joinOpensAt,
+          session: {
+            id: session.id,
+            topic: session.topic || null,
+            zoom_meeting_id: null,
+            meeting_password: null,
+            scheduled_date: session.scheduled_date || null,
+            scheduled_time: session.scheduled_time || null,
+            scheduled_timezone: timezone,
+            course_id: session.course_id || null,
+            instructor_id: session.instructor_id || null,
+            instructor_name: session.instructor_name || null,
+            status: session.status || "scheduled",
+            zoom_join_url: null,
+            recording_url: session.recording_url || null,
+          },
+        });
+      }
+
+      console.log("Generating Zoom meeting for live session:", session.id);
+
+      const meeting = await createZoomMeetingForLiveSession(session);
+
+      const updateResponse = await axios.patch(
+        `${POCKETBASE_URL}/api/collections/live_sessions/records/${session.id}`,
+        {
+          zoom_meeting_id: String(meeting.id),
+          meeting_password: meeting.password || "",
+          zoom_meeting_url: meeting.join_url || "",
+          zoom_generation_status: "generated",
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      session = updateResponse.data;
+
+      console.log("Zoom meeting generated and saved for session:", session.id);
+    }
+
     return res.json({
       allowed: true,
+      can_join: canJoin && Boolean(session.zoom_meeting_id),
+      join_reason:
+        canJoin && session.zoom_meeting_id
+          ? "Classroom is open"
+          : joinReason || "Waiting for Zoom meeting generation",
+      join_opens_at: joinOpensAt,
       session: {
         id: session.id,
         topic: session.topic || null,
-        zoom_meeting_id: session.zoom_meeting_id || null,
-        meeting_password: session.meeting_password || null,
+        zoom_meeting_id: canJoin ? session.zoom_meeting_id || null : null,
+        meeting_password: canJoin ? session.meeting_password || null : null,
         scheduled_date: session.scheduled_date || null,
         scheduled_time: session.scheduled_time || null,
+        scheduled_timezone: timezone,
         course_id: session.course_id || null,
         instructor_id: session.instructor_id || null,
         instructor_name: session.instructor_name || null,
         status: session.status || "scheduled",
-        zoom_join_url: session.zoom_meeting_url || null,
+        zoom_join_url: canJoin ? session.zoom_meeting_url || null : null,
         recording_url: session.recording_url || null,
       },
     });
