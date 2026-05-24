@@ -119,6 +119,10 @@ const DEFAULT_LIVE_DB = {
   quizAttempts: {},
   notes: {},
 
+  // Backend-owned enrollments are used when PocketBase enrollment create/update fails.
+  // This keeps demo/checkout access working even when PocketBase collection rules return 500.
+  enrollments: {},
+
   plans: {},
   coupons: {},
   couponRedemptions: {},
@@ -157,6 +161,7 @@ async function readLiveDb() {
       communityMessages: parsed.communityMessages || {},
       quizAttempts: parsed.quizAttempts || {},
       notes: parsed.notes || {},
+      enrollments: parsed.enrollments || {},
       plans: parsed.plans || {},
       coupons: parsed.coupons || {},
       couponRedemptions: parsed.couponRedemptions || {},
@@ -239,6 +244,10 @@ function buildUserSessionKey(userId, sessionId) {
 
 function buildCourseUserKey(courseId, userId) {
   return `${courseId}:${userId}`;
+}
+
+function buildBackendEnrollmentKey(courseId, userId, type = "access") {
+  return `${courseId}:${userId}:${type}`;
 }
 
 function buildLeaderboardKey(courseId, userId) {
@@ -628,6 +637,27 @@ async function createPocketBaseStudent({ email, name, password }) {
 
 async function getEnrollmentForCourse({ userId, courseId, token }) {
   try {
+    const db = await readLiveDb();
+    const backendEnrollments = Object.values(db.enrollments || {}).filter(
+      (item) =>
+        String(item.user_id) === String(userId) &&
+        String(item.course_id) === String(courseId) &&
+        item.access_granted === true
+    );
+
+    const backendPaid = backendEnrollments.find((item) => item.is_demo === false);
+    if (backendPaid) return backendPaid;
+
+    const backendDemo = backendEnrollments
+      .filter((item) => item.is_demo === true)
+      .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")))[0];
+
+    if (backendDemo) return backendDemo;
+  } catch (dbError) {
+    console.warn("Backend enrollment lookup failed:", dbError.message);
+  }
+
+  try {
     const filter = encodeURIComponent(`user_id="${userId}" && course_id="${courseId}" && access_granted=true`);
     const response = await axios.get(
       `${POCKETBASE_URL}/api/collections/enrollments/records?perPage=20&filter=${filter}&sort=-created`,
@@ -640,6 +670,29 @@ async function getEnrollmentForCourse({ userId, courseId, token }) {
   }
 }
 
+function createBackendEnrollment(db, { userId, userName, courseId, isDemo, accessGranted = true, demoExpiry = null, planId = null }) {
+  const key = buildBackendEnrollmentKey(courseId, userId, isDemo ? "demo" : "paid");
+  const previous = db.enrollments[key] || {};
+
+  db.enrollments[key] = {
+    ...previous,
+    id: key,
+    backend_owned: true,
+    user_id: userId,
+    user_name: userName || previous.user_name || "Student",
+    course_id: courseId,
+    plan_id: planId || previous.plan_id || null,
+    access_granted: Boolean(accessGranted),
+    is_demo: Boolean(isDemo),
+    demo_expiry: demoExpiry,
+    progress_percentage: previous.progress_percentage || 0,
+    created_at: previous.created_at || new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  return db.enrollments[key];
+}
+
 function isDemoEnrollmentActive(enrollment, demoSettings) {
   if (!enrollment?.is_demo) return true;
   if (!demoSettings.enabled) return false;
@@ -648,7 +701,7 @@ function isDemoEnrollmentActive(enrollment, demoSettings) {
   return expiryTime >= Date.now();
 }
 
-async function grantEnrollmentAccessForCheckout({ token, enrollmentId, studentId, courseId }) {
+async function grantEnrollmentAccessForCheckout({ token, enrollmentId, studentId, courseId, userName = "Student", planId = null }) {
   const headers = { Authorization: `Bearer ${token}` };
   const accessPayload = {
     user_id: studentId,
@@ -657,6 +710,20 @@ async function grantEnrollmentAccessForCheckout({ token, enrollmentId, studentId
     progress_percentage: 0,
     is_demo: false,
   };
+
+  if (String(enrollmentId || "").includes(":")) {
+    const db = await readLiveDb();
+    const enrollment = createBackendEnrollment(db, {
+      userId: studentId,
+      userName,
+      courseId,
+      isDemo: false,
+      accessGranted: true,
+      planId,
+    });
+    await writeLiveDb(db);
+    return { granted: true, method: "backend_enrollment_granted", enrollment };
+  }
 
   if (enrollmentId) {
     try {
@@ -708,15 +775,20 @@ async function grantEnrollmentAccessForCheckout({ token, enrollmentId, studentId
     const createResponse = await axios.post(`${POCKETBASE_URL}/api/collections/enrollments/records`, accessPayload, { headers });
     return { granted: true, method: "created_new_access_enrollment", enrollment: createResponse.data };
   } catch (createError) {
-    const error = new Error(
-      createError.response?.data?.message ||
-        createError.response?.data?.error ||
-        createError.message ||
-        "Failed to grant enrollment access"
-    );
-    error.statusCode = createError.response?.status || 500;
-    error.details = createError.response?.data || null;
-    throw error;
+    console.warn("PocketBase paid enrollment create failed; using backend enrollment:", createError.response?.data || createError.message);
+
+    const db = await readLiveDb();
+    const enrollment = createBackendEnrollment(db, {
+      userId: studentId,
+      userName,
+      courseId,
+      isDemo: false,
+      accessGranted: true,
+      planId,
+    });
+    await writeLiveDb(db);
+
+    return { granted: true, method: "backend_enrollment_created", enrollment };
   }
 }
 
@@ -2003,29 +2075,53 @@ app.post("/enrollments/prepare-checkout", async (req, res) => {
           success: true,
           enrollment: existing,
           created: false,
+          source: "pocketbase",
         });
       }
     } catch (lookupError) {
       console.warn("Prepare checkout enrollment lookup failed:", lookupError.response?.data || lookupError.message);
     }
 
-    const createResponse = await axios.post(
-      `${POCKETBASE_URL}/api/collections/enrollments/records`,
-      {
-        user_id: user.id,
-        course_id,
-        access_granted: false,
-        progress_percentage: 0,
-        is_demo: false,
-      },
-      { headers }
-    );
+    try {
+      const createResponse = await axios.post(
+        `${POCKETBASE_URL}/api/collections/enrollments/records`,
+        {
+          user_id: user.id,
+          course_id,
+          access_granted: false,
+          progress_percentage: 0,
+          is_demo: false,
+        },
+        { headers }
+      );
 
-    return res.json({
-      success: true,
-      enrollment: createResponse.data,
-      created: true,
-    });
+      return res.json({
+        success: true,
+        enrollment: createResponse.data,
+        created: true,
+        source: "pocketbase",
+      });
+    } catch (pbCreateError) {
+      console.warn("PocketBase checkout enrollment create failed; using backend enrollment:", pbCreateError.response?.data || pbCreateError.message);
+
+      const db = await readLiveDb();
+      const backendEnrollment = createBackendEnrollment(db, {
+        userId: user.id,
+        userName: user.name || user.username || user.email || "Student",
+        courseId: course_id,
+        isDemo: false,
+        accessGranted: false,
+      });
+
+      await writeLiveDb(db);
+
+      return res.json({
+        success: true,
+        enrollment: backendEnrollment,
+        created: true,
+        source: "backend",
+      });
+    }
   } catch (error) {
     console.error("Prepare checkout enrollment error:", error.response?.data || error.message);
 
@@ -2057,6 +2153,19 @@ app.post("/demo/start", async (req, res) => {
       return res.status(403).json({ success: false, error: "Demo access is currently disabled" });
     }
 
+    const backendPaidKey = buildBackendEnrollmentKey(course_id, user.id, "paid");
+    const backendPaid = db.enrollments?.[backendPaidKey];
+
+    if (backendPaid?.access_granted === true) {
+      return res.json({
+        success: true,
+        already_paid: true,
+        enrollment: backendPaid,
+        message: "You already have full access to this course",
+        source: "backend",
+      });
+    }
+
     const headers = { Authorization: `Bearer ${token}` };
 
     try {
@@ -2077,6 +2186,7 @@ app.post("/demo/start", async (req, res) => {
           already_paid: true,
           enrollment: paidEnrollment,
           message: "You already have full access to this course",
+          source: "pocketbase",
         });
       }
     } catch (paidLookupError) {
@@ -2100,49 +2210,79 @@ app.post("/demo/start", async (req, res) => {
       const existingDemo = demoResponse.data?.items?.[0];
 
       if (existingDemo?.id) {
-        const updateResponse = await axios.patch(
-          `${POCKETBASE_URL}/api/collections/enrollments/records/${existingDemo.id}`,
-          {
-            access_granted: true,
-            is_demo: true,
-            demo_expiry: demoExpiry,
-            progress_percentage: existingDemo.progress_percentage || 0,
-          },
-          { headers }
-        );
+        try {
+          const updateResponse = await axios.patch(
+            `${POCKETBASE_URL}/api/collections/enrollments/records/${existingDemo.id}`,
+            {
+              access_granted: true,
+              is_demo: true,
+              demo_expiry: demoExpiry,
+              progress_percentage: existingDemo.progress_percentage || 0,
+            },
+            { headers }
+          );
 
-        return res.json({
-          success: true,
-          enrollment: updateResponse.data,
-          demo_settings: demoSettings,
-          demo_expiry: demoExpiry,
-          created: false,
-        });
+          return res.json({
+            success: true,
+            enrollment: updateResponse.data,
+            demo_settings: demoSettings,
+            demo_expiry: demoExpiry,
+            created: false,
+            source: "pocketbase",
+          });
+        } catch (pbUpdateError) {
+          console.warn("PocketBase demo update failed; using backend enrollment:", pbUpdateError.response?.data || pbUpdateError.message);
+        }
       }
     } catch (demoLookupError) {
       console.warn("Existing demo lookup failed:", demoLookupError.response?.data || demoLookupError.message);
     }
 
-    const createResponse = await axios.post(
-      `${POCKETBASE_URL}/api/collections/enrollments/records`,
-      {
-        user_id: user.id,
-        course_id,
-        access_granted: true,
-        is_demo: true,
-        demo_expiry: demoExpiry,
-        progress_percentage: 0,
-      },
-      { headers }
-    );
+    try {
+      const createResponse = await axios.post(
+        `${POCKETBASE_URL}/api/collections/enrollments/records`,
+        {
+          user_id: user.id,
+          course_id,
+          access_granted: true,
+          is_demo: true,
+          demo_expiry: demoExpiry,
+          progress_percentage: 0,
+        },
+        { headers }
+      );
 
-    return res.json({
-      success: true,
-      enrollment: createResponse.data,
-      demo_settings: demoSettings,
-      demo_expiry: demoExpiry,
-      created: true,
-    });
+      return res.json({
+        success: true,
+        enrollment: createResponse.data,
+        demo_settings: demoSettings,
+        demo_expiry: demoExpiry,
+        created: true,
+        source: "pocketbase",
+      });
+    } catch (pbCreateError) {
+      console.warn("PocketBase demo create failed; using backend enrollment:", pbCreateError.response?.data || pbCreateError.message);
+
+      const backendEnrollment = createBackendEnrollment(db, {
+        userId: user.id,
+        userName: user.name || user.username || user.email || "Student",
+        courseId: course_id,
+        isDemo: true,
+        accessGranted: true,
+        demoExpiry,
+      });
+
+      await writeLiveDb(db);
+
+      return res.json({
+        success: true,
+        enrollment: backendEnrollment,
+        demo_settings: demoSettings,
+        demo_expiry: demoExpiry,
+        created: true,
+        source: "backend",
+      });
+    }
   } catch (error) {
     console.error("Start demo error:", error.response?.data || error.message);
 
@@ -2203,7 +2343,14 @@ app.post("/stripe/create-checkout", async (req, res) => {
     const finalAmountCents = pricing.final_amount_cents;
 
     if (finalAmountCents <= 0) {
-      const accessGrant = await grantEnrollmentAccessForCheckout({ token, enrollmentId, studentId, courseId });
+      const accessGrant = await grantEnrollmentAccessForCheckout({
+        token,
+        enrollmentId,
+        studentId,
+        courseId,
+        userName: user.name || user.username || user.email || "Student",
+        planId: plan.id,
+      });
       const redemptionId = crypto.randomUUID();
 
       if (coupon?.id) {
@@ -3059,6 +3206,11 @@ app.post("/live/attendance/mark", async (req, res) => {
       updated_at: new Date().toISOString(),
     };
 
+    const userEnrollment = await getEnrollmentForCourse({ userId: user.id, courseId, token });
+    if (!userEnrollment && user.role !== "admin" && user.role !== "instructor") {
+      return res.status(403).json({ success: false, error: "No course access found for attendance marking" });
+    }
+
     const progressKey = buildCourseUserKey(courseId, user.id);
     const attendedSessions = new Set(userAttendanceForCourse.map((item) => item.session_id));
     db.courseProgress[progressKey] = {
@@ -3289,6 +3441,7 @@ app.get("/live/debug/storage", async (req, res) => {
         communitySessions: Object.keys(db.communityMessages || {}).length,
         quizAttemptUsers: Object.keys(db.quizAttempts || {}).length,
         notes: Object.keys(db.notes || {}).length,
+        enrollments: Object.keys(db.enrollments || {}).length,
         plans: Object.keys(db.plans || {}).length,
         coupons: Object.keys(db.coupons || {}).length,
         couponRedemptions: Object.keys(db.couponRedemptions || {}).length,
