@@ -1972,6 +1972,193 @@ app.post("/coupons/validate", async (req, res) => {
 });
 
 /* -------------------------------------------------------------------------- */
+/* Enrollment creation through Render backend                                  */
+/* -------------------------------------------------------------------------- */
+
+app.post("/enrollments/prepare-checkout", async (req, res) => {
+  try {
+    const { user, token } = await getAuthenticatedUser(req);
+    const { course_id } = req.body;
+
+    if (!course_id) {
+      return res.status(400).json({ success: false, error: "course_id is required" });
+    }
+
+    const headers = { Authorization: `Bearer ${token}` };
+
+    try {
+      const filter = encodeURIComponent(
+        `user_id="${user.id}" && course_id="${course_id}" && is_demo=false`
+      );
+
+      const existingResponse = await axios.get(
+        `${POCKETBASE_URL}/api/collections/enrollments/records?perPage=20&filter=${filter}&sort=-created`,
+        { headers }
+      );
+
+      const existing = existingResponse.data?.items?.[0];
+
+      if (existing?.id) {
+        return res.json({
+          success: true,
+          enrollment: existing,
+          created: false,
+        });
+      }
+    } catch (lookupError) {
+      console.warn("Prepare checkout enrollment lookup failed:", lookupError.response?.data || lookupError.message);
+    }
+
+    const createResponse = await axios.post(
+      `${POCKETBASE_URL}/api/collections/enrollments/records`,
+      {
+        user_id: user.id,
+        course_id,
+        access_granted: false,
+        progress_percentage: 0,
+        is_demo: false,
+      },
+      { headers }
+    );
+
+    return res.json({
+      success: true,
+      enrollment: createResponse.data,
+      created: true,
+    });
+  } catch (error) {
+    console.error("Prepare checkout enrollment error:", error.response?.data || error.message);
+
+    return res.status(error.statusCode || error.response?.status || 500).json({
+      success: false,
+      error:
+        error.response?.data?.message ||
+        error.response?.data?.error ||
+        error.message ||
+        "Failed to prepare enrollment",
+      details: error.response?.data || null,
+    });
+  }
+});
+
+app.post("/demo/start", async (req, res) => {
+  try {
+    const { user, token } = await getAuthenticatedUser(req);
+    const { course_id } = req.body;
+
+    if (!course_id) {
+      return res.status(400).json({ success: false, error: "course_id is required" });
+    }
+
+    const db = await readLiveDb();
+    const demoSettings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
+
+    if (!demoSettings.enabled) {
+      return res.status(403).json({ success: false, error: "Demo access is currently disabled" });
+    }
+
+    const headers = { Authorization: `Bearer ${token}` };
+
+    try {
+      const paidFilter = encodeURIComponent(
+        `user_id="${user.id}" && course_id="${course_id}" && access_granted=true && is_demo=false`
+      );
+
+      const paidResponse = await axios.get(
+        `${POCKETBASE_URL}/api/collections/enrollments/records?perPage=20&filter=${paidFilter}&sort=-created`,
+        { headers }
+      );
+
+      const paidEnrollment = paidResponse.data?.items?.[0];
+
+      if (paidEnrollment?.id) {
+        return res.json({
+          success: true,
+          already_paid: true,
+          enrollment: paidEnrollment,
+          message: "You already have full access to this course",
+        });
+      }
+    } catch (paidLookupError) {
+      console.warn("Paid enrollment lookup before demo failed:", paidLookupError.response?.data || paidLookupError.message);
+    }
+
+    const demoExpiry = addDays(new Date(), Number(demoSettings.duration_days || 2))
+      .toISOString()
+      .split("T")[0];
+
+    try {
+      const demoFilter = encodeURIComponent(
+        `user_id="${user.id}" && course_id="${course_id}" && is_demo=true`
+      );
+
+      const demoResponse = await axios.get(
+        `${POCKETBASE_URL}/api/collections/enrollments/records?perPage=20&filter=${demoFilter}&sort=-created`,
+        { headers }
+      );
+
+      const existingDemo = demoResponse.data?.items?.[0];
+
+      if (existingDemo?.id) {
+        const updateResponse = await axios.patch(
+          `${POCKETBASE_URL}/api/collections/enrollments/records/${existingDemo.id}`,
+          {
+            access_granted: true,
+            is_demo: true,
+            demo_expiry: demoExpiry,
+            progress_percentage: existingDemo.progress_percentage || 0,
+          },
+          { headers }
+        );
+
+        return res.json({
+          success: true,
+          enrollment: updateResponse.data,
+          demo_settings: demoSettings,
+          demo_expiry: demoExpiry,
+          created: false,
+        });
+      }
+    } catch (demoLookupError) {
+      console.warn("Existing demo lookup failed:", demoLookupError.response?.data || demoLookupError.message);
+    }
+
+    const createResponse = await axios.post(
+      `${POCKETBASE_URL}/api/collections/enrollments/records`,
+      {
+        user_id: user.id,
+        course_id,
+        access_granted: true,
+        is_demo: true,
+        demo_expiry: demoExpiry,
+        progress_percentage: 0,
+      },
+      { headers }
+    );
+
+    return res.json({
+      success: true,
+      enrollment: createResponse.data,
+      demo_settings: demoSettings,
+      demo_expiry: demoExpiry,
+      created: true,
+    });
+  } catch (error) {
+    console.error("Start demo error:", error.response?.data || error.message);
+
+    return res.status(error.statusCode || error.response?.status || 500).json({
+      success: false,
+      error:
+        error.response?.data?.message ||
+        error.response?.data?.error ||
+        error.message ||
+        "Failed to start demo",
+      details: error.response?.data || null,
+    });
+  }
+});
+
+/* -------------------------------------------------------------------------- */
 /* Stripe checkout                                                             */
 /* -------------------------------------------------------------------------- */
 
