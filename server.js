@@ -11,10 +11,11 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 app.use(cors({ origin: "*" }));
 
 const POCKETBASE_URL = process.env.POCKETBASE_URL;
+
 function getTimezoneOffsetMs(timeZone, date) {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone,
@@ -28,6 +29,7 @@ function getTimezoneOffsetMs(timeZone, date) {
   }).formatToParts(date);
 
   const values = {};
+
   for (const part of parts) {
     if (part.type !== "literal") {
       values[part.type] = part.value;
@@ -46,7 +48,11 @@ function getTimezoneOffsetMs(timeZone, date) {
   return asUtc - date.getTime();
 }
 
-function getSessionStartUtc(scheduledDate, scheduledTime, timezone = "America/New_York") {
+function getSessionStartUtc(
+  scheduledDate,
+  scheduledTime,
+  timezone = "America/New_York"
+) {
   if (!scheduledDate || !scheduledTime) {
     return null;
   }
@@ -67,6 +73,38 @@ function getSessionStartUtc(scheduledDate, scheduledTime, timezone = "America/Ne
   return new Date(utcGuess.getTime() - offset);
 }
 
+function toDateString(date) {
+  return date.toISOString().split("T")[0];
+}
+
+function addDays(date, days) {
+  const copy = new Date(date);
+  copy.setDate(copy.getDate() + days);
+  return copy;
+}
+
+function buildClassDates({ startDate, classCount, skipSundays }) {
+  const dates = [];
+
+  if (!startDate || !classCount) {
+    return dates;
+  }
+
+  let cursor = new Date(`${startDate}T00:00:00`);
+
+  while (dates.length < Number(classCount)) {
+    const isSunday = cursor.getDay() === 0;
+
+    if (!(skipSundays && isSunday)) {
+      dates.push(toDateString(cursor));
+    }
+
+    cursor = addDays(cursor, 1);
+  }
+
+  return dates;
+}
+
 function isAdminOrInstructor(user, session) {
   return (
     user?.role === "admin" ||
@@ -75,10 +113,52 @@ function isAdminOrInstructor(user, session) {
   );
 }
 
+function isSessionLocked(session) {
+  return (
+    session.status === "completed" ||
+    session.status === "cancelled" ||
+    session.status === "holiday" ||
+    Boolean(session.zoom_meeting_id)
+  );
+}
+
+async function getPocketBaseUserFromToken(token) {
+  const userRefresh = await axios.post(
+    `${POCKETBASE_URL}/api/collections/users/auth-refresh`,
+    {},
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    }
+  );
+
+  return userRefresh.data.record;
+}
+
+async function getZoomAccessToken() {
+  const response = await axios.post(
+    `https://zoom.us/oauth/token?grant_type=account_credentials&account_id=${process.env.ZOOM_ACCOUNT_ID}`,
+    {},
+    {
+      headers: {
+        Authorization:
+          "Basic " +
+          Buffer.from(
+            `${process.env.ZOOM_CLIENT_ID}:${process.env.ZOOM_CLIENT_SECRET}`
+          ).toString("base64"),
+      },
+    }
+  );
+
+  return response.data.access_token;
+}
+
 async function createZoomMeetingForLiveSession(session) {
   const accessToken = await getZoomAccessToken();
 
   const timezone = session.scheduled_timezone || "America/New_York";
+
   const sessionStartUtc = getSessionStartUtc(
     session.scheduled_date,
     session.scheduled_time,
@@ -89,7 +169,7 @@ async function createZoomMeetingForLiveSession(session) {
     throw new Error("Session scheduled date/time is invalid");
   }
 
-  const duration = Number(session.duration || 60);
+  const duration = Number(session.duration || 120);
 
   const response = await axios.post(
     "https://api.zoom.us/v2/users/me/meetings",
@@ -117,8 +197,40 @@ async function createZoomMeetingForLiveSession(session) {
   return response.data;
 }
 
+async function getLastScheduledSessionForCourse(courseId, token) {
+  const response = await axios.get(
+    `${POCKETBASE_URL}/api/collections/live_sessions/records?perPage=1&filter=${encodeURIComponent(
+      `course_id="${courseId}"`
+    )}&sort=-scheduled_date,-scheduled_time`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    }
+  );
+
+  return response.data?.items?.[0] || null;
+}
+
+function getNextClassDateAfter(dateString, skipSundays = true) {
+  let cursor = addDays(new Date(`${dateString}T00:00:00`), 1);
+
+  while (skipSundays && cursor.getDay() === 0) {
+    cursor = addDays(cursor, 1);
+  }
+
+  return toDateString(cursor);
+}
+
 app.get("/", (req, res) => {
   res.send("NextGen Backend Running");
+});
+
+app.get("/health", (req, res) => {
+  res.json({
+    success: true,
+    message: "Backend running",
+  });
 });
 
 app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
@@ -149,17 +261,7 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
       });
     }
 
-    const userRefresh = await axios.post(
-      `${POCKETBASE_URL}/api/collections/users/auth-refresh`,
-      {},
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      }
-    );
-
-    const user = userRefresh.data.record;
+    const user = await getPocketBaseUserFromToken(token);
 
     if (!user?.id) {
       return res.status(401).json({
@@ -234,7 +336,34 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
       });
     }
 
+    if (session.status === "holiday") {
+      return res.json({
+        allowed: true,
+        can_join: false,
+        join_reason:
+          session.holiday_reason ||
+          "Tutor is unavailable today. This class has been marked as a holiday.",
+        join_opens_at: null,
+        session: {
+          id: session.id,
+          topic: session.topic || null,
+          zoom_meeting_id: null,
+          meeting_password: null,
+          scheduled_date: session.scheduled_date || null,
+          scheduled_time: session.scheduled_time || null,
+          scheduled_timezone: session.scheduled_timezone || "America/New_York",
+          course_id: session.course_id || null,
+          instructor_id: session.instructor_id || null,
+          instructor_name: session.instructor_name || null,
+          status: session.status || "holiday",
+          zoom_join_url: null,
+          recording_url: session.recording_url || null,
+        },
+      });
+    }
+
     const timezone = session.scheduled_timezone || "America/New_York";
+
     const sessionStartUtc = getSessionStartUtc(
       session.scheduled_date,
       session.scheduled_time,
@@ -269,7 +398,8 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
       canJoin &&
       !session.zoom_meeting_id &&
       session.status !== "completed" &&
-      session.status !== "cancelled"
+      session.status !== "cancelled" &&
+      session.status !== "holiday"
     ) {
       if (!userCanGenerateZoom) {
         return res.json({
@@ -353,6 +483,366 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
         error.response?.data?.error ||
         error.message ||
         "Failed to load live classroom",
+      details: error.response?.data || null,
+    });
+  }
+});
+
+app.post("/course-schedule/sync", async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization || "";
+    const token = authHeader.replace("Bearer ", "").trim();
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        error: "User not authenticated",
+      });
+    }
+
+    if (!POCKETBASE_URL) {
+      return res.status(500).json({
+        success: false,
+        error: "POCKETBASE_URL is missing",
+      });
+    }
+
+    const user = await getPocketBaseUserFromToken(token);
+
+    if (!user?.id || user.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        error: "Only admins can sync course schedules",
+      });
+    }
+
+    const {
+      course_id,
+      course_name,
+      instructor_name,
+      schedule_start_date,
+      class_count,
+      class_time,
+      scheduled_timezone = "America/New_York",
+      skip_sundays = true,
+      default_duration = 120,
+    } = req.body;
+
+    if (!course_id) {
+      return res.status(400).json({
+        success: false,
+        error: "course_id is required",
+      });
+    }
+
+    if (!schedule_start_date || !class_count || !class_time) {
+      return res.status(400).json({
+        success: false,
+        error: "schedule_start_date, class_count, and class_time are required",
+      });
+    }
+
+    const desiredDates = buildClassDates({
+      startDate: schedule_start_date,
+      classCount: Number(class_count),
+      skipSundays: Boolean(skip_sundays),
+    });
+
+    const existingResponse = await axios.get(
+      `${POCKETBASE_URL}/api/collections/live_sessions/records?perPage=500&filter=${encodeURIComponent(
+        `course_id="${course_id}"`
+      )}&sort=scheduled_date,scheduled_time`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    );
+
+    const existingSessions = existingResponse.data?.items || [];
+
+    const sortedSessions = [...existingSessions].sort((a, b) => {
+      const aTime = `${a.scheduled_date || ""} ${a.scheduled_time || ""}`;
+      const bTime = `${b.scheduled_date || ""} ${b.scheduled_time || ""}`;
+      return aTime.localeCompare(bTime);
+    });
+
+    let createdCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+
+    for (let index = 0; index < desiredDates.length; index += 1) {
+      const classNumber = index + 1;
+      const scheduledDate = desiredDates[index];
+      const existing = sortedSessions[index];
+
+      const payload = {
+        topic: `${course_name || "Course"} - Class ${classNumber}`,
+        instructor_name: instructor_name || "Admin",
+        scheduled_date: scheduledDate,
+        scheduled_time: class_time,
+        scheduled_timezone,
+        duration: Number(default_duration || 120),
+        course_id,
+        status: "scheduled",
+      };
+
+      if (existing) {
+        if (isSessionLocked(existing)) {
+          skippedCount += 1;
+          continue;
+        }
+
+        await axios.patch(
+          `${POCKETBASE_URL}/api/collections/live_sessions/records/${existing.id}`,
+          {
+            ...payload,
+            zoom_generation_status: existing.zoom_generation_status || "pending",
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          }
+        );
+
+        updatedCount += 1;
+      } else {
+        await axios.post(
+          `${POCKETBASE_URL}/api/collections/live_sessions/records`,
+          {
+            ...payload,
+            zoom_meeting_id: "",
+            meeting_password: "",
+            zoom_meeting_url: "",
+            zoom_generation_status: "pending",
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          }
+        );
+
+        createdCount += 1;
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: "Course live schedule synced successfully",
+      course_id,
+      total_desired_sessions: desiredDates.length,
+      created: createdCount,
+      updated: updatedCount,
+      skipped_locked_sessions: skippedCount,
+      timezone: scheduled_timezone,
+      class_time,
+      skip_sundays: Boolean(skip_sundays),
+    });
+  } catch (error) {
+    console.error("Course schedule sync error:", error.response?.data || error.message);
+
+    return res.status(error.response?.status || 500).json({
+      success: false,
+      error:
+        error.response?.data?.message ||
+        error.response?.data?.error ||
+        error.message ||
+        "Failed to sync course schedule",
+      details: error.response?.data || null,
+    });
+  }
+});
+
+app.post("/course-schedule/holiday", async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization || "";
+    const token = authHeader.replace("Bearer ", "").trim();
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        error: "User not authenticated",
+      });
+    }
+
+    if (!POCKETBASE_URL) {
+      return res.status(500).json({
+        success: false,
+        error: "POCKETBASE_URL is missing",
+      });
+    }
+
+    const user = await getPocketBaseUserFromToken(token);
+
+    if (!user?.id || (user.role !== "admin" && user.role !== "instructor")) {
+      return res.status(403).json({
+        success: false,
+        error: "Only admins or instructors can mark holidays",
+      });
+    }
+
+    const {
+      session_id,
+      reason = "Tutor is unavailable today.",
+      notify_students = true,
+      create_replacement = true,
+    } = req.body;
+
+    if (!session_id) {
+      return res.status(400).json({
+        success: false,
+        error: "session_id is required",
+      });
+    }
+
+    const sessionResponse = await axios.get(
+      `${POCKETBASE_URL}/api/collections/live_sessions/records/${session_id}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    );
+
+    const session = sessionResponse.data;
+
+    if (!session?.id) {
+      return res.status(404).json({
+        success: false,
+        error: "Session not found",
+      });
+    }
+
+    if (session.zoom_meeting_id) {
+      return res.status(400).json({
+        success: false,
+        error: "Cannot mark holiday after Zoom meeting has already been generated",
+      });
+    }
+
+    if (session.status === "completed") {
+      return res.status(400).json({
+        success: false,
+        error: "Cannot mark completed session as holiday",
+      });
+    }
+
+    await axios.patch(
+      `${POCKETBASE_URL}/api/collections/live_sessions/records/${session.id}`,
+      {
+        status: "holiday",
+        holiday_reason: reason,
+        zoom_generation_status: "holiday",
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    );
+
+    let replacementSession = null;
+
+    if (create_replacement && session.course_id) {
+      const courseResponse = await axios.get(
+        `${POCKETBASE_URL}/api/collections/courses/records/${session.course_id}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      const course = courseResponse.data;
+      const lastSession = await getLastScheduledSessionForCourse(session.course_id, token);
+
+      const lastDate =
+        lastSession?.scheduled_date ||
+        session.scheduled_date ||
+        course.schedule_start_date;
+
+      const replacementDate = getNextClassDateAfter(
+        lastDate,
+        course.skip_sundays !== false
+      );
+
+      const createResponse = await axios.post(
+        `${POCKETBASE_URL}/api/collections/live_sessions/records`,
+        {
+          topic: `${course.name || session.topic || "Course"} - Replacement Class`,
+          instructor_name: session.instructor_name || course.instructor_name || "Admin",
+          scheduled_date: replacementDate,
+          scheduled_time: course.class_time || session.scheduled_time,
+          scheduled_timezone:
+            course.scheduled_timezone ||
+            session.scheduled_timezone ||
+            "America/New_York",
+          duration: Number(course.default_duration || session.duration || 120),
+          course_id: session.course_id,
+          status: "scheduled",
+          zoom_meeting_id: "",
+          meeting_password: "",
+          zoom_meeting_url: "",
+          zoom_generation_status: "pending",
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      replacementSession = createResponse.data;
+    }
+
+    let announcement = null;
+
+    if (notify_students && session.course_id) {
+      try {
+        const announcementResponse = await axios.post(
+          `${POCKETBASE_URL}/api/collections/announcements/records`,
+          {
+            title: "Class Holiday: Tutor Unavailable",
+            content: `${session.topic || "Today's class"} has been marked as a holiday. Reason: ${reason}`,
+            course_id: session.course_id,
+            type: "holiday",
+          },
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          }
+        );
+
+        announcement = announcementResponse.data;
+      } catch (announcementError) {
+        console.warn(
+          "Failed to create holiday announcement:",
+          announcementError.response?.data || announcementError.message
+        );
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: "Session marked as holiday",
+      session_id: session.id,
+      replacement_session_id: replacementSession?.id || null,
+      announcement_id: announcement?.id || null,
+    });
+  } catch (error) {
+    console.error("Holiday error:", error.response?.data || error.message);
+
+    return res.status(error.response?.status || 500).json({
+      success: false,
+      error:
+        error.response?.data?.message ||
+        error.response?.data?.error ||
+        error.message ||
+        "Failed to mark session as holiday",
+      details: error.response?.data || null,
     });
   }
 });
@@ -399,24 +889,6 @@ app.post("/stripe/create-checkout", async (req, res) => {
   }
 });
 
-async function getZoomAccessToken() {
-  const response = await axios.post(
-    `https://zoom.us/oauth/token?grant_type=account_credentials&account_id=${process.env.ZOOM_ACCOUNT_ID}`,
-    {},
-    {
-      headers: {
-        Authorization:
-          "Basic " +
-          Buffer.from(
-            `${process.env.ZOOM_CLIENT_ID}:${process.env.ZOOM_CLIENT_SECRET}`
-          ).toString("base64"),
-      },
-    }
-  );
-
-  return response.data.access_token;
-}
-
 app.get("/zoom/zak", async (req, res) => {
   try {
     const accessToken = await getZoomAccessToken();
@@ -444,7 +916,12 @@ app.get("/zoom/zak", async (req, res) => {
 
 app.post("/zoom/create-meeting", async (req, res) => {
   try {
-    const { topic, start_time, duration } = req.body;
+    const {
+      topic,
+      start_time,
+      duration,
+      timezone = "America/New_York",
+    } = req.body;
 
     const accessToken = await getZoomAccessToken();
 
@@ -455,7 +932,7 @@ app.post("/zoom/create-meeting", async (req, res) => {
         type: 2,
         start_time,
         duration,
-        timezone: "Asia/Karachi",
+        timezone,
         settings: {
           host_video: true,
           participant_video: true,
@@ -541,70 +1018,27 @@ app.post("/zoom/webhook", async (req, res) => {
 
     if (event === "recording.completed") {
       const recordingObject = req.body.payload.object;
-
-      const zoomMeetingId = String(recordingObject.id);
-      const zoomUuid = recordingObject.uuid;
-      const topic = recordingObject.topic;
-      const startTime = recordingObject.start_time;
-      const duration = recordingObject.duration;
       const recordingFiles = recordingObject.recording_files || [];
 
       const videoFile =
         recordingFiles.find((file) => file.file_type === "MP4") ||
         recordingFiles[0];
 
-      const recordingUrl =
-        videoFile?.play_url ||
-        recordingObject.share_url ||
-        videoFile?.download_url ||
-        null;
-
       console.log("Recording completed:");
-      console.log("Meeting ID:", zoomMeetingId);
-      console.log("Zoom UUID:", zoomUuid);
-      console.log("Topic:", topic);
-      console.log("Start Time:", startTime);
-      console.log("Duration:", duration);
-      console.log("Recording URL:", recordingUrl);
-
-      if (!recordingUrl) {
-        console.log("No recording URL found in Zoom webhook.");
-
-        return res.status(200).json({
-          received: true,
-          saved: false,
-          reason: "No recording URL",
-        });
-      }
-
-      if (!process.env.HORIZONS_RECORDING_UPDATE_URL) {
-        throw new Error("HORIZONS_RECORDING_UPDATE_URL is missing");
-      }
-
-      if (!process.env.RECORDING_UPDATE_SECRET) {
-        throw new Error("RECORDING_UPDATE_SECRET is missing");
-      }
-
-      const updateResponse = await axios.post(
-        process.env.HORIZONS_RECORDING_UPDATE_URL,
-        {
-          zoom_meeting_id: zoomMeetingId,
-          recording_url: recordingUrl,
-          secret_key: process.env.RECORDING_UPDATE_SECRET,
-        },
-        {
-          headers: {
-            "Content-Type": "application/json",
-          },
-        }
+      console.log("Meeting ID:", String(recordingObject.id));
+      console.log("Zoom UUID:", recordingObject.uuid);
+      console.log("Topic:", recordingObject.topic);
+      console.log("Start Time:", recordingObject.start_time);
+      console.log("Duration:", recordingObject.duration);
+      console.log(
+        "Recording URL:",
+        videoFile?.play_url || recordingObject.share_url || videoFile?.download_url || null
       );
-
-      console.log("Horizons recording update response:", updateResponse.data);
 
       return res.status(200).json({
         received: true,
-        saved: true,
-        horizons_response: updateResponse.data,
+        saved: false,
+        note: "Recording received. Recordings are fetched directly from Zoom via /zoom/recordings.",
       });
     }
 
@@ -614,12 +1048,13 @@ app.post("/zoom/webhook", async (req, res) => {
   } catch (error) {
     console.error("Zoom webhook error:", error.response?.data || error.message);
 
-    return res.status(500).json({
+    return res.status(200).json({
       success: false,
       error: error.response?.data || error.message,
     });
   }
 });
+
 app.get("/zoom/recordings", async (req, res) => {
   try {
     const accessToken = await getZoomAccessToken();
@@ -632,7 +1067,7 @@ app.get("/zoom/recordings", async (req, res) => {
     const from = fromDate.toISOString().slice(0, 10);
 
     const response = await axios.get(
-      `https://api.zoom.us/v2/users/me/recordings?from=${from}&to=${to}&page_size=30`,
+      `https://api.zoom.us/v2/users/me/recordings?from=${from}&to=${to}&page_size=100`,
       {
         headers: {
           Authorization: `Bearer ${accessToken}`,
@@ -677,12 +1112,6 @@ app.get("/zoom/recordings", async (req, res) => {
       error: error.response?.data || error.message,
     });
   }
-});
-app.get("/health", (req, res) => {
-  res.json({
-    success: true,
-    message: "Backend running",
-  });
 });
 
 const PORT = process.env.PORT || 5000;
