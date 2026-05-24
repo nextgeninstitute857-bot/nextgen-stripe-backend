@@ -709,6 +709,133 @@ async function fetchPocketBaseSession(sessionId, token) {
   return response.data;
 }
 
+async function grantEnrollmentAccessForCheckout({
+  token,
+  enrollmentId,
+  studentId,
+  courseId,
+}) {
+  const headers = {
+    Authorization: `Bearer ${token}`,
+  };
+
+  const accessPayload = {
+    user_id: studentId,
+    course_id: courseId,
+    access_granted: true,
+    progress_percentage: 0,
+    is_demo: false,
+  };
+
+  if (enrollmentId) {
+    try {
+      const existingResponse = await axios.get(
+        `${POCKETBASE_URL}/api/collections/enrollments/records/${enrollmentId}`,
+        { headers }
+      );
+
+      const existing = existingResponse.data;
+
+      if (
+        String(existing.user_id) === String(studentId) &&
+        String(existing.course_id) === String(courseId)
+      ) {
+        const updateResponse = await axios.patch(
+          `${POCKETBASE_URL}/api/collections/enrollments/records/${enrollmentId}`,
+          {
+            access_granted: true,
+            is_demo: false,
+          },
+          { headers }
+        );
+
+        return {
+          granted: true,
+          method: "updated_requested_enrollment",
+          enrollment: updateResponse.data,
+        };
+      }
+    } catch (error) {
+      console.warn(
+        "Requested enrollment update failed, falling back:",
+        error.response?.data || error.message
+      );
+    }
+  }
+
+  try {
+    const filter = encodeURIComponent(
+      `user_id="${studentId}" && course_id="${courseId}" && is_demo=false`
+    );
+
+    const listResponse = await axios.get(
+      `${POCKETBASE_URL}/api/collections/enrollments/records?perPage=20&filter=${filter}&sort=-created`,
+      { headers }
+    );
+
+    const existing = listResponse.data?.items?.[0];
+
+    if (existing?.id) {
+      try {
+        const updateResponse = await axios.patch(
+          `${POCKETBASE_URL}/api/collections/enrollments/records/${existing.id}`,
+          {
+            access_granted: true,
+            is_demo: false,
+          },
+          { headers }
+        );
+
+        return {
+          granted: true,
+          method: "updated_existing_enrollment",
+          enrollment: updateResponse.data,
+        };
+      } catch (updateError) {
+        console.warn(
+          "Existing enrollment update failed, will create new:",
+          updateError.response?.data || updateError.message
+        );
+      }
+    }
+  } catch (error) {
+    console.warn(
+      "Existing enrollment lookup failed, will create new:",
+      error.response?.data || error.message
+    );
+  }
+
+  try {
+    const createResponse = await axios.post(
+      `${POCKETBASE_URL}/api/collections/enrollments/records`,
+      accessPayload,
+      { headers }
+    );
+
+    return {
+      granted: true,
+      method: "created_new_access_enrollment",
+      enrollment: createResponse.data,
+    };
+  } catch (createError) {
+    console.error(
+      "Failed to grant checkout access:",
+      createError.response?.data || createError.message
+    );
+
+    const error = new Error(
+      createError.response?.data?.message ||
+        createError.response?.data?.error ||
+        createError.message ||
+        "Failed to grant enrollment access"
+    );
+
+    error.statusCode = createError.response?.status || 500;
+    error.details = createError.response?.data || null;
+    throw error;
+  }
+}
+
 /* -------------------------------------------------------------------------- */
 /* Basic routes                                                                */
 /* -------------------------------------------------------------------------- */
@@ -1724,6 +1851,8 @@ app.post("/coupons/validate", async (req, res) => {
 
 app.post("/stripe/create-checkout", async (req, res) => {
   try {
+    const { user, token } = await getAuthenticatedUser(req);
+
     const {
       enrollmentId,
       studentId,
@@ -1741,6 +1870,13 @@ app.post("/stripe/create-checkout", async (req, res) => {
       return res.status(400).json({
         success: false,
         error: "enrollmentId, studentId, and courseId are required",
+      });
+    }
+
+    if (String(user.id) !== String(studentId) && user.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        error: "Checkout user mismatch",
       });
     }
 
@@ -1765,8 +1901,9 @@ app.post("/stripe/create-checkout", async (req, res) => {
       );
 
       plan =
-        coursePlans.sort((a, b) => Number(a.price_cents || 0) - Number(b.price_cents || 0))[0] ||
-        null;
+        coursePlans.sort(
+          (a, b) => Number(a.price_cents || 0) - Number(b.price_cents || 0)
+        )[0] || null;
     }
 
     if (!plan) {
@@ -1805,6 +1942,13 @@ app.post("/stripe/create-checkout", async (req, res) => {
     const finalAmountCents = pricing.final_amount_cents;
 
     if (finalAmountCents <= 0) {
+      const accessGrant = await grantEnrollmentAccessForCheckout({
+        token,
+        enrollmentId,
+        studentId,
+        courseId,
+      });
+
       const redemptionId = crypto.randomUUID();
 
       if (coupon?.id) {
@@ -1819,7 +1963,8 @@ app.post("/stripe/create-checkout", async (req, res) => {
           coupon_id: coupon.id,
           coupon_code: coupon.code,
           plan_id: plan.id,
-          enrollment_id: enrollmentId,
+          enrollment_id: accessGrant.enrollment?.id || enrollmentId,
+          requested_enrollment_id: enrollmentId,
           student_id: studentId,
           course_id: courseId,
           original_amount_cents: pricing.original_amount_cents,
@@ -1837,7 +1982,12 @@ app.post("/stripe/create-checkout", async (req, res) => {
         url: null,
         plan: sanitizePlan(plan),
         pricing,
-        message: "Final amount is zero. Grant access without Stripe checkout.",
+        access_grant: {
+          granted: true,
+          method: accessGrant.method,
+          enrollment_id: accessGrant.enrollment?.id || null,
+        },
+        message: "Final amount is zero. Access granted without Stripe checkout.",
       });
     }
 
@@ -1867,8 +2017,10 @@ app.post("/stripe/create-checkout", async (req, res) => {
         discountCents: String(pricing.discount_cents),
         finalAmountCents: String(finalAmountCents),
       },
-      success_url: successUrl || "https://live.nextgenusmlelms.com/payment-success",
-      cancel_url: cancelUrl || "https://live.nextgenusmlelms.com/payment-cancel",
+      success_url:
+        successUrl || "https://live.nextgenusmlelms.com/payment-success",
+      cancel_url:
+        cancelUrl || "https://live.nextgenusmlelms.com/payment-cancel",
     });
 
     return res.json({
@@ -1879,11 +2031,16 @@ app.post("/stripe/create-checkout", async (req, res) => {
       pricing,
     });
   } catch (err) {
-    console.error("Stripe Error:", err.response?.data || err.message);
+    console.error("Stripe Error:", err.response?.data || err.details || err.message);
 
-    return res.status(500).json({
+    return res.status(err.statusCode || err.response?.status || 500).json({
       success: false,
-      error: err.message,
+      error:
+        err.response?.data?.message ||
+        err.response?.data?.error ||
+        err.message ||
+        "Checkout failed",
+      details: err.response?.data || err.details || null,
     });
   }
 });
