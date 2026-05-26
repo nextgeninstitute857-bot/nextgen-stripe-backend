@@ -51,6 +51,11 @@ const DEFAULT_DEMO_SETTINGS = {
 };
 
 const DEFAULT_LIVE_DB = {
+  // Backend-owned LMS content. PocketBase is kept only for users/auth.
+  courses: {},
+  liveSessions: {},
+  announcements: {},
+
   recordings: {},
   notes: {},
   attendance: {},
@@ -93,6 +98,9 @@ async function readLiveDb() {
     return {
       ...DEFAULT_LIVE_DB,
       ...parsed,
+      courses: parsed.courses || {},
+      liveSessions: parsed.liveSessions || {},
+      announcements: parsed.announcements || {},
       recordings: parsed.recordings || {},
       notes: parsed.notes || {},
       attendance: parsed.attendance || {},
@@ -207,6 +215,116 @@ function sanitizeCoupon(coupon) {
     created_at: coupon.created_at || null,
     updated_at: coupon.updated_at || null,
   };
+}
+
+
+function normalizeStatus(value, fallback = "active") {
+  const allowed = ["active", "draft", "archived", "inactive", "cancelled", "completed", "scheduled"];
+  const clean = String(value || fallback).trim().toLowerCase();
+  return allowed.includes(clean) ? clean : fallback;
+}
+
+function normalizeCoursePayload(body = {}, existing = {}) {
+  return {
+    ...existing,
+    name: String(body.name ?? existing.name ?? "").trim(),
+    description: String(body.description ?? existing.description ?? "").trim(),
+    instructor_name: String(body.instructor_name ?? existing.instructor_name ?? "").trim(),
+    instructor_bio: String(body.instructor_bio ?? existing.instructor_bio ?? "").trim(),
+    total_duration: Number(body.total_duration ?? existing.total_duration ?? 0) || 0,
+    image_url: String(body.image_url ?? existing.image_url ?? "").trim(),
+    category: String(body.category ?? existing.category ?? "USMLE Step 1").trim() || "USMLE Step 1",
+    course_type: String(body.course_type ?? existing.course_type ?? "Live Course").trim() || "Live Course",
+    category_note: String(body.category_note ?? existing.category_note ?? "").trim(),
+    status: normalizeStatus(body.status ?? existing.status ?? "active", "active"),
+    demo_access_enabled: body.demo_access_enabled !== undefined ? Boolean(body.demo_access_enabled) : existing.demo_access_enabled !== false,
+  };
+}
+
+function sanitizeCourse(course) {
+  return {
+    id: course.id,
+    name: course.name || "",
+    description: course.description || "",
+    instructor_name: course.instructor_name || "",
+    instructor_bio: course.instructor_bio || "",
+    total_duration: Number(course.total_duration || 0),
+    image_url: course.image_url || "",
+    category: course.category || "USMLE Step 1",
+    course_type: course.course_type || "Live Course",
+    category_note: course.category_note || "",
+    status: course.status || "active",
+    demo_access_enabled: course.demo_access_enabled !== false,
+    created_by: course.created_by || null,
+    updated_by: course.updated_by || null,
+    created_at: course.created_at || null,
+    updated_at: course.updated_at || null,
+  };
+}
+
+function normalizeLiveSessionPayload(body = {}, existing = {}) {
+  return {
+    ...existing,
+    course_id: String(body.course_id ?? existing.course_id ?? "").trim(),
+    topic: String(body.topic ?? existing.topic ?? body.title ?? existing.title ?? "").trim(),
+    title: String(body.title ?? existing.title ?? body.topic ?? existing.topic ?? "").trim(),
+    description: String(body.description ?? existing.description ?? "").trim(),
+    scheduled_date: String(body.scheduled_date ?? existing.scheduled_date ?? "").trim(),
+    scheduled_time: String(body.scheduled_time ?? existing.scheduled_time ?? "").trim(),
+    scheduled_timezone: String(body.scheduled_timezone ?? existing.scheduled_timezone ?? DEFAULT_TIMEZONE).trim() || DEFAULT_TIMEZONE,
+    duration_minutes: Number(body.duration_minutes ?? existing.duration_minutes ?? DEFAULT_ZOOM_DURATION_MINUTES) || DEFAULT_ZOOM_DURATION_MINUTES,
+    instructor_id: body.instructor_id ?? existing.instructor_id ?? null,
+    instructor_name: String(body.instructor_name ?? existing.instructor_name ?? "").trim(),
+    status: normalizeStatus(body.status ?? existing.status ?? "scheduled", "scheduled"),
+    zoom_meeting_id: body.zoom_meeting_id ?? existing.zoom_meeting_id ?? null,
+    meeting_password: body.meeting_password ?? existing.meeting_password ?? null,
+    zoom_meeting_url: body.zoom_meeting_url ?? existing.zoom_meeting_url ?? null,
+    recording_url: body.recording_url ?? existing.recording_url ?? null,
+  };
+}
+
+function sanitizeLiveSession(session) {
+  return {
+    id: session.id,
+    course_id: session.course_id || null,
+    topic: session.topic || session.title || "Live Class",
+    title: session.title || session.topic || "Live Class",
+    description: session.description || "",
+    scheduled_date: session.scheduled_date || null,
+    scheduled_time: session.scheduled_time || null,
+    scheduled_timezone: session.scheduled_timezone || DEFAULT_TIMEZONE,
+    duration_minutes: Number(session.duration_minutes || DEFAULT_ZOOM_DURATION_MINUTES),
+    instructor_id: session.instructor_id || null,
+    instructor_name: session.instructor_name || null,
+    status: session.status || "scheduled",
+    zoom_meeting_id: session.zoom_meeting_id || null,
+        meeting_password: session.meeting_password || null,
+    zoom_meeting_url: session.zoom_meeting_url || null,
+    recording_url: session.recording_url || null,
+    created_by: session.created_by || null,
+    updated_by: session.updated_by || null,
+    created_at: session.created_at || null,
+    updated_at: session.updated_at || null,
+  };
+}
+
+function sanitizeAnnouncement(item) {
+  return {
+    id: item.id,
+    title: item.title || "",
+    content: item.content || "",
+    course_id: item.course_id || null,
+    status: item.status || "active",
+    created_by: item.created_by || null,
+    updated_by: item.updated_by || null,
+    created_at: item.created_at || item.created || null,
+    updated_at: item.updated_at || null,
+    created: item.created_at || item.created || null,
+  };
+}
+
+function sortNewestFirst(a, b) {
+  return String(b.created_at || b.created || "").localeCompare(String(a.created_at || a.created || ""));
 }
 
 function sanitizePublicRecording(recording) {
@@ -381,9 +499,11 @@ async function downloadZoomTextFile(file, accessToken) {
   return typeof response.data === "string" ? response.data : String(response.data || "");
 }
 function findSessionByMeetingIdInNotesOrRecordings(db, meetingId) {
-  const rec = db.recordings[String(meetingId)] || null;
+  const key = String(meetingId || "");
+  const rec = db.recordings[key] || null;
   if (rec?.session_id) return rec.session_id;
-  return null;
+  const session = Object.values(db.liveSessions || {}).find((s) => String(s.zoom_meeting_id || "") === key);
+  return session?.id || null;
 }
 
 function sanitizeRoadmapDay(day) {
@@ -513,6 +633,231 @@ app.post("/auth/google", async (req, res) => {
   }
 });
 
+
+// -----------------------------------------------------------------------------
+// Backend-owned Courses, Live Sessions, and Announcements
+// PocketBase is no longer used for these LMS records. It remains only for auth.
+// -----------------------------------------------------------------------------
+
+app.get("/courses", async (req, res) => {
+  try {
+    const db = await readLiveDb();
+    let courses = Object.values(db.courses || {}).map(sanitizeCourse);
+    if (req.query.status) courses = courses.filter((c) => String(c.status) === String(req.query.status));
+    else courses = courses.filter((c) => c.status === "active");
+    if (req.query.category) courses = courses.filter((c) => String(c.category) === String(req.query.category));
+    courses.sort(sortNewestFirst);
+    res.json({ success: true, count: courses.length, courses });
+  } catch (e) { res.status(500).json({ success: false, error: e.message || "Failed to load courses" }); }
+});
+
+app.get("/courses/:courseId", async (req, res) => {
+  try {
+    const db = await readLiveDb();
+    const course = db.courses[String(req.params.courseId)];
+    if (!course || course.status === "archived") return res.status(404).json({ success: false, error: "Course not found" });
+    res.json({ success: true, course: sanitizeCourse(course) });
+  } catch (e) { res.status(500).json({ success: false, error: e.message || "Failed to load course" }); }
+});
+
+app.get("/admin/courses", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    const courses = Object.values(db.courses || {}).map(sanitizeCourse).sort(sortNewestFirst);
+    res.json({ success: true, count: courses.length, courses });
+  } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to load admin courses" }); }
+});
+
+app.post("/admin/courses", async (req, res) => {
+  try {
+    const { user } = await requireAdmin(req);
+    const db = await readLiveDb();
+    const id = uuid();
+    const course = normalizeCoursePayload(req.body);
+    course.id = id;
+    course.created_by = user.id;
+    course.created_at = new Date().toISOString();
+    course.updated_at = new Date().toISOString();
+    if (!course.name) return res.status(400).json({ success: false, error: "Course name is required" });
+    if (!course.description) return res.status(400).json({ success: false, error: "Course description is required" });
+    db.courses[id] = course;
+    await writeLiveDb(db);
+    res.json({ success: true, course: sanitizeCourse(course) });
+  } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to create course" }); }
+});
+
+app.patch("/admin/courses/:courseId", async (req, res) => {
+  try {
+    const { user } = await requireAdmin(req);
+    const db = await readLiveDb();
+    const existing = db.courses[String(req.params.courseId)];
+    if (!existing) return res.status(404).json({ success: false, error: "Course not found" });
+    const course = normalizeCoursePayload(req.body, existing);
+    course.id = existing.id;
+    course.created_by = existing.created_by || user.id;
+    course.created_at = existing.created_at || new Date().toISOString();
+    course.updated_by = user.id;
+    course.updated_at = new Date().toISOString();
+    if (!course.name) return res.status(400).json({ success: false, error: "Course name is required" });
+    db.courses[course.id] = course;
+    await writeLiveDb(db);
+    res.json({ success: true, course: sanitizeCourse(course) });
+  } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to update course" }); }
+});
+
+app.delete("/admin/courses/:courseId", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    const course = db.courses[String(req.params.courseId)];
+    if (!course) return res.status(404).json({ success: false, error: "Course not found" });
+    delete db.courses[String(req.params.courseId)];
+    await writeLiveDb(db);
+    res.json({ success: true, deleted_course: sanitizeCourse(course) });
+  } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to delete course" }); }
+});
+
+app.get("/live-sessions", async (req, res) => {
+  try {
+    const db = await readLiveDb();
+    let sessions = Object.values(db.liveSessions || {}).map(sanitizeLiveSession);
+    if (req.query.course_id) sessions = sessions.filter((s) => String(s.course_id) === String(req.query.course_id));
+    if (req.query.status) sessions = sessions.filter((s) => String(s.status) === String(req.query.status));
+    sessions.sort((a, b) => String(a.scheduled_date || "").localeCompare(String(b.scheduled_date || "")) || String(a.scheduled_time || "").localeCompare(String(b.scheduled_time || "")));
+    res.json({ success: true, count: sessions.length, sessions });
+  } catch (e) { res.status(500).json({ success: false, error: e.message || "Failed to load live sessions" }); }
+});
+
+app.get("/live-sessions/:sessionId", async (req, res) => {
+  try {
+    const db = await readLiveDb();
+    const session = db.liveSessions[String(req.params.sessionId)];
+    if (!session) return res.status(404).json({ success: false, error: "Live session not found" });
+    res.json({ success: true, session: sanitizeLiveSession(session) });
+  } catch (e) { res.status(500).json({ success: false, error: e.message || "Failed to load live session" }); }
+});
+
+app.get("/admin/live-sessions", async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    let sessions = Object.values(db.liveSessions || {}).map(sanitizeLiveSession);
+    if (req.query.course_id) sessions = sessions.filter((s) => String(s.course_id) === String(req.query.course_id));
+    sessions.sort((a, b) => String(a.scheduled_date || "").localeCompare(String(b.scheduled_date || "")) || String(a.scheduled_time || "").localeCompare(String(b.scheduled_time || "")));
+    res.json({ success: true, count: sessions.length, sessions });
+  } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to load admin live sessions" }); }
+});
+
+app.post("/admin/live-sessions", async (req, res) => {
+  try {
+    const { user } = await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const id = uuid();
+    const session = normalizeLiveSessionPayload(req.body);
+    session.id = id;
+    session.created_by = user.id;
+    session.created_at = new Date().toISOString();
+    session.updated_at = new Date().toISOString();
+    if (!session.course_id) return res.status(400).json({ success: false, error: "course_id is required" });
+    if (!session.topic) return res.status(400).json({ success: false, error: "Session topic is required" });
+    db.liveSessions[id] = session;
+    await writeLiveDb(db);
+    res.json({ success: true, session: sanitizeLiveSession(session) });
+  } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to create live session" }); }
+});
+
+app.patch("/admin/live-sessions/:sessionId", async (req, res) => {
+  try {
+    const { user } = await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const existing = db.liveSessions[String(req.params.sessionId)];
+    if (!existing) return res.status(404).json({ success: false, error: "Live session not found" });
+    const session = normalizeLiveSessionPayload(req.body, existing);
+    session.id = existing.id;
+    session.created_by = existing.created_by || user.id;
+    session.created_at = existing.created_at || new Date().toISOString();
+    session.updated_by = user.id;
+    session.updated_at = new Date().toISOString();
+    db.liveSessions[session.id] = session;
+    await writeLiveDb(db);
+    res.json({ success: true, session: sanitizeLiveSession(session) });
+  } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to update live session" }); }
+});
+
+app.delete("/admin/live-sessions/:sessionId", async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const session = db.liveSessions[String(req.params.sessionId)];
+    if (!session) return res.status(404).json({ success: false, error: "Live session not found" });
+    delete db.liveSessions[String(req.params.sessionId)];
+    await writeLiveDb(db);
+    res.json({ success: true, deleted_session: sanitizeLiveSession(session) });
+  } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to delete live session" }); }
+});
+
+app.get("/announcements", async (req, res) => {
+  try {
+    const db = await readLiveDb();
+    let announcements = Object.values(db.announcements || {}).map(sanitizeAnnouncement).filter((a) => a.status === "active");
+    if (req.query.course_id) announcements = announcements.filter((a) => !a.course_id || String(a.course_id) === String(req.query.course_id));
+    announcements.sort(sortNewestFirst);
+    res.json({ success: true, count: announcements.length, announcements });
+  } catch (e) { res.status(500).json({ success: false, error: e.message || "Failed to load announcements" }); }
+});
+
+app.get("/admin/announcements", async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const announcements = Object.values(db.announcements || {}).map(sanitizeAnnouncement).sort(sortNewestFirst);
+    res.json({ success: true, count: announcements.length, announcements });
+  } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to load admin announcements" }); }
+});
+
+app.post("/admin/announcements", async (req, res) => {
+  try {
+    const { user } = await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const id = uuid();
+    const item = { id, title: String(req.body.title || "").trim(), content: String(req.body.content || "").trim(), course_id: req.body.course_id || null, status: req.body.status || "active", created_by: user.id, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+    if (!item.title) return res.status(400).json({ success: false, error: "Announcement title is required" });
+    if (!item.content) return res.status(400).json({ success: false, error: "Announcement content is required" });
+    db.announcements[id] = item;
+    await writeLiveDb(db);
+    res.json({ success: true, announcement: sanitizeAnnouncement(item) });
+  } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to create announcement" }); }
+});
+
+app.patch("/admin/announcements/:announcementId", async (req, res) => {
+  try {
+    const { user } = await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const item = db.announcements[String(req.params.announcementId)];
+    if (!item) return res.status(404).json({ success: false, error: "Announcement not found" });
+    for (const key of ["title", "content", "course_id", "status"]) if (req.body[key] !== undefined) item[key] = req.body[key];
+    item.title = String(item.title || "").trim();
+    item.content = String(item.content || "").trim();
+    item.updated_by = user.id;
+    item.updated_at = new Date().toISOString();
+    await writeLiveDb(db);
+    res.json({ success: true, announcement: sanitizeAnnouncement(item) });
+  } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to update announcement" }); }
+});
+
+app.delete("/admin/announcements/:announcementId", async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const item = db.announcements[String(req.params.announcementId)];
+    if (!item) return res.status(404).json({ success: false, error: "Announcement not found" });
+    delete db.announcements[String(req.params.announcementId)];
+    await writeLiveDb(db);
+    res.json({ success: true, deleted_announcement: sanitizeAnnouncement(item) });
+  } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to delete announcement" }); }
+});
+
 app.get("/demo/settings", async (req, res) => { const db = await readLiveDb(); res.json({ success: true, demo_settings: { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) } }); });
 app.get("/admin/demo/settings", async (req, res) => { try { await requireAdmin(req); const db = await readLiveDb(); res.json({ success: true, demo_settings: { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) } }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.patch("/admin/demo/settings", async (req, res) => {
@@ -620,11 +965,16 @@ app.post("/stripe/create-checkout", async (req, res) => {
 
 app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
   try {
-    const { user, token } = await getAuthenticatedUser(req);
-    let session = await fetchPocketBaseSession(req.params.sessionId, token);
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    let session = db.liveSessions[String(req.params.sessionId)] || null;
     if (!session?.id) return res.status(404).json({ allowed: false, error: "Session not found" });
-    const db = await readLiveDb(); const courseId = session.course_id; const enrollment = getBackendEnrollment(db, { userId: user.id, courseId });
-    let allowed = false; let reason = "You don't have access to this session";
+
+    const courseId = session.course_id;
+    const enrollment = getBackendEnrollment(db, { userId: user.id, courseId });
+    let allowed = false;
+    let reason = "You don't have access to this session";
+
     if (isAdminOrInstructor(user, session)) allowed = true;
     else if (enrollment?.id) {
       if (enrollment.is_demo) {
@@ -633,19 +983,59 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
         else allowed = true;
       } else allowed = true;
     }
+
     if (!allowed) return res.json({ allowed: false, reason });
-    if (session.status === "cancelled") return res.json({ allowed: true, can_join: false, join_reason: "This session has been cancelled.", session: { id: session.id, topic: session.topic, status: session.status, course_id: courseId } });
-    const start = getSessionStartUtc(session.scheduled_date, session.scheduled_time, DEFAULT_TIMEZONE); let canJoin = false; let joinReason = null; let joinOpensAt = null;
+    if (session.status === "cancelled") return res.json({ allowed: true, can_join: false, join_reason: "This session has been cancelled.", session: sanitizeLiveSession(session) });
+
+    const start = getSessionStartUtc(session.scheduled_date, session.scheduled_time, session.scheduled_timezone || DEFAULT_TIMEZONE);
+    let canJoin = false;
+    let joinReason = null;
+    let joinOpensAt = null;
+
     if (!start) joinReason = "Session date/time is not configured correctly";
     else if (session.status === "completed") joinReason = "Session is completed";
-    else { const openAt = new Date(start.getTime() - 60 * 1000); joinOpensAt = openAt.toISOString(); canJoin = Date.now() >= openAt.getTime(); if (!canJoin) joinReason = "Classroom opens 1 minute before class starts"; }
-    if (canJoin && !hasRealZoomMeetingId(session.zoom_meeting_id) && isAdminOrInstructor(user, session)) {
-      const meeting = await createZoomMeetingForLiveSession(session, DEFAULT_TIMEZONE);
-      const update = await axios.patch(`${POCKETBASE_URL}/api/collections/live_sessions/records/${session.id}`, { zoom_meeting_id: String(meeting.id), meeting_password: meeting.password || "pending", zoom_meeting_url: meeting.join_url || "pending" }, { headers: { Authorization: `Bearer ${token}` } });
-      session = update.data;
+    else {
+      const openAt = new Date(start.getTime() - 60 * 1000);
+      joinOpensAt = openAt.toISOString();
+      canJoin = Date.now() >= openAt.getTime();
+      if (!canJoin) joinReason = "Classroom opens 1 minute before class starts";
     }
+
+    if (canJoin && !hasRealZoomMeetingId(session.zoom_meeting_id) && isAdminOrInstructor(user, session)) {
+      const meeting = await createZoomMeetingForLiveSession(session, session.scheduled_timezone || DEFAULT_TIMEZONE);
+      session.zoom_meeting_id = String(meeting.id);
+      session.meeting_password = meeting.password || "pending";
+      session.zoom_meeting_url = meeting.join_url || "pending";
+      session.status = session.status || "scheduled";
+      session.updated_by = user.id;
+      session.updated_at = new Date().toISOString();
+      db.liveSessions[session.id] = session;
+      db.recordings[String(meeting.id)] = { ...(db.recordings[String(meeting.id)] || {}), meeting_id: String(meeting.id), session_id: session.id, course_id: courseId, topic: session.topic, published: false, created_at: new Date().toISOString() };
+      await writeLiveDb(db);
+    }
+
     const hasZoom = hasRealZoomMeetingId(session.zoom_meeting_id);
-    res.json({ allowed: true, can_join: canJoin && hasZoom, join_reason: canJoin && hasZoom ? "Classroom is open" : joinReason || "Waiting for tutor to open classroom", join_opens_at: joinOpensAt, session: { id: session.id, topic: session.topic, zoom_meeting_id: canJoin && hasZoom ? session.zoom_meeting_id : null, meeting_password: canJoin && hasZoom ? session.meeting_password : null, scheduled_date: session.scheduled_date, scheduled_time: session.scheduled_time, scheduled_timezone: DEFAULT_TIMEZONE, course_id: courseId, instructor_id: session.instructor_id || null, instructor_name: session.instructor_name || null, status: session.status || "scheduled", zoom_join_url: canJoin && hasZoom ? session.zoom_meeting_url : null, recording_url: session.recording_url || null } });
+    res.json({
+      allowed: true,
+      can_join: canJoin && hasZoom,
+      join_reason: canJoin && hasZoom ? "Classroom is open" : joinReason || "Waiting for tutor to open classroom",
+      join_opens_at: joinOpensAt,
+      session: {
+        id: session.id,
+        topic: session.topic,
+        zoom_meeting_id: canJoin && hasZoom ? session.zoom_meeting_id : null,
+        meeting_password: canJoin && hasZoom ? session.meeting_password : null,
+        scheduled_date: session.scheduled_date,
+        scheduled_time: session.scheduled_time,
+        scheduled_timezone: session.scheduled_timezone || DEFAULT_TIMEZONE,
+        course_id: courseId,
+        instructor_id: session.instructor_id || null,
+        instructor_name: session.instructor_name || null,
+        status: session.status || "scheduled",
+        zoom_join_url: canJoin && hasZoom ? session.zoom_meeting_url : null,
+        recording_url: session.recording_url || null,
+      },
+    });
   } catch (e) { res.status(e.statusCode || e.response?.status || 500).json({ allowed: false, error: e.response?.data?.message || e.message || "Failed to load live classroom", details: e.response?.data || null }); }
 });
 
@@ -728,7 +1118,7 @@ app.get("/student/dashboard/summary", async (req, res) => {
   } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); }
 });
 
-app.get("/live/debug/storage", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); if (user.role !== "admin") return res.status(403).json({ success: false, error: "Only admins can view storage debug" }); const db = await readLiveDb(); res.json({ success: true, data_dir: DATA_DIR, live_db_path: LIVE_DB_PATH, counts: { recordings: Object.keys(db.recordings || {}).length, notes: Object.keys(db.notes || {}).length, enrollments: Object.keys(db.enrollments || {}).length, plans: Object.keys(db.plans || {}).length, coupons: Object.keys(db.coupons || {}).length, assessments: Object.keys(db.assessments || {}).length, assessmentAttempts: Object.keys(db.assessmentAttempts || {}).length, roadmaps: Object.keys(db.roadmaps || {}).length, roadmapProgress: Object.keys(db.roadmapProgress || {}).length, leaderboard: Object.keys(db.leaderboard || {}).length, googleAuthUsers: Object.keys(db.googleAuthUsers || {}).length }, updatedAt: db.updatedAt || null }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.get("/live/debug/storage", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); if (user.role !== "admin") return res.status(403).json({ success: false, error: "Only admins can view storage debug" }); const db = await readLiveDb(); res.json({ success: true, data_dir: DATA_DIR, live_db_path: LIVE_DB_PATH, counts: { courses: Object.keys(db.courses || {}).length, liveSessions: Object.keys(db.liveSessions || {}).length, announcements: Object.keys(db.announcements || {}).length, recordings: Object.keys(db.recordings || {}).length, notes: Object.keys(db.notes || {}).length, enrollments: Object.keys(db.enrollments || {}).length, plans: Object.keys(db.plans || {}).length, coupons: Object.keys(db.coupons || {}).length, assessments: Object.keys(db.assessments || {}).length, assessmentAttempts: Object.keys(db.assessmentAttempts || {}).length, roadmaps: Object.keys(db.roadmaps || {}).length, roadmapProgress: Object.keys(db.roadmapProgress || {}).length, leaderboard: Object.keys(db.leaderboard || {}).length, googleAuthUsers: Object.keys(db.googleAuthUsers || {}).length }, updatedAt: db.updatedAt || null }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
