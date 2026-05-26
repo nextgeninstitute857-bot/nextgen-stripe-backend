@@ -51,7 +51,8 @@ const DEFAULT_DEMO_SETTINGS = {
 };
 
 const DEFAULT_LIVE_DB = {
-  // Backend-owned LMS content. PocketBase is kept only for users/auth.
+  // Backend-owned LMS content and authentication. PocketBase is no longer required.
+  users: {},
   courses: {},
   liveSessions: {},
   announcements: {},
@@ -98,6 +99,7 @@ async function readLiveDb() {
     return {
       ...DEFAULT_LIVE_DB,
       ...parsed,
+      users: parsed.users || {},
       courses: parsed.courses || {},
       liveSessions: parsed.liveSessions || {},
       announcements: parsed.announcements || {},
@@ -160,6 +162,159 @@ function assessmentAttemptKey(assessmentId, userId) { return `${assessmentId}:${
 function isPendingZoomId(value) { return String(value || "").startsWith(PENDING_ZOOM_PREFIX); }
 function hasRealZoomMeetingId(value) { return Boolean(value) && !isPendingZoomId(value); }
 function buildPendingZoomId(courseId, label) { return `${PENDING_ZOOM_PREFIX}${courseId}_${label}_${Date.now()}`; }
+
+const AUTH_JWT_SECRET = process.env.AUTH_JWT_SECRET || "CHANGE_THIS_AUTH_SECRET_IN_RENDER_ENV";
+const AUTH_TOKEN_DAYS = 30;
+
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
+  const passwordHash = crypto
+    .pbkdf2Sync(String(password || ""), salt, 120000, 64, "sha512")
+    .toString("hex");
+
+  return {
+    salt,
+    password_hash: passwordHash,
+  };
+}
+
+function verifyPassword(password, user) {
+  if (!user?.salt || !user?.password_hash) return false;
+
+  const check = crypto
+    .pbkdf2Sync(String(password || ""), user.salt, 120000, 64, "sha512")
+    .toString("hex");
+
+  try {
+    return crypto.timingSafeEqual(
+      Buffer.from(check, "hex"),
+      Buffer.from(user.password_hash, "hex")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeUser(user) {
+  if (!user) return null;
+
+  return {
+    id: user.id,
+    email: user.email,
+    name: user.name || "",
+    role: user.role || "student",
+    avatar_url: user.avatar_url || null,
+    google_sub: user.google_sub || null,
+    verified: user.verified !== false,
+    created_at: user.created_at || null,
+    updated_at: user.updated_at || null,
+  };
+}
+
+function signAuthToken(user) {
+  return jwt.sign(
+    {
+      sub: user.id,
+      email: user.email,
+      role: user.role || "student",
+    },
+    AUTH_JWT_SECRET,
+    {
+      expiresIn: `${AUTH_TOKEN_DAYS}d`,
+    }
+  );
+}
+
+function findUserByEmail(db, email) {
+  const cleanEmail = normalizeEmail(email);
+
+  return (
+    Object.values(db.users || {}).find(
+      (user) => normalizeEmail(user.email) === cleanEmail
+    ) || null
+  );
+}
+
+async function ensureBootstrapAdmin() {
+  const email = normalizeEmail(process.env.BOOTSTRAP_ADMIN_EMAIL);
+  const password = String(process.env.BOOTSTRAP_ADMIN_PASSWORD || "");
+  const name = process.env.BOOTSTRAP_ADMIN_NAME || "NextGen Admin";
+
+  if (!email || !password) {
+    return null;
+  }
+
+  const db = await readLiveDb();
+  const existing = findUserByEmail(db, email);
+
+  if (existing) {
+    let changed = false;
+
+    if (existing.role !== "admin") {
+      existing.role = "admin";
+      changed = true;
+    }
+
+    if (process.env.BOOTSTRAP_ADMIN_RESET_PASSWORD === "true") {
+      const hashed = hashPassword(password);
+      existing.salt = hashed.salt;
+      existing.password_hash = hashed.password_hash;
+      changed = true;
+    }
+
+    if (changed) {
+      existing.updated_at = new Date().toISOString();
+      db.users[existing.id] = existing;
+      await writeLiveDb(db);
+    }
+
+    return existing;
+  }
+
+  const id = uuid();
+  const hashed = hashPassword(password);
+
+  const admin = {
+    id,
+    email,
+    name,
+    role: "admin",
+    verified: true,
+    ...hashed,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  db.users[id] = admin;
+  await writeLiveDb(db);
+
+  console.log(`Bootstrap admin created: ${email}`);
+
+  return admin;
+}
+
+function createBackendUser({ email, name, password, role = "student", google_sub = null, avatar_url = null }) {
+  const hashed = password
+    ? hashPassword(password)
+    : hashPassword(`NG_${crypto.randomBytes(24).toString("hex")}_9aZ!`);
+
+  return {
+    id: uuid(),
+    email: normalizeEmail(email),
+    name: String(name || "").trim(),
+    role,
+    verified: true,
+    google_sub,
+    avatar_url,
+    ...hashed,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+}
+
 
 function getTimezoneOffsetMs(timeZone, date) {
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -376,39 +531,72 @@ function buildCheckoutPricing({ plan, coupon, courseId }) {
   return { valid: true, original_amount_cents: original, discount_cents: discount, final_amount_cents: Math.max(0, original - discount), coupon_code: coupon?.code || null };
 }
 
-async function getPocketBaseUserFromToken(token) {
-  const response = await axios.post(`${POCKETBASE_URL}/api/collections/users/auth-refresh`, {}, { headers: { Authorization: `Bearer ${token}` } });
-  return response.data.record;
-}
-
 async function getAuthenticatedUser(req) {
+  await ensureBootstrapAdmin();
+
   const token = String(req.headers.authorization || "").replace("Bearer ", "").trim();
-  if (!token) { const e = new Error("User not authenticated"); e.statusCode = 401; throw e; }
-  if (!POCKETBASE_URL) { const e = new Error("POCKETBASE_URL is missing"); e.statusCode = 500; throw e; }
-  const user = await getPocketBaseUserFromToken(token);
-  if (!user?.id) { const e = new Error("Invalid user token"); e.statusCode = 401; throw e; }
-  return { user, token };
+
+  if (!token) {
+    const e = new Error("User not authenticated");
+    e.statusCode = 401;
+    throw e;
+  }
+
+  let decoded;
+
+  try {
+    decoded = jwt.verify(token, AUTH_JWT_SECRET);
+  } catch {
+    const e = new Error("Invalid or expired auth token");
+    e.statusCode = 401;
+    throw e;
+  }
+
+  const db = await readLiveDb();
+  const user = db.users[String(decoded.sub)];
+
+  if (!user?.id) {
+    const e = new Error("User not found");
+    e.statusCode = 401;
+    throw e;
+  }
+
+  return {
+    user: sanitizeUser(user),
+    token,
+  };
 }
 
 async function requireAdmin(req) {
   const ctx = await getAuthenticatedUser(req);
-  if (ctx.user.role !== "admin") { const e = new Error("Only admins can perform this action"); e.statusCode = 403; throw e; }
+
+  if (ctx.user.role !== "admin") {
+    const e = new Error("Only admins can perform this action");
+    e.statusCode = 403;
+    throw e;
+  }
+
   return ctx;
 }
+
 async function requireAdminOrInstructor(req) {
   const ctx = await getAuthenticatedUser(req);
-  if (ctx.user.role !== "admin" && ctx.user.role !== "instructor") { const e = new Error("Only admins or instructors can perform this action"); e.statusCode = 403; throw e; }
+
+  if (ctx.user.role !== "admin" && ctx.user.role !== "instructor") {
+    const e = new Error("Only admins or instructors can perform this action");
+    e.statusCode = 403;
+    throw e;
+  }
+
   return ctx;
 }
-function isAdminOrInstructor(user, session) { return user?.role === "admin" || user?.role === "instructor" || session?.instructor_id === user?.id; }
 
-async function pocketBasePasswordLogin(email, password) {
-  const response = await axios.post(`${POCKETBASE_URL}/api/collections/users/auth-with-password`, { identity: email, password });
-  return response.data;
-}
-async function createPocketBaseStudent({ email, name, password }) {
-  const response = await axios.post(`${POCKETBASE_URL}/api/collections/users/records`, { email, name, password, passwordConfirm: password, role: "student" });
-  return response.data;
+function isAdminOrInstructor(user, session) {
+  return (
+    user?.role === "admin" ||
+    user?.role === "instructor" ||
+    session?.instructor_id === user?.id
+  );
 }
 
 function createBackendEnrollment(db, { userId, userName, courseId, isDemo, accessGranted = true, demoExpiry = null, planId = null }) {
@@ -456,10 +644,6 @@ async function getZoomAccessToken() {
     { headers: { Authorization: "Basic " + Buffer.from(`${process.env.ZOOM_CLIENT_ID}:${process.env.ZOOM_CLIENT_SECRET}`).toString("base64") } }
   );
   return response.data.access_token;
-}
-async function fetchPocketBaseSession(sessionId, token) {
-  const response = await axios.get(`${POCKETBASE_URL}/api/collections/live_sessions/records/${sessionId}`, { headers: { Authorization: `Bearer ${token}` } });
-  return response.data;
 }
 async function createZoomMeetingForLiveSession(session, timezone = DEFAULT_TIMEZONE) {
   const accessToken = await getZoomAccessToken();
@@ -602,7 +786,147 @@ app.get("/", (req, res) => res.send("NextGen Backend Running"));
 app.get("/health", async (req, res) => {
   const liveDbExists = await fs.access(LIVE_DB_PATH).then(() => true).catch(() => false);
   res.json({ success: true, message: "Backend running", data_dir: DATA_DIR, live_db_path: LIVE_DB_PATH, live_db_exists: liveDbExists });
+})
+
+app.post("/auth/login", async (req, res) => {
+  try {
+    await ensureBootstrapAdmin();
+
+    const email = normalizeEmail(req.body.email);
+    const password = String(req.body.password || "");
+
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        error: "Email and password are required",
+      });
+    }
+
+    const db = await readLiveDb();
+    const user = findUserByEmail(db, email);
+
+    if (!user || !verifyPassword(password, user)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid email or password",
+      });
+    }
+
+    const token = signAuthToken(user);
+    const safeUser = sanitizeUser(user);
+
+    res.json({
+      success: true,
+      token,
+      user: safeUser,
+      record: safeUser,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Login failed",
+    });
+  }
 });
+
+app.post("/auth/signup", async (req, res) => {
+  try {
+    await ensureBootstrapAdmin();
+
+    const email = normalizeEmail(req.body.email);
+    const password = String(req.body.password || "");
+    const passwordConfirm = String(req.body.passwordConfirm || req.body.password_confirm || "");
+    const name = String(req.body.name || "").trim();
+
+    if (!name) {
+      return res.status(400).json({
+        success: false,
+        error: "Name is required",
+      });
+    }
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        error: "Email is required",
+      });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({
+        success: false,
+        error: "Password must be at least 8 characters",
+      });
+    }
+
+    if (passwordConfirm && password !== passwordConfirm) {
+      return res.status(400).json({
+        success: false,
+        error: "Passwords do not match",
+      });
+    }
+
+    const db = await readLiveDb();
+
+    if (findUserByEmail(db, email)) {
+      return res.status(400).json({
+        success: false,
+        error: "An account with this email already exists",
+      });
+    }
+
+    const user = createBackendUser({
+      email,
+      name,
+      password,
+      role: "student",
+    });
+
+    db.users[user.id] = user;
+    await writeLiveDb(db);
+
+    const token = signAuthToken(user);
+    const safeUser = sanitizeUser(user);
+
+    res.json({
+      success: true,
+      token,
+      user: safeUser,
+      record: safeUser,
+      created: true,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Signup failed",
+    });
+  }
+});
+
+app.get("/auth/me", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+
+    res.json({
+      success: true,
+      user,
+      record: user,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to load current user",
+    });
+  }
+});
+
+app.post("/auth/logout", async (req, res) => {
+  res.json({
+    success: true,
+    message: "Logged out",
+  });
+});
+;
 
 async function verifyGoogleIdToken(idToken) {
   if (!process.env.GOOGLE_CLIENT_ID) { const e = new Error("GOOGLE_CLIENT_ID is missing"); e.statusCode = 500; throw e; }
@@ -615,29 +939,74 @@ async function verifyGoogleIdToken(idToken) {
 }
 app.post("/auth/google", async (req, res) => {
   try {
+    await ensureBootstrapAdmin();
+
     const profile = await verifyGoogleIdToken(req.body.id_token);
     const db = await readLiveDb();
-    const existing = db.googleAuthUsers[profile.email];
-    if (existing?.password) {
-      const authData = await pocketBasePasswordLogin(profile.email, existing.password);
-      return res.json({ success: true, token: authData.token, record: authData.record, created: false });
+
+    let user = findUserByEmail(db, profile.email);
+    let created = false;
+
+    if (!user) {
+      user = createBackendUser({
+        email: profile.email,
+        name: profile.name,
+        role: "student",
+        google_sub: profile.google_sub,
+        avatar_url: profile.picture,
+      });
+
+      created = true;
+    } else {
+      user.google_sub = user.google_sub || profile.google_sub;
+      user.avatar_url = user.avatar_url || profile.picture;
+      user.name = user.name || profile.name;
+      user.verified = true;
+      user.updated_at = new Date().toISOString();
     }
-    const generatedPassword = `NGG_${crypto.randomBytes(24).toString("hex")}_9aZ!`;
-    const createdUser = await createPocketBaseStudent({ email: profile.email, name: profile.name, password: generatedPassword });
-    const authData = await pocketBasePasswordLogin(profile.email, generatedPassword);
-    db.googleAuthUsers[profile.email] = { email: profile.email, user_id: authData.record?.id || createdUser.id, password: generatedPassword, google_sub: profile.google_sub, name: profile.name, picture: profile.picture, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+
+    db.users[user.id] = user;
+
+    db.googleAuthUsers[profile.email] = {
+      email: profile.email,
+      user_id: user.id,
+      google_sub: profile.google_sub,
+      name: profile.name,
+      picture: profile.picture,
+      created_at: db.googleAuthUsers[profile.email]?.created_at || new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
     await writeLiveDb(db);
-    res.json({ success: true, token: authData.token, record: authData.record, created: true });
+
+    const token = signAuthToken(user);
+    const safeUser = sanitizeUser(user);
+
+    res.json({
+      success: true,
+      token,
+      user: safeUser,
+      record: safeUser,
+      created,
+    });
   } catch (error) {
     console.error("Google auth error:", error.response?.data || error.message);
-    res.status(error.statusCode || error.response?.status || 500).json({ success: false, error: error.response?.data?.error_description || error.response?.data?.message || error.message || "Google login failed", details: error.response?.data || null });
+
+    res.status(error.statusCode || error.response?.status || 500).json({
+      success: false,
+      error:
+        error.response?.data?.error_description ||
+        error.response?.data?.message ||
+        error.message ||
+        "Google login failed",
+      details: error.response?.data || null,
+    });
   }
 });
 
-
 // -----------------------------------------------------------------------------
 // Backend-owned Courses, Live Sessions, and Announcements
-// PocketBase is no longer used for these LMS records. It remains only for auth.
+// PocketBase is no longer used for LMS records or authentication.
 // -----------------------------------------------------------------------------
 
 app.get("/courses", async (req, res) => {
