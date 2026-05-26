@@ -298,9 +298,10 @@ function sanitizeLiveSession(session) {
     instructor_name: session.instructor_name || null,
     status: session.status || "scheduled",
     zoom_meeting_id: session.zoom_meeting_id || null,
-        meeting_password: session.meeting_password || null,
+    meeting_password: session.meeting_password || null,
     zoom_meeting_url: session.zoom_meeting_url || null,
     recording_url: session.recording_url || null,
+    roadmap_day_id: session.roadmap_day_id || null,
     created_by: session.created_by || null,
     updated_by: session.updated_by || null,
     created_at: session.created_at || null,
@@ -1091,6 +1092,156 @@ app.post("/live/community/:sessionId", async (req, res) => { try { const { user 
 
 app.get("/roadmap/course/:courseId", async (req, res) => { const db = await readLiveDb(); const roadmap = db.roadmaps[String(req.params.courseId)] || null; const days = (roadmap?.days || []).filter((d) => d.is_published !== false); res.json({ success: true, roadmap: roadmap ? { id: roadmap.id, course_id: roadmap.course_id, course_name: roadmap.course_name, settings: roadmap.settings, created_at: roadmap.created_at, updated_at: roadmap.updated_at } : null, days: days.map(sanitizeRoadmapDay), summary: { total_days: roadmap?.days?.length || 0, shown_days: days.length, total_weeks: Math.ceil((roadmap?.days?.length || 0) / 7) } }); });
 app.post("/admin/roadmap/generate", async (req, res) => { try { await requireAdminOrInstructor(req); const db = await readLiveDb(); const { course_id, course_name = "Course", start_date, duration_days, class_time = null, skip_sundays = true, template = "usmle_step_1" } = req.body; if (!course_id || !start_date || !duration_days) return res.status(400).json({ success: false, error: "course_id, start_date, duration_days required" }); const topics = ["Orientation", "Biochemistry", "Genetics", "Immunology", "Microbiology", "Pathology", "Pharmacology", "Cardiology", "Respiratory", "Renal", "Endocrine", "GI", "Neurology", "Psychiatry", "Reproductive", "Heme/Onc", "MSK/Derm", "Biostatistics", "Mixed Review"]; const dates = []; let cursor = new Date(`${start_date}T00:00:00`); while (dates.length < Number(duration_days)) { if (!(skip_sundays && cursor.getDay() === 0)) dates.push(dateOnly(cursor)); cursor = addDays(cursor, 1); } const days = dates.map((date, i) => ({ id: `${course_id}:day:${i + 1}`, course_id, week_number: Math.ceil((i + 1) / 7), day_number: i + 1, date, title: topics[i % topics.length], description: `Daily plan for ${course_name}`, resources: ["First Aid", "UWorld", "Class notes"], resource_links: [], uworld_target: "30-40 MCQs or assigned block", first_aid_topics: topics[i % topics.length], homework: "Complete assigned MCQs and review explanations", class_time, status: "scheduled", is_published: true, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), template })); db.roadmaps[String(course_id)] = { id: `roadmap:${course_id}`, course_id, course_name, settings: { duration_days: Number(duration_days), start_date, class_time, skip_sundays, template }, days, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }; await writeLiveDb(db); res.json({ success: true, roadmap: db.roadmaps[String(course_id)] }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.post("/admin/roadmap/sync-live-sessions", async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+
+    const courseId = String(req.body.course_id || "").trim();
+
+    if (!courseId) {
+      return res.status(400).json({
+        success: false,
+        error: "course_id is required",
+      });
+    }
+
+    const db = await readLiveDb();
+
+    const sessions = Object.values(db.liveSessions || {})
+      .filter((session) => String(session.course_id) === courseId)
+      .sort((a, b) => {
+        const ad = `${a.scheduled_date || ""} ${a.scheduled_time || ""}`;
+        const bd = `${b.scheduled_date || ""} ${b.scheduled_time || ""}`;
+        return ad.localeCompare(bd);
+      });
+
+    if (!sessions.length) {
+      return res.status(404).json({
+        success: false,
+        error: "No live sessions found for this course",
+      });
+    }
+
+    let roadmapKey = courseId;
+    let roadmap = db.roadmaps?.[courseId];
+
+    if (!roadmap) {
+      const found = Object.entries(db.roadmaps || {}).find(([, value]) => {
+        return (
+          String(value.course_id || "") === courseId ||
+          String(value.courseId || "") === courseId
+        );
+      });
+
+      if (found) {
+        roadmapKey = found[0];
+        roadmap = found[1];
+      }
+    }
+
+    if (!roadmap) {
+      return res.status(404).json({
+        success: false,
+        error: "Roadmap not found for this course",
+      });
+    }
+
+    const days = Array.isArray(roadmap.days)
+      ? roadmap.days
+      : Array.isArray(roadmap.items)
+        ? roadmap.items
+        : Array.isArray(roadmap.roadmap)
+          ? roadmap.roadmap
+          : [];
+
+    if (!days.length) {
+      return res.status(404).json({
+        success: false,
+        error: "Roadmap has no days to sync",
+      });
+    }
+
+    const sessionByDate = new Map();
+    const sessionByDayNumber = new Map();
+
+    sessions.forEach((session, index) => {
+      if (session.scheduled_date) {
+        sessionByDate.set(String(session.scheduled_date).slice(0, 10), session);
+      }
+
+      const topic = String(session.topic || "");
+      const dayMatch = topic.match(/day\s*(\d+)/i);
+
+      if (dayMatch?.[1]) {
+        sessionByDayNumber.set(Number(dayMatch[1]), session);
+      }
+
+      sessionByDayNumber.set(index + 1, session);
+    });
+
+    let syncedCount = 0;
+
+    const syncedDays = days.map((day, index) => {
+      const dayNumber = Number(day.day_number || day.order || index + 1);
+      const dateKey = day.date ? String(day.date).slice(0, 10) : "";
+
+      const matchedSession =
+        (dateKey && sessionByDate.get(dateKey)) ||
+        sessionByDayNumber.get(dayNumber) ||
+        sessions[index];
+
+      if (!matchedSession?.id) {
+        return day;
+      }
+
+      syncedCount += 1;
+
+      db.liveSessions[matchedSession.id] = {
+        ...db.liveSessions[matchedSession.id],
+        roadmap_day_id: day.id || null,
+        updated_at: new Date().toISOString(),
+      };
+
+      return {
+        ...day,
+        live_session_id: matchedSession.id,
+        session_id: matchedSession.id,
+        scheduled_date: matchedSession.scheduled_date || day.scheduled_date || day.date || "",
+        scheduled_time: matchedSession.scheduled_time || day.scheduled_time || "",
+        status: day.status || "scheduled",
+      };
+    });
+
+    if (Array.isArray(roadmap.days)) {
+      roadmap.days = syncedDays;
+    } else if (Array.isArray(roadmap.items)) {
+      roadmap.items = syncedDays;
+    } else if (Array.isArray(roadmap.roadmap)) {
+      roadmap.roadmap = syncedDays;
+    } else {
+      roadmap.days = syncedDays;
+    }
+
+    roadmap.updated_at = new Date().toISOString();
+    db.roadmaps[roadmapKey] = roadmap;
+
+    await writeLiveDb(db);
+
+    res.json({
+      success: true,
+      course_id: courseId,
+      synced_count: syncedCount,
+      total_days: syncedDays.length,
+      total_sessions: sessions.length,
+      roadmap,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to sync roadmap with live sessions",
+    });
+  }
+});
 app.post("/roadmap/progress/mark", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); const { course_id, day_id, completed = true } = req.body; const db = await readLiveDb(); const key = `${course_id}:${user.id}:${day_id}`; db.roadmapProgress[key] = { id: key, course_id, user_id: user.id, day_id, completed: Boolean(completed), completed_at: completed ? new Date().toISOString() : null, updated_at: new Date().toISOString() }; const leaderboard = updateLeaderboard(db, { courseId: course_id, userId: user.id, userName: user.name || user.email || "Student" }); await writeLiveDb(db); res.json({ success: true, progress: db.roadmapProgress[key], summary: buildProgressSummary({ db, courseId: course_id, userId: user.id }), leaderboard }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.get("/roadmap/progress/me", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); const db = await readLiveDb(); res.json({ success: true, summary: buildProgressSummary({ db, courseId: req.query.course_id, userId: user.id }), progress_items: Object.values(db.roadmapProgress || {}).filter((x) => String(x.course_id) === String(req.query.course_id) && String(x.user_id) === String(user.id)) }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 
