@@ -81,6 +81,7 @@ const DEFAULT_LIVE_DB = {
 
   assessments: {},
   assessmentAttempts: {},
+  aiUsageLogs: {},
 
   updatedAt: null,
 };
@@ -120,6 +121,7 @@ async function readLiveDb() {
       roadmapProgress: parsed.roadmapProgress || {},
       assessments: parsed.assessments || {},
       assessmentAttempts: parsed.assessmentAttempts || {},
+      aiUsageLogs: parsed.aiUsageLogs || {},
       featureCatalog: { ...DEFAULT_FEATURE_CATALOG, ...(parsed.featureCatalog || {}) },
       demoSettings: { ...DEFAULT_DEMO_SETTINGS, ...(parsed.demoSettings || {}) },
     };
@@ -804,6 +806,72 @@ function getAICleanupModel(fallback = "gpt-4o-mini") {
   return String(process.env.AI_CLEANUP_MODEL || process.env.AI_MODEL || fallback).trim() || fallback;
 }
 
+function getAIModelPricing(model) {
+  const key = String(model || "").toLowerCase();
+
+  const pricing = {
+    "gpt-4o-mini": { input_per_1m: 0.15, output_per_1m: 0.60 },
+    "gpt-4.1-mini": { input_per_1m: 0.40, output_per_1m: 1.60 },
+    "gpt-5-mini": { input_per_1m: 0.25, output_per_1m: 2.00 },
+  };
+
+  return pricing[key] || pricing["gpt-4o-mini"];
+}
+
+function normalizeAIUsage(rawUsage = {}) {
+  const inputTokens = Number(rawUsage.input_tokens ?? rawUsage.prompt_tokens ?? rawUsage.inputTokens ?? 0) || 0;
+  const outputTokens = Number(rawUsage.output_tokens ?? rawUsage.completion_tokens ?? rawUsage.outputTokens ?? 0) || 0;
+  const totalTokens = Number(rawUsage.total_tokens ?? rawUsage.totalTokens ?? 0) || inputTokens + outputTokens;
+
+  return {
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    total_tokens: totalTokens,
+  };
+}
+
+function estimateAICostUsd({ model, usage }) {
+  const cleanUsage = normalizeAIUsage(usage);
+  const pricing = getAIModelPricing(model);
+
+  const inputCost = (cleanUsage.input_tokens / 1000000) * pricing.input_per_1m;
+  const outputCost = (cleanUsage.output_tokens / 1000000) * pricing.output_per_1m;
+
+  return Number((inputCost + outputCost).toFixed(6));
+}
+
+async function logAIUsage({ user, action, model, usage, sourceLength = 0, questionCount = null }) {
+  try {
+    const db = await readLiveDb();
+    db.aiUsageLogs = db.aiUsageLogs || {};
+
+    const cleanUsage = normalizeAIUsage(usage);
+    const id = uuid();
+    const log = {
+      id,
+      user_id: user?.id || null,
+      user_email: user?.email || null,
+      user_name: user?.name || null,
+      action,
+      model,
+      input_tokens: cleanUsage.input_tokens,
+      output_tokens: cleanUsage.output_tokens,
+      total_tokens: cleanUsage.total_tokens,
+      estimated_cost_usd: estimateAICostUsd({ model, usage: cleanUsage }),
+      source_length: Number(sourceLength || 0),
+      question_count: questionCount === null || questionCount === undefined ? null : Number(questionCount || 0),
+      created_at: new Date().toISOString(),
+    };
+
+    db.aiUsageLogs[id] = log;
+    await writeLiveDb(db);
+    return log;
+  } catch (error) {
+    console.warn("AI usage logging failed:", error.message);
+    return null;
+  }
+}
+
 function extractAIText(openAIResponse) {
   if (typeof openAIResponse?.output_text === "string") {
     return openAIResponse.output_text;
@@ -872,24 +940,14 @@ async function callOpenAIResponsesAPI({
   const payload = {
     model,
     input: [
-      {
-        role: "system",
-        content: systemPrompt,
-      },
-      {
-        role: "user",
-        content: userPrompt,
-      },
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
     ],
     max_output_tokens: maxOutputTokens,
   };
 
   if (jsonMode) {
-    payload.text = {
-      format: {
-        type: "json_object",
-      },
-    };
+    payload.text = { format: { type: "json_object" } };
   }
 
   try {
@@ -905,7 +963,12 @@ async function callOpenAIResponsesAPI({
       }
     );
 
-    return extractAIText(response.data);
+    return {
+      text: extractAIText(response.data),
+      usage: normalizeAIUsage(response.data?.usage || {}),
+      model,
+      raw_model: response.data?.model || model,
+    };
   } catch (error) {
     const apiMessage =
       error.response?.data?.error?.message ||
@@ -1055,13 +1118,21 @@ Clean and organize the following notes:
 ${cleanText}
 `.trim();
 
-  return callOpenAIResponsesAPI({
-    model: getAICleanupModel(),
+  const model = getAICleanupModel();
+
+  const result = await callOpenAIResponsesAPI({
+    model,
     systemPrompt,
     userPrompt,
     maxOutputTokens: 5000,
     jsonMode: false,
   });
+
+  return {
+    cleaned_notes: result.text,
+    usage: result.usage,
+    model: result.raw_model || model,
+  };
 }
 
 async function generateQuestionsWithAI({
@@ -1119,25 +1190,29 @@ Source material:
 ${cleanText}
 `.trim();
 
-  const aiText = await callOpenAIResponsesAPI({
-    model: getAIModel(),
+  const model = getAIModel();
+
+  const aiResult = await callOpenAIResponsesAPI({
+    model,
     systemPrompt,
     userPrompt,
     maxOutputTokens: 7000,
     jsonMode: true,
   });
 
-  const parsed = safeJsonParseFromAI(aiText);
+  const parsed = safeJsonParseFromAI(aiResult.text);
 
   return {
     questions: normalizeAIQuestions(parsed.questions || []),
     warnings: Array.isArray(parsed.warnings) ? parsed.warnings : [],
+    usage: aiResult.usage,
+    model: aiResult.raw_model || model,
   };
 }
 
 app.post("/admin/ai/clean-notes", async (req, res) => {
   try {
-    await requireAdminOrInstructor(req);
+    const { user } = await requireAdminOrInstructor(req);
 
     if (!isAIConfigured()) {
       return res.status(500).json({
@@ -1152,7 +1227,7 @@ app.post("/admin/ai/clean-notes", async (req, res) => {
       body: req.body || {},
     });
 
-    const cleanedNotes = await cleanNotesWithAI({
+    const aiResult = await cleanNotesWithAI({
       sourceText,
       sourceType,
       metadata: {
@@ -1162,10 +1237,19 @@ app.post("/admin/ai/clean-notes", async (req, res) => {
       },
     });
 
+    const usageLog = await logAIUsage({
+      user,
+      action: "clean_notes",
+      model: aiResult.model,
+      usage: aiResult.usage,
+      sourceLength: String(sourceText || "").length,
+    });
+
     res.json({
       success: true,
-      cleaned_notes: cleanedNotes,
+      cleaned_notes: aiResult.cleaned_notes,
       source_length: String(sourceText || "").length,
+      ai_usage: usageLog,
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({
@@ -1177,7 +1261,7 @@ app.post("/admin/ai/clean-notes", async (req, res) => {
 
 app.post("/admin/assessments/generate-from-source", async (req, res) => {
   try {
-    await requireAdminOrInstructor(req);
+    const { user } = await requireAdminOrInstructor(req);
 
     if (!isAIConfigured()) {
       return res.status(500).json({
@@ -1227,11 +1311,21 @@ app.post("/admin/assessments/generate-from-source", async (req, res) => {
       },
     });
 
+    const usageLog = await logAIUsage({
+      user,
+      action: "generate_assessment",
+      model: result.model,
+      usage: result.usage,
+      sourceLength: String(sourceText || "").length,
+      questionCount: result.questions.length,
+    });
+
     res.json({
       success: true,
       questions: result.questions,
       warnings: result.warnings,
       source_length: String(sourceText || "").length,
+      ai_usage: usageLog,
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({
@@ -1240,6 +1334,40 @@ app.post("/admin/assessments/generate-from-source", async (req, res) => {
     });
   }
 });
+app.get("/admin/ai/usage", async (req, res) => {
+  try {
+    await requireAdmin(req);
+
+    const db = await readLiveDb();
+    const logs = Object.values(db.aiUsageLogs || {}).sort((a, b) =>
+      String(b.created_at || "").localeCompare(String(a.created_at || ""))
+    );
+
+    const totalTokens = logs.reduce((sum, item) => sum + Number(item.total_tokens || 0), 0);
+    const totalCost = logs.reduce((sum, item) => sum + Number(item.estimated_cost_usd || 0), 0);
+    const today = new Date().toISOString().slice(0, 10);
+    const todayLogs = logs.filter((item) => String(item.created_at || "").startsWith(today));
+    const todayCost = todayLogs.reduce((sum, item) => sum + Number(item.estimated_cost_usd || 0), 0);
+
+    res.json({
+      success: true,
+      summary: {
+        total_requests: logs.length,
+        total_tokens: totalTokens,
+        total_cost_usd: Number(totalCost.toFixed(6)),
+        today_requests: todayLogs.length,
+        today_cost_usd: Number(todayCost.toFixed(6)),
+      },
+      logs: logs.slice(0, 200),
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to load AI usage",
+    });
+  }
+});
+
 app.get("/", (req, res) => res.send("NextGen Backend Running"));
 app.get("/health", async (req, res) => {
   const liveDbExists = await fs.access(LIVE_DB_PATH).then(() => true).catch(() => false);
@@ -2096,7 +2224,7 @@ app.get("/student/dashboard/summary", async (req, res) => {
   } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); }
 });
 
-app.get("/live/debug/storage", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); if (user.role !== "admin") return res.status(403).json({ success: false, error: "Only admins can view storage debug" }); const db = await readLiveDb(); res.json({ success: true, data_dir: DATA_DIR, live_db_path: LIVE_DB_PATH, counts: { courses: Object.keys(db.courses || {}).length, liveSessions: Object.keys(db.liveSessions || {}).length, announcements: Object.keys(db.announcements || {}).length, recordings: Object.keys(db.recordings || {}).length, notes: Object.keys(db.notes || {}).length, enrollments: Object.keys(db.enrollments || {}).length, plans: Object.keys(db.plans || {}).length, coupons: Object.keys(db.coupons || {}).length, assessments: Object.keys(db.assessments || {}).length, assessmentAttempts: Object.keys(db.assessmentAttempts || {}).length, roadmaps: Object.keys(db.roadmaps || {}).length, roadmapProgress: Object.keys(db.roadmapProgress || {}).length, leaderboard: Object.keys(db.leaderboard || {}).length, googleAuthUsers: Object.keys(db.googleAuthUsers || {}).length }, updatedAt: db.updatedAt || null }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.get("/live/debug/storage", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); if (user.role !== "admin") return res.status(403).json({ success: false, error: "Only admins can view storage debug" }); const db = await readLiveDb(); res.json({ success: true, data_dir: DATA_DIR, live_db_path: LIVE_DB_PATH, counts: { courses: Object.keys(db.courses || {}).length, liveSessions: Object.keys(db.liveSessions || {}).length, announcements: Object.keys(db.announcements || {}).length, recordings: Object.keys(db.recordings || {}).length, notes: Object.keys(db.notes || {}).length, enrollments: Object.keys(db.enrollments || {}).length, plans: Object.keys(db.plans || {}).length, coupons: Object.keys(db.coupons || {}).length, assessments: Object.keys(db.assessments || {}).length, assessmentAttempts: Object.keys(db.assessmentAttempts || {}).length, aiUsageLogs: Object.keys(db.aiUsageLogs || {}).length, roadmaps: Object.keys(db.roadmaps || {}).length, roadmapProgress: Object.keys(db.roadmapProgress || {}).length, leaderboard: Object.keys(db.leaderboard || {}).length, googleAuthUsers: Object.keys(db.googleAuthUsers || {}).length }, updatedAt: db.updatedAt || null }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
