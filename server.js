@@ -781,7 +781,465 @@ function gradeAssessment(assessment, answers = {}) {
   const total = (assessment.questions || []).length;
   return { score, total, percentage: total ? Math.round((score / total) * 100) : 0, graded };
 }
+// -----------------------------------------------------------------------------
+// AI Foundation: Notes Cleanup + Assessment Question Generation
+// -----------------------------------------------------------------------------
 
+function isAIConfigured() {
+  return (
+    process.env.AI_ENABLED !== "false" &&
+    Boolean(String(process.env.OPENAI_API_KEY || "").trim())
+  );
+}
+
+function getAIConfigError() {
+  return "AI question generation is not configured. Please add OPENAI_API_KEY.";
+}
+
+function getAIModel(fallback = "gpt-4o-mini") {
+  return String(process.env.AI_MODEL || fallback).trim() || fallback;
+}
+
+function getAICleanupModel(fallback = "gpt-4o-mini") {
+  return String(process.env.AI_CLEANUP_MODEL || process.env.AI_MODEL || fallback).trim() || fallback;
+}
+
+function extractAIText(openAIResponse) {
+  if (typeof openAIResponse?.output_text === "string") {
+    return openAIResponse.output_text;
+  }
+
+  const output = openAIResponse?.output || [];
+
+  for (const item of output) {
+    const content = item?.content || [];
+
+    for (const part of content) {
+      if (typeof part?.text === "string") return part.text;
+      if (typeof part?.output_text === "string") return part.output_text;
+    }
+  }
+
+  const firstChoice = openAIResponse?.choices?.[0]?.message?.content;
+
+  if (typeof firstChoice === "string") return firstChoice;
+
+  return "";
+}
+
+function safeJsonParseFromAI(text) {
+  const raw = String(text || "").trim();
+
+  if (!raw) {
+    throw new Error("AI returned an empty response");
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const jsonMatch =
+      raw.match(/```json\s*([\s\S]*?)```/i) ||
+      raw.match(/```\s*([\s\S]*?)```/i);
+
+    if (jsonMatch?.[1]) {
+      return JSON.parse(jsonMatch[1].trim());
+    }
+
+    const firstBrace = raw.indexOf("{");
+    const lastBrace = raw.lastIndexOf("}");
+
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+      return JSON.parse(raw.slice(firstBrace, lastBrace + 1));
+    }
+
+    throw new Error("AI response was not valid JSON");
+  }
+}
+
+async function callOpenAIResponsesAPI({
+  model,
+  systemPrompt,
+  userPrompt,
+  maxOutputTokens = 3000,
+  jsonMode = false,
+}) {
+  if (!isAIConfigured()) {
+    const error = new Error(getAIConfigError());
+    error.statusCode = 500;
+    throw error;
+  }
+
+  const payload = {
+    model,
+    input: [
+      {
+        role: "system",
+        content: systemPrompt,
+      },
+      {
+        role: "user",
+        content: userPrompt,
+      },
+    ],
+    max_output_tokens: maxOutputTokens,
+  };
+
+  if (jsonMode) {
+    payload.text = {
+      format: {
+        type: "json_object",
+      },
+    };
+  }
+
+  try {
+    const response = await axios.post(
+      "https://api.openai.com/v1/responses",
+      payload,
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        timeout: 120000,
+      }
+    );
+
+    return extractAIText(response.data);
+  } catch (error) {
+    const apiMessage =
+      error.response?.data?.error?.message ||
+      error.response?.data?.message ||
+      error.message ||
+      "OpenAI request failed";
+
+    const e = new Error(apiMessage);
+    e.statusCode = error.response?.status || 500;
+    throw e;
+  }
+}
+
+function getSourceTextFromRequest({ db, body }) {
+  const sourceType = String(body.source_type || "custom_text").trim();
+  const manualText = String(body.text || body.source_text || "").trim();
+
+  if (manualText) {
+    return {
+      sourceType,
+      sourceText: manualText,
+      sourceSession: null,
+    };
+  }
+
+  const sessionId = body.session_id ? String(body.session_id) : "";
+
+  if (sessionId) {
+    const notes = db.notes?.[sessionId] || null;
+    const session = db.liveSessions?.[sessionId] || null;
+
+    const sourceText = String(
+      notes?.notes ||
+        notes?.transcript_text ||
+        notes?.transcript ||
+        notes?.content ||
+        ""
+    ).trim();
+
+    return {
+      sourceType: "session_notes",
+      sourceText,
+      sourceSession: session,
+    };
+  }
+
+  return {
+    sourceType,
+    sourceText: "",
+    sourceSession: null,
+  };
+}
+
+function validateAISourceText(sourceText) {
+  const text = String(sourceText || "").trim();
+
+  if (!text) {
+    const error = new Error("Source text is required");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (text.length < 300) {
+    const error = new Error("Source text must be at least 300 characters for AI generation");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return text;
+}
+
+function normalizeAIQuestions(inputQuestions = []) {
+  const questions = Array.isArray(inputQuestions) ? inputQuestions : [];
+
+  return questions
+    .map((question, index) => {
+      const optionsObject = question.options || {};
+      const optionsArray = Array.isArray(optionsObject)
+        ? optionsObject
+        : [
+            optionsObject.A,
+            optionsObject.B,
+            optionsObject.C,
+            optionsObject.D,
+          ];
+
+      const cleanOptions = optionsArray
+        .map((item) => String(item || "").trim())
+        .filter(Boolean)
+        .slice(0, 4);
+
+      while (cleanOptions.length < 4) {
+        cleanOptions.push(`Option ${String.fromCharCode(65 + cleanOptions.length)}`);
+      }
+
+      const correctLetter = String(question.correct_answer || "A").trim().toUpperCase();
+      const letterMap = { A: 0, B: 1, C: 2, D: 3 };
+      const correctIndex =
+        Number.isInteger(question.correct_index)
+          ? Math.max(0, Math.min(3, Number(question.correct_index)))
+          : letterMap[correctLetter] ?? 0;
+
+      return {
+        id: question.id || `q${index + 1}`,
+        stem: String(
+          question.stem ||
+            question.question_text ||
+            question.question ||
+            `Question ${index + 1}`
+        ).trim(),
+        options: cleanOptions,
+        correct_index: correctIndex,
+        explanation: String(question.explanation || "").trim(),
+        topic: String(question.topic || question.source_lecture_name || "General").trim(),
+        difficulty: String(question.difficulty || "medium").trim().toLowerCase(),
+        points: Number(question.points || 1) || 1,
+        source_lecture_id: question.source_lecture_id || null,
+        source_lecture_name: question.source_lecture_name || null,
+      };
+    })
+    .filter((question) => question.stem && question.options.length >= 4);
+}
+
+async function cleanNotesWithAI({ sourceText, sourceType, metadata = {} }) {
+  const cleanText = validateAISourceText(sourceText);
+
+  const systemPrompt = `
+You are cleaning lecture/session notes for NextGen USMLE.
+
+Rules:
+- Preserve the original meaning.
+- Do not add new medical facts.
+- Do not invent information.
+- Do not expand beyond the provided source.
+- Organize into clear headings and bullet points.
+- Correct grammar and formatting.
+- If content is unclear, label it as unclear instead of guessing.
+- Return clean notes only, not JSON.
+`.trim();
+
+  const userPrompt = `
+Source type: ${sourceType || "custom_text"}
+Metadata: ${JSON.stringify(metadata || {})}
+
+Clean and organize the following notes:
+
+${cleanText}
+`.trim();
+
+  return callOpenAIResponsesAPI({
+    model: getAICleanupModel(),
+    systemPrompt,
+    userPrompt,
+    maxOutputTokens: 5000,
+    jsonMode: false,
+  });
+}
+
+async function generateQuestionsWithAI({
+  sourceText,
+  questionCount = 10,
+  difficulty = "mixed",
+  questionType = "mcq",
+  metadata = {},
+}) {
+  const cleanText = validateAISourceText(sourceText);
+  const count = Math.max(1, Math.min(50, Number(questionCount || 10)));
+
+  const systemPrompt = `
+You are generating original USMLE-style assessment questions for NextGen USMLE.
+
+Rules:
+- Use only the provided source material.
+- Do not invent facts.
+- Do not copy proprietary question-bank content.
+- Do not use outside question bank wording.
+- If there is not enough material, generate fewer questions and include a warning.
+- Return strict JSON only.
+- Each question must have A, B, C, D options.
+- Each question must have one correct answer.
+- Each explanation must be grounded in the provided source.
+`.trim();
+
+  const userPrompt = `
+Generate ${count} ${questionType || "mcq"} questions.
+
+Difficulty: ${difficulty || "mixed"}
+Metadata: ${JSON.stringify(metadata || {})}
+
+Return JSON exactly in this shape:
+{
+  "questions": [
+    {
+      "question_text": "...",
+      "options": {
+        "A": "...",
+        "B": "...",
+        "C": "...",
+        "D": "..."
+      },
+      "correct_answer": "A",
+      "explanation": "...",
+      "difficulty": "medium",
+      "points": 1
+    }
+  ],
+  "warnings": []
+}
+
+Source material:
+${cleanText}
+`.trim();
+
+  const aiText = await callOpenAIResponsesAPI({
+    model: getAIModel(),
+    systemPrompt,
+    userPrompt,
+    maxOutputTokens: 7000,
+    jsonMode: true,
+  });
+
+  const parsed = safeJsonParseFromAI(aiText);
+
+  return {
+    questions: normalizeAIQuestions(parsed.questions || []),
+    warnings: Array.isArray(parsed.warnings) ? parsed.warnings : [],
+  };
+}
+
+app.post("/admin/ai/clean-notes", async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+
+    if (!isAIConfigured()) {
+      return res.status(500).json({
+        success: false,
+        error: getAIConfigError(),
+      });
+    }
+
+    const db = await readLiveDb();
+    const { sourceType, sourceText, sourceSession } = getSourceTextFromRequest({
+      db,
+      body: req.body || {},
+    });
+
+    const cleanedNotes = await cleanNotesWithAI({
+      sourceText,
+      sourceType,
+      metadata: {
+        session_id: req.body.session_id || null,
+        course_id: req.body.course_id || sourceSession?.course_id || null,
+        topic: sourceSession?.topic || sourceSession?.title || null,
+      },
+    });
+
+    res.json({
+      success: true,
+      cleaned_notes: cleanedNotes,
+      source_length: String(sourceText || "").length,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to clean notes with AI",
+    });
+  }
+});
+
+app.post("/admin/assessments/generate-from-source", async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+
+    if (!isAIConfigured()) {
+      return res.status(500).json({
+        success: false,
+        error: getAIConfigError(),
+      });
+    }
+
+    const db = await readLiveDb();
+
+    const courseId = String(req.body.course_id || "").trim();
+
+    if (!courseId) {
+      return res.status(400).json({
+        success: false,
+        error: "course_id is required",
+      });
+    }
+
+    const course = db.courses?.[courseId];
+
+    if (!course) {
+      return res.status(404).json({
+        success: false,
+        error: "Course not found",
+      });
+    }
+
+    const { sourceType, sourceText, sourceSession } = getSourceTextFromRequest({
+      db,
+      body: req.body || {},
+    });
+
+    const result = await generateQuestionsWithAI({
+      sourceText,
+      questionCount: req.body.question_count,
+      difficulty: req.body.difficulty || "mixed",
+      questionType: req.body.question_type || "mcq",
+      metadata: {
+        course_id: courseId,
+        course_name: course.name || "",
+        session_id: req.body.session_id || null,
+        session_topic: sourceSession?.topic || sourceSession?.title || null,
+        title: req.body.title || "",
+        instructions: req.body.instructions || "",
+        source_type: sourceType,
+      },
+    });
+
+    res.json({
+      success: true,
+      questions: result.questions,
+      warnings: result.warnings,
+      source_length: String(sourceText || "").length,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to generate assessment questions",
+    });
+  }
+});
 app.get("/", (req, res) => res.send("NextGen Backend Running"));
 app.get("/health", async (req, res) => {
   const liveDbExists = await fs.access(LIVE_DB_PATH).then(() => true).catch(() => false);
