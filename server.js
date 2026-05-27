@@ -751,21 +751,153 @@ function updateLeaderboard(db, { courseId, userId, userName }) {
   return db.leaderboard[key];
 }
 
+function isAttemptReleased(attempt) {
+  if (!attempt) return false;
+  return attempt.released_to_student === true || attempt.review_status === "released";
+}
+
+function sanitizeAttemptForStudent(attempt) {
+  if (!attempt) return null;
+  const released = isAttemptReleased(attempt);
+  return {
+    id: attempt.id,
+    assessment_id: attempt.assessment_id,
+    course_id: attempt.course_id,
+    session_id: attempt.session_id || null,
+    submitted_at: attempt.submitted_at || null,
+    review_status: attempt.review_status || (released ? "released" : "pending_review"),
+    released_to_student: released,
+    admin_feedback: released ? (attempt.admin_feedback || "") : "",
+    score: released ? attempt.score : null,
+    total: released ? attempt.total : attempt.total || null,
+    percentage: released ? attempt.percentage : null,
+    graded_answers: released ? attempt.graded_answers || [] : [],
+  };
+}
+
+function sanitizeAttemptForAdmin(attempt, db) {
+  const assessment = db.assessments?.[attempt.assessment_id] || null;
+  const course = db.courses?.[attempt.course_id] || null;
+  const user = db.users?.[attempt.user_id] || null;
+  return {
+    ...attempt,
+    assessment_title: assessment?.title || attempt.assessment_title || "Assessment",
+    course_name: course?.name || "Course",
+    student_name: user?.name || attempt.user_name || "Student",
+    student_email: user?.email || attempt.user_email || "",
+    review_status: attempt.review_status || "pending_review",
+    released_to_student: attempt.released_to_student === true,
+    leaderboard_applied: attempt.leaderboard_applied === true,
+  };
+}
+
 function sanitizeAssessmentForStudent(assessment, attempt = null) {
+  const released = isAttemptReleased(attempt);
   return {
-    id: assessment.id, course_id: assessment.course_id, session_id: assessment.session_id || null, title: assessment.title,
-    description: assessment.description || "", source_type: assessment.source_type || "manual_notes",
-    question_count: (assessment.questions || []).length, duration_minutes: assessment.duration_minutes || null,
-    is_published: Boolean(assessment.is_published), created_at: assessment.created_at || null, published_at: assessment.published_at || null,
-    attempt_status: attempt ? "completed" : "not_started", attempt_score: attempt?.score ?? null, attempt_total: attempt?.total ?? null, attempt_percentage: attempt?.percentage ?? null,
+    id: assessment.id,
+    course_id: assessment.course_id,
+    session_id: assessment.session_id || null,
+    title: assessment.title,
+    description: assessment.description || "",
+    source_type: assessment.source_type || "manual_notes",
+    question_count: (assessment.questions || []).length,
+    duration_minutes: assessment.duration_minutes || null,
+    starts_at: assessment.starts_at || assessment.start_at || assessment.opens_at || null,
+    due_at: assessment.due_at || assessment.ends_at || assessment.deadline || null,
+    attempts_allowed: assessment.attempts_allowed || 1,
+    is_published: Boolean(assessment.is_published),
+    created_at: assessment.created_at || null,
+    published_at: assessment.published_at || null,
+    attempt_status: attempt ? "completed" : "not_started",
+    review_status: attempt ? (attempt.review_status || (released ? "released" : "pending_review")) : null,
+    released_to_student: released,
+    result_visible: released,
+    attempt_score: released ? attempt?.score ?? null : null,
+    attempt_total: released ? attempt?.total ?? null : attempt?.total ?? null,
+    attempt_percentage: released ? attempt?.percentage ?? null : null,
+    admin_feedback: released ? attempt?.admin_feedback || "" : "",
+    submitted_at: attempt?.submitted_at || null,
   };
 }
-function sanitizeAssessmentForTaking(assessment) {
+
+function sanitizeAssessmentForTaking(assessment, existingAttempt = null) {
+  const released = isAttemptReleased(existingAttempt);
   return {
-    id: assessment.id, course_id: assessment.course_id, session_id: assessment.session_id || null, title: assessment.title, description: assessment.description || "", duration_minutes: assessment.duration_minutes || null,
-    questions: (assessment.questions || []).map((q, i) => ({ id: q.id || `q${i + 1}`, stem: q.stem, options: q.options || [], topic: q.topic || "General", difficulty: q.difficulty || "medium" })),
+    id: assessment.id,
+    course_id: assessment.course_id,
+    session_id: assessment.session_id || null,
+    title: assessment.title,
+    description: assessment.description || "",
+    duration_minutes: assessment.duration_minutes || null,
+    starts_at: assessment.starts_at || assessment.start_at || assessment.opens_at || null,
+    due_at: assessment.due_at || assessment.ends_at || assessment.deadline || null,
+    attempts_allowed: assessment.attempts_allowed || 1,
+    existing_attempt: existingAttempt ? sanitizeAttemptForStudent(existingAttempt) : null,
+    questions: released
+      ? (assessment.questions || []).map((q, i) => ({
+          id: q.id || `q${i + 1}`,
+          stem: q.stem,
+          options: q.options || [],
+          topic: q.topic || "General",
+          difficulty: q.difficulty || "medium",
+          explanation: q.explanation || "",
+          correct_index: q.correct_index,
+        }))
+      : (assessment.questions || []).map((q, i) => ({
+          id: q.id || `q${i + 1}`,
+          stem: q.stem,
+          options: q.options || [],
+          topic: q.topic || "General",
+          difficulty: q.difficulty || "medium",
+        })),
   };
 }
+
+function applyReleasedAssessmentAttemptToLeaderboard(db, attempt, assessment = null) {
+  if (!attempt || attempt.leaderboard_applied === true) {
+    return db.leaderboard?.[courseUserKey(attempt?.course_id, attempt?.user_id)] || null;
+  }
+
+  const quizKey = courseUserKey(attempt.course_id, attempt.user_id);
+  db.quizAttempts[quizKey] = Array.isArray(db.quizAttempts[quizKey]) ? db.quizAttempts[quizKey] : [];
+
+  const existingQuizAttemptId = attempt.quiz_attempt_id;
+  const alreadyExists = existingQuizAttemptId
+    ? db.quizAttempts[quizKey].some((item) => item.id === existingQuizAttemptId)
+    : db.quizAttempts[quizKey].some((item) => item.assessment_attempt_id === attempt.id);
+
+  if (!alreadyExists) {
+    const quizAttemptId = existingQuizAttemptId || uuid();
+    attempt.quiz_attempt_id = quizAttemptId;
+    db.quizAttempts[quizKey].push({
+      id: quizAttemptId,
+      assessment_attempt_id: attempt.id,
+      user_id: attempt.user_id,
+      user_name: attempt.user_name || "Student",
+      session_id: attempt.session_id || "assessment",
+      course_id: attempt.course_id,
+      quiz_id: attempt.assessment_id,
+      topic: assessment?.title || attempt.assessment_title || "Assessment",
+      subject: "Assessment",
+      score: attempt.score,
+      total: attempt.total,
+      percentage: attempt.percentage,
+      answers: attempt.answers || {},
+      created_at: attempt.submitted_at || new Date().toISOString(),
+      released_at: attempt.reviewed_at || new Date().toISOString(),
+    });
+  }
+
+  attempt.leaderboard_applied = true;
+  attempt.leaderboard_applied_at = attempt.leaderboard_applied_at || new Date().toISOString();
+
+  return updateLeaderboard(db, {
+    courseId: attempt.course_id,
+    userId: attempt.user_id,
+    userName: attempt.user_name || "Student",
+  });
+}
+
 function createDraftQuestions({ question_count = 10, topic = "Assessment" }) {
   const count = Math.max(1, Math.min(80, Number(question_count || 10)));
   return Array.from({ length: count }).map((_, i) => ({ id: `q${i + 1}`, stem: `Draft MCQ ${i + 1}: edit this question for ${topic}.`, options: ["Option A", "Option B", "Option C", "Option D"], correct_index: 0, explanation: "Add explanation before publishing.", topic, difficulty: "medium" }));
@@ -2206,10 +2338,273 @@ app.get("/admin/assessments/:assessmentId", async (req, res) => { try { await re
 app.patch("/admin/assessments/:assessmentId", async (req, res) => { try { await requireAdminOrInstructor(req); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a) return res.status(404).json({ success: false, error: "Assessment not found" }); const allowed = ["title", "description", "source_type", "source_text", "duration_minutes", "questions"]; for (const k of allowed) if (req.body[k] !== undefined) a[k] = req.body[k]; a.question_count = Array.isArray(a.questions) ? a.questions.length : a.question_count; a.updated_at = new Date().toISOString(); await writeLiveDb(db); res.json({ success: true, assessment: a }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.post("/admin/assessments/:assessmentId/publish", async (req, res) => { try { const { user } = await requireAdminOrInstructor(req); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a) return res.status(404).json({ success: false, error: "Assessment not found" }); const invalid = (a.questions || []).find((q) => !q.stem || !Array.isArray(q.options) || q.options.length < 2 || q.correct_index === undefined); if (req.body.is_published !== false && invalid) return res.status(400).json({ success: false, error: "Assessment has incomplete questions" }); a.is_published = req.body.is_published !== false; a.published_at = a.is_published ? new Date().toISOString() : null; a.published_by = a.is_published ? user.id : null; a.updated_at = new Date().toISOString(); await writeLiveDb(db); res.json({ success: true, assessment: a }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.delete("/admin/assessments/:assessmentId", async (req, res) => { try { await requireAdminOrInstructor(req); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a) return res.status(404).json({ success: false, error: "Assessment not found" }); delete db.assessments[req.params.assessmentId]; await writeLiveDb(db); res.json({ success: true, deleted_assessment: a }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
-app.get("/student/assessments", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); const db = await readLiveDb(); const courseId = req.query.course_id; if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" }); const e = getBackendEnrollment(db, { userId: user.id, courseId }); if (!e && user.role !== "admin" && user.role !== "instructor") return res.status(403).json({ success: false, error: "No course access found" }); if (e?.is_demo && !db.demoSettings.allow_assessments) return res.json({ success: true, count: 0, assessments: [], demo_restricted: true }); const items = Object.values(db.assessments || {}).filter((a) => String(a.course_id) === String(courseId) && a.is_published); res.json({ success: true, count: items.length, assessments: items.map((a) => sanitizeAssessmentForStudent(a, db.assessmentAttempts[assessmentAttemptKey(a.id, user.id)])) }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
-app.get("/student/assessments/:assessmentId/take", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a || !a.is_published) return res.status(404).json({ success: false, error: "Assessment not found" }); const e = getBackendEnrollment(db, { userId: user.id, courseId: a.course_id }); if (!e && user.role !== "admin" && user.role !== "instructor") return res.status(403).json({ success: false, error: "No course access found" }); res.json({ success: true, assessment: sanitizeAssessmentForTaking(a), existing_attempt: db.assessmentAttempts[assessmentAttemptKey(a.id, user.id)] || null }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
-app.post("/student/assessments/:assessmentId/submit", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a || !a.is_published) return res.status(404).json({ success: false, error: "Assessment not found" }); const e = getBackendEnrollment(db, { userId: user.id, courseId: a.course_id }); if (!e && user.role !== "admin" && user.role !== "instructor") return res.status(403).json({ success: false, error: "No course access found" }); const graded = gradeAssessment(a, req.body.answers || {}); const key = assessmentAttemptKey(a.id, user.id); const attempt = { id: key, assessment_id: a.id, course_id: a.course_id, session_id: a.session_id || null, user_id: user.id, user_name: user.name || user.email || "Student", answers: req.body.answers || {}, score: graded.score, total: graded.total, percentage: graded.percentage, graded_answers: graded.graded, submitted_at: new Date().toISOString() }; db.assessmentAttempts[key] = attempt; const quizKey = courseUserKey(a.course_id, user.id); db.quizAttempts[quizKey] = [...(db.quizAttempts[quizKey] || []), { id: uuid(), user_id: user.id, user_name: attempt.user_name, session_id: a.session_id || "assessment", course_id: a.course_id, quiz_id: a.id, topic: a.title, subject: "Assessment", score: graded.score, total: graded.total, percentage: graded.percentage, answers: req.body.answers || {}, created_at: new Date().toISOString() }]; const leaderboard = updateLeaderboard(db, { courseId: a.course_id, userId: user.id, userName: attempt.user_name }); await writeLiveDb(db); res.json({ success: true, attempt, leaderboard }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
-app.get("/admin/assessments/report/:courseId", async (req, res) => { try { await requireAdminOrInstructor(req); const db = await readLiveDb(); const assessments = Object.values(db.assessments || {}).filter((a) => String(a.course_id) === String(req.params.courseId)); const attempts = Object.values(db.assessmentAttempts || {}).filter((a) => String(a.course_id) === String(req.params.courseId)); const reports = assessments.map((a) => { const related = attempts.filter((x) => x.assessment_id === a.id); const avg = related.length ? Math.round(related.reduce((s, x) => s + Number(x.percentage || 0), 0) / related.length) : 0; return { assessment_id: a.id, title: a.title, published: Boolean(a.is_published), attempts_count: related.length, average_percentage: avg }; }); res.json({ success: true, course_id: req.params.courseId, assessments_count: assessments.length, attempts_count: attempts.length, reports }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.get("/student/assessments", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const courseId = req.query.course_id;
+
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+
+    const enrollment = getBackendEnrollment(db, { userId: user.id, courseId });
+    if (!enrollment && user.role !== "admin" && user.role !== "instructor") {
+      return res.status(403).json({ success: false, error: "No course access found" });
+    }
+
+    if (enrollment?.is_demo && !db.demoSettings.allow_assessments) {
+      return res.json({ success: true, count: 0, assessments: [], demo_restricted: true });
+    }
+
+    const items = Object.values(db.assessments || {})
+      .filter((assessment) => String(assessment.course_id) === String(courseId) && assessment.is_published)
+      .map((assessment) => sanitizeAssessmentForStudent(assessment, db.assessmentAttempts[assessmentAttemptKey(assessment.id, user.id)]));
+
+    res.json({ success: true, count: items.length, assessments: items });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message });
+  }
+});
+
+app.get("/student/assessments/:assessmentId/take", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const assessment = db.assessments[req.params.assessmentId];
+
+    if (!assessment || !assessment.is_published) {
+      return res.status(404).json({ success: false, error: "Assessment not found" });
+    }
+
+    const enrollment = getBackendEnrollment(db, { userId: user.id, courseId: assessment.course_id });
+    if (!enrollment && user.role !== "admin" && user.role !== "instructor") {
+      return res.status(403).json({ success: false, error: "No course access found" });
+    }
+
+    const existingAttempt = db.assessmentAttempts[assessmentAttemptKey(assessment.id, user.id)] || null;
+
+    res.json({
+      success: true,
+      assessment: sanitizeAssessmentForTaking(assessment, existingAttempt),
+      existing_attempt: existingAttempt ? sanitizeAttemptForStudent(existingAttempt) : null,
+    });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message });
+  }
+});
+
+app.post("/student/assessments/:assessmentId/submit", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const assessment = db.assessments[req.params.assessmentId];
+
+    if (!assessment || !assessment.is_published) {
+      return res.status(404).json({ success: false, error: "Assessment not found" });
+    }
+
+    const enrollment = getBackendEnrollment(db, { userId: user.id, courseId: assessment.course_id });
+    if (!enrollment && user.role !== "admin" && user.role !== "instructor") {
+      return res.status(403).json({ success: false, error: "No course access found" });
+    }
+
+    const key = assessmentAttemptKey(assessment.id, user.id);
+    const existingAttempt = db.assessmentAttempts[key] || null;
+    if (existingAttempt) {
+      return res.status(400).json({
+        success: false,
+        error: "Assessment already submitted",
+        attempt: sanitizeAttemptForStudent(existingAttempt),
+      });
+    }
+
+    const graded = gradeAssessment(assessment, req.body.answers || {});
+    const now = new Date().toISOString();
+
+    const attempt = {
+      id: key,
+      assessment_id: assessment.id,
+      assessment_title: assessment.title || "Assessment",
+      course_id: assessment.course_id,
+      session_id: assessment.session_id || null,
+      user_id: user.id,
+      user_name: user.name || user.email || "Student",
+      user_email: user.email || "",
+      answers: req.body.answers || {},
+      marked_for_review: Array.isArray(req.body.marked_for_review) ? req.body.marked_for_review : [],
+      score: graded.score,
+      total: graded.total,
+      percentage: graded.percentage,
+      graded_answers: graded.graded,
+      submitted_at: now,
+      auto_submitted: Boolean(req.body.auto_submitted),
+      review_status: "pending_review",
+      released_to_student: false,
+      reviewed_by: null,
+      reviewed_at: null,
+      admin_feedback: "",
+      leaderboard_applied: false,
+      leaderboard_applied_at: null,
+      quiz_attempt_id: null,
+    };
+
+    db.assessmentAttempts[key] = attempt;
+    await writeLiveDb(db);
+
+    res.json({
+      success: true,
+      message: "Assessment submitted. Result is under admin review.",
+      attempt: sanitizeAttemptForStudent(attempt),
+    });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message });
+  }
+});
+
+app.get("/admin/assessments/report/:courseId", async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const assessments = Object.values(db.assessments || {}).filter((assessment) => String(assessment.course_id) === String(req.params.courseId));
+    const attempts = Object.values(db.assessmentAttempts || {}).filter((attempt) => String(attempt.course_id) === String(req.params.courseId));
+
+    const reports = assessments.map((assessment) => {
+      const related = attempts.filter((attempt) => attempt.assessment_id === assessment.id);
+      const released = related.filter((attempt) => attempt.released_to_student === true || attempt.review_status === "released");
+      const pendingReview = related.filter((attempt) => !attempt.released_to_student && attempt.review_status !== "released");
+      const avg = released.length ? Math.round(released.reduce((sum, attempt) => sum + Number(attempt.percentage || 0), 0) / released.length) : 0;
+      return {
+        assessment_id: assessment.id,
+        title: assessment.title,
+        published: Boolean(assessment.is_published),
+        attempts_count: related.length,
+        released_attempts_count: released.length,
+        pending_review_count: pendingReview.length,
+        average_percentage: avg,
+      };
+    });
+
+    res.json({
+      success: true,
+      course_id: req.params.courseId,
+      assessments_count: assessments.length,
+      attempts_count: attempts.length,
+      pending_review_count: attempts.filter((attempt) => !attempt.released_to_student && attempt.review_status !== "released").length,
+      reports,
+    });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message });
+  }
+});
+
+app.get("/admin/assessment-attempts", async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const courseId = req.query.course_id ? String(req.query.course_id) : "";
+    const assessmentId = req.query.assessment_id ? String(req.query.assessment_id) : "";
+
+    let attempts = Object.values(db.assessmentAttempts || {});
+    if (courseId) attempts = attempts.filter((attempt) => String(attempt.course_id) === courseId);
+    if (assessmentId) attempts = attempts.filter((attempt) => String(attempt.assessment_id) === assessmentId);
+
+    attempts = attempts
+      .map((attempt) => sanitizeAttemptForAdmin(attempt, db))
+      .sort((a, b) => String(b.submitted_at || "").localeCompare(String(a.submitted_at || "")));
+
+    res.json({ success: true, count: attempts.length, attempts });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to load assessment attempts" });
+  }
+});
+
+app.get("/admin/assessment-attempts/:attemptId", async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const attempt = db.assessmentAttempts[String(req.params.attemptId)];
+
+    if (!attempt) return res.status(404).json({ success: false, error: "Assessment attempt not found" });
+
+    const assessment = db.assessments?.[attempt.assessment_id] || null;
+    res.json({
+      success: true,
+      attempt: sanitizeAttemptForAdmin(attempt, db),
+      assessment,
+      questions: assessment?.questions || [],
+    });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to load assessment attempt" });
+  }
+});
+
+app.patch("/admin/assessment-attempts/:attemptId/review", async (req, res) => {
+  try {
+    const { user } = await requireAdmin(req);
+    const db = await readLiveDb();
+    const attempt = db.assessmentAttempts[String(req.params.attemptId)];
+
+    if (!attempt) return res.status(404).json({ success: false, error: "Assessment attempt not found" });
+
+    if (req.body.admin_feedback !== undefined) attempt.admin_feedback = String(req.body.admin_feedback || "");
+    if (req.body.review_status !== undefined) {
+      const allowed = ["pending_review", "reviewed", "released"];
+      const nextStatus = String(req.body.review_status || "pending_review");
+      if (allowed.includes(nextStatus)) attempt.review_status = nextStatus;
+    }
+    if (req.body.released_to_student !== undefined) attempt.released_to_student = Boolean(req.body.released_to_student);
+
+    if (attempt.released_to_student || attempt.review_status === "released") {
+      attempt.review_status = "released";
+      attempt.released_to_student = true;
+      attempt.reviewed_by = user.id;
+      attempt.reviewed_at = new Date().toISOString();
+      applyReleasedAssessmentAttemptToLeaderboard(db, attempt, db.assessments?.[attempt.assessment_id]);
+    } else {
+      attempt.reviewed_by = user.id;
+      attempt.reviewed_at = new Date().toISOString();
+    }
+
+    db.assessmentAttempts[attempt.id] = attempt;
+    await writeLiveDb(db);
+
+    res.json({
+      success: true,
+      attempt: sanitizeAttemptForAdmin(attempt, db),
+      leaderboard: db.leaderboard?.[courseUserKey(attempt.course_id, attempt.user_id)] || null,
+    });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to review assessment attempt" });
+  }
+});
+
+app.post("/admin/assessment-attempts/:attemptId/release", async (req, res) => {
+  try {
+    const { user } = await requireAdmin(req);
+    const db = await readLiveDb();
+    const attempt = db.assessmentAttempts[String(req.params.attemptId)];
+
+    if (!attempt) return res.status(404).json({ success: false, error: "Assessment attempt not found" });
+
+    if (req.body.admin_feedback !== undefined) attempt.admin_feedback = String(req.body.admin_feedback || "");
+    attempt.review_status = "released";
+    attempt.released_to_student = true;
+    attempt.reviewed_by = user.id;
+    attempt.reviewed_at = new Date().toISOString();
+
+    const leaderboard = applyReleasedAssessmentAttemptToLeaderboard(db, attempt, db.assessments?.[attempt.assessment_id]);
+
+    db.assessmentAttempts[attempt.id] = attempt;
+    await writeLiveDb(db);
+
+    res.json({
+      success: true,
+      attempt: sanitizeAttemptForAdmin(attempt, db),
+      leaderboard,
+    });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to release assessment result" });
+  }
+});
 
 app.get("/student/dashboard/summary", async (req, res) => {
   try {
@@ -2218,7 +2613,7 @@ app.get("/student/dashboard/summary", async (req, res) => {
     let plan = { name: enrollment?.is_demo ? "Demo" : enrollment ? "Active" : "No active plan", days_left: null, is_demo: Boolean(enrollment?.is_demo) };
     if (enrollment?.is_demo && enrollment.demo_expiry) plan.days_left = Math.max(0, Math.ceil((new Date(`${enrollment.demo_expiry}T23:59:59`).getTime() - Date.now()) / 86400000));
     const assessments = Object.values(db.assessments || {}).filter((a) => String(a.course_id) === String(courseId) && a.is_published);
-    const completedAssessments = assessments.filter((a) => db.assessmentAttempts[assessmentAttemptKey(a.id, user.id)]);
+    const completedAssessments = assessments.filter((a) => { const attempt = db.assessmentAttempts[assessmentAttemptKey(a.id, user.id)]; return attempt && isAttemptReleased(attempt); });
     await writeLiveDb(db);
     res.json({ success: true, plan, roadmap, today: roadmap.today_day, performance: { study_streak: 0, best_streak: 0, total_study_time_hours: 0, average_mock_score: perf.average_score, latest_mock_score: perf.latest_score, best_mock_score: perf.best_score, attempts_count: perf.attempts_count }, focus_areas: perf.focus_areas, leaderboard: { points: leaderboard.total_points || 0, attendance_points: leaderboard.attendance_points || 0, task_points: leaderboard.task_points || 0, quiz_points: leaderboard.quiz_points || 0 }, assessments: { available: assessments.length, completed: completedAssessments.length, pending: Math.max(0, assessments.length - completedAssessments.length) } });
   } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); }
