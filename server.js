@@ -72,6 +72,7 @@ const DEFAULT_LIVE_DB = {
   plans: {},
   coupons: {},
   couponRedemptions: {},
+  payments: {},
   featureCatalog: DEFAULT_FEATURE_CATALOG,
   demoSettings: DEFAULT_DEMO_SETTINGS,
   googleAuthUsers: {},
@@ -116,6 +117,7 @@ async function readLiveDb() {
       plans: parsed.plans || {},
       coupons: parsed.coupons || {},
       couponRedemptions: parsed.couponRedemptions || {},
+      payments: parsed.payments || {},
       googleAuthUsers: parsed.googleAuthUsers || {},
       roadmaps: parsed.roadmaps || {},
       roadmapProgress: parsed.roadmapProgress || {},
@@ -372,6 +374,131 @@ function sanitizeCoupon(coupon) {
     created_at: coupon.created_at || null,
     updated_at: coupon.updated_at || null,
   };
+}
+
+function getUserDisplay(db, userId, fallbackName = "Student") {
+  const user = db.users?.[String(userId)] || null;
+  return {
+    user_id: userId || null,
+    student_id: userId || null,
+    user_name: user?.name || fallbackName || "Student",
+    student_name: user?.name || fallbackName || "Student",
+    user_email: user?.email || "",
+    student_email: user?.email || "",
+    email: user?.email || "",
+  };
+}
+
+function sanitizeAdminEnrollment(enrollment, db) {
+  const course = db.courses?.[String(enrollment.course_id)] || null;
+  const userInfo = getUserDisplay(db, enrollment.user_id, enrollment.user_name);
+  const plan = enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null;
+  const isDemo = Boolean(enrollment.is_demo);
+  const accessGranted = enrollment.access_granted !== false;
+  const demoActive = isDemo ? isDemoEnrollmentActive(enrollment, { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) }) : true;
+
+  return {
+    id: enrollment.id,
+    backend_owned: enrollment.backend_owned !== false,
+    user_id: enrollment.user_id || null,
+    student_id: enrollment.user_id || null,
+    student_name: userInfo.student_name,
+    user_name: userInfo.user_name,
+    name: userInfo.user_name,
+    student_email: userInfo.student_email,
+    user_email: userInfo.user_email,
+    email: userInfo.email,
+    course_id: enrollment.course_id || null,
+    course_name: course?.name || "Course",
+    plan_id: enrollment.plan_id || null,
+    plan_name: plan?.name || (isDemo ? "Demo" : enrollment.plan_id ? "Selected plan" : "Manual/Legacy"),
+    access_granted: accessGranted,
+    is_active: accessGranted,
+    is_demo: isDemo,
+    type: isDemo ? "demo" : "paid",
+    status: !accessGranted ? "revoked" : isDemo ? (demoActive ? "demo_active" : "demo_expired") : "paid",
+    demo_expiry: enrollment.demo_expiry || null,
+    progress_percentage: Number(enrollment.progress_percentage || 0),
+    created_at: enrollment.created_at || null,
+    updated_at: enrollment.updated_at || null,
+  };
+}
+
+function sanitizePayment(payment, db) {
+  const course = db.courses?.[String(payment.course_id)] || null;
+  const plan = payment.plan_id ? db.plans?.[String(payment.plan_id)] || null : null;
+  const userInfo = getUserDisplay(db, payment.student_id || payment.user_id, payment.student_name || payment.user_name);
+  const amountCents = Number(payment.amount_cents ?? payment.final_amount_cents ?? payment.price_cents ?? 0) || 0;
+
+  return {
+    id: payment.id,
+    payment_id: payment.id,
+    checkout_session_id: payment.checkout_session_id || payment.stripe_session_id || null,
+    stripe_session_id: payment.stripe_session_id || payment.checkout_session_id || null,
+    enrollment_id: payment.enrollment_id || null,
+    user_id: payment.user_id || payment.student_id || null,
+    student_id: payment.student_id || payment.user_id || null,
+    student_name: userInfo.student_name,
+    student_email: userInfo.student_email,
+    user_name: userInfo.user_name,
+    user_email: userInfo.user_email,
+    email: userInfo.email,
+    course_id: payment.course_id || null,
+    course_name: course?.name || "Course",
+    plan_id: payment.plan_id || null,
+    plan_name: plan?.name || payment.plan_name || "Plan",
+    coupon_code: payment.coupon_code || null,
+    amount_cents: amountCents,
+    price_cents: amountCents,
+    original_amount_cents: Number(payment.original_amount_cents ?? amountCents) || 0,
+    discount_cents: Number(payment.discount_cents || 0) || 0,
+    currency: payment.currency || plan?.currency || "usd",
+    status: payment.status || payment.payment_status || "completed",
+    payment_status: payment.payment_status || payment.status || "completed",
+    payment_method: payment.payment_method || payment.method || "stripe",
+    source: payment.source || "backend",
+    created_at: payment.created_at || payment.paid_at || payment.redeemed_at || null,
+    updated_at: payment.updated_at || null,
+    paid_at: payment.paid_at || null,
+    metadata: payment.metadata || {},
+  };
+}
+
+function buildDerivedPayments(db) {
+  const payments = Object.values(db.payments || {});
+
+  for (const redemption of Object.values(db.couponRedemptions || {})) {
+    const id = `coupon_${redemption.id}`;
+    if (!payments.some((p) => p.id === id)) {
+      payments.push({
+        id,
+        enrollment_id: redemption.enrollment_id || null,
+        student_id: redemption.student_id || null,
+        user_id: redemption.student_id || null,
+        course_id: redemption.course_id || null,
+        plan_id: redemption.plan_id || null,
+        coupon_code: redemption.coupon_code || null,
+        original_amount_cents: Number(redemption.original_amount_cents || 0),
+        discount_cents: Number(redemption.discount_cents || 0),
+        amount_cents: Number(redemption.final_amount_cents || 0),
+        final_amount_cents: Number(redemption.final_amount_cents || 0),
+        currency: "usd",
+        status: "completed",
+        payment_status: "completed",
+        payment_method: "coupon",
+        source: "coupon_redemption",
+        created_at: redemption.redeemed_at || null,
+        paid_at: redemption.redeemed_at || null,
+      });
+    }
+  }
+
+  return payments.map((payment) => sanitizePayment(payment, db)).sort(sortNewestFirst);
+}
+
+function findEnrollmentById(db, enrollmentId) {
+  const id = String(enrollmentId || "");
+  return db.enrollments?.[id] || Object.values(db.enrollments || {}).find((e) => String(e.id) === id) || null;
 }
 
 
@@ -2002,6 +2129,258 @@ app.patch("/admin/coupons/:couponId", async (req, res) => { try { await requireA
 app.delete("/admin/coupons/:couponId", async (req, res) => { try { await requireAdmin(req); const db = await readLiveDb(); const c = db.coupons[req.params.couponId]; if (!c) return res.status(404).json({ success: false, error: "Coupon not found" }); delete db.coupons[req.params.couponId]; await writeLiveDb(db); res.json({ success: true, deleted_coupon: sanitizeCoupon(c) }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.post("/coupons/validate", async (req, res) => { const db = await readLiveDb(); const plan = db.plans[req.body.plan_id]; if (!plan || plan.is_active === false) return res.status(404).json({ success: false, error: "Plan not found or inactive" }); const code = normalizeCouponCode(req.body.coupon_code); const coupon = code ? Object.values(db.coupons || {}).find((c) => c.code === code) : null; if (code && !coupon) return res.status(400).json({ success: false, valid: false, error: "Coupon not found" }); const pricing = buildCheckoutPricing({ plan, coupon, courseId: req.body.course_id }); if (!pricing.valid) return res.status(400).json({ success: false, valid: false, error: pricing.error }); res.json({ success: true, valid: true, coupon: coupon ? sanitizeCoupon(coupon) : null, pricing }); });
 
+
+// -----------------------------------------------------------------------------
+// Admin Enrollments + Payments
+// -----------------------------------------------------------------------------
+
+app.get("/admin/enrollments", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    let enrollments = Object.values(db.enrollments || {}).map((item) => sanitizeAdminEnrollment(item, db));
+
+    if (req.query.course_id) {
+      enrollments = enrollments.filter((item) => String(item.course_id) === String(req.query.course_id));
+    }
+
+    if (req.query.status) {
+      enrollments = enrollments.filter((item) => String(item.status) === String(req.query.status));
+    }
+
+    if (req.query.type) {
+      enrollments = enrollments.filter((item) => String(item.type) === String(req.query.type));
+    }
+
+    enrollments.sort(sortNewestFirst);
+
+    res.json({
+      success: true,
+      count: enrollments.length,
+      enrollments,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to load enrollments",
+    });
+  }
+});
+
+app.post("/admin/enrollments", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+
+    const courseId = String(req.body.course_id || "").trim();
+    const email = normalizeEmail(req.body.email || req.body.student_email || req.body.user_email);
+    const name = String(req.body.name || req.body.student_name || "Student").trim();
+    const isDemo = Boolean(req.body.is_demo || req.body.type === "demo");
+
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    if (!email && !req.body.user_id) return res.status(400).json({ success: false, error: "Student email or user_id is required" });
+    if (!db.courses[courseId]) return res.status(404).json({ success: false, error: "Course not found" });
+
+    let user = req.body.user_id ? db.users[String(req.body.user_id)] : findUserByEmail(db, email);
+
+    if (!user) {
+      user = createBackendUser({
+        email,
+        name: name || email.split("@")[0],
+        role: "student",
+      });
+      db.users[user.id] = user;
+    }
+
+    const enrollment = createBackendEnrollment(db, {
+      userId: user.id,
+      userName: user.name || name || user.email || "Student",
+      courseId,
+      isDemo,
+      accessGranted: req.body.access_granted !== false,
+      demoExpiry: req.body.demo_expiry || null,
+      planId: req.body.plan_id || null,
+    });
+
+    if (req.body.progress_percentage !== undefined) {
+      enrollment.progress_percentage = Number(req.body.progress_percentage || 0) || 0;
+    }
+
+    enrollment.updated_at = new Date().toISOString();
+    db.enrollments[enrollment.id] = enrollment;
+
+    await writeLiveDb(db);
+
+    res.json({
+      success: true,
+      enrollment: sanitizeAdminEnrollment(enrollment, db),
+      created: true,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to create enrollment",
+    });
+  }
+});
+
+app.patch("/admin/enrollments/:enrollmentId", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    const enrollment = findEnrollmentById(db, req.params.enrollmentId);
+
+    if (!enrollment) {
+      return res.status(404).json({ success: false, error: "Enrollment not found" });
+    }
+
+    if (req.body.access_granted !== undefined) enrollment.access_granted = Boolean(req.body.access_granted);
+    if (req.body.is_active !== undefined) enrollment.access_granted = Boolean(req.body.is_active);
+    if (req.body.demo_expiry !== undefined) enrollment.demo_expiry = req.body.demo_expiry || null;
+    if (req.body.plan_id !== undefined) enrollment.plan_id = req.body.plan_id || null;
+    if (req.body.progress_percentage !== undefined) enrollment.progress_percentage = Number(req.body.progress_percentage || 0) || 0;
+    if (req.body.user_name !== undefined || req.body.student_name !== undefined || req.body.name !== undefined) {
+      enrollment.user_name = String(req.body.user_name || req.body.student_name || req.body.name || enrollment.user_name || "Student").trim();
+    }
+
+    enrollment.updated_at = new Date().toISOString();
+    db.enrollments[enrollment.id] = enrollment;
+
+    await writeLiveDb(db);
+
+    res.json({
+      success: true,
+      enrollment: sanitizeAdminEnrollment(enrollment, db),
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to update enrollment",
+    });
+  }
+});
+
+app.post("/admin/enrollments/:enrollmentId/revoke", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    const enrollment = findEnrollmentById(db, req.params.enrollmentId);
+
+    if (!enrollment) {
+      return res.status(404).json({ success: false, error: "Enrollment not found" });
+    }
+
+    enrollment.access_granted = false;
+    enrollment.updated_at = new Date().toISOString();
+    db.enrollments[enrollment.id] = enrollment;
+
+    await writeLiveDb(db);
+
+    res.json({
+      success: true,
+      enrollment: sanitizeAdminEnrollment(enrollment, db),
+      message: "Enrollment access revoked",
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to revoke enrollment",
+    });
+  }
+});
+
+app.delete("/admin/enrollments/:enrollmentId", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    const enrollment = findEnrollmentById(db, req.params.enrollmentId);
+
+    if (!enrollment) {
+      return res.status(404).json({ success: false, error: "Enrollment not found" });
+    }
+
+    const deleted = sanitizeAdminEnrollment(enrollment, db);
+    delete db.enrollments[enrollment.id];
+
+    await writeLiveDb(db);
+
+    res.json({
+      success: true,
+      deleted_enrollment: deleted,
+      message: "Enrollment deleted",
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to delete enrollment",
+    });
+  }
+});
+
+app.get("/admin/payments", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    let payments = buildDerivedPayments(db);
+
+    if (req.query.course_id) {
+      payments = payments.filter((item) => String(item.course_id) === String(req.query.course_id));
+    }
+
+    if (req.query.status) {
+      payments = payments.filter((item) => String(item.status) === String(req.query.status) || String(item.payment_status) === String(req.query.status));
+    }
+
+    res.json({
+      success: true,
+      count: payments.length,
+      payments,
+      total_amount_cents: payments
+        .filter((payment) => ["paid", "completed", "succeeded"].includes(String(payment.status || payment.payment_status)))
+        .reduce((sum, payment) => sum + Number(payment.amount_cents || 0), 0),
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to load payments",
+    });
+  }
+});
+
+app.patch("/admin/payments/:paymentId", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    db.payments = db.payments || {};
+    const payment = db.payments[String(req.params.paymentId)];
+
+    if (!payment) {
+      return res.status(404).json({ success: false, error: "Payment not found" });
+    }
+
+    const allowed = ["status", "payment_status", "amount_cents", "currency", "metadata", "paid_at"];
+    for (const key of allowed) {
+      if (req.body[key] !== undefined) payment[key] = req.body[key];
+    }
+
+    if (payment.amount_cents !== undefined) payment.amount_cents = Number(payment.amount_cents || 0) || 0;
+    payment.updated_at = new Date().toISOString();
+
+    db.payments[payment.id] = payment;
+    await writeLiveDb(db);
+
+    res.json({
+      success: true,
+      payment: sanitizePayment(payment, db),
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to update payment",
+    });
+  }
+});
+
 app.post("/demo/start", async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req);
@@ -2042,11 +2421,59 @@ app.post("/stripe/create-checkout", async (req, res) => {
     const code = normalizeCouponCode(coupon_code); const coupon = code ? Object.values(db.coupons || {}).find((c) => c.code === code) : null; const pricing = buildCheckoutPricing({ plan, coupon, courseId }); if (!pricing.valid) return res.status(400).json({ success: false, error: pricing.error });
     if (pricing.final_amount_cents <= 0) {
       const enrollment = createBackendEnrollment(db, { userId: studentId, userName: user.name || user.email || "Student", courseId, isDemo: false, accessGranted: true, planId: plan.id });
+      db.payments = db.payments || {};
+      const paymentId = uuid();
+      db.payments[paymentId] = {
+        id: paymentId,
+        enrollment_id: enrollment.id,
+        user_id: studentId,
+        student_id: studentId,
+        course_id: courseId,
+        plan_id: plan.id,
+        plan_name: plan.name || "Plan",
+        coupon_code: coupon?.code || null,
+        original_amount_cents: pricing.original_amount_cents,
+        discount_cents: pricing.discount_cents,
+        amount_cents: 0,
+        final_amount_cents: 0,
+        currency: plan.currency || "usd",
+        status: "completed",
+        payment_status: "completed",
+        payment_method: coupon?.id ? "coupon" : "free_checkout",
+        source: "free_checkout",
+        created_at: new Date().toISOString(),
+        paid_at: new Date().toISOString(),
+      };
       if (coupon?.id) { coupon.used_count = Number(coupon.used_count || 0) + 1; coupon.updated_at = new Date().toISOString(); db.couponRedemptions[uuid()] = { id: uuid(), coupon_id: coupon.id, coupon_code: coupon.code, plan_id: plan.id, enrollment_id: enrollment.id, student_id: studentId, course_id: courseId, original_amount_cents: pricing.original_amount_cents, discount_cents: pricing.discount_cents, final_amount_cents: 0, redeemed_at: new Date().toISOString() }; }
       await writeLiveDb(db);
       return res.json({ success: true, free_checkout: true, url: null, plan: sanitizePlan(plan), pricing, access_grant: { granted: true, method: "backend_enrollment_granted", enrollment_id: enrollment.id }, message: "Access granted without Stripe checkout." });
     }
     const session = await stripe.checkout.sessions.create({ mode: "payment", payment_method_types: ["card"], line_items: [{ price_data: { currency: plan.currency || "usd", product_data: { name: plan.name, description: plan.description || "Course enrollment" }, unit_amount: pricing.final_amount_cents }, quantity: 1 }], metadata: { enrollmentId, studentId, courseId, planId: plan.id, couponCode: coupon?.code || "", originalAmountCents: String(pricing.original_amount_cents), discountCents: String(pricing.discount_cents), finalAmountCents: String(pricing.final_amount_cents) }, success_url: successUrl || "https://live.nextgenusmlelms.com/payment-success", cancel_url: cancelUrl || "https://live.nextgenusmlelms.com/payment-cancel" });
+    db.payments = db.payments || {};
+    db.payments[session.id] = {
+      id: session.id,
+      checkout_session_id: session.id,
+      stripe_session_id: session.id,
+      enrollment_id: enrollmentId,
+      user_id: studentId,
+      student_id: studentId,
+      course_id: courseId,
+      plan_id: plan.id,
+      plan_name: plan.name || "Plan",
+      coupon_code: coupon?.code || null,
+      original_amount_cents: pricing.original_amount_cents,
+      discount_cents: pricing.discount_cents,
+      amount_cents: pricing.final_amount_cents,
+      final_amount_cents: pricing.final_amount_cents,
+      currency: plan.currency || "usd",
+      status: "pending",
+      payment_status: "pending",
+      payment_method: "stripe",
+      source: "stripe_checkout",
+      created_at: new Date().toISOString(),
+      metadata: session.metadata || {},
+    };
+    await writeLiveDb(db);
     res.json({ success: true, free_checkout: false, url: session.url, plan: sanitizePlan(plan), pricing });
   } catch (e) { res.status(e.statusCode || e.response?.status || 500).json({ success: false, error: e.response?.data?.message || e.message || "Checkout failed", details: e.response?.data || null }); }
 });
@@ -2619,7 +3046,7 @@ app.get("/student/dashboard/summary", async (req, res) => {
   } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); }
 });
 
-app.get("/live/debug/storage", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); if (user.role !== "admin") return res.status(403).json({ success: false, error: "Only admins can view storage debug" }); const db = await readLiveDb(); res.json({ success: true, data_dir: DATA_DIR, live_db_path: LIVE_DB_PATH, counts: { courses: Object.keys(db.courses || {}).length, liveSessions: Object.keys(db.liveSessions || {}).length, announcements: Object.keys(db.announcements || {}).length, recordings: Object.keys(db.recordings || {}).length, notes: Object.keys(db.notes || {}).length, enrollments: Object.keys(db.enrollments || {}).length, plans: Object.keys(db.plans || {}).length, coupons: Object.keys(db.coupons || {}).length, assessments: Object.keys(db.assessments || {}).length, assessmentAttempts: Object.keys(db.assessmentAttempts || {}).length, aiUsageLogs: Object.keys(db.aiUsageLogs || {}).length, roadmaps: Object.keys(db.roadmaps || {}).length, roadmapProgress: Object.keys(db.roadmapProgress || {}).length, leaderboard: Object.keys(db.leaderboard || {}).length, googleAuthUsers: Object.keys(db.googleAuthUsers || {}).length }, updatedAt: db.updatedAt || null }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.get("/live/debug/storage", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); if (user.role !== "admin") return res.status(403).json({ success: false, error: "Only admins can view storage debug" }); const db = await readLiveDb(); res.json({ success: true, data_dir: DATA_DIR, live_db_path: LIVE_DB_PATH, counts: { courses: Object.keys(db.courses || {}).length, liveSessions: Object.keys(db.liveSessions || {}).length, announcements: Object.keys(db.announcements || {}).length, recordings: Object.keys(db.recordings || {}).length, notes: Object.keys(db.notes || {}).length, enrollments: Object.keys(db.enrollments || {}).length, plans: Object.keys(db.plans || {}).length, coupons: Object.keys(db.coupons || {}).length, assessments: Object.keys(db.assessments || {}).length, assessmentAttempts: Object.keys(db.assessmentAttempts || {}).length, aiUsageLogs: Object.keys(db.aiUsageLogs || {}).length, payments: Object.keys(db.payments || {}).length, roadmaps: Object.keys(db.roadmaps || {}).length, roadmapProgress: Object.keys(db.roadmapProgress || {}).length, leaderboard: Object.keys(db.leaderboard || {}).length, googleAuthUsers: Object.keys(db.googleAuthUsers || {}).length }, updatedAt: db.updatedAt || null }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
