@@ -170,6 +170,14 @@ function buildPendingZoomId(courseId, label) { return `${PENDING_ZOOM_PREFIX}${c
 const AUTH_JWT_SECRET = process.env.AUTH_JWT_SECRET || "CHANGE_THIS_AUTH_SECRET_IN_RENDER_ENV";
 const AUTH_TOKEN_DAYS = 30;
 
+const EXTERNAL_LIBRARY_URL =
+  process.env.EXTERNAL_LIBRARY_URL || "https://lms.nextgenusmlelms.com";
+
+const EXTERNAL_LIBRARY_SSO_SECRET =
+  process.env.EXTERNAL_LIBRARY_SSO_SECRET || AUTH_JWT_SECRET;
+
+const EXTERNAL_LIBRARY_TOKEN_MINUTES = 2;
+
 function normalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
 }
@@ -228,6 +236,157 @@ function signAuthToken(user) {
     AUTH_JWT_SECRET,
     {
       expiresIn: `${AUTH_TOKEN_DAYS}d`,
+    }
+  );
+}
+
+function planIncludesFeature(plan, featureKey) {
+  const features = Array.isArray(plan?.included_features)
+    ? plan.included_features
+    : [];
+
+  return features
+    .map((item) => String(item || "").trim().toLowerCase())
+    .includes(String(featureKey || "").trim().toLowerCase());
+}
+
+function getPlanAccessDays(plan) {
+  if (plan?.access_days === null || plan?.access_days === undefined || plan?.access_days === "") {
+    return 30;
+  }
+
+  const days = Number(plan.access_days);
+  return Number.isFinite(days) && days > 0 ? days : 30;
+}
+
+function getExternalLibraryAccess(db, user) {
+  const enrollments = Object.values(db.enrollments || {}).filter((enrollment) => {
+    return (
+      String(enrollment.user_id) === String(user.id) &&
+      enrollment.access_granted !== false &&
+      enrollment.is_demo !== true
+    );
+  });
+
+  for (const enrollment of enrollments) {
+    const plan = enrollment.plan_id
+      ? db.plans?.[String(enrollment.plan_id)] || null
+      : null;
+
+    if (!plan) continue;
+    if (plan.is_active === false) continue;
+    if (!planIncludesFeature(plan, "video_library")) continue;
+
+    const course = enrollment.course_id
+      ? db.courses?.[String(enrollment.course_id)] || null
+      : null;
+
+    const accessDays = getPlanAccessDays(plan);
+    const accessEndsAt = addDays(new Date(), accessDays).toISOString();
+
+    return {
+      allowed: true,
+      enrollment,
+      plan,
+      course,
+      accessDays,
+      accessEndsAt,
+    };
+  }
+
+  return {
+    allowed: false,
+    enrollment: null,
+    plan: null,
+    course: null,
+    accessDays: 0,
+    accessEndsAt: null,
+  };
+}
+
+function getStudentFeatureAccess(db, user) {
+  const featureKeys = Object.keys({ ...DEFAULT_FEATURE_CATALOG, ...(db.featureCatalog || {}) });
+  const access = {};
+
+  for (const key of featureKeys) {
+    const catalogItem = (db.featureCatalog || {})[key] || DEFAULT_FEATURE_CATALOG[key] || {};
+    access[key] = {
+      key,
+      name: catalogItem.name || key,
+      description: catalogItem.description || "",
+      included: Boolean(catalogItem.free_for_all),
+      locked: !Boolean(catalogItem.free_for_all),
+      plan_id: null,
+      plan_name: null,
+      course_id: null,
+      course_name: null,
+      access_days: null,
+    };
+  }
+
+  const enrollments = Object.values(db.enrollments || {}).filter((enrollment) => {
+    return (
+      String(enrollment.user_id) === String(user.id) &&
+      enrollment.access_granted !== false &&
+      enrollment.is_demo !== true
+    );
+  });
+
+  for (const enrollment of enrollments) {
+    const plan = enrollment.plan_id
+      ? db.plans?.[String(enrollment.plan_id)] || null
+      : null;
+
+    if (!plan || plan.is_active === false) continue;
+
+    const course = enrollment.course_id
+      ? db.courses?.[String(enrollment.course_id)] || null
+      : null;
+
+    const features = Array.isArray(plan.included_features) ? plan.included_features : [];
+
+    for (const rawFeature of features) {
+      const featureKey = String(rawFeature || "").trim();
+      if (!featureKey) continue;
+
+      const catalogItem = (db.featureCatalog || {})[featureKey] || DEFAULT_FEATURE_CATALOG[featureKey] || {};
+      access[featureKey] = {
+        key: featureKey,
+        name: catalogItem.name || featureKey,
+        description: catalogItem.description || "",
+        included: true,
+        locked: false,
+        plan_id: plan.id || null,
+        plan_name: plan.name || null,
+        course_id: course?.id || enrollment.course_id || null,
+        course_name: course?.name || "Course",
+        access_days: getPlanAccessDays(plan),
+      };
+    }
+  }
+
+  return access;
+}
+
+function signExternalLibraryToken({ user, enrollment, plan, course, accessEndsAt }) {
+  return jwt.sign(
+    {
+      purpose: "external_library_sso",
+      sub: user.id,
+      email: user.email,
+      name: user.name || user.email || "NextGen Student",
+      role: user.role || "student",
+      tier: "premium",
+      enrollment_id: enrollment?.id || null,
+      plan_id: plan?.id || null,
+      plan_name: plan?.name || "NextGen Plan",
+      course_id: course?.id || enrollment?.course_id || null,
+      course_name: course?.name || "NextGen Course",
+      accessEndsAt,
+    },
+    EXTERNAL_LIBRARY_SSO_SECRET,
+    {
+      expiresIn: `${EXTERNAL_LIBRARY_TOKEN_MINUTES}m`,
     }
   );
 }
@@ -521,6 +680,18 @@ function normalizeCoursePayload(body = {}, existing = {}) {
     course_type: String(body.course_type ?? existing.course_type ?? "Live Course").trim() || "Live Course",
     category_note: String(body.category_note ?? existing.category_note ?? "").trim(),
     status: normalizeStatus(body.status ?? existing.status ?? "active", "active"),
+    homepage_roadmap_enabled:
+      body.homepage_roadmap_enabled !== undefined
+        ? Boolean(body.homepage_roadmap_enabled)
+        : Boolean(existing.homepage_roadmap_enabled),
+    homepage_roadmap_title: String(body.homepage_roadmap_title ?? existing.homepage_roadmap_title ?? "").trim(),
+    homepage_roadmap_subtitle: String(body.homepage_roadmap_subtitle ?? existing.homepage_roadmap_subtitle ?? "").trim(),
+    homepage_roadmap_style: String(body.homepage_roadmap_style ?? existing.homepage_roadmap_style ?? "custom").trim() || "custom",
+    homepage_roadmap_phases: Array.isArray(body.homepage_roadmap_phases)
+      ? body.homepage_roadmap_phases
+      : Array.isArray(existing.homepage_roadmap_phases)
+        ? existing.homepage_roadmap_phases
+        : [],
     demo_access_enabled: body.demo_access_enabled !== undefined ? Boolean(body.demo_access_enabled) : existing.demo_access_enabled !== false,
   };
 }
@@ -538,6 +709,11 @@ function sanitizeCourse(course) {
     course_type: course.course_type || "Live Course",
     category_note: course.category_note || "",
     status: course.status || "active",
+    homepage_roadmap_enabled: Boolean(course.homepage_roadmap_enabled),
+    homepage_roadmap_title: course.homepage_roadmap_title || "",
+    homepage_roadmap_subtitle: course.homepage_roadmap_subtitle || "",
+    homepage_roadmap_style: course.homepage_roadmap_style || "custom",
+    homepage_roadmap_phases: Array.isArray(course.homepage_roadmap_phases) ? course.homepage_roadmap_phases : [],
     demo_access_enabled: course.demo_access_enabled !== false,
     created_by: course.created_by || null,
     updated_by: course.updated_by || null,
@@ -1744,6 +1920,146 @@ app.post("/auth/signup", async (req, res) => {
     res.status(error.statusCode || 500).json({
       success: false,
       error: error.message || "Signup failed",
+    });
+  }
+});
+
+app.get("/student/feature-access", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const features = getStudentFeatureAccess(db, user);
+
+    res.json({
+      success: true,
+      features,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to load feature access",
+    });
+  }
+});
+
+app.post("/student/external-library/access", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+
+    if (user.role !== "student" && user.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        error: "Only students can open the external video library",
+      });
+    }
+
+    const db = await readLiveDb();
+    const access = getExternalLibraryAccess(db, user);
+
+    if (!access.allowed) {
+      return res.status(403).json({
+        success: false,
+        locked: true,
+        feature: "video_library",
+        upgrade_url: "/plans",
+        error:
+          "Your current plan does not include UWorld Video Library access. Please upgrade to a plan that includes Video Library.",
+      });
+    }
+
+    const token = signExternalLibraryToken({
+      user,
+      enrollment: access.enrollment,
+      plan: access.plan,
+      course: access.course,
+      accessEndsAt: access.accessEndsAt,
+    });
+
+    const redirect_url = `${EXTERNAL_LIBRARY_URL.replace(/\/$/, "")}/sso-login?token=${encodeURIComponent(token)}`;
+
+    res.json({
+      success: true,
+      redirect_url,
+      expires_in_minutes: EXTERNAL_LIBRARY_TOKEN_MINUTES,
+      access_ends_at: access.accessEndsAt,
+      access_days: access.accessDays,
+      plan: access.plan ? sanitizePlan(access.plan) : null,
+      course: access.course ? sanitizeCourse(access.course) : null,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to create external library access link",
+    });
+  }
+});
+
+app.get("/external-library/sso/verify", async (req, res) => {
+  try {
+    const token = String(req.query.token || "").trim();
+
+    if (!token) {
+      return res.status(400).json({
+        success: false,
+        error: "SSO token is required",
+      });
+    }
+
+    let decoded;
+
+    try {
+      decoded = jwt.verify(token, EXTERNAL_LIBRARY_SSO_SECRET);
+    } catch {
+      return res.status(401).json({
+        success: false,
+        error: "SSO token is invalid or expired",
+      });
+    }
+
+    if (decoded.purpose !== "external_library_sso") {
+      return res.status(401).json({
+        success: false,
+        error: "Invalid SSO token purpose",
+      });
+    }
+
+    const db = await readLiveDb();
+    const user = db.users?.[String(decoded.sub)] || findUserByEmail(db, decoded.email);
+
+    if (!user?.id) {
+      return res.status(404).json({
+        success: false,
+        error: "Student account not found",
+      });
+    }
+
+    const access = getExternalLibraryAccess(db, sanitizeUser(user));
+
+    if (!access.allowed) {
+      return res.status(403).json({
+        success: false,
+        error: "Video Library access is no longer active for this student",
+      });
+    }
+
+    res.json({
+      success: true,
+      student: {
+        id: user.id,
+        name: user.name || decoded.name || user.email || "NextGen Student",
+        email: user.email,
+        tier: decoded.tier || "premium",
+        accessEndsAt: decoded.accessEndsAt || access.accessEndsAt,
+        plan_id: decoded.plan_id || access.plan?.id || null,
+        plan_name: decoded.plan_name || access.plan?.name || null,
+        course_id: decoded.course_id || access.course?.id || null,
+        course_name: decoded.course_name || access.course?.name || null,
+      },
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to verify external library SSO token",
     });
   }
 });
