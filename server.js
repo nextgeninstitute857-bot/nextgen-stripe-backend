@@ -64,6 +64,7 @@ const DEFAULT_LIVE_DB = {
   courseProgress: {},
   leaderboard: {},
   communityMessages: {},
+  communityLocks: {},
   quizAttempts: {},
 
   // Backend-only enrollments. PocketBase enrollments are intentionally bypassed.
@@ -112,6 +113,7 @@ async function readLiveDb() {
       courseProgress: parsed.courseProgress || {},
       leaderboard: parsed.leaderboard || {},
       communityMessages: parsed.communityMessages || {},
+      communityLocks: parsed.communityLocks || {},
       quizAttempts: parsed.quizAttempts || {},
       enrollments: parsed.enrollments || {},
       plans: parsed.plans || {},
@@ -3192,8 +3194,237 @@ app.get("/live/notes/:sessionId", async (req, res) => { try { const { user } = a
 
 app.post("/live/attendance/mark", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); const db = await readLiveDb(); const { session_id, course_id, source = "classroom_opened" } = req.body; if (!session_id || !course_id) return res.status(400).json({ success: false, error: "session_id and course_id are required" }); const e = getBackendEnrollment(db, { userId: user.id, courseId: course_id }); if (!e && user.role !== "admin" && user.role !== "instructor") return res.status(403).json({ success: false, error: "No course access found" }); const key = `${user.id}:${session_id}`; db.attendance[key] = { id: key, user_id: user.id, user_name: user.name || user.email || "Student", session_id, course_id, date: todayKey(), source, marked_at: new Date().toISOString() }; const leaderboard = updateLeaderboard(db, { courseId: course_id, userId: user.id, userName: user.name || user.email || "Student" }); await writeLiveDb(db); res.json({ success: true, attendance: db.attendance[key], leaderboard }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.get("/live/leaderboard", async (req, res) => { try { await getAuthenticatedUser(req); const db = await readLiveDb(); let list = Object.values(db.leaderboard || {}); if (req.query.course_id) list = list.filter((x) => String(x.course_id) === String(req.query.course_id)); list = list.sort((a, b) => Number(b.total_points || 0) - Number(a.total_points || 0)).map((x, i) => ({ rank: i + 1, ...x })); res.json({ success: true, count: list.length, leaderboard: list }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
-app.get("/live/community/:sessionId", async (req, res) => { try { await getAuthenticatedUser(req); const db = await readLiveDb(); const messages = db.communityMessages[req.params.sessionId] || []; res.json({ success: true, count: messages.length, messages }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
-app.post("/live/community/:sessionId", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); if (!req.body.message) return res.status(400).json({ success: false, error: "message is required" }); const db = await readLiveDb(); const item = { id: uuid(), session_id: req.params.sessionId, course_id: req.body.course_id || null, user_id: user.id, user_name: user.name || user.email || "Student", message: String(req.body.message).slice(0, 2000), created_at: new Date().toISOString() }; db.communityMessages[req.params.sessionId] = [...(db.communityMessages[req.params.sessionId] || []), item]; await writeLiveDb(db); res.json({ success: true, message: item }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+function communityLockKey(scope, scopeId, userId) {
+  return `${scope}:${scopeId}:${userId}`;
+}
+
+function getCommunityLock(db, { sessionId, courseId, userId }) {
+  const locks = db.communityLocks || {};
+  const exactSessionLock = sessionId ? locks[communityLockKey("session", sessionId, userId)] : null;
+  if (exactSessionLock?.is_locked !== false) return exactSessionLock;
+
+  const courseLock = courseId ? locks[communityLockKey("course", courseId, userId)] : null;
+  if (courseLock?.is_locked !== false) return courseLock;
+
+  return null;
+}
+
+app.get("/live/community/:sessionId", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const sessionId = req.params.sessionId;
+    const messages = db.communityMessages[sessionId] || [];
+    const session = db.liveSessions?.[String(sessionId)] || null;
+    const userLock = getCommunityLock(db, {
+      sessionId,
+      courseId: session?.course_id || req.query.course_id || null,
+      userId: user.id,
+    });
+
+    res.json({
+      success: true,
+      count: messages.length,
+      messages,
+      locked: Boolean(userLock),
+      lock: userLock || null,
+    });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message });
+  }
+});
+
+app.post("/live/community/:sessionId", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+
+    if (!req.body.message) {
+      return res.status(400).json({ success: false, error: "message is required" });
+    }
+
+    const db = await readLiveDb();
+    db.communityLocks = db.communityLocks || {};
+
+    const sessionId = req.params.sessionId;
+    const session = db.liveSessions?.[String(sessionId)] || null;
+    const courseId = req.body.course_id || session?.course_id || null;
+
+    if (user.role !== "admin" && user.role !== "instructor") {
+      const lock = getCommunityLock(db, { sessionId, courseId, userId: user.id });
+
+      if (lock) {
+        return res.status(403).json({
+          success: false,
+          error: lock.reason || "You are locked from posting in this community.",
+          locked: true,
+          lock,
+        });
+      }
+    }
+
+    const item = {
+      id: uuid(),
+      session_id: sessionId,
+      course_id: courseId,
+      user_id: user.id,
+      user_name: user.name || user.email || "Student",
+      user_email: user.email || "",
+      user_role: user.role || "student",
+      message: String(req.body.message).slice(0, 2000),
+      created_at: new Date().toISOString(),
+    };
+
+    db.communityMessages[sessionId] = [
+      ...(db.communityMessages[sessionId] || []),
+      item,
+    ];
+
+    await writeLiveDb(db);
+
+    res.json({ success: true, message: item });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message });
+  }
+});
+
+app.get("/admin/community/locks", async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const courseId = req.query.course_id ? String(req.query.course_id) : "";
+    const sessionId = req.query.session_id ? String(req.query.session_id) : "";
+
+    let locks = Object.values(db.communityLocks || {}).filter((lock) => lock.is_locked !== false);
+
+    if (courseId) {
+      locks = locks.filter((lock) => String(lock.course_id || "") === courseId);
+    }
+
+    if (sessionId) {
+      locks = locks.filter((lock) => {
+        return (
+          String(lock.session_id || "") === sessionId ||
+          String(lock.scope || "") === "course"
+        );
+      });
+    }
+
+    locks.sort((a, b) => String(b.locked_at || "").localeCompare(String(a.locked_at || "")));
+
+    res.json({ success: true, count: locks.length, locks });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message });
+  }
+});
+
+app.post("/admin/community/locks", async (req, res) => {
+  try {
+    const { user } = await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    db.communityLocks = db.communityLocks || {};
+
+    const userId = String(req.body.user_id || "").trim();
+    const courseId = req.body.course_id ? String(req.body.course_id) : null;
+    const sessionId = req.body.session_id ? String(req.body.session_id) : null;
+    const scope = req.body.scope === "course" ? "course" : "session";
+
+    if (!userId) {
+      return res.status(400).json({ success: false, error: "user_id is required" });
+    }
+
+    if (scope === "course" && !courseId) {
+      return res.status(400).json({ success: false, error: "course_id is required for course lock" });
+    }
+
+    if (scope === "session" && !sessionId) {
+      return res.status(400).json({ success: false, error: "session_id is required for session lock" });
+    }
+
+    const scopeId = scope === "course" ? courseId : sessionId;
+    const key = communityLockKey(scope, scopeId, userId);
+
+    const lock = {
+      id: key,
+      scope,
+      course_id: courseId,
+      session_id: sessionId,
+      user_id: userId,
+      user_name: req.body.user_name || "Student",
+      user_email: req.body.user_email || "",
+      reason: String(req.body.reason || "Locked by admin").slice(0, 500),
+      is_locked: req.body.is_locked !== false,
+      locked_by: user.id,
+      locked_by_name: user.name || user.email || "Admin",
+      locked_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    db.communityLocks[key] = lock;
+
+    await writeLiveDb(db);
+
+    res.json({ success: true, lock });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message });
+  }
+});
+
+app.delete("/admin/community/locks/:lockId", async (req, res) => {
+  try {
+    const { user } = await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    db.communityLocks = db.communityLocks || {};
+
+    const lockId = String(req.params.lockId || "");
+    const lock = db.communityLocks[lockId];
+
+    if (!lock) {
+      return res.status(404).json({ success: false, error: "Lock not found" });
+    }
+
+    db.communityLocks[lockId] = {
+      ...lock,
+      is_locked: false,
+      unlocked_by: user.id,
+      unlocked_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    await writeLiveDb(db);
+
+    res.json({ success: true, lock: db.communityLocks[lockId] });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message });
+  }
+});
+
+app.delete("/admin/community/:sessionId/messages/:messageId", async (req, res) => {
+  try {
+    const { user } = await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const sessionId = String(req.params.sessionId || "");
+    const messageId = String(req.params.messageId || "");
+    const messages = db.communityMessages?.[sessionId] || [];
+    const message = messages.find((item) => String(item.id) === messageId);
+
+    if (!message) {
+      return res.status(404).json({ success: false, error: "Message not found" });
+    }
+
+    db.communityMessages[sessionId] = messages.filter((item) => String(item.id) !== messageId);
+
+    await writeLiveDb(db);
+
+    res.json({
+      success: true,
+      deleted: true,
+      deleted_message_id: messageId,
+      deleted_by: user.id,
+    });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message });
+  }
+});
 
 app.get("/roadmap/course/:courseId", async (req, res) => { const db = await readLiveDb(); const roadmap = db.roadmaps[String(req.params.courseId)] || null; const days = (roadmap?.days || []).filter((d) => d.is_published !== false); res.json({ success: true, roadmap: roadmap ? { id: roadmap.id, course_id: roadmap.course_id, course_name: roadmap.course_name, settings: roadmap.settings, created_at: roadmap.created_at, updated_at: roadmap.updated_at } : null, days: days.map(sanitizeRoadmapDay), summary: { total_days: roadmap?.days?.length || 0, shown_days: days.length, total_weeks: Math.ceil((roadmap?.days?.length || 0) / 7) } }); });
 app.post("/admin/roadmap/generate", async (req, res) => { try { await requireAdminOrInstructor(req); const db = await readLiveDb(); const { course_id, course_name = "Course", start_date, duration_days, class_time = null, skip_sundays = true, template = "usmle_step_1" } = req.body; if (!course_id || !start_date || !duration_days) return res.status(400).json({ success: false, error: "course_id, start_date, duration_days required" }); const topics = ["Orientation", "Biochemistry", "Genetics", "Immunology", "Microbiology", "Pathology", "Pharmacology", "Cardiology", "Respiratory", "Renal", "Endocrine", "GI", "Neurology", "Psychiatry", "Reproductive", "Heme/Onc", "MSK/Derm", "Biostatistics", "Mixed Review"]; const dates = []; let cursor = new Date(`${start_date}T00:00:00`); while (dates.length < Number(duration_days)) { if (!(skip_sundays && cursor.getDay() === 0)) dates.push(dateOnly(cursor)); cursor = addDays(cursor, 1); } const days = dates.map((date, i) => ({ id: `${course_id}:day:${i + 1}`, course_id, week_number: Math.ceil((i + 1) / 7), day_number: i + 1, date, title: topics[i % topics.length], description: `Daily plan for ${course_name}`, resources: ["First Aid", "UWorld", "Class notes"], resource_links: [], uworld_target: "30-40 MCQs or assigned block", first_aid_topics: topics[i % topics.length], homework: "Complete assigned MCQs and review explanations", class_time, status: "scheduled", is_published: true, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), template })); db.roadmaps[String(course_id)] = { id: `roadmap:${course_id}`, course_id, course_name, settings: { duration_days: Number(duration_days), start_date, class_time, skip_sundays, template }, days, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }; await writeLiveDb(db); res.json({ success: true, roadmap: db.roadmaps[String(course_id)] }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
