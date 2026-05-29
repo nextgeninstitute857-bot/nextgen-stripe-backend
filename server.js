@@ -973,27 +973,202 @@ function stripVttToText(vtt) {
 }
 
 function findTranscriptFile(recordingFiles = []) {
-  return recordingFiles.find((file) => ["TRANSCRIPT", "CC", "VTT"].includes(String(file.file_type || "").toUpperCase())) ||
-    recordingFiles.find((file) => String(file.file_extension || "").toLowerCase() === "vtt") || null;
+  const files = Array.isArray(recordingFiles) ? recordingFiles : [];
+
+  return (
+    files.find((file) =>
+      ["TRANSCRIPT", "CC", "VTT"].includes(
+        String(file.file_type || "").toUpperCase()
+      )
+    ) ||
+    files.find((file) =>
+      String(file.recording_type || "").toLowerCase().includes("transcript")
+    ) ||
+    files.find((file) =>
+      String(file.file_extension || "").toLowerCase() === "vtt"
+    ) ||
+    files.find((file) =>
+      String(file.download_url || file.play_url || "").toLowerCase().includes("transcript")
+    ) ||
+    null
+  );
 }
+
 function findVideoFile(recordingFiles = []) {
-  return recordingFiles.find((file) => String(file.file_type || "").toUpperCase() === "MP4") || recordingFiles[0] || null;
+  const files = Array.isArray(recordingFiles) ? recordingFiles : [];
+
+  return (
+    files.find((file) => String(file.file_type || "").toUpperCase() === "MP4") ||
+    files.find((file) => String(file.recording_type || "").toLowerCase().includes("shared_screen")) ||
+    files.find((file) => String(file.file_type || "").toUpperCase().includes("MP4")) ||
+    files[0] ||
+    null
+  );
 }
+
 async function downloadZoomTextFile(file, accessToken) {
-  const url = file?.download_url || file?.play_url;
-  if (!url) return "";
+  const baseUrl = file?.download_url || file?.play_url;
+  if (!baseUrl) return "";
+
+  const separator = baseUrl.includes("?") ? "&" : "?";
+  const url = file?.download_url ? `${baseUrl}${separator}access_token=${accessToken}` : baseUrl;
+
   const response = await axios.get(url, {
     responseType: "text",
     headers: { Authorization: `Bearer ${accessToken}` },
   });
+
   return typeof response.data === "string" ? response.data : String(response.data || "");
 }
+
 function findSessionByMeetingIdInNotesOrRecordings(db, meetingId) {
   const key = String(meetingId || "");
   const rec = db.recordings[key] || null;
+
   if (rec?.session_id) return rec.session_id;
-  const session = Object.values(db.liveSessions || {}).find((s) => String(s.zoom_meeting_id || "") === key);
+
+  const session = Object.values(db.liveSessions || {}).find((s) => {
+    return (
+      String(s.zoom_meeting_id || "") === key ||
+      String(s.meeting_id || "") === key
+    );
+  });
+
   return session?.id || null;
+}
+
+async function fetchZoomRecordingByMeetingId(meetingId) {
+  const accessToken = await getZoomAccessToken();
+  const encodedMeetingId = encodeURIComponent(String(meetingId || ""));
+
+  const response = await axios.get(
+    `https://api.zoom.us/v2/meetings/${encodedMeetingId}/recordings`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+
+  return { recording: response.data, accessToken };
+}
+
+async function upsertZoomRecordingFromObject({ db, object, accessToken = null, forceImportTranscript = false }) {
+  const files = object?.recording_files || [];
+  const videoFile = findVideoFile(files);
+  const transcriptFile = findTranscriptFile(files);
+  const meetingId = String(object?.id || object?.meeting_id || "");
+
+  if (!meetingId) {
+    throw new Error("Zoom recording object is missing meeting id");
+  }
+
+  let transcriptText = "";
+  let transcriptRaw = "";
+  let transcriptImportError = null;
+
+  if (transcriptFile && (forceImportTranscript || transcriptFile.download_url || transcriptFile.play_url)) {
+    try {
+      const token = accessToken || await getZoomAccessToken();
+      transcriptRaw = await downloadZoomTextFile(transcriptFile, token);
+      transcriptText = stripVttToText(transcriptRaw);
+    } catch (error) {
+      transcriptImportError = error.response?.data || error.message;
+      console.warn("Zoom transcript import failed:", transcriptImportError);
+    }
+  }
+
+  const previous = db.recordings[meetingId] || {};
+
+  const recordingPayload = {
+    ...previous,
+    meeting_id: meetingId,
+    uuid: object.uuid || previous.uuid || null,
+    topic: object.topic || previous.topic || null,
+    start_time: object.start_time || previous.start_time || null,
+    duration: object.duration || previous.duration || null,
+
+    share_url: object.share_url || previous.share_url || null,
+
+    recording_url:
+      videoFile?.play_url ||
+      object.share_url ||
+      videoFile?.download_url ||
+      previous.recording_url ||
+      null,
+
+    download_url:
+      videoFile?.download_url ||
+      previous.download_url ||
+      null,
+
+    transcript_url:
+      transcriptFile?.play_url ||
+      transcriptFile?.download_url ||
+      previous.transcript_url ||
+      null,
+
+    transcript_download_url:
+      transcriptFile?.download_url ||
+      previous.transcript_download_url ||
+      null,
+
+    transcript_imported: Boolean(transcriptText || previous.transcript_imported),
+    transcript_import_error: transcriptImportError,
+
+    file_type: videoFile?.file_type || previous.file_type || null,
+    recording_type: videoFile?.recording_type || previous.recording_type || null,
+    status: videoFile?.status || previous.status || "completed",
+
+    published: Boolean(previous.published),
+    received_at: new Date().toISOString(),
+  };
+
+  db.recordings[meetingId] = recordingPayload;
+
+  const sessionId =
+    previous.session_id ||
+    findSessionByMeetingIdInNotesOrRecordings(db, meetingId) ||
+    null;
+
+  if (sessionId) {
+    db.notes[sessionId] = {
+      ...(db.notes[sessionId] || {}),
+      session_id: sessionId,
+      course_id:
+        previous.course_id ||
+        db.liveSessions?.[sessionId]?.course_id ||
+        db.notes[sessionId]?.course_id ||
+        null,
+
+      notes: db.notes[sessionId]?.notes || "",
+
+      transcript_text:
+        transcriptText ||
+        db.notes[sessionId]?.transcript_text ||
+        "",
+
+      transcript_raw_vtt:
+        transcriptRaw ||
+        db.notes[sessionId]?.transcript_raw_vtt ||
+        "",
+
+      transcript_url: recordingPayload.transcript_url,
+      transcript_download_url: recordingPayload.transcript_download_url,
+      recording_url: recordingPayload.recording_url,
+      meeting_id: meetingId,
+      source: transcriptText
+        ? "zoom_transcript"
+        : db.notes[sessionId]?.source || "manual",
+      auto_imported: Boolean(transcriptText || db.notes[sessionId]?.auto_imported),
+      updated_at: new Date().toISOString(),
+    };
+  }
+
+  return {
+    recordingPayload,
+    sessionId,
+    transcriptFile,
+    transcriptText,
+    transcriptRaw,
+    transcriptImportError,
+  };
 }
 
 function sanitizeRoadmapDay(day) {
@@ -2877,37 +3052,137 @@ app.post("/zoom/create-meeting", async (req, res) => { try { const token = await
 app.post("/zoom/webhook", async (req, res) => {
   try {
     const event = req.body.event;
+
     if (event === "endpoint.url_validation") {
       const plainToken = req.body.payload.plainToken;
-      const encryptedToken = crypto.createHmac("sha256", process.env.ZOOM_WEBHOOK_SECRET_TOKEN).update(plainToken).digest("hex");
+      const encryptedToken = crypto
+        .createHmac("sha256", process.env.ZOOM_WEBHOOK_SECRET_TOKEN)
+        .update(plainToken)
+        .digest("hex");
+
       return res.status(200).json({ plainToken, encryptedToken });
     }
+
     if (event === "recording.completed") {
       const object = req.body.payload.object;
-      const files = object.recording_files || [];
-      const videoFile = findVideoFile(files);
-      const transcriptFile = findTranscriptFile(files);
       const meetingId = String(object.id);
       const db = await readLiveDb();
-      let transcriptText = ""; let transcriptRaw = ""; let transcriptImportError = null;
-      if (transcriptFile) {
-        try { const accessToken = await getZoomAccessToken(); transcriptRaw = await downloadZoomTextFile(transcriptFile, accessToken); transcriptText = stripVttToText(transcriptRaw); } catch (e) { transcriptImportError = e.response?.data || e.message; console.warn("Zoom transcript import failed:", transcriptImportError); }
-      }
-      const previous = db.recordings[meetingId] || {};
-      const recordingPayload = { ...previous, meeting_id: meetingId, uuid: object.uuid, topic: object.topic, start_time: object.start_time, duration: object.duration, share_url: object.share_url || previous.share_url || null, recording_url: videoFile?.play_url || object.share_url || videoFile?.download_url || previous.recording_url || null, download_url: videoFile?.download_url || previous.download_url || null, transcript_url: transcriptFile?.download_url || transcriptFile?.play_url || previous.transcript_url || null, transcript_imported: Boolean(transcriptText), transcript_import_error: transcriptImportError, file_type: videoFile?.file_type || previous.file_type || null, recording_type: videoFile?.recording_type || previous.recording_type || null, status: videoFile?.status || previous.status || null, published: Boolean(previous.published), received_at: new Date().toISOString() };
-      db.recordings[meetingId] = recordingPayload;
-      const sessionId = previous.session_id || findSessionByMeetingIdInNotesOrRecordings(db, meetingId) || null;
-      if (sessionId) {
-        db.notes[sessionId] = { ...(db.notes[sessionId] || {}), session_id: sessionId, course_id: previous.course_id || db.notes[sessionId]?.course_id || null, notes: db.notes[sessionId]?.notes || "", transcript_text: transcriptText || db.notes[sessionId]?.transcript_text || "", transcript_raw_vtt: transcriptRaw || db.notes[sessionId]?.transcript_raw_vtt || "", transcript_url: recordingPayload.transcript_url, recording_url: recordingPayload.recording_url, meeting_id: meetingId, source: transcriptText ? "zoom_transcript" : db.notes[sessionId]?.source || "manual", auto_imported: Boolean(transcriptText), updated_at: new Date().toISOString() };
-      }
+
+      const result = await upsertZoomRecordingFromObject({
+        db,
+        object,
+        forceImportTranscript: true,
+      });
+
       await writeLiveDb(db);
-      return res.status(200).json({ received: true, saved: true, transcript_imported: Boolean(transcriptText), session_id: sessionId });
+
+      return res.status(200).json({
+        received: true,
+        saved: true,
+        meeting_id: meetingId,
+        transcript_found: Boolean(result.transcriptFile),
+        transcript_imported: Boolean(result.transcriptText),
+        transcript_url: result.recordingPayload.transcript_url,
+        session_id: result.sessionId,
+      });
     }
+
     res.status(200).json({ received: true });
-  } catch (e) { console.error("Zoom webhook error:", e.response?.data || e.message); res.status(200).json({ success: false, error: e.response?.data || e.message }); }
+  } catch (e) {
+    console.error("Zoom webhook error:", e.response?.data || e.message);
+
+    // Return 200 so Zoom does not keep retrying forever for app-side errors.
+    res.status(200).json({
+      success: false,
+      error: e.response?.data || e.message,
+    });
+  }
 });
 
-app.get("/zoom/recordings", async (req, res) => { try { const token = await getZoomAccessToken(); const to = todayKey(); const from = todayKey(addDays(new Date(), -30)); const response = await axios.get(`https://api.zoom.us/v2/users/me/recordings?from=${from}&to=${to}&page_size=100`, { headers: { Authorization: `Bearer ${token}` } }); const db = await readLiveDb(); const recordings = (response.data?.meetings || []).flatMap((m) => (m.recording_files || []).filter((f) => f.file_type === "MP4").map((f) => sanitizePublicRecording({ ...(db.recordings[String(m.id)] || {}), meeting_id: String(m.id), uuid: m.uuid, topic: m.topic, start_time: m.start_time, duration: m.duration, share_url: m.share_url, recording_url: f.play_url || m.share_url || f.download_url, download_url: f.download_url, file_type: f.file_type, recording_type: f.recording_type, status: f.status }))); res.json({ success: true, from, to, count: recordings.length, recordings }); } catch (e) { res.status(500).json({ success: false, error: e.response?.data || e.message }); } });
+app.get("/zoom/recordings", async (req, res) => {
+  try {
+    const token = await getZoomAccessToken();
+    const to = todayKey();
+    const from = todayKey(addDays(new Date(), -30));
+
+    const response = await axios.get(
+      `https://api.zoom.us/v2/users/me/recordings?from=${from}&to=${to}&page_size=100`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+
+    const db = await readLiveDb();
+
+    const recordings = (response.data?.meetings || []).map((meeting) => {
+      const files = meeting.recording_files || [];
+      const videoFile = findVideoFile(files);
+      const transcriptFile = findTranscriptFile(files);
+
+      return sanitizePublicRecording({
+        ...(db.recordings[String(meeting.id)] || {}),
+        meeting_id: String(meeting.id),
+        uuid: meeting.uuid,
+        topic: meeting.topic,
+        start_time: meeting.start_time,
+        duration: meeting.duration,
+        share_url: meeting.share_url,
+        recording_url: videoFile?.play_url || meeting.share_url || videoFile?.download_url || null,
+        download_url: videoFile?.download_url || null,
+        transcript_url: transcriptFile?.play_url || transcriptFile?.download_url || db.recordings[String(meeting.id)]?.transcript_url || null,
+        transcript_download_url: transcriptFile?.download_url || db.recordings[String(meeting.id)]?.transcript_download_url || null,
+        file_type: videoFile?.file_type || null,
+        recording_type: videoFile?.recording_type || null,
+        status: videoFile?.status || "completed",
+      });
+    });
+
+    res.json({ success: true, from, to, count: recordings.length, recordings });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.response?.data || e.message });
+  }
+});
+
+app.post("/zoom/recordings/:meetingId/refresh-transcript", async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+
+    const meetingId = String(req.params.meetingId || req.body.meeting_id || "").trim();
+
+    if (!meetingId) {
+      return res.status(400).json({
+        success: false,
+        error: "meeting_id is required",
+      });
+    }
+
+    const { recording, accessToken } = await fetchZoomRecordingByMeetingId(meetingId);
+    const db = await readLiveDb();
+
+    const result = await upsertZoomRecordingFromObject({
+      db,
+      object: recording,
+      accessToken,
+      forceImportTranscript: true,
+    });
+
+    await writeLiveDb(db);
+
+    res.json({
+      success: true,
+      meeting_id: meetingId,
+      transcript_found: Boolean(result.transcriptFile),
+      transcript_imported: Boolean(result.transcriptText),
+      transcript_url: result.recordingPayload.transcript_url,
+      transcript_download_url: result.recordingPayload.transcript_download_url,
+      session_id: result.sessionId,
+      recording: sanitizePublicRecording(result.recordingPayload),
+    });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({
+      success: false,
+      error: e.response?.data || e.message,
+    });
+  }
+});
 app.post("/live/recordings/publish", async (req, res) => { try { const { user } = await requireAdminOrInstructor(req); const db = await readLiveDb(); const key = String(req.body.meeting_id); if (!key) return res.status(400).json({ success: false, error: "meeting_id is required" }); db.recordings[key] = { ...(db.recordings[key] || {}), meeting_id: key, session_id: req.body.session_id || db.recordings[key]?.session_id || null, course_id: req.body.course_id || db.recordings[key]?.course_id || null, topic: req.body.topic || db.recordings[key]?.topic || null, recording_url: req.body.recording_url || db.recordings[key]?.recording_url || null, share_url: req.body.share_url || db.recordings[key]?.share_url || null, published: req.body.published !== false, published_at: new Date().toISOString(), published_by: user.id }; await writeLiveDb(db); res.json({ success: true, recording: db.recordings[key] }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.post("/live/recordings/unpublish", async (req, res) => { try { await requireAdminOrInstructor(req); const db = await readLiveDb(); const key = String(req.body.meeting_id); db.recordings[key] = { ...(db.recordings[key] || {}), meeting_id: key, published: false, unpublished_at: new Date().toISOString() }; await writeLiveDb(db); res.json({ success: true, recording: db.recordings[key] }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.get("/live/recordings/published", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); const db = await readLiveDb(); if (req.query.course_id) { const e = getBackendEnrollment(db, { userId: user.id, courseId: req.query.course_id }); if (e?.is_demo && !db.demoSettings.allow_recordings) return res.json({ success: true, count: 0, recordings: [], demo_restricted: true }); } let recordings = Object.values(db.recordings || {}).filter((r) => r.published); if (req.query.course_id) recordings = recordings.filter((r) => String(r.course_id || "") === String(req.query.course_id)); res.json({ success: true, count: recordings.length, recordings: recordings.map(sanitizePublicRecording) }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
