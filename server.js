@@ -6012,7 +6012,12 @@ app.post("/admin/crm/integrations/test", async (req, res) => {
   try {
     await requireCrmAdmin(req);
     const platform = normalizeCrmLower(req.body?.platform, "other");
-    res.json({ success: true, message: `${platform} credentials saved for later live API validation`, platform, live_connected: false, mode: "mock_test" });
+    const result = await testSocialIntegration({ ...(req.body || {}), platform });
+    res.json({
+      success: true,
+      platform,
+      ...result,
+    });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -6084,13 +6089,30 @@ app.post("/admin/crm/integrations/:id/test", async (req, res) => {
     const integration = ensureCrmArray(db, "integrations").find((item) => String(item.id) === String(req.params.id));
     if (!integration) return res.status(404).json({ success: false, error: "Integration not found" });
 
+    const result = await testSocialIntegration(integration);
+
     integration.last_tested_at = nowIso();
-    integration.test_status = "mock_success";
+    integration.test_status = result.live_connected ? "live_success" : "configured_success";
+    integration.status = result.live_connected ? "connected" : (integration.status || "configured");
     integration.updated_at = nowIso();
-    createIntegrationLog(db, { brand_id: integration.brand_id, integration_id: integration.id, platform: integration.platform, action: "test_connection", status: "success", message: "Mock connection test passed. Live API connection will be added later." });
+
+    createIntegrationLog(db, {
+      brand_id: integration.brand_id,
+      integration_id: integration.id,
+      platform: integration.platform,
+      action: "test_connection",
+      status: "success",
+      message: result.message || "Integration connection test completed",
+      metadata: result.safe_metadata || {},
+    });
+
     await writeCrmDb(db);
 
-    res.json({ success: true, message: "Mock connection test passed. Live API connection will be added later.", integration: sanitizeIntegrationForResponse(integration) });
+    res.json({
+      success: true,
+      ...result,
+      integration: sanitizeIntegrationForResponse(integration),
+    });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -6103,15 +6125,30 @@ app.post("/admin/crm/integrations/:id/sync", async (req, res) => {
     const integration = ensureCrmArray(db, "integrations").find((item) => String(item.id) === String(req.params.id));
     if (!integration) return res.status(404).json({ success: false, error: "Integration not found" });
 
+    const result = await syncSocialIntegration({ db, integration, body: req.body || {} });
+
     integration.last_sync = nowIso();
     integration.last_sync_at = integration.last_sync;
-    integration.sync_status = "mock_synced";
+    integration.sync_status = result.live_connected ? "live_synced" : "ready_no_live_sync";
     integration.updated_at = nowIso();
 
-    createIntegrationLog(db, { brand_id: integration.brand_id, integration_id: integration.id, platform: integration.platform, action: "manual_sync", status: "success", message: "Mock sync completed. Live social API sync will be connected later." });
+    createIntegrationLog(db, {
+      brand_id: integration.brand_id,
+      integration_id: integration.id,
+      platform: integration.platform,
+      action: "manual_sync",
+      status: "success",
+      message: result.message || "Integration sync completed",
+      metadata: result.safe_metadata || {},
+    });
+
     await writeCrmDb(db);
 
-    res.json({ success: true, message: "Mock sync completed", integration: sanitizeIntegrationForResponse(integration), leads_captured: 0 });
+    res.json({
+      success: true,
+      ...result,
+      integration: sanitizeIntegrationForResponse(integration),
+    });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -6286,6 +6323,1001 @@ app.get("/admin/crm/campaigns/:id/performance", async (req, res) => {
         consultations_booked: leads.filter((lead) => ["consultation_booked", "payment_pending", "enrolled"].includes(String(lead.status || "").toLowerCase())).length,
       },
     });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+
+// -----------------------------------------------------------------------------
+// Telegram Live Integration
+// -----------------------------------------------------------------------------
+
+function getTelegramBotToken(integration = {}) {
+  const fromIntegration =
+    integration?.api_key ||
+    integration?.access_token ||
+    integration?.bot_token ||
+    "";
+  return String(process.env.TELEGRAM_BOT_TOKEN || fromIntegration || "").trim();
+}
+
+function getTelegramWebhookSecret() {
+  return String(process.env.TELEGRAM_WEBHOOK_SECRET || "").trim();
+}
+
+function getPublicBackendUrl(req = null) {
+  const envUrl = String(
+    process.env.BACKEND_PUBLIC_URL ||
+    process.env.RENDER_EXTERNAL_URL ||
+    process.env.PUBLIC_BACKEND_URL ||
+    ""
+  ).trim();
+
+  if (envUrl) return envUrl.replace(/\/+$/, "");
+
+  if (req) {
+    const proto = req.headers["x-forwarded-proto"] || req.protocol || "https";
+    const host = req.headers["x-forwarded-host"] || req.headers.host;
+    if (host) return `${proto}://${host}`.replace(/\/+$/, "");
+  }
+
+  return "";
+}
+
+async function telegramApi(method, payload = {}, integration = {}) {
+  const token = getTelegramBotToken(integration);
+  if (!token) {
+    const error = new Error("Telegram bot token is missing. Add TELEGRAM_BOT_TOKEN in Render environment variables.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const response = await axios.post(
+    `https://api.telegram.org/bot${token}/${method}`,
+    payload,
+    { timeout: 30000 }
+  );
+
+  if (response.data?.ok === false) {
+    const error = new Error(response.data?.description || "Telegram API request failed");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return response.data;
+}
+
+function findTelegramIntegration(db) {
+  const integrations = ensureCrmArray(db, "integrations");
+  return (
+    integrations.find((item) =>
+      String(item.platform || "").toLowerCase() === "telegram" &&
+      String(item.status || "").toLowerCase() !== "inactive"
+    ) ||
+    integrations.find((item) => String(item.platform || "").toLowerCase() === "telegram") ||
+    null
+  );
+}
+
+function getTelegramMessageFromUpdate(update = {}) {
+  return (
+    update.message ||
+    update.edited_message ||
+    update.channel_post ||
+    update.edited_channel_post ||
+    update.callback_query?.message ||
+    null
+  );
+}
+
+function normalizeTelegramLeadPayload({ update = {}, message = {}, integration = null }) {
+  const from = update.callback_query?.from || message.from || {};
+  const chat = message.chat || {};
+  const username = from.username ? `@${String(from.username).replace(/^@/, "")}` : "";
+  const firstName = String(from.first_name || "").trim();
+  const lastName = String(from.last_name || "").trim();
+  const fullName = [firstName, lastName].filter(Boolean).join(" ").trim();
+
+  return {
+    name: fullName || username || `Telegram ${from.id || chat.id || "Lead"}`,
+    telegram_id: from.id || chat.id || null,
+    telegram_chat_id: chat.id || null,
+    telegram_username: username,
+    source_platform: "telegram",
+    platform: "telegram",
+    source_integration_id: integration?.id || null,
+    source_integration_name: integration?.account_name || integration?.name || "Telegram",
+    language: from.language_code || "",
+    country: "",
+    region: "",
+    status: "new",
+    lead_status: "new",
+    opt_in_status: "telegram_inbound",
+    unsubscribe_status: "subscribed",
+    last_contacted_at: new Date().toISOString(),
+  };
+}
+
+function findExistingTelegramLead(db, payload = {}) {
+  const leads = ensureCrmArray(db, "leads");
+  return leads.find((lead) => {
+    return (
+      (payload.telegram_id && String(lead.telegram_id || "") === String(payload.telegram_id)) ||
+      (payload.telegram_chat_id && String(lead.telegram_chat_id || "") === String(payload.telegram_chat_id)) ||
+      (payload.telegram_username && String(lead.telegram_username || "").toLowerCase() === String(payload.telegram_username).toLowerCase())
+    );
+  }) || null;
+}
+
+function upsertTelegramLead(db, payload = {}) {
+  db.leads = ensureCrmArray(db, "leads");
+  const previous = findExistingTelegramLead(db, payload);
+
+  if (previous) {
+    Object.assign(previous, {
+      ...previous,
+      ...payload,
+      status: previous.status || payload.status || "new",
+      lead_status: previous.lead_status || previous.status || payload.lead_status || "new",
+      updated_at: new Date().toISOString(),
+    });
+    return { lead: previous, created: false };
+  }
+
+  const lead = withTimestamps({
+    id: uuid(),
+    ...payload,
+    lead_score: Number(payload.lead_score || 0),
+    created_by: "telegram_webhook",
+  });
+
+  db.leads.push(lead);
+  return { lead, created: true };
+}
+
+function appendTelegramConversation(db, { lead, update = {}, message = {}, text = "", integration = null }) {
+  db.conversations = ensureCrmArray(db, "conversations");
+
+  const conversation = withTimestamps({
+    id: uuid(),
+    lead_id: lead?.id || null,
+    integration_id: integration?.id || null,
+    platform: "telegram",
+    channel: "telegram",
+    direction: "inbound",
+    message_id: message.message_id || null,
+    telegram_update_id: update.update_id || null,
+    telegram_chat_id: message.chat?.id || lead?.telegram_chat_id || null,
+    from_id: message.from?.id || null,
+    from_username: message.from?.username || "",
+    text: text || message.text || message.caption || "",
+    raw: update,
+    created_at: new Date().toISOString(),
+  });
+
+  db.conversations.push(conversation);
+  return conversation;
+}
+
+function createTelegramIntegrationLog(db, payload = {}) {
+  db.integration_logs = ensureCrmArray(db, "integration_logs");
+  const log = withTimestamps({
+    id: uuid(),
+    platform: "telegram",
+    integration_id: payload.integration_id || null,
+    lead_id: payload.lead_id || null,
+    action: payload.action || "telegram_event",
+    status: payload.status || "success",
+    message: payload.message || "",
+    raw: payload.raw || null,
+  });
+  db.integration_logs.push(log);
+  return log;
+}
+
+app.get("/webhooks/telegram", (req, res) => {
+  res.json({
+    success: true,
+    message: "Telegram webhook endpoint is online. Telegram sends updates by POST.",
+  });
+});
+
+app.post("/webhooks/telegram", async (req, res) => {
+  try {
+    const expectedSecret = getTelegramWebhookSecret();
+    if (expectedSecret) {
+      const receivedSecret = String(req.headers["x-telegram-bot-api-secret-token"] || "");
+      if (receivedSecret !== expectedSecret) {
+        return res.status(403).json({ success: false, error: "Invalid Telegram webhook secret" });
+      }
+    }
+
+    const update = req.body || {};
+    const message = getTelegramMessageFromUpdate(update);
+
+    if (!message) {
+      return res.json({ success: true, ignored: true, reason: "No message object found" });
+    }
+
+    const text = String(message.text || message.caption || "").trim();
+    const db = await readCrmDb();
+    const integration = findTelegramIntegration(db);
+
+    const leadPayload = normalizeTelegramLeadPayload({ update, message, integration });
+    const { lead, created } = upsertTelegramLead(db, leadPayload);
+    const conversation = appendTelegramConversation(db, { lead, update, message, text, integration });
+
+    createTelegramIntegrationLog(db, {
+      integration_id: integration?.id || null,
+      lead_id: lead.id,
+      action: "telegram_inbound_message",
+      status: "success",
+      message: created ? "Created lead from Telegram inbound message" : "Updated lead from Telegram inbound message",
+      raw: { update_id: update.update_id, message_id: message.message_id, text },
+    });
+
+    db.client_data_events = ensureCrmArray(db, "client_data_events");
+    db.client_data_events.push(withTimestamps({
+      id: uuid(),
+      lead_id: lead.id,
+      source: "telegram",
+      action: created ? "create_lead" : "update_lead",
+      fields_collected: Object.keys(leadPayload),
+      conversation_id: conversation.id,
+    }));
+
+    await writeCrmDb(db);
+
+    res.json({
+      success: true,
+      created,
+      lead_id: lead.id,
+      conversation_id: conversation.id,
+    });
+  } catch (error) {
+    console.error("Telegram webhook error:", error.message);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Telegram webhook failed",
+    });
+  }
+});
+
+app.get("/admin/crm/integrations/telegram/me", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const integration = findTelegramIntegration(db);
+    const result = await telegramApi("getMe", {}, integration || {});
+    res.json({ success: true, bot: result.result, live_connected: true });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/integrations/telegram/set-webhook", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const integration = findTelegramIntegration(db);
+    const publicUrl = getPublicBackendUrl(req);
+
+    if (!publicUrl) {
+      return res.status(400).json({
+        success: false,
+        error: "BACKEND_PUBLIC_URL or RENDER_EXTERNAL_URL is required to set Telegram webhook.",
+      });
+    }
+
+    const webhookUrl = `${publicUrl}/webhooks/telegram`;
+    const secret = getTelegramWebhookSecret();
+
+    const payload = {
+      url: webhookUrl,
+      allowed_updates: ["message", "edited_message", "callback_query", "channel_post"],
+      drop_pending_updates: req.body?.drop_pending_updates !== false,
+    };
+
+    if (secret) {
+      payload.secret_token = secret;
+    }
+
+    const result = await telegramApi("setWebhook", payload, integration || {});
+
+    if (integration) {
+      integration.webhook_url = webhookUrl;
+      integration.status = "connected";
+      integration.last_sync = new Date().toISOString();
+      integration.updated_at = new Date().toISOString();
+      createTelegramIntegrationLog(db, {
+        integration_id: integration.id,
+        action: "set_webhook",
+        status: "success",
+        message: `Telegram webhook set to ${webhookUrl}`,
+      });
+      await writeCrmDb(db);
+    }
+
+    res.json({
+      success: true,
+      message: "Telegram webhook configured",
+      webhook_url: webhookUrl,
+      telegram: result,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/integrations/telegram/send", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const chatId = req.body.chat_id || req.body.telegram_chat_id;
+    const text = String(req.body.text || req.body.message || "").trim();
+
+    if (!chatId) return res.status(400).json({ success: false, error: "chat_id is required" });
+    if (!text) return res.status(400).json({ success: false, error: "text/message is required" });
+
+    const db = await readCrmDb();
+    const integration = findTelegramIntegration(db);
+    const result = await telegramApi("sendMessage", {
+      chat_id: chatId,
+      text,
+      parse_mode: req.body.parse_mode || undefined,
+      disable_web_page_preview: req.body.disable_web_page_preview !== false,
+    }, integration || {});
+
+    const lead = ensureCrmArray(db, "leads").find((item) => String(item.telegram_chat_id || "") === String(chatId)) || null;
+
+    db.conversations = ensureCrmArray(db, "conversations");
+    const conversation = withTimestamps({
+      id: uuid(),
+      lead_id: lead?.id || req.body.lead_id || null,
+      integration_id: integration?.id || null,
+      platform: "telegram",
+      channel: "telegram",
+      direction: "outbound",
+      telegram_chat_id: chatId,
+      text,
+      sent_by: user.email,
+      raw: result.result || result,
+    });
+    db.conversations.push(conversation);
+
+    createTelegramIntegrationLog(db, {
+      integration_id: integration?.id || null,
+      lead_id: lead?.id || req.body.lead_id || null,
+      action: "telegram_send_message",
+      status: "success",
+      message: `Sent Telegram message to ${chatId}`,
+      raw: { message_id: result.result?.message_id || null },
+    });
+
+    await writeCrmDb(db);
+
+    res.json({
+      success: true,
+      message: "Telegram message sent",
+      telegram: result,
+      conversation,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/integrations/telegram/delete-webhook", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const integration = findTelegramIntegration(db);
+    const result = await telegramApi("deleteWebhook", {
+      drop_pending_updates: req.body?.drop_pending_updates === true,
+    }, integration || {});
+
+    if (integration) {
+      integration.webhook_url = "";
+      integration.status = "configured";
+      integration.updated_at = new Date().toISOString();
+      createTelegramIntegrationLog(db, {
+        integration_id: integration.id,
+        action: "delete_webhook",
+        status: "success",
+        message: "Telegram webhook deleted",
+      });
+      await writeCrmDb(db);
+    }
+
+    res.json({ success: true, message: "Telegram webhook deleted", telegram: result });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+
+// -----------------------------------------------------------------------------
+// Universal Social Integrations: Email, WhatsApp, Meta, Reddit, LinkedIn,
+// YouTube, TikTok, X/Twitter, Discord, custom webhooks.
+// -----------------------------------------------------------------------------
+
+const SOCIAL_PLATFORM_CONFIG = {
+  telegram: {
+    label: "Telegram",
+    env: ["TELEGRAM_BOT_TOKEN"],
+    live: true,
+    inbound: true,
+    outbound: true,
+  },
+  email: {
+    label: "Email",
+    env: ["RESEND_API_KEY or SENDGRID_API_KEY or SMTP_*"],
+    live: true,
+    inbound: true,
+    outbound: true,
+  },
+  whatsapp: {
+    label: "WhatsApp Cloud API",
+    env: ["WHATSAPP_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID", "WHATSAPP_WEBHOOK_VERIFY_TOKEN"],
+    live: true,
+    inbound: true,
+    outbound: true,
+  },
+  facebook: {
+    label: "Facebook Page",
+    env: ["META_PAGE_ACCESS_TOKEN", "FACEBOOK_PAGE_ID", "META_VERIFY_TOKEN"],
+    live: true,
+    inbound: true,
+    outbound: true,
+  },
+  instagram: {
+    label: "Instagram Professional",
+    env: ["META_PAGE_ACCESS_TOKEN", "INSTAGRAM_BUSINESS_ACCOUNT_ID", "META_VERIFY_TOKEN"],
+    live: true,
+    inbound: true,
+    outbound: true,
+  },
+  reddit: {
+    label: "Reddit",
+    env: ["REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET", "REDDIT_REFRESH_TOKEN"],
+    live: false,
+    inbound: true,
+    outbound: false,
+  },
+  linkedin: {
+    label: "LinkedIn",
+    env: ["LINKEDIN_CLIENT_ID", "LINKEDIN_CLIENT_SECRET", "LINKEDIN_ACCESS_TOKEN"],
+    live: false,
+    inbound: true,
+    outbound: false,
+  },
+  youtube: {
+    label: "YouTube",
+    env: ["YOUTUBE_API_KEY or GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET"],
+    live: false,
+    inbound: true,
+    outbound: false,
+  },
+  tiktok: {
+    label: "TikTok",
+    env: ["TIKTOK_CLIENT_KEY", "TIKTOK_CLIENT_SECRET", "TIKTOK_ACCESS_TOKEN"],
+    live: false,
+    inbound: true,
+    outbound: false,
+  },
+  twitter: {
+    label: "X / Twitter",
+    env: ["TWITTER_BEARER_TOKEN", "TWITTER_API_KEY", "TWITTER_API_SECRET"],
+    live: false,
+    inbound: true,
+    outbound: false,
+  },
+  x: {
+    label: "X / Twitter",
+    env: ["TWITTER_BEARER_TOKEN", "TWITTER_API_KEY", "TWITTER_API_SECRET"],
+    live: false,
+    inbound: true,
+    outbound: false,
+  },
+  discord: {
+    label: "Discord",
+    env: ["DISCORD_BOT_TOKEN or DISCORD_WEBHOOK_URL"],
+    live: true,
+    inbound: true,
+    outbound: true,
+  },
+  other: {
+    label: "Custom Platform",
+    env: [],
+    live: false,
+    inbound: true,
+    outbound: false,
+  },
+};
+
+function normalizeSocialPlatform(platform = "other") {
+  const clean = String(platform || "other").trim().toLowerCase();
+  if (clean === "x") return "twitter";
+  return SOCIAL_PLATFORM_CONFIG[clean] ? clean : "other";
+}
+
+function getPlatformConfig(platform) {
+  return SOCIAL_PLATFORM_CONFIG[normalizeSocialPlatform(platform)] || SOCIAL_PLATFORM_CONFIG.other;
+}
+
+function getIntegrationCredential(integration = {}, key, envKey = null) {
+  const value = integration?.[key] || integration?.credentials?.[key] || "";
+  const envValue = envKey ? process.env[envKey] : "";
+  const clean = String(value || envValue || "").trim();
+  if (!clean || clean.includes("***")) return String(envValue || "").trim();
+  return clean;
+}
+
+function getBackendPublicUrl() {
+  return String(process.env.BACKEND_PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || "").replace(/\/$/, "");
+}
+
+function getIntegrationByPlatform(db, platform) {
+  const clean = normalizeSocialPlatform(platform);
+  return ensureCrmArray(db, "integrations").find((item) => normalizeSocialPlatform(item.platform) === clean) || null;
+}
+
+function parseInboundSocialPayload({ platform, payload = {}, integration = null }) {
+  const cleanPlatform = normalizeSocialPlatform(platform);
+  const body = payload || {};
+
+  let text = "";
+  let externalUserId = "";
+  let username = "";
+  let displayName = "";
+  let chatId = "";
+  let email = "";
+  let phone = "";
+
+  if (cleanPlatform === "whatsapp") {
+    const value = body.entry?.[0]?.changes?.[0]?.value || body.value || body;
+    const message = value.messages?.[0] || body.message || {};
+    const contact = value.contacts?.[0] || {};
+    text = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || body.text || "";
+    externalUserId = message.from || contact.wa_id || body.from || body.phone || "";
+    phone = externalUserId;
+    displayName = contact.profile?.name || body.name || externalUserId;
+    chatId = externalUserId;
+  } else if (cleanPlatform === "facebook" || cleanPlatform === "instagram") {
+    const entry = body.entry?.[0] || {};
+    const messaging = entry.messaging?.[0] || {};
+    const change = entry.changes?.[0]?.value || {};
+    text = messaging.message?.text || change.message || change.text || body.text || body.message || "";
+    externalUserId = messaging.sender?.id || change.from?.id || body.sender_id || body.user_id || "";
+    username = change.from?.username || body.username || "";
+    displayName = change.from?.name || username || externalUserId || body.name || "";
+    chatId = messaging.sender?.id || externalUserId;
+  } else if (cleanPlatform === "email") {
+    text = body.text || body.html || body.subject || "";
+    email = body.from || body.email || body.sender || "";
+    externalUserId = email;
+    displayName = body.name || body.from_name || email;
+    chatId = body.message_id || email;
+  } else if (cleanPlatform === "discord") {
+    text = body.content || body.text || "";
+    externalUserId = body.author?.id || body.user_id || "";
+    username = body.author?.username || body.username || "";
+    displayName = body.author?.global_name || username || externalUserId;
+    chatId = body.channel_id || "";
+  } else {
+    text = body.text || body.message || body.comment || body.body || body.content || "";
+    externalUserId = body.user_id || body.id || body.author_id || body.sender_id || body.profile_id || body.username || body.email || "";
+    username = body.username || body.handle || body.author || "";
+    email = body.email || "";
+    phone = body.phone || body.whatsapp || "";
+    displayName = body.name || username || email || phone || externalUserId || `${getPlatformConfig(cleanPlatform).label} Lead`;
+    chatId = body.chat_id || body.thread_id || body.conversation_id || "";
+  }
+
+  return compactDefined({
+    name: displayName,
+    email,
+    phone,
+    whatsapp: cleanPlatform === "whatsapp" ? phone : undefined,
+    [`${cleanPlatform}_id`]: externalUserId,
+    [`${cleanPlatform}_username`]: username,
+    [`${cleanPlatform}_chat_id`]: chatId,
+    telegram_id: cleanPlatform === "telegram" ? externalUserId : undefined,
+    telegram_username: cleanPlatform === "telegram" ? username : undefined,
+    source_platform: cleanPlatform,
+    platform: cleanPlatform,
+    source_integration_id: integration?.id || null,
+    source_integration_name: integration?.account_name || integration?.name || getPlatformConfig(cleanPlatform).label,
+    source_text: String(text || "").trim(),
+    conversation_summary: String(text || "").trim().slice(0, 300),
+    opt_in_status: cleanPlatform === "whatsapp" ? "unknown" : "platform_inbound",
+    status: "new",
+  });
+}
+
+function findExistingSocialLead(db, platform, payload = {}) {
+  const cleanPlatform = normalizeSocialPlatform(platform);
+  const leads = ensureCrmArray(db, "leads");
+  const possibleIds = [
+    payload.email,
+    payload.phone,
+    payload.whatsapp,
+    payload.telegram_id,
+    payload.facebook_id,
+    payload.instagram_id,
+    payload.linkedin_id,
+    payload.reddit_id,
+    payload.youtube_id,
+    payload.tiktok_id,
+    payload.twitter_id,
+    payload.discord_id,
+    payload[`${cleanPlatform}_id`],
+    payload[`${cleanPlatform}_username`],
+    payload[`${cleanPlatform}_chat_id`],
+  ].map((item) => String(item || "").trim()).filter(Boolean);
+
+  return leads.find((lead) => {
+    if (payload.email && normalizeEmail(lead.email) === normalizeEmail(payload.email)) return true;
+    return possibleIds.some((value) => {
+      return [
+        lead.phone,
+        lead.whatsapp,
+        lead.telegram_id,
+        lead.facebook_id,
+        lead.instagram_id,
+        lead.linkedin_id,
+        lead.reddit_id,
+        lead.youtube_id,
+        lead.tiktok_id,
+        lead.twitter_id,
+        lead.discord_id,
+        lead[`${cleanPlatform}_id`],
+        lead[`${cleanPlatform}_username`],
+        lead[`${cleanPlatform}_chat_id`],
+      ].map((x) => String(x || "").trim()).includes(value);
+    });
+  }) || null;
+}
+
+function upsertSocialLead(db, platform, payload = {}) {
+  const cleanPlatform = normalizeSocialPlatform(platform);
+  const previous = findExistingSocialLead(db, cleanPlatform, payload);
+  const leads = ensureCrmArray(db, "leads");
+
+  if (previous) {
+    Object.assign(previous, compactDefined(payload), {
+      last_inbound_at: nowIso(),
+      updated_at: nowIso(),
+    });
+    return { lead: previous, created: false };
+  }
+
+  const lead = withTimestamps({
+    id: uuid(),
+    brand_id: payload.brand_id || null,
+    name: payload.name || `${getPlatformConfig(cleanPlatform).label} Lead`,
+    status: payload.status || "new",
+    lead_score: Number(payload.lead_score || 10),
+    source_platform: cleanPlatform,
+    platform: cleanPlatform,
+    created_from: `${cleanPlatform}_webhook`,
+    last_inbound_at: nowIso(),
+    ...compactDefined(payload),
+  });
+
+  leads.push(lead);
+  return { lead, created: true };
+}
+
+function appendSocialConversation(db, { lead, platform, direction = "inbound", text = "", payload = {}, integration = null }) {
+  const message = withTimestamps({
+    id: uuid(),
+    brand_id: lead?.brand_id || integration?.brand_id || null,
+    lead_id: lead?.id || null,
+    platform: normalizeSocialPlatform(platform),
+    integration_id: integration?.id || null,
+    direction,
+    message_text: String(text || ""),
+    raw_payload: payload || {},
+    sent_by: direction === "outbound" ? "system" : "lead",
+    status: "saved",
+  });
+  ensureCrmArray(db, "conversations").push(message);
+  return message;
+}
+
+function createSocialClientDataEvent(db, { lead, platform, payload = {}, integration = null }) {
+  const event = withTimestamps({
+    id: uuid(),
+    lead_id: lead?.id || null,
+    brand_id: lead?.brand_id || integration?.brand_id || null,
+    agent_id: null,
+    event_type: `${normalizeSocialPlatform(platform)}_inbound_capture`,
+    source: normalizeSocialPlatform(platform),
+    client_data: compactDefined(payload),
+  });
+  ensureCrmArray(db, "client_data_events").push(event);
+  return event;
+}
+
+async function testSocialIntegration(integration = {}) {
+  const platform = normalizeSocialPlatform(integration.platform);
+  const config = getPlatformConfig(platform);
+
+  if (platform === "telegram") {
+    const telegramResult = await telegramApi("getMe", {}, integration);
+    return {
+      message: `Telegram live connection passed for @${telegramResult.result?.username || "bot"}`,
+      platform,
+      live_connected: true,
+      safe_metadata: { bot_username: telegramResult.result?.username || null, bot_id: telegramResult.result?.id || null },
+      bot: telegramResult.result,
+    };
+  }
+
+  if (platform === "email") {
+    const hasResend = Boolean(process.env.RESEND_API_KEY);
+    const hasSendGrid = Boolean(process.env.SENDGRID_API_KEY);
+    const hasSmtp = Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
+    if (!hasResend && !hasSendGrid && !hasSmtp && !integration.api_key) {
+      const e = new Error("Email provider is not configured. Add RESEND_API_KEY, SENDGRID_API_KEY, SMTP_* or save an integration API key.");
+      e.statusCode = 400;
+      throw e;
+    }
+    return { message: "Email integration configuration found", platform, live_connected: Boolean(hasResend || hasSendGrid), mode: hasResend ? "resend" : hasSendGrid ? "sendgrid" : "smtp_or_saved_credentials", safe_metadata: { provider: hasResend ? "resend" : hasSendGrid ? "sendgrid" : "smtp_or_saved_credentials" } };
+  }
+
+  if (platform === "whatsapp") {
+    const token = getIntegrationCredential(integration, "api_key", "WHATSAPP_ACCESS_TOKEN") || process.env.WHATSAPP_ACCESS_TOKEN;
+    const phoneNumberId = integration.phone_number_id || integration.account_id || process.env.WHATSAPP_PHONE_NUMBER_ID;
+    if (!token || !phoneNumberId) {
+      const e = new Error("WhatsApp is missing WHATSAPP_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID.");
+      e.statusCode = 400;
+      throw e;
+    }
+    const response = await axios.get(`https://graph.facebook.com/v19.0/${phoneNumberId}`, { params: { access_token: token }, timeout: 20000 });
+    return { message: "WhatsApp Cloud API connection passed", platform, live_connected: true, safe_metadata: { phone_number_id: phoneNumberId, display_phone_number: response.data?.display_phone_number || null }, meta: response.data };
+  }
+
+  if (platform === "facebook" || platform === "instagram") {
+    const token = getIntegrationCredential(integration, "api_key", "META_PAGE_ACCESS_TOKEN") || process.env.META_PAGE_ACCESS_TOKEN;
+    if (!token) {
+      const e = new Error("Meta integration is missing META_PAGE_ACCESS_TOKEN or saved API token.");
+      e.statusCode = 400;
+      throw e;
+    }
+    const id = platform === "instagram" ? (integration.account_id || process.env.INSTAGRAM_BUSINESS_ACCOUNT_ID || "me") : (integration.account_id || process.env.FACEBOOK_PAGE_ID || "me");
+    const response = await axios.get(`https://graph.facebook.com/v19.0/${id}`, { params: { access_token: token }, timeout: 20000 });
+    return { message: `${config.label} API connection passed`, platform, live_connected: true, safe_metadata: { id: response.data?.id || id, name: response.data?.name || response.data?.username || null }, meta: response.data };
+  }
+
+  if (platform === "discord") {
+    const webhookUrl = integration.webhook_url || process.env.DISCORD_WEBHOOK_URL;
+    const botToken = getIntegrationCredential(integration, "api_key", "DISCORD_BOT_TOKEN") || process.env.DISCORD_BOT_TOKEN;
+    if (!webhookUrl && !botToken) {
+      const e = new Error("Discord is missing DISCORD_WEBHOOK_URL or DISCORD_BOT_TOKEN.");
+      e.statusCode = 400;
+      throw e;
+    }
+    return { message: "Discord configuration found", platform, live_connected: Boolean(webhookUrl || botToken), safe_metadata: { mode: webhookUrl ? "webhook" : "bot_token" } };
+  }
+
+  const configured = Boolean(integration.api_key || integration.access_token || integration.account_id || integration.webhook_url);
+  return {
+    message: `${config.label} settings are stored. Live API execution is manual/approval-first until OAuth/API access is completed.`,
+    platform,
+    live_connected: false,
+    configured,
+    mode: configured ? "configured_manual_first" : "not_configured",
+    required_env: config.env,
+    safe_metadata: { required_env: config.env, manual_first: true },
+  };
+}
+
+async function syncSocialIntegration({ db, integration, body = {} }) {
+  const platform = normalizeSocialPlatform(integration.platform);
+  if (platform === "telegram") {
+    const result = await telegramApi("getMe", {}, integration);
+    return { message: `Telegram sync checked bot @${result.result?.username || "bot"}`, platform, live_connected: true, leads_captured: 0, safe_metadata: { bot_username: result.result?.username || null } };
+  }
+  if (["whatsapp", "facebook", "instagram", "email", "discord"].includes(platform)) {
+    const test = await testSocialIntegration(integration);
+    return { ...test, message: `${getPlatformConfig(platform).label} configuration synced`, leads_captured: 0 };
+  }
+  return { message: `${getPlatformConfig(platform).label} sync saved as manual-first. Inbound webhooks/imports can still capture leads.`, platform, live_connected: false, leads_captured: 0, safe_metadata: { manual_first: true } };
+}
+
+async function sendSocialMessage({ db, integration, body = {} }) {
+  const platform = normalizeSocialPlatform(integration.platform);
+  const to = body.to || body.chat_id || body.phone || body.email || body.recipient || body.channel_id;
+  const text = String(body.text || body.message || body.body || "").trim();
+  if (!text) {
+    const e = new Error("Message text is required");
+    e.statusCode = 400;
+    throw e;
+  }
+
+  if (platform === "telegram") {
+    const result = await telegramApi("sendMessage", { chat_id: to, text }, integration);
+    return { message: "Telegram message sent", platform, live_sent: true, raw: result };
+  }
+
+  if (platform === "email") {
+    const from = body.from || process.env.EMAIL_FROM || process.env.RESEND_FROM_EMAIL || "NextGen USMLE <noreply@nextgenusmlelms.com>";
+    const subject = body.subject || "NextGen USMLE";
+    if (process.env.RESEND_API_KEY) {
+      const response = await axios.post("https://api.resend.com/emails", { from, to: Array.isArray(to) ? to : [to], subject, text }, { headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, "Content-Type": "application/json" }, timeout: 30000 });
+      return { message: "Email sent through Resend", platform, live_sent: true, raw: response.data };
+    }
+    if (process.env.SENDGRID_API_KEY) {
+      const response = await axios.post("https://api.sendgrid.com/v3/mail/send", { personalizations: [{ to: [{ email: to }] }], from: { email: String(from).match(/<([^>]+)>/)?.[1] || from }, subject, content: [{ type: "text/plain", value: text }] }, { headers: { Authorization: `Bearer ${process.env.SENDGRID_API_KEY}`, "Content-Type": "application/json" }, timeout: 30000 });
+      return { message: "Email sent through SendGrid", platform, live_sent: true, raw: { status: response.status } };
+    }
+    const e = new Error("Email sending requires RESEND_API_KEY or SENDGRID_API_KEY.");
+    e.statusCode = 400;
+    throw e;
+  }
+
+  if (platform === "whatsapp") {
+    const token = getIntegrationCredential(integration, "api_key", "WHATSAPP_ACCESS_TOKEN") || process.env.WHATSAPP_ACCESS_TOKEN;
+    const phoneNumberId = integration.phone_number_id || integration.account_id || process.env.WHATSAPP_PHONE_NUMBER_ID;
+    if (!token || !phoneNumberId) {
+      const e = new Error("WhatsApp is missing WHATSAPP_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID.");
+      e.statusCode = 400;
+      throw e;
+    }
+    const response = await axios.post(`https://graph.facebook.com/v19.0/${phoneNumberId}/messages`, { messaging_product: "whatsapp", to, type: "text", text: { preview_url: false, body: text } }, { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, timeout: 30000 });
+    return { message: "WhatsApp message sent", platform, live_sent: true, raw: response.data };
+  }
+
+  if (platform === "discord") {
+    const webhookUrl = integration.webhook_url || process.env.DISCORD_WEBHOOK_URL;
+    if (!webhookUrl) {
+      const e = new Error("Discord webhook URL is required for live send.");
+      e.statusCode = 400;
+      throw e;
+    }
+    const response = await axios.post(webhookUrl, { content: text }, { timeout: 30000 });
+    return { message: "Discord webhook message sent", platform, live_sent: true, raw: { status: response.status } };
+  }
+
+  const draft = withTimestamps({
+    id: uuid(),
+    brand_id: integration.brand_id || null,
+    integration_id: integration.id,
+    platform,
+    action_type: `${platform}_manual_send_draft`,
+    input_text: text,
+    output_text: text,
+    status: "draft",
+    approval_status: "needs_approval",
+    metadata: { to },
+  });
+  ensureCrmArray(db, "approval_queue").push(draft);
+  return { message: `${getPlatformConfig(platform).label} is manual-first. Message saved to approval queue as a draft.`, platform, live_sent: false, approval_item: draft };
+}
+
+function verifyMetaWebhook(req, res) {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+  const expected = process.env.META_VERIFY_TOKEN || process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN;
+  if (mode === "subscribe" && token && expected && token === expected) return res.status(200).send(challenge);
+  return res.status(403).send("Forbidden");
+}
+
+function verifyTelegramSecretHeader(req) {
+  const expectedSecret = getTelegramWebhookSecret();
+  if (!expectedSecret) return true;
+  const receivedSecret = req.headers["x-telegram-bot-api-secret-token"];
+  return String(receivedSecret || "") === String(expectedSecret);
+}
+
+async function handleUniversalWebhook({ req, res, platform, integrationId = null }) {
+  try {
+    const db = await readCrmDb();
+    const cleanPlatform = normalizeSocialPlatform(platform);
+    const integration = integrationId
+      ? ensureCrmArray(db, "integrations").find((item) => String(item.id) === String(integrationId))
+      : getIntegrationByPlatform(db, cleanPlatform);
+
+    const leadPayload = parseInboundSocialPayload({ platform: cleanPlatform, payload: req.body || {}, integration });
+    const inboundText = leadPayload.source_text || "";
+    const { lead, created } = upsertSocialLead(db, cleanPlatform, leadPayload);
+    const conversation = appendSocialConversation(db, { lead, platform: cleanPlatform, direction: "inbound", text: inboundText, payload: req.body || {}, integration });
+    createSocialClientDataEvent(db, { lead, platform: cleanPlatform, payload: leadPayload, integration });
+    createIntegrationLog(db, { brand_id: integration?.brand_id || lead.brand_id || null, integration_id: integration?.id || null, platform: cleanPlatform, action: "inbound_webhook", status: "success", message: created ? `Created lead from ${cleanPlatform} inbound webhook` : `Updated lead from ${cleanPlatform} inbound webhook`, metadata: { lead_id: lead.id, conversation_id: conversation.id } });
+
+    await writeCrmDb(db);
+    res.json({ success: true, platform: cleanPlatform, lead_id: lead.id, created, conversation_id: conversation.id });
+  } catch (error) {
+    console.error("Universal social webhook error:", error.message);
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Webhook failed" });
+  }
+}
+
+app.get("/webhooks/social/:platform/:integrationId?", (req, res) => {
+  const platform = normalizeSocialPlatform(req.params.platform);
+  if (["whatsapp", "facebook", "instagram"].includes(platform)) return verifyMetaWebhook(req, res);
+  res.json({ success: true, platform, message: `${getPlatformConfig(platform).label} webhook endpoint is online. Send POST requests here.` });
+});
+
+app.post("/webhooks/social/:platform/:integrationId?", async (req, res) => {
+  const platform = normalizeSocialPlatform(req.params.platform);
+  if (platform === "telegram" && !verifyTelegramSecretHeader(req)) return res.status(403).json({ success: false, error: "Invalid Telegram webhook secret" });
+  return handleUniversalWebhook({ req, res, platform, integrationId: req.params.integrationId || null });
+});
+
+app.get("/webhooks/whatsapp", verifyMetaWebhook);
+app.post("/webhooks/whatsapp", async (req, res) => handleUniversalWebhook({ req, res, platform: "whatsapp" }));
+app.get("/webhooks/meta", verifyMetaWebhook);
+app.post("/webhooks/meta", async (req, res) => handleUniversalWebhook({ req, res, platform: "facebook" }));
+app.post("/webhooks/email", async (req, res) => handleUniversalWebhook({ req, res, platform: "email" }));
+app.post("/webhooks/reddit", async (req, res) => handleUniversalWebhook({ req, res, platform: "reddit" }));
+app.post("/webhooks/linkedin", async (req, res) => handleUniversalWebhook({ req, res, platform: "linkedin" }));
+app.post("/webhooks/youtube", async (req, res) => handleUniversalWebhook({ req, res, platform: "youtube" }));
+app.post("/webhooks/tiktok", async (req, res) => handleUniversalWebhook({ req, res, platform: "tiktok" }));
+app.post("/webhooks/twitter", async (req, res) => handleUniversalWebhook({ req, res, platform: "twitter" }));
+app.post("/webhooks/discord", async (req, res) => handleUniversalWebhook({ req, res, platform: "discord" }));
+
+app.get("/admin/crm/integrations/platforms", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    res.json({
+      success: true,
+      platforms: Object.entries(SOCIAL_PLATFORM_CONFIG).map(([key, value]) => ({ platform: key, ...value })),
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/integrations/:id/send", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const integration = ensureCrmArray(db, "integrations").find((item) => String(item.id) === String(req.params.id));
+    if (!integration) return res.status(404).json({ success: false, error: "Integration not found" });
+
+    const result = await sendSocialMessage({ db, integration, body: req.body || {} });
+    createIntegrationLog(db, { brand_id: integration.brand_id, integration_id: integration.id, platform: integration.platform, action: "send_message", status: result.live_sent ? "success" : "draft", message: result.message, metadata: { to: req.body?.to || req.body?.chat_id || req.body?.email || req.body?.phone || null } });
+    await writeCrmDb(db);
+
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/integrations/:id/capture", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const integration = ensureCrmArray(db, "integrations").find((item) => String(item.id) === String(req.params.id));
+    if (!integration) return res.status(404).json({ success: false, error: "Integration not found" });
+
+    const platform = normalizeSocialPlatform(integration.platform);
+    const leadPayload = { ...parseInboundSocialPayload({ platform, payload: req.body || {}, integration }), ...compactDefined(normalizeClientDataPayload(req.body || {})) };
+    const { lead, created } = upsertSocialLead(db, platform, leadPayload);
+    const conversation = appendSocialConversation(db, { lead, platform, direction: req.body.direction || "manual_capture", text: leadPayload.source_text || req.body.notes || "", payload: req.body || {}, integration });
+    createSocialClientDataEvent(db, { lead, platform, payload: leadPayload, integration });
+    createIntegrationLog(db, { brand_id: integration.brand_id, integration_id: integration.id, platform, action: "manual_capture", status: "success", message: created ? "Lead captured from integration" : "Lead updated from integration", metadata: { lead_id: lead.id } });
+
+    await writeCrmDb(db);
+    res.json({ success: true, lead, created, conversation });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/integrations/:id/status", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const integration = ensureCrmArray(db, "integrations").find((item) => String(item.id) === String(req.params.id));
+    if (!integration) return res.status(404).json({ success: false, error: "Integration not found" });
+    const platform = normalizeSocialPlatform(integration.platform);
+    res.json({ success: true, platform, config: getPlatformConfig(platform), integration: sanitizeIntegrationForResponse(integration) });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
