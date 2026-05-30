@@ -3866,6 +3866,12 @@ const DEFAULT_CRM_DB = {
   followups: [],
   templates: [],
   approval_queue: [],
+  agents: [],
+  agent_logs: [],
+  integrations: [],
+  integration_logs: [],
+  handoffs: [],
+  client_data_events: [],
   settings: DEFAULT_CRM_SETTINGS,
   updated_at: null,
 };
@@ -3937,6 +3943,12 @@ async function readCrmDb() {
       followups: Array.isArray(parsed.followups) ? parsed.followups : [],
       templates: Array.isArray(parsed.templates) ? parsed.templates : [],
       approval_queue: Array.isArray(parsed.approval_queue) ? parsed.approval_queue : [],
+      agents: Array.isArray(parsed.agents) ? parsed.agents : [],
+      agent_logs: Array.isArray(parsed.agent_logs) ? parsed.agent_logs : [],
+      integrations: Array.isArray(parsed.integrations) ? parsed.integrations : [],
+      integration_logs: Array.isArray(parsed.integration_logs) ? parsed.integration_logs : [],
+      handoffs: Array.isArray(parsed.handoffs) ? parsed.handoffs : [],
+      client_data_events: Array.isArray(parsed.client_data_events) ? parsed.client_data_events : [],
       settings: { ...DEFAULT_CRM_SETTINGS, ...(parsed.settings || {}) },
       updated_at: parsed.updated_at || null,
     };
@@ -4097,6 +4109,86 @@ function normalizeCrmCollectionPayload(collection, body = {}, existing = null, b
     base.version = Number(base.version || existing?.version || 1);
   }
 
+
+  if (collection === "agents") {
+    base.name = normalizeCrmString(base.name || base.agent_name || "New Agent");
+    base.agent_name = base.name;
+    base.agent_type = normalizeCrmLower(base.agent_type || base.type || "follow_up_agent", "follow_up_agent");
+    base.status = normalizeCrmLower(base.status, "draft_only") || "draft_only";
+    base.approval_level = normalizeCrmLower(base.approval_level, "needs_approval") || "needs_approval";
+    base.primary_language = normalizeCrmLower(base.primary_language || base.language, "english") || "english";
+    base.region = normalizeCrmLower(base.region, "global") || "global";
+    base.country = normalizeCrmString(base.country || "");
+    base.allowed_channels = Array.isArray(base.allowed_channels) ? base.allowed_channels : normalizeArray(base.allowed_channels || []);
+    base.allowed_actions = Array.isArray(base.allowed_actions) ? base.allowed_actions : normalizeArray(base.allowed_actions || []);
+    base.assigned_strategy_id = base.assigned_strategy_id || base.strategy_id || null;
+    base.daily_action_limit = Number(base.daily_action_limit || 50);
+    base.daily_cost_limit_usd = Number(base.daily_cost_limit_usd || 2);
+    base.monthly_cost_limit_usd = Number(base.monthly_cost_limit_usd || 30);
+    base.max_messages_per_lead_per_day = Number(base.max_messages_per_lead_per_day || 2);
+    base.total_ai_cost_usd = Number(base.total_ai_cost_usd || 0);
+    base.total_leads_handled = Number(base.total_leads_handled || 0);
+    base.conversion_count = Number(base.conversion_count || 0);
+  }
+
+  if (collection === "integrations") {
+    base.platform = normalizeCrmLower(base.platform, "other") || "other";
+    base.account_name = normalizeCrmString(base.account_name || base.name || `${base.platform} Account`);
+    base.name = base.account_name;
+    base.account_id = normalizeCrmString(base.account_id || base.username || "");
+    base.status = normalizeCrmLower(base.status, "not_connected") || "not_connected";
+    base.rate_limit = Number(base.rate_limit || 60);
+    base.auto_sync = base.auto_sync !== false;
+    base.sync_frequency = normalizeCrmLower(base.sync_frequency, "hourly") || "hourly";
+    base.permissions = Array.isArray(base.permissions) ? base.permissions : normalizeArray(base.permissions || []);
+    base.allowed_actions = Array.isArray(base.allowed_actions) ? base.allowed_actions : normalizeArray(base.allowed_actions || []);
+    base.messages_sent_today = Number(base.messages_sent_today || 0);
+    base.messages_received_today = Number(base.messages_received_today || 0);
+    base.leads_captured = Number(base.leads_captured || 0);
+    base.last_sync = base.last_sync || base.last_sync_at || null;
+    base.last_webhook_at = base.last_webhook_at || null;
+  }
+
+  if (collection === "coupon_rules") {
+    base.rule_name = normalizeCrmString(base.rule_name || base.name || "New Offer");
+    base.name = base.rule_name;
+    base.coupon_code = normalizeCrmString(base.coupon_code || base.code || "").toUpperCase();
+    base.code = base.coupon_code || base.code || "";
+    base.discount_type = normalizeCrmLower(base.discount_type, "percentage") || "percentage";
+    base.discount_percent = Number(base.discount_percent || base.discount_value || 0);
+    base.discount_amount_usd = Number(base.discount_amount_usd || 0);
+    base.country = normalizeCrmString(base.country || "");
+    base.region = normalizeCrmLower(base.region, "global") || "global";
+    base.language = normalizeCrmLower(base.language, "english") || "english";
+    base.economic_segment = normalizeCrmLower(base.economic_segment, "general") || "general";
+    base.exam_type = normalizeCrmString(base.exam_type || "USMLE");
+    base.lead_status = normalizeCrmLower(base.lead_status, "any") || "any";
+    base.recommended_offer = normalizeCrmString(base.recommended_offer || "");
+    base.usage_limit = base.usage_limit ? Number(base.usage_limit) : null;
+    base.used_count = Number(base.used_count || 0);
+    base.approval_required = base.approval_required !== false;
+    base.active = base.active !== false;
+    base.status = base.active ? "active" : "inactive";
+  }
+
+  if (collection === "country_strategies") {
+    base.strategy_name = normalizeCrmString(base.strategy_name || base.name || "Regional Strategy");
+    base.name = base.strategy_name;
+    base.country = normalizeCrmString(base.country || "");
+    base.region = normalizeCrmLower(base.region, "global") || "global";
+    base.language = normalizeCrmLower(base.language, "english") || "english";
+    base.target_audience = normalizeCrmString(base.target_audience || "");
+    base.exam_type = normalizeCrmString(base.exam_type || "USMLE");
+    base.recommended_offer = normalizeCrmString(base.recommended_offer || "");
+    base.tone = normalizeCrmString(base.tone || "professional, supportive");
+    base.cta = normalizeCrmString(base.cta || "Book a free consultation");
+    base.approval_mode = normalizeCrmLower(base.approval_mode, "needs_approval") || "needs_approval";
+    base.status = normalizeCrmLower(base.status, "draft") || "draft";
+    base.community_ids = Array.isArray(base.community_ids) ? base.community_ids : normalizeArray(base.community_ids || []);
+    base.agent_ids = Array.isArray(base.agent_ids) ? base.agent_ids : normalizeArray(base.agent_ids || []);
+  }
+
+
   return base;
 }
 
@@ -4121,6 +4213,12 @@ function collectionResponseName(collection) {
     followups: "followups",
     templates: "templates",
     approval_queue: "items",
+    agents: "agents",
+    agent_logs: "logs",
+    integrations: "integrations",
+    integration_logs: "logs",
+    handoffs: "handoffs",
+    client_data_events: "events",
   };
   return map[collection] || collection;
 }
@@ -5414,6 +5512,786 @@ app.post("/admin/crm/ai/generate-reply", async (req, res) => {
 });
 
 // CRM debug endpoint
+
+// -----------------------------------------------------------------------------
+// CRM Advanced Backend: Agents, Social Integrations, Client Data, Revenue
+// -----------------------------------------------------------------------------
+
+function crmMoney(value) {
+  const n = Number(value || 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function getLeadRevenueUsd(lead = {}) {
+  return crmMoney(
+    lead.revenue_generated_usd ??
+    lead.revenue_usd ??
+    lead.amount_brought_usd ??
+    lead.deal_value_usd ??
+    lead.payment_amount_usd ??
+    lead.sale_amount_usd ??
+    lead.value_usd
+  );
+}
+
+function getLeadSpendUsd(lead = {}) {
+  return crmMoney(
+    lead.marketing_spend_usd ??
+    lead.spend_usd ??
+    lead.ad_spend_usd ??
+    lead.cost_usd ??
+    lead.acquisition_cost_usd
+  );
+}
+
+function getCampaignSpendUsd(campaign = {}) {
+  return crmMoney(campaign.spend_usd ?? campaign.budget_used_usd ?? campaign.ad_spend_usd ?? campaign.cost_usd);
+}
+
+function getCampaignRevenueUsd(campaign = {}) {
+  return crmMoney(campaign.revenue_generated_usd ?? campaign.revenue_usd ?? campaign.value_usd);
+}
+
+function maskSecret(value) {
+  const raw = String(value || "");
+  if (!raw) return "";
+  if (raw.length <= 8) return "********";
+  return `${"*".repeat(Math.max(8, raw.length - 4))}${raw.slice(-4)}`;
+}
+
+function sanitizeIntegrationForResponse(integration = {}) {
+  return {
+    ...integration,
+    api_key: integration.api_key ? maskSecret(integration.api_key) : "",
+    api_secret: integration.api_secret ? maskSecret(integration.api_secret) : "",
+    access_token: integration.access_token ? maskSecret(integration.access_token) : "",
+  };
+}
+
+function createCrmActionLog(db, payload = {}) {
+  db.ai_actions = ensureCrmArray(db, "ai_actions");
+  const log = withTimestamps({
+    id: uuid(),
+    brand_id: payload.brand_id || null,
+    agent_id: payload.agent_id || null,
+    agent_name: payload.agent_name || "system",
+    action_type: payload.action_type || "manual_action",
+    channel: payload.channel || "admin",
+    lead_id: payload.lead_id || null,
+    campaign_id: payload.campaign_id || null,
+    input_text: payload.input_text || "",
+    output_text: payload.output_text || "",
+    status: payload.status || "completed",
+    approval_status: payload.approval_status || "approved",
+    estimated_cost: crmMoney(payload.estimated_cost),
+    model_used: payload.model_used || null,
+    created_by: payload.created_by || null,
+    executed_at: nowIso(),
+  });
+  db.ai_actions.push(log);
+  return log;
+}
+
+function createAgentLog(db, payload = {}) {
+  db.agent_logs = ensureCrmArray(db, "agent_logs");
+  const log = withTimestamps({
+    id: uuid(),
+    brand_id: payload.brand_id || null,
+    agent_id: payload.agent_id || null,
+    agent_name: payload.agent_name || "",
+    lead_id: payload.lead_id || null,
+    action_type: payload.action_type || "agent_action",
+    channel: payload.channel || "admin",
+    status: payload.status || "completed",
+    message: payload.message || "",
+    metadata: payload.metadata || {},
+  });
+  db.agent_logs.push(log);
+  return log;
+}
+
+function createIntegrationLog(db, payload = {}) {
+  db.integration_logs = ensureCrmArray(db, "integration_logs");
+  const log = withTimestamps({
+    id: uuid(),
+    brand_id: payload.brand_id || null,
+    integration_id: payload.integration_id || null,
+    platform: payload.platform || "other",
+    action: payload.action || "integration_action",
+    status: payload.status || "success",
+    message: payload.message || "",
+    metadata: payload.metadata || {},
+    timestamp: nowIso(),
+  });
+  db.integration_logs.push(log);
+  return log;
+}
+
+function normalizeClientDataPayload(body = {}) {
+  return {
+    name: body.name,
+    email: body.email,
+    phone: body.phone,
+    whatsapp: body.whatsapp,
+    facebook_url: body.facebook_url,
+    facebook_id: body.facebook_id,
+    instagram_handle: body.instagram_handle,
+    instagram_url: body.instagram_url,
+    linkedin_url: body.linkedin_url,
+    telegram_username: body.telegram_username,
+    telegram_id: body.telegram_id,
+    country: body.country,
+    region: body.region,
+    language: body.language,
+    exam_type: body.exam_type,
+    exam_timeline: body.exam_timeline,
+    exam_date: body.exam_date,
+    current_stage: body.current_stage,
+    target_score: body.target_score,
+    pain_points: body.pain_points,
+    study_problem: body.study_problem,
+    budget_level: body.budget_level,
+    preferred_contact_method: body.preferred_contact_method,
+    interested_program: body.interested_program,
+    recommended_offer: body.recommended_offer,
+    lead_score: body.lead_score,
+    status: body.status || body.lead_status,
+    source_platform: body.source_platform || body.platform,
+    source_community_id: body.source_community_id,
+    source_campaign_id: body.source_campaign_id,
+    assigned_agent_id: body.assigned_agent_id,
+    conversation_summary: body.conversation_summary,
+    next_follow_up_at: body.next_follow_up_at,
+    opt_in_status: body.opt_in_status,
+    unsubscribe_status: body.unsubscribe_status,
+    revenue_generated_usd: body.revenue_generated_usd,
+    marketing_spend_usd: body.marketing_spend_usd,
+    payment_status: body.payment_status,
+    payment_reference: body.payment_reference,
+    converted_at: body.converted_at,
+  };
+}
+
+function compactDefined(obj = {}) {
+  const out = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (value !== undefined && value !== null && value !== "") out[key] = value;
+  }
+  return out;
+}
+
+function canAgentAct(agent, actionType, channel = null) {
+  if (!agent) return { allowed: false, error: "Agent not found" };
+  if (["paused", "disabled"].includes(String(agent.status || "").toLowerCase())) return { allowed: false, error: `Agent is ${agent.status}` };
+
+  const allowedActions = Array.isArray(agent.allowed_actions) ? agent.allowed_actions : [];
+  if (allowedActions.length && !allowedActions.includes(actionType)) {
+    return { allowed: false, error: "Agent is not allowed to perform this action" };
+  }
+
+  const allowedChannels = Array.isArray(agent.allowed_channels) ? agent.allowed_channels : [];
+  if (channel && allowedChannels.length && !allowedChannels.includes(channel)) {
+    return { allowed: false, error: "Agent is not allowed on this channel" };
+  }
+
+  return { allowed: true, error: null };
+}
+
+function calculateCrmAnalytics(db, req) {
+  const brandId = getCrmBrandId(req, db);
+  const leads = ensureCrmArray(db, "leads").filter((lead) => !brandId || String(lead.brand_id) === String(brandId));
+  const campaigns = ensureCrmArray(db, "campaigns").filter((campaign) => !brandId || String(campaign.brand_id) === String(brandId));
+  const aiUsage = ensureCrmArray(db, "ai_usage").filter((usage) => !brandId || String(usage.brand_id) === String(brandId));
+
+  const totalRevenue = leads.reduce((sum, lead) => sum + getLeadRevenueUsd(lead), 0) + campaigns.reduce((sum, campaign) => sum + getCampaignRevenueUsd(campaign), 0);
+  const leadSpend = leads.reduce((sum, lead) => sum + getLeadSpendUsd(lead), 0);
+  const campaignSpend = campaigns.reduce((sum, campaign) => sum + getCampaignSpendUsd(campaign), 0);
+  const aiSpend = aiUsage.reduce((sum, usage) => sum + crmMoney(usage.estimated_cost || usage.estimated_cost_usd), 0);
+  const totalSpend = leadSpend + campaignSpend + aiSpend;
+  const qualified = leads.filter((lead) => ["qualified", "hot_lead", "consultation_booked", "payment_pending", "enrolled"].includes(String(lead.status || "").toLowerCase())).length;
+  const enrolled = leads.filter((lead) => String(lead.status || "").toLowerCase() === "enrolled").length;
+  const consultations = leads.filter((lead) => ["consultation_booked", "payment_pending", "enrolled"].includes(String(lead.status || "").toLowerCase())).length;
+
+  const groupSum = (items, keyFn, valueFn) => {
+    const map = {};
+    for (const item of items) {
+      const key = keyFn(item) || "Unknown";
+      map[key] = (map[key] || 0) + valueFn(item);
+    }
+    return Object.entries(map).map(([name, value]) => ({ name, value: Number(value.toFixed(2)) })).sort((a, b) => b.value - a.value);
+  };
+
+  return {
+    brand_id: brandId,
+    total_leads: leads.length,
+    clients_reached_out: leads.filter((lead) => lead.last_contacted_at || lead.reached_out_at || lead.first_message_sent_at).length,
+    qualified_leads: qualified,
+    consultations_booked: consultations,
+    enrollments: enrolled,
+    revenue_generated_usd: Number(totalRevenue.toFixed(2)),
+    total_marketing_spend_usd: Number(totalSpend.toFixed(2)),
+    ai_usage_cost_usd: Number(aiSpend.toFixed(2)),
+    campaign_spend_usd: Number(campaignSpend.toFixed(2)),
+    lead_level_spend_usd: Number(leadSpend.toFixed(2)),
+    net_revenue_usd: Number((totalRevenue - totalSpend).toFixed(2)),
+    roi_percent: totalSpend ? Number((((totalRevenue - totalSpend) / totalSpend) * 100).toFixed(2)) : 0,
+    cost_per_lead_usd: leads.length ? Number((totalSpend / leads.length).toFixed(2)) : 0,
+    cost_per_qualified_lead_usd: qualified ? Number((totalSpend / qualified).toFixed(2)) : 0,
+    cost_per_enrollment_usd: enrolled ? Number((totalSpend / enrolled).toFixed(2)) : 0,
+    lead_to_consultation_rate: leads.length ? Number(((consultations / leads.length) * 100).toFixed(2)) : 0,
+    consultation_to_enrollment_rate: consultations ? Number(((enrolled / consultations) * 100).toFixed(2)) : 0,
+    revenue_by_campaign: groupSum(leads, (lead) => lead.source_campaign_id || lead.campaign_id || "Manual/Unknown", getLeadRevenueUsd),
+    revenue_by_country: groupSum(leads, (lead) => lead.country || "Unknown", getLeadRevenueUsd),
+    revenue_by_platform: groupSum(leads, (lead) => lead.source_platform || lead.platform || "manual", getLeadRevenueUsd),
+  };
+}
+
+// Stronger agents backend
+app.get("/admin/crm/agents", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const agents = filterCrmRecords(req, ensureCrmArray(db, "agents"), brandId);
+    res.json({ success: true, agents, count: agents.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/agents", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const agent = normalizeCrmCollectionPayload("agents", req.body || {}, null, brandId);
+    ensureCrmArray(db, "agents").push(agent);
+    createAgentLog(db, { brand_id: brandId, agent_id: agent.id, agent_name: agent.name, action_type: "create_agent", message: "Agent created", metadata: { created_by: user.id } });
+    await writeCrmDb(db);
+    res.json({ success: true, agent });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/agents/:id", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const agents = ensureCrmArray(db, "agents");
+    const index = agents.findIndex((agent) => String(agent.id) === String(req.params.id));
+    if (index < 0) return res.status(404).json({ success: false, error: "Agent not found" });
+
+    agents[index] = normalizeCrmCollectionPayload("agents", req.body || {}, agents[index], agents[index].brand_id);
+    createAgentLog(db, { brand_id: agents[index].brand_id, agent_id: agents[index].id, agent_name: agents[index].name, action_type: "update_agent", message: "Agent updated", metadata: { updated_by: user.id } });
+    await writeCrmDb(db);
+    res.json({ success: true, agent: agents[index] });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete("/admin/crm/agents/:id", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const before = ensureCrmArray(db, "agents").length;
+    db.agents = db.agents.filter((agent) => String(agent.id) !== String(req.params.id));
+    await writeCrmDb(db);
+    res.json({ success: true, deleted: before !== db.agents.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/agents/:id/pause", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const agent = ensureCrmArray(db, "agents").find((item) => String(item.id) === String(req.params.id));
+    if (!agent) return res.status(404).json({ success: false, error: "Agent not found" });
+    agent.status = "paused";
+    agent.paused_at = nowIso();
+    agent.pause_reason = req.body?.reason || "Paused by admin";
+    agent.updated_at = nowIso();
+    createAgentLog(db, { brand_id: agent.brand_id, agent_id: agent.id, agent_name: agent.name, action_type: "pause_agent", message: agent.pause_reason });
+    await writeCrmDb(db);
+    res.json({ success: true, agent });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/agents/:id/resume", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const agent = ensureCrmArray(db, "agents").find((item) => String(item.id) === String(req.params.id));
+    if (!agent) return res.status(404).json({ success: false, error: "Agent not found" });
+    agent.status = "active";
+    agent.resumed_at = nowIso();
+    agent.updated_at = nowIso();
+    createAgentLog(db, { brand_id: agent.brand_id, agent_id: agent.id, agent_name: agent.name, action_type: "resume_agent", message: "Agent resumed" });
+    await writeCrmDb(db);
+    res.json({ success: true, agent });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/agents/:id/logs", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const logs = ensureCrmArray(db, "agent_logs").filter((log) => String(log.agent_id) === String(req.params.id)).sort(sortNewestFirst);
+    res.json({ success: true, logs, count: logs.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/agents/:id/leads", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const leads = ensureCrmArray(db, "leads").filter((lead) => String(lead.assigned_agent_id) === String(req.params.id)).sort(sortNewestFirst);
+    res.json({ success: true, leads, count: leads.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/agents/:id/usage", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const usage = ensureCrmArray(db, "ai_usage").filter((item) => String(item.agent_id) === String(req.params.id) || String(item.agent_name) === String(req.params.id));
+    const totalCost = usage.reduce((sum, item) => sum + crmMoney(item.estimated_cost || item.estimated_cost_usd), 0);
+    res.json({ success: true, usage, summary: { total_calls: usage.length, total_cost_usd: Number(totalCost.toFixed(6)) } });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/agents/:id/capture-lead", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const agent = ensureCrmArray(db, "agents").find((item) => String(item.id) === String(req.params.id));
+    const permission = canAgentAct(agent, "capture_leads", req.body?.source_platform || req.body?.platform);
+    if (!permission.allowed) return res.status(403).json({ success: false, error: permission.error });
+
+    const brandId = agent.brand_id || getCrmBrandId(req, db);
+    const clientData = compactDefined(normalizeClientDataPayload(req.body || {}));
+    const lead = normalizeCrmCollectionPayload("leads", {
+      ...clientData,
+      id: uuid(),
+      brand_id: brandId,
+      assigned_agent_id: agent.id,
+      platform: clientData.source_platform || req.body.platform || "agent_capture",
+      status: clientData.status || "new",
+      conversation_summary: req.body.conversation_summary || req.body.notes || "",
+      opt_in_status: req.body.opt_in_status || "unknown",
+    }, null, brandId);
+
+    ensureCrmArray(db, "leads").push(lead);
+    agent.total_leads_handled = Number(agent.total_leads_handled || 0) + 1;
+    agent.last_activity = nowIso();
+    agent.updated_at = nowIso();
+
+    const event = withTimestamps({ id: uuid(), brand_id: brandId, agent_id: agent.id, lead_id: lead.id, event_type: "capture_lead", client_data: clientData, created_by: user.id });
+    ensureCrmArray(db, "client_data_events").push(event);
+    createAgentLog(db, { brand_id: brandId, agent_id: agent.id, agent_name: agent.name, lead_id: lead.id, action_type: "capture_lead", channel: lead.platform, message: "Lead captured by agent", metadata: clientData });
+    createCrmActionLog(db, { brand_id: brandId, agent_id: agent.id, agent_name: agent.name, lead_id: lead.id, action_type: "capture_lead", channel: lead.platform, status: "completed", created_by: user.id });
+
+    await writeCrmDb(db);
+    res.json({ success: true, lead, agent });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/agents/:id/update-lead-data", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const agent = ensureCrmArray(db, "agents").find((item) => String(item.id) === String(req.params.id));
+    const permission = canAgentAct(agent, "update_lead_data", req.body?.source_platform || req.body?.platform);
+    if (!permission.allowed) return res.status(403).json({ success: false, error: permission.error });
+
+    const lead = ensureCrmArray(db, "leads").find((item) => String(item.id) === String(req.body.lead_id));
+    if (!lead) return res.status(404).json({ success: false, error: "Lead not found" });
+
+    const updates = compactDefined(normalizeClientDataPayload(req.body || {}));
+    Object.assign(lead, updates, { assigned_agent_id: agent.id, updated_at: nowIso() });
+
+    const event = withTimestamps({ id: uuid(), brand_id: lead.brand_id, agent_id: agent.id, lead_id: lead.id, event_type: "update_lead_data", client_data: updates, created_by: user.id });
+    ensureCrmArray(db, "client_data_events").push(event);
+    createAgentLog(db, { brand_id: lead.brand_id, agent_id: agent.id, agent_name: agent.name, lead_id: lead.id, action_type: "update_lead_data", channel: lead.platform, message: "Lead data updated by agent", metadata: updates });
+
+    await writeCrmDb(db);
+    res.json({ success: true, lead, event });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/agents/:id/create-followup", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const agent = ensureCrmArray(db, "agents").find((item) => String(item.id) === String(req.params.id));
+    const permission = canAgentAct(agent, "create_followup", req.body?.channel);
+    if (!permission.allowed) return res.status(403).json({ success: false, error: permission.error });
+
+    const followup = normalizeCrmCollectionPayload("followups", {
+      ...req.body,
+      brand_id: agent.brand_id,
+      assigned_agent_id: agent.id,
+      agent_id: agent.id,
+      status: req.body.status || "scheduled",
+    }, null, agent.brand_id);
+
+    ensureCrmArray(db, "followups").push(followup);
+    createAgentLog(db, { brand_id: agent.brand_id, agent_id: agent.id, agent_name: agent.name, lead_id: req.body.lead_id || null, action_type: "create_followup", channel: req.body.channel || "manual", message: "Follow-up created" });
+    await writeCrmDb(db);
+    res.json({ success: true, followup });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/agents/:id/escalate-lead", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const agent = ensureCrmArray(db, "agents").find((item) => String(item.id) === String(req.params.id));
+    if (!agent) return res.status(404).json({ success: false, error: "Agent not found" });
+
+    const lead = ensureCrmArray(db, "leads").find((item) => String(item.id) === String(req.body.lead_id));
+    if (!lead) return res.status(404).json({ success: false, error: "Lead not found" });
+
+    lead.status = req.body.status || "hot_lead";
+    lead.escalated_at = nowIso();
+    lead.escalated_by_agent_id = agent.id;
+    lead.updated_at = nowIso();
+
+    const handoff = withTimestamps({
+      id: uuid(),
+      brand_id: lead.brand_id,
+      lead_id: lead.id,
+      agent_id: agent.id,
+      status: "pending_sales_review",
+      handoff_summary: req.body.handoff_summary || lead.conversation_summary || "",
+      recommended_next_action: req.body.recommended_next_action || "Book consultation",
+      assigned_closer_id: req.body.assigned_closer_id || null,
+    });
+    ensureCrmArray(db, "handoffs").push(handoff);
+    createAgentLog(db, { brand_id: lead.brand_id, agent_id: agent.id, agent_name: agent.name, lead_id: lead.id, action_type: "escalate_lead", channel: lead.platform, message: "Lead escalated to sales" });
+    await writeCrmDb(db);
+    res.json({ success: true, lead, handoff });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// Social integrations backend
+app.get("/admin/crm/integrations/logs", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const logs = filterCrmRecords(req, ensureCrmArray(db, "integration_logs"), brandId);
+    res.json({ success: true, logs, count: logs.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/integrations/test", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const platform = normalizeCrmLower(req.body?.platform, "other");
+    res.json({ success: true, message: `${platform} credentials saved for later live API validation`, platform, live_connected: false, mode: "mock_test" });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/integrations", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const integrations = filterCrmRecords(req, ensureCrmArray(db, "integrations"), brandId).map(sanitizeIntegrationForResponse);
+    res.json({ success: true, integrations, count: integrations.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/integrations", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const integration = normalizeCrmCollectionPayload("integrations", req.body || {}, null, brandId);
+    ensureCrmArray(db, "integrations").push(integration);
+    createIntegrationLog(db, { brand_id: brandId, integration_id: integration.id, platform: integration.platform, action: "create_integration", status: "success", message: "Integration created", metadata: { created_by: user.id } });
+    await writeCrmDb(db);
+    res.json({ success: true, integration: sanitizeIntegrationForResponse(integration) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/integrations/:id", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const integrations = ensureCrmArray(db, "integrations");
+    const index = integrations.findIndex((item) => String(item.id) === String(req.params.id));
+    if (index < 0) return res.status(404).json({ success: false, error: "Integration not found" });
+
+    integrations[index] = normalizeCrmCollectionPayload("integrations", req.body || {}, integrations[index], integrations[index].brand_id);
+    createIntegrationLog(db, { brand_id: integrations[index].brand_id, integration_id: integrations[index].id, platform: integrations[index].platform, action: "update_integration", status: "success", message: "Integration updated", metadata: { updated_by: user.id } });
+    await writeCrmDb(db);
+    res.json({ success: true, integration: sanitizeIntegrationForResponse(integrations[index]) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete("/admin/crm/integrations/:id", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const integrations = ensureCrmArray(db, "integrations");
+    const item = integrations.find((integration) => String(integration.id) === String(req.params.id));
+    db.integrations = integrations.filter((integration) => String(integration.id) !== String(req.params.id));
+    if (item) createIntegrationLog(db, { brand_id: item.brand_id, integration_id: item.id, platform: item.platform, action: "delete_integration", status: "success", message: "Integration deleted/disconnected" });
+    await writeCrmDb(db);
+    res.json({ success: true, deleted: Boolean(item) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/integrations/:id/test", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const integration = ensureCrmArray(db, "integrations").find((item) => String(item.id) === String(req.params.id));
+    if (!integration) return res.status(404).json({ success: false, error: "Integration not found" });
+
+    integration.last_tested_at = nowIso();
+    integration.test_status = "mock_success";
+    integration.updated_at = nowIso();
+    createIntegrationLog(db, { brand_id: integration.brand_id, integration_id: integration.id, platform: integration.platform, action: "test_connection", status: "success", message: "Mock connection test passed. Live API connection will be added later." });
+    await writeCrmDb(db);
+
+    res.json({ success: true, message: "Mock connection test passed. Live API connection will be added later.", integration: sanitizeIntegrationForResponse(integration) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/integrations/:id/sync", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const integration = ensureCrmArray(db, "integrations").find((item) => String(item.id) === String(req.params.id));
+    if (!integration) return res.status(404).json({ success: false, error: "Integration not found" });
+
+    integration.last_sync = nowIso();
+    integration.last_sync_at = integration.last_sync;
+    integration.sync_status = "mock_synced";
+    integration.updated_at = nowIso();
+
+    createIntegrationLog(db, { brand_id: integration.brand_id, integration_id: integration.id, platform: integration.platform, action: "manual_sync", status: "success", message: "Mock sync completed. Live social API sync will be connected later." });
+    await writeCrmDb(db);
+
+    res.json({ success: true, message: "Mock sync completed", integration: sanitizeIntegrationForResponse(integration), leads_captured: 0 });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/integrations/:id/logs", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const logs = ensureCrmArray(db, "integration_logs").filter((log) => String(log.integration_id) === String(req.params.id)).sort(sortNewestFirst);
+    res.json({ success: true, logs, count: logs.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// Client data / conversation / handoff backend
+app.get("/admin/crm/conversations/:leadId", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const conversations = ensureCrmArray(db, "conversations").filter((item) => String(item.lead_id) === String(req.params.leadId)).sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
+    res.json({ success: true, conversations, messages: conversations });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/conversations/:leadId/messages", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const lead = ensureCrmArray(db, "leads").find((item) => String(item.id) === String(req.params.leadId));
+    if (!lead) return res.status(404).json({ success: false, error: "Lead not found" });
+
+    const message = withTimestamps({
+      id: uuid(),
+      brand_id: lead.brand_id,
+      lead_id: lead.id,
+      platform: req.body.platform || lead.platform || "manual",
+      direction: req.body.direction || "internal_note",
+      message_text: req.body.message_text || req.body.text || "",
+      ai_summary: req.body.ai_summary || "",
+      sent_by: req.body.sent_by || "human",
+      status: req.body.status || "saved",
+    });
+
+    ensureCrmArray(db, "conversations").push(message);
+    lead.last_contacted_at = nowIso();
+    lead.updated_at = nowIso();
+    await writeCrmDb(db);
+
+    res.json({ success: true, message, conversation: message });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/leads/:id/client-data", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const lead = ensureCrmArray(db, "leads").find((item) => String(item.id) === String(req.params.id));
+    if (!lead) return res.status(404).json({ success: false, error: "Lead not found" });
+
+    const updates = compactDefined(normalizeClientDataPayload(req.body || {}));
+    Object.assign(lead, updates, { updated_at: nowIso() });
+
+    const event = withTimestamps({ id: uuid(), brand_id: lead.brand_id, lead_id: lead.id, event_type: "client_data_update", client_data: updates, created_by: user.id });
+    ensureCrmArray(db, "client_data_events").push(event);
+    await writeCrmDb(db);
+
+    res.json({ success: true, lead, event });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/leads/:id/score", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const lead = ensureCrmArray(db, "leads").find((item) => String(item.id) === String(req.params.id));
+    if (!lead) return res.status(404).json({ success: false, error: "Lead not found" });
+    lead.lead_score = Math.max(0, Math.min(100, Number(req.body.lead_score ?? req.body.score ?? lead.lead_score ?? 0)));
+    lead.status = req.body.status || lead.status;
+    lead.score_reason = req.body.score_reason || lead.score_reason || "";
+    lead.updated_at = nowIso();
+    await writeCrmDb(db);
+    res.json({ success: true, lead });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/leads/:id/handoff", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const lead = ensureCrmArray(db, "leads").find((item) => String(item.id) === String(req.params.id));
+    if (!lead) return res.status(404).json({ success: false, error: "Lead not found" });
+
+    const handoff = withTimestamps({
+      id: uuid(),
+      brand_id: lead.brand_id,
+      lead_id: lead.id,
+      status: req.body.status || "pending_sales_review",
+      assigned_closer_id: req.body.assigned_closer_id || null,
+      handoff_summary: req.body.handoff_summary || lead.conversation_summary || "",
+      recommended_next_action: req.body.recommended_next_action || "Book consultation",
+      priority: req.body.priority || "normal",
+    });
+
+    ensureCrmArray(db, "handoffs").push(handoff);
+    lead.status = req.body.lead_status || "hot_lead";
+    lead.handoff_id = handoff.id;
+    lead.updated_at = nowIso();
+    await writeCrmDb(db);
+    res.json({ success: true, lead, handoff });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// Revenue and dashboard analytics
+app.get("/admin/crm/dashboard/analytics", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    res.json({ success: true, analytics: calculateCrmAnalytics(db, req) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/revenue/summary", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    res.json({ success: true, summary: calculateCrmAnalytics(db, req) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/campaigns/:id/performance", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const campaign = ensureCrmArray(db, "campaigns").find((item) => String(item.id) === String(req.params.id));
+    if (!campaign) return res.status(404).json({ success: false, error: "Campaign not found" });
+
+    const leads = ensureCrmArray(db, "leads").filter((lead) => String(lead.source_campaign_id || lead.campaign_id) === String(campaign.id));
+    const revenue = leads.reduce((sum, lead) => sum + getLeadRevenueUsd(lead), 0) + getCampaignRevenueUsd(campaign);
+    const spend = leads.reduce((sum, lead) => sum + getLeadSpendUsd(lead), 0) + getCampaignSpendUsd(campaign);
+    const qualified = leads.filter((lead) => ["qualified", "hot_lead", "consultation_booked", "payment_pending", "enrolled"].includes(String(lead.status || "").toLowerCase())).length;
+    const enrolled = leads.filter((lead) => String(lead.status || "").toLowerCase() === "enrolled").length;
+
+    res.json({
+      success: true,
+      campaign,
+      performance: {
+        leads_count: leads.length,
+        qualified_count: qualified,
+        enrollments_count: enrolled,
+        revenue_generated_usd: Number(revenue.toFixed(2)),
+        spend_usd: Number(spend.toFixed(2)),
+        net_revenue_usd: Number((revenue - spend).toFixed(2)),
+        roi_percent: spend ? Number((((revenue - spend) / spend) * 100).toFixed(2)) : 0,
+        replies_count: Number(campaign.replies_count || 0),
+        messages_sent: Number(campaign.messages_sent || campaign.leads_reached || 0),
+        consultations_booked: leads.filter((lead) => ["consultation_booked", "payment_pending", "enrolled"].includes(String(lead.status || "").toLowerCase())).length,
+      },
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+
 app.get("/admin/crm/debug/storage", async (req, res) => {
   try {
     const { user } = await requireCrmAdmin(req);
@@ -5434,6 +6312,12 @@ app.get("/admin/crm/debug/storage", async (req, res) => {
         ai_usage: db.ai_usage.length,
         approval_queue: db.approval_queue.length,
         model_pricing: db.model_pricing.length,
+        agents: ensureCrmArray(db, "agents").length,
+        agent_logs: ensureCrmArray(db, "agent_logs").length,
+        integrations: ensureCrmArray(db, "integrations").length,
+        integration_logs: ensureCrmArray(db, "integration_logs").length,
+        handoffs: ensureCrmArray(db, "handoffs").length,
+        client_data_events: ensureCrmArray(db, "client_data_events").length,
       },
       updated_at: db.updated_at || null,
     });
