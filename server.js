@@ -4257,7 +4257,12 @@ function registerCrmCrudRoutes({ route, collection, brandScoped = true }) {
       await requireCrmAdmin(req);
       const db = await readCrmDb();
       const brandId = brandScoped ? getCrmBrandId(req, db) : null;
-      const records = filterCrmRecords(req, ensureCrmArray(db, collection), brandId);
+      let records = filterCrmRecords(req, ensureCrmArray(db, collection), brandId);
+
+      if (collection === "leads") {
+        records = records.map((lead) => ensureLeadIdentityFields(lead));
+      }
+
       res.json({ success: true, [collectionResponseName(collection)]: records, count: records.length });
     } catch (error) {
       res.status(error.statusCode || 500).json({ success: false, error: error.message });
@@ -4270,7 +4275,8 @@ function registerCrmCrudRoutes({ route, collection, brandScoped = true }) {
       const db = await readCrmDb();
       const brandId = brandScoped ? getCrmBrandId(req, db) : null;
       const records = ensureCrmArray(db, collection);
-      const record = normalizeCrmCollectionPayload(collection, req.body || {}, null, brandId);
+      let record = normalizeCrmCollectionPayload(collection, req.body || {}, null, brandId);
+      if (collection === "leads") record = ensureLeadIdentityFields(record);
       records.push(record);
 
       if (collection === "brands" && !db.settings.default_brand_id) {
@@ -4288,7 +4294,28 @@ function registerCrmCrudRoutes({ route, collection, brandScoped = true }) {
     try {
       await requireCrmAdmin(req);
       const db = await readCrmDb();
-      const record = ensureCrmArray(db, collection).find((item) => String(item.id) === String(req.params.id));
+      let record = null;
+
+      if (collection === "leads") {
+        record = getLeadByAnyId(db, req.params.id);
+        if (record) {
+          ensureLeadIdentityFields(record);
+          const conversations = ensureCrmArray(db, "conversations")
+            .filter((item) => String(item.lead_id) === String(record.id))
+            .sort((a, b) => String(a.created_at || a.timestamp || "").localeCompare(String(b.created_at || b.timestamp || "")));
+          return res.json({ success: true, lead: record, record, conversations });
+        }
+      } else if (collection === "conversations") {
+        record = ensureCrmArray(db, collection).find((item) => String(item.id) === String(req.params.id));
+        if (!record) {
+          const conversations = ensureCrmArray(db, "conversations")
+            .filter((item) => String(item.lead_id) === String(req.params.id))
+            .sort((a, b) => String(a.created_at || a.timestamp || "").localeCompare(String(b.created_at || b.timestamp || "")));
+          return res.json({ success: true, conversations, count: conversations.length });
+        }
+      } else {
+        record = ensureCrmArray(db, collection).find((item) => String(item.id) === String(req.params.id));
+      }
 
       if (!record) return res.status(404).json({ success: false, error: "Record not found" });
 
@@ -4304,11 +4331,14 @@ function registerCrmCrudRoutes({ route, collection, brandScoped = true }) {
       const db = await readCrmDb();
       const brandId = brandScoped ? getCrmBrandId(req, db) : null;
       const records = ensureCrmArray(db, collection);
-      const index = records.findIndex((item) => String(item.id) === String(req.params.id));
+      const index = collection === "leads"
+        ? records.findIndex((item) => [item.id, item._id, item.lead_id, item.uuid].map((x) => String(x || "")).includes(String(req.params.id)))
+        : records.findIndex((item) => String(item.id) === String(req.params.id));
 
       if (index < 0) return res.status(404).json({ success: false, error: "Record not found" });
 
-      const record = normalizeCrmCollectionPayload(collection, req.body || {}, records[index], brandId);
+      let record = normalizeCrmCollectionPayload(collection, req.body || {}, records[index], brandId);
+      if (collection === "leads") record = ensureLeadIdentityFields(record);
       records[index] = record;
 
       await writeCrmDb(db);
@@ -4324,7 +4354,13 @@ function registerCrmCrudRoutes({ route, collection, brandScoped = true }) {
       const db = await readCrmDb();
       const records = ensureCrmArray(db, collection);
       const before = records.length;
-      db[collection] = records.filter((item) => String(item.id) !== String(req.params.id));
+      if (collection === "leads") {
+        db[collection] = records.filter((item) => {
+          return ![item.id, item._id, item.lead_id, item.uuid].map((x) => String(x || "")).includes(String(req.params.id));
+        });
+      } else {
+        db[collection] = records.filter((item) => String(item.id) !== String(req.params.id));
+      }
       await writeCrmDb(db);
       res.json({ success: true, deleted: before !== db[collection].length });
     } catch (error) {
@@ -5015,10 +5051,12 @@ app.get("/admin/crm/leads/:leadId/conversations", async (req, res) => {
   try {
     await requireCrmAdmin(req);
     const db = await readCrmDb();
+    const lead = getLeadByAnyId(db, req.params.leadId);
+    const leadId = lead?.id || req.params.leadId;
     const conversations = ensureCrmArray(db, "conversations")
-      .filter((item) => String(item.lead_id) === String(req.params.leadId))
-      .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
-    res.json({ success: true, conversations });
+      .filter((item) => String(item.lead_id) === String(leadId))
+      .sort((a, b) => String(a.created_at || a.timestamp || "").localeCompare(String(b.created_at || b.timestamp || "")));
+    res.json({ success: true, conversations, lead: lead ? normalizeLeadForResponse(lead) : null });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -5028,21 +5066,20 @@ app.post("/admin/crm/leads/:leadId/conversations", async (req, res) => {
   try {
     await requireCrmAdmin(req);
     const db = await readCrmDb();
-    const lead = db.leads.find((item) => String(item.id) === String(req.params.leadId));
+    const lead = getLeadByAnyId(db, req.params.leadId);
     if (!lead) return res.status(404).json({ success: false, error: "Lead not found" });
 
-    const conversation = withTimestamps({
-      id: uuid(),
-      brand_id: lead.brand_id,
-      lead_id: lead.id,
-      platform: req.body.platform || lead.platform || "manual",
+    const conversation = appendSocialConversation(db, {
+      lead,
+      platform: req.body.platform || lead.platform || lead.source_platform || "manual",
       direction: req.body.direction || "internal_note",
-      message_text: req.body.message_text || req.body.text || "",
-      ai_summary: req.body.ai_summary || "",
-      sent_by: req.body.sent_by || "human",
+      text: req.body.message_text || req.body.text || req.body.message || "",
+      payload: { manual_message: true, ai_summary: req.body.ai_summary || "" },
+      integration: null,
     });
 
-    db.conversations.push(conversation);
+    conversation.ai_summary = req.body.ai_summary || "";
+    conversation.sent_by = req.body.sent_by || conversation.sent_by || "human";
     lead.last_contacted_at = nowIso();
     lead.updated_at = nowIso();
 
@@ -6181,22 +6218,22 @@ app.post("/admin/crm/conversations/:leadId/messages", async (req, res) => {
   try {
     await requireCrmAdmin(req);
     const db = await readCrmDb();
-    const lead = ensureCrmArray(db, "leads").find((item) => String(item.id) === String(req.params.leadId));
+    const lead = getLeadByAnyId(db, req.params.leadId);
     if (!lead) return res.status(404).json({ success: false, error: "Lead not found" });
 
-    const message = withTimestamps({
-      id: uuid(),
-      brand_id: lead.brand_id,
-      lead_id: lead.id,
-      platform: req.body.platform || lead.platform || "manual",
+    const message = appendSocialConversation(db, {
+      lead,
+      platform: req.body.platform || lead.platform || lead.source_platform || "manual",
       direction: req.body.direction || "internal_note",
-      message_text: req.body.message_text || req.body.text || "",
-      ai_summary: req.body.ai_summary || "",
-      sent_by: req.body.sent_by || "human",
-      status: req.body.status || "saved",
+      text: req.body.message_text || req.body.text || req.body.message || "",
+      payload: { manual_message: true, ai_summary: req.body.ai_summary || "", status: req.body.status || "saved" },
+      integration: null,
     });
 
-    ensureCrmArray(db, "conversations").push(message);
+    message.ai_summary = req.body.ai_summary || "";
+    message.sent_by = req.body.sent_by || message.sent_by || "human";
+    message.status = req.body.status || message.status || "saved";
+
     lead.last_contacted_at = nowIso();
     lead.updated_at = nowIso();
     await writeCrmDb(db);
@@ -6435,6 +6472,13 @@ function normalizeTelegramLeadPayload({ update = {}, message = {}, integration =
     lead_status: "new",
     opt_in_status: "telegram_inbound",
     unsubscribe_status: "subscribed",
+    source_text: String(message.text || message.caption || "").trim(),
+    last_message: String(message.text || message.caption || "").trim(),
+    last_message_at: new Date().toISOString(),
+    platform_contact_id: chat.id || from.id || null,
+    conversation_direction: "inbound",
+    client_reached_out: true,
+    agent_initiated: false,
     last_contacted_at: new Date().toISOString(),
   };
 }
@@ -6453,50 +6497,97 @@ function findExistingTelegramLead(db, payload = {}) {
 function upsertTelegramLead(db, payload = {}) {
   db.leads = ensureCrmArray(db, "leads");
   const previous = findExistingTelegramLead(db, payload);
+  const now = nowIso();
+  const inboundText = String(payload.last_message || payload.source_text || "").trim();
 
   if (previous) {
     Object.assign(previous, {
       ...previous,
       ...payload,
+      id: getStableLeadId(previous) || previous.id || uuid(),
+      lead_id: previous.lead_id || getStableLeadId(previous) || previous.id || uuid(),
+      source_platform: "telegram",
+      platform: "telegram",
+      source_channel: "social_integration",
+      conversation_direction: previous.conversation_direction || "inbound",
+      client_reached_out: true,
+      agent_initiated: Boolean(previous.agent_initiated),
       status: previous.status || payload.status || "new",
       lead_status: previous.lead_status || previous.status || payload.lead_status || "new",
-      updated_at: new Date().toISOString(),
+      last_message: inboundText || previous.last_message || "",
+      last_message_at: inboundText ? now : previous.last_message_at || now,
+      last_inbound_at: now,
+      updated_at: now,
     });
+    ensureLeadIdentityFields(previous);
     return { lead: previous, created: false };
   }
 
+  const leadId = uuid();
   const lead = withTimestamps({
-    id: uuid(),
+    id: leadId,
+    lead_id: leadId,
     ...payload,
-    lead_score: Number(payload.lead_score || 0),
+    source_platform: "telegram",
+    platform: "telegram",
+    source_channel: "social_integration",
+    conversation_direction: "inbound",
+    client_reached_out: true,
+    agent_initiated: false,
+    last_message: inboundText,
+    last_message_at: inboundText ? now : null,
+    last_inbound_at: now,
+    lead_score: Number(payload.lead_score || 10),
     created_by: "telegram_webhook",
   });
 
+  ensureLeadIdentityFields(lead);
   db.leads.push(lead);
   return { lead, created: true };
 }
 
 function appendTelegramConversation(db, { lead, update = {}, message = {}, text = "", integration = null }) {
   db.conversations = ensureCrmArray(db, "conversations");
+  const msgText = text || message.text || message.caption || "";
+  const now = nowIso();
 
   const conversation = withTimestamps({
     id: uuid(),
+    conversation_id: lead?.conversation_id || lead?.id || uuid(),
     lead_id: lead?.id || null,
     integration_id: integration?.id || null,
     platform: "telegram",
+    source_platform: "telegram",
     channel: "telegram",
     direction: "inbound",
     message_id: message.message_id || null,
+    platform_message_id: message.message_id || null,
     telegram_update_id: update.update_id || null,
     telegram_chat_id: message.chat?.id || lead?.telegram_chat_id || null,
+    platform_contact_id: lead?.platform_contact_id || lead?.telegram_chat_id || message.chat?.id || null,
     from_id: message.from?.id || null,
     from_username: message.from?.username || "",
-    text: text || message.text || message.caption || "",
+    message_text: msgText,
+    text: msgText,
     raw: update,
-    created_at: new Date().toISOString(),
+    raw_payload: update,
+    status: "received",
+    timestamp: now,
+    created_at: now,
   });
 
   db.conversations.push(conversation);
+
+  if (lead) {
+    lead.last_message = msgText || lead.last_message || "";
+    lead.last_message_at = now;
+    lead.last_inbound_at = now;
+    lead.client_reached_out = true;
+    lead.source_platform = "telegram";
+    lead.platform = "telegram";
+    lead.updated_at = now;
+  }
+
   return conversation;
 }
 
@@ -6772,7 +6863,7 @@ const SOCIAL_PLATFORM_CONFIG = {
   },
   instagram: {
     label: "Instagram Professional",
-    env: ["META_PAGE_ACCESS_TOKEN", "INSTAGRAM_BUSINESS_ACCOUNT_ID", "META_VERIFY_TOKEN"],
+    env: ["INSTAGRAM_PAGE_ACCESS_TOKEN", "INSTAGRAM_BUSINESS_ACCOUNT_ID", "META_VERIFY_TOKEN"],
     live: true,
     inbound: true,
     outbound: true,
@@ -6862,9 +6953,242 @@ function getIntegrationByPlatform(db, platform) {
   return ensureCrmArray(db, "integrations").find((item) => normalizeSocialPlatform(item.platform) === clean) || null;
 }
 
-function parseInboundSocialPayload({ platform, payload = {}, integration = null }) {
+function getStableLeadId(lead = {}) {
+  return String(lead?.id || lead?._id || lead?.lead_id || lead?.uuid || "").trim();
+}
+
+function getLeadByAnyId(db, id) {
+  const cleanId = String(id || "").trim();
+  if (!cleanId) return null;
+  return ensureCrmArray(db, "leads").find((lead) => {
+    return [lead.id, lead._id, lead.lead_id, lead.uuid].map((x) => String(x || "").trim()).includes(cleanId);
+  }) || null;
+}
+
+function normalizeLeadDirection(value, fallback = "inbound") {
+  const clean = String(value || fallback || "inbound").trim().toLowerCase();
+  if (["outbound", "agent", "agent_outreach", "company", "business"].includes(clean)) return "outbound";
+  if (["inbound", "client", "client_reached_out", "student", "lead", "user"].includes(clean)) return "inbound";
+  return fallback || "inbound";
+}
+
+function normalizeLeadSourcePlatform(lead = {}, fallback = "other") {
+  return normalizeSocialPlatform(
+    lead.source_platform ||
+    lead.platform ||
+    lead.channel ||
+    lead.source ||
+    lead.source_channel ||
+    fallback
+  );
+}
+
+function normalizeLeadForResponse(lead = {}) {
+  const id = getStableLeadId(lead) || uuid();
+  const platform = normalizeLeadSourcePlatform(lead);
+  const direction = normalizeLeadDirection(
+    lead.conversation_direction ||
+      lead.direction ||
+      lead.lead_direction ||
+      lead.origin ||
+      (lead.agent_initiated ? "outbound" : "inbound"),
+    lead.agent_initiated ? "outbound" : "inbound"
+  );
+
+  return {
+    ...lead,
+    id,
+    lead_id: lead.lead_id || id,
+    source_platform: platform,
+    platform,
+    source_channel: lead.source_channel || "social_integration",
+    conversation_direction: direction,
+    client_reached_out: direction === "inbound" ? true : Boolean(lead.client_reached_out),
+    agent_initiated: direction === "outbound" ? true : Boolean(lead.agent_initiated),
+    status: lead.status || lead.lead_status || "new",
+    lead_status: lead.lead_status || lead.status || "new",
+    last_message: lead.last_message || lead.last_message_text || lead.source_text || "",
+    last_message_at: lead.last_message_at || lead.last_inbound_at || lead.updated_at || lead.created_at || null,
+    assigned_agent: lead.assigned_agent || lead.assigned_agent_id || null,
+  };
+}
+
+function ensureLeadIdentityFields(lead = {}) {
+  const normalized = normalizeLeadForResponse(lead);
+  Object.assign(lead, normalized);
+  return lead;
+}
+
+function getPlatformContactIdForLead(platform, payload = {}) {
   const cleanPlatform = normalizeSocialPlatform(platform);
+  return (
+    payload.platform_contact_id ||
+    payload[`${cleanPlatform}_id`] ||
+    payload[`${cleanPlatform}_chat_id`] ||
+    payload.telegram_chat_id ||
+    payload.wa_id ||
+    payload.whatsapp_phone ||
+    payload.phone ||
+    payload.email ||
+    payload.username ||
+    ""
+  );
+}
+
+function detectMetaPayloadPlatform(payload = {}) {
+  const object = String(payload?.object || "").toLowerCase();
+
+  if (object.includes("instagram")) return "instagram";
+  if (object.includes("page")) return "facebook";
+
+  const entry = payload?.entry?.[0] || {};
+  const messaging = entry?.messaging?.[0] || {};
+  const change = entry?.changes?.[0] || {};
+  const field = String(change?.field || "").toLowerCase();
+
+  if (
+    field.includes("instagram") ||
+    ["comments", "live_comments", "messages", "messaging_postbacks", "message_reactions", "messaging_seen"].includes(field) &&
+      (change?.value?.from?.username || change?.value?.media || change?.value?.comment_id)
+  ) {
+    return "instagram";
+  }
+
+  if (messaging?.recipient?.id || messaging?.sender?.id || field) return "facebook";
+
+  return "facebook";
+}
+
+function extractMetaText({ platform, payload = {} }) {
+  const entry = payload.entry?.[0] || {};
+  const messaging = entry.messaging?.[0] || {};
+  const change = entry.changes?.[0] || {};
+  const value = change.value || {};
+
+  const messageText =
+    messaging.message?.text ||
+    messaging.postback?.title ||
+    messaging.postback?.payload ||
+    value.message ||
+    value.text ||
+    value.comment ||
+    value.caption ||
+    payload.text ||
+    payload.message ||
+    "";
+
+  const senderId =
+    messaging.sender?.id ||
+    value.from?.id ||
+    value.sender?.id ||
+    payload.sender_id ||
+    payload.user_id ||
+    payload.from_id ||
+    "";
+
+  const recipientId =
+    messaging.recipient?.id ||
+    value.recipient?.id ||
+    entry.id ||
+    payload.recipient_id ||
+    "";
+
+  const username =
+    value.from?.username ||
+    value.sender?.username ||
+    payload.username ||
+    payload.handle ||
+    "";
+
+  const displayName =
+    value.from?.name ||
+    value.sender?.name ||
+    payload.name ||
+    username ||
+    senderId ||
+    `${getPlatformConfig(platform).label} Lead`;
+
+  const platformMessageId =
+    messaging.message?.mid ||
+    messaging.postback?.mid ||
+    value.mid ||
+    value.message_id ||
+    value.comment_id ||
+    value.id ||
+    payload.message_id ||
+    "";
+
+  return { messageText, senderId, recipientId, username, displayName, platformMessageId, field: change.field || "" };
+}
+
+function getMetaTokenForPlatform(platform, integration = {}) {
+  const cleanPlatform = normalizeSocialPlatform(platform);
+  if (cleanPlatform === "instagram") {
+    return (
+      getIntegrationCredential(integration, "api_key", "INSTAGRAM_PAGE_ACCESS_TOKEN") ||
+      process.env.INSTAGRAM_PAGE_ACCESS_TOKEN ||
+      process.env.META_PAGE_ACCESS_TOKEN ||
+      ""
+    );
+  }
+  return (
+    getIntegrationCredential(integration, "api_key", "META_PAGE_ACCESS_TOKEN") ||
+    process.env.META_PAGE_ACCESS_TOKEN ||
+    process.env.FACEBOOK_PAGE_ACCESS_TOKEN ||
+    ""
+  );
+}
+
+function getMetaAccountIdForPlatform(platform, integration = {}) {
+  const cleanPlatform = normalizeSocialPlatform(platform);
+  if (cleanPlatform === "instagram") {
+    return integration.account_id || process.env.INSTAGRAM_BUSINESS_ACCOUNT_ID || process.env.INSTAGRAM_ACCOUNT_ID || "me";
+  }
+  return integration.account_id || process.env.FACEBOOK_PAGE_ID || "me";
+}
+
+function buildConversationInbox(db) {
+  const leads = ensureCrmArray(db, "leads").map(normalizeLeadForResponse);
+  const conversations = ensureCrmArray(db, "conversations");
+
+  return leads.map((lead) => {
+    const leadId = getStableLeadId(lead);
+    const leadMessages = conversations
+      .filter((message) => String(message.lead_id || "") === String(leadId))
+      .sort((a, b) => String(b.created_at || b.timestamp || "").localeCompare(String(a.created_at || a.timestamp || "")));
+
+    const lastMessage = leadMessages[0] || null;
+    const unreadCount = leadMessages.filter((message) => {
+      return String(message.direction || "inbound") === "inbound" && !message.read_at && !message.admin_read_at;
+    }).length;
+
+    return {
+      conversation_id: lead.conversation_id || leadId,
+      lead_id: leadId,
+      lead_name: lead.name || lead.display_name || "Unknown Lead",
+      contact: lead.email || lead.phone || lead.whatsapp_phone || lead.platform_contact_id || "",
+      platform: normalizeLeadSourcePlatform(lead),
+      source_platform: normalizeLeadSourcePlatform(lead),
+      platform_icon: normalizeLeadSourcePlatform(lead),
+      last_message: lastMessage?.message_text || lastMessage?.text || lead.last_message || "",
+      last_message_at: lastMessage?.created_at || lastMessage?.timestamp || lead.last_message_at || lead.updated_at || lead.created_at || null,
+      unread_count: unreadCount,
+      status: lead.status || lead.lead_status || "new",
+      assigned_agent: lead.assigned_agent_name || lead.assigned_agent || lead.assigned_agent_id || "Unassigned",
+      direction: lead.conversation_direction || "inbound",
+      client_reached_out: lead.client_reached_out !== false,
+      agent_initiated: Boolean(lead.agent_initiated),
+    };
+  }).sort((a, b) => String(b.last_message_at || "").localeCompare(String(a.last_message_at || "")));
+}
+
+function parseInboundSocialPayload({ platform, payload = {}, integration = null }) {
+  let cleanPlatform = normalizeSocialPlatform(platform);
   const body = payload || {};
+
+  if (cleanPlatform === "facebook" && (String(body.object || "").toLowerCase().includes("instagram"))) {
+    cleanPlatform = "instagram";
+  }
 
   let text = "";
   let externalUserId = "";
@@ -6873,37 +7197,58 @@ function parseInboundSocialPayload({ platform, payload = {}, integration = null 
   let chatId = "";
   let email = "";
   let phone = "";
+  let platformMessageId = "";
+  let recipientId = "";
 
-  if (cleanPlatform === "whatsapp") {
+  if (cleanPlatform === "telegram") {
+    const message = body.message || body.edited_message || body.channel_post || {};
+    const from = message.from || {};
+    const chat = message.chat || {};
+    text = message.text || message.caption || body.text || "";
+    externalUserId = String(from.id || chat.id || body.user_id || "");
+    username = from.username || body.username || "";
+    displayName = [from.first_name, from.last_name].filter(Boolean).join(" ") || username || chat.title || externalUserId;
+    chatId = String(chat.id || externalUserId || "");
+    platformMessageId = message.message_id || body.update_id || "";
+  } else if (cleanPlatform === "whatsapp") {
     const value = body.entry?.[0]?.changes?.[0]?.value || body.value || body;
     const message = value.messages?.[0] || body.message || {};
     const contact = value.contacts?.[0] || {};
-    text = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || body.text || "";
+    text =
+      message.text?.body ||
+      message.button?.text ||
+      message.interactive?.button_reply?.title ||
+      message.interactive?.list_reply?.title ||
+      body.text ||
+      "";
     externalUserId = message.from || contact.wa_id || body.from || body.phone || "";
     phone = externalUserId;
     displayName = contact.profile?.name || body.name || externalUserId;
     chatId = externalUserId;
+    platformMessageId = message.id || body.message_id || "";
   } else if (cleanPlatform === "facebook" || cleanPlatform === "instagram") {
-    const entry = body.entry?.[0] || {};
-    const messaging = entry.messaging?.[0] || {};
-    const change = entry.changes?.[0]?.value || {};
-    text = messaging.message?.text || change.message || change.text || body.text || body.message || "";
-    externalUserId = messaging.sender?.id || change.from?.id || body.sender_id || body.user_id || "";
-    username = change.from?.username || body.username || "";
-    displayName = change.from?.name || username || externalUserId || body.name || "";
-    chatId = messaging.sender?.id || externalUserId;
+    const meta = extractMetaText({ platform: cleanPlatform, payload: body });
+    text = meta.messageText;
+    externalUserId = meta.senderId;
+    username = meta.username;
+    displayName = meta.displayName;
+    chatId = meta.senderId;
+    recipientId = meta.recipientId;
+    platformMessageId = meta.platformMessageId;
   } else if (cleanPlatform === "email") {
-    text = body.text || body.html || body.subject || "";
-    email = body.from || body.email || body.sender || "";
+    text = body.text || body.html || body.subject || body.message || "";
+    email = body.from || body.email || body.sender || body.reply_to || "";
     externalUserId = email;
     displayName = body.name || body.from_name || email;
-    chatId = body.message_id || email;
+    chatId = body.message_id || body.thread_id || email;
+    platformMessageId = body.message_id || "";
   } else if (cleanPlatform === "discord") {
     text = body.content || body.text || "";
     externalUserId = body.author?.id || body.user_id || "";
     username = body.author?.username || body.username || "";
     displayName = body.author?.global_name || username || externalUserId;
     chatId = body.channel_id || "";
+    platformMessageId = body.id || body.message_id || "";
   } else {
     text = body.text || body.message || body.comment || body.body || body.content || "";
     externalUserId = body.user_id || body.id || body.author_id || body.sender_id || body.profile_id || body.username || body.email || "";
@@ -6912,26 +7257,59 @@ function parseInboundSocialPayload({ platform, payload = {}, integration = null 
     phone = body.phone || body.whatsapp || "";
     displayName = body.name || username || email || phone || externalUserId || `${getPlatformConfig(cleanPlatform).label} Lead`;
     chatId = body.chat_id || body.thread_id || body.conversation_id || "";
+    platformMessageId = body.message_id || body.id || "";
   }
+
+  const platformContactId = String(getPlatformContactIdForLead(cleanPlatform, {
+    platform_contact_id: externalUserId || chatId || email || phone,
+    [`${cleanPlatform}_id`]: externalUserId,
+    [`${cleanPlatform}_chat_id`]: chatId,
+    email,
+    phone,
+  }) || "").trim();
 
   return compactDefined({
     name: displayName,
+    display_name: displayName,
     email,
     phone,
     whatsapp: cleanPlatform === "whatsapp" ? phone : undefined,
+    whatsapp_phone: cleanPlatform === "whatsapp" ? phone : undefined,
+    wa_id: cleanPlatform === "whatsapp" ? externalUserId : undefined,
+
     [`${cleanPlatform}_id`]: externalUserId,
     [`${cleanPlatform}_username`]: username,
     [`${cleanPlatform}_chat_id`]: chatId,
+
     telegram_id: cleanPlatform === "telegram" ? externalUserId : undefined,
     telegram_username: cleanPlatform === "telegram" ? username : undefined,
+    telegram_chat_id: cleanPlatform === "telegram" ? chatId : undefined,
+
+    facebook_sender_id: cleanPlatform === "facebook" ? externalUserId : undefined,
+    facebook_page_id: cleanPlatform === "facebook" ? (recipientId || process.env.FACEBOOK_PAGE_ID || "") : undefined,
+
+    instagram_sender_id: cleanPlatform === "instagram" ? externalUserId : undefined,
+    instagram_business_account_id: cleanPlatform === "instagram" ? (recipientId || process.env.INSTAGRAM_BUSINESS_ACCOUNT_ID || "") : undefined,
+
+    platform_contact_id: platformContactId,
+    platform_username: username,
+    platform_display_name: displayName,
+    platform_message_id: platformMessageId,
     source_platform: cleanPlatform,
     platform: cleanPlatform,
+    source_channel: "social_integration",
     source_integration_id: integration?.id || null,
     source_integration_name: integration?.account_name || integration?.name || getPlatformConfig(cleanPlatform).label,
     source_text: String(text || "").trim(),
+    last_message: String(text || "").trim(),
+    last_message_at: nowIso(),
     conversation_summary: String(text || "").trim().slice(0, 300),
-    opt_in_status: cleanPlatform === "whatsapp" ? "unknown" : "platform_inbound",
+    conversation_direction: "inbound",
+    client_reached_out: true,
+    agent_initiated: false,
+    opt_in_status: cleanPlatform === "whatsapp" ? "platform_inbound" : "platform_inbound",
     status: "new",
+    lead_status: "new",
   });
 }
 
@@ -6942,6 +7320,9 @@ function findExistingSocialLead(db, platform, payload = {}) {
     payload.email,
     payload.phone,
     payload.whatsapp,
+    payload.whatsapp_phone,
+    payload.wa_id,
+    payload.platform_contact_id,
     payload.telegram_id,
     payload.facebook_id,
     payload.instagram_id,
@@ -6962,6 +7343,9 @@ function findExistingSocialLead(db, platform, payload = {}) {
       return [
         lead.phone,
         lead.whatsapp,
+        lead.whatsapp_phone,
+        lead.wa_id,
+        lead.platform_contact_id,
         lead.telegram_id,
         lead.facebook_id,
         lead.instagram_id,
@@ -6983,46 +7367,101 @@ function upsertSocialLead(db, platform, payload = {}) {
   const cleanPlatform = normalizeSocialPlatform(platform);
   const previous = findExistingSocialLead(db, cleanPlatform, payload);
   const leads = ensureCrmArray(db, "leads");
+  const now = nowIso();
+  const inboundText = String(payload.last_message || payload.source_text || "").trim();
 
   if (previous) {
     Object.assign(previous, compactDefined(payload), {
-      last_inbound_at: nowIso(),
-      updated_at: nowIso(),
+      id: getStableLeadId(previous) || uuid(),
+      lead_id: previous.lead_id || getStableLeadId(previous) || uuid(),
+      source_platform: cleanPlatform,
+      platform: cleanPlatform,
+      source_channel: previous.source_channel || "social_integration",
+      conversation_direction: previous.conversation_direction || "inbound",
+      client_reached_out: previous.client_reached_out !== false,
+      agent_initiated: Boolean(previous.agent_initiated),
+      last_message: inboundText || previous.last_message || previous.last_message_text || "",
+      last_message_at: inboundText ? now : previous.last_message_at || previous.updated_at || now,
+      last_inbound_at: now,
+      updated_at: now,
+      status: previous.status || previous.lead_status || payload.status || "new",
+      lead_status: previous.lead_status || previous.status || payload.lead_status || "new",
     });
+    ensureLeadIdentityFields(previous);
     return { lead: previous, created: false };
   }
 
+  const leadId = uuid();
   const lead = withTimestamps({
-    id: uuid(),
+    id: leadId,
+    lead_id: leadId,
     brand_id: payload.brand_id || null,
-    name: payload.name || `${getPlatformConfig(cleanPlatform).label} Lead`,
+    name: payload.name || payload.display_name || `${getPlatformConfig(cleanPlatform).label} Lead`,
     status: payload.status || "new",
+    lead_status: payload.lead_status || payload.status || "new",
     lead_score: Number(payload.lead_score || 10),
     source_platform: cleanPlatform,
     platform: cleanPlatform,
+    source_channel: "social_integration",
+    conversation_direction: "inbound",
+    client_reached_out: true,
+    agent_initiated: false,
     created_from: `${cleanPlatform}_webhook`,
-    last_inbound_at: nowIso(),
+    last_message: inboundText,
+    last_message_at: inboundText ? now : null,
+    last_inbound_at: now,
     ...compactDefined(payload),
   });
 
+  ensureLeadIdentityFields(lead);
   leads.push(lead);
   return { lead, created: true };
 }
 
 function appendSocialConversation(db, { lead, platform, direction = "inbound", text = "", payload = {}, integration = null }) {
+  const cleanPlatform = normalizeSocialPlatform(platform);
+  const now = nowIso();
+  const leadId = getStableLeadId(lead);
+  const msgText = String(text || payload?.text || payload?.message || "").trim();
+
   const message = withTimestamps({
     id: uuid(),
+    conversation_id: lead?.conversation_id || leadId || uuid(),
     brand_id: lead?.brand_id || integration?.brand_id || null,
-    lead_id: lead?.id || null,
-    platform: normalizeSocialPlatform(platform),
+    lead_id: leadId || null,
+    platform: cleanPlatform,
+    source_platform: cleanPlatform,
     integration_id: integration?.id || null,
-    direction,
-    message_text: String(text || ""),
+    direction: normalizeLeadDirection(direction, "inbound"),
+    message_text: msgText,
+    text: msgText,
+    platform_message_id: payload?.message_id || payload?.platform_message_id || payload?.entry?.[0]?.messaging?.[0]?.message?.mid || null,
+    platform_contact_id: lead?.platform_contact_id || lead?.[`${cleanPlatform}_id`] || null,
     raw_payload: payload || {},
-    sent_by: direction === "outbound" ? "system" : "lead",
-    status: "saved",
+    sent_by: normalizeLeadDirection(direction, "inbound") === "outbound" ? "system" : "lead",
+    status: normalizeLeadDirection(direction, "inbound") === "outbound" ? "sent" : "received",
+    timestamp: now,
+    created_at: now,
   });
+
   ensureCrmArray(db, "conversations").push(message);
+
+  if (lead) {
+    lead.id = leadId || lead.id || uuid();
+    lead.lead_id = lead.lead_id || lead.id;
+    lead.last_message = msgText || lead.last_message || "";
+    lead.last_message_at = now;
+    if (normalizeLeadDirection(direction, "inbound") === "inbound") {
+      lead.last_inbound_at = now;
+      lead.client_reached_out = true;
+      lead.conversation_direction = lead.conversation_direction || "inbound";
+    } else {
+      lead.last_outbound_at = now;
+      lead.agent_initiated = true;
+    }
+    lead.updated_at = now;
+  }
+
   return message;
 }
 
@@ -7080,14 +7519,16 @@ async function testSocialIntegration(integration = {}) {
   }
 
   if (platform === "facebook" || platform === "instagram") {
-    const token = getIntegrationCredential(integration, "api_key", "META_PAGE_ACCESS_TOKEN") || process.env.META_PAGE_ACCESS_TOKEN;
+    const token = getMetaTokenForPlatform(platform, integration);
     if (!token) {
-      const e = new Error("Meta integration is missing META_PAGE_ACCESS_TOKEN or saved API token.");
+      const e = new Error(platform === "instagram"
+        ? "Instagram integration is missing INSTAGRAM_PAGE_ACCESS_TOKEN or META_PAGE_ACCESS_TOKEN."
+        : "Facebook integration is missing META_PAGE_ACCESS_TOKEN.");
       e.statusCode = 400;
       throw e;
     }
-    const id = platform === "instagram" ? (integration.account_id || process.env.INSTAGRAM_BUSINESS_ACCOUNT_ID || "me") : (integration.account_id || process.env.FACEBOOK_PAGE_ID || "me");
-    const response = await axios.get(`https://graph.facebook.com/v19.0/${id}`, { params: { access_token: token }, timeout: 20000 });
+    const id = getMetaAccountIdForPlatform(platform, integration);
+    const response = await axios.get(`https://graph.facebook.com/v19.0/${id}`, { params: { access_token: token, fields: platform === "instagram" ? "id,username,name" : "id,name" }, timeout: 20000 });
     return { message: `${config.label} API connection passed`, platform, live_connected: true, safe_metadata: { id: response.data?.id || id, name: response.data?.name || response.data?.username || null }, meta: response.data };
   }
 
@@ -7170,6 +7611,45 @@ async function sendSocialMessage({ db, integration, body = {} }) {
     return { message: "WhatsApp message sent", platform, live_sent: true, raw: response.data };
   }
 
+  if (platform === "facebook" || platform === "instagram") {
+    const token = getMetaTokenForPlatform(platform, integration);
+    if (!token) {
+      const e = new Error(platform === "instagram"
+        ? "Instagram sending requires INSTAGRAM_PAGE_ACCESS_TOKEN or META_PAGE_ACCESS_TOKEN."
+        : "Facebook sending requires META_PAGE_ACCESS_TOKEN.");
+      e.statusCode = 400;
+      throw e;
+    }
+
+    const recipientId = to;
+    if (!recipientId) {
+      const e = new Error("Recipient ID is required for Meta messaging.");
+      e.statusCode = 400;
+      throw e;
+    }
+
+    const response = await axios.post(
+      `https://graph.facebook.com/v19.0/me/messages`,
+      {
+        recipient: { id: recipientId },
+        message: { text },
+        messaging_type: body.messaging_type || "RESPONSE",
+      },
+      {
+        params: { access_token: token },
+        headers: { "Content-Type": "application/json" },
+        timeout: 30000,
+      }
+    );
+
+    return {
+      message: `${getPlatformConfig(platform).label} message sent`,
+      platform,
+      live_sent: true,
+      raw: response.data,
+    };
+  }
+
   if (platform === "discord") {
     const webhookUrl = integration.webhook_url || process.env.DISCORD_WEBHOOK_URL;
     if (!webhookUrl) {
@@ -7216,7 +7696,10 @@ function verifyTelegramSecretHeader(req) {
 async function handleUniversalWebhook({ req, res, platform, integrationId = null }) {
   try {
     const db = await readCrmDb();
-    const cleanPlatform = normalizeSocialPlatform(platform);
+    const requestedPlatform = normalizeSocialPlatform(platform);
+    const cleanPlatform = (requestedPlatform === "facebook" || requestedPlatform === "instagram")
+      ? (String(req.body?.object || "").toLowerCase().includes("instagram") ? "instagram" : requestedPlatform)
+      : requestedPlatform;
     const integration = integrationId
       ? ensureCrmArray(db, "integrations").find((item) => String(item.id) === String(integrationId))
       : getIntegrationByPlatform(db, cleanPlatform);
@@ -7318,6 +7801,102 @@ app.get("/admin/crm/integrations/:id/status", async (req, res) => {
     if (!integration) return res.status(404).json({ success: false, error: "Integration not found" });
     const platform = normalizeSocialPlatform(integration.platform);
     res.json({ success: true, platform, config: getPlatformConfig(platform), integration: sanitizeIntegrationForResponse(integration) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+
+
+app.get("/admin/crm/conversation-inbox", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const conversations = buildConversationInbox(db);
+
+    const platform = req.query.platform ? normalizeSocialPlatform(req.query.platform) : null;
+    const status = req.query.status ? String(req.query.status).toLowerCase() : null;
+    const direction = req.query.direction ? normalizeLeadDirection(req.query.direction, "") : null;
+    const unreadOnly = String(req.query.unread || "false").toLowerCase() === "true";
+
+    const filtered = conversations.filter((item) => {
+      if (platform && item.platform !== platform) return false;
+      if (status && String(item.status || "").toLowerCase() !== status) return false;
+      if (direction && item.direction !== direction) return false;
+      if (unreadOnly && Number(item.unread_count || 0) <= 0) return false;
+      return true;
+    });
+
+    res.json({
+      success: true,
+      conversations: filtered,
+      count: filtered.length,
+      summary: {
+        total: conversations.length,
+        unread: conversations.filter((item) => Number(item.unread_count || 0) > 0).length,
+        whatsapp: conversations.filter((item) => item.platform === "whatsapp").length,
+        telegram: conversations.filter((item) => item.platform === "telegram").length,
+        email: conversations.filter((item) => item.platform === "email").length,
+        facebook: conversations.filter((item) => item.platform === "facebook").length,
+        instagram: conversations.filter((item) => item.platform === "instagram").length,
+      },
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/conversations/:leadId/send", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const lead = getLeadByAnyId(db, req.params.leadId);
+    if (!lead) return res.status(404).json({ success: false, error: "Lead not found" });
+
+    const platform = normalizeLeadSourcePlatform(lead);
+    const integration = getIntegrationByPlatform(db, platform) || { id: null, platform };
+    const to =
+      req.body.to ||
+      lead.platform_contact_id ||
+      lead.telegram_chat_id ||
+      lead.wa_id ||
+      lead.whatsapp_phone ||
+      lead.phone ||
+      lead.email ||
+      lead.facebook_sender_id ||
+      lead.instagram_sender_id;
+
+    const result = await sendSocialMessage({
+      db,
+      integration,
+      body: {
+        ...req.body,
+        to,
+        text: req.body.text || req.body.message || req.body.body,
+      },
+    });
+
+    const conversation = appendSocialConversation(db, {
+      lead,
+      platform,
+      direction: "outbound",
+      text: req.body.text || req.body.message || req.body.body || "",
+      payload: { send_result: result },
+      integration,
+    });
+
+    createIntegrationLog(db, {
+      brand_id: integration?.brand_id || lead.brand_id || null,
+      integration_id: integration?.id || null,
+      platform,
+      action: "admin_send_message",
+      status: result.live_sent ? "success" : "queued",
+      message: result.message,
+      metadata: { lead_id: lead.id, conversation_id: conversation.id },
+    });
+
+    await writeCrmDb(db);
+    res.json({ success: true, result, conversation });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
