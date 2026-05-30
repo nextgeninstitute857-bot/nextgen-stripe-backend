@@ -3791,6 +3791,1658 @@ app.get("/student/dashboard/summary", async (req, res) => {
 
 app.get("/live/debug/storage", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); if (user.role !== "admin") return res.status(403).json({ success: false, error: "Only admins can view storage debug" }); const db = await readLiveDb(); res.json({ success: true, data_dir: DATA_DIR, live_db_path: LIVE_DB_PATH, counts: { courses: Object.keys(db.courses || {}).length, liveSessions: Object.keys(db.liveSessions || {}).length, announcements: Object.keys(db.announcements || {}).length, recordings: Object.keys(db.recordings || {}).length, notes: Object.keys(db.notes || {}).length, enrollments: Object.keys(db.enrollments || {}).length, plans: Object.keys(db.plans || {}).length, coupons: Object.keys(db.coupons || {}).length, assessments: Object.keys(db.assessments || {}).length, assessmentAttempts: Object.keys(db.assessmentAttempts || {}).length, aiUsageLogs: Object.keys(db.aiUsageLogs || {}).length, payments: Object.keys(db.payments || {}).length, roadmaps: Object.keys(db.roadmaps || {}).length, roadmapProgress: Object.keys(db.roadmapProgress || {}).length, leaderboard: Object.keys(db.leaderboard || {}).length, googleAuthUsers: Object.keys(db.googleAuthUsers || {}).length }, updatedAt: db.updatedAt || null }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 
+
+// -----------------------------------------------------------------------------
+// CRM Growth Engine Backend (JSON persistent storage on Render disk)
+// -----------------------------------------------------------------------------
+// This module is intentionally backend-owned. Do not use PocketBase or frontend
+// localStorage for CRM records. Frontend should call these APIs.
+
+const CRM_DB_PATH = path.join(DATA_DIR, "crm-db.json");
+
+const DEFAULT_CRM_SETTINGS = {
+  global_ai_enabled: true,
+  whatsapp_ai_enabled: false,
+  email_ai_enabled: false,
+  social_ai_enabled: false,
+  default_approval_mode: "needs_approval",
+  default_language: "english",
+  default_region: "global",
+  default_daily_send_limit: 50,
+  default_brand_id: null,
+  budget_mode: "approval",
+  ai_usage_tracking_enabled: true,
+  default_consultation_link: "",
+  default_payment_link_behavior: "approval_required",
+  unsubscribe_keywords: ["STOP", "UNSUBSCRIBE", "DON'T MESSAGE", "DO NOT MESSAGE", "NOT INTERESTED"],
+  blocked_words: [],
+  whatsapp_safety_thresholds: {
+    max_daily_failures: 10,
+    max_stop_replies_per_day: 5,
+    max_blocked_per_day: 3,
+  },
+};
+
+const DEFAULT_CRM_MODEL_PRICING = [
+  {
+    id: "model_gpt_4o_mini",
+    model_name: "gpt-4o-mini",
+    input_cost_per_1m_tokens: 0.15,
+    output_cost_per_1m_tokens: 0.60,
+    active: true,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  },
+  {
+    id: "model_gpt_5_mini",
+    model_name: "gpt-5-mini",
+    input_cost_per_1m_tokens: 0.25,
+    output_cost_per_1m_tokens: 2.00,
+    active: true,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  },
+];
+
+const DEFAULT_CRM_DB = {
+  brands: [],
+  leads: [],
+  conversations: [],
+  communities: [],
+  community_posts: [],
+  campaigns: [],
+  outreach_queue: [],
+  import_batches: [],
+  ai_training: [],
+  ai_strategies: [],
+  ai_actions: [],
+  ai_feedback: [],
+  forbidden_claims: [],
+  ai_usage: [],
+  ai_cost_settings: [],
+  model_pricing: DEFAULT_CRM_MODEL_PRICING,
+  country_strategies: [],
+  coupon_rules: [],
+  followups: [],
+  templates: [],
+  approval_queue: [],
+  settings: DEFAULT_CRM_SETTINGS,
+  updated_at: null,
+};
+
+let crmWriteQueue = Promise.resolve();
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function normalizeCrmString(value, fallback = "") {
+  return String(value ?? fallback).trim();
+}
+
+function normalizeCrmLower(value, fallback = "") {
+  return normalizeCrmString(value, fallback).toLowerCase();
+}
+
+function ensureCrmArray(db, key) {
+  if (!Array.isArray(db[key])) db[key] = [];
+  return db[key];
+}
+
+function withTimestamps(record = {}, existing = null) {
+  const now = nowIso();
+  return {
+    ...record,
+    id: record.id || existing?.id || uuid(),
+    created_at: existing?.created_at || record.created_at || now,
+    updated_at: now,
+  };
+}
+
+function safeCrmJson(value, fallback) {
+  try {
+    if (typeof value === "string") return JSON.parse(value);
+    return value ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+async function readCrmDb() {
+  try {
+    await ensureDataDir();
+    const raw = await fs.readFile(CRM_DB_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+
+    const merged = {
+      ...DEFAULT_CRM_DB,
+      ...parsed,
+      brands: Array.isArray(parsed.brands) ? parsed.brands : [],
+      leads: Array.isArray(parsed.leads) ? parsed.leads : [],
+      conversations: Array.isArray(parsed.conversations) ? parsed.conversations : [],
+      communities: Array.isArray(parsed.communities) ? parsed.communities : [],
+      community_posts: Array.isArray(parsed.community_posts) ? parsed.community_posts : [],
+      campaigns: Array.isArray(parsed.campaigns) ? parsed.campaigns : [],
+      outreach_queue: Array.isArray(parsed.outreach_queue) ? parsed.outreach_queue : [],
+      import_batches: Array.isArray(parsed.import_batches) ? parsed.import_batches : [],
+      ai_training: Array.isArray(parsed.ai_training) ? parsed.ai_training : [],
+      ai_strategies: Array.isArray(parsed.ai_strategies) ? parsed.ai_strategies : [],
+      ai_actions: Array.isArray(parsed.ai_actions) ? parsed.ai_actions : [],
+      ai_feedback: Array.isArray(parsed.ai_feedback) ? parsed.ai_feedback : [],
+      ai_usage: Array.isArray(parsed.ai_usage) ? parsed.ai_usage : [],
+      ai_cost_settings: Array.isArray(parsed.ai_cost_settings) ? parsed.ai_cost_settings : [],
+      model_pricing: Array.isArray(parsed.model_pricing) && parsed.model_pricing.length ? parsed.model_pricing : DEFAULT_CRM_MODEL_PRICING,
+      country_strategies: Array.isArray(parsed.country_strategies) ? parsed.country_strategies : [],
+      coupon_rules: Array.isArray(parsed.coupon_rules) ? parsed.coupon_rules : [],
+      followups: Array.isArray(parsed.followups) ? parsed.followups : [],
+      templates: Array.isArray(parsed.templates) ? parsed.templates : [],
+      approval_queue: Array.isArray(parsed.approval_queue) ? parsed.approval_queue : [],
+      settings: { ...DEFAULT_CRM_SETTINGS, ...(parsed.settings || {}) },
+      updated_at: parsed.updated_at || null,
+    };
+
+    if (!merged.brands.length) {
+      const brand = createDefaultCrmBrand();
+      merged.brands.push(brand);
+      merged.settings.default_brand_id = brand.id;
+      await writeCrmDb(merged);
+    } else if (!merged.settings.default_brand_id) {
+      merged.settings.default_brand_id = merged.brands[0].id;
+      await writeCrmDb(merged);
+    }
+
+    return merged;
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      const brand = createDefaultCrmBrand();
+      const initial = {
+        ...DEFAULT_CRM_DB,
+        brands: [brand],
+        settings: { ...DEFAULT_CRM_SETTINGS, default_brand_id: brand.id },
+        updated_at: nowIso(),
+      };
+      await writeCrmDb(initial);
+      return initial;
+    }
+
+    console.error("CRM DB read error:", error.message);
+    return { ...DEFAULT_CRM_DB };
+  }
+}
+
+async function writeCrmDb(db) {
+  crmWriteQueue = crmWriteQueue.then(async () => {
+    await ensureDataDir();
+    const nextDb = {
+      ...DEFAULT_CRM_DB,
+      ...db,
+      settings: { ...DEFAULT_CRM_SETTINGS, ...(db.settings || {}) },
+      model_pricing: Array.isArray(db.model_pricing) && db.model_pricing.length ? db.model_pricing : DEFAULT_CRM_MODEL_PRICING,
+      updated_at: nowIso(),
+    };
+    const tempPath = `${CRM_DB_PATH}.tmp`;
+    await fs.writeFile(tempPath, JSON.stringify(nextDb, null, 2), "utf8");
+    await fs.rename(tempPath, CRM_DB_PATH);
+  });
+  return crmWriteQueue;
+}
+
+function createDefaultCrmBrand() {
+  const now = nowIso();
+  return {
+    id: "brand_nextgen_usmle",
+    name: "NextGen USMLE",
+    exam_key: "usmle",
+    domain: "live.nextgenusmlelms.com",
+    logo_url: "",
+    primary_color: "#060F1E",
+    accent_color: "#10B981",
+    default_language: "english",
+    support_email: "support@nextgenusmlelms.com",
+    whatsapp_number: "",
+    status: "active",
+    created_at: now,
+    updated_at: now,
+  };
+}
+
+function getCrmBrandId(req, db, fallback = null) {
+  return (
+    normalizeCrmString(req.query.brand_id) ||
+    normalizeCrmString(req.body?.brand_id) ||
+    fallback ||
+    db.settings?.default_brand_id ||
+    db.brands?.[0]?.id ||
+    null
+  );
+}
+
+function normalizeCrmCollectionPayload(collection, body = {}, existing = null, brandId = null) {
+  const now = nowIso();
+  const base = {
+    ...(existing || {}),
+    ...(body || {}),
+    id: body.id || existing?.id || uuid(),
+    created_at: existing?.created_at || body.created_at || now,
+    updated_at: now,
+  };
+
+  if (collection !== "brands" && brandId) {
+    base.brand_id = body.brand_id || existing?.brand_id || brandId;
+  }
+
+  if (collection === "brands") {
+    base.name = normalizeCrmString(base.name || base.brand_name || "New Brand");
+    base.exam_key = normalizeCrmString(base.exam_key || base.name.toLowerCase().replace(/[^a-z0-9]+/g, "_"), "general");
+    base.status = normalizeCrmLower(base.status, "active") || "active";
+    base.default_language = normalizeCrmLower(base.default_language, "english") || "english";
+    base.primary_color = base.primary_color || "#060F1E";
+    base.accent_color = base.accent_color || "#10B981";
+  }
+
+  if (collection === "leads") {
+    base.name = normalizeCrmString(base.name || "Unnamed Lead");
+    base.email = normalizeEmail(base.email || "");
+    base.whatsapp = normalizeCrmString(base.whatsapp || base.phone || "");
+    base.phone = normalizeCrmString(base.phone || base.whatsapp || "");
+    base.platform = normalizeCrmLower(base.platform, "manual") || "manual";
+    base.status = normalizeCrmLower(base.status, "new") || "new";
+    base.language = normalizeCrmLower(base.language, "english") || "english";
+    base.region = normalizeCrmLower(base.region, "global") || "global";
+    base.country = normalizeCrmString(base.country || "");
+    base.economic_segment = normalizeCrmLower(base.economic_segment, "unknown") || "unknown";
+    base.interest_level = normalizeCrmLower(base.interest_level, "unknown") || "unknown";
+    base.lead_score = Math.max(0, Math.min(100, Number(base.lead_score || 0)));
+    base.opt_in_status = normalizeCrmLower(base.opt_in_status, "unknown") || "unknown";
+    base.unsubscribe_status = normalizeCrmLower(base.unsubscribe_status, "active") || "active";
+    base.ai_enabled = base.ai_enabled !== false;
+  }
+
+  if (collection === "communities") {
+    base.platform = normalizeCrmLower(base.platform, "manual") || "manual";
+    base.name = normalizeCrmString(base.name || "New Community");
+    base.status = normalizeCrmLower(base.status, "active") || "active";
+    base.language = normalizeCrmLower(base.language, "english") || "english";
+    base.region = normalizeCrmLower(base.region, "global") || "global";
+    base.community_type = normalizeCrmLower(base.community_type, "international") || "international";
+    base.member_count = Number(base.member_count || 0);
+  }
+
+  if (collection === "campaigns") {
+    base.name = normalizeCrmString(base.name || "New Campaign");
+    base.channel = normalizeCrmLower(base.channel, "manual") || "manual";
+    base.status = normalizeCrmLower(base.status, "draft") || "draft";
+    base.send_mode = normalizeCrmLower(base.send_mode, "safe_queue") || "safe_queue";
+    base.approval_mode = normalizeCrmLower(base.approval_mode, "safe_queue") || "safe_queue";
+    base.daily_limit = Number(base.daily_limit || 50);
+    base.personalization_enabled = base.personalization_enabled !== false;
+  }
+
+  if (collection === "ai_training") {
+    base.category = normalizeCrmString(base.category || "Company Knowledge");
+    base.title = normalizeCrmString(base.title || "Untitled Knowledge");
+    base.content = normalizeCrmString(base.content || "");
+    base.is_active = base.is_active !== false;
+    base.priority = Number(base.priority || 0);
+    base.version = Number(base.version || existing?.version || 1);
+  }
+
+  if (collection === "templates") {
+    base.name = normalizeCrmString(base.name || "Untitled Template");
+    base.channel = normalizeCrmLower(base.channel, "whatsapp") || "whatsapp";
+    base.language = normalizeCrmLower(base.language, "english") || "english";
+    base.body = base.body || base.message_body || base.content || "";
+    base.active = base.active !== false;
+    base.approval_required = base.approval_required !== false;
+    base.version = Number(base.version || existing?.version || 1);
+  }
+
+  return base;
+}
+
+function collectionResponseName(collection) {
+  const map = {
+    brands: "brands",
+    leads: "leads",
+    conversations: "conversations",
+    communities: "communities",
+    community_posts: "posts",
+    campaigns: "campaigns",
+    outreach_queue: "queue",
+    import_batches: "batches",
+    ai_training: "training",
+    ai_strategies: "strategies",
+    ai_actions: "actions",
+    ai_feedback: "feedback",
+    forbidden_claims: "claims",
+    ai_usage: "usage",
+    country_strategies: "country_strategies",
+    coupon_rules: "coupon_rules",
+    followups: "followups",
+    templates: "templates",
+    approval_queue: "items",
+  };
+  return map[collection] || collection;
+}
+
+function filterCrmRecords(req, records = [], brandId = null) {
+  let output = [...records];
+
+  if (brandId) {
+    output = output.filter((item) => !item.brand_id || String(item.brand_id) === String(brandId));
+  }
+
+  const status = normalizeCrmString(req.query.status);
+  if (status) output = output.filter((item) => String(item.status || "").toLowerCase() === status.toLowerCase());
+
+  const platform = normalizeCrmString(req.query.platform);
+  if (platform) output = output.filter((item) => String(item.platform || "").toLowerCase() === platform.toLowerCase());
+
+  const q = normalizeCrmString(req.query.q || req.query.search);
+  if (q) {
+    const needle = q.toLowerCase();
+    output = output.filter((item) => JSON.stringify(item).toLowerCase().includes(needle));
+  }
+
+  output.sort(sortNewestFirst);
+
+  return output;
+}
+
+async function requireCrmAdmin(req) {
+  return requireAdmin(req);
+}
+
+function registerCrmCrudRoutes({ route, collection, brandScoped = true }) {
+  app.get(route, async (req, res) => {
+    try {
+      await requireCrmAdmin(req);
+      const db = await readCrmDb();
+      const brandId = brandScoped ? getCrmBrandId(req, db) : null;
+      const records = filterCrmRecords(req, ensureCrmArray(db, collection), brandId);
+      res.json({ success: true, [collectionResponseName(collection)]: records, count: records.length });
+    } catch (error) {
+      res.status(error.statusCode || 500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.post(route, async (req, res) => {
+    try {
+      await requireCrmAdmin(req);
+      const db = await readCrmDb();
+      const brandId = brandScoped ? getCrmBrandId(req, db) : null;
+      const records = ensureCrmArray(db, collection);
+      const record = normalizeCrmCollectionPayload(collection, req.body || {}, null, brandId);
+      records.push(record);
+
+      if (collection === "brands" && !db.settings.default_brand_id) {
+        db.settings.default_brand_id = record.id;
+      }
+
+      await writeCrmDb(db);
+      res.json({ success: true, [collectionResponseName(collection).replace(/s$/, "") || "record"]: record });
+    } catch (error) {
+      res.status(error.statusCode || 500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.get(`${route}/:id`, async (req, res) => {
+    try {
+      await requireCrmAdmin(req);
+      const db = await readCrmDb();
+      const record = ensureCrmArray(db, collection).find((item) => String(item.id) === String(req.params.id));
+
+      if (!record) return res.status(404).json({ success: false, error: "Record not found" });
+
+      res.json({ success: true, record });
+    } catch (error) {
+      res.status(error.statusCode || 500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.put(`${route}/:id`, async (req, res) => {
+    try {
+      await requireCrmAdmin(req);
+      const db = await readCrmDb();
+      const brandId = brandScoped ? getCrmBrandId(req, db) : null;
+      const records = ensureCrmArray(db, collection);
+      const index = records.findIndex((item) => String(item.id) === String(req.params.id));
+
+      if (index < 0) return res.status(404).json({ success: false, error: "Record not found" });
+
+      const record = normalizeCrmCollectionPayload(collection, req.body || {}, records[index], brandId);
+      records[index] = record;
+
+      await writeCrmDb(db);
+      res.json({ success: true, record });
+    } catch (error) {
+      res.status(error.statusCode || 500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.delete(`${route}/:id`, async (req, res) => {
+    try {
+      await requireCrmAdmin(req);
+      const db = await readCrmDb();
+      const records = ensureCrmArray(db, collection);
+      const before = records.length;
+      db[collection] = records.filter((item) => String(item.id) !== String(req.params.id));
+      await writeCrmDb(db);
+      res.json({ success: true, deleted: before !== db[collection].length });
+    } catch (error) {
+      res.status(error.statusCode || 500).json({ success: false, error: error.message });
+    }
+  });
+}
+
+function detectCountryFromPhone(rawPhone) {
+  const phone = String(rawPhone || "").replace(/[^\d+]/g, "");
+  const digits = phone.replace(/\D/g, "");
+
+  const rules = [
+    { prefix: "966", country: "Saudi Arabia", region: "middle_east", language: "arabic" },
+    { prefix: "971", country: "United Arab Emirates", region: "middle_east", language: "arabic" },
+    { prefix: "974", country: "Qatar", region: "middle_east", language: "arabic" },
+    { prefix: "965", country: "Kuwait", region: "middle_east", language: "arabic" },
+    { prefix: "968", country: "Oman", region: "middle_east", language: "arabic" },
+    { prefix: "973", country: "Bahrain", region: "middle_east", language: "arabic" },
+    { prefix: "20", country: "Egypt", region: "middle_east", language: "arabic" },
+    { prefix: "92", country: "Pakistan", region: "south_asia", language: "urdu" },
+    { prefix: "91", country: "India", region: "south_asia", language: "english" },
+    { prefix: "234", country: "Nigeria", region: "africa", language: "english" },
+    { prefix: "1", country: "United States/Canada", region: "north_america", language: "english" },
+    { prefix: "44", country: "United Kingdom", region: "europe", language: "english" },
+  ];
+
+  const match = rules.find((item) => digits.startsWith(item.prefix));
+
+  return {
+    phone,
+    country: match?.country || "",
+    region: match?.region || "global",
+    language: match?.language || "english",
+  };
+}
+
+function parseManualContacts(input) {
+  if (Array.isArray(input)) return input;
+
+  const raw = String(input || "");
+  return raw
+    .split(/\n|,|;/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((value) => {
+      if (value.includes("@")) return { email: value };
+      return { whatsapp: value, phone: value };
+    });
+}
+
+function validateCrmContact(row = {}) {
+  const email = normalizeEmail(row.email || "");
+  const whatsapp = normalizeCrmString(row.whatsapp || row.phone || "");
+  const emailValid = !email || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  const phoneDigits = whatsapp.replace(/\D/g, "");
+  const phoneValid = !whatsapp || phoneDigits.length >= 8;
+
+  return {
+    email,
+    whatsapp,
+    phone: normalizeCrmString(row.phone || whatsapp),
+    valid: Boolean((email && emailValid) || (whatsapp && phoneValid)),
+    email_valid: emailValid,
+    phone_valid: phoneValid,
+  };
+}
+
+function findCouponForLead(db, { brandId, country, region, language, examType, leadStatus }) {
+  const rules = ensureCrmArray(db, "coupon_rules").filter((rule) => {
+    if (String(rule.brand_id) !== String(brandId)) return false;
+    if (rule.active === false) return false;
+    if (rule.country && country && String(rule.country).toLowerCase() !== String(country).toLowerCase()) return false;
+    if (rule.region && region && String(rule.region).toLowerCase() !== String(region).toLowerCase()) return false;
+    if (rule.language && language && String(rule.language).toLowerCase() !== String(language).toLowerCase()) return false;
+    if (rule.exam_type && examType && String(rule.exam_type).toLowerCase() !== String(examType).toLowerCase()) return false;
+    if (rule.lead_status && leadStatus && String(rule.lead_status).toLowerCase() !== String(leadStatus).toLowerCase()) return false;
+    return true;
+  });
+
+  return rules[0] || null;
+}
+
+function buildImportPreviewRows({ db, brandId, rows = [], defaults = {} }) {
+  const leads = ensureCrmArray(db, "leads");
+
+  return rows.map((rawRow, index) => {
+    const row = typeof rawRow === "string" ? (rawRow.includes("@") ? { email: rawRow } : { whatsapp: rawRow, phone: rawRow }) : rawRow || {};
+    const validation = validateCrmContact(row);
+    const detected = detectCountryFromPhone(validation.whatsapp || validation.phone);
+    const email = validation.email;
+    const whatsapp = validation.whatsapp || detected.phone;
+    const duplicate = leads.some((lead) => {
+      return (
+        (email && normalizeEmail(lead.email) === email) ||
+        (whatsapp && String(lead.whatsapp || lead.phone || "").replace(/\D/g, "") === whatsapp.replace(/\D/g, ""))
+      );
+    });
+
+    const country = row.country || detected.country || defaults.country || "";
+    const region = row.region || detected.region || defaults.region || "global";
+    const language = row.language || detected.language || defaults.language || "english";
+    const couponRule = findCouponForLead(db, {
+      brandId,
+      country,
+      region,
+      language,
+      examType: row.exam_type || defaults.exam_type || "",
+      leadStatus: row.status || "imported",
+    });
+
+    return {
+      row_number: index + 1,
+      name: normalizeCrmString(row.name || row.full_name || ""),
+      email,
+      whatsapp,
+      phone: validation.phone || whatsapp,
+      country,
+      region,
+      language,
+      platform: row.platform || defaults.platform || "manual",
+      source_community: row.source_community || defaults.source_community || "",
+      exam_type: row.exam_type || defaults.exam_type || "",
+      exam_timeline: row.exam_timeline || defaults.exam_timeline || "",
+      notes: row.notes || row.pain_points || "",
+      opt_in_status: row.opt_in_status || defaults.opt_in_status || "unknown",
+      coupon_rule: couponRule ? { id: couponRule.id, coupon_code: couponRule.coupon_code, discount_percent: couponRule.discount_percent } : null,
+      valid: validation.valid,
+      duplicate,
+      action: duplicate ? "skip_duplicate" : validation.valid ? "create" : "skip_invalid",
+      errors: [
+        validation.email_valid ? null : "Invalid email",
+        validation.phone_valid ? null : "Invalid phone",
+        validation.valid ? null : "No valid email or phone",
+      ].filter(Boolean),
+    };
+  });
+}
+
+function estimateTokensFromText(text) {
+  return Math.max(1, Math.ceil(String(text || "").length / 4));
+}
+
+function getCrmModelPricing(db, modelName = "gpt-4o-mini") {
+  return (
+    ensureCrmArray(db, "model_pricing").find((item) => String(item.model_name).toLowerCase() === String(modelName).toLowerCase() && item.active !== false) ||
+    DEFAULT_CRM_MODEL_PRICING[0]
+  );
+}
+
+function estimateCrmAiCost({ db, model, inputTokens, outputTokens }) {
+  const pricing = getCrmModelPricing(db, model);
+  const input = Number(inputTokens || 0);
+  const output = Number(outputTokens || 0);
+  const cost =
+    (input / 1000000) * Number(pricing.input_cost_per_1m_tokens || 0) +
+    (output / 1000000) * Number(pricing.output_cost_per_1m_tokens || 0);
+
+  return Number(cost.toFixed(6));
+}
+
+function getBrandCostSettings(db, brandId) {
+  const existing = ensureCrmArray(db, "ai_cost_settings").find((item) => String(item.brand_id) === String(brandId));
+  return {
+    id: existing?.id || `cost_${brandId || "global"}`,
+    brand_id: brandId || null,
+    daily_cost_limit: Number(existing?.daily_cost_limit ?? 5),
+    weekly_cost_limit: Number(existing?.weekly_cost_limit ?? 25),
+    monthly_cost_limit: Number(existing?.monthly_cost_limit ?? 100),
+    daily_token_limit: Number(existing?.daily_token_limit ?? 500000),
+    monthly_token_limit: Number(existing?.monthly_token_limit ?? 5000000),
+    max_cost_per_action: Number(existing?.max_cost_per_action ?? 0.25),
+    max_tokens_per_action: Number(existing?.max_tokens_per_action ?? 12000),
+    budget_mode: existing?.budget_mode || db.settings?.budget_mode || "approval",
+    pause_at_limit: existing?.pause_at_limit !== false,
+    notify_at_50: existing?.notify_at_50 !== false,
+    notify_at_75: existing?.notify_at_75 !== false,
+    notify_at_90: existing?.notify_at_90 !== false,
+    notify_at_100: existing?.notify_at_100 !== false,
+    agent_limits: existing?.agent_limits || {},
+    campaign_limits: existing?.campaign_limits || {},
+    lead_limits: existing?.lead_limits || {},
+    created_at: existing?.created_at || nowIso(),
+    updated_at: existing?.updated_at || nowIso(),
+  };
+}
+
+function usageWithinDate(usage, startDate, endDate) {
+  const ts = new Date(usage.created_at || 0).getTime();
+  return ts >= startDate.getTime() && ts <= endDate.getTime();
+}
+
+function getCrmUsageTotals(db, brandId, { startDate, endDate } = {}) {
+  let logs = ensureCrmArray(db, "ai_usage").filter((item) => !brandId || String(item.brand_id) === String(brandId));
+
+  if (startDate && endDate) {
+    logs = logs.filter((item) => usageWithinDate(item, startDate, endDate));
+  }
+
+  return logs.reduce(
+    (acc, item) => {
+      acc.calls += 1;
+      acc.input_tokens += Number(item.input_tokens || 0);
+      acc.output_tokens += Number(item.output_tokens || 0);
+      acc.total_tokens += Number(item.total_tokens || 0);
+      acc.estimated_cost += Number(item.estimated_cost || 0);
+      if (item.status === "failed") acc.failed_calls += 1;
+      return acc;
+    },
+    { calls: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0, estimated_cost: 0, failed_calls: 0 }
+  );
+}
+
+function todayRange() {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  const end = new Date();
+  end.setHours(23, 59, 59, 999);
+  return { start, end };
+}
+
+function monthRange() {
+  const start = new Date();
+  start.setDate(1);
+  start.setHours(0, 0, 0, 0);
+  const end = new Date();
+  end.setMonth(end.getMonth() + 1, 0);
+  end.setHours(23, 59, 59, 999);
+  return { start, end };
+}
+
+function weekRange() {
+  const end = new Date();
+  const start = new Date();
+  start.setDate(start.getDate() - 6);
+  start.setHours(0, 0, 0, 0);
+  end.setHours(23, 59, 59, 999);
+  return { start, end };
+}
+
+function evaluateCrmBudget({ db, brandId, estimatedCost = 0, estimatedTokens = 0, agentName = "", campaignId = "", leadId = "" }) {
+  const settings = getBrandCostSettings(db, brandId);
+  const today = todayRange();
+  const month = monthRange();
+  const todayTotals = getCrmUsageTotals(db, brandId, { startDate: today.start, endDate: today.end });
+  const monthTotals = getCrmUsageTotals(db, brandId, { startDate: month.start, endDate: month.end });
+
+  const reasons = [];
+
+  if (Number(estimatedCost || 0) > settings.max_cost_per_action) reasons.push("max_cost_per_action_exceeded");
+  if (Number(estimatedTokens || 0) > settings.max_tokens_per_action) reasons.push("max_tokens_per_action_exceeded");
+  if (todayTotals.estimated_cost + Number(estimatedCost || 0) > settings.daily_cost_limit) reasons.push("daily_cost_limit_reached");
+  if (monthTotals.estimated_cost + Number(estimatedCost || 0) > settings.monthly_cost_limit) reasons.push("monthly_cost_limit_reached");
+  if (todayTotals.total_tokens + Number(estimatedTokens || 0) > settings.daily_token_limit) reasons.push("daily_token_limit_reached");
+  if (monthTotals.total_tokens + Number(estimatedTokens || 0) > settings.monthly_token_limit) reasons.push("monthly_token_limit_reached");
+
+  const agentLimit = agentName ? settings.agent_limits?.[agentName] : null;
+  if (agentLimit?.daily_cost_limit) {
+    const agentToday = ensureCrmArray(db, "ai_usage")
+      .filter((item) => String(item.brand_id) === String(brandId) && item.agent_name === agentName)
+      .filter((item) => usageWithinDate(item, today.start, today.end))
+      .reduce((sum, item) => sum + Number(item.estimated_cost || 0), 0);
+    if (agentToday + Number(estimatedCost || 0) > Number(agentLimit.daily_cost_limit)) reasons.push("agent_daily_cost_limit_reached");
+  }
+
+  const campaignLimit = campaignId ? settings.campaign_limits?.[campaignId] : null;
+  if (campaignLimit?.total_cost_limit) {
+    const campaignTotal = ensureCrmArray(db, "ai_usage")
+      .filter((item) => String(item.brand_id) === String(brandId) && String(item.campaign_id) === String(campaignId))
+      .reduce((sum, item) => sum + Number(item.estimated_cost || 0), 0);
+    if (campaignTotal + Number(estimatedCost || 0) > Number(campaignLimit.total_cost_limit)) reasons.push("campaign_cost_limit_reached");
+  }
+
+  const leadLimit = leadId ? settings.lead_limits?.[leadId] : null;
+  if (leadLimit?.max_cost) {
+    const leadTotal = ensureCrmArray(db, "ai_usage")
+      .filter((item) => String(item.brand_id) === String(brandId) && String(item.lead_id) === String(leadId))
+      .reduce((sum, item) => sum + Number(item.estimated_cost || 0), 0);
+    if (leadTotal + Number(estimatedCost || 0) > Number(leadLimit.max_cost)) reasons.push("lead_cost_limit_reached");
+  }
+
+  return {
+    allowed: reasons.length === 0 || settings.budget_mode === "warning",
+    budget_mode: settings.budget_mode,
+    requires_approval: reasons.length > 0 && settings.budget_mode === "approval",
+    should_pause: reasons.length > 0 && settings.budget_mode === "strict",
+    reasons,
+    settings,
+    todayTotals,
+    monthTotals,
+  };
+}
+
+async function logCrmAiActionAndUsage({
+  db,
+  brandId,
+  agentName = "CRM AI",
+  actionType,
+  channel = "crm",
+  leadId = null,
+  campaignId = null,
+  strategyId = null,
+  inputText = "",
+  outputText = "",
+  model = "gpt-4o-mini",
+  status = "draft",
+  approvalStatus = "needs_approval",
+}) {
+  const inputTokens = estimateTokensFromText(inputText);
+  const outputTokens = estimateTokensFromText(outputText);
+  const totalTokens = inputTokens + outputTokens;
+  const estimatedCost = estimateCrmAiCost({ db, model, inputTokens, outputTokens });
+
+  const now = nowIso();
+  const action = {
+    id: uuid(),
+    brand_id: brandId || null,
+    agent_name: agentName,
+    action_type: actionType,
+    channel,
+    lead_id: leadId,
+    campaign_id: campaignId,
+    strategy_id: strategyId,
+    input_text: inputText,
+    output_text: outputText,
+    status,
+    approval_status: approvalStatus,
+    approved_by: null,
+    executed_at: status === "executed" || status === "sent" ? now : null,
+    created_at: now,
+  };
+
+  const usage = {
+    id: uuid(),
+    brand_id: brandId || null,
+    agent_name: agentName,
+    action_type: actionType,
+    lead_id: leadId,
+    campaign_id: campaignId,
+    strategy_id: strategyId,
+    channel,
+    model_used: model,
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    total_tokens: totalTokens,
+    estimated_cost: estimatedCost,
+    status,
+    created_at: now,
+  };
+
+  db.ai_actions.push(action);
+  db.ai_usage.push(usage);
+
+  if (approvalStatus === "needs_approval" || status === "draft") {
+    db.approval_queue.push({
+      id: uuid(),
+      brand_id: brandId || null,
+      action_id: action.id,
+      agent_name: agentName,
+      action_type: actionType,
+      channel,
+      lead_id: leadId,
+      campaign_id: campaignId,
+      strategy_id: strategyId,
+      draft_content: outputText,
+      estimated_cost: estimatedCost,
+      total_tokens: totalTokens,
+      status: "pending",
+      created_at: now,
+      updated_at: now,
+    });
+  }
+
+  return { action, usage };
+}
+
+function classifyLeadFromMessage(message = "") {
+  const text = String(message || "").toLowerCase();
+  let score = 30;
+  let exam_type = "";
+  let exam_timeline = "";
+  let recommended_offer = "Free 15-minute consultation";
+  const pain = [];
+
+  if (text.includes("step 1")) exam_type = "Step 1";
+  if (text.includes("step 2") || text.includes("ck")) exam_type = "Step 2 CK";
+  if (text.includes("uworld")) { score += 15; pain.push("Needs UWorld guidance"); }
+  if (text.includes("nbme")) { score += 20; pain.push("NBME score concern"); }
+  if (text.includes("live")) { score += 15; pain.push("Interested in live classes"); }
+  if (text.includes("exam")) score += 10;
+  if (text.includes("fail") || text.includes("stuck") || text.includes("low score")) { score += 15; pain.push("Score is stuck or low"); }
+
+  const months = text.match(/(\d+)\s*(month|months)/i);
+  const weeks = text.match(/(\d+)\s*(week|weeks)/i);
+  if (months) exam_timeline = `${months[1]} months`;
+  if (weeks) exam_timeline = `${weeks[1]} weeks`;
+
+  if (weeks && Number(weeks[1]) <= 10) recommended_offer = "60 Days Marathon";
+  else if (months && Number(months[1]) >= 3) recommended_offer = "120 Days Marathon";
+  else if (text.includes("record") || text.includes("video")) recommended_offer = "UWorld Video Library";
+
+  return {
+    exam_type: exam_type || "Unknown",
+    exam_timeline: exam_timeline || "Unknown",
+    current_resources: [
+      text.includes("uworld") ? "UWorld" : null,
+      text.includes("first aid") ? "First Aid" : null,
+      text.includes("nbme") ? "NBME" : null,
+      text.includes("pathoma") ? "Pathoma" : null,
+      text.includes("sketchy") ? "Sketchy" : null,
+    ].filter(Boolean).join(" + ") || "Unknown",
+    pain_points: pain.join(", ") || "Needs study structure guidance",
+    interest_level: score >= 75 ? "high" : score >= 50 ? "medium" : "low",
+    lead_score: Math.max(0, Math.min(100, score)),
+    recommended_offer,
+  };
+}
+
+function buildMockLeadReply(analysis) {
+  return `That makes sense, Doctor. Based on what you shared, your main issue seems to be ${analysis.pain_points}. Are you currently following a fixed daily roadmap, or are you selecting topics randomly?`;
+}
+
+function buildMockCommunityPost({ platform, postType, topic, audience, cta, language }) {
+  const isArabic = String(language || "").toLowerCase() === "arabic";
+  const isUrdu = String(language || "").toLowerCase().includes("urdu");
+
+  if (isArabic) {
+    return `نقاش USMLE لليوم:\n\n${topic || "كثير من الطلاب يدرسون UWorld ولكن لا يرون تحسنًا واضحًا في NBME."}\n\nما السبب الأهم برأيك؟\nA) ضعف في الأساسيات\nB) مراجعة غير صحيحة للأخطاء\nC) جدول عشوائي\nD) عدد أسئلة غير كافٍ\n\n${cta || "اكتب إجابتك، وسنشارك طريقة المراجعة الصحيحة بعد النقاش."}`;
+  }
+
+  if (isUrdu) {
+    return `USMLE Discussion:\n\n${topic || "Bohat se students UWorld karte hain lekin NBME score improve nahi hota."}\n\nAap ke khayal mein sab se bari wajah kya hai?\nA) First Aid weak\nB) Incorrects review theek nahi\nC) Random schedule\nD) Questions kam\n\n${cta || "Apna answer comment karein, phir hum strategy share karenge."}`;
+  }
+
+  return `USMLE Discussion of the Day:\n\n${topic || "Many students complete UWorld but still do not see NBME improvement."}\n\nWhat do you think is the biggest reason?\n\nA) Weak First Aid base\nB) Poor incorrect review\nC) Random study schedule\nD) Not enough questions\n\n${cta || "Comment your answer and we’ll share the correct strategy after discussion."}`;
+}
+
+// CRM core CRUD routes
+registerCrmCrudRoutes({ route: "/admin/crm/brands", collection: "brands", brandScoped: false });
+registerCrmCrudRoutes({ route: "/admin/crm/leads", collection: "leads", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/communities", collection: "communities", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/campaigns", collection: "campaigns", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/training", collection: "ai_training", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/templates", collection: "templates", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/followups", collection: "followups", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/conversations", collection: "conversations", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/community-posts", collection: "community_posts", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/country-strategies", collection: "country_strategies", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/coupon-rules", collection: "coupon_rules", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/strategies", collection: "ai_strategies", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/ai-strategies", collection: "ai_strategies", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/followup-rules", collection: "followups", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/geo-communities", collection: "communities", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/coupons", collection: "coupon_rules", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/outreach-queue", collection: "outreach_queue", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/ai-feedback", collection: "ai_feedback", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/forbidden-claims", collection: "forbidden_claims", brandScoped: true });
+
+app.get("/admin/crm/ai-permissions", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    res.json({
+      success: true,
+      permissions: db.settings?.ai_permissions || DEFAULT_CRM_SETTINGS.ai_permissions || {},
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/ai-permissions", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    db.settings = { ...DEFAULT_CRM_SETTINGS, ...(db.settings || {}) };
+    db.settings.ai_permissions = { ...(db.settings.ai_permissions || {}), ...(req.body || {}) };
+    db.ai_actions = ensureCrmArray(db, "ai_actions");
+    db.ai_actions.push(withTimestamps({
+      id: uuid(),
+      brand_id: getCrmBrandId(req, db),
+      agent_name: "system",
+      action_type: "update_ai_permissions",
+      channel: "admin",
+      input_text: JSON.stringify(req.body || {}),
+      output_text: "AI permissions updated",
+      status: "completed",
+      approval_status: "approved",
+      approved_by: user.id,
+      executed_at: nowIso(),
+    }));
+    await writeCrmDb(db);
+    res.json({ success: true, permissions: db.settings.ai_permissions });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai/pause", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    db.settings = { ...DEFAULT_CRM_SETTINGS, ...(db.settings || {}) };
+    const scope = normalizeCrmLower(req.body?.scope || "global", "global");
+    db.settings.ai_paused = true;
+    db.settings.ai_pause_scope = scope;
+    db.settings.ai_paused_at = nowIso();
+    db.settings.ai_paused_by = user.id;
+    db.settings.ai_pause_reason = normalizeCrmString(req.body?.reason || "Paused by admin");
+    db.ai_actions = ensureCrmArray(db, "ai_actions");
+    db.ai_actions.push(withTimestamps({
+      id: uuid(),
+      brand_id: getCrmBrandId(req, db),
+      agent_name: "system",
+      action_type: "pause_ai",
+      channel: "admin",
+      input_text: JSON.stringify(req.body || {}),
+      output_text: `AI paused (${scope})`,
+      status: "completed",
+      approval_status: "approved",
+      approved_by: user.id,
+      executed_at: nowIso(),
+    }));
+    await writeCrmDb(db);
+    res.json({ success: true, settings: db.settings });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai/resume", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    db.settings = { ...DEFAULT_CRM_SETTINGS, ...(db.settings || {}) };
+    db.settings.ai_paused = false;
+    db.settings.ai_resumed_at = nowIso();
+    db.settings.ai_resumed_by = user.id;
+    db.ai_actions = ensureCrmArray(db, "ai_actions");
+    db.ai_actions.push(withTimestamps({
+      id: uuid(),
+      brand_id: getCrmBrandId(req, db),
+      agent_name: "system",
+      action_type: "resume_ai",
+      channel: "admin",
+      input_text: JSON.stringify(req.body || {}),
+      output_text: "AI resumed",
+      status: "completed",
+      approval_status: "approved",
+      approved_by: user.id,
+      executed_at: nowIso(),
+    }));
+    await writeCrmDb(db);
+    res.json({ success: true, settings: db.settings });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// Compatibility aliases for frontend naming
+app.get("/admin/crm/action-logs", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const actions = filterCrmRecords(req, ensureCrmArray(db, "ai_actions"), brandId);
+    res.json({ success: true, actions, logs: actions, count: actions.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/approval-queue", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const items = filterCrmRecords(req, ensureCrmArray(db, "approval_queue"), brandId);
+    res.json({ success: true, items, count: items.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/approval-queue/:id", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const item = db.approval_queue.find((x) => String(x.id) === String(req.params.id));
+    if (!item) return res.status(404).json({ success: false, error: "Approval item not found" });
+
+    item.status = normalizeCrmLower(req.body.status, "approved");
+    item.review_note = req.body.review_note || "";
+    item.approved_by = item.status === "approved" ? user.id : null;
+    item.updated_at = nowIso();
+
+    const action = db.ai_actions.find((x) => String(x.id) === String(item.action_id));
+    if (action) {
+      action.approval_status = item.status;
+      action.approved_by = item.approved_by;
+      action.updated_at = nowIso();
+    }
+
+    if (item.status === "rejected" || item.status === "unsafe") {
+      db.ai_feedback.push({
+        id: uuid(),
+        brand_id: item.brand_id || null,
+        action_id: item.action_id || null,
+        agent_name: item.agent_name || "",
+        original_output: item.draft_content || "",
+        corrected_output: req.body.corrected_output || "",
+        rejection_reason: req.body.review_note || "Rejected from approval queue",
+        feedback_type: req.body.feedback_type || "other",
+        created_by: user.id,
+        created_at: nowIso(),
+      });
+    }
+
+    await writeCrmDb(db);
+    res.json({ success: true, item });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/summary", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const leads = ensureCrmArray(db, "leads").filter((lead) => !brandId || String(lead.brand_id) === String(brandId));
+    const byStatus = (status) => leads.filter((lead) => lead.status === status).length;
+
+    const summary = {
+      total_leads: leads.length,
+      new_leads: byStatus("new"),
+      imported_contacts: byStatus("imported"),
+      engaged: byStatus("engaged"),
+      qualified: byStatus("qualified"),
+      hot_leads: byStatus("hot_lead"),
+      consultation_offered: byStatus("consultation_offered"),
+      consultation_booked: byStatus("consultation_booked"),
+      demo_offered: byStatus("demo_offered"),
+      payment_pending: byStatus("payment_pending"),
+      enrolled: byStatus("enrolled"),
+      cold: byStatus("cold"),
+      unsubscribed: byStatus("unsubscribed") + leads.filter((lead) => lead.unsubscribe_status === "unsubscribed").length,
+      todays_followups: ensureCrmArray(db, "followups").filter((item) => item.scheduled_at && String(item.scheduled_at).slice(0, 10) === todayKey()).length,
+      active_campaigns: ensureCrmArray(db, "campaigns").filter((item) => String(item.brand_id) === String(brandId) && item.status === "running").length,
+      active_communities: ensureCrmArray(db, "communities").filter((item) => String(item.brand_id) === String(brandId) && item.status !== "archived").length,
+    };
+
+    res.json({
+      success: true,
+      summary,
+      recent_leads: leads.sort(sortNewestFirst).slice(0, 10),
+      high_score_leads: [...leads].sort((a, b) => Number(b.lead_score || 0) - Number(a.lead_score || 0)).slice(0, 10),
+      approval_queue_count: ensureCrmArray(db, "approval_queue").filter((item) => String(item.brand_id) === String(brandId) && item.status === "pending").length,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/settings", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    res.json({ success: true, settings: db.settings || DEFAULT_CRM_SETTINGS });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/settings", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    db.settings = { ...DEFAULT_CRM_SETTINGS, ...(db.settings || {}), ...(req.body || {}), updated_at: nowIso() };
+    await writeCrmDb(db);
+    res.json({ success: true, settings: db.settings });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/leads/:leadId/conversations", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const conversations = ensureCrmArray(db, "conversations")
+      .filter((item) => String(item.lead_id) === String(req.params.leadId))
+      .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
+    res.json({ success: true, conversations });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/leads/:leadId/conversations", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const lead = db.leads.find((item) => String(item.id) === String(req.params.leadId));
+    if (!lead) return res.status(404).json({ success: false, error: "Lead not found" });
+
+    const conversation = withTimestamps({
+      id: uuid(),
+      brand_id: lead.brand_id,
+      lead_id: lead.id,
+      platform: req.body.platform || lead.platform || "manual",
+      direction: req.body.direction || "internal_note",
+      message_text: req.body.message_text || req.body.text || "",
+      ai_summary: req.body.ai_summary || "",
+      sent_by: req.body.sent_by || "human",
+    });
+
+    db.conversations.push(conversation);
+    lead.last_contacted_at = nowIso();
+    lead.updated_at = nowIso();
+
+    await writeCrmDb(db);
+    res.json({ success: true, conversation });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/import/preview", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const inputRows = req.body.rows || req.body.contacts || parseManualContacts(req.body.text || req.body.raw || "");
+    const rows = buildImportPreviewRows({ db, brandId, rows: inputRows, defaults: req.body.defaults || req.body || {} });
+
+    res.json({
+      success: true,
+      rows,
+      summary: {
+        total_rows: rows.length,
+        valid_rows: rows.filter((row) => row.valid && !row.duplicate).length,
+        duplicate_rows: rows.filter((row) => row.duplicate).length,
+        invalid_rows: rows.filter((row) => !row.valid).length,
+      },
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/import/confirm", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+    const batchId = uuid();
+    const now = nowIso();
+
+    let created = 0;
+    let skipped = 0;
+
+    for (const row of rows) {
+      if (!row.valid || row.duplicate || row.action === "skip_duplicate" || row.action === "skip_invalid") {
+        skipped += 1;
+        continue;
+      }
+
+      const lead = normalizeCrmCollectionPayload(
+        "leads",
+        {
+          ...row,
+          id: uuid(),
+          brand_id: brandId,
+          status: row.status || "imported",
+          source_community: row.source_community || req.body.source_community || "",
+          import_batch_id: batchId,
+          opt_in_status: row.opt_in_status || "unknown",
+          coupon_eligibility: row.coupon_rule?.coupon_code || "",
+          ai_enabled: false,
+          created_at: now,
+          updated_at: now,
+        },
+        null,
+        brandId
+      );
+
+      db.leads.push(lead);
+      created += 1;
+    }
+
+    const batch = {
+      id: batchId,
+      brand_id: brandId,
+      source_type: req.body.source_type || "manual_import",
+      file_name: req.body.file_name || "",
+      total_rows: rows.length,
+      valid_rows: created,
+      duplicate_rows: rows.filter((row) => row.duplicate).length,
+      invalid_rows: rows.filter((row) => !row.valid).length,
+      imported_by: user.id,
+      status: "completed",
+      created_at: now,
+      updated_at: now,
+    };
+
+    db.import_batches.push(batch);
+    await writeCrmDb(db);
+
+    res.json({ success: true, batch, created, skipped });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// AI Usage & Cost Control
+app.get("/admin/crm/ai-usage/summary", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const today = todayRange();
+    const week = weekRange();
+    const month = monthRange();
+    const todayTotals = getCrmUsageTotals(db, brandId, { startDate: today.start, endDate: today.end });
+    const weekTotals = getCrmUsageTotals(db, brandId, { startDate: week.start, endDate: week.end });
+    const monthTotals = getCrmUsageTotals(db, brandId, { startDate: month.start, endDate: month.end });
+    const settings = getBrandCostSettings(db, brandId);
+
+    const byField = (field) => {
+      const map = {};
+      for (const item of ensureCrmArray(db, "ai_usage").filter((log) => !brandId || String(log.brand_id) === String(brandId))) {
+        const key = item[field] || "Unknown";
+        map[key] = (map[key] || 0) + Number(item.estimated_cost || 0);
+      }
+      return Object.entries(map).map(([name, cost]) => ({ name, cost: Number(cost.toFixed(6)) })).sort((a, b) => b.cost - a.cost);
+    };
+
+    res.json({
+      success: true,
+      summary: {
+        today_cost: Number(todayTotals.estimated_cost.toFixed(6)),
+        week_cost: Number(weekTotals.estimated_cost.toFixed(6)),
+        month_cost: Number(monthTotals.estimated_cost.toFixed(6)),
+        total_tokens: monthTotals.total_tokens,
+        input_tokens: monthTotals.input_tokens,
+        output_tokens: monthTotals.output_tokens,
+        remaining_monthly_budget: Math.max(0, Number((settings.monthly_cost_limit - monthTotals.estimated_cost).toFixed(6))),
+        ai_calls_today: todayTotals.calls,
+        failed_ai_calls: monthTotals.failed_calls,
+        most_expensive_agent: byField("agent_name")[0] || null,
+        most_expensive_campaign: byField("campaign_id")[0] || null,
+        most_expensive_brand: byField("brand_id")[0] || null,
+      },
+      breakdowns: {
+        cost_by_agent: byField("agent_name"),
+        cost_by_campaign: byField("campaign_id"),
+        cost_by_brand: byField("brand_id"),
+        cost_by_action_type: byField("action_type"),
+        cost_by_channel: byField("channel"),
+      },
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/ai-usage/logs", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const logs = filterCrmRecords(req, ensureCrmArray(db, "ai_usage"), brandId);
+    res.json({ success: true, logs, usage: logs, count: logs.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/ai-usage/charts", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const logs = ensureCrmArray(db, "ai_usage").filter((item) => !brandId || String(item.brand_id) === String(brandId));
+    const daily = {};
+
+    for (const log of logs) {
+      const day = String(log.created_at || "").slice(0, 10);
+      if (!day) continue;
+      daily[day] ||= { date: day, cost: 0, tokens: 0, calls: 0 };
+      daily[day].cost += Number(log.estimated_cost || 0);
+      daily[day].tokens += Number(log.total_tokens || 0);
+      daily[day].calls += 1;
+    }
+
+    res.json({ success: true, daily: Object.values(daily).sort((a, b) => a.date.localeCompare(b.date)) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/ai-cost-settings", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    res.json({ success: true, settings: getBrandCostSettings(db, brandId) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/ai-cost-settings", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const settings = getBrandCostSettings(db, brandId);
+    const updated = { ...settings, ...(req.body || {}), id: settings.id, brand_id: brandId, updated_at: nowIso() };
+    const index = db.ai_cost_settings.findIndex((item) => String(item.brand_id) === String(brandId));
+    if (index >= 0) db.ai_cost_settings[index] = updated;
+    else db.ai_cost_settings.push(updated);
+    await writeCrmDb(db);
+    res.json({ success: true, settings: updated });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/model-pricing", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    res.json({ success: true, pricing: ensureCrmArray(db, "model_pricing") });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/model-pricing/:id", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const index = db.model_pricing.findIndex((item) => String(item.id) === String(req.params.id));
+    if (index < 0) return res.status(404).json({ success: false, error: "Model pricing not found" });
+    db.model_pricing[index] = { ...db.model_pricing[index], ...(req.body || {}), updated_at: nowIso() };
+    await writeCrmDb(db);
+    res.json({ success: true, pricing: db.model_pricing[index] });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-usage/check-budget", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const model = req.body.model || "gpt-4o-mini";
+    const inputTokens = Number(req.body.input_tokens || estimateTokensFromText(req.body.input_text || ""));
+    const outputTokens = Number(req.body.output_tokens || estimateTokensFromText(req.body.output_text || ""));
+    const estimatedCost = req.body.estimated_cost ?? estimateCrmAiCost({ db, model, inputTokens, outputTokens });
+    const result = evaluateCrmBudget({
+      db,
+      brandId,
+      estimatedCost,
+      estimatedTokens: inputTokens + outputTokens,
+      agentName: req.body.agent_name || "",
+      campaignId: req.body.campaign_id || "",
+      leadId: req.body.lead_id || "",
+    });
+    res.json({ success: true, ...result, estimated_cost: estimatedCost, estimated_tokens: inputTokens + outputTokens });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-usage/log-action", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const result = await logCrmAiActionAndUsage({
+      db,
+      brandId,
+      agentName: req.body.agent_name || "CRM AI",
+      actionType: req.body.action_type || "manual_ai_action",
+      channel: req.body.channel || "crm",
+      leadId: req.body.lead_id || null,
+      campaignId: req.body.campaign_id || null,
+      strategyId: req.body.strategy_id || null,
+      inputText: req.body.input_text || "",
+      outputText: req.body.output_text || "",
+      model: req.body.model_used || req.body.model || "gpt-4o-mini",
+      status: req.body.status || "draft",
+      approvalStatus: req.body.approval_status || "needs_approval",
+    });
+    await writeCrmDb(db);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-usage/estimate-campaign", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const leadCount = Number(req.body.lead_count || req.body.leads?.length || 0);
+    const template = req.body.template || req.body.message_template || "";
+    const model = req.body.model || "gpt-4o-mini";
+    const inputTokensPerLead = estimateTokensFromText(template) + 250;
+    const outputTokensPerLead = 120;
+    const totalInput = inputTokensPerLead * leadCount;
+    const totalOutput = outputTokensPerLead * leadCount;
+    const estimatedCost = estimateCrmAiCost({ db, model, inputTokens: totalInput, outputTokens: totalOutput });
+    const campaignDailyLimit = Number(req.body.daily_limit || 50);
+    res.json({
+      success: true,
+      estimate: {
+        brand_id: brandId,
+        lead_count: leadCount,
+        expected_ai_calls: leadCount,
+        input_tokens: totalInput,
+        output_tokens: totalOutput,
+        total_tokens: totalInput + totalOutput,
+        estimated_cost: estimatedCost,
+        daily_limit: campaignDailyLimit,
+        estimated_days: campaignDailyLimit ? Math.ceil(leadCount / campaignDailyLimit) : null,
+        model,
+      },
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// Mock AI endpoints, integration-ready for OpenAI later
+app.post("/admin/crm/ai/analyze-lead", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const message = req.body.message || req.body.text || req.body.comment || "";
+    const detected = detectCountryFromPhone(req.body.whatsapp || req.body.phone || "");
+    const analysis = {
+      ...classifyLeadFromMessage(message),
+      country: req.body.country || detected.country || "",
+      region: req.body.region || detected.region || "global",
+      language: req.body.language || detected.language || "english",
+    };
+    const couponRule = findCouponForLead(db, {
+      brandId,
+      country: analysis.country,
+      region: analysis.region,
+      language: analysis.language,
+      examType: analysis.exam_type,
+      leadStatus: "engaged",
+    });
+    analysis.coupon_eligibility = couponRule?.coupon_code || "none";
+    analysis.suggested_reply = buildMockLeadReply(analysis);
+    analysis.sales_summary = `Lead preparing for ${analysis.exam_type}, timeline ${analysis.exam_timeline}, resources ${analysis.current_resources}. Pain point: ${analysis.pain_points}. Recommended offer: ${analysis.recommended_offer}.`;
+
+    const model = req.body.model || "mock-crm-ai";
+    const inputText = JSON.stringify(req.body || {});
+    const outputText = JSON.stringify(analysis);
+    const inputTokens = estimateTokensFromText(inputText);
+    const outputTokens = estimateTokensFromText(outputText);
+    const estimatedCost = estimateCrmAiCost({ db, model, inputTokens, outputTokens });
+    const budget = evaluateCrmBudget({ db, brandId, estimatedCost, estimatedTokens: inputTokens + outputTokens, agentName: "AI Lead Analyzer", leadId: req.body.lead_id });
+
+    const log = await logCrmAiActionAndUsage({
+      db,
+      brandId,
+      agentName: "AI Lead Analyzer",
+      actionType: "analyze_lead",
+      channel: req.body.platform || "crm",
+      leadId: req.body.lead_id || null,
+      campaignId: req.body.campaign_id || null,
+      strategyId: req.body.strategy_id || null,
+      inputText,
+      outputText,
+      model,
+      status: budget.requires_approval ? "draft" : "executed",
+      approvalStatus: budget.requires_approval ? "needs_approval" : "auto_approved",
+    });
+
+    await writeCrmDb(db);
+    res.json({ success: true, analysis, budget, ai_action: log.action, ai_usage: log.usage });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai/generate-post", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const content = buildMockCommunityPost({
+      platform: req.body.platform,
+      postType: req.body.post_type,
+      topic: req.body.topic,
+      audience: req.body.audience,
+      cta: req.body.cta,
+      language: req.body.language,
+    });
+
+    const model = req.body.model || "mock-crm-ai";
+    const inputText = JSON.stringify(req.body || {});
+    const outputText = content;
+    const inputTokens = estimateTokensFromText(inputText);
+    const outputTokens = estimateTokensFromText(outputText);
+    const estimatedCost = estimateCrmAiCost({ db, model, inputTokens, outputTokens });
+    const budget = evaluateCrmBudget({ db, brandId, estimatedCost, estimatedTokens: inputTokens + outputTokens, agentName: "Community Manager Agent" });
+
+    const log = await logCrmAiActionAndUsage({
+      db,
+      brandId,
+      agentName: "Community Manager Agent",
+      actionType: "generate_post",
+      channel: req.body.platform || "social",
+      leadId: null,
+      campaignId: req.body.campaign_id || null,
+      strategyId: req.body.strategy_id || null,
+      inputText,
+      outputText,
+      model,
+      status: "draft",
+      approvalStatus: "needs_approval",
+    });
+
+    await writeCrmDb(db);
+    res.json({ success: true, post: { content, cta: req.body.cta || "" }, budget, ai_action: log.action, ai_usage: log.usage });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai/generate-reply", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const message = req.body.message || "";
+    const analysis = classifyLeadFromMessage(message);
+    const reply = req.body.language === "arabic"
+      ? "شكرًا دكتور. لفهم حالتك بشكل أفضل، هل تستعد حاليًا لـ Step 1 أم Step 2 CK؟"
+      : req.body.language === "urdu"
+        ? "Thank you Doctor. Behtar guide karne ke liye, kya aap Step 1 prepare kar rahe hain ya Step 2 CK?"
+        : buildMockLeadReply(analysis);
+
+    const model = req.body.model || "mock-crm-ai";
+    const inputText = JSON.stringify(req.body || {});
+    const outputText = reply;
+    const inputTokens = estimateTokensFromText(inputText);
+    const outputTokens = estimateTokensFromText(outputText);
+    const estimatedCost = estimateCrmAiCost({ db, model, inputTokens, outputTokens });
+    const budget = evaluateCrmBudget({ db, brandId, estimatedCost, estimatedTokens: inputTokens + outputTokens, agentName: "Trust Advisor Agent", leadId: req.body.lead_id });
+
+    const log = await logCrmAiActionAndUsage({
+      db,
+      brandId,
+      agentName: "Trust Advisor Agent",
+      actionType: "generate_reply",
+      channel: req.body.channel || req.body.platform || "crm",
+      leadId: req.body.lead_id || null,
+      campaignId: req.body.campaign_id || null,
+      strategyId: req.body.strategy_id || null,
+      inputText,
+      outputText,
+      model,
+      status: "draft",
+      approvalStatus: "needs_approval",
+    });
+
+    await writeCrmDb(db);
+    res.json({ success: true, reply, budget, ai_action: log.action, ai_usage: log.usage });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// CRM debug endpoint
+app.get("/admin/crm/debug/storage", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    res.json({
+      success: true,
+      user,
+      data_dir: DATA_DIR,
+      crm_db_path: CRM_DB_PATH,
+      counts: {
+        brands: db.brands.length,
+        leads: db.leads.length,
+        conversations: db.conversations.length,
+        communities: db.communities.length,
+        campaigns: db.campaigns.length,
+        ai_training: db.ai_training.length,
+        ai_actions: db.ai_actions.length,
+        ai_usage: db.ai_usage.length,
+        approval_queue: db.approval_queue.length,
+        model_pricing: db.model_pricing.length,
+      },
+      updated_at: db.updated_at || null,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
