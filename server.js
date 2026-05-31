@@ -7527,9 +7527,67 @@ async function testSocialIntegration(integration = {}) {
       e.statusCode = 400;
       throw e;
     }
+
     const id = getMetaAccountIdForPlatform(platform, integration);
-    const response = await axios.get(`https://graph.facebook.com/v19.0/${id}`, { params: { access_token: token, fields: platform === "instagram" ? "id,username,name" : "id,name" }, timeout: 20000 });
-    return { message: `${config.label} API connection passed`, platform, live_connected: true, safe_metadata: { id: response.data?.id || id, name: response.data?.name || response.data?.username || null }, meta: response.data };
+    const fields = platform === "instagram" ? "id,username,name" : "id,name";
+
+    try {
+      const response = await axios.get(`https://graph.facebook.com/v19.0/${id}`, {
+        params: { access_token: token, fields },
+        timeout: 20000,
+      });
+
+      return {
+        message: `${config.label} API connection passed`,
+        platform,
+        live_connected: true,
+        configured: true,
+        mode: "graph_verified",
+        safe_metadata: {
+          id: response.data?.id || id,
+          name: response.data?.name || response.data?.username || null,
+          graph_verified: true,
+        },
+        meta: response.data,
+      };
+    } catch (error) {
+      const metaError = error.response?.data?.error || {};
+      const metaMessage = String(metaError.message || error.message || "Meta Graph API test failed");
+      const metaCode = metaError.code || error.response?.status || null;
+
+      const isPermissionOrReviewBlock =
+        error.response?.status === 400 &&
+        (
+          metaCode === 100 ||
+          metaCode === 10 ||
+          metaCode === 190 ||
+          /missing permission|reviewable feature|does not exist|pages_read_engagement|permission/i.test(metaMessage)
+        );
+
+      if (!isPermissionOrReviewBlock) {
+        const e = new Error(metaMessage);
+        e.statusCode = error.response?.status || 500;
+        throw e;
+      }
+
+      return {
+        message: `${config.label} token is stored, webhook can be configured, but Meta profile lookup is blocked by permission/app review.`,
+        platform,
+        live_connected: false,
+        configured: true,
+        mode: "configured_permission_limited",
+        warning: metaMessage,
+        safe_metadata: {
+          id,
+          graph_verified: false,
+          meta_error_code: metaCode,
+          required_review_or_permission: true,
+          note: platform === "facebook"
+            ? "Facebook Page messaging can be configured for development, but Page metadata lookup may need pages_read_engagement/app review."
+            : "Instagram messaging can be configured for development, but IG metadata lookup may need Instagram permissions/app review.",
+        },
+      };
+    }
   }
 
   if (platform === "discord") {
