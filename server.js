@@ -4852,6 +4852,10 @@ const DEFAULT_CRM_DB = {
   voice_call_settings: [],
   voice_call_logs: [],
 
+  // Student support / helpdesk module for CRM Support Tickets page.
+  support_tickets: [],
+  ticket_messages: [],
+
   // GoHighLevel-style CRM modules added for NextGen multi-brand growth.
   appointments: [],
   appointment_notes: [],
@@ -4958,6 +4962,8 @@ async function readCrmDb() {
       client_data_events: Array.isArray(parsed.client_data_events) ? parsed.client_data_events : [],
       lms_team_assignments: Array.isArray(parsed.lms_team_assignments) ? parsed.lms_team_assignments : [],
       lms_permission_audit_logs: Array.isArray(parsed.lms_permission_audit_logs) ? parsed.lms_permission_audit_logs : [],
+      support_tickets: Array.isArray(parsed.support_tickets) ? parsed.support_tickets : [],
+      ticket_messages: Array.isArray(parsed.ticket_messages) ? parsed.ticket_messages : [],
       appointments: Array.isArray(parsed.appointments) ? parsed.appointments : [],
       appointment_notes: Array.isArray(parsed.appointment_notes) ? parsed.appointment_notes : [],
       pipelines: Array.isArray(parsed.pipelines) ? parsed.pipelines : [],
@@ -5223,6 +5229,36 @@ function normalizeCrmCollectionPayload(collection, body = {}, existing = null, b
   }
 
 
+  if (collection === "support_tickets") {
+    base.title = normalizeCrmString(base.title || base.subject || base.issue || "Student support ticket");
+    base.subject = base.title;
+    base.student_id = base.student_id || base.user_id || base.lead_id || null;
+    base.lead_id = base.lead_id || base.student_id || null;
+    base.student_name = normalizeCrmString(base.student_name || base.lead_name || base.name || "");
+    base.student_email = normalizeEmail(base.student_email || base.email || "");
+    base.student_phone = normalizeCrmString(base.student_phone || base.phone || base.whatsapp || "");
+    base.category = normalizeCrmLower(base.category || base.ticket_type, "general") || "general";
+    base.priority = normalizeCrmLower(base.priority, "medium") || "medium";
+    base.status = normalizeCrmLower(base.status, "open") || "open";
+    base.source = normalizeCrmLower(base.source || base.platform, "manual") || "manual";
+    base.assigned_to_id = base.assigned_to_id || base.assigned_agent_id || base.team_member_id || null;
+    base.assigned_to_name = normalizeCrmString(base.assigned_to_name || base.assigned_agent_name || "");
+    base.description = normalizeCrmString(base.description || base.details || base.message || "");
+    base.last_message_at = base.last_message_at || base.updated_at || now;
+    base.closed_at = ["closed", "resolved"].includes(base.status) ? (base.closed_at || now) : null;
+    base.tags = Array.isArray(base.tags) ? base.tags : normalizeArray(base.tags || []);
+  }
+
+  if (collection === "ticket_messages") {
+    base.ticket_id = base.ticket_id || null;
+    base.sender_id = base.sender_id || base.user_id || null;
+    base.sender_name = normalizeCrmString(base.sender_name || base.name || "Admin");
+    base.sender_role = normalizeCrmLower(base.sender_role || base.role, "admin") || "admin";
+    base.message = normalizeCrmString(base.message || base.body || base.content || "");
+    base.visibility = normalizeCrmLower(base.visibility, "public") || "public";
+    base.attachments = Array.isArray(base.attachments) ? base.attachments : [];
+  }
+
   if (collection === "appointments") {
     base.title = normalizeCrmString(base.title || base.name || "Student appointment");
     base.name = base.title;
@@ -5485,6 +5521,8 @@ function collectionResponseName(collection) {
     integration_logs: "logs",
     handoffs: "handoffs",
     client_data_events: "events",
+    support_tickets: "tickets",
+    ticket_messages: "messages",
   };
   return map[collection] || collection;
 }
@@ -6575,6 +6613,8 @@ app.post("/admin/crm/brand-snapshots/:snapshotId/apply", async (req, res) => {
 // CRM core CRUD routes
 registerCrmCrudRoutes({ route: "/admin/crm/brands", collection: "brands", brandScoped: false });
 registerCrmCrudRoutes({ route: "/admin/crm/leads", collection: "leads", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/support-tickets", collection: "support_tickets", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/ticket-messages", collection: "ticket_messages", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/communities", collection: "communities", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/campaigns", collection: "campaigns", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/training", collection: "ai_training", brandScoped: true });
@@ -7582,6 +7622,379 @@ function calculateCrmAnalytics(db, req) {
     revenue_by_platform: groupSum(leads, (lead) => lead.source_platform || lead.platform || "manual", getLeadRevenueUsd),
   };
 }
+
+// -----------------------------------------------------------------------------
+// CRM Team Performance + Support Tickets + Reports API
+// -----------------------------------------------------------------------------
+
+function crmPercent(part, total) {
+  const p = Number(part || 0);
+  const t = Number(total || 0);
+  return t ? Number(((p / t) * 100).toFixed(2)) : 0;
+}
+
+function crmDateWithinDays(value, days = 30) {
+  if (!value) return false;
+  const time = new Date(value).getTime();
+  if (!Number.isFinite(time)) return false;
+  return time >= Date.now() - Number(days || 30) * 24 * 60 * 60 * 1000;
+}
+
+function getRecordAssigneeIds(record = {}) {
+  return [
+    record.assigned_agent_id,
+    record.agent_id,
+    record.assigned_to_id,
+    record.assigned_user_id,
+    record.team_member_id,
+    record.owner_id,
+    record.user_id,
+  ].map((value) => String(value || "").trim()).filter(Boolean);
+}
+
+function getTeamDisplayName(member = {}) {
+  return normalizeCrmString(
+    member.name || member.full_name || member.agent_name || member.display_name || member.email || "Team Member"
+  );
+}
+
+function getAllCrmPerformers(db, brandId = null) {
+  const teamMembers = ensureCrmArray(db, "team_members").filter((item) => !brandId || !item.brand_id || String(item.brand_id) === String(brandId));
+  const agents = ensureCrmArray(db, "agents").filter((item) => !brandId || !item.brand_id || String(item.brand_id) === String(brandId));
+  const map = new Map();
+
+  for (const member of teamMembers) {
+    map.set(String(member.id), {
+      id: member.id,
+      source: "team_member",
+      name: getTeamDisplayName(member),
+      email: member.email || "",
+      role: member.role_name || member.role || "team_member",
+      status: member.status || "active",
+      raw: member,
+    });
+  }
+
+  for (const agent of agents) {
+    if (!map.has(String(agent.id))) {
+      map.set(String(agent.id), {
+        id: agent.id,
+        source: "agent",
+        name: getTeamDisplayName(agent),
+        email: agent.email || "",
+        role: agent.agent_type || agent.role || "ai_agent",
+        status: agent.status || "active",
+        raw: agent,
+      });
+    }
+  }
+
+  return Array.from(map.values());
+}
+
+function recordAssignedToPerformer(record = {}, performer = {}) {
+  const ids = getRecordAssigneeIds(record);
+  if (ids.includes(String(performer.id))) return true;
+  const name = getTeamDisplayName(performer).toLowerCase();
+  const email = normalizeEmail(performer.email || "");
+  const textNames = [record.assigned_agent_name, record.agent_name, record.assigned_to_name, record.owner_name, record.user_name]
+    .map((value) => normalizeCrmString(value).toLowerCase())
+    .filter(Boolean);
+  const textEmails = [record.assigned_to_email, record.agent_email, record.owner_email, record.user_email]
+    .map((value) => normalizeEmail(value || ""))
+    .filter(Boolean);
+  return (name && textNames.includes(name)) || (email && textEmails.includes(email));
+}
+
+function buildCrmTeamPerformance(db, req) {
+  const brandId = getCrmBrandId(req, db);
+  const performers = getAllCrmPerformers(db, brandId);
+  const leads = filterCrmRecords(req, ensureCrmArray(db, "leads"), brandId);
+  const appointments = filterCrmRecords(req, ensureCrmArray(db, "appointments"), brandId);
+  const tasks = filterCrmRecords(req, ensureCrmArray(db, "tasks"), brandId);
+  const opportunities = filterCrmRecords(req, ensureCrmArray(db, "opportunities"), brandId);
+  const revenueAttribution = filterCrmRecords(req, ensureCrmArray(db, "revenue_attribution"), brandId);
+  const payouts = filterCrmRecords(req, ensureCrmArray(db, "commission_payouts"), brandId);
+  const agentLogs = filterCrmRecords(req, ensureCrmArray(db, "agent_logs"), brandId);
+  const teamLogs = filterCrmRecords(req, ensureCrmArray(db, "team_activity_logs"), brandId);
+
+  const rows = performers.map((performer) => {
+    const assignedLeads = leads.filter((lead) => recordAssignedToPerformer(lead, performer));
+    const performerAppointments = appointments.filter((item) => recordAssignedToPerformer(item, performer));
+    const completedAppointments = performerAppointments.filter((item) => ["completed", "showed", "attended"].includes(String(item.status || "").toLowerCase()));
+    const noShows = performerAppointments.filter((item) => ["no_show", "missed", "cancelled"].includes(String(item.status || "").toLowerCase()));
+    const performerTasks = tasks.filter((item) => recordAssignedToPerformer(item, performer));
+    const completedTasks = performerTasks.filter((item) => ["done", "completed", "closed"].includes(String(item.status || "").toLowerCase()));
+    const overdueTasks = performerTasks.filter((item) => item.due_at && new Date(item.due_at).getTime() < Date.now() && !["done", "completed", "closed"].includes(String(item.status || "").toLowerCase()));
+    const performerOpportunities = opportunities.filter((item) => recordAssignedToPerformer(item, performer));
+    const wonDeals = performerOpportunities.filter((item) => ["won", "closed_won", "paid", "enrolled"].includes(String(item.status || item.stage || "").toLowerCase()));
+    const revenueRecords = revenueAttribution.filter((item) => recordAssignedToPerformer(item, performer));
+    const payoutRecords = payouts.filter((item) => recordAssignedToPerformer(item, performer));
+    const logs = [...agentLogs, ...teamLogs].filter((item) => recordAssignedToPerformer(item, performer));
+
+    const leadRevenue = assignedLeads.reduce((sum, lead) => sum + getLeadRevenueUsd(lead), 0);
+    const opportunityRevenue = performerOpportunities.reduce((sum, item) => sum + crmMoney(item.value_usd || item.revenue_usd || item.amount_usd), 0);
+    const attributedRevenue = revenueRecords.reduce((sum, item) => sum + crmMoney(item.revenue_usd || item.amount_usd || item.amount), 0);
+    const commissionEarned = payoutRecords.reduce((sum, item) => sum + crmMoney(item.amount_usd || item.commission_usd || item.payout_usd), 0);
+
+    return {
+      ...performer,
+      metrics: {
+        total_leads: assignedLeads.length,
+        hot_leads: assignedLeads.filter((lead) => ["hot", "hot_lead", "qualified"].includes(String(lead.status || lead.interest_level || "").toLowerCase())).length,
+        demos_booked: performerAppointments.length,
+        demos_completed: completedAppointments.length,
+        no_shows: noShows.length,
+        tasks_total: performerTasks.length,
+        tasks_completed: completedTasks.length,
+        tasks_overdue: overdueTasks.length,
+        deals_total: performerOpportunities.length,
+        deals_won: wonDeals.length,
+        conversion_rate: crmPercent(wonDeals.length || assignedLeads.filter((lead) => String(lead.status || "").toLowerCase() === "enrolled").length, assignedLeads.length),
+        task_completion_rate: crmPercent(completedTasks.length, performerTasks.length),
+        show_rate: crmPercent(completedAppointments.length, performerAppointments.length),
+        revenue_usd: Number(Math.max(leadRevenue, opportunityRevenue, attributedRevenue).toFixed(2)),
+        commission_earned_usd: Number(commissionEarned.toFixed(2)),
+        activity_count: logs.length,
+        recent_activity_count: logs.filter((log) => crmDateWithinDays(log.created_at || log.logged_at || log.timestamp, 7)).length,
+      },
+    };
+  }).sort((a, b) => (b.metrics.revenue_usd - a.metrics.revenue_usd) || (b.metrics.total_leads - a.metrics.total_leads));
+
+  const totals = rows.reduce((acc, row) => {
+    for (const [key, value] of Object.entries(row.metrics)) {
+      if (typeof value === "number" && !key.endsWith("_rate")) acc[key] = Number(((acc[key] || 0) + value).toFixed(2));
+    }
+    return acc;
+  }, {});
+
+  totals.conversion_rate = crmPercent(totals.deals_won, totals.total_leads);
+  totals.task_completion_rate = crmPercent(totals.tasks_completed, totals.tasks_total);
+  totals.show_rate = crmPercent(totals.demos_completed, totals.demos_booked);
+
+  return {
+    brand_id: brandId,
+    generated_at: nowIso(),
+    summary: {
+      team_members: rows.length,
+      ...totals,
+    },
+    team: rows,
+  };
+}
+
+function groupCrmCount(items = [], keyFn = () => "Unknown") {
+  const map = {};
+  for (const item of items) {
+    const key = keyFn(item) || "Unknown";
+    map[key] = (map[key] || 0) + 1;
+  }
+  return Object.entries(map).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
+}
+
+function groupCrmMoney(items = [], keyFn = () => "Unknown", valueFn = () => 0) {
+  const map = {};
+  for (const item of items) {
+    const key = keyFn(item) || "Unknown";
+    map[key] = (map[key] || 0) + crmMoney(valueFn(item));
+  }
+  return Object.entries(map).map(([name, value]) => ({ name, value: Number(value.toFixed(2)) })).sort((a, b) => b.value - a.value);
+}
+
+function buildCrmReportsOverview(db, req) {
+  const brandId = getCrmBrandId(req, db);
+  const analytics = calculateCrmAnalytics(db, req);
+  const leads = filterCrmRecords(req, ensureCrmArray(db, "leads"), brandId);
+  const appointments = filterCrmRecords(req, ensureCrmArray(db, "appointments"), brandId);
+  const opportunities = filterCrmRecords(req, ensureCrmArray(db, "opportunities"), brandId);
+  const tasks = filterCrmRecords(req, ensureCrmArray(db, "tasks"), brandId);
+  const campaigns = filterCrmRecords(req, ensureCrmArray(db, "campaigns"), brandId);
+  const tickets = filterCrmRecords(req, ensureCrmArray(db, "support_tickets"), brandId);
+  const adLogs = filterCrmRecords(req, ensureCrmArray(db, "ad_performance_logs"), brandId);
+
+  const wonDeals = opportunities.filter((item) => ["won", "closed_won", "paid", "enrolled"].includes(String(item.status || item.stage || "").toLowerCase()));
+  const openTickets = tickets.filter((item) => !["closed", "resolved"].includes(String(item.status || "").toLowerCase()));
+  const overdueTasks = tasks.filter((item) => item.due_at && new Date(item.due_at).getTime() < Date.now() && !["done", "completed", "closed"].includes(String(item.status || "").toLowerCase()));
+
+  return {
+    brand_id: brandId,
+    generated_at: nowIso(),
+    summary: {
+      ...analytics,
+      opportunities: opportunities.length,
+      deals_won: wonDeals.length,
+      appointments: appointments.length,
+      open_support_tickets: openTickets.length,
+      overdue_tasks: overdueTasks.length,
+      active_campaigns: campaigns.filter((item) => ["active", "running", "scheduled"].includes(String(item.status || "").toLowerCase())).length,
+      ad_spend_usd: Number(adLogs.reduce((sum, item) => sum + crmMoney(item.spend_usd), 0).toFixed(2)),
+      ad_leads: adLogs.reduce((sum, item) => sum + Number(item.leads || 0), 0),
+    },
+    breakdowns: {
+      leads_by_status: groupCrmCount(leads, (lead) => lead.status || "new"),
+      leads_by_source: groupCrmCount(leads, (lead) => lead.source_platform || lead.platform || lead.source || "manual"),
+      leads_by_country: groupCrmCount(leads, (lead) => lead.country || "Unknown"),
+      appointments_by_status: groupCrmCount(appointments, (item) => item.status || "scheduled"),
+      tickets_by_status: groupCrmCount(tickets, (item) => item.status || "open"),
+      tickets_by_priority: groupCrmCount(tickets, (item) => item.priority || "medium"),
+      revenue_by_source: groupCrmMoney(leads, (lead) => lead.source_platform || lead.platform || lead.source || "manual", getLeadRevenueUsd),
+      campaign_revenue: groupCrmMoney(campaigns, (campaign) => campaign.name || campaign.id || "Campaign", getCampaignRevenueUsd),
+    },
+  };
+}
+
+function buildCrmRevenueReport(db, req) {
+  const brandId = getCrmBrandId(req, db);
+  const leads = filterCrmRecords(req, ensureCrmArray(db, "leads"), brandId);
+  const campaigns = filterCrmRecords(req, ensureCrmArray(db, "campaigns"), brandId);
+  const opportunities = filterCrmRecords(req, ensureCrmArray(db, "opportunities"), brandId);
+  const attribution = filterCrmRecords(req, ensureCrmArray(db, "revenue_attribution"), brandId);
+  const payouts = filterCrmRecords(req, ensureCrmArray(db, "commission_payouts"), brandId);
+
+  const leadRevenue = leads.reduce((sum, lead) => sum + getLeadRevenueUsd(lead), 0);
+  const campaignRevenue = campaigns.reduce((sum, campaign) => sum + getCampaignRevenueUsd(campaign), 0);
+  const opportunityRevenue = opportunities.reduce((sum, item) => sum + crmMoney(item.value_usd || item.revenue_usd || item.amount_usd), 0);
+  const attributedRevenue = attribution.reduce((sum, item) => sum + crmMoney(item.revenue_usd || item.amount_usd || item.amount), 0);
+  const commissionPaid = payouts.reduce((sum, item) => sum + crmMoney(item.amount_usd || item.commission_usd || item.payout_usd), 0);
+  const totalRevenue = Math.max(leadRevenue, campaignRevenue, opportunityRevenue, attributedRevenue);
+
+  return {
+    brand_id: brandId,
+    generated_at: nowIso(),
+    summary: {
+      total_revenue_usd: Number(totalRevenue.toFixed(2)),
+      lead_revenue_usd: Number(leadRevenue.toFixed(2)),
+      campaign_revenue_usd: Number(campaignRevenue.toFixed(2)),
+      opportunity_revenue_usd: Number(opportunityRevenue.toFixed(2)),
+      attributed_revenue_usd: Number(attributedRevenue.toFixed(2)),
+      commission_paid_usd: Number(commissionPaid.toFixed(2)),
+      net_after_commission_usd: Number((totalRevenue - commissionPaid).toFixed(2)),
+    },
+    revenue_by_campaign: groupCrmMoney(campaigns, (campaign) => campaign.name || campaign.id || "Campaign", getCampaignRevenueUsd),
+    revenue_by_source: groupCrmMoney(leads, (lead) => lead.source_platform || lead.platform || lead.source || "manual", getLeadRevenueUsd),
+    revenue_by_country: groupCrmMoney(leads, (lead) => lead.country || "Unknown", getLeadRevenueUsd),
+    revenue_attribution: attribution.sort(sortNewestFirst),
+    commission_payouts: payouts.sort(sortNewestFirst),
+  };
+}
+
+function buildCrmAgentReport(db, req) {
+  const performance = buildCrmTeamPerformance(db, req);
+  return {
+    brand_id: performance.brand_id,
+    generated_at: performance.generated_at,
+    summary: performance.summary,
+    agents: performance.team,
+  };
+}
+
+app.get("/admin/crm/team-performance", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    res.json({ success: true, ...buildCrmTeamPerformance(db, req) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/reports/overview", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    res.json({ success: true, ...buildCrmReportsOverview(db, req) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/reports/agents", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    res.json({ success: true, ...buildCrmAgentReport(db, req) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/reports/revenue", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    res.json({ success: true, ...buildCrmRevenueReport(db, req) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/reports/campaigns", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const campaigns = filterCrmRecords(req, ensureCrmArray(db, "campaigns"), brandId);
+    const adLogs = filterCrmRecords(req, ensureCrmArray(db, "ad_performance_logs"), brandId);
+    const report = campaigns.map((campaign) => {
+      const logs = adLogs.filter((log) => String(log.ad_campaign_id || log.campaign_id || "") === String(campaign.id));
+      const spend = logs.reduce((sum, item) => sum + crmMoney(item.spend_usd), 0) + getCampaignSpendUsd(campaign);
+      const leads = logs.reduce((sum, item) => sum + Number(item.leads || 0), 0);
+      const enrollments = logs.reduce((sum, item) => sum + Number(item.enrollments || 0), 0);
+      const revenue = Math.max(getCampaignRevenueUsd(campaign), logs.reduce((sum, item) => sum + crmMoney(item.revenue_usd), 0));
+      return {
+        ...campaign,
+        metrics: {
+          spend_usd: Number(spend.toFixed(2)),
+          leads,
+          enrollments,
+          revenue_usd: Number(revenue.toFixed(2)),
+          cpl_usd: leads ? Number((spend / leads).toFixed(2)) : 0,
+          roas: spend ? Number((revenue / spend).toFixed(2)) : 0,
+          conversion_rate: crmPercent(enrollments, leads),
+        },
+      };
+    });
+    res.json({ success: true, brand_id: brandId, generated_at: nowIso(), campaigns: report, count: report.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/support-tickets/:id/messages", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const ticket = ensureCrmArray(db, "support_tickets").find((item) => String(item.id) === String(req.params.id));
+    if (!ticket) return res.status(404).json({ success: false, error: "Support ticket not found" });
+    const message = normalizeCrmCollectionPayload("ticket_messages", {
+      ...(req.body || {}),
+      ticket_id: ticket.id,
+      sender_id: req.body?.sender_id || user.id,
+      sender_name: req.body?.sender_name || user.name || user.email || "Admin",
+      sender_role: req.body?.sender_role || user.role || "admin",
+    }, null, ticket.brand_id || getCrmBrandId(req, db));
+    ensureCrmArray(db, "ticket_messages").push(message);
+    ticket.last_message_at = nowIso();
+    ticket.updated_at = nowIso();
+    await writeCrmDb(db);
+    res.json({ success: true, ticket, message });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/support-tickets/:id/messages", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const messages = ensureCrmArray(db, "ticket_messages")
+      .filter((item) => String(item.ticket_id) === String(req.params.id))
+      .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
+    res.json({ success: true, messages, count: messages.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
 
 // Stronger agents backend
 app.get("/admin/crm/agents", async (req, res) => {
@@ -10950,6 +11363,8 @@ app.get("/admin/crm/debug/storage", async (req, res) => {
         commission_payouts: ensureCrmArray(db, "commission_payouts").length,
         revenue_attribution: ensureCrmArray(db, "revenue_attribution").length,
         dashboard_settings: ensureCrmArray(db, "dashboard_settings").length,
+        support_tickets: ensureCrmArray(db, "support_tickets").length,
+        ticket_messages: ensureCrmArray(db, "ticket_messages").length,
         appointments: ensureCrmArray(db, "appointments").length,
         pipelines: ensureCrmArray(db, "pipelines").length,
         pipeline_stages: ensureCrmArray(db, "pipeline_stages").length,
