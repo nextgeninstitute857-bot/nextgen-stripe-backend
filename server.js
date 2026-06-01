@@ -921,6 +921,212 @@ async function requireAdminOrInstructor(req) {
   return ctx;
 }
 
+
+function normalizePermissionList(values = []) {
+  return Array.isArray(values)
+    ? values.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+}
+
+function permissionListIncludes(list = [], permission = "") {
+  const permissions = normalizePermissionList(list);
+  return permissions.includes("*") || permissions.includes(permission);
+}
+
+function getRequestCourseScope(req = {}) {
+  return (
+    req.body?.course_id ||
+    req.body?.courseId ||
+    req.query?.course_id ||
+    req.query?.courseId ||
+    req.params?.courseId ||
+    req.params?.course_id ||
+    null
+  );
+}
+
+function getRequestSessionScope(req = {}) {
+  return (
+    req.body?.session_id ||
+    req.body?.sessionId ||
+    req.params?.sessionId ||
+    req.params?.session_id ||
+    null
+  );
+}
+
+function getRequestAssessmentScope(req = {}) {
+  return (
+    req.body?.assessment_id ||
+    req.body?.assessmentId ||
+    req.params?.assessmentId ||
+    req.params?.assessment_id ||
+    null
+  );
+}
+
+function getTeamMemberForUser(crmDb, user) {
+  const email = normalizeEmail(user?.email || "");
+  return ensureCrmArray(crmDb, "team_members").find((member) => {
+    return (
+      member.status !== "disabled" &&
+      member.status !== "inactive" &&
+      (
+        (member.user_id && String(member.user_id) === String(user?.id)) ||
+        (email && normalizeEmail(member.email || "") === email)
+      )
+    );
+  }) || null;
+}
+
+function getRoleForTeamMember(crmDb, member) {
+  if (!member) return null;
+  return ensureCrmArray(crmDb, "roles").find((role) => {
+    return (
+      (member.role_id && String(role.id) === String(member.role_id)) ||
+      (member.role_name && String(role.name || "").toLowerCase() === String(member.role_name).toLowerCase()) ||
+      (member.role && String(role.role_key || "").toLowerCase() === String(member.role).toLowerCase())
+    );
+  }) || null;
+}
+
+function getDefaultLmsPermissionsForRole(roleNameOrKey = "") {
+  const key = String(roleNameOrKey || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_");
+  return DEFAULT_LMS_ROLE_PERMISSION_SETS?.[key] || [];
+}
+
+function getEffectiveLmsPermissions(crmDb, user) {
+  if (user?.role === "admin") return ["*"];
+
+  const member = getTeamMemberForUser(crmDb, user);
+  const role = getRoleForTeamMember(crmDb, member);
+  const defaultRolePermissions = getDefaultLmsPermissionsForRole(member?.role || member?.role_name || role?.role_key || role?.name || user?.role);
+
+  return [
+    ...getDefaultLmsPermissionsForRole(user?.role),
+    ...defaultRolePermissions,
+    ...normalizePermissionList(role?.permissions),
+    ...normalizePermissionList(role?.lms_permissions),
+    ...normalizePermissionList(member?.permissions),
+    ...normalizePermissionList(member?.lms_permissions),
+  ];
+}
+
+function lmsScopeAllowed({ member, assignment = null, courseId = null, sessionId = null }) {
+  if (!member) return true;
+
+  const assignedCourseIds = [
+    ...normalizePermissionList(member.assigned_course_ids),
+    ...normalizePermissionList(member.course_ids),
+    ...normalizePermissionList(assignment?.course_ids),
+    ...normalizePermissionList(assignment?.assigned_course_ids),
+  ];
+
+  const assignedSessionIds = [
+    ...normalizePermissionList(member.assigned_session_ids),
+    ...normalizePermissionList(member.session_ids),
+    ...normalizePermissionList(assignment?.session_ids),
+    ...normalizePermissionList(assignment?.assigned_session_ids),
+  ];
+
+  const restrictToAssigned =
+    member.restrict_to_assigned_courses === true ||
+    member.restrict_to_assigned_scope === true ||
+    assignment?.restrict_to_assigned_courses === true ||
+    assignment?.restrict_to_assigned_scope === true;
+
+  if (!restrictToAssigned) return true;
+
+  if (courseId && assignedCourseIds.length && assignedCourseIds.includes(String(courseId))) return true;
+  if (sessionId && assignedSessionIds.length && assignedSessionIds.includes(String(sessionId))) return true;
+
+  if (!courseId && !sessionId) return true;
+
+  return false;
+}
+
+function getLmsAssignmentForMember(crmDb, member) {
+  if (!member) return null;
+  return ensureCrmArray(crmDb, "lms_team_assignments").find((assignment) => {
+    return (
+      assignment.status !== "inactive" &&
+      (
+        String(assignment.team_member_id || "") === String(member.id) ||
+        (member.user_id && String(assignment.user_id || "") === String(member.user_id)) ||
+        (member.email && normalizeEmail(assignment.email || "") === normalizeEmail(member.email))
+      )
+    );
+  }) || null;
+}
+
+async function requireLmsPermission(req, permission, options = {}) {
+  const ctx = await getAuthenticatedUser(req);
+
+  if (ctx.user.role === "admin") {
+    return { ...ctx, permission_granted: permission, lms_admin: true, team_member: null };
+  }
+
+  const crmDb = await readCrmDb();
+  const member = getTeamMemberForUser(crmDb, ctx.user);
+  const role = getRoleForTeamMember(crmDb, member);
+  const assignment = getLmsAssignmentForMember(crmDb, member);
+  const permissions = getEffectiveLmsPermissions(crmDb, ctx.user);
+  const courseId = options.courseId || getRequestCourseScope(req);
+  const sessionId = options.sessionId || getRequestSessionScope(req);
+
+  const allowedByPermission = permissionListIncludes(permissions, permission);
+  const allowedByScope = lmsScopeAllowed({ member, assignment, courseId, sessionId });
+
+  if (!allowedByPermission || !allowedByScope) {
+    const e = new Error(
+      !allowedByPermission
+        ? `Missing LMS permission: ${permission}`
+        : "This team member is not assigned to this LMS scope"
+    );
+    e.statusCode = 403;
+    throw e;
+  }
+
+  return {
+    ...ctx,
+    permission_granted: permission,
+    team_member: member,
+    team_role: role,
+    lms_assignment: assignment,
+    lms_permissions: permissions,
+  };
+}
+
+async function requireLmsAnyPermission(req, permissions = [], options = {}) {
+  let lastError = null;
+
+  for (const permission of permissions) {
+    try {
+      return await requireLmsPermission(req, permission, options);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || Object.assign(new Error("Missing LMS permission"), { statusCode: 403 });
+}
+
+function logLmsPermissionAudit(crmDb, payload = {}) {
+  ensureCrmArray(crmDb, "lms_permission_audit_logs").push(withTimestamps({
+    id: uuid(),
+    user_id: payload.user_id || null,
+    user_email: payload.user_email || "",
+    team_member_id: payload.team_member_id || null,
+    action: payload.action || "lms_permission_action",
+    permission: payload.permission || null,
+    course_id: payload.course_id || null,
+    session_id: payload.session_id || null,
+    assessment_id: payload.assessment_id || null,
+    status: payload.status || "success",
+    metadata: payload.metadata || {},
+  }));
+}
+
 function isAdminOrInstructor(user, session) {
   return (
     user?.role === "admin" ||
@@ -1847,7 +2053,7 @@ ${cleanText}
 
 app.post("/admin/ai/clean-notes", async (req, res) => {
   try {
-    const { user } = await requireAdminOrInstructor(req);
+    const { user } = await requireLmsPermission(req, "lms.notes.manage");
 
     if (!isAIConfigured()) {
       return res.status(500).json({
@@ -1896,7 +2102,7 @@ app.post("/admin/ai/clean-notes", async (req, res) => {
 
 app.post("/admin/assessments/generate-from-source", async (req, res) => {
   try {
-    const { user } = await requireAdminOrInstructor(req);
+    const { user } = await requireLmsPermission(req, "lms.assessments.create");
 
     if (!isAIConfigured()) {
       return res.status(500).json({
@@ -2471,7 +2677,7 @@ app.get("/live-sessions/:sessionId", async (req, res) => {
 
 app.get("/admin/live-sessions", async (req, res) => {
   try {
-    await requireAdminOrInstructor(req);
+    await requireLmsPermission(req, "lms.live_sessions.view");
     const db = await readLiveDb();
     let sessions = Object.values(db.liveSessions || {}).map(sanitizeLiveSession);
     if (req.query.course_id) sessions = sessions.filter((s) => String(s.course_id) === String(req.query.course_id));
@@ -2482,7 +2688,7 @@ app.get("/admin/live-sessions", async (req, res) => {
 
 app.post("/admin/live-sessions", async (req, res) => {
   try {
-    const { user } = await requireAdminOrInstructor(req);
+    const { user } = await requireLmsPermission(req, "lms.live_sessions.manage");
     const db = await readLiveDb();
     const id = uuid();
     const session = normalizeLiveSessionPayload(req.body);
@@ -2500,7 +2706,7 @@ app.post("/admin/live-sessions", async (req, res) => {
 
 app.patch("/admin/live-sessions/:sessionId", async (req, res) => {
   try {
-    const { user } = await requireAdminOrInstructor(req);
+    const { user } = await requireLmsPermission(req, "lms.live_sessions.manage");
     const db = await readLiveDb();
     const existing = db.liveSessions[String(req.params.sessionId)];
     if (!existing) return res.status(404).json({ success: false, error: "Live session not found" });
@@ -2518,7 +2724,7 @@ app.patch("/admin/live-sessions/:sessionId", async (req, res) => {
 
 app.delete("/admin/live-sessions/:sessionId", async (req, res) => {
   try {
-    await requireAdminOrInstructor(req);
+    await requireLmsPermission(req, "lms.live_sessions.manage");
     const db = await readLiveDb();
     const session = db.liveSessions[String(req.params.sessionId)];
     if (!session) return res.status(404).json({ success: false, error: "Live session not found" });
@@ -3168,7 +3374,7 @@ app.get("/zoom/recordings", async (req, res) => {
 
 app.post("/zoom/recordings/:meetingId/refresh-transcript", async (req, res) => {
   try {
-    await requireAdminOrInstructor(req);
+    await requireLmsPermission(req, "lms.recordings.manage");
 
     const meetingId = String(req.params.meetingId || req.body.meeting_id || "").trim();
 
@@ -3208,8 +3414,8 @@ app.post("/zoom/recordings/:meetingId/refresh-transcript", async (req, res) => {
     });
   }
 });
-app.post("/live/recordings/publish", async (req, res) => { try { const { user } = await requireAdminOrInstructor(req); const db = await readLiveDb(); const key = String(req.body.meeting_id); if (!key) return res.status(400).json({ success: false, error: "meeting_id is required" }); db.recordings[key] = { ...(db.recordings[key] || {}), meeting_id: key, session_id: req.body.session_id || db.recordings[key]?.session_id || null, course_id: req.body.course_id || db.recordings[key]?.course_id || null, topic: req.body.topic || db.recordings[key]?.topic || null, recording_url: req.body.recording_url || db.recordings[key]?.recording_url || null, share_url: req.body.share_url || db.recordings[key]?.share_url || null, published: req.body.published !== false, published_at: new Date().toISOString(), published_by: user.id }; await writeLiveDb(db); res.json({ success: true, recording: db.recordings[key] }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
-app.post("/live/recordings/unpublish", async (req, res) => { try { await requireAdminOrInstructor(req); const db = await readLiveDb(); const key = String(req.body.meeting_id); db.recordings[key] = { ...(db.recordings[key] || {}), meeting_id: key, published: false, unpublished_at: new Date().toISOString() }; await writeLiveDb(db); res.json({ success: true, recording: db.recordings[key] }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.post("/live/recordings/publish", async (req, res) => { try { const { user } = await requireLmsPermission(req, "lms.recordings.publish"); const db = await readLiveDb(); const key = String(req.body.meeting_id); if (!key) return res.status(400).json({ success: false, error: "meeting_id is required" }); db.recordings[key] = { ...(db.recordings[key] || {}), meeting_id: key, session_id: req.body.session_id || db.recordings[key]?.session_id || null, course_id: req.body.course_id || db.recordings[key]?.course_id || null, topic: req.body.topic || db.recordings[key]?.topic || null, recording_url: req.body.recording_url || db.recordings[key]?.recording_url || null, share_url: req.body.share_url || db.recordings[key]?.share_url || null, published: req.body.published !== false, published_at: new Date().toISOString(), published_by: user.id }; await writeLiveDb(db); res.json({ success: true, recording: db.recordings[key] }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.post("/live/recordings/unpublish", async (req, res) => { try { await requireLmsPermission(req, "lms.recordings.unpublish"); const db = await readLiveDb(); const key = String(req.body.meeting_id); db.recordings[key] = { ...(db.recordings[key] || {}), meeting_id: key, published: false, unpublished_at: new Date().toISOString() }; await writeLiveDb(db); res.json({ success: true, recording: db.recordings[key] }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.get("/live/recordings", async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req);
@@ -3282,7 +3488,7 @@ function buildNotesPayload({ db, sessionId, body = {}, user, publishMode = "save
 
 async function saveNotesHandler(req, res) {
   try {
-    const { user } = await requireAdminOrInstructor(req);
+    const { user } = await requireLmsPermission(req, "lms.notes.manage");
     const db = await readLiveDb();
     const sessionId = String(req.params.sessionId || "").trim();
 
@@ -3307,7 +3513,7 @@ async function saveNotesHandler(req, res) {
 
 async function publishNotesHandler(req, res) {
   try {
-    const { user } = await requireAdminOrInstructor(req);
+    const { user } = await requireLmsPermission(req, "lms.notes.publish");
     const db = await readLiveDb();
     const sessionId = String(req.params.sessionId || "").trim();
 
@@ -3332,7 +3538,7 @@ async function publishNotesHandler(req, res) {
 
 async function unpublishNotesHandler(req, res) {
   try {
-    const { user } = await requireAdminOrInstructor(req);
+    const { user } = await requireLmsPermission(req, "lms.notes.unpublish");
     const db = await readLiveDb();
     const sessionId = String(req.params.sessionId || "").trim();
 
@@ -3400,10 +3606,10 @@ app.get("/live/community/:sessionId", async (req, res) => { try { await getAuthe
 app.post("/live/community/:sessionId", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); if (!req.body.message) return res.status(400).json({ success: false, error: "message is required" }); const db = await readLiveDb(); const item = { id: uuid(), session_id: req.params.sessionId, course_id: req.body.course_id || null, user_id: user.id, user_name: user.name || user.email || "Student", message: String(req.body.message).slice(0, 2000), created_at: new Date().toISOString() }; db.communityMessages[req.params.sessionId] = [...(db.communityMessages[req.params.sessionId] || []), item]; await writeLiveDb(db); res.json({ success: true, message: item }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 
 app.get("/roadmap/course/:courseId", async (req, res) => { const db = await readLiveDb(); const roadmap = db.roadmaps[String(req.params.courseId)] || null; const days = (roadmap?.days || []).filter((d) => d.is_published !== false); res.json({ success: true, roadmap: roadmap ? { id: roadmap.id, course_id: roadmap.course_id, course_name: roadmap.course_name, settings: roadmap.settings, created_at: roadmap.created_at, updated_at: roadmap.updated_at } : null, days: days.map(sanitizeRoadmapDay), summary: { total_days: roadmap?.days?.length || 0, shown_days: days.length, total_weeks: Math.ceil((roadmap?.days?.length || 0) / 7) } }); });
-app.post("/admin/roadmap/generate", async (req, res) => { try { await requireAdminOrInstructor(req); const db = await readLiveDb(); const { course_id, course_name = "Course", start_date, duration_days, class_time = null, skip_sundays = true, template = "usmle_step_1" } = req.body; if (!course_id || !start_date || !duration_days) return res.status(400).json({ success: false, error: "course_id, start_date, duration_days required" }); const topics = ["Orientation", "Biochemistry", "Genetics", "Immunology", "Microbiology", "Pathology", "Pharmacology", "Cardiology", "Respiratory", "Renal", "Endocrine", "GI", "Neurology", "Psychiatry", "Reproductive", "Heme/Onc", "MSK/Derm", "Biostatistics", "Mixed Review"]; const dates = []; let cursor = new Date(`${start_date}T00:00:00`); while (dates.length < Number(duration_days)) { if (!(skip_sundays && cursor.getDay() === 0)) dates.push(dateOnly(cursor)); cursor = addDays(cursor, 1); } const days = dates.map((date, i) => ({ id: `${course_id}:day:${i + 1}`, course_id, week_number: Math.ceil((i + 1) / 7), day_number: i + 1, date, title: topics[i % topics.length], description: `Daily plan for ${course_name}`, resources: ["First Aid", "UWorld", "Class notes"], resource_links: [], uworld_target: "30-40 MCQs or assigned block", first_aid_topics: topics[i % topics.length], homework: "Complete assigned MCQs and review explanations", class_time, status: "scheduled", is_published: true, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), template })); db.roadmaps[String(course_id)] = { id: `roadmap:${course_id}`, course_id, course_name, settings: { duration_days: Number(duration_days), start_date, class_time, skip_sundays, template }, days, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }; await writeLiveDb(db); res.json({ success: true, roadmap: db.roadmaps[String(course_id)] }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.post("/admin/roadmap/generate", async (req, res) => { try { await requireLmsPermission(req, "lms.roadmap.manage"); const db = await readLiveDb(); const { course_id, course_name = "Course", start_date, duration_days, class_time = null, skip_sundays = true, template = "usmle_step_1" } = req.body; if (!course_id || !start_date || !duration_days) return res.status(400).json({ success: false, error: "course_id, start_date, duration_days required" }); const topics = ["Orientation", "Biochemistry", "Genetics", "Immunology", "Microbiology", "Pathology", "Pharmacology", "Cardiology", "Respiratory", "Renal", "Endocrine", "GI", "Neurology", "Psychiatry", "Reproductive", "Heme/Onc", "MSK/Derm", "Biostatistics", "Mixed Review"]; const dates = []; let cursor = new Date(`${start_date}T00:00:00`); while (dates.length < Number(duration_days)) { if (!(skip_sundays && cursor.getDay() === 0)) dates.push(dateOnly(cursor)); cursor = addDays(cursor, 1); } const days = dates.map((date, i) => ({ id: `${course_id}:day:${i + 1}`, course_id, week_number: Math.ceil((i + 1) / 7), day_number: i + 1, date, title: topics[i % topics.length], description: `Daily plan for ${course_name}`, resources: ["First Aid", "UWorld", "Class notes"], resource_links: [], uworld_target: "30-40 MCQs or assigned block", first_aid_topics: topics[i % topics.length], homework: "Complete assigned MCQs and review explanations", class_time, status: "scheduled", is_published: true, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), template })); db.roadmaps[String(course_id)] = { id: `roadmap:${course_id}`, course_id, course_name, settings: { duration_days: Number(duration_days), start_date, class_time, skip_sundays, template }, days, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }; await writeLiveDb(db); res.json({ success: true, roadmap: db.roadmaps[String(course_id)] }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.post("/admin/roadmap/sync-live-sessions", async (req, res) => {
   try {
-    await requireAdminOrInstructor(req);
+    await requireLmsPermission(req, "lms.roadmap.manage");
 
     const courseId = String(req.body.course_id || "").trim();
 
@@ -3554,12 +3760,12 @@ app.post("/admin/roadmap/sync-live-sessions", async (req, res) => {
 app.post("/roadmap/progress/mark", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); const { course_id, day_id, completed = true } = req.body; const db = await readLiveDb(); const key = `${course_id}:${user.id}:${day_id}`; db.roadmapProgress[key] = { id: key, course_id, user_id: user.id, day_id, completed: Boolean(completed), completed_at: completed ? new Date().toISOString() : null, updated_at: new Date().toISOString() }; const leaderboard = updateLeaderboard(db, { courseId: course_id, userId: user.id, userName: user.name || user.email || "Student" }); await writeLiveDb(db); res.json({ success: true, progress: db.roadmapProgress[key], summary: buildProgressSummary({ db, courseId: course_id, userId: user.id }), leaderboard }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.get("/roadmap/progress/me", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); const db = await readLiveDb(); res.json({ success: true, summary: buildProgressSummary({ db, courseId: req.query.course_id, userId: user.id }), progress_items: Object.values(db.roadmapProgress || {}).filter((x) => String(x.course_id) === String(req.query.course_id) && String(x.user_id) === String(user.id)) }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 
-app.post("/admin/assessments/create", async (req, res) => { try { const { user } = await requireAdminOrInstructor(req); const { course_id, session_id = null, title, description = "", source_type = "manual_notes", source_text = "", question_count = 10, duration_minutes = null, topic = "Assessment" } = req.body; if (!course_id) return res.status(400).json({ success: false, error: "course_id is required" }); const db = await readLiveDb(); const notes = session_id ? db.notes[session_id] : null; const source = source_text || notes?.notes || notes?.transcript_text || ""; const id = uuid(); const assessment = { id, course_id, session_id, title: title || `${topic} Assessment`, description, source_type, source_text: source, question_count: Number(question_count), duration_minutes, questions: createDraftQuestions({ question_count, topic }), is_published: false, created_by: user.id, created_by_name: user.name || user.email || "Tutor", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), published_at: null }; db.assessments[id] = assessment; await writeLiveDb(db); res.json({ success: true, assessment }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
-app.get("/admin/assessments", async (req, res) => { try { await requireAdminOrInstructor(req); const db = await readLiveDb(); let items = Object.values(db.assessments || {}); if (req.query.course_id) items = items.filter((a) => String(a.course_id) === String(req.query.course_id)); if (req.query.session_id) items = items.filter((a) => String(a.session_id || "") === String(req.query.session_id)); items.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || ""))); res.json({ success: true, count: items.length, assessments: items }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
-app.get("/admin/assessments/:assessmentId", async (req, res) => { try { await requireAdminOrInstructor(req); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a) return res.status(404).json({ success: false, error: "Assessment not found" }); res.json({ success: true, assessment: a }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
-app.patch("/admin/assessments/:assessmentId", async (req, res) => { try { await requireAdminOrInstructor(req); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a) return res.status(404).json({ success: false, error: "Assessment not found" }); const allowed = ["title", "description", "source_type", "source_text", "duration_minutes", "questions"]; for (const k of allowed) if (req.body[k] !== undefined) a[k] = req.body[k]; a.question_count = Array.isArray(a.questions) ? a.questions.length : a.question_count; a.updated_at = new Date().toISOString(); await writeLiveDb(db); res.json({ success: true, assessment: a }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
-app.post("/admin/assessments/:assessmentId/publish", async (req, res) => { try { const { user } = await requireAdminOrInstructor(req); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a) return res.status(404).json({ success: false, error: "Assessment not found" }); const invalid = (a.questions || []).find((q) => !q.stem || !Array.isArray(q.options) || q.options.length < 2 || q.correct_index === undefined); if (req.body.is_published !== false && invalid) return res.status(400).json({ success: false, error: "Assessment has incomplete questions" }); a.is_published = req.body.is_published !== false; a.published_at = a.is_published ? new Date().toISOString() : null; a.published_by = a.is_published ? user.id : null; a.updated_at = new Date().toISOString(); await writeLiveDb(db); res.json({ success: true, assessment: a }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
-app.delete("/admin/assessments/:assessmentId", async (req, res) => { try { await requireAdminOrInstructor(req); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a) return res.status(404).json({ success: false, error: "Assessment not found" }); delete db.assessments[req.params.assessmentId]; await writeLiveDb(db); res.json({ success: true, deleted_assessment: a }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.post("/admin/assessments/create", async (req, res) => { try { const { user } = await requireLmsPermission(req, "lms.assessments.create"); const { course_id, session_id = null, title, description = "", source_type = "manual_notes", source_text = "", question_count = 10, duration_minutes = null, topic = "Assessment" } = req.body; if (!course_id) return res.status(400).json({ success: false, error: "course_id is required" }); const db = await readLiveDb(); const notes = session_id ? db.notes[session_id] : null; const source = source_text || notes?.notes || notes?.transcript_text || ""; const id = uuid(); const assessment = { id, course_id, session_id, title: title || `${topic} Assessment`, description, source_type, source_text: source, question_count: Number(question_count), duration_minutes, questions: createDraftQuestions({ question_count, topic }), is_published: false, created_by: user.id, created_by_name: user.name || user.email || "Tutor", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), published_at: null }; db.assessments[id] = assessment; await writeLiveDb(db); res.json({ success: true, assessment }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.get("/admin/assessments", async (req, res) => { try { await requireLmsPermission(req, "lms.assessments.view"); const db = await readLiveDb(); let items = Object.values(db.assessments || {}); if (req.query.course_id) items = items.filter((a) => String(a.course_id) === String(req.query.course_id)); if (req.query.session_id) items = items.filter((a) => String(a.session_id || "") === String(req.query.session_id)); items.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || ""))); res.json({ success: true, count: items.length, assessments: items }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.get("/admin/assessments/:assessmentId", async (req, res) => { try { await requireLmsPermission(req, "lms.assessments.view"); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a) return res.status(404).json({ success: false, error: "Assessment not found" }); res.json({ success: true, assessment: a }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.patch("/admin/assessments/:assessmentId", async (req, res) => { try { await requireLmsPermission(req, "lms.assessments.create"); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a) return res.status(404).json({ success: false, error: "Assessment not found" }); const allowed = ["title", "description", "source_type", "source_text", "duration_minutes", "questions"]; for (const k of allowed) if (req.body[k] !== undefined) a[k] = req.body[k]; a.question_count = Array.isArray(a.questions) ? a.questions.length : a.question_count; a.updated_at = new Date().toISOString(); await writeLiveDb(db); res.json({ success: true, assessment: a }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.post("/admin/assessments/:assessmentId/publish", async (req, res) => { try { const { user } = await requireLmsPermission(req, "lms.assessments.publish"); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a) return res.status(404).json({ success: false, error: "Assessment not found" }); const invalid = (a.questions || []).find((q) => !q.stem || !Array.isArray(q.options) || q.options.length < 2 || q.correct_index === undefined); if (req.body.is_published !== false && invalid) return res.status(400).json({ success: false, error: "Assessment has incomplete questions" }); a.is_published = req.body.is_published !== false; a.published_at = a.is_published ? new Date().toISOString() : null; a.published_by = a.is_published ? user.id : null; a.updated_at = new Date().toISOString(); await writeLiveDb(db); res.json({ success: true, assessment: a }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.delete("/admin/assessments/:assessmentId", async (req, res) => { try { await requireLmsPermission(req, "lms.assessments.delete"); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a) return res.status(404).json({ success: false, error: "Assessment not found" }); delete db.assessments[req.params.assessmentId]; await writeLiveDb(db); res.json({ success: true, deleted_assessment: a }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.get("/student/assessments", async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req);
@@ -3684,7 +3890,7 @@ app.post("/student/assessments/:assessmentId/submit", async (req, res) => {
 
 app.get("/admin/assessments/report/:courseId", async (req, res) => {
   try {
-    await requireAdminOrInstructor(req);
+    await requireLmsPermission(req, "lms.assessments.review_attempts");
     const db = await readLiveDb();
     const assessments = Object.values(db.assessments || {}).filter((assessment) => String(assessment.course_id) === String(req.params.courseId));
     const attempts = Object.values(db.assessmentAttempts || {}).filter((attempt) => String(attempt.course_id) === String(req.params.courseId));
@@ -3720,7 +3926,7 @@ app.get("/admin/assessments/report/:courseId", async (req, res) => {
 
 app.get("/admin/assessment-attempts", async (req, res) => {
   try {
-    await requireAdminOrInstructor(req);
+    await requireLmsPermission(req, "lms.assessments.review_attempts");
     const db = await readLiveDb();
     const courseId = req.query.course_id ? String(req.query.course_id) : "";
     const assessmentId = req.query.assessment_id ? String(req.query.assessment_id) : "";
@@ -3741,7 +3947,7 @@ app.get("/admin/assessment-attempts", async (req, res) => {
 
 app.get("/admin/assessment-attempts/:attemptId", async (req, res) => {
   try {
-    await requireAdminOrInstructor(req);
+    await requireLmsPermission(req, "lms.assessments.review_attempts");
     const db = await readLiveDb();
     const attempt = db.assessmentAttempts[String(req.params.attemptId)];
 
@@ -3761,7 +3967,7 @@ app.get("/admin/assessment-attempts/:attemptId", async (req, res) => {
 
 app.patch("/admin/assessment-attempts/:attemptId/review", async (req, res) => {
   try {
-    const { user } = await requireAdmin(req);
+    const { user } = await requireLmsPermission(req, "lms.assessments.review_attempts");
     const db = await readLiveDb();
     const attempt = db.assessmentAttempts[String(req.params.attemptId)];
 
@@ -3801,7 +4007,7 @@ app.patch("/admin/assessment-attempts/:attemptId/review", async (req, res) => {
 
 app.post("/admin/assessment-attempts/:attemptId/release", async (req, res) => {
   try {
-    const { user } = await requireAdmin(req);
+    const { user } = await requireLmsPermission(req, "lms.assessments.review_attempts");
     const db = await readLiveDb();
     const attempt = db.assessmentAttempts[String(req.params.attemptId)];
 
@@ -4631,6 +4837,10 @@ const DEFAULT_CRM_DB = {
   roles: [],
   role_permissions: [],
   team_activity_logs: [],
+
+  // LMS team/tutor assignment and permission layer.
+  lms_team_assignments: [],
+  lms_permission_audit_logs: [],
   referral_codes: [],
   referral_attributions: [],
   commission_rules: [],
@@ -4746,6 +4956,8 @@ async function readCrmDb() {
       integration_logs: Array.isArray(parsed.integration_logs) ? parsed.integration_logs : [],
       handoffs: Array.isArray(parsed.handoffs) ? parsed.handoffs : [],
       client_data_events: Array.isArray(parsed.client_data_events) ? parsed.client_data_events : [],
+      lms_team_assignments: Array.isArray(parsed.lms_team_assignments) ? parsed.lms_team_assignments : [],
+      lms_permission_audit_logs: Array.isArray(parsed.lms_permission_audit_logs) ? parsed.lms_permission_audit_logs : [],
       appointments: Array.isArray(parsed.appointments) ? parsed.appointments : [],
       appointment_notes: Array.isArray(parsed.appointment_notes) ? parsed.appointment_notes : [],
       pipelines: Array.isArray(parsed.pipelines) ? parsed.pipelines : [],
@@ -9628,14 +9840,128 @@ const DEFAULT_CRM_DASHBOARD_LAYOUT = {
   pinned_modules: ["conversation_inbox", "leads", "approval_queue", "live_session_conversion"],
 };
 
+const DEFAULT_LMS_PERMISSION_CATALOG = [
+  { key: "lms.courses.view", label: "View courses", group: "LMS Courses" },
+  { key: "lms.courses.manage", label: "Create and edit courses", group: "LMS Courses" },
+  { key: "lms.roadmap.view", label: "View roadmap", group: "LMS Roadmap" },
+  { key: "lms.roadmap.manage", label: "Generate and sync roadmap", group: "LMS Roadmap" },
+  { key: "lms.live_sessions.view", label: "View live sessions", group: "LMS Live Classes" },
+  { key: "lms.live_sessions.manage", label: "Create, edit, cancel, or delete live sessions", group: "LMS Live Classes" },
+  { key: "lms.live_sessions.start", label: "Start/open classroom", group: "LMS Live Classes" },
+  { key: "lms.recordings.view", label: "View recordings", group: "LMS Recordings" },
+  { key: "lms.recordings.manage", label: "Refresh/import recording transcripts", group: "LMS Recordings" },
+  { key: "lms.recordings.publish", label: "Publish recordings", group: "LMS Recordings" },
+  { key: "lms.recordings.unpublish", label: "Unpublish recordings", group: "LMS Recordings" },
+  { key: "lms.notes.view", label: "View notes/transcripts", group: "LMS Notes" },
+  { key: "lms.notes.manage", label: "Create and edit notes/transcripts", group: "LMS Notes" },
+  { key: "lms.notes.publish", label: "Publish notes/transcripts", group: "LMS Notes" },
+  { key: "lms.notes.unpublish", label: "Unpublish notes/transcripts", group: "LMS Notes" },
+  { key: "lms.assessments.view", label: "View assessments", group: "LMS Assessments" },
+  { key: "lms.assessments.create", label: "Create and edit assessments", group: "LMS Assessments" },
+  { key: "lms.assessments.publish", label: "Publish/unpublish assessments", group: "LMS Assessments" },
+  { key: "lms.assessments.delete", label: "Delete assessments", group: "LMS Assessments" },
+  { key: "lms.assessments.review_attempts", label: "Review and release student assessment attempts", group: "LMS Assessments" },
+  { key: "lms.enrollments.view", label: "View enrollments", group: "LMS Enrollments" },
+  { key: "lms.enrollments.manage", label: "Create, update, revoke, or delete enrollments", group: "LMS Enrollments" },
+  { key: "lms.payments.view", label: "View payments", group: "LMS Payments" },
+  { key: "lms.payments.manage", label: "Update payment records", group: "LMS Payments" },
+  { key: "lms.plans.manage", label: "Manage plans", group: "LMS Plans & Coupons" },
+  { key: "lms.coupons.manage", label: "Manage coupons", group: "LMS Plans & Coupons" },
+  { key: "lms.global_community.moderate", label: "Moderate global LMS community", group: "LMS Community" },
+  { key: "lms.study_partner.moderate", label: "Moderate study partner module", group: "LMS Community" },
+  { key: "lms.students.view", label: "View assigned students", group: "LMS Students" },
+];
+
+const DEFAULT_LMS_ROLE_PERMISSION_SETS = {
+  admin: ["*"],
+  instructor: [
+    "lms.courses.view",
+    "lms.roadmap.view",
+    "lms.roadmap.manage",
+    "lms.live_sessions.view",
+    "lms.live_sessions.manage",
+    "lms.live_sessions.start",
+    "lms.recordings.view",
+    "lms.recordings.manage",
+    "lms.recordings.publish",
+    "lms.recordings.unpublish",
+    "lms.notes.view",
+    "lms.notes.manage",
+    "lms.notes.publish",
+    "lms.notes.unpublish",
+    "lms.assessments.view",
+    "lms.assessments.create",
+    "lms.assessments.publish",
+    "lms.assessments.review_attempts",
+    "lms.students.view"
+  ],
+  tutor: [
+    "lms.courses.view",
+    "lms.roadmap.view",
+    "lms.live_sessions.view",
+    "lms.live_sessions.manage",
+    "lms.live_sessions.start",
+    "lms.recordings.view",
+    "lms.recordings.publish",
+    "lms.notes.view",
+    "lms.notes.manage",
+    "lms.notes.publish",
+    "lms.assessments.view",
+    "lms.assessments.create",
+    "lms.assessments.publish",
+    "lms.assessments.review_attempts",
+    "lms.students.view"
+  ],
+  community_manager: [
+    "lms.global_community.moderate",
+    "lms.study_partner.moderate",
+    "lms.students.view"
+  ],
+  support_agent: [
+    "lms.courses.view",
+    "lms.live_sessions.view",
+    "lms.recordings.view",
+    "lms.notes.view",
+    "lms.students.view"
+  ],
+  sales_agent: [
+    "lms.courses.view",
+    "lms.live_sessions.view",
+    "lms.enrollments.view"
+  ],
+  closer: [
+    "lms.courses.view",
+    "lms.live_sessions.view",
+    "lms.enrollments.view",
+    "lms.payments.view"
+  ],
+  affiliate: []
+};
+
 const DEFAULT_ROLE_PERMISSION_SETS = {
-  admin: ["*"] ,
-  instructor: ["view_assigned_courses", "manage_live_sessions", "manage_recordings", "manage_assessments", "view_assigned_students", "reply_assigned_conversations"],
-  sales_agent: ["view_assigned_leads", "reply_assigned_conversations", "use_ai_draft", "create_followups"],
-  closer: ["view_assigned_leads", "reply_assigned_conversations", "send_payment_links", "view_revenue_limited", "create_followups"],
-  community_manager: ["manage_community_intelligence", "draft_community_replies", "submit_approval_items"],
+  admin: ["*"],
+  instructor: [
+    "view_assigned_courses",
+    "manage_live_sessions",
+    "manage_recordings",
+    "manage_assessments",
+    "view_assigned_students",
+    "reply_assigned_conversations",
+    ...DEFAULT_LMS_ROLE_PERMISSION_SETS.instructor
+  ],
+  tutor: [
+    "view_assigned_courses",
+    "manage_live_sessions",
+    "manage_recordings",
+    "manage_assessments",
+    "view_assigned_students",
+    ...DEFAULT_LMS_ROLE_PERMISSION_SETS.tutor
+  ],
+  sales_agent: ["view_assigned_leads", "reply_assigned_conversations", "use_ai_draft", "create_followups", ...DEFAULT_LMS_ROLE_PERMISSION_SETS.sales_agent],
+  closer: ["view_assigned_leads", "reply_assigned_conversations", "send_payment_links", "view_revenue_limited", "create_followups", ...DEFAULT_LMS_ROLE_PERMISSION_SETS.closer],
+  community_manager: ["manage_community_intelligence", "draft_community_replies", "submit_approval_items", ...DEFAULT_LMS_ROLE_PERMISSION_SETS.community_manager],
   affiliate: ["view_own_referrals", "view_own_commissions"],
-  support_agent: ["view_assigned_leads", "reply_assigned_conversations", "create_internal_notes"],
+  support_agent: ["view_assigned_leads", "reply_assigned_conversations", "create_internal_notes", ...DEFAULT_LMS_ROLE_PERMISSION_SETS.support_agent],
 };
 
 function getDefaultLiveConversionSettings(brandId = null) {
@@ -10469,7 +10795,7 @@ app.get("/admin/crm/team-members", async (req, res) => {
 });
 
 app.post("/admin/crm/team-members", async (req, res) => {
-  try { const { user } = await requireCrmAdmin(req); const db = await readCrmDb(); const member = withTimestamps({ id: uuid(), user_id: req.body.user_id || null, name: req.body.name || req.body.full_name || "Team Member", email: normalizeEmail(req.body.email || ""), role_id: req.body.role_id || null, role_name: req.body.role_name || req.body.role || "Team Member", status: req.body.status || "active", permissions: Array.isArray(req.body.permissions) ? req.body.permissions : [], allowed_modules: Array.isArray(req.body.allowed_modules) ? req.body.allowed_modules : [], referral_code: normalizeCrmString(req.body.referral_code || "").toUpperCase(), commission_rule_id: req.body.commission_rule_id || null, created_by: user.id }); ensureCrmArray(db, "team_members").push(member); logTeamActivity(db, { team_member_id: member.id, action: "create_team_member", message: "Team member created", metadata: { created_by: user.id } }); await writeCrmDb(db); res.json({ success: true, member }); }
+  try { const { user } = await requireCrmAdmin(req); const db = await readCrmDb(); const member = withTimestamps({ id: uuid(), user_id: req.body.user_id || null, name: req.body.name || req.body.full_name || "Team Member", email: normalizeEmail(req.body.email || ""), role_id: req.body.role_id || null, role_name: req.body.role_name || req.body.role || "Team Member", status: req.body.status || "active", permissions: Array.isArray(req.body.permissions) ? req.body.permissions : [], lms_permissions: Array.isArray(req.body.lms_permissions) ? req.body.lms_permissions : [], allowed_modules: Array.isArray(req.body.allowed_modules) ? req.body.allowed_modules : [], lms_allowed_modules: Array.isArray(req.body.lms_allowed_modules) ? req.body.lms_allowed_modules : [], assigned_course_ids: Array.isArray(req.body.assigned_course_ids) ? req.body.assigned_course_ids : [], assigned_session_ids: Array.isArray(req.body.assigned_session_ids) ? req.body.assigned_session_ids : [], restrict_to_assigned_courses: Boolean(req.body.restrict_to_assigned_courses), restrict_to_assigned_scope: Boolean(req.body.restrict_to_assigned_scope), referral_code: normalizeCrmString(req.body.referral_code || "").toUpperCase(), commission_rule_id: req.body.commission_rule_id || null, created_by: user.id }); ensureCrmArray(db, "team_members").push(member); logTeamActivity(db, { team_member_id: member.id, action: "create_team_member", message: "Team member created", metadata: { created_by: user.id } }); await writeCrmDb(db); res.json({ success: true, member }); }
   catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
