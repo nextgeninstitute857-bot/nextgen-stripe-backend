@@ -4642,6 +4642,33 @@ const DEFAULT_CRM_DB = {
   voice_call_settings: [],
   voice_call_logs: [],
 
+  // GoHighLevel-style CRM modules added for NextGen multi-brand growth.
+  appointments: [],
+  appointment_notes: [],
+  pipelines: [],
+  pipeline_stages: [],
+  opportunities: [],
+  tasks: [],
+  forms: [],
+  form_fields: [],
+  form_submissions: [],
+  surveys: [],
+  survey_responses: [],
+  review_requests: [],
+  testimonials: [],
+  testimonial_permissions: [],
+  review_platform_links: [],
+  review_followups: [],
+  ad_accounts: [],
+  ad_campaigns: [],
+  ad_sets: [],
+  ad_creatives: [],
+  ad_performance_logs: [],
+  ad_ai_recommendations: [],
+  ad_ai_actions: [],
+  brand_snapshots: [],
+  snapshot_items: [],
+
   settings: DEFAULT_CRM_SETTINGS,
   updated_at: null,
 };
@@ -4719,6 +4746,31 @@ async function readCrmDb() {
       integration_logs: Array.isArray(parsed.integration_logs) ? parsed.integration_logs : [],
       handoffs: Array.isArray(parsed.handoffs) ? parsed.handoffs : [],
       client_data_events: Array.isArray(parsed.client_data_events) ? parsed.client_data_events : [],
+      appointments: Array.isArray(parsed.appointments) ? parsed.appointments : [],
+      appointment_notes: Array.isArray(parsed.appointment_notes) ? parsed.appointment_notes : [],
+      pipelines: Array.isArray(parsed.pipelines) ? parsed.pipelines : [],
+      pipeline_stages: Array.isArray(parsed.pipeline_stages) ? parsed.pipeline_stages : [],
+      opportunities: Array.isArray(parsed.opportunities) ? parsed.opportunities : [],
+      tasks: Array.isArray(parsed.tasks) ? parsed.tasks : [],
+      forms: Array.isArray(parsed.forms) ? parsed.forms : [],
+      form_fields: Array.isArray(parsed.form_fields) ? parsed.form_fields : [],
+      form_submissions: Array.isArray(parsed.form_submissions) ? parsed.form_submissions : [],
+      surveys: Array.isArray(parsed.surveys) ? parsed.surveys : [],
+      survey_responses: Array.isArray(parsed.survey_responses) ? parsed.survey_responses : [],
+      review_requests: Array.isArray(parsed.review_requests) ? parsed.review_requests : [],
+      testimonials: Array.isArray(parsed.testimonials) ? parsed.testimonials : [],
+      testimonial_permissions: Array.isArray(parsed.testimonial_permissions) ? parsed.testimonial_permissions : [],
+      review_platform_links: Array.isArray(parsed.review_platform_links) ? parsed.review_platform_links : [],
+      review_followups: Array.isArray(parsed.review_followups) ? parsed.review_followups : [],
+      ad_accounts: Array.isArray(parsed.ad_accounts) ? parsed.ad_accounts : [],
+      ad_campaigns: Array.isArray(parsed.ad_campaigns) ? parsed.ad_campaigns : [],
+      ad_sets: Array.isArray(parsed.ad_sets) ? parsed.ad_sets : [],
+      ad_creatives: Array.isArray(parsed.ad_creatives) ? parsed.ad_creatives : [],
+      ad_performance_logs: Array.isArray(parsed.ad_performance_logs) ? parsed.ad_performance_logs : [],
+      ad_ai_recommendations: Array.isArray(parsed.ad_ai_recommendations) ? parsed.ad_ai_recommendations : [],
+      ad_ai_actions: Array.isArray(parsed.ad_ai_actions) ? parsed.ad_ai_actions : [],
+      brand_snapshots: Array.isArray(parsed.brand_snapshots) ? parsed.brand_snapshots : [],
+      snapshot_items: Array.isArray(parsed.snapshot_items) ? parsed.snapshot_items : [],
       settings: { ...DEFAULT_CRM_SETTINGS, ...(parsed.settings || {}) },
       updated_at: parsed.updated_at || null,
     };
@@ -4956,6 +5008,238 @@ function normalizeCrmCollectionPayload(collection, body = {}, existing = null, b
     base.status = normalizeCrmLower(base.status, "draft") || "draft";
     base.community_ids = Array.isArray(base.community_ids) ? base.community_ids : normalizeArray(base.community_ids || []);
     base.agent_ids = Array.isArray(base.agent_ids) ? base.agent_ids : normalizeArray(base.agent_ids || []);
+  }
+
+
+  if (collection === "appointments") {
+    base.title = normalizeCrmString(base.title || base.name || "Student appointment");
+    base.name = base.title;
+    base.lead_id = base.lead_id || base.student_id || null;
+    base.student_name = normalizeCrmString(base.student_name || base.lead_name || base.name || "");
+    base.student_email = normalizeEmail(base.student_email || base.email || "");
+    base.student_phone = normalizeCrmString(base.student_phone || base.phone || base.whatsapp || "");
+    base.platform = normalizeSocialPlatform(base.platform || base.source_platform || "manual");
+    base.appointment_type = normalizeCrmLower(base.appointment_type || base.type, "consultation");
+    base.status = normalizeCrmLower(base.status, "scheduled") || "scheduled";
+    base.start_time = normalizeCrmString(base.start_time || base.starts_at || base.scheduled_at || "");
+    base.end_time = normalizeCrmString(base.end_time || base.ends_at || "");
+    base.timezone = normalizeCrmString(base.timezone || DEFAULT_TIMEZONE);
+    base.assigned_team_member_id = base.assigned_team_member_id || base.assigned_to || null;
+    base.assigned_agent_id = base.assigned_agent_id || null;
+    base.notes = normalizeCrmString(base.notes || "");
+    base.conversation_summary = normalizeCrmString(base.conversation_summary || "");
+    base.location = normalizeCrmString(base.location || base.meeting_link || "");
+    base.reminder_enabled = base.reminder_enabled !== false;
+  }
+
+  if (collection === "appointment_notes") {
+    base.appointment_id = base.appointment_id || null;
+    base.lead_id = base.lead_id || null;
+    base.note = normalizeCrmString(base.note || base.content || "");
+    base.created_by = base.created_by || null;
+  }
+
+  if (collection === "pipelines") {
+    base.name = normalizeCrmString(base.name || "Sales Pipeline");
+    base.description = normalizeCrmString(base.description || "");
+    base.status = normalizeCrmLower(base.status, "active") || "active";
+    base.is_default = Boolean(base.is_default);
+  }
+
+  if (collection === "pipeline_stages") {
+    base.name = normalizeCrmString(base.name || "New Stage");
+    base.pipeline_id = base.pipeline_id || null;
+    base.stage_key = normalizeCrmLower(base.stage_key || base.name.replace(/[^a-z0-9]+/gi, "_"), "stage");
+    base.order = Number(base.order || base.position || 0);
+    base.probability = Number(base.probability || 0);
+    base.status = normalizeCrmLower(base.status, "active") || "active";
+  }
+
+  if (collection === "opportunities") {
+    base.name = normalizeCrmString(base.name || base.title || "New Opportunity");
+    base.lead_id = base.lead_id || null;
+    base.pipeline_id = base.pipeline_id || null;
+    base.stage_id = base.stage_id || null;
+    base.stage_key = normalizeCrmLower(base.stage_key || "new_lead", "new_lead");
+    base.status = normalizeCrmLower(base.status, "open") || "open";
+    base.value_usd = Number(base.value_usd || base.amount_usd || 0);
+    base.probability = Number(base.probability || 0);
+    base.assigned_team_member_id = base.assigned_team_member_id || base.assigned_to || null;
+    base.source_platform = normalizeSocialPlatform(base.source_platform || base.platform || "manual");
+    base.expected_close_date = normalizeCrmString(base.expected_close_date || "");
+  }
+
+  if (collection === "tasks") {
+    base.title = normalizeCrmString(base.title || base.name || "CRM task");
+    base.name = base.title;
+    base.description = normalizeCrmString(base.description || base.notes || "");
+    base.status = normalizeCrmLower(base.status, "open") || "open";
+    base.priority = normalizeCrmLower(base.priority, "normal") || "normal";
+    base.due_at = normalizeCrmString(base.due_at || base.due_date || "");
+    base.lead_id = base.lead_id || null;
+    base.opportunity_id = base.opportunity_id || null;
+    base.appointment_id = base.appointment_id || null;
+    base.assigned_team_member_id = base.assigned_team_member_id || base.assigned_to || null;
+    base.task_type = normalizeCrmLower(base.task_type || base.type, "follow_up");
+  }
+
+  if (collection === "forms" || collection === "surveys") {
+    base.name = normalizeCrmString(base.name || base.title || (collection === "forms" ? "New Form" : "New Survey"));
+    base.title = base.name;
+    base.description = normalizeCrmString(base.description || "");
+    base.slug = normalizeCrmLower(base.slug || base.name.replace(/[^a-z0-9]+/gi, "-"), "form");
+    base.status = normalizeCrmLower(base.status, "draft") || "draft";
+    base.form_type = normalizeCrmLower(base.form_type || base.type, collection === "forms" ? "lead_capture" : "survey");
+    base.fields = Array.isArray(base.fields) ? base.fields : [];
+    base.create_lead_on_submit = base.create_lead_on_submit !== false;
+    base.default_pipeline_id = base.default_pipeline_id || null;
+    base.default_stage_key = normalizeCrmLower(base.default_stage_key || "new_lead", "new_lead");
+  }
+
+  if (collection === "form_fields") {
+    base.form_id = base.form_id || null;
+    base.label = normalizeCrmString(base.label || base.name || "Field");
+    base.field_key = normalizeCrmLower(base.field_key || base.label.replace(/[^a-z0-9]+/gi, "_"), "field");
+    base.field_type = normalizeCrmLower(base.field_type || base.type, "text");
+    base.required = Boolean(base.required);
+    base.options = Array.isArray(base.options) ? base.options : normalizeArray(base.options || []);
+    base.order = Number(base.order || 0);
+  }
+
+  if (collection === "form_submissions" || collection === "survey_responses") {
+    base.form_id = base.form_id || base.survey_id || null;
+    base.survey_id = base.survey_id || base.form_id || null;
+    base.lead_id = base.lead_id || null;
+    base.submitted_by_email = normalizeEmail(base.submitted_by_email || base.email || "");
+    base.submitted_by_name = normalizeCrmString(base.submitted_by_name || base.name || "");
+    base.answers = typeof base.answers === "object" && base.answers !== null ? base.answers : {};
+    base.status = normalizeCrmLower(base.status, "submitted") || "submitted";
+    base.source_platform = normalizeSocialPlatform(base.source_platform || base.platform || "form");
+  }
+
+  if (collection === "review_requests") {
+    base.lead_id = base.lead_id || base.student_id || null;
+    base.student_name = normalizeCrmString(base.student_name || base.name || "");
+    base.student_email = normalizeEmail(base.student_email || base.email || "");
+    base.platform = normalizeCrmLower(base.platform || "trustpilot", "trustpilot");
+    base.status = normalizeCrmLower(base.status, "pending") || "pending";
+    base.requested_at = base.requested_at || nowIso();
+    base.review_link = normalizeCrmString(base.review_link || "");
+    base.message = normalizeCrmString(base.message || "");
+  }
+
+  if (collection === "testimonials") {
+    base.lead_id = base.lead_id || base.student_id || null;
+    base.student_name = normalizeCrmString(base.student_name || base.name || "");
+    base.exam_type = normalizeCrmString(base.exam_type || "");
+    base.testimonial_type = normalizeCrmLower(base.testimonial_type || base.type, "text");
+    base.content = normalizeCrmString(base.content || base.text || "");
+    base.video_url = normalizeCrmString(base.video_url || "");
+    base.result_score = normalizeCrmString(base.result_score || "");
+    base.status = normalizeCrmLower(base.status, "pending_review") || "pending_review";
+    base.permission_to_publish = base.permission_to_publish === true;
+    base.feature_on_homepage = Boolean(base.feature_on_homepage);
+  }
+
+  if (collection === "testimonial_permissions") {
+    base.testimonial_id = base.testimonial_id || null;
+    base.lead_id = base.lead_id || null;
+    base.permission_type = normalizeCrmLower(base.permission_type, "publish");
+    base.granted = base.granted === true;
+    base.granted_at = base.granted ? (base.granted_at || nowIso()) : null;
+  }
+
+  if (collection === "review_platform_links") {
+    base.platform = normalizeCrmLower(base.platform || "trustpilot", "trustpilot");
+    base.name = normalizeCrmString(base.name || base.platform);
+    base.url = normalizeCrmString(base.url || "");
+    base.status = normalizeCrmLower(base.status, "active") || "active";
+  }
+
+  if (collection === "review_followups") {
+    base.review_request_id = base.review_request_id || null;
+    base.lead_id = base.lead_id || null;
+    base.followup_at = normalizeCrmString(base.followup_at || base.scheduled_at || "");
+    base.status = normalizeCrmLower(base.status, "scheduled") || "scheduled";
+  }
+
+  if (collection === "ad_accounts") {
+    base.platform = normalizeCrmLower(base.platform || "meta", "meta");
+    base.name = normalizeCrmString(base.name || base.account_name || `${base.platform} Ad Account`);
+    base.account_id = normalizeCrmString(base.account_id || "");
+    base.status = normalizeCrmLower(base.status, "configured") || "configured";
+    base.currency = normalizeCrmString(base.currency || "usd").toLowerCase();
+  }
+
+  if (collection === "ad_campaigns") {
+    base.name = normalizeCrmString(base.name || "New Ad Campaign");
+    base.platform = normalizeCrmLower(base.platform || "meta", "meta");
+    base.ad_account_id = base.ad_account_id || null;
+    base.status = normalizeCrmLower(base.status, "draft") || "draft";
+    base.objective = normalizeCrmLower(base.objective || "lead_generation", "lead_generation");
+    base.daily_budget_usd = Number(base.daily_budget_usd || 0);
+    base.total_budget_usd = Number(base.total_budget_usd || 0);
+    base.ai_manager_enabled = Boolean(base.ai_manager_enabled);
+    base.ai_publish_requires_approval = base.ai_publish_requires_approval !== false;
+  }
+
+  if (collection === "ad_sets") {
+    base.ad_campaign_id = base.ad_campaign_id || base.campaign_id || null;
+    base.name = normalizeCrmString(base.name || "New Ad Set");
+    base.audience = typeof base.audience === "object" && base.audience !== null ? base.audience : {};
+    base.daily_budget_usd = Number(base.daily_budget_usd || 0);
+    base.status = normalizeCrmLower(base.status, "draft") || "draft";
+  }
+
+  if (collection === "ad_creatives") {
+    base.ad_campaign_id = base.ad_campaign_id || base.campaign_id || null;
+    base.ad_set_id = base.ad_set_id || null;
+    base.name = normalizeCrmString(base.name || "New Creative");
+    base.primary_text = normalizeCrmString(base.primary_text || "");
+    base.headline = normalizeCrmString(base.headline || "");
+    base.description = normalizeCrmString(base.description || "");
+    base.cta = normalizeCrmString(base.cta || "Learn More");
+    base.status = normalizeCrmLower(base.status, "draft") || "draft";
+  }
+
+  if (collection === "ad_performance_logs") {
+    base.ad_campaign_id = base.ad_campaign_id || base.campaign_id || null;
+    base.ad_set_id = base.ad_set_id || null;
+    base.ad_creative_id = base.ad_creative_id || null;
+    base.spend_usd = Number(base.spend_usd || 0);
+    base.impressions = Number(base.impressions || 0);
+    base.clicks = Number(base.clicks || 0);
+    base.leads = Number(base.leads || 0);
+    base.enrollments = Number(base.enrollments || 0);
+    base.revenue_usd = Number(base.revenue_usd || 0);
+    base.logged_at = base.logged_at || nowIso();
+  }
+
+  if (collection === "ad_ai_recommendations" || collection === "ad_ai_actions") {
+    base.ad_campaign_id = base.ad_campaign_id || base.campaign_id || null;
+    base.agent_id = base.agent_id || null;
+    base.recommendation_type = normalizeCrmLower(base.recommendation_type || base.action_type, "optimize");
+    base.title = normalizeCrmString(base.title || base.name || "AI ad recommendation");
+    base.reason = normalizeCrmString(base.reason || "");
+    base.recommended_action = normalizeCrmString(base.recommended_action || base.action || "");
+    base.estimated_impact = normalizeCrmString(base.estimated_impact || "");
+    base.status = normalizeCrmLower(base.status, "needs_approval") || "needs_approval";
+    base.approval_required = base.approval_required !== false;
+  }
+
+  if (collection === "brand_snapshots") {
+    base.name = normalizeCrmString(base.name || "New Brand Snapshot");
+    base.exam_key = normalizeCrmLower(base.exam_key || "usmle", "usmle");
+    base.description = normalizeCrmString(base.description || "");
+    base.status = normalizeCrmLower(base.status, "draft") || "draft";
+    base.snapshot_data = typeof base.snapshot_data === "object" && base.snapshot_data !== null ? base.snapshot_data : {};
+  }
+
+  if (collection === "snapshot_items") {
+    base.snapshot_id = base.snapshot_id || null;
+    base.item_type = normalizeCrmLower(base.item_type || "template", "template");
+    base.item_key = normalizeCrmLower(base.item_key || base.name || "item", "item");
+    base.item_data = typeof base.item_data === "object" && base.item_data !== null ? base.item_data : {};
   }
 
 
@@ -5568,6 +5852,514 @@ function buildMockCommunityPost({ platform, postType, topic, audience, cta, lang
   return `USMLE Discussion of the Day:\n\n${topic || "Many students complete UWorld but still do not see NBME improvement."}\n\nWhat do you think is the biggest reason?\n\nA) Weak First Aid base\nB) Poor incorrect review\nC) Random study schedule\nD) Not enough questions\n\n${cta || "Comment your answer and we’ll share the correct strategy after discussion."}`;
 }
 
+
+// -----------------------------------------------------------------------------
+// GoHighLevel-style CRM route helpers
+// Appointments, pipeline, tasks, forms/surveys, reviews, ads, snapshots.
+// -----------------------------------------------------------------------------
+
+function getLeadConversationHistory(db, leadId) {
+  const cleanLeadId = String(leadId || "");
+  return ensureCrmArray(db, "conversations")
+    .filter((item) => String(item.lead_id || "") === cleanLeadId)
+    .sort((a, b) => String(a.created_at || a.timestamp || "").localeCompare(String(b.created_at || b.timestamp || "")));
+}
+
+function enrichAppointment(db, appointment = {}) {
+  const lead = appointment.lead_id ? getLeadByAnyId(db, appointment.lead_id) : null;
+  const teamMember = appointment.assigned_team_member_id
+    ? ensureCrmArray(db, "team_members").find((item) => String(item.id) === String(appointment.assigned_team_member_id))
+    : null;
+  const notes = ensureCrmArray(db, "appointment_notes").filter((item) => String(item.appointment_id) === String(appointment.id));
+  return {
+    ...appointment,
+    lead: lead ? normalizeLeadForResponse(lead) : null,
+    assigned_team_member: teamMember || null,
+    notes,
+    conversation_history: lead ? getLeadConversationHistory(db, lead.id) : [],
+  };
+}
+
+function getDefaultPipeline(db, brandId) {
+  return (
+    ensureCrmArray(db, "pipelines").find((item) => String(item.brand_id || "") === String(brandId || "") && item.is_default) ||
+    ensureCrmArray(db, "pipelines").find((item) => !brandId || String(item.brand_id || "") === String(brandId || "")) ||
+    null
+  );
+}
+
+function ensureDefaultPipeline(db, brandId) {
+  let pipeline = getDefaultPipeline(db, brandId);
+  if (pipeline) return pipeline;
+
+  pipeline = withTimestamps({
+    id: uuid(),
+    brand_id: brandId || null,
+    name: "Default Sales Pipeline",
+    description: "Default lead-to-enrollment pipeline",
+    status: "active",
+    is_default: true,
+  });
+
+  ensureCrmArray(db, "pipelines").push(pipeline);
+
+  const stages = [
+    ["new_lead", "New Lead", 10],
+    ["qualified", "Qualified", 25],
+    ["demo_booked", "Demo Booked", 40],
+    ["attended_session", "Attended Session", 60],
+    ["payment_link_sent", "Payment Link Sent", 80],
+    ["paid_enrolled", "Paid / Enrolled", 100],
+    ["lost", "Lost", 0],
+  ];
+
+  stages.forEach(([stageKey, name, probability], index) => {
+    ensureCrmArray(db, "pipeline_stages").push(withTimestamps({
+      id: uuid(),
+      brand_id: brandId || null,
+      pipeline_id: pipeline.id,
+      stage_key: stageKey,
+      name,
+      order: index + 1,
+      probability,
+      status: "active",
+    }));
+  });
+
+  return pipeline;
+}
+
+function createOpportunityFromLead(db, { lead, brandId, stageKey = "new_lead", valueUsd = 0 }) {
+  if (!lead?.id) return null;
+  const existing = ensureCrmArray(db, "opportunities").find((item) => String(item.lead_id) === String(lead.id) && String(item.status || "open") === "open");
+  if (existing) return existing;
+
+  const pipeline = ensureDefaultPipeline(db, brandId || lead.brand_id || null);
+  const stage = ensureCrmArray(db, "pipeline_stages").find((item) => String(item.pipeline_id) === String(pipeline.id) && item.stage_key === stageKey);
+
+  const opportunity = withTimestamps({
+    id: uuid(),
+    brand_id: brandId || lead.brand_id || null,
+    name: `${lead.name || lead.email || "Lead"} Opportunity`,
+    lead_id: lead.id,
+    pipeline_id: pipeline.id,
+    stage_id: stage?.id || null,
+    stage_key: stageKey,
+    status: "open",
+    value_usd: Number(valueUsd || lead.value_usd || lead.deal_value_usd || 0),
+    probability: Number(stage?.probability || 10),
+    source_platform: normalizeLeadSourcePlatform(lead),
+    assigned_team_member_id: lead.assigned_team_member_id || null,
+  });
+
+  ensureCrmArray(db, "opportunities").push(opportunity);
+  return opportunity;
+}
+
+app.get("/admin/crm/appointments/calendar", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const from = req.query.from ? new Date(String(req.query.from)) : new Date(new Date().setHours(0, 0, 0, 0));
+    const to = req.query.to ? new Date(String(req.query.to)) : addDays(from, 30);
+
+    let appointments = ensureCrmArray(db, "appointments").filter((item) => {
+      if (brandId && String(item.brand_id || "") !== String(brandId)) return false;
+      const ts = new Date(item.start_time || item.scheduled_at || item.created_at || 0).getTime();
+      return ts >= from.getTime() && ts <= to.getTime();
+    });
+
+    if (req.query.assigned_team_member_id) {
+      appointments = appointments.filter((item) => String(item.assigned_team_member_id || "") === String(req.query.assigned_team_member_id));
+    }
+
+    appointments.sort((a, b) => String(a.start_time || "").localeCompare(String(b.start_time || "")));
+
+    res.json({
+      success: true,
+      from: from.toISOString(),
+      to: to.toISOString(),
+      count: appointments.length,
+      appointments: appointments.map((item) => enrichAppointment(db, item)),
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/appointments/:id/complete", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const appointment = ensureCrmArray(db, "appointments").find((item) => String(item.id) === String(req.params.id));
+    if (!appointment) return res.status(404).json({ success: false, error: "Appointment not found" });
+
+    appointment.status = "completed";
+    appointment.completed_at = nowIso();
+    appointment.outcome = req.body.outcome || appointment.outcome || "";
+    appointment.updated_at = nowIso();
+
+    if (appointment.lead_id && req.body.create_task !== false) {
+      ensureCrmArray(db, "tasks").push(withTimestamps({
+        id: uuid(),
+        brand_id: appointment.brand_id || null,
+        title: req.body.next_task_title || "Follow up after completed appointment",
+        description: req.body.next_task_description || "Send plan/payment link or schedule next step.",
+        task_type: "post_appointment_follow_up",
+        status: "open",
+        priority: "high",
+        lead_id: appointment.lead_id,
+        appointment_id: appointment.id,
+        assigned_team_member_id: appointment.assigned_team_member_id || null,
+        due_at: req.body.next_task_due_at || addDays(new Date(), 1).toISOString(),
+      }));
+    }
+
+    await writeCrmDb(db);
+    res.json({ success: true, appointment: enrichAppointment(db, appointment) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/appointments/:id/missed", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const appointment = ensureCrmArray(db, "appointments").find((item) => String(item.id) === String(req.params.id));
+    if (!appointment) return res.status(404).json({ success: false, error: "Appointment not found" });
+
+    appointment.status = "missed";
+    appointment.missed_at = nowIso();
+    appointment.missed_reason = req.body.reason || "";
+    appointment.updated_at = nowIso();
+
+    ensureCrmArray(db, "tasks").push(withTimestamps({
+      id: uuid(),
+      brand_id: appointment.brand_id || null,
+      title: "Reschedule missed appointment",
+      description: req.body.task_description || "Lead missed the appointment. Follow up and reschedule.",
+      task_type: "reschedule_appointment",
+      status: "open",
+      priority: "high",
+      lead_id: appointment.lead_id || null,
+      appointment_id: appointment.id,
+      assigned_team_member_id: appointment.assigned_team_member_id || null,
+      due_at: req.body.due_at || addDays(new Date(), 1).toISOString(),
+    }));
+
+    await writeCrmDb(db);
+    res.json({ success: true, appointment: enrichAppointment(db, appointment) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/appointments/:id/reschedule", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const appointment = ensureCrmArray(db, "appointments").find((item) => String(item.id) === String(req.params.id));
+    if (!appointment) return res.status(404).json({ success: false, error: "Appointment not found" });
+
+    appointment.previous_start_time = appointment.start_time || null;
+    appointment.previous_end_time = appointment.end_time || null;
+    appointment.start_time = req.body.start_time || req.body.scheduled_at || appointment.start_time;
+    appointment.end_time = req.body.end_time || appointment.end_time;
+    appointment.timezone = req.body.timezone || appointment.timezone || DEFAULT_TIMEZONE;
+    appointment.status = "rescheduled";
+    appointment.rescheduled_at = nowIso();
+    appointment.reschedule_reason = req.body.reason || "";
+    appointment.updated_at = nowIso();
+
+    await writeCrmDb(db);
+    res.json({ success: true, appointment: enrichAppointment(db, appointment) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/appointments/:id/assign", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const appointment = ensureCrmArray(db, "appointments").find((item) => String(item.id) === String(req.params.id));
+    if (!appointment) return res.status(404).json({ success: false, error: "Appointment not found" });
+    appointment.assigned_team_member_id = req.body.assigned_team_member_id || req.body.assigned_to || null;
+    appointment.assigned_agent_id = req.body.assigned_agent_id || appointment.assigned_agent_id || null;
+    appointment.updated_at = nowIso();
+    await writeCrmDb(db);
+    res.json({ success: true, appointment: enrichAppointment(db, appointment) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/pipeline/board", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const pipeline = req.query.pipeline_id
+      ? ensureCrmArray(db, "pipelines").find((item) => String(item.id) === String(req.query.pipeline_id))
+      : ensureDefaultPipeline(db, brandId);
+
+    const stages = ensureCrmArray(db, "pipeline_stages")
+      .filter((item) => String(item.pipeline_id) === String(pipeline?.id || ""))
+      .sort((a, b) => Number(a.order || 0) - Number(b.order || 0));
+
+    const opportunities = ensureCrmArray(db, "opportunities").filter((item) => {
+      if (brandId && String(item.brand_id || "") !== String(brandId)) return false;
+      return !pipeline?.id || String(item.pipeline_id || "") === String(pipeline.id);
+    });
+
+    const board = stages.map((stage) => {
+      const items = opportunities
+        .filter((opp) => String(opp.stage_id || "") === String(stage.id) || String(opp.stage_key || "") === String(stage.stage_key))
+        .map((opp) => ({
+          ...opp,
+          lead: opp.lead_id ? normalizeLeadForResponse(getLeadByAnyId(db, opp.lead_id) || {}) : null,
+        }));
+      return {
+        ...stage,
+        opportunities: items,
+        count: items.length,
+        value_usd: Number(items.reduce((sum, item) => sum + Number(item.value_usd || 0), 0).toFixed(2)),
+      };
+    });
+
+    res.json({ success: true, pipeline, stages, board });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/opportunities/:id/move", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const opportunity = ensureCrmArray(db, "opportunities").find((item) => String(item.id) === String(req.params.id));
+    if (!opportunity) return res.status(404).json({ success: false, error: "Opportunity not found" });
+
+    const stage = req.body.stage_id
+      ? ensureCrmArray(db, "pipeline_stages").find((item) => String(item.id) === String(req.body.stage_id))
+      : ensureCrmArray(db, "pipeline_stages").find((item) => String(item.pipeline_id) === String(opportunity.pipeline_id) && String(item.stage_key) === String(req.body.stage_key));
+
+    if (!stage) return res.status(404).json({ success: false, error: "Pipeline stage not found" });
+
+    opportunity.stage_id = stage.id;
+    opportunity.stage_key = stage.stage_key;
+    opportunity.probability = Number(stage.probability || opportunity.probability || 0);
+    opportunity.updated_at = nowIso();
+
+    if (stage.stage_key === "paid_enrolled") {
+      opportunity.status = "won";
+      opportunity.closed_at = nowIso();
+    }
+    if (stage.stage_key === "lost") {
+      opportunity.status = "lost";
+      opportunity.closed_at = nowIso();
+    }
+
+    await writeCrmDb(db);
+    res.json({ success: true, opportunity });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/tasks/:id/complete", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const task = ensureCrmArray(db, "tasks").find((item) => String(item.id) === String(req.params.id));
+    if (!task) return res.status(404).json({ success: false, error: "Task not found" });
+    task.status = "completed";
+    task.completed_at = nowIso();
+    task.completed_by = user.id;
+    task.completion_note = req.body.note || "";
+    task.updated_at = nowIso();
+    await writeCrmDb(db);
+    res.json({ success: true, task });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/public/crm/forms/:formId/submit", async (req, res) => {
+  try {
+    const db = await readCrmDb();
+    const form = ensureCrmArray(db, "forms").find((item) => String(item.id) === String(req.params.formId) || String(item.slug) === String(req.params.formId));
+    if (!form || form.status !== "active") return res.status(404).json({ success: false, error: "Form not found or inactive" });
+
+    const answers = req.body.answers || req.body || {};
+    const brandId = form.brand_id || db.settings?.default_brand_id || null;
+    let lead = null;
+
+    if (form.create_lead_on_submit !== false) {
+      const leadPayload = normalizeCrmCollectionPayload("leads", {
+        brand_id: brandId,
+        name: answers.name || answers.full_name || answers.student_name || "Form Lead",
+        email: answers.email || answers.student_email || "",
+        whatsapp: answers.whatsapp || answers.phone || "",
+        phone: answers.phone || answers.whatsapp || "",
+        country: answers.country || "",
+        platform: "form",
+        source_platform: "form",
+        status: "new",
+        exam_type: answers.exam_type || answers.exam || "",
+        exam_date: answers.exam_date || "",
+        exam_timeline: answers.exam_timeline || "",
+        pain_points: answers.pain_points || answers.weak_subjects || "",
+        conversation_summary: JSON.stringify(answers).slice(0, 1000),
+        opt_in_status: "form_submission",
+      }, null, brandId);
+
+      const existing = findExistingSocialLead(db, "email", leadPayload);
+      if (existing) {
+        Object.assign(existing, compactDefined(leadPayload), { updated_at: nowIso() });
+        lead = existing;
+      } else {
+        lead = leadPayload;
+        ensureCrmArray(db, "leads").push(lead);
+      }
+
+      createOpportunityFromLead(db, { lead, brandId, stageKey: form.default_stage_key || "new_lead" });
+    }
+
+    const submission = normalizeCrmCollectionPayload("form_submissions", {
+      id: uuid(),
+      brand_id: brandId,
+      form_id: form.id,
+      lead_id: lead?.id || null,
+      submitted_by_name: answers.name || answers.full_name || "",
+      submitted_by_email: answers.email || "",
+      answers,
+      source_platform: "form",
+      status: "submitted",
+    }, null, brandId);
+
+    ensureCrmArray(db, "form_submissions").push(submission);
+    await writeCrmDb(db);
+
+    res.json({ success: true, submission, lead_id: lead?.id || null });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/review-requests/:id/mark-sent", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const item = ensureCrmArray(db, "review_requests").find((request) => String(request.id) === String(req.params.id));
+    if (!item) return res.status(404).json({ success: false, error: "Review request not found" });
+    item.status = "sent";
+    item.sent_at = nowIso();
+    item.channel = req.body.channel || item.channel || "manual";
+    item.updated_at = nowIso();
+    await writeCrmDb(db);
+    res.json({ success: true, review_request: item });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/testimonials/:id/approve", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const item = ensureCrmArray(db, "testimonials").find((testimonial) => String(testimonial.id) === String(req.params.id));
+    if (!item) return res.status(404).json({ success: false, error: "Testimonial not found" });
+    item.status = "approved";
+    item.permission_to_publish = req.body.permission_to_publish !== false;
+    item.approved_at = nowIso();
+    item.updated_at = nowIso();
+    await writeCrmDb(db);
+    res.json({ success: true, testimonial: item });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ad-manager/:campaignId/ai-recommendation", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const campaign = ensureCrmArray(db, "ad_campaigns").find((item) => String(item.id) === String(req.params.campaignId));
+    if (!campaign) return res.status(404).json({ success: false, error: "Ad campaign not found" });
+
+    const logs = ensureCrmArray(db, "ad_performance_logs").filter((item) => String(item.ad_campaign_id || item.campaign_id) === String(campaign.id));
+    const spend = logs.reduce((sum, item) => sum + Number(item.spend_usd || 0), 0);
+    const leads = logs.reduce((sum, item) => sum + Number(item.leads || 0), 0);
+    const revenue = logs.reduce((sum, item) => sum + Number(item.revenue_usd || 0), 0);
+    const cpl = leads ? spend / leads : 0;
+
+    const recommendation = normalizeCrmCollectionPayload("ad_ai_recommendations", {
+      id: uuid(),
+      brand_id: campaign.brand_id || null,
+      ad_campaign_id: campaign.id,
+      title: req.body.title || (leads === 0 && spend > 0 ? "Review ad targeting and creative" : revenue > spend ? "Consider scaling winning campaign" : "Monitor campaign before scaling"),
+      reason: req.body.reason || `Spend: $${spend.toFixed(2)}, leads: ${leads}, CPL: $${cpl.toFixed(2)}, revenue: $${revenue.toFixed(2)}.`,
+      recommended_action: req.body.recommended_action || (revenue > spend ? "Increase budget only after admin approval." : "Draft new creative/audience test; do not increase spend yet."),
+      estimated_impact: req.body.estimated_impact || "",
+      status: "needs_approval",
+      approval_required: true,
+    }, null, campaign.brand_id || null);
+
+    ensureCrmArray(db, "ad_ai_recommendations").push(recommendation);
+    ensureCrmArray(db, "approval_queue").push(withTimestamps({
+      id: uuid(),
+      brand_id: campaign.brand_id || null,
+      action_id: recommendation.id,
+      agent_name: "AI Ad Manager",
+      action_type: "ad_campaign_recommendation",
+      channel: "ad_manager",
+      campaign_id: campaign.id,
+      draft_content: `${recommendation.title}\n\n${recommendation.reason}\n\n${recommendation.recommended_action}`,
+      estimated_cost: 0,
+      total_tokens: 0,
+      status: "pending",
+    }));
+
+    await writeCrmDb(db);
+    res.json({ success: true, recommendation });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/brand-snapshots/:snapshotId/apply", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const snapshot = ensureCrmArray(db, "brand_snapshots").find((item) => String(item.id) === String(req.params.snapshotId));
+    if (!snapshot) return res.status(404).json({ success: false, error: "Brand snapshot not found" });
+
+    const targetBrandId = req.body.brand_id || getCrmBrandId(req, db);
+    const items = ensureCrmArray(db, "snapshot_items").filter((item) => String(item.snapshot_id) === String(snapshot.id));
+    const created = [];
+
+    for (const item of items) {
+      const data = { ...(item.item_data || {}), brand_id: targetBrandId };
+      const collection = item.target_collection || item.item_type;
+      if (!collection || !Array.isArray(db[collection])) continue;
+      const record = normalizeCrmCollectionPayload(collection, { ...data, id: uuid() }, null, targetBrandId);
+      db[collection].push(record);
+      created.push({ collection, id: record.id });
+    }
+
+    snapshot.last_applied_at = nowIso();
+    snapshot.updated_at = nowIso();
+    await writeCrmDb(db);
+    res.json({ success: true, snapshot, target_brand_id: targetBrandId, created });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+
 // CRM core CRUD routes
 registerCrmCrudRoutes({ route: "/admin/crm/brands", collection: "brands", brandScoped: false });
 registerCrmCrudRoutes({ route: "/admin/crm/leads", collection: "leads", brandScoped: true });
@@ -5588,6 +6380,32 @@ registerCrmCrudRoutes({ route: "/admin/crm/coupons", collection: "coupon_rules",
 registerCrmCrudRoutes({ route: "/admin/crm/outreach-queue", collection: "outreach_queue", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/ai-feedback", collection: "ai_feedback", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/forbidden-claims", collection: "forbidden_claims", brandScoped: true });
+
+registerCrmCrudRoutes({ route: "/admin/crm/appointments", collection: "appointments", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/appointment-notes", collection: "appointment_notes", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/pipelines", collection: "pipelines", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/pipeline-stages", collection: "pipeline_stages", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/opportunities", collection: "opportunities", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/tasks", collection: "tasks", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/forms", collection: "forms", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/form-fields", collection: "form_fields", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/form-submissions", collection: "form_submissions", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/surveys", collection: "surveys", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/survey-responses", collection: "survey_responses", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/review-requests", collection: "review_requests", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/testimonials", collection: "testimonials", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/testimonial-permissions", collection: "testimonial_permissions", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/review-platform-links", collection: "review_platform_links", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/review-followups", collection: "review_followups", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/ad-accounts", collection: "ad_accounts", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/ad-campaigns", collection: "ad_campaigns", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/ad-sets", collection: "ad_sets", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/ad-creatives", collection: "ad_creatives", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/ad-performance-logs", collection: "ad_performance_logs", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/ad-ai-recommendations", collection: "ad_ai_recommendations", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/ad-ai-actions", collection: "ad_ai_actions", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/brand-snapshots", collection: "brand_snapshots", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/snapshot-items", collection: "snapshot_items", brandScoped: true });
 
 app.get("/admin/crm/ai-permissions", async (req, res) => {
   try {
@@ -9806,6 +10624,25 @@ app.get("/admin/crm/debug/storage", async (req, res) => {
         commission_payouts: ensureCrmArray(db, "commission_payouts").length,
         revenue_attribution: ensureCrmArray(db, "revenue_attribution").length,
         dashboard_settings: ensureCrmArray(db, "dashboard_settings").length,
+        appointments: ensureCrmArray(db, "appointments").length,
+        pipelines: ensureCrmArray(db, "pipelines").length,
+        pipeline_stages: ensureCrmArray(db, "pipeline_stages").length,
+        opportunities: ensureCrmArray(db, "opportunities").length,
+        tasks: ensureCrmArray(db, "tasks").length,
+        forms: ensureCrmArray(db, "forms").length,
+        form_submissions: ensureCrmArray(db, "form_submissions").length,
+        surveys: ensureCrmArray(db, "surveys").length,
+        survey_responses: ensureCrmArray(db, "survey_responses").length,
+        review_requests: ensureCrmArray(db, "review_requests").length,
+        testimonials: ensureCrmArray(db, "testimonials").length,
+        ad_accounts: ensureCrmArray(db, "ad_accounts").length,
+        ad_campaigns: ensureCrmArray(db, "ad_campaigns").length,
+        ad_sets: ensureCrmArray(db, "ad_sets").length,
+        ad_creatives: ensureCrmArray(db, "ad_creatives").length,
+        ad_performance_logs: ensureCrmArray(db, "ad_performance_logs").length,
+        ad_ai_recommendations: ensureCrmArray(db, "ad_ai_recommendations").length,
+        brand_snapshots: ensureCrmArray(db, "brand_snapshots").length,
+        snapshot_items: ensureCrmArray(db, "snapshot_items").length,
       },
       updated_at: db.updated_at || null,
     });
