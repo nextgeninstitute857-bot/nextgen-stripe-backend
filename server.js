@@ -4856,6 +4856,16 @@ const DEFAULT_CRM_DB = {
   support_tickets: [],
   ticket_messages: [],
 
+  // Multi-channel automation/provider layer.
+  message_templates: [],
+  message_logs: [],
+  outbound_messages: [],
+  inbound_messages: [],
+  automation_enrollments: [],
+  automation_queue: [],
+  provider_accounts: [],
+  provider_settings: [],
+
   // GoHighLevel-style CRM modules added for NextGen multi-brand growth.
   appointments: [],
   appointment_notes: [],
@@ -4964,6 +4974,14 @@ async function readCrmDb() {
       lms_permission_audit_logs: Array.isArray(parsed.lms_permission_audit_logs) ? parsed.lms_permission_audit_logs : [],
       support_tickets: Array.isArray(parsed.support_tickets) ? parsed.support_tickets : [],
       ticket_messages: Array.isArray(parsed.ticket_messages) ? parsed.ticket_messages : [],
+      message_templates: Array.isArray(parsed.message_templates) ? parsed.message_templates : [],
+      message_logs: Array.isArray(parsed.message_logs) ? parsed.message_logs : [],
+      outbound_messages: Array.isArray(parsed.outbound_messages) ? parsed.outbound_messages : [],
+      inbound_messages: Array.isArray(parsed.inbound_messages) ? parsed.inbound_messages : [],
+      automation_enrollments: Array.isArray(parsed.automation_enrollments) ? parsed.automation_enrollments : [],
+      automation_queue: Array.isArray(parsed.automation_queue) ? parsed.automation_queue : [],
+      provider_accounts: Array.isArray(parsed.provider_accounts) ? parsed.provider_accounts : [],
+      provider_settings: Array.isArray(parsed.provider_settings) ? parsed.provider_settings : [],
       appointments: Array.isArray(parsed.appointments) ? parsed.appointments : [],
       appointment_notes: Array.isArray(parsed.appointment_notes) ? parsed.appointment_notes : [],
       pipelines: Array.isArray(parsed.pipelines) ? parsed.pipelines : [],
@@ -10649,6 +10667,695 @@ app.post("/admin/crm/flows/bootstrap-default", async (req, res) => {
     res.json({ success: true, flow, created: true });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
+
+
+// -----------------------------------------------------------------------------
+// Multi-channel CRM Automation Engine + Provider Layer
+// -----------------------------------------------------------------------------
+// WhatsApp Cloud API is active when WHATSAPP_ACCESS_TOKEN and
+// WHATSAPP_PHONE_NUMBER_ID exist. Email/SMS/social channels share the same
+// message/automation storage and can be attached later without changing the
+// frontend contract.
+
+const CRM_AUTOMATION_CRON_SECRET = process.env.CRM_AUTOMATION_CRON_SECRET || process.env.ADMIN_API_SECRET || AUTH_JWT_SECRET;
+const WHATSAPP_GRAPH_VERSION = process.env.WHATSAPP_GRAPH_VERSION || "v20.0";
+
+function normalizeAutomationChannel(value = "whatsapp") {
+  const clean = String(value || "whatsapp").trim().toLowerCase().replace(/[^a-z0-9_]+/g, "_");
+  if (["wa", "meta_whatsapp", "whatsapp_cloud"].includes(clean)) return "whatsapp";
+  if (["e_mail", "gmail", "smtp", "sendgrid"].includes(clean)) return "email";
+  if (["text", "twilio_sms"].includes(clean)) return "sms";
+  if (["fb", "facebook_messenger", "messenger"].includes(clean)) return "messenger";
+  if (["ig", "instagram_dm"].includes(clean)) return "instagram";
+  return clean || "whatsapp";
+}
+
+function getProviderStatus() {
+  return {
+    whatsapp: {
+      key: "whatsapp",
+      name: "Meta WhatsApp Cloud API",
+      configured: Boolean(process.env.WHATSAPP_ACCESS_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID),
+      business_account_id: process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || null,
+      phone_number_id: process.env.WHATSAPP_PHONE_NUMBER_ID || null,
+      supports: ["text", "template", "webhook", "automation"],
+    },
+    email: {
+      key: "email",
+      name: "Email provider",
+      configured: Boolean(process.env.SMTP_HOST || process.env.SENDGRID_API_KEY || process.env.RESEND_API_KEY),
+      supports: ["text", "template", "automation"],
+      status: "provider_adapter_ready_credentials_optional",
+    },
+    sms: {
+      key: "sms",
+      name: "SMS provider",
+      configured: Boolean(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN),
+      supports: ["text", "template", "automation"],
+      status: "provider_adapter_ready_credentials_optional",
+    },
+    messenger: {
+      key: "messenger",
+      name: "Facebook Messenger",
+      configured: Boolean(process.env.META_PAGE_ACCESS_TOKEN),
+      supports: ["text", "automation"],
+      status: "provider_adapter_ready_credentials_optional",
+    },
+    instagram: {
+      key: "instagram",
+      name: "Instagram DM",
+      configured: Boolean(process.env.INSTAGRAM_ACCESS_TOKEN || process.env.META_PAGE_ACCESS_TOKEN),
+      supports: ["text", "automation"],
+      status: "provider_adapter_ready_credentials_optional",
+    },
+  };
+}
+
+function normalizePhoneForWhatsapp(value = "") {
+  const raw = String(value || "").trim();
+  const digits = raw.replace(/[^0-9]/g, "");
+  if (!digits) return "";
+  return digits;
+}
+
+function findLeadByPhoneOrEmail(db, { phone = "", email = "", waId = "" } = {}) {
+  const cleanPhone = normalizePhoneForWhatsapp(phone || waId);
+  const cleanEmail = normalizeEmail(email || "");
+  return ensureCrmArray(db, "leads").find((lead) => {
+    const phones = [lead.phone, lead.whatsapp, lead.whatsapp_number, lead.mobile, lead.contact_number, lead.wa_id].map(normalizePhoneForWhatsapp).filter(Boolean);
+    const emails = [lead.email, lead.student_email, lead.customer_email].map(normalizeEmail).filter(Boolean);
+    return (cleanPhone && phones.includes(cleanPhone)) || (cleanEmail && emails.includes(cleanEmail));
+  }) || null;
+}
+
+function renderTemplateString(template = "", variables = {}) {
+  return String(template || "").replace(/{{\s*([a-zA-Z0-9_.-]+)\s*}}/g, (_, key) => {
+    const value = key.split(".").reduce((acc, part) => (acc && acc[part] !== undefined ? acc[part] : undefined), variables);
+    return value === undefined || value === null ? "" : String(value);
+  });
+}
+
+function getMessageTemplateByKey(db, keyOrId = "") {
+  const clean = String(keyOrId || "").trim();
+  if (!clean) return null;
+  return ensureCrmArray(db, "message_templates").find((item) => {
+    return [item.id, item.key, item.slug, item.name, item.template_name].map((x) => String(x || "").trim()).includes(clean);
+  }) || null;
+}
+
+function normalizeMessageTemplate(body = {}, existing = null, brandId = null) {
+  const channel = normalizeAutomationChannel(body.channel || existing?.channel || "whatsapp");
+  return withTimestamps({
+    ...(existing || {}),
+    ...(body || {}),
+    id: body.id || existing?.id || uuid(),
+    brand_id: body.brand_id || existing?.brand_id || brandId || null,
+    key: normalizeCrmString(body.key || existing?.key || body.name || existing?.name || "template").toLowerCase().replace(/[^a-z0-9]+/g, "_"),
+    name: normalizeCrmString(body.name || existing?.name || "Message Template"),
+    channel,
+    subject: normalizeCrmString(body.subject || existing?.subject || ""),
+    body: String(body.body ?? existing?.body ?? body.message ?? ""),
+    provider_template_name: normalizeCrmString(body.provider_template_name || existing?.provider_template_name || body.whatsapp_template_name || ""),
+    provider_language_code: normalizeCrmString(body.provider_language_code || existing?.provider_language_code || body.language_code || "en_US"),
+    category: normalizeCrmString(body.category || existing?.category || "followup"),
+    status: normalizeCrmLower(body.status || existing?.status || "active", "active"),
+    variables: Array.isArray(body.variables) ? body.variables : existing?.variables || [],
+  }, existing);
+}
+
+function createMessageLog(db, payload = {}) {
+  const channel = normalizeAutomationChannel(payload.channel || "whatsapp");
+  const log = withTimestamps({
+    id: payload.id || uuid(),
+    brand_id: payload.brand_id || null,
+    channel,
+    provider: payload.provider || channel,
+    direction: payload.direction || "outbound",
+    lead_id: payload.lead_id || null,
+    enrollment_id: payload.enrollment_id || null,
+    flow_id: payload.flow_id || null,
+    run_id: payload.run_id || null,
+    queue_id: payload.queue_id || null,
+    template_id: payload.template_id || null,
+    to: payload.to || payload.recipient || "",
+    from: payload.from || payload.sender || "",
+    subject: payload.subject || "",
+    text: payload.text || payload.body || "",
+    status: payload.status || "queued",
+    provider_message_id: payload.provider_message_id || null,
+    provider_response: payload.provider_response || null,
+    error: payload.error || null,
+    sent_at: payload.sent_at || null,
+    delivered_at: payload.delivered_at || null,
+    read_at: payload.read_at || null,
+    metadata: payload.metadata || {},
+  });
+  ensureCrmArray(db, "message_logs").push(log);
+  ensureCrmArray(db, "outbound_messages").push(log);
+  return log;
+}
+
+async function sendWhatsAppCloudMessage({ to, text = "", templateName = "", languageCode = "en_US", components = [] }) {
+  const token = process.env.WHATSAPP_ACCESS_TOKEN;
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+
+  if (!token || !phoneNumberId) {
+    const error = new Error("WhatsApp Cloud API is not configured. Add WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID.");
+    error.statusCode = 500;
+    throw error;
+  }
+
+  const recipient = normalizePhoneForWhatsapp(to);
+  if (!recipient) {
+    const error = new Error("A valid WhatsApp recipient number is required");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const payload = {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: recipient,
+  };
+
+  if (templateName) {
+    payload.type = "template";
+    payload.template = {
+      name: templateName,
+      language: { code: languageCode || "en_US" },
+      ...(Array.isArray(components) && components.length ? { components } : {}),
+    };
+  } else {
+    payload.type = "text";
+    payload.text = { preview_url: false, body: String(text || "") };
+  }
+
+  const response = await axios.post(
+    `https://graph.facebook.com/${WHATSAPP_GRAPH_VERSION}/${phoneNumberId}/messages`,
+    payload,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      timeout: 30000,
+    }
+  );
+
+  return response.data;
+}
+
+async function sendCrmMessage({ db, brandId = null, channel = "whatsapp", to = "", subject = "", text = "", templateId = null, templateVariables = {}, leadId = null, enrollmentId = null, flowId = null, runId = null, queueId = null, metadata = {} }) {
+  const cleanChannel = normalizeAutomationChannel(channel);
+  const template = templateId ? getMessageTemplateByKey(db, templateId) : null;
+  const finalSubject = renderTemplateString(subject || template?.subject || "", templateVariables);
+  const finalText = renderTemplateString(text || template?.body || template?.message || "", templateVariables);
+
+  const baseLog = {
+    brand_id: brandId,
+    channel: cleanChannel,
+    lead_id: leadId,
+    enrollment_id: enrollmentId,
+    flow_id: flowId,
+    run_id: runId,
+    queue_id: queueId,
+    template_id: template?.id || templateId || null,
+    to,
+    subject: finalSubject,
+    text: finalText,
+    metadata,
+  };
+
+  try {
+    let providerResponse = null;
+    let providerMessageId = null;
+
+    if (cleanChannel === "whatsapp") {
+      providerResponse = await sendWhatsAppCloudMessage({
+        to,
+        text: finalText,
+        templateName: template?.provider_template_name || metadata.whatsapp_template_name || metadata.template_name || "",
+        languageCode: template?.provider_language_code || metadata.language_code || "en_US",
+        components: metadata.components || [],
+      });
+      providerMessageId = providerResponse?.messages?.[0]?.id || null;
+    } else {
+      const error = new Error(`${cleanChannel} provider adapter is ready, but credentials/sending implementation are not enabled yet`);
+      error.statusCode = 501;
+      throw error;
+    }
+
+    const log = createMessageLog(db, {
+      ...baseLog,
+      status: "sent",
+      provider_message_id: providerMessageId,
+      provider_response: providerResponse,
+      sent_at: nowIso(),
+    });
+
+    return { success: true, log, provider_response: providerResponse };
+  } catch (error) {
+    const providerError = error.response?.data || error.message;
+    const log = createMessageLog(db, {
+      ...baseLog,
+      status: "failed",
+      error: typeof providerError === "string" ? providerError : JSON.stringify(providerError),
+      provider_response: error.response?.data || null,
+    });
+    return { success: false, log, error: log.error };
+  }
+}
+
+function normalizeAutomationEnrollment(body = {}, existing = null, brandId = null) {
+  const now = nowIso();
+  return {
+    ...(existing || {}),
+    ...(body || {}),
+    id: body.id || existing?.id || uuid(),
+    brand_id: body.brand_id || existing?.brand_id || brandId || null,
+    flow_id: body.flow_id || existing?.flow_id || null,
+    lead_id: body.lead_id || existing?.lead_id || null,
+    channel: normalizeAutomationChannel(body.channel || existing?.channel || "whatsapp"),
+    recipient: body.recipient || existing?.recipient || body.to || "",
+    status: body.status || existing?.status || "active",
+    current_step_index: Number(body.current_step_index ?? existing?.current_step_index ?? 0),
+    next_run_at: body.next_run_at || existing?.next_run_at || now,
+    started_at: existing?.started_at || body.started_at || now,
+    completed_at: body.completed_at || existing?.completed_at || null,
+    paused_at: body.paused_at || existing?.paused_at || null,
+    metadata: body.metadata || existing?.metadata || {},
+    created_at: existing?.created_at || body.created_at || now,
+    updated_at: now,
+  };
+}
+
+function getFlowStepDelayMs(step = {}) {
+  const minutes = Number(step.delay_minutes ?? step.wait_minutes ?? step.after_minutes ?? 0) || 0;
+  const hours = Number(step.delay_hours ?? step.wait_hours ?? 0) || 0;
+  const days = Number(step.delay_days ?? step.wait_days ?? 0) || 0;
+  return Math.max(0, Math.round((minutes * 60 + hours * 3600 + days * 86400) * 1000));
+}
+
+function getFlowStepMessage(step = {}, flow = {}, lead = null) {
+  const fallback = "Hi Doctor, this is NextGen USMLE. Are you preparing for Step 1 or Step 2 CK, and when is your exam planned?";
+  const raw = step.message || step.message_text || step.body || step.text || step.content || flow.default_message || fallback;
+  return renderTemplateString(raw, { lead: lead || {}, flow, step });
+}
+
+function isSendStep(step = {}) {
+  const type = String(step.type || step.action || "").toLowerCase();
+  return type.includes("send") || type.includes("message") || type.includes("whatsapp") || type.includes("email") || type.includes("sms") || type === "draft_or_send";
+}
+
+async function processAutomationEnrollment({ db, enrollment, flow, autoSend = true, maxSteps = 1 }) {
+  const events = [];
+  const lead = enrollment.lead_id ? getLeadByAnyId(db, enrollment.lead_id) : null;
+  const steps = Array.isArray(flow.steps) ? flow.steps : [];
+  let processed = 0;
+
+  while (enrollment.status === "active" && enrollment.current_step_index < steps.length && processed < maxSteps) {
+    const step = steps[enrollment.current_step_index] || {};
+    const delayMs = getFlowStepDelayMs(step);
+
+    if (delayMs > 0 && !step._delay_already_applied) {
+      enrollment.next_run_at = new Date(Date.now() + delayMs).toISOString();
+      step._delay_already_applied = true;
+      events.push(withTimestamps({ id: uuid(), brand_id: enrollment.brand_id, flow_id: flow.id, enrollment_id: enrollment.id, lead_id: enrollment.lead_id, event_type: "step_delayed", message: `Step delayed until ${enrollment.next_run_at}`, step }));
+      break;
+    }
+
+    if (isSendStep(step)) {
+      const channel = normalizeAutomationChannel(step.channel || enrollment.channel || flow.platforms?.[0] || "whatsapp");
+      const to = step.to || enrollment.recipient || lead?.whatsapp || lead?.phone || lead?.email || "";
+      const messageText = getFlowStepMessage(step, flow, lead);
+      const approvalRequired = step.approval_required === true || flow.approval_mode === "draft_first" || flow.approval_mode === "needs_approval";
+
+      if (approvalRequired && !autoSend) {
+        const approval = withTimestamps({
+          id: uuid(),
+          brand_id: enrollment.brand_id,
+          flow_id: flow.id,
+          enrollment_id: enrollment.id,
+          lead_id: enrollment.lead_id,
+          channel,
+          to,
+          message: messageText,
+          status: "needs_approval",
+          type: "automation_message",
+          step,
+        });
+        ensureCrmArray(db, "approval_queue").push(approval);
+        events.push(withTimestamps({ id: uuid(), brand_id: enrollment.brand_id, flow_id: flow.id, enrollment_id: enrollment.id, lead_id: enrollment.lead_id, event_type: "approval_created", message: "Message queued for approval", approval_id: approval.id }));
+      } else {
+        const result = await sendCrmMessage({
+          db,
+          brandId: enrollment.brand_id,
+          channel,
+          to,
+          text: messageText,
+          templateId: step.template_id || step.template_key || null,
+          templateVariables: { lead: lead || {}, flow, step },
+          leadId: enrollment.lead_id,
+          enrollmentId: enrollment.id,
+          flowId: flow.id,
+          metadata: { automation_step_id: step.id || null, template_name: step.provider_template_name || step.whatsapp_template_name || "" },
+        });
+        events.push(withTimestamps({ id: uuid(), brand_id: enrollment.brand_id, flow_id: flow.id, enrollment_id: enrollment.id, lead_id: enrollment.lead_id, event_type: result.success ? "message_sent" : "message_failed", message: result.success ? "Automation message sent" : result.error, message_log_id: result.log?.id || null, step }));
+      }
+    } else {
+      events.push(withTimestamps({ id: uuid(), brand_id: enrollment.brand_id, flow_id: flow.id, enrollment_id: enrollment.id, lead_id: enrollment.lead_id, event_type: "step_recorded", message: `Automation step recorded: ${step.label || step.type || "step"}`, step }));
+    }
+
+    enrollment.current_step_index += 1;
+    processed += 1;
+    enrollment.next_run_at = nowIso();
+  }
+
+  if (enrollment.current_step_index >= steps.length) {
+    enrollment.status = "completed";
+    enrollment.completed_at = nowIso();
+  }
+
+  enrollment.updated_at = nowIso();
+  ensureCrmArray(db, "crm_flow_events").push(...events);
+  return { enrollment, events, processed_steps: processed };
+}
+
+async function requireAutomationRunPermission(req) {
+  const authHeader = String(req.headers.authorization || "").replace("Bearer ", "").trim();
+  const cronSecret = String(req.headers["x-crm-cron-secret"] || req.query.secret || req.body?.secret || "").trim();
+  if (cronSecret && CRM_AUTOMATION_CRON_SECRET && cronSecret === CRM_AUTOMATION_CRON_SECRET) {
+    return { user: { id: "cron", role: "system", email: "cron" }, cron: true };
+  }
+  if (authHeader) return requireCrmAdmin(req);
+  const e = new Error("Admin auth token or valid x-crm-cron-secret is required");
+  e.statusCode = 401;
+  throw e;
+}
+
+app.get("/admin/crm/providers", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    res.json({ success: true, providers: getProviderStatus() });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/crm/message-templates", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const templates = filterCrmRecords(req, ensureCrmArray(db, "message_templates"), brandId);
+    res.json({ success: true, templates, count: templates.length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/message-templates", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const template = normalizeMessageTemplate(req.body || {}, null, brandId);
+    ensureCrmArray(db, "message_templates").push(template);
+    await writeCrmDb(db);
+    res.json({ success: true, template });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.put("/admin/crm/message-templates/:id", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const templates = ensureCrmArray(db, "message_templates");
+    const index = templates.findIndex((item) => String(item.id) === String(req.params.id));
+    if (index < 0) return res.status(404).json({ success: false, error: "Message template not found" });
+    templates[index] = normalizeMessageTemplate(req.body || {}, templates[index], templates[index].brand_id);
+    await writeCrmDb(db);
+    res.json({ success: true, template: templates[index] });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.delete("/admin/crm/message-templates/:id", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const before = ensureCrmArray(db, "message_templates").length;
+    db.message_templates = ensureCrmArray(db, "message_templates").filter((item) => String(item.id) !== String(req.params.id));
+    await writeCrmDb(db);
+    res.json({ success: true, deleted: db.message_templates.length < before });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/crm/message-logs", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const logs = filterCrmRecords(req, ensureCrmArray(db, "message_logs"), brandId).sort(sortNewestFirst).slice(0, Number(req.query.limit || 200));
+    res.json({ success: true, logs, count: logs.length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/messages/send", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const lead = req.body.lead_id ? getLeadByAnyId(db, req.body.lead_id) : null;
+    const channel = normalizeAutomationChannel(req.body.channel || "whatsapp");
+    const to = req.body.to || req.body.recipient || lead?.whatsapp || lead?.phone || lead?.email || "";
+    const result = await sendCrmMessage({
+      db,
+      brandId,
+      channel,
+      to,
+      subject: req.body.subject || "",
+      text: req.body.text || req.body.message || req.body.body || "",
+      templateId: req.body.template_id || req.body.template_key || null,
+      templateVariables: { ...(req.body.variables || {}), lead: lead || {} },
+      leadId: lead?.id || req.body.lead_id || null,
+      metadata: req.body.metadata || {},
+    });
+    await writeCrmDb(db);
+    res.status(result.success ? 200 : 502).json(result);
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/messages/send-whatsapp", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const lead = req.body.lead_id ? getLeadByAnyId(db, req.body.lead_id) : null;
+    const to = req.body.to || req.body.recipient || lead?.whatsapp || lead?.phone || "";
+    const result = await sendCrmMessage({
+      db,
+      brandId,
+      channel: "whatsapp",
+      to,
+      text: req.body.text || req.body.message || req.body.body || "",
+      templateId: req.body.template_id || req.body.template_key || null,
+      templateVariables: { ...(req.body.variables || {}), lead: lead || {} },
+      leadId: lead?.id || req.body.lead_id || null,
+      metadata: req.body.metadata || {
+        template_name: req.body.template_name || req.body.whatsapp_template_name || "",
+        language_code: req.body.language_code || "en_US",
+        components: req.body.components || [],
+      },
+    });
+    await writeCrmDb(db);
+    res.status(result.success ? 200 : 502).json(result);
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/crm/automation/enrollments", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const enrollments = filterCrmRecords(req, ensureCrmArray(db, "automation_enrollments"), brandId).sort(sortNewestFirst);
+    res.json({ success: true, enrollments, count: enrollments.length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/automation/enroll-lead", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const flow = ensureCrmArray(db, "crm_flows").find((item) => String(item.id) === String(req.body.flow_id));
+    if (!flow) return res.status(404).json({ success: false, error: "CRM flow not found" });
+    const lead = req.body.lead_id ? getLeadByAnyId(db, req.body.lead_id) : findLeadByPhoneOrEmail(db, { phone: req.body.recipient || req.body.to, email: req.body.email });
+    const enrollment = normalizeAutomationEnrollment({
+      ...req.body,
+      brand_id: brandId,
+      flow_id: flow.id,
+      lead_id: lead?.id || req.body.lead_id || null,
+      recipient: req.body.recipient || req.body.to || lead?.whatsapp || lead?.phone || lead?.email || "",
+      status: "active",
+      next_run_at: req.body.next_run_at || nowIso(),
+    }, null, brandId);
+    ensureCrmArray(db, "automation_enrollments").push(enrollment);
+    ensureCrmArray(db, "crm_flow_events").push(withTimestamps({ id: uuid(), brand_id: brandId, flow_id: flow.id, enrollment_id: enrollment.id, lead_id: enrollment.lead_id, event_type: "lead_enrolled", message: "Lead enrolled into automation" }));
+    await writeCrmDb(db);
+    res.json({ success: true, enrollment });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/automation/run-due", async (req, res) => {
+  try {
+    await requireAutomationRunPermission(req);
+    const db = await readCrmDb();
+    const now = Date.now();
+    const brandId = getCrmBrandId(req, db);
+    const limit = Math.max(1, Math.min(100, Number(req.body.limit || req.query.limit || 25)));
+    const autoSend = req.body.auto_send !== false && req.query.auto_send !== "false";
+    const due = ensureCrmArray(db, "automation_enrollments")
+      .filter((item) => item.status === "active")
+      .filter((item) => !brandId || String(item.brand_id || "") === String(brandId || ""))
+      .filter((item) => !item.next_run_at || new Date(item.next_run_at).getTime() <= now)
+      .slice(0, limit);
+
+    const results = [];
+    for (const enrollment of due) {
+      const flow = ensureCrmArray(db, "crm_flows").find((item) => String(item.id) === String(enrollment.flow_id));
+      if (!flow || flow.enabled === false || flow.status === "paused") {
+        enrollment.status = "paused";
+        enrollment.paused_at = nowIso();
+        enrollment.updated_at = nowIso();
+        results.push({ enrollment_id: enrollment.id, skipped: true, reason: "flow_missing_or_inactive" });
+        continue;
+      }
+      const result = await processAutomationEnrollment({ db, enrollment, flow, autoSend, maxSteps: Number(req.body.max_steps || 1) });
+      results.push({ enrollment_id: enrollment.id, flow_id: flow.id, status: enrollment.status, processed_steps: result.processed_steps, events: result.events.length });
+    }
+
+    await writeCrmDb(db);
+    res.json({ success: true, processed: results.length, results });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/automation/:id/pause", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const item = ensureCrmArray(db, "automation_enrollments").find((enrollment) => String(enrollment.id) === String(req.params.id));
+    if (!item) return res.status(404).json({ success: false, error: "Automation enrollment not found" });
+    item.status = "paused";
+    item.paused_at = nowIso();
+    item.updated_at = nowIso();
+    await writeCrmDb(db);
+    res.json({ success: true, enrollment: item });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/automation/:id/resume", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const item = ensureCrmArray(db, "automation_enrollments").find((enrollment) => String(enrollment.id) === String(req.params.id));
+    if (!item) return res.status(404).json({ success: false, error: "Automation enrollment not found" });
+    item.status = "active";
+    item.paused_at = null;
+    item.next_run_at = req.body.next_run_at || nowIso();
+    item.updated_at = nowIso();
+    await writeCrmDb(db);
+    res.json({ success: true, enrollment: item });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/webhooks/whatsapp", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+  if (mode === "subscribe" && token === process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN) return res.status(200).send(challenge);
+  return res.sendStatus(403);
+});
+
+app.post("/webhooks/whatsapp", async (req, res) => {
+  try {
+    const db = await readCrmDb();
+    const entries = Array.isArray(req.body?.entry) ? req.body.entry : [];
+    for (const entry of entries) {
+      for (const change of entry.changes || []) {
+        const value = change.value || {};
+        const contacts = value.contacts || [];
+        const messages = value.messages || [];
+        const statuses = value.statuses || [];
+
+        for (const message of messages) {
+          const from = normalizePhoneForWhatsapp(message.from || "");
+          const contact = contacts.find((item) => normalizePhoneForWhatsapp(item.wa_id) === from) || contacts[0] || {};
+          const text = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || "";
+          let lead = findLeadByPhoneOrEmail(db, { phone: from, waId: contact.wa_id });
+          if (!lead && from) {
+            lead = withTimestamps({
+              id: uuid(),
+              brand_id: db.settings?.default_brand_id || db.brands?.[0]?.id || null,
+              name: contact.profile?.name || "WhatsApp Lead",
+              phone: from,
+              whatsapp: from,
+              wa_id: contact.wa_id || from,
+              source: "whatsapp",
+              source_platform: "whatsapp",
+              status: "new",
+              conversation_direction: "inbound",
+            });
+            ensureCrmArray(db, "leads").push(lead);
+          }
+          ensureCrmArray(db, "inbound_messages").push(withTimestamps({
+            id: uuid(),
+            brand_id: lead?.brand_id || db.settings?.default_brand_id || null,
+            channel: "whatsapp",
+            provider: "whatsapp",
+            direction: "inbound",
+            lead_id: lead?.id || null,
+            from,
+            to: value.metadata?.display_phone_number || value.metadata?.phone_number_id || "",
+            text,
+            provider_message_id: message.id || null,
+            provider_response: message,
+            status: "received",
+            received_at: nowIso(),
+          }));
+          ensureCrmArray(db, "message_logs").push(withTimestamps({
+            id: uuid(),
+            brand_id: lead?.brand_id || db.settings?.default_brand_id || null,
+            channel: "whatsapp",
+            provider: "whatsapp",
+            direction: "inbound",
+            lead_id: lead?.id || null,
+            from,
+            to: value.metadata?.display_phone_number || value.metadata?.phone_number_id || "",
+            text,
+            provider_message_id: message.id || null,
+            status: "received",
+            received_at: nowIso(),
+          }));
+        }
+
+        for (const status of statuses) {
+          const messageId = status.id;
+          const log = ensureCrmArray(db, "message_logs").find((item) => String(item.provider_message_id || "") === String(messageId || ""));
+          if (log) {
+            log.status = status.status || log.status;
+            log.provider_status = status.status || null;
+            log.provider_response = status;
+            if (status.status === "delivered") log.delivered_at = nowIso();
+            if (status.status === "read") log.read_at = nowIso();
+            log.updated_at = nowIso();
+          }
+        }
+      }
+    }
+    await writeCrmDb(db);
+    res.sendStatus(200);
+  } catch (error) {
+    console.error("WhatsApp webhook error:", error.response?.data || error.message);
+    res.sendStatus(200);
+  }
+});
+
 
 // Live Session Conversion Settings and Events
 app.get("/admin/crm/live-conversion/settings", async (req, res) => {
