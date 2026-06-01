@@ -32,6 +32,8 @@ const DEFAULT_FEATURE_CATALOG = {
   notes_transcripts: { key: "notes_transcripts", name: "Notes & Transcripts", description: "Access to class notes and transcript links", is_active: true, free_for_all: false },
   leaderboard: { key: "leaderboard", name: "Leaderboard", description: "Access to attendance, assessment, and task leaderboard", is_active: true, free_for_all: false },
   roadmap: { key: "roadmap", name: "Roadmap", description: "Access to course roadmap", is_active: true, free_for_all: true },
+  global_community: { key: "global_community", name: "Global LMS Community", description: "Access to the overall LMS community discussions", is_active: true, free_for_all: false },
+  study_partner: { key: "study_partner", name: "Study Partner", description: "Find and connect with compatible study partners", is_active: true, free_for_all: false },
   support: { key: "support", name: "Student Support", description: "Access to support and announcements", is_active: true, free_for_all: false },
 };
 
@@ -41,6 +43,8 @@ const DEFAULT_DEMO_SETTINGS = {
   allow_live_classes: true,
   allow_roadmap: true,
   allow_community: true,
+  allow_global_community: true,
+  allow_study_partner: true,
   allow_assessments: true,
   allow_leaderboard: true,
   allow_recordings: true,
@@ -65,6 +69,18 @@ const DEFAULT_LIVE_DB = {
   leaderboard: {},
   communityMessages: {},
   quizAttempts: {},
+
+  // Global LMS community and study partner module.
+  globalCommunityPosts: {},
+  globalCommunityComments: {},
+  globalCommunityReactions: {},
+  globalCommunityReports: {},
+  globalCommunityCategories: {},
+
+  studyPartnerProfiles: {},
+  studyPartnerRequests: {},
+  studyPartnerMatches: {},
+  studyPartnerReports: {},
 
   // Backend-only enrollments. PocketBase enrollments are intentionally bypassed.
   enrollments: {},
@@ -113,6 +129,15 @@ async function readLiveDb() {
       leaderboard: parsed.leaderboard || {},
       communityMessages: parsed.communityMessages || {},
       quizAttempts: parsed.quizAttempts || {},
+      globalCommunityPosts: parsed.globalCommunityPosts || {},
+      globalCommunityComments: parsed.globalCommunityComments || {},
+      globalCommunityReactions: parsed.globalCommunityReactions || {},
+      globalCommunityReports: parsed.globalCommunityReports || {},
+      globalCommunityCategories: parsed.globalCommunityCategories || {},
+      studyPartnerProfiles: parsed.studyPartnerProfiles || {},
+      studyPartnerRequests: parsed.studyPartnerRequests || {},
+      studyPartnerMatches: parsed.studyPartnerMatches || {},
+      studyPartnerReports: parsed.studyPartnerReports || {},
       enrollments: parsed.enrollments || {},
       plans: parsed.plans || {},
       coupons: parsed.coupons || {},
@@ -2570,7 +2595,7 @@ app.patch("/admin/demo/settings", async (req, res) => {
   try {
     const { user } = await requireAdmin(req);
     const db = await readLiveDb();
-    const allowed = ["enabled", "duration_days", "allow_live_classes", "allow_roadmap", "allow_community", "allow_assessments", "allow_leaderboard", "allow_recordings", "allow_notes_transcripts", "allow_video_library", "max_live_sessions"];
+    const allowed = ["enabled", "duration_days", "allow_live_classes", "allow_roadmap", "allow_community", "allow_global_community", "allow_study_partner", "allow_assessments", "allow_leaderboard", "allow_recordings", "allow_notes_transcripts", "allow_video_library", "max_live_sessions"];
     const updates = {};
     for (const k of allowed) if (req.body[k] !== undefined) updates[k] = req.body[k];
     if (updates.duration_days !== undefined) updates.duration_days = Math.max(1, Number(updates.duration_days || 2));
@@ -3185,6 +3210,33 @@ app.post("/zoom/recordings/:meetingId/refresh-transcript", async (req, res) => {
 });
 app.post("/live/recordings/publish", async (req, res) => { try { const { user } = await requireAdminOrInstructor(req); const db = await readLiveDb(); const key = String(req.body.meeting_id); if (!key) return res.status(400).json({ success: false, error: "meeting_id is required" }); db.recordings[key] = { ...(db.recordings[key] || {}), meeting_id: key, session_id: req.body.session_id || db.recordings[key]?.session_id || null, course_id: req.body.course_id || db.recordings[key]?.course_id || null, topic: req.body.topic || db.recordings[key]?.topic || null, recording_url: req.body.recording_url || db.recordings[key]?.recording_url || null, share_url: req.body.share_url || db.recordings[key]?.share_url || null, published: req.body.published !== false, published_at: new Date().toISOString(), published_by: user.id }; await writeLiveDb(db); res.json({ success: true, recording: db.recordings[key] }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.post("/live/recordings/unpublish", async (req, res) => { try { await requireAdminOrInstructor(req); const db = await readLiveDb(); const key = String(req.body.meeting_id); db.recordings[key] = { ...(db.recordings[key] || {}), meeting_id: key, published: false, unpublished_at: new Date().toISOString() }; await writeLiveDb(db); res.json({ success: true, recording: db.recordings[key] }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.get("/live/recordings", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const isStaff = user.role === "admin" || user.role === "instructor";
+
+    if (req.query.course_id) {
+      const enrollment = getBackendEnrollment(db, { userId: user.id, courseId: req.query.course_id });
+      if (!enrollment && !isStaff) {
+        return res.status(403).json({ success: false, error: "No course access found" });
+      }
+      if (enrollment?.is_demo && !db.demoSettings.allow_recordings) {
+        return res.json({ success: true, count: 0, recordings: [], demo_restricted: true });
+      }
+    }
+
+    let recordings = Object.values(db.recordings || {});
+    if (!isStaff) recordings = recordings.filter((recording) => recording.published);
+    if (req.query.course_id) recordings = recordings.filter((recording) => String(recording.course_id || "") === String(req.query.course_id));
+
+    recordings.sort(sortNewestFirst);
+    res.json({ success: true, count: recordings.length, recordings: recordings.map(sanitizePublicRecording) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to load live recordings" });
+  }
+});
+
 app.get("/live/recordings/published", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); const db = await readLiveDb(); if (req.query.course_id) { const e = getBackendEnrollment(db, { userId: user.id, courseId: req.query.course_id }); if (e?.is_demo && !db.demoSettings.allow_recordings) return res.json({ success: true, count: 0, recordings: [], demo_restricted: true }); } let recordings = Object.values(db.recordings || {}).filter((r) => r.published); if (req.query.course_id) recordings = recordings.filter((r) => String(r.course_id || "") === String(req.query.course_id)); res.json({ success: true, count: recordings.length, recordings: recordings.map(sanitizePublicRecording) }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 
 
@@ -3789,7 +3841,694 @@ app.get("/student/dashboard/summary", async (req, res) => {
   } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); }
 });
 
-app.get("/live/debug/storage", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); if (user.role !== "admin") return res.status(403).json({ success: false, error: "Only admins can view storage debug" }); const db = await readLiveDb(); res.json({ success: true, data_dir: DATA_DIR, live_db_path: LIVE_DB_PATH, counts: { courses: Object.keys(db.courses || {}).length, liveSessions: Object.keys(db.liveSessions || {}).length, announcements: Object.keys(db.announcements || {}).length, recordings: Object.keys(db.recordings || {}).length, notes: Object.keys(db.notes || {}).length, enrollments: Object.keys(db.enrollments || {}).length, plans: Object.keys(db.plans || {}).length, coupons: Object.keys(db.coupons || {}).length, assessments: Object.keys(db.assessments || {}).length, assessmentAttempts: Object.keys(db.assessmentAttempts || {}).length, aiUsageLogs: Object.keys(db.aiUsageLogs || {}).length, payments: Object.keys(db.payments || {}).length, roadmaps: Object.keys(db.roadmaps || {}).length, roadmapProgress: Object.keys(db.roadmapProgress || {}).length, leaderboard: Object.keys(db.leaderboard || {}).length, googleAuthUsers: Object.keys(db.googleAuthUsers || {}).length }, updatedAt: db.updatedAt || null }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+
+// -----------------------------------------------------------------------------
+// Global LMS Community + Study Partner Module
+// -----------------------------------------------------------------------------
+
+const DEFAULT_COMMUNITY_CATEGORIES = [
+  { key: "general", name: "General Discussion", description: "General LMS community discussion" },
+  { key: "step_1", name: "USMLE Step 1", description: "Step 1 questions, plans, and discussion" },
+  { key: "step_2_ck", name: "USMLE Step 2 CK", description: "Step 2 CK discussion" },
+  { key: "uworld", name: "UWorld Discussion", description: "UWorld blocks, incorrects, and strategy" },
+  { key: "first_aid", name: "First Aid", description: "First Aid topics and memorization help" },
+  { key: "nbme", name: "NBME Reviews", description: "NBME score improvement and review" },
+  { key: "study_partner", name: "Study Partner Board", description: "Find accountability and study partners" },
+  { key: "success_stories", name: "Success Stories", description: "Student wins and motivation" },
+  { key: "announcements", name: "Announcements", description: "Official LMS announcements" },
+];
+
+function hasAnyActiveEnrollment(db, user, { includeDemo = true } = {}) {
+  if (!user?.id) return false;
+  return Object.values(db.enrollments || {}).some((enrollment) => {
+    if (String(enrollment.user_id) !== String(user.id)) return false;
+    if (enrollment.access_granted === false) return false;
+    if (!includeDemo && enrollment.is_demo) return false;
+    if (enrollment.is_demo && !isDemoEnrollmentActive(enrollment, { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) })) return false;
+    return true;
+  });
+}
+
+function sanitizeGlobalCommunityPost(post = {}) {
+  return {
+    id: post.id,
+    title: post.title || "",
+    content: post.content || "",
+    category: post.category || "general",
+    tags: Array.isArray(post.tags) ? post.tags : [],
+    exam_type: post.exam_type || "",
+    course_id: post.course_id || null,
+    user_id: post.user_id || null,
+    user_name: post.user_name || "Student",
+    user_role: post.user_role || "student",
+    is_ai_generated: Boolean(post.is_ai_generated),
+    is_pinned: Boolean(post.is_pinned),
+    is_locked: Boolean(post.is_locked),
+    status: post.status || "active",
+    comments_count: Number(post.comments_count || 0),
+    reactions_count: Number(post.reactions_count || 0),
+    created_at: post.created_at || null,
+    updated_at: post.updated_at || null,
+  };
+}
+
+function sanitizeGlobalCommunityComment(comment = {}) {
+  return {
+    id: comment.id,
+    post_id: comment.post_id,
+    parent_comment_id: comment.parent_comment_id || null,
+    content: comment.content || "",
+    user_id: comment.user_id || null,
+    user_name: comment.user_name || "Student",
+    user_role: comment.user_role || "student",
+    is_ai_generated: Boolean(comment.is_ai_generated),
+    status: comment.status || "active",
+    created_at: comment.created_at || null,
+    updated_at: comment.updated_at || null,
+  };
+}
+
+function canAccessGlobalCommunity({ db, user }) {
+  if (user.role === "admin" || user.role === "instructor") return { allowed: true };
+
+  const featureAccess = getStudentFeatureAccess(db, user);
+  const hasFeature = featureAccess.global_community?.included || featureAccess.community?.included;
+  const demoAllowed = db.demoSettings?.allow_global_community !== false && hasAnyActiveEnrollment(db, user, { includeDemo: true });
+
+  if (!hasFeature && !demoAllowed) {
+    return { allowed: false, error: "Your current plan does not include Global Community access." };
+  }
+
+  return { allowed: true };
+}
+
+function sanitizeStudyPartnerProfile(profile = {}, currentUserId = null, exposeContact = false) {
+  const isOwnProfile = String(profile.user_id || "") === String(currentUserId || "");
+  const canExpose = isOwnProfile || exposeContact;
+
+  return {
+    id: profile.id,
+    user_id: profile.user_id,
+    user_name: profile.user_name || "Student",
+    exam_type: profile.exam_type || "",
+    current_stage: profile.current_stage || "",
+    timezone: profile.timezone || "",
+    country: profile.country || "",
+    target_exam_date: profile.target_exam_date || null,
+    current_resources: Array.isArray(profile.current_resources) ? profile.current_resources : [],
+    current_subjects: Array.isArray(profile.current_subjects) ? profile.current_subjects : [],
+    available_hours_per_day: Number(profile.available_hours_per_day || 0),
+    available_hours_per_week: Number(profile.available_hours_per_week || 0),
+    preferred_time_blocks: Array.isArray(profile.preferred_time_blocks) ? profile.preferred_time_blocks : [],
+    study_style: profile.study_style || "",
+    looking_for: Array.isArray(profile.looking_for) ? profile.looking_for : [],
+    language_preference: Array.isArray(profile.language_preference) ? profile.language_preference : [],
+    bio: profile.bio || "",
+    visibility: profile.visibility || "students_only",
+    allow_requests: profile.allow_requests !== false,
+    show_contact_after_accept: profile.show_contact_after_accept !== false,
+    status: profile.status || "active",
+    email: canExpose ? profile.email || "" : "",
+    whatsapp: canExpose ? profile.whatsapp || "" : "",
+    telegram_username: canExpose ? profile.telegram_username || "" : "",
+    created_at: profile.created_at || null,
+    updated_at: profile.updated_at || null,
+  };
+}
+
+function calculateStudyPartnerCompatibility(a = {}, b = {}) {
+  let score = 0;
+  const reasons = [];
+
+  if (a.exam_type && b.exam_type && String(a.exam_type).toLowerCase() === String(b.exam_type).toLowerCase()) {
+    score += 30;
+    reasons.push("Same exam");
+  }
+
+  if (a.timezone && b.timezone && String(a.timezone).toLowerCase() === String(b.timezone).toLowerCase()) {
+    score += 20;
+    reasons.push("Same timezone");
+  }
+
+  const resourcesA = new Set((a.current_resources || []).map((x) => String(x).toLowerCase()));
+  const resourcesB = new Set((b.current_resources || []).map((x) => String(x).toLowerCase()));
+  const sharedResources = [...resourcesA].filter((x) => resourcesB.has(x));
+  if (sharedResources.length) {
+    score += Math.min(15, sharedResources.length * 5);
+    reasons.push(`Shared resources: ${sharedResources.join(", ")}`);
+  }
+
+  const subjectsA = new Set((a.current_subjects || []).map((x) => String(x).toLowerCase()));
+  const subjectsB = new Set((b.current_subjects || []).map((x) => String(x).toLowerCase()));
+  const sharedSubjects = [...subjectsA].filter((x) => subjectsB.has(x));
+  if (sharedSubjects.length) {
+    score += Math.min(15, sharedSubjects.length * 5);
+    reasons.push(`Shared subjects: ${sharedSubjects.join(", ")}`);
+  }
+
+  const langA = new Set((a.language_preference || []).map((x) => String(x).toLowerCase()));
+  const langB = new Set((b.language_preference || []).map((x) => String(x).toLowerCase()));
+  const sharedLang = [...langA].filter((x) => langB.has(x));
+  if (sharedLang.length) {
+    score += 10;
+    reasons.push("Same language preference");
+  }
+
+  const hoursA = Number(a.available_hours_per_day || 0);
+  const hoursB = Number(b.available_hours_per_day || 0);
+  if (hoursA && hoursB && Math.abs(hoursA - hoursB) <= 2) {
+    score += 10;
+    reasons.push("Similar daily study hours");
+  }
+
+  return { score: Math.max(0, Math.min(100, score)), reasons };
+}
+
+function canAccessStudyPartner({ db, user }) {
+  if (user.role === "admin" || user.role === "instructor") return { allowed: true };
+
+  const featureAccess = getStudentFeatureAccess(db, user);
+  const hasFeature = featureAccess.study_partner?.included;
+  const demoAllowed = db.demoSettings?.allow_study_partner !== false && hasAnyActiveEnrollment(db, user, { includeDemo: true });
+
+  if (!hasFeature && !demoAllowed) {
+    return { allowed: false, error: "Your current plan does not include Study Partner access." };
+  }
+
+  return { allowed: true };
+}
+
+app.get("/community/categories", async (req, res) => {
+  try {
+    await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const stored = Object.values(db.globalCommunityCategories || {});
+    res.json({ success: true, categories: stored.length ? stored : DEFAULT_COMMUNITY_CATEGORIES });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to load community categories" });
+  }
+});
+
+app.get("/community/posts", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const access = canAccessGlobalCommunity({ db, user });
+    if (!access.allowed) return res.status(403).json({ success: false, error: access.error });
+
+    let posts = Object.values(db.globalCommunityPosts || {}).filter((post) => post.status !== "deleted");
+    if (req.query.category) posts = posts.filter((post) => String(post.category) === String(req.query.category));
+    if (req.query.exam_type) posts = posts.filter((post) => String(post.exam_type || "").toLowerCase() === String(req.query.exam_type).toLowerCase());
+    if (req.query.q) {
+      const q = String(req.query.q).toLowerCase();
+      posts = posts.filter((post) => JSON.stringify(post).toLowerCase().includes(q));
+    }
+
+    posts.sort((a, b) => {
+      if (a.is_pinned && !b.is_pinned) return -1;
+      if (!a.is_pinned && b.is_pinned) return 1;
+      return String(b.created_at || "").localeCompare(String(a.created_at || ""));
+    });
+
+    res.json({ success: true, count: posts.length, posts: posts.map(sanitizeGlobalCommunityPost) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to load community posts" });
+  }
+});
+
+app.post("/community/posts", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const access = canAccessGlobalCommunity({ db, user });
+    if (!access.allowed) return res.status(403).json({ success: false, error: access.error });
+
+    const title = String(req.body.title || "").trim();
+    const content = String(req.body.content || "").trim();
+    if (!title) return res.status(400).json({ success: false, error: "Post title is required" });
+    if (!content) return res.status(400).json({ success: false, error: "Post content is required" });
+
+    const id = uuid();
+    const now = new Date().toISOString();
+    const post = {
+      id,
+      title: title.slice(0, 200),
+      content: content.slice(0, 8000),
+      category: req.body.category || "general",
+      tags: Array.isArray(req.body.tags) ? req.body.tags : [],
+      exam_type: req.body.exam_type || "",
+      course_id: req.body.course_id || null,
+      user_id: user.id,
+      user_name: user.name || user.email || "Student",
+      user_role: user.role || "student",
+      is_ai_generated: false,
+      is_pinned: false,
+      is_locked: false,
+      status: "active",
+      comments_count: 0,
+      reactions_count: 0,
+      created_at: now,
+      updated_at: now,
+    };
+
+    db.globalCommunityPosts[id] = post;
+    await writeLiveDb(db);
+    res.json({ success: true, post: sanitizeGlobalCommunityPost(post) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to create community post" });
+  }
+});
+
+app.get("/community/posts/:postId", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const access = canAccessGlobalCommunity({ db, user });
+    if (!access.allowed) return res.status(403).json({ success: false, error: access.error });
+
+    const post = db.globalCommunityPosts[String(req.params.postId)];
+    if (!post || post.status === "deleted") return res.status(404).json({ success: false, error: "Post not found" });
+
+    const comments = Object.values(db.globalCommunityComments || {})
+      .filter((comment) => String(comment.post_id) === String(post.id) && comment.status !== "deleted")
+      .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
+
+    res.json({ success: true, post: sanitizeGlobalCommunityPost(post), comments: comments.map(sanitizeGlobalCommunityComment) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to load community post" });
+  }
+});
+
+app.post("/community/posts/:postId/comments", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const access = canAccessGlobalCommunity({ db, user });
+    if (!access.allowed) return res.status(403).json({ success: false, error: access.error });
+
+    const post = db.globalCommunityPosts[String(req.params.postId)];
+    if (!post || post.status === "deleted") return res.status(404).json({ success: false, error: "Post not found" });
+    if (post.is_locked) return res.status(403).json({ success: false, error: "This post is locked" });
+
+    const content = String(req.body.content || req.body.comment || "").trim();
+    if (!content) return res.status(400).json({ success: false, error: "Comment content is required" });
+
+    const id = uuid();
+    const now = new Date().toISOString();
+    const comment = {
+      id,
+      post_id: post.id,
+      parent_comment_id: req.body.parent_comment_id || null,
+      content: content.slice(0, 4000),
+      user_id: user.id,
+      user_name: user.name || user.email || "Student",
+      user_role: user.role || "student",
+      is_ai_generated: false,
+      status: "active",
+      created_at: now,
+      updated_at: now,
+    };
+
+    db.globalCommunityComments[id] = comment;
+    post.comments_count = Object.values(db.globalCommunityComments || {}).filter((c) => String(c.post_id) === String(post.id) && c.status !== "deleted").length;
+    post.updated_at = now;
+    await writeLiveDb(db);
+    res.json({ success: true, comment: sanitizeGlobalCommunityComment(comment) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to add comment" });
+  }
+});
+
+app.post("/community/posts/:postId/react", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const access = canAccessGlobalCommunity({ db, user });
+    if (!access.allowed) return res.status(403).json({ success: false, error: access.error });
+
+    const post = db.globalCommunityPosts[String(req.params.postId)];
+    if (!post || post.status === "deleted") return res.status(404).json({ success: false, error: "Post not found" });
+
+    const reactionType = String(req.body.reaction_type || "like").trim().toLowerCase();
+    const key = `${post.id}:${user.id}`;
+    db.globalCommunityReactions[key] = {
+      id: key,
+      post_id: post.id,
+      user_id: user.id,
+      user_name: user.name || user.email || "Student",
+      reaction_type: reactionType,
+      created_at: db.globalCommunityReactions[key]?.created_at || new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    post.reactions_count = Object.values(db.globalCommunityReactions || {}).filter((r) => String(r.post_id) === String(post.id)).length;
+    post.updated_at = new Date().toISOString();
+    await writeLiveDb(db);
+    res.json({ success: true, reaction: db.globalCommunityReactions[key], reactions_count: post.reactions_count });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to react to post" });
+  }
+});
+
+app.post("/community/report", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const id = uuid();
+    const report = {
+      id,
+      target_type: req.body.target_type || "post",
+      target_id: req.body.target_id || "",
+      reason: req.body.reason || "Reported by user",
+      details: req.body.details || "",
+      user_id: user.id,
+      user_name: user.name || user.email || "Student",
+      status: "pending_review",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    db.globalCommunityReports[id] = report;
+    await writeLiveDb(db);
+    res.json({ success: true, report });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to report item" });
+  }
+});
+
+app.get("/admin/community/posts", async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    let posts = Object.values(db.globalCommunityPosts || {});
+    if (req.query.status) posts = posts.filter((p) => String(p.status) === String(req.query.status));
+    if (req.query.category) posts = posts.filter((p) => String(p.category) === String(req.query.category));
+    posts.sort(sortNewestFirst);
+    res.json({ success: true, count: posts.length, posts: posts.map(sanitizeGlobalCommunityPost) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to load admin community posts" });
+  }
+});
+
+app.patch("/admin/community/posts/:postId", async (req, res) => {
+  try {
+    const { user } = await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const post = db.globalCommunityPosts[String(req.params.postId)];
+    if (!post) return res.status(404).json({ success: false, error: "Post not found" });
+    const allowed = ["title", "content", "category", "tags", "status", "is_pinned", "is_locked"];
+    for (const key of allowed) if (req.body[key] !== undefined) post[key] = req.body[key];
+    post.updated_by = user.id;
+    post.updated_at = new Date().toISOString();
+    await writeLiveDb(db);
+    res.json({ success: true, post: sanitizeGlobalCommunityPost(post) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to update community post" });
+  }
+});
+
+app.post("/admin/community/ai-prompt", async (req, res) => {
+  try {
+    const { user } = await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const title = String(req.body.title || "USMLE Discussion of the Day").trim();
+    const content = String(req.body.content || "").trim();
+    if (!content) return res.status(400).json({ success: false, error: "AI prompt content is required" });
+
+    const id = uuid();
+    const now = new Date().toISOString();
+    const post = {
+      id,
+      title: title.slice(0, 200),
+      content: content.slice(0, 8000),
+      category: req.body.category || "general",
+      tags: Array.isArray(req.body.tags) ? req.body.tags : ["ai_prompt"],
+      exam_type: req.body.exam_type || "",
+      course_id: req.body.course_id || null,
+      user_id: user.id,
+      user_name: req.body.agent_name || "NextGen AI",
+      user_role: "ai_agent",
+      is_ai_generated: true,
+      is_pinned: Boolean(req.body.is_pinned),
+      is_locked: false,
+      status: req.body.status || "active",
+      comments_count: 0,
+      reactions_count: 0,
+      created_by: user.id,
+      created_at: now,
+      updated_at: now,
+    };
+    db.globalCommunityPosts[id] = post;
+
+    const usageId = uuid();
+    db.aiUsageLogs = db.aiUsageLogs || {};
+    db.aiUsageLogs[usageId] = {
+      id: usageId,
+      user_id: user.id,
+      user_email: user.email,
+      action: "community_ai_prompt",
+      model: req.body.model || "manual_admin_ai_prompt",
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+      estimated_cost_usd: 0,
+      created_at: now,
+    };
+
+    await writeLiveDb(db);
+    res.json({ success: true, post: sanitizeGlobalCommunityPost(post) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to create AI community prompt" });
+  }
+});
+
+app.get("/study-partner/profile/me", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const access = canAccessStudyPartner({ db, user });
+    if (!access.allowed) return res.status(403).json({ success: false, error: access.error });
+    const profile = Object.values(db.studyPartnerProfiles || {}).find((p) => String(p.user_id) === String(user.id)) || null;
+    res.json({ success: true, profile: profile ? sanitizeStudyPartnerProfile(profile, user.id) : null });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to load study partner profile" });
+  }
+});
+
+app.post("/study-partner/profile/me", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const access = canAccessStudyPartner({ db, user });
+    if (!access.allowed) return res.status(403).json({ success: false, error: access.error });
+
+    const existing = Object.values(db.studyPartnerProfiles || {}).find((p) => String(p.user_id) === String(user.id)) || null;
+    const id = existing?.id || uuid();
+    const profile = {
+      ...(existing || {}),
+      id,
+      user_id: user.id,
+      user_name: user.name || user.email || "Student",
+      email: req.body.email || existing?.email || user.email || "",
+      whatsapp: req.body.whatsapp || existing?.whatsapp || "",
+      telegram_username: req.body.telegram_username || existing?.telegram_username || "",
+      exam_type: req.body.exam_type || existing?.exam_type || "Step 1",
+      current_stage: req.body.current_stage || existing?.current_stage || "",
+      timezone: req.body.timezone || existing?.timezone || "",
+      country: req.body.country || existing?.country || "",
+      target_exam_date: req.body.target_exam_date || existing?.target_exam_date || null,
+      current_resources: Array.isArray(req.body.current_resources) ? req.body.current_resources : existing?.current_resources || [],
+      current_subjects: Array.isArray(req.body.current_subjects) ? req.body.current_subjects : existing?.current_subjects || [],
+      available_hours_per_day: Number(req.body.available_hours_per_day ?? existing?.available_hours_per_day ?? 0),
+      available_hours_per_week: Number(req.body.available_hours_per_week ?? existing?.available_hours_per_week ?? 0),
+      preferred_time_blocks: Array.isArray(req.body.preferred_time_blocks) ? req.body.preferred_time_blocks : existing?.preferred_time_blocks || [],
+      study_style: req.body.study_style || existing?.study_style || "",
+      looking_for: Array.isArray(req.body.looking_for) ? req.body.looking_for : existing?.looking_for || [],
+      language_preference: Array.isArray(req.body.language_preference) ? req.body.language_preference : existing?.language_preference || [],
+      bio: String(req.body.bio || existing?.bio || "").slice(0, 1000),
+      visibility: req.body.visibility || existing?.visibility || "students_only",
+      allow_requests: req.body.allow_requests !== undefined ? Boolean(req.body.allow_requests) : existing?.allow_requests !== false,
+      show_contact_after_accept: req.body.show_contact_after_accept !== undefined ? Boolean(req.body.show_contact_after_accept) : existing?.show_contact_after_accept !== false,
+      status: req.body.status || existing?.status || "active",
+      created_at: existing?.created_at || new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    db.studyPartnerProfiles[id] = profile;
+    await writeLiveDb(db);
+    res.json({ success: true, profile: sanitizeStudyPartnerProfile(profile, user.id) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to save study partner profile" });
+  }
+});
+
+app.get("/study-partner/matches", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const access = canAccessStudyPartner({ db, user });
+    if (!access.allowed) return res.status(403).json({ success: false, error: access.error });
+
+    const myProfile = Object.values(db.studyPartnerProfiles || {}).find((p) => String(p.user_id) === String(user.id)) || null;
+    if (!myProfile) return res.json({ success: true, profile_required: true, matches: [], message: "Please create your study partner profile first." });
+
+    const profiles = Object.values(db.studyPartnerProfiles || {})
+      .filter((p) => String(p.user_id) !== String(user.id))
+      .filter((p) => p.status === "active")
+      .filter((p) => p.allow_requests !== false)
+      .filter((p) => p.visibility !== "hidden");
+
+    let matches = profiles.map((profile) => {
+      const compatibility = calculateStudyPartnerCompatibility(myProfile, profile);
+      return { profile: sanitizeStudyPartnerProfile(profile, user.id), compatibility_score: compatibility.score, compatibility_reasons: compatibility.reasons };
+    });
+
+    if (req.query.exam_type) matches = matches.filter((m) => String(m.profile.exam_type || "").toLowerCase() === String(req.query.exam_type).toLowerCase());
+    if (req.query.timezone) matches = matches.filter((m) => String(m.profile.timezone || "").toLowerCase() === String(req.query.timezone).toLowerCase());
+    matches.sort((a, b) => Number(b.compatibility_score || 0) - Number(a.compatibility_score || 0));
+
+    res.json({ success: true, count: matches.length, matches });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to load study partner matches" });
+  }
+});
+
+app.post("/study-partner/requests", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const access = canAccessStudyPartner({ db, user });
+    if (!access.allowed) return res.status(403).json({ success: false, error: access.error });
+
+    const toUserId = String(req.body.to_user_id || "").trim();
+    const toProfileId = String(req.body.to_profile_id || "").trim();
+    const toProfile = Object.values(db.studyPartnerProfiles || {}).find((p) => (toUserId && String(p.user_id) === toUserId) || (toProfileId && String(p.id) === toProfileId));
+    if (!toProfile) return res.status(404).json({ success: false, error: "Study partner profile not found" });
+    if (String(toProfile.user_id) === String(user.id)) return res.status(400).json({ success: false, error: "You cannot send a study partner request to yourself" });
+
+    const existing = Object.values(db.studyPartnerRequests || {}).find((r) => String(r.from_user_id) === String(user.id) && String(r.to_user_id) === String(toProfile.user_id) && ["pending", "accepted"].includes(String(r.status)));
+    if (existing) return res.status(400).json({ success: false, error: "A request already exists with this student" });
+
+    const id = uuid();
+    const request = {
+      id,
+      from_user_id: user.id,
+      from_user_name: user.name || user.email || "Student",
+      to_user_id: toProfile.user_id,
+      to_user_name: toProfile.user_name || "Student",
+      to_profile_id: toProfile.id,
+      message: String(req.body.message || "").slice(0, 1000),
+      status: "pending",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    db.studyPartnerRequests[id] = request;
+    await writeLiveDb(db);
+    res.json({ success: true, request });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to send study partner request" });
+  }
+});
+
+app.get("/study-partner/requests", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const access = canAccessStudyPartner({ db, user });
+    if (!access.allowed) return res.status(403).json({ success: false, error: access.error });
+    const requests = Object.values(db.studyPartnerRequests || {})
+      .filter((r) => String(r.from_user_id) === String(user.id) || String(r.to_user_id) === String(user.id))
+      .sort(sortNewestFirst);
+    res.json({ success: true, count: requests.length, requests });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to load study partner requests" });
+  }
+});
+
+app.patch("/study-partner/requests/:requestId", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const request = db.studyPartnerRequests[String(req.params.requestId)];
+    if (!request) return res.status(404).json({ success: false, error: "Request not found" });
+    if (String(request.to_user_id) !== String(user.id) && user.role !== "admin") return res.status(403).json({ success: false, error: "Only the receiver can accept or decline this request" });
+
+    const status = String(req.body.status || "").toLowerCase();
+    if (!["accepted", "declined", "blocked"].includes(status)) return res.status(400).json({ success: false, error: "Invalid request status" });
+
+    request.status = status;
+    request.updated_at = new Date().toISOString();
+    if (status === "accepted") {
+      const matchId = `${request.from_user_id}:${request.to_user_id}`;
+      db.studyPartnerMatches[matchId] = {
+        id: matchId,
+        request_id: request.id,
+        user_a_id: request.from_user_id,
+        user_a_name: request.from_user_name,
+        user_b_id: request.to_user_id,
+        user_b_name: request.to_user_name,
+        status: "active",
+        created_at: db.studyPartnerMatches[matchId]?.created_at || new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+    }
+    await writeLiveDb(db);
+    res.json({ success: true, request });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to update study partner request" });
+  }
+});
+
+app.get("/study-partner/partners", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const matches = Object.values(db.studyPartnerMatches || {})
+      .filter((m) => String(m.user_a_id) === String(user.id) || String(m.user_b_id) === String(user.id))
+      .filter((m) => m.status === "active")
+      .map((match) => {
+        const partnerUserId = String(match.user_a_id) === String(user.id) ? match.user_b_id : match.user_a_id;
+        const profile = Object.values(db.studyPartnerProfiles || {}).find((p) => String(p.user_id) === String(partnerUserId)) || null;
+        const exposeContact = profile?.show_contact_after_accept !== false;
+        return { ...match, partner_user_id: partnerUserId, partner_profile: profile ? sanitizeStudyPartnerProfile(profile, user.id, exposeContact) : null };
+      });
+    res.json({ success: true, count: matches.length, partners: matches });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to load study partners" });
+  }
+});
+
+app.get("/admin/study-partner/profiles", async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    let profiles = Object.values(db.studyPartnerProfiles || {});
+    if (req.query.status) profiles = profiles.filter((p) => String(p.status) === String(req.query.status));
+    if (req.query.exam_type) profiles = profiles.filter((p) => String(p.exam_type) === String(req.query.exam_type));
+    profiles.sort(sortNewestFirst);
+    res.json({ success: true, count: profiles.length, profiles });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to load study partner profiles" });
+  }
+});
+
+app.patch("/admin/study-partner/profiles/:profileId", async (req, res) => {
+  try {
+    const { user } = await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const profile = db.studyPartnerProfiles[String(req.params.profileId)];
+    if (!profile) return res.status(404).json({ success: false, error: "Profile not found" });
+    const allowed = ["status", "visibility", "allow_requests", "bio"];
+    for (const key of allowed) if (req.body[key] !== undefined) profile[key] = req.body[key];
+    profile.updated_by = user.id;
+    profile.updated_at = new Date().toISOString();
+    await writeLiveDb(db);
+    res.json({ success: true, profile });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to update study partner profile" });
+  }
+});
+
+app.get("/live/debug/storage", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); if (user.role !== "admin") return res.status(403).json({ success: false, error: "Only admins can view storage debug" }); const db = await readLiveDb(); res.json({ success: true, data_dir: DATA_DIR, live_db_path: LIVE_DB_PATH, counts: { courses: Object.keys(db.courses || {}).length, liveSessions: Object.keys(db.liveSessions || {}).length, announcements: Object.keys(db.announcements || {}).length, recordings: Object.keys(db.recordings || {}).length, notes: Object.keys(db.notes || {}).length, enrollments: Object.keys(db.enrollments || {}).length, plans: Object.keys(db.plans || {}).length, coupons: Object.keys(db.coupons || {}).length, assessments: Object.keys(db.assessments || {}).length, assessmentAttempts: Object.keys(db.assessmentAttempts || {}).length, aiUsageLogs: Object.keys(db.aiUsageLogs || {}).length, payments: Object.keys(db.payments || {}).length, roadmaps: Object.keys(db.roadmaps || {}).length, roadmapProgress: Object.keys(db.roadmapProgress || {}).length, leaderboard: Object.keys(db.leaderboard || {}).length, googleAuthUsers: Object.keys(db.googleAuthUsers || {}).length, globalCommunityPosts: Object.keys(db.globalCommunityPosts || {}).length, globalCommunityComments: Object.keys(db.globalCommunityComments || {}).length, globalCommunityReactions: Object.keys(db.globalCommunityReactions || {}).length, globalCommunityReports: Object.keys(db.globalCommunityReports || {}).length, studyPartnerProfiles: Object.keys(db.studyPartnerProfiles || {}).length, studyPartnerRequests: Object.keys(db.studyPartnerRequests || {}).length, studyPartnerMatches: Object.keys(db.studyPartnerMatches || {}).length, studyPartnerReports: Object.keys(db.studyPartnerReports || {}).length }, updatedAt: db.updatedAt || null }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 
 
 // -----------------------------------------------------------------------------
@@ -3872,6 +4611,37 @@ const DEFAULT_CRM_DB = {
   integration_logs: [],
   handoffs: [],
   client_data_events: [],
+
+  // Advanced CRM operating-system modules
+  crm_flows: [],
+  crm_flow_runs: [],
+  crm_flow_events: [],
+  live_conversion_settings: [],
+  live_conversion_events: [],
+  live_session_invites: [],
+  scheduled_followup_jobs: [],
+  followup_executions: [],
+  community_intelligence_settings: [],
+  community_intelligence_tasks: [],
+  community_opportunities: [],
+  community_reply_drafts: [],
+  community_watch_keywords: [],
+  community_rules: [],
+  team_members: [],
+  roles: [],
+  role_permissions: [],
+  team_activity_logs: [],
+  referral_codes: [],
+  referral_attributions: [],
+  commission_rules: [],
+  commission_payouts: [],
+  revenue_attribution: [],
+  dashboard_settings: [],
+  module_visibility_settings: [],
+  portal_settings: [],
+  voice_call_settings: [],
+  voice_call_logs: [],
+
   settings: DEFAULT_CRM_SETTINGS,
   updated_at: null,
 };
@@ -7961,6 +8731,671 @@ app.post("/admin/crm/conversations/:leadId/send", async (req, res) => {
 });
 
 
+
+// -----------------------------------------------------------------------------
+// CRM Advanced Operating System: Flow Builder, Live Conversion, Team/Roles,
+// Referrals/Commissions, Community Intelligence, Dashboard Settings
+// -----------------------------------------------------------------------------
+
+const DEFAULT_CRM_DASHBOARD_LAYOUT = {
+  version: 1,
+  sidebar_mode: "grouped",
+  compact_mode: true,
+  default_landing_page: "conversation_inbox",
+  groups: [
+    {
+      key: "daily_work",
+      label: "Daily Work",
+      description: "The pages used every day by admins and agents.",
+      modules: ["conversation_inbox", "leads", "approval_queue", "followup_rules", "sales_handoff"]
+    },
+    {
+      key: "growth",
+      label: "Growth Channels",
+      description: "Lead sources, integrations, campaigns, and community intelligence.",
+      modules: ["social_integrations", "communities", "geo_communities", "community_intelligence", "campaigns", "post_generator", "import_contacts"]
+    },
+    {
+      key: "ai_control",
+      label: "AI Control",
+      description: "AI agents, flow builder, training, templates, costs, and safety.",
+      modules: ["ai_agents", "ai_flow_builder", "ai_training_center", "ai_lead_analyzer", "ai_control_center", "templates", "ai_usage_cost", "ai_cost_settings", "action_logs"]
+    },
+    {
+      key: "sales_revenue",
+      label: "Sales & Revenue",
+      description: "Live-session conversion, coupons, referrals, commissions, and ROI.",
+      modules: ["live_session_conversion", "coupons_offers", "regional_strategies", "cost_revenue_dashboard", "team_role_portal", "referral_commission"]
+    },
+    {
+      key: "system",
+      label: "System",
+      description: "Brands, dashboard settings, module visibility, and portal controls.",
+      modules: ["brands", "dashboard_settings", "settings"]
+    }
+  ],
+  module_labels: {
+    brands: "Brands",
+    leads: "Leads",
+    import_contacts: "Import Contacts",
+    communities: "Communities",
+    geo_communities: "Geo Communities",
+    social_integrations: "Social Integrations",
+    conversation_inbox: "Conversations Inbox",
+    ai_agents: "AI Agents",
+    ai_flow_builder: "AI Flow Builder",
+    coupons_offers: "Coupons / Offers",
+    regional_strategies: "Regional Strategies",
+    campaigns: "Campaigns",
+    post_generator: "Post Generator",
+    ai_lead_analyzer: "AI Lead Analyzer",
+    ai_control_center: "AI Control Center",
+    ai_usage_cost: "AI Usage & Cost",
+    ai_cost_settings: "AI Cost Settings",
+    approval_queue: "Approval Queue",
+    templates: "Templates",
+    followup_rules: "Follow-up Rules",
+    ai_training_center: "AI Training Center",
+    sales_handoff: "Sales Handoff",
+    action_logs: "Action Logs",
+    live_session_conversion: "Live Session Conversion",
+    community_intelligence: "Community Intelligence",
+    cost_revenue_dashboard: "Cost & Revenue Dashboard",
+    team_role_portal: "Team / Role Portal",
+    referral_commission: "Referral & Commission",
+    dashboard_settings: "Dashboard Settings",
+    settings: "Settings"
+  },
+  hidden_modules: [],
+  pinned_modules: ["conversation_inbox", "leads", "approval_queue", "live_session_conversion"],
+};
+
+const DEFAULT_ROLE_PERMISSION_SETS = {
+  admin: ["*"] ,
+  instructor: ["view_assigned_courses", "manage_live_sessions", "manage_recordings", "manage_assessments", "view_assigned_students", "reply_assigned_conversations"],
+  sales_agent: ["view_assigned_leads", "reply_assigned_conversations", "use_ai_draft", "create_followups"],
+  closer: ["view_assigned_leads", "reply_assigned_conversations", "send_payment_links", "view_revenue_limited", "create_followups"],
+  community_manager: ["manage_community_intelligence", "draft_community_replies", "submit_approval_items"],
+  affiliate: ["view_own_referrals", "view_own_commissions"],
+  support_agent: ["view_assigned_leads", "reply_assigned_conversations", "create_internal_notes"],
+};
+
+function getDefaultLiveConversionSettings(brandId = null) {
+  return {
+    id: `live_conversion_${brandId || "global"}`,
+    brand_id: brandId || null,
+    enabled: true,
+    approval_required: true,
+    promote_live_sessions: true,
+    promote_demo_sessions: true,
+    link_send_window_minutes_before: 120,
+    link_send_window_minutes_after_start: 30,
+    post_session_followup_minutes: 45,
+    did_not_attend_followup_hours: 12,
+    max_session_invites_per_lead: 3,
+    default_course_id: null,
+    default_plan_id: null,
+    default_payment_link: "",
+    default_booking_link: "",
+    message_templates: {
+      live_now: "Doctor, a relevant live session is starting now. You can join and experience the teaching style before enrollment: {{session_link}}",
+      upcoming: "Doctor, we have a relevant live/demo session coming up at {{session_time}}. I can send you the join link when it opens.",
+      post_session_attended: "How was the session, Doctor? If you liked the teaching style, I can guide you to the best plan for your timeline.",
+      post_session_missed: "No problem if you missed it. I can send you the next available live/demo session so you can experience the class before deciding.",
+      payment_link: "Based on your timeline, this plan fits best: {{plan_name}}. Here is the secure enrollment link: {{payment_link}}"
+    },
+    created_at: nowIso(),
+    updated_at: nowIso(),
+  };
+}
+
+function getDashboardSettings(db, brandId = null) {
+  const existing = ensureCrmArray(db, "dashboard_settings").find((item) => !brandId || String(item.brand_id || "") === String(brandId));
+  if (existing) return { ...DEFAULT_CRM_DASHBOARD_LAYOUT, ...existing };
+  return {
+    id: `dashboard_${brandId || "global"}`,
+    brand_id: brandId || null,
+    ...DEFAULT_CRM_DASHBOARD_LAYOUT,
+    created_at: nowIso(),
+    updated_at: nowIso(),
+  };
+}
+
+function getLiveConversionSettings(db, brandId = null) {
+  const existing = ensureCrmArray(db, "live_conversion_settings").find((item) => !brandId || String(item.brand_id || "") === String(brandId));
+  return existing ? { ...getDefaultLiveConversionSettings(brandId), ...existing } : getDefaultLiveConversionSettings(brandId);
+}
+
+function normalizeCrmFlow(body = {}, existing = null, brandId = null) {
+  const now = nowIso();
+  return {
+    ...(existing || {}),
+    id: existing?.id || body.id || uuid(),
+    brand_id: body.brand_id || existing?.brand_id || brandId || null,
+    name: normalizeCrmString(body.name || existing?.name || "New CRM Flow"),
+    description: normalizeCrmString(body.description || existing?.description || ""),
+    enabled: body.enabled !== undefined ? Boolean(body.enabled) : existing?.enabled !== false,
+    platforms: Array.isArray(body.platforms) ? body.platforms.map(normalizeSocialPlatform) : existing?.platforms || ["whatsapp", "telegram", "email"],
+    trigger: body.trigger || existing?.trigger || "new_inbound_message",
+    conditions: safeCrmJson(body.conditions, existing?.conditions || { intents: ["pricing_inquiry", "course_inquiry", "demo_interest", "live_class_inquiry"] }),
+    steps: Array.isArray(body.steps) ? body.steps : existing?.steps || [
+      { id: "classify_intent", type: "ai_classify_intent", label: "Classify intent" },
+      { id: "check_live_sessions", type: "check_live_sessions", label: "Check ongoing/upcoming sessions" },
+      { id: "draft_session_invite", type: "draft_or_send", label: "Draft/send live session invite", approval_required: true },
+      { id: "schedule_followup", type: "schedule_followup", label: "Schedule post-session follow-up" },
+      { id: "recommend_plan", type: "recommend_plan", label: "Recommend plan/payment link" },
+      { id: "escalate_hot_lead", type: "escalate_if_hot", label: "Escalate hot lead" }
+    ],
+    approval_mode: body.approval_mode || existing?.approval_mode || "draft_first",
+    max_followups: Number(body.max_followups ?? existing?.max_followups ?? 3),
+    assigned_agent_id: body.assigned_agent_id || existing?.assigned_agent_id || null,
+    status: body.status || existing?.status || "active",
+    created_at: existing?.created_at || body.created_at || now,
+    updated_at: now,
+  };
+}
+
+function calculateStripeFeeUsd(amountUsd, override = null) {
+  if (override !== null && override !== undefined && override !== "") return Number(override || 0);
+  const amount = Number(amountUsd || 0);
+  if (amount <= 0) return 0;
+  const percent = Number(process.env.STRIPE_FEE_PERCENT || 2.9);
+  const fixed = Number(process.env.STRIPE_FEE_FIXED_USD || 0.30);
+  return Number(((amount * percent) / 100 + fixed).toFixed(2));
+}
+
+function calculateCommission({ grossUsd = 0, netUsd = 0, rule = null }) {
+  if (!rule || rule.active === false) return 0;
+  const basis = String(rule.basis || "net").toLowerCase() === "gross" ? Number(grossUsd || 0) : Number(netUsd || 0);
+  if (rule.commission_type === "fixed") return Number(rule.amount_usd || 0);
+  return Number(((basis * Number(rule.percent || rule.commission_percent || 0)) / 100).toFixed(2));
+}
+
+function findReferralCode(db, code) {
+  const clean = normalizeCrmString(code).toUpperCase();
+  if (!clean) return null;
+  return ensureCrmArray(db, "referral_codes").find((item) => String(item.code || "").toUpperCase() === clean) || null;
+}
+
+function getTeamMemberStats(db, teamMemberId) {
+  const attributions = ensureCrmArray(db, "referral_attributions").filter((item) => String(item.team_member_id) === String(teamMemberId));
+  const payouts = ensureCrmArray(db, "commission_payouts").filter((item) => String(item.team_member_id) === String(teamMemberId));
+  const gross = attributions.reduce((sum, item) => sum + Number(item.gross_revenue_usd || 0), 0);
+  const stripeFees = attributions.reduce((sum, item) => sum + Number(item.stripe_fee_usd || 0), 0);
+  const commissions = attributions.reduce((sum, item) => sum + Number(item.commission_amount_usd || 0), 0);
+  const paid = payouts.filter((item) => item.status === "paid").reduce((sum, item) => sum + Number(item.amount_usd || 0), 0);
+  return {
+    referrals_count: attributions.length,
+    gross_revenue_usd: Number(gross.toFixed(2)),
+    stripe_fees_usd: Number(stripeFees.toFixed(2)),
+    net_revenue_usd: Number((gross - stripeFees).toFixed(2)),
+    commission_earned_usd: Number(commissions.toFixed(2)),
+    commission_paid_usd: Number(paid.toFixed(2)),
+    commission_pending_usd: Number((commissions - paid).toFixed(2)),
+  };
+}
+
+function logTeamActivity(db, payload = {}) {
+  const log = withTimestamps({
+    id: uuid(),
+    team_member_id: payload.team_member_id || null,
+    user_id: payload.user_id || null,
+    role_id: payload.role_id || null,
+    action: payload.action || "team_activity",
+    message: payload.message || "",
+    metadata: payload.metadata || {},
+  });
+  ensureCrmArray(db, "team_activity_logs").push(log);
+  return log;
+}
+
+function defaultCommunityIntelligenceSettings(brandId = null) {
+  return {
+    id: `community_intelligence_${brandId || "global"}`,
+    brand_id: brandId || null,
+    enabled: true,
+    approval_required: true,
+    mode: "manual_first",
+    allowed_platforms: ["telegram", "reddit", "facebook", "instagram", "youtube", "linkedin"],
+    blocked_actions: ["mass_dm", "spam_comment", "auto_post_without_approval"],
+    default_keywords: ["usmle", "step 1", "step 2", "uworld", "nbme", "first aid", "pathoma", "sketchy"],
+    max_drafts_per_day: 20,
+    created_at: nowIso(),
+    updated_at: nowIso(),
+  };
+}
+
+function getCommunityIntelligenceSettings(db, brandId = null) {
+  const existing = ensureCrmArray(db, "community_intelligence_settings").find((item) => !brandId || String(item.brand_id || "") === String(brandId));
+  return existing ? { ...defaultCommunityIntelligenceSettings(brandId), ...existing } : defaultCommunityIntelligenceSettings(brandId);
+}
+
+// Dashboard grouping/settings so the CRM is not crowded on frontend.
+app.get("/admin/crm/dashboard-settings", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    res.json({ success: true, settings: getDashboardSettings(db, brandId) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/dashboard-settings", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const records = ensureCrmArray(db, "dashboard_settings");
+    const existingIndex = records.findIndex((item) => String(item.brand_id || "") === String(brandId || ""));
+    const existing = existingIndex >= 0 ? records[existingIndex] : getDashboardSettings(db, brandId);
+    const updated = { ...existing, ...(req.body || {}), id: existing.id || `dashboard_${brandId || "global"}`, brand_id: brandId, updated_at: nowIso(), created_at: existing.created_at || nowIso() };
+    if (existingIndex >= 0) records[existingIndex] = updated;
+    else records.push(updated);
+    await writeCrmDb(db);
+    res.json({ success: true, settings: updated });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// AI Flow Builder
+app.get("/admin/crm/flows", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const flows = filterCrmRecords(req, ensureCrmArray(db, "crm_flows"), brandId);
+    res.json({ success: true, flows, count: flows.length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/flows", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const flow = normalizeCrmFlow(req.body || {}, null, brandId);
+    flow.created_by = user.id;
+    ensureCrmArray(db, "crm_flows").push(flow);
+    createCrmActionLog(db, { brand_id: brandId, agent_name: "system", action_type: "create_crm_flow", channel: "admin", output_text: flow.name, created_by: user.id });
+    await writeCrmDb(db);
+    res.json({ success: true, flow });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/crm/flows/:id", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const flow = ensureCrmArray(db, "crm_flows").find((item) => String(item.id) === String(req.params.id));
+    if (!flow) return res.status(404).json({ success: false, error: "CRM flow not found" });
+    const runs = ensureCrmArray(db, "crm_flow_runs").filter((run) => String(run.flow_id) === String(flow.id)).sort(sortNewestFirst).slice(0, 50);
+    res.json({ success: true, flow, runs });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.put("/admin/crm/flows/:id", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const flows = ensureCrmArray(db, "crm_flows");
+    const index = flows.findIndex((item) => String(item.id) === String(req.params.id));
+    if (index < 0) return res.status(404).json({ success: false, error: "CRM flow not found" });
+    flows[index] = normalizeCrmFlow(req.body || {}, flows[index], flows[index].brand_id);
+    flows[index].updated_by = user.id;
+    await writeCrmDb(db);
+    res.json({ success: true, flow: flows[index] });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/flows/:id/run", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const flow = ensureCrmArray(db, "crm_flows").find((item) => String(item.id) === String(req.params.id));
+    if (!flow) return res.status(404).json({ success: false, error: "CRM flow not found" });
+    const lead = req.body.lead_id ? getLeadByAnyId(db, req.body.lead_id) : null;
+    const run = withTimestamps({
+      id: uuid(),
+      brand_id: flow.brand_id || null,
+      flow_id: flow.id,
+      flow_name: flow.name,
+      lead_id: lead?.id || req.body.lead_id || null,
+      trigger: req.body.trigger || flow.trigger,
+      status: "simulated",
+      mode: req.body.mode || "manual_test",
+      steps_snapshot: flow.steps || [],
+      input: req.body || {},
+      result_summary: "Flow run recorded. Execution engine is approval-first/manual until frontend enables automation.",
+      executed_by: user.id,
+    });
+    ensureCrmArray(db, "crm_flow_runs").push(run);
+    ensureCrmArray(db, "crm_flow_events").push(withTimestamps({ id: uuid(), flow_id: flow.id, run_id: run.id, lead_id: run.lead_id, event_type: "flow_run_created", message: run.result_summary }));
+    await writeCrmDb(db);
+    res.json({ success: true, run });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/flows/bootstrap-default", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const existing = ensureCrmArray(db, "crm_flows").find((item) => item.name === "Live Session Conversion Flow" && String(item.brand_id || "") === String(brandId || ""));
+    if (existing) return res.json({ success: true, flow: existing, already_exists: true });
+    const flow = normalizeCrmFlow({ name: "Live Session Conversion Flow", description: "Move qualified leads from inbound messages into live/demo sessions, post-session follow-up, plan recommendation, and sales handoff." }, null, brandId);
+    flow.created_by = user.id;
+    ensureCrmArray(db, "crm_flows").push(flow);
+    await writeCrmDb(db);
+    res.json({ success: true, flow, created: true });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+// Live Session Conversion Settings and Events
+app.get("/admin/crm/live-conversion/settings", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    res.json({ success: true, settings: getLiveConversionSettings(db, brandId) });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.put("/admin/crm/live-conversion/settings", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const records = ensureCrmArray(db, "live_conversion_settings");
+    const index = records.findIndex((item) => String(item.brand_id || "") === String(brandId || ""));
+    const existing = index >= 0 ? records[index] : getLiveConversionSettings(db, brandId);
+    const updated = { ...existing, ...(req.body || {}), id: existing.id || `live_conversion_${brandId || "global"}`, brand_id: brandId, updated_at: nowIso(), created_at: existing.created_at || nowIso() };
+    if (index >= 0) records[index] = updated; else records.push(updated);
+    await writeCrmDb(db);
+    res.json({ success: true, settings: updated });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/crm/live-conversion/eligible-sessions", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const liveDb = await readLiveDb();
+    const crmDb = await readCrmDb();
+    const brandId = getCrmBrandId(req, crmDb);
+    const settings = getLiveConversionSettings(crmDb, brandId);
+    const now = Date.now();
+    const windowBefore = Number(settings.link_send_window_minutes_before || 120) * 60000;
+    const windowAfter = Number(settings.link_send_window_minutes_after_start || 30) * 60000;
+    let sessions = Object.values(liveDb.liveSessions || {}).map(sanitizeLiveSession).filter((s) => s.status !== "cancelled" && s.status !== "completed");
+    if (req.query.course_id) sessions = sessions.filter((s) => String(s.course_id) === String(req.query.course_id));
+    sessions = sessions.map((session) => {
+      const start = getSessionStartUtc(session.scheduled_date, session.scheduled_time, session.scheduled_timezone || DEFAULT_TIMEZONE);
+      const eligible_now = start ? now >= start.getTime() - windowBefore && now <= start.getTime() + windowAfter : false;
+      return { ...session, start_utc: start ? start.toISOString() : null, eligible_now, join_link_available: Boolean(session.zoom_meeting_url || session.zoom_join_url || session.zoom_meeting_id) };
+    }).sort((a, b) => String(a.start_utc || "").localeCompare(String(b.start_utc || "")));
+    res.json({ success: true, settings, count: sessions.length, sessions });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/live-conversion/invite", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const crmDb = await readCrmDb();
+    const liveDb = await readLiveDb();
+    const brandId = getCrmBrandId(req, crmDb);
+    const lead = getLeadByAnyId(crmDb, req.body.lead_id);
+    if (!lead) return res.status(404).json({ success: false, error: "Lead not found" });
+    const session = liveDb.liveSessions[String(req.body.session_id)] || null;
+    if (!session) return res.status(404).json({ success: false, error: "Live session not found" });
+    const settings = getLiveConversionSettings(crmDb, brandId);
+    const existingInvites = ensureCrmArray(crmDb, "live_session_invites").filter((item) => String(item.lead_id) === String(lead.id));
+    if (existingInvites.length >= Number(settings.max_session_invites_per_lead || 3)) {
+      return res.status(400).json({ success: false, error: "Max session invites reached for this lead" });
+    }
+    const link = session.zoom_meeting_url || req.body.session_link || "";
+    const message = String(req.body.message || settings.message_templates?.upcoming || "").replace("{{session_link}}", link).replace("{{session_time}}", `${session.scheduled_date || ""} ${session.scheduled_time || ""}`.trim());
+    const invite = withTimestamps({
+      id: uuid(), brand_id: brandId, lead_id: lead.id, session_id: session.id, course_id: session.course_id || null,
+      session_topic: session.topic || session.title || "Live Session", session_link: link, message,
+      status: settings.approval_required ? "needs_approval" : "ready_to_send", approval_required: Boolean(settings.approval_required), created_by: user.id,
+    });
+    ensureCrmArray(crmDb, "live_session_invites").push(invite);
+    ensureCrmArray(crmDb, "live_conversion_events").push(withTimestamps({ id: uuid(), brand_id: brandId, lead_id: lead.id, session_id: session.id, event_type: "session_invite_created", message }));
+    if (settings.approval_required) {
+      ensureCrmArray(crmDb, "approval_queue").push(withTimestamps({ id: uuid(), brand_id: brandId, action_id: invite.id, action_type: "live_session_invite", channel: normalizeLeadSourcePlatform(lead), lead_id: lead.id, draft_content: message, status: "pending" }));
+    }
+    lead.status = "live_session_link_sent";
+    lead.lead_status = lead.status;
+    lead.last_live_session_invite_id = invite.id;
+    lead.updated_at = nowIso();
+    await writeCrmDb(crmDb);
+    res.json({ success: true, invite, lead: normalizeLeadForResponse(lead) });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/live-conversion/events", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const event = withTimestamps({ id: uuid(), brand_id: getCrmBrandId(req, db), ...(req.body || {}) });
+    ensureCrmArray(db, "live_conversion_events").push(event);
+    const lead = req.body.lead_id ? getLeadByAnyId(db, req.body.lead_id) : null;
+    if (lead && req.body.lead_status) { lead.status = req.body.lead_status; lead.lead_status = req.body.lead_status; lead.updated_at = nowIso(); }
+    await writeCrmDb(db);
+    res.json({ success: true, event, lead: lead ? normalizeLeadForResponse(lead) : null });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/crm/live-conversion/events", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    let events = filterCrmRecords(req, ensureCrmArray(db, "live_conversion_events"), brandId);
+    if (req.query.lead_id) events = events.filter((e) => String(e.lead_id) === String(req.query.lead_id));
+    res.json({ success: true, events, count: events.length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+// Follow-up Jobs execution structure
+app.get("/admin/crm/followup-jobs", async (req, res) => {
+  try { await requireCrmAdmin(req); const db = await readCrmDb(); const brandId = getCrmBrandId(req, db); const jobs = filterCrmRecords(req, ensureCrmArray(db, "scheduled_followup_jobs"), brandId); res.json({ success: true, jobs, count: jobs.length }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/followup-jobs", async (req, res) => {
+  try { await requireCrmAdmin(req); const db = await readCrmDb(); const brandId = getCrmBrandId(req, db); const job = withTimestamps({ id: uuid(), brand_id: brandId, status: "scheduled", approval_required: true, ...(req.body || {}) }); ensureCrmArray(db, "scheduled_followup_jobs").push(job); await writeCrmDb(db); res.json({ success: true, job }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/followup-jobs/:id/execute", async (req, res) => {
+  try { const { user } = await requireCrmAdmin(req); const db = await readCrmDb(); const job = ensureCrmArray(db, "scheduled_followup_jobs").find((j) => String(j.id) === String(req.params.id)); if (!job) return res.status(404).json({ success: false, error: "Follow-up job not found" }); job.status = req.body.status || "executed"; job.executed_at = nowIso(); job.executed_by = user.id; job.updated_at = nowIso(); const execution = withTimestamps({ id: uuid(), job_id: job.id, brand_id: job.brand_id || null, lead_id: job.lead_id || null, status: job.status, result: req.body.result || "Manual execution recorded" }); ensureCrmArray(db, "followup_executions").push(execution); await writeCrmDb(db); res.json({ success: true, job, execution }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+// Community Intelligence
+app.get("/admin/crm/community-intelligence/settings", async (req, res) => {
+  try { await requireCrmAdmin(req); const db = await readCrmDb(); const brandId = getCrmBrandId(req, db); res.json({ success: true, settings: getCommunityIntelligenceSettings(db, brandId) }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.put("/admin/crm/community-intelligence/settings", async (req, res) => {
+  try { await requireCrmAdmin(req); const db = await readCrmDb(); const brandId = getCrmBrandId(req, db); const records = ensureCrmArray(db, "community_intelligence_settings"); const index = records.findIndex((i) => String(i.brand_id || "") === String(brandId || "")); const existing = index >= 0 ? records[index] : defaultCommunityIntelligenceSettings(brandId); const updated = { ...existing, ...(req.body || {}), id: existing.id || `community_intelligence_${brandId || "global"}`, brand_id: brandId, updated_at: nowIso(), created_at: existing.created_at || nowIso() }; if (index >= 0) records[index] = updated; else records.push(updated); await writeCrmDb(db); res.json({ success: true, settings: updated }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+for (const [route, collection, responseKey] of [
+  ["/admin/crm/community-intelligence/tasks", "community_intelligence_tasks", "tasks"],
+  ["/admin/crm/community-intelligence/opportunities", "community_opportunities", "opportunities"],
+  ["/admin/crm/community-intelligence/reply-drafts", "community_reply_drafts", "drafts"],
+  ["/admin/crm/community-intelligence/watch-keywords", "community_watch_keywords", "keywords"],
+  ["/admin/crm/community-intelligence/rules", "community_rules", "rules"],
+]) {
+  app.get(route, async (req, res) => {
+    try { await requireCrmAdmin(req); const db = await readCrmDb(); const brandId = getCrmBrandId(req, db); const records = filterCrmRecords(req, ensureCrmArray(db, collection), brandId); res.json({ success: true, [responseKey]: records, count: records.length }); }
+    catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+  });
+  app.post(route, async (req, res) => {
+    try { await requireCrmAdmin(req); const db = await readCrmDb(); const brandId = getCrmBrandId(req, db); const record = withTimestamps({ id: uuid(), brand_id: brandId, status: req.body?.status || "draft", approval_required: req.body?.approval_required !== false, mode: req.body?.mode || "manual_first", ...(req.body || {}) }); ensureCrmArray(db, collection).push(record); await writeCrmDb(db); res.json({ success: true, record }); }
+    catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+  });
+}
+
+app.post("/admin/crm/community-intelligence/opportunities/:id/create-lead", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const opp = ensureCrmArray(db, "community_opportunities").find((item) => String(item.id) === String(req.params.id));
+    if (!opp) return res.status(404).json({ success: false, error: "Opportunity not found" });
+    const brandId = opp.brand_id || getCrmBrandId(req, db);
+    const payload = parseInboundSocialPayload({ platform: opp.platform || req.body.platform || "other", payload: { ...(opp.raw_payload || {}), ...(req.body || {}), text: req.body.message || opp.detected_text || opp.summary || "" }, integration: null });
+    const { lead, created } = upsertSocialLead(db, payload.platform || opp.platform || "other", { ...payload, brand_id: brandId, source_community_id: opp.community_id || null, source_opportunity_id: opp.id });
+    opp.lead_id = lead.id;
+    opp.status = "lead_created";
+    opp.updated_at = nowIso();
+    await writeCrmDb(db);
+    res.json({ success: true, lead: normalizeLeadForResponse(lead), opportunity: opp, created });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+// Team / Role Portal
+app.get("/admin/crm/roles", async (req, res) => {
+  try { await requireCrmAdmin(req); const db = await readCrmDb(); const roles = ensureCrmArray(db, "roles"); res.json({ success: true, roles, default_permission_sets: DEFAULT_ROLE_PERMISSION_SETS, count: roles.length }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/roles", async (req, res) => {
+  try { await requireCrmAdmin(req); const db = await readCrmDb(); const roleKey = normalizeCrmLower(req.body.role_key || req.body.name || "custom_role").replace(/[^a-z0-9]+/g, "_"); const role = withTimestamps({ id: uuid(), role_key: roleKey, name: req.body.name || roleKey, description: req.body.description || "", permissions: Array.isArray(req.body.permissions) ? req.body.permissions : (DEFAULT_ROLE_PERMISSION_SETS[roleKey] || []), dashboard_modules: Array.isArray(req.body.dashboard_modules) ? req.body.dashboard_modules : [], status: req.body.status || "active" }); ensureCrmArray(db, "roles").push(role); await writeCrmDb(db); res.json({ success: true, role }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.put("/admin/crm/roles/:id", async (req, res) => {
+  try { await requireCrmAdmin(req); const db = await readCrmDb(); const roles = ensureCrmArray(db, "roles"); const idx = roles.findIndex((r) => String(r.id) === String(req.params.id)); if (idx < 0) return res.status(404).json({ success: false, error: "Role not found" }); roles[idx] = { ...roles[idx], ...(req.body || {}), updated_at: nowIso() }; await writeCrmDb(db); res.json({ success: true, role: roles[idx] }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/crm/team-members", async (req, res) => {
+  try { await requireCrmAdmin(req); const db = await readCrmDb(); let members = filterCrmRecords(req, ensureCrmArray(db, "team_members"), null); members = members.map((m) => ({ ...m, stats: getTeamMemberStats(db, m.id) })); res.json({ success: true, members, count: members.length }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/team-members", async (req, res) => {
+  try { const { user } = await requireCrmAdmin(req); const db = await readCrmDb(); const member = withTimestamps({ id: uuid(), user_id: req.body.user_id || null, name: req.body.name || req.body.full_name || "Team Member", email: normalizeEmail(req.body.email || ""), role_id: req.body.role_id || null, role_name: req.body.role_name || req.body.role || "Team Member", status: req.body.status || "active", permissions: Array.isArray(req.body.permissions) ? req.body.permissions : [], allowed_modules: Array.isArray(req.body.allowed_modules) ? req.body.allowed_modules : [], referral_code: normalizeCrmString(req.body.referral_code || "").toUpperCase(), commission_rule_id: req.body.commission_rule_id || null, created_by: user.id }); ensureCrmArray(db, "team_members").push(member); logTeamActivity(db, { team_member_id: member.id, action: "create_team_member", message: "Team member created", metadata: { created_by: user.id } }); await writeCrmDb(db); res.json({ success: true, member }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/crm/team-members/:id", async (req, res) => {
+  try { await requireCrmAdmin(req); const db = await readCrmDb(); const member = ensureCrmArray(db, "team_members").find((m) => String(m.id) === String(req.params.id)); if (!member) return res.status(404).json({ success: false, error: "Team member not found" }); const stats = getTeamMemberStats(db, member.id); const referrals = ensureCrmArray(db, "referral_attributions").filter((a) => String(a.team_member_id) === String(member.id)); const logs = ensureCrmArray(db, "team_activity_logs").filter((l) => String(l.team_member_id) === String(member.id)).sort(sortNewestFirst).slice(0, 100); res.json({ success: true, member, stats, referrals, logs }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.put("/admin/crm/team-members/:id", async (req, res) => {
+  try { const { user } = await requireCrmAdmin(req); const db = await readCrmDb(); const arr = ensureCrmArray(db, "team_members"); const idx = arr.findIndex((m) => String(m.id) === String(req.params.id)); if (idx < 0) return res.status(404).json({ success: false, error: "Team member not found" }); arr[idx] = { ...arr[idx], ...(req.body || {}), updated_at: nowIso(), updated_by: user.id }; logTeamActivity(db, { team_member_id: arr[idx].id, action: "update_team_member", message: "Team member updated", metadata: { updated_by: user.id } }); await writeCrmDb(db); res.json({ success: true, member: arr[idx] }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/team-members/:id/referral-link", async (req, res) => {
+  try { await requireCrmAdmin(req); const db = await readCrmDb(); const member = ensureCrmArray(db, "team_members").find((m) => String(m.id) === String(req.params.id)); if (!member) return res.status(404).json({ success: false, error: "Team member not found" }); let code = member.referral_code || normalizeCrmString(req.body.code || member.name || member.id).toUpperCase().replace(/[^A-Z0-9]+/g, "").slice(0, 12); if (!code) code = `REF${Date.now()}`; member.referral_code = code; let ref = findReferralCode(db, code); if (!ref) { ref = withTimestamps({ id: uuid(), team_member_id: member.id, code, status: "active", commission_rule_id: member.commission_rule_id || null, created_from: "team_member" }); ensureCrmArray(db, "referral_codes").push(ref); } const baseUrl = req.body.base_url || "https://live.nextgenusmlelms.com"; await writeCrmDb(db); res.json({ success: true, code, referral_code: ref, referral_link: `${String(baseUrl).replace(/\/$/, "")}/?ref=${encodeURIComponent(code)}` }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/crm/team-members/:id/dashboard", async (req, res) => {
+  try { await requireCrmAdmin(req); const db = await readCrmDb(); const member = ensureCrmArray(db, "team_members").find((m) => String(m.id) === String(req.params.id)); if (!member) return res.status(404).json({ success: false, error: "Team member not found" }); const stats = getTeamMemberStats(db, member.id); const assignedLeads = ensureCrmArray(db, "leads").filter((l) => String(l.assigned_agent_id || l.assigned_team_member_id || "") === String(member.id)); const referralAttributions = ensureCrmArray(db, "referral_attributions").filter((a) => String(a.team_member_id) === String(member.id)); res.json({ success: true, member, stats, assigned_leads: assignedLeads.map(normalizeLeadForResponse), referral_attributions: referralAttributions }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+// Referral & Commission Settings
+app.get("/admin/crm/referral-codes", async (req, res) => {
+  try { await requireCrmAdmin(req); const db = await readCrmDb(); const codes = ensureCrmArray(db, "referral_codes").sort(sortNewestFirst); res.json({ success: true, codes, count: codes.length }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/referral-codes", async (req, res) => {
+  try { await requireCrmAdmin(req); const db = await readCrmDb(); const code = normalizeCrmString(req.body.code || "").toUpperCase(); if (!code) return res.status(400).json({ success: false, error: "Referral code is required" }); if (findReferralCode(db, code)) return res.status(400).json({ success: false, error: "Referral code already exists" }); const ref = withTimestamps({ id: uuid(), code, team_member_id: req.body.team_member_id || null, commission_rule_id: req.body.commission_rule_id || null, status: req.body.status || "active", max_uses: req.body.max_uses || null, used_count: 0 }); ensureCrmArray(db, "referral_codes").push(ref); await writeCrmDb(db); res.json({ success: true, referral_code: ref }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/crm/commission-rules", async (req, res) => {
+  try { await requireCrmAdmin(req); const db = await readCrmDb(); const rules = ensureCrmArray(db, "commission_rules").sort(sortNewestFirst); res.json({ success: true, rules, count: rules.length }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/commission-rules", async (req, res) => {
+  try { await requireCrmAdmin(req); const db = await readCrmDb(); const rule = withTimestamps({ id: uuid(), name: req.body.name || "Commission Rule", commission_type: req.body.commission_type || "percentage", percent: Number(req.body.percent ?? req.body.commission_percent ?? 20), amount_usd: Number(req.body.amount_usd || 0), basis: req.body.basis || "net", plan_id: req.body.plan_id || null, team_member_id: req.body.team_member_id || null, active: req.body.active !== false, payout_requires_approval: req.body.payout_requires_approval !== false, refund_hold_days: Number(req.body.refund_hold_days || 0) }); ensureCrmArray(db, "commission_rules").push(rule); await writeCrmDb(db); res.json({ success: true, rule }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/crm/referral-attributions", async (req, res) => {
+  try { await requireCrmAdmin(req); const db = await readCrmDb(); let attributions = ensureCrmArray(db, "referral_attributions").sort(sortNewestFirst); if (req.query.team_member_id) attributions = attributions.filter((a) => String(a.team_member_id) === String(req.query.team_member_id)); res.json({ success: true, attributions, count: attributions.length }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/referral-attributions", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const code = normalizeCrmString(req.body.referral_code || req.body.code || "").toUpperCase();
+    const ref = findReferralCode(db, code);
+    const teamMemberId = req.body.team_member_id || ref?.team_member_id || null;
+    const rule = ensureCrmArray(db, "commission_rules").find((r) => String(r.id) === String(req.body.commission_rule_id || ref?.commission_rule_id || "")) || ensureCrmArray(db, "commission_rules").find((r) => r.active !== false && (!r.team_member_id || String(r.team_member_id) === String(teamMemberId))) || null;
+    const gross = Number(req.body.gross_revenue_usd || req.body.amount_usd || 0);
+    const stripeFee = calculateStripeFeeUsd(gross, req.body.stripe_fee_usd);
+    const net = Number((gross - stripeFee).toFixed(2));
+    const commission = calculateCommission({ grossUsd: gross, netUsd: net, rule });
+    const attr = withTimestamps({ id: uuid(), referral_code: code, referral_code_id: ref?.id || null, team_member_id: teamMemberId, lead_id: req.body.lead_id || null, user_id: req.body.user_id || null, payment_id: req.body.payment_id || null, plan_id: req.body.plan_id || null, gross_revenue_usd: gross, stripe_fee_usd: stripeFee, net_revenue_usd: net, commission_rule_id: rule?.id || null, commission_amount_usd: commission, payout_status: "pending", status: "active" });
+    ensureCrmArray(db, "referral_attributions").push(attr);
+    if (ref) { ref.used_count = Number(ref.used_count || 0) + 1; ref.updated_at = nowIso(); }
+    ensureCrmArray(db, "revenue_attribution").push(withTimestamps({ id: uuid(), source: "referral", referral_attribution_id: attr.id, lead_id: attr.lead_id, team_member_id: teamMemberId, gross_revenue_usd: gross, stripe_fee_usd: stripeFee, ai_cost_usd: 0, commission_amount_usd: commission, net_retained_usd: Number((net - commission).toFixed(2)) }));
+    await writeCrmDb(db);
+    res.json({ success: true, attribution: attr });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/crm/commission-payouts", async (req, res) => {
+  try { await requireCrmAdmin(req); const db = await readCrmDb(); let payouts = ensureCrmArray(db, "commission_payouts").sort(sortNewestFirst); if (req.query.team_member_id) payouts = payouts.filter((p) => String(p.team_member_id) === String(req.query.team_member_id)); res.json({ success: true, payouts, count: payouts.length }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/commission-payouts", async (req, res) => {
+  try { const { user } = await requireCrmAdmin(req); const db = await readCrmDb(); const payout = withTimestamps({ id: uuid(), team_member_id: req.body.team_member_id || null, amount_usd: Number(req.body.amount_usd || 0), status: req.body.status || "pending_approval", method: req.body.method || "manual", notes: req.body.notes || "", created_by: user.id }); ensureCrmArray(db, "commission_payouts").push(payout); await writeCrmDb(db); res.json({ success: true, payout }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.patch("/admin/crm/commission-payouts/:id", async (req, res) => {
+  try { const { user } = await requireCrmAdmin(req); const db = await readCrmDb(); const p = ensureCrmArray(db, "commission_payouts").find((x) => String(x.id) === String(req.params.id)); if (!p) return res.status(404).json({ success: false, error: "Payout not found" }); Object.assign(p, req.body || {}, { updated_at: nowIso(), updated_by: user.id }); if (p.status === "paid" && !p.paid_at) p.paid_at = nowIso(); await writeCrmDb(db); res.json({ success: true, payout: p }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/crm/revenue/enhanced-summary", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const base = calculateCrmAnalytics(db, req);
+    const attr = ensureCrmArray(db, "revenue_attribution");
+    const referrals = ensureCrmArray(db, "referral_attributions");
+    const gross = attr.length ? attr.reduce((s, x) => s + Number(x.gross_revenue_usd || 0), 0) : base.revenue_generated_usd;
+    const stripeFees = attr.reduce((s, x) => s + Number(x.stripe_fee_usd || 0), 0) || referrals.reduce((s, x) => s + Number(x.stripe_fee_usd || 0), 0);
+    const commissions = attr.reduce((s, x) => s + Number(x.commission_amount_usd || 0), 0) || referrals.reduce((s, x) => s + Number(x.commission_amount_usd || 0), 0);
+    const voiceCost = ensureCrmArray(db, "voice_call_logs").reduce((s, x) => s + Number(x.cost_usd || 0), 0);
+    const aiCost = Number(base.ai_usage_cost_usd || 0);
+    const net = Number((gross - stripeFees - commissions - aiCost - voiceCost).toFixed(2));
+    res.json({ success: true, summary: { ...base, gross_revenue_usd: Number(gross.toFixed(2)), stripe_fees_usd: Number(stripeFees.toFixed(2)), commission_amount_usd: Number(commissions.toFixed(2)), ai_cost_usd: aiCost, voice_cost_usd: Number(voiceCost.toFixed(2)), net_retained_usd: net } });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+// Voice call cost structure for future AI voice integration; live calling is not enabled here.
+app.get("/admin/crm/voice-call-settings", async (req, res) => {
+  try { await requireCrmAdmin(req); const db = await readCrmDb(); const settings = ensureCrmArray(db, "voice_call_settings")[0] || { id: "voice_settings_global", enabled: false, approval_required: true, max_calls_per_day: 20, max_minutes_per_call: 10, max_daily_cost_usd: 10, allowed_countries: [], created_at: nowIso(), updated_at: nowIso() }; res.json({ success: true, settings }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.put("/admin/crm/voice-call-settings", async (req, res) => {
+  try { await requireCrmAdmin(req); const db = await readCrmDb(); const arr = ensureCrmArray(db, "voice_call_settings"); const existing = arr[0] || { id: "voice_settings_global", created_at: nowIso() }; const updated = { ...existing, ...(req.body || {}), updated_at: nowIso() }; if (arr.length) arr[0] = updated; else arr.push(updated); await writeCrmDb(db); res.json({ success: true, settings: updated }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
 app.get("/admin/crm/debug/storage", async (req, res) => {
   try {
     const { user } = await requireCrmAdmin(req);
@@ -7987,6 +9422,21 @@ app.get("/admin/crm/debug/storage", async (req, res) => {
         integration_logs: ensureCrmArray(db, "integration_logs").length,
         handoffs: ensureCrmArray(db, "handoffs").length,
         client_data_events: ensureCrmArray(db, "client_data_events").length,
+        crm_flows: ensureCrmArray(db, "crm_flows").length,
+        crm_flow_runs: ensureCrmArray(db, "crm_flow_runs").length,
+        live_conversion_settings: ensureCrmArray(db, "live_conversion_settings").length,
+        live_session_invites: ensureCrmArray(db, "live_session_invites").length,
+        scheduled_followup_jobs: ensureCrmArray(db, "scheduled_followup_jobs").length,
+        community_intelligence_tasks: ensureCrmArray(db, "community_intelligence_tasks").length,
+        community_opportunities: ensureCrmArray(db, "community_opportunities").length,
+        team_members: ensureCrmArray(db, "team_members").length,
+        roles: ensureCrmArray(db, "roles").length,
+        referral_codes: ensureCrmArray(db, "referral_codes").length,
+        referral_attributions: ensureCrmArray(db, "referral_attributions").length,
+        commission_rules: ensureCrmArray(db, "commission_rules").length,
+        commission_payouts: ensureCrmArray(db, "commission_payouts").length,
+        revenue_attribution: ensureCrmArray(db, "revenue_attribution").length,
+        dashboard_settings: ensureCrmArray(db, "dashboard_settings").length,
       },
       updated_at: db.updated_at || null,
     });
