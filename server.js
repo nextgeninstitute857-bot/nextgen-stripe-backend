@@ -12982,6 +12982,1369 @@ app.get("/admin/crm/debug/storage", async (req, res) => {
 
 
 const PORT = process.env.PORT || 5000;
+
+// -----------------------------------------------------------------------------
+// NEXTGEN OVERALL AI ORCHESTRATION BACKEND
+// -----------------------------------------------------------------------------
+// This is the consolidated control layer for:
+// 1) NextGen Flow Assistant = admin checker/helper
+// 2) CRM AI Agents = sales/support/community agents
+// 3) AI Training Center = admin-editable brain
+// 4) Message Templates = admin-editable templates
+// 5) Conversation AI mode = manual / draft / auto
+// 6) Safe control mode = observer / approval / admin_action
+//
+// Install: paste this complete section before app.listen(...)
+// -----------------------------------------------------------------------------
+
+const NEXTGEN_AI_DEFAULT_SETTINGS = {
+  enabled: true,
+  mode: "approval", // observer | approval | admin_action
+  default_conversation_mode: "draft", // manual | draft | auto
+  live_agent_mode: "draft", // draft first; auto only after testing
+  lookback_hours: 24,
+  max_records_per_check: 100,
+  daily_minutes_limit: 15,
+  require_approval_for: [
+    "send_message",
+    "bulk_message",
+    "payment_link",
+    "enable_ai_auto",
+    "change_pricing",
+    "change_permissions",
+    "delete_record"
+  ],
+  blocked_actions: [
+    "delete_records",
+    "change_pricing",
+    "change_permissions",
+    "send_bulk_messages",
+    "enable_ai_auto_without_approval",
+    "send_payment_links_without_approval"
+  ],
+  allowed_safe_actions: [
+    "run_flow_check",
+    "create_task",
+    "create_report",
+    "draft_template",
+    "draft_reply",
+    "create_handoff_suggestion",
+    "run_due_automation"
+  ],
+  notify_email: process.env.ASSISTANT_NOTIFY_EMAIL || process.env.BOOTSTRAP_ADMIN_EMAIL || "nextgenacademy89@gmail.com",
+  updated_at: null
+};
+
+const NEXTGEN_DEFAULT_TRAINING = [
+  {
+    id: "company_knowledge",
+    title: "Company Knowledge",
+    category: "company",
+    content: "NextGen USMLE helps USMLE students with live preparation, UWorld video library, structured roadmap, recordings, notes, demo access, and support.",
+    active: true
+  },
+  {
+    id: "conversation_rules",
+    title: "Conversation Rules",
+    category: "rules",
+    content: "Welcome the student, ask exam type, expected exam date, and main pain point. Do not guarantee passing, score improvement, or affiliation with USMLE/NBME/UWorld/Pathoma/Sketchy.",
+    active: true
+  },
+  {
+    id: "handoff_rules",
+    title: "Handoff Rules",
+    category: "handoff",
+    content: "If lead asks price, wants demo, wants to join, has exam within 60 days, or score is low, mark as hot lead and suggest handoff to human closer.",
+    active: true
+  }
+];
+
+const NEXTGEN_DEFAULT_AI_AGENTS = [
+  {
+    id: "nextgen_flow_assistant",
+    name: "NextGen Flow Assistant",
+    type: "operations",
+    status: "active",
+    mode: "approval",
+    channels: ["internal"],
+    training_ids: ["company_knowledge", "conversation_rules", "handoff_rules"],
+    allowed_actions: ["run_flow_check", "create_task", "draft_template", "create_handoff_suggestion"],
+    description: "Admin helper that checks Telegram, WhatsApp, CRM, LMS, and flow blockers."
+  },
+  {
+    id: "welcome_agent",
+    name: "Welcome Agent",
+    type: "conversation",
+    status: "draft",
+    mode: "draft",
+    channels: ["whatsapp", "telegram", "email"],
+    training_ids: ["company_knowledge", "conversation_rules"],
+    allowed_actions: ["draft_reply"],
+    description: "Drafts first replies and qualification questions for new leads."
+  },
+  {
+    id: "followup_agent",
+    name: "Follow-up Agent",
+    type: "conversation",
+    status: "draft",
+    mode: "draft",
+    channels: ["whatsapp", "telegram", "email"],
+    training_ids: ["company_knowledge", "conversation_rules", "handoff_rules"],
+    allowed_actions: ["draft_reply", "create_handoff_suggestion"],
+    description: "Drafts follow-ups and suggests handoff when a lead becomes hot."
+  }
+];
+
+function ngNowIso() {
+  return new Date().toISOString();
+}
+
+function ngUuid() {
+  return typeof uuid === "function" ? uuid() : crypto.randomUUID();
+}
+
+function ngNormalizeArray(value) {
+  if (Array.isArray(value)) return value.map((x) => String(x || "").trim()).filter(Boolean);
+  if (typeof value === "string") return value.split(",").map((x) => x.trim()).filter(Boolean);
+  return [];
+}
+
+function ngEnsureArray(db, key) {
+  if (!Array.isArray(db[key])) db[key] = [];
+  return db[key];
+}
+
+function ngReadArray(db, key) {
+  return Array.isArray(db?.[key]) ? db[key] : [];
+}
+
+function ngHoursAgo(hours = 24) {
+  return new Date(Date.now() - Number(hours || 24) * 60 * 60 * 1000);
+}
+
+function ngIsRecent(value, hours = 24) {
+  if (!value) return false;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return false;
+  return date.getTime() >= ngHoursAgo(hours).getTime();
+}
+
+function ngNormalizeMode(mode, fallback = "approval") {
+  const clean = String(mode || fallback).trim().toLowerCase();
+  return ["observer", "approval", "admin_action"].includes(clean) ? clean : fallback;
+}
+
+function ngNormalizeConversationMode(mode, fallback = "draft") {
+  const clean = String(mode || fallback).trim().toLowerCase();
+  return ["manual", "draft", "auto"].includes(clean) ? clean : fallback;
+}
+
+function ngNormalizeChannel(channel, fallback = "internal") {
+  const clean = String(channel || fallback).trim().toLowerCase();
+  if (clean === "x") return "twitter";
+  return clean || fallback;
+}
+
+function ngEnsureAiStore(db) {
+  db.ai_orchestration_settings = {
+    ...NEXTGEN_AI_DEFAULT_SETTINGS,
+    ...(db.ai_orchestration_settings || db.assistant_settings || {})
+  };
+
+  if (!Array.isArray(db.ai_training_items)) {
+    db.ai_training_items = [];
+  }
+
+  for (const item of NEXTGEN_DEFAULT_TRAINING) {
+    if (!db.ai_training_items.some((x) => String(x.id) === String(item.id))) {
+      db.ai_training_items.push({
+        ...item,
+        created_at: ngNowIso(),
+        updated_at: ngNowIso()
+      });
+    }
+  }
+
+  if (!Array.isArray(db.ai_agents)) {
+    db.ai_agents = [];
+  }
+
+  for (const agent of NEXTGEN_DEFAULT_AI_AGENTS) {
+    if (!db.ai_agents.some((x) => String(x.id) === String(agent.id))) {
+      db.ai_agents.push({
+        ...agent,
+        created_at: ngNowIso(),
+        updated_at: ngNowIso()
+      });
+    }
+  }
+
+  ngEnsureArray(db, "message_templates");
+  ngEnsureArray(db, "ai_agent_action_logs");
+  ngEnsureArray(db, "assistant_reports");
+  ngEnsureArray(db, "assistant_actions");
+  ngEnsureArray(db, "assistant_chats");
+  ngEnsureArray(db, "approval_queue");
+  ngEnsureArray(db, "tasks");
+  ngEnsureArray(db, "handoffs");
+  ngEnsureArray(db, "conversation_ai_modes");
+
+  return db;
+}
+
+function ngGetProviderStatusFromEnv() {
+  return {
+    whatsapp: {
+      channel: "whatsapp",
+      configured: Boolean(process.env.WHATSAPP_ACCESS_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID),
+      status: process.env.WHATSAPP_ACCESS_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID ? "active" : "missing_env",
+      present_env: {
+        WHATSAPP_ACCESS_TOKEN: Boolean(process.env.WHATSAPP_ACCESS_TOKEN),
+        WHATSAPP_PHONE_NUMBER_ID: Boolean(process.env.WHATSAPP_PHONE_NUMBER_ID),
+        WHATSAPP_WEBHOOK_VERIFY_TOKEN: Boolean(process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN),
+        WHATSAPP_BUSINESS_ACCOUNT_ID: Boolean(process.env.WHATSAPP_BUSINESS_ACCOUNT_ID)
+      }
+    },
+    telegram: {
+      channel: "telegram",
+      configured: Boolean(process.env.TELEGRAM_BOT_TOKEN),
+      status: process.env.TELEGRAM_BOT_TOKEN ? "active" : "missing_env",
+      present_env: {
+        TELEGRAM_BOT_TOKEN: Boolean(process.env.TELEGRAM_BOT_TOKEN),
+        TELEGRAM_WEBHOOK_SECRET: Boolean(process.env.TELEGRAM_WEBHOOK_SECRET)
+      }
+    },
+    email: {
+      channel: "email",
+      configured: Boolean(process.env.RESEND_API_KEY || process.env.SENDGRID_API_KEY || process.env.SMTP_HOST),
+      status: process.env.RESEND_API_KEY || process.env.SENDGRID_API_KEY || process.env.SMTP_HOST ? "active" : "missing_env",
+      present_env: {
+        RESEND_API_KEY: Boolean(process.env.RESEND_API_KEY),
+        SENDGRID_API_KEY: Boolean(process.env.SENDGRID_API_KEY),
+        SMTP_HOST: Boolean(process.env.SMTP_HOST)
+      }
+    },
+    facebook: {
+      channel: "facebook",
+      configured: Boolean(process.env.FACEBOOK_PAGE_ACCESS_TOKEN || process.env.META_PAGE_ACCESS_TOKEN),
+      status: process.env.FACEBOOK_PAGE_ACCESS_TOKEN || process.env.META_PAGE_ACCESS_TOKEN ? "prepared" : "future_setup",
+      note: "Requires Meta page permissions and app review for live Messenger use."
+    },
+    instagram: {
+      channel: "instagram",
+      configured: Boolean(process.env.INSTAGRAM_ACCESS_TOKEN || process.env.META_PAGE_ACCESS_TOKEN),
+      status: process.env.INSTAGRAM_ACCESS_TOKEN || process.env.META_PAGE_ACCESS_TOKEN ? "prepared" : "future_setup",
+      note: "Requires Instagram Business account and Meta permissions."
+    }
+  };
+}
+
+function ngGetMessageLogs(db, hours = 24) {
+  const logs = [
+    ...ngReadArray(db, "message_logs"),
+    ...ngReadArray(db, "crm_message_logs"),
+    ...ngReadArray(db, "communication_logs")
+  ];
+
+  return logs.filter((log) => {
+    const date = log.created_at || log.sent_at || log.timestamp || log.updated_at;
+    return !date || ngIsRecent(date, hours);
+  }).slice(-500);
+}
+
+function ngGetLeads(db, hours = 24) {
+  return ngReadArray(db, "leads").filter((lead) => {
+    const date = lead.created_at || lead.updated_at || lead.last_activity_at || lead.last_message_at;
+    return !date || ngIsRecent(date, hours);
+  }).slice(-500);
+}
+
+function ngBuildIssue({ severity = "info", area = "general", title, detail, fix, evidence = null }) {
+  return {
+    id: ngUuid(),
+    severity,
+    area,
+    title,
+    detail,
+    fix,
+    evidence,
+    created_at: ngNowIso()
+  };
+}
+
+function ngBuildAction({ type = "review", title, description, area = "general", payload = {}, requires_approval = true }) {
+  return {
+    id: ngUuid(),
+    type,
+    title,
+    description,
+    area,
+    payload,
+    status: requires_approval ? "pending_approval" : "ready",
+    requires_approval,
+    created_at: ngNowIso(),
+    updated_at: ngNowIso()
+  };
+}
+
+function ngGetActiveTraining(db, ids = []) {
+  const items = ngReadArray(db, "ai_training_items").filter((item) => item.active !== false);
+  if (!ids.length) return items;
+  return items.filter((item) => ids.includes(String(item.id)));
+}
+
+function ngBuildTrainingContext(db, agent = null) {
+  const ids = ngNormalizeArray(agent?.training_ids);
+  return ngGetActiveTraining(db, ids)
+    .map((item) => `## ${item.title || item.category || item.id}\n${item.content || ""}`)
+    .join("\n\n");
+}
+
+function ngApplyTemplateVariables(text, data = {}) {
+  const lead = data.lead || {};
+  return String(text || "")
+    .replaceAll("{{lead_name}}", lead.name || lead.full_name || lead.lead_name || "Doc")
+    .replaceAll("{{student_name}}", lead.name || lead.full_name || lead.lead_name || "Doc")
+    .replaceAll("{{exam_type}}", lead.exam_type || lead.exam || "USMLE")
+    .replaceAll("{{website_link}}", "https://live.nextgenusmlelms.com")
+    .replaceAll("{{demo_link}}", "https://live.nextgenusmlelms.com")
+    .replaceAll("{{brand_name}}", "NextGen USMLE");
+}
+
+function ngGenerateFallbackReply({ db, agent = null, lead = {}, messages = [], mode = "reply" }) {
+  const lastMessage = messages.length ? String(messages[messages.length - 1]?.text || messages[messages.length - 1]?.message || "") : "";
+  const trainingContext = ngBuildTrainingContext(db, agent);
+
+  if (mode === "welcome") {
+    return {
+      reply:
+`Hi Doc, welcome to NextGen USMLE.
+
+We help students with live USMLE preparation, UWorld video library, structured roadmap, recordings, notes, and demo access.
+
+You can visit:
+https://live.nextgenusmlelms.com
+
+Before I guide you, may I ask:
+1. Are you preparing for Step 1 or Step 2 CK?
+2. When is your expected exam date?
+3. What is your main difficulty right now — UWorld, First Aid, NBME score, schedule, or revision?`,
+      intent: "new_lead_welcome",
+      next_action: "ask_exam_date_and_pain_point",
+      confidence: 0.82,
+      used_training: Boolean(trainingContext)
+    };
+  }
+
+  return {
+    reply:
+`Hi Doc, thanks for your message.
+
+To guide you properly, may I ask:
+1. Are you preparing for Step 1 or Step 2 CK?
+2. When is your expected exam date?
+3. What is your main difficulty right now — UWorld, First Aid, NBME score, schedule, or revision?
+
+You can also check our LMS/demo access here:
+https://live.nextgenusmlelms.com`,
+    intent: lastMessage ? "lead_needs_guidance" : "general_followup",
+    next_action: "qualify_lead",
+    confidence: 0.78,
+    used_training: Boolean(trainingContext)
+  };
+}
+
+async function ngRunFlowCheck({ area = "all", lookbackHours = 24, actor = null, command = "" } = {}) {
+  const db = ngEnsureAiStore(await readCrmDb());
+  const liveDb = await readLiveDb();
+  const providers = ngGetProviderStatusFromEnv();
+  const logs = ngGetMessageLogs(db, lookbackHours);
+  const leads = ngGetLeads(db, lookbackHours);
+
+  const issues = [];
+  const actions = [];
+
+  const failed = logs.filter((log) => {
+    const txt = JSON.stringify(log).toLowerCase();
+    const status = String(log.status || log.delivery_status || "").toLowerCase();
+    return status.includes("fail") || status.includes("error") || txt.includes("error") || txt.includes("failed");
+  });
+
+  if (failed.length) {
+    issues.push(ngBuildIssue({
+      severity: failed.length >= 5 ? "high" : "medium",
+      area: "message_logs",
+      title: `${failed.length} failed message(s) detected`,
+      detail: "Some messages failed in the selected lookback window.",
+      fix: "Open Social Integrations or Message Logs and inspect provider errors.",
+      evidence: failed.slice(0, 10).map((log) => ({
+        channel: log.channel || log.provider,
+        to: log.to || log.recipient,
+        error: log.error || log.provider_error || log.message_error,
+        status: log.status || log.delivery_status
+      }))
+    }));
+  }
+
+  if (area === "all" || area === "telegram") {
+    const telegramLogs = logs.filter((log) => String(log.channel || log.provider || "").toLowerCase() === "telegram");
+    const telegramFailures = telegramLogs.filter((log) => {
+      const txt = JSON.stringify(log).toLowerCase();
+      return txt.includes("t.me/") || txt.includes("chat not found") || txt.includes("bad request") || txt.includes("failed") || txt.includes("error");
+    });
+
+    if (!providers.telegram.configured) {
+      issues.push(ngBuildIssue({
+        severity: "high",
+        area: "telegram",
+        title: "Telegram bot token is missing",
+        detail: "TELEGRAM_BOT_TOKEN is not detected.",
+        fix: "Add TELEGRAM_BOT_TOKEN in Render env, redeploy, and test using numeric chat_id.",
+        evidence: providers.telegram.present_env
+      }));
+    }
+
+    if (telegramFailures.length) {
+      issues.push(ngBuildIssue({
+        severity: "high",
+        area: "telegram",
+        title: "Telegram send failures detected",
+        detail: "Telegram usually fails if recipient is a t.me link, bot not started, or bot not in group.",
+        fix: "Use numeric chat_id like 123456789 or -100xxxxxxxxxx. Do not use t.me links.",
+        evidence: telegramFailures.slice(0, 10).map((log) => ({
+          to: log.to || log.recipient,
+          error: log.error || log.provider_error || log.message || log.body
+        }))
+      }));
+
+      actions.push(ngBuildAction({
+        type: "create_task",
+        area: "telegram",
+        title: "Fix Telegram chat_id issue",
+        description: "Ask test user to message the bot, capture numeric chat_id, then retry Telegram provider test.",
+        payload: { channel: "telegram", recommended_to: "NUMERIC_CHAT_ID" }
+      }));
+    }
+
+    if (providers.telegram.configured && !telegramLogs.length) {
+      issues.push(ngBuildIssue({
+        severity: "medium",
+        area: "telegram",
+        title: "Telegram configured but no recent Telegram logs found",
+        detail: "Telegram may not have been tested recently or logs are not being saved.",
+        fix: "Run Telegram provider test from Social Integrations using numeric chat_id."
+      }));
+    }
+  }
+
+  if (area === "all" || area === "whatsapp") {
+    const whatsappLogs = logs.filter((log) => String(log.channel || log.provider || "").toLowerCase() === "whatsapp");
+    const templateErrors = whatsappLogs.filter((log) => {
+      const txt = JSON.stringify(log).toLowerCase();
+      return txt.includes("template") || txt.includes("24") || txt.includes("customer window") || txt.includes("outside");
+    });
+
+    if (!providers.whatsapp.configured) {
+      issues.push(ngBuildIssue({
+        severity: "high",
+        area: "whatsapp",
+        title: "WhatsApp Cloud API env is incomplete",
+        detail: "WHATSAPP_ACCESS_TOKEN and/or WHATSAPP_PHONE_NUMBER_ID are missing.",
+        fix: "Confirm Meta WhatsApp env keys in Render and redeploy.",
+        evidence: providers.whatsapp.present_env
+      }));
+    }
+
+    if (templateErrors.length) {
+      issues.push(ngBuildIssue({
+        severity: "medium",
+        area: "whatsapp",
+        title: "WhatsApp template may be required",
+        detail: "Cold or outside-24-hour WhatsApp messages usually require approved templates.",
+        fix: "Create approved WhatsApp templates for welcome, demo invite, reminders, and reactivation."
+      }));
+
+      actions.push(ngBuildAction({
+        type: "draft_template",
+        area: "whatsapp",
+        title: "Draft WhatsApp demo invite template",
+        description: "Create an admin-editable WhatsApp template for demo invitation.",
+        payload: {
+          name: "WhatsApp Demo Invite",
+          channel: "whatsapp",
+          category: "demo_invite",
+          template_name: "nextgen_demo_invite",
+          language_code: "en_US",
+          body: "Hi Doc, this is NextGen USMLE. You can access our LMS/demo and live session details here: https://live.nextgenusmlelms.com"
+        }
+      }));
+    }
+  }
+
+  if (area === "all" || area === "email") {
+    if (!providers.email.configured) {
+      issues.push(ngBuildIssue({
+        severity: "medium",
+        area: "email",
+        title: "Email provider is not configured",
+        detail: "No Resend, SendGrid, or SMTP env detected.",
+        fix: "Add RESEND_API_KEY, SENDGRID_API_KEY, or SMTP env keys."
+      }));
+    }
+  }
+
+  const hotUnassigned = leads.filter((lead) => {
+    const score = Number(lead.lead_score || lead.score || 0);
+    const status = String(lead.status || lead.lead_status || "").toLowerCase();
+    return (score >= 70 || status.includes("hot")) && !(lead.assigned_agent_id || lead.assigned_agent_name);
+  });
+
+  if (hotUnassigned.length) {
+    issues.push(ngBuildIssue({
+      severity: "high",
+      area: "handoff",
+      title: `${hotUnassigned.length} hot lead(s) are not assigned`,
+      detail: "Hot leads should be assigned to a closer quickly.",
+      fix: "Create handoff tasks or assign to closer."
+    }));
+
+    actions.push(ngBuildAction({
+      type: "create_handoff_suggestion",
+      area: "handoff",
+      title: "Create handoff suggestions for hot leads",
+      description: "Prepare human handoff items for hot unassigned leads.",
+      payload: { lead_ids: hotUnassigned.slice(0, 20).map((lead) => lead.id).filter(Boolean) }
+    }));
+  }
+
+  const pendingApprovals = ngReadArray(db, "approval_queue").filter((item) => {
+    return String(item.status || "pending").toLowerCase().includes("pending");
+  });
+
+  if (pendingApprovals.length) {
+    issues.push(ngBuildIssue({
+      severity: "medium",
+      area: "approval_queue",
+      title: `${pendingApprovals.length} approval item(s) pending`,
+      detail: "AI drafts/actions are waiting for human approval.",
+      fix: "Open Approval Queue and approve/reject pending items."
+    }));
+  }
+
+  const unpublishedRecordings = Object.values(liveDb.recordings || {}).filter((rec) => rec.published !== true).slice(0, 20);
+  if (unpublishedRecordings.length) {
+    issues.push(ngBuildIssue({
+      severity: "low",
+      area: "lms_recordings",
+      title: `${unpublishedRecordings.length} unpublished recording(s) found`,
+      detail: "Some Zoom recordings exist but are not published.",
+      fix: "Review recordings and publish the correct ones.",
+      evidence: unpublishedRecordings.slice(0, 10).map((rec) => ({
+        meeting_id: rec.meeting_id,
+        topic: rec.topic,
+        start_time: rec.start_time
+      }))
+    }));
+  }
+
+  const report = {
+    id: ngUuid(),
+    type: "flow_check",
+    area,
+    command,
+    status: issues.some((x) => x.severity === "high") ? "attention_required" : issues.length ? "issues_found" : "healthy",
+    lookback_hours: lookbackHours,
+    summary: {
+      providers,
+      message_logs_checked: logs.length,
+      failed_messages: failed.length,
+      leads_checked: leads.length,
+      pending_approvals: pendingApprovals.length,
+      suggested_actions: actions.length
+    },
+    issues,
+    suggested_actions: actions,
+    created_by: actor?.id || null,
+    created_by_email: actor?.email || null,
+    created_at: ngNowIso()
+  };
+
+  db.assistant_reports.unshift(report);
+  db.assistant_reports = db.assistant_reports.slice(0, 200);
+
+  const mode = ngNormalizeMode(db.ai_orchestration_settings.mode);
+  if (mode !== "observer") {
+    for (const action of actions) {
+      db.assistant_actions.unshift({
+        ...action,
+        report_id: report.id,
+        created_by: actor?.id || null,
+        created_by_email: actor?.email || null
+      });
+    }
+    db.assistant_actions = db.assistant_actions.slice(0, 500);
+  }
+
+  await writeCrmDb(db);
+  return { report, actions: mode === "observer" ? [] : actions };
+}
+
+async function ngExecuteApprovedAction(action, actor = null) {
+  if (!action) throw new Error("Action not found");
+  if (action.status !== "approved") throw new Error("Action must be approved before execution");
+
+  const db = ngEnsureAiStore(await readCrmDb());
+  const settings = db.ai_orchestration_settings;
+  const mode = ngNormalizeMode(settings.mode);
+
+  if (mode !== "admin_action") {
+    throw new Error("Switch assistant to Admin Action mode before executing approved actions.");
+  }
+
+  if (action.type === "create_task") {
+    const task = {
+      id: ngUuid(),
+      title: action.title,
+      description: action.description,
+      status: "pending",
+      priority: action.area === "telegram" || action.area === "whatsapp" ? "high" : "normal",
+      source: "nextgen_ai_orchestration",
+      action_id: action.id,
+      created_by: actor?.id || null,
+      created_at: ngNowIso(),
+      updated_at: ngNowIso()
+    };
+    db.tasks.unshift(task);
+    await writeCrmDb(db);
+    return { executed: true, task };
+  }
+
+  if (action.type === "draft_template") {
+    const template = {
+      id: ngUuid(),
+      name: action.payload?.name || action.payload?.template_name || action.title,
+      channel: ngNormalizeChannel(action.payload?.channel || "whatsapp"),
+      category: action.payload?.category || action.area || "general",
+      template_name: action.payload?.template_name || "",
+      language_code: action.payload?.language_code || "en_US",
+      subject: action.payload?.subject || "",
+      body: action.payload?.body || action.description || "",
+      status: "draft",
+      active: true,
+      source: "nextgen_ai_orchestration",
+      action_id: action.id,
+      created_by: actor?.id || null,
+      created_at: ngNowIso(),
+      updated_at: ngNowIso()
+    };
+    db.message_templates.unshift(template);
+    await writeCrmDb(db);
+    return { executed: true, template };
+  }
+
+  if (action.type === "create_handoff_suggestion") {
+    const handoffs = ngNormalizeArray(action.payload?.lead_ids).map((leadId) => ({
+      id: ngUuid(),
+      lead_id: leadId,
+      status: "pending",
+      reason: "Hot lead detected by NextGen AI Orchestration",
+      source: "nextgen_ai_orchestration",
+      action_id: action.id,
+      created_by: actor?.id || null,
+      created_at: ngNowIso(),
+      updated_at: ngNowIso()
+    }));
+
+    for (const item of handoffs) db.handoffs.unshift(item);
+    await writeCrmDb(db);
+    return { executed: true, handoffs };
+  }
+
+  throw new Error(`Execution for action type ${action.type} is not implemented yet.`);
+}
+
+async function ngAssistantChat({ message, actor = null }) {
+  const text = String(message || "").trim();
+  const lower = text.toLowerCase();
+
+  if (!text) {
+    return { reply: "Tell me what to check. Example: Check Telegram flow.", result: null };
+  }
+
+  let area = "all";
+  if (lower.includes("telegram")) area = "telegram";
+  else if (lower.includes("whatsapp") || lower.includes("whatapp")) area = "whatsapp";
+  else if (lower.includes("email")) area = "email";
+
+  if (
+    lower.includes("check") ||
+    lower.includes("audit") ||
+    lower.includes("flow") ||
+    lower.includes("problem") ||
+    lower.includes("failed") ||
+    lower.includes("stuck") ||
+    lower.includes("why")
+  ) {
+    const result = await ngRunFlowCheck({ area, actor, command: text, lookbackHours: 24 });
+    const issues = result.report.issues || [];
+    const high = issues.filter((x) => x.severity === "high").length;
+    const medium = issues.filter((x) => x.severity === "medium").length;
+
+    return {
+      reply: issues.length
+        ? `I checked ${area}. I found ${issues.length} issue(s): ${high} high and ${medium} medium. See the report and suggested actions.`
+        : `I checked ${area}. No major blockage was found.`,
+      result
+    };
+  }
+
+  return {
+    reply: "I can check Telegram, WhatsApp, Email, failed messages, stuck leads, unassigned hot leads, pending approvals, templates, training, and LMS recording issues. I will suggest first and ask approval before action.",
+    result: null
+  };
+}
+
+// -------------------------
+// Assistant / Control Center
+// -------------------------
+
+app.get("/admin/assistant/settings", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    await writeCrmDb(db);
+    res.json({ success: true, settings: db.ai_orchestration_settings });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/assistant/settings", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+
+    db.ai_orchestration_settings = {
+      ...db.ai_orchestration_settings,
+      ...(req.body || {}),
+      mode: ngNormalizeMode(req.body?.mode || db.ai_orchestration_settings.mode),
+      default_conversation_mode: ngNormalizeConversationMode(req.body?.default_conversation_mode || db.ai_orchestration_settings.default_conversation_mode),
+      updated_by: user.id,
+      updated_at: ngNowIso()
+    };
+
+    await writeCrmDb(db);
+    res.json({ success: true, settings: db.ai_orchestration_settings });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/assistant/chat", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const response = await ngAssistantChat({ message: req.body?.message, actor: user });
+    const db = ngEnsureAiStore(await readCrmDb());
+
+    db.assistant_chats.unshift({
+      id: ngUuid(),
+      role: "user",
+      message: req.body?.message || "",
+      created_by: user.id,
+      created_at: ngNowIso()
+    });
+
+    db.assistant_chats.unshift({
+      id: ngUuid(),
+      role: "assistant",
+      message: response.reply,
+      result_report_id: response.result?.report?.id || null,
+      created_at: ngNowIso()
+    });
+
+    db.assistant_chats = db.assistant_chats.slice(0, 300);
+    await writeCrmDb(db);
+
+    res.json({ success: true, reply: response.reply, result: response.result });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/assistant/run-flow-check", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const result = await ngRunFlowCheck({
+      area: req.body?.area || "all",
+      lookbackHours: Number(req.body?.lookback_hours || 24),
+      actor: user,
+      command: req.body?.command || "Manual flow check"
+    });
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/assistant/run-telegram-check", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const result = await ngRunFlowCheck({ area: "telegram", lookbackHours: Number(req.body?.lookback_hours || 24), actor: user, command: "Telegram flow check" });
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/assistant/run-whatsapp-check", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const result = await ngRunFlowCheck({ area: "whatsapp", lookbackHours: Number(req.body?.lookback_hours || 24), actor: user, command: "WhatsApp flow check" });
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/assistant/reports", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    res.json({ success: true, reports: db.assistant_reports.slice(0, Number(req.query.limit || 50)), count: db.assistant_reports.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/assistant/actions", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    res.json({ success: true, actions: db.assistant_actions.slice(0, Number(req.query.limit || 100)), count: db.assistant_actions.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/assistant/actions/:id/approve", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const action = db.assistant_actions.find((item) => String(item.id) === String(req.params.id));
+    if (!action) return res.status(404).json({ success: false, error: "Assistant action not found" });
+
+    action.status = "approved";
+    action.approved_by = user.id;
+    action.approved_by_email = user.email;
+    action.approved_at = ngNowIso();
+    action.updated_at = ngNowIso();
+
+    await writeCrmDb(db);
+    res.json({ success: true, action });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/assistant/actions/:id/reject", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const action = db.assistant_actions.find((item) => String(item.id) === String(req.params.id));
+    if (!action) return res.status(404).json({ success: false, error: "Assistant action not found" });
+
+    action.status = "rejected";
+    action.rejected_by = user.id;
+    action.rejected_by_email = user.email;
+    action.rejection_reason = req.body?.reason || "";
+    action.rejected_at = ngNowIso();
+    action.updated_at = ngNowIso();
+
+    await writeCrmDb(db);
+    res.json({ success: true, action });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/assistant/actions/:id/execute", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const action = db.assistant_actions.find((item) => String(item.id) === String(req.params.id));
+    if (!action) return res.status(404).json({ success: false, error: "Assistant action not found" });
+
+    const result = await ngExecuteApprovedAction(action, user);
+
+    const db2 = ngEnsureAiStore(await readCrmDb());
+    const updated = db2.assistant_actions.find((item) => String(item.id) === String(req.params.id));
+    if (updated) {
+      updated.status = "executed";
+      updated.executed_by = user.id;
+      updated.executed_by_email = user.email;
+      updated.executed_at = ngNowIso();
+      updated.execution_result = result;
+      updated.updated_at = ngNowIso();
+    }
+
+    await writeCrmDb(db2);
+    res.json({ success: true, action: updated || action, result });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// -------------------------
+// AI Training Center
+// -------------------------
+
+app.get("/admin/crm/ai-training", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    await writeCrmDb(db);
+    res.json({ success: true, items: db.ai_training_items, training: db.ai_training_items });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-training", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const item = {
+      id: req.body?.id || ngUuid(),
+      title: req.body?.title || "Training Item",
+      category: req.body?.category || "general",
+      content: req.body?.content || req.body?.body || "",
+      active: req.body?.active !== false,
+      priority: Number(req.body?.priority || 0),
+      created_by: user.id,
+      created_at: ngNowIso(),
+      updated_at: ngNowIso()
+    };
+    db.ai_training_items.unshift(item);
+    await writeCrmDb(db);
+    res.json({ success: true, item });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/ai-training/:id", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const item = db.ai_training_items.find((x) => String(x.id) === String(req.params.id));
+    if (!item) return res.status(404).json({ success: false, error: "Training item not found" });
+
+    Object.assign(item, {
+      ...(req.body || {}),
+      updated_by: user.id,
+      updated_at: ngNowIso()
+    });
+
+    await writeCrmDb(db);
+    res.json({ success: true, item });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete("/admin/crm/ai-training/:id", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const item = db.ai_training_items.find((x) => String(x.id) === String(req.params.id));
+    if (!item) return res.status(404).json({ success: false, error: "Training item not found" });
+
+    item.active = false;
+    item.deleted_at = ngNowIso();
+    item.deleted_by = user.id;
+
+    await writeCrmDb(db);
+    res.json({ success: true, item });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai/test-training", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const agent = db.ai_agents.find((x) => String(x.id) === String(req.body?.agent_id || "welcome_agent")) || db.ai_agents[0];
+    const result = ngGenerateFallbackReply({
+      db,
+      agent,
+      lead: req.body?.lead || {},
+      messages: req.body?.messages || [],
+      mode: req.body?.mode || "welcome"
+    });
+    res.json({ success: true, agent, ...result, training_context: ngBuildTrainingContext(db, agent) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// -------------------------
+// AI Agents
+// -------------------------
+
+app.get("/admin/crm/ai-agents", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    await writeCrmDb(db);
+    res.json({ success: true, agents: db.ai_agents, items: db.ai_agents });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-agents", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const agent = {
+      id: req.body?.id || ngUuid(),
+      name: req.body?.name || "New AI Agent",
+      type: req.body?.type || "conversation",
+      status: req.body?.status || "draft",
+      mode: ngNormalizeConversationMode(req.body?.mode || "draft"),
+      channels: ngNormalizeArray(req.body?.channels || ["whatsapp", "telegram", "email"]),
+      training_ids: ngNormalizeArray(req.body?.training_ids),
+      allowed_actions: ngNormalizeArray(req.body?.allowed_actions || ["draft_reply"]),
+      description: req.body?.description || "",
+      created_by: user.id,
+      created_at: ngNowIso(),
+      updated_at: ngNowIso()
+    };
+    db.ai_agents.unshift(agent);
+    await writeCrmDb(db);
+    res.json({ success: true, agent });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/ai-agents/:id", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const agent = db.ai_agents.find((x) => String(x.id) === String(req.params.id));
+    if (!agent) return res.status(404).json({ success: false, error: "AI agent not found" });
+
+    Object.assign(agent, {
+      ...(req.body || {}),
+      channels: req.body?.channels ? ngNormalizeArray(req.body.channels) : agent.channels,
+      training_ids: req.body?.training_ids ? ngNormalizeArray(req.body.training_ids) : agent.training_ids,
+      allowed_actions: req.body?.allowed_actions ? ngNormalizeArray(req.body.allowed_actions) : agent.allowed_actions,
+      mode: req.body?.mode ? ngNormalizeConversationMode(req.body.mode) : agent.mode,
+      updated_by: user.id,
+      updated_at: ngNowIso()
+    });
+
+    await writeCrmDb(db);
+    res.json({ success: true, agent });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete("/admin/crm/ai-agents/:id", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const agent = db.ai_agents.find((x) => String(x.id) === String(req.params.id));
+    if (!agent) return res.status(404).json({ success: false, error: "AI agent not found" });
+
+    agent.status = "deleted";
+    agent.deleted_by = user.id;
+    agent.deleted_at = ngNowIso();
+    agent.updated_at = ngNowIso();
+
+    await writeCrmDb(db);
+    res.json({ success: true, agent });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-agents/:id/activate", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const agent = db.ai_agents.find((x) => String(x.id) === String(req.params.id));
+    if (!agent) return res.status(404).json({ success: false, error: "AI agent not found" });
+
+    agent.status = "active";
+    agent.mode = ngNormalizeConversationMode(req.body?.mode || agent.mode || "draft");
+    agent.activated_by = user.id;
+    agent.activated_at = ngNowIso();
+    agent.updated_at = ngNowIso();
+
+    await writeCrmDb(db);
+    res.json({ success: true, agent });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-agents/:id/pause", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const agent = db.ai_agents.find((x) => String(x.id) === String(req.params.id));
+    if (!agent) return res.status(404).json({ success: false, error: "AI agent not found" });
+
+    agent.status = "paused";
+    agent.paused_by = user.id;
+    agent.paused_at = ngNowIso();
+    agent.updated_at = ngNowIso();
+
+    await writeCrmDb(db);
+    res.json({ success: true, agent });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-agents/:id/test", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const agent = db.ai_agents.find((x) => String(x.id) === String(req.params.id));
+    if (!agent) return res.status(404).json({ success: false, error: "AI agent not found" });
+
+    const result = ngGenerateFallbackReply({
+      db,
+      agent,
+      lead: req.body?.lead || {},
+      messages: req.body?.messages || [],
+      mode: req.body?.mode || "reply"
+    });
+
+    res.json({ success: true, agent, ...result, training_context: ngBuildTrainingContext(db, agent) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// Alias for older frontend pages using /admin/crm/agents.
+app.get("/admin/crm/agents", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    res.json({ success: true, agents: db.ai_agents, items: db.ai_agents });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// -------------------------
+// Message Templates
+// -------------------------
+
+app.get("/admin/crm/message-templates", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    res.json({ success: true, templates: db.message_templates, items: db.message_templates });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/message-templates", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const template = {
+      id: req.body?.id || ngUuid(),
+      name: req.body?.name || req.body?.template_name || "Message Template",
+      channel: ngNormalizeChannel(req.body?.channel || "whatsapp"),
+      category: req.body?.category || "general",
+      subject: req.body?.subject || "",
+      body: req.body?.body || req.body?.message || req.body?.content || "",
+      template_name: req.body?.template_name || "",
+      language_code: req.body?.language_code || "en_US",
+      variables: ngNormalizeArray(req.body?.variables),
+      status: req.body?.status || "draft",
+      active: req.body?.active !== false,
+      created_by: user.id,
+      created_at: ngNowIso(),
+      updated_at: ngNowIso()
+    };
+    db.message_templates.unshift(template);
+    await writeCrmDb(db);
+    res.json({ success: true, template });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/message-templates/:id", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const template = db.message_templates.find((x) => String(x.id) === String(req.params.id));
+    if (!template) return res.status(404).json({ success: false, error: "Template not found" });
+
+    Object.assign(template, {
+      ...(req.body || {}),
+      channel: req.body?.channel ? ngNormalizeChannel(req.body.channel) : template.channel,
+      variables: req.body?.variables ? ngNormalizeArray(req.body.variables) : template.variables,
+      updated_by: user.id,
+      updated_at: ngNowIso()
+    });
+
+    await writeCrmDb(db);
+    res.json({ success: true, template });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete("/admin/crm/message-templates/:id", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const template = db.message_templates.find((x) => String(x.id) === String(req.params.id));
+    if (!template) return res.status(404).json({ success: false, error: "Template not found" });
+
+    template.active = false;
+    template.status = "archived";
+    template.deleted_by = user.id;
+    template.deleted_at = ngNowIso();
+
+    await writeCrmDb(db);
+    res.json({ success: true, template });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// Alias for older frontend pages.
+app.get("/admin/crm/templates", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    res.json({ success: true, templates: db.message_templates, items: db.message_templates });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// -------------------------
+// Conversation AI Mode + Reply Generation
+// -------------------------
+
+app.post("/admin/crm/conversations/:leadId/ai-mode", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const leadId = String(req.params.leadId || "");
+    const mode = ngNormalizeConversationMode(req.body?.mode || req.body?.ai_mode || "draft");
+
+    const existing = db.conversation_ai_modes.find((x) => String(x.lead_id) === leadId);
+    const payload = {
+      id: existing?.id || ngUuid(),
+      lead_id: leadId,
+      mode,
+      ai_mode: mode,
+      updated_by: user.id,
+      updated_at: ngNowIso(),
+      created_at: existing?.created_at || ngNowIso()
+    };
+
+    if (existing) Object.assign(existing, payload);
+    else db.conversation_ai_modes.unshift(payload);
+
+    const lead = ngReadArray(db, "leads").find((x) => String(x.id) === leadId);
+    if (lead) {
+      lead.ai_mode = mode;
+      lead.updated_at = ngNowIso();
+    }
+
+    await writeCrmDb(db);
+    res.json({ success: true, mode: payload });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/leads/:leadId/ai-mode", async (req, res) => {
+  req.params.leadId = req.params.leadId;
+  return app._router.handle(req, res, () => {});
+});
+
+app.post("/admin/crm/ai/generate-reply", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+
+    const agent =
+      db.ai_agents.find((x) => String(x.id) === String(req.body?.agent_id || "")) ||
+      db.ai_agents.find((x) => String(x.id) === "welcome_agent") ||
+      db.ai_agents[0];
+
+    const result = ngGenerateFallbackReply({
+      db,
+      agent,
+      lead: req.body?.lead || {},
+      messages: req.body?.messages || [],
+      mode: req.body?.mode || "reply"
+    });
+
+    db.ai_agent_action_logs.unshift({
+      id: ngUuid(),
+      agent_id: agent?.id || null,
+      action: "generate_reply",
+      mode: req.body?.mode || "reply",
+      channel: req.body?.channel || null,
+      lead_id: req.body?.lead_id || null,
+      result,
+      created_at: ngNowIso()
+    });
+    db.ai_agent_action_logs = db.ai_agent_action_logs.slice(0, 500);
+
+    await writeCrmDb(db);
+    res.json({ success: true, agent, ...result });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/conversations/ai-reply", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const agent =
+      db.ai_agents.find((x) => String(x.id) === String(req.body?.agent_id || "")) ||
+      db.ai_agents.find((x) => String(x.id) === "welcome_agent") ||
+      db.ai_agents[0];
+
+    const result = ngGenerateFallbackReply({
+      db,
+      agent,
+      lead: req.body?.lead || {},
+      messages: req.body?.messages || [],
+      mode: req.body?.mode || "reply"
+    });
+
+    res.json({ success: true, agent, ...result });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// END NEXTGEN OVERALL AI ORCHESTRATION BACKEND
+// -----------------------------------------------------------------------------
+
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`DATA_DIR=${DATA_DIR}`);
