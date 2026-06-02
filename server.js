@@ -965,51 +965,323 @@ function getRequestAssessmentScope(req = {}) {
   );
 }
 
+
+function uniqueList(values = []) {
+  return Array.from(
+    new Set(
+      (Array.isArray(values) ? values : [])
+        .flat()
+        .map((item) => String(item || "").trim())
+        .filter(Boolean)
+    )
+  );
+}
+
+function normalizeIdList(values = []) {
+  if (Array.isArray(values)) return values.map((item) => String(item || "").trim()).filter(Boolean);
+  if (typeof values === "string") {
+    return values.split(",").map((item) => item.trim()).filter(Boolean);
+  }
+  return [];
+}
+
+function permissionIncludes(list = [], permission = "") {
+  const clean = uniqueList(list);
+  return clean.includes("*") || clean.includes(permission);
+}
+
+function normalizeRoleKey(value = "") {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function getDefaultCrmPermissionsForRole(roleNameOrKey = "") {
+  const key = normalizeRoleKey(roleNameOrKey);
+  return DEFAULT_ROLE_PERMISSION_SETS?.[key] || [];
+}
+
+function getDefaultLmsPermissionsForRole(roleNameOrKey = "") {
+  const key = normalizeRoleKey(roleNameOrKey);
+  return DEFAULT_LMS_ROLE_PERMISSION_SETS?.[key] || [];
+}
+
+function getTeamMemberRoleIds(member = {}) {
+  return uniqueList([
+    ...normalizeIdList(member.role_ids),
+    ...normalizeIdList(member.crm_role_ids),
+    member.role_id,
+    member.crm_role_id,
+  ]);
+}
+
+function getTeamMemberRoleKeys(member = {}) {
+  return uniqueList([
+    ...normalizeIdList(member.roles),
+    ...normalizeIdList(member.crm_roles),
+    ...normalizeIdList(member.role_keys),
+    ...normalizeIdList(member.crm_role_keys),
+    member.role,
+    member.role_name,
+  ]).map(normalizeRoleKey).filter(Boolean);
+}
+
+function getTeamMemberLmsRoleKeys(member = {}) {
+  return uniqueList([
+    ...normalizeIdList(member.lms_roles),
+    ...normalizeIdList(member.lms_role_keys),
+    ...normalizeIdList(member.lms_role_names),
+    member.lms_role,
+    member.lms_role_name,
+  ]).map(normalizeRoleKey).filter(Boolean);
+}
+
 function getTeamMemberForUser(crmDb, user) {
   const email = normalizeEmail(user?.email || "");
+
   return ensureCrmArray(crmDb, "team_members").find((member) => {
     return (
       member.status !== "disabled" &&
       member.status !== "inactive" &&
+      member.status !== "deleted" &&
       (
         (member.user_id && String(member.user_id) === String(user?.id)) ||
+        (member.portal_user_id && String(member.portal_user_id) === String(user?.id)) ||
         (email && normalizeEmail(member.email || "") === email)
       )
     );
   }) || null;
 }
 
-function getRoleForTeamMember(crmDb, member) {
-  if (!member) return null;
-  return ensureCrmArray(crmDb, "roles").find((role) => {
-    return (
-      (member.role_id && String(role.id) === String(member.role_id)) ||
-      (member.role_name && String(role.name || "").toLowerCase() === String(member.role_name).toLowerCase()) ||
-      (member.role && String(role.role_key || "").toLowerCase() === String(member.role).toLowerCase())
-    );
-  }) || null;
+function getRolesForTeamMember(crmDb, member) {
+  if (!member) return [];
+
+  const roles = ensureCrmArray(crmDb, "roles");
+  const roleIds = getTeamMemberRoleIds(member);
+  const roleKeys = getTeamMemberRoleKeys(member);
+
+  return roles.filter((role) => {
+    const idMatch = roleIds.includes(String(role.id || ""));
+    const key = normalizeRoleKey(role.role_key || role.name);
+    const name = normalizeRoleKey(role.name || role.role_key);
+    return idMatch || roleKeys.includes(key) || roleKeys.includes(name);
+  });
 }
 
-function getDefaultLmsPermissionsForRole(roleNameOrKey = "") {
-  const key = String(roleNameOrKey || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_");
-  return DEFAULT_LMS_ROLE_PERMISSION_SETS?.[key] || [];
+function getRoleForTeamMember(crmDb, member) {
+  return getRolesForTeamMember(crmDb, member)[0] || null;
+}
+
+function getEffectiveCrmPermissions(crmDb, user) {
+  if (user?.role === "admin") return ["*"];
+
+  const member = getTeamMemberForUser(crmDb, user);
+  const roles = getRolesForTeamMember(crmDb, member);
+
+  const roleKeys = [
+    user?.role,
+    ...getTeamMemberRoleKeys(member || {}),
+    ...roles.map((role) => role.role_key || role.name),
+  ].filter(Boolean);
+
+  return uniqueList([
+    ...roleKeys.flatMap(getDefaultCrmPermissionsForRole),
+    ...roles.flatMap((role) => normalizeIdList(role.permissions)),
+    ...roles.flatMap((role) => normalizeIdList(role.crm_permissions)),
+    ...normalizeIdList(member?.permissions),
+    ...normalizeIdList(member?.crm_permissions),
+  ]);
 }
 
 function getEffectiveLmsPermissions(crmDb, user) {
   if (user?.role === "admin") return ["*"];
 
   const member = getTeamMemberForUser(crmDb, user);
-  const role = getRoleForTeamMember(crmDb, member);
-  const defaultRolePermissions = getDefaultLmsPermissionsForRole(member?.role || member?.role_name || role?.role_key || role?.name || user?.role);
+  const roles = getRolesForTeamMember(crmDb, member);
+  const lmsRoleKeys = getTeamMemberLmsRoleKeys(member || {});
 
-  return [
-    ...getDefaultLmsPermissionsForRole(user?.role),
-    ...defaultRolePermissions,
-    ...normalizePermissionList(role?.permissions),
-    ...normalizePermissionList(role?.lms_permissions),
-    ...normalizePermissionList(member?.permissions),
-    ...normalizePermissionList(member?.lms_permissions),
-  ];
+  const roleKeys = [
+    user?.role,
+    ...getTeamMemberRoleKeys(member || {}),
+    ...lmsRoleKeys,
+    ...roles.map((role) => role.role_key || role.name),
+  ].filter(Boolean);
+
+  return uniqueList([
+    ...roleKeys.flatMap(getDefaultLmsPermissionsForRole),
+    ...roles.flatMap((role) => normalizeIdList(role.lms_permissions)),
+    ...roles.flatMap((role) => normalizeIdList(role.permissions).filter((item) => String(item).startsWith("lms_"))),
+    ...normalizeIdList(member?.lms_permissions),
+  ]);
+}
+
+function getAllowedModulesForTeamMember(crmDb, member, area = "crm") {
+  const roles = getRolesForTeamMember(crmDb, member);
+
+  if (area === "lms") {
+    return uniqueList([
+      ...roles.flatMap((role) => normalizeIdList(role.lms_allowed_modules)),
+      ...roles.flatMap((role) => normalizeIdList(role.dashboard_modules).filter((item) => String(item).startsWith("lms"))),
+      ...normalizeIdList(member?.lms_allowed_modules),
+    ]);
+  }
+
+  return uniqueList([
+    ...roles.flatMap((role) => normalizeIdList(role.allowed_modules)),
+    ...roles.flatMap((role) => normalizeIdList(role.dashboard_modules)),
+    ...normalizeIdList(member?.allowed_modules),
+  ]);
+}
+
+function getAllowedChannelsForTeamMember(member = {}) {
+  const channels = uniqueList([
+    ...normalizeIdList(member.allowed_channels),
+    ...normalizeIdList(member.channels),
+  ]);
+
+  return channels.length ? channels : ["whatsapp", "email", "telegram"];
+}
+
+function buildTeamMemberPortalSummary(crmDb, member, user = null) {
+  const roles = getRolesForTeamMember(crmDb, member);
+
+  const crmPermissions = user
+    ? getEffectiveCrmPermissions(crmDb, user)
+    : uniqueList([
+        ...roles.flatMap((role) => normalizeIdList(role.permissions)),
+        ...roles.flatMap((role) => normalizeIdList(role.crm_permissions)),
+        ...normalizeIdList(member?.permissions),
+        ...normalizeIdList(member?.crm_permissions),
+      ]);
+
+  const lmsPermissions = user
+    ? getEffectiveLmsPermissions(crmDb, user)
+    : uniqueList([
+        ...roles.flatMap((role) => normalizeIdList(role.lms_permissions)),
+        ...normalizeIdList(member?.lms_permissions),
+      ]);
+
+  return {
+    roles,
+    role_ids: getTeamMemberRoleIds(member || {}),
+    role_keys: uniqueList([
+      ...getTeamMemberRoleKeys(member || {}),
+      ...roles.map((role) => normalizeRoleKey(role.role_key || role.name)),
+    ]),
+    lms_roles: getTeamMemberLmsRoleKeys(member || {}),
+    crm_permissions: crmPermissions,
+    lms_permissions: lmsPermissions,
+    allowed_modules: getAllowedModulesForTeamMember(crmDb, member, "crm"),
+    lms_allowed_modules: getAllowedModulesForTeamMember(crmDb, member, "lms"),
+    allowed_channels: getAllowedChannelsForTeamMember(member),
+    can_send_messages: permissionIncludes(crmPermissions, "send_messages") || Boolean(member?.can_send_messages),
+    can_approve_ai_drafts: permissionIncludes(crmPermissions, "approve_ai_drafts") || Boolean(member?.can_approve_ai_drafts),
+    can_send_payment_links: permissionIncludes(crmPermissions, "send_payment_links") || Boolean(member?.can_send_payment_links),
+    can_receive_handoffs: member?.can_receive_handoffs !== false,
+    portal_enabled: member?.portal_enabled !== false,
+  };
+}
+
+function normalizeTeamMemberPayload(body = {}, existing = {}, actor = null) {
+  const roleIds = uniqueList([
+    ...normalizeIdList(body.role_ids),
+    ...normalizeIdList(body.crm_role_ids),
+    body.role_id,
+    existing.role_id,
+  ]);
+
+  const crmRoles = uniqueList([
+    ...normalizeIdList(body.roles),
+    ...normalizeIdList(body.crm_roles),
+    ...normalizeIdList(body.role_keys),
+    body.role,
+    body.role_name,
+  ]).map(normalizeRoleKey).filter(Boolean);
+
+  const lmsRoles = uniqueList([
+    ...normalizeIdList(body.lms_roles),
+    ...normalizeIdList(body.lms_role_keys),
+    body.lms_role,
+    body.lms_role_name,
+  ]).map(normalizeRoleKey).filter(Boolean);
+
+  return {
+    ...existing,
+    user_id: body.user_id ?? existing.user_id ?? null,
+    name: body.name || body.full_name || existing.name || "Team Member",
+    email: normalizeEmail(body.email ?? existing.email ?? ""),
+    phone: body.phone ?? body.whatsapp ?? existing.phone ?? "",
+    whatsapp: body.whatsapp ?? existing.whatsapp ?? body.phone ?? existing.phone ?? "",
+    telegram_chat_id: body.telegram_chat_id ?? body.telegram_id ?? body.chat_id ?? existing.telegram_chat_id ?? "",
+
+    role_id: roleIds[0] || null,
+    role_name: body.role_name || body.role || existing.role_name || crmRoles[0] || "team_member",
+    role: body.role || existing.role || crmRoles[0] || "team_member",
+
+    role_ids: roleIds,
+    crm_role_ids: roleIds,
+    roles: crmRoles,
+    crm_roles: crmRoles,
+    lms_roles: lmsRoles,
+
+    status: body.status || existing.status || "active",
+    department: body.department || existing.department || "General",
+    timezone: body.timezone || existing.timezone || "Asia/Karachi",
+
+    permissions: uniqueList([...normalizeIdList(body.permissions), ...normalizeIdList(body.crm_permissions)]),
+    crm_permissions: uniqueList([...normalizeIdList(body.crm_permissions), ...normalizeIdList(body.permissions)]),
+    lms_permissions: normalizeIdList(body.lms_permissions),
+
+    allowed_modules: normalizeIdList(body.allowed_modules),
+    lms_allowed_modules: normalizeIdList(body.lms_allowed_modules),
+    allowed_channels: getAllowedChannelsForTeamMember(body.allowed_channels || body.channels ? body : existing),
+
+    assigned_course_ids: normalizeIdList(body.assigned_course_ids),
+    assigned_session_ids: normalizeIdList(body.assigned_session_ids),
+    restrict_to_assigned_courses: Boolean(body.restrict_to_assigned_courses ?? existing.restrict_to_assigned_courses),
+    restrict_to_assigned_scope: Boolean(body.restrict_to_assigned_scope ?? existing.restrict_to_assigned_scope),
+
+    portal_enabled: body.portal_enabled !== undefined ? Boolean(body.portal_enabled) : existing.portal_enabled !== false,
+    portal_user_id: body.portal_user_id || existing.portal_user_id || existing.user_id || null,
+    invite_status: body.invite_status || existing.invite_status || "not_sent",
+    last_invited_at: body.last_invited_at || existing.last_invited_at || null,
+
+    can_send_messages: body.can_send_messages !== undefined ? Boolean(body.can_send_messages) : Boolean(existing.can_send_messages),
+    can_receive_handoffs: body.can_receive_handoffs !== undefined ? Boolean(body.can_receive_handoffs) : existing.can_receive_handoffs !== false,
+    can_approve_ai_drafts: body.can_approve_ai_drafts !== undefined ? Boolean(body.can_approve_ai_drafts) : Boolean(existing.can_approve_ai_drafts),
+    can_send_payment_links: body.can_send_payment_links !== undefined ? Boolean(body.can_send_payment_links) : Boolean(existing.can_send_payment_links),
+
+    daily_lead_limit: Number(body.daily_lead_limit ?? existing.daily_lead_limit ?? 50),
+    daily_message_limit: Number(body.daily_message_limit ?? existing.daily_message_limit ?? 100),
+    monthly_target_usd: Number(body.monthly_target_usd ?? existing.monthly_target_usd ?? 0),
+    commission_rate: Number(body.commission_rate ?? existing.commission_rate ?? 0),
+
+    referral_code: normalizeCrmString(body.referral_code || existing.referral_code || "").toUpperCase(),
+    commission_rule_id: body.commission_rule_id ?? existing.commission_rule_id ?? null,
+
+    created_by: existing.created_by || actor?.id || null,
+    updated_by: actor?.id || existing.updated_by || null,
+  };
+}
+
+function sanitizeRoleForPortal(role = {}) {
+  return {
+    id: role.id,
+    role_key: role.role_key || normalizeRoleKey(role.name),
+    name: role.name || role.role_key || "Role",
+    description: role.description || "",
+    permissions: normalizeIdList(role.permissions),
+    crm_permissions: normalizeIdList(role.crm_permissions || role.permissions),
+    lms_permissions: normalizeIdList(role.lms_permissions),
+    allowed_modules: normalizeIdList(role.allowed_modules || role.dashboard_modules),
+    lms_allowed_modules: normalizeIdList(role.lms_allowed_modules),
+    dashboard_modules: normalizeIdList(role.dashboard_modules),
+    status: role.status || "active",
+    created_at: role.created_at || null,
+    updated_at: role.updated_at || null,
+  };
 }
 
 function lmsScopeAllowed({ member, assignment = null, courseId = null, sessionId = null }) {
@@ -11922,404 +12194,619 @@ app.post("/admin/crm/community-intelligence/opportunities/:id/create-lead", asyn
 // Community Intelligence Pipeline Patch
 // Paste this block AFTER the existing route:
 // app.post("/admin/crm/community-intelligence/opportunities/:id/create-lead", ...)
-// and BEFORE the "// Team / Role Portal" section.
-// -----------------------------------------------------------------------------
-
-function getCommunityOpportunityText(opp = {}) {
-  return String(
-    opp.detected_text ||
-      opp.source_text ||
-      opp.summary ||
-      opp.post_text ||
-      opp.message ||
-      opp.title ||
-      ""
-  ).trim();
-}
-
-function getCommunityOpportunityTitle(opp = {}) {
-  return String(
-    opp.title ||
-      opp.community_name ||
-      opp.author_name ||
-      opp.username ||
-      "Community Opportunity"
-  ).trim();
-}
-
-async function ensureCommunityLeadForOpportunity({ db, req, opp, extra = {} }) {
-  const existingLead = opp.lead_id ? getLeadByAnyId(db, opp.lead_id) : null;
-  if (existingLead) return { lead: existingLead, created: false };
-
-  const brandId = opp.brand_id || getCrmBrandId(req, db);
-  const platform = normalizeSocialPlatform(opp.platform || opp.source_platform || extra.platform || "other");
-  const text = extra.message || getCommunityOpportunityText(opp);
-
-  const payload = parseInboundSocialPayload({
-    platform,
-    payload: {
-      ...(opp.raw_payload || {}),
-      ...extra,
-      text,
-      message: text,
-      content: text,
-      name: extra.name || opp.author_name || opp.username || getCommunityOpportunityTitle(opp),
-      username: extra.username || opp.username || opp.author_name || "",
-      user_id: opp.author_id || opp.platform_user_id || opp.username || "",
-      platform_contact_id: opp.platform_contact_id || opp.author_id || opp.username || opp.author_name || "",
-    },
-    integration: null,
-  });
-
-  const result = upsertSocialLead(db, platform, {
-    ...payload,
-    brand_id: brandId,
-    source_platform: platform,
-    platform,
-    source_channel: "community_intelligence",
-    source_community_id: opp.community_id || null,
-    source_opportunity_id: opp.id,
-    source_community_name: opp.community_name || "",
-    community_post_url: opp.post_url || opp.source_url || "",
-    status: extra.status || "community_lead",
-    lead_status: extra.status || "community_lead",
-    conversation_summary: text.slice(0, 500),
-    last_message: text,
-    client_reached_out: true,
-    agent_initiated: false,
-    opt_in_status: "community_public_context",
-  });
-
-  opp.lead_id = result.lead.id;
-  opp.converted_lead_id = result.lead.id;
-  opp.updated_at = nowIso();
-
-  return result;
-}
-
-app.post("/admin/crm/community-intelligence/opportunities/:id/soft-outreach-draft", async (req, res) => {
-  try {
-    const { user } = await requireCrmAdmin(req);
-    const db = await readCrmDb();
-    const opp = ensureCrmArray(db, "community_opportunities").find((item) => String(item.id) === String(req.params.id));
-    if (!opp) return res.status(404).json({ success: false, error: "Opportunity not found" });
-
-    const brandId = opp.brand_id || getCrmBrandId(req, db);
-    const platform = normalizeSocialPlatform(opp.platform || opp.source_platform || "other");
-    const detectedText = getCommunityOpportunityText(opp);
-    const style = req.body?.style || "friendly_helpful_no_pitch";
-
-    const draftContent = String(req.body?.draft_content || "").trim() ||
-      `Hi${opp.author_name ? ` ${opp.author_name}` : ""}, I saw your post about ${opp.intent || "USMLE prep"}. I am not trying to sell anything here — just trying to understand your situation. What is your exam timeline, and what is the main difficulty right now: NBME score, UWorld review, First Aid, or study schedule?`;
-
-    const draft = withTimestamps({
-      id: uuid(),
-      brand_id: brandId,
-      opportunity_id: opp.id,
-      platform,
-      channel: platform,
-      action_type: "community_soft_outreach_draft",
-      style,
-      detected_text: detectedText,
-      draft_content: draftContent,
-      status: "draft",
-      approval_status: "needs_approval",
-      created_by: user.id,
-    });
-
-    ensureCrmArray(db, "community_reply_drafts").push(draft);
-
-    const approvalItem = withTimestamps({
-      id: uuid(),
-      brand_id: brandId,
-      opportunity_id: opp.id,
-      action_id: draft.id,
-      agent_name: "Community Intelligence",
-      action_type: "community_soft_outreach_draft",
-      channel: platform,
-      draft_content: draftContent,
-      estimated_cost: 0,
-      total_tokens: 0,
-      status: "pending",
-    });
-
-    ensureCrmArray(db, "approval_queue").push(approvalItem);
-
-    opp.status = "soft_outreach_drafted";
-    opp.last_draft_id = draft.id;
-    opp.updated_at = nowIso();
-
-    createCrmActionLog(db, {
-      brand_id: brandId,
-      agent_name: "Community Intelligence",
-      action_type: "draft_soft_outreach",
-      channel: platform,
-      output_text: draftContent,
-      status: "draft",
-      approval_status: "needs_approval",
-      created_by: user.id,
-    });
-
-    await writeCrmDb(db);
-    res.json({ success: true, draft, approval_item: approvalItem, opportunity: opp });
-  } catch (error) {
-    res.status(error.statusCode || 500).json({ success: false, error: error.message });
-  }
-});
-
-app.post("/admin/crm/community-intelligence/opportunities/:id/qualify", async (req, res) => {
-  try {
-    const { user } = await requireCrmAdmin(req);
-    const db = await readCrmDb();
-    const opp = ensureCrmArray(db, "community_opportunities").find((item) => String(item.id) === String(req.params.id));
-    if (!opp) return res.status(404).json({ success: false, error: "Opportunity not found" });
-
-    const { lead, created } = await ensureCommunityLeadForOpportunity({ db, req, opp, extra: { status: "qualified" } });
-
-    const qualification = {
-      exam_type: req.body.exam_type || opp.exam_type || "Unknown",
-      exam_date: req.body.exam_date || "",
-      exam_timeline: req.body.exam_timeline || "",
-      nbme_score: req.body.nbme_score || "",
-      uworld_progress: req.body.uworld_progress || "",
-      current_resources: req.body.current_resources || "",
-      difficulty: req.body.difficulty || req.body.pain_points || "",
-      pain_points: req.body.pain_points || req.body.difficulty || "",
-      study_hours: req.body.study_hours || "",
-      budget_level: req.body.budget_level || "",
-      interest_level: req.body.interest_level || "medium",
-      preferred_contact_method: req.body.preferred_contact_method || "",
-      recommended_offer: req.body.recommended_offer || "Free live/demo session",
-      notes: req.body.notes || "",
-      qualified_by: user.id,
-      qualified_at: nowIso(),
-    };
-
-    Object.assign(opp, qualification, {
-      status: "qualified",
-      lead_id: lead.id,
-      converted_lead_id: lead.id,
-      qualification,
-      updated_at: nowIso(),
-    });
-
-    Object.assign(lead, {
-      ...qualification,
-      status: qualification.interest_level === "hot" || qualification.interest_level === "high" ? "hot_lead" : "qualified",
-      lead_status: qualification.interest_level === "hot" || qualification.interest_level === "high" ? "hot_lead" : "qualified",
-      interest_level: qualification.interest_level,
-      recommended_offer: qualification.recommended_offer,
-      source_opportunity_id: opp.id,
-      updated_at: nowIso(),
-    });
-
-    ensureCrmArray(db, "client_data_events").push(withTimestamps({
-      id: uuid(),
-      brand_id: lead.brand_id || opp.brand_id || getCrmBrandId(req, db),
-      lead_id: lead.id,
-      event_type: "community_lead_qualified",
-      source: "community_intelligence",
-      client_data: qualification,
-      created_by: user.id,
-    }));
-
-    await writeCrmDb(db);
-    res.json({ success: true, created, opportunity: opp, lead: normalizeLeadForResponse(lead), qualification });
-  } catch (error) {
-    res.status(error.statusCode || 500).json({ success: false, error: error.message });
-  }
-});
-
-app.post("/admin/crm/community-intelligence/opportunities/:id/assign-agent", async (req, res) => {
-  try {
-    const { user } = await requireCrmAdmin(req);
-    const db = await readCrmDb();
-    const opp = ensureCrmArray(db, "community_opportunities").find((item) => String(item.id) === String(req.params.id));
-    if (!opp) return res.status(404).json({ success: false, error: "Opportunity not found" });
-
-    const agentType = req.body.agent_type || "community";
-    const agentId = req.body.agent_id || req.body.team_member_id || null;
-    const agentName = req.body.agent_name || "Assigned Agent";
-    const { lead } = await ensureCommunityLeadForOpportunity({ db, req, opp });
-
-    if (agentType === "sales") {
-      opp.sales_agent_id = agentId;
-      opp.sales_agent_name = agentName;
-      lead.assigned_sales_agent_id = agentId;
-      lead.assigned_sales_agent_name = agentName;
-    } else {
-      opp.community_agent_id = agentId;
-      opp.community_agent_name = agentName;
-      lead.assigned_agent_id = agentId;
-      lead.assigned_agent_name = agentName;
-    }
-
-    opp.status = opp.status === "new" ? "assigned" : opp.status;
-    opp.updated_at = nowIso();
-    lead.updated_at = nowIso();
-
-    createAgentLog(db, {
-      brand_id: lead.brand_id || opp.brand_id || getCrmBrandId(req, db),
-      agent_id: agentId,
-      agent_name: agentName,
-      lead_id: lead.id,
-      action_type: `assign_${agentType}_agent`,
-      channel: opp.platform || "community",
-      message: `Community opportunity assigned to ${agentName}`,
-      metadata: { opportunity_id: opp.id, assigned_by: user.id },
-    });
-
-    await writeCrmDb(db);
-    res.json({ success: true, opportunity: opp, lead: normalizeLeadForResponse(lead) });
-  } catch (error) {
-    res.status(error.statusCode || 500).json({ success: false, error: error.message });
-  }
-});
-
-app.post("/admin/crm/community-intelligence/opportunities/:id/handoff", async (req, res) => {
-  try {
-    const { user } = await requireCrmAdmin(req);
-    const db = await readCrmDb();
-    const opp = ensureCrmArray(db, "community_opportunities").find((item) => String(item.id) === String(req.params.id));
-    if (!opp) return res.status(404).json({ success: false, error: "Opportunity not found" });
-
-    const { lead } = await ensureCommunityLeadForOpportunity({ db, req, opp, extra: { status: req.body.lead_status || "hot_lead" } });
-    const handoff = withTimestamps({
-      id: uuid(),
-      brand_id: lead.brand_id || opp.brand_id || getCrmBrandId(req, db),
-      lead_id: lead.id,
-      opportunity_id: opp.id,
-      source: "community_intelligence",
-      status: "pending_sales_review",
-      assigned_closer_id: req.body.assigned_closer_id || opp.sales_agent_id || null,
-      handoff_summary: req.body.handoff_summary || opp.qualification?.notes || getCommunityOpportunityText(opp),
-      recommended_next_action: req.body.recommended_next_action || "Invite to live/demo session, then recommend the best plan.",
-      priority: req.body.priority || opp.priority || "normal",
-      created_by: user.id,
-    });
-
-    ensureCrmArray(db, "handoffs").push(handoff);
-    opp.status = "handoff_to_sales";
-    opp.handoff_id = handoff.id;
-    opp.updated_at = nowIso();
-
-    lead.status = req.body.lead_status || "hot_lead";
-    lead.lead_status = req.body.lead_status || "hot_lead";
-    lead.handoff_id = handoff.id;
-    lead.updated_at = nowIso();
-
-    await writeCrmDb(db);
-    res.json({ success: true, opportunity: opp, lead: normalizeLeadForResponse(lead), handoff });
-  } catch (error) {
-    res.status(error.statusCode || 500).json({ success: false, error: error.message });
-  }
-});
-
-app.post("/admin/crm/community-intelligence/opportunities/:id/send-to-live-conversion", async (req, res) => {
-  try {
-    const { user } = await requireCrmAdmin(req);
-    const db = await readCrmDb();
-    const opp = ensureCrmArray(db, "community_opportunities").find((item) => String(item.id) === String(req.params.id));
-    if (!opp) return res.status(404).json({ success: false, error: "Opportunity not found" });
-
-    const { lead } = await ensureCommunityLeadForOpportunity({ db, req, opp, extra: { status: "demo_offered" } });
-    const brandId = lead.brand_id || opp.brand_id || getCrmBrandId(req, db);
-
-    const invite = withTimestamps({
-      id: uuid(),
-      brand_id: brandId,
-      lead_id: lead.id,
-      opportunity_id: opp.id,
-      session_id: req.body.session_id || null,
-      session_title: req.body.session_title || "",
-      plan_id: req.body.plan_id || null,
-      plan_name: req.body.plan_name || "",
-      status: req.body.invite_status || "draft_needs_approval",
-      approval_required: true,
-      source: "community_intelligence",
-      created_by: user.id,
-    });
-
-    ensureCrmArray(db, "live_session_invites").push(invite);
-
-    const event = withTimestamps({
-      id: uuid(),
-      brand_id: brandId,
-      lead_id: lead.id,
-      opportunity_id: opp.id,
-      event_type: "community_lead_sent_to_live_conversion",
-      status: "pending_invite_approval",
-      session_id: invite.session_id,
-      plan_id: invite.plan_id,
-      created_by: user.id,
-    });
-    ensureCrmArray(db, "live_conversion_events").push(event);
-
-    const followup = withTimestamps({
-      id: uuid(),
-      brand_id: brandId,
-      lead_id: lead.id,
-      opportunity_id: opp.id,
-      source: "community_intelligence",
-      channel: lead.source_platform || opp.platform || "manual",
-      status: "scheduled",
-      approval_required: true,
-      followup_type: "live_session_invite_followup",
-      scheduled_at: req.body.scheduled_at || null,
-      message: req.body.message || "Follow up after sending live/demo session invite.",
-    });
-    ensureCrmArray(db, "scheduled_followup_jobs").push(followup);
-
-    opp.status = "sent_to_live_conversion";
-    opp.live_session_invite_id = invite.id;
-    opp.live_conversion_event_id = event.id;
-    opp.updated_at = nowIso();
-
-    lead.status = "demo_offered";
-    lead.lead_status = "demo_offered";
-    lead.updated_at = nowIso();
-
-    await writeCrmDb(db);
-    res.json({ success: true, opportunity: opp, lead: normalizeLeadForResponse(lead), invite, event, followup });
-  } catch (error) {
-    res.status(error.statusCode || 500).json({ success: false, error: error.message });
-  }
-});
-
-// Team / Role Portal
+// and BEFORE the "// Team / Role Portal - Multi-role CRM + LMS portals
 app.get("/admin/crm/roles", async (req, res) => {
-  try { await requireCrmAdmin(req); const db = await readCrmDb(); const roles = ensureCrmArray(db, "roles"); res.json({ success: true, roles, default_permission_sets: DEFAULT_ROLE_PERMISSION_SETS, count: roles.length }); }
-  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const roles = ensureCrmArray(db, "roles").map(sanitizeRoleForPortal);
+
+    res.json({
+      success: true,
+      roles,
+      count: roles.length,
+      default_permission_sets: DEFAULT_ROLE_PERMISSION_SETS,
+      default_lms_permission_sets: DEFAULT_LMS_ROLE_PERMISSION_SETS,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
 });
 
 app.post("/admin/crm/roles", async (req, res) => {
-  try { await requireCrmAdmin(req); const db = await readCrmDb(); const roleKey = normalizeCrmLower(req.body.role_key || req.body.name || "custom_role").replace(/[^a-z0-9]+/g, "_"); const role = withTimestamps({ id: uuid(), role_key: roleKey, name: req.body.name || roleKey, description: req.body.description || "", permissions: Array.isArray(req.body.permissions) ? req.body.permissions : (DEFAULT_ROLE_PERMISSION_SETS[roleKey] || []), dashboard_modules: Array.isArray(req.body.dashboard_modules) ? req.body.dashboard_modules : [], status: req.body.status || "active" }); ensureCrmArray(db, "roles").push(role); await writeCrmDb(db); res.json({ success: true, role }); }
-  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const roles = ensureCrmArray(db, "roles");
+
+    const roleKey = normalizeRoleKey(req.body.role_key || req.body.name || "custom_role");
+
+    const role = withTimestamps({
+      id: uuid(),
+      role_key: roleKey,
+      name: req.body.name || roleKey,
+      description: req.body.description || "",
+      permissions: normalizeIdList(req.body.permissions || req.body.crm_permissions || DEFAULT_ROLE_PERMISSION_SETS?.[roleKey] || []),
+      crm_permissions: normalizeIdList(req.body.crm_permissions || req.body.permissions || DEFAULT_ROLE_PERMISSION_SETS?.[roleKey] || []),
+      lms_permissions: normalizeIdList(req.body.lms_permissions || DEFAULT_LMS_ROLE_PERMISSION_SETS?.[roleKey] || []),
+      allowed_modules: normalizeIdList(req.body.allowed_modules || req.body.dashboard_modules),
+      lms_allowed_modules: normalizeIdList(req.body.lms_allowed_modules),
+      dashboard_modules: normalizeIdList(req.body.dashboard_modules || req.body.allowed_modules),
+      status: req.body.status || "active",
+      created_by: user.id,
+    });
+
+    roles.push(role);
+    await writeCrmDb(db);
+    res.json({ success: true, role: sanitizeRoleForPortal(role) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
 });
 
 app.put("/admin/crm/roles/:id", async (req, res) => {
-  try { await requireCrmAdmin(req); const db = await readCrmDb(); const roles = ensureCrmArray(db, "roles"); const idx = roles.findIndex((r) => String(r.id) === String(req.params.id)); if (idx < 0) return res.status(404).json({ success: false, error: "Role not found" }); roles[idx] = { ...roles[idx], ...(req.body || {}), updated_at: nowIso() }; await writeCrmDb(db); res.json({ success: true, role: roles[idx] }); }
-  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const roles = ensureCrmArray(db, "roles");
+    const idx = roles.findIndex((role) => String(role.id) === String(req.params.id));
+
+    if (idx < 0) {
+      return res.status(404).json({ success: false, error: "Role not found" });
+    }
+
+    roles[idx] = {
+      ...roles[idx],
+      ...(req.body || {}),
+      role_key: normalizeRoleKey(req.body.role_key || req.body.name || roles[idx].role_key || roles[idx].name),
+      permissions: normalizeIdList(req.body.permissions ?? roles[idx].permissions),
+      crm_permissions: normalizeIdList(req.body.crm_permissions ?? req.body.permissions ?? roles[idx].crm_permissions ?? roles[idx].permissions),
+      lms_permissions: normalizeIdList(req.body.lms_permissions ?? roles[idx].lms_permissions),
+      allowed_modules: normalizeIdList(req.body.allowed_modules ?? roles[idx].allowed_modules),
+      lms_allowed_modules: normalizeIdList(req.body.lms_allowed_modules ?? roles[idx].lms_allowed_modules),
+      dashboard_modules: normalizeIdList(req.body.dashboard_modules ?? roles[idx].dashboard_modules),
+      updated_by: user.id,
+      updated_at: nowIso(),
+    };
+
+    await writeCrmDb(db);
+    res.json({ success: true, role: sanitizeRoleForPortal(roles[idx]) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
 });
 
 app.get("/admin/crm/team-members", async (req, res) => {
-  try { await requireCrmAdmin(req); const db = await readCrmDb(); let members = filterCrmRecords(req, ensureCrmArray(db, "team_members"), null); members = members.map((m) => ({ ...m, stats: getTeamMemberStats(db, m.id) })); res.json({ success: true, members, count: members.length }); }
-  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    let members = filterCrmRecords(req, ensureCrmArray(db, "team_members"), null);
+
+    members = members.map((member) => ({
+      ...member,
+      ...buildTeamMemberPortalSummary(db, member),
+      stats: getTeamMemberStats(db, member.id),
+    }));
+
+    res.json({ success: true, members, count: members.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
 });
 
 app.post("/admin/crm/team-members", async (req, res) => {
-  try { const { user } = await requireCrmAdmin(req); const db = await readCrmDb(); const member = withTimestamps({ id: uuid(), user_id: req.body.user_id || null, name: req.body.name || req.body.full_name || "Team Member", email: normalizeEmail(req.body.email || ""), role_id: req.body.role_id || null, role_name: req.body.role_name || req.body.role || "Team Member", status: req.body.status || "active", permissions: Array.isArray(req.body.permissions) ? req.body.permissions : [], lms_permissions: Array.isArray(req.body.lms_permissions) ? req.body.lms_permissions : [], allowed_modules: Array.isArray(req.body.allowed_modules) ? req.body.allowed_modules : [], lms_allowed_modules: Array.isArray(req.body.lms_allowed_modules) ? req.body.lms_allowed_modules : [], assigned_course_ids: Array.isArray(req.body.assigned_course_ids) ? req.body.assigned_course_ids : [], assigned_session_ids: Array.isArray(req.body.assigned_session_ids) ? req.body.assigned_session_ids : [], restrict_to_assigned_courses: Boolean(req.body.restrict_to_assigned_courses), restrict_to_assigned_scope: Boolean(req.body.restrict_to_assigned_scope), referral_code: normalizeCrmString(req.body.referral_code || "").toUpperCase(), commission_rule_id: req.body.commission_rule_id || null, created_by: user.id }); ensureCrmArray(db, "team_members").push(member); logTeamActivity(db, { team_member_id: member.id, action: "create_team_member", message: "Team member created", metadata: { created_by: user.id } }); await writeCrmDb(db); res.json({ success: true, member }); }
-  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+
+    const member = withTimestamps({
+      id: uuid(),
+      ...normalizeTeamMemberPayload(req.body, {}, user),
+    });
+
+    ensureCrmArray(db, "team_members").push(member);
+
+    logTeamActivity(db, {
+      team_member_id: member.id,
+      action: "create_team_member",
+      message: "Team member created",
+      metadata: {
+        created_by: user.id,
+        roles: member.roles,
+        lms_roles: member.lms_roles,
+      },
+    });
+
+    await writeCrmDb(db);
+
+    res.json({
+      success: true,
+      member: {
+        ...member,
+        ...buildTeamMemberPortalSummary(db, member),
+      },
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
 });
 
 app.get("/admin/crm/team-members/:id", async (req, res) => {
-  try { await requireCrmAdmin(req); const db = await readCrmDb(); const member = ensureCrmArray(db, "team_members").find((m) => String(m.id) === String(req.params.id)); if (!member) return res.status(404).json({ success: false, error: "Team member not found" }); const stats = getTeamMemberStats(db, member.id); const referrals = ensureCrmArray(db, "referral_attributions").filter((a) => String(a.team_member_id) === String(member.id)); const logs = ensureCrmArray(db, "team_activity_logs").filter((l) => String(l.team_member_id) === String(member.id)).sort(sortNewestFirst).slice(0, 100); res.json({ success: true, member, stats, referrals, logs }); }
-  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const member = ensureCrmArray(db, "team_members").find((item) => String(item.id) === String(req.params.id));
+
+    if (!member) {
+      return res.status(404).json({ success: false, error: "Team member not found" });
+    }
+
+    const stats = getTeamMemberStats(db, member.id);
+    const referrals = ensureCrmArray(db, "referral_attributions").filter((item) => String(item.team_member_id) === String(member.id));
+    const logs = ensureCrmArray(db, "team_activity_logs")
+      .filter((item) => String(item.team_member_id) === String(member.id))
+      .sort(sortNewestFirst)
+      .slice(0, 100);
+
+    res.json({
+      success: true,
+      member: {
+        ...member,
+        ...buildTeamMemberPortalSummary(db, member),
+        stats,
+        referrals,
+        logs,
+      },
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
 });
 
 app.put("/admin/crm/team-members/:id", async (req, res) => {
-  try { const { user } = await requireCrmAdmin(req); const db = await readCrmDb(); const arr = ensureCrmArray(db, "team_members"); const idx = arr.findIndex((m) => String(m.id) === String(req.params.id)); if (idx < 0) return res.status(404).json({ success: false, error: "Team member not found" }); arr[idx] = { ...arr[idx], ...(req.body || {}), updated_at: nowIso(), updated_by: user.id }; logTeamActivity(db, { team_member_id: arr[idx].id, action: "update_team_member", message: "Team member updated", metadata: { updated_by: user.id } }); await writeCrmDb(db); res.json({ success: true, member: arr[idx] }); }
-  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const members = ensureCrmArray(db, "team_members");
+    const idx = members.findIndex((item) => String(item.id) === String(req.params.id));
+
+    if (idx < 0) {
+      return res.status(404).json({ success: false, error: "Team member not found" });
+    }
+
+    const previous = members[idx];
+    members[idx] = {
+      ...previous,
+      ...normalizeTeamMemberPayload(req.body, previous, user),
+      updated_at: nowIso(),
+    };
+
+    logTeamActivity(db, {
+      team_member_id: members[idx].id,
+      action: "update_team_member",
+      message: "Team member updated",
+      metadata: {
+        updated_by: user.id,
+        roles: members[idx].roles,
+        lms_roles: members[idx].lms_roles,
+      },
+    });
+
+    await writeCrmDb(db);
+
+    res.json({
+      success: true,
+      member: {
+        ...members[idx],
+        ...buildTeamMemberPortalSummary(db, members[idx]),
+      },
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete("/admin/crm/team-members/:id", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const members = ensureCrmArray(db, "team_members");
+    const idx = members.findIndex((item) => String(item.id) === String(req.params.id));
+
+    if (idx < 0) {
+      return res.status(404).json({ success: false, error: "Team member not found" });
+    }
+
+    members[idx] = {
+      ...members[idx],
+      status: "deleted",
+      deleted_at: nowIso(),
+      deleted_by: user.id,
+      updated_at: nowIso(),
+    };
+
+    logTeamActivity(db, {
+      team_member_id: members[idx].id,
+      action: "delete_team_member",
+      message: "Team member disabled/deleted",
+      metadata: { deleted_by: user.id },
+    });
+
+    await writeCrmDb(db);
+    res.json({ success: true, deleted: true, member: members[idx] });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/team-members/:id/permissions", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const members = ensureCrmArray(db, "team_members");
+    const idx = members.findIndex((item) => String(item.id) === String(req.params.id));
+
+    if (idx < 0) {
+      return res.status(404).json({ success: false, error: "Team member not found" });
+    }
+
+    members[idx] = {
+      ...members[idx],
+      role_ids: normalizeIdList(req.body.role_ids ?? members[idx].role_ids),
+      crm_role_ids: normalizeIdList(req.body.crm_role_ids ?? req.body.role_ids ?? members[idx].crm_role_ids),
+      roles: uniqueList(normalizeIdList(req.body.roles ?? req.body.crm_roles ?? members[idx].roles).map(normalizeRoleKey)),
+      crm_roles: uniqueList(normalizeIdList(req.body.crm_roles ?? req.body.roles ?? members[idx].crm_roles).map(normalizeRoleKey)),
+      permissions: normalizeIdList(req.body.permissions ?? members[idx].permissions),
+      crm_permissions: normalizeIdList(req.body.crm_permissions ?? req.body.permissions ?? members[idx].crm_permissions),
+      allowed_modules: normalizeIdList(req.body.allowed_modules ?? members[idx].allowed_modules),
+      allowed_channels: normalizeIdList(req.body.allowed_channels ?? members[idx].allowed_channels),
+      can_send_messages: Boolean(req.body.can_send_messages ?? members[idx].can_send_messages),
+      can_receive_handoffs: Boolean(req.body.can_receive_handoffs ?? members[idx].can_receive_handoffs),
+      can_approve_ai_drafts: Boolean(req.body.can_approve_ai_drafts ?? members[idx].can_approve_ai_drafts),
+      can_send_payment_links: Boolean(req.body.can_send_payment_links ?? members[idx].can_send_payment_links),
+      updated_by: user.id,
+      updated_at: nowIso(),
+    };
+
+    logTeamActivity(db, {
+      team_member_id: members[idx].id,
+      action: "update_crm_permissions",
+      message: "CRM permissions updated",
+      metadata: { updated_by: user.id },
+    });
+
+    await writeCrmDb(db);
+
+    res.json({
+      success: true,
+      member: {
+        ...members[idx],
+        ...buildTeamMemberPortalSummary(db, members[idx]),
+      },
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/team-members/:id/lms-access", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const members = ensureCrmArray(db, "team_members");
+    const idx = members.findIndex((item) => String(item.id) === String(req.params.id));
+
+    if (idx < 0) {
+      return res.status(404).json({ success: false, error: "Team member not found" });
+    }
+
+    members[idx] = {
+      ...members[idx],
+      lms_roles: uniqueList(normalizeIdList(req.body.lms_roles ?? members[idx].lms_roles).map(normalizeRoleKey)),
+      lms_permissions: normalizeIdList(req.body.lms_permissions ?? members[idx].lms_permissions),
+      lms_allowed_modules: normalizeIdList(req.body.lms_allowed_modules ?? members[idx].lms_allowed_modules),
+      assigned_course_ids: normalizeIdList(req.body.assigned_course_ids ?? members[idx].assigned_course_ids),
+      assigned_session_ids: normalizeIdList(req.body.assigned_session_ids ?? members[idx].assigned_session_ids),
+      restrict_to_assigned_courses: Boolean(req.body.restrict_to_assigned_courses ?? members[idx].restrict_to_assigned_courses),
+      restrict_to_assigned_scope: Boolean(req.body.restrict_to_assigned_scope ?? members[idx].restrict_to_assigned_scope),
+      updated_by: user.id,
+      updated_at: nowIso(),
+    };
+
+    ensureCrmArray(db, "lms_permission_audit_logs").push(withTimestamps({
+      id: uuid(),
+      user_id: user.id,
+      user_email: user.email,
+      team_member_id: members[idx].id,
+      action: "update_lms_access",
+      status: "success",
+      metadata: {
+        lms_roles: members[idx].lms_roles,
+        lms_permissions: members[idx].lms_permissions,
+        assigned_course_ids: members[idx].assigned_course_ids,
+        assigned_session_ids: members[idx].assigned_session_ids,
+      },
+    }));
+
+    await writeCrmDb(db);
+
+    res.json({
+      success: true,
+      member: {
+        ...members[idx],
+        ...buildTeamMemberPortalSummary(db, members[idx]),
+      },
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/team-members/:id/create-portal-user", async (req, res) => {
+  try {
+    const { user: adminUser } = await requireCrmAdmin(req);
+    const crmDb = await readCrmDb();
+    const liveDb = await readLiveDb();
+
+    liveDb.users = liveDb.users || {};
+
+    const members = ensureCrmArray(crmDb, "team_members");
+    const idx = members.findIndex((item) => String(item.id) === String(req.params.id));
+
+    if (idx < 0) {
+      return res.status(404).json({ success: false, error: "Team member not found" });
+    }
+
+    const member = members[idx];
+
+    if (!member.email) {
+      return res.status(400).json({ success: false, error: "Team member email is required before creating portal user" });
+    }
+
+    const existingUser = Object.values(liveDb.users || {}).find((item) => normalizeEmail(item.email) === normalizeEmail(member.email));
+
+    let portalUser = existingUser || null;
+    let temporaryPassword = null;
+
+    if (!portalUser) {
+      temporaryPassword =
+        req.body.password ||
+        `NG-${crypto.randomBytes(4).toString("hex")}-${String(Date.now()).slice(-4)}`;
+
+      portalUser = createBackendUser({
+        email: member.email,
+        name: member.name,
+        password: temporaryPassword,
+        role: req.body.system_role || "team",
+      });
+
+      liveDb.users[portalUser.id] = portalUser;
+      await writeLiveDb(liveDb);
+    }
+
+    members[idx] = {
+      ...member,
+      user_id: portalUser.id,
+      portal_user_id: portalUser.id,
+      portal_enabled: true,
+      invite_status: existingUser ? "existing_user_linked" : "portal_user_created",
+      updated_by: adminUser.id,
+      updated_at: nowIso(),
+    };
+
+    logTeamActivity(crmDb, {
+      team_member_id: members[idx].id,
+      action: "create_portal_user",
+      message: existingUser ? "Existing portal user linked" : "Portal user created",
+      metadata: { created_by: adminUser.id, user_id: portalUser.id },
+    });
+
+    await writeCrmDb(crmDb);
+
+    res.json({
+      success: true,
+      member: {
+        ...members[idx],
+        ...buildTeamMemberPortalSummary(crmDb, members[idx], portalUser),
+      },
+      user: sanitizeUser(portalUser),
+      temporary_password: temporaryPassword,
+      note: temporaryPassword
+        ? "Show or send this temporary password securely. User should change it after login."
+        : "Existing user linked. No password generated.",
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/team-members/:id/send-invite", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const crmDb = await readCrmDb();
+    const members = ensureCrmArray(crmDb, "team_members");
+    const idx = members.findIndex((item) => String(item.id) === String(req.params.id));
+
+    if (idx < 0) {
+      return res.status(404).json({ success: false, error: "Team member not found" });
+    }
+
+    const member = members[idx];
+
+    if (!member.email) {
+      return res.status(400).json({ success: false, error: "Team member email is required to send invite" });
+    }
+
+    const inviteToken = jwt.sign(
+      {
+        purpose: "team_portal_invite",
+        team_member_id: member.id,
+        email: member.email,
+      },
+      AUTH_JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    const inviteUrl =
+      req.body.invite_url ||
+      `${process.env.FRONTEND_URL || "https://live.nextgenusmlelms.com"}/team/invite?token=${encodeURIComponent(inviteToken)}`;
+
+    members[idx] = {
+      ...member,
+      invite_status: "sent",
+      last_invited_at: nowIso(),
+      invite_token_preview: inviteToken.slice(0, 12),
+      updated_by: user.id,
+      updated_at: nowIso(),
+    };
+
+    logTeamActivity(crmDb, {
+      team_member_id: member.id,
+      action: "send_portal_invite",
+      message: "Portal invite generated",
+      metadata: { invited_by: user.id, invite_url },
+    });
+
+    await writeCrmDb(crmDb);
+
+    res.json({
+      success: true,
+      invite_url: inviteUrl,
+      member: {
+        ...members[idx],
+        ...buildTeamMemberPortalSummary(crmDb, members[idx]),
+      },
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/me/permissions", async (req, res) => {
+  try {
+    const ctx = await getAuthenticatedUser(req);
+    const crmDb = await readCrmDb();
+
+    if (ctx.user.role === "admin") {
+      return res.json({
+        success: true,
+        user: ctx.user,
+        admin: true,
+        team_member: null,
+        roles: [{ id: "admin", role_key: "admin", name: "Admin" }],
+        role_keys: ["admin"],
+        lms_roles: ["admin"],
+        crm_permissions: ["*"],
+        lms_permissions: ["*"],
+        allowed_modules: ["*"],
+        lms_allowed_modules: ["*"],
+        allowed_channels: ["whatsapp", "email", "telegram"],
+        can_send_messages: true,
+        can_approve_ai_drafts: true,
+        can_send_payment_links: true,
+        can_receive_handoffs: true,
+        portal_enabled: true,
+      });
+    }
+
+    const member = getTeamMemberForUser(crmDb, ctx.user);
+
+    if (!member) {
+      return res.status(403).json({
+        success: false,
+        error: "No active team portal profile is linked to this user",
+      });
+    }
+
+    const summary = buildTeamMemberPortalSummary(crmDb, member, ctx.user);
+
+    res.json({
+      success: true,
+      user: ctx.user,
+      admin: false,
+      team_member: member,
+      ...summary,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/me/portal", async (req, res) => {
+  try {
+    const ctx = await getAuthenticatedUser(req);
+    const crmDb = await readCrmDb();
+
+    if (ctx.user.role === "admin") {
+      return res.json({
+        success: true,
+        user: ctx.user,
+        portal_type: "admin",
+        modules: ["*"],
+        lms_modules: ["*"],
+        permissions: ["*"],
+        lms_permissions: ["*"],
+      });
+    }
+
+    const member = getTeamMemberForUser(crmDb, ctx.user);
+
+    if (!member) {
+      return res.status(403).json({ success: false, error: "Portal profile not found" });
+    }
+
+    const summary = buildTeamMemberPortalSummary(crmDb, member, ctx.user);
+
+    res.json({
+      success: true,
+      user: ctx.user,
+      portal_type: "team",
+      member,
+      modules: summary.allowed_modules,
+      lms_modules: summary.lms_allowed_modules,
+      permissions: summary.crm_permissions,
+      lms_permissions: summary.lms_permissions,
+      roles: summary.roles,
+      role_keys: summary.role_keys,
+      lms_roles: summary.lms_roles,
+      allowed_channels: summary.allowed_channels,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/me/check-permission", async (req, res) => {
+  try {
+    const ctx = await getAuthenticatedUser(req);
+    const crmDb = await readCrmDb();
+
+    const permission = String(req.body.permission || "").trim();
+    const area = String(req.body.area || "crm").trim();
+
+    if (!permission) {
+      return res.status(400).json({ success: false, error: "permission is required" });
+    }
+
+    if (ctx.user.role === "admin") {
+      return res.json({ success: true, allowed: true, admin: true });
+    }
+
+    const permissions =
+      area === "lms"
+        ? getEffectiveLmsPermissions(crmDb, ctx.user)
+        : getEffectiveCrmPermissions(crmDb, ctx.user);
+
+    res.json({
+      success: true,
+      allowed: permissionIncludes(permissions, permission),
+      permission,
+      area,
+      permissions,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
 });
 
 app.post("/admin/crm/team-members/:id/referral-link", async (req, res) => {
@@ -12328,9 +12815,10 @@ app.post("/admin/crm/team-members/:id/referral-link", async (req, res) => {
 });
 
 app.get("/admin/crm/team-members/:id/dashboard", async (req, res) => {
-  try { await requireCrmAdmin(req); const db = await readCrmDb(); const member = ensureCrmArray(db, "team_members").find((m) => String(m.id) === String(req.params.id)); if (!member) return res.status(404).json({ success: false, error: "Team member not found" }); const stats = getTeamMemberStats(db, member.id); const assignedLeads = ensureCrmArray(db, "leads").filter((l) => String(l.assigned_agent_id || l.assigned_team_member_id || "") === String(member.id)); const referralAttributions = ensureCrmArray(db, "referral_attributions").filter((a) => String(a.team_member_id) === String(member.id)); res.json({ success: true, member, stats, assigned_leads: assignedLeads.map(normalizeLeadForResponse), referral_attributions: referralAttributions }); }
+  try { await requireCrmAdmin(req); const db = await readCrmDb(); const member = ensureCrmArray(db, "team_members").find((m) => String(m.id) === String(req.params.id)); if (!member) return res.status(404).json({ success: false, error: "Team member not found" }); const stats = getTeamMemberStats(db, member.id); const assignedLeads = ensureCrmArray(db, "leads").filter((l) => String(l.assigned_agent_id || l.assigned_team_member_id || "") === String(member.id)); const referralAttributions = ensureCrmArray(db, "referral_attributions").filter((a) => String(a.team_member_id) === String(member.id)); res.json({ success: true, member: { ...member, ...buildTeamMemberPortalSummary(db, member) }, stats, assigned_leads: assignedLeads.map(normalizeLeadForResponse), referral_attributions: referralAttributions }); }
   catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
+
 
 // Referral & Commission Settings
 app.get("/admin/crm/referral-codes", async (req, res) => {
