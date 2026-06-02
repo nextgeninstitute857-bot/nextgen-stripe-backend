@@ -14879,6 +14879,682 @@ app.post("/admin/crm/conversations/ai-reply", async (req, res) => {
 // -----------------------------------------------------------------------------
 
 
+
+
+// -----------------------------------------------------------------------------
+// AYLA PERMANENT COPILOT BACKEND
+// -----------------------------------------------------------------------------
+// Ayla = permanent LMS + CRM copilot.
+// Uses existing OPENAI_API_KEY / AI_MODEL from Render.
+// Stores memory and cost logs in CRM DB on Render disk.
+// Executes read/check tools directly. Mutating tools create approval actions first.
+// -----------------------------------------------------------------------------
+
+const AYLA_DEFAULT_SETTINGS = {
+  assistant_name: "Ayla",
+  enabled: true,
+  mode: "approval", // observer | approval | admin_action
+  memory_enabled: true,
+  voice_enabled: true,
+  speak_replies: false,
+  model: process.env.AYLA_MODEL || process.env.AI_MODEL || "gpt-4o-mini",
+  strong_model: process.env.AYLA_STRONG_MODEL || process.env.AI_STRONG_MODEL || process.env.AI_MODEL || "gpt-4o-mini",
+  daily_budget_usd: Number(process.env.AYLA_DAILY_BUDGET_USD || 2),
+  monthly_budget_usd: Number(process.env.AYLA_MONTHLY_BUDGET_USD || 25),
+  approval_required_for: [
+    "send_message",
+    "send_bulk_message",
+    "change_team_permissions",
+    "change_prices",
+    "change_plans",
+    "change_coupons",
+    "delete_record",
+    "publish_recording",
+    "grant_student_access",
+    "revoke_student_access",
+    "execute_campaign",
+    "enable_ai_auto"
+  ],
+  safe_tools: [
+    "run_full_flow_check",
+    "run_telegram_check",
+    "run_whatsapp_check",
+    "get_providers",
+    "get_message_logs",
+    "get_pending_approvals",
+    "get_team_members",
+    "get_lms_recordings",
+    "get_templates",
+    "get_plans",
+    "get_coupons",
+    "get_enrollments",
+    "get_live_sessions",
+    "get_tasks"
+  ],
+  updated_at: null
+};
+
+function aylaEnsureStore(db) {
+  if (!Array.isArray(db.copilot_memory)) db.copilot_memory = [];
+  if (!Array.isArray(db.copilot_chats)) db.copilot_chats = [];
+  if (!Array.isArray(db.copilot_cost_logs)) db.copilot_cost_logs = [];
+  if (!Array.isArray(db.copilot_tool_runs)) db.copilot_tool_runs = [];
+  if (!Array.isArray(db.copilot_actions)) db.copilot_actions = [];
+  db.copilot_settings = {
+    ...AYLA_DEFAULT_SETTINGS,
+    ...(db.copilot_settings || {}),
+  };
+  if (!db.copilot_settings.assistant_name) db.copilot_settings.assistant_name = "Ayla";
+  return db;
+}
+
+function aylaPublicSettings(db) {
+  const settings = aylaEnsureStore(db).copilot_settings || AYLA_DEFAULT_SETTINGS;
+  return {
+    assistant_name: settings.assistant_name || "Ayla",
+    enabled: settings.enabled !== false,
+    mode: settings.mode || "approval",
+    memory_enabled: settings.memory_enabled !== false,
+    voice_enabled: settings.voice_enabled !== false,
+    speak_replies: Boolean(settings.speak_replies),
+    model: settings.model || getAIModel("gpt-4o-mini"),
+    strong_model: settings.strong_model || settings.model || getAIModel("gpt-4o-mini"),
+    daily_budget_usd: Number(settings.daily_budget_usd || 2),
+    monthly_budget_usd: Number(settings.monthly_budget_usd || 25),
+    approval_required_for: Array.isArray(settings.approval_required_for) ? settings.approval_required_for : AYLA_DEFAULT_SETTINGS.approval_required_for,
+    safe_tools: Array.isArray(settings.safe_tools) ? settings.safe_tools : AYLA_DEFAULT_SETTINGS.safe_tools,
+    updated_at: settings.updated_at || null,
+  };
+}
+
+function aylaIsMutatingRequest(text = "") {
+  const t = String(text || "").toLowerCase();
+  return [
+    "send ",
+    "send this",
+    "send message",
+    "bulk",
+    "delete",
+    "remove",
+    "change price",
+    "change plan",
+    "update plan",
+    "create coupon",
+    "disable coupon",
+    "enable coupon",
+    "grant access",
+    "revoke access",
+    "publish recording",
+    "change permission",
+    "give access",
+    "create portal",
+    "execute campaign",
+    "auto send",
+    "turn on ai auto"
+  ].some((phrase) => t.includes(phrase));
+}
+
+function aylaNeedsStrongModel(text = "") {
+  const t = String(text || "").toLowerCase();
+  return [
+    "server.js",
+    "code",
+    "debug",
+    "error",
+    "stack trace",
+    "build failed",
+    "syntax",
+    "route",
+    "backend",
+    "frontend",
+    "replace file",
+    "full replacement",
+    "crash",
+    "cannot deploy"
+  ].some((phrase) => t.includes(phrase));
+}
+
+function aylaExtractMemoryFromMessage(message = "") {
+  const clean = String(message || "").trim();
+  if (!clean) return null;
+  const lower = clean.toLowerCase();
+  const shouldRemember =
+    lower.startsWith("remember") ||
+    lower.includes("remember that") ||
+    lower.includes("save this") ||
+    lower.includes("store this") ||
+    lower.includes("from now on") ||
+    lower.includes("do not forget") ||
+    lower.includes("don't forget");
+  if (!shouldRemember) return null;
+  return {
+    id: ngUuid(),
+    title: "User instruction",
+    text: clean,
+    scope: "global",
+    source: "ayla_chat",
+    created_at: ngNowIso(),
+    updated_at: ngNowIso(),
+  };
+}
+
+function aylaSummarizeCrm(crmDb) {
+  const providers = ngGetProviderStatusFromEnv();
+  const pendingAssistantActions = ngReadArray(crmDb, "assistant_actions").filter((x) => {
+    return ["pending", "pending_approval"].includes(String(x.status || "").toLowerCase());
+  });
+  const failedMessages = ngGetMessageLogs(crmDb, 24).filter((log) => {
+    const txt = JSON.stringify(log).toLowerCase();
+    const status = String(log.status || log.delivery_status || "").toLowerCase();
+    return status.includes("fail") || status.includes("error") || txt.includes("failed") || txt.includes("error");
+  });
+  return {
+    providers,
+    counts: {
+      leads: ngReadArray(crmDb, "leads").length,
+      conversations: ngReadArray(crmDb, "conversations").length,
+      message_logs: ngReadArray(crmDb, "message_logs").length,
+      failed_messages_24h: failedMessages.length,
+      pending_assistant_actions: pendingAssistantActions.length,
+      approvals: ngReadArray(crmDb, "approval_queue").length,
+      team_members: ngReadArray(crmDb, "team_members").length,
+      tasks: ngReadArray(crmDb, "tasks").length,
+      templates: ngReadArray(crmDb, "message_templates").length,
+      integrations: ngReadArray(crmDb, "integrations").length,
+    },
+    latest_report: ngReadArray(crmDb, "assistant_reports").slice(-1)[0] || null,
+    pending_actions: pendingAssistantActions.slice(0, 10),
+  };
+}
+
+function aylaSummarizeLms(liveDb) {
+  const recordings = Object.values(liveDb.recordings || {});
+  const unpublished = recordings.filter((r) => r.published !== true);
+  return {
+    counts: {
+      users: Object.keys(liveDb.users || {}).length,
+      courses: Object.keys(liveDb.courses || {}).length,
+      live_sessions: Object.keys(liveDb.liveSessions || {}).length,
+      recordings: recordings.length,
+      unpublished_recordings: unpublished.length,
+      notes: Object.keys(liveDb.notes || {}).length,
+      enrollments: Object.keys(liveDb.enrollments || {}).length,
+      plans: Object.keys(liveDb.plans || {}).length,
+      coupons: Object.keys(liveDb.coupons || {}).length,
+      assessments: Object.keys(liveDb.assessments || {}).length,
+      assessment_attempts: Object.keys(liveDb.assessmentAttempts || {}).length,
+    },
+    unpublished_recordings: unpublished.slice(0, 10).map((r) => ({
+      meeting_id: r.meeting_id,
+      topic: r.topic,
+      start_time: r.start_time,
+      session_id: r.session_id,
+      course_id: r.course_id,
+    })),
+  };
+}
+
+function aylaBuildCostSummary(db) {
+  aylaEnsureStore(db);
+  const logs = ngReadArray(db, "copilot_cost_logs");
+  const today = new Date().toISOString().slice(0, 10);
+  const month = new Date().toISOString().slice(0, 7);
+  const todayLogs = logs.filter((x) => String(x.created_at || "").startsWith(today));
+  const monthLogs = logs.filter((x) => String(x.created_at || "").startsWith(month));
+  const sum = (items) => Number(items.reduce((acc, item) => acc + Number(item.estimated_cost_usd || item.cost_usd || 0), 0).toFixed(6));
+  return {
+    today_usd: sum(todayLogs),
+    month_usd: sum(monthLogs),
+    total_usd: sum(logs),
+    last_usd: Number(logs.slice(-1)[0]?.estimated_cost_usd || 0),
+    logs: logs.slice(-100).reverse(),
+  };
+}
+
+async function aylaLogCost({ db, actor, model, usage, action = "copilot_chat", meta = {} }) {
+  const cleanUsage = normalizeAIUsage(usage || {});
+  const estimated = estimateAICostUsd({ model, usage: cleanUsage });
+  const log = {
+    id: ngUuid(),
+    action,
+    model,
+    input_tokens: cleanUsage.input_tokens,
+    output_tokens: cleanUsage.output_tokens,
+    total_tokens: cleanUsage.total_tokens,
+    estimated_cost_usd: estimated,
+    user_id: actor?.id || null,
+    user_email: actor?.email || null,
+    meta,
+    created_at: ngNowIso(),
+  };
+  ngEnsureArray(db, "copilot_cost_logs").push(log);
+  db.copilot_cost_logs = db.copilot_cost_logs.slice(-1000);
+  return log;
+}
+
+async function aylaRunSafeTool({ tool, actor = null, payload = {} }) {
+  const crmDb = ngEnsureAiStore(aylaEnsureStore(await readCrmDb()));
+  const liveDb = await readLiveDb();
+  let result = null;
+
+  if (tool === "run_full_flow_check" || tool === "full-flow" || tool === "full_flow") {
+    result = await ngRunFlowCheck({ area: "all", lookbackHours: payload.lookback_hours || 24, actor, command: "Ayla full flow check" });
+  } else if (tool === "run_telegram_check" || tool === "telegram") {
+    result = await ngRunFlowCheck({ area: "telegram", lookbackHours: payload.lookback_hours || 24, actor, command: "Ayla Telegram check" });
+  } else if (tool === "run_whatsapp_check" || tool === "whatsapp") {
+    result = await ngRunFlowCheck({ area: "whatsapp", lookbackHours: payload.lookback_hours || 24, actor, command: "Ayla WhatsApp check" });
+  } else if (tool === "get_providers") {
+    result = { providers: ngGetProviderStatusFromEnv() };
+  } else if (tool === "get_message_logs") {
+    result = { message_logs: ngGetMessageLogs(crmDb, payload.lookback_hours || 24).slice(-100) };
+  } else if (tool === "get_pending_approvals") {
+    result = {
+      assistant_actions: ngReadArray(crmDb, "assistant_actions").filter((x) => ["pending", "pending_approval"].includes(String(x.status || "").toLowerCase())).slice(0, 100),
+      approval_queue: ngReadArray(crmDb, "approval_queue").filter((x) => ["pending", "pending_approval", "needs_approval"].includes(String(x.status || "").toLowerCase())).slice(0, 100),
+    };
+  } else if (tool === "get_team_members") {
+    result = { team_members: ngReadArray(crmDb, "team_members").slice(0, 200), roles: ngReadArray(crmDb, "roles").slice(0, 200) };
+  } else if (tool === "get_lms_recordings") {
+    result = { recordings: Object.values(liveDb.recordings || {}).slice(-200) };
+  } else if (tool === "get_templates") {
+    result = { templates: [...ngReadArray(crmDb, "message_templates"), ...ngReadArray(crmDb, "templates")].slice(0, 200) };
+  } else if (tool === "get_plans") {
+    result = { plans: Object.values(liveDb.plans || {}).slice(0, 200) };
+  } else if (tool === "get_coupons") {
+    result = { coupons: Object.values(liveDb.coupons || {}).slice(0, 200) };
+  } else if (tool === "get_enrollments") {
+    result = { enrollments: Object.values(liveDb.enrollments || {}).slice(-200) };
+  } else if (tool === "get_live_sessions") {
+    result = { live_sessions: Object.values(liveDb.liveSessions || {}).slice(-200) };
+  } else if (tool === "get_tasks") {
+    result = { tasks: ngReadArray(crmDb, "tasks").slice(-200) };
+  } else {
+    const error = new Error(`Unknown Ayla tool: ${tool}`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const logDb = aylaEnsureStore(await readCrmDb());
+  ngEnsureArray(logDb, "copilot_tool_runs").push({
+    id: ngUuid(),
+    tool,
+    payload,
+    result_summary: JSON.stringify(result || {}).slice(0, 2500),
+    user_id: actor?.id || null,
+    user_email: actor?.email || null,
+    created_at: ngNowIso(),
+  });
+  logDb.copilot_tool_runs = logDb.copilot_tool_runs.slice(-500);
+  await writeCrmDb(logDb);
+
+  return result;
+}
+
+function aylaPickAutomaticTool(message = "") {
+  const text = String(message || "").toLowerCase();
+  if (text.includes("telegram")) return "run_telegram_check";
+  if (text.includes("whatsapp")) return "run_whatsapp_check";
+  if (text.includes("provider") || text.includes("integration")) return "get_providers";
+  if (text.includes("approval") || text.includes("approve")) return "get_pending_approvals";
+  if (text.includes("team") || text.includes("portal") || text.includes("permission") || text.includes("role")) return "get_team_members";
+  if (text.includes("recording") || text.includes("zoom")) return "get_lms_recordings";
+  if (text.includes("template")) return "get_templates";
+  if (text.includes("plan") || text.includes("pricing")) return "get_plans";
+  if (text.includes("coupon")) return "get_coupons";
+  if (text.includes("enrollment") || text.includes("student access")) return "get_enrollments";
+  if (text.includes("live session") || text.includes("class")) return "get_live_sessions";
+  if (text.includes("task")) return "get_tasks";
+  if (
+    text.includes("check everything") ||
+    text.includes("full flow") ||
+    text.includes("where should i start") ||
+    text.includes("what should i fix") ||
+    text.includes("blocked") ||
+    text.includes("stuck")
+  ) return "run_full_flow_check";
+  return null;
+}
+
+function aylaCreateApprovalAction(db, { message, actor, currentPage, toolSuggestion = null }) {
+  const action = ngBuildAction({
+    type: "copilot_approval_required",
+    title: "Ayla requested approval before changing data",
+    description: "Ayla detected a request that may change CRM/LMS data. Review before execution.",
+    area: "copilot",
+    payload: {
+      requested_message: message,
+      current_page: currentPage || null,
+      tool_suggestion: toolSuggestion,
+      requested_by: actor?.email || null,
+    },
+    requires_approval: true,
+  });
+  ngEnsureArray(db, "assistant_actions").push(action);
+  ngEnsureArray(db, "copilot_actions").push(action);
+  return action;
+}
+
+async function aylaBuildPromptContext({ db, liveDb, message, pageContext, toolResult, actor }) {
+  const memory = ngReadArray(db, "copilot_memory").filter((m) => m.active !== false).slice(-50);
+  const training = ngReadArray(db, "ai_training_items").filter((x) => x.active !== false).slice(0, 50);
+  const crmSummary = aylaSummarizeCrm(db);
+  const lmsSummary = aylaSummarizeLms(liveDb);
+
+  return {
+    assistant: "Ayla",
+    user: {
+      id: actor?.id || null,
+      email: actor?.email || null,
+      name: actor?.name || "Admin",
+    },
+    current_page: pageContext || {},
+    message,
+    mode: aylaPublicSettings(db).mode,
+    crm_summary: crmSummary,
+    lms_summary: lmsSummary,
+    memory: memory.map((m) => ({ title: m.title, text: m.text, scope: m.scope, created_at: m.created_at })),
+    training: training.map((t) => ({ title: t.title, category: t.category, content: t.content })),
+    tool_result: toolResult,
+  };
+}
+
+function aylaSystemPrompt() {
+  return `You are Ayla, the permanent female AI Copilot for NextGen USMLE LMS + CRM.
+
+Your job:
+- Help the owner operate the full LMS + CRM.
+- Understand CRM, LMS, leads, inbox, WhatsApp, Telegram, email, Meta/Facebook/Instagram, team roles, recordings, plans, coupons, payments, enrollments, assessments, live sessions, and support flows.
+- Give real, specific operational answers from the supplied backend context.
+- Tell the owner where to start and what to fix first.
+- Use simple direct language. The owner is building fast and needs exact steps.
+
+Safety and permissions:
+- You may freely read/check/summarize.
+- You must NOT claim you already changed data unless a tool result explicitly says it changed data.
+- For sensitive or mutating actions, explain the proposed action and say it needs approval.
+- Sensitive actions include sending messages, bulk sends, changing pricing/plans/coupons, permissions, student access, publishing/deleting records, enabling full auto mode, payment links, campaigns.
+- Never guarantee USMLE pass, score increase, residency, license, visa, or official affiliation with USMLE/NBME/UWorld/Pathoma/Sketchy.
+
+Memory:
+- Use provided memory as permanent facts/instructions.
+- If the owner gives a new durable instruction, mention that it can be saved.
+
+Response style:
+- Be precise and operational.
+- If a tool result shows issues, list the issues and fixes.
+- If asked "where to start", give the top 3 actions in order.
+- If backend/tool access is missing, say exactly what route/tool is missing.`;
+}
+
+function aylaBuildUserPrompt(context) {
+  return `CURRENT CONTEXT JSON:
+${JSON.stringify(context, null, 2).slice(0, 45000)}
+
+Now answer the owner's latest message as Ayla.`;
+}
+
+app.get("/admin/copilot/settings", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = aylaEnsureStore(await readCrmDb());
+    await writeCrmDb(db);
+    res.json({ success: true, settings: aylaPublicSettings(db) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/copilot/settings", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = aylaEnsureStore(await readCrmDb());
+    db.copilot_settings = {
+      ...db.copilot_settings,
+      ...req.body,
+      assistant_name: req.body?.assistant_name || db.copilot_settings.assistant_name || "Ayla",
+      mode: ngNormalizeMode(req.body?.mode || db.copilot_settings.mode || "approval"),
+      updated_at: ngNowIso(),
+    };
+    await writeCrmDb(db);
+    res.json({ success: true, settings: aylaPublicSettings(db) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/copilot/memory", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = aylaEnsureStore(await readCrmDb());
+    res.json({ success: true, memory: ngReadArray(db, "copilot_memory").filter((m) => m.active !== false).slice().reverse() });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/copilot/memory", async (req, res) => {
+  try {
+    const ctx = await requireCrmAdmin(req);
+    const db = aylaEnsureStore(await readCrmDb());
+    const memory = withTimestamps({
+      id: req.body?.id || ngUuid(),
+      title: req.body?.title || "Ayla memory",
+      text: String(req.body?.text || req.body?.content || "").trim(),
+      scope: req.body?.scope || "global",
+      category: req.body?.category || "instruction",
+      source: req.body?.source || "manual",
+      active: req.body?.active !== false,
+      created_by: ctx.user?.id || null,
+    });
+    if (!memory.text) {
+      return res.status(400).json({ success: false, error: "Memory text is required" });
+    }
+    ngEnsureArray(db, "copilot_memory").push(memory);
+    db.copilot_memory = db.copilot_memory.slice(-500);
+    await writeCrmDb(db);
+    res.json({ success: true, memory });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete("/admin/copilot/memory/:id", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = aylaEnsureStore(await readCrmDb());
+    const item = ngReadArray(db, "copilot_memory").find((m) => String(m.id) === String(req.params.id));
+    if (!item) return res.status(404).json({ success: false, error: "Memory not found" });
+    item.active = false;
+    item.updated_at = ngNowIso();
+    await writeCrmDb(db);
+    res.json({ success: true, memory: item });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/copilot/costs", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = aylaEnsureStore(await readCrmDb());
+    res.json({ success: true, costs: aylaBuildCostSummary(db), summary: aylaBuildCostSummary(db) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/copilot/tools", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = aylaEnsureStore(await readCrmDb());
+    res.json({
+      success: true,
+      tools: aylaPublicSettings(db).safe_tools.map((key) => ({ key, safe: true })),
+      approval_required_for: aylaPublicSettings(db).approval_required_for,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/copilot/run-tool", async (req, res) => {
+  try {
+    const ctx = await requireCrmAdmin(req);
+    const tool = String(req.body?.tool || req.body?.name || "").trim();
+    const payload = req.body?.payload || {};
+    const result = await aylaRunSafeTool({ tool, actor: ctx.user, payload });
+    res.json({ success: true, tool, result });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/copilot/chat", async (req, res) => {
+  try {
+    const ctx = await requireCrmAdmin(req);
+    let db = ngEnsureAiStore(aylaEnsureStore(await readCrmDb()));
+    const liveDb = await readLiveDb();
+    const settings = aylaPublicSettings(db);
+
+    if (settings.enabled === false) {
+      return res.status(403).json({ success: false, error: "Ayla is disabled in copilot settings" });
+    }
+
+    const message = String(req.body?.message || "").trim();
+    if (!message) {
+      return res.status(400).json({ success: false, error: "Message is required" });
+    }
+
+    const extractedMemory = aylaExtractMemoryFromMessage(message);
+    if (extractedMemory && settings.memory_enabled !== false) {
+      ngEnsureArray(db, "copilot_memory").push({
+        ...extractedMemory,
+        created_by: ctx.user?.id || null,
+      });
+      db.copilot_memory = db.copilot_memory.slice(-500);
+    }
+
+    let toolResult = null;
+    const autoTool = aylaPickAutomaticTool(message);
+    if (autoTool) {
+      try {
+        toolResult = await aylaRunSafeTool({
+          tool: autoTool,
+          actor: ctx.user,
+          payload: {
+            lookback_hours: req.body?.lookback_hours || 24,
+            current_page: req.body?.current_page || null,
+          },
+        });
+        db = ngEnsureAiStore(aylaEnsureStore(await readCrmDb()));
+      } catch (toolError) {
+        toolResult = { error: toolError.message, tool: autoTool };
+      }
+    }
+
+    let approvalAction = null;
+    if (aylaIsMutatingRequest(message) && settings.mode !== "admin_action") {
+      approvalAction = aylaCreateApprovalAction(db, {
+        message,
+        actor: ctx.user,
+        currentPage: req.body?.current_page || req.body?.page_context?.path || null,
+        toolSuggestion: autoTool,
+      });
+    }
+
+    const model = aylaNeedsStrongModel(message)
+      ? (settings.strong_model || settings.model || getAIModel("gpt-4o-mini"))
+      : (settings.model || getAIModel("gpt-4o-mini"));
+
+    const promptContext = await aylaBuildPromptContext({
+      db,
+      liveDb,
+      message,
+      pageContext: req.body?.page_context || { path: req.body?.current_page || null },
+      toolResult,
+      actor: ctx.user,
+    });
+
+    let aiResult = null;
+    let reply = "";
+
+    if (isAIConfigured()) {
+      aiResult = await callOpenAIResponsesAPI({
+        model,
+        systemPrompt: aylaSystemPrompt(),
+        userPrompt: aylaBuildUserPrompt(promptContext),
+        maxOutputTokens: 1400,
+        jsonMode: false,
+      });
+      reply = aiResult.text || "";
+    } else {
+      reply = "Ayla is connected to the backend, but OPENAI_API_KEY is not configured. I can still run checks, but real AI reasoning needs the OpenAI key.";
+    }
+
+    if (!reply.trim()) {
+      reply = "I checked the available context. Please ask me what exact flow you want to inspect next.";
+    }
+
+    const costLog = aiResult
+      ? await aylaLogCost({
+          db,
+          actor: ctx.user,
+          model,
+          usage: aiResult.usage,
+          action: "copilot_chat",
+          meta: {
+            current_page: req.body?.current_page || null,
+            auto_tool: autoTool,
+          },
+        })
+      : null;
+
+    const chat = {
+      id: ngUuid(),
+      user_id: ctx.user?.id || null,
+      user_email: ctx.user?.email || null,
+      message,
+      reply,
+      model,
+      usage: aiResult?.usage || null,
+      estimated_cost_usd: costLog?.estimated_cost_usd || 0,
+      auto_tool: autoTool,
+      tool_result_summary: toolResult ? JSON.stringify(toolResult).slice(0, 5000) : null,
+      approval_action_id: approvalAction?.id || null,
+      created_at: ngNowIso(),
+    };
+
+    ngEnsureArray(db, "copilot_chats").push(chat);
+    db.copilot_chats = db.copilot_chats.slice(-500);
+    await writeCrmDb(db);
+
+    res.json({
+      success: true,
+      assistant_name: settings.assistant_name || "Ayla",
+      reply,
+      message: reply,
+      model,
+      usage: aiResult?.usage || null,
+      ai_usage: aiResult?.usage || null,
+      cost: costLog,
+      estimated_cost_usd: costLog?.estimated_cost_usd || 0,
+      memory_saved: Boolean(extractedMemory),
+      tool: autoTool,
+      tool_result: toolResult,
+      report: toolResult?.report || toolResult?.result?.report || null,
+      actions: approvalAction ? [approvalAction] : [],
+      approval_action: approvalAction,
+      chat,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// END AYLA PERMANENT COPILOT BACKEND
+// -----------------------------------------------------------------------------
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`DATA_DIR=${DATA_DIR}`);
