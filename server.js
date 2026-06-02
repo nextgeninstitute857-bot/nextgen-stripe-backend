@@ -10142,55 +10142,51 @@ app.post("/admin/crm/conversations/:leadId/send", async (req, res) => {
     const lead = getLeadByAnyId(db, req.params.leadId);
     if (!lead) return res.status(404).json({ success: false, error: "Lead not found" });
 
-    const platform = normalizeLeadSourcePlatform(lead);
-    const integration = getIntegrationByPlatform(db, platform) || { id: null, platform };
-    const to =
-      req.body.to ||
-      lead.platform_contact_id ||
-      lead.telegram_chat_id ||
-      lead.wa_id ||
-      lead.whatsapp_phone ||
-      lead.phone ||
-      lead.email ||
-      lead.facebook_sender_id ||
-      lead.instagram_sender_id;
+    const brandId = getCrmBrandId(req, db) || lead.brand_id || null;
+    const requestedChannel = req.body.channel || req.body.platform || normalizeLeadSourcePlatform(lead);
+    const channel = normalizeAutomationChannel(requestedChannel);
+    const to = getBestRecipientForChannel({
+      channel,
+      to: req.body.to || req.body.recipient || "",
+      lead,
+    });
 
-    const result = await sendSocialMessage({
+    const result = await sendCrmMessage({
       db,
-      integration,
-      body: {
-        ...req.body,
-        to,
-        text: req.body.text || req.body.message || req.body.body,
+      brandId,
+      channel,
+      to,
+      subject: req.body.subject || "NextGen USMLE",
+      text: req.body.text || req.body.message || req.body.body || "",
+      templateId: req.body.template_id || req.body.template_key || null,
+      templateVariables: { ...(req.body.variables || {}), lead },
+      leadId: lead.id,
+      metadata: {
+        ...(req.body.metadata || {}),
+        source: "conversation_inbox",
+        template_name: req.body.template_name || req.body.whatsapp_template_name || req.body.metadata?.template_name || "",
+        whatsapp_template_name: req.body.whatsapp_template_name || req.body.template_name || req.body.metadata?.whatsapp_template_name || "",
+        language_code: req.body.language_code || req.body.metadata?.language_code || "en_US",
+        components: req.body.components || req.body.metadata?.components || [],
       },
     });
 
-    const conversation = appendSocialConversation(db, {
-      lead,
-      platform,
-      direction: "outbound",
-      text: req.body.text || req.body.message || req.body.body || "",
-      payload: { send_result: result },
-      integration,
-    });
-
     createIntegrationLog(db, {
-      brand_id: integration?.brand_id || lead.brand_id || null,
-      integration_id: integration?.id || null,
-      platform,
+      brand_id: brandId,
+      integration_id: getIntegrationByPlatform(db, channel)?.id || null,
+      platform: channel,
       action: "admin_send_message",
-      status: result.live_sent ? "success" : "queued",
-      message: result.message,
-      metadata: { lead_id: lead.id, conversation_id: conversation.id },
+      status: result.success ? "success" : result.queued ? "queued" : "error",
+      message: result.message || result.error || `${channel} send attempted`,
+      metadata: { lead_id: lead.id, log_id: result.log?.id || null, error: result.error || null },
     });
 
     await writeCrmDb(db);
-    res.json({ success: true, result, conversation });
+    res.status(result.success || result.queued ? 200 : 502).json({ success: result.success, result, log: result.log, error: result.error || null, hint: result.hint || null });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
 });
-
 
 
 // -----------------------------------------------------------------------------
@@ -10691,42 +10687,108 @@ function normalizeAutomationChannel(value = "whatsapp") {
 }
 
 function getProviderStatus() {
+  const hasWhatsapp = Boolean(process.env.WHATSAPP_ACCESS_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID);
+  const hasTelegram = Boolean(process.env.TELEGRAM_BOT_TOKEN);
+  const hasEmail = Boolean(process.env.SMTP_HOST || process.env.SENDGRID_API_KEY || process.env.RESEND_API_KEY);
+  const hasFacebook = Boolean(process.env.META_PAGE_ACCESS_TOKEN || process.env.FACEBOOK_PAGE_ACCESS_TOKEN);
+  const hasInstagram = Boolean(process.env.INSTAGRAM_ACCESS_TOKEN || process.env.INSTAGRAM_PAGE_ACCESS_TOKEN || process.env.META_PAGE_ACCESS_TOKEN);
+
   return {
     whatsapp: {
       key: "whatsapp",
+      channel: "whatsapp",
       name: "Meta WhatsApp Cloud API",
-      configured: Boolean(process.env.WHATSAPP_ACCESS_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID),
+      configured: hasWhatsapp,
+      ready: hasWhatsapp,
+      enabled: hasWhatsapp,
+      status: hasWhatsapp ? "active" : "not_configured",
       business_account_id: process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || null,
       phone_number_id: process.env.WHATSAPP_PHONE_NUMBER_ID || null,
-      supports: ["text", "template", "webhook", "automation"],
+      supports: ["text", "template", "webhook", "automation", "bulk"],
+      notes: hasWhatsapp
+        ? "WhatsApp credentials found. Cold/outside-24h messages may require approved templates."
+        : "Add WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID.",
+    },
+    telegram: {
+      key: "telegram",
+      channel: "telegram",
+      name: "Telegram Bot",
+      configured: hasTelegram,
+      ready: hasTelegram,
+      enabled: hasTelegram,
+      status: hasTelegram ? "active" : "not_configured",
+      bot_configured: hasTelegram,
+      webhook_secret_configured: Boolean(process.env.TELEGRAM_WEBHOOK_SECRET),
+      supports: ["text", "webhook", "automation", "community_watch"],
+      notes: hasTelegram
+        ? "Telegram bot token found. Send to numeric chat_id only, not t.me links."
+        : "Add TELEGRAM_BOT_TOKEN.",
     },
     email: {
       key: "email",
+      channel: "email",
       name: "Email provider",
-      configured: Boolean(process.env.SMTP_HOST || process.env.SENDGRID_API_KEY || process.env.RESEND_API_KEY),
-      supports: ["text", "template", "automation"],
-      status: "provider_adapter_ready_credentials_optional",
+      configured: hasEmail,
+      ready: hasEmail,
+      enabled: hasEmail,
+      status: hasEmail ? "active" : "not_configured",
+      provider: process.env.RESEND_API_KEY ? "resend" : process.env.SENDGRID_API_KEY ? "sendgrid" : process.env.SMTP_HOST ? "smtp" : null,
+      supports: ["text", "template", "automation", "bulk"],
+      notes: hasEmail
+        ? "Email credentials found. Resend, SendGrid, or SMTP can be used."
+        : "Add RESEND_API_KEY, SENDGRID_API_KEY, or SMTP_HOST/SMTP_USER/SMTP_PASS.",
     },
     sms: {
       key: "sms",
+      channel: "sms",
       name: "SMS provider",
       configured: Boolean(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN),
+      ready: Boolean(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN),
+      enabled: Boolean(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN),
       supports: ["text", "template", "automation"],
-      status: "provider_adapter_ready_credentials_optional",
+      status: process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN ? "active" : "not_configured",
+    },
+    facebook: {
+      key: "facebook",
+      channel: "facebook",
+      name: "Facebook Messenger / Page",
+      configured: hasFacebook,
+      ready: hasFacebook,
+      enabled: hasFacebook,
+      supports: ["text", "webhook", "automation"],
+      status: hasFacebook ? "active" : "manual_first",
+      notes: "Facebook/Meta sending may require app permissions and app review.",
     },
     messenger: {
       key: "messenger",
+      channel: "messenger",
       name: "Facebook Messenger",
-      configured: Boolean(process.env.META_PAGE_ACCESS_TOKEN),
+      configured: hasFacebook,
+      ready: hasFacebook,
+      enabled: hasFacebook,
       supports: ["text", "automation"],
-      status: "provider_adapter_ready_credentials_optional",
+      status: hasFacebook ? "active" : "manual_first",
     },
     instagram: {
       key: "instagram",
+      channel: "instagram",
       name: "Instagram DM",
-      configured: Boolean(process.env.INSTAGRAM_ACCESS_TOKEN || process.env.META_PAGE_ACCESS_TOKEN),
-      supports: ["text", "automation"],
-      status: "provider_adapter_ready_credentials_optional",
+      configured: hasInstagram,
+      ready: hasInstagram,
+      enabled: hasInstagram,
+      supports: ["text", "webhook", "automation"],
+      status: hasInstagram ? "active" : "manual_first",
+      notes: "Instagram/Meta sending may require app permissions and app review.",
+    },
+    discord: {
+      key: "discord",
+      channel: "discord",
+      name: "Discord",
+      configured: Boolean(process.env.DISCORD_WEBHOOK_URL || process.env.DISCORD_BOT_TOKEN),
+      ready: Boolean(process.env.DISCORD_WEBHOOK_URL || process.env.DISCORD_BOT_TOKEN),
+      enabled: Boolean(process.env.DISCORD_WEBHOOK_URL || process.env.DISCORD_BOT_TOKEN),
+      supports: ["text", "webhook"],
+      status: process.env.DISCORD_WEBHOOK_URL || process.env.DISCORD_BOT_TOKEN ? "active" : "not_configured",
     },
   };
 }
@@ -10815,6 +10877,27 @@ function createMessageLog(db, payload = {}) {
   return log;
 }
 
+function getWhatsAppTemplateName({ template = null, metadata = {} } = {}) {
+  return String(
+    template?.provider_template_name ||
+      template?.whatsapp_template_name ||
+      metadata.whatsapp_template_name ||
+      metadata.template_name ||
+      metadata.provider_template_name ||
+      ""
+  ).trim();
+}
+
+function getWhatsAppLanguageCode({ template = null, metadata = {} } = {}) {
+  return String(
+    template?.provider_language_code ||
+      template?.language_code ||
+      metadata.language_code ||
+      metadata.provider_language_code ||
+      "en_US"
+  ).trim() || "en_US";
+}
+
 async function sendWhatsAppCloudMessage({ to, text = "", templateName = "", languageCode = "en_US", components = [] }) {
   const token = process.env.WHATSAPP_ACCESS_TOKEN;
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
@@ -10822,13 +10905,15 @@ async function sendWhatsAppCloudMessage({ to, text = "", templateName = "", lang
   if (!token || !phoneNumberId) {
     const error = new Error("WhatsApp Cloud API is not configured. Add WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID.");
     error.statusCode = 500;
+    error.hint = "Check Render environment variables and redeploy the backend.";
     throw error;
   }
 
   const recipient = normalizePhoneForWhatsapp(to);
   if (!recipient) {
-    const error = new Error("A valid WhatsApp recipient number is required");
+    const error = new Error("A valid WhatsApp recipient number is required. Use international format, for example +923001234567.");
     error.statusCode = 400;
+    error.hint = "Do not use names or Telegram links for WhatsApp recipient.";
     throw error;
   }
 
@@ -10846,8 +10931,14 @@ async function sendWhatsAppCloudMessage({ to, text = "", templateName = "", lang
       ...(Array.isArray(components) && components.length ? { components } : {}),
     };
   } else {
+    const cleanText = String(text || "").trim();
+    if (!cleanText) {
+      const error = new Error("WhatsApp text message is empty and no template was selected.");
+      error.statusCode = 400;
+      throw error;
+    }
     payload.type = "text";
-    payload.text = { preview_url: false, body: String(text || "") };
+    payload.text = { preview_url: false, body: cleanText };
   }
 
   const response = await axios.post(
@@ -10865,64 +10956,327 @@ async function sendWhatsAppCloudMessage({ to, text = "", templateName = "", lang
   return response.data;
 }
 
-async function sendCrmMessage({ db, brandId = null, channel = "whatsapp", to = "", subject = "", text = "", templateId = null, templateVariables = {}, leadId = null, enrollmentId = null, flowId = null, runId = null, queueId = null, metadata = {} }) {
+async function sendTelegramMessage({ to, text = "", integration = {} }) {
+  const chatId = String(to || "").trim();
+  if (!chatId) {
+    const error = new Error("Telegram chat_id is required. Use numeric chat_id, not a t.me link.");
+    error.statusCode = 400;
+    error.hint = "Example valid values: 123456789 or -1001577486157.";
+    throw error;
+  }
+
+  if (/^https?:\/\//i.test(chatId) || chatId.includes("t.me/")) {
+    const error = new Error("Telegram recipient must be a numeric chat_id, not a t.me URL.");
+    error.statusCode = 400;
+    error.hint = "Open Telegram webhook/inbound logs and copy telegram_chat_id. For groups it usually starts with -100.";
+    throw error;
+  }
+
+  const cleanText = String(text || "").trim();
+  if (!cleanText) {
+    const error = new Error("Telegram message text is required.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return telegramApi("sendMessage", {
+    chat_id: chatId,
+    text: cleanText,
+    disable_web_page_preview: false,
+  }, integration || {});
+}
+
+function getEmailFromAddress() {
+  return (
+    process.env.EMAIL_FROM ||
+    process.env.RESEND_FROM_EMAIL ||
+    process.env.SENDGRID_FROM_EMAIL ||
+    process.env.SMTP_FROM ||
+    "NextGen USMLE <support@nextgenusmlelms.com>"
+  );
+}
+
+function extractEmailAddress(value = "") {
+  const clean = String(value || "").trim();
+  return clean.match(/<([^>]+)>/)?.[1] || clean;
+}
+
+async function sendEmailMessage({ to, subject = "NextGen USMLE", text = "" }) {
+  const recipient = String(Array.isArray(to) ? to[0] : to || "").trim();
+  if (!recipient || !recipient.includes("@")) {
+    const error = new Error("A valid email recipient is required.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const cleanText = String(text || "").trim();
+  if (!cleanText) {
+    const error = new Error("Email message body is required.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const from = getEmailFromAddress();
+  const cleanSubject = String(subject || "NextGen USMLE").trim() || "NextGen USMLE";
+
+  if (process.env.RESEND_API_KEY) {
+    const response = await axios.post(
+      "https://api.resend.com/emails",
+      {
+        from,
+        to: [recipient],
+        subject: cleanSubject,
+        text: cleanText,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        timeout: 30000,
+      }
+    );
+
+    return { provider: "resend", ...response.data };
+  }
+
+  if (process.env.SENDGRID_API_KEY) {
+    const response = await axios.post(
+      "https://api.sendgrid.com/v3/mail/send",
+      {
+        personalizations: [{ to: [{ email: recipient }] }],
+        from: { email: extractEmailAddress(from) },
+        subject: cleanSubject,
+        content: [{ type: "text/plain", value: cleanText }],
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.SENDGRID_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        timeout: 30000,
+      }
+    );
+
+    return { provider: "sendgrid", status: response.status };
+  }
+
+  if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+    try {
+      const nodemailer = await import("nodemailer");
+      const transporter = nodemailer.default.createTransport({
+        host: process.env.SMTP_HOST,
+        port: Number(process.env.SMTP_PORT || 587),
+        secure: String(process.env.SMTP_SECURE || "false") === "true",
+        auth: {
+          user: process.env.SMTP_USER,
+          pass: process.env.SMTP_PASS,
+        },
+      });
+      return transporter.sendMail({ from, to: recipient, subject: cleanSubject, text: cleanText });
+    } catch (error) {
+      const e = new Error(`SMTP is configured but nodemailer is not installed or failed: ${error.message}`);
+      e.statusCode = 500;
+      throw e;
+    }
+  }
+
+  const error = new Error("Email sending requires RESEND_API_KEY, SENDGRID_API_KEY, or SMTP_HOST/SMTP_USER/SMTP_PASS.");
+  error.statusCode = 500;
+  throw error;
+}
+
+function getBestRecipientForChannel({ channel, to = "", lead = null }) {
+  if (to) return to;
+
+  if (channel === "email") {
+    return lead?.email || lead?.student_email || lead?.customer_email || "";
+  }
+
+  if (channel === "telegram") {
+    return lead?.telegram_chat_id || lead?.chat_id || lead?.platform_contact_id || lead?.telegram_id || "";
+  }
+
+  if (channel === "whatsapp") {
+    return lead?.whatsapp || lead?.whatsapp_phone || lead?.wa_id || lead?.phone || lead?.mobile || "";
+  }
+
+  if (["facebook", "messenger"].includes(channel)) {
+    return lead?.facebook_sender_id || lead?.platform_contact_id || lead?.facebook_id || "";
+  }
+
+  if (channel === "instagram") {
+    return lead?.instagram_sender_id || lead?.platform_contact_id || lead?.instagram_id || "";
+  }
+
+  return lead?.platform_contact_id || lead?.phone || lead?.email || "";
+}
+
+function extractProviderError(error) {
+  const data = error?.response?.data;
+  if (!data) return error?.message || "Provider request failed";
+  if (typeof data === "string") return data;
+  return data?.error?.message || data?.description || data?.message || JSON.stringify(data);
+}
+
+async function sendCrmMessage({
+  db,
+  brandId = null,
+  channel = "whatsapp",
+  to = "",
+  subject = "",
+  text = "",
+  templateId = null,
+  templateVariables = {},
+  leadId = null,
+  enrollmentId = null,
+  flowId = null,
+  runId = null,
+  queueId = null,
+  metadata = {},
+}) {
   const cleanChannel = normalizeAutomationChannel(channel);
   const template = templateId ? getMessageTemplateByKey(db, templateId) : null;
-  const finalSubject = renderTemplateString(subject || template?.subject || "", templateVariables);
-  const finalText = renderTemplateString(text || template?.body || template?.message || "", templateVariables);
+  const lead = leadId ? getLeadByAnyId(db, leadId) : null;
+  const variables = { ...(templateVariables || {}), lead: lead || templateVariables?.lead || {} };
+  const finalSubject = renderTemplateString(subject || template?.subject || "", variables) || "NextGen USMLE";
+  const finalText = renderTemplateString(text || template?.body || template?.message || "", variables);
+  const finalTo = getBestRecipientForChannel({ channel: cleanChannel, to, lead });
+  const integration = getIntegrationByPlatform(db, cleanChannel) || { id: null, platform: cleanChannel, brand_id: brandId };
 
   const baseLog = {
     brand_id: brandId,
     channel: cleanChannel,
-    lead_id: leadId,
+    provider: cleanChannel,
+    lead_id: lead?.id || leadId || null,
     enrollment_id: enrollmentId,
     flow_id: flowId,
     run_id: runId,
     queue_id: queueId,
     template_id: template?.id || templateId || null,
-    to,
+    to: finalTo,
     subject: finalSubject,
     text: finalText,
-    metadata,
+    metadata: {
+      ...(metadata || {}),
+      source: metadata?.source || "crm_messages_send",
+      template_key: template?.key || templateId || null,
+    },
   };
 
   try {
+    if (!finalTo) {
+      const error = new Error(`Recipient is required for ${cleanChannel}.`);
+      error.statusCode = 400;
+      throw error;
+    }
+
     let providerResponse = null;
     let providerMessageId = null;
 
     if (cleanChannel === "whatsapp") {
+      const templateName = getWhatsAppTemplateName({ template, metadata });
       providerResponse = await sendWhatsAppCloudMessage({
-        to,
+        to: finalTo,
         text: finalText,
-        templateName: template?.provider_template_name || metadata.whatsapp_template_name || metadata.template_name || "",
-        languageCode: template?.provider_language_code || metadata.language_code || "en_US",
-        components: metadata.components || [],
+        templateName,
+        languageCode: getWhatsAppLanguageCode({ template, metadata }),
+        components: metadata.components || metadata.whatsapp_components || [],
       });
       providerMessageId = providerResponse?.messages?.[0]?.id || null;
+    } else if (cleanChannel === "telegram") {
+      providerResponse = await sendTelegramMessage({ to: finalTo, text: finalText, integration });
+      providerMessageId = providerResponse?.result?.message_id || null;
+    } else if (cleanChannel === "email") {
+      providerResponse = await sendEmailMessage({ to: finalTo, subject: finalSubject, text: finalText });
+      providerMessageId = providerResponse?.id || providerResponse?.messageId || null;
+    } else if (["facebook", "messenger", "instagram", "discord"].includes(cleanChannel)) {
+      providerResponse = await sendSocialMessage({
+        db,
+        integration,
+        body: {
+          to: finalTo,
+          recipient: finalTo,
+          subject: finalSubject,
+          text: finalText,
+          message: finalText,
+          body: finalText,
+          messaging_type: metadata.messaging_type || "RESPONSE",
+        },
+      });
+      providerMessageId = providerResponse?.raw?.message_id || providerResponse?.raw?.recipient_id || null;
     } else {
-      const error = new Error(`${cleanChannel} provider adapter is ready, but credentials/sending implementation are not enabled yet`);
-      error.statusCode = 501;
-      throw error;
+      const draft = withTimestamps({
+        id: uuid(),
+        brand_id: brandId,
+        channel: cleanChannel,
+        action_type: `${cleanChannel}_manual_send_draft`,
+        input_text: finalText,
+        output_text: finalText,
+        status: "draft",
+        approval_status: "needs_approval",
+        metadata: { to: finalTo, subject: finalSubject },
+      });
+      ensureCrmArray(db, "approval_queue").push(draft);
+      providerResponse = { manual_first: true, approval_item: draft };
+      providerMessageId = draft.id;
     }
 
     const log = createMessageLog(db, {
       ...baseLog,
-      status: "sent",
+      status: providerResponse?.manual_first ? "queued" : "sent",
       provider_message_id: providerMessageId,
       provider_response: providerResponse,
-      sent_at: nowIso(),
+      sent_at: providerResponse?.manual_first ? null : nowIso(),
     });
 
-    return { success: true, log, provider_response: providerResponse };
+    if (lead) {
+      appendSocialConversation(db, {
+        lead,
+        platform: cleanChannel,
+        direction: "outbound",
+        text: finalText,
+        payload: { provider_response: providerResponse, message_log_id: log.id },
+        integration,
+      });
+    }
+
+    return {
+      success: !providerResponse?.manual_first,
+      queued: Boolean(providerResponse?.manual_first),
+      channel: cleanChannel,
+      provider: cleanChannel,
+      to: finalTo,
+      status: providerResponse?.manual_first ? "queued_for_approval" : "sent",
+      message: providerResponse?.manual_first ? "Provider is manual-first; message queued for approval." : `${cleanChannel} message sent`,
+      log,
+      provider_response: providerResponse,
+    };
   } catch (error) {
-    const providerError = error.response?.data || error.message;
+    const providerError = extractProviderError(error);
     const log = createMessageLog(db, {
       ...baseLog,
       status: "failed",
-      error: typeof providerError === "string" ? providerError : JSON.stringify(providerError),
+      error: providerError,
       provider_response: error.response?.data || null,
+      metadata: {
+        ...(baseLog.metadata || {}),
+        hint: error.hint || null,
+        status_code: error.statusCode || error.response?.status || null,
+      },
     });
-    return { success: false, log, error: log.error };
+
+    return {
+      success: false,
+      channel: cleanChannel,
+      provider: cleanChannel,
+      to: finalTo,
+      status: "failed",
+      error: providerError,
+      hint: error.hint || null,
+      log,
+      provider_response: error.response?.data || null,
+    };
   }
 }
 
@@ -11060,6 +11414,38 @@ app.get("/admin/crm/providers", async (req, res) => {
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
+app.post("/admin/crm/providers/test-send", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const channel = normalizeAutomationChannel(req.body.channel || "whatsapp");
+    const result = await sendCrmMessage({
+      db,
+      brandId,
+      channel,
+      to: req.body.to || req.body.recipient || req.body.chat_id || req.body.email || "",
+      subject: req.body.subject || "NextGen CRM Provider Test",
+      text: req.body.text || req.body.message || req.body.body || "Test message from NextGen CRM.",
+      templateId: req.body.template_id || req.body.template_key || null,
+      templateVariables: req.body.variables || {},
+      leadId: req.body.lead_id || null,
+      metadata: {
+        ...(req.body.metadata || {}),
+        source: "provider_test_center",
+        template_name: req.body.template_name || req.body.whatsapp_template_name || req.body.metadata?.template_name || "",
+        whatsapp_template_name: req.body.whatsapp_template_name || req.body.template_name || req.body.metadata?.whatsapp_template_name || "",
+        language_code: req.body.language_code || req.body.metadata?.language_code || "en_US",
+        components: req.body.components || req.body.metadata?.components || [],
+      },
+    });
+    await writeCrmDb(db);
+    res.status(result.success || result.queued ? 200 : 502).json(result);
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
 app.get("/admin/crm/message-templates", async (req, res) => {
   try {
     await requireCrmAdmin(req);
@@ -11122,8 +11508,8 @@ app.post("/admin/crm/messages/send", async (req, res) => {
     const db = await readCrmDb();
     const brandId = getCrmBrandId(req, db);
     const lead = req.body.lead_id ? getLeadByAnyId(db, req.body.lead_id) : null;
-    const channel = normalizeAutomationChannel(req.body.channel || "whatsapp");
-    const to = req.body.to || req.body.recipient || lead?.whatsapp || lead?.phone || lead?.email || "";
+    const channel = normalizeAutomationChannel(req.body.channel || req.body.platform || "whatsapp");
+    const to = getBestRecipientForChannel({ channel, to: req.body.to || req.body.recipient || req.body.chat_id || "", lead });
     const result = await sendCrmMessage({
       db,
       brandId,
@@ -11134,10 +11520,17 @@ app.post("/admin/crm/messages/send", async (req, res) => {
       templateId: req.body.template_id || req.body.template_key || null,
       templateVariables: { ...(req.body.variables || {}), lead: lead || {} },
       leadId: lead?.id || req.body.lead_id || null,
-      metadata: req.body.metadata || {},
+      metadata: {
+        ...(req.body.metadata || {}),
+        source: req.body.source || req.body.metadata?.source || "crm_messages_send",
+        template_name: req.body.template_name || req.body.whatsapp_template_name || req.body.metadata?.template_name || "",
+        whatsapp_template_name: req.body.whatsapp_template_name || req.body.template_name || req.body.metadata?.whatsapp_template_name || "",
+        language_code: req.body.language_code || req.body.metadata?.language_code || "en_US",
+        components: req.body.components || req.body.metadata?.components || [],
+      },
     });
     await writeCrmDb(db);
-    res.status(result.success ? 200 : 502).json(result);
+    res.status(result.success || result.queued ? 200 : 502).json(result);
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
