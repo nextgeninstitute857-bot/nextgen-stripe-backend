@@ -14238,6 +14238,540 @@ app.get("/admin/crm/templates", async (req, res) => {
 });
 
 // -------------------------
+// Assistant / Control Center CRM aliases
+// -------------------------
+
+app.get("/admin/crm/assistant/settings", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    await writeCrmDb(db);
+    res.json({ success: true, settings: db.ai_orchestration_settings });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/assistant/settings", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+
+    db.ai_orchestration_settings = {
+      ...db.ai_orchestration_settings,
+      ...(req.body || {}),
+      mode: ngNormalizeMode(req.body?.mode || db.ai_orchestration_settings.mode),
+      default_conversation_mode: ngNormalizeConversationMode(req.body?.default_conversation_mode || db.ai_orchestration_settings.default_conversation_mode),
+      updated_by: user.id,
+      updated_at: ngNowIso()
+    };
+
+    await writeCrmDb(db);
+    res.json({ success: true, settings: db.ai_orchestration_settings });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/assistant/chat", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const response = await ngAssistantChat({ message: req.body?.message, actor: user });
+    const db = ngEnsureAiStore(await readCrmDb());
+
+    db.assistant_chats.unshift({
+      id: ngUuid(),
+      role: "user",
+      message: req.body?.message || "",
+      created_by: user.id,
+      created_at: ngNowIso()
+    });
+
+    db.assistant_chats.unshift({
+      id: ngUuid(),
+      role: "assistant",
+      message: response.reply,
+      result_report_id: response.result?.report?.id || null,
+      created_at: ngNowIso()
+    });
+
+    db.assistant_chats = db.assistant_chats.slice(0, 300);
+    await writeCrmDb(db);
+
+    res.json({ success: true, reply: response.reply, result: response.result });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/assistant/run-flow-check", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const result = await ngRunFlowCheck({
+      area: req.body?.area || "all",
+      lookbackHours: Number(req.body?.lookback_hours || 24),
+      actor: user,
+      command: req.body?.command || "Manual flow check"
+    });
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/assistant/run-telegram-check", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const result = await ngRunFlowCheck({ area: "telegram", lookbackHours: Number(req.body?.lookback_hours || 24), actor: user, command: "Telegram flow check" });
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/assistant/run-whatsapp-check", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const result = await ngRunFlowCheck({ area: "whatsapp", lookbackHours: Number(req.body?.lookback_hours || 24), actor: user, command: "WhatsApp flow check" });
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/assistant/reports", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    res.json({ success: true, reports: db.assistant_reports.slice(0, Number(req.query.limit || 50)), count: db.assistant_reports.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/assistant/actions", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    res.json({ success: true, actions: db.assistant_actions.slice(0, Number(req.query.limit || 100)), count: db.assistant_actions.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/assistant/actions/:id/approve", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const action = db.assistant_actions.find((item) => String(item.id) === String(req.params.id));
+    if (!action) return res.status(404).json({ success: false, error: "Assistant action not found" });
+
+    action.status = "approved";
+    action.approved_by = user.id;
+    action.approved_by_email = user.email;
+    action.approved_at = ngNowIso();
+    action.updated_at = ngNowIso();
+
+    await writeCrmDb(db);
+    res.json({ success: true, action });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/assistant/actions/:id/reject", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const action = db.assistant_actions.find((item) => String(item.id) === String(req.params.id));
+    if (!action) return res.status(404).json({ success: false, error: "Assistant action not found" });
+
+    action.status = "rejected";
+    action.rejected_by = user.id;
+    action.rejected_by_email = user.email;
+    action.rejection_reason = req.body?.reason || "";
+    action.rejected_at = ngNowIso();
+    action.updated_at = ngNowIso();
+
+    await writeCrmDb(db);
+    res.json({ success: true, action });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/assistant/actions/:id/execute", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const action = db.assistant_actions.find((item) => String(item.id) === String(req.params.id));
+    if (!action) return res.status(404).json({ success: false, error: "Assistant action not found" });
+
+    const result = await ngExecuteApprovedAction(action, user);
+
+    const db2 = ngEnsureAiStore(await readCrmDb());
+    const updated = db2.assistant_actions.find((item) => String(item.id) === String(req.params.id));
+    if (updated) {
+      updated.status = "executed";
+      updated.executed_by = user.id;
+      updated.executed_by_email = user.email;
+      updated.executed_at = ngNowIso();
+      updated.execution_result = result;
+      updated.updated_at = ngNowIso();
+    }
+
+    await writeCrmDb(db2);
+    res.json({ success: true, action: updated || action, result });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// -------------------------
+// AI Training Center
+// -------------------------
+
+app.get("/admin/crm/ai-training", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    await writeCrmDb(db);
+    res.json({ success: true, items: db.ai_training_items, training: db.ai_training_items });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-training", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const item = {
+      id: req.body?.id || ngUuid(),
+      title: req.body?.title || "Training Item",
+      category: req.body?.category || "general",
+      content: req.body?.content || req.body?.body || "",
+      active: req.body?.active !== false,
+      priority: Number(req.body?.priority || 0),
+      created_by: user.id,
+      created_at: ngNowIso(),
+      updated_at: ngNowIso()
+    };
+    db.ai_training_items.unshift(item);
+    await writeCrmDb(db);
+    res.json({ success: true, item });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/ai-training/:id", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const item = db.ai_training_items.find((x) => String(x.id) === String(req.params.id));
+    if (!item) return res.status(404).json({ success: false, error: "Training item not found" });
+
+    Object.assign(item, {
+      ...(req.body || {}),
+      updated_by: user.id,
+      updated_at: ngNowIso()
+    });
+
+    await writeCrmDb(db);
+    res.json({ success: true, item });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete("/admin/crm/ai-training/:id", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const item = db.ai_training_items.find((x) => String(x.id) === String(req.params.id));
+    if (!item) return res.status(404).json({ success: false, error: "Training item not found" });
+
+    item.active = false;
+    item.deleted_at = ngNowIso();
+    item.deleted_by = user.id;
+
+    await writeCrmDb(db);
+    res.json({ success: true, item });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai/test-training", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const agent = db.ai_agents.find((x) => String(x.id) === String(req.body?.agent_id || "welcome_agent")) || db.ai_agents[0];
+    const result = ngGenerateFallbackReply({
+      db,
+      agent,
+      lead: req.body?.lead || {},
+      messages: req.body?.messages || [],
+      mode: req.body?.mode || "welcome"
+    });
+    res.json({ success: true, agent, ...result, training_context: ngBuildTrainingContext(db, agent) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// -------------------------
+// AI Agents
+// -------------------------
+
+app.get("/admin/crm/ai-agents", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    await writeCrmDb(db);
+    res.json({ success: true, agents: db.ai_agents, items: db.ai_agents });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-agents", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const agent = {
+      id: req.body?.id || ngUuid(),
+      name: req.body?.name || "New AI Agent",
+      type: req.body?.type || "conversation",
+      status: req.body?.status || "draft",
+      mode: ngNormalizeConversationMode(req.body?.mode || "draft"),
+      channels: ngNormalizeArray(req.body?.channels || ["whatsapp", "telegram", "email"]),
+      training_ids: ngNormalizeArray(req.body?.training_ids),
+      allowed_actions: ngNormalizeArray(req.body?.allowed_actions || ["draft_reply"]),
+      description: req.body?.description || "",
+      created_by: user.id,
+      created_at: ngNowIso(),
+      updated_at: ngNowIso()
+    };
+    db.ai_agents.unshift(agent);
+    await writeCrmDb(db);
+    res.json({ success: true, agent });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/ai-agents/:id", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const agent = db.ai_agents.find((x) => String(x.id) === String(req.params.id));
+    if (!agent) return res.status(404).json({ success: false, error: "AI agent not found" });
+
+    Object.assign(agent, {
+      ...(req.body || {}),
+      channels: req.body?.channels ? ngNormalizeArray(req.body.channels) : agent.channels,
+      training_ids: req.body?.training_ids ? ngNormalizeArray(req.body.training_ids) : agent.training_ids,
+      allowed_actions: req.body?.allowed_actions ? ngNormalizeArray(req.body.allowed_actions) : agent.allowed_actions,
+      mode: req.body?.mode ? ngNormalizeConversationMode(req.body.mode) : agent.mode,
+      updated_by: user.id,
+      updated_at: ngNowIso()
+    });
+
+    await writeCrmDb(db);
+    res.json({ success: true, agent });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete("/admin/crm/ai-agents/:id", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const agent = db.ai_agents.find((x) => String(x.id) === String(req.params.id));
+    if (!agent) return res.status(404).json({ success: false, error: "AI agent not found" });
+
+    agent.status = "deleted";
+    agent.deleted_by = user.id;
+    agent.deleted_at = ngNowIso();
+    agent.updated_at = ngNowIso();
+
+    await writeCrmDb(db);
+    res.json({ success: true, agent });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-agents/:id/activate", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const agent = db.ai_agents.find((x) => String(x.id) === String(req.params.id));
+    if (!agent) return res.status(404).json({ success: false, error: "AI agent not found" });
+
+    agent.status = "active";
+    agent.mode = ngNormalizeConversationMode(req.body?.mode || agent.mode || "draft");
+    agent.activated_by = user.id;
+    agent.activated_at = ngNowIso();
+    agent.updated_at = ngNowIso();
+
+    await writeCrmDb(db);
+    res.json({ success: true, agent });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-agents/:id/pause", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const agent = db.ai_agents.find((x) => String(x.id) === String(req.params.id));
+    if (!agent) return res.status(404).json({ success: false, error: "AI agent not found" });
+
+    agent.status = "paused";
+    agent.paused_by = user.id;
+    agent.paused_at = ngNowIso();
+    agent.updated_at = ngNowIso();
+
+    await writeCrmDb(db);
+    res.json({ success: true, agent });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-agents/:id/test", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const agent = db.ai_agents.find((x) => String(x.id) === String(req.params.id));
+    if (!agent) return res.status(404).json({ success: false, error: "AI agent not found" });
+
+    const result = ngGenerateFallbackReply({
+      db,
+      agent,
+      lead: req.body?.lead || {},
+      messages: req.body?.messages || [],
+      mode: req.body?.mode || "reply"
+    });
+
+    res.json({ success: true, agent, ...result, training_context: ngBuildTrainingContext(db, agent) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// Alias for older frontend pages using /admin/crm/agents.
+app.get("/admin/crm/agents", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    res.json({ success: true, agents: db.ai_agents, items: db.ai_agents });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// -------------------------
+// Message Templates
+// -------------------------
+
+app.get("/admin/crm/message-templates", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    res.json({ success: true, templates: db.message_templates, items: db.message_templates });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/message-templates", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const template = {
+      id: req.body?.id || ngUuid(),
+      name: req.body?.name || req.body?.template_name || "Message Template",
+      channel: ngNormalizeChannel(req.body?.channel || "whatsapp"),
+      category: req.body?.category || "general",
+      subject: req.body?.subject || "",
+      body: req.body?.body || req.body?.message || req.body?.content || "",
+      template_name: req.body?.template_name || "",
+      language_code: req.body?.language_code || "en_US",
+      variables: ngNormalizeArray(req.body?.variables),
+      status: req.body?.status || "draft",
+      active: req.body?.active !== false,
+      created_by: user.id,
+      created_at: ngNowIso(),
+      updated_at: ngNowIso()
+    };
+    db.message_templates.unshift(template);
+    await writeCrmDb(db);
+    res.json({ success: true, template });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/message-templates/:id", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const template = db.message_templates.find((x) => String(x.id) === String(req.params.id));
+    if (!template) return res.status(404).json({ success: false, error: "Template not found" });
+
+    Object.assign(template, {
+      ...(req.body || {}),
+      channel: req.body?.channel ? ngNormalizeChannel(req.body.channel) : template.channel,
+      variables: req.body?.variables ? ngNormalizeArray(req.body.variables) : template.variables,
+      updated_by: user.id,
+      updated_at: ngNowIso()
+    });
+
+    await writeCrmDb(db);
+    res.json({ success: true, template });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete("/admin/crm/message-templates/:id", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const template = db.message_templates.find((x) => String(x.id) === String(req.params.id));
+    if (!template) return res.status(404).json({ success: false, error: "Template not found" });
+
+    template.active = false;
+    template.status = "archived";
+    template.deleted_by = user.id;
+    template.deleted_at = ngNowIso();
+
+    await writeCrmDb(db);
+    res.json({ success: true, template });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// Alias for older frontend pages.
+app.get("/admin/crm/templates", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    res.json({ success: true, templates: db.message_templates, items: db.message_templates });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+
+// -------------------------
 // Conversation AI Mode + Reply Generation
 // -------------------------
 
