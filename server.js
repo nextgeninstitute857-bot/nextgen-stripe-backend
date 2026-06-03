@@ -10961,6 +10961,82 @@ function normalizeAutomationChannel(value = "whatsapp") {
   return clean || "whatsapp";
 }
 
+// -----------------------------------------------------------------------------
+// NEXTGEN GLOBAL CHANNEL RESOLVER
+// -----------------------------------------------------------------------------
+// Supports frontend values:
+// - auto / global: backend chooses the best available channel.
+// - lead_current_channel: use the channel where the lead is already talking.
+// Explicit channels like whatsapp/email/sms still work exactly as before.
+// -----------------------------------------------------------------------------
+
+const CRM_CHANNEL_AUTO_VALUES = new Set(["", "auto", "global", "lead_current_channel", "lead_current", "current", "current_channel"]);
+const CRM_VALID_SEND_CHANNELS = new Set(["whatsapp", "email", "sms", "telegram", "messenger", "facebook", "instagram"]);
+
+function normalizeCrmSendChannel(value = "") {
+  const clean = normalizeAutomationChannel(value || "");
+  if (["facebook_messenger", "fb_messenger"].includes(clean)) return "messenger";
+  if (clean === "fb") return "facebook";
+  if (clean === "ig") return "instagram";
+  return clean;
+}
+
+function getLeadCurrentChannel(lead = {}) {
+  return (
+    lead.current_channel ||
+    lead.currentChannel ||
+    lead.last_channel ||
+    lead.lastChannel ||
+    lead.preferred_channel ||
+    lead.preferredChannel ||
+    lead.source_platform ||
+    lead.platform ||
+    lead.channel ||
+    lead.source ||
+    ""
+  );
+}
+
+function leadHasRecipientForChannel(lead = {}, channel = "") {
+  const clean = normalizeCrmSendChannel(channel);
+  if (clean === "email") return Boolean(lead.email || lead.student_email || lead.customer_email);
+  if (clean === "telegram") return Boolean(lead.telegram_chat_id || lead.chat_id || lead.telegram_id || lead.platform_contact_id);
+  if (clean === "whatsapp") return Boolean(lead.whatsapp || lead.whatsapp_phone || lead.wa_id || lead.phone || lead.mobile);
+  if (["messenger", "facebook"].includes(clean)) return Boolean(lead.facebook_sender_id || lead.facebook_id || lead.platform_contact_id);
+  if (clean === "instagram") return Boolean(lead.instagram_sender_id || lead.instagram_id || lead.platform_contact_id);
+  if (clean === "sms") return Boolean(lead.phone || lead.mobile || lead.whatsapp || lead.whatsapp_phone);
+  return Boolean(lead.platform_contact_id || lead.phone || lead.email);
+}
+
+function resolveCrmChannel({ requestedChannel = "", lead = null, template = null, fallback = "whatsapp" } = {}) {
+  const rawRequested = String(requestedChannel || template?.channel || template?.send_channel || "").trim();
+  const normalizedRequested = normalizeCrmSendChannel(rawRequested);
+
+  if (normalizedRequested && !CRM_CHANNEL_AUTO_VALUES.has(normalizedRequested)) {
+    return CRM_VALID_SEND_CHANNELS.has(normalizedRequested) ? normalizedRequested : normalizeCrmSendChannel(fallback || "whatsapp");
+  }
+
+  const leadCurrent = normalizeCrmSendChannel(getLeadCurrentChannel(lead || {}));
+  if (leadCurrent && !CRM_CHANNEL_AUTO_VALUES.has(leadCurrent) && leadHasRecipientForChannel(lead || {}, leadCurrent)) {
+    return leadCurrent;
+  }
+
+  const templateChannel = normalizeCrmSendChannel(template?.channel || template?.send_channel || "");
+  if (templateChannel && !CRM_CHANNEL_AUTO_VALUES.has(templateChannel) && CRM_VALID_SEND_CHANNELS.has(templateChannel)) {
+    return templateChannel;
+  }
+
+  if (leadHasRecipientForChannel(lead || {}, "whatsapp")) return "whatsapp";
+  if (leadHasRecipientForChannel(lead || {}, "email")) return "email";
+  if (leadHasRecipientForChannel(lead || {}, "telegram")) return "telegram";
+  if (leadHasRecipientForChannel(lead || {}, "sms")) return "sms";
+  if (leadHasRecipientForChannel(lead || {}, "messenger")) return "messenger";
+  if (leadHasRecipientForChannel(lead || {}, "instagram")) return "instagram";
+
+  return normalizeCrmSendChannel(fallback || "whatsapp");
+}
+
+
 function getProviderStatus() {
   const hasWhatsapp = Boolean(process.env.WHATSAPP_ACCESS_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID);
   const hasTelegram = Boolean(process.env.TELEGRAM_BOT_TOKEN);
@@ -11410,9 +11486,14 @@ async function sendCrmMessage({
   queueId = null,
   metadata = {},
 }) {
-  const cleanChannel = normalizeAutomationChannel(channel);
   const template = templateId ? getMessageTemplateByKey(db, templateId) : null;
   const lead = leadId ? getLeadByAnyId(db, leadId) : null;
+  const cleanChannel = resolveCrmChannel({
+    requestedChannel: channel || template?.channel || template?.send_channel || "auto",
+    lead,
+    template,
+    fallback: "whatsapp",
+  });
   const variables = { ...(templateVariables || {}), lead: lead || templateVariables?.lead || {} };
   const finalSubject = renderTemplateString(subject || template?.subject || "", variables) || "NextGen USMLE";
   const finalText = renderTemplateString(text || template?.body || template?.message || "", variables);
@@ -16096,13 +16177,53 @@ function ngAiAutoMessageFingerprint(message = {}) {
   ).trim();
 }
 
-function ngAiAutoCooldownActive(lead = {}, seconds = 60) {
-  const lastAt = new Date(lead.last_ai_auto_replied_at || 0).getTime();
-  if (!Number.isFinite(lastAt) || lastAt <= 0) return false;
-  return Date.now() - lastAt < Number(seconds || 60) * 1000;
+const NG_AI_AUTO_COOLDOWN_SECONDS = Number(process.env.AI_AUTO_COOLDOWN_SECONDS || 15);
+const ngAiAutoLocks = new Map();
+
+function ngAiAutoGuardKey({ lead = {}, inbound = {}, channel = "" } = {}) {
+  return [
+    lead.id || lead.lead_id || lead.phone || lead.email || "unknown_lead",
+    ngAiAutoMessageFingerprint(inbound) || "unknown_message",
+    normalizeCrmSendChannel(channel || lead.last_ai_auto_reply_channel || lead.source_platform || lead.platform || "auto"),
+  ].join(":");
 }
 
-function ngShouldSkipAiAutoForInbound(lead = {}, inbound = {}) {
+function ngAiAutoCooldownActive(lead = {}, seconds = NG_AI_AUTO_COOLDOWN_SECONDS) {
+  const lastAt = new Date(lead.last_ai_auto_replied_at || 0).getTime();
+  if (!Number.isFinite(lastAt) || lastAt <= 0) return false;
+  return Date.now() - lastAt < Number(seconds || NG_AI_AUTO_COOLDOWN_SECONDS) * 1000;
+}
+
+function ngTryLockAiAuto({ lead = {}, inbound = {}, channel = "", ttlSeconds = NG_AI_AUTO_COOLDOWN_SECONDS } = {}) {
+  const key = ngAiAutoGuardKey({ lead, inbound, channel });
+  const now = Date.now();
+  const existing = ngAiAutoLocks.get(key);
+
+  if (existing && now - Number(existing.started_at || 0) < Number(ttlSeconds || NG_AI_AUTO_COOLDOWN_SECONDS) * 1000) {
+    return {
+      locked: false,
+      key,
+      reason: "ai_auto_already_processing",
+      wait_ms: Math.max(0, Number(ttlSeconds || NG_AI_AUTO_COOLDOWN_SECONDS) * 1000 - (now - Number(existing.started_at || 0))),
+    };
+  }
+
+  ngAiAutoLocks.set(key, {
+    key,
+    lead_id: lead.id || lead.lead_id || null,
+    fingerprint: ngAiAutoMessageFingerprint(inbound),
+    channel: normalizeCrmSendChannel(channel || "auto"),
+    started_at: now,
+  });
+
+  return { locked: true, key, reason: "locked", wait_ms: 0 };
+}
+
+function ngReleaseAiAutoLock(key = "") {
+  if (key) ngAiAutoLocks.delete(key);
+}
+
+function ngShouldSkipAiAutoForInbound(lead = {}, inbound = {}, options = {}) {
   const fingerprint = ngAiAutoMessageFingerprint(inbound);
   if (!fingerprint) return { skip: false };
 
@@ -16110,11 +16231,22 @@ function ngShouldSkipAiAutoForInbound(lead = {}, inbound = {}) {
     return { skip: true, reason: "already_replied_to_this_inbound_message" };
   }
 
-  if (ngAiAutoCooldownActive(lead, 60)) {
+  if (ngAiAutoCooldownActive(lead, options.cooldownSeconds || NG_AI_AUTO_COOLDOWN_SECONDS)) {
     return { skip: true, reason: "ai_auto_cooldown_active" };
   }
 
-  return { skip: false, fingerprint };
+  const lock = ngTryLockAiAuto({
+    lead,
+    inbound,
+    channel: options.channel || lead.last_ai_auto_reply_channel || lead.source_platform || lead.platform || "auto",
+    ttlSeconds: options.cooldownSeconds || NG_AI_AUTO_COOLDOWN_SECONDS,
+  });
+
+  if (!lock.locked) {
+    return { skip: true, reason: lock.reason, wait_ms: lock.wait_ms, lock_key: lock.key };
+  }
+
+  return { skip: false, fingerprint, lock_key: lock.key };
 }
 
 function ngMarkAiAutoProcessed(lead = {}, inbound = {}, extra = {}) {
@@ -16211,12 +16343,16 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
     if (!lead) return res.status(404).json({ success: false, error: "Lead not found" });
     ngNormalizeLeadAiMode(lead);
 
-    const channel = normalizeAutomationChannel(req.body?.channel || lead.source_platform || lead.platform || "whatsapp");
+    const channel = resolveCrmChannel({
+      requestedChannel: req.body?.channel || lead.current_channel || lead.last_channel || lead.source_platform || lead.platform || "auto",
+      lead,
+      fallback: "whatsapp",
+    });
     const messages = ngLeadConversationMessages(db, lead.id);
     const latestInbound = ngLatestInbound(messages);
     if (!latestInbound) return res.status(400).json({ success: false, error: "No inbound student message found for AI Auto" });
 
-    const duplicateGuard = ngShouldSkipAiAutoForInbound(lead, latestInbound);
+    const duplicateGuard = ngShouldSkipAiAutoForInbound(lead, latestInbound, { channel });
     if (duplicateGuard.skip) {
       await writeCrmDb(db);
       return res.json({
@@ -16255,7 +16391,8 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
 
     ngAffArray(db, "ai_auto_runs").unshift({ id: uuid(), lead_id: lead.id, inbound_message_id: ngAiAutoMessageFingerprint(latestInbound), channel, reply: ai.reply, sent: true, result, model: ai.model, usage: ai.usage, created_by: user.id, created_at: ngAffNow() });
     await writeCrmDb(db);
-    res.json({ success: true, sent: true, reply: ai.reply, result, usage: ai.usage, model: ai.model });
+    ngReleaseAiAutoLock(duplicateGuard.lock_key);
+    res.json({ success: true, sent: true, reply: ai.reply, result, usage: ai.usage, model: ai.model, channel, cooldown_seconds: NG_AI_AUTO_COOLDOWN_SECONDS });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message, detail: error.response?.data || null }); }
 });
 
@@ -16279,14 +16416,19 @@ app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
       const outbound = ngLatestOutbound(messages);
       if (!inbound) { results.push({ lead_id: lead.id, skipped: true, reason: "no_inbound" }); continue; }
 
-      const duplicateGuard = ngShouldSkipAiAutoForInbound(lead, inbound);
-      if (duplicateGuard.skip) { results.push({ lead_id: lead.id, skipped: true, reason: duplicateGuard.reason }); continue; }
+      const channel = resolveCrmChannel({
+        requestedChannel: lead.current_channel || lead.last_channel || lead.source_platform || lead.platform || "auto",
+        lead,
+        fallback: "whatsapp",
+      });
+
+      const duplicateGuard = ngShouldSkipAiAutoForInbound(lead, inbound, { channel });
+      if (duplicateGuard.skip) { results.push({ lead_id: lead.id, skipped: true, reason: duplicateGuard.reason, wait_ms: duplicateGuard.wait_ms || 0 }); continue; }
 
       const inboundTime = new Date(inbound.created_at || inbound.received_at || inbound.timestamp || 0).getTime();
       const outboundTime = new Date(outbound?.created_at || outbound?.sent_at || outbound?.timestamp || 0).getTime();
-      if (outbound && outboundTime >= inboundTime) { results.push({ lead_id: lead.id, skipped: true, reason: "already_replied" }); continue; }
+      if (outbound && outboundTime >= inboundTime) { ngReleaseAiAutoLock(duplicateGuard.lock_key); results.push({ lead_id: lead.id, skipped: true, reason: "already_replied" }); continue; }
 
-      const channel = normalizeAutomationChannel(lead.source_platform || lead.platform || "whatsapp");
       if (channel === "whatsapp" && !ngWithinHours(inbound.created_at || inbound.received_at || inbound.timestamp, 24)) {
         ngAffArray(db, "ai_actions").unshift({ id: uuid(), title: "WhatsApp template required for Full AI Auto", area: "whatsapp", type: "template_required", status: "pending_approval", lead_id: lead.id, payload: { lead_id: lead.id, channel }, created_at: ngAffNow(), updated_at: ngAffNow() });
         results.push({ lead_id: lead.id, skipped: true, reason: "whatsapp_template_required" });
@@ -16300,15 +16442,221 @@ app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
         ngMarkAiAutoProcessed(lead, inbound, { channel, reply: ai.reply });
         if (typeof aylaLogCost === "function") await aylaLogCost({ db, actor: user, model: ai.model, usage: ai.usage, action: "process_ai_auto_send", meta: { lead_id: lead.id, channel } }).catch(() => null);
         ngAffArray(db, "ai_auto_runs").unshift({ id: uuid(), lead_id: lead.id, inbound_message_id: ngAiAutoMessageFingerprint(inbound), channel, reply: ai.reply, sent: true, result: sendResult, model: ai.model, usage: ai.usage, created_by: user.id, created_at: ngAffNow() });
-        results.push({ lead_id: lead.id, sent: true, reply: ai.reply });
+        ngReleaseAiAutoLock(duplicateGuard.lock_key);
+        results.push({ lead_id: lead.id, sent: true, reply: ai.reply, channel });
       } catch (err) {
-        results.push({ lead_id: lead.id, sent: false, error: err.message });
+        ngReleaseAiAutoLock(duplicateGuard.lock_key);
+        results.push({ lead_id: lead.id, sent: false, error: err.message, channel });
       }
     }
 
     await writeCrmDb(db);
     res.json({ success: true, processed: results.length, results });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+
+// -----------------------------------------------------------------------------
+// NEXTGEN AYLA FULL CRM AUDIT + CHANNEL RESOLVER ENDPOINTS
+// -----------------------------------------------------------------------------
+
+function ngAylaFullAudit({ crmDb = {}, liveDb = {} } = {}) {
+  const leads = ngAffArray(crmDb, "leads");
+  const conversations = ngAffArray(crmDb, "conversations");
+  const followups = [
+    ...ngAffArray(crmDb, "followups"),
+    ...ngAffArray(crmDb, "scheduled_followup_jobs"),
+    ...ngAffArray(crmDb, "automation_queue"),
+  ];
+  const templates = [
+    ...ngAffArray(crmDb, "templates"),
+    ...ngAffArray(crmDb, "message_templates"),
+  ];
+  const messageLogs = ngAffArray(crmDb, "message_logs");
+  const appointments = ngAffArray(crmDb, "appointments");
+  const aiActions = ngAffArray(crmDb, "ai_actions");
+
+  const issues = [];
+  const warnings = [];
+  const actions = [];
+
+  const leadsWithoutContact = leads.filter((lead) => {
+    return !leadHasRecipientForChannel(lead, "whatsapp") && !leadHasRecipientForChannel(lead, "email") && !leadHasRecipientForChannel(lead, "telegram") && !leadHasRecipientForChannel(lead, "sms") && !leadHasRecipientForChannel(lead, "messenger") && !leadHasRecipientForChannel(lead, "instagram");
+  });
+
+  if (leadsWithoutContact.length) {
+    issues.push({
+      type: "leads_without_usable_contact",
+      count: leadsWithoutContact.length,
+      lead_ids: leadsWithoutContact.slice(0, 20).map((lead) => lead.id || lead.lead_id || null),
+      message: `${leadsWithoutContact.length} leads have no usable contact channel.`,
+    });
+    actions.push("Fix missing phone/email/platform IDs for leads without contact method.");
+  }
+
+  const openNeedsReply = leads.filter((lead) => {
+    const messages = ngLeadConversationMessages(crmDb, lead.id || lead.lead_id);
+    const inbound = ngLatestInbound(messages);
+    const outbound = ngLatestOutbound(messages);
+    if (!inbound) return false;
+    const inboundTime = new Date(inbound.created_at || inbound.received_at || inbound.timestamp || 0).getTime();
+    const outboundTime = new Date(outbound?.created_at || outbound?.sent_at || outbound?.timestamp || 0).getTime();
+    return !outbound || outboundTime < inboundTime;
+  });
+
+  if (openNeedsReply.length) {
+    issues.push({
+      type: "open_conversations_need_reply",
+      count: openNeedsReply.length,
+      lead_ids: openNeedsReply.slice(0, 20).map((lead) => lead.id || lead.lead_id || null),
+      message: `${openNeedsReply.length} leads have inbound messages needing reply.`,
+    });
+    actions.push("Review open conversations and let Ayla draft or send replies according to AI mode.");
+  }
+
+  const activeFollowupsWithoutTemplate = followups.filter((rule) => {
+    const status = String(rule.status || "").toLowerCase();
+    const active = rule.active !== false && !["disabled", "inactive", "cancelled", "archived"].includes(status);
+    return active && !(rule.template_id || rule.templateId || rule.template_key || rule.templateKey || rule.message_template_id);
+  });
+
+  if (activeFollowupsWithoutTemplate.length) {
+    warnings.push({
+      type: "active_followups_without_template",
+      count: activeFollowupsWithoutTemplate.length,
+      ids: activeFollowupsWithoutTemplate.slice(0, 20).map((item) => item.id || null),
+      message: `${activeFollowupsWithoutTemplate.length} active follow-up jobs/rules have no template attached.`,
+    });
+    actions.push("Attach templates to active follow-up rules or set them to manual text.");
+  }
+
+  const templatesWithoutChannel = templates.filter((template) => !template.channel && !template.send_channel);
+  if (templatesWithoutChannel.length) {
+    warnings.push({
+      type: "templates_without_channel",
+      count: templatesWithoutChannel.length,
+      ids: templatesWithoutChannel.slice(0, 20).map((item) => item.id || item.key || null),
+      message: `${templatesWithoutChannel.length} templates do not have channel set. Backend will use Global/Auto resolver.`,
+    });
+  }
+
+  const failedMessages24h = messageLogs.filter((log) => {
+    const createdAt = log.created_at || log.sent_at || log.updated_at;
+    if (!ngWithinHours(createdAt, 24)) return false;
+    const packed = JSON.stringify(log).toLowerCase();
+    const status = String(log.status || log.delivery_status || "").toLowerCase();
+    return status.includes("fail") || status.includes("error") || packed.includes("failed") || packed.includes("error");
+  });
+
+  if (failedMessages24h.length) {
+    issues.push({
+      type: "failed_messages_last_24h",
+      count: failedMessages24h.length,
+      ids: failedMessages24h.slice(0, 20).map((item) => item.id || item.provider_message_id || null),
+      message: `${failedMessages24h.length} CRM messages failed in the last 24 hours.`,
+    });
+    actions.push("Check provider credentials, recipient numbers/emails, and template names for failed messages.");
+  }
+
+  const pendingAiActions = aiActions.filter((item) => ["pending", "pending_approval"].includes(String(item.status || "").toLowerCase()));
+  if (pendingAiActions.length) {
+    warnings.push({
+      type: "pending_ai_actions",
+      count: pendingAiActions.length,
+      ids: pendingAiActions.slice(0, 20).map((item) => item.id || null),
+      message: `${pendingAiActions.length} AI actions are waiting for approval.`,
+    });
+    actions.push("Approve, reject, or execute pending AI actions.");
+  }
+
+  const staleAppointments = appointments.filter((appt) => {
+    const status = String(appt.status || "").toLowerCase();
+    return ["pending", "scheduled", "requested"].includes(status) && !appt.confirmed_at && !appt.completed_at;
+  });
+
+  if (staleAppointments.length) {
+    warnings.push({
+      type: "appointments_need_review",
+      count: staleAppointments.length,
+      ids: staleAppointments.slice(0, 20).map((item) => item.id || null),
+      message: `${staleAppointments.length} appointments may need confirmation or follow-up.`,
+    });
+  }
+
+  const providerStatus = typeof getProviderStatus === "function" ? getProviderStatus() : {};
+  const providerProblems = Object.values(providerStatus || {}).filter((provider) => provider && provider.configured === false);
+  if (providerProblems.length) {
+    warnings.push({
+      type: "providers_not_configured",
+      count: providerProblems.length,
+      providers: providerProblems.map((p) => p.channel || p.key || p.name),
+      message: `${providerProblems.length} messaging providers are not configured.`,
+    });
+  }
+
+  const liveRecordings = Object.values(liveDb.recordings || {});
+  const unpublishedRecordings = liveRecordings.filter((recording) => recording.published !== true);
+
+  return {
+    success: true,
+    ok: issues.length === 0,
+    checked_at: ngAffNow(),
+    cooldown_seconds: NG_AI_AUTO_COOLDOWN_SECONDS,
+    summary: {
+      leads: leads.length,
+      conversations: conversations.length,
+      followups: followups.length,
+      templates: templates.length,
+      message_logs: messageLogs.length,
+      appointments: appointments.length,
+      pending_ai_actions: pendingAiActions.length,
+      live_recordings: liveRecordings.length,
+      unpublished_recordings: unpublishedRecordings.length,
+      issues: issues.length,
+      warnings: warnings.length,
+      actions: actions.length,
+    },
+    issues,
+    warnings,
+    actions,
+    provider_status: providerStatus,
+    channel_resolver: {
+      supported_frontend_values: ["auto", "global", "lead_current_channel", "whatsapp", "email", "sms", "telegram", "messenger", "instagram"],
+      fallback: "whatsapp",
+    },
+  };
+}
+
+async function ngAylaAuditHandler(req, res) {
+  try {
+    await requireCrmAdmin(req);
+    const crmDb = await readCrmDb();
+    const liveDb = await readLiveDb();
+    return res.json(ngAylaFullAudit({ crmDb, liveDb }));
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+}
+
+app.get("/admin/crm/ayla/audit", ngAylaAuditHandler);
+app.get("/api/ayla/audit", ngAylaAuditHandler);
+
+app.post("/admin/crm/channel/resolve", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const lead = req.body?.lead_id ? getLeadByAnyId(db, req.body.lead_id) : (req.body?.lead || null);
+    const template = req.body?.template_id ? getMessageTemplateByKey(db, req.body.template_id) : (req.body?.template || null);
+    const channel = resolveCrmChannel({
+      requestedChannel: req.body?.channel || req.body?.requested_channel || "auto",
+      lead,
+      template,
+      fallback: req.body?.fallback || "whatsapp",
+    });
+    return res.json({ success: true, channel, lead_id: lead?.id || null, template_id: template?.id || template?.key || null });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
 });
 
 // -----------------------------------------------------------------------------
