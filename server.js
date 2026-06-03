@@ -16083,6 +16083,71 @@ app.get("/admin/crm/team-ai-usage", async (req, res) => {
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
+
+function ngAiAutoMessageFingerprint(message = {}) {
+  return String(
+    message.id ||
+      message.message_id ||
+      message.provider_message_id ||
+      message.created_at ||
+      message.received_at ||
+      message.timestamp ||
+      ngMessageText(message)
+  ).trim();
+}
+
+function ngAiAutoCooldownActive(lead = {}, seconds = 60) {
+  const lastAt = new Date(lead.last_ai_auto_replied_at || 0).getTime();
+  if (!Number.isFinite(lastAt) || lastAt <= 0) return false;
+  return Date.now() - lastAt < Number(seconds || 60) * 1000;
+}
+
+function ngShouldSkipAiAutoForInbound(lead = {}, inbound = {}) {
+  const fingerprint = ngAiAutoMessageFingerprint(inbound);
+  if (!fingerprint) return { skip: false };
+
+  if (lead.last_ai_auto_replied_message_id && String(lead.last_ai_auto_replied_message_id) === fingerprint) {
+    return { skip: true, reason: "already_replied_to_this_inbound_message" };
+  }
+
+  if (ngAiAutoCooldownActive(lead, 60)) {
+    return { skip: true, reason: "ai_auto_cooldown_active" };
+  }
+
+  return { skip: false, fingerprint };
+}
+
+function ngMarkAiAutoProcessed(lead = {}, inbound = {}, extra = {}) {
+  const now = ngAffNow();
+  const fingerprint = ngAiAutoMessageFingerprint(inbound);
+
+  lead.ai_mode = lead.ai_mode || "auto";
+  lead.automation_mode = lead.automation_mode || "auto";
+  lead.last_ai_auto_replied_message_id = fingerprint || lead.last_ai_auto_replied_message_id || null;
+  lead.last_ai_auto_replied_at = now;
+  lead.last_ai_auto_reply_channel = extra.channel || lead.last_ai_auto_reply_channel || null;
+  lead.last_ai_auto_reply_text = extra.reply || lead.last_ai_auto_reply_text || "";
+  lead.updated_at = now;
+
+  return lead;
+}
+
+function ngNormalizeLeadAiMode(lead = {}) {
+  if (!lead.ai_mode && !lead.automation_mode) {
+    lead.ai_mode = "auto";
+    lead.automation_mode = "auto";
+  }
+  return lead;
+}
+
+function ngTrainingContextForFullAiAuto(db) {
+  return ngReadArray(db, "ai_training_items")
+    .filter((item) => item.active !== false && item.enforce_in_ai !== false)
+    .slice(0, 30)
+    .map((item) => `## ${item.title || item.category || item.id}\n${item.content || item.training_content || ""}`)
+    .join("\n\n");
+}
+
 function ngLeadConversationMessages(db, leadId) {
   return ngAffArray(db, "conversations")
     .filter((item) => String(item.lead_id) === String(leadId))
@@ -16105,14 +16170,36 @@ function ngWithinHours(dateValue, hours = 24) {
   if (!Number.isFinite(t)) return false;
   return Date.now() - t <= Number(hours || 24) * 60 * 60 * 1000;
 }
-async function ngGenerateStudentAutoReply({ lead, messages, channel }) {
+async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }) {
   const history = messages.slice(-10).map((m) => `${ngIsOutboundMessage(m) ? "NextGen" : "Student"}: ${ngMessageText(m)}`).join("\n");
-  const fallback = "Hi Doctor, thank you for your message. To guide you properly, may I ask your exam type, expected exam date, and your main difficulty right now?";
+  const fallback = "Hi Doctor, welcome to NextGen USMLE. Are you preparing for Step 1 or Step 2 CK?";
   if (!isAIConfigured()) return { reply: fallback, usage: {}, model: "fallback" };
 
-  const systemPrompt = `You are Ayla/NextGen USMLE assistant replying to a medical student lead. Be warm, professional, short, doctor-to-doctor, non-pushy. Do not guarantee scores or passing. Do not claim official affiliation with USMLE, NBME, UWorld, First Aid, Pathoma, or Sketchy. First qualify the student: exam type, exam date, difficulty. If relevant mention 2-day LMS demo, UWorld-style video library, and 60 Days Marathon live demo at 1 PM EST. Do not send payment links unless interest is clear.`;
+  const trainingContext = db ? ngTrainingContextForFullAiAuto(db) : "";
+
+  const systemPrompt = `You are Ayla, the NextGen USMLE Full AI Auto assistant replying to a medical student lead.
+
+Core rules:
+- Keep replies short, warm, professional, doctor-to-doctor, and non-pushy.
+- Usually reply with 1 to 3 short sentences only.
+- Do not send long generic product pitches.
+- Do not repeat yourself.
+- Do not send payment links unless interest is clearly established.
+- Do not guarantee scores, passing, residency, licensing, or exam success.
+- Do not claim official affiliation with USMLE, NBME, UWorld, First Aid, Pathoma, or Sketchy.
+- For greetings like hello/hi/interested/details, ask only: "Hi Doctor, welcome to NextGen USMLE. Are you preparing for Step 1 or Step 2 CK?"
+- If the student gives Step 1 or Step 2, ask exam date and main difficulty.
+- If demo is requested, guide to the 2-day LMS demo and Live Classroom: https://live.nextgenusmlelms.com
+- The live session is at 1 PM EST. Prefer telling them to join from LMS Live Classroom instead of sending raw Zoom links.
+- If the student has not availed demo yet, ask them to activate the free 2-day demo first.
+- If the student already has demo access, ask them to login and open Live Classroom.
+- Mention notes/recordings only after the live session or when relevant.
+
+Enforced training context from AI Training Center:
+${trainingContext || "No extra training context found."}`;
+
   const userPrompt = `Lead: ${JSON.stringify(lead || {}).slice(0, 2500)}\nChannel: ${channel}\nConversation:\n${history}\n\nWrite the next reply only. No markdown headings.`;
-  const result = await callOpenAIResponsesAPI({ model: process.env.AI_MODEL || "gpt-4o-mini", systemPrompt, userPrompt, maxOutputTokens: 500, jsonMode: false });
+  const result = await callOpenAIResponsesAPI({ model: process.env.AI_MODEL || "gpt-4o-mini", systemPrompt, userPrompt, maxOutputTokens: 260, jsonMode: false });
   return { reply: String(result.text || fallback).trim() || fallback, usage: result.usage || {}, model: result.model || process.env.AI_MODEL || "gpt-4o-mini" };
 }
 
@@ -16122,18 +16209,31 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
     const db = await readCrmDb();
     const lead = getLeadByAnyId(db, req.params.leadId);
     if (!lead) return res.status(404).json({ success: false, error: "Lead not found" });
+    ngNormalizeLeadAiMode(lead);
 
     const channel = normalizeAutomationChannel(req.body?.channel || lead.source_platform || lead.platform || "whatsapp");
     const messages = ngLeadConversationMessages(db, lead.id);
     const latestInbound = ngLatestInbound(messages);
     if (!latestInbound) return res.status(400).json({ success: false, error: "No inbound student message found for AI Auto" });
 
+    const duplicateGuard = ngShouldSkipAiAutoForInbound(lead, latestInbound);
+    if (duplicateGuard.skip) {
+      await writeCrmDb(db);
+      return res.json({
+        success: true,
+        sent: false,
+        skipped: true,
+        reason: duplicateGuard.reason,
+        message: "Full AI Auto already replied recently or already processed this inbound message.",
+      });
+    }
+
     const isWhatsAppOutsideWindow = channel === "whatsapp" && !ngWithinHours(latestInbound.created_at || latestInbound.received_at || latestInbound.timestamp, 24);
     if (isWhatsAppOutsideWindow && !req.body?.template_id && !req.body?.template_key) {
       return res.status(400).json({ success: false, error: "WhatsApp AI Auto outside 24-hour window requires an approved WhatsApp template.", requires_template: true });
     }
 
-    const ai = await ngGenerateStudentAutoReply({ lead, messages, channel });
+    const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel });
     const to = getBestRecipientForChannel({ channel, lead, to: req.body?.to || req.body?.recipient || "" });
     const result = await sendCrmMessage({
       db,
@@ -16147,11 +16247,13 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
       metadata: { source: "full_ai_auto", ai_auto: true, triggered_by: user.id, latest_inbound_id: latestInbound.id || null },
     });
 
+    ngMarkAiAutoProcessed(lead, latestInbound, { channel, reply: ai.reply });
+
     if (typeof aylaLogCost === "function") {
       await aylaLogCost({ db, actor: user, model: ai.model, usage: ai.usage, action: "full_ai_auto_send", meta: { lead_id: lead.id, channel } }).catch(() => null);
     }
 
-    ngAffArray(db, "ai_auto_runs").unshift({ id: uuid(), lead_id: lead.id, channel, reply: ai.reply, sent: true, result, model: ai.model, usage: ai.usage, created_by: user.id, created_at: ngAffNow() });
+    ngAffArray(db, "ai_auto_runs").unshift({ id: uuid(), lead_id: lead.id, inbound_message_id: ngAiAutoMessageFingerprint(latestInbound), channel, reply: ai.reply, sent: true, result, model: ai.model, usage: ai.usage, created_by: user.id, created_at: ngAffNow() });
     await writeCrmDb(db);
     res.json({ success: true, sent: true, reply: ai.reply, result, usage: ai.usage, model: ai.model });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message, detail: error.response?.data || null }); }
@@ -16162,7 +16264,13 @@ app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
     const { user } = await requireCrmAdmin(req);
     const db = await readCrmDb();
     const limit = Math.max(1, Math.min(20, Number(req.body?.limit || 5)));
-    const leads = ngAffArray(db, "leads").filter((lead) => String(lead.ai_mode || lead.automation_mode || "").toLowerCase() === "auto").slice(0, limit);
+
+    // Full AI Auto is now the default for new conversations unless a human explicitly set Manual or AI Draft.
+    const leads = ngAffArray(db, "leads")
+      .map(ngNormalizeLeadAiMode)
+      .filter((lead) => String(lead.ai_mode || lead.automation_mode || "auto").toLowerCase() === "auto")
+      .slice(0, limit);
+
     const results = [];
 
     for (const lead of leads) {
@@ -16170,6 +16278,10 @@ app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
       const inbound = ngLatestInbound(messages);
       const outbound = ngLatestOutbound(messages);
       if (!inbound) { results.push({ lead_id: lead.id, skipped: true, reason: "no_inbound" }); continue; }
+
+      const duplicateGuard = ngShouldSkipAiAutoForInbound(lead, inbound);
+      if (duplicateGuard.skip) { results.push({ lead_id: lead.id, skipped: true, reason: duplicateGuard.reason }); continue; }
+
       const inboundTime = new Date(inbound.created_at || inbound.received_at || inbound.timestamp || 0).getTime();
       const outboundTime = new Date(outbound?.created_at || outbound?.sent_at || outbound?.timestamp || 0).getTime();
       if (outbound && outboundTime >= inboundTime) { results.push({ lead_id: lead.id, skipped: true, reason: "already_replied" }); continue; }
@@ -16182,11 +16294,12 @@ app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
       }
 
       try {
-        const ai = await ngGenerateStudentAutoReply({ lead, messages, channel });
+        const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel });
         const to = getBestRecipientForChannel({ channel, lead });
-        const sendResult = await sendCrmMessage({ db, brandId: lead.brand_id || getCrmBrandId(req, db), channel, to, text: ai.reply, leadId: lead.id, metadata: { source: "process_ai_auto", ai_auto: true, triggered_by: user.id } });
+        const sendResult = await sendCrmMessage({ db, brandId: lead.brand_id || getCrmBrandId(req, db), channel, to, text: ai.reply, leadId: lead.id, metadata: { source: "process_ai_auto", ai_auto: true, triggered_by: user.id, latest_inbound_id: inbound.id || null } });
+        ngMarkAiAutoProcessed(lead, inbound, { channel, reply: ai.reply });
         if (typeof aylaLogCost === "function") await aylaLogCost({ db, actor: user, model: ai.model, usage: ai.usage, action: "process_ai_auto_send", meta: { lead_id: lead.id, channel } }).catch(() => null);
-        ngAffArray(db, "ai_auto_runs").unshift({ id: uuid(), lead_id: lead.id, channel, reply: ai.reply, sent: true, result: sendResult, model: ai.model, usage: ai.usage, created_by: user.id, created_at: ngAffNow() });
+        ngAffArray(db, "ai_auto_runs").unshift({ id: uuid(), lead_id: lead.id, inbound_message_id: ngAiAutoMessageFingerprint(inbound), channel, reply: ai.reply, sent: true, result: sendResult, model: ai.model, usage: ai.usage, created_by: user.id, created_at: ngAffNow() });
         results.push({ lead_id: lead.id, sent: true, reply: ai.reply });
       } catch (err) {
         results.push({ lead_id: lead.id, sent: false, error: err.message });
