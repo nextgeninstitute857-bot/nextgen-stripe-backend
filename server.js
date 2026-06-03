@@ -3405,7 +3405,7 @@ app.get("/enrollments/status", async (req, res) => {
 app.post("/stripe/create-checkout", async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req);
-    const { enrollmentId, studentId, courseId, plan_id = null, coupon_code = null, successUrl, cancelUrl, amount } = req.body;
+    const { enrollmentId, studentId, courseId, plan_id = null, coupon_code = null, referral_code = null, ref = null, successUrl, cancelUrl, amount } = req.body;
     if (!enrollmentId || !studentId || !courseId) return res.status(400).json({ success: false, error: "enrollmentId, studentId, courseId required" });
     if (String(user.id) !== String(studentId) && user.role !== "admin") return res.status(403).json({ success: false, error: "Checkout user mismatch" });
     const db = await readLiveDb();
@@ -3426,6 +3426,7 @@ app.post("/stripe/create-checkout", async (req, res) => {
         plan_id: plan.id,
         plan_name: plan.name || "Plan",
         coupon_code: coupon?.code || null,
+        referral_code: ngAffCode(referral_code || ref || "") || null,
         original_amount_cents: pricing.original_amount_cents,
         discount_cents: pricing.discount_cents,
         amount_cents: 0,
@@ -3439,10 +3440,11 @@ app.post("/stripe/create-checkout", async (req, res) => {
         paid_at: new Date().toISOString(),
       };
       if (coupon?.id) { coupon.used_count = Number(coupon.used_count || 0) + 1; coupon.updated_at = new Date().toISOString(); db.couponRedemptions[uuid()] = { id: uuid(), coupon_id: coupon.id, coupon_code: coupon.code, plan_id: plan.id, enrollment_id: enrollment.id, student_id: studentId, course_id: courseId, original_amount_cents: pricing.original_amount_cents, discount_cents: pricing.discount_cents, final_amount_cents: 0, redeemed_at: new Date().toISOString() }; }
+      if (ngAffCode(referral_code || ref || "")) { const crmDb = ngAffiliateStore(await readCrmDb()); const affiliate = ngFindAffiliateByCode(crmDb, referral_code || ref); if (affiliate) { const commission = ngCreateCommissionLedgerEntry({ db: crmDb, affiliate, payment: db.payments[paymentId], attribution: { student_id: studentId, course_id: courseId, plan_id: plan.id }, source: "free_checkout" }); crmDb.referral_attributions.unshift({ id: uuid(), affiliate_id: affiliate.id, affiliate_name: affiliate.name, referral_code: affiliate.referral_code, student_id: studentId, course_id: courseId, plan_id: plan.id, payment_id: paymentId, commission_id: commission.id, status: "converted", created_at: new Date().toISOString(), updated_at: new Date().toISOString() }); await writeCrmDb(crmDb); } }
       await writeLiveDb(db);
       return res.json({ success: true, free_checkout: true, url: null, plan: sanitizePlan(plan), pricing, access_grant: { granted: true, method: "backend_enrollment_granted", enrollment_id: enrollment.id }, message: "Access granted without Stripe checkout." });
     }
-    const session = await stripe.checkout.sessions.create({ mode: "payment", payment_method_types: ["card"], line_items: [{ price_data: { currency: plan.currency || "usd", product_data: { name: plan.name, description: plan.description || "Course enrollment" }, unit_amount: pricing.final_amount_cents }, quantity: 1 }], metadata: { enrollmentId, studentId, courseId, planId: plan.id, couponCode: coupon?.code || "", originalAmountCents: String(pricing.original_amount_cents), discountCents: String(pricing.discount_cents), finalAmountCents: String(pricing.final_amount_cents) }, success_url: successUrl || "https://live.nextgenusmlelms.com/payment-success", cancel_url: cancelUrl || "https://live.nextgenusmlelms.com/payment-cancel" });
+    const session = await stripe.checkout.sessions.create({ mode: "payment", payment_method_types: ["card"], line_items: [{ price_data: { currency: plan.currency || "usd", product_data: { name: plan.name, description: plan.description || "Course enrollment" }, unit_amount: pricing.final_amount_cents }, quantity: 1 }], metadata: { enrollmentId, studentId, courseId, planId: plan.id, couponCode: coupon?.code || "", referralCode: ngAffCode(referral_code || ref || ""), originalAmountCents: String(pricing.original_amount_cents), discountCents: String(pricing.discount_cents), finalAmountCents: String(pricing.final_amount_cents) }, success_url: successUrl || "https://live.nextgenusmlelms.com/payment-success", cancel_url: cancelUrl || "https://live.nextgenusmlelms.com/payment-cancel" });
     db.payments = db.payments || {};
     db.payments[session.id] = {
       id: session.id,
@@ -3467,6 +3469,7 @@ app.post("/stripe/create-checkout", async (req, res) => {
       created_at: new Date().toISOString(),
       metadata: session.metadata || {},
     };
+    if (ngAffCode(referral_code || ref || "")) { const crmDb = ngAffiliateStore(await readCrmDb()); const affiliate = ngFindAffiliateByCode(crmDb, referral_code || ref); if (affiliate) { crmDb.referral_attributions.unshift({ id: uuid(), affiliate_id: affiliate.id, affiliate_name: affiliate.name, referral_code: affiliate.referral_code, student_id: studentId, course_id: courseId, plan_id: plan.id, payment_id: session.id, status: "pending_payment", created_at: new Date().toISOString(), updated_at: new Date().toISOString() }); await writeCrmDb(crmDb); } }
     await writeLiveDb(db);
     res.json({ success: true, free_checkout: false, url: session.url, plan: sanitizePlan(plan), pricing });
   } catch (e) { res.status(e.statusCode || e.response?.status || 500).json({ success: false, error: e.response?.data?.message || e.message || "Checkout failed", details: e.response?.data || null }); }
@@ -15553,6 +15556,650 @@ app.post("/admin/copilot/chat", async (req, res) => {
 
 // -----------------------------------------------------------------------------
 // END AYLA PERMANENT COPILOT BACKEND
+// -----------------------------------------------------------------------------
+
+
+
+// -----------------------------------------------------------------------------
+// NEXTGEN AFFILIATE + SCOPED FINANCE + FULL AI AUTO EXTENSION
+// Safe to append: uses existing readCrmDb/writeCrmDb/sendCrmMessage/OpenAI helpers.
+// -----------------------------------------------------------------------------
+
+const NEXTGEN_AFFILIATE_DEFAULT_RULE = {
+  id: "default_affiliate_rule",
+  name: "Default Affiliate Rule",
+  status: "active",
+  currency: "usd",
+  upfront_rate_percent: 10,
+  monthly_rate_percent: 10,
+  monthly_commission_mode: "split_until_cap", // split_until_cap | first_payment_only | recurring_limited
+  max_commission_months: 3,
+  hold_days: 7,
+  payout_mode: "manual_approval",
+  created_at: null,
+  updated_at: null,
+};
+
+function ngAffNow() { return new Date().toISOString(); }
+function ngAffArray(db, key) { if (!Array.isArray(db[key])) db[key] = []; return db[key]; }
+function ngAffMoney(cents = 0) { return Math.max(0, Math.round(Number(cents || 0))); }
+function ngAffCode(value = "") {
+  return String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_-]/g, "")
+    .slice(0, 32);
+}
+function ngAffSlug(value = "NG") {
+  const base = String(value || "NG")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "")
+    .slice(0, 10) || "NG";
+  return `${base}${String(Math.floor(1000 + Math.random() * 9000))}`;
+}
+function ngAffBaseUrl() {
+  return String(process.env.FRONTEND_URL || process.env.PUBLIC_FRONTEND_URL || "https://live.nextgenusmlelms.com").replace(/\/$/, "");
+}
+function ngAffiliateLink(code) { return `${ngAffBaseUrl()}/pricing?ref=${encodeURIComponent(code || "")}`; }
+function ngPercent(value, fallback = 0) {
+  const n = Number(value ?? fallback);
+  return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : fallback;
+}
+function ngAffiliateStore(db) {
+  ngAffArray(db, "affiliates");
+  ngAffArray(db, "referral_codes");
+  ngAffArray(db, "referral_attributions");
+  ngAffArray(db, "commission_rules");
+  ngAffArray(db, "commission_payouts");
+  ngAffArray(db, "commission_ledger");
+  ngAffArray(db, "affiliate_events");
+  ngAffArray(db, "team_ai_usage_rollups");
+  ngAffArray(db, "ai_auto_runs");
+
+  if (!db.commission_rules.some((rule) => String(rule.id) === NEXTGEN_AFFILIATE_DEFAULT_RULE.id)) {
+    db.commission_rules.push({ ...NEXTGEN_AFFILIATE_DEFAULT_RULE, created_at: ngAffNow(), updated_at: ngAffNow() });
+  }
+  return db;
+}
+function ngFindAffiliateByCode(db, code) {
+  const clean = ngAffCode(code);
+  if (!clean) return null;
+  const affiliates = ngAffArray(db, "affiliates");
+  return affiliates.find((a) => ngAffCode(a.referral_code) === clean || ngAffCode(a.code) === clean) || null;
+}
+function ngFindAffiliateForUser(db, user) {
+  const email = normalizeEmail(user?.email || "");
+  return ngAffArray(db, "affiliates").find((affiliate) => {
+    return affiliate.status !== "deleted" && (
+      (affiliate.user_id && String(affiliate.user_id) === String(user?.id)) ||
+      (affiliate.portal_user_id && String(affiliate.portal_user_id) === String(user?.id)) ||
+      (email && normalizeEmail(affiliate.email || "") === email)
+    );
+  }) || null;
+}
+function ngFindTeamMemberForAffiliate(db, affiliate) {
+  if (!affiliate?.team_member_id) return null;
+  return ngAffArray(db, "team_members").find((m) => String(m.id) === String(affiliate.team_member_id)) || null;
+}
+function ngGetAffiliateRule(db, affiliate = null) {
+  const rules = ngAffArray(db, "commission_rules");
+  return rules.find((r) => String(r.id) === String(affiliate?.commission_rule_id || "")) ||
+    rules.find((r) => String(r.id) === NEXTGEN_AFFILIATE_DEFAULT_RULE.id) ||
+    { ...NEXTGEN_AFFILIATE_DEFAULT_RULE };
+}
+function ngNormalizeAffiliatePayload(db, body = {}, existing = {}, actor = null) {
+  const name = String(body.name || body.full_name || existing.name || "Affiliate").trim();
+  const email = normalizeEmail(body.email ?? existing.email ?? "");
+  let code = ngAffCode(body.referral_code || body.code || existing.referral_code || existing.code || "");
+  if (!code) code = ngAffSlug(name || email || "NG");
+
+  const duplicate = ngAffArray(db, "affiliates").find((a) => String(a.id) !== String(existing.id || "") && ngAffCode(a.referral_code) === code);
+  if (duplicate) code = ngAffSlug(code);
+
+  const type = String(body.type || existing.type || body.affiliate_type || existing.affiliate_type || "pure_affiliate");
+  const isStaffAffiliate = Boolean(body.is_staff_affiliate ?? existing.is_staff_affiliate ?? body.team_member_id ?? existing.team_member_id);
+
+  return {
+    ...existing,
+    id: existing.id || uuid(),
+    type,
+    affiliate_type: type,
+    is_staff_affiliate: isStaffAffiliate,
+    team_member_id: body.team_member_id ?? existing.team_member_id ?? null,
+    user_id: body.user_id ?? existing.user_id ?? null,
+    portal_user_id: body.portal_user_id ?? existing.portal_user_id ?? existing.user_id ?? null,
+    name,
+    email,
+    phone: body.phone ?? body.whatsapp ?? existing.phone ?? "",
+    whatsapp: body.whatsapp ?? existing.whatsapp ?? body.phone ?? existing.phone ?? "",
+    referral_code: code,
+    code,
+    referral_link: ngAffiliateLink(code),
+    status: body.status || existing.status || "active",
+    commission_rule_id: body.commission_rule_id ?? existing.commission_rule_id ?? NEXTGEN_AFFILIATE_DEFAULT_RULE.id,
+    upfront_rate_percent: ngPercent(body.upfront_rate_percent, existing.upfront_rate_percent ?? 10),
+    monthly_rate_percent: ngPercent(body.monthly_rate_percent, existing.monthly_rate_percent ?? 10),
+    monthly_commission_mode: body.monthly_commission_mode || existing.monthly_commission_mode || "split_until_cap",
+    package_value_cents: ngAffMoney(body.package_value_cents ?? existing.package_value_cents ?? 0),
+    max_commission_cents: ngAffMoney(body.max_commission_cents ?? existing.max_commission_cents ?? 0),
+    payout_method: body.payout_method || existing.payout_method || "manual",
+    notes: body.notes ?? existing.notes ?? "",
+    crm_access_enabled: false, // affiliate portal is separate; staff access stays on team member record
+    lms_access_enabled: false,
+    created_by: existing.created_by || actor?.id || null,
+    updated_by: actor?.id || existing.updated_by || null,
+    created_at: existing.created_at || ngAffNow(),
+    updated_at: ngAffNow(),
+  };
+}
+function ngAffiliatePublic(affiliate = {}) {
+  return {
+    id: affiliate.id,
+    name: affiliate.name,
+    email: affiliate.email,
+    phone: affiliate.phone || affiliate.whatsapp || "",
+    type: affiliate.type || affiliate.affiliate_type || "pure_affiliate",
+    is_staff_affiliate: Boolean(affiliate.is_staff_affiliate),
+    team_member_id: affiliate.team_member_id || null,
+    referral_code: affiliate.referral_code || affiliate.code,
+    code: affiliate.referral_code || affiliate.code,
+    referral_link: affiliate.referral_link || ngAffiliateLink(affiliate.referral_code || affiliate.code),
+    status: affiliate.status || "active",
+    commission_rule_id: affiliate.commission_rule_id || NEXTGEN_AFFILIATE_DEFAULT_RULE.id,
+    upfront_rate_percent: Number(affiliate.upfront_rate_percent ?? 10),
+    monthly_rate_percent: Number(affiliate.monthly_rate_percent ?? 10),
+    monthly_commission_mode: affiliate.monthly_commission_mode || "split_until_cap",
+    package_value_cents: Number(affiliate.package_value_cents || 0),
+    max_commission_cents: Number(affiliate.max_commission_cents || 0),
+    payout_method: affiliate.payout_method || "manual",
+    created_at: affiliate.created_at || null,
+    updated_at: affiliate.updated_at || null,
+  };
+}
+function ngGetExistingCommissionTotal(db, affiliateId, studentId, planId) {
+  return ngAffArray(db, "commission_ledger")
+    .filter((item) => String(item.affiliate_id) === String(affiliateId) && String(item.student_id || "") === String(studentId || "") && String(item.plan_id || "") === String(planId || ""))
+    .reduce((sum, item) => sum + ngAffMoney(item.commission_cents), 0);
+}
+function ngCalculateCommission({ db, affiliate, rule, amountCents, packageValueCents = 0, billingType = "one_time", studentId = null, planId = null, paymentNumber = 1 }) {
+  const amount = ngAffMoney(amountCents);
+  const packageValue = ngAffMoney(packageValueCents || affiliate?.package_value_cents || amount);
+  const upfrontRate = ngPercent(affiliate?.upfront_rate_percent, rule?.upfront_rate_percent ?? 10);
+  const monthlyRate = ngPercent(affiliate?.monthly_rate_percent, rule?.monthly_rate_percent ?? upfrontRate);
+  const mode = String(affiliate?.monthly_commission_mode || rule?.monthly_commission_mode || "split_until_cap");
+
+  if (amount <= 0) return { commission_cents: 0, commission_rate_percent: 0, cap_cents: 0, remaining_cap_cents: 0, mode };
+
+  if (String(billingType).includes("month") || String(billingType).includes("recurring") || mode !== "upfront_full") {
+    const cap = ngAffMoney(affiliate?.max_commission_cents || Math.round(packageValue * (monthlyRate / 100)));
+    const already = ngGetExistingCommissionTotal(db, affiliate.id, studentId, planId);
+    const remaining = Math.max(0, cap - already);
+
+    let raw = Math.round(amount * (monthlyRate / 100));
+    if (mode === "first_payment_only" && Number(paymentNumber || 1) > 1) raw = 0;
+    if (mode === "recurring_limited") {
+      const maxMonths = Number(rule?.max_commission_months || affiliate?.max_commission_months || 3);
+      if (Number(paymentNumber || 1) > maxMonths) raw = 0;
+    }
+
+    const commission = Math.min(raw, remaining || raw);
+    return { commission_cents: ngAffMoney(commission), commission_rate_percent: monthlyRate, cap_cents: cap, remaining_cap_cents: remaining, mode };
+  }
+
+  const commission = Math.round(amount * (upfrontRate / 100));
+  return { commission_cents: ngAffMoney(commission), commission_rate_percent: upfrontRate, cap_cents: commission, remaining_cap_cents: commission, mode: "upfront_full" };
+}
+function ngCreateCommissionLedgerEntry({ db, affiliate, payment = {}, attribution = {}, source = "manual" }) {
+  ngAffiliateStore(db);
+  if (!affiliate?.id) throw new Error("Affiliate is required for commission entry");
+
+  const rule = ngGetAffiliateRule(db, affiliate);
+  const amountCents = ngAffMoney(payment.amount_cents ?? payment.final_amount_cents ?? payment.price_cents ?? 0);
+  const billingType = payment.billing_type || payment.plan_billing_type || payment.metadata?.billing_type || "one_time";
+  const packageValueCents = ngAffMoney(payment.package_value_cents || payment.metadata?.package_value_cents || affiliate.package_value_cents || amountCents);
+  const paymentNumber = Number(payment.payment_number || payment.metadata?.payment_number || 1);
+  const calc = ngCalculateCommission({ db, affiliate, rule, amountCents, packageValueCents, billingType, studentId: payment.student_id || payment.user_id, planId: payment.plan_id, paymentNumber });
+
+  const entry = {
+    id: uuid(),
+    affiliate_id: affiliate.id,
+    affiliate_name: affiliate.name,
+    referral_code: affiliate.referral_code || affiliate.code,
+    team_member_id: affiliate.team_member_id || null,
+    student_id: payment.student_id || payment.user_id || attribution.student_id || null,
+    student_email: payment.student_email || payment.email || attribution.student_email || "",
+    lead_id: payment.lead_id || attribution.lead_id || null,
+    payment_id: payment.id || payment.payment_id || payment.checkout_session_id || null,
+    plan_id: payment.plan_id || null,
+    plan_name: payment.plan_name || "Plan",
+    billing_type: billingType,
+    payment_number: paymentNumber,
+    amount_cents: amountCents,
+    commission_rate_percent: calc.commission_rate_percent,
+    commission_cents: calc.commission_cents,
+    cap_cents: calc.cap_cents,
+    remaining_cap_cents_before_payment: calc.remaining_cap_cents,
+    commission_mode: calc.mode,
+    status: calc.commission_cents > 0 ? "pending" : "zero",
+    approval_status: "pending",
+    payout_status: "unpaid",
+    source,
+    metadata: { payment, attribution, rule_id: rule.id },
+    created_at: ngAffNow(),
+    updated_at: ngAffNow(),
+  };
+
+  ngAffArray(db, "commission_ledger").unshift(entry);
+  return entry;
+}
+function ngAffiliateDashboard(db, affiliate) {
+  const code = ngAffCode(affiliate?.referral_code || affiliate?.code || "");
+  const attributions = ngAffArray(db, "referral_attributions").filter((item) => String(item.affiliate_id) === String(affiliate.id) || ngAffCode(item.referral_code) === code);
+  const commissions = ngAffArray(db, "commission_ledger").filter((item) => String(item.affiliate_id) === String(affiliate.id) || ngAffCode(item.referral_code) === code);
+  const sum = (status) => commissions.filter((x) => !status || x.status === status || x.payout_status === status || x.approval_status === status).reduce((s, x) => s + ngAffMoney(x.commission_cents), 0);
+  return {
+    affiliate: ngAffiliatePublic(affiliate),
+    referral_code: code,
+    referral_link: ngAffiliateLink(code),
+    counts: {
+      referrals: attributions.length,
+      paid_students: new Set(commissions.filter((c) => ngAffMoney(c.amount_cents) > 0).map((c) => String(c.student_id || c.payment_id))).size,
+      commissions: commissions.length,
+    },
+    totals: {
+      referred_revenue_cents: commissions.reduce((s, x) => s + ngAffMoney(x.amount_cents), 0),
+      pending_commission_cents: sum("pending"),
+      approved_commission_cents: sum("approved"),
+      paid_commission_cents: sum("paid"),
+      total_commission_cents: commissions.reduce((s, x) => s + ngAffMoney(x.commission_cents), 0),
+    },
+    attributions: attributions.slice(0, 100),
+    commissions: commissions.slice(0, 100),
+  };
+}
+function ngGetManagedTeamMemberIds(crmDb, managerMember) {
+  if (!managerMember?.id) return [];
+  return ngAffArray(crmDb, "team_members")
+    .filter((m) => String(m.manager_id || m.reports_to || m.team_manager_id || "") === String(managerMember.id) || String(m.id) === String(managerMember.id))
+    .map((m) => String(m.id));
+}
+function ngCanViewCompanyFinance(crmDb, user) {
+  if (user?.role === "admin") return true;
+  const perms = getEffectiveCrmPermissions(crmDb, user);
+  return permissionIncludes(perms, "view_company_revenue") || permissionIncludes(perms, "view_company_roi") || permissionIncludes(perms, "view_full_payments");
+}
+function ngCanViewTeamFinance(crmDb, user) {
+  if (ngCanViewCompanyFinance(crmDb, user)) return true;
+  const perms = getEffectiveCrmPermissions(crmDb, user);
+  return permissionIncludes(perms, "view_team_revenue") || permissionIncludes(perms, "view_team_ai_cost");
+}
+
+app.get("/admin/crm/affiliates", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngAffiliateStore(await readCrmDb());
+    res.json({ success: true, affiliates: ngAffArray(db, "affiliates").map(ngAffiliatePublic), count: db.affiliates.length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/affiliates", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngAffiliateStore(await readCrmDb());
+    const affiliate = ngNormalizeAffiliatePayload(db, req.body || {}, {}, user);
+    db.affiliates.unshift(affiliate);
+    db.referral_codes.unshift({ id: uuid(), affiliate_id: affiliate.id, referral_code: affiliate.referral_code, code: affiliate.referral_code, status: "active", created_at: ngAffNow(), updated_at: ngAffNow() });
+    await writeCrmDb(db);
+    res.json({ success: true, affiliate: ngAffiliatePublic(affiliate) });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.put("/admin/crm/affiliates/:id", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngAffiliateStore(await readCrmDb());
+    const idx = db.affiliates.findIndex((a) => String(a.id) === String(req.params.id));
+    if (idx < 0) return res.status(404).json({ success: false, error: "Affiliate not found" });
+    db.affiliates[idx] = ngNormalizeAffiliatePayload(db, req.body || {}, db.affiliates[idx], user);
+    await writeCrmDb(db);
+    res.json({ success: true, affiliate: ngAffiliatePublic(db.affiliates[idx]) });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/affiliates/:id/create-portal-user", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const crmDb = ngAffiliateStore(await readCrmDb());
+    const affiliate = crmDb.affiliates.find((a) => String(a.id) === String(req.params.id));
+    if (!affiliate) return res.status(404).json({ success: false, error: "Affiliate not found" });
+    if (!affiliate.email) return res.status(400).json({ success: false, error: "Affiliate email is required" });
+
+    const liveDb = await readLiveDb();
+    let portalUser = findUserByEmail(liveDb, affiliate.email);
+    const temporaryPassword = `NGAff-${crypto.randomBytes(4).toString("hex")}-${Math.floor(1000 + Math.random() * 9000)}`;
+
+    if (!portalUser) {
+      portalUser = createBackendUser({ email: affiliate.email, name: affiliate.name, password: temporaryPassword, role: "affiliate" });
+      liveDb.users[portalUser.id] = portalUser;
+    } else {
+      portalUser.role = portalUser.role === "admin" ? "admin" : "affiliate";
+      portalUser.updated_at = ngAffNow();
+      liveDb.users[portalUser.id] = { ...liveDb.users[portalUser.id], ...portalUser };
+    }
+
+    affiliate.user_id = portalUser.id;
+    affiliate.portal_user_id = portalUser.id;
+    affiliate.portal_enabled = true;
+    affiliate.updated_at = ngAffNow();
+
+    await writeLiveDb(liveDb);
+    await writeCrmDb(crmDb);
+
+    res.json({ success: true, affiliate: ngAffiliatePublic(affiliate), portal_user: sanitizeUser(portalUser), temporary_password: temporaryPassword, login_url: `${ngAffBaseUrl()}/login`, note: "Pure affiliate login should show affiliate portal only, not CRM/LMS admin." });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/public/referral/:code", async (req, res) => {
+  try {
+    const db = ngAffiliateStore(await readCrmDb());
+    const affiliate = ngFindAffiliateByCode(db, req.params.code);
+    if (!affiliate || affiliate.status !== "active") return res.status(404).json({ success: false, error: "Referral code not found" });
+    res.json({ success: true, referral_code: affiliate.referral_code, affiliate: { id: affiliate.id, name: affiliate.name }, referral_link: ngAffiliateLink(affiliate.referral_code) });
+  } catch (error) { res.status(500).json({ success: false, error: error.message }); }
+});
+
+app.post("/checkout/apply-referral", async (req, res) => {
+  try {
+    const db = ngAffiliateStore(await readCrmDb());
+    const code = ngAffCode(req.body?.referral_code || req.body?.code || req.body?.ref || "");
+    const affiliate = ngFindAffiliateByCode(db, code);
+    if (!affiliate || affiliate.status !== "active") return res.status(404).json({ success: false, error: "Invalid referral code" });
+
+    const attribution = {
+      id: uuid(),
+      affiliate_id: affiliate.id,
+      affiliate_name: affiliate.name,
+      referral_code: affiliate.referral_code,
+      student_id: req.body?.student_id || req.body?.user_id || null,
+      student_email: normalizeEmail(req.body?.student_email || req.body?.email || ""),
+      lead_id: req.body?.lead_id || null,
+      plan_id: req.body?.plan_id || null,
+      course_id: req.body?.course_id || null,
+      status: "pending_payment",
+      source: req.body?.source || "checkout_apply_referral",
+      metadata: req.body?.metadata || {},
+      created_at: ngAffNow(),
+      updated_at: ngAffNow(),
+    };
+    db.referral_attributions.unshift(attribution);
+    await writeCrmDb(db);
+    res.json({ success: true, valid: true, attribution, affiliate: ngAffiliatePublic(affiliate) });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/affiliate/me", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = ngAffiliateStore(await readCrmDb());
+    const affiliate = ngFindAffiliateForUser(db, user);
+    if (!affiliate) return res.status(404).json({ success: false, error: "Affiliate profile not found" });
+    res.json({ success: true, affiliate: ngAffiliatePublic(affiliate), user });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/affiliate/dashboard", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = ngAffiliateStore(await readCrmDb());
+    const affiliate = ngFindAffiliateForUser(db, user);
+    if (!affiliate) return res.status(404).json({ success: false, error: "Affiliate profile not found" });
+    res.json({ success: true, dashboard: ngAffiliateDashboard(db, affiliate) });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/affiliate/referrals", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = ngAffiliateStore(await readCrmDb());
+    const affiliate = ngFindAffiliateForUser(db, user);
+    if (!affiliate) return res.status(404).json({ success: false, error: "Affiliate profile not found" });
+    const code = ngAffCode(affiliate.referral_code);
+    const referrals = ngAffArray(db, "referral_attributions").filter((x) => String(x.affiliate_id) === String(affiliate.id) || ngAffCode(x.referral_code) === code);
+    res.json({ success: true, referrals, count: referrals.length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/affiliate/commissions", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = ngAffiliateStore(await readCrmDb());
+    const affiliate = ngFindAffiliateForUser(db, user);
+    if (!affiliate) return res.status(404).json({ success: false, error: "Affiliate profile not found" });
+    const commissions = ngAffArray(db, "commission_ledger").filter((x) => String(x.affiliate_id) === String(affiliate.id));
+    res.json({ success: true, commissions, count: commissions.length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/crm/commission-rules", async (req, res) => {
+  try { await requireCrmAdmin(req); const db = ngAffiliateStore(await readCrmDb()); res.json({ success: true, rules: db.commission_rules }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/commission-rules", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngAffiliateStore(await readCrmDb());
+    const rule = { ...NEXTGEN_AFFILIATE_DEFAULT_RULE, ...(req.body || {}), id: req.body?.id || uuid(), created_by: user.id, created_at: ngAffNow(), updated_at: ngAffNow() };
+    db.commission_rules.unshift(rule);
+    await writeCrmDb(db);
+    res.json({ success: true, rule });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/crm/commissions", async (req, res) => {
+  try { await requireCrmAdmin(req); const db = ngAffiliateStore(await readCrmDb()); res.json({ success: true, commissions: db.commission_ledger, count: db.commission_ledger.length }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.put("/admin/crm/commissions/:id/:action", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngAffiliateStore(await readCrmDb());
+    const item = db.commission_ledger.find((x) => String(x.id) === String(req.params.id));
+    if (!item) return res.status(404).json({ success: false, error: "Commission not found" });
+    const action = String(req.params.action || "").toLowerCase();
+    if (action === "approve") { item.approval_status = "approved"; item.status = "approved"; item.approved_by = user.id; item.approved_at = ngAffNow(); }
+    else if (action === "reject") { item.approval_status = "rejected"; item.status = "rejected"; item.rejected_by = user.id; item.rejected_at = ngAffNow(); item.reject_reason = req.body?.reason || ""; }
+    else if (action === "mark-paid" || action === "paid") { item.payout_status = "paid"; item.status = "paid"; item.paid_by = user.id; item.paid_at = ngAffNow(); item.payout_reference = req.body?.payout_reference || ""; }
+    else return res.status(400).json({ success: false, error: "Invalid commission action" });
+    item.updated_at = ngAffNow();
+    await writeCrmDb(db);
+    res.json({ success: true, commission: item });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/affiliate/record-payment", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngAffiliateStore(await readCrmDb());
+    const code = ngAffCode(req.body?.referral_code || req.body?.code || "");
+    const affiliate = req.body?.affiliate_id ? db.affiliates.find((a) => String(a.id) === String(req.body.affiliate_id)) : ngFindAffiliateByCode(db, code);
+    if (!affiliate) return res.status(404).json({ success: false, error: "Affiliate not found" });
+    const payment = { ...(req.body?.payment || {}), ...req.body };
+    const attribution = req.body?.attribution || {};
+    const commission = ngCreateCommissionLedgerEntry({ db, affiliate, payment, attribution, source: req.body?.source || "manual_record_payment" });
+    await writeCrmDb(db);
+    res.json({ success: true, commission, affiliate: ngAffiliatePublic(affiliate) });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/crm/scoped-revenue", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const crmDb = ngAffiliateStore(await readCrmDb());
+    const liveDb = await readLiveDb();
+    const payments = buildDerivedPayments(liveDb);
+
+    if (ngCanViewCompanyFinance(crmDb, user)) {
+      const total = payments.reduce((sum, p) => sum + ngAffMoney(p.amount_cents), 0);
+      return res.json({ success: true, scope: "company", total_revenue_cents: total, payments_count: payments.length, payments });
+    }
+
+    if (!ngCanViewTeamFinance(crmDb, user)) return res.status(403).json({ success: false, error: "Missing scoped finance permission" });
+
+    const member = getTeamMemberForUser(crmDb, user);
+    const teamMemberIds = ngGetManagedTeamMemberIds(crmDb, member);
+    const leads = ngAffArray(crmDb, "leads").filter((lead) => teamMemberIds.includes(String(lead.assigned_agent_id || lead.owner_id || lead.team_member_id || lead.created_by || "")));
+    const leadStudentIds = new Set(leads.map((lead) => String(lead.student_id || lead.user_id || lead.email || lead.phone || lead.contact || "")).filter(Boolean));
+    const scopedPayments = payments.filter((p) => leadStudentIds.has(String(p.student_id || p.user_id || p.student_email || p.email || "")) || teamMemberIds.includes(String(p.team_member_id || p.agent_id || p.manager_id || "")));
+    const total = scopedPayments.reduce((sum, p) => sum + ngAffMoney(p.amount_cents), 0);
+    res.json({ success: true, scope: "team", team_member_id: member?.id || null, team_member_ids: teamMemberIds, total_revenue_cents: total, payments_count: scopedPayments.length, payments: scopedPayments });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/crm/team-ai-usage", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = ngAffiliateStore(await readCrmDb());
+    const allLogs = [
+      ...ngAffArray(db, "copilot_cost_logs"),
+      ...ngAffArray(db, "ai_usage"),
+      ...ngAffArray(db, "ai_usage_logs"),
+    ];
+
+    if (ngCanViewCompanyFinance(db, user)) {
+      const total = allLogs.reduce((sum, item) => sum + Number(item.estimated_cost_usd || item.cost_usd || item.total_cost_usd || 0), 0);
+      return res.json({ success: true, scope: "company", total_cost_usd: Number(total.toFixed(6)), logs: allLogs.slice(-500).reverse() });
+    }
+
+    if (!ngCanViewTeamFinance(db, user)) return res.status(403).json({ success: false, error: "Missing AI usage permission" });
+    const member = getTeamMemberForUser(db, user);
+    const teamMemberIds = ngGetManagedTeamMemberIds(db, member);
+    const teamUserIds = new Set(ngAffArray(db, "team_members").filter((m) => teamMemberIds.includes(String(m.id))).flatMap((m) => [m.user_id, m.portal_user_id, m.id]).map(String));
+    const logs = allLogs.filter((item) => teamUserIds.has(String(item.user_id || item.team_member_id || item.actor_id || "")));
+    const total = logs.reduce((sum, item) => sum + Number(item.estimated_cost_usd || item.cost_usd || item.total_cost_usd || 0), 0);
+    res.json({ success: true, scope: "team", team_member_id: member?.id || null, total_cost_usd: Number(total.toFixed(6)), logs: logs.slice(-500).reverse() });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+function ngLeadConversationMessages(db, leadId) {
+  return ngAffArray(db, "conversations")
+    .filter((item) => String(item.lead_id) === String(leadId))
+    .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
+}
+function ngMessageText(item = {}) { return String(item.message_text || item.text || item.body || item.message || item.content || "").trim(); }
+function ngIsInboundMessage(item = {}) {
+  const direction = String(item.direction || "").toLowerCase();
+  return direction === "inbound" || direction === "received" || direction === "lead" || item.inbound === true;
+}
+function ngIsOutboundMessage(item = {}) {
+  const direction = String(item.direction || "").toLowerCase();
+  return direction === "outbound" || direction === "sent" || item.agent_initiated === true;
+}
+function ngLatestInbound(messages = []) { return [...messages].reverse().find((m) => ngIsInboundMessage(m) && ngMessageText(m)); }
+function ngLatestOutbound(messages = []) { return [...messages].reverse().find((m) => ngIsOutboundMessage(m) && ngMessageText(m)); }
+function ngWithinHours(dateValue, hours = 24) {
+  if (!dateValue) return false;
+  const t = new Date(dateValue).getTime();
+  if (!Number.isFinite(t)) return false;
+  return Date.now() - t <= Number(hours || 24) * 60 * 60 * 1000;
+}
+async function ngGenerateStudentAutoReply({ lead, messages, channel }) {
+  const history = messages.slice(-10).map((m) => `${ngIsOutboundMessage(m) ? "NextGen" : "Student"}: ${ngMessageText(m)}`).join("\n");
+  const fallback = "Hi Doctor, thank you for your message. To guide you properly, may I ask your exam type, expected exam date, and your main difficulty right now?";
+  if (!isAIConfigured()) return { reply: fallback, usage: {}, model: "fallback" };
+
+  const systemPrompt = `You are Ayla/NextGen USMLE assistant replying to a medical student lead. Be warm, professional, short, doctor-to-doctor, non-pushy. Do not guarantee scores or passing. Do not claim official affiliation with USMLE, NBME, UWorld, First Aid, Pathoma, or Sketchy. First qualify the student: exam type, exam date, difficulty. If relevant mention 2-day LMS demo, UWorld-style video library, and 60 Days Marathon live demo at 1 PM EST. Do not send payment links unless interest is clear.`;
+  const userPrompt = `Lead: ${JSON.stringify(lead || {}).slice(0, 2500)}\nChannel: ${channel}\nConversation:\n${history}\n\nWrite the next reply only. No markdown headings.`;
+  const result = await callOpenAIResponsesAPI({ model: process.env.AI_MODEL || "gpt-4o-mini", systemPrompt, userPrompt, maxOutputTokens: 500, jsonMode: false });
+  return { reply: String(result.text || fallback).trim() || fallback, usage: result.usage || {}, model: result.model || process.env.AI_MODEL || "gpt-4o-mini" };
+}
+
+app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const lead = getLeadByAnyId(db, req.params.leadId);
+    if (!lead) return res.status(404).json({ success: false, error: "Lead not found" });
+
+    const channel = normalizeAutomationChannel(req.body?.channel || lead.source_platform || lead.platform || "whatsapp");
+    const messages = ngLeadConversationMessages(db, lead.id);
+    const latestInbound = ngLatestInbound(messages);
+    if (!latestInbound) return res.status(400).json({ success: false, error: "No inbound student message found for AI Auto" });
+
+    const isWhatsAppOutsideWindow = channel === "whatsapp" && !ngWithinHours(latestInbound.created_at || latestInbound.received_at || latestInbound.timestamp, 24);
+    if (isWhatsAppOutsideWindow && !req.body?.template_id && !req.body?.template_key) {
+      return res.status(400).json({ success: false, error: "WhatsApp AI Auto outside 24-hour window requires an approved WhatsApp template.", requires_template: true });
+    }
+
+    const ai = await ngGenerateStudentAutoReply({ lead, messages, channel });
+    const to = getBestRecipientForChannel({ channel, lead, to: req.body?.to || req.body?.recipient || "" });
+    const result = await sendCrmMessage({
+      db,
+      brandId: lead.brand_id || getCrmBrandId(req, db),
+      channel,
+      to,
+      text: ai.reply,
+      templateId: req.body?.template_id || req.body?.template_key || null,
+      templateVariables: { lead },
+      leadId: lead.id,
+      metadata: { source: "full_ai_auto", ai_auto: true, triggered_by: user.id, latest_inbound_id: latestInbound.id || null },
+    });
+
+    if (typeof aylaLogCost === "function") {
+      await aylaLogCost({ db, actor: user, model: ai.model, usage: ai.usage, action: "full_ai_auto_send", meta: { lead_id: lead.id, channel } }).catch(() => null);
+    }
+
+    ngAffArray(db, "ai_auto_runs").unshift({ id: uuid(), lead_id: lead.id, channel, reply: ai.reply, sent: true, result, model: ai.model, usage: ai.usage, created_by: user.id, created_at: ngAffNow() });
+    await writeCrmDb(db);
+    res.json({ success: true, sent: true, reply: ai.reply, result, usage: ai.usage, model: ai.model });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message, detail: error.response?.data || null }); }
+});
+
+app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const limit = Math.max(1, Math.min(20, Number(req.body?.limit || 5)));
+    const leads = ngAffArray(db, "leads").filter((lead) => String(lead.ai_mode || lead.automation_mode || "").toLowerCase() === "auto").slice(0, limit);
+    const results = [];
+
+    for (const lead of leads) {
+      const messages = ngLeadConversationMessages(db, lead.id);
+      const inbound = ngLatestInbound(messages);
+      const outbound = ngLatestOutbound(messages);
+      if (!inbound) { results.push({ lead_id: lead.id, skipped: true, reason: "no_inbound" }); continue; }
+      const inboundTime = new Date(inbound.created_at || inbound.received_at || inbound.timestamp || 0).getTime();
+      const outboundTime = new Date(outbound?.created_at || outbound?.sent_at || outbound?.timestamp || 0).getTime();
+      if (outbound && outboundTime >= inboundTime) { results.push({ lead_id: lead.id, skipped: true, reason: "already_replied" }); continue; }
+
+      const channel = normalizeAutomationChannel(lead.source_platform || lead.platform || "whatsapp");
+      if (channel === "whatsapp" && !ngWithinHours(inbound.created_at || inbound.received_at || inbound.timestamp, 24)) {
+        ngAffArray(db, "ai_actions").unshift({ id: uuid(), title: "WhatsApp template required for Full AI Auto", area: "whatsapp", type: "template_required", status: "pending_approval", lead_id: lead.id, payload: { lead_id: lead.id, channel }, created_at: ngAffNow(), updated_at: ngAffNow() });
+        results.push({ lead_id: lead.id, skipped: true, reason: "whatsapp_template_required" });
+        continue;
+      }
+
+      try {
+        const ai = await ngGenerateStudentAutoReply({ lead, messages, channel });
+        const to = getBestRecipientForChannel({ channel, lead });
+        const sendResult = await sendCrmMessage({ db, brandId: lead.brand_id || getCrmBrandId(req, db), channel, to, text: ai.reply, leadId: lead.id, metadata: { source: "process_ai_auto", ai_auto: true, triggered_by: user.id } });
+        if (typeof aylaLogCost === "function") await aylaLogCost({ db, actor: user, model: ai.model, usage: ai.usage, action: "process_ai_auto_send", meta: { lead_id: lead.id, channel } }).catch(() => null);
+        ngAffArray(db, "ai_auto_runs").unshift({ id: uuid(), lead_id: lead.id, channel, reply: ai.reply, sent: true, result: sendResult, model: ai.model, usage: ai.usage, created_by: user.id, created_at: ngAffNow() });
+        results.push({ lead_id: lead.id, sent: true, reply: ai.reply });
+      } catch (err) {
+        results.push({ lead_id: lead.id, sent: false, error: err.message });
+      }
+    }
+
+    await writeCrmDb(db);
+    res.json({ success: true, processed: results.length, results });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+// -----------------------------------------------------------------------------
+// END NEXTGEN AFFILIATE + SCOPED FINANCE + FULL AI AUTO EXTENSION
 // -----------------------------------------------------------------------------
 
 app.listen(PORT, () => {
