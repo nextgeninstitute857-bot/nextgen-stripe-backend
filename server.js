@@ -10318,8 +10318,62 @@ async function handleUniversalWebhook({ req, res, platform, integrationId = null
     createSocialClientDataEvent(db, { lead, platform: cleanPlatform, payload: leadPayload, integration });
     createIntegrationLog(db, { brand_id: integration?.brand_id || lead.brand_id || null, integration_id: integration?.id || null, platform: cleanPlatform, action: "inbound_webhook", status: "success", message: created ? `Created lead from ${cleanPlatform} inbound webhook` : `Updated lead from ${cleanPlatform} inbound webhook`, metadata: { lead_id: lead.id, conversation_id: conversation.id } });
 
+    let aiAutoResult = null;
+    try {
+      ngNormalizeLeadAiMode(lead);
+      const aiMode = String(lead.ai_mode || lead.automation_mode || "auto").toLowerCase();
+      const explicitlyManualOrDraft =
+        (lead.ai_mode_set === true || lead.automation_mode_set === true || lead.mode_locked === true || lead.ai_mode_manually_set === true) &&
+        (aiMode === "manual" || aiMode === "draft" || aiMode === "ai_draft");
+
+      if (!explicitlyManualOrDraft && String(inboundText || "").trim()) {
+        const messages = ngLeadConversationMessages(db, lead.id);
+        const latestInbound = conversation;
+        const channel = resolveCrmChannelForConversation({
+          requestedChannel: lead.current_channel || lead.last_channel || lead.source_platform || lead.platform || cleanPlatform || "auto",
+          lead,
+          latestInbound,
+          fallback: cleanPlatform || "whatsapp",
+        });
+
+        const duplicateGuard = ngShouldSkipAiAutoForInbound(lead, latestInbound, { channel });
+        if (duplicateGuard.skip) {
+          aiAutoResult = { sent: false, skipped: true, reason: duplicateGuard.reason, channel, wait_ms: duplicateGuard.wait_ms || 0 };
+        } else if (channel === "whatsapp" && !ngWithinHours(latestInbound.created_at || latestInbound.received_at || latestInbound.timestamp, 24)) {
+          ngReleaseAiAutoLock(duplicateGuard.lock_key);
+          aiAutoResult = { sent: false, skipped: true, reason: "whatsapp_template_required", channel, requires_template: true };
+          ngAffArray(db, "ai_actions").unshift({ id: uuid(), title: "WhatsApp template required for Full AI Auto", area: "whatsapp", type: "template_required", status: "pending_approval", lead_id: lead.id, payload: { lead_id: lead.id, channel }, created_at: ngAffNow(), updated_at: ngAffNow() });
+        } else {
+          const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel });
+          const to = getBestRecipientForChannel({ channel, lead, message: latestInbound });
+          const sendResult = await sendCrmMessage({
+            db,
+            brandId: lead.brand_id || integration?.brand_id || null,
+            channel,
+            to,
+            text: ai.reply,
+            leadId: lead.id,
+            metadata: {
+              source: "social_webhook_full_ai_auto",
+              ai_auto: true,
+              latest_inbound_id: latestInbound.id || null,
+              inbound_message_id: ngAiAutoMessageFingerprint(latestInbound),
+              messaging_type: ["facebook", "instagram"].includes(channel) ? "RESPONSE" : undefined,
+            },
+          });
+          ngMarkAiAutoProcessed(lead, latestInbound, { channel, reply: ai.reply });
+          ngReleaseAiAutoLock(duplicateGuard.lock_key);
+          aiAutoResult = { sent: Boolean(sendResult.success), queued: Boolean(sendResult.queued), channel, to, result: sendResult };
+          ngAffArray(db, "ai_auto_runs").unshift({ id: uuid(), lead_id: lead.id, inbound_message_id: ngAiAutoMessageFingerprint(latestInbound), channel, reply: ai.reply, sent: Boolean(sendResult.success), queued: Boolean(sendResult.queued), result: sendResult, model: ai.model, usage: ai.usage, created_by: "webhook", created_at: ngAffNow() });
+        }
+      }
+    } catch (aiError) {
+      createIntegrationLog(db, { brand_id: integration?.brand_id || lead.brand_id || null, integration_id: integration?.id || null, platform: cleanPlatform, action: "full_ai_auto_webhook", status: "failed", message: aiError.message, metadata: { lead_id: lead.id, conversation_id: conversation.id } });
+      aiAutoResult = { sent: false, error: aiError.message };
+    }
+
     await writeCrmDb(db);
-    res.json({ success: true, platform: cleanPlatform, lead_id: lead.id, created, conversation_id: conversation.id });
+    res.json({ success: true, platform: cleanPlatform, lead_id: lead.id, created, conversation_id: conversation.id, ai_auto: aiAutoResult });
   } catch (error) {
     console.error("Universal social webhook error:", error.message);
     res.status(error.statusCode || 500).json({ success: false, error: error.message || "Webhook failed" });
@@ -11014,14 +11068,35 @@ function normalizeAutomationChannel(value = "whatsapp") {
 // -----------------------------------------------------------------------------
 
 const CRM_CHANNEL_AUTO_VALUES = new Set(["", "auto", "global", "lead_current_channel", "lead_current", "current", "current_channel"]);
-const CRM_VALID_SEND_CHANNELS = new Set(["whatsapp", "email", "sms", "telegram", "messenger", "facebook", "instagram"]);
+const CRM_VALID_SEND_CHANNELS = new Set([
+  "whatsapp",
+  "email",
+  "sms",
+  "telegram",
+  "facebook",
+  "messenger",
+  "instagram",
+  "reddit",
+  "linkedin",
+  "youtube",
+  "tiktok",
+  "twitter",
+  "x",
+  "discord",
+  "other",
+]);
 
 function normalizeCrmSendChannel(value = "") {
   const clean = normalizeAutomationChannel(value || "");
-  if (["facebook_messenger", "fb_messenger"].includes(clean)) return "messenger";
+  if (["facebook_messenger", "fb_messenger", "messenger", "meta_messenger"].includes(clean)) return "facebook";
   if (clean === "fb") return "facebook";
   if (clean === "ig") return "instagram";
-  return clean;
+  if (clean === "x") return "twitter";
+  if (typeof normalizeSocialPlatform === "function") {
+    const social = normalizeSocialPlatform(clean);
+    if (social && social !== "other") return social;
+  }
+  return clean || "other";
 }
 
 function getLeadCurrentChannel(lead = {}) {
@@ -11043,12 +11118,23 @@ function getLeadCurrentChannel(lead = {}) {
 function leadHasRecipientForChannel(lead = {}, channel = "") {
   const clean = normalizeCrmSendChannel(channel);
   if (clean === "email") return Boolean(lead.email || lead.student_email || lead.customer_email);
-  if (clean === "telegram") return Boolean(lead.telegram_chat_id || lead.chat_id || lead.telegram_id || lead.platform_contact_id);
+  if (clean === "telegram") return Boolean(lead.telegram_chat_id || lead.chat_id || lead.telegram_id || lead.platform_contact_id || lead.telegram_id || lead.telegram_username);
   if (clean === "whatsapp") return Boolean(lead.whatsapp || lead.whatsapp_phone || lead.wa_id || lead.phone || lead.mobile);
-  if (["messenger", "facebook"].includes(clean)) return Boolean(lead.facebook_sender_id || lead.facebook_id || lead.platform_contact_id);
-  if (clean === "instagram") return Boolean(lead.instagram_sender_id || lead.instagram_id || lead.platform_contact_id);
+  if (clean === "facebook") return Boolean(lead.facebook_sender_id || lead.facebook_id || lead.facebook_chat_id || lead.platform_contact_id);
+  if (clean === "instagram") return Boolean(lead.instagram_sender_id || lead.instagram_id || lead.instagram_chat_id || lead.platform_contact_id);
+  if (clean === "discord") return Boolean(lead.discord_chat_id || lead.discord_channel_id || lead.discord_id || lead.platform_contact_id);
+  if (["reddit", "linkedin", "youtube", "tiktok", "twitter"].includes(clean)) {
+    return Boolean(
+      lead.platform_contact_id ||
+      lead[`${clean}_id`] ||
+      lead[`${clean}_chat_id`] ||
+      lead[`${clean}_username`] ||
+      lead.username ||
+      lead.platform_username
+    );
+  }
   if (clean === "sms") return Boolean(lead.phone || lead.mobile || lead.whatsapp || lead.whatsapp_phone);
-  return Boolean(lead.platform_contact_id || lead.phone || lead.email);
+  return Boolean(lead.platform_contact_id || lead.phone || lead.email || lead.username || lead.platform_username);
 }
 
 function resolveCrmChannel({ requestedChannel = "", lead = null, template = null, fallback = "whatsapp" } = {}) {
@@ -11077,6 +11163,33 @@ function resolveCrmChannel({ requestedChannel = "", lead = null, template = null
   if (leadHasRecipientForChannel(lead || {}, "instagram")) return "instagram";
 
   return normalizeCrmSendChannel(fallback || "whatsapp");
+}
+
+
+function ngMessageChannel(message = {}) {
+  return normalizeCrmSendChannel(
+    message.channel ||
+      message.platform ||
+      message.provider ||
+      message.source_platform ||
+      message.source ||
+      message.transport ||
+      ""
+  );
+}
+
+function resolveCrmChannelForConversation({ requestedChannel = "", lead = null, template = null, latestInbound = null, fallback = "whatsapp" } = {}) {
+  const requested = normalizeCrmSendChannel(requestedChannel || "");
+  if (requested && !CRM_CHANNEL_AUTO_VALUES.has(requested) && CRM_VALID_SEND_CHANNELS.has(requested)) {
+    return requested;
+  }
+
+  const inboundChannel = ngMessageChannel(latestInbound || {});
+  if (inboundChannel && !CRM_CHANNEL_AUTO_VALUES.has(inboundChannel) && CRM_VALID_SEND_CHANNELS.has(inboundChannel)) {
+    return inboundChannel;
+  }
+
+  return resolveCrmChannel({ requestedChannel, lead, template, fallback });
 }
 
 
@@ -11480,30 +11593,49 @@ async function sendEmailMessage({ to, subject = "NextGen USMLE", text = "" }) {
   throw error;
 }
 
-function getBestRecipientForChannel({ channel, to = "", lead = null }) {
+function getBestRecipientForChannel({ channel, to = "", lead = null, message = null }) {
   if (to) return to;
 
-  if (channel === "email") {
-    return lead?.email || lead?.student_email || lead?.customer_email || "";
+  const cleanChannel = normalizeCrmSendChannel(channel || lead?.platform || lead?.source_platform || message?.platform || "");
+  const msg = message || {};
+
+  if (cleanChannel === "email") {
+    return lead?.email || lead?.student_email || lead?.customer_email || msg.email || msg.from || msg.sender || msg.contact || msg.recipient || "";
   }
 
-  if (channel === "telegram") {
-    return lead?.telegram_chat_id || lead?.chat_id || lead?.platform_contact_id || lead?.telegram_id || "";
+  if (cleanChannel === "telegram") {
+    return (
+      lead?.telegram_chat_id || lead?.chat_id || lead?.telegram_id || lead?.platform_contact_id ||
+      msg.telegram_chat_id || msg.chat_id || msg.platform_contact_id || msg.telegram_id ||
+      msg.from || msg.sender || msg.contact || msg.recipient || msg.lead_id || ""
+    );
   }
 
-  if (channel === "whatsapp") {
-    return lead?.whatsapp || lead?.whatsapp_phone || lead?.wa_id || lead?.phone || lead?.mobile || "";
+  if (cleanChannel === "whatsapp") {
+    return lead?.whatsapp || lead?.whatsapp_phone || lead?.wa_id || lead?.phone || lead?.mobile || msg.wa_id || msg.phone || msg.from || msg.contact || msg.recipient || "";
   }
 
-  if (["facebook", "messenger"].includes(channel)) {
-    return lead?.facebook_sender_id || lead?.platform_contact_id || lead?.facebook_id || "";
+  if (cleanChannel === "facebook") {
+    return lead?.facebook_sender_id || lead?.facebook_chat_id || lead?.facebook_id || lead?.platform_contact_id || msg.platform_contact_id || msg.from || msg.sender || msg.contact || msg.recipient || "";
   }
 
-  if (channel === "instagram") {
-    return lead?.instagram_sender_id || lead?.platform_contact_id || lead?.instagram_id || "";
+  if (cleanChannel === "instagram") {
+    return lead?.instagram_sender_id || lead?.instagram_chat_id || lead?.instagram_id || lead?.platform_contact_id || msg.platform_contact_id || msg.from || msg.sender || msg.contact || msg.recipient || "";
   }
 
-  return lead?.platform_contact_id || lead?.phone || lead?.email || "";
+  if (cleanChannel === "discord") {
+    return lead?.discord_channel_id || lead?.discord_chat_id || lead?.discord_id || lead?.platform_contact_id || msg.channel_id || msg.platform_contact_id || msg.from || msg.sender || msg.contact || msg.recipient || "";
+  }
+
+  if (["reddit", "linkedin", "youtube", "tiktok", "twitter"].includes(cleanChannel)) {
+    return (
+      lead?.platform_contact_id || lead?.[`${cleanChannel}_chat_id`] || lead?.[`${cleanChannel}_id`] || lead?.[`${cleanChannel}_username`] ||
+      msg.platform_contact_id || msg[`${cleanChannel}_chat_id`] || msg[`${cleanChannel}_id`] || msg[`${cleanChannel}_username`] ||
+      msg.from || msg.sender || msg.contact || msg.recipient || lead?.platform_username || lead?.username || ""
+    );
+  }
+
+  return lead?.platform_contact_id || lead?.phone || lead?.email || msg.platform_contact_id || msg.from || msg.sender || msg.contact || msg.recipient || lead?.platform_username || lead?.username || "";
 }
 
 function extractProviderError(error) {
@@ -11589,7 +11721,7 @@ async function sendCrmMessage({
     } else if (cleanChannel === "email") {
       providerResponse = await sendEmailMessage({ to: finalTo, subject: finalSubject, text: finalText });
       providerMessageId = providerResponse?.id || providerResponse?.messageId || null;
-    } else if (["facebook", "messenger", "instagram", "discord"].includes(cleanChannel)) {
+    } else if (["facebook", "instagram", "discord", "reddit", "linkedin", "youtube", "tiktok", "twitter", "other"].includes(cleanChannel)) {
       providerResponse = await sendSocialMessage({
         db,
         integration,
@@ -11603,7 +11735,7 @@ async function sendCrmMessage({
           messaging_type: metadata.messaging_type || "RESPONSE",
         },
       });
-      providerMessageId = providerResponse?.raw?.message_id || providerResponse?.raw?.recipient_id || null;
+      providerMessageId = providerResponse?.raw?.message_id || providerResponse?.raw?.recipient_id || providerResponse?.approval_item?.id || null;
     } else {
       const draft = withTimestamps({
         id: uuid(),
@@ -16476,19 +16608,6 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
 
     ngNormalizeLeadAiMode(lead);
 
-    const channel = resolveCrmChannel({
-      requestedChannel:
-        req.body?.channel ||
-        req.body?.requested_channel ||
-        lead.current_channel ||
-        lead.last_channel ||
-        lead.source_platform ||
-        lead.platform ||
-        "auto",
-      lead,
-      fallback: "whatsapp",
-    });
-
     const messages = ngLeadConversationMessages(db, lead.id);
     const latestInbound = ngLatestInbound(messages);
 
@@ -16498,6 +16617,20 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
         error: "No inbound student message found for AI Auto",
       });
     }
+
+    const channel = resolveCrmChannelForConversation({
+      requestedChannel:
+        req.body?.channel ||
+        req.body?.requested_channel ||
+        lead.current_channel ||
+        lead.last_channel ||
+        lead.source_platform ||
+        lead.platform ||
+        "auto",
+      lead,
+      latestInbound,
+      fallback: "whatsapp",
+    });
 
     if (ngHasOutboundAfterInbound(messages, latestInbound)) {
       return res.json({
@@ -16549,6 +16682,7 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
     const to = getBestRecipientForChannel({
       channel,
       lead,
+      message: latestInbound,
       to: req.body?.to || req.body?.recipient || "",
     });
 
@@ -16646,9 +16780,10 @@ app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
       const outbound = ngLatestOutbound(messages);
       if (!inbound) { results.push({ lead_id: lead.id, skipped: true, reason: "no_inbound" }); continue; }
 
-      const channel = resolveCrmChannel({
+      const channel = resolveCrmChannelForConversation({
         requestedChannel: lead.current_channel || lead.last_channel || lead.source_platform || lead.platform || "auto",
         lead,
+        latestInbound: inbound,
         fallback: "whatsapp",
       });
 
@@ -16668,7 +16803,7 @@ app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
 
       try {
         const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel });
-        const to = getBestRecipientForChannel({ channel, lead });
+        const to = getBestRecipientForChannel({ channel, lead, message: inbound });
         const sendResult = await sendCrmMessage({ db, brandId: lead.brand_id || getCrmBrandId(req, db), channel, to, text: ai.reply, leadId: lead.id, metadata: { source: "process_ai_auto", ai_auto: true, triggered_by: user.id, latest_inbound_id: inbound.id || null } });
         ngMarkAiAutoProcessed(lead, inbound, { channel, reply: ai.reply });
         if (typeof aylaLogCost === "function") await aylaLogCost({ db, actor: user, model: ai.model, usage: ai.usage, action: "process_ai_auto_send", meta: { lead_id: lead.id, channel } }).catch(() => null);
