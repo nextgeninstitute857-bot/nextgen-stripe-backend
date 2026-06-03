@@ -185,6 +185,10 @@ function normalizeArray(value) {
   if (typeof value === "string") return value.split("\n").map((x) => x.trim()).filter(Boolean);
   return [];
 }
+
+function safeArray(value) {
+  return Array.isArray(value) ? value : [];
+}
 function backendEnrollmentKey(courseId, userId, type) { return `${courseId}:${userId}:${type}`; }
 function courseUserKey(courseId, userId) { return `${courseId}:${userId}`; }
 function assessmentAttemptKey(assessmentId, userId) { return `${assessmentId}:${userId}`; }
