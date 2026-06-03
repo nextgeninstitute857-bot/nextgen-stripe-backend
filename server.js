@@ -7639,45 +7639,84 @@ app.post("/admin/crm/ai/generate-post", async (req, res) => {
 
 app.post("/admin/crm/ai/generate-reply", async (req, res) => {
   try {
-    await requireCrmAdmin(req);
+    const { user } = await requireCrmAdmin(req);
     const db = await readCrmDb();
     const brandId = getCrmBrandId(req, db);
-    const message = req.body.message || "";
-    const analysis = classifyLeadFromMessage(message);
-    const reply = req.body.language === "arabic"
-      ? "شكرًا دكتور. لفهم حالتك بشكل أفضل، هل تستعد حاليًا لـ Step 1 أم Step 2 CK؟"
-      : req.body.language === "urdu"
-        ? "Thank you Doctor. Behtar guide karne ke liye, kya aap Step 1 prepare kar rahe hain ya Step 2 CK?"
-        : buildMockLeadReply(analysis);
 
-    const model = req.body.model || "mock-crm-ai";
-    const inputText = JSON.stringify(req.body || {});
-    const outputText = reply;
-    const inputTokens = estimateTokensFromText(inputText);
-    const outputTokens = estimateTokensFromText(outputText);
-    const estimatedCost = estimateCrmAiCost({ db, model, inputTokens, outputTokens });
-    const budget = evaluateCrmBudget({ db, brandId, estimatedCost, estimatedTokens: inputTokens + outputTokens, agentName: "Trust Advisor Agent", leadId: req.body.lead_id });
+    const leadId = req.body?.lead_id || req.body?.lead?.id || req.body?.lead?.lead_id || null;
+    const storedLead = leadId ? getLeadByAnyId(db, leadId) : null;
+    const lead = storedLead || req.body?.lead || {};
 
-    const log = await logCrmAiActionAndUsage({
-      db,
-      brandId,
-      agentName: "Trust Advisor Agent",
-      actionType: "generate_reply",
-      channel: req.body.channel || req.body.platform || "crm",
-      leadId: req.body.lead_id || null,
-      campaignId: req.body.campaign_id || null,
-      strategyId: req.body.strategy_id || null,
-      inputText,
-      outputText,
-      model,
-      status: "draft",
-      approvalStatus: "needs_approval",
+    const channel = resolveCrmChannel({
+      requestedChannel:
+        req.body?.channel ||
+        req.body?.requested_channel ||
+        lead.current_channel ||
+        lead.last_channel ||
+        lead.source_platform ||
+        lead.platform ||
+        "auto",
+      lead,
+      fallback: "whatsapp",
     });
 
+    const submittedMessages = Array.isArray(req.body?.messages) ? req.body.messages : [];
+    const storedMessages = storedLead?.id ? ngLeadConversationMessages(db, storedLead.id) : [];
+    const messages = (submittedMessages.length ? submittedMessages : storedMessages).map((message) => ({
+      ...message,
+      text: ngMessageText(message) || message.text || message.message || message.body || "",
+      direction: message.direction || message.role || "inbound",
+      created_at: message.created_at || message.timestamp || message.sent_at || message.received_at || null,
+    }));
+
+    const ai = await ngGenerateStudentAutoReply({
+      db,
+      lead,
+      messages,
+      channel,
+    });
+
+    const inputText = JSON.stringify({ lead_id: leadId, channel, messages: messages.slice(-10), instructions: req.body?.instructions || "" });
+    const outputText = ai.reply;
+
+    let usageLog = null;
+    if (typeof logCrmAiActionAndUsage === "function") {
+      usageLog = await logCrmAiActionAndUsage({
+        db,
+        brandId,
+        agentName: "Ayla Full AI Auto",
+        actionType: "generate_reply",
+        channel,
+        leadId: leadId || null,
+        inputText,
+        outputText,
+        model: ai.model || process.env.AI_MODEL || "gpt-4o-mini",
+        status: "draft",
+        approvalStatus: "needs_approval",
+      }).catch(() => null);
+    }
+
     await writeCrmDb(db);
-    res.json({ success: true, reply, budget, ai_action: log.action, ai_usage: log.usage });
+
+    return res.json({
+      success: true,
+      reply: ai.reply,
+      message: ai.reply,
+      text: ai.reply,
+      suggested_reply: ai.reply,
+      channel,
+      model: ai.model,
+      usage: ai.usage || {},
+      ai_action: usageLog?.action || null,
+      ai_usage: usageLog?.usage || null,
+    });
   } catch (error) {
-    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+    console.error("AI generate reply failed:", error.response?.data || error.message);
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "AI reply generation failed",
+      detail: error.response?.data || null,
+    });
   }
 });
 
