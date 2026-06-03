@@ -17029,6 +17029,838 @@ app.post("/admin/crm/channel/resolve", async (req, res) => {
 // END NEXTGEN AFFILIATE + SCOPED FINANCE + FULL AI AUTO EXTENSION
 // -----------------------------------------------------------------------------
 
+
+// -----------------------------------------------------------------------------
+// NEXTGEN COMMUNITY INTELLIGENCE + COMMUNITY SCOUT BACKEND EXTENSION
+// -----------------------------------------------------------------------------
+// Adds backend storage/actions for:
+// - My Communities
+// - Community content drafts/calendar
+// - Telegram-first scout/study-helper bot data capture
+// - Opportunity qualification, soft outreach, handoff, and live/demo conversion
+// This block is additive and does not replace existing CRM/LMS/payment/Zoom routes.
+// -----------------------------------------------------------------------------
+
+const NEXTGEN_COMMUNITY_CONTENT_TYPES = {
+  daily_mcq: "Daily UWorld-style MCQ",
+  education_post: "Educational Post",
+  poll: "Community Poll",
+  strategy_tip: "Exam Strategy Tip",
+  demo_invite_soft: "Soft Demo Invite",
+  weekly_plan: "Weekly Study Plan",
+};
+
+function ngCommunityArray(db, key) {
+  return ensureCrmArray(db, key);
+}
+
+function ngCommunityText(value, fallback = "") {
+  return String(value ?? fallback).trim();
+}
+
+function ngCommunityPlatform(value, fallback = "telegram") {
+  const clean = ngCommunityText(value || fallback).toLowerCase();
+  if (clean === "x") return "twitter";
+  if (clean === "fb") return "facebook";
+  if (clean === "ig") return "instagram";
+  const allowed = [
+    "telegram", "whatsapp", "facebook", "messenger", "instagram", "reddit",
+    "linkedin", "youtube", "twitter", "discord", "email", "sms", "webchat", "other"
+  ];
+  return allowed.includes(clean) ? clean : fallback;
+}
+
+function ngCommunityOpportunityText(item = {}) {
+  return ngCommunityText(
+    item.detected_text ||
+    item.source_text ||
+    item.summary ||
+    item.post_text ||
+    item.message ||
+    item.title ||
+    ""
+  );
+}
+
+function ngCommunityTrainingContext(db) {
+  const direct = [
+    ...ngCommunityArray(db, "ai_training"),
+    ...ngCommunityArray(db, "ai_training_items"),
+  ];
+
+  const useful = direct
+    .filter((item) => item && item.active !== false && item.is_active !== false)
+    .filter((item) => {
+      const haystack = [
+        item.category,
+        item.audience,
+        item.title,
+        item.tags,
+        item.content,
+      ].join(" ").toLowerCase();
+
+      return (
+        haystack.includes("education") ||
+        haystack.includes("community") ||
+        haystack.includes("telegram") ||
+        haystack.includes("whatsapp") ||
+        haystack.includes("uworld") ||
+        haystack.includes("mcq") ||
+        haystack.includes("first aid") ||
+        haystack.includes("demo") ||
+        haystack.includes("qualification") ||
+        haystack.includes("old graduate")
+      );
+    })
+    .sort((a, b) => Number(b.priority || 0) - Number(a.priority || 0))
+    .slice(0, 14)
+    .map((item) => `Title: ${item.title || item.name || "Training"}\nCategory: ${item.category || "general"}\nContent: ${item.content || item.body || item.text || ""}`)
+    .join("\n\n---\n\n");
+
+  return useful || "Use NextGen USMLE rules: educational first, no spam, ask Step 1/Step 2, exam date, graduation year, main difficulty, then offer free 2-day LMS demo only after qualification.";
+}
+
+function ngBuildCommunityFallbackContent(body = {}) {
+  const type = ngCommunityText(body.content_type || body.post_type || "daily_mcq");
+  const exam = ngCommunityText(body.exam_type || "Step 1");
+  const topic = ngCommunityText(body.topic || "UWorld + First Aid integrated learning");
+  const cta = ngCommunityText(body.cta || "Reply with your answer or your main difficulty.");
+
+  if (type === "daily_mcq") {
+    return `Daily ${exam} MCQ\n\nA student is reviewing ${topic}. Which next step best improves retention and exam performance?\n\nA. Read the explanation once and move on\nB. Memorize isolated facts without questions\nC. Review the incorrect concept, connect it with First Aid, and retest with similar UWorld-style questions\nD. Delay review until the final week\nE. Avoid NBME-style self-assessment\n\nCorrect Answer: C\n\nExplanation:\nThe highest-yield approach is active recall plus error correction. For USMLE preparation, each wrong question should be converted into a First Aid-linked concept, then retested with similar clinical reasoning questions.\n\n${cta}`;
+  }
+
+  if (type === "poll") {
+    return `Quick ${exam} poll:\n\nWhat is your biggest difficulty right now?\n\n1. UWorld explanations\n2. First Aid retention\n3. NBME score not improving\n4. Study schedule\n5. Revision before exam\n\nVote and comment your exam date if you want guidance.`;
+  }
+
+  if (type === "strategy_tip") {
+    return `${exam} Strategy Tip\n\nDo not study randomly. Pick one weak area, solve a focused UWorld block, review every wrong option, then write the First Aid concept beside it.\n\nFor students near exam date: your revision should be based on mistakes, NBME trend, and weak systems — not just rereading.\n\n${cta}`;
+  }
+
+  if (type === "demo_invite_soft") {
+    return `For serious ${exam} students:\n\nIf you are confused about UWorld, First Aid integration, NBME scores, or a clear daily schedule, you can request the free 2-day NextGen LMS demo.\n\nNo pressure — first tell us your exam date and main difficulty so we can guide you properly.`;
+  }
+
+  if (type === "weekly_plan") {
+    return `${exam} Weekly Study Plan\n\nDay 1-2: Weak system UWorld blocks\nDay 3: First Aid integration and notes cleanup\nDay 4: Mixed timed questions\nDay 5: Review incorrects and make micro-targets\nDay 6: NBME-style review / self-assessment\nDay 7: Light revision + planning next week\n\n${cta}`;
+  }
+
+  return `${exam} Educational Post\n\nTopic: ${topic}\n\nKey idea: connect every question mistake to a testable First Aid concept. The goal is not only finishing resources, but learning how the exam asks the concept.\n\n${cta}`;
+}
+
+async function ngGenerateCommunityAiContent({ db, body, mode = "content" }) {
+  const trainingContext = ngCommunityTrainingContext(db);
+  const platform = ngCommunityPlatform(body.platform || body.channel || "telegram");
+  const type = ngCommunityText(body.content_type || body.post_type || "daily_mcq");
+  const exam = ngCommunityText(body.exam_type || "Step 1");
+  const topic = ngCommunityText(body.topic || body.detected_text || body.source_text || "USMLE preparation");
+  const audience = ngCommunityText(body.audience || "USMLE students preparing for Step 1 or Step 2 CK");
+  const cta = ngCommunityText(body.cta || "Ask one helpful question and avoid direct sales pressure.");
+
+  if (!isAIConfigured()) {
+    return {
+      content: ngBuildCommunityFallbackContent({ ...body, platform, content_type: type, exam_type: exam, topic, audience, cta }),
+      model: "local-community-fallback",
+      usage: {},
+      ai_configured: false,
+    };
+  }
+
+  const systemPrompt =
+    mode === "outreach"
+      ? `You are the NextGen USMLE Community Study Helper. You write friendly, non-spammy, approval-first outreach drafts. Do not pretend to be a random friend. Be warm and human. Ask only useful qualification questions first. Do not push payment.`
+      : `You are the NextGen USMLE Community Content AI. Create educational, medically careful USMLE community content using the provided training rules. For MCQs include stem, options A-E, answer, and concise explanation. Do not make false guarantees.`;
+
+  const userPrompt = [
+    `AI Training Center context:\n${trainingContext}`,
+    `Platform: ${platform}`,
+    `Mode: ${mode}`,
+    `Content type: ${type}`,
+    `Exam: ${exam}`,
+    `Audience: ${audience}`,
+    `Topic/source:\n${topic}`,
+    `CTA/instruction:\n${cta}`,
+    `Rules: educational first, no spam, no aggressive sales, no guaranteed score/result claims, qualify before demo offer.`,
+  ].join("\n\n");
+
+  const result = await callOpenAIResponsesAPI({
+    model: getAIModel("gpt-4o-mini"),
+    systemPrompt,
+    userPrompt,
+    maxOutputTokens: mode === "outreach" ? 700 : 1400,
+  });
+
+  return {
+    content: result.text || ngBuildCommunityFallbackContent(body),
+    model: result.model,
+    usage: result.usage || {},
+    ai_configured: true,
+  };
+}
+
+function ngNormalizeCommunityRecord(body = {}, existing = {}, brandId = null, user = null) {
+  return withTimestamps({
+    ...existing,
+    ...(body || {}),
+    id: existing.id || body.id || uuid(),
+    brand_id: body.brand_id || existing.brand_id || brandId || null,
+    platform: ngCommunityPlatform(body.platform || existing.platform || "telegram"),
+    name: ngCommunityText(body.name || body.community_name || existing.name || existing.community_name || "Community"),
+    community_name: ngCommunityText(body.community_name || body.name || existing.community_name || existing.name || "Community"),
+    community_url: ngCommunityText(body.community_url || body.url || existing.community_url || existing.url || ""),
+    ownership_type: ngCommunityText(body.ownership_type || existing.ownership_type || "owned"), // owned | partner | external_watch
+    posting_frequency: ngCommunityText(body.posting_frequency || body.frequency || existing.posting_frequency || "daily"),
+    community_goal: ngCommunityText(body.community_goal || existing.community_goal || "Build trust, educate daily, capture qualified USMLE leads."),
+    status: ngCommunityText(body.status || existing.status || "active"),
+    notes: ngCommunityText(body.notes || existing.notes || ""),
+    created_by: existing.created_by || user?.id || null,
+    updated_by: user?.id || existing.updated_by || null,
+  }, existing);
+}
+
+function ngNormalizeCommunityTask(body = {}, existing = {}, brandId = null, user = null) {
+  const keywords = Array.isArray(body.keywords)
+    ? body.keywords
+    : String(body.keywords || existing.keywords || "")
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
+
+  return withTimestamps({
+    ...existing,
+    ...(body || {}),
+    id: existing.id || body.id || uuid(),
+    brand_id: body.brand_id || existing.brand_id || brandId || null,
+    platform: ngCommunityPlatform(body.platform || existing.platform || "telegram"),
+    name: ngCommunityText(body.name || existing.name || body.community_name || "Community watch task"),
+    community_name: ngCommunityText(body.community_name || existing.community_name || ""),
+    community_url: ngCommunityText(body.community_url || existing.community_url || ""),
+    keywords,
+    status: ngCommunityText(body.status || existing.status || "active"),
+    frequency: ngCommunityText(body.frequency || existing.frequency || "daily"),
+    approval_required: body.approval_required !== undefined ? Boolean(body.approval_required) : existing.approval_required !== false,
+    outreach_style: ngCommunityText(body.outreach_style || existing.outreach_style || "friendly_helpful_no_pitch"),
+    notes: ngCommunityText(body.notes || existing.notes || ""),
+    created_by: existing.created_by || user?.id || null,
+    updated_by: user?.id || existing.updated_by || null,
+  }, existing);
+}
+
+function ngNormalizeCommunityOpportunity(body = {}, existing = {}, brandId = null, user = null) {
+  const text = ngCommunityText(body.detected_text || body.source_text || body.post_text || body.message || existing.detected_text || "");
+  return withTimestamps({
+    ...existing,
+    ...(body || {}),
+    id: existing.id || body.id || uuid(),
+    brand_id: body.brand_id || existing.brand_id || brandId || null,
+    platform: ngCommunityPlatform(body.platform || body.source_platform || existing.platform || existing.source_platform || "telegram"),
+    source_platform: ngCommunityPlatform(body.source_platform || body.platform || existing.source_platform || existing.platform || "telegram"),
+    community_id: body.community_id || existing.community_id || null,
+    community_name: ngCommunityText(body.community_name || existing.community_name || ""),
+    post_url: ngCommunityText(body.post_url || body.source_url || existing.post_url || existing.source_url || ""),
+    author_name: ngCommunityText(body.author_name || body.username || existing.author_name || existing.username || ""),
+    username: ngCommunityText(body.username || body.author_name || existing.username || existing.author_name || ""),
+    title: ngCommunityText(body.title || existing.title || "Community opportunity"),
+    detected_text: text,
+    intent: ngCommunityText(body.intent || existing.intent || "exam_difficulty"),
+    priority: ngCommunityText(body.priority || existing.priority || "medium"),
+    status: ngCommunityText(body.status || existing.status || "new"),
+    suggested_reply: ngCommunityText(body.suggested_reply || existing.suggested_reply || ""),
+    consent_to_contact: body.consent_to_contact !== undefined ? Boolean(body.consent_to_contact) : Boolean(existing.consent_to_contact),
+    created_by: existing.created_by || user?.id || null,
+    updated_by: user?.id || existing.updated_by || null,
+  }, existing);
+}
+
+function ngCreateCommunityApprovalItem(db, { brandId, draft, kind = "community_content", user = null }) {
+  const approval = withTimestamps({
+    id: `approval_${draft.id || uuid()}`,
+    brand_id: brandId || draft.brand_id || null,
+    type: kind,
+    action_type: draft.action_type || kind,
+    title: draft.title || draft.name || (kind === "community_content" ? "Community content draft" : "Community outreach draft"),
+    platform: draft.platform || draft.channel || "telegram",
+    status: "pending",
+    approval_status: "pending",
+    draft_content: draft.draft_content || draft.message || draft.content || "",
+    payload: draft,
+    created_by: user?.id || draft.created_by || null,
+  });
+  ngCommunityArray(db, "approval_queue").unshift(approval);
+  return approval;
+}
+
+function ngCreateLeadFromCommunityOpportunity(db, req, opp, user = null) {
+  const brandId = opp.brand_id || getCrmBrandId(req, db);
+  const payload = parseInboundSocialPayload({
+    platform: opp.platform || "telegram",
+    payload: {
+      ...(opp.raw_payload || {}),
+      ...(req.body || {}),
+      text: req.body?.message || opp.detected_text || opp.summary || "",
+      username: opp.username || opp.author_name || req.body?.username || "",
+      name: opp.author_name || opp.username || req.body?.name || "",
+      chat_id: opp.telegram_chat_id || opp.chat_id || req.body?.telegram_chat_id || req.body?.chat_id || "",
+      email: req.body?.email || opp.email || "",
+      phone: req.body?.phone || opp.phone || opp.whatsapp || "",
+    },
+    integration: null,
+  });
+
+  const { lead, created } = upsertSocialLead(db, payload.platform || opp.platform || "telegram", {
+    ...payload,
+    brand_id: brandId,
+    source: "community_intelligence",
+    source_platform: opp.platform || "telegram",
+    source_community_id: opp.community_id || null,
+    source_community_name: opp.community_name || "",
+    source_opportunity_id: opp.id,
+    exam_type: opp.exam_type || req.body?.exam_type || null,
+    exam_date: opp.exam_date || req.body?.exam_date || null,
+    graduation_year: opp.graduation_year || req.body?.graduation_year || null,
+    gap_type: opp.gap_type || req.body?.gap_type || null,
+    pain_points: opp.pain_points || opp.detected_text || "",
+    interest_level: opp.interest_level || req.body?.interest_level || "medium",
+    consent_to_contact: opp.consent_to_contact || req.body?.consent_to_contact === true,
+  });
+
+  opp.lead_id = lead.id;
+  opp.converted_lead_id = lead.id;
+  opp.status = "lead_created";
+  opp.updated_by = user?.id || opp.updated_by || null;
+  opp.updated_at = nowIso();
+
+  return { lead, created };
+}
+
+function ngRegisterCommunityCollectionRoutes(baseRoutes, collection, responseKey, normalizer) {
+  for (const baseRoute of baseRoutes) {
+    app.get(baseRoute, async (req, res) => {
+      try {
+        await requireCrmAdmin(req);
+        const db = await readCrmDb();
+        const brandId = getCrmBrandId(req, db);
+        const rows = filterCrmRecords(req, ngCommunityArray(db, collection), brandId).sort(sortNewestFirst);
+        res.json({ success: true, [responseKey]: rows, items: rows, records: rows, count: rows.length });
+      } catch (error) {
+        res.status(error.statusCode || 500).json({ success: false, error: error.message });
+      }
+    });
+
+    app.post(baseRoute, async (req, res) => {
+      try {
+        const { user } = await requireCrmAdmin(req);
+        const db = await readCrmDb();
+        const brandId = getCrmBrandId(req, db);
+        const record = normalizer(req.body || {}, {}, brandId, user);
+        ngCommunityArray(db, collection).unshift(record);
+        await writeCrmDb(db);
+        res.json({ success: true, [responseKey.replace(/s$/, "")]: record, record, item: record });
+      } catch (error) {
+        res.status(error.statusCode || 500).json({ success: false, error: error.message });
+      }
+    });
+
+    app.put(`${baseRoute}/:id`, async (req, res) => {
+      try {
+        const { user } = await requireCrmAdmin(req);
+        const db = await readCrmDb();
+        const brandId = getCrmBrandId(req, db);
+        const rows = ngCommunityArray(db, collection);
+        const index = rows.findIndex((item) => String(item.id) === String(req.params.id));
+        if (index < 0) return res.status(404).json({ success: false, error: "Record not found" });
+        rows[index] = normalizer(req.body || {}, rows[index], brandId, user);
+        await writeCrmDb(db);
+        res.json({ success: true, [responseKey.replace(/s$/, "")]: rows[index], record: rows[index], item: rows[index] });
+      } catch (error) {
+        res.status(error.statusCode || 500).json({ success: false, error: error.message });
+      }
+    });
+
+    app.delete(`${baseRoute}/:id`, async (req, res) => {
+      try {
+        const { user } = await requireCrmAdmin(req);
+        const db = await readCrmDb();
+        const rows = ngCommunityArray(db, collection);
+        const item = rows.find((row) => String(row.id) === String(req.params.id));
+        if (!item) return res.status(404).json({ success: false, error: "Record not found" });
+        item.status = "deleted";
+        item.deleted_at = nowIso();
+        item.deleted_by = user.id;
+        item.updated_at = nowIso();
+        await writeCrmDb(db);
+        res.json({ success: true, deleted: true, item });
+      } catch (error) {
+        res.status(error.statusCode || 500).json({ success: false, error: error.message });
+      }
+    });
+  }
+}
+
+// My Communities
+ngRegisterCommunityCollectionRoutes(
+  ["/admin/crm/communities", "/admin/crm/community-intelligence/communities"],
+  "communities",
+  "communities",
+  ngNormalizeCommunityRecord
+);
+
+// Add PUT/DELETE compatibility for existing generic Community Intelligence collections
+for (const [baseRoute, collection, responseKey, normalizer] of [
+  ["/admin/crm/community-intelligence/tasks", "community_intelligence_tasks", "tasks", ngNormalizeCommunityTask],
+  ["/admin/crm/community-intelligence-tasks", "community_intelligence_tasks", "tasks", ngNormalizeCommunityTask],
+  ["/admin/crm/community-tasks", "community_intelligence_tasks", "tasks", ngNormalizeCommunityTask],
+  ["/admin/crm/community-intelligence/opportunities", "community_opportunities", "opportunities", ngNormalizeCommunityOpportunity],
+  ["/admin/crm/community-opportunities", "community_opportunities", "opportunities", ngNormalizeCommunityOpportunity],
+  ["/admin/crm/community-intelligence-opportunities", "community_opportunities", "opportunities", ngNormalizeCommunityOpportunity],
+  ["/admin/crm/community-intelligence/reply-drafts", "community_reply_drafts", "drafts", (body, existing, brandId, user) => withTimestamps({ ...existing, ...(body || {}), id: existing.id || body.id || uuid(), brand_id: body.brand_id || existing.brand_id || brandId, platform: ngCommunityPlatform(body.platform || existing.platform || "telegram"), status: body.status || existing.status || "draft", created_by: existing.created_by || user?.id || null, updated_by: user?.id || existing.updated_by || null }, existing)],
+  ["/admin/crm/community-reply-drafts", "community_reply_drafts", "drafts", (body, existing, brandId, user) => withTimestamps({ ...existing, ...(body || {}), id: existing.id || body.id || uuid(), brand_id: body.brand_id || existing.brand_id || brandId, platform: ngCommunityPlatform(body.platform || existing.platform || "telegram"), status: body.status || existing.status || "draft", created_by: existing.created_by || user?.id || null, updated_by: user?.id || existing.updated_by || null }, existing)],
+  ["/admin/crm/community-intelligence/content-drafts", "community_content_drafts", "content_drafts", (body, existing, brandId, user) => withTimestamps({ ...existing, ...(body || {}), id: existing.id || body.id || uuid(), brand_id: body.brand_id || existing.brand_id || brandId, platform: ngCommunityPlatform(body.platform || existing.platform || "telegram"), status: body.status || existing.status || "draft", action_type: body.action_type || existing.action_type || "community_content_draft", created_by: existing.created_by || user?.id || null, updated_by: user?.id || existing.updated_by || null }, existing)],
+  ["/admin/crm/community-content-drafts", "community_content_drafts", "content_drafts", (body, existing, brandId, user) => withTimestamps({ ...existing, ...(body || {}), id: existing.id || body.id || uuid(), brand_id: body.brand_id || existing.brand_id || brandId, platform: ngCommunityPlatform(body.platform || existing.platform || "telegram"), status: body.status || existing.status || "draft", action_type: body.action_type || existing.action_type || "community_content_draft", created_by: existing.created_by || user?.id || null, updated_by: user?.id || existing.updated_by || null }, existing)],
+]) {
+  app.put(`${baseRoute}/:id`, async (req, res) => {
+    try {
+      const { user } = await requireCrmAdmin(req);
+      const db = await readCrmDb();
+      const brandId = getCrmBrandId(req, db);
+      const rows = ngCommunityArray(db, collection);
+      const index = rows.findIndex((item) => String(item.id) === String(req.params.id));
+      if (index < 0) return res.status(404).json({ success: false, error: "Record not found" });
+      rows[index] = normalizer(req.body || {}, rows[index], brandId, user);
+      await writeCrmDb(db);
+      res.json({ success: true, [responseKey.replace(/s$/, "")]: rows[index], record: rows[index], item: rows[index] });
+    } catch (error) {
+      res.status(error.statusCode || 500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.delete(`${baseRoute}/:id`, async (req, res) => {
+    try {
+      const { user } = await requireCrmAdmin(req);
+      const db = await readCrmDb();
+      const rows = ngCommunityArray(db, collection);
+      const item = rows.find((row) => String(row.id) === String(req.params.id));
+      if (!item) return res.status(404).json({ success: false, error: "Record not found" });
+      item.status = "deleted";
+      item.deleted_at = nowIso();
+      item.deleted_by = user.id;
+      item.updated_at = nowIso();
+      await writeCrmDb(db);
+      res.json({ success: true, deleted: true, item });
+    } catch (error) {
+      res.status(error.statusCode || 500).json({ success: false, error: error.message });
+    }
+  });
+}
+
+// Content drafts explicit GET/POST for frontend content calendar
+app.get("/admin/crm/community-intelligence/content-drafts", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const drafts = filterCrmRecords(req, ngCommunityArray(db, "community_content_drafts"), brandId).sort(sortNewestFirst);
+    res.json({ success: true, content_drafts: drafts, drafts, items: drafts, count: drafts.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/community-content-drafts", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const drafts = filterCrmRecords(req, ngCommunityArray(db, "community_content_drafts"), brandId).sort(sortNewestFirst);
+    res.json({ success: true, content_drafts: drafts, drafts, items: drafts, count: drafts.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/community-intelligence/generate-content", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const ai = await ngGenerateCommunityAiContent({ db, body: req.body || {}, mode: "content" });
+
+    const draft = withTimestamps({
+      id: uuid(),
+      brand_id: brandId,
+      platform: ngCommunityPlatform(req.body?.platform || "telegram"),
+      community_name: ngCommunityText(req.body?.community_name || ""),
+      content_type: ngCommunityText(req.body?.content_type || "daily_mcq"),
+      title: NEXTGEN_COMMUNITY_CONTENT_TYPES[req.body?.content_type] || "Community content draft",
+      action_type: "community_content_draft",
+      status: "draft",
+      approval_status: "pending",
+      draft_content: ai.content,
+      message: ai.content,
+      ai_model: ai.model,
+      ai_configured: ai.ai_configured,
+      ai_usage: ai.usage,
+      source: "community_intelligence_generate_content",
+      created_by: user.id,
+    });
+
+    ngCommunityArray(db, "community_content_drafts").unshift(draft);
+    const approval = ngCreateCommunityApprovalItem(db, { brandId, draft, kind: "community_content", user });
+    await writeCrmDb(db);
+
+    res.json({ success: true, draft, content: ai.content, approval_item: approval });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/community-intelligence/opportunities/:id/soft-outreach-draft", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const opp = ngCommunityArray(db, "community_opportunities").find((item) => String(item.id) === String(req.params.id));
+    if (!opp) return res.status(404).json({ success: false, error: "Opportunity not found" });
+
+    const brandId = opp.brand_id || getCrmBrandId(req, db);
+    const ai = await ngGenerateCommunityAiContent({
+      db,
+      body: {
+        platform: opp.platform || req.body?.platform || "telegram",
+        post_type: "helpful_reply",
+        content_type: "soft_outreach",
+        topic: ngCommunityOpportunityText(opp),
+        audience: "USMLE student/community member",
+        cta: "Ask Step 1 or Step 2 CK, exam date, graduation year, and main difficulty. Do not pitch directly. Offer official NextGen demo only after qualification/consent.",
+      },
+      mode: "outreach",
+    });
+
+    const draft = withTimestamps({
+      id: uuid(),
+      brand_id: brandId,
+      opportunity_id: opp.id,
+      platform: opp.platform || "telegram",
+      community_name: opp.community_name || "",
+      action_type: "community_soft_outreach_draft",
+      status: "draft",
+      approval_status: "pending",
+      draft_content: ai.content,
+      message: ai.content,
+      ai_model: ai.model,
+      ai_configured: ai.ai_configured,
+      ai_usage: ai.usage,
+      created_by: user.id,
+    });
+
+    ngCommunityArray(db, "community_reply_drafts").unshift(draft);
+    const approval = ngCreateCommunityApprovalItem(db, { brandId, draft, kind: "community_reply", user });
+
+    opp.status = "soft_outreach_drafted";
+    opp.suggested_reply = ai.content;
+    opp.reply_draft_id = draft.id;
+    opp.updated_at = nowIso();
+    opp.updated_by = user.id;
+
+    await writeCrmDb(db);
+    res.json({ success: true, draft, reply: ai.content, approval_item: approval, opportunity: opp });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/community-intelligence/opportunities/:id/qualify", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const opp = ngCommunityArray(db, "community_opportunities").find((item) => String(item.id) === String(req.params.id));
+    if (!opp) return res.status(404).json({ success: false, error: "Opportunity not found" });
+
+    Object.assign(opp, {
+      exam_type: req.body?.exam_type ?? opp.exam_type ?? null,
+      exam_date: req.body?.exam_date ?? opp.exam_date ?? null,
+      graduation_year: req.body?.graduation_year ?? opp.graduation_year ?? null,
+      gap_type: req.body?.gap_type ?? opp.gap_type ?? "unknown",
+      exam_timeline: req.body?.exam_timeline ?? opp.exam_timeline ?? "",
+      nbme_score: req.body?.nbme_score ?? opp.nbme_score ?? "",
+      uworld_progress: req.body?.uworld_progress ?? opp.uworld_progress ?? "",
+      current_resources: req.body?.current_resources ?? opp.current_resources ?? "",
+      difficulty: req.body?.difficulty ?? req.body?.pain_points ?? opp.difficulty ?? "",
+      pain_points: req.body?.pain_points ?? opp.pain_points ?? "",
+      study_hours: req.body?.study_hours ?? opp.study_hours ?? "",
+      budget_level: req.body?.budget_level ?? opp.budget_level ?? "",
+      interest_level: req.body?.interest_level ?? opp.interest_level ?? "medium",
+      preferred_contact_method: req.body?.preferred_contact_method ?? opp.preferred_contact_method ?? opp.platform ?? "telegram",
+      recommended_offer: req.body?.recommended_offer ?? opp.recommended_offer ?? "Free 2-day LMS demo",
+      notes: req.body?.notes ?? opp.notes ?? "",
+      status: "qualified",
+      qualified_at: nowIso(),
+      qualified_by: user.id,
+      updated_at: nowIso(),
+      updated_by: user.id,
+    });
+
+    let lead = null;
+    let created = false;
+    if (req.body?.create_lead !== false) {
+      const result = ngCreateLeadFromCommunityOpportunity(db, req, opp, user);
+      lead = result.lead;
+      created = result.created;
+      // Keep qualified if lead was created and qualification data is available
+      opp.status = "qualified";
+    }
+
+    await writeCrmDb(db);
+    res.json({ success: true, opportunity: opp, lead: lead ? normalizeLeadForResponse(lead) : null, created });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/community-intelligence/opportunities/:id/assign-agent", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const opp = ngCommunityArray(db, "community_opportunities").find((item) => String(item.id) === String(req.params.id));
+    if (!opp) return res.status(404).json({ success: false, error: "Opportunity not found" });
+
+    const agentType = ngCommunityText(req.body?.agent_type || "community");
+    Object.assign(opp, {
+      [`${agentType}_agent_id`]: req.body?.agent_id || null,
+      [`${agentType}_agent_name`]: req.body?.agent_name || "",
+      assigned_agent_type: agentType,
+      assigned_at: nowIso(),
+      assigned_by: user.id,
+      status: agentType === "sales" ? "handoff_to_sales" : (opp.status || "assigned"),
+      updated_at: nowIso(),
+      updated_by: user.id,
+    });
+
+    ngCommunityArray(db, "team_activity_logs").unshift(withTimestamps({
+      id: uuid(),
+      brand_id: opp.brand_id || getCrmBrandId(req, db),
+      team_member_id: req.body?.agent_id || null,
+      action: "community_opportunity_assigned",
+      opportunity_id: opp.id,
+      message: `Community opportunity assigned to ${req.body?.agent_name || req.body?.agent_id || agentType}`,
+      created_by: user.id,
+    }));
+
+    await writeCrmDb(db);
+    res.json({ success: true, opportunity: opp });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/community-intelligence/opportunities/:id/handoff", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const opp = ngCommunityArray(db, "community_opportunities").find((item) => String(item.id) === String(req.params.id));
+    if (!opp) return res.status(404).json({ success: false, error: "Opportunity not found" });
+
+    let lead = opp.lead_id ? getLeadByAnyId(db, opp.lead_id) : null;
+    let created = false;
+    if (!lead) {
+      const result = ngCreateLeadFromCommunityOpportunity(db, req, opp, user);
+      lead = result.lead;
+      created = result.created;
+    }
+
+    const handoff = withTimestamps({
+      id: uuid(),
+      brand_id: opp.brand_id || getCrmBrandId(req, db),
+      lead_id: lead?.id || opp.lead_id || null,
+      opportunity_id: opp.id,
+      source: "community_intelligence",
+      channel: opp.platform || "telegram",
+      status: "pending",
+      priority: opp.priority || req.body?.priority || "high",
+      reason: req.body?.reason || "Qualified community lead ready for official NextGen follow-up",
+      handoff_summary: req.body?.handoff_summary || `Community lead from ${opp.platform || "community"}: ${ngCommunityOpportunityText(opp).slice(0, 600)}`,
+      recommended_next_action: req.body?.recommended_next_action || "Official NextGen account should invite to free 2-day LMS demo or live session, then sales closer follows up.",
+      lead_status: req.body?.lead_status || "hot_lead",
+      created_by: user.id,
+    });
+
+    ngCommunityArray(db, "handoffs").unshift(handoff);
+
+    opp.status = "handoff_to_sales";
+    opp.handoff_id = handoff.id;
+    opp.lead_id = lead?.id || opp.lead_id || null;
+    opp.handed_off_at = nowIso();
+    opp.handed_off_by = user.id;
+    opp.updated_at = nowIso();
+
+    await writeCrmDb(db);
+    res.json({ success: true, handoff, opportunity: opp, lead: lead ? normalizeLeadForResponse(lead) : null, created });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/community-intelligence/opportunities/:id/send-to-live-conversion", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const opp = ngCommunityArray(db, "community_opportunities").find((item) => String(item.id) === String(req.params.id));
+    if (!opp) return res.status(404).json({ success: false, error: "Opportunity not found" });
+
+    let lead = opp.lead_id ? getLeadByAnyId(db, opp.lead_id) : null;
+    if (!lead) {
+      const result = ngCreateLeadFromCommunityOpportunity(db, req, opp, user);
+      lead = result.lead;
+    }
+
+    const invite = withTimestamps({
+      id: uuid(),
+      brand_id: opp.brand_id || getCrmBrandId(req, db),
+      lead_id: lead?.id || opp.lead_id || null,
+      opportunity_id: opp.id,
+      channel: opp.platform || req.body?.channel || "telegram",
+      session_id: req.body?.session_id || null,
+      session_title: req.body?.session_title || "",
+      plan_id: req.body?.plan_id || null,
+      plan_name: req.body?.plan_name || "",
+      demo_offer: req.body?.demo_offer || "Free 2-day LMS demo",
+      invite_status: req.body?.invite_status || "draft_needs_approval",
+      status: "draft",
+      created_by: user.id,
+    });
+
+    ngCommunityArray(db, "live_session_invites").unshift(invite);
+
+    const draftText = `Hi Doctor, based on your exam timeline and difficulty, the official NextGen USMLE team can give you free 2-day LMS demo access and guide you with UWorld + First Aid integrated preparation. Would you like the demo link?`;
+
+    const draft = withTimestamps({
+      id: uuid(),
+      brand_id: invite.brand_id,
+      platform: invite.channel,
+      opportunity_id: opp.id,
+      lead_id: lead?.id || null,
+      action_type: "community_live_demo_invite",
+      status: "draft",
+      approval_status: "pending",
+      draft_content: draftText,
+      message: draftText,
+      invite_id: invite.id,
+      created_by: user.id,
+    });
+
+    ngCommunityArray(db, "community_reply_drafts").unshift(draft);
+    const approval = ngCreateCommunityApprovalItem(db, { brandId: invite.brand_id, draft, kind: "community_live_demo_invite", user });
+
+    opp.status = "sent_to_live_conversion";
+    opp.live_session_invite_id = invite.id;
+    opp.updated_at = nowIso();
+    opp.updated_by = user.id;
+
+    await writeCrmDb(db);
+    res.json({ success: true, invite, draft, approval_item: approval, opportunity: opp, lead: lead ? normalizeLeadForResponse(lead) : null });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// Telegram Scout / Study Helper Bot configuration and lead data capture.
+// This supports a friendly helper bot flow, not a deceptive "fake friend" bot.
+ngRegisterCommunityCollectionRoutes(
+  ["/admin/crm/community-intelligence/scout-bots", "/admin/crm/telegram-scout-bots"],
+  "community_scout_bots",
+  "scout_bots",
+  (body = {}, existing = {}, brandId = null, user = null) => withTimestamps({
+    ...existing,
+    ...(body || {}),
+    id: existing.id || body.id || uuid(),
+    brand_id: body.brand_id || existing.brand_id || brandId || null,
+    platform: ngCommunityPlatform(body.platform || existing.platform || "telegram"),
+    name: ngCommunityText(body.name || existing.name || "USMLE Study Helper"),
+    public_identity: ngCommunityText(body.public_identity || existing.public_identity || "USMLE Study Helper"),
+    disclosure_text: ngCommunityText(body.disclosure_text || existing.disclosure_text || "I help USMLE students organize preparation and can connect interested students with official NextGen demo support."),
+    tone: ngCommunityText(body.tone || existing.tone || "friendly_student_support_not_salesy"),
+    status: ngCommunityText(body.status || existing.status || "active"),
+    require_contact_consent: body.require_contact_consent !== undefined ? Boolean(body.require_contact_consent) : existing.require_contact_consent !== false,
+    official_handoff_required: body.official_handoff_required !== undefined ? Boolean(body.official_handoff_required) : existing.official_handoff_required !== false,
+    qualification_questions: Array.isArray(body.qualification_questions) ? body.qualification_questions : (existing.qualification_questions || [
+      "Are you preparing for Step 1 or Step 2 CK?",
+      "When is your exam planned?",
+      "What is your graduation year?",
+      "What is your main difficulty right now — UWorld, First Aid, NBME, revision, or schedule?",
+    ]),
+    created_by: existing.created_by || user?.id || null,
+    updated_by: user?.id || existing.updated_by || null,
+  }, existing)
+);
+
+app.post("/admin/crm/community-intelligence/scout-capture", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+
+    const platform = ngCommunityPlatform(req.body?.platform || "telegram");
+    const consent = req.body?.consent_to_contact === true || req.body?.official_nextgen_contact_allowed === true;
+
+    const opportunity = ngNormalizeCommunityOpportunity({
+      platform,
+      source_platform: platform,
+      community_id: req.body?.community_id || null,
+      community_name: req.body?.community_name || "",
+      author_name: req.body?.name || req.body?.author_name || req.body?.username || "Telegram Student",
+      username: req.body?.username || "",
+      telegram_chat_id: req.body?.telegram_chat_id || req.body?.chat_id || "",
+      title: req.body?.title || "Scout bot captured student",
+      detected_text: req.body?.message || req.body?.detected_text || req.body?.pain_points || "",
+      intent: req.body?.intent || "scout_bot_qualification",
+      priority: req.body?.priority || (req.body?.interest_level === "hot" ? "hot" : "medium"),
+      status: consent ? "qualified" : "new",
+      consent_to_contact: consent,
+      exam_type: req.body?.exam_type || null,
+      exam_date: req.body?.exam_date || null,
+      graduation_year: req.body?.graduation_year || null,
+      gap_type: req.body?.gap_type || "unknown",
+      pain_points: req.body?.pain_points || "",
+      nbme_score: req.body?.nbme_score || "",
+      uworld_progress: req.body?.uworld_progress || "",
+      interest_level: req.body?.interest_level || "medium",
+      scout_bot_id: req.body?.scout_bot_id || null,
+      raw_payload: req.body || {},
+    }, {}, brandId, user);
+
+    ngCommunityArray(db, "community_opportunities").unshift(opportunity);
+
+    let lead = null;
+    let created = false;
+    if (consent) {
+      const result = ngCreateLeadFromCommunityOpportunity(db, req, opportunity, user);
+      lead = result.lead;
+      created = result.created;
+      opportunity.status = "qualified";
+      opportunity.official_handoff_ready = true;
+    }
+
+    await writeCrmDb(db);
+
+    res.json({
+      success: true,
+      opportunity,
+      lead: lead ? normalizeLeadForResponse(lead) : null,
+      created,
+      official_handoff_ready: Boolean(consent),
+      note: consent
+        ? "Student consent captured. Official NextGen follow-up can now be sent."
+        : "Captured as opportunity only. Ask for permission before official NextGen outreach.",
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// END NEXTGEN COMMUNITY INTELLIGENCE + COMMUNITY SCOUT BACKEND EXTENSION
+// -----------------------------------------------------------------------------
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`DATA_DIR=${DATA_DIR}`);
