@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-app.use(express.json({ limit: "20mb" }));
+app.use(express.json({ limit: "60mb" }));
 app.use(cors({ origin: "*" }));
 
 const POCKETBASE_URL = process.env.POCKETBASE_URL;
@@ -17856,6 +17856,481 @@ app.post("/admin/crm/community-intelligence/scout-capture", async (req, res) => 
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
 });
+
+
+
+// -----------------------------------------------------------------------------
+// NEXTGEN SCOUT TELEGRAM WEBHOOK + AI TRAINING PDF IMPORT EXTENSION
+// Added without changing the official Telegram bot routes/names.
+// -----------------------------------------------------------------------------
+
+function ngScoutBotToken() {
+  return String(process.env.TELEGRAM_SCOUT_BOT_TOKEN || "").trim();
+}
+
+function ngScoutWebhookSecret() {
+  return String(process.env.TELEGRAM_SCOUT_WEBHOOK_SECRET || "").trim();
+}
+
+async function ngScoutTelegramApi(method, payload = {}) {
+  const token = ngScoutBotToken();
+  if (!token) {
+    const error = new Error("Telegram Scout bot token is missing. Add TELEGRAM_SCOUT_BOT_TOKEN in Render environment variables.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const response = await axios.post(
+    `https://api.telegram.org/bot${token}/${method}`,
+    payload,
+    { timeout: 30000 }
+  );
+
+  if (response.data?.ok === false) {
+    const error = new Error(response.data?.description || "Telegram Scout API request failed");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return response.data;
+}
+
+function ngScoutExtractIntent(text = "") {
+  const t = String(text || "").toLowerCase();
+  if (/step\s*2|ck/.test(t)) return "step_2_ck";
+  if (/step\s*1|step one/.test(t)) return "step_1";
+  if (/nbme|score|fail|failed|low/.test(t)) return "nbme_low_score";
+  if (/uworld|u world|qbank|question/.test(t)) return "uworld_help";
+  if (/old graduate|graduate|yog|year of graduation/.test(t)) return "graduation_gap";
+  if (/exam|date|month|oct|nov|dec|jan|feb|mar|apr|may|jun|jul|aug|sep/.test(t)) return "exam_timeline";
+  return "general_usmle_interest";
+}
+
+function ngScoutBuildReply({ text = "", lead = {}, opportunity = null }) {
+  const clean = String(text || "").trim();
+  const lower = clean.toLowerCase();
+  const name = lead?.name && !String(lead.name).startsWith("Telegram") ? String(lead.name).split(" ")[0] : "Doctor";
+
+  if (!clean || lower === "/start" || lower === "start" || /^(hi|hello|hey|salam|assalam)/i.test(clean)) {
+    return `Hi ${name}, I am the NextGen USMLE Study Helper. I can help you organize your USMLE prep with MCQs, study strategy, and free resources.\n\nAre you preparing for Step 1 or Step 2 CK?`;
+  }
+
+  if (/step\s*1|step one|step\s*2|ck/i.test(clean) && !/exam|date|month|week|day|oct|nov|dec|jan|feb|mar|apr|may|jun|jul|aug|sep/i.test(clean)) {
+    return `Great. When is your exam planned, and what is your graduation year?`;
+  }
+
+  if (/exam|date|month|week|day|oct|nov|dec|jan|feb|mar|apr|may|jun|jul|aug|sep|202\d/i.test(clean) && !/uworld|nbme|first aid|revision|schedule|weak|difficulty/i.test(clean)) {
+    return `That helps. What is your main difficulty right now — UWorld, NBME score, First Aid retention, revision, or schedule?`;
+  }
+
+  if (/uworld|nbme|first aid|revision|schedule|weak|difficulty|fail|failed|low score/i.test(clean)) {
+    return `Understood. Based on this, the official NextGen team can send you the free 2-day LMS demo where resident doctors explain UWorld with First Aid integration.\n\nWould you like me to connect you with the official NextGen team for the demo details?`;
+  }
+
+  if (/yes|send|demo|connect|interested|ok|okay|sure/i.test(clean)) {
+    return `Perfect. I will mark you as interested for the official NextGen team. Please share your exam type, exam date, and graduation year if you have not already shared them.`;
+  }
+
+  return `Thanks, ${name}. To guide you better: are you preparing for Step 1 or Step 2 CK, when is your exam planned, and what is your main difficulty right now?`;
+}
+
+function ngScoutMaybeExtractFieldsFromText(text = "") {
+  const clean = String(text || "");
+  const lower = clean.toLowerCase();
+  const fields = {};
+
+  if (/step\s*2|ck/.test(lower)) fields.exam_type = "Step 2 CK";
+  if (/step\s*1|step one/.test(lower)) fields.exam_type = "Step 1";
+
+  const yearMatch = clean.match(/\b(20\d{2}|19\d{2})\b/);
+  if (yearMatch) fields.graduation_year = yearMatch[1];
+
+  const monthMatch = clean.match(/\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\b/i);
+  if (monthMatch) fields.exam_timeline = monthMatch[0];
+
+  if (/uworld|u world/.test(lower)) fields.pain_points = "UWorld help";
+  if (/nbme|score|fail|failed|low/.test(lower)) fields.pain_points = fields.pain_points ? `${fields.pain_points}; NBME/score concern` : "NBME/score concern";
+  if (/first aid|fa/.test(lower)) fields.pain_points = fields.pain_points ? `${fields.pain_points}; First Aid retention` : "First Aid retention";
+  if (/schedule|plan|roadmap/.test(lower)) fields.pain_points = fields.pain_points ? `${fields.pain_points}; schedule/roadmap` : "schedule/roadmap";
+
+  if (/old graduate|yog|graduated/.test(lower)) fields.gap_type = "old_graduate";
+
+  return fields;
+}
+
+async function ngScoutHandleTelegramUpdate(req, res) {
+  try {
+    if (String(process.env.SCOUT_BOT_ENABLED || "true").toLowerCase() === "false") {
+      return res.json({ success: true, ignored: true, reason: "Scout bot disabled" });
+    }
+
+    const expectedSecret = ngScoutWebhookSecret();
+    if (expectedSecret) {
+      const receivedSecret = String(req.headers["x-telegram-bot-api-secret-token"] || "");
+      if (receivedSecret !== expectedSecret) {
+        return res.status(403).json({ success: false, error: "Invalid Telegram Scout webhook secret" });
+      }
+    }
+
+    const update = req.body || {};
+    const message = getTelegramMessageFromUpdate(update);
+    if (!message) {
+      return res.json({ success: true, ignored: true, reason: "No message object found" });
+    }
+
+    const text = String(message.text || message.caption || "").trim();
+    const db = await readCrmDb();
+    const now = nowIso();
+
+    const leadPayload = {
+      ...normalizeTelegramLeadPayload({ update, message, integration: null }),
+      source_integration_name: "Telegram Scout Bot",
+      source_channel: "telegram_scout_bot",
+      source_platform: "telegram",
+      platform: "telegram",
+      scout_bot: true,
+      lead_source: "telegram_scout_bot",
+      status: "community_scout",
+      lead_status: "community_scout",
+      ...ngScoutMaybeExtractFieldsFromText(text),
+    };
+
+    const { lead, created } = upsertTelegramLead(db, leadPayload);
+    lead.scout_bot = true;
+    lead.scout_bot_last_message_at = now;
+    lead.scout_bot_status = "active";
+    lead.source_channel = "telegram_scout_bot";
+
+    const conversation = appendTelegramConversation(db, { lead, update, message, text, integration: null });
+    conversation.scout_bot = true;
+    conversation.channel = "telegram_scout";
+    conversation.source_channel = "telegram_scout_bot";
+
+    const capturedFields = ngScoutMaybeExtractFieldsFromText(text);
+    db.community_opportunities = ensureCrmArray(db, "community_opportunities");
+    const opportunity = withTimestamps({
+      id: uuid(),
+      platform: "telegram",
+      source_platform: "telegram",
+      source_channel: "telegram_scout_bot",
+      scout_bot: true,
+      lead_id: lead.id,
+      telegram_chat_id: message.chat?.id || lead.telegram_chat_id || null,
+      username: lead.telegram_username || "",
+      author_name: lead.name || lead.telegram_username || "Telegram Student",
+      title: "Scout bot captured Telegram student",
+      detected_text: text,
+      intent: ngScoutExtractIntent(text),
+      priority: /yes|demo|interested|connect|failed|low score/i.test(text) ? "high" : "medium",
+      status: /yes|demo|interested|connect/i.test(text) ? "qualified" : "new",
+      consent_to_contact: /yes|demo|interested|connect|send/i.test(text),
+      official_handoff_ready: /yes|demo|interested|connect|send/i.test(text),
+      exam_type: capturedFields.exam_type || lead.exam_type || null,
+      exam_timeline: capturedFields.exam_timeline || lead.exam_timeline || "",
+      graduation_year: capturedFields.graduation_year || lead.graduation_year || "",
+      gap_type: capturedFields.gap_type || lead.gap_type || "unknown",
+      pain_points: capturedFields.pain_points || lead.pain_points || "",
+      raw_payload: update,
+      created_by: "telegram_scout_webhook",
+    });
+    db.community_opportunities.unshift(opportunity);
+
+    createTelegramIntegrationLog(db, {
+      integration_id: null,
+      lead_id: lead.id,
+      action: "telegram_scout_inbound_message",
+      status: "success",
+      message: created ? "Created lead from Telegram Scout inbound message" : "Updated lead from Telegram Scout inbound message",
+      raw: { update_id: update.update_id, message_id: message.message_id, text },
+    });
+
+    db.client_data_events = ensureCrmArray(db, "client_data_events");
+    db.client_data_events.push(withTimestamps({
+      id: uuid(),
+      lead_id: lead.id,
+      source: "telegram_scout_bot",
+      action: created ? "create_lead" : "update_lead",
+      fields_collected: Object.keys(capturedFields || {}),
+      conversation_id: conversation.id,
+      opportunity_id: opportunity.id,
+    }));
+
+    const reply = ngScoutBuildReply({ text, lead, opportunity });
+    let sent = null;
+    try {
+      sent = await ngScoutTelegramApi("sendMessage", {
+        chat_id: message.chat?.id,
+        text: reply,
+        disable_web_page_preview: true,
+      });
+
+      const outbound = withTimestamps({
+        id: uuid(),
+        conversation_id: lead?.conversation_id || lead?.id || uuid(),
+        lead_id: lead?.id || null,
+        platform: "telegram",
+        source_platform: "telegram",
+        channel: "telegram_scout",
+        source_channel: "telegram_scout_bot",
+        direction: "outbound",
+        scout_bot: true,
+        telegram_chat_id: message.chat?.id || lead?.telegram_chat_id || null,
+        platform_contact_id: lead?.platform_contact_id || lead?.telegram_chat_id || message.chat?.id || null,
+        message_text: reply,
+        text: reply,
+        raw: sent,
+        raw_payload: sent,
+        status: "sent",
+        timestamp: nowIso(),
+        created_at: nowIso(),
+      });
+      db.conversations = ensureCrmArray(db, "conversations");
+      db.conversations.push(outbound);
+      lead.last_outbound_at = nowIso();
+      lead.scout_bot_last_reply = reply;
+    } catch (sendError) {
+      createTelegramIntegrationLog(db, {
+        lead_id: lead.id,
+        action: "telegram_scout_auto_reply_failed",
+        status: "error",
+        message: sendError.message,
+        raw: { text: reply },
+      });
+    }
+
+    await writeCrmDb(db);
+
+    res.json({
+      success: true,
+      scout: true,
+      created,
+      lead_id: lead.id,
+      conversation_id: conversation.id,
+      opportunity_id: opportunity.id,
+      replied: Boolean(sent),
+    });
+  } catch (error) {
+    console.error("Telegram Scout webhook error:", error.message);
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Telegram Scout webhook failed" });
+  }
+}
+
+app.get("/webhooks/telegram/scout", (req, res) => {
+  res.json({
+    success: true,
+    message: "Telegram Scout webhook endpoint is online. Telegram sends updates by POST.",
+  });
+});
+
+app.post("/webhooks/telegram/scout", ngScoutHandleTelegramUpdate);
+
+app.get("/admin/crm/integrations/telegram/scout/me", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const result = await ngScoutTelegramApi("getMe", {});
+    res.json({ success: true, bot: result.result, live_connected: true, scout: true });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/integrations/telegram/scout/set-webhook", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const publicUrl = getPublicBackendUrl(req);
+    if (!publicUrl) {
+      return res.status(400).json({
+        success: false,
+        error: "BACKEND_PUBLIC_URL or RENDER_EXTERNAL_URL is required to set Telegram Scout webhook.",
+      });
+    }
+
+    const webhookUrl = `${publicUrl}/webhooks/telegram/scout`;
+    const secret = ngScoutWebhookSecret();
+    const payload = {
+      url: webhookUrl,
+      allowed_updates: ["message", "edited_message", "callback_query", "channel_post"],
+      drop_pending_updates: req.body?.drop_pending_updates !== false,
+    };
+    if (secret) payload.secret_token = secret;
+
+    const result = await ngScoutTelegramApi("setWebhook", payload);
+
+    const db = await readCrmDb();
+    db.integration_logs = ensureCrmArray(db, "integration_logs");
+    db.integration_logs.push(withTimestamps({
+      id: uuid(),
+      platform: "telegram",
+      action: "set_scout_webhook",
+      status: "success",
+      message: `Telegram Scout webhook set to ${webhookUrl}`,
+      raw: result,
+    }));
+    db.community_scout_bots = ensureCrmArray(db, "community_scout_bots");
+    const existing = db.community_scout_bots.find((bot) => String(bot.platform || "").toLowerCase() === "telegram" && bot.system_key === "telegram_scout_bot");
+    const botPayload = withTimestamps({
+      id: existing?.id || uuid(),
+      system_key: "telegram_scout_bot",
+      name: existing?.name || "Telegram Study Helper",
+      platform: "telegram",
+      status: "active",
+      webhook_url: webhookUrl,
+      public_identity: existing?.public_identity || "USMLE Study Helper",
+      consent_required: existing?.consent_required !== false,
+      official_handoff_required: existing?.official_handoff_required !== false,
+      updated_at: nowIso(),
+    }, existing || {});
+    if (existing) Object.assign(existing, botPayload); else db.community_scout_bots.unshift(botPayload);
+    await writeCrmDb(db);
+
+    res.json({ success: true, message: "Telegram Scout webhook configured", webhook_url: webhookUrl, telegram: result });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+function ngDecodeBase64File(data = "") {
+  const raw = String(data || "");
+  const cleaned = raw.includes(",") ? raw.split(",").pop() : raw;
+  return Buffer.from(cleaned, "base64");
+}
+
+function ngBasicPdfTextFallback(buffer) {
+  const raw = buffer.toString("latin1");
+  const out = [];
+  const parenRegex = /\(([^()]{8,})\)\s*Tj/g;
+  let match;
+  while ((match = parenRegex.exec(raw)) !== null && out.length < 20000) {
+    out.push(match[1].replace(/\\\(|\\\)/g, "").replace(/\\n/g, " "));
+  }
+  const tjArrayRegex = /\[((?:\([^()]{2,}\)\s*)+)\]\s*TJ/g;
+  while ((match = tjArrayRegex.exec(raw)) !== null && out.length < 20000) {
+    const inner = [];
+    const innerRegex = /\(([^()]{2,})\)/g;
+    let innerMatch;
+    while ((innerMatch = innerRegex.exec(match[1])) !== null) inner.push(innerMatch[1]);
+    if (inner.length) out.push(inner.join(""));
+  }
+  return out.join("\n").replace(/\s{2,}/g, " ").trim();
+}
+
+async function ngExtractPdfText(buffer) {
+  try {
+    const mod = await import("pdf-parse");
+    const pdfParse = mod.default || mod;
+    const data = await pdfParse(buffer);
+    return { text: String(data?.text || "").trim(), method: "pdf-parse", pages: data?.numpages || null };
+  } catch (error) {
+    const fallbackText = ngBasicPdfTextFallback(buffer);
+    return { text: fallbackText, method: fallbackText ? "basic-pdf-fallback" : "none", pages: null, parser_error: error.message };
+  }
+}
+
+function ngSplitTrainingText(text = "", chunkSize = 5500) {
+  const clean = String(text || "").replace(/\r/g, "").replace(/\n{3,}/g, "\n\n").trim();
+  if (!clean) return [];
+  const chunks = [];
+  let remaining = clean;
+  while (remaining.length > chunkSize) {
+    let cut = remaining.lastIndexOf("\n\n", chunkSize);
+    if (cut < chunkSize * 0.55) cut = remaining.lastIndexOf(". ", chunkSize);
+    if (cut < chunkSize * 0.55) cut = chunkSize;
+    chunks.push(remaining.slice(0, cut).trim());
+    remaining = remaining.slice(cut).trim();
+  }
+  if (remaining) chunks.push(remaining);
+  return chunks;
+}
+
+app.post("/admin/crm/ai-training/import-document", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    db.ai_training_documents = ensureCrmArray(db, "ai_training_documents");
+
+    const filename = String(req.body?.filename || req.body?.name || "uploaded-document.pdf").trim();
+    const mimeType = String(req.body?.mime_type || req.body?.mimeType || "application/pdf").trim();
+    const title = String(req.body?.title || filename.replace(/\.pdf$/i, "") || "Imported Education PDF").trim();
+    const category = req.body?.category || "Education Knowledge";
+    const audience = req.body?.audience || req.body?.target_audience || "Community Content AI, Telegram Community Worker, LMS Tutor AI";
+    const tags = uniqueList([...(Array.isArray(req.body?.tags) ? req.body.tags : String(req.body?.tags || "").split(",")), "pdf_import", "education"]);
+
+    let extractedText = String(req.body?.extracted_text || req.body?.text || req.body?.content || "").trim();
+    let extraction = { method: extractedText ? "provided_text" : "none", pages: null };
+
+    if (!extractedText && req.body?.file_base64) {
+      const buffer = ngDecodeBase64File(req.body.file_base64);
+      if (mimeType.toLowerCase().includes("pdf") || filename.toLowerCase().endsWith(".pdf")) {
+        extraction = await ngExtractPdfText(buffer);
+        extractedText = extraction.text;
+      } else {
+        extractedText = buffer.toString("utf8");
+        extraction = { method: "plain_text_buffer", pages: null };
+      }
+    }
+
+    if (!extractedText) {
+      return res.status(422).json({
+        success: false,
+        error: "Could not extract text from this PDF. Install pdf-parse in backend or send extracted_text from frontend.",
+        extraction,
+      });
+    }
+
+    const chunks = ngSplitTrainingText(extractedText, Number(req.body?.chunk_size || 5500));
+    const document = withTimestamps({
+      id: uuid(),
+      title,
+      filename,
+      mime_type: mimeType,
+      category,
+      audience,
+      tags,
+      source: "pdf_import",
+      extraction_method: extraction.method,
+      parser_error: extraction.parser_error || null,
+      pages: extraction.pages || null,
+      total_characters: extractedText.length,
+      chunks_count: chunks.length,
+      active: true,
+      created_by: user.id,
+      created_by_email: user.email,
+    });
+
+    const items = chunks.map((chunk, index) => withTimestamps({
+      id: uuid(),
+      document_id: document.id,
+      title: `${title} — Part ${index + 1}`,
+      category,
+      audience,
+      tags,
+      content: chunk,
+      source: "pdf_import",
+      active: true,
+      priority: Number(req.body?.priority || 20),
+      created_by: user.id,
+      created_by_email: user.email,
+    }));
+
+    db.ai_training_documents.unshift(document);
+    db.ai_training_items.unshift(...items);
+    await writeCrmDb(db);
+
+    res.json({ success: true, document, items_created: items.length, extraction_method: extraction.method, parser_error: extraction.parser_error || null });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-training/upload-pdf", async (req, res, next) => {
+  // Alias kept for the frontend wording the user requested.
+  req.url = "/admin/crm/ai-training/import-document";
+  return app.handle(req, res, next);
+});
+
+// -----------------------------------------------------------------------------
+// END NEXTGEN SCOUT TELEGRAM WEBHOOK + AI TRAINING PDF IMPORT EXTENSION
+// -----------------------------------------------------------------------------
 
 // -----------------------------------------------------------------------------
 // END NEXTGEN COMMUNITY INTELLIGENCE + COMMUNITY SCOUT BACKEND EXTENSION
