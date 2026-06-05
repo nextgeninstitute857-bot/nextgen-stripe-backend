@@ -14218,8 +14218,30 @@ function ngBuildAction({ type = "review", title, description, area = "general", 
   };
 }
 
+function ngTrainingItemAllowedForAiUse(item = {}) {
+  if (!item || item.active === false || item.is_active === false) return false;
+
+  const status = String(item.status || item.approval_status || "").toLowerCase();
+  if (["deleted", "rejected", "disabled", "inactive"].includes(status)) return false;
+  if (item.deleted_at) return false;
+
+  const source = String(item.source || "").toLowerCase();
+  const requiresApproval =
+    item.requires_medical_review === true ||
+    item.approval_required === true ||
+    source === "education_chunk_import" ||
+    source === "medical_education_import";
+
+  if (requiresApproval) {
+    const approval = String(item.approval_status || item.medical_review_status || item.status || "").toLowerCase();
+    return ["approved", "active_approved", "verified"].includes(approval);
+  }
+
+  return true;
+}
+
 function ngGetActiveTraining(db, ids = []) {
-  const items = ngReadArray(db, "ai_training_items").filter((item) => item.active !== false);
+  const items = ngReadArray(db, "ai_training_items").filter((item) => ngTrainingItemAllowedForAiUse(item));
   if (!ids.length) return items;
   return items.filter((item) => ids.includes(String(item.id)));
 }
@@ -19475,6 +19497,480 @@ function ngSplitTrainingText(text = "", chunkSize = 5500) {
   return chunks;
 }
 
+function ngEducationTextSignals(text = "") {
+  const clean = ngNormalizeTrainingText(text);
+  const tokens = clean.split(/\s+/).filter(Boolean);
+  const words = tokens.filter((token) => /[A-Za-z]{3,}/.test(token));
+  const symbolHeavy = tokens.filter((token) =>
+    /[A-Za-z]/.test(token) &&
+    /[$<>\\^_{}|~`]/.test(token)
+  ).length;
+  const digitLetterMixed = tokens.filter((token) =>
+    /[A-Za-z]/.test(token) &&
+    /\d/.test(token)
+  ).length;
+  const allCapsWeird = tokens.filter((token) =>
+    token.length >= 6 &&
+    /^[A-Z0-9$&+\\\/%#@^_<>-]+$/.test(token) &&
+    !/^(USMLE|UWorld|NBME|ECG|DNA|RNA|ATP|ADP|IgG|IgM|HLA|MHC|CNS|RBC|WBC|ARDS|COPD|HIV|HPV|HBV|HCV|MI|CHF|CKD|AKI|UTI)$/i.test(token)
+  ).length;
+
+  const likelyFontEncoded = words.filter((token) =>
+    /[$\\\/<>^_]/.test(token) ||
+    /[A-Z][a-z]*[A-Z]{2,}/.test(token)
+  ).length;
+
+  return {
+    token_count: tokens.length,
+    word_count: words.length,
+    symbol_heavy_tokens: symbolHeavy,
+    digit_letter_mixed_tokens: digitLetterMixed,
+    all_caps_weird_tokens: allCapsWeird,
+    likely_font_encoded_tokens: likelyFontEncoded,
+    symbol_heavy_ratio: tokens.length ? symbolHeavy / tokens.length : 0,
+    mixed_token_ratio: tokens.length ? (symbolHeavy + digitLetterMixed + allCapsWeird) / tokens.length : 0,
+  };
+}
+
+function ngIsUsableEducationSourceText(text = "") {
+  const base = ngIsReadableTrainingText(text, { min_chars: 900, min_words: 120 });
+  const signals = ngEducationTextSignals(text);
+
+  if (!base.ok) {
+    return { ok: false, reason: base.reason, quality: base.quality, signals };
+  }
+
+  if (signals.word_count < 120) {
+    return {
+      ok: false,
+      reason: "Education document has too few readable medical words to safely convert.",
+      quality: base.quality,
+      signals,
+    };
+  }
+
+  if (signals.mixed_token_ratio > 0.18 || signals.symbol_heavy_ratio > 0.08) {
+    return {
+      ok: false,
+      reason: "The PDF text appears font-encoded or garbled. Use OCR/clean text before creating medical education chunks.",
+      quality: base.quality,
+      signals,
+    };
+  }
+
+  return { ok: true, reason: "Education source text is readable enough for structured conversion.", quality: base.quality, signals };
+}
+
+function ngSplitEducationSourceIntoTopicBlocks(text = "", options = {}) {
+  const clean = ngNormalizeTrainingText(text);
+  const maxChars = Math.max(1800, Math.min(7000, Number(options.chunk_size || 4200)));
+  const minChars = Math.max(500, Math.min(1500, Number(options.min_chunk_chars || 800)));
+
+  const paragraphs = clean
+    .split(/\n{2,}/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  const blocks = [];
+  let current = "";
+
+  const flush = () => {
+    const value = current.trim();
+    if (value.length >= minChars) blocks.push(value);
+    current = "";
+  };
+
+  for (const para of paragraphs) {
+    const looksLikeHeading =
+      para.length <= 120 &&
+      (/^(chapter|section|topic|unit)\s+\d+/i.test(para) || /^[A-Z][A-Za-z0-9 ,:;()\/-]{8,}$/.test(para));
+
+    if (looksLikeHeading && current.length >= minChars) {
+      flush();
+    }
+
+    if ((current + "\n\n" + para).length > maxChars && current.length >= minChars) {
+      flush();
+    }
+
+    current = current ? `${current}\n\n${para}` : para;
+  }
+
+  flush();
+
+  if (!blocks.length && clean.length >= minChars) {
+    return ngSplitTrainingText(clean, maxChars).filter((chunk) => chunk.length >= minChars);
+  }
+
+  return blocks;
+}
+
+function ngEducationSafeTitle(value = "", fallback = "Education Topic") {
+  const raw = String(value || "").replace(/\s+/g, " ").trim();
+  const clean = raw
+    .replace(/[`*_#>{}\[\]]/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+
+  if (!clean || clean.length < 4) return fallback;
+  return clean.slice(0, 160);
+}
+
+function ngBuildEducationChunkContent(data = {}) {
+  const topic = ngEducationSafeTitle(data.topic, "Education Topic");
+
+  return `Topic:
+${topic}
+
+High-yield explanation:
+${String(data.high_yield_explanation || "").trim()}
+
+Mechanism:
+${String(data.mechanism || "").trim()}
+
+Examples:
+${Array.isArray(data.examples) ? data.examples.map((x) => `- ${String(x).trim()}`).join("\n") : String(data.examples || "").trim()}
+
+USMLE-style teaching point:
+${String(data.usmle_teaching_point || "").trim()}
+
+Common student confusion:
+${String(data.common_student_confusion || "").trim()}
+
+Community post version:
+${String(data.community_post_version || "").trim()}
+
+Tutor explanation version:
+${String(data.tutor_explanation_version || "").trim()}
+
+Suggested MCQ draft:
+${String(data.suggested_mcq || "").trim()}
+
+Medical safety note:
+This is a draft educational training chunk. It must be reviewed before public community posting or tutor use.`;
+}
+
+async function ngCreateStructuredEducationChunkWithAI({ sourceBlock, title, audience, index, total, user }) {
+  const model = String(process.env.AI_EDUCATION_MODEL || process.env.AI_MODEL || "gpt-4o-mini").trim() || "gpt-4o-mini";
+
+  const systemPrompt = `You convert readable medical education source notes into original, high-yield USMLE teaching chunks for an internal AI training center.
+
+Strict rules:
+- Do not copy long passages from the source.
+- Do not reproduce copyrighted text.
+- Rewrite into original teaching notes.
+- If the source is garbled, incomplete, or unsafe, set confidence below 0.60 and explain what is missing.
+- Do not invent facts that are not supported by the source.
+- If making an MCQ draft, keep it clearly marked as a draft requiring human approval.
+- Return valid JSON only.`;
+
+  const userPrompt = `Create one structured education knowledge chunk from this source block.
+
+Document title: ${title || "Education Document"}
+Audience: ${audience || "Community Content AI, LMS Tutor AI, ScoutBot"}
+Block: ${index + 1} of ${total}
+
+Return JSON with exactly these keys:
+{
+  "topic": "",
+  "high_yield_explanation": "",
+  "mechanism": "",
+  "examples": [],
+  "usmle_teaching_point": "",
+  "common_student_confusion": "",
+  "community_post_version": "",
+  "tutor_explanation_version": "",
+  "suggested_mcq": "",
+  "tags": [],
+  "confidence": 0.0,
+  "missing_or_uncertain_points": [],
+  "safe_for_public_posting_after_review": false
+}
+
+Source block:
+"""${String(sourceBlock || "").slice(0, 6500)}"""`;
+
+  const ai = await callOpenAIResponsesAPI({
+    model,
+    systemPrompt,
+    userPrompt,
+    maxOutputTokens: 2500,
+    jsonMode: true,
+  });
+
+  await logAIUsage({
+    user,
+    action: "education_chunk_import",
+    model,
+    usage: ai.usage,
+    sourceLength: String(sourceBlock || "").length,
+    questionCount: null,
+  });
+
+  const parsed = safeJsonParseFromAI(ai.text);
+  const content = ngBuildEducationChunkContent(parsed);
+  const confidence = Math.max(0, Math.min(1, Number(parsed.confidence || 0)));
+
+  return {
+    parsed,
+    content,
+    confidence,
+    model,
+    usage: ai.usage,
+  };
+}
+
+app.post("/admin/crm/ai-training/import-education-document", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    db.ai_training_documents = ensureCrmArray(db, "ai_training_documents");
+    db.ai_training_items = ensureCrmArray(db, "ai_training_items");
+
+    const filename = String(req.body?.filename || req.body?.name || "education-document.pdf").trim();
+    const mimeType = String(req.body?.mime_type || req.body?.mimeType || "application/pdf").trim();
+    const title = String(req.body?.title || filename.replace(/\.pdf$/i, "") || "Education Document").trim();
+    const category = req.body?.category || "Education Knowledge";
+    const audience = req.body?.audience || req.body?.target_audience || "Community Content AI, LMS Tutor AI, ScoutBot";
+    const maxChunks = Math.max(1, Math.min(20, Number(req.body?.max_chunks || 8)));
+    const chunkSize = Math.max(1800, Math.min(7000, Number(req.body?.chunk_size || 4200)));
+
+    let sourceText = String(req.body?.extracted_text || req.body?.text || req.body?.content || req.body?.source_text || "").trim();
+    let extraction = { method: sourceText ? "provided_text" : "none", pages: null };
+
+    if (!sourceText && req.body?.file_base64) {
+      const buffer = ngDecodeBase64File(req.body.file_base64);
+      if (mimeType.toLowerCase().includes("pdf") || filename.toLowerCase().endsWith(".pdf")) {
+        extraction = await ngExtractPdfText(buffer);
+        sourceText = extraction.text;
+      } else {
+        sourceText = buffer.toString("utf8");
+        extraction = { method: "plain_text_buffer", pages: null };
+      }
+    }
+
+    sourceText = ngNormalizeTrainingText(sourceText);
+
+    const sourceQuality = ngIsUsableEducationSourceText(sourceText);
+    if (!sourceQuality.ok) {
+      return res.status(422).json({
+        success: false,
+        error: `Education document rejected: ${sourceQuality.reason}`,
+        extraction,
+        quality: sourceQuality.quality,
+        signals: sourceQuality.signals,
+        preview: sourceText.slice(0, 900),
+        recommendation: "Use OCR or paste clean readable notes. The system will not create medical/community AI knowledge from corrupted or weak source text.",
+      });
+    }
+
+    const sourceBlocks = ngSplitEducationSourceIntoTopicBlocks(sourceText, { chunk_size: chunkSize }).slice(0, maxChunks);
+
+    if (!sourceBlocks.length) {
+      return res.status(422).json({
+        success: false,
+        error: "No usable topic blocks could be created from this education document.",
+        quality: sourceQuality.quality,
+      });
+    }
+
+    const document = withTimestamps({
+      id: uuid(),
+      title,
+      filename,
+      mime_type: mimeType,
+      category,
+      audience,
+      source: "education_chunk_import",
+      extraction_method: extraction.method,
+      parser_error: extraction.parser_error || null,
+      pages: extraction.pages || null,
+      total_characters: sourceText.length,
+      source_quality: sourceQuality.quality,
+      source_signals: sourceQuality.signals,
+      chunks_planned: sourceBlocks.length,
+      status: "needs_review",
+      approval_status: "needs_review",
+      requires_medical_review: true,
+      active: false,
+      created_by: user.id,
+      created_by_email: user.email,
+    });
+
+    const createdItems = [];
+    const failedBlocks = [];
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+
+    for (let index = 0; index < sourceBlocks.length; index += 1) {
+      const block = sourceBlocks[index];
+
+      try {
+        const structured = await ngCreateStructuredEducationChunkWithAI({
+          sourceBlock: block,
+          title,
+          audience,
+          index,
+          total: sourceBlocks.length,
+          user,
+        });
+
+        totalInputTokens += Number(structured.usage?.input_tokens || 0);
+        totalOutputTokens += Number(structured.usage?.output_tokens || 0);
+
+        const topic = ngEducationSafeTitle(structured.parsed.topic, `Education Topic ${index + 1}`);
+        const confidence = structured.confidence;
+
+        const item = withTimestamps({
+          id: uuid(),
+          document_id: document.id,
+          title: `${title} — ${topic}`.slice(0, 180),
+          category,
+          audience,
+          tags: uniqueList([
+            "education",
+            "usmle",
+            "medical_review_required",
+            "community_content_draft",
+            ...(Array.isArray(structured.parsed.tags) ? structured.parsed.tags : []),
+          ]),
+          content: structured.content,
+          structured: structured.parsed,
+          source: "education_chunk_import",
+          source_block_index: index + 1,
+          source_block_count: sourceBlocks.length,
+          source_excerpt: block.slice(0, 900),
+          ai_model: structured.model,
+          confidence,
+          active: false,
+          is_active: false,
+          status: "needs_review",
+          approval_status: "needs_review",
+          medical_review_status: "needs_review",
+          approval_required: true,
+          requires_medical_review: true,
+          safe_for_public_posting_after_review: Boolean(structured.parsed.safe_for_public_posting_after_review) && confidence >= 0.75,
+          priority: Number(req.body?.priority || 5),
+          created_by: user.id,
+          created_by_email: user.email,
+        });
+
+        createdItems.push(item);
+      } catch (blockError) {
+        failedBlocks.push({
+          block_index: index + 1,
+          error: blockError.message || "Failed to convert education block",
+        });
+      }
+    }
+
+    if (!createdItems.length) {
+      return res.status(422).json({
+        success: false,
+        error: "AI could not create any structured education chunks from this document.",
+        failed_blocks: failedBlocks,
+      });
+    }
+
+    document.chunks_created = createdItems.length;
+    document.failed_blocks = failedBlocks;
+    document.ai_usage_summary = {
+      input_tokens: totalInputTokens,
+      output_tokens: totalOutputTokens,
+      total_tokens: totalInputTokens + totalOutputTokens,
+    };
+
+    db.ai_training_documents.unshift(document);
+    db.ai_training_items.unshift(...createdItems);
+
+    ensureCrmArray(db, "approval_queue").unshift({
+      id: uuid(),
+      brand_id: req.body?.brand_id || null,
+      action_id: document.id,
+      action_type: "medical_education_training_review",
+      agent_name: "Education Knowledge Importer",
+      channel: "ai_training_center",
+      draft_content: `${title}: ${createdItems.length} structured education chunks need human medical review before ScoutBot/community use.`,
+      estimated_cost: estimateAICostUsd({ model: String(process.env.AI_EDUCATION_MODEL || process.env.AI_MODEL || "gpt-4o-mini"), usage: document.ai_usage_summary }),
+      total_tokens: document.ai_usage_summary.total_tokens,
+      status: "pending",
+      created_at: ngNowIso(),
+      updated_at: ngNowIso(),
+    });
+
+    await writeCrmDb(db);
+
+    res.json({
+      success: true,
+      mode: "education_chunks_review_first",
+      document,
+      items_created: createdItems.length,
+      failed_blocks: failedBlocks,
+      approval_required: true,
+      message: "Structured education chunks were created as needs_review and are NOT used by AI until approved.",
+      items: createdItems.map((item) => ({
+        id: item.id,
+        title: item.title,
+        confidence: item.confidence,
+        status: item.status,
+        approval_status: item.approval_status,
+      })),
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-training/:id/approve", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const item = ensureCrmArray(db, "ai_training_items").find((x) => String(x.id) === String(req.params.id));
+    if (!item) return res.status(404).json({ success: false, error: "Training item not found" });
+
+    item.active = true;
+    item.is_active = true;
+    item.status = "approved";
+    item.approval_status = "approved";
+    item.medical_review_status = "approved";
+    item.approved_by = user.id;
+    item.approved_by_email = user.email;
+    item.approved_at = ngNowIso();
+    item.updated_at = ngNowIso();
+
+    await writeCrmDb(db);
+    res.json({ success: true, item });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-training/:id/reject", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const item = ensureCrmArray(db, "ai_training_items").find((x) => String(x.id) === String(req.params.id));
+    if (!item) return res.status(404).json({ success: false, error: "Training item not found" });
+
+    item.active = false;
+    item.is_active = false;
+    item.status = "rejected";
+    item.approval_status = "rejected";
+    item.medical_review_status = "rejected";
+    item.rejection_reason = req.body?.reason || "";
+    item.rejected_by = user.id;
+    item.rejected_by_email = user.email;
+    item.rejected_at = ngNowIso();
+    item.updated_at = ngNowIso();
+
+    await writeCrmDb(db);
+    res.json({ success: true, item });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+
 app.post("/admin/crm/ai-training/import-document", async (req, res) => {
   try {
     const { user } = await requireCrmAdmin(req);
@@ -19558,7 +20054,7 @@ app.post("/admin/crm/ai-training/import-document", async (req, res) => {
       content: chunk,
       source: "pdf_import",
       active: true,
-      priority: Number(req.body?.priority || 20),
+      priority: Number(req.body?.priority || 5),
       created_by: user.id,
       created_by_email: user.email,
     }));
