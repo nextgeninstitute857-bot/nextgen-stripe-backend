@@ -13180,7 +13180,7 @@ app.post("/admin/crm/team-members/:id/create-portal-user", async (req, res) => {
       idx,
       adminUser,
       password: req.body.password || null,
-      resetPassword: Boolean(req.body.reset_password),
+      resetPassword: req.body.reset_password !== false,
       systemRole: req.body.system_role || "team",
     });
 
@@ -13202,9 +13202,19 @@ app.post("/admin/crm/team-members/:id/create-portal-user", async (req, res) => {
       user: sanitizeUser(result.portalUser),
       temporary_password: result.temporaryPassword,
       login_url: `${getTeamPortalBaseUrl()}/login`,
+      manual_message: [
+        `Hello ${result.member.name || result.portalUser.name || "Team Member"},`,
+        "",
+        "Your NextGen team portal access has been created.",
+        `Email: ${result.member.email}`,
+        `Login URL: ${getTeamPortalBaseUrl()}/login`,
+        result.temporaryPassword ? `Temporary Password: ${result.temporaryPassword}` : null,
+        "",
+        "Please log in and keep your credentials private.",
+      ].filter(Boolean).join("\n"),
       note: result.temporaryPassword
         ? "Show or send this temporary password securely. User should change it after login."
-        : "Existing user linked. No password generated.",
+        : "A fresh temporary password was generated for manual sharing.",
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
@@ -13300,6 +13310,17 @@ app.post("/admin/crm/team-members/:id/send-invite", async (req, res) => {
       invite_url: inviteUrl,
       login_url: loginUrl,
       temporary_password: portalResult.temporaryPassword,
+      manual_message: [
+        `Hello ${member.name || portalResult.portalUser.name || "Team Member"},`,
+        "",
+        "Your NextGen team portal access has been created.",
+        `Email: ${member.email}`,
+        `Login URL: ${loginUrl}`,
+        portalResult.temporaryPassword ? `Temporary Password: ${portalResult.temporaryPassword}` : null,
+        inviteUrl ? `Invite Link: ${inviteUrl}` : null,
+        "",
+        "Please log in and keep your credentials private.",
+      ].filter(Boolean).join("\n"),
       email_provider_response: emailProviderResponse ? { provider: emailProviderResponse.provider || null, id: emailProviderResponse.id || emailProviderResponse.messageId || null, status: emailProviderResponse.status || null } : null,
       member: {
         ...members[idx],
@@ -13363,6 +13384,16 @@ app.post("/admin/crm/team-members/:id/reset-portal-password", async (req, res) =
       user: sanitizeUser(portalResult.portalUser),
       login_url: `${getTeamPortalBaseUrl()}/login`,
       temporary_password: portalResult.temporaryPassword,
+      manual_message: [
+        `Hello ${portalResult.member.name || portalResult.portalUser.name || "Team Member"},`,
+        "",
+        "Your NextGen team portal password has been reset.",
+        `Email: ${portalResult.member.email}`,
+        `Login URL: ${getTeamPortalBaseUrl()}/login`,
+        portalResult.temporaryPassword ? `Temporary Password: ${portalResult.temporaryPassword}` : null,
+        "",
+        "Please log in and keep your credentials private.",
+      ].filter(Boolean).join("\n"),
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
