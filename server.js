@@ -2532,6 +2532,84 @@ app.post("/auth/login", async (req, res) => {
   }
 });
 
+app.post("/auth/team-invite/accept", async (req, res) => {
+  try {
+    const inviteToken = String(req.body.token || req.query.token || "").trim();
+    const password = String(req.body.password || "").trim();
+    const name = String(req.body.name || "").trim();
+
+    if (!inviteToken) return res.status(400).json({ success: false, error: "Invite token is required" });
+    if (password && password.length < 8) return res.status(400).json({ success: false, error: "Password must be at least 8 characters" });
+
+    let decoded;
+    try {
+      decoded = jwt.verify(inviteToken, AUTH_JWT_SECRET);
+    } catch {
+      return res.status(400).json({ success: false, error: "Invite link is invalid or expired" });
+    }
+
+    if (decoded.purpose !== "team_portal_invite") {
+      return res.status(400).json({ success: false, error: "Invalid invite purpose" });
+    }
+
+    const crmDb = await readCrmDb();
+    const liveDb = await readLiveDb();
+    const members = ensureCrmArray(crmDb, "team_members");
+    const idx = members.findIndex((item) => String(item.id) === String(decoded.team_member_id));
+
+    if (idx < 0) return res.status(404).json({ success: false, error: "Team member profile not found" });
+
+    const member = members[idx];
+    const portalUser = findLiveUserForTeamMember(liveDb, member) || findUserByEmail(liveDb, decoded.email);
+
+    if (!portalUser) {
+      return res.status(404).json({ success: false, error: "Portal user was not created. Ask admin to resend the invite." });
+    }
+
+    if (password) {
+      const hashed = hashPassword(password);
+      portalUser.salt = hashed.salt;
+      portalUser.password_hash = hashed.password_hash;
+    }
+
+    if (name) portalUser.name = name;
+    portalUser.disabled = false;
+    portalUser.portal_disabled = false;
+    portalUser.verified = true;
+    portalUser.updated_at = nowIso();
+    liveDb.users[portalUser.id] = portalUser;
+
+    members[idx] = {
+      ...member,
+      user_id: portalUser.id,
+      portal_user_id: portalUser.id,
+      portal_enabled: true,
+      invite_status: "accepted",
+      invite_accepted_at: nowIso(),
+      updated_at: nowIso(),
+    };
+
+    await writeLiveDb(liveDb);
+    await writeCrmDb(crmDb);
+
+    const token = signAuthToken(portalUser);
+    const safeUser = sanitizeUser(portalUser);
+
+    res.json({
+      success: true,
+      token,
+      user: safeUser,
+      record: safeUser,
+      member: {
+        ...members[idx],
+        ...buildTeamMemberPortalSummary(crmDb, members[idx], portalUser),
+      },
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Invite acceptance failed" });
+  }
+});
+
 app.post("/auth/signup", async (req, res) => {
   try {
     await ensureBootstrapAdmin();
@@ -12814,6 +12892,7 @@ app.delete("/admin/crm/team-members/:id", async (req, res) => {
   try {
     const { user } = await requireCrmAdmin(req);
     const db = await readCrmDb();
+    const liveDb = await readLiveDb();
     const members = ensureCrmArray(db, "team_members");
     const idx = members.findIndex((item) => String(item.id) === String(req.params.id));
 
@@ -12821,23 +12900,51 @@ app.delete("/admin/crm/team-members/:id", async (req, res) => {
       return res.status(404).json({ success: false, error: "Team member not found" });
     }
 
-    members[idx] = {
-      ...members[idx],
+    const hardDelete = req.query.hard === "false" || req.body?.hard === false ? false : true;
+    const disablePortalUser = req.query.disable_portal_user !== "false" && req.body?.disable_portal_user !== false;
+    const member = members[idx];
+    const deletedMember = {
+      ...member,
       status: "deleted",
       deleted_at: nowIso(),
       deleted_by: user.id,
       updated_at: nowIso(),
     };
 
+    if (hardDelete) {
+      members.splice(idx, 1);
+    } else {
+      members[idx] = deletedMember;
+    }
+
+    if (disablePortalUser && (member.portal_user_id || member.user_id || member.email)) {
+      const portalUser = Object.values(liveDb.users || {}).find((item) => {
+        return (
+          (member.portal_user_id && String(item.id) === String(member.portal_user_id)) ||
+          (member.user_id && String(item.id) === String(member.user_id)) ||
+          (member.email && normalizeEmail(item.email) === normalizeEmail(member.email))
+        );
+      });
+
+      if (portalUser && portalUser.role !== "admin") {
+        portalUser.role = portalUser.role || "team";
+        portalUser.portal_disabled = true;
+        portalUser.disabled = true;
+        portalUser.updated_at = nowIso();
+        liveDb.users[portalUser.id] = portalUser;
+        await writeLiveDb(liveDb);
+      }
+    }
+
     logTeamActivity(db, {
-      team_member_id: members[idx].id,
-      action: "delete_team_member",
-      message: "Team member disabled/deleted",
-      metadata: { deleted_by: user.id },
+      team_member_id: member.id,
+      action: hardDelete ? "hard_delete_team_member" : "delete_team_member",
+      message: hardDelete ? "Team member permanently removed from CRM team list" : "Team member disabled/deleted",
+      metadata: { deleted_by: user.id, hard_delete: hardDelete, portal_user_disabled: disablePortalUser },
     });
 
     await writeCrmDb(db);
-    res.json({ success: true, deleted: true, member: members[idx] });
+    res.json({ success: true, deleted: true, hard_deleted: hardDelete, member: deletedMember });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -12946,14 +13053,119 @@ app.put("/admin/crm/team-members/:id/lms-access", async (req, res) => {
   }
 });
 
+function generateTeamPortalTemporaryPassword() {
+  return `NG-${crypto.randomBytes(4).toString("hex")}-${String(Date.now()).slice(-4)}`;
+}
+
+function getTeamPortalBaseUrl() {
+  return String(
+    process.env.TEAM_PORTAL_URL ||
+    process.env.FRONTEND_URL ||
+    process.env.PUBLIC_FRONTEND_URL ||
+    "https://live.nextgenusmlelms.com"
+  ).replace(/\/$/, "");
+}
+
+function findLiveUserForTeamMember(liveDb, member = {}) {
+  return Object.values(liveDb.users || {}).find((item) => {
+    return (
+      (member.portal_user_id && String(item.id) === String(member.portal_user_id)) ||
+      (member.user_id && String(item.id) === String(member.user_id)) ||
+      (member.email && normalizeEmail(item.email) === normalizeEmail(member.email))
+    );
+  }) || null;
+}
+
+async function ensureTeamPortalUser({ crmDb, liveDb, members, idx, adminUser, password = null, resetPassword = false, systemRole = "team" }) {
+  const member = members[idx];
+  if (!member?.email) {
+    const e = new Error("Team member email is required before creating portal user");
+    e.statusCode = 400;
+    throw e;
+  }
+
+  liveDb.users = liveDb.users || {};
+  let portalUser = findLiveUserForTeamMember(liveDb, member);
+  let temporaryPassword = null;
+  let created = false;
+  let passwordReset = false;
+
+  if (!portalUser) {
+    temporaryPassword = password || generateTeamPortalTemporaryPassword();
+    portalUser = createBackendUser({
+      email: member.email,
+      name: member.name,
+      password: temporaryPassword,
+      role: systemRole || "team",
+    });
+    created = true;
+  } else if (resetPassword) {
+    temporaryPassword = password || generateTeamPortalTemporaryPassword();
+    const hashed = hashPassword(temporaryPassword);
+    portalUser = {
+      ...portalUser,
+      ...hashed,
+      disabled: false,
+      portal_disabled: false,
+      verified: true,
+      updated_at: nowIso(),
+    };
+    passwordReset = true;
+  } else {
+    portalUser = {
+      ...portalUser,
+      disabled: false,
+      portal_disabled: false,
+      verified: portalUser.verified !== false,
+      role: portalUser.role === "student" ? (systemRole || "team") : (portalUser.role || systemRole || "team"),
+      updated_at: nowIso(),
+    };
+  }
+
+  liveDb.users[portalUser.id] = portalUser;
+  await writeLiveDb(liveDb);
+
+  members[idx] = {
+    ...member,
+    user_id: portalUser.id,
+    portal_user_id: portalUser.id,
+    portal_enabled: true,
+    invite_status: created ? "portal_user_created" : passwordReset ? "password_reset" : "existing_user_linked",
+    updated_by: adminUser?.id || member.updated_by || null,
+    updated_at: nowIso(),
+  };
+
+  return { portalUser, temporaryPassword, created, passwordReset, member: members[idx] };
+}
+
+async function sendTeamPortalInviteEmail({ member, inviteUrl, temporaryPassword = null, portalLoginUrl = null }) {
+  const loginUrl = portalLoginUrl || `${getTeamPortalBaseUrl()}/login`;
+  const subject = "Your NextGen team portal access";
+  const text = [
+    `Hi ${member.name || "there"},`,
+    "",
+    "Your NextGen team portal access has been created.",
+    "",
+    `Portal login: ${loginUrl}`,
+    `Email: ${member.email}`,
+    temporaryPassword ? `Temporary password: ${temporaryPassword}` : null,
+    "",
+    inviteUrl ? `Invite/access link: ${inviteUrl}` : null,
+    "",
+    "Please log in and keep your credentials private.",
+    "",
+    "NextGen USMLE Team",
+  ].filter(Boolean).join("
+");
+
+  return sendEmailMessage({ to: member.email, subject, text });
+}
+
 app.post("/admin/crm/team-members/:id/create-portal-user", async (req, res) => {
   try {
     const { user: adminUser } = await requireCrmAdmin(req);
     const crmDb = await readCrmDb();
     const liveDb = await readLiveDb();
-
-    liveDb.users = liveDb.users || {};
-
     const members = ensureCrmArray(crmDb, "team_members");
     const idx = members.findIndex((item) => String(item.id) === String(req.params.id));
 
@@ -12961,48 +13173,22 @@ app.post("/admin/crm/team-members/:id/create-portal-user", async (req, res) => {
       return res.status(404).json({ success: false, error: "Team member not found" });
     }
 
-    const member = members[idx];
-
-    if (!member.email) {
-      return res.status(400).json({ success: false, error: "Team member email is required before creating portal user" });
-    }
-
-    const existingUser = Object.values(liveDb.users || {}).find((item) => normalizeEmail(item.email) === normalizeEmail(member.email));
-
-    let portalUser = existingUser || null;
-    let temporaryPassword = null;
-
-    if (!portalUser) {
-      temporaryPassword =
-        req.body.password ||
-        `NG-${crypto.randomBytes(4).toString("hex")}-${String(Date.now()).slice(-4)}`;
-
-      portalUser = createBackendUser({
-        email: member.email,
-        name: member.name,
-        password: temporaryPassword,
-        role: req.body.system_role || "team",
-      });
-
-      liveDb.users[portalUser.id] = portalUser;
-      await writeLiveDb(liveDb);
-    }
-
-    members[idx] = {
-      ...member,
-      user_id: portalUser.id,
-      portal_user_id: portalUser.id,
-      portal_enabled: true,
-      invite_status: existingUser ? "existing_user_linked" : "portal_user_created",
-      updated_by: adminUser.id,
-      updated_at: nowIso(),
-    };
+    const result = await ensureTeamPortalUser({
+      crmDb,
+      liveDb,
+      members,
+      idx,
+      adminUser,
+      password: req.body.password || null,
+      resetPassword: Boolean(req.body.reset_password),
+      systemRole: req.body.system_role || "team",
+    });
 
     logTeamActivity(crmDb, {
-      team_member_id: members[idx].id,
-      action: "create_portal_user",
-      message: existingUser ? "Existing portal user linked" : "Portal user created",
-      metadata: { created_by: adminUser.id, user_id: portalUser.id },
+      team_member_id: result.member.id,
+      action: result.created ? "create_portal_user" : result.passwordReset ? "reset_portal_password" : "link_portal_user",
+      message: result.created ? "Portal user created" : result.passwordReset ? "Portal password reset" : "Existing portal user linked",
+      metadata: { created_by: adminUser.id, user_id: result.portalUser.id },
     });
 
     await writeCrmDb(crmDb);
@@ -13010,12 +13196,13 @@ app.post("/admin/crm/team-members/:id/create-portal-user", async (req, res) => {
     res.json({
       success: true,
       member: {
-        ...members[idx],
-        ...buildTeamMemberPortalSummary(crmDb, members[idx], portalUser),
+        ...result.member,
+        ...buildTeamMemberPortalSummary(crmDb, result.member, result.portalUser),
       },
-      user: sanitizeUser(portalUser),
-      temporary_password: temporaryPassword,
-      note: temporaryPassword
+      user: sanitizeUser(result.portalUser),
+      temporary_password: result.temporaryPassword,
+      login_url: `${getTeamPortalBaseUrl()}/login`,
+      note: result.temporaryPassword
         ? "Show or send this temporary password securely. User should change it after login."
         : "Existing user linked. No password generated.",
     });
@@ -13028,6 +13215,7 @@ app.post("/admin/crm/team-members/:id/send-invite", async (req, res) => {
   try {
     const { user } = await requireCrmAdmin(req);
     const crmDb = await readCrmDb();
+    const liveDb = await readLiveDb();
     const members = ensureCrmArray(crmDb, "team_members");
     const idx = members.findIndex((item) => String(item.id) === String(req.params.id));
 
@@ -13035,51 +13223,146 @@ app.post("/admin/crm/team-members/:id/send-invite", async (req, res) => {
       return res.status(404).json({ success: false, error: "Team member not found" });
     }
 
-    const member = members[idx];
-
-    if (!member.email) {
+    if (!members[idx].email) {
       return res.status(400).json({ success: false, error: "Team member email is required to send invite" });
     }
 
+    const portalResult = await ensureTeamPortalUser({
+      crmDb,
+      liveDb,
+      members,
+      idx,
+      adminUser: user,
+      password: req.body.password || null,
+      resetPassword: req.body.reset_password !== false,
+      systemRole: req.body.system_role || "team",
+    });
+
+    const member = portalResult.member;
     const inviteToken = jwt.sign(
       {
         purpose: "team_portal_invite",
         team_member_id: member.id,
+        portal_user_id: portalResult.portalUser.id,
         email: member.email,
       },
       AUTH_JWT_SECRET,
-      { expiresIn: "7d" }
+      { expiresIn: req.body.expires_in || "7d" }
     );
 
+    const portalBase = getTeamPortalBaseUrl();
     const inviteUrl =
       req.body.invite_url ||
-      `${process.env.FRONTEND_URL || "https://live.nextgenusmlelms.com"}/team/invite?token=${encodeURIComponent(inviteToken)}`;
+      `${portalBase}/team/invite?token=${encodeURIComponent(inviteToken)}`;
+    const loginUrl = req.body.login_url || `${portalBase}/login`;
+
+    let emailSent = false;
+    let emailError = null;
+    let emailProviderResponse = null;
+
+    if (req.body.send_email !== false) {
+      try {
+        emailProviderResponse = await sendTeamPortalInviteEmail({
+          member,
+          inviteUrl,
+          temporaryPassword: portalResult.temporaryPassword,
+          portalLoginUrl: loginUrl,
+        });
+        emailSent = true;
+      } catch (error) {
+        emailError = error.message || "Invite email failed";
+      }
+    }
 
     members[idx] = {
       ...member,
-      invite_status: "sent",
+      invite_status: emailSent ? "sent" : emailError ? "generated_email_failed" : "generated_not_emailed",
       last_invited_at: nowIso(),
       invite_token_preview: inviteToken.slice(0, 12),
+      last_invite_url: inviteUrl,
       updated_by: user.id,
       updated_at: nowIso(),
     };
 
     logTeamActivity(crmDb, {
       team_member_id: member.id,
-      action: "send_portal_invite",
-      message: "Portal invite generated",
-      metadata: { invited_by: user.id, invite_url },
+      action: emailSent ? "send_portal_invite" : "generate_portal_invite",
+      message: emailSent ? "Portal invite emailed" : "Portal invite generated but email was not sent",
+      metadata: { invited_by: user.id, invite_url: inviteUrl, login_url: loginUrl, email_sent: emailSent, email_error: emailError },
     });
 
     await writeCrmDb(crmDb);
 
     res.json({
       success: true,
+      email_sent: emailSent,
+      email_error: emailError,
       invite_url: inviteUrl,
+      login_url: loginUrl,
+      temporary_password: portalResult.temporaryPassword,
+      email_provider_response: emailProviderResponse ? { provider: emailProviderResponse.provider || null, id: emailProviderResponse.id || emailProviderResponse.messageId || null, status: emailProviderResponse.status || null } : null,
       member: {
         ...members[idx],
-        ...buildTeamMemberPortalSummary(crmDb, members[idx]),
+        ...buildTeamMemberPortalSummary(crmDb, members[idx], portalResult.portalUser),
       },
+      user: sanitizeUser(portalResult.portalUser),
+      note: emailSent
+        ? "Invite email sent."
+        : "Invite was generated but email was not sent. Copy the login_url and temporary_password manually, and check email provider env if needed.",
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/team-members/:id/reset-portal-password", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const crmDb = await readCrmDb();
+    const liveDb = await readLiveDb();
+    const members = ensureCrmArray(crmDb, "team_members");
+    const idx = members.findIndex((item) => String(item.id) === String(req.params.id));
+
+    if (idx < 0) {
+      return res.status(404).json({ success: false, error: "Team member not found" });
+    }
+
+    const portalResult = await ensureTeamPortalUser({
+      crmDb,
+      liveDb,
+      members,
+      idx,
+      adminUser: user,
+      password: req.body.password || null,
+      resetPassword: true,
+      systemRole: req.body.system_role || "team",
+    });
+
+    members[idx] = {
+      ...portalResult.member,
+      invite_status: "password_reset",
+      updated_by: user.id,
+      updated_at: nowIso(),
+    };
+
+    logTeamActivity(crmDb, {
+      team_member_id: portalResult.member.id,
+      action: "reset_portal_password",
+      message: "Portal password reset",
+      metadata: { reset_by: user.id, user_id: portalResult.portalUser.id },
+    });
+
+    await writeCrmDb(crmDb);
+
+    res.json({
+      success: true,
+      member: {
+        ...members[idx],
+        ...buildTeamMemberPortalSummary(crmDb, members[idx], portalResult.portalUser),
+      },
+      user: sanitizeUser(portalResult.portalUser),
+      login_url: `${getTeamPortalBaseUrl()}/login`,
+      temporary_password: portalResult.temporaryPassword,
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
