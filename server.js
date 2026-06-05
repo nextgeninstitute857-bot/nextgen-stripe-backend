@@ -19491,75 +19491,59 @@ app.post("/admin/crm/ai-training/upload-pdf", async (req, res, next) => {
 // -----------------------------------------------------------------------------
 
 
+
 // -----------------------------------------------------------------------------
-// TEAM MEMBER "MY PERFORMANCE TODAY" SUMMARY
+// NEXTGEN TEAM PERFORMANCE TODAY ENDPOINT
 // -----------------------------------------------------------------------------
-// Team-scoped dashboard cards for /team/crm. Admin sees overall company totals,
-// team members see only records they own/created/are assigned to.
-function ngStartOfDayLocal(date = new Date()) {
-  const d = new Date(date);
-  d.setHours(0, 0, 0, 0);
-  return d;
-}
-
-function ngEndOfDayLocal(date = new Date()) {
-  const d = new Date(date);
-  d.setHours(23, 59, 59, 999);
-  return d;
-}
-
-function ngDateValue(record = {}, fields = []) {
-  for (const field of fields) {
-    const value = record?.[field];
-    if (!value) continue;
-    const date = new Date(value);
-    if (!Number.isNaN(date.getTime())) return date;
-  }
-  return null;
-}
-
-function ngRecordIsToday(record = {}, fields = []) {
-  const date = ngDateValue(record, fields);
-  if (!date) return false;
-  const start = ngStartOfDayLocal();
-  const end = ngEndOfDayLocal();
-  return date.getTime() >= start.getTime() && date.getTime() <= end.getTime();
-}
-
-function ngLower(value = "") {
+function ngPerfLower(value = "") {
   return String(value || "").trim().toLowerCase();
 }
 
-function ngTeamScopedRecords(records = [], member = null, user = null, collection = "") {
-  if (!member) return Array.isArray(records) ? records : [];
-  try {
-    return applyTeamScopeToRecords(Array.isArray(records) ? records : [], member, user, collection);
-  } catch {
-    const identities = crmTeamIdentityValues(member, user);
-    return (Array.isArray(records) ? records : []).filter((record) => {
-      const values = crmRecordOwnershipValues(record);
-      return values.some((value) => identities.includes(value));
-    });
+function ngPerfFirstDateValue(record = {}, keys = []) {
+  for (const key of keys) {
+    const value = record?.[key];
+    if (!value) continue;
+
+    const date = new Date(value);
+    if (!Number.isNaN(date.getTime())) return date;
   }
+
+  return null;
 }
 
-function ngIsOutboundMessage(record = {}) {
-  const raw = ngLower(
-    record.direction ||
-    record.message_direction ||
-    record.type ||
-    record.event_type ||
-    record.status_type ||
-    record.origin ||
-    ""
+function ngPerfIsToday(record = {}, keys = ["created_at", "created", "timestamp", "updated_at"]) {
+  const date = ngPerfFirstDateValue(record, keys);
+  if (!date) return false;
+  return date.toISOString().slice(0, 10) === todayKey();
+}
+
+function ngPerfIsOutbound(record = {}) {
+  const raw = ngPerfLower(record.direction || record.type || record.message_type || record.status || "");
+
+  if (
+    record.outbound === true ||
+    record.sent_by_agent === true ||
+    record.agent_initiated === true ||
+    record.is_outbound === true
+  ) {
+    return true;
+  }
+
+  return (
+    raw === "outbound" ||
+    raw === "sent" ||
+    raw === "agent" ||
+    raw === "admin" ||
+    raw === "reply" ||
+    raw === "manual_reply" ||
+    raw === "ai_reply" ||
+    raw.includes("outbound") ||
+    raw.includes("sent") ||
+    raw.includes("reply")
   );
-
-  if (record.outbound === true || record.sent_by_agent === true || record.agent_initiated === true) return true;
-  if (["outbound", "sent", "agent", "admin", "reply", "manual_reply", "ai_reply"].includes(raw)) return true;
-  return raw.includes("outbound") || raw.includes("sent") || raw.includes("reply");
 }
 
-function ngAiCostValue(record = {}) {
+function ngPerfAiCostUsd(record = {}) {
   const candidates = [
     record.cost_usd,
     record.total_cost_usd,
@@ -19581,9 +19565,14 @@ function ngAiCostValue(record = {}) {
   return 0;
 }
 
-function ngTeamMemberLimit(member = {}, key, fallback = 0) {
-  const value = Number(member?.[key]);
-  return Number.isFinite(value) && value >= 0 ? value : fallback;
+function ngPerfNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function ngPerfScopedRecords(crmDb, collection, member, user, isAdmin) {
+  const records = ensureCrmArray(crmDb, collection);
+  return isAdmin ? records : applyTeamScopeToRecords(records, member, user, collection);
 }
 
 app.get("/admin/crm/me/performance-today", async (req, res) => {
@@ -19602,20 +19591,20 @@ app.get("/admin/crm/me/performance-today", async (req, res) => {
       });
     }
 
-    const leadRecords = ngTeamScopedRecords(ensureCrmArray(crmDb, "leads"), member, ctx.user, "leads");
-    const messageLogs = ngTeamScopedRecords(ensureCrmArray(crmDb, "message_logs"), member, ctx.user, "conversations");
-    const outboundMessages = ngTeamScopedRecords(ensureCrmArray(crmDb, "outbound_messages"), member, ctx.user, "conversations");
-    const conversations = ngTeamScopedRecords(ensureCrmArray(crmDb, "conversations"), member, ctx.user, "conversations");
-    const handoffs = ngTeamScopedRecords(ensureCrmArray(crmDb, "handoffs"), member, ctx.user, "handoffs");
-    const opportunities = ngTeamScopedRecords(ensureCrmArray(crmDb, "opportunities"), member, ctx.user, "opportunities");
-    const crmAiUsage = ngTeamScopedRecords(ensureCrmArray(crmDb, "ai_usage"), member, ctx.user, "ai_usage");
+    const leads = ngPerfScopedRecords(crmDb, "leads", member, ctx.user, isAdmin);
+    const messageLogs = ngPerfScopedRecords(crmDb, "message_logs", member, ctx.user, isAdmin);
+    const outboundMessages = ngPerfScopedRecords(crmDb, "outbound_messages", member, ctx.user, isAdmin);
+    const conversations = ngPerfScopedRecords(crmDb, "conversations", member, ctx.user, isAdmin);
+    const handoffs = ngPerfScopedRecords(crmDb, "handoffs", member, ctx.user, isAdmin);
+    const opportunities = ngPerfScopedRecords(crmDb, "opportunities", member, ctx.user, isAdmin);
+    const crmAiUsage = ngPerfScopedRecords(crmDb, "ai_usage", member, ctx.user, isAdmin);
 
-    const liveAiUsageSource = Object.values(liveDb.aiUsageLogs || {});
-    const liveAiUsage = ngTeamScopedRecords(liveAiUsageSource, member, ctx.user, "ai_usage");
+    const liveAiUsageRaw = Object.values(liveDb.aiUsageLogs || {});
+    const liveAiUsage = isAdmin ? liveAiUsageRaw : applyTeamScopeToRecords(liveAiUsageRaw, member, ctx.user, "ai_usage");
 
-    const todayLeadRecords = leadRecords.filter((lead) =>
-      ngRecordIsToday(lead, ["created_at", "created", "timestamp"])
-    );
+    const newLeadsCollected = leads.filter((lead) =>
+      ngPerfIsToday(lead, ["created_at", "created", "timestamp"])
+    ).length;
 
     const hotStatuses = new Set([
       "hot",
@@ -19627,52 +19616,59 @@ app.get("/admin/crm/me/performance-today", async (req, res) => {
       "sales_ready",
     ]);
 
-    const hotLeadsCreated = leadRecords.filter((lead) => {
-      const status = ngLower(lead.status || lead.lead_status || lead.pipeline_status);
-      return hotStatuses.has(status) && ngRecordIsToday(lead, ["updated_at", "created_at", "qualified_at", "booked_at"]);
+    const hotLeadsCreated = leads.filter((lead) => {
+      const status = ngPerfLower(lead.status || lead.lead_status || lead.pipeline_status);
+      return hotStatuses.has(status) &&
+        ngPerfIsToday(lead, ["updated_at", "created_at", "qualified_at", "booked_at"]);
     }).length;
 
-    const outboundTodayLogs = [
-      ...messageLogs,
-      ...outboundMessages,
-      ...conversations,
-    ].filter((message) =>
-      ngIsOutboundMessage(message) &&
-      ngRecordIsToday(message, ["created_at", "sent_at", "timestamp", "updated_at", "last_message_at"])
-    );
+    const outboundTodayMap = new Map();
+    for (const message of [...messageLogs, ...outboundMessages, ...conversations]) {
+      if (!ngPerfIsOutbound(message)) continue;
+      if (!ngPerfIsToday(message, ["created_at", "sent_at", "timestamp", "updated_at", "last_message_at"])) continue;
 
-    const todayHandoffs = handoffs.filter((handoff) =>
-      ngRecordIsToday(handoff, ["created_at", "sent_at", "handoff_at", "updated_at"])
-    );
+      const key = String(message.id || `${message.lead_id || message.conversation_id || message.to || message.from || ""}:${message.created_at || message.sent_at || message.timestamp || ""}`);
+      outboundTodayMap.set(key, message);
+    }
+
+    const messagesSentToday = outboundTodayMap.size;
+
+    const handoffsSent = handoffs.filter((handoff) =>
+      ngPerfIsToday(handoff, ["created_at", "sent_at", "handoff_at", "updated_at"])
+    ).length;
 
     const todayAiUsage = [...crmAiUsage, ...liveAiUsage].filter((item) =>
-      ngRecordIsToday(item, ["created_at", "timestamp", "started_at", "completed_at", "updated_at"])
+      ngPerfIsToday(item, ["created_at", "timestamp", "started_at", "completed_at", "updated_at"])
     );
 
-    const aiCostUsedToday = todayAiUsage.reduce((sum, item) => sum + ngAiCostValue(item), 0);
+    const aiCostUsedToday = todayAiUsage.reduce((sum, item) => sum + ngPerfAiCostUsd(item), 0);
     const aiCallsToday = todayAiUsage.length;
 
-    const dailyMessageLimit = ngTeamMemberLimit(member, "daily_message_limit", isAdmin ? 0 : 100);
-    const dailyAiBudgetLimit = ngTeamMemberLimit(member, "daily_ai_budget_usd", 0) ||
-      ngTeamMemberLimit(member, "daily_ai_budget", 0) ||
-      ngTeamMemberLimit(member, "max_daily_ai_cost_usd", 0);
+    const dailyMessageLimit = isAdmin ? null : ngPerfNumber(member?.daily_message_limit, 100);
+    const dailyAiBudgetLimit = isAdmin
+      ? null
+      : (
+          ngPerfNumber(member?.daily_ai_budget_usd, 0) ||
+          ngPerfNumber(member?.daily_ai_budget, 0) ||
+          ngPerfNumber(member?.max_daily_ai_cost_usd, 0)
+        );
 
-    const messagesSentToday = outboundTodayLogs.length;
-    const remainingDailyMessageLimit = dailyMessageLimit > 0
+    const remainingDailyMessageLimit = dailyMessageLimit && dailyMessageLimit > 0
       ? Math.max(0, dailyMessageLimit - messagesSentToday)
       : null;
 
-    const remainingAiBudget = dailyAiBudgetLimit > 0
+    const remainingAiBudget = dailyAiBudgetLimit && dailyAiBudgetLimit > 0
       ? Math.max(0, dailyAiBudgetLimit - aiCostUsedToday)
       : null;
 
     const wonStatuses = new Set(["won", "paid", "converted", "enrolled"]);
-    const todayWonRevenueCents = opportunities
-      .filter((item) => wonStatuses.has(ngLower(item.status || item.stage || item.pipeline_status)))
-      .filter((item) => ngRecordIsToday(item, ["paid_at", "won_at", "updated_at", "created_at"]))
+    const wonRevenueTodayCents = opportunities
+      .filter((item) => wonStatuses.has(ngPerfLower(item.status || item.stage || item.pipeline_status)))
+      .filter((item) => ngPerfIsToday(item, ["paid_at", "won_at", "updated_at", "created_at"]))
       .reduce((sum, item) => {
         const cents = Number(item.amount_cents || item.value_cents || item.revenue_cents || 0);
         if (Number.isFinite(cents) && cents > 0) return sum + cents;
+
         const usd = Number(item.amount_usd || item.value_usd || item.revenue_usd || item.value || 0);
         return sum + (Number.isFinite(usd) && usd > 0 ? Math.round(usd * 100) : 0);
       }, 0);
@@ -19695,10 +19691,10 @@ app.get("/admin/crm/me/performance-today", async (req, res) => {
             role: "admin",
           },
       performance: {
-        new_leads_collected: todayLeadRecords.length,
+        new_leads_collected: newLeadsCollected,
         conversations_replied: messagesSentToday,
         hot_leads_created: hotLeadsCreated,
-        handoffs_sent: todayHandoffs.length,
+        handoffs_sent: handoffsSent,
         ai_cost_used_today: Number(aiCostUsedToday.toFixed(6)),
         ai_calls_today: aiCallsToday,
         messages_sent_today: messagesSentToday,
@@ -19706,18 +19702,21 @@ app.get("/admin/crm/me/performance-today", async (req, res) => {
         remaining_daily_message_limit: remainingDailyMessageLimit,
         daily_ai_budget_limit: dailyAiBudgetLimit,
         remaining_ai_budget: remainingAiBudget === null ? null : Number(remainingAiBudget.toFixed(6)),
-        won_revenue_today_cents: todayWonRevenueCents,
-        won_revenue_today_usd: Number((todayWonRevenueCents / 100).toFixed(2)),
+        won_revenue_today_cents: wonRevenueTodayCents,
+        won_revenue_today_usd: Number((wonRevenueTodayCents / 100).toFixed(2)),
       },
     });
   } catch (error) {
-    res.status(error.statusCode || 500).json({
+    return res.status(error.statusCode || 500).json({
       success: false,
       error: error.message || "Failed to load team performance summary",
     });
   }
 });
 
+// -----------------------------------------------------------------------------
+// END NEXTGEN TEAM PERFORMANCE TODAY ENDPOINT
+// -----------------------------------------------------------------------------
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
