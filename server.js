@@ -5824,11 +5824,133 @@ function collectionResponseName(collection) {
   return map[collection] || collection;
 }
 
+function getCrmRecordDateValue(item = {}) {
+  return (
+    item.created_at ||
+    item.created ||
+    item.timestamp ||
+    item.sent_at ||
+    item.received_at ||
+    item.paid_at ||
+    item.redeemed_at ||
+    item.updated_at ||
+    item.date ||
+    null
+  );
+}
+
+function ngPeriodRange(period = "month", query = {}) {
+  const clean = normalizeCrmString(period || query.period || "month").toLowerCase().replace(/\s+/g, "_");
+  const end = new Date();
+  end.setHours(23, 59, 59, 999);
+  const start = new Date(end);
+
+  if (clean === "today" || clean === "day" || clean === "daily") {
+    start.setHours(0, 0, 0, 0);
+  } else if (clean === "week" || clean === "weekly" || clean === "this_week") {
+    start.setDate(start.getDate() - 6);
+    start.setHours(0, 0, 0, 0);
+  } else if (clean === "2_months" || clean === "two_months") {
+    start.setMonth(start.getMonth() - 2);
+    start.setHours(0, 0, 0, 0);
+  } else if (clean === "3_months" || clean === "three_months" || clean === "quarter") {
+    start.setMonth(start.getMonth() - 3);
+    start.setHours(0, 0, 0, 0);
+  } else if (clean === "6_months" || clean === "six_months" || clean === "half_year") {
+    start.setMonth(start.getMonth() - 6);
+    start.setHours(0, 0, 0, 0);
+  } else if (clean === "year" || clean === "yearly" || clean === "annual") {
+    start.setFullYear(start.getFullYear() - 1);
+    start.setHours(0, 0, 0, 0);
+  } else if (clean === "custom") {
+    const customStart = query.start_date || query.startDate || query.from;
+    const customEnd = query.end_date || query.endDate || query.to;
+    const s = customStart ? new Date(customStart) : null;
+    const e = customEnd ? new Date(customEnd) : null;
+    if (s && !Number.isNaN(s.getTime())) {
+      s.setHours(0, 0, 0, 0);
+      start.setTime(s.getTime());
+    }
+    if (e && !Number.isNaN(e.getTime())) {
+      e.setHours(23, 59, 59, 999);
+      end.setTime(e.getTime());
+    }
+  } else {
+    start.setMonth(start.getMonth() - 1);
+    start.setHours(0, 0, 0, 0);
+  }
+
+  return { period: clean, start, end, start_date: start.toISOString(), end_date: end.toISOString() };
+}
+
+function ngWithinRange(item = {}, range = null) {
+  if (!range?.start || !range?.end) return true;
+  const raw = getCrmRecordDateValue(item);
+  if (!raw) return true;
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return true;
+  return d.getTime() >= range.start.getTime() && d.getTime() <= range.end.getTime();
+}
+
+function ngCurrentTeamMemberFromReq(req, db) {
+  try {
+    const token = String(req.headers.authorization || "").replace("Bearer ", "").trim();
+    if (!token) return null;
+    const decoded = jwt.verify(token, AUTH_JWT_SECRET);
+    const user = db.users?.[String(decoded.sub)] || null;
+    if (!user || user.role === "admin") return null;
+    return getTeamMemberForUser(db, user) || null;
+  } catch {
+    return null;
+  }
+}
+
+function ngRecordBelongsToTeamMember(item = {}, member = null) {
+  if (!member?.id) return true;
+  const ids = uniqueList([member.id, member.user_id, member.portal_user_id, member.email, member.referral_code]).filter(Boolean).map(String);
+  const candidates = [
+    item.owner_team_member_id,
+    item.team_member_id,
+    item.assigned_agent_id,
+    item.assigned_closer_id,
+    item.affiliate_id,
+    item.referrer_id,
+    item.created_by_team_member_id,
+    item.created_by,
+    item.portal_user_id,
+    item.user_id,
+    item.referral_code,
+    item.source_referral_code,
+    item.owner_user_id,
+  ].filter(Boolean).map(String);
+  return candidates.some((value) => ids.includes(value));
+}
+
+function ngScopeRecordsForRequester(req, db, records = []) {
+  const token = String(req.headers.authorization || "").replace("Bearer ", "").trim();
+  if (!token) return records;
+  try {
+    const decoded = jwt.verify(token, AUTH_JWT_SECRET);
+    const user = db.users?.[String(decoded.sub)] || null;
+    if (!user || user.role === "admin") return records;
+    const member = getTeamMemberForUser(db, user);
+    if (!member) return [];
+    return records.filter((item) => ngRecordBelongsToTeamMember(item, member));
+  } catch {
+    return records;
+  }
+}
+
 function filterCrmRecords(req, records = [], brandId = null) {
   let output = [...records];
 
   if (brandId) {
     output = output.filter((item) => !item.brand_id || String(item.brand_id) === String(brandId));
+  }
+
+  if (req?.query?.period || req?.query?.start_date || req?.query?.end_date || req?.query?.startDate || req?.query?.endDate) {
+    const range = ngPeriodRange(req.query.period || "month", req.query || {});
+    output = output.filter((item) => ngWithinRange(item, range));
   }
 
   const status = normalizeCrmString(req.query.status);
@@ -7321,41 +7443,64 @@ app.get("/admin/crm/ai-usage/summary", async (req, res) => {
     await requireCrmAdmin(req);
     const db = await readCrmDb();
     const brandId = getCrmBrandId(req, db);
+    const selectedRange = ngPeriodRange(req.query.period || "month", req.query || {});
     const today = todayRange();
     const week = weekRange();
     const month = monthRange();
-    const todayTotals = getCrmUsageTotals(db, brandId, { startDate: today.start, endDate: today.end });
-    const weekTotals = getCrmUsageTotals(db, brandId, { startDate: week.start, endDate: week.end });
-    const monthTotals = getCrmUsageTotals(db, brandId, { startDate: month.start, endDate: month.end });
+
+    const scopedLogs = ngScopeRecordsForRequester(req, db, ensureCrmArray(db, "ai_usage"))
+      .filter((log) => !brandId || String(log.brand_id || "") === String(brandId));
+    const selectedLogs = scopedLogs.filter((log) => ngWithinRange(log, selectedRange));
+
+    const totalsFromLogs = (logs = []) => logs.reduce((acc, item) => {
+      acc.estimated_cost += Number(item.estimated_cost || item.cost || 0);
+      acc.total_tokens += Number(item.total_tokens || 0);
+      acc.input_tokens += Number(item.input_tokens || item.prompt_tokens || 0);
+      acc.output_tokens += Number(item.output_tokens || item.completion_tokens || 0);
+      acc.calls += 1;
+      if (String(item.status || "").toLowerCase() === "failed" || item.success === false) acc.failed_calls += 1;
+      return acc;
+    }, { estimated_cost: 0, total_tokens: 0, input_tokens: 0, output_tokens: 0, calls: 0, failed_calls: 0 });
+
+    const todayTotals = totalsFromLogs(scopedLogs.filter((log) => ngWithinRange(log, { start: today.start, end: today.end })));
+    const weekTotals = totalsFromLogs(scopedLogs.filter((log) => ngWithinRange(log, { start: week.start, end: week.end })));
+    const monthTotals = totalsFromLogs(scopedLogs.filter((log) => ngWithinRange(log, { start: month.start, end: month.end })));
+    const selectedTotals = totalsFromLogs(selectedLogs);
     const settings = getBrandCostSettings(db, brandId);
 
-    const byField = (field) => {
+    const byField = (field, logs = selectedLogs) => {
       const map = {};
-      for (const item of ensureCrmArray(db, "ai_usage").filter((log) => !brandId || String(log.brand_id) === String(brandId))) {
+      for (const item of logs) {
         const key = item[field] || "Unknown";
-        map[key] = (map[key] || 0) + Number(item.estimated_cost || 0);
+        map[key] = (map[key] || 0) + Number(item.estimated_cost || item.cost || 0);
       }
       return Object.entries(map).map(([name, cost]) => ({ name, cost: Number(cost.toFixed(6)) })).sort((a, b) => b.cost - a.cost);
     };
 
     res.json({
       success: true,
+      period: selectedRange.period,
+      range: { start_date: selectedRange.start_date, end_date: selectedRange.end_date },
       summary: {
+        selected_cost: Number(selectedTotals.estimated_cost.toFixed(6)),
+        period_cost: Number(selectedTotals.estimated_cost.toFixed(6)),
         today_cost: Number(todayTotals.estimated_cost.toFixed(6)),
         week_cost: Number(weekTotals.estimated_cost.toFixed(6)),
         month_cost: Number(monthTotals.estimated_cost.toFixed(6)),
-        total_tokens: monthTotals.total_tokens,
-        input_tokens: monthTotals.input_tokens,
-        output_tokens: monthTotals.output_tokens,
+        total_tokens: selectedTotals.total_tokens,
+        input_tokens: selectedTotals.input_tokens,
+        output_tokens: selectedTotals.output_tokens,
+        selected_calls: selectedTotals.calls,
         remaining_monthly_budget: Math.max(0, Number((settings.monthly_cost_limit - monthTotals.estimated_cost).toFixed(6))),
         ai_calls_today: todayTotals.calls,
-        failed_ai_calls: monthTotals.failed_calls,
+        failed_ai_calls: selectedTotals.failed_calls,
         most_expensive_agent: byField("agent_name")[0] || null,
         most_expensive_campaign: byField("campaign_id")[0] || null,
         most_expensive_brand: byField("brand_id")[0] || null,
       },
       breakdowns: {
         cost_by_agent: byField("agent_name"),
+        cost_by_team_member: byField("team_member_id"),
         cost_by_campaign: byField("campaign_id"),
         cost_by_brand: byField("brand_id"),
         cost_by_action_type: byField("action_type"),
@@ -17912,26 +18057,34 @@ function ngScoutBuildReply({ text = "", lead = {}, opportunity = null }) {
   const name = lead?.name && !String(lead.name).startsWith("Telegram") ? String(lead.name).split(" ")[0] : "Doctor";
 
   if (!clean || lower === "/start" || lower === "start" || /^(hi|hello|hey|salam|assalam)/i.test(clean)) {
-    return `Hi ${name}, I am the NextGen USMLE Study Helper. I can help you organize your USMLE prep with MCQs, study strategy, and free resources.\n\nAre you preparing for Step 1 or Step 2 CK?`;
+    return `Hi ${name} 👋\n\nI help USMLE students organize their preparation and identify what is blocking their progress.\n\nAre you preparing for Step 1 or Step 2 CK?`;
   }
 
   if (/step\s*1|step one|step\s*2|ck/i.test(clean) && !/exam|date|month|week|day|oct|nov|dec|jan|feb|mar|apr|may|jun|jul|aug|sep/i.test(clean)) {
-    return `Great. When is your exam planned, and what is your graduation year?`;
+    return `Got it. When are you planning to take your exam, and what is your graduation year?`;
   }
 
   if (/exam|date|month|week|day|oct|nov|dec|jan|feb|mar|apr|may|jun|jul|aug|sep|202\d/i.test(clean) && !/uworld|nbme|first aid|revision|schedule|weak|difficulty/i.test(clean)) {
-    return `That helps. What is your main difficulty right now — UWorld, NBME score, First Aid retention, revision, or schedule?`;
+    return `That helps. What is your biggest difficulty right now — UWorld, NBME score, First Aid retention, revision, schedule, or confidence?`;
   }
 
-  if (/uworld|nbme|first aid|revision|schedule|weak|difficulty|fail|failed|low score/i.test(clean)) {
-    return `Understood. Based on this, the official NextGen team can send you the free 2-day LMS demo where resident doctors explain UWorld with First Aid integration.\n\nWould you like me to connect you with the official NextGen team for the demo details?`;
+  if (/uworld|u world|qbank/i.test(clean)) {
+    return `That is common. With UWorld, the key is not only finishing blocks; it is reviewing each question in layers: why the correct option is right, why your chosen option was tempting, and which First Aid concept was being tested.\n\nWhat is your current UWorld progress and your latest NBME score, if you have taken one?`;
+  }
+
+  if (/nbme|score|fail|failed|low score/i.test(clean)) {
+    return `I understand. A low NBME usually means either weak content recall, poor question interpretation, or random revision without a roadmap.\n\nWhich NBME did you take, what was the score, and when is your exam planned?`;
+  }
+
+  if (/first aid|fa|revision|schedule|roadmap|plan/i.test(clean)) {
+    return `That makes sense. For USMLE, random reading usually wastes time. A better approach is: daily questions, First Aid integration, weak-topic revision, and NBME-based correction.\n\nAre you following a fixed daily roadmap right now, or choosing topics randomly?`;
   }
 
   if (/yes|send|demo|connect|interested|ok|okay|sure/i.test(clean)) {
-    return `Perfect. I will mark you as interested for the official NextGen team. Please share your exam type, exam date, and graduation year if you have not already shared them.`;
+    return `Good. I can mark that you want structured guidance. Please share your exam type, exam timeline, graduation year, and main difficulty if you have not already shared them.`;
   }
 
-  return `Thanks, ${name}. To guide you better: are you preparing for Step 1 or Step 2 CK, when is your exam planned, and what is your main difficulty right now?`;
+  return `Thanks, ${name}. To guide you properly, tell me three things: Step 1 or Step 2 CK, your exam timeline, and your main difficulty right now.`;
 }
 
 function ngScoutMaybeExtractFieldsFromText(text = "") {
@@ -17953,10 +18106,274 @@ function ngScoutMaybeExtractFieldsFromText(text = "") {
   if (/first aid|fa/.test(lower)) fields.pain_points = fields.pain_points ? `${fields.pain_points}; First Aid retention` : "First Aid retention";
   if (/schedule|plan|roadmap/.test(lower)) fields.pain_points = fields.pain_points ? `${fields.pain_points}; schedule/roadmap` : "schedule/roadmap";
 
-  if (/old graduate|yog|graduated/.test(lower)) fields.gap_type = "old_graduate";
+  if (/old graduate|yog|graduated/.test(lower)) {
+    fields.gap_type = "old_graduate";
+    fields.graduate_status = "old_graduate";
+  }
+  if (/student|medical student|final year/.test(lower)) fields.graduate_status = "student";
+  if (/fresh graduate|recent graduate|new graduate/.test(lower)) fields.graduate_status = "fresh_graduate";
+
+  if (/failed|fail|attempt|second time|repeat|repeat taker|tried before|previous attempt/.test(lower)) {
+    fields.attempt_history = "previous_attempt_or_failure_concern";
+  }
+  if (/first time|never attempted|not attempted|no attempt/.test(lower)) {
+    fields.attempt_history = "first_attempt";
+  }
+
+  if (fields.pain_points) fields.main_difficulty = fields.pain_points;
+  if (/yes|send|demo|connect|interested|ok|okay|sure/.test(lower)) {
+    fields.contact_permission = true;
+    fields.consent_to_contact = true;
+  }
 
   return fields;
 }
+
+const DEFAULT_SCOUT_THROTTLE_SETTINGS = {
+  fast_reply_while_collecting_data: true,
+  required_fields_before_slowdown: [
+    "exam_type",
+    "exam_timeline",
+    "graduation_year",
+    "main_difficulty",
+    "attempt_history",
+    "graduate_status",
+    "contact_permission"
+  ],
+  max_fast_replies_per_lead: 5,
+  max_scout_ai_cost_per_lead: 0.25,
+  delay_after_data_complete_minutes: 30,
+  delay_after_handoff_ignored_hours: 24,
+  delay_after_repeated_questions_hours: 48,
+  stop_after_data_complete_days: 3,
+  switch_to_ai_draft_after_limit: true,
+  auto_handoff_hot_leads: true,
+  hot_lead_keywords: ["demo", "connect", "interested", "failed", "low score", "exam soon", "urgent"],
+};
+
+function ngGetScoutThrottleSettings(db, brandId = null) {
+  const records = ensureCrmArray(db, "scout_bot_settings");
+  const existing =
+    records.find((item) => brandId && String(item.brand_id || "") === String(brandId)) ||
+    records.find((item) => !item.brand_id || item.system_default === true) ||
+    null;
+
+  return {
+    ...DEFAULT_SCOUT_THROTTLE_SETTINGS,
+    ...(existing || {}),
+    brand_id: existing?.brand_id || brandId || null,
+    required_fields_before_slowdown: Array.isArray(existing?.required_fields_before_slowdown)
+      ? existing.required_fields_before_slowdown
+      : DEFAULT_SCOUT_THROTTLE_SETTINGS.required_fields_before_slowdown,
+    hot_lead_keywords: Array.isArray(existing?.hot_lead_keywords)
+      ? existing.hot_lead_keywords
+      : DEFAULT_SCOUT_THROTTLE_SETTINGS.hot_lead_keywords,
+  };
+}
+
+function ngSaveScoutThrottleSettings(db, brandId, body = {}, user = null) {
+  db.scout_bot_settings = ensureCrmArray(db, "scout_bot_settings");
+  const existing = db.scout_bot_settings.find((item) => String(item.brand_id || "") === String(brandId || ""));
+  const next = withTimestamps({
+    ...(existing || {}),
+    ...(body || {}),
+    id: existing?.id || body.id || uuid(),
+    brand_id: brandId || body.brand_id || existing?.brand_id || null,
+    system_default: Boolean(body.system_default ?? existing?.system_default ?? !brandId),
+    fast_reply_while_collecting_data: body.fast_reply_while_collecting_data !== undefined ? Boolean(body.fast_reply_while_collecting_data) : (existing?.fast_reply_while_collecting_data ?? DEFAULT_SCOUT_THROTTLE_SETTINGS.fast_reply_while_collecting_data),
+    required_fields_before_slowdown: Array.isArray(body.required_fields_before_slowdown)
+      ? body.required_fields_before_slowdown
+      : (existing?.required_fields_before_slowdown || DEFAULT_SCOUT_THROTTLE_SETTINGS.required_fields_before_slowdown),
+    max_fast_replies_per_lead: Number(body.max_fast_replies_per_lead ?? existing?.max_fast_replies_per_lead ?? DEFAULT_SCOUT_THROTTLE_SETTINGS.max_fast_replies_per_lead),
+    max_scout_ai_cost_per_lead: Number(body.max_scout_ai_cost_per_lead ?? existing?.max_scout_ai_cost_per_lead ?? DEFAULT_SCOUT_THROTTLE_SETTINGS.max_scout_ai_cost_per_lead),
+    delay_after_data_complete_minutes: Number(body.delay_after_data_complete_minutes ?? existing?.delay_after_data_complete_minutes ?? DEFAULT_SCOUT_THROTTLE_SETTINGS.delay_after_data_complete_minutes),
+    delay_after_handoff_ignored_hours: Number(body.delay_after_handoff_ignored_hours ?? existing?.delay_after_handoff_ignored_hours ?? DEFAULT_SCOUT_THROTTLE_SETTINGS.delay_after_handoff_ignored_hours),
+    delay_after_repeated_questions_hours: Number(body.delay_after_repeated_questions_hours ?? existing?.delay_after_repeated_questions_hours ?? DEFAULT_SCOUT_THROTTLE_SETTINGS.delay_after_repeated_questions_hours),
+    stop_after_data_complete_days: Number(body.stop_after_data_complete_days ?? existing?.stop_after_data_complete_days ?? DEFAULT_SCOUT_THROTTLE_SETTINGS.stop_after_data_complete_days),
+    switch_to_ai_draft_after_limit: body.switch_to_ai_draft_after_limit !== undefined ? Boolean(body.switch_to_ai_draft_after_limit) : (existing?.switch_to_ai_draft_after_limit ?? DEFAULT_SCOUT_THROTTLE_SETTINGS.switch_to_ai_draft_after_limit),
+    auto_handoff_hot_leads: body.auto_handoff_hot_leads !== undefined ? Boolean(body.auto_handoff_hot_leads) : (existing?.auto_handoff_hot_leads ?? DEFAULT_SCOUT_THROTTLE_SETTINGS.auto_handoff_hot_leads),
+    hot_lead_keywords: Array.isArray(body.hot_lead_keywords) ? body.hot_lead_keywords : (existing?.hot_lead_keywords || DEFAULT_SCOUT_THROTTLE_SETTINGS.hot_lead_keywords),
+    updated_by: user?.id || existing?.updated_by || null,
+    created_by: existing?.created_by || user?.id || null,
+  }, existing || null);
+
+  if (existing) Object.assign(existing, next);
+  else db.scout_bot_settings.unshift(next);
+
+  return next;
+}
+
+function ngScoutFieldValue(lead = {}, field = "") {
+  const key = String(field || "");
+  if (key === "main_difficulty") return lead.main_difficulty || lead.pain_points || lead.difficulty || lead.current_problem;
+  if (key === "exam_timeline") return lead.exam_timeline || lead.exam_date || lead.expected_exam_date;
+  if (key === "graduate_status") return lead.gap_type || lead.graduate_status || lead.graduation_year;
+  if (key === "contact_permission") return lead.consent_to_contact || lead.official_handoff_ready || lead.contact_permission;
+  return lead[key];
+}
+
+function ngScoutCompleteness(lead = {}, settings = DEFAULT_SCOUT_THROTTLE_SETTINGS) {
+  const required = Array.isArray(settings.required_fields_before_slowdown)
+    ? settings.required_fields_before_slowdown
+    : DEFAULT_SCOUT_THROTTLE_SETTINGS.required_fields_before_slowdown;
+  const missing = required.filter((field) => {
+    const value = ngScoutFieldValue(lead, field);
+    return value === null || value === undefined || value === "" || value === false;
+  });
+  const collected = required.length - missing.length;
+  const score = required.length ? Math.round((collected / required.length) * 100) : 100;
+  return { required, missing, collected, total: required.length, score, complete: missing.length === 0 };
+}
+
+function ngScoutEstimateReplyCost(text = "") {
+  const chars = String(text || "").length;
+  const tokens = Math.max(1, Math.ceil(chars / 4));
+  return Number(((tokens / 1000) * 0.0006).toFixed(6));
+}
+
+
+function ngScoutExtractReferralCode(text = "", message = {}) {
+  const clean = String(text || "").trim();
+  const startMatch = clean.match(/^\/start\s+([A-Za-z0-9_-]{3,80})/i);
+  if (startMatch) return startMatch[1].replace(/^ref[_-]?/i, "").toUpperCase();
+
+  const deepLink = clean.match(/(?:ref|team|affiliate|agent)[_:=\-\s]+([A-Za-z0-9_-]{3,80})/i);
+  if (deepLink) return deepLink[1].toUpperCase();
+
+  return "";
+}
+
+function ngScoutResolveOwnerFromReferral(db, text = "", message = {}) {
+  const code = ngScoutExtractReferralCode(text, message);
+  if (!code) return { member: null, referral_code: "" };
+
+  const member = ensureCrmArray(db, "team_members").find((item) => {
+    return (
+      String(item.referral_code || "").toUpperCase() === code ||
+      String(item.id || "").toUpperCase() === code ||
+      String(item.telegram_chat_id || "") === String(message.chat?.id || "")
+    );
+  }) || null;
+
+  return { member, referral_code: code };
+}
+
+function ngScoutIsHotLeadText(text = "", settings = DEFAULT_SCOUT_THROTTLE_SETTINGS) {
+  const lower = String(text || "").toLowerCase();
+  return safeArray(settings.hot_lead_keywords).some((kw) => kw && lower.includes(String(kw).toLowerCase()));
+}
+
+function ngScoutDelayMs({ hours = 0, minutes = 0, days = 0 } = {}) {
+  return ((Number(days) * 24 * 60) + (Number(hours) * 60) + Number(minutes)) * 60 * 1000;
+}
+
+function ngScoutDecideReply({ lead = {}, text = "", settings = DEFAULT_SCOUT_THROTTLE_SETTINGS, now = new Date() }) {
+  const completion = ngScoutCompleteness(lead, settings);
+  const firstAt = lead.scout_bot_first_message_at ? new Date(lead.scout_bot_first_message_at) : null;
+  const lastReplyAt = lead.scout_bot_last_reply_at ? new Date(lead.scout_bot_last_reply_at) : null;
+  const nextAllowedAt = lead.scout_next_allowed_reply_at ? new Date(lead.scout_next_allowed_reply_at) : null;
+  const fastReplies = Number(lead.scout_fast_reply_count || 0);
+  const totalReplies = Number(lead.scout_reply_count || 0);
+  const costUsed = Number(lead.scout_ai_cost_used || 0);
+  const hotLead = ngScoutIsHotLeadText(text, settings);
+  const maxFast = Number(settings.max_fast_replies_per_lead || 0);
+  const maxCost = Number(settings.max_scout_ai_cost_per_lead || 0);
+
+  if (completion.complete && firstAt && Number(settings.stop_after_data_complete_days || 0) > 0) {
+    const stopAt = new Date(firstAt.getTime() + ngScoutDelayMs({ days: Number(settings.stop_after_data_complete_days || 3) }));
+    if (now.getTime() >= stopAt.getTime() && !hotLead) {
+      return { action: "stop", completion, reason: "ScoutBot data already completed and stop-after-days limit reached", next_allowed_at: null, hot_lead: hotLead };
+    }
+  }
+
+  if (maxCost > 0 && costUsed >= maxCost && !hotLead) {
+    return {
+      action: settings.switch_to_ai_draft_after_limit ? "draft" : "skip",
+      completion,
+      reason: "ScoutBot per-lead AI cost cap reached",
+      next_allowed_at: null,
+      hot_lead: hotLead,
+    };
+  }
+
+  if (nextAllowedAt && now.getTime() < nextAllowedAt.getTime() && !hotLead) {
+    return { action: "skip", completion, reason: "ScoutBot cooldown active", next_allowed_at: nextAllowedAt.toISOString(), hot_lead: hotLead };
+  }
+
+  if (!completion.complete && settings.fast_reply_while_collecting_data !== false && fastReplies < maxFast) {
+    return { action: "send", completion, reason: "Collecting required student data", fast_reply: true, next_allowed_at: null, hot_lead: hotLead };
+  }
+
+  if (!completion.complete && fastReplies >= maxFast) {
+    const delayMs = ngScoutDelayMs({ hours: Number(settings.delay_after_repeated_questions_hours || 48) });
+    return {
+      action: settings.switch_to_ai_draft_after_limit ? "draft" : "skip",
+      completion,
+      reason: "Max fast ScoutBot replies reached before full qualification",
+      next_allowed_at: new Date(now.getTime() + delayMs).toISOString(),
+      hot_lead: hotLead,
+    };
+  }
+
+  if (lead.handoff_offered_at && !lead.handoff_accepted_at && !hotLead) {
+    const delayMs = ngScoutDelayMs({ hours: Number(settings.delay_after_handoff_ignored_hours || 24) });
+    if (!lastReplyAt || now.getTime() - lastReplyAt.getTime() < delayMs) {
+      return {
+        action: "skip",
+        completion,
+        reason: "Handoff already offered; waiting before next ScoutBot reply",
+        next_allowed_at: new Date((lastReplyAt || now).getTime() + delayMs).toISOString(),
+        hot_lead: hotLead,
+      };
+    }
+  }
+
+  if (completion.complete && !hotLead) {
+    const delayMs = ngScoutDelayMs({ minutes: Number(settings.delay_after_data_complete_minutes || 30) });
+    if (lastReplyAt && now.getTime() - lastReplyAt.getTime() < delayMs) {
+      return {
+        action: "skip",
+        completion,
+        reason: "Data complete; ScoutBot slowed down to avoid free unlimited tutoring",
+        next_allowed_at: new Date(lastReplyAt.getTime() + delayMs).toISOString(),
+        hot_lead: hotLead,
+      };
+    }
+  }
+
+  return { action: "send", completion, reason: completion.complete ? "Qualified lead follow-up" : "Allowed ScoutBot reply", fast_reply: false, next_allowed_at: null, hot_lead: hotLead };
+}
+
+function ngScoutApplyThrottleState({ lead, decision, reply = "", settings = DEFAULT_SCOUT_THROTTLE_SETTINGS, now = new Date() }) {
+  if (!lead) return;
+  const completion = decision.completion || ngScoutCompleteness(lead, settings);
+  lead.scout_data_completion_score = completion.score;
+  lead.scout_missing_fields = completion.missing;
+  lead.scout_required_fields = completion.required;
+  lead.scout_data_complete = completion.complete;
+  lead.scout_stage = completion.complete ? "data_complete" : "collecting_data";
+
+  if (!lead.scout_bot_first_message_at) lead.scout_bot_first_message_at = now.toISOString();
+
+  if (decision.action === "send") {
+    lead.scout_reply_count = Number(lead.scout_reply_count || 0) + 1;
+    if (decision.fast_reply) lead.scout_fast_reply_count = Number(lead.scout_fast_reply_count || 0) + 1;
+    lead.scout_bot_last_reply_at = now.toISOString();
+    lead.scout_ai_cost_used = Number((Number(lead.scout_ai_cost_used || 0) + ngScoutEstimateReplyCost(reply)).toFixed(6));
+  }
+
+  if (decision.next_allowed_at) lead.scout_next_allowed_reply_at = decision.next_allowed_at;
+
+  if (decision.action === "draft") {
+    lead.scout_stage = "draft_only";
+  }
+
+  if (decision.action === "stop") {
+    lead.scout_stage = "stopped_after_data_capture";
+    lead.scout_stopped_at = now.toISOString();
+  }
+}
+
 
 async function ngScoutHandleTelegramUpdate(req, res) {
   try {
@@ -17981,6 +18398,8 @@ async function ngScoutHandleTelegramUpdate(req, res) {
     const text = String(message.text || message.caption || "").trim();
     const db = await readCrmDb();
     const now = nowIso();
+    const ownerRef = ngScoutResolveOwnerFromReferral(db, text, message);
+    const ownerMember = ownerRef.member || null;
 
     const leadPayload = {
       ...normalizeTelegramLeadPayload({ update, message, integration: null }),
@@ -17992,6 +18411,11 @@ async function ngScoutHandleTelegramUpdate(req, res) {
       lead_source: "telegram_scout_bot",
       status: "community_scout",
       lead_status: "community_scout",
+      owner_team_member_id: ownerMember?.id || null,
+      owner_user_id: ownerMember?.user_id || ownerMember?.portal_user_id || null,
+      affiliate_id: ownerMember?.id || null,
+      source_referral_code: ownerRef.referral_code || "",
+      assigned_agent_id: ownerMember?.id || null,
       ...ngScoutMaybeExtractFieldsFromText(text),
     };
 
@@ -18000,6 +18424,13 @@ async function ngScoutHandleTelegramUpdate(req, res) {
     lead.scout_bot_last_message_at = now;
     lead.scout_bot_status = "active";
     lead.source_channel = "telegram_scout_bot";
+    if (ownerMember?.id) {
+      lead.owner_team_member_id = ownerMember.id;
+      lead.owner_user_id = ownerMember.user_id || ownerMember.portal_user_id || lead.owner_user_id || null;
+      lead.affiliate_id = ownerMember.id;
+      lead.assigned_agent_id = ownerMember.id;
+      lead.source_referral_code = ownerRef.referral_code || lead.source_referral_code || "";
+    }
 
     const conversation = appendTelegramConversation(db, { lead, update, message, text, integration: null });
     conversation.scout_bot = true;
@@ -18015,6 +18446,11 @@ async function ngScoutHandleTelegramUpdate(req, res) {
       source_channel: "telegram_scout_bot",
       scout_bot: true,
       lead_id: lead.id,
+      owner_team_member_id: lead.owner_team_member_id || null,
+      owner_user_id: lead.owner_user_id || null,
+      affiliate_id: lead.affiliate_id || null,
+      assigned_agent_id: lead.assigned_agent_id || null,
+      source_referral_code: lead.source_referral_code || "",
       telegram_chat_id: message.chat?.id || lead.telegram_chat_id || null,
       username: lead.telegram_username || "",
       author_name: lead.name || lead.telegram_username || "Telegram Student",
@@ -18055,48 +18491,106 @@ async function ngScoutHandleTelegramUpdate(req, res) {
       opportunity_id: opportunity.id,
     }));
 
+    const brandId = getCrmBrandId(req, db);
+    const scoutSettings = ngGetScoutThrottleSettings(db, brandId);
     const reply = ngScoutBuildReply({ text, lead, opportunity });
-    let sent = null;
-    try {
-      sent = await ngScoutTelegramApi("sendMessage", {
-        chat_id: message.chat?.id,
-        text: reply,
-        disable_web_page_preview: true,
-      });
+    const decision = ngScoutDecideReply({ lead, text, settings: scoutSettings, now: new Date() });
 
-      const outbound = withTimestamps({
+    let sent = null;
+    let draft = null;
+
+    if (decision.action === "send") {
+      try {
+        sent = await ngScoutTelegramApi("sendMessage", {
+          chat_id: message.chat?.id,
+          text: reply,
+          disable_web_page_preview: true,
+        });
+
+        const outbound = withTimestamps({
+          id: uuid(),
+          conversation_id: lead?.conversation_id || lead?.id || uuid(),
+          lead_id: lead?.id || null,
+          platform: "telegram",
+          source_platform: "telegram",
+          channel: "telegram_scout",
+          source_channel: "telegram_scout_bot",
+          direction: "outbound",
+          scout_bot: true,
+          scout_decision: decision.reason,
+          telegram_chat_id: message.chat?.id || lead?.telegram_chat_id || null,
+          platform_contact_id: lead?.platform_contact_id || lead?.telegram_chat_id || message.chat?.id || null,
+          message_text: reply,
+          text: reply,
+          raw: sent,
+          raw_payload: sent,
+          status: "sent",
+          timestamp: nowIso(),
+          created_at: nowIso(),
+        });
+        db.conversations = ensureCrmArray(db, "conversations");
+        db.conversations.push(outbound);
+        lead.last_outbound_at = nowIso();
+        lead.scout_bot_last_reply = reply;
+        if (decision.completion?.complete && !lead.handoff_offered_at) {
+          lead.handoff_offered_at = nowIso();
+        }
+      } catch (sendError) {
+        createTelegramIntegrationLog(db, {
+          lead_id: lead.id,
+          action: "telegram_scout_auto_reply_failed",
+          status: "error",
+          message: sendError.message,
+          raw: { text: reply },
+        });
+      }
+    } else if (decision.action === "draft") {
+      draft = withTimestamps({
         id: uuid(),
-        conversation_id: lead?.conversation_id || lead?.id || uuid(),
-        lead_id: lead?.id || null,
+        brand_id: brandId || null,
+        lead_id: lead.id,
+        opportunity_id: opportunity.id,
         platform: "telegram",
-        source_platform: "telegram",
         channel: "telegram_scout",
         source_channel: "telegram_scout_bot",
-        direction: "outbound",
         scout_bot: true,
-        telegram_chat_id: message.chat?.id || lead?.telegram_chat_id || null,
-        platform_contact_id: lead?.platform_contact_id || lead?.telegram_chat_id || message.chat?.id || null,
-        message_text: reply,
-        text: reply,
-        raw: sent,
-        raw_payload: sent,
-        status: "sent",
-        timestamp: nowIso(),
-        created_at: nowIso(),
+        status: "draft",
+        approval_status: "pending",
+        action_type: "scoutbot_limited_reply_draft",
+        draft_content: reply,
+        message: reply,
+        reason: decision.reason,
+        next_allowed_reply_at: decision.next_allowed_at || null,
+        created_by: "telegram_scout_webhook",
       });
-      db.conversations = ensureCrmArray(db, "conversations");
-      db.conversations.push(outbound);
-      lead.last_outbound_at = nowIso();
-      lead.scout_bot_last_reply = reply;
-    } catch (sendError) {
+      ngCommunityArray(db, "community_reply_drafts").unshift(draft);
+      lead.scout_next_allowed_reply_at = decision.next_allowed_at || lead.scout_next_allowed_reply_at || null;
+    } else {
+      lead.scout_next_allowed_reply_at = decision.next_allowed_at || lead.scout_next_allowed_reply_at || null;
       createTelegramIntegrationLog(db, {
         lead_id: lead.id,
-        action: "telegram_scout_auto_reply_failed",
-        status: "error",
-        message: sendError.message,
-        raw: { text: reply },
+        action: `telegram_scout_${decision.action}_reply`,
+        status: "skipped",
+        message: decision.reason,
+        raw: { next_allowed_reply_at: decision.next_allowed_at || null, completion: decision.completion },
       });
     }
+
+    if (decision.hot_lead && scoutSettings.auto_handoff_hot_leads !== false) {
+      lead.scout_hot_lead = true;
+      lead.official_handoff_ready = true;
+      opportunity.official_handoff_ready = true;
+      opportunity.priority = "high";
+      opportunity.status = opportunity.status === "qualified" ? "qualified" : "hot_scout_lead";
+    }
+
+    ngScoutApplyThrottleState({ lead, decision, reply, settings: scoutSettings, now: new Date() });
+    opportunity.scout_data_completion_score = lead.scout_data_completion_score;
+    opportunity.scout_missing_fields = lead.scout_missing_fields;
+    opportunity.scout_reply_decision = decision.action;
+    opportunity.scout_reply_reason = decision.reason;
+    opportunity.next_allowed_reply_at = decision.next_allowed_at || null;
+    opportunity.updated_at = nowIso();
 
     await writeCrmDb(db);
 
@@ -18108,6 +18602,12 @@ async function ngScoutHandleTelegramUpdate(req, res) {
       conversation_id: conversation.id,
       opportunity_id: opportunity.id,
       replied: Boolean(sent),
+      drafted: Boolean(draft),
+      scout_reply_action: decision.action,
+      scout_reply_reason: decision.reason,
+      next_allowed_reply_at: decision.next_allowed_at || null,
+      data_completion_score: decision.completion?.score || null,
+      missing_fields: decision.completion?.missing || [],
     });
   } catch (error) {
     console.error("Telegram Scout webhook error:", error.message);
@@ -18188,6 +18688,133 @@ app.post("/admin/crm/integrations/telegram/scout/set-webhook", async (req, res) 
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
 });
+
+
+app.get("/admin/crm/community-intelligence/scout-settings", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    res.json({ success: true, settings: ngGetScoutThrottleSettings(db, brandId) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/community-intelligence/scout-settings", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const settings = ngSaveScoutThrottleSettings(db, brandId, req.body || {}, user);
+    await writeCrmDb(db);
+    res.json({ success: true, settings });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/scoutbot/settings", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    res.json({ success: true, settings: ngGetScoutThrottleSettings(db, brandId) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/scoutbot/settings", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const settings = ngSaveScoutThrottleSettings(db, brandId, req.body || {}, user);
+    await writeCrmDb(db);
+    res.json({ success: true, settings });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+function ngSumMoney(records = [], fields = []) {
+  return records.reduce((sum, item) => {
+    for (const field of fields) {
+      if (item[field] !== undefined && item[field] !== null && item[field] !== "") {
+        return sum + Number(item[field] || 0);
+      }
+    }
+    return sum;
+  }, 0);
+}
+
+function ngFinanceStatusIsPaid(item = {}) {
+  const s = String(item.status || item.payment_status || item.state || "").toLowerCase();
+  return !s || ["paid", "completed", "success", "succeeded", "active", "converted"].includes(s);
+}
+
+app.get("/admin/crm/finance/summary", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const crmDb = await readCrmDb();
+    const liveDb = await readLiveDb();
+    const brandId = getCrmBrandId(req, crmDb);
+    const range = ngPeriodRange(req.query.period || "month", req.query || {});
+
+    const scopedCrmPayments = ngScopeRecordsForRequester(req, crmDb, ensureCrmArray(crmDb, "payments"))
+      .filter((item) => (!brandId || !item.brand_id || String(item.brand_id) === String(brandId)) && ngWithinRange(item, range) && ngFinanceStatusIsPaid(item));
+    const livePayments = Object.values(liveDb.payments || {}).filter((item) => ngWithinRange(item, range) && ngFinanceStatusIsPaid(item));
+
+    const revenue = ngSumMoney(scopedCrmPayments, ["amount_cents", "final_amount_cents", "price_cents"]) / 100
+      + ngSumMoney(livePayments, ["amount_cents", "final_amount_cents", "price_cents"]) / 100
+      + ngSumMoney(
+        ngScopeRecordsForRequester(req, crmDb, ensureCrmArray(crmDb, "revenue_attribution"))
+          .filter((item) => (!brandId || !item.brand_id || String(item.brand_id) === String(brandId)) && ngWithinRange(item, range)),
+        ["revenue", "amount", "amount_usd"]
+      );
+
+    const aiLogs = ngScopeRecordsForRequester(req, crmDb, ensureCrmArray(crmDb, "ai_usage"))
+      .filter((item) => (!brandId || !item.brand_id || String(item.brand_id) === String(brandId)) && ngWithinRange(item, range));
+    const aiCost = ngSumMoney(aiLogs, ["estimated_cost", "cost", "cost_usd"]);
+
+    const commissions = ngScopeRecordsForRequester(req, crmDb, ensureCrmArray(crmDb, "commission_payouts"))
+      .filter((item) => (!brandId || !item.brand_id || String(item.brand_id) === String(brandId)) && ngWithinRange(item, range));
+    const commissionCost = ngSumMoney(commissions, ["amount", "amount_usd", "commission_amount"]);
+
+    const adLogs = ngScopeRecordsForRequester(req, crmDb, ensureCrmArray(crmDb, "ad_performance_logs"))
+      .filter((item) => (!brandId || !item.brand_id || String(item.brand_id) === String(brandId)) && ngWithinRange(item, range));
+    const adSpend = ngSumMoney(adLogs, ["spend", "cost", "amount_spent", "spend_usd"]);
+
+    const leads = ngScopeRecordsForRequester(req, crmDb, ensureCrmArray(crmDb, "leads"))
+      .filter((item) => (!brandId || !item.brand_id || String(item.brand_id) === String(brandId)) && ngWithinRange(item, range));
+    const opportunities = ngScopeRecordsForRequester(req, crmDb, ensureCrmArray(crmDb, "opportunities"))
+      .filter((item) => (!brandId || !item.brand_id || String(item.brand_id) === String(brandId)) && ngWithinRange(item, range));
+
+    const netProfit = revenue - aiCost - commissionCost - adSpend;
+
+    res.json({
+      success: true,
+      period: range.period,
+      range: { start_date: range.start_date, end_date: range.end_date },
+      summary: {
+        revenue: Number(revenue.toFixed(2)),
+        ai_cost: Number(aiCost.toFixed(6)),
+        commission_cost: Number(commissionCost.toFixed(2)),
+        ad_spend: Number(adSpend.toFixed(2)),
+        net_profit: Number(netProfit.toFixed(2)),
+        leads: leads.length,
+        qualified_leads: leads.filter((item) => ["qualified", "hot", "hot_lead", "demo_sent"].includes(String(item.status || item.lead_status || "").toLowerCase())).length,
+        opportunities: opportunities.length,
+        enrollments: livePayments.length,
+        payments: scopedCrmPayments.length + livePayments.length,
+      },
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
 
 function ngDecodeBase64File(data = "") {
   const raw = String(data || "");
