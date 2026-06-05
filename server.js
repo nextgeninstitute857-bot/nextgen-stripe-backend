@@ -14887,15 +14887,25 @@ app.delete("/admin/crm/ai-training/:id", async (req, res) => {
   try {
     const { user } = await requireCrmAdmin(req);
     const db = ngEnsureAiStore(await readCrmDb());
-    const item = db.ai_training_items.find((x) => String(x.id) === String(req.params.id));
-    if (!item) return res.status(404).json({ success: false, error: "Training item not found" });
+    const before = Array.isArray(db.ai_training_items) ? db.ai_training_items.length : 0;
+    const targetId = String(req.params.id || "");
 
-    item.active = false;
-    item.deleted_at = ngNowIso();
-    item.deleted_by = user.id;
+    db.ai_training_items = ensureCrmArray(db, "ai_training_items").filter((x) => String(x.id || "") !== targetId);
+    const deleted = db.ai_training_items.length !== before;
+
+    if (!deleted) return res.status(404).json({ success: false, error: "Training item not found" });
+
+    ensureCrmArray(db, "ai_training_deletion_logs").push({
+      id: ngUuid(),
+      training_item_id: targetId,
+      deleted_by: user.id,
+      deleted_by_email: user.email,
+      deleted_at: ngNowIso(),
+      delete_mode: "hard_delete"
+    });
 
     await writeCrmDb(db);
-    res.json({ success: true, item });
+    res.json({ success: true, deleted: true, id: targetId });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -15420,15 +15430,25 @@ app.delete("/admin/crm/ai-training/:id", async (req, res) => {
   try {
     const { user } = await requireCrmAdmin(req);
     const db = ngEnsureAiStore(await readCrmDb());
-    const item = db.ai_training_items.find((x) => String(x.id) === String(req.params.id));
-    if (!item) return res.status(404).json({ success: false, error: "Training item not found" });
+    const before = Array.isArray(db.ai_training_items) ? db.ai_training_items.length : 0;
+    const targetId = String(req.params.id || "");
 
-    item.active = false;
-    item.deleted_at = ngNowIso();
-    item.deleted_by = user.id;
+    db.ai_training_items = ensureCrmArray(db, "ai_training_items").filter((x) => String(x.id || "") !== targetId);
+    const deleted = db.ai_training_items.length !== before;
+
+    if (!deleted) return res.status(404).json({ success: false, error: "Training item not found" });
+
+    ensureCrmArray(db, "ai_training_deletion_logs").push({
+      id: ngUuid(),
+      training_item_id: targetId,
+      deleted_by: user.id,
+      deleted_by_email: user.email,
+      deleted_at: ngNowIso(),
+      delete_mode: "hard_delete"
+    });
 
     await writeCrmDb(db);
-    res.json({ success: true, item });
+    res.json({ success: true, deleted: true, id: targetId });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -19380,6 +19400,65 @@ async function ngExtractPdfText(buffer) {
   }
 }
 
+function ngNormalizeTrainingText(text = "") {
+  return String(text || "")
+    .replace(/\u0000/g, "")
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, " ")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/\n{4,}/g, "\n\n")
+    .trim();
+}
+
+function ngTrainingTextQuality(text = "") {
+  const clean = ngNormalizeTrainingText(text);
+  const length = clean.length;
+  const letters = (clean.match(/[A-Za-z]/g) || []).length;
+  const words = (clean.match(/[A-Za-z][A-Za-z'-]{2,}/g) || []).length;
+  const nonAscii = (clean.match(/[^\x09\x0A\x0D\x20-\x7E]/g) || []).length;
+  const replacementChars = (clean.match(/\uFFFD/g) || []).length;
+  const pdfArtifacts = (clean.match(/\/(?:Type|Font|Length|Filter|FlateDecode|Subtype|XObject|Resources)|endobj|xref|trailer|startxref|stream/g) || []).length;
+  const suspiciousRuns = (clean.match(/[^\w\s.,;:!?'"()\-–—/%+$#@[\]{}]{3,}/g) || []).length;
+
+  return {
+    length,
+    words,
+    letter_ratio: length ? letters / length : 0,
+    non_ascii_ratio: length ? nonAscii / length : 0,
+    replacement_chars: replacementChars,
+    pdf_artifacts: pdfArtifacts,
+    suspicious_runs: suspiciousRuns,
+  };
+}
+
+function ngIsReadableTrainingText(text = "", options = {}) {
+  const quality = ngTrainingTextQuality(text);
+  const minChars = Number(options.min_chars || 300);
+  const minWords = Number(options.min_words || 45);
+
+  if (quality.length < minChars) {
+    return { ok: false, reason: `Extracted text is too short (${quality.length} characters).`, quality };
+  }
+
+  if (quality.words < minWords) {
+    return { ok: false, reason: `Extracted text has too few readable words (${quality.words}).`, quality };
+  }
+
+  if (quality.letter_ratio < 0.22) {
+    return { ok: false, reason: "Extracted text does not look like readable educational text.", quality };
+  }
+
+  if (quality.non_ascii_ratio > 0.12 || quality.replacement_chars > 5 || quality.suspicious_runs > 12) {
+    return { ok: false, reason: "Extracted text appears corrupted or binary-encoded.", quality };
+  }
+
+  if (quality.pdf_artifacts > 12) {
+    return { ok: false, reason: "Raw PDF internals were detected instead of clean text.", quality };
+  }
+
+  return { ok: true, reason: "Readable text accepted.", quality };
+}
+
 function ngSplitTrainingText(text = "", chunkSize = 5500) {
   const clean = String(text || "").replace(/\r/g, "").replace(/\n{3,}/g, "\n\n").trim();
   if (!clean) return [];
@@ -19423,11 +19502,28 @@ app.post("/admin/crm/ai-training/import-document", async (req, res) => {
       }
     }
 
+    extractedText = ngNormalizeTrainingText(extractedText);
+
     if (!extractedText) {
       return res.status(422).json({
         success: false,
-        error: "Could not extract text from this PDF. Install pdf-parse in backend or send extracted_text from frontend.",
+        error: "Could not extract readable text from this PDF. Install pdf-parse in backend, upload a text-based PDF, or paste extracted_text from the frontend.",
         extraction,
+      });
+    }
+
+    const qualityCheck = ngIsReadableTrainingText(extractedText, {
+      min_chars: Number(req.body?.min_chars || 300),
+      min_words: Number(req.body?.min_words || 45),
+    });
+
+    if (!qualityCheck.ok) {
+      return res.status(422).json({
+        success: false,
+        error: `PDF text extraction failed quality check: ${qualityCheck.reason}`,
+        extraction,
+        quality: qualityCheck.quality,
+        preview: extractedText.slice(0, 700),
       });
     }
 
@@ -19445,6 +19541,7 @@ app.post("/admin/crm/ai-training/import-document", async (req, res) => {
       parser_error: extraction.parser_error || null,
       pages: extraction.pages || null,
       total_characters: extractedText.length,
+      quality: qualityCheck.quality,
       chunks_count: chunks.length,
       active: true,
       created_by: user.id,
@@ -19470,7 +19567,58 @@ app.post("/admin/crm/ai-training/import-document", async (req, res) => {
     db.ai_training_items.unshift(...items);
     await writeCrmDb(db);
 
-    res.json({ success: true, document, items_created: items.length, extraction_method: extraction.method, parser_error: extraction.parser_error || null });
+    res.json({
+      success: true,
+      document,
+      items_created: items.length,
+      extraction_method: extraction.method,
+      parser_error: extraction.parser_error || null,
+      quality: qualityCheck.quality,
+      preview: extractedText.slice(0, 700),
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-training/cleanup-corrupted", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const items = ensureCrmArray(db, "ai_training_items");
+    const removeInactive = req.body?.remove_inactive === true;
+    const dryRun = req.body?.dry_run === true;
+
+    const corrupted = items.filter((item) => {
+      const content = String(item.content || item.body || "");
+      const quality = ngIsReadableTrainingText(content, { min_chars: 80, min_words: 8 });
+      const isPdfImport = String(item.source || "").includes("pdf") || normalizeIdList(item.tags).some((tag) => String(tag).toLowerCase().includes("pdf"));
+      const inactiveDeleted = item.active === false || item.is_active === false || item.deleted_at;
+      return (isPdfImport && !quality.ok) || (removeInactive && inactiveDeleted);
+    });
+
+    if (!dryRun) {
+      const removeIds = new Set(corrupted.map((item) => String(item.id || "")));
+      db.ai_training_items = items.filter((item) => !removeIds.has(String(item.id || "")));
+      ensureCrmArray(db, "ai_training_deletion_logs").push({
+        id: ngUuid(),
+        deleted_count: corrupted.length,
+        deleted_ids: Array.from(removeIds),
+        deleted_by: user.id,
+        deleted_by_email: user.email,
+        deleted_at: ngNowIso(),
+        delete_mode: "corrupted_pdf_cleanup"
+      });
+      await writeCrmDb(db);
+    }
+
+    res.json({
+      success: true,
+      dry_run: dryRun,
+      deleted_count: dryRun ? 0 : corrupted.length,
+      matched_count: corrupted.length,
+      items: corrupted.map((item) => ({ id: item.id, title: item.title, source: item.source, active: item.active, deleted_at: item.deleted_at || null })),
+    });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
