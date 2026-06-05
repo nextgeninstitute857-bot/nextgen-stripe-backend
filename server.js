@@ -6052,19 +6052,212 @@ async function requireCrmAdmin(req) {
   return requireAdmin(req);
 }
 
+const TEAM_CRM_READ_PERMISSION_BY_COLLECTION = {
+  leads: ["view_leads", "view_assigned_leads", "edit_leads", "send_messages"],
+  conversations: ["send_messages", "reply_assigned_conversations", "view_leads", "view_assigned_leads"],
+  communities: ["community_intelligence", "manage_community_intelligence", "view_leads", "view_assigned_leads"],
+  community_posts: ["community_intelligence", "manage_community_intelligence"],
+  tasks: ["manage_tasks", "create_followups", "view_leads", "view_assigned_leads"],
+  followups: ["create_followups", "view_leads", "view_assigned_leads"],
+  appointments: ["manage_appointments", "view_leads", "view_assigned_leads"],
+  appointment_notes: ["manage_appointments", "view_leads", "view_assigned_leads"],
+  approval_queue: ["approve_ai_drafts", "submit_approval_items"],
+  opportunities: ["view_leads", "view_assigned_leads", "view_revenue_limited"],
+  pipelines: ["view_leads", "view_assigned_leads"],
+  pipeline_stages: ["view_leads", "view_assigned_leads"],
+  support_tickets: ["create_internal_notes", "reply_assigned_conversations", "view_leads", "view_assigned_leads"],
+  ticket_messages: ["create_internal_notes", "reply_assigned_conversations", "view_leads", "view_assigned_leads"],
+};
+
+const TEAM_CRM_WRITE_PERMISSION_BY_COLLECTION = {
+  leads: ["edit_leads", "view_leads", "view_assigned_leads"],
+  conversations: ["send_messages", "reply_assigned_conversations"],
+  tasks: ["manage_tasks", "create_followups"],
+  followups: ["create_followups"],
+  appointments: ["manage_appointments"],
+  appointment_notes: ["manage_appointments"],
+  approval_queue: ["approve_ai_drafts", "submit_approval_items"],
+  support_tickets: ["create_internal_notes", "reply_assigned_conversations"],
+  ticket_messages: ["create_internal_notes", "reply_assigned_conversations"],
+  communities: ["community_intelligence", "manage_community_intelligence"],
+  community_posts: ["community_intelligence", "manage_community_intelligence"],
+};
+
+const TEAM_CRM_MODULE_BY_COLLECTION = {
+  leads: ["leads", "lead_management"],
+  conversations: ["inbox", "conversation_inbox", "conversations"],
+  communities: ["communities", "community_intelligence", "geo_communities"],
+  community_posts: ["communities", "community_intelligence"],
+  tasks: ["tasks"],
+  followups: ["tasks", "followups"],
+  appointments: ["appointments", "appointments_calendar"],
+  appointment_notes: ["appointments", "appointments_calendar"],
+  approval_queue: ["approval_queue"],
+  opportunities: ["pipeline", "opportunities", "pipeline_opportunities"],
+  pipelines: ["pipeline", "opportunities", "pipeline_opportunities"],
+  pipeline_stages: ["pipeline", "opportunities", "pipeline_opportunities"],
+  support_tickets: ["support_tickets"],
+  ticket_messages: ["support_tickets"],
+};
+
+function crmAccessKey(value = "") {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function crmListHasAny(list = [], required = []) {
+  const values = uniqueList(list).map(crmAccessKey);
+  if (values.includes("*")) return true;
+
+  const requiredKeys = uniqueList(required).map(crmAccessKey);
+  return requiredKeys.some((key) => values.includes(key));
+}
+
+function teamCanUseCrmCollection({ crmDb, user, collection, action = "read" }) {
+  if (user?.role === "admin") {
+    return { allowed: true, admin: true, member: null, permissions: ["*"], modules: ["*"] };
+  }
+
+  const member = getTeamMemberForUser(crmDb, user);
+  if (!member || member.portal_enabled === false || member.crm_access_enabled === false) {
+    return { allowed: false, admin: false, member: null, permissions: [], modules: [] };
+  }
+
+  const permissions = getEffectiveCrmPermissions(crmDb, user);
+  const modules = getAllowedModulesForTeamMember(crmDb, member, "crm");
+  const requiredPermissions =
+    action === "write"
+      ? (TEAM_CRM_WRITE_PERMISSION_BY_COLLECTION[collection] || TEAM_CRM_READ_PERMISSION_BY_COLLECTION[collection] || [])
+      : (TEAM_CRM_READ_PERMISSION_BY_COLLECTION[collection] || []);
+  const requiredModules = TEAM_CRM_MODULE_BY_COLLECTION[collection] || [];
+
+  const allowedByPermission = !requiredPermissions.length || crmListHasAny(permissions, requiredPermissions);
+  const allowedByModule = !requiredModules.length || crmListHasAny(modules, requiredModules);
+
+  return {
+    allowed: allowedByPermission && allowedByModule,
+    admin: false,
+    member,
+    permissions,
+    modules,
+  };
+}
+
+async function requireCrmCollectionAccess(req, collection, action = "read") {
+  const ctx = await getAuthenticatedUser(req);
+  const crmDb = await readCrmDb();
+
+  const access = teamCanUseCrmCollection({ crmDb, user: ctx.user, collection, action });
+  if (!access.allowed) {
+    const e = new Error(
+      ctx.user.role === "admin"
+        ? "CRM access denied"
+        : `Missing CRM permission/module for ${collection}`
+    );
+    e.statusCode = 403;
+    throw e;
+  }
+
+  return { ...ctx, crmDb, team_member: access.member, crm_permissions: access.permissions, crm_modules: access.modules, crm_admin: access.admin };
+}
+
+function crmRecordOwnershipValues(record = {}) {
+  return [
+    record.team_member_id,
+    record.owner_team_member_id,
+    record.assigned_team_member_id,
+    record.assigned_agent_id,
+    record.assigned_closer_id,
+    record.assigned_to_id,
+    record.assignee_id,
+    record.agent_id,
+    record.closer_id,
+    record.created_by,
+    record.updated_by,
+    record.portal_user_id,
+    record.user_id,
+    record.owner_user_id,
+    record.assigned_user_id,
+    record.assigned_agent_user_id,
+    record.assigned_closer_user_id,
+    record.email,
+    record.assigned_agent_email,
+    record.assigned_closer_email,
+    record.team_member_email,
+    record.owner_email,
+  ].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
+}
+
+function crmTeamIdentityValues(member = {}, user = {}) {
+  return [
+    member.id,
+    member.user_id,
+    member.portal_user_id,
+    user.id,
+    member.email,
+    user.email,
+    member.name,
+  ].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
+}
+
+function crmRecordVisibleToTeam(record = {}, member = {}, user = {}) {
+  if (!member) return true;
+
+  const identities = crmTeamIdentityValues(member, user);
+  const ownershipValues = crmRecordOwnershipValues(record);
+
+  if (ownershipValues.some((value) => identities.includes(value))) return true;
+
+  const leadId = String(record.lead_id || record.id || "").trim();
+  if (leadId && Array.isArray(member.assigned_lead_ids) && member.assigned_lead_ids.map(String).includes(leadId)) return true;
+
+  return false;
+}
+
+function applyTeamScopeToRecords(records = [], member = null, user = null, collection = "") {
+  if (!member) return records;
+
+  return records.filter((record) => {
+    if (crmRecordVisibleToTeam(record, member, user)) return true;
+
+    if (collection === "conversations" && record.lead_id) {
+      return false;
+    }
+
+    return false;
+  });
+}
+
+function attachTeamOwnership(record = {}, member = null, user = null) {
+  if (!member) return record;
+
+  return {
+    ...record,
+    owner_team_member_id: record.owner_team_member_id || member.id || null,
+    team_member_id: record.team_member_id || member.id || null,
+    assigned_agent_id: record.assigned_agent_id || member.id || null,
+    assigned_agent_email: record.assigned_agent_email || member.email || user?.email || "",
+    created_by: record.created_by || user?.id || null,
+  };
+}
+
 function registerCrmCrudRoutes({ route, collection, brandScoped = true }) {
   app.get(route, async (req, res) => {
     try {
-      await requireCrmAdmin(req);
-      const db = await readCrmDb();
+      const ctx = await requireCrmCollectionAccess(req, collection, "read");
+      const db = ctx.crmDb;
       const brandId = brandScoped ? getCrmBrandId(req, db) : null;
       let records = filterCrmRecords(req, ensureCrmArray(db, collection), brandId);
+      if (!ctx.crm_admin) records = applyTeamScopeToRecords(records, ctx.team_member, ctx.user, collection);
 
       if (collection === "leads") {
         records = records.map((lead) => ensureLeadIdentityFields(lead));
       }
 
-      res.json({ success: true, [collectionResponseName(collection)]: records, count: records.length });
+      res.json({ success: true, [collectionResponseName(collection)]: records, count: records.length, scoped: !ctx.crm_admin });
     } catch (error) {
       res.status(error.statusCode || 500).json({ success: false, error: error.message });
     }
@@ -6072,11 +6265,12 @@ function registerCrmCrudRoutes({ route, collection, brandScoped = true }) {
 
   app.post(route, async (req, res) => {
     try {
-      await requireCrmAdmin(req);
-      const db = await readCrmDb();
+      const ctx = await requireCrmCollectionAccess(req, collection, "write");
+      const db = ctx.crmDb;
       const brandId = brandScoped ? getCrmBrandId(req, db) : null;
       const records = ensureCrmArray(db, collection);
       let record = normalizeCrmCollectionPayload(collection, req.body || {}, null, brandId);
+      if (!ctx.crm_admin) record = attachTeamOwnership(record, ctx.team_member, ctx.user);
       if (collection === "leads") record = ensureLeadIdentityFields(record);
       records.push(record);
 
@@ -6085,7 +6279,7 @@ function registerCrmCrudRoutes({ route, collection, brandScoped = true }) {
       }
 
       await writeCrmDb(db);
-      res.json({ success: true, [collectionResponseName(collection).replace(/s$/, "") || "record"]: record });
+      res.json({ success: true, [collectionResponseName(collection).replace(/s$/, "") || "record"]: record, scoped: !ctx.crm_admin });
     } catch (error) {
       res.status(error.statusCode || 500).json({ success: false, error: error.message });
     }
@@ -6093,34 +6287,42 @@ function registerCrmCrudRoutes({ route, collection, brandScoped = true }) {
 
   app.get(`${route}/:id`, async (req, res) => {
     try {
-      await requireCrmAdmin(req);
-      const db = await readCrmDb();
+      const ctx = await requireCrmCollectionAccess(req, collection, "read");
+      const db = ctx.crmDb;
       let record = null;
 
       if (collection === "leads") {
         record = getLeadByAnyId(db, req.params.id);
         if (record) {
           ensureLeadIdentityFields(record);
-          const conversations = ensureCrmArray(db, "conversations")
+          if (!ctx.crm_admin && !crmRecordVisibleToTeam(record, ctx.team_member, ctx.user)) {
+            return res.status(403).json({ success: false, error: "This lead is not assigned to this team member" });
+          }
+          let conversations = ensureCrmArray(db, "conversations")
             .filter((item) => String(item.lead_id) === String(record.id))
             .sort((a, b) => String(a.created_at || a.timestamp || "").localeCompare(String(b.created_at || b.timestamp || "")));
-          return res.json({ success: true, lead: record, record, conversations });
+          if (!ctx.crm_admin) conversations = applyTeamScopeToRecords(conversations, ctx.team_member, ctx.user, "conversations");
+          return res.json({ success: true, lead: record, record, conversations, scoped: !ctx.crm_admin });
         }
       } else if (collection === "conversations") {
         record = ensureCrmArray(db, collection).find((item) => String(item.id) === String(req.params.id));
         if (!record) {
-          const conversations = ensureCrmArray(db, "conversations")
+          let conversations = ensureCrmArray(db, "conversations")
             .filter((item) => String(item.lead_id) === String(req.params.id))
             .sort((a, b) => String(a.created_at || a.timestamp || "").localeCompare(String(b.created_at || b.timestamp || "")));
-          return res.json({ success: true, conversations, count: conversations.length });
+          if (!ctx.crm_admin) conversations = applyTeamScopeToRecords(conversations, ctx.team_member, ctx.user, "conversations");
+          return res.json({ success: true, conversations, count: conversations.length, scoped: !ctx.crm_admin });
         }
       } else {
         record = ensureCrmArray(db, collection).find((item) => String(item.id) === String(req.params.id));
       }
 
       if (!record) return res.status(404).json({ success: false, error: "Record not found" });
+      if (!ctx.crm_admin && !crmRecordVisibleToTeam(record, ctx.team_member, ctx.user)) {
+        return res.status(403).json({ success: false, error: "This record is not assigned to this team member" });
+      }
 
-      res.json({ success: true, record });
+      res.json({ success: true, record, scoped: !ctx.crm_admin });
     } catch (error) {
       res.status(error.statusCode || 500).json({ success: false, error: error.message });
     }
@@ -6128,8 +6330,8 @@ function registerCrmCrudRoutes({ route, collection, brandScoped = true }) {
 
   app.put(`${route}/:id`, async (req, res) => {
     try {
-      await requireCrmAdmin(req);
-      const db = await readCrmDb();
+      const ctx = await requireCrmCollectionAccess(req, collection, "write");
+      const db = ctx.crmDb;
       const brandId = brandScoped ? getCrmBrandId(req, db) : null;
       const records = ensureCrmArray(db, collection);
       const index = collection === "leads"
@@ -6137,13 +6339,17 @@ function registerCrmCrudRoutes({ route, collection, brandScoped = true }) {
         : records.findIndex((item) => String(item.id) === String(req.params.id));
 
       if (index < 0) return res.status(404).json({ success: false, error: "Record not found" });
+      if (!ctx.crm_admin && !crmRecordVisibleToTeam(records[index], ctx.team_member, ctx.user)) {
+        return res.status(403).json({ success: false, error: "This record is not assigned to this team member" });
+      }
 
       let record = normalizeCrmCollectionPayload(collection, req.body || {}, records[index], brandId);
+      if (!ctx.crm_admin) record = attachTeamOwnership(record, ctx.team_member, ctx.user);
       if (collection === "leads") record = ensureLeadIdentityFields(record);
       records[index] = record;
 
       await writeCrmDb(db);
-      res.json({ success: true, record });
+      res.json({ success: true, record, scoped: !ctx.crm_admin });
     } catch (error) {
       res.status(error.statusCode || 500).json({ success: false, error: error.message });
     }
@@ -6151,19 +6357,24 @@ function registerCrmCrudRoutes({ route, collection, brandScoped = true }) {
 
   app.delete(`${route}/:id`, async (req, res) => {
     try {
-      await requireCrmAdmin(req);
-      const db = await readCrmDb();
+      const ctx = await requireCrmCollectionAccess(req, collection, "write");
+      const db = ctx.crmDb;
       const records = ensureCrmArray(db, collection);
       const before = records.length;
+
+      const canDelete = (item) => ctx.crm_admin || crmRecordVisibleToTeam(item, ctx.team_member, ctx.user);
+
       if (collection === "leads") {
         db[collection] = records.filter((item) => {
-          return ![item.id, item._id, item.lead_id, item.uuid].map((x) => String(x || "")).includes(String(req.params.id));
+          const idMatch = [item.id, item._id, item.lead_id, item.uuid].map((x) => String(x || "")).includes(String(req.params.id));
+          return !(idMatch && canDelete(item));
         });
       } else {
-        db[collection] = records.filter((item) => String(item.id) !== String(req.params.id));
+        db[collection] = records.filter((item) => !(String(item.id) === String(req.params.id) && canDelete(item)));
       }
+
       await writeCrmDb(db);
-      res.json({ success: true, deleted: before !== db[collection].length });
+      res.json({ success: true, deleted: before !== db[collection].length, scoped: !ctx.crm_admin });
     } catch (error) {
       res.status(error.statusCode || 500).json({ success: false, error: error.message });
     }
@@ -7272,11 +7483,12 @@ app.get("/admin/crm/action-logs", async (req, res) => {
 
 app.get("/admin/crm/approval-queue", async (req, res) => {
   try {
-    await requireCrmAdmin(req);
-    const db = await readCrmDb();
+    const ctx = await requireCrmCollectionAccess(req, "approval_queue", "read");
+    const db = ctx.crmDb;
     const brandId = getCrmBrandId(req, db);
-    const items = filterCrmRecords(req, ensureCrmArray(db, "approval_queue"), brandId);
-    res.json({ success: true, items, count: items.length });
+    let items = filterCrmRecords(req, ensureCrmArray(db, "approval_queue"), brandId);
+    if (!ctx.crm_admin) items = applyTeamScopeToRecords(items, ctx.team_member, ctx.user, "approval_queue");
+    res.json({ success: true, items, count: items.length, scoped: !ctx.crm_admin });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -7284,10 +7496,14 @@ app.get("/admin/crm/approval-queue", async (req, res) => {
 
 app.put("/admin/crm/approval-queue/:id", async (req, res) => {
   try {
-    const { user } = await requireCrmAdmin(req);
-    const db = await readCrmDb();
+    const ctx = await requireCrmCollectionAccess(req, "approval_queue", "write");
+    const { user } = ctx;
+    const db = ctx.crmDb;
     const item = db.approval_queue.find((x) => String(x.id) === String(req.params.id));
     if (!item) return res.status(404).json({ success: false, error: "Approval item not found" });
+    if (!ctx.crm_admin && !crmRecordVisibleToTeam(item, ctx.team_member, ctx.user)) {
+      return res.status(403).json({ success: false, error: "This approval item is not assigned to this team member" });
+    }
 
     item.status = normalizeCrmLower(req.body.status, "approved");
     item.review_note = req.body.review_note || "";
@@ -7325,11 +7541,22 @@ app.put("/admin/crm/approval-queue/:id", async (req, res) => {
 
 app.get("/admin/crm/summary", async (req, res) => {
   try {
-    await requireCrmAdmin(req);
-    const db = await readCrmDb();
+    const ctx = await requireCrmCollectionAccess(req, "leads", "read");
+    const db = ctx.crmDb;
     const brandId = getCrmBrandId(req, db);
-    const leads = ensureCrmArray(db, "leads").filter((lead) => !brandId || String(lead.brand_id) === String(brandId));
+    let leads = ensureCrmArray(db, "leads").filter((lead) => !brandId || String(lead.brand_id) === String(brandId));
+    if (!ctx.crm_admin) leads = applyTeamScopeToRecords(leads, ctx.team_member, ctx.user, "leads");
     const byStatus = (status) => leads.filter((lead) => lead.status === status).length;
+
+    let followups = ensureCrmArray(db, "followups").filter((item) => item.scheduled_at && String(item.scheduled_at).slice(0, 10) === todayKey());
+    let communities = ensureCrmArray(db, "communities").filter((item) => String(item.brand_id) === String(brandId) && item.status !== "archived");
+    let approvals = ensureCrmArray(db, "approval_queue").filter((item) => String(item.brand_id) === String(brandId) && item.status === "pending");
+
+    if (!ctx.crm_admin) {
+      followups = applyTeamScopeToRecords(followups, ctx.team_member, ctx.user, "followups");
+      communities = applyTeamScopeToRecords(communities, ctx.team_member, ctx.user, "communities");
+      approvals = applyTeamScopeToRecords(approvals, ctx.team_member, ctx.user, "approval_queue");
+    }
 
     const summary = {
       total_leads: leads.length,
@@ -7345,17 +7572,18 @@ app.get("/admin/crm/summary", async (req, res) => {
       enrolled: byStatus("enrolled"),
       cold: byStatus("cold"),
       unsubscribed: byStatus("unsubscribed") + leads.filter((lead) => lead.unsubscribe_status === "unsubscribed").length,
-      todays_followups: ensureCrmArray(db, "followups").filter((item) => item.scheduled_at && String(item.scheduled_at).slice(0, 10) === todayKey()).length,
-      active_campaigns: ensureCrmArray(db, "campaigns").filter((item) => String(item.brand_id) === String(brandId) && item.status === "running").length,
-      active_communities: ensureCrmArray(db, "communities").filter((item) => String(item.brand_id) === String(brandId) && item.status !== "archived").length,
+      todays_followups: followups.length,
+      active_campaigns: ctx.crm_admin ? ensureCrmArray(db, "campaigns").filter((item) => String(item.brand_id) === String(brandId) && item.status === "running").length : 0,
+      active_communities: communities.length,
     };
 
     res.json({
       success: true,
       summary,
+      scoped: !ctx.crm_admin,
       recent_leads: leads.sort(sortNewestFirst).slice(0, 10),
       high_score_leads: [...leads].sort((a, b) => Number(b.lead_score || 0) - Number(a.lead_score || 0)).slice(0, 10),
-      approval_queue_count: ensureCrmArray(db, "approval_queue").filter((item) => String(item.brand_id) === String(brandId) && item.status === "pending").length,
+      approval_queue_count: approvals.length,
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
@@ -7429,10 +7657,10 @@ app.post("/admin/crm/leads/:leadId/conversations", async (req, res) => {
 
 app.post("/admin/crm/import/preview", async (req, res) => {
   try {
-    await requireCrmAdmin(req);
-    const db = await readCrmDb();
+    const ctx = await requireCrmCollectionAccess(req, "leads", "write");
+    const db = ctx.crmDb;
     const brandId = getCrmBrandId(req, db);
-    const inputRows = req.body.rows || req.body.contacts || parseManualContacts(req.body.text || req.body.raw || "");
+    const inputRows = req.body.rows || req.body.contacts || parseManualContacts(req.body.text || req.body.raw || req.body.data || "");
     const rows = buildImportPreviewRows({ db, brandId, rows: inputRows, defaults: req.body.defaults || req.body || {} });
 
     res.json({
@@ -7452,10 +7680,11 @@ app.post("/admin/crm/import/preview", async (req, res) => {
 
 app.post("/admin/crm/import/confirm", async (req, res) => {
   try {
-    const { user } = await requireCrmAdmin(req);
-    const db = await readCrmDb();
+    const ctx = await requireCrmCollectionAccess(req, "leads", "write");
+    const { user } = ctx;
+    const db = ctx.crmDb;
     const brandId = getCrmBrandId(req, db);
-    const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+    const rows = Array.isArray(req.body.rows) ? req.body.rows : Array.isArray(req.body.leads) ? req.body.leads.map((record) => ({ valid: true, duplicate: false, record, ...record })) : [];
     const batchId = uuid();
     const now = nowIso();
 
@@ -7468,9 +7697,10 @@ app.post("/admin/crm/import/confirm", async (req, res) => {
         continue;
       }
 
-      const lead = normalizeCrmCollectionPayload(
+      let lead = normalizeCrmCollectionPayload(
         "leads",
         {
+          ...(row.record || {}),
           ...row,
           id: uuid(),
           brand_id: brandId,
@@ -7487,6 +7717,8 @@ app.post("/admin/crm/import/confirm", async (req, res) => {
         brandId
       );
 
+      if (!ctx.crm_admin) lead = attachTeamOwnership(lead, ctx.team_member, ctx.user);
+      lead = ensureLeadIdentityFields(lead);
       db.leads.push(lead);
       created += 1;
     }
@@ -10694,9 +10926,10 @@ app.get("/admin/crm/integrations/:id/status", async (req, res) => {
 
 app.get("/admin/crm/conversation-inbox", async (req, res) => {
   try {
-    await requireCrmAdmin(req);
-    const db = await readCrmDb();
-    const conversations = buildConversationInbox(db);
+    const ctx = await requireCrmCollectionAccess(req, "conversations", "read");
+    const db = ctx.crmDb;
+    let conversations = buildConversationInbox(db);
+    if (!ctx.crm_admin) conversations = applyTeamScopeToRecords(conversations, ctx.team_member, ctx.user, "conversations");
 
     const platform = req.query.platform ? normalizeSocialPlatform(req.query.platform) : null;
     const status = req.query.status ? String(req.query.status).toLowerCase() : null;
@@ -10715,6 +10948,7 @@ app.get("/admin/crm/conversation-inbox", async (req, res) => {
       success: true,
       conversations: filtered,
       count: filtered.length,
+      scoped: !ctx.crm_admin,
       summary: {
         total: conversations.length,
         unread: conversations.filter((item) => Number(item.unread_count || 0) > 0).length,
@@ -12163,8 +12397,17 @@ async function requireAutomationRunPermission(req) {
 
 app.get("/admin/crm/providers", async (req, res) => {
   try {
-    await requireCrmAdmin(req);
-    res.json({ success: true, providers: getProviderStatus() });
+    const ctx = await getAuthenticatedUser(req);
+    if (ctx.user.role !== "admin") {
+      const crmDb = await readCrmDb();
+      const member = getTeamMemberForUser(crmDb, ctx.user);
+      if (!member || member.portal_enabled === false || member.crm_access_enabled === false) {
+        const e = new Error("Missing CRM portal access");
+        e.statusCode = 403;
+        throw e;
+      }
+    }
+    res.json({ success: true, providers: getProviderStatus(), scoped: ctx.user.role !== "admin" });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
@@ -12248,11 +12491,13 @@ app.delete("/admin/crm/message-templates/:id", async (req, res) => {
 
 app.get("/admin/crm/message-logs", async (req, res) => {
   try {
-    await requireCrmAdmin(req);
-    const db = await readCrmDb();
+    const ctx = await requireCrmCollectionAccess(req, "conversations", "read");
+    const db = ctx.crmDb;
     const brandId = getCrmBrandId(req, db);
-    const logs = filterCrmRecords(req, ensureCrmArray(db, "message_logs"), brandId).sort(sortNewestFirst).slice(0, Number(req.query.limit || 200));
-    res.json({ success: true, logs, count: logs.length });
+    let logs = filterCrmRecords(req, ensureCrmArray(db, "message_logs"), brandId);
+    if (!ctx.crm_admin) logs = applyTeamScopeToRecords(logs, ctx.team_member, ctx.user, "conversations");
+    logs = logs.sort(sortNewestFirst).slice(0, Number(req.query.limit || 200));
+    res.json({ success: true, logs, count: logs.length, scoped: !ctx.crm_admin });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
