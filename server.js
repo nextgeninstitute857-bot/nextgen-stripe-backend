@@ -21232,6 +21232,282 @@ function ngCreateRoadmapScheduledPosts(db, roadmap = {}, ctx = {}) {
   return created;
 }
 
+
+// -----------------------------------------------------------------------------
+// AI MONTHLY ROADMAP AUTOPILOT
+// Creates editable question + delayed-answer schedules from approved sources.
+// Admin/team doctor only chooses: targets, dates/times, duration, and rotation rule.
+// The backend picks approved source chunks automatically, avoids repeats, and stores
+// progress so the same topic/source is not reused until the source pool is exhausted.
+// -----------------------------------------------------------------------------
+function ngAutopilotBookKey(source = {}) {
+  const title = ngContentClean(source.title || source.name || "approved-source", "approved-source");
+  const lowered = title.toLowerCase();
+  if (lowered.includes("pathoma")) return "pathoma";
+  if (lowered.includes("first aid") || lowered.includes("first-aid")) return "first_aid";
+  if (lowered.includes("uworld")) return "uworld";
+  if (lowered.includes("sketchy")) return "sketchy";
+  if (lowered.includes("bnb") || lowered.includes("boards")) return "boards_and_beyond";
+  return title.split("—")[0].split("-")[0].trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "approved-source";
+}
+
+function ngAutopilotBookName(source = {}) {
+  const title = ngContentClean(source.title || source.name || "Approved Source", "Approved Source");
+  const lowered = title.toLowerCase();
+  if (lowered.includes("pathoma")) return "Pathoma";
+  if (lowered.includes("first aid") || lowered.includes("first-aid")) return "First Aid";
+  if (lowered.includes("uworld")) return "UWorld / NextGen Notes";
+  if (lowered.includes("sketchy")) return "Sketchy";
+  return title.split("—")[0].trim() || "Approved Source";
+}
+
+function ngAutopilotTopic(source = {}, fallbackIndex = 0) {
+  const title = ngContentClean(source.title || source.name || "", "");
+  const afterDash = title.includes("—") ? title.split("—").slice(1).join("—").trim() : "";
+  const content = ngContentClean(source.content || source.body || source.text || source.summary || "", "");
+  const topicLine = content.split(/\n+/).find((line) => /^topic\s*:/i.test(line));
+  const cleanTopic = afterDash || (topicLine ? topicLine.replace(/^topic\s*:/i, "").trim() : "") || title || `Approved source topic ${fallbackIndex + 1}`;
+  return cleanTopic.replace(/^part\s*\d+\s*[:\-–—]?\s*/i, "").trim() || `Approved source topic ${fallbackIndex + 1}`;
+}
+
+function ngAutopilotSourcePool(db, body = {}) {
+  let sources = ngApprovedTrainingSources(db, body.source_ids || body.sources || []);
+  const pool = ngContentClean(body.source_pool || body.sourcePool || "all_approved", "all_approved").toLowerCase();
+  const q = ngContentClean(body.source_query || body.book || body.system || "", "").toLowerCase();
+
+  if (q) {
+    sources = sources.filter((s) => [s.title, s.name, s.category, s.audience, Array.isArray(s.tags) ? s.tags.join(" ") : s.tags]
+      .join(" ").toLowerCase().includes(q));
+  }
+
+  if (pool && pool !== "all" && pool !== "all_approved" && pool !== "mixed_approved") {
+    const key = pool.replace(/[^a-z0-9]+/g, "_");
+    sources = sources.filter((s) => {
+      const hay = [s.title, s.name, s.category, s.audience, Array.isArray(s.tags) ? s.tags.join(" ") : s.tags]
+        .join(" ").toLowerCase().replace(/[^a-z0-9]+/g, "_");
+      return hay.includes(key);
+    });
+  }
+
+  return sources.map((source, index) => ({
+    ...source,
+    __source_id: String(source.id || source._id || source.training_id || index),
+    __book_key: ngAutopilotBookKey(source),
+    __book_name: ngAutopilotBookName(source),
+    __topic: ngAutopilotTopic(source, index),
+    __sequence: Number(source.sequence || source.order || source.priority || index + 1),
+  })).sort((a, b) => {
+    const bookCompare = String(a.__book_name).localeCompare(String(b.__book_name));
+    if (bookCompare) return bookCompare;
+    return Number(a.__sequence || 0) - Number(b.__sequence || 0);
+  });
+}
+
+function ngAutopilotProgressKey(body = {}, ctx = {}) {
+  const brandId = body.brand_id || getCrmBrandId({ query: {}, body: {} }, ctx.crmDb || {}) || "brand_nextgen_usmle";
+  const scope = ngContentClean(body.progress_scope || body.community_scope || "global", "global");
+  const pool = ngContentClean(body.source_pool || body.sourcePool || "all_approved", "all_approved");
+  const team = ctx.team_member?.id || ctx.user?.id || "admin";
+  return `${brandId}:${scope}:${pool}:${team}`;
+}
+
+function ngGetAutopilotProgress(db, key) {
+  const arr = ngContentArray(db, "community_content_autopilot_progress");
+  let item = arr.find((p) => String(p.key) === String(key));
+  if (!item) {
+    item = withTimestamps({
+      id: uuid(),
+      key,
+      used_source_ids: [],
+      used_topics: [],
+      source_rotation_index: 0,
+      book_rotation_index: 0,
+      last_book_key: null,
+      last_source_id: null,
+      status: "active",
+    });
+    arr.unshift(item);
+  }
+  return item;
+}
+
+function ngSelectAutopilotSources(db, body = {}, ctx = {}, days = 30) {
+  const sources = ngAutopilotSourcePool(db, body);
+  if (!sources.length) {
+    const error = new Error("No approved sources available for AI roadmap autopilot. Approve education chunks first.");
+    error.statusCode = 422;
+    throw error;
+  }
+
+  const progressKey = ngAutopilotProgressKey(body, ctx);
+  const progress = ngGetAutopilotProgress(db, progressKey);
+  const avoidRepeats = body.avoid_repeats !== false;
+  const strategy = ngContentClean(body.rotation_strategy || body.source_rotation || "one_book_per_day", "one_book_per_day");
+  const used = new Set(avoidRepeats ? ngContentList(progress.used_source_ids) : []);
+
+  const byBook = new Map();
+  for (const s of sources) {
+    if (!byBook.has(s.__book_key)) byBook.set(s.__book_key, []);
+    byBook.get(s.__book_key).push(s);
+  }
+  const bookKeys = Array.from(byBook.keys()).sort();
+  const selections = [];
+
+  for (let day = 0; day < days; day += 1) {
+    let candidate = null;
+    if (strategy === "finish_one_book_first" || strategy === "sequential_book_by_book") {
+      const available = sources.find((s) => !used.has(s.__source_id)) || sources[day % sources.length];
+      candidate = available;
+    } else if (strategy === "mixed_sources" || strategy === "system_wise_rotation" || strategy === "one_book_per_day") {
+      for (let offset = 0; offset < bookKeys.length; offset += 1) {
+        const bookIndex = (Number(progress.book_rotation_index || 0) + day + offset) % bookKeys.length;
+        const bookKey = bookKeys[bookIndex];
+        const list = byBook.get(bookKey) || [];
+        candidate = list.find((s) => !used.has(s.__source_id)) || null;
+        if (candidate) break;
+      }
+      if (!candidate) candidate = sources.find((s) => !used.has(s.__source_id)) || sources[day % sources.length];
+    } else {
+      candidate = sources.find((s) => !used.has(s.__source_id)) || sources[day % sources.length];
+    }
+
+    if (!candidate) candidate = sources[day % sources.length];
+    used.add(candidate.__source_id);
+    selections.push({
+      day: day + 1,
+      source: candidate,
+      source_id: candidate.__source_id,
+      source_title: candidate.title || candidate.name || "Approved Source",
+      book_key: candidate.__book_key,
+      book_name: candidate.__book_name,
+      topic: candidate.__topic,
+    });
+  }
+
+  progress.used_source_ids = uniqueList([...(progress.used_source_ids || []), ...selections.map((s) => s.source_id)]);
+  progress.used_topics = uniqueList([...(progress.used_topics || []), ...selections.map((s) => s.topic)]);
+  progress.source_rotation_index = Number(progress.source_rotation_index || 0) + selections.length;
+  progress.book_rotation_index = (Number(progress.book_rotation_index || 0) + selections.length) % Math.max(1, bookKeys.length);
+  progress.last_book_key = selections[selections.length - 1]?.book_key || progress.last_book_key || null;
+  progress.last_source_id = selections[selections.length - 1]?.source_id || progress.last_source_id || null;
+  progress.updated_at = nowIso();
+
+  return { selections, progress, progressKey, sources };
+}
+
+function ngCreateAutopilotScheduledPosts(db, roadmap = {}, selections = [], ctx = {}) {
+  const posts = ngContentArray(db, "community_scheduled_posts");
+  const start = new Date(`${String(roadmap.start_date || todayKey()).slice(0, 10)}T00:00:00`);
+  const created = [];
+
+  for (let i = 0; i < selections.length; i += 1) {
+    const pick = selections[i];
+    const d = new Date(start);
+    d.setDate(start.getDate() + i);
+    const dateKeyValue = d.toISOString().slice(0, 10);
+    const topic = pick.topic || `${roadmap.topic || "USMLE topic"} — Day ${i + 1}`;
+    const bookLabel = pick.book_name || "Approved Source";
+    const questionAt = ngRoadmapDateTime(dateKeyValue, roadmap.question_time || roadmap.post_time || "10:00", roadmap.timezone);
+    const answerAt = ngRoadmapDateTime(dateKeyValue, roadmap.answer_time || "15:00", roadmap.timezone);
+    const sourceIds = [pick.source_id].filter(Boolean);
+
+    const question = ngBuildScheduledPostPayload({
+      title: `Day ${i + 1} — ${bookLabel} — ${topic}`,
+      topic,
+      content_type: roadmap.content_type || "daily_mcq",
+      post_kind: "question",
+      message: "",
+      scheduled_at: questionAt,
+      timezone: roadmap.timezone || DEFAULT_TIMEZONE,
+      platforms: roadmap.platforms,
+      community_ids: roadmap.community_ids,
+      source_ids: sourceIds,
+      media_items: roadmap.media_items || [],
+      image_urls: roadmap.image_urls || [],
+      status: "draft",
+      approval_status: "needs_review",
+    }, ctx, {
+      roadmap_id: roadmap.id,
+      title: `Day ${i + 1} — ${bookLabel} — ${topic}`,
+      topic,
+      created_by: ctx.user?.id || null,
+    });
+    question.autopilot = true;
+    question.day_number = i + 1;
+    question.source_title = pick.source_title;
+    question.book_name = bookLabel;
+    question.rotation_strategy = roadmap.rotation_strategy;
+
+    const answer = ngBuildScheduledPostPayload({
+      title: `Day ${i + 1} Answer — ${bookLabel} — ${topic}`,
+      topic,
+      content_type: "answer_explanation",
+      post_kind: "answer",
+      parent_post_id: question.id,
+      message: "",
+      scheduled_at: answerAt,
+      timezone: roadmap.timezone || DEFAULT_TIMEZONE,
+      platforms: roadmap.platforms,
+      community_ids: roadmap.community_ids,
+      source_ids: sourceIds,
+      media_items: roadmap.media_items || [],
+      image_urls: roadmap.image_urls || [],
+      status: "draft",
+      approval_status: "needs_review",
+    }, ctx, {
+      roadmap_id: roadmap.id,
+      parent_post_id: question.id,
+      title: `Day ${i + 1} Answer — ${bookLabel} — ${topic}`,
+      topic,
+      created_by: ctx.user?.id || null,
+    });
+    answer.autopilot = true;
+    answer.day_number = i + 1;
+    answer.source_title = pick.source_title;
+    answer.book_name = bookLabel;
+    answer.rotation_strategy = roadmap.rotation_strategy;
+
+    posts.push(question, answer);
+    created.push(question, answer);
+  }
+
+  return created;
+}
+
+async function ngGenerateAutopilotPostContent({ db, post, roadmap = {}, source = null } = {}) {
+  const sourceIds = post.source_ids && post.source_ids.length ? post.source_ids : (source ? [source.__source_id || source.id] : []);
+  const sources = ngApprovedTrainingSources(db, sourceIds);
+  const ai = await ngGenerateContentFromApprovedSources({
+    db,
+    sources,
+    body: {
+      ...post,
+      topic: post.topic,
+      title: post.title,
+      content_type: post.content_type,
+      instructions: [
+        roadmap.instructions || "",
+        "Use the selected approved source only.",
+        "Do not repeat earlier roadmap topics.",
+        "Make this suitable for public USMLE community posting.",
+      ].filter(Boolean).join("\n"),
+    },
+    answerOnly: String(post.post_kind || "").toLowerCase() === "answer" || String(post.content_type || "").toLowerCase().includes("answer"),
+  });
+  post.message = ai.content;
+  post.draft_content = ai.content;
+  post.ai_model = ai.model;
+  post.ai_usage = ai.usage;
+  post.ai_configured = ai.ai_configured;
+  post.status = "needs_review";
+  post.approval_status = "needs_review";
+  post.medical_review_status = ngContentIsMedicalType(post) ? "needs_review" : "not_required";
+  post.ready_to_post = false;
+  post.generated_at = nowIso();
+  post.updated_at = nowIso();
+  return post;
+}
+
 app.get("/admin/crm/ai-training/approved-sources", async (req, res) => {
   try {
     const ctx = await ngRequireContentAccess(req, "read");
@@ -21262,6 +21538,126 @@ app.get("/admin/crm/community-content/roadmaps", async (req, res) => {
     let roadmaps = filterCrmRecords(req, ngContentArray(ctx.crmDb, "community_content_roadmaps"), getCrmBrandId(req, ctx.crmDb));
     roadmaps = ngContentScope(roadmaps, ctx).sort(sortNewestFirst);
     res.json({ success: true, roadmaps, items: roadmaps, count: roadmaps.length, scoped: !ctx.crm_admin });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+
+app.put("/admin/crm/community-content/roadmaps/:id", async (req, res) => {
+  try {
+    const ctx = await ngRequireContentAccess(req, "create");
+    const db = ctx.crmDb;
+    const roadmap = ngContentArray(db, "community_content_roadmaps").find((item) => String(item.id) === String(req.params.id));
+    if (!roadmap) return res.status(404).json({ success: false, error: "Roadmap not found" });
+    if (!ctx.crm_admin && !crmRecordVisibleToTeam(roadmap, ctx.team_member, ctx.user)) {
+      return res.status(403).json({ success: false, error: "This roadmap is outside your assigned scope" });
+    }
+
+    const editable = ["title", "description", "topic", "exam_type", "days", "start_date", "timezone", "post_time", "question_time", "answer_time", "answer_delay_hours", "platforms", "community_ids", "source_pool", "source_query", "rotation_strategy", "content_mix", "approval_required", "auto_post_after_approval", "instructions", "status"];
+    for (const key of editable) {
+      if (req.body?.[key] !== undefined) {
+        if (["platforms", "community_ids", "content_mix"].includes(key)) roadmap[key] = ngContentList(req.body[key]);
+        else if (["days", "answer_delay_hours"].includes(key)) roadmap[key] = Number(req.body[key]);
+        else roadmap[key] = req.body[key];
+      }
+    }
+    roadmap.updated_at = nowIso();
+    roadmap.updated_by = ctx.user.id;
+    await writeCrmDb(db);
+    res.json({ success: true, roadmap });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/community-content/roadmaps/autopilot", async (req, res) => {
+  try {
+    const ctx = await ngRequireContentAccess(req, "create");
+    const db = ctx.crmDb;
+    const days = Math.min(90, Math.max(1, Number(req.body?.days || 30)));
+    const payload = {
+      ...(req.body || {}),
+      days,
+      platforms: ngContentPlatforms(req.body?.platforms || req.body?.channels || "telegram"),
+      community_ids: ngContentList(req.body?.community_ids || req.body?.communities),
+      rotation_strategy: ngContentClean(req.body?.rotation_strategy || req.body?.source_rotation || "one_book_per_day", "one_book_per_day"),
+      source_pool: ngContentClean(req.body?.source_pool || req.body?.sourcePool || "all_approved", "all_approved"),
+    };
+    ngValidateCommunityTargetsForScheduling(db, payload);
+
+    const { selections, progress, progressKey } = ngSelectAutopilotSources(db, payload, ctx, days);
+    let roadmap = withTimestamps({
+      id: uuid(),
+      brand_id: getCrmBrandId(req, db),
+      title: ngContentClean(req.body?.title || `AI Autopilot Roadmap — ${days} days`, `AI Autopilot Roadmap — ${days} days`),
+      description: ngContentClean(req.body?.description || "AI-generated editable community content roadmap using approved sources.", ""),
+      topic: ngContentClean(req.body?.topic || "USMLE Step 1 high-yield roadmap", "USMLE Step 1 high-yield roadmap"),
+      exam_type: ngContentClean(req.body?.exam_type || "Step 1", "Step 1"),
+      days,
+      start_date: String(req.body?.start_date || todayKey()).slice(0, 10),
+      timezone: req.body?.timezone || DEFAULT_TIMEZONE,
+      post_time: req.body?.post_time || req.body?.question_time || "10:00",
+      question_time: req.body?.question_time || req.body?.post_time || "10:00",
+      answer_time: req.body?.answer_time || "15:00",
+      answer_delay_hours: Number(req.body?.answer_delay_hours || 5),
+      platforms: payload.platforms,
+      community_ids: payload.community_ids,
+      source_pool: payload.source_pool,
+      source_query: ngContentClean(req.body?.source_query || req.body?.book || req.body?.system || "", ""),
+      source_ids: selections.map((s) => s.source_id),
+      source_rotation: payload.rotation_strategy,
+      rotation_strategy: payload.rotation_strategy,
+      avoid_repeats: req.body?.avoid_repeats !== false,
+      content_type: req.body?.content_type || "daily_mcq",
+      content_mix: Array.isArray(req.body?.content_mix) ? req.body.content_mix : ["daily_mcq", "answer_explanation"],
+      approval_required: req.body?.approval_required !== false,
+      auto_post_after_approval: req.body?.auto_post_after_approval !== false,
+      instructions: ngContentClean(req.body?.instructions || "", ""),
+      autopilot: true,
+      progress_key: progressKey,
+      selected_plan: selections.map((s) => ({ day: s.day, source_id: s.source_id, book_name: s.book_name, topic: s.topic, source_title: s.source_title })),
+      status: "active",
+      created_by: ctx.user.id,
+      updated_by: ctx.user.id,
+    });
+    roadmap = ngContentAttachOwnership(roadmap, ctx);
+    ngContentArray(db, "community_content_roadmaps").unshift(roadmap);
+    const scheduled_posts = ngCreateAutopilotScheduledPosts(db, roadmap, selections, ctx);
+
+    const generateNow = req.body?.generate_now === true || req.body?.generate_first_batch === true;
+    const generateLimit = Math.min(Number(req.body?.generate_limit || 4), scheduled_posts.length);
+    if (generateNow) {
+      for (const post of scheduled_posts.slice(0, generateLimit)) {
+        await ngGenerateAutopilotPostContent({ db, post, roadmap });
+      }
+    }
+
+    await writeCrmDb(db);
+    res.json({ success: true, roadmap, scheduled_posts, scheduled_count: scheduled_posts.length, progress, message: "AI autopilot roadmap created. All posts are editable before approval/publishing." });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message, details: error.details || null });
+  }
+});
+
+app.post("/admin/crm/community-content/roadmaps/:id/generate-next", async (req, res) => {
+  try {
+    const ctx = await ngRequireContentAccess(req, "generate");
+    const db = ctx.crmDb;
+    const roadmap = ngContentArray(db, "community_content_roadmaps").find((item) => String(item.id) === String(req.params.id));
+    if (!roadmap) return res.status(404).json({ success: false, error: "Roadmap not found" });
+    if (!ctx.crm_admin && !crmRecordVisibleToTeam(roadmap, ctx.team_member, ctx.user)) {
+      return res.status(403).json({ success: false, error: "This roadmap is outside your assigned scope" });
+    }
+    const posts = ngContentArray(db, "community_scheduled_posts")
+      .filter((post) => String(post.roadmap_id || "") === String(roadmap.id))
+      .filter((post) => !ngContentClean(post.message || post.draft_content, ""))
+      .sort((a, b) => String(a.scheduled_at || "").localeCompare(String(b.scheduled_at || "")));
+    const limit = Math.min(20, Math.max(1, Number(req.body?.limit || 2)));
+    const selected = posts.slice(0, limit);
+    for (const post of selected) await ngGenerateAutopilotPostContent({ db, post, roadmap });
+    await writeCrmDb(db);
+    res.json({ success: true, roadmap, generated_count: selected.length, posts: selected });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -21364,6 +21760,37 @@ app.post("/admin/crm/community-content/scheduled-posts", async (req, res) => {
     ngValidateCommunityTargetsForScheduling(db, req.body || {});
     const post = ngBuildScheduledPostPayload(req.body || {}, ctx, { brand_id: getCrmBrandId(req, db), created_by: ctx.user.id });
     posts.unshift(post);
+    await writeCrmDb(db);
+    res.json({ success: true, post });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+
+app.put("/admin/crm/community-content/scheduled-posts/:id", async (req, res) => {
+  try {
+    const ctx = await ngRequireContentAccess(req, "schedule");
+    const db = ctx.crmDb;
+    const post = ngContentArray(db, "community_scheduled_posts").find((item) => String(item.id) === String(req.params.id));
+    if (!post) return res.status(404).json({ success: false, error: "Scheduled post not found" });
+    if (!ctx.crm_admin && !crmRecordVisibleToTeam(post, ctx.team_member, ctx.user)) {
+      return res.status(403).json({ success: false, error: "This post is outside your assigned scope" });
+    }
+
+    const editable = ["title", "topic", "content_type", "post_kind", "message", "draft_content", "scheduled_at", "timezone", "platforms", "community_ids", "source_ids", "media_items", "image_urls", "status", "approval_status", "medical_review_status", "ready_to_post"];
+    for (const key of editable) {
+      if (req.body?.[key] !== undefined) {
+        if (["platforms", "community_ids", "source_ids", "image_urls"].includes(key)) post[key] = ngContentList(req.body[key]);
+        else if (key === "media_items") post[key] = Array.isArray(req.body[key]) ? req.body[key] : post[key];
+        else if (key === "ready_to_post") post[key] = Boolean(req.body[key]);
+        else post[key] = req.body[key];
+      }
+    }
+    if (req.body?.message !== undefined && req.body?.draft_content === undefined) post.draft_content = req.body.message;
+    if (req.body?.draft_content !== undefined && req.body?.message === undefined) post.message = req.body.draft_content;
+    post.updated_at = nowIso();
+    post.updated_by = ctx.user.id;
     await writeCrmDb(db);
     res.json({ success: true, post });
   } catch (error) {
