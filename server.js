@@ -20877,6 +20877,14 @@ async function ngGenerateContentFromApprovedSources({ db, body = {}, sources = [
   };
 }
 
+function ngTargetValue(...values) {
+  for (const value of values) {
+    const clean = ngContentClean(value);
+    if (clean) return clean;
+  }
+  return "";
+}
+
 function ngNormalizeCommunityTargets(db, { platforms = [], community_ids = [], direct_targets = [] } = {}) {
   const platformList = ngContentPlatforms(platforms);
   const ids = ngContentList(community_ids);
@@ -20888,17 +20896,34 @@ function ngNormalizeCommunityTargets(db, { platforms = [], community_ids = [], d
   const targets = [];
 
   for (const community of communities) {
-    const platform = ngCommunityPlatform(community.platform || community.channel || "telegram");
+    const platform = ngCommunityPlatform(community.platform || community.channel || community.source_platform || "telegram");
     if (platformList.length && !platformList.includes(platform)) continue;
 
     targets.push({
       id: community.id || uuid(),
       platform,
       community_id: community.id || null,
-      community_name: community.community_name || community.name || "",
-      telegram_chat_id: community.telegram_chat_id || community.chat_id || community.platform_chat_id || "",
-      whatsapp_to: community.whatsapp_to || community.whatsapp || community.phone || "",
-      email_to: community.email_to || community.email || "",
+      community_name: community.community_name || community.name || community.title || "",
+      telegram_chat_id: ngTargetValue(
+        community.telegram_chat_id,
+        community.chat_id,
+        community.channel_id,
+        community.telegram_group_id,
+        community.platform_chat_id,
+        community.target_id,
+        community.delivery_target
+      ),
+      whatsapp_to: ngTargetValue(
+        community.whatsapp_to,
+        community.whatsapp_number,
+        community.whatsapp,
+        community.phone,
+        community.phone_number,
+        community.group_id,
+        community.target_id,
+        community.delivery_target
+      ),
+      email_to: ngTargetValue(community.email_to, community.email, community.target_email, community.delivery_target),
       url: community.community_url || community.url || "",
       raw: community,
     });
@@ -20911,19 +20936,54 @@ function ngNormalizeCommunityTargets(db, { platforms = [], community_ids = [], d
       id: target.id || uuid(),
       platform,
       community_id: target.community_id || null,
-      community_name: target.community_name || target.name || "",
-      telegram_chat_id: target.telegram_chat_id || target.chat_id || "",
-      whatsapp_to: target.whatsapp_to || target.whatsapp || target.phone || "",
-      email_to: target.email_to || target.email || "",
+      community_name: target.community_name || target.name || target.title || "",
+      telegram_chat_id: ngTargetValue(target.telegram_chat_id, target.chat_id, target.channel_id, target.target_id, target.to, target.recipient),
+      whatsapp_to: ngTargetValue(target.whatsapp_to, target.whatsapp_number, target.whatsapp, target.phone, target.phone_number, target.target_id, target.to, target.recipient),
+      email_to: ngTargetValue(target.email_to, target.email, target.target_email, target.to, target.recipient),
       url: target.url || "",
       raw: target,
     });
   }
 
+  // Important: do not fabricate default targets. If no community/direct target is
+  // selected, publishing must fail clearly before trying Telegram/WhatsApp.
+  return targets;
+}
+
+function ngTargetCanReceivePlatform(target = {}, platform = "") {
+  const cleanPlatform = ngCommunityPlatform(platform || target.platform || "telegram");
+  if (cleanPlatform === "telegram") return Boolean(ngTargetValue(target.telegram_chat_id, target.chat_id, target.to, target.recipient));
+  if (cleanPlatform === "whatsapp") return Boolean(ngTargetValue(target.whatsapp_to, target.whatsapp_number, target.phone, target.to, target.recipient));
+  if (cleanPlatform === "email") return Boolean(ngTargetValue(target.email_to, target.email, target.to, target.recipient));
+  return true;
+}
+
+function ngValidateCommunityTargetsForScheduling(db, payload = {}) {
+  const platforms = ngContentPlatforms(payload.platforms || payload.platform || payload.channels || payload.platform_targets || "telegram");
+  const targets = ngNormalizeCommunityTargets(db, {
+    platforms,
+    community_ids: payload.community_ids || payload.communities,
+    direct_targets: payload.direct_targets,
+  });
+
   if (!targets.length) {
-    for (const platform of platformList) {
-      targets.push({ id: `${platform}_default`, platform, community_name: `${platform} target`, raw: {} });
-    }
+    const error = new Error("Select at least one target community before scheduling or publishing.");
+    error.statusCode = 422;
+    error.details = { platforms, community_ids: ngContentList(payload.community_ids || payload.communities), direct_targets_count: Array.isArray(payload.direct_targets) ? payload.direct_targets.length : 0 };
+    throw error;
+  }
+
+  const deliverable = targets.filter((target) => ngTargetCanReceivePlatform(target, target.platform));
+  if (!deliverable.length) {
+    const missing = targets.map((target) => ({
+      platform: target.platform,
+      community_name: target.community_name || target.community_id || target.id,
+      required: target.platform === "telegram" ? "telegram_chat_id/chat_id" : target.platform === "whatsapp" ? "whatsapp_number/phone" : target.platform === "email" ? "email" : "platform adapter",
+    }));
+    const error = new Error("Selected community target is missing delivery details.");
+    error.statusCode = 422;
+    error.details = { missing };
+    throw error;
   }
 
   return targets;
@@ -20972,7 +21032,9 @@ function ngContentCanPublish(post = {}) {
   const approval = String(post.approval_status || "").toLowerCase();
   const medical = String(post.medical_review_status || "").toLowerCase();
 
-  if (["posted", "cancelled", "failed", "deleted"].includes(status)) return false;
+  // Failed/manual-pending posts are allowed to retry after approval. Only final
+  // or intentionally blocked statuses are stopped here.
+  if (["posted", "cancelled", "deleted"].includes(status)) return false;
   if (approval !== "approved" && !post.ready_to_post) return false;
   if (ngContentIsMedicalType(post) && medical !== "approved") return false;
 
@@ -21033,6 +21095,17 @@ async function ngPublishScheduledPost(db, post = {}, actor = null) {
     community_ids: post.community_ids,
     direct_targets: post.direct_targets,
   });
+
+  if (!targets.length) {
+    const error = new Error("No delivery target selected. Choose a Telegram/WhatsApp community or add a direct target before publishing.");
+    error.statusCode = 422;
+    error.details = {
+      platforms: post.platforms || [post.platform].filter(Boolean),
+      community_ids: post.community_ids || [],
+      direct_targets: post.direct_targets || [],
+    };
+    throw error;
+  }
 
   const message = ngContentClean(post.message || post.draft_content || "");
   if (!message) {
@@ -21227,9 +21300,10 @@ app.post("/admin/crm/community-content/roadmaps", async (req, res) => {
     });
 
     roadmap = ngContentAttachOwnership(roadmap, ctx);
+    const createSchedule = req.body?.create_schedule !== false;
+    if (createSchedule) ngValidateCommunityTargetsForScheduling(db, roadmap);
     roadmaps.unshift(roadmap);
 
-    const createSchedule = req.body?.create_schedule !== false;
     const scheduled_posts = createSchedule ? ngCreateRoadmapScheduledPosts(db, roadmap, ctx) : [];
 
     await writeCrmDb(db);
@@ -21287,6 +21361,7 @@ app.post("/admin/crm/community-content/scheduled-posts", async (req, res) => {
     const ctx = await ngRequireContentAccess(req, "schedule");
     const db = ctx.crmDb;
     const posts = ngContentArray(db, "community_scheduled_posts");
+    ngValidateCommunityTargetsForScheduling(db, req.body || {});
     const post = ngBuildScheduledPostPayload(req.body || {}, ctx, { brand_id: getCrmBrandId(req, db), created_by: ctx.user.id });
     posts.unshift(post);
     await writeCrmDb(db);
