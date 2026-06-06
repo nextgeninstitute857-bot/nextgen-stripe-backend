@@ -11215,7 +11215,7 @@ const DEFAULT_ROLE_PERMISSION_SETS = {
   ],
   sales_agent: ["view_assigned_leads", "reply_assigned_conversations", "use_ai_draft", "create_followups", ...DEFAULT_LMS_ROLE_PERMISSION_SETS.sales_agent],
   closer: ["view_assigned_leads", "reply_assigned_conversations", "send_payment_links", "view_revenue_limited", "create_followups", ...DEFAULT_LMS_ROLE_PERMISSION_SETS.closer],
-  community_manager: ["manage_community_intelligence", "draft_community_replies", "submit_approval_items", ...DEFAULT_LMS_ROLE_PERMISSION_SETS.community_manager],
+  community_manager: ["manage_community_intelligence", "draft_community_replies", "submit_approval_items", "content_roadmap_view", "content_roadmap_create", "content_generate_drafts", "content_edit_own_drafts", "content_schedule_own", "content_publish_approved", "media_library_view", "media_library_upload", ...DEFAULT_LMS_ROLE_PERMISSION_SETS.community_manager],
   affiliate: ["view_own_referrals", "view_own_commissions"],
   support_agent: ["view_assigned_leads", "reply_assigned_conversations", "create_internal_notes", ...DEFAULT_LMS_ROLE_PERMISSION_SETS.support_agent],
 };
@@ -20575,6 +20575,985 @@ app.get("/admin/crm/me/performance-today", async (req, res) => {
 
 // -----------------------------------------------------------------------------
 // END NEXTGEN TEAM PERFORMANCE TODAY ENDPOINT
+// -----------------------------------------------------------------------------
+
+
+
+// -----------------------------------------------------------------------------
+// NEXTGEN COMMUNITY CONTENT ROADMAP + MULTI-PLATFORM SCHEDULER
+// -----------------------------------------------------------------------------
+// Purpose:
+// - Approved source selector for community content generation
+// - Monthly/weekly content roadmaps
+// - Question now / answer later scheduling
+// - Team-scoped doctor content creation
+// - Ready-to-post approval gate before auto publishing
+// - Multi-platform target model: Telegram, WhatsApp, Facebook, Instagram, Reddit, etc.
+// -----------------------------------------------------------------------------
+
+const NG_CONTENT_PLATFORMS = [
+  "telegram",
+  "whatsapp",
+  "facebook",
+  "instagram",
+  "reddit",
+  "linkedin",
+  "twitter",
+  "email",
+  "sms",
+  "other",
+];
+
+const NG_CONTENT_ACTION_PERMISSIONS = {
+  read: [
+    "content_roadmap_view",
+    "content_roadmap_create",
+    "content_generate_drafts",
+    "content_schedule_own",
+    "content_publish_approved",
+    "manage_community_intelligence",
+    "community_intelligence",
+    "approve_ai_drafts",
+  ],
+  create: [
+    "content_roadmap_create",
+    "content_generate_drafts",
+    "manage_community_intelligence",
+    "community_intelligence",
+  ],
+  generate: [
+    "content_generate_drafts",
+    "content_roadmap_create",
+    "manage_community_intelligence",
+    "community_intelligence",
+  ],
+  approve: [
+    "content_medical_review",
+    "content_approve_own_medical",
+    "content_approve_team_medical",
+    "approve_ai_drafts",
+    "manage_community_intelligence",
+  ],
+  schedule: [
+    "content_schedule",
+    "content_schedule_own",
+    "content_publish_approved",
+    "manage_community_intelligence",
+    "community_intelligence",
+  ],
+  publish: [
+    "content_publish",
+    "content_publish_approved",
+    "manage_community_intelligence",
+  ],
+  media: [
+    "media_library_view",
+    "media_library_upload",
+    "manage_community_intelligence",
+    "community_intelligence",
+  ],
+};
+
+function ngContentClean(value = "", fallback = "") {
+  return String(value ?? fallback).trim();
+}
+
+function ngContentArray(db, key) {
+  return ensureCrmArray(db, key);
+}
+
+function ngContentList(value = []) {
+  if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean);
+  if (typeof value === "string") return value.split(",").map((item) => item.trim()).filter(Boolean);
+  return [];
+}
+
+function ngContentPlatforms(value = []) {
+  const raw = ngContentList(value);
+  const normalized = raw.length ? raw : ["telegram"];
+  return uniqueList(normalized.map((item) => ngCommunityPlatform(item || "telegram")).filter(Boolean));
+}
+
+function ngContentPermissionAllowed(permissions = [], action = "read") {
+  const required = NG_CONTENT_ACTION_PERMISSIONS[action] || NG_CONTENT_ACTION_PERMISSIONS.read;
+  return permissionIncludes(permissions, "*") || required.some((permission) => permissionIncludes(permissions, permission));
+}
+
+function ngContentModuleAllowed(modules = []) {
+  return crmListHasAny(modules, [
+    "community_intelligence",
+    "communities",
+    "geo_communities",
+    "content_roadmap",
+    "scheduled_posts",
+    "approval_queue",
+  ]);
+}
+
+async function ngRequireContentAccess(req, action = "read") {
+  const ctx = await getAuthenticatedUser(req);
+  const db = await readCrmDb();
+
+  if (ctx.user.role === "admin") {
+    return {
+      ...ctx,
+      crmDb: db,
+      crm_admin: true,
+      team_member: null,
+      crm_permissions: ["*"],
+      crm_modules: ["*"],
+    };
+  }
+
+  const member = getTeamMemberForUser(db, ctx.user);
+  if (!member || member.portal_enabled === false || member.crm_access_enabled === false) {
+    const error = new Error("Team portal access is not enabled for this user");
+    error.statusCode = 403;
+    throw error;
+  }
+
+  const permissions = getEffectiveCrmPermissions(db, ctx.user);
+  const modules = getAllowedModulesForTeamMember(db, member, "crm");
+
+  if (!ngContentPermissionAllowed(permissions, action) && !ngContentModuleAllowed(modules)) {
+    const error = new Error(`Missing CRM content permission: ${action}`);
+    error.statusCode = 403;
+    throw error;
+  }
+
+  return {
+    ...ctx,
+    crmDb: db,
+    crm_admin: false,
+    team_member: member,
+    crm_permissions: permissions,
+    crm_modules: modules,
+  };
+}
+
+function ngContentScope(records = [], ctx = {}) {
+  if (ctx.crm_admin) return records;
+  return applyTeamScopeToRecords(records, ctx.team_member, ctx.user, "community_content");
+}
+
+function ngContentAttachOwnership(record = {}, ctx = {}) {
+  if (ctx.crm_admin) return record;
+  return attachTeamOwnership(record, ctx.team_member, ctx.user);
+}
+
+function ngIsApprovedTrainingSource(item = {}) {
+  const active = item && item.active !== false && item.is_active !== false && item.status !== "deleted" && item.status !== "disabled";
+  if (!active) return false;
+
+  const source = String(item.source || item.import_mode || "").toLowerCase();
+  const category = String(item.category || "").toLowerCase();
+  const tags = Array.isArray(item.tags) ? item.tags.join(" ").toLowerCase() : String(item.tags || "").toLowerCase();
+  const requiresReview = Boolean(item.requires_human_review || item.medical_review_required) ||
+    source.includes("education") ||
+    source.includes("document_job") ||
+    category.includes("education") ||
+    tags.includes("medical_review_required") ||
+    tags.includes("teaching_chunk");
+
+  if (!requiresReview) return true;
+
+  return String(item.approval_status || "").toLowerCase() === "approved" &&
+    String(item.medical_review_status || "").toLowerCase() === "approved";
+}
+
+function ngApprovedTrainingSources(db, sourceIds = []) {
+  const ids = ngContentList(sourceIds).map(String);
+  const rows = [
+    ...ngContentArray(db, "ai_training"),
+    ...ngContentArray(db, "ai_training_items"),
+  ];
+
+  return rows
+    .filter(ngIsApprovedTrainingSource)
+    .filter((item) => !ids.length || ids.includes(String(item.id || item._id || item.training_id || "")))
+    .sort((a, b) => Number(b.priority || 0) - Number(a.priority || 0));
+}
+
+function ngSourceContextForGeneration(sources = [], maxChars = 9000) {
+  const text = sources
+    .map((item, index) => {
+      const title = item.title || item.name || `Approved source ${index + 1}`;
+      const category = item.category || "general";
+      const content = item.content || item.body || item.text || item.summary || "";
+      return `Source ${index + 1}: ${title}\nCategory: ${category}\n${content}`;
+    })
+    .join("\n\n---\n\n");
+
+  return text.slice(0, maxChars);
+}
+
+function ngContentIsMedicalType(item = {}) {
+  const haystack = [
+    item.content_type,
+    item.post_type,
+    item.category,
+    item.title,
+    item.topic,
+    item.message,
+    item.text,
+    item.draft_content,
+    item.tags,
+  ].join(" ").toLowerCase();
+
+  return (
+    haystack.includes("mcq") ||
+    haystack.includes("medical") ||
+    haystack.includes("usmle") ||
+    haystack.includes("pathology") ||
+    haystack.includes("pharma") ||
+    haystack.includes("physiology") ||
+    haystack.includes("diagnosis") ||
+    haystack.includes("treatment")
+  );
+}
+
+function ngContentBuildFallbackFromSources({ type = "daily_mcq", topic = "USMLE concept", sources = [], exam = "Step 1", answerOnly = false } = {}) {
+  const sourceTitle = sources[0]?.title || sources[0]?.name || "approved source";
+  if (answerOnly || String(type).includes("answer")) {
+    return `Answer & Explanation\n\nTopic: ${topic}\n\nUse the approved source "${sourceTitle}" to review the key mechanism, why the correct answer is correct, and why the common distractors are wrong.\n\nTeaching point: connect the clinical clue to the underlying mechanism, then review related First Aid/UWorld-style traps.`;
+  }
+
+  if (String(type).includes("poll")) {
+    return `Quick ${exam} Poll\n\nTopic: ${topic}\n\nWhich part of this topic is most confusing for you?\n\n1. Mechanism\n2. Clinical clue\n3. Diagnosis\n4. Differentiating similar options\n5. Exam strategy`;
+  }
+
+  return `Daily ${exam} MCQ\n\nTopic: ${topic}\n\nA student is reviewing this concept from an approved source. Which approach best helps convert this topic into a testable USMLE point?\n\nA. Memorize isolated facts without context\nB. Skip the mechanism and only read the answer\nC. Identify the clinical clue, mechanism, and common distractor pattern\nD. Review only the title of the topic\nE. Avoid practice questions\n\nCorrect Answer: C\n\nExplanation:\nUSMLE questions test mechanisms through clinical clues and distractors. Use the approved source "${sourceTitle}" to connect the clue to the mechanism and then practice similar questions.`;
+}
+
+async function ngGenerateContentFromApprovedSources({ db, body = {}, sources = [], answerOnly = false } = {}) {
+  const type = ngContentClean(body.content_type || body.post_type || (answerOnly ? "answer_explanation" : "daily_mcq"), "daily_mcq");
+  const exam = ngContentClean(body.exam_type || body.exam || "Step 1", "Step 1");
+  const topic = ngContentClean(body.topic || body.title || "USMLE preparation", "USMLE preparation");
+  const platform = ngCommunityPlatform(body.platform || body.channel || "telegram");
+  const audience = ngContentClean(body.audience || "USMLE students", "USMLE students");
+  const extraInstruction = ngContentClean(body.instructions || body.cta || "", "");
+
+  if (!sources.length && body.allow_general_knowledge !== true) {
+    const error = new Error("No approved medical training source selected. Approve/select a source first, or explicitly allow general knowledge.");
+    error.statusCode = 422;
+    throw error;
+  }
+
+  if (!isAIConfigured()) {
+    return {
+      content: ngContentBuildFallbackFromSources({ type, topic, sources, exam, answerOnly }),
+      model: "local-approved-source-fallback",
+      usage: {},
+      ai_configured: false,
+    };
+  }
+
+  const sourceContext = ngSourceContextForGeneration(sources);
+  const systemPrompt = `You are NextGen USMLE Community Content AI. Generate medically careful, original educational content for public communities. Use only the approved source context provided when medical content is requested. Do not copy long passages. Do not invent unsupported facts. If the source is insufficient, say that more approved source material is needed.`;
+  const userPrompt = [
+    `Approved source context:\n${sourceContext || "No approved source context was selected."}`,
+    `Platform: ${platform}`,
+    `Content type: ${type}`,
+    `Exam: ${exam}`,
+    `Audience: ${audience}`,
+    `Topic: ${topic}`,
+    `Mode: ${answerOnly ? "answer/explanation follow-up" : "question/content post"}`,
+    `Instructions: ${extraInstruction || "Create concise, high-yield community content."}`,
+    `Required safety: medical MCQs must be source-grounded, original, and review-ready. For MCQs include: question stem, A-E choices, correct answer, explanation, and why key distractors are wrong.`
+  ].join("\n\n");
+
+  const result = await callOpenAIResponsesAPI({
+    model: getAIModel(process.env.AI_CONTENT_MODEL || "gpt-4o-mini"),
+    systemPrompt,
+    userPrompt,
+    maxOutputTokens: answerOnly ? 1500 : 1800,
+  });
+
+  return {
+    content: result.text || ngContentBuildFallbackFromSources({ type, topic, sources, exam, answerOnly }),
+    model: result.model,
+    usage: result.usage || {},
+    ai_configured: true,
+  };
+}
+
+function ngNormalizeCommunityTargets(db, { platforms = [], community_ids = [], direct_targets = [] } = {}) {
+  const platformList = ngContentPlatforms(platforms);
+  const ids = ngContentList(community_ids);
+  const direct = Array.isArray(direct_targets) ? direct_targets : [];
+
+  const communities = ngContentArray(db, "communities")
+    .filter((item) => !ids.length || ids.includes(String(item.id || "")));
+
+  const targets = [];
+
+  for (const community of communities) {
+    const platform = ngCommunityPlatform(community.platform || community.channel || "telegram");
+    if (platformList.length && !platformList.includes(platform)) continue;
+
+    targets.push({
+      id: community.id || uuid(),
+      platform,
+      community_id: community.id || null,
+      community_name: community.community_name || community.name || "",
+      telegram_chat_id: community.telegram_chat_id || community.chat_id || community.platform_chat_id || "",
+      whatsapp_to: community.whatsapp_to || community.whatsapp || community.phone || "",
+      email_to: community.email_to || community.email || "",
+      url: community.community_url || community.url || "",
+      raw: community,
+    });
+  }
+
+  for (const target of direct) {
+    const platform = ngCommunityPlatform(target.platform || target.channel || "telegram");
+    if (platformList.length && !platformList.includes(platform)) continue;
+    targets.push({
+      id: target.id || uuid(),
+      platform,
+      community_id: target.community_id || null,
+      community_name: target.community_name || target.name || "",
+      telegram_chat_id: target.telegram_chat_id || target.chat_id || "",
+      whatsapp_to: target.whatsapp_to || target.whatsapp || target.phone || "",
+      email_to: target.email_to || target.email || "",
+      url: target.url || "",
+      raw: target,
+    });
+  }
+
+  if (!targets.length) {
+    for (const platform of platformList) {
+      targets.push({ id: `${platform}_default`, platform, community_name: `${platform} target`, raw: {} });
+    }
+  }
+
+  return targets;
+}
+
+function ngBuildScheduledPostPayload(body = {}, ctx = {}, extra = {}) {
+  const platforms = ngContentPlatforms(body.platforms || body.channels || body.platform || "telegram");
+  const status = body.status || (body.scheduled_at || body.scheduledAt ? "needs_review" : "draft");
+
+  let record = withTimestamps({
+    id: body.id || uuid(),
+    brand_id: body.brand_id || extra.brand_id || getCrmBrandId({ query: {}, body: {} }, ctx.crmDb) || null,
+    roadmap_id: body.roadmap_id || extra.roadmap_id || null,
+    parent_post_id: body.parent_post_id || extra.parent_post_id || null,
+    source_ids: ngContentList(body.source_ids || body.sources || extra.source_ids),
+    community_ids: ngContentList(body.community_ids || body.communities || extra.community_ids),
+    direct_targets: Array.isArray(body.direct_targets) ? body.direct_targets : (extra.direct_targets || []),
+    platforms,
+    platform: platforms[0] || "telegram",
+    title: ngContentClean(body.title || extra.title || "Community content post"),
+    topic: ngContentClean(body.topic || extra.topic || ""),
+    content_type: ngContentClean(body.content_type || body.post_type || extra.content_type || "daily_mcq"),
+    post_kind: ngContentClean(body.post_kind || extra.post_kind || "question"),
+    message: ngContentClean(body.message || body.content || body.draft_content || extra.message || ""),
+    draft_content: ngContentClean(body.draft_content || body.message || body.content || extra.message || ""),
+    media_items: Array.isArray(body.media_items) ? body.media_items : (extra.media_items || []),
+    image_urls: ngContentList(body.image_urls || body.images || extra.image_urls),
+    scheduled_at: body.scheduled_at || body.scheduledAt || extra.scheduled_at || null,
+    timezone: body.timezone || extra.timezone || DEFAULT_TIMEZONE,
+    status,
+    approval_status: body.approval_status || "needs_review",
+    medical_review_status: body.medical_review_status || (ngContentIsMedicalType(body) ? "needs_review" : "not_required"),
+    ready_to_post: false,
+    posted_at: null,
+    publish_results: [],
+    created_by: extra.created_by || ctx.user?.id || null,
+    updated_by: ctx.user?.id || null,
+  }, body.existing || null);
+
+  record = ngContentAttachOwnership(record, ctx);
+  return record;
+}
+
+function ngContentCanPublish(post = {}) {
+  const status = String(post.status || "").toLowerCase();
+  const approval = String(post.approval_status || "").toLowerCase();
+  const medical = String(post.medical_review_status || "").toLowerCase();
+
+  if (["posted", "cancelled", "failed", "deleted"].includes(status)) return false;
+  if (approval !== "approved" && !post.ready_to_post) return false;
+  if (ngContentIsMedicalType(post) && medical !== "approved") return false;
+
+  return true;
+}
+
+async function ngPublishToPlatform({ platform, target = {}, post = {}, text = "" }) {
+  const messageText = ngContentClean(text || post.message || post.draft_content || "");
+  const imageUrl = (Array.isArray(post.image_urls) ? post.image_urls[0] : null) ||
+    (Array.isArray(post.media_items) ? post.media_items.find((item) => item?.url || item?.image_url)?.url || post.media_items.find((item) => item?.url || item?.image_url)?.image_url : null);
+
+  if (platform === "telegram") {
+    const chatId = target.telegram_chat_id || target.chat_id || target.to || target.recipient || "";
+    if (!chatId) throw Object.assign(new Error("Telegram target missing chat_id"), { statusCode: 400 });
+    if (imageUrl) {
+      return telegramApi("sendPhoto", {
+        chat_id: chatId,
+        photo: imageUrl,
+        caption: messageText.slice(0, 1000),
+      }, {});
+    }
+    return sendTelegramMessage({ to: chatId, text: messageText, integration: {} });
+  }
+
+  if (platform === "whatsapp") {
+    const to = target.whatsapp_to || target.to || target.phone || "";
+    if (!to) throw Object.assign(new Error("WhatsApp target missing phone number"), { statusCode: 400 });
+    const body = imageUrl ? `${messageText}\n\nImage: ${imageUrl}` : messageText;
+    return sendWhatsAppCloudMessage({ to, text: body });
+  }
+
+  if (platform === "email") {
+    const to = target.email_to || target.to || target.email || "";
+    if (!to) throw Object.assign(new Error("Email target missing email address"), { statusCode: 400 });
+    const body = imageUrl ? `${messageText}\n\nImage: ${imageUrl}` : messageText;
+    return sendEmailMessage({ to, subject: post.title || "NextGen USMLE Community Post", text: body });
+  }
+
+  // Facebook / Instagram / Reddit adapters can be connected later. We still keep the
+  // same scheduled-post contract now, so these channels are not Telegram-only.
+  return {
+    skipped: true,
+    platform,
+    reason: `${platform} publishing adapter is not connected yet. Post is kept in history for manual/platform-specific publishing.`,
+    url: target.url || "",
+  };
+}
+
+async function ngPublishScheduledPost(db, post = {}, actor = null) {
+  if (!ngContentCanPublish(post)) {
+    const error = new Error("Post is not approved/ready for publishing");
+    error.statusCode = 422;
+    throw error;
+  }
+
+  const targets = ngNormalizeCommunityTargets(db, {
+    platforms: post.platforms || post.platform,
+    community_ids: post.community_ids,
+    direct_targets: post.direct_targets,
+  });
+
+  const message = ngContentClean(post.message || post.draft_content || "");
+  if (!message) {
+    const error = new Error("Scheduled post has no message content");
+    error.statusCode = 422;
+    throw error;
+  }
+
+  const results = [];
+  for (const target of targets) {
+    const platform = ngCommunityPlatform(target.platform || post.platform || "telegram");
+    try {
+      const result = await ngPublishToPlatform({ platform, target, post, text: message });
+      results.push({ platform, target, success: true, result, posted_at: nowIso() });
+    } catch (error) {
+      results.push({ platform, target, success: false, error: error.message, posted_at: nowIso() });
+    }
+  }
+
+  const anySuccess = results.some((item) => item.success && !item.result?.skipped);
+  const allSkipped = results.length && results.every((item) => item.result?.skipped);
+
+  post.publish_results = [...(Array.isArray(post.publish_results) ? post.publish_results : []), ...results];
+  post.status = anySuccess ? "posted" : allSkipped ? "manual_platform_pending" : "failed";
+  post.posted_at = anySuccess ? nowIso() : post.posted_at || null;
+  post.updated_at = nowIso();
+  post.updated_by = actor?.id || post.updated_by || null;
+
+  ngContentArray(db, "community_post_history").unshift(withTimestamps({
+    id: uuid(),
+    scheduled_post_id: post.id,
+    roadmap_id: post.roadmap_id || null,
+    title: post.title,
+    content_type: post.content_type,
+    message,
+    platforms: post.platforms || [post.platform],
+    results,
+    status: post.status,
+    created_by: actor?.id || post.created_by || null,
+  }));
+
+  return { post, results };
+}
+
+function ngRoadmapDateTime(dateString, timeString, timezone = DEFAULT_TIMEZONE) {
+  const date = String(dateString || "").slice(0, 10);
+  const time = String(timeString || "10:00").slice(0, 5);
+  return `${date}T${time}:00`;
+}
+
+function ngAddHoursIsoLike(value, hours = 4) {
+  const d = value ? new Date(value) : new Date();
+  if (Number.isNaN(d.getTime())) return null;
+  d.setHours(d.getHours() + Number(hours || 0));
+  return d.toISOString();
+}
+
+function ngCreateRoadmapScheduledPosts(db, roadmap = {}, ctx = {}) {
+  const posts = ngContentArray(db, "community_scheduled_posts");
+  const days = Number(roadmap.days || 30);
+  const start = new Date(`${String(roadmap.start_date || todayKey()).slice(0, 10)}T00:00:00`);
+  const topics = Array.isArray(roadmap.topics) && roadmap.topics.length ? roadmap.topics : [];
+  const created = [];
+
+  for (let i = 0; i < days; i += 1) {
+    const d = new Date(start);
+    d.setDate(start.getDate() + i);
+    const dateKeyValue = d.toISOString().slice(0, 10);
+    const topic = topics[i] || `${roadmap.topic || "USMLE high-yield topic"} — Day ${i + 1}`;
+
+    const questionAt = ngRoadmapDateTime(dateKeyValue, roadmap.question_time || roadmap.post_time || "10:00", roadmap.timezone);
+    const answerAt = ngRoadmapDateTime(dateKeyValue, roadmap.answer_time || "15:00", roadmap.timezone);
+
+    const question = ngBuildScheduledPostPayload({
+      title: `${roadmap.title || "Community Roadmap"} — Day ${i + 1} Question`,
+      topic,
+      content_type: roadmap.content_type || "daily_mcq",
+      post_kind: "question",
+      message: "",
+      scheduled_at: questionAt,
+      timezone: roadmap.timezone || DEFAULT_TIMEZONE,
+      platforms: roadmap.platforms,
+      community_ids: roadmap.community_ids,
+      source_ids: roadmap.source_ids,
+      media_items: roadmap.media_items || [],
+      image_urls: roadmap.image_urls || [],
+      status: "draft",
+      approval_status: "needs_review",
+    }, ctx, {
+      roadmap_id: roadmap.id,
+      title: `${roadmap.title || "Community Roadmap"} — Day ${i + 1} Question`,
+      topic,
+      created_by: ctx.user?.id || null,
+    });
+
+    const answer = ngBuildScheduledPostPayload({
+      title: `${roadmap.title || "Community Roadmap"} — Day ${i + 1} Answer`,
+      topic,
+      content_type: "answer_explanation",
+      post_kind: "answer",
+      parent_post_id: question.id,
+      message: "",
+      scheduled_at: answerAt,
+      timezone: roadmap.timezone || DEFAULT_TIMEZONE,
+      platforms: roadmap.platforms,
+      community_ids: roadmap.community_ids,
+      source_ids: roadmap.source_ids,
+      media_items: roadmap.media_items || [],
+      image_urls: roadmap.image_urls || [],
+      status: "draft",
+      approval_status: "needs_review",
+    }, ctx, {
+      roadmap_id: roadmap.id,
+      parent_post_id: question.id,
+      title: `${roadmap.title || "Community Roadmap"} — Day ${i + 1} Answer`,
+      topic,
+      created_by: ctx.user?.id || null,
+    });
+
+    posts.push(question, answer);
+    created.push(question, answer);
+  }
+
+  return created;
+}
+
+app.get("/admin/crm/ai-training/approved-sources", async (req, res) => {
+  try {
+    const ctx = await ngRequireContentAccess(req, "read");
+    const db = ctx.crmDb;
+    const sources = ngApprovedTrainingSources(db, req.query?.source_ids)
+      .map((item) => ({
+        id: item.id || item._id || item.training_id,
+        title: item.title || item.name || "Approved Source",
+        category: item.category || "",
+        audience: item.audience || "",
+        priority: Number(item.priority || 0),
+        tags: item.tags || [],
+        approval_status: item.approval_status || "",
+        medical_review_status: item.medical_review_status || "",
+        content_preview: String(item.content || item.body || item.text || "").slice(0, 500),
+        updated_at: item.updated_at || item.created_at || null,
+      }));
+
+    res.json({ success: true, sources, count: sources.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/community-content/roadmaps", async (req, res) => {
+  try {
+    const ctx = await ngRequireContentAccess(req, "read");
+    let roadmaps = filterCrmRecords(req, ngContentArray(ctx.crmDb, "community_content_roadmaps"), getCrmBrandId(req, ctx.crmDb));
+    roadmaps = ngContentScope(roadmaps, ctx).sort(sortNewestFirst);
+    res.json({ success: true, roadmaps, items: roadmaps, count: roadmaps.length, scoped: !ctx.crm_admin });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/community-content/roadmaps", async (req, res) => {
+  try {
+    const ctx = await ngRequireContentAccess(req, "create");
+    const db = ctx.crmDb;
+    const roadmaps = ngContentArray(db, "community_content_roadmaps");
+
+    let roadmap = withTimestamps({
+      id: uuid(),
+      brand_id: getCrmBrandId(req, db),
+      title: ngContentClean(req.body?.title || "Community Content Roadmap"),
+      description: ngContentClean(req.body?.description || ""),
+      topic: ngContentClean(req.body?.topic || "USMLE high-yield content"),
+      exam_type: ngContentClean(req.body?.exam_type || "Step 1"),
+      days: Math.min(60, Math.max(1, Number(req.body?.days || 30))),
+      start_date: String(req.body?.start_date || todayKey()).slice(0, 10),
+      timezone: req.body?.timezone || DEFAULT_TIMEZONE,
+      post_time: req.body?.post_time || req.body?.question_time || "10:00",
+      question_time: req.body?.question_time || req.body?.post_time || "10:00",
+      answer_time: req.body?.answer_time || "15:00",
+      answer_delay_hours: Number(req.body?.answer_delay_hours || 5),
+      platforms: ngContentPlatforms(req.body?.platforms || req.body?.channels || "telegram"),
+      community_ids: ngContentList(req.body?.community_ids || req.body?.communities),
+      source_ids: ngContentList(req.body?.source_ids || req.body?.sources),
+      topics: Array.isArray(req.body?.topics) ? req.body.topics.map((item) => String(item || "").trim()).filter(Boolean) : [],
+      content_mix: Array.isArray(req.body?.content_mix) ? req.body.content_mix : ["daily_mcq", "answer_explanation"],
+      approval_required: req.body?.approval_required !== false,
+      auto_post_after_approval: req.body?.auto_post_after_approval !== false,
+      status: "active",
+      created_by: ctx.user.id,
+      updated_by: ctx.user.id,
+    });
+
+    roadmap = ngContentAttachOwnership(roadmap, ctx);
+    roadmaps.unshift(roadmap);
+
+    const createSchedule = req.body?.create_schedule !== false;
+    const scheduled_posts = createSchedule ? ngCreateRoadmapScheduledPosts(db, roadmap, ctx) : [];
+
+    await writeCrmDb(db);
+    res.json({ success: true, roadmap, scheduled_posts, scheduled_count: scheduled_posts.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete("/admin/crm/community-content/roadmaps/:id", async (req, res) => {
+  try {
+    const ctx = await ngRequireContentAccess(req, "create");
+    const db = ctx.crmDb;
+    const roadmaps = ngContentArray(db, "community_content_roadmaps");
+    const roadmap = roadmaps.find((item) => String(item.id) === String(req.params.id));
+    if (!roadmap) return res.status(404).json({ success: false, error: "Roadmap not found" });
+    if (!ctx.crm_admin && !crmRecordVisibleToTeam(roadmap, ctx.team_member, ctx.user)) {
+      return res.status(403).json({ success: false, error: "This roadmap is outside your assigned scope" });
+    }
+
+    roadmap.status = "deleted";
+    roadmap.deleted_at = nowIso();
+    roadmap.deleted_by = ctx.user.id;
+
+    if (req.query.delete_posts === "true" || req.body?.delete_posts === true) {
+      for (const post of ngContentArray(db, "community_scheduled_posts")) {
+        if (String(post.roadmap_id || "") === String(roadmap.id)) {
+          post.status = "deleted";
+          post.deleted_at = nowIso();
+          post.deleted_by = ctx.user.id;
+        }
+      }
+    }
+
+    await writeCrmDb(db);
+    res.json({ success: true, roadmap });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/community-content/scheduled-posts", async (req, res) => {
+  try {
+    const ctx = await ngRequireContentAccess(req, "read");
+    let posts = filterCrmRecords(req, ngContentArray(ctx.crmDb, "community_scheduled_posts"), getCrmBrandId(req, ctx.crmDb));
+    posts = ngContentScope(posts, ctx).filter((item) => item.status !== "deleted").sort((a, b) => String(a.scheduled_at || a.created_at || "").localeCompare(String(b.scheduled_at || b.created_at || "")));
+    res.json({ success: true, posts, scheduled_posts: posts, items: posts, count: posts.length, scoped: !ctx.crm_admin });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/community-content/scheduled-posts", async (req, res) => {
+  try {
+    const ctx = await ngRequireContentAccess(req, "schedule");
+    const db = ctx.crmDb;
+    const posts = ngContentArray(db, "community_scheduled_posts");
+    const post = ngBuildScheduledPostPayload(req.body || {}, ctx, { brand_id: getCrmBrandId(req, db), created_by: ctx.user.id });
+    posts.unshift(post);
+    await writeCrmDb(db);
+    res.json({ success: true, post });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/community-content/scheduled-posts/:id/generate", async (req, res) => {
+  try {
+    const ctx = await ngRequireContentAccess(req, "generate");
+    const db = ctx.crmDb;
+    const post = ngContentArray(db, "community_scheduled_posts").find((item) => String(item.id) === String(req.params.id));
+    if (!post) return res.status(404).json({ success: false, error: "Scheduled post not found" });
+    if (!ctx.crm_admin && !crmRecordVisibleToTeam(post, ctx.team_member, ctx.user)) {
+      return res.status(403).json({ success: false, error: "This post is outside your assigned scope" });
+    }
+
+    const sourceIds = req.body?.source_ids || post.source_ids || [];
+    const sources = ngApprovedTrainingSources(db, sourceIds);
+    const ai = await ngGenerateContentFromApprovedSources({
+      db,
+      sources,
+      body: {
+        ...post,
+        ...req.body,
+        source_ids: sourceIds,
+        topic: req.body?.topic || post.topic,
+        content_type: req.body?.content_type || post.content_type,
+        platform: post.platform,
+      },
+      answerOnly: String(post.post_kind || "").toLowerCase() === "answer" || String(post.content_type || "").toLowerCase().includes("answer"),
+    });
+
+    post.message = ai.content;
+    post.draft_content = ai.content;
+    post.ai_model = ai.model;
+    post.ai_usage = ai.usage;
+    post.ai_configured = ai.ai_configured;
+    post.status = "needs_review";
+    post.approval_status = "needs_review";
+    post.medical_review_status = ngContentIsMedicalType(post) ? "needs_review" : "not_required";
+    post.ready_to_post = false;
+    post.updated_at = nowIso();
+    post.updated_by = ctx.user.id;
+
+    const draft = withTimestamps({
+      id: uuid(),
+      brand_id: post.brand_id || getCrmBrandId(req, db),
+      scheduled_post_id: post.id,
+      roadmap_id: post.roadmap_id || null,
+      platform: post.platform || "telegram",
+      platforms: post.platforms || [post.platform || "telegram"],
+      community_ids: post.community_ids || [],
+      title: post.title || "Scheduled community content",
+      action_type: "community_scheduled_content_draft",
+      status: "draft",
+      approval_status: "pending",
+      draft_content: post.draft_content,
+      message: post.message,
+      ai_model: ai.model,
+      ai_usage: ai.usage,
+      source: "scheduled_post_generate",
+      created_by: ctx.user.id,
+    });
+    ngContentArray(db, "community_content_drafts").unshift(ngContentAttachOwnership(draft, ctx));
+    ngCreateCommunityApprovalItem(db, { brandId: post.brand_id || getCrmBrandId(req, db), draft, kind: "community_scheduled_content", user: ctx.user });
+
+    await writeCrmDb(db);
+    res.json({ success: true, post, content: ai.content, sources_used: sources.map((item) => ({ id: item.id, title: item.title })) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/community-content/generate-from-source", async (req, res) => {
+  try {
+    const ctx = await ngRequireContentAccess(req, "generate");
+    const db = ctx.crmDb;
+    const sources = ngApprovedTrainingSources(db, req.body?.source_ids || req.body?.sources);
+    const ai = await ngGenerateContentFromApprovedSources({ db, body: req.body || {}, sources });
+
+    const post = ngBuildScheduledPostPayload({
+      ...req.body,
+      message: ai.content,
+      draft_content: ai.content,
+      status: "needs_review",
+      approval_status: "needs_review",
+      medical_review_status: ngContentIsMedicalType(req.body) ? "needs_review" : "not_required",
+    }, ctx, { brand_id: getCrmBrandId(req, db), created_by: ctx.user.id });
+
+    post.ai_model = ai.model;
+    post.ai_usage = ai.usage;
+    post.ai_configured = ai.ai_configured;
+    ngContentArray(db, "community_scheduled_posts").unshift(post);
+
+    const draft = withTimestamps({
+      id: uuid(),
+      brand_id: post.brand_id,
+      scheduled_post_id: post.id,
+      title: post.title,
+      action_type: "community_content_from_source",
+      status: "draft",
+      approval_status: "pending",
+      draft_content: post.draft_content,
+      message: post.message,
+      created_by: ctx.user.id,
+    });
+    ngContentArray(db, "community_content_drafts").unshift(ngContentAttachOwnership(draft, ctx));
+    const approval = ngCreateCommunityApprovalItem(db, { brandId: post.brand_id, draft, kind: "community_content", user: ctx.user });
+
+    await writeCrmDb(db);
+    res.json({ success: true, post, draft, approval_item: approval, content: ai.content, sources_used: sources.map((item) => ({ id: item.id, title: item.title })) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/community-content/scheduled-posts/:id/approve", async (req, res) => {
+  try {
+    const ctx = await ngRequireContentAccess(req, "approve");
+    const db = ctx.crmDb;
+    const post = ngContentArray(db, "community_scheduled_posts").find((item) => String(item.id) === String(req.params.id));
+    if (!post) return res.status(404).json({ success: false, error: "Scheduled post not found" });
+    if (!ctx.crm_admin && !crmRecordVisibleToTeam(post, ctx.team_member, ctx.user)) {
+      return res.status(403).json({ success: false, error: "This post is outside your assigned scope" });
+    }
+
+    post.approval_status = "approved";
+    post.medical_review_status = ngContentIsMedicalType(post) ? "approved" : (post.medical_review_status || "not_required");
+    post.ready_to_post = true;
+    post.status = post.scheduled_at ? "scheduled" : "ready_to_post";
+    post.approved_at = nowIso();
+    post.approved_by = ctx.user.id;
+    post.updated_at = nowIso();
+    post.updated_by = ctx.user.id;
+
+    await writeCrmDb(db);
+    res.json({ success: true, post });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/community-content/scheduled-posts/:id/reject", async (req, res) => {
+  try {
+    const ctx = await ngRequireContentAccess(req, "approve");
+    const db = ctx.crmDb;
+    const post = ngContentArray(db, "community_scheduled_posts").find((item) => String(item.id) === String(req.params.id));
+    if (!post) return res.status(404).json({ success: false, error: "Scheduled post not found" });
+    if (!ctx.crm_admin && !crmRecordVisibleToTeam(post, ctx.team_member, ctx.user)) {
+      return res.status(403).json({ success: false, error: "This post is outside your assigned scope" });
+    }
+
+    post.approval_status = "rejected";
+    post.medical_review_status = ngContentIsMedicalType(post) ? "rejected" : (post.medical_review_status || "not_required");
+    post.ready_to_post = false;
+    post.status = "rejected";
+    post.rejection_reason = req.body?.reason || "Rejected from content review";
+    post.rejected_at = nowIso();
+    post.rejected_by = ctx.user.id;
+    post.updated_at = nowIso();
+    post.updated_by = ctx.user.id;
+
+    await writeCrmDb(db);
+    res.json({ success: true, post });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/community-content/scheduled-posts/:id/publish-now", async (req, res) => {
+  try {
+    const ctx = await ngRequireContentAccess(req, "publish");
+    const db = ctx.crmDb;
+    const post = ngContentArray(db, "community_scheduled_posts").find((item) => String(item.id) === String(req.params.id));
+    if (!post) return res.status(404).json({ success: false, error: "Scheduled post not found" });
+    if (!ctx.crm_admin && !crmRecordVisibleToTeam(post, ctx.team_member, ctx.user)) {
+      return res.status(403).json({ success: false, error: "This post is outside your assigned scope" });
+    }
+
+    const result = await ngPublishScheduledPost(db, post, ctx.user);
+    await writeCrmDb(db);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/community-content/run-due", async (req, res) => {
+  try {
+    const ctx = await ngRequireContentAccess(req, "publish");
+    const db = ctx.crmDb;
+    const now = Date.now();
+
+    let due = ngContentArray(db, "community_scheduled_posts")
+      .filter((post) => ["scheduled", "ready_to_post"].includes(String(post.status || "").toLowerCase()))
+      .filter((post) => post.scheduled_at && new Date(post.scheduled_at).getTime() <= now)
+      .filter((post) => ngContentCanPublish(post));
+
+    due = ngContentScope(due, ctx);
+
+    const limit = Math.min(25, Math.max(1, Number(req.body?.limit || req.query?.limit || 10)));
+    const selected = due.slice(0, limit);
+    const results = [];
+
+    for (const post of selected) {
+      try {
+        const publish = await ngPublishScheduledPost(db, post, ctx.user);
+        results.push({ id: post.id, success: true, status: post.status, results: publish.results });
+      } catch (error) {
+        post.status = "failed";
+        post.last_error = error.message;
+        post.updated_at = nowIso();
+        results.push({ id: post.id, success: false, error: error.message });
+      }
+    }
+
+    await writeCrmDb(db);
+    res.json({ success: true, processed: selected.length, results });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/community-content/media-library", async (req, res) => {
+  try {
+    const ctx = await ngRequireContentAccess(req, "media");
+    let media = filterCrmRecords(req, ngContentArray(ctx.crmDb, "community_media_library"), getCrmBrandId(req, ctx.crmDb));
+    media = ngContentScope(media, ctx).filter((item) => item.status !== "deleted").sort(sortNewestFirst);
+    res.json({ success: true, media, items: media, count: media.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/community-content/media-library", async (req, res) => {
+  try {
+    const ctx = await ngRequireContentAccess(req, "media");
+    const db = ctx.crmDb;
+    let item = withTimestamps({
+      id: uuid(),
+      brand_id: getCrmBrandId(req, db),
+      title: ngContentClean(req.body?.title || req.body?.name || "Media item"),
+      url: ngContentClean(req.body?.url || req.body?.image_url || ""),
+      image_url: ngContentClean(req.body?.image_url || req.body?.url || ""),
+      caption: ngContentClean(req.body?.caption || ""),
+      source: ngContentClean(req.body?.source || ""),
+      topic: ngContentClean(req.body?.topic || ""),
+      tags: ngContentList(req.body?.tags),
+      allowed_for_public_posting: req.body?.allowed_for_public_posting !== false,
+      status: req.body?.status || "active",
+      created_by: ctx.user.id,
+      updated_by: ctx.user.id,
+    });
+    item = ngContentAttachOwnership(item, ctx);
+    ngContentArray(db, "community_media_library").unshift(item);
+    await writeCrmDb(db);
+    res.json({ success: true, media_item: item, item });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// END NEXTGEN COMMUNITY CONTENT ROADMAP + MULTI-PLATFORM SCHEDULER
 // -----------------------------------------------------------------------------
 
 app.listen(PORT, () => {
