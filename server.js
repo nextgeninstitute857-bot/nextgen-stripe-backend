@@ -19720,6 +19720,156 @@ Source block:
   };
 }
 
+
+function ngEducationDocumentSummary(document = {}) {
+  const sourceBlocks = Array.isArray(document.source_blocks) ? document.source_blocks : [];
+  const total = Number(document.total_source_chunks || document.chunks_planned || sourceBlocks.length || 0);
+  const processed = Number(document.processed_chunks || sourceBlocks.filter((block) => block.status === "processed").length || 0);
+  const failed = Number(document.failed_chunks || sourceBlocks.filter((block) => block.status === "failed").length || 0);
+  const remaining = Math.max(0, Number(document.remaining_chunks ?? (total - processed - failed)) || 0);
+
+  const copy = { ...document };
+  delete copy.source_blocks;
+  delete copy.source_text;
+
+  return {
+    ...copy,
+    total_source_chunks: total,
+    chunks_planned: total,
+    processed_chunks: processed,
+    failed_chunks: failed,
+    remaining_chunks: remaining,
+    progress_percent: total ? Math.round((processed / total) * 100) : 0,
+  };
+}
+
+async function ngProcessEducationDocumentBatch({ db, document, user, batchSize = 8 }) {
+  db.ai_training_items = ensureCrmArray(db, "ai_training_items");
+
+  const blocks = Array.isArray(document.source_blocks) ? document.source_blocks : [];
+  const pendingBlocks = blocks.filter((block) => String(block.status || "pending") === "pending");
+  const selectedBlocks = pendingBlocks.slice(0, Math.max(1, Math.min(20, Number(batchSize || 8))));
+
+  const createdItems = [];
+  const failedBlocks = [];
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+
+  for (const blockRecord of selectedBlocks) {
+    const index = Math.max(0, Number(blockRecord.index || 1) - 1);
+    const blockText = String(blockRecord.text || "").trim();
+
+    if (!blockText) {
+      blockRecord.status = "failed";
+      blockRecord.error = "Empty source block";
+      blockRecord.failed_at = ngNowIso();
+      failedBlocks.push({ block_index: index + 1, error: "Empty source block" });
+      continue;
+    }
+
+    try {
+      const structured = await ngCreateStructuredEducationChunkWithAI({
+        sourceBlock: blockText,
+        title: document.title,
+        audience: document.audience,
+        index,
+        total: Number(document.total_source_chunks || blocks.length || 1),
+        user,
+      });
+
+      totalInputTokens += Number(structured.usage?.input_tokens || 0);
+      totalOutputTokens += Number(structured.usage?.output_tokens || 0);
+
+      const topic = ngEducationSafeTitle(structured.parsed.topic, `Education Topic ${index + 1}`);
+      const confidence = structured.confidence;
+
+      const item = withTimestamps({
+        id: uuid(),
+        document_id: document.id,
+        title: `${document.title} — ${topic}`.slice(0, 180),
+        category: document.category || "Education Knowledge",
+        audience: document.audience || "Community Content AI, LMS Tutor AI, ScoutBot",
+        tags: uniqueList([
+          "education",
+          "usmle",
+          "medical_review_required",
+          "community_content_draft",
+          ...(Array.isArray(structured.parsed.tags) ? structured.parsed.tags : []),
+        ]),
+        content: structured.content,
+        structured: structured.parsed,
+        source: "education_chunk_import",
+        source_block_index: index + 1,
+        source_block_count: Number(document.total_source_chunks || blocks.length || 1),
+        source_excerpt: blockText.slice(0, 900),
+        ai_model: structured.model,
+        confidence,
+        active: false,
+        is_active: false,
+        status: "needs_review",
+        approval_status: "needs_review",
+        medical_review_status: "needs_review",
+        approval_required: true,
+        requires_medical_review: true,
+        safe_for_public_posting_after_review: Boolean(structured.parsed.safe_for_public_posting_after_review) && confidence >= 0.75,
+        priority: Number(document.priority || 5),
+        created_by: user.id,
+        created_by_email: user.email,
+      });
+
+      createdItems.push(item);
+
+      blockRecord.status = "processed";
+      blockRecord.item_id = item.id;
+      blockRecord.processed_at = ngNowIso();
+      blockRecord.topic = topic;
+      blockRecord.confidence = confidence;
+      blockRecord.error = null;
+    } catch (blockError) {
+      blockRecord.status = "failed";
+      blockRecord.error = blockError.message || "Failed to convert education block";
+      blockRecord.failed_at = ngNowIso();
+      failedBlocks.push({
+        block_index: index + 1,
+        error: blockError.message || "Failed to convert education block",
+      });
+    }
+  }
+
+  if (createdItems.length) {
+    db.ai_training_items.unshift(...createdItems);
+  }
+
+  const processedCount = blocks.filter((block) => block.status === "processed").length;
+  const failedCount = blocks.filter((block) => block.status === "failed").length;
+  const pendingCount = blocks.filter((block) => String(block.status || "pending") === "pending").length;
+
+  document.processed_chunks = processedCount;
+  document.failed_chunks = failedCount;
+  document.remaining_chunks = pendingCount;
+  document.chunks_created = Number(document.chunks_created || 0) + createdItems.length;
+  document.failed_blocks = [...(Array.isArray(document.failed_blocks) ? document.failed_blocks : []), ...failedBlocks];
+  document.ai_usage_summary = {
+    input_tokens: Number(document.ai_usage_summary?.input_tokens || 0) + totalInputTokens,
+    output_tokens: Number(document.ai_usage_summary?.output_tokens || 0) + totalOutputTokens,
+    total_tokens: Number(document.ai_usage_summary?.total_tokens || 0) + totalInputTokens + totalOutputTokens,
+  };
+  document.last_batch_at = ngNowIso();
+  document.updated_at = ngNowIso();
+  document.status = pendingCount > 0 ? "in_progress" : "needs_review";
+  document.processing_status = pendingCount > 0 ? "partial" : "complete";
+
+  return {
+    createdItems,
+    failedBlocks,
+    selected_count: selectedBlocks.length,
+    remaining_chunks: pendingCount,
+    processed_chunks: processedCount,
+    failed_chunks: failedCount,
+    ai_usage_summary: document.ai_usage_summary,
+  };
+}
+
 app.post("/admin/crm/ai-training/import-education-document", async (req, res) => {
   try {
     const { user } = await requireCrmAdmin(req);
@@ -19732,7 +19882,7 @@ app.post("/admin/crm/ai-training/import-education-document", async (req, res) =>
     const title = String(req.body?.title || filename.replace(/\.pdf$/i, "") || "Education Document").trim();
     const category = req.body?.category || "Education Knowledge";
     const audience = req.body?.audience || req.body?.target_audience || "Community Content AI, LMS Tutor AI, ScoutBot";
-    const maxChunks = Math.max(1, Math.min(20, Number(req.body?.max_chunks || 8)));
+    const firstBatchSize = Math.max(1, Math.min(20, Number(req.body?.max_chunks || req.body?.batch_size || 8)));
     const chunkSize = Math.max(1800, Math.min(7000, Number(req.body?.chunk_size || 4200)));
 
     let sourceText = String(req.body?.extracted_text || req.body?.text || req.body?.content || req.body?.source_text || "").trim();
@@ -19764,9 +19914,9 @@ app.post("/admin/crm/ai-training/import-education-document", async (req, res) =>
       });
     }
 
-    const sourceBlocks = ngSplitEducationSourceIntoTopicBlocks(sourceText, { chunk_size: chunkSize }).slice(0, maxChunks);
+    const allSourceBlocks = ngSplitEducationSourceIntoTopicBlocks(sourceText, { chunk_size: chunkSize });
 
-    if (!sourceBlocks.length) {
+    if (!allSourceBlocks.length) {
       return res.status(422).json({
         success: false,
         error: "No usable topic blocks could be created from this education document.",
@@ -19781,6 +19931,7 @@ app.post("/admin/crm/ai-training/import-education-document", async (req, res) =>
       mime_type: mimeType,
       category,
       audience,
+      priority: Number(req.body?.priority || 5),
       source: "education_chunk_import",
       extraction_method: extraction.method,
       parser_error: extraction.parser_error || null,
@@ -19788,8 +19939,20 @@ app.post("/admin/crm/ai-training/import-education-document", async (req, res) =>
       total_characters: sourceText.length,
       source_quality: sourceQuality.quality,
       source_signals: sourceQuality.signals,
-      chunks_planned: sourceBlocks.length,
-      status: "needs_review",
+      total_source_chunks: allSourceBlocks.length,
+      chunks_planned: allSourceBlocks.length,
+      source_blocks: allSourceBlocks.map((text, index) => ({
+        index: index + 1,
+        text,
+        status: "pending",
+        characters: text.length,
+      })),
+      chunks_created: 0,
+      processed_chunks: 0,
+      failed_chunks: 0,
+      remaining_chunks: allSourceBlocks.length,
+      status: "queued",
+      processing_status: "queued",
       approval_status: "needs_review",
       requires_medical_review: true,
       active: false,
@@ -19797,91 +19960,14 @@ app.post("/admin/crm/ai-training/import-education-document", async (req, res) =>
       created_by_email: user.email,
     });
 
-    const createdItems = [];
-    const failedBlocks = [];
-    let totalInputTokens = 0;
-    let totalOutputTokens = 0;
-
-    for (let index = 0; index < sourceBlocks.length; index += 1) {
-      const block = sourceBlocks[index];
-
-      try {
-        const structured = await ngCreateStructuredEducationChunkWithAI({
-          sourceBlock: block,
-          title,
-          audience,
-          index,
-          total: sourceBlocks.length,
-          user,
-        });
-
-        totalInputTokens += Number(structured.usage?.input_tokens || 0);
-        totalOutputTokens += Number(structured.usage?.output_tokens || 0);
-
-        const topic = ngEducationSafeTitle(structured.parsed.topic, `Education Topic ${index + 1}`);
-        const confidence = structured.confidence;
-
-        const item = withTimestamps({
-          id: uuid(),
-          document_id: document.id,
-          title: `${title} — ${topic}`.slice(0, 180),
-          category,
-          audience,
-          tags: uniqueList([
-            "education",
-            "usmle",
-            "medical_review_required",
-            "community_content_draft",
-            ...(Array.isArray(structured.parsed.tags) ? structured.parsed.tags : []),
-          ]),
-          content: structured.content,
-          structured: structured.parsed,
-          source: "education_chunk_import",
-          source_block_index: index + 1,
-          source_block_count: sourceBlocks.length,
-          source_excerpt: block.slice(0, 900),
-          ai_model: structured.model,
-          confidence,
-          active: false,
-          is_active: false,
-          status: "needs_review",
-          approval_status: "needs_review",
-          medical_review_status: "needs_review",
-          approval_required: true,
-          requires_medical_review: true,
-          safe_for_public_posting_after_review: Boolean(structured.parsed.safe_for_public_posting_after_review) && confidence >= 0.75,
-          priority: Number(req.body?.priority || 5),
-          created_by: user.id,
-          created_by_email: user.email,
-        });
-
-        createdItems.push(item);
-      } catch (blockError) {
-        failedBlocks.push({
-          block_index: index + 1,
-          error: blockError.message || "Failed to convert education block",
-        });
-      }
-    }
-
-    if (!createdItems.length) {
-      return res.status(422).json({
-        success: false,
-        error: "AI could not create any structured education chunks from this document.",
-        failed_blocks: failedBlocks,
-      });
-    }
-
-    document.chunks_created = createdItems.length;
-    document.failed_blocks = failedBlocks;
-    document.ai_usage_summary = {
-      input_tokens: totalInputTokens,
-      output_tokens: totalOutputTokens,
-      total_tokens: totalInputTokens + totalOutputTokens,
-    };
+    const batchResult = await ngProcessEducationDocumentBatch({
+      db,
+      document,
+      user,
+      batchSize: firstBatchSize,
+    });
 
     db.ai_training_documents.unshift(document);
-    db.ai_training_items.unshift(...createdItems);
 
     ensureCrmArray(db, "approval_queue").unshift({
       id: uuid(),
@@ -19890,9 +19976,9 @@ app.post("/admin/crm/ai-training/import-education-document", async (req, res) =>
       action_type: "medical_education_training_review",
       agent_name: "Education Knowledge Importer",
       channel: "ai_training_center",
-      draft_content: `${title}: ${createdItems.length} structured education chunks need human medical review before ScoutBot/community use.`,
+      draft_content: `${title}: ${batchResult.createdItems.length} structured education chunks created in the first batch. ${document.remaining_chunks} source chunks remain. Human medical review is required before ScoutBot/community use.`,
       estimated_cost: estimateAICostUsd({ model: String(process.env.AI_EDUCATION_MODEL || process.env.AI_MODEL || "gpt-4o-mini"), usage: document.ai_usage_summary }),
-      total_tokens: document.ai_usage_summary.total_tokens,
+      total_tokens: document.ai_usage_summary?.total_tokens || 0,
       status: "pending",
       created_at: ngNowIso(),
       updated_at: ngNowIso(),
@@ -19902,19 +19988,148 @@ app.post("/admin/crm/ai-training/import-education-document", async (req, res) =>
 
     res.json({
       success: true,
-      mode: "education_chunks_review_first",
-      document,
-      items_created: createdItems.length,
-      failed_blocks: failedBlocks,
+      mode: "education_chunks_review_first_batched",
+      document: ngEducationDocumentSummary(document),
+      items_created: batchResult.createdItems.length,
+      failed_blocks: batchResult.failedBlocks,
       approval_required: true,
-      message: "Structured education chunks were created as needs_review and are NOT used by AI until approved.",
-      items: createdItems.map((item) => ({
+      remaining_chunks: document.remaining_chunks,
+      message: "First batch created as needs_review. Use process-next-batch to continue the full book safely.",
+      items: batchResult.createdItems.map((item) => ({
         id: item.id,
         title: item.title,
         confidence: item.confidence,
         status: item.status,
         approval_status: item.approval_status,
       })),
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/ai-training/documents", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const documents = ensureCrmArray(db, "ai_training_documents")
+      .filter((document) => String(document.source || "").includes("education_chunk_import") || Array.isArray(document.source_blocks))
+      .map(ngEducationDocumentSummary)
+      .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+
+    res.json({ success: true, documents });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-training/documents/:documentId/process-next-batch", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    db.ai_training_documents = ensureCrmArray(db, "ai_training_documents");
+    db.ai_training_items = ensureCrmArray(db, "ai_training_items");
+
+    const document = db.ai_training_documents.find((item) => String(item.id) === String(req.params.documentId));
+    if (!document) return res.status(404).json({ success: false, error: "Education document import job not found" });
+
+    const batchSize = Math.max(1, Math.min(20, Number(req.body?.batch_size || req.body?.max_chunks || 8)));
+
+    const beforeRemaining = Number(document.remaining_chunks ?? 0);
+    if (beforeRemaining <= 0) {
+      return res.json({
+        success: true,
+        message: "No pending source chunks remain for this document.",
+        document: ngEducationDocumentSummary(document),
+        items_created: 0,
+        remaining_chunks: 0,
+      });
+    }
+
+    const batchResult = await ngProcessEducationDocumentBatch({
+      db,
+      document,
+      user,
+      batchSize,
+    });
+
+    ensureCrmArray(db, "approval_queue").unshift({
+      id: uuid(),
+      brand_id: req.body?.brand_id || null,
+      action_id: document.id,
+      action_type: "medical_education_training_review_batch",
+      agent_name: "Education Knowledge Importer",
+      channel: "ai_training_center",
+      draft_content: `${document.title}: processed next batch. ${batchResult.createdItems.length} new chunks need medical review. ${document.remaining_chunks} source chunks remain.`,
+      estimated_cost: estimateAICostUsd({ model: String(process.env.AI_EDUCATION_MODEL || process.env.AI_MODEL || "gpt-4o-mini"), usage: batchResult.ai_usage_summary }),
+      total_tokens: document.ai_usage_summary?.total_tokens || 0,
+      status: "pending",
+      created_at: ngNowIso(),
+      updated_at: ngNowIso(),
+    });
+
+    await writeCrmDb(db);
+
+    res.json({
+      success: true,
+      mode: "education_document_next_batch",
+      document: ngEducationDocumentSummary(document),
+      items_created: batchResult.createdItems.length,
+      failed_blocks: batchResult.failedBlocks,
+      remaining_chunks: document.remaining_chunks,
+      processed_chunks: document.processed_chunks,
+      message: document.remaining_chunks > 0
+        ? "Batch processed. Continue with process-next-batch for the remaining chunks."
+        : "Document processing complete. Review and approve only accurate chunks before AI use.",
+      items: batchResult.createdItems.map((item) => ({
+        id: item.id,
+        title: item.title,
+        confidence: item.confidence,
+        status: item.status,
+        approval_status: item.approval_status,
+      })),
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete("/admin/crm/ai-training/documents/:documentId", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const documentId = String(req.params.documentId || "");
+    const deleteItems = req.body?.delete_items !== false;
+
+    const documents = ensureCrmArray(db, "ai_training_documents");
+    const beforeDocuments = documents.length;
+    db.ai_training_documents = documents.filter((document) => String(document.id) !== documentId);
+
+    let deletedItems = 0;
+    if (deleteItems) {
+      const items = ensureCrmArray(db, "ai_training_items");
+      const beforeItems = items.length;
+      db.ai_training_items = items.filter((item) => String(item.document_id || "") !== documentId);
+      deletedItems = beforeItems - db.ai_training_items.length;
+    }
+
+    ensureCrmArray(db, "ai_training_deletion_logs").push({
+      id: ngUuid(),
+      document_id: documentId,
+      deleted_document_count: beforeDocuments - db.ai_training_documents.length,
+      deleted_items: deletedItems,
+      deleted_by: user.id,
+      deleted_by_email: user.email,
+      deleted_at: ngNowIso(),
+      delete_mode: "education_document_job_delete",
+    });
+
+    await writeCrmDb(db);
+
+    res.json({
+      success: true,
+      deleted_document_count: beforeDocuments - db.ai_training_documents.length,
+      deleted_items: deletedItems,
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
