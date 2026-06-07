@@ -13,22 +13,51 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
+const allowedOrigins = [
+  "https://live.nextgenusmlelms.com",
+  "https://www.live.nextgenusmlelms.com",
+  "https://lms.nextgenusmlelms.com",
+  "https://nextgenusmlelms.com",
+  "https://www.nextgenusmlelms.com",
+  "http://localhost:5173",
+  "http://localhost:3000",
+];
+
+function applyNextGenCors(req, res) {
+  const origin = String(req.headers.origin || "").trim();
+  const requestHeaders = String(req.headers["access-control-request-headers"] || "").trim();
+
+  if (origin && allowedOrigins.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+  } else if (!origin) {
+    // curl, Render health checks, Postman, and server-to-server jobs do not send Origin.
+    res.setHeader("Access-Control-Allow-Origin", "*");
+  }
+
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    requestHeaders || "Content-Type, Authorization, x-admin-token, x-requested-with"
+  );
+  res.setHeader("Access-Control-Max-Age", "86400");
+  res.setHeader("X-NextGen-Backend-Build", "v7-cors-community-publish");
+}
+
+// Hard CORS/preflight guard. This must be the first middleware after app creation.
+// It prevents route crashes, auth failures, and large body parser errors from appearing as fake CORS failures.
+app.use((req, res, next) => {
+  applyNextGenCors(req, res);
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
+  return next();
+});
+
 const corsOptions = {
   origin(origin, callback) {
-    const allowedOrigins = [
-      "https://live.nextgenusmlelms.com",
-      "https://www.live.nextgenusmlelms.com",
-      "https://lms.nextgenusmlelms.com",
-      "https://nextgenusmlelms.com",
-      "http://localhost:5173",
-      "http://localhost:3000",
-    ];
-
-    // Allow server-to-server tools, Render health checks, curl/Postman, and same-origin requests.
-    if (!origin || allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-
+    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
     console.warn("Blocked by CORS:", origin);
     return callback(new Error(`Not allowed by CORS: ${origin}`));
   },
@@ -38,13 +67,25 @@ const corsOptions = {
   optionsSuccessStatus: 204,
 };
 
-// CORS must run before body parsing so oversized/invalid upload payloads still return CORS headers.
+// Keep standard cors() too, but the manual guard above is the source of truth for browser preflight.
 app.use(cors(corsOptions));
-app.options(/.*/, cors(corsOptions));
+app.options(/.*/, (req, res) => {
+  applyNextGenCors(req, res);
+  return res.status(204).end();
+});
 
 // AI-training PDFs are sent as base64 JSON, which is larger than the original PDF.
-app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || "200mb" }));
-app.use(express.urlencoded({ extended: true, limit: process.env.JSON_BODY_LIMIT || "200mb" }));
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || "300mb" }));
+app.use(express.urlencoded({ extended: true, limit: process.env.JSON_BODY_LIMIT || "300mb" }));
+
+app.get("/admin/debug/cors-check", (req, res) => {
+  res.json({
+    success: true,
+    build: "v7-cors-community-publish",
+    origin: req.headers.origin || null,
+    now: new Date().toISOString(),
+  });
+});
 
 const POCKETBASE_URL = process.env.POCKETBASE_URL;
 const DATA_DIR = process.env.DATA_DIR || "/tmp";
@@ -22514,6 +22555,7 @@ app.post("/admin/crm/community-content/media-library", async (req, res) => {
 // -----------------------------------------------------------------------------
 
 app.use((err, req, res, next) => {
+  applyNextGenCors(req, res);
   console.error("GLOBAL EXPRESS ERROR:", err);
 
   if (err?.type === "entity.too.large" || err?.status === 413 || err?.statusCode === 413) {
