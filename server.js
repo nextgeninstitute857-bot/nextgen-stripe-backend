@@ -7552,6 +7552,96 @@ app.get("/admin/crm/action-logs", async (req, res) => {
   }
 });
 
+
+function ngFindApprovalQueueItem(db, rawId) {
+  const targetId = String(rawId || "").trim();
+  const items = ensureCrmArray(db, "approval_queue");
+  if (!targetId) return { item: null, items, targetId };
+
+  const candidates = uniqueList([
+    targetId,
+    targetId.startsWith("approval_") ? targetId : `approval_${targetId}`,
+    targetId.replace(/^approval_/, ""),
+  ]);
+
+  const item = items.find((approval) => {
+    const payload = approval?.payload || {};
+    return (
+      candidates.includes(String(approval.id || "")) ||
+      candidates.includes(String(approval.action_id || "")) ||
+      candidates.includes(String(approval.draft_id || "")) ||
+      candidates.includes(String(approval.scheduled_post_id || "")) ||
+      candidates.includes(String(payload.id || "")) ||
+      candidates.includes(String(payload.action_id || "")) ||
+      candidates.includes(String(payload.draft_id || "")) ||
+      candidates.includes(String(payload.scheduled_post_id || ""))
+    );
+  }) || null;
+
+  return { item, items, targetId, candidates };
+}
+
+function ngFindScheduledPostForApproval(db, itemOrId) {
+  const targetId = typeof itemOrId === "string" ? itemOrId : "";
+  const item = typeof itemOrId === "object" && itemOrId ? itemOrId : null;
+  const payload = item?.payload || {};
+  const ids = uniqueList([
+    targetId,
+    targetId.replace(/^approval_/, ""),
+    item?.scheduled_post_id,
+    item?.action_id,
+    payload?.scheduled_post_id,
+    payload?.post_id,
+    payload?.id,
+  ]);
+
+  return ngContentArray(db, "community_scheduled_posts").find((post) => ids.includes(String(post.id || ""))) || null;
+}
+
+function ngApplyApprovalStatusToLinkedCommunityContent(db, itemOrId, status, user, reqBody = {}) {
+  const cleanStatus = normalizeCrmLower(status, "approved");
+  const approved = cleanStatus === "approved";
+  const rejected = cleanStatus === "rejected" || cleanStatus === "unsafe" || cleanStatus === "failed";
+  const post = ngFindScheduledPostForApproval(db, itemOrId);
+
+  if (post) {
+    if (approved) {
+      post.approval_status = "approved";
+      post.medical_review_status = ngContentIsMedicalType(post) ? "approved" : (post.medical_review_status || "not_required");
+      post.ready_to_post = true;
+      post.status = post.scheduled_at ? "scheduled" : "ready_to_post";
+      post.approved_at = nowIso();
+      post.approved_by = user?.id || null;
+    } else if (rejected) {
+      post.approval_status = "rejected";
+      post.medical_review_status = ngContentIsMedicalType(post) ? "rejected" : (post.medical_review_status || "not_required");
+      post.ready_to_post = false;
+      post.status = "rejected";
+      post.rejection_reason = reqBody?.review_note || reqBody?.reason || "Rejected from approval queue";
+      post.rejected_at = nowIso();
+      post.rejected_by = user?.id || null;
+    } else {
+      post.approval_status = cleanStatus;
+      post.status = cleanStatus;
+    }
+    post.updated_at = nowIso();
+    post.updated_by = user?.id || null;
+  }
+
+  const payload = typeof itemOrId === "object" && itemOrId ? itemOrId.payload || {} : {};
+  const draftIds = uniqueList([payload.id, payload.draft_id, itemOrId?.draft_id, itemOrId?.action_id]);
+  const draft = ngContentArray(db, "community_content_drafts").find((d) => draftIds.includes(String(d.id || ""))) || null;
+  if (draft) {
+    draft.approval_status = cleanStatus;
+    draft.status = approved ? "approved" : rejected ? "rejected" : cleanStatus;
+    draft.review_note = reqBody?.review_note || reqBody?.reason || draft.review_note || "";
+    draft.updated_at = nowIso();
+    draft.updated_by = user?.id || null;
+  }
+
+  return { post, draft };
+}
+
 app.get("/admin/crm/approval-queue", async (req, res) => {
   try {
     const ctx = await requireCrmCollectionAccess(req, "approval_queue", "read");
@@ -7565,38 +7655,108 @@ app.get("/admin/crm/approval-queue", async (req, res) => {
   }
 });
 
+
+app.get("/admin/crm/approval-queue/:id", async (req, res) => {
+  try {
+    const ctx = await requireCrmCollectionAccess(req, "approval_queue", "read");
+    const { item } = ngFindApprovalQueueItem(ctx.crmDb, req.params.id);
+    const linked_post = item ? ngFindScheduledPostForApproval(ctx.crmDb, item) : ngFindScheduledPostForApproval(ctx.crmDb, String(req.params.id));
+
+    if (!item && !linked_post) {
+      return res.status(404).json({ success: false, error: "Approval item not found" });
+    }
+
+    if (item && !ctx.crm_admin && !crmRecordVisibleToTeam(item, ctx.team_member, ctx.user)) {
+      return res.status(403).json({ success: false, error: "This approval item is not assigned to this team member" });
+    }
+
+    res.json({ success: true, item: item || null, linked_post: linked_post || null });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete("/admin/crm/approval-queue/:id", async (req, res) => {
+  try {
+    const ctx = await requireCrmCollectionAccess(req, "approval_queue", "write");
+    const db = ctx.crmDb;
+    const found = ngFindApprovalQueueItem(db, req.params.id);
+    if (!found.item) return res.status(404).json({ success: false, error: "Approval item not found" });
+    if (!ctx.crm_admin && !crmRecordVisibleToTeam(found.item, ctx.team_member, ctx.user)) {
+      return res.status(403).json({ success: false, error: "This approval item is not assigned to this team member" });
+    }
+
+    const before = found.items.length;
+    db.approval_queue = found.items.filter((item) => String(item.id || "") !== String(found.item.id || ""));
+    await writeCrmDb(db);
+    res.json({ success: true, deleted: before - db.approval_queue.length, item: found.item });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
 app.put("/admin/crm/approval-queue/:id", async (req, res) => {
   try {
     const ctx = await requireCrmCollectionAccess(req, "approval_queue", "write");
     const { user } = ctx;
     const db = ctx.crmDb;
-    const item = db.approval_queue.find((x) => String(x.id) === String(req.params.id));
-    if (!item) return res.status(404).json({ success: false, error: "Approval item not found" });
-    if (!ctx.crm_admin && !crmRecordVisibleToTeam(item, ctx.team_member, ctx.user)) {
+    const found = ngFindApprovalQueueItem(db, req.params.id);
+    let item = found.item;
+
+    if (item && !ctx.crm_admin && !crmRecordVisibleToTeam(item, ctx.team_member, ctx.user)) {
       return res.status(403).json({ success: false, error: "This approval item is not assigned to this team member" });
     }
 
-    item.status = normalizeCrmLower(req.body.status, "approved");
-    item.review_note = req.body.review_note || "";
+    const requestedStatus = normalizeCrmLower(req.body.status || req.body.approval_status || "approved", "approved");
+
+    // Some frontend modals send the draft id or scheduled_post id instead of approval_ + draft id.
+    // If no approval row is found, still allow approving/rejecting the linked scheduled post.
+    if (!item) {
+      const linked = ngApplyApprovalStatusToLinkedCommunityContent(db, String(req.params.id), requestedStatus, user, req.body || {});
+      if (!linked.post && !linked.draft) {
+        return res.status(404).json({ success: false, error: "Approval item not found" });
+      }
+
+      const syntheticItem = withTimestamps({
+        id: `approval_${req.params.id}`,
+        status: requestedStatus,
+        approval_status: requestedStatus,
+        draft_content: linked.post?.draft_content || linked.post?.message || linked.draft?.draft_content || "",
+        scheduled_post_id: linked.post?.id || null,
+        payload: linked.post || linked.draft || {},
+        recovered_from_missing_approval_row: true,
+        updated_by: user.id,
+      });
+      ensureCrmArray(db, "approval_queue").unshift(syntheticItem);
+      item = syntheticItem;
+    }
+
+    item.status = requestedStatus;
+    item.approval_status = requestedStatus;
+    item.review_note = req.body.review_note || req.body.reason || "";
     item.approved_by = item.status === "approved" ? user.id : null;
+    item.reviewed_by = user.id;
+    item.reviewed_at = nowIso();
     item.updated_at = nowIso();
 
-    const action = db.ai_actions.find((x) => String(x.id) === String(item.action_id));
+    const action = ensureCrmArray(db, "ai_actions").find((x) => String(x.id) === String(item.action_id));
     if (action) {
       action.approval_status = item.status;
       action.approved_by = item.approved_by;
       action.updated_at = nowIso();
     }
 
+    const linked = ngApplyApprovalStatusToLinkedCommunityContent(db, item, item.status, user, req.body || {});
+
     if (item.status === "rejected" || item.status === "unsafe") {
-      db.ai_feedback.push({
+      ensureCrmArray(db, "ai_feedback").push({
         id: uuid(),
         brand_id: item.brand_id || null,
         action_id: item.action_id || null,
         agent_name: item.agent_name || "",
         original_output: item.draft_content || "",
         corrected_output: req.body.corrected_output || "",
-        rejection_reason: req.body.review_note || "Rejected from approval queue",
+        rejection_reason: req.body.review_note || req.body.reason || "Rejected from approval queue",
         feedback_type: req.body.feedback_type || "other",
         created_by: user.id,
         created_at: nowIso(),
@@ -7604,7 +7764,7 @@ app.put("/admin/crm/approval-queue/:id", async (req, res) => {
     }
 
     await writeCrmDb(db);
-    res.json({ success: true, item });
+    res.json({ success: true, item, linked_post: linked.post || null, linked_draft: linked.draft || null });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -22032,7 +22192,9 @@ app.get("/admin/crm/community-content/roadmaps", async (req, res) => {
   try {
     const ctx = await ngRequireContentAccess(req, "read");
     let roadmaps = filterCrmRecords(req, ngContentArray(ctx.crmDb, "community_content_roadmaps"), getCrmBrandId(req, ctx.crmDb));
-    roadmaps = ngContentScope(roadmaps, ctx).sort(sortNewestFirst);
+    roadmaps = ngContentScope(roadmaps, ctx);
+    if (req.query.include_deleted !== "true") roadmaps = roadmaps.filter((item) => String(item.status || "").toLowerCase() !== "deleted" && !item.deleted_at);
+    roadmaps = roadmaps.sort(sortNewestFirst);
     res.json({ success: true, roadmaps, items: roadmaps, count: roadmaps.length, scoped: !ctx.crm_admin });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
@@ -22457,6 +22619,73 @@ app.post("/admin/crm/community-content/scheduled-posts/:id/reject", async (req, 
   }
 });
 
+
+app.delete("/admin/crm/community-content/scheduled-posts/:id", async (req, res) => {
+  try {
+    const ctx = await ngRequireContentAccess(req, "schedule");
+    const db = ctx.crmDb;
+    const posts = ngContentArray(db, "community_scheduled_posts");
+    const post = posts.find((item) => String(item.id) === String(req.params.id));
+    if (!post) return res.status(404).json({ success: false, error: "Scheduled post not found" });
+    if (!ctx.crm_admin && !crmRecordVisibleToTeam(post, ctx.team_member, ctx.user)) {
+      return res.status(403).json({ success: false, error: "This post is outside your assigned scope" });
+    }
+
+    const hard = req.query.hard === "true" || req.body?.hard === true;
+    if (hard) {
+      db.community_scheduled_posts = posts.filter((item) => String(item.id) !== String(post.id));
+      db.approval_queue = ensureCrmArray(db, "approval_queue").filter((item) => {
+        const payload = item.payload || {};
+        return String(item.scheduled_post_id || item.action_id || payload.scheduled_post_id || payload.id || "") !== String(post.id);
+      });
+    } else {
+      post.status = "deleted";
+      post.deleted_at = nowIso();
+      post.deleted_by = ctx.user.id;
+      post.updated_at = nowIso();
+      post.updated_by = ctx.user.id;
+    }
+
+    await writeCrmDb(db);
+    res.json({ success: true, post, hard_deleted: hard });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/community-content/scheduled-posts/:id/delete", async (req, res) => {
+  req.method = "DELETE";
+  return app.handle(req, res);
+});
+
+app.post("/admin/crm/community-content/scheduled-posts/cleanup-rejected", async (req, res) => {
+  try {
+    const ctx = await ngRequireContentAccess(req, "schedule");
+    const db = ctx.crmDb;
+    const posts = ngContentArray(db, "community_scheduled_posts");
+    const statuses = new Set(["rejected", "failed", "error", "deleted"]);
+    let deleted = 0;
+
+    for (const post of posts) {
+      const status = String(post.status || post.approval_status || "").toLowerCase();
+      const rejected = statuses.has(status) || String(post.approval_status || "").toLowerCase() === "rejected";
+      if (!rejected) continue;
+      if (!ctx.crm_admin && !crmRecordVisibleToTeam(post, ctx.team_member, ctx.user)) continue;
+      if (!post.deleted_at) deleted += 1;
+      post.status = "deleted";
+      post.deleted_at = post.deleted_at || nowIso();
+      post.deleted_by = ctx.user.id;
+      post.updated_at = nowIso();
+      post.updated_by = ctx.user.id;
+    }
+
+    await writeCrmDb(db);
+    res.json({ success: true, deleted_count: deleted });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
 app.post("/admin/crm/community-content/scheduled-posts/:id/publish-now", async (req, res) => {
   try {
     const ctx = await ngRequireContentAccess(req, "publish");
@@ -22470,6 +22699,48 @@ app.post("/admin/crm/community-content/scheduled-posts/:id/publish-now", async (
     const result = await ngPublishScheduledPost(db, post, ctx.user);
     await writeCrmDb(db);
     res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+
+app.post("/admin/crm/community-content/cleanup-deleted", async (req, res) => {
+  try {
+    const ctx = await ngRequireContentAccess(req, "schedule");
+    const db = ctx.crmDb;
+    const hard = req.body?.hard === true || req.query.hard === "true";
+
+    const roadmaps = ngContentArray(db, "community_content_roadmaps");
+    const posts = ngContentArray(db, "community_scheduled_posts");
+    const hiddenRoadmaps = roadmaps.filter((item) => String(item.status || "").toLowerCase() === "deleted" || item.deleted_at);
+    const hiddenPosts = posts.filter((item) => String(item.status || "").toLowerCase() === "deleted" || item.deleted_at || String(item.status || "").toLowerCase() === "rejected" || String(item.approval_status || "").toLowerCase() === "rejected");
+
+    if (hard) {
+      const roadIds = new Set(hiddenRoadmaps.map((item) => String(item.id || "")));
+      const postIds = new Set(hiddenPosts.map((item) => String(item.id || "")));
+      db.community_content_roadmaps = roadmaps.filter((item) => !roadIds.has(String(item.id || "")));
+      db.community_scheduled_posts = posts.filter((item) => !postIds.has(String(item.id || "")));
+      db.approval_queue = ensureCrmArray(db, "approval_queue").filter((item) => {
+        const payload = item.payload || {};
+        const linkedPostId = String(item.scheduled_post_id || item.action_id || payload.scheduled_post_id || payload.id || "");
+        return !postIds.has(linkedPostId);
+      });
+    } else {
+      for (const post of hiddenPosts) {
+        post.status = "deleted";
+        post.deleted_at = post.deleted_at || nowIso();
+        post.deleted_by = ctx.user.id;
+      }
+      for (const roadmap of hiddenRoadmaps) {
+        roadmap.status = "deleted";
+        roadmap.deleted_at = roadmap.deleted_at || nowIso();
+        roadmap.deleted_by = ctx.user.id;
+      }
+    }
+
+    await writeCrmDb(db);
+    res.json({ success: true, hard_deleted: hard, roadmaps_matched: hiddenRoadmaps.length, posts_matched: hiddenPosts.length });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
