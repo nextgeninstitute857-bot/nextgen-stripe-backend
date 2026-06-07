@@ -19454,8 +19454,10 @@ async function ngExtractPdfText(buffer) {
 
 function ngNormalizeTrainingText(text = "") {
   return String(text || "")
+    .normalize("NFKC")
     .replace(/\u0000/g, "")
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, " ")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
     .replace(/[ \t]{2,}/g, " ")
     .replace(/\n[ \t]+/g, "\n")
     .replace(/\n{4,}/g, "\n\n")
@@ -19500,11 +19502,16 @@ function ngIsReadableTrainingText(text = "", options = {}) {
     return { ok: false, reason: "Extracted text does not look like readable educational text.", quality };
   }
 
-  if (quality.non_ascii_ratio > 0.12 || quality.replacement_chars > 5 || quality.suspicious_runs > 12) {
+  // Some legitimate medical PDFs contain ligatures, copyright symbols, arrows,
+  // Greek letters, tables, and author/title pages. Do not reject a long readable
+  // extraction only because it has non-ASCII characters or scattered symbols.
+  const hasStrongReadableText = quality.words >= Math.max(minWords * 8, 360) && quality.letter_ratio >= 0.35;
+
+  if (!hasStrongReadableText && (quality.non_ascii_ratio > 0.22 || quality.replacement_chars > 20 || quality.suspicious_runs > 80)) {
     return { ok: false, reason: "Extracted text appears corrupted or binary-encoded.", quality };
   }
 
-  if (quality.pdf_artifacts > 12) {
+  if (quality.pdf_artifacts > 30 && !hasStrongReadableText) {
     return { ok: false, reason: "Raw PDF internals were detected instead of clean text.", quality };
   }
 
@@ -19579,7 +19586,12 @@ function ngIsUsableEducationSourceText(text = "") {
     };
   }
 
-  if (signals.mixed_token_ratio > 0.18 || signals.symbol_heavy_ratio > 0.08) {
+  // Long readable books often have title pages, tables, abbreviations, symbols,
+  // Greek letters, formulas, and mixed tokens. Reject only when the text is both
+  // symbol-heavy and not clearly readable enough.
+  const stronglyReadableEducationText = signals.word_count >= 900 && base.quality?.letter_ratio >= 0.35;
+
+  if (!stronglyReadableEducationText && (signals.mixed_token_ratio > 0.28 || signals.symbol_heavy_ratio > 0.14)) {
     return {
       ok: false,
       reason: "The PDF text appears font-encoded or garbled. Use OCR/clean text before creating medical education chunks.",
