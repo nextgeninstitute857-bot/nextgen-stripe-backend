@@ -20228,6 +20228,37 @@ app.post("/admin/crm/ai-training/:id/reject", async (req, res) => {
 });
 
 
+function ngFirstAidTrainingMatch(item = {}) {
+  const tags = Array.isArray(item.tags) ? item.tags.join(" ") : String(item.tags || "");
+  const haystack = [
+    item.title,
+    item.name,
+    item.filename,
+    item.file_name,
+    item.source,
+    tags,
+    item.content,
+    item.body,
+    item.text,
+  ].map((value) => String(value || "")).join("\n").toLowerCase();
+
+  const firstAidMatch =
+    haystack.includes("first aid for the") ||
+    haystack.includes("first aid for the usmle") ||
+    haystack.includes("usmle step 1 2026") ||
+    haystack.includes("tao le") ||
+    haystack.includes("vikas bhushan") ||
+    haystack.includes("carolina caban rivera") ||
+    haystack.includes("978-1-264-77578-1");
+
+  const pathomaMatch =
+    haystack.includes("pathoma") ||
+    haystack.includes("fundamentals-of-pathology") ||
+    haystack.includes("fundamentals of pathology");
+
+  return firstAidMatch && !pathomaMatch;
+}
+
 async function importTrainingDocumentHandler(req, res) {
   try {
     const { user } = await requireCrmAdmin(req);
@@ -20237,13 +20268,15 @@ async function importTrainingDocumentHandler(req, res) {
 
     const filename = String(req.body?.filename || req.body?.name || "uploaded-document.pdf").trim();
     const mimeType = String(req.body?.mime_type || req.body?.mimeType || "application/pdf").trim();
-    const title = String(req.body?.title || filename.replace(/\.pdf$/i, "") || "Imported Education PDF").trim();
-    const category = req.body?.category || "Education Knowledge";
-    const audience = req.body?.audience || req.body?.target_audience || "Community Content AI, Telegram Community Worker, LMS Tutor AI";
+    const title = String(req.body?.title || filename.replace(/\.pdf$/i, "") || "Raw Reference Upload").trim();
+    const category = req.body?.category || "Raw Reference";
+    const audience = req.body?.audience || req.body?.target_audience || "Admin Review Only";
     const tags = uniqueList([
       ...(Array.isArray(req.body?.tags) ? req.body.tags : String(req.body?.tags || "").split(",")),
+      "raw_reference",
       "pdf_import",
-      "education",
+      "not_enforced",
+      "admin_review_only",
     ]);
 
     let extractedText = String(req.body?.extracted_text || req.body?.text || req.body?.content || "").trim();
@@ -20265,7 +20298,7 @@ async function importTrainingDocumentHandler(req, res) {
     if (!extractedText) {
       return res.status(422).json({
         success: false,
-        error: "Could not extract readable text from this PDF. Try a text-based PDF, OCR PDF, TXT file, or paste extracted text.",
+        error: "Could not extract readable text from this file. Try a text-based PDF, OCR PDF, TXT file, or paste extracted text. For medical teaching chunks, use the Education Pipeline button instead of Raw Reference Upload.",
         extraction,
       });
     }
@@ -20278,10 +20311,11 @@ async function importTrainingDocumentHandler(req, res) {
     if (!qualityCheck.ok) {
       return res.status(422).json({
         success: false,
-        error: `PDF text extraction failed quality check: ${qualityCheck.reason}`,
+        error: `Raw reference extraction failed quality check: ${qualityCheck.reason}`,
         extraction,
         quality: qualityCheck.quality,
         preview: extractedText.slice(0, 700),
+        recommendation: "For medical books/notes, upload through Education Pipeline so the backend creates structured review-first teaching chunks.",
       });
     }
 
@@ -20294,14 +20328,19 @@ async function importTrainingDocumentHandler(req, res) {
       category,
       audience,
       tags,
-      source: "pdf_import",
+      source: "raw_reference_import",
       extraction_method: extraction.method,
       parser_error: extraction.parser_error || null,
       pages: extraction.pages || null,
       total_characters: extractedText.length,
       quality: qualityCheck.quality,
       chunks_count: chunks.length,
-      active: true,
+      active: false,
+      is_active: false,
+      enforce_in_ai: false,
+      status: "raw_reference_only",
+      approval_status: "not_for_ai",
+      medical_review_status: "not_required",
       created_by: user.id,
       created_by_email: user.email,
     });
@@ -20309,14 +20348,19 @@ async function importTrainingDocumentHandler(req, res) {
     const items = chunks.map((chunk, index) => withTimestamps({
       id: uuid(),
       document_id: document.id,
-      title: `${title} — Part ${index + 1}`,
+      title: `${title} — Raw Reference Part ${index + 1}`,
       category,
       audience,
       tags,
       content: chunk,
-      source: "pdf_import",
-      active: true,
-      priority: Number(req.body?.priority || 5),
+      source: "raw_reference_import",
+      active: false,
+      is_active: false,
+      enforce_in_ai: false,
+      status: "raw_reference_only",
+      approval_status: "not_for_ai",
+      medical_review_status: "not_required",
+      priority: Number(req.body?.priority || 1),
       created_by: user.id,
       created_by_email: user.email,
     }));
@@ -20327,6 +20371,8 @@ async function importTrainingDocumentHandler(req, res) {
 
     return res.json({
       success: true,
+      mode: "raw_reference_only_not_enforced",
+      warning: "Raw Reference Upload is saved inactive and not enforced in AI. For Pathoma-style structured teaching chunks, use Education Pipeline.",
       document,
       items_created: items.length,
       extraction_method: extraction.method,
@@ -20335,12 +20381,71 @@ async function importTrainingDocumentHandler(req, res) {
       preview: extractedText.slice(0, 700),
     });
   } catch (error) {
-    console.error("Import training document error:", error);
-    return res.status(error.statusCode || 500).json({ success: false, error: error.message || "Document import failed" });
+    console.error("Import raw reference document error:", error);
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message || "Raw reference import failed" });
   }
 }
 
 app.post("/admin/crm/ai-training/import-document", importTrainingDocumentHandler);
+
+app.post("/admin/crm/ai-training/cleanup-first-aid-raw", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const dryRun = req.body?.dry_run !== false;
+
+    const items = ensureCrmArray(db, "ai_training_items");
+    const documents = ensureCrmArray(db, "ai_training_documents");
+
+    const matchedItems = items.filter((item) => ngFirstAidTrainingMatch(item));
+    const matchedDocumentIds = new Set([
+      ...matchedItems.map((item) => String(item.document_id || "")).filter(Boolean),
+      ...documents.filter((document) => ngFirstAidTrainingMatch(document)).map((document) => String(document.id || "")).filter(Boolean),
+    ]);
+
+    const matchedItemIds = new Set(matchedItems.map((item) => String(item.id || "")).filter(Boolean));
+    const matchedDocumentItems = items.filter((item) => matchedDocumentIds.has(String(item.document_id || "")));
+    for (const item of matchedDocumentItems) {
+      if (item.id) matchedItemIds.add(String(item.id));
+    }
+
+    const matchedDocuments = documents.filter((document) => matchedDocumentIds.has(String(document.id || "")));
+
+    if (!dryRun) {
+      db.ai_training_items = items.filter((item) => !matchedItemIds.has(String(item.id || "")));
+      db.ai_training_documents = documents.filter((document) => !matchedDocumentIds.has(String(document.id || "")));
+      ensureCrmArray(db, "ai_training_deletion_logs").push({
+        id: ngUuid(),
+        delete_mode: "cleanup_first_aid_raw_import",
+        deleted_item_count: matchedItemIds.size,
+        deleted_document_count: matchedDocumentIds.size,
+        deleted_item_ids: Array.from(matchedItemIds),
+        deleted_document_ids: Array.from(matchedDocumentIds),
+        deleted_by: user.id,
+        deleted_by_email: user.email,
+        deleted_at: ngNowIso(),
+      });
+      await writeCrmDb(db);
+    }
+
+    return res.json({
+      success: true,
+      dry_run: dryRun,
+      matched_item_count: matchedItemIds.size,
+      matched_document_count: matchedDocumentIds.size,
+      deleted_item_count: dryRun ? 0 : matchedItemIds.size,
+      deleted_document_count: dryRun ? 0 : matchedDocumentIds.size,
+      sample_items: items
+        .filter((item) => matchedItemIds.has(String(item.id || "")))
+        .slice(0, 50)
+        .map((item) => ({ id: item.id, title: item.title, document_id: item.document_id || null, source: item.source, active: item.active, enforce_in_ai: item.enforce_in_ai })),
+      sample_documents: matchedDocuments.slice(0, 20).map((document) => ({ id: document.id, title: document.title, filename: document.filename, source: document.source })),
+    });
+  } catch (error) {
+    console.error("First Aid cleanup error:", error);
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message || "First Aid cleanup failed" });
+  }
+});
 
 app.post("/admin/crm/ai-training/cleanup-corrupted", async (req, res) => {
   try {
