@@ -22382,18 +22382,43 @@ app.delete("/admin/crm/community-content/roadmaps/:id", async (req, res) => {
     roadmap.deleted_at = nowIso();
     roadmap.deleted_by = ctx.user.id;
 
-    if (req.query.delete_posts === "true" || req.body?.delete_posts === true) {
-      for (const post of ngContentArray(db, "community_scheduled_posts")) {
+    // Default behavior: when a roadmap is deleted, hide/delete its scheduled queue too.
+    // Use delete_posts=false only if you intentionally want to keep the generated posts.
+    const deleteLinkedPosts = req.query.delete_posts !== "false" && req.body?.delete_posts !== false;
+    const hardPosts = req.query.hard_posts === "true" || req.body?.hard_posts === true;
+    let linkedPostsDeleted = 0;
+
+    if (deleteLinkedPosts) {
+      const posts = ngContentArray(db, "community_scheduled_posts");
+      const linkedPostIds = new Set();
+
+      for (const post of posts) {
         if (String(post.roadmap_id || "") === String(roadmap.id)) {
-          post.status = "deleted";
-          post.deleted_at = nowIso();
-          post.deleted_by = ctx.user.id;
+          linkedPostsDeleted += 1;
+          linkedPostIds.add(String(post.id || ""));
+          if (!hardPosts) {
+            post.status = "deleted";
+            post.deleted_at = post.deleted_at || nowIso();
+            post.deleted_by = ctx.user.id;
+            post.updated_at = nowIso();
+            post.updated_by = ctx.user.id;
+          }
         }
       }
+
+      if (hardPosts) {
+        db.community_scheduled_posts = posts.filter((post) => String(post.roadmap_id || "") !== String(roadmap.id));
+      }
+
+      db.approval_queue = ensureCrmArray(db, "approval_queue").filter((item) => {
+        const payload = item.payload || {};
+        const linkedPostId = String(item.scheduled_post_id || item.action_id || payload.scheduled_post_id || payload.id || "");
+        return !linkedPostIds.has(linkedPostId);
+      });
     }
 
     await writeCrmDb(db);
-    res.json({ success: true, roadmap });
+    res.json({ success: true, roadmap, linked_posts_deleted: linkedPostsDeleted, hard_posts_deleted: hardPosts });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -22402,8 +22427,25 @@ app.delete("/admin/crm/community-content/roadmaps/:id", async (req, res) => {
 app.get("/admin/crm/community-content/scheduled-posts", async (req, res) => {
   try {
     const ctx = await ngRequireContentAccess(req, "read");
+    const includeDeleted = req.query.include_deleted === "true" || req.query.show_deleted === "true";
+    const roadmaps = ngContentArray(ctx.crmDb, "community_content_roadmaps");
+    const deletedRoadmapIds = new Set(
+      roadmaps
+        .filter((roadmap) => String(roadmap.status || "").toLowerCase() === "deleted" || roadmap.deleted_at)
+        .map((roadmap) => String(roadmap.id || ""))
+        .filter(Boolean)
+    );
+
     let posts = filterCrmRecords(req, ngContentArray(ctx.crmDb, "community_scheduled_posts"), getCrmBrandId(req, ctx.crmDb));
-    posts = ngContentScope(posts, ctx).filter((item) => item.status !== "deleted").sort((a, b) => String(a.scheduled_at || a.created_at || "").localeCompare(String(b.scheduled_at || b.created_at || "")));
+    posts = ngContentScope(posts, ctx)
+      .filter((item) => {
+        if (includeDeleted) return true;
+        const status = String(item.status || "").toLowerCase();
+        if (status === "deleted" || item.deleted_at) return false;
+        if (item.roadmap_id && deletedRoadmapIds.has(String(item.roadmap_id))) return false;
+        return true;
+      })
+      .sort((a, b) => String(a.scheduled_at || a.created_at || "").localeCompare(String(b.scheduled_at || b.created_at || "")));
     res.json({ success: true, posts, scheduled_posts: posts, items: posts, count: posts.length, scoped: !ctx.crm_admin });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
@@ -22714,7 +22756,13 @@ app.post("/admin/crm/community-content/cleanup-deleted", async (req, res) => {
     const roadmaps = ngContentArray(db, "community_content_roadmaps");
     const posts = ngContentArray(db, "community_scheduled_posts");
     const hiddenRoadmaps = roadmaps.filter((item) => String(item.status || "").toLowerCase() === "deleted" || item.deleted_at);
-    const hiddenPosts = posts.filter((item) => String(item.status || "").toLowerCase() === "deleted" || item.deleted_at || String(item.status || "").toLowerCase() === "rejected" || String(item.approval_status || "").toLowerCase() === "rejected");
+    const hiddenRoadmapIds = new Set(hiddenRoadmaps.map((item) => String(item.id || "")).filter(Boolean));
+    const hiddenPosts = posts.filter((item) => {
+      const status = String(item.status || "").toLowerCase();
+      const approval = String(item.approval_status || "").toLowerCase();
+      const linkedToDeletedRoadmap = item.roadmap_id && hiddenRoadmapIds.has(String(item.roadmap_id));
+      return status === "deleted" || item.deleted_at || status === "rejected" || status === "failed" || status === "error" || approval === "rejected" || linkedToDeletedRoadmap;
+    });
 
     if (hard) {
       const roadIds = new Set(hiddenRoadmaps.map((item) => String(item.id || "")));
