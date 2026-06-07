@@ -9444,19 +9444,38 @@ async function telegramApi(method, payload = {}, integration = {}) {
     throw error;
   }
 
-  const response = await axios.post(
-    `https://api.telegram.org/bot${token}/${method}`,
-    payload,
-    { timeout: 30000 }
-  );
+  try {
+    const response = await axios.post(
+      `https://api.telegram.org/bot${token}/${method}`,
+      payload,
+      { timeout: 30000 }
+    );
 
-  if (response.data?.ok === false) {
-    const error = new Error(response.data?.description || "Telegram API request failed");
-    error.statusCode = 400;
-    throw error;
+    if (response.data?.ok === false) {
+      const error = new Error(response.data?.description || "Telegram API request failed");
+      error.statusCode = 400;
+      error.telegram_response = response.data;
+      throw error;
+    }
+
+    return response.data;
+  } catch (error) {
+    const telegramDescription =
+      error?.response?.data?.description ||
+      error?.response?.data?.error ||
+      error?.message ||
+      "Telegram API request failed";
+
+    const wrapped = new Error(telegramDescription);
+    wrapped.statusCode = error?.response?.status || error?.statusCode || 400;
+    wrapped.telegram_method = method;
+    wrapped.telegram_payload = {
+      ...payload,
+      // Never expose bot token; payload is safe and helps debug bad chat_id.
+    };
+    wrapped.telegram_response = error?.response?.data || null;
+    throw wrapped;
   }
-
-  return response.data;
 }
 
 function findTelegramIntegration(db) {
@@ -11951,18 +11970,18 @@ async function sendWhatsAppCloudMessage({ to, text = "", templateName = "", lang
 }
 
 async function sendTelegramMessage({ to, text = "", integration = {} }) {
-  const chatId = String(to || "").trim();
+  const chatId = ngNormalizeTelegramChatId(to, { assumeGroup: false });
   if (!chatId) {
     const error = new Error("Telegram chat_id is required. Use numeric chat_id, not a t.me link.");
     error.statusCode = 400;
-    error.hint = "Example valid values: 123456789 or -1001577486157.";
+    error.hint = "Example valid values: 123456789, -5240157430, or -1001577486157.";
     throw error;
   }
 
   if (/^https?:\/\//i.test(chatId) || chatId.includes("t.me/")) {
     const error = new Error("Telegram recipient must be a numeric chat_id, not a t.me URL.");
     error.statusCode = 400;
-    error.hint = "Open Telegram webhook/inbound logs and copy telegram_chat_id. For groups it usually starts with -100.";
+    error.hint = "Open Telegram webhook/inbound logs and copy telegram_chat_id. For groups it usually starts with -100 or another negative number.";
     throw error;
   }
 
@@ -20136,6 +20155,211 @@ app.post("/admin/crm/ai-training/documents/:documentId/process-next-batch", asyn
   }
 });
 
+
+app.post("/admin/crm/ai-training/documents/:documentId/process-all-batches", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    db.ai_training_documents = ensureCrmArray(db, "ai_training_documents");
+    db.ai_training_items = ensureCrmArray(db, "ai_training_items");
+
+    const document = db.ai_training_documents.find((item) => String(item.id) === String(req.params.documentId));
+    if (!document) return res.status(404).json({ success: false, error: "Education document import job not found" });
+
+    const batchSize = Math.max(1, Math.min(20, Number(req.body?.batch_size || req.body?.max_chunks || 10)));
+    const maxBatches = Math.max(1, Math.min(60, Number(req.body?.max_batches || 25)));
+    const stopAtRemaining = Math.max(0, Number(req.body?.stop_at_remaining || 0));
+
+    const batches = [];
+    let totalCreated = 0;
+    let totalFailed = 0;
+
+    for (let i = 0; i < maxBatches; i += 1) {
+      const remainingBefore = Number(document.remaining_chunks ?? 0);
+      if (remainingBefore <= stopAtRemaining) break;
+
+      const batchResult = await ngProcessEducationDocumentBatch({
+        db,
+        document,
+        user,
+        batchSize,
+      });
+
+      totalCreated += Number(batchResult.createdItems?.length || 0);
+      totalFailed += Number(batchResult.failedBlocks?.length || 0);
+
+      batches.push({
+        batch_number: i + 1,
+        items_created: batchResult.createdItems?.length || 0,
+        failed_blocks: batchResult.failedBlocks || [],
+        remaining_chunks: Number(document.remaining_chunks || 0),
+        processed_chunks: Number(document.processed_chunks || 0),
+      });
+
+      if (Number(document.remaining_chunks || 0) <= stopAtRemaining) break;
+      if (!batchResult.createdItems?.length && !batchResult.failedBlocks?.length) break;
+    }
+
+    ensureCrmArray(db, "approval_queue").unshift({
+      id: uuid(),
+      brand_id: req.body?.brand_id || null,
+      action_id: document.id,
+      action_type: "medical_education_training_process_all",
+      agent_name: "Education Knowledge Importer",
+      channel: "ai_training_center",
+      draft_content: `${document.title}: process-all ran ${batches.length} batch(es), created ${totalCreated} new review chunks, ${document.remaining_chunks} source chunks remain.`,
+      estimated_cost: estimateAICostUsd({ model: String(process.env.AI_EDUCATION_MODEL || process.env.AI_MODEL || "gpt-4o-mini"), usage: document.ai_usage_summary }),
+      total_tokens: document.ai_usage_summary?.total_tokens || 0,
+      status: "pending",
+      created_at: ngNowIso(),
+      updated_at: ngNowIso(),
+    });
+
+    await writeCrmDb(db);
+
+    res.json({
+      success: true,
+      mode: "education_document_process_all_batches",
+      document: ngEducationDocumentSummary(document),
+      batches_processed: batches.length,
+      items_created: totalCreated,
+      failed_blocks_count: totalFailed,
+      remaining_chunks: Number(document.remaining_chunks || 0),
+      processed_chunks: Number(document.processed_chunks || 0),
+      complete: Number(document.remaining_chunks || 0) <= 0,
+      message: Number(document.remaining_chunks || 0) <= 0
+        ? "Document processing complete. Review samples, then use approve-all if accurate."
+        : "Process-all stopped at the safety limit. Click Process All again to continue.",
+      batches,
+    });
+  } catch (error) {
+    console.error("Process all education document error:", error);
+    res.status(error.statusCode || 500).json({ success: false, error: error.message, hint: error.hint || null });
+  }
+});
+
+app.post("/admin/crm/ai-training/documents/:documentId/approve-all", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const documentId = String(req.params.documentId || "");
+    const document = ensureCrmArray(db, "ai_training_documents").find((item) => String(item.id) === documentId);
+    if (!document) return res.status(404).json({ success: false, error: "Education document import job not found" });
+
+    const items = ensureCrmArray(db, "ai_training_items").filter((item) => String(item.document_id || "") === documentId);
+    const onlyNeedsReview = req.body?.only_needs_review !== false;
+    let approvedCount = 0;
+
+    for (const item of items) {
+      if (onlyNeedsReview && ["rejected", "deleted"].includes(String(item.approval_status || item.status || "").toLowerCase())) {
+        continue;
+      }
+
+      item.active = true;
+      item.is_active = true;
+      item.enforce_in_ai = true;
+      item.status = "approved";
+      item.approval_status = "approved";
+      item.medical_review_status = "approved";
+      item.requires_medical_review = false;
+      item.requires_human_review = false;
+      item.approved_by = user.id;
+      item.approved_by_email = user.email;
+      item.approved_at = ngNowIso();
+      item.updated_at = ngNowIso();
+      approvedCount += 1;
+    }
+
+    document.approval_status = "approved";
+    document.medical_review_status = "approved";
+    document.status = Number(document.remaining_chunks || 0) > 0 ? "partially_processed_approved" : "completed_approved";
+    document.approved_items_count = approvedCount;
+    document.approved_by = user.id;
+    document.approved_by_email = user.email;
+    document.approved_at = ngNowIso();
+    document.updated_at = ngNowIso();
+
+    ensureCrmArray(db, "approval_queue").unshift({
+      id: uuid(),
+      brand_id: req.body?.brand_id || null,
+      action_id: document.id,
+      action_type: "medical_education_training_approve_all",
+      agent_name: "Education Knowledge Importer",
+      channel: "ai_training_center",
+      draft_content: `${document.title}: ${approvedCount} education training chunks approved for AI use by ${user.email}.`,
+      status: "approved",
+      created_at: ngNowIso(),
+      updated_at: ngNowIso(),
+    });
+
+    await writeCrmDb(db);
+
+    res.json({
+      success: true,
+      mode: "education_document_approve_all",
+      document: ngEducationDocumentSummary(document),
+      approved_count: approvedCount,
+      total_items: items.length,
+      message: `${approvedCount} chunks approved for AI use.`,
+    });
+  } catch (error) {
+    console.error("Approve all education document error:", error);
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/ai-training/documents/:documentId/download-notes", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const documentId = String(req.params.documentId || "");
+    const document = ensureCrmArray(db, "ai_training_documents").find((item) => String(item.id) === documentId);
+    if (!document) return res.status(404).json({ success: false, error: "Education document import job not found" });
+
+    const items = ensureCrmArray(db, "ai_training_items")
+      .filter((item) => String(item.document_id || "") === documentId)
+      .sort((a, b) => Number(a.chunk_index ?? a.part_index ?? 0) - Number(b.chunk_index ?? b.part_index ?? 0) || String(a.created_at || "").localeCompare(String(b.created_at || "")));
+
+    const safeTitle = String(document.title || "education-notes")
+      .replace(/[^a-z0-9]+/gi, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 80) || "education-notes";
+
+    const format = String(req.query?.format || "md").toLowerCase();
+    const extension = format === "txt" ? "txt" : "md";
+    const contentType = extension === "txt" ? "text/plain; charset=utf-8" : "text/markdown; charset=utf-8";
+
+    const body = [
+      `# ${document.title || "Education Notes"}`,
+      "",
+      `Source file: ${document.filename || ""}`,
+      `Generated chunks: ${items.length}`,
+      `Downloaded: ${ngNowIso()}`,
+      "",
+      "---",
+      "",
+      ...items.flatMap((item, index) => [
+        `## ${index + 1}. ${item.title || `Chunk ${index + 1}`}`,
+        "",
+        `Status: ${item.approval_status || item.status || "draft"} | Medical: ${item.medical_review_status || "not_required"} | Active: ${item.active !== false}`,
+        "",
+        String(item.content || item.body || item.text || "").trim(),
+        "",
+        "---",
+        "",
+      ]),
+    ].join("\n");
+
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Disposition", `attachment; filename="${safeTitle}-notes.${extension}"`);
+    res.send(body);
+  } catch (error) {
+    console.error("Download education notes error:", error);
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+
 app.delete("/admin/crm/ai-training/documents/:documentId", async (req, res) => {
   try {
     const { user } = await requireCrmAdmin(req);
@@ -21086,6 +21310,30 @@ function ngTargetValue(...values) {
   return "";
 }
 
+function ngNormalizeTelegramChatId(value = "", { assumeGroup = false } = {}) {
+  let clean = String(value || "")
+    .trim()
+    .replace(/^[\u2010\u2011\u2012\u2013\u2014\u2212]/, "-")
+    .replace(/\s+/g, "");
+
+  if (!clean) return "";
+
+  if (/^https?:\/\//i.test(clean) || clean.includes("t.me/")) {
+    const error = new Error("Telegram delivery target must be numeric chat_id, not a t.me invite link.");
+    error.statusCode = 400;
+    error.hint = "Use the Telegram group ID from IDBot. For your group it should be -5240157430, including the minus sign.";
+    throw error;
+  }
+
+  // Telegram group/channel IDs are negative. Many admin UIs accidentally strip
+  // the minus sign, so for community publishing we restore it automatically.
+  if (assumeGroup && /^\d{7,}$/.test(clean)) {
+    clean = `-${clean}`;
+  }
+
+  return clean;
+}
+
 function ngNormalizeCommunityTargets(db, { platforms = [], community_ids = [], direct_targets = [] } = {}) {
   const platformList = ngContentPlatforms(platforms);
   const ids = ngContentList(community_ids);
@@ -21105,7 +21353,7 @@ function ngNormalizeCommunityTargets(db, { platforms = [], community_ids = [], d
       platform,
       community_id: community.id || null,
       community_name: community.community_name || community.name || community.title || "",
-      telegram_chat_id: ngTargetValue(
+      telegram_chat_id: ngNormalizeTelegramChatId(ngTargetValue(
         community.telegram_chat_id,
         community.chat_id,
         community.channel_id,
@@ -21113,7 +21361,7 @@ function ngNormalizeCommunityTargets(db, { platforms = [], community_ids = [], d
         community.platform_chat_id,
         community.target_id,
         community.delivery_target
-      ),
+      ), { assumeGroup: true }),
       whatsapp_to: ngTargetValue(
         community.whatsapp_to,
         community.whatsapp_number,
@@ -21138,7 +21386,10 @@ function ngNormalizeCommunityTargets(db, { platforms = [], community_ids = [], d
       platform,
       community_id: target.community_id || null,
       community_name: target.community_name || target.name || target.title || "",
-      telegram_chat_id: ngTargetValue(target.telegram_chat_id, target.chat_id, target.channel_id, target.target_id, target.to, target.recipient),
+      telegram_chat_id: ngNormalizeTelegramChatId(
+        ngTargetValue(target.telegram_chat_id, target.chat_id, target.channel_id, target.target_id, target.to, target.recipient),
+        { assumeGroup: Boolean(target.community_id || target.is_group || target.type === "group" || target.group === true) }
+      ),
       whatsapp_to: ngTargetValue(target.whatsapp_to, target.whatsapp_number, target.whatsapp, target.phone, target.phone_number, target.target_id, target.to, target.recipient),
       email_to: ngTargetValue(target.email_to, target.email, target.target_email, target.to, target.recipient),
       url: target.url || "",
@@ -21248,7 +21499,10 @@ async function ngPublishToPlatform({ platform, target = {}, post = {}, text = ""
     (Array.isArray(post.media_items) ? post.media_items.find((item) => item?.url || item?.image_url)?.url || post.media_items.find((item) => item?.url || item?.image_url)?.image_url : null);
 
   if (platform === "telegram") {
-    const chatId = target.telegram_chat_id || target.chat_id || target.to || target.recipient || "";
+    const chatId = ngNormalizeTelegramChatId(
+      target.telegram_chat_id || target.chat_id || target.to || target.recipient || "",
+      { assumeGroup: Boolean(target.community_id || target.raw?.id || target.raw?.community_name || target.raw?.name) }
+    );
     if (!chatId) throw Object.assign(new Error("Telegram target missing chat_id"), { statusCode: 400 });
     if (imageUrl) {
       return telegramApi("sendPhoto", {
@@ -22280,6 +22534,15 @@ app.use((err, req, res, next) => {
     success: false,
     error: err?.message || "Server error",
   });
+});
+
+
+process.on("unhandledRejection", (reason) => {
+  console.error("UNHANDLED REJECTION:", reason);
+});
+
+process.on("uncaughtException", (error) => {
+  console.error("UNCAUGHT EXCEPTION:", error);
 });
 
 app.listen(PORT, () => {
