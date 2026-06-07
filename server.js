@@ -13,8 +13,38 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-app.use(express.json({ limit: "60mb" }));
-app.use(cors({ origin: "*" }));
+const corsOptions = {
+  origin(origin, callback) {
+    const allowedOrigins = [
+      "https://live.nextgenusmlelms.com",
+      "https://www.live.nextgenusmlelms.com",
+      "https://lms.nextgenusmlelms.com",
+      "https://nextgenusmlelms.com",
+      "http://localhost:5173",
+      "http://localhost:3000",
+    ];
+
+    // Allow server-to-server tools, Render health checks, curl/Postman, and same-origin requests.
+    if (!origin || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    console.warn("Blocked by CORS:", origin);
+    return callback(new Error(`Not allowed by CORS: ${origin}`));
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "x-admin-token", "x-requested-with"],
+  optionsSuccessStatus: 204,
+};
+
+// CORS must run before body parsing so oversized/invalid upload payloads still return CORS headers.
+app.use(cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
+
+// AI-training PDFs are sent as base64 JSON, which is larger than the original PDF.
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || "200mb" }));
+app.use(express.urlencoded({ extended: true, limit: process.env.JSON_BODY_LIMIT || "200mb" }));
 
 const POCKETBASE_URL = process.env.POCKETBASE_URL;
 const DATA_DIR = process.env.DATA_DIR || "/tmp";
@@ -20186,18 +20216,23 @@ app.post("/admin/crm/ai-training/:id/reject", async (req, res) => {
 });
 
 
-app.post("/admin/crm/ai-training/import-document", async (req, res) => {
+async function importTrainingDocumentHandler(req, res) {
   try {
     const { user } = await requireCrmAdmin(req);
     const db = ngEnsureAiStore(await readCrmDb());
     db.ai_training_documents = ensureCrmArray(db, "ai_training_documents");
+    db.ai_training_items = ensureCrmArray(db, "ai_training_items");
 
     const filename = String(req.body?.filename || req.body?.name || "uploaded-document.pdf").trim();
     const mimeType = String(req.body?.mime_type || req.body?.mimeType || "application/pdf").trim();
     const title = String(req.body?.title || filename.replace(/\.pdf$/i, "") || "Imported Education PDF").trim();
     const category = req.body?.category || "Education Knowledge";
     const audience = req.body?.audience || req.body?.target_audience || "Community Content AI, Telegram Community Worker, LMS Tutor AI";
-    const tags = uniqueList([...(Array.isArray(req.body?.tags) ? req.body.tags : String(req.body?.tags || "").split(",")), "pdf_import", "education"]);
+    const tags = uniqueList([
+      ...(Array.isArray(req.body?.tags) ? req.body.tags : String(req.body?.tags || "").split(",")),
+      "pdf_import",
+      "education",
+    ]);
 
     let extractedText = String(req.body?.extracted_text || req.body?.text || req.body?.content || "").trim();
     let extraction = { method: extractedText ? "provided_text" : "none", pages: null };
@@ -20218,7 +20253,7 @@ app.post("/admin/crm/ai-training/import-document", async (req, res) => {
     if (!extractedText) {
       return res.status(422).json({
         success: false,
-        error: "Could not extract readable text from this PDF. Install pdf-parse in backend, upload a text-based PDF, or paste extracted_text from the frontend.",
+        error: "Could not extract readable text from this PDF. Try a text-based PDF, OCR PDF, TXT file, or paste extracted text.",
         extraction,
       });
     }
@@ -20278,7 +20313,7 @@ app.post("/admin/crm/ai-training/import-document", async (req, res) => {
     db.ai_training_items.unshift(...items);
     await writeCrmDb(db);
 
-    res.json({
+    return res.json({
       success: true,
       document,
       items_created: items.length,
@@ -20288,9 +20323,12 @@ app.post("/admin/crm/ai-training/import-document", async (req, res) => {
       preview: extractedText.slice(0, 700),
     });
   } catch (error) {
-    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+    console.error("Import training document error:", error);
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message || "Document import failed" });
   }
-});
+}
+
+app.post("/admin/crm/ai-training/import-document", importTrainingDocumentHandler);
 
 app.post("/admin/crm/ai-training/cleanup-corrupted", async (req, res) => {
   try {
@@ -20335,11 +20373,8 @@ app.post("/admin/crm/ai-training/cleanup-corrupted", async (req, res) => {
   }
 });
 
-app.post("/admin/crm/ai-training/upload-pdf", async (req, res, next) => {
-  // Alias kept for the frontend wording the user requested.
-  req.url = "/admin/crm/ai-training/import-document";
-  return app.handle(req, res, next);
-});
+// Alias kept for the frontend wording the user requested.
+app.post("/admin/crm/ai-training/upload-pdf", importTrainingDocumentHandler);
 
 // -----------------------------------------------------------------------------
 // END NEXTGEN SCOUT TELEGRAM WEBHOOK + AI TRAINING PDF IMPORT EXTENSION
@@ -22057,6 +22092,29 @@ app.post("/admin/crm/community-content/media-library", async (req, res) => {
 // -----------------------------------------------------------------------------
 // END NEXTGEN COMMUNITY CONTENT ROADMAP + MULTI-PLATFORM SCHEDULER
 // -----------------------------------------------------------------------------
+
+app.use((err, req, res, next) => {
+  console.error("GLOBAL EXPRESS ERROR:", err);
+
+  if (err?.type === "entity.too.large" || err?.status === 413 || err?.statusCode === 413) {
+    return res.status(413).json({
+      success: false,
+      error: "Uploaded file is too large for one request. Split the PDF into smaller parts or increase JSON_BODY_LIMIT on Render.",
+    });
+  }
+
+  if (err instanceof SyntaxError && "body" in err) {
+    return res.status(400).json({
+      success: false,
+      error: "Invalid JSON payload. Please retry the upload.",
+    });
+  }
+
+  return res.status(err?.statusCode || err?.status || 500).json({
+    success: false,
+    error: err?.message || "Server error",
+  });
+});
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
