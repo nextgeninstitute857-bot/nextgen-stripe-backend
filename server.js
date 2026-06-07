@@ -20259,6 +20259,34 @@ function ngFirstAidTrainingMatch(item = {}) {
   return firstAidMatch && !pathomaMatch;
 }
 
+function ngRequiresEducationPipeline(item = {}) {
+  const tags = Array.isArray(item.tags) ? item.tags.join(" ") : String(item.tags || "");
+  const haystack = [
+    item.title,
+    item.name,
+    item.filename,
+    item.file_name,
+    item.source,
+    tags,
+    item.content,
+    item.body,
+    item.text,
+  ].map((value) => String(value || "")).join("\n").toLowerCase();
+
+  // These are medical education books/resources. They must go through the
+  // structured Education Pipeline so the system creates review-first teaching
+  // chunks instead of raw reference fragments.
+  return (
+    ngFirstAidTrainingMatch(item) ||
+    haystack.includes("pathoma") ||
+    haystack.includes("fundamentals-of-pathology") ||
+    haystack.includes("fundamentals of pathology") ||
+    haystack.includes("sketchy") ||
+    haystack.includes("uworld") ||
+    haystack.includes("first aid")
+  );
+}
+
 async function importTrainingDocumentHandler(req, res) {
   try {
     const { user } = await requireCrmAdmin(req);
@@ -20294,6 +20322,27 @@ async function importTrainingDocumentHandler(req, res) {
     }
 
     extractedText = ngNormalizeTrainingText(extractedText);
+
+    const pipelineCheckPayload = {
+      title,
+      filename,
+      file_name: filename,
+      source: req.body?.source || "raw_reference_import_attempt",
+      tags,
+      content: extractedText.slice(0, 6000),
+    };
+
+    if (ngRequiresEducationPipeline(pipelineCheckPayload)) {
+      return res.status(409).json({
+        success: false,
+        error: "This looks like a medical education book/resource. Use the Education Pipeline button so it creates structured review-first teaching chunks instead of raw reference parts.",
+        education_pipeline_required: true,
+        correct_endpoint: "/admin/crm/ai-training/import-education-document",
+        blocked_route: req.originalUrl || req.path,
+        title,
+        filename,
+      });
+    }
 
     if (!extractedText) {
       return res.status(422).json({
