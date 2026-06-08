@@ -42,7 +42,7 @@ function applyNextGenCors(req, res) {
     requestHeaders || "Content-Type, Authorization, x-admin-token, x-requested-with"
   );
   res.setHeader("Access-Control-Max-Age", "86400");
-  res.setHeader("X-NextGen-Backend-Build", "v7-cors-community-publish");
+  res.setHeader("X-NextGen-Backend-Build", "v10-telegram-community-bot-routing");
 }
 
 // Hard CORS/preflight guard. This must be the first middleware after app creation.
@@ -81,7 +81,7 @@ app.use(express.urlencoded({ extended: true, limit: process.env.JSON_BODY_LIMIT 
 app.get("/admin/debug/cors-check", (req, res) => {
   res.json({
     success: true,
-    build: "v7-cors-community-publish",
+    build: "v10-telegram-community-bot-routing",
     origin: req.headers.origin || null,
     now: new Date().toISOString(),
   });
@@ -9679,6 +9679,66 @@ async function telegramApi(method, payload = {}, integration = {}) {
   }
 }
 
+function getTelegramCommunityBotToken(integration = {}) {
+  const fromIntegration =
+    integration?.community_bot_token ||
+    integration?.community_api_key ||
+    integration?.scout_bot_token ||
+    "";
+
+  return String(
+    process.env.TELEGRAM_COMMUNITY_BOT_TOKEN ||
+      process.env.TELEGRAM_SCOUT_BOT_TOKEN ||
+      fromIntegration ||
+      process.env.TELEGRAM_BOT_TOKEN ||
+      ""
+  ).trim();
+}
+
+async function telegramCommunityApi(method, payload = {}, integration = {}) {
+  const token = getTelegramCommunityBotToken(integration);
+  if (!token) {
+    const error = new Error(
+      "Telegram community bot token is missing. Add TELEGRAM_COMMUNITY_BOT_TOKEN or TELEGRAM_SCOUT_BOT_TOKEN in Render environment variables."
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+
+  try {
+    const response = await axios.post(
+      `https://api.telegram.org/bot${token}/${method}`,
+      payload,
+      { timeout: 30000 }
+    );
+
+    if (response.data?.ok === false) {
+      const error = new Error(response.data?.description || "Telegram community API request failed");
+      error.statusCode = 400;
+      error.telegram_response = response.data;
+      throw error;
+    }
+
+    return response.data;
+  } catch (error) {
+    const telegramDescription =
+      error?.response?.data?.description ||
+      error?.response?.data?.error ||
+      error?.message ||
+      "Telegram community API request failed";
+
+    const wrapped = new Error(telegramDescription);
+    wrapped.statusCode = error?.response?.status || error?.statusCode || 400;
+    wrapped.telegram_method = method;
+    wrapped.telegram_payload = {
+      ...payload,
+      // Never expose the bot token. Payload helps debug bad chat_id/format.
+    };
+    wrapped.telegram_response = error?.response?.data || error.telegram_response || null;
+    throw wrapped;
+  }
+}
+
 function findTelegramIntegration(db) {
   const integrations = ensureCrmArray(db, "integrations");
   return (
@@ -10049,6 +10109,89 @@ app.post("/admin/crm/integrations/telegram/send", async (req, res) => {
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/integrations/telegram/community-me", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const integration = findTelegramIntegration(db);
+    const result = await telegramCommunityApi("getMe", {}, integration || {});
+    res.json({
+      success: true,
+      bot: result.result,
+      live_connected: true,
+      mode: "community_bot",
+      token_source_priority: "TELEGRAM_COMMUNITY_BOT_TOKEN -> TELEGRAM_SCOUT_BOT_TOKEN -> TELEGRAM_BOT_TOKEN",
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+      telegram_response: error.telegram_response || null,
+    });
+  }
+});
+
+app.post("/admin/crm/integrations/telegram/community-send", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const chatId = req.body.chat_id || req.body.telegram_chat_id || req.body.to || req.body.channel_id;
+    const text = String(req.body.text || req.body.message || "").trim();
+
+    if (!chatId) return res.status(400).json({ success: false, error: "chat_id is required" });
+    if (!text) return res.status(400).json({ success: false, error: "text/message is required" });
+
+    const db = await readCrmDb();
+    const integration = findTelegramIntegration(db);
+    const normalizedChatId = ngNormalizeTelegramChatId(chatId, { assumeGroup: true });
+
+    const result = await telegramCommunityApi("sendMessage", {
+      chat_id: normalizedChatId || chatId,
+      text,
+      parse_mode: req.body.parse_mode || undefined,
+      disable_web_page_preview: req.body.disable_web_page_preview !== false,
+    }, integration || {});
+
+    db.conversations = ensureCrmArray(db, "conversations");
+    const conversation = withTimestamps({
+      id: uuid(),
+      lead_id: req.body.lead_id || null,
+      integration_id: integration?.id || null,
+      platform: "telegram",
+      channel: "telegram_community",
+      direction: "outbound",
+      telegram_chat_id: normalizedChatId || chatId,
+      text,
+      sent_by: user.email,
+      raw: result.result || result,
+    });
+    db.conversations.push(conversation);
+
+    createTelegramIntegrationLog(db, {
+      integration_id: integration?.id || null,
+      lead_id: req.body.lead_id || null,
+      action: "telegram_community_send_message",
+      status: "success",
+      message: `Sent Telegram community message to ${normalizedChatId || chatId}`,
+      raw: { message_id: result.result?.message_id || null },
+    });
+
+    await writeCrmDb(db);
+
+    res.json({
+      success: true,
+      message: "Telegram community message sent",
+      telegram: result,
+      conversation,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+      telegram_response: error.telegram_response || null,
+    });
   }
 });
 
@@ -21706,13 +21849,17 @@ async function ngPublishToPlatform({ platform, target = {}, post = {}, text = ""
     );
     if (!chatId) throw Object.assign(new Error("Telegram target missing chat_id"), { statusCode: 400 });
     if (imageUrl) {
-      return telegramApi("sendPhoto", {
+      return telegramCommunityApi("sendPhoto", {
         chat_id: chatId,
         photo: imageUrl,
         caption: messageText.slice(0, 1000),
       }, {});
     }
-    return sendTelegramMessage({ to: chatId, text: messageText, integration: {} });
+    return telegramCommunityApi("sendMessage", {
+      chat_id: chatId,
+      text: messageText,
+      disable_web_page_preview: false,
+    }, {});
   }
 
   if (platform === "whatsapp") {
