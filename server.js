@@ -42,7 +42,7 @@ function applyNextGenCors(req, res) {
     requestHeaders || "Content-Type, Authorization, x-admin-token, x-requested-with"
   );
   res.setHeader("Access-Control-Max-Age", "86400");
-  res.setHeader("X-NextGen-Backend-Build", "v10-telegram-community-bot-routing");
+  res.setHeader("X-NextGen-Backend-Build", "v13-roadmap-rebuild-safe");
 }
 
 // Hard CORS/preflight guard. This must be the first middleware after app creation.
@@ -81,7 +81,7 @@ app.use(express.urlencoded({ extended: true, limit: process.env.JSON_BODY_LIMIT 
 app.get("/admin/debug/cors-check", (req, res) => {
   res.json({
     success: true,
-    build: "v10-telegram-community-bot-routing",
+    build: "v13-roadmap-rebuild-safe",
     origin: req.headers.origin || null,
     now: new Date().toISOString(),
   });
@@ -21581,88 +21581,6 @@ function ngContentIsMedicalType(item = {}) {
   );
 }
 
-function ngStripCommunityMarkdown(text = "") {
-  return String(text || "")
-    .replace(/\*\*/g, "")
-    .replace(/^#{1,6}\s*/gm, "")
-    .replace(/`{1,3}/g, "")
-    .replace(/__([^_]+)__/g, "$1")
-    .replace(/
-/g, "
-")
-    .replace(/[ 	]+
-/g, "
-")
-    .replace(/
-{3,}/g, "
-
-")
-    .trim();
-}
-
-function ngCommunityQuestionFooter() {
-  return "Reply with A, B, C, D, or E. The answer and explanation will be posted later.";
-}
-
-function ngLooksLikeAnswerHeader(line = "") {
-  return /^(correct\s+answer|answer\s*:|explanation\s*:|key\s+distractor|distractor\s+explanation|why\s+the\s+other|teaching\s+point|note\s*:|community\s+post\s+version|tutor\s+explanation|suggested\s+mcq|medical\s+safety)/i.test(String(line || "").trim().replace(/^[-–—\s]+/, ""));
-}
-
-function ngExtractQuestionOnlyContent(text = "") {
-  const clean = ngStripCommunityMarkdown(text);
-  const lines = clean.split("
-");
-  const kept = [];
-
-  for (const line of lines) {
-    if (ngLooksLikeAnswerHeader(line)) break;
-    kept.push(line);
-  }
-
-  let question = kept.join("
-").trim() || clean;
-  question = question
-    .replace(/
-?Correct\s+Answer\s*:[\s\S]*$/i, "")
-    .replace(/
-?Answer\s*:[\s\S]*$/i, "")
-    .replace(/
-?Explanation\s*:[\s\S]*$/i, "")
-    .trim();
-
-  const footer = ngCommunityQuestionFooter();
-  if (!question.toLowerCase().includes(footer.toLowerCase())) question = `${question}
-
-${footer}`.trim();
-  return question;
-}
-
-function ngExtractAnswerOnlyContent(text = "") {
-  const clean = ngStripCommunityMarkdown(text);
-  const answerIndex = clean.search(/(^|
-)(Correct\s+Answer|Answer\s*:|Explanation\s*:)/i);
-  return (answerIndex >= 0 ? clean.slice(answerIndex).trim() : clean) || clean;
-}
-
-function ngFormatCommunityGeneratedContent(text = "", { answerOnly = false } = {}) {
-  return answerOnly ? ngExtractAnswerOnlyContent(text) : ngExtractQuestionOnlyContent(text);
-}
-
-function ngAddHoursToLocalDateTime(value, hours = 4) {
-  const clean = String(value || "").trim();
-  const match = clean.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/);
-  const h = Number(hours || 4);
-
-  if (!match) return ngAddHoursIsoLike(value, h);
-
-  const d = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4]), Number(match[5]), Number(match[6] || 0));
-  if (Number.isNaN(d.getTime())) return ngAddHoursIsoLike(value, h);
-  d.setHours(d.getHours() + h);
-
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:00`;
-}
-
 function ngContentBuildFallbackFromSources({ type = "daily_mcq", topic = "USMLE concept", sources = [], exam = "Step 1", answerOnly = false } = {}) {
   const sourceTitle = sources[0]?.title || sources[0]?.name || "approved source";
   if (answerOnly || String(type).includes("answer")) {
@@ -21673,7 +21591,7 @@ function ngContentBuildFallbackFromSources({ type = "daily_mcq", topic = "USMLE 
     return `Quick ${exam} Poll\n\nTopic: ${topic}\n\nWhich part of this topic is most confusing for you?\n\n1. Mechanism\n2. Clinical clue\n3. Diagnosis\n4. Differentiating similar options\n5. Exam strategy`;
   }
 
-  return `Daily ${exam} MCQ\n\nTopic: ${topic}\n\nA student is reviewing this concept from an approved source. Which approach best helps convert this topic into a testable USMLE point?\n\nA. Memorize isolated facts without context\nB. Skip the mechanism and only read the answer\nC. Identify the clinical clue, mechanism, and common distractor pattern\nD. Review only the title of the topic\nE. Avoid practice questions\n\n${ngCommunityQuestionFooter()}`;
+  return `Daily ${exam} MCQ\n\nTopic: ${topic}\n\nA student is reviewing this concept from an approved source. Which approach best helps convert this topic into a testable USMLE point?\n\nA. Memorize isolated facts without context\nB. Skip the mechanism and only read the answer\nC. Identify the clinical clue, mechanism, and common distractor pattern\nD. Review only the title of the topic\nE. Avoid practice questions\n\nCorrect Answer: C\n\nExplanation:\nUSMLE questions test mechanisms through clinical clues and distractors. Use the approved source "${sourceTitle}" to connect the clue to the mechanism and then practice similar questions.`;
 }
 
 async function ngGenerateContentFromApprovedSources({ db, body = {}, sources = [], answerOnly = false } = {}) {
@@ -21692,7 +21610,7 @@ async function ngGenerateContentFromApprovedSources({ db, body = {}, sources = [
 
   if (!isAIConfigured()) {
     return {
-      content: ngFormatCommunityGeneratedContent(ngContentBuildFallbackFromSources({ type, topic, sources, exam, answerOnly }), { answerOnly }),
+      content: ngContentBuildFallbackFromSources({ type, topic, sources, exam, answerOnly }),
       model: "local-approved-source-fallback",
       usage: {},
       ai_configured: false,
@@ -21710,9 +21628,7 @@ async function ngGenerateContentFromApprovedSources({ db, body = {}, sources = [
     `Topic: ${topic}`,
     `Mode: ${answerOnly ? "answer/explanation follow-up" : "question/content post"}`,
     `Instructions: ${extraInstruction || "Create concise, high-yield community content."}`,
-    answerOnly
-      ? `Required format: answer/explanation follow-up only. Include the correct answer, concise explanation, and key distractor explanations. Do not repeat the full question stem unless needed. Do not use markdown stars or ### headings.`
-      : `Required format: question post only. Include a concise title/topic, question stem, and A-E answer choices only. Do NOT include the correct answer, explanation, teaching point, or distractor explanations. End by asking students to reply with A-E and mention the answer will be posted later. Do not use markdown stars or ### headings.`
+    `Required safety: medical MCQs must be source-grounded, original, and review-ready. For MCQs include: question stem, A-E choices, correct answer, explanation, and why key distractors are wrong.`
   ].join("\n\n");
 
   const result = await callOpenAIResponsesAPI({
@@ -21722,10 +21638,8 @@ async function ngGenerateContentFromApprovedSources({ db, body = {}, sources = [
     maxOutputTokens: answerOnly ? 1500 : 1800,
   });
 
-  const generatedContent = result.text || ngContentBuildFallbackFromSources({ type, topic, sources, exam, answerOnly });
-
   return {
-    content: ngFormatCommunityGeneratedContent(generatedContent, { answerOnly }),
+    content: result.text || ngContentBuildFallbackFromSources({ type, topic, sources, exam, answerOnly }),
     model: result.model,
     usage: result.usage || {},
     ai_configured: true,
@@ -21837,6 +21751,7 @@ function ngTargetCanReceivePlatform(target = {}, platform = "") {
   if (cleanPlatform === "telegram") return Boolean(ngTargetValue(target.telegram_chat_id, target.chat_id, target.to, target.recipient));
   if (cleanPlatform === "whatsapp") return Boolean(ngTargetValue(target.whatsapp_to, target.whatsapp_number, target.phone, target.to, target.recipient));
   if (cleanPlatform === "email") return Boolean(ngTargetValue(target.email_to, target.email, target.to, target.recipient));
+  if (cleanPlatform === "reddit") return Boolean(ngTargetValue(target.subreddit, target.reddit_subreddit, target.community_name, process.env.REDDIT_DEFAULT_SUBREDDIT));
   return true;
 }
 
@@ -21924,8 +21839,7 @@ function ngContentCanPublish(post = {}) {
 }
 
 async function ngPublishToPlatform({ platform, target = {}, post = {}, text = "" }) {
-  const isAnswerPost = String(post.post_kind || "").toLowerCase() === "answer" || String(post.content_type || "").toLowerCase().includes("answer");
-  const messageText = ngFormatCommunityGeneratedContent(text || post.message || post.draft_content || "", { answerOnly: isAnswerPost });
+  const messageText = ngFormatPostTextForPlatform(post, text || post.message || post.draft_content || "", platform);
   const imageUrl = (Array.isArray(post.image_urls) ? post.image_urls[0] : null) ||
     (Array.isArray(post.media_items) ? post.media_items.find((item) => item?.url || item?.image_url)?.url || post.media_items.find((item) => item?.url || item?.image_url)?.image_url : null);
 
@@ -21963,8 +21877,15 @@ async function ngPublishToPlatform({ platform, target = {}, post = {}, text = ""
     return sendEmailMessage({ to, subject: post.title || "NextGen USMLE Community Post", text: body });
   }
 
-  // Facebook / Instagram / Reddit adapters can be connected later. We still keep the
-  // same scheduled-post contract now, so these channels are not Telegram-only.
+  if (platform === "reddit") {
+    if (target.subreddit || target.reddit_subreddit) {
+      post.reddit_subreddit = target.subreddit || target.reddit_subreddit;
+    }
+    return ngPublishRedditPost(post, messageText);
+  }
+
+  // Facebook / Instagram adapters can be connected later after Meta review. We keep
+  // the same scheduled-post contract now, so these channels are not Telegram-only.
   return {
     skipped: true,
     platform,
@@ -21997,7 +21918,7 @@ async function ngPublishScheduledPost(db, post = {}, actor = null) {
     throw error;
   }
 
-  const message = ngContentClean(post.message || post.draft_content || "");
+  const message = ngFormatPostTextForPlatform(post, post.message || post.draft_content || "", post.platform || "telegram");
   if (!message) {
     const error = new Error("Scheduled post has no message content");
     error.statusCode = 422;
@@ -22053,9 +21974,230 @@ function ngAddHoursIsoLike(value, hours = 4) {
   return d.toISOString();
 }
 
+const NG_WEEKLY_CONTENT_CALENDAR = [
+  { day: "Monday", content_type: "daily_mcq", label: "Daily UWorld-style MCQ", split_answer: true },
+  { day: "Tuesday", content_type: "first_aid_retention_tip", label: "First Aid retention tip", split_answer: false },
+  { day: "Wednesday", content_type: "nbme_mistake_breakdown", label: "NBME mistake breakdown", split_answer: false },
+  { day: "Thursday", content_type: "poll_exam_weak_area", label: "Poll: exam date / weak area", split_answer: false },
+  { day: "Friday", content_type: "mini_case", label: "Mini case + explanation", split_answer: true },
+  { day: "Saturday", content_type: "study_strategy_old_graduate", label: "Study strategy / old graduate guidance", split_answer: false },
+  { day: "Sunday", content_type: "soft_demo_invite", label: "Soft free 2-day LMS demo invite", split_answer: false },
+];
+
+function ngNormalizeContentType(value = "") {
+  return String(value || "daily_mcq")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "") || "daily_mcq";
+}
+
+function ngDefaultWeeklyContentMix() {
+  return NG_WEEKLY_CONTENT_CALENDAR.map((item) => item.content_type);
+}
+
+function ngRoadmapContentMix(roadmap = {}) {
+  const raw = ngContentList(roadmap.content_mix || roadmap.contentMix || roadmap.weekly_content_mix || roadmap.weekly_mix);
+  const normalized = raw.map(ngNormalizeContentType).filter(Boolean);
+  return normalized.length ? normalized : ngDefaultWeeklyContentMix();
+}
+
+function ngContentTypeLabel(type = "") {
+  const clean = ngNormalizeContentType(type);
+  const found = NG_WEEKLY_CONTENT_CALENDAR.find((item) => item.content_type === clean);
+  if (found) return found.label;
+  return clean.split("_").map((part) => part ? part[0].toUpperCase() + part.slice(1) : part).join(" ");
+}
+
+function ngContentTypeForIndex(roadmap = {}, index = 0) {
+  const mix = ngRoadmapContentMix(roadmap);
+  return mix[index % Math.max(1, mix.length)] || "daily_mcq";
+}
+
+function ngIsSplitContentType(type = "") {
+  const clean = ngNormalizeContentType(type);
+  return ["daily_mcq", "mcq", "uworld_style_mcq", "mini_case", "mini_case_question", "case_question"].includes(clean);
+}
+
+function ngAddHoursLocalLike(value, hours = 4) {
+  const clean = String(value || "").trim();
+  const match = clean.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (match) {
+    const d = new Date(`${match[1]}T${match[2]}:${match[3]}:${match[4] || "00"}`);
+    if (!Number.isNaN(d.getTime())) {
+      d.setHours(d.getHours() + Number(hours || 0));
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, "0");
+      const dd = String(d.getDate()).padStart(2, "0");
+      const hh = String(d.getHours()).padStart(2, "0");
+      const mi = String(d.getMinutes()).padStart(2, "0");
+      return `${yyyy}-${mm}-${dd}T${hh}:${mi}:00`;
+    }
+  }
+  return ngAddHoursIsoLike(value, hours);
+}
+
+function ngAnswerDateTimeForQuestion(questionAt, roadmap = {}) {
+  const delay = Number(roadmap.answer_delay_hours ?? roadmap.answerDelayHours ?? 4) || 4;
+  return ngAddHoursLocalLike(questionAt, delay);
+}
+
+function ngCleanCommunityText(value = "") {
+  let text = String(value || "");
+  text = text.replace(/\*\*/g, "");
+  text = text.replace(/^\s*#{1,6}\s*/gm, "");
+  text = text.replace(/`{1,3}/g, "");
+  text = text.replace(/^\s*(AI|Bot|Assistant|ChatGPT)\s*[:\-]\s*/gim, "");
+  text = text.replace(/^\s*(Here is|Here's)\s+(a|the)\s+/gim, "");
+  text = text.replace(/[ \t]+\n/g, "\n");
+  text = text.replace(/\n{3,}/g, "\n\n");
+  return text.trim();
+}
+
+function ngStripAnswerFromQuestionText(value = "") {
+  let text = ngCleanCommunityText(value);
+  const answerMarkers = [
+    /^\s*correct\s+answer\s*[:\-]/im,
+    /^\s*answer\s*[:\-]/im,
+    /^\s*explanation\s*[:\-]/im,
+    /^\s*key\s+distractor\s+explanations?\s*[:\-]/im,
+    /^\s*teaching\s+point\s*[:\-]/im,
+    /^\s*why\s+the\s+answer\s+is\s+correct\s*[:\-]/im,
+    /^\s*note\s*[:\-]/im,
+  ];
+  const cutAt = answerMarkers
+    .map((regex) => {
+      const m = text.match(regex);
+      return m ? m.index : -1;
+    })
+    .filter((idx) => idx >= 0)
+    .sort((a, b) => a - b)[0];
+  if (cutAt !== undefined) text = text.slice(0, cutAt).trim();
+  if (!/comment|reply|guess|answer below/i.test(text)) {
+    text = `${text}\n\nReply with your answer. The explanation will be posted later.`.trim();
+  }
+  return text;
+}
+
+function ngFormatPostTextForPlatform(post = {}, text = "", platform = "telegram") {
+  const cleanPlatform = ngCommunityPlatform(platform || post.platform || "telegram");
+  const type = ngNormalizeContentType(post.content_type);
+  const kind = String(post.post_kind || "").toLowerCase();
+  let finalText = ngCleanCommunityText(text || post.message || post.draft_content || "");
+  if (ngIsSplitContentType(type) && (kind === "question" || !kind)) {
+    finalText = ngStripAnswerFromQuestionText(finalText);
+  }
+  if (cleanPlatform === "whatsapp") {
+    return finalText.replace(/\n{3,}/g, "\n\n").slice(0, 3500).trim();
+  }
+  if (cleanPlatform === "reddit") {
+    return finalText.replace(/\n{3,}/g, "\n\n").trim();
+  }
+  return finalText.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function ngBuildRedditPostPayload(post = {}, text = "") {
+  const title = ngCleanCommunityText(post.reddit_title || post.title || post.topic || "USMLE Study Post").slice(0, 280);
+  const body = ngFormatPostTextForPlatform(post, text, "reddit");
+  const subreddit = String(post.subreddit || post.reddit_subreddit || process.env.REDDIT_DEFAULT_SUBREDDIT || "").replace(/^r\//i, "").trim();
+  return { subreddit, title, body };
+}
+
+function ngRedditStatus() {
+  const enabled = String(process.env.REDDIT_POSTING_ENABLED || "false").toLowerCase() === "true";
+  return {
+    enabled,
+    configured: Boolean(process.env.REDDIT_CLIENT_ID && process.env.REDDIT_CLIENT_SECRET && process.env.REDDIT_USERNAME && (process.env.REDDIT_PASSWORD || process.env.REDDIT_REFRESH_TOKEN)),
+    subreddit: process.env.REDDIT_DEFAULT_SUBREDDIT || null,
+    username: process.env.REDDIT_USERNAME || null,
+    mode: enabled ? "live_or_configured" : "disabled_until_reddit_approval",
+  };
+}
+
+let ngRedditCachedToken = null;
+async function ngGetRedditAccessToken() {
+  const status = ngRedditStatus();
+  if (!status.enabled) {
+    const error = new Error("Reddit posting is disabled. Set REDDIT_POSTING_ENABLED=true after Reddit approval and credentials are ready.");
+    error.statusCode = 409;
+    throw error;
+  }
+  if (!status.configured) {
+    const error = new Error("Reddit credentials are incomplete. Add REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USERNAME, REDDIT_PASSWORD or REDDIT_REFRESH_TOKEN, and REDDIT_USER_AGENT.");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (ngRedditCachedToken?.access_token && ngRedditCachedToken.expires_at > Date.now() + 60000) return ngRedditCachedToken.access_token;
+
+  const auth = Buffer.from(`${process.env.REDDIT_CLIENT_ID}:${process.env.REDDIT_CLIENT_SECRET}`).toString("base64");
+  const params = new URLSearchParams();
+  if (process.env.REDDIT_REFRESH_TOKEN) {
+    params.set("grant_type", "refresh_token");
+    params.set("refresh_token", process.env.REDDIT_REFRESH_TOKEN);
+  } else {
+    params.set("grant_type", "password");
+    params.set("username", process.env.REDDIT_USERNAME || "");
+    params.set("password", process.env.REDDIT_PASSWORD || "");
+  }
+
+  const response = await axios.post("https://www.reddit.com/api/v1/access_token", params.toString(), {
+    headers: {
+      Authorization: `Basic ${auth}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+      "User-Agent": process.env.REDDIT_USER_AGENT || `nextgen-usmle-community/1.0 by u/${process.env.REDDIT_USERNAME || "NextGenUSMLEHelper"}`,
+    },
+    timeout: 30000,
+  });
+
+  const token = response.data?.access_token;
+  if (!token) {
+    const error = new Error("Reddit token request did not return an access token.");
+    error.statusCode = 502;
+    throw error;
+  }
+  ngRedditCachedToken = {
+    access_token: token,
+    expires_at: Date.now() + Number(response.data?.expires_in || 3600) * 1000,
+  };
+  return token;
+}
+
+async function ngPublishRedditPost(post = {}, text = "") {
+  const payload = ngBuildRedditPostPayload(post, text);
+  if (!payload.subreddit) {
+    const error = new Error("Reddit target subreddit is missing. Add REDDIT_DEFAULT_SUBREDDIT or a reddit_subreddit on the post/community target.");
+    error.statusCode = 400;
+    throw error;
+  }
+  const token = await ngGetRedditAccessToken();
+  const params = new URLSearchParams();
+  params.set("sr", payload.subreddit);
+  params.set("kind", "self");
+  params.set("title", payload.title);
+  params.set("text", payload.body);
+  params.set("api_type", "json");
+  params.set("resubmit", "true");
+
+  const response = await axios.post("https://oauth.reddit.com/api/submit", params.toString(), {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+      "User-Agent": process.env.REDDIT_USER_AGENT || `nextgen-usmle-community/1.0 by u/${process.env.REDDIT_USERNAME || "NextGenUSMLEHelper"}`,
+    },
+    timeout: 30000,
+  });
+  return { reddit: response.data, payload };
+}
+
+function ngShouldDraftContextualReply({ comment = "", mentioned = false } = {}) {
+  const text = String(comment || "").toLowerCase();
+  if (mentioned) return true;
+  return /\b(why|how|explain|confused|answer|correct|wrong|mechanism|because|what does|what is|can you clarify)\b/.test(text);
+}
+
 function ngCreateRoadmapScheduledPosts(db, roadmap = {}, ctx = {}) {
   const posts = ngContentArray(db, "community_scheduled_posts");
-  const days = Number(roadmap.days || 30);
+  const days = Math.min(90, Math.max(1, Number(roadmap.days || 30)));
   const start = new Date(`${String(roadmap.start_date || todayKey()).slice(0, 10)}T00:00:00`);
   const topics = Array.isArray(roadmap.topics) && roadmap.topics.length ? roadmap.topics : [];
   const created = [];
@@ -22064,61 +22206,77 @@ function ngCreateRoadmapScheduledPosts(db, roadmap = {}, ctx = {}) {
     const d = new Date(start);
     d.setDate(start.getDate() + i);
     const dateKeyValue = d.toISOString().slice(0, 10);
-    const topic = topics[i] || `${roadmap.topic || "USMLE high-yield topic"} — Day ${i + 1}`;
+    const contentType = ngContentTypeForIndex(roadmap, i);
+    const label = ngContentTypeLabel(contentType);
+    const topic = topics[i] || `${roadmap.topic || label || "USMLE high-yield topic"} — Day ${i + 1}`;
+    const scheduledAt = ngRoadmapDateTime(dateKeyValue, roadmap.question_time || roadmap.post_time || "10:00", roadmap.timezone);
+    const sourceIds = ngContentList(roadmap.source_ids);
 
-    const questionAt = ngRoadmapDateTime(dateKeyValue, roadmap.question_time || roadmap.post_time || "10:00", roadmap.timezone);
-    const answerAt = roadmap.answer_time
-      ? ngRoadmapDateTime(dateKeyValue, roadmap.answer_time, roadmap.timezone)
-      : ngAddHoursToLocalDateTime(questionAt, Number(roadmap.answer_delay_hours || 4));
-
-    const question = ngBuildScheduledPostPayload({
-      title: `${roadmap.title || "Community Roadmap"} — Day ${i + 1} Question`,
+    const basePayload = {
+      title: `${roadmap.title || "Community Roadmap"} — Day ${i + 1} — ${label}`,
       topic,
-      content_type: roadmap.content_type || "daily_mcq",
-      post_kind: "question",
+      content_type: contentType,
       message: "",
-      scheduled_at: questionAt,
+      scheduled_at: scheduledAt,
       timezone: roadmap.timezone || DEFAULT_TIMEZONE,
       platforms: roadmap.platforms,
       community_ids: roadmap.community_ids,
-      source_ids: roadmap.source_ids,
+      source_ids: sourceIds,
       media_items: roadmap.media_items || [],
       image_urls: roadmap.image_urls || [],
       status: "draft",
       approval_status: "needs_review",
-    }, ctx, {
-      roadmap_id: roadmap.id,
-      title: `${roadmap.title || "Community Roadmap"} — Day ${i + 1} Question`,
-      topic,
-      created_by: ctx.user?.id || null,
-    });
+    };
 
-    const answer = ngBuildScheduledPostPayload({
-      title: `${roadmap.title || "Community Roadmap"} — Day ${i + 1} Answer`,
-      topic,
-      content_type: "answer_explanation",
-      post_kind: "answer",
-      parent_post_id: question.id,
-      message: "",
-      scheduled_at: answerAt,
-      timezone: roadmap.timezone || DEFAULT_TIMEZONE,
-      platforms: roadmap.platforms,
-      community_ids: roadmap.community_ids,
-      source_ids: roadmap.source_ids,
-      media_items: roadmap.media_items || [],
-      image_urls: roadmap.image_urls || [],
-      status: "draft",
-      approval_status: "needs_review",
-    }, ctx, {
-      roadmap_id: roadmap.id,
-      parent_post_id: question.id,
-      title: `${roadmap.title || "Community Roadmap"} — Day ${i + 1} Answer`,
-      topic,
-      created_by: ctx.user?.id || null,
-    });
+    if (ngIsSplitContentType(contentType)) {
+      const question = ngBuildScheduledPostPayload({
+        ...basePayload,
+        post_kind: "question",
+      }, ctx, {
+        roadmap_id: roadmap.id,
+        title: `${roadmap.title || "Community Roadmap"} — Day ${i + 1} — ${label}`,
+        topic,
+        created_by: ctx.user?.id || null,
+      });
+      question.day_number = i + 1;
+      question.weekly_content_type = contentType;
+      question.answer_delay_hours = Number(roadmap.answer_delay_hours || 4);
 
-    posts.push(question, answer);
-    created.push(question, answer);
+      const answer = ngBuildScheduledPostPayload({
+        ...basePayload,
+        title: `${roadmap.title || "Community Roadmap"} — Day ${i + 1} — Explanation`,
+        content_type: "answer_explanation",
+        post_kind: "answer",
+        parent_post_id: question.id,
+        scheduled_at: ngAnswerDateTimeForQuestion(scheduledAt, roadmap),
+      }, ctx, {
+        roadmap_id: roadmap.id,
+        parent_post_id: question.id,
+        title: `${roadmap.title || "Community Roadmap"} — Day ${i + 1} — Explanation`,
+        topic,
+        created_by: ctx.user?.id || null,
+      });
+      answer.day_number = i + 1;
+      answer.weekly_content_type = "answer_explanation";
+      answer.answer_delay_hours = Number(roadmap.answer_delay_hours || 4);
+
+      posts.push(question, answer);
+      created.push(question, answer);
+    } else {
+      const single = ngBuildScheduledPostPayload({
+        ...basePayload,
+        post_kind: "single",
+      }, ctx, {
+        roadmap_id: roadmap.id,
+        title: `${roadmap.title || "Community Roadmap"} — Day ${i + 1} — ${label}`,
+        topic,
+        created_by: ctx.user?.id || null,
+      });
+      single.day_number = i + 1;
+      single.weekly_content_type = contentType;
+      posts.push(single);
+      created.push(single);
+    }
   }
 
   return created;
@@ -22297,640 +22455,19 @@ function ngCreateAutopilotScheduledPosts(db, roadmap = {}, selections = [], ctx 
     const d = new Date(start);
     d.setDate(start.getDate() + i);
     const dateKeyValue = d.toISOString().slice(0, 10);
-    const topic = pick.topic || `${roadmap.topic || "USMLE topic"} — Day ${i + 1}`;
+    const contentType = ngContentTypeForIndex(roadmap, i);
+    const label = ngContentTypeLabel(contentType);
+    const topic = pick.topic || `${roadmap.topic || label || "USMLE topic"} — Day ${i + 1}`;
     const bookLabel = pick.book_name || "Approved Source";
-    const questionAt = ngRoadmapDateTime(dateKeyValue, roadmap.question_time || roadmap.post_time || "10:00", roadmap.timezone);
-    const answerAt = roadmap.answer_time
-      ? ngRoadmapDateTime(dateKeyValue, roadmap.answer_time, roadmap.timezone)
-      : ngAddHoursToLocalDateTime(questionAt, Number(roadmap.answer_delay_hours || 4));
+    const scheduledAt = ngRoadmapDateTime(dateKeyValue, roadmap.question_time || roadmap.post_time || "10:00", roadmap.timezone);
     const sourceIds = [pick.source_id].filter(Boolean);
 
-    const question = ngBuildScheduledPostPayload({
-      title: `Day ${i + 1} — ${bookLabel} — ${topic}`,
-      topic,
-      content_type: roadmap.content_type || "daily_mcq",
-      post_kind: "question",
-      message: "",
-      scheduled_at: questionAt,
-      timezone: roadmap.timezone || DEFAULT_TIMEZONE,
-      platforms: roadmap.platforms,
-      community_ids: roadmap.community_ids,
-      source_ids: sourceIds,
-      media_items: roadmap.media_items || [],
-      image_urls: roadmap.image_urls || [],
-      status: "draft",
-      approval_status: "needs_review",
-    }, ctx, {
-      roadmap_id: roadmap.id,
-      title: `Day ${i + 1} — ${bookLabel} — ${topic}`,
-      topic,
-      created_by: ctx.user?.id || null,
-    });
-    question.autopilot = true;
-    question.day_number = i + 1;
-    question.source_title = pick.source_title;
-    question.book_name = bookLabel;
-    question.rotation_strategy = roadmap.rotation_strategy;
-
-    const answer = ngBuildScheduledPostPayload({
-      title: `Day ${i + 1} Answer — ${bookLabel} — ${topic}`,
-      topic,
-      content_type: "answer_explanation",
-      post_kind: "answer",
-      parent_post_id: question.id,
-      message: "",
-      scheduled_at: answerAt,
-      timezone: roadmap.timezone || DEFAULT_TIMEZONE,
-      platforms: roadmap.platforms,
-      community_ids: roadmap.community_ids,
-      source_ids: sourceIds,
-      media_items: roadmap.media_items || [],
-      image_urls: roadmap.image_urls || [],
-      status: "draft",
-      approval_status: "needs_review",
-    }, ctx, {
-      roadmap_id: roadmap.id,
-      parent_post_id: question.id,
-      title: `Day ${i + 1} Answer — ${bookLabel} — ${topic}`,
-      topic,
-      created_by: ctx.user?.id || null,
-    });
-    answer.autopilot = true;
-    answer.day_number = i + 1;
-    answer.source_title = pick.source_title;
-    answer.book_name = bookLabel;
-    answer.rotation_strategy = roadmap.rotation_strategy;
-
-    posts.push(question, answer);
-    created.push(question, answer);
-  }
-
-  return created;
-}
-
-async function ngGenerateAutopilotPostContent({ db, post, roadmap = {}, source = null } = {}) {
-  const sourceIds = post.source_ids && post.source_ids.length ? post.source_ids : (source ? [source.__source_id || source.id] : []);
-  const sources = ngApprovedTrainingSources(db, sourceIds);
-  const ai = await ngGenerateContentFromApprovedSources({
-    db,
-    sources,
-    body: {
-      ...post,
-      topic: post.topic,
-      title: post.title,
-      content_type: post.content_type,
-      instructions: [
-        roadmap.instructions || "",
-        "Use the selected approved source only.",
-        "Do not repeat earlier roadmap topics.",
-        "Make this suitable for public USMLE community posting.",
-      ].filter(Boolean).join("\n"),
-    },
-    answerOnly: String(post.post_kind || "").toLowerCase() === "answer" || String(post.content_type || "").toLowerCase().includes("answer"),
-  });
-  const formattedContent = ngFormatCommunityGeneratedContent(ai.content, {
-    answerOnly: String(post.post_kind || "").toLowerCase() === "answer" || String(post.content_type || "").toLowerCase().includes("answer"),
-  });
-  post.message = formattedContent;
-  post.draft_content = formattedContent;
-  post.ai_model = ai.model;
-  post.ai_usage = ai.usage;
-  post.ai_configured = ai.ai_configured;
-  post.status = "needs_review";
-  post.approval_status = "needs_review";
-  post.medical_review_status = ngContentIsMedicalType(post) ? "needs_review" : "not_required";
-  post.ready_to_post = false;
-  post.generated_at = nowIso();
-  post.updated_at = nowIso();
-  return post;
-}
-
-
-// -----------------------------------------------------------------------------
-// NEXTGEN v12 COMMUNITY CONTENT ENGINE
-// Platform-wide weekly content calendar, clean professional formatting, Reddit
-// adapter placeholder/OAuth support, contextual replies, and cost guardrails.
-// This section intentionally overrides selected v11 helpers without changing
-// LMS, CRM, Telegram, WhatsApp, Email, AI Training, or approval flows.
-// -----------------------------------------------------------------------------
-
-const NG_WEEKLY_CONTENT_CALENDAR = [
-  {
-    day: "monday",
-    content_type: "daily_mcq",
-    label: "Daily UWorld-style MCQ",
-    split_answer: true,
-    default_time: "10:00",
-    answer_delay_hours: 4,
-  },
-  {
-    day: "tuesday",
-    content_type: "first_aid_retention_tip",
-    label: "First Aid retention tip",
-    split_answer: false,
-    default_time: "10:00",
-  },
-  {
-    day: "wednesday",
-    content_type: "nbme_mistake_breakdown",
-    label: "NBME mistake breakdown",
-    split_answer: false,
-    default_time: "10:00",
-  },
-  {
-    day: "thursday",
-    content_type: "poll_exam_weak_area",
-    label: "Poll: exam date / weak area",
-    split_answer: false,
-    default_time: "10:00",
-  },
-  {
-    day: "friday",
-    content_type: "mini_case",
-    label: "Mini case + explanation",
-    split_answer: true,
-    default_time: "10:00",
-    answer_delay_hours: 4,
-  },
-  {
-    day: "saturday",
-    content_type: "study_strategy_old_graduate",
-    label: "Study strategy / old graduate guidance",
-    split_answer: false,
-    default_time: "10:00",
-  },
-  {
-    day: "sunday",
-    content_type: "soft_demo_invite",
-    label: "Soft free 2-day LMS demo invite",
-    split_answer: false,
-    default_time: "10:00",
-  },
-];
-
-function ngNormalizeContentType(value = "daily_mcq") {
-  return String(value || "daily_mcq")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "") || "daily_mcq";
-}
-
-function ngPostRequiresAnswerFollowup(type = "", post = {}) {
-  const t = ngNormalizeContentType(type || post.content_type || post.post_type);
-  if (String(post.post_kind || "").toLowerCase() === "answer") return false;
-  return ["daily_mcq", "mcq", "uworld_style_mcq", "mini_case", "mini_case_question", "case_question"].includes(t);
-}
-
-function ngPostIsAnswer(post = {}) {
-  const t = ngNormalizeContentType(post.content_type || post.post_type);
-  return String(post.post_kind || "").toLowerCase() === "answer" || t.includes("answer") || t.includes("explanation_followup");
-}
-
-function ngWeeklyCalendarItemForIndex(index = 0, roadmap = {}) {
-  const custom = Array.isArray(roadmap.content_mix) ? roadmap.content_mix.map(ngNormalizeContentType).filter(Boolean) : [];
-  const oldMcqOnlyDefault = custom.length === 2 && custom.includes("daily_mcq") && custom.includes("answer_explanation");
-  const useCustom = custom.length && !oldMcqOnlyDefault;
-  if (useCustom) {
-    const contentType = custom[index % custom.length];
-    return {
-      day: `day_${index + 1}`,
-      content_type: contentType,
-      label: ngContentTypeLabel(contentType),
-      split_answer: ngPostRequiresAnswerFollowup(contentType),
-      default_time: roadmap.post_time || roadmap.question_time || "10:00",
-      answer_delay_hours: Number(roadmap.answer_delay_hours || 4),
-    };
-  }
-  return NG_WEEKLY_CONTENT_CALENDAR[index % NG_WEEKLY_CONTENT_CALENDAR.length];
-}
-
-function ngContentTypeLabel(type = "daily_mcq") {
-  const t = ngNormalizeContentType(type);
-  const found = NG_WEEKLY_CONTENT_CALENDAR.find((item) => item.content_type === t);
-  if (found) return found.label;
-  return t.split("_").map((part) => part ? part[0].toUpperCase() + part.slice(1) : "").join(" ").trim() || "Community post";
-}
-
-function ngProfessionalTextClean(text = "") {
-  let clean = String(text || "");
-
-  clean = clean
-    .replace(/\*\*/g, "")
-    .replace(/\*/g, "")
-    .replace(/^#{1,6}\s*/gm, "")
-    .replace(/`{1,3}/g, "")
-    .replace(/__([^_]+)__/g, "$1")
-    .replace(/^\s*>\s?/gm, "")
-    .replace(/^\s*[-–—]\s*\*?/gm, "- ")
-    .replace(/\bAI[-\s]?generated\b/gi, "")
-    .replace(/\bAs an AI\b/gi, "")
-    .replace(/\bCommunity Content on\b/gi, "")
-    .replace(/\bStay tuned for more high-yield questions!?\b/gi, "")
-    .replace(/\s+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-
-  // Keep normal medical commas because they are grammatically necessary. The goal
-  // is to remove raw markdown punctuation, not to damage professional sentences.
-  return clean;
-}
-
-function ngCleanHeadingLine(line = "") {
-  return ngProfessionalTextClean(line)
-    .replace(/\s*:\s*$/g, "")
-    .trim();
-}
-
-function ngStripCommunityMarkdown(text = "") {
-  return ngProfessionalTextClean(text);
-}
-
-function ngLooksLikeAnswerHeader(line = "") {
-  const clean = ngCleanHeadingLine(String(line || "").replace(/^[-–—\s]+/, ""));
-  return /^(correct\s+answer|answer|explanation|key\s+distractor|distractor\s+explanation|why\s+the\s+other|teaching\s+point|note|community\s+post\s+version|tutor\s+explanation|suggested\s+mcq|medical\s+safety)/i.test(clean);
-}
-
-function ngCommunityQuestionFooter() {
-  return "Reply with A, B, C, D, or E. The answer and explanation will be posted later.";
-}
-
-function ngExtractQuestionOnlyContent(text = "") {
-  const clean = ngProfessionalTextClean(text);
-  const lines = clean.split("\n");
-  const kept = [];
-  for (const line of lines) {
-    if (ngLooksLikeAnswerHeader(line)) break;
-    kept.push(line);
-  }
-  let question = kept.join("\n").trim() || clean;
-  question = question
-    .replace(/\n?Correct\s+Answer\s*:[\s\S]*$/i, "")
-    .replace(/\n?Answer\s*:[\s\S]*$/i, "")
-    .replace(/\n?Explanation\s*:[\s\S]*$/i, "")
-    .trim();
-  const footer = ngCommunityQuestionFooter();
-  if (!question.toLowerCase().includes(footer.toLowerCase())) question = `${question}\n\n${footer}`.trim();
-  return ngProfessionalTextClean(question);
-}
-
-function ngExtractAnswerOnlyContent(text = "") {
-  const clean = ngProfessionalTextClean(text);
-  const answerIndex = clean.search(/(^|\n)(Correct\s+Answer|Answer\s*:|Explanation\s*:)/i);
-  const answer = (answerIndex >= 0 ? clean.slice(answerIndex).trim() : clean) || clean;
-  return ngProfessionalTextClean(answer);
-}
-
-function ngFormatCommunityGeneratedContent(text = "", { answerOnly = false, contentType = "daily_mcq", post = null } = {}) {
-  const t = ngNormalizeContentType(contentType || post?.content_type || post?.post_type);
-  if (answerOnly || ngPostIsAnswer(post || { content_type: t })) return ngExtractAnswerOnlyContent(text);
-  if (ngPostRequiresAnswerFollowup(t, post || {})) return ngExtractQuestionOnlyContent(text);
-  return ngProfessionalTextClean(text);
-}
-
-function ngPlatformTextLimit(platform = "telegram") {
-  const p = ngCommunityPlatform(platform || "telegram");
-  if (p === "whatsapp") return 1800;
-  if (p === "telegram") return 3900;
-  if (p === "reddit") return 9500;
-  if (p === "facebook" || p === "instagram") return 2200;
-  return 3000;
-}
-
-function ngFormatForPlatform({ platform = "telegram", post = {}, text = "" } = {}) {
-  const p = ngCommunityPlatform(platform || post.platform || "telegram");
-  const t = ngNormalizeContentType(post.content_type || post.post_type || "daily_mcq");
-  const answerOnly = ngPostIsAnswer(post);
-  let body = ngFormatCommunityGeneratedContent(text || post.message || post.draft_content || "", { answerOnly, contentType: t, post });
-  const limit = ngPlatformTextLimit(p);
-
-  if (p === "whatsapp") {
-    body = body
-      .replace(/\n{3,}/g, "\n\n")
-      .replace(/\n-\s+/g, "\n• ")
-      .trim();
-  }
-
-  if (p === "reddit") {
-    const titleBase = ngProfessionalTextClean(post.title || post.topic || ngContentTypeLabel(t) || "USMLE Study Post")
-      .replace(/\n+/g, " ")
-      .slice(0, 280);
-    const bodyText = body.slice(0, limit);
-    return { title: titleBase || "USMLE Study Post", body: bodyText };
-  }
-
-  return body.slice(0, limit);
-}
-
-function ngContentBuildFallbackFromSources({ type = "daily_mcq", topic = "USMLE concept", sources = [], exam = "Step 1", answerOnly = false } = {}) {
-  const t = ngNormalizeContentType(type);
-  const sourceTitle = sources[0]?.title || sources[0]?.name || "approved source";
-
-  if (answerOnly || t.includes("answer")) {
-    return `Correct answer: Review the approved explanation for ${topic}.\n\nExplanation:\nThe key is to connect the clinical clue with the underlying mechanism. Use ${sourceTitle} to review why the correct option fits and why the common distractors are less likely.`;
-  }
-
-  if (t === "daily_mcq" || t === "mcq" || t === "uworld_style_mcq") {
-    return `Daily ${exam} MCQ\n\nTopic: ${topic}\n\nA student is reviewing this concept from an approved source. Which approach best turns this topic into a testable USMLE point?\n\nA. Memorize isolated facts without context\nB. Skip the mechanism and only read the answer\nC. Identify the clinical clue, mechanism, and common distractor pattern\nD. Review only the title of the topic\nE. Avoid practice questions\n\n${ngCommunityQuestionFooter()}`;
-  }
-
-  if (t === "first_aid_retention_tip") {
-    return `First Aid retention tip\n\nTopic: ${topic}\n\nDo not memorize this topic as an isolated line. Attach it to one clinical clue, one mechanism, and one common exam trap. Review it once today, then test yourself again tomorrow with a short recall question.`;
-  }
-
-  if (t === "nbme_mistake_breakdown") {
-    return `NBME mistake breakdown\n\nTopic: ${topic}\n\nMost mistakes happen when students recognize the disease but miss the mechanism being tested. Before choosing an answer, identify the clue, the mechanism, and the distractor that looks similar but does not match the stem.`;
-  }
-
-  if (t === "poll_exam_weak_area") {
-    return `Quick USMLE poll\n\nWhat is your weakest area this week?\n\nA. Exam date planning\nB. UWorld consistency\nC. First Aid retention\nD. NBME score improvement\nE. Test-taking strategy\n\nReply with your option.`;
-  }
-
-  if (t === "mini_case") {
-    return `Mini case\n\nTopic: ${topic}\n\nA patient presents with a classic clinical clue related to this topic. Which mechanism best explains the finding?\n\nA. Immune-mediated injury\nB. Vascular obstruction\nC. Enzyme deficiency\nD. Receptor blockade\nE. Normal physiologic variant\n\n${ngCommunityQuestionFooter()}`;
-  }
-
-  if (t === "study_strategy_old_graduate") {
-    return `Study strategy\n\nOlder graduates should avoid passive reading for months. Start with a structured plan, use UWorld explanations actively, review First Aid around missed concepts, and track NBME progress. Consistency matters more than long unfocused study hours.`;
-  }
-
-  if (t === "soft_demo_invite") {
-    return `Free 2-day LMS demo\n\nIf you want to see how our USMLE teaching flow works, you can try the NextGen LMS demo for 2 days. Use it to sample the UWorld-style video explanations and decide whether the teaching style fits your preparation.`;
-  }
-
-  return `USMLE study post\n\nTopic: ${topic}\n\nFocus on the clinical clue, the mechanism, and the most common distractor. This is the safest way to turn reading into exam performance.`;
-}
-
-function ngPromptInstructionsForContentType({ type = "daily_mcq", answerOnly = false, platform = "telegram" } = {}) {
-  const t = ngNormalizeContentType(type);
-  const base = [
-    "Use plain professional text only.",
-    "Do not use markdown stars, hash headings, code fences, emojis, or exaggerated sales language.",
-    "Do not write 'AI-generated' or mention that an AI made the post.",
-    "Keep the post educational, concise, and suitable for public USMLE communities.",
-  ];
-
-  if (answerOnly) {
-    return [...base, "Create only the answer and explanation follow-up. Include correct answer, why it is correct, and concise distractor explanations. Do not repeat the full question unless needed."].join(" ");
-  }
-
-  if (ngPostRequiresAnswerFollowup(t)) {
-    return [...base, "Create the question post only. Include title, stem, and A-E options. Do not include the correct answer, explanation, teaching point, or distractor explanations. End by asking students to reply A-E and saying the answer will be posted later."].join(" ");
-  }
-
-  if (t === "first_aid_retention_tip") return [...base, "Create one First Aid retention tip with a memory approach, a common trap, and one action for today. No MCQ answer split."].join(" ");
-  if (t === "nbme_mistake_breakdown") return [...base, "Create one NBME-style mistake breakdown focused on why students miss this concept and how to avoid the trap. No question-answer split unless the user specifically asks."].join(" ");
-  if (t === "poll_exam_weak_area") return [...base, "Create one poll with clear options about exam date, weak area, or study obstacle. Keep it easy to answer."].join(" ");
-  if (t === "study_strategy_old_graduate") return [...base, "Create one supportive strategy post for older graduates or students with study gaps. Create urgency without fear or false promises."].join(" ");
-  if (t === "soft_demo_invite") return [...base, "Create one soft invite for a free 2-day LMS demo. Make it helpful, not pushy. Do not overpromise results."].join(" ");
-  return [...base, "Create one clean educational community post. Do not split into answer/explanation unless it is an MCQ or mini case."].join(" ");
-}
-
-async function ngGenerateContentFromApprovedSources({ db, body = {}, sources = [], answerOnly = false } = {}) {
-  const type = ngNormalizeContentType(body.content_type || body.post_type || (answerOnly ? "answer_explanation" : "daily_mcq"));
-  const exam = ngContentClean(body.exam_type || body.exam || "Step 1", "Step 1");
-  const topic = ngContentClean(body.topic || body.title || "USMLE preparation", "USMLE preparation");
-  const platform = ngCommunityPlatform(body.platform || body.channel || "telegram");
-  const audience = ngContentClean(body.audience || "USMLE students", "USMLE students");
-  const extraInstruction = ngContentClean(body.instructions || body.cta || "", "");
-
-  if (!sources.length && body.allow_general_knowledge !== true) {
-    const error = new Error("No approved medical training source selected. Approve/select a source first, or explicitly allow general knowledge.");
-    error.statusCode = 422;
-    throw error;
-  }
-
-  if (!isAIConfigured()) {
-    const fallback = ngContentBuildFallbackFromSources({ type, topic, sources, exam, answerOnly });
-    return { content: ngFormatCommunityGeneratedContent(fallback, { answerOnly, contentType: type }), model: "local-approved-source-fallback", usage: {}, ai_configured: false };
-  }
-
-  const sourceContext = ngSourceContextForGeneration(sources);
-  const systemPrompt = "You are NextGen USMLE Community Content AI. Generate medically careful, original educational content for public communities. Use only the approved source context when medical content is requested. Do not copy long passages. Do not invent unsupported facts. Use clean professional plain text.";
-  const userPrompt = [
-    `Approved source context:\n${sourceContext || "No approved source context was selected."}`,
-    `Platform: ${platform}`,
-    `Content type: ${type}`,
-    `Exam: ${exam}`,
-    `Audience: ${audience}`,
-    `Topic: ${topic}`,
-    `Mode: ${answerOnly ? "answer/explanation follow-up" : "community post"}`,
-    `Instructions: ${extraInstruction || "Create concise, high-yield community content."}`,
-    ngPromptInstructionsForContentType({ type, answerOnly, platform }),
-  ].join("\n\n");
-
-  const result = await callOpenAIResponsesAPI({
-    model: getAIModel(process.env.AI_CONTENT_MODEL || "gpt-4o-mini"),
-    systemPrompt,
-    userPrompt,
-    maxOutputTokens: answerOnly ? 1300 : 1600,
-  });
-
-  const generatedContent = result.text || ngContentBuildFallbackFromSources({ type, topic, sources, exam, answerOnly });
-  return {
-    content: ngFormatCommunityGeneratedContent(generatedContent, { answerOnly, contentType: type }),
-    model: result.model,
-    usage: result.usage || {},
-    ai_configured: true,
-  };
-}
-
-function ngRedditPostingEnabled() {
-  return String(process.env.REDDIT_POSTING_ENABLED || "false").trim().toLowerCase() === "true";
-}
-
-function ngRedditCredentialsReady() {
-  return Boolean(process.env.REDDIT_CLIENT_ID && process.env.REDDIT_CLIENT_SECRET && process.env.REDDIT_USERNAME && process.env.REDDIT_PASSWORD);
-}
-
-let ngRedditTokenCache = { token: "", expires_at: 0 };
-
-async function ngGetRedditAccessToken() {
-  if (!ngRedditPostingEnabled()) {
-    const error = new Error("Reddit posting is disabled. Set REDDIT_POSTING_ENABLED=true after Reddit API approval.");
-    error.statusCode = 503;
-    throw error;
-  }
-  if (!ngRedditCredentialsReady()) {
-    const error = new Error("Reddit credentials are incomplete. Add REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USERNAME, and REDDIT_PASSWORD after Reddit approval.");
-    error.statusCode = 503;
-    throw error;
-  }
-  if (ngRedditTokenCache.token && ngRedditTokenCache.expires_at > Date.now() + 60000) return ngRedditTokenCache.token;
-
-  const auth = Buffer.from(`${process.env.REDDIT_CLIENT_ID}:${process.env.REDDIT_CLIENT_SECRET}`).toString("base64");
-  const params = new URLSearchParams();
-  params.set("grant_type", "password");
-  params.set("username", process.env.REDDIT_USERNAME);
-  params.set("password", process.env.REDDIT_PASSWORD);
-
-  const response = await axios.post("https://www.reddit.com/api/v1/access_token", params.toString(), {
-    headers: {
-      Authorization: `Basic ${auth}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-      "User-Agent": process.env.REDDIT_USER_AGENT || `nextgen-usmle-community/1.0 by u/${process.env.REDDIT_USERNAME || "NextGenUSMLEHelper"}`,
-    },
-    timeout: 30000,
-  });
-
-  if (!response.data?.access_token) {
-    const error = new Error("Reddit access token was not returned.");
-    error.statusCode = 502;
-    error.reddit_response = response.data;
-    throw error;
-  }
-
-  ngRedditTokenCache = {
-    token: response.data.access_token,
-    expires_at: Date.now() + (Number(response.data.expires_in || 3600) * 1000),
-  };
-  return ngRedditTokenCache.token;
-}
-
-async function ngPostToReddit({ subreddit = "", title = "", body = "" } = {}) {
-  const targetSubreddit = String(subreddit || process.env.REDDIT_DEFAULT_SUBREDDIT || "").replace(/^r\//i, "").trim();
-  if (!targetSubreddit) throw Object.assign(new Error("Reddit target subreddit is missing."), { statusCode: 400 });
-
-  const token = await ngGetRedditAccessToken();
-  const params = new URLSearchParams();
-  params.set("sr", targetSubreddit);
-  params.set("kind", "self");
-  params.set("title", ngProfessionalTextClean(title).slice(0, 280) || "USMLE Study Post");
-  params.set("text", ngProfessionalTextClean(body).slice(0, 9500));
-  params.set("api_type", "json");
-
-  const response = await axios.post("https://oauth.reddit.com/api/submit", params.toString(), {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-      "User-Agent": process.env.REDDIT_USER_AGENT || `nextgen-usmle-community/1.0 by u/${process.env.REDDIT_USERNAME || "NextGenUSMLEHelper"}`,
-    },
-    timeout: 30000,
-  });
-
-  const errors = response.data?.json?.errors || [];
-  if (errors.length) {
-    const error = new Error(`Reddit post failed: ${errors.map((e) => e.join(" ")).join("; ")}`);
-    error.statusCode = 400;
-    error.reddit_response = response.data;
-    throw error;
-  }
-
-  return response.data;
-}
-
-function ngNormalizeCommunityTargets(db, { platforms = [], community_ids = [], direct_targets = [] } = {}) {
-  const platformList = ngContentPlatforms(platforms);
-  const ids = ngContentList(community_ids);
-  const direct = Array.isArray(direct_targets) ? direct_targets : [];
-  const communities = ngContentArray(db, "communities").filter((item) => !ids.length || ids.includes(String(item.id || "")));
-  const targets = [];
-
-  const buildTarget = (raw = {}) => {
-    const platform = ngCommunityPlatform(raw.platform || raw.channel || raw.source_platform || "telegram");
-    return {
-      id: raw.id || uuid(),
-      platform,
-      community_id: raw.id || raw.community_id || null,
-      community_name: raw.community_name || raw.name || raw.title || "",
-      telegram_chat_id: ngNormalizeTelegramChatId(ngTargetValue(raw.telegram_chat_id, raw.chat_id, raw.channel_id, raw.telegram_group_id, raw.platform_chat_id, raw.target_id, raw.delivery_target), { assumeGroup: true }),
-      whatsapp_to: ngTargetValue(raw.whatsapp_to, raw.whatsapp_number, raw.whatsapp, raw.phone, raw.phone_number, raw.group_id, raw.target_id, raw.delivery_target),
-      email_to: ngTargetValue(raw.email_to, raw.email, raw.target_email, raw.delivery_target),
-      reddit_subreddit: ngTargetValue(raw.reddit_subreddit, raw.subreddit, raw.community_handle, raw.handle, raw.target_subreddit, raw.delivery_target, process.env.REDDIT_DEFAULT_SUBREDDIT),
-      url: raw.community_url || raw.url || "",
-      raw,
-    };
-  };
-
-  for (const community of communities) {
-    const target = buildTarget(community);
-    if (platformList.length && !platformList.includes(target.platform)) continue;
-    targets.push(target);
-  }
-
-  for (const raw of direct) {
-    const target = buildTarget({ ...raw, id: raw.id || uuid() });
-    if (platformList.length && !platformList.includes(target.platform)) continue;
-    targets.push(target);
-  }
-
-  return targets;
-}
-
-function ngTargetCanReceivePlatform(target = {}, platform = "") {
-  const cleanPlatform = ngCommunityPlatform(platform || target.platform || "telegram");
-  if (cleanPlatform === "telegram") return Boolean(ngTargetValue(target.telegram_chat_id, target.chat_id, target.to, target.recipient));
-  if (cleanPlatform === "whatsapp") return Boolean(ngTargetValue(target.whatsapp_to, target.whatsapp_number, target.phone, target.to, target.recipient));
-  if (cleanPlatform === "email") return Boolean(ngTargetValue(target.email_to, target.email, target.to, target.recipient));
-  if (cleanPlatform === "reddit") return Boolean(ngTargetValue(target.reddit_subreddit, target.subreddit, process.env.REDDIT_DEFAULT_SUBREDDIT));
-  return true;
-}
-
-async function ngPublishToPlatform({ platform, target = {}, post = {}, text = "" }) {
-  const p = ngCommunityPlatform(platform || target.platform || post.platform || "telegram");
-  const formatted = ngFormatForPlatform({ platform: p, post, text: text || post.message || post.draft_content || "" });
-  const imageUrl = (Array.isArray(post.image_urls) ? post.image_urls[0] : null) ||
-    (Array.isArray(post.media_items) ? post.media_items.find((item) => item?.url || item?.image_url)?.url || post.media_items.find((item) => item?.url || item?.image_url)?.image_url : null);
-
-  if (p === "telegram") {
-    const chatId = ngNormalizeTelegramChatId(target.telegram_chat_id || target.chat_id || target.to || target.recipient || "", { assumeGroup: Boolean(target.community_id || target.raw?.id || target.raw?.community_name || target.raw?.name) });
-    if (!chatId) throw Object.assign(new Error("Telegram target missing chat_id"), { statusCode: 400 });
-    const messageText = String(formatted || "").trim();
-    if (imageUrl) return telegramCommunityApi("sendPhoto", { chat_id: chatId, photo: imageUrl, caption: messageText.slice(0, 1000) }, {});
-    return telegramCommunityApi("sendMessage", { chat_id: chatId, text: messageText, disable_web_page_preview: false }, {});
-  }
-
-  if (p === "whatsapp") {
-    const to = target.whatsapp_to || target.to || target.phone || "";
-    if (!to) throw Object.assign(new Error("WhatsApp target missing phone number"), { statusCode: 400 });
-    const body = imageUrl ? `${formatted}\n\nImage: ${imageUrl}` : formatted;
-    return sendWhatsAppCloudMessage({ to, text: body });
-  }
-
-  if (p === "email") {
-    const to = target.email_to || target.to || target.email || "";
-    if (!to) throw Object.assign(new Error("Email target missing email address"), { statusCode: 400 });
-    const body = imageUrl ? `${formatted}\n\nImage: ${imageUrl}` : formatted;
-    return sendEmailMessage({ to, subject: post.title || "NextGen USMLE Community Post", text: body });
-  }
-
-  if (p === "reddit") {
-    if (!ngRedditPostingEnabled()) {
-      return { skipped: true, platform: "reddit", reason: "Reddit posting is prepared but disabled until API access is approved. Set REDDIT_POSTING_ENABLED=true after credentials are ready.", subreddit: target.reddit_subreddit || process.env.REDDIT_DEFAULT_SUBREDDIT || "" };
-    }
-    return ngPostToReddit({ subreddit: target.reddit_subreddit, title: formatted.title, body: formatted.body });
-  }
-
-  return { skipped: true, platform: p, reason: `${p} publishing adapter is not connected yet. Post is kept in history for manual/platform-specific publishing.`, url: target.url || "" };
-}
-
-function ngCreateAutopilotScheduledPosts(db, roadmap = {}, selections = [], ctx = {}) {
-  const posts = ngContentArray(db, "community_scheduled_posts");
-  const start = new Date(`${String(roadmap.start_date || todayKey()).slice(0, 10)}T00:00:00`);
-  const created = [];
-
-  for (let i = 0; i < selections.length; i += 1) {
-    const pick = selections[i];
-    const d = new Date(start);
-    d.setDate(start.getDate() + i);
-    const dateKeyValue = d.toISOString().slice(0, 10);
-    const calendarItem = ngWeeklyCalendarItemForIndex(i, roadmap);
-    const contentType = calendarItem.content_type;
-    const topic = pick.topic || `${roadmap.topic || "USMLE topic"} — Day ${i + 1}`;
-    const bookLabel = pick.book_name || "Approved Source";
-    const postAt = ngRoadmapDateTime(dateKeyValue, roadmap.question_time || roadmap.post_time || calendarItem.default_time || "10:00", roadmap.timezone);
-    const answerAt = roadmap.answer_time
-      ? ngRoadmapDateTime(dateKeyValue, roadmap.answer_time, roadmap.timezone)
-      : ngAddHoursToLocalDateTime(postAt, Number(roadmap.answer_delay_hours || calendarItem.answer_delay_hours || 4));
-    const sourceIds = [pick.source_id].filter(Boolean);
-
-    const mainPost = ngBuildScheduledPostPayload({
-      title: `Day ${i + 1} — ${calendarItem.label} — ${topic}`,
+    const basePayload = {
+      title: `Day ${i + 1} — ${label} — ${topic}`,
       topic,
       content_type: contentType,
-      post_kind: ngPostRequiresAnswerFollowup(contentType) ? "question" : "single",
       message: "",
-      scheduled_at: postAt,
+      scheduled_at: scheduledAt,
       timezone: roadmap.timezone || DEFAULT_TIMEZONE,
       platforms: roadmap.platforms,
       community_ids: roadmap.community_ids,
@@ -22939,52 +22476,88 @@ function ngCreateAutopilotScheduledPosts(db, roadmap = {}, selections = [], ctx 
       image_urls: roadmap.image_urls || [],
       status: "draft",
       approval_status: "needs_review",
-    }, ctx, { roadmap_id: roadmap.id, title: `Day ${i + 1} — ${calendarItem.label} — ${topic}`, topic, created_by: ctx.user?.id || null });
-    mainPost.autopilot = true;
-    mainPost.day_number = i + 1;
-    mainPost.source_title = pick.source_title;
-    mainPost.book_name = bookLabel;
-    mainPost.rotation_strategy = roadmap.rotation_strategy;
-    mainPost.weekly_calendar_slot = calendarItem.day;
+    };
 
-    posts.push(mainPost);
-    created.push(mainPost);
-
-    if (ngPostRequiresAnswerFollowup(contentType)) {
-      const answer = ngBuildScheduledPostPayload({
-        title: `Day ${i + 1} Answer — ${calendarItem.label} — ${topic}`,
+    if (ngIsSplitContentType(contentType)) {
+      const question = ngBuildScheduledPostPayload({
+        ...basePayload,
+        post_kind: "question",
+      }, ctx, {
+        roadmap_id: roadmap.id,
+        title: `Day ${i + 1} — ${label} — ${topic}`,
         topic,
+        created_by: ctx.user?.id || null,
+      });
+      question.autopilot = true;
+      question.day_number = i + 1;
+      question.weekly_content_type = contentType;
+      question.source_title = pick.source_title;
+      question.book_name = bookLabel;
+      question.rotation_strategy = roadmap.rotation_strategy;
+      question.answer_delay_hours = Number(roadmap.answer_delay_hours || 4);
+
+      const answer = ngBuildScheduledPostPayload({
+        ...basePayload,
+        title: `Day ${i + 1} Explanation — ${bookLabel} — ${topic}`,
         content_type: "answer_explanation",
         post_kind: "answer",
-        parent_post_id: mainPost.id,
-        message: "",
-        scheduled_at: answerAt,
-        timezone: roadmap.timezone || DEFAULT_TIMEZONE,
-        platforms: roadmap.platforms,
-        community_ids: roadmap.community_ids,
-        source_ids: sourceIds,
-        media_items: roadmap.media_items || [],
-        image_urls: roadmap.image_urls || [],
-        status: "draft",
-        approval_status: "needs_review",
-      }, ctx, { roadmap_id: roadmap.id, parent_post_id: mainPost.id, title: `Day ${i + 1} Answer — ${calendarItem.label} — ${topic}`, topic, created_by: ctx.user?.id || null });
+        parent_post_id: question.id,
+        scheduled_at: ngAnswerDateTimeForQuestion(scheduledAt, roadmap),
+      }, ctx, {
+        roadmap_id: roadmap.id,
+        parent_post_id: question.id,
+        title: `Day ${i + 1} Explanation — ${bookLabel} — ${topic}`,
+        topic,
+        created_by: ctx.user?.id || null,
+      });
       answer.autopilot = true;
       answer.day_number = i + 1;
+      answer.weekly_content_type = "answer_explanation";
       answer.source_title = pick.source_title;
       answer.book_name = bookLabel;
       answer.rotation_strategy = roadmap.rotation_strategy;
-      answer.weekly_calendar_slot = calendarItem.day;
-      posts.push(answer);
-      created.push(answer);
+      answer.answer_delay_hours = Number(roadmap.answer_delay_hours || 4);
+
+      posts.push(question, answer);
+      created.push(question, answer);
+    } else {
+      const single = ngBuildScheduledPostPayload({
+        ...basePayload,
+        post_kind: "single",
+      }, ctx, {
+        roadmap_id: roadmap.id,
+        title: `Day ${i + 1} — ${label} — ${topic}`,
+        topic,
+        created_by: ctx.user?.id || null,
+      });
+      single.autopilot = true;
+      single.day_number = i + 1;
+      single.weekly_content_type = contentType;
+      single.source_title = pick.source_title;
+      single.book_name = bookLabel;
+      single.rotation_strategy = roadmap.rotation_strategy;
+
+      posts.push(single);
+      created.push(single);
     }
   }
+
   return created;
 }
 
 async function ngGenerateAutopilotPostContent({ db, post, roadmap = {}, source = null } = {}) {
   const sourceIds = post.source_ids && post.source_ids.length ? post.source_ids : (source ? [source.__source_id || source.id] : []);
   const sources = ngApprovedTrainingSources(db, sourceIds);
-  const answerOnly = ngPostIsAnswer(post);
+  const type = ngNormalizeContentType(post.content_type);
+  const kind = String(post.post_kind || "").toLowerCase();
+  const splitQuestion = ngIsSplitContentType(type) && kind === "question";
+  const answerOnly = kind === "answer" || type.includes("answer");
+  const contentInstruction = splitQuestion
+    ? "Create the question only. Do not include the correct answer, explanation, teaching point, or distractor explanations. End by asking students to reply with their answer."
+    : answerOnly
+      ? "Create the correct answer and concise explanation for the earlier question."
+      : `Create one clean ${ngContentTypeLabel(type)} post. Do not use markdown stars or AI labels.`;
+
   const ai = await ngGenerateContentFromApprovedSources({
     db,
     sources,
@@ -22995,17 +22568,20 @@ async function ngGenerateAutopilotPostContent({ db, post, roadmap = {}, source =
       content_type: post.content_type,
       instructions: [
         roadmap.instructions || "",
-        "Use the selected approved source only when medical facts are needed.",
-        "Follow the weekly calendar content type for this post.",
+        "Use the selected approved source only when a source is attached.",
         "Do not repeat earlier roadmap topics.",
-        "Use professional plain text without markdown stars or hash headings.",
+        "Make this suitable for public USMLE community posting.",
+        "Use professional paragraphs or a professional MCQ format.",
+        "Do not include raw markdown stars, ### headings, or AI-bot labels.",
+        contentInstruction,
       ].filter(Boolean).join("\n"),
     },
     answerOnly,
   });
-  const formattedContent = ngFormatCommunityGeneratedContent(ai.content, { answerOnly, contentType: post.content_type, post });
-  post.message = formattedContent;
-  post.draft_content = formattedContent;
+  let content = ngCleanCommunityText(ai.content);
+  if (splitQuestion) content = ngStripAnswerFromQuestionText(content);
+  post.message = content;
+  post.draft_content = content;
   post.ai_model = ai.model;
   post.ai_usage = ai.usage;
   post.ai_configured = ai.ai_configured;
@@ -23016,102 +22592,27 @@ async function ngGenerateAutopilotPostContent({ db, post, roadmap = {}, source =
   post.generated_at = nowIso();
   post.updated_at = nowIso();
   return post;
-}
-
-function ngCommunityReplyShouldUseAI({ text = "", mentioned = false } = {}) {
-  const clean = String(text || "").trim().toLowerCase();
-  if (!clean) return { allowed: false, reason: "empty_comment" };
-  if (mentioned) return { allowed: true, reason: "bot_mentioned" };
-  if (/\b(why|how|explain|confused|answer|correct|wrong|mechanism|option\s*[a-e]|what\s+is|which\s+one)\b/i.test(clean)) return { allowed: true, reason: "direct_question" };
-  return { allowed: false, reason: "not_a_direct_question" };
-}
-
-function ngCommunityReplyLimitOk(db, { scheduledPostId = "", author = "" } = {}) {
-  const logs = ngContentArray(db, "community_contextual_reply_logs");
-  const since = Date.now() - (24 * 60 * 60 * 1000);
-  const recentSameUserPost = logs.filter((item) => {
-    const ts = new Date(item.created_at || item.timestamp || 0).getTime();
-    return ts >= since && String(item.scheduled_post_id || "") === String(scheduledPostId || "") && String(item.author || "") === String(author || "");
-  });
-  const maxPerUserPerPost = Math.max(1, Number(process.env.COMMUNITY_REPLY_MAX_PER_USER_POST || 1));
-  return recentSameUserPost.length < maxPerUserPerPost;
-}
-
-function ngFindPublishedPostContext(db, body = {}) {
-  const posts = ngContentArray(db, "community_scheduled_posts");
-  const history = ngContentArray(db, "community_post_history");
-  const id = String(body.scheduled_post_id || body.post_id || body.parent_post_id || "");
-  if (id) {
-    const post = posts.find((item) => String(item.id || "") === id) || null;
-    if (post) return { post, history: history.find((h) => String(h.scheduled_post_id || "") === id) || null };
-  }
-  const platformMessageId = String(body.platform_message_id || body.message_id || body.reply_to_message_id || "");
-  if (platformMessageId) {
-    const foundHistory = history.find((item) => JSON.stringify(item.results || []).includes(platformMessageId)) || null;
-    if (foundHistory) return { post: posts.find((p) => String(p.id || "") === String(foundHistory.scheduled_post_id || "")) || null, history: foundHistory };
-  }
-  return { post: null, history: null };
-}
-
-async function ngBuildContextualCommunityReply({ db, body = {}, actor = null } = {}) {
-  const commentText = ngProfessionalTextClean(body.comment_text || body.text || body.message || "");
-  const mentioned = Boolean(body.bot_mentioned || body.mentioned || /@?(nextgen|usmle\s*prep\s*partner|nextgenusmlehelper)/i.test(commentText));
-  const gate = ngCommunityReplyShouldUseAI({ text: commentText, mentioned });
-  const { post, history } = ngFindPublishedPostContext(db, body);
-  if (!post) throw Object.assign(new Error("Original scheduled post context not found. Provide scheduled_post_id or platform_message_id."), { statusCode: 404 });
-  const author = String(body.author || body.username || body.sender || "unknown");
-  if (!gate.allowed) return { skipped: true, reason: gate.reason, post };
-  if (!ngCommunityReplyLimitOk(db, { scheduledPostId: post.id, author })) return { skipped: true, reason: "reply_limit_reached", post };
-
-  const sources = ngApprovedTrainingSources(db, post.source_ids || []);
-  const sourceContext = ngSourceContextForGeneration(sources, 5000);
-  const postContext = ngProfessionalTextClean(post.message || post.draft_content || history?.message || "");
-  let reply = "";
-  let usage = {};
-  let model = "local_context_reply";
-
-  if (isAIConfigured()) {
-    const result = await callOpenAIResponsesAPI({
-      model: getAIModel(process.env.AI_REPLY_MODEL || process.env.AI_CONTENT_MODEL || "gpt-4o-mini"),
-      systemPrompt: "You answer students in a public USMLE study community. Use the original post context and approved source context. Answer only the question being asked. Be concise, medically careful, and do not introduce a random new topic. Do not use markdown stars or hash headings.",
-      userPrompt: [
-        `Original post title: ${post.title || ""}`,
-        `Original post content:\n${postContext}`,
-        `Approved source context:\n${sourceContext || "No source context available."}`,
-        `Student comment:\n${commentText}`,
-        "Write a concise helpful reply. If the comment is not about the original post, say that this thread is for the posted question and ask them to start a new question separately.",
-      ].join("\n\n"),
-      maxOutputTokens: Math.min(700, Math.max(250, Number(process.env.COMMUNITY_REPLY_MAX_TOKENS || 450))),
-    });
-    reply = ngProfessionalTextClean(result.text || "");
-    usage = result.usage || {};
-    model = result.model;
-  } else {
-    reply = ngProfessionalTextClean(`This question is about the posted topic: ${post.topic || post.title || "the current USMLE concept"}. The key is to connect the stem clue with the mechanism before choosing an option. Please share which option you selected and what confused you, and I will clarify that part.`);
-  }
-
-  const draft = withTimestamps({
-    id: uuid(),
-    scheduled_post_id: post.id,
-    platform: body.platform || post.platform || "telegram",
-    author,
-    original_comment: commentText,
-    reply_text: reply,
-    status: "draft_needs_review",
-    ai_model: model,
-    ai_usage: usage,
-    cost_guard: gate.reason,
-    created_by: actor?.id || null,
-  });
-  ngContentArray(db, "community_contextual_reply_drafts").unshift(draft);
-  ngContentArray(db, "community_contextual_reply_logs").unshift({ ...draft, status: "drafted" });
-  return { skipped: false, reply_draft: draft, post };
 }
 
 app.get("/admin/crm/community-content/calendar-template", async (req, res) => {
   try {
     await ngRequireContentAccess(req, "read");
-    res.json({ success: true, weekly_calendar: NG_WEEKLY_CONTENT_CALENDAR, message: "Weekly calendar template is platform-wide. MCQs and mini cases split question and answer. Other post types publish as clean single posts." });
+    res.json({
+      success: true,
+      calendar: NG_WEEKLY_CONTENT_CALENDAR,
+      content_mix: ngDefaultWeeklyContentMix(),
+      answer_delay_hours: 4,
+      notes: "MCQ and mini-case posts split into question first and answer/explanation later. Other post types remain single clean posts.",
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/integrations/reddit/status", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    res.json({ success: true, reddit: ngRedditStatus() });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -23121,73 +22622,76 @@ app.post("/admin/crm/community-content/weekly-calendar", async (req, res) => {
   try {
     const ctx = await ngRequireContentAccess(req, "create");
     const db = ctx.crmDb;
-    const days = Math.min(28, Math.max(7, Number(req.body?.days || 7)));
+    const days = Math.min(90, Math.max(1, Number(req.body?.days || 30)));
     const payload = {
       ...(req.body || {}),
       days,
       platforms: ngContentPlatforms(req.body?.platforms || req.body?.channels || "telegram"),
       community_ids: ngContentList(req.body?.community_ids || req.body?.communities),
-      content_mix: NG_WEEKLY_CONTENT_CALENDAR.map((item) => item.content_type),
-      rotation_strategy: ngContentClean(req.body?.rotation_strategy || "weekly_calendar", "weekly_calendar"),
-      source_pool: ngContentClean(req.body?.source_pool || "all_approved", "all_approved"),
+      content_mix: ngRoadmapContentMix(req.body?.content_mix ? { content_mix: req.body.content_mix } : {}),
+      answer_delay_hours: Number(req.body?.answer_delay_hours || 4),
+      source_pool: ngContentClean(req.body?.source_pool || req.body?.sourcePool || "all_approved", "all_approved"),
+      rotation_strategy: ngContentClean(req.body?.rotation_strategy || req.body?.source_rotation || "one_book_per_day", "one_book_per_day"),
     };
     ngValidateCommunityTargetsForScheduling(db, payload);
-    const { selections, progress, progressKey } = ngSelectAutopilotSources(db, payload, ctx, days);
+
+    const useAutopilot = req.body?.autopilot !== false;
+    let selections = [];
+    let progress = null;
+    let progressKey = null;
+    if (useAutopilot) {
+      const selected = ngSelectAutopilotSources(db, payload, ctx, days);
+      selections = selected.selections;
+      progress = selected.progress;
+      progressKey = selected.progressKey;
+    }
+
     let roadmap = withTimestamps({
       id: uuid(),
       brand_id: getCrmBrandId(req, db),
       title: ngContentClean(req.body?.title || `Weekly Community Calendar — ${days} days`, `Weekly Community Calendar — ${days} days`),
-      description: "Weekly platform-wide content calendar with editable drafts before posting.",
-      topic: ngContentClean(req.body?.topic || "USMLE Step 1 and Step 2 CK preparation", "USMLE Step 1 and Step 2 CK preparation"),
-      exam_type: ngContentClean(req.body?.exam_type || "Step 1", "Step 1"),
+      description: ngContentClean(req.body?.description || "Editable weekly community content calendar using approved sources.", ""),
+      topic: ngContentClean(req.body?.topic || "USMLE Step 1 and Step 2 CK community learning", "USMLE Step 1 and Step 2 CK community learning"),
+      exam_type: ngContentClean(req.body?.exam_type || "USMLE", "USMLE"),
       days,
       start_date: String(req.body?.start_date || todayKey()).slice(0, 10),
       timezone: req.body?.timezone || DEFAULT_TIMEZONE,
       post_time: req.body?.post_time || req.body?.question_time || "10:00",
       question_time: req.body?.question_time || req.body?.post_time || "10:00",
-      answer_delay_hours: Number(req.body?.answer_delay_hours || 4),
+      answer_delay_hours: payload.answer_delay_hours,
       platforms: payload.platforms,
       community_ids: payload.community_ids,
-      content_mix: payload.content_mix,
       source_pool: payload.source_pool,
-      source_ids: selections.map((s) => s.source_id),
+      source_query: ngContentClean(req.body?.source_query || req.body?.book || req.body?.system || "", ""),
+      source_ids: selections.map((s) => s.source_id).filter(Boolean),
+      source_rotation: payload.rotation_strategy,
       rotation_strategy: payload.rotation_strategy,
-      progress_key: progressKey,
-      approval_required: true,
-      auto_post_after_approval: req.body?.auto_post_after_approval === true,
+      avoid_repeats: req.body?.avoid_repeats !== false,
+      content_mix: payload.content_mix,
+      approval_required: req.body?.approval_required !== false,
+      auto_post_after_approval: req.body?.auto_post_after_approval !== false,
       instructions: ngContentClean(req.body?.instructions || "", ""),
-      weekly_calendar: true,
+      autopilot: useAutopilot,
+      progress_key: progressKey,
+      selected_plan: selections.map((s) => ({ day: s.day, source_id: s.source_id, book_name: s.book_name, topic: s.topic, source_title: s.source_title })),
       status: "active",
       created_by: ctx.user.id,
       updated_by: ctx.user.id,
     });
     roadmap = ngContentAttachOwnership(roadmap, ctx);
     ngContentArray(db, "community_content_roadmaps").unshift(roadmap);
-    const scheduled_posts = ngCreateAutopilotScheduledPosts(db, roadmap, selections, ctx);
+    const scheduled_posts = selections.length ? ngCreateAutopilotScheduledPosts(db, roadmap, selections, ctx) : ngCreateRoadmapScheduledPosts(db, roadmap, ctx);
+
     const generateNow = req.body?.generate_now === true || req.body?.generate_first_batch === true;
-    const generateLimit = Math.min(Number(req.body?.generate_limit || 7), scheduled_posts.length);
-    if (generateNow) for (const post of scheduled_posts.slice(0, generateLimit)) await ngGenerateAutopilotPostContent({ db, post, roadmap });
+    const generateLimit = Math.min(Number(req.body?.generate_limit || 4), scheduled_posts.length);
+    if (generateNow) {
+      for (const post of scheduled_posts.slice(0, generateLimit)) await ngGenerateAutopilotPostContent({ db, post, roadmap });
+    }
+
     await writeCrmDb(db);
-    res.json({ success: true, roadmap, scheduled_posts, scheduled_count: scheduled_posts.length, progress, message: "Weekly calendar created. All posts remain editable drafts before approval and publishing." });
+    res.json({ success: true, roadmap, scheduled_posts, scheduled_count: scheduled_posts.length, progress, message: "Weekly calendar created. Posts are editable before approval/publishing." });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message, details: error.details || null });
-  }
-});
-
-app.get("/admin/crm/integrations/reddit/status", async (req, res) => {
-  try {
-    await requireCrmAdmin(req);
-    res.json({
-      success: true,
-      enabled: ngRedditPostingEnabled(),
-      credentials_ready: ngRedditCredentialsReady(),
-      username: process.env.REDDIT_USERNAME || null,
-      default_subreddit: process.env.REDDIT_DEFAULT_SUBREDDIT || null,
-      user_agent_set: Boolean(process.env.REDDIT_USER_AGENT),
-      message: ngRedditPostingEnabled() ? "Reddit posting enabled" : "Reddit adapter is ready but disabled until API approval and credentials are complete.",
-    });
-  } catch (error) {
-    res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
 });
 
@@ -23195,14 +22699,83 @@ app.post("/admin/crm/community-content/contextual-reply", async (req, res) => {
   try {
     const ctx = await ngRequireContentAccess(req, "generate");
     const db = ctx.crmDb;
-    const result = await ngBuildContextualCommunityReply({ db, body: req.body || {}, actor: ctx.user });
+    const postId = String(req.body?.scheduled_post_id || req.body?.post_id || req.body?.parent_post_id || "").trim();
+    const platformMessageId = String(req.body?.platform_message_id || req.body?.reply_to_message_id || "").trim();
+    const comment = ngContentClean(req.body?.comment || req.body?.message || req.body?.text || "", "");
+    const userKey = ngContentClean(req.body?.user_id || req.body?.platform_user_id || req.body?.username || "anonymous", "anonymous");
+    const mentioned = req.body?.mentioned === true || /@(usmle_prep_partner_bot|nextgen)/i.test(comment);
+
+    const post = ngContentArray(db, "community_scheduled_posts").find((item) => {
+      if (postId && String(item.id || "") === postId) return true;
+      if (platformMessageId && String(item.platform_message_id || item.telegram_message_id || item.reddit_id || "") === platformMessageId) return true;
+      return false;
+    });
+
+    if (!post) return res.status(404).json({ success: false, error: "Original scheduled post context not found" });
+    if (!comment) return res.status(400).json({ success: false, error: "Student comment/question is required" });
+
+    const replyLogs = ngContentArray(db, "community_contextual_replies");
+    const recentCount = replyLogs.filter((item) => String(item.scheduled_post_id) === String(post.id) && String(item.user_key) === String(userKey)).length;
+    if (recentCount >= Number(process.env.COMMUNITY_REPLY_LIMIT_PER_USER_PER_POST || 1)) {
+      return res.status(429).json({ success: false, error: "Reply limit reached for this user/post", skipped: true });
+    }
+
+    if (!ngShouldDraftContextualReply({ comment, mentioned })) {
+      const skipped = withTimestamps({ id: uuid(), scheduled_post_id: post.id, user_key: userKey, comment, status: "skipped", reason: "No direct question or bot mention detected", created_by: ctx.user.id });
+      replyLogs.unshift(skipped);
+      await writeCrmDb(db);
+      return res.json({ success: true, skipped: true, reason: skipped.reason, log: skipped });
+    }
+
+    const parent = post.parent_post_id ? ngContentArray(db, "community_scheduled_posts").find((item) => String(item.id) === String(post.parent_post_id)) : null;
+    const siblings = ngContentArray(db, "community_scheduled_posts").filter((item) => String(item.parent_post_id || "") === String(post.id));
+    const sourceIds = uniqueList([...(post.source_ids || []), ...(parent?.source_ids || []), ...siblings.flatMap((item) => item.source_ids || [])]);
+    const sources = ngApprovedTrainingSources(db, sourceIds);
+
+    const ai = await ngGenerateContentFromApprovedSources({
+      db,
+      sources,
+      body: {
+        title: `Reply to community question about ${post.topic || post.title}`,
+        topic: post.topic || post.title,
+        content_type: "contextual_reply",
+        instructions: [
+          "Answer only the student's question about the original post.",
+          "Do not introduce a random new USMLE question.",
+          "Use the original post and attached source context first.",
+          "Keep it concise, educational, and safe for public community reply.",
+          "Do not include markdown stars or AI labels.",
+          `Original post:\n${post.message || post.draft_content || ""}`,
+          parent ? `Parent question:\n${parent.message || parent.draft_content || ""}` : "",
+          siblings.length ? `Linked answer/explanation:\n${siblings.map((item) => item.message || item.draft_content || "").join("\n\n")}` : "",
+          `Student comment:\n${comment}`,
+        ].filter(Boolean).join("\n\n"),
+      },
+      answerOnly: false,
+    });
+
+    const draft = ngCleanCommunityText(ai.content);
+    const log = withTimestamps({
+      id: uuid(),
+      scheduled_post_id: post.id,
+      parent_post_id: parent?.id || null,
+      user_key: userKey,
+      platform: req.body?.platform || post.platform || "telegram",
+      comment,
+      draft_reply: draft,
+      status: "draft_needs_review",
+      ai_model: ai.model,
+      ai_usage: ai.usage,
+      ai_configured: ai.ai_configured,
+      created_by: ctx.user.id,
+    });
+    replyLogs.unshift(log);
     await writeCrmDb(db);
-    res.json({ success: true, ...result, message: result.skipped ? `Reply skipped: ${result.reason}` : "Contextual reply draft created for review." });
+    res.json({ success: true, reply: draft, log, mode: "draft_needs_review" });
   } catch (error) {
-    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+    res.status(error.statusCode || 500).json({ success: false, error: error.message, details: error.details || null });
   }
 });
-
 
 app.get("/admin/crm/ai-training/approved-sources", async (req, res) => {
   try {
@@ -23227,183 +22800,6 @@ app.get("/admin/crm/ai-training/approved-sources", async (req, res) => {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
 });
-
-
-// -----------------------------------------------------------------------------
-// NEXTGEN v13 ROADMAP REBUILD HELPERS
-// Rebuild future/editable scheduled posts when the weekly content_mix changes.
-// Keeps already published/sent posts untouched, so changing the roadmap pattern
-// does not erase posting history.
-// -----------------------------------------------------------------------------
-function ngRoadmapPostIsPublishedOrSent(post = {}) {
-  const status = String(post.status || post.delivery_status || "").toLowerCase();
-  if (["published", "posted", "sent", "delivered", "completed"].includes(status)) return true;
-  if (post.published_at || post.posted_at || post.sent_at || post.delivered_at) return true;
-  const results = Array.isArray(post.delivery_results) ? post.delivery_results : Array.isArray(post.results) ? post.results : [];
-  return results.some((r) => r?.success === true || String(r?.status || "").toLowerCase() === "sent" || String(r?.status || "").toLowerCase() === "delivered");
-}
-
-function ngApplyRoadmapEditableFields(roadmap = {}, body = {}) {
-  const editable = [
-    "title", "description", "topic", "exam_type", "days", "start_date", "timezone",
-    "post_time", "question_time", "answer_time", "answer_delay_hours", "platforms",
-    "community_ids", "source_pool", "source_query", "source_ids", "topics",
-    "rotation_strategy", "source_rotation", "content_mix", "approval_required",
-    "auto_post_after_approval", "instructions", "status",
-  ];
-
-  for (const key of editable) {
-    if (body?.[key] === undefined) continue;
-    if (["platforms", "community_ids", "content_mix", "source_ids", "topics"].includes(key)) roadmap[key] = ngContentList(body[key]);
-    else if (["days", "answer_delay_hours"].includes(key)) roadmap[key] = Number(body[key]);
-    else roadmap[key] = body[key];
-  }
-
-  if (body?.channels !== undefined && body?.platforms === undefined) roadmap.platforms = ngContentPlatforms(body.channels);
-  if (body?.communities !== undefined && body?.community_ids === undefined) roadmap.community_ids = ngContentList(body.communities);
-  if (body?.sources !== undefined && body?.source_ids === undefined) roadmap.source_ids = ngContentList(body.sources);
-
-  roadmap.days = Math.min(90, Math.max(1, Number(roadmap.days || 7)));
-  roadmap.content_mix = Array.isArray(roadmap.content_mix) && roadmap.content_mix.length
-    ? roadmap.content_mix.map(ngNormalizeContentType).filter(Boolean)
-    : NG_WEEKLY_CONTENT_CALENDAR.map((item) => item.content_type);
-  roadmap.platforms = ngContentPlatforms(roadmap.platforms || "telegram");
-  roadmap.community_ids = ngContentList(roadmap.community_ids || []);
-  roadmap.answer_delay_hours = Number(roadmap.answer_delay_hours || 4);
-  roadmap.question_time = roadmap.question_time || roadmap.post_time || "10:00";
-  roadmap.post_time = roadmap.post_time || roadmap.question_time || "10:00";
-  roadmap.updated_at = nowIso();
-  return roadmap;
-}
-
-function ngBuildSelectionsForRoadmapRebuild(db, roadmap = {}, ctx = {}, options = {}) {
-  const days = Math.min(90, Math.max(1, Number(roadmap.days || options.days || 7)));
-
-  if (Array.isArray(roadmap.selected_plan) && roadmap.selected_plan.length && options.reset_sources !== true) {
-    const plan = roadmap.selected_plan.slice(0, days);
-    const repeated = [];
-    for (let i = 0; i < days; i += 1) {
-      const pick = plan[i % Math.max(1, plan.length)] || {};
-      repeated.push({
-        day: i + 1,
-        source_id: pick.source_id || pick.id || (Array.isArray(roadmap.source_ids) ? roadmap.source_ids[i % Math.max(1, roadmap.source_ids.length)] : null),
-        source_title: pick.source_title || pick.title || pick.book_name || "Approved Source",
-        book_name: pick.book_name || pick.book || "Approved Source",
-        topic: pick.topic || (Array.isArray(roadmap.topics) && roadmap.topics[i] ? roadmap.topics[i] : `${roadmap.topic || "USMLE topic"} — Day ${i + 1}`),
-      });
-    }
-    return { selections: repeated, progress: null, progressKey: roadmap.progress_key || null, from: "existing_selected_plan" };
-  }
-
-  try {
-    const selected = ngSelectAutopilotSources(db, roadmap, ctx, days);
-    return { ...selected, from: "approved_source_rotation" };
-  } catch (error) {
-    const sourceIds = ngContentList(roadmap.source_ids || []);
-    const topics = Array.isArray(roadmap.topics) ? roadmap.topics : [];
-    const selections = [];
-    for (let i = 0; i < days; i += 1) {
-      selections.push({
-        day: i + 1,
-        source_id: sourceIds.length ? sourceIds[i % sourceIds.length] : null,
-        source_title: sourceIds.length ? `Selected source ${i + 1}` : "No approved source selected",
-        book_name: "Approved Source",
-        topic: topics[i] || `${roadmap.topic || "USMLE topic"} — Day ${i + 1}`,
-      });
-    }
-    return { selections, progress: null, progressKey: roadmap.progress_key || null, from: "roadmap_topics_fallback", warning: error.message };
-  }
-}
-
-async function ngRebuildRoadmapSchedule(db, roadmap = {}, ctx = {}, body = {}) {
-  const rebuildId = uuid();
-  const posts = ngContentArray(db, "community_scheduled_posts");
-  const approvalQueue = ensureCrmArray(db, "approval_queue");
-  const hard = body.hard === true || body.hard_delete === true;
-  const includePublished = body.include_published === true;
-  const generateNow = body.generate_now === true || body.generate_first_batch === true;
-  const generateLimit = Math.min(50, Math.max(0, Number(body.generate_limit || 0)));
-
-  ngApplyRoadmapEditableFields(roadmap, body || {});
-  ngValidateCommunityTargetsForScheduling(db, roadmap);
-
-  const linked = posts.filter((post) => String(post.roadmap_id || "") === String(roadmap.id || ""));
-  const replaceable = linked.filter((post) => includePublished || !ngRoadmapPostIsPublishedOrSent(post));
-  const replaceableIds = new Set(replaceable.map((post) => String(post.id || "")).filter(Boolean));
-
-  if (hard) {
-    db.community_scheduled_posts = posts.filter((post) => !replaceableIds.has(String(post.id || "")));
-  } else {
-    for (const post of replaceable) {
-      post.status = "deleted";
-      post.deleted_at = post.deleted_at || nowIso();
-      post.deleted_by = ctx.user?.id || null;
-      post.rebuild_id = rebuildId;
-      post.replaced_by_rebuild = true;
-      post.updated_at = nowIso();
-      post.updated_by = ctx.user?.id || null;
-    }
-  }
-
-  db.approval_queue = approvalQueue.filter((item) => {
-    const payload = item.payload || {};
-    const linkedPostId = String(item.scheduled_post_id || item.action_id || payload.scheduled_post_id || payload.id || "");
-    return !replaceableIds.has(linkedPostId);
-  });
-
-  const selectionResult = ngBuildSelectionsForRoadmapRebuild(db, roadmap, ctx, body || {});
-  const newPosts = ngCreateAutopilotScheduledPosts(db, roadmap, selectionResult.selections, ctx);
-
-  if (generateNow && generateLimit > 0) {
-    for (const post of newPosts.slice(0, generateLimit)) {
-      await ngGenerateAutopilotPostContent({ db, post, roadmap });
-    }
-  }
-
-  roadmap.rebuild_count = Number(roadmap.rebuild_count || 0) + 1;
-  roadmap.last_rebuild_id = rebuildId;
-  roadmap.last_rebuilt_at = nowIso();
-  roadmap.last_rebuilt_by = ctx.user?.id || null;
-  roadmap.selected_plan = selectionResult.selections.map((s) => ({
-    day: s.day,
-    source_id: s.source_id || null,
-    book_name: s.book_name || "Approved Source",
-    topic: s.topic || "USMLE topic",
-    source_title: s.source_title || "Approved Source",
-  }));
-  roadmap.source_ids = uniqueList([...(roadmap.source_ids || []), ...selectionResult.selections.map((s) => s.source_id).filter(Boolean)]);
-  roadmap.updated_at = nowIso();
-  roadmap.updated_by = ctx.user?.id || null;
-
-  ngContentArray(db, "community_content_rebuild_logs").unshift(withTimestamps({
-    id: rebuildId,
-    roadmap_id: roadmap.id,
-    roadmap_title: roadmap.title || "Community Content Roadmap",
-    content_mix: roadmap.content_mix,
-    old_posts_matched: linked.length,
-    old_posts_replaced: replaceable.length,
-    published_posts_kept: linked.length - replaceable.length,
-    new_posts_created: newPosts.length,
-    hard_delete: hard,
-    include_published: includePublished,
-    selection_source: selectionResult.from,
-    warning: selectionResult.warning || null,
-    created_by: ctx.user?.id || null,
-  }));
-
-  return {
-    rebuild_id: rebuildId,
-    roadmap,
-    old_posts_matched: linked.length,
-    old_posts_replaced: replaceable.length,
-    published_posts_kept: linked.length - replaceable.length,
-    new_posts_created: newPosts.length,
-    scheduled_posts: newPosts,
-    selection_source: selectionResult.from,
-    warning: selectionResult.warning || null,
-    generated_count: generateNow ? Math.min(generateLimit, newPosts.length) : 0,
-  };
-}
 
 app.get("/admin/crm/community-content/roadmaps", async (req, res) => {
   try {
@@ -23475,7 +22871,7 @@ app.post("/admin/crm/community-content/roadmaps/autopilot", async (req, res) => 
       post_time: req.body?.post_time || req.body?.question_time || "10:00",
       question_time: req.body?.question_time || req.body?.post_time || "10:00",
       answer_time: req.body?.answer_time || "15:00",
-      answer_delay_hours: Number(req.body?.answer_delay_hours || 5),
+      answer_delay_hours: Number(req.body?.answer_delay_hours || 4),
       platforms: payload.platforms,
       community_ids: payload.community_ids,
       source_pool: payload.source_pool,
@@ -23485,7 +22881,7 @@ app.post("/admin/crm/community-content/roadmaps/autopilot", async (req, res) => 
       rotation_strategy: payload.rotation_strategy,
       avoid_repeats: req.body?.avoid_repeats !== false,
       content_type: req.body?.content_type || "daily_mcq",
-      content_mix: Array.isArray(req.body?.content_mix) ? req.body.content_mix : ["daily_mcq", "answer_explanation"],
+      content_mix: ngRoadmapContentMix(req.body?.content_mix ? { content_mix: req.body.content_mix } : {}),
       approval_required: req.body?.approval_required !== false,
       auto_post_after_approval: req.body?.auto_post_after_approval !== false,
       instructions: ngContentClean(req.body?.instructions || "", ""),
@@ -23538,25 +22934,155 @@ app.post("/admin/crm/community-content/roadmaps/:id/generate-next", async (req, 
   }
 });
 
+
 app.post("/admin/crm/community-content/roadmaps/:id/rebuild-schedule", async (req, res) => {
   try {
     const ctx = await ngRequireContentAccess(req, "create");
     const db = ctx.crmDb;
-    const roadmap = ngContentArray(db, "community_content_roadmaps").find((item) => String(item.id) === String(req.params.id));
+    const roadmaps = ngContentArray(db, "community_content_roadmaps");
+    const roadmap = roadmaps.find((item) => String(item.id) === String(req.params.id));
+
     if (!roadmap) return res.status(404).json({ success: false, error: "Roadmap not found" });
     if (!ctx.crm_admin && !crmRecordVisibleToTeam(roadmap, ctx.team_member, ctx.user)) {
       return res.status(403).json({ success: false, error: "This roadmap is outside your assigned scope" });
     }
 
-    const result = await ngRebuildRoadmapSchedule(db, roadmap, ctx, req.body || {});
+    const editable = [
+      "title",
+      "description",
+      "topic",
+      "exam_type",
+      "days",
+      "start_date",
+      "timezone",
+      "post_time",
+      "question_time",
+      "answer_time",
+      "answer_delay_hours",
+      "platforms",
+      "community_ids",
+      "source_pool",
+      "source_query",
+      "source_rotation",
+      "rotation_strategy",
+      "content_mix",
+      "source_ids",
+      "topics",
+      "approval_required",
+      "auto_post_after_approval",
+      "instructions",
+      "content_type",
+    ];
+
+    for (const key of editable) {
+      if (req.body?.[key] !== undefined) {
+        if (["platforms", "community_ids", "content_mix", "source_ids", "topics"].includes(key)) {
+          roadmap[key] = ngContentList(req.body[key]);
+        } else if (["days", "answer_delay_hours"].includes(key)) {
+          roadmap[key] = Number(req.body[key]);
+        } else {
+          roadmap[key] = req.body[key];
+        }
+      }
+    }
+
+    roadmap.platforms = ngContentPlatforms(roadmap.platforms || req.body?.channels || "telegram");
+    roadmap.community_ids = ngContentList(roadmap.community_ids || req.body?.communities);
+    roadmap.days = Math.min(90, Math.max(1, Number(roadmap.days || 30)));
+    roadmap.answer_delay_hours = Number(roadmap.answer_delay_hours || 4);
+    roadmap.status = String(roadmap.status || "active").toLowerCase() === "deleted" ? "active" : (roadmap.status || "active");
+    roadmap.updated_at = nowIso();
+    roadmap.updated_by = ctx.user.id;
+
+    ngValidateCommunityTargetsForScheduling(db, roadmap);
+
+    const posts = ngContentArray(db, "community_scheduled_posts");
+    const replacedPostIds = new Set();
+    let hidden_old_posts = 0;
+    let kept_published_posts = 0;
+
+    for (const post of posts) {
+      if (String(post.roadmap_id || "") !== String(roadmap.id)) continue;
+
+      const status = String(post.status || "").toLowerCase();
+      const alreadyPublished =
+        ["posted", "published", "sent"].includes(status) ||
+        Boolean(post.published_at || post.posted_at || post.sent_at);
+
+      if (alreadyPublished) {
+        kept_published_posts += 1;
+        continue;
+      }
+
+      replacedPostIds.add(String(post.id || ""));
+      hidden_old_posts += 1;
+      post.status = "deleted";
+      post.deleted_at = post.deleted_at || nowIso();
+      post.deleted_by = ctx.user.id;
+      post.updated_at = nowIso();
+      post.updated_by = ctx.user.id;
+    }
+
+    db.approval_queue = ensureCrmArray(db, "approval_queue").filter((item) => {
+      const payload = item.payload || {};
+      const linkedPostId = String(item.scheduled_post_id || item.action_id || payload.scheduled_post_id || payload.id || "");
+      return !replacedPostIds.has(linkedPostId);
+    });
+
+    let selections = [];
+    if (roadmap.autopilot || String(req.body?.mode || "").toLowerCase() === "autopilot") {
+      const sourcePayload = {
+        ...roadmap,
+        ...req.body,
+        platforms: roadmap.platforms,
+        community_ids: roadmap.community_ids,
+        rotation_strategy: roadmap.rotation_strategy || roadmap.source_rotation || req.body?.source_rotation || "one_book_per_day",
+        source_pool: roadmap.source_pool || req.body?.source_pool || "all_approved",
+      };
+      const selected = ngSelectAutopilotSources(db, sourcePayload, ctx, roadmap.days);
+      selections = selected.selections;
+      roadmap.progress_key = selected.progressKey;
+      roadmap.source_ids = selections.map((s) => s.source_id).filter(Boolean);
+      roadmap.selected_plan = selections.map((s) => ({
+        day: s.day,
+        source_id: s.source_id,
+        book_name: s.book_name,
+        topic: s.topic,
+        source_title: s.source_title,
+      }));
+    }
+
+    const created_posts = selections.length
+      ? ngCreateAutopilotScheduledPosts(db, roadmap, selections, ctx)
+      : ngCreateRoadmapScheduledPosts(db, roadmap, ctx);
+
+    const generateNow = req.body?.generate_now === true || req.body?.generate_first_batch === true;
+    const generateLimit = Math.min(Number(req.body?.generate_limit || 4), created_posts.length);
+
+    if (generateNow) {
+      for (const post of created_posts.slice(0, generateLimit)) {
+        await ngGenerateAutopilotPostContent({ db, post, roadmap });
+      }
+    }
+
     await writeCrmDb(db);
+
     res.json({
       success: true,
-      message: "Roadmap schedule rebuilt. Published/sent posts were kept unless include_published=true was requested.",
-      ...result,
+      roadmap,
+      created_posts,
+      scheduled_posts: created_posts,
+      scheduled_count: created_posts.length,
+      hidden_old_posts,
+      kept_published_posts,
+      message: "Roadmap schedule rebuilt. Published posts were kept; future draft/review posts were replaced.",
     });
   } catch (error) {
-    res.status(error.statusCode || 500).json({ success: false, error: error.message, details: error.details || null });
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+      details: error.details || null,
+    });
   }
 });
 
@@ -23579,12 +23105,12 @@ app.post("/admin/crm/community-content/roadmaps", async (req, res) => {
       post_time: req.body?.post_time || req.body?.question_time || "10:00",
       question_time: req.body?.question_time || req.body?.post_time || "10:00",
       answer_time: req.body?.answer_time || "15:00",
-      answer_delay_hours: Number(req.body?.answer_delay_hours || 5),
+      answer_delay_hours: Number(req.body?.answer_delay_hours || 4),
       platforms: ngContentPlatforms(req.body?.platforms || req.body?.channels || "telegram"),
       community_ids: ngContentList(req.body?.community_ids || req.body?.communities),
       source_ids: ngContentList(req.body?.source_ids || req.body?.sources),
       topics: Array.isArray(req.body?.topics) ? req.body.topics.map((item) => String(item || "").trim()).filter(Boolean) : [],
-      content_mix: Array.isArray(req.body?.content_mix) ? req.body.content_mix : ["daily_mcq", "answer_explanation"],
+      content_mix: ngRoadmapContentMix(req.body?.content_mix ? { content_mix: req.body.content_mix } : {}),
       approval_required: req.body?.approval_required !== false,
       auto_post_after_approval: req.body?.auto_post_after_approval !== false,
       status: "active",
@@ -23763,11 +23289,8 @@ app.post("/admin/crm/community-content/scheduled-posts/:id/generate", async (req
       answerOnly: String(post.post_kind || "").toLowerCase() === "answer" || String(post.content_type || "").toLowerCase().includes("answer"),
     });
 
-    const formattedContent = ngFormatCommunityGeneratedContent(ai.content, {
-      answerOnly: String(post.post_kind || "").toLowerCase() === "answer" || String(post.content_type || "").toLowerCase().includes("answer"),
-    });
-    post.message = formattedContent;
-    post.draft_content = formattedContent;
+    post.message = ai.content;
+    post.draft_content = ai.content;
     post.ai_model = ai.model;
     post.ai_usage = ai.usage;
     post.ai_configured = ai.ai_configured;
