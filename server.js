@@ -11117,7 +11117,7 @@ async function testSocialIntegration(integration = {}) {
   }
 
   if (platform === "discord") {
-    const webhookUrl = integration.webhook_url || process.env.DISCORD_WEBHOOK_URL;
+    const webhookUrl = integration.webhook_url || (process.env.DISCORD_DAILY_MCQ_WEBHOOK_URL || process.env.DISCORD_WEBHOOK_URL);
     const botToken = getIntegrationCredential(integration, "api_key", "DISCORD_BOT_TOKEN") || process.env.DISCORD_BOT_TOKEN;
     if (!webhookUrl && !botToken) {
       const e = new Error("Discord is missing DISCORD_WEBHOOK_URL or DISCORD_BOT_TOKEN.");
@@ -11235,7 +11235,7 @@ async function sendSocialMessage({ db, integration, body = {} }) {
   }
 
   if (platform === "discord") {
-    const webhookUrl = integration.webhook_url || process.env.DISCORD_WEBHOOK_URL;
+    const webhookUrl = integration.webhook_url || (process.env.DISCORD_DAILY_MCQ_WEBHOOK_URL || process.env.DISCORD_WEBHOOK_URL);
     if (!webhookUrl) {
       const e = new Error("Discord webhook URL is required for live send.");
       e.statusCode = 400;
@@ -12270,11 +12270,11 @@ function getProviderStatus() {
       key: "discord",
       channel: "discord",
       name: "Discord",
-      configured: Boolean(process.env.DISCORD_WEBHOOK_URL || process.env.DISCORD_BOT_TOKEN),
-      ready: Boolean(process.env.DISCORD_WEBHOOK_URL || process.env.DISCORD_BOT_TOKEN),
-      enabled: Boolean(process.env.DISCORD_WEBHOOK_URL || process.env.DISCORD_BOT_TOKEN),
+      configured: Boolean((process.env.DISCORD_DAILY_MCQ_WEBHOOK_URL || process.env.DISCORD_WEBHOOK_URL) || process.env.DISCORD_BOT_TOKEN),
+      ready: Boolean((process.env.DISCORD_DAILY_MCQ_WEBHOOK_URL || process.env.DISCORD_WEBHOOK_URL) || process.env.DISCORD_BOT_TOKEN),
+      enabled: Boolean((process.env.DISCORD_DAILY_MCQ_WEBHOOK_URL || process.env.DISCORD_WEBHOOK_URL) || process.env.DISCORD_BOT_TOKEN),
       supports: ["text", "webhook"],
-      status: process.env.DISCORD_WEBHOOK_URL || process.env.DISCORD_BOT_TOKEN ? "active" : "not_configured",
+      status: (process.env.DISCORD_DAILY_MCQ_WEBHOOK_URL || process.env.DISCORD_WEBHOOK_URL) || process.env.DISCORD_BOT_TOKEN ? "active" : "not_configured",
     },
   };
 }
@@ -23871,6 +23871,301 @@ app.post("/admin/crm/community-content/media-library", async (req, res) => {
 // -----------------------------------------------------------------------------
 // END NEXTGEN COMMUNITY CONTENT ROADMAP + MULTI-PLATFORM SCHEDULER
 // -----------------------------------------------------------------------------
+
+
+// -----------------------------------------------------------------------------
+// DISCORD COMMUNITY POSTING EXTENSION
+// Added safely as an extension layer. It does not change Telegram, WhatsApp,
+// Stripe, Zoom, LMS demo, or existing CRM flows.
+// -----------------------------------------------------------------------------
+
+function getNextGenDiscordWebhookUrl() {
+  return (
+    process.env.DISCORD_DAILY_MCQ_WEBHOOK_URL ||
+    process.env.DISCORD_WEBHOOK_URL ||
+    ""
+  );
+}
+
+function buildNextGenDiscordMessage(body = {}, sourcePost = null) {
+  const rawContent =
+    body.content ||
+    body.message ||
+    body.text ||
+    sourcePost?.discord_content ||
+    sourcePost?.content ||
+    sourcePost?.post_text ||
+    sourcePost?.generated_text ||
+    sourcePost?.output_text ||
+    sourcePost?.caption ||
+    "";
+
+  if (String(rawContent || "").trim()) {
+    return String(rawContent).trim();
+  }
+
+  const title = body.title || sourcePost?.title || "Daily MCQ";
+  const topic = body.topic || sourcePost?.topic || "";
+  const question = body.question || sourcePost?.question || "";
+  const explanation = body.explanation || sourcePost?.explanation || "";
+  const answer = body.answer || sourcePost?.answer || sourcePost?.correct_answer || "";
+  const cta = body.cta || sourcePost?.cta || "";
+
+  const options = Array.isArray(body.options)
+    ? body.options
+    : Array.isArray(sourcePost?.options)
+      ? sourcePost.options
+      : [];
+
+  const lines = [];
+
+  lines.push(`**${title}**`);
+  if (topic) lines.push(`Topic: ${topic}`);
+  if (question) {
+    lines.push("");
+    lines.push(question);
+  }
+
+  if (options.length) {
+    lines.push("");
+    for (const option of options) {
+      lines.push(String(option));
+    }
+  }
+
+  if (answer) {
+    lines.push("");
+    lines.push(`**Answer:** ${answer}`);
+  }
+
+  if (explanation) {
+    lines.push("");
+    lines.push(`**Explanation:** ${explanation}`);
+  }
+
+  if (cta) {
+    lines.push("");
+    lines.push(String(cta));
+  }
+
+  if (lines.length <= 1) {
+    lines.push("High-yield NextGen medical licensing exam practice post.");
+  }
+
+  return lines.join("\n").trim();
+}
+
+async function sendNextGenDiscordWebhookMessage({ content, username = "NextGen MCQ Bot" }) {
+  const webhookUrl = getNextGenDiscordWebhookUrl();
+
+  if (!webhookUrl) {
+    const e = new Error("Discord webhook URL is missing. Add DISCORD_DAILY_MCQ_WEBHOOK_URL in Render Environment.");
+    e.statusCode = 400;
+    throw e;
+  }
+
+  const cleanContent = String(content || "").trim();
+
+  if (!cleanContent) {
+    const e = new Error("Discord message content is required.");
+    e.statusCode = 400;
+    throw e;
+  }
+
+  // Discord content limit is 2000 chars. Keep a safe margin.
+  const finalContent =
+    cleanContent.length > 1900
+      ? `${cleanContent.slice(0, 1880)}\n\n...(continued in next post)`
+      : cleanContent;
+
+  const response = await axios.post(
+    webhookUrl,
+    {
+      username,
+      content: finalContent,
+      allowed_mentions: { parse: [] },
+    },
+    {
+      headers: { "Content-Type": "application/json" },
+      timeout: 30000,
+    }
+  );
+
+  return {
+    status: response.status,
+    statusText: response.statusText,
+  };
+}
+
+app.get("/admin/crm/integrations/discord/status", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+
+    const configured = Boolean(getNextGenDiscordWebhookUrl());
+
+    res.json({
+      success: true,
+      platform: "discord",
+      configured,
+      live_connected: configured,
+      env_key: process.env.DISCORD_DAILY_MCQ_WEBHOOK_URL
+        ? "DISCORD_DAILY_MCQ_WEBHOOK_URL"
+        : process.env.DISCORD_WEBHOOK_URL
+          ? "DISCORD_WEBHOOK_URL"
+          : null,
+      message: configured
+        ? "Discord webhook is configured."
+        : "Discord webhook is missing. Add DISCORD_DAILY_MCQ_WEBHOOK_URL in Render Environment.",
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to check Discord status",
+    });
+  }
+});
+
+app.post("/admin/crm/integrations/discord/test-post", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+
+    const content = buildNextGenDiscordMessage({
+      title: req.body?.title || "NextGen Discord Test",
+      topic: req.body?.topic || "Integration Check",
+      question: req.body?.question || "This is a test post from NextGen CRM to Discord.",
+      options: req.body?.options || [],
+      explanation: req.body?.explanation || "If you can see this in #daily-mcq, the Discord webhook is connected successfully.",
+      cta: req.body?.cta || "NextGen community posting is ready.",
+      content: req.body?.content || req.body?.message || "",
+    });
+
+    const result = await sendNextGenDiscordWebhookMessage({
+      content,
+      username: req.body?.username || "NextGen MCQ Bot",
+    });
+
+    try {
+      const db = await readCrmDb();
+      ensureCrmArray(db, "integration_logs").push(withTimestamps({
+        id: uuid(),
+        platform: "discord",
+        action: "discord_test_post",
+        status: "success",
+        message: "Discord test post sent",
+        metadata: { result },
+      }));
+      await writeCrmDb(db);
+    } catch (logError) {
+      console.warn("Discord test post log failed:", logError.message);
+    }
+
+    res.json({
+      success: true,
+      platform: "discord",
+      message: "Discord test post sent successfully.",
+      discord: result,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.response?.data?.message || error.message || "Failed to send Discord test post",
+      discord_error: error.response?.data || null,
+    });
+  }
+});
+
+app.post("/admin/crm/community-content/publish-discord", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+
+    const db = await readCrmDb();
+    const postId = req.body?.post_id || req.body?.id || null;
+    let sourcePost = null;
+    let sourceCollection = null;
+
+    if (postId) {
+      const searchableCollections = [
+        "scheduled_posts",
+        "community_scheduled_posts",
+        "community_content_drafts",
+        "approval_queue",
+        "community_posts",
+        "post_generator_outputs",
+      ];
+
+      for (const collection of searchableCollections) {
+        const items = ensureCrmArray(db, collection);
+        const found = items.find((item) => String(item.id) === String(postId));
+        if (found) {
+          sourcePost = found;
+          sourceCollection = collection;
+          break;
+        }
+      }
+
+      if (!sourcePost) {
+        return res.status(404).json({
+          success: false,
+          error: "Community content post not found for the provided post_id.",
+        });
+      }
+    }
+
+    const content = buildNextGenDiscordMessage(req.body || {}, sourcePost);
+
+    const result = await sendNextGenDiscordWebhookMessage({
+      content,
+      username: req.body?.username || "NextGen MCQ Bot",
+    });
+
+    const publishedAt = new Date().toISOString();
+
+    if (sourcePost) {
+      sourcePost.discord_published = true;
+      sourcePost.discord_published_at = publishedAt;
+      sourcePost.published_platforms = Array.from(new Set([
+        ...(Array.isArray(sourcePost.published_platforms) ? sourcePost.published_platforms : []),
+        "discord",
+      ]));
+      sourcePost.updated_at = publishedAt;
+    }
+
+    ensureCrmArray(db, "integration_logs").push(withTimestamps({
+      id: uuid(),
+      platform: "discord",
+      action: "publish_discord",
+      status: "success",
+      message: "Community content published to Discord",
+      metadata: {
+        post_id: postId,
+        source_collection: sourceCollection,
+        discord: result,
+      },
+    }));
+
+    await writeCrmDb(db);
+
+    res.json({
+      success: true,
+      platform: "discord",
+      message: "Community content published to Discord successfully.",
+      post_id: postId,
+      source_collection: sourceCollection,
+      discord: result,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.response?.data?.message || error.message || "Failed to publish community content to Discord",
+      discord_error: error.response?.data || null,
+    });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// END DISCORD COMMUNITY POSTING EXTENSION
+// -----------------------------------------------------------------------------
+
 
 app.use((err, req, res, next) => {
   applyNextGenCors(req, res);
