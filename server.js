@@ -11,37 +11,6 @@ import path from "path";
 dotenv.config();
 
 const app = express();
-
-// NextGen route de-duplication guard.
-// This keeps the first registered route and safely skips later exact duplicates.
-// It protects the backend from duplicated pasted route blocks without removing feature code.
-const __nextGenRegisteredRoutes = new Set();
-const __nextGenDuplicateRoutes = [];
-
-function __nextGenRouteKey(method, routePath) {
-  if (typeof routePath === "string") return `${String(method).toUpperCase()} ${routePath}`;
-  if (routePath instanceof RegExp) return `${String(method).toUpperCase()} ${routePath.toString()}`;
-  return `${String(method).toUpperCase()} ${String(routePath)}`;
-}
-
-for (const __method of ["get", "post", "put", "patch", "delete"]) {
-  const __original = app[__method].bind(app);
-  app[__method] = (routePath, ...handlers) => {
-    const __key = __nextGenRouteKey(__method, routePath);
-    if (__nextGenRegisteredRoutes.has(__key)) {
-      __nextGenDuplicateRoutes.push({
-        method: __method.toUpperCase(),
-        path: typeof routePath === "string" ? routePath : String(routePath),
-        skipped_at: new Date().toISOString(),
-      });
-      console.warn(`[NextGen duplicate route skipped] ${__key}`);
-      return app;
-    }
-    __nextGenRegisteredRoutes.add(__key);
-    return __original(routePath, ...handlers);
-  };
-}
-
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const allowedOrigins = [
@@ -114,17 +83,6 @@ app.get("/admin/debug/cors-check", (req, res) => {
     success: true,
     build: "v10-telegram-community-bot-routing",
     origin: req.headers.origin || null,
-    now: new Date().toISOString(),
-  });
-});
-
-app.get("/admin/debug/routes-audit", (req, res) => {
-  res.json({
-    success: true,
-    active_route_count: __nextGenRegisteredRoutes.size,
-    duplicate_route_count: __nextGenDuplicateRoutes.length,
-    duplicate_routes: __nextGenDuplicateRoutes,
-    build: "v11-cleaned-demo-access",
     now: new Date().toISOString(),
   });
 });
@@ -447,7 +405,6 @@ function getExternalLibraryAccess(db, user) {
 }
 
 function getStudentFeatureAccess(db, user) {
-  const demoSettings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
   const featureKeys = Object.keys({ ...DEFAULT_FEATURE_CATALOG, ...(db.featureCatalog || {}) });
   const access = {};
 
@@ -459,54 +416,54 @@ function getStudentFeatureAccess(db, user) {
       description: catalogItem.description || "",
       included: Boolean(catalogItem.free_for_all),
       locked: !Boolean(catalogItem.free_for_all),
-      source: catalogItem.free_for_all ? "free_for_all" : "locked",
       plan_id: null,
       plan_name: null,
       course_id: null,
       course_name: null,
       access_days: null,
+      is_demo: false,
       demo_expiry: null,
     };
   }
 
-  const enrollments = Object.values(db.enrollments || {}).filter((enrollment) => {
-    return (
-      String(enrollment.user_id) === String(user.id) &&
-      enrollment.access_granted !== false
-    );
-  });
+  // Demo access: controlled globally from admin demo settings and per-course via demo_access_enabled.
+  // This does not affect paid access and does not grant Video Library unless allow_video_library is enabled.
+  const demoSettings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
+  const demoFeatureMap = {
+    live_classes: "allow_live_classes",
+    roadmap: "allow_roadmap",
+    community: "allow_community",
+    global_community: "allow_global_community",
+    study_partner: "allow_study_partner",
+    assessments: "allow_assessments",
+    leaderboard: "allow_leaderboard",
+    recordings: "allow_recordings",
+    notes_transcripts: "allow_notes_transcripts",
+    video_library: "allow_video_library",
+    support: "allow_community",
+  };
 
-  for (const enrollment of enrollments) {
-    const isDemo = enrollment.is_demo === true;
+  if (demoSettings.enabled !== false) {
+    const demoEnrollments = Object.values(db.enrollments || {}).filter((enrollment) => {
+      if (String(enrollment.user_id) !== String(user.id)) return false;
+      if (enrollment.access_granted === false) return false;
+      if (enrollment.is_demo !== true) return false;
+      if (!isDemoEnrollmentActive(enrollment, demoSettings)) return false;
 
-    if (isDemo && !isDemoEnrollmentActive(enrollment, demoSettings)) {
-      continue;
-    }
+      const course = enrollment.course_id
+        ? db.courses?.[String(enrollment.course_id)] || null
+        : null;
 
-    const course = enrollment.course_id
-      ? db.courses?.[String(enrollment.course_id)] || null
-      : null;
+      return course?.demo_access_enabled !== false;
+    });
 
-    if (isDemo) {
-      if (!demoSettings.enabled) continue;
-      if (course && course.demo_access_enabled === false) continue;
+    for (const enrollment of demoEnrollments) {
+      const course = enrollment.course_id
+        ? db.courses?.[String(enrollment.course_id)] || null
+        : null;
 
-      const demoFeatureMap = {
-        live_classes: demoSettings.allow_live_classes,
-        roadmap: demoSettings.allow_roadmap,
-        community: demoSettings.allow_community,
-        global_community: demoSettings.allow_global_community,
-        study_partner: demoSettings.allow_study_partner,
-        assessments: demoSettings.allow_assessments,
-        leaderboard: demoSettings.allow_leaderboard,
-        recordings: demoSettings.allow_recordings,
-        notes_transcripts: demoSettings.allow_notes_transcripts,
-        video_library: demoSettings.allow_video_library,
-        support: true,
-      };
-
-      for (const [featureKey, allowed] of Object.entries(demoFeatureMap)) {
-        if (!allowed) continue;
+      for (const [featureKey, settingKey] of Object.entries(demoFeatureMap)) {
+        if (demoSettings[settingKey] !== true) continue;
 
         const catalogItem = (db.featureCatalog || {})[featureKey] || DEFAULT_FEATURE_CATALOG[featureKey] || {};
         access[featureKey] = {
@@ -515,24 +472,37 @@ function getStudentFeatureAccess(db, user) {
           description: catalogItem.description || "",
           included: true,
           locked: false,
-          source: "demo",
           plan_id: null,
           plan_name: "Demo Access",
           course_id: course?.id || enrollment.course_id || null,
           course_name: course?.name || "Course",
           access_days: Number(demoSettings.duration_days || 2),
+          is_demo: true,
           demo_expiry: enrollment.demo_expiry || null,
         };
       }
-
-      continue;
     }
+  }
 
+  // Paid access always has priority over demo access.
+  const enrollments = Object.values(db.enrollments || {}).filter((enrollment) => {
+    return (
+      String(enrollment.user_id) === String(user.id) &&
+      enrollment.access_granted !== false &&
+      enrollment.is_demo !== true
+    );
+  });
+
+  for (const enrollment of enrollments) {
     const plan = enrollment.plan_id
       ? db.plans?.[String(enrollment.plan_id)] || null
       : null;
 
     if (!plan || plan.is_active === false) continue;
+
+    const course = enrollment.course_id
+      ? db.courses?.[String(enrollment.course_id)] || null
+      : null;
 
     const features = Array.isArray(plan.included_features) ? plan.included_features : [];
 
@@ -547,12 +517,12 @@ function getStudentFeatureAccess(db, user) {
         description: catalogItem.description || "",
         included: true,
         locked: false,
-        source: "paid_plan",
         plan_id: plan.id || null,
         plan_name: plan.name || null,
         course_id: course?.id || enrollment.course_id || null,
         course_name: course?.name || "Course",
         access_days: getPlanAccessDays(plan),
+        is_demo: false,
         demo_expiry: null,
       };
     }
@@ -3624,7 +3594,7 @@ app.patch("/admin/payments/:paymentId", async (req, res) => {
 app.post("/demo/start", async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req);
-    const course_id = String(req.body?.course_id || req.body?.courseId || "").trim();
+    const { course_id } = req.body;
 
     if (!course_id) {
       return res.status(400).json({ success: false, error: "course_id is required" });
@@ -3637,7 +3607,7 @@ app.post("/demo/start", async (req, res) => {
       return res.status(403).json({ success: false, error: "Demo access is disabled" });
     }
 
-    const course = db.courses?.[course_id] || null;
+    const course = db.courses?.[String(course_id)] || null;
 
     if (!course) {
       return res.status(404).json({ success: false, error: "Course not found" });
@@ -3667,9 +3637,9 @@ app.post("/demo/start", async (req, res) => {
         enrollment: existingDemo,
         demo_settings: settings,
         demo_expiry: existingDemo.demo_expiry || null,
-        already_demo: true,
+        created: false,
         source: "backend",
-        message: "Demo access is already active",
+        message: "Demo access already active",
       });
     }
 
