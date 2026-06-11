@@ -42,7 +42,7 @@ function applyNextGenCors(req, res) {
     requestHeaders || "Content-Type, Authorization, x-admin-token, x-requested-with"
   );
   res.setHeader("Access-Control-Max-Age", "86400");
-  res.setHeader("X-NextGen-Backend-Build", "v10-telegram-community-bot-routing");
+  res.setHeader("X-NextGen-Backend-Build", "v12-exam-track-crm-separation");
 }
 
 // Hard CORS/preflight guard. This must be the first middleware after app creation.
@@ -81,7 +81,7 @@ app.use(express.urlencoded({ extended: true, limit: process.env.JSON_BODY_LIMIT 
 app.get("/admin/debug/cors-check", (req, res) => {
   res.json({
     success: true,
-    build: "v10-telegram-community-bot-routing",
+    build: "v12-exam-track-crm-separation",
     origin: req.headers.origin || null,
     now: new Date().toISOString(),
   });
@@ -6452,12 +6452,20 @@ function registerCrmCrudRoutes({ route, collection, brandScoped = true }) {
       const brandId = brandScoped ? getCrmBrandId(req, db) : null;
       let records = filterCrmRecords(req, ensureCrmArray(db, collection), brandId);
       if (!ctx.crm_admin) records = applyTeamScopeToRecords(records, ctx.team_member, ctx.user, collection);
+      records = ngFilterByExamTrackQuery(req, records);
 
       if (collection === "leads") {
-        records = records.map((lead) => ensureLeadIdentityFields(lead));
+        records = records.map((lead) => ensureLeadIdentityFields(ngAttachExamTrack(lead)));
       }
 
-      res.json({ success: true, [collectionResponseName(collection)]: records, count: records.length, scoped: !ctx.crm_admin });
+      res.json({
+        success: true,
+        [collectionResponseName(collection)]: records,
+        count: records.length,
+        scoped: !ctx.crm_admin,
+        exam_track: ngNormalizeExamTrack(req.query?.exam_track || req.query?.track || ""),
+        exam_track_summary: ngExamTrackSummary(records),
+      });
     } catch (error) {
       res.status(error.statusCode || 500).json({ success: false, error: error.message });
     }
@@ -6470,6 +6478,7 @@ function registerCrmCrudRoutes({ route, collection, brandScoped = true }) {
       const brandId = brandScoped ? getCrmBrandId(req, db) : null;
       const records = ensureCrmArray(db, collection);
       let record = normalizeCrmCollectionPayload(collection, req.body || {}, null, brandId);
+      record = ngAttachExamTrack(record, req.body?.exam_track || req.body?.track || req.query?.exam_track || req.query?.track || "");
       if (!ctx.crm_admin) record = attachTeamOwnership(record, ctx.team_member, ctx.user);
       if (collection === "leads") record = ensureLeadIdentityFields(record);
       records.push(record);
@@ -6544,6 +6553,7 @@ function registerCrmCrudRoutes({ route, collection, brandScoped = true }) {
       }
 
       let record = normalizeCrmCollectionPayload(collection, req.body || {}, records[index], brandId);
+      record = ngAttachExamTrack(record, req.body?.exam_track || req.body?.track || req.query?.exam_track || req.query?.track || records[index]?.exam_track || "");
       if (!ctx.crm_admin) record = attachTeamOwnership(record, ctx.team_member, ctx.user);
       if (collection === "leads") record = ensureLeadIdentityFields(record);
       records[index] = record;
@@ -10078,9 +10088,16 @@ app.post("/webhooks/telegram", async (req, res) => {
     const db = await readCrmDb();
     const integration = findTelegramIntegration(db);
 
-    const leadPayload = normalizeTelegramLeadPayload({ update, message, integration });
+    const examTrack = ngResolveExamTrackFromTelegramMessage(message);
+    const leadPayload = {
+      ...normalizeTelegramLeadPayload({ update, message, integration }),
+      exam_track: examTrack || undefined,
+      exam_track_label: examTrack ? ngExamTrackLabel(examTrack) : undefined,
+    };
     const { lead, created } = upsertTelegramLead(db, leadPayload);
+    ngAttachExamTrack(lead, examTrack);
     const conversation = appendTelegramConversation(db, { lead, update, message, text, integration });
+    ngAttachExamTrack(conversation, lead.exam_track || examTrack);
 
     createTelegramIntegrationLog(db, {
       integration_id: integration?.id || null,
@@ -10099,6 +10116,7 @@ app.post("/webhooks/telegram", async (req, res) => {
       action: created ? "create_lead" : "update_lead",
       fields_collected: Object.keys(leadPayload),
       conversation_id: conversation.id,
+      exam_track: lead.exam_track || examTrack || null,
     }));
 
     await writeCrmDb(db);
@@ -11452,6 +11470,7 @@ app.get("/admin/crm/conversation-inbox", async (req, res) => {
     const db = ctx.crmDb;
     let conversations = buildConversationInbox(db);
     if (!ctx.crm_admin) conversations = applyTeamScopeToRecords(conversations, ctx.team_member, ctx.user, "conversations");
+    conversations = ngFilterByExamTrackQuery(req, conversations);
 
     const platform = req.query.platform ? normalizeSocialPlatform(req.query.platform) : null;
     const status = req.query.status ? String(req.query.status).toLowerCase() : null;
@@ -11479,6 +11498,7 @@ app.get("/admin/crm/conversation-inbox", async (req, res) => {
         email: conversations.filter((item) => item.platform === "email").length,
         facebook: conversations.filter((item) => item.platform === "facebook").length,
         instagram: conversations.filter((item) => item.platform === "instagram").length,
+        exam_tracks: ngExamTrackSummary(conversations),
       },
     });
   } catch (error) {
@@ -19492,8 +19512,11 @@ async function ngScoutHandleTelegramUpdate(req, res) {
     const ownerRef = ngScoutResolveOwnerFromReferral(db, text, message);
     const ownerMember = ownerRef.member || null;
 
+    const examTrack = ngResolveExamTrackFromTelegramMessage(message);
     const leadPayload = {
       ...normalizeTelegramLeadPayload({ update, message, integration: null }),
+      exam_track: examTrack || undefined,
+      exam_track_label: examTrack ? ngExamTrackLabel(examTrack) : undefined,
       source_integration_name: "Telegram Scout Bot",
       source_channel: "telegram_scout_bot",
       source_platform: "telegram",
@@ -19511,6 +19534,7 @@ async function ngScoutHandleTelegramUpdate(req, res) {
     };
 
     const { lead, created } = upsertTelegramLead(db, leadPayload);
+    ngAttachExamTrack(lead, examTrack);
     lead.scout_bot = true;
     lead.scout_bot_last_message_at = now;
     lead.scout_bot_status = "active";
@@ -19524,6 +19548,7 @@ async function ngScoutHandleTelegramUpdate(req, res) {
     }
 
     const conversation = appendTelegramConversation(db, { lead, update, message, text, integration: null });
+    ngAttachExamTrack(conversation, lead.exam_track || examTrack);
     conversation.scout_bot = true;
     conversation.channel = "telegram_scout";
     conversation.source_channel = "telegram_scout_bot";
@@ -19535,6 +19560,8 @@ async function ngScoutHandleTelegramUpdate(req, res) {
       platform: "telegram",
       source_platform: "telegram",
       source_channel: "telegram_scout_bot",
+      exam_track: lead.exam_track || examTrack || null,
+      exam_track_label: lead.exam_track ? ngExamTrackLabel(lead.exam_track) : null,
       scout_bot: true,
       lead_id: lead.id,
       owner_team_member_id: lead.owner_team_member_id || null,
@@ -19580,6 +19607,7 @@ async function ngScoutHandleTelegramUpdate(req, res) {
       fields_collected: Object.keys(capturedFields || {}),
       conversation_id: conversation.id,
       opportunity_id: opportunity.id,
+      exam_track: lead.exam_track || examTrack || null,
     }));
 
     const brandId = getCrmBrandId(req, db);
@@ -21811,6 +21839,8 @@ function ngBuildScheduledPostPayload(body = {}, ctx = {}, extra = {}) {
     title: ngContentClean(body.title || extra.title || "Community content post"),
     topic: ngContentClean(body.topic || extra.topic || ""),
     content_type: ngContentClean(body.content_type || body.post_type || extra.content_type || "daily_mcq"),
+    exam_track: ngNormalizeExamTrack(body.exam_track || body.examTrack || extra.exam_track || body.target_track || body.exam_type || body.topic || body.title || ""),
+    exam_track_label: ngExamTrackLabel(body.exam_track || body.examTrack || extra.exam_track || body.target_track || body.exam_type || body.topic || body.title || ""),
     post_kind: ngContentClean(body.post_kind || extra.post_kind || "question"),
     message: ngContentClean(body.message || body.content || body.draft_content || extra.message || ""),
     draft_content: ngContentClean(body.draft_content || body.message || body.content || extra.message || ""),
@@ -21857,11 +21887,13 @@ async function ngPublishScheduledPost(db, post = {}, actor = null) {
   const targets = ngNormalizeCommunityTargets(db, {
     platforms: post.platforms || post.platform,
     community_ids: post.community_ids,
-    direct_targets: post.direct_targets,
+    direct_targets: Array.isArray(post.direct_targets) && post.direct_targets.length
+      ? post.direct_targets
+      : [{ exam_track: post.exam_track || post.examTrack || post.target_track || post.exam_type || post.topic || post.title || "" }],
   });
 
   if (!targets.length) {
-    const error = new Error("No delivery target selected. Choose a Telegram/WhatsApp community or add a direct target before publishing.");
+    const error = new Error("No delivery target selected. Choose a Telegram/Discord/WhatsApp community or add a direct target before publishing.");
     error.statusCode = 422;
     error.details = {
       platforms: post.platforms || [post.platform].filter(Boolean),
@@ -21904,6 +21936,8 @@ async function ngPublishScheduledPost(db, post = {}, actor = null) {
     roadmap_id: post.roadmap_id || null,
     title: post.title,
     content_type: post.content_type,
+    exam_track: post.exam_track || null,
+    exam_track_label: post.exam_track ? ngExamTrackLabel(post.exam_track) : null,
     message,
     platforms: post.platforms || [post.platform],
     results,
@@ -22361,6 +22395,17 @@ function ngFormatForPlatform({ platform = "telegram", post = {}, text = "" } = {
   let body = ngFormatCommunityGeneratedContent(text || post.message || post.draft_content || "", { answerOnly, contentType: t, post });
   const limit = ngPlatformTextLimit(p);
 
+  if (p === "discord") {
+    const track = ngInferExamTrackFromObject({ ...post, ...target }, post.exam_track || target.exam_track || "");
+    const messageText = String(formatted || "").trim();
+    return sendNextGenDiscordWebhookMessage({
+      content: messageText,
+      exam_track: track,
+      webhook_url: target.discord_webhook_url || "",
+      username: target.discord_username || ngDiscordUsernameForExamTrack(track),
+    });
+  }
+
   if (p === "whatsapp") {
     body = body
       .replace(/\n{3,}/g, "\n\n")
@@ -22576,6 +22621,185 @@ async function ngPostToReddit({ subreddit = "", title = "", body = "" } = {}) {
   return response.data;
 }
 
+
+
+// -----------------------------------------------------------------------------
+// NEXTGEN EXAM TRACK SEPARATION + ROUTING
+// One CRM, separated by exam_track across leads, inbox, communities, posts.
+// -----------------------------------------------------------------------------
+
+const NEXTGEN_EXAM_TRACKS = {
+  usmle_step1: {
+    key: "usmle_step1",
+    label: "USMLE Step 1",
+    aliases: ["step1", "step_1", "usmle_step_1", "usmle step 1", "daily_mcq", "daily-mcqs", "daily mcqs", "free live", "live session"],
+    telegramEnv: "TELEGRAM_STEP1_CHAT_ID",
+    discordEnv: "DISCORD_STEP1_WEBHOOK_URL",
+    discordUsername: "USMLE Step 1 Daily MCQ",
+  },
+  usmle_step2_ck: {
+    key: "usmle_step2_ck",
+    label: "USMLE Step 2 CK",
+    aliases: ["step2", "step2ck", "step_2", "step_2_ck", "usmle_step2", "usmle_step2_ck", "usmle step 2", "usmle step 2 ck", "ck"],
+    telegramEnv: "TELEGRAM_STEP2_CK_CHAT_ID",
+    discordEnv: "DISCORD_STEP2_CK_WEBHOOK_URL",
+    discordUsername: "Step 2 CK Clinical Cases",
+  },
+  nclex: {
+    key: "nclex",
+    label: "NCLEX",
+    aliases: ["nclex", "nclex_rn", "nclex rn", "clinical judgment", "clinical_judgment"],
+    telegramEnv: "TELEGRAM_NCLEX_CHAT_ID",
+    discordEnv: "DISCORD_NCLEX_WEBHOOK_URL",
+    discordUsername: "NCLEX Clinical Judgment",
+  },
+  mccqe: {
+    key: "mccqe",
+    label: "MCCQE",
+    aliases: ["mccqe", "mccqe1", "mccqe_1", "canada", "canadian"],
+    telegramEnv: "TELEGRAM_MCCQE_CHAT_ID",
+    discordEnv: "DISCORD_MCCQE_WEBHOOK_URL",
+    discordUsername: "MCCQE Clinical Cases",
+  },
+  amc: {
+    key: "amc",
+    label: "AMC",
+    aliases: ["amc", "australia", "australian"],
+    telegramEnv: "TELEGRAM_AMC_CHAT_ID",
+    discordEnv: "DISCORD_AMC_WEBHOOK_URL",
+    discordUsername: "AMC Clinical Reasoning",
+  },
+};
+
+function ngNormalizeExamTrack(value = "", fallback = "") {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return fallback || "";
+  const compact = raw.replace(/&/g, " and ").replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  if (NEXTGEN_EXAM_TRACKS[compact]) return compact;
+  for (const track of Object.values(NEXTGEN_EXAM_TRACKS)) {
+    if (track.aliases.some((alias) => {
+      const cleanAlias = String(alias).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+      return compact === cleanAlias || compact.includes(cleanAlias) || raw.includes(String(alias).toLowerCase());
+    })) return track.key;
+  }
+  if (compact.includes("usmle") && compact.includes("2")) return "usmle_step2_ck";
+  if (compact.includes("usmle") && compact.includes("1")) return "usmle_step1";
+  if (compact.includes("nclex")) return "nclex";
+  if (compact.includes("mccqe")) return "mccqe";
+  if (compact === "amc" || compact.includes("australia")) return "amc";
+  return fallback || "";
+}
+
+function ngExamTrackLabel(track = "") {
+  const key = ngNormalizeExamTrack(track);
+  return NEXTGEN_EXAM_TRACKS[key]?.label || "General";
+}
+
+function ngResolveExamTrackFromTelegramChatId(chatId = "") {
+  const clean = String(chatId || "").trim();
+  if (!clean) return "";
+  for (const track of Object.values(NEXTGEN_EXAM_TRACKS)) {
+    if (String(process.env[track.telegramEnv] || "").trim() === clean) return track.key;
+  }
+  return "";
+}
+
+function ngResolveExamTrackFromTelegramMessage(message = {}) {
+  const chat = message.chat || {};
+  const candidates = [
+    ngResolveExamTrackFromTelegramChatId(chat.id),
+    chat.title,
+    chat.username,
+    message.text,
+    message.caption,
+  ];
+  for (const candidate of candidates) {
+    const track = ngNormalizeExamTrack(candidate);
+    if (track) return track;
+  }
+  return "";
+}
+
+function ngInferExamTrackFromObject(obj = {}, fallback = "") {
+  const candidates = [
+    obj.exam_track,
+    obj.examTrack,
+    obj.track,
+    obj.target_track,
+    obj.provider_target_id,
+    obj.target_id,
+    obj.community_name,
+    obj.name,
+    obj.title,
+    obj.topic,
+    obj.content_type,
+    obj.exam_type,
+    obj.platform_target,
+    obj.channel,
+    obj.source_channel,
+    obj.notes,
+    obj.instructions,
+  ];
+  for (const candidate of candidates) {
+    const track = ngNormalizeExamTrack(candidate);
+    if (track) return track;
+  }
+  return ngNormalizeExamTrack(fallback);
+}
+
+function ngTelegramChatIdForExamTrack(track = "") {
+  const key = ngNormalizeExamTrack(track);
+  const env = NEXTGEN_EXAM_TRACKS[key]?.telegramEnv;
+  return env ? String(process.env[env] || "").trim() : "";
+}
+
+function ngDiscordWebhookUrlForExamTrack(track = "") {
+  const key = ngNormalizeExamTrack(track);
+  const env = NEXTGEN_EXAM_TRACKS[key]?.discordEnv;
+  return env ? String(process.env[env] || "").trim() : "";
+}
+
+function ngDiscordUsernameForExamTrack(track = "") {
+  const key = ngNormalizeExamTrack(track);
+  return NEXTGEN_EXAM_TRACKS[key]?.discordUsername || "Medical Exam Study Helper";
+}
+
+function ngAttachExamTrack(record = {}, track = "") {
+  const key = ngNormalizeExamTrack(track || record.exam_track || record.examTrack || record.exam_type || record.title || record.topic);
+  if (!key) return record;
+  record.exam_track = key;
+  record.exam_track_label = ngExamTrackLabel(key);
+  return record;
+}
+
+function ngFilterByExamTrackQuery(req = {}, records = []) {
+  const requested = req.query?.exam_track || req.query?.examTrack || req.query?.track || req.query?.exam || "";
+  const key = ngNormalizeExamTrack(requested);
+  if (!key || key === "all") return records;
+  return records.filter((item) => ngNormalizeExamTrack(item.exam_track || item.examTrack || item.track || "") === key);
+}
+
+function ngExamTrackSummary(records = []) {
+  return Object.fromEntries(Object.keys(NEXTGEN_EXAM_TRACKS).map((key) => [
+    key,
+    records.filter((item) => ngNormalizeExamTrack(item.exam_track || "") === key).length,
+  ]));
+}
+
+function ngExamTrackRoutingStatus() {
+  return Object.fromEntries(Object.entries(NEXTGEN_EXAM_TRACKS).map(([key, track]) => [
+    key,
+    {
+      label: track.label,
+      telegram_configured: Boolean(process.env[track.telegramEnv]),
+      discord_configured: Boolean(process.env[track.discordEnv]),
+      telegram_env: track.telegramEnv,
+      discord_env: track.discordEnv,
+    },
+  ]));
+}
+
+
 function ngNormalizeCommunityTargets(db, { platforms = [], community_ids = [], direct_targets = [] } = {}) {
   const platformList = ngContentPlatforms(platforms);
   const ids = ngContentList(community_ids);
@@ -22590,6 +22814,8 @@ function ngNormalizeCommunityTargets(db, { platforms = [], community_ids = [], d
       platform,
       community_id: raw.id || raw.community_id || null,
       community_name: raw.community_name || raw.name || raw.title || "",
+      exam_track: ngInferExamTrackFromObject(raw),
+      exam_track_label: ngExamTrackLabel(ngInferExamTrackFromObject(raw)),
       telegram_chat_id: ngNormalizeTelegramChatId(ngTargetValue(raw.telegram_chat_id, raw.chat_id, raw.channel_id, raw.telegram_group_id, raw.platform_chat_id, raw.target_id, raw.delivery_target), { assumeGroup: true }),
       whatsapp_to: ngTargetValue(raw.whatsapp_to, raw.whatsapp_number, raw.whatsapp, raw.phone, raw.phone_number, raw.group_id, raw.target_id, raw.delivery_target),
       email_to: ngTargetValue(raw.email_to, raw.email, raw.target_email, raw.delivery_target),
@@ -22611,6 +22837,30 @@ function ngNormalizeCommunityTargets(db, { platforms = [], community_ids = [], d
     targets.push(target);
   }
 
+  if (!targets.length && platformList.length) {
+    const fallbackTrack = ngNormalizeExamTrack(
+      ngTargetValue(
+        direct[0]?.exam_track,
+        direct[0]?.track,
+        direct[0]?.target_track,
+        direct[0]?.provider_target_id,
+        direct[0]?.target_id
+      )
+    );
+
+    for (const platform of platformList) {
+      const cleanPlatform = ngCommunityPlatform(platform);
+      if (cleanPlatform === "telegram") {
+        const chatId = ngTelegramChatIdForExamTrack(fallbackTrack);
+        if (chatId) targets.push({ id: uuid(), platform: "telegram", exam_track: fallbackTrack, exam_track_label: ngExamTrackLabel(fallbackTrack), community_name: `${ngExamTrackLabel(fallbackTrack)} Telegram`, telegram_chat_id: chatId, raw: { env_fallback: true } });
+      }
+      if (cleanPlatform === "discord") {
+        const webhookUrl = ngDiscordWebhookUrlForExamTrack(fallbackTrack);
+        if (webhookUrl) targets.push({ id: uuid(), platform: "discord", exam_track: fallbackTrack, exam_track_label: ngExamTrackLabel(fallbackTrack), community_name: `${ngExamTrackLabel(fallbackTrack)} Discord`, discord_webhook_url: webhookUrl, raw: { env_fallback: true } });
+      }
+    }
+  }
+
   return targets;
 }
 
@@ -22620,6 +22870,7 @@ function ngTargetCanReceivePlatform(target = {}, platform = "") {
   if (cleanPlatform === "whatsapp") return Boolean(ngTargetValue(target.whatsapp_to, target.whatsapp_number, target.phone, target.to, target.recipient));
   if (cleanPlatform === "email") return Boolean(ngTargetValue(target.email_to, target.email, target.to, target.recipient));
   if (cleanPlatform === "reddit") return Boolean(ngTargetValue(target.reddit_subreddit, target.subreddit, process.env.REDDIT_DEFAULT_SUBREDDIT));
+  if (cleanPlatform === "discord") return Boolean(ngTargetValue(target.discord_webhook_url, ngDiscordWebhookUrlForExamTrack(target.exam_track)));
   return true;
 }
 
@@ -22630,7 +22881,8 @@ async function ngPublishToPlatform({ platform, target = {}, post = {}, text = ""
     (Array.isArray(post.media_items) ? post.media_items.find((item) => item?.url || item?.image_url)?.url || post.media_items.find((item) => item?.url || item?.image_url)?.image_url : null);
 
   if (p === "telegram") {
-    const chatId = ngNormalizeTelegramChatId(target.telegram_chat_id || target.chat_id || target.to || target.recipient || "", { assumeGroup: Boolean(target.community_id || target.raw?.id || target.raw?.community_name || target.raw?.name) });
+    const track = ngInferExamTrackFromObject({ ...post, ...target }, post.exam_track || target.exam_track || "");
+    const chatId = ngNormalizeTelegramChatId(target.telegram_chat_id || target.chat_id || target.to || target.recipient || ngTelegramChatIdForExamTrack(track) || "", { assumeGroup: true });
     if (!chatId) throw Object.assign(new Error("Telegram target missing chat_id"), { statusCode: 400 });
     const messageText = String(formatted || "").trim();
     if (imageUrl) return telegramCommunityApi("sendPhoto", { chat_id: chatId, photo: imageUrl, caption: messageText.slice(0, 1000) }, {});
@@ -23879,8 +24131,12 @@ app.post("/admin/crm/community-content/media-library", async (req, res) => {
 // Stripe, Zoom, LMS demo, or existing CRM flows.
 // -----------------------------------------------------------------------------
 
-function getNextGenDiscordWebhookUrl() {
+function getNextGenDiscordWebhookUrl(examTrack = "", fallbackUrl = "") {
+  const trackUrl = ngDiscordWebhookUrlForExamTrack(examTrack);
   return (
+    fallbackUrl ||
+    trackUrl ||
+    process.env.DISCORD_STEP1_WEBHOOK_URL ||
     process.env.DISCORD_DAILY_MCQ_WEBHOOK_URL ||
     process.env.DISCORD_WEBHOOK_URL ||
     ""
@@ -23955,11 +24211,13 @@ function buildNextGenDiscordMessage(body = {}, sourcePost = null) {
   return lines.join("\n").trim();
 }
 
-async function sendNextGenDiscordWebhookMessage({ content, username = "NextGen MCQ Bot" }) {
-  const webhookUrl = getNextGenDiscordWebhookUrl();
+async function sendNextGenDiscordWebhookMessage({ content, username = "", exam_track = "", webhook_url = "" }) {
+  const track = ngNormalizeExamTrack(exam_track);
+  const webhookUrl = getNextGenDiscordWebhookUrl(track, webhook_url);
+  const finalUsername = username || ngDiscordUsernameForExamTrack(track);
 
   if (!webhookUrl) {
-    const e = new Error("Discord webhook URL is missing. Add DISCORD_DAILY_MCQ_WEBHOOK_URL in Render Environment.");
+    const e = new Error("Discord webhook URL is missing. Add DISCORD_STEP1_WEBHOOK_URL / DISCORD_STEP2_CK_WEBHOOK_URL / DISCORD_NCLEX_WEBHOOK_URL / DISCORD_MCCQE_WEBHOOK_URL / DISCORD_AMC_WEBHOOK_URL in Render Environment.");
     e.statusCode = 400;
     throw e;
   }
@@ -23981,7 +24239,7 @@ async function sendNextGenDiscordWebhookMessage({ content, username = "NextGen M
   const response = await axios.post(
     webhookUrl,
     {
-      username,
+      username: finalUsername,
       content: finalContent,
       allowed_mentions: { parse: [] },
     },
@@ -24001,21 +24259,21 @@ app.get("/admin/crm/integrations/discord/status", async (req, res) => {
   try {
     await requireCrmAdmin(req);
 
-    const configured = Boolean(getNextGenDiscordWebhookUrl());
+    const requestedTrack = ngNormalizeExamTrack(req.query?.exam_track || req.query?.track || req.query?.exam || "");
+    const configured = requestedTrack
+      ? Boolean(ngDiscordWebhookUrlForExamTrack(requestedTrack))
+      : Object.keys(NEXTGEN_EXAM_TRACKS).some((key) => Boolean(ngDiscordWebhookUrlForExamTrack(key)));
 
     res.json({
       success: true,
       platform: "discord",
       configured,
       live_connected: configured,
-      env_key: process.env.DISCORD_DAILY_MCQ_WEBHOOK_URL
-        ? "DISCORD_DAILY_MCQ_WEBHOOK_URL"
-        : process.env.DISCORD_WEBHOOK_URL
-          ? "DISCORD_WEBHOOK_URL"
-          : null,
+      exam_track: requestedTrack || "all",
+      routing: ngExamTrackRoutingStatus(),
       message: configured
-        ? "Discord webhook is configured."
-        : "Discord webhook is missing. Add DISCORD_DAILY_MCQ_WEBHOOK_URL in Render Environment.",
+        ? "Discord webhook routing is configured."
+        : "Discord webhook routing is missing. Add per-exam Discord webhook env values in Render.",
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({
@@ -24039,9 +24297,11 @@ app.post("/admin/crm/integrations/discord/test-post", async (req, res) => {
       content: req.body?.content || req.body?.message || "",
     });
 
+    const examTrack = ngInferExamTrackFromObject(req.body || {}, req.body?.exam_track || req.body?.track || "");
     const result = await sendNextGenDiscordWebhookMessage({
       content,
-      username: req.body?.username || "NextGen MCQ Bot",
+      exam_track: examTrack,
+      username: req.body?.username || ngDiscordUsernameForExamTrack(examTrack),
     });
 
     try {
@@ -24113,14 +24373,17 @@ app.post("/admin/crm/community-content/publish-discord", async (req, res) => {
 
     const content = buildNextGenDiscordMessage(req.body || {}, sourcePost);
 
+    const examTrack = ngInferExamTrackFromObject({ ...(sourcePost || {}), ...(req.body || {}) }, req.body?.exam_track || req.body?.track || "");
     const result = await sendNextGenDiscordWebhookMessage({
       content,
-      username: req.body?.username || "NextGen MCQ Bot",
+      exam_track: examTrack,
+      username: req.body?.username || ngDiscordUsernameForExamTrack(examTrack),
     });
 
     const publishedAt = new Date().toISOString();
 
     if (sourcePost) {
+      ngAttachExamTrack(sourcePost, examTrack);
       sourcePost.discord_published = true;
       sourcePost.discord_published_at = publishedAt;
       sourcePost.published_platforms = Array.from(new Set([
@@ -24159,6 +24422,31 @@ app.post("/admin/crm/community-content/publish-discord", async (req, res) => {
       error: error.response?.data?.message || error.message || "Failed to publish community content to Discord",
       discord_error: error.response?.data || null,
     });
+  }
+});
+
+
+app.get("/admin/crm/exam-tracks/status", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    res.json({
+      success: true,
+      tracks: Object.values(NEXTGEN_EXAM_TRACKS).map((track) => ({
+        key: track.key,
+        label: track.label,
+        telegram_configured: Boolean(process.env[track.telegramEnv]),
+        discord_configured: Boolean(process.env[track.discordEnv]),
+        telegram_env: track.telegramEnv,
+        discord_env: track.discordEnv,
+        leads: ensureCrmArray(db, "leads").filter((item) => ngNormalizeExamTrack(item.exam_track || "") === track.key).length,
+        conversations: ensureCrmArray(db, "conversations").filter((item) => ngNormalizeExamTrack(item.exam_track || "") === track.key).length,
+        communities: ensureCrmArray(db, "communities").filter((item) => ngNormalizeExamTrack(item.exam_track || item.name || item.community_name || "") === track.key).length,
+      })),
+      routing: ngExamTrackRoutingStatus(),
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
 });
 
