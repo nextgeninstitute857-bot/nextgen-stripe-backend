@@ -42,7 +42,7 @@ function applyNextGenCors(req, res) {
     requestHeaders || "Content-Type, Authorization, x-admin-token, x-requested-with"
   );
   res.setHeader("Access-Control-Max-Age", "86400");
-  res.setHeader("X-NextGen-Backend-Build", "v12-exam-track-crm-separation");
+  res.setHeader("X-NextGen-Backend-Build", "v13-scout-community-telegram-routing");
 }
 
 // Hard CORS/preflight guard. This must be the first middleware after app creation.
@@ -81,7 +81,7 @@ app.use(express.urlencoded({ extended: true, limit: process.env.JSON_BODY_LIMIT 
 app.get("/admin/debug/cors-check", (req, res) => {
   res.json({
     success: true,
-    build: "v12-exam-track-crm-separation",
+    build: "v13-scout-community-telegram-routing",
     origin: req.headers.origin || null,
     now: new Date().toISOString(),
   });
@@ -12671,8 +12671,43 @@ async function sendCrmMessage({
   const variables = { ...(templateVariables || {}), lead: lead || templateVariables?.lead || {} };
   const finalSubject = renderTemplateString(subject || template?.subject || "", variables) || "NextGen USMLE";
   const finalText = renderTemplateString(text || template?.body || template?.message || "", variables);
-  const finalTo = getBestRecipientForChannel({ channel: cleanChannel, to, lead });
+  let finalTo = getBestRecipientForChannel({ channel: cleanChannel, to, lead });
   const integration = getIntegrationByPlatform(db, cleanChannel) || { id: null, platform: cleanChannel, brand_id: brandId };
+
+  const requestedExamTrack = ngNormalizeExamTrack(
+    metadata?.exam_track ||
+    metadata?.examTrack ||
+    metadata?.track ||
+    templateVariables?.exam_track ||
+    templateVariables?.examTrack ||
+    templateVariables?.lead?.exam_track ||
+    lead?.exam_track ||
+    ""
+  );
+
+  const telegramSource = String(metadata?.source || "").toLowerCase();
+  const shouldUseCommunityTelegram =
+    cleanChannel === "telegram" &&
+    (
+      metadata?.use_community_bot === true ||
+      metadata?.community_bot === true ||
+      metadata?.scout_bot === true ||
+      metadata?.community === true ||
+      Boolean(requestedExamTrack) ||
+      telegramSource.includes("community") ||
+      telegramSource.includes("roadmap") ||
+      telegramSource.includes("exam_track") ||
+      telegramSource.includes("console_multi_exam") ||
+      telegramSource.includes("console_direct_telegram")
+    );
+
+  if (cleanChannel === "telegram" && !finalTo && requestedExamTrack) {
+    finalTo = ngTelegramChatIdForExamTrack(requestedExamTrack);
+  }
+
+  if (cleanChannel === "telegram" && shouldUseCommunityTelegram && finalTo) {
+    finalTo = ngNormalizeTelegramChatId(finalTo, { assumeGroup: true });
+  }
 
   const baseLog = {
     brand_id: brandId,
@@ -12691,6 +12726,8 @@ async function sendCrmMessage({
       ...(metadata || {}),
       source: metadata?.source || "crm_messages_send",
       template_key: template?.key || templateId || null,
+      exam_track: requestedExamTrack || metadata?.exam_track || lead?.exam_track || null,
+      telegram_bot_route: shouldUseCommunityTelegram ? "community_scout_bot" : (cleanChannel === "telegram" ? "official_bot" : undefined),
     },
   };
 
@@ -12715,7 +12752,15 @@ async function sendCrmMessage({
       });
       providerMessageId = providerResponse?.messages?.[0]?.id || null;
     } else if (cleanChannel === "telegram") {
-      providerResponse = await sendTelegramMessage({ to: finalTo, text: finalText, integration });
+      if (shouldUseCommunityTelegram) {
+        providerResponse = await telegramCommunityApi("sendMessage", {
+          chat_id: finalTo,
+          text: finalText,
+          disable_web_page_preview: false,
+        }, integration || {});
+      } else {
+        providerResponse = await sendTelegramMessage({ to: finalTo, text: finalText, integration });
+      }
       providerMessageId = providerResponse?.result?.message_id || null;
     } else if (cleanChannel === "email") {
       providerResponse = await sendEmailMessage({ to: finalTo, subject: finalSubject, text: finalText });
@@ -13050,7 +13095,10 @@ app.post("/admin/crm/messages/send", async (req, res) => {
     const brandId = getCrmBrandId(req, db);
     const lead = req.body.lead_id ? getLeadByAnyId(db, req.body.lead_id) : null;
     const channel = normalizeAutomationChannel(req.body.channel || req.body.platform || "whatsapp");
-    const to = getBestRecipientForChannel({ channel, to: req.body.to || req.body.recipient || req.body.chat_id || "", lead });
+    const requestedExamTrack = ngNormalizeExamTrack(req.body.exam_track || req.body.examTrack || req.body.track || lead?.exam_track || "");
+    const directTo = req.body.to || req.body.recipient || req.body.chat_id || req.body.telegram_chat_id || req.body.channel_id || "";
+    const examTrackTelegramTo = channel === "telegram" && requestedExamTrack ? ngTelegramChatIdForExamTrack(requestedExamTrack) : "";
+    const to = getBestRecipientForChannel({ channel, to: directTo || examTrackTelegramTo || "", lead });
     const result = await sendCrmMessage({
       db,
       brandId,
@@ -13064,6 +13112,10 @@ app.post("/admin/crm/messages/send", async (req, res) => {
       metadata: {
         ...(req.body.metadata || {}),
         source: req.body.source || req.body.metadata?.source || "crm_messages_send",
+        exam_track: requestedExamTrack || req.body.exam_track || req.body.examTrack || req.body.track || null,
+        use_community_bot: req.body.use_community_bot !== undefined ? Boolean(req.body.use_community_bot) : (channel === "telegram" && Boolean(requestedExamTrack)),
+        community_bot: req.body.community_bot !== undefined ? Boolean(req.body.community_bot) : (channel === "telegram" && Boolean(requestedExamTrack)),
+        scout_bot: req.body.scout_bot !== undefined ? Boolean(req.body.scout_bot) : (channel === "telegram" && Boolean(requestedExamTrack)),
         template_name: req.body.template_name || req.body.whatsapp_template_name || req.body.metadata?.template_name || "",
         whatsapp_template_name: req.body.whatsapp_template_name || req.body.template_name || req.body.metadata?.whatsapp_template_name || "",
         language_code: req.body.language_code || req.body.metadata?.language_code || "en_US",
