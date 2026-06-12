@@ -42,7 +42,7 @@ function applyNextGenCors(req, res) {
     requestHeaders || "Content-Type, Authorization, x-admin-token, x-requested-with"
   );
   res.setHeader("Access-Control-Max-Age", "86400");
-  res.setHeader("X-NextGen-Backend-Build", "v15-autopilot-publisher-controls");
+  res.setHeader("X-NextGen-Backend-Build", "v16-exam-specific-ai-prompt-templates");
 }
 
 // Hard CORS/preflight guard. This must be the first middleware after app creation.
@@ -81,7 +81,7 @@ app.use(express.urlencoded({ extended: true, limit: process.env.JSON_BODY_LIMIT 
 app.get("/admin/debug/cors-check", (req, res) => {
   res.json({
     success: true,
-    build: "v15-autopilot-publisher-controls",
+    build: "v16-exam-specific-ai-prompt-templates",
     origin: req.headers.origin || null,
     now: new Date().toISOString(),
   });
@@ -22120,6 +22120,14 @@ function ngAutopilotSourcePool(db, body = {}) {
     });
   }
 
+  const examTrack = ngNormalizeExamTrack(body.exam_track || body.examTrack || body.target_track || body.exam_type || "");
+  if (examTrack) {
+    const examSpecificSources = sources.filter((source) => ngSourceMatchesExamTrack(source, examTrack));
+    if (examSpecificSources.length) {
+      sources = examSpecificSources;
+    }
+  }
+
   return sources.map((source, index) => ({
     ...source,
     __source_id: String(source.id || source._id || source.training_id || index),
@@ -22795,6 +22803,89 @@ function ngDefaultTopicForExamTrack(track = "") {
   return label && label !== "General" ? `${label} high-yield roadmap` : "Medical exam community roadmap";
 }
 
+function ngExamPromptTemplate(track = "") {
+  const key = ngNormalizeExamTrack(track);
+  const templates = {
+    usmle_step1: {
+      prompt_key: "usmle_step1_prompt_v1",
+      syllabus_focus: ["First Aid basic sciences", "pathophysiology", "pharmacology", "microbiology", "immunology", "biochemistry", "genetics", "physiology", "pathology", "biostatistics"],
+      instruction: `You are generating educational community content for USMLE Step 1 students.
+Use USMLE Step 1 basic-science style only: mechanisms, pathophysiology, pharmacology, microbiology, immunology, biochemistry, physiology, genetics, pathology, and biostatistics.
+MCQs must look like high-yield USMLE Step 1 / NBME / UWorld-style reasoning questions with a clinical or experimental stem, 5 options A-E, one best answer, and a concise explanation.
+Do not generate nursing-priority, Canadian licensing, or Australian licensing wording.
+Do not give Step 2 CK management-only questions unless the mechanism is the main tested concept.
+For question posts, hide the answer and explanation. For answer posts, provide the correct option, explanation, why other options are wrong, and a high-yield takeaway.`
+    },
+    usmle_step2_ck: {
+      prompt_key: "usmle_step2_ck_prompt_v1",
+      syllabus_focus: ["clinical diagnosis", "next best step", "management", "screening", "risk factors", "emergency care", "outpatient care", "OB/GYN", "pediatrics", "medicine", "surgery", "psychiatry"],
+      instruction: `You are generating educational community content for USMLE Step 2 CK students.
+Use Step 2 CK clinical-vignette style only: diagnosis, next best step, management, screening, risk factors, prognosis, emergency care, outpatient care, OB/GYN, pediatrics, medicine, surgery, psychiatry, and ethics.
+MCQs must be clinically realistic with 5 options A-E and one best answer. Focus on what the physician should do next.
+Do not generate Step 1 mechanism-only questions unless the mechanism directly changes diagnosis or management.
+Do not generate NCLEX nursing delegation/SATA wording, MCCQE Canadian-specific framing, or AMC Australian-specific framing.
+For question posts, hide the answer and explanation. For answer posts, provide the correct option, explanation, why other options are wrong, and a high-yield takeaway.`
+    },
+    nclex: {
+      prompt_key: "nclex_prompt_v1",
+      syllabus_focus: ["clinical judgment", "safety", "prioritization", "delegation", "nursing interventions", "patient education", "pharmacology safety", "SATA-style reasoning", "Next Gen NCLEX case judgment"],
+      instruction: `You are generating educational community content for NCLEX-RN nursing students.
+Use NCLEX / Next Gen NCLEX style only: clinical judgment, safety, prioritization, delegation, nursing interventions, patient education, infection control, medication safety, and nursing process.
+Questions should test what the nurse should assess, do first, delegate, teach, or report. Use nursing language, not physician diagnosis/management language.
+Acceptable formats include single-best-answer, select-all-that-apply style, ordered response style, and short clinical judgment mini-cases. If using SATA, clearly say "Select all that apply" and include multiple correct answers in the answer post only.
+Do not generate USMLE/NBME-style mechanism questions, MCCQE questions, or AMC questions.
+For question posts, hide the answer and rationale. For answer posts, provide the correct answer(s), nursing rationale, safety priority, and why incorrect options are unsafe or lower priority.`
+    },
+    mccqe: {
+      prompt_key: "mccqe_prompt_v1",
+      syllabus_focus: ["Canadian clinical decision-making", "family medicine", "preventive care", "screening", "ethics", "public health", "diagnosis", "management", "communication", "patient safety"],
+      instruction: `You are generating educational community content for MCCQE Part I students.
+Use Canadian licensing exam style only: clinical decision-making, family medicine, preventive care, screening, ethics, public health, patient safety, diagnosis, and management.
+MCQs should be practical clinical vignettes with one best answer and Canadian-style emphasis on prevention, communication, patient-centered care, and appropriate next step.
+Do not generate USMLE Step 1 mechanism-heavy questions, NCLEX nursing-priority questions, or AMC-specific Australian framing.
+For question posts, hide the answer and explanation. For answer posts, provide the correct option, explanation, why other options are wrong, and a practical Canadian exam takeaway.`
+    },
+    amc: {
+      prompt_key: "amc_prompt_v1",
+      syllabus_focus: ["Australian clinical reasoning", "primary care", "emergency medicine", "diagnosis", "management", "public health", "ethics", "rural/remote care", "patient safety"],
+      instruction: `You are generating educational community content for AMC Australian medical licensing exam students.
+Use AMC-style clinical reasoning only: diagnosis, management, emergency medicine, primary care, public health, ethics, patient safety, and practical Australian-style clinical decision-making.
+MCQs should be realistic clinical vignettes with one best answer and focus on safe initial management, investigations, escalation, and common Australian exam presentations.
+Do not generate USMLE Step 1 basic-science mechanism questions, NCLEX nursing-priority questions, or MCCQE Canadian-specific framing.
+For question posts, hide the answer and explanation. For answer posts, provide the correct option, explanation, why other options are wrong, and a concise AMC-style takeaway.`
+    }
+  };
+  return templates[key] || {
+    prompt_key: "general_medical_prompt_v1",
+    syllabus_focus: ["medical exam reasoning", "safe educational content"],
+    instruction: `Generate safe educational medical exam content for the selected audience. Use one best answer unless the selected exam style specifically allows multiple answers. Keep content concise, professional, and medically careful.`
+  };
+}
+
+function ngExamPromptInstruction(track = "", extra = "") {
+  const template = ngExamPromptTemplate(track);
+  return [
+    `LOCKED EXAM-SPECIFIC AI TEMPLATE: ${template.prompt_key}`,
+    template.instruction,
+    `Syllabus focus: ${template.syllabus_focus.join(", ")}.`,
+    String(extra || "").trim(),
+  ].filter(Boolean).join("\n\n");
+}
+
+function ngSourceMatchesExamTrack(source = {}, track = "") {
+  const key = ngNormalizeExamTrack(track);
+  if (!key) return true;
+  const hay = [source.exam_track, source.examTrack, source.exam_type, source.audience, source.category, source.title, source.name, Array.isArray(source.tags) ? source.tags.join(" ") : source.tags]
+    .join(" ").toLowerCase();
+  if (!hay.trim()) return false;
+  if (key === "usmle_step1") return /step\s*1|usmle\s*1|first aid|pathoma|sketchy|uworld|basic science|nbme/i.test(hay) && !/step\s*2|nclex|mccqe|amc|australia/i.test(hay);
+  if (key === "usmle_step2_ck") return /step\s*2|step2|ck|clinical case|medicine|surgery|obgyn|pediatrics|psychiatry/i.test(hay) && !/nclex|mccqe|amc|australia/i.test(hay);
+  if (key === "nclex") return /nclex|nursing|clinical judgment|delegation|prioritization|sata|next gen nclex/i.test(hay);
+  if (key === "mccqe") return /mccqe|canada|canadian|family medicine|preventive/i.test(hay);
+  if (key === "amc") return /\bamc\b|australia|australian|primary care|rural|emergency/i.test(hay);
+  return true;
+}
+
 function ngTelegramChatIdForExamTrack(track = "") {
   const key = ngNormalizeExamTrack(track);
   const env = NEXTGEN_EXAM_TRACKS[key]?.telegramEnv;
@@ -23070,12 +23161,12 @@ async function ngGenerateAutopilotPostContent({ db, post, roadmap = {}, source =
       title: post.title,
       content_type: post.content_type,
       instructions: [
-        roadmap.instructions || "",
-        "Use the selected approved source only when medical facts are needed.",
+        ngExamPromptInstruction(post.exam_track || roadmap.exam_track || roadmap.exam_type || "", roadmap.instructions || ""),
+        "Use the selected approved source only when medical facts are needed. If the approved source does not match the selected exam, keep only universally valid medical facts and adapt the question style to the locked exam template.",
         "Follow the weekly calendar content type for this post.",
         "Do not repeat earlier roadmap topics.",
         "Use professional plain text without markdown stars or hash headings.",
-      ].filter(Boolean).join("\n"),
+      ].filter(Boolean).join("\n\n"),
     },
     answerOnly,
   });
@@ -23184,6 +23275,20 @@ async function ngBuildContextualCommunityReply({ db, body = {}, actor = null } =
   return { skipped: false, reply_draft: draft, post };
 }
 
+app.get("/admin/crm/community-content/exam-prompts", async (req, res) => {
+  try {
+    await ngRequireContentAccess(req, "read");
+    const prompts = Object.fromEntries(Object.keys(NEXTGEN_EXAM_TRACKS).map((key) => {
+      const template = ngExamPromptTemplate(key);
+      return [key, { key, label: ngExamTrackLabel(key), ...template }];
+    }));
+    const requested = ngNormalizeExamTrack(req.query?.exam_track || req.query?.track || "");
+    res.json({ success: true, prompts, selected: requested ? prompts[requested] : null, build: "v16-exam-specific-ai-prompt-templates" });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
 app.get("/admin/crm/community-content/calendar-template", async (req, res) => {
   try {
     await ngRequireContentAccess(req, "read");
@@ -23221,6 +23326,9 @@ app.post("/admin/crm/community-content/weekly-calendar", async (req, res) => {
       exam_track: selectedExamTrack || null,
       exam_track_label: selectedExamTrack ? ngExamTrackLabel(selectedExamTrack) : "General",
       exam_type: selectedExamTrack ? ngExamTrackLabel(selectedExamTrack) : ngContentClean(req.body?.exam_type || "General", "General"),
+      exam_prompt_key: ngExamPromptTemplate(selectedExamTrack).prompt_key,
+      exam_ai_instructions: ngExamPromptInstruction(selectedExamTrack, req.body?.instructions || ""),
+      syllabus_focus: ngExamPromptTemplate(selectedExamTrack).syllabus_focus,
       days,
       start_date: String(req.body?.start_date || todayKey()).slice(0, 10),
       timezone: req.body?.timezone || DEFAULT_TIMEZONE,
@@ -23510,7 +23618,7 @@ app.put("/admin/crm/community-content/roadmaps/:id", async (req, res) => {
       return res.status(403).json({ success: false, error: "This roadmap is outside your assigned scope" });
     }
 
-    const editable = ["title", "description", "topic", "exam_type", "days", "start_date", "timezone", "post_time", "question_time", "answer_time", "answer_delay_hours", "platforms", "community_ids", "source_pool", "source_query", "rotation_strategy", "content_mix", "approval_required", "auto_post_after_approval", "instructions", "status"];
+    const editable = ["title", "description", "topic", "exam_track", "exam_type", "exam_prompt_key", "exam_ai_instructions", "syllabus_focus", "days", "start_date", "timezone", "post_time", "question_time", "answer_time", "answer_delay_hours", "platforms", "community_ids", "source_pool", "source_query", "rotation_strategy", "content_mix", "approval_required", "auto_post_after_approval", "instructions", "status"];
     for (const key of editable) {
       if (req.body?.[key] !== undefined) {
         if (["platforms", "community_ids", "content_mix"].includes(key)) roadmap[key] = ngContentList(req.body[key]);
@@ -23541,6 +23649,10 @@ app.post("/admin/crm/community-content/roadmaps/autopilot", async (req, res) => 
       source_pool: ngContentClean(req.body?.source_pool || req.body?.sourcePool || "all_approved", "all_approved"),
     };
     ngValidateCommunityTargetsForScheduling(db, payload);
+    const selectedExamTrack = ngNormalizeExamTrack(req.body?.exam_track || req.body?.examTrack || req.body?.target_track || req.body?.exam_type || "") || ngInferExamTrackFromCommunityIds(db, payload.community_ids, "");
+    payload.exam_track = selectedExamTrack;
+    payload.exam_type = selectedExamTrack ? ngExamTrackLabel(selectedExamTrack) : ngContentClean(req.body?.exam_type || "General", "General");
+    payload.instructions = ngExamPromptInstruction(selectedExamTrack, req.body?.instructions || "");
 
     const { selections, progress, progressKey } = ngSelectAutopilotSources(db, payload, ctx, days);
     let roadmap = withTimestamps({
@@ -23552,6 +23664,9 @@ app.post("/admin/crm/community-content/roadmaps/autopilot", async (req, res) => 
       exam_track: selectedExamTrack || null,
       exam_track_label: selectedExamTrack ? ngExamTrackLabel(selectedExamTrack) : "General",
       exam_type: selectedExamTrack ? ngExamTrackLabel(selectedExamTrack) : ngContentClean(req.body?.exam_type || "General", "General"),
+      exam_prompt_key: ngExamPromptTemplate(selectedExamTrack).prompt_key,
+      exam_ai_instructions: ngExamPromptInstruction(selectedExamTrack, req.body?.instructions || ""),
+      syllabus_focus: ngExamPromptTemplate(selectedExamTrack).syllabus_focus,
       days,
       start_date: String(req.body?.start_date || todayKey()).slice(0, 10),
       timezone: req.body?.timezone || DEFAULT_TIMEZONE,
