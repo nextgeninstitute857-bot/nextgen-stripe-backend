@@ -42,7 +42,7 @@ function applyNextGenCors(req, res) {
     requestHeaders || "Content-Type, Authorization, x-admin-token, x-requested-with"
   );
   res.setHeader("Access-Control-Max-Age", "86400");
-  res.setHeader("X-NextGen-Backend-Build", "v16-exam-specific-ai-prompt-templates");
+  res.setHeader("X-NextGen-Backend-Build", "v17-question-answer-order-roadmap-bulk-controls");
 }
 
 // Hard CORS/preflight guard. This must be the first middleware after app creation.
@@ -81,7 +81,7 @@ app.use(express.urlencoded({ extended: true, limit: process.env.JSON_BODY_LIMIT 
 app.get("/admin/debug/cors-check", (req, res) => {
   res.json({
     success: true,
-    build: "v16-exam-specific-ai-prompt-templates",
+    build: "v17-question-answer-order-roadmap-bulk-controls",
     origin: req.headers.origin || null,
     now: new Date().toISOString(),
   });
@@ -21875,6 +21875,42 @@ function ngContentCanPublish(post = {}) {
 
   return true;
 }
+
+function ngFindScheduledPostById(db, id = "") {
+  const cleanId = String(id || "").trim();
+  if (!cleanId) return null;
+  return ngContentArray(db, "community_scheduled_posts").find((item) => String(item.id || "") === cleanId) || null;
+}
+
+function ngPostPublished(post = {}) {
+  const status = String(post.status || "").toLowerCase();
+  return ["posted", "published", "sent"].includes(status) || Boolean(post.posted_at);
+}
+
+function ngAnswerCanPublishAfterQuestion(db, post = {}) {
+  if (!ngPostIsAnswer(post)) return { allowed: true, parent: null };
+  const parentId = post.parent_post_id || post.question_post_id || post.parent_id || "";
+  const parent = ngFindScheduledPostById(db, parentId);
+  if (!parent) {
+    return { allowed: false, parent: null, reason: "Answer is linked to a question that cannot be found." };
+  }
+  if (!ngPostPublished(parent)) {
+    return { allowed: false, parent, reason: "Answer blocked: question has not been published yet." };
+  }
+  return { allowed: true, parent };
+}
+
+function ngFilterScheduledPostsForBulk(posts = [], body = {}, query = {}) {
+  const roadmapId = String(body.roadmap_id || body.roadmapId || query.roadmap_id || query.roadmapId || "").trim();
+  const examTrack = ngNormalizeExamTrack(body.exam_track || body.examTrack || query.exam_track || query.examTrack || "");
+  const postKind = ngContentClean(body.post_kind || body.postKind || query.post_kind || query.postKind || "", "").toLowerCase();
+  return posts.filter((post) => {
+    if (roadmapId && String(post.roadmap_id || "") !== roadmapId) return false;
+    if (examTrack && ngNormalizeExamTrack(post.exam_track || post.target_track || post.exam_type || "") !== examTrack) return false;
+    if (postKind && String(post.post_kind || "").toLowerCase() !== postKind) return false;
+    return true;
+  });
+}
 // Removed earlier duplicate definition of ngPublishToPlatform; using later full v14 definition.
 
 async function ngPublishScheduledPost(db, post = {}, actor = null, options = {}) {
@@ -21897,6 +21933,17 @@ async function ngPublishScheduledPost(db, post = {}, actor = null, options = {})
       results: [],
       skipped: true,
       message: "Post is already publishing. Wait a few seconds.",
+    };
+  }
+
+  const answerGate = ngAnswerCanPublishAfterQuestion(db, post);
+  if (!answerGate.allowed) {
+    return {
+      post,
+      results: [],
+      skipped: true,
+      blocked: true,
+      message: answerGate.reason || "Answer blocked until question is published.",
     };
   }
 
@@ -23080,9 +23127,20 @@ function ngCreateAutopilotScheduledPosts(db, roadmap = {}, selections = [], ctx 
     const topic = pick.topic || `${roadmap.topic || "USMLE topic"} — Day ${i + 1}`;
     const bookLabel = pick.book_name || "Approved Source";
     const postAt = ngRoadmapDateTime(dateKeyValue, roadmap.question_time || roadmap.post_time || calendarItem.default_time || "10:00", roadmap.timezone);
-    const answerAt = roadmap.answer_time
+    let answerAt = roadmap.answer_time
       ? ngRoadmapDateTime(dateKeyValue, roadmap.answer_time, roadmap.timezone)
       : ngAddHoursToLocalDateTime(postAt, Number(roadmap.answer_delay_hours || calendarItem.answer_delay_hours || 4));
+
+    // If the answer time is earlier than or equal to the question time, treat it
+    // as the next day. Example: question 21:00, answer 00:00 means midnight
+    // after the question, not midnight before the question.
+    if (ngPostRequiresAnswerFollowup(contentType) && answerAt) {
+      const qMs = new Date(postAt).getTime();
+      const aMs = new Date(answerAt).getTime();
+      if (Number.isFinite(qMs) && Number.isFinite(aMs) && aMs <= qMs) {
+        answerAt = new Date(aMs + 24 * 60 * 60 * 1000).toISOString();
+      }
+    }
     const sourceIds = [pick.source_id].filter(Boolean);
 
     const mainPost = ngBuildScheduledPostPayload({
@@ -23283,7 +23341,7 @@ app.get("/admin/crm/community-content/exam-prompts", async (req, res) => {
       return [key, { key, label: ngExamTrackLabel(key), ...template }];
     }));
     const requested = ngNormalizeExamTrack(req.query?.exam_track || req.query?.track || "");
-    res.json({ success: true, prompts, selected: requested ? prompts[requested] : null, build: "v16-exam-specific-ai-prompt-templates" });
+    res.json({ success: true, prompts, selected: requested ? prompts[requested] : null, build: "v17-question-answer-order-roadmap-bulk-controls" });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -24193,7 +24251,11 @@ app.post("/admin/crm/community-content/scheduled-posts/generate-all", async (req
     const ctx = await ngRequireContentAccess(req, "generate");
     const db = ctx.crmDb;
     const limit = Math.min(100, Math.max(1, Number(req.body?.limit || req.query?.limit || 50)));
-    const posts = ngContentScope(ngContentArray(db, "community_scheduled_posts"), ctx)
+    const posts = ngFilterScheduledPostsForBulk(
+        ngContentScope(ngContentArray(db, "community_scheduled_posts"), ctx),
+        req.body || {},
+        req.query || {}
+      )
       .filter((post) => !post.deleted_at && !["deleted", "posted", "published"].includes(String(post.status || "").toLowerCase()))
       .filter((post) => !ngContentClean(post.message || post.draft_content || ""))
       .slice(0, limit);
@@ -24224,7 +24286,11 @@ app.post("/admin/crm/community-content/scheduled-posts/approve-all", async (req,
     const ctx = await ngRequireContentAccess(req, "approve");
     const db = ctx.crmDb;
     const limit = Math.min(200, Math.max(1, Number(req.body?.limit || req.query?.limit || 100)));
-    const posts = ngContentScope(ngContentArray(db, "community_scheduled_posts"), ctx)
+    const posts = ngFilterScheduledPostsForBulk(
+        ngContentScope(ngContentArray(db, "community_scheduled_posts"), ctx),
+        req.body || {},
+        req.query || {}
+      )
       .filter((post) => !post.deleted_at && !["deleted", "posted", "published"].includes(String(post.status || "").toLowerCase()))
       .filter((post) => ngContentClean(post.message || post.draft_content || ""))
       .filter((post) => String(post.approval_status || "").toLowerCase() !== "approved" || post.ready_to_post !== true)
@@ -24253,7 +24319,11 @@ app.post("/admin/crm/community-content/scheduled-posts/publish-all", async (req,
     const ctx = await ngRequireContentAccess(req, "publish");
     const db = ctx.crmDb;
     const limit = Math.min(50, Math.max(1, Number(req.body?.limit || req.query?.limit || 25)));
-    const posts = ngContentScope(ngContentArray(db, "community_scheduled_posts"), ctx)
+    const posts = ngFilterScheduledPostsForBulk(
+        ngContentScope(ngContentArray(db, "community_scheduled_posts"), ctx),
+        req.body || {},
+        req.query || {}
+      )
       .filter((post) => !post.deleted_at && ngContentCanPublish(post))
       .filter((post) => !["posted", "published", "publishing"].includes(String(post.status || "").toLowerCase()) && !post.posted_at)
       .slice(0, limit);
@@ -24748,6 +24818,16 @@ async function runNextGenAutopilotSchedulerOnce() {
       .filter((post) => !post.deleted_at && ["scheduled", "ready_to_post"].includes(String(post.status || "").toLowerCase()))
       .filter((post) => post.scheduled_at && new Date(post.scheduled_at).getTime() <= now)
       .filter((post) => ngContentCanPublish(post))
+      .filter((post) => ngAnswerCanPublishAfterQuestion(db, post).allowed)
+      .sort((a, b) => {
+        const dayA = Number(a.day_number || 0);
+        const dayB = Number(b.day_number || 0);
+        if (dayA !== dayB) return dayA - dayB;
+        const kindA = ngPostIsAnswer(a) ? 1 : 0;
+        const kindB = ngPostIsAnswer(b) ? 1 : 0;
+        if (kindA !== kindB) return kindA - kindB;
+        return new Date(a.scheduled_at || 0).getTime() - new Date(b.scheduled_at || 0).getTime();
+      })
       .slice(0, Math.max(1, Number(process.env.NEXTGEN_AUTOPILOT_SCHEDULER_BATCH || 10)));
 
     const results = [];
