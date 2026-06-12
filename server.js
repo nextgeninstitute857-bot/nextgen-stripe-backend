@@ -42,7 +42,7 @@ function applyNextGenCors(req, res) {
     requestHeaders || "Content-Type, Authorization, x-admin-token, x-requested-with"
   );
   res.setHeader("Access-Control-Max-Age", "86400");
-  res.setHeader("X-NextGen-Backend-Build", "v13-scout-community-telegram-routing");
+  res.setHeader("X-NextGen-Backend-Build", "v15-autopilot-publisher-controls");
 }
 
 // Hard CORS/preflight guard. This must be the first middleware after app creation.
@@ -81,7 +81,7 @@ app.use(express.urlencoded({ extended: true, limit: process.env.JSON_BODY_LIMIT 
 app.get("/admin/debug/cors-check", (req, res) => {
   res.json({
     success: true,
-    build: "v13-scout-community-telegram-routing",
+    build: "v15-autopilot-publisher-controls",
     origin: req.headers.origin || null,
     now: new Date().toISOString(),
   });
@@ -12671,43 +12671,8 @@ async function sendCrmMessage({
   const variables = { ...(templateVariables || {}), lead: lead || templateVariables?.lead || {} };
   const finalSubject = renderTemplateString(subject || template?.subject || "", variables) || "NextGen USMLE";
   const finalText = renderTemplateString(text || template?.body || template?.message || "", variables);
-  let finalTo = getBestRecipientForChannel({ channel: cleanChannel, to, lead });
+  const finalTo = getBestRecipientForChannel({ channel: cleanChannel, to, lead });
   const integration = getIntegrationByPlatform(db, cleanChannel) || { id: null, platform: cleanChannel, brand_id: brandId };
-
-  const requestedExamTrack = ngNormalizeExamTrack(
-    metadata?.exam_track ||
-    metadata?.examTrack ||
-    metadata?.track ||
-    templateVariables?.exam_track ||
-    templateVariables?.examTrack ||
-    templateVariables?.lead?.exam_track ||
-    lead?.exam_track ||
-    ""
-  );
-
-  const telegramSource = String(metadata?.source || "").toLowerCase();
-  const shouldUseCommunityTelegram =
-    cleanChannel === "telegram" &&
-    (
-      metadata?.use_community_bot === true ||
-      metadata?.community_bot === true ||
-      metadata?.scout_bot === true ||
-      metadata?.community === true ||
-      Boolean(requestedExamTrack) ||
-      telegramSource.includes("community") ||
-      telegramSource.includes("roadmap") ||
-      telegramSource.includes("exam_track") ||
-      telegramSource.includes("console_multi_exam") ||
-      telegramSource.includes("console_direct_telegram")
-    );
-
-  if (cleanChannel === "telegram" && !finalTo && requestedExamTrack) {
-    finalTo = ngTelegramChatIdForExamTrack(requestedExamTrack);
-  }
-
-  if (cleanChannel === "telegram" && shouldUseCommunityTelegram && finalTo) {
-    finalTo = ngNormalizeTelegramChatId(finalTo, { assumeGroup: true });
-  }
 
   const baseLog = {
     brand_id: brandId,
@@ -12726,8 +12691,6 @@ async function sendCrmMessage({
       ...(metadata || {}),
       source: metadata?.source || "crm_messages_send",
       template_key: template?.key || templateId || null,
-      exam_track: requestedExamTrack || metadata?.exam_track || lead?.exam_track || null,
-      telegram_bot_route: shouldUseCommunityTelegram ? "community_scout_bot" : (cleanChannel === "telegram" ? "official_bot" : undefined),
     },
   };
 
@@ -12752,15 +12715,7 @@ async function sendCrmMessage({
       });
       providerMessageId = providerResponse?.messages?.[0]?.id || null;
     } else if (cleanChannel === "telegram") {
-      if (shouldUseCommunityTelegram) {
-        providerResponse = await telegramCommunityApi("sendMessage", {
-          chat_id: finalTo,
-          text: finalText,
-          disable_web_page_preview: false,
-        }, integration || {});
-      } else {
-        providerResponse = await sendTelegramMessage({ to: finalTo, text: finalText, integration });
-      }
+      providerResponse = await sendTelegramMessage({ to: finalTo, text: finalText, integration });
       providerMessageId = providerResponse?.result?.message_id || null;
     } else if (cleanChannel === "email") {
       providerResponse = await sendEmailMessage({ to: finalTo, subject: finalSubject, text: finalText });
@@ -13095,10 +13050,7 @@ app.post("/admin/crm/messages/send", async (req, res) => {
     const brandId = getCrmBrandId(req, db);
     const lead = req.body.lead_id ? getLeadByAnyId(db, req.body.lead_id) : null;
     const channel = normalizeAutomationChannel(req.body.channel || req.body.platform || "whatsapp");
-    const requestedExamTrack = ngNormalizeExamTrack(req.body.exam_track || req.body.examTrack || req.body.track || lead?.exam_track || "");
-    const directTo = req.body.to || req.body.recipient || req.body.chat_id || req.body.telegram_chat_id || req.body.channel_id || "";
-    const examTrackTelegramTo = channel === "telegram" && requestedExamTrack ? ngTelegramChatIdForExamTrack(requestedExamTrack) : "";
-    const to = getBestRecipientForChannel({ channel, to: directTo || examTrackTelegramTo || "", lead });
+    const to = getBestRecipientForChannel({ channel, to: req.body.to || req.body.recipient || req.body.chat_id || "", lead });
     const result = await sendCrmMessage({
       db,
       brandId,
@@ -13112,10 +13064,6 @@ app.post("/admin/crm/messages/send", async (req, res) => {
       metadata: {
         ...(req.body.metadata || {}),
         source: req.body.source || req.body.metadata?.source || "crm_messages_send",
-        exam_track: requestedExamTrack || req.body.exam_track || req.body.examTrack || req.body.track || null,
-        use_community_bot: req.body.use_community_bot !== undefined ? Boolean(req.body.use_community_bot) : (channel === "telegram" && Boolean(requestedExamTrack)),
-        community_bot: req.body.community_bot !== undefined ? Boolean(req.body.community_bot) : (channel === "telegram" && Boolean(requestedExamTrack)),
-        scout_bot: req.body.scout_bot !== undefined ? Boolean(req.body.scout_bot) : (channel === "telegram" && Boolean(requestedExamTrack)),
         template_name: req.body.template_name || req.body.whatsapp_template_name || req.body.metadata?.template_name || "",
         whatsapp_template_name: req.body.whatsapp_template_name || req.body.template_name || req.body.metadata?.whatsapp_template_name || "",
         language_code: req.body.language_code || req.body.metadata?.language_code || "en_US",
@@ -21929,12 +21877,39 @@ function ngContentCanPublish(post = {}) {
 }
 // Removed earlier duplicate definition of ngPublishToPlatform; using later full v14 definition.
 
-async function ngPublishScheduledPost(db, post = {}, actor = null) {
+async function ngPublishScheduledPost(db, post = {}, actor = null, options = {}) {
+  const force = options.force === true;
+  const currentStatus = String(post.status || "").toLowerCase();
+
+  if (!force && (currentStatus === "posted" || currentStatus === "published" || post.posted_at)) {
+    return {
+      post,
+      results: Array.isArray(post.publish_results) ? post.publish_results : [],
+      skipped: true,
+      message: "Post already published. Duplicate click ignored.",
+    };
+  }
+
+  const lockUntil = post.publish_lock_until ? new Date(post.publish_lock_until).getTime() : 0;
+  if (!force && lockUntil && lockUntil > Date.now()) {
+    return {
+      post,
+      results: [],
+      skipped: true,
+      message: "Post is already publishing. Wait a few seconds.",
+    };
+  }
+
   if (!ngContentCanPublish(post)) {
     const error = new Error("Post is not approved/ready for publishing");
     error.statusCode = 422;
     throw error;
   }
+
+  post.status = "publishing";
+  post.publish_lock_until = new Date(Date.now() + 90 * 1000).toISOString();
+  post.updated_at = nowIso();
+  post.updated_by = actor?.id || post.updated_by || null;
 
   const targets = ngNormalizeCommunityTargets(db, {
     platforms: post.platforms || post.platform,
@@ -21945,6 +21920,8 @@ async function ngPublishScheduledPost(db, post = {}, actor = null) {
   });
 
   if (!targets.length) {
+    post.status = "failed";
+    post.publish_lock_until = null;
     const error = new Error("No delivery target selected. Choose a Telegram/Discord/WhatsApp community or add a direct target before publishing.");
     error.statusCode = 422;
     error.details = {
@@ -21957,6 +21934,8 @@ async function ngPublishScheduledPost(db, post = {}, actor = null) {
 
   const message = ngContentClean(post.message || post.draft_content || "");
   if (!message) {
+    post.status = "failed";
+    post.publish_lock_until = null;
     const error = new Error("Scheduled post has no message content");
     error.statusCode = 422;
     throw error;
@@ -21979,6 +21958,7 @@ async function ngPublishScheduledPost(db, post = {}, actor = null) {
   post.publish_results = [...(Array.isArray(post.publish_results) ? post.publish_results : []), ...results];
   post.status = anySuccess ? "posted" : allSkipped ? "manual_platform_pending" : "failed";
   post.posted_at = anySuccess ? nowIso() : post.posted_at || null;
+  post.publish_lock_until = null;
   post.updated_at = nowIso();
   post.updated_by = actor?.id || post.updated_by || null;
 
@@ -21999,7 +21979,6 @@ async function ngPublishScheduledPost(db, post = {}, actor = null) {
 
   return { post, results };
 }
-
 function ngRoadmapDateTime(dateString, timeString, timezone = DEFAULT_TIMEZONE) {
   const date = String(dateString || "").slice(0, 10);
   const time = String(timeString || "10:00").slice(0, 5);
@@ -22157,7 +22136,9 @@ function ngAutopilotSourcePool(db, body = {}) {
 
 function ngAutopilotProgressKey(body = {}, ctx = {}) {
   const brandId = body.brand_id || getCrmBrandId({ query: {}, body: {} }, ctx.crmDb || {}) || "brand_nextgen_usmle";
-  const scope = ngContentClean(body.progress_scope || body.community_scope || "global", "global");
+  const trackScope = ngNormalizeExamTrack(body.exam_track || body.examTrack || body.target_track || body.exam_type || "") || "general";
+  const communityScope = ngContentList(body.community_ids || body.communities).join("_") || ngContentClean(body.progress_scope || body.community_scope || "global", "global");
+  const scope = `${trackScope}:${communityScope}`;
   const pool = ngContentClean(body.source_pool || body.sourcePool || "all_approved", "all_approved");
   const team = ctx.team_member?.id || ctx.user?.id || "admin";
   return `${brandId}:${scope}:${pool}:${team}`;
@@ -22448,14 +22429,7 @@ function ngFormatForPlatform({ platform = "telegram", post = {}, text = "" } = {
   const limit = ngPlatformTextLimit(p);
 
   if (p === "discord") {
-    const track = ngInferExamTrackFromObject({ ...post, ...target }, post.exam_track || target.exam_track || "");
-    const messageText = String(formatted || "").trim();
-    return sendNextGenDiscordWebhookMessage({
-      content: messageText,
-      exam_track: track,
-      webhook_url: target.discord_webhook_url || "",
-      username: target.discord_username || ngDiscordUsernameForExamTrack(track),
-    });
+    return body.slice(0, limit);
   }
 
   if (p === "whatsapp") {
@@ -22799,6 +22773,28 @@ function ngInferExamTrackFromObject(obj = {}, fallback = "") {
   return ngNormalizeExamTrack(fallback);
 }
 
+function ngInferExamTrackFromCommunityIds(db = {}, communityIds = [], fallback = "") {
+  const ids = new Set(ngContentList(communityIds));
+  if (!ids.size) return ngNormalizeExamTrack(fallback);
+  const communities = ngContentArray(db, "communities").filter((item) => ids.has(String(item.id || "")));
+  for (const community of communities) {
+    const track = ngInferExamTrackFromObject(community);
+    if (track) return track;
+  }
+  return ngNormalizeExamTrack(fallback);
+}
+
+function ngDefaultTopicForExamTrack(track = "") {
+  const key = ngNormalizeExamTrack(track);
+  const label = ngExamTrackLabel(key);
+  if (key === "usmle_step1") return "USMLE Step 1 high-yield roadmap";
+  if (key === "usmle_step2_ck") return "USMLE Step 2 CK clinical case roadmap";
+  if (key === "nclex") return "NCLEX clinical judgment roadmap";
+  if (key === "mccqe") return "MCCQE clinical decision roadmap";
+  if (key === "amc") return "AMC clinical reasoning roadmap";
+  return label && label !== "General" ? `${label} high-yield roadmap` : "Medical exam community roadmap";
+}
+
 function ngTelegramChatIdForExamTrack(track = "") {
   const key = ngNormalizeExamTrack(track);
   const env = NEXTGEN_EXAM_TRACKS[key]?.telegramEnv;
@@ -22941,6 +22937,19 @@ async function ngPublishToPlatform({ platform, target = {}, post = {}, text = ""
     return telegramCommunityApi("sendMessage", { chat_id: chatId, text: messageText, disable_web_page_preview: false }, {});
   }
 
+  if (p === "discord") {
+    const track = ngInferExamTrackFromObject({ ...post, ...target }, post.exam_track || target.exam_track || "");
+    const webhookUrl = target.discord_webhook_url || ngDiscordWebhookUrlForExamTrack(track) || "";
+    const messageText = String(formatted || "").trim();
+    if (!messageText) throw Object.assign(new Error("Discord message content is required"), { statusCode: 400 });
+    return sendNextGenDiscordWebhookMessage({
+      content: messageText,
+      exam_track: track,
+      webhook_url: webhookUrl,
+      username: target.discord_username || ngDiscordUsernameForExamTrack(track),
+    });
+  }
+
   if (p === "whatsapp") {
     const to = target.whatsapp_to || target.to || target.phone || "";
     if (!to) throw Object.assign(new Error("WhatsApp target missing phone number"), { statusCode: 400 });
@@ -22989,6 +22998,8 @@ function ngCreateAutopilotScheduledPosts(db, roadmap = {}, selections = [], ctx 
       title: `Day ${i + 1} — ${calendarItem.label} — ${topic}`,
       topic,
       content_type: contentType,
+      exam_track: roadmap.exam_track || roadmap.target_track || null,
+      exam_type: roadmap.exam_type || roadmap.exam_track_label || null,
       post_kind: ngPostRequiresAnswerFollowup(contentType) ? "question" : "single",
       message: "",
       scheduled_at: postAt,
@@ -23007,6 +23018,7 @@ function ngCreateAutopilotScheduledPosts(db, roadmap = {}, selections = [], ctx 
     mainPost.book_name = bookLabel;
     mainPost.rotation_strategy = roadmap.rotation_strategy;
     mainPost.weekly_calendar_slot = calendarItem.day;
+    ngAttachExamTrack(mainPost, roadmap.exam_track || roadmap.exam_type || roadmap.topic || "");
 
     posts.push(mainPost);
     created.push(mainPost);
@@ -23016,6 +23028,8 @@ function ngCreateAutopilotScheduledPosts(db, roadmap = {}, selections = [], ctx 
         title: `Day ${i + 1} Answer — ${calendarItem.label} — ${topic}`,
         topic,
         content_type: "answer_explanation",
+        exam_track: roadmap.exam_track || roadmap.target_track || null,
+        exam_type: roadmap.exam_type || roadmap.exam_track_label || null,
         post_kind: "answer",
         parent_post_id: mainPost.id,
         message: "",
@@ -23035,6 +23049,7 @@ function ngCreateAutopilotScheduledPosts(db, roadmap = {}, selections = [], ctx 
       answer.book_name = bookLabel;
       answer.rotation_strategy = roadmap.rotation_strategy;
       answer.weekly_calendar_slot = calendarItem.day;
+      ngAttachExamTrack(answer, roadmap.exam_track || roadmap.exam_type || roadmap.topic || "");
       posts.push(answer);
       created.push(answer);
     }
@@ -23193,14 +23208,19 @@ app.post("/admin/crm/community-content/weekly-calendar", async (req, res) => {
       source_pool: ngContentClean(req.body?.source_pool || "all_approved", "all_approved"),
     };
     ngValidateCommunityTargetsForScheduling(db, payload);
+    const selectedExamTrack = ngNormalizeExamTrack(req.body?.exam_track || req.body?.examTrack || req.body?.target_track || req.body?.exam_type || "") || ngInferExamTrackFromCommunityIds(db, payload.community_ids, "");
+    payload.exam_track = selectedExamTrack;
+    payload.exam_type = selectedExamTrack ? ngExamTrackLabel(selectedExamTrack) : ngContentClean(req.body?.exam_type || "General", "General");
     const { selections, progress, progressKey } = ngSelectAutopilotSources(db, payload, ctx, days);
     let roadmap = withTimestamps({
       id: uuid(),
       brand_id: getCrmBrandId(req, db),
       title: ngContentClean(req.body?.title || `Weekly Community Calendar — ${days} days`, `Weekly Community Calendar — ${days} days`),
       description: "Weekly platform-wide content calendar with editable drafts before posting.",
-      topic: ngContentClean(req.body?.topic || "USMLE Step 1 and Step 2 CK preparation", "USMLE Step 1 and Step 2 CK preparation"),
-      exam_type: ngContentClean(req.body?.exam_type || "Step 1", "Step 1"),
+      topic: ngContentClean(req.body?.topic || ngDefaultTopicForExamTrack(selectedExamTrack), ngDefaultTopicForExamTrack(selectedExamTrack)),
+      exam_track: selectedExamTrack || null,
+      exam_track_label: selectedExamTrack ? ngExamTrackLabel(selectedExamTrack) : "General",
+      exam_type: selectedExamTrack ? ngExamTrackLabel(selectedExamTrack) : ngContentClean(req.body?.exam_type || "General", "General"),
       days,
       start_date: String(req.body?.start_date || todayKey()).slice(0, 10),
       timezone: req.body?.timezone || DEFAULT_TIMEZONE,
@@ -23528,8 +23548,10 @@ app.post("/admin/crm/community-content/roadmaps/autopilot", async (req, res) => 
       brand_id: getCrmBrandId(req, db),
       title: ngContentClean(req.body?.title || `AI Autopilot Roadmap — ${days} days`, `AI Autopilot Roadmap — ${days} days`),
       description: ngContentClean(req.body?.description || "AI-generated editable community content roadmap using approved sources.", ""),
-      topic: ngContentClean(req.body?.topic || "USMLE Step 1 high-yield roadmap", "USMLE Step 1 high-yield roadmap"),
-      exam_type: ngContentClean(req.body?.exam_type || "Step 1", "Step 1"),
+      topic: ngContentClean(req.body?.topic || ngDefaultTopicForExamTrack(selectedExamTrack), ngDefaultTopicForExamTrack(selectedExamTrack)),
+      exam_track: selectedExamTrack || null,
+      exam_track_label: selectedExamTrack ? ngExamTrackLabel(selectedExamTrack) : "General",
+      exam_type: selectedExamTrack ? ngExamTrackLabel(selectedExamTrack) : ngContentClean(req.body?.exam_type || "General", "General"),
       days,
       start_date: String(req.body?.start_date || todayKey()).slice(0, 10),
       timezone: req.body?.timezone || DEFAULT_TIMEZONE,
@@ -23589,7 +23611,7 @@ app.post("/admin/crm/community-content/roadmaps/:id/generate-next", async (req, 
       .filter((post) => String(post.roadmap_id || "") === String(roadmap.id))
       .filter((post) => !ngContentClean(post.message || post.draft_content, ""))
       .sort((a, b) => String(a.scheduled_at || "").localeCompare(String(b.scheduled_at || "")));
-    const limit = Math.min(20, Math.max(1, Number(req.body?.limit || 2)));
+    const limit = Math.min(20, Math.max(1, Number(req.body?.batch_size || req.body?.batchSize || req.body?.limit || 2)));
     const selected = posts.slice(0, limit);
     for (const post of selected) await ngGenerateAutopilotPostContent({ db, post, roadmap });
     await writeCrmDb(db);
@@ -24050,6 +24072,98 @@ app.post("/admin/crm/community-content/scheduled-posts/:id/publish-now", async (
 });
 
 
+
+app.post("/admin/crm/community-content/scheduled-posts/generate-all", async (req, res) => {
+  try {
+    const ctx = await ngRequireContentAccess(req, "generate");
+    const db = ctx.crmDb;
+    const limit = Math.min(100, Math.max(1, Number(req.body?.limit || req.query?.limit || 50)));
+    const posts = ngContentScope(ngContentArray(db, "community_scheduled_posts"), ctx)
+      .filter((post) => !post.deleted_at && !["deleted", "posted", "published"].includes(String(post.status || "").toLowerCase()))
+      .filter((post) => !ngContentClean(post.message || post.draft_content || ""))
+      .slice(0, limit);
+
+    const results = [];
+    for (const post of posts) {
+      try {
+        const roadmap = ngContentArray(db, "community_content_roadmaps").find((item) => String(item.id || "") === String(post.roadmap_id || "")) || {};
+        await ngGenerateAutopilotPostContent({ db, post, roadmap });
+        results.push({ id: post.id, success: true, status: post.status });
+      } catch (error) {
+        post.status = "failed";
+        post.last_error = error.message;
+        post.updated_at = nowIso();
+        results.push({ id: post.id, success: false, error: error.message });
+      }
+    }
+
+    await writeCrmDb(db);
+    res.json({ success: true, processed: posts.length, results });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/community-content/scheduled-posts/approve-all", async (req, res) => {
+  try {
+    const ctx = await ngRequireContentAccess(req, "approve");
+    const db = ctx.crmDb;
+    const limit = Math.min(200, Math.max(1, Number(req.body?.limit || req.query?.limit || 100)));
+    const posts = ngContentScope(ngContentArray(db, "community_scheduled_posts"), ctx)
+      .filter((post) => !post.deleted_at && !["deleted", "posted", "published"].includes(String(post.status || "").toLowerCase()))
+      .filter((post) => ngContentClean(post.message || post.draft_content || ""))
+      .filter((post) => String(post.approval_status || "").toLowerCase() !== "approved" || post.ready_to_post !== true)
+      .slice(0, limit);
+
+    for (const post of posts) {
+      post.approval_status = "approved";
+      post.medical_review_status = ngContentIsMedicalType(post) ? "approved" : (post.medical_review_status || "not_required");
+      post.ready_to_post = true;
+      post.status = post.scheduled_at ? "scheduled" : "ready_to_post";
+      post.approved_at = post.approved_at || nowIso();
+      post.approved_by = ctx.user.id;
+      post.updated_at = nowIso();
+      post.updated_by = ctx.user.id;
+    }
+
+    await writeCrmDb(db);
+    res.json({ success: true, approved_count: posts.length, posts });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/community-content/scheduled-posts/publish-all", async (req, res) => {
+  try {
+    const ctx = await ngRequireContentAccess(req, "publish");
+    const db = ctx.crmDb;
+    const limit = Math.min(50, Math.max(1, Number(req.body?.limit || req.query?.limit || 25)));
+    const posts = ngContentScope(ngContentArray(db, "community_scheduled_posts"), ctx)
+      .filter((post) => !post.deleted_at && ngContentCanPublish(post))
+      .filter((post) => !["posted", "published", "publishing"].includes(String(post.status || "").toLowerCase()) && !post.posted_at)
+      .slice(0, limit);
+
+    const results = [];
+    for (const post of posts) {
+      try {
+        const publish = await ngPublishScheduledPost(db, post, ctx.user);
+        results.push({ id: post.id, success: true, skipped: publish.skipped || false, status: post.status, results: publish.results });
+      } catch (error) {
+        post.status = "failed";
+        post.last_error = error.message;
+        post.publish_lock_until = null;
+        post.updated_at = nowIso();
+        results.push({ id: post.id, success: false, error: error.message });
+      }
+    }
+
+    await writeCrmDb(db);
+    res.json({ success: true, processed: posts.length, results });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
 app.post("/admin/crm/community-content/cleanup-deleted", async (req, res) => {
   try {
     const ctx = await ngRequireContentAccess(req, "schedule");
@@ -24501,6 +24615,56 @@ app.get("/admin/crm/exam-tracks/status", async (req, res) => {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
 });
+
+// -----------------------------------------------------------------------------
+// NEXTGEN AUTOPILOT SCHEDULER WORKER
+// Fires approved scheduled posts automatically. Render has a single instance with
+// the attached disk, so an in-process loop is safe for this service.
+// -----------------------------------------------------------------------------
+let nextGenAutopilotSchedulerRunning = false;
+
+async function runNextGenAutopilotSchedulerOnce() {
+  if (nextGenAutopilotSchedulerRunning) return { skipped: true, reason: "already_running" };
+  nextGenAutopilotSchedulerRunning = true;
+  try {
+    const db = await readCrmDb();
+    const now = Date.now();
+    const due = ngContentArray(db, "community_scheduled_posts")
+      .filter((post) => !post.deleted_at && ["scheduled", "ready_to_post"].includes(String(post.status || "").toLowerCase()))
+      .filter((post) => post.scheduled_at && new Date(post.scheduled_at).getTime() <= now)
+      .filter((post) => ngContentCanPublish(post))
+      .slice(0, Math.max(1, Number(process.env.NEXTGEN_AUTOPILOT_SCHEDULER_BATCH || 10)));
+
+    const results = [];
+    for (const post of due) {
+      try {
+        const publish = await ngPublishScheduledPost(db, post, { id: "system_scheduler", role: "system" });
+        results.push({ id: post.id, success: true, skipped: publish.skipped || false, status: post.status });
+      } catch (error) {
+        post.status = "failed";
+        post.last_error = error.message;
+        post.publish_lock_until = null;
+        post.updated_at = nowIso();
+        results.push({ id: post.id, success: false, error: error.message });
+      }
+    }
+
+    if (due.length) await writeCrmDb(db);
+    if (due.length) console.log("NextGen autopilot scheduler processed", due.length, results);
+    return { processed: due.length, results };
+  } catch (error) {
+    console.error("NextGen autopilot scheduler error:", error.message);
+    return { success: false, error: error.message };
+  } finally {
+    nextGenAutopilotSchedulerRunning = false;
+  }
+}
+
+if (process.env.NEXTGEN_AUTOPILOT_SCHEDULER_DISABLED !== "true") {
+  const intervalMs = Math.max(30000, Number(process.env.NEXTGEN_AUTOPILOT_SCHEDULER_INTERVAL_MS || 60000));
+  setInterval(runNextGenAutopilotSchedulerOnce, intervalMs);
+  setTimeout(runNextGenAutopilotSchedulerOnce, 15000);
+}
 
 // -----------------------------------------------------------------------------
 // END DISCORD COMMUNITY POSTING EXTENSION
