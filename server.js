@@ -22,8 +22,6 @@ const allowedOrigins = [
   "https://www.lms.nextgenusmlelms.com",
   "https://nextgenusmlelms.com",
   "https://www.nextgenusmlelms.com",
-  "https://usmlecorner.com",
-  "https://www.usmlecorner.com",
   "http://localhost:5173",
   "http://localhost:3000",
 ];
