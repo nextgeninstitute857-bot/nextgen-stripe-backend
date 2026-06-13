@@ -42,7 +42,7 @@ function applyNextGenCors(req, res) {
     requestHeaders || "Content-Type, Authorization, x-admin-token, x-requested-with"
   );
   res.setHeader("Access-Control-Max-Age", "86400");
-  res.setHeader("X-NextGen-Backend-Build", "v18-scheduled-posting-dedupe-perfect");
+  res.setHeader("X-NextGen-Backend-Build", "v20-community-response-insights-topic-replies");
 }
 
 // Hard CORS/preflight guard. This must be the first middleware after app creation.
@@ -81,7 +81,7 @@ app.use(express.urlencoded({ extended: true, limit: process.env.JSON_BODY_LIMIT 
 app.get("/admin/debug/cors-check", (req, res) => {
   res.json({
     success: true,
-    build: "v18-scheduled-posting-dedupe-perfect",
+    build: "v20-community-response-insights-topic-replies",
     origin: req.headers.origin || null,
     now: new Date().toISOString(),
   });
@@ -10089,6 +10089,15 @@ app.post("/webhooks/telegram", async (req, res) => {
     const integration = findTelegramIntegration(db);
 
     const examTrack = ngResolveExamTrackFromTelegramMessage(message);
+    const isCommunityGroupChat = ["group", "supergroup", "channel"].includes(String(message.chat?.type || "").toLowerCase());
+    const activeQuestionPost = isCommunityGroupChat ? ngFindActiveQuestionPostForTelegramMessage(db, message) : null;
+    const selectedChoice = ngExtractChoiceFromStudentText(text);
+    const botWasMentioned = ngBotMentionedInTelegramText(text);
+    const topicRelatedMention = Boolean(botWasMentioned && activeQuestionPost && ngTelegramCommentLooksTopicRelated(text, activeQuestionPost, message));
+    let recordedCommunityResponse = null;
+    if (isCommunityGroupChat && activeQuestionPost && selectedChoice) {
+      recordedCommunityResponse = ngRecordCommunityAnswerResponse(db, { post: activeQuestionPost, message, text, choice: selectedChoice });
+    }
     const leadPayload = {
       ...normalizeTelegramLeadPayload({ update, message, integration }),
       exam_track: examTrack || undefined,
@@ -19611,6 +19620,91 @@ async function ngScoutHandleTelegramUpdate(req, res) {
     }));
 
     const brandId = getCrmBrandId(req, db);
+
+    // In public communities, the scout bot should not answer every message.
+    // It records A-E responses silently, and replies only when mentioned inside
+    // the currently posted topic. This keeps token cost low and prevents the bot
+    // from becoming a general free-answer bot in the group.
+    if (isCommunityGroupChat) {
+      let groupReplySent = null;
+      let groupReplyAction = "silent_record";
+      let groupReplyReason = recordedCommunityResponse ? "answer_choice_recorded" : "group_message_saved";
+
+      if (botWasMentioned) {
+        const replyText = topicRelatedMention
+          ? ngBuildLowCostTopicReply({ text, post: activeQuestionPost, choice: selectedChoice })
+          : "I can help in this group only with the current posted topic. Please reply to today’s question or mention the topic from the post so I can keep the discussion focused.";
+        try {
+          groupReplySent = await ngScoutTelegramApi("sendMessage", {
+            chat_id: message.chat?.id,
+            text: replyText,
+            reply_to_message_id: message.message_id,
+            disable_web_page_preview: true,
+          });
+          db.conversations = ensureCrmArray(db, "conversations");
+          db.conversations.push(withTimestamps({
+            id: uuid(),
+            conversation_id: lead?.conversation_id || lead?.id || uuid(),
+            lead_id: lead?.id || null,
+            platform: "telegram",
+            source_platform: "telegram",
+            channel: "telegram_scout",
+            source_channel: "telegram_scout_bot",
+            direction: "outbound",
+            scout_bot: true,
+            scout_decision: topicRelatedMention ? "topic_related_group_reply" : "topic_guard_group_reply",
+            telegram_chat_id: message.chat?.id || lead?.telegram_chat_id || null,
+            platform_contact_id: lead?.platform_contact_id || lead?.telegram_chat_id || message.chat?.id || null,
+            scheduled_post_id: activeQuestionPost?.id || null,
+            message_text: replyText,
+            text: replyText,
+            raw: groupReplySent,
+            raw_payload: groupReplySent,
+            status: "sent",
+            timestamp: nowIso(),
+            created_at: nowIso(),
+          }));
+          groupReplyAction = "send";
+          groupReplyReason = topicRelatedMention ? "topic_related_mention" : "mention_outside_topic_guard";
+        } catch (sendError) {
+          groupReplyAction = "failed";
+          groupReplyReason = sendError.message;
+          createTelegramIntegrationLog(db, {
+            lead_id: lead.id,
+            action: "telegram_scout_group_topic_reply_failed",
+            status: "error",
+            message: sendError.message,
+            raw: { text: replyText },
+          });
+        }
+      }
+
+      opportunity.scout_reply_decision = groupReplyAction;
+      opportunity.scout_reply_reason = groupReplyReason;
+      opportunity.scheduled_post_id = activeQuestionPost?.id || null;
+      opportunity.recorded_choice = recordedCommunityResponse?.choice || selectedChoice || "";
+      opportunity.updated_at = nowIso();
+      if (activeQuestionPost) {
+        activeQuestionPost.response_analytics = ngCommunityResponseAnalyticsForPost(db, activeQuestionPost);
+        activeQuestionPost.updated_at = nowIso();
+      }
+      await writeCrmDb(db);
+      return res.json({
+        success: true,
+        scout: true,
+        group_mode: true,
+        created,
+        lead_id: lead.id,
+        conversation_id: conversation.id,
+        opportunity_id: opportunity.id,
+        scheduled_post_id: activeQuestionPost?.id || null,
+        recorded_choice: recordedCommunityResponse?.choice || selectedChoice || "",
+        replied: Boolean(groupReplySent),
+        scout_reply_action: groupReplyAction,
+        scout_reply_reason: groupReplyReason,
+      });
+    }
+
     const scoutSettings = ngGetScoutThrottleSettings(db, brandId);
     const reply = ngScoutBuildReply({ text, lead, opportunity });
     const decision = ngScoutDecideReply({ lead, text, settings: scoutSettings, now: new Date() });
@@ -21983,6 +22077,10 @@ async function ngPublishScheduledPost(db, post = {}, actor = null, options = {})
     throw error;
   }
 
+  if (ngPostIsAnswer(post)) {
+    ngApplyMajorityInsightToAnswerPost(db, post);
+  }
+
   const message = ngContentClean(post.message || post.draft_content || "");
   if (!message) {
     post.status = "failed";
@@ -22032,6 +22130,9 @@ async function ngPublishScheduledPost(db, post = {}, actor = null, options = {})
   post.publish_lock_until = null;
   post.updated_at = nowIso();
   post.updated_by = actor?.id || post.updated_by || null;
+  if (ngScheduledPostIsQuestion(post) || ngPostIsAnswer(post)) {
+    post.response_analytics = ngCommunityResponseAnalyticsForPost(db, post);
+  }
 
   ngContentArray(db, "community_post_history").unshift(withTimestamps({
     id: uuid(),
@@ -22390,10 +22491,32 @@ function ngPostIsAnswer(post = {}) {
   return String(post.post_kind || "").toLowerCase() === "answer" || t.includes("answer") || t.includes("explanation_followup");
 }
 
+function ngContentTypeIsStandaloneAnswer(type = "") {
+  const t = ngNormalizeContentType(type);
+  return [
+    "answer",
+    "answers",
+    "answer_explanation",
+    "explanation",
+    "explanation_answer",
+    "answer_followup",
+    "explanation_followup",
+  ].includes(t) || (t.includes("answer") && !["question_answer_pair"].includes(t));
+}
+
 function ngWeeklyCalendarItemForIndex(index = 0, roadmap = {}) {
-  const custom = Array.isArray(roadmap.content_mix) ? roadmap.content_mix.map(ngNormalizeContentType).filter(Boolean) : [];
-  const oldMcqOnlyDefault = custom.length === 2 && custom.includes("daily_mcq") && custom.includes("answer_explanation");
+  const rawCustom = Array.isArray(roadmap.content_mix)
+    ? roadmap.content_mix.map(ngNormalizeContentType).filter(Boolean)
+    : [];
+
+  // answer_explanation is never allowed as a standalone day in the roadmap.
+  // It is a paired follow-up created automatically only when the main post is
+  // an MCQ/mini-case question. This prevents Day 2/Day 3 from becoming an
+  // answer-only post with no question.
+  const custom = rawCustom.filter((type) => !ngContentTypeIsStandaloneAnswer(type));
+  const oldMcqOnlyDefault = rawCustom.length === 2 && rawCustom.includes("daily_mcq") && rawCustom.includes("answer_explanation");
   const useCustom = custom.length && !oldMcqOnlyDefault;
+
   if (useCustom) {
     const contentType = custom[index % custom.length];
     return {
@@ -22405,6 +22528,7 @@ function ngWeeklyCalendarItemForIndex(index = 0, roadmap = {}) {
       answer_delay_hours: Number(roadmap.answer_delay_hours || 4),
     };
   }
+
   return NG_WEEKLY_CONTENT_CALENDAR[index % NG_WEEKLY_CONTENT_CALENDAR.length];
 }
 
@@ -22527,6 +22651,247 @@ function ngFormatForPlatform({ platform = "telegram", post = {}, text = "" } = {
   }
 
   return body.slice(0, limit);
+}
+
+
+function ngScheduledPostIsQuestion(post = {}) {
+  if (ngPostIsAnswer(post)) return false;
+  return ngPostRequiresAnswerFollowup(post.content_type || post.post_type, post);
+}
+
+function ngExtractChoiceFromStudentText(text = "") {
+  const clean = String(text || "").trim().toUpperCase();
+  if (!clean) return "";
+  const match = clean.match(/(?:^|\s|[\(\[])([A-E])(?:[\)\].,\s]|$)/);
+  return match ? match[1] : "";
+}
+
+function ngExtractCorrectChoiceFromAnswerText(text = "") {
+  const clean = String(text || "");
+  const patterns = [
+    /correct\s+answer\s*[:\-]?\s*([A-E])/i,
+    /answer\s*[:\-]?\s*([A-E])/i,
+    /\b([A-E])\s*(?:is|=)\s*(?:the\s+)?correct/i,
+  ];
+  for (const pattern of patterns) {
+    const match = clean.match(pattern);
+    if (match?.[1]) return String(match[1]).toUpperCase();
+  }
+  return "";
+}
+
+function ngTelegramMessageIdFromResult(item = {}) {
+  const candidates = [
+    item?.message_id,
+    item?.result?.message_id,
+    item?.result?.result?.message_id,
+    item?.result?.telegram?.message_id,
+    item?.provider_message_id,
+    item?.platform_message_id,
+  ];
+  for (const value of candidates) {
+    const clean = String(value || "").trim();
+    if (clean) return clean;
+  }
+  return "";
+}
+
+function ngTelegramChatIdFromResult(item = {}) {
+  const candidates = [
+    item?.target?.telegram_chat_id,
+    item?.target?.chat_id,
+    item?.target?.to,
+    item?.target?.recipient,
+    item?.result?.result?.chat?.id,
+    item?.result?.chat?.id,
+    item?.telegram_chat_id,
+    item?.chat_id,
+  ];
+  for (const value of candidates) {
+    const clean = ngNormalizeTelegramChatId(value || "", { assumeGroup: true });
+    if (clean) return clean;
+  }
+  return "";
+}
+
+function ngPostWasSentToTelegramChat(post = {}, chatId = "") {
+  const targetChat = ngNormalizeTelegramChatId(chatId || "", { assumeGroup: true });
+  if (!targetChat) return false;
+  const results = Array.isArray(post.publish_results) ? post.publish_results : [];
+  return results.some((item) => {
+    const platform = ngCommunityPlatform(item.platform || item.target?.platform || "");
+    if (platform !== "telegram") return false;
+    if (item.success !== true && !item.result?.skipped) return false;
+    return ngTelegramChatIdFromResult(item) === targetChat;
+  });
+}
+
+function ngPostWasSentAsTelegramMessage(post = {}, messageId = "") {
+  const targetMessageId = String(messageId || "").trim();
+  if (!targetMessageId) return false;
+  const results = Array.isArray(post.publish_results) ? post.publish_results : [];
+  return results.some((item) => {
+    const platform = ngCommunityPlatform(item.platform || item.target?.platform || "");
+    if (platform !== "telegram") return false;
+    return ngTelegramMessageIdFromResult(item) === targetMessageId;
+  });
+}
+
+function ngFindActiveQuestionPostForTelegramMessage(db, message = {}) {
+  const posts = ngContentArray(db, "community_scheduled_posts");
+  const chatId = ngNormalizeTelegramChatId(message?.chat?.id || "", { assumeGroup: true });
+  const replyToMessageId = String(message?.reply_to_message?.message_id || "").trim();
+  if (replyToMessageId) {
+    const replyMatched = posts.find((post) => ngScheduledPostIsQuestion(post) && ngPostPublished(post) && ngPostWasSentAsTelegramMessage(post, replyToMessageId));
+    if (replyMatched) return replyMatched;
+  }
+  if (!chatId) return null;
+  const nowMs = Date.now();
+  const activeWindowHours = Number(process.env.COMMUNITY_RESPONSE_WINDOW_HOURS || 8);
+  const activeWindowMs = Math.max(1, activeWindowHours) * 60 * 60 * 1000;
+  const candidates = posts
+    .filter((post) => ngScheduledPostIsQuestion(post) && ngPostPublished(post) && ngPostWasSentToTelegramChat(post, chatId))
+    .filter((post) => {
+      const publishedAt = new Date(post.posted_at || post.updated_at || post.scheduled_at || 0).getTime();
+      if (!publishedAt || Number.isNaN(publishedAt)) return true;
+      return nowMs - publishedAt <= activeWindowMs;
+    })
+    .sort((a, b) => new Date(b.posted_at || b.updated_at || b.scheduled_at || 0).getTime() - new Date(a.posted_at || a.updated_at || a.scheduled_at || 0).getTime());
+  return candidates[0] || null;
+}
+
+function ngRecordCommunityAnswerResponse(db, { post = {}, message = {}, text = "", choice = "" } = {}) {
+  if (!post?.id || !choice) return null;
+  const responses = ngContentArray(db, "community_post_responses");
+  const chatId = ngNormalizeTelegramChatId(message?.chat?.id || "", { assumeGroup: true });
+  const user = message?.from || {};
+  const userId = String(user.id || message?.sender_chat?.id || "unknown");
+  const messageId = String(message?.message_id || "");
+  const duplicate = responses.find((item) => {
+    if (messageId && String(item.platform_message_id || "") === messageId && String(item.telegram_chat_id || "") === chatId) return true;
+    return String(item.scheduled_post_id || "") === String(post.id) && String(item.telegram_chat_id || "") === chatId && String(item.telegram_user_id || "") === userId && String(item.choice || "").toUpperCase() === choice && (Date.now() - new Date(item.created_at || 0).getTime()) < 2 * 60 * 1000;
+  });
+  if (duplicate) return duplicate;
+  const record = withTimestamps({
+    id: uuid(),
+    scheduled_post_id: post.id,
+    roadmap_id: post.roadmap_id || null,
+    parent_post_id: post.parent_post_id || null,
+    exam_track: post.exam_track || null,
+    exam_track_label: post.exam_track ? ngExamTrackLabel(post.exam_track) : null,
+    platform: "telegram",
+    telegram_chat_id: chatId || null,
+    telegram_user_id: userId,
+    telegram_username: user.username || "",
+    student_name: [user.first_name, user.last_name].filter(Boolean).join(" ") || user.username || "Telegram student",
+    platform_message_id: messageId,
+    choice,
+    text: ngProfessionalTextClean(text).slice(0, 1000),
+    created_by: "telegram_scout_webhook",
+  });
+  responses.push(record);
+  return record;
+}
+
+function ngCommunityResponseAnalyticsForPost(db, post = {}) {
+  const questionPostId = ngPostIsAnswer(post) ? (post.parent_post_id || post.question_post_id || "") : post.id;
+  if (!questionPostId) return { total: 0, counts: {}, majority_choice: "", correct_choice: "" };
+  const rows = ngContentArray(db, "community_post_responses").filter((item) => String(item.scheduled_post_id || "") === String(questionPostId));
+  const counts = { A: 0, B: 0, C: 0, D: 0, E: 0 };
+  const uniqueUsers = new Set();
+  for (const row of rows) {
+    const choice = String(row.choice || "").toUpperCase();
+    if (counts[choice] === undefined) continue;
+    counts[choice] += 1;
+    if (row.telegram_user_id) uniqueUsers.add(String(row.telegram_user_id));
+  }
+  const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  const majority = entries[0] && entries[0][1] > 0 ? entries[0][0] : "";
+  const total = Object.values(counts).reduce((sum, n) => sum + Number(n || 0), 0);
+  const answerText = post.message || post.draft_content || "";
+  const correct = ngExtractCorrectChoiceFromAnswerText(answerText);
+  return {
+    total,
+    unique_students: uniqueUsers.size || total,
+    counts,
+    majority_choice: majority,
+    majority_count: majority ? counts[majority] : 0,
+    correct_choice: correct,
+    responses: rows.slice(-50),
+  };
+}
+
+function ngBuildMajorityInsightForAnswer(db, answerPost = {}) {
+  if (!ngPostIsAnswer(answerPost)) return "";
+  const analytics = ngCommunityResponseAnalyticsForPost(db, answerPost);
+  if (!analytics.total) return "";
+  const parts = [];
+  parts.push("Community response snapshot:");
+  parts.push(`Many students selected ${analytics.majority_choice || "an option"} (${analytics.majority_count}/${analytics.total} responses).`);
+  if (analytics.correct_choice) {
+    if (analytics.majority_choice && analytics.majority_choice !== analytics.correct_choice) {
+      parts.push(`Correct answer is ${analytics.correct_choice}, so the common trap was choosing ${analytics.majority_choice} before matching the key clue to the mechanism.`);
+    } else {
+      parts.push(`Correct answer is ${analytics.correct_choice}. Most responses were aligned with the correct option.`);
+    }
+  } else {
+    parts.push("Use the explanation below to compare the most common answer with the correct reasoning.");
+  }
+  parts.push("This is a group-level summary only, not individual student tracking.");
+  return parts.join("\n");
+}
+
+function ngApplyMajorityInsightToAnswerPost(db, post = {}) {
+  if (!ngPostIsAnswer(post)) return post;
+  const current = ngProfessionalTextClean(post.message || post.draft_content || "");
+  if (!current || /community\s+response\s+snapshot/i.test(current)) return post;
+  const insight = ngBuildMajorityInsightForAnswer(db, post);
+  if (!insight) return post;
+  const next = ngProfessionalTextClean(`${insight}\n\n${current}`);
+  post.message = next;
+  post.draft_content = next;
+  post.response_analytics = ngCommunityResponseAnalyticsForPost(db, post);
+  post.updated_at = nowIso();
+  return post;
+}
+
+function ngBotMentionedInTelegramText(text = "") {
+  const clean = String(text || "").toLowerCase();
+  const configured = [
+    process.env.TELEGRAM_SCOUT_BOT_USERNAME,
+    process.env.TELEGRAM_COMMUNITY_BOT_USERNAME,
+    process.env.TELEGRAM_BOT_USERNAME,
+  ].filter(Boolean).map((item) => String(item).toLowerCase().replace(/^@/, ""));
+  const names = new Set(["usmle_prep_partner_bot", "medical_exam_study_helper", "medical exam study helper", "study helper", ...configured]);
+  for (const name of names) {
+    if (!name) continue;
+    if (clean.includes(`@${name}`) || clean.includes(name)) return true;
+  }
+  return false;
+}
+
+function ngTopicKeywordsFromPost(post = {}) {
+  return String([post.topic, post.title, post.content_type].filter(Boolean).join(" "))
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((word) => word.length >= 5 && !["daily", "style", "question", "answer", "explanation", "community", "usmle", "nclex", "mccqe", "clinical"].includes(word))
+    .slice(0, 12);
+}
+
+function ngTelegramCommentLooksTopicRelated(text = "", post = {}, message = {}) {
+  if (!post?.id) return false;
+  if (message?.reply_to_message?.message_id && ngPostWasSentAsTelegramMessage(post, message.reply_to_message.message_id)) return true;
+  const clean = String(text || "").toLowerCase();
+  if (ngExtractChoiceFromStudentText(clean)) return true;
+  const keywords = ngTopicKeywordsFromPost(post);
+  return keywords.some((word) => clean.includes(word));
+}
+
+function ngBuildLowCostTopicReply({ text = "", post = {}, choice = "" } = {}) {
+  const topic = post.topic || post.title || "today's posted concept";
+  const picked = choice ? `You selected ${choice}. ` : "";
+  return ngProfessionalTextClean(`${picked}For this thread, I can help only with today's topic: ${topic}. Focus on the key clue in the stem, then match it with the mechanism before choosing an option. If you are confused, ask specifically about the clue, the mechanism, or why one option is wrong.`).slice(0, 900);
 }
 
 function ngContentBuildFallbackFromSources({ type = "daily_mcq", topic = "USMLE concept", sources = [], exam = "Step 1", answerOnly = false } = {}) {
@@ -23314,6 +23679,18 @@ async function ngGenerateAutopilotPostContent({ db, post, roadmap = {}, source =
   return post;
 }
 
+function ngCanGenerateScheduledPostNow(post = {}, allPosts = []) {
+  if (!ngPostIsAnswer(post)) return true;
+
+  const parentId = String(post.parent_post_id || post.question_post_id || post.parent_id || "");
+  if (!parentId) return false;
+
+  const parent = allPosts.find((item) => String(item.id || "") === parentId) || null;
+  if (!parent) return false;
+
+  return Boolean(ngContentClean(parent.message || parent.draft_content || ""));
+}
+
 function ngCommunityReplyShouldUseAI({ text = "", mentioned = false } = {}) {
   const clean = String(text || "").trim().toLowerCase();
   if (!clean) return { allowed: false, reason: "empty_comment" };
@@ -23404,6 +23781,22 @@ async function ngBuildContextualCommunityReply({ db, body = {}, actor = null } =
   return { skipped: false, reply_draft: draft, post };
 }
 
+
+app.get("/admin/crm/community-content/scheduled-posts/:id/response-analytics", async (req, res) => {
+  try {
+    const ctx = await ngRequireContentAccess(req, "read");
+    const db = ctx.crmDb;
+    const post = ngFindScheduledPostById(db, req.params.id);
+    if (!post) return res.status(404).json({ success: false, error: "Scheduled post not found" });
+    if (!ctx.crm_admin && !crmRecordVisibleToTeam(post, ctx.team_member, ctx.user)) {
+      return res.status(403).json({ success: false, error: "This post is outside your assigned scope" });
+    }
+    res.json({ success: true, post_id: post.id, analytics: ngCommunityResponseAnalyticsForPost(db, post) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
 app.get("/admin/crm/community-content/exam-prompts", async (req, res) => {
   try {
     await ngRequireContentAccess(req, "read");
@@ -23412,7 +23805,7 @@ app.get("/admin/crm/community-content/exam-prompts", async (req, res) => {
       return [key, { key, label: ngExamTrackLabel(key), ...template }];
     }));
     const requested = ngNormalizeExamTrack(req.query?.exam_track || req.query?.track || "");
-    res.json({ success: true, prompts, selected: requested ? prompts[requested] : null, build: "v18-scheduled-posting-dedupe-perfect" });
+    res.json({ success: true, prompts, selected: requested ? prompts[requested] : null, build: "v20-community-response-insights-topic-replies" });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -23583,7 +23976,7 @@ function ngApplyRoadmapEditableFields(roadmap = {}, body = {}) {
 
   roadmap.days = Math.min(90, Math.max(1, Number(roadmap.days || 7)));
   roadmap.content_mix = Array.isArray(roadmap.content_mix) && roadmap.content_mix.length
-    ? roadmap.content_mix.map(ngNormalizeContentType).filter(Boolean)
+    ? roadmap.content_mix.map(ngNormalizeContentType).filter(Boolean).filter((type) => !ngContentTypeIsStandaloneAnswer(type))
     : NG_WEEKLY_CONTENT_CALENDAR.map((item) => item.content_type);
   roadmap.platforms = ngContentPlatforms(roadmap.platforms || "telegram");
   roadmap.community_ids = ngContentList(roadmap.community_ids || []);
@@ -23812,7 +24205,7 @@ app.post("/admin/crm/community-content/roadmaps/autopilot", async (req, res) => 
       rotation_strategy: payload.rotation_strategy,
       avoid_repeats: req.body?.avoid_repeats !== false,
       content_type: req.body?.content_type || "daily_mcq",
-      content_mix: Array.isArray(req.body?.content_mix) ? req.body.content_mix : ["daily_mcq", "answer_explanation"],
+      content_mix: (Array.isArray(req.body?.content_mix) ? req.body.content_mix : ["daily_mcq"]).map(ngNormalizeContentType).filter((type) => !ngContentTypeIsStandaloneAnswer(type)),
       approval_required: req.body?.approval_required !== false,
       auto_post_after_approval: req.body?.auto_post_after_approval !== false,
       instructions: ngContentClean(req.body?.instructions || "", ""),
@@ -23851,9 +24244,11 @@ app.post("/admin/crm/community-content/roadmaps/:id/generate-next", async (req, 
     if (!ctx.crm_admin && !crmRecordVisibleToTeam(roadmap, ctx.team_member, ctx.user)) {
       return res.status(403).json({ success: false, error: "This roadmap is outside your assigned scope" });
     }
-    const posts = ngContentArray(db, "community_scheduled_posts")
-      .filter((post) => String(post.roadmap_id || "") === String(roadmap.id))
+    const allRoadmapPosts = ngContentArray(db, "community_scheduled_posts")
+      .filter((post) => String(post.roadmap_id || "") === String(roadmap.id));
+    const posts = allRoadmapPosts
       .filter((post) => !ngContentClean(post.message || post.draft_content, ""))
+      .filter((post) => ngCanGenerateScheduledPostNow(post, allRoadmapPosts))
       .sort((a, b) => String(a.scheduled_at || "").localeCompare(String(b.scheduled_at || "")));
     const limit = Math.min(20, Math.max(1, Number(req.body?.batch_size || req.body?.batchSize || req.body?.limit || 2)));
     const selected = posts.slice(0, limit);
@@ -23911,7 +24306,7 @@ app.post("/admin/crm/community-content/roadmaps", async (req, res) => {
       community_ids: ngContentList(req.body?.community_ids || req.body?.communities),
       source_ids: ngContentList(req.body?.source_ids || req.body?.sources),
       topics: Array.isArray(req.body?.topics) ? req.body.topics.map((item) => String(item || "").trim()).filter(Boolean) : [],
-      content_mix: Array.isArray(req.body?.content_mix) ? req.body.content_mix : ["daily_mcq", "answer_explanation"],
+      content_mix: (Array.isArray(req.body?.content_mix) ? req.body.content_mix : ["daily_mcq"]).map(ngNormalizeContentType).filter((type) => !ngContentTypeIsStandaloneAnswer(type)),
       approval_required: req.body?.approval_required !== false,
       auto_post_after_approval: req.body?.auto_post_after_approval !== false,
       status: "active",
@@ -24012,6 +24407,10 @@ app.get("/admin/crm/community-content/scheduled-posts", async (req, res) => {
         return true;
       })
       .sort((a, b) => String(a.scheduled_at || a.created_at || "").localeCompare(String(b.scheduled_at || b.created_at || "")));
+    posts = posts.map((post) => ({
+      ...post,
+      response_analytics: ngCommunityResponseAnalyticsForPost(ctx.crmDb, post),
+    }));
     res.json({ success: true, posts, scheduled_posts: posts, items: posts, count: posts.length, scoped: !ctx.crm_admin });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
@@ -24322,13 +24721,15 @@ app.post("/admin/crm/community-content/scheduled-posts/generate-all", async (req
     const ctx = await ngRequireContentAccess(req, "generate");
     const db = ctx.crmDb;
     const limit = Math.min(100, Math.max(1, Number(req.body?.limit || req.query?.limit || 50)));
+    const scopedScheduledPosts = ngContentScope(ngContentArray(db, "community_scheduled_posts"), ctx);
     const posts = ngFilterScheduledPostsForBulk(
-        ngContentScope(ngContentArray(db, "community_scheduled_posts"), ctx),
+        scopedScheduledPosts,
         req.body || {},
         req.query || {}
       )
       .filter((post) => !post.deleted_at && !["deleted", "posted", "published"].includes(String(post.status || "").toLowerCase()))
       .filter((post) => !ngContentClean(post.message || post.draft_content || ""))
+      .filter((post) => ngCanGenerateScheduledPostNow(post, scopedScheduledPosts))
       .slice(0, limit);
 
     const results = [];
