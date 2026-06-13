@@ -42,7 +42,7 @@ function applyNextGenCors(req, res) {
     requestHeaders || "Content-Type, Authorization, x-admin-token, x-requested-with"
   );
   res.setHeader("Access-Control-Max-Age", "86400");
-  res.setHeader("X-NextGen-Backend-Build", "v24-all-exam-hard-lock-roadmap-generation");
+  res.setHeader("X-NextGen-Backend-Build", "v29-topic-replies-on-marketing-outreach-off");
 }
 
 // Hard CORS/preflight guard. This must be the first middleware after app creation.
@@ -81,7 +81,7 @@ app.use(express.urlencoded({ extended: true, limit: process.env.JSON_BODY_LIMIT 
 app.get("/admin/debug/cors-check", (req, res) => {
   res.json({
     success: true,
-    build: "v24-all-exam-hard-lock-roadmap-generation",
+    build: "v29-topic-replies-on-marketing-outreach-off",
     origin: req.headers.origin || null,
     now: new Date().toISOString(),
   });
@@ -18794,57 +18794,14 @@ app.post("/admin/crm/community-intelligence/generate-content", async (req, res) 
 });
 
 app.post("/admin/crm/community-intelligence/opportunities/:id/soft-outreach-draft", async (req, res) => {
-  try {
-    const { user } = await requireCrmAdmin(req);
-    const db = await readCrmDb();
-    const opp = ngCommunityArray(db, "community_opportunities").find((item) => String(item.id) === String(req.params.id));
-    if (!opp) return res.status(404).json({ success: false, error: "Opportunity not found" });
-
-    const brandId = opp.brand_id || getCrmBrandId(req, db);
-    const ai = await ngGenerateCommunityAiContent({
-      db,
-      body: {
-        platform: opp.platform || req.body?.platform || "telegram",
-        post_type: "helpful_reply",
-        content_type: "soft_outreach",
-        topic: ngCommunityOpportunityText(opp),
-        audience: "USMLE student/community member",
-        cta: "Ask Step 1 or Step 2 CK, exam date, graduation year, and main difficulty. Do not pitch directly. Offer official NextGen demo only after qualification/consent.",
-      },
-      mode: "outreach",
-    });
-
-    const draft = withTimestamps({
-      id: uuid(),
-      brand_id: brandId,
-      opportunity_id: opp.id,
-      platform: opp.platform || "telegram",
-      community_name: opp.community_name || "",
-      action_type: "community_soft_outreach_draft",
-      status: "draft",
-      approval_status: "pending",
-      draft_content: ai.content,
-      message: ai.content,
-      ai_model: ai.model,
-      ai_configured: ai.ai_configured,
-      ai_usage: ai.usage,
-      created_by: user.id,
-    });
-
-    ngCommunityArray(db, "community_reply_drafts").unshift(draft);
-    const approval = ngCreateCommunityApprovalItem(db, { brandId, draft, kind: "community_reply", user });
-
-    opp.status = "soft_outreach_drafted";
-    opp.suggested_reply = ai.content;
-    opp.reply_draft_id = draft.id;
-    opp.updated_at = nowIso();
-    opp.updated_by = user.id;
-
-    await writeCrmDb(db);
-    res.json({ success: true, draft, reply: ai.content, approval_item: approval, opportunity: opp });
-  } catch (error) {
-    res.status(error.statusCode || 500).json({ success: false, error: error.message });
-  }
+  // Disabled intentionally: this endpoint is only for marketing/community outreach draft generation.
+  // Telegram Scout topic-mention replies remain enabled inside the webhook, but broad outreach drafts are off.
+  res.status(409).json({
+    success: false,
+    disabled: true,
+    error: "Marketing outreach AI drafts are disabled. Telegram topic-mention replies remain enabled in the Scout bot, but broad/manual outreach should be handled manually or by templates later.",
+    build: "v29-topic-replies-on-marketing-outreach-off",
+  });
 });
 
 app.post("/admin/crm/community-intelligence/opportunities/:id/qualify", async (req, res) => {
@@ -22090,6 +22047,50 @@ async function ngPublishScheduledPost(db, post = {}, actor = null, options = {})
     throw error;
   }
 
+  const postExamTrack = ngNormalizeExamTrack(post.exam_track || post.target_track || post.exam_type || post.title || post.topic || "", "");
+  const incompatibleTargets = [];
+  const compatibleTargets = targets.filter((target) => {
+    const platform = ngCommunityPlatform(target.platform || "telegram");
+    const targetTrack = ngNormalizeExamTrack(
+      target.exam_track || target.track || target.target_track || target.exam_type || target.community_name || target.channel_name || target.raw?.name || target.raw?.title || "",
+      ""
+    );
+
+    if (postExamTrack && targetTrack && postExamTrack !== targetTrack) {
+      incompatibleTargets.push({
+        platform,
+        community_name: target.community_name || target.raw?.name || target.raw?.title || target.id || "Community",
+        post_exam_track: postExamTrack,
+        target_exam_track: targetTrack,
+      });
+      return false;
+    }
+
+    if (postExamTrack && !target.exam_track) {
+      target.exam_track = postExamTrack;
+      target.exam_track_label = ngExamTrackLabel(postExamTrack);
+    }
+
+    return true;
+  });
+
+  if (!compatibleTargets.length) {
+    post.status = "failed";
+    post.publish_lock_until = null;
+    post.last_error = `Selected communities do not match ${ngExamTrackLabel(postExamTrack)}. No post was sent.`;
+    const error = new Error(post.last_error);
+    error.statusCode = 422;
+    error.details = { incompatible_targets: incompatibleTargets };
+    throw error;
+  }
+
+  if (incompatibleTargets.length) {
+    post.skipped_incompatible_targets = [
+      ...(Array.isArray(post.skipped_incompatible_targets) ? post.skipped_incompatible_targets : []),
+      ...incompatibleTargets.map((item) => ({ ...item, skipped_at: nowIso() })),
+    ];
+  }
+
   if (ngPostIsAnswer(post)) {
     ngApplyMajorityInsightToAnswerPost(db, post);
   }
@@ -22107,7 +22108,7 @@ async function ngPublishScheduledPost(db, post = {}, actor = null, options = {})
   const results = [];
   const runSeenKeys = new Set();
 
-  for (const target of targets) {
+  for (const target of compatibleTargets) {
     const platform = ngCommunityPlatform(target.platform || post.platform || "telegram");
     const deliveryKey = target.delivery_key || ngDeliveryTargetKey(target, platform);
 
@@ -22164,10 +22165,43 @@ async function ngPublishScheduledPost(db, post = {}, actor = null, options = {})
 
   return { post, results };
 }
-function ngRoadmapDateTime(dateString, timeString, timezone = DEFAULT_TIMEZONE) {
+function ngParseCommunityTimeTo24Hour(timeString = "10:00") {
+  const raw = String(timeString || "10:00").trim();
+  const ampm = raw.match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/i);
+  if (ampm) {
+    let hour = Number(ampm[1]);
+    const minute = Number(ampm[2] || 0);
+    const meridian = String(ampm[3] || "").toUpperCase();
+    if (hour === 12) hour = 0;
+    if (meridian === "PM") hour += 12;
+    return { hour: Math.max(0, Math.min(23, hour)), minute: Math.max(0, Math.min(59, minute)) };
+  }
+
+  const twentyFour = raw.match(/^(\d{1,2})(?::(\d{2}))?/);
+  if (twentyFour) {
+    return {
+      hour: Math.max(0, Math.min(23, Number(twentyFour[1]))),
+      minute: Math.max(0, Math.min(59, Number(twentyFour[2] || 0))),
+    };
+  }
+
+  return { hour: 10, minute: 0 };
+}
+
+function ngRoadmapDateTime(dateString, timeString, timezone = "") {
   const date = String(dateString || "").slice(0, 10);
-  const time = String(timeString || "10:00").slice(0, 5);
-  return `${date}T${time}:00`;
+  const { hour, minute } = ngParseCommunityTimeTo24Hour(timeString || "10:00");
+  const pad = (n) => String(n).padStart(2, "0");
+  const localTime = `${pad(hour)}:${pad(minute)}`;
+  const tz = String(timezone || process.env.NEXTGEN_COMMUNITY_DEFAULT_TIMEZONE || "Asia/Karachi" || DEFAULT_TIMEZONE).trim();
+
+  // Store a real UTC instant. This prevents 8:00 PM Pakistan being treated as
+  // 08:00 UTC or as the Render server timezone. It also correctly handles
+  // browser AM/PM strings like "08:00 PM".
+  const utc = getSessionStartUtc(date, localTime, tz);
+  if (utc && !Number.isNaN(utc.getTime())) return utc.toISOString();
+
+  return `${date}T${localTime}:00`;
 }
 
 function ngAddHoursIsoLike(value, hours = 4) {
@@ -22287,8 +22321,12 @@ function ngAutopilotTopic(source = {}, fallbackIndex = 0) {
 }
 
 function ngAutopilotSourcePool(db, body = {}) {
+  const pool = ngContentClean(body.source_pool || body.sourcePool || body.source_mode || "auto_exam_safe", "auto_exam_safe").toLowerCase();
+  if (["ai_only", "ai_exam_template", "exam_template_only", "no_resources", "general_ai"].includes(pool)) {
+    return [];
+  }
+
   let sources = ngApprovedTrainingSources(db, body.source_ids || body.sources || []);
-  const pool = ngContentClean(body.source_pool || body.sourcePool || "all_approved", "all_approved").toLowerCase();
   const q = ngContentClean(body.source_query || body.book || body.system || "", "").toLowerCase();
 
   if (q) {
@@ -22296,7 +22334,7 @@ function ngAutopilotSourcePool(db, body = {}) {
       .join(" ").toLowerCase().includes(q));
   }
 
-  if (pool && pool !== "all" && pool !== "all_approved" && pool !== "mixed_approved") {
+  if (pool && !["all", "all_approved", "mixed_approved", "auto_exam_safe", "exam_safe_auto"].includes(pool)) {
     const key = pool.replace(/[^a-z0-9]+/g, "_");
     sources = sources.filter((s) => {
       const hay = [s.title, s.name, s.category, s.audience, Array.isArray(s.tags) ? s.tags.join(" ") : s.tags]
@@ -22338,7 +22376,7 @@ function ngAutopilotProgressKey(body = {}, ctx = {}) {
   const trackScope = ngNormalizeExamTrack(body.exam_track || body.examTrack || body.target_track || body.exam_type || "") || "general";
   const communityScope = ngContentList(body.community_ids || body.communities).join("_") || ngContentClean(body.progress_scope || body.community_scope || "global", "global");
   const scope = `${trackScope}:${communityScope}`;
-  const pool = ngContentClean(body.source_pool || body.sourcePool || "all_approved", "all_approved");
+  const pool = ngContentClean(body.source_pool || body.sourcePool || body.source_mode || "auto_exam_safe", "auto_exam_safe");
   const team = ctx.team_member?.id || ctx.user?.id || "admin";
   return `${brandId}:${scope}:${pool}:${team}`;
 }
@@ -22980,78 +23018,158 @@ function ngBuildLowCostTopicReply({ text = "", post = {}, choice = "" } = {}) {
   return ngProfessionalTextClean(`${picked}For this thread, I can help only with today's topic: ${topic}. Focus on the key clue in the stem, then match it with the mechanism before choosing an option. If you are confused, ask specifically about the clue, the mechanism, or why one option is wrong.`).slice(0, 900);
 }
 
+
+function ngContentTypeFamily(type = "daily_mcq") {
+  const t = ngNormalizeContentType(type);
+  if (["daily_mcq", "mcq", "uworld_style_mcq", "question", "case_question", "mini_case", "mini_case_question"].includes(t)) return "question";
+  if (["answer", "answer_explanation", "explanation", "answer_followup", "explanation_followup"].includes(t) || t.includes("answer")) return "answer";
+  if (["poll", "poll_exam_weak_area", "exam_poll", "weak_area_poll", "community_poll"].includes(t) || t.includes("poll")) return "poll";
+  if (["strategy_tip", "study_strategy", "study_strategy_old_graduate", "exam_strategy", "tip", "study_tip"].includes(t) || t.includes("strategy") || t.includes("tip")) return "strategy";
+  if (["education_post", "educational_post", "education", "teaching_post", "concept_review", "screening_recommendations", "first_aid_retention_tip", "nbme_mistake_breakdown"].includes(t) || t.includes("education") || t.includes("retention") || t.includes("breakdown")) return "education";
+  if (["announcement", "soft_demo_invite", "demo_invite", "offer", "reminder"].includes(t) || t.includes("invite") || t.includes("announcement")) return "invite";
+  return "education";
+}
+
+function ngContentTypeTitleForExam(type = "daily_mcq", trackOrExam = "") {
+  const family = ngContentTypeFamily(type);
+  const profile = ngExamGenerationProfile(trackOrExam);
+  if (family === "question") return profile.title;
+  if (family === "poll") return `${profile.label} Community Poll`;
+  if (family === "strategy") return `${profile.label} Strategy Tip`;
+  if (family === "invite") return `${profile.label} Free Demo Invitation`;
+  return `${profile.label} Education Post`;
+}
+
+function ngContentLooksLikeMcq(text = "") {
+  const clean = String(text || "");
+  return /(^|\n)\s*A[\).:-]/i.test(clean) && /(^|\n)\s*B[\).:-]/i.test(clean) && /(^|\n)\s*(C|D)[\).:-]/i.test(clean);
+}
+
+function ngRemoveQuestionOnlyFooter(text = "") {
+  return String(text || "")
+    .replace(/\n?\s*Please\s+reply\s+with\s+(?:your\s+answer\s*)?\(?A\s*[-–,]?\s*E\)?\.?\s*/gi, "")
+    .replace(/\n?\s*Reply\s+with\s+A\s*,?\s*B\s*,?\s*C\s*,?\s*D\s*,?\s*(?:or\s*)?E\.?\s*/gi, "")
+    .replace(/\n?\s*The\s+answer\s+and\s+explanation\s+will\s+be\s+posted\s+later\.?\s*/gi, "")
+    .replace(/\n?\s*Answer\s+and\s+explanation\s+will\s+be\s+posted\s+later\.?\s*/gi, "")
+    .trim();
+}
+
+function ngCleanDanglingGeneratedEnding(text = "") {
+  let clean = ngProfessionalTextClean(text);
+  clean = clean
+    .replace(/\s+(?:The|A|An|This|These|Those|Because|Therefore|Additionally|However|And|But)\s*$/i, "")
+    .replace(/\s+\b(?:the|a|an|this|because)\s*$/i, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return clean;
+}
+
 function ngContentBuildFallbackFromSources({ type = "daily_mcq", topic = "Medical exam concept", sources = [], exam = "Step 1", exam_track = "", answerOnly = false } = {}) {
   const t = ngNormalizeContentType(type);
+  const family = ngContentTypeFamily(t);
   const key = ngNormalizeExamTrack(exam_track || exam, "usmle_step1") || "usmle_step1";
   const profile = ngExamGenerationProfile(key);
   const cleanTopic = ngContentClean(topic || profile.label, profile.label);
   const sourceTitle = sources[0]?.title || sources[0]?.name || `${profile.label} template`;
 
-  if (answerOnly || t.includes("answer")) {
+  if (answerOnly || family === "answer") {
     if (key === "nclex") {
-      return `Correct answer: See the priority nursing action below.\n\nExplanation:\nFor NCLEX, identify the safest nursing priority first: airway/breathing/circulation, acute risk, medication safety, infection control, delegation limits, or client teaching. The correct option is the action that protects the client now and fits the nurse's scope. Review why the tempting distractor is less safe or less urgent.`;
+      return `Correct answer: See the priority nursing action below.\n\nExplanation:\nFor NCLEX, identify the safest nursing priority first: airway/breathing/circulation, acute risk, medication safety, infection control, delegation limits, client teaching, or escalation. The correct option is the action that protects the client now and fits nursing scope. Review why the tempting distractor is less safe or less urgent.`;
     }
     return `Correct answer: Review the ${profile.label} explanation for ${cleanTopic}.\n\nExplanation:\nThe key is to connect the stem clue with the exam task. For ${profile.label}, focus on ${profile.style}. Use ${sourceTitle} only if it matches this exam track; otherwise use the locked ${profile.label} template.`;
   }
 
-  if (t === "daily_mcq" || t === "mcq" || t === "uworld_style_mcq") {
+  if (family === "question") {
     if (key === "nclex") {
-      return `${profile.title}\n\nTopic: ${cleanTopic}\n\nStem: A nurse is caring for a client with a clinical finding related to ${cleanTopic}. Which nursing action should the nurse prioritize first?\n\nA. Delay assessment until routine rounds\nB. Assess the client's immediate safety and highest-risk finding\nC. Delegate all assessment to assistive personnel\nD. Provide discharge teaching before stabilizing the client\nE. Document the finding without further action\n\nPlease reply with A, B, C, D, or E. The answer and explanation will be posted later.`;
+      return `${profile.title}\n\nTopic: ${cleanTopic}\n\nA nurse is caring for a client with findings related to ${cleanTopic}. Which nursing action should the nurse prioritize first?\n\nA. Delay assessment until routine rounds\nB. Assess the client's immediate safety and highest-risk finding\nC. Delegate all assessment to assistive personnel\nD. Provide discharge teaching before stabilizing the client\nE. Document the finding without further action\n\n${ngCommunityQuestionFooter()}`;
     }
     if (key === "usmle_step2_ck") {
-      return `${profile.title}\n\nTopic: ${cleanTopic}\n\nStem: A patient presents with findings related to ${cleanTopic}. After initial stabilization, what is the most appropriate next step in diagnosis or management?\n\nA. Reassurance only\nB. Immediate broad intervention without confirming severity\nC. Select the next step based on the key clinical clue and acuity\nD. Ignore risk factors and treat later\nE. Choose the least urgent outpatient option\n\nPlease reply with A, B, C, D, or E. The answer and explanation will be posted later.`;
+      return `${profile.title}\n\nTopic: ${cleanTopic}\n\nA patient presents with findings related to ${cleanTopic}. After initial stabilization, what is the most appropriate next step in diagnosis or management?\n\nA. Reassurance only\nB. Immediate broad intervention without confirming severity\nC. Select the next step based on the key clinical clue and acuity\nD. Ignore risk factors and treat later\nE. Choose the least urgent outpatient option\n\n${ngCommunityQuestionFooter()}`;
     }
     if (key === "mccqe") {
-      return `${profile.title}\n\nTopic: ${cleanTopic}\n\nStem: A patient in a Canadian primary care setting presents with a concern related to ${cleanTopic}. Which clinical decision is most appropriate?\n\nA. Ignore prevention and follow-up\nB. Apply a safe evidence-based approach including risk assessment and patient communication\nC. Delay care without safety-net advice\nD. Choose an intervention outside the clinical context\nE. Avoid shared decision-making\n\nPlease reply with A, B, C, D, or E. The answer and explanation will be posted later.`;
+      return `${profile.title}\n\nTopic: ${cleanTopic}\n\nA patient in a Canadian clinical setting presents with a concern related to ${cleanTopic}. Which clinical decision is most appropriate?\n\nA. Ignore prevention and follow-up\nB. Apply a safe evidence-based approach including risk assessment and patient communication\nC. Delay care without safety-net advice\nD. Choose an intervention outside the clinical context\nE. Avoid shared decision-making\n\n${ngCommunityQuestionFooter()}`;
     }
     if (key === "amc") {
-      return `${profile.title}\n\nTopic: ${cleanTopic}\n\nStem: A patient presents in an Australian clinical setting with a problem related to ${cleanTopic}. What is the safest and most appropriate management decision?\n\nA. Discharge without assessment\nB. Escalate or manage based on acuity, safety, and clinical context\nC. Ignore public health and follow-up considerations\nD. Provide treatment unrelated to the presentation\nE. Delay urgent care until routine review\n\nPlease reply with A, B, C, D, or E. The answer and explanation will be posted later.`;
+      return `${profile.title}\n\nTopic: ${cleanTopic}\n\nA patient presents in an Australian clinical setting with a problem related to ${cleanTopic}. What is the safest and most appropriate management decision?\n\nA. Discharge without assessment\nB. Escalate or manage based on acuity, safety, and clinical context\nC. Ignore public health and follow-up considerations\nD. Provide treatment unrelated to the presentation\nE. Delay urgent care until routine review\n\n${ngCommunityQuestionFooter()}`;
     }
-    return `${profile.title}\n\nTopic: ${cleanTopic}\n\nStem: A student is reviewing this concept from an approved Step 1 source. Which approach best turns this topic into a testable mechanism-based point?\n\nA. Memorize isolated facts without context\nB. Skip the mechanism and only read the answer\nC. Identify the clinical clue, mechanism, and common distractor pattern\nD. Review only the title of the topic\nE. Avoid practice questions\n\n${ngCommunityQuestionFooter()}`;
+    return `${profile.title}\n\nTopic: ${cleanTopic}\n\nA student is reviewing this concept from an approved Step 1 source. Which approach best turns this topic into a testable mechanism-based point?\n\nA. Memorize isolated facts without context\nB. Skip the mechanism and only read the answer\nC. Identify the clinical clue, mechanism, and common distractor pattern\nD. Review only the title of the topic\nE. Avoid practice questions\n\n${ngCommunityQuestionFooter()}`;
   }
 
-  if (t === "mini_case") {
-    return `${profile.label} mini case\n\nTopic: ${cleanTopic}\n\nA learner sees a presentation related to this topic. What is the key exam decision?\n\nA. Ignore the highest-risk clue\nB. Match the clue to the correct exam-specific action\nC. Choose an unrelated diagnosis\nD. Delay all care\nE. Avoid reviewing the mechanism\n\nPlease reply with A, B, C, D, or E. The answer and explanation will be posted later.`;
+  if (family === "poll") {
+    return `${profile.label} Community Poll\n\nWhat should we focus on next for ${profile.label}?\n\nA. Weak topic review\nB. Question-solving strategy\nC. Time management\nD. High-yield clinical reasoning\nE. Exam-day confidence\n\nReply with A, B, C, D, or E. This is a poll, so there is no correct answer.`;
   }
 
-  if (t === "poll_exam_weak_area") {
-    return `Quick ${profile.label} poll\n\nWhat is your weakest area this week?\n\nA. Study schedule\nB. Question interpretation\nC. Core content recall\nD. Exam strategy\nE. Confidence under timed conditions\n\nReply with your option.`;
+  if (family === "strategy") {
+    return `${profile.label} Strategy Tip\n\nToday's focus: ${cleanTopic}.\n\nUse this 3-step approach:\n1. Identify the exam task first.\n2. Match the key clue to the safest or highest-yield decision.\n3. Review why the most tempting distractor is wrong.\n\nKeep your review active: write one sentence explaining the clue before moving to the next question.`;
   }
 
-  if (t === "study_strategy_old_graduate") {
-    return `${profile.label} study strategy\n\nAvoid passive reading for months. Use a structured plan, active recall, timed questions, error review, and weekly progress checks. Focus on the question style of ${profile.label}, not another exam.`;
+  if (family === "invite") {
+    return `${profile.label} Free Demo Invitation\n\nIf you are preparing for ${profile.label}, you can request a free 2-day LMS demo to see whether the teaching style, roadmap, and community support fit your preparation. Join for a short session first, then decide whether you want guidance from a mentor.`;
   }
 
-  if (t === "soft_demo_invite") {
-    return `Free 2-day LMS demo\n\nIf you are preparing for ${profile.label}, you can request a free 2-day LMS demo to see whether the teaching style and roadmap fit your preparation.`;
-  }
-
-  return `${profile.label} study post\n\nTopic: ${cleanTopic}\n\nFocus on the exam task, key clue, safest decision, and most common distractor for ${profile.label}.`;
+  return `${profile.label} Education Post\n\nTopic: ${cleanTopic}\n\nKey idea: focus on the exact exam task for ${profile.label}.\n\nWhy it matters: students often miss this topic when they memorize facts without connecting them to the clinical clue, safety issue, screening rule, or management decision.\n\nHow to review today: summarize the core point, do one related practice question, and write down the distractor that confused you most.`;
 }
 
 function ngPromptInstructionsForContentType({ type = "daily_mcq", answerOnly = false, platform = "telegram" } = {}) {
   const t = ngNormalizeContentType(type);
+  const family = ngContentTypeFamily(t);
   const base = [
     "Use plain professional text only.",
     "Do not use markdown stars, hash headings, code fences, emojis, or exaggerated sales language.",
-    "Do not write 'AI-generated' or mention that an AI made the post.",
+    "Do not write AI-generated or mention that an AI made the post.",
     "Keep the post educational, concise, and suitable for public medical exam communities.",
   ];
 
-  if (answerOnly) {
+  if (answerOnly || family === "answer") {
     return [...base, "Create only the answer and explanation follow-up. Include correct answer, why it is correct, and concise distractor explanations. Do not repeat the full question unless needed."].join(" ");
   }
 
-  if (ngPostRequiresAnswerFollowup(t)) {
-    return [...base, "Create the question post only. Include title, stem, and A-E options. Do not include the correct answer, explanation, teaching point, or distractor explanations. End by asking students to reply A-E and saying the answer will be posted later."].join(" ");
+  if (family === "question") {
+    return [...base, "Create a question post only. Include a content-appropriate title, stem, and A-E options. Do not include the correct answer, explanation, teaching point, or distractor explanations. End by asking students to reply A-E and saying the answer will be posted later."].join(" ");
   }
 
-  if (t === "first_aid_retention_tip") return [...base, "Create one First Aid retention tip with a memory approach, a common trap, and one action for today. No MCQ answer split."].join(" ");
-  if (t === "nbme_mistake_breakdown") return [...base, "Create one NBME-style mistake breakdown focused on why students miss this concept and how to avoid the trap. No question-answer split unless the user specifically asks."].join(" ");
-  if (t === "poll_exam_weak_area") return [...base, "Create one poll with clear options about exam date, weak area, or study obstacle. Keep it easy to answer."].join(" ");
-  if (t === "study_strategy_old_graduate") return [...base, "Create one supportive strategy post for older graduates or students with study gaps. Create urgency without fear or false promises."].join(" ");
-  if (t === "soft_demo_invite") return [...base, "Create one soft invite for a free 2-day LMS demo. Make it helpful, not pushy. Do not overpromise results."].join(" ");
+  if (family === "poll") {
+    return [...base, "Create a true community poll, not an MCQ. It should ask about weak area, exam date, confidence, study obstacle, or what topic students want next. Use A-E or 1-5 options, but explicitly state there is no correct answer. Do not include a medical stem, diagnosis question, correct answer, or answer-will-be-posted-later line."].join(" ");
+  }
+
+  if (family === "strategy") {
+    return [...base, "Create one practical strategy tip. Do not create a stem, A-E options, correct answer, or answer-will-be-posted-later line. Use 2-4 short action points."].join(" ");
+  }
+
+  if (family === "education") {
+    return [...base, "Create one educational explanation post. Do not create a multiple-choice question, A-E options, correct answer, or answer-will-be-posted-later line. Use a clear key idea, why it matters, and how to review it."].join(" ");
+  }
+
+  if (family === "invite") {
+    return [...base, "Create one soft invitation or announcement. Do not create a medical MCQ or answer/explanation split. Make it helpful, not pushy. Do not overpromise results."].join(" ");
+  }
+
   return [...base, "Create one clean educational community post. Do not split into answer/explanation unless it is an MCQ or mini case."].join(" ");
+}
+
+function ngEnforceContentTypeAfterGeneration(text = "", { type = "daily_mcq", topic = "", sources = [], exam = "", exam_track = "", answerOnly = false } = {}) {
+  const t = ngNormalizeContentType(type);
+  const family = ngContentTypeFamily(t);
+  const key = ngNormalizeExamTrack(exam_track || exam, "usmle_step1") || "usmle_step1";
+  let clean = ngCleanDanglingGeneratedEnding(ngRemoveQuestionOnlyFooter(text));
+
+  if (answerOnly || family === "answer") return ngCleanDanglingGeneratedEnding(text);
+
+  if (family === "question") {
+    return ngExtractQuestionOnlyContent(text);
+  }
+
+  const looksMcq = ngContentLooksLikeMcq(clean) || /\b(correct answer|answer and explanation will be posted later|please reply with your answer)\b/i.test(clean);
+  const forcedQuestionTitle = /\bDaily\s+(USMLE|NCLEX|MCCQE|AMC).*\b(Question|MCQ|Clinical Case)\b/i.test(clean.split("\n")[0] || "");
+  const tooShortOrDangling = clean.length < 80 || /\b(The|A|An|This|Because|Therefore|Additionally)\s*$/i.test(clean);
+
+  if (family === "poll" || (family !== "question" && (looksMcq || forcedQuestionTitle || tooShortOrDangling))) {
+    clean = ngContentBuildFallbackFromSources({ type: t, topic, sources, exam, exam_track: key, answerOnly: false });
+  }
+
+  clean = ngRemoveQuestionOnlyFooter(clean);
+  clean = ngCleanDanglingGeneratedEnding(clean);
+  return clean;
 }
 
 async function ngGenerateContentFromApprovedSources({ db, body = {}, sources = [], answerOnly = false } = {}) {
@@ -23074,7 +23192,8 @@ async function ngGenerateContentFromApprovedSources({ db, body = {}, sources = [
   if (!isAIConfigured()) {
     const fallback = ngContentBuildFallbackFromSources({ type, topic, sources, exam, exam_track: examTrack, answerOnly });
     const cleanedFallback = ngSanitizeGeneratedContentForExamTrack(fallback, examTrack);
-    return { content: ngFormatCommunityGeneratedContent(cleanedFallback, { answerOnly, contentType: type }), model: "local-exam-locked-fallback", usage: {}, ai_configured: false };
+    const typedFallback = ngEnforceContentTypeAfterGeneration(cleanedFallback, { type, topic, sources, exam, exam_track: examTrack, answerOnly });
+    return { content: ngFormatCommunityGeneratedContent(typedFallback, { answerOnly, contentType: type }), model: "local-exam-locked-fallback", usage: {}, ai_configured: false };
   }
 
   const sourceContext = sources.length ? ngSourceContextForGeneration(sources) : "No approved source context selected. Use the locked exam template and standard medical knowledge only.";
@@ -23103,8 +23222,9 @@ async function ngGenerateContentFromApprovedSources({ db, body = {}, sources = [
 
   const generatedContent = result.text || ngContentBuildFallbackFromSources({ type, topic, sources, exam, exam_track: examTrack, answerOnly });
   const cleanedContent = ngSanitizeGeneratedContentForExamTrack(generatedContent, examTrack);
+  const typedContent = ngEnforceContentTypeAfterGeneration(cleanedContent, { type, topic, sources, exam, exam_track: examTrack, answerOnly });
   return {
-    content: ngFormatCommunityGeneratedContent(cleanedContent, { answerOnly, contentType: type }),
+    content: ngFormatCommunityGeneratedContent(typedContent, { answerOnly, contentType: type }),
     model: result.model,
     usage: result.usage || {},
     ai_configured: true,
@@ -23307,7 +23427,7 @@ function ngStrictExamInstruction(trackOrExam = "") {
     `HARD EXAM LOCK: ${profile.label}.`,
     `Write for: ${profile.audience}.`,
     `Required style: ${profile.style}.`,
-    `Title must use: ${profile.title}.`,
+    `Default MCQ/mini-case title: ${profile.title}. For education posts, strategy tips, polls, and announcements, use a content-type title instead of forcing a question title.`,
     `Forbidden labels/phrases: ${(profile.forbidden || []).join(", ") || "none"}.`,
     lockLine,
     key === "nclex" ? "For NCLEX, write as a nursing clinical judgment question. The decision-maker is the nurse. Ask for priority nursing action, safety intervention, delegation, assessment, teaching, or medication safety. Do not ask for physician diagnosis as the main task." : "",
@@ -23722,6 +23842,15 @@ function ngNormalizeCommunityTargets(db, { platforms = [], community_ids = [], d
       telegram_chat_id: ngNormalizeTelegramChatId(ngTargetValue(raw.telegram_chat_id, raw.chat_id, raw.channel_id, raw.telegram_group_id, raw.platform_chat_id, raw.target_id, raw.delivery_target), { assumeGroup: true }),
       whatsapp_to: ngTargetValue(raw.whatsapp_to, raw.whatsapp_number, raw.whatsapp, raw.phone, raw.phone_number, raw.group_id, raw.target_id, raw.delivery_target),
       email_to: ngTargetValue(raw.email_to, raw.email, raw.target_email, raw.delivery_target),
+      discord_webhook_url: ngTargetValue(
+        raw.discord_webhook_url,
+        raw.discordWebhookUrl,
+        raw.webhook_url,
+        raw.discord_webhook,
+        String(raw.target_id || "").startsWith("http") ? raw.target_id : "",
+        String(raw.delivery_target || "").startsWith("http") ? raw.delivery_target : ""
+      ),
+      discord_username: ngTargetValue(raw.discord_username, raw.webhook_username, raw.username),
       reddit_subreddit: ngTargetValue(raw.reddit_subreddit, raw.subreddit, raw.community_handle, raw.handle, raw.target_subreddit, raw.delivery_target, process.env.REDDIT_DEFAULT_SUBREDDIT),
       url: raw.community_url || raw.url || "",
       raw,
@@ -23845,7 +23974,7 @@ function ngCreateAutopilotScheduledPosts(db, roadmap = {}, selections = [], ctx 
     const examProfileForTitle = ngExamGenerationProfile(examTrackForTitle);
     const safeCalendarLabel = ngPostRequiresAnswerFollowup(contentType)
       ? examProfileForTitle.title
-      : ngSanitizeGeneratedContentForExamTrack(calendarItem.label || "Community post", examTrackForTitle).replace(/^Title:\s*/i, "");
+      : ngContentTypeTitleForExam(contentType, examTrackForTitle);
     const topic = pick.topic || `${roadmap.topic || examProfileForTitle.label + " topic"} — Day ${i + 1}`;
     const bookLabel = pick.book_name || "Approved Source";
     const postAt = ngRoadmapDateTime(dateKeyValue, roadmap.question_time || roadmap.post_time || calendarItem.default_time || "10:00", roadmap.timezone);
@@ -24118,7 +24247,7 @@ app.get("/admin/crm/community-content/exam-prompts", async (req, res) => {
       return [key, { key, label: ngExamTrackLabel(key), ...template }];
     }));
     const requested = ngNormalizeExamTrack(req.query?.exam_track || req.query?.track || "");
-    res.json({ success: true, prompts, selected: requested ? prompts[requested] : null, build: "v24-all-exam-hard-lock-roadmap-generation" });
+    res.json({ success: true, prompts, selected: requested ? prompts[requested] : null, build: "v29-topic-replies-on-marketing-outreach-off" });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -24145,7 +24274,7 @@ app.post("/admin/crm/community-content/weekly-calendar", async (req, res) => {
       community_ids: ngContentList(req.body?.community_ids || req.body?.communities),
       content_mix: NG_WEEKLY_CONTENT_CALENDAR.map((item) => item.content_type),
       rotation_strategy: ngContentClean(req.body?.rotation_strategy || "weekly_calendar", "weekly_calendar"),
-      source_pool: ngContentClean(req.body?.source_pool || "all_approved", "all_approved"),
+      source_pool: ngContentClean(req.body?.source_pool || req.body?.source_mode || "auto_exam_safe", "auto_exam_safe"),
     };
     ngValidateCommunityTargetsForScheduling(db, payload);
     const selectedExamTrack = ngNormalizeExamTrack(req.body?.exam_track || req.body?.examTrack || req.body?.target_track || req.body?.exam_type || "") || ngInferExamTrackFromCommunityIds(db, payload.community_ids, "");
@@ -24481,7 +24610,7 @@ app.post("/admin/crm/community-content/roadmaps/autopilot", async (req, res) => 
       platforms: ngContentPlatforms(req.body?.platforms || req.body?.channels || "telegram"),
       community_ids: ngContentList(req.body?.community_ids || req.body?.communities),
       rotation_strategy: ngContentClean(req.body?.rotation_strategy || req.body?.source_rotation || "one_book_per_day", "one_book_per_day"),
-      source_pool: ngContentClean(req.body?.source_pool || req.body?.sourcePool || "all_approved", "all_approved"),
+      source_pool: ngContentClean(req.body?.source_pool || req.body?.sourcePool || req.body?.source_mode || "auto_exam_safe", "auto_exam_safe"),
     };
     ngValidateCommunityTargetsForScheduling(db, payload);
     const selectedExamTrack = ngNormalizeExamTrack(req.body?.exam_track || req.body?.examTrack || req.body?.target_track || req.body?.exam_type || "") || ngInferExamTrackFromCommunityIds(db, payload.community_ids, "");
