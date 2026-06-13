@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v37-whatsapp-template-send-fix";
+const NEXTGEN_BACKEND_BUILD = "v38-whatsapp-template-language-mapping-fix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -11769,7 +11769,7 @@ app.post("/admin/crm/conversations/:leadId/send", async (req, res) => {
         source: "conversation_inbox",
         template_name: req.body.template_name || req.body.whatsapp_template_name || req.body.metadata?.template_name || "",
         whatsapp_template_name: req.body.whatsapp_template_name || req.body.template_name || req.body.metadata?.whatsapp_template_name || "",
-        language_code: req.body.language_code || req.body.metadata?.language_code || "en_US",
+        language_code: normalizeWhatsAppLanguageCode(req.body.language_code || req.body.metadata?.language_code || req.body.meta_language || req.body.metadata?.meta_language || "en"),
         components: req.body.components || req.body.metadata?.components || [],
       },
     });
@@ -12555,11 +12555,37 @@ function renderTemplateString(template = "", variables = {}) {
   });
 }
 
+function normalizeTemplateLookupKey(value = "") {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
 function getMessageTemplateByKey(db, keyOrId = "") {
   const clean = String(keyOrId || "").trim();
   if (!clean) return null;
+  const cleanNorm = normalizeTemplateLookupKey(clean);
   return ensureCrmArray(db, "message_templates").find((item) => {
-    return [item.id, item.key, item.slug, item.name, item.template_name].map((x) => String(x || "").trim()).includes(clean);
+    const candidates = [
+      item.id,
+      item._id,
+      item.uuid,
+      item.template_id,
+      item.key,
+      item.template_key,
+      item.slug,
+      item.name,
+      item.template_name,
+      item.meta_template_name,
+      item.whatsapp_template_name,
+      item.provider_template_name,
+    ];
+    return candidates.some((x) => {
+      const raw = String(x || "").trim();
+      return raw === clean || normalizeTemplateLookupKey(raw) === cleanNorm;
+    });
   }) || null;
 }
 
@@ -12589,9 +12615,11 @@ function normalizeMessageTemplate(body = {}, existing = null, brandId = null) {
     meta_template_name: normalizeCrmString(body.meta_template_name || existing?.meta_template_name || body.provider_template_name || body.whatsapp_template_name || body.template_name || ""),
     whatsapp_template_name: normalizeCrmString(body.whatsapp_template_name || existing?.whatsapp_template_name || body.meta_template_name || body.provider_template_name || body.template_name || ""),
     template_name: normalizeCrmString(body.template_name || existing?.template_name || body.meta_template_name || body.whatsapp_template_name || body.provider_template_name || ""),
-    provider_language_code: normalizeCrmString(body.provider_language_code || existing?.provider_language_code || body.language_code || body.language || "en_US"),
-    language_code: normalizeCrmString(body.language_code || existing?.language_code || body.provider_language_code || body.language || "en_US"),
-    language: normalizeCrmString(body.language || existing?.language || body.language_code || existing?.language_code || "en_US"),
+    meta_language: normalizeWhatsAppLanguageCode(body.meta_language || existing?.meta_language || body.whatsapp_language || existing?.whatsapp_language || body.language_code || body.language || "en"),
+    whatsapp_language: normalizeWhatsAppLanguageCode(body.whatsapp_language || existing?.whatsapp_language || body.meta_language || existing?.meta_language || body.language_code || body.language || "en"),
+    provider_language_code: normalizeWhatsAppLanguageCode(body.provider_language_code || existing?.provider_language_code || body.meta_language || existing?.meta_language || body.whatsapp_language || existing?.whatsapp_language || body.language_code || body.language || "en"),
+    language_code: normalizeWhatsAppLanguageCode(body.language_code || existing?.language_code || body.meta_language || existing?.meta_language || body.whatsapp_language || existing?.whatsapp_language || body.provider_language_code || body.language || "en"),
+    language: normalizeCrmString(body.language || existing?.language || body.meta_language || existing?.meta_language || body.language_code || existing?.language_code || "English"),
     category: normalizeCrmString(body.category || existing?.category || "followup"),
     status: normalizeCrmLower(body.status || existing?.status || "active", "active"),
     variables: Array.isArray(body.variables) ? body.variables : existing?.variables || [],
@@ -12630,35 +12658,84 @@ function createMessageLog(db, payload = {}) {
   return log;
 }
 
-function getWhatsAppTemplateName({ template = null, metadata = {} } = {}) {
-  const clean = String(
-    template?.provider_template_name ||
-      template?.meta_template_name ||
-      template?.whatsapp_template_name ||
-      template?.template_name ||
-      metadata.provider_template_name ||
-      metadata.meta_template_name ||
-      metadata.whatsapp_template_name ||
-      metadata.template_name ||
-      metadata.name ||
-      ""
-  ).trim();
+const WHATSAPP_TEMPLATE_NAME_ALIASES = {
+  meta_ad_first_message: "meta_ad_first_message",
+  meta_first_message: "meta_ad_first_message",
+  first_message_intro: "meta_ad_first_message",
+  five_min_live_session_reminder: "five_minute_reminder",
+  five_minute_reminder: "five_minute_reminder",
+  live_session_1pm_reminder: "live_session_link_now",
+  live_session_link_now: "live_session_link_now",
+  next_day_missed_session: "next_day_missed_session",
+  sorry_you_missed_session: "sorry_you_missed_session",
+  recording_followup_after_session: "recording_followup_after_session",
+  post_live_notes_recording_followup: "recording_followup_after_session",
+  community_fallback_invite: "community_fallback_invite",
+  mentor_booking: "mentor_call_offer",
+  mentor_call_offer: "mentor_call_offer",
+  enrollment_help_after_interest: "enrollment_help_after_interest",
+  uworld_video_library_soft_pitch: "uworld_video_library_soft_pitch",
+  post_demo_interest_check: "post_demo_interest_check",
+  stop_opt_out: "stop_opt_out",
+};
 
-  // Meta template names are lowercase snake_case. If admin did not save the provider name,
-  // use the CRM template key as a safe fallback instead of sending raw text to a cold lead.
-  return clean || String(template?.key || template?.slug || "").trim();
+function isPlaceholderTemplateName(value = "") {
+  const clean = normalizeTemplateLookupKey(value);
+  return !clean || [
+    "approved_template_name_in_meta",
+    "optional_provider_template_id",
+    "template_name",
+    "meta_template_name",
+    "whatsapp_template_name",
+  ].includes(clean);
+}
+
+function normalizeWhatsAppLanguageCode(value = "") {
+  const raw = String(value || "").trim();
+  const clean = raw.toLowerCase().replace(/[()]/g, " ").replace(/[\s-]+/g, "_");
+  if (!clean) return "en";
+  if (["english", "eng", "en"].includes(clean)) return "en";
+  if (["english_us", "english_united_states", "en_us", "en_us_"] .includes(clean)) return "en_US";
+  if (["english_uk", "english_gb", "english_united_kingdom", "en_gb"].includes(clean)) return "en_GB";
+  return raw;
+}
+
+function getWhatsAppTemplateName({ template = null, metadata = {} } = {}) {
+  const candidates = [
+    template?.provider_template_name,
+    template?.meta_template_name,
+    template?.whatsapp_template_name,
+    template?.template_name,
+    metadata.provider_template_name,
+    metadata.meta_template_name,
+    metadata.whatsapp_template_name,
+    metadata.template_name,
+    metadata.name,
+  ];
+
+  for (const candidate of candidates) {
+    const clean = String(candidate || "").trim();
+    if (clean && !isPlaceholderTemplateName(clean)) return clean;
+  }
+
+  const fallbackKey = normalizeTemplateLookupKey(template?.key || template?.template_key || template?.slug || metadata.template_key || metadata.key || "");
+  return WHATSAPP_TEMPLATE_NAME_ALIASES[fallbackKey] || fallbackKey;
 }
 
 function getWhatsAppLanguageCode({ template = null, metadata = {} } = {}) {
-  return String(
-    template?.provider_language_code ||
-      template?.language_code ||
-      template?.language ||
+  return normalizeWhatsAppLanguageCode(
+    template?.meta_language ||
+      template?.whatsapp_language ||
+      template?.provider_language_code ||
+      metadata.meta_language ||
+      metadata.whatsapp_language ||
       metadata.provider_language_code ||
       metadata.language_code ||
       metadata.language ||
-      "en_US"
-  ).trim() || "en_US";
+      template?.language_code ||
+      template?.language ||
+      "en"
+  );
 }
 
 function getLeadVariableValue(name = "", lead = {}, variables = {}, metadata = {}) {
@@ -12737,7 +12814,7 @@ function buildWhatsAppTemplateComponents({ template = null, lead = null, variabl
   }];
 }
 
-async function sendWhatsAppCloudMessage({ to, text = "", templateName = "", languageCode = "en_US", components = [] }) {
+async function sendWhatsAppCloudMessage({ to, text = "", templateName = "", languageCode = "en", components = [] }) {
   const token = process.env.WHATSAPP_ACCESS_TOKEN;
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
 
@@ -12766,7 +12843,7 @@ async function sendWhatsAppCloudMessage({ to, text = "", templateName = "", lang
     payload.type = "template";
     payload.template = {
       name: templateName,
-      language: { code: languageCode || "en_US" },
+      language: { code: normalizeWhatsAppLanguageCode(languageCode || "en") },
       ...(Array.isArray(components) && components.length ? { components } : {}),
     };
   } else {
@@ -13006,6 +13083,11 @@ async function sendCrmMessage({
   const finalText = renderTemplateString(text || template?.body || template?.message || "", variables);
   const finalTo = getBestRecipientForChannel({ channel: cleanChannel, to, lead });
   const integration = getIntegrationByPlatform(db, cleanChannel) || { id: null, platform: cleanChannel, brand_id: brandId };
+  const resolvedWhatsAppTemplateName = cleanChannel === "whatsapp" ? getWhatsAppTemplateName({ template, metadata }) : "";
+  const resolvedWhatsAppLanguageCode = cleanChannel === "whatsapp" ? getWhatsAppLanguageCode({ template, metadata }) : "";
+  const resolvedWhatsAppComponents = cleanChannel === "whatsapp"
+    ? buildWhatsAppTemplateComponents({ template, lead, variables, metadata })
+    : [];
 
   const baseLog = {
     brand_id: brandId,
@@ -13024,6 +13106,12 @@ async function sendCrmMessage({
       ...(metadata || {}),
       source: metadata?.source || "crm_messages_send",
       template_key: template?.key || templateId || null,
+      ...(cleanChannel === "whatsapp" ? {
+        template_name: resolvedWhatsAppTemplateName,
+        whatsapp_template_name: resolvedWhatsAppTemplateName,
+        language_code: resolvedWhatsAppLanguageCode,
+        components: resolvedWhatsAppComponents,
+      } : {}),
     },
   };
 
@@ -13038,14 +13126,12 @@ async function sendCrmMessage({
     let providerMessageId = null;
 
     if (cleanChannel === "whatsapp") {
-      const templateName = getWhatsAppTemplateName({ template, metadata });
-      const components = buildWhatsAppTemplateComponents({ template, lead, variables, metadata });
       providerResponse = await sendWhatsAppCloudMessage({
         to: finalTo,
         text: finalText,
-        templateName,
-        languageCode: getWhatsAppLanguageCode({ template, metadata }),
-        components,
+        templateName: resolvedWhatsAppTemplateName,
+        languageCode: resolvedWhatsAppLanguageCode,
+        components: resolvedWhatsAppComponents,
       });
       providerMessageId = providerResponse?.messages?.[0]?.id || null;
     } else if (cleanChannel === "telegram") {
@@ -13308,7 +13394,7 @@ app.post("/admin/crm/providers/test-send", async (req, res) => {
         source: "provider_test_center",
         template_name: req.body.template_name || req.body.whatsapp_template_name || req.body.metadata?.template_name || "",
         whatsapp_template_name: req.body.whatsapp_template_name || req.body.template_name || req.body.metadata?.whatsapp_template_name || "",
-        language_code: req.body.language_code || req.body.metadata?.language_code || "en_US",
+        language_code: normalizeWhatsAppLanguageCode(req.body.language_code || req.body.metadata?.language_code || req.body.meta_language || req.body.metadata?.meta_language || "en"),
         components: req.body.components || req.body.metadata?.components || [],
       },
     });
@@ -13400,7 +13486,7 @@ app.post("/admin/crm/messages/send", async (req, res) => {
         source: req.body.source || req.body.metadata?.source || "crm_messages_send",
         template_name: req.body.template_name || req.body.whatsapp_template_name || req.body.metadata?.template_name || "",
         whatsapp_template_name: req.body.whatsapp_template_name || req.body.template_name || req.body.metadata?.whatsapp_template_name || "",
-        language_code: req.body.language_code || req.body.metadata?.language_code || "en_US",
+        language_code: normalizeWhatsAppLanguageCode(req.body.language_code || req.body.metadata?.language_code || req.body.meta_language || req.body.metadata?.meta_language || "en"),
         components: req.body.components || req.body.metadata?.components || [],
       },
     });
@@ -13427,7 +13513,7 @@ app.post("/admin/crm/messages/send-whatsapp", async (req, res) => {
       leadId: lead?.id || req.body.lead_id || null,
       metadata: req.body.metadata || {
         template_name: req.body.template_name || req.body.whatsapp_template_name || "",
-        language_code: req.body.language_code || "en_US",
+        language_code: normalizeWhatsAppLanguageCode(req.body.language_code || req.body.meta_language || "en"),
         components: req.body.components || [],
       },
     });
