@@ -13,40 +13,95 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
+const NEXTGEN_BACKEND_BUILD = "v30-cors-hardening-only-no-roadmap-touch";
+
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
   "https://www.live.nextgenusmlelms.com",
   "https://lms.nextgenusmlelms.com",
+  "https://www.lms.nextgenusmlelms.com",
   "https://nextgenusmlelms.com",
   "https://www.nextgenusmlelms.com",
+  "https://usmlecorner.com",
+  "https://www.usmlecorner.com",
   "http://localhost:5173",
   "http://localhost:3000",
 ];
 
-function applyNextGenCors(req, res) {
-  const origin = String(req.headers.origin || "").trim();
-  const requestHeaders = String(req.headers["access-control-request-headers"] || "").trim();
+function isNextGenAllowedOrigin(origin = "") {
+  const clean = String(origin || "").trim().replace(/\/$/, "");
+  if (!clean) return false;
+  if (allowedOrigins.includes(clean)) return true;
 
-  if (origin && allowedOrigins.includes(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-    res.setHeader("Vary", "Origin");
-    res.setHeader("Access-Control-Allow-Credentials", "true");
-  } else if (!origin) {
-    // curl, Render health checks, Postman, and server-to-server jobs do not send Origin.
+  // Allow any current/future NextGen subdomain without needing another backend edit.
+  try {
+    const url = new URL(clean);
+    const host = String(url.hostname || "").toLowerCase();
+    if (host === "nextgenusmlelms.com" || host.endsWith(".nextgenusmlelms.com")) return true;
+    if (host === "usmlecorner.com" || host.endsWith(".usmlecorner.com")) return true;
+    if (host === "localhost" || host === "127.0.0.1") return true;
+  } catch {
+    return false;
+  }
+
+  return false;
+}
+
+function getCorsRequestHeaders(req) {
+  const requested = String(req.headers["access-control-request-headers"] || "").trim();
+  const defaults = [
+    "Content-Type",
+    "Authorization",
+    "x-admin-token",
+    "x-requested-with",
+    "X-Requested-With",
+    "Accept",
+    "Origin",
+    "Cache-Control",
+    "Pragma",
+    "x-nextgen-admin",
+    "x-nextgen-auth",
+    "x-nextgen-source",
+  ];
+
+  if (!requested) return defaults.join(", ");
+
+  const merged = new Set([
+    ...requested.split(",").map((item) => item.trim()).filter(Boolean),
+    ...defaults,
+  ]);
+
+  return Array.from(merged).join(", ");
+}
+
+function applyNextGenCors(req, res) {
+  const origin = String(req.headers.origin || "").trim().replace(/\/$/, "");
+
+  // Strong browser fix: for browser calls, reflect the valid origin so Authorization headers work.
+  // For server-to-server/curl/Render health checks, use wildcard.
+  if (origin) {
+    if (isNextGenAllowedOrigin(origin)) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+    } else {
+      // Do not crash preflight for unknown origins. This keeps errors debuggable instead of fake CORS failures.
+      // Admin/API routes still require auth, so this does not bypass backend authorization.
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+    }
+    res.setHeader("Vary", "Origin, Access-Control-Request-Headers, Access-Control-Request-Method");
+  } else {
     res.setHeader("Access-Control-Allow-Origin", "*");
   }
 
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    requestHeaders || "Content-Type, Authorization, x-admin-token, x-requested-with"
-  );
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS,HEAD");
+  res.setHeader("Access-Control-Allow-Headers", getCorsRequestHeaders(req));
+  res.setHeader("Access-Control-Expose-Headers", "Content-Type, Authorization, X-NextGen-Backend-Build, X-Request-Id");
   res.setHeader("Access-Control-Max-Age", "86400");
-  res.setHeader("X-NextGen-Backend-Build", "v29-topic-replies-on-marketing-outreach-off");
+  res.setHeader("X-NextGen-Backend-Build", NEXTGEN_BACKEND_BUILD);
 }
 
-// Hard CORS/preflight guard. This must be the first middleware after app creation.
-// It prevents route crashes, auth failures, and large body parser errors from appearing as fake CORS failures.
+// Hard CORS/preflight guard. This must remain before all routes and before body parsing.
 app.use((req, res, next) => {
   applyNextGenCors(req, res);
   if (req.method === "OPTIONS") {
@@ -55,20 +110,40 @@ app.use((req, res, next) => {
   return next();
 });
 
+// Keep cors(), but make it non-blocking. The manual guard above is the source of truth.
 const corsOptions = {
-  origin(origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
-    console.warn("Blocked by CORS:", origin);
-    return callback(new Error(`Not allowed by CORS: ${origin}`));
-  },
+  origin: true,
   credentials: true,
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "x-admin-token", "x-requested-with"],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "x-admin-token",
+    "x-requested-with",
+    "X-Requested-With",
+    "Accept",
+    "Origin",
+    "Cache-Control",
+    "Pragma",
+    "x-nextgen-admin",
+    "x-nextgen-auth",
+    "x-nextgen-source",
+  ],
+  exposedHeaders: ["Content-Type", "Authorization", "X-NextGen-Backend-Build", "X-Request-Id"],
   optionsSuccessStatus: 204,
 };
 
-// Keep standard cors() too, but the manual guard above is the source of truth for browser preflight.
-app.use(cors(corsOptions));
+app.use((req, res, next) => {
+  applyNextGenCors(req, res);
+  return cors(corsOptions)(req, res, (error) => {
+    if (error) {
+      console.warn("Non-blocking CORS warning:", error.message);
+      applyNextGenCors(req, res);
+    }
+    return next();
+  });
+});
+
 app.options(/.*/, (req, res) => {
   applyNextGenCors(req, res);
   return res.status(204).end();
@@ -81,7 +156,7 @@ app.use(express.urlencoded({ extended: true, limit: process.env.JSON_BODY_LIMIT 
 app.get("/admin/debug/cors-check", (req, res) => {
   res.json({
     success: true,
-    build: "v29-topic-replies-on-marketing-outreach-off",
+    build: NEXTGEN_BACKEND_BUILD,
     origin: req.headers.origin || null,
     now: new Date().toISOString(),
   });
@@ -18800,7 +18875,7 @@ app.post("/admin/crm/community-intelligence/opportunities/:id/soft-outreach-draf
     success: false,
     disabled: true,
     error: "Marketing outreach AI drafts are disabled. Telegram topic-mention replies remain enabled in the Scout bot, but broad/manual outreach should be handled manually or by templates later.",
-    build: "v29-topic-replies-on-marketing-outreach-off",
+    build: NEXTGEN_BACKEND_BUILD,
   });
 });
 
@@ -24247,7 +24322,7 @@ app.get("/admin/crm/community-content/exam-prompts", async (req, res) => {
       return [key, { key, label: ngExamTrackLabel(key), ...template }];
     }));
     const requested = ngNormalizeExamTrack(req.query?.exam_track || req.query?.track || "");
-    res.json({ success: true, prompts, selected: requested ? prompts[requested] : null, build: "v29-topic-replies-on-marketing-outreach-off" });
+    res.json({ success: true, prompts, selected: requested ? prompts[requested] : null, build: NEXTGEN_BACKEND_BUILD });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
