@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v38-whatsapp-template-language-mapping-fix";
+const NEXTGEN_BACKEND_BUILD = "v39-whatsapp-template-variable-mapping-fix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -12738,45 +12738,66 @@ function getWhatsAppLanguageCode({ template = null, metadata = {} } = {}) {
   );
 }
 
+function looksLikePhoneOnly(value = "") {
+  const raw = String(value || "").trim();
+  if (!raw) return false;
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length < 7) return false;
+  const letters = raw.replace(/[^a-zA-Z]/g, "");
+  return letters.length === 0;
+}
+
+function safeTemplateValue(value = "") {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
 function getLeadVariableValue(name = "", lead = {}, variables = {}, metadata = {}) {
   const key = String(name || "").trim();
   const lowerKey = key.toLowerCase();
   const direct = key.split(".").reduce((acc, part) => (acc && acc[part] !== undefined ? acc[part] : undefined), variables);
-  if (direct !== undefined && direct !== null && String(direct).trim() !== "") return String(direct);
+  if (direct !== undefined && direct !== null && safeTemplateValue(direct) !== "") return safeTemplateValue(direct);
 
   const source = { ...(metadata || {}), ...(lead || {}) };
   const aliases = {
-    lead_name: ["lead_name", "student_name", "doctor_name", "name", "full_name", "first_name"],
-    student_name: ["student_name", "lead_name", "doctor_name", "name", "full_name", "first_name"],
-    doctor_name: ["doctor_name", "student_name", "lead_name", "name", "full_name", "first_name"],
-    name: ["name", "full_name", "student_name", "lead_name", "doctor_name", "first_name"],
-    exam_type: ["exam_type", "exam_track", "exam", "which_exam", "track", "program_track"],
-    exam_track: ["exam_track", "exam_type", "exam", "which_exam", "track", "program_track"],
+    lead_name: ["lead_name", "student_name", "doctor_name", "name", "full_name", "first_name", "display_name", "profile_name", "whatsapp_name"],
+    student_name: ["student_name", "lead_name", "doctor_name", "name", "full_name", "first_name", "display_name", "profile_name", "whatsapp_name"],
+    doctor_name: ["doctor_name", "student_name", "lead_name", "name", "full_name", "first_name", "display_name", "profile_name", "whatsapp_name"],
+    name: ["name", "full_name", "student_name", "lead_name", "doctor_name", "first_name", "display_name", "profile_name", "whatsapp_name"],
+    exam_type: ["exam_type", "exam_track", "exam", "which_exam", "track", "program_track", "course_name"],
+    exam_track: ["exam_track", "exam_type", "exam", "which_exam", "track", "program_track", "course_name"],
     exam_date: ["exam_date", "exam_timeline", "planned_exam_date", "target_exam_date"],
     graduation_year: ["graduation_year", "year_of_graduation", "yog", "years_since_graduation"],
     main_difficulty: ["main_difficulty", "difficulty", "pain_points", "study_problem", "main_problem"],
     course_name: ["course_name", "program_name", "interested_program"],
-    session_time: ["session_time", "live_session_time", "appointment_time"],
-    live_session_link: ["live_session_link", "session_link", "zoom_link", "live_link"],
-    session_link: ["session_link", "live_session_link", "zoom_link", "live_link"],
-    recording_link: ["recording_link", "recording_url"],
-    mentor_booking_link: ["mentor_booking_link", "booking_link", "appointment_link", "mentor_link"],
-    community_link: ["community_link", "telegram_link", "whatsapp_group_link", "group_link"],
-    proof_link: ["proof_link", "testimonial_link", "review_link", "trustpilot_link"],
-    youtube_link: ["youtube_link", "youtube_url"],
-    demo_link: ["demo_link", "lms_link", "dashboard_link"],
-    payment_link: ["payment_link", "checkout_link"],
+    program_name: ["program_name", "course_name", "interested_program"],
+    session_time: ["session_time", "live_session_time", "appointment_time", "fixed_run_time", "live_time"],
+    live_session_link: ["live_session_link", "session_link", "zoom_link", "live_link", "link_url", "url", "default_link"],
+    session_link: ["session_link", "live_session_link", "zoom_link", "live_link", "link_url", "url", "default_link"],
+    recording_link: ["recording_link", "recording_url", "recording", "link_url", "url", "default_link"],
+    mentor_booking_link: ["mentor_booking_link", "booking_link", "appointment_link", "mentor_link", "calendar_link", "link_url", "url", "default_link"],
+    community_link: ["community_link", "telegram_link", "whatsapp_group_link", "group_link", "community_url", "link_url", "url", "default_link"],
+    proof_link: ["proof_link", "testimonial_link", "review_link", "trustpilot_link", "proof_url", "link_url", "url", "default_link"],
+    youtube_link: ["youtube_link", "youtube_url", "proof_link"],
+    demo_link: ["demo_link", "lms_link", "dashboard_link", "live_session_link", "link_url", "url", "default_link"],
+    payment_link: ["payment_link", "checkout_link", "plan_link", "link_url", "url", "default_link"],
   };
 
   const keys = aliases[lowerKey] || [key];
   for (const k of keys) {
     const value = source[k];
-    if (value !== undefined && value !== null && String(value).trim() !== "") return String(value);
+    if (value !== undefined && value !== null && safeTemplateValue(value) !== "") {
+      const clean = safeTemplateValue(value);
+      if (["lead_name", "student_name", "doctor_name", "name"].includes(lowerKey) && looksLikePhoneOnly(clean)) continue;
+      return clean;
+    }
   }
 
   if (["lead_name", "student_name", "doctor_name", "name"].includes(lowerKey)) return "Doctor";
   if (["exam_type", "exam_track"].includes(lowerKey)) return "USMLE Step 1";
   if (lowerKey === "session_time") return "1 PM EST";
+  if (["live_session_link", "session_link", "demo_link", "recording_link"].includes(lowerKey)) return "https://live.nextgenusmlelms.com";
+  if (lowerKey === "course_name" || lowerKey === "program_name") return "NextGen USMLE";
+  if (lowerKey === "exam_date" || lowerKey === "graduation_year" || lowerKey === "main_difficulty") return "not confirmed";
   return "";
 }
 
@@ -12795,23 +12816,155 @@ function extractTemplateVariableNames(templateText = "") {
   return matches;
 }
 
-function buildWhatsAppTemplateComponents({ template = null, lead = null, variables = {}, metadata = {} } = {}) {
-  if (Array.isArray(metadata.components) && metadata.components.length) return metadata.components;
-  if (Array.isArray(metadata.whatsapp_components) && metadata.whatsapp_components.length) return metadata.whatsapp_components;
+function extractNumberedTemplateVariableCount(templateText = "") {
+  const nums = [];
+  String(templateText || "").replace(/{{\s*(\d+)\s*}}/g, (_, key) => {
+    const n = Number(key);
+    if (Number.isFinite(n) && n > 0) nums.push(n);
+    return "";
+  });
+  return nums.length ? Math.max(...nums) : 0;
+}
 
-  const names = Array.isArray(template?.variables) && template.variables.length
+const WHATSAPP_TEMPLATE_VARIABLE_ORDERS = {
+  meta_ad_first_message: ["student_name", "exam_type", "session_time"],
+  meta_first_message: ["student_name", "exam_type", "session_time"],
+  first_message_intro: ["student_name", "exam_type", "session_time"],
+
+  five_minute_reminder: ["student_name"],
+  five_min_live_session_reminder: ["student_name"],
+
+  live_session_link_now: ["student_name", "live_session_link"],
+  live_session_1pm_reminder: ["student_name", "live_session_link"],
+
+  next_day_missed_session: ["student_name", "session_time", "exam_type"],
+  sorry_you_missed_session: ["student_name", "session_time", "exam_type"],
+
+  recording_followup_after_session: ["student_name", "recording_link", "exam_type"],
+  post_live_notes_recording_followup: ["student_name", "recording_link", "exam_type"],
+
+  community_fallback_invite: ["student_name", "exam_type", "community_link"],
+
+  mentor_call_offer: ["student_name", "exam_type", "mentor_booking_link"],
+  mentor_booking: ["student_name", "exam_type", "mentor_booking_link"],
+
+  proof_testimonial_message: ["student_name", "proof_link", "youtube_link"],
+  proof_testimonial: ["student_name", "proof_link", "youtube_link"],
+
+  stop_opt_out: ["student_name"],
+
+  two_day_lms_demo_access: ["student_name", "demo_link"],
+  demo_lms_activation_invite: ["student_name", "demo_link"],
+  enrollment_help_after_interest: [],
+  uworld_video_library_soft_pitch: [],
+  post_demo_interest_check: [],
+};
+
+const REQUIRED_WHATSAPP_LINK_VARIABLES = new Set([
+  "live_session_link",
+  "session_link",
+  "recording_link",
+  "mentor_booking_link",
+  "community_link",
+  "proof_link",
+  "demo_link",
+  "payment_link",
+]);
+
+function getWhatsAppTemplateLookupKeys({ template = null, metadata = {} } = {}) {
+  return [
+    template?.key,
+    template?.template_key,
+    template?.slug,
+    template?.name,
+    template?.template_name,
+    template?.meta_template_name,
+    template?.whatsapp_template_name,
+    template?.provider_template_name,
+    metadata.template_key,
+    metadata.key,
+    metadata.name,
+    metadata.template_name,
+    metadata.meta_template_name,
+    metadata.whatsapp_template_name,
+    metadata.provider_template_name,
+  ].map(normalizeTemplateLookupKey).filter(Boolean);
+}
+
+function resolveWhatsAppTemplateVariableOrder({ template = null, metadata = {} } = {}) {
+  const lookupKeys = getWhatsAppTemplateLookupKeys({ template, metadata });
+  const templateName = normalizeTemplateLookupKey(getWhatsAppTemplateName({ template, metadata }));
+  if (templateName) lookupKeys.unshift(templateName);
+
+  for (const rawKey of lookupKeys) {
+    const alias = WHATSAPP_TEMPLATE_NAME_ALIASES[rawKey] || rawKey;
+    if (Object.prototype.hasOwnProperty.call(WHATSAPP_TEMPLATE_VARIABLE_ORDERS, alias)) {
+      return WHATSAPP_TEMPLATE_VARIABLE_ORDERS[alias];
+    }
+    if (Object.prototype.hasOwnProperty.call(WHATSAPP_TEMPLATE_VARIABLE_ORDERS, rawKey)) {
+      return WHATSAPP_TEMPLATE_VARIABLE_ORDERS[rawKey];
+    }
+  }
+
+  const templateBody = template?.body || template?.message || template?.content || template?.text || "";
+  const namedFromBody = extractTemplateVariableNames(templateBody);
+  if (namedFromBody.length && namedFromBody.length <= 8) return namedFromBody;
+
+  const templateVars = Array.isArray(template?.variables)
     ? template.variables.map((x) => String(x || "").replace(/[{}]/g, "").trim()).filter((x) => x && !/^\d+$/.test(x))
-    : extractTemplateVariableNames(template?.body || template?.message || template?.content || "");
+    : [];
 
+  // The Templates UI can store a generic "all variables" list. Do not send that whole list to Meta.
+  if (templateVars.length && templateVars.length <= 8) return templateVars;
+
+  return [];
+}
+
+function buildWhatsAppTemplateComponents({ template = null, lead = null, variables = {}, metadata = {} } = {}) {
+  const names = resolveWhatsAppTemplateVariableOrder({ template, metadata });
   if (!names.length) return [];
+
+  const params = names.map((name) => {
+    const value = getLeadVariableValue(name, lead || {}, variables || {}, metadata || {});
+    const cleanValue = safeTemplateValue(value);
+
+    if (!cleanValue && REQUIRED_WHATSAPP_LINK_VARIABLES.has(String(name || "").toLowerCase())) {
+      const templateName = getWhatsAppTemplateName({ template, metadata }) || metadata.template_key || template?.key || "selected template";
+      const error = new Error(`Missing WhatsApp template variable: ${name} for ${templateName}`);
+      error.statusCode = 400;
+      error.hint = `Add ${name} in Campaigns / Live Session Conversion / Communities / Reviews before sending this template.`;
+      throw error;
+    }
+
+    return {
+      type: "text",
+      text: cleanValue || "not confirmed",
+    };
+  });
 
   return [{
     type: "body",
-    parameters: names.map((name) => ({
-      type: "text",
-      text: getLeadVariableValue(name, lead || {}, variables || {}, metadata || {}),
-    })),
+    parameters: params,
   }];
+}
+
+function sanitizeWhatsAppTemplateComponents(components = []) {
+  if (!Array.isArray(components)) return [];
+  return components
+    .map((component) => {
+      if (!component || String(component.type || "").toLowerCase() !== "body") return component;
+      const parameters = Array.isArray(component.parameters)
+        ? component.parameters
+            .filter((param) => param && String(param.type || "").toLowerCase() === "text")
+            .map((param) => ({ ...param, text: safeTemplateValue(param.text) || "not confirmed" }))
+        : [];
+      return { ...component, parameters };
+    })
+    .filter((component) => {
+      if (!component) return false;
+      if (String(component.type || "").toLowerCase() !== "body") return true;
+      return Array.isArray(component.parameters) && component.parameters.length > 0;
+    });
 }
 
 async function sendWhatsAppCloudMessage({ to, text = "", templateName = "", languageCode = "en", components = [] }) {
@@ -12840,11 +12993,12 @@ async function sendWhatsAppCloudMessage({ to, text = "", templateName = "", lang
   };
 
   if (templateName) {
+    const safeComponents = sanitizeWhatsAppTemplateComponents(components);
     payload.type = "template";
     payload.template = {
       name: templateName,
       language: { code: normalizeWhatsAppLanguageCode(languageCode || "en") },
-      ...(Array.isArray(components) && components.length ? { components } : {}),
+      ...(safeComponents.length ? { components: safeComponents } : {}),
     };
   } else {
     const cleanText = String(text || "").trim();
