@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v34-non-mcq-clean-no-correct-answer-no-dangling";
+const NEXTGEN_BACKEND_BUILD = "v35-owner-profit-ai-control-safe-bridge";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -17854,6 +17854,133 @@ function ngWithinHours(dateValue, hours = 24) {
   if (!Number.isFinite(t)) return false;
   return Date.now() - t <= Number(hours || 24) * 60 * 60 * 1000;
 }
+
+// -----------------------------------------------------------------------------
+// NEXTGEN SAFE AI COMMAND CONTEXT BRIDGE (v35)
+// Reads frontend AI Control Center + Reviews/Testimonial proof settings without
+// changing existing LMS, payment, Zoom, Telegram, Discord, or community flows.
+// -----------------------------------------------------------------------------
+function ngAylaCleanText(value = "", max = 1800) {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+function ngAylaBool(value) {
+  return value === true || value === "true" || value === 1 || value === "1" || value === "yes";
+}
+
+function ngAylaPickSettings(db = {}) {
+  return {
+    ...(db.ai_orchestration_settings || {}),
+    ...(db.assistant_settings || {}),
+    ...(db.ai_control_settings || {}),
+  };
+}
+
+function ngAylaLeadExamTrack(lead = {}) {
+  const raw = lead.exam_track || lead.examTrack || lead.exam_type || lead.exam || lead.which_exam || lead.program_track || "";
+  try {
+    if (typeof ngNormalizeExamTrack === "function") return ngNormalizeExamTrack(raw || "usmle_step1");
+  } catch {}
+  const clean = String(raw || "").toLowerCase();
+  if (clean.includes("step 2") || clean.includes("step2") || clean.includes("ck")) return "usmle_step2_ck";
+  if (clean.includes("nclex")) return "nclex";
+  if (clean.includes("mccqe") || clean.includes("canada")) return "mccqe";
+  if (clean.includes("amc") || clean.includes("australia")) return "amc";
+  return "usmle_step1";
+}
+
+function ngAylaApprovedProofItems(db = {}, lead = {}) {
+  const track = ngAylaLeadExamTrack(lead);
+  const testimonials = ensureCrmArray(db, "testimonials");
+  const settings = ngAylaPickSettings(db);
+  const proof = [];
+
+  if (settings.youtube_channel_url || settings.youtube_link) {
+    proof.push({
+      type: "youtube",
+      label: "YouTube lecture history",
+      url: settings.youtube_channel_url || settings.youtube_link,
+      summary: "Use this as proof that NextGen has published teaching content and lectures over time.",
+      priority: 1,
+    });
+  }
+  if (settings.testimonials_url || settings.testimonial_link || settings.trustpilot_url || settings.google_review_url) {
+    proof.push({
+      type: "testimonials",
+      label: "Approved student feedback",
+      url: settings.testimonials_url || settings.testimonial_link || settings.trustpilot_url || settings.google_review_url,
+      summary: "Use this as approved external proof/review link. Do not invent student outcomes.",
+      priority: 2,
+    });
+  }
+
+  for (const item of testimonials) {
+    const status = String(item.status || "").toLowerCase();
+    const allowedStatus = ["approved", "published"].includes(status);
+    const permitted = item.permission_to_publish === true || item.marketing_permission === true || item.approved_for_ai === true || item.ai_approved === true;
+    const internalOnly = item.internal_only === true || item.private_only === true;
+    const itemTrack = ngAylaLeadExamTrack(item);
+    const trackOk = !item.exam_track && !item.exam_type && !item.exam && itemTrack === "usmle_step1" ? true : itemTrack === track || itemTrack === "all";
+    if (!allowedStatus || !permitted || internalOnly || !trackOk) continue;
+    proof.push({
+      type: item.proof_type || item.source || "testimonial",
+      label: item.headline || item.title || item.student_name || "Approved testimonial",
+      url: item.public_review_url || item.review_url || item.video_url || item.screenshot_url || "",
+      summary: ngAylaCleanText(item.ai_safe_summary || item.marketing_story || item.testimonial_text || item.review_text || "", 500),
+      priority: Number(item.priority || 99),
+    });
+  }
+
+  return proof.sort((a, b) => Number(a.priority || 99) - Number(b.priority || 99)).slice(0, 5);
+}
+
+function ngBuildAylaCommandContext(db = {}, lead = {}) {
+  const s = ngAylaPickSettings(db);
+  const proof = ngAylaApprovedProofItems(db, lead);
+  const commandBlocks = [
+    s.global_ai_command,
+    s.command_instructions,
+    s.ai_command_instructions,
+    s.meta_lead_followup_rule,
+    s.first_message_rule,
+    s.no_reply_rule,
+    s.live_session_rule,
+    s.session_link_rule,
+    s.post_session_followup_rule,
+    s.next_day_followup_rule,
+    s.proof_testimonials_rule,
+    s.community_fallback_rule,
+    s.mentor_booking_rule,
+    s.payment_link_rule,
+    s.human_handoff_rule,
+    s.tone_rule,
+    s.stop_opt_out_rule,
+  ].map((x) => ngAylaCleanText(x, 1200)).filter(Boolean);
+
+  const proofLines = proof.map((item, index) => {
+    const url = item.url ? ` URL: ${item.url}` : "";
+    const summary = item.summary ? ` Summary: ${item.summary}` : "";
+    return `${index + 1}. ${item.label || item.type}.${url}${summary}`;
+  });
+
+  return `
+Frontend AI Control Center rules:
+${commandBlocks.length ? commandBlocks.map((x, i) => `${i + 1}. ${x}`).join("\n") : "No custom command rules saved yet."}
+
+Default live-session rule:
+- For Meta/form leads, assume they requested contact. Silence alone is not opt-out.
+- Invite to the 1 PM EST live session, send a 5-minute reminder, send the session link at session time if available, follow up after session, and follow up next day if silent.
+- Stop only when the lead says stop, unsubscribe, wrong number, do not message, or not interested, or when admin marks paid/human-handoff.
+
+Program/proof rule:
+- Explain who NextGen is early: live batches, USMLE mentors, UWorld-style teaching, First Aid integration, recordings, notes, and continuous batches.
+- Mention YouTube/proof/testimonials only when approved links exist below.
+- Do not fabricate testimonials, pass claims, score claims, residency/match claims, visa claims, or official affiliations.
+
+Approved proof links/items:
+${proofLines.length ? proofLines.join("\n") : "No approved proof item found. Do not claim specific testimonial proof unless admin provides it."}`.trim();
+}
+
 async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }) {
   const cleanMessages = safeArray(messages)
     .filter((m) => ngMessageText(m))
@@ -17873,6 +18000,7 @@ async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }
   const latestInbound = ngLatestInbound(cleanMessages);
   const latestInboundText = ngMessageText(latestInbound || {});
   const trainingContext = db ? ngTrainingContextForFullAiAuto(db) : "";
+  const commandContext = db ? ngBuildAylaCommandContext(db, lead) : "";
 
   const systemPrompt = `You are Ayla, the NextGen USMLE Full AI Auto assistant replying to a medical student lead.
 
@@ -17906,6 +18034,9 @@ Conversation policy:
 NextGen context:
 - NextGen offers live USMLE preparation, structured roadmap, USMLE mentors, UWorld-style discussion, First Aid integration, recordings, notes, and demo access.
 - Free demo/access should be positioned softly, not aggressively.
+
+Enforced AI Control Center behavior rules and proof policy:
+${commandContext || "No AI Control Center command rules found."}
 
 Enforced training context from AI Training Center:
 ${trainingContext || "No extra training context found."}`;
@@ -20056,16 +20187,49 @@ app.get("/admin/crm/finance/summary", async (req, res) => {
       period: range.period,
       range: { start_date: range.start_date, end_date: range.end_date },
       summary: {
+        // Legacy fields preserved
         revenue: Number(revenue.toFixed(2)),
         ai_cost: Number(aiCost.toFixed(6)),
         commission_cost: Number(commissionCost.toFixed(2)),
         ad_spend: Number(adSpend.toFixed(2)),
         net_profit: Number(netProfit.toFixed(2)),
         leads: leads.length,
-        qualified_leads: leads.filter((item) => ["qualified", "hot", "hot_lead", "demo_sent"].includes(String(item.status || item.lead_status || "").toLowerCase())).length,
+        qualified_leads: leads.filter((item) => ["qualified", "hot", "hot_lead", "demo_sent", "sales_ready", "mentor_call_booked"].includes(String(item.status || item.lead_status || "").toLowerCase())).length,
         opportunities: opportunities.length,
         enrollments: livePayments.length,
         payments: scopedCrmPayments.length + livePayments.length,
+
+        // Owner Profit Command Center aliases. These are additive and do not break older pages.
+        gross_revenue_usd: Number(revenue.toFixed(2)),
+        revenue_generated_usd: Number(revenue.toFixed(2)),
+        total_revenue_usd: Number(revenue.toFixed(2)),
+        total_revenue: Number(revenue.toFixed(2)),
+        stripe_fees_usd: 0,
+        payment_processing_fees_usd: 0,
+        ai_usage_cost_usd: Number(aiCost.toFixed(6)),
+        ai_cost_usd: Number(aiCost.toFixed(6)),
+        total_ai_cost_usd: Number(aiCost.toFixed(6)),
+        voice_cost_usd: 0,
+        commission_due_usd: Number(commissionCost.toFixed(2)),
+        total_commission_due_usd: Number(commissionCost.toFixed(2)),
+        campaign_spend_usd: Number(adSpend.toFixed(2)),
+        total_marketing_spend_usd: Number(adSpend.toFixed(2)),
+        marketing_spend_usd: Number(adSpend.toFixed(2)),
+        total_cost_usd: Number((aiCost + commissionCost + adSpend).toFixed(2)),
+        total_spend_usd: Number((aiCost + commissionCost + adSpend).toFixed(2)),
+        net_revenue_usd: Number(netProfit.toFixed(2)),
+        net_retained_usd: Number(netProfit.toFixed(2)),
+        roi_percent: Number(((aiCost + commissionCost + adSpend) ? ((revenue - aiCost - commissionCost - adSpend) / (aiCost + commissionCost + adSpend)) * 100 : 0).toFixed(2)),
+        total_leads: leads.length,
+        qualified_count: leads.filter((item) => ["qualified", "hot", "hot_lead", "demo_sent", "sales_ready", "mentor_call_booked"].includes(String(item.status || item.lead_status || "").toLowerCase())).length,
+        consultations_booked: ensureCrmArray(crmDb, "appointments").filter((item) => ngWithinRange(item, range)).length,
+        enrollments_count: livePayments.length,
+        cost_per_lead_usd: leads.length ? Number((adSpend / leads.length).toFixed(2)) : 0,
+        cost_per_enrollment_usd: livePayments.length ? Number(((aiCost + commissionCost + adSpend) / livePayments.length).toFixed(2)) : 0,
+        revenue_by_platform: Object.entries(groupCrmCount([...scopedCrmPayments, ...livePayments], (item) => item.source || item.platform || item.channel || "stripe")).map(([name, count]) => ({ name, platform: name, count, value: 0, revenue: 0 })),
+        revenue_by_agent: [],
+        revenue_by_team_member: [],
+        revenue_by_campaign: [],
       },
     });
   } catch (error) {
@@ -25904,6 +26068,306 @@ if (process.env.NEXTGEN_AUTOPILOT_SCHEDULER_DISABLED !== "true") {
 // -----------------------------------------------------------------------------
 // END DISCORD COMMUNITY POSTING EXTENSION
 // -----------------------------------------------------------------------------
+
+
+
+// -----------------------------------------------------------------------------
+// NEXTGEN FRONTEND 9-25 SAFE BACKEND BRIDGE (v35)
+// Additive aliases for the new command-center frontend pages. Existing routes
+// remain untouched; these routes only fill missing aliases used by the frontend.
+// -----------------------------------------------------------------------------
+function ngBridgeMoneyUsd(value = 0) {
+  const n = Number(value || 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function ngBridgeCentsToUsd(value = 0) {
+  const n = Number(value || 0);
+  return Number.isFinite(n) ? n / 100 : 0;
+}
+
+function ngBridgeCollectionResponse(collection, records) {
+  const keyMap = {
+    testimonials: "testimonials",
+    review_requests: "requests",
+    appointments: "appointments",
+    live_session_invites: "invites",
+    live_conversion_events: "events",
+    commission_payouts: "payouts",
+  };
+  const key = keyMap[collection] || "items";
+  return { success: true, [key]: records, items: records, records, count: records.length };
+}
+
+function ngBridgeNormalizeRecord(collection, body, existing = null, brandId = null, user = null) {
+  let record;
+  try {
+    record = normalizeCrmCollectionPayload(collection, { ...(body || {}), brand_id: brandId }, existing || {}, brandId);
+  } catch {
+    record = { ...(existing || {}), ...(body || {}), brand_id: brandId };
+  }
+  record.id = record.id || existing?.id || uuid();
+  record.brand_id = record.brand_id || brandId || existing?.brand_id || null;
+  record.created_at = record.created_at || existing?.created_at || nowIso();
+  record.updated_at = nowIso();
+  if (user?.id) record.updated_by = user.id;
+  if (user?.id && !record.created_by) record.created_by = user.id;
+  return record;
+}
+
+function ngBridgeRegisterCollectionAliases(paths = [], collection) {
+  app.get(paths, async (req, res) => {
+    try {
+      await requireCrmAdmin(req);
+      const db = await readCrmDb();
+      const brandId = getCrmBrandId(req, db);
+      let records = filterCrmRecords(req, ensureCrmArray(db, collection), brandId);
+      if (req.query.status && req.query.status !== "all") records = records.filter((item) => String(item.status || "").toLowerCase() === String(req.query.status).toLowerCase());
+      if (req.query.source && req.query.source !== "all") records = records.filter((item) => String(item.source || item.platform || "").toLowerCase() === String(req.query.source).toLowerCase());
+      records = records.slice().sort(sortNewestFirst);
+      res.json(ngBridgeCollectionResponse(collection, records));
+    } catch (error) {
+      res.status(error.statusCode || 500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.post(paths, async (req, res) => {
+    try {
+      const { user } = await requireCrmAdmin(req);
+      const db = await readCrmDb();
+      const brandId = getCrmBrandId(req, db);
+      const record = ngBridgeNormalizeRecord(collection, req.body || {}, null, brandId, user);
+      ensureCrmArray(db, collection).push(record);
+      await writeCrmDb(db);
+      res.json({ success: true, item: record, record, [collection === "testimonials" ? "testimonial" : collection === "review_requests" ? "request" : "item"]: record });
+    } catch (error) {
+      res.status(error.statusCode || 500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.put(paths.map((p) => `${p}/:id`), async (req, res) => {
+    try {
+      const { user } = await requireCrmAdmin(req);
+      const db = await readCrmDb();
+      const brandId = getCrmBrandId(req, db);
+      const list = ensureCrmArray(db, collection);
+      const index = list.findIndex((item) => String(item.id) === String(req.params.id));
+      if (index < 0) return res.status(404).json({ success: false, error: "Record not found" });
+      const record = ngBridgeNormalizeRecord(collection, req.body || {}, list[index], brandId, user);
+      list[index] = record;
+      await writeCrmDb(db);
+      res.json({ success: true, item: record, record, [collection === "testimonials" ? "testimonial" : collection === "review_requests" ? "request" : "item"]: record });
+    } catch (error) {
+      res.status(error.statusCode || 500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.patch(paths.map((p) => `${p}/:id`), async (req, res) => {
+    try {
+      const { user } = await requireCrmAdmin(req);
+      const db = await readCrmDb();
+      const brandId = getCrmBrandId(req, db);
+      const list = ensureCrmArray(db, collection);
+      const index = list.findIndex((item) => String(item.id) === String(req.params.id));
+      if (index < 0) return res.status(404).json({ success: false, error: "Record not found" });
+      const record = ngBridgeNormalizeRecord(collection, req.body || {}, list[index], brandId, user);
+      list[index] = record;
+      await writeCrmDb(db);
+      res.json({ success: true, item: record, record, [collection === "testimonials" ? "testimonial" : collection === "review_requests" ? "request" : "item"]: record });
+    } catch (error) {
+      res.status(error.statusCode || 500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.delete(paths.map((p) => `${p}/:id`), async (req, res) => {
+    try {
+      await requireCrmAdmin(req);
+      const db = await readCrmDb();
+      const list = ensureCrmArray(db, collection);
+      const index = list.findIndex((item) => String(item.id) === String(req.params.id));
+      if (index < 0) return res.status(404).json({ success: false, error: "Record not found" });
+      const [deleted] = list.splice(index, 1);
+      await writeCrmDb(db);
+      res.json({ success: true, deleted: true, item: deleted, record: deleted });
+    } catch (error) {
+      res.status(error.statusCode || 500).json({ success: false, error: error.message });
+    }
+  });
+}
+
+ngBridgeRegisterCollectionAliases(["/admin/crm/reviews-testimonials", "/admin/crm/reviews"], "testimonials");
+ngBridgeRegisterCollectionAliases(["/admin/crm/testimonial-requests", "/admin/crm/reviews/requests"], "review_requests");
+ngBridgeRegisterCollectionAliases(["/admin/crm/calendar/appointments", "/admin/crm/appointments-calendar"], "appointments");
+
+app.get(["/admin/crm/live-session-invites", "/admin/crm/live-conversion/invites", "/admin/crm/live-session-conversion/invites"], async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const records = filterCrmRecords(req, ensureCrmArray(db, "live_session_invites"), brandId).slice().sort(sortNewestFirst);
+    res.json(ngBridgeCollectionResponse("live_session_invites", records));
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/live-session-conversion/settings", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    res.json({ success: true, settings: getLiveConversionSettings(db, brandId) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/live-session-conversion/settings", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const records = ensureCrmArray(db, "live_conversion_settings");
+    const index = records.findIndex((item) => String(item.brand_id || "") === String(brandId || ""));
+    const existing = index >= 0 ? records[index] : getLiveConversionSettings(db, brandId);
+    const updated = { ...existing, ...(req.body || {}), id: existing.id || `live_conversion_${brandId || "global"}`, brand_id: brandId, updated_by: user.id, updated_at: nowIso(), created_at: existing.created_at || nowIso() };
+    if (index >= 0) records[index] = updated; else records.push(updated);
+    await writeCrmDb(db);
+    res.json({ success: true, settings: updated });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/live-session-conversion/events", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    let records = filterCrmRecords(req, ensureCrmArray(db, "live_conversion_events"), brandId).slice().sort(sortNewestFirst);
+    if (req.query.lead_id) records = records.filter((item) => String(item.lead_id) === String(req.query.lead_id));
+    res.json(ngBridgeCollectionResponse("live_conversion_events", records));
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/live-session-conversion/events", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const event = withTimestamps({ id: uuid(), brand_id: getCrmBrandId(req, db), ...(req.body || {}) });
+    ensureCrmArray(db, "live_conversion_events").push(event);
+    await writeCrmDb(db);
+    res.json({ success: true, event, item: event });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/live-session-conversion/eligible-sessions", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const liveDb = await readLiveDb();
+    const crmDb = await readCrmDb();
+    const brandId = getCrmBrandId(req, crmDb);
+    const settings = getLiveConversionSettings(crmDb, brandId);
+    let sessions = Object.values(liveDb.liveSessions || {}).map(sanitizeLiveSession).filter((s) => s.status !== "cancelled");
+    if (req.query.course_id) sessions = sessions.filter((s) => String(s.course_id) === String(req.query.course_id));
+    res.json({ success: true, settings, sessions, count: sessions.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/payments", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const liveDb = await readLiveDb();
+    const crmDb = await readCrmDb();
+    const crmPayments = ensureCrmArray(crmDb, "payments");
+    const livePayments = buildDerivedPayments(liveDb);
+    const payments = [...crmPayments, ...livePayments].sort(sortNewestFirst);
+    res.json({ success: true, payments, items: payments, records: payments, count: payments.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/referral-commission/payouts", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const payouts = filterCrmRecords(req, ensureCrmArray(db, "commission_payouts"), brandId).slice().sort(sortNewestFirst);
+    res.json({ success: true, payouts, commission_payouts: payouts, items: payouts, records: payouts, count: payouts.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/revenue-attribution/summary", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const crmDb = await readCrmDb();
+    const liveDb = await readLiveDb();
+    const range = typeof ngPeriodRange === "function" ? ngPeriodRange(req.query.period || "month", req.query || {}) : null;
+    const payments = buildDerivedPayments(liveDb).filter((item) => !range || ngWithinRange(item, range));
+    const crmPayments = ensureCrmArray(crmDb, "payments").filter((item) => !range || ngWithinRange(item, range));
+    const allPayments = [...payments, ...crmPayments].filter(ngFinanceStatusIsPaid);
+    const gross = allPayments.reduce((sum, item) => sum + ngBridgeCentsToUsd(item.amount_cents ?? item.final_amount_cents ?? item.price_cents ?? 0) + ngBridgeMoneyUsd(item.amount_usd || item.revenue_usd || 0), 0);
+    const aiLogs = ensureCrmArray(crmDb, "ai_usage").filter((item) => !range || ngWithinRange(item, range));
+    const aiCost = aiLogs.reduce((sum, item) => sum + ngBridgeMoneyUsd(item.estimated_cost || item.cost || item.cost_usd), 0);
+    const payouts = ensureCrmArray(crmDb, "commission_payouts").filter((item) => !range || ngWithinRange(item, range));
+    const commission = payouts.reduce((sum, item) => sum + ngBridgeMoneyUsd(item.amount_usd || item.commission_amount_usd || item.payout_amount_usd || item.amount), 0);
+    const adLogs = ensureCrmArray(crmDb, "ad_performance_logs").filter((item) => !range || ngWithinRange(item, range));
+    const spend = adLogs.reduce((sum, item) => sum + ngBridgeMoneyUsd(item.spend_usd || item.spend || item.cost || item.amount_spent), 0);
+    const totalCost = aiCost + commission + spend;
+    const summary = {
+      gross_revenue_usd: Number(gross.toFixed(2)),
+      total_revenue_usd: Number(gross.toFixed(2)),
+      total_revenue: Number(gross.toFixed(2)),
+      ai_usage_cost_usd: Number(aiCost.toFixed(6)),
+      ai_cost_usd: Number(aiCost.toFixed(6)),
+      commission_due_usd: Number(commission.toFixed(2)),
+      campaign_spend_usd: Number(spend.toFixed(2)),
+      total_cost_usd: Number(totalCost.toFixed(2)),
+      net_revenue_usd: Number((gross - totalCost).toFixed(2)),
+      roi_percent: totalCost ? Number((((gross - totalCost) / totalCost) * 100).toFixed(2)) : 0,
+      enrollments: allPayments.length,
+      enrollments_count: allPayments.length,
+      total_leads: ensureCrmArray(crmDb, "leads").length,
+    };
+    res.json({ success: true, summary, data: summary, analytics: summary });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/backend-bridge/status", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    res.json({
+      success: true,
+      build: NEXTGEN_BACKEND_BUILD,
+      bridge: "frontend_9_25_safe_owner_bridge",
+      counts: {
+        leads: ensureCrmArray(db, "leads").length,
+        campaigns: ensureCrmArray(db, "campaigns").length,
+        templates: ensureCrmArray(db, "message_templates").length,
+        communities: ensureCrmArray(db, "communities").length,
+        testimonials: ensureCrmArray(db, "testimonials").length,
+        appointments: ensureCrmArray(db, "appointments").length,
+        live_conversion_events: ensureCrmArray(db, "live_conversion_events").length,
+        commission_payouts: ensureCrmArray(db, "commission_payouts").length,
+      },
+      note: "Additive compatibility bridge only. Existing routes and data collections are preserved."
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
 
 
 app.use((err, req, res, next) => {
