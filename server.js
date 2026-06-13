@@ -42,7 +42,7 @@ function applyNextGenCors(req, res) {
     requestHeaders || "Content-Type, Authorization, x-admin-token, x-requested-with"
   );
   res.setHeader("Access-Control-Max-Age", "86400");
-  res.setHeader("X-NextGen-Backend-Build", "v20-community-response-insights-topic-replies");
+  res.setHeader("X-NextGen-Backend-Build", "v21-community-exam-track-edit-fetch-fixed");
 }
 
 // Hard CORS/preflight guard. This must be the first middleware after app creation.
@@ -81,7 +81,7 @@ app.use(express.urlencoded({ extended: true, limit: process.env.JSON_BODY_LIMIT 
 app.get("/admin/debug/cors-check", (req, res) => {
   res.json({
     success: true,
-    build: "v20-community-response-insights-topic-replies",
+    build: "v21-community-exam-track-edit-fetch-fixed",
     origin: req.headers.origin || null,
     now: new Date().toISOString(),
   });
@@ -6452,6 +6452,10 @@ function registerCrmCrudRoutes({ route, collection, brandScoped = true }) {
       const brandId = brandScoped ? getCrmBrandId(req, db) : null;
       let records = filterCrmRecords(req, ensureCrmArray(db, collection), brandId);
       if (!ctx.crm_admin) records = applyTeamScopeToRecords(records, ctx.team_member, ctx.user, collection);
+      if (collection === "communities") {
+        records = records.map((community) => ngNormalizeCommunityExamTrackRecord(community));
+      }
+
       records = ngFilterByExamTrackQuery(req, records);
 
       if (collection === "leads") {
@@ -6478,7 +6482,11 @@ function registerCrmCrudRoutes({ route, collection, brandScoped = true }) {
       const brandId = brandScoped ? getCrmBrandId(req, db) : null;
       const records = ensureCrmArray(db, collection);
       let record = normalizeCrmCollectionPayload(collection, req.body || {}, null, brandId);
-      record = ngAttachExamTrack(record, req.body?.exam_track || req.body?.track || req.query?.exam_track || req.query?.track || "");
+      if (collection === "communities") {
+        record = ngNormalizeCommunityExamTrackRecord(record);
+      } else {
+        record = ngAttachExamTrack(record, req.body?.exam_track || req.body?.track || req.query?.exam_track || req.query?.track || "");
+      }
       if (!ctx.crm_admin) record = attachTeamOwnership(record, ctx.team_member, ctx.user);
       if (collection === "leads") record = ensureLeadIdentityFields(record);
       records.push(record);
@@ -6530,6 +6538,7 @@ function registerCrmCrudRoutes({ route, collection, brandScoped = true }) {
       if (!ctx.crm_admin && !crmRecordVisibleToTeam(record, ctx.team_member, ctx.user)) {
         return res.status(403).json({ success: false, error: "This record is not assigned to this team member" });
       }
+      if (collection === "communities") record = ngNormalizeCommunityExamTrackRecord(record);
 
       res.json({ success: true, record, scoped: !ctx.crm_admin });
     } catch (error) {
@@ -6553,7 +6562,11 @@ function registerCrmCrudRoutes({ route, collection, brandScoped = true }) {
       }
 
       let record = normalizeCrmCollectionPayload(collection, req.body || {}, records[index], brandId);
-      record = ngAttachExamTrack(record, req.body?.exam_track || req.body?.track || req.query?.exam_track || req.query?.track || records[index]?.exam_track || "");
+      if (collection === "communities") {
+        record = ngNormalizeCommunityExamTrackRecord(record);
+      } else {
+        record = ngAttachExamTrack(record, req.body?.exam_track || req.body?.track || req.query?.exam_track || req.query?.track || records[index]?.exam_track || "");
+      }
       if (!ctx.crm_admin) record = attachTeamOwnership(record, ctx.team_member, ctx.user);
       if (collection === "leads") record = ensureLeadIdentityFields(record);
       records[index] = record;
@@ -23174,6 +23187,55 @@ function ngResolveExamTrackFromTelegramChatId(chatId = "") {
   return "";
 }
 
+function ngResolveExamTrackFromCommunityTarget(item = {}) {
+  const targetCandidates = [
+    item.telegram_chat_id,
+    item.chat_id,
+    item.channel_id,
+    item.telegram_group_id,
+    item.platform_chat_id,
+    item.provider_target_id,
+    item.target_id,
+  ];
+
+  for (const value of targetCandidates) {
+    const track = ngResolveExamTrackFromTelegramChatId(value);
+    if (track) return track;
+  }
+
+  const hay = [
+    item.name,
+    item.community_name,
+    item.title,
+    item.url,
+    item.link,
+    item.discord_channel,
+    item.channel_name,
+    item.provider_target_id,
+    item.target_id,
+    item.notes,
+  ].filter(Boolean).join(" ").toLowerCase();
+
+  if (/step\s*2|step2|ck|clinical\s*case|usmle[-_\s]*step[-_\s]*2/.test(hay)) return "usmle_step2_ck";
+  if (/nclex|clinical\s*judgment/.test(hay)) return "nclex";
+  if (/mccqe|canada|canadian/.test(hay)) return "mccqe";
+  if (/amc|australia|australian/.test(hay)) return "amc";
+  if (/step\s*1|step1|daily[-_\s]*mcq|free\s*live|usmle[-_\s]*prep/.test(hay)) return "usmle_step1";
+
+  return ngNormalizeExamTrack(item.exam_track || item.examTrack || item.track || item.exam_type || "", "usmle_step1");
+}
+
+function ngNormalizeCommunityExamTrackRecord(item = {}) {
+  if (!item || typeof item !== "object") return item;
+  const track = ngResolveExamTrackFromCommunityTarget(item);
+  if (!track) return item;
+  item.exam_track = track;
+  item.exam_track_label = ngExamTrackLabel(track);
+  item.exam_type = item.exam_type || ngExamTrackLabel(track);
+  item.track = track;
+  return item;
+}
+
 function ngResolveExamTrackFromTelegramMessage(message = {}) {
   const chat = message.chat || {};
   const candidates = [
@@ -23805,7 +23867,7 @@ app.get("/admin/crm/community-content/exam-prompts", async (req, res) => {
       return [key, { key, label: ngExamTrackLabel(key), ...template }];
     }));
     const requested = ngNormalizeExamTrack(req.query?.exam_track || req.query?.track || "");
-    res.json({ success: true, prompts, selected: requested ? prompts[requested] : null, build: "v20-community-response-insights-topic-replies" });
+    res.json({ success: true, prompts, selected: requested ? prompts[requested] : null, build: "v21-community-exam-track-edit-fetch-fixed" });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
