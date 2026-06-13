@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v32-memory-safe-virtual-post-rescue-no-roadmap-touch";
+const NEXTGEN_BACKEND_BUILD = "v30-cors-hardening-only-no-roadmap-touch";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -158,19 +158,6 @@ app.get("/admin/debug/cors-check", (req, res) => {
     success: true,
     build: NEXTGEN_BACKEND_BUILD,
     origin: req.headers.origin || null,
-    now: new Date().toISOString(),
-  });
-});
-
-app.get("/admin/debug/memory", (req, res) => {
-  const mem = process.memoryUsage();
-  res.json({
-    success: true,
-    build: NEXTGEN_BACKEND_BUILD,
-    rss_mb: Math.round(mem.rss / 1024 / 1024),
-    heap_used_mb: Math.round(mem.heapUsed / 1024 / 1024),
-    heap_total_mb: Math.round(mem.heapTotal / 1024 / 1024),
-    external_mb: Math.round(mem.external / 1024 / 1024),
     now: new Date().toISOString(),
   });
 });
@@ -24917,115 +24904,6 @@ app.delete("/admin/crm/community-content/roadmaps/:id", async (req, res) => {
   }
 });
 
-
-
-// -----------------------------------------------------------------------------
-// NEXTGEN v32 MEMORY-SAFE VIRTUAL POST RESCUE
-// This does NOT delete, rebuild, or rewrite roadmaps/drafts. It only allows the
-// scheduled-posts API to DISPLAY already-created drafts as virtual scheduled
-// posts when the scheduled_posts array is empty/missing. It avoids the v31
-// heavy DB rewrite that can exceed 512MB RAM on Render.
-// -----------------------------------------------------------------------------
-const NG_VIRTUAL_POST_RESCUE_LIMIT = Number(process.env.NG_VIRTUAL_POST_RESCUE_LIMIT || 500);
-
-function ngMemorySafePickDraftContent(draft = {}) {
-  return ngContentClean(
-    draft.message ||
-      draft.draft_content ||
-      draft.content ||
-      draft.text ||
-      draft.payload?.message ||
-      draft.payload?.draft_content ||
-      draft.payload?.content ||
-      "",
-    ""
-  );
-}
-
-function ngVirtualScheduledPostsFromDrafts(db, ctx = {}) {
-  const existingPosts = ngContentArray(db, "community_scheduled_posts");
-  const existingPostIds = new Set(existingPosts.map((x) => String(x.id || "")).filter(Boolean));
-  const virtualPosts = [];
-  const max = Math.max(0, Math.min(NG_VIRTUAL_POST_RESCUE_LIMIT, 1000));
-
-  const contentDrafts = ngContentArray(db, "community_content_drafts");
-  const approvalItems = ensureCrmArray(db, "approval_queue");
-
-  function consider(raw, sourceName) {
-    if (!raw || typeof raw !== "object") return;
-    if (virtualPosts.length >= max) return;
-
-    const payload = raw.payload && typeof raw.payload === "object" ? raw.payload : {};
-    const status = String(raw.status || payload.status || "").toLowerCase();
-    if (["deleted", "rejected", "archived", "cancelled"].includes(status) || raw.deleted_at || payload.deleted_at) return;
-
-    const draftId = String(raw.id || payload.id || raw.action_id || raw.scheduled_post_id || "").trim();
-    if (!draftId) return;
-
-    const scheduledPostId = String(raw.scheduled_post_id || raw.post_id || raw.action_id || payload.scheduled_post_id || payload.post_id || payload.id || "").trim();
-    const roadmapId = String(raw.roadmap_id || payload.roadmap_id || raw.community_roadmap_id || payload.community_roadmap_id || "").trim();
-    const actionType = String(raw.action_type || raw.type || raw.kind || payload.action_type || payload.type || "").toLowerCase();
-    const message = ngMemorySafePickDraftContent({ ...payload, ...raw, payload });
-
-    const looksLikeCommunityDraft =
-      Boolean(roadmapId) ||
-      Boolean(scheduledPostId) ||
-      actionType.includes("community_content") ||
-      actionType.includes("scheduled_content") ||
-      actionType.includes("community_scheduled") ||
-      Boolean(message);
-
-    if (!looksLikeCommunityDraft) return;
-
-    const idBase = scheduledPostId || `virtual_${draftId}`;
-    const id = existingPostIds.has(idBase) ? `virtual_${draftId}` : idBase;
-    if (existingPostIds.has(id) || virtualPosts.some((x) => String(x.id) === id)) return;
-
-    const approvalStatus = String(raw.approval_status || raw.medical_review_status || payload.approval_status || payload.medical_review_status || "").toLowerCase();
-    const ready = raw.ready_to_post === true || payload.ready_to_post === true || approvalStatus === "approved";
-    const contentType = ngNormalizeContentType(raw.content_type || payload.content_type || raw.post_type || payload.post_type || "daily_mcq");
-
-    virtualPosts.push({
-      id,
-      brand_id: raw.brand_id || payload.brand_id || getCrmBrandId({ query: {}, body: {} }, db),
-      roadmap_id: roadmapId || null,
-      source_ids: ngContentList(raw.source_ids || payload.source_ids || []),
-      community_ids: ngContentList(raw.community_ids || payload.community_ids || []),
-      direct_targets: Array.isArray(raw.direct_targets) ? raw.direct_targets : (Array.isArray(payload.direct_targets) ? payload.direct_targets : []),
-      platforms: ngContentList(raw.platforms || raw.channels || payload.platforms || payload.channels || [raw.platform || payload.platform || "telegram"]),
-      platform: raw.platform || payload.platform || (Array.isArray(raw.platforms) ? raw.platforms[0] : "telegram"),
-      title: raw.title || payload.title || raw.name || payload.name || "Recovered community draft",
-      topic: raw.topic || payload.topic || raw.title || payload.title || "Community content",
-      content_type: contentType,
-      post_kind: raw.post_kind || payload.post_kind || (ngContentTypeIsStandaloneAnswer(contentType) ? "answer" : "question"),
-      exam_track: raw.exam_track || raw.target_track || raw.exam_type || payload.exam_track || payload.target_track || payload.exam_type || "",
-      message,
-      draft_content: message,
-      scheduled_at: raw.scheduled_at || payload.scheduled_at || raw.publish_at || payload.publish_at || raw.created_at || payload.created_at || nowIso(),
-      answer_scheduled_at: raw.answer_scheduled_at || payload.answer_scheduled_at || null,
-      timezone: raw.timezone || payload.timezone || DEFAULT_TIMEZONE,
-      status: ready ? "scheduled" : "needs_review",
-      approval_status: ready ? "approved" : "needs_review",
-      medical_review_status: ready ? "approved" : (ngContentIsMedicalType(raw) ? "needs_review" : "not_required"),
-      ready_to_post: ready,
-      recovered_from_draft_id: draftId,
-      recovery_source: sourceName,
-      virtual_recovered: true,
-      created_at: raw.created_at || payload.created_at || nowIso(),
-      updated_at: raw.updated_at || payload.updated_at || nowIso(),
-    });
-  }
-
-  for (const draft of contentDrafts) consider(draft, "community_content_drafts_virtual");
-  for (const item of approvalItems) {
-    const hay = [item.type, item.action_type, item.title, item.status, item.approval_status].join(" ").toLowerCase();
-    if (hay.includes("community") || hay.includes("scheduled")) consider(item, "approval_queue_virtual");
-    if (virtualPosts.length >= max) break;
-  }
-
-  return virtualPosts;
-}
-
 app.get("/admin/crm/community-content/scheduled-posts", async (req, res) => {
   try {
     const ctx = await ngRequireContentAccess(req, "read");
@@ -25038,9 +24916,7 @@ app.get("/admin/crm/community-content/scheduled-posts", async (req, res) => {
         .filter(Boolean)
     );
 
-    let rawPosts = ngContentArray(ctx.crmDb, "community_scheduled_posts");
-    const virtualRescue = rawPosts.length ? [] : ngVirtualScheduledPostsFromDrafts(ctx.crmDb, ctx);
-    let posts = filterCrmRecords(req, [...rawPosts, ...virtualRescue], getCrmBrandId(req, ctx.crmDb));
+    let posts = filterCrmRecords(req, ngContentArray(ctx.crmDb, "community_scheduled_posts"), getCrmBrandId(req, ctx.crmDb));
     posts = ngContentScope(posts, ctx)
       .filter((item) => {
         if (includeDeleted) return true;
@@ -25052,19 +24928,9 @@ app.get("/admin/crm/community-content/scheduled-posts", async (req, res) => {
       .sort((a, b) => String(a.scheduled_at || a.created_at || "").localeCompare(String(b.scheduled_at || b.created_at || "")));
     posts = posts.map((post) => ({
       ...post,
-      response_analytics: post.virtual_recovered ? null : ngCommunityResponseAnalyticsForPost(ctx.crmDb, post),
+      response_analytics: ngCommunityResponseAnalyticsForPost(ctx.crmDb, post),
     }));
-    res.json({
-      success: true,
-      posts,
-      scheduled_posts: posts,
-      items: posts,
-      count: posts.length,
-      virtual_rescued_count: virtualRescue.length,
-      actual_scheduled_posts_count: rawPosts.length,
-      memory_safe: true,
-      scoped: !ctx.crm_admin,
-    });
+    res.json({ success: true, posts, scheduled_posts: posts, items: posts, count: posts.length, scoped: !ctx.crm_admin });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
