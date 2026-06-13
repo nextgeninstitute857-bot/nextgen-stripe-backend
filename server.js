@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v35-owner-profit-ai-control-safe-bridge";
+const NEXTGEN_BACKEND_BUILD = "v36-meta-lead-defaults-safe-bridge";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -5717,6 +5717,72 @@ function getCrmBrandId(req, db, fallback = null) {
   );
 }
 
+
+function normalizeCrmLeadSource(value = "", body = {}) {
+  const raw = normalizeCrmLower(value || body.source_platform || body.platform || body.channel || body.source_channel || body.source || body.source_type || "", "");
+  const text = [raw, body.origin, body.lead_source, body.source_type, body.created_from, body.import_source]
+    .map((x) => String(x || "").toLowerCase())
+    .join(" ");
+
+  if (text.includes("whatsapp") || text.includes("wa_")) return "whatsapp";
+  if (text.includes("meta") || text.includes("facebook lead") || text.includes("lead form") || text.includes("lead_form")) return "whatsapp";
+  if (text.includes("telegram")) return "telegram";
+  if (text.includes("email") || text.includes("mail")) return "email";
+  if (text.includes("instagram")) return "instagram";
+  if (text.includes("facebook")) return "facebook";
+  if (text.includes("linkedin")) return "linkedin";
+  if (text.includes("reddit")) return "reddit";
+  if (text.includes("discord")) return "discord";
+  if (text.includes("youtube")) return "youtube";
+  if (text.includes("tiktok")) return "tiktok";
+  if (text === "manual") return "manual";
+
+  // Most imported Meta test leads have phone/WhatsApp but no real source label yet.
+  if ((body.whatsapp || body.whatsapp_phone || body.phone || body.wa_id) && (!raw || raw === "other" || raw === "manual")) return "whatsapp";
+  return raw || "manual";
+}
+
+function normalizeCrmLeadAiMode(value = "") {
+  const clean = normalizeCrmLower(value || "", "");
+  if (["auto", "ai_auto", "full_ai_auto", "full auto", "full_ai"].includes(clean)) return "auto";
+  if (["draft", "ai_draft", "safe_draft"].includes(clean)) return "draft";
+  if (["manual", "human", "off"].includes(clean)) return "manual";
+  return clean || "draft";
+}
+
+function normalizeCrmLeadStageValue(value = "", fallback = "new_lead") {
+  const clean = normalizeCrmLower(value || "", "").replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  if (!clean || clean === "new" || clean === "imported" || clean === "manual_import" || clean === "meta_import") return fallback;
+  if (["paid", "enrolled", "paid_enrolled", "converted", "won", "closed_won"].includes(clean)) return "paid_enrolled";
+  if (["first_message", "first_message_sent", "contacted"].includes(clean)) return "first_message_sent";
+  if (["replied", "needs_reply", "inbound"].includes(clean)) return "needs_reply";
+  if (["interested", "interested_live_session", "live_session"].includes(clean)) return "interested_live_session";
+  if (["payment", "payment_pending"].includes(clean)) return "payment_pending";
+  if (["mentor", "mentor_call", "mentor_call_scheduled"].includes(clean)) return "mentor_call_scheduled";
+  if (["community", "sent_to_community"].includes(clean)) return "sent_to_community";
+  if (["not_interested", "lost", "unsubscribe", "unsubscribed"].includes(clean)) return "not_interested";
+  return clean;
+}
+
+function normalizeCrmLeadOrigin(value = "", body = {}) {
+  const text = [value, body.origin, body.lead_origin, body.lead_source, body.source, body.source_type, body.created_from, body.import_source]
+    .map((x) => String(x || "").toLowerCase())
+    .join(" ");
+  if (text.includes("meta") || text.includes("lead form") || text.includes("lead_form") || text.includes("facebook lead")) return "meta_lead_form";
+  if (text.includes("agent") || text.includes("outreach") || text.includes("manual outbound")) return "agent_outreach";
+  if (text.includes("community") || text.includes("group")) return "community";
+  if (text.includes("whatsapp")) return "whatsapp_direct";
+  if (text.includes("client") || text.includes("inbound") || text.includes("reached")) return "client_reached_out";
+  return body.source_platform === "whatsapp" || body.platform === "whatsapp" ? "whatsapp_direct" : "manual_import";
+}
+
+function isCrmMetaLeadPayload(body = {}) {
+  const text = [body.origin, body.lead_origin, body.lead_source, body.source, body.source_type, body.created_from, body.import_source, body.campaign_name]
+    .map((x) => String(x || "").toLowerCase())
+    .join(" ");
+  return text.includes("meta") || text.includes("lead form") || text.includes("lead_form") || text.includes("facebook lead");
+}
+
 function normalizeCrmCollectionPayload(collection, body = {}, existing = null, brandId = null) {
   const now = nowIso();
   const base = {
@@ -5741,21 +5807,61 @@ function normalizeCrmCollectionPayload(collection, body = {}, existing = null, b
   }
 
   if (collection === "leads") {
-    base.name = normalizeCrmString(base.name || "Unnamed Lead");
+    base.name = normalizeCrmString(base.name || base.full_name || base.student_name || "Unnamed Lead");
     base.email = normalizeEmail(base.email || "");
-    base.whatsapp = normalizeCrmString(base.whatsapp || base.phone || "");
-    base.phone = normalizeCrmString(base.phone || base.whatsapp || "");
-    base.platform = normalizeCrmLower(base.platform, "manual") || "manual";
-    base.status = normalizeCrmLower(base.status, "new") || "new";
+    base.whatsapp = normalizeCrmString(base.whatsapp || base.whatsapp_phone || base.phone || base.wa_id || "");
+    base.phone = normalizeCrmString(base.phone || base.whatsapp_phone || base.whatsapp || "");
+    base.whatsapp_phone = normalizeCrmString(base.whatsapp_phone || base.whatsapp || base.phone || "");
+
+    const normalizedSource = normalizeCrmLeadSource(base.source_platform || base.platform || base.channel || base.source || base.source_type, base);
+    base.source_platform = normalizedSource;
+    base.platform = normalizedSource;
+    base.channel = normalizeCrmLeadSource(base.channel || normalizedSource, base);
+    base.current_channel = base.current_channel || normalizedSource;
+    base.preferred_channel = base.preferred_channel || normalizedSource;
+
+    const incomingStatus = normalizeCrmLower(base.status || base.lead_status, "new") || "new";
+    const safeStatus = ["imported", "manual_import", "meta_import", "created"].includes(incomingStatus) ? "new" : incomingStatus;
+    base.status = safeStatus;
+    base.lead_status = normalizeCrmLower(base.lead_status || safeStatus, safeStatus) || safeStatus;
+
+    // Do not let tags/notes make a silent new Meta lead look paid. Stage must come from explicit stage fields.
+    const explicitStage = base.stage || base.lead_stage || base.sales_stage || base.pipeline_stage || base.crm_stage || "";
+    const fallbackStage = ["paid", "enrolled", "converted", "won", "closed_won"].includes(safeStatus) ? "paid_enrolled" : "new_lead";
+    const normalizedStage = normalizeCrmLeadStageValue(explicitStage || safeStatus, fallbackStage);
+    base.stage = normalizedStage;
+    base.lead_stage = normalizedStage;
+    base.sales_stage = normalizedStage;
+    base.pipeline_stage = normalizedStage;
+
+    base.origin = normalizeCrmLeadOrigin(base.origin || base.lead_origin || base.source_type || base.source, base);
+    base.lead_origin = base.origin;
+    base.lead_source = base.lead_source || base.origin;
+    base.source_type = base.source_type || base.origin;
+    base.created_from = base.created_from || base.origin;
+
+    const isAgentOrigin = base.origin === "agent_outreach";
+    const isInboundOrigin = !isAgentOrigin;
+    base.conversation_direction = normalizeCrmLower(base.conversation_direction || (isAgentOrigin ? "outbound" : "inbound"), isAgentOrigin ? "outbound" : "inbound");
+    base.client_reached_out = base.client_reached_out !== undefined ? Boolean(base.client_reached_out) : isInboundOrigin;
+    base.agent_initiated = base.agent_initiated !== undefined ? Boolean(base.agent_initiated) : isAgentOrigin;
+
+    base.ai_mode = normalizeCrmLeadAiMode(base.ai_mode || base.automation_mode || base.default_ai_mode || base.ai_control_mode || "draft");
+    base.automation_mode = base.ai_mode;
+    base.ai_enabled = base.ai_mode === "manual" ? false : base.ai_enabled !== false;
+
+    base.campaign_id = base.campaign_id || base.campaignId || null;
+    base.campaign_name = base.campaign_name || base.source_campaign || "";
+    base.campaign_key = base.campaign_key || "";
+
     base.language = normalizeCrmLower(base.language, "english") || "english";
     base.region = normalizeCrmLower(base.region, "global") || "global";
     base.country = normalizeCrmString(base.country || "");
     base.economic_segment = normalizeCrmLower(base.economic_segment, "unknown") || "unknown";
     base.interest_level = normalizeCrmLower(base.interest_level, "unknown") || "unknown";
     base.lead_score = Math.max(0, Math.min(100, Number(base.lead_score || 0)));
-    base.opt_in_status = normalizeCrmLower(base.opt_in_status, "unknown") || "unknown";
+    base.opt_in_status = normalizeCrmLower(base.opt_in_status, isCrmMetaLeadPayload(base) ? "meta_form_opt_in" : "unknown") || (isCrmMetaLeadPayload(base) ? "meta_form_opt_in" : "unknown");
     base.unsubscribe_status = normalizeCrmLower(base.unsubscribe_status, "active") || "active";
-    base.ai_enabled = base.ai_enabled !== false;
   }
 
   if (collection === "communities") {
@@ -6789,12 +6895,25 @@ function buildImportPreviewRows({ db, brandId, rows = [], defaults = {} }) {
       country,
       region,
       language,
-      platform: row.platform || defaults.platform || "manual",
+      platform: normalizeCrmLeadSource(row.source_platform || row.platform || defaults.source_platform || defaults.platform || defaults.channel || defaults.source_type || "manual", { ...defaults, ...row }),
+      source_platform: normalizeCrmLeadSource(row.source_platform || row.platform || defaults.source_platform || defaults.platform || defaults.channel || defaults.source_type || "manual", { ...defaults, ...row }),
+      channel: normalizeCrmLeadSource(row.channel || row.source_platform || row.platform || defaults.channel || defaults.source_platform || defaults.platform || "manual", { ...defaults, ...row }),
+      origin: normalizeCrmLeadOrigin(row.origin || defaults.origin || defaults.source_type || defaults.lead_source || "", { ...defaults, ...row }),
+      lead_source: row.lead_source || defaults.lead_source || defaults.source_type || "manual_import",
+      campaign_id: row.campaign_id || defaults.campaign_id || defaults.campaignId || "",
+      campaign_name: row.campaign_name || defaults.campaign_name || defaults.source_campaign || "",
+      campaign_key: row.campaign_key || defaults.campaign_key || "",
+      ai_mode: normalizeCrmLeadAiMode(row.ai_mode || defaults.ai_mode || defaults.default_ai_mode || defaults.automation_mode || "draft"),
+      stage: normalizeCrmLeadStageValue(row.stage || row.lead_stage || defaults.stage || defaults.lead_stage || "new_lead", "new_lead"),
+      lead_stage: normalizeCrmLeadStageValue(row.stage || row.lead_stage || defaults.stage || defaults.lead_stage || "new_lead", "new_lead"),
+      status: normalizeCrmLower(row.status || defaults.status || "new", "new") || "new",
+      lead_status: normalizeCrmLower(row.lead_status || row.status || defaults.lead_status || defaults.status || "new", "new") || "new",
       source_community: row.source_community || defaults.source_community || "",
-      exam_type: row.exam_type || defaults.exam_type || "",
+      exam_type: row.exam_type || defaults.exam_type || defaults.exam_track || "",
+      exam_track: row.exam_track || defaults.exam_track || row.exam_type || defaults.exam_type || "",
       exam_timeline: row.exam_timeline || defaults.exam_timeline || "",
       notes: row.notes || row.pain_points || "",
-      opt_in_status: row.opt_in_status || defaults.opt_in_status || "unknown",
+      opt_in_status: row.opt_in_status || defaults.opt_in_status || (isCrmMetaLeadPayload({ ...defaults, ...row }) ? "meta_form_opt_in" : "unknown"),
       coupon_rule: couponRule ? { id: couponRule.id, coupon_code: couponRule.coupon_code, discount_percent: couponRule.discount_percent } : null,
       valid: validation.valid,
       duplicate,
@@ -8160,12 +8279,30 @@ app.post("/admin/crm/import/confirm", async (req, res) => {
           ...row,
           id: uuid(),
           brand_id: brandId,
-          status: row.status || "imported",
-          source_community: row.source_community || req.body.source_community || "",
+          status: row.status || req.body.status || req.body.defaults?.status || "new",
+          lead_status: row.lead_status || row.status || req.body.lead_status || req.body.defaults?.lead_status || "new",
+          stage: row.stage || row.lead_stage || req.body.stage || req.body.defaults?.stage || "new_lead",
+          lead_stage: row.lead_stage || row.stage || req.body.lead_stage || req.body.defaults?.lead_stage || "new_lead",
+          source_platform: normalizeCrmLeadSource(row.source_platform || row.platform || req.body.source_platform || req.body.defaults?.source_platform || req.body.platform || req.body.channel || "whatsapp", { ...req.body.defaults, ...req.body, ...row }),
+          platform: normalizeCrmLeadSource(row.source_platform || row.platform || req.body.source_platform || req.body.defaults?.source_platform || req.body.platform || req.body.channel || "whatsapp", { ...req.body.defaults, ...req.body, ...row }),
+          channel: normalizeCrmLeadSource(row.channel || row.source_platform || row.platform || req.body.channel || req.body.defaults?.channel || req.body.source_platform || "whatsapp", { ...req.body.defaults, ...req.body, ...row }),
+          origin: normalizeCrmLeadOrigin(row.origin || req.body.origin || req.body.defaults?.origin || req.body.source_type || "meta_lead_form", { ...req.body.defaults, ...req.body, ...row }),
+          lead_origin: normalizeCrmLeadOrigin(row.origin || req.body.origin || req.body.defaults?.origin || req.body.source_type || "meta_lead_form", { ...req.body.defaults, ...req.body, ...row }),
+          lead_source: row.lead_source || req.body.lead_source || req.body.defaults?.lead_source || req.body.source_type || "meta_lead_form",
+          source_type: row.source_type || req.body.source_type || req.body.defaults?.source_type || "meta_lead_form",
+          campaign_id: row.campaign_id || req.body.campaign_id || req.body.defaults?.campaign_id || "",
+          campaign_name: row.campaign_name || req.body.campaign_name || req.body.defaults?.campaign_name || "",
+          campaign_key: row.campaign_key || req.body.campaign_key || req.body.defaults?.campaign_key || "",
+          ai_mode: normalizeCrmLeadAiMode(row.ai_mode || req.body.ai_mode || req.body.defaults?.ai_mode || req.body.default_ai_mode || req.body.defaults?.default_ai_mode || "draft"),
+          automation_mode: normalizeCrmLeadAiMode(row.ai_mode || req.body.ai_mode || req.body.defaults?.ai_mode || req.body.default_ai_mode || req.body.defaults?.default_ai_mode || "draft"),
+          ai_enabled: normalizeCrmLeadAiMode(row.ai_mode || req.body.ai_mode || req.body.defaults?.ai_mode || req.body.default_ai_mode || req.body.defaults?.default_ai_mode || "draft") !== "manual",
+          client_reached_out: true,
+          agent_initiated: false,
+          conversation_direction: "inbound",
+          source_community: row.source_community || req.body.source_community || req.body.defaults?.source_community || "",
           import_batch_id: batchId,
-          opt_in_status: row.opt_in_status || "unknown",
+          opt_in_status: row.opt_in_status || req.body.opt_in_status || req.body.defaults?.opt_in_status || "meta_form_opt_in",
           coupon_eligibility: row.coupon_rule?.coupon_code || "",
-          ai_enabled: false,
           created_at: now,
           updated_at: now,
         },
