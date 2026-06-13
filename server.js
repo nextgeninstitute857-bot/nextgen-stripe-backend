@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v30-cors-hardening-only-no-roadmap-touch";
+const NEXTGEN_BACKEND_BUILD = "v34-non-mcq-clean-no-correct-answer-no-dangling";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -22809,9 +22809,10 @@ function ngExtractAnswerOnlyContent(text = "") {
 
 function ngFormatCommunityGeneratedContent(text = "", { answerOnly = false, contentType = "daily_mcq", post = null } = {}) {
   const t = ngNormalizeContentType(contentType || post?.content_type || post?.post_type);
+  const family = ngContentTypeFamily(t);
   if (answerOnly || ngPostIsAnswer(post || { content_type: t })) return ngExtractAnswerOnlyContent(text);
   if (ngPostRequiresAnswerFollowup(t, post || {})) return ngExtractQuestionOnlyContent(text);
-  return ngProfessionalTextClean(text);
+  return ngCleanNonQuestionCommunityContent(text, { contentType: t, family });
 }
 
 function ngPlatformTextLimit(platform = "telegram") {
@@ -23134,9 +23135,44 @@ function ngCleanDanglingGeneratedEnding(text = "") {
   clean = clean
     .replace(/\s+(?:The|A|An|This|These|Those|Because|Therefore|Additionally|However|And|But)\s*$/i, "")
     .replace(/\s+\b(?:the|a|an|this|because)\s*$/i, "")
+    .replace(/[\s.]*\b(?:The|A|An|This|These|Those|Because|Therefore|Additionally|However|And|But)\s*$/i, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
   return clean;
+}
+
+function ngCleanNonQuestionCommunityContent(text = "", { contentType = "education_post" } = {}) {
+  const family = ngContentTypeFamily(contentType);
+  let clean = ngProfessionalTextClean(text);
+
+  clean = clean
+    .replace(/\s*This\s+is\s+a\s+poll\s*,?\s*so\s+there\s+is\s+no\s+correct\s+answer\.?/gi, "")
+    .replace(/\s*There\s+is\s+no\s+correct\s+answer\s*(?:for\s+this\s+poll)?\.?/gi, "")
+    .replace(/\s*No\s+correct\s+answer\s*(?:for\s+this\s+poll)?\.?/gi, "")
+    .replace(/\s*This\s+poll\s+has\s+no\s+correct\s+answer\.?/gi, "")
+    .replace(/\s*so\s+there\s+is\s+no\s+correct\s+answer\.?/gi, "")
+    .replace(/\s*Answer\s+and\s+explanation\s+will\s+be\s+posted\s+later\.?/gi, "")
+    .replace(/\s*The\s+answer\s+and\s+explanation\s+will\s+be\s+posted\s+later\.?/gi, "")
+    .replace(/\s*Correct\s+Answer\s*:[\s\S]*$/i, "")
+    .replace(/\s*Correct\s+answer\s*:[\s\S]*$/i, "");
+
+  if (family !== "question" && family !== "poll") {
+    clean = clean
+      .replace(/\n\s*Reply\s+with\s+A\s*,?\s*B\s*,?\s*C\s*,?\s*D\s*,?\s*(?:or\s*)?E\.?/gi, "")
+      .replace(/\n\s*Vote\s+with\s+A\s*,?\s*B\s*,?\s*C\s*,?\s*D\s*,?\s*(?:or\s*)?E\.?/gi, "");
+  }
+
+  clean = clean
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[\s.]*\b(?:The|A|An|This|These|Those|Because|Therefore|Additionally|However|And|But)\s*$/i, "")
+    .trim();
+
+  if (family === "poll" && clean.length > 0 && !/\b(vote|reply|choose|select)\b/i.test(clean)) {
+    clean = `${clean}\n\nReply with your choice and share what you want reviewed next.`;
+  }
+
+  return ngCleanDanglingGeneratedEnding(clean);
 }
 
 function ngContentBuildFallbackFromSources({ type = "daily_mcq", topic = "Medical exam concept", sources = [], exam = "Step 1", exam_track = "", answerOnly = false } = {}) {
@@ -23171,7 +23207,7 @@ function ngContentBuildFallbackFromSources({ type = "daily_mcq", topic = "Medica
   }
 
   if (family === "poll") {
-    return `${profile.label} Community Poll\n\nWhat should we focus on next for ${profile.label}?\n\nA. Weak topic review\nB. Question-solving strategy\nC. Time management\nD. High-yield clinical reasoning\nE. Exam-day confidence\n\nReply with A, B, C, D, or E. This is a poll, so there is no correct answer.`;
+    return `${profile.label} Community Poll\n\nWhat should we focus on next for ${profile.label}?\n\nA. Weak topic review\nB. Question-solving strategy\nC. Time management\nD. High-yield clinical reasoning\nE. Exam-day confidence\n\nReply with A, B, C, D, or E. Vote and share what you want reviewed next.`;
   }
 
   if (family === "strategy") {
@@ -23204,7 +23240,7 @@ function ngPromptInstructionsForContentType({ type = "daily_mcq", answerOnly = f
   }
 
   if (family === "poll") {
-    return [...base, "Create a true community poll, not an MCQ. It should ask about weak area, exam date, confidence, study obstacle, or what topic students want next. Use A-E or 1-5 options, but explicitly state there is no correct answer. Do not include a medical stem, diagnosis question, correct answer, or answer-will-be-posted-later line."].join(" ");
+    return [...base, "Create a true community poll, not an MCQ. It should ask about weak area, exam date, confidence, study obstacle, or what topic students want next. Use A-E or 1-5 options. Do not write any line about correct answer/no correct answer. Do not include a medical stem, diagnosis question, correct answer, explanation, or answer-will-be-posted-later line."].join(" ");
   }
 
   if (family === "strategy") {
@@ -23243,6 +23279,7 @@ function ngEnforceContentTypeAfterGeneration(text = "", { type = "daily_mcq", to
   }
 
   clean = ngRemoveQuestionOnlyFooter(clean);
+  clean = ngCleanNonQuestionCommunityContent(clean, { contentType: t });
   clean = ngCleanDanglingGeneratedEnding(clean);
   return clean;
 }
@@ -24926,10 +24963,20 @@ app.get("/admin/crm/community-content/scheduled-posts", async (req, res) => {
         return true;
       })
       .sort((a, b) => String(a.scheduled_at || a.created_at || "").localeCompare(String(b.scheduled_at || b.created_at || "")));
-    posts = posts.map((post) => ({
-      ...post,
-      response_analytics: ngCommunityResponseAnalyticsForPost(ctx.crmDb, post),
-    }));
+    posts = posts.map((post) => {
+      const t = ngNormalizeContentType(post.content_type || post.post_type || "daily_mcq");
+      const isAnswer = ngPostIsAnswer(post);
+      const originalText = post.message || post.draft_content || "";
+      const displayText = originalText
+        ? ngFormatCommunityGeneratedContent(originalText, { answerOnly: isAnswer, contentType: t, post })
+        : originalText;
+      return {
+        ...post,
+        message: displayText || post.message,
+        draft_content: displayText || post.draft_content,
+        response_analytics: ngCommunityResponseAnalyticsForPost(ctx.crmDb, post),
+      };
+    });
     res.json({ success: true, posts, scheduled_posts: posts, items: posts, count: posts.length, scoped: !ctx.crm_admin });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
@@ -25010,6 +25057,8 @@ app.post("/admin/crm/community-content/scheduled-posts/:id/generate", async (req
 
     const formattedContent = ngFormatCommunityGeneratedContent(ai.content, {
       answerOnly: String(post.post_kind || "").toLowerCase() === "answer" || String(post.content_type || "").toLowerCase().includes("answer"),
+      contentType: post.content_type,
+      post,
     });
     post.message = formattedContent;
     post.draft_content = formattedContent;
