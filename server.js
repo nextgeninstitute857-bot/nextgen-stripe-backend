@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v36-meta-lead-defaults-safe-bridge";
+const NEXTGEN_BACKEND_BUILD = "v37-whatsapp-template-send-fix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -12575,8 +12575,23 @@ function normalizeMessageTemplate(body = {}, existing = null, brandId = null) {
     channel,
     subject: normalizeCrmString(body.subject || existing?.subject || ""),
     body: String(body.body ?? existing?.body ?? body.message ?? ""),
-    provider_template_name: normalizeCrmString(body.provider_template_name || existing?.provider_template_name || body.whatsapp_template_name || ""),
-    provider_language_code: normalizeCrmString(body.provider_language_code || existing?.provider_language_code || body.language_code || "en_US"),
+    provider_template_name: normalizeCrmString(
+      body.provider_template_name ||
+      body.meta_template_name ||
+      body.whatsapp_template_name ||
+      body.template_name ||
+      existing?.provider_template_name ||
+      existing?.meta_template_name ||
+      existing?.whatsapp_template_name ||
+      existing?.template_name ||
+      ""
+    ),
+    meta_template_name: normalizeCrmString(body.meta_template_name || existing?.meta_template_name || body.provider_template_name || body.whatsapp_template_name || body.template_name || ""),
+    whatsapp_template_name: normalizeCrmString(body.whatsapp_template_name || existing?.whatsapp_template_name || body.meta_template_name || body.provider_template_name || body.template_name || ""),
+    template_name: normalizeCrmString(body.template_name || existing?.template_name || body.meta_template_name || body.whatsapp_template_name || body.provider_template_name || ""),
+    provider_language_code: normalizeCrmString(body.provider_language_code || existing?.provider_language_code || body.language_code || body.language || "en_US"),
+    language_code: normalizeCrmString(body.language_code || existing?.language_code || body.provider_language_code || body.language || "en_US"),
+    language: normalizeCrmString(body.language || existing?.language || body.language_code || existing?.language_code || "en_US"),
     category: normalizeCrmString(body.category || existing?.category || "followup"),
     status: normalizeCrmLower(body.status || existing?.status || "active", "active"),
     variables: Array.isArray(body.variables) ? body.variables : existing?.variables || [],
@@ -12616,24 +12631,110 @@ function createMessageLog(db, payload = {}) {
 }
 
 function getWhatsAppTemplateName({ template = null, metadata = {} } = {}) {
-  return String(
+  const clean = String(
     template?.provider_template_name ||
+      template?.meta_template_name ||
       template?.whatsapp_template_name ||
+      template?.template_name ||
+      metadata.provider_template_name ||
+      metadata.meta_template_name ||
       metadata.whatsapp_template_name ||
       metadata.template_name ||
-      metadata.provider_template_name ||
+      metadata.name ||
       ""
   ).trim();
+
+  // Meta template names are lowercase snake_case. If admin did not save the provider name,
+  // use the CRM template key as a safe fallback instead of sending raw text to a cold lead.
+  return clean || String(template?.key || template?.slug || "").trim();
 }
 
 function getWhatsAppLanguageCode({ template = null, metadata = {} } = {}) {
   return String(
     template?.provider_language_code ||
       template?.language_code ||
-      metadata.language_code ||
+      template?.language ||
       metadata.provider_language_code ||
+      metadata.language_code ||
+      metadata.language ||
       "en_US"
   ).trim() || "en_US";
+}
+
+function getLeadVariableValue(name = "", lead = {}, variables = {}, metadata = {}) {
+  const key = String(name || "").trim();
+  const lowerKey = key.toLowerCase();
+  const direct = key.split(".").reduce((acc, part) => (acc && acc[part] !== undefined ? acc[part] : undefined), variables);
+  if (direct !== undefined && direct !== null && String(direct).trim() !== "") return String(direct);
+
+  const source = { ...(metadata || {}), ...(lead || {}) };
+  const aliases = {
+    lead_name: ["lead_name", "student_name", "doctor_name", "name", "full_name", "first_name"],
+    student_name: ["student_name", "lead_name", "doctor_name", "name", "full_name", "first_name"],
+    doctor_name: ["doctor_name", "student_name", "lead_name", "name", "full_name", "first_name"],
+    name: ["name", "full_name", "student_name", "lead_name", "doctor_name", "first_name"],
+    exam_type: ["exam_type", "exam_track", "exam", "which_exam", "track", "program_track"],
+    exam_track: ["exam_track", "exam_type", "exam", "which_exam", "track", "program_track"],
+    exam_date: ["exam_date", "exam_timeline", "planned_exam_date", "target_exam_date"],
+    graduation_year: ["graduation_year", "year_of_graduation", "yog", "years_since_graduation"],
+    main_difficulty: ["main_difficulty", "difficulty", "pain_points", "study_problem", "main_problem"],
+    course_name: ["course_name", "program_name", "interested_program"],
+    session_time: ["session_time", "live_session_time", "appointment_time"],
+    live_session_link: ["live_session_link", "session_link", "zoom_link", "live_link"],
+    session_link: ["session_link", "live_session_link", "zoom_link", "live_link"],
+    recording_link: ["recording_link", "recording_url"],
+    mentor_booking_link: ["mentor_booking_link", "booking_link", "appointment_link", "mentor_link"],
+    community_link: ["community_link", "telegram_link", "whatsapp_group_link", "group_link"],
+    proof_link: ["proof_link", "testimonial_link", "review_link", "trustpilot_link"],
+    youtube_link: ["youtube_link", "youtube_url"],
+    demo_link: ["demo_link", "lms_link", "dashboard_link"],
+    payment_link: ["payment_link", "checkout_link"],
+  };
+
+  const keys = aliases[lowerKey] || [key];
+  for (const k of keys) {
+    const value = source[k];
+    if (value !== undefined && value !== null && String(value).trim() !== "") return String(value);
+  }
+
+  if (["lead_name", "student_name", "doctor_name", "name"].includes(lowerKey)) return "Doctor";
+  if (["exam_type", "exam_track"].includes(lowerKey)) return "USMLE Step 1";
+  if (lowerKey === "session_time") return "1 PM EST";
+  return "";
+}
+
+function extractTemplateVariableNames(templateText = "") {
+  const matches = [];
+  const seen = new Set();
+  String(templateText || "").replace(/{{\s*([a-zA-Z0-9_.-]+)\s*}}/g, (_, key) => {
+    const cleanKey = String(key || "").trim();
+    if (!cleanKey || /^\d+$/.test(cleanKey)) return "";
+    if (!seen.has(cleanKey)) {
+      seen.add(cleanKey);
+      matches.push(cleanKey);
+    }
+    return "";
+  });
+  return matches;
+}
+
+function buildWhatsAppTemplateComponents({ template = null, lead = null, variables = {}, metadata = {} } = {}) {
+  if (Array.isArray(metadata.components) && metadata.components.length) return metadata.components;
+  if (Array.isArray(metadata.whatsapp_components) && metadata.whatsapp_components.length) return metadata.whatsapp_components;
+
+  const names = Array.isArray(template?.variables) && template.variables.length
+    ? template.variables.map((x) => String(x || "").replace(/[{}]/g, "").trim()).filter((x) => x && !/^\d+$/.test(x))
+    : extractTemplateVariableNames(template?.body || template?.message || template?.content || "");
+
+  if (!names.length) return [];
+
+  return [{
+    type: "body",
+    parameters: names.map((name) => ({
+      type: "text",
+      text: getLeadVariableValue(name, lead || {}, variables || {}, metadata || {}),
+    })),
+  }];
 }
 
 async function sendWhatsAppCloudMessage({ to, text = "", templateName = "", languageCode = "en_US", components = [] }) {
@@ -12938,12 +13039,13 @@ async function sendCrmMessage({
 
     if (cleanChannel === "whatsapp") {
       const templateName = getWhatsAppTemplateName({ template, metadata });
+      const components = buildWhatsAppTemplateComponents({ template, lead, variables, metadata });
       providerResponse = await sendWhatsAppCloudMessage({
         to: finalTo,
         text: finalText,
         templateName,
         languageCode: getWhatsAppLanguageCode({ template, metadata }),
-        components: metadata.components || metadata.whatsapp_components || [],
+        components,
       });
       providerMessageId = providerResponse?.messages?.[0]?.id || null;
     } else if (cleanChannel === "telegram") {
