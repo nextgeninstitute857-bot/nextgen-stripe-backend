@@ -42,7 +42,7 @@ function applyNextGenCors(req, res) {
     requestHeaders || "Content-Type, Authorization, x-admin-token, x-requested-with"
   );
   res.setHeader("Access-Control-Max-Age", "86400");
-  res.setHeader("X-NextGen-Backend-Build", "v21-community-exam-track-edit-fetch-fixed");
+  res.setHeader("X-NextGen-Backend-Build", "v24-all-exam-hard-lock-roadmap-generation");
 }
 
 // Hard CORS/preflight guard. This must be the first middleware after app creation.
@@ -81,7 +81,7 @@ app.use(express.urlencoded({ extended: true, limit: process.env.JSON_BODY_LIMIT 
 app.get("/admin/debug/cors-check", (req, res) => {
   res.json({
     success: true,
-    build: "v21-community-exam-track-edit-fetch-fixed",
+    build: "v24-all-exam-hard-lock-roadmap-generation",
     origin: req.headers.origin || null,
     now: new Date().toISOString(),
   });
@@ -22310,6 +22310,12 @@ function ngAutopilotSourcePool(db, body = {}) {
     const examSpecificSources = sources.filter((source) => ngSourceMatchesExamTrack(source, examTrack));
     if (examSpecificSources.length) {
       sources = examSpecificSources;
+    } else if (examTrack !== "usmle_step1") {
+      // IMPORTANT: Do not silently use Step 1 / First Aid sources for Step 2 CK,
+      // NCLEX, MCCQE, or AMC. If no matching source exists, the roadmap generator
+      // must still create the full requested schedule using the locked exam prompt
+      // and AI-only syllabus topics.
+      sources = [];
     }
   }
 
@@ -22357,15 +22363,82 @@ function ngGetAutopilotProgress(db, key) {
   return item;
 }
 
+
+function ngExamTrackSyntheticTopics(track = "", days = 30) {
+  const key = ngNormalizeExamTrack(track) || "general";
+  const topicMap = {
+    usmle_step1: [
+      "Cell injury and adaptation", "Inflammation and repair", "Autonomic pharmacology", "Microbiology mechanisms", "Immunology hypersensitivity", "Cardiac physiology", "Renal acid-base", "Endocrine feedback loops", "Biochemistry metabolism", "Genetics and inheritance", "Hematology anemias", "Respiratory physiology", "Neuroanatomy pathways", "Reproductive endocrinology", "Biostatistics concepts"
+    ],
+    usmle_step2_ck: [
+      "Chest pain next best step", "Shortness of breath diagnosis and management", "Abdominal pain triage", "Hypertension management", "Diabetes outpatient care", "OB/GYN bleeding and pregnancy", "Pediatrics fever and rash", "Psychiatry risk assessment", "Surgery acute abdomen", "Emergency medicine stabilization", "Preventive screening", "Infectious disease management", "Neurology focal deficits", "Ethics and communication", "Risk factors and prognosis"
+    ],
+    nclex: [
+      "Priority nursing assessment", "Delegation and assignment", "Medication safety", "Airway breathing circulation prioritization", "Infection control precautions", "Patient education", "Safety and fall prevention", "Maternal-newborn nursing", "Pediatric nursing care", "Mental health nursing", "Fluid and electrolyte safety", "Clinical judgment case", "SATA-style nursing intervention", "Adverse effect recognition", "Discharge teaching"
+    ],
+    mccqe: [
+      "Family medicine preventive care", "Canadian screening recommendations", "Emergency stabilization", "Ethics and consent", "Public health reporting", "Pediatrics common presentations", "OB/GYN primary care", "Psychiatry safety assessment", "Chronic disease management", "Indigenous and rural care context", "Communication and patient safety", "Clinical diagnosis and next step", "Vaccination and prevention", "Geriatrics and falls", "Population health"
+    ],
+    amc: [
+      "Australian primary care presentation", "Emergency medicine initial management", "Rural and remote care scenario", "Public health and screening", "Ethics and consent", "Safe prescribing", "Women’s health presentation", "Child health presentation", "Mental health risk assessment", "Chronic disease management", "Infectious disease and immunisation", "Abdominal pain diagnosis", "Cardiorespiratory emergency", "Dermatology and MSK primary care", "Patient safety and escalation"
+    ],
+    general: [
+      "Clinical reasoning", "Diagnosis and management", "Patient safety", "Pharmacology safety", "Ethics", "Preventive care", "Emergency triage", "Public health", "Communication", "High-yield review"
+    ],
+  };
+  const list = topicMap[key] || topicMap.general;
+  const out = [];
+  for (let i = 0; i < Math.max(1, Number(days || 1)); i += 1) {
+    out.push(list[i % list.length]);
+  }
+  return out;
+}
+
+function ngBuildAiOnlyAutopilotSelections(body = {}, days = 30) {
+  const track = ngNormalizeExamTrack(body.exam_track || body.examTrack || body.target_track || body.exam_type || "") || "general";
+  const topics = Array.isArray(body.topics) && body.topics.length
+    ? body.topics.map((item) => ngContentClean(item)).filter(Boolean)
+    : ngExamTrackSyntheticTopics(track, days);
+  const label = ngExamTrackLabel(track) || "Medical Exam";
+  const selections = [];
+  for (let day = 0; day < Math.max(1, Number(days || 1)); day += 1) {
+    const topic = topics[day % Math.max(1, topics.length)] || `${label} AI topic ${day + 1}`;
+    selections.push({
+      day: day + 1,
+      source: null,
+      source_id: null,
+      source_title: "AI exam-template generation",
+      book_key: "ai_exam_template",
+      book_name: `${label} AI Template`,
+      topic,
+      ai_generated_without_source: true,
+      source_mode: "ai_exam_template",
+    });
+  }
+  return selections;
+}
+
 function ngSelectAutopilotSources(db, body = {}, ctx = {}, days = 30) {
   const sources = ngAutopilotSourcePool(db, body);
+  const progressKey = ngAutopilotProgressKey(body, ctx);
   if (!sources.length) {
-    const error = new Error("No approved sources available for AI roadmap autopilot. Approve education chunks first.");
-    error.statusCode = 422;
-    throw error;
+    const selections = ngBuildAiOnlyAutopilotSelections(body, days);
+    const progress = ngGetAutopilotProgress(db, progressKey);
+    progress.used_topics = uniqueList([...(progress.used_topics || []), ...selections.map((s) => s.topic)]);
+    progress.source_rotation_index = Number(progress.source_rotation_index || 0) + selections.length;
+    progress.last_source_id = null;
+    progress.last_book_key = "ai_exam_template";
+    progress.updated_at = nowIso();
+    return {
+      selections,
+      progress,
+      progressKey,
+      sources: [],
+      source_mode: "ai_exam_template",
+      warning: "No matching approved source was found for this exam track. Full roadmap created with locked exam-specific AI template instead.",
+    };
   }
 
-  const progressKey = ngAutopilotProgressKey(body, ctx);
   const progress = ngGetAutopilotProgress(db, progressKey);
   const avoidRepeats = body.avoid_repeats !== false;
   const strategy = ngContentClean(body.rotation_strategy || body.source_rotation || "one_book_per_day", "one_book_per_day");
@@ -22907,43 +22980,53 @@ function ngBuildLowCostTopicReply({ text = "", post = {}, choice = "" } = {}) {
   return ngProfessionalTextClean(`${picked}For this thread, I can help only with today's topic: ${topic}. Focus on the key clue in the stem, then match it with the mechanism before choosing an option. If you are confused, ask specifically about the clue, the mechanism, or why one option is wrong.`).slice(0, 900);
 }
 
-function ngContentBuildFallbackFromSources({ type = "daily_mcq", topic = "USMLE concept", sources = [], exam = "Step 1", answerOnly = false } = {}) {
+function ngContentBuildFallbackFromSources({ type = "daily_mcq", topic = "Medical exam concept", sources = [], exam = "Step 1", exam_track = "", answerOnly = false } = {}) {
   const t = ngNormalizeContentType(type);
-  const sourceTitle = sources[0]?.title || sources[0]?.name || "approved source";
+  const key = ngNormalizeExamTrack(exam_track || exam, "usmle_step1") || "usmle_step1";
+  const profile = ngExamGenerationProfile(key);
+  const cleanTopic = ngContentClean(topic || profile.label, profile.label);
+  const sourceTitle = sources[0]?.title || sources[0]?.name || `${profile.label} template`;
 
   if (answerOnly || t.includes("answer")) {
-    return `Correct answer: Review the approved explanation for ${topic}.\n\nExplanation:\nThe key is to connect the clinical clue with the underlying mechanism. Use ${sourceTitle} to review why the correct option fits and why the common distractors are less likely.`;
+    if (key === "nclex") {
+      return `Correct answer: See the priority nursing action below.\n\nExplanation:\nFor NCLEX, identify the safest nursing priority first: airway/breathing/circulation, acute risk, medication safety, infection control, delegation limits, or client teaching. The correct option is the action that protects the client now and fits the nurse's scope. Review why the tempting distractor is less safe or less urgent.`;
+    }
+    return `Correct answer: Review the ${profile.label} explanation for ${cleanTopic}.\n\nExplanation:\nThe key is to connect the stem clue with the exam task. For ${profile.label}, focus on ${profile.style}. Use ${sourceTitle} only if it matches this exam track; otherwise use the locked ${profile.label} template.`;
   }
 
   if (t === "daily_mcq" || t === "mcq" || t === "uworld_style_mcq") {
-    return `Daily ${exam} MCQ\n\nTopic: ${topic}\n\nA student is reviewing this concept from an approved source. Which approach best turns this topic into a testable USMLE point?\n\nA. Memorize isolated facts without context\nB. Skip the mechanism and only read the answer\nC. Identify the clinical clue, mechanism, and common distractor pattern\nD. Review only the title of the topic\nE. Avoid practice questions\n\n${ngCommunityQuestionFooter()}`;
-  }
-
-  if (t === "first_aid_retention_tip") {
-    return `First Aid retention tip\n\nTopic: ${topic}\n\nDo not memorize this topic as an isolated line. Attach it to one clinical clue, one mechanism, and one common exam trap. Review it once today, then test yourself again tomorrow with a short recall question.`;
-  }
-
-  if (t === "nbme_mistake_breakdown") {
-    return `NBME mistake breakdown\n\nTopic: ${topic}\n\nMost mistakes happen when students recognize the disease but miss the mechanism being tested. Before choosing an answer, identify the clue, the mechanism, and the distractor that looks similar but does not match the stem.`;
-  }
-
-  if (t === "poll_exam_weak_area") {
-    return `Quick USMLE poll\n\nWhat is your weakest area this week?\n\nA. Exam date planning\nB. UWorld consistency\nC. First Aid retention\nD. NBME score improvement\nE. Test-taking strategy\n\nReply with your option.`;
+    if (key === "nclex") {
+      return `${profile.title}\n\nTopic: ${cleanTopic}\n\nStem: A nurse is caring for a client with a clinical finding related to ${cleanTopic}. Which nursing action should the nurse prioritize first?\n\nA. Delay assessment until routine rounds\nB. Assess the client's immediate safety and highest-risk finding\nC. Delegate all assessment to assistive personnel\nD. Provide discharge teaching before stabilizing the client\nE. Document the finding without further action\n\nPlease reply with A, B, C, D, or E. The answer and explanation will be posted later.`;
+    }
+    if (key === "usmle_step2_ck") {
+      return `${profile.title}\n\nTopic: ${cleanTopic}\n\nStem: A patient presents with findings related to ${cleanTopic}. After initial stabilization, what is the most appropriate next step in diagnosis or management?\n\nA. Reassurance only\nB. Immediate broad intervention without confirming severity\nC. Select the next step based on the key clinical clue and acuity\nD. Ignore risk factors and treat later\nE. Choose the least urgent outpatient option\n\nPlease reply with A, B, C, D, or E. The answer and explanation will be posted later.`;
+    }
+    if (key === "mccqe") {
+      return `${profile.title}\n\nTopic: ${cleanTopic}\n\nStem: A patient in a Canadian primary care setting presents with a concern related to ${cleanTopic}. Which clinical decision is most appropriate?\n\nA. Ignore prevention and follow-up\nB. Apply a safe evidence-based approach including risk assessment and patient communication\nC. Delay care without safety-net advice\nD. Choose an intervention outside the clinical context\nE. Avoid shared decision-making\n\nPlease reply with A, B, C, D, or E. The answer and explanation will be posted later.`;
+    }
+    if (key === "amc") {
+      return `${profile.title}\n\nTopic: ${cleanTopic}\n\nStem: A patient presents in an Australian clinical setting with a problem related to ${cleanTopic}. What is the safest and most appropriate management decision?\n\nA. Discharge without assessment\nB. Escalate or manage based on acuity, safety, and clinical context\nC. Ignore public health and follow-up considerations\nD. Provide treatment unrelated to the presentation\nE. Delay urgent care until routine review\n\nPlease reply with A, B, C, D, or E. The answer and explanation will be posted later.`;
+    }
+    return `${profile.title}\n\nTopic: ${cleanTopic}\n\nStem: A student is reviewing this concept from an approved Step 1 source. Which approach best turns this topic into a testable mechanism-based point?\n\nA. Memorize isolated facts without context\nB. Skip the mechanism and only read the answer\nC. Identify the clinical clue, mechanism, and common distractor pattern\nD. Review only the title of the topic\nE. Avoid practice questions\n\n${ngCommunityQuestionFooter()}`;
   }
 
   if (t === "mini_case") {
-    return `Mini case\n\nTopic: ${topic}\n\nA patient presents with a classic clinical clue related to this topic. Which mechanism best explains the finding?\n\nA. Immune-mediated injury\nB. Vascular obstruction\nC. Enzyme deficiency\nD. Receptor blockade\nE. Normal physiologic variant\n\n${ngCommunityQuestionFooter()}`;
+    return `${profile.label} mini case\n\nTopic: ${cleanTopic}\n\nA learner sees a presentation related to this topic. What is the key exam decision?\n\nA. Ignore the highest-risk clue\nB. Match the clue to the correct exam-specific action\nC. Choose an unrelated diagnosis\nD. Delay all care\nE. Avoid reviewing the mechanism\n\nPlease reply with A, B, C, D, or E. The answer and explanation will be posted later.`;
+  }
+
+  if (t === "poll_exam_weak_area") {
+    return `Quick ${profile.label} poll\n\nWhat is your weakest area this week?\n\nA. Study schedule\nB. Question interpretation\nC. Core content recall\nD. Exam strategy\nE. Confidence under timed conditions\n\nReply with your option.`;
   }
 
   if (t === "study_strategy_old_graduate") {
-    return `Study strategy\n\nOlder graduates should avoid passive reading for months. Start with a structured plan, use UWorld explanations actively, review First Aid around missed concepts, and track NBME progress. Consistency matters more than long unfocused study hours.`;
+    return `${profile.label} study strategy\n\nAvoid passive reading for months. Use a structured plan, active recall, timed questions, error review, and weekly progress checks. Focus on the question style of ${profile.label}, not another exam.`;
   }
 
   if (t === "soft_demo_invite") {
-    return `Free 2-day LMS demo\n\nIf you want to see how our USMLE teaching flow works, you can try the NextGen LMS demo for 2 days. Use it to sample the UWorld-style video explanations and decide whether the teaching style fits your preparation.`;
+    return `Free 2-day LMS demo\n\nIf you are preparing for ${profile.label}, you can request a free 2-day LMS demo to see whether the teaching style and roadmap fit your preparation.`;
   }
 
-  return `USMLE study post\n\nTopic: ${topic}\n\nFocus on the clinical clue, the mechanism, and the most common distractor. This is the safest way to turn reading into exam performance.`;
+  return `${profile.label} study post\n\nTopic: ${cleanTopic}\n\nFocus on the exam task, key clue, safest decision, and most common distractor for ${profile.label}.`;
 }
 
 function ngPromptInstructionsForContentType({ type = "daily_mcq", answerOnly = false, platform = "telegram" } = {}) {
@@ -22952,7 +23035,7 @@ function ngPromptInstructionsForContentType({ type = "daily_mcq", answerOnly = f
     "Use plain professional text only.",
     "Do not use markdown stars, hash headings, code fences, emojis, or exaggerated sales language.",
     "Do not write 'AI-generated' or mention that an AI made the post.",
-    "Keep the post educational, concise, and suitable for public USMLE communities.",
+    "Keep the post educational, concise, and suitable for public medical exam communities.",
   ];
 
   if (answerOnly) {
@@ -22973,33 +23056,40 @@ function ngPromptInstructionsForContentType({ type = "daily_mcq", answerOnly = f
 
 async function ngGenerateContentFromApprovedSources({ db, body = {}, sources = [], answerOnly = false } = {}) {
   const type = ngNormalizeContentType(body.content_type || body.post_type || (answerOnly ? "answer_explanation" : "daily_mcq"));
-  const exam = ngContentClean(body.exam_type || body.exam || "Step 1", "Step 1");
-  const topic = ngContentClean(body.topic || body.title || "USMLE preparation", "USMLE preparation");
+  const examTrack = ngStrictExamTrackFromGenerationBody(body);
+  const profile = ngExamGenerationProfile(examTrack);
+  const exam = profile.label;
+  const topic = ngContentClean(body.topic || body.title || `${profile.label} preparation`, `${profile.label} preparation`);
   const platform = ngCommunityPlatform(body.platform || body.channel || "telegram");
-  const audience = ngContentClean(body.audience || "USMLE students", "USMLE students");
+  const audience = ngContentClean(body.audience || profile.audience, profile.audience);
   const extraInstruction = ngContentClean(body.instructions || body.cta || "", "");
+  const allowGeneral = body.allow_general_knowledge === true || body.ai_generated_without_source === true || body.source_mode === "ai_exam_template";
 
-  if (!sources.length && body.allow_general_knowledge !== true) {
+  if (!sources.length && allowGeneral !== true) {
     const error = new Error("No approved medical training source selected. Approve/select a source first, or explicitly allow general knowledge.");
     error.statusCode = 422;
     throw error;
   }
 
   if (!isAIConfigured()) {
-    const fallback = ngContentBuildFallbackFromSources({ type, topic, sources, exam, answerOnly });
-    return { content: ngFormatCommunityGeneratedContent(fallback, { answerOnly, contentType: type }), model: "local-approved-source-fallback", usage: {}, ai_configured: false };
+    const fallback = ngContentBuildFallbackFromSources({ type, topic, sources, exam, exam_track: examTrack, answerOnly });
+    const cleanedFallback = ngSanitizeGeneratedContentForExamTrack(fallback, examTrack);
+    return { content: ngFormatCommunityGeneratedContent(cleanedFallback, { answerOnly, contentType: type }), model: "local-exam-locked-fallback", usage: {}, ai_configured: false };
   }
 
-  const sourceContext = ngSourceContextForGeneration(sources);
-  const systemPrompt = "You are NextGen USMLE Community Content AI. Generate medically careful, original educational content for public communities. Use only the approved source context when medical content is requested. Do not copy long passages. Do not invent unsupported facts. Use clean professional plain text.";
+  const sourceContext = sources.length ? ngSourceContextForGeneration(sources) : "No approved source context selected. Use the locked exam template and standard medical knowledge only.";
+  const systemPrompt = `You are NextGen Medical Exam Community Content AI. Generate original, medically careful educational content for ${profile.label}. You must obey the HARD EXAM LOCK. Never label this content as another exam. Use clean professional plain text.`;
   const userPrompt = [
-    `Approved source context:\n${sourceContext || "No approved source context was selected."}`,
+    ngStrictExamInstruction(examTrack),
+    `Approved source context:\n${sourceContext}`,
     `Platform: ${platform}`,
     `Content type: ${type}`,
-    `Exam: ${exam}`,
+    `Hard exam track: ${examTrack}`,
+    `Exam label to display: ${profile.label}`,
     `Audience: ${audience}`,
     `Topic: ${topic}`,
     `Mode: ${answerOnly ? "answer/explanation follow-up" : "community post"}`,
+    `Forbidden labels/phrases for this exam: ${(profile.forbidden || []).join(", ") || "none"}`,
     `Instructions: ${extraInstruction || "Create concise, high-yield community content."}`,
     ngPromptInstructionsForContentType({ type, answerOnly, platform }),
   ].join("\n\n");
@@ -23011,9 +23101,10 @@ async function ngGenerateContentFromApprovedSources({ db, body = {}, sources = [
     maxOutputTokens: answerOnly ? 1300 : 1600,
   });
 
-  const generatedContent = result.text || ngContentBuildFallbackFromSources({ type, topic, sources, exam, answerOnly });
+  const generatedContent = result.text || ngContentBuildFallbackFromSources({ type, topic, sources, exam, exam_track: examTrack, answerOnly });
+  const cleanedContent = ngSanitizeGeneratedContentForExamTrack(generatedContent, examTrack);
   return {
-    content: ngFormatCommunityGeneratedContent(generatedContent, { answerOnly, contentType: type }),
+    content: ngFormatCommunityGeneratedContent(cleanedContent, { answerOnly, contentType: type }),
     model: result.model,
     usage: result.usage || {},
     ai_configured: true,
@@ -23153,6 +23244,134 @@ const NEXTGEN_EXAM_TRACKS = {
     discordUsername: "AMC Clinical Reasoning",
   },
 };
+
+const NEXTGEN_EXAM_GENERATION_PROFILES = {
+  usmle_step1: {
+    label: "USMLE Step 1",
+    title: "Daily USMLE Step 1 MCQ",
+    audience: "USMLE Step 1 candidates",
+    style: "basic science, pathophysiology, mechanism, pharmacology, microbiology, immunology, physiology, pathology, biochemistry, genetics, biostatistics",
+    forbidden: ["NCLEX", "MCCQE", "AMC"],
+  },
+  usmle_step2_ck: {
+    label: "USMLE Step 2 CK",
+    title: "Daily USMLE Step 2 CK Clinical Case",
+    audience: "USMLE Step 2 CK candidates",
+    style: "clinical vignette, diagnosis, next best step, management, screening, risk factor, emergency/outpatient decision-making",
+    forbidden: ["USMLE Step 1 Preparation", "USMLE Step 1", "Step 1 MCQ", "First Aid Step 1", "First Aid", "NCLEX", "MCCQE", "AMC", "nursing clinical judgment"],
+  },
+  nclex: {
+    label: "NCLEX",
+    title: "Daily NCLEX Clinical Judgment Question",
+    audience: "NCLEX nursing candidates",
+    style: "nursing clinical judgment, priority action, safety, delegation, patient education, medication safety, SATA/NGN-style reasoning when appropriate",
+    forbidden: ["USMLE", "Step 1", "Step 2", "NBME", "UWorld", "MCCQE", "AMC", "physician management"],
+  },
+  mccqe: {
+    label: "MCCQE",
+    title: "Daily MCCQE Clinical Decision Question",
+    audience: "MCCQE Part I candidates",
+    style: "Canadian clinical decision-making, family medicine, prevention, screening, ethics, public health, communication, patient safety, diagnosis and management",
+    forbidden: ["USMLE", "USMLE Step 1", "USMLE Step 2", "Step 1", "Step 2", "Step 1 MCQ", "NBME", "UWorld", "First Aid", "NCLEX", "AMC", "nursing clinical judgment"],
+  },
+  amc: {
+    label: "AMC",
+    title: "Daily AMC Clinical Reasoning Question",
+    audience: "AMC candidates",
+    style: "Australian clinical reasoning, primary care, emergency medicine, public health, safe management, ethics, rural/remote care and patient safety",
+    forbidden: ["USMLE", "USMLE Step 1", "USMLE Step 2", "Step 1", "Step 2", "Step 1 MCQ", "NBME", "UWorld", "First Aid", "NCLEX", "MCCQE", "Canadian MCCQE", "nursing clinical judgment"],
+  },
+};
+
+function ngExamGenerationProfile(trackOrExam = "") {
+  const key = ngNormalizeExamTrack(trackOrExam, "") || "usmle_step1";
+  return NEXTGEN_EXAM_GENERATION_PROFILES[key] || NEXTGEN_EXAM_GENERATION_PROFILES.usmle_step1;
+}
+
+function ngStrictExamTrackFromGenerationBody(body = {}) {
+  return ngNormalizeExamTrack(
+    body.exam_track || body.examTrack || body.target_track || body.program_track || body.track || body.exam_type || body.exam || body.audience || body.instructions || body.title || body.topic || "",
+    "usmle_step1"
+  ) || "usmle_step1";
+}
+
+function ngStrictExamInstruction(trackOrExam = "") {
+  const key = ngNormalizeExamTrack(trackOrExam, "usmle_step1") || "usmle_step1";
+  const profile = ngExamGenerationProfile(key);
+  const lockLine = key === "usmle_step1"
+    ? "This is USMLE Step 1, so mechanism-based basic science is appropriate. Do not use NCLEX, MCCQE, or AMC wording."
+    : key === "usmle_step2_ck"
+      ? "This is USMLE Step 2 CK only. Do not write Step 1/basic-science-only, NCLEX nursing, MCCQE Canadian, or AMC Australian wording. Do not title it Step 1 or First Aid."
+      : `This is ${profile.label} only. Do NOT write USMLE, Step 1, Step 2 CK, NBME, UWorld, First Aid, or physician-board style wording for this exam.`;
+  return [
+    `HARD EXAM LOCK: ${profile.label}.`,
+    `Write for: ${profile.audience}.`,
+    `Required style: ${profile.style}.`,
+    `Title must use: ${profile.title}.`,
+    `Forbidden labels/phrases: ${(profile.forbidden || []).join(", ") || "none"}.`,
+    lockLine,
+    key === "nclex" ? "For NCLEX, write as a nursing clinical judgment question. The decision-maker is the nurse. Ask for priority nursing action, safety intervention, delegation, assessment, teaching, or medication safety. Do not ask for physician diagnosis as the main task." : "",
+    key === "mccqe" ? "For MCCQE, use Canadian clinical decision-making, prevention/screening, ethics, public health, family medicine, and safe management style. Do not use USMLE/NBME/UWorld phrasing." : "",
+    key === "amc" ? "For AMC, use Australian medical licensing clinical reasoning, primary care, emergency care, public health, safe management, and Australian-style clinical decision-making. Do not use USMLE/NBME/UWorld phrasing." : "",
+  ].filter(Boolean).join(" ");
+}
+
+function ngSanitizeGeneratedContentForExamTrack(content = "", trackOrExam = "") {
+  const key = ngNormalizeExamTrack(trackOrExam, "usmle_step1") || "usmle_step1";
+  const profile = ngExamGenerationProfile(key);
+  let text = String(content || "");
+
+  // Force the visible title line to match the selected exam. This prevents
+  // NCLEX/MCCQE/AMC/Step 2 roadmaps from displaying Step 1/USMLE titles even
+  // when the model or an old source tries to reuse generic wording.
+  if (/^\s*Title\s*:/im.test(text)) {
+    text = text.replace(/^\s*Title\s*:\s*.*$/im, `Title: ${profile.title}`);
+  }
+
+  if (key === "usmle_step1") {
+    return text
+      .replace(/Title\s*:\s*Daily\s+NCLEX[^\n]*/gi, `Title: ${profile.title}`)
+      .replace(/Title\s*:\s*Daily\s+MCCQE[^\n]*/gi, `Title: ${profile.title}`)
+      .replace(/Title\s*:\s*Daily\s+AMC[^\n]*/gi, `Title: ${profile.title}`);
+  }
+
+  // Remove Step 1 leakage for every non-Step-1 exam.
+  text = text
+    .replace(/Daily\s+MCQ\s+for\s+USMLE\s+Step\s*1\s+Preparation/gi, profile.title)
+    .replace(/Daily\s+USMLE[-\s]*style\s+MCQ/gi, profile.title)
+    .replace(/USMLE\s+Step\s*1\s+Preparation/gi, `${profile.label} Preparation`)
+    .replace(/USMLE\s+Step\s*1/gi, profile.label)
+    .replace(/Step\s*1\s+MCQ/gi, profile.title)
+    .replace(/First\s+Aid\s+for\s+the\s+USMLE\s+Step\s*1\s*2026/gi, `${profile.label} exam template`)
+    .replace(/First\s+Aid/gi, `${profile.label} review`);
+
+  if (key !== "usmle_step2_ck") {
+    text = text
+      .replace(/USMLE\s+Step\s*2\s*CK/gi, profile.label)
+      .replace(/USMLE\s+Step\s*2/gi, profile.label)
+      .replace(/Step\s*2\s*CK/gi, profile.label)
+      .replace(/\bUSMLE\b/gi, profile.label)
+      .replace(/NBME[-\s]*style/gi, `${profile.label}-style`)
+      .replace(/\bNBME\b/gi, profile.label)
+      .replace(/UWorld[-\s]*style/gi, `${profile.label}-style`)
+      .replace(/\bUWorld\b/gi, profile.label);
+  } else {
+    text = text
+      .replace(/NBME[-\s]*style/gi, `${profile.label}-style`)
+      .replace(/UWorld[-\s]*style/gi, `${profile.label}-style`);
+  }
+
+  if (key === "nclex") {
+    text = text
+      .replace(/most likely diagnosis/gi, "priority nursing concern")
+      .replace(/most appropriate diagnosis/gi, "priority nursing concern")
+      .replace(/next best step in management/gi, "priority nursing action")
+      .replace(/physician/gi, "nurse")
+      .replace(/\bpatient\b/gi, "client");
+  }
+
+  return text;
+}
 
 function ngNormalizeExamTrack(value = "", fallback = "") {
   const raw = String(value || "").trim().toLowerCase();
@@ -23622,7 +23841,12 @@ function ngCreateAutopilotScheduledPosts(db, roadmap = {}, selections = [], ctx 
     const dateKeyValue = d.toISOString().slice(0, 10);
     const calendarItem = ngWeeklyCalendarItemForIndex(i, roadmap);
     const contentType = calendarItem.content_type;
-    const topic = pick.topic || `${roadmap.topic || "USMLE topic"} — Day ${i + 1}`;
+    const examTrackForTitle = ngNormalizeExamTrack(roadmap.exam_track || roadmap.exam_type || roadmap.topic || "", "usmle_step1") || "usmle_step1";
+    const examProfileForTitle = ngExamGenerationProfile(examTrackForTitle);
+    const safeCalendarLabel = ngPostRequiresAnswerFollowup(contentType)
+      ? examProfileForTitle.title
+      : ngSanitizeGeneratedContentForExamTrack(calendarItem.label || "Community post", examTrackForTitle).replace(/^Title:\s*/i, "");
+    const topic = pick.topic || `${roadmap.topic || examProfileForTitle.label + " topic"} — Day ${i + 1}`;
     const bookLabel = pick.book_name || "Approved Source";
     const postAt = ngRoadmapDateTime(dateKeyValue, roadmap.question_time || roadmap.post_time || calendarItem.default_time || "10:00", roadmap.timezone);
     let answerAt = roadmap.answer_time
@@ -23640,9 +23864,10 @@ function ngCreateAutopilotScheduledPosts(db, roadmap = {}, selections = [], ctx 
       }
     }
     const sourceIds = [pick.source_id].filter(Boolean);
+    const aiTemplateOnly = Boolean(pick.ai_generated_without_source || pick.source_mode === "ai_exam_template" || !sourceIds.length);
 
     const mainPost = ngBuildScheduledPostPayload({
-      title: `Day ${i + 1} — ${calendarItem.label} — ${topic}`,
+      title: `Day ${i + 1} — ${safeCalendarLabel} — ${topic}`,
       topic,
       content_type: contentType,
       exam_track: roadmap.exam_track || roadmap.target_track || null,
@@ -23658,11 +23883,13 @@ function ngCreateAutopilotScheduledPosts(db, roadmap = {}, selections = [], ctx 
       image_urls: roadmap.image_urls || [],
       status: "draft",
       approval_status: "needs_review",
-    }, ctx, { roadmap_id: roadmap.id, title: `Day ${i + 1} — ${calendarItem.label} — ${topic}`, topic, created_by: ctx.user?.id || null });
+    }, ctx, { roadmap_id: roadmap.id, title: `Day ${i + 1} — ${safeCalendarLabel} — ${topic}`, topic, created_by: ctx.user?.id || null });
     mainPost.autopilot = true;
     mainPost.day_number = i + 1;
     mainPost.source_title = pick.source_title;
     mainPost.book_name = bookLabel;
+    mainPost.source_mode = aiTemplateOnly ? "ai_exam_template" : "approved_source";
+    mainPost.ai_generated_without_source = aiTemplateOnly;
     mainPost.rotation_strategy = roadmap.rotation_strategy;
     mainPost.weekly_calendar_slot = calendarItem.day;
     ngAttachExamTrack(mainPost, roadmap.exam_track || roadmap.exam_type || roadmap.topic || "");
@@ -23672,7 +23899,7 @@ function ngCreateAutopilotScheduledPosts(db, roadmap = {}, selections = [], ctx 
 
     if (ngPostRequiresAnswerFollowup(contentType)) {
       const answer = ngBuildScheduledPostPayload({
-        title: `Day ${i + 1} Answer — ${calendarItem.label} — ${topic}`,
+        title: `Day ${i + 1} Answer — ${safeCalendarLabel} — ${topic}`,
         topic,
         content_type: "answer_explanation",
         exam_track: roadmap.exam_track || roadmap.target_track || null,
@@ -23689,11 +23916,13 @@ function ngCreateAutopilotScheduledPosts(db, roadmap = {}, selections = [], ctx 
         image_urls: roadmap.image_urls || [],
         status: "draft",
         approval_status: "needs_review",
-      }, ctx, { roadmap_id: roadmap.id, parent_post_id: mainPost.id, title: `Day ${i + 1} Answer — ${calendarItem.label} — ${topic}`, topic, created_by: ctx.user?.id || null });
+      }, ctx, { roadmap_id: roadmap.id, parent_post_id: mainPost.id, title: `Day ${i + 1} Answer — ${safeCalendarLabel} — ${topic}`, topic, created_by: ctx.user?.id || null });
       answer.autopilot = true;
       answer.day_number = i + 1;
       answer.source_title = pick.source_title;
       answer.book_name = bookLabel;
+      answer.source_mode = aiTemplateOnly ? "ai_exam_template" : "approved_source";
+      answer.ai_generated_without_source = aiTemplateOnly;
       answer.rotation_strategy = roadmap.rotation_strategy;
       answer.weekly_calendar_slot = calendarItem.day;
       ngAttachExamTrack(answer, roadmap.exam_track || roadmap.exam_type || roadmap.topic || "");
@@ -23705,20 +23934,41 @@ function ngCreateAutopilotScheduledPosts(db, roadmap = {}, selections = [], ctx 
 }
 
 async function ngGenerateAutopilotPostContent({ db, post, roadmap = {}, source = null } = {}) {
-  const sourceIds = post.source_ids && post.source_ids.length ? post.source_ids : (source ? [source.__source_id || source.id] : []);
-  const sources = ngApprovedTrainingSources(db, sourceIds);
+  const strictTrack = ngNormalizeExamTrack(post.exam_track || roadmap.exam_track || roadmap.target_track || roadmap.exam_type || post.exam_type || post.title || post.topic || "", "usmle_step1") || "usmle_step1";
+  const profile = ngExamGenerationProfile(strictTrack);
+  post.exam_track = strictTrack;
+  post.exam_track_label = profile.label;
+  post.exam_type = profile.label;
+
+  const aiTemplateOnly = post.ai_generated_without_source === true || post.source_mode === "ai_exam_template" || roadmap.source_mode === "ai_exam_template" || (strictTrack !== "usmle_step1" && !(post.source_ids || []).length);
+  const sourceIds = aiTemplateOnly ? [] : (post.source_ids && post.source_ids.length ? post.source_ids : (source ? [source.__source_id || source.id] : []));
+  const sources = aiTemplateOnly ? [] : ngApprovedTrainingSources(db, sourceIds).filter((item) => {
+    if (strictTrack === "usmle_step1") return true;
+    return ngSourceMatchesExamTrack(item, strictTrack);
+  });
   const answerOnly = ngPostIsAnswer(post);
   const ai = await ngGenerateContentFromApprovedSources({
     db,
     sources,
     body: {
       ...post,
+      exam_track: strictTrack,
+      target_track: strictTrack,
+      exam_type: profile.label,
+      exam: profile.label,
+      audience: profile.audience,
       topic: post.topic,
       title: post.title,
       content_type: post.content_type,
+      allow_general_knowledge: aiTemplateOnly || strictTrack !== "usmle_step1",
+      ai_generated_without_source: aiTemplateOnly,
+      source_mode: aiTemplateOnly ? "ai_exam_template" : "approved_source",
       instructions: [
-        ngExamPromptInstruction(post.exam_track || roadmap.exam_track || roadmap.exam_type || "", roadmap.instructions || ""),
-        "Use the selected approved source only when medical facts are needed. If the approved source does not match the selected exam, keep only universally valid medical facts and adapt the question style to the locked exam template.",
+        ngStrictExamInstruction(strictTrack),
+        ngExamPromptInstruction(strictTrack, roadmap.instructions || ""),
+        aiTemplateOnly
+          ? `No matching approved source is available for ${profile.label}. Generate from the locked ${profile.label} exam-specific template and standard medical knowledge only. Do not use Step 1 / First Aid / UWorld / NBME labels unless this is Step 1.`
+          : `Use only sources that match ${profile.label}. If any source looks like a different exam, ignore that source and follow the locked exam template.`,
         "Follow the weekly calendar content type for this post.",
         "Do not repeat earlier roadmap topics.",
         "Use professional plain text without markdown stars or hash headings.",
@@ -23726,7 +23976,8 @@ async function ngGenerateAutopilotPostContent({ db, post, roadmap = {}, source =
     },
     answerOnly,
   });
-  const formattedContent = ngFormatCommunityGeneratedContent(ai.content, { answerOnly, contentType: post.content_type, post });
+  const sanitized = ngSanitizeGeneratedContentForExamTrack(ai.content, strictTrack);
+  const formattedContent = ngFormatCommunityGeneratedContent(sanitized, { answerOnly, contentType: post.content_type, post });
   post.message = formattedContent;
   post.draft_content = formattedContent;
   post.ai_model = ai.model;
@@ -23867,7 +24118,7 @@ app.get("/admin/crm/community-content/exam-prompts", async (req, res) => {
       return [key, { key, label: ngExamTrackLabel(key), ...template }];
     }));
     const requested = ngNormalizeExamTrack(req.query?.exam_track || req.query?.track || "");
-    res.json({ success: true, prompts, selected: requested ? prompts[requested] : null, build: "v21-community-exam-track-edit-fetch-fixed" });
+    res.json({ success: true, prompts, selected: requested ? prompts[requested] : null, build: "v24-all-exam-hard-lock-roadmap-generation" });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -23900,7 +24151,7 @@ app.post("/admin/crm/community-content/weekly-calendar", async (req, res) => {
     const selectedExamTrack = ngNormalizeExamTrack(req.body?.exam_track || req.body?.examTrack || req.body?.target_track || req.body?.exam_type || "") || ngInferExamTrackFromCommunityIds(db, payload.community_ids, "");
     payload.exam_track = selectedExamTrack;
     payload.exam_type = selectedExamTrack ? ngExamTrackLabel(selectedExamTrack) : ngContentClean(req.body?.exam_type || "General", "General");
-    const { selections, progress, progressKey } = ngSelectAutopilotSources(db, payload, ctx, days);
+    const { selections, progress, progressKey, source_mode, warning } = ngSelectAutopilotSources(db, payload, ctx, days);
     let roadmap = withTimestamps({
       id: uuid(),
       brand_id: getCrmBrandId(req, db),
@@ -24238,7 +24489,7 @@ app.post("/admin/crm/community-content/roadmaps/autopilot", async (req, res) => 
     payload.exam_type = selectedExamTrack ? ngExamTrackLabel(selectedExamTrack) : ngContentClean(req.body?.exam_type || "General", "General");
     payload.instructions = ngExamPromptInstruction(selectedExamTrack, req.body?.instructions || "");
 
-    const { selections, progress, progressKey } = ngSelectAutopilotSources(db, payload, ctx, days);
+    const { selections, progress, progressKey, source_mode, warning } = ngSelectAutopilotSources(db, payload, ctx, days);
     let roadmap = withTimestamps({
       id: uuid(),
       brand_id: getCrmBrandId(req, db),
@@ -24262,7 +24513,9 @@ app.post("/admin/crm/community-content/roadmaps/autopilot", async (req, res) => 
       community_ids: payload.community_ids,
       source_pool: payload.source_pool,
       source_query: ngContentClean(req.body?.source_query || req.body?.book || req.body?.system || "", ""),
-      source_ids: selections.map((s) => s.source_id),
+      source_ids: selections.map((s) => s.source_id).filter(Boolean),
+      source_mode: source_mode || (selections.some((s) => s.source_mode === "ai_exam_template" || s.ai_generated_without_source) ? "ai_exam_template" : "approved_source"),
+      source_warning: warning || null,
       source_rotation: payload.rotation_strategy,
       rotation_strategy: payload.rotation_strategy,
       avoid_repeats: req.body?.avoid_repeats !== false,
@@ -24273,7 +24526,7 @@ app.post("/admin/crm/community-content/roadmaps/autopilot", async (req, res) => 
       instructions: ngContentClean(req.body?.instructions || "", ""),
       autopilot: true,
       progress_key: progressKey,
-      selected_plan: selections.map((s) => ({ day: s.day, source_id: s.source_id, book_name: s.book_name, topic: s.topic, source_title: s.source_title })),
+      selected_plan: selections.map((s) => ({ day: s.day, source_id: s.source_id || null, book_name: s.book_name, topic: s.topic, source_title: s.source_title, source_mode: s.source_mode || (s.ai_generated_without_source ? "ai_exam_template" : "approved_source") })),
       status: "active",
       created_by: ctx.user.id,
       updated_by: ctx.user.id,
@@ -24291,7 +24544,7 @@ app.post("/admin/crm/community-content/roadmaps/autopilot", async (req, res) => 
     }
 
     await writeCrmDb(db);
-    res.json({ success: true, roadmap, scheduled_posts, scheduled_count: scheduled_posts.length, progress, message: "AI autopilot roadmap created. All posts are editable before approval/publishing." });
+    res.json({ success: true, roadmap, scheduled_posts, scheduled_count: scheduled_posts.length, progress, source_mode: roadmap.source_mode, warning: roadmap.source_warning, message: "AI autopilot roadmap created for the full requested duration. If matching approved sources were unavailable, AI-only exam-template posts were created instead." });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message, details: error.details || null });
   }
