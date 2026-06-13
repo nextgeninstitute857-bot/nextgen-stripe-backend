@@ -42,7 +42,7 @@ function applyNextGenCors(req, res) {
     requestHeaders || "Content-Type, Authorization, x-admin-token, x-requested-with"
   );
   res.setHeader("Access-Control-Max-Age", "86400");
-  res.setHeader("X-NextGen-Backend-Build", "v17-question-answer-order-roadmap-bulk-controls");
+  res.setHeader("X-NextGen-Backend-Build", "v18-scheduled-posting-dedupe-perfect");
 }
 
 // Hard CORS/preflight guard. This must be the first middleware after app creation.
@@ -81,7 +81,7 @@ app.use(express.urlencoded({ extended: true, limit: process.env.JSON_BODY_LIMIT 
 app.get("/admin/debug/cors-check", (req, res) => {
   res.json({
     success: true,
-    build: "v17-question-answer-order-roadmap-bulk-controls",
+    build: "v18-scheduled-posting-dedupe-perfect",
     origin: req.headers.origin || null,
     now: new Date().toISOString(),
   });
@@ -21958,12 +21958,16 @@ async function ngPublishScheduledPost(db, post = {}, actor = null, options = {})
   post.updated_at = nowIso();
   post.updated_by = actor?.id || post.updated_by || null;
 
+  const explicitDirectTargets = Array.isArray(post.direct_targets) ? post.direct_targets : [];
+  const selectedCommunityIds = ngContentList(post.community_ids);
+  const fallbackDirectTargets = explicitDirectTargets.length
+    ? explicitDirectTargets
+    : (selectedCommunityIds.length ? [] : [{ exam_track: post.exam_track || post.examTrack || post.target_track || post.exam_type || post.topic || post.title || "" }]);
+
   const targets = ngNormalizeCommunityTargets(db, {
     platforms: post.platforms || post.platform,
     community_ids: post.community_ids,
-    direct_targets: Array.isArray(post.direct_targets) && post.direct_targets.length
-      ? post.direct_targets
-      : [{ exam_track: post.exam_track || post.examTrack || post.target_track || post.exam_type || post.topic || post.title || "" }],
+    direct_targets: fallbackDirectTargets,
   });
 
   if (!targets.length) {
@@ -21988,23 +21992,43 @@ async function ngPublishScheduledPost(db, post = {}, actor = null, options = {})
     throw error;
   }
 
+  const existingResults = Array.isArray(post.publish_results) ? post.publish_results : [];
   const results = [];
+  const runSeenKeys = new Set();
+
   for (const target of targets) {
     const platform = ngCommunityPlatform(target.platform || post.platform || "telegram");
+    const deliveryKey = target.delivery_key || ngDeliveryTargetKey(target, platform);
+
+    if (runSeenKeys.has(deliveryKey) || ngPostAlreadyDelivered(post, deliveryKey)) {
+      results.push({
+        platform,
+        target,
+        delivery_key: deliveryKey,
+        success: true,
+        result: { skipped: true, reason: "Duplicate delivery skipped. This post already reached this target." },
+        posted_at: nowIso(),
+      });
+      continue;
+    }
+
+    runSeenKeys.add(deliveryKey);
+
     try {
       const result = await ngPublishToPlatform({ platform, target, post, text: message });
-      results.push({ platform, target, success: true, result, posted_at: nowIso() });
+      results.push({ platform, target, delivery_key: deliveryKey, success: true, result: { ...(result || {}), delivery_key: deliveryKey }, posted_at: nowIso() });
     } catch (error) {
-      results.push({ platform, target, success: false, error: error.message, posted_at: nowIso() });
+      results.push({ platform, target, delivery_key: deliveryKey, success: false, error: error.message, posted_at: nowIso() });
     }
   }
 
-  const anySuccess = results.some((item) => item.success && !item.result?.skipped);
+  const hadPreviousSuccess = existingResults.some((item) => item.success === true && !item.result?.skipped);
+  const anySuccess = results.some((item) => item.success && !item.result?.skipped) || hadPreviousSuccess;
   const allSkipped = results.length && results.every((item) => item.result?.skipped);
 
-  post.publish_results = [...(Array.isArray(post.publish_results) ? post.publish_results : []), ...results];
-  post.status = anySuccess ? "posted" : allSkipped ? "manual_platform_pending" : "failed";
-  post.posted_at = anySuccess ? nowIso() : post.posted_at || null;
+  post.publish_results = [...existingResults, ...results];
+  post.status = anySuccess ? "posted" : allSkipped ? "posted" : "failed";
+  post.posted_at = anySuccess || allSkipped ? (post.posted_at || nowIso()) : null;
   post.publish_lock_until = null;
   post.updated_at = nowIso();
   post.updated_by = actor?.id || post.updated_by || null;
@@ -22986,6 +23010,53 @@ function ngExamTrackRoutingStatus() {
 }
 
 
+
+function ngDeliveryTargetKey(target = {}, platform = "") {
+  const p = ngCommunityPlatform(platform || target.platform || target.channel || "telegram");
+  if (p === "telegram") {
+    const chatId = ngNormalizeTelegramChatId(
+      ngTargetValue(target.telegram_chat_id, target.chat_id, target.channel_id, target.telegram_group_id, target.platform_chat_id, target.target_id, target.to, target.recipient, target.delivery_target),
+      { assumeGroup: true }
+    );
+    return chatId ? `telegram:${chatId}` : "telegram:missing";
+  }
+  if (p === "discord") {
+    const track = ngInferExamTrackFromObject(target, target.exam_track || "");
+    const webhook = ngTargetValue(target.discord_webhook_url, target.webhook_url, target.target_id, ngDiscordWebhookUrlForExamTrack(track));
+    return webhook ? `discord:${crypto.createHash("sha1").update(String(webhook)).digest("hex")}` : `discord:${track || "missing"}`;
+  }
+  if (p === "whatsapp") {
+    const to = ngTargetValue(target.whatsapp_to, target.whatsapp_number, target.whatsapp, target.phone, target.phone_number, target.group_id, target.target_id, target.to, target.recipient, target.delivery_target);
+    return to ? `whatsapp:${String(to).replace(/\s+/g, "")}` : "whatsapp:missing";
+  }
+  if (p === "email") {
+    const to = ngTargetValue(target.email_to, target.email, target.target_email, target.to, target.recipient, target.delivery_target);
+    return to ? `email:${String(to).trim().toLowerCase()}` : "email:missing";
+  }
+  return `${p}:${ngTargetValue(target.id, target.community_id, target.url, target.target_id, uuid())}`;
+}
+
+function ngDedupeCommunityTargets(targets = []) {
+  const seen = new Set();
+  const clean = [];
+  for (const target of Array.isArray(targets) ? targets : []) {
+    const platform = ngCommunityPlatform(target.platform || "telegram");
+    const key = ngDeliveryTargetKey(target, platform);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    clean.push({ ...target, delivery_key: key });
+  }
+  return clean;
+}
+
+function ngPostAlreadyDelivered(post = {}, deliveryKey = "") {
+  if (!deliveryKey) return false;
+  return (Array.isArray(post.publish_results) ? post.publish_results : []).some((item) => {
+    const key = item.delivery_key || item.target_key || item.result?.delivery_key || "";
+    return key === deliveryKey && item.success === true && !item.result?.skipped;
+  });
+}
+
 function ngNormalizeCommunityTargets(db, { platforms = [], community_ids = [], direct_targets = [] } = {}) {
   const platformList = ngContentPlatforms(platforms);
   const ids = ngContentList(community_ids);
@@ -23341,7 +23412,7 @@ app.get("/admin/crm/community-content/exam-prompts", async (req, res) => {
       return [key, { key, label: ngExamTrackLabel(key), ...template }];
     }));
     const requested = ngNormalizeExamTrack(req.query?.exam_track || req.query?.track || "");
-    res.json({ success: true, prompts, selected: requested ? prompts[requested] : null, build: "v17-question-answer-order-roadmap-bulk-controls" });
+    res.json({ success: true, prompts, selected: requested ? prompts[requested] : null, build: "v18-scheduled-posting-dedupe-perfect" });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
