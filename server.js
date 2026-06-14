@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v46-ai-sales-brain-clean-dedupe";
+const NEXTGEN_BACKEND_BUILD = "v47-ai-sales-brain-no-sleep";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -18609,11 +18609,12 @@ const NG_AI_AUTO_COOLDOWN_SECONDS = Number(process.env.AI_AUTO_COOLDOWN_SECONDS 
 const ngAiAutoLocks = new Map();
 
 function ngAiAutoGuardKey({ lead = {}, inbound = {}, channel = "" } = {}) {
-  // v46: lock per lead+channel, not per inbound message. This prevents two webhook/manual
-  // triggers from sending two Ayla replies at the same time for the same student.
+  // v47: lock by lead + inbound message fingerprint, not the whole lead.
+  // This blocks duplicate replies to the same inbound webhook retry, but it does NOT
+  // swallow a genuinely new student message like "Yes", "?", or "Hello?".
   return [
     lead.id || lead.lead_id || lead.phone || lead.email || "unknown_lead",
-    "lead_ai_auto_lock",
+    ngAiAutoMessageFingerprint(inbound) || "unknown_message",
     normalizeCrmSendChannel(channel || lead.last_ai_auto_reply_channel || lead.source_platform || lead.platform || "auto"),
   ].join(":");
 }
@@ -19072,6 +19073,9 @@ function ngCleanAylaStudentReply(text = "") {
   reply = reply.replace(/I\s+appreciate\s+your\s+interest[.!]?/gi, "Thank you, Doctor.");
   reply = reply.replace(/let'?s\s+get\s+you\s+set\s+up\s+with\s+a\s+mentor/gi, "I can arrange a mentor guidance call for you");
   reply = reply.replace(/feel\s+free\s+to\s+ask[.!]?/gi, "");
+  reply = reply.replace(/I\s+understand\s+your\s+interest\s+in\s+pricing[.!]?/gi, "Doctor, the mentor can guide you on the best option after understanding your timeline.");
+  reply = reply.replace(/Our\s+course\s+offerings\s+vary\s+based\s+on\s+the\s+program\s+and\s+duration[.!]?/gi, "The right plan depends on your exam date and preparation level.");
+  reply = reply.replace(/Would\s+it\s+be\s+helpful\s+if\s+I\s+arranged/gi, "I can arrange");
 
   // Keep WhatsApp replies readable and human-like.
   reply = reply
