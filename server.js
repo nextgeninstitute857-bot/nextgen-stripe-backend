@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v52-google-meet-positive-intent-live-session-scheduler";
+const NEXTGEN_BACKEND_BUILD = "v54-paid-group-live-session-exclusion";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -14025,10 +14025,49 @@ function ngDailyLiveSessionActionNow(settings = {}, date = new Date()) {
   return null;
 }
 
+
+function ngLeadIsPaidOrGroupAddedForLiveSession(lead = {}) {
+  const blob = JSON.stringify({
+    stage: lead.stage,
+    lead_stage: lead.lead_stage,
+    status: lead.status,
+    payment_status: lead.payment_status,
+    enrollment_status: lead.enrollment_status,
+    student_status: lead.student_status,
+    tags: lead.tags,
+  }).toLowerCase();
+
+  const explicitTrue = [
+    lead.manual_paid,
+    lead.marked_paid,
+    lead.is_paid,
+    lead.paid,
+    lead.payment_completed,
+    lead.has_active_enrollment,
+    lead.enrolled,
+    lead.is_enrolled,
+    lead.group_added,
+    lead.added_to_group,
+    lead.added_to_paid_group,
+    lead.paid_group_added,
+    lead.whatsapp_group_added,
+    lead.student_group_added,
+    lead.live_session_automation_excluded,
+    lead.exclude_from_live_session_flow,
+    lead.exclude_daily_live_session,
+  ].some(Boolean);
+
+  if (explicitTrue) return true;
+
+  return /(paid_enrolled|paid|enrolled|converted|closed_won|student_active|active_student|group_added|added_to_paid_group|paid_group_added|manual_paid)/i.test(blob);
+}
+
 function ngDailyLiveSessionEligibleLead(db = {}, lead = {}, settings = {}) {
   if (!lead?.id) return false;
   const stage = normalizeCrmLeadStageValue(lead.stage || lead.lead_stage || lead.status || "new_lead", "new_lead");
-  if (settings.daily_session_exclude_paid !== false && ["paid", "paid_enrolled", "enrolled", "converted"].includes(stage)) return false;
+  if (settings.daily_session_exclude_paid !== false && (["paid", "paid_enrolled", "enrolled", "converted"].includes(stage) || ngLeadIsPaidOrGroupAddedForLiveSession(lead))) return false;
+  if (settings.daily_session_exclude_group_added !== false && (lead.group_added || lead.added_to_group || lead.added_to_paid_group || lead.paid_group_added || lead.whatsapp_group_added || lead.student_group_added)) return false;
+  if (lead.live_session_automation_excluded || lead.exclude_from_live_session_flow || lead.exclude_daily_live_session) return false;
   if (settings.daily_session_exclude_not_interested !== false && ["not_interested", "lost", "unsubscribed"].includes(stage)) return false;
   if (settings.daily_session_exclude_suppressed !== false && (lead.suppressed || lead.ai_suppressed || ng41IsSuppressed(db, lead))) return false;
   if (!ng41LeadPhone(lead) && !lead.email) return false;
@@ -14134,6 +14173,353 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
   return { action, processed: results.length, sent: results.filter((r) => r.sent).length, skipped: results.filter((r) => r.skipped).length, results };
 }
 
+
+
+function ngGoogleMeetAppointmentDateTime(appointment = {}) {
+  const date = normalizeCrmString(appointment.date || appointment.appointment_date || appointment.scheduled_date || "");
+  const time = normalizeCrmString(appointment.time || appointment.appointment_time || appointment.scheduled_time || "");
+  const start = normalizeCrmString(appointment.start_time || appointment.starts_at || appointment.scheduled_at || "");
+  if (start) {
+    const d = new Date(start);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+  if (date && time) {
+    const d = new Date(`${date}T${time.length === 5 ? `${time}:00` : time}`);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+  return null;
+}
+
+function ngGoogleMeetAppointmentLink(appointment = {}) {
+  return normalizeCrmString(
+    appointment.google_meet_link ||
+    appointment.meeting_link ||
+    appointment.zoom_link ||
+    appointment.join_url ||
+    appointment.location ||
+    appointment.booking_link ||
+    ""
+  );
+}
+
+function ngGoogleMeetAppointmentLead(db = {}, appointment = {}) {
+  return appointment.lead_id ? getLeadByAnyId(db, appointment.lead_id) : null;
+}
+
+function ngGoogleMeetAppointmentStudentName(db = {}, appointment = {}) {
+  const lead = ngGoogleMeetAppointmentLead(db, appointment);
+  return normalizeCrmString(
+    appointment.student_name || appointment.lead_name || appointment.name ||
+    lead?.student_name || lead?.lead_name || lead?.name || lead?.full_name ||
+    "Doctor"
+  ) || "Doctor";
+}
+
+function ngGoogleMeetAppointmentText(action = "link_now", appointment = {}, db = {}) {
+  const name = ngGoogleMeetAppointmentStudentName(db, appointment);
+  const link = ngGoogleMeetAppointmentLink(appointment);
+  const date = normalizeCrmString(appointment.date || appointment.scheduled_date || String(appointment.start_time || "").slice(0, 10));
+  const time = normalizeCrmString(appointment.time || appointment.scheduled_time || String(appointment.start_time || "").slice(11, 16));
+  if (action === "confirmation") {
+    return `Great Doctor, your Google Meet mentor consultation is scheduled for ${date || "the selected date"}${time ? ` at ${time} EST` : ""}.\n\nI will send the Google Meet link at the meeting time.`;
+  }
+  if (action === "five_minute_reminder") {
+    return `Doctor, your Google Meet mentor consultation starts in 5 minutes.\n\nPlease be ready. I will send the Google Meet link at the meeting time.`;
+  }
+  return `Doctor, your Google Meet mentor consultation is starting now.\n\nPlease join here:\n${link}`;
+}
+
+function ngGoogleMeetAppointmentAlreadySent(db = {}, appointment = {}, action = "") {
+  return ensureCrmArray(db, "message_logs").some((log) => {
+    return String(log.metadata?.google_meet_appointment_id || "") === String(appointment.id || "") &&
+      String(log.metadata?.google_meet_action || "") === String(action || "") &&
+      !["failed", "error"].includes(String(log.status || ""));
+  });
+}
+
+async function ngSendGoogleMeetAppointmentMessage({ db = {}, appointment = {}, action = "link_now", brandId = null, dryRun = false } = {}) {
+  const lead = ngGoogleMeetAppointmentLead(db, appointment);
+  const channel = resolveCrmChannelForConversation({
+    requestedChannel: appointment.channel || lead?.current_channel || lead?.last_channel || lead?.source_platform || lead?.platform || "whatsapp",
+    lead,
+    fallback: "whatsapp",
+  });
+  const latestInbound = lead ? ngLatestInbound(ngLeadConversationMessages(db, lead.id)) : null;
+  const whatsappWindowOpen = channel !== "whatsapp" || ngWithinHours(latestInbound?.created_at || latestInbound?.received_at || latestInbound?.timestamp, 24);
+  const settings = ngAylaPickSettings(db);
+  const templateMap = {
+    confirmation: settings.google_meet_confirmation_template_key || "google_meet_confirmation",
+    five_minute_reminder: settings.google_meet_5min_reminder_template_key || "google_meet_5min_reminder",
+    link_now: settings.google_meet_link_now_template_key || "google_meet_link_now",
+  };
+  const templateId = channel === "whatsapp" && !whatsappWindowOpen ? templateMap[action] : null;
+  const text = ngGoogleMeetAppointmentText(action, appointment, db);
+  if (dryRun) return { dry_run: true, text, template_id: templateId, channel };
+  const result = await sendCrmMessage({
+    db,
+    brandId: appointment.brand_id || brandId || lead?.brand_id || db.settings?.default_brand_id || null,
+    channel,
+    to: getBestRecipientForChannel({ channel, lead }) || appointment.phone || appointment.student_phone || appointment.email || appointment.student_email || "",
+    text,
+    templateId,
+    templateVariables: {
+      lead,
+      appointment,
+      student_name: ngGoogleMeetAppointmentStudentName(db, appointment),
+      google_meet_link: ngGoogleMeetAppointmentLink(appointment),
+      appointment_date: appointment.date || appointment.scheduled_date || String(appointment.start_time || "").slice(0, 10),
+      appointment_time: appointment.time || appointment.scheduled_time || String(appointment.start_time || "").slice(11, 16),
+    },
+    leadId: appointment.lead_id || lead?.id || null,
+    metadata: {
+      source: "google_meet_command_center",
+      google_meet_action: action,
+      google_meet_appointment_id: appointment.id || null,
+      template_key: templateId,
+    },
+  });
+  return { sent: true, message_id: result.log?.id || null, template_id: templateId, channel };
+}
+
+async function ngRunGoogleMeetAppointmentScheduler({ db = {}, brandId = null, limit = 50, dryRun = false, source = "run_due" } = {}) {
+  const now = new Date();
+  const items = ensureCrmArray(db, "appointments")
+    .filter((item) => !brandId || String(item.brand_id || "") === String(brandId || ""))
+    .filter((item) => ["scheduled", "rescheduled", "missing_link", "needs_link", "link_ready"].includes(String(item.status || "scheduled").toLowerCase()))
+    .filter((item) => String(item.appointment_type || item.type || "").toLowerCase().includes("google") || String(item.appointment_type || item.type || "").toLowerCase().includes("mentor") || item.google_meet_requested || item.link_send_scheduled || item.google_meet_link_send_scheduled)
+    .slice(0, Math.max(1, Math.min(200, Number(limit || 50))));
+  const results = [];
+  for (const item of items) {
+    const start = ngGoogleMeetAppointmentDateTime(item);
+    const link = ngGoogleMeetAppointmentLink(item);
+    if (!start) { results.push({ appointment_id: item.id, skipped: true, reason: "missing_time" }); continue; }
+    const minutesUntil = (start.getTime() - now.getTime()) / 60000;
+    const actions = [];
+    const reminderMinutes = Number(item.reminder_minutes_before || item.google_meet_reminder_minutes || 5);
+    if (link && item.google_meet_reminder_scheduled !== false && minutesUntil <= reminderMinutes && minutesUntil > 0 && !item.google_meet_5min_reminder_sent_at && !ngGoogleMeetAppointmentAlreadySent(db, item, "five_minute_reminder")) {
+      actions.push("five_minute_reminder");
+    }
+    if (link && (item.link_send_scheduled || item.google_meet_link_send_scheduled || item.schedule_link_send_at_meeting_time) && minutesUntil <= 0 && minutesUntil >= -30 && !item.google_meet_link_sent_at && !ngGoogleMeetAppointmentAlreadySent(db, item, "link_now")) {
+      actions.push("link_now");
+    }
+    if (!actions.length) { results.push({ appointment_id: item.id, skipped: true, reason: link ? "not_due" : "missing_link" }); continue; }
+    for (const action of actions) {
+      try {
+        const sent = await ngSendGoogleMeetAppointmentMessage({ db, appointment: item, action, brandId, dryRun });
+        if (!dryRun) {
+          if (action === "five_minute_reminder") item.google_meet_5min_reminder_sent_at = nowIso();
+          if (action === "link_now") {
+            item.google_meet_link_sent_at = nowIso();
+            item.link_send_status = "sent";
+          }
+          item.last_google_meet_action_at = nowIso();
+          item.updated_at = nowIso();
+        }
+        results.push({ appointment_id: item.id, action, ...sent });
+      } catch (error) {
+        results.push({ appointment_id: item.id, action, sent: false, error: error.message });
+      }
+    }
+  }
+  return { processed: results.length, sent: results.filter((r) => r.sent).length, results, source };
+}
+
+function ngGoogleMeetCommandCenterQueues(db = {}, brandId = null) {
+  const appointments = ensureCrmArray(db, "appointments")
+    .filter((item) => !brandId || String(item.brand_id || "") === String(brandId || ""));
+  const leads = ensureCrmArray(db, "leads")
+    .filter((item) => !brandId || String(item.brand_id || "") === String(brandId || ""));
+  const hotQueue = ensureCrmArray(db, "hot_call_queue")
+    .filter((item) => !brandId || String(item.brand_id || "") === String(brandId || ""));
+  const handoffs = ensureCrmArray(db, "handoffs")
+    .filter((item) => !brandId || String(item.brand_id || "") === String(brandId || ""));
+  const googleMeetLeads = leads.filter((lead) => {
+    const blob = JSON.stringify(lead || {}).toLowerCase();
+    return blob.includes("google_meet") || blob.includes("mentor_requested") || blob.includes("schedule_google_meet");
+  });
+  const requests = [
+    ...googleMeetLeads.map((lead) => ({ id: `lead_${lead.id}`, type: "lead", lead_id: lead.id, name: ng41LeadName(lead), phone: ng41LeadPhone(lead), email: ng41LeadEmail(lead), status: lead.stage || lead.lead_stage || lead.status || "google_meet_requested", source: "lead", raw: lead })),
+    ...hotQueue.filter((item) => String(item.request_type || item.status || item.reason || "").toLowerCase().includes("google") || String(item.next_best_action || "").toLowerCase().includes("google")).map((item) => ({ id: `queue_${item.id}`, type: "queue", lead_id: item.lead_id, name: item.lead_name || item.name || "Student", phone: item.phone || item.whatsapp || "", email: item.email || "", status: item.status || "google_meet_requested", source: "queue", raw: item })),
+    ...handoffs.filter((item) => String(item.handoff_type || item.requested_action || item.status || "").toLowerCase().includes("google")).map((item) => ({ id: `handoff_${item.id}`, type: "handoff", lead_id: item.lead_id, name: item.lead_name || item.name || "Student", phone: item.phone || "", email: item.email || "", status: item.status || "pending_google_meet_booking", source: "handoff", raw: item })),
+  ];
+  return {
+    requests,
+    appointments,
+    missing_link: appointments.filter((item) => !ngGoogleMeetAppointmentLink(item) && ["scheduled", "rescheduled", "missing_link", "needs_link"].includes(String(item.status || "").toLowerCase() || "scheduled")),
+    link_ready: appointments.filter((item) => ngGoogleMeetAppointmentLink(item) && !item.google_meet_link_sent_at),
+    sent: appointments.filter((item) => item.google_meet_link_sent_at),
+  };
+}
+
+app.get("/admin/crm/google-meet-command-center", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const queues = ngGoogleMeetCommandCenterQueues(db, brandId);
+    res.json({ success: true, ...queues, counts: { requests: queues.requests.length, appointments: queues.appointments.length, missing_link: queues.missing_link.length, link_ready: queues.link_ready.length, sent: queues.sent.length } });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.patch("/admin/crm/appointments/:id/google-meet-link", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const item = ensureCrmArray(db, "appointments").find((appointment) => String(appointment.id) === String(req.params.id));
+    if (!item) return res.status(404).json({ success: false, error: "Appointment not found" });
+    const link = normalizeCrmString(req.body.google_meet_link || req.body.meeting_link || req.body.link || "");
+    if (!link) return res.status(400).json({ success: false, error: "Google Meet link is required" });
+    item.google_meet_link = link;
+    item.meeting_link = link;
+    item.location = link;
+    item.link_status = "ready";
+    item.status = ["missing_link", "needs_link"].includes(String(item.status || "").toLowerCase()) ? "scheduled" : (item.status || "scheduled");
+    if (req.body.schedule_link_send !== false) {
+      item.link_send_scheduled = true;
+      item.google_meet_link_send_scheduled = true;
+      item.schedule_link_send_at_meeting_time = true;
+      item.link_send_status = "scheduled";
+    }
+    item.updated_at = nowIso();
+    await writeCrmDb(db);
+    res.json({ success: true, appointment: enrichAppointment(db, item) });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/appointments/:id/schedule-link-send", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const item = ensureCrmArray(db, "appointments").find((appointment) => String(appointment.id) === String(req.params.id));
+    if (!item) return res.status(404).json({ success: false, error: "Appointment not found" });
+    if (!ngGoogleMeetAppointmentLink(item)) return res.status(400).json({ success: false, error: "Paste Google Meet link before scheduling link send" });
+    item.link_send_scheduled = true;
+    item.google_meet_link_send_scheduled = true;
+    item.schedule_link_send_at_meeting_time = true;
+    item.link_send_status = "scheduled";
+    item.updated_at = nowIso();
+    await writeCrmDb(db);
+    res.json({ success: true, appointment: enrichAppointment(db, item) });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/appointments/:id/send-link-now", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const item = ensureCrmArray(db, "appointments").find((appointment) => String(appointment.id) === String(req.params.id));
+    if (!item) return res.status(404).json({ success: false, error: "Appointment not found" });
+    if (!ngGoogleMeetAppointmentLink(item)) return res.status(400).json({ success: false, error: "Paste Google Meet link before sending" });
+    const sent = await ngSendGoogleMeetAppointmentMessage({ db, appointment: item, action: "link_now", brandId: item.brand_id || getCrmBrandId(req, db) });
+    item.google_meet_link_sent_at = nowIso();
+    item.link_send_status = "sent";
+    item.updated_at = nowIso();
+    await writeCrmDb(db);
+    res.json({ success: true, sent, appointment: enrichAppointment(db, item) });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/appointments/:id/send-confirmation", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const item = ensureCrmArray(db, "appointments").find((appointment) => String(appointment.id) === String(req.params.id));
+    if (!item) return res.status(404).json({ success: false, error: "Appointment not found" });
+    const sent = await ngSendGoogleMeetAppointmentMessage({ db, appointment: item, action: "confirmation", brandId: item.brand_id || getCrmBrandId(req, db) });
+    item.google_meet_confirmation_sent_at = nowIso();
+    item.updated_at = nowIso();
+    await writeCrmDb(db);
+    res.json({ success: true, sent, appointment: enrichAppointment(db, item) });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+
+function ngApplyPaidGroupStatusToLead(db = {}, lead = {}, payload = {}, actor = null) {
+  const now = typeof nowIso === "function" ? nowIso() : new Date().toISOString();
+  const markPaid = payload.mark_paid === true || payload.paid === true || payload.action === "mark_paid" || payload.action === "mark_paid_and_group";
+  const markGroup = payload.mark_group_added === true || payload.group_added === true || payload.action === "mark_group_added" || payload.action === "mark_paid_and_group";
+  const exclude = payload.exclude_from_live_session_flow !== false;
+
+  if (markPaid) {
+    lead.manual_paid = true;
+    lead.marked_paid = true;
+    lead.payment_status = "paid";
+    lead.enrollment_status = lead.enrollment_status || "active";
+    lead.paid_at = lead.paid_at || now;
+    lead.paid_marked_at = now;
+  }
+
+  if (markGroup) {
+    lead.group_added = true;
+    lead.added_to_group = true;
+    lead.added_to_paid_group = true;
+    lead.group_added_at = lead.group_added_at || now;
+  }
+
+  if (exclude) {
+    lead.live_session_automation_excluded = true;
+    lead.exclude_from_live_session_flow = true;
+    lead.daily_live_session_excluded_reason = markPaid && markGroup ? "paid_and_added_to_group" : markPaid ? "paid" : markGroup ? "added_to_group" : "manual_exclusion";
+  }
+
+  if (markPaid || markGroup) {
+    lead.status = "paid_enrolled";
+    lead.stage = "paid_enrolled";
+    lead.lead_stage = "paid_enrolled";
+    lead.next_action = "student_onboarding_or_group_support";
+  }
+
+  lead.paid_group_status_updated_at = now;
+  lead.updated_at = now;
+  lead.updated_by = actor?.id || lead.updated_by || null;
+
+  ensureCrmArray(db, "action_logs").push(withTimestamps({
+    id: uuid(),
+    action: "lead_paid_group_status_updated",
+    lead_id: lead.id,
+    actor_id: actor?.id || null,
+    mark_paid: markPaid,
+    mark_group_added: markGroup,
+    exclude_from_live_session_flow: exclude,
+    note: payload.note || "",
+  }));
+
+  return lead;
+}
+
+async function ngHandlePaidGroupLeadAction(req, res, action) {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const lead = getLeadByAnyId(db, req.params.leadId || req.params.id);
+    if (!lead) return res.status(404).json({ success: false, error: "Lead not found" });
+
+    const payload = { ...(req.body || {}), action };
+    if (action === "resume_live_session") {
+      lead.live_session_automation_excluded = false;
+      lead.exclude_from_live_session_flow = false;
+      lead.exclude_daily_live_session = false;
+      lead.daily_live_session_excluded_reason = "";
+      lead.updated_at = nowIso();
+      ensureCrmArray(db, "action_logs").push(withTimestamps({ id: uuid(), action: "lead_live_session_automation_resumed", lead_id: lead.id, actor_id: user.id }));
+      await writeCrmDb(db);
+      return res.json({ success: true, lead, resumed: true });
+    }
+
+    const updated = ngApplyPaidGroupStatusToLead(db, lead, payload, user);
+    await writeCrmDb(db);
+    res.json({ success: true, lead: updated, paid_or_group_excluded: ngLeadIsPaidOrGroupAddedForLiveSession(updated) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+}
+
+app.post("/admin/crm/leads/:leadId/paid-group-status", (req, res) => ngHandlePaidGroupLeadAction(req, res, req.body?.action || "custom"));
+app.post("/admin/crm/leads/:leadId/mark-paid", (req, res) => ngHandlePaidGroupLeadAction(req, res, "mark_paid"));
+app.post("/admin/crm/leads/:leadId/mark-added-to-group", (req, res) => ngHandlePaidGroupLeadAction(req, res, "mark_group_added"));
+app.post("/admin/crm/leads/:leadId/mark-paid-and-group", (req, res) => ngHandlePaidGroupLeadAction(req, res, "mark_paid_and_group"));
+app.post("/admin/crm/leads/:leadId/resume-live-session-automation", (req, res) => ngHandlePaidGroupLeadAction(req, res, "resume_live_session"));
+
 app.post("/admin/crm/automation/run-due", async (req, res) => {
   try {
     await requireAutomationRunPermission(req);
@@ -14179,16 +14565,26 @@ app.post("/admin/crm/automation/run-due", async (req, res) => {
       source: req.body.source || req.query.source || "run_due",
     });
 
+    const googleMeetAppointmentResults = await ngRunGoogleMeetAppointmentScheduler({
+      db,
+      brandId,
+      limit: Number(req.body.google_meet_limit || req.query.google_meet_limit || remainingLimit || limit),
+      dryRun: req.body.dry_run === true || req.query.dry_run === "true",
+      source: req.body.source || req.query.source || "run_due",
+    });
+
     await writeCrmDb(db);
     res.json({
       success: true,
-      processed: results.length + firstMessageResults.length + Number(dailySessionResults.processed || 0),
+      processed: results.length + firstMessageResults.length + Number(dailySessionResults.processed || 0) + Number(googleMeetAppointmentResults.processed || 0),
       automation_processed: results.length,
       first_message_processed: firstMessageResults.length,
       daily_session_processed: dailySessionResults.processed || 0,
+      google_meet_processed: googleMeetAppointmentResults.processed || 0,
       results,
       first_message_results: firstMessageResults,
       daily_session_results: dailySessionResults,
+      google_meet_results: googleMeetAppointmentResults,
     });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
@@ -15599,6 +15995,8 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   daily_session_send_to_interested: true,
   daily_session_send_to_no_reply: true,
   daily_session_exclude_paid: true,
+  daily_session_exclude_group_added: true,
+  daily_session_exclude_manual_excluded: true,
   daily_session_exclude_suppressed: true,
   daily_session_exclude_not_interested: true,
   pricing_mode: "hide_prices_and_handoff",
@@ -19573,12 +19971,12 @@ function ngAylaLastOutboundOfferedGoogleMeet(text = "") {
 
 function ngAylaIsDirectGoogleMeetRequest(text = "") {
   const t = String(text || "").trim().toLowerCase();
-  return /(connect me|let'?s connect|let connect|connect with mentor|connect to mentor|book.*mentor|book.*meet|schedule.*meet|schedule.*mentor|google\s*meet|mentor consultation|i want guidance|want guidance|guide me|talk to mentor|speak to mentor|call me|arrange.*mentor|arrange.*meet)/i.test(t);
+  return /(connect me|let'?s connect|let connect|connect with mentor|connect to mentor|book.*mentor|book.*meet|schedule.*meet|schedule.*mentor|google\s*meet|mentor consultation|i want guidance|want guidance|guide me|talk to mentor|speak to mentor|call me|i want it|i want this|arrange.*mentor|arrange.*meet)/i.test(t);
 }
 
 function ngAylaIsPositiveShortReply(text = "") {
   const t = String(text || "").trim().toLowerCase();
-  return /^(yes|yeah|yep|ok|okay|sure|great|good|fine|interested|i am interested|sounds good|lets do it|let's do it|go ahead|please|send|share|done|i like it|liked it|that's great|thats great|perfect)$/i.test(t);
+  return /^(yes|yeah|yep|ok|okay|sure|great|good|fine|interested|i am interested|i want|want|i want it|i want this|i need it|sounds good|lets do it|let's do it|go ahead|please|send|share|done|i like it|liked it|that's great|thats great|perfect)$/i.test(t);
 }
 
 function ngAylaCreateGoogleMeetRequest(db = {}, lead = {}, reason = "google_meet_requested", sourceText = "") {
@@ -19652,6 +20050,96 @@ function ngAylaPostRecordingInterestQuestion(assets = {}) {
 Are you interested in joining the live sessions, or would you like a Google Meet mentor consultation for guidance?`;
 }
 
+
+function ngAylaLooksLikeTimePreference(text = "") {
+  const t = String(text || "").toLowerCase();
+  return /(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\b\d{1,2}(:\d{2})?\s*(am|pm)\b|morning|evening|night|afternoon)/i.test(t);
+}
+
+function ngAylaNextDateForWeekday(weekdayIndex, base = new Date()) {
+  const d = new Date(base);
+  const current = d.getDay();
+  let diff = (weekdayIndex + 7 - current) % 7;
+  if (diff === 0) diff = 7;
+  d.setDate(d.getDate() + diff);
+  return d;
+}
+
+function ngAylaParsePreferredGoogleMeetTime(text = "") {
+  const t = String(text || "").toLowerCase();
+  const now = new Date();
+  let date = new Date(now);
+  if (/tomorrow/i.test(t)) date.setDate(date.getDate() + 1);
+  const weekdays = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
+  for (const [name, idx] of Object.entries(weekdays)) {
+    if (t.includes(name)) { date = ngAylaNextDateForWeekday(idx, now); break; }
+  }
+  let hour = null;
+  let minute = 0;
+  const timeMatch = t.match(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/);
+  if (timeMatch) {
+    hour = Number(timeMatch[1]);
+    minute = Number(timeMatch[2] || 0);
+    const ap = timeMatch[3];
+    if (ap === "pm" && hour < 12) hour += 12;
+    if (ap === "am" && hour === 12) hour = 0;
+    if (!ap && hour >= 1 && hour <= 7) hour += 12;
+  } else if (/morning/i.test(t)) hour = 10;
+  else if (/afternoon/i.test(t)) hour = 15;
+  else if (/evening|night/i.test(t)) hour = 18;
+  if (hour === null || hour < 0 || hour > 23) return null;
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  const hh = String(hour).padStart(2, "0");
+  const mm = String(minute).padStart(2, "0");
+  return { date: `${y}-${m}-${d}`, time: `${hh}:${mm}`, start_time: `${y}-${m}-${d}T${hh}:${mm}:00`, timezone: "America/New_York" };
+}
+
+function ngAylaCreateGoogleMeetAppointmentFromPreference(db = {}, lead = {}, preference = null, sourceText = "") {
+  if (!db || !lead?.id || !preference) return null;
+  const existing = ensureCrmArray(db, "appointments").find((item) => String(item.lead_id || "") === String(lead.id || "") && ["scheduled", "missing_link", "needs_link", "rescheduled"].includes(String(item.status || "").toLowerCase()));
+  const payload = withTimestamps({
+    ...(existing || {}),
+    id: existing?.id || uuid(),
+    brand_id: lead.brand_id || db.settings?.default_brand_id || null,
+    title: "Google Meet Mentor Consultation",
+    name: "Google Meet Mentor Consultation",
+    lead_id: lead.id,
+    student_name: ng41LeadName(lead),
+    student_email: ng41LeadEmail(lead),
+    student_phone: ng41LeadPhone(lead),
+    phone: ng41LeadPhone(lead),
+    email: ng41LeadEmail(lead),
+    appointment_type: "google_meet_mentor_consultation",
+    type: "google_meet_mentor_consultation",
+    status: existing?.status || "missing_link",
+    link_status: existing?.link_status || "missing_link",
+    date: preference.date,
+    time: preference.time,
+    scheduled_date: preference.date,
+    scheduled_time: preference.time,
+    start_time: preference.start_time,
+    timezone: preference.timezone || "America/New_York",
+    timezone_str: preference.timezone || "America/New_York",
+    reminder_minutes_before: 5,
+    google_meet_requested: true,
+    link_send_scheduled: false,
+    google_meet_link_send_scheduled: false,
+    conversation_summary: sourceText || "Student shared preferred time for Google Meet mentor consultation.",
+    notes: sourceText || existing?.notes || "Preferred Google Meet time collected by Ayla.",
+    next_action: "admin_paste_google_meet_link",
+    source: "ayla_google_meet_booking_bridge",
+  }, existing || {});
+  if (existing) Object.assign(existing, payload); else ensureCrmArray(db, "appointments").push(payload);
+  lead.next_action = "admin_paste_google_meet_link";
+  lead.stage = "google_meet_time_collected";
+  lead.lead_stage = "google_meet_time_collected";
+  lead.google_meet_appointment_id = payload.id;
+  lead.updated_at = nowIso();
+  return payload;
+}
+
 function ngAylaHardSalesRouter({ db = {}, lead = {}, messages = [], channel = "whatsapp" } = {}) {
   const cleanMessages = safeArray(messages).filter((m) => ngMessageText(m));
   const latestInbound = ngLatestInbound(cleanMessages);
@@ -19693,7 +20181,21 @@ function ngAylaHardSalesRouter({ db = {}, lead = {}, messages = [], channel = "w
   const asksPrice = ngAylaIsPriceQuestion(latestText);
   const directGoogleMeetRequest = ngAylaIsDirectGoogleMeetRequest(latestText);
   const previousOfferedGoogleMeet = ngAylaLastOutboundOfferedGoogleMeet(lastOutboundText);
+  const leadWaitingForGoogleMeetTime = /google_meet_requested|google_meet_time_collected/i.test(String(lead.stage || lead.lead_stage || lead.next_action || ""));
   const positiveGoogleMeetContext = previousOfferedGoogleMeet && ngAylaIsPositiveShortReply(latestText);
+  const timePreference = (leadWaitingForGoogleMeetTime || previousOfferedGoogleMeet) && ngAylaLooksLikeTimePreference(latestText)
+    ? ngAylaParsePreferredGoogleMeetTime(latestText)
+    : null;
+
+  if (timePreference) {
+    const appointment = ngAylaCreateGoogleMeetAppointmentFromPreference(db, lead, timePreference, latestText);
+    return {
+      intent: "google_meet_time_collected_missing_link",
+      reply: `Great Doctor, I have noted your preferred Google Meet time for ${timePreference.date} at ${timePreference.time} EST.
+
+Our team will confirm the Google Meet link shortly. You will receive the link at the meeting time.`
+    };
+  }
 
   if (asksPrice) {
     ngAylaCreateGoogleMeetRequest(db, lead, "pricing_interest", latestText);
