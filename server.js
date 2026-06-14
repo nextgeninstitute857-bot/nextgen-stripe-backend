@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v41-crm-growth-command-system";
+const NEXTGEN_BACKEND_BUILD = "v42-ai-control-owner-command-enforcement";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -13273,6 +13273,7 @@ async function sendCrmMessage({
 }) {
   const template = templateId ? getMessageTemplateByKey(db, templateId) : null;
   const lead = leadId ? getLeadByAnyId(db, leadId) : null;
+  const commandMetadata = ngAylaOutboundCommandMetadata(db, lead || templateVariables?.lead || {});
   const cleanChannel = resolveCrmChannel({
     requestedChannel: channel || template?.channel || template?.send_channel || "auto",
     lead,
@@ -13305,6 +13306,7 @@ async function sendCrmMessage({
     text: finalText,
     metadata: {
       ...(metadata || {}),
+      ai_control: commandMetadata,
       source: metadata?.source || "crm_messages_send",
       template_key: template?.key || templateId || null,
       ...(cleanChannel === "whatsapp" ? {
@@ -13633,6 +13635,11 @@ function ngFirstMessageVariablesForLead(lead = {}) {
 }
 
 async function ngSendAutoFirstMessageForLead({ db, lead, brandId = null, actorId = "system", source = "auto_first_message", dryRun = false } = {}) {
+  const ownerBlock = ngAylaOwnerCommandBlocksBulkSend(db);
+  if (ownerBlock.blocked) {
+    return { success: true, sent: false, skipped: true, reason: ownerBlock.reason, lead_id: lead?.id || null };
+  }
+
   const allowed = ngCanSendAutoFirstMessage(db, lead || {});
   if (!allowed.ok) {
     return { success: true, sent: false, skipped: true, reason: allowed.reason, lead_id: lead?.id || null };
@@ -13640,7 +13647,7 @@ async function ngSendAutoFirstMessageForLead({ db, lead, brandId = null, actorId
 
   const templateKey = "meta_ad_first_message";
   const template = getMessageTemplateByKey(db, templateKey) || getMessageTemplateByKey(db, "META_AD_FIRST_MESSAGE");
-  const vars = ngFirstMessageVariablesForLead(lead);
+  const vars = { ...ngFirstMessageVariablesForLead(lead), ai_control_command_context: ngBuildAylaCommandContext(db, lead).slice(0, 3000) };
   const fallbackText = "Hi Doctor {{student_name}}, this is NextGen USMLE. You reached out about {{exam_type}} preparation. We have a live guidance session today at {{session_time}} to explain the program and mentor teaching style. Can you join?";
   const to = getBestRecipientForChannel({ channel: "whatsapp", lead });
 
@@ -15275,6 +15282,18 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   mode: "approval", // observer | approval | admin_action
   default_conversation_mode: "draft", // manual | draft | auto
   live_agent_mode: "draft", // draft first; auto only after testing
+
+  // v42: Admin-written live strategy command. This is intentionally free-text so the owner can
+  // change sales behavior without backend edits. It is injected into Ayla prompts and logged on
+  // outbound/automation/template sends. Backend safety rules and WhatsApp template rules still apply.
+  owner_live_command_enabled: true,
+  owner_live_command: "",
+  owner_do_rule: "",
+  owner_dont_rule: "",
+  ai_strategy_override: "",
+  command_priority_mode: "owner_first",
+  last_owner_command_at: null,
+  last_owner_command_by: null,
   lookback_hours: 24,
   max_records_per_check: 100,
   daily_minutes_limit: 15,
@@ -16573,6 +16592,65 @@ app.put("/admin/crm/assistant/settings", async (req, res) => {
 
     await writeCrmDb(db);
     res.json({ success: true, settings: db.ai_orchestration_settings });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+
+app.post("/admin/crm/assistant/owner-command", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const command = normalizeCrmString(req.body?.owner_live_command ?? req.body?.command ?? req.body?.instruction ?? "");
+
+    db.ai_orchestration_settings = {
+      ...db.ai_orchestration_settings,
+      owner_live_command_enabled: req.body?.owner_live_command_enabled !== undefined ? Boolean(req.body.owner_live_command_enabled) : db.ai_orchestration_settings.owner_live_command_enabled !== false,
+      owner_live_command: command,
+      owner_do_rule: req.body?.owner_do_rule ?? db.ai_orchestration_settings.owner_do_rule ?? "",
+      owner_dont_rule: req.body?.owner_dont_rule ?? db.ai_orchestration_settings.owner_dont_rule ?? "",
+      ai_strategy_override: req.body?.ai_strategy_override ?? db.ai_orchestration_settings.ai_strategy_override ?? "",
+      command_priority_mode: req.body?.command_priority_mode || db.ai_orchestration_settings.command_priority_mode || "owner_first",
+      last_owner_command_at: ngNowIso(),
+      last_owner_command_by: user.id,
+      updated_by: user.id,
+      updated_at: ngNowIso(),
+    };
+
+    ensureCrmArray(db, "ai_agent_action_logs").unshift(withTimestamps({
+      id: uuid(),
+      area: "ai_control",
+      action_type: "owner_live_command_saved",
+      status: "completed",
+      created_by: user.id,
+      metadata: {
+        owner_live_command_enabled: db.ai_orchestration_settings.owner_live_command_enabled,
+        owner_live_command_excerpt: command.slice(0, 600),
+        command_priority_mode: db.ai_orchestration_settings.command_priority_mode,
+      },
+    }));
+
+    await writeCrmDb(db);
+    res.json({ success: true, settings: db.ai_orchestration_settings });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/assistant/command-context/:leadId", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    const lead = getLeadByAnyId(db, req.params.leadId) || {};
+    const context = ngBuildAylaCommandContext(db, lead);
+    res.json({
+      success: true,
+      lead_found: Boolean(lead.id || lead.lead_id),
+      lead_id: lead.id || lead.lead_id || req.params.leadId,
+      ai_control: ngAylaOutboundCommandMetadata(db, lead),
+      command_context: context,
+    });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -18637,9 +18715,96 @@ function ngAylaApprovedProofItems(db = {}, lead = {}) {
   return proof.sort((a, b) => Number(a.priority || 99) - Number(b.priority || 99)).slice(0, 5);
 }
 
+
+function ngAylaSettingsText(value, max = 1800) {
+  return ngAylaCleanText(value, max);
+}
+
+function ngFindCampaignForLeadCommand(db = {}, lead = {}) {
+  const campaigns = ensureCrmArray(db, "campaigns");
+  if (!campaigns.length || !lead) return null;
+  const candidates = [
+    lead.campaign_id,
+    lead.campaignId,
+    lead.campaign_key,
+    lead.campaign_name,
+    lead.source_campaign,
+    lead.source_campaign_id,
+    lead.meta_campaign_id,
+    lead.ad_campaign_id,
+  ].map((x) => String(x || "").trim()).filter(Boolean);
+  if (!candidates.length) return null;
+  const normalized = candidates.map((x) => x.toLowerCase());
+  return campaigns.find((campaign) => {
+    const fields = [campaign.id, campaign._id, campaign.key, campaign.slug, campaign.name, campaign.title, campaign.campaign_name, campaign.meta_campaign_id, campaign.facebook_campaign_id]
+      .map((x) => String(x || "").trim()).filter(Boolean);
+    return fields.some((field) => {
+      const clean = field.toLowerCase();
+      return normalized.includes(clean) || normalized.some((n) => n && (clean.includes(n) || n.includes(clean)));
+    });
+  }) || null;
+}
+
+function ngAylaCampaignCommandContext(db = {}, lead = {}) {
+  const campaign = ngFindCampaignForLeadCommand(db, lead);
+  if (!campaign) return "";
+  const commandFields = [
+    ["Campaign Command Center", campaign.campaign_command_center || campaign.command_center || campaign.ai_command_center || campaign.command_instructions || campaign.instructions],
+    ["AI must do", campaign.ai_must_do || campaign.must_do || campaign.required_behavior || campaign.ai_required_actions],
+    ["AI must not do", campaign.ai_must_not || campaign.must_not || campaign.forbidden_behavior || campaign.ai_forbidden_actions],
+    ["Campaign objective", campaign.objective || campaign.goal || campaign.conversion_goal],
+    ["Campaign offer", campaign.offer || campaign.primary_offer || campaign.program_offer],
+    ["Campaign links", [campaign.session_link, campaign.recording_link, campaign.community_link, campaign.mentor_booking_link, campaign.lms_link, campaign.website_link].filter(Boolean).join(" | ")],
+  ];
+  const lines = commandFields
+    .map(([label, value]) => [label, ngAylaSettingsText(value, 1600)])
+    .filter(([, value]) => Boolean(value))
+    .map(([label, value]) => `- ${label}: ${value}`);
+  if (!lines.length) return "";
+  return `Campaign-specific command for this lead (${campaign.name || campaign.title || campaign.id || "campaign"}):\n${lines.join("\n")}`;
+}
+
+function ngAylaOwnerLiveCommandContext(settings = {}) {
+  if (settings.owner_live_command_enabled === false) return "";
+  const blocks = [
+    ["Owner Live Command", settings.owner_live_command || settings.owner_runtime_command || settings.live_owner_command],
+    ["Owner Do Rule", settings.owner_do_rule],
+    ["Owner Don't Rule", settings.owner_dont_rule || settings.owner_dont_rule_text],
+    ["Strategy Override", settings.ai_strategy_override || settings.strategy_override || settings.current_strategy_command],
+  ].map(([label, value]) => [label, ngAylaSettingsText(value, 2200)])
+    .filter(([, value]) => Boolean(value))
+    .map(([label, value]) => `- ${label}: ${value}`);
+  if (!blocks.length) return "";
+  return `HIGHEST PRIORITY OWNER COMMANDS FROM AI CONTROL CENTER:\n${blocks.join("\n")}\n\nApply these owner commands before normal sales style or campaign defaults, unless they conflict with safety rules, opt-out rules, legal/compliance rules, or WhatsApp template restrictions.`;
+}
+
+function ngAylaOutboundCommandMetadata(db = {}, lead = {}) {
+  const settings = ngAylaPickSettings(db);
+  return {
+    owner_live_command_enabled: settings.owner_live_command_enabled !== false,
+    owner_live_command_active: Boolean(ngAylaSettingsText(settings.owner_live_command || settings.owner_runtime_command || settings.live_owner_command, 500)),
+    owner_live_command_excerpt: ngAylaSettingsText(settings.owner_live_command || settings.owner_runtime_command || settings.live_owner_command, 500),
+    campaign_command_active: Boolean(ngAylaCampaignCommandContext(db, lead)),
+    command_priority_mode: settings.command_priority_mode || "owner_first",
+    command_context_version: "v42_owner_command_enforcement",
+  };
+}
+
+function ngAylaOwnerCommandBlocksBulkSend(db = {}) {
+  const settings = ngAylaPickSettings(db);
+  if (settings.owner_live_command_enabled === false) return { blocked: false, reason: "owner_command_disabled" };
+  const rawText = [settings.owner_live_command, settings.owner_dont_rule, settings.ai_strategy_override].map((x) => String(x || "").toLowerCase()).join("\n");
+  if (!rawText.trim()) return { blocked: false, reason: "no_owner_command" };
+  const hardStops = ["pause all automation", "pause automation", "stop all automation", "do not send any messages", "don't send any messages", "stop sending messages", "pause all messages", "do not message anyone", "stop all outbound", "pause all outbound"];
+  const matched = hardStops.find((item) => rawText.includes(item));
+  return matched ? { blocked: true, reason: `owner_command_block:${matched}` } : { blocked: false, reason: "allowed" };
+}
+
 function ngBuildAylaCommandContext(db = {}, lead = {}) {
   const s = ngAylaPickSettings(db);
   const proof = ngAylaApprovedProofItems(db, lead);
+  const ownerCommandContext = ngAylaOwnerLiveCommandContext(s);
+  const campaignCommandContext = ngAylaCampaignCommandContext(db, lead);
   const commandBlocks = [
     s.global_ai_command,
     s.command_instructions,
@@ -18652,6 +18817,7 @@ function ngBuildAylaCommandContext(db = {}, lead = {}) {
     s.post_session_followup_rule,
     s.next_day_followup_rule,
     s.proof_testimonials_rule,
+    s.proof_and_testimonials_rule,
     s.community_fallback_rule,
     s.mentor_booking_rule,
     s.payment_link_rule,
@@ -18667,12 +18833,17 @@ function ngBuildAylaCommandContext(db = {}, lead = {}) {
   });
 
   return `
+${ownerCommandContext || "No active Owner Live Command saved in AI Control."}
+
+${campaignCommandContext || "No campaign-specific command found for this lead."}
+
 Frontend AI Control Center rules:
-${commandBlocks.length ? commandBlocks.map((x, i) => `${i + 1}. ${x}`).join("\n") : "No custom command rules saved yet."}
+${commandBlocks.length ? commandBlocks.map((x, i) => `${i + 1}. ${x}`).join("
+") : "No custom command rules saved yet."}
 
 Default live-session rule:
 - For Meta/form leads, assume they requested contact. Silence alone is not opt-out.
-- Invite to the 1 PM EST live session, send a 5-minute reminder, send the session link at session time if available, follow up after session, and follow up next day if silent.
+- Invite to the configured live session time when the admin/campaign rules say a session is available. Do not override active owner commands or campaign commands.
 - Stop only when the lead says stop, unsubscribe, wrong number, do not message, or not interested, or when admin marks paid/human-handoff.
 
 Program/proof rule:
@@ -18681,7 +18852,8 @@ Program/proof rule:
 - Do not fabricate testimonials, pass claims, score claims, residency/match claims, visa claims, or official affiliations.
 
 Approved proof links/items:
-${proofLines.length ? proofLines.join("\n") : "No approved proof item found. Do not claim specific testimonial proof unless admin provides it."}`.trim();
+${proofLines.length ? proofLines.join("
+") : "No approved proof item found. Do not claim specific testimonial proof unless admin provides it."}`.trim();
 }
 
 async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }) {
@@ -18713,6 +18885,7 @@ Your job:
 - Progress the conversation one step at a time.
 
 Strict rules:
+- The Owner Live Command from AI Control Center is highest priority for sales/conversation behavior unless it violates safety, opt-out, or WhatsApp policy.
 - Keep replies short: usually 1 to 2 sentences, maximum 3 short sentences.
 - Sound natural, warm, professional, doctor-to-doctor.
 - Do not use generic filler such as "That makes sense, Doctor" unless it genuinely fits.
