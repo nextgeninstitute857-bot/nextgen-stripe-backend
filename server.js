@@ -11610,6 +11610,7 @@ async function handleUniversalWebhook({ req, res, platform, integrationId = null
           ngAffArray(db, "ai_actions").unshift({ id: uuid(), title: "WhatsApp template required for Full AI Auto", area: "whatsapp", type: "template_required", status: "pending_approval", lead_id: lead.id, payload: { lead_id: lead.id, channel }, created_at: ngAffNow(), updated_at: ngAffNow() });
         } else {
           const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel });
+          const replyDelayMs = await ngAylaWaitBeforeAutoSend(db);
           const to = getBestRecipientForChannel({ channel, lead, message: latestInbound });
           const sendResult = await sendCrmMessage({
             db,
@@ -11629,7 +11630,7 @@ async function handleUniversalWebhook({ req, res, platform, integrationId = null
           ngMarkAiAutoProcessed(lead, latestInbound, { channel, reply: ai.reply });
           ngReleaseAiAutoLock(duplicateGuard.lock_key);
           aiAutoResult = { sent: Boolean(sendResult.success), queued: Boolean(sendResult.queued), channel, to, result: sendResult };
-          ngAffArray(db, "ai_auto_runs").unshift({ id: uuid(), lead_id: lead.id, inbound_message_id: ngAiAutoMessageFingerprint(latestInbound), channel, reply: ai.reply, sent: Boolean(sendResult.success), queued: Boolean(sendResult.queued), result: sendResult, model: ai.model, usage: ai.usage, created_by: "webhook", created_at: ngAffNow() });
+          ngAffArray(db, "ai_auto_runs").unshift({ id: uuid(), lead_id: lead.id, inbound_message_id: ngAiAutoMessageFingerprint(latestInbound), channel, reply: ai.reply, sent: Boolean(sendResult.success), queued: Boolean(sendResult.queued), result: sendResult, model: ai.model, usage: ai.usage, reply_delay_ms: replyDelayMs || 0, created_by: "webhook", created_at: ngAffNow() });
         }
       }
     } catch (aiError) {
@@ -14334,21 +14335,95 @@ function ngGoogleMeetCommandCenterQueues(db = {}, brandId = null) {
     .filter((item) => !brandId || String(item.brand_id || "") === String(brandId || ""));
   const handoffs = ensureCrmArray(db, "handoffs")
     .filter((item) => !brandId || String(item.brand_id || "") === String(brandId || ""));
-  const googleMeetLeads = leads.filter((lead) => {
-    const blob = JSON.stringify(lead || {}).toLowerCase();
-    return blob.includes("google_meet") || blob.includes("mentor_requested") || blob.includes("schedule_google_meet");
+
+  const leadById = new Map(leads.map((lead) => [String(lead.id || lead._id || ""), lead]));
+  const activeAppointmentsByLead = new Map();
+  appointments.forEach((appointment) => {
+    const leadId = String(appointment.lead_id || "");
+    if (!leadId) return;
+    const status = String(appointment.status || "").toLowerCase();
+    const typeBlob = [appointment.appointment_type, appointment.type, appointment.title, appointment.name, appointment.source].join(" ").toLowerCase();
+    const isGoogle = typeBlob.includes("google") || typeBlob.includes("mentor") || appointment.google_meet_requested;
+    if (!isGoogle || ["completed", "attended", "done", "cancelled", "canceled", "converted"].includes(status)) return;
+    const previous = activeAppointmentsByLead.get(leadId);
+    if (!previous || String(appointment.updated_at || appointment.created_at || "") > String(previous.updated_at || previous.created_at || "")) {
+      activeAppointmentsByLead.set(leadId, appointment);
+    }
   });
-  const requests = [
-    ...googleMeetLeads.map((lead) => ({ id: `lead_${lead.id}`, type: "lead", lead_id: lead.id, name: ng41LeadName(lead), phone: ng41LeadPhone(lead), email: ng41LeadEmail(lead), status: lead.stage || lead.lead_stage || lead.status || "google_meet_requested", source: "lead", raw: lead })),
-    ...hotQueue.filter((item) => String(item.request_type || item.status || item.reason || "").toLowerCase().includes("google") || String(item.next_best_action || "").toLowerCase().includes("google")).map((item) => ({ id: `queue_${item.id}`, type: "queue", lead_id: item.lead_id, name: item.lead_name || item.name || "Student", phone: item.phone || item.whatsapp || "", email: item.email || "", status: item.status || "google_meet_requested", source: "queue", raw: item })),
-    ...handoffs.filter((item) => String(item.handoff_type || item.requested_action || item.status || "").toLowerCase().includes("google")).map((item) => ({ id: `handoff_${item.id}`, type: "handoff", lead_id: item.lead_id, name: item.lead_name || item.name || "Student", phone: item.phone || "", email: item.email || "", status: item.status || "pending_google_meet_booking", source: "handoff", raw: item })),
-  ];
+
+  const makeRequest = (sourceItem, source = "lead") => {
+    const leadId = String(sourceItem.lead_id || sourceItem.leadId || sourceItem.id || sourceItem._id || "");
+    const lead = leadById.get(leadId) || (source === "lead" ? sourceItem : null) || {};
+    const appointment = activeAppointmentsByLead.get(leadId) || null;
+    const name = sourceItem.lead_name || sourceItem.student_name || sourceItem.name || ng41LeadName(lead) || appointment?.student_name || "Student";
+    const phone = sourceItem.phone || sourceItem.whatsapp || sourceItem.student_phone || sourceItem.lead_phone || ng41LeadPhone(lead) || appointment?.phone || appointment?.student_phone || "";
+    const email = sourceItem.email || sourceItem.student_email || sourceItem.lead_email || ng41LeadEmail(lead) || appointment?.email || appointment?.student_email || "";
+    return {
+      id: `${source}_${leadId || sourceItem.id || uuid()}`,
+      type: source,
+      lead_id: leadId,
+      appointment_id: appointment?.id || sourceItem.appointment_id || sourceItem.google_meet_appointment_id || lead.google_meet_appointment_id || null,
+      name,
+      student_name: name,
+      phone,
+      whatsapp: phone,
+      email,
+      status: appointment?.status || sourceItem.status || lead.stage || lead.lead_stage || "pending_google_meet_booking",
+      date: appointment?.date || appointment?.scheduled_date || sourceItem.date || sourceItem.scheduled_date || lead.google_meet_date || "",
+      time: appointment?.time || appointment?.scheduled_time || sourceItem.time || sourceItem.scheduled_time || lead.google_meet_time || "",
+      meeting_link: ngGoogleMeetAppointmentLink(appointment || {}) || "",
+      link_status: appointment?.link_status || (ngGoogleMeetAppointmentLink(appointment || {}) ? "ready" : "missing_link"),
+      source,
+      raw: { ...lead, ...sourceItem, appointment },
+    };
+  };
+
+  const rawRequests = [];
+  leads.forEach((lead) => {
+    const blob = JSON.stringify(lead || {}).toLowerCase();
+    if (blob.includes("google_meet") || blob.includes("mentor_requested") || blob.includes("schedule_google_meet") || activeAppointmentsByLead.has(String(lead.id || ""))) rawRequests.push(makeRequest(lead, "lead"));
+  });
+  hotQueue.forEach((item) => {
+    if (String(item.request_type || item.status || item.reason || "").toLowerCase().includes("google") || String(item.next_best_action || "").toLowerCase().includes("google")) rawRequests.push(makeRequest(item, "queue"));
+  });
+  handoffs.forEach((item) => {
+    if (String(item.handoff_type || item.requested_action || item.status || "").toLowerCase().includes("google")) rawRequests.push(makeRequest(item, "handoff"));
+  });
+
+  const deduped = new Map();
+  rawRequests.forEach((item) => {
+    const key = String(item.lead_id || item.phone || item.email || item.id);
+    const existing = deduped.get(key);
+    if (!existing) deduped.set(key, item);
+    else {
+      deduped.set(key, {
+        ...existing,
+        ...item,
+        name: existing.name !== "Student" ? existing.name : item.name,
+        student_name: existing.student_name !== "Student" ? existing.student_name : item.student_name,
+        phone: existing.phone || item.phone,
+        whatsapp: existing.whatsapp || item.whatsapp,
+        email: existing.email || item.email,
+        appointment_id: existing.appointment_id || item.appointment_id,
+        meeting_link: existing.meeting_link || item.meeting_link,
+        date: existing.date || item.date,
+        time: existing.time || item.time,
+      });
+    }
+  });
+
+  const requests = Array.from(deduped.values()).sort((a, b) => String(b.raw?.updated_at || b.raw?.created_at || "").localeCompare(String(a.raw?.updated_at || a.raw?.created_at || "")));
+  const googleAppointments = appointments.filter((item) => {
+    const typeBlob = [item.appointment_type, item.type, item.title, item.name, item.source].join(" ").toLowerCase();
+    return typeBlob.includes("google") || typeBlob.includes("mentor") || item.google_meet_requested || item.google_meet_link_send_scheduled || item.link_send_scheduled;
+  });
+
   return {
     requests,
-    appointments,
-    missing_link: appointments.filter((item) => !ngGoogleMeetAppointmentLink(item) && ["scheduled", "rescheduled", "missing_link", "needs_link"].includes(String(item.status || "").toLowerCase() || "scheduled")),
-    link_ready: appointments.filter((item) => ngGoogleMeetAppointmentLink(item) && !item.google_meet_link_sent_at),
-    sent: appointments.filter((item) => item.google_meet_link_sent_at),
+    appointments: googleAppointments,
+    missing_link: googleAppointments.filter((item) => !ngGoogleMeetAppointmentLink(item) && ["scheduled", "rescheduled", "missing_link", "needs_link"].includes(String(item.status || "").toLowerCase() || "scheduled")),
+    link_ready: googleAppointments.filter((item) => ngGoogleMeetAppointmentLink(item) && !item.google_meet_link_sent_at),
+    sent: googleAppointments.filter((item) => item.google_meet_link_sent_at),
   };
 }
 
@@ -14359,6 +14434,85 @@ app.get("/admin/crm/google-meet-command-center", async (req, res) => {
     const brandId = getCrmBrandId(req, db);
     const queues = ngGoogleMeetCommandCenterQueues(db, brandId);
     res.json({ success: true, ...queues, counts: { requests: queues.requests.length, appointments: queues.appointments.length, missing_link: queues.missing_link.length, link_ready: queues.link_ready.length, sent: queues.sent.length } });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/google-meet-command-center/save-link", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const body = req.body || {};
+    const link = normalizeCrmString(body.google_meet_link || body.meeting_link || body.link || "");
+    if (!link) return res.status(400).json({ success: false, error: "Google Meet link is required" });
+
+    const lead = body.lead_id ? getLeadByAnyId(db, body.lead_id) : null;
+    const appointments = ensureCrmArray(db, "appointments");
+    let item = null;
+    if (body.appointment_id || body.id) item = appointments.find((appointment) => String(appointment.id) === String(body.appointment_id || body.id));
+    if (!item && lead?.id) item = appointments.find((appointment) => String(appointment.lead_id || "") === String(lead.id || "") && !["completed", "attended", "done", "cancelled", "canceled"].includes(String(appointment.status || "").toLowerCase()));
+
+    if (!item) {
+      if (!lead?.id && !body.student_name && !body.phone && !body.email) return res.status(400).json({ success: false, error: "Lead or student contact is required" });
+      item = withTimestamps({
+        id: uuid(),
+        brand_id: lead?.brand_id || brandId || null,
+        title: "Google Meet Mentor Consultation",
+        name: "Google Meet Mentor Consultation",
+        lead_id: lead?.id || body.lead_id || null,
+        student_name: body.student_name || ng41LeadName(lead || {}) || "Student",
+        phone: body.phone || ng41LeadPhone(lead || {}) || "",
+        student_phone: body.phone || ng41LeadPhone(lead || {}) || "",
+        email: body.email || ng41LeadEmail(lead || {}) || "",
+        student_email: body.email || ng41LeadEmail(lead || {}) || "",
+        date: body.date || body.scheduled_date || "",
+        time: body.time || body.scheduled_time || "",
+        scheduled_date: body.date || body.scheduled_date || "",
+        scheduled_time: body.time || body.scheduled_time || "",
+        start_time: body.date && body.time ? `${body.date}T${body.time}:00` : "",
+        timezone: body.timezone || "America/New_York",
+        timezone_str: body.timezone || "America/New_York",
+        duration_minutes: Number(body.duration_minutes || 30),
+        appointment_type: "google_meet_mentor_consultation",
+        type: "google_meet_mentor_consultation",
+        google_meet_requested: true,
+        source: "google_meet_command_center_simple_link_paste",
+      });
+      appointments.push(item);
+    } else {
+      item.student_name = item.student_name || body.student_name || ng41LeadName(lead || {}) || "Student";
+      item.phone = item.phone || body.phone || ng41LeadPhone(lead || {}) || "";
+      item.student_phone = item.student_phone || item.phone;
+      item.email = item.email || body.email || ng41LeadEmail(lead || {}) || "";
+      item.student_email = item.student_email || item.email;
+      item.date = body.date || item.date || item.scheduled_date || "";
+      item.time = body.time || item.time || item.scheduled_time || "";
+      item.scheduled_date = item.date;
+      item.scheduled_time = item.time;
+      if (item.date && item.time) item.start_time = `${item.date}T${item.time}:00`;
+    }
+
+    item.google_meet_link = link;
+    item.meeting_link = link;
+    item.location = link;
+    item.link_status = "ready";
+    item.status = "scheduled";
+    item.link_send_scheduled = true;
+    item.google_meet_link_send_scheduled = true;
+    item.schedule_link_send_at_meeting_time = true;
+    item.link_send_status = "scheduled";
+    item.updated_at = nowIso();
+
+    if (lead?.id) {
+      lead.google_meet_appointment_id = item.id;
+      lead.google_meet_booking_state = "link_ready_or_scheduled";
+      lead.waiting_for_google_meet_link = false;
+      lead.live_session_automation_paused_until_google_meet = true;
+      lead.updated_at = nowIso();
+    }
+
+    await writeCrmDb(db);
+    res.json({ success: true, appointment: enrichAppointment(db, item), message: "Google Meet link saved and scheduled for meeting time" });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
@@ -15957,6 +16111,10 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   ai_reply_style: "warm_sales_closer",
   ai_max_sentences: 3,
   ai_max_lines: 4,
+  ai_auto_reply_delay_seconds: 4,
+  ai_auto_reply_delay_min_seconds: 3,
+  ai_auto_reply_delay_max_seconds: 5,
+  basic_conversation_router_enabled: true,
   booking_timezone: "EST",
   disclose_pricing_in_ai_chat: false,
   send_website_early: false,
@@ -16000,6 +16158,7 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   daily_session_exclude_manual_excluded: true,
   daily_session_exclude_suppressed: true,
   daily_session_exclude_not_interested: true,
+  daily_session_exclude_active_google_meet: true,
   pricing_mode: "hide_prices_and_handoff",
   pricing_hot_lead_enabled: true,
   google_meet_booking_enabled: true,
@@ -19506,7 +19665,7 @@ function ngAylaOutboundCommandMetadata(db = {}, lead = {}) {
     owner_live_command_excerpt: ngAylaSettingsText(settings.owner_live_command || settings.owner_runtime_command || settings.live_owner_command, 500),
     campaign_command_active: Boolean(ngAylaCampaignCommandContext(db, lead)),
     command_priority_mode: settings.command_priority_mode || "owner_first",
-    command_context_version: "v55_conversation_state_guard",
+    command_context_version: "v56_real_conversation_router",
   };
 }
 
@@ -19883,6 +20042,25 @@ function ngAylaIsGenericClarification(text = "") {
 function ngAylaHasQuestionMarkOrQuestionWord(text = "") {
   const t = String(text || "").trim().toLowerCase();
   return /\?$/.test(t) || /^(what|why|how|when|where|which|who|can|do|does|is|are|will|would|should)\b/.test(t);
+}
+
+
+function ngAylaIsBasicConversationRequest(text = "") {
+  const t = String(text || "").trim().toLowerCase();
+  if (!t) return false;
+  if (ngAylaHasQuestionMarkOrQuestionWord(t)) return true;
+  if (ngAylaIsGenericClarification(t)) return true;
+  if (/\b(tell me|explain|describe|details about|info about|information about|i want to know|can you tell)\b/i.test(t)) return true;
+  if (/\b(tutor|tutors|teacher|teachers|mentor team|mentors|faculty|who teaches|teaching team)\b/i.test(t)) return true;
+  if (/\b(road\s*map|roadmap|study plan|curriculum|syllabus|classes plan|class plan|daily plan|plan for me)\b/i.test(t)) return true;
+  if (/\b(live session|live sessions|recording|recordings|uworld|u world|video library|demo|first aid|pathoma|sketchy|nbme|qbank|mcq)\b/i.test(t) && !ngAylaIsPositiveShortReply(t)) return true;
+  if (/\b(old graduate|failed|fail|weak|weakness|struggling|confused|gap|exam date|timeline|step 1|step 2|step1|step2)\b/i.test(t) && t.split(/\s+/).length >= 2) return true;
+  return false;
+}
+
+function ngAylaIsShortNonInformational(text = "") {
+  const t = String(text || "").trim().toLowerCase().replace(/[.!،؟?]+$/g, "").trim();
+  return /^(hi|hello|hey|salam|assalam|yes|no|ok|okay|thanks|thank you|thank u|great|fine|good|sure|done|perfect|step\s*1|step\s*2|step1|step2|ck)$/.test(t);
 }
 
 function ngAylaUworldDemoExplanation(assets = {}, opening = "Doctor, this is our UWorld Video Library demo.") {
@@ -20293,6 +20471,8 @@ function ngAylaHardSalesRouter({ db = {}, lead = {}, messages = [], channel = "w
   const worriedOrFailed = /(failed|fail|attempt|low score|nbme|weak|weakness|struggling|confused|lost|worried|scared|old graduate|gap|long gap|delayed|no confidence|don't know what to do|dont know what to do)/i.test(latestText);
   const directQuestion = ngAylaHasQuestionMarkOrQuestionWord(latestText);
   const genericClarification = ngAylaIsGenericClarification(latestText);
+  const basicConversationRequest = ngAylaIsBasicConversationRequest(latestText);
+  const shortNonInformational = ngAylaIsShortNonInformational(latestText);
   const shortInterest = /^(yes|yeah|yep|ok|okay|interested|sure|send|share|hmm+|great|great i will check out|i will check|i will check out|sounds good|fine|step\s*1|step\s*2|step1|step2|ck)$/i.test(latestText);
   const asksPrice = ngAylaIsPriceQuestion(latestText);
   const directGoogleMeetRequest = ngAylaIsDirectGoogleMeetRequest(latestText);
@@ -20320,6 +20500,12 @@ Our team will confirm the Google Meet link shortly. You will receive the link at
     ngAylaMarkGoogleMeetLockedLead(lead, activeGoogleMeetAppointment);
     const lockedReply = ngAylaGoogleMeetLockedReply({ latestText, lead, appointment: activeGoogleMeetAppointment, assets });
     if (lockedReply?.reply) return lockedReply;
+    // In Google Meet state, never restart sales flow. Let real AI answer normal questions like tutors/roadmap.
+    if (basicConversationRequest) return null;
+    return {
+      intent: "google_meet_state_hold_no_sales_restart",
+      reply: `Doctor, your Google Meet request is already noted. We’ll share the Google Meet link at the meeting time.`
+    };
   }
 
   if (asksPrice) {
@@ -20336,6 +20522,12 @@ Our team will confirm the Google Meet link shortly. You will receive the link at
       intent: "google_meet_requested",
       reply: ngAylaGoogleMeetBookingReply(assets.timezone || "EST")
     };
+  }
+
+  // v56: Basic conversation must be answered by real AI before any sales checklist.
+  // This prevents canned Google Meet/live-session text from overriding questions like tutors, roadmap, curriculum, recordings, etc.
+  if (basicConversationRequest && !shortNonInformational && !asksPrice && !directGoogleMeetRequest && !positiveGoogleMeetContext && !timePreference) {
+    return null;
   }
 
   // Direct student questions and confusion override the sales sequence.
@@ -20511,6 +20703,39 @@ Are you interested in live sessions or Google Meet mentor guidance?`
 }
 
 
+
+function ngAylaNormalizeReplyForRepeat(text = "") {
+  return String(text || "").toLowerCase().replace(/https?:\/\/\S+/g, "[link]").replace(/\s+/g, " ").trim();
+}
+
+function ngAylaIsRepeatOfRecentOutbound(reply = "", messages = []) {
+  const cleanReply = ngAylaNormalizeReplyForRepeat(reply);
+  if (!cleanReply) return false;
+  const outbound = safeArray(messages).filter((m) => ngIsOutboundMessage(m)).slice(-4);
+  return outbound.some((m) => ngAylaNormalizeReplyForRepeat(ngMessageText(m)) === cleanReply);
+}
+
+function ngAylaAutoReplyDelayMs(db = {}) {
+  const s = db ? ngAylaPickSettings(db) : {};
+  const fixed = Number(s.ai_auto_reply_delay_seconds ?? 4);
+  const min = Number(s.ai_auto_reply_delay_min_seconds ?? 3);
+  const max = Number(s.ai_auto_reply_delay_max_seconds ?? 5);
+  const lo = Number.isFinite(min) ? Math.max(0, min) : 3;
+  const hi = Number.isFinite(max) ? Math.max(lo, max) : 5;
+  const seconds = Number.isFinite(fixed) ? Math.max(lo, Math.min(hi, fixed)) : (lo + Math.random() * Math.max(0, hi - lo));
+  return Math.round(seconds * 1000);
+}
+
+function ngAylaSleep(ms = 0) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
+async function ngAylaWaitBeforeAutoSend(db = {}) {
+  const ms = ngAylaAutoReplyDelayMs(db);
+  if (ms > 0) await ngAylaSleep(ms);
+  return ms;
+}
+
 async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }) {
   const cleanMessages = safeArray(messages)
     .filter((m) => ngMessageText(m))
@@ -20525,13 +20750,16 @@ async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }
     : null;
 
   if (hardSalesReply?.reply) {
-    return {
-      reply: ngCleanAylaStudentReply(hardSalesReply.reply),
-      usage: {},
-      model: "nextgen-v55-conversation-state-guard",
-      hard_router: true,
-      intent: hardSalesReply.intent || "sales_asset_push",
-    };
+    const hardReplyText = ngCleanAylaStudentReply(hardSalesReply.reply);
+    if (!ngAylaIsRepeatOfRecentOutbound(hardReplyText, cleanMessages)) {
+      return {
+        reply: hardReplyText,
+        usage: {},
+        model: "nextgen-v56-real-conversation-router",
+        hard_router: true,
+        intent: hardSalesReply.intent || "sales_asset_push",
+      };
+    }
   }
 
   if (!isAIConfigured()) {
@@ -20560,14 +20788,14 @@ Non-negotiable reply style:
 - Keep replies short and readable by default. For UWorld/library/program explanations, use 3-5 short WhatsApp-style lines if needed.
 - Open warmly when natural: "Hi Doctor, how are you doing?" or "I hope you are doing well, Doctor."
 - Never say "prompt response", "I appreciate your prompt response", or talk like you are responding to a prompt. Say "Thank you, Doctor" or continue naturally.
-- The student’s latest message must be answered first. If they ask “what is this/that,” explain the previous Ayla message before continuing the sales flow.
+- The student’s latest message must be answered first. If they ask “what is this/that,” explain the previous Ayla message before continuing the sales flow. If they ask about tutors, roadmap, live sessions, recordings, UWorld, schedule, curriculum, or any normal program detail, answer that exact question first in plain human language.
 - Sound confident, persuasive, doctor-to-doctor, and human.
 - Do not write robotic paragraphs. Do not use markdown headings. Explain clearly when the student asks.
 - Do not end with weak generic filler like "feel free to ask" unless it is paired with a strong next step.
 
 Sales behavior:
 - After answering the student’s question, move the lead forward naturally: build trust, share/offer session recording, explain the UWorld Video Library, invite to live session, ask exam date/weak area, or offer Google Meet mentor consultation at the right time.
-- Never ignore the student’s direct question. Answer first, then convert naturally.
+- Never ignore the student’s direct question or instruction. Do not repeat a previous offer when the student asked something else. Answer first, then convert naturally.
 - If the student asks price/cost/package/payment, do NOT give numbers. Move them to Google Meet mentor guidance for program/pricing guidance.
 - If the student is weak, failed, old graduate, delayed, confused, or struggling, reassure first: tell them they are in the right place, explain roadmap/mentor feedback/weak-area correction, then guide to recording/demo/live session.
 - If the student says yes/ok/interested, send the next useful asset unless they asked a question. Do not jump to Google Meet time before value is shown.
@@ -20757,6 +20985,7 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
     }
 
     const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel });
+    const replyDelayMs = await ngAylaWaitBeforeAutoSend(db);
     const to = getBestRecipientForChannel({
       channel,
       lead,
@@ -20806,6 +21035,7 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
       model: ai.model,
       usage: ai.usage,
       created_by: user.id,
+      reply_delay_ms: replyDelayMs || 0,
       created_at: ngAffNow(),
     });
 
@@ -20823,6 +21053,7 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
       model: ai.model,
       channel,
       cooldown_seconds: NG_AI_AUTO_COOLDOWN_SECONDS,
+      reply_delay_ms: replyDelayMs || 0,
     });
   } catch (error) {
     if (aiAutoLockKey) {
