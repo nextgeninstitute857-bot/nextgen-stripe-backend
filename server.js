@@ -16115,6 +16115,14 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   ai_auto_reply_delay_min_seconds: 3,
   ai_auto_reply_delay_max_seconds: 5,
   basic_conversation_router_enabled: true,
+  greeting_once_enabled: true,
+  roadmap_resources_knowledge_enabled: true,
+  roadmap_summary: "Our 120-day Step 1 roadmap is system-wise and structured so preparation does not feel random. It covers Cardiology, Endocrinology, Renal, Pulmonology, Immunology, Hematology, MSK, Neurology, GIT, Reproductive, Psychiatry, Biostatistics, and Biochemistry. The flow includes live teaching, UWorld-style MCQ discussion, First Aid integration, bootcamps, assessments, and NBME-style preparation.",
+  resources_summary: "NextGen preparation uses First Aid, UWorld-style QBank/MCQ discussion, Pathoma concepts, and NextGen assessments. The goal is to connect resources with MCQ-solving, weak-area review, and exam strategy instead of reading randomly.",
+  roadmap_answer_rule: "When a student asks about roadmap, summarize the system-wise 120-day roadmap and major systems covered. Do not explain every single day unless the student asks for daily details.",
+  resources_answer_rule: "When a student asks about resources, say we use First Aid, UWorld-style QBank/MCQ discussion, Pathoma concepts, and NextGen assessments. Keep it short and connect resources to MCQ-solving and weak-area correction.",
+  greeting_once_rule: "Use Hi Doctor only in the first message of a new conversation. After that, answer directly with Doctor / Yes Doctor / Sure Doctor. Do not repeat Hi Doctor in every answer.",
+  soft_roadmap_resources_rule: "When explaining the program generally, softly mention that the program follows a structured 120-day roadmap and uses First Aid, UWorld-style MCQ teaching, Pathoma concepts, and NextGen assessments. Do not dump the full roadmap unless asked.",
   booking_timezone: "EST",
   disclose_pricing_in_ai_chat: false,
   send_website_early: false,
@@ -16167,7 +16175,7 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   student_success_line: "Students from our community are progressing every month through structured live teaching, recordings, and mentor support.",
   sunday_fallback_message: "On Sunday, share the recording and UWorld demo first, then invite to the next Monday-Friday live session.",
   recording_template_key: "session_recording_video",
-  sales_style_rule: "Open warmly and talk like a human counselor. Answer the student’s exact question first, then move the lead through live session, recent recording, UWorld demo, YouTube lectures, then Google Meet mentor consultation. Do not dump assets when the student asks a direct question.",
+  sales_style_rule: "Open warmly once and talk like a human counselor. Answer the student’s exact question first, then move the lead through live session, recent recording, UWorld demo, YouTube lectures, then Google Meet mentor consultation. Do not dump assets when the student asks a direct question. Do not start every reply with Hi Doctor.",
   uworld_video_library_rule: "Present the UWorld Video Library as a major NextGen advantage: around 150 hours, 3000+ UWorld-style MCQs explained in depth, First Aid side-by-side, helping students learn MCQ approach, option elimination, concept connection, and weak-area correction. Share the UWorld library link when relevant.",
   mentor_sales_rule: "Use mentor authority naturally only when useful. Do not invent doctor names. Student-facing wording must say Google Meet / Google Meet mentor consultation, not call.",
   recording_sales_rule: "Send session recording early and proactively. Ask: did you like the teaching style, and are you interested in live sessions or Google Meet mentor guidance? If the response is positive, move to Google Meet booking.",
@@ -19735,7 +19743,10 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
     "- Conversation-first rule: answer the student’s latest question or concern first. Then move forward with ONE useful next step: live session, session recording, UWorld demo/library, YouTube lectures, exam date/weak area, and then Google Meet mentor consultation when ready.",
     "- Google Meet state lock: once the student has requested Google Meet, shared a preferred time, is waiting for the Google Meet link, or has a scheduled Google Meet, do NOT restart live-session/recording/UWorld/demo/mentor-offer flow. Only acknowledge, answer direct questions, collect/reschedule time, or remind them that the Google Meet link will be sent at meeting time.",
     "- Acknowledgements like thank you/thanks/ok/noted/great/perfect after booking must get a simple acknowledgement or no sales push. Never treat them as a new sales trigger.",
-    "- Start warmly when appropriate: 'Hi Doctor, how are you doing?' / 'I hope you are doing well, Doctor.' / 'Thank you for sharing that, Doctor.'",
+    "- Greeting rule: use 'Hi Doctor' only once in a new conversation. After that, answer directly with Doctor / Yes Doctor / Sure Doctor. Never start every reply with Hi Doctor.",
+    "- Roadmap rule: if asked about roadmap/study plan/curriculum, summarize the 120-day system-wise roadmap. Mention Cardiology, Endocrinology, Renal, Pulmonology, Immunology, Hematology, MSK, Neurology, GIT, Reproductive, Psychiatry, Biostatistics, and Biochemistry, plus bootcamps, assessments, and NBME-style preparation. Do not explain every day unless asked.",
+    "- Resources rule: if asked about resources, explain that NextGen uses First Aid, UWorld-style QBank/MCQ discussion, Pathoma concepts, and NextGen assessments, connected to MCQ-solving and weak-area correction.",
+    "- Soft program mention: when explaining the program generally, briefly mention the structured 120-day roadmap and resources, but do not dump the full roadmap unless the student asks.",
     "- Never ignore a direct question like what is this/that. Clarify the previous Ayla message first, then continue the sales flow naturally.",
     `- UWorld Video Library pitch: NextGen has around ${hours} hours of detailed UWorld-style video teaching with ${mcqs} MCQs explained in depth. First Aid is integrated with every MCQ, so students learn the concept, FA point, correct/wrong options, option elimination, and weak-area correction. Tell them to click Try Demo for 2 days free access and first lecture of every chapter.`,
     `- UWorld Library link to share when discussing the library/resource: ${libraryLink}`,
@@ -20005,6 +20016,14 @@ function ngAylaGetSalesAssets(db = {}) {
       ngAylaFirstNonEmptySetting(s, ["student_success_line"], ""),
       "We support students with structured live teaching, recordings, UWorld-style practice, and mentor feedback."
     ),
+    roadmapSummary: ngAylaNormalizeMarketingLine(
+      ngAylaFirstNonEmptySetting(s, ["roadmap_summary", "roadmap_knowledge_summary"], ""),
+      "Our 120-day Step 1 roadmap is system-wise and structured so preparation does not feel random. It covers Cardiology, Endocrinology, Renal, Pulmonology, Immunology, Hematology, MSK, Neurology, GIT, Reproductive, Psychiatry, Biostatistics, and Biochemistry. The flow includes live teaching, UWorld-style MCQ discussion, First Aid integration, bootcamps, assessments, and NBME-style preparation."
+    ),
+    resourcesSummary: ngAylaNormalizeMarketingLine(
+      ngAylaFirstNonEmptySetting(s, ["resources_summary", "program_resources_summary"], ""),
+      "NextGen preparation uses First Aid, UWorld-style QBank/MCQ discussion, Pathoma concepts, and NextGen assessments. The goal is to connect resources with MCQ-solving, weak-area review, and exam strategy instead of reading randomly."
+    ),
   };
 }
 
@@ -20070,6 +20089,53 @@ function ngAylaUworldDemoExplanation(assets = {}, opening = "Doctor, this is our
 It has around ${assets.hours} hours of recorded MCQ teaching and ${assets.mcqs} UWorld-style MCQs. First Aid is integrated with each MCQ, so you learn the concept, FA point, correct option, wrong options, and elimination approach together.${link}
 
 The demo gives 2 days of free access, and you can watch the first lecture of every chapter.`;
+}
+
+function ngAylaIsRoadmapQuestion(text = "") {
+  const t = String(text || "").toLowerCase();
+  return /(road\s*map|roadmap|study\s*plan|curriculum|syllabus|course\s*structure|class\s*plan|daily\s*plan|120\s*days|what\s*do\s*you\s*cover|topics\s*covered|systems\s*covered)/i.test(t);
+}
+
+function ngAylaIsResourcesQuestion(text = "") {
+  const t = String(text || "").toLowerCase();
+  return /(resources?|first\s*aid|pathoma|uworld\s*q\s*bank|u\s*world\s*q\s*bank|qbank|q\s*bank|nbme|assessment|assessments|which\s*books|what\s*books|materials?|what\s*do\s*you\s*use)/i.test(t);
+}
+
+function ngAylaRoadmapReply(assets = {}) {
+  return `Doctor, our roadmap is a structured 120-day Step 1 plan, organized system-wise so your preparation does not feel random.
+
+We cover Cardiology, Endocrinology, Renal, Pulmonology, Immunology, Hematology, MSK, Neurology, GIT, Reproductive, Psychiatry, Biostatistics, and Biochemistry.
+
+The flow includes live teaching, UWorld-style MCQ discussion, First Aid integration, bootcamps, assessments, and NBME-style exam preparation.`;
+}
+
+function ngAylaResourcesReply(assets = {}) {
+  return `Doctor, our preparation is built around high-yield USMLE resources.
+
+We use First Aid, UWorld-style QBank/MCQ discussion, Pathoma concepts, and NextGen assessments.
+
+The goal is not just to read resources, but to connect them with MCQ-solving, weak-area review, and exam strategy.`;
+}
+
+function ngAylaProgramWithRoadmapResourcesReply(assets = {}) {
+  const rec = assets.recordingLink ? `\n\nRecent session recording:\n${assets.recordingLink}` : "";
+  return `Doctor, Next Generation USMLE helps with live sessions, recordings, UWorld-style MCQ teaching, First Aid integration, structured roadmap support, and mentor guidance.
+
+The program follows a 120-day system-wise roadmap and uses First Aid, UWorld-style QBank discussion, Pathoma concepts, and NextGen assessments.${rec}
+
+You can also try the UWorld Video Library demo for 2 days free and watch the first lecture of every chapter.\n${assets.uworldLink}`;
+}
+
+function ngAylaApplyGreetingOnce(reply = "", messages = []) {
+  let text = String(reply || "").trim();
+  if (!text) return text;
+  const outbound = safeArray(messages).filter((m) => ngIsOutboundMessage(m) && ngMessageText(m));
+  const alreadyGreeted = outbound.some((m) => /\b(hi|hello|hey)\s+doctor\b/i.test(ngMessageText(m))) || outbound.length > 0;
+  if (!alreadyGreeted) return text;
+  text = text.replace(/^\s*(hi|hello|hey)\s+doctor[,!.، ]*/i, "Doctor, ");
+  text = text.replace(/^\s*i hope you are doing well[,!.، ]*doctor[,!.، ]*/i, "Doctor, ");
+  text = text.replace(/^\s*doctor,\s*doctor,/i, "Doctor,");
+  return text.trim();
 }
 
 function ngAylaClarifyPreviousMessageReply({ latestText = "", lastOutboundText = "", assets = {} } = {}) {
@@ -20465,6 +20531,8 @@ function ngAylaHardSalesRouter({ db = {}, lead = {}, messages = [], channel = "w
   const asksUworld = /(uworld|u world|qbank|question bank|mcq|library|video library|lms|demo)/i.test(latestText);
   const asksSessionTime = /(what\s*time|when|schedule|live session|class time|session time|today|zoom|join link|session link|class link|live link)/i.test(latestText);
   const asksProgram = /(program|course|how it works|details|offer|features|what do you provide|what is included)/i.test(latestText);
+  const asksRoadmap = ngAylaIsRoadmapQuestion(latestText);
+  const asksResources = ngAylaIsResourcesQuestion(latestText);
   const asksInvite = /(invite me|add me|send.*session|send.*live|share.*session|share.*zoom|i want.*join|want to join|yes.*join|yes.*invite|join session|attend session)/i.test(latestText);
   const watchedRecording = /(watched|seen|checked|viewed).*recording|recording.*(good|fine|okay|ok|enough|watched|seen|checked)|i\s+am\s+fine\s+with\s+that/i.test(latestText);
   const cannotAttendLive = /(can't join|cannot join|cant join|no time|busy|missed|miss it|not available|recording only)/i.test(latestText);
@@ -20524,7 +20592,21 @@ Our team will confirm the Google Meet link shortly. You will receive the link at
     };
   }
 
-  // v56: Basic conversation must be answered by real AI before any sales checklist.
+  if (asksRoadmap) {
+    return {
+      intent: "roadmap_requested",
+      reply: ngAylaRoadmapReply(assets)
+    };
+  }
+
+  if (asksResources) {
+    return {
+      intent: "resources_requested",
+      reply: ngAylaResourcesReply(assets)
+    };
+  }
+
+  // v57: Basic conversation must be answered by real AI before any sales checklist.
   // This prevents canned Google Meet/live-session text from overriding questions like tutors, roadmap, curriculum, recordings, etc.
   if (basicConversationRequest && !shortNonInformational && !asksPrice && !directGoogleMeetRequest && !positiveGoogleMeetContext && !timePreference) {
     return null;
@@ -20629,12 +20711,9 @@ ${ngAylaPostRecordingInterestQuestion(assets)}`
   }
 
   if (asksProgram) {
-    const rec = assets.recordingLink ? `\n\nRecent session recording:\n${assets.recordingLink}` : "";
     return {
-      intent: "program_requested",
-      reply: `Doctor, Next Generation USMLE helps with live sessions, recordings, UWorld-style MCQ teaching, First Aid integration, roadmap support, and mentor guidance.${rec}
-
-We also have a UWorld Video Library demo where you can click “Try Demo” and watch the first lecture of every chapter for 2 days free.\n${assets.uworldLink}`
+      intent: "program_requested_roadmap_resources_soft",
+      reply: ngAylaProgramWithRoadmapResourcesReply(assets)
     };
   }
 
@@ -20750,12 +20829,12 @@ async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }
     : null;
 
   if (hardSalesReply?.reply) {
-    const hardReplyText = ngCleanAylaStudentReply(hardSalesReply.reply);
+    const hardReplyText = ngAylaApplyGreetingOnce(ngCleanAylaStudentReply(hardSalesReply.reply), cleanMessages);
     if (!ngAylaIsRepeatOfRecentOutbound(hardReplyText, cleanMessages)) {
       return {
         reply: hardReplyText,
         usage: {},
-        model: "nextgen-v56-real-conversation-router",
+        model: "nextgen-v57-roadmap-resources-greeting-guard",
         hard_router: true,
         intent: hardSalesReply.intent || "sales_asset_push",
       };
@@ -20786,7 +20865,7 @@ Backend-enforced identity:
 
 Non-negotiable reply style:
 - Keep replies short and readable by default. For UWorld/library/program explanations, use 3-5 short WhatsApp-style lines if needed.
-- Open warmly when natural: "Hi Doctor, how are you doing?" or "I hope you are doing well, Doctor."
+- Open warmly only once at the start of a new conversation. Do not start every reply with "Hi Doctor". After the first greeting, use "Doctor," / "Yes Doctor," / "Sure Doctor," or answer directly.
 - Never say "prompt response", "I appreciate your prompt response", or talk like you are responding to a prompt. Say "Thank you, Doctor" or continue naturally.
 - The student’s latest message must be answered first. If they ask “what is this/that,” explain the previous Ayla message before continuing the sales flow. If they ask about tutors, roadmap, live sessions, recordings, UWorld, schedule, curriculum, or any normal program detail, answer that exact question first in plain human language.
 - Sound confident, persuasive, doctor-to-doctor, and human.
@@ -20809,6 +20888,9 @@ Conversation intelligence:
 - Do not ask for weak area again if already known.
 - If something is missing, ask only one clear question.
 - If enough is known, move to recording/live session/UWorld demo first, then Google Meet mentor consultation after value is shown or if directly requested.
+- Roadmap knowledge: if the student asks roadmap/study plan/curriculum, summarize: structured 120-day system-wise roadmap covering Cardiology, Endocrinology, Renal, Pulmonology, Immunology, Hematology, MSK, Neurology, GIT, Reproductive, Psychiatry, Biostatistics, and Biochemistry; live teaching, UWorld-style MCQ discussion, First Aid integration, bootcamps, assessments, and NBME-style preparation. Do not explain each day unless asked.
+- Resources knowledge: if the student asks resources, say we use First Aid, UWorld-style QBank/MCQ discussion, Pathoma concepts, and NextGen assessments, connected with MCQ-solving, weak-area review, and exam strategy.
+- Softly mention roadmap/resources in general program explanation even when not asked, but keep it short.
 - Mention the UWorld Video Library naturally when it helps sell value: around 150 hours, 3000+ MCQs, First Aid integrated with every MCQ, MCQ approach, option elimination, concept connection, and weak-area correction. Explain Try Demo: 2 days free access and first lecture of every chapter.
 - Share the UWorld library link only as the UWorld Video Library/resource, not as a random website link.
 
@@ -20849,7 +20931,7 @@ Write only Ayla's next message. No markdown headings. No bullet list unless the 
     jsonMode: false,
   });
 
-  const reply = ngCleanAylaStudentReply(result.text || "");
+  const reply = ngAylaApplyGreetingOnce(ngCleanAylaStudentReply(result.text || ""), cleanMessages);
 
   if (!reply) {
     const error = new Error("AI_EMPTY_REPLY: OpenAI returned an empty reply.");
