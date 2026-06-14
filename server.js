@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v40-auto-first-message-run-due-fix";
+const NEXTGEN_BACKEND_BUILD = "v41-crm-growth-command-system";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -5523,6 +5523,26 @@ const DEFAULT_CRM_DB = {
   brand_snapshots: [],
   snapshot_items: [],
 
+  // v41 CRM Growth Command System: audience, broadcast, lead profile, call queue, learning.
+  audience_lists: [],
+  audience_members: [],
+  broadcast_campaigns: [],
+  broadcast_queue: [],
+  broadcast_replies: [],
+  call_queue: [],
+  call_logs: [],
+  future_followups: [],
+  whatsapp_windows: [],
+  daily_session_recovery: [],
+  ai_learning_events: [],
+  ai_learning_lessons: [],
+  ai_mistake_reports: [],
+  duplicate_send_guards: [],
+  suppression_list: [],
+  lead_scores: [],
+  crm_sales_briefs: [],
+  community_invite_links: [],
+
   settings: DEFAULT_CRM_SETTINGS,
   updated_at: null,
 };
@@ -5637,6 +5657,24 @@ async function readCrmDb() {
       ad_ai_actions: Array.isArray(parsed.ad_ai_actions) ? parsed.ad_ai_actions : [],
       brand_snapshots: Array.isArray(parsed.brand_snapshots) ? parsed.brand_snapshots : [],
       snapshot_items: Array.isArray(parsed.snapshot_items) ? parsed.snapshot_items : [],
+      audience_lists: Array.isArray(parsed.audience_lists) ? parsed.audience_lists : [],
+      audience_members: Array.isArray(parsed.audience_members) ? parsed.audience_members : [],
+      broadcast_campaigns: Array.isArray(parsed.broadcast_campaigns) ? parsed.broadcast_campaigns : [],
+      broadcast_queue: Array.isArray(parsed.broadcast_queue) ? parsed.broadcast_queue : [],
+      broadcast_replies: Array.isArray(parsed.broadcast_replies) ? parsed.broadcast_replies : [],
+      call_queue: Array.isArray(parsed.call_queue) ? parsed.call_queue : [],
+      call_logs: Array.isArray(parsed.call_logs) ? parsed.call_logs : [],
+      future_followups: Array.isArray(parsed.future_followups) ? parsed.future_followups : [],
+      whatsapp_windows: Array.isArray(parsed.whatsapp_windows) ? parsed.whatsapp_windows : [],
+      daily_session_recovery: Array.isArray(parsed.daily_session_recovery) ? parsed.daily_session_recovery : [],
+      ai_learning_events: Array.isArray(parsed.ai_learning_events) ? parsed.ai_learning_events : [],
+      ai_learning_lessons: Array.isArray(parsed.ai_learning_lessons) ? parsed.ai_learning_lessons : [],
+      ai_mistake_reports: Array.isArray(parsed.ai_mistake_reports) ? parsed.ai_mistake_reports : [],
+      duplicate_send_guards: Array.isArray(parsed.duplicate_send_guards) ? parsed.duplicate_send_guards : [],
+      suppression_list: Array.isArray(parsed.suppression_list) ? parsed.suppression_list : [],
+      lead_scores: Array.isArray(parsed.lead_scores) ? parsed.lead_scores : [],
+      crm_sales_briefs: Array.isArray(parsed.crm_sales_briefs) ? parsed.crm_sales_briefs : [],
+      community_invite_links: Array.isArray(parsed.community_invite_links) ? parsed.community_invite_links : [],
       settings: { ...DEFAULT_CRM_SETTINGS, ...(parsed.settings || {}) },
       updated_at: parsed.updated_at || null,
     };
@@ -12858,6 +12896,15 @@ const WHATSAPP_TEMPLATE_VARIABLE_ORDERS = {
   enrollment_help_after_interest: [],
   uworld_video_library_soft_pitch: [],
   post_demo_interest_check: [],
+
+  // v41 broadcast / future-follow-up templates.
+  live_session_invite_broadcast: ["student_name", "exam_type", "session_time", "live_session_link"],
+  community_invite_broadcast: ["student_name", "exam_type", "community_link"],
+  future_followup_reminder: ["student_name", "follow_up_month", "exam_type", "session_time"],
+  september_start_followup: ["student_name", "follow_up_month", "exam_type", "session_time"],
+  exam_prep_restart_invite: ["student_name", "follow_up_month", "exam_type", "session_time"],
+  mentor_call_followup: ["student_name", "exam_type", "mentor_booking_link"],
+  new_launch_broadcast: ["student_name", "announcement_text", "link_url"],
 };
 
 const REQUIRED_WHATSAPP_LINK_VARIABLES = new Set([
@@ -14010,6 +14057,15 @@ app.post("/webhooks/whatsapp", async (req, res) => {
             status: "received",
             received_at: nowIso(),
           }));
+
+          ng41ProcessInboundMessageForGrowth(db, {
+            lead,
+            text,
+            from,
+            channel: "whatsapp",
+            provider_message_id: message.id || null,
+            source: "whatsapp_webhook",
+          });
         }
 
         for (const status of statuses) {
@@ -27017,6 +27073,1376 @@ app.get("/admin/crm/revenue-attribution/summary", async (req, res) => {
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
+});
+
+
+// -----------------------------------------------------------------------------
+// v41 CRM Growth Command System
+// Hot call queue, audience lists, broadcasts, future follow-up memory,
+// WhatsApp window tracker, daily sales brief, lead profile, AI sales learning.
+// Additive only: existing LMS/payment/Zoom/CRM routes remain untouched.
+// -----------------------------------------------------------------------------
+
+const NG41_CRM_GROWTH_COLLECTIONS = [
+  "audience_lists",
+  "audience_members",
+  "broadcast_campaigns",
+  "broadcast_queue",
+  "broadcast_replies",
+  "call_queue",
+  "call_logs",
+  "future_followups",
+  "whatsapp_windows",
+  "daily_session_recovery",
+  "ai_learning_events",
+  "ai_learning_lessons",
+  "ai_mistake_reports",
+  "duplicate_send_guards",
+  "suppression_list",
+  "lead_scores",
+  "crm_sales_briefs",
+  "community_invite_links",
+];
+
+function ng41EnsureGrowthCollections(db) {
+  for (const key of NG41_CRM_GROWTH_COLLECTIONS) ensureCrmArray(db, key);
+  return db;
+}
+
+function ng41Phone(value = "") {
+  return normalizePhoneForWhatsapp(value || "");
+}
+
+function ng41FirstNonEmpty(...values) {
+  for (const value of values) {
+    const clean = normalizeCrmString(value || "");
+    if (clean) return clean;
+  }
+  return "";
+}
+
+function ng41LeadPhone(lead = {}) {
+  return ng41FirstNonEmpty(lead.whatsapp, lead.phone, lead.mobile, lead.whatsapp_number, lead.contact_number, lead.wa_id);
+}
+
+function ng41LeadEmail(lead = {}) {
+  return normalizeEmail(ng41FirstNonEmpty(lead.email, lead.student_email, lead.customer_email));
+}
+
+function ng41LeadName(lead = {}) {
+  const raw = ng41FirstNonEmpty(lead.student_name, lead.lead_name, lead.name, lead.full_name, lead.first_name, lead.whatsapp_name, lead.profile_name);
+  if (!raw || looksLikePhoneOnly(raw)) return "Doctor";
+  return raw;
+}
+
+function ng41LeadExamType(lead = {}) {
+  return ng41FirstNonEmpty(lead.exam_type, lead.exam_track, lead.exam, lead.program_track, lead.course_name) || "USMLE Step 1";
+}
+
+function ng41LeadStage(lead = {}) {
+  return normalizeCrmLower(lead.stage || lead.lead_stage || lead.sales_stage || lead.pipeline_stage || lead.status || "new_lead", "new_lead");
+}
+
+function ng41MessageTimeMs(message = {}) {
+  const raw = message.created_at || message.received_at || message.sent_at || message.delivered_at || message.updated_at || null;
+  const ms = raw ? new Date(raw).getTime() : 0;
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function ng41MessageText(message = {}) {
+  return normalizeCrmString(message.text || message.message_text || message.body || message.message || message.content || "");
+}
+
+function ng41IsInbound(message = {}) {
+  return normalizeCrmLower(message.direction || message.message_direction || "") === "inbound" || Boolean(message.from && !message.sent_at);
+}
+
+function ng41IsOutbound(message = {}) {
+  return normalizeCrmLower(message.direction || message.message_direction || "") === "outbound" || Boolean(message.sent_at);
+}
+
+function ng41LeadMessages(db, leadId = "") {
+  const id = String(leadId || "");
+  return [
+    ...ensureCrmArray(db, "message_logs"),
+    ...ensureCrmArray(db, "inbound_messages"),
+    ...ensureCrmArray(db, "outbound_messages"),
+    ...ensureCrmArray(db, "conversations"),
+  ]
+    .filter((item) => String(item.lead_id || item.leadId || item.contact_id || "") === id)
+    .sort((a, b) => ng41MessageTimeMs(a) - ng41MessageTimeMs(b));
+}
+
+function ng41LatestInbound(db, leadId = "") {
+  return [...ng41LeadMessages(db, leadId)].reverse().find((item) => ng41IsInbound(item) && ng41MessageText(item)) || null;
+}
+
+function ng41LatestOutbound(db, leadId = "") {
+  return [...ng41LeadMessages(db, leadId)].reverse().find((item) => ng41IsOutbound(item) && ng41MessageText(item)) || null;
+}
+
+function ng41Contains(text = "", terms = []) {
+  const lower = normalizeCrmLower(text || "");
+  return terms.some((term) => lower.includes(normalizeCrmLower(term || "")));
+}
+
+function ng41DetectStop(text = "") {
+  return ng41Contains(text, [
+    "stop", "unsubscribe", "don't message", "do not message", "remove me", "wrong number", "not interested", "dont message",
+  ]);
+}
+
+function ng41DetectPriceInterest(text = "") {
+  return ng41Contains(text, ["price", "cost", "fee", "fees", "payment", "installment", "discount", "how much", "charges"]);
+}
+
+function ng41DetectMentorInterest(text = "") {
+  return ng41Contains(text, ["mentor", "call", "meeting", "zoom", "guidance", "counsel", "advisor", "consultation"]);
+}
+
+function ng41DetectSessionInterest(text = "") {
+  return ng41Contains(text, ["session", "live", "class", "join", "link", "recording", "recorded", "demo"]);
+}
+
+function ng41DetectCommunityInterest(text = "") {
+  return ng41Contains(text, ["community", "group", "telegram", "whatsapp group", "discord", "instagram"]);
+}
+
+function ng41DetectFutureIntent(text = "") {
+  return ng41Contains(text, [
+    "later", "next week", "week later", "after a week", "after one week", "after 1 week",
+    "next month", "month later", "after a month", "after one month", "after 1 month",
+    "september", "october", "november", "december", "january", "february", "march", "april", "may", "june", "july", "august",
+    "tomorrow", "busy", "not now", "start next", "upcoming month",
+  ]);
+}
+
+function ng41DateOnlyIso(date = new Date()) {
+  return date.toISOString().slice(0, 10);
+}
+
+function ng41AddDaysIso(days = 0) {
+  const d = new Date();
+  d.setDate(d.getDate() + Number(days || 0));
+  d.setHours(9, 0, 0, 0);
+  return d.toISOString();
+}
+
+function ng41ResolveFutureFollowupDate(text = "") {
+  const lower = normalizeCrmLower(text || "");
+  if (!lower) return null;
+  if (lower.includes("tomorrow")) return ng41AddDaysIso(1);
+  if (lower.includes("next week") || lower.includes("week later") || lower.includes("after a week") || lower.includes("after one week") || lower.includes("after 1 week")) return ng41AddDaysIso(7);
+  if (lower.includes("next month") || lower.includes("month later") || lower.includes("after a month") || lower.includes("after one month") || lower.includes("after 1 month") || lower.includes("upcoming month")) return ng41AddDaysIso(30);
+
+  const months = [
+    ["january", 0], ["february", 1], ["march", 2], ["april", 3], ["may", 4], ["june", 5],
+    ["july", 6], ["august", 7], ["september", 8], ["october", 9], ["november", 10], ["december", 11],
+  ];
+  const found = months.find(([name]) => lower.includes(name));
+  if (found) {
+    const now = new Date();
+    let year = now.getFullYear();
+    const candidate = new Date(Date.UTC(year, found[1], 1, 9, 0, 0));
+    if (candidate.getTime() < now.getTime() - 86400000) year += 1;
+    return new Date(Date.UTC(year, found[1], 1, 9, 0, 0)).toISOString();
+  }
+  return null;
+}
+
+function ng41UpsertWhatsappWindow(db, lead = {}, inboundMessage = null) {
+  ng41EnsureGrowthCollections(db);
+  const leadId = lead?.id || lead?.lead_id || null;
+  if (!leadId) return null;
+  const latestInbound = inboundMessage || ng41LatestInbound(db, leadId);
+  const lastInboundAt = latestInbound?.received_at || latestInbound?.created_at || latestInbound?.updated_at || null;
+  const expiresAt = lastInboundAt ? new Date(new Date(lastInboundAt).getTime() + 24 * 60 * 60 * 1000).toISOString() : null;
+  const now = Date.now();
+  const expiresMs = expiresAt ? new Date(expiresAt).getTime() : 0;
+  const hoursLeft = expiresMs ? (expiresMs - now) / 3600000 : null;
+  const status = !expiresAt ? "closed" : hoursLeft <= 0 ? "closed" : hoursLeft <= 1 ? "closing_soon" : "open";
+  const windows = ensureCrmArray(db, "whatsapp_windows");
+  const existing = windows.find((item) => String(item.lead_id || "") === String(leadId));
+  const payload = withTimestamps({
+    ...(existing || {}),
+    id: existing?.id || uuid(),
+    brand_id: lead.brand_id || db.settings?.default_brand_id || null,
+    lead_id: leadId,
+    phone: ng41Phone(ng41LeadPhone(lead)),
+    status,
+    window_status: status,
+    last_student_message_at: lastInboundAt,
+    whatsapp_window_expires_at: expiresAt,
+    hours_left: hoursLeft === null ? null : Number(Math.max(0, hoursLeft).toFixed(2)),
+    next_action: status === "closing_soon" ? "send_23_hour_rescue" : status === "open" ? "continue_ai_conversation" : "template_required",
+  }, existing);
+  if (existing) Object.assign(existing, payload); else windows.push(payload);
+  return payload;
+}
+
+function ng41UpsertSuppression(db, lead = {}, reason = "", source = "manual", text = "") {
+  ng41EnsureGrowthCollections(db);
+  const phone = ng41Phone(ng41LeadPhone(lead));
+  const email = ng41LeadEmail(lead);
+  const list = ensureCrmArray(db, "suppression_list");
+  let existing = list.find((item) => (phone && ng41Phone(item.phone) === phone) || (email && normalizeEmail(item.email) === email));
+  const payload = withTimestamps({
+    ...(existing || {}),
+    id: existing?.id || uuid(),
+    brand_id: lead.brand_id || db.settings?.default_brand_id || null,
+    lead_id: lead.id || lead.lead_id || null,
+    name: ng41LeadName(lead),
+    phone,
+    email,
+    reason: reason || existing?.reason || "suppressed",
+    status: "active",
+    source,
+    last_text: text || existing?.last_text || "",
+    suppressed_at: existing?.suppressed_at || nowIso(),
+  }, existing);
+  if (existing) Object.assign(existing, payload); else list.push(payload);
+  if (lead?.id) {
+    lead.unsubscribe_status = "stopped";
+    lead.opt_out_status = "stopped";
+    lead.status = lead.status === "paid" ? lead.status : "not_interested";
+    lead.updated_at = nowIso();
+  }
+  return payload;
+}
+
+function ng41IsSuppressed(db, target = {}) {
+  const phone = ng41Phone(target.phone || target.whatsapp || target.mobile || target.to || "");
+  const email = normalizeEmail(target.email || "");
+  return ensureCrmArray(db, "suppression_list").some((item) => {
+    if (item.status === "inactive" || item.status === "removed") return false;
+    return (phone && ng41Phone(item.phone) === phone) || (email && normalizeEmail(item.email) === email);
+  });
+}
+
+function ng41UpsertFutureFollowup(db, lead = {}, payload = {}) {
+  ng41EnsureGrowthCollections(db);
+  const leadId = lead?.id || payload.lead_id || null;
+  const dueAt = payload.due_at || payload.follow_up_at || payload.follow_up_date || null;
+  if (!leadId || !dueAt) return null;
+  const list = ensureCrmArray(db, "future_followups");
+  const activeExisting = list.find((item) => String(item.lead_id || "") === String(leadId) && ["scheduled", "due"].includes(item.status || "scheduled"));
+  const item = withTimestamps({
+    ...(activeExisting || {}),
+    id: activeExisting?.id || uuid(),
+    brand_id: lead.brand_id || db.settings?.default_brand_id || null,
+    lead_id: leadId,
+    name: ng41LeadName(lead),
+    phone: ng41LeadPhone(lead),
+    email: ng41LeadEmail(lead),
+    exam_type: ng41LeadExamType(lead),
+    due_at: dueAt,
+    follow_up_at: dueAt,
+    follow_up_date: String(dueAt).slice(0, 10),
+    reason: payload.reason || activeExisting?.reason || "Student asked to be contacted later",
+    student_intent: payload.student_intent || activeExisting?.student_intent || "future_start",
+    preferred_channel: payload.preferred_channel || activeExisting?.preferred_channel || "whatsapp",
+    follow_up_type: payload.follow_up_type || activeExisting?.follow_up_type || "template_or_call",
+    status: payload.status || activeExisting?.status || "scheduled",
+    source: payload.source || activeExisting?.source || "ai_detected",
+    original_text: payload.original_text || activeExisting?.original_text || "",
+  }, activeExisting);
+  if (activeExisting) Object.assign(activeExisting, item); else list.push(item);
+  lead.next_follow_up_at = dueAt;
+  lead.next_action = "future_followup_scheduled";
+  lead.updated_at = nowIso();
+  return item;
+}
+
+function ng41MaybeCreateFutureFollowupFromText(db, lead = {}, text = "", source = "ai_detected") {
+  if (!ng41DetectFutureIntent(text)) return null;
+  const dueAt = ng41ResolveFutureFollowupDate(text);
+  if (!dueAt) return null;
+  return ng41UpsertFutureFollowup(db, lead, {
+    due_at: dueAt,
+    reason: "Student asked NextGen to reach out later",
+    student_intent: "start_later_or_busy_now",
+    preferred_channel: "whatsapp",
+    follow_up_type: "session_or_mentor_invite",
+    source,
+    original_text: text,
+  });
+}
+
+function ng41ScoreLead(db, lead = {}) {
+  const leadId = lead?.id || lead?.lead_id || "";
+  const messages = ng41LeadMessages(db, leadId);
+  const textBlob = messages.map(ng41MessageText).join(" \n ").toLowerCase();
+  const inboundCount = messages.filter(ng41IsInbound).length;
+  const outboundCount = messages.filter(ng41IsOutbound).length;
+  const latestInbound = ng41LatestInbound(db, leadId);
+  const stage = ng41LeadStage(lead);
+  let score = 0;
+  const reasons = [];
+
+  if (inboundCount > 0) { score += 25; reasons.push("student_replied"); }
+  if (ng41DetectPriceInterest(textBlob)) { score += 25; reasons.push("asked_price_or_payment"); }
+  if (ng41DetectMentorInterest(textBlob)) { score += 20; reasons.push("mentor_or_call_interest"); }
+  if (ng41DetectSessionInterest(textBlob)) { score += 15; reasons.push("session_or_demo_interest"); }
+  if (ng41DetectCommunityInterest(textBlob)) { score += 8; reasons.push("community_interest"); }
+  if (lead.attended_session_at || lead.session_attended_at || lead.live_session_attended === true || stage.includes("attended")) { score += 35; reasons.push("attended_session"); }
+  if (lead.recording_sent_at || textBlob.includes("recording")) { score += 8; reasons.push("recording_sent_or_requested"); }
+  if (lead.old_graduate === true || Number(lead.graduation_year || 0) < new Date().getFullYear() - 3) { score += 10; reasons.push("old_graduate_or_urgent"); }
+  if (lead.exam_date || lead.target_exam_date || textBlob.includes("exam date")) { score += 8; reasons.push("exam_timeline_known"); }
+  if (outboundCount > 0) { score += 4; reasons.push("contacted"); }
+  if (ng41IsSuppressed(db, lead) || ["not_interested", "unsubscribed", "lost"].includes(stage)) { score = Math.min(score, 0); reasons.push("suppressed_or_lost"); }
+  if (["paid", "paid_enrolled", "enrolled"].includes(stage) || lead.payment_status === "paid" || lead.enrolled === true) { score = 100; reasons.push("converted_or_enrolled"); }
+
+  const priority = score >= 80 ? "urgent" : score >= 60 ? "high" : score >= 35 ? "medium" : "low";
+  const nextBestAction = ["paid", "paid_enrolled", "enrolled"].includes(stage)
+    ? "support_enrolled_student"
+    : ng41IsSuppressed(db, lead)
+      ? "do_not_contact"
+      : score >= 60
+        ? "call_now_or_book_mentor"
+        : latestInbound
+          ? "ai_follow_up_inside_window"
+          : "template_session_recovery";
+
+  const scores = ensureCrmArray(db, "lead_scores");
+  let existing = scores.find((item) => String(item.lead_id || "") === String(leadId));
+  const payload = withTimestamps({
+    ...(existing || {}),
+    id: existing?.id || uuid(),
+    brand_id: lead.brand_id || db.settings?.default_brand_id || null,
+    lead_id: leadId,
+    score,
+    priority,
+    reasons,
+    inbound_count: inboundCount,
+    outbound_count: outboundCount,
+    next_best_action: nextBestAction,
+    last_scored_at: nowIso(),
+  }, existing);
+  if (existing) Object.assign(existing, payload); else scores.push(payload);
+  return payload;
+}
+
+function ng41EnsureDailySessionRecovery(db, lead = {}) {
+  ng41EnsureGrowthCollections(db);
+  const leadId = lead?.id || lead?.lead_id || null;
+  if (!leadId) return null;
+  const arr = ensureCrmArray(db, "daily_session_recovery");
+  let existing = arr.find((item) => String(item.lead_id || "") === String(leadId));
+  const messageLogs = ng41LeadMessages(db, leadId);
+  const sentRecording = Boolean(lead.recording_sent_at || messageLogs.some((m) => ng41MessageText(m).toLowerCase().includes("recording")));
+  const payload = withTimestamps({
+    ...(existing || {}),
+    id: existing?.id || uuid(),
+    brand_id: lead.brand_id || db.settings?.default_brand_id || null,
+    lead_id: leadId,
+    status: existing?.status || "active",
+    daily_session_sequence_day: Number(existing?.daily_session_sequence_day || lead.daily_session_sequence_day || 0),
+    first_message_sent_at: lead.first_message_sent_at || lead.first_template_sent_at || existing?.first_message_sent_at || null,
+    last_session_reminder_sent_at: lead.last_session_reminder_sent_at || existing?.last_session_reminder_sent_at || null,
+    last_session_link_sent_at: lead.last_session_link_sent_at || existing?.last_session_link_sent_at || null,
+    recording_followup_sent_once: Boolean(existing?.recording_followup_sent_once || lead.recording_followup_sent_once || sentRecording),
+    next_action: "daily_template_session_recovery",
+  }, existing);
+  if (existing) Object.assign(existing, payload); else arr.push(payload);
+  return payload;
+}
+
+function ng41EnsureCallQueue(db, lead = {}, reason = "hot_lead", source = "auto_scoring") {
+  ng41EnsureGrowthCollections(db);
+  const score = ng41ScoreLead(db, lead);
+  if (ng41IsSuppressed(db, lead)) return null;
+  if (score.score < 55 && !["manual", "session_attended", "payment_interest", "human_needed"].includes(reason)) return null;
+  const leadId = lead?.id || lead?.lead_id || null;
+  if (!leadId) return null;
+  const queue = ensureCrmArray(db, "call_queue");
+  let existing = queue.find((item) => String(item.lead_id || "") === String(leadId) && !["converted", "not_interested", "closed"].includes(item.status || ""));
+  const payload = withTimestamps({
+    ...(existing || {}),
+    id: existing?.id || uuid(),
+    brand_id: lead.brand_id || db.settings?.default_brand_id || null,
+    lead_id: leadId,
+    name: ng41LeadName(lead),
+    phone: ng41LeadPhone(lead),
+    whatsapp: ng41LeadPhone(lead),
+    email: ng41LeadEmail(lead),
+    exam_type: ng41LeadExamType(lead),
+    campaign_id: lead.campaign_id || null,
+    campaign_name: lead.campaign_name || lead.campaign || "",
+    lead_score: score.score,
+    priority: score.priority,
+    reason,
+    source,
+    status: existing?.status || "needs_call",
+    next_call_at: existing?.next_call_at || nowIso(),
+    next_best_action: score.next_best_action,
+    assigned_to: existing?.assigned_to || lead.owner_id || lead.assigned_to || null,
+  }, existing);
+  if (existing) Object.assign(existing, payload); else queue.push(payload);
+  return payload;
+}
+
+function ng41RecordLearningEvent(db, payload = {}) {
+  ng41EnsureGrowthCollections(db);
+  const event = withTimestamps({
+    id: payload.id || uuid(),
+    brand_id: payload.brand_id || db.settings?.default_brand_id || null,
+    lead_id: payload.lead_id || null,
+    event_type: payload.event_type || "observation",
+    severity: payload.severity || "info",
+    title: payload.title || "AI sales learning event",
+    description: payload.description || "",
+    lesson_suggestion: payload.lesson_suggestion || "",
+    status: payload.status || "new",
+    source: payload.source || "system",
+    metadata: payload.metadata || {},
+  });
+  ensureCrmArray(db, "ai_learning_events").push(event);
+  return event;
+}
+
+function ng41ProcessInboundMessageForGrowth(db, { lead = null, text = "", from = "", channel = "whatsapp", provider_message_id = null, source = "inbound" } = {}) {
+  if (!lead?.id) return null;
+  ng41EnsureGrowthCollections(db);
+  const inbound = { lead_id: lead.id, text, from, channel, direction: "inbound", received_at: nowIso(), provider_message_id };
+  const windowRecord = channel === "whatsapp" ? ng41UpsertWhatsappWindow(db, lead, inbound) : null;
+
+  if (ng41DetectStop(text)) {
+    ng41UpsertSuppression(db, lead, "student_requested_stop_or_not_interested", source, text);
+    ng41RecordLearningEvent(db, {
+      lead_id: lead.id,
+      event_type: "negative_reply",
+      severity: "warning",
+      title: "Student asked to stop / not interested",
+      description: text,
+      lesson_suggestion: "Stop all future broadcasts and mark the lead as not interested unless a human re-opens it.",
+      source,
+    });
+  }
+
+  const followup = ng41MaybeCreateFutureFollowupFromText(db, lead, text, source);
+  if (followup) {
+    ng41RecordLearningEvent(db, {
+      lead_id: lead.id,
+      event_type: "future_followup_detected",
+      severity: "info",
+      title: "Student asked for future follow-up",
+      description: `Follow up scheduled for ${followup.follow_up_date}`,
+      lesson_suggestion: "When students say they will start later, create a dated follow-up task and move them to warm future pipeline.",
+      source,
+      metadata: { followup_id: followup.id },
+    });
+  }
+
+  if (ng41DetectPriceInterest(text)) {
+    ng41EnsureCallQueue(db, lead, "payment_interest", source);
+    ng41RecordLearningEvent(db, {
+      lead_id: lead.id,
+      event_type: "price_interest",
+      severity: "high",
+      title: "Student asked about price/payment",
+      description: text,
+      lesson_suggestion: "When a student asks about price, explain program value briefly and offer a mentor call instead of only sending price.",
+      source,
+    });
+  } else if (ng41DetectMentorInterest(text) || ng41DetectSessionInterest(text)) {
+    ng41EnsureCallQueue(db, lead, ng41DetectMentorInterest(text) ? "mentor_or_call_interest" : "session_interest", source);
+  }
+
+  const lastBroadcast = [...ensureCrmArray(db, "broadcast_queue")].reverse().find((item) => {
+    const sameLead = lead.id && String(item.lead_id || "") === String(lead.id);
+    const samePhone = from && ng41Phone(item.to || item.phone || item.recipient || "") === ng41Phone(from);
+    return (sameLead || samePhone) && ["sent", "delivered", "read"].includes(item.status || "");
+  });
+  if (lastBroadcast) {
+    ensureCrmArray(db, "broadcast_replies").push(withTimestamps({
+      id: uuid(),
+      brand_id: lead.brand_id || db.settings?.default_brand_id || null,
+      broadcast_id: lastBroadcast.broadcast_id || lastBroadcast.campaign_id || null,
+      queue_id: lastBroadcast.id || null,
+      lead_id: lead.id,
+      from,
+      text,
+      status: "new",
+      routed_to: ng41DetectPriceInterest(text) || ng41DetectMentorInterest(text) ? "hot_call_queue" : "broadcast_replies",
+      ai_suggested_action: ng41DetectPriceInterest(text) ? "call_or_send_value_reply" : ng41DetectFutureIntent(text) ? "schedule_future_followup" : "ai_reply_or_template",
+    }));
+  }
+
+  const score = ng41ScoreLead(db, lead);
+  if (score.score >= 55) ng41EnsureCallQueue(db, lead, "hot_score", source);
+  ng41EnsureDailySessionRecovery(db, lead);
+  return { window: windowRecord, followup, score };
+}
+
+function ng41BuildLeadProfile(db, lead = {}) {
+  ng41EnsureGrowthCollections(db);
+  const leadId = lead?.id || lead?.lead_id || null;
+  const messages = ng41LeadMessages(db, leadId);
+  const score = ensureCrmArray(db, "lead_scores").find((item) => String(item.lead_id || "") === String(leadId)) || ng41ScoreLead(db, lead);
+  const windowRecord = ensureCrmArray(db, "whatsapp_windows").find((item) => String(item.lead_id || "") === String(leadId)) || ng41UpsertWhatsappWindow(db, lead);
+  const callQueue = ensureCrmArray(db, "call_queue").filter((item) => String(item.lead_id || "") === String(leadId)).sort(sortNewestFirst);
+  const callLogs = ensureCrmArray(db, "call_logs").filter((item) => String(item.lead_id || "") === String(leadId)).sort(sortNewestFirst);
+  const followups = ensureCrmArray(db, "future_followups").filter((item) => String(item.lead_id || "") === String(leadId)).sort(sortNewestFirst);
+  const broadcasts = ensureCrmArray(db, "broadcast_queue").filter((item) => String(item.lead_id || "") === String(leadId)).sort(sortNewestFirst);
+  const learning = ensureCrmArray(db, "ai_learning_events").filter((item) => String(item.lead_id || "") === String(leadId)).sort(sortNewestFirst).slice(0, 20);
+  const recovery = ensureCrmArray(db, "daily_session_recovery").find((item) => String(item.lead_id || "") === String(leadId)) || ng41EnsureDailySessionRecovery(db, lead);
+  return {
+    lead,
+    identity: {
+      name: ng41LeadName(lead),
+      phone: ng41LeadPhone(lead),
+      email: ng41LeadEmail(lead),
+      exam_type: ng41LeadExamType(lead),
+      stage: ng41LeadStage(lead),
+      source: lead.source || lead.source_platform || lead.origin || "",
+      campaign_id: lead.campaign_id || null,
+      campaign_name: lead.campaign_name || lead.campaign || "",
+    },
+    score,
+    whatsapp_window: windowRecord,
+    daily_session_recovery: recovery,
+    next_best_action: score?.next_best_action || lead.next_action || "review_lead",
+    messages: messages.slice(-80),
+    call_queue: callQueue,
+    call_logs: callLogs,
+    future_followups: followups,
+    broadcast_history: broadcasts,
+    ai_learning_events: learning,
+    flags: {
+      suppressed: ng41IsSuppressed(db, lead),
+      recording_sent_once: Boolean(recovery?.recording_followup_sent_once || lead.recording_followup_sent_once),
+      hot: Number(score?.score || 0) >= 55,
+      qualified: ng41IsQualifiedLead(db, lead),
+    },
+  };
+}
+
+function ng41IsQualifiedLead(db, lead = {}) {
+  const score = ensureCrmArray(db, "lead_scores").find((item) => String(item.lead_id || "") === String(lead.id || lead.lead_id || "")) || ng41ScoreLead(db, lead);
+  const stage = ng41LeadStage(lead);
+  if (ng41IsSuppressed(db, lead)) return false;
+  if (["paid", "paid_enrolled", "enrolled", "lost", "not_interested", "unsubscribed"].includes(stage)) return false;
+  return Number(score?.score || 0) >= 35 || Boolean(ng41LatestInbound(db, lead.id || lead.lead_id));
+}
+
+function ng41AudienceTargetMatches(db, lead = {}, filter = {}) {
+  const type = normalizeCrmLower(filter.type || filter.audience_type || "all_leads", "all_leads");
+  const stage = ng41LeadStage(lead);
+  const score = ensureCrmArray(db, "lead_scores").find((item) => String(item.lead_id || "") === String(lead.id || lead.lead_id || "")) || ng41ScoreLead(db, lead);
+  if (ng41IsSuppressed(db, lead)) return false;
+  if (["paid", "paid_enrolled", "enrolled"].includes(stage) && filter.exclude_enrolled !== false) return false;
+  if (type === "existing_qualified" || type === "qualified_not_enrolled") return ng41IsQualifiedLead(db, lead);
+  if (type === "hot_leads") return Number(score.score || 0) >= 55;
+  if (type === "new_meta_leads") return ngLeadLooksLikeMetaCampaignLead(lead) && !lead.first_message_sent_at;
+  if (type === "session_attendees") return Boolean(lead.attended_session_at || lead.session_attended_at || lead.live_session_attended === true || stage.includes("attended"));
+  if (type === "recording_received") return Boolean(lead.recording_sent_at || lead.recording_followup_sent_once);
+  if (type === "future_followup_due") {
+    const today = Date.now();
+    return ensureCrmArray(db, "future_followups").some((item) => String(item.lead_id || "") === String(lead.id || "") && ["scheduled", "due"].includes(item.status || "scheduled") && new Date(item.due_at || item.follow_up_at || 0).getTime() <= today);
+  }
+  if (type === "community_not_joined") return !lead.community_joined && !lead.telegram_joined && !lead.whatsapp_group_joined;
+  if (type === "step1_interested") return ng41LeadExamType(lead).toLowerCase().includes("step 1") || ng41LeadExamType(lead).toLowerCase().includes("step1");
+  return true;
+}
+
+function ng41ResolveAudienceTargets(db, { audience_type = "all_leads", audience_list_id = "", lead_ids = [], exclude_enrolled = true, limit = 5000 } = {}) {
+  ng41EnsureGrowthCollections(db);
+  const output = [];
+  const seen = new Set();
+  const addTarget = (target) => {
+    const phone = ng41Phone(target.phone || target.whatsapp || target.to || target.recipient || "");
+    const email = normalizeEmail(target.email || "");
+    const key = phone || email || target.lead_id || target.id;
+    if (!key || seen.has(key)) return;
+    if (ng41IsSuppressed(db, { phone, email })) return;
+    seen.add(key);
+    output.push(target);
+  };
+
+  const selectedLeadIds = new Set(normalizeIdList(lead_ids));
+  for (const lead of ensureCrmArray(db, "leads")) {
+    if (selectedLeadIds.size && !selectedLeadIds.has(String(lead.id || lead.lead_id || ""))) continue;
+    if (!ng41AudienceTargetMatches(db, lead, { type: audience_type, exclude_enrolled })) continue;
+    addTarget({
+      type: "lead",
+      lead_id: lead.id || lead.lead_id,
+      name: ng41LeadName(lead),
+      phone: ng41LeadPhone(lead),
+      whatsapp: ng41LeadPhone(lead),
+      email: ng41LeadEmail(lead),
+      exam_type: ng41LeadExamType(lead),
+      lead,
+    });
+  }
+
+  if (audience_list_id) {
+    for (const member of ensureCrmArray(db, "audience_members").filter((item) => String(item.list_id || item.audience_list_id || "") === String(audience_list_id))) {
+      addTarget({
+        type: "audience_member",
+        member_id: member.id,
+        name: member.name || member.full_name || "Doctor",
+        phone: member.phone || member.whatsapp || member.mobile || "",
+        whatsapp: member.whatsapp || member.phone || member.mobile || "",
+        email: member.email || "",
+        exam_type: member.exam_type || member.exam || "USMLE Step 1",
+        member,
+      });
+    }
+  }
+
+  return output.slice(0, Math.max(1, Number(limit || 5000)));
+}
+
+function ng41BroadcastVariablesForTarget(target = {}, campaign = {}) {
+  const name = target.name && !looksLikePhoneOnly(target.name) ? target.name : "Doctor";
+  const link = ng41FirstNonEmpty(campaign.link_url, campaign.live_session_link, campaign.community_link, campaign.website_link, campaign.lms_link, target.link_url, "https://live.nextgenusmlelms.com");
+  return {
+    student_name: name,
+    lead_name: name,
+    doctor_name: name,
+    exam_type: target.exam_type || campaign.exam_type || "USMLE Step 1",
+    session_time: campaign.session_time || "1:00 PM EST",
+    live_session_link: campaign.live_session_link || campaign.session_link || link,
+    session_link: campaign.session_link || campaign.live_session_link || link,
+    community_link: campaign.community_link || link,
+    recording_link: campaign.recording_link || link,
+    mentor_booking_link: campaign.mentor_booking_link || campaign.booking_link || link,
+    demo_link: campaign.demo_link || campaign.lms_link || link,
+    lms_link: campaign.lms_link || link,
+    website_link: campaign.website_link || link,
+    link_url: link,
+    url: link,
+    default_link: link,
+    announcement_text: campaign.announcement_text || campaign.message || campaign.body || "NextGen USMLE has a new update for you.",
+    follow_up_month: campaign.follow_up_month || campaign.month || "your planned start time",
+  };
+}
+
+function ng41NormalizeBroadcastCampaign(body = {}, existing = null, brandId = null) {
+  return withTimestamps({
+    ...(existing || {}),
+    ...(body || {}),
+    id: body.id || existing?.id || uuid(),
+    brand_id: body.brand_id || existing?.brand_id || brandId || null,
+    name: normalizeCrmString(body.name || body.campaign_name || existing?.name || "Broadcast Campaign"),
+    campaign_name: normalizeCrmString(body.campaign_name || body.name || existing?.campaign_name || "Broadcast Campaign"),
+    status: body.status || existing?.status || "draft",
+    channel: normalizeAutomationChannel(body.channel || existing?.channel || "whatsapp"),
+    audience_type: body.audience_type || existing?.audience_type || "existing_qualified",
+    audience_list_id: body.audience_list_id || existing?.audience_list_id || null,
+    template_key: body.template_key || body.template_id || existing?.template_key || "live_session_invite_broadcast",
+    template_id: body.template_id || existing?.template_id || null,
+    subject: body.subject || existing?.subject || "NextGen USMLE",
+    message: body.message || body.body || existing?.message || "Hi Doctor {{student_name}}, we are running a live USMLE guidance session today at {{session_time}}. You can join for 5–10 minutes to understand our mentor teaching style, roadmap, and how the program works.\n\nJoin here: {{live_session_link}}",
+    body: body.body || body.message || existing?.body || "",
+    link_url: body.link_url || existing?.link_url || "",
+    live_session_link: body.live_session_link || body.session_link || existing?.live_session_link || "",
+    community_link: body.community_link || existing?.community_link || "",
+    website_link: body.website_link || existing?.website_link || "https://live.nextgenusmlelms.com",
+    lms_link: body.lms_link || existing?.lms_link || "https://live.nextgenusmlelms.com",
+    session_time: body.session_time || existing?.session_time || "1:00 PM EST",
+    throttle_count: Math.max(1, Math.min(50, Number(body.throttle_count ?? existing?.throttle_count ?? 10))),
+    throttle_minutes: Math.max(1, Math.min(120, Number(body.throttle_minutes ?? existing?.throttle_minutes ?? 10))),
+    daily_cap: Math.max(1, Math.min(1000, Number(body.daily_cap ?? existing?.daily_cap ?? 200))),
+    stop_on_reply: body.stop_on_reply !== undefined ? Boolean(body.stop_on_reply) : existing?.stop_on_reply !== false,
+    stop_on_failed: body.stop_on_failed !== undefined ? Boolean(body.stop_on_failed) : existing?.stop_on_failed !== false,
+    stop_on_blocked: body.stop_on_blocked !== undefined ? Boolean(body.stop_on_blocked) : existing?.stop_on_blocked !== false,
+    exclude_enrolled: body.exclude_enrolled !== undefined ? Boolean(body.exclude_enrolled) : existing?.exclude_enrolled !== false,
+    metadata: body.metadata || existing?.metadata || {},
+  }, existing);
+}
+
+function ng41QueueScheduledAt(index = 0, throttleCount = 10, throttleMinutes = 10, startAt = null) {
+  const base = startAt ? new Date(startAt) : new Date();
+  const batch = Math.floor(Number(index || 0) / Math.max(1, Number(throttleCount || 10)));
+  base.setMinutes(base.getMinutes() + batch * Math.max(1, Number(throttleMinutes || 10)));
+  return base.toISOString();
+}
+
+function ng41CreateBroadcastQueue(db, campaign = {}, targets = []) {
+  ng41EnsureGrowthCollections(db);
+  const queue = ensureCrmArray(db, "broadcast_queue");
+  const created = [];
+  const skipped = [];
+  targets.forEach((target, index) => {
+    const to = target.whatsapp || target.phone || target.email || "";
+    const dedupeKey = `${campaign.id}:${ng41Phone(to) || normalizeEmail(to) || target.lead_id || target.member_id}`;
+    const duplicate = queue.find((item) => item.dedupe_key === dedupeKey && !["failed", "cancelled"].includes(item.status || ""));
+    if (!to) { skipped.push({ target, reason: "missing_recipient" }); return; }
+    if (duplicate) { skipped.push({ target, reason: "already_queued" }); return; }
+    if (ng41IsSuppressed(db, target)) { skipped.push({ target, reason: "suppressed" }); return; }
+    const item = withTimestamps({
+      id: uuid(),
+      brand_id: campaign.brand_id || db.settings?.default_brand_id || null,
+      broadcast_id: campaign.id,
+      campaign_id: campaign.id,
+      campaign_name: campaign.campaign_name || campaign.name || "Broadcast Campaign",
+      lead_id: target.lead_id || null,
+      audience_member_id: target.member_id || null,
+      channel: campaign.channel || "whatsapp",
+      to,
+      phone: target.phone || target.whatsapp || "",
+      email: target.email || "",
+      name: target.name || "Doctor",
+      status: "queued",
+      scheduled_at: ng41QueueScheduledAt(index, campaign.throttle_count, campaign.throttle_minutes, campaign.start_at),
+      template_key: campaign.template_key || campaign.template_id || "live_session_invite_broadcast",
+      message: campaign.message || campaign.body || "",
+      variables: ng41BroadcastVariablesForTarget(target, campaign),
+      dedupe_key: dedupeKey,
+      attempts: 0,
+      metadata: { target_type: target.type || "lead" },
+    });
+    queue.push(item);
+    created.push(item);
+  });
+  campaign.status = "queued";
+  campaign.queued_count = Number(campaign.queued_count || 0) + created.length;
+  campaign.skipped_count = Number(campaign.skipped_count || 0) + skipped.length;
+  campaign.launched_at = campaign.launched_at || nowIso();
+  campaign.updated_at = nowIso();
+  return { created, skipped };
+}
+
+function ng41BroadcastSentToday(db, campaignId = "") {
+  const today = ng41DateOnlyIso();
+  return ensureCrmArray(db, "broadcast_queue").filter((item) => {
+    return String(item.broadcast_id || item.campaign_id || "") === String(campaignId || "") && ["sent", "delivered", "read"].includes(item.status || "") && String(item.sent_at || item.updated_at || "").slice(0, 10) === today;
+  }).length;
+}
+
+async function ng41RunBroadcastQueue(db, { limit = 25, dryRun = false } = {}) {
+  ng41EnsureGrowthCollections(db);
+  const now = Date.now();
+  const due = ensureCrmArray(db, "broadcast_queue")
+    .filter((item) => item.status === "queued")
+    .filter((item) => !item.scheduled_at || new Date(item.scheduled_at).getTime() <= now)
+    .sort((a, b) => String(a.scheduled_at || a.created_at || "").localeCompare(String(b.scheduled_at || b.created_at || "")))
+    .slice(0, Math.max(1, Number(limit || 25)));
+  const results = [];
+  for (const item of due) {
+    const campaign = ensureCrmArray(db, "broadcast_campaigns").find((c) => String(c.id || "") === String(item.broadcast_id || item.campaign_id || ""));
+    if (!campaign) {
+      item.status = "failed";
+      item.error = "broadcast_campaign_missing";
+      item.updated_at = nowIso();
+      results.push({ id: item.id, success: false, error: item.error });
+      continue;
+    }
+    if (ng41BroadcastSentToday(db, campaign.id) >= Number(campaign.daily_cap || 200)) {
+      item.scheduled_at = ng41AddDaysIso(1);
+      item.updated_at = nowIso();
+      results.push({ id: item.id, skipped: true, reason: "daily_cap_reached" });
+      continue;
+    }
+    if (ng41IsSuppressed(db, item)) {
+      item.status = "skipped";
+      item.error = "suppressed";
+      item.updated_at = nowIso();
+      results.push({ id: item.id, skipped: true, reason: "suppressed" });
+      continue;
+    }
+    if (dryRun) {
+      results.push({ id: item.id, dry_run: true, to: item.to, template_key: item.template_key });
+      continue;
+    }
+    item.status = "sending";
+    item.attempts = Number(item.attempts || 0) + 1;
+    item.updated_at = nowIso();
+    const lead = item.lead_id ? getLeadByAnyId(db, item.lead_id) : null;
+    const template = getMessageTemplateByKey(db, campaign.template_id || campaign.template_key || item.template_key) || getMessageTemplateByKey(db, item.template_key);
+    const variables = { ...(item.variables || {}), lead: lead || item.variables || {} };
+    const result = await sendCrmMessage({
+      db,
+      brandId: campaign.brand_id || item.brand_id || db.settings?.default_brand_id || null,
+      channel: campaign.channel || item.channel || "whatsapp",
+      to: item.to,
+      subject: campaign.subject || "NextGen USMLE",
+      text: campaign.message || campaign.body || item.message || template?.body || "",
+      templateId: template?.id || template?.key || campaign.template_key || item.template_key,
+      templateVariables: variables,
+      leadId: lead?.id || item.lead_id || null,
+      queueId: item.id,
+      metadata: {
+        source: "v41_broadcast_queue",
+        broadcast_id: campaign.id,
+        broadcast_queue_id: item.id,
+        template_key: template?.key || campaign.template_key || item.template_key,
+        template_name: template?.provider_template_name || template?.meta_template_name || template?.whatsapp_template_name || campaign.template_key || item.template_key,
+        whatsapp_template_name: template?.whatsapp_template_name || template?.meta_template_name || template?.provider_template_name || campaign.template_key || item.template_key,
+        language_code: normalizeWhatsAppLanguageCode(template?.meta_language || template?.whatsapp_language || template?.language_code || "en"),
+        ...variables,
+      },
+    });
+    item.status = result.success || result.queued ? "sent" : "failed";
+    item.sent_at = result.success || result.queued ? nowIso() : null;
+    item.error = result.error || null;
+    item.message_log_id = result.log?.id || null;
+    item.provider_response = result.provider_response || null;
+    item.updated_at = nowIso();
+    campaign.sent_count = Number(campaign.sent_count || 0) + (result.success || result.queued ? 1 : 0);
+    campaign.failed_count = Number(campaign.failed_count || 0) + (result.success || result.queued ? 0 : 1);
+    campaign.updated_at = nowIso();
+    results.push({ id: item.id, success: Boolean(result.success || result.queued), status: item.status, error: item.error, log_id: result.log?.id || null });
+  }
+  return results;
+}
+
+function ng41BuildDailySalesBrief(db) {
+  ng41EnsureGrowthCollections(db);
+  const now = Date.now();
+  const today = ng41DateOnlyIso();
+  for (const lead of ensureCrmArray(db, "leads")) {
+    ng41ScoreLead(db, lead);
+    ng41UpsertWhatsappWindow(db, lead);
+    ng41EnsureDailySessionRecovery(db, lead);
+    const score = ensureCrmArray(db, "lead_scores").find((item) => String(item.lead_id || "") === String(lead.id || ""));
+    if (Number(score?.score || 0) >= 55) ng41EnsureCallQueue(db, lead, "daily_brief_hot_score", "daily_brief");
+  }
+  const hotCalls = ensureCrmArray(db, "call_queue").filter((item) => !["converted", "not_interested", "closed"].includes(item.status || ""));
+  const dueFollowups = ensureCrmArray(db, "future_followups").filter((item) => ["scheduled", "due"].includes(item.status || "scheduled") && new Date(item.due_at || item.follow_up_at || 0).getTime() <= now);
+  const windowsClosing = ensureCrmArray(db, "whatsapp_windows").filter((item) => item.status === "closing_soon");
+  const windowsOpen = ensureCrmArray(db, "whatsapp_windows").filter((item) => item.status === "open");
+  const broadcastReplies = ensureCrmArray(db, "broadcast_replies").filter((item) => ["new", "open"].includes(item.status || "new"));
+  const paymentInterest = ensureCrmArray(db, "lead_scores").filter((item) => Array.isArray(item.reasons) && item.reasons.includes("asked_price_or_payment"));
+  const sessionRecovery = ensureCrmArray(db, "daily_session_recovery").filter((item) => item.status !== "stopped");
+  const learningReview = ensureCrmArray(db, "ai_learning_events").filter((item) => ["new", "needs_review"].includes(item.status || "new"));
+  const summary = {
+    date: today,
+    generated_at: nowIso(),
+    counts: {
+      total_leads: ensureCrmArray(db, "leads").length,
+      hot_leads_need_call: hotCalls.length,
+      future_followups_due: dueFollowups.length,
+      whatsapp_windows_closing_soon: windowsClosing.length,
+      whatsapp_windows_open: windowsOpen.length,
+      broadcast_replies_open: broadcastReplies.length,
+      payment_interest_leads: paymentInterest.length,
+      daily_session_recovery_active: sessionRecovery.length,
+      ai_learning_items_to_review: learningReview.length,
+      suppressed_contacts: ensureCrmArray(db, "suppression_list").filter((item) => item.status !== "inactive").length,
+    },
+    actions: [
+      { key: "open_hot_call_queue", label: "Open Hot Call Queue", count: hotCalls.length, priority: "high" },
+      { key: "open_future_followups", label: "Open Due Future Follow-ups", count: dueFollowups.length, priority: "high" },
+      { key: "open_closing_soon", label: "Open 24h Closing Soon", count: windowsClosing.length, priority: "high" },
+      { key: "open_broadcast_replies", label: "Open Broadcast Replies", count: broadcastReplies.length, priority: "medium" },
+      { key: "open_ai_learning", label: "Review AI Sales Learning", count: learningReview.length, priority: "medium" },
+      { key: "open_session_recovery", label: "Open Daily Session Recovery", count: sessionRecovery.length, priority: "medium" },
+    ],
+    top_call_queue: hotCalls.sort((a, b) => Number(b.lead_score || 0) - Number(a.lead_score || 0)).slice(0, 20),
+    due_followups: dueFollowups.sort((a, b) => String(a.due_at || "").localeCompare(String(b.due_at || ""))).slice(0, 20),
+    closing_windows: windowsClosing.slice(0, 20),
+  };
+  const brief = withTimestamps({ id: uuid(), brand_id: db.settings?.default_brand_id || null, date: today, summary, status: "generated" });
+  ensureCrmArray(db, "crm_sales_briefs").push(brief);
+  return summary;
+}
+
+// Growth summary / daily command center.
+app.get("/admin/crm/growth/summary", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    ng41EnsureGrowthCollections(db);
+    const summary = ng41BuildDailySalesBrief(db);
+    await writeCrmDb(db);
+    res.json({ success: true, build: NEXTGEN_BACKEND_BUILD, summary });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/crm/daily-sales-brief", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    ng41EnsureGrowthCollections(db);
+    const summary = ng41BuildDailySalesBrief(db);
+    await writeCrmDb(db);
+    res.json({ success: true, brief: summary, summary });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/growth/rebuild", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    ng41EnsureGrowthCollections(db);
+    let processed = 0;
+    for (const lead of ensureCrmArray(db, "leads")) {
+      ng41ScoreLead(db, lead);
+      ng41UpsertWhatsappWindow(db, lead);
+      ng41EnsureDailySessionRecovery(db, lead);
+      const score = ensureCrmArray(db, "lead_scores").find((item) => String(item.lead_id || "") === String(lead.id || ""));
+      if (Number(score?.score || 0) >= 55) ng41EnsureCallQueue(db, lead, "rebuild_hot_score", "growth_rebuild");
+      processed += 1;
+    }
+    const summary = ng41BuildDailySalesBrief(db);
+    await writeCrmDb(db);
+    res.json({ success: true, processed, summary });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+// Lead Profile Pro.
+app.get("/admin/crm/lead-profiles/:leadId", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const lead = getLeadByAnyId(db, req.params.leadId);
+    if (!lead) return res.status(404).json({ success: false, error: "Lead not found" });
+    const profile = ng41BuildLeadProfile(db, lead);
+    await writeCrmDb(db);
+    res.json({ success: true, profile });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+// Hot Lead Call Queue.
+app.get("/admin/crm/hot-call-queue", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    ng41EnsureGrowthCollections(db);
+    const status = req.query.status ? normalizeCrmLower(req.query.status) : "";
+    let items = ensureCrmArray(db, "call_queue");
+    if (status) items = items.filter((item) => normalizeCrmLower(item.status || "") === status);
+    items = items.sort((a, b) => Number(b.lead_score || 0) - Number(a.lead_score || 0));
+    res.json({ success: true, items, count: items.length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/hot-call-queue/rebuild", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    let added = 0;
+    for (const lead of ensureCrmArray(db, "leads")) {
+      const item = ng41EnsureCallQueue(db, lead, "manual_rebuild", "hot_call_queue_rebuild");
+      if (item) added += 1;
+    }
+    await writeCrmDb(db);
+    res.json({ success: true, added, count: ensureCrmArray(db, "call_queue").length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/hot-call-queue/:leadId/add", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const lead = getLeadByAnyId(db, req.params.leadId);
+    if (!lead) return res.status(404).json({ success: false, error: "Lead not found" });
+    const item = ng41EnsureCallQueue(db, lead, req.body.reason || "manual", "manual_add");
+    await writeCrmDb(db);
+    res.json({ success: true, item });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.patch("/admin/crm/hot-call-queue/:id", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const item = ensureCrmArray(db, "call_queue").find((x) => String(x.id) === String(req.params.id));
+    if (!item) return res.status(404).json({ success: false, error: "Call queue item not found" });
+    Object.assign(item, req.body || {}, { updated_at: nowIso() });
+    await writeCrmDb(db);
+    res.json({ success: true, item });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/hot-call-queue/:id/call-log", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const item = ensureCrmArray(db, "call_queue").find((x) => String(x.id) === String(req.params.id));
+    if (!item) return res.status(404).json({ success: false, error: "Call queue item not found" });
+    const log = withTimestamps({
+      id: uuid(),
+      brand_id: item.brand_id || db.settings?.default_brand_id || null,
+      call_queue_id: item.id,
+      lead_id: item.lead_id || null,
+      outcome: req.body.outcome || "called",
+      notes: req.body.notes || "",
+      next_call_at: req.body.next_call_at || null,
+      created_by: req.body.created_by || "admin",
+    });
+    ensureCrmArray(db, "call_logs").push(log);
+    item.status = req.body.next_status || req.body.status || item.status || "called";
+    item.last_called_at = nowIso();
+    if (req.body.next_call_at) item.next_call_at = req.body.next_call_at;
+    item.updated_at = nowIso();
+    await writeCrmDb(db);
+    res.json({ success: true, log, item });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+// Audience Lists / Contact Bank.
+app.get("/admin/crm/audience-lists", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const lists = ensureCrmArray(db, "audience_lists").map((list) => ({ ...list, member_count: ensureCrmArray(db, "audience_members").filter((m) => String(m.list_id) === String(list.id)).length }));
+    res.json({ success: true, lists, count: lists.length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/audience-lists", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const list = withTimestamps({
+      id: uuid(),
+      brand_id: getCrmBrandId(req, db),
+      name: req.body.name || req.body.list_name || "Audience List",
+      description: req.body.description || "",
+      source: req.body.source || "manual",
+      tags: normalizeIdList(req.body.tags),
+      consent_status: req.body.consent_status || "unknown",
+      status: req.body.status || "active",
+    });
+    ensureCrmArray(db, "audience_lists").push(list);
+    await writeCrmDb(db);
+    res.json({ success: true, list });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.patch("/admin/crm/audience-lists/:id", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const list = ensureCrmArray(db, "audience_lists").find((x) => String(x.id) === String(req.params.id));
+    if (!list) return res.status(404).json({ success: false, error: "Audience list not found" });
+    Object.assign(list, req.body || {}, { updated_at: nowIso() });
+    await writeCrmDb(db);
+    res.json({ success: true, list });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/audience-lists/:id/import", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const list = ensureCrmArray(db, "audience_lists").find((x) => String(x.id) === String(req.params.id));
+    if (!list) return res.status(404).json({ success: false, error: "Audience list not found" });
+    const contacts = Array.isArray(req.body.contacts) ? req.body.contacts : [];
+    const members = ensureCrmArray(db, "audience_members");
+    let added = 0;
+    let skipped = 0;
+    for (const contact of contacts) {
+      const phone = ng41Phone(contact.phone || contact.whatsapp || contact.mobile || contact.number || "");
+      const email = normalizeEmail(contact.email || "");
+      if (!phone && !email) { skipped += 1; continue; }
+      const exists = members.find((m) => String(m.list_id) === String(list.id) && ((phone && ng41Phone(m.phone || m.whatsapp) === phone) || (email && normalizeEmail(m.email) === email)));
+      if (exists) { skipped += 1; continue; }
+      members.push(withTimestamps({
+        id: uuid(),
+        brand_id: list.brand_id || db.settings?.default_brand_id || null,
+        list_id: list.id,
+        name: contact.name || contact.full_name || contact.student_name || "Doctor",
+        phone,
+        whatsapp: phone,
+        email,
+        country: contact.country || "",
+        source: contact.source || list.source || "import",
+        tags: normalizeIdList(contact.tags || list.tags),
+        consent_status: contact.consent_status || list.consent_status || "unknown",
+        status: "active",
+        metadata: contact.metadata || {},
+      }));
+      added += 1;
+    }
+    list.member_count = ensureCrmArray(db, "audience_members").filter((m) => String(m.list_id) === String(list.id)).length;
+    list.updated_at = nowIso();
+    await writeCrmDb(db);
+    res.json({ success: true, added, skipped, member_count: list.member_count });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/crm/audience-targets/preview", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const targets = ng41ResolveAudienceTargets(db, {
+      audience_type: req.query.audience_type || req.query.type || "existing_qualified",
+      audience_list_id: req.query.audience_list_id || "",
+      limit: Number(req.query.limit || 250),
+    });
+    res.json({ success: true, targets, count: targets.length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+// Broadcast Center.
+app.get("/admin/crm/broadcast-campaigns", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const campaigns = ensureCrmArray(db, "broadcast_campaigns").sort(sortNewestFirst);
+    res.json({ success: true, campaigns, count: campaigns.length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/broadcast-campaigns", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const campaign = ng41NormalizeBroadcastCampaign(req.body || {}, null, getCrmBrandId(req, db));
+    ensureCrmArray(db, "broadcast_campaigns").push(campaign);
+    await writeCrmDb(db);
+    res.json({ success: true, campaign });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.patch("/admin/crm/broadcast-campaigns/:id", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const arr = ensureCrmArray(db, "broadcast_campaigns");
+    const index = arr.findIndex((x) => String(x.id) === String(req.params.id));
+    if (index < 0) return res.status(404).json({ success: false, error: "Broadcast campaign not found" });
+    arr[index] = ng41NormalizeBroadcastCampaign(req.body || {}, arr[index], arr[index].brand_id || getCrmBrandId(req, db));
+    await writeCrmDb(db);
+    res.json({ success: true, campaign: arr[index] });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/broadcast-campaigns/:id/preview", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const campaign = ensureCrmArray(db, "broadcast_campaigns").find((x) => String(x.id) === String(req.params.id));
+    if (!campaign) return res.status(404).json({ success: false, error: "Broadcast campaign not found" });
+    const targets = ng41ResolveAudienceTargets(db, { audience_type: campaign.audience_type, audience_list_id: campaign.audience_list_id, exclude_enrolled: campaign.exclude_enrolled, limit: Number(req.body.limit || 500) });
+    res.json({ success: true, campaign, targets: targets.slice(0, 100), count: targets.length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/broadcast-campaigns/:id/launch", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const campaign = ensureCrmArray(db, "broadcast_campaigns").find((x) => String(x.id) === String(req.params.id));
+    if (!campaign) return res.status(404).json({ success: false, error: "Broadcast campaign not found" });
+    const targets = ng41ResolveAudienceTargets(db, { audience_type: campaign.audience_type, audience_list_id: campaign.audience_list_id, exclude_enrolled: campaign.exclude_enrolled, limit: Number(req.body.limit || campaign.max_targets || 5000) });
+    const result = ng41CreateBroadcastQueue(db, campaign, targets);
+    await writeCrmDb(db);
+    res.json({ success: true, campaign, queued: result.created.length, skipped: result.skipped.length, skipped_details: result.skipped.slice(0, 50) });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/crm/broadcast-queue", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    let items = ensureCrmArray(db, "broadcast_queue").sort((a, b) => String(a.scheduled_at || "").localeCompare(String(b.scheduled_at || "")));
+    if (req.query.status) items = items.filter((item) => String(item.status || "") === String(req.query.status));
+    res.json({ success: true, items: items.slice(0, Number(req.query.limit || 500)), count: items.length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/broadcast-queue/run", async (req, res) => {
+  try {
+    await requireAutomationRunPermission(req);
+    const db = await readCrmDb();
+    const results = await ng41RunBroadcastQueue(db, { limit: Number(req.body.limit || req.query.limit || 25), dryRun: req.body.dry_run === true || req.query.dry_run === "true" });
+    await writeCrmDb(db);
+    res.json({ success: true, processed: results.length, results });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/crm/broadcast-replies", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    let replies = ensureCrmArray(db, "broadcast_replies").sort(sortNewestFirst);
+    if (req.query.status) replies = replies.filter((item) => String(item.status || "") === String(req.query.status));
+    res.json({ success: true, replies: replies.slice(0, Number(req.query.limit || 500)), count: replies.length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+// Future follow-up / snooze memory.
+app.get("/admin/crm/future-followups", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const dueOnly = req.query.due === "true";
+    const now = Date.now();
+    let items = ensureCrmArray(db, "future_followups").sort((a, b) => String(a.due_at || "").localeCompare(String(b.due_at || "")));
+    if (dueOnly) items = items.filter((item) => ["scheduled", "due"].includes(item.status || "scheduled") && new Date(item.due_at || item.follow_up_at || 0).getTime() <= now);
+    res.json({ success: true, followups: items, count: items.length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/future-followups", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const lead = getLeadByAnyId(db, req.body.lead_id);
+    if (!lead) return res.status(404).json({ success: false, error: "Lead not found" });
+    const followup = ng41UpsertFutureFollowup(db, lead, req.body || {});
+    await writeCrmDb(db);
+    res.json({ success: true, followup });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.patch("/admin/crm/future-followups/:id", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const item = ensureCrmArray(db, "future_followups").find((x) => String(x.id) === String(req.params.id));
+    if (!item) return res.status(404).json({ success: false, error: "Future follow-up not found" });
+    Object.assign(item, req.body || {}, { updated_at: nowIso() });
+    await writeCrmDb(db);
+    res.json({ success: true, followup: item });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+// WhatsApp window tracker and session recovery.
+app.get("/admin/crm/whatsapp-windows", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    for (const lead of ensureCrmArray(db, "leads")) ng41UpsertWhatsappWindow(db, lead);
+    await writeCrmDb(db);
+    let windows = ensureCrmArray(db, "whatsapp_windows").sort((a, b) => String(a.whatsapp_window_expires_at || "").localeCompare(String(b.whatsapp_window_expires_at || "")));
+    if (req.query.status) windows = windows.filter((item) => String(item.status || item.window_status || "") === String(req.query.status));
+    res.json({ success: true, windows, count: windows.length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/crm/daily-session-recovery", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    for (const lead of ensureCrmArray(db, "leads")) ng41EnsureDailySessionRecovery(db, lead);
+    await writeCrmDb(db);
+    const items = ensureCrmArray(db, "daily_session_recovery").sort(sortNewestFirst);
+    res.json({ success: true, items, count: items.length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+// AI Sales Learning Center.
+app.get("/admin/crm/ai-sales-learning/events", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    let events = ensureCrmArray(db, "ai_learning_events").sort(sortNewestFirst);
+    if (req.query.status) events = events.filter((item) => String(item.status || "") === String(req.query.status));
+    res.json({ success: true, events: events.slice(0, Number(req.query.limit || 500)), count: events.length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/ai-sales-learning/events", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const event = ng41RecordLearningEvent(db, req.body || {});
+    await writeCrmDb(db);
+    res.json({ success: true, event });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/crm/ai-sales-learning/lessons", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const lessons = ensureCrmArray(db, "ai_learning_lessons").sort(sortNewestFirst);
+    res.json({ success: true, lessons, count: lessons.length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/ai-sales-learning/lessons", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const lesson = withTimestamps({
+      id: uuid(),
+      brand_id: getCrmBrandId(req, db),
+      title: req.body.title || "AI Sales Lesson",
+      rule_text: req.body.rule_text || req.body.lesson || "",
+      category: req.body.category || "sales_behavior",
+      status: req.body.status || "pending_approval",
+      source_event_id: req.body.source_event_id || null,
+      created_by: "admin",
+    });
+    ensureCrmArray(db, "ai_learning_lessons").push(lesson);
+    await writeCrmDb(db);
+    res.json({ success: true, lesson });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/ai-sales-learning/lessons/:id/approve", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const lesson = ensureCrmArray(db, "ai_learning_lessons").find((x) => String(x.id) === String(req.params.id));
+    if (!lesson) return res.status(404).json({ success: false, error: "Lesson not found" });
+    lesson.status = "approved";
+    lesson.approved_at = nowIso();
+    lesson.updated_at = nowIso();
+    await writeCrmDb(db);
+    res.json({ success: true, lesson });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/ai-sales-learning/lessons/:id/reject", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const lesson = ensureCrmArray(db, "ai_learning_lessons").find((x) => String(x.id) === String(req.params.id));
+    if (!lesson) return res.status(404).json({ success: false, error: "Lesson not found" });
+    lesson.status = "rejected";
+    lesson.rejected_at = nowIso();
+    lesson.updated_at = nowIso();
+    await writeCrmDb(db);
+    res.json({ success: true, lesson });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+// Suppression / STOP list.
+app.get("/admin/crm/suppression-list", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const items = ensureCrmArray(db, "suppression_list").sort(sortNewestFirst);
+    res.json({ success: true, items, count: items.length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/suppression-list", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const lead = req.body.lead_id ? getLeadByAnyId(db, req.body.lead_id) : { name: req.body.name || "", phone: req.body.phone || req.body.whatsapp || "", email: req.body.email || "", brand_id: getCrmBrandId(req, db) };
+    const item = ng41UpsertSuppression(db, lead, req.body.reason || "manual_suppression", "manual", req.body.notes || "");
+    await writeCrmDb(db);
+    res.json({ success: true, item });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+// Community Invite Manager link store.
+app.get("/admin/crm/community-invite-links", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const links = ensureCrmArray(db, "community_invite_links").sort(sortNewestFirst);
+    res.json({ success: true, links, count: links.length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/community-invite-links", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const link = withTimestamps({
+      id: uuid(),
+      brand_id: getCrmBrandId(req, db),
+      name: req.body.name || "Community Link",
+      type: req.body.type || "whatsapp_or_telegram",
+      url: req.body.url || req.body.link || "",
+      description: req.body.description || "",
+      status: req.body.status || "active",
+    });
+    ensureCrmArray(db, "community_invite_links").push(link);
+    await writeCrmDb(db);
+    res.json({ success: true, link });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
 app.get("/admin/crm/backend-bridge/status", async (req, res) => {
