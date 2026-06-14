@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v42-ai-control-owner-command-enforcement";
+const NEXTGEN_BACKEND_BUILD = "v43-sunday-template-router";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -12700,6 +12700,9 @@ const WHATSAPP_TEMPLATE_NAME_ALIASES = {
   meta_ad_first_message: "meta_ad_first_message",
   meta_first_message: "meta_ad_first_message",
   first_message_intro: "meta_ad_first_message",
+  greeting_exam_type_question: "greeting_exam_type_question",
+  exam_type_question: "greeting_exam_type_question",
+  sunday_first_message: "greeting_exam_type_question",
   five_min_live_session_reminder: "five_minute_reminder",
   five_minute_reminder: "five_minute_reminder",
   live_session_1pm_reminder: "live_session_link_now",
@@ -12868,6 +12871,11 @@ const WHATSAPP_TEMPLATE_VARIABLE_ORDERS = {
   meta_ad_first_message: ["student_name", "exam_type", "session_time"],
   meta_first_message: ["student_name", "exam_type", "session_time"],
   first_message_intro: ["student_name", "exam_type", "session_time"],
+
+  // v43 Sunday-safe first template: no variables in approved Meta template.
+  greeting_exam_type_question: [],
+  exam_type_question: [],
+  sunday_first_message: [],
 
   five_minute_reminder: ["student_name"],
   five_min_live_session_reminder: ["student_name"],
@@ -13617,7 +13625,7 @@ function ngCanSendAutoFirstMessage(db, lead = {}) {
   if (!leadHasRecipientForChannel(lead, "whatsapp")) return { ok: false, reason: "no_whatsapp_recipient" };
   if (!ngLeadLooksLikeMetaCampaignLead(lead)) return { ok: false, reason: "not_campaign_or_meta_lead" };
   if (lead.first_message_sent_at || lead.first_template_sent_at || stage === "first_message_sent") return { ok: false, reason: "first_message_already_marked_sent" };
-  if (ngLeadHasOutboundTemplate(db, lead, ["meta_ad_first_message", "first_message_intro", "meta_first_message"])) return { ok: false, reason: "first_message_already_logged" };
+  if (ngLeadHasOutboundTemplate(db, lead, ["meta_ad_first_message", "first_message_intro", "meta_first_message", "greeting_exam_type_question", "exam_type_question", "sunday_first_message"])) return { ok: false, reason: "first_message_already_logged" };
   return { ok: true, reason: "eligible" };
 }
 
@@ -13634,6 +13642,61 @@ function ngFirstMessageVariablesForLead(lead = {}) {
   };
 }
 
+
+function ngGetAssistantTimeZone(db = {}) {
+  const settings = db?.ai_orchestration_settings || db?.assistant_settings || {};
+  return normalizeCrmString(
+    settings.live_session_timezone ||
+      settings.default_timezone ||
+      settings.timezone ||
+      process.env.NEXTGEN_LIVE_SESSION_TIMEZONE ||
+      process.env.TZ ||
+      "America/New_York"
+  ) || "America/New_York";
+}
+
+function ngWeekdayInTimeZone(date = new Date(), timeZone = "America/New_York") {
+  try {
+    return new Intl.DateTimeFormat("en-US", { weekday: "long", timeZone }).format(date);
+  } catch (_) {
+    return new Intl.DateTimeFormat("en-US", { weekday: "long", timeZone: "America/New_York" }).format(date);
+  }
+}
+
+function ngIsSundayNoLiveSessionDay(db = {}, date = new Date()) {
+  const settings = db?.ai_orchestration_settings || {};
+  const ownerText = normalizeCrmString([
+    settings.owner_live_command,
+    settings.owner_do_rule,
+    settings.owner_dont_rule,
+    settings.live_session_rule,
+    settings.meta_lead_first_flow,
+  ].filter(Boolean).join("\n")).toLowerCase();
+
+  const tz = ngGetAssistantTimeZone(db);
+  const weekday = ngWeekdayInTimeZone(date, tz).toLowerCase();
+  const isSunday = weekday === "sunday";
+
+  // Sunday is the business default no-live-session day for NextGen. Admin command can reinforce it.
+  if (!isSunday) return false;
+  if (!ownerText) return true;
+  if (ownerText.includes("sunday") && (ownerText.includes("do not invite") || ownerText.includes("no live") || ownerText.includes("no session") || ownerText.includes("greeting_exam_type_question"))) return true;
+  return true;
+}
+
+function ngResolveAutoFirstMessageTemplateKey(db = {}, lead = {}) {
+  if (ngIsSundayNoLiveSessionDay(db)) return "greeting_exam_type_question";
+  return "meta_ad_first_message";
+}
+
+function ngAutoFirstFallbackTextForTemplate(templateKey = "meta_ad_first_message") {
+  const clean = normalizeTemplateLookupKey(templateKey);
+  if (clean === "greeting_exam_type_question" || clean === "exam_type_question" || clean === "sunday_first_message") {
+    return "Hi Doctor, welcome to NextGen USMLE. Are you preparing for Step 1 or Step 2 CK?";
+  }
+  return "Hi Doctor {{student_name}}, this is NextGen USMLE. You reached out about {{exam_type}} preparation. We have a live guidance session today at {{session_time}} to explain the program and mentor teaching style. Can you join?";
+}
+
 async function ngSendAutoFirstMessageForLead({ db, lead, brandId = null, actorId = "system", source = "auto_first_message", dryRun = false } = {}) {
   const ownerBlock = ngAylaOwnerCommandBlocksBulkSend(db);
   if (ownerBlock.blocked) {
@@ -13645,10 +13708,13 @@ async function ngSendAutoFirstMessageForLead({ db, lead, brandId = null, actorId
     return { success: true, sent: false, skipped: true, reason: allowed.reason, lead_id: lead?.id || null };
   }
 
-  const templateKey = "meta_ad_first_message";
-  const template = getMessageTemplateByKey(db, templateKey) || getMessageTemplateByKey(db, "META_AD_FIRST_MESSAGE");
+  const templateKey = ngResolveAutoFirstMessageTemplateKey(db, lead);
+  const template =
+    getMessageTemplateByKey(db, templateKey) ||
+    getMessageTemplateByKey(db, templateKey.toUpperCase()) ||
+    (templateKey === "meta_ad_first_message" ? getMessageTemplateByKey(db, "META_AD_FIRST_MESSAGE") : null);
   const vars = { ...ngFirstMessageVariablesForLead(lead), ai_control_command_context: ngBuildAylaCommandContext(db, lead).slice(0, 3000) };
-  const fallbackText = "Hi Doctor {{student_name}}, this is NextGen USMLE. You reached out about {{exam_type}} preparation. We have a live guidance session today at {{session_time}} to explain the program and mentor teaching style. Can you join?";
+  const fallbackText = ngAutoFirstFallbackTextForTemplate(templateKey);
   const to = getBestRecipientForChannel({ channel: "whatsapp", lead });
 
   if (dryRun) {
@@ -13669,8 +13735,9 @@ async function ngSendAutoFirstMessageForLead({ db, lead, brandId = null, actorId
       source,
       quick_action: "first_message",
       template_key: templateKey,
-      template_name: template?.provider_template_name || template?.meta_template_name || template?.whatsapp_template_name || "meta_ad_first_message",
-      whatsapp_template_name: template?.whatsapp_template_name || template?.meta_template_name || template?.provider_template_name || "meta_ad_first_message",
+      sunday_template_router: ngIsSundayNoLiveSessionDay(db),
+      template_name: template?.provider_template_name || template?.meta_template_name || template?.whatsapp_template_name || templateKey,
+      whatsapp_template_name: template?.whatsapp_template_name || template?.meta_template_name || template?.provider_template_name || templateKey,
       language_code: normalizeWhatsAppLanguageCode(template?.meta_language || template?.whatsapp_language || template?.language_code || "en"),
       triggered_by: actorId || "system",
     },
@@ -13689,7 +13756,7 @@ async function ngSendAutoFirstMessageForLead({ db, lead, brandId = null, actorId
     lead.updated_at = now;
   }
 
-  return { ...result, sent: Boolean(result.success), lead_id: lead.id || lead.lead_id, template_key: templateKey };
+  return { ...result, sent: Boolean(result.success), lead_id: lead.id || lead.lead_id, template_key: templateKey, sunday_template_router: ngIsSundayNoLiveSessionDay(db) };
 }
 
 async function ngRunDueAutoFirstMessages({ db, brandId = null, limit = 25, actorId = "system", dryRun = false } = {}) {
@@ -16597,6 +16664,28 @@ app.put("/admin/crm/assistant/settings", async (req, res) => {
   }
 });
 
+
+
+app.get("/admin/crm/assistant/owner-command", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    await writeCrmDb(db);
+    res.json({
+      success: true,
+      settings: db.ai_orchestration_settings,
+      owner_live_command_enabled: db.ai_orchestration_settings.owner_live_command_enabled !== false,
+      owner_live_command: db.ai_orchestration_settings.owner_live_command || "",
+      owner_do_rule: db.ai_orchestration_settings.owner_do_rule || "",
+      owner_dont_rule: db.ai_orchestration_settings.owner_dont_rule || "",
+      command_priority_mode: db.ai_orchestration_settings.command_priority_mode || "owner_first",
+      sunday_template_router_active: ngIsSundayNoLiveSessionDay(db),
+      sunday_first_template: ngIsSundayNoLiveSessionDay(db) ? "greeting_exam_type_question" : "meta_ad_first_message",
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
 
 app.post("/admin/crm/assistant/owner-command", async (req, res) => {
   try {
