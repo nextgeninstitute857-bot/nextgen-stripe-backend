@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v43-sunday-template-router";
+const NEXTGEN_BACKEND_BUILD = "v45-ai-sales-brain-enforced";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -15391,6 +15391,36 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
     "run_due_automation"
   ],
   notify_email: process.env.ASSISTANT_NOTIFY_EMAIL || process.env.BOOTSTRAP_ADMIN_EMAIL || "nextgenacademy89@gmail.com",
+
+  // v45: Backend-enforced AI Sales Brain. This is NOT a WhatsApp template.
+  // It is injected into every Ayla free-form student reply so Ayla behaves like
+  // a warm, professional admissions counselor/sales closer even if the owner
+  // command box is empty or older rules still exist in the CRM.
+  sales_closer_mode_enabled: true,
+  sales_warm_opening_enabled: true,
+  ai_reply_style: "warm_sales_closer",
+  ai_max_sentences: 3,
+  ai_max_lines: 3,
+  booking_timezone: "EST",
+  disclose_pricing_in_ai_chat: false,
+  send_website_early: false,
+  use_templates_only_as_doorway: true,
+  recording_first_strategy_enabled: true,
+  main_cta: "mentor_call",
+  secondary_cta: "watch_recording_or_join_live_session",
+  uworld_library_link: "https://lms.nextgenusmlelms.com/",
+  uworld_library_hours: "150",
+  uworld_library_mcqs: "3000+",
+  uworld_library_mentor_name: "Dr Hasnain",
+  uworld_library_mentor_title: "resident at Rochester General Hospital, New York",
+  main_recording_link: "",
+  live_session_link: "",
+  recording_template_key: "recording_proof_video",
+  sales_style_rule: "Open warmly, then sell professionally in 2-3 short lines. Build trust, explain one strong NextGen value, and move the lead toward recording, live session, or mentor guidance call. Do not sound like a generic support bot.",
+  uworld_video_library_rule: "Present the UWorld Video Library as a major NextGen advantage: around 150 hours, 3000+ UWorld-style MCQs explained in depth, First Aid side-by-side, helping students learn MCQ approach, option elimination, concept connection, and weak-area correction. Share the UWorld library link when relevant.",
+  mentor_sales_rule: "Use mentor authority naturally. Mention Dr Ahmad and USMLE-focused mentors when useful. Mention the UWorld mentor only when discussing the library. Do not dump all mentor names in every reply.",
+  recording_sales_rule: "Offer a short session recording early as proof of teaching quality. Use it to build trust, then offer next live session link or mentor call.",
+  failed_student_reassurance_rule: "If a student failed, is weak, delayed, confused, or old graduate, reassure strongly: they are in the right place; the key is roadmap, mentor feedback, UWorld-style practice, and weak-area correction. Then offer mentor call.",
   updated_at: null
 };
 
@@ -18875,7 +18905,7 @@ function ngAylaOutboundCommandMetadata(db = {}, lead = {}) {
     owner_live_command_excerpt: ngAylaSettingsText(settings.owner_live_command || settings.owner_runtime_command || settings.live_owner_command, 500),
     campaign_command_active: Boolean(ngAylaCampaignCommandContext(db, lead)),
     command_priority_mode: settings.command_priority_mode || "owner_first",
-    command_context_version: "v42_owner_command_enforcement",
+    command_context_version: "v45_ai_sales_brain_enforced",
   };
 }
 
@@ -18889,11 +18919,90 @@ function ngAylaOwnerCommandBlocksBulkSend(db = {}) {
   return matched ? { blocked: true, reason: `owner_command_block:${matched}` } : { blocked: false, reason: "allowed" };
 }
 
+
+function ngAylaSalesBrainValue(settings = {}, key, fallback = "") {
+  const value = settings?.[key];
+  if (value === undefined || value === null || value === "") return fallback;
+  return value;
+}
+
+function ngAylaLatestMessageSignals(latestInboundText = "", history = "") {
+  const text = String(latestInboundText || "").toLowerCase();
+  const all = `${history || ""}\n${latestInboundText || ""}`.toLowerCase();
+  const hasStep1 = /\bstep\s*1\b|step1|usmle\s*1/.test(all);
+  const hasStep2 = /\bstep\s*2\b|step2|ck/.test(all);
+  const hasExamDate = /(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\b20\d{2}\b|\b\d{1,2}\s*(am|pm)\b|exam.*\b\d{1,2}\b)/i.test(all);
+  const hasWeakArea = /(weak|difficulty|problem|struggling|fail|failed|attempt|immunology|biochem|pharma|pathology|uworld|nbme|low score|score)/i.test(all);
+  const asksPrice = /(price|cost|fee|fees|package|payment|discount|charges|how much)/i.test(text);
+  const wantsMentor = /(mentor|call|meet|guidance|guide|talk|speak|book|schedule|yes|ok|okay|interested)/i.test(text);
+  const greetingOnly = /^(hi|hello|hey|salam|assalam|how are you|details|yes|ok|okay|interested|step\s*1|step\s*2|step1|step2|ck)\.?$/i.test(String(latestInboundText || "").trim());
+  const mentionsRecording = /(recording|video|lecture|youtube|watch)/i.test(all);
+  const mentionsLibrary = /(library|uworld video|lms\.nextgen|150 hours|3000)/i.test(all);
+  return {
+    has_exam_type: hasStep1 || hasStep2,
+    has_exam_date: hasExamDate,
+    has_weak_area: hasWeakArea,
+    asks_price: asksPrice,
+    wants_mentor: wantsMentor,
+    greeting_or_short_reply: greetingOnly,
+    recording_already_mentioned: mentionsRecording,
+    library_already_mentioned: mentionsLibrary,
+  };
+}
+
+function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = "", history = "") {
+  const s = ngAylaPickSettings(db);
+  if (s.sales_closer_mode_enabled === false) {
+    return "Backend Sales Brain is disabled in AI Control Center.";
+  }
+
+  const signals = ngAylaLatestMessageSignals(latestInboundText, history);
+  const timezone = ngAylaSalesBrainValue(s, "booking_timezone", "EST");
+  const libraryLink = ngAylaSalesBrainValue(s, "uworld_library_link", "https://lms.nextgenusmlelms.com/");
+  const hours = ngAylaSalesBrainValue(s, "uworld_library_hours", "150");
+  const mcqs = ngAylaSalesBrainValue(s, "uworld_library_mcqs", "3000+");
+  const mentorName = ngAylaSalesBrainValue(s, "uworld_library_mentor_name", "Dr Hasnain");
+  const mentorTitle = ngAylaSalesBrainValue(s, "uworld_library_mentor_title", "resident at Rochester General Hospital, New York");
+  const recordingLink = ngAylaSalesBrainValue(s, "main_recording_link", "");
+  const liveSessionLink = ngAylaSalesBrainValue(s, "live_session_link", "");
+
+  const lines = [
+    "BACKEND-ENFORCED NEXTGEN SALES BRAIN (highest priority after safety/opt-out/compliance):",
+    "- Ayla is a warm, professional NextGen USMLE admissions counselor and sales closer, not a basic support chatbot and not a template sender.",
+    "- WhatsApp templates are only a doorway to open/reopen conversation. After the student replies, Ayla must talk freely and naturally inside the 24-hour window.",
+    "- Reply style must be human-like: warm opening when natural, 2-3 short lines, no long paragraphs, no robotic FAQ tone, no passive 'feel free to ask' endings.",
+    "- Every reply must move the lead forward with ONE useful next step: watch recording, understand UWorld library, join live session when available, give exam date/weak area, or book mentor call.",
+    "- Start warmly when appropriate: 'Hi Doctor, how are you doing?' / 'I hope you are doing well, Doctor.' / 'Thank you for sharing that, Doctor.'",
+    "- Do not only answer the student's question. Build trust and sell one NextGen value briefly before the next question/CTA.",
+    `- UWorld Video Library pitch: NextGen has around ${hours} hours of detailed UWorld-style video teaching with ${mcqs} MCQs explained in depth and First Aid side-by-side. It helps students learn how to approach MCQs, eliminate options, connect concepts, and correct weak areas.`,
+    `- UWorld Library link to share when discussing the library/resource proof: ${libraryLink}`,
+    `- UWorld mentor context: ${mentorName}${mentorTitle ? `, ${mentorTitle}` : ""}, taught detailed UWorld-style content. Mention this naturally only when relevant, not in every reply.`,
+    "- Mentor authority: mention Dr Ahmad and USMLE-focused mentors naturally. The mentors guide exam timeline, weak areas, UWorld approach, study planning, and mistake correction.",
+    "- Recording proof: offer a short session recording early as proof of teaching quality. The recording is not a random link; it is proof that the student can judge the mentor style.",
+    recordingLink ? `- Main recording link available from AI Control: ${recordingLink}` : "- If no recording link is saved, offer to share the session recording rather than inventing a link.",
+    liveSessionLink ? `- Live session link available from AI Control: ${liveSessionLink}` : "- If no live-session link is saved or available, say you can send the next live session link when it is available.",
+    `- Scheduling timezone: always use ${timezone}. Do not mention Pakistan time unless the student asks for it.`,
+    "- Price rule: do not mention pricing numbers in AI chat. If price/cost/package/payment is asked, say the best option depends on timeline/support needed and move to mentor guidance call.",
+    "- Failed/weak/confused rule: reassure strongly that the student is in the right place; the key is the right roadmap, mentor feedback, UWorld-style practice, and weak-area correction; then offer mentor call.",
+    "- Website rule: do not send generic website/demo links early. The LMS link is allowed only when presenting the UWorld Video Library/resource proof.",
+    "- Mentor call booking: if the student shows interest, asks price, asks program, shares weakness/failure, or says yes, ask what time works best for a one-on-one mentor guidance call in EST and confirm the request directly.",
+    `- Current latest-message signals: ${JSON.stringify(signals)}`,
+    s.sales_style_rule ? `- Admin sales style rule: ${ngAylaSettingsText(s.sales_style_rule, 800)}` : "",
+    s.uworld_video_library_rule ? `- Admin UWorld rule: ${ngAylaSettingsText(s.uworld_video_library_rule, 900)}` : "",
+    s.recording_sales_rule ? `- Admin recording rule: ${ngAylaSettingsText(s.recording_sales_rule, 800)}` : "",
+    s.mentor_sales_rule ? `- Admin mentor rule: ${ngAylaSettingsText(s.mentor_sales_rule, 800)}` : "",
+    s.failed_student_reassurance_rule ? `- Admin reassurance rule: ${ngAylaSettingsText(s.failed_student_reassurance_rule, 800)}` : "",
+  ].filter(Boolean);
+
+  return lines.join("\n");
+}
+
 function ngBuildAylaCommandContext(db = {}, lead = {}) {
   const s = ngAylaPickSettings(db);
   const proof = ngAylaApprovedProofItems(db, lead);
   const ownerCommandContext = ngAylaOwnerLiveCommandContext(s);
   const campaignCommandContext = ngAylaCampaignCommandContext(db, lead);
+  const backendSalesBrainContext = ngBuildAylaBackendSalesBrain(db, lead);
   const commandBlocks = [
     s.global_ai_command,
     s.command_instructions,
@@ -18925,6 +19034,8 @@ function ngBuildAylaCommandContext(db = {}, lead = {}) {
 ${ownerCommandContext || "No active Owner Live Command saved in AI Control."}
 
 ${campaignCommandContext || "No campaign-specific command found for this lead."}
+
+${backendSalesBrainContext}
 
 Frontend AI Control Center rules:
 ${commandBlocks.length ? commandBlocks.map((x, i) => `${i + 1}. ${x}`).join("\n") : "No custom command rules saved yet."}
@@ -18964,39 +19075,46 @@ async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }
   const trainingContext = db ? ngTrainingContextForFullAiAuto(db) : "";
   const commandContext = db ? ngBuildAylaCommandContext(db, lead) : "";
 
+  const backendSalesBrain = db ? ngBuildAylaBackendSalesBrain(db, lead, latestInboundText, history) : "";
+  const latestSignals = ngAylaLatestMessageSignals(latestInboundText, history);
+
   const systemPrompt = `You are Ayla, the NextGen USMLE Full AI Auto assistant replying to a medical student lead.
 
-Your job:
-- Behave like a real human admissions/support assistant for NextGen USMLE.
-- Read the full conversation and reply to the latest student message only.
-- Progress the conversation one step at a time.
+Backend-enforced identity:
+- You are a warm, professional NextGen USMLE admissions counselor and sales closer.
+- You are not a generic support bot, not a passive FAQ bot, and not a WhatsApp template sender.
+- Templates only open/reopen WhatsApp conversations. Once the student replies, you speak freely, naturally, and intelligently.
 
-Strict rules:
-- The Owner Live Command from AI Control Center is highest priority for sales/conversation behavior unless it violates safety, opt-out, or WhatsApp policy.
-- Keep replies short: usually 1 to 2 sentences, maximum 3 short sentences.
-- Sound natural, warm, professional, doctor-to-doctor.
-- Do not use generic filler such as "That makes sense, Doctor" unless it genuinely fits.
-- Do not repeat a question already answered by the student.
-- Do not ask for exam type again if the student already said Step 1 or Step 2 CK.
-- Do not ask for main difficulty again if the student already gave it.
-- Do not send long sales pitches.
-- Do not mention payment unless the student clearly asks about price/enrollment/payment.
-- Do not guarantee scores, passing, residency, licensing, or exam success.
+Non-negotiable reply style:
+- Keep every reply short and readable: 2 to 3 short lines/sentences maximum.
+- Open warmly when natural: "Hi Doctor, how are you doing?" or "I hope you are doing well, Doctor."
+- Sound confident, persuasive, doctor-to-doctor, and human.
+- Do not write long paragraphs. Do not use markdown headings. Do not over-explain.
+- Do not end with weak generic filler like "feel free to ask" unless it is paired with a strong next step.
+
+Sales behavior:
+- Every reply must move the lead forward: build trust, explain one strong NextGen value, share/offer recording proof, explain the UWorld Video Library, invite to live session when available, ask exam date/weak area, or book mentor call.
+- Do not only answer the question. Convert the lead.
+- If the student asks price/cost/package/payment, do NOT give numbers. Move them to mentor guidance call for program/pricing guidance.
+- If the student is weak, failed, old graduate, delayed, confused, or struggling, reassure strongly and sell guidance.
+- If the student says yes/ok/interested, do not sleep. Ask the next conversion question or ask for mentor-call time in EST.
+- Always use EST for scheduling unless the student asks for another timezone.
+
+Conversation intelligence:
+- Do not ask for exam type again if already known.
+- Do not ask for exam date again if already known.
+- Do not ask for weak area again if already known.
+- If something is missing, ask only one clear question.
+- If enough is known, move to recording/live session/mentor call.
+- Mention the UWorld Video Library naturally when it helps sell value: around 150 hours, 3000+ MCQs, First Aid side-by-side, MCQ approach, option elimination, concept connection, weak-area correction.
+- Share the UWorld library link only as the UWorld Video Library/resource proof, not as a random website link.
+
+Hard safety/compliance:
+- Stop automation only for clear opt-out/not interested/wrong number/unsubscribe/do not message.
+- Do not guarantee scores, passing, residency, licensing, visas, or exam success.
 - Do not claim official affiliation with USMLE, NBME, UWorld, First Aid, Pathoma, or Sketchy.
 
-Conversation policy:
-- If the latest message is only a greeting like "hi", "hello", "yes", or "details", ask one clear next question based on missing information.
-- If exam type is missing, ask whether they are preparing for Step 1 or Step 2 CK.
-- If exam type is known but exam date is missing, ask when the exam is planned.
-- If exam type and exam date are known but difficulty is missing, ask the main difficulty.
-- If the student gives exam type, exam date, and difficulty, invite them to activate the free 2-day LMS demo/live session.
-- For demo: guide them to https://live.nextgenusmlelms.com
-- Live sessions are generally at 1 PM EST; prefer LMS Live Classroom instead of raw Zoom links.
-- Mention recordings/notes/UWorld library only when relevant.
-
-NextGen context:
-- NextGen offers live USMLE preparation, structured roadmap, USMLE mentors, UWorld-style discussion, First Aid integration, recordings, notes, and demo access.
-- Free demo/access should be positioned softly, not aggressively.
+${backendSalesBrain}
 
 Enforced AI Control Center behavior rules and proof policy:
 ${commandContext || "No AI Control Center command rules found."}
@@ -19006,6 +19124,9 @@ ${trainingContext || "No extra training context found."}`;
 
   const userPrompt = `Lead JSON:
 ${JSON.stringify(lead || {}).slice(0, 2500)}
+
+Detected latest-message signals:
+${JSON.stringify(latestSignals)}
 
 Channel: ${channel}
 
@@ -19021,7 +19142,7 @@ Write only Ayla's next message. No markdown headings. No bullet list unless the 
     model: process.env.AI_MODEL || "gpt-4o-mini",
     systemPrompt,
     userPrompt,
-    maxOutputTokens: 220,
+    maxOutputTokens: 180,
     jsonMode: false,
   });
 
