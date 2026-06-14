@@ -14068,6 +14068,7 @@ function ngDailyLiveSessionEligibleLead(db = {}, lead = {}, settings = {}) {
   if (settings.daily_session_exclude_paid !== false && (["paid", "paid_enrolled", "enrolled", "converted"].includes(stage) || ngLeadIsPaidOrGroupAddedForLiveSession(lead))) return false;
   if (settings.daily_session_exclude_group_added !== false && (lead.group_added || lead.added_to_group || lead.added_to_paid_group || lead.paid_group_added || lead.whatsapp_group_added || lead.student_group_added)) return false;
   if (lead.live_session_automation_excluded || lead.exclude_from_live_session_flow || lead.exclude_daily_live_session) return false;
+  if (settings.daily_session_exclude_active_google_meet !== false && (lead.live_session_automation_paused_until_google_meet || ngAylaLeadGoogleMeetState(lead, ngAylaFindActiveGoogleMeetAppointment(db, lead)))) return false;
   if (settings.daily_session_exclude_not_interested !== false && ["not_interested", "lost", "unsubscribed"].includes(stage)) return false;
   if (settings.daily_session_exclude_suppressed !== false && (lead.suppressed || lead.ai_suppressed || ng41IsSuppressed(db, lead))) return false;
   if (!ng41LeadPhone(lead) && !lead.email) return false;
@@ -19505,7 +19506,7 @@ function ngAylaOutboundCommandMetadata(db = {}, lead = {}) {
     owner_live_command_excerpt: ngAylaSettingsText(settings.owner_live_command || settings.owner_runtime_command || settings.live_owner_command, 500),
     campaign_command_active: Boolean(ngAylaCampaignCommandContext(db, lead)),
     command_priority_mode: settings.command_priority_mode || "owner_first",
-    command_context_version: "v52_google_meet_scheduler",
+    command_context_version: "v55_conversation_state_guard",
   };
 }
 
@@ -19573,6 +19574,8 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
     "- WhatsApp templates are only a doorway to open/reopen conversation. After the student replies, Ayla must talk freely and naturally inside the 24-hour window.",
     "- Reply style must be human-like: warm opening when natural, short WhatsApp-style lines, no robotic FAQ tone, no passive 'feel free to ask' endings.",
     "- Conversation-first rule: answer the student’s latest question or concern first. Then move forward with ONE useful next step: live session, session recording, UWorld demo/library, YouTube lectures, exam date/weak area, and then Google Meet mentor consultation when ready.",
+    "- Google Meet state lock: once the student has requested Google Meet, shared a preferred time, is waiting for the Google Meet link, or has a scheduled Google Meet, do NOT restart live-session/recording/UWorld/demo/mentor-offer flow. Only acknowledge, answer direct questions, collect/reschedule time, or remind them that the Google Meet link will be sent at meeting time.",
+    "- Acknowledgements like thank you/thanks/ok/noted/great/perfect after booking must get a simple acknowledgement or no sales push. Never treat them as a new sales trigger.",
     "- Start warmly when appropriate: 'Hi Doctor, how are you doing?' / 'I hope you are doing well, Doctor.' / 'Thank you for sharing that, Doctor.'",
     "- Never ignore a direct question like what is this/that. Clarify the previous Ayla message first, then continue the sales flow naturally.",
     `- UWorld Video Library pitch: NextGen has around ${hours} hours of detailed UWorld-style video teaching with ${mcqs} MCQs explained in depth. First Aid is integrated with every MCQ, so students learn the concept, FA point, correct/wrong options, option elimination, and weak-area correction. Tell them to click Try Demo for 2 days free access and first lecture of every chapter.`,
@@ -19979,6 +19982,115 @@ function ngAylaIsPositiveShortReply(text = "") {
   return /^(yes|yeah|yep|ok|okay|sure|great|good|fine|interested|i am interested|i want|want|i want it|i want this|i need it|sounds good|lets do it|let's do it|go ahead|please|send|share|done|i like it|liked it|that's great|thats great|perfect)$/i.test(t);
 }
 
+function ngAylaIsAcknowledgementOnly(text = "") {
+  const t = String(text || "").trim().toLowerCase().replace(/[.!،؟?]+$/g, "").trim();
+  return /^(thank you|thanks|thank u|thx|jazakallah|jazaakallah|جزاک اللہ|ok|okay|alright|all right|noted|received|got it|perfect|great|sounds good|fine|good|sure|done|appreciated|appreciate it)$/i.test(t);
+}
+
+function ngAylaIsGoogleMeetLinkQuestion(text = "") {
+  const t = String(text || "").toLowerCase();
+  return /(where.*(link|meet)|send.*(link|meet)|share.*(link|meet)|(link|meet).*\?|google\s*meet.*link|meeting.*link|join.*link|can.*send.*now)/i.test(t);
+}
+
+function ngAylaIsRescheduleOrCancelRequest(text = "") {
+  const t = String(text || "").toLowerCase();
+  return /(reschedule|change.*time|another time|different time|can'?t attend|cannot attend|cant attend|not available|busy at that time|miss.*meet|cancel.*meet|postpone)/i.test(t);
+}
+
+function ngAylaLeadGoogleMeetState(lead = {}, appointment = null) {
+  const blob = [
+    lead.stage, lead.lead_stage, lead.sales_stage, lead.pipeline_stage, lead.status, lead.next_action,
+    lead.google_meet_booking_state, lead.google_meet_requested, lead.google_meet_appointment_id,
+    appointment?.status, appointment?.next_action, appointment?.link_status, appointment?.google_meet_requested,
+  ].map((x) => String(x || "").toLowerCase()).join(" ");
+
+  if (/(google_meet_time_collected|admin_paste_google_meet_link|waiting_for_google_meet_link|missing_link|needs_link|google_meet_scheduled|pending_google_meet_booking|schedule_google_meet|google_meet_requested)/i.test(blob)) {
+    return true;
+  }
+  return false;
+}
+
+function ngAylaFindActiveGoogleMeetAppointment(db = {}, lead = {}) {
+  if (!lead?.id) return null;
+  const appointments = ensureCrmArray(db, "appointments");
+  const active = appointments
+    .filter((item) => String(item.lead_id || "") === String(lead.id || ""))
+    .filter((item) => {
+      const typeBlob = [item.appointment_type, item.type, item.title, item.name, item.source].join(" ").toLowerCase();
+      const status = String(item.status || "").toLowerCase();
+      const isGoogleMeet = typeBlob.includes("google") || typeBlob.includes("mentor") || item.google_meet_requested || item.google_meet_link_send_scheduled || item.link_send_scheduled;
+      const activeStatus = !["completed", "attended", "done", "cancelled", "canceled", "no_show", "lost", "converted"].includes(status);
+      return isGoogleMeet && activeStatus;
+    })
+    .sort((a, b) => String(b.updated_at || b.created_at || "").localeCompare(String(a.updated_at || a.created_at || "")));
+  return active[0] || null;
+}
+
+function ngAylaMarkGoogleMeetLockedLead(lead = {}, appointment = null) {
+  if (!lead?.id) return;
+  lead.google_meet_booking_state = appointment?.google_meet_link || appointment?.meeting_link ? "link_ready_or_scheduled" : "waiting_for_admin_link";
+  lead.waiting_for_google_meet_link = !Boolean(appointment?.google_meet_link || appointment?.meeting_link || appointment?.join_url);
+  lead.live_session_automation_paused_until_google_meet = true;
+  lead.updated_at = nowIso();
+}
+
+function ngAylaGoogleMeetLockedReply({ latestText = "", lead = {}, appointment = null, assets = {} } = {}) {
+  const link = appointment ? ngGoogleMeetAppointmentLink(appointment) : "";
+  const date = normalizeCrmString(appointment?.date || appointment?.scheduled_date || String(appointment?.start_time || "").slice(0, 10));
+  const time = normalizeCrmString(appointment?.time || appointment?.scheduled_time || String(appointment?.start_time || "").slice(11, 16));
+  const when = date || time ? `${date || "the booked date"}${time ? ` at ${time} EST` : ""}` : "your booked time";
+
+  if (ngAylaIsAcknowledgementOnly(latestText) || ngAylaIsPositiveShortReply(latestText)) {
+    return {
+      intent: "google_meet_state_acknowledgement",
+      reply: `You’re welcome Doctor. We’ll share the Google Meet link at the meeting time.`
+    };
+  }
+
+  if (ngAylaIsGoogleMeetLinkQuestion(latestText)) {
+    if (link) {
+      return {
+        intent: "google_meet_link_question_link_ready",
+        reply: `Doctor, your Google Meet link is ready and scheduled for ${when}.
+
+You will receive it at the meeting time.`
+      };
+    }
+    return {
+      intent: "google_meet_link_question_waiting_admin",
+      reply: `Doctor, our team is confirming the Google Meet link for ${when}.
+
+You will receive the link at the meeting time.`
+    };
+  }
+
+  if (ngAylaIsPriceQuestion(latestText)) {
+    return {
+      intent: "pricing_after_google_meet_time_collected",
+      reply: `Doctor, the mentor/admin will explain the best plan and price clearly in your Google Meet.
+
+Your preferred time is already noted for ${when}. You will receive the Google Meet link at the meeting time.`
+    };
+  }
+
+  if (ngAylaIsRescheduleOrCancelRequest(latestText)) {
+    if (appointment) {
+      appointment.status = "reschedule_requested";
+      appointment.next_action = "collect_new_google_meet_time";
+      appointment.updated_at = nowIso();
+    }
+    lead.next_action = "collect_new_google_meet_time";
+    lead.google_meet_booking_state = "reschedule_requested";
+    lead.updated_at = nowIso();
+    return {
+      intent: "google_meet_reschedule_requested",
+      reply: `No problem Doctor. What new time works best for your Google Meet mentor consultation in EST?`
+    };
+  }
+
+  return null;
+}
+
 function ngAylaCreateGoogleMeetRequest(db = {}, lead = {}, reason = "google_meet_requested", sourceText = "") {
   if (!db || !lead?.id) return null;
   const now = typeof nowIso === "function" ? nowIso() : new Date().toISOString();
@@ -20136,6 +20248,10 @@ function ngAylaCreateGoogleMeetAppointmentFromPreference(db = {}, lead = {}, pre
   lead.stage = "google_meet_time_collected";
   lead.lead_stage = "google_meet_time_collected";
   lead.google_meet_appointment_id = payload.id;
+  lead.google_meet_time_collected_at = lead.google_meet_time_collected_at || nowIso();
+  lead.google_meet_booking_state = "waiting_for_admin_link";
+  lead.waiting_for_google_meet_link = true;
+  lead.live_session_automation_paused_until_google_meet = true;
   lead.updated_at = nowIso();
   return payload;
 }
@@ -20181,20 +20297,29 @@ function ngAylaHardSalesRouter({ db = {}, lead = {}, messages = [], channel = "w
   const asksPrice = ngAylaIsPriceQuestion(latestText);
   const directGoogleMeetRequest = ngAylaIsDirectGoogleMeetRequest(latestText);
   const previousOfferedGoogleMeet = ngAylaLastOutboundOfferedGoogleMeet(lastOutboundText);
-  const leadWaitingForGoogleMeetTime = /google_meet_requested|google_meet_time_collected/i.test(String(lead.stage || lead.lead_stage || lead.next_action || ""));
+  const activeGoogleMeetAppointment = ngAylaFindActiveGoogleMeetAppointment(db, lead);
+  const leadWaitingForGoogleMeetTime = /google_meet_requested|google_meet_time_collected|admin_paste_google_meet_link|waiting_for_google_meet_link|missing_link|needs_link|google_meet_scheduled|schedule_google_meet|collect_new_google_meet_time/i.test(String([lead.stage, lead.lead_stage, lead.next_action, lead.google_meet_booking_state].join(" ")));
+  const leadHasGoogleMeetStateLock = ngAylaLeadGoogleMeetState(lead, activeGoogleMeetAppointment);
   const positiveGoogleMeetContext = previousOfferedGoogleMeet && ngAylaIsPositiveShortReply(latestText);
-  const timePreference = (leadWaitingForGoogleMeetTime || previousOfferedGoogleMeet) && ngAylaLooksLikeTimePreference(latestText)
+  const timePreference = (leadWaitingForGoogleMeetTime || previousOfferedGoogleMeet || leadHasGoogleMeetStateLock) && ngAylaLooksLikeTimePreference(latestText)
     ? ngAylaParsePreferredGoogleMeetTime(latestText)
     : null;
 
   if (timePreference) {
     const appointment = ngAylaCreateGoogleMeetAppointmentFromPreference(db, lead, timePreference, latestText);
+    ngAylaMarkGoogleMeetLockedLead(lead, appointment);
     return {
       intent: "google_meet_time_collected_missing_link",
       reply: `Great Doctor, I have noted your preferred Google Meet time for ${timePreference.date} at ${timePreference.time} EST.
 
 Our team will confirm the Google Meet link shortly. You will receive the link at the meeting time.`
     };
+  }
+
+  if (leadHasGoogleMeetStateLock) {
+    ngAylaMarkGoogleMeetLockedLead(lead, activeGoogleMeetAppointment);
+    const lockedReply = ngAylaGoogleMeetLockedReply({ latestText, lead, appointment: activeGoogleMeetAppointment, assets });
+    if (lockedReply?.reply) return lockedReply;
   }
 
   if (asksPrice) {
@@ -20403,7 +20528,7 @@ async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }
     return {
       reply: ngCleanAylaStudentReply(hardSalesReply.reply),
       usage: {},
-      model: "nextgen-v51-conversation-first-sales-brain",
+      model: "nextgen-v55-conversation-state-guard",
       hard_router: true,
       intent: hardSalesReply.intent || "sales_asset_push",
     };
@@ -20449,6 +20574,8 @@ Sales behavior:
 - Always use EST for scheduling unless the student asks for another timezone.
 
 Conversation intelligence:
+- If lead is already in Google Meet requested/time collected/waiting for link/scheduled state, do not offer live sessions, recordings, UWorld demo, or Google Meet again. Acknowledge short replies and keep the lead waiting for the meeting/link.
+- If the student says thank you/thanks/ok/noted/great/perfect after Google Meet time is collected, reply only: “You’re welcome Doctor. We’ll share the Google Meet link at the meeting time.”
 - Do not ask for exam type again if already known.
 - Do not ask for exam date again if already known.
 - Do not ask for weak area again if already known.
