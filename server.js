@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v45-ai-sales-brain-enforced";
+const NEXTGEN_BACKEND_BUILD = "v46-ai-sales-brain-clean-dedupe";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -18609,9 +18609,11 @@ const NG_AI_AUTO_COOLDOWN_SECONDS = Number(process.env.AI_AUTO_COOLDOWN_SECONDS 
 const ngAiAutoLocks = new Map();
 
 function ngAiAutoGuardKey({ lead = {}, inbound = {}, channel = "" } = {}) {
+  // v46: lock per lead+channel, not per inbound message. This prevents two webhook/manual
+  // triggers from sending two Ayla replies at the same time for the same student.
   return [
     lead.id || lead.lead_id || lead.phone || lead.email || "unknown_lead",
-    ngAiAutoMessageFingerprint(inbound) || "unknown_message",
+    "lead_ai_auto_lock",
     normalizeCrmSendChannel(channel || lead.last_ai_auto_reply_channel || lead.source_platform || lead.platform || "auto"),
   ].join(":");
 }
@@ -18659,7 +18661,13 @@ function ngShouldSkipAiAutoForInbound(lead = {}, inbound = {}, options = {}) {
     return { skip: true, reason: "already_replied_to_this_inbound_message" };
   }
 
-  if (ngAiAutoCooldownActive(lead, options.cooldownSeconds || NG_AI_AUTO_COOLDOWN_SECONDS)) {
+  // v46: do not swallow a genuinely new student message just because a previous reply
+  // happened recently. Same-message duplicates are blocked above, and simultaneous sends
+  // are blocked by the lead-level lock below.
+  if (
+    options.strictCooldown === true &&
+    ngAiAutoCooldownActive(lead, options.cooldownSeconds || NG_AI_AUTO_COOLDOWN_SECONDS)
+  ) {
     return { skip: true, reason: "ai_auto_cooldown_active" };
   }
 
@@ -19054,6 +19062,34 @@ Approved proof links/items:
 ${proofLines.length ? proofLines.join("\n") : "No approved proof item found. Do not claim specific testimonial proof unless admin provides it."}`.trim();
 }
 
+function ngCleanAylaStudentReply(text = "") {
+  let reply = String(text || "").trim();
+
+  // v46: remove language that makes Ayla sound like she is talking about an AI prompt.
+  reply = reply.replace(/I\s+appreciate\s+your\s+prompt\s+response[.!]?/gi, "Thank you, Doctor.");
+  reply = reply.replace(/your\s+prompt\s+response/gi, "your reply");
+  reply = reply.replace(/prompt\s+response/gi, "reply");
+  reply = reply.replace(/I\s+appreciate\s+your\s+interest[.!]?/gi, "Thank you, Doctor.");
+  reply = reply.replace(/let'?s\s+get\s+you\s+set\s+up\s+with\s+a\s+mentor/gi, "I can arrange a mentor guidance call for you");
+  reply = reply.replace(/feel\s+free\s+to\s+ask[.!]?/gi, "");
+
+  // Keep WhatsApp replies readable and human-like.
+  reply = reply
+    .split(/
++/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 4)
+    .join("
+");
+
+  reply = reply.replace(/[ 	]{2,}/g, " ").replace(/
+{3,}/g, "
+
+").trim();
+  return reply;
+}
+
 async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }) {
   const cleanMessages = safeArray(messages)
     .filter((m) => ngMessageText(m))
@@ -19088,6 +19124,8 @@ Backend-enforced identity:
 Non-negotiable reply style:
 - Keep every reply short and readable: 2 to 3 short lines/sentences maximum.
 - Open warmly when natural: "Hi Doctor, how are you doing?" or "I hope you are doing well, Doctor."
+- Never say "prompt response", "I appreciate your prompt response", or talk like you are responding to a prompt. Say "Thank you, Doctor" or continue naturally.
+- If the student sends a short reply like "yes", "ok", or "?", treat it as interest and move to the next sales step, not as a prompt.
 - Sound confident, persuasive, doctor-to-doctor, and human.
 - Do not write long paragraphs. Do not use markdown headings. Do not over-explain.
 - Do not end with weak generic filler like "feel free to ask" unless it is paired with a strong next step.
@@ -19146,7 +19184,7 @@ Write only Ayla's next message. No markdown headings. No bullet list unless the 
     jsonMode: false,
   });
 
-  const reply = String(result.text || "").trim();
+  const reply = ngCleanAylaStudentReply(result.text || "");
 
   if (!reply) {
     const error = new Error("AI_EMPTY_REPLY: OpenAI returned an empty reply.");
