@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v39-whatsapp-template-variable-mapping-fix";
+const NEXTGEN_BACKEND_BUILD = "v40-auto-first-message-run-due-fix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -13499,6 +13499,160 @@ async function processAutomationEnrollment({ db, enrollment, flow, autoSend = tr
   return { enrollment, events, processed_steps: processed };
 }
 
+
+function ngLeadHasOutboundTemplate(db, lead = {}, templateKeys = []) {
+  const leadId = getStableLeadId(lead) || lead.id || lead.lead_id || "";
+  if (!leadId) return false;
+  const wanted = new Set(templateKeys.map(normalizeTemplateLookupKey).filter(Boolean));
+  const logs = [
+    ...ensureCrmArray(db, "message_logs"),
+    ...ensureCrmArray(db, "outbound_messages"),
+    ...ensureCrmArray(db, "conversations"),
+  ];
+  return logs.some((item) => {
+    if (String(item.lead_id || "") !== String(leadId)) return false;
+    if (!ngIsOutboundMessage(item) && String(item.direction || "").toLowerCase() !== "outbound") return false;
+    const meta = item.metadata || item.meta || {};
+    const candidates = [
+      item.template_id,
+      item.template_key,
+      item.template_name,
+      item.whatsapp_template_name,
+      meta.template_id,
+      meta.template_key,
+      meta.template_name,
+      meta.whatsapp_template_name,
+    ].map(normalizeTemplateLookupKey).filter(Boolean);
+    return candidates.some((key) => wanted.has(key) || wanted.has(WHATSAPP_TEMPLATE_NAME_ALIASES[key] || key));
+  });
+}
+
+function ngLeadLooksLikeMetaCampaignLead(lead = {}) {
+  const text = [
+    lead.origin,
+    lead.lead_origin,
+    lead.lead_source,
+    lead.source,
+    lead.source_type,
+    lead.created_from,
+    lead.import_source,
+    lead.opt_in_status,
+    lead.campaign_name,
+    lead.campaign_key,
+    lead.campaign_id,
+  ].map((x) => String(x || "").toLowerCase()).join(" ");
+
+  return Boolean(
+    text.includes("meta") ||
+    text.includes("lead form") ||
+    text.includes("lead_form") ||
+    text.includes("facebook lead") ||
+    text.includes("usmle step1 live session") ||
+    text.includes("meta_usmle") ||
+    lead.campaign_id ||
+    lead.campaign_name ||
+    lead.campaign_key
+  );
+}
+
+function ngCanSendAutoFirstMessage(db, lead = {}) {
+  const stage = normalizeCrmLeadStageValue(lead.stage || lead.lead_stage || lead.sales_stage || lead.pipeline_stage || lead.status || "new_lead", "new_lead");
+  const status = normalizeCrmLower(lead.status || lead.lead_status || "new", "new");
+  const unsub = normalizeCrmLower(lead.unsubscribe_status || lead.opt_out_status || "active", "active");
+  const aiMode = normalizeCrmLeadAiMode(lead.ai_mode || lead.automation_mode || "draft");
+
+  if (["paid_enrolled", "not_interested", "lost", "unsubscribed"].includes(stage)) return { ok: false, reason: "lead_stage_blocks_first_message" };
+  if (["paid", "enrolled", "lost", "unsubscribed", "not_interested"].includes(status)) return { ok: false, reason: "lead_status_blocks_first_message" };
+  if (["stop", "stopped", "opted_out", "unsubscribed", "inactive"].includes(unsub)) return { ok: false, reason: "lead_unsubscribed_or_inactive" };
+  if (aiMode === "manual" && lead.ai_enabled === false) return { ok: false, reason: "ai_manual_disabled" };
+  if (!leadHasRecipientForChannel(lead, "whatsapp")) return { ok: false, reason: "no_whatsapp_recipient" };
+  if (!ngLeadLooksLikeMetaCampaignLead(lead)) return { ok: false, reason: "not_campaign_or_meta_lead" };
+  if (lead.first_message_sent_at || lead.first_template_sent_at || stage === "first_message_sent") return { ok: false, reason: "first_message_already_marked_sent" };
+  if (ngLeadHasOutboundTemplate(db, lead, ["meta_ad_first_message", "first_message_intro", "meta_first_message"])) return { ok: false, reason: "first_message_already_logged" };
+  return { ok: true, reason: "eligible" };
+}
+
+function ngFirstMessageVariablesForLead(lead = {}) {
+  const rawName = safeTemplateValue(lead.student_name || lead.lead_name || lead.name || lead.full_name || lead.first_name || lead.whatsapp_name || lead.profile_name || "");
+  const studentName = rawName && !looksLikePhoneOnly(rawName) ? rawName : "Doctor";
+  return {
+    student_name: studentName,
+    lead_name: studentName,
+    doctor_name: studentName,
+    exam_type: safeTemplateValue(lead.exam_type || lead.exam_track || lead.exam || lead.program_track || "USMLE Step 1"),
+    exam_track: safeTemplateValue(lead.exam_track || lead.exam_type || lead.exam || "USMLE Step 1"),
+    session_time: safeTemplateValue(lead.session_time || lead.live_session_time || lead.fixed_run_time || "1:00 PM EST"),
+  };
+}
+
+async function ngSendAutoFirstMessageForLead({ db, lead, brandId = null, actorId = "system", source = "auto_first_message", dryRun = false } = {}) {
+  const allowed = ngCanSendAutoFirstMessage(db, lead || {});
+  if (!allowed.ok) {
+    return { success: true, sent: false, skipped: true, reason: allowed.reason, lead_id: lead?.id || null };
+  }
+
+  const templateKey = "meta_ad_first_message";
+  const template = getMessageTemplateByKey(db, templateKey) || getMessageTemplateByKey(db, "META_AD_FIRST_MESSAGE");
+  const vars = ngFirstMessageVariablesForLead(lead);
+  const fallbackText = "Hi Doctor {{student_name}}, this is NextGen USMLE. You reached out about {{exam_type}} preparation. We have a live guidance session today at {{session_time}} to explain the program and mentor teaching style. Can you join?";
+  const to = getBestRecipientForChannel({ channel: "whatsapp", lead });
+
+  if (dryRun) {
+    return { success: true, sent: false, dry_run: true, lead_id: lead.id, to, template_key: templateKey, variables: vars };
+  }
+
+  const result = await sendCrmMessage({
+    db,
+    brandId: brandId || lead.brand_id || null,
+    channel: "whatsapp",
+    to,
+    subject: "NextGen USMLE",
+    text: template?.body || template?.message || fallbackText,
+    templateId: template?.id || template?.key || templateKey,
+    templateVariables: { ...vars, lead },
+    leadId: lead.id || lead.lead_id,
+    metadata: {
+      source,
+      quick_action: "first_message",
+      template_key: templateKey,
+      template_name: template?.provider_template_name || template?.meta_template_name || template?.whatsapp_template_name || "meta_ad_first_message",
+      whatsapp_template_name: template?.whatsapp_template_name || template?.meta_template_name || template?.provider_template_name || "meta_ad_first_message",
+      language_code: normalizeWhatsAppLanguageCode(template?.meta_language || template?.whatsapp_language || template?.language_code || "en"),
+      triggered_by: actorId || "system",
+    },
+  });
+
+  if (result.success) {
+    const now = nowIso();
+    lead.stage = "first_message_sent";
+    lead.lead_stage = "first_message_sent";
+    lead.sales_stage = "first_message_sent";
+    lead.pipeline_stage = "first_message_sent";
+    lead.first_message_sent_at = now;
+    lead.first_template_sent_at = now;
+    lead.last_contacted_at = now;
+    lead.next_action = "wait_for_reply";
+    lead.updated_at = now;
+  }
+
+  return { ...result, sent: Boolean(result.success), lead_id: lead.id || lead.lead_id, template_key: templateKey };
+}
+
+async function ngRunDueAutoFirstMessages({ db, brandId = null, limit = 25, actorId = "system", dryRun = false } = {}) {
+  const leads = ensureCrmArray(db, "leads")
+    .filter((lead) => !brandId || String(lead.brand_id || "") === String(brandId || ""))
+    .filter((lead) => ngCanSendAutoFirstMessage(db, lead).ok)
+    .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")))
+    .slice(0, Math.max(0, Number(limit || 0)));
+
+  const results = [];
+  for (const lead of leads) {
+    const result = await ngSendAutoFirstMessageForLead({ db, lead, brandId: brandId || lead.brand_id || null, actorId, source: "run_due_auto_first_message", dryRun });
+    results.push({ lead_id: lead.id || lead.lead_id, name: lead.name || lead.student_name || "Lead", success: Boolean(result.success), sent: Boolean(result.sent), skipped: Boolean(result.skipped), reason: result.reason || result.error || null, log_id: result.log?.id || null });
+  }
+  return results;
+}
+
 async function requireAutomationRunPermission(req) {
   const authHeader = String(req.headers.authorization || "").replace("Bearer ", "").trim();
   const cronSecret = String(req.headers["x-crm-cron-secret"] || req.query.secret || req.body?.secret || "").trim();
@@ -13738,8 +13892,24 @@ app.post("/admin/crm/automation/run-due", async (req, res) => {
       results.push({ enrollment_id: enrollment.id, flow_id: flow.id, status: enrollment.status, processed_steps: result.processed_steps, events: result.events.length });
     }
 
+    const remainingLimit = Math.max(0, limit - results.length);
+    const firstMessageResults = await ngRunDueAutoFirstMessages({
+      db,
+      brandId,
+      limit: Number(req.body.first_message_limit || req.query.first_message_limit || remainingLimit || limit),
+      actorId: "run_due",
+      dryRun: req.body.dry_run === true || req.query.dry_run === "true",
+    });
+
     await writeCrmDb(db);
-    res.json({ success: true, processed: results.length, results });
+    res.json({
+      success: true,
+      processed: results.length + firstMessageResults.length,
+      automation_processed: results.length,
+      first_message_processed: firstMessageResults.length,
+      results,
+      first_message_results: firstMessageResults,
+    });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
@@ -18573,9 +18743,37 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
     const latestInbound = ngLatestInbound(messages);
 
     if (!latestInbound) {
+      const firstMessageResult = await ngSendAutoFirstMessageForLead({
+        db,
+        lead,
+        brandId: lead.brand_id || getCrmBrandId(req, db),
+        actorId: user.id,
+        source: "full_ai_auto_first_message_no_inbound",
+      });
+
+      await writeCrmDb(db);
+
+      if (firstMessageResult.sent || firstMessageResult.skipped) {
+        return res.status(firstMessageResult.success ? 200 : 502).json({
+          success: Boolean(firstMessageResult.success),
+          sent: Boolean(firstMessageResult.sent),
+          skipped: Boolean(firstMessageResult.skipped),
+          first_message: true,
+          reason: firstMessageResult.reason || null,
+          message: firstMessageResult.sent
+            ? "First approved WhatsApp template sent. AI Auto will continue after the student replies."
+            : "First message was not sent because it was skipped by safety checks.",
+          result: firstMessageResult,
+          log: firstMessageResult.log || null,
+          error: firstMessageResult.error || null,
+        });
+      }
+
       return res.status(400).json({
         success: false,
-        error: "No inbound student message found for AI Auto",
+        error: firstMessageResult.error || "No inbound student message found for AI Auto",
+        first_message: true,
+        result: firstMessageResult,
       });
     }
 
