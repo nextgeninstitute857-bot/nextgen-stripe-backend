@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v49-sales-asset-push-engine";
+const NEXTGEN_BACKEND_BUILD = "v50-sales-asset-push-engine-no-proof-word";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -15411,10 +15411,14 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   uworld_library_link: "https://lms.nextgenusmlelms.com/",
   uworld_library_hours: "150",
   uworld_library_mcqs: "3000+",
-  uworld_library_mentor_name: "Dr Hasnain",
-  uworld_library_mentor_title: "resident at Rochester General Hospital, New York",
+  uworld_library_mentor_name: "",
+  uworld_library_mentor_title: "",
   main_recording_link: "",
   session_recording_link: "",
+  latest_session_recording_link: "",
+  dr_ahmad_recording_link: "",
+  dr_ahmed_recording_link: "",
+  recording_mentor_name: "",
   live_session_link: "",
   youtube_channel_link: "",
   youtube_proof_link: "",
@@ -15422,16 +15426,17 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   live_session_time: "1:00 PM EST",
   default_live_session_time: "1:00 PM EST",
   live_session_timezone: "EST",
-  mentor_team_line: "Dr Ahmad, Dr Owais, Dr Hasnain, and Dr Mahen guide students through USMLE preparation.",
+  mentor_team_line: "",
+  company_line: "Next Generation USMLE has been actively teaching USMLE students for around 2-3 years.",
   company_proof_line: "Next Generation USMLE has been actively teaching USMLE students for around 2-3 years.",
-  student_success_line: "Students from our community are progressing and passing every month through structured guidance and mentor support.",
-  sunday_fallback_message: "Since there is no live-session push today, share the recording and UWorld demo first, then invite to the next live session.",
-  recording_template_key: "recording_proof_video",
-  sales_style_rule: "Open warmly, then sell professionally in 2-3 short lines. Build trust, explain one strong NextGen value, and move the lead through live session, recording, UWorld demo, YouTube/proof, then mentor call. Do not jump to mentor call first.",
+  student_success_line: "Students from our community are progressing every month through structured live teaching, recordings, and mentor support.",
+  sunday_fallback_message: "On Sunday, share the recording and UWorld demo first, then invite to the next Monday-Friday live session.",
+  recording_template_key: "session_recording_video",
+  sales_style_rule: "Open warmly, then sell professionally in 2-3 short lines. Build trust, explain one strong NextGen value, and move the lead through live session, recording, UWorld demo, YouTube lectures, then mentor call. Do not jump to mentor call first.",
   uworld_video_library_rule: "Present the UWorld Video Library as a major NextGen advantage: around 150 hours, 3000+ UWorld-style MCQs explained in depth, First Aid side-by-side, helping students learn MCQ approach, option elimination, concept connection, and weak-area correction. Share the UWorld library link when relevant.",
   mentor_sales_rule: "Use mentor authority naturally. Mention Dr Ahmad and USMLE-focused mentors when useful. Mention the UWorld mentor only when discussing the library. Do not dump all mentor names in every reply.",
-  recording_sales_rule: "Send recording proof early and proactively. Use it to build trust, then push live session and UWorld demo before mentor call.",
-  failed_student_reassurance_rule: "If a student failed, is weak, delayed, confused, or old graduate, reassure strongly: they are in the right place; the key is roadmap, mentor feedback, UWorld-style practice, and weak-area correction. Then send session/recording/UWorld proof before mentor call.",
+  recording_sales_rule: "Send session recording early and proactively. Use it to build trust, then push live session and UWorld demo before mentor call.",
+  failed_student_reassurance_rule: "If a student failed, is weak, delayed, confused, or old graduate, reassure strongly: they are in the right place; the key is roadmap, mentor feedback, UWorld-style practice, and weak-area correction. Then send session/recording/UWorld demo before mentor call.",
   updated_at: null
 };
 
@@ -18977,35 +18982,36 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
   }
 
   const signals = ngAylaLatestMessageSignals(latestInboundText, history);
-  const timezone = ngAylaSalesBrainValue(s, "booking_timezone", "EST");
-  const libraryLink = ngAylaSalesBrainValue(s, "uworld_library_link", "https://lms.nextgenusmlelms.com/");
-  const hours = ngAylaSalesBrainValue(s, "uworld_library_hours", "150");
-  const mcqs = ngAylaSalesBrainValue(s, "uworld_library_mcqs", "3000+");
-  const mentorName = ngAylaSalesBrainValue(s, "uworld_library_mentor_name", "Dr Hasnain");
-  const mentorTitle = ngAylaSalesBrainValue(s, "uworld_library_mentor_title", "resident at Rochester General Hospital, New York");
-  const recordingLink = ngAylaSalesBrainValue(s, "main_recording_link", "");
-  const liveSessionLink = ngAylaSalesBrainValue(s, "live_session_link", "");
+  const assets = typeof ngAylaGetSalesAssets === "function" ? ngAylaGetSalesAssets(db) : {};
+  const timezone = assets.timezone || ngAylaSalesBrainValue(s, "booking_timezone", "EST");
+  const libraryLink = assets.uworldLink || ngAylaSalesBrainValue(s, "uworld_library_link", "https://lms.nextgenusmlelms.com/");
+  const hours = assets.hours || ngAylaSalesBrainValue(s, "uworld_library_hours", "150");
+  const mcqs = assets.mcqs || ngAylaSalesBrainValue(s, "uworld_library_mcqs", "3000+");
+  const mentorName = assets.mentorName || ngAylaSalesBrainValue(s, "uworld_library_mentor_name", "");
+  const mentorTitle = assets.mentorTitle || ngAylaSalesBrainValue(s, "uworld_library_mentor_title", "");
+  const recordingLink = assets.recordingLink || "";
+  const liveSessionLink = assets.liveSessionLink || "";
 
   const lines = [
     "BACKEND-ENFORCED NEXTGEN SALES BRAIN (highest priority after safety/opt-out/compliance):",
     "- Ayla is a warm, professional NextGen USMLE admissions counselor and sales closer, not a basic support chatbot and not a template sender.",
     "- WhatsApp templates are only a doorway to open/reopen conversation. After the student replies, Ayla must talk freely and naturally inside the 24-hour window.",
     "- Reply style must be human-like: warm opening when natural, 2-3 short lines, no long paragraphs, no robotic FAQ tone, no passive 'feel free to ask' endings.",
-    "- Every reply must move the lead forward with ONE useful next sales asset first: live session, recording proof, UWorld demo/library, YouTube/proof, exam date/weak area, and only then mentor call.",
+    "- Every reply must move the lead forward with ONE useful next sales asset first: live session, session recording, UWorld demo/library, YouTube lectures, exam date/weak area, and only then mentor call.",
     "- Start warmly when appropriate: 'Hi Doctor, how are you doing?' / 'I hope you are doing well, Doctor.' / 'Thank you for sharing that, Doctor.'",
     "- Do not only answer the student's question. Build trust and sell one NextGen value briefly before the next question/CTA.",
     `- UWorld Video Library pitch: NextGen has around ${hours} hours of detailed UWorld-style video teaching with ${mcqs} MCQs explained in depth and First Aid side-by-side. It helps students learn how to approach MCQs, eliminate options, connect concepts, and correct weak areas.`,
-    `- UWorld Library link to share when discussing the library/resource proof: ${libraryLink}`,
-    `- UWorld mentor context: ${mentorName}${mentorTitle ? `, ${mentorTitle}` : ""}, taught detailed UWorld-style content. Mention this naturally only when relevant, not in every reply.`,
-    "- Mentor authority: mention Dr Ahmad and USMLE-focused mentors naturally. The mentors guide exam timeline, weak areas, UWorld approach, study planning, and mistake correction.",
-    "- Recording proof: offer a short session recording early as proof of teaching quality. The recording is not a random link; it is proof that the student can judge the mentor style.",
+    `- UWorld Library link to share when discussing the library/resource: ${libraryLink}`,
+    mentorName ? `- UWorld mentor context: ${mentorName}${mentorTitle ? `, ${mentorTitle}` : ""}, taught detailed UWorld-style content. Mention this naturally only when relevant, not in every reply.` : "",
+    "- Mentor authority: refer to the USMLE-focused mentor team naturally. Do not invent or hard-code doctor names unless the admin saved them in AI Control.",
+    "- Session recording: offer a recent session recording early so the student can judge the teaching quality and explanation style.",
     recordingLink ? `- Main recording link available from AI Control: ${recordingLink}` : "- If no recording link is saved, offer to share the session recording rather than inventing a link.",
     liveSessionLink ? `- Live session link available from AI Control: ${liveSessionLink}` : "- If no live-session link is saved or available, say you can send the next live session link when it is available.",
     `- Scheduling timezone: always use ${timezone}. Do not mention Pakistan time unless the student asks for it.`,
-    "- Price rule: do not mention pricing numbers in AI chat. If price/cost/package/payment is asked, say the best option depends on timeline/support needed, then first show session/recording/UWorld proof before mentor call.",
+    "- Price rule: do not mention pricing numbers in AI chat. If price/cost/package/payment is asked, say the best option depends on timeline/support needed, then first share session/recording/UWorld demo before mentor call.",
     "- Failed/weak/confused rule: reassure strongly that the student is in the right place; the key is the right roadmap, mentor feedback, UWorld-style practice, and weak-area correction; then push session/recording/UWorld demo before mentor call.",
-    "- Website rule: do not send generic website/demo links early. The LMS link is allowed only when presenting the UWorld Video Library/resource proof.",
-    "- Mentor call booking: do NOT jump to mentor call first. Only offer mentor call after the lead has received or engaged with live session, recording proof, UWorld demo/library, or YouTube/proof.",
+    "- Website rule: do not send generic website/demo links early. The LMS link is allowed only when presenting the UWorld Video Library/resource.",
+    "- Mentor call booking: do NOT jump to mentor call first. Only offer mentor call after the lead has received or engaged with live session, session recording, UWorld demo/library, or YouTube lectures.",
     `- Current latest-message signals: ${JSON.stringify(signals)}`,
     s.sales_style_rule ? `- Admin sales style rule: ${ngAylaSettingsText(s.sales_style_rule, 800)}` : "",
     s.uworld_video_library_rule ? `- Admin UWorld rule: ${ngAylaSettingsText(s.uworld_video_library_rule, 900)}` : "",
@@ -19065,13 +19071,13 @@ Default live-session rule:
 - Invite to the configured live session time when the admin/campaign rules say a session is available. Do not override active owner commands or campaign commands.
 - Stop only when the lead says stop, unsubscribe, wrong number, do not message, or not interested, or when admin marks paid/human-handoff.
 
-Program/proof rule:
+Program evidence rule:
 - Explain who NextGen is early: live batches, USMLE mentors, UWorld-style teaching, First Aid integration, recordings, notes, and continuous batches.
-- Mention YouTube/proof/testimonials only when approved links exist below.
+- Mention YouTube lectures/testimonials only when approved links exist below.
 - Do not fabricate testimonials, pass claims, score claims, residency/match claims, visa claims, or official affiliations.
 
-Approved proof links/items:
-${proofLines.length ? proofLines.join("\n") : "No approved proof item found. Do not claim specific testimonial proof unless admin provides it."}`.trim();
+Approved public links/items:
+${proofLines.length ? proofLines.join("\n") : "No approved public review item found. Do not claim specific testimonial proof unless admin provides it."}`.trim();
 }
 
 function ngCleanAylaStudentReply(text = "") {
@@ -19104,7 +19110,7 @@ function ngCleanAylaStudentReply(text = "") {
 // -----------------------------------------------------------------------------
 // v49 Sales Asset Push Engine
 // Deterministic router runs before OpenAI so Ayla cannot become lazy.
-// Order: live session -> recording -> UWorld demo/library -> YouTube/proof -> mentor call.
+// Order: live session -> recording -> UWorld demo/library -> YouTube lectures -> mentor call.
 // -----------------------------------------------------------------------------
 
 function ngAylaFirstNonEmptySetting(settings = {}, keys = [], fallback = "") {
@@ -19124,9 +19130,41 @@ function ngAylaSalesHistoryText(messages = []) {
     .toLowerCase();
 }
 
+function ngAylaSalesOutboundHistoryText(messages = []) {
+  return safeArray(messages)
+    .filter((m) => ngIsOutboundMessage(m))
+    .map((m) => ngMessageText(m))
+    .join("\n")
+    .toLowerCase();
+}
+
 function ngAylaHasSentAsset(historyText = "", keys = []) {
   const h = String(historyText || "").toLowerCase();
   return keys.some((key) => h.includes(String(key || "").toLowerCase()));
+}
+
+
+function ngAylaNormalizeMarketingLine(value = "", fallback = "") {
+  let text = String(value || "").trim();
+  if (!text) return fallback;
+  text = text.replace(/\bHMLE\b/gi, "USMLE").replace(/\bNext\s+Generation\s+HMLE\b/gi, "Next Generation USMLE");
+  text = text.replace(/proof\s+lectures?/gi, "lectures").replace(/youtube\s*\/\s*proof/gi, "YouTube");
+  return text;
+}
+
+function ngAylaSafeMentorTeamLine(value = "") {
+  const raw = String(value || "").trim();
+  if (!raw) return "Our USMLE-focused mentor team guides students through live teaching, recordings, roadmap support, and exam strategy.";
+  const oldHardcoded = /Dr\s+Ahmad.*Dr\s+Owais.*Dr\s+Hasnain.*Dr\s+Mahen/i.test(raw);
+  if (oldHardcoded) {
+    return "Our USMLE-focused mentor team guides students through live teaching, recordings, roadmap support, and exam strategy.";
+  }
+  return ngAylaNormalizeMarketingLine(raw, "Our USMLE-focused mentor team guides students through live teaching, recordings, roadmap support, and exam strategy.");
+}
+
+function ngAylaRecordingTitle(assets = {}) {
+  const mentor = String(assets.recordingMentorName || "").trim();
+  return mentor ? `${mentor}'s recent live session recording` : "our recent live session recording";
 }
 
 function ngAylaGetSalesAssets(db = {}) {
@@ -19138,21 +19176,94 @@ function ngAylaGetSalesAssets(db = {}) {
     `1:00 PM ${timezone}`
   );
 
+  const recordingLink = ngAylaFirstNonEmptySetting(s, [
+    "latest_session_recording_link",
+    "dr_ahmad_recording_link",
+    "dr_ahmed_recording_link",
+    "dr_ahmad_session_recording_link",
+    "dr_ahmed_session_recording_link",
+    "session_recording_link",
+    "session_recordings_link",
+    "recording_session_link",
+    "recording_lecture_link",
+    "recorded_session_link",
+    "recorded_lecture_link",
+    "sample_recording_link",
+    "main_recording_link",
+    "main_recording_url",
+    "recording_link",
+    "recording_url",
+    "recordings_link",
+    "latest_recording_url",
+    "youtube_recording_link",
+    "youtube_recording_url"
+  ], "");
+
+  const liveSessionLink = ngAylaFirstNonEmptySetting(s, [
+    "live_session_link",
+    "live_session_url",
+    "daily_live_session_link",
+    "daily_session_link",
+    "live_link",
+    "session_link",
+    "zoom_link",
+    "zoom_url",
+    "join_link",
+    "meeting_link",
+    "live_session_zoom_link",
+    "whatsapp_live_session_link"
+  ], "");
+
+  const uworldLink = ngAylaFirstNonEmptySetting(s, [
+    "uworld_demo_link",
+    "uworld_demo_url",
+    "uworld_video_library_link",
+    "uworld_video_library_url",
+    "uworld_library_link",
+    "uworld_library_url",
+    "lms_demo_link",
+    "lms_demo_url",
+    "demo_link",
+    "demo_url",
+    "library_link"
+  ], "https://lms.nextgenusmlelms.com/");
+
+  const youtubeLink = ngAylaFirstNonEmptySetting(s, [
+    "youtube_channel_link",
+    "youtube_channel_url",
+    "youtube_lecture_link",
+    "youtube_lectures_link",
+    "youtube_link",
+    "youtube_url",
+    "youtube_proof_link",
+    "youtube_proof_url"
+  ], "");
+
+  const companyLine = ngAylaNormalizeMarketingLine(
+    ngAylaFirstNonEmptySetting(s, ["company_line", "company_market_line", "company_proof_line"], ""),
+    "Next Generation USMLE has been actively teaching USMLE students for around 2-3 years."
+  );
+
   return {
     settings: s,
     timezone,
     sessionTime,
-    liveSessionLink: ngAylaFirstNonEmptySetting(s, ["live_session_link", "session_link", "zoom_link"], ""),
-    recordingLink: ngAylaFirstNonEmptySetting(s, ["session_recording_link", "main_recording_link", "recording_link", "recording_url", "proof_recording_link"], ""),
-    uworldLink: ngAylaFirstNonEmptySetting(s, ["uworld_demo_link", "uworld_library_link", "lms_demo_link", "demo_link"], "https://lms.nextgenusmlelms.com/"),
-    youtubeLink: ngAylaFirstNonEmptySetting(s, ["youtube_channel_link", "youtube_proof_link", "youtube_link", "proof_link"], ""),
+    sessionDays: ngAylaFirstNonEmptySetting(s, ["live_session_days", "session_days"], "Monday to Friday"),
+    liveSessionLink,
+    recordingLink,
+    recordingMentorName: ngAylaFirstNonEmptySetting(s, ["recording_mentor_name", "session_recording_mentor_name"], ""),
+    uworldLink,
+    youtubeLink,
     hours: ngAylaFirstNonEmptySetting(s, ["uworld_library_hours"], "150"),
     mcqs: ngAylaFirstNonEmptySetting(s, ["uworld_library_mcqs"], "3000+"),
-    mentorName: ngAylaFirstNonEmptySetting(s, ["uworld_library_mentor_name"], "Dr Hasnain"),
-    mentorTitle: ngAylaFirstNonEmptySetting(s, ["uworld_library_mentor_title"], "resident at Rochester General Hospital, New York"),
-    mentorTeamLine: ngAylaFirstNonEmptySetting(s, ["mentor_team_line"], "Dr Ahmad, Dr Owais, Dr Hasnain, and Dr Mahen guide students through USMLE preparation."),
-    companyProofLine: ngAylaFirstNonEmptySetting(s, ["company_proof_line"], "Next Generation USMLE has been actively teaching USMLE students for around 2-3 years."),
-    studentSuccessLine: ngAylaFirstNonEmptySetting(s, ["student_success_line"], "Students from our community are progressing and passing every month through structured guidance and mentor support."),
+    mentorName: ngAylaFirstNonEmptySetting(s, ["uworld_library_mentor_name"], ""),
+    mentorTitle: ngAylaFirstNonEmptySetting(s, ["uworld_library_mentor_title"], ""),
+    mentorTeamLine: ngAylaSafeMentorTeamLine(ngAylaFirstNonEmptySetting(s, ["mentor_team_line"], "")),
+    companyProofLine: companyLine,
+    studentSuccessLine: ngAylaNormalizeMarketingLine(
+      ngAylaFirstNonEmptySetting(s, ["student_success_line"], ""),
+      "Students from our community are progressing every month through structured live teaching, recordings, and mentor support."
+    ),
   };
 }
 
@@ -19180,6 +19291,7 @@ function ngAylaHardSalesRouter({ db = {}, lead = {}, messages = [], channel = "w
 
   const text = latestText.toLowerCase();
   const historyText = ngAylaSalesHistoryText(cleanMessages);
+  const sentText = ngAylaSalesOutboundHistoryText(cleanMessages);
   const assets = ngAylaGetSalesAssets(db);
   const examInText = ngAylaMentionedStep(latestText);
   const examKnown = examInText || ngAylaMentionedStep(historyText) || lead.exam_type || lead.exam || lead.exam_track || "";
@@ -19198,11 +19310,45 @@ function ngAylaHardSalesRouter({ db = {}, lead = {}, messages = [], channel = "w
     };
   }
 
-  const asksRecording = /(recording|recordings|recorded|video|lecture|watch|replay)/i.test(latestText);
+  const asksRecording = /(recording|recordings|recorded|replay|session video|class video|recording lecture|lecture recording|watch.*recording|recording.*link)/i.test(latestText);
   const asksUworld = /(uworld|u world|qbank|question bank|mcq|library|video library|lms|demo)/i.test(latestText);
-  const asksSessionTime = /(time|when|schedule|live session|class time|session time|today|link)/i.test(latestText);
+  const asksSessionTime = /(what\s*time|when|schedule|live session|class time|session time|today|zoom|join link|session link|class link|live link)/i.test(latestText);
   const asksProgram = /(program|course|how it works|details|offer|features|what do you provide|what is included)/i.test(latestText);
   const shortInterest = /^(yes|yeah|yep|ok|okay|interested|sure|send|share|hmm+|\?+|what\??|hello|hi|hey|details|step\s*1|step\s*2|step1|step2|ck)$/i.test(latestText);
+
+  const asksInvite = /(invite me|add me|send.*session|send.*live|share.*session|share.*zoom|i want.*join|want to join|yes.*join|yes.*invite|join session|attend session)/i.test(latestText);
+  const watchedRecording = /(watched|seen|checked|viewed).*recording|recording.*(good|fine|okay|ok|enough|watched|seen|checked)|i\s+am\s+fine\s+with\s+that/i.test(latestText);
+  const cannotAttendLive = /(can't join|cannot join|cant join|no time|busy|missed|miss it|not available|recording only)/i.test(latestText);
+
+  if (watchedRecording) {
+    return {
+      intent: "mentor_after_recording_watched",
+      reply: `Great Doctor. Since you have checked the recording, the next best step is a one-on-one mentor consultation.
+
+The mentor can review your exam timeline, weak areas, and preparation plan properly.`
+    };
+  }
+
+  if (asksInvite) {
+    const linkLine = assets.liveSessionLink ? `\n\nLive session link:\n${assets.liveSessionLink}` : "";
+    const recLine = assets.recordingLink && !ngAylaHasSentAsset(sentText, [assets.recordingLink])
+      ? `\n\nAlso, check ${ngAylaRecordingTitle(assets)} before the live session:\n${assets.recordingLink}`
+      : "";
+    return {
+      intent: "explicit_live_session_invite",
+      reply: `Perfect Doctor. I’ll make sure you receive the ${assets.sessionTime} live-session reminder 5 minutes before, and the link at session time.${linkLine}${recLine}`
+    };
+  }
+
+  if (cannotAttendLive) {
+    const rec = assets.recordingLink ? `\n\nRecording:\n${assets.recordingLink}` : "";
+    return {
+      intent: "cannot_attend_send_recording",
+      reply: `No problem Doctor. If live timing is difficult, you can still catch up through our recordings.${rec}
+
+Please watch a few minutes and tell me if this teaching style works for you.`
+    };
+  }
 
   if (/prompt/i.test(latestText)) {
     return {
@@ -19224,12 +19370,12 @@ Are you preparing for Step 1 or Step 2?`
     };
   }
 
-  if (examInText && !ngAylaHasSentAsset(historyText, ["live session", "1 pm est", "1:00 pm est"])) {
+  if (examInText && !ngAylaHasSentAsset(sentText, ["live session", "1 pm est", "1:00 pm est"])) {
     return {
       intent: "exam_known_invite_live",
-      reply: `Great Doctor. For ${examInText}, we have daily live USMLE guidance sessions at ${assets.sessionTime}.
+      reply: `Great Doctor. For ${examInText}, we have live USMLE guidance sessions ${assets.sessionDays} at ${assets.sessionTime}.
 
-You can join even for 5-10 minutes to see the mentor’s teaching style. I’ll remind you before the session and share the link at session time.`
+You can join even for 5-10 minutes to see the teaching style. I’ll remind you 5 minutes before and share the link at session time.`
     };
   }
 
@@ -19237,9 +19383,9 @@ You can join even for 5-10 minutes to see the mentor’s teaching style. I’ll 
     const linkLine = assets.liveSessionLink ? `\n\nLive session link:\n${assets.liveSessionLink}` : "";
     return {
       intent: "session_time_or_link",
-      reply: `Doctor, our live session is at ${assets.sessionTime}.
+      reply: `Doctor, our live session runs ${assets.sessionDays} at ${assets.sessionTime}.
 
-You can join even for 5-10 minutes to see how the mentor teaches and how the program works.${linkLine}`
+You can join even for 5-10 minutes to see how the teaching works.${linkLine}`
     };
   }
 
@@ -19247,9 +19393,9 @@ You can join even for 5-10 minutes to see how the mentor teaches and how the pro
     const linkLine = assets.recordingLink ? `\n\nRecording:\n${assets.recordingLink}` : "\n\nI’ll share the latest available recording link with you.";
     return {
       intent: "recording_requested",
-      reply: `Yes Doctor, we have recordings so you can judge the teaching quality before joining.${linkLine}
+      reply: `Yes Doctor, we have recordings so you can check the teaching quality before joining.${linkLine}
 
-Please watch a few minutes and tell me if you like the mentor’s explanation style.`
+Please watch a few minutes and tell me if you like the explanation style. We also have live sessions ${assets.sessionDays} at ${assets.sessionTime}; if you want, I can invite you too.`
     };
   }
 
@@ -19268,47 +19414,48 @@ ${assets.uworldLink}`
   if (asksProgram) {
     return {
       intent: "program_requested",
-      reply: `Doctor, Next Generation USMLE helps with daily live sessions, recordings, UWorld-style MCQ teaching, First Aid integration, roadmap support, and mentor guidance.
+      reply: `Doctor, Next Generation USMLE helps with live sessions, recordings, UWorld-style MCQ teaching, First Aid integration, roadmap support, and mentor guidance.
 
-You can first check the teaching quality through our session/demo before deciding.
+First, check the quality through ${ngAylaRecordingTitle(assets)}:${assets.recordingLink ? `
+${assets.recordingLink}` : ""}
 
-UWorld demo:
+Then you can also access the UWorld Video Library demo here:
 ${assets.uworldLink}`
     };
   }
 
   // Proactive persuasion: if the student did not ask, still push the next missing sales asset.
   if (shortInterest || examKnown) {
-    if (isSunday && !ngAylaHasSentAsset(historyText, ["recording", "recordings"])) {
+    if (isSunday && !ngAylaHasSentAsset(sentText, ["recording", "recordings"])) {
       const rec = assets.recordingLink ? `\n\nRecording:\n${assets.recordingLink}` : "";
       return {
         intent: "sunday_recording_first",
-        reply: `Doctor, since live-session timing may not work today, I’m sharing a recent session recording so you can check our teaching quality first.${rec}
+        reply: `Doctor, since we do not push a Sunday live-session invite, I’m sharing ${ngAylaRecordingTitle(assets)} so you can check the teaching quality first.${rec}
 
-After that, you can join the next ${assets.sessionTime} live session.`
+After that, you can join the next ${assets.sessionDays} ${assets.sessionTime} live session.`
       };
     }
 
-    if (!ngAylaHasSentAsset(historyText, ["live session", "1 pm est", "1:00 pm est"])) {
+    if (!ngAylaHasSentAsset(sentText, ["live session", "1 pm est", "1:00 pm est"])) {
       return {
         intent: "proactive_live_invite",
-        reply: `Doctor, we have daily live USMLE guidance sessions at ${assets.sessionTime}.
+        reply: `Doctor, we have live USMLE guidance sessions ${assets.sessionDays} at ${assets.sessionTime}.
 
-Join even for 5-10 minutes to see the mentor’s teaching style. I’ll share the link at session time.`
+Join even for 5-10 minutes to see the teaching style. I’ll remind you 5 minutes before and share the link at session time.`
       };
     }
 
-    if (!ngAylaHasSentAsset(historyText, ["recording", "recordings"])) {
+    if (!ngAylaHasSentAsset(sentText, ["recording", "recordings"])) {
       const rec = assets.recordingLink ? `\n\nRecording:\n${assets.recordingLink}` : "";
       return {
         intent: "proactive_recording",
-        reply: `Doctor, I’m also sharing a recent session recording so you can judge the teaching quality yourself.${rec}
+        reply: `Doctor, I’m also sharing ${ngAylaRecordingTitle(assets)} so you can check the teaching quality yourself.${rec}
 
-Please watch a few minutes and tell me if you like the explanation style.`
+Please watch a few minutes and tell me if you like the explanation style. We also run live sessions ${assets.sessionDays} at ${assets.sessionTime}; if you want, I can invite you too.`
       };
     }
 
-    if (!ngAylaHasSentAsset(historyText, ["uworld video library", "150 hours", "3000+", "lms.nextgen"])) {
+    if (!ngAylaHasSentAsset(sentText, ["uworld video library", "150 hours", "3000+", "lms.nextgen"])) {
       return {
         intent: "proactive_uworld_demo",
         reply: `Doctor, we also have a UWorld Video Library with around ${assets.hours} hours and ${assets.mcqs} MCQs explained by USMLE-focused mentors.
@@ -19318,12 +19465,12 @@ ${assets.uworldLink}`
       };
     }
 
-    if (assets.youtubeLink && !ngAylaHasSentAsset(historyText, ["youtube", assets.youtubeLink])) {
+    if (assets.youtubeLink && !ngAylaHasSentAsset(sentText, ["youtube", assets.youtubeLink])) {
       return {
-        intent: "proactive_youtube_proof",
+        intent: "proactive_youtube_lectures",
         reply: `${assets.companyProofLine}
 
-You can also check our YouTube/proof lectures here:
+You can also check our YouTube lectures here:
 ${assets.youtubeLink}
 
 ${assets.mentorTeamLine}`
@@ -19359,7 +19506,7 @@ async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }
     return {
       reply: ngCleanAylaStudentReply(hardSalesReply.reply),
       usage: {},
-      model: "nextgen-v49-sales-asset-push-engine",
+      model: "nextgen-v50-sales-asset-push-engine-no-proof-word",
       hard_router: true,
       intent: hardSalesReply.intent || "sales_asset_push",
     };
@@ -19397,7 +19544,7 @@ Non-negotiable reply style:
 - Do not end with weak generic filler like "feel free to ask" unless it is paired with a strong next step.
 
 Sales behavior:
-- Every reply must move the lead forward: build trust, explain one strong NextGen value, share/offer recording proof, explain the UWorld Video Library, invite to live session when available, ask exam date/weak area, or book mentor call.
+- Every reply must move the lead forward: build trust, explain one strong NextGen value, share/offer session recording, explain the UWorld Video Library, invite to live session when available, ask exam date/weak area, or book mentor call.
 - Do not only answer the question. Convert the lead.
 - If the student asks price/cost/package/payment, do NOT give numbers. Move them to mentor guidance call for program/pricing guidance.
 - If the student is weak, failed, old graduate, delayed, confused, or struggling, reassure strongly and sell guidance.
@@ -19411,7 +19558,7 @@ Conversation intelligence:
 - If something is missing, ask only one clear question.
 - If enough is known, move to recording/live session/mentor call.
 - Mention the UWorld Video Library naturally when it helps sell value: around 150 hours, 3000+ MCQs, First Aid side-by-side, MCQ approach, option elimination, concept connection, weak-area correction.
-- Share the UWorld library link only as the UWorld Video Library/resource proof, not as a random website link.
+- Share the UWorld library link only as the UWorld Video Library/resource, not as a random website link.
 
 Hard safety/compliance:
 - Stop automation only for clear opt-out/not interested/wrong number/unsubscribe/do not message.
