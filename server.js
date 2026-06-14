@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v51-conversation-first-sales-brain";
+const NEXTGEN_BACKEND_BUILD = "v52-google-meet-positive-intent-live-session-scheduler";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -13985,6 +13985,155 @@ app.post("/admin/crm/automation/enroll-lead", async (req, res) => {
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
+
+function ngDailySessionDateKey(date = new Date(), timezone = "America/New_York") {
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
+    const values = {};
+    for (const p of parts) if (p.type !== "literal") values[p.type] = p.value;
+    return `${values.year}-${values.month}-${values.day}`;
+  } catch {
+    return new Date(date).toISOString().slice(0, 10);
+  }
+}
+
+function ngDailySessionTimeParts(date = new Date(), timezone = "America/New_York") {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", { timeZone: timezone, weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(date);
+    const values = {};
+    for (const p of parts) if (p.type !== "literal") values[p.type] = p.value;
+    return { weekday: values.weekday || "", hour: Number(values.hour || 0), minute: Number(values.minute || 0) };
+  } catch {
+    const d = new Date(date);
+    return { weekday: ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][d.getUTCDay()], hour: d.getUTCHours(), minute: d.getUTCMinutes() };
+  }
+}
+
+function ngDailyLiveSessionActionNow(settings = {}, date = new Date()) {
+  const tz = "America/New_York";
+  const { weekday, hour, minute } = ngDailySessionTimeParts(date, tz);
+  const day = String(weekday || "").toLowerCase();
+  if (day.startsWith("sat") || day.startsWith("sun")) return null;
+  const reminderMinutes = Number(settings.session_reminder_minutes || settings.default_session_reminder_minutes || 5);
+  const sessionHour = 13;
+  const sessionMinute = 0;
+  const total = hour * 60 + minute;
+  const sessionTotal = sessionHour * 60 + sessionMinute;
+  if (total >= sessionTotal - reminderMinutes && total < sessionTotal) return "five_minute_reminder";
+  if (total >= sessionTotal && total <= sessionTotal + 15) return "session_link";
+  if (total >= sessionTotal + Number(settings.post_session_followup_delay_minutes || 120) && total <= sessionTotal + Number(settings.post_session_followup_delay_minutes || 120) + 90) return "post_session_recording";
+  return null;
+}
+
+function ngDailyLiveSessionEligibleLead(db = {}, lead = {}, settings = {}) {
+  if (!lead?.id) return false;
+  const stage = normalizeCrmLeadStageValue(lead.stage || lead.lead_stage || lead.status || "new_lead", "new_lead");
+  if (settings.daily_session_exclude_paid !== false && ["paid", "paid_enrolled", "enrolled", "converted"].includes(stage)) return false;
+  if (settings.daily_session_exclude_not_interested !== false && ["not_interested", "lost", "unsubscribed"].includes(stage)) return false;
+  if (settings.daily_session_exclude_suppressed !== false && (lead.suppressed || lead.ai_suppressed || ng41IsSuppressed(db, lead))) return false;
+  if (!ng41LeadPhone(lead) && !lead.email) return false;
+  if (["new_lead", "first_message_sent"].includes(stage) && settings.daily_session_send_to_new_leads === false) return false;
+  if (["interested", "session_today", "hot_lead", "google_meet_requested"].includes(stage) && settings.daily_session_send_to_interested === false) return false;
+  if (["no_reply", "warm", "follow_up"].includes(stage) && settings.daily_session_send_to_no_reply === false) return false;
+  return true;
+}
+
+function ngDailyLiveSessionAlreadySent(db = {}, lead = {}, action = "", dateKey = "") {
+  return ensureCrmArray(db, "message_logs").some((log) => {
+    return String(log.lead_id || "") === String(lead.id || "") &&
+      String(log.metadata?.daily_live_session_action || "") === String(action) &&
+      String(log.metadata?.daily_live_session_date || "") === String(dateKey) &&
+      !["failed", "error"].includes(String(log.status || ""));
+  });
+}
+
+function ngDailyLiveSessionText(action = "", assets = {}, lead = {}) {
+  const name = ng41LeadName(lead) || "Doctor";
+  if (action === "five_minute_reminder") {
+    return `Doctor, our live USMLE guidance session starts in 5 minutes.\n\nPlease join even for 5-10 minutes to see the mentor’s teaching style. I’ll share the link at session time.`;
+  }
+  if (action === "session_link") {
+    const link = assets.liveSessionLink || "I’ll share the Zoom link as soon as it is available.";
+    return `Doctor, the live session is starting now.\n\nJoin here:\n${link}\n\nEven 5-10 minutes is enough to understand the teaching style.`;
+  }
+  const rec = assets.recordingLink ? `\n\nRecording:\n${assets.recordingLink}` : "";
+  return `Doctor, I’m sharing the recent live-session recording so you can check the teaching quality.${rec}\n\nDid you like the teaching style? Are you interested in joining the live sessions, or would you like a Google Meet mentor consultation for guidance?`;
+}
+
+async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit = 50, dryRun = false, source = "run_due" } = {}) {
+  const settings = ngAylaPickSettings(db);
+  if (settings.daily_live_session_flow_enabled === false) return { action: null, processed: 0, sent: 0, skipped: 0, results: [], reason: "disabled" };
+  const action = ngDailyLiveSessionActionNow(settings, new Date());
+  if (!action) return { action: null, processed: 0, sent: 0, skipped: 0, results: [], reason: "not_due_now" };
+  const dateKey = ngDailySessionDateKey(new Date());
+  const assets = ngAylaGetSalesAssets(db);
+  const templateMap = {
+    five_minute_reminder: settings.session_reminder_template_key || "five_minute_reminder",
+    session_link: settings.session_link_template_key || "live_session_link_now",
+    post_session_recording: settings.post_session_recording_template_key || "recording_followup_after_session",
+  };
+  const leads = ensureCrmArray(db, "leads")
+    .filter((lead) => !brandId || String(lead.brand_id || "") === String(brandId || ""))
+    .filter((lead) => ngDailyLiveSessionEligibleLead(db, lead, settings))
+    .slice(0, Math.max(1, Math.min(200, Number(limit || 50))));
+  const results = [];
+  for (const lead of leads) {
+    if (ngDailyLiveSessionAlreadySent(db, lead, action, dateKey)) {
+      results.push({ lead_id: lead.id, skipped: true, reason: "already_sent_today" });
+      continue;
+    }
+    const channel = resolveCrmChannelForConversation({ requestedChannel: lead.current_channel || lead.last_channel || lead.source_platform || lead.platform || "whatsapp", lead, fallback: "whatsapp" });
+    const latestInbound = ngLatestInbound(ngLeadConversationMessages(db, lead.id));
+    const whatsappWindowOpen = channel !== "whatsapp" || ngWithinHours(latestInbound?.created_at || latestInbound?.received_at || latestInbound?.timestamp, 24);
+    const templateId = channel === "whatsapp" && !whatsappWindowOpen ? templateMap[action] : null;
+    const text = ngDailyLiveSessionText(action, assets, lead);
+    if (dryRun) {
+      results.push({ lead_id: lead.id, dry_run: true, action, template_id: templateId, text });
+      continue;
+    }
+    try {
+      const result = await sendCrmMessage({
+        db,
+        brandId: lead.brand_id || brandId || db.settings?.default_brand_id || null,
+        channel,
+        to: getBestRecipientForChannel({ channel, lead }),
+        text,
+        templateId,
+        templateVariables: {
+          lead,
+          student_name: ng41LeadName(lead) || "Doctor",
+          exam_type: ng41LeadExamType(lead) || "USMLE",
+          session_time: assets.sessionTime,
+          live_session_link: assets.liveSessionLink,
+          recording_link: assets.recordingLink,
+          demo_link: assets.uworldLink,
+        },
+        leadId: lead.id,
+        metadata: {
+          source: "daily_live_session_scheduler",
+          daily_live_session_action: action,
+          daily_live_session_date: dateKey,
+          template_key: templateId,
+          scheduler_source: source,
+        },
+      });
+      if (action === "five_minute_reminder") lead.last_session_reminder_sent_at = nowIso();
+      if (action === "session_link") lead.last_session_link_sent_at = nowIso();
+      if (action === "post_session_recording") {
+        lead.last_recording_followup_sent_at = nowIso();
+        lead.recording_followup_sent_once = true;
+      }
+      lead.next_action = action === "post_session_recording" ? "await_recording_feedback_or_google_meet_interest" : "daily_live_session_flow";
+      lead.updated_at = nowIso();
+      ng41EnsureDailySessionRecovery(db, lead);
+      results.push({ lead_id: lead.id, sent: true, action, template_id: templateId, message_id: result.log?.id || null });
+    } catch (error) {
+      results.push({ lead_id: lead.id, sent: false, error: error.message, action, template_id: templateId });
+    }
+  }
+  return { action, processed: results.length, sent: results.filter((r) => r.sent).length, skipped: results.filter((r) => r.skipped).length, results };
+}
+
 app.post("/admin/crm/automation/run-due", async (req, res) => {
   try {
     await requireAutomationRunPermission(req);
@@ -14022,14 +14171,24 @@ app.post("/admin/crm/automation/run-due", async (req, res) => {
       dryRun: req.body.dry_run === true || req.query.dry_run === "true",
     });
 
+    const dailySessionResults = await ngRunDailyLiveSessionScheduler({
+      db,
+      brandId,
+      limit: Number(req.body.daily_session_limit || req.query.daily_session_limit || remainingLimit || limit),
+      dryRun: req.body.dry_run === true || req.query.dry_run === "true",
+      source: req.body.source || req.query.source || "run_due",
+    });
+
     await writeCrmDb(db);
     res.json({
       success: true,
-      processed: results.length + firstMessageResults.length,
+      processed: results.length + firstMessageResults.length + Number(dailySessionResults.processed || 0),
       automation_processed: results.length,
       first_message_processed: firstMessageResults.length,
+      daily_session_processed: dailySessionResults.processed || 0,
       results,
       first_message_results: firstMessageResults,
+      daily_session_results: dailySessionResults,
     });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
@@ -15400,14 +15559,14 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   sales_warm_opening_enabled: true,
   ai_reply_style: "warm_sales_closer",
   ai_max_sentences: 3,
-  ai_max_lines: 3,
+  ai_max_lines: 4,
   booking_timezone: "EST",
   disclose_pricing_in_ai_chat: false,
   send_website_early: false,
   use_templates_only_as_doorway: true,
   recording_first_strategy_enabled: true,
   main_cta: "sales_asset_flow",
-  secondary_cta: "mentor_call_after_assets",
+  secondary_cta: "live_session_recording_uworld_demo_then_google_meet",
   uworld_library_link: "https://lms.nextgenusmlelms.com/",
   uworld_library_hours: "150",
   uworld_library_mcqs: "3000+",
@@ -15428,15 +15587,33 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   live_session_timezone: "EST",
   mentor_team_line: "",
   company_line: "Next Generation USMLE has been actively teaching USMLE students for around 2-3 years.",
+  daily_live_session_flow_enabled: true,
+  live_session_days: "Monday to Friday",
+  session_reminder_minutes: 5,
+  session_reminder_template_key: "five_minute_reminder",
+  session_link_template_key: "live_session_link_now",
+  post_session_recording_template_key: "recording_followup_after_session",
+  next_day_followup_template_key: "next_day_missed_session",
+  post_session_followup_delay_minutes: 120,
+  daily_session_send_to_new_leads: true,
+  daily_session_send_to_interested: true,
+  daily_session_send_to_no_reply: true,
+  daily_session_exclude_paid: true,
+  daily_session_exclude_suppressed: true,
+  daily_session_exclude_not_interested: true,
+  pricing_mode: "hide_prices_and_handoff",
+  pricing_hot_lead_enabled: true,
+  google_meet_booking_enabled: true,
+  google_meet_label: "Google Meet",
   company_proof_line: "Next Generation USMLE has been actively teaching USMLE students for around 2-3 years.",
   student_success_line: "Students from our community are progressing every month through structured live teaching, recordings, and mentor support.",
   sunday_fallback_message: "On Sunday, share the recording and UWorld demo first, then invite to the next Monday-Friday live session.",
   recording_template_key: "session_recording_video",
-  sales_style_rule: "Open warmly, then sell professionally in 2-3 short lines. Build trust, explain one strong NextGen value, and move the lead through live session, recording, UWorld demo, YouTube lectures, then mentor call. Do not jump to mentor call first.",
+  sales_style_rule: "Open warmly and talk like a human counselor. Answer the student’s exact question first, then move the lead through live session, recent recording, UWorld demo, YouTube lectures, then Google Meet mentor consultation. Do not dump assets when the student asks a direct question.",
   uworld_video_library_rule: "Present the UWorld Video Library as a major NextGen advantage: around 150 hours, 3000+ UWorld-style MCQs explained in depth, First Aid side-by-side, helping students learn MCQ approach, option elimination, concept connection, and weak-area correction. Share the UWorld library link when relevant.",
-  mentor_sales_rule: "Use mentor authority naturally. Mention Dr Ahmad and USMLE-focused mentors when useful. Mention the UWorld mentor only when discussing the library. Do not dump all mentor names in every reply.",
-  recording_sales_rule: "Send session recording early and proactively. Use it to build trust, then push live session and UWorld demo before mentor call.",
-  failed_student_reassurance_rule: "If a student failed, is weak, delayed, confused, or old graduate, reassure strongly: they are in the right place; the key is roadmap, mentor feedback, UWorld-style practice, and weak-area correction. Then send session/recording/UWorld demo before mentor call.",
+  mentor_sales_rule: "Use mentor authority naturally only when useful. Do not invent doctor names. Student-facing wording must say Google Meet / Google Meet mentor consultation, not call.",
+  recording_sales_rule: "Send session recording early and proactively. Ask: did you like the teaching style, and are you interested in live sessions or Google Meet mentor guidance? If the response is positive, move to Google Meet booking.",
+  failed_student_reassurance_rule: "If a student failed, is weak, delayed, confused, or old graduate, reassure strongly: they are in the right place; the key is roadmap, mentor feedback, UWorld-style practice, and weak-area correction. Then guide them through recording/live session/UWorld demo and offer Google Meet mentor consultation when positive or directly requested.",
   updated_at: null
 };
 
@@ -18930,7 +19107,7 @@ function ngAylaOutboundCommandMetadata(db = {}, lead = {}) {
     owner_live_command_excerpt: ngAylaSettingsText(settings.owner_live_command || settings.owner_runtime_command || settings.live_owner_command, 500),
     campaign_command_active: Boolean(ngAylaCampaignCommandContext(db, lead)),
     command_priority_mode: settings.command_priority_mode || "owner_first",
-    command_context_version: "v45_ai_sales_brain_enforced",
+    command_context_version: "v52_google_meet_scheduler",
   };
 }
 
@@ -18997,7 +19174,7 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
     "- Ayla is a warm, professional NextGen USMLE admissions counselor and sales closer, not a basic support chatbot and not a template sender.",
     "- WhatsApp templates are only a doorway to open/reopen conversation. After the student replies, Ayla must talk freely and naturally inside the 24-hour window.",
     "- Reply style must be human-like: warm opening when natural, short WhatsApp-style lines, no robotic FAQ tone, no passive 'feel free to ask' endings.",
-    "- Conversation-first rule: answer the student’s latest question or concern first. Then move forward with ONE useful next sales asset: live session, session recording, UWorld demo/library, YouTube lectures, exam date/weak area, and only then mentor call.",
+    "- Conversation-first rule: answer the student’s latest question or concern first. Then move forward with ONE useful next step: live session, session recording, UWorld demo/library, YouTube lectures, exam date/weak area, and then Google Meet mentor consultation when ready.",
     "- Start warmly when appropriate: 'Hi Doctor, how are you doing?' / 'I hope you are doing well, Doctor.' / 'Thank you for sharing that, Doctor.'",
     "- Never ignore a direct question like what is this/that. Clarify the previous Ayla message first, then continue the sales flow naturally.",
     `- UWorld Video Library pitch: NextGen has around ${hours} hours of detailed UWorld-style video teaching with ${mcqs} MCQs explained in depth. First Aid is integrated with every MCQ, so students learn the concept, FA point, correct/wrong options, option elimination, and weak-area correction. Tell them to click Try Demo for 2 days free access and first lecture of every chapter.`,
@@ -19008,10 +19185,10 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
     recordingLink ? `- Main recording link available from AI Control: ${recordingLink}` : "- If no recording link is saved, offer to share the session recording rather than inventing a link.",
     liveSessionLink ? `- Live session link available from AI Control: ${liveSessionLink}` : "- If no live-session link is saved or available, say you can send the next live session link when it is available.",
     `- Scheduling timezone: always use ${timezone}. Do not mention Pakistan time unless the student asks for it.`,
-    "- Price rule: do not mention pricing numbers in AI chat. If price/cost/package/payment is asked, say the best option depends on timeline/support needed, then first share session/recording/UWorld demo before mentor call.",
-    "- Failed/weak/confused rule: reassure strongly that the student is in the right place; the key is the right roadmap, mentor feedback, UWorld-style practice, and weak-area correction; then push session/recording/UWorld demo before mentor call.",
+    "- Price rule: if price/cost/package/payment is asked, answer that pricing depends on plan duration/support needed, do not dump recordings again, and move the lead to Google Meet/admin guidance. Ask preferred time in EST.",
+    "- Failed/weak/confused rule: reassure strongly that the student is in the right place; the key is roadmap, mentor feedback, UWorld-style practice, and weak-area correction; then offer recording/live session/UWorld demo and Google Meet guidance when positive.",
     "- Website rule: do not send generic website/demo links early. The LMS link is allowed only when presenting the UWorld Video Library/resource.",
-    "- Mentor call booking: do NOT jump to mentor call first. Only offer mentor call after the lead has received or engaged with live session, session recording, UWorld demo/library, or YouTube lectures.",
+    "- Google Meet booking: do not jump to Google Meet before value unless the student directly asks. If student says connect me / yes / ok / interested after a Google Meet offer, ask preferred time in EST and mark the lead as Google Meet requested.",
     `- Current latest-message signals: ${JSON.stringify(signals)}`,
     s.sales_style_rule ? `- Admin sales style rule: ${ngAylaSettingsText(s.sales_style_rule, 800)}` : "",
     s.uworld_video_library_rule ? `- Admin UWorld rule: ${ngAylaSettingsText(s.uworld_video_library_rule, 900)}` : "",
@@ -19088,9 +19265,9 @@ function ngCleanAylaStudentReply(text = "") {
   reply = reply.replace(/your\s+prompt\s+response/gi, "your reply");
   reply = reply.replace(/prompt\s+response/gi, "reply");
   reply = reply.replace(/I\s+appreciate\s+your\s+interest[.!]?/gi, "Thank you, Doctor.");
-  reply = reply.replace(/let'?s\s+get\s+you\s+set\s+up\s+with\s+a\s+mentor/gi, "I can arrange a mentor guidance call for you");
+  reply = reply.replace(/let'?s\s+get\s+you\s+set\s+up\s+with\s+a\s+mentor/gi, "I can arrange a Google Meet mentor consultation for you");
   reply = reply.replace(/feel\s+free\s+to\s+ask[.!]?/gi, "");
-  reply = reply.replace(/I\s+understand\s+your\s+interest\s+in\s+pricing[.!]?/gi, "Doctor, the mentor can guide you on the best option after understanding your timeline.");
+  reply = reply.replace(/I\s+understand\s+your\s+interest\s+in\s+pricing[.!]?/gi, "Doctor, the best option depends on your timeline and support needed. I can arrange a Google Meet mentor consultation to guide you clearly.");
   reply = reply.replace(/Our\s+course\s+offerings\s+vary\s+based\s+on\s+the\s+program\s+and\s+duration[.!]?/gi, "The right plan depends on your exam date and preparation level.");
   reply = reply.replace(/Would\s+it\s+be\s+helpful\s+if\s+I\s+arranged/gi, "I can arrange");
 
@@ -19293,7 +19470,7 @@ function ngAylaLastOutboundTopic(text = "") {
   if (/recording|recorded|recent live session|watch a few minutes/.test(t)) return "recording";
   if (/youtube|lecture channel|channel/.test(t)) return "youtube";
   if (/live session|1:00 pm|1 pm|zoom|join/.test(t)) return "live_session";
-  if (/mentor|consultation|one-on-one|guidance call/.test(t)) return "mentor";
+  if (/mentor|consultation|one-on-one|guidance|google\s*meet/.test(t)) return "mentor";
   return "general";
 }
 
@@ -19361,7 +19538,7 @@ It runs ${assets.sessionDays} at ${assets.sessionTime}. You can join for 5-10 mi
   if (topic === "mentor") {
     return {
       intent: "clarify_mentor_previous_message",
-      reply: `Sorry Doctor, I meant a one-on-one mentor consultation.
+      reply: `Sorry Doctor, I meant a one-on-one Google Meet mentor consultation.
 
 After you check the recording or demo, the mentor can review your exam timeline, weak areas, and exact preparation plan.`
     };
@@ -19371,7 +19548,7 @@ After you check the recording or demo, the mentor can review your exam timeline,
     intent: "clarify_general_previous_message",
     reply: `Sorry Doctor, let me clarify properly.
 
-I’m guiding you through Next Generation USMLE: live sessions, recent recordings, UWorld Video Library demo, and then mentor consultation if you like the teaching style.`
+I’m guiding you through Next Generation USMLE: live sessions, recent recordings, UWorld Video Library demo, and then Google Meet mentor consultation if you like the teaching style.`
   };
 }
 
@@ -19381,7 +19558,98 @@ function ngAylaFailedOrWorriedReply(assets = {}) {
 
 We regularly guide students who are weak, confused, old graduates, delayed, or have failed before. The key is a proper roadmap, mentor feedback, UWorld-style practice, and weak-area correction.${rec}
 
-After you check the teaching quality, I can connect you with a mentor for your exact plan.`;
+After you check the teaching quality, I can arrange a Google Meet mentor consultation for your exact plan.`;
+}
+
+
+function ngAylaIsPriceQuestion(text = "") {
+  return /\b(price|cost|fee|fees|charges|charge|payment|payments|package|packages|plan price|pricing|how much|discount|installment|pay)\b/i.test(String(text || ""));
+}
+
+function ngAylaLastOutboundOfferedGoogleMeet(text = "") {
+  const t = String(text || "").toLowerCase();
+  return /(google\s*meet|mentor consultation|one[-\s]?on[-\s]?one guidance|connect you with a mentor|connect you with our mentor|preferred time|what time works|mentor guidance)/i.test(t);
+}
+
+function ngAylaIsDirectGoogleMeetRequest(text = "") {
+  const t = String(text || "").trim().toLowerCase();
+  return /(connect me|let'?s connect|let connect|connect with mentor|connect to mentor|book.*mentor|book.*meet|schedule.*meet|schedule.*mentor|google\s*meet|mentor consultation|i want guidance|want guidance|guide me|talk to mentor|speak to mentor|call me|arrange.*mentor|arrange.*meet)/i.test(t);
+}
+
+function ngAylaIsPositiveShortReply(text = "") {
+  const t = String(text || "").trim().toLowerCase();
+  return /^(yes|yeah|yep|ok|okay|sure|great|good|fine|interested|i am interested|sounds good|lets do it|let's do it|go ahead|please|send|share|done|i like it|liked it|that's great|thats great|perfect)$/i.test(t);
+}
+
+function ngAylaCreateGoogleMeetRequest(db = {}, lead = {}, reason = "google_meet_requested", sourceText = "") {
+  if (!db || !lead?.id) return null;
+  const now = typeof nowIso === "function" ? nowIso() : new Date().toISOString();
+  lead.status = lead.status === "paid" || lead.status === "converted" ? lead.status : "hot_lead";
+  lead.lead_stage = "google_meet_requested";
+  lead.stage = "google_meet_requested";
+  lead.google_meet_requested = true;
+  lead.google_meet_requested_at = lead.google_meet_requested_at || now;
+  lead.google_meet_reason = reason;
+  lead.next_action = "schedule_google_meet";
+  lead.human_needed = true;
+  lead.updated_at = now;
+
+  let queueItem = null;
+  try {
+    if (typeof ng41EnsureCallQueue === "function") {
+      queueItem = ng41EnsureCallQueue(db, lead, "human_needed", reason);
+      if (queueItem) {
+        queueItem.status = "google_meet_requested";
+        queueItem.reason = reason;
+        queueItem.source = reason;
+        queueItem.next_best_action = "schedule_google_meet";
+        queueItem.request_type = "google_meet";
+        queueItem.student_facing_label = "Google Meet Request";
+        queueItem.original_text = sourceText || queueItem.original_text || "";
+        queueItem.updated_at = now;
+      }
+    }
+  } catch {}
+
+  const handoffs = ensureCrmArray(db, "handoffs");
+  const existingHandoff = handoffs.find((item) => String(item.lead_id || "") === String(lead.id) && !["closed", "completed", "cancelled"].includes(String(item.status || "")));
+  const handoffPayload = withTimestamps({
+    ...(existingHandoff || {}),
+    id: existingHandoff?.id || uuid(),
+    brand_id: lead.brand_id || db.settings?.default_brand_id || null,
+    lead_id: lead.id,
+    status: existingHandoff?.status || "pending_google_meet_booking",
+    priority: reason === "pricing_interest" ? "high" : "normal",
+    handoff_type: "google_meet",
+    requested_action: "schedule_google_meet",
+    handoff_summary: sourceText || existingHandoff?.handoff_summary || "Student is ready for Google Meet mentor guidance.",
+    recommended_next_action: "Ask preferred time in EST and schedule Google Meet mentor consultation.",
+    source: reason,
+  }, existingHandoff || {});
+  if (existingHandoff) Object.assign(existingHandoff, handoffPayload); else handoffs.push(handoffPayload);
+  lead.handoff_id = handoffPayload.id;
+
+  return { queue_item: queueItem, handoff: handoffPayload };
+}
+
+function ngAylaPricingReply(timezone = "EST") {
+  return `Doctor, the price depends on the plan duration and the level of support you need.
+
+The best option depends on your exam timeline, weak areas, and whether you need live sessions, recordings, UWorld Video Library, or mentor guidance.
+
+I can arrange a Google Meet mentor consultation so you can get the correct option clearly. What time works best for you in ${timezone}?`;
+}
+
+function ngAylaGoogleMeetBookingReply(timezone = "EST") {
+  return `Sure Doctor, I’ll arrange a Google Meet mentor consultation for you.
+
+What time works best for you in ${timezone}?`;
+}
+
+function ngAylaPostRecordingInterestQuestion(assets = {}) {
+  return `Please watch a few minutes and tell me if you like the teaching style.
+
+Are you interested in joining the live sessions, or would you like a Google Meet mentor consultation for guidance?`;
 }
 
 function ngAylaHardSalesRouter({ db = {}, lead = {}, messages = [], channel = "whatsapp" } = {}) {
@@ -19422,6 +19690,26 @@ function ngAylaHardSalesRouter({ db = {}, lead = {}, messages = [], channel = "w
   const directQuestion = ngAylaHasQuestionMarkOrQuestionWord(latestText);
   const genericClarification = ngAylaIsGenericClarification(latestText);
   const shortInterest = /^(yes|yeah|yep|ok|okay|interested|sure|send|share|hmm+|great|great i will check out|i will check|i will check out|sounds good|fine|step\s*1|step\s*2|step1|step2|ck)$/i.test(latestText);
+  const asksPrice = ngAylaIsPriceQuestion(latestText);
+  const directGoogleMeetRequest = ngAylaIsDirectGoogleMeetRequest(latestText);
+  const previousOfferedGoogleMeet = ngAylaLastOutboundOfferedGoogleMeet(lastOutboundText);
+  const positiveGoogleMeetContext = previousOfferedGoogleMeet && ngAylaIsPositiveShortReply(latestText);
+
+  if (asksPrice) {
+    ngAylaCreateGoogleMeetRequest(db, lead, "pricing_interest", latestText);
+    return {
+      intent: "pricing_question_google_meet_handoff",
+      reply: ngAylaPricingReply(assets.timezone || "EST")
+    };
+  }
+
+  if (directGoogleMeetRequest || positiveGoogleMeetContext) {
+    ngAylaCreateGoogleMeetRequest(db, lead, "google_meet_requested", latestText);
+    return {
+      intent: "google_meet_requested",
+      reply: ngAylaGoogleMeetBookingReply(assets.timezone || "EST")
+    };
+  }
 
   // Direct student questions and confusion override the sales sequence.
   if (genericClarification && !asksUworld && !asksRecording && !asksSessionTime && !asksProgram) {
@@ -19449,7 +19737,7 @@ Are you preparing for Step 1 or Step 2?`
   if (watchedRecording) {
     return {
       intent: "mentor_after_recording_watched",
-      reply: `Great Doctor. Since you have checked the recording, the next best step is a one-on-one mentor consultation.
+      reply: `Great Doctor. Since you have checked the recording, the next best step is a one-on-one Google Meet mentor consultation.
 
 The mentor can review your exam timeline, weak areas, and preparation plan properly.`
     };
@@ -19472,7 +19760,7 @@ The mentor can review your exam timeline, weak areas, and preparation plan prope
       intent: "cannot_attend_send_recording",
       reply: `No problem Doctor. If live timing is difficult, you can still catch up through our recordings.${rec}
 
-Please watch a few minutes and tell me if this teaching style works for you.`
+${ngAylaPostRecordingInterestQuestion(assets)}`
     };
   }
 
@@ -19510,7 +19798,7 @@ You can join even for 5-10 minutes to see how the teaching works.${linkLine}`
       intent: "recording_requested",
       reply: `Yes Doctor, we have recordings so you can check the teaching quality before joining.${linkLine}
 
-Please watch a few minutes and tell me if you like the explanation style. We also have live sessions ${assets.sessionDays} at ${assets.sessionTime}; if you want, I can invite you too.`
+${ngAylaPostRecordingInterestQuestion(assets)}`
     };
   }
 
@@ -19564,7 +19852,7 @@ Join even for 5-10 minutes to see the teaching style. I’ll remind you 5 minute
         intent: "proactive_recording",
         reply: `Doctor, I’m also sharing ${ngAylaRecordingTitle(assets)} so you can check the teaching quality yourself.${rec}
 
-Please watch a few minutes and tell me if you like the explanation style. We also run live sessions ${assets.sessionDays} at ${assets.sessionTime}; if you want, I can invite you too.`
+${ngAylaPostRecordingInterestQuestion(assets)}`
       };
     }
 
@@ -19585,10 +19873,10 @@ You can also check our YouTube lectures/channel here:\n${assets.youtubeLink}`
     }
 
     return {
-      intent: "mentor_after_assets",
-      reply: `Doctor, after you check the session, recording, or UWorld demo, I can connect you with a mentor for one-on-one guidance.
+      intent: "google_meet_after_assets_interest_check",
+      reply: `Doctor, after you check the session, recording, or UWorld demo, I can arrange a Google Meet mentor consultation for one-on-one guidance.
 
-They can review your timeline, weak areas, and exam plan properly.`
+Are you interested in live sessions or Google Meet mentor guidance?`
     };
   }
 
@@ -19651,11 +19939,11 @@ Non-negotiable reply style:
 - Do not end with weak generic filler like "feel free to ask" unless it is paired with a strong next step.
 
 Sales behavior:
-- After answering the student’s question, move the lead forward naturally: build trust, share/offer session recording, explain the UWorld Video Library, invite to live session, ask exam date/weak area, or offer mentor consultation at the right time.
+- After answering the student’s question, move the lead forward naturally: build trust, share/offer session recording, explain the UWorld Video Library, invite to live session, ask exam date/weak area, or offer Google Meet mentor consultation at the right time.
 - Never ignore the student’s direct question. Answer first, then convert naturally.
-- If the student asks price/cost/package/payment, do NOT give numbers. Move them to mentor guidance call for program/pricing guidance.
+- If the student asks price/cost/package/payment, do NOT give numbers. Move them to Google Meet mentor guidance for program/pricing guidance.
 - If the student is weak, failed, old graduate, delayed, confused, or struggling, reassure first: tell them they are in the right place, explain roadmap/mentor feedback/weak-area correction, then guide to recording/demo/live session.
-- If the student says yes/ok/interested, send the next useful asset unless they asked a question. Do not jump to mentor-call time before value is shown.
+- If the student says yes/ok/interested, send the next useful asset unless they asked a question. Do not jump to Google Meet time before value is shown.
 - Always use EST for scheduling unless the student asks for another timezone.
 
 Conversation intelligence:
@@ -19663,7 +19951,7 @@ Conversation intelligence:
 - Do not ask for exam date again if already known.
 - Do not ask for weak area again if already known.
 - If something is missing, ask only one clear question.
-- If enough is known, move to recording/live session/UWorld demo first, then mentor consultation after value is shown or if directly requested.
+- If enough is known, move to recording/live session/UWorld demo first, then Google Meet mentor consultation after value is shown or if directly requested.
 - Mention the UWorld Video Library naturally when it helps sell value: around 150 hours, 3000+ MCQs, First Aid integrated with every MCQ, MCQ approach, option elimination, concept connection, and weak-area correction. Explain Try Demo: 2 days free access and first lecture of every chapter.
 - Share the UWorld library link only as the UWorld Video Library/resource, not as a random website link.
 
@@ -28166,7 +28454,7 @@ function ng41EnsureCallQueue(db, lead = {}, reason = "hot_lead", source = "auto_
   ng41EnsureGrowthCollections(db);
   const score = ng41ScoreLead(db, lead);
   if (ng41IsSuppressed(db, lead)) return null;
-  if (score.score < 55 && !["manual", "session_attended", "payment_interest", "human_needed"].includes(reason)) return null;
+  if (score.score < 55 && !["manual", "session_attended", "payment_interest", "human_needed", "google_meet_requested", "pricing_interest", "recording_watched_positive"].includes(reason)) return null;
   const leadId = lead?.id || lead?.lead_id || null;
   if (!leadId) return null;
   const queue = ensureCrmArray(db, "call_queue");
@@ -28187,8 +28475,10 @@ function ng41EnsureCallQueue(db, lead = {}, reason = "hot_lead", source = "auto_
     priority: score.priority,
     reason,
     source,
-    status: existing?.status || "needs_call",
+    status: existing?.status || "needs_google_meet",
     next_call_at: existing?.next_call_at || nowIso(),
+    next_google_meet_at: existing?.next_google_meet_at || existing?.next_call_at || nowIso(),
+    request_type: existing?.request_type || "google_meet",
     next_best_action: score.next_best_action,
     assigned_to: existing?.assigned_to || lead.owner_id || lead.assigned_to || null,
   }, existing);
@@ -28256,7 +28546,7 @@ function ng41ProcessInboundMessageForGrowth(db, { lead = null, text = "", from =
       severity: "high",
       title: "Student asked about price/payment",
       description: text,
-      lesson_suggestion: "When a student asks about price, explain program value briefly and offer a mentor call instead of only sending price.",
+      lesson_suggestion: "When a student asks about price, explain program value briefly and offer a Google Meet mentor consultation instead of only sending price.",
       source,
     });
   } else if (ng41DetectMentorInterest(text) || ng41DetectSessionInterest(text)) {
