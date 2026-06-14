@@ -18838,8 +18838,7 @@ ${ownerCommandContext || "No active Owner Live Command saved in AI Control."}
 ${campaignCommandContext || "No campaign-specific command found for this lead."}
 
 Frontend AI Control Center rules:
-${commandBlocks.length ? commandBlocks.map((x, i) => `${i + 1}. ${x}`).join("
-") : "No custom command rules saved yet."}
+${commandBlocks.length ? commandBlocks.map((x, i) => `${i + 1}. ${x}`).join("\n") : "No custom command rules saved yet."}
 
 Default live-session rule:
 - For Meta/form leads, assume they requested contact. Silence alone is not opt-out.
@@ -18852,8 +18851,7 @@ Program/proof rule:
 - Do not fabricate testimonials, pass claims, score claims, residency/match claims, visa claims, or official affiliations.
 
 Approved proof links/items:
-${proofLines.length ? proofLines.join("
-") : "No approved proof item found. Do not claim specific testimonial proof unless admin provides it."}`.trim();
+${proofLines.length ? proofLines.join("\n") : "No approved proof item found. Do not claim specific testimonial proof unless admin provides it."}`.trim();
 }
 
 async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }) {
