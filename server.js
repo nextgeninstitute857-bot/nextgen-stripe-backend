@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v54-paid-group-live-session-exclusion";
+const NEXTGEN_BACKEND_BUILD = "v58-safe-session-override-cors-fix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -5534,6 +5534,7 @@ const DEFAULT_CRM_DB = {
   future_followups: [],
   whatsapp_windows: [],
   daily_session_recovery: [],
+  session_overrides: [],
   ai_learning_events: [],
   ai_learning_lessons: [],
   ai_mistake_reports: [],
@@ -14010,6 +14011,122 @@ function ngDailySessionTimeParts(date = new Date(), timezone = "America/New_York
   }
 }
 
+
+function ngNormalizeSessionOverrideStatus(value = "") {
+  const clean = String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  if (["cancelled", "canceled", "no_session", "doctor_not_available", "mentor_not_available", "unavailable"].includes(clean)) return "cancelled";
+  if (["live", "live_today", "available", "normal", "resume"].includes(clean)) return "live";
+  return clean || "live";
+}
+
+function ngGetLiveSessionOverrideForDate(db = {}, dateKey = "", brandId = null) {
+  const targetDate = String(dateKey || ngDailySessionDateKey(new Date())).slice(0, 10);
+  return ensureCrmArray(db, "session_overrides")
+    .filter((item) => String(item.date || item.session_date || "").slice(0, 10) === targetDate)
+    .filter((item) => !brandId || !item.brand_id || String(item.brand_id) === String(brandId))
+    .sort((a, b) => String(b.updated_at || b.created_at || "").localeCompare(String(a.updated_at || a.created_at || "")))[0] || null;
+}
+
+function ngLiveSessionOverrideIsCancelled(override = null) {
+  if (!override) return false;
+  if (override.cancelled === true || override.is_cancelled === true || override.no_session_today === true || override.doctor_not_available === true) return true;
+  return ngNormalizeSessionOverrideStatus(override.status || override.session_status) === "cancelled";
+}
+
+function ngBuildNoSessionRecordingFallbackText({ db = {}, settings = {}, assets = {}, override = {}, lead = {} } = {}) {
+  const custom = normalizeCrmString(override.message || override.no_session_message || settings.no_session_today_message || settings.doctor_not_available_message || "");
+  if (custom) {
+    return custom
+      .replace(/{{\s*student_name\s*}}/gi, ng41LeadName(lead) || "Doctor")
+      .replace(/{{\s*recording_link\s*}}/gi, assets.recordingLink || "")
+      .replace(/{{\s*session_time\s*}}/gi, assets.sessionTime || "1 PM EST")
+      .replace(/{{\s*demo_link\s*}}/gi, assets.uworldLink || "")
+      .trim();
+  }
+
+  const recordingLine = assets.recordingLink
+    ? `\n\nYou can watch this recent session recording for now:\n${assets.recordingLink}`
+    : "\n\nYou can continue with the recent recording/demo for now, and I’ll share the recording link as soon as it is available.";
+
+  return `Doctor, today’s ${assets.sessionTime || "1 PM EST"} live session is not available because the mentor/doctor is not available today.${recordingLine}\n\nIf you like the teaching style, I can arrange a Google Meet mentor consultation for guidance. Or if you prefer to wait for tomorrow’s live session, I’ll update you tomorrow.`;
+}
+
+async function ngRunNoSessionRecordingFallback({ db = {}, brandId = null, limit = 50, dryRun = false, source = "session_override", override = null, dateKey = ngDailySessionDateKey(new Date()) } = {}) {
+  const settings = ngAylaPickSettings(db);
+  const assets = ngAylaGetSalesAssets(db);
+  const action = "no_session_recording_fallback";
+  const templateIdDefault = settings.no_session_recording_template_key || settings.no_session_today_template_key || "no_session_recording_fallback";
+  const leads = ensureCrmArray(db, "leads")
+    .filter((lead) => !brandId || String(lead.brand_id || "") === String(brandId || ""))
+    .filter((lead) => ngDailyLiveSessionEligibleLead(db, lead, settings))
+    .slice(0, Math.max(1, Math.min(300, Number(limit || 50))));
+
+  const results = [];
+  for (const lead of leads) {
+    if (ngDailyLiveSessionAlreadySent(db, lead, action, dateKey)) {
+      results.push({ lead_id: lead.id, skipped: true, reason: "no_session_update_already_sent_today" });
+      continue;
+    }
+
+    const channel = resolveCrmChannelForConversation({ requestedChannel: lead.current_channel || lead.last_channel || lead.source_platform || lead.platform || "whatsapp", lead, fallback: "whatsapp" });
+    const latestInbound = ngLatestInbound(ngLeadConversationMessages(db, lead.id));
+    const whatsappWindowOpen = channel !== "whatsapp" || ngWithinHours(latestInbound?.created_at || latestInbound?.received_at || latestInbound?.timestamp, 24);
+    const templateId = channel === "whatsapp" && !whatsappWindowOpen ? templateIdDefault : null;
+    const text = ngBuildNoSessionRecordingFallbackText({ db, settings, assets, override, lead });
+
+    if (dryRun) {
+      results.push({ lead_id: lead.id, dry_run: true, action, template_id: templateId, text });
+      continue;
+    }
+
+    try {
+      const result = await sendCrmMessage({
+        db,
+        brandId: lead.brand_id || brandId || db.settings?.default_brand_id || null,
+        channel,
+        to: getBestRecipientForChannel({ channel, lead }),
+        text,
+        templateId,
+        templateVariables: {
+          lead,
+          student_name: ng41LeadName(lead) || "Doctor",
+          exam_type: ng41LeadExamType(lead) || "USMLE",
+          session_time: assets.sessionTime,
+          recording_link: assets.recordingLink,
+          demo_link: assets.uworldLink,
+        },
+        leadId: lead.id,
+        metadata: {
+          source: "no_session_today_override",
+          daily_live_session_action: action,
+          daily_live_session_date: dateKey,
+          template_key: templateId,
+          scheduler_source: source,
+          session_override_id: override?.id || null,
+          session_status: "cancelled",
+        },
+      });
+
+      lead.last_no_session_update_sent_at = nowIso();
+      lead.no_session_update_date = dateKey;
+      lead.next_action = "wait_for_recording_feedback_google_meet_or_tomorrow_live_session";
+      lead.updated_at = nowIso();
+      results.push({ lead_id: lead.id, sent: true, action, template_id: templateId, message_id: result.log?.id || null });
+    } catch (error) {
+      results.push({ lead_id: lead.id, sent: false, error: error.message, action, template_id: templateId });
+    }
+  }
+
+  if (override && !dryRun) {
+    override.no_session_update_sent_at = override.no_session_update_sent_at || nowIso();
+    override.no_session_update_last_run_at = nowIso();
+    override.no_session_update_sent_count = Number(override.no_session_update_sent_count || 0) + results.filter((r) => r.sent).length;
+    override.updated_at = nowIso();
+  }
+
+  return { action, processed: results.length, sent: results.filter((r) => r.sent).length, skipped: results.filter((r) => r.skipped).length, results, override };
+}
+
 function ngDailyLiveSessionActionNow(settings = {}, date = new Date()) {
   const tz = "America/New_York";
   const { weekday, hour, minute } = ngDailySessionTimeParts(date, tz);
@@ -14090,6 +14207,9 @@ function ngDailyLiveSessionAlreadySent(db = {}, lead = {}, action = "", dateKey 
 
 function ngDailyLiveSessionText(action = "", assets = {}, lead = {}) {
   const name = ng41LeadName(lead) || "Doctor";
+  if (action === "no_session_recording_fallback") {
+    return ngBuildNoSessionRecordingFallbackText({ assets, lead });
+  }
   if (action === "five_minute_reminder") {
     return `Doctor, our live USMLE guidance session starts in 5 minutes.\n\nPlease join even for 5-10 minutes to see the mentor’s teaching style. I’ll share the link at session time.`;
   }
@@ -14104,9 +14224,14 @@ function ngDailyLiveSessionText(action = "", assets = {}, lead = {}) {
 async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit = 50, dryRun = false, source = "run_due" } = {}) {
   const settings = ngAylaPickSettings(db);
   if (settings.daily_live_session_flow_enabled === false) return { action: null, processed: 0, sent: 0, skipped: 0, results: [], reason: "disabled" };
-  const action = ngDailyLiveSessionActionNow(settings, new Date());
+  const nowDate = new Date();
+  const dateKey = ngDailySessionDateKey(nowDate);
+  const override = ngGetLiveSessionOverrideForDate(db, dateKey, brandId);
+  if (ngLiveSessionOverrideIsCancelled(override)) {
+    return ngRunNoSessionRecordingFallback({ db, brandId, limit, dryRun, source, override, dateKey });
+  }
+  const action = ngDailyLiveSessionActionNow(settings, nowDate);
   if (!action) return { action: null, processed: 0, sent: 0, skipped: 0, results: [], reason: "not_due_now" };
-  const dateKey = ngDailySessionDateKey(new Date());
   const assets = ngAylaGetSalesAssets(db);
   const templateMap = {
     five_minute_reminder: settings.session_reminder_template_key || "five_minute_reminder",
@@ -14587,6 +14712,108 @@ app.post("/admin/crm/appointments/:id/send-confirmation", async (req, res) => {
     res.json({ success: true, sent, appointment: enrichAppointment(db, item) });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
+
+
+function ngUpsertTodayLiveSessionOverride(db = {}, { brandId = null, status = "live", reason = "", message = "", actor = null } = {}) {
+  const dateKey = ngDailySessionDateKey(new Date());
+  const normalizedStatus = ngNormalizeSessionOverrideStatus(status);
+  const overrides = ensureCrmArray(db, "session_overrides");
+  let item = overrides.find((override) => String(override.date || override.session_date || "").slice(0, 10) === dateKey && String(override.brand_id || "") === String(brandId || ""));
+  const existing = item || null;
+  item = withTimestamps({
+    ...(item || {}),
+    id: item?.id || uuid(),
+    brand_id: brandId || null,
+    date: dateKey,
+    session_date: dateKey,
+    status: normalizedStatus,
+    session_status: normalizedStatus,
+    reason: reason || (normalizedStatus === "cancelled" ? "doctor_not_available" : "live_today"),
+    message: message || item?.message || "",
+    cancelled: normalizedStatus === "cancelled",
+    no_session_today: normalizedStatus === "cancelled",
+    doctor_not_available: normalizedStatus === "cancelled" && /doctor|mentor|available|unavailable/i.test(reason || "doctor_not_available"),
+    block_reminder: normalizedStatus === "cancelled",
+    block_live_link: normalizedStatus === "cancelled",
+    block_post_session_feedback: normalizedStatus === "cancelled",
+    send_recording_instead: normalizedStatus === "cancelled",
+    updated_by: actor?.id || item?.updated_by || null,
+  }, existing);
+  if (existing) Object.assign(existing, item);
+  else overrides.push(item);
+
+  ensureCrmArray(db, "action_logs").push(withTimestamps({
+    id: uuid(),
+    action: normalizedStatus === "cancelled" ? "daily_live_session_cancelled" : "daily_live_session_marked_live",
+    session_date: dateKey,
+    session_override_id: item.id,
+    actor_id: actor?.id || null,
+    brand_id: brandId || null,
+    reason: item.reason,
+  }));
+
+  return item;
+}
+
+app.get("/admin/crm/live-session-status/today", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const dateKey = ngDailySessionDateKey(new Date());
+    const override = ngGetLiveSessionOverrideForDate(db, dateKey, brandId);
+    res.json({
+      success: true,
+      date: dateKey,
+      status: ngLiveSessionOverrideIsCancelled(override) ? "cancelled" : "live",
+      override,
+      cancelled: ngLiveSessionOverrideIsCancelled(override),
+      message: override?.message || "",
+    });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/live-session-status/today", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const body = req.body || {};
+    const status = ngNormalizeSessionOverrideStatus(body.status || body.session_status || (body.cancelled ? "cancelled" : "live"));
+    const reason = normalizeCrmString(body.reason || (status === "cancelled" ? "doctor_not_available" : "live_today"));
+    const message = normalizeCrmString(body.message || body.no_session_message || "");
+    const override = ngUpsertTodayLiveSessionOverride(db, { brandId, status, reason, message, actor: user });
+    let sendResults = null;
+    if (status === "cancelled" && body.send_update !== false) {
+      sendResults = await ngRunNoSessionRecordingFallback({
+        db,
+        brandId,
+        limit: Number(body.limit || 200),
+        dryRun: body.dry_run === true,
+        source: body.source || "admin_no_session_today_button",
+        override,
+        dateKey: override.date,
+      });
+    }
+    await writeCrmDb(db);
+    res.json({ success: true, status, cancelled: status === "cancelled", override, send_results: sendResults });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+
+app.post("/admin/crm/live-session-status/today/no-session", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const body = req.body || {};
+    const override = ngUpsertTodayLiveSessionOverride(db, { brandId, status: "cancelled", reason: normalizeCrmString(body.reason || "doctor_not_available"), message: normalizeCrmString(body.message || body.no_session_message || ""), actor: user });
+    const sendResults = body.send_update === false ? null : await ngRunNoSessionRecordingFallback({ db, brandId, limit: Number(body.limit || 200), dryRun: body.dry_run === true, source: body.source || "admin_no_session_today_button", override, dateKey: override.date });
+    await writeCrmDb(db);
+    res.json({ success: true, status: "cancelled", cancelled: true, override, send_results: sendResults });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
 
 
 function ngApplyPaidGroupStatusToLead(db = {}, lead = {}, payload = {}, actor = null) {
@@ -19804,12 +20031,19 @@ function ngBuildAylaCommandContext(db = {}, lead = {}) {
     return `${index + 1}. ${item.label || item.type}.${url}${summary}`;
   });
 
+  const todaySessionOverride = ngGetLiveSessionOverrideForDate(db, ngDailySessionDateKey(new Date()), lead?.brand_id || db?.settings?.default_brand_id || null);
+  const todaySessionContext = ngLiveSessionOverrideIsCancelled(todaySessionOverride)
+    ? `Today’s live session status: CANCELLED / NO SESSION TODAY. Reason: ${todaySessionOverride.reason || "doctor_not_available"}. Do not invite to today’s live session. Do not send or promise today’s session link. Do not ask “how was your session?” for today. If relevant, share the recent recording/demo and say the next live-session update will be tomorrow unless admin marks the session live again.`
+    : "Today’s live session status: normal unless another admin override says otherwise.";
+
   return `
 ${ownerCommandContext || "No active Owner Live Command saved in AI Control."}
 
 ${campaignCommandContext || "No campaign-specific command found for this lead."}
 
 ${backendSalesBrainContext}
+
+${todaySessionContext}
 
 Frontend AI Control Center rules:
 ${commandBlocks.length ? commandBlocks.map((x, i) => `${i + 1}. ${x}`).join("\n") : "No custom command rules saved yet."}
@@ -20834,7 +21068,7 @@ async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }
       return {
         reply: hardReplyText,
         usage: {},
-        model: "nextgen-v57-roadmap-resources-greeting-guard",
+        model: "nextgen-v58-safe-session-override-cors-fix",
         hard_router: true,
         intent: hardSalesReply.intent || "sales_asset_push",
       };
