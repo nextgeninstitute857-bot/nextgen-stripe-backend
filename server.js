@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v61-global-phone-import-safe-sender";
+const NEXTGEN_BACKEND_BUILD = "v68-website-ayla-demo-combined";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -3664,15 +3664,119 @@ app.patch("/admin/payments/:paymentId", async (req, res) => {
   }
 });
 
+
+function getDemoCourseCandidates(db, body = {}) {
+  const requestedIds = uniqueList([
+    ...normalizeIdList(body.course_ids),
+    ...normalizeIdList(body.courseIds),
+    ...normalizeIdList(body.track_ids),
+    ...normalizeIdList(body.trackIds),
+  ]);
+
+  const allCoursesRequested =
+    body.all_courses === true ||
+    body.all_tracks === true ||
+    body.activate_all_demo_tracks === true ||
+    body.course_scope === "all_active" ||
+    body.mode === "all_courses";
+
+  const courses = Object.values(db.courses || {}).filter((course) => {
+    if (!course?.id) return false;
+    if (course.status && String(course.status).toLowerCase() !== "active") return false;
+    if (course.demo_access_enabled === false) return false;
+    if (requestedIds.length) return requestedIds.includes(String(course.id));
+    if (allCoursesRequested) return true;
+    return body.course_id && String(course.id) === String(body.course_id);
+  });
+
+  return courses;
+}
+
+function enrichDemoEnrollment(enrollment, body = {}, activationSource = "demo_start") {
+  if (!enrollment) return enrollment;
+  enrollment.demo_source = body.source || body.demo_source || activationSource;
+  enrollment.source = enrollment.source || body.source || activationSource;
+  enrollment.campaign = body.campaign || body.source_campaign || enrollment.campaign || null;
+  enrollment.intent = body.intent || enrollment.intent || "demo_interest";
+  enrollment.demo_activation_mode = body.all_courses || body.all_tracks || body.activate_all_demo_tracks || body.course_scope === "all_active" ? "all_demo_courses" : "single_course";
+  enrollment.demo_started_at = enrollment.demo_started_at || new Date().toISOString();
+  enrollment.updated_at = new Date().toISOString();
+  return enrollment;
+}
+
+function getDemoExpiryDateTime(demoExpiry) {
+  if (!demoExpiry) return null;
+  const raw = String(demoExpiry || "").trim();
+  const date = raw.includes("T") ? new Date(raw) : new Date(`${raw}T23:59:59`);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function buildStudentDemoStatus(db, user) {
+  const settings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
+  const enrollments = Object.values(db.enrollments || {}).filter((enrollment) => String(enrollment.user_id) === String(user.id) && enrollment.access_granted !== false);
+
+  const paidEnrollments = enrollments.filter((enrollment) => enrollment.is_demo !== true);
+  const paidCourseIds = new Set(paidEnrollments.map((enrollment) => String(enrollment.course_id || "")).filter(Boolean));
+
+  const demoEnrollments = enrollments.filter((enrollment) => {
+    if (enrollment.is_demo !== true) return false;
+    if (!isDemoEnrollmentActive(enrollment, settings)) return false;
+    const course = enrollment.course_id ? db.courses?.[String(enrollment.course_id)] || null : null;
+    if (!course) return false;
+    if (course.demo_access_enabled === false) return false;
+    if (paidCourseIds.has(String(course.id))) return false;
+    return true;
+  });
+
+  const expiryDates = demoEnrollments
+    .map((enrollment) => getDemoExpiryDateTime(enrollment.demo_expiry))
+    .filter(Boolean)
+    .sort((a, b) => a.getTime() - b.getTime());
+
+  const nearestExpiry = expiryDates[0] || null;
+  const secondsRemaining = nearestExpiry ? Math.max(0, Math.floor((nearestExpiry.getTime() - Date.now()) / 1000)) : 0;
+  const daysRemaining = secondsRemaining ? Math.floor(secondsRemaining / 86400) : 0;
+  const hoursRemaining = secondsRemaining ? Math.floor((secondsRemaining % 86400) / 3600) : 0;
+  const minutesRemaining = secondsRemaining ? Math.floor((secondsRemaining % 3600) / 60) : 0;
+
+  const courseRows = demoEnrollments.map((enrollment) => {
+    const course = enrollment.course_id ? db.courses?.[String(enrollment.course_id)] || null : null;
+    const expiry = getDemoExpiryDateTime(enrollment.demo_expiry);
+    const courseSeconds = expiry ? Math.max(0, Math.floor((expiry.getTime() - Date.now()) / 1000)) : 0;
+    return {
+      enrollment_id: enrollment.id,
+      course_id: enrollment.course_id || null,
+      course_name: course?.name || enrollment.course_name || "Course",
+      category: course?.category || null,
+      course_type: course?.course_type || null,
+      demo_expiry: enrollment.demo_expiry || null,
+      seconds_remaining: courseSeconds,
+      status: courseSeconds > 0 ? "demo_active" : "demo_expired",
+    };
+  });
+
+  return {
+    success: true,
+    is_demo: demoEnrollments.length > 0,
+    has_paid_access: paidEnrollments.length > 0,
+    demo_enabled: settings.enabled !== false,
+    demo_expiry: nearestExpiry ? nearestExpiry.toISOString() : null,
+    seconds_remaining: secondsRemaining,
+    days_remaining: daysRemaining,
+    hours_remaining: hoursRemaining,
+    minutes_remaining: minutesRemaining,
+    courses: courseRows,
+    demo_settings: settings,
+    features: getStudentFeatureAccess(db, user),
+    upgrade_url: "/plans",
+    mentor_url: "/#contact",
+    live_classroom_url: "/student/live-sessions",
+  };
+}
+
 app.post("/demo/start", async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req);
-    const { course_id } = req.body;
-
-    if (!course_id) {
-      return res.status(400).json({ success: false, error: "course_id is required" });
-    }
-
     const db = await readLiveDb();
     const settings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
 
@@ -3680,62 +3784,108 @@ app.post("/demo/start", async (req, res) => {
       return res.status(403).json({ success: false, error: "Demo access is disabled" });
     }
 
-    const course = db.courses?.[String(course_id)] || null;
+    const allCoursesRequested =
+      req.body?.all_courses === true ||
+      req.body?.all_tracks === true ||
+      req.body?.activate_all_demo_tracks === true ||
+      req.body?.course_scope === "all_active" ||
+      req.body?.mode === "all_courses";
 
-    if (!course) {
-      return res.status(404).json({ success: false, error: "Course not found" });
+    const courses = getDemoCourseCandidates(db, req.body || {});
+
+    if (!allCoursesRequested && !req.body?.course_id && !normalizeIdList(req.body?.course_ids).length) {
+      return res.status(400).json({ success: false, error: "course_id is required unless all_courses is true" });
     }
 
-    if (course.demo_access_enabled === false) {
-      return res.status(403).json({ success: false, error: "Demo access is disabled for this course" });
-    }
-
-    const paid = db.enrollments[backendEnrollmentKey(course_id, user.id, "paid")];
-
-    if (paid?.access_granted) {
-      return res.json({
-        success: true,
-        already_paid: true,
-        enrollment: paid,
-        message: "You already have full access",
-        source: "backend",
-      });
-    }
-
-    const existingDemo = db.enrollments[backendEnrollmentKey(course_id, user.id, "demo")];
-
-    if (existingDemo?.access_granted && isDemoEnrollmentActive(existingDemo, settings)) {
-      return res.json({
-        success: true,
-        enrollment: existingDemo,
-        demo_settings: settings,
-        demo_expiry: existingDemo.demo_expiry || null,
-        created: false,
-        source: "backend",
-        message: "Demo access already active",
+    if (!courses.length) {
+      return res.status(404).json({
+        success: false,
+        error: allCoursesRequested
+          ? "No active demo-enabled courses found"
+          : "Course not found or demo access is disabled for this course",
       });
     }
 
     const demoExpiry = dateOnly(addDays(new Date(), Number(settings.duration_days || 2)));
-    const enrollment = createBackendEnrollment(db, {
-      userId: user.id,
-      userName: user.name || user.email || "Student",
-      courseId: course_id,
-      isDemo: true,
-      accessGranted: true,
-      demoExpiry,
-    });
+    const enrollments = [];
+    let createdCount = 0;
+    let reusedCount = 0;
+    let paidCount = 0;
+
+    for (const course of courses) {
+      const courseId = String(course.id);
+      const paid = db.enrollments[backendEnrollmentKey(courseId, user.id, "paid")];
+
+      if (paid?.access_granted) {
+        paidCount += 1;
+        enrollments.push({
+          ...paid,
+          course_name: course.name || "Course",
+          status: "paid",
+          already_paid: true,
+        });
+        continue;
+      }
+
+      const existingDemo = db.enrollments[backendEnrollmentKey(courseId, user.id, "demo")];
+
+      if (existingDemo?.access_granted && isDemoEnrollmentActive(existingDemo, settings)) {
+        reusedCount += 1;
+        enrichDemoEnrollment(existingDemo, req.body || {}, "website_demo_reused");
+        enrollments.push({
+          ...existingDemo,
+          course_name: course.name || "Course",
+          status: "demo_active",
+          created: false,
+        });
+        continue;
+      }
+
+      const enrollment = createBackendEnrollment(db, {
+        userId: user.id,
+        userName: user.name || user.email || "Student",
+        courseId,
+        isDemo: true,
+        accessGranted: true,
+        demoExpiry,
+      });
+
+      createdCount += 1;
+      enrichDemoEnrollment(enrollment, req.body || {}, "website_demo_created");
+      enrollments.push({
+        ...enrollment,
+        course_name: course.name || "Course",
+        status: "demo_active",
+        created: true,
+      });
+    }
 
     await writeLiveDb(db);
 
+    const status = buildStudentDemoStatus(db, user);
+
     res.json({
       success: true,
-      enrollment,
+      type: allCoursesRequested ? "all_demo_courses" : "single_course_demo",
+      all_courses: allCoursesRequested,
+      created: createdCount > 0,
+      created_count: createdCount,
+      reused_count: reusedCount,
+      already_paid_count: paidCount,
+      count: enrollments.length,
+      enrollments,
+      enrollment: enrollments[0] || null,
       demo_settings: settings,
-      demo_expiry: demoExpiry,
-      created: true,
+      demo_expiry: status.demo_expiry || demoExpiry,
+      demo_status: status,
       source: "backend",
-      message: "Demo access granted",
+      message: allCoursesRequested
+        ? "Demo access granted for all active demo-enabled courses"
+        : createdCount > 0
+          ? "Demo access granted"
+          : reusedCount > 0
+            ? "Demo access already active"
+            : "You already have full access",
     });
   } catch (e) {
     res.status(e.statusCode || e.response?.status || 500).json({
@@ -3743,6 +3893,16 @@ app.post("/demo/start", async (req, res) => {
       error: e.response?.data?.message || e.message || "Failed to start demo",
       details: e.response?.data || null,
     });
+  }
+});
+
+app.get("/student/demo-status", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    res.json(buildStudentDemoStatus(db, user));
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to load demo status" });
   }
 });
 app.post("/enrollments/prepare-checkout", async (req, res) => {
@@ -13843,6 +14003,164 @@ function ngUpdateLeadWhatsAppSendStatus(lead, result = {}) {
   lead.updated_at = now;
 }
 
+
+function ngDedupeHashText(value = "") {
+  const clean = String(value || "").toLowerCase().replace(/\s+/g, " ").trim().slice(0, 1200);
+  return crypto.createHash("sha1").update(clean || "empty").digest("hex").slice(0, 16);
+}
+
+function ngMessageLogTimeMs(item = {}) {
+  const raw = item.sent_at || item.created_at || item.created || item.updated_at || item.timestamp || "";
+  const ms = new Date(raw).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function ngDeliveryIdentity({ lead = null, leadId = null, to = "" } = {}) {
+  return String(lead?.id || leadId || to || "").trim();
+}
+
+function ngBuildDeliveryPurpose({ templateId = null, metadata = {} } = {}) {
+  const candidates = [
+    metadata.delivery_purpose,
+    metadata.daily_live_session_action,
+    metadata.google_meet_action,
+    metadata.quick_action,
+    metadata.automation_step_id,
+    metadata.template_key,
+    metadata.template_name,
+    metadata.whatsapp_template_name,
+    templateId,
+    metadata.source,
+  ];
+  for (const value of candidates) {
+    const clean = normalizeTemplateLookupKey(value || "");
+    if (clean) return clean;
+  }
+  return "manual_message";
+}
+
+function ngBuildDeliveryDedupeKey({ lead = null, leadId = null, channel = "whatsapp", to = "", templateId = null, text = "", metadata = {} } = {}) {
+  const identity = ngDeliveryIdentity({ lead, leadId, to });
+  const purpose = ngBuildDeliveryPurpose({ templateId, metadata });
+  const dateScope = String(
+    metadata.delivery_date_key ||
+    metadata.daily_live_session_date ||
+    (metadata.google_meet_appointment_id ? `${metadata.google_meet_appointment_id}:${metadata.google_meet_action || "google_meet"}` : "") ||
+    ngDailySessionDateKey(new Date())
+  );
+  const templateKey = normalizeTemplateLookupKey(metadata.template_key || metadata.template_name || metadata.whatsapp_template_name || templateId || "");
+  const textHash = ngDedupeHashText(text || "");
+  return ["v67", normalizeAutomationChannel(channel || "whatsapp"), identity, purpose, templateKey, dateScope, textHash].join("|");
+}
+
+function ngDeliveryStatusCountsAsSent(status = "") {
+  const clean = normalizeCrmLower(status || "", "");
+  return ["sent", "delivered", "read", "queued", "queued_for_approval"].includes(clean);
+}
+
+function ngFindRecentDuplicateDelivery(db = {}, payload = {}) {
+  const metadata = payload.metadata || {};
+  if (metadata.allow_duplicate_send === true || metadata.skip_dedupe === true) return null;
+
+  const key = ngBuildDeliveryDedupeKey(payload);
+  const identity = ngDeliveryIdentity(payload);
+  const channel = normalizeAutomationChannel(payload.channel || "whatsapp");
+  const nowMs = Date.now();
+  const shortWindowMs = Math.max(30, Number(metadata.dedupe_window_seconds || 180)) * 1000;
+
+  const locks = ensureCrmArray(db, "message_delivery_locks");
+  const activeLock = locks.find((lock) => {
+    if (String(lock.delivery_dedupe_key || "") !== key) return false;
+    if (!["sending", "queued"].includes(String(lock.status || ""))) return false;
+    const age = nowMs - ngMessageLogTimeMs(lock);
+    return age >= 0 && age <= shortWindowMs;
+  });
+  if (activeLock) return { type: "active_lock", key, existing: activeLock };
+
+  const logs = [
+    ...ensureCrmArray(db, "message_logs"),
+    ...ensureCrmArray(db, "outbound_messages"),
+  ];
+  const textHash = ngDedupeHashText(payload.text || "");
+  const purpose = ngBuildDeliveryPurpose(payload);
+  const dateScope = String(metadata.delivery_date_key || metadata.daily_live_session_date || ngDailySessionDateKey(new Date()));
+
+  const duplicateLog = logs.find((log) => {
+    if (!ngDeliveryStatusCountsAsSent(log.status)) return false;
+    const logMeta = log.metadata || {};
+    const logChannel = normalizeAutomationChannel(log.channel || log.provider || "whatsapp");
+    if (logChannel !== channel) return false;
+    const sameIdentity = String(log.lead_id || "") === identity || String(log.to || log.recipient || "") === String(payload.to || "");
+    if (!sameIdentity) return false;
+    if (String(logMeta.delivery_dedupe_key || "") === key) return true;
+
+    const logPurpose = ngBuildDeliveryPurpose({ templateId: log.template_id, metadata: logMeta });
+    const logDateScope = String(logMeta.delivery_date_key || logMeta.daily_live_session_date || String(log.sent_at || log.created_at || "").slice(0, 10));
+    const sameScopedAction = logPurpose === purpose && logDateScope === dateScope && purpose !== "manual_message";
+    if (sameScopedAction) return true;
+
+    const age = nowMs - ngMessageLogTimeMs(log);
+    if (age >= 0 && age <= shortWindowMs && ngDedupeHashText(log.text || log.body || "") === textHash) return true;
+    return false;
+  });
+
+  return duplicateLog ? { type: "message_log", key, existing: duplicateLog } : null;
+}
+
+function ngStartDeliveryLock(db = {}, payload = {}) {
+  const key = ngBuildDeliveryDedupeKey(payload);
+  const lock = withTimestamps({
+    id: uuid(),
+    delivery_dedupe_key: key,
+    lead_id: payload.lead?.id || payload.leadId || null,
+    channel: normalizeAutomationChannel(payload.channel || "whatsapp"),
+    to: payload.to || "",
+    template_id: payload.templateId || null,
+    status: "sending",
+    metadata: payload.metadata || {},
+  });
+  ensureCrmArray(db, "message_delivery_locks").push(lock);
+  return lock;
+}
+
+function ngFinishDeliveryLock(lock = null, status = "sent", extra = {}) {
+  if (!lock) return;
+  lock.status = status;
+  lock.finished_at = nowIso();
+  lock.updated_at = nowIso();
+  Object.assign(lock, extra || {});
+}
+
+function ngRecentlyContactedMinutesAgo(lead = {}, minutes = 10) {
+  const raw = lead.last_contacted_at || lead.last_outbound_sent_at || lead.whatsapp_last_sent_at || lead.first_message_sent_at || "";
+  if (!raw) return false;
+  const ms = new Date(raw).getTime();
+  if (!Number.isFinite(ms)) return false;
+  return Date.now() - ms >= 0 && Date.now() - ms <= Math.max(1, Number(minutes || 10)) * 60000;
+}
+
+function ngLiveSessionTimingStateNow(db = {}, date = new Date()) {
+  const settings = db?.ai_orchestration_settings || db?.assistant_settings || {};
+  const tz = "America/New_York";
+  const { weekday, hour, minute } = ngDailySessionTimeParts(date, tz);
+  const day = String(weekday || "").toLowerCase();
+  const reminderMinutes = Number(settings.session_reminder_minutes || settings.default_session_reminder_minutes || 5);
+  const postDelay = Number(settings.post_session_followup_delay_minutes || 120);
+  const total = hour * 60 + minute;
+  const sessionTotal = 13 * 60;
+
+  if (day.startsWith("sat") || day.startsWith("sun")) return { phase: "no_session_day", weekday, total, sessionTotal };
+  if (total < sessionTotal - reminderMinutes) return { phase: "before_session_invite", weekday, total, sessionTotal };
+  if (total >= sessionTotal - reminderMinutes && total < sessionTotal) return { phase: "reminder_window", weekday, total, sessionTotal };
+  if (total >= sessionTotal && total <= sessionTotal + 15) return { phase: "live_window", weekday, total, sessionTotal };
+  if (total > sessionTotal + 15 && total < sessionTotal + postDelay) return { phase: "session_finished_waiting_recording_followup", weekday, total, sessionTotal };
+  return { phase: "after_session", weekday, total, sessionTotal };
+}
+
+function ngShouldUseTodayLiveSessionFirstInvite(db = {}, date = new Date()) {
+  return ngLiveSessionTimingStateNow(db, date).phase === "before_session_invite";
+}
+
 async function sendCrmMessage({
   db,
   brandId = null,
@@ -13906,12 +14224,43 @@ async function sendCrmMessage({
     },
   };
 
+  let deliveryLock = null;
+
   try {
     if (!finalTo) {
       const error = new Error(`Recipient is required for ${cleanChannel}.`);
       error.statusCode = 400;
       throw error;
     }
+
+    const deliveryPayload = {
+      lead,
+      leadId: lead?.id || leadId || null,
+      channel: cleanChannel,
+      to: finalTo,
+      templateId: template?.id || templateId || null,
+      text: finalText,
+      metadata: baseLog.metadata || {},
+    };
+    const duplicate = ngFindRecentDuplicateDelivery(db, deliveryPayload);
+    if (duplicate) {
+      return {
+        success: true,
+        sent: false,
+        skipped: true,
+        duplicate_blocked: true,
+        channel: cleanChannel,
+        provider: cleanChannel,
+        to: finalTo,
+        status: "duplicate_blocked",
+        reason: "duplicate_message_blocked",
+        delivery_dedupe_key: duplicate.key,
+        duplicate_type: duplicate.type,
+      };
+    }
+
+    deliveryLock = ngStartDeliveryLock(db, deliveryPayload);
+    baseLog.metadata.delivery_dedupe_key = deliveryLock.delivery_dedupe_key;
 
     let providerResponse = null;
     let providerMessageId = null;
@@ -13970,6 +14319,7 @@ async function sendCrmMessage({
       provider_response: providerResponse,
       sent_at: providerResponse?.manual_first ? null : nowIso(),
     });
+    ngFinishDeliveryLock(deliveryLock, providerResponse?.manual_first ? "queued" : "sent", { message_log_id: log.id, provider_message_id: providerMessageId });
 
     if (lead) {
       appendSocialConversation(db, {
@@ -13980,6 +14330,11 @@ async function sendCrmMessage({
         payload: { provider_response: providerResponse, message_log_id: log.id },
         integration,
       });
+      if (!providerResponse?.manual_first) {
+        const sentNow = nowIso();
+        lead.last_contacted_at = sentNow;
+        lead.last_outbound_sent_at = sentNow;
+      }
       if (cleanChannel === "whatsapp" && !providerResponse?.manual_first) {
         ngUpdateLeadWhatsAppSendStatus(lead, { success: true, quick_action: metadata?.quick_action || metadata?.source || "message" });
       }
@@ -14012,6 +14367,7 @@ async function sendCrmMessage({
         whatsapp_status: failure.whatsapp_status,
       },
     });
+    ngFinishDeliveryLock(deliveryLock, "failed", { message_log_id: log.id, error: providerError });
 
     if (lead && cleanChannel === "whatsapp") {
       ngUpdateLeadWhatsAppSendStatus(lead, {
@@ -14290,6 +14646,7 @@ function ngIsSundayNoLiveSessionDay(db = {}, date = new Date()) {
 
 function ngResolveAutoFirstMessageTemplateKey(db = {}, lead = {}) {
   if (ngIsSundayNoLiveSessionDay(db)) return "greeting_exam_type_question";
+  if (!ngShouldUseTodayLiveSessionFirstInvite(db)) return "greeting_exam_type_question";
   return "meta_ad_first_message";
 }
 
@@ -14322,7 +14679,7 @@ async function ngSendAutoFirstMessageForLead({ db, lead, brandId = null, actorId
   const to = getBestRecipientForChannel({ channel: "whatsapp", lead });
 
   if (dryRun) {
-    return { success: true, sent: false, dry_run: true, lead_id: lead.id, to, template_key: templateKey, variables: vars };
+    return { success: true, sent: false, dry_run: true, lead_id: lead.id, to, template_key: templateKey, live_session_timing: ngLiveSessionTimingStateNow(db), variables: vars };
   }
 
   const result = await sendCrmMessage({
@@ -14340,6 +14697,7 @@ async function ngSendAutoFirstMessageForLead({ db, lead, brandId = null, actorId
       quick_action: "first_message",
       template_key: templateKey,
       sunday_template_router: ngIsSundayNoLiveSessionDay(db),
+      live_session_timing_phase: ngLiveSessionTimingStateNow(db).phase,
       template_name: template?.provider_template_name || template?.meta_template_name || template?.whatsapp_template_name || templateKey,
       whatsapp_template_name: template?.whatsapp_template_name || template?.meta_template_name || template?.provider_template_name || templateKey,
       language_code: normalizeWhatsAppLanguageCode(template?.meta_language || template?.whatsapp_language || template?.language_code || "en"),
@@ -14360,7 +14718,7 @@ async function ngSendAutoFirstMessageForLead({ db, lead, brandId = null, actorId
     lead.updated_at = now;
   }
 
-  return { ...result, sent: Boolean(result.success), lead_id: lead.id || lead.lead_id, template_key: templateKey, sunday_template_router: ngIsSundayNoLiveSessionDay(db) };
+  return { ...result, sent: Boolean(result.success && !result.skipped), lead_id: lead.id || lead.lead_id, template_key: templateKey, sunday_template_router: ngIsSundayNoLiveSessionDay(db), live_session_timing: ngLiveSessionTimingStateNow(db) };
 }
 
 function ngGetBulkFirstMessageSettings(db = {}, overrides = {}) {
@@ -14770,6 +15128,11 @@ async function ngRunNoSessionRecordingFallback({ db = {}, brandId = null, limit 
       results.push({ lead_id: lead.id, skipped: true, reason: "no_session_update_already_sent_today" });
       continue;
     }
+    const recentCooldownMinutes = Math.max(1, Number(settings.daily_session_recent_send_cooldown_minutes || 10));
+    if (ngRecentlyContactedMinutesAgo(lead, recentCooldownMinutes)) {
+      results.push({ lead_id: lead.id, skipped: true, reason: "recent_outbound_cooldown", cooldown_minutes: recentCooldownMinutes });
+      continue;
+    }
 
     const channel = resolveCrmChannelForConversation({ requestedChannel: lead.current_channel || lead.last_channel || lead.source_platform || lead.platform || "whatsapp", lead, fallback: "whatsapp" });
     const latestInbound = ngLatestInbound(ngLeadConversationMessages(db, lead.id));
@@ -14810,11 +15173,15 @@ async function ngRunNoSessionRecordingFallback({ db = {}, brandId = null, limit 
         },
       });
 
+      if (result.skipped || result.duplicate_blocked) {
+        results.push({ lead_id: lead.id, skipped: true, reason: result.reason || "duplicate_message_blocked", action, template_id: templateId });
+        continue;
+      }
       lead.last_no_session_update_sent_at = nowIso();
       lead.no_session_update_date = dateKey;
       lead.next_action = "wait_for_recording_feedback_google_meet_or_tomorrow_live_session";
       lead.updated_at = nowIso();
-      results.push({ lead_id: lead.id, sent: true, action, template_id: templateId, message_id: result.log?.id || null });
+      results.push({ lead_id: lead.id, sent: Boolean(result.success || result.queued), action, template_id: templateId, message_id: result.log?.id || null });
     } catch (error) {
       results.push({ lead_id: lead.id, sent: false, error: error.message, action, template_id: templateId });
     }
@@ -14951,6 +15318,11 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
       results.push({ lead_id: lead.id, skipped: true, reason: "already_sent_today" });
       continue;
     }
+    const recentCooldownMinutes = Math.max(1, Number(settings.daily_session_recent_send_cooldown_minutes || 10));
+    if (ngRecentlyContactedMinutesAgo(lead, recentCooldownMinutes)) {
+      results.push({ lead_id: lead.id, skipped: true, reason: "recent_outbound_cooldown", cooldown_minutes: recentCooldownMinutes });
+      continue;
+    }
     const channel = resolveCrmChannelForConversation({ requestedChannel: lead.current_channel || lead.last_channel || lead.source_platform || lead.platform || "whatsapp", lead, fallback: "whatsapp" });
     const latestInbound = ngLatestInbound(ngLeadConversationMessages(db, lead.id));
     const whatsappWindowOpen = channel !== "whatsapp" || ngWithinHours(latestInbound?.created_at || latestInbound?.received_at || latestInbound?.timestamp, 24);
@@ -14986,6 +15358,10 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
           scheduler_source: source,
         },
       });
+      if (result.skipped || result.duplicate_blocked) {
+        results.push({ lead_id: lead.id, skipped: true, reason: result.reason || "duplicate_message_blocked", action, template_id: templateId });
+        continue;
+      }
       if (action === "five_minute_reminder") lead.last_session_reminder_sent_at = nowIso();
       if (action === "session_link") lead.last_session_link_sent_at = nowIso();
       if (action === "post_session_recording") {
@@ -14995,7 +15371,7 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
       lead.next_action = action === "post_session_recording" ? "await_recording_feedback_or_google_meet_interest" : "daily_live_session_flow";
       lead.updated_at = nowIso();
       ng41EnsureDailySessionRecovery(db, lead);
-      results.push({ lead_id: lead.id, sent: true, action, template_id: templateId, message_id: result.log?.id || null });
+      results.push({ lead_id: lead.id, sent: Boolean(result.success || result.queued), action, template_id: templateId, message_id: result.log?.id || null });
     } catch (error) {
       results.push({ lead_id: lead.id, sent: false, error: error.message, action, template_id: templateId });
     }
@@ -21264,7 +21640,7 @@ function ngAylaGoogleMeetLockedReply({ latestText = "", lead = {}, appointment =
   if (ngAylaIsAcknowledgementOnly(latestText) || ngAylaIsPositiveShortReply(latestText)) {
     return {
       intent: "google_meet_state_acknowledgement",
-      reply: `You’re welcome Doctor. We’ll share the Google Meet link at the meeting time.`
+      reply: `Yes Doctor, I’m here. Your Google Meet is already noted, and you can ask me anything before the session. How can I help you meanwhile?`
     };
   }
 
@@ -21549,7 +21925,7 @@ Our team will confirm the Google Meet link shortly. You will receive the link at
     if (basicConversationRequest) return null;
     return {
       intent: "google_meet_state_hold_no_sales_restart",
-      reply: `Doctor, your Google Meet request is already noted. We’ll share the Google Meet link at the meeting time.`
+      reply: `Yes Doctor, I’m here. Your Google Meet is already noted, and you can ask me anything before the session. How can I help you?`
     };
   }
 
@@ -31391,6 +31767,257 @@ app.get("/admin/crm/backend-bridge/status", async (req, res) => {
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+
+// -----------------------------------------------------------------------------
+// v68 Website Ayla Chat + Website Lead Capture
+// Public website route. Isolated from WhatsApp webhook, Meta lead scheduler,
+// imported-lead flow, templates, bulk sender, and Google Meet automation.
+// -----------------------------------------------------------------------------
+function ngWebsiteSessionId(value = "") {
+  const clean = String(value || "").trim();
+  if (clean && /^[a-zA-Z0-9_:-]{8,120}$/.test(clean)) return clean;
+  return `website_${Date.now()}_${crypto.randomBytes(8).toString("hex")}`;
+}
+
+function ngWebsiteVisitorName(visitor = {}) {
+  return normalizeCrmString(visitor.name || visitor.full_name || visitor.student_name || visitor.first_name || "Website Visitor", "Website Visitor");
+}
+
+function ngFindOrCreateWebsiteLead(db, { sessionId, visitor = {}, message = "", page = "homepage", campaign = "website_chat", intent = "website_question" }) {
+  const leads = ensureCrmArray(db, "leads");
+  const email = normalizeEmail(visitor.email || "");
+  const phone = normalizeCrmString(visitor.whatsapp || visitor.phone || visitor.mobile || "");
+  const existing = leads.find((lead) => {
+    return (
+      String(lead.website_session_id || "") === String(sessionId) ||
+      (email && normalizeEmail(lead.email || lead.student_email || "") === email) ||
+      (phone && normalizeCrmString(lead.phone || lead.whatsapp || "") === phone)
+    );
+  });
+
+  const now = nowIso();
+  const basePatch = {
+    website_session_id: sessionId,
+    source_platform: "website",
+    platform: "website",
+    channel: "website_chat",
+    source_channel: "website_chat",
+    source: "website_homepage",
+    source_page: page || "homepage",
+    source_campaign: campaign || "website_chat",
+    campaign: campaign || "website_chat",
+    intent: intent || "website_question",
+    conversation_direction: "inbound",
+    client_reached_out: true,
+    agent_initiated: false,
+    automation_paused: true,
+    whatsapp_automation_paused: true,
+    meta_followup_disabled: true,
+    imported_lead_flow_disabled: true,
+    status: "website_chat",
+    lead_status: "website_chat",
+    last_message: message,
+    last_message_at: now,
+    updated_at: now,
+  };
+
+  if (existing) {
+    Object.assign(existing, basePatch);
+    if (visitor.name || visitor.full_name || visitor.student_name || visitor.first_name) existing.name = ngWebsiteVisitorName(visitor);
+    if (email) existing.email = email;
+    if (phone) {
+      existing.phone = phone;
+      existing.whatsapp = phone;
+    }
+    if (visitor.exam || visitor.exam_type || visitor.exam_track) existing.exam_type = visitor.exam || visitor.exam_type || visitor.exam_track;
+    if (visitor.exam_date) existing.exam_date = visitor.exam_date;
+    if (visitor.graduation_year) existing.graduation_year = visitor.graduation_year;
+    return existing;
+  }
+
+  const lead = withTimestamps({
+    id: `website_lead_${crypto.randomUUID()}`,
+    lead_id: `website_lead_${crypto.randomUUID()}`,
+    name: ngWebsiteVisitorName(visitor),
+    email,
+    phone,
+    whatsapp: phone,
+    exam_type: visitor.exam || visitor.exam_type || visitor.exam_track || "",
+    exam_track: visitor.exam_track || visitor.exam || visitor.exam_type || "usmle_step1",
+    exam_date: visitor.exam_date || "",
+    graduation_year: visitor.graduation_year || "",
+    tags: ["website_chat", "website_homepage", "ayla_website"],
+    ...basePatch,
+  });
+
+  leads.unshift(lead);
+  return lead;
+}
+
+function ngWebsiteAylaFallbackReply(message = "") {
+  const text = String(message || "").toLowerCase();
+
+  if (/demo|trial|free|try|2\s*day|two\s*day/.test(text)) {
+    return "Yes Doctor, you can start the 2-day LMS demo from the Try Demo button. After login/signup, the backend will activate demo access only for the tracks allowed by admin demo settings. Inside the dashboard, please start with Live Classes, Roadmap, and published recordings.";
+  }
+
+  if (/live|session|class|1\s*pm|time|today/.test(text)) {
+    return "Doctor, our live session flow is based around 1 PM EST on active teaching days. If today’s session time has passed, we guide you to the recent recording and the next available live session instead of inviting you to an already-finished class.";
+  }
+
+  if (/roadmap|plan|schedule|study/.test(text)) {
+    return "Doctor, NextGen follows a structured USMLE roadmap with live teaching, UWorld-style MCQ discussion, First Aid integration, assessments, recordings, and mentor guidance, so your preparation does not stay random.";
+  }
+
+  if (/uworld|library|recording|video/.test(text)) {
+    return "Doctor, the UWorld Video Library is one of the main NextGen resources. It includes recorded MCQ explanations with First Aid integration, concept explanation, wrong-option analysis, and exam strategy.";
+  }
+
+  if (/price|cost|fee|payment|package/.test(text)) {
+    return "Doctor, the best package depends on your exam timeline and support level. I can guide you first through the demo/live session, then you can book mentor guidance for the best plan.";
+  }
+
+  return "Hi Doctor, I’m Ayla from NextGen USMLE. I can help you understand the live session, LMS demo, roadmap, recordings, UWorld library, pricing guidance, or mentor consultation. What would you like to know first?";
+}
+
+app.post("/website-chat/ayla", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const message = normalizeCrmString(body.message || body.text || body.question || "");
+
+    if (!message) {
+      return res.status(400).json({ success: false, error: "message is required" });
+    }
+
+    const db = typeof ngEnsureAiStore === "function" ? ngEnsureAiStore(await readCrmDb()) : await readCrmDb();
+    const sessionId = ngWebsiteSessionId(body.session_id || body.sessionId);
+    const page = body.page || body.page_url || body.pathname || "homepage";
+    const campaign = body.campaign || body.source_campaign || "website_chat";
+    const intent = body.intent || "website_question";
+    const visitor = body.visitor || {};
+
+    const sessionList = ensureCrmArray(db, "website_chat_sessions");
+    let session = sessionList.find((item) => String(item.id) === String(sessionId));
+
+    if (!session) {
+      session = withTimestamps({
+        id: sessionId,
+        source: "website_homepage",
+        channel: "website_chat",
+        page,
+        campaign,
+        intent,
+        visitor,
+        messages: [],
+        status: "active",
+      });
+      sessionList.unshift(session);
+    }
+
+    const lead = ngFindOrCreateWebsiteLead(db, { sessionId, visitor, message, page, campaign, intent });
+
+    const inbound = {
+      id: uuid(),
+      role: "user",
+      direction: "inbound",
+      text: message,
+      message,
+      created_at: nowIso(),
+    };
+
+    session.messages = safeArray(session.messages);
+    session.messages.push(inbound);
+    session.updated_at = nowIso();
+    session.last_message = message;
+
+    let reply = "";
+    let model = "website-ayla-fallback";
+    let usage = {};
+    let aiError = null;
+
+    try {
+      const ai = await ngGenerateStudentAutoReply({
+        db,
+        lead: {
+          ...lead,
+          source_platform: "website",
+          channel: "website_chat",
+          source_channel: "website_chat",
+          source: "website_homepage",
+          source_campaign: campaign,
+          intent,
+        },
+        messages: session.messages,
+        channel: "website_chat",
+      });
+      reply = ai.reply;
+      model = ai.model || model;
+      usage = ai.usage || {};
+    } catch (error) {
+      aiError = error.message || "AI fallback used";
+      reply = ngWebsiteAylaFallbackReply(message);
+    }
+
+    const outbound = {
+      id: uuid(),
+      role: "assistant",
+      direction: "outbound",
+      text: reply,
+      message: reply,
+      created_at: nowIso(),
+      model,
+    };
+
+    session.messages.push(outbound);
+    session.last_reply = reply;
+    session.last_reply_at = outbound.created_at;
+    lead.last_ai_reply = reply;
+    lead.last_ai_reply_at = outbound.created_at;
+    lead.updated_at = nowIso();
+
+    ensureCrmArray(db, "website_chat_events").push(withTimestamps({
+      id: uuid(),
+      session_id: sessionId,
+      lead_id: lead.id || lead.lead_id || null,
+      type: "website_chat_reply",
+      source: "website_homepage",
+      campaign,
+      intent,
+      inbound_text: message,
+      outbound_text: reply,
+      model,
+      ai_error: aiError,
+    }));
+
+    await writeCrmDb(db);
+
+    res.json({
+      success: true,
+      session_id: sessionId,
+      lead_id: lead.id || lead.lead_id || null,
+      reply,
+      message: reply,
+      text: reply,
+      model,
+      usage,
+      ai_error: aiError,
+      source: "website_chat",
+      automation_isolated: true,
+      quick_actions: [
+        { key: "start_demo", label: "Start 2-Day LMS Demo", url: "/try-demo" },
+        { key: "live_session", label: "Today’s live session time?" },
+        { key: "roadmap", label: "Explain the roadmap" },
+        { key: "mentor", label: "Book mentor guidance" },
+      ],
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Website Ayla chat failed",
+    });
   }
 });
 
