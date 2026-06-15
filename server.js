@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v58-safe-session-override-cors-fix";
+const NEXTGEN_BACKEND_BUILD = "v61-global-phone-import-safe-sender";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -6822,32 +6822,340 @@ function registerCrmCrudRoutes({ route, collection, brandScoped = true }) {
   });
 }
 
-function detectCountryFromPhone(rawPhone) {
-  const phone = String(rawPhone || "").replace(/[^\d+]/g, "");
-  const digits = phone.replace(/\D/g, "");
 
-  const rules = [
-    { prefix: "966", country: "Saudi Arabia", region: "middle_east", language: "arabic" },
-    { prefix: "971", country: "United Arab Emirates", region: "middle_east", language: "arabic" },
-    { prefix: "974", country: "Qatar", region: "middle_east", language: "arabic" },
-    { prefix: "965", country: "Kuwait", region: "middle_east", language: "arabic" },
-    { prefix: "968", country: "Oman", region: "middle_east", language: "arabic" },
-    { prefix: "973", country: "Bahrain", region: "middle_east", language: "arabic" },
-    { prefix: "20", country: "Egypt", region: "middle_east", language: "arabic" },
-    { prefix: "92", country: "Pakistan", region: "south_asia", language: "urdu" },
-    { prefix: "91", country: "India", region: "south_asia", language: "english" },
-    { prefix: "234", country: "Nigeria", region: "africa", language: "english" },
-    { prefix: "1", country: "United States/Canada", region: "north_america", language: "english" },
-    { prefix: "44", country: "United Kingdom", region: "europe", language: "english" },
-  ];
+const NEXTGEN_IMPORT_PHONE_COUNTRY_RULES = [
+  // Core North America / common Meta lead markets
+  { iso2: "US", code: "1", country: "United States/Canada", region: "north_america", language: "english", aliases: ["us", "usa", "united states", "america", "canada", "ca", "united states/canada", "+1", "1"], national_lengths: [10], international_lengths: [11] },
+  { iso2: "MX", code: "52", country: "Mexico", region: "north_america", language: "spanish", aliases: ["mx", "mexico", "+52", "52"], national_lengths: [10], international_lengths: [12] },
 
-  const match = rules.find((item) => digits.startsWith(item.prefix));
+  // South Asia / medical graduate markets
+  { iso2: "PK", code: "92", country: "Pakistan", region: "south_asia", language: "urdu", aliases: ["pk", "pakistan", "+92", "92"], national_lengths: [10, 11], international_lengths: [12] },
+  { iso2: "IN", code: "91", country: "India", region: "south_asia", language: "english", aliases: ["in", "india", "+91", "91"], national_lengths: [10, 11], international_lengths: [12] },
+  { iso2: "BD", code: "880", country: "Bangladesh", region: "south_asia", language: "english", aliases: ["bd", "bangladesh", "+880", "880"], national_lengths: [10, 11], international_lengths: [13] },
+  { iso2: "NP", code: "977", country: "Nepal", region: "south_asia", language: "english", aliases: ["np", "nepal", "+977", "977"], national_lengths: [10], international_lengths: [13] },
+  { iso2: "LK", code: "94", country: "Sri Lanka", region: "south_asia", language: "english", aliases: ["lk", "sri lanka", "srilanka", "+94", "94"], national_lengths: [9, 10], international_lengths: [11] },
+  { iso2: "AF", code: "93", country: "Afghanistan", region: "south_asia", language: "english", aliases: ["af", "afghanistan", "+93", "93"], national_lengths: [9, 10], international_lengths: [11] },
 
+  // GCC / Middle East
+  { iso2: "SA", code: "966", country: "Saudi Arabia", region: "middle_east", language: "arabic", aliases: ["sa", "ksa", "saudi", "saudi arabia", "+966", "966"], national_lengths: [9, 10], international_lengths: [12] },
+  { iso2: "AE", code: "971", country: "United Arab Emirates", region: "middle_east", language: "arabic", aliases: ["ae", "uae", "united arab emirates", "dubai", "+971", "971"], national_lengths: [9, 10], international_lengths: [12] },
+  { iso2: "QA", code: "974", country: "Qatar", region: "middle_east", language: "arabic", aliases: ["qa", "qatar", "+974", "974"], national_lengths: [8], international_lengths: [11] },
+  { iso2: "KW", code: "965", country: "Kuwait", region: "middle_east", language: "arabic", aliases: ["kw", "kuwait", "+965", "965"], national_lengths: [8], international_lengths: [11] },
+  { iso2: "OM", code: "968", country: "Oman", region: "middle_east", language: "arabic", aliases: ["om", "oman", "+968", "968"], national_lengths: [8], international_lengths: [11] },
+  { iso2: "BH", code: "973", country: "Bahrain", region: "middle_east", language: "arabic", aliases: ["bh", "bahrain", "+973", "973"], national_lengths: [8], international_lengths: [11] },
+  { iso2: "JO", code: "962", country: "Jordan", region: "middle_east", language: "arabic", aliases: ["jo", "jordan", "+962", "962"], national_lengths: [9], international_lengths: [12] },
+  { iso2: "IQ", code: "964", country: "Iraq", region: "middle_east", language: "arabic", aliases: ["iq", "iraq", "+964", "964"], national_lengths: [10], international_lengths: [13] },
+  { iso2: "LB", code: "961", country: "Lebanon", region: "middle_east", language: "arabic", aliases: ["lb", "lebanon", "+961", "961"], national_lengths: [7, 8], international_lengths: [10, 11] },
+  { iso2: "PS", code: "970", country: "Palestine", region: "middle_east", language: "arabic", aliases: ["ps", "palestine", "+970", "970"], national_lengths: [9], international_lengths: [12] },
+  { iso2: "YE", code: "967", country: "Yemen", region: "middle_east", language: "arabic", aliases: ["ye", "yemen", "+967", "967"], national_lengths: [9], international_lengths: [12] },
+  { iso2: "TR", code: "90", country: "Turkey", region: "middle_east", language: "english", aliases: ["tr", "turkey", "turkiye", "+90", "90"], national_lengths: [10], international_lengths: [12] },
+  { iso2: "IR", code: "98", country: "Iran", region: "middle_east", language: "english", aliases: ["ir", "iran", "+98", "98"], national_lengths: [10, 11], international_lengths: [12] },
+
+  // Africa — important for NextGen Meta leads
+  { iso2: "EG", code: "20", country: "Egypt", region: "africa", language: "arabic", aliases: ["eg", "egypt", "+20", "20"], national_lengths: [10, 11], international_lengths: [12] },
+  { iso2: "NG", code: "234", country: "Nigeria", region: "africa", language: "english", aliases: ["ng", "nigeria", "+234", "234"], national_lengths: [10, 11], international_lengths: [13] },
+  { iso2: "SD", code: "249", country: "Sudan", region: "africa", language: "arabic", aliases: ["sd", "sudan", "+249", "249"], national_lengths: [9, 10], international_lengths: [12] },
+  { iso2: "SS", code: "211", country: "South Sudan", region: "africa", language: "english", aliases: ["ss", "south sudan", "+211", "211"], national_lengths: [9], international_lengths: [12] },
+  { iso2: "GH", code: "233", country: "Ghana", region: "africa", language: "english", aliases: ["gh", "ghana", "+233", "233"], national_lengths: [9, 10], international_lengths: [12] },
+  { iso2: "KE", code: "254", country: "Kenya", region: "africa", language: "english", aliases: ["ke", "kenya", "+254", "254"], national_lengths: [9, 10], international_lengths: [12] },
+  { iso2: "UG", code: "256", country: "Uganda", region: "africa", language: "english", aliases: ["ug", "uganda", "+256", "256"], national_lengths: [9], international_lengths: [12] },
+  { iso2: "TZ", code: "255", country: "Tanzania", region: "africa", language: "english", aliases: ["tz", "tanzania", "+255", "255"], national_lengths: [9], international_lengths: [12] },
+  { iso2: "ET", code: "251", country: "Ethiopia", region: "africa", language: "english", aliases: ["et", "ethiopia", "+251", "251"], national_lengths: [9], international_lengths: [12] },
+  { iso2: "SO", code: "252", country: "Somalia", region: "africa", language: "english", aliases: ["so", "somalia", "+252", "252"], national_lengths: [8, 9], international_lengths: [11, 12] },
+  { iso2: "ZA", code: "27", country: "South Africa", region: "africa", language: "english", aliases: ["za", "south africa", "+27", "27"], national_lengths: [9, 10], international_lengths: [11] },
+  { iso2: "ZW", code: "263", country: "Zimbabwe", region: "africa", language: "english", aliases: ["zw", "zimbabwe", "+263", "263"], national_lengths: [9], international_lengths: [12] },
+  { iso2: "ZM", code: "260", country: "Zambia", region: "africa", language: "english", aliases: ["zm", "zambia", "+260", "260"], national_lengths: [9], international_lengths: [12] },
+  { iso2: "RW", code: "250", country: "Rwanda", region: "africa", language: "english", aliases: ["rw", "rwanda", "+250", "250"], national_lengths: [9], international_lengths: [12] },
+  { iso2: "CM", code: "237", country: "Cameroon", region: "africa", language: "english", aliases: ["cm", "cameroon", "+237", "237"], national_lengths: [9], international_lengths: [12] },
+  { iso2: "SL", code: "232", country: "Sierra Leone", region: "africa", language: "english", aliases: ["sl", "sierra leone", "+232", "232"], national_lengths: [8], international_lengths: [11] },
+  { iso2: "LR", code: "231", country: "Liberia", region: "africa", language: "english", aliases: ["lr", "liberia", "+231", "231"], national_lengths: [8], international_lengths: [11] },
+  { iso2: "GM", code: "220", country: "Gambia", region: "africa", language: "english", aliases: ["gm", "gambia", "+220", "220"], national_lengths: [7], international_lengths: [10] },
+  { iso2: "MA", code: "212", country: "Morocco", region: "africa", language: "arabic", aliases: ["ma", "morocco", "+212", "212"], national_lengths: [9], international_lengths: [12] },
+  { iso2: "DZ", code: "213", country: "Algeria", region: "africa", language: "arabic", aliases: ["dz", "algeria", "+213", "213"], national_lengths: [9], international_lengths: [12] },
+  { iso2: "TN", code: "216", country: "Tunisia", region: "africa", language: "arabic", aliases: ["tn", "tunisia", "+216", "216"], national_lengths: [8], international_lengths: [11] },
+  { iso2: "LY", code: "218", country: "Libya", region: "africa", language: "arabic", aliases: ["ly", "libya", "+218", "218"], national_lengths: [9], international_lengths: [12] },
+
+  // Europe / UK
+  { iso2: "GB", code: "44", country: "United Kingdom", region: "europe", language: "english", aliases: ["gb", "uk", "united kingdom", "england", "britain", "+44", "44"], national_lengths: [10, 11], international_lengths: [12] },
+  { iso2: "IE", code: "353", country: "Ireland", region: "europe", language: "english", aliases: ["ie", "ireland", "+353", "353"], national_lengths: [9], international_lengths: [12] },
+  { iso2: "DE", code: "49", country: "Germany", region: "europe", language: "english", aliases: ["de", "germany", "+49", "49"], national_lengths: [10, 11], international_lengths: [12, 13] },
+  { iso2: "FR", code: "33", country: "France", region: "europe", language: "english", aliases: ["fr", "france", "+33", "33"], national_lengths: [9, 10], international_lengths: [11] },
+  { iso2: "IT", code: "39", country: "Italy", region: "europe", language: "english", aliases: ["it", "italy", "+39", "39"], national_lengths: [9, 10], international_lengths: [11, 12] },
+  { iso2: "ES", code: "34", country: "Spain", region: "europe", language: "english", aliases: ["es", "spain", "+34", "34"], national_lengths: [9], international_lengths: [11] },
+  { iso2: "NL", code: "31", country: "Netherlands", region: "europe", language: "english", aliases: ["nl", "netherlands", "holland", "+31", "31"], national_lengths: [9], international_lengths: [11] },
+  { iso2: "SE", code: "46", country: "Sweden", region: "europe", language: "english", aliases: ["se", "sweden", "+46", "46"], national_lengths: [9, 10], international_lengths: [11, 12] },
+  { iso2: "NO", code: "47", country: "Norway", region: "europe", language: "english", aliases: ["no", "norway", "+47", "47"], national_lengths: [8], international_lengths: [10] },
+  { iso2: "DK", code: "45", country: "Denmark", region: "europe", language: "english", aliases: ["dk", "denmark", "+45", "45"], national_lengths: [8], international_lengths: [10] },
+
+  // Asia-Pacific
+  { iso2: "AU", code: "61", country: "Australia", region: "oceania", language: "english", aliases: ["au", "australia", "+61", "61"], national_lengths: [9, 10], international_lengths: [11] },
+  { iso2: "NZ", code: "64", country: "New Zealand", region: "oceania", language: "english", aliases: ["nz", "new zealand", "+64", "64"], national_lengths: [8, 9, 10], international_lengths: [10, 11, 12] },
+  { iso2: "PH", code: "63", country: "Philippines", region: "asia", language: "english", aliases: ["ph", "philippines", "+63", "63"], national_lengths: [10], international_lengths: [12] },
+  { iso2: "ID", code: "62", country: "Indonesia", region: "asia", language: "english", aliases: ["id", "indonesia", "+62", "62"], national_lengths: [9, 10, 11, 12], international_lengths: [11, 12, 13, 14] },
+  { iso2: "MY", code: "60", country: "Malaysia", region: "asia", language: "english", aliases: ["my", "malaysia", "+60", "60"], national_lengths: [9, 10], international_lengths: [11, 12] },
+  { iso2: "SG", code: "65", country: "Singapore", region: "asia", language: "english", aliases: ["sg", "singapore", "+65", "65"], national_lengths: [8], international_lengths: [10] },
+  { iso2: "CN", code: "86", country: "China", region: "asia", language: "english", aliases: ["cn", "china", "+86", "86"], national_lengths: [11], international_lengths: [13] },
+  { iso2: "HK", code: "852", country: "Hong Kong", region: "asia", language: "english", aliases: ["hk", "hong kong", "+852", "852"], national_lengths: [8], international_lengths: [11] },
+  { iso2: "JP", code: "81", country: "Japan", region: "asia", language: "english", aliases: ["jp", "japan", "+81", "81"], national_lengths: [10, 11], international_lengths: [12, 13] },
+  { iso2: "KR", code: "82", country: "South Korea", region: "asia", language: "english", aliases: ["kr", "korea", "south korea", "+82", "82"], national_lengths: [9, 10, 11], international_lengths: [11, 12, 13] },
+
+  // Americas / Caribbean common fallback
+  { iso2: "BR", code: "55", country: "Brazil", region: "south_america", language: "english", aliases: ["br", "brazil", "+55", "55"], national_lengths: [10, 11], international_lengths: [12, 13] },
+  { iso2: "CO", code: "57", country: "Colombia", region: "south_america", language: "spanish", aliases: ["co", "colombia", "+57", "57"], national_lengths: [10], international_lengths: [12] },
+  { iso2: "AR", code: "54", country: "Argentina", region: "south_america", language: "spanish", aliases: ["ar", "argentina", "+54", "54"], national_lengths: [10, 11], international_lengths: [12, 13] },
+];
+
+function normalizeImportCountryHint(value = "") {
+  const clean = String(value || "").trim().toLowerCase().replace(/[^a-z0-9+]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!clean) return null;
+  const digits = clean.replace(/\D/g, "");
+  return NEXTGEN_IMPORT_PHONE_COUNTRY_RULES.find((rule) => {
+    const aliases = [rule.iso2, rule.code, `+${rule.code}`, rule.country, ...(rule.aliases || [])].map((x) => String(x || "").trim().toLowerCase());
+    return aliases.includes(clean) || (digits && digits === rule.code);
+  }) || null;
+}
+
+function getImportDefaultCountryRule({ row = {}, defaults = {} } = {}) {
+  return normalizeImportCountryHint(
+    row.default_country_code || row.country_code || row.phone_country_code || row.country || row.default_country ||
+    defaults.default_country_code || defaults.country_code || defaults.phone_country_code || defaults.selected_country_code || defaults.country || defaults.default_country || ""
+  );
+}
+
+function truthyImportChoice(value) {
+  if (value === true) return true;
+  if (value === false || value === null || value === undefined) return false;
+  const clean = String(value || "").trim().toLowerCase();
+  return ["1", "true", "yes", "y", "on", "enabled", "auto", "apply", "add", "plus_one", "+1"].includes(clean);
+}
+
+function shouldApplyDefaultCountryCode({ row = {}, defaults = {} } = {}) {
+  return truthyImportChoice(
+    row.add_missing_country_code ??
+    row.apply_default_country_code ??
+    row.auto_apply_default_country_code ??
+    row.attach_default_country_code ??
+    row.add_plus_one_to_missing ??
+    row.attach_plus_one ??
+    defaults.add_missing_country_code ??
+    defaults.apply_default_country_code ??
+    defaults.auto_apply_default_country_code ??
+    defaults.attach_default_country_code ??
+    defaults.add_plus_one_to_missing ??
+    defaults.attach_plus_one ??
+    defaults.add_country_code_to_missing
+  );
+}
+
+function stripPhoneExtension(raw = "") {
+  return String(raw || "")
+    .replace(/(ext\.?|extension|x)\s*\d+\s*$/i, "")
+    .replace(/[#;].*$/, "")
+    .trim();
+}
+
+function extractPhoneDigitsForImport(rawValue = "") {
+  let raw = stripPhoneExtension(rawValue);
+  raw = raw.replace(/(?:https?:\/\/)?(?:wa\.me|api\.whatsapp\.com\/send\?phone=)/i, " ");
+  const hasLeadingPlus = /^\s*\+/.test(raw);
+  const digits = raw.replace(/\D/g, "");
+  return { raw, digits, hasLeadingPlus };
+}
+
+function findImportCountryByInternationalDigits(digits = "") {
+  const clean = String(digits || "").replace(/\D/g, "");
+  return [...NEXTGEN_IMPORT_PHONE_COUNTRY_RULES]
+    .sort((a, b) => String(b.code).length - String(a.code).length)
+    .find((rule) => clean.startsWith(rule.code)) || null;
+}
+
+function isPlausibleInternationalPhoneDigits(digits = "", rule = null) {
+  const clean = String(digits || "").replace(/\D/g, "");
+  if (!clean) return false;
+  if (clean.length < 8 || clean.length > 15) return false;
+  if (!rule) return true;
+  const national = clean.slice(String(rule.code).length);
+  if ((rule.international_lengths || []).includes(clean.length)) return true;
+  if ((rule.national_lengths || []).includes(national.length)) return true;
+  // Keep global tolerance because WhatsApp accepts many country formats and some countries have variable lengths.
+  return national.length >= 7 && national.length <= 12;
+}
+
+function isLikelyNanpLocalTenDigits(digits = "") {
+  const clean = String(digits || "").replace(/\D/g, "");
+  if (clean.length !== 10) return false;
+  // NANP area code and exchange cannot start with 0/1. If this fails, mark possible issue instead of silently sending.
+  return /^[2-9]\d{2}[2-9]\d{6}$/.test(clean);
+}
+
+function normalizePhoneForImport(row = {}, defaults = {}) {
+  const rawValue = row.whatsapp || row.whatsapp_phone || row.phone || row.mobile || row.contact_number || row.wa_id || "";
+  const defaultRule = getImportDefaultCountryRule({ row, defaults });
+  const applyDefault = shouldApplyDefaultCountryCode({ row, defaults });
+  const selectedCountryLabel = normalizeCrmString(row.country || defaults.country || row.default_country || defaults.default_country || "");
+  const { raw, digits: originalDigits, hasLeadingPlus } = extractPhoneDigitsForImport(rawValue);
+
+  const result = {
+    raw,
+    raw_input: rawValue,
+    digits: originalDigits,
+    e164: "",
+    whatsapp: "",
+    phone: "",
+    country: "",
+    country_code: "",
+    iso2: "",
+    region: "global",
+    language: "english",
+    status: "missing_phone",
+    category: "missing_phone",
+    valid: false,
+    can_message: false,
+    has_explicit_country_code: false,
+    applied_default_country_code: false,
+    needs_country_code: false,
+    possible_wrong_country_code: false,
+    warnings: [],
+    errors: [],
+  };
+
+  if (!originalDigits) {
+    result.errors.push("Missing phone number");
+    return result;
+  }
+
+  let digits = originalDigits;
+  let explicitInternational = hasLeadingPlus;
+
+  // International dialing prefixes commonly pasted from CRMs or sheets.
+  if (!explicitInternational && digits.startsWith("00") && digits.length > 8) {
+    digits = digits.slice(2);
+    explicitInternational = true;
+    result.has_explicit_country_code = true;
+  } else if (!explicitInternational && digits.startsWith("011") && digits.length > 9) {
+    digits = digits.slice(3);
+    explicitInternational = true;
+    result.has_explicit_country_code = true;
+  }
+
+  let detectedRule = findImportCountryByInternationalDigits(digits);
+
+  // Keep explicit country code if it is present, even if the selected/default country says something else.
+  if (explicitInternational || (detectedRule && isPlausibleInternationalPhoneDigits(digits, detectedRule) && digits.length !== 10)) {
+    result.has_explicit_country_code = true;
+    if (!detectedRule) detectedRule = findImportCountryByInternationalDigits(digits);
+    if (!isPlausibleInternationalPhoneDigits(digits, detectedRule)) {
+      result.status = "invalid_phone";
+      result.category = "invalid_phone";
+      result.errors.push("Phone has country code but length is not valid for WhatsApp/E.164");
+      return result;
+    }
+  } else if (defaultRule && applyDefault) {
+    // Admin intentionally chose to attach the selected country code to missing-code numbers.
+    let national = digits;
+    if (defaultRule.code === "1") {
+      if (digits.length === 11 && digits.startsWith("1")) national = digits.slice(1);
+      if (digits.length !== 10 && !(digits.length === 11 && digits.startsWith("1"))) {
+        result.status = "invalid_phone";
+        result.category = "invalid_phone";
+        result.errors.push("US/Canada numbers must be 10 digits, or 11 digits starting with 1");
+        return result;
+      }
+      if (!isLikelyNanpLocalTenDigits(national)) {
+        result.warnings.push("US/Canada number format looks unusual; check area code/exchange before sending");
+        result.possible_wrong_country_code = true;
+      }
+      digits = `1${national}`;
+    } else if (defaultRule.code === "92") {
+      if (digits.startsWith("92") && digits.length >= 11) {
+        // Already has Pakistan country code without plus. Keep it.
+      } else if (digits.startsWith("0") && digits.length >= 10) {
+        digits = `92${digits.slice(1)}`;
+      } else if (digits.startsWith("3") && digits.length === 10) {
+        digits = `92${digits}`;
+      } else {
+        digits = `${defaultRule.code}${digits.replace(/^0+/, "")}`;
+      }
+    } else {
+      const national = digits.startsWith("0") && digits.length > 8 ? digits.replace(/^0+/, "") : digits;
+      digits = `${defaultRule.code}${national}`;
+    }
+    detectedRule = defaultRule;
+    result.applied_default_country_code = true;
+  } else if (defaultRule && !applyDefault && digits.length <= 11 && !detectedRule) {
+    result.status = "needs_country_code";
+    result.category = "needs_country_code";
+    result.needs_country_code = true;
+    result.errors.push(`Missing country code. Select ${defaultRule.country} and enable Add country code, or upload with +${defaultRule.code}.`);
+    return result;
+  } else if (!detectedRule) {
+    if (digits.length === 10) {
+      result.status = "needs_country_code";
+      result.category = "needs_country_code";
+      result.needs_country_code = true;
+      result.errors.push("Missing country code. Choose Add +1 / selected country code, or upload in international format.");
+      return result;
+    }
+    result.status = digits.length < 8 || digits.length > 15 ? "invalid_phone" : "possible_wrong_country_code";
+    result.category = result.status;
+    result.possible_wrong_country_code = result.status === "possible_wrong_country_code";
+    result.errors.push(result.status === "invalid_phone" ? "Phone length is invalid" : "Could not confidently detect country code");
+    return result;
+  }
+
+  detectedRule = findImportCountryByInternationalDigits(digits) || detectedRule || defaultRule;
+
+  if (!isPlausibleInternationalPhoneDigits(digits, detectedRule)) {
+    result.status = "invalid_phone";
+    result.category = "invalid_phone";
+    result.errors.push("Phone length is invalid for WhatsApp/E.164");
+    return result;
+  }
+
+  if (detectedRule?.code === "1" && digits.length !== 11) {
+    result.status = "invalid_phone";
+    result.category = "invalid_phone";
+    result.errors.push("US/Canada WhatsApp number must be +1 followed by 10 digits");
+    return result;
+  }
+
+  if (detectedRule?.code === "1" && !isLikelyNanpLocalTenDigits(digits.slice(1))) {
+    result.warnings.push("US/Canada number may have an invalid area code/exchange; keep in failed/suspect view if provider rejects it");
+    result.possible_wrong_country_code = true;
+  }
+
+  if (defaultRule && detectedRule && defaultRule.code !== detectedRule.code && selectedCountryLabel) {
+    result.warnings.push(`Selected country (${selectedCountryLabel}) differs from detected phone country (${detectedRule.country}); kept the phone's explicit country code.`);
+    result.possible_wrong_country_code = true;
+  }
+
+  result.e164 = `+${digits}`;
+  result.whatsapp = result.e164;
+  result.phone = result.e164;
+  result.digits = digits;
+  result.country = detectedRule?.country || "";
+  result.country_code = detectedRule ? `+${detectedRule.code}` : "";
+  result.iso2 = detectedRule?.iso2 || "";
+  result.region = detectedRule?.region || "global";
+  result.language = detectedRule?.language || "english";
+  result.status = result.possible_wrong_country_code ? "possible_wrong_country_code" : "ready";
+  result.category = result.status;
+  result.valid = true;
+  result.can_message = true;
+  return result;
+}
+
+function detectCountryFromPhone(rawPhone, options = {}) {
+  const normalized = normalizePhoneForImport({ phone: rawPhone, whatsapp: rawPhone }, options?.defaults || {});
+  const phone = normalized.e164 || String(rawPhone || "").replace(/[^\d+]/g, "");
   return {
     phone,
-    country: match?.country || "",
-    region: match?.region || "global",
-    language: match?.language || "english",
+    country: normalized.country || "",
+    country_code: normalized.country_code || "",
+    region: normalized.region || "global",
+    language: normalized.language || "english",
+    status: normalized.status,
+    valid: normalized.valid,
   };
 }
 
@@ -6860,25 +7168,36 @@ function parseManualContacts(input) {
     .map((line) => line.trim())
     .filter(Boolean)
     .map((value) => {
-      if (value.includes("@")) return { email: value };
+      if (value.includes("@") && !/\d{7,}/.test(value)) return { email: value };
       return { whatsapp: value, phone: value };
     });
 }
 
-function validateCrmContact(row = {}) {
+function validateCrmContact(row = {}, defaults = {}) {
   const email = normalizeEmail(row.email || "");
-  const whatsapp = normalizeCrmString(row.whatsapp || row.phone || "");
   const emailValid = !email || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-  const phoneDigits = whatsapp.replace(/\D/g, "");
-  const phoneValid = !whatsapp || phoneDigits.length >= 8;
+  const phoneInfo = normalizePhoneForImport(row, defaults);
+  const hasPhoneRaw = Boolean(phoneInfo.raw || phoneInfo.raw_input || phoneInfo.digits);
+  const phoneValid = !hasPhoneRaw || phoneInfo.valid;
+  const valid = Boolean((email && emailValid) || phoneInfo.valid);
 
   return {
     email,
-    whatsapp,
-    phone: normalizeCrmString(row.phone || whatsapp),
-    valid: Boolean((email && emailValid) || (whatsapp && phoneValid)),
+    whatsapp: phoneInfo.whatsapp,
+    phone: phoneInfo.phone,
+    phone_e164: phoneInfo.e164,
+    phone_digits: phoneInfo.digits,
+    phone_info: phoneInfo,
+    valid,
     email_valid: emailValid,
     phone_valid: phoneValid,
+    can_message: Boolean(phoneInfo.valid && phoneInfo.can_message),
+    errors: [
+      emailValid ? null : "Invalid email",
+      ...safeArray(phoneInfo.errors),
+      valid ? null : "No valid email or phone",
+    ].filter(Boolean),
+    warnings: safeArray(phoneInfo.warnings),
   };
 }
 
@@ -6897,73 +7216,136 @@ function findCouponForLead(db, { brandId, country, region, language, examType, l
   return rules[0] || null;
 }
 
+
 function buildImportPreviewRows({ db, brandId, rows = [], defaults = {} }) {
   const leads = ensureCrmArray(db, "leads");
 
   return rows.map((rawRow, index) => {
-    const row = typeof rawRow === "string" ? (rawRow.includes("@") ? { email: rawRow } : { whatsapp: rawRow, phone: rawRow }) : rawRow || {};
-    const validation = validateCrmContact(row);
-    const detected = detectCountryFromPhone(validation.whatsapp || validation.phone);
+    const row = typeof rawRow === "string" ? (rawRow.includes("@") && !/\d{7,}/.test(rawRow) ? { email: rawRow } : { whatsapp: rawRow, phone: rawRow }) : rawRow || {};
+    const mergedDefaults = { ...(defaults || {}), ...(row.defaults || {}) };
+    const validation = validateCrmContact(row, mergedDefaults);
+    const phoneInfo = validation.phone_info || normalizePhoneForImport(row, mergedDefaults);
     const email = validation.email;
-    const whatsapp = validation.whatsapp || detected.phone;
+    const whatsapp = validation.whatsapp || phoneInfo.whatsapp || "";
+    const phoneDigits = phoneInfo.digits || whatsapp.replace(/\D/g, "");
     const duplicate = leads.some((lead) => {
+      const leadPhoneDigits = String(lead.whatsapp || lead.phone || lead.mobile || lead.wa_id || "").replace(/\D/g, "");
       return (
         (email && normalizeEmail(lead.email) === email) ||
-        (whatsapp && String(lead.whatsapp || lead.phone || "").replace(/\D/g, "") === whatsapp.replace(/\D/g, ""))
+        (phoneDigits && leadPhoneDigits && leadPhoneDigits === phoneDigits)
       );
     });
 
-    const country = row.country || detected.country || defaults.country || "";
-    const region = row.region || detected.region || defaults.region || "global";
-    const language = row.language || detected.language || defaults.language || "english";
+    const country = row.country || phoneInfo.country || mergedDefaults.country || "";
+    const region = row.region || phoneInfo.region || mergedDefaults.region || "global";
+    const language = row.language || phoneInfo.language || mergedDefaults.language || "english";
     const couponRule = findCouponForLead(db, {
       brandId,
       country,
       region,
       language,
-      examType: row.exam_type || defaults.exam_type || "",
+      examType: row.exam_type || mergedDefaults.exam_type || "",
       leadStatus: row.status || "imported",
     });
 
+    let importStatus = "ready";
+    if (duplicate) importStatus = "duplicate";
+    else if (!validation.valid) importStatus = phoneInfo.category || "invalid_contact";
+    else if (phoneInfo.needs_country_code) importStatus = "needs_country_code";
+    else if (phoneInfo.possible_wrong_country_code) importStatus = "possible_wrong_country_code";
+    else if (!validation.can_message && email) importStatus = "email_only_no_whatsapp";
+
+    const canMessage = Boolean(validation.can_message && !duplicate && !phoneInfo.needs_country_code && phoneInfo.valid);
+    const importAction = duplicate
+      ? "skip_duplicate"
+      : validation.valid
+        ? "create"
+        : phoneInfo.needs_country_code
+          ? "fix_country_code"
+          : "skip_invalid";
+
     return {
       row_number: index + 1,
-      name: normalizeCrmString(row.name || row.full_name || ""),
+      name: normalizeCrmString(row.name || row.full_name || row.first_name || row.student_name || ""),
       email,
       whatsapp,
       phone: validation.phone || whatsapp,
+      phone_e164: phoneInfo.e164 || "",
+      phone_digits: phoneInfo.digits || "",
+      phone_country_code: phoneInfo.country_code || "",
+      phone_import_status: phoneInfo.status || importStatus,
+      phone_import_category: phoneInfo.category || importStatus,
       country,
       region,
       language,
-      platform: normalizeCrmLeadSource(row.source_platform || row.platform || defaults.source_platform || defaults.platform || defaults.channel || defaults.source_type || "manual", { ...defaults, ...row }),
-      source_platform: normalizeCrmLeadSource(row.source_platform || row.platform || defaults.source_platform || defaults.platform || defaults.channel || defaults.source_type || "manual", { ...defaults, ...row }),
-      channel: normalizeCrmLeadSource(row.channel || row.source_platform || row.platform || defaults.channel || defaults.source_platform || defaults.platform || "manual", { ...defaults, ...row }),
-      origin: normalizeCrmLeadOrigin(row.origin || defaults.origin || defaults.source_type || defaults.lead_source || "", { ...defaults, ...row }),
-      lead_source: row.lead_source || defaults.lead_source || defaults.source_type || "manual_import",
-      campaign_id: row.campaign_id || defaults.campaign_id || defaults.campaignId || "",
-      campaign_name: row.campaign_name || defaults.campaign_name || defaults.source_campaign || "",
-      campaign_key: row.campaign_key || defaults.campaign_key || "",
-      ai_mode: normalizeCrmLeadAiMode(row.ai_mode || defaults.ai_mode || defaults.default_ai_mode || defaults.automation_mode || "draft"),
-      stage: normalizeCrmLeadStageValue(row.stage || row.lead_stage || defaults.stage || defaults.lead_stage || "new_lead", "new_lead"),
-      lead_stage: normalizeCrmLeadStageValue(row.stage || row.lead_stage || defaults.stage || defaults.lead_stage || "new_lead", "new_lead"),
-      status: normalizeCrmLower(row.status || defaults.status || "new", "new") || "new",
-      lead_status: normalizeCrmLower(row.lead_status || row.status || defaults.lead_status || defaults.status || "new", "new") || "new",
-      source_community: row.source_community || defaults.source_community || "",
-      exam_type: row.exam_type || defaults.exam_type || defaults.exam_track || "",
-      exam_track: row.exam_track || defaults.exam_track || row.exam_type || defaults.exam_type || "",
-      exam_timeline: row.exam_timeline || defaults.exam_timeline || "",
+      platform: normalizeCrmLeadSource(row.source_platform || row.platform || mergedDefaults.source_platform || mergedDefaults.platform || mergedDefaults.channel || mergedDefaults.source_type || "manual", { ...mergedDefaults, ...row }),
+      source_platform: normalizeCrmLeadSource(row.source_platform || row.platform || mergedDefaults.source_platform || mergedDefaults.platform || mergedDefaults.channel || mergedDefaults.source_type || "manual", { ...mergedDefaults, ...row }),
+      channel: normalizeCrmLeadSource(row.channel || row.source_platform || row.platform || mergedDefaults.channel || mergedDefaults.source_platform || mergedDefaults.platform || "manual", { ...mergedDefaults, ...row }),
+      origin: normalizeCrmLeadOrigin(row.origin || mergedDefaults.origin || mergedDefaults.source_type || mergedDefaults.lead_source || "", { ...mergedDefaults, ...row }),
+      lead_source: row.lead_source || mergedDefaults.lead_source || mergedDefaults.source_type || "manual_import",
+      source_type: row.source_type || mergedDefaults.source_type || row.lead_source || mergedDefaults.lead_source || "manual_import",
+      campaign_id: row.campaign_id || mergedDefaults.campaign_id || mergedDefaults.campaignId || "",
+      campaign_name: row.campaign_name || mergedDefaults.campaign_name || mergedDefaults.source_campaign || "",
+      campaign_key: row.campaign_key || mergedDefaults.campaign_key || "",
+      ai_mode: normalizeCrmLeadAiMode(row.ai_mode || mergedDefaults.ai_mode || mergedDefaults.default_ai_mode || mergedDefaults.automation_mode || "draft"),
+      stage: normalizeCrmLeadStageValue(row.stage || row.lead_stage || mergedDefaults.stage || mergedDefaults.lead_stage || "new_lead", "new_lead"),
+      lead_stage: normalizeCrmLeadStageValue(row.stage || row.lead_stage || mergedDefaults.stage || mergedDefaults.lead_stage || "new_lead", "new_lead"),
+      status: normalizeCrmLower(row.status || mergedDefaults.status || "new", "new") || "new",
+      lead_status: normalizeCrmLower(row.lead_status || row.status || mergedDefaults.lead_status || mergedDefaults.status || "new", "new") || "new",
+      source_community: row.source_community || mergedDefaults.source_community || "",
+      exam_type: row.exam_type || mergedDefaults.exam_type || mergedDefaults.exam_track || "",
+      exam_track: row.exam_track || mergedDefaults.exam_track || row.exam_type || mergedDefaults.exam_type || "",
+      exam_timeline: row.exam_timeline || mergedDefaults.exam_timeline || "",
+      graduation_year: row.graduation_year || mergedDefaults.graduation_year || "",
       notes: row.notes || row.pain_points || "",
-      opt_in_status: row.opt_in_status || defaults.opt_in_status || (isCrmMetaLeadPayload({ ...defaults, ...row }) ? "meta_form_opt_in" : "unknown"),
+      opt_in_status: row.opt_in_status || mergedDefaults.opt_in_status || (isCrmMetaLeadPayload({ ...mergedDefaults, ...row }) ? "meta_form_opt_in" : "unknown"),
       coupon_rule: couponRule ? { id: couponRule.id, coupon_code: couponRule.coupon_code, discount_percent: couponRule.discount_percent } : null,
       valid: validation.valid,
+      can_message: canMessage,
       duplicate,
-      action: duplicate ? "skip_duplicate" : validation.valid ? "create" : "skip_invalid",
-      errors: [
-        validation.email_valid ? null : "Invalid email",
-        validation.phone_valid ? null : "Invalid phone",
-        validation.valid ? null : "No valid email or phone",
-      ].filter(Boolean),
+      import_status: importStatus,
+      action: importAction,
+      whatsapp_status: canMessage ? "not_checked" : phoneInfo.needs_country_code ? "needs_country_code" : phoneInfo.valid ? "not_checked" : "not_sendable",
+      errors: validation.errors || [],
+      warnings: validation.warnings || [],
+      record: {
+        ...(row.record || {}),
+        ...row,
+        whatsapp,
+        phone: validation.phone || whatsapp,
+        phone_e164: phoneInfo.e164 || "",
+        phone_digits: phoneInfo.digits || "",
+        country,
+        region,
+        language,
+      },
     };
   });
+}
+
+function summarizeImportPreviewRows(rows = []) {
+  const count = (fn) => rows.filter(fn).length;
+  const byStatus = rows.reduce((acc, row) => {
+    const key = row.import_status || row.phone_import_status || "unknown";
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+
+  return {
+    total_rows: rows.length,
+    valid_rows: count((row) => row.valid && !row.duplicate),
+    ready_rows: count((row) => row.import_status === "ready" && !row.duplicate),
+    ready_to_message_rows: count((row) => row.can_message && !row.duplicate),
+    duplicate_rows: count((row) => row.duplicate),
+    invalid_rows: count((row) => !row.valid),
+    needs_country_code_rows: count((row) => row.import_status === "needs_country_code" || row.phone_import_status === "needs_country_code"),
+    possible_wrong_country_code_rows: count((row) => row.import_status === "possible_wrong_country_code" || row.phone_import_status === "possible_wrong_country_code"),
+    email_only_no_whatsapp_rows: count((row) => row.import_status === "email_only_no_whatsapp"),
+    invalid_phone_rows: count((row) => row.phone_import_status === "invalid_phone"),
+    not_messageable_rows: count((row) => !row.can_message),
+    by_status: byStatus,
+    requires_country_code_choice: count((row) => row.import_status === "needs_country_code" || row.phone_import_status === "needs_country_code") > 0,
+  };
 }
 
 function estimateTokensFromText(text) {
@@ -8280,11 +8662,18 @@ app.post("/admin/crm/import/preview", async (req, res) => {
     res.json({
       success: true,
       rows,
-      summary: {
-        total_rows: rows.length,
-        valid_rows: rows.filter((row) => row.valid && !row.duplicate).length,
-        duplicate_rows: rows.filter((row) => row.duplicate).length,
-        invalid_rows: rows.filter((row) => !row.valid).length,
+      summary: summarizeImportPreviewRows(rows),
+      phone_import_safety: {
+        explicit_country_code_is_preserved: true,
+        missing_country_code_requires_admin_choice: true,
+        supports_add_plus_one_to_missing: true,
+        add_country_code_flags: [
+          "add_missing_country_code",
+          "apply_default_country_code",
+          "auto_apply_default_country_code",
+          "add_plus_one_to_missing",
+          "attach_plus_one"
+        ],
       },
     });
   } catch (error) {
@@ -8298,16 +8687,35 @@ app.post("/admin/crm/import/confirm", async (req, res) => {
     const { user } = ctx;
     const db = ctx.crmDb;
     const brandId = getCrmBrandId(req, db);
-    const rows = Array.isArray(req.body.rows) ? req.body.rows : Array.isArray(req.body.leads) ? req.body.leads.map((record) => ({ valid: true, duplicate: false, record, ...record })) : [];
+    const inputRows = Array.isArray(req.body.rows)
+      ? req.body.rows
+      : Array.isArray(req.body.leads)
+        ? req.body.leads.map((record) => ({ record, ...record }))
+        : [];
+    const rows = buildImportPreviewRows({ db, brandId, rows: inputRows, defaults: req.body.defaults || req.body || {} });
     const batchId = uuid();
     const now = nowIso();
+    const queueFirstMessage = req.body.queue_first_message === true || req.body.send_first_message_after_import === true || req.body.first_message_after_import === true || req.body.defaults?.queue_first_message === true || req.body.defaults?.send_first_message_after_import === true;
 
     let created = 0;
     let skipped = 0;
+    const createdLeadIds = [];
+    const failedRows = [];
 
     for (const row of rows) {
-      if (!row.valid || row.duplicate || row.action === "skip_duplicate" || row.action === "skip_invalid") {
+      if (!row.valid || row.duplicate || row.action === "skip_duplicate" || row.action === "skip_invalid" || row.action === "fix_country_code") {
         skipped += 1;
+        failedRows.push({
+          row_number: row.row_number,
+          name: row.name || "",
+          email: row.email || "",
+          phone: row.phone || row.whatsapp || row.record?.phone || "",
+          whatsapp: row.whatsapp || "",
+          import_status: row.import_status || row.phone_import_status || "skipped",
+          action: row.action || "skip",
+          errors: row.errors || [],
+          warnings: row.warnings || [],
+        });
         continue;
       }
 
@@ -8318,6 +8726,22 @@ app.post("/admin/crm/import/confirm", async (req, res) => {
           ...row,
           id: uuid(),
           brand_id: brandId,
+          phone: row.phone || row.phone_e164 || row.whatsapp || row.record?.phone || "",
+          whatsapp: row.whatsapp || row.phone_e164 || row.record?.whatsapp || row.record?.phone || "",
+          whatsapp_phone: row.whatsapp || row.phone_e164 || row.record?.whatsapp || row.record?.phone || "",
+          phone_e164: row.phone_e164 || row.whatsapp || "",
+          phone_digits: row.phone_digits || "",
+          country: row.country || "",
+          region: row.region || "global",
+          language: row.language || "english",
+          phone_import_status: row.phone_import_status || row.import_status || "ready",
+          phone_import_category: row.phone_import_category || row.import_status || "ready",
+          phone_import_warnings: row.warnings || [],
+          whatsapp_status: row.can_message ? "not_checked" : "not_sendable",
+          whatsapp_validation_status: row.can_message ? "pending_provider_check" : "not_sendable",
+          first_message_queue_status: queueFirstMessage && row.can_message ? "queued" : "not_queued",
+          first_message_queued_at: queueFirstMessage && row.can_message ? now : null,
+          first_message_queue_source: queueFirstMessage && row.can_message ? "import_confirm" : "",
           status: row.status || req.body.status || req.body.defaults?.status || "new",
           lead_status: row.lead_status || row.status || req.body.lead_status || req.body.defaults?.lead_status || "new",
           stage: row.stage || row.lead_stage || req.body.stage || req.body.defaults?.stage || "new_lead",
@@ -8352,20 +8776,31 @@ app.post("/admin/crm/import/confirm", async (req, res) => {
       if (!ctx.crm_admin) lead = attachTeamOwnership(lead, ctx.team_member, ctx.user);
       lead = ensureLeadIdentityFields(lead);
       db.leads.push(lead);
+      createdLeadIds.push(lead.id);
       created += 1;
     }
 
+    const summary = summarizeImportPreviewRows(rows);
     const batch = {
       id: batchId,
       brand_id: brandId,
-      source_type: req.body.source_type || "manual_import",
+      source_type: req.body.source_type || req.body.defaults?.source_type || "manual_import",
       file_name: req.body.file_name || "",
       total_rows: rows.length,
       valid_rows: created,
+      created_rows: created,
+      skipped_rows: skipped,
       duplicate_rows: rows.filter((row) => row.duplicate).length,
       invalid_rows: rows.filter((row) => !row.valid).length,
+      needs_country_code_rows: summary.needs_country_code_rows,
+      possible_wrong_country_code_rows: summary.possible_wrong_country_code_rows,
+      ready_to_message_rows: summary.ready_to_message_rows,
+      queued_first_message_rows: queueFirstMessage ? rows.filter((row) => row.can_message && !row.duplicate && row.valid).length : 0,
+      failed_rows: failedRows,
+      failed_rows_count: failedRows.length,
+      phone_import_summary: summary,
       imported_by: user.id,
-      status: "completed",
+      status: failedRows.length ? "completed_with_skips" : "completed",
       created_at: now,
       updated_at: now,
     };
@@ -8373,7 +8808,94 @@ app.post("/admin/crm/import/confirm", async (req, res) => {
     db.import_batches.push(batch);
     await writeCrmDb(db);
 
-    res.json({ success: true, batch, created, skipped });
+    res.json({ success: true, batch, created, skipped, created_lead_ids: createdLeadIds, failed_rows: failedRows, summary });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/import/batches/:batchId", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const batch = ensureCrmArray(db, "import_batches").find((item) => String(item.id) === String(req.params.batchId));
+    if (!batch) return res.status(404).json({ success: false, error: "Import batch not found" });
+    const leads = ensureCrmArray(db, "leads").filter((lead) => String(lead.import_batch_id || "") === String(batch.id));
+    res.json({
+      success: true,
+      batch,
+      leads,
+      failed_rows: batch.failed_rows || [],
+      problem_rows: batch.failed_rows || [],
+      summary: batch.phone_import_summary || null,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/bulk-first-message/status", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const settings = ngGetBulkFirstMessageSettings(db);
+    const state = ngGetBulkFirstMessageState(db);
+    const today = todayKey();
+    state.sent_today = Math.max(Number(state.sent_today || 0), ngFirstMessageSentTodayCount(db, today));
+    const eligible = ensureCrmArray(db, "leads").filter((lead) => (!brandId || String(lead.brand_id || "") === String(brandId || "")) && ngCanSendAutoFirstMessage(db, lead).ok);
+    const blocked = ensureCrmArray(db, "leads")
+      .filter((lead) => !brandId || String(lead.brand_id || "") === String(brandId || ""))
+      .reduce((acc, lead) => {
+        const result = ngCanSendAutoFirstMessage(db, lead);
+        if (!result.ok) acc[result.reason] = (acc[result.reason] || 0) + 1;
+        return acc;
+      }, {});
+    res.json({
+      success: true,
+      settings,
+      state,
+      eligible_count: eligible.length,
+      sent_today: state.sent_today,
+      remaining_today: Math.max(0, settings.daily_max - Number(state.sent_today || 0)),
+      next_allowed_at: state.last_batch_sent_at ? new Date(new Date(state.last_batch_sent_at).getTime() + settings.batch_delay_minutes * 60000).toISOString() : null,
+      blocked_reasons: blocked,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/bulk-first-message/settings", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    db.bulk_first_message_settings = {
+      ...(db.bulk_first_message_settings || {}),
+      first_message_daily_max: Math.max(1, Math.min(500, Number(req.body.first_message_daily_max || req.body.daily_max || 200))),
+      first_message_batch_size: Math.max(1, Math.min(25, Number(req.body.first_message_batch_size || req.body.batch_size || 10))),
+      first_message_batch_delay_minutes: Math.max(1, Math.min(60, Number(req.body.first_message_batch_delay_minutes || req.body.batch_delay_minutes || 5))),
+      first_message_pause_failure_rate: Math.max(0.1, Math.min(1, Number(req.body.first_message_pause_failure_rate || req.body.pause_failure_rate || 0.35))),
+      first_message_pause_minutes_on_high_failure: Math.max(5, Math.min(180, Number(req.body.first_message_pause_minutes_on_high_failure || req.body.pause_minutes_on_high_failure || 30))),
+      updated_at: nowIso(),
+    };
+    await writeCrmDb(db);
+    res.json({ success: true, settings: ngGetBulkFirstMessageSettings(db) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/bulk-first-message/resume", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const state = ngGetBulkFirstMessageState(db);
+    state.paused_until = null;
+    state.last_batch_sent_at = req.body.clear_cooldown === true ? null : state.last_batch_sent_at;
+    state.updated_at = nowIso();
+    await writeCrmDb(db);
+    res.json({ success: true, state });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -13265,6 +13787,62 @@ function extractProviderError(error) {
   return data?.error?.message || data?.description || data?.message || JSON.stringify(data);
 }
 
+function classifyWhatsAppProviderFailure(error, providerError = "") {
+  const raw = JSON.stringify(error?.response?.data || {}) + " " + String(providerError || error?.message || "");
+  const text = raw.toLowerCase();
+  const status = Number(error?.response?.status || error?.statusCode || 0);
+
+  if (text.includes("rate") || text.includes("too many") || status === 429) {
+    return { category: "provider_rate_limited", whatsapp_status: "retry_later", retryable: true, suppress_until_fixed: false };
+  }
+  if (text.includes("template") || text.includes("parameter") || text.includes("translation") || text.includes("language")) {
+    return { category: "template_failed", whatsapp_status: "template_failed", retryable: false, suppress_until_fixed: false };
+  }
+  if (text.includes("recipient") && (text.includes("not") || text.includes("unable") || text.includes("undeliverable"))) {
+    return { category: "possible_no_whatsapp", whatsapp_status: "possible_no_whatsapp", retryable: false, suppress_until_fixed: true };
+  }
+  if (text.includes("not a whatsapp") || text.includes("does not have whatsapp") || text.includes("not on whatsapp")) {
+    return { category: "possible_no_whatsapp", whatsapp_status: "possible_no_whatsapp", retryable: false, suppress_until_fixed: true };
+  }
+  if (text.includes("invalid") && (text.includes("phone") || text.includes("recipient") || text.includes("number") || text.includes("to"))) {
+    return { category: "invalid_whatsapp_number", whatsapp_status: "invalid_whatsapp_number", retryable: false, suppress_until_fixed: true };
+  }
+  if (text.includes("permission") || text.includes("access token") || text.includes("oauth") || status === 401 || status === 403) {
+    return { category: "provider_auth_or_permission", whatsapp_status: "provider_failed", retryable: true, suppress_until_fixed: false };
+  }
+  return { category: "provider_failed", whatsapp_status: "provider_failed", retryable: true, suppress_until_fixed: false };
+}
+
+function ngUpdateLeadWhatsAppSendStatus(lead, result = {}) {
+  if (!lead) return;
+  const now = nowIso();
+  if (result.success) {
+    lead.whatsapp_status = "message_sent";
+    lead.whatsapp_validation_status = "message_sent";
+    lead.whatsapp_last_sent_at = now;
+    if (result.quick_action === "first_message") {
+      lead.first_message_queue_status = "sent";
+      lead.first_message_sent_at = lead.first_message_sent_at || now;
+    }
+  } else {
+    lead.whatsapp_status = result.whatsapp_status || "provider_failed";
+    lead.whatsapp_validation_status = result.category || result.whatsapp_status || "provider_failed";
+    lead.whatsapp_last_error = result.error || "Provider failed";
+    lead.whatsapp_last_error_at = now;
+    lead.whatsapp_failure_category = result.category || "provider_failed";
+    if (result.suppress_until_fixed) {
+      lead.whatsapp_send_suppressed = true;
+      lead.whatsapp_suppressed_reason = result.category || "provider_failed";
+      lead.first_message_queue_status = "failed_needs_fix";
+    } else if (result.retryable) {
+      lead.first_message_queue_status = lead.first_message_queue_status === "sent" ? "sent" : "retry_later";
+    } else {
+      lead.first_message_queue_status = lead.first_message_queue_status === "sent" ? "sent" : "failed";
+    }
+  }
+  lead.updated_at = now;
+}
+
 async function sendCrmMessage({
   db,
   brandId = null,
@@ -13402,6 +13980,9 @@ async function sendCrmMessage({
         payload: { provider_response: providerResponse, message_log_id: log.id },
         integration,
       });
+      if (cleanChannel === "whatsapp" && !providerResponse?.manual_first) {
+        ngUpdateLeadWhatsAppSendStatus(lead, { success: true, quick_action: metadata?.quick_action || metadata?.source || "message" });
+      }
     }
 
     return {
@@ -13417,6 +13998,7 @@ async function sendCrmMessage({
     };
   } catch (error) {
     const providerError = extractProviderError(error);
+    const failure = cleanChannel === "whatsapp" ? classifyWhatsAppProviderFailure(error, providerError) : { category: "provider_failed", whatsapp_status: "provider_failed", retryable: true, suppress_until_fixed: false };
     const log = createMessageLog(db, {
       ...baseLog,
       status: "failed",
@@ -13426,8 +14008,21 @@ async function sendCrmMessage({
         ...(baseLog.metadata || {}),
         hint: error.hint || null,
         status_code: error.statusCode || error.response?.status || null,
+        failure_category: failure.category,
+        whatsapp_status: failure.whatsapp_status,
       },
     });
+
+    if (lead && cleanChannel === "whatsapp") {
+      ngUpdateLeadWhatsAppSendStatus(lead, {
+        success: false,
+        error: providerError,
+        category: failure.category,
+        whatsapp_status: failure.whatsapp_status,
+        retryable: failure.retryable,
+        suppress_until_fixed: failure.suppress_until_fixed,
+      });
+    }
 
     return {
       success: false,
@@ -13437,6 +14032,10 @@ async function sendCrmMessage({
       status: "failed",
       error: providerError,
       hint: error.hint || null,
+      category: failure.category,
+      whatsapp_status: failure.whatsapp_status,
+      retryable: failure.retryable,
+      suppress_until_fixed: failure.suppress_until_fixed,
       log,
       provider_response: error.response?.data || null,
     };
@@ -13624,6 +14223,9 @@ function ngCanSendAutoFirstMessage(db, lead = {}) {
   if (["paid", "enrolled", "lost", "unsubscribed", "not_interested"].includes(status)) return { ok: false, reason: "lead_status_blocks_first_message" };
   if (["stop", "stopped", "opted_out", "unsubscribed", "inactive"].includes(unsub)) return { ok: false, reason: "lead_unsubscribed_or_inactive" };
   if (aiMode === "manual" && lead.ai_enabled === false) return { ok: false, reason: "ai_manual_disabled" };
+  if (lead.whatsapp_send_suppressed === true) return { ok: false, reason: lead.whatsapp_suppressed_reason || "whatsapp_send_suppressed" };
+  if (["invalid_whatsapp_number", "possible_no_whatsapp", "needs_country_code", "not_sendable"].includes(normalizeCrmLower(lead.whatsapp_status || lead.whatsapp_validation_status || "", ""))) return { ok: false, reason: lead.whatsapp_status || "whatsapp_not_sendable" };
+  if (["needs_country_code", "invalid_phone"].includes(normalizeCrmLower(lead.phone_import_status || lead.phone_import_category || "", ""))) return { ok: false, reason: lead.phone_import_status || "phone_import_not_ready" };
   if (!leadHasRecipientForChannel(lead, "whatsapp")) return { ok: false, reason: "no_whatsapp_recipient" };
   if (!ngLeadLooksLikeMetaCampaignLead(lead)) return { ok: false, reason: "not_campaign_or_meta_lead" };
   if (lead.first_message_sent_at || lead.first_template_sent_at || stage === "first_message_sent") return { ok: false, reason: "first_message_already_marked_sent" };
@@ -13761,18 +14363,119 @@ async function ngSendAutoFirstMessageForLead({ db, lead, brandId = null, actorId
   return { ...result, sent: Boolean(result.success), lead_id: lead.id || lead.lead_id, template_key: templateKey, sunday_template_router: ngIsSundayNoLiveSessionDay(db) };
 }
 
-async function ngRunDueAutoFirstMessages({ db, brandId = null, limit = 25, actorId = "system", dryRun = false } = {}) {
+function ngGetBulkFirstMessageSettings(db = {}, overrides = {}) {
+  const settings = {
+    ...(db.ai_orchestration_settings || {}),
+    ...(db.bulk_first_message_settings || {}),
+    ...(overrides || {}),
+  };
+  const dailyMax = Math.max(1, Math.min(500, Number(settings.first_message_daily_max || settings.daily_max_first_messages || settings.bulk_first_message_daily_max || process.env.NEXTGEN_FIRST_MESSAGE_DAILY_MAX || 200)));
+  const batchSize = Math.max(1, Math.min(25, Number(settings.first_message_batch_size || settings.bulk_first_message_batch_size || process.env.NEXTGEN_FIRST_MESSAGE_BATCH_SIZE || 10)));
+  const delayMinutes = Math.max(1, Math.min(60, Number(settings.first_message_batch_delay_minutes || settings.bulk_first_message_batch_delay_minutes || process.env.NEXTGEN_FIRST_MESSAGE_BATCH_DELAY_MINUTES || 5)));
+  const pauseFailureRate = Math.max(0.1, Math.min(1, Number(settings.first_message_pause_failure_rate || settings.bulk_first_message_pause_failure_rate || 0.35)));
+  const pauseMinutes = Math.max(5, Math.min(180, Number(settings.first_message_pause_minutes_on_high_failure || settings.bulk_first_message_pause_minutes || 30)));
+  return { daily_max: dailyMax, batch_size: batchSize, batch_delay_minutes: delayMinutes, pause_failure_rate: pauseFailureRate, pause_minutes_on_high_failure: pauseMinutes };
+}
+
+function ngFirstMessageSentTodayCount(db = {}, dateKey = todayKey()) {
+  return ensureCrmArray(db, "message_logs").filter((log) => {
+    const meta = log.metadata || {};
+    const isFirst = normalizeTemplateLookupKey(meta.quick_action || meta.source || log.template_id || meta.template_key || "").includes("first_message") || normalizeTemplateLookupKey(meta.template_key || log.template_id || "") === "meta_ad_first_message";
+    const isSent = ["sent", "delivered", "queued"].includes(normalizeCrmLower(log.status || "", ""));
+    const logDate = String(log.sent_at || log.created_at || log.created || "").slice(0, 10);
+    return isFirst && isSent && logDate === dateKey;
+  }).length;
+}
+
+function ngGetBulkFirstMessageState(db = {}) {
+  if (!db.bulk_first_message_sending_state || typeof db.bulk_first_message_sending_state !== "object") db.bulk_first_message_sending_state = {};
+  if (!db.bulk_first_message_sending_state.first_message || typeof db.bulk_first_message_sending_state.first_message !== "object") {
+    db.bulk_first_message_sending_state.first_message = { date_key: todayKey(), sent_today: 0, last_batch_sent_at: null, paused_until: null, updated_at: nowIso() };
+  }
+  return db.bulk_first_message_sending_state.first_message;
+}
+
+async function ngRunDueAutoFirstMessages({ db, brandId = null, limit = 25, actorId = "system", dryRun = false, bulkSettings = {} } = {}) {
+  const settings = ngGetBulkFirstMessageSettings(db, bulkSettings);
+  const state = ngGetBulkFirstMessageState(db);
+  const today = todayKey();
+  const nowMs = Date.now();
+
+  if (state.date_key !== today) {
+    state.date_key = today;
+    state.sent_today = 0;
+    state.failed_today = 0;
+    state.last_batch_sent_at = null;
+    state.paused_until = null;
+  }
+
+  if (!dryRun && state.paused_until && new Date(state.paused_until).getTime() > nowMs) {
+    return [{ success: true, sent: false, skipped: true, reason: "bulk_first_message_paused_until", paused_until: state.paused_until, settings }];
+  }
+
+  if (!dryRun && state.last_batch_sent_at) {
+    const nextAllowedAt = new Date(new Date(state.last_batch_sent_at).getTime() + settings.batch_delay_minutes * 60000);
+    if (nextAllowedAt.getTime() > nowMs) {
+      return [{ success: true, sent: false, skipped: true, reason: "bulk_first_message_batch_cooldown", next_allowed_at: nextAllowedAt.toISOString(), settings }];
+    }
+  }
+
+  const sentTodayFromLogs = ngFirstMessageSentTodayCount(db, today);
+  state.sent_today = Math.max(Number(state.sent_today || 0), sentTodayFromLogs);
+  const remainingDaily = Math.max(0, settings.daily_max - state.sent_today);
+  if (remainingDaily <= 0 && !dryRun) {
+    return [{ success: true, sent: false, skipped: true, reason: "bulk_first_message_daily_limit_reached", sent_today: state.sent_today, settings }];
+  }
+
+  const runLimit = Math.max(0, Number(limit || 0));
+  const effectiveLimit = dryRun ? Math.min(runLimit || settings.batch_size, settings.batch_size) : Math.min(runLimit || settings.batch_size, settings.batch_size, remainingDaily);
+  if (effectiveLimit <= 0) return [];
+
   const leads = ensureCrmArray(db, "leads")
     .filter((lead) => !brandId || String(lead.brand_id || "") === String(brandId || ""))
     .filter((lead) => ngCanSendAutoFirstMessage(db, lead).ok)
-    .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")))
-    .slice(0, Math.max(0, Number(limit || 0)));
+    .sort((a, b) => String(a.first_message_queued_at || a.created_at || "").localeCompare(String(b.first_message_queued_at || b.created_at || "")))
+    .slice(0, effectiveLimit);
 
   const results = [];
+  let sentCount = 0;
+  let failedCount = 0;
+
   for (const lead of leads) {
     const result = await ngSendAutoFirstMessageForLead({ db, lead, brandId: brandId || lead.brand_id || null, actorId, source: "run_due_auto_first_message", dryRun });
-    results.push({ lead_id: lead.id || lead.lead_id, name: lead.name || lead.student_name || "Lead", success: Boolean(result.success), sent: Boolean(result.sent), skipped: Boolean(result.skipped), reason: result.reason || result.error || null, log_id: result.log?.id || null });
+    if (result.sent) sentCount += 1;
+    if (result.success === false) failedCount += 1;
+    results.push({
+      lead_id: lead.id || lead.lead_id,
+      name: lead.name || lead.student_name || "Lead",
+      to: getBestRecipientForChannel({ channel: "whatsapp", lead }),
+      success: Boolean(result.success),
+      sent: Boolean(result.sent),
+      skipped: Boolean(result.skipped),
+      reason: result.reason || result.error || null,
+      category: result.category || null,
+      whatsapp_status: result.whatsapp_status || lead.whatsapp_status || null,
+      log_id: result.log?.id || null,
+    });
   }
+
+  if (!dryRun && leads.length) {
+    state.last_batch_sent_at = nowIso();
+    state.sent_today = Number(state.sent_today || 0) + sentCount;
+    state.failed_today = Number(state.failed_today || 0) + failedCount;
+    state.last_batch_size = leads.length;
+    state.last_batch_sent = sentCount;
+    state.last_batch_failed = failedCount;
+    state.settings_snapshot = settings;
+    state.updated_at = nowIso();
+
+    const failureRate = leads.length ? failedCount / leads.length : 0;
+    if (leads.length >= Math.min(5, settings.batch_size) && failureRate >= settings.pause_failure_rate) {
+      state.paused_until = new Date(Date.now() + settings.pause_minutes_on_high_failure * 60000).toISOString();
+      results.push({ success: true, sent: false, skipped: true, reason: "bulk_first_message_paused_high_failure_rate", failure_rate: failureRate, paused_until: state.paused_until });
+    }
+  }
+
   return results;
 }
 
@@ -14342,13 +15045,39 @@ function ngGoogleMeetAppointmentStudentName(db = {}, appointment = {}) {
   ) || "Doctor";
 }
 
+function ngGoogleMeetAppointmentDisplayDate(appointment = {}) {
+  const rawDate = normalizeCrmString(appointment.date || appointment.scheduled_date || String(appointment.start_time || "").slice(0, 10));
+  if (!rawDate) return "the selected date";
+  const parsed = new Date(`${rawDate}T12:00:00`);
+  if (Number.isNaN(parsed.getTime())) return rawDate;
+  return parsed.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+}
+
+function ngGoogleMeetAppointmentDisplayTime(appointment = {}) {
+  const rawTime = normalizeCrmString(appointment.time || appointment.scheduled_time || String(appointment.start_time || "").slice(11, 16));
+  if (!rawTime) return "";
+  const match = rawTime.match(/^(\d{1,2})(?::(\d{2}))?/);
+  if (!match) return rawTime;
+  let hour = Number(match[1]);
+  const minute = String(match[2] || "00").padStart(2, "0");
+  if (!Number.isFinite(hour)) return rawTime;
+  const suffix = hour >= 12 ? "PM" : "AM";
+  const hour12 = hour % 12 || 12;
+  return `${hour12}:${minute} ${suffix}`;
+}
+
+function ngGoogleMeetAppointmentDisplayDateTime(appointment = {}, timezone = "EST") {
+  const date = ngGoogleMeetAppointmentDisplayDate(appointment);
+  const time = ngGoogleMeetAppointmentDisplayTime(appointment);
+  return `${date}${time ? ` at ${time} ${timezone}` : ""}`;
+}
+
 function ngGoogleMeetAppointmentText(action = "link_now", appointment = {}, db = {}) {
   const name = ngGoogleMeetAppointmentStudentName(db, appointment);
   const link = ngGoogleMeetAppointmentLink(appointment);
-  const date = normalizeCrmString(appointment.date || appointment.scheduled_date || String(appointment.start_time || "").slice(0, 10));
-  const time = normalizeCrmString(appointment.time || appointment.scheduled_time || String(appointment.start_time || "").slice(11, 16));
+  const displayDateTime = ngGoogleMeetAppointmentDisplayDateTime(appointment, "EST");
   if (action === "confirmation") {
-    return `Great Doctor, your Google Meet mentor consultation is scheduled for ${date || "the selected date"}${time ? ` at ${time} EST` : ""}.\n\nI will send the Google Meet link at the meeting time.`;
+    return `Great Doctor, your Google Meet mentor consultation is confirmed for ${displayDateTime}.\n\nWe’ll share the Google Meet link at the meeting time.`;
   }
   if (action === "five_minute_reminder") {
     return `Doctor, your Google Meet mentor consultation starts in 5 minutes.\n\nPlease be ready. I will send the Google Meet link at the meeting time.`;
@@ -14396,6 +15125,9 @@ async function ngSendGoogleMeetAppointmentMessage({ db = {}, appointment = {}, a
       google_meet_link: ngGoogleMeetAppointmentLink(appointment),
       appointment_date: appointment.date || appointment.scheduled_date || String(appointment.start_time || "").slice(0, 10),
       appointment_time: appointment.time || appointment.scheduled_time || String(appointment.start_time || "").slice(11, 16),
+      appointment_display_date: ngGoogleMeetAppointmentDisplayDate(appointment),
+      appointment_display_time: ngGoogleMeetAppointmentDisplayTime(appointment),
+      appointment_display_datetime: ngGoogleMeetAppointmentDisplayDateTime(appointment, "EST"),
     },
     leadId: appointment.lead_id || lead?.id || null,
     metadata: {
@@ -14709,7 +15441,13 @@ app.post("/admin/crm/appointments/:id/send-confirmation", async (req, res) => {
     item.google_meet_confirmation_sent_at = nowIso();
     item.updated_at = nowIso();
     await writeCrmDb(db);
-    res.json({ success: true, sent, appointment: enrichAppointment(db, item) });
+    res.json({
+      success: true,
+      sent,
+      appointment: enrichAppointment(db, item),
+      appointment_display_datetime: ngGoogleMeetAppointmentDisplayDateTime(item, "EST"),
+      message: "Google Meet confirmation sent successfully",
+    });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
@@ -14937,6 +15675,11 @@ app.post("/admin/crm/automation/run-due", async (req, res) => {
       limit: Number(req.body.first_message_limit || req.query.first_message_limit || remainingLimit || limit),
       actorId: "run_due",
       dryRun: req.body.dry_run === true || req.query.dry_run === "true",
+      bulkSettings: {
+        first_message_daily_max: req.body.first_message_daily_max || req.query.first_message_daily_max,
+        first_message_batch_size: req.body.first_message_batch_size || req.query.first_message_batch_size,
+        first_message_batch_delay_minutes: req.body.first_message_batch_delay_minutes || req.query.first_message_batch_delay_minutes,
+      },
     });
 
     const dailySessionResults = await ngRunDailyLiveSessionScheduler({
