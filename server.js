@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v108-unified-thread-ayla-reply";
+const NEXTGEN_BACKEND_BUILD = "v109-contact-dedupe-thread";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -12254,7 +12254,80 @@ function getMetaAccountIdForPlatform(platform, integration = {}) {
 function buildConversationInbox(db) {
   const leads = ensureCrmArray(db, "leads").map(normalizeLeadForResponse);
 
-  return leads.map((lead) => {
+  function inboxPhoneDigits(value = "") {
+    const d = String(value || "").replace(/\D/g, "");
+    if (!d || d.length < 10) return "";
+    return d.slice(-10);
+  }
+
+  function inboxContactKey(lead = {}) {
+    const phone = inboxPhoneDigits(
+      lead.whatsapp ||
+      lead.whatsapp_phone ||
+      lead.phone ||
+      lead.mobile ||
+      lead.contact ||
+      lead.platform_contact_id ||
+      lead.wa_id ||
+      ""
+    );
+    if (phone) return `phone:${phone}`;
+
+    const email = normalizeEmail(lead.email || lead.student_email || lead.customer_email || "");
+    if (email) return `email:${email}`;
+
+    const platformContact = normalizeCrmString(
+      lead.platform_contact_id ||
+      lead.chat_id ||
+      lead.telegram_chat_id ||
+      lead.instagram_id ||
+      lead.facebook_id ||
+      ""
+    ).toLowerCase();
+    if (platformContact) return `platform:${platformContact}`;
+
+    return `lead:${getStableLeadId(lead)}`;
+  }
+
+  function genericInboxName(value = "") {
+    const text = String(value || "").trim().toLowerCase();
+    if (!text) return true;
+    if (/^\+?\d{7,}$/.test(text.replace(/\s+/g, ""))) return true;
+    return [
+      "unknown lead",
+      "website visitor",
+      "visitor",
+      "lead",
+      "doctor",
+      "crm",
+      "nextgen",
+      "next gen scholars",
+      "nextgen scholars",
+      "nextgen usmle",
+    ].some((item) => text === item || text.includes(item));
+  }
+
+  function stageRank(status = "") {
+    const key = String(status || "").toLowerCase().replace(/[^a-z0-9]+/g, "_");
+    const map = {
+      needs_reply: 90,
+      interested_live_session: 80,
+      mentor_call_scheduled: 78,
+      payment_pending: 76,
+      first_message_sent: 65,
+      replied: 60,
+      new_lead: 50,
+      new: 50,
+      no_reply: 40,
+      not_interested: 5,
+      paid_enrolled: 1,
+      paid: 1,
+      enrolled: 1,
+    };
+    return map[key] || 10;
+  }
+
+  const rows = leads.map((lead) => {
     const leadId = getStableLeadId(lead);
     const leadMessages = typeof ngLeadConversationMessages === "function"
       ? ngLeadConversationMessages(db, leadId)
@@ -12290,12 +12363,65 @@ function buildConversationInbox(db) {
       status: lead.status || lead.lead_status || "new",
       lead_status: lead.lead_status || lead.status || "new",
       assigned_agent: lead.assigned_agent_name || lead.assigned_agent || lead.assigned_agent_id || "Unassigned",
-      direction: lead.conversation_direction || "inbound",
+      direction: lead.conversation_direction || (lastMessage?.direction || "inbound"),
       client_reached_out: lead.client_reached_out !== false,
       agent_initiated: Boolean(lead.agent_initiated),
       ai_mode: lead.ai_mode || lead.automation_mode || "auto",
+      duplicate_contact_key: inboxContactKey(lead),
     };
-  }).sort((a, b) => String(b.last_message_at || "").localeCompare(String(a.last_message_at || "")));
+  });
+
+  const merged = new Map();
+
+  for (const row of rows) {
+    const key = row.duplicate_contact_key || `lead:${row.lead_id}`;
+    const existing = merged.get(key);
+    if (!existing) {
+      merged.set(key, { ...row, duplicate_lead_ids: [row.lead_id].filter(Boolean), duplicate_count: 1 });
+      continue;
+    }
+
+    const rowTime = new Date(row.last_message_at || 0).getTime();
+    const existingTime = new Date(existing.last_message_at || 0).getTime();
+    const newest = rowTime >= existingTime ? row : existing;
+    const older = rowTime >= existingTime ? existing : row;
+    const betterName = !genericInboxName(row.lead_name) && (genericInboxName(existing.lead_name) || rowTime >= existingTime)
+      ? row.lead_name
+      : existing.lead_name;
+    const betterStatus = stageRank(row.status) > stageRank(existing.status) ? row.status : existing.status;
+    const betterLeadStatus = stageRank(row.lead_status) > stageRank(existing.lead_status) ? row.lead_status : existing.lead_status;
+    const preferredPlatform = [row.platform, existing.platform].includes("whatsapp") ? "whatsapp" : (newest.platform || existing.platform || row.platform);
+    const allMessages = [...(existing.messages || []), ...(row.messages || [])]
+      .filter((message, index, arr) => {
+        const id = String(message.id || message.message_id || message.provider_message_id || "");
+        if (!id) return true;
+        return arr.findIndex((candidate) => String(candidate.id || candidate.message_id || candidate.provider_message_id || "") === id) === index;
+      })
+      .sort((a, b) => String(a.created_at || a.received_at || a.sent_at || a.timestamp || "").localeCompare(String(b.created_at || b.received_at || b.sent_at || b.timestamp || "")));
+
+    merged.set(key, {
+      ...older,
+      ...newest,
+      conversation_id: newest.conversation_id || existing.conversation_id || row.conversation_id,
+      lead_id: existing.lead_id || row.lead_id,
+      lead_name: betterName || newest.lead_name || existing.lead_name,
+      contact: existing.contact || row.contact,
+      platform: preferredPlatform,
+      source_platform: preferredPlatform,
+      platform_icon: preferredPlatform,
+      messages: allMessages,
+      message_count: allMessages.length,
+      unread_count: Number(existing.unread_count || 0) + Number(row.unread_count || 0),
+      status: betterStatus,
+      lead_status: betterLeadStatus,
+      ai_mode: newest.ai_mode || existing.ai_mode || row.ai_mode || "auto",
+      duplicate_contact_key: key,
+      duplicate_count: Number(existing.duplicate_count || 1) + 1,
+      duplicate_lead_ids: Array.from(new Set([...(existing.duplicate_lead_ids || []), existing.lead_id, row.lead_id].filter(Boolean))),
+    });
+  }
+
+  return Array.from(merged.values()).sort((a, b) => String(b.last_message_at || "").localeCompare(String(a.last_message_at || "")));
 }
 
 function parseInboundSocialPayload({ platform, payload = {}, integration = null }) {
