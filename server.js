@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v71-student-access-ayla-media-flow-check";
+const NEXTGEN_BACKEND_BUILD = "v93-ayla-auto-reply-guard-fix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -21013,7 +21013,12 @@ function ngShouldSkipAiAutoForInbound(lead = {}, inbound = {}, options = {}) {
   if (!fingerprint) return { skip: false };
 
   if (lead.last_ai_auto_replied_message_id && String(lead.last_ai_auto_replied_message_id) === fingerprint) {
-    return { skip: true, reason: "already_replied_to_this_inbound_message" };
+    if (options.forceReprocess === true || options.force === true || options.debugForce === true) {
+      lead.last_ai_auto_replied_message_id = null;
+      lead.last_ai_auto_replied_at = null;
+    } else {
+      return { skip: true, reason: "already_replied_to_this_inbound_message" };
+    }
   }
 
   // v46: do not swallow a genuinely new student message just because a previous reply
@@ -22781,6 +22786,29 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
   }
 });
 
+app.post("/admin/crm/automation/reset-ai-auto-guard", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const leadId = String(req.body?.lead_id || req.body?.leadId || req.body?.id || "").trim();
+    if (!leadId) return res.status(400).json({ success: false, error: "lead_id is required" });
+    const leads = ngAffArray(db, "leads");
+    const lead = leads.find((item) => String(item.id || item.lead_id || "") === leadId);
+    if (!lead) return res.status(404).json({ success: false, error: "Lead not found" });
+    lead.last_ai_auto_replied_message_id = null;
+    lead.last_ai_auto_replied_at = null;
+    lead.last_ai_auto_reply_channel = null;
+    lead.last_ai_auto_reply_text = "";
+    lead.ai_mode = "auto";
+    lead.automation_mode = "auto";
+    lead.updated_at = ngAffNow();
+    await writeCrmDb(db);
+    return res.json({ success: true, lead_id: lead.id || lead.lead_id, message: "AI auto duplicate guard reset for this lead" });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
 app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
   try {
     const { user } = await requireCrmAdmin(req);
@@ -22808,12 +22836,41 @@ app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
         fallback: "whatsapp",
       });
 
-      const duplicateGuard = ngShouldSkipAiAutoForInbound(lead, inbound, { channel });
-      if (duplicateGuard.skip) { results.push({ lead_id: lead.id, skipped: true, reason: duplicateGuard.reason, wait_ms: duplicateGuard.wait_ms || 0 }); continue; }
+      const inboundFingerprint = ngAiAutoMessageFingerprint(inbound);
+      const hasOutboundAfterInbound = ngHasOutboundAfterInbound(messages, inbound);
+      if (
+        lead.last_ai_auto_replied_message_id &&
+        String(lead.last_ai_auto_replied_message_id) === String(inboundFingerprint) &&
+        !hasOutboundAfterInbound
+      ) {
+        // v93: if Ayla's fingerprint says replied but no real outbound exists after this inbound,
+        // the old guard was blocking the student forever. Clear the stale guard and let Ayla answer.
+        lead.last_ai_auto_replied_message_id = null;
+        lead.last_ai_auto_replied_at = null;
+      }
+
+      const duplicateGuard = ngShouldSkipAiAutoForInbound(lead, inbound, {
+        channel,
+        forceReprocess: req.body?.force === true || req.body?.force_reprocess === true || req.body?.reset_guard === true,
+      });
+      if (duplicateGuard.skip) {
+        results.push({
+          lead_id: lead.id,
+          skipped: true,
+          reason: duplicateGuard.reason,
+          wait_ms: duplicateGuard.wait_ms || 0,
+          last_inbound_text: ngMessageText(inbound).slice(0, 120),
+          last_outbound_text: ngMessageText(outbound || {}).slice(0, 120),
+          has_outbound_after_inbound: hasOutboundAfterInbound,
+          last_ai_auto_replied_message_id: lead.last_ai_auto_replied_message_id || null,
+          inbound_fingerprint: inboundFingerprint || null,
+        });
+        continue;
+      }
 
       const inboundTime = new Date(inbound.created_at || inbound.received_at || inbound.timestamp || 0).getTime();
       const outboundTime = new Date(outbound?.created_at || outbound?.sent_at || outbound?.timestamp || 0).getTime();
-      if (outbound && outboundTime >= inboundTime) { ngReleaseAiAutoLock(duplicateGuard.lock_key); results.push({ lead_id: lead.id, skipped: true, reason: "already_replied" }); continue; }
+      if (outbound && outboundTime >= inboundTime) { ngReleaseAiAutoLock(duplicateGuard.lock_key); results.push({ lead_id: lead.id, skipped: true, reason: "already_replied", last_outbound_text: ngMessageText(outbound || {}).slice(0, 120), has_outbound_after_inbound: true }); continue; }
 
       if (channel === "whatsapp" && !ngWithinHours(inbound.created_at || inbound.received_at || inbound.timestamp, 24)) {
         ngReleaseAiAutoLock(duplicateGuard.lock_key);
