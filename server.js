@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v111-ayla-reliable-inbound-retry";
+const NEXTGEN_BACKEND_BUILD = "v113-ayla-continuous-chat-real-send";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -13141,10 +13141,10 @@ async function handleUniversalWebhook({ req, res, platform, integrationId = null
               messaging_type: ["facebook", "instagram"].includes(channel) ? "RESPONSE" : undefined,
             },
           });
-          ngMarkAiAutoProcessed(lead, latestInbound, { channel, reply: ai.reply });
+          const delivered = ngAylaMarkProcessedOnlyIfDelivered({ lead, inbound: latestInbound, channel, reply: ai.reply, sendResult });
           ngReleaseAiAutoLock(duplicateGuard.lock_key);
-          aiAutoResult = { sent: Boolean(sendResult.success), queued: Boolean(sendResult.queued), channel, to, result: sendResult };
-          ngAffArray(db, "ai_auto_runs").unshift({ id: uuid(), lead_id: lead.id, inbound_message_id: ngAiAutoMessageFingerprint(latestInbound), channel, reply: ai.reply, sent: Boolean(sendResult.success), queued: Boolean(sendResult.queued), result: sendResult, model: ai.model, usage: ai.usage, reply_delay_ms: replyDelayMs || 0, created_by: "webhook", created_at: ngAffNow() });
+          aiAutoResult = { sent: delivered, queued: Boolean(sendResult.queued), channel, to, result: sendResult };
+          ngAffArray(db, "ai_auto_runs").unshift({ id: uuid(), lead_id: lead.id, inbound_message_id: ngAiAutoMessageFingerprint(latestInbound), channel, reply: ai.reply, sent: delivered, queued: Boolean(sendResult.queued), result: sendResult, model: ai.model, usage: ai.usage, reply_delay_ms: replyDelayMs || 0, created_by: "webhook", created_at: ngAffNow() });
         }
       }
     } catch (aiError) {
@@ -22021,6 +22021,38 @@ function ngMarkAiAutoProcessed(lead = {}, inbound = {}, extra = {}) {
   return lead;
 }
 
+
+// v113: Continuation fix only. Do not change Ayla's sales/content strategy here.
+// The bug: sendCrmMessage can report success:true while the provider actually skipped,
+// duplicate-blocked, suppressed, or failed the outbound. If we mark the inbound as processed
+// in that state, Ayla believes she replied and stops after a few turns.
+function ngAylaDeliveryActuallySent(result = {}) {
+  if (!result || typeof result !== "object") return false;
+  if (result.skipped === true || result.duplicate_blocked === true || result.suppressed === true) return false;
+  const status = String(result.status || result.delivery_status || result.message_status || "").toLowerCase();
+  if (["failed", "duplicate_blocked", "blocked", "suppressed", "error", "skipped"].includes(status)) return false;
+  if (result.sent === true || result.delivered === true || result.queued === true || result.success === true) return true;
+  return false;
+}
+
+function ngAylaMarkProcessedOnlyIfDelivered({ lead = {}, inbound = {}, channel = "", reply = "", sendResult = {} } = {}) {
+  const delivered = ngAylaDeliveryActuallySent(sendResult);
+  if (delivered) {
+    ngMarkAiAutoProcessed(lead, inbound, { channel, reply });
+  } else if (lead) {
+    // Keep the latest inbound eligible for retry. Do not poison the guard after a failed/skipped send.
+    const fingerprint = ngAiAutoMessageFingerprint(inbound);
+    if (String(lead.last_ai_auto_replied_message_id || "") === String(fingerprint || "")) {
+      lead.last_ai_auto_replied_message_id = null;
+      lead.last_ai_auto_replied_at = null;
+    }
+    lead.last_ai_auto_failed_at = ngAffNow();
+    lead.last_ai_auto_failure_reason = sendResult?.error || sendResult?.reason || sendResult?.status || "provider_not_sent";
+    lead.updated_at = ngAffNow();
+  }
+  return delivered;
+}
+
 function ngNormalizeLeadAiMode(lead = {}) {
   if (!lead.ai_mode && !lead.automation_mode) {
     lead.ai_mode = "auto";
@@ -23671,7 +23703,10 @@ Non-negotiable reply style:
 - Do not end with weak generic filler like "feel free to ask" unless it is paired with a strong next step.
 
 Sales behavior:
+- After answering the student’s latest message, continue the conversation naturally. There is no 2-message or 3-message limit; every new student inbound deserves a fresh contextual reply if no outbound exists after it.
+- Use broad reasoning for any weak area or system the student mentions; do not hard-code only MSK or only Cardiology. Adapt to the system named by the student.
 - After answering the student’s question, move the lead forward naturally: build trust, share/offer session recording, explain the UWorld Video Library, invite to live session, ask exam date/weak area, or offer Google Meet mentor consultation at the right time.
+- Session recordings are still an important proof asset. Do not suppress recording links. If a recording is useful for trust or the student asks about recordings, share it; just keep listening and continue the next turn when the student replies.
 - Never ignore the student’s direct question or instruction. Do not repeat a previous offer when the student asked something else. Answer first, then convert naturally.
 - If the student asks price/cost/package/payment, do NOT give numbers. Move them to Google Meet mentor guidance for program/pricing guidance.
 - If the student is weak, failed, old graduate, delayed, confused, or struggling, reassure first: tell them they are in the right place, explain roadmap/mentor feedback/weak-area correction, then guide to recording/demo/live session.
@@ -23911,7 +23946,7 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
       source: "full_ai_auto",
     });
 
-    ngMarkAiAutoProcessed(lead, latestInbound, { channel, reply: ai.reply });
+    const deliveryActuallySent = ngAylaMarkProcessedOnlyIfDelivered({ lead, inbound: latestInbound, channel, reply: ai.reply, sendResult: result });
 
     if (typeof aylaLogCost === "function") {
       await aylaLogCost({
@@ -23930,7 +23965,7 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
       inbound_message_id: ngAiAutoMessageFingerprint(latestInbound),
       channel,
       reply: ai.reply,
-      sent: true,
+      sent: deliveryActuallySent,
       result,
       model: ai.model,
       usage: ai.usage,
@@ -23946,8 +23981,8 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
     aiAutoLockKey = null;
 
     return res.json({
-      success: true,
-      sent: true,
+      success: deliveryActuallySent,
+      sent: deliveryActuallySent,
       reply: ai.reply,
       result,
       usage: ai.usage,
@@ -24125,7 +24160,7 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
       source,
     });
 
-    ngMarkAiAutoProcessed(lead, latestInbound, { channel, reply: ai.reply });
+    const deliveryActuallySent = ngAylaMarkProcessedOnlyIfDelivered({ lead, inbound: latestInbound, channel, reply: ai.reply, sendResult });
 
     ngAffArray(db, "ai_auto_runs").unshift({
       id: uuid(),
@@ -24133,7 +24168,7 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
       inbound_message_id: inboundFingerprint,
       channel,
       reply: ai.reply,
-      sent: Boolean(sendResult.success),
+      sent: deliveryActuallySent,
       queued: Boolean(sendResult.queued),
       result: sendResult,
       model: ai.model,
@@ -24149,7 +24184,7 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
 
     return {
       lead_id: lead.id || lead.lead_id || null,
-      sent: Boolean(sendResult.success),
+      sent: deliveryActuallySent,
       queued: Boolean(sendResult.queued),
       reply: ai.reply,
       channel,
@@ -24577,11 +24612,11 @@ app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
           latestInbound: inbound,
           source: "process_ai_auto",
         });
-        ngMarkAiAutoProcessed(lead, inbound, { channel, reply: ai.reply });
+        const deliveryActuallySent = ngAylaMarkProcessedOnlyIfDelivered({ lead, inbound, channel, reply: ai.reply, sendResult });
         if (typeof aylaLogCost === "function") await aylaLogCost({ db, actor: user, model: ai.model, usage: ai.usage, action: "process_ai_auto_send", meta: { lead_id: lead.id, channel } }).catch(() => null);
-        ngAffArray(db, "ai_auto_runs").unshift({ id: uuid(), lead_id: lead.id, inbound_message_id: ngAiAutoMessageFingerprint(inbound), channel, reply: ai.reply, sent: true, result: sendResult, model: ai.model, usage: ai.usage, admin_alert: adminAlert, created_by: user.id, created_at: ngAffNow() });
+        ngAffArray(db, "ai_auto_runs").unshift({ id: uuid(), lead_id: lead.id, inbound_message_id: ngAiAutoMessageFingerprint(inbound), channel, reply: ai.reply, sent: deliveryActuallySent, result: sendResult, model: ai.model, usage: ai.usage, admin_alert: adminAlert, created_by: user.id, created_at: ngAffNow() });
         ngReleaseAiAutoLock(duplicateGuard.lock_key);
-        results.push({ lead_id: lead.id, sent: true, reply: ai.reply, channel, admin_alert: adminAlert });
+        results.push({ lead_id: lead.id, sent: deliveryActuallySent, reply: ai.reply, channel, admin_alert: adminAlert, result: sendResult });
       } catch (err) {
         ngReleaseAiAutoLock(duplicateGuard.lock_key);
         results.push({ lead_id: lead.id, sent: false, error: err.message, channel });
