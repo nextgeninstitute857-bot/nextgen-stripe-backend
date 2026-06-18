@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v98-ayla-no-campaign-fallback";
+const NEXTGEN_BACKEND_BUILD = "v99-crm-templates-endpoint-alias-fix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -6607,6 +6607,7 @@ function collectionResponseName(collection) {
     coupon_rules: "coupon_rules",
     followups: "followups",
     templates: "templates",
+    message_templates: "templates",
     approval_queue: "items",
     agents: "agents",
     agent_logs: "logs",
@@ -8474,7 +8475,7 @@ registerCrmCrudRoutes({ route: "/admin/crm/ticket-messages", collection: "ticket
 registerCrmCrudRoutes({ route: "/admin/crm/communities", collection: "communities", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/campaigns", collection: "campaigns", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/training", collection: "ai_training", brandScoped: true });
-registerCrmCrudRoutes({ route: "/admin/crm/templates", collection: "templates", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/templates", collection: "message_templates", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/followups", collection: "followups", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/conversations", collection: "conversations", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/community-posts", collection: "community_posts", brandScoped: true });
