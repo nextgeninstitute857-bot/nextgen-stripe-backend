@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v100-import-country-merge-fix";
+const NEXTGEN_BACKEND_BUILD = "v101-crm-auto-runner-after-import";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -9239,7 +9239,22 @@ app.post("/admin/crm/import/confirm", async (req, res) => {
     db.import_batches.push(batch);
     await writeCrmDb(db);
 
-    res.json({ success: true, batch, created, skipped, created_lead_ids: createdLeadIds, failed_rows: failedRows, summary });
+    // v101: After import confirms/queues first messages, wake the backend runner automatically.
+    // This removes the need to click Trigger Auto Now for each imported lead.
+    if (queueFirstMessage && createdLeadIds.length) {
+      ngScheduleCrmDueBackgroundRun("import_confirm", 1500);
+    }
+
+    res.json({
+      success: true,
+      batch,
+      created,
+      skipped,
+      created_lead_ids: createdLeadIds,
+      failed_rows: failedRows,
+      summary,
+      auto_runner_scheduled: Boolean(queueFirstMessage && createdLeadIds.length),
+    });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -34437,6 +34452,173 @@ app.use((err, req, res, next) => {
 });
 
 
+// -----------------------------------------------------------------------------
+// v101 CRM AUTO RUNNER
+// -----------------------------------------------------------------------------
+// Permanent backend fix: the CRM should not require the admin to click
+// "Trigger Auto Now" after every import. This internal runner drains queued first
+// WhatsApp templates, due live-session automations, Google Meet reminders, and
+// pending Full AI Auto replies on a safe interval and immediately after imports.
+//
+// Disable in Render only if needed:
+//   NEXTGEN_CRM_AUTO_RUNNER_ENABLED=false
+// Optional tuning:
+//   NEXTGEN_CRM_AUTO_RUNNER_INTERVAL_MS=60000
+//   NEXTGEN_CRM_AUTO_FIRST_MESSAGE_LIMIT=20
+//   NEXTGEN_CRM_AUTO_AI_LIMIT=20
+//   NEXTGEN_CRM_AUTO_DAILY_SESSION_LIMIT=20
+//   NEXTGEN_CRM_AUTO_GOOGLE_MEET_LIMIT=5
+//   NEXTGEN_CRM_AUTO_FIRST_MESSAGE_DELAY_MINUTES=1
+
+let ngCrmDueBackgroundBusy = false;
+let ngCrmDueBackgroundStarted = false;
+let ngCrmDueBackgroundTimer = null;
+let ngCrmDueBackgroundWakeTimer = null;
+
+function ngCrmAutoRunnerEnabled() {
+  const value = String(process.env.NEXTGEN_CRM_AUTO_RUNNER_ENABLED || "true").trim().toLowerCase();
+  return !["0", "false", "no", "off", "disabled"].includes(value);
+}
+
+function ngCrmAutoRunnerNumber(envName, fallback, min, max) {
+  const value = Number(process.env[envName]);
+  const picked = Number.isFinite(value) && value > 0 ? value : fallback;
+  return Math.max(min, Math.min(max, picked));
+}
+
+async function ngRunCrmDueBackgroundOnce(source = "crm_background_auto_runner") {
+  if (!ngCrmAutoRunnerEnabled()) {
+    return { success: true, skipped: true, reason: "crm_auto_runner_disabled" };
+  }
+
+  if (ngCrmDueBackgroundBusy) {
+    return { success: true, skipped: true, reason: "crm_auto_runner_already_running" };
+  }
+
+  ngCrmDueBackgroundBusy = true;
+  const startedAt = nowIso();
+
+  try {
+    const db = await readCrmDb();
+    const firstMessageLimit = ngCrmAutoRunnerNumber("NEXTGEN_CRM_AUTO_FIRST_MESSAGE_LIMIT", 20, 1, 100);
+    const aiAutoLimit = ngCrmAutoRunnerNumber("NEXTGEN_CRM_AUTO_AI_LIMIT", 20, 1, 100);
+    const dailySessionLimit = ngCrmAutoRunnerNumber("NEXTGEN_CRM_AUTO_DAILY_SESSION_LIMIT", 20, 0, 100);
+    const googleMeetLimit = ngCrmAutoRunnerNumber("NEXTGEN_CRM_AUTO_GOOGLE_MEET_LIMIT", 5, 0, 100);
+    const firstMessageDelayMinutes = ngCrmAutoRunnerNumber("NEXTGEN_CRM_AUTO_FIRST_MESSAGE_DELAY_MINUTES", 1, 1, 60);
+
+    const firstMessageResults = await ngRunDueAutoFirstMessages({
+      db,
+      brandId: null,
+      limit: firstMessageLimit,
+      actorId: "crm_auto_runner",
+      dryRun: false,
+      bulkSettings: {
+        first_message_batch_size: firstMessageLimit,
+        first_message_batch_delay_minutes: firstMessageDelayMinutes,
+      },
+    });
+
+    const dailySessionResults = dailySessionLimit > 0
+      ? await ngRunDailyLiveSessionScheduler({
+          db,
+          brandId: null,
+          limit: dailySessionLimit,
+          dryRun: false,
+          source,
+        })
+      : { processed: 0, results: [] };
+
+    const googleMeetAppointmentResults = googleMeetLimit > 0
+      ? await ngRunGoogleMeetAppointmentScheduler({
+          db,
+          brandId: null,
+          limit: googleMeetLimit,
+          dryRun: false,
+          source,
+        })
+      : { processed: 0, results: [] };
+
+    const aiAutoResults = await ngAylaRunPendingFullAiAuto({
+      db,
+      brandId: null,
+      limit: aiAutoLimit,
+      source,
+      actorId: "crm_auto_runner",
+      force: false,
+    });
+
+    await writeCrmDb(db);
+
+    const summary = {
+      success: true,
+      source,
+      started_at: startedAt,
+      finished_at: nowIso(),
+      first_message_processed: firstMessageResults.length,
+      first_message_sent: firstMessageResults.filter((item) => item.sent).length,
+      daily_session_processed: Number(dailySessionResults.processed || 0),
+      google_meet_processed: Number(googleMeetAppointmentResults.processed || 0),
+      ai_auto_processed: aiAutoResults.length,
+    };
+
+    if (
+      summary.first_message_processed ||
+      summary.daily_session_processed ||
+      summary.google_meet_processed ||
+      summary.ai_auto_processed
+    ) {
+      console.log("CRM auto runner:", summary);
+    }
+
+    return summary;
+  } catch (error) {
+    console.error("CRM auto runner failed:", error?.message || error);
+    return { success: false, error: error?.message || String(error), source, started_at: startedAt, finished_at: nowIso() };
+  } finally {
+    ngCrmDueBackgroundBusy = false;
+  }
+}
+
+function ngScheduleCrmDueBackgroundRun(reason = "manual_schedule", delayMs = 1500) {
+  if (!ngCrmAutoRunnerEnabled()) return false;
+
+  if (ngCrmDueBackgroundWakeTimer) {
+    clearTimeout(ngCrmDueBackgroundWakeTimer);
+  }
+
+  ngCrmDueBackgroundWakeTimer = setTimeout(() => {
+    ngCrmDueBackgroundWakeTimer = null;
+    ngRunCrmDueBackgroundOnce(`crm_auto_${reason}`).catch((error) => {
+      console.error("Scheduled CRM auto runner failed:", error?.message || error);
+    });
+  }, Math.max(250, Number(delayMs || 1500)));
+
+  return true;
+}
+
+function ngStartCrmDueBackgroundRunner() {
+  if (ngCrmDueBackgroundStarted || !ngCrmAutoRunnerEnabled()) return false;
+  ngCrmDueBackgroundStarted = true;
+
+  const intervalMs = ngCrmAutoRunnerNumber("NEXTGEN_CRM_AUTO_RUNNER_INTERVAL_MS", 60000, 30000, 600000);
+  ngCrmDueBackgroundTimer = setInterval(() => {
+    ngRunCrmDueBackgroundOnce("crm_auto_interval").catch((error) => {
+      console.error("Interval CRM auto runner failed:", error?.message || error);
+    });
+  }, intervalMs);
+
+  // Do not keep the Node process alive only because of this timer.
+  if (typeof ngCrmDueBackgroundTimer.unref === "function") {
+    ngCrmDueBackgroundTimer.unref();
+  }
+
+  // Run once shortly after boot so queued leads from before deploy are picked up.
+  ngScheduleCrmDueBackgroundRun("startup", 5000);
+  console.log(`CRM auto runner enabled every ${intervalMs}ms`);
+  return true;
+}
+
+
 process.on("unhandledRejection", (reason) => {
   console.error("UNHANDLED REJECTION:", reason);
 });
@@ -34449,4 +34631,5 @@ app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`DATA_DIR=${DATA_DIR}`);
   console.log(`LIVE_DB_PATH=${LIVE_DB_PATH}`);
+  ngStartCrmDueBackgroundRunner();
 });
