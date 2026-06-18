@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v109-contact-dedupe-thread";
+const NEXTGEN_BACKEND_BUILD = "v111-ayla-reliable-inbound-retry";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -24191,24 +24191,65 @@ async function ngAylaRunPendingFullAiAuto({ db, brandId = null, limit = 10, sour
 function ngScheduleAylaAutoReplyAfterInbound({ leadId, source = "webhook_ai_auto_wakeup", delayMs = null } = {}) {
   const cleanLeadId = String(leadId || "").trim();
   if (!cleanLeadId) return;
-  const waitMs = Number.isFinite(Number(delayMs)) ? Number(delayMs) : 4500;
 
-  setTimeout(async () => {
-    try {
-      const db = await readCrmDb();
-      const result = await ngAylaProcessFullAiAutoForLead({
-        db,
-        leadId: cleanLeadId,
-        source,
-        actorId: "webhook_wakeup",
-        force: false,
-      });
-      await writeCrmDb(db);
-      console.log("Ayla webhook wake-up result:", result);
-    } catch (error) {
-      console.error("Ayla webhook wake-up failed:", error.message);
-    }
-  }, Math.max(1000, waitMs));
+  // v111: do not trust one single setTimeout. In production the inline webhook AI path can
+  // fail after taking a duplicate lock, then the old one-shot wake-up fires too early and
+  // silently skips with ai_auto_already_processing. We now retry safely. Before every retry
+  // we re-read the DB and stop if a real outbound reply already exists after the latest inbound.
+  const firstDelay = Number.isFinite(Number(delayMs)) ? Math.max(1000, Number(delayMs)) : 4500;
+  const attempts = [firstDelay, 22000, 52000];
+
+  attempts.forEach((waitMs, index) => {
+    setTimeout(async () => {
+      try {
+        const db = await readCrmDb();
+        const lead = getLeadByAnyId(db, cleanLeadId) || ngAffArray(db, "leads").find((item) => String(item.id || item.lead_id || "") === cleanLeadId);
+        if (!lead) {
+          console.warn("Ayla webhook wake-up skipped: lead not found", { leadId: cleanLeadId, source, attempt: index + 1 });
+          return;
+        }
+
+        const messages = ngLeadConversationMessages(db, lead.id || lead.lead_id || cleanLeadId);
+        const latestInbound = ngLatestInbound(messages);
+        if (!latestInbound) {
+          console.log("Ayla webhook wake-up skipped: no latest inbound", { leadId: cleanLeadId, source, attempt: index + 1 });
+          return;
+        }
+
+        if (ngHasOutboundAfterInbound(messages, latestInbound)) {
+          console.log("Ayla webhook wake-up not needed: outbound already exists after latest inbound", { leadId: cleanLeadId, source, attempt: index + 1 });
+          return;
+        }
+
+        // First try respects normal guards. Retry attempts bypass stale fingerprint/lock state only
+        // after the cooldown window, while still avoiding duplicates via the outbound-after-inbound check above.
+        const result = await ngAylaProcessFullAiAutoForLead({
+          db,
+          lead,
+          leadId: lead.id || cleanLeadId,
+          source: `${source}_attempt_${index + 1}`,
+          actorId: "webhook_wakeup",
+          force: index > 0,
+        });
+
+        ngAffArray(db, "ai_auto_runs").unshift({
+          id: uuid(),
+          lead_id: lead.id || lead.lead_id || cleanLeadId,
+          source: `${source}_attempt_${index + 1}`,
+          status: result?.sent ? "sent" : (result?.skipped ? "skipped" : "checked"),
+          result,
+          latest_inbound_text: ngMessageText(latestInbound).slice(0, 240),
+          created_by: "webhook_wakeup",
+          created_at: ngAffNow(),
+        });
+
+        await writeCrmDb(db);
+        console.log("Ayla webhook wake-up result:", result);
+      } catch (error) {
+        console.error("Ayla webhook wake-up failed:", error.message, error.response?.data || "");
+      }
+    }, waitMs);
+  });
 }
 
 app.post("/admin/crm/automation/revive-ayla", async (req, res) => {
@@ -24361,6 +24402,78 @@ app.post("/admin/crm/automation/force-reply-latest", async (req, res) => {
 
     await writeCrmDb(db);
     return res.json({ success: true, build: NEXTGEN_BACKEND_BUILD, lead_id: lead.id || lead.lead_id, result });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message, detail: error.response?.data || null });
+  }
+});
+
+
+// v111: one-click/admin diagnostic repair for the exact symptom: inbound messages exist,
+// but Ayla did not produce any outbound reply after the latest inbound.
+app.post("/admin/crm/automation/wake-silent-inbound", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const key = req.body?.lead_id || req.body?.phone || req.body?.contact || req.body?.id || "";
+    const limit = Math.max(1, Math.min(50, Number(req.body?.limit || 10)));
+    const force = req.body?.force !== false;
+
+    let candidates = [];
+    if (key) {
+      const lead = getLeadByAnyId(db, key);
+      if (!lead) return res.status(404).json({ success: false, error: "Lead not found", key });
+      candidates = [lead];
+    } else {
+      candidates = ngAffArray(db, "leads")
+        .map(ngNormalizeLeadAiMode)
+        .filter((lead) => String(lead.ai_mode || lead.automation_mode || "auto").toLowerCase() === "auto")
+        .slice(0, limit * 3);
+    }
+
+    const results = [];
+    for (const lead of candidates) {
+      if (results.length >= limit) break;
+      const messages = ngLeadConversationMessages(db, lead.id || lead.lead_id);
+      const latestInbound = ngLatestInbound(messages);
+      if (!latestInbound) {
+        if (key) results.push({ lead_id: lead.id || lead.lead_id, skipped: true, reason: "no_inbound" });
+        continue;
+      }
+      if (ngHasOutboundAfterInbound(messages, latestInbound)) {
+        if (key) results.push({ lead_id: lead.id || lead.lead_id, skipped: true, reason: "outbound_already_after_latest_inbound" });
+        continue;
+      }
+
+      lead.ai_mode = "auto";
+      lead.automation_mode = "auto";
+      lead.ai_mode_set = false;
+      lead.automation_mode_set = false;
+      lead.mode_locked = false;
+      lead.ai_mode_manually_set = false;
+      if (force) {
+        lead.last_ai_auto_replied_message_id = null;
+        lead.last_ai_auto_replied_at = null;
+      }
+
+      const result = await ngAylaProcessFullAiAutoForLead({
+        db,
+        lead,
+        brandId: lead.brand_id || getCrmBrandId(req, db),
+        source: "admin_wake_silent_inbound",
+        actorId: user.id || "admin",
+        force,
+      });
+      results.push({
+        lead_id: lead.id || lead.lead_id,
+        name: lead.name || lead.lead_name || "Lead",
+        phone: lead.phone || lead.whatsapp || lead.whatsapp_phone || "",
+        latest_inbound: ngMessageText(latestInbound).slice(0, 240),
+        result,
+      });
+    }
+
+    await writeCrmDb(db);
+    return res.json({ success: true, build: NEXTGEN_BACKEND_BUILD, count: results.length, results });
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, error: error.message, detail: error.response?.data || null });
   }
