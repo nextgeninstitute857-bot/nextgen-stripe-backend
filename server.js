@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v94-ayla-webhook-auto-wakeup";
+const NEXTGEN_BACKEND_BUILD = "v97-ayla-inbound-message-lookup-fix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -21252,9 +21252,121 @@ function ngTrainingContextForFullAiAuto(db) {
 }
 
 function ngLeadConversationMessages(db, leadId) {
-  return ngAffArray(db, "conversations")
-    .filter((item) => String(item.lead_id) === String(leadId))
-    .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
+  // v97 targeted fix: Full AI Auto must see WhatsApp webhook messages.
+  // Earlier versions only read db.conversations, while WhatsApp inbound is also stored in
+  // message_logs / inbound_messages / outbound_messages. That caused process-ai-auto to
+  // return reason: no_inbound even when the student message was visible in the inbox.
+  const id = String(leadId || "").trim();
+  if (!id) return [];
+
+  const leads = [
+    ...ngAffArray(db, "leads"),
+    ...safeArray(db?.leads),
+  ];
+
+  const lead = leads.find((item) => {
+    return [item?.id, item?._id, item?.lead_id, item?.uuid]
+      .map((value) => String(value || ""))
+      .includes(id);
+  }) || {};
+
+  const leadPhones = [
+    lead.phone,
+    lead.whatsapp,
+    lead.whatsapp_phone,
+    lead.phone_number,
+    lead.mobile,
+    lead.contact,
+    lead.wa_id,
+  ]
+    .map((value) => String(value || "").replace(/\D/g, ""))
+    .filter(Boolean);
+
+  const sameLead = (item = {}) => {
+    const itemLeadIds = [
+      item.lead_id,
+      item.leadId,
+      item.lead,
+      item.contact_id,
+      item.contactId,
+      item.crm_lead_id,
+      item.conversation_id,
+      item.thread_lead_id,
+    ].map((value) => String(value || ""));
+
+    if (itemLeadIds.includes(id)) return true;
+
+    if (!leadPhones.length) return false;
+
+    const itemPhones = [
+      item.phone,
+      item.whatsapp,
+      item.whatsapp_phone,
+      item.phone_number,
+      item.mobile,
+      item.to,
+      item.from,
+      item.recipient,
+      item.sender,
+      item.wa_id,
+      item.customer_phone,
+      item.lead_phone,
+      item.contact_phone,
+    ]
+      .map((value) => String(value || "").replace(/\D/g, ""))
+      .filter(Boolean);
+
+    return itemPhones.some((phone) => {
+      return leadPhones.some((leadPhone) => {
+        return phone === leadPhone || phone.endsWith(leadPhone) || leadPhone.endsWith(phone);
+      });
+    });
+  };
+
+  const timeMs = (item = {}) => {
+    const raw = item.created_at || item.received_at || item.sent_at || item.delivered_at || item.timestamp || item.updated_at || item.time || null;
+    const ms = raw ? new Date(raw).getTime() : 0;
+    return Number.isFinite(ms) ? ms : 0;
+  };
+
+  const normalizeDirection = (item = {}) => {
+    const raw = String(item.direction || item.message_direction || item.type || "").toLowerCase();
+    if (["inbound", "received", "incoming", "lead", "student"].includes(raw) || item.inbound === true || item.is_inbound === true) return "inbound";
+    if (["outbound", "sent", "outgoing", "agent", "assistant"].includes(raw) || item.outbound === true || item.is_outbound === true || item.agent_initiated === true) return "outbound";
+    if (item.from && !item.sent_at && !item.agent_id) return "inbound";
+    if (item.to && (item.sent_at || item.agent_id || item.sender_role === "assistant")) return "outbound";
+    return raw || "";
+  };
+
+  const sources = [
+    ...ngAffArray(db, "message_logs"),
+    ...ngAffArray(db, "crm_message_logs"),
+    ...ngAffArray(db, "inbound_messages"),
+    ...ngAffArray(db, "outbound_messages"),
+    ...ngAffArray(db, "conversations"),
+  ];
+
+  const seen = new Set();
+
+  return sources
+    .filter(sameLead)
+    .map((item) => {
+      const direction = normalizeDirection(item);
+      return {
+        ...item,
+        direction: direction || item.direction || item.message_direction || "",
+        message_text: ngMessageText(item) || item.message_text || item.text || item.body || item.message || item.content || "",
+        created_at: item.created_at || item.received_at || item.sent_at || item.timestamp || item.updated_at || new Date(0).toISOString(),
+      };
+    })
+    .filter((item) => ngMessageText(item))
+    .filter((item) => {
+      const key = String(item.id || item.provider_message_id || item.message_id || item.whatsapp_message_id || `${normalizeDirection(item)}:${timeMs(item)}:${ngMessageText(item)}`);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => timeMs(a) - timeMs(b));
 }
 function ngMessageText(item = {}) { return String(item.message_text || item.text || item.body || item.message || item.content || "").trim(); }
 function ngIsInboundMessage(item = {}) {
