@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v107-ayla-contact-capture-whatsapp-reply";
+const NEXTGEN_BACKEND_BUILD = "v108-unified-thread-ayla-reply";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -11082,8 +11082,25 @@ app.get("/admin/crm/conversations/:leadId", async (req, res) => {
   try {
     await requireCrmAdmin(req);
     const db = await readCrmDb();
-    const conversations = ensureCrmArray(db, "conversations").filter((item) => String(item.lead_id) === String(req.params.leadId)).sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
-    res.json({ success: true, conversations, messages: conversations });
+    const rawKey = String(req.params.leadId || "").trim();
+    const lead = getLeadByAnyId(db, rawKey);
+    const resolvedLeadId = lead?.id || lead?.lead_id || rawKey;
+    const messages = typeof ngLeadConversationMessages === "function"
+      ? ngLeadConversationMessages(db, resolvedLeadId)
+      : ensureCrmArray(db, "conversations")
+        .filter((item) => String(item.lead_id || "") === String(resolvedLeadId))
+        .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
+
+    res.json({
+      success: true,
+      lead: lead || null,
+      lead_id: resolvedLeadId,
+      query_key: rawKey,
+      conversations: messages,
+      messages,
+      count: messages.length,
+      sources: { unified_thread: true, includes: ["conversations", "message_logs", "inbound_messages", "outbound_messages"] },
+    });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -12014,8 +12031,41 @@ function getStableLeadId(lead = {}) {
 function getLeadByAnyId(db, id) {
   const cleanId = String(id || "").trim();
   if (!cleanId) return null;
+
+  const cleanLower = cleanId.toLowerCase();
+  const cleanDigits = cleanId.replace(/\D/g, "");
+
   return ensureCrmArray(db, "leads").find((lead) => {
-    return [lead.id, lead._id, lead.lead_id, lead.uuid].map((x) => String(x || "").trim()).includes(cleanId);
+    const idFields = [lead.id, lead._id, lead.lead_id, lead.uuid, lead.contact_id, lead.conversation_id]
+      .map((x) => String(x || "").trim())
+      .filter(Boolean);
+    if (idFields.includes(cleanId)) return true;
+
+    const emailFields = [lead.email, lead.student_email, lead.customer_email]
+      .map((x) => String(x || "").trim().toLowerCase())
+      .filter(Boolean);
+    if (cleanLower && emailFields.includes(cleanLower)) return true;
+
+    if (cleanDigits) {
+      const phoneFields = [
+        lead.phone,
+        lead.whatsapp,
+        lead.whatsapp_phone,
+        lead.whatsapp_number,
+        lead.mobile,
+        lead.contact_number,
+        lead.phone_number,
+        lead.wa_id,
+        lead.platform_contact_id,
+        lead.contact,
+      ]
+        .map((x) => String(x || "").replace(/\D/g, ""))
+        .filter(Boolean);
+
+      if (phoneFields.some((phone) => phone === cleanDigits || phone.endsWith(cleanDigits) || cleanDigits.endsWith(phone))) return true;
+    }
+
+    return false;
   }) || null;
 }
 
@@ -12203,35 +12253,47 @@ function getMetaAccountIdForPlatform(platform, integration = {}) {
 
 function buildConversationInbox(db) {
   const leads = ensureCrmArray(db, "leads").map(normalizeLeadForResponse);
-  const conversations = ensureCrmArray(db, "conversations");
 
   return leads.map((lead) => {
     const leadId = getStableLeadId(lead);
-    const leadMessages = conversations
-      .filter((message) => String(message.lead_id || "") === String(leadId))
-      .sort((a, b) => String(b.created_at || b.timestamp || "").localeCompare(String(a.created_at || a.timestamp || "")));
+    const leadMessages = typeof ngLeadConversationMessages === "function"
+      ? ngLeadConversationMessages(db, leadId)
+      : ensureCrmArray(db, "conversations")
+        .filter((message) => String(message.lead_id || "") === String(leadId))
+        .sort((a, b) => String(a.created_at || a.timestamp || "").localeCompare(String(b.created_at || b.timestamp || "")));
 
-    const lastMessage = leadMessages[0] || null;
+    const newestFirst = [...leadMessages].sort((a, b) => {
+      const at = new Date(a.created_at || a.received_at || a.sent_at || a.timestamp || a.updated_at || 0).getTime();
+      const bt = new Date(b.created_at || b.received_at || b.sent_at || b.timestamp || b.updated_at || 0).getTime();
+      return bt - at;
+    });
+
+    const lastMessage = newestFirst[0] || null;
     const unreadCount = leadMessages.filter((message) => {
-      return String(message.direction || "inbound") === "inbound" && !message.read_at && !message.admin_read_at;
+      const dir = String(message.direction || message.message_direction || "inbound").toLowerCase();
+      return ["inbound", "received", "lead", "student"].includes(dir) && !message.read_at && !message.admin_read_at;
     }).length;
 
     return {
       conversation_id: lead.conversation_id || leadId,
       lead_id: leadId,
       lead_name: lead.name || lead.display_name || "Unknown Lead",
-      contact: lead.email || lead.phone || lead.whatsapp_phone || lead.platform_contact_id || "",
+      contact: lead.email || lead.phone || lead.whatsapp || lead.whatsapp_phone || lead.platform_contact_id || "",
       platform: normalizeLeadSourcePlatform(lead),
       source_platform: normalizeLeadSourcePlatform(lead),
       platform_icon: normalizeLeadSourcePlatform(lead),
-      last_message: lastMessage?.message_text || lastMessage?.text || lead.last_message || "",
-      last_message_at: lastMessage?.created_at || lastMessage?.timestamp || lead.last_message_at || lead.updated_at || lead.created_at || null,
+      messages: leadMessages,
+      message_count: leadMessages.length,
+      last_message: lastMessage?.message_text || lastMessage?.text || lastMessage?.body || lastMessage?.message || lead.last_message || "",
+      last_message_at: lastMessage?.created_at || lastMessage?.received_at || lastMessage?.sent_at || lastMessage?.timestamp || lead.last_message_at || lead.updated_at || lead.created_at || null,
       unread_count: unreadCount,
       status: lead.status || lead.lead_status || "new",
+      lead_status: lead.lead_status || lead.status || "new",
       assigned_agent: lead.assigned_agent_name || lead.assigned_agent || lead.assigned_agent_id || "Unassigned",
       direction: lead.conversation_direction || "inbound",
       client_reached_out: lead.client_reached_out !== false,
       agent_initiated: Boolean(lead.agent_initiated),
+      ai_mode: lead.ai_mode || lead.automation_mode || "auto",
     };
   }).sort((a, b) => String(b.last_message_at || "").localeCompare(String(a.last_message_at || "")));
 }
@@ -12499,6 +12561,9 @@ function appendSocialConversation(db, { lead, platform, direction = "inbound", t
   });
 
   ensureCrmArray(db, "conversations").push(message);
+  if (typeof ngMirrorConversationMessageToStores === "function") {
+    ngMirrorConversationMessageToStores(db, message, lead);
+  }
 
   if (lead) {
     lead.id = leadId || lead.id || uuid();
@@ -12517,6 +12582,75 @@ function appendSocialConversation(db, { lead, platform, direction = "inbound", t
   }
 
   return message;
+}
+
+
+function ngMirrorConversationMessageToStores(db, message = {}, lead = {}) {
+  const text = String(message.message_text || message.text || message.body || message.message || "").trim();
+  if (!text) return null;
+
+  const direction = normalizeLeadDirection(message.direction || message.message_direction || "inbound", "inbound");
+  const channel = normalizeSocialPlatform(message.platform || message.source_platform || message.channel || lead?.source_platform || "whatsapp");
+  const leadId = message.lead_id || lead?.id || lead?.lead_id || null;
+  const providerMessageId = message.platform_message_id || message.provider_message_id || message.message_id || null;
+  const createdAt = message.created_at || message.received_at || message.sent_at || message.timestamp || nowIso();
+
+  const sameTextRecent = (item = {}) => {
+    const itemText = String(item.message_text || item.text || item.body || item.message || "").trim();
+    if (!itemText || itemText !== text) return false;
+    const sameLead = String(item.lead_id || "") === String(leadId || "");
+    const sameProvider = providerMessageId && String(item.provider_message_id || item.platform_message_id || item.message_id || "") === String(providerMessageId);
+    const sameDirection = normalizeLeadDirection(item.direction || item.message_direction || "", "") === direction;
+    const itemTime = new Date(item.created_at || item.received_at || item.sent_at || item.timestamp || 0).getTime();
+    const msgTime = new Date(createdAt || 0).getTime();
+    const closeTime = Number.isFinite(itemTime) && Number.isFinite(msgTime) && Math.abs(itemTime - msgTime) <= 5000;
+    return Boolean((sameProvider || (sameLead && closeTime)) && sameDirection);
+  };
+
+  const logs = ensureCrmArray(db, "message_logs");
+  if (!logs.some(sameTextRecent)) {
+    logs.push(withTimestamps({
+      id: uuid(),
+      brand_id: message.brand_id || lead?.brand_id || null,
+      channel,
+      provider: channel,
+      direction,
+      lead_id: leadId,
+      from: direction === "inbound" ? (message.from || lead?.phone || lead?.whatsapp || lead?.platform_contact_id || "") : "NextGen",
+      to: direction === "outbound" ? (message.to || lead?.phone || lead?.whatsapp || lead?.platform_contact_id || "") : "NextGen",
+      text,
+      message_text: text,
+      provider_message_id: providerMessageId,
+      status: direction === "inbound" ? "received" : "sent",
+      received_at: direction === "inbound" ? createdAt : null,
+      sent_at: direction === "outbound" ? createdAt : null,
+      created_at: createdAt,
+      metadata: { source: "conversation_mirror", conversation_id: message.id || message.conversation_id || null },
+    }));
+  }
+
+  const bucketName = direction === "inbound" ? "inbound_messages" : "outbound_messages";
+  const bucket = ensureCrmArray(db, bucketName);
+  if (!bucket.some(sameTextRecent)) {
+    bucket.push(withTimestamps({
+      id: uuid(),
+      brand_id: message.brand_id || lead?.brand_id || null,
+      channel,
+      provider: channel,
+      direction,
+      lead_id: leadId,
+      text,
+      message_text: text,
+      provider_message_id: providerMessageId,
+      status: direction === "inbound" ? "received" : "sent",
+      received_at: direction === "inbound" ? createdAt : null,
+      sent_at: direction === "outbound" ? createdAt : null,
+      created_at: createdAt,
+      metadata: { source: "conversation_mirror", conversation_id: message.id || message.conversation_id || null },
+    }));
+  }
+
+  return true;
 }
 
 function createSocialClientDataEvent(db, { lead, platform, payload = {}, integration = null }) {
@@ -18746,8 +18880,40 @@ function ngApplyTemplateVariables(text, data = {}) {
 }
 
 function ngGenerateFallbackReply({ db, agent = null, lead = {}, messages = [], mode = "reply" }) {
-  const lastMessage = messages.length ? String(messages[messages.length - 1]?.text || messages[messages.length - 1]?.message || "") : "";
+  const lastItem = messages.length ? messages[messages.length - 1] || {} : {};
+  const lastMessage = String(lastItem.text || lastItem.message || lastItem.message_text || lastItem.body || "").trim();
+  const lowerLast = lastMessage.toLowerCase();
   const trainingContext = ngBuildTrainingContext(db, agent);
+
+  if (/recording|recordings|recorded|replay|session video|class video|lecture video/.test(lowerLast)) {
+    return {
+      reply: "Yes Doctor, recordings are included. If you miss a live class, you can watch the recording later, revise the First Aid-linked teaching points, and complete the matching UWorld QID homework from the roadmap. I can also send you a recent recording/demo link so you can see the teaching style first.",
+      intent: "recording_question_answered",
+      next_action: "send_recording_or_demo",
+      confidence: 0.86,
+      used_training: Boolean(trainingContext)
+    };
+  }
+
+  if (/roadmap|plan|schedule|curriculum|system/.test(lowerLast)) {
+    return {
+      reply: "Doctor, the Step 1 roadmap starts with Cardiology, then MSK, CNS, Repro, Endo, GIT, Renal, Pulmo, Immunology, Hematology, and Psychiatry. Each day connects the First Aid topic, mapped UWorld QIDs, live teaching, matching recording, homework, and revision/assessment task.",
+      intent: "roadmap_question_answered",
+      next_action: "offer_demo_or_live_session",
+      confidence: 0.86,
+      used_training: Boolean(trainingContext)
+    };
+  }
+
+  if (/uworld|u world|library|qbank|mcq|question/.test(lowerLast)) {
+    return {
+      reply: "Doctor, our UWorld Video Library has around 150 hours of recorded MCQ teaching and 3000+ UWorld-style MCQs. The mentor explains the concept, First Aid connection, correct option, wrong options, and elimination approach together. You can check it through the LMS demo.",
+      intent: "uworld_library_question_answered",
+      next_action: "send_demo_link",
+      confidence: 0.86,
+      used_training: Boolean(trainingContext)
+    };
+  }
 
   if (mode === "welcome") {
     return {
@@ -23686,7 +23852,7 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
 // does not depend on you pressing Trigger Auto manually inside the inbox.
 async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: providedLead = null, brandId = null, source = "ayla_auto_wakeup", actorId = "system", force = false } = {}) {
   const leads = ngAffArray(db, "leads");
-  const lead = providedLead || leads.find((item) => String(item.id || item.lead_id || "") === String(leadId || ""));
+  const lead = providedLead || getLeadByAnyId(db, leadId) || leads.find((item) => String(item.id || item.lead_id || "") === String(leadId || ""));
 
   if (!lead) return { skipped: true, reason: "lead_not_found", lead_id: leadId || null };
 
@@ -24037,6 +24203,40 @@ app.post("/admin/crm/automation/diagnose-ayla", async (req, res) => {
     });
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+
+app.post("/admin/crm/automation/force-reply-latest", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const key = req.body?.lead_id || req.body?.phone || req.body?.contact || req.body?.id || "";
+    const lead = getLeadByAnyId(db, key);
+    if (!lead) return res.status(404).json({ success: false, error: "Lead not found", key });
+
+    lead.ai_mode = "auto";
+    lead.automation_mode = "auto";
+    lead.ai_mode_set = false;
+    lead.automation_mode_set = false;
+    lead.mode_locked = false;
+    lead.ai_mode_manually_set = false;
+    lead.last_ai_auto_replied_message_id = req.body?.reset_guard === false ? lead.last_ai_auto_replied_message_id : null;
+    lead.last_ai_auto_replied_at = req.body?.reset_guard === false ? lead.last_ai_auto_replied_at : null;
+
+    const result = await ngAylaProcessFullAiAutoForLead({
+      db,
+      lead,
+      brandId: lead.brand_id || getCrmBrandId(req, db),
+      source: "admin_force_reply_latest",
+      actorId: user.id || "admin",
+      force: req.body?.force !== false,
+    });
+
+    await writeCrmDb(db);
+    return res.json({ success: true, build: NEXTGEN_BACKEND_BUILD, lead_id: lead.id || lead.lead_id, result });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message, detail: error.response?.data || null });
   }
 });
 
@@ -33590,6 +33790,9 @@ function ngAppendWebsiteConversation(db, { lead, sessionId = "", direction = "in
     created_at: now,
   });
   ensureCrmArray(db, "conversations").push(message);
+  if (typeof ngMirrorConversationMessageToStores === "function") {
+    ngMirrorConversationMessageToStores(db, message, lead);
+  }
 
   if (lead) {
     lead.id = lead.id || lead.lead_id || uuid();
