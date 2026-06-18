@@ -14777,23 +14777,62 @@ function ngLeadLooksLikeMetaCampaignLead(lead = {}) {
   );
 }
 
+function ngLeadExplicitlyQueuedForFirstMessage(lead = {}) {
+  const queueStatus = normalizeCrmLower(lead.first_message_queue_status || lead.first_message_status || lead.first_template_status || "", "");
+  const sourceText = [
+    lead.origin,
+    lead.lead_origin,
+    lead.lead_source,
+    lead.source,
+    lead.source_type,
+    lead.source_platform,
+    lead.created_from,
+    lead.import_source,
+    lead.first_message_queue_source,
+    lead.opt_in_status,
+  ].map((x) => String(x || "").toLowerCase()).join(" ");
+
+  return Boolean(
+    lead.queue_first_message === true ||
+    lead.send_first_message_after_import === true ||
+    lead.first_message_after_import === true ||
+    ["queued", "pending", "retry_later", "failed", "failed_needs_fix"].includes(queueStatus) ||
+    sourceText.includes("import_confirm") ||
+    sourceText.includes("console_import_test") ||
+    sourceText.includes("meta") ||
+    sourceText.includes("lead form") ||
+    sourceText.includes("requested_contact")
+  );
+}
+
 function ngCanSendAutoFirstMessage(db, lead = {}) {
   const stage = normalizeCrmLeadStageValue(lead.stage || lead.lead_stage || lead.sales_stage || lead.pipeline_stage || lead.status || "new_lead", "new_lead");
   const status = normalizeCrmLower(lead.status || lead.lead_status || "new", "new");
   const unsub = normalizeCrmLower(lead.unsubscribe_status || lead.opt_out_status || "active", "active");
   const aiMode = normalizeCrmLeadAiMode(lead.ai_mode || lead.automation_mode || "draft");
+  const queuedByImportOrAdmin = ngLeadExplicitlyQueuedForFirstMessage(lead);
 
-  if (["paid_enrolled", "not_interested", "lost", "unsubscribed"].includes(stage)) return { ok: false, reason: "lead_stage_blocks_first_message" };
-  if (["paid", "enrolled", "lost", "unsubscribed", "not_interested"].includes(status)) return { ok: false, reason: "lead_status_blocks_first_message" };
+  if (["paid_enrolled", "not_interested", "lost", "unsubscribed", "deleted"].includes(stage)) return { ok: false, reason: "lead_stage_blocks_first_message" };
+  if (["paid", "enrolled", "lost", "unsubscribed", "not_interested", "deleted"].includes(status)) return { ok: false, reason: "lead_status_blocks_first_message" };
   if (["stop", "stopped", "opted_out", "unsubscribed", "inactive"].includes(unsub)) return { ok: false, reason: "lead_unsubscribed_or_inactive" };
   if (aiMode === "manual" && lead.ai_enabled === false) return { ok: false, reason: "ai_manual_disabled" };
-  if (lead.whatsapp_send_suppressed === true) return { ok: false, reason: lead.whatsapp_suppressed_reason || "whatsapp_send_suppressed" };
+
+  // v95: do not permanently block an explicitly queued first message because of an old template failure flag.
+  // True opt-out/invalid number still blocks; stale template/provider suppressions can be retried after templates are fixed.
+  const suppressedReason = normalizeCrmLower(lead.whatsapp_suppressed_reason || lead.first_message_error || "", "");
+  if (lead.whatsapp_send_suppressed === true && !queuedByImportOrAdmin) return { ok: false, reason: lead.whatsapp_suppressed_reason || "whatsapp_send_suppressed" };
+  if (lead.whatsapp_send_suppressed === true && queuedByImportOrAdmin && (suppressedReason.includes("opt") || suppressedReason.includes("stop") || suppressedReason.includes("invalid"))) return { ok: false, reason: lead.whatsapp_suppressed_reason || "whatsapp_send_suppressed" };
+
   if (["invalid_whatsapp_number", "possible_no_whatsapp", "needs_country_code", "not_sendable"].includes(normalizeCrmLower(lead.whatsapp_status || lead.whatsapp_validation_status || "", ""))) return { ok: false, reason: lead.whatsapp_status || "whatsapp_not_sendable" };
   if (["needs_country_code", "invalid_phone"].includes(normalizeCrmLower(lead.phone_import_status || lead.phone_import_category || "", ""))) return { ok: false, reason: lead.phone_import_status || "phone_import_not_ready" };
   if (!leadHasRecipientForChannel(lead, "whatsapp")) return { ok: false, reason: "no_whatsapp_recipient" };
-  if (!ngLeadLooksLikeMetaCampaignLead(lead)) return { ok: false, reason: "not_campaign_or_meta_lead" };
+
+  // v95: every imported/new lead may receive the first approved template unless admin turned it off.
+  // We no longer require the lead source to literally contain Meta/campaign.
+  if (!ngLeadLooksLikeMetaCampaignLead(lead) && !queuedByImportOrAdmin) return { ok: false, reason: "not_queued_for_first_message" };
+
   if (lead.first_message_sent_at || lead.first_template_sent_at || stage === "first_message_sent") return { ok: false, reason: "first_message_already_marked_sent" };
-  if (ngLeadHasOutboundTemplate(db, lead, ["meta_ad_first_message", "first_message_intro", "meta_first_message", "greeting_exam_type_question", "exam_type_question", "sunday_first_message"])) return { ok: false, reason: "first_message_already_logged" };
+  if (ngLeadHasOutboundTemplate(db, lead, ["meta_ad_first_message", "first_message_intro", "meta_first_message", "greeting_exam_type_question", "exam_type_question", "sunday_first_message", "welcome_demo_invite"])) return { ok: false, reason: "first_message_already_logged" };
   return { ok: true, reason: "eligible" };
 }
 
@@ -14853,9 +14892,73 @@ function ngIsSundayNoLiveSessionDay(db = {}, date = new Date()) {
 }
 
 function ngResolveAutoFirstMessageTemplateKey(db = {}, lead = {}) {
+  const settings = db?.ai_orchestration_settings || db?.assistant_settings || {};
+  const leadPreferred = normalizeTemplateLookupKey(lead.first_message_template_key || lead.template_key || lead.whatsapp_template_key || "");
+  if (leadPreferred) return WHATSAPP_TEMPLATE_NAME_ALIASES[leadPreferred] || leadPreferred;
+
+  const settingsPreferred = normalizeTemplateLookupKey(settings.first_message_template_key || settings.meta_first_message_template_key || settings.default_first_message_template_key || "");
+  if (settingsPreferred) return WHATSAPP_TEMPLATE_NAME_ALIASES[settingsPreferred] || settingsPreferred;
+
+  // v95: use the already-approved Meta first-message template by default for all first outreach.
+  // This is safest for cold WhatsApp messages because it opens a conversation with an approved Marketing template.
   if (ngIsSundayNoLiveSessionDay(db)) return "greeting_exam_type_question";
-  if (!ngShouldUseTodayLiveSessionFirstInvite(db)) return "greeting_exam_type_question";
   return "meta_ad_first_message";
+}
+
+function ngGetOfficialWhatsAppTemplateNameForKey(templateKey = "") {
+  const clean = normalizeTemplateLookupKey(templateKey);
+  return WHATSAPP_TEMPLATE_NAME_ALIASES[clean] || clean || "meta_ad_first_message";
+}
+
+function ngAutoFirstVirtualTemplate(templateKey = "meta_ad_first_message", existingTemplate = null) {
+  const key = ngGetOfficialWhatsAppTemplateNameForKey(templateKey);
+  if (existingTemplate) {
+    return {
+      ...existingTemplate,
+      key: existingTemplate.key || key,
+      template_key: existingTemplate.template_key || existingTemplate.key || key,
+      provider_template_name: existingTemplate.provider_template_name || existingTemplate.meta_template_name || existingTemplate.whatsapp_template_name || key,
+      meta_template_name: existingTemplate.meta_template_name || existingTemplate.provider_template_name || existingTemplate.whatsapp_template_name || key,
+      whatsapp_template_name: existingTemplate.whatsapp_template_name || existingTemplate.meta_template_name || existingTemplate.provider_template_name || key,
+      language_code: existingTemplate.language_code || existingTemplate.meta_language || existingTemplate.whatsapp_language || "en",
+      meta_language: existingTemplate.meta_language || existingTemplate.language_code || existingTemplate.whatsapp_language || "en",
+      whatsapp_language: existingTemplate.whatsapp_language || existingTemplate.meta_language || existingTemplate.language_code || "en",
+    };
+  }
+
+  if (key === "greeting_exam_type_question") {
+    return {
+      id: key,
+      key,
+      template_key: key,
+      name: "Greeting Exam Type Question",
+      channel: "whatsapp",
+      body: "Hi Doctor, welcome to NextGen USMLE. Are you preparing for Step 1 or Step 2 CK?",
+      provider_template_name: key,
+      meta_template_name: key,
+      whatsapp_template_name: key,
+      language_code: "en",
+      meta_language: "en",
+      whatsapp_language: "en",
+      variables: [],
+    };
+  }
+
+  return {
+    id: key,
+    key,
+    template_key: key,
+    name: "Meta Ad First Message",
+    channel: "whatsapp",
+    body: "Hi Doctor {{student_name}}, this is NextGen USMLE. You reached out about {{exam_type}} preparation. We have a live guidance session today at {{session_time}} to explain the program and mentor teaching style. Can you join?",
+    provider_template_name: "meta_ad_first_message",
+    meta_template_name: "meta_ad_first_message",
+    whatsapp_template_name: "meta_ad_first_message",
+    language_code: "en",
+    meta_language: "en",
+    whatsapp_language: "en",
+    variables: ["student_name", "exam_type", "session_time"],
+  };
 }
 
 function ngAutoFirstFallbackTextForTemplate(templateKey = "meta_ad_first_message") {
@@ -14878,10 +14981,12 @@ async function ngSendAutoFirstMessageForLead({ db, lead, brandId = null, actorId
   }
 
   const templateKey = ngResolveAutoFirstMessageTemplateKey(db, lead);
-  const template =
+  const storedTemplate =
     getMessageTemplateByKey(db, templateKey) ||
     getMessageTemplateByKey(db, templateKey.toUpperCase()) ||
+    getMessageTemplateByKey(db, ngGetOfficialWhatsAppTemplateNameForKey(templateKey)) ||
     (templateKey === "meta_ad_first_message" ? getMessageTemplateByKey(db, "META_AD_FIRST_MESSAGE") : null);
+  const template = ngAutoFirstVirtualTemplate(templateKey, storedTemplate);
   const vars = { ...ngFirstMessageVariablesForLead(lead), ai_control_command_context: ngBuildAylaCommandContext(db, lead).slice(0, 3000) };
   const fallbackText = ngAutoFirstFallbackTextForTemplate(templateKey);
   const to = getBestRecipientForChannel({ channel: "whatsapp", lead });
@@ -14906,8 +15011,9 @@ async function ngSendAutoFirstMessageForLead({ db, lead, brandId = null, actorId
       template_key: templateKey,
       sunday_template_router: ngIsSundayNoLiveSessionDay(db),
       live_session_timing_phase: ngLiveSessionTimingStateNow(db).phase,
-      template_name: template?.provider_template_name || template?.meta_template_name || template?.whatsapp_template_name || templateKey,
-      whatsapp_template_name: template?.whatsapp_template_name || template?.meta_template_name || template?.provider_template_name || templateKey,
+      template_name: ngGetOfficialWhatsAppTemplateNameForKey(templateKey),
+      meta_template_name: ngGetOfficialWhatsAppTemplateNameForKey(templateKey),
+      whatsapp_template_name: ngGetOfficialWhatsAppTemplateNameForKey(templateKey),
       language_code: normalizeWhatsAppLanguageCode(template?.meta_language || template?.whatsapp_language || template?.language_code || "en"),
       triggered_by: actorId || "system",
     },
@@ -15044,6 +15150,35 @@ async function ngRunDueAutoFirstMessages({ db, brandId = null, limit = 25, actor
 
   return results;
 }
+
+
+app.get("/admin/crm/debug/first-message-template", async (req, res) => {
+  try {
+    const db = await readCrmDb();
+    const leadId = req.query.lead_id || req.query.id || "";
+    const phone = req.query.phone || req.query.to || "";
+    const lead = leadId ? getLeadByAnyId(db, leadId) : findLeadByPhoneOrEmail(db, { phone });
+    const templateKey = ngResolveAutoFirstMessageTemplateKey(db, lead || {});
+    const storedTemplate = getMessageTemplateByKey(db, templateKey) || getMessageTemplateByKey(db, ngGetOfficialWhatsAppTemplateNameForKey(templateKey));
+    const template = ngAutoFirstVirtualTemplate(templateKey, storedTemplate);
+    const vars = ngFirstMessageVariablesForLead(lead || {});
+    const components = buildWhatsAppTemplateComponents({ template, lead: lead || {}, variables: vars, metadata: { template_key: templateKey, whatsapp_template_name: ngGetOfficialWhatsAppTemplateNameForKey(templateKey) } });
+    return res.json({
+      success: true,
+      lead_id: lead?.id || null,
+      can_send: lead ? ngCanSendAutoFirstMessage(db, lead) : null,
+      template_key: templateKey,
+      official_whatsapp_template_name: ngGetOfficialWhatsAppTemplateNameForKey(templateKey),
+      stored_template_found: Boolean(storedTemplate),
+      language_code: getWhatsAppLanguageCode({ template, metadata: { template_key: templateKey } }),
+      variables: vars,
+      components,
+      body: template.body || template.message || "",
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message, hint: error.hint || null });
+  }
+});
 
 async function requireAutomationRunPermission(req) {
   const authHeader = String(req.headers.authorization || "").replace("Bearer ", "").trim();
