@@ -14370,7 +14370,22 @@ async function sendCrmMessage({
   mediaType = "",
   caption = "",
 }) {
-  const template = templateId ? getMessageTemplateByKey(db, templateId) : null;
+  const forceFreeformAiAuto = Boolean(
+    metadata?.ai_auto === true ||
+    metadata?.full_ai_auto === true ||
+    [
+      "full_ai_auto",
+      "process_ai_auto",
+      "ayla_auto_wakeup",
+      "webhook_ai_auto_wakeup",
+      "universal_social_webhook_wakeup",
+      "social_webhook_full_ai_auto",
+    ].includes(String(metadata?.source || "").trim())
+  );
+
+  // v96: WhatsApp templates are only for cold first-message/reopen/scheduled approved messages.
+  // Once a student replies and Ayla is in Full AI Auto, force a natural free-form AI reply.
+  const template = (!forceFreeformAiAuto && templateId) ? getMessageTemplateByKey(db, templateId) : null;
   const lead = leadId ? getLeadByAnyId(db, leadId) : null;
   const commandMetadata = ngAylaOutboundCommandMetadata(db, lead || templateVariables?.lead || {});
   const cleanChannel = resolveCrmChannel({
@@ -14384,9 +14399,9 @@ async function sendCrmMessage({
   const finalText = renderTemplateString(text || template?.body || template?.message || "", variables);
   const finalTo = getBestRecipientForChannel({ channel: cleanChannel, to, lead });
   const integration = getIntegrationByPlatform(db, cleanChannel) || { id: null, platform: cleanChannel, brand_id: brandId };
-  const resolvedWhatsAppTemplateName = cleanChannel === "whatsapp" ? getWhatsAppTemplateName({ template, metadata }) : "";
-  const resolvedWhatsAppLanguageCode = cleanChannel === "whatsapp" ? getWhatsAppLanguageCode({ template, metadata }) : "";
-  const resolvedWhatsAppComponents = cleanChannel === "whatsapp"
+  const resolvedWhatsAppTemplateName = cleanChannel === "whatsapp" && !forceFreeformAiAuto ? getWhatsAppTemplateName({ template, metadata }) : "";
+  const resolvedWhatsAppLanguageCode = cleanChannel === "whatsapp" && !forceFreeformAiAuto ? getWhatsAppLanguageCode({ template, metadata }) : "";
+  const resolvedWhatsAppComponents = cleanChannel === "whatsapp" && !forceFreeformAiAuto
     ? buildWhatsAppTemplateComponents({ template, lead, variables, metadata })
     : [];
   const resolvedMediaUrl = normalizeCrmString(mediaUrl || metadata.media_url || metadata.mediaUrl || metadata.image_url || metadata.imageUrl || metadata.public_url || "");
@@ -22589,6 +22604,28 @@ async function ngAylaWaitBeforeAutoSend(db = {}) {
   return ms;
 }
 
+function ngAylaShouldBypassHardSalesRouterForNaturalConversation({ latestInboundText = "", messages = [] } = {}) {
+  const text = String(latestInboundText || "").trim();
+  const lower = text.toLowerCase();
+  if (!lower) return false;
+
+  // Keep deterministic safety/booking guards for these.
+  if (/(stop|unsubscribe|do not message|don't message|dont message|remove me|wrong number|not interested)/i.test(text)) return false;
+  if (/(price|cost|fee|fees|package|payment|discount|charges|how much)/i.test(text)) return false;
+  if (/(google\s*meet|meet|call|book|schedule|connect me|talk to mentor|speak to mentor)/i.test(text)) return false;
+
+  // v96: real student questions must go to OpenAI, not canned router lines.
+  // This includes program explanation, roadmap, UWorld, resources, tutors, demo, LMS, recordings, live class, etc.
+  if (/[?؟]/.test(text)) return true;
+  if (/(program|course|details|detail|included|include|how it works|roadmap|study plan|curriculum|schedule|resources|resource|uworld|u world|qbank|mcq|library|demo|lms|recording|recordings|video|lecture|live session|class|teacher|tutor|mentor|dr\.?\s*ahmad|first aid|pathoma|assessment|nbme|marathon|120)/i.test(text)) return true;
+
+  // If the student writes more than a very short acknowledgement, let Ayla reason naturally.
+  const words = lower.split(/\s+/).filter(Boolean);
+  if (words.length >= 4) return true;
+
+  return false;
+}
+
 async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }) {
   const cleanMessages = safeArray(messages)
     .filter((m) => ngMessageText(m))
@@ -22598,7 +22635,14 @@ async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }
     .map((m) => `${ngIsOutboundMessage(m) ? "NextGen/Ayla" : "Student"}: ${ngMessageText(m)}`)
     .join("\n");
 
-  const hardSalesReply = db
+  const latestInboundForRouting = ngLatestInbound(cleanMessages);
+  const latestInboundTextForRouting = ngMessageText(latestInboundForRouting || {});
+  const bypassHardRouter = ngAylaShouldBypassHardSalesRouterForNaturalConversation({
+    latestInboundText: latestInboundTextForRouting,
+    messages: cleanMessages,
+  });
+
+  const hardSalesReply = (!bypassHardRouter && db)
     ? ngAylaHardSalesRouter({ db, lead, messages: cleanMessages, channel })
     : null;
 
@@ -22636,6 +22680,7 @@ Backend-enforced identity:
 - You are a warm, professional NextGen USMLE admissions counselor and sales closer.
 - You are not a generic support bot, not a passive FAQ bot, and not a WhatsApp template sender.
 - Templates only open/reopen WhatsApp conversations. Once the student replies, you speak freely, naturally, and intelligently.
+- Never repeat the approved first-message template after the student has replied. Do not answer normal program questions with canned template text. Use the conversation history and explain like a human counselor.
 
 Non-negotiable reply style:
 - Keep replies short and readable by default. For UWorld/library/program explanations, use 3-5 short WhatsApp-style lines if needed.
@@ -22858,7 +22903,8 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
       channel,
       to,
       text: ai.reply,
-      templateId: req.body?.template_id || req.body?.template_key || null,
+      // v96: after inbound, Ayla must answer freely. Do not reuse approved templates for normal chat.
+      templateId: null,
       templateVariables: { lead },
       leadId: lead.id,
       mediaUrl: aylaMediaAsset?.public_url || aylaMediaAsset?.relative_url || "",
