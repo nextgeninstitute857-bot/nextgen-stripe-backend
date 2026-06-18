@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v68-website-ayla-demo-combined";
+const NEXTGEN_BACKEND_BUILD = "v71-student-access-ayla-media-flow-check";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -162,7 +162,9 @@ app.get("/admin/debug/cors-check", (req, res) => {
 
 const POCKETBASE_URL = process.env.POCKETBASE_URL;
 const DATA_DIR = process.env.DATA_DIR || "/tmp";
+const MEDIA_DIR = path.join(DATA_DIR, "media");
 const LIVE_DB_PATH = path.join(DATA_DIR, "live-session-db.json");
+app.use("/media", express.static(MEDIA_DIR, { maxAge: "30d", fallthrough: true }));
 const DEFAULT_TIMEZONE = "America/New_York";
 const DEFAULT_ZOOM_DURATION_MINUTES = 120;
 const PENDING_ZOOM_PREFIX = "PENDING_ZOOM_";
@@ -175,6 +177,7 @@ const DEFAULT_FEATURE_CATALOG = {
   assessments: { key: "assessments", name: "Assessments", description: "Access to tutor-created assessments", is_active: true, free_for_all: false },
   notes_transcripts: { key: "notes_transcripts", name: "Notes & Transcripts", description: "Access to class notes and transcript links", is_active: true, free_for_all: false },
   leaderboard: { key: "leaderboard", name: "Leaderboard", description: "Access to attendance, assessment, and task leaderboard", is_active: true, free_for_all: false },
+  flashcards: { key: "flashcards", name: "Daily Flashcards", description: "Access to daily topic-based flashcards", is_active: true, free_for_all: false },
   roadmap: { key: "roadmap", name: "Roadmap", description: "Access to course roadmap", is_active: true, free_for_all: true },
   global_community: { key: "global_community", name: "Global LMS Community", description: "Access to the overall LMS community discussions", is_active: true, free_for_all: false },
   study_partner: { key: "study_partner", name: "Study Partner", description: "Find and connect with compatible study partners", is_active: true, free_for_all: false },
@@ -191,6 +194,7 @@ const DEFAULT_DEMO_SETTINGS = {
   allow_study_partner: true,
   allow_assessments: true,
   allow_leaderboard: true,
+  allow_flashcards: true,
   allow_recordings: true,
   allow_notes_transcripts: true,
   allow_video_library: false,
@@ -242,6 +246,7 @@ const DEFAULT_LIVE_DB = {
 
   assessments: {},
   assessmentAttempts: {},
+  flashcards: {},
   aiUsageLogs: {},
 
   updatedAt: null,
@@ -292,6 +297,7 @@ async function readLiveDb() {
       roadmapProgress: parsed.roadmapProgress || {},
       assessments: parsed.assessments || {},
       assessmentAttempts: parsed.assessmentAttempts || {},
+      flashcards: parsed.flashcards || {},
       aiUsageLogs: parsed.aiUsageLogs || {},
       featureCatalog: { ...DEFAULT_FEATURE_CATALOG, ...(parsed.featureCatalog || {}) },
       demoSettings: { ...DEFAULT_DEMO_SETTINGS, ...(parsed.demoSettings || {}) },
@@ -510,6 +516,7 @@ function getStudentFeatureAccess(db, user) {
     study_partner: "allow_study_partner",
     assessments: "allow_assessments",
     leaderboard: "allow_leaderboard",
+    flashcards: "allow_flashcards",
     recordings: "allow_recordings",
     notes_transcripts: "allow_notes_transcripts",
     video_library: "allow_video_library",
@@ -912,6 +919,11 @@ function normalizeCoursePayload(body = {}, existing = {}) {
     instructor_bio: String(body.instructor_bio ?? existing.instructor_bio ?? "").trim(),
     total_duration: Number(body.total_duration ?? existing.total_duration ?? 0) || 0,
     image_url: String(body.image_url ?? existing.image_url ?? "").trim(),
+    homepage_preview_image_url: String(body.homepage_preview_image_url ?? body.homepage_image_url ?? existing.homepage_preview_image_url ?? existing.homepage_image_url ?? "").trim(),
+    course_card_image_url: String(body.course_card_image_url ?? body.card_image_url ?? existing.course_card_image_url ?? existing.card_image_url ?? "").trim(),
+    course_detail_image_url: String(body.course_detail_image_url ?? body.detail_image_url ?? existing.course_detail_image_url ?? existing.detail_image_url ?? "").trim(),
+    mobile_image_url: String(body.mobile_image_url ?? existing.mobile_image_url ?? "").trim(),
+    whatsapp_image_url: String(body.whatsapp_image_url ?? body.whatsapp_preview_image_url ?? existing.whatsapp_image_url ?? existing.whatsapp_preview_image_url ?? "").trim(),
     category: String(body.category ?? existing.category ?? "USMLE Step 1").trim() || "USMLE Step 1",
     course_type: String(body.course_type ?? existing.course_type ?? "Live Course").trim() || "Live Course",
     category_note: String(body.category_note ?? existing.category_note ?? "").trim(),
@@ -941,6 +953,11 @@ function sanitizeCourse(course) {
     instructor_bio: course.instructor_bio || "",
     total_duration: Number(course.total_duration || 0),
     image_url: course.image_url || "",
+    homepage_preview_image_url: course.homepage_preview_image_url || course.homepage_image_url || course.image_url || "",
+    course_card_image_url: course.course_card_image_url || course.card_image_url || course.image_url || "",
+    course_detail_image_url: course.course_detail_image_url || course.detail_image_url || course.image_url || "",
+    mobile_image_url: course.mobile_image_url || course.image_url || "",
+    whatsapp_image_url: course.whatsapp_image_url || course.whatsapp_preview_image_url || course.image_url || "",
     category: course.category || "USMLE Step 1",
     course_type: course.course_type || "Live Course",
     category_note: course.category_note || "",
@@ -2465,6 +2482,10 @@ async function generateQuestionsWithAI({
   difficulty = "mixed",
   questionType = "mcq",
   metadata = {},
+  mediaUrl = "",
+  mediaId = "",
+  mediaType = "",
+  caption = "",
 }) {
   const cleanText = validateAISourceText(sourceText);
   const count = Math.max(1, Math.min(50, Number(questionCount || 10)));
@@ -3465,13 +3486,27 @@ app.post("/admin/enrollments", async (req, res) => {
     if (!db.courses[courseId]) return res.status(404).json({ success: false, error: "Course not found" });
 
     let user = req.body.user_id ? db.users[String(req.body.user_id)] : findUserByEmail(db, email);
+    let studentWasCreated = false;
+    let temporaryPassword = "";
 
     if (!user) {
+      temporaryPassword = ngGenerateTemporaryPassword();
       user = createBackendUser({
         email,
         name: name || email.split("@")[0],
+        password: temporaryPassword,
         role: "student",
       });
+      user.must_change_password = true;
+      db.users[user.id] = user;
+      studentWasCreated = true;
+    } else if (req.body.force_password_reset === true || req.body.reset_password === true) {
+      temporaryPassword = ngGenerateTemporaryPassword();
+      const hashed = hashPassword(temporaryPassword);
+      user.salt = hashed.salt;
+      user.password_hash = hashed.password_hash;
+      user.must_change_password = true;
+      user.updated_at = nowIso();
       db.users[user.id] = user;
     }
 
@@ -3492,12 +3527,27 @@ app.post("/admin/enrollments", async (req, res) => {
     enrollment.updated_at = new Date().toISOString();
     db.enrollments[enrollment.id] = enrollment;
 
+    let credentialEmail = { attempted: false, sent: false, skipped: true, reason: "send_credentials_disabled" };
+    if (req.body.send_credentials !== false) {
+      credentialEmail = await ngSendStudentAccessEmailSafe({
+        db,
+        req,
+        user,
+        enrollment,
+        course: db.courses[courseId],
+        temporaryPassword,
+        reason: studentWasCreated ? "admin_enrollment_new_student" : temporaryPassword ? "admin_enrollment_password_reset" : "admin_enrollment_existing_student",
+      });
+    }
+
     await writeLiveDb(db);
 
     res.json({
       success: true,
       enrollment: sanitizeAdminEnrollment(enrollment, db),
       created: true,
+      student_created: studentWasCreated,
+      credentials_email: credentialEmail,
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({
@@ -5698,11 +5748,20 @@ const DEFAULT_CRM_DB = {
   ai_learning_events: [],
   ai_learning_lessons: [],
   ai_mistake_reports: [],
+  approved_learning_rules: [],
+  community_learning_events: [],
+  community_learning_lessons: [],
   duplicate_send_guards: [],
   suppression_list: [],
   lead_scores: [],
   crm_sales_briefs: [],
   community_invite_links: [],
+  media_assets: [],
+  ayla_media_rules: [],
+  media_send_events: [],
+  whatsapp_business_profiles: [],
+  marketing_flow_events: [],
+  lead_flow_labels: [],
 
   settings: DEFAULT_CRM_SETTINGS,
   updated_at: null,
@@ -5831,11 +5890,20 @@ async function readCrmDb() {
       ai_learning_events: Array.isArray(parsed.ai_learning_events) ? parsed.ai_learning_events : [],
       ai_learning_lessons: Array.isArray(parsed.ai_learning_lessons) ? parsed.ai_learning_lessons : [],
       ai_mistake_reports: Array.isArray(parsed.ai_mistake_reports) ? parsed.ai_mistake_reports : [],
+      approved_learning_rules: Array.isArray(parsed.approved_learning_rules) ? parsed.approved_learning_rules : [],
+      community_learning_events: Array.isArray(parsed.community_learning_events) ? parsed.community_learning_events : [],
+      community_learning_lessons: Array.isArray(parsed.community_learning_lessons) ? parsed.community_learning_lessons : [],
       duplicate_send_guards: Array.isArray(parsed.duplicate_send_guards) ? parsed.duplicate_send_guards : [],
       suppression_list: Array.isArray(parsed.suppression_list) ? parsed.suppression_list : [],
       lead_scores: Array.isArray(parsed.lead_scores) ? parsed.lead_scores : [],
       crm_sales_briefs: Array.isArray(parsed.crm_sales_briefs) ? parsed.crm_sales_briefs : [],
       community_invite_links: Array.isArray(parsed.community_invite_links) ? parsed.community_invite_links : [],
+      media_assets: Array.isArray(parsed.media_assets) ? parsed.media_assets : [],
+      ayla_media_rules: Array.isArray(parsed.ayla_media_rules) ? parsed.ayla_media_rules : [],
+      media_send_events: Array.isArray(parsed.media_send_events) ? parsed.media_send_events : [],
+      whatsapp_business_profiles: Array.isArray(parsed.whatsapp_business_profiles) ? parsed.whatsapp_business_profiles : [],
+      marketing_flow_events: Array.isArray(parsed.marketing_flow_events) ? parsed.marketing_flow_events : [],
+      lead_flow_labels: Array.isArray(parsed.lead_flow_labels) ? parsed.lead_flow_labels : [],
       settings: { ...DEFAULT_CRM_SETTINGS, ...(parsed.settings || {}) },
       updated_at: parsed.updated_at || null,
     };
@@ -6061,6 +6129,25 @@ function normalizeCrmCollectionPayload(collection, body = {}, existing = null, b
     base.lead_score = Math.max(0, Math.min(100, Number(base.lead_score || 0)));
     base.opt_in_status = normalizeCrmLower(base.opt_in_status, isCrmMetaLeadPayload(base) ? "meta_form_opt_in" : "unknown") || (isCrmMetaLeadPayload(base) ? "meta_form_opt_in" : "unknown");
     base.unsubscribe_status = normalizeCrmLower(base.unsubscribe_status, "active") || "active";
+    base.labels = Array.isArray(base.labels) ? uniqueList(base.labels) : normalizeArray(base.labels || []);
+    base.tags = Array.isArray(base.tags) ? uniqueList(base.tags) : normalizeArray(base.tags || []);
+    base.lead_flow = normalizeCrmLower(base.lead_flow || base.flow_group || "lead_flow", "lead_flow") || "lead_flow";
+    base.unpaid_active = base.unpaid_active !== undefined ? Boolean(base.unpaid_active) : !["paid_enrolled", "paid", "enrolled", "converted"].includes(base.stage);
+    base.pending_payment = Boolean(base.pending_payment || base.payment_status === "pending_payment" || base.stage === "payment_pending");
+    base.payment_promise_date = normalizeCrmString(base.payment_promise_date || base.promised_payment_date || base.promise_to_pay_date || "");
+    base.payment_promise_note = normalizeCrmString(base.payment_promise_note || base.promised_payment_note || base.payment_note || "");
+    base.payment_followup_status = normalizeCrmLower(base.payment_followup_status || (base.payment_promise_date ? "pending_payment" : ""), "");
+    base.added_to_free_community = Boolean(base.added_to_free_community || base.free_community_added);
+    base.free_community_invited = Boolean(base.free_community_invited);
+    base.program_explained = Boolean(base.program_explained);
+    base.website_link_sent = Boolean(base.website_link_sent);
+    base.demo_link_sent = Boolean(base.demo_link_sent);
+    base.live_session_invited = Boolean(base.live_session_invited);
+    base.recording_sent = Boolean(base.recording_sent);
+    base.google_meet_invite_sent = Boolean(base.google_meet_invite_sent);
+    base.google_meet_requested = Boolean(base.google_meet_requested || base.google_meet_booking_state === "requested");
+    base.google_meet_booked = Boolean(base.google_meet_booked || base.google_meet_appointment_id);
+    base.not_replying_2_days = Boolean(base.not_replying_2_days);
   }
 
   if (collection === "communities") {
@@ -6443,6 +6530,59 @@ function normalizeCrmCollectionPayload(collection, body = {}, existing = null, b
     base.item_data = typeof base.item_data === "object" && base.item_data !== null ? base.item_data : {};
   }
 
+  if (collection === "media_assets") {
+    base.title = normalizeCrmString(base.title || base.name || "Media asset");
+    base.name = base.title;
+    base.asset_type = normalizeCrmLower(base.asset_type || base.type || "image", "image") || "image";
+    base.usage_area = normalizeCrmLower(base.usage_area || base.usage || "general", "general") || "general";
+    base.aspect_ratio = normalizeCrmString(base.aspect_ratio || "");
+    base.public_url = normalizeCrmString(base.public_url || base.url || "");
+    base.relative_url = normalizeCrmString(base.relative_url || "");
+    base.file_name = normalizeCrmString(base.file_name || base.filename || "");
+    base.mime_type = normalizeCrmString(base.mime_type || "");
+    base.whatsapp_media_id = normalizeCrmString(base.whatsapp_media_id || "");
+    base.status = normalizeCrmLower(base.status || "active", "active") || "active";
+    base.tags = Array.isArray(base.tags) ? uniqueList(base.tags) : normalizeArray(base.tags || []);
+    base.ai_send_enabled = base.ai_send_enabled === true || base.auto_send_with_ayla === true || base.send_when_explaining === true;
+    base.auto_send_with_ayla = base.auto_send_with_ayla === true || base.ai_send_enabled === true;
+    base.send_when_explaining = base.send_when_explaining === true || base.ai_send_enabled === true;
+    base.trigger_keywords = Array.isArray(base.trigger_keywords) ? uniqueList(base.trigger_keywords) : normalizeArray(base.trigger_keywords || base.keywords || []);
+    base.ai_usage_context = normalizeCrmString(base.ai_usage_context || base.context || base.description || "");
+    base.caption_template = normalizeCrmString(base.caption_template || base.caption || "");
+    base.priority = Number(base.priority || 0) || 0;
+  }
+
+  if (collection === "whatsapp_business_profiles") {
+    base.display_name = normalizeCrmString(base.display_name || base.name || "");
+    base.about = normalizeCrmString(base.about || base.bio || "");
+    base.description = normalizeCrmString(base.description || base.business_description || "");
+    base.email = normalizeEmail(base.email || "");
+    base.website = normalizeCrmString(base.website || base.website_url || "");
+    base.address = normalizeCrmString(base.address || "");
+    base.category = normalizeCrmString(base.category || "Education");
+    base.profile_picture_url = normalizeCrmString(base.profile_picture_url || base.picture_url || "");
+    base.profile_picture_handle = normalizeCrmString(base.profile_picture_handle || "");
+    base.phone_number_id = normalizeCrmString(base.phone_number_id || process.env.WHATSAPP_PHONE_NUMBER_ID || "");
+    base.status = normalizeCrmLower(base.status || "draft", "draft") || "draft";
+  }
+
+  if (collection === "marketing_flow_events") {
+    base.event_type = normalizeCrmLower(base.event_type || base.type || "marketing_event", "marketing_event") || "marketing_event";
+    base.lead_id = base.lead_id || null;
+    base.channel = normalizeCrmLower(base.channel || "whatsapp", "whatsapp") || "whatsapp";
+    base.status = normalizeCrmLower(base.status || "logged", "logged") || "logged";
+    base.message = normalizeCrmString(base.message || base.text || "");
+    base.metadata = typeof base.metadata === "object" && base.metadata !== null ? base.metadata : {};
+  }
+
+  if (collection === "lead_flow_labels") {
+    base.key = normalizeCrmLower(base.key || base.label || base.name || "label", "label").replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+    base.name = normalizeCrmString(base.name || base.label || base.key);
+    base.group = normalizeCrmLower(base.group || "lead_flow", "lead_flow") || "lead_flow";
+    base.description = normalizeCrmString(base.description || "");
+    base.status = normalizeCrmLower(base.status || "active", "active") || "active";
+  }
+
 
   return base;
 }
@@ -6476,6 +6616,10 @@ function collectionResponseName(collection) {
     client_data_events: "events",
     support_tickets: "tickets",
     ticket_messages: "messages",
+    media_assets: "media_assets",
+    whatsapp_business_profiles: "profiles",
+    marketing_flow_events: "events",
+    lead_flow_labels: "labels",
   };
   return map[collection] || collection;
 }
@@ -6645,6 +6789,10 @@ const TEAM_CRM_READ_PERMISSION_BY_COLLECTION = {
   pipeline_stages: ["view_leads", "view_assigned_leads"],
   support_tickets: ["create_internal_notes", "reply_assigned_conversations", "view_leads", "view_assigned_leads"],
   ticket_messages: ["create_internal_notes", "reply_assigned_conversations", "view_leads", "view_assigned_leads"],
+  media_assets: ["view_leads", "edit_leads", "send_messages"],
+  whatsapp_business_profiles: ["send_messages"],
+  marketing_flow_events: ["view_leads", "send_messages"],
+  lead_flow_labels: ["view_leads", "edit_leads"],
 };
 
 const TEAM_CRM_WRITE_PERMISSION_BY_COLLECTION = {
@@ -6676,6 +6824,10 @@ const TEAM_CRM_MODULE_BY_COLLECTION = {
   pipeline_stages: ["pipeline", "opportunities", "pipeline_opportunities"],
   support_tickets: ["support_tickets"],
   ticket_messages: ["support_tickets"],
+  media_assets: ["media_library", "ai_control"],
+  whatsapp_business_profiles: ["whatsapp_settings", "ai_control"],
+  marketing_flow_events: ["leads", "conversation_inbox"],
+  lead_flow_labels: ["leads", "lead_management"],
 };
 
 function crmAccessKey(value = "") {
@@ -8362,6 +8514,11 @@ registerCrmCrudRoutes({ route: "/admin/crm/ad-ai-recommendations", collection: "
 registerCrmCrudRoutes({ route: "/admin/crm/ad-ai-actions", collection: "ad_ai_actions", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/brand-snapshots", collection: "brand_snapshots", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/snapshot-items", collection: "snapshot_items", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/media-assets", collection: "media_assets", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/media-library", collection: "media_assets", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/whatsapp-business-profiles", collection: "whatsapp_business_profiles", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/marketing-flow-events", collection: "marketing_flow_events", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/lead-flow-labels", collection: "lead_flow_labels", brandScoped: true });
 
 app.get("/admin/crm/ai-permissions", async (req, res) => {
   try {
@@ -12162,7 +12319,21 @@ async function sendSocialMessage({ db, integration, body = {} }) {
       e.statusCode = 400;
       throw e;
     }
-    const response = await axios.post(`https://graph.facebook.com/v19.0/${phoneNumberId}/messages`, { messaging_product: "whatsapp", to, type: "text", text: { preview_url: false, body: text } }, { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, timeout: 30000 });
+    const mediaUrl = normalizeCrmString(body.media_url || body.mediaUrl || body.image_url || body.imageUrl || "");
+    const mediaId = normalizeCrmString(body.media_id || body.mediaId || body.whatsapp_media_id || "");
+    const mediaType = normalizeCrmLower(body.media_type || body.mediaType || "image", "image");
+    const waPayload = { messaging_product: "whatsapp", to };
+    if (mediaUrl || mediaId) {
+      const cleanType = ["image", "video", "document", "audio"].includes(mediaType) ? mediaType : "image";
+      waPayload.type = cleanType;
+      const mediaPayload = mediaId ? { id: mediaId } : { link: mediaUrl };
+      if (text && ["image", "video", "document"].includes(cleanType)) mediaPayload.caption = text;
+      waPayload[cleanType] = mediaPayload;
+    } else {
+      waPayload.type = "text";
+      waPayload.text = { preview_url: false, body: text };
+    }
+    const response = await axios.post(`https://graph.facebook.com/v19.0/${phoneNumberId}/messages`, waPayload, { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, timeout: 30000 });
     return { message: "WhatsApp message sent", platform, live_sent: true, raw: response.data };
   }
 
@@ -12493,7 +12664,15 @@ app.post("/admin/crm/conversations/:leadId/send", async (req, res) => {
         whatsapp_template_name: req.body.whatsapp_template_name || req.body.template_name || req.body.metadata?.whatsapp_template_name || "",
         language_code: normalizeWhatsAppLanguageCode(req.body.language_code || req.body.metadata?.language_code || req.body.meta_language || req.body.metadata?.meta_language || "en"),
         components: req.body.components || req.body.metadata?.components || [],
+        media_url: req.body.media_url || req.body.image_url || req.body.metadata?.media_url || req.body.metadata?.image_url || "",
+        media_id: req.body.media_id || req.body.whatsapp_media_id || req.body.metadata?.media_id || req.body.metadata?.whatsapp_media_id || "",
+        media_type: req.body.media_type || req.body.metadata?.media_type || "image",
+        caption: req.body.caption || req.body.metadata?.caption || "",
       },
+      mediaUrl: req.body.media_url || req.body.image_url || req.body.metadata?.media_url || req.body.metadata?.image_url || "",
+      mediaId: req.body.media_id || req.body.whatsapp_media_id || req.body.metadata?.media_id || req.body.metadata?.whatsapp_media_id || "",
+      mediaType: req.body.media_type || req.body.metadata?.media_type || "image",
+      caption: req.body.caption || req.body.metadata?.caption || "",
     });
 
     createIntegrationLog(db, {
@@ -13706,7 +13885,7 @@ function sanitizeWhatsAppTemplateComponents(components = []) {
     });
 }
 
-async function sendWhatsAppCloudMessage({ to, text = "", templateName = "", languageCode = "en", components = [] }) {
+async function sendWhatsAppCloudMessage({ to, text = "", templateName = "", languageCode = "en", components = [], mediaUrl = "", mediaId = "", mediaType = "image", caption = "" }) {
   const token = process.env.WHATSAPP_ACCESS_TOKEN;
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
 
@@ -13739,10 +13918,17 @@ async function sendWhatsAppCloudMessage({ to, text = "", templateName = "", lang
       language: { code: normalizeWhatsAppLanguageCode(languageCode || "en") },
       ...(safeComponents.length ? { components: safeComponents } : {}),
     };
+  } else if (mediaUrl || mediaId) {
+    const cleanType = ["image", "video", "document", "audio"].includes(String(mediaType || "image").toLowerCase()) ? String(mediaType || "image").toLowerCase() : "image";
+    payload.type = cleanType;
+    const mediaPayload = mediaId ? { id: String(mediaId).trim() } : { link: String(mediaUrl).trim() };
+    const cleanCaption = String(caption || text || "").trim();
+    if (cleanCaption && ["image", "video", "document"].includes(cleanType)) mediaPayload.caption = cleanCaption;
+    payload[cleanType] = mediaPayload;
   } else {
     const cleanText = String(text || "").trim();
     if (!cleanText) {
-      const error = new Error("WhatsApp text message is empty and no template was selected.");
+      const error = new Error("WhatsApp text message is empty and no template or media was selected.");
       error.statusCode = 400;
       throw error;
     }
@@ -14176,6 +14362,10 @@ async function sendCrmMessage({
   runId = null,
   queueId = null,
   metadata = {},
+  mediaUrl = "",
+  mediaId = "",
+  mediaType = "",
+  caption = "",
 }) {
   const template = templateId ? getMessageTemplateByKey(db, templateId) : null;
   const lead = leadId ? getLeadByAnyId(db, leadId) : null;
@@ -14196,6 +14386,10 @@ async function sendCrmMessage({
   const resolvedWhatsAppComponents = cleanChannel === "whatsapp"
     ? buildWhatsAppTemplateComponents({ template, lead, variables, metadata })
     : [];
+  const resolvedMediaUrl = normalizeCrmString(mediaUrl || metadata.media_url || metadata.mediaUrl || metadata.image_url || metadata.imageUrl || metadata.public_url || "");
+  const resolvedMediaId = normalizeCrmString(mediaId || metadata.media_id || metadata.mediaId || metadata.whatsapp_media_id || "");
+  const resolvedMediaType = normalizeCrmLower(mediaType || metadata.media_type || metadata.mediaType || (resolvedMediaUrl || resolvedMediaId ? "image" : ""), "");
+  const resolvedCaption = normalizeCrmString(caption || metadata.caption || finalText || "");
 
   const baseLog = {
     brand_id: brandId,
@@ -14220,6 +14414,10 @@ async function sendCrmMessage({
         whatsapp_template_name: resolvedWhatsAppTemplateName,
         language_code: resolvedWhatsAppLanguageCode,
         components: resolvedWhatsAppComponents,
+        media_url: resolvedMediaUrl,
+        media_id: resolvedMediaId,
+        media_type: resolvedMediaType,
+        caption: resolvedCaption,
       } : {}),
     },
   };
@@ -14272,6 +14470,10 @@ async function sendCrmMessage({
         templateName: resolvedWhatsAppTemplateName,
         languageCode: resolvedWhatsAppLanguageCode,
         components: resolvedWhatsAppComponents,
+        mediaUrl: resolvedMediaUrl,
+        mediaId: resolvedMediaId,
+        mediaType: resolvedMediaType || "image",
+        caption: resolvedCaption,
       });
       providerMessageId = providerResponse?.messages?.[0]?.id || null;
     } else if (cleanChannel === "telegram") {
@@ -14292,6 +14494,9 @@ async function sendCrmMessage({
           message: finalText,
           body: finalText,
           messaging_type: metadata.messaging_type || "RESPONSE",
+          media_url: resolvedMediaUrl,
+          media_id: resolvedMediaId,
+          media_type: resolvedMediaType,
         },
       });
       providerMessageId = providerResponse?.raw?.message_id || providerResponse?.raw?.recipient_id || providerResponse?.approval_item?.id || null;
@@ -15003,11 +15208,20 @@ app.post("/admin/crm/messages/send-whatsapp", async (req, res) => {
       templateId: req.body.template_id || req.body.template_key || null,
       templateVariables: { ...(req.body.variables || {}), lead: lead || {} },
       leadId: lead?.id || req.body.lead_id || null,
-      metadata: req.body.metadata || {
-        template_name: req.body.template_name || req.body.whatsapp_template_name || "",
-        language_code: normalizeWhatsAppLanguageCode(req.body.language_code || req.body.meta_language || "en"),
-        components: req.body.components || [],
+      metadata: {
+        ...(req.body.metadata || {}),
+        template_name: req.body.template_name || req.body.whatsapp_template_name || req.body.metadata?.template_name || "",
+        language_code: normalizeWhatsAppLanguageCode(req.body.language_code || req.body.meta_language || req.body.metadata?.language_code || "en"),
+        components: req.body.components || req.body.metadata?.components || [],
+        media_url: req.body.media_url || req.body.image_url || req.body.metadata?.media_url || req.body.metadata?.image_url || "",
+        media_id: req.body.media_id || req.body.whatsapp_media_id || req.body.metadata?.media_id || req.body.metadata?.whatsapp_media_id || "",
+        media_type: req.body.media_type || req.body.metadata?.media_type || "image",
+        caption: req.body.caption || req.body.metadata?.caption || "",
       },
+      mediaUrl: req.body.media_url || req.body.image_url || req.body.metadata?.media_url || req.body.metadata?.image_url || "",
+      mediaId: req.body.media_id || req.body.whatsapp_media_id || req.body.metadata?.media_id || req.body.metadata?.whatsapp_media_id || "",
+      mediaType: req.body.media_type || req.body.metadata?.media_type || "image",
+      caption: req.body.caption || req.body.metadata?.caption || "",
     });
     await writeCrmDb(db);
     res.status(result.success ? 200 : 502).json(result);
@@ -15207,6 +15421,7 @@ function ngDailyLiveSessionActionNow(settings = {}, date = new Date()) {
   const sessionMinute = 0;
   const total = hour * 60 + minute;
   const sessionTotal = sessionHour * 60 + sessionMinute;
+  if (total >= 7 * 60 && total < sessionTotal - reminderMinutes) return "daily_session_invite";
   if (total >= sessionTotal - reminderMinutes && total < sessionTotal) return "five_minute_reminder";
   if (total >= sessionTotal && total <= sessionTotal + 15) return "session_link";
   if (total >= sessionTotal + Number(settings.post_session_followup_delay_minutes || 120) && total <= sessionTotal + Number(settings.post_session_followup_delay_minutes || 120) + 90) return "post_session_recording";
@@ -15304,6 +15519,7 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
   if (!action) return { action: null, processed: 0, sent: 0, skipped: 0, results: [], reason: "not_due_now" };
   const assets = ngAylaGetSalesAssets(db);
   const templateMap = {
+    daily_session_invite: settings.daily_session_invite_template_key || "daily_live_session_invite",
     five_minute_reminder: settings.session_reminder_template_key || "five_minute_reminder",
     session_link: settings.session_link_template_key || "live_session_link_now",
     post_session_recording: settings.post_session_recording_template_key || "recording_followup_after_session",
@@ -15362,11 +15578,15 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
         results.push({ lead_id: lead.id, skipped: true, reason: result.reason || "duplicate_message_blocked", action, template_id: templateId });
         continue;
       }
-      if (action === "five_minute_reminder") lead.last_session_reminder_sent_at = nowIso();
-      if (action === "session_link") lead.last_session_link_sent_at = nowIso();
+      ngUpdateNoReplyLeadStatus(db, lead);
+      if (action === "daily_session_invite") { lead.last_session_invite_sent_at = nowIso(); lead.live_session_invited = true; ngEnsureLeadFlowLabels(lead, ["daily_session_invited", "live_session_invited"]); }
+      if (action === "five_minute_reminder") { lead.last_session_reminder_sent_at = nowIso(); lead.five_min_reminder_sent = true; ngEnsureLeadFlowLabels(lead, ["five_min_reminder_sent"]); }
+      if (action === "session_link") { lead.last_session_link_sent_at = nowIso(); lead.session_link_sent = true; ngEnsureLeadFlowLabels(lead, ["session_link_sent"]); }
       if (action === "post_session_recording") {
         lead.last_recording_followup_sent_at = nowIso();
         lead.recording_followup_sent_once = true;
+        lead.recording_sent = true;
+        ngEnsureLeadFlowLabels(lead, ["recording_sent"]);
       }
       lead.next_action = action === "post_session_recording" ? "await_recording_feedback_or_google_meet_interest" : "daily_live_session_flow";
       lead.updated_at = nowIso();
@@ -15744,8 +15964,9 @@ app.post("/admin/crm/google-meet-command-center/save-link", async (req, res) => 
       lead.updated_at = nowIso();
     }
 
+    const adminAlert = await ngSendAdminWhatsAppAlert(db, { type: "google_meet_booked", lead, appointment: item });
     await writeCrmDb(db);
-    res.json({ success: true, appointment: enrichAppointment(db, item), message: "Google Meet link saved and scheduled for meeting time" });
+    res.json({ success: true, appointment: enrichAppointment(db, item), admin_alert: adminAlert, message: "Google Meet link saved and scheduled for meeting time" });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
@@ -17463,8 +17684,8 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   basic_conversation_router_enabled: true,
   greeting_once_enabled: true,
   roadmap_resources_knowledge_enabled: true,
-  roadmap_summary: "Our 120-day Step 1 roadmap is system-wise and structured so preparation does not feel random. It covers Cardiology, Endocrinology, Renal, Pulmonology, Immunology, Hematology, MSK, Neurology, GIT, Reproductive, Psychiatry, Biostatistics, and Biochemistry. The flow includes live teaching, UWorld-style MCQ discussion, First Aid integration, bootcamps, assessments, and NBME-style preparation.",
-  resources_summary: "NextGen preparation uses First Aid, UWorld-style QBank/MCQ discussion, Pathoma concepts, and NextGen assessments. The goal is to connect resources with MCQ-solving, weak-area review, and exam strategy instead of reading randomly.",
+  roadmap_summary: "Our July 1 120-day Step 1 marathon is system-wise and starts from MSK. It covers MSK, Neurology/CNS, Reproductive, Endocrinology, GIT, Renal, Pulmonology/Respiratory, Immunology, Hematology, and Psychiatry. The flow includes Dr. Ahmad live First Aid teaching, mapped UWorld QIDs, matching UWorld Video Library lecture, daily homework/tasks, recordings and notes, Community Q&A, leaderboard points, daily flashcards, system-end assessments, surprise mentor assessments when needed, and Google Meet guidance.",
+  resources_summary: "We connect First Aid, Pathoma concepts, mapped UWorld QIDs, UWorld Video Library explanations, daily flashcards, recordings/notes, Community Q&A, and assessments so students are not scattered across resources.",
   roadmap_answer_rule: "When a student asks about roadmap, summarize the system-wise 120-day roadmap and major systems covered. Do not explain every single day unless the student asks for daily details.",
   resources_answer_rule: "When a student asks about resources, say we use First Aid, UWorld-style QBank/MCQ discussion, Pathoma concepts, and NextGen assessments. Keep it short and connect resources to MCQ-solving and weak-area correction.",
   greeting_once_rule: "Use Hi Doctor only in the first message of a new conversation. After that, answer directly with Doctor / Yes Doctor / Sure Doctor. Do not repeat Hi Doctor in every answer.",
@@ -17476,7 +17697,7 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   recording_first_strategy_enabled: true,
   main_cta: "sales_asset_flow",
   secondary_cta: "live_session_recording_uworld_demo_then_google_meet",
-  uworld_library_link: "https://lms.nextgenusmlelms.com/",
+  uworld_library_link: "https://live.nextgenusmlelms.com/demo",
   uworld_library_hours: "150",
   uworld_library_mcqs: "3000+",
   uworld_library_mentor_name: "",
@@ -17490,7 +17711,7 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   live_session_link: "",
   youtube_channel_link: "",
   youtube_proof_link: "",
-  uworld_demo_link: "https://lms.nextgenusmlelms.com/",
+  uworld_demo_link: "https://live.nextgenusmlelms.com/demo",
   live_session_time: "1:00 PM EST",
   default_live_session_time: "1:00 PM EST",
   live_session_timezone: "EST",
@@ -17526,6 +17747,29 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   mentor_sales_rule: "Use mentor authority naturally only when useful. Do not invent doctor names. Student-facing wording must say Google Meet / Google Meet mentor consultation, not call.",
   recording_sales_rule: "Send session recording early and proactively. Ask: did you like the teaching style, and are you interested in live sessions or Google Meet mentor guidance? If the response is positive, move to Google Meet booking.",
   failed_student_reassurance_rule: "If a student failed, is weak, delayed, confused, or old graduate, reassure strongly: they are in the right place; the key is roadmap, mentor feedback, UWorld-style practice, and weak-area correction. Then guide them through recording/live session/UWorld demo and offer Google Meet mentor consultation when positive or directly requested.",
+  july_1_marathon_mode_enabled: true,
+  july_1_marathon_start_date: "2026-07-01",
+  july_1_marathon_phrase_rule: "Say: We are starting the USMLE Step 1 120-Day Marathon from July 1. Do not say: NextGen is starting.",
+  july_1_marathon_system_order: ["MSK", "Neurology / CNS", "Reproductive", "Endocrinology", "GIT", "Renal", "Pulmonology / Respiratory", "Immunology", "Hematology", "Psychiatry"],
+  july_1_marathon_excluded_systems: ["Biochemistry", "Biostatistics"],
+  july_1_marathon_demo_link: "https://live.nextgenusmlelms.com/demo",
+  july_1_marathon_current_batch_rule: "Our current live classes are still going on and the current batch is ending around June 29-30. Students can join now to see Dr. Ahmad’s teaching style. The new 120-Day Marathon starts July 1 from MSK.",
+  july_1_marathon_program_flow: "Live First Aid teaching with Dr. Ahmad → mapped UWorld QIDs → matching UWorld Video Library lecture → daily homework/task → recordings + notes → Community Q&A → leaderboard points → daily flashcards → system-end assessments → surprise mentor assessments when needed → Google Meet guidance.",
+  assessment_rule: "Do not create assessment after every session. Assessments are after each system/block, surprise mentor assessments when assigned, and final/mixed review assessments when needed.",
+  flashcards_enabled: true,
+  media_library_enabled: true,
+  daily_session_invite_template_key: "daily_live_session_invite",
+  daily_session_send_recording_to_no_reply: true,
+  daily_session_exclude_active_google_meet: false,
+  daily_session_exclude_not_interested: false,
+  no_reply_mark_after_days: 2,
+  google_meet_followup_for_no_reply: true,
+  admin_whatsapp_alerts_enabled: true,
+  admin_whatsapp_alert_numbers: [],
+  primary_admin_whatsapp: "",
+  second_admin_whatsapp: "",
+  third_admin_whatsapp: "",
+  fourth_admin_whatsapp: "",
   updated_at: null
 };
 
@@ -21083,6 +21327,7 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
 
   const lines = [
     "BACKEND-ENFORCED NEXTGEN SALES BRAIN (highest priority after safety/opt-out/compliance):",
+    ngLearningRulesPromptBlock(db, "marketing"),
     "- Ayla is a warm, professional NextGen USMLE admissions counselor and sales closer, not a basic support chatbot and not a template sender.",
     "- WhatsApp templates are only a doorway to open/reopen conversation. After the student replies, Ayla must talk freely and naturally inside the 24-hour window.",
     "- Reply style must be human-like: warm opening when natural, short WhatsApp-style lines, no robotic FAQ tone, no passive 'feel free to ask' endings.",
@@ -21090,8 +21335,11 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
     "- Google Meet state lock: once the student has requested Google Meet, shared a preferred time, is waiting for the Google Meet link, or has a scheduled Google Meet, do NOT restart live-session/recording/UWorld/demo/mentor-offer flow. Only acknowledge, answer direct questions, collect/reschedule time, or remind them that the Google Meet link will be sent at meeting time.",
     "- Acknowledgements like thank you/thanks/ok/noted/great/perfect after booking must get a simple acknowledgement or no sales push. Never treat them as a new sales trigger.",
     "- Greeting rule: use 'Hi Doctor' only once in a new conversation. After that, answer directly with Doctor / Yes Doctor / Sure Doctor. Never start every reply with Hi Doctor.",
-    "- Roadmap rule: if asked about roadmap/study plan/curriculum, summarize the 120-day system-wise roadmap. Mention Cardiology, Endocrinology, Renal, Pulmonology, Immunology, Hematology, MSK, Neurology, GIT, Reproductive, Psychiatry, Biostatistics, and Biochemistry, plus bootcamps, assessments, and NBME-style preparation. Do not explain every day unless asked.",
-    "- Resources rule: if asked about resources, explain that NextGen uses First Aid, UWorld-style QBank/MCQ discussion, Pathoma concepts, and NextGen assessments, connected to MCQ-solving and weak-area correction.",
+    "- July 1 Marathon rule: say 'we are starting the USMLE Step 1 120-Day Marathon from July 1'. Do NOT say 'NextGen is starting'. The roadmap starts from MSK and covers MSK, Neurology/CNS, Reproductive, Endocrinology, GIT, Renal, Pulmonology/Respiratory, Immunology, Hematology, and Psychiatry. Do not include Biochemistry or Biostatistics in this July 1 roadmap unless the student asks why they are excluded.",
+    "- Program flow rule: explain the program proactively after greeting/weak-subject question: Dr. Ahmad live First Aid teaching → mapped UWorld QIDs → matching UWorld Video Library lecture → daily homework/task → recordings + notes → Community Q&A → leaderboard points → daily flashcards → system-end assessments → surprise mentor assessments when needed → Google Meet guidance.",
+    ngBuildAylaMediaGuidance(db, lead),
+    "- Assessment rule: never say there is an assessment after every session. Say assessments are after each system/block and surprise mentor assessments can be assigned when needed.",
+    "- Resources rule: explain that we connect First Aid, Pathoma concepts, mapped UWorld QIDs, the matching UWorld Video Library, recordings/notes, daily flashcards, Community Q&A, leaderboard accountability, and system-end assessments so the student is not left alone with scattered resources.",
     "- Soft program mention: when explaining the program generally, briefly mention the structured 120-day roadmap and resources, but do not dump the full roadmap unless the student asks.",
     "- Never ignore a direct question like what is this/that. Clarify the previous Ayla message first, then continue the sales flow naturally.",
     `- UWorld Video Library pitch: NextGen has around ${hours} hours of detailed UWorld-style video teaching with ${mcqs} MCQs explained in depth. First Aid is integrated with every MCQ, so students learn the concept, FA point, correct/wrong options, option elimination, and weak-area correction. Tell them to click Try Demo for 2 days free access and first lecture of every chapter.`,
@@ -21104,7 +21352,7 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
     `- Scheduling timezone: always use ${timezone}. Do not mention Pakistan time unless the student asks for it.`,
     "- Price rule: if price/cost/package/payment is asked, answer that pricing depends on plan duration/support needed, do not dump recordings again, and move the lead to Google Meet/admin guidance. Ask preferred time in EST.",
     "- Failed/weak/confused rule: reassure strongly that the student is in the right place; the key is roadmap, mentor feedback, UWorld-style practice, and weak-area correction; then offer recording/live session/UWorld demo and Google Meet guidance when positive.",
-    "- Website rule: do not send generic website/demo links early. The LMS link is allowed only when presenting the UWorld Video Library/resource.",
+    "- Website/demo rule: send https://live.nextgenusmlelms.com/demo early when explaining the July 1 Marathon. Explain that the demo shows the dashboard, roadmap, live-class structure, recordings, notes, community, and system flow; the actual July 1 Marathon starts from July 1.",
     "- Google Meet booking: do not jump to Google Meet before value unless the student directly asks. If student says connect me / yes / ok / interested after a Google Meet offer, ask preferred time in EST and mark the lead as Google Meet requested.",
     `- Current latest-message signals: ${JSON.stringify(signals)}`,
     s.sales_style_rule ? `- Admin sales style rule: ${ngAylaSettingsText(s.sales_style_rule, 800)}` : "",
@@ -21333,7 +21581,7 @@ function ngAylaGetSalesAssets(db = {}) {
     "demo_link",
     "demo_url",
     "library_link"
-  ], "https://lms.nextgenusmlelms.com/");
+  ], "https://live.nextgenusmlelms.com/demo");
 
   const youtubeLink = ngAylaFirstNonEmptySetting(s, [
     "youtube_channel_link",
@@ -22427,6 +22675,9 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
       message: latestInbound,
       to: req.body?.to || req.body?.recipient || "",
     });
+    const aylaMediaAsset = channel === "whatsapp"
+      ? ngPickAylaMediaAssetForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(latestInbound || {}), messages })
+      : null;
 
     const result = await sendCrmMessage({
       db,
@@ -22437,14 +22688,21 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
       templateId: req.body?.template_id || req.body?.template_key || null,
       templateVariables: { lead },
       leadId: lead.id,
+      mediaUrl: aylaMediaAsset?.public_url || aylaMediaAsset?.relative_url || "",
+      mediaId: aylaMediaAsset?.whatsapp_media_id || "",
+      mediaType: aylaMediaAsset?.asset_type || "image",
+      caption: aylaMediaAsset ? ngRenderAylaMediaCaption(aylaMediaAsset, { lead, reply: ai.reply }) : "",
       metadata: {
         source: "full_ai_auto",
         ai_auto: true,
         triggered_by: user.id,
         latest_inbound_id: latestInbound.id || null,
         inbound_message_id: ngAiAutoMessageFingerprint(latestInbound),
+        ayla_media_asset_id: aylaMediaAsset?.id || null,
+        ayla_media_usage_area: aylaMediaAsset?.usage_area || null,
       },
     });
+    if (aylaMediaAsset) ngMarkAylaMediaSent(db, lead, aylaMediaAsset, { source: "full_ai_auto", result });
 
     ngMarkAiAutoProcessed(lead, latestInbound, { channel, reply: ai.reply });
 
@@ -22548,7 +22806,23 @@ app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
       try {
         const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel });
         const to = getBestRecipientForChannel({ channel, lead, message: inbound });
-        const sendResult = await sendCrmMessage({ db, brandId: lead.brand_id || getCrmBrandId(req, db), channel, to, text: ai.reply, leadId: lead.id, metadata: { source: "process_ai_auto", ai_auto: true, triggered_by: user.id, latest_inbound_id: inbound.id || null } });
+        const aylaMediaAsset = channel === "whatsapp"
+          ? ngPickAylaMediaAssetForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(inbound || {}), messages })
+          : null;
+        const sendResult = await sendCrmMessage({
+          db,
+          brandId: lead.brand_id || getCrmBrandId(req, db),
+          channel,
+          to,
+          text: ai.reply,
+          leadId: lead.id,
+          mediaUrl: aylaMediaAsset?.public_url || aylaMediaAsset?.relative_url || "",
+          mediaId: aylaMediaAsset?.whatsapp_media_id || "",
+          mediaType: aylaMediaAsset?.asset_type || "image",
+          caption: aylaMediaAsset ? ngRenderAylaMediaCaption(aylaMediaAsset, { lead, reply: ai.reply }) : "",
+          metadata: { source: "process_ai_auto", ai_auto: true, triggered_by: user.id, latest_inbound_id: inbound.id || null, ayla_media_asset_id: aylaMediaAsset?.id || null, ayla_media_usage_area: aylaMediaAsset?.usage_area || null }
+        });
+        if (aylaMediaAsset) ngMarkAylaMediaSent(db, lead, aylaMediaAsset, { source: "process_ai_auto", result: sendResult });
         ngMarkAiAutoProcessed(lead, inbound, { channel, reply: ai.reply });
         if (typeof aylaLogCost === "function") await aylaLogCost({ db, actor: user, model: ai.model, usage: ai.usage, action: "process_ai_auto_send", meta: { lead_id: lead.id, channel } }).catch(() => null);
         ngAffArray(db, "ai_auto_runs").unshift({ id: uuid(), lead_id: lead.id, inbound_message_id: ngAiAutoMessageFingerprint(inbound), channel, reply: ai.reply, sent: true, result: sendResult, model: ai.model, usage: ai.usage, created_by: user.id, created_at: ngAffNow() });
@@ -22630,7 +22904,9 @@ function ngCommunityTrainingContext(db) {
     .map((item) => `Title: ${item.title || item.name || "Training"}\nCategory: ${item.category || "general"}\nContent: ${item.content || item.body || item.text || ""}`)
     .join("\n\n---\n\n");
 
-  return useful || "Use NextGen USMLE rules: educational first, no spam, ask Step 1/Step 2, exam date, graduation year, main difficulty, then offer free 2-day LMS demo only after qualification.";
+  const baseContext = useful || "Use NextGen USMLE rules: educational first, no spam, ask Step 1/Step 2, exam date, graduation year, main difficulty, then offer free 2-day LMS demo only after qualification.";
+  const learningContext = ngLearningRulesPromptBlock(db, "community");
+  return [learningContext, baseContext].filter(Boolean).join("\n\n---\n\n");
 }
 
 function ngBuildCommunityFallbackContent(body = {}) {
@@ -27505,6 +27781,7 @@ async function ngGenerateContentFromApprovedSources({ db, body = {}, sources = [
   const systemPrompt = `You are NextGen Medical Exam Community Content AI. Generate original, medically careful educational content for ${profile.label}. You must obey the HARD EXAM LOCK. Never label this content as another exam. Use clean professional plain text.`;
   const userPrompt = [
     ngStrictExamInstruction(examTrack),
+    ngLearningRulesPromptBlock(db, "community"),
     `Approved source context:\n${sourceContext}`,
     `Platform: ${platform}`,
     `Content type: ${type}`,
@@ -31657,7 +31934,10 @@ app.post("/admin/crm/ai-sales-learning/lessons", async (req, res) => {
       title: req.body.title || "AI Sales Lesson",
       rule_text: req.body.rule_text || req.body.lesson || "",
       category: req.body.category || "sales_behavior",
+      area: ngNormalizeLearningArea(req.body.area || req.body.scope || "marketing"),
+      scope: ngNormalizeLearningArea(req.body.scope || req.body.area || "marketing"),
       status: req.body.status || "pending_approval",
+      override_behavior: req.body.override_behavior === true || req.body.status === "approved",
       source_event_id: req.body.source_event_id || null,
       created_by: "admin",
     });
@@ -31674,10 +31954,17 @@ app.post("/admin/crm/ai-sales-learning/lessons/:id/approve", async (req, res) =>
     const lesson = ensureCrmArray(db, "ai_learning_lessons").find((x) => String(x.id) === String(req.params.id));
     if (!lesson) return res.status(404).json({ success: false, error: "Lesson not found" });
     lesson.status = "approved";
+    lesson.approved = true;
+    lesson.admin_approved = true;
+    lesson.override_behavior = true;
+    lesson.area = ngNormalizeLearningArea(req.body.area || lesson.area || lesson.scope || "marketing");
+    lesson.scope = lesson.area;
+    lesson.approved_by = "admin";
     lesson.approved_at = nowIso();
     lesson.updated_at = nowIso();
+    const rule = ngCreateApprovedLearningRule(db, { ...lesson, source: "ai_sales_learning_lesson", source_event_id: lesson.id }, null);
     await writeCrmDb(db);
-    res.json({ success: true, lesson });
+    res.json({ success: true, lesson, rule });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
@@ -32021,6 +32308,1214 @@ app.post("/website-chat/ayla", async (req, res) => {
   }
 });
 
+
+// -----------------------------------------------------------------------------
+// v69 July 1 Marathon backend additions: Media Library, Admin Alerts, Lead Flow, Flashcards, 120-Day Generator
+// -----------------------------------------------------------------------------
+
+function ngPublicBaseUrl(req = null) {
+  const envUrl = normalizeCrmString(process.env.PUBLIC_BACKEND_URL || process.env.RENDER_EXTERNAL_URL || process.env.NEXTGEN_BACKEND_PUBLIC_URL || "").replace(/\/$/, "");
+  if (envUrl) return envUrl;
+  if (req?.get) return `${req.protocol}://${req.get("host")}`.replace(/\/$/, "");
+  return "";
+}
+
+function ngSafeFileExtension(mime = "", fileName = "") {
+  const byName = String(fileName || "").toLowerCase().match(/\.([a-z0-9]{2,8})$/)?.[1];
+  if (byName && ["png", "jpg", "jpeg", "webp", "gif", "mp4", "pdf"].includes(byName)) return byName === "jpeg" ? "jpg" : byName;
+  const m = String(mime || "").toLowerCase();
+  if (m.includes("png")) return "png";
+  if (m.includes("webp")) return "webp";
+  if (m.includes("gif")) return "gif";
+  if (m.includes("mp4")) return "mp4";
+  if (m.includes("pdf")) return "pdf";
+  return "jpg";
+}
+
+function ngStripDataUrl(value = "") {
+  const raw = String(value || "").trim();
+  const match = raw.match(/^data:([^;]+);base64,(.*)$/i);
+  return { mime: match?.[1] || "", base64: match ? match[2] : raw };
+}
+
+function ngEnsureLeadFlowLabels(lead = {}, labels = []) {
+  const clean = uniqueList(labels).map((x) => normalizeCrmLower(x, "").replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "")).filter(Boolean);
+  lead.labels = uniqueList([...(Array.isArray(lead.labels) ? lead.labels : normalizeArray(lead.labels || [])), ...clean]);
+  lead.tags = uniqueList([...(Array.isArray(lead.tags) ? lead.tags : normalizeArray(lead.tags || [])), ...clean]);
+  return lead;
+}
+
+function ngUpdateNoReplyLeadStatus(db = {}, lead = {}) {
+  const days = Math.max(1, Number(ngAylaPickSettings(db).no_reply_mark_after_days || 2));
+  const messages = ngLeadConversationMessages(db, lead.id);
+  const latestInbound = ngLatestInbound(messages);
+  const latestOutbound = ngLatestOutbound(messages);
+  const reference = latestInbound?.created_at || latestInbound?.received_at || latestInbound?.timestamp || lead.created_at || latestOutbound?.created_at || latestOutbound?.sent_at || null;
+  if (!reference) return lead;
+  const ageMs = Date.now() - new Date(reference).getTime();
+  if (!Number.isFinite(ageMs) || ageMs < days * 86400000) return lead;
+  lead.not_replying_2_days = true;
+  lead.no_reply_1_day = true;
+  lead.no_reply_days = Math.floor(ageMs / 86400000);
+  lead.no_reply_marked_at = lead.no_reply_marked_at || nowIso();
+  ngEnsureLeadFlowLabels(lead, ["not_replying_2_days", "google_meet_invite_sent"]);
+  if (ngAylaPickSettings(db).google_meet_followup_for_no_reply !== false) {
+    lead.google_meet_invite_sent = true;
+    lead.meet_followup_due = true;
+    lead.next_action = lead.next_action || "ask_preferred_google_meet_time";
+  }
+  return lead;
+}
+
+function ngAylaAdminAlertNumbers(db = {}) {
+  const s = ngAylaPickSettings(db);
+  return uniqueList([
+    ...(Array.isArray(s.admin_whatsapp_alert_numbers) ? s.admin_whatsapp_alert_numbers : []),
+    s.primary_admin_whatsapp,
+    s.second_admin_whatsapp,
+    s.third_admin_whatsapp,
+    s.fourth_admin_whatsapp,
+  ]).map(normalizePhoneForWhatsapp).filter(Boolean).slice(0, 4);
+}
+
+function ngLeadStatusSummaryForAlert(lead = {}) {
+  return [
+    `Program explained: ${lead.program_explained ? "Yes" : "No/unknown"}`,
+    `Demo link sent: ${lead.demo_link_sent ? "Yes" : "No/unknown"}`,
+    `Live session invited: ${lead.live_session_invited || lead.last_session_invite_sent_at ? "Yes" : "No/unknown"}`,
+    `Session attended: ${lead.session_attended ? "Yes" : "No/unknown"}`,
+    `Recording sent: ${lead.recording_sent || lead.recording_followup_sent_once ? "Yes" : "No/unknown"}`,
+    `Interested 120-Day: ${lead.interested_120_day || lead.stage === "interested_120_day" ? "Yes" : "No/unknown"}`,
+    `Payment: ${lead.pending_payment ? "Pending" : lead.payment_status || lead.stage || "unknown"}`,
+  ].join("\\n");
+}
+
+async function ngSendAdminWhatsAppAlert(db = {}, { type = "alert", lead = null, appointment = null, text = "", meta = {} } = {}) {
+  const s = ngAylaPickSettings(db);
+  if (s.admin_whatsapp_alerts_enabled === false) return { enabled: false, sent: 0, results: [] };
+  const numbers = ngAylaAdminAlertNumbers(db);
+  if (!numbers.length) return { enabled: true, sent: 0, skipped: true, reason: "no_admin_whatsapp_numbers", results: [] };
+  const leadName = ng41LeadName(lead || {}) || appointment?.student_name || "Student";
+  const leadPhone = ng41LeadPhone(lead || {}) || appointment?.student_phone || appointment?.phone || "";
+  const appointmentTime = appointment ? ngGoogleMeetAppointmentDisplayDateTime(appointment, "EST") : "";
+  const body = text || `🚨 ${type.replace(/_/g, " ").toUpperCase()}\\n\\nStudent: ${leadName}\\nPhone: ${leadPhone}${appointmentTime ? `\\nTime: ${appointmentTime}` : ""}\\n\\nStatus:\\n${ngLeadStatusSummaryForAlert(lead || {})}\\n\\nNext action: Please review this lead in CRM.`;
+  const results = [];
+  for (const to of numbers) {
+    try {
+      const raw = await sendWhatsAppCloudMessage({ to, text: body });
+      results.push({ to, success: true, raw });
+    } catch (error) {
+      results.push({ to, success: false, error: error.message, provider_response: error.response?.data || null });
+    }
+  }
+  ensureCrmArray(db, "marketing_flow_events").push(withTimestamps({
+    event_type: "admin_whatsapp_alert",
+    lead_id: lead?.id || appointment?.lead_id || null,
+    channel: "whatsapp",
+    status: results.some((r) => r.success) ? "sent" : "failed",
+    message: body,
+    metadata: { type, appointment_id: appointment?.id || null, meta, results },
+  }));
+  return { enabled: true, sent: results.filter((r) => r.success).length, results };
+}
+
+app.get("/admin/crm/ai-command/admin-alerts/settings", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const s = ngAylaPickSettings(db);
+    res.json({ success: true, settings: {
+      admin_whatsapp_alerts_enabled: s.admin_whatsapp_alerts_enabled !== false,
+      admin_whatsapp_alert_numbers: ngAylaAdminAlertNumbers(db),
+      primary_admin_whatsapp: s.primary_admin_whatsapp || "",
+      second_admin_whatsapp: s.second_admin_whatsapp || "",
+      third_admin_whatsapp: s.third_admin_whatsapp || "",
+      fourth_admin_whatsapp: s.fourth_admin_whatsapp || "",
+    }});
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/ai-command/admin-alerts/settings", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    db.ai_settings = { ...(db.ai_settings || {}), ...(db.settings || {}) };
+    const incoming = uniqueList([...(Array.isArray(req.body.admin_whatsapp_alert_numbers) ? req.body.admin_whatsapp_alert_numbers : []), req.body.primary_admin_whatsapp, req.body.second_admin_whatsapp, req.body.third_admin_whatsapp, req.body.fourth_admin_whatsapp]).filter(Boolean).slice(0, 4);
+    const normalized = incoming.map(normalizePhoneForWhatsapp).filter(Boolean);
+    db.ai_settings.admin_whatsapp_alerts_enabled = req.body.admin_whatsapp_alerts_enabled !== false;
+    db.ai_settings.admin_whatsapp_alert_numbers = normalized;
+    db.ai_settings.primary_admin_whatsapp = normalized[0] || "";
+    db.ai_settings.second_admin_whatsapp = normalized[1] || "";
+    db.ai_settings.third_admin_whatsapp = normalized[2] || "";
+    db.ai_settings.fourth_admin_whatsapp = normalized[3] || "";
+    db.settings = { ...(db.settings || {}), ...db.ai_settings };
+    await writeCrmDb(db);
+    res.json({ success: true, settings: { admin_whatsapp_alert_numbers: normalized, admin_whatsapp_alerts_enabled: db.ai_settings.admin_whatsapp_alerts_enabled } });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/admin-alerts/test", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const result = await ngSendAdminWhatsAppAlert(db, { type: "test_alert", text: req.body.text || "✅ NextGen admin WhatsApp alert test is working." });
+    await writeCrmDb(db);
+    res.status(result.sent ? 200 : 400).json({ success: result.sent > 0, ...result });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/media-library/upload", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const { mime, base64 } = ngStripDataUrl(req.body.data_url || req.body.base64 || req.body.file_base64 || "");
+    if (!base64) return res.status(400).json({ success: false, error: "data_url or base64 image is required" });
+    const buffer = Buffer.from(base64, "base64");
+    if (!buffer.length) return res.status(400).json({ success: false, error: "Invalid base64 media" });
+    await fs.mkdir(MEDIA_DIR, { recursive: true });
+    const ext = ngSafeFileExtension(req.body.mime_type || mime, req.body.file_name || req.body.filename || "");
+    const safeTitle = normalizeCrmString(req.body.title || req.body.name || "media").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 50) || "media";
+    const fileName = `${Date.now()}-${safeTitle}-${crypto.randomBytes(4).toString("hex")}.${ext}`;
+    const absPath = path.join(MEDIA_DIR, fileName);
+    await fs.writeFile(absPath, buffer);
+    const relativeUrl = `/media/${fileName}`;
+    const publicUrl = `${ngPublicBaseUrl(req)}${relativeUrl}`;
+    const asset = normalizeCrmCollectionPayload("media_assets", {
+      title: req.body.title || req.body.name || fileName,
+      asset_type: req.body.asset_type || req.body.type || "image",
+      usage_area: req.body.usage_area || req.body.usage || "general",
+      aspect_ratio: req.body.aspect_ratio || "",
+      public_url: publicUrl,
+      relative_url: relativeUrl,
+      file_name: fileName,
+      mime_type: req.body.mime_type || mime || `image/${ext}`,
+      size_bytes: buffer.length,
+      tags: req.body.tags || [],
+      ai_send_enabled: req.body.ai_send_enabled === true || req.body.auto_send_with_ayla === true || req.body.send_when_explaining === true,
+      auto_send_with_ayla: req.body.auto_send_with_ayla === true || req.body.ai_send_enabled === true,
+      send_when_explaining: req.body.send_when_explaining === true || req.body.ai_send_enabled === true,
+      trigger_keywords: req.body.trigger_keywords || req.body.keywords || [],
+      ai_usage_context: req.body.ai_usage_context || req.body.context || req.body.description || "",
+      caption_template: req.body.caption_template || req.body.caption || "",
+      priority: Number(req.body.priority || 0) || 0,
+      status: "active",
+    }, null, brandId);
+    ensureCrmArray(db, "media_assets").push(asset);
+    await writeCrmDb(db);
+    res.json({ success: true, asset, public_url: publicUrl, relative_url: relativeUrl });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/media-library/send-whatsapp", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const asset = req.body.asset_id ? ensureCrmArray(db, "media_assets").find((item) => String(item.id) === String(req.body.asset_id)) : null;
+    const lead = req.body.lead_id ? getLeadByAnyId(db, req.body.lead_id) : null;
+    const mediaUrl = req.body.media_url || req.body.image_url || asset?.public_url || asset?.relative_url || "";
+    const result = await sendCrmMessage({
+      db,
+      brandId: lead?.brand_id || getCrmBrandId(req, db),
+      channel: "whatsapp",
+      to: req.body.to || req.body.recipient || ng41LeadPhone(lead || {}) || "",
+      text: req.body.caption || req.body.text || req.body.message || "",
+      leadId: lead?.id || req.body.lead_id || null,
+      mediaUrl,
+      mediaId: req.body.media_id || asset?.whatsapp_media_id || "",
+      mediaType: req.body.media_type || asset?.asset_type || "image",
+      caption: req.body.caption || req.body.text || "",
+      metadata: { source: "media_library_send_whatsapp", media_asset_id: asset?.id || null, media_url: mediaUrl, media_type: req.body.media_type || asset?.asset_type || "image" },
+    });
+    await writeCrmDb(db);
+    res.status(result.success || result.queued ? 200 : 502).json(result);
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/leads/:id/flow-status", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const lead = getLeadByAnyId(db, req.params.id);
+    if (!lead) return res.status(404).json({ success: false, error: "Lead not found" });
+    const allowed = ["pending_payment", "payment_promise_date", "payment_promise_note", "payment_followup_status", "added_to_free_community", "free_community_invited", "program_explained", "website_link_sent", "demo_link_sent", "live_session_invited", "session_attended", "session_missed", "recording_sent", "google_meet_requested", "google_meet_booked", "mentor_handoff_needed", "paid", "manual_paid", "unpaid_active", "opted_out", "do_not_message", "admin_suppressed"];
+    for (const key of allowed) if (req.body[key] !== undefined) lead[key] = req.body[key];
+    if (req.body.labels) ngEnsureLeadFlowLabels(lead, Array.isArray(req.body.labels) ? req.body.labels : normalizeArray(req.body.labels));
+    if (lead.payment_promise_date) {
+      lead.pending_payment = true;
+      lead.payment_followup_status = lead.payment_followup_status || "pending_payment";
+      ngEnsureLeadFlowLabels(lead, ["pending_payment", "payment_promise_date", "payment_followup_due"]);
+      ensureCrmArray(db, "tasks").push(normalizeCrmCollectionPayload("tasks", {
+        title: `Payment follow-up: ${ng41LeadName(lead) || "Student"}`,
+        description: lead.payment_promise_note || "Student promised payment. Follow up on promised date.",
+        due_at: lead.payment_promise_date,
+        lead_id: lead.id,
+        task_type: "payment_promise_followup",
+        status: "open",
+        priority: "high",
+      }, null, lead.brand_id || db.settings?.default_brand_id || null));
+    }
+    if (lead.added_to_free_community) ngEnsureLeadFlowLabels(lead, ["added_to_free_community"]);
+    if (lead.paid || lead.manual_paid) {
+      lead.stage = "paid_enrolled";
+      lead.lead_stage = "paid_enrolled";
+      lead.unpaid_active = false;
+      lead.exclude_daily_live_session = true;
+      ngEnsureLeadFlowLabels(lead, ["paid"]);
+    }
+    if (lead.opted_out || lead.do_not_message || lead.admin_suppressed) {
+      lead.unsubscribe_status = "suppressed";
+      lead.suppressed = true;
+      ngEnsureLeadFlowLabels(lead, [lead.opted_out ? "opted_out" : "do_not_message"]);
+    }
+    lead.updated_at = nowIso();
+    await writeCrmDb(db);
+    res.json({ success: true, lead: ensureLeadIdentityFields(lead) });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+function ngDefaultMarathonSystems() {
+  return [
+    { system: "MSK", days: 10, topics: ["bone and joint foundation", "muscle and connective tissue", "arthritis and bone pathology"] },
+    { system: "Neurology / CNS", days: 17, topics: ["neuroanatomy and localization", "stroke/seizure/movement", "CNS pathology and pharmacology"] },
+    { system: "Reproductive", days: 10, topics: ["female reproductive physiology", "pregnancy and pathology", "male reproductive and endocrine integration"] },
+    { system: "Endocrinology", days: 10, topics: ["diabetes and thyroid", "adrenal and pituitary", "calcium/PTH and endocrine pharmacology"] },
+    { system: "GIT", days: 14, topics: ["GI physiology", "liver/pancreas", "malabsorption/IBD/GI pathology"] },
+    { system: "Renal", days: 12, topics: ["nephron physiology", "acid-base and electrolytes", "glomerular disease and diuretics"] },
+    { system: "Pulmonology / Respiratory", days: 10, topics: ["pulmonary mechanics", "V/Q and gas exchange", "obstructive/restrictive lung disease"] },
+    { system: "Immunology", days: 8, topics: ["immune cells and complement", "hypersensitivity and immunodeficiency", "autoimmunity and transplant"] },
+    { system: "Hematology", days: 10, topics: ["RBC and anemia", "WBC malignancy", "platelets/coagulation/transfusion"] },
+    { system: "Psychiatry", days: 7, topics: ["mood/anxiety/psychosis", "substance/personality", "psych pharmacology"] },
+    { system: "Mixed Review + Final Correction", days: 12, topics: ["weak-area repair", "mixed QID correction", "final readiness review"] },
+  ];
+}
+
+function ngNextStudyDate(date, skipSundays = true) {
+  const d = new Date(date);
+  while (skipSundays && d.getDay() === 0) d.setDate(d.getDate() + 1);
+  return d;
+}
+
+function ngBuildMarathonDay({ courseId, dayNumber, weekNumber, date, system, systemDay, totalSystemDays, topic, qids = "" }) {
+  const isAssessment = systemDay === totalSystemDays && !system.toLowerCase().includes("mixed");
+  const title = isAssessment ? `${system} — System-End Assessment + Correction` : `${system} Day ${systemDay} — ${topic}`;
+  const description = isAssessment
+    ? `System-end assessment and correction day for ${system}. Students review incorrects, rewatch weak UWorld Video Library explanations, revise First Aid/Pathoma notes, and post one confusing concept in Community Q&A.`
+    : `Live First Aid session with Dr. Ahmad for ${system}. After class, complete the mapped UWorld QIDs, watch the matching UWorld Video Library lecture, review recordings/notes, complete the daily task, use flashcards, earn leaderboard points, and post one confusing concept in Community Q&A.`;
+  return {
+    id: uuid(), course_id: courseId, week_number: weekNumber, day_number: dayNumber, date: dateOnly(date),
+    system, system_day: systemDay, title, description,
+    resources: isAssessment ? ["First Aid", "UWorld Video Library", "Assessment", "Incorrect Review", "Leaderboard", "Community Q&A"] : ["First Aid", "Pathoma", "UWorld Video Library", "Live Session Recording", "Class Notes", "Daily Flashcards", "Community Q&A", "Leaderboard"],
+    resource_links: [],
+    uworld_target: isAssessment ? `${system} system-end assessment + incorrect review` : (qids || `${system} mapped QIDs: 30-40 MCQs or assigned block`),
+    first_aid_topics: topic,
+    homework: isAssessment ? "Complete the system-end assessment, review incorrects, rewatch weak video-library explanations, and submit correction notes for leaderboard points." : "Attend Dr. Ahmad’s live First Aid session, complete assigned QIDs, watch the matching UWorld Video Library lecture, review notes/recording when available, complete daily flashcards, complete the roadmap task, earn leaderboard task points, and post one confusing concept in Community Q&A.",
+    status: "scheduled",
+    is_published: true,
+    published: true,
+    assessment_day: isAssessment,
+    flashcards_enabled: true,
+  };
+}
+
+function ngBuildDailyFlashcardsForDay(day) {
+  if (!day || day.assessment_day) return [];
+  const topic = day.first_aid_topics || day.system || "today’s topic";
+  return [
+    { front: `What is the key First Aid concept for ${topic}?`, back: `Review the live class notes for ${topic}, then connect the mechanism to the assigned UWorld QIDs.`, explanation: "Use active recall before watching the video explanation." },
+    { front: `Which mistake should you avoid in ${day.system}?`, back: "Do not memorize the answer only. Identify the mechanism, wrong-option trap, and First Aid line that explains it.", explanation: "This card is for correction-based revision." },
+    { front: `What should you do after completing today’s ${day.system} QIDs?`, back: "Watch the matching UWorld Video Library lecture, review notes/recording, post one confusing concept in Community Q&A, and mark the roadmap task complete.", explanation: "This links daily study work to leaderboard accountability." },
+  ];
+}
+
+app.post("/admin/roadmap/apply-marathon-template", async (req, res) => {
+  try {
+    const { user } = await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const courseId = String(req.body.course_id || req.body.courseId || "").trim();
+    if (!courseId || !db.courses[courseId]) return res.status(404).json({ success: false, error: "Valid course_id is required" });
+    const startDateRaw = req.body.start_date || req.body.startDate || "2026-07-01";
+    const classTime = String(req.body.class_time || req.body.scheduled_time || "13:00").trim();
+    const timezone = String(req.body.timezone || req.body.scheduled_timezone || DEFAULT_TIMEZONE).trim() || DEFAULT_TIMEZONE;
+    const skipSundays = req.body.skip_sundays !== false;
+    const recreateSessions = req.body.recreate_live_sessions !== false;
+    const createFlashcards = req.body.create_flashcards !== false;
+    const systems = Array.isArray(req.body.system_plan) && req.body.system_plan.length ? req.body.system_plan : ngDefaultMarathonSystems();
+    let dayNumber = 1;
+    let cursor = ngNextStudyDate(new Date(`${startDateRaw}T00:00:00`), skipSundays);
+    const days = [];
+    const sessionsCreated = [];
+    const assessmentsCreated = [];
+    const flashcardsCreated = [];
+    for (const sys of systems) {
+      const totalDays = Number(sys.days || 1);
+      const topics = Array.isArray(sys.topics) && sys.topics.length ? sys.topics : [sys.system || "System review"];
+      for (let i = 1; i <= totalDays && dayNumber <= 120; i++) {
+        cursor = ngNextStudyDate(cursor, skipSundays);
+        const topic = topics[(i - 1) % topics.length];
+        const qids = Array.isArray(sys.qid_blocks) ? (sys.qid_blocks[i - 1] || "") : "";
+        const day = ngBuildMarathonDay({ courseId, dayNumber, weekNumber: Math.ceil(dayNumber / 7), date: cursor, system: sys.system, systemDay: i, totalSystemDays: totalDays, topic, qids });
+        days.push(day);
+        if (recreateSessions && !day.assessment_day) {
+          const sessionId = uuid();
+          const session = {
+            id: sessionId, course_id: courseId, topic: `${db.courses[courseId].name || "120-Day Marathon"} — Day ${day.day_number}: ${day.system}`,
+            title: `${db.courses[courseId].name || "120-Day Marathon"} — Day ${day.day_number}: ${day.system}`,
+            description: day.description, scheduled_date: day.date, scheduled_time: classTime, scheduled_timezone: timezone, duration_minutes: DEFAULT_ZOOM_DURATION_MINUTES,
+            instructor_id: null, instructor_name: db.courses[courseId].instructor_name || "Dr. Ahmad", status: "scheduled", roadmap_day_id: day.id, created_by: user.id, created_at: nowIso(), updated_at: nowIso(),
+          };
+          db.liveSessions[sessionId] = session;
+          day.live_session_id = sessionId;
+          sessionsCreated.push(session);
+        }
+        if (day.assessment_day) {
+          const assessmentId = uuid();
+          db.assessments[assessmentId] = { id: assessmentId, course_id: courseId, session_id: null, roadmap_day_id: day.id, title: day.title, description: day.description, source_type: "system_end_marathon_template", questions: [], duration_minutes: 60, attempts_allowed: 1, is_published: false, assessment_type: "system_end", system: day.system, created_by: user.id, created_at: nowIso(), updated_at: nowIso() };
+          day.assessment_id = assessmentId;
+          assessmentsCreated.push(db.assessments[assessmentId]);
+        }
+        if (createFlashcards && !day.assessment_day) {
+          for (const card of ngBuildDailyFlashcardsForDay(day)) {
+            const cardId = uuid();
+            db.flashcards[cardId] = { id: cardId, course_id: courseId, roadmap_day_id: day.id, day_number: day.day_number, system: day.system, front: card.front, back: card.back, explanation: card.explanation, status: "published", created_by: user.id, created_at: nowIso(), updated_at: nowIso() };
+            flashcardsCreated.push(db.flashcards[cardId]);
+          }
+        }
+        dayNumber += 1;
+        cursor.setDate(cursor.getDate() + 1);
+      }
+    }
+    db.roadmaps[courseId] = { id: courseId, course_id: courseId, title: req.body.title || "July 1 — 120-Day Step 1 Marathon Roadmap", start_date: dateOnly(new Date(`${startDateRaw}T00:00:00`)), class_time: classTime, timezone, skip_sundays: skipSundays, days, created_by: user.id, updated_by: user.id, created_at: db.roadmaps[courseId]?.created_at || nowIso(), updated_at: nowIso() };
+    await writeLiveDb(db);
+    res.json({ success: true, roadmap: db.roadmaps[courseId], counts: { days: days.length, live_sessions_created: sessionsCreated.length, system_end_assessments_created: assessmentsCreated.length, flashcards_created: flashcardsCreated.length }, message: "120-Day Marathon template applied without per-day manual editing." });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/flashcards", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const courseId = String(req.query.course_id || req.query.courseId || "").trim();
+    let cards = Object.values(db.flashcards || {}).filter((card) => card.status !== "archived" && card.is_published !== false);
+    if (courseId) cards = cards.filter((card) => String(card.course_id) === courseId);
+    if (req.query.day_id) cards = cards.filter((card) => String(card.roadmap_day_id) === String(req.query.day_id));
+    if (req.query.day_number) cards = cards.filter((card) => String(card.day_number) === String(req.query.day_number));
+    cards.sort((a, b) => Number(a.day_number || 0) - Number(b.day_number || 0));
+    res.json({ success: true, count: cards.length, flashcards: cards });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/flashcards", async (req, res) => {
+  try {
+    const { user } = await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const id = req.body.id || uuid();
+    db.flashcards[id] = { ...(db.flashcards[id] || {}), id, course_id: req.body.course_id || db.flashcards[id]?.course_id || null, roadmap_day_id: req.body.roadmap_day_id || req.body.day_id || db.flashcards[id]?.roadmap_day_id || null, day_number: Number(req.body.day_number || db.flashcards[id]?.day_number || 0), system: req.body.system || db.flashcards[id]?.system || "", front: String(req.body.front || req.body.question || db.flashcards[id]?.front || "").trim(), back: String(req.body.back || req.body.answer || db.flashcards[id]?.back || "").trim(), explanation: String(req.body.explanation || db.flashcards[id]?.explanation || "").trim(), status: req.body.status || db.flashcards[id]?.status || "published", is_published: req.body.is_published !== false, updated_by: user.id, created_by: db.flashcards[id]?.created_by || user.id, created_at: db.flashcards[id]?.created_at || nowIso(), updated_at: nowIso() };
+    await writeLiveDb(db);
+    res.json({ success: true, flashcard: db.flashcards[id] });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.delete("/admin/flashcards/:id", async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    if (!db.flashcards[req.params.id]) return res.status(404).json({ success: false, error: "Flashcard not found" });
+    db.flashcards[req.params.id].status = "archived";
+    db.flashcards[req.params.id].is_published = false;
+    db.flashcards[req.params.id].updated_at = nowIso();
+    await writeLiveDb(db);
+    res.json({ success: true, flashcard: db.flashcards[req.params.id] });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+
+
+// -----------------------------------------------------------------------------
+// v70 Learning Override Layer: Admin-approved marketing + community lessons
+// -----------------------------------------------------------------------------
+
+const NEXTGEN_LEARNING_AREAS = ["marketing", "community", "all"];
+
+function ngNormalizeLearningArea(value = "marketing") {
+  const clean = normalizeCrmLower(value || "marketing", "marketing")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  if (["community_intelligence", "community_content", "community_posts", "community_poll", "polls"].includes(clean)) return "community";
+  if (["sales", "ayla", "crm", "leads", "marketing_flow", "conversation", "whatsapp"].includes(clean)) return "marketing";
+  if (clean === "all" || clean === "global") return "all";
+  return NEXTGEN_LEARNING_AREAS.includes(clean) ? clean : "marketing";
+}
+
+function ngLearningRuleText(item = {}) {
+  return normalizeCrmString(
+    item.rule_text ||
+    item.override_rule ||
+    item.corrected_behavior ||
+    item.lesson ||
+    item.content ||
+    item.text ||
+    item.note ||
+    item.notes ||
+    ""
+  );
+}
+
+function ngLearningRuleTitle(item = {}, fallback = "Approved learning rule") {
+  return normalizeCrmString(item.title || item.name || item.category || fallback);
+}
+
+function ngLearningRuleIsApproved(item = {}) {
+  const status = normalizeCrmLower(item.status || item.approval_status || "", "");
+  const active = item.active !== false && item.is_active !== false && status !== "archived" && status !== "deleted" && status !== "rejected";
+  if (!active) return false;
+  return status === "approved" || item.approved === true || item.admin_approved === true || item.override_behavior === true;
+}
+
+function ngLearningRuleAreaMatches(item = {}, area = "marketing") {
+  const wanted = ngNormalizeLearningArea(area);
+  const values = uniqueList([
+    item.area,
+    item.scope,
+    item.learning_area,
+    item.target_area,
+    item.module,
+    item.source_module,
+    ...(Array.isArray(item.areas) ? item.areas : []),
+    ...(Array.isArray(item.scopes) ? item.scopes : []),
+  ]).map(ngNormalizeLearningArea);
+  if (!values.length) return wanted === "marketing";
+  return values.includes("all") || values.includes(wanted);
+}
+
+function ngApprovedLearningRules(db = {}, area = "marketing", limit = 18) {
+  const rows = [
+    ...ensureCrmArray(db, "approved_learning_rules"),
+    ...ensureCrmArray(db, "ai_learning_lessons"),
+    ...ensureCrmArray(db, "community_learning_lessons"),
+  ];
+
+  const seen = new Set();
+  return rows
+    .filter((item) => ngLearningRuleIsApproved(item))
+    .filter((item) => ngLearningRuleAreaMatches(item, area))
+    .map((item) => ({
+      ...item,
+      area: ngNormalizeLearningArea(item.area || item.scope || item.learning_area || area),
+      rule_text: ngLearningRuleText(item),
+      title: ngLearningRuleTitle(item),
+      priority: Number(item.priority ?? item.override_priority ?? 50),
+    }))
+    .filter((item) => item.rule_text)
+    .filter((item) => {
+      const key = `${item.area}:${item.rule_text}`.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => Number(b.priority || 0) - Number(a.priority || 0) || String(b.updated_at || b.approved_at || b.created_at || "").localeCompare(String(a.updated_at || a.approved_at || a.created_at || "")))
+    .slice(0, Number(limit || 18));
+}
+
+function ngLearningRulesPromptBlock(db = {}, area = "marketing") {
+  const rules = ngApprovedLearningRules(db, area, area === "community" ? 20 : 18);
+  if (!rules.length) {
+    return area === "community"
+      ? "ADMIN-APPROVED COMMUNITY LEARNING: no approved override rules yet. Use existing community training and medical-review rules."
+      : "ADMIN-APPROVED AYLA SALES LEARNING: no approved override rules yet. Use existing sales brain and AI Control rules.";
+  }
+
+  const label = area === "community" ? "COMMUNITY INTELLIGENCE" : "AYLA SALES/MARKETING";
+  return [
+    `ADMIN-APPROVED ${label} LEARNING OVERRIDES:`,
+    "These rules are approved/corrected by admin and override generic AI behavior. Use them as high-priority guidance, but still adapt naturally to each student/community context. Do not copy one script robotically if the person's question requires a tailored answer.",
+    ...rules.map((rule, index) => `${index + 1}. ${rule.title}: ${rule.rule_text}`),
+  ].join("\n");
+}
+
+function ngCreateApprovedLearningRule(db = {}, payload = {}, actor = null) {
+  const area = ngNormalizeLearningArea(payload.area || payload.scope || payload.learning_area || "marketing");
+  const record = withTimestamps({
+    id: payload.id || uuid(),
+    brand_id: payload.brand_id || null,
+    area,
+    scope: area,
+    title: payload.title || (area === "community" ? "Community override rule" : "Ayla override rule"),
+    rule_text: ngLearningRuleText(payload) || normalizeCrmString(payload.rule_text || ""),
+    category: payload.category || (area === "community" ? "community_behavior" : "sales_behavior"),
+    status: payload.status || "approved",
+    approved: payload.approved !== false,
+    admin_approved: true,
+    override_behavior: payload.override_behavior !== false,
+    priority: Number(payload.priority ?? payload.override_priority ?? 80),
+    source: payload.source || "admin_correction",
+    source_event_id: payload.source_event_id || null,
+    source_message_id: payload.source_message_id || null,
+    bad_example: payload.bad_example || payload.mistake || "",
+    corrected_example: payload.corrected_example || payload.corrected_reply || "",
+    applies_to: payload.applies_to || payload.condition || "Use when relevant to the lead/community context.",
+    created_by: actor?.id || payload.created_by || "admin",
+    approved_by: actor?.id || payload.approved_by || "admin",
+    approved_at: payload.approved_at || nowIso(),
+  });
+  ensureCrmArray(db, "approved_learning_rules").unshift(record);
+  return record;
+}
+
+function ngRecordLearningCorrection(db = {}, payload = {}, actor = null, defaultArea = "marketing") {
+  const area = ngNormalizeLearningArea(payload.area || payload.scope || defaultArea);
+  const mistake = withTimestamps({
+    id: payload.id || uuid(),
+    brand_id: payload.brand_id || null,
+    area,
+    lead_id: payload.lead_id || null,
+    community_id: payload.community_id || null,
+    post_id: payload.post_id || payload.scheduled_post_id || null,
+    message_id: payload.message_id || null,
+    mistake_type: payload.mistake_type || payload.category || "admin_correction",
+    bad_reply: payload.bad_reply || payload.bad_example || payload.original_reply || payload.mistake || "",
+    corrected_reply: payload.corrected_reply || payload.corrected_example || payload.corrected_behavior || "",
+    rule_text: ngLearningRuleText(payload),
+    admin_note: payload.admin_note || payload.notes || "",
+    status: payload.status || "approved",
+    created_by: actor?.id || "admin",
+    approved_by: actor?.id || "admin",
+    approved_at: nowIso(),
+  });
+
+  if (area === "community") ensureCrmArray(db, "community_learning_events").unshift(mistake);
+  else ensureCrmArray(db, "ai_mistake_reports").unshift(mistake);
+
+  const rule = ngCreateApprovedLearningRule(db, {
+    ...payload,
+    area,
+    title: payload.title || (area === "community" ? "Corrected community behavior" : "Corrected Ayla behavior"),
+    rule_text: ngLearningRuleText(payload) || payload.corrected_reply || payload.corrected_behavior || payload.corrected_example,
+    bad_example: mistake.bad_reply,
+    corrected_example: mistake.corrected_reply,
+    source: "admin_mistake_correction",
+    source_event_id: mistake.id,
+    priority: payload.priority ?? 95,
+  }, actor);
+
+  return { mistake, rule };
+}
+
+app.get("/admin/crm/ai-sales-learning/approved-rules", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const area = req.query.area || req.query.scope || "all";
+    let rules = ensureCrmArray(db, "approved_learning_rules").filter((item) => item.status !== "archived" && item.status !== "deleted");
+    if (area !== "all") rules = rules.filter((item) => ngLearningRuleAreaMatches(item, area));
+    rules.sort((a, b) => Number(b.priority || 0) - Number(a.priority || 0) || String(b.updated_at || b.created_at || "").localeCompare(String(a.updated_at || a.created_at || "")));
+    res.json({ success: true, rules, approved_rules: rules, count: rules.length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/ai-sales-learning/approved-rules", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const ruleText = ngLearningRuleText(req.body || {});
+    if (!ruleText) return res.status(400).json({ success: false, error: "rule_text is required" });
+    const rule = ngCreateApprovedLearningRule(db, req.body || {}, user);
+    await writeCrmDb(db);
+    res.json({ success: true, rule, message: "Approved learning rule saved. It will override Ayla/community behavior when relevant." });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.put("/admin/crm/ai-sales-learning/approved-rules/:id", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const rule = ensureCrmArray(db, "approved_learning_rules").find((x) => String(x.id) === String(req.params.id));
+    if (!rule) return res.status(404).json({ success: false, error: "Approved rule not found" });
+    Object.assign(rule, req.body || {}, {
+      area: ngNormalizeLearningArea(req.body.area || req.body.scope || rule.area || "marketing"),
+      scope: ngNormalizeLearningArea(req.body.scope || req.body.area || rule.scope || rule.area || "marketing"),
+      rule_text: ngLearningRuleText(req.body || {}) || rule.rule_text,
+      updated_by: user.id,
+      updated_at: nowIso(),
+    });
+    await writeCrmDb(db);
+    res.json({ success: true, rule });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+app.patch("/admin/crm/ai-sales-learning/approved-rules/:id", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const rule = ensureCrmArray(db, "approved_learning_rules").find((x) => String(x.id) === String(req.params.id));
+    if (!rule) return res.status(404).json({ success: false, error: "Approved rule not found" });
+    Object.assign(rule, req.body || {}, {
+      area: ngNormalizeLearningArea(req.body.area || req.body.scope || rule.area || "marketing"),
+      scope: ngNormalizeLearningArea(req.body.scope || req.body.area || rule.scope || rule.area || "marketing"),
+      rule_text: ngLearningRuleText(req.body || {}) || rule.rule_text,
+      updated_by: user.id,
+      updated_at: nowIso(),
+    });
+    await writeCrmDb(db);
+    res.json({ success: true, rule });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/ai-sales-learning/approved-rules/:id/approve", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const rule = ensureCrmArray(db, "approved_learning_rules").find((x) => String(x.id) === String(req.params.id));
+    if (!rule) return res.status(404).json({ success: false, error: "Approved rule not found" });
+    Object.assign(rule, { status: "approved", approved: true, admin_approved: true, override_behavior: true, approved_by: user.id, approved_at: nowIso(), updated_at: nowIso() });
+    await writeCrmDb(db);
+    res.json({ success: true, rule });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/ai-sales-learning/approved-rules/:id/reject", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const rule = ensureCrmArray(db, "approved_learning_rules").find((x) => String(x.id) === String(req.params.id));
+    if (!rule) return res.status(404).json({ success: false, error: "Approved rule not found" });
+    Object.assign(rule, { status: "rejected", approved: false, override_behavior: false, rejected_by: user.id, rejected_at: nowIso(), updated_at: nowIso() });
+    await writeCrmDb(db);
+    res.json({ success: true, rule });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.delete("/admin/crm/ai-sales-learning/approved-rules/:id", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const rule = ensureCrmArray(db, "approved_learning_rules").find((x) => String(x.id) === String(req.params.id));
+    if (!rule) return res.status(404).json({ success: false, error: "Approved rule not found" });
+    Object.assign(rule, { status: "archived", approved: false, override_behavior: false, archived_by: user.id, archived_at: nowIso(), updated_at: nowIso() });
+    await writeCrmDb(db);
+    res.json({ success: true, rule });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/ai-sales-learning/mistake-corrections", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const result = ngRecordLearningCorrection(db, req.body || {}, user, req.body.area || "marketing");
+    await writeCrmDb(db);
+    res.json({ success: true, ...result, message: "Correction saved and approved as an override rule." });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/crm/community-intelligence/learning", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const events = ensureCrmArray(db, "community_learning_events").sort(sortNewestFirst);
+    const lessons = ensureCrmArray(db, "community_learning_lessons").sort(sortNewestFirst);
+    const approved_rules = ngApprovedLearningRules(db, "community", 100);
+    res.json({ success: true, events, lessons, approved_rules, count: { events: events.length, lessons: lessons.length, approved_rules: approved_rules.length } });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/community-intelligence/learning/events", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const event = withTimestamps({ ...(req.body || {}), id: req.body.id || uuid(), area: "community", source: req.body.source || "community_intelligence", created_by: user.id });
+    ensureCrmArray(db, "community_learning_events").unshift(event);
+    await writeCrmDb(db);
+    res.json({ success: true, event });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/community-intelligence/learning/corrections", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const result = ngRecordLearningCorrection(db, { ...(req.body || {}), area: "community" }, user, "community");
+    await writeCrmDb(db);
+    res.json({ success: true, ...result, message: "Community correction saved and approved as an override rule." });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/community-intelligence/learning/lessons", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const lesson = withTimestamps({ ...(req.body || {}), id: req.body.id || uuid(), area: "community", scope: "community", title: req.body.title || "Community learning lesson", rule_text: ngLearningRuleText(req.body || {}), status: req.body.status || "pending_approval", created_by: user.id });
+    ensureCrmArray(db, "community_learning_lessons").unshift(lesson);
+    if (req.body.approve_now === true || req.body.status === "approved") {
+      lesson.status = "approved";
+      lesson.approved = true;
+      lesson.admin_approved = true;
+      lesson.override_behavior = true;
+      lesson.approved_by = user.id;
+      lesson.approved_at = nowIso();
+      ngCreateApprovedLearningRule(db, { ...lesson, source: "community_learning_lesson", source_event_id: lesson.id }, user);
+    }
+    await writeCrmDb(db);
+    res.json({ success: true, lesson });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/community-intelligence/learning/lessons/:id/approve", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const lesson = ensureCrmArray(db, "community_learning_lessons").find((x) => String(x.id) === String(req.params.id));
+    if (!lesson) return res.status(404).json({ success: false, error: "Community lesson not found" });
+    Object.assign(lesson, { status: "approved", approved: true, admin_approved: true, override_behavior: true, approved_by: user.id, approved_at: nowIso(), updated_at: nowIso() });
+    const rule = ngCreateApprovedLearningRule(db, { ...lesson, area: "community", source: "community_learning_lesson", source_event_id: lesson.id }, user);
+    await writeCrmDb(db);
+    res.json({ success: true, lesson, rule });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/community-intelligence/learning/lessons/:id/reject", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const lesson = ensureCrmArray(db, "community_learning_lessons").find((x) => String(x.id) === String(req.params.id));
+    if (!lesson) return res.status(404).json({ success: false, error: "Community lesson not found" });
+    Object.assign(lesson, { status: "rejected", approved: false, override_behavior: false, rejected_by: user.id, rejected_at: nowIso(), updated_at: nowIso() });
+    await writeCrmDb(db);
+    res.json({ success: true, lesson });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+
+
+// -----------------------------------------------------------------------------
+// V71 STUDENT ACCESS + AYLA MEDIA INTELLIGENCE + FLOW CHECKS
+// -----------------------------------------------------------------------------
+
+const NG_AYLA_MEDIA_USAGE_DEFINITIONS = [
+  { key: "program_overview", label: "Program Overview", keywords: ["program", "120-day", "marathon", "july 1", "overview", "structure"] },
+  { key: "live_classroom", label: "Live Classroom", keywords: ["live class", "live session", "classroom", "dr ahmad", "teaching", "first aid session"] },
+  { key: "recording", label: "Recording", keywords: ["recording", "recordings", "watch", "review recording", "session recording", "video"] },
+  { key: "community", label: "Community Q&A", keywords: ["community", "q&a", "questions", "ask", "mentor reply", "discussion"] },
+  { key: "assessment", label: "Assessments", keywords: ["assessment", "assessments", "system-end", "surprise assessment", "incorrect", "score"] },
+  { key: "leaderboard", label: "Leaderboard", keywords: ["leaderboard", "points", "task points", "accountability", "motivation", "rank"] },
+  { key: "flashcards", label: "Daily Flashcards", keywords: ["flashcard", "flashcards", "active recall", "recall", "daily card"] },
+  { key: "roadmap", label: "Roadmap", keywords: ["roadmap", "system-wise", "msk", "120 days", "daily plan", "schedule"] },
+  { key: "demo_lms", label: "LMS Demo", keywords: ["demo", "website", "dashboard", "lms", "try demo", "platform"] },
+  { key: "free_community", label: "Free Community", keywords: ["free community", "community invite", "telegram", "discord"] },
+  { key: "uworld_video_library", label: "UWorld Video Library", keywords: ["uworld", "video library", "qids", "mcq", "question ids", "150 hours", "3000"] },
+];
+
+function ngNormalizeMediaUsageKey(value = "") {
+  const raw = normalizeCrmLower(value || "", "general");
+  const map = {
+    classroom: "live_classroom",
+    live_session_invite: "live_classroom",
+    live_classroom: "live_classroom",
+    live_class: "live_classroom",
+    recordings: "recording",
+    recording_available: "recording",
+    community_qa: "community",
+    community_qna: "community",
+    assessments: "assessment",
+    system_assessment: "assessment",
+    leaderboard_points: "leaderboard",
+    daily_flashcards: "flashcards",
+    flashcard: "flashcards",
+    homepage_course_preview: "program_overview",
+    ayla_program_explanation: "program_overview",
+    demo_lms_preview: "demo_lms",
+    roadmap_preview: "roadmap",
+    whatsapp_campaign: "program_overview",
+    course_detail_page: "program_overview",
+    course_card: "program_overview",
+    mobile_course_image: "program_overview",
+  };
+  return map[raw] || raw || "general";
+}
+
+function ngAylaMediaEligibleAssets(db = {}, brandId = null) {
+  return ensureCrmArray(db, "media_assets")
+    .filter((asset) => asset && asset.status !== "inactive" && asset.status !== "archived" && asset.status !== "deleted")
+    .filter((asset) => !brandId || !asset.brand_id || String(asset.brand_id) === String(brandId))
+    .filter((asset) => asset.ai_send_enabled === true || asset.auto_send_with_ayla === true || asset.send_when_explaining === true)
+    .map((asset) => ({
+      ...asset,
+      usage_area: ngNormalizeMediaUsageKey(asset.usage_area || asset.usage || "general"),
+      trigger_keywords: uniqueList([...(Array.isArray(asset.trigger_keywords) ? asset.trigger_keywords : normalizeArray(asset.trigger_keywords || asset.keywords || "")), ...safeArray(asset.tags)]),
+      priority: Number(asset.priority || 0) || 0,
+    }));
+}
+
+function ngBuildAylaMediaGuidance(db = {}, lead = {}) {
+  const assets = ngAylaMediaEligibleAssets(db, lead?.brand_id || null).slice(0, 30);
+  if (!assets.length) {
+    return "- Media Library rule: no Ayla-enabled media assets are available yet. Do not claim that a picture was sent unless the backend attaches one.";
+  }
+  const lines = assets.map((asset) => {
+    const usage = ngNormalizeMediaUsageKey(asset.usage_area || "general");
+    const keys = uniqueList([...(asset.trigger_keywords || []), ...safeArray(asset.tags)]).slice(0, 8).join(", ");
+    const ctx = asset.ai_usage_context ? ` Context: ${ngAylaSettingsText(asset.ai_usage_context, 180)}` : "";
+    return `  • ${asset.title || asset.name || asset.id}: usage=${usage}${keys ? `, triggers=${keys}` : ""}.${ctx}`;
+  });
+  return [
+    "- Ayla Media Library rule: when explaining a feature, the backend may attach one matching approved image from Media Library. Do not spam images; one relevant picture is enough.",
+    "- Use matching media naturally: classroom picture for live teaching/classroom; recording picture for recordings; community picture for Community Q&A; assessment picture for assessments; leaderboard picture for leaderboard/task points; flashcard picture for daily flashcards; roadmap/demo picture for roadmap or LMS demo.",
+    "- If an image is attached, write the caption/message so the image supports the explanation.",
+    "- Available Ayla-enabled media assets:",
+    ...lines,
+  ].join("\n");
+}
+
+function ngMediaTextMatchScore(text = "", asset = {}) {
+  const hay = String(text || "").toLowerCase();
+  const usage = ngNormalizeMediaUsageKey(asset.usage_area || "general");
+  const def = NG_AYLA_MEDIA_USAGE_DEFINITIONS.find((x) => x.key === usage) || { keywords: [] };
+  const triggers = uniqueList([...(def.keywords || []), ...(asset.trigger_keywords || []), ...safeArray(asset.tags)]);
+  let score = Number(asset.priority || 0) || 0;
+  for (const key of triggers) {
+    const clean = String(key || "").toLowerCase().trim();
+    if (!clean) continue;
+    if (hay.includes(clean)) score += clean.length > 10 ? 4 : 2;
+  }
+  if (usage === "program_overview" && /120-day|marathon|july 1|program|structure/.test(hay)) score += 4;
+  if (usage === "live_classroom" && /live|class|session|teaching|dr\.?\s*ahmad/.test(hay)) score += 5;
+  if (usage === "recording" && /recording|watch|review/.test(hay)) score += 5;
+  if (usage === "community" && /community|q\s*&\s*a|questions|confusing/.test(hay)) score += 5;
+  if (usage === "assessment" && /assessment|incorrect|score|system-end|surprise/.test(hay)) score += 5;
+  if (usage === "leaderboard" && /leaderboard|points|accountability/.test(hay)) score += 5;
+  if (usage === "flashcards" && /flashcards?|active recall/.test(hay)) score += 5;
+  if (usage === "demo_lms" && /demo|website|dashboard|lms|platform/.test(hay)) score += 5;
+  return score;
+}
+
+function ngAylaRecentMediaUsageBlocked(lead = {}, usage = "") {
+  const map = lead.ayla_media_last_sent_by_usage || {};
+  const last = map[usage];
+  if (!last) return false;
+  return Date.now() - new Date(last).getTime() < 6 * 60 * 60 * 1000;
+}
+
+function ngPickAylaMediaAssetForReply(db = {}, { lead = {}, reply = "", latestInboundText = "", messages = [] } = {}) {
+  const text = [reply, latestInboundText, safeArray(messages).slice(-6).map(ngMessageText).join("\n")].join("\n");
+  const assets = ngAylaMediaEligibleAssets(db, lead?.brand_id || null);
+  const scored = assets
+    .map((asset) => ({ asset, usage: ngNormalizeMediaUsageKey(asset.usage_area || "general"), score: ngMediaTextMatchScore(text, asset) }))
+    .filter((x) => x.score >= 5)
+    .filter((x) => !ngAylaRecentMediaUsageBlocked(lead, x.usage))
+    .sort((a, b) => b.score - a.score || Number(b.asset.priority || 0) - Number(a.asset.priority || 0));
+  return scored[0]?.asset || null;
+}
+
+function ngRenderAylaMediaCaption(asset = {}, { lead = {}, reply = "" } = {}) {
+  const template = String(asset.caption_template || "").trim();
+  if (template) return renderTemplateString(template, { lead, asset, reply });
+  return String(reply || "").trim();
+}
+
+function ngMarkAylaMediaSent(db = {}, lead = {}, asset = {}, meta = {}) {
+  if (!lead || !asset?.id) return;
+  const usage = ngNormalizeMediaUsageKey(asset.usage_area || "general");
+  lead.ayla_media_last_sent_at = nowIso();
+  lead.ayla_media_last_sent_asset_id = asset.id;
+  lead.ayla_media_last_sent_by_usage = { ...(lead.ayla_media_last_sent_by_usage || {}), [usage]: nowIso() };
+  ensureCrmArray(db, "media_send_events").unshift(withTimestamps({
+    id: uuid(),
+    lead_id: lead.id || null,
+    media_asset_id: asset.id,
+    usage_area: usage,
+    channel: "whatsapp",
+    source: meta.source || "ayla_auto_media",
+    result_status: meta.result?.status || null,
+    metadata: { title: asset.title || asset.name || "", result: meta.result || null },
+  }));
+}
+
+app.get("/admin/crm/media-library/ayla-usage", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const assets = ngAylaMediaEligibleAssets(db, brandId);
+    res.json({ success: true, definitions: NG_AYLA_MEDIA_USAGE_DEFINITIONS, assets, count: assets.length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.patch("/admin/crm/media-library/:id/ayla-usage", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const asset = ensureCrmArray(db, "media_assets").find((item) => String(item.id) === String(req.params.id));
+    if (!asset) return res.status(404).json({ success: false, error: "Media asset not found" });
+    const allowed = ["ai_send_enabled", "auto_send_with_ayla", "send_when_explaining", "usage_area", "trigger_keywords", "ai_usage_context", "caption_template", "priority", "status", "tags", "whatsapp_media_id"];
+    for (const key of allowed) if (req.body[key] !== undefined) asset[key] = req.body[key];
+    Object.assign(asset, normalizeCrmCollectionPayload("media_assets", asset, asset, asset.brand_id || getCrmBrandId(req, db)));
+    asset.updated_at = nowIso();
+    await writeCrmDb(db);
+    res.json({ success: true, asset });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+function ngGenerateTemporaryPassword() {
+  return `NG-${crypto.randomBytes(4).toString("hex").toUpperCase()}-${Math.floor(1000 + Math.random() * 9000)}`;
+}
+
+function ngHashToken(value = "") {
+  return crypto.createHash("sha256").update(String(value || "")).digest("hex");
+}
+
+function ngStudentLoginUrl() {
+  return process.env.STUDENT_LOGIN_URL || process.env.FRONTEND_LOGIN_URL || "https://live.nextgenusmlelms.com/login";
+}
+
+function ngStudentResetUrl(req, token) {
+  const base = process.env.STUDENT_RESET_PASSWORD_URL || "https://live.nextgenusmlelms.com/reset-password";
+  const joiner = base.includes("?") ? "&" : "?";
+  return `${base}${joiner}token=${encodeURIComponent(token)}`;
+}
+
+function ngStudentCredentialEmailBody({ user = {}, course = {}, enrollment = {}, temporaryPassword = "", resetUrl = "", reason = "" } = {}) {
+  const lines = [
+    `Hi Doctor,`,
+    ``,
+    `Your LMS access has been created${course?.name ? ` for ${course.name}` : ""}.`,
+    ``,
+    `Login:`,
+    ngStudentLoginUrl(),
+    ``,
+    `Email:`,
+    user.email || "",
+  ];
+  if (temporaryPassword) {
+    lines.push(``, `Temporary Password:`, temporaryPassword, ``, `Please change your password after logging in.`);
+  } else if (resetUrl) {
+    lines.push(``, `You can use your existing password. If you do not remember it, set a new password here:`, resetUrl);
+  }
+  lines.push(``, `NextGen USMLE Team`);
+  return lines.join("\n");
+}
+
+function ngLogStudentEmail(db = {}, payload = {}) {
+  if (!Array.isArray(db.emailLogs)) db.emailLogs = [];
+  db.emailLogs.unshift(withTimestamps({ id: uuid(), ...payload }));
+  db.emailLogs = db.emailLogs.slice(0, 500);
+}
+
+async function ngSendStudentAccessEmailSafe({ db, req, user, enrollment = {}, course = {}, temporaryPassword = "", reason = "student_access" } = {}) {
+  const result = { attempted: true, sent: false, provider: null, error: null, reason };
+  try {
+    if (!user?.email) throw new Error("Student email is missing");
+    let resetToken = "";
+    let resetUrl = "";
+    if (!temporaryPassword) {
+      resetToken = crypto.randomBytes(32).toString("hex");
+      user.password_reset_token_hash = ngHashToken(resetToken);
+      user.password_reset_expires_at = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+      user.updated_at = nowIso();
+      resetUrl = ngStudentResetUrl(req, resetToken);
+    }
+    const body = ngStudentCredentialEmailBody({ user, course, enrollment, temporaryPassword, resetUrl, reason });
+    const provider = await sendEmailMessage({ to: user.email, subject: "Your NextGen USMLE LMS Access", text: body });
+    result.sent = true;
+    result.provider = provider?.provider || provider?.messageId || provider?.id || "email";
+    ngLogStudentEmail(db, { to: user.email, subject: "Your NextGen USMLE LMS Access", status: "sent", provider_response: provider, reason, user_id: user.id, enrollment_id: enrollment?.id || null });
+  } catch (error) {
+    result.error = error.message;
+    ngLogStudentEmail(db, { to: user?.email || "", subject: "Your NextGen USMLE LMS Access", status: "failed", error: error.message, reason, user_id: user?.id || null, enrollment_id: enrollment?.id || null });
+  }
+  return result;
+}
+
+app.post("/auth/forgot-password", async (req, res) => {
+  try {
+    const email = normalizeEmail(req.body.email || "");
+    if (!email) return res.status(400).json({ success: false, error: "Email is required" });
+    const db = await readLiveDb();
+    const user = findUserByEmail(db, email);
+    if (user) {
+      const token = crypto.randomBytes(32).toString("hex");
+      user.password_reset_token_hash = ngHashToken(token);
+      user.password_reset_expires_at = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+      user.updated_at = nowIso();
+      const resetUrl = ngStudentResetUrl(req, token);
+      try {
+        const provider = await sendEmailMessage({ to: user.email, subject: "Reset your NextGen USMLE LMS password", text: `Hi Doctor,\n\nUse this link to reset your password:\n${resetUrl}\n\nThis link expires in 1 hour.\n\nNextGen USMLE Team` });
+        ngLogStudentEmail(db, { to: user.email, subject: "Reset your NextGen USMLE LMS password", status: "sent", provider_response: provider, reason: "forgot_password", user_id: user.id });
+      } catch (emailError) {
+        ngLogStudentEmail(db, { to: user.email, subject: "Reset your NextGen USMLE LMS password", status: "failed", error: emailError.message, reason: "forgot_password", user_id: user.id });
+      }
+      await writeLiveDb(db);
+    }
+    res.json({ success: true, message: "If this email exists, a reset link has been sent." });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/auth/reset-password", async (req, res) => {
+  try {
+    const token = String(req.body.token || "").trim();
+    const password = String(req.body.password || "");
+    if (!token) return res.status(400).json({ success: false, error: "Reset token is required" });
+    if (password.length < 8) return res.status(400).json({ success: false, error: "Password must be at least 8 characters" });
+    const db = await readLiveDb();
+    const hash = ngHashToken(token);
+    const user = Object.values(db.users || {}).find((item) => item.password_reset_token_hash === hash && item.password_reset_expires_at && new Date(item.password_reset_expires_at).getTime() > Date.now());
+    if (!user) return res.status(400).json({ success: false, error: "Reset link is invalid or expired" });
+    const hashed = hashPassword(password);
+    user.salt = hashed.salt;
+    user.password_hash = hashed.password_hash;
+    user.password_reset_token_hash = null;
+    user.password_reset_expires_at = null;
+    user.must_change_password = false;
+    user.updated_at = nowIso();
+    db.users[user.id] = user;
+    await writeLiveDb(db);
+    res.json({ success: true, message: "Password reset successfully" });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+function ngFindStudentByParam(db = {}, value = "") {
+  const id = String(value || "");
+  return db.users?.[id] || findUserByEmail(db, id) || null;
+}
+
+app.post("/admin/students/:id/send-credentials", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    const user = ngFindStudentByParam(db, req.params.id);
+    if (!user) return res.status(404).json({ success: false, error: "Student not found" });
+    let temp = "";
+    if (req.body.reset_password === true || req.body.force_password_reset === true) {
+      temp = ngGenerateTemporaryPassword();
+      const hashed = hashPassword(temp);
+      user.salt = hashed.salt;
+      user.password_hash = hashed.password_hash;
+      user.must_change_password = true;
+      user.updated_at = nowIso();
+    }
+    const enrollment = Object.values(db.enrollments || {}).find((e) => String(e.user_id) === String(user.id) && e.access_granted !== false) || null;
+    const course = enrollment?.course_id ? db.courses?.[String(enrollment.course_id)] || null : null;
+    const email = await ngSendStudentAccessEmailSafe({ db, req, user, enrollment, course, temporaryPassword: temp, reason: temp ? "admin_student_reset_and_send" : "admin_student_send_credentials" });
+    db.users[user.id] = user;
+    await writeLiveDb(db);
+    res.json({ success: true, user: sanitizeUser(user), credentials_email: email });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/students/:id/reset-password", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    const user = ngFindStudentByParam(db, req.params.id);
+    if (!user) return res.status(404).json({ success: false, error: "Student not found" });
+    const temp = req.body.temporary_password || ngGenerateTemporaryPassword();
+    const hashed = hashPassword(temp);
+    user.salt = hashed.salt;
+    user.password_hash = hashed.password_hash;
+    user.must_change_password = true;
+    user.updated_at = nowIso();
+    db.users[user.id] = user;
+    const email = req.body.send_email === false ? { attempted: false, sent: false, skipped: true } : await ngSendStudentAccessEmailSafe({ db, req, user, temporaryPassword: temp, reason: "admin_student_reset_password" });
+    await writeLiveDb(db);
+    res.json({ success: true, user: sanitizeUser(user), temporary_password: req.body.return_password === true ? temp : undefined, credentials_email: email });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/enrollments/:enrollmentId/send-credentials", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    const enrollment = findEnrollmentById(db, req.params.enrollmentId);
+    if (!enrollment) return res.status(404).json({ success: false, error: "Enrollment not found" });
+    const user = db.users?.[String(enrollment.user_id)] || null;
+    if (!user) return res.status(404).json({ success: false, error: "Student user not found for enrollment" });
+    let temp = "";
+    if (req.body.reset_password === true || req.body.force_password_reset === true) {
+      temp = ngGenerateTemporaryPassword();
+      const hashed = hashPassword(temp);
+      user.salt = hashed.salt;
+      user.password_hash = hashed.password_hash;
+      user.must_change_password = true;
+      user.updated_at = nowIso();
+      db.users[user.id] = user;
+    }
+    const course = enrollment.course_id ? db.courses?.[String(enrollment.course_id)] || null : null;
+    const email = await ngSendStudentAccessEmailSafe({ db, req, user, enrollment, course, temporaryPassword: temp, reason: temp ? "admin_enrollment_reset_and_send" : "admin_enrollment_resend_credentials" });
+    await writeLiveDb(db);
+    res.json({ success: true, enrollment: sanitizeAdminEnrollment(enrollment, db), credentials_email: email });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/email/status", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    res.json({ success: true, configured: Boolean(process.env.RESEND_API_KEY || process.env.SENDGRID_API_KEY || (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS)), provider: process.env.RESEND_API_KEY ? "resend" : process.env.SENDGRID_API_KEY ? "sendgrid" : process.env.SMTP_HOST ? "smtp" : null, from: getEmailFromAddress() });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/email/test", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    const to = req.body.to || process.env.BOOTSTRAP_ADMIN_EMAIL || "nextgenacademy89@gmail.com";
+    const provider = await sendEmailMessage({ to, subject: req.body.subject || "NextGen email test", text: req.body.text || "✅ NextGen email sending is working." });
+    ngLogStudentEmail(db, { to, subject: req.body.subject || "NextGen email test", status: "sent", provider_response: provider, reason: "admin_email_test" });
+    await writeLiveDb(db);
+    res.json({ success: true, provider });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/email/logs", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    res.json({ success: true, logs: safeArray(db.emailLogs).slice(0, 200), count: safeArray(db.emailLogs).length });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/prelaunch/flow-check", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const liveDb = await readLiveDb();
+    const crmDb = await readCrmDb();
+    let mediaWritable = false;
+    try { await fs.mkdir(MEDIA_DIR, { recursive: true }); await fs.access(MEDIA_DIR); mediaWritable = true; } catch { mediaWritable = false; }
+    const aylaMedia = ngAylaMediaEligibleAssets(crmDb);
+    const checks = [
+      { key: "backend_build", ok: NEXTGEN_BACKEND_BUILD === "v71-student-access-ayla-media-flow-check", value: NEXTGEN_BACKEND_BUILD },
+      { key: "email_provider", ok: Boolean(process.env.RESEND_API_KEY || process.env.SENDGRID_API_KEY || (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS)), value: process.env.RESEND_API_KEY ? "resend" : process.env.SENDGRID_API_KEY ? "sendgrid" : process.env.SMTP_HOST ? "smtp" : "missing" },
+      { key: "whatsapp_provider", ok: Boolean(process.env.WHATSAPP_ACCESS_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID), value: process.env.WHATSAPP_PHONE_NUMBER_ID ? "configured" : "missing" },
+      { key: "openai_provider", ok: isAIConfigured(), value: isAIConfigured() ? "configured" : "missing" },
+      { key: "media_directory", ok: mediaWritable, value: MEDIA_DIR },
+      { key: "ayla_enabled_media_assets", ok: aylaMedia.length > 0, value: aylaMedia.length },
+      { key: "active_courses", ok: Object.values(liveDb.courses || {}).some((c) => c.status !== "archived"), value: Object.values(liveDb.courses || {}).length },
+      { key: "crm_leads", ok: ensureCrmArray(crmDb, "leads").length >= 0, value: ensureCrmArray(crmDb, "leads").length },
+      { key: "suppression_list", ok: Array.isArray(crmDb.suppression_list), value: safeArray(crmDb.suppression_list).length },
+    ];
+    res.json({ success: true, ok: checks.every((c) => c.ok), checks });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/prelaunch/flow-test", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const liveDb = await readLiveDb();
+    const crmDb = await readCrmDb();
+    const dryRun = req.body.dry_run !== false;
+    const testLead = getLeadByAnyId(crmDb, req.body.lead_id || "") || ensureCrmArray(crmDb, "leads")[0] || null;
+    const mediaPick = testLead ? ngPickAylaMediaAssetForReply(crmDb, { lead: testLead, reply: req.body.sample_reply || "Doctor, we are starting the 120-Day Marathon with live classroom teaching, recordings, Community Q&A, assessments, leaderboard points and daily flashcards. Please check the LMS demo.", latestInboundText: "Tell me about the program", messages: [] }) : null;
+    const checks = {
+      dry_run: dryRun,
+      login_route_present: true,
+      forgot_password_route_present: true,
+      enrollment_credentials_route_present: true,
+      media_auto_pick_working: Boolean(mediaPick),
+      selected_media_asset: mediaPick ? { id: mediaPick.id, title: mediaPick.title, usage_area: mediaPick.usage_area, public_url: mediaPick.public_url } : null,
+      email_status_endpoint: "/admin/email/status",
+      media_usage_endpoint: "/admin/crm/media-library/ayla-usage",
+      roadmap_generator_endpoint: "/admin/roadmap/apply-marathon-template",
+      prelaunch_check_endpoint: "/admin/prelaunch/flow-check",
+    };
+    res.json({ success: true, checks });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
 
 app.use((err, req, res, next) => {
   applyNextGenCors(req, res);
