@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v99-crm-templates-endpoint-alias-fix";
+const NEXTGEN_BACKEND_BUILD = "v100-import-country-merge-fix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -7437,8 +7437,13 @@ function normalizePhoneForImport(row = {}, defaults = {}) {
     result.possible_wrong_country_code = true;
   }
 
-  if (defaultRule && detectedRule && defaultRule.code !== detectedRule.code && selectedCountryLabel) {
-    result.warnings.push(`Selected country (${selectedCountryLabel}) differs from detected phone country (${detectedRule.country}); kept the phone's explicit country code.`);
+  const explicitRowCountryLabel = normalizeCrmString(row.country || row.country_code || row.phone_country_code || "");
+  const explicitRowCountryRule = explicitRowCountryLabel ? normalizeImportCountryHint(explicitRowCountryLabel) : null;
+  // Do not warn when the mismatch came only from the page's default country.
+  // If the phone already has +92, +91, +44, +1, etc., the explicit phone code wins.
+  // Warn only when the pasted row itself explicitly says a different country.
+  if (explicitRowCountryRule && detectedRule && explicitRowCountryRule.code !== detectedRule.code) {
+    result.warnings.push(`Row country (${explicitRowCountryLabel}) differs from detected phone country (${detectedRule.country}); kept the phone's explicit country code.`);
     result.possible_wrong_country_code = true;
   }
 
@@ -7530,6 +7535,41 @@ function findCouponForLead(db, { brandId, country, region, language, examType, l
 }
 
 
+function importMergeEnabled(row = {}, defaults = {}) {
+  const raw = row.merge_duplicates ?? row.merge_duplicate ?? row.update_existing ?? defaults.merge_duplicates ?? defaults.merge_duplicate ?? defaults.update_existing;
+  if (raw === false) return false;
+  if (raw === true || raw === undefined || raw === null || raw === "") return true;
+  return !["0", "false", "no", "off", "skip", "block"].includes(String(raw).trim().toLowerCase());
+}
+
+function getImportLeadPhoneDigits(lead = {}) {
+  return String(
+    lead.phone_digits ||
+    lead.phone_e164 ||
+    lead.whatsapp_phone ||
+    lead.whatsapp ||
+    lead.phone ||
+    lead.mobile ||
+    lead.wa_id ||
+    ""
+  ).replace(/\D/g, "");
+}
+
+function findExistingImportLead(leads = [], { email = "", phoneDigits = "", brandId = "" } = {}) {
+  const cleanEmail = normalizeEmail(email || "");
+  const cleanPhone = String(phoneDigits || "").replace(/\D/g, "");
+
+  return leads.find((lead) => {
+    if (brandId && lead.brand_id && String(lead.brand_id) !== String(brandId)) return false;
+    const leadEmail = normalizeEmail(lead.email || lead.lead_email || lead.contact_email || "");
+    const leadPhone = getImportLeadPhoneDigits(lead);
+    return Boolean(
+      (cleanEmail && leadEmail && leadEmail === cleanEmail) ||
+      (cleanPhone && leadPhone && leadPhone === cleanPhone)
+    );
+  }) || null;
+}
+
 function buildImportPreviewRows({ db, brandId, rows = [], defaults = {} }) {
   const leads = ensureCrmArray(db, "leads");
 
@@ -7541,15 +7581,13 @@ function buildImportPreviewRows({ db, brandId, rows = [], defaults = {} }) {
     const email = validation.email;
     const whatsapp = validation.whatsapp || phoneInfo.whatsapp || "";
     const phoneDigits = phoneInfo.digits || whatsapp.replace(/\D/g, "");
-    const duplicate = leads.some((lead) => {
-      const leadPhoneDigits = String(lead.whatsapp || lead.phone || lead.mobile || lead.wa_id || "").replace(/\D/g, "");
-      return (
-        (email && normalizeEmail(lead.email) === email) ||
-        (phoneDigits && leadPhoneDigits && leadPhoneDigits === phoneDigits)
-      );
-    });
+    const existingLead = findExistingImportLead(leads, { email, phoneDigits, brandId });
+    const duplicate = Boolean(existingLead);
+    const shouldMergeDuplicate = duplicate && importMergeEnabled(row, mergedDefaults);
 
-    const country = row.country || phoneInfo.country || mergedDefaults.country || "";
+    // Explicit phone country code wins over the page default. This prevents +92 phones from
+    // showing as USA just because the dropdown/default country was USA/Canada.
+    const country = phoneInfo.country || row.country || mergedDefaults.country || "";
     const region = row.region || phoneInfo.region || mergedDefaults.region || "global";
     const language = row.language || phoneInfo.language || mergedDefaults.language || "english";
     const couponRule = findCouponForLead(db, {
@@ -7562,15 +7600,16 @@ function buildImportPreviewRows({ db, brandId, rows = [], defaults = {} }) {
     });
 
     let importStatus = "ready";
-    if (duplicate) importStatus = "duplicate";
+    if (duplicate && !shouldMergeDuplicate) importStatus = "duplicate";
+    else if (duplicate && shouldMergeDuplicate) importStatus = "merge_existing";
     else if (!validation.valid) importStatus = phoneInfo.category || "invalid_contact";
     else if (phoneInfo.needs_country_code) importStatus = "needs_country_code";
     else if (phoneInfo.possible_wrong_country_code) importStatus = "possible_wrong_country_code";
     else if (!validation.can_message && email) importStatus = "email_only_no_whatsapp";
 
-    const canMessage = Boolean(validation.can_message && !duplicate && !phoneInfo.needs_country_code && phoneInfo.valid);
+    const canMessage = Boolean(validation.can_message && (!duplicate || shouldMergeDuplicate) && !phoneInfo.needs_country_code && phoneInfo.valid);
     const importAction = duplicate
-      ? "skip_duplicate"
+      ? (shouldMergeDuplicate ? "merge_existing" : "skip_duplicate")
       : validation.valid
         ? "create"
         : phoneInfo.needs_country_code
@@ -7616,6 +7655,9 @@ function buildImportPreviewRows({ db, brandId, rows = [], defaults = {} }) {
       valid: validation.valid,
       can_message: canMessage,
       duplicate,
+      duplicate_merge: shouldMergeDuplicate,
+      will_merge_duplicate: shouldMergeDuplicate,
+      existing_lead_id: existingLead?.id || null,
       import_status: importStatus,
       action: importAction,
       whatsapp_status: canMessage ? "not_checked" : phoneInfo.needs_country_code ? "needs_country_code" : phoneInfo.valid ? "not_checked" : "not_sendable",
@@ -7646,9 +7688,9 @@ function summarizeImportPreviewRows(rows = []) {
 
   return {
     total_rows: rows.length,
-    valid_rows: count((row) => row.valid && !row.duplicate),
-    ready_rows: count((row) => row.import_status === "ready" && !row.duplicate),
-    ready_to_message_rows: count((row) => row.can_message && !row.duplicate),
+    valid_rows: count((row) => row.valid && (!row.duplicate || row.duplicate_merge || row.action === "merge_existing")),
+    ready_rows: count((row) => (row.import_status === "ready" || row.import_status === "merge_existing") && (!row.duplicate || row.duplicate_merge || row.action === "merge_existing")),
+    ready_to_message_rows: count((row) => row.can_message && (!row.duplicate || row.duplicate_merge || row.action === "merge_existing")),
     duplicate_rows: count((row) => row.duplicate),
     invalid_rows: count((row) => !row.valid),
     needs_country_code_rows: count((row) => row.import_status === "needs_country_code" || row.phone_import_status === "needs_country_code"),
@@ -9021,7 +9063,8 @@ app.post("/admin/crm/import/confirm", async (req, res) => {
     const failedRows = [];
 
     for (const row of rows) {
-      if (!row.valid || row.duplicate || row.action === "skip_duplicate" || row.action === "skip_invalid" || row.action === "fix_country_code") {
+      const shouldMergeExisting = row.action === "merge_existing" || row.duplicate_merge === true || row.will_merge_duplicate === true || (row.duplicate && importMergeEnabled(row, req.body.defaults || req.body || {}));
+      if (!row.valid || (!shouldMergeExisting && (row.duplicate || row.action === "skip_duplicate")) || row.action === "skip_invalid" || row.action === "fix_country_code") {
         skipped += 1;
         failedRows.push({
           row_number: row.row_number,
@@ -9034,6 +9077,76 @@ app.post("/admin/crm/import/confirm", async (req, res) => {
           errors: row.errors || [],
           warnings: row.warnings || [],
         });
+        continue;
+      }
+
+      const existingImportLead = findExistingImportLead(ensureCrmArray(db, "leads"), {
+        email: row.email,
+        phoneDigits: row.phone_digits || String(row.phone_e164 || row.whatsapp || row.phone || row.record?.phone || "").replace(/\D/g, ""),
+        brandId,
+      });
+
+      if (existingImportLead && (shouldMergeExisting || importMergeEnabled(row, req.body.defaults || req.body || {}))) {
+        let mergedLead = normalizeCrmCollectionPayload(
+          "leads",
+          {
+            ...existingImportLead,
+            ...(row.record || {}),
+            ...row,
+            id: existingImportLead.id,
+            brand_id: existingImportLead.brand_id || brandId,
+            phone: row.phone || row.phone_e164 || row.whatsapp || row.record?.phone || existingImportLead.phone || "",
+            whatsapp: row.whatsapp || row.phone_e164 || row.record?.whatsapp || row.record?.phone || existingImportLead.whatsapp || "",
+            whatsapp_phone: row.whatsapp || row.phone_e164 || row.record?.whatsapp || row.record?.phone || existingImportLead.whatsapp_phone || "",
+            phone_e164: row.phone_e164 || row.whatsapp || existingImportLead.phone_e164 || "",
+            phone_digits: row.phone_digits || getImportLeadPhoneDigits(existingImportLead) || "",
+            country: row.country || existingImportLead.country || "",
+            region: row.region || existingImportLead.region || "global",
+            language: row.language || existingImportLead.language || "english",
+            phone_import_status: row.phone_import_status || row.import_status || existingImportLead.phone_import_status || "ready",
+            phone_import_category: row.phone_import_category || row.import_status || existingImportLead.phone_import_category || "ready",
+            phone_import_warnings: row.warnings || existingImportLead.phone_import_warnings || [],
+            whatsapp_status: row.can_message ? "not_checked" : existingImportLead.whatsapp_status || "not_sendable",
+            whatsapp_validation_status: row.can_message ? "pending_provider_check" : existingImportLead.whatsapp_validation_status || "not_sendable",
+            first_message_queue_status: queueFirstMessage && row.can_message ? "queued" : existingImportLead.first_message_queue_status || "not_queued",
+            first_message_queued_at: queueFirstMessage && row.can_message ? now : existingImportLead.first_message_queued_at || null,
+            first_message_queue_source: queueFirstMessage && row.can_message ? "import_confirm_merge" : existingImportLead.first_message_queue_source || "",
+            status: row.status || req.body.status || req.body.defaults?.status || existingImportLead.status || "new",
+            lead_status: row.lead_status || row.status || req.body.lead_status || req.body.defaults?.lead_status || existingImportLead.lead_status || "new",
+            stage: row.stage || row.lead_stage || req.body.stage || req.body.defaults?.stage || existingImportLead.stage || "new_lead",
+            lead_stage: row.lead_stage || row.stage || req.body.lead_stage || req.body.defaults?.lead_stage || existingImportLead.lead_stage || "new_lead",
+            source_platform: normalizeCrmLeadSource(row.source_platform || row.platform || req.body.source_platform || req.body.defaults?.source_platform || req.body.platform || req.body.channel || existingImportLead.source_platform || "whatsapp", { ...req.body.defaults, ...req.body, ...row }),
+            platform: normalizeCrmLeadSource(row.source_platform || row.platform || req.body.source_platform || req.body.defaults?.source_platform || req.body.platform || req.body.channel || existingImportLead.platform || "whatsapp", { ...req.body.defaults, ...req.body, ...row }),
+            channel: normalizeCrmLeadSource(row.channel || row.source_platform || row.platform || req.body.channel || req.body.defaults?.channel || req.body.source_platform || existingImportLead.channel || "whatsapp", { ...req.body.defaults, ...req.body, ...row }),
+            origin: normalizeCrmLeadOrigin(row.origin || req.body.origin || req.body.defaults?.origin || req.body.source_type || existingImportLead.origin || "meta_lead_form", { ...req.body.defaults, ...req.body, ...row }),
+            lead_origin: normalizeCrmLeadOrigin(row.origin || req.body.origin || req.body.defaults?.origin || req.body.source_type || existingImportLead.lead_origin || "meta_lead_form", { ...req.body.defaults, ...req.body, ...row }),
+            lead_source: row.lead_source || req.body.lead_source || req.body.defaults?.lead_source || req.body.source_type || existingImportLead.lead_source || "meta_lead_form",
+            source_type: row.source_type || req.body.source_type || req.body.defaults?.source_type || existingImportLead.source_type || "meta_lead_form",
+            campaign_id: row.campaign_id || req.body.campaign_id || req.body.defaults?.campaign_id || existingImportLead.campaign_id || "",
+            campaign_name: row.campaign_name || req.body.campaign_name || req.body.defaults?.campaign_name || existingImportLead.campaign_name || "",
+            campaign_key: row.campaign_key || req.body.campaign_key || req.body.defaults?.campaign_key || existingImportLead.campaign_key || "",
+            ai_mode: normalizeCrmLeadAiMode(row.ai_mode || req.body.ai_mode || req.body.defaults?.ai_mode || req.body.default_ai_mode || req.body.defaults?.default_ai_mode || existingImportLead.ai_mode || "draft"),
+            automation_mode: normalizeCrmLeadAiMode(row.ai_mode || req.body.ai_mode || req.body.defaults?.ai_mode || req.body.default_ai_mode || req.body.defaults?.default_ai_mode || existingImportLead.automation_mode || "draft"),
+            ai_enabled: normalizeCrmLeadAiMode(row.ai_mode || req.body.ai_mode || req.body.defaults?.ai_mode || req.body.default_ai_mode || req.body.defaults?.default_ai_mode || existingImportLead.ai_mode || "draft") !== "manual",
+            client_reached_out: true,
+            agent_initiated: false,
+            conversation_direction: "inbound",
+            source_community: row.source_community || req.body.source_community || req.body.defaults?.source_community || existingImportLead.source_community || "",
+            import_batch_id: batchId,
+            opt_in_status: row.opt_in_status || req.body.opt_in_status || req.body.defaults?.opt_in_status || existingImportLead.opt_in_status || "meta_form_opt_in",
+            coupon_eligibility: row.coupon_rule?.coupon_code || existingImportLead.coupon_eligibility || "",
+            created_at: existingImportLead.created_at || now,
+            updated_at: now,
+          },
+          existingImportLead,
+          brandId
+        );
+
+        if (!ctx.crm_admin) mergedLead = attachTeamOwnership(mergedLead, ctx.team_member, ctx.user);
+        mergedLead = ensureLeadIdentityFields(mergedLead);
+        Object.assign(existingImportLead, mergedLead, { id: existingImportLead.id, updated_at: now });
+        createdLeadIds.push(existingImportLead.id);
+        created += 1;
         continue;
       }
 
@@ -9113,7 +9226,7 @@ app.post("/admin/crm/import/confirm", async (req, res) => {
       needs_country_code_rows: summary.needs_country_code_rows,
       possible_wrong_country_code_rows: summary.possible_wrong_country_code_rows,
       ready_to_message_rows: summary.ready_to_message_rows,
-      queued_first_message_rows: queueFirstMessage ? rows.filter((row) => row.can_message && !row.duplicate && row.valid).length : 0,
+      queued_first_message_rows: queueFirstMessage ? rows.filter((row) => row.can_message && row.valid && (!row.duplicate || row.duplicate_merge || row.action === "merge_existing")).length : 0,
       failed_rows: failedRows,
       failed_rows_count: failedRows.length,
       phone_import_summary: summary,
