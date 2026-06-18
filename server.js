@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v97-ayla-inbound-message-lookup-fix";
+const NEXTGEN_BACKEND_BUILD = "v98-ayla-no-campaign-fallback";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -21522,9 +21522,58 @@ function ngFindCampaignForLeadCommand(db = {}, lead = {}) {
   }) || null;
 }
 
+function ngAylaDefaultCampaignCommandContext(db = {}, lead = {}) {
+  const settings = ngAylaPickSettings(db);
+  const channel = String(
+    lead?.current_channel ||
+      lead?.last_channel ||
+      lead?.source_platform ||
+      lead?.platform ||
+      "whatsapp"
+  ).trim().toLowerCase() || "whatsapp";
+
+  const sessionTime = ngAylaFirstNonEmptySetting(
+    settings,
+    ["default_live_session_time", "live_session_time", "session_time", "fixed_run_time"],
+    "1:00 PM EST"
+  );
+
+  const liveLink = ngAylaFirstNonEmptySetting(
+    settings,
+    ["live_session_link", "daily_live_session_link", "session_link", "zoom_link", "join_link"],
+    ""
+  );
+
+  const recordingLink = ngAylaFirstNonEmptySetting(
+    settings,
+    ["latest_session_recording_link", "session_recording_link", "recording_link", "recording_url", "youtube_recording_link"],
+    ""
+  );
+
+  const demoLink = ngAylaFirstNonEmptySetting(
+    settings,
+    ["uworld_demo_link", "uworld_video_library_link", "uworld_library_link", "lms_demo_link", "demo_link"],
+    ""
+  );
+
+  const lines = [
+    "No campaign is attached to this lead. Campaign is optional; do not skip the AI reply because campaign_id/campaign_name is empty.",
+    `Default channel: ${channel}. Reply naturally to the latest student message and continue the NextGen WhatsApp conversation.`,
+    "Default objective: understand the student's exam type/date/weak area, explain NextGen clearly, and move them to live session, recording, demo LMS, or Google Meet mentor guidance when appropriate.",
+    `Default live session time: ${sessionTime}.`,
+    liveLink ? `Default live session link: ${liveLink}` : "No default live session link saved; do not invent a link.",
+    recordingLink ? `Default recording link: ${recordingLink}` : "No default recording link saved; offer recording only if an approved link exists elsewhere in settings/history.",
+    demoLink ? `Default demo/LMS link: ${demoLink}` : "No default demo/LMS link saved; offer demo access without inventing a link.",
+    "Manual Trigger Auto Now and Full AI Auto should answer no-campaign WhatsApp leads unless they are opted out, paid/enrolled, missing a valid recipient, or WhatsApp credentials are unavailable.",
+  ];
+
+  return `Default Ayla command for no-campaign lead:\n${lines.map((line) => `- ${line}`).join("\n")}`;
+}
+
 function ngAylaCampaignCommandContext(db = {}, lead = {}) {
+  const fallbackContext = ngAylaDefaultCampaignCommandContext(db, lead);
   const campaign = ngFindCampaignForLeadCommand(db, lead);
-  if (!campaign) return "";
+  if (!campaign) return fallbackContext;
   const commandFields = [
     ["Campaign Command Center", campaign.campaign_command_center || campaign.command_center || campaign.ai_command_center || campaign.command_instructions || campaign.instructions],
     ["AI must do", campaign.ai_must_do || campaign.must_do || campaign.required_behavior || campaign.ai_required_actions],
@@ -21537,7 +21586,7 @@ function ngAylaCampaignCommandContext(db = {}, lead = {}) {
     .map(([label, value]) => [label, ngAylaSettingsText(value, 1600)])
     .filter(([, value]) => Boolean(value))
     .map(([label, value]) => `- ${label}: ${value}`);
-  if (!lines.length) return "";
+  if (!lines.length) return fallbackContext;
   return `Campaign-specific command for this lead (${campaign.name || campaign.title || campaign.id || "campaign"}):\n${lines.join("\n")}`;
 }
 
