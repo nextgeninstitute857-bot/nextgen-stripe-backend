@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v93-ayla-auto-reply-guard-fix";
+const NEXTGEN_BACKEND_BUILD = "v94-ayla-webhook-auto-wakeup";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -12494,6 +12494,9 @@ async function handleUniversalWebhook({ req, res, platform, integrationId = null
 
     await writeCrmDb(db);
     res.json({ success: true, platform: cleanPlatform, lead_id: lead.id, created, conversation_id: conversation.id, ai_auto: aiAutoResult });
+    // v94 safety: if the inline webhook AI path skipped or returned before sending, wake Ayla once after response.
+    // Duplicate/outbound guards prevent double replies if the inline path already sent.
+    ngScheduleAylaAutoReplyAfterInbound({ leadId: lead.id, source: "universal_social_webhook_wakeup", delayMs: 4500 });
   } catch (error) {
     console.error("Universal social webhook error:", error.message);
     res.status(error.statusCode || 500).json({ success: false, error: error.message || "Webhook failed" });
@@ -16295,18 +16298,32 @@ app.post("/admin/crm/automation/run-due", async (req, res) => {
       source: req.body.source || req.query.source || "run_due",
     });
 
+    // v94: Run Due now also drains pending Full AI Auto replies for fresh inbound student messages.
+    const aiAutoResults = req.body.dry_run === true || req.query.dry_run === "true"
+      ? []
+      : await ngAylaRunPendingFullAiAuto({
+          db,
+          brandId,
+          limit: Number(req.body.ai_auto_limit || req.query.ai_auto_limit || remainingLimit || limit || 10),
+          source: req.body.source || req.query.source || "run_due_ai_auto",
+          actorId: "run_due",
+          force: req.body.force_ai_auto === true || req.query.force_ai_auto === "true",
+        });
+
     await writeCrmDb(db);
     res.json({
       success: true,
-      processed: results.length + firstMessageResults.length + Number(dailySessionResults.processed || 0) + Number(googleMeetAppointmentResults.processed || 0),
+      processed: results.length + firstMessageResults.length + Number(dailySessionResults.processed || 0) + Number(googleMeetAppointmentResults.processed || 0) + aiAutoResults.length,
       automation_processed: results.length,
       first_message_processed: firstMessageResults.length,
       daily_session_processed: dailySessionResults.processed || 0,
       google_meet_processed: googleMeetAppointmentResults.processed || 0,
+      ai_auto_processed: aiAutoResults.length,
       results,
       first_message_results: firstMessageResults,
       daily_session_results: dailySessionResults,
       google_meet_results: googleMeetAppointmentResults,
+      ai_auto_results: aiAutoResults,
     });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
@@ -16351,6 +16368,7 @@ app.get("/webhooks/whatsapp", (req, res) => {
 app.post("/webhooks/whatsapp", async (req, res) => {
   try {
     const db = await readCrmDb();
+    const aylaWakeLeadIds = new Set();
     const entries = Array.isArray(req.body?.entry) ? req.body.entry : [];
     for (const entry of entries) {
       for (const change of entry.changes || []) {
@@ -16417,6 +16435,10 @@ app.post("/webhooks/whatsapp", async (req, res) => {
             provider_message_id: message.id || null,
             source: "whatsapp_webhook",
           });
+
+          // v94: wake Ayla after inbound WhatsApp messages. This fixes the case where
+          // the inbox shows a new student message but Full AI Auto does not answer until manual trigger.
+          if (lead?.id && String(text || "").trim()) aylaWakeLeadIds.add(String(lead.id));
         }
 
         for (const status of statuses) {
@@ -16435,6 +16457,9 @@ app.post("/webhooks/whatsapp", async (req, res) => {
     }
     await writeCrmDb(db);
     res.sendStatus(200);
+    for (const leadId of aylaWakeLeadIds) {
+      ngScheduleAylaAutoReplyAfterInbound({ leadId, source: "whatsapp_webhook_wakeup", delayMs: 4500 });
+    }
   } catch (error) {
     console.error("WhatsApp webhook error:", error.response?.data || error.message);
     res.sendStatus(200);
@@ -22785,6 +22810,234 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
     });
   }
 });
+
+
+
+// v94: Ayla auto-reply wake-up engine.
+// This runs after inbound WhatsApp/webhook messages and also from Run Due, so Full AI Auto
+// does not depend on you pressing Trigger Auto manually inside the inbox.
+async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: providedLead = null, brandId = null, source = "ayla_auto_wakeup", actorId = "system", force = false } = {}) {
+  const leads = ngAffArray(db, "leads");
+  const lead = providedLead || leads.find((item) => String(item.id || item.lead_id || "") === String(leadId || ""));
+
+  if (!lead) return { skipped: true, reason: "lead_not_found", lead_id: leadId || null };
+
+  ngNormalizeLeadAiMode(lead);
+
+  const aiMode = String(lead.ai_mode || lead.automation_mode || "auto").toLowerCase();
+  const explicitlyManualOrDraft =
+    (lead.ai_mode_set === true || lead.automation_mode_set === true || lead.mode_locked === true || lead.ai_mode_manually_set === true) &&
+    (aiMode === "manual" || aiMode === "draft" || aiMode === "ai_draft");
+
+  // Full AI Auto is default. Only an explicit manual/draft lock blocks Ayla.
+  if (explicitlyManualOrDraft) {
+    return { lead_id: lead.id || lead.lead_id || null, skipped: true, reason: "explicit_manual_or_draft_mode", ai_mode: aiMode };
+  }
+
+  if (ngLeadIsPaidOrGroupAddedForLiveSession(lead)) {
+    return { lead_id: lead.id || lead.lead_id || null, skipped: true, reason: "paid_or_group_added" };
+  }
+
+  const messages = ngLeadConversationMessages(db, lead.id);
+  const latestInbound = ngLatestInbound(messages);
+  const latestOutbound = ngLatestOutbound(messages);
+
+  if (!latestInbound) return { lead_id: lead.id || lead.lead_id || null, skipped: true, reason: "no_inbound" };
+
+  const channel = resolveCrmChannelForConversation({
+    requestedChannel: lead.current_channel || lead.last_channel || lead.source_platform || lead.platform || "auto",
+    lead,
+    latestInbound,
+    fallback: "whatsapp",
+  });
+
+  const inboundFingerprint = ngAiAutoMessageFingerprint(latestInbound);
+  const hasOutboundAfterInbound = ngHasOutboundAfterInbound(messages, latestInbound);
+
+  // Clear stale guard: do not block a student forever if no real outbound exists after their message.
+  if (
+    lead.last_ai_auto_replied_message_id &&
+    String(lead.last_ai_auto_replied_message_id) === String(inboundFingerprint) &&
+    !hasOutboundAfterInbound
+  ) {
+    lead.last_ai_auto_replied_message_id = null;
+    lead.last_ai_auto_replied_at = null;
+  }
+
+  const inboundTime = new Date(latestInbound.created_at || latestInbound.received_at || latestInbound.timestamp || 0).getTime();
+  const outboundTime = new Date(latestOutbound?.created_at || latestOutbound?.sent_at || latestOutbound?.timestamp || 0).getTime();
+
+  if (!force && latestOutbound && Number.isFinite(outboundTime) && Number.isFinite(inboundTime) && outboundTime >= inboundTime) {
+    return {
+      lead_id: lead.id || lead.lead_id || null,
+      skipped: true,
+      reason: "already_replied",
+      has_outbound_after_inbound: true,
+      last_inbound_text: ngMessageText(latestInbound).slice(0, 120),
+      last_outbound_text: ngMessageText(latestOutbound).slice(0, 120),
+    };
+  }
+
+  const duplicateGuard = ngShouldSkipAiAutoForInbound(lead, latestInbound, {
+    channel,
+    forceReprocess: force === true,
+  });
+
+  if (duplicateGuard.skip) {
+    return {
+      lead_id: lead.id || lead.lead_id || null,
+      skipped: true,
+      reason: duplicateGuard.reason,
+      wait_ms: duplicateGuard.wait_ms || 0,
+      last_inbound_text: ngMessageText(latestInbound).slice(0, 120),
+      last_outbound_text: ngMessageText(latestOutbound || {}).slice(0, 120),
+      has_outbound_after_inbound: hasOutboundAfterInbound,
+      inbound_fingerprint: inboundFingerprint || null,
+      last_ai_auto_replied_message_id: lead.last_ai_auto_replied_message_id || null,
+    };
+  }
+
+  if (channel === "whatsapp" && !ngWithinHours(latestInbound.created_at || latestInbound.received_at || latestInbound.timestamp, 24)) {
+    ngReleaseAiAutoLock(duplicateGuard.lock_key);
+    ngAffArray(db, "ai_actions").unshift({
+      id: uuid(),
+      title: "WhatsApp template required for Full AI Auto",
+      area: "whatsapp",
+      type: "template_required",
+      status: "pending_approval",
+      lead_id: lead.id,
+      payload: { lead_id: lead.id, channel, source },
+      created_at: ngAffNow(),
+      updated_at: ngAffNow(),
+    });
+    return { lead_id: lead.id || lead.lead_id || null, skipped: true, reason: "whatsapp_template_required", requires_template: true };
+  }
+
+  try {
+    const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel });
+    const replyDelayMs = await ngAylaWaitBeforeAutoSend(db);
+    const to = getBestRecipientForChannel({ channel, lead, message: latestInbound });
+    const aylaMediaAsset = channel === "whatsapp"
+      ? ngPickAylaMediaAssetForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(latestInbound || {}), messages })
+      : null;
+
+    const sendResult = await sendCrmMessage({
+      db,
+      brandId: lead.brand_id || brandId || null,
+      channel,
+      to,
+      text: ai.reply,
+      leadId: lead.id,
+      mediaUrl: aylaMediaAsset?.public_url || aylaMediaAsset?.relative_url || "",
+      mediaId: aylaMediaAsset?.whatsapp_media_id || "",
+      mediaType: aylaMediaAsset?.asset_type || "image",
+      caption: aylaMediaAsset ? ngRenderAylaMediaCaption(aylaMediaAsset, { lead, reply: ai.reply }) : "",
+      metadata: {
+        source,
+        ai_auto: true,
+        latest_inbound_id: latestInbound.id || null,
+        inbound_message_id: inboundFingerprint,
+        ayla_media_asset_id: aylaMediaAsset?.id || null,
+        ayla_media_usage_area: aylaMediaAsset?.usage_area || null,
+      },
+    });
+
+    if (aylaMediaAsset) ngMarkAylaMediaSent(db, lead, aylaMediaAsset, { source, result: sendResult });
+
+    const adminAlert = await ngAylaMaybeSendConversationAdminAlert({
+      db,
+      lead,
+      appointment: typeof ngAylaFindActiveGoogleMeetAppointment === "function" ? ngAylaFindActiveGoogleMeetAppointment(db, lead) : null,
+      ai,
+      latestInbound,
+      source,
+    });
+
+    ngMarkAiAutoProcessed(lead, latestInbound, { channel, reply: ai.reply });
+
+    ngAffArray(db, "ai_auto_runs").unshift({
+      id: uuid(),
+      lead_id: lead.id,
+      inbound_message_id: inboundFingerprint,
+      channel,
+      reply: ai.reply,
+      sent: Boolean(sendResult.success),
+      queued: Boolean(sendResult.queued),
+      result: sendResult,
+      model: ai.model,
+      usage: ai.usage,
+      admin_alert: adminAlert,
+      created_by: actorId,
+      source,
+      reply_delay_ms: replyDelayMs || 0,
+      created_at: ngAffNow(),
+    });
+
+    ngReleaseAiAutoLock(duplicateGuard.lock_key);
+
+    return {
+      lead_id: lead.id || lead.lead_id || null,
+      sent: Boolean(sendResult.success),
+      queued: Boolean(sendResult.queued),
+      reply: ai.reply,
+      channel,
+      to,
+      admin_alert: adminAlert,
+      source,
+      result: sendResult,
+    };
+  } catch (error) {
+    ngReleaseAiAutoLock(duplicateGuard.lock_key);
+    return {
+      lead_id: lead.id || lead.lead_id || null,
+      sent: false,
+      error: error.message,
+      channel,
+      source,
+    };
+  }
+}
+
+async function ngAylaRunPendingFullAiAuto({ db, brandId = null, limit = 10, source = "run_due_ai_auto", actorId = "run_due", force = false } = {}) {
+  const candidates = ngAffArray(db, "leads")
+    .map(ngNormalizeLeadAiMode)
+    .filter((lead) => !brandId || String(lead.brand_id || "") === String(brandId || ""))
+    .filter((lead) => String(lead.ai_mode || lead.automation_mode || "auto").toLowerCase() === "auto")
+    .slice(0, Math.max(1, Math.min(50, Number(limit || 10))));
+
+  const results = [];
+  for (const lead of candidates) {
+    const messages = ngLeadConversationMessages(db, lead.id);
+    const inbound = ngLatestInbound(messages);
+    if (!inbound) continue;
+    if (!force && ngHasOutboundAfterInbound(messages, inbound)) continue;
+    results.push(await ngAylaProcessFullAiAutoForLead({ db, lead, brandId, source, actorId, force }));
+  }
+  return results;
+}
+
+function ngScheduleAylaAutoReplyAfterInbound({ leadId, source = "webhook_ai_auto_wakeup", delayMs = null } = {}) {
+  const cleanLeadId = String(leadId || "").trim();
+  if (!cleanLeadId) return;
+  const waitMs = Number.isFinite(Number(delayMs)) ? Number(delayMs) : 4500;
+
+  setTimeout(async () => {
+    try {
+      const db = await readCrmDb();
+      const result = await ngAylaProcessFullAiAutoForLead({
+        db,
+        leadId: cleanLeadId,
+        source,
+        actorId: "webhook_wakeup",
+        force: false,
+      });
+      await writeCrmDb(db);
+      console.log("Ayla webhook wake-up result:", result);
+    } catch (error) {
+      console.error("Ayla webhook wake-up failed:", error.message);
+    }
+  }, Math.max(1000, waitMs));
+}
 
 app.post("/admin/crm/automation/reset-ai-auto-guard", async (req, res) => {
   try {
