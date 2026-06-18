@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v105-crm-hard-clear-endpoint";
+const NEXTGEN_BACKEND_BUILD = "v106-ayla-smarter-followup";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -21885,7 +21885,8 @@ function ngHasOutboundAfterInbound(messages = [], inbound = null) {
   return safeArray(messages).some((message) => {
     if (!ngIsOutboundMessage(message) || !ngMessageText(message)) return false;
     const outTime = ngMessageTimeMs(message);
-    if (inboundTime && outTime && outTime >= inboundTime) return true;
+    // v106: WhatsApp/webhook timestamps can land in the same second. Do not treat an older/same-second outbound as a reply to the latest inbound unless metadata explicitly links it.
+    if (inboundTime && outTime && outTime > inboundTime + 1000) return true;
     const meta = message.metadata || message.meta || {};
     return Boolean(
       inboundFingerprint &&
@@ -22990,6 +22991,7 @@ function ngAylaHardSalesRouter({ db = {}, lead = {}, messages = [], channel = "w
   const basicConversationRequest = ngAylaIsBasicConversationRequest(latestText);
   const shortNonInformational = ngAylaIsShortNonInformational(latestText);
   const shortInterest = /^(yes|yeah|yep|ok|okay|interested|sure|send|share|hmm+|great|great i will check out|i will check|i will check out|sounds good|fine|step\s*1|step\s*2|step1|step2|ck)$/i.test(latestText);
+  const acknowledgementOnly = ngAylaIsAcknowledgementOnly(latestText) || /^(that's great|thats great)$/i.test(latestText);
   const asksPrice = ngAylaIsPriceQuestion(latestText);
   const directGoogleMeetRequest = ngAylaIsDirectGoogleMeetRequest(latestText);
   const previousOfferedGoogleMeet = ngAylaLastOutboundOfferedGoogleMeet(lastOutboundText);
@@ -23016,12 +23018,27 @@ Our team will confirm the Google Meet link shortly. You will receive the link at
     ngAylaMarkGoogleMeetLockedLead(lead, activeGoogleMeetAppointment);
     const lockedReply = ngAylaGoogleMeetLockedReply({ latestText, lead, appointment: activeGoogleMeetAppointment, assets });
     if (lockedReply?.reply) return lockedReply;
-    // In Google Meet state, never restart sales flow. Let real AI answer normal questions like tutors/roadmap.
-    if (basicConversationRequest) return null;
+    // v106: Google Meet state must not make Ayla dumb/silent. If the student asks a real question
+    // about recordings, UWorld, roadmap, program, resources, live classes, etc., let OpenAI answer it.
+    if (basicConversationRequest || asksRecording || asksUworld || asksRoadmap || asksResources || asksProgram || asksSessionTime || directQuestion) return null;
     return {
       intent: "google_meet_state_hold_no_sales_restart",
       reply: `Yes Doctor, I’m here. Your Google Meet is already noted, and you can ask me anything before the session. How can I help you?`
     };
+  }
+
+  // v106: Acknowledgements like "that's great" should not restart the same canned sales message.
+  // Move naturally to one next question unless the student asked for Google Meet/price/etc.
+  if (acknowledgementOnly && !directGoogleMeetRequest && !positiveGoogleMeetContext && !leadHasGoogleMeetStateLock) {
+    const alreadySharedUworld = ngAylaHasSentAsset(sentText, ["uworld video library", "150 hours", "3000+", "try demo", "lms.nextgen"]);
+    const alreadySharedRecording = ngAylaHasSentAsset(sentText, ["recording", "recordings", assets.recordingLink]);
+    const alreadySharedLive = ngAylaHasSentAsset(sentText, ["live session", "1 pm est", "1:00 pm est"]);
+    if (alreadySharedUworld || alreadySharedRecording || alreadySharedLive) {
+      return {
+        intent: "acknowledgement_continue_conversation",
+        reply: `Great Doctor. To guide you properly, what is your exam timeline and your biggest difficulty right now — UWorld, First Aid retention, NBME score, or scheduling?`
+      };
+    }
   }
 
   if (asksPrice) {
@@ -23726,7 +23743,7 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
   const inboundTime = new Date(latestInbound.created_at || latestInbound.received_at || latestInbound.timestamp || 0).getTime();
   const outboundTime = new Date(latestOutbound?.created_at || latestOutbound?.sent_at || latestOutbound?.timestamp || 0).getTime();
 
-  if (!force && latestOutbound && Number.isFinite(outboundTime) && Number.isFinite(inboundTime) && outboundTime >= inboundTime) {
+  if (!force && latestOutbound && Number.isFinite(outboundTime) && Number.isFinite(inboundTime) && outboundTime > inboundTime + 1000) {
     return {
       lead_id: lead.id || lead.lead_id || null,
       skipped: true,
@@ -23976,6 +23993,49 @@ app.post("/admin/crm/automation/reset-ai-auto-guard", async (req, res) => {
   }
 });
 
+
+// v106: diagnose why Ayla is not replying to the latest inbound message.
+app.post("/admin/crm/automation/diagnose-ayla", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const leadId = String(req.body?.lead_id || req.body?.leadId || req.body?.id || "").trim();
+    const phoneDigits = String(req.body?.phone || "").replace(/\D/g, "");
+    const leads = ngAffArray(db, "leads").map(ngNormalizeLeadAiMode);
+    const lead = leadId
+      ? leads.find((item) => String(item.id || item.lead_id || "") === leadId)
+      : leads.find((item) => {
+          const p = String(item.phone || item.whatsapp || item.whatsapp_phone || "").replace(/\D/g, "");
+          return phoneDigits && (p === phoneDigits || p.endsWith(phoneDigits) || phoneDigits.endsWith(p));
+        });
+    if (!lead) return res.status(404).json({ success: false, error: "Lead not found" });
+    const messages = ngLeadConversationMessages(db, lead.id);
+    const latestInbound = ngLatestInbound(messages);
+    const latestOutbound = ngLatestOutbound(messages);
+    const channel = resolveCrmChannelForConversation({ requestedChannel: lead.current_channel || lead.last_channel || lead.source_platform || lead.platform || "auto", lead, latestInbound, fallback: "whatsapp" });
+    const hasOutboundAfterInbound = latestInbound ? ngHasOutboundAfterInbound(messages, latestInbound) : false;
+    const duplicateGuardPreview = latestInbound ? {
+      inbound_fingerprint: ngAiAutoMessageFingerprint(latestInbound),
+      last_ai_auto_replied_message_id: lead.last_ai_auto_replied_message_id || null,
+      same_fingerprint: String(lead.last_ai_auto_replied_message_id || "") === String(ngAiAutoMessageFingerprint(latestInbound) || ""),
+    } : null;
+    return res.json({
+      success: true,
+      build: NEXTGEN_BACKEND_BUILD,
+      lead: { id: lead.id || lead.lead_id, name: lead.name, phone: lead.phone || lead.whatsapp, ai_mode: lead.ai_mode, automation_mode: lead.automation_mode, status: lead.status, stage: lead.stage || lead.lead_stage, next_action: lead.next_action },
+      channel,
+      counts: { messages: messages.length, inbound: messages.filter(ngIsInboundMessage).length, outbound: messages.filter(ngIsOutboundMessage).length },
+      latest_inbound: latestInbound ? { id: latestInbound.id, text: ngMessageText(latestInbound), created_at: latestInbound.created_at || latestInbound.received_at || latestInbound.timestamp, direction: latestInbound.direction } : null,
+      latest_outbound: latestOutbound ? { id: latestOutbound.id, text: ngMessageText(latestOutbound), created_at: latestOutbound.created_at || latestOutbound.sent_at || latestOutbound.timestamp, direction: latestOutbound.direction } : null,
+      has_outbound_after_inbound: hasOutboundAfterInbound,
+      duplicate_guard_preview: duplicateGuardPreview,
+      whatsapp_window_ok: latestInbound ? ngWithinHours(latestInbound.created_at || latestInbound.received_at || latestInbound.timestamp, 24) : null,
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
 app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
   try {
     const { user } = await requireCrmAdmin(req);
@@ -24037,7 +24097,7 @@ app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
 
       const inboundTime = new Date(inbound.created_at || inbound.received_at || inbound.timestamp || 0).getTime();
       const outboundTime = new Date(outbound?.created_at || outbound?.sent_at || outbound?.timestamp || 0).getTime();
-      if (outbound && outboundTime >= inboundTime) { ngReleaseAiAutoLock(duplicateGuard.lock_key); results.push({ lead_id: lead.id, skipped: true, reason: "already_replied", last_outbound_text: ngMessageText(outbound || {}).slice(0, 120), has_outbound_after_inbound: true }); continue; }
+      if (outbound && outboundTime > inboundTime + 1000) { ngReleaseAiAutoLock(duplicateGuard.lock_key); results.push({ lead_id: lead.id, skipped: true, reason: "already_replied", last_outbound_text: ngMessageText(outbound || {}).slice(0, 120), has_outbound_after_inbound: true }); continue; }
 
       if (channel === "whatsapp" && !ngWithinHours(inbound.created_at || inbound.received_at || inbound.timestamp, 24)) {
         ngReleaseAiAutoLock(duplicateGuard.lock_key);
@@ -33400,29 +33460,41 @@ function ngFindOrCreateWebsiteLead(db, { sessionId, visitor = {}, message = "", 
 }
 
 function ngWebsiteAylaFallbackReply(message = "") {
-  const text = String(message || "").toLowerCase();
+  const text = String(message || "").toLowerCase().trim();
+
+  if (/^(hi|hello|hey|salam|assalam)$/.test(text)) {
+    return "Hi Doctor, welcome to NextGen USMLE. Are you preparing for Step 1, and when are you planning your exam?";
+  }
+
+  if (/^(that'?s great|thats great|great|ok|okay|sounds good|perfect|nice|yes)$/i.test(text)) {
+    return "Great Doctor. The best next step is to see the teaching style first. You can check the 2-day LMS demo, a recent recording, or join the next live session. Which one would you like me to explain?";
+  }
+
+  if (/recording|recordings|recorded|replay|session video|class video|lecture video/.test(text)) {
+    return "Yes Doctor, recordings are part of the support. After live class, students can use the recording to revise the teaching, review the First Aid-linked points, and complete the matching UWorld QID homework. This helps even if you miss a live session.";
+  }
 
   if (/demo|trial|free|try|2\s*day|two\s*day/.test(text)) {
-    return "Yes Doctor, you can start the 2-day LMS demo from the Try Demo button. After login/signup, the backend will activate demo access only for the tracks allowed by admin demo settings. Inside the dashboard, please start with Live Classes, Roadmap, and published recordings.";
+    return "Yes Doctor, the 2-day LMS demo lets you see how the system works before enrolling. You can check the dashboard, roadmap style, live-class flow, and sample video-library access. Open the LMS link and click Try Demo.";
   }
 
-  if (/live|session|class|1\s*pm|time|today/.test(text)) {
-    return "Doctor, our live session flow is based around 1 PM EST on active teaching days. If today’s session time has passed, we guide you to the recent recording and the next available live session instead of inviting you to an already-finished class.";
+  if (/live|session|class|1\s*pm|time|today|zoom|join/.test(text)) {
+    return "Doctor, our live guidance sessions are normally Monday to Friday at 1 PM EST. Students can join even for 5-10 minutes to see the teaching style. If the class is missed, we guide them with a recording and next session.";
   }
 
-  if (/roadmap|plan|schedule|study/.test(text)) {
-    return "Doctor, NextGen follows a structured USMLE roadmap with live teaching, UWorld-style MCQ discussion, First Aid integration, assessments, recordings, and mentor guidance, so your preparation does not stay random.";
+  if (/roadmap|plan|schedule|study|curriculum|system/.test(text)) {
+    return "Doctor, the Step 1 roadmap starts with Cardiology, then MSK, CNS, Reproductive, Endocrinology, GIT, Renal, Pulmonology, Immunology, Hematology, and Psychiatry. Each lecture connects First Aid topics, mapped UWorld QIDs, live teaching, recordings, homework, and revision tasks.";
   }
 
-  if (/uworld|library|recording|video/.test(text)) {
-    return "Doctor, the UWorld Video Library is one of the main NextGen resources. It includes recorded MCQ explanations with First Aid integration, concept explanation, wrong-option analysis, and exam strategy.";
+  if (/uworld|u world|library|qbank|mcq|question/.test(text)) {
+    return "Doctor, the UWorld Video Library has around 150 hours of recorded MCQ teaching and 3000+ UWorld-style MCQs. First Aid is integrated with each MCQ, so students learn the concept, correct option, wrong options, and elimination approach together.";
   }
 
-  if (/price|cost|fee|payment|package/.test(text)) {
-    return "Doctor, the best package depends on your exam timeline and support level. I can guide you first through the demo/live session, then you can book mentor guidance for the best plan.";
+  if (/price|cost|fee|payment|package|how much/.test(text)) {
+    return "Doctor, the best package depends on your exam timeline and the support level you need. First, it is better to check the teaching/demo, then we can arrange mentor guidance so the plan is clear.";
   }
 
-  return "Hi Doctor, I’m Ayla from NextGen USMLE. I can help you understand the live session, LMS demo, roadmap, recordings, UWorld library, pricing guidance, or mentor consultation. What would you like to know first?";
+  return "Doctor, I understand. To guide you correctly, tell me: are you preparing for Step 1, and what is your biggest difficulty right now — UWorld, First Aid retention, NBME score, or making a schedule?";
 }
 
 app.post("/website-chat/ayla", async (req, res) => {
