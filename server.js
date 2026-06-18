@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v106-ayla-smarter-followup";
+const NEXTGEN_BACKEND_BUILD = "v107-ayla-contact-capture-whatsapp-reply";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -23295,6 +23295,10 @@ function ngAylaShouldBypassHardSalesRouterForNaturalConversation({ latestInbound
   if (/[?؟]/.test(text)) return true;
   if (/(program|course|details|detail|included|include|how it works|roadmap|study plan|curriculum|schedule|resources|resource|uworld|u world|qbank|mcq|library|demo|lms|recording|recordings|video|lecture|live session|class|teacher|tutor|mentor|dr\.?\s*ahmad|first aid|pathoma|assessment|nbme|marathon|120)/i.test(text)) return true;
 
+  // v107: acknowledgements like "that's great" were being treated as a sales trigger and Ayla repeated the same offer.
+  // Let OpenAI read the previous message and continue naturally instead of using the hard router.
+  if (/^(that'?s great|thats great|great|ok|okay|sounds good|perfect|nice|yes|yep|sure|alright|fine)$/i.test(text) && safeArray(messages).length > 1) return true;
+
   // If the student writes more than a very short acknowledgement, let Ayla reason naturally.
   const words = lower.split(/\s+/).filter(Boolean);
   if (words.length >= 4) return true;
@@ -33467,7 +33471,7 @@ function ngWebsiteAylaFallbackReply(message = "") {
   }
 
   if (/^(that'?s great|thats great|great|ok|okay|sounds good|perfect|nice|yes)$/i.test(text)) {
-    return "Great Doctor. The best next step is to see the teaching style first. You can check the 2-day LMS demo, a recent recording, or join the next live session. Which one would you like me to explain?";
+    return "Great Doctor. To guide you properly and reach you later, please share your WhatsApp number or email. Once you share WhatsApp, I can send the live/demo details there from our CRM.";
   }
 
   if (/recording|recordings|recorded|replay|session video|class video|lecture video/.test(text)) {
@@ -33494,7 +33498,128 @@ function ngWebsiteAylaFallbackReply(message = "") {
     return "Doctor, the best package depends on your exam timeline and the support level you need. First, it is better to check the teaching/demo, then we can arrange mentor guidance so the plan is clear.";
   }
 
-  return "Doctor, I understand. To guide you correctly, tell me: are you preparing for Step 1, and what is your biggest difficulty right now — UWorld, First Aid retention, NBME score, or making a schedule?";
+  return "Doctor, I understand. To guide you correctly, tell me: are you preparing for Step 1, and what is your biggest difficulty right now — UWorld, First Aid retention, NBME score, or making a schedule? Also, please share your WhatsApp number or email so we can reach you with the demo/session details if you leave the page.";
+}
+
+// v107: Website chat must become a real CRM conversation and collect contact details.
+function ngWebsiteExtractContactFromText(message = "") {
+  const text = String(message || "");
+  const email = (text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i) || [""])[0].trim().toLowerCase();
+
+  const phoneCandidate = (text.match(/(?:\+|00)?\d[\d\s().-]{7,}\d/) || [""])[0];
+  let phone = String(phoneCandidate || "").trim();
+  let digits = phone.replace(/\D/g, "");
+
+  // Avoid capturing times/short numeric fragments.
+  if (digits.length < 10 || digits.length > 15) {
+    phone = "";
+    digits = "";
+  }
+
+  if (phone) {
+    if (phone.startsWith("00")) phone = `+${digits.slice(2)}`;
+    else if (phone.startsWith("+")) phone = `+${digits}`;
+    else if (digits.length === 10) phone = `+1${digits}`;
+    else phone = `+${digits}`;
+  }
+
+  return { email, phone, phone_digits: digits };
+}
+
+function ngWebsiteLeadHasContact(lead = {}) {
+  return Boolean(
+    normalizeEmail(lead.email || lead.student_email || lead.customer_email || "") ||
+    normalizeCrmString(lead.whatsapp || lead.whatsapp_phone || lead.phone || lead.mobile || "")
+  );
+}
+
+function ngWebsiteApplyContactToLead(lead = {}, contact = {}) {
+  let changed = false;
+  if (contact.email && !normalizeEmail(lead.email || "")) {
+    lead.email = contact.email;
+    lead.student_email = lead.student_email || contact.email;
+    changed = true;
+  }
+  if (contact.phone) {
+    const existingPhone = normalizePhoneForWhatsapp(lead.whatsapp || lead.phone || "");
+    const newPhone = normalizePhoneForWhatsapp(contact.phone);
+    if (!existingPhone || existingPhone !== newPhone) {
+      lead.phone = contact.phone;
+      lead.whatsapp = contact.phone;
+      lead.whatsapp_phone = contact.phone;
+      lead.phone_import_status = "ready";
+      lead.whatsapp_status = "ready";
+      lead.can_message = true;
+      lead.queue_first_message = true;
+      lead.send_first_message_after_import = true;
+      lead.first_message_queue_status = lead.first_message_sent_at ? "sent" : "queued";
+      lead.first_message_queue_source = "website_contact_capture";
+      lead.opt_in_status = "requested_contact_on_website";
+      changed = true;
+    }
+  }
+  if (changed) lead.updated_at = nowIso();
+  return changed;
+}
+
+function ngAppendWebsiteConversation(db, { lead, sessionId = "", direction = "inbound", text = "", page = "homepage", campaign = "website_chat", model = "", metadata = {} } = {}) {
+  const msgText = normalizeCrmString(text || "");
+  if (!msgText) return null;
+  const now = nowIso();
+  const leadId = lead?.id || lead?.lead_id || null;
+  const message = withTimestamps({
+    id: uuid(),
+    conversation_id: sessionId || lead?.conversation_id || leadId || uuid(),
+    lead_id: leadId,
+    platform: "website_chat",
+    source_platform: "website_chat",
+    channel: "website_chat",
+    source_channel: "website_chat",
+    direction: normalizeLeadDirection(direction, "inbound"),
+    message_text: msgText,
+    text: msgText,
+    body: msgText,
+    status: normalizeLeadDirection(direction, "inbound") === "outbound" ? "sent" : "received",
+    sent_by: normalizeLeadDirection(direction, "inbound") === "outbound" ? "ayla" : "lead",
+    website_session_id: sessionId || null,
+    source_page: page || "homepage",
+    campaign: campaign || "website_chat",
+    model: model || null,
+    metadata: { source: "website_chat", ...(metadata || {}) },
+    timestamp: now,
+    created_at: now,
+  });
+  ensureCrmArray(db, "conversations").push(message);
+
+  if (lead) {
+    lead.id = lead.id || lead.lead_id || uuid();
+    lead.lead_id = lead.lead_id || lead.id;
+    lead.last_message = msgText;
+    lead.last_message_at = now;
+    if (message.direction === "inbound") {
+      lead.last_inbound_at = now;
+      lead.client_reached_out = true;
+      lead.needs_reply = true;
+      lead.status = lead.status || "website_chat";
+      lead.lead_status = lead.lead_status || lead.status;
+    } else {
+      lead.last_outbound_at = now;
+      lead.last_ai_reply = msgText;
+      lead.last_ai_reply_at = now;
+      lead.needs_reply = false;
+    }
+    lead.updated_at = now;
+  }
+
+  return message;
+}
+
+function ngWebsiteMaybeAddContactAsk(reply = "", lead = {}) {
+  const text = normalizeCrmString(reply || "");
+  if (!text) return text;
+  if (ngWebsiteLeadHasContact(lead)) return text;
+  if (/whatsapp|email|phone|number|contact/i.test(text)) return text;
+  return `${text}\n\nAlso, please share your WhatsApp number or email so we can send you the demo/session details and follow up if you leave the page.`;
 }
 
 app.post("/website-chat/ayla", async (req, res) => {
@@ -33511,7 +33636,10 @@ app.post("/website-chat/ayla", async (req, res) => {
     const page = body.page || body.page_url || body.pathname || "homepage";
     const campaign = body.campaign || body.source_campaign || "website_chat";
     const intent = body.intent || "website_question";
-    const visitor = body.visitor || {};
+    const extractedContact = ngWebsiteExtractContactFromText(message);
+    const visitor = { ...(body.visitor || {}) };
+    if (extractedContact.email && !visitor.email) visitor.email = extractedContact.email;
+    if (extractedContact.phone && !visitor.whatsapp && !visitor.phone && !visitor.mobile) visitor.whatsapp = extractedContact.phone;
 
     const sessionList = ensureCrmArray(db, "website_chat_sessions");
     let session = sessionList.find((item) => String(item.id) === String(sessionId));
@@ -33532,6 +33660,15 @@ app.post("/website-chat/ayla", async (req, res) => {
     }
 
     const lead = ngFindOrCreateWebsiteLead(db, { sessionId, visitor, message, page, campaign, intent });
+    const contactChanged = ngWebsiteApplyContactToLead(lead, extractedContact);
+    if (contactChanged && extractedContact.phone) {
+      lead.status = lead.first_message_sent_at ? "website_contact_captured" : "website_contact_ready";
+      lead.lead_status = lead.status;
+      lead.source_platform = "website_chat";
+      lead.platform = "website_chat";
+      lead.current_channel = "whatsapp";
+      lead.last_channel = "website_chat";
+    }
 
     const inbound = {
       id: uuid(),
@@ -33544,6 +33681,7 @@ app.post("/website-chat/ayla", async (req, res) => {
 
     session.messages = safeArray(session.messages);
     session.messages.push(inbound);
+    ngAppendWebsiteConversation(db, { lead, sessionId, direction: "inbound", text: message, page, campaign, metadata: { visitor, extracted_contact: extractedContact } });
     session.updated_at = nowIso();
     session.last_message = message;
 
@@ -33575,6 +33713,11 @@ app.post("/website-chat/ayla", async (req, res) => {
       reply = ngWebsiteAylaFallbackReply(message);
     }
 
+    reply = ngWebsiteMaybeAddContactAsk(reply, lead);
+    if (contactChanged && extractedContact.phone && !/whatsapp|saved|send/i.test(reply)) {
+      reply = `${reply}\n\nI have saved your WhatsApp number and will send the live/demo details there as well.`;
+    }
+
     const outbound = {
       id: uuid(),
       role: "assistant",
@@ -33586,11 +33729,23 @@ app.post("/website-chat/ayla", async (req, res) => {
     };
 
     session.messages.push(outbound);
+    ngAppendWebsiteConversation(db, { lead, sessionId, direction: "outbound", text: reply, page, campaign, model, metadata: { ai_error: aiError } });
     session.last_reply = reply;
     session.last_reply_at = outbound.created_at;
     lead.last_ai_reply = reply;
     lead.last_ai_reply_at = outbound.created_at;
     lead.updated_at = nowIso();
+
+    let whatsappFirstMessageResult = null;
+    if (extractedContact.phone && !lead.first_message_sent_at && !lead.first_template_sent_at) {
+      whatsappFirstMessageResult = await ngSendAutoFirstMessageForLead({
+        db,
+        lead,
+        brandId: lead.brand_id || null,
+        actorId: "website_chat",
+        source: "website_contact_capture_first_whatsapp_message",
+      });
+    }
 
     ensureCrmArray(db, "website_chat_events").push(withTimestamps({
       id: uuid(),
@@ -33619,7 +33774,10 @@ app.post("/website-chat/ayla", async (req, res) => {
       usage,
       ai_error: aiError,
       source: "website_chat",
-      automation_isolated: true,
+      automation_isolated: false,
+      contact_captured: Boolean(extractedContact.email || extractedContact.phone),
+      contact: extractedContact,
+      whatsapp_first_message_result: whatsappFirstMessageResult,
       quick_actions: [
         { key: "start_demo", label: "Start 2-Day LMS Demo", url: "/try-demo" },
         { key: "live_session", label: "Today’s live session time?" },
