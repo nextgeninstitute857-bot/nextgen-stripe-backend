@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v104-final-roadmap-ayla-texting";
+const NEXTGEN_BACKEND_BUILD = "v105-crm-hard-clear-endpoint";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -8690,6 +8690,88 @@ app.post("/admin/crm/brand-snapshots/:snapshotId/apply", async (req, res) => {
   }
 });
 
+
+
+// v105 admin-only hard cleanup endpoint for CRM lead/inbox reset.
+// Keeps templates, campaigns, integrations, provider settings, AI training, roadmap, and system settings.
+app.post("/admin/crm/debug/clear-leads-inbox", async (req, res) => {
+  try {
+    const ctx = await requireCrmCollectionAccess(req, "leads", "write");
+    if (!ctx.crm_admin) {
+      return res.status(403).json({ success: false, error: "Only CRM admins can clear lead/inbox data" });
+    }
+
+    const phrase = String(req.body?.confirm || "").trim();
+    if (phrase !== "DELETE CRM") {
+      return res.status(400).json({ success: false, error: "Missing confirmation phrase DELETE CRM" });
+    }
+
+    const db = ctx.crmDb;
+    const keysToClear = [
+      "leads",
+      "conversations",
+      "message_logs",
+      "outbound_messages",
+      "inbound_messages",
+      "outreach_queue",
+      "automation_queue",
+      "automation_enrollments",
+      "appointments",
+      "appointment_notes",
+      "opportunities",
+      "tasks",
+      "handoffs",
+      "live_session_invites",
+      "scheduled_followup_jobs",
+      "followup_executions",
+      "whatsapp_windows",
+      "daily_session_recovery",
+      "duplicate_send_guards",
+      "lead_scores",
+      "crm_sales_briefs",
+      "marketing_flow_events",
+      "lead_flow_labels",
+      "audience_members",
+      "broadcast_queue",
+      "broadcast_replies",
+      "call_queue",
+      "call_logs",
+      "future_followups",
+      "form_submissions"
+    ];
+
+    const before = {};
+    for (const key of keysToClear) {
+      before[key] = Array.isArray(db[key]) ? db[key].length : 0;
+      db[key] = [];
+    }
+
+    db.updated_at = nowIso();
+    db.last_crm_hard_clear = {
+      at: nowIso(),
+      by_user_id: ctx.user?.id || null,
+      by_email: ctx.user?.email || "",
+      cleared_keys: keysToClear,
+      before,
+    };
+
+    await writeCrmDb(db);
+
+    const afterDb = await readCrmDb();
+    const after = Object.fromEntries(keysToClear.map((key) => [key, Array.isArray(afterDb[key]) ? afterDb[key].length : 0]));
+
+    res.json({
+      success: true,
+      build: NEXTGEN_BACKEND_BUILD,
+      message: "CRM leads, conversations, message logs, queues, and related lead records cleared",
+      cleared_keys: keysToClear,
+      before,
+      after,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
 
 // CRM core CRUD routes
 registerCrmCrudRoutes({ route: "/admin/crm/brands", collection: "brands", brandScoped: false });
