@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v100-import-country-merge-fix";
+const NEXTGEN_BACKEND_BUILD = "v104-final-roadmap-ayla-texting";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -168,6 +168,37 @@ app.use("/media", express.static(MEDIA_DIR, { maxAge: "30d", fallthrough: true }
 const DEFAULT_TIMEZONE = "America/New_York";
 const DEFAULT_ZOOM_DURATION_MINUTES = 120;
 const PENDING_ZOOM_PREFIX = "PENDING_ZOOM_";
+
+
+function getNextGenConfiguredLiveSessionLink() {
+  return String(
+    process.env.NEXTGEN_LIVE_SESSION_LINK ||
+    process.env.NEXTGEN_ZOOM_LINK ||
+    process.env.NEXTGEN_DAILY_LIVE_LINK ||
+    process.env.LIVE_SESSION_LINK ||
+    ""
+  ).trim();
+}
+
+
+const NEXTGEN_STEP1_ROADMAP_SYSTEM_SEQUENCE = [
+  "Cardiology",
+  "MSK",
+  "Central Nervous System",
+  "Reproductive",
+  "Endocrinology",
+  "GIT",
+  "Renal",
+  "Pulmonology",
+  "Immunology",
+  "Hematology",
+  "Psychiatry",
+];
+
+// v104: User-confirmed final July 1 Marathon sequence. Do not move MSK before Cardiology.
+function ngRoadmapSystemSequenceText() {
+  return NEXTGEN_STEP1_ROADMAP_SYSTEM_SEQUENCE.join(" → ");
+}
 
 const DEFAULT_FEATURE_CATALOG = {
   video_library: { key: "video_library", name: "Video Library", description: "Access to recorded video lessons", is_active: true, free_for_all: false },
@@ -1905,8 +1936,12 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
 function sanitizeRoadmapDay(day) {
   return {
     id: day.id, course_id: day.course_id, week_number: day.week_number, day_number: day.day_number, date: day.date,
+    system: day.system || day.chapter || "",
     title: day.title, description: day.description || "", resources: day.resources || [], resource_links: day.resource_links || [],
-    uworld_target: day.uworld_target || "", first_aid_topics: day.first_aid_topics || "", homework: day.homework || "",
+    uworld_target: day.uworld_target || "", first_aid_topics: day.first_aid_topics || "", live_teaching_topic: day.live_teaching_topic || "",
+    lecture_id: day.lecture_id || null, lecture_title: day.lecture_title || "", video_library_lecture: day.video_library_lecture || "",
+    uworld_qids: Array.isArray(day.uworld_qids) ? day.uworld_qids : [], mapped_uworld_qids: Array.isArray(day.mapped_uworld_qids) ? day.mapped_uworld_qids : [],
+    homework: day.homework || "", tasks: Array.isArray(day.tasks) ? day.tasks : [], recording_link: day.recording_link || "", notes_link: day.notes_link || "", assessment_task: day.assessment_task || "",
     status: day.status || "scheduled", live_session_id: day.live_session_id || null, is_published: day.is_published !== false,
   };
 }
@@ -4446,7 +4481,154 @@ app.get("/live/community/:sessionId", async (req, res) => { try { await getAuthe
 app.post("/live/community/:sessionId", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); if (!req.body.message) return res.status(400).json({ success: false, error: "message is required" }); const db = await readLiveDb(); const item = { id: uuid(), session_id: req.params.sessionId, course_id: req.body.course_id || null, user_id: user.id, user_name: user.name || user.email || "Student", message: String(req.body.message).slice(0, 2000), created_at: new Date().toISOString() }; db.communityMessages[req.params.sessionId] = [...(db.communityMessages[req.params.sessionId] || []), item]; await writeLiveDb(db); res.json({ success: true, message: item }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 
 app.get("/roadmap/course/:courseId", async (req, res) => { const db = await readLiveDb(); const roadmap = db.roadmaps[String(req.params.courseId)] || null; const days = (roadmap?.days || []).filter((d) => d.is_published !== false); res.json({ success: true, roadmap: roadmap ? { id: roadmap.id, course_id: roadmap.course_id, course_name: roadmap.course_name, settings: roadmap.settings, created_at: roadmap.created_at, updated_at: roadmap.updated_at } : null, days: days.map(sanitizeRoadmapDay), summary: { total_days: roadmap?.days?.length || 0, shown_days: days.length, total_weeks: Math.ceil((roadmap?.days?.length || 0) / 7) } }); });
-app.post("/admin/roadmap/generate", async (req, res) => { try { await requireLmsPermission(req, "lms.roadmap.manage"); const db = await readLiveDb(); const { course_id, course_name = "Course", start_date, duration_days, class_time = null, skip_sundays = true, template = "usmle_step_1" } = req.body; if (!course_id || !start_date || !duration_days) return res.status(400).json({ success: false, error: "course_id, start_date, duration_days required" }); const topics = ["Orientation", "Biochemistry", "Genetics", "Immunology", "Microbiology", "Pathology", "Pharmacology", "Cardiology", "Respiratory", "Renal", "Endocrine", "GI", "Neurology", "Psychiatry", "Reproductive", "Heme/Onc", "MSK/Derm", "Biostatistics", "Mixed Review"]; const dates = []; let cursor = new Date(`${start_date}T00:00:00`); while (dates.length < Number(duration_days)) { if (!(skip_sundays && cursor.getDay() === 0)) dates.push(dateOnly(cursor)); cursor = addDays(cursor, 1); } const days = dates.map((date, i) => ({ id: `${course_id}:day:${i + 1}`, course_id, week_number: Math.ceil((i + 1) / 7), day_number: i + 1, date, title: topics[i % topics.length], description: `Daily plan for ${course_name}`, resources: ["First Aid", "UWorld", "Class notes"], resource_links: [], uworld_target: "30-40 MCQs or assigned block", first_aid_topics: topics[i % topics.length], homework: "Complete assigned MCQs and review explanations", class_time, status: "scheduled", is_published: true, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), template })); db.roadmaps[String(course_id)] = { id: `roadmap:${course_id}`, course_id, course_name, settings: { duration_days: Number(duration_days), start_date, class_time, skip_sundays, template }, days, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }; await writeLiveDb(db); res.json({ success: true, roadmap: db.roadmaps[String(course_id)] }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.post("/admin/roadmap/generate", async (req, res) => {
+  try {
+    await requireLmsPermission(req, "lms.roadmap.manage");
+    const db = await readLiveDb();
+    const {
+      course_id,
+      course_name = "Course",
+      start_date,
+      duration_days,
+      class_time = null,
+      skip_sundays = true,
+      template = "usmle_step_1_cardio_first",
+    } = req.body;
+
+    if (!course_id || !start_date || !duration_days) {
+      return res.status(400).json({ success: false, error: "course_id, start_date, duration_days required" });
+    }
+
+    const systemSequence = Array.isArray(req.body.system_sequence) && req.body.system_sequence.length
+      ? req.body.system_sequence.map((item) => String(item || "").trim()).filter(Boolean)
+      : NEXTGEN_STEP1_ROADMAP_SYSTEM_SEQUENCE;
+
+    const course = db.courses?.[String(course_id)] || Object.values(db.courses || {}).find((item) => {
+      return String(item.id || item.course_id || item.slug || "") === String(course_id);
+    }) || null;
+
+    const collectLectures = (value, out = []) => {
+      if (!value) return out;
+      if (Array.isArray(value)) {
+        value.forEach((item) => collectLectures(item, out));
+        return out;
+      }
+      if (typeof value !== "object") return out;
+
+      const hasLectureShape = value.title || value.name || value.lecture_title || value.video_title || value.description || value.uworld_qids || value.question_ids || value.qids;
+      if (hasLectureShape) out.push(value);
+
+      ["lectures", "videos", "lessons", "chapters", "sections", "modules", "items", "children"].forEach((key) => {
+        if (value[key]) collectLectures(value[key], out);
+      });
+      return out;
+    };
+
+    const extractQids = (lecture = {}) => {
+      const raw = [
+        lecture.uworld_qids,
+        lecture.uworld_question_ids,
+        lecture.question_ids,
+        lecture.qids,
+        lecture.description,
+        lecture.details,
+        lecture.notes,
+      ].flat().join(" ");
+      return [...new Set(String(raw || "").match(/\b\d{2,6}\b/g) || [])];
+    };
+
+    const allLectures = collectLectures(course || {});
+    const lecturesBySystem = new Map();
+    for (const lecture of allLectures) {
+      const haystack = `${lecture.system || ""} ${lecture.chapter || ""} ${lecture.chapter_title || ""} ${lecture.title || ""} ${lecture.name || ""}`.toLowerCase();
+      for (const system of systemSequence) {
+        const key = String(system || "").toLowerCase().split("/")[0];
+        if (key && haystack.includes(key)) {
+          if (!lecturesBySystem.has(system)) lecturesBySystem.set(system, []);
+          lecturesBySystem.get(system).push(lecture);
+        }
+      }
+    }
+
+    const dates = [];
+    let cursor = new Date(`${start_date}T00:00:00`);
+    while (dates.length < Number(duration_days)) {
+      if (!(skip_sundays && cursor.getDay() === 0)) dates.push(dateOnly(cursor));
+      cursor = addDays(cursor, 1);
+    }
+
+    const days = dates.map((date, i) => {
+      const system = systemSequence[i % systemSequence.length] || "Cardiology";
+      const lecturePool = lecturesBySystem.get(system) || [];
+      const lecture = lecturePool.length ? lecturePool[Math.floor(i / systemSequence.length) % lecturePool.length] : null;
+      const qids = lecture ? extractQids(lecture) : [];
+      const lectureTitle = lecture?.title || lecture?.name || lecture?.lecture_title || `${system} Lecture`;
+
+      return {
+        id: `${course_id}:day:${i + 1}`,
+        course_id,
+        week_number: Math.ceil((i + 1) / 7),
+        day_number: i + 1,
+        date,
+        system,
+        title: `${system} — First Aid + UWorld mapped plan`,
+        description: `Daily ${system} plan for ${course_name}: First Aid topic, live teaching, mapped UWorld QIDs, matching recording, homework, and review.`,
+        first_aid_topics: req.body.first_aid_topics?.[i] || `${system} First Aid topic block`,
+        live_teaching_topic: req.body.live_teaching_topics?.[i] || `${system} live teaching with Dr. Ahmad`,
+        lecture_id: lecture?.id || lecture?.lecture_id || null,
+        lecture_title: lectureTitle,
+        video_library_lecture: lectureTitle,
+        uworld_qids: qids,
+        mapped_uworld_qids: qids,
+        uworld_target: qids.length ? `Complete mapped QIDs: ${qids.join(",")}` : "Complete mapped lecture QIDs from the LMS lecture description/QID field",
+        resources: ["First Aid", "Mapped UWorld QIDs", "Live class", "Video Library", "Class notes"],
+        resource_links: [],
+        homework: qids.length
+          ? `Complete mapped QIDs (${qids.join(",")}) and revise the matching First Aid topic.`
+          : "Complete the mapped UWorld QIDs from the lecture QID field and revise the matching First Aid topic.",
+        tasks: [
+          "Attend live teaching",
+          "Revise matching First Aid topic",
+          "Solve mapped UWorld QIDs",
+          "Watch matching video-library lecture if needed",
+          "Submit task completion / points",
+        ],
+        recording_link: "",
+        notes_link: "",
+        assessment_task: "End-of-topic check, surprise mentor assessment, or review quiz when assigned",
+        class_time,
+        status: "scheduled",
+        is_published: true,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        template,
+      };
+    });
+
+    db.roadmaps[String(course_id)] = {
+      id: `roadmap:${course_id}`,
+      course_id,
+      course_name,
+      settings: {
+        duration_days: Number(duration_days),
+        start_date,
+        class_time,
+        skip_sundays,
+        template,
+        system_sequence: systemSequence,
+        system_sequence_note: "Correct NextGen flow starts with Cardiology first, then MSK, Central Nervous System, Reproductive, Endocrinology, GIT, Renal, Pulmonology, Immunology, Hematology, and Psychiatry. Each day connects First Aid topics with mapped UWorld QIDs and LMS recordings.",
+      },
+      days,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    await writeLiveDb(db);
+    res.json({ success: true, roadmap: db.roadmaps[String(course_id)] });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message });
+  }
+});
 app.post("/admin/roadmap/sync-live-sessions", async (req, res) => {
   try {
     await requireLmsPermission(req, "lms.roadmap.manage");
@@ -9239,7 +9421,29 @@ app.post("/admin/crm/import/confirm", async (req, res) => {
     db.import_batches.push(batch);
     await writeCrmDb(db);
 
-    res.json({ success: true, batch, created, skipped, created_lead_ids: createdLeadIds, failed_rows: failedRows, summary });
+    const postImportFirstMessageWakeup = queueFirstMessage && createdLeadIds.length
+      ? ngSchedulePostImportFirstMessageSend({
+          leadIds: createdLeadIds,
+          brandId,
+          batchId,
+          actorId: user.id,
+          delayMs: req.body.post_import_first_message_delay_ms || req.body.defaults?.post_import_first_message_delay_ms,
+        })
+      : { scheduled: false, reason: queueFirstMessage ? "no_created_leads" : "first_message_queue_disabled" };
+
+    res.json({
+      success: true,
+      batch,
+      created,
+      skipped,
+      created_lead_ids: createdLeadIds,
+      failed_rows: failedRows,
+      summary,
+      post_import_first_message_wakeup: postImportFirstMessageWakeup,
+      message: postImportFirstMessageWakeup.scheduled
+        ? "Import completed. First WhatsApp messages will be sent automatically in the background."
+        : "Import completed.",
+    });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -13816,7 +14020,8 @@ function getLeadVariableValue(name = "", lead = {}, variables = {}, metadata = {
   if (["lead_name", "student_name", "doctor_name", "name"].includes(lowerKey)) return "Doctor";
   if (["exam_type", "exam_track"].includes(lowerKey)) return "USMLE Step 1";
   if (lowerKey === "session_time") return "1 PM EST";
-  if (["live_session_link", "session_link", "demo_link", "recording_link"].includes(lowerKey)) return "https://live.nextgenusmlelms.com";
+  if (["live_session_link", "session_link"].includes(lowerKey)) return getNextGenConfiguredLiveSessionLink() || "https://live.nextgenusmlelms.com";
+  if (["demo_link", "recording_link"].includes(lowerKey)) return "https://live.nextgenusmlelms.com";
   if (lowerKey === "course_name" || lowerKey === "program_name") return "NextGen USMLE";
   if (lowerKey === "exam_date" || lowerKey === "graduation_year" || lowerKey === "main_difficulty") return "not confirmed";
   return "";
@@ -15277,7 +15482,100 @@ async function ngRunDueAutoFirstMessages({ db, brandId = null, limit = 25, actor
     }
   }
 
+
   return results;
+}
+
+const ngPostImportFirstMessageJobKeys = new Set();
+
+function ngSchedulePostImportFirstMessageSend({ leadIds = [], brandId = null, batchId = "", actorId = "import_confirm", delayMs = null } = {}) {
+  const cleanIds = Array.from(new Set((Array.isArray(leadIds) ? leadIds : [])
+    .map((id) => String(id || "").trim())
+    .filter(Boolean)));
+
+  if (!cleanIds.length) return { scheduled: false, reason: "no_lead_ids" };
+
+  const jobKey = String(batchId || cleanIds.join(",")).slice(0, 220);
+  if (ngPostImportFirstMessageJobKeys.has(jobKey)) return { scheduled: false, reason: "already_scheduled", job_key: jobKey };
+
+  ngPostImportFirstMessageJobKeys.add(jobKey);
+
+  const waitBetweenSendsMs = Math.max(
+    1500,
+    Math.min(15000, Number(delayMs || process.env.NEXTGEN_POST_IMPORT_FIRST_MESSAGE_DELAY_MS || 3500))
+  );
+
+  setTimeout(async () => {
+    const runStartedAt = nowIso();
+    const results = [];
+
+    try {
+      for (const leadId of cleanIds) {
+        const db = await readCrmDb();
+        const lead = getLeadByAnyId(db, leadId);
+
+        if (!lead) {
+          results.push({ lead_id: leadId, sent: false, skipped: true, reason: "lead_not_found" });
+          await writeCrmDb(db);
+          continue;
+        }
+
+        const result = await ngSendAutoFirstMessageForLead({
+          db,
+          lead,
+          brandId: brandId || lead.brand_id || null,
+          actorId,
+          source: "post_import_auto_first_message",
+          dryRun: false,
+        });
+
+        ensureCrmArray(db, "post_import_auto_first_message_runs").unshift({
+          id: uuid(),
+          batch_id: batchId || null,
+          lead_id: lead.id || lead.lead_id || leadId,
+          name: lead.name || lead.student_name || "Lead",
+          to: getBestRecipientForChannel({ channel: "whatsapp", lead }),
+          success: Boolean(result.success),
+          sent: Boolean(result.sent),
+          skipped: Boolean(result.skipped),
+          reason: result.reason || result.error || null,
+          result,
+          actor_id: actorId || "import_confirm",
+          source: "post_import_auto_first_message",
+          started_at: runStartedAt,
+          created_at: nowIso(),
+        });
+
+        results.push({
+          lead_id: lead.id || lead.lead_id || leadId,
+          sent: Boolean(result.sent),
+          skipped: Boolean(result.skipped),
+          reason: result.reason || result.error || null,
+        });
+
+        await writeCrmDb(db);
+        await new Promise((resolve) => setTimeout(resolve, waitBetweenSendsMs));
+      }
+
+      console.log("Post-import first-message sender finished", {
+        batch_id: batchId || null,
+        processed: results.length,
+        sent: results.filter((item) => item.sent).length,
+        skipped: results.filter((item) => item.skipped).length,
+      });
+    } catch (error) {
+      console.error("Post-import first-message sender failed:", error.message);
+    } finally {
+      ngPostImportFirstMessageJobKeys.delete(jobKey);
+    }
+  }, 1200);
+
+  return {
+    scheduled: true,
+    job_key: jobKey,
+    lead_count: cleanIds.length,
+    delay_ms: waitBetweenSendsMs,
+  };
 }
 
 
@@ -17973,7 +18271,7 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   basic_conversation_router_enabled: true,
   greeting_once_enabled: true,
   roadmap_resources_knowledge_enabled: true,
-  roadmap_summary: "Our July 1 120-day Step 1 marathon is system-wise and starts from MSK. It covers MSK, Neurology/CNS, Reproductive, Endocrinology, GIT, Renal, Pulmonology/Respiratory, Immunology, Hematology, and Psychiatry. The flow includes Dr. Ahmad live First Aid teaching, mapped UWorld QIDs, matching UWorld Video Library lecture, daily homework/tasks, recordings and notes, Community Q&A, leaderboard points, daily flashcards, system-end assessments, surprise mentor assessments when needed, and Google Meet guidance.",
+  roadmap_summary: "Our July 1 120-day Step 1 marathon starts with Cardiology first, then MSK, Central Nervous System, Reproductive, Endocrinology, GIT, Renal, Pulmonology, Immunology, Hematology, and Psychiatry. The flow includes Dr. Ahmad live First Aid teaching, First Aid topics, mapped UWorld QIDs, matching UWorld Video Library lecture, daily homework/tasks, recordings and notes, Community Q&A, leaderboard points, daily flashcards, system-end assessments, surprise mentor assessments when needed, and Google Meet guidance.",
   resources_summary: "We connect First Aid, Pathoma concepts, mapped UWorld QIDs, UWorld Video Library explanations, daily flashcards, recordings/notes, Community Q&A, and assessments so students are not scattered across resources.",
   roadmap_answer_rule: "When a student asks about roadmap, summarize the system-wise 120-day roadmap and major systems covered. Do not explain every single day unless the student asks for daily details.",
   resources_answer_rule: "When a student asks about resources, say we use First Aid, UWorld-style QBank/MCQ discussion, Pathoma concepts, and NextGen assessments. Keep it short and connect resources to MCQ-solving and weak-area correction.",
@@ -17997,7 +18295,7 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   dr_ahmad_recording_link: "",
   dr_ahmed_recording_link: "",
   recording_mentor_name: "",
-  live_session_link: "",
+  live_session_link: getNextGenConfiguredLiveSessionLink(),
   youtube_channel_link: "",
   youtube_proof_link: "",
   uworld_demo_link: "https://live.nextgenusmlelms.com/demo",
@@ -18039,10 +18337,10 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   july_1_marathon_mode_enabled: true,
   july_1_marathon_start_date: "2026-07-01",
   july_1_marathon_phrase_rule: "Say: We are starting the USMLE Step 1 120-Day Marathon from July 1. Do not say: NextGen is starting.",
-  july_1_marathon_system_order: ["MSK", "Neurology / CNS", "Reproductive", "Endocrinology", "GIT", "Renal", "Pulmonology / Respiratory", "Immunology", "Hematology", "Psychiatry"],
+  july_1_marathon_system_order: ["Cardiology", "MSK", "Central Nervous System", "Reproductive", "Endocrinology", "GIT", "Renal", "Pulmonology", "Immunology", "Hematology", "Psychiatry"],
   july_1_marathon_excluded_systems: ["Biochemistry", "Biostatistics"],
   july_1_marathon_demo_link: "https://live.nextgenusmlelms.com/demo",
-  july_1_marathon_current_batch_rule: "Our current live classes are still going on and the current batch is ending around June 29-30. Students can join now to see Dr. Ahmad’s teaching style. The new 120-Day Marathon starts July 1 from MSK.",
+  july_1_marathon_current_batch_rule: "Our current live classes are still going on and the current batch is ending around June 29-30. Students can join now to see Dr. Ahmad’s teaching style. The new 120-Day Marathon starts July 1 with Cardiology first, then MSK and the rest of the roadmap sequence.",
   july_1_marathon_program_flow: "Live First Aid teaching with Dr. Ahmad → mapped UWorld QIDs → matching UWorld Video Library lecture → daily homework/task → recordings + notes → Community Q&A → leaderboard points → daily flashcards → system-end assessments → surprise mentor assessments when needed → Google Meet guidance.",
   assessment_rule: "Do not create assessment after every session. Assessments are after each system/block, surprise mentor assessments when assigned, and final/mixed review assessments when needed.",
   flashcards_enabled: true,
@@ -21798,7 +22096,7 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
     "- Google Meet state lock: once the student has requested Google Meet, shared a preferred time, is waiting for the Google Meet link, or has a scheduled Google Meet, do NOT restart live-session/recording/UWorld/demo/mentor-offer flow. Only acknowledge, answer direct questions, collect/reschedule time, or remind them that the Google Meet link will be sent at meeting time.",
     "- Acknowledgements like thank you/thanks/ok/noted/great/perfect after booking must get a simple acknowledgement or no sales push. Never treat them as a new sales trigger.",
     "- Greeting rule: use 'Hi Doctor' only once in a new conversation. After that, answer directly with Doctor / Yes Doctor / Sure Doctor. Never start every reply with Hi Doctor.",
-    "- July 1 Marathon rule: say 'we are starting the USMLE Step 1 120-Day Marathon from July 1'. Do NOT say 'NextGen is starting'. The roadmap starts from MSK and covers MSK, Neurology/CNS, Reproductive, Endocrinology, GIT, Renal, Pulmonology/Respiratory, Immunology, Hematology, and Psychiatry. Do not include Biochemistry or Biostatistics in this July 1 roadmap unless the student asks why they are excluded.",
+    "- July 1 Marathon rule: say 'we are starting the USMLE Step 1 120-Day Marathon from July 1'. Do NOT say 'NextGen is starting'. The roadmap starts with Cardiology first, then MSK, Central Nervous System, Reproductive, Endocrinology, GIT, Renal, Pulmonology, Immunology, Hematology, and Psychiatry. Do not include Biochemistry or Biostatistics in this July 1 roadmap unless the student asks why they are excluded.",
     "- Program flow rule: explain the program proactively after greeting/weak-subject question: Dr. Ahmad live First Aid teaching → mapped UWorld QIDs → matching UWorld Video Library lecture → daily homework/task → recordings + notes → Community Q&A → leaderboard points → daily flashcards → system-end assessments → surprise mentor assessments when needed → Google Meet guidance.",
     ngBuildAylaMediaGuidance(db, lead),
     "- Assessment rule: never say there is an assessment after every session. Say assessments are after each system/block and surprise mentor assessments can be assigned when needed.",
@@ -22082,7 +22380,7 @@ function ngAylaGetSalesAssets(db = {}) {
     ),
     roadmapSummary: ngAylaNormalizeMarketingLine(
       ngAylaFirstNonEmptySetting(s, ["roadmap_summary", "roadmap_knowledge_summary"], ""),
-      "Our 120-day Step 1 roadmap is system-wise and structured so preparation does not feel random. It covers Cardiology, Endocrinology, Renal, Pulmonology, Immunology, Hematology, MSK, Neurology, GIT, Reproductive, Psychiatry, Biostatistics, and Biochemistry. The flow includes live teaching, UWorld-style MCQ discussion, First Aid integration, bootcamps, assessments, and NBME-style preparation."
+      "Our 120-day Step 1 roadmap is system-wise and structured so preparation does not feel random. It starts with Cardiology first and continues with MSK, Central Nervous System, Reproductive, Endocrinology, GIT, Renal, Pulmonology, Immunology, Hematology, and Psychiatry. The flow includes live teaching, mapped UWorld QIDs, First Aid integration, matching recordings, homework/tasks, assessments, and NBME-style preparation."
     ),
     resourcesSummary: ngAylaNormalizeMarketingLine(
       ngAylaFirstNonEmptySetting(s, ["resources_summary", "program_resources_summary"], ""),
@@ -22168,9 +22466,9 @@ function ngAylaIsResourcesQuestion(text = "") {
 function ngAylaRoadmapReply(assets = {}) {
   return `Doctor, our roadmap is a structured 120-day Step 1 plan, organized system-wise so your preparation does not feel random.
 
-We cover Cardiology, Endocrinology, Renal, Pulmonology, Immunology, Hematology, MSK, Neurology, GIT, Reproductive, Psychiatry, Biostatistics, and Biochemistry.
+The correct flow starts with Cardiology first and continues in this exact sequence: ${ngRoadmapSystemSequenceText()}.
 
-The flow includes live teaching, UWorld-style MCQ discussion, First Aid integration, bootcamps, assessments, and NBME-style exam preparation.`;
+Each live lecture is connected with the matching First Aid topic, mapped UWorld QIDs from the LMS lecture QID field, the matching video-library recording, homework/tasks, notes/recordings, and assessment or revision work.`;
 }
 
 function ngAylaResourcesReply(assets = {}) {
@@ -22182,12 +22480,16 @@ The goal is not just to read resources, but to connect them with MCQ-solving, we
 }
 
 function ngAylaProgramWithRoadmapResourcesReply(assets = {}) {
-  const rec = assets.recordingLink ? `\n\nRecent session recording:\n${assets.recordingLink}` : "";
+  const rec = assets.recordingLink ? `
+
+Recent session recording:
+${assets.recordingLink}` : "";
   return `Doctor, Next Generation USMLE helps with live sessions, recordings, UWorld-style MCQ teaching, First Aid integration, structured roadmap support, and mentor guidance.
 
-The program follows a 120-day system-wise roadmap and uses First Aid, UWorld-style QBank discussion, Pathoma concepts, and NextGen assessments.${rec}
+The 120-day roadmap starts with Cardiology first, then MSK, Central Nervous System, Reproductive, Endocrinology, GIT, Renal, Pulmonology, Immunology, Hematology, and Psychiatry. Every lecture connects the First Aid topic with mapped UWorld QIDs, matching recordings, homework/tasks, notes, and assessment or revision work.${rec}
 
-You can also try the UWorld Video Library demo for 2 days free and watch the first lecture of every chapter.\n${assets.uworldLink}`;
+You can also try the UWorld Video Library demo for 2 days free and watch the first lecture of every chapter.
+${assets.uworldLink}`;
 }
 
 function ngAylaApplyGreetingOnce(reply = "", messages = []) {
@@ -22935,10 +23237,17 @@ async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }
   }
 
   if (!isAIConfigured()) {
-    const error = new Error("AI_NOT_CONFIGURED: Add OPENAI_API_KEY in Render environment variables before enabling Full AI Auto.");
-    error.statusCode = 503;
-    error.code = "AI_NOT_CONFIGURED";
-    throw error;
+    // v103: Ayla should not go completely silent if OpenAI is temporarily missing/misconfigured.
+    // Use the safe local counselor fallback so inbound students still receive a useful reply.
+    const fallback = ngGenerateFallbackReply({ db, lead, messages: cleanMessages, mode: "reply" });
+    return {
+      reply: ngAylaApplyGreetingOnce(ngCleanAylaStudentReply(fallback.reply || "Doctor, thanks for your message. Are you preparing for Step 1, and when is your exam planned?"), cleanMessages),
+      usage: {},
+      model: "nextgen-ayla-local-fallback-no-openai",
+      fallback: true,
+      code: "AI_NOT_CONFIGURED",
+      intent: fallback.intent || "fallback_guidance",
+    };
   }
 
   const latestInbound = ngLatestInbound(cleanMessages);
@@ -22982,7 +23291,7 @@ Conversation intelligence:
 - Do not ask for weak area again if already known.
 - If something is missing, ask only one clear question.
 - If enough is known, move to recording/live session/UWorld demo first, then Google Meet mentor consultation after value is shown or if directly requested.
-- Roadmap knowledge: if the student asks roadmap/study plan/curriculum, summarize: structured 120-day system-wise roadmap covering Cardiology, Endocrinology, Renal, Pulmonology, Immunology, Hematology, MSK, Neurology, GIT, Reproductive, Psychiatry, Biostatistics, and Biochemistry; live teaching, UWorld-style MCQ discussion, First Aid integration, bootcamps, assessments, and NBME-style preparation. Do not explain each day unless asked.
+- Roadmap knowledge: if the student asks roadmap/study plan/curriculum, summarize: structured 120-day system-wise roadmap starting with Cardiology first and continuing through Psychiatry in this order: Cardiology, MSK, Central Nervous System, Reproductive, Endocrinology, GIT, Renal, Pulmonology, Immunology, Hematology, Psychiatry. Explain that each lecture connects First Aid topic + mapped UWorld QIDs from LMS + live teaching + matching recording + homework/tasks + notes/recordings + assessment/revision. Do not say MSK first. Do not explain each day unless asked.
 - Resources knowledge: if the student asks resources, say we use First Aid, UWorld-style QBank/MCQ discussion, Pathoma concepts, and NextGen assessments, connected with MCQ-solving, weak-area review, and exam strategy.
 - Softly mention roadmap/resources in general program explanation even when not asked, but keep it short.
 - Mention the UWorld Video Library naturally when it helps sell value: around 150 hours, 3000+ MCQs, First Aid integrated with every MCQ, MCQ approach, option elimination, concept connection, and weak-area correction. Explain Try Demo: 2 days free access and first lecture of every chapter.
@@ -23285,8 +23594,20 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
     (lead.ai_mode_set === true || lead.automation_mode_set === true || lead.mode_locked === true || lead.ai_mode_manually_set === true) &&
     (aiMode === "manual" || aiMode === "draft" || aiMode === "ai_draft");
 
-  // Full AI Auto is default. Only an explicit manual/draft lock blocks Ayla.
-  if (explicitlyManualOrDraft) {
+  // Full AI Auto is default. v103: inbound webhook wakeups can revive Ayla automatically,
+  // because imported/test leads were often left in Manual/AI Draft and the bot appeared silent.
+  const sourceText = String(source || "").toLowerCase();
+  const isInboundWebhookWakeup = /webhook|inbound|wakeup/.test(sourceText);
+  const forceAutoOnInbound = String(process.env.NEXTGEN_AYLA_FORCE_AUTO_ON_INBOUND || "true").toLowerCase() !== "false";
+  if (explicitlyManualOrDraft && isInboundWebhookWakeup && forceAutoOnInbound) {
+    lead.ai_mode = "auto";
+    lead.automation_mode = "auto";
+    lead.ai_mode_set = false;
+    lead.automation_mode_set = false;
+    lead.mode_locked = false;
+    lead.ai_mode_manually_set = false;
+    lead.updated_at = ngAffNow();
+  } else if (explicitlyManualOrDraft) {
     return { lead_id: lead.id || lead.lead_id || null, skipped: true, reason: "explicit_manual_or_draft_mode", ai_mode: aiMode };
   }
 
@@ -23494,6 +23815,61 @@ function ngScheduleAylaAutoReplyAfterInbound({ leadId, source = "webhook_ai_auto
     }
   }, Math.max(1000, waitMs));
 }
+
+app.post("/admin/crm/automation/revive-ayla", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const ids = Array.isArray(req.body?.lead_ids) ? req.body.lead_ids.map((x) => String(x || "").trim()).filter(Boolean) : [];
+    const limit = Math.max(1, Math.min(200, Number(req.body?.limit || 100)));
+    const runNow = req.body?.run_now !== false;
+
+    const leads = ngAffArray(db, "leads");
+    const candidates = leads
+      .filter((lead) => !ids.length || ids.includes(String(lead.id || lead.lead_id || "")))
+      .filter((lead) => req.body?.include_paid === true || !ngLeadIsPaidOrGroupAddedForLiveSession(lead))
+      .filter((lead) => req.body?.include_opted_out === true || !lead.opted_out && !lead.opt_out && !lead.unsubscribed && !lead.do_not_contact && !lead.stop_requested)
+      .slice(0, limit);
+
+    const results = [];
+    for (const lead of candidates) {
+      lead.ai_mode = "auto";
+      lead.automation_mode = "auto";
+      lead.ai_mode_set = false;
+      lead.automation_mode_set = false;
+      lead.mode_locked = false;
+      lead.ai_mode_manually_set = false;
+      lead.last_ai_auto_replied_message_id = null;
+      lead.last_ai_auto_replied_at = null;
+      lead.last_ai_auto_reply_channel = null;
+      lead.last_ai_auto_reply_text = "";
+      lead.updated_at = ngAffNow();
+
+      if (runNow) {
+        results.push(await ngAylaProcessFullAiAutoForLead({
+          db,
+          lead,
+          source: "revive_ayla_admin",
+          actorId: "admin_revival",
+          force: req.body?.force === true,
+        }));
+      } else {
+        results.push({ lead_id: lead.id || lead.lead_id || null, revived: true, run_now: false });
+      }
+    }
+
+    await writeCrmDb(db);
+    return res.json({
+      success: true,
+      revived_count: candidates.length,
+      run_now: runNow,
+      results,
+      message: "Ayla set back to Full AI Auto and duplicate guards cleared for selected leads.",
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
 
 app.post("/admin/crm/automation/reset-ai-auto-guard", async (req, res) => {
   try {
