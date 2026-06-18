@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v113-ayla-continuous-chat-real-send";
+const NEXTGEN_BACKEND_BUILD = "v114-realtime-inbox-ai-retry";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -24231,8 +24231,12 @@ function ngScheduleAylaAutoReplyAfterInbound({ leadId, source = "webhook_ai_auto
   // fail after taking a duplicate lock, then the old one-shot wake-up fires too early and
   // silently skips with ai_auto_already_processing. We now retry safely. Before every retry
   // we re-read the DB and stop if a real outbound reply already exists after the latest inbound.
-  const firstDelay = Number.isFinite(Number(delayMs)) ? Math.max(1000, Number(delayMs)) : 4500;
-  const attempts = [firstDelay, 22000, 52000];
+  // v114: make inbound reply feel real-time. The previous attempts (4.5s/22s/52s)
+  // were too slow, so the student saw silence until refreshing or until a later run-due pass.
+  // We still keep idempotency by re-reading the DB before every attempt and stopping if a
+  // real outbound already exists after the latest inbound.
+  const firstDelay = Number.isFinite(Number(delayMs)) ? Math.max(1000, Number(delayMs)) : 1500;
+  const attempts = [firstDelay, 7000, 18000, 45000];
 
   attempts.forEach((waitMs, index) => {
     setTimeout(async () => {
