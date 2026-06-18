@@ -17765,6 +17765,11 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   no_reply_mark_after_days: 2,
   google_meet_followup_for_no_reply: true,
   admin_whatsapp_alerts_enabled: true,
+  admin_whatsapp_alert_hot_leads_enabled: true,
+  admin_whatsapp_alert_google_meet_requests_enabled: true,
+  admin_whatsapp_alert_google_meet_time_collected_enabled: true,
+  admin_whatsapp_alert_pricing_interest_enabled: true,
+  admin_whatsapp_alert_include_latest_message: true,
   admin_whatsapp_alert_numbers: [],
   primary_admin_whatsapp: "",
   second_admin_whatsapp: "",
@@ -21131,6 +21136,9 @@ function ngAylaPickSettings(db = {}) {
     ...(db.ai_orchestration_settings || {}),
     ...(db.assistant_settings || {}),
     ...(db.ai_control_settings || {}),
+    // v92: admin WhatsApp alert settings may be saved through the dedicated admin-alerts endpoint.
+    ...(db.ai_settings || {}),
+    ...(db.settings || {}),
   };
 }
 
@@ -22704,6 +22712,15 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
     });
     if (aylaMediaAsset) ngMarkAylaMediaSent(db, lead, aylaMediaAsset, { source: "full_ai_auto", result });
 
+    const adminAlert = await ngAylaMaybeSendConversationAdminAlert({
+      db,
+      lead,
+      appointment: typeof ngAylaFindActiveGoogleMeetAppointment === "function" ? ngAylaFindActiveGoogleMeetAppointment(db, lead) : null,
+      ai,
+      latestInbound,
+      source: "full_ai_auto",
+    });
+
     ngMarkAiAutoProcessed(lead, latestInbound, { channel, reply: ai.reply });
 
     if (typeof aylaLogCost === "function") {
@@ -22729,6 +22746,7 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
       usage: ai.usage,
       created_by: user.id,
       reply_delay_ms: replyDelayMs || 0,
+      admin_alert: adminAlert,
       created_at: ngAffNow(),
     });
 
@@ -22747,6 +22765,7 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
       channel,
       cooldown_seconds: NG_AI_AUTO_COOLDOWN_SECONDS,
       reply_delay_ms: replyDelayMs || 0,
+      admin_alert: adminAlert,
     });
   } catch (error) {
     if (aiAutoLockKey) {
@@ -22823,11 +22842,19 @@ app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
           metadata: { source: "process_ai_auto", ai_auto: true, triggered_by: user.id, latest_inbound_id: inbound.id || null, ayla_media_asset_id: aylaMediaAsset?.id || null, ayla_media_usage_area: aylaMediaAsset?.usage_area || null }
         });
         if (aylaMediaAsset) ngMarkAylaMediaSent(db, lead, aylaMediaAsset, { source: "process_ai_auto", result: sendResult });
+        const adminAlert = await ngAylaMaybeSendConversationAdminAlert({
+          db,
+          lead,
+          appointment: typeof ngAylaFindActiveGoogleMeetAppointment === "function" ? ngAylaFindActiveGoogleMeetAppointment(db, lead) : null,
+          ai,
+          latestInbound: inbound,
+          source: "process_ai_auto",
+        });
         ngMarkAiAutoProcessed(lead, inbound, { channel, reply: ai.reply });
         if (typeof aylaLogCost === "function") await aylaLogCost({ db, actor: user, model: ai.model, usage: ai.usage, action: "process_ai_auto_send", meta: { lead_id: lead.id, channel } }).catch(() => null);
-        ngAffArray(db, "ai_auto_runs").unshift({ id: uuid(), lead_id: lead.id, inbound_message_id: ngAiAutoMessageFingerprint(inbound), channel, reply: ai.reply, sent: true, result: sendResult, model: ai.model, usage: ai.usage, created_by: user.id, created_at: ngAffNow() });
+        ngAffArray(db, "ai_auto_runs").unshift({ id: uuid(), lead_id: lead.id, inbound_message_id: ngAiAutoMessageFingerprint(inbound), channel, reply: ai.reply, sent: true, result: sendResult, model: ai.model, usage: ai.usage, admin_alert: adminAlert, created_by: user.id, created_at: ngAffNow() });
         ngReleaseAiAutoLock(duplicateGuard.lock_key);
-        results.push({ lead_id: lead.id, sent: true, reply: ai.reply, channel });
+        results.push({ lead_id: lead.id, sent: true, reply: ai.reply, channel, admin_alert: adminAlert });
       } catch (err) {
         ngReleaseAiAutoLock(duplicateGuard.lock_key);
         results.push({ lead_id: lead.id, sent: false, error: err.message, channel });
@@ -22840,6 +22867,10 @@ app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
 });
 
 
+
+function ngCommunityArray(db = {}, key = "") {
+  return ensureCrmArray(db, key);
+}
 
 function ngCommunityText(value, fallback = "") {
   return String(value ?? fallback).trim();
@@ -32419,6 +32450,95 @@ async function ngSendAdminWhatsAppAlert(db = {}, { type = "alert", lead = null, 
   return { enabled: true, sent: results.filter((r) => r.success).length, results };
 }
 
+
+function ngAylaAdminAlertTypeForIntent(intent = "", lead = {}, appointment = null) {
+  const cleanIntent = String(intent || "").toLowerCase();
+  const leadState = String([
+    lead.status,
+    lead.stage,
+    lead.lead_stage,
+    lead.next_action,
+    lead.google_meet_booking_state,
+    lead.human_needed ? "human_needed" : "",
+    lead.google_meet_requested ? "google_meet_requested" : "",
+  ].join(" ")).toLowerCase();
+
+  if (cleanIntent.includes("google_meet_time_collected") || leadState.includes("google_meet_time_collected") || leadState.includes("waiting_for_admin_link") || leadState.includes("admin_paste_google_meet_link") || appointment?.id) {
+    return "google_meet_time_collected";
+  }
+
+  if (cleanIntent.includes("pricing") || leadState.includes("pricing")) return "pricing_interest";
+  if (cleanIntent.includes("google_meet_requested") || leadState.includes("google_meet_requested") || leadState.includes("schedule_google_meet")) return "google_meet_requested";
+  if (leadState.includes("hot") || leadState.includes("human_needed") || lead.human_needed) return "hot_lead_interested";
+  return "";
+}
+
+function ngAylaAdminAlertEnabledForType(db = {}, type = "") {
+  const s = ngAylaPickSettings(db);
+  if (s.admin_whatsapp_alerts_enabled === false) return false;
+  const clean = String(type || "").toLowerCase();
+  if (clean === "hot_lead_interested" && s.admin_whatsapp_alert_hot_leads_enabled === false) return false;
+  if (clean === "google_meet_requested" && s.admin_whatsapp_alert_google_meet_requests_enabled === false) return false;
+  if (clean === "google_meet_time_collected" && s.admin_whatsapp_alert_google_meet_time_collected_enabled === false) return false;
+  if (clean === "pricing_interest" && s.admin_whatsapp_alert_pricing_interest_enabled === false) return false;
+  return true;
+}
+
+function ngAylaAdminAlertDedupeKey({ type = "", lead = null, appointment = null, meta = {} } = {}) {
+  return [
+    "admin_whatsapp_alert",
+    String(type || "alert"),
+    String(lead?.id || appointment?.lead_id || meta.lead_id || "no_lead"),
+    String(appointment?.id || meta.appointment_id || "no_appointment"),
+  ].join(":");
+}
+
+function ngAylaAdminAlertAlreadySent(db = {}, { type = "", lead = null, appointment = null, meta = {}, hours = 12 } = {}) {
+  const dedupeKey = ngAylaAdminAlertDedupeKey({ type, lead, appointment, meta });
+  return ensureCrmArray(db, "marketing_flow_events").some((event) => {
+    if (String(event.event_type || "") !== "admin_whatsapp_alert") return false;
+    const eventType = String(event.metadata?.type || "").toLowerCase();
+    const eventDedupe = String(event.metadata?.dedupe_key || "");
+    if (eventDedupe !== dedupeKey && eventType !== String(type || "").toLowerCase()) return false;
+    if (lead?.id && String(event.lead_id || event.metadata?.lead_id || "") !== String(lead.id)) return false;
+    return ngIsRecent(event.created_at || event.updated_at, hours);
+  });
+}
+
+function ngAylaBuildAdminHotLeadAlertText({ type = "hot_lead_interested", lead = null, appointment = null, latestInboundText = "", intent = "" } = {}) {
+  const label = String(type || "alert").replace(/_/g, " ").toUpperCase();
+  const leadName = ng41LeadName(lead || {}) || appointment?.student_name || "Student";
+  const leadPhone = ng41LeadPhone(lead || {}) || appointment?.student_phone || appointment?.phone || "";
+  const leadEmail = ng41LeadEmail(lead || {}) || appointment?.student_email || appointment?.email || "";
+  const appointmentTime = appointment ? ngGoogleMeetAppointmentDisplayDateTime(appointment, "EST") : "";
+  const sourceLine = intent ? `\nAI intent: ${intent}` : "";
+  const latestLine = latestInboundText ? `\n\nLatest student message:\n${String(latestInboundText).slice(0, 900)}` : "";
+
+  return `🚨 NEXTGEN HOT LEAD ALERT\n\nType: ${label}\nStudent: ${leadName}\nWhatsApp: ${leadPhone || "—"}\nEmail: ${leadEmail || "—"}${appointmentTime ? `\nGoogle Meet time: ${appointmentTime}` : ""}${sourceLine}\n\nStatus:\n${ngLeadStatusSummaryForAlert(lead || {})}${latestLine}\n\nAction needed: Open CRM, check the conversation, and handle Google Meet / payment / human follow-up.`;
+}
+
+async function ngAylaMaybeSendConversationAdminAlert({ db = {}, lead = null, appointment = null, ai = {}, latestInbound = null, source = "ai_auto" } = {}) {
+  const type = ngAylaAdminAlertTypeForIntent(ai?.intent || "", lead || {}, appointment || null);
+  if (!type) return { enabled: true, skipped: true, reason: "not_hot_or_google_meet_intent" };
+  if (!ngAylaAdminAlertEnabledForType(db, type)) return { enabled: false, skipped: true, reason: "admin_alert_type_disabled", type };
+
+  const latestInboundText = ngMessageText(latestInbound || {});
+  const meta = {
+    source,
+    intent: ai?.intent || "",
+    lead_id: lead?.id || null,
+    appointment_id: appointment?.id || null,
+    dedupe_key: ngAylaAdminAlertDedupeKey({ type, lead, appointment, meta: { source } }),
+  };
+
+  if (ngAylaAdminAlertAlreadySent(db, { type, lead, appointment, meta, hours: 12 })) {
+    return { enabled: true, skipped: true, reason: "duplicate_admin_alert_recently_sent", type };
+  }
+
+  const text = ngAylaBuildAdminHotLeadAlertText({ type, lead, appointment, latestInboundText, intent: ai?.intent || "" });
+  return ngSendAdminWhatsAppAlert(db, { type, lead, appointment, text, meta });
+}
+
 app.get("/admin/crm/ai-command/admin-alerts/settings", async (req, res) => {
   try {
     await requireCrmAdmin(req);
@@ -32426,6 +32546,10 @@ app.get("/admin/crm/ai-command/admin-alerts/settings", async (req, res) => {
     const s = ngAylaPickSettings(db);
     res.json({ success: true, settings: {
       admin_whatsapp_alerts_enabled: s.admin_whatsapp_alerts_enabled !== false,
+      admin_whatsapp_alert_hot_leads_enabled: s.admin_whatsapp_alert_hot_leads_enabled !== false,
+      admin_whatsapp_alert_google_meet_requests_enabled: s.admin_whatsapp_alert_google_meet_requests_enabled !== false,
+      admin_whatsapp_alert_google_meet_time_collected_enabled: s.admin_whatsapp_alert_google_meet_time_collected_enabled !== false,
+      admin_whatsapp_alert_pricing_interest_enabled: s.admin_whatsapp_alert_pricing_interest_enabled !== false,
       admin_whatsapp_alert_numbers: ngAylaAdminAlertNumbers(db),
       primary_admin_whatsapp: s.primary_admin_whatsapp || "",
       second_admin_whatsapp: s.second_admin_whatsapp || "",
@@ -32443,12 +32567,17 @@ app.post("/admin/crm/ai-command/admin-alerts/settings", async (req, res) => {
     const incoming = uniqueList([...(Array.isArray(req.body.admin_whatsapp_alert_numbers) ? req.body.admin_whatsapp_alert_numbers : []), req.body.primary_admin_whatsapp, req.body.second_admin_whatsapp, req.body.third_admin_whatsapp, req.body.fourth_admin_whatsapp]).filter(Boolean).slice(0, 4);
     const normalized = incoming.map(normalizePhoneForWhatsapp).filter(Boolean);
     db.ai_settings.admin_whatsapp_alerts_enabled = req.body.admin_whatsapp_alerts_enabled !== false;
+    db.ai_settings.admin_whatsapp_alert_hot_leads_enabled = req.body.admin_whatsapp_alert_hot_leads_enabled !== false;
+    db.ai_settings.admin_whatsapp_alert_google_meet_requests_enabled = req.body.admin_whatsapp_alert_google_meet_requests_enabled !== false;
+    db.ai_settings.admin_whatsapp_alert_google_meet_time_collected_enabled = req.body.admin_whatsapp_alert_google_meet_time_collected_enabled !== false;
+    db.ai_settings.admin_whatsapp_alert_pricing_interest_enabled = req.body.admin_whatsapp_alert_pricing_interest_enabled !== false;
     db.ai_settings.admin_whatsapp_alert_numbers = normalized;
     db.ai_settings.primary_admin_whatsapp = normalized[0] || "";
     db.ai_settings.second_admin_whatsapp = normalized[1] || "";
     db.ai_settings.third_admin_whatsapp = normalized[2] || "";
     db.ai_settings.fourth_admin_whatsapp = normalized[3] || "";
     db.settings = { ...(db.settings || {}), ...db.ai_settings };
+    db.ai_orchestration_settings = { ...(db.ai_orchestration_settings || {}), ...db.ai_settings };
     await writeCrmDb(db);
     res.json({ success: true, settings: { admin_whatsapp_alert_numbers: normalized, admin_whatsapp_alerts_enabled: db.ai_settings.admin_whatsapp_alerts_enabled } });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
