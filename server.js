@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v114-realtime-inbox-ai-retry";
+const NEXTGEN_BACKEND_BUILD = "v117-revised-unread-quick-actions-heartbeat";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -7545,8 +7545,9 @@ function normalizePhoneForImport(row = {}, defaults = {}) {
       result.errors.push("Phone has country code but length is not valid for WhatsApp/E.164");
       return result;
     }
-  } else if (defaultRule && applyDefault) {
-    // Admin intentionally chose to attach the selected country code to missing-code numbers.
+  } else if (defaultRule && (applyDefault || Boolean(selectedCountryLabel) || Boolean(row.country_code || row.phone_country_code || row.default_country_code))) {
+    // v117: If the CSV row itself says USA/India/Pakistan/UAE/etc., apply that country code automatically.
+    // Admin toggle is still honored, but explicit row country no longer blocks import as "needs_country_code".
     let national = digits;
     if (defaultRule.code === "1") {
       if (digits.length === 11 && digits.startsWith("1")) national = digits.slice(1);
@@ -7809,6 +7810,7 @@ function buildImportPreviewRows({ db, brandId, rows = [], defaults = {} }) {
       phone_country_code: phoneInfo.country_code || "",
       phone_import_status: phoneInfo.status || importStatus,
       phone_import_category: phoneInfo.category || importStatus,
+      missing_country_candidate_priority: phoneInfo.needs_country_code ? ["+1 US/Canada", "+91 India", "+92 Pakistan", "+971 UAE", "+249 Sudan", "+234 Nigeria", "+966 Saudi", "+974 Qatar", "+965 Kuwait", "+968 Oman", "+973 Bahrain", "+44 UK", "+20 Egypt", "+962 Jordan"] : [],
       country,
       region,
       language,
@@ -11080,11 +11082,16 @@ app.get("/admin/crm/integrations/:id/logs", async (req, res) => {
 // Client data / conversation / handoff backend
 app.get("/admin/crm/conversations/:leadId", async (req, res) => {
   try {
-    await requireCrmAdmin(req);
+    const { user } = await requireCrmAdmin(req);
     const db = await readCrmDb();
     const rawKey = String(req.params.leadId || "").trim();
     const lead = getLeadByAnyId(db, rawKey);
     const resolvedLeadId = lead?.id || lead?.lead_id || rawKey;
+    let markReadResult = { changed: false };
+    if (lead && String(req.query.mark_read || "true").toLowerCase() !== "false") {
+      markReadResult = ngMarkConversationRead(db, lead, { actorId: user.id, reason: "conversation_opened" });
+      if (markReadResult.changed) await writeCrmDb(db);
+    }
     const messages = typeof ngLeadConversationMessages === "function"
       ? ngLeadConversationMessages(db, resolvedLeadId)
       : ensureCrmArray(db, "conversations")
@@ -11099,8 +11106,94 @@ app.get("/admin/crm/conversations/:leadId", async (req, res) => {
       conversations: messages,
       messages,
       count: messages.length,
+      read_state: markReadResult,
       sources: { unified_thread: true, includes: ["conversations", "message_logs", "inbound_messages", "outbound_messages"] },
     });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+
+app.post("/admin/crm/conversations/:leadId/mark-read", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const lead = getLeadByAnyId(db, req.params.leadId);
+    if (!lead) return res.status(404).json({ success: false, error: "Lead not found" });
+    const result = ngMarkConversationRead(db, lead, { actorId: user.id, reason: req.body?.reason || "manual_mark_read" });
+    await writeCrmDb(db);
+    res.json({ success: true, ...result, unread_count: 0 });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/conversations/:leadId/quick-action", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const lead = getLeadByAnyId(db, req.params.leadId);
+    if (!lead) return res.status(404).json({ success: false, error: "Lead not found" });
+
+    const actionPayload = ngBuildQuickActionPayload(db, lead, req.body?.action || req.body?.quick_action || "", req.body || {});
+    if (!actionPayload.action) return res.status(400).json({ success: false, error: "Quick action is required" });
+
+    const channel = normalizeAutomationChannel(req.body?.channel || req.body?.platform || normalizeLeadSourcePlatform(lead) || "whatsapp");
+    const to = getBestRecipientForChannel({ channel, to: req.body?.to || req.body?.recipient || "", lead });
+    const brandId = getCrmBrandId(req, db) || lead.brand_id || null;
+
+    const result = await sendCrmMessage({
+      db,
+      brandId,
+      channel,
+      to,
+      subject: req.body?.subject || "NextGen USMLE",
+      text: actionPayload.text,
+      templateId: req.body?.template_id || req.body?.template_key || actionPayload.templateId,
+      templateVariables: actionPayload.variables,
+      leadId: lead.id,
+      metadata: {
+        ...(req.body?.metadata || {}),
+        source: "conversation_inbox_quick_action",
+        quick_action: actionPayload.action,
+        template_key: actionPayload.template?.key || actionPayload.templateId,
+        template_name: actionPayload.template?.template_name || actionPayload.template?.name || req.body?.template_name || "",
+        whatsapp_template_name: actionPayload.template?.whatsapp_template_name || actionPayload.template?.meta_template_name || req.body?.whatsapp_template_name || "",
+        language_code: normalizeWhatsAppLanguageCode(req.body?.language_code || req.body?.metadata?.language_code || actionPayload.template?.language_code || "en"),
+        quick_action_links: actionPayload.links,
+      },
+      mediaUrl: req.body?.media_url || req.body?.image_url || "",
+      mediaId: req.body?.media_id || req.body?.whatsapp_media_id || "",
+      mediaType: req.body?.media_type || "image",
+      caption: req.body?.caption || "",
+    });
+
+    if (result.success || result.queued) {
+      ngMarkConversationHandledByOutbound(db, lead, { actorId: user.id, reason: `quick_action_${actionPayload.action}` });
+      if (actionPayload.stage) {
+        lead.status = actionPayload.stage;
+        lead.lead_status = actionPayload.stage;
+        lead.stage = actionPayload.stage;
+        lead.sales_stage = actionPayload.stage;
+      }
+      lead.last_quick_action = actionPayload.action;
+      lead.last_quick_action_at = nowIso();
+      lead.updated_at = nowIso();
+    }
+
+    createIntegrationLog(db, {
+      brand_id: brandId,
+      integration_id: getIntegrationByPlatform(db, channel)?.id || null,
+      platform: channel,
+      action: "admin_quick_action",
+      status: result.success ? "success" : result.queued ? "queued" : "error",
+      message: result.message || result.error || `${channel} quick action attempted`,
+      metadata: { lead_id: lead.id, quick_action: actionPayload.action, log_id: result.log?.id || null, error: result.error || null, links: actionPayload.links },
+    });
+
+    await writeCrmDb(db);
+    res.status(result.success || result.queued ? 200 : 502).json({ success: result.success, queued: result.queued, action: actionPayload.action, result, log: result.log, links: actionPayload.links, error: result.error || null, hint: result.hint || null });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -12251,6 +12344,228 @@ function getMetaAccountIdForPlatform(platform, integration = {}) {
   return integration.account_id || process.env.FACEBOOK_PAGE_ID || "me";
 }
 
+
+// v117: Inbox unread/read-state must be backend-owned.
+// Red dots should count only fresh inbound student messages after the last admin/AI outbound/read.
+function ngReadStateMessageTimeMs(message = {}) {
+  const value = message.created_at || message.received_at || message.sent_at || message.delivered_at || message.timestamp || message.updated_at || message.time || null;
+  const ms = value ? new Date(value).getTime() : 0;
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function ngReadStatePhoneDigits(value = "") {
+  const digits = String(value || "").replace(/\D/g, "");
+  return digits && digits.length >= 7 ? digits : "";
+}
+
+function ngReadStateLeadPhones(lead = {}) {
+  return [lead.phone, lead.whatsapp, lead.whatsapp_phone, lead.phone_number, lead.mobile, lead.contact, lead.wa_id, lead.platform_contact_id]
+    .map(ngReadStatePhoneDigits)
+    .filter(Boolean);
+}
+
+function ngReadStateLeadEmails(lead = {}) {
+  return [lead.email, lead.student_email, lead.customer_email, lead.contact_email]
+    .map(normalizeEmail)
+    .filter(Boolean);
+}
+
+function ngReadStateMessageBelongsToLead(message = {}, lead = {}) {
+  if (!lead) return false;
+  const leadIds = [lead.id, lead._id, lead.lead_id, lead.uuid].map((x) => String(x || "")).filter(Boolean);
+  const messageLeadIds = [message.lead_id, message.leadId, message.lead, message.contact_id, message.contactId, message.crm_lead_id, message.conversation_id, message.thread_lead_id]
+    .map((x) => String(x || ""))
+    .filter(Boolean);
+  if (leadIds.length && messageLeadIds.some((id) => leadIds.includes(id))) return true;
+
+  const leadPhones = ngReadStateLeadPhones(lead);
+  const messagePhones = [message.phone, message.whatsapp, message.whatsapp_phone, message.phone_number, message.mobile, message.to, message.from, message.recipient, message.sender, message.wa_id, message.customer_phone, message.lead_phone, message.contact_phone]
+    .map(ngReadStatePhoneDigits)
+    .filter(Boolean);
+  if (leadPhones.length && messagePhones.some((phone) => leadPhones.some((leadPhone) => phone === leadPhone || phone.endsWith(leadPhone) || leadPhone.endsWith(phone)))) return true;
+
+  const leadEmails = ngReadStateLeadEmails(lead);
+  const messageEmails = [message.email, message.to, message.from, message.recipient, message.sender, message.customer_email, message.lead_email, message.contact_email]
+    .map(normalizeEmail)
+    .filter(Boolean);
+  return Boolean(leadEmails.length && messageEmails.some((email) => leadEmails.includes(email)));
+}
+
+function ngReadStateIsInbound(message = {}) {
+  const dir = String(message.direction || message.message_direction || message.type || "").toLowerCase();
+  return ["inbound", "received", "incoming", "lead", "student"].includes(dir) || message.inbound === true || message.is_inbound === true;
+}
+
+function ngReadStateIsOutbound(message = {}) {
+  const dir = String(message.direction || message.message_direction || message.type || "").toLowerCase();
+  if (["outbound", "sent", "outgoing", "agent", "assistant"].includes(dir)) return true;
+  if (message.outbound === true || message.is_outbound === true || message.agent_initiated === true) return true;
+  if (message.to && (message.sent_at || message.agent_id || message.sender_role === "assistant" || message.sender_role === "admin")) return true;
+  return false;
+}
+
+function ngReadStateMaxTime(values = []) {
+  return Math.max(0, ...values.map((value) => {
+    const ms = value ? new Date(value).getTime() : 0;
+    return Number.isFinite(ms) ? ms : 0;
+  }));
+}
+
+function ngInboxUnreadCountForLead({ lead = {}, messages = [] } = {}) {
+  const safeMessages = safeArray(messages);
+  const lastAdminReadMs = ngReadStateMaxTime([
+    lead.last_admin_read_at,
+    lead.inbox_last_read_at,
+    lead.last_read_at,
+    lead.conversation_read_at,
+    lead.admin_read_at,
+  ]);
+  const lastOutboundMs = safeMessages.reduce((max, message) => {
+    if (!ngReadStateIsOutbound(message)) return max;
+    const status = String(message.status || message.provider_status || "").toLowerCase();
+    if (["failed", "error", "duplicate_blocked", "skipped", "not_sent"].includes(status)) return max;
+    return Math.max(max, ngReadStateMessageTimeMs(message));
+  }, 0);
+  const cutoffMs = Math.max(lastAdminReadMs, lastOutboundMs);
+  return safeMessages.filter((message) => {
+    if (!ngReadStateIsInbound(message)) return false;
+    if (!ngMessageText(message)) return false;
+    if (message.admin_read_at || message.read_by_admin_at || message.inbox_read_at) return false;
+    const t = ngReadStateMessageTimeMs(message);
+    return t > cutoffMs + 250;
+  }).length;
+}
+
+function ngMarkConversationRead(db = {}, leadOrId = null, options = {}) {
+  const lead = typeof leadOrId === "object" && leadOrId ? leadOrId : getLeadByAnyId(db, leadOrId);
+  if (!lead) return { changed: false, reason: "lead_not_found" };
+  const now = nowIso();
+  let changed = false;
+  const collections = ["message_logs", "crm_message_logs", "inbound_messages", "conversations"];
+  for (const collection of collections) {
+    for (const message of ensureCrmArray(db, collection)) {
+      if (!ngReadStateIsInbound(message)) continue;
+      if (!ngReadStateMessageBelongsToLead(message, lead)) continue;
+      if (!message.admin_read_at) { message.admin_read_at = now; changed = true; }
+      if (!message.inbox_read_at) { message.inbox_read_at = now; changed = true; }
+      if (!message.read_by_admin_at) { message.read_by_admin_at = now; changed = true; }
+      message.read_by = options.actorId || options.actor_id || message.read_by || "admin";
+      message.read_reason = options.reason || message.read_reason || "conversation_mark_read";
+      message.updated_at = now;
+    }
+  }
+  lead.unread_count = 0;
+  lead.inbox_unread_count = 0;
+  lead.last_admin_read_at = now;
+  lead.inbox_last_read_at = now;
+  lead.last_read_at = now;
+  lead.updated_at = now;
+  changed = true;
+  return { changed, lead_id: lead.id || lead.lead_id || null, read_at: now };
+}
+
+function ngMarkConversationHandledByOutbound(db = {}, leadOrId = null, options = {}) {
+  const result = ngMarkConversationRead(db, leadOrId, { ...options, reason: options.reason || "outbound_message_sent" });
+  const lead = typeof leadOrId === "object" && leadOrId ? leadOrId : getLeadByAnyId(db, leadOrId);
+  if (lead) {
+    const now = result.read_at || nowIso();
+    lead.last_handled_at = now;
+    lead.needs_reply = false;
+    if (String(lead.status || "").toLowerCase() === "needs_reply") lead.status = lead.lead_status || "replied";
+    if (String(lead.lead_status || "").toLowerCase() === "needs_reply") lead.lead_status = lead.status || "replied";
+    lead.updated_at = now;
+  }
+  return result;
+}
+
+const NEXTGEN_QUICK_ACTION_TEMPLATE_KEYS = {
+  first_message: ["meta_ad_first_message", "meta_first_message", "first_message_intro", "greeting_exam_type_question"],
+  reminder: ["five_min_live_session_reminder", "five_minute_reminder", "live_session_1pm_reminder"],
+  session_link: ["live_session_link_now", "live_session_1pm_reminder", "live_session_invite_broadcast"],
+  recording: ["recording_followup_after_session", "post_live_notes_recording_followup"],
+  testimonial: ["proof_testimonial_message", "proof_testimonial"],
+  uworld_demo: ["uworld_video_library_soft_pitch", "demo_lms_activation_invite", "two_day_lms_demo_access"],
+  community: ["community_fallback_invite"],
+  mentor: ["mentor_call_offer", "mentor_booking", "mentor_call_followup"],
+};
+
+function ngFindTemplateForQuickAction(db = {}, action = "") {
+  const keys = (NEXTGEN_QUICK_ACTION_TEMPLATE_KEYS[action] || [action]).map(normalizeTemplateLookupKey);
+  const templates = [...ensureCrmArray(db, "message_templates"), ...ensureCrmArray(db, "templates")];
+  return templates.find((template) => {
+    if (template.active === false || template.is_active === false || template.status === "archived") return false;
+    const ids = [template.id, template.template_id, template.key, template.template_key, template.slug, template.name, template.title, template.template_name, template.meta_template_name, template.whatsapp_template_name, template.provider_template_name]
+      .map(normalizeTemplateLookupKey)
+      .filter(Boolean);
+    return keys.some((key) => ids.includes(key));
+  }) || null;
+}
+
+function ngSalesAssetValue(assets = {}, key = "") {
+  return String(assets?.[key] || "").trim();
+}
+
+function ngBuildQuickActionPayload(db = {}, lead = {}, action = "", body = {}) {
+  const cleanAction = normalizeTemplateLookupKey(action || body.quick_action || body.action || "");
+  const assets = typeof ngAylaGetSalesAssets === "function" ? ngAylaGetSalesAssets(db) : {};
+  const liveLink = getNextGenConfiguredLiveSessionLink() || ngSalesAssetValue(assets, "liveSessionLink") || lead.live_session_link || lead.session_link || "";
+  const sessionTime = body.session_time || ngSalesAssetValue(assets, "sessionTime") || lead.session_time || "1 PM EST";
+  const recordingLink = body.recording_link || ngSalesAssetValue(assets, "recordingLink") || lead.recording_link || lead.recording_url || "";
+  const demoLink = body.demo_link || ngSalesAssetValue(assets, "uworldLink") || lead.demo_link || "https://live.nextgenusmlelms.com";
+  const youtubeLink = body.youtube_link || ngSalesAssetValue(assets, "youtubeLink") || lead.youtube_link || "";
+  const communityLink = body.community_link || lead.community_link || lead.telegram_link || "";
+  const mentorLink = body.mentor_booking_link || lead.mentor_booking_link || "";
+  const name = getLeadVariableValue("student_name", lead, {}, {}) || "Doctor";
+  const examType = getLeadVariableValue("exam_type", lead, {}, {}) || "USMLE Step 1";
+
+  const messages = {
+    first_message: `Hi ${name}, this is NextGen USMLE. You reached out regarding ${examType} preparation. We have a live guidance session at ${sessionTime}, where you can see Dr. Ahmad's teaching style and understand how the program works.`,
+    reminder: `Doctor, quick reminder — our live guidance session starts at ${sessionTime}. Please be ready. ${liveLink ? `Here is the joining link: ${liveLink}` : "I will share the joining link shortly."}\n\nAfter the session, we can arrange a Google Meet with our mentor for proper guidance based on your timeline and weak areas.`,
+    session_link: `Doctor, here is today's live session link:\n${liveLink || "Live session link is not configured yet."}\n\nEven if you join for just 5–10 minutes, you will understand Dr. Ahmad's teaching style and how the program works. After that, let's arrange a Google Meet with our mentor so you get personal guidance.`,
+    recording: `Doctor, here is a recent session recording so you can see the teaching style:\n${recordingLink || "Recording link is not configured yet."}\n\nAfter you watch even a few minutes, we can arrange a Google Meet with our mentor and guide you based on your exam timeline and weak areas.`,
+    testimonial: `Doctor, you can also review NextGen teaching/proof here:${youtubeLink ? `\n${youtubeLink}` : "\nYouTube/proof link is not configured yet."}\n\nThe main idea is structured guidance, accountability, and support instead of preparing alone.`,
+    uworld_demo: `Doctor, our LMS is a complete USMLE learning ecosystem in one place: roadmap, live sessions, recordings, UWorld Video Library, notes, tasks, accountability assessments, progress tracking, leaderboard encouragement, Community Q&A, and Study Partner support.\n\nYou can check the LMS/UWorld library here:\n${demoLink}`,
+    community: `Doctor, I can also add you to our free ${examType} community where we share guidance, session updates, and study direction.${communityLink ? `\n${communityLink}` : ""}`,
+    mentor: `Doctor, I can arrange a Google Meet with our mentor. Before booking, have you attended any Dr. Ahmad / NextGen live session before? If yes, when did you attend and how did you find the teaching style?`,
+  };
+
+  const template = ngFindTemplateForQuickAction(db, cleanAction);
+  const templateKey = (NEXTGEN_QUICK_ACTION_TEMPLATE_KEYS[cleanAction] || [cleanAction])[0] || cleanAction;
+  return {
+    action: cleanAction,
+    text: body.text || body.message || messages[cleanAction] || messages.first_message,
+    template,
+    templateId: template?.id || template?.template_id || template?.key || template?.template_key || templateKey,
+    stage: {
+      first_message: "first_message_sent",
+      reminder: "interested_live_session",
+      session_link: "interested_live_session",
+      recording: "recording_sent",
+      community: "sent_to_community",
+      mentor: "mentor_call_scheduled",
+    }[cleanAction] || null,
+    variables: {
+      lead,
+      lead_name: name,
+      student_name: name,
+      doctor_name: name,
+      exam_type: examType,
+      exam_track: examType,
+      session_time: sessionTime,
+      live_session_link: liveLink,
+      session_link: liveLink,
+      recording_link: recordingLink,
+      demo_link: demoLink,
+      lms_link: demoLink,
+      youtube_link: youtubeLink,
+      proof_link: youtubeLink,
+      community_link: communityLink,
+      mentor_booking_link: mentorLink,
+    },
+    links: { live_session_link: liveLink, recording_link: recordingLink, demo_link: demoLink, youtube_link: youtubeLink, community_link: communityLink, mentor_booking_link: mentorLink },
+  };
+}
+
 function buildConversationInbox(db) {
   const leads = ensureCrmArray(db, "leads").map(normalizeLeadForResponse);
 
@@ -12342,10 +12657,7 @@ function buildConversationInbox(db) {
     });
 
     const lastMessage = newestFirst[0] || null;
-    const unreadCount = leadMessages.filter((message) => {
-      const dir = String(message.direction || message.message_direction || "inbound").toLowerCase();
-      return ["inbound", "received", "lead", "student"].includes(dir) && !message.read_at && !message.admin_read_at;
-    }).length;
+    const unreadCount = ngInboxUnreadCountForLead({ lead, messages: leadMessages });
 
     return {
       conversation_id: lead.conversation_id || leadId,
@@ -12411,7 +12723,7 @@ function buildConversationInbox(db) {
       platform_icon: preferredPlatform,
       messages: allMessages,
       message_count: allMessages.length,
-      unread_count: Number(existing.unread_count || 0) + Number(row.unread_count || 0),
+      unread_count: ngInboxUnreadCountForLead({ lead: newest, messages: allMessages }),
       status: betterStatus,
       lead_status: betterLeadStatus,
       ai_mode: newest.ai_mode || existing.ai_mode || row.ai_mode || "auto",
@@ -13156,7 +13468,7 @@ async function handleUniversalWebhook({ req, res, platform, integrationId = null
     res.json({ success: true, platform: cleanPlatform, lead_id: lead.id, created, conversation_id: conversation.id, ai_auto: aiAutoResult });
     // v94 safety: if the inline webhook AI path skipped or returned before sending, wake Ayla once after response.
     // Duplicate/outbound guards prevent double replies if the inline path already sent.
-    ngScheduleAylaAutoReplyAfterInbound({ leadId: lead.id, source: "universal_social_webhook_wakeup", delayMs: 4500 });
+    ngScheduleAylaAutoReplyAfterInbound({ leadId: lead.id, source: "universal_social_webhook_wakeup", delayMs: 1000 });
   } catch (error) {
     console.error("Universal social webhook error:", error.message);
     res.status(error.statusCode || 500).json({ success: false, error: error.message || "Webhook failed" });
@@ -13296,7 +13608,7 @@ app.get("/admin/crm/conversation-inbox", async (req, res) => {
 
 app.post("/admin/crm/conversations/:leadId/send", async (req, res) => {
   try {
-    await requireCrmAdmin(req);
+    const { user } = await requireCrmAdmin(req);
     const db = await readCrmDb();
     const lead = getLeadByAnyId(db, req.params.leadId);
     if (!lead) return res.status(404).json({ success: false, error: "Lead not found" });
@@ -13337,6 +13649,10 @@ app.post("/admin/crm/conversations/:leadId/send", async (req, res) => {
       mediaType: req.body.media_type || req.body.metadata?.media_type || "image",
       caption: req.body.caption || req.body.metadata?.caption || "",
     });
+
+    if (result.success || result.queued) {
+      ngMarkConversationHandledByOutbound(db, lead, { actorId: user.id, reason: "admin_manual_send" });
+    }
 
     createIntegrationLog(db, {
       brand_id: brandId,
@@ -17362,7 +17678,7 @@ app.post("/webhooks/whatsapp", async (req, res) => {
     await writeCrmDb(db);
     res.sendStatus(200);
     for (const leadId of aylaWakeLeadIds) {
-      ngScheduleAylaAutoReplyAfterInbound({ leadId, source: "whatsapp_webhook_wakeup", delayMs: 4500 });
+      ngScheduleAylaAutoReplyAfterInbound({ leadId, source: "whatsapp_webhook_wakeup", delayMs: 1000 });
     }
   } catch (error) {
     console.error("WhatsApp webhook error:", error.response?.data || error.message);
@@ -22504,11 +22820,12 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
     "- Acknowledgements like thank you/thanks/ok/noted/great/perfect after booking must get a simple acknowledgement or no sales push. Never treat them as a new sales trigger.",
     "- Greeting rule: use 'Hi Doctor' only once in a new conversation. After that, answer directly with Doctor / Yes Doctor / Sure Doctor. Never start every reply with Hi Doctor.",
     "- July 1 Marathon rule: say 'we are starting the USMLE Step 1 120-Day Marathon from July 1'. Do NOT say 'NextGen is starting'. The roadmap starts with Cardiology first, then MSK, Central Nervous System, Reproductive, Endocrinology, GIT, Renal, Pulmonology, Immunology, Hematology, and Psychiatry. Do not include Biochemistry or Biostatistics in this July 1 roadmap unless the student asks why they are excluded.",
-    "- Program flow rule: explain the program proactively after greeting/weak-subject question: Dr. Ahmad live First Aid teaching → mapped UWorld QIDs → matching UWorld Video Library lecture → daily homework/task → recordings + notes → Community Q&A → leaderboard points → daily flashcards → system-end assessments → surprise mentor assessments when needed → Google Meet guidance.",
+    "- LMS ecosystem rule: explain NextGen as a complete USMLE learning ecosystem in short human WhatsApp-style lines, not a long feature dump. Say the student gets everything in one place: roadmap, live sessions, recordings, UWorld Video Library, First Aid/UWorld mapping, notes, tasks, accountability assessments, progress tracking, leaderboard encouragement, Community Q&A, and Study Partner support.",
+    "- Early value sequence: in the first few real replies after the student engages, naturally cover live sessions at 1:00 PM EST Monday-Friday, recent recording, YouTube/proof when available, UWorld Video Library, LMS/demo/dashboard, then ask whether the student attended any Dr. Ahmad/NextGen session before, ask exam timeline/weak areas, and move toward Google Meet when qualified. Do this slowly and conversationally, not as a dump.",
     ngBuildAylaMediaGuidance(db, lead),
     "- Assessment rule: never say there is an assessment after every session. Say assessments are after each system/block and surprise mentor assessments can be assigned when needed.",
-    "- Resources rule: explain that we connect First Aid, Pathoma concepts, mapped UWorld QIDs, the matching UWorld Video Library, recordings/notes, daily flashcards, Community Q&A, leaderboard accountability, and system-end assessments so the student is not left alone with scattered resources.",
-    "- Soft program mention: when explaining the program generally, briefly mention the structured 120-day roadmap and resources, but do not dump the full roadmap unless the student asks.",
+    "- Resources rule: explain briefly that the ecosystem connects First Aid, Pathoma concepts, mapped UWorld QIDs, UWorld Video Library, recordings/notes, tasks, assessments for accountability, progress tracking, leaderboard encouragement, Community Q&A, and Study Partner support in one screen/place.",
+    "- Soft program mention: when explaining the program generally, say it is a complete USMLE learning ecosystem that keeps the student guided, accountable, and encouraged. Keep feature explanations short, usually one line or less.",
     "- Never ignore a direct question like what is this/that. Clarify the previous Ayla message first, then continue the sales flow naturally.",
     `- UWorld Video Library pitch: NextGen has around ${hours} hours of detailed UWorld-style video teaching with ${mcqs} MCQs explained in depth. First Aid is integrated with every MCQ, so students learn the concept, FA point, correct/wrong options, option elimination, and weak-area correction. Tell them to click Try Demo for 2 days free access and first lecture of every chapter.`,
     `- UWorld Library link to share when discussing the library/resource: ${libraryLink}`,
@@ -22520,8 +22837,8 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
     `- Scheduling timezone: always use ${timezone}. Do not mention Pakistan time unless the student asks for it.`,
     "- Price rule: if price/cost/package/payment is asked, answer that pricing depends on plan duration/support needed, do not dump recordings again, and move the lead to Google Meet/admin guidance. Ask preferred time in EST.",
     "- Failed/weak/confused rule: reassure strongly that the student is in the right place; the key is roadmap, mentor feedback, UWorld-style practice, and weak-area correction; then offer recording/live session/UWorld demo and Google Meet guidance when positive.",
-    "- Website/demo rule: send https://live.nextgenusmlelms.com/demo early when explaining the July 1 Marathon. Explain that the demo shows the dashboard, roadmap, live-class structure, recordings, notes, community, and system flow; the actual July 1 Marathon starts from July 1.",
-    "- Google Meet booking: do not jump to Google Meet before value unless the student directly asks. If student says connect me / yes / ok / interested after a Google Meet offer, ask preferred time in EST and mark the lead as Google Meet requested.",
+    "- Website/demo rule: send https://live.nextgenusmlelms.com/demo early when explaining the July 1 Marathon. Explain naturally that the demo shows the learning ecosystem/dashboard: roadmap, live classes, recordings, notes, tasks, accountability assessments, progress tracking, leaderboard, community, and Study Partner support.",
+    "- Google Meet booking: before booking, ask whether the student attended any Dr. Ahmad/NextGen live session before. If yes, ask when and what they thought. Also ask exam timeline and weak areas. Then offer Google Meet mentor consultation. If the student directly gives a time after a Meet offer, confirm once and alert admin once.",
     `- Current latest-message signals: ${JSON.stringify(signals)}`,
     s.sales_style_rule ? `- Admin sales style rule: ${ngAylaSettingsText(s.sales_style_rule, 800)}` : "",
     s.uworld_video_library_rule ? `- Admin UWorld rule: ${ngAylaSettingsText(s.uworld_video_library_rule, 900)}` : "",
@@ -22787,11 +23104,11 @@ function ngAylaGetSalesAssets(db = {}) {
     ),
     roadmapSummary: ngAylaNormalizeMarketingLine(
       ngAylaFirstNonEmptySetting(s, ["roadmap_summary", "roadmap_knowledge_summary"], ""),
-      "Our 120-day Step 1 roadmap is system-wise and structured so preparation does not feel random. It starts with Cardiology first and continues with MSK, Central Nervous System, Reproductive, Endocrinology, GIT, Renal, Pulmonology, Immunology, Hematology, and Psychiatry. The flow includes live teaching, mapped UWorld QIDs, First Aid integration, matching recordings, homework/tasks, assessments, and NBME-style preparation."
+      "NextGen LMS is a complete USMLE learning ecosystem in one place. The 120-day Step 1 roadmap starts with Cardiology first and continues with MSK, Central Nervous System, Reproductive, Endocrinology, GIT, Renal, Pulmonology, Immunology, Hematology, and Psychiatry. Students get live teaching, mapped UWorld QIDs, First Aid integration, recordings, tasks, notes, accountability assessments, progress tracking, leaderboard encouragement, Community Q&A, and Study Partner support."
     ),
     resourcesSummary: ngAylaNormalizeMarketingLine(
       ngAylaFirstNonEmptySetting(s, ["resources_summary", "program_resources_summary"], ""),
-      "NextGen preparation uses First Aid, UWorld-style QBank/MCQ discussion, Pathoma concepts, and NextGen assessments. The goal is to connect resources with MCQ-solving, weak-area review, and exam strategy instead of reading randomly."
+      "NextGen connects First Aid, UWorld-style QBank/MCQ teaching, Pathoma concepts, recordings, tasks, accountability assessments, progress tracking, leaderboard encouragement, Community Q&A, and Study Partner support so students feel guided in one learning ecosystem."
     ),
   };
 }
@@ -22871,19 +23188,15 @@ function ngAylaIsResourcesQuestion(text = "") {
 }
 
 function ngAylaRoadmapReply(assets = {}) {
-  return `Doctor, our roadmap is a structured 120-day Step 1 plan, organized system-wise so your preparation does not feel random.
+  return `Doctor, the Step 1 roadmap starts with Cardiology and moves system-wise like this: ${ngRoadmapSystemSequenceText()}.
 
-The correct flow starts with Cardiology first and continues in this exact sequence: ${ngRoadmapSystemSequenceText()}.
-
-Each live lecture is connected with the matching First Aid topic, mapped UWorld QIDs from the LMS lecture QID field, the matching video-library recording, homework/tasks, notes/recordings, and assessment or revision work.`;
+Inside the LMS, this roadmap connects each live topic with First Aid, mapped UWorld QIDs, recordings, notes, tasks, and accountability checks so you can follow everything in one place.`;
 }
 
 function ngAylaResourcesReply(assets = {}) {
-  return `Doctor, our preparation is built around high-yield USMLE resources.
+  return `Doctor, the LMS is a complete USMLE learning ecosystem, not only a video page.
 
-We use First Aid, UWorld-style QBank/MCQ discussion, Pathoma concepts, and NextGen assessments.
-
-The goal is not just to read resources, but to connect them with MCQ-solving, weak-area review, and exam strategy.`;
+In one place you get roadmap, live classes, recordings, UWorld Video Library, First Aid/UWorld mapping, notes, tasks, accountability assessments, progress tracking, leaderboard encouragement, Community Q&A, and Study Partner support.`;
 }
 
 function ngAylaProgramWithRoadmapResourcesReply(assets = {}) {
@@ -22891,12 +23204,15 @@ function ngAylaProgramWithRoadmapResourcesReply(assets = {}) {
 
 Recent session recording:
 ${assets.recordingLink}` : "";
-  return `Doctor, Next Generation USMLE helps with live sessions, recordings, UWorld-style MCQ teaching, First Aid integration, structured roadmap support, and mentor guidance.
+  const demo = assets.uworldLink ? `
 
-The 120-day roadmap starts with Cardiology first, then MSK, Central Nervous System, Reproductive, Endocrinology, GIT, Renal, Pulmonology, Immunology, Hematology, and Psychiatry. Every lecture connects the First Aid topic with mapped UWorld QIDs, matching recordings, homework/tasks, notes, and assessment or revision work.${rec}
+UWorld Video Library / LMS demo:
+${assets.uworldLink}` : "";
+  return `Doctor, NextGen LMS is a complete USMLE learning ecosystem in one place.
 
-You can also try the UWorld Video Library demo for 2 days free and watch the first lecture of every chapter.
-${assets.uworldLink}`;
+You get roadmap, live teaching, recordings, UWorld Video Library, First Aid/UWorld mapping, notes, tasks, accountability assessments, progress tracking, leaderboard encouragement, Community Q&A, and Study Partner support.
+
+The roadmap starts with Cardiology, then continues: ${ngRoadmapSystemSequenceText()}.${rec}${demo}`;
 }
 
 function ngAylaApplyGreetingOnce(reply = "", messages = []) {
@@ -34344,27 +34660,60 @@ function ngAylaAdminAlertNumbers(db = {}) {
   ]).map(normalizePhoneForWhatsapp).filter(Boolean).slice(0, 4);
 }
 
-function ngLeadStatusSummaryForAlert(lead = {}) {
+function ngAylaAdminAlertPhoneKey(value = "") {
+  const d = String(value || "").replace(/\D/g, "");
+  return d.length >= 10 ? d.slice(-10) : d;
+}
+
+function ngAylaConversationBlobForAlert(messages = []) {
+  return safeArray(messages)
+    .map((m) => ngMessageText(m))
+    .filter(Boolean)
+    .join("\n")
+    .toLowerCase();
+}
+
+function ngLeadStatusSummaryForAlert(lead = {}, messages = []) {
+  const blob = ngAylaConversationBlobForAlert(messages);
+  const stageBlob = String([lead.status, lead.stage, lead.lead_stage, lead.next_action, lead.google_meet_booking_state, lead.payment_status].join(" ")).toLowerCase();
+  const programExplained = Boolean(lead.program_explained || /120[- ]?day|marathon|roadmap|live usmle guidance|program works|mapped uworld|first aid|lms/.test(blob));
+  const demoSent = Boolean(lead.demo_link_sent || /live\.nextgenusmlelms\.com\/demo|try demo|2[- ]?day lms demo/.test(blob));
+  const liveInvited = Boolean(lead.live_session_invited || lead.last_session_invite_sent_at || /1:00 pm est|1 pm est|live session|live guidance session|join today's live/.test(blob));
+  const recordingSent = Boolean(lead.recording_sent || lead.recording_followup_sent_once || /recording|us06web\.zoom\.us\/rec\/share|session recording/.test(blob));
+  const uworldSent = Boolean(lead.uworld_demo_sent || lead.demo_lms_sent || /lms\.nextgenusmlelms\.com|uworld video library|uworld-style|3000\+|150 hours/.test(blob));
+  const meetRequested = Boolean(lead.google_meet_requested || /google_meet_requested|google meet|mentor consultation|preferred.*time/.test(stageBlob + " " + blob));
+  const meetTime = Boolean(lead.google_meet_time_collected_at || /google_meet_time_collected|waiting_for_google_meet_link|missing_link|needs_link/.test(stageBlob));
+  const payment = lead.pending_payment ? "Pending" : meetTime ? "Google Meet time collected" : meetRequested ? "Google Meet requested" : lead.payment_status || lead.stage || "unknown";
   return [
-    `Program explained: ${lead.program_explained ? "Yes" : "No/unknown"}`,
-    `Demo link sent: ${lead.demo_link_sent ? "Yes" : "No/unknown"}`,
-    `Live session invited: ${lead.live_session_invited || lead.last_session_invite_sent_at ? "Yes" : "No/unknown"}`,
+    `Program explained: ${programExplained ? "Yes" : "No/unknown"}`,
+    `Attended Dr. Ahmad/NextGen session before: ${lead.attended_dr_ahmad_session === true || lead.attended_nextgen_session === true || /attended.*(dr\.?\s*ahmad|nextgen).*session|joined.*(dr\.?\s*ahmad|nextgen).*session|previous marathon|part of nextgen/i.test(blob) ? "Yes/likely" : lead.attended_dr_ahmad_session === false || lead.attended_nextgen_session === false ? "No" : "Unknown"}`,
+    `Previous session feedback: ${lead.previous_session_feedback || lead.dr_ahmad_session_feedback || "Unknown"}`,
+    `Demo link sent: ${demoSent ? "Yes" : "No/unknown"}`,
+    `Live session invited: ${liveInvited ? "Yes" : "No/unknown"}`,
     `Session attended: ${lead.session_attended ? "Yes" : "No/unknown"}`,
-    `Recording sent: ${lead.recording_sent || lead.recording_followup_sent_once ? "Yes" : "No/unknown"}`,
-    `Interested 120-Day: ${lead.interested_120_day || lead.stage === "interested_120_day" ? "Yes" : "No/unknown"}`,
-    `Payment: ${lead.pending_payment ? "Pending" : lead.payment_status || lead.stage || "unknown"}`,
+    `Recording sent: ${recordingSent ? "Yes" : "No/unknown"}`,
+    `UWorld/LMS link sent: ${uworldSent ? "Yes" : "No/unknown"}`,
+    `Google Meet: ${meetTime ? "Time collected / waiting for link" : meetRequested ? "Requested" : "No/unknown"}`,
+    `Interested 120-Day: ${lead.interested_120_day || String(lead.stage || "") === "interested_120_day" || /120[- ]?day|july 1|marathon/.test(blob) ? "Yes/likely" : "No/unknown"}`,
+    `Payment: ${payment}`,
   ].join("\\n");
 }
 
 async function ngSendAdminWhatsAppAlert(db = {}, { type = "alert", lead = null, appointment = null, text = "", meta = {} } = {}) {
   const s = ngAylaPickSettings(db);
   if (s.admin_whatsapp_alerts_enabled === false) return { enabled: false, sent: 0, results: [] };
-  const numbers = ngAylaAdminAlertNumbers(db);
-  if (!numbers.length) return { enabled: true, sent: 0, skipped: true, reason: "no_admin_whatsapp_numbers", results: [] };
-  const leadName = ng41LeadName(lead || {}) || appointment?.student_name || "Student";
+  const rawNumbers = ngAylaAdminAlertNumbers(db);
   const leadPhone = ng41LeadPhone(lead || {}) || appointment?.student_phone || appointment?.phone || "";
+  const leadPhoneKey = ngAylaAdminAlertPhoneKey(leadPhone);
+  const numbers = rawNumbers.filter((to) => {
+    const adminKey = ngAylaAdminAlertPhoneKey(to);
+    return adminKey && (!leadPhoneKey || adminKey !== leadPhoneKey);
+  });
+  if (!rawNumbers.length) return { enabled: true, sent: 0, skipped: true, reason: "no_admin_whatsapp_numbers", results: [] };
+  if (!numbers.length) return { enabled: true, sent: 0, skipped: true, reason: "admin_number_is_same_as_lead_number", results: [] };
+  const leadName = ng41LeadName(lead || {}) || appointment?.student_name || "Student";
   const appointmentTime = appointment ? ngGoogleMeetAppointmentDisplayDateTime(appointment, "EST") : "";
-  const body = text || `🚨 ${type.replace(/_/g, " ").toUpperCase()}\\n\\nStudent: ${leadName}\\nPhone: ${leadPhone}${appointmentTime ? `\\nTime: ${appointmentTime}` : ""}\\n\\nStatus:\\n${ngLeadStatusSummaryForAlert(lead || {})}\\n\\nNext action: Please review this lead in CRM.`;
+  const body = text || `🚨 ${type.replace(/_/g, " ").toUpperCase()}\n\nStudent: ${leadName}\nPhone: ${leadPhone}${appointmentTime ? `\nTime: ${appointmentTime}` : ""}\n\nStatus:\n${ngLeadStatusSummaryForAlert(lead || {}, lead?.id ? ngLeadConversationMessages(db, lead.id) : [])}\n\nNext action: Please review this lead in CRM.`;
   const results = [];
   for (const to of numbers) {
     try {
@@ -34380,7 +34729,7 @@ async function ngSendAdminWhatsAppAlert(db = {}, { type = "alert", lead = null, 
     channel: "whatsapp",
     status: results.some((r) => r.success) ? "sent" : "failed",
     message: body,
-    metadata: { type, appointment_id: appointment?.id || null, meta, results },
+    metadata: { type, appointment_id: appointment?.id || null, dedupe_key: meta?.dedupe_key || null, meta, results },
   }));
   return { enabled: true, sent: results.filter((r) => r.success).length, results };
 }
@@ -34429,18 +34778,28 @@ function ngAylaAdminAlertDedupeKey({ type = "", lead = null, appointment = null,
 }
 
 function ngAylaAdminAlertAlreadySent(db = {}, { type = "", lead = null, appointment = null, meta = {}, hours = 12 } = {}) {
+  const cleanType = String(type || "").toLowerCase();
+  const leadId = String(lead?.id || appointment?.lead_id || meta.lead_id || "");
+  const phoneKey = ngAylaAdminAlertPhoneKey(ng41LeadPhone(lead || {}) || appointment?.student_phone || appointment?.phone || "");
+  const appointmentId = String(appointment?.id || meta.appointment_id || "");
   const dedupeKey = ngAylaAdminAlertDedupeKey({ type, lead, appointment, meta });
   return ensureCrmArray(db, "marketing_flow_events").some((event) => {
     if (String(event.event_type || "") !== "admin_whatsapp_alert") return false;
-    const eventType = String(event.metadata?.type || "").toLowerCase();
-    const eventDedupe = String(event.metadata?.dedupe_key || "");
-    if (eventDedupe !== dedupeKey && eventType !== String(type || "").toLowerCase()) return false;
-    if (lead?.id && String(event.lead_id || event.metadata?.lead_id || "") !== String(lead.id)) return false;
-    return ngIsRecent(event.created_at || event.updated_at, hours);
+    if (!ngIsRecent(event.created_at || event.updated_at, hours)) return false;
+    const eventType = String(event.metadata?.type || event.metadata?.meta?.type || "").toLowerCase();
+    const eventDedupe = String(event.metadata?.dedupe_key || event.metadata?.meta?.dedupe_key || "");
+    const eventLeadId = String(event.lead_id || event.metadata?.lead_id || event.metadata?.meta?.lead_id || "");
+    const eventAppointmentId = String(event.metadata?.appointment_id || event.metadata?.meta?.appointment_id || "");
+    const eventPhoneKey = ngAylaAdminAlertPhoneKey(event.metadata?.lead_phone || event.metadata?.meta?.lead_phone || "");
+    if (eventDedupe && eventDedupe === dedupeKey) return true;
+    if (appointmentId && eventAppointmentId && appointmentId === eventAppointmentId && eventType === cleanType) return true;
+    if (leadId && eventLeadId && leadId === eventLeadId && eventType === cleanType) return true;
+    if (phoneKey && eventPhoneKey && phoneKey === eventPhoneKey && eventType === cleanType) return true;
+    return false;
   });
 }
 
-function ngAylaBuildAdminHotLeadAlertText({ type = "hot_lead_interested", lead = null, appointment = null, latestInboundText = "", intent = "" } = {}) {
+function ngAylaBuildAdminHotLeadAlertText({ type = "hot_lead_interested", lead = null, appointment = null, latestInboundText = "", intent = "", messages = [] } = {}) {
   const label = String(type || "alert").replace(/_/g, " ").toUpperCase();
   const leadName = ng41LeadName(lead || {}) || appointment?.student_name || "Student";
   const leadPhone = ng41LeadPhone(lead || {}) || appointment?.student_phone || appointment?.phone || "";
@@ -34449,7 +34808,7 @@ function ngAylaBuildAdminHotLeadAlertText({ type = "hot_lead_interested", lead =
   const sourceLine = intent ? `\nAI intent: ${intent}` : "";
   const latestLine = latestInboundText ? `\n\nLatest student message:\n${String(latestInboundText).slice(0, 900)}` : "";
 
-  return `🚨 NEXTGEN HOT LEAD ALERT\n\nType: ${label}\nStudent: ${leadName}\nWhatsApp: ${leadPhone || "—"}\nEmail: ${leadEmail || "—"}${appointmentTime ? `\nGoogle Meet time: ${appointmentTime}` : ""}${sourceLine}\n\nStatus:\n${ngLeadStatusSummaryForAlert(lead || {})}${latestLine}\n\nAction needed: Open CRM, check the conversation, and handle Google Meet / payment / human follow-up.`;
+  return `🚨 NEXTGEN HOT LEAD ALERT\n\nType: ${label}\nStudent: ${leadName}\nWhatsApp: ${leadPhone || "—"}\nEmail: ${leadEmail || "—"}${appointmentTime ? `\nGoogle Meet time: ${appointmentTime}` : ""}${sourceLine}\n\nStatus:\n${ngLeadStatusSummaryForAlert(lead || {}, messages)}${latestLine}\n\nAction needed: Open CRM, check the conversation, and handle Google Meet / payment / human follow-up.`;
 }
 
 async function ngAylaMaybeSendConversationAdminAlert({ db = {}, lead = null, appointment = null, ai = {}, latestInbound = null, source = "ai_auto" } = {}) {
@@ -34458,10 +34817,13 @@ async function ngAylaMaybeSendConversationAdminAlert({ db = {}, lead = null, app
   if (!ngAylaAdminAlertEnabledForType(db, type)) return { enabled: false, skipped: true, reason: "admin_alert_type_disabled", type };
 
   const latestInboundText = ngMessageText(latestInbound || {});
+  const leadMessagesForAlert = lead?.id ? ngLeadConversationMessages(db, lead.id) : [];
   const meta = {
     source,
+    type,
     intent: ai?.intent || "",
     lead_id: lead?.id || null,
+    lead_phone: ng41LeadPhone(lead || {}) || appointment?.student_phone || appointment?.phone || "",
     appointment_id: appointment?.id || null,
     dedupe_key: ngAylaAdminAlertDedupeKey({ type, lead, appointment, meta: { source } }),
   };
@@ -34470,8 +34832,19 @@ async function ngAylaMaybeSendConversationAdminAlert({ db = {}, lead = null, app
     return { enabled: true, skipped: true, reason: "duplicate_admin_alert_recently_sent", type };
   }
 
-  const text = ngAylaBuildAdminHotLeadAlertText({ type, lead, appointment, latestInboundText, intent: ai?.intent || "" });
-  return ngSendAdminWhatsAppAlert(db, { type, lead, appointment, text, meta });
+  const text = ngAylaBuildAdminHotLeadAlertText({ type, lead, appointment, latestInboundText, intent: ai?.intent || "", messages: leadMessagesForAlert });
+  const alertResult = await ngSendAdminWhatsAppAlert(db, { type, lead, appointment, text, meta });
+  if (!alertResult?.skipped) {
+    lead.last_admin_alert_type = type;
+    lead.last_admin_alert_at = ngAffNow();
+    lead.last_admin_alert_intent = ai?.intent || "";
+    lead.updated_at = ngAffNow();
+    if (appointment) {
+      appointment.admin_alert_sent_at = appointment.admin_alert_sent_at || ngAffNow();
+      appointment.updated_at = ngAffNow();
+    }
+  }
+  return alertResult;
 }
 
 app.get("/admin/crm/ai-command/admin-alerts/settings", async (req, res) => {
@@ -35581,6 +35954,266 @@ app.post("/admin/prelaunch/flow-test", async (req, res) => {
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
+
+// v116: Backend-first Ayla heartbeat and no-reply nurture.
+// Goal: Ayla must not depend on the CRM frontend being open. The server checks for fresh inbound
+// every second (configurable), retries silent inbound replies, drains first-message queues, runs
+// Google Meet/session jobs, and nurtures no-reply leads after a 5-7 hour wait.
+const NG_V116_HEARTBEAT_STATE = {
+  started: false,
+  running: false,
+  ticks: 0,
+  last_tick_at: null,
+  last_finish_at: null,
+  last_error: null,
+  last_ai_results: [],
+  last_first_message_results: [],
+  last_no_reply_results: [],
+  last_daily_session_result: null,
+  last_google_meet_result: null,
+};
+
+function ngV116HeartbeatEnabled() {
+  return String(process.env.NEXTGEN_BACKEND_HEARTBEAT_ENABLED || "true").toLowerCase() !== "false";
+}
+
+function ngV116HeartbeatMs() {
+  return Math.max(1000, Math.min(10000, Number(process.env.NEXTGEN_BACKEND_HEARTBEAT_MS || 1000)));
+}
+
+function ngV116NoReplyWaitHours(db = {}) {
+  const s = ngAylaPickSettings(db);
+  return Math.max(5, Math.min(7, Number(s.no_reply_lms_nurture_wait_hours || process.env.NEXTGEN_NO_REPLY_NURTURE_WAIT_HOURS || 6)));
+}
+
+function ngV116LeadCanReceiveAutomation(db = {}, lead = {}) {
+  if (!lead?.id) return { ok: false, reason: "missing_lead" };
+  if (lead.opted_out || lead.opt_out || lead.unsubscribed || lead.do_not_contact || lead.stop_requested) return { ok: false, reason: "opted_out" };
+  if (ngLeadIsPaidOrGroupAddedForLiveSession(lead)) return { ok: false, reason: "paid_or_group_added" };
+  if (lead.suppressed || lead.ai_suppressed || ng41IsSuppressed(db, lead)) return { ok: false, reason: "suppressed" };
+  const stage = normalizeCrmLeadStageValue(lead.stage || lead.lead_stage || lead.status || "new_lead", "new_lead");
+  if (["not_interested", "lost", "unsubscribed", "deleted"].includes(stage)) return { ok: false, reason: stage };
+  return { ok: true };
+}
+
+function ngV116ClearStaleSilentInboundGuards(db = {}, limit = 50) {
+  const results = [];
+  for (const lead of ngAffArray(db, "leads").slice(0, Math.max(1, Number(limit || 50)))) {
+    const eligible = ngV116LeadCanReceiveAutomation(db, lead);
+    if (!eligible.ok) continue;
+    if (String(lead.ai_mode || lead.automation_mode || "auto").toLowerCase() !== "auto") continue;
+    const messages = ngLeadConversationMessages(db, lead.id);
+    const latestInbound = ngLatestInbound(messages);
+    if (!latestInbound) continue;
+    if (ngHasOutboundAfterInbound(messages, latestInbound)) continue;
+    const fp = ngAiAutoMessageFingerprint(latestInbound);
+    if (fp && String(lead.last_ai_auto_replied_message_id || "") === String(fp)) {
+      lead.last_ai_auto_replied_message_id = null;
+      lead.last_ai_auto_replied_at = null;
+      lead.last_ai_auto_reply_channel = null;
+      lead.last_ai_auto_reply_text = "";
+      lead.last_ai_auto_failure_reason = "v116_cleared_stale_processed_guard_no_outbound_after_inbound";
+      lead.updated_at = nowIso();
+      results.push({ lead_id: lead.id, cleared: true, inbound_fingerprint: fp, latest_text: ngMessageText(latestInbound).slice(0, 140) });
+    }
+  }
+  return results;
+}
+
+function ngV116NoReplyNurtureText(db = {}, lead = {}) {
+  const assets = ngAylaGetSalesAssets(db);
+  const parts = [];
+  parts.push("Doctor, I’m sharing this so you can understand the full support even if you are busy.");
+  parts.push("NextGen LMS is a complete USMLE learning ecosystem in one place — roadmap, live classes, recordings, UWorld Video Library, notes, tasks, accountability assessments, progress tracking, leaderboard encouragement, Community Q&A, and Study Partner support.");
+  parts.push(`Our live guidance session is at ${assets.sessionTime || "1:00 PM EST"}. You can join even for 5-10 minutes to see Dr. Ahmad’s teaching style.`);
+  if (assets.recordingLink) parts.push(`Recent recording:\n${assets.recordingLink}`);
+  if (assets.uworldLink) parts.push(`UWorld Video Library / LMS demo:\n${assets.uworldLink}`);
+  if (assets.youtubeLink) parts.push(`YouTube channel:\n${assets.youtubeLink}`);
+  parts.push("After you check this, I can arrange a Google Meet with our mentor so you get guidance based on your exam timeline and weak areas.");
+  return parts.join("\n\n");
+}
+
+function ngV116NoReplyLeadEligible(db = {}, lead = {}) {
+  const base = ngV116LeadCanReceiveAutomation(db, lead);
+  if (!base.ok) return base;
+  const firstAtRaw = lead.first_message_sent_at || lead.first_template_sent_at || lead.last_contacted_at || lead.last_outbound_sent_at || "";
+  if (!firstAtRaw) return { ok: false, reason: "no_first_outbound_yet" };
+  const firstAt = new Date(firstAtRaw).getTime();
+  if (!Number.isFinite(firstAt)) return { ok: false, reason: "invalid_first_outbound_time" };
+  const waitMs = ngV116NoReplyWaitHours(db) * 3600000;
+  if (Date.now() - firstAt < waitMs) return { ok: false, reason: "waiting_5_to_7_hours", wait_ms: Math.max(0, waitMs - (Date.now() - firstAt)) };
+  const messages = ngLeadConversationMessages(db, lead.id);
+  const latestInbound = ngLatestInbound(messages);
+  if (latestInbound) {
+    const inboundAt = new Date(latestInbound.created_at || latestInbound.received_at || latestInbound.timestamp || 0).getTime();
+    if (Number.isFinite(inboundAt) && inboundAt > firstAt) return { ok: false, reason: "student_replied" };
+  }
+  if (lead.no_reply_lms_nurture_sent_at && ngIsRecent(lead.no_reply_lms_nurture_sent_at, 24)) return { ok: false, reason: "nurture_already_sent_24h" };
+  if (ngRecentlyContactedMinutesAgo(lead, 60)) return { ok: false, reason: "recent_outbound_cooldown" };
+  return { ok: true };
+}
+
+async function ngV116RunNoReplyLmsNurture({ db = {}, brandId = null, limit = 20, source = "backend_heartbeat_no_reply_nurture", dryRun = false } = {}) {
+  const s = ngAylaPickSettings(db);
+  const templateKey = normalizeTemplateLookupKey(s.no_reply_lms_nurture_template_key || s.demo_lms_activation_invite_template_key || "demo_lms_activation_invite");
+  const leads = ngAffArray(db, "leads")
+    .filter((lead) => !brandId || String(lead.brand_id || "") === String(brandId || ""))
+    .filter((lead) => ngV116NoReplyLeadEligible(db, lead).ok)
+    .slice(0, Math.max(1, Math.min(50, Number(limit || 20))));
+  const results = [];
+  for (const lead of leads) {
+    const channel = resolveCrmChannelForConversation({ requestedChannel: lead.current_channel || lead.last_channel || lead.source_platform || lead.platform || "whatsapp", lead, fallback: "whatsapp" });
+    const text = ngV116NoReplyNurtureText(db, lead);
+    const to = getBestRecipientForChannel({ channel, lead });
+    if (dryRun) {
+      results.push({ lead_id: lead.id, dry_run: true, channel, to, template_key: channel === "whatsapp" ? templateKey : null, text });
+      continue;
+    }
+    try {
+      const result = await sendCrmMessage({
+        db,
+        brandId: lead.brand_id || brandId || null,
+        channel,
+        to,
+        text,
+        leadId: lead.id,
+        templateId: channel === "whatsapp" ? templateKey : null,
+        templateVariables: {
+          lead,
+          student_name: ng41LeadName(lead) || "Doctor",
+          exam_type: ng41LeadExamType(lead) || "USMLE Step 1",
+          session_time: ngAylaGetSalesAssets(db).sessionTime,
+          recording_link: ngAylaGetSalesAssets(db).recordingLink,
+          demo_link: ngAylaGetSalesAssets(db).uworldLink,
+          live_session_link: ngAylaGetSalesAssets(db).liveSessionLink,
+        },
+        metadata: {
+          source,
+          delivery_purpose: "no_reply_lms_ecosystem_nurture",
+          template_key: templateKey,
+          whatsapp_template_name: templateKey,
+          no_reply_nurture: true,
+        },
+      });
+      const sent = ngAylaDeliveryActuallySent(result);
+      if (sent) {
+        lead.no_reply_lms_nurture_sent_at = nowIso();
+        lead.no_reply_lms_nurture_status = "sent";
+        lead.no_reply_lms_nurture_template_key = templateKey;
+        lead.lms_ecosystem_explained = true;
+        lead.stage = lead.stage === "new_lead" || lead.stage === "first_message_sent" ? "no_reply" : lead.stage;
+        lead.next_action = "continue_daily_live_session_and_google_meet_nurture";
+        ngEnsureLeadFlowLabels(lead, ["lms_ecosystem_explained", "no_reply_nurture_sent"]);
+      } else {
+        lead.no_reply_lms_nurture_status = "retry_later";
+        lead.no_reply_lms_nurture_last_error = result?.error || result?.reason || result?.status || "not_sent";
+      }
+      lead.updated_at = nowIso();
+      results.push({ lead_id: lead.id, sent, channel, to, template_key: channel === "whatsapp" ? templateKey : null, result });
+    } catch (error) {
+      lead.no_reply_lms_nurture_status = "failed";
+      lead.no_reply_lms_nurture_last_error = error.message;
+      lead.updated_at = nowIso();
+      results.push({ lead_id: lead.id, sent: false, error: error.message });
+    }
+  }
+  return results;
+}
+
+let ngV116LastFirstMessageRunAt = 0;
+let ngV116LastScheduledRunAt = 0;
+
+async function ngV116RunBackendHeartbeatTick({ source = "backend_heartbeat" } = {}) {
+  if (!ngV116HeartbeatEnabled()) return { skipped: true, reason: "disabled" };
+  if (NG_V116_HEARTBEAT_STATE.running) return { skipped: true, reason: "previous_tick_running" };
+  NG_V116_HEARTBEAT_STATE.running = true;
+  NG_V116_HEARTBEAT_STATE.ticks += 1;
+  NG_V116_HEARTBEAT_STATE.last_tick_at = nowIso();
+  const tick = NG_V116_HEARTBEAT_STATE.ticks;
+  try {
+    const db = await readCrmDb();
+    const clearResults = ngV116ClearStaleSilentInboundGuards(db, 80);
+    const aiResults = await ngAylaRunPendingFullAiAuto({
+      db,
+      brandId: null,
+      limit: Math.max(1, Math.min(20, Number(process.env.NEXTGEN_HEARTBEAT_AI_LIMIT || 8))),
+      source: `${source}_ai_auto`,
+      actorId: "backend_heartbeat",
+      force: false,
+    });
+    let firstMessageResults = [];
+    let noReplyResults = [];
+    let dailySessionResult = null;
+    let googleMeetResult = null;
+    const now = Date.now();
+    if (now - ngV116LastFirstMessageRunAt >= Math.max(5000, Number(process.env.NEXTGEN_HEARTBEAT_FIRST_MESSAGE_MS || 15000))) {
+      ngV116LastFirstMessageRunAt = now;
+      firstMessageResults = await ngRunDueAutoFirstMessages({
+        db,
+        brandId: null,
+        limit: Math.max(1, Math.min(25, Number(process.env.NEXTGEN_HEARTBEAT_FIRST_MESSAGE_LIMIT || 10))),
+        actorId: "backend_heartbeat",
+        dryRun: false,
+      });
+    }
+    if (now - ngV116LastScheduledRunAt >= Math.max(30000, Number(process.env.NEXTGEN_HEARTBEAT_SCHEDULED_MS || 60000))) {
+      ngV116LastScheduledRunAt = now;
+      noReplyResults = await ngV116RunNoReplyLmsNurture({ db, limit: Math.max(1, Math.min(50, Number(process.env.NEXTGEN_HEARTBEAT_NO_REPLY_LIMIT || 20))), source: `${source}_no_reply_nurture` });
+      dailySessionResult = await ngRunDailyLiveSessionScheduler({ db, limit: Math.max(1, Math.min(100, Number(process.env.NEXTGEN_HEARTBEAT_DAILY_SESSION_LIMIT || 50))), dryRun: false, source: `${source}_daily_session` });
+      googleMeetResult = await ngRunGoogleMeetAppointmentScheduler({ db, limit: Math.max(1, Math.min(50, Number(process.env.NEXTGEN_HEARTBEAT_GOOGLE_MEET_LIMIT || 25))), dryRun: false, source: `${source}_google_meet` });
+    }
+    const changed = clearResults.length || aiResults.length || firstMessageResults.length || noReplyResults.length || Number(dailySessionResult?.processed || 0) || Number(googleMeetResult?.processed || 0);
+    if (changed) await writeCrmDb(db);
+    NG_V116_HEARTBEAT_STATE.last_finish_at = nowIso();
+    NG_V116_HEARTBEAT_STATE.last_error = null;
+    NG_V116_HEARTBEAT_STATE.last_ai_results = aiResults.slice(-20);
+    NG_V116_HEARTBEAT_STATE.last_first_message_results = firstMessageResults.slice(-20);
+    NG_V116_HEARTBEAT_STATE.last_no_reply_results = noReplyResults.slice(-20);
+    NG_V116_HEARTBEAT_STATE.last_daily_session_result = dailySessionResult;
+    NG_V116_HEARTBEAT_STATE.last_google_meet_result = googleMeetResult;
+    return { success: true, tick, changed: Boolean(changed), clear_results: clearResults.length, ai_auto: aiResults.length, first_messages: firstMessageResults.length, no_reply: noReplyResults.length, daily_session_processed: dailySessionResult?.processed || 0, google_meet_processed: googleMeetResult?.processed || 0 };
+  } catch (error) {
+    NG_V116_HEARTBEAT_STATE.last_error = { message: error.message, at: nowIso() };
+    console.error("v116 backend heartbeat failed:", error.message, error.response?.data || "");
+    return { success: false, error: error.message };
+  } finally {
+    NG_V116_HEARTBEAT_STATE.running = false;
+  }
+}
+
+function ngV116StartBackendHeartbeat() {
+  if (NG_V116_HEARTBEAT_STATE.started) return NG_V116_HEARTBEAT_STATE;
+  NG_V116_HEARTBEAT_STATE.started = true;
+  if (!ngV116HeartbeatEnabled()) {
+    console.log("v116 backend heartbeat disabled by NEXTGEN_BACKEND_HEARTBEAT_ENABLED=false");
+    return NG_V116_HEARTBEAT_STATE;
+  }
+  const intervalMs = ngV116HeartbeatMs();
+  setInterval(() => {
+    ngV116RunBackendHeartbeatTick({ source: "backend_interval" }).catch((error) => console.error("v116 heartbeat interval error:", error.message));
+  }, intervalMs);
+  setTimeout(() => {
+    ngV116RunBackendHeartbeatTick({ source: "backend_startup" }).catch((error) => console.error("v116 heartbeat startup error:", error.message));
+  }, 1500);
+  console.log(`v116 backend heartbeat started: every ${intervalMs}ms for inbound/AI; scheduled jobs every ${Math.max(30000, Number(process.env.NEXTGEN_HEARTBEAT_SCHEDULED_MS || 60000))}ms`);
+  return NG_V116_HEARTBEAT_STATE;
+}
+
+app.get("/admin/crm/automation/backend-heartbeat/status", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    res.json({ success: true, build: NEXTGEN_BACKEND_BUILD, heartbeat: NG_V116_HEARTBEAT_STATE, config: { enabled: ngV116HeartbeatEnabled(), heartbeat_ms: ngV116HeartbeatMs(), no_reply_wait_hours: process.env.NEXTGEN_NO_REPLY_NURTURE_WAIT_HOURS || "6", ai_limit: process.env.NEXTGEN_HEARTBEAT_AI_LIMIT || "8" } });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/automation/backend-heartbeat/run-once", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const result = await ngV116RunBackendHeartbeatTick({ source: "manual_backend_heartbeat" });
+    res.json({ success: true, result, heartbeat: NG_V116_HEARTBEAT_STATE });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
 app.use((err, req, res, next) => {
   applyNextGenCors(req, res);
   console.error("GLOBAL EXPRESS ERROR:", err);
@@ -35616,6 +36249,7 @@ process.on("uncaughtException", (error) => {
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  ngV116StartBackendHeartbeat();
   console.log(`DATA_DIR=${DATA_DIR}`);
   console.log(`LIVE_DB_PATH=${LIVE_DB_PATH}`);
 });
