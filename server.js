@@ -4904,6 +4904,139 @@ function ngBuildPublicRoadmapProgress(days = []) {
   };
 }
 
+
+function ngFindAdminRoadmapDayRef(db, { courseId = "", dayId = "" } = {}) {
+  const cleanDayId = String(dayId || "").trim();
+  const cleanCourseId = String(courseId || "").trim();
+  const courseIds = cleanCourseId ? [cleanCourseId] : Object.keys(db.roadmaps || {});
+  for (const cid of courseIds) {
+    const roadmap = db.roadmaps?.[String(cid)] || null;
+    const days = Array.isArray(roadmap?.days) ? roadmap.days : [];
+    const index = days.findIndex((day) => String(day.id || "") === cleanDayId);
+    if (index >= 0) return { courseId: String(cid), roadmap, day: days[index], index };
+  }
+  return { courseId: cleanCourseId, roadmap: null, day: null, index: -1 };
+}
+
+function ngNormalizeAdminRoadmapPayload(body = {}, existing = {}) {
+  const dayNumber = Number(body.day_number ?? body.order ?? existing.day_number ?? existing.order ?? 1) || 1;
+  const weekNumber = Number(body.week_number ?? existing.week_number ?? Math.ceil(dayNumber / 7)) || Math.ceil(dayNumber / 7);
+  const status = String(body.roadmap_status ?? body.status ?? existing.roadmap_status ?? existing.status ?? "scheduled").trim() || "scheduled";
+  const qids = ngNormalizeQidList(body.uworld_qids || body.mapped_uworld_qids || body.qids || body.qid_list || body.uworld_target || existing.uworld_qids || existing.mapped_uworld_qids || []);
+  return {
+    ...existing,
+    title: String(body.title ?? existing.title ?? `Day ${dayNumber}`).trim(),
+    description: String(body.description ?? existing.description ?? "").trim(),
+    order: dayNumber,
+    day_number: dayNumber,
+    week_number: weekNumber,
+    date: body.date === null ? "" : String(body.date ?? existing.date ?? "").trim(),
+    resources: Array.isArray(body.resources) ? body.resources : normalizeArray(body.resources ?? existing.resources ?? []),
+    resource_links: Array.isArray(body.resource_links) ? body.resource_links : normalizeArray(body.resource_links ?? existing.resource_links ?? []),
+    uworld_target: String(body.uworld_target ?? existing.uworld_target ?? (qids.length ? qids.join(",") : "")).trim(),
+    uworld_qids: qids,
+    mapped_uworld_qids: qids,
+    first_aid_topics: String(body.first_aid_topics ?? existing.first_aid_topics ?? "").trim(),
+    first_aid_pages: body.first_aid_pages ?? body.fa_pages ?? existing.first_aid_pages ?? existing.fa_pages ?? null,
+    homework: String(body.homework ?? existing.homework ?? "").trim(),
+    system: String(body.system ?? existing.system ?? existing.chapter ?? "").trim(),
+    chapter: String(body.chapter ?? existing.chapter ?? existing.system ?? "").trim(),
+    live_session_id: body.live_session_id || existing.live_session_id || null,
+    video_library_lecture: String(body.video_library_lecture ?? existing.video_library_lecture ?? existing.lecture_title ?? "").trim(),
+    lecture_title: String(body.lecture_title ?? existing.lecture_title ?? body.video_library_lecture ?? existing.video_library_lecture ?? "").trim(),
+    status,
+    roadmap_status: status,
+    is_published: body.is_published !== undefined ? Boolean(body.is_published) : existing.is_published !== false,
+    published: body.published !== undefined ? Boolean(body.published) : existing.published !== false,
+    assessment_day: body.assessment_day !== undefined ? Boolean(body.assessment_day) : Boolean(existing.assessment_day),
+    flashcards_enabled: body.flashcards_enabled !== undefined ? Boolean(body.flashcards_enabled) : existing.flashcards_enabled !== false,
+    task_items: Array.isArray(body.task_items) ? body.task_items : Array.isArray(existing.task_items) ? existing.task_items : ngBuildDefaultTaskItems({ assessment_day: Boolean(body.assessment_day ?? existing.assessment_day) }),
+  };
+}
+
+app.get("/admin/roadmap", async (req, res) => {
+  try {
+    await requireLmsPermission(req, "lms.roadmap.manage");
+    const db = await readLiveDb();
+    const courseId = String(req.query.course_id || req.query.courseId || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    const roadmap = db.roadmaps?.[courseId] || null;
+    const days = Array.isArray(roadmap?.days) ? roadmap.days : [];
+    res.json({ success: true, roadmap, days: days.map(sanitizeRoadmapDay), roadmap_days: days.map(sanitizeRoadmapDay) });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/roadmap", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.roadmap.manage");
+    const db = await readLiveDb();
+    const courseId = String(req.body.course_id || req.body.courseId || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    const course = db.courses?.[courseId] || null;
+    const roadmap = db.roadmaps[courseId] || {
+      id: `roadmap:${courseId}`,
+      course_id: courseId,
+      course_name: course?.name || req.body.course_name || "Course",
+      settings: {},
+      days: [],
+      created_at: new Date().toISOString(),
+    };
+    roadmap.days = Array.isArray(roadmap.days) ? roadmap.days : [];
+    const dayNumber = Number(req.body.day_number || req.body.order || roadmap.days.length + 1) || roadmap.days.length + 1;
+    const id = req.body.id || `${courseId}:day:${dayNumber}:${uuid()}`;
+    const item = ngNormalizeAdminRoadmapPayload(req.body, {
+      id,
+      course_id: courseId,
+      created_by: user.id,
+      created_at: new Date().toISOString(),
+    });
+    item.updated_by = user.id;
+    item.updated_at = new Date().toISOString();
+    roadmap.days.push(item);
+    roadmap.days.sort((a, b) => Number(a.day_number || a.order || 0) - Number(b.day_number || b.order || 0));
+    roadmap.updated_at = new Date().toISOString();
+    db.roadmaps[courseId] = roadmap;
+    await writeLiveDb(db);
+    res.json({ success: true, day: sanitizeRoadmapDay(item), item: sanitizeRoadmapDay(item), roadmap });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.patch("/admin/roadmap/:dayId", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.roadmap.manage");
+    const db = await readLiveDb();
+    const ref = ngFindAdminRoadmapDayRef(db, { courseId: req.body.course_id || req.query.course_id, dayId: req.params.dayId });
+    if (!ref.roadmap || !ref.day) return res.status(404).json({ success: false, error: "Roadmap item not found" });
+    const updated = ngNormalizeAdminRoadmapPayload(req.body, ref.day);
+    updated.id = ref.day.id;
+    updated.course_id = ref.day.course_id || ref.courseId;
+    updated.created_at = ref.day.created_at || new Date().toISOString();
+    updated.created_by = ref.day.created_by || null;
+    updated.updated_by = user.id;
+    updated.updated_at = new Date().toISOString();
+    ref.roadmap.days[ref.index] = updated;
+    ref.roadmap.days.sort((a, b) => Number(a.day_number || a.order || 0) - Number(b.day_number || b.order || 0));
+    ref.roadmap.updated_at = new Date().toISOString();
+    db.roadmaps[ref.courseId] = ref.roadmap;
+    await writeLiveDb(db);
+    res.json({ success: true, day: sanitizeRoadmapDay(updated), item: sanitizeRoadmapDay(updated), roadmap: ref.roadmap });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.delete("/admin/roadmap/:dayId", async (req, res) => {
+  try {
+    await requireLmsPermission(req, "lms.roadmap.manage");
+    const db = await readLiveDb();
+    const ref = ngFindAdminRoadmapDayRef(db, { courseId: req.query.course_id || req.body?.course_id, dayId: req.params.dayId });
+    if (!ref.roadmap || !ref.day) return res.status(404).json({ success: false, error: "Roadmap item not found" });
+    const [removed] = ref.roadmap.days.splice(ref.index, 1);
+    ref.roadmap.updated_at = new Date().toISOString();
+    db.roadmaps[ref.courseId] = ref.roadmap;
+    await writeLiveDb(db);
+    res.json({ success: true, deleted: true, item: sanitizeRoadmapDay(removed) });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
 app.get("/roadmap/course/:courseId", async (req, res) => {
   const db = await readLiveDb();
   const roadmap = db.roadmaps[String(req.params.courseId)] || null;
