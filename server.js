@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v130-daily-task-flashcard-points-engine";
+const NEXTGEN_BACKEND_BUILD = "v138-roadmap-master-map-generator";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -273,6 +273,7 @@ const DEFAULT_LIVE_DB = {
   googleAuthUsers: {},
 
   roadmaps: {},
+  roadmapMasterMaps: {},
   roadmapProgress: {},
 
   assessments: {},
@@ -331,6 +332,7 @@ async function readLiveDb() {
       payments: parsed.payments || {},
       googleAuthUsers: parsed.googleAuthUsers || {},
       roadmaps: parsed.roadmaps || {},
+      roadmapMasterMaps: parsed.roadmapMasterMaps || {},
       roadmapProgress: parsed.roadmapProgress || {},
       assessments: parsed.assessments || {},
       assessmentAttempts: parsed.assessmentAttempts || {},
@@ -35579,6 +35581,208 @@ app.post("/admin/crm/leads/:id/flow-status", async (req, res) => {
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
+
+const NEXTGEN_MASTER_MAP_TEMPLATE_KEY = "nextgen_120_day_usmle_step_1_marathon";
+
+function ngNormalizeMasterMapSystemName(value = "") {
+  const raw = String(value || "").trim();
+  const clean = raw.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  if (!clean) return "General";
+  if (clean.includes("cardio") || clean.includes("heart")) return "Cardiology";
+  if (clean === "msk" || clean.includes("musculoskeletal") || clean.includes("bone") || clean.includes("joint")) return "MSK";
+  if (clean.includes("central nervous") || clean === "cns" || clean.includes("neuro")) return "Central Nervous System";
+  if (clean.includes("repro")) return "Reproductive";
+  if (clean.includes("endo")) return "Endocrinology";
+  if (clean === "git" || clean.includes("gastro") || clean.includes("gi ") || clean === "gi") return "GIT";
+  if (clean.includes("renal") || clean.includes("kidney")) return "Renal";
+  if (clean.includes("pulm") || clean.includes("resp")) return "Pulmonology";
+  if (clean.includes("immun")) return "Immunology";
+  if (clean.includes("hem") || clean.includes("heme")) return "Hematology";
+  if (clean.includes("psych")) return "Psychiatry";
+  return raw;
+}
+
+function ngSystemOrderIndex(system = "") {
+  const normalized = ngNormalizeMasterMapSystemName(system);
+  const index = NEXTGEN_STEP1_ROADMAP_SYSTEM_SEQUENCE.findIndex((item) => item === normalized);
+  return index >= 0 ? index : 999;
+}
+
+function ngSafeJsonArrayFromBody(value) {
+  if (Array.isArray(value)) return value;
+  if (value && Array.isArray(value.rows)) return value.rows;
+  if (value && Array.isArray(value.days)) return value.days;
+  if (typeof value === "string") {
+    const parsed = JSON.parse(value);
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && Array.isArray(parsed.rows)) return parsed.rows;
+    if (parsed && Array.isArray(parsed.days)) return parsed.days;
+  }
+  return [];
+}
+
+function ngNormalizeMasterMapRows(value) {
+  const rows = ngSafeJsonArrayFromBody(value);
+  return rows.map((row, index) => {
+    const dayNumber = Number(row.day_number ?? row.day ?? row.day_no ?? row.order ?? row.sequence ?? index + 1) || (index + 1);
+    const system = ngNormalizeMasterMapSystemName(row.system ?? row.chapter ?? row.subject ?? row.organ_system ?? "");
+    const topic = String(row.topic ?? row.daily_topic ?? row.title_topic ?? row.focus ?? row.first_aid_topics ?? row.fa_topic ?? "").trim();
+    const qids = ngNormalizeQidList(row.uworld_qids ?? row.qids ?? row.question_ids ?? row.qid_list ?? row.uworld_target ?? "");
+    const firstAidPages = String(row.first_aid_pages ?? row.fa_pages ?? row.pages ?? row.page_range ?? "").trim();
+    const firstAidTopics = String(row.first_aid_topics ?? row.fa_topics ?? row.fa_topic ?? topic ?? "").trim();
+    const lectureTitle = String(row.video_library_lecture ?? row.lecture_title ?? row.video_lecture ?? row.library_lecture ?? row.recorded_lecture ?? "").trim();
+    const title = String(row.title ?? row.day_title ?? "").trim() || `${system} Day ${dayNumber} — ${topic || firstAidTopics || "Daily Review"}`;
+    return {
+      ...row,
+      source_index: index + 1,
+      day_number: dayNumber,
+      week_number: Number(row.week_number ?? row.week ?? Math.ceil(dayNumber / 7)) || Math.ceil(dayNumber / 7),
+      system,
+      chapter: String(row.chapter ?? system ?? "").trim() || system,
+      topic,
+      title,
+      description: String(row.description ?? row.summary ?? "").trim(),
+      first_aid_pages: firstAidPages || null,
+      first_aid_topics: firstAidTopics,
+      live_teaching_topic: String(row.live_teaching_topic ?? row.live_topic ?? topic ?? firstAidTopics ?? "").trim(),
+      lecture_id: row.lecture_id || row.video_library_lecture_id || row.video_id || null,
+      lecture_title: lectureTitle,
+      video_library_lecture: lectureTitle,
+      uworld_qids: qids,
+      mapped_uworld_qids: qids,
+      qid_count: Number(row.qid_count ?? qids.length) || qids.length,
+      uworld_target: String(row.uworld_target ?? row.uworld_task ?? "").trim() || (qids.length ? `Complete mapped QIDs: ${qids.join(", ")}` : "Complete assigned mapped UWorld QIDs"),
+      homework: String(row.homework ?? row.task ?? row.daily_task ?? "").trim(),
+      flashcard_tags: normalizeArray(row.flashcard_tags ?? row.tags ?? [system, topic].filter(Boolean)),
+      community_prompt: String(row.community_prompt ?? row.qna_prompt ?? "").trim(),
+      assessment_task: String(row.assessment_task ?? row.assessment_type ?? "").trim(),
+      assessment_day: row.assessment_day === true || String(row.assessment_type || "").toLowerCase().includes("assessment"),
+      is_published: row.is_published !== false,
+    };
+  }).filter((row) => row.system && (row.topic || row.first_aid_topics || row.title || row.uworld_qids.length));
+}
+
+function ngSortMasterRowsForSequence(rows = []) {
+  return [...rows].sort((a, b) => {
+    const ai = ngSystemOrderIndex(a.system);
+    const bi = ngSystemOrderIndex(b.system);
+    if (ai !== bi) return ai - bi;
+    const ad = Number(a.system_day ?? a.day_in_system ?? a.source_index ?? a.day_number ?? 0) || 0;
+    const bd = Number(b.system_day ?? b.day_in_system ?? b.source_index ?? b.day_number ?? 0) || 0;
+    return ad - bd;
+  });
+}
+
+function ngGetStoredMasterRows(db, template = NEXTGEN_MASTER_MAP_TEMPLATE_KEY) {
+  const store = db.roadmapMasterMaps || {};
+  const item = store[String(template || NEXTGEN_MASTER_MAP_TEMPLATE_KEY)] || store[NEXTGEN_MASTER_MAP_TEMPLATE_KEY] || null;
+  return ngNormalizeMasterMapRows(item?.rows || []);
+}
+
+function ngBuildStudyDates(startDateRaw, count, skipSundays = true) {
+  const dates = [];
+  let cursor = ngNextStudyDate(new Date(`${startDateRaw}T00:00:00`), skipSundays);
+  while (dates.length < Number(count || 0)) {
+    cursor = ngNextStudyDate(cursor, skipSundays);
+    dates.push(dateOnly(cursor));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return dates;
+}
+
+function ngBuildTaskItemsForMasterDay(row = {}) {
+  const base = ngBuildDefaultTaskItems(row);
+  const descriptions = {
+    live_attendance: "Attend the scheduled live class for this day.",
+    video_library_watch: row.video_library_lecture ? `Watch: ${row.video_library_lecture}.` : "Watch the matching video-library lecture when assigned.",
+    assigned_qids_completed: row.uworld_qids?.length ? `Complete QIDs: ${row.uworld_qids.join(", ")}.` : "Complete the assigned mapped QIDs.",
+    weak_concepts_logged: "Log wrong QIDs or weak concepts after review.",
+    flashcards_reviewed: "Review the daily review cards prepared for this topic.",
+    community_confusion_post: row.community_prompt || "Post one confusing point in Community Q&A.",
+    daily_task_submitted: "Submit the daily task after the study work is finished.",
+    assessment_completed: row.assessment_task || "Complete the assigned assessment or correction task.",
+  };
+  return base.map((item) => ({ ...item, description: descriptions[item.key] || item.description || "" }));
+}
+
+function ngBuildMarathonDayFromMasterRow({ courseId, courseName, row, dayNumber, date, classTime, template }) {
+  const qids = Array.isArray(row.uworld_qids) ? row.uworld_qids : ngNormalizeQidList(row.uworld_qids || row.mapped_uworld_qids || []);
+  const topic = row.topic || row.first_aid_topics || row.system || "Daily Review";
+  const readLine = row.first_aid_pages ? `Read assigned book pages: ${row.first_aid_pages}.` : "Read the assigned book pages for today’s topic.";
+  const watchLine = row.video_library_lecture ? `Watch matching video-library lecture: ${row.video_library_lecture}.` : "Watch the matching video-library lecture if assigned.";
+  const qidLine = qids.length ? `Complete mapped QIDs: ${qids.join(", ")}.` : "Complete the mapped UWorld QIDs assigned for this topic.";
+  const description = row.description || `${readLine} ${watchLine} ${qidLine} Review cards and post one confusion point in Community Q&A.`;
+  return {
+    id: `${courseId}:day:${dayNumber}:${uuid()}`,
+    course_id: courseId,
+    week_number: Math.ceil(dayNumber / 7),
+    day_number: dayNumber,
+    date,
+    system: row.system,
+    chapter: row.chapter || row.system,
+    system_day: row.system_day || row.day_in_system || null,
+    topic,
+    title: row.title || `${row.system} Day ${dayNumber} — ${topic}`,
+    description,
+    first_aid_pages: row.first_aid_pages || null,
+    first_aid_topics: row.first_aid_topics || topic,
+    live_teaching_topic: row.live_teaching_topic || topic,
+    lecture_id: row.lecture_id || null,
+    lecture_title: row.lecture_title || row.video_library_lecture || "",
+    video_library_lecture: row.video_library_lecture || row.lecture_title || "",
+    uworld_qids: qids,
+    mapped_uworld_qids: qids,
+    qid_count: qids.length,
+    uworld_target: row.uworld_target || (qids.length ? `Complete mapped QIDs: ${qids.join(", ")}` : "Complete assigned mapped UWorld QIDs"),
+    resources: Array.isArray(row.resources) && row.resources.length ? row.resources : ["Assigned book pages", "Mapped UWorld QIDs", "Live class", "Video Library", "Class notes", "Review cards", "Community Q&A"],
+    resource_links: Array.isArray(row.resource_links) ? row.resource_links : [],
+    homework: row.homework || `${readLine} ${watchLine} ${qidLine}`,
+    task_items: ngBuildTaskItemsForMasterDay(row),
+    flashcard_tags: row.flashcard_tags || [row.system, topic].filter(Boolean),
+    community_prompt: row.community_prompt || "Post one confusing concept from today’s topic.",
+    assessment_task: row.assessment_task || "",
+    assessment_day: Boolean(row.assessment_day),
+    class_time: classTime,
+    status: "scheduled",
+    roadmap_status: "scheduled",
+    is_published: row.is_published !== false,
+    source_master_map_index: row.source_index || null,
+    template,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+}
+
+function ngSyncLinkedLiveSessionsForRoadmap(db, roadmap) {
+  const days = Array.isArray(roadmap?.days) ? roadmap.days : [];
+  for (const day of days) {
+    if (!day.live_session_id || !db.liveSessions?.[day.live_session_id]) continue;
+    const session = db.liveSessions[day.live_session_id];
+    session.scheduled_date = day.date || session.scheduled_date;
+    session.roadmap_day_id = day.id;
+    session.description = day.description || session.description;
+    session.updated_at = new Date().toISOString();
+  }
+}
+
+function ngRecalculateRoadmapSchedule(db, roadmap, { startDate = "", skipSundays = true } = {}) {
+  if (!roadmap || !Array.isArray(roadmap.days) || !roadmap.days.length) return roadmap;
+  const firstDate = startDate || roadmap.start_date || roadmap.settings?.start_date || roadmap.days[0]?.date || todayKey();
+  let cursor = ngNextStudyDate(new Date(`${firstDate}T00:00:00`), skipSundays);
+  roadmap.days.forEach((day, index) => {
+    cursor = ngNextStudyDate(cursor, skipSundays);
+    day.day_number = index + 1;
+    day.order = index + 1;
+    day.week_number = Math.ceil((index + 1) / 7);
+    day.date = dateOnly(cursor);
+    day.updated_at = new Date().toISOString();
+    cursor.setDate(cursor.getDate() + 1);
+  });
+  ngSyncLinkedLiveSessionsForRoadmap(db, roadmap);
+  roadmap.updated_at = new Date().toISOString();
+  return roadmap;
+}
+
 function ngDefaultMarathonSystems() {
   return [
     { system: "Cardiology", days: 14, topics: ["cardiac physiology foundation", "murmurs and valvular disease", "ischemia and heart failure", "arrhythmias and pharmacology"] },
@@ -35632,11 +35836,101 @@ function ngBuildDailyFlashcardsForDay(day) {
   if (!day || day.assessment_day) return [];
   const topic = day.first_aid_topics || day.system || "today’s topic";
   return [
-    { front: `What is the key First Aid concept for ${topic}?`, back: `Review the live class notes for ${topic}, then connect the mechanism to the assigned UWorld QIDs.`, explanation: "Use active recall before watching the video explanation." },
-    { front: `Which mistake should you avoid in ${day.system}?`, back: "Do not memorize the answer only. Identify the mechanism, wrong-option trap, and First Aid line that explains it.", explanation: "This card is for correction-based revision." },
+    { front: `What is the key concept for ${topic}?`, back: `Review the live class notes for ${topic}, then connect the mechanism to the assigned UWorld QIDs.`, explanation: "Use active recall before watching the video explanation." },
+    { front: `Which mistake should you avoid in ${day.system}?`, back: "Do not memorize the answer only. Identify the mechanism, diagnosis clue, and wrong-option trap.", explanation: "This card is for correction-based revision." },
     { front: `What should you do after completing today’s ${day.system} QIDs?`, back: "Watch the matching UWorld Video Library QID explanations first, complete assigned UWorld QIDs externally, log wrongs/weak concepts, review notes/recording, post one confusing concept in Community Q&A, and submit the daily task.", explanation: "This links daily study work to leaderboard accountability." },
   ];
 }
+
+
+app.get("/admin/roadmap/master-map", async (req, res) => {
+  try {
+    await requireLmsPermission(req, "lms.roadmap.manage");
+    const db = await readLiveDb();
+    const template = String(req.query.template || NEXTGEN_MASTER_MAP_TEMPLATE_KEY).trim() || NEXTGEN_MASTER_MAP_TEMPLATE_KEY;
+    const item = db.roadmapMasterMaps?.[template] || null;
+    const rows = ngNormalizeMasterMapRows(item?.rows || []);
+    const bySystem = {};
+    for (const row of rows) bySystem[row.system] = (bySystem[row.system] || 0) + 1;
+    res.json({ success: true, template, exists: Boolean(item), map: item ? { ...item, rows: req.query.with_rows === "true" ? rows : undefined } : null, count: rows.length, by_system: bySystem, systems: Object.keys(bySystem) });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/roadmap/import-master-map", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.roadmap.manage");
+    const db = await readLiveDb();
+    const template = String(req.body.template || NEXTGEN_MASTER_MAP_TEMPLATE_KEY).trim() || NEXTGEN_MASTER_MAP_TEMPLATE_KEY;
+    const rawRows = req.body.rows || req.body.days || req.body.master_map || req.body.map || req.body.json_text || [];
+    const rows = ngSortMasterRowsForSequence(ngNormalizeMasterMapRows(rawRows));
+    if (!rows.length) return res.status(400).json({ success: false, error: "Master map JSON must contain at least one valid row/day" });
+    const bySystem = {};
+    for (const row of rows) bySystem[row.system] = (bySystem[row.system] || 0) + 1;
+    db.roadmapMasterMaps = db.roadmapMasterMaps || {};
+    db.roadmapMasterMaps[template] = {
+      id: template,
+      template,
+      name: String(req.body.name || "NextGen 120-Day Step 1 Master Map").trim(),
+      rows,
+      count: rows.length,
+      by_system: bySystem,
+      system_sequence: NEXTGEN_STEP1_ROADMAP_SYSTEM_SEQUENCE,
+      source: "admin_json_import",
+      imported_by: user.id,
+      imported_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    await writeLiveDb(db);
+    res.json({ success: true, template, count: rows.length, by_system: bySystem, map: { ...db.roadmapMasterMaps[template], rows: undefined }, message: `Master map imported: ${rows.length} rows` });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/roadmap/:dayId/push-status", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.roadmap.manage");
+    const db = await readLiveDb();
+    const status = String(req.body.status || req.body.roadmap_status || "holiday").toLowerCase();
+    if (!["holiday", "cancelled"].includes(status)) return res.status(400).json({ success: false, error: "status must be holiday or cancelled" });
+    const ref = ngFindAdminRoadmapDayRef(db, { courseId: req.body.course_id || req.query.course_id, dayId: req.params.dayId });
+    if (!ref.roadmap || !ref.day) return res.status(404).json({ success: false, error: "Roadmap item not found" });
+    const originalContent = { ...ref.day, id: `${ref.courseId}:day:pushed:${uuid()}`, pushed_from_day_id: ref.day.id, status: "scheduled", roadmap_status: "scheduled", live_session_id: null, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), updated_by: user.id };
+    const placeholderTitle = status === "holiday" ? "Holiday / No Live Class" : "Cancelled / Content Pushed";
+    ref.roadmap.days[ref.index] = {
+      ...ref.day,
+      title: req.body.title || placeholderTitle,
+      description: req.body.description || (status === "holiday" ? "No academic task today. The planned content has been pushed to the next teaching day." : "Class cancelled. The planned content has been pushed to the next teaching day."),
+      resources: [],
+      resource_links: [],
+      uworld_qids: [],
+      mapped_uworld_qids: [],
+      uworld_target: "",
+      homework: "",
+      task_items: [],
+      tasks: [],
+      first_aid_topics: "",
+      first_aid_pages: null,
+      video_library_lecture: "",
+      lecture_title: "",
+      assessment_day: false,
+      assessment_id: null,
+      live_session_id: null,
+      status,
+      roadmap_status: status,
+      is_schedule_placeholder: true,
+      pushed_content_day_id: originalContent.id,
+      original_day_snapshot: req.body.keep_snapshot === false ? undefined : ref.day,
+      updated_by: user.id,
+      updated_at: new Date().toISOString(),
+    };
+    ref.roadmap.days.splice(ref.index + 1, 0, originalContent);
+    const skipSundays = ref.roadmap.skip_sundays !== false && ref.roadmap.settings?.skip_sundays !== false;
+    const startDate = ref.roadmap.start_date || ref.roadmap.settings?.start_date || ref.roadmap.days[0]?.date || todayKey();
+    ngRecalculateRoadmapSchedule(db, ref.roadmap, { startDate, skipSundays });
+    db.roadmaps[ref.courseId] = ref.roadmap;
+    await writeLiveDb(db);
+    res.json({ success: true, status, pushed: true, roadmap: ref.roadmap, days: ref.roadmap.days.map(sanitizeRoadmapDay), message: `${status} added and following content pushed forward.` });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
 
 app.post("/admin/roadmap/apply-marathon-template", async (req, res) => {
   try {
@@ -35648,56 +35942,105 @@ app.post("/admin/roadmap/apply-marathon-template", async (req, res) => {
     const classTime = String(req.body.class_time || req.body.scheduled_time || "13:00").trim();
     const timezone = String(req.body.timezone || req.body.scheduled_timezone || DEFAULT_TIMEZONE).trim() || DEFAULT_TIMEZONE;
     const skipSundays = req.body.skip_sundays !== false;
-    const recreateSessions = req.body.recreate_live_sessions !== false;
+    const recreateSessions = req.body.recreate_live_sessions !== false && req.body.create_live_sessions !== false;
     const createFlashcards = req.body.create_flashcards !== false;
-    const systems = Array.isArray(req.body.system_plan) && req.body.system_plan.length ? req.body.system_plan : ngDefaultMarathonSystems();
-    let dayNumber = 1;
-    let cursor = ngNextStudyDate(new Date(`${startDateRaw}T00:00:00`), skipSundays);
-    const days = [];
+    const createAssessments = req.body.create_assessments !== false;
+    const overwriteExisting = req.body.overwrite_existing === true;
+    const template = String(req.body.template || NEXTGEN_MASTER_MAP_TEMPLATE_KEY).trim() || NEXTGEN_MASTER_MAP_TEMPLATE_KEY;
+    const existingDays = Array.isArray(db.roadmaps?.[courseId]?.days) ? db.roadmaps[courseId].days : [];
+    if (!overwriteExisting && existingDays.length > 0) return res.status(409).json({ success: false, error: "Roadmap already exists. Enable overwrite existing to rebuild it." });
+
+    const requestRows = ngNormalizeMasterMapRows(req.body.master_map || req.body.rows || req.body.days || []);
+    let masterRows = requestRows.length ? requestRows : ngGetStoredMasterRows(db, template);
+    const usedMasterMap = masterRows.length > 0;
+    const requestedDuration = Number(req.body.duration_days || 120) || 120;
     const sessionsCreated = [];
     const assessmentsCreated = [];
     const flashcardsCreated = [];
-    for (const sys of systems) {
-      const totalDays = Number(sys.days || 1);
-      const topics = Array.isArray(sys.topics) && sys.topics.length ? sys.topics : [sys.system || "System review"];
-      for (let i = 1; i <= totalDays && dayNumber <= 120; i++) {
-        cursor = ngNextStudyDate(cursor, skipSundays);
-        const topic = topics[(i - 1) % topics.length];
-        const qids = Array.isArray(sys.qid_blocks) ? (sys.qid_blocks[i - 1] || "") : "";
-        const day = ngBuildMarathonDay({ courseId, dayNumber, weekNumber: Math.ceil(dayNumber / 7), date: cursor, system: sys.system, systemDay: i, totalSystemDays: totalDays, topic, qids });
-        days.push(day);
-        if (recreateSessions && !day.assessment_day) {
-          const sessionId = uuid();
-          const session = {
-            id: sessionId, course_id: courseId, topic: `${db.courses[courseId].name || "120-Day Marathon"} — Day ${day.day_number}: ${day.system}`,
-            title: `${db.courses[courseId].name || "120-Day Marathon"} — Day ${day.day_number}: ${day.system}`,
-            description: day.description, scheduled_date: day.date, scheduled_time: classTime, scheduled_timezone: timezone, duration_minutes: DEFAULT_ZOOM_DURATION_MINUTES,
-            instructor_id: null, instructor_name: db.courses[courseId].instructor_name || "Dr. Ahmad", status: "scheduled", roadmap_day_id: day.id, created_by: user.id, created_at: nowIso(), updated_at: nowIso(),
-          };
-          db.liveSessions[sessionId] = session;
-          day.live_session_id = sessionId;
-          sessionsCreated.push(session);
+    let days = [];
+
+    if (usedMasterMap) {
+      masterRows = ngSortMasterRowsForSequence(masterRows).slice(0, requestedDuration);
+      const dates = ngBuildStudyDates(startDateRaw, masterRows.length, skipSundays);
+      days = masterRows.map((row, index) => ngBuildMarathonDayFromMasterRow({ courseId, courseName: db.courses[courseId].name || "Course", row, dayNumber: index + 1, date: dates[index], classTime, template }));
+    } else {
+      const systems = Array.isArray(req.body.system_plan) && req.body.system_plan.length ? req.body.system_plan : ngDefaultMarathonSystems();
+      let dayNumber = 1;
+      let cursor = ngNextStudyDate(new Date(`${startDateRaw}T00:00:00`), skipSundays);
+      for (const sys of systems) {
+        const totalDays = Number(sys.days || 1);
+        const topics = Array.isArray(sys.topics) && sys.topics.length ? sys.topics : [sys.system || "System review"];
+        for (let i = 1; i <= totalDays && dayNumber <= requestedDuration; i++) {
+          cursor = ngNextStudyDate(cursor, skipSundays);
+          const topic = topics[(i - 1) % topics.length];
+          const qids = Array.isArray(sys.qid_blocks) ? (sys.qid_blocks[i - 1] || "") : "";
+          const day = ngBuildMarathonDay({ courseId, dayNumber, weekNumber: Math.ceil(dayNumber / 7), date: cursor, system: sys.system, systemDay: i, totalSystemDays: totalDays, topic, qids });
+          day.template = template;
+          days.push(day);
+          dayNumber += 1;
+          cursor.setDate(cursor.getDate() + 1);
         }
-        if (day.assessment_day) {
-          const assessmentId = uuid();
-          db.assessments[assessmentId] = { id: assessmentId, course_id: courseId, session_id: null, roadmap_day_id: day.id, title: day.title, description: day.description, source_type: "system_end_marathon_template", questions: [], duration_minutes: 60, attempts_allowed: 1, is_published: false, assessment_type: "system_end", system: day.system, created_by: user.id, created_at: nowIso(), updated_at: nowIso() };
-          day.assessment_id = assessmentId;
-          assessmentsCreated.push(db.assessments[assessmentId]);
-        }
-        if (createFlashcards && !day.assessment_day) {
-          for (const card of ngBuildDailyFlashcardsForDay(day)) {
-            const cardId = uuid();
-            db.flashcards[cardId] = { id: cardId, course_id: courseId, roadmap_day_id: day.id, day_number: day.day_number, system: day.system, front: card.front, back: card.back, explanation: card.explanation, status: "published", created_by: user.id, created_at: nowIso(), updated_at: nowIso() };
-            flashcardsCreated.push(db.flashcards[cardId]);
-          }
-        }
-        dayNumber += 1;
-        cursor.setDate(cursor.getDate() + 1);
       }
     }
-    db.roadmaps[courseId] = { id: courseId, course_id: courseId, title: req.body.title || "July 1 — 120-Day Step 1 Marathon Roadmap", start_date: dateOnly(new Date(`${startDateRaw}T00:00:00`)), class_time: classTime, timezone, skip_sundays: skipSundays, days, created_by: user.id, updated_by: user.id, created_at: db.roadmaps[courseId]?.created_at || nowIso(), updated_at: nowIso() };
+
+    for (const day of days) {
+      if (recreateSessions && !day.assessment_day && !["holiday", "cancelled"].includes(String(day.status || "").toLowerCase())) {
+        const sessionId = uuid();
+        const session = {
+          id: sessionId,
+          course_id: courseId,
+          topic: `${db.courses[courseId].name || "120-Day Marathon"} — Day ${day.day_number}: ${day.title || day.system}`,
+          title: `${db.courses[courseId].name || "120-Day Marathon"} — Day ${day.day_number}: ${day.title || day.system}`,
+          description: day.description,
+          scheduled_date: day.date,
+          scheduled_time: classTime,
+          scheduled_timezone: timezone,
+          duration_minutes: DEFAULT_ZOOM_DURATION_MINUTES,
+          instructor_id: null,
+          instructor_name: db.courses[courseId].instructor_name || "Dr. Ahmad",
+          status: "scheduled",
+          roadmap_day_id: day.id,
+          created_by: user.id,
+          created_at: nowIso(),
+          updated_at: nowIso(),
+        };
+        db.liveSessions[sessionId] = session;
+        day.live_session_id = sessionId;
+        sessionsCreated.push(session);
+      }
+      if (createAssessments && day.assessment_day) {
+        const assessmentId = uuid();
+        db.assessments[assessmentId] = { id: assessmentId, course_id: courseId, session_id: null, roadmap_day_id: day.id, title: day.title, description: day.description, source_type: usedMasterMap ? "master_map" : "system_end_marathon_template", questions: [], duration_minutes: 60, attempts_allowed: 1, is_published: false, assessment_type: "system_end", system: day.system, created_by: user.id, created_at: nowIso(), updated_at: nowIso() };
+        day.assessment_id = assessmentId;
+        assessmentsCreated.push(db.assessments[assessmentId]);
+      }
+      if (createFlashcards && !day.assessment_day && !["holiday", "cancelled"].includes(String(day.status || "").toLowerCase())) {
+        for (const card of ngBuildDailyFlashcardsForDay(day)) {
+          const cardId = uuid();
+          db.flashcards[cardId] = { id: cardId, course_id: courseId, roadmap_day_id: day.id, day_number: day.day_number, system: day.system, front: card.front, back: card.back, explanation: card.explanation, status: "published", created_by: user.id, created_at: nowIso(), updated_at: nowIso() };
+          flashcardsCreated.push(db.flashcards[cardId]);
+        }
+      }
+    }
+
+    db.roadmaps[courseId] = {
+      id: `roadmap:${courseId}`,
+      course_id: courseId,
+      title: req.body.title || "120-Day Step 1 Marathon Roadmap",
+      course_name: db.courses[courseId].name || req.body.course_name || "Course",
+      start_date: dateOnly(new Date(`${startDateRaw}T00:00:00`)),
+      class_time: classTime,
+      timezone,
+      skip_sundays: skipSundays,
+      settings: { duration_days: days.length, start_date: dateOnly(new Date(`${startDateRaw}T00:00:00`)), class_time: classTime, timezone, skip_sundays: skipSundays, template, source: usedMasterMap ? "master_map" : "generic_fallback", system_sequence: NEXTGEN_STEP1_ROADMAP_SYSTEM_SEQUENCE },
+      days,
+      created_by: user.id,
+      updated_by: user.id,
+      created_at: db.roadmaps[courseId]?.created_at || nowIso(),
+      updated_at: nowIso(),
+    };
     await writeLiveDb(db);
-    res.json({ success: true, roadmap: db.roadmaps[courseId], counts: { days: days.length, live_sessions_created: sessionsCreated.length, system_end_assessments_created: assessmentsCreated.length, flashcards_created: flashcardsCreated.length }, message: "120-Day Marathon template applied without per-day manual editing." });
+    res.json({ success: true, roadmap: db.roadmaps[courseId], counts: { days: days.length, live_sessions_created: sessionsCreated.length, system_end_assessments_created: assessmentsCreated.length, flashcards_created: flashcardsCreated.length, master_map_rows_used: usedMasterMap ? masterRows.length : 0 }, source: usedMasterMap ? "master_map" : "generic_fallback", message: usedMasterMap ? "120-Day Marathon roadmap applied from stored master map." : "120-Day Marathon roadmap applied using generic fallback because no master map is imported yet." });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
