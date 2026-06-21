@@ -4915,7 +4915,7 @@ app.get("/roadmap/course/:courseId", async (req, res) => {
     days: days.map(sanitizeRoadmapDay),
     summary: { total_days: roadmap?.days?.length || 0, shown_days: days.length, total_weeks: Math.ceil((roadmap?.days?.length || 0) / 7), public_progress: publicProgress },
   });
-}); });
+});
 app.post("/admin/roadmap/generate", async (req, res) => {
   try {
     await requireLmsPermission(req, "lms.roadmap.manage");
