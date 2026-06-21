@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v117-revised-unread-quick-actions-heartbeat";
+const NEXTGEN_BACKEND_BUILD = "v130-daily-task-flashcard-points-engine";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -280,6 +280,12 @@ const DEFAULT_LIVE_DB = {
   flashcards: {},
   aiUsageLogs: {},
 
+  qidLibrary: {},
+  dailyTaskProgress: {},
+  weakConceptLogs: {},
+  flashcardProgress: {},
+  pointEvents: {},
+
   updatedAt: null,
 };
 
@@ -330,6 +336,11 @@ async function readLiveDb() {
       assessmentAttempts: parsed.assessmentAttempts || {},
       flashcards: parsed.flashcards || {},
       aiUsageLogs: parsed.aiUsageLogs || {},
+      qidLibrary: parsed.qidLibrary || {},
+      dailyTaskProgress: parsed.dailyTaskProgress || {},
+      weakConceptLogs: parsed.weakConceptLogs || {},
+      flashcardProgress: parsed.flashcardProgress || {},
+      pointEvents: parsed.pointEvents || {},
       featureCatalog: { ...DEFAULT_FEATURE_CATALOG, ...(parsed.featureCatalog || {}) },
       demoSettings: { ...DEFAULT_DEMO_SETTINGS, ...(parsed.demoSettings || {}) },
     };
@@ -1933,27 +1944,257 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
   };
 }
 
+
+const NEXTGEN_TASK_POINTS = {
+  live_attendance: 10,
+  video_library_watch: 10,
+  assigned_qids_completed: 15,
+  weak_concepts_logged: 5,
+  flashcards_reviewed: 5,
+  community_confusion_post: 5,
+  daily_task_submitted: 10,
+  assessment_completed: 15,
+  assessment_high_score_bonus: 5,
+  daily_streak_bonus: 5,
+};
+
+const NEXTGEN_DAILY_TASK_ORDER = [
+  "live_attendance",
+  "video_library_watch",
+  "assigned_qids_completed",
+  "weak_concepts_logged",
+  "flashcards_reviewed",
+  "community_confusion_post",
+  "daily_task_submitted",
+];
+
+function ngTaskLabel(key) {
+  const labels = {
+    live_attendance: "Attend live First Aid session",
+    video_library_watch: "Watch matching NextGen UWorld Video Library QID explanations",
+    assigned_qids_completed: "Complete assigned UWorld QIDs",
+    weak_concepts_logged: "Mark wrong QIDs / weak concepts",
+    flashcards_reviewed: "Review assigned flashcards / weak-area cards",
+    community_confusion_post: "Post one confusion point in Community Q&A",
+    daily_task_submitted: "Submit full daily task completion",
+    assessment_completed: "Complete assessment / mini-mock",
+    assessment_high_score_bonus: "High assessment score bonus",
+    daily_streak_bonus: "Daily streak bonus",
+  };
+  return labels[key] || key;
+}
+
+function ngNormalizeQidList(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || "").trim()).filter(Boolean);
+  }
+  return String(value || "")
+    .split(/[\s,;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function ngBuildDefaultTaskItems(day = {}) {
+  const isAssessment = day.assessment_day === true || day.assessment_id;
+  const keys = isAssessment
+    ? ["assessment_completed", "weak_concepts_logged", "flashcards_reviewed", "community_confusion_post", "daily_task_submitted"]
+    : NEXTGEN_DAILY_TASK_ORDER;
+
+  return keys.map((key, index) => ({
+    key,
+    label: ngTaskLabel(key),
+    points: Number(NEXTGEN_TASK_POINTS[key] || 0),
+    order: index + 1,
+    required: key !== "weak_concepts_logged",
+  }));
+}
+
+function ngGetTaskItems(day = {}) {
+  const items = Array.isArray(day.task_items) && day.task_items.length
+    ? day.task_items
+    : Array.isArray(day.tasks) && day.tasks.some((item) => typeof item === "object")
+      ? day.tasks
+      : ngBuildDefaultTaskItems(day);
+
+  return items.map((item, index) => {
+    const key = String(item.key || item.id || item.task_key || `task_${index + 1}`).trim();
+    return {
+      key,
+      id: key,
+      label: item.label || item.title || ngTaskLabel(key),
+      title: item.title || item.label || ngTaskLabel(key),
+      points: Number(item.points ?? NEXTGEN_TASK_POINTS[key] ?? 0) || 0,
+      order: Number(item.order || index + 1),
+      required: item.required !== false,
+      description: item.description || "",
+    };
+  }).sort((a, b) => Number(a.order || 0) - Number(b.order || 0));
+}
+
+function ngTaskProgressKey({ courseId, userId, dayId }) {
+  return `${courseId}:${userId}:${dayId}`;
+}
+
+function ngPointEventKey({ courseId, userId, dayId, taskKey }) {
+  return `${courseId}:${userId}:${dayId}:${taskKey}`;
+}
+
+function ngGetDailyTaskProgress(db, { courseId, userId, dayId }) {
+  db.dailyTaskProgress = db.dailyTaskProgress || {};
+  const key = ngTaskProgressKey({ courseId, userId, dayId });
+  return db.dailyTaskProgress[key] || null;
+}
+
+function ngEnsureDailyTaskProgress(db, { courseId, userId, userName, day }) {
+  db.dailyTaskProgress = db.dailyTaskProgress || {};
+  const key = ngTaskProgressKey({ courseId, userId, dayId: day.id });
+  const previous = db.dailyTaskProgress[key] || {};
+  const tasks = previous.tasks && typeof previous.tasks === "object" ? previous.tasks : {};
+  const taskItems = ngGetTaskItems(day);
+  const completedTaskCount = taskItems.filter((item) => tasks[item.key]?.completed).length;
+  const requiredItems = taskItems.filter((item) => item.required !== false);
+  const requiredCompletedCount = requiredItems.filter((item) => tasks[item.key]?.completed).length;
+  const totalTaskCount = taskItems.length;
+  const completed = Boolean(tasks.daily_task_submitted?.completed) || (requiredItems.length > 0 && requiredCompletedCount === requiredItems.length);
+
+  db.dailyTaskProgress[key] = {
+    id: key,
+    course_id: courseId,
+    user_id: userId,
+    user_name: userName || previous.user_name || "Student",
+    roadmap_day_id: day.id,
+    day_id: day.id,
+    day_number: day.day_number || previous.day_number || null,
+    system: day.system || previous.system || "",
+    date: day.date || previous.date || null,
+    tasks,
+    completed_task_count: completedTaskCount,
+    total_task_count: totalTaskCount,
+    required_completed_count: requiredCompletedCount,
+    required_task_count: requiredItems.length,
+    completed,
+    completed_at: completed ? (previous.completed_at || new Date().toISOString()) : null,
+    updated_at: new Date().toISOString(),
+    created_at: previous.created_at || new Date().toISOString(),
+  };
+
+  return db.dailyTaskProgress[key];
+}
+
+function ngUpsertTaskCompletion(db, { courseId, userId, userName, day, taskKey, completed = true, metadata = {} }) {
+  const progress = ngEnsureDailyTaskProgress(db, { courseId, userId, userName, day });
+  const key = String(taskKey || "").trim();
+  if (!key) {
+    const error = new Error("task_key is required");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const taskItems = ngGetTaskItems(day);
+  const item = taskItems.find((task) => task.key === key) || { key, label: ngTaskLabel(key), points: Number(NEXTGEN_TASK_POINTS[key] || 0) };
+  progress.tasks = progress.tasks || {};
+  const previous = progress.tasks[key] || {};
+
+  progress.tasks[key] = {
+    ...previous,
+    key,
+    label: item.label,
+    points: Number(item.points || 0),
+    completed: Boolean(completed),
+    completed_at: completed ? (previous.completed_at || new Date().toISOString()) : null,
+    updated_at: new Date().toISOString(),
+    metadata: { ...(previous.metadata || {}), ...(metadata || {}) },
+  };
+
+  const taskPointKey = ngPointEventKey({ courseId, userId, dayId: day.id, taskKey: key });
+  db.pointEvents = db.pointEvents || {};
+
+  if (completed && !db.pointEvents[taskPointKey]) {
+    db.pointEvents[taskPointKey] = {
+      id: taskPointKey,
+      course_id: courseId,
+      user_id: userId,
+      user_name: userName || "Student",
+      roadmap_day_id: day.id,
+      day_id: day.id,
+      day_number: day.day_number || null,
+      system: day.system || "",
+      task_key: key,
+      label: item.label,
+      category: key === "live_attendance" ? "attendance" : key.includes("assessment") ? "assessment" : "task",
+      points: Number(item.points || 0),
+      awarded_at: new Date().toISOString(),
+      metadata: metadata || {},
+    };
+  }
+
+  ngEnsureDailyTaskProgress(db, { courseId, userId, userName, day });
+
+  db.roadmapProgress = db.roadmapProgress || {};
+  const roadmapKey = `${courseId}:${userId}:${day.id}`;
+  if (progress.completed || progress.tasks.daily_task_submitted?.completed) {
+    db.roadmapProgress[roadmapKey] = {
+      id: roadmapKey,
+      course_id: courseId,
+      user_id: userId,
+      day_id: day.id,
+      completed: true,
+      completed_at: db.roadmapProgress[roadmapKey]?.completed_at || new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+  }
+
+  return db.dailyTaskProgress[ngTaskProgressKey({ courseId, userId, dayId: day.id })];
+}
+
 function sanitizeRoadmapDay(day) {
+  const qids = ngNormalizeQidList(day.uworld_qids?.length ? day.uworld_qids : day.mapped_uworld_qids?.length ? day.mapped_uworld_qids : day.qids || day.uworld_target);
+  const taskItems = ngGetTaskItems(day);
   return {
     id: day.id, course_id: day.course_id, week_number: day.week_number, day_number: day.day_number, date: day.date,
     system: day.system || day.chapter || "",
+    chapter: day.chapter || day.system || "",
     title: day.title, description: day.description || "", resources: day.resources || [], resource_links: day.resource_links || [],
-    uworld_target: day.uworld_target || "", first_aid_topics: day.first_aid_topics || "", live_teaching_topic: day.live_teaching_topic || "",
-    lecture_id: day.lecture_id || null, lecture_title: day.lecture_title || "", video_library_lecture: day.video_library_lecture || "",
-    uworld_qids: Array.isArray(day.uworld_qids) ? day.uworld_qids : [], mapped_uworld_qids: Array.isArray(day.mapped_uworld_qids) ? day.mapped_uworld_qids : [],
-    homework: day.homework || "", tasks: Array.isArray(day.tasks) ? day.tasks : [], recording_link: day.recording_link || "", notes_link: day.notes_link || "", assessment_task: day.assessment_task || "",
+    uworld_target: day.uworld_target || (qids.length ? qids.join(",") : ""), first_aid_topics: day.first_aid_topics || "", live_teaching_topic: day.live_teaching_topic || "",
+    first_aid_pages: day.first_aid_pages || day.fa_pages || null,
+    lecture_id: day.lecture_id || null, lecture_title: day.lecture_title || "", video_library_lecture: day.video_library_lecture || day.lecture_title || "",
+    uworld_qids: qids, mapped_uworld_qids: Array.isArray(day.mapped_uworld_qids) ? day.mapped_uworld_qids : qids,
+    qid_count: qids.length,
+    homework: day.homework || "", tasks: taskItems, task_items: taskItems,
+    available_points: taskItems.reduce((sum, item) => sum + Number(item.points || 0), 0),
+    points_config: NEXTGEN_TASK_POINTS,
+    recording_link: day.recording_link || "", notes_link: day.notes_link || "", assessment_task: day.assessment_task || "",
+    assessment_day: Boolean(day.assessment_day), assessment_id: day.assessment_id || null,
+    flashcards_enabled: day.flashcards_enabled !== false,
     status: day.status || "scheduled", live_session_id: day.live_session_id || null, is_published: day.is_published !== false,
   };
 }
+
+function ngIsDailyTaskCompleted(progress) {
+  if (!progress) return false;
+  if (progress.completed === true) return true;
+  if (progress.tasks?.daily_task_submitted?.completed === true) return true;
+  return false;
+}
+
 function buildProgressSummary({ db, courseId, userId }) {
   const roadmap = db.roadmaps[String(courseId)] || null;
   const days = (roadmap?.days || []).filter((d) => d.is_published !== false);
   const progressItems = Object.values(db.roadmapProgress || {}).filter((p) => String(p.course_id) === String(courseId) && String(p.user_id) === String(userId));
   const completedIds = new Set(progressItems.filter((p) => p.completed).map((p) => p.day_id));
+
+  for (const item of Object.values(db.dailyTaskProgress || {})) {
+    if (String(item.course_id) === String(courseId) && String(item.user_id) === String(userId) && ngIsDailyTaskCompleted(item)) {
+      completedIds.add(item.day_id || item.roadmap_day_id);
+    }
+  }
+
   const total = days.length;
   const completed = days.filter((d) => completedIds.has(d.id)).length;
   const today = todayKey();
   const todayDay = days.find((d) => d.date === today) || days.find((d) => !completedIds.has(d.id)) || days[0] || null;
+  const completedSystems = Array.from(new Set(days.filter((d) => completedIds.has(d.id)).map((d) => d.system || d.chapter).filter(Boolean)));
+  const currentSystem = todayDay?.system || todayDay?.chapter || null;
   return {
     course_id: courseId,
     total_days: total,
@@ -1962,19 +2203,22 @@ function buildProgressSummary({ db, courseId, userId }) {
     progress_percentage: total ? Math.round((completed / total) * 100) : 0,
     current_week: todayDay?.week_number || null,
     current_day: todayDay?.day_number || null,
+    current_system: currentSystem,
+    completed_systems: completedSystems,
     today_day: todayDay ? sanitizeRoadmapDay(todayDay) : null,
   };
 }
 function getStudentAttempts(db, courseId, userId) {
   let attempts = [];
   for (const arr of Object.values(db.quizAttempts || {})) attempts = attempts.concat(arr || []);
+  attempts = attempts.concat(Object.values(db.assessmentAttempts || {}).filter(Boolean));
   return attempts.filter((a) => String(a.course_id) === String(courseId) && String(a.user_id) === String(userId));
 }
 function performanceFromAttempts(attempts) {
   if (!attempts.length) return { attempts_count: 0, average_score: 0, best_score: 0, latest_score: 0, focus_areas: [] };
   const ps = attempts.map((a) => Number(a.percentage || 0));
   const topicScores = {};
-  for (const a of attempts) { const t = a.topic || a.subject || "General"; (topicScores[t] ||= []).push(Number(a.percentage || 0)); }
+  for (const a of attempts) { const t = a.topic || a.subject || a.system || a.assessment_title || "General"; (topicScores[t] ||= []).push(Number(a.percentage || 0)); }
   return {
     attempts_count: attempts.length,
     average_score: Math.round(ps.reduce((s, x) => s + x, 0) / ps.length),
@@ -1984,14 +2228,47 @@ function performanceFromAttempts(attempts) {
   };
 }
 function updateLeaderboard(db, { courseId, userId, userName }) {
+  db.pointEvents = db.pointEvents || {};
   const attendance = Object.values(db.attendance || {}).filter((a) => String(a.course_id) === String(courseId) && String(a.user_id) === String(userId));
-  const attempts = getStudentAttempts(db, courseId, userId);
-  const progress = buildProgressSummary({ db, courseId, userId });
-  const attendancePoints = new Set(attendance.map((a) => a.session_id)).size * 10;
-  const taskPoints = progress.completed_days * 5;
-  const quizPoints = attempts.reduce((sum, a) => sum + Math.round(Number(a.percentage || 0) / 10), 0);
+
+  for (const attendanceItem of attendance) {
+    const taskKey = `attendance:${attendanceItem.session_id}`;
+    const eventKey = `${courseId}:${userId}:${taskKey}`;
+    if (!db.pointEvents[eventKey]) {
+      db.pointEvents[eventKey] = {
+        id: eventKey,
+        course_id: courseId,
+        user_id: userId,
+        user_name: userName || attendanceItem.user_name || "Student",
+        session_id: attendanceItem.session_id,
+        task_key: "live_attendance",
+        category: "attendance",
+        label: ngTaskLabel("live_attendance"),
+        points: NEXTGEN_TASK_POINTS.live_attendance,
+        awarded_at: attendanceItem.marked_at || new Date().toISOString(),
+        metadata: { source: attendanceItem.source || "attendance" },
+      };
+    }
+  }
+
+  const taskEvents = Object.values(db.pointEvents || {}).filter((event) => String(event.course_id) === String(courseId) && String(event.user_id) === String(userId));
+  const attendancePoints = taskEvents.filter((event) => event.category === "attendance" || event.task_key === "live_attendance").reduce((sum, event) => sum + Number(event.points || 0), 0);
+  const assessmentPoints = taskEvents.filter((event) => event.category === "assessment" || String(event.task_key || "").includes("assessment")).reduce((sum, event) => sum + Number(event.points || 0), 0);
+  const taskPoints = taskEvents.filter((event) => !["attendance", "assessment"].includes(event.category) && !String(event.task_key || "").includes("assessment") && event.task_key !== "live_attendance").reduce((sum, event) => sum + Number(event.points || 0), 0);
+
   const key = courseUserKey(courseId, userId);
-  db.leaderboard[key] = { course_id: courseId, user_id: userId, user_name: userName || "Student", attendance_points: attendancePoints, task_points: taskPoints, quiz_points: quizPoints, total_points: attendancePoints + taskPoints + quizPoints, updated_at: new Date().toISOString() };
+  db.leaderboard[key] = {
+    course_id: courseId,
+    user_id: userId,
+    user_name: userName || "Student",
+    attendance_points: attendancePoints,
+    task_points: taskPoints,
+    quiz_points: assessmentPoints,
+    assessment_points: assessmentPoints,
+    total_points: attendancePoints + taskPoints + assessmentPoints,
+    point_events_count: taskEvents.length,
+    updated_at: new Date().toISOString(),
+  };
   return db.leaderboard[key];
 }
 
@@ -2130,6 +2407,18 @@ function applyReleasedAssessmentAttemptToLeaderboard(db, attempt, assessment = n
       created_at: attempt.submitted_at || new Date().toISOString(),
       released_at: attempt.reviewed_at || new Date().toISOString(),
     });
+  }
+
+  db.pointEvents = db.pointEvents || {};
+  const baseEventKey = `${attempt.course_id}:${attempt.user_id}:assessment:${attempt.assessment_id}`;
+  if (!db.pointEvents[baseEventKey]) {
+    db.pointEvents[baseEventKey] = { id: baseEventKey, course_id: attempt.course_id, user_id: attempt.user_id, user_name: attempt.user_name || "Student", assessment_id: attempt.assessment_id, task_key: "assessment_completed", category: "assessment", label: ngTaskLabel("assessment_completed"), points: NEXTGEN_TASK_POINTS.assessment_completed, awarded_at: new Date().toISOString(), metadata: { percentage: attempt.percentage } };
+  }
+  if (Number(attempt.percentage || 0) >= 80) {
+    const bonusEventKey = `${attempt.course_id}:${attempt.user_id}:assessment_high_score:${attempt.assessment_id}`;
+    if (!db.pointEvents[bonusEventKey]) {
+      db.pointEvents[bonusEventKey] = { id: bonusEventKey, course_id: attempt.course_id, user_id: attempt.user_id, user_name: attempt.user_name || "Student", assessment_id: attempt.assessment_id, task_key: "assessment_high_score_bonus", category: "assessment", label: ngTaskLabel("assessment_high_score_bonus"), points: NEXTGEN_TASK_POINTS.assessment_high_score_bonus, awarded_at: new Date().toISOString(), metadata: { percentage: attempt.percentage } };
+    }
   }
 
   attempt.leaderboard_applied = true;
@@ -4478,9 +4767,155 @@ app.get(["/live/notes/:sessionId", "/admin/notes/:sessionId"], getNotesHandler);
 app.post("/live/attendance/mark", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); const db = await readLiveDb(); const { session_id, course_id, source = "classroom_opened" } = req.body; if (!session_id || !course_id) return res.status(400).json({ success: false, error: "session_id and course_id are required" }); const e = getBackendEnrollment(db, { userId: user.id, courseId: course_id }); if (!e && user.role !== "admin" && user.role !== "instructor") return res.status(403).json({ success: false, error: "No course access found" }); const key = `${user.id}:${session_id}`; db.attendance[key] = { id: key, user_id: user.id, user_name: user.name || user.email || "Student", session_id, course_id, date: todayKey(), source, marked_at: new Date().toISOString() }; const leaderboard = updateLeaderboard(db, { courseId: course_id, userId: user.id, userName: user.name || user.email || "Student" }); await writeLiveDb(db); res.json({ success: true, attendance: db.attendance[key], leaderboard }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.get("/live/leaderboard", async (req, res) => { try { await getAuthenticatedUser(req); const db = await readLiveDb(); let list = Object.values(db.leaderboard || {}); if (req.query.course_id) list = list.filter((x) => String(x.course_id) === String(req.query.course_id)); list = list.sort((a, b) => Number(b.total_points || 0) - Number(a.total_points || 0)).map((x, i) => ({ rank: i + 1, ...x })); res.json({ success: true, count: list.length, leaderboard: list }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.get("/live/community/:sessionId", async (req, res) => { try { await getAuthenticatedUser(req); const db = await readLiveDb(); const messages = db.communityMessages[req.params.sessionId] || []; res.json({ success: true, count: messages.length, messages }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
-app.post("/live/community/:sessionId", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); if (!req.body.message) return res.status(400).json({ success: false, error: "message is required" }); const db = await readLiveDb(); const item = { id: uuid(), session_id: req.params.sessionId, course_id: req.body.course_id || null, user_id: user.id, user_name: user.name || user.email || "Student", message: String(req.body.message).slice(0, 2000), created_at: new Date().toISOString() }; db.communityMessages[req.params.sessionId] = [...(db.communityMessages[req.params.sessionId] || []), item]; await writeLiveDb(db); res.json({ success: true, message: item }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.post("/live/community/:sessionId", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); if (!req.body.message) return res.status(400).json({ success: false, error: "message is required" }); const db = await readLiveDb(); const session = db.liveSessions?.[String(req.params.sessionId)] || null; const courseId = req.body.course_id || session?.course_id || null; const item = { id: uuid(), session_id: req.params.sessionId, course_id: courseId, user_id: user.id, user_name: user.name || user.email || "Student", message: String(req.body.message).slice(0, 2000), created_at: new Date().toISOString() }; db.communityMessages[req.params.sessionId] = [...(db.communityMessages[req.params.sessionId] || []), item]; if (courseId && session?.roadmap_day_id) { const day = ngFindRoadmapDay(db, { courseId, dayId: session.roadmap_day_id }); if (day) ngUpsertTaskCompletion(db, { courseId, userId: user.id, userName: user.name || user.email || "Student", day, taskKey: "community_confusion_post", completed: true, metadata: { community_message_id: item.id, session_id: req.params.sessionId } }); updateLeaderboard(db, { courseId, userId: user.id, userName: user.name || user.email || "Student" }); } await writeLiveDb(db); res.json({ success: true, message: item, leaderboard: courseId ? db.leaderboard?.[courseUserKey(courseId, user.id)] || null : null }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 
-app.get("/roadmap/course/:courseId", async (req, res) => { const db = await readLiveDb(); const roadmap = db.roadmaps[String(req.params.courseId)] || null; const days = (roadmap?.days || []).filter((d) => d.is_published !== false); res.json({ success: true, roadmap: roadmap ? { id: roadmap.id, course_id: roadmap.course_id, course_name: roadmap.course_name, settings: roadmap.settings, created_at: roadmap.created_at, updated_at: roadmap.updated_at } : null, days: days.map(sanitizeRoadmapDay), summary: { total_days: roadmap?.days?.length || 0, shown_days: days.length, total_weeks: Math.ceil((roadmap?.days?.length || 0) / 7) } }); });
+
+function ngFindRoadmapDay(db, { courseId, dayId, dayNumber }) {
+  const roadmap = db.roadmaps[String(courseId)] || null;
+  const days = (roadmap?.days || []).filter((d) => d.is_published !== false);
+  if (dayId) return days.find((day) => String(day.id) === String(dayId)) || null;
+  if (dayNumber) return days.find((day) => String(day.day_number) === String(dayNumber)) || null;
+  const today = todayKey();
+  return days.find((day) => day.date === today) || days[0] || null;
+}
+
+function ngSanitizeDailyTaskPacket(db, { courseId, userId, day }) {
+  if (!day) return null;
+  const progress = ngGetDailyTaskProgress(db, { courseId, userId, dayId: day.id }) || ngEnsureDailyTaskProgress(db, { courseId, userId, userName: "Student", day });
+  const cleanDay = sanitizeRoadmapDay(day);
+  const taskItems = cleanDay.task_items.map((task) => ({
+    ...task,
+    completed: Boolean(progress.tasks?.[task.key]?.completed),
+    completed_at: progress.tasks?.[task.key]?.completed_at || null,
+    metadata: progress.tasks?.[task.key]?.metadata || {},
+  }));
+  const earnedPoints = Object.values(db.pointEvents || {})
+    .filter((event) => String(event.course_id) === String(courseId) && String(event.user_id) === String(userId) && String(event.roadmap_day_id || event.day_id || "") === String(day.id))
+    .reduce((sum, event) => sum + Number(event.points || 0), 0);
+  return {
+    ...cleanDay,
+    task_items: taskItems,
+    tasks: taskItems,
+    progress,
+    earned_points: earnedPoints,
+    available_points: taskItems.reduce((sum, task) => sum + Number(task.points || 0), 0),
+  };
+}
+
+app.get("/student/daily-task", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const courseId = String(req.query.course_id || req.query.courseId || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    const enrollment = getBackendEnrollment(db, { userId: user.id, courseId });
+    if (!enrollment && user.role !== "admin" && user.role !== "instructor") return res.status(403).json({ success: false, error: "No course access found" });
+    const day = ngFindRoadmapDay(db, { courseId, dayId: req.query.day_id, dayNumber: req.query.day_number });
+    if (!day) return res.status(404).json({ success: false, error: "Roadmap day not found" });
+    const packet = ngSanitizeDailyTaskPacket(db, { courseId, userId: user.id, day });
+    const summary = buildProgressSummary({ db, courseId, userId: user.id });
+    const leaderboard = updateLeaderboard(db, { courseId, userId: user.id, userName: user.name || user.email || "Student" });
+    await writeLiveDb(db);
+    res.json({ success: true, packet, summary, leaderboard });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/student/daily-task/:dayId/task", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const courseId = String(req.body.course_id || req.body.courseId || "").trim();
+    const taskKey = String(req.body.task_key || req.body.taskKey || req.body.key || "").trim();
+    if (!courseId || !taskKey) return res.status(400).json({ success: false, error: "course_id and task_key are required" });
+    const enrollment = getBackendEnrollment(db, { userId: user.id, courseId });
+    if (!enrollment && user.role !== "admin" && user.role !== "instructor") return res.status(403).json({ success: false, error: "No course access found" });
+    const day = ngFindRoadmapDay(db, { courseId, dayId: req.params.dayId });
+    if (!day) return res.status(404).json({ success: false, error: "Roadmap day not found" });
+    const progress = ngUpsertTaskCompletion(db, { courseId, userId: user.id, userName: user.name || user.email || "Student", day, taskKey, completed: req.body.completed !== false, metadata: req.body.metadata || {} });
+    const leaderboard = updateLeaderboard(db, { courseId, userId: user.id, userName: user.name || user.email || "Student" });
+    await writeLiveDb(db);
+    res.json({ success: true, progress, packet: ngSanitizeDailyTaskPacket(db, { courseId, userId: user.id, day }), summary: buildProgressSummary({ db, courseId, userId: user.id }), leaderboard });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/student/daily-task/:dayId/weak-concept", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const courseId = String(req.body.course_id || req.body.courseId || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    const day = ngFindRoadmapDay(db, { courseId, dayId: req.params.dayId });
+    if (!day) return res.status(404).json({ success: false, error: "Roadmap day not found" });
+    const enrollment = getBackendEnrollment(db, { userId: user.id, courseId });
+    if (!enrollment && user.role !== "admin" && user.role !== "instructor") return res.status(403).json({ success: false, error: "No course access found" });
+    db.weakConceptLogs = db.weakConceptLogs || {};
+    const id = uuid();
+    db.weakConceptLogs[id] = {
+      id,
+      course_id: courseId,
+      user_id: user.id,
+      user_name: user.name || user.email || "Student",
+      roadmap_day_id: day.id,
+      day_id: day.id,
+      day_number: day.day_number || null,
+      system: day.system || "",
+      qids: ngNormalizeQidList(req.body.qids || req.body.qid || req.body.wrong_qids),
+      weak_concept: String(req.body.weak_concept || req.body.concept || req.body.topic || "").trim(),
+      reason: String(req.body.reason || req.body.mistake_reason || "").trim(),
+      notes: String(req.body.notes || req.body.note || "").slice(0, 4000),
+      source: "student_daily_task",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    const progress = ngUpsertTaskCompletion(db, { courseId, userId: user.id, userName: user.name || user.email || "Student", day, taskKey: "weak_concepts_logged", completed: true, metadata: { weak_concept_log_id: id } });
+    const leaderboard = updateLeaderboard(db, { courseId, userId: user.id, userName: user.name || user.email || "Student" });
+    await writeLiveDb(db);
+    res.json({ success: true, weak_concept: db.weakConceptLogs[id], progress, leaderboard });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+function ngBuildPublicRoadmapProgress(days = []) {
+  const today = todayKey();
+  const published = days.filter((d) => d.is_published !== false);
+  const completed = published.filter((d) => ["completed", "done"].includes(String(d.status || "").toLowerCase()));
+  const current = published.find((d) => d.date === today) || published.find((d) => new Date(`${d.date}T00:00:00`).getTime() >= new Date(`${today}T00:00:00`).getTime()) || published[published.length - 1] || null;
+  const systems = [];
+  for (const day of published) {
+    const system = day.system || day.chapter || "General";
+    let item = systems.find((x) => x.system === system);
+    if (!item) {
+      item = { system, total_days: 0, completed_days: 0, status: "upcoming" };
+      systems.push(item);
+    }
+    item.total_days += 1;
+    if (["completed", "done"].includes(String(day.status || "").toLowerCase()) || (current && systems.length && item.system !== (current.system || current.chapter) && new Date(`${day.date}T00:00:00`).getTime() < new Date(`${today}T00:00:00`).getTime())) item.completed_days += 1;
+  }
+  for (const item of systems) {
+    item.progress_percentage = item.total_days ? Math.round((item.completed_days / item.total_days) * 100) : 0;
+    if (item.progress_percentage >= 100) item.status = "completed";
+    else if (current && item.system === (current.system || current.chapter)) item.status = "current";
+  }
+  return {
+    total_days: published.length,
+    completed_days: completed.length,
+    current_day: current ? sanitizeRoadmapDay(current) : null,
+    current_system: current?.system || current?.chapter || null,
+    systems,
+  };
+}
+
+app.get("/roadmap/course/:courseId", async (req, res) => {
+  const db = await readLiveDb();
+  const roadmap = db.roadmaps[String(req.params.courseId)] || null;
+  const days = (roadmap?.days || []).filter((d) => d.is_published !== false);
+  const publicProgress = ngBuildPublicRoadmapProgress(days);
+  res.json({
+    success: true,
+    roadmap: roadmap ? { id: roadmap.id, course_id: roadmap.course_id, course_name: roadmap.course_name, settings: roadmap.settings, created_at: roadmap.created_at, updated_at: roadmap.updated_at, title: roadmap.title || "" } : null,
+    days: days.map(sanitizeRoadmapDay),
+    summary: { total_days: roadmap?.days?.length || 0, shown_days: days.length, total_weeks: Math.ceil((roadmap?.days?.length || 0) / 7), public_progress: publicProgress },
+  });
+}); });
 app.post("/admin/roadmap/generate", async (req, res) => {
   try {
     await requireLmsPermission(req, "lms.roadmap.manage");
@@ -35013,17 +35448,18 @@ app.post("/admin/crm/leads/:id/flow-status", async (req, res) => {
 
 function ngDefaultMarathonSystems() {
   return [
+    { system: "Cardiology", days: 14, topics: ["cardiac physiology foundation", "murmurs and valvular disease", "ischemia and heart failure", "arrhythmias and pharmacology"] },
     { system: "MSK", days: 10, topics: ["bone and joint foundation", "muscle and connective tissue", "arthritis and bone pathology"] },
-    { system: "Neurology / CNS", days: 17, topics: ["neuroanatomy and localization", "stroke/seizure/movement", "CNS pathology and pharmacology"] },
+    { system: "Neurology / CNS", days: 15, topics: ["neuroanatomy and localization", "stroke/seizure/movement", "CNS pathology and pharmacology"] },
     { system: "Reproductive", days: 10, topics: ["female reproductive physiology", "pregnancy and pathology", "male reproductive and endocrine integration"] },
-    { system: "Endocrinology", days: 10, topics: ["diabetes and thyroid", "adrenal and pituitary", "calcium/PTH and endocrine pharmacology"] },
-    { system: "GIT", days: 14, topics: ["GI physiology", "liver/pancreas", "malabsorption/IBD/GI pathology"] },
-    { system: "Renal", days: 12, topics: ["nephron physiology", "acid-base and electrolytes", "glomerular disease and diuretics"] },
+    { system: "Endocrinology", days: 9, topics: ["diabetes and thyroid", "adrenal and pituitary", "calcium/PTH and endocrine pharmacology"] },
+    { system: "GIT", days: 13, topics: ["GI physiology", "liver/pancreas", "malabsorption/IBD/GI pathology"] },
+    { system: "Renal", days: 11, topics: ["nephron physiology", "acid-base and electrolytes", "glomerular disease and diuretics"] },
     { system: "Pulmonology / Respiratory", days: 10, topics: ["pulmonary mechanics", "V/Q and gas exchange", "obstructive/restrictive lung disease"] },
-    { system: "Immunology", days: 8, topics: ["immune cells and complement", "hypersensitivity and immunodeficiency", "autoimmunity and transplant"] },
+    { system: "Immunology", days: 7, topics: ["immune cells and complement", "hypersensitivity and immunodeficiency", "autoimmunity and transplant"] },
     { system: "Hematology", days: 10, topics: ["RBC and anemia", "WBC malignancy", "platelets/coagulation/transfusion"] },
     { system: "Psychiatry", days: 7, topics: ["mood/anxiety/psychosis", "substance/personality", "psych pharmacology"] },
-    { system: "Mixed Review + Final Correction", days: 12, topics: ["weak-area repair", "mixed QID correction", "final readiness review"] },
+    { system: "Mixed Review + Final Correction", days: 4, topics: ["weak-area repair", "mixed QID correction", "final readiness review"] },
   ];
 }
 
@@ -35038,20 +35474,24 @@ function ngBuildMarathonDay({ courseId, dayNumber, weekNumber, date, system, sys
   const title = isAssessment ? `${system} — System-End Assessment + Correction` : `${system} Day ${systemDay} — ${topic}`;
   const description = isAssessment
     ? `System-end assessment and correction day for ${system}. Students review incorrects, rewatch weak UWorld Video Library explanations, revise First Aid/Pathoma notes, and post one confusing concept in Community Q&A.`
-    : `Live First Aid session with Dr. Ahmad for ${system}. After class, complete the mapped UWorld QIDs, watch the matching UWorld Video Library lecture, review recordings/notes, complete the daily task, use flashcards, earn leaderboard points, and post one confusing concept in Community Q&A.`;
+    : `Live First Aid session with Dr. Ahmad for ${system}. After class, watch the matching UWorld Video Library QID explanations, complete the assigned UWorld QIDs externally, log weak concepts, review flashcards, earn leaderboard points, and post one confusing concept in Community Q&A.`;
   return {
     id: uuid(), course_id: courseId, week_number: weekNumber, day_number: dayNumber, date: dateOnly(date),
     system, system_day: systemDay, title, description,
     resources: isAssessment ? ["First Aid", "UWorld Video Library", "Assessment", "Incorrect Review", "Leaderboard", "Community Q&A"] : ["First Aid", "Pathoma", "UWorld Video Library", "Live Session Recording", "Class Notes", "Daily Flashcards", "Community Q&A", "Leaderboard"],
     resource_links: [],
     uworld_target: isAssessment ? `${system} system-end assessment + incorrect review` : (qids || `${system} mapped QIDs: 30-40 MCQs or assigned block`),
+    uworld_qids: ngNormalizeQidList(qids),
+    mapped_uworld_qids: ngNormalizeQidList(qids),
+    video_library_lecture: `${system} Video Library — Day ${systemDay}`,
     first_aid_topics: topic,
-    homework: isAssessment ? "Complete the system-end assessment, review incorrects, rewatch weak video-library explanations, and submit correction notes for leaderboard points." : "Attend Dr. Ahmad’s live First Aid session, complete assigned QIDs, watch the matching UWorld Video Library lecture, review notes/recording when available, complete daily flashcards, complete the roadmap task, earn leaderboard task points, and post one confusing concept in Community Q&A.",
+    homework: isAssessment ? "Complete the system-end assessment, review incorrects, rewatch weak video-library explanations, and submit correction notes for leaderboard points." : "Attend Dr. Ahmad’s live First Aid session, watch the matching UWorld Video Library QID explanations, complete assigned UWorld QIDs externally, log wrongs/weak concepts, review daily flashcards, submit the daily task, earn leaderboard task points, and post one confusing concept in Community Q&A.",
     status: "scheduled",
     is_published: true,
     published: true,
     assessment_day: isAssessment,
     flashcards_enabled: true,
+    task_items: ngBuildDefaultTaskItems({ assessment_day: isAssessment }),
   };
 }
 
@@ -35061,7 +35501,7 @@ function ngBuildDailyFlashcardsForDay(day) {
   return [
     { front: `What is the key First Aid concept for ${topic}?`, back: `Review the live class notes for ${topic}, then connect the mechanism to the assigned UWorld QIDs.`, explanation: "Use active recall before watching the video explanation." },
     { front: `Which mistake should you avoid in ${day.system}?`, back: "Do not memorize the answer only. Identify the mechanism, wrong-option trap, and First Aid line that explains it.", explanation: "This card is for correction-based revision." },
-    { front: `What should you do after completing today’s ${day.system} QIDs?`, back: "Watch the matching UWorld Video Library lecture, review notes/recording, post one confusing concept in Community Q&A, and mark the roadmap task complete.", explanation: "This links daily study work to leaderboard accountability." },
+    { front: `What should you do after completing today’s ${day.system} QIDs?`, back: "Watch the matching UWorld Video Library QID explanations first, complete assigned UWorld QIDs externally, log wrongs/weak concepts, review notes/recording, post one confusing concept in Community Q&A, and submit the daily task.", explanation: "This links daily study work to leaderboard accountability." },
   ];
 }
 
@@ -35128,6 +35568,191 @@ app.post("/admin/roadmap/apply-marathon-template", async (req, res) => {
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
+
+function ngTrainingTextForFlashcards(crmDb, { system = "", topic = "", weakConcept = "", qids = [] } = {}) {
+  const hayWords = [system, topic, weakConcept, ...(Array.isArray(qids) ? qids : [])]
+    .map((x) => String(x || "").toLowerCase())
+    .filter(Boolean);
+  const items = [
+    ...ensureCrmArray(crmDb, "ai_training_items"),
+    ...ensureCrmArray(crmDb, "ai_training"),
+  ].filter((item) => item.active !== false && item.status !== "archived" && item.is_deleted !== true);
+  const ranked = items.map((item) => {
+    const title = String(item.title || item.name || item.category || "");
+    const content = String(item.content || item.training_content || item.text || item.summary || "");
+    const hay = `${title}\n${content}`.toLowerCase();
+    let score = 0;
+    for (const word of hayWords) if (word && hay.includes(word)) score += word.length > 4 ? 4 : 1;
+    if (/first aid|usmle|step 1|high-yield|high yield/i.test(`${title}\n${content}`)) score += 2;
+    return { item, score, text: `## ${title}\n${content}`.trim() };
+  }).filter((x) => x.text.length > 50).sort((a, b) => b.score - a.score);
+
+  const picked = ranked.filter((x) => x.score > 0).slice(0, 8);
+  const fallback = picked.length ? picked : ranked.slice(0, 8);
+  return fallback.map((x) => x.text).join("\n\n---\n\n").slice(0, 24000);
+}
+
+function ngNormalizeAIFlashcards(cards = []) {
+  return (Array.isArray(cards) ? cards : []).map((card, index) => ({
+    front: String(card.front || card.question || card.prompt || `Flashcard ${index + 1}`).trim(),
+    back: String(card.back || card.answer || "").trim(),
+    explanation: String(card.explanation || card.rationale || "").trim(),
+    tag: String(card.tag || card.topic || "weak-area").trim(),
+    difficulty: String(card.difficulty || "medium").trim(),
+  })).filter((card) => card.front && card.back);
+}
+
+async function ngGenerateFlashcardsWithAI({ trainingText, system, topic, weakConcept, qids = [], count = 8 }) {
+  const clean = String(trainingText || "").trim();
+  if (!isAIConfigured() || clean.length < 300) {
+    return {
+      cards: [
+        { front: `What is the key First Aid point for ${weakConcept || topic || system}?`, back: "Review the relevant First Aid chunk and connect the mechanism to your wrong QID.", explanation: "Fallback card because AI/training context was not available.", tag: "weak-area", difficulty: "medium" },
+        { front: `What trap should you avoid in ${weakConcept || topic || system}?`, back: "Do not memorize the answer only. Identify the mechanism, diagnosis clue, and wrong-option trap.", explanation: "This card supports correction-based revision.", tag: "error-correction", difficulty: "medium" },
+      ],
+      usage: {},
+      model: "fallback-local",
+      warnings: [!isAIConfigured() ? getAIConfigError() : "Training context was too short"],
+    };
+  }
+
+  const model = getAIModel();
+  const systemPrompt = `You create original USMLE Step 1 active-recall flashcards for NextGen students. Use only the provided First Aid/training context. Do not copy question-bank wording. Return strict JSON only.`;
+  const userPrompt = `
+Create ${Math.max(3, Math.min(20, Number(count || 8)))} flashcards.
+
+Student weak area: ${weakConcept || "not specified"}
+System: ${system || "not specified"}
+Daily topic: ${topic || "not specified"}
+Related QIDs: ${(Array.isArray(qids) ? qids : []).join(", ") || "not specified"}
+
+Return JSON exactly:
+{
+  "flashcards": [
+    { "front": "...", "back": "...", "explanation": "...", "tag": "...", "difficulty": "easy|medium|hard" }
+  ],
+  "warnings": []
+}
+
+First Aid / AI Training context:
+${clean}
+`.trim();
+
+  const aiResult = await callOpenAIResponsesAPI({ model, systemPrompt, userPrompt, maxOutputTokens: 5000, jsonMode: true });
+  const parsed = safeJsonParseFromAI(aiResult.text);
+  return {
+    cards: ngNormalizeAIFlashcards(parsed.flashcards || parsed.cards || []),
+    warnings: Array.isArray(parsed.warnings) ? parsed.warnings : [],
+    usage: aiResult.usage,
+    model: aiResult.raw_model || model,
+  };
+}
+
+app.post("/student/flashcards/generate-weak-area", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const crmDb = await readCrmDb();
+    const courseId = String(req.body.course_id || req.body.courseId || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    const enrollment = getBackendEnrollment(db, { userId: user.id, courseId });
+    if (!enrollment && user.role !== "admin" && user.role !== "instructor") return res.status(403).json({ success: false, error: "No course access found" });
+    const day = req.body.day_id || req.body.roadmap_day_id ? ngFindRoadmapDay(db, { courseId, dayId: req.body.day_id || req.body.roadmap_day_id }) : null;
+    const qids = ngNormalizeQidList(req.body.qids || req.body.wrong_qids || req.body.qid);
+    const weakConcept = String(req.body.weak_concept || req.body.concept || req.body.topic || "").trim();
+    const topic = String(req.body.topic || day?.first_aid_topics || day?.live_teaching_topic || "").trim();
+    const system = String(req.body.system || day?.system || "").trim();
+    const trainingText = ngTrainingTextForFlashcards(crmDb, { system, topic, weakConcept, qids });
+    const result = await ngGenerateFlashcardsWithAI({ trainingText, system, topic, weakConcept, qids, count: req.body.count || 8 });
+    const created = [];
+    for (const card of result.cards) {
+      const id = uuid();
+      db.flashcards[id] = {
+        id,
+        course_id: courseId,
+        user_id: user.id,
+        roadmap_day_id: day?.id || req.body.day_id || null,
+        day_number: day?.day_number || null,
+        system,
+        front: card.front,
+        back: card.back,
+        explanation: card.explanation,
+        tag: card.tag,
+        difficulty: card.difficulty,
+        scope: "student_weak_area",
+        source: "ai_training_first_aid_weak_area",
+        qids,
+        weak_concept: weakConcept,
+        due_date: dateOnly(addDays(new Date(), 1)),
+        status: "published",
+        is_published: true,
+        created_by: user.id,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      created.push(db.flashcards[id]);
+    }
+    if (day) {
+      ngUpsertTaskCompletion(db, { courseId, userId: user.id, userName: user.name || user.email || "Student", day, taskKey: "weak_concepts_logged", completed: true, metadata: { weak_concept: weakConcept, qids, generated_flashcards: created.length } });
+    }
+    const leaderboard = updateLeaderboard(db, { courseId, userId: user.id, userName: user.name || user.email || "Student" });
+    await writeLiveDb(db);
+    res.json({ success: true, count: created.length, flashcards: created, warnings: result.warnings || [], ai_model: result.model, training_context_used: Boolean(trainingText), leaderboard });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/student/flashcards/:id/review", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const card = db.flashcards?.[String(req.params.id)] || null;
+    if (!card) return res.status(404).json({ success: false, error: "Flashcard not found" });
+    const courseId = String(card.course_id || req.body.course_id || "").trim();
+    const day = card.roadmap_day_id ? ngFindRoadmapDay(db, { courseId, dayId: card.roadmap_day_id }) : null;
+    db.flashcardProgress = db.flashcardProgress || {};
+    const key = `${courseId}:${user.id}:${card.id}`;
+    db.flashcardProgress[key] = { id: key, course_id: courseId, user_id: user.id, flashcard_id: card.id, roadmap_day_id: card.roadmap_day_id || null, reviewed: true, confidence: req.body.confidence || null, reviewed_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+    if (day) ngUpsertTaskCompletion(db, { courseId, userId: user.id, userName: user.name || user.email || "Student", day, taskKey: "flashcards_reviewed", completed: true, metadata: { flashcard_id: card.id, confidence: req.body.confidence || null } });
+    const leaderboard = courseId ? updateLeaderboard(db, { courseId, userId: user.id, userName: user.name || user.email || "Student" }) : null;
+    await writeLiveDb(db);
+    res.json({ success: true, progress: db.flashcardProgress[key], leaderboard });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/qid-library/import", async (req, res) => {
+  try {
+    const { user } = await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const courseId = String(req.body.course_id || req.body.courseId || "global_step1").trim();
+    const systems = Array.isArray(req.body.systems) ? req.body.systems : Array.isArray(req.body.system_plan) ? req.body.system_plan : [];
+    if (!systems.length) return res.status(400).json({ success: false, error: "systems array is required" });
+    db.qidLibrary = db.qidLibrary || {};
+    const rows = [];
+    for (const system of systems) {
+      const systemName = String(system.system || system.name || system.title || "System").trim();
+      const lectures = Array.isArray(system.lectures) ? system.lectures : Array.isArray(system.qid_blocks) ? system.qid_blocks.map((qids, index) => ({ lecture_number: index + 1, title: `${systemName} Lecture ${index + 1}`, qids })) : [];
+      for (const lecture of lectures) {
+        rows.push({
+          id: `${courseId}:${systemName}:${lecture.lecture_number || lecture.number || rows.length + 1}`.replace(/\s+/g, "_"),
+          course_id: courseId,
+          system: systemName,
+          lecture_number: Number(lecture.lecture_number || lecture.number || rows.length + 1),
+          lecture_title: String(lecture.title || lecture.name || `${systemName} Lecture`).trim(),
+          video_library_lecture: String(lecture.video_library_lecture || lecture.title || lecture.name || `${systemName} Lecture`).trim(),
+          first_aid_topics: String(lecture.first_aid_topics || lecture.topic || "").trim(),
+          qids: ngNormalizeQidList(lecture.qids || lecture.uworld_qids || lecture.qid_list),
+          created_by: user.id,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        });
+      }
+    }
+    db.qidLibrary[courseId] = { course_id: courseId, rows, updated_by: user.id, updated_at: new Date().toISOString() };
+    await writeLiveDb(db);
+    res.json({ success: true, course_id: courseId, lectures: rows.length, qids: rows.reduce((sum, row) => sum + row.qids.length, 0), qid_library: db.qidLibrary[courseId] });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
 app.get("/flashcards", async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req);
@@ -35135,8 +35760,16 @@ app.get("/flashcards", async (req, res) => {
     const courseId = String(req.query.course_id || req.query.courseId || "").trim();
     let cards = Object.values(db.flashcards || {}).filter((card) => card.status !== "archived" && card.is_published !== false);
     if (courseId) cards = cards.filter((card) => String(card.course_id) === courseId);
+    cards = cards.filter((card) => !card.user_id || String(card.user_id) === String(user.id) || user.role === "admin" || user.role === "instructor");
     if (req.query.day_id) cards = cards.filter((card) => String(card.roadmap_day_id) === String(req.query.day_id));
     if (req.query.day_number) cards = cards.filter((card) => String(card.day_number) === String(req.query.day_number));
+    if (req.query.scope) cards = cards.filter((card) => String(card.scope || "daily_topic") === String(req.query.scope));
+    if (req.query.due === "true") {
+      const today = todayKey();
+      cards = cards.filter((card) => !card.due_date || String(card.due_date) <= today);
+    }
+    const reviewed = new Set(Object.values(db.flashcardProgress || {}).filter((p) => String(p.user_id) === String(user.id) && p.reviewed).map((p) => String(p.flashcard_id)));
+    cards = cards.map((card) => ({ ...card, reviewed: reviewed.has(String(card.id)) }));
     cards.sort((a, b) => Number(a.day_number || 0) - Number(b.day_number || 0));
     res.json({ success: true, count: cards.length, flashcards: cards });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
