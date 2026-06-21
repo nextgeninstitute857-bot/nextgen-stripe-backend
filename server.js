@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v138-roadmap-master-map-generator";
+const NEXTGEN_BACKEND_BUILD = "v140-roadmap-reset-ai-flashcards";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -35662,10 +35662,25 @@ function ngNormalizeMasterMapRows(value) {
   }).filter((row) => row.system && (row.topic || row.first_aid_topics || row.title || row.uworld_qids.length));
 }
 
-function ngSortMasterRowsForSequence(rows = []) {
+function ngNormalizeSystemSequence(values = []) {
+  const list = Array.isArray(values) ? values : typeof values === "string" ? values.split(/[\n,>→]+/) : [];
+  const normalized = list.map((item) => ngNormalizeMasterMapSystemName(item)).filter(Boolean);
+  const unique = [];
+  for (const item of normalized) if (!unique.includes(item)) unique.push(item);
+  return unique.length ? unique : [...NEXTGEN_STEP1_ROADMAP_SYSTEM_SEQUENCE];
+}
+
+function ngSystemOrderIndexFromSequence(system = "", sequence = NEXTGEN_STEP1_ROADMAP_SYSTEM_SEQUENCE) {
+  const normalized = ngNormalizeMasterMapSystemName(system);
+  const list = ngNormalizeSystemSequence(sequence);
+  const index = list.findIndex((item) => item === normalized);
+  return index >= 0 ? index : 999;
+}
+
+function ngSortMasterRowsForSequence(rows = [], systemSequence = NEXTGEN_STEP1_ROADMAP_SYSTEM_SEQUENCE) {
   return [...rows].sort((a, b) => {
-    const ai = ngSystemOrderIndex(a.system);
-    const bi = ngSystemOrderIndex(b.system);
+    const ai = ngSystemOrderIndexFromSequence(a.system, systemSequence);
+    const bi = ngSystemOrderIndexFromSequence(b.system, systemSequence);
     if (ai !== bi) return ai - bi;
     const ad = Number(a.system_day ?? a.day_in_system ?? a.source_index ?? a.day_number ?? 0) || 0;
     const bd = Number(b.system_day ?? b.day_in_system ?? b.source_index ?? b.day_number ?? 0) || 0;
@@ -35673,10 +35688,30 @@ function ngSortMasterRowsForSequence(rows = []) {
   });
 }
 
-function ngGetStoredMasterRows(db, template = NEXTGEN_MASTER_MAP_TEMPLATE_KEY) {
+function ngExtractMasterMapSystemSequence(body = {}, rows = []) {
+  const explicit = body.system_order || body.system_sequence || body.sequence || body.systems_order;
+  if (explicit) return ngNormalizeSystemSequence(explicit);
+  const seen = [];
+  for (const row of rows || []) {
+    const system = ngNormalizeMasterMapSystemName(row.system || row.chapter || row.subject || "");
+    if (system && !seen.includes(system)) seen.push(system);
+  }
+  return seen.length ? seen : [...NEXTGEN_STEP1_ROADMAP_SYSTEM_SEQUENCE];
+}
+
+function ngGetStoredMasterMapItem(db, template = NEXTGEN_MASTER_MAP_TEMPLATE_KEY) {
   const store = db.roadmapMasterMaps || {};
-  const item = store[String(template || NEXTGEN_MASTER_MAP_TEMPLATE_KEY)] || store[NEXTGEN_MASTER_MAP_TEMPLATE_KEY] || null;
+  return store[String(template || NEXTGEN_MASTER_MAP_TEMPLATE_KEY)] || store[NEXTGEN_MASTER_MAP_TEMPLATE_KEY] || null;
+}
+
+function ngGetStoredMasterRows(db, template = NEXTGEN_MASTER_MAP_TEMPLATE_KEY) {
+  const item = ngGetStoredMasterMapItem(db, template);
   return ngNormalizeMasterMapRows(item?.rows || []);
+}
+
+function ngGetStoredMasterSystemSequence(db, template = NEXTGEN_MASTER_MAP_TEMPLATE_KEY) {
+  const item = ngGetStoredMasterMapItem(db, template);
+  return ngNormalizeSystemSequence(item?.system_sequence || item?.system_order || NEXTGEN_STEP1_ROADMAP_SYSTEM_SEQUENCE);
 }
 
 function ngBuildStudyDates(startDateRaw, count, skipSundays = true) {
@@ -35783,6 +35818,94 @@ function ngRecalculateRoadmapSchedule(db, roadmap, { startDate = "", skipSundays
   return roadmap;
 }
 
+function ngResetObjectByCourse(db, key, courseId, shouldRemove = null) {
+  const bucket = db[key] || {};
+  let removed = 0;
+  for (const [id, item] of Object.entries(bucket)) {
+    const itemCourseId = String(item?.course_id || item?.courseId || "");
+    const keyMatches = String(id).startsWith(`${courseId}:`) || String(id).includes(`:${courseId}:`);
+    const courseMatches = itemCourseId === String(courseId) || keyMatches;
+    if (!courseMatches) continue;
+    if (typeof shouldRemove === "function" && !shouldRemove(item, id)) continue;
+    delete bucket[id];
+    removed += 1;
+  }
+  db[key] = bucket;
+  return removed;
+}
+
+function ngResetCourseAcademicContent(db, options = {}) {
+  const courseId = String(options.courseId || options.course_id || "").trim();
+  if (!courseId) return { error: "course_id is required" };
+
+  const counts = {
+    roadmap_days_removed: 0,
+    live_sessions_removed: 0,
+    flashcards_archived: 0,
+    assessments_removed: 0,
+    daily_task_progress_removed: 0,
+    weak_concepts_removed: 0,
+    flashcard_progress_removed: 0,
+    point_events_removed: 0,
+  };
+
+  const roadmap = db.roadmaps?.[courseId] || null;
+  const roadmapDayIds = new Set((Array.isArray(roadmap?.days) ? roadmap.days : []).map((day) => String(day.id || "")).filter(Boolean));
+
+  if (options.clearGeneratedLiveSessions !== false || options.clearAllCourseLiveSessions === true) {
+    db.liveSessions = db.liveSessions || {};
+    for (const [id, session] of Object.entries(db.liveSessions)) {
+      const isCourseSession = String(session?.course_id || "") === courseId;
+      const isLinkedToRoadmap = session?.roadmap_day_id && roadmapDayIds.has(String(session.roadmap_day_id));
+      const isGenerated = isLinkedToRoadmap || String(session?.source || "").includes("roadmap") || String(session?.topic || "").includes("Day ");
+      if (isCourseSession && (options.clearAllCourseLiveSessions === true || isGenerated)) {
+        delete db.liveSessions[id];
+        counts.live_sessions_removed += 1;
+      }
+    }
+  }
+
+  if (options.archiveGeneratedFlashcards !== false || options.archiveAllCourseFlashcards === true) {
+    db.flashcards = db.flashcards || {};
+    const systemFilter = String(options.system || "").trim();
+    for (const card of Object.values(db.flashcards)) {
+      if (!card || String(card.course_id || "") !== courseId) continue;
+      if (systemFilter && ngNormalizeMasterMapSystemName(card.system || card.topic || "") !== ngNormalizeMasterMapSystemName(systemFilter)) continue;
+      const isLinkedToRoadmap = card.roadmap_day_id && roadmapDayIds.has(String(card.roadmap_day_id));
+      const isGenerated = isLinkedToRoadmap || /generated|roadmap|weak_area|daily_topic/i.test(String(card.source || card.scope || ""));
+      if (options.archiveAllCourseFlashcards === true || isGenerated) {
+        card.status = "archived";
+        card.is_published = false;
+        card.archived_reason = options.reason || "course_academic_reset";
+        card.archived_at = nowIso();
+        card.updated_by = options.actorId || card.updated_by || null;
+        card.updated_at = nowIso();
+        counts.flashcards_archived += 1;
+      }
+    }
+  }
+
+  if (options.clearAssessments !== false) {
+    counts.assessments_removed = ngResetObjectByCourse(db, "assessments", courseId, (assessment) => {
+      return options.clearAllCourseAssessments === true || (assessment?.roadmap_day_id && roadmapDayIds.has(String(assessment.roadmap_day_id))) || /roadmap|marathon|system_end/i.test(String(assessment?.source_type || assessment?.assessment_type || ""));
+    });
+  }
+
+  if (options.clearProgress !== false) {
+    counts.daily_task_progress_removed = ngResetObjectByCourse(db, "dailyTaskProgress", courseId);
+    counts.weak_concepts_removed = ngResetObjectByCourse(db, "weakConceptLogs", courseId);
+    counts.flashcard_progress_removed = ngResetObjectByCourse(db, "flashcardProgress", courseId);
+    counts.point_events_removed = ngResetObjectByCourse(db, "pointEvents", courseId);
+  }
+
+  if (options.resetRoadmap === true && db.roadmaps?.[courseId]) {
+    counts.roadmap_days_removed = Array.isArray(db.roadmaps[courseId].days) ? db.roadmaps[courseId].days.length : 0;
+    delete db.roadmaps[courseId];
+  }
+
+  return counts;
+}
+
 function ngDefaultMarathonSystems() {
   return [
     { system: "Cardiology", days: 14, topics: ["cardiac physiology foundation", "murmurs and valvular disease", "ischemia and heart failure", "arrhythmias and pharmacology"] },
@@ -35862,7 +35985,9 @@ app.post("/admin/roadmap/import-master-map", async (req, res) => {
     const db = await readLiveDb();
     const template = String(req.body.template || NEXTGEN_MASTER_MAP_TEMPLATE_KEY).trim() || NEXTGEN_MASTER_MAP_TEMPLATE_KEY;
     const rawRows = req.body.rows || req.body.days || req.body.master_map || req.body.map || req.body.json_text || [];
-    const rows = ngSortMasterRowsForSequence(ngNormalizeMasterMapRows(rawRows));
+    const normalizedRows = ngNormalizeMasterMapRows(rawRows);
+    const systemSequence = ngExtractMasterMapSystemSequence(req.body || {}, normalizedRows);
+    const rows = ngSortMasterRowsForSequence(normalizedRows, systemSequence);
     if (!rows.length) return res.status(400).json({ success: false, error: "Master map JSON must contain at least one valid row/day" });
     const bySystem = {};
     for (const row of rows) bySystem[row.system] = (bySystem[row.system] || 0) + 1;
@@ -35874,14 +35999,14 @@ app.post("/admin/roadmap/import-master-map", async (req, res) => {
       rows,
       count: rows.length,
       by_system: bySystem,
-      system_sequence: NEXTGEN_STEP1_ROADMAP_SYSTEM_SEQUENCE,
+      system_sequence: systemSequence,
       source: "admin_json_import",
       imported_by: user.id,
       imported_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
     await writeLiveDb(db);
-    res.json({ success: true, template, count: rows.length, by_system: bySystem, map: { ...db.roadmapMasterMaps[template], rows: undefined }, message: `Master map imported: ${rows.length} rows` });
+    res.json({ success: true, template, count: rows.length, by_system: bySystem, system_sequence: systemSequence, first_system: systemSequence[0] || rows[0]?.system || null, map: { ...db.roadmapMasterMaps[template], rows: undefined }, message: `Master map imported: ${rows.length} rows` });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
@@ -35932,6 +36057,40 @@ app.post("/admin/roadmap/:dayId/push-status", async (req, res) => {
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
+app.post("/admin/roadmap/course-academic-reset", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.roadmap.manage");
+    const db = await readLiveDb();
+    const courseId = String(req.body.course_id || req.body.courseId || "").trim();
+    if (!courseId || !db.courses?.[courseId]) return res.status(404).json({ success: false, error: "Valid course_id is required" });
+    const confirmed = req.body.confirm === true || String(req.body.confirm || "").toLowerCase() === "reset";
+    if (!confirmed) return res.status(400).json({ success: false, error: "Confirmation is required. Send confirm: true." });
+
+    const counts = ngResetCourseAcademicContent(db, {
+      courseId,
+      resetRoadmap: req.body.reset_roadmap !== false,
+      clearGeneratedLiveSessions: req.body.clear_generated_live_sessions !== false,
+      clearAllCourseLiveSessions: req.body.clear_all_live_sessions === true,
+      archiveGeneratedFlashcards: req.body.archive_generated_flashcards !== false,
+      archiveAllCourseFlashcards: req.body.archive_all_flashcards === true,
+      clearAssessments: req.body.clear_assessments !== false,
+      clearAllCourseAssessments: req.body.clear_all_assessments === true,
+      clearProgress: req.body.clear_progress !== false,
+      system: req.body.system || "",
+      actorId: user.id,
+      reason: "admin_course_academic_reset",
+    });
+
+    await writeLiveDb(db);
+    res.json({
+      success: true,
+      course_id: courseId,
+      counts,
+      message: "Course academic content reset completed. Students, enrollments, payments, plans, coupons, and users were not touched.",
+    });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
 app.post("/admin/roadmap/apply-marathon-template", async (req, res) => {
   try {
     const { user } = await requireAdminOrInstructor(req);
@@ -35952,15 +36111,33 @@ app.post("/admin/roadmap/apply-marathon-template", async (req, res) => {
 
     const requestRows = ngNormalizeMasterMapRows(req.body.master_map || req.body.rows || req.body.days || []);
     let masterRows = requestRows.length ? requestRows : ngGetStoredMasterRows(db, template);
+    const masterSystemSequence = requestRows.length
+      ? ngExtractMasterMapSystemSequence(req.body || {}, requestRows)
+      : ngGetStoredMasterSystemSequence(db, template);
     const usedMasterMap = masterRows.length > 0;
     const requestedDuration = Number(req.body.duration_days || 120) || 120;
     const sessionsCreated = [];
     const assessmentsCreated = [];
     const flashcardsCreated = [];
+    let cleanupCounts = null;
     let days = [];
 
+    if (overwriteExisting || req.body.reset_generated_content === true) {
+      cleanupCounts = ngResetCourseAcademicContent(db, {
+        courseId,
+        resetRoadmap: false,
+        clearGeneratedLiveSessions: true,
+        clearAllCourseLiveSessions: req.body.clear_all_live_sessions === true,
+        archiveGeneratedFlashcards: true,
+        archiveAllCourseFlashcards: req.body.archive_all_flashcards === true,
+        clearAssessments: true,
+        clearProgress: true,
+        actorId: user.id,
+      });
+    }
+
     if (usedMasterMap) {
-      masterRows = ngSortMasterRowsForSequence(masterRows).slice(0, requestedDuration);
+      masterRows = ngSortMasterRowsForSequence(masterRows, masterSystemSequence).slice(0, requestedDuration);
       const dates = ngBuildStudyDates(startDateRaw, masterRows.length, skipSundays);
       days = masterRows.map((row, index) => ngBuildMarathonDayFromMasterRow({ courseId, courseName: db.courses[courseId].name || "Course", row, dayNumber: index + 1, date: dates[index], classTime, template }));
     } else {
@@ -36017,7 +36194,7 @@ app.post("/admin/roadmap/apply-marathon-template", async (req, res) => {
       if (createFlashcards && !day.assessment_day && !["holiday", "cancelled"].includes(String(day.status || "").toLowerCase())) {
         for (const card of ngBuildDailyFlashcardsForDay(day)) {
           const cardId = uuid();
-          db.flashcards[cardId] = { id: cardId, course_id: courseId, roadmap_day_id: day.id, day_number: day.day_number, system: day.system, front: card.front, back: card.back, explanation: card.explanation, status: "published", created_by: user.id, created_at: nowIso(), updated_at: nowIso() };
+          db.flashcards[cardId] = { id: cardId, course_id: courseId, roadmap_day_id: day.id, day_number: day.day_number, system: day.system, topic: day.topic || day.first_aid_topics || "", front: card.front, back: card.back, explanation: card.explanation, scope: "daily_topic", source: "roadmap_auto_generated", resource_source: "roadmap_master_map", status: "published", is_published: true, created_by: user.id, created_at: nowIso(), updated_at: nowIso() };
           flashcardsCreated.push(db.flashcards[cardId]);
         }
       }
@@ -36032,7 +36209,7 @@ app.post("/admin/roadmap/apply-marathon-template", async (req, res) => {
       class_time: classTime,
       timezone,
       skip_sundays: skipSundays,
-      settings: { duration_days: days.length, start_date: dateOnly(new Date(`${startDateRaw}T00:00:00`)), class_time: classTime, timezone, skip_sundays: skipSundays, template, source: usedMasterMap ? "master_map" : "generic_fallback", system_sequence: NEXTGEN_STEP1_ROADMAP_SYSTEM_SEQUENCE },
+      settings: { duration_days: days.length, start_date: dateOnly(new Date(`${startDateRaw}T00:00:00`)), class_time: classTime, timezone, skip_sundays: skipSundays, template, source: usedMasterMap ? "master_map" : "generic_fallback", system_sequence: usedMasterMap ? masterSystemSequence : NEXTGEN_STEP1_ROADMAP_SYSTEM_SEQUENCE },
       days,
       created_by: user.id,
       updated_by: user.id,
@@ -36040,7 +36217,7 @@ app.post("/admin/roadmap/apply-marathon-template", async (req, res) => {
       updated_at: nowIso(),
     };
     await writeLiveDb(db);
-    res.json({ success: true, roadmap: db.roadmaps[courseId], counts: { days: days.length, live_sessions_created: sessionsCreated.length, system_end_assessments_created: assessmentsCreated.length, flashcards_created: flashcardsCreated.length, master_map_rows_used: usedMasterMap ? masterRows.length : 0 }, source: usedMasterMap ? "master_map" : "generic_fallback", message: usedMasterMap ? "120-Day Marathon roadmap applied from stored master map." : "120-Day Marathon roadmap applied using generic fallback because no master map is imported yet." });
+    res.json({ success: true, roadmap: db.roadmaps[courseId], counts: { days: days.length, live_sessions_created: sessionsCreated.length, system_end_assessments_created: assessmentsCreated.length, flashcards_created: flashcardsCreated.length, master_map_rows_used: usedMasterMap ? masterRows.length : 0, cleanup: cleanupCounts || null }, source: usedMasterMap ? "master_map" : "generic_fallback", system_sequence: usedMasterMap ? masterSystemSequence : NEXTGEN_STEP1_ROADMAP_SYSTEM_SEQUENCE, first_system: days[0]?.system || null, message: usedMasterMap ? "120-Day Marathon roadmap applied from stored master map." : "120-Day Marathon roadmap applied using generic fallback because no master map is imported yet." });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
@@ -36078,14 +36255,26 @@ function ngNormalizeAIFlashcards(cards = []) {
   })).filter((card) => card.front && card.back);
 }
 
+function ngBuildLocalFlashcardDrafts({ system = "", topic = "", weakConcept = "", qids = [], count = 8, resourceSource = "roadmap" } = {}) {
+  const n = Math.max(1, Math.min(100, Number(count || 8)));
+  const cleanSystem = system || "General";
+  const cleanTopic = topic || weakConcept || cleanSystem;
+  const qidList = Array.isArray(qids) ? qids : ngNormalizeQidList(qids);
+  const templates = [
+    (i) => ({ front: `${cleanTopic}: what is the core mechanism?`, back: `Explain the core mechanism for ${cleanTopic} in ${cleanSystem}, then connect it to the assigned resource.`, explanation: `Generated draft from ${resourceSource}. Edit before publishing if needed.`, tag: cleanTopic, difficulty: "medium" }),
+    (i) => ({ front: `${cleanTopic}: what clue should trigger this concept?`, back: `Identify the key vignette clue, the diagnosis clue, and the common trap for ${cleanTopic}.`, explanation: "Use this for active recall before solving QIDs.", tag: "recognition", difficulty: "medium" }),
+    (i) => ({ front: `${cleanTopic}: what is the most common wrong-option trap?`, back: `Write why the tempting wrong answer is wrong, then compare it with the correct mechanism.`, explanation: "Correction-based review card.", tag: "trap", difficulty: "hard" }),
+    (i) => ({ front: `${cleanTopic}: which First Aid line/page should be reviewed?`, back: `Review the assigned book page or note section for ${cleanTopic}, then summarize it in one mechanism sentence.`, explanation: "Book-linked review card.", tag: "book-review", difficulty: "medium" }),
+    (i) => ({ front: qidList.length ? `QID ${qidList[(i - 1) % qidList.length]}: what concept is being tested?` : `${cleanTopic}: what question pattern tests this?`, back: `Map the question back to ${cleanTopic}: mechanism → clue → answer → wrong-option trap.`, explanation: "Mapped QID review card.", tag: "qid-map", difficulty: "medium" }),
+  ];
+  return Array.from({ length: n }, (_, index) => templates[index % templates.length](index + 1));
+}
+
 async function ngGenerateFlashcardsWithAI({ trainingText, system, topic, weakConcept, qids = [], count = 8 }) {
   const clean = String(trainingText || "").trim();
   if (!isAIConfigured() || clean.length < 300) {
     return {
-      cards: [
-        { front: `What is the key First Aid point for ${weakConcept || topic || system}?`, back: "Review the relevant First Aid chunk and connect the mechanism to your wrong QID.", explanation: "Fallback card because AI/training context was not available.", tag: "weak-area", difficulty: "medium" },
-        { front: `What trap should you avoid in ${weakConcept || topic || system}?`, back: "Do not memorize the answer only. Identify the mechanism, diagnosis clue, and wrong-option trap.", explanation: "This card supports correction-based revision.", tag: "error-correction", difficulty: "medium" },
-      ],
+      cards: ngBuildLocalFlashcardDrafts({ system, topic, weakConcept, qids, count, resourceSource: clean.length >= 300 ? "training" : "local-fallback" }),
       usage: {},
       model: "fallback-local",
       warnings: [!isAIConfigured() ? getAIConfigError() : "Training context was too short"],
@@ -36095,7 +36284,7 @@ async function ngGenerateFlashcardsWithAI({ trainingText, system, topic, weakCon
   const model = getAIModel();
   const systemPrompt = `You create original USMLE Step 1 active-recall flashcards for NextGen students. Use only the provided First Aid/training context. Do not copy question-bank wording. Return strict JSON only.`;
   const userPrompt = `
-Create ${Math.max(3, Math.min(20, Number(count || 8)))} flashcards.
+Create ${Math.max(1, Math.min(100, Number(count || 8)))} flashcards.
 
 Student weak area: ${weakConcept || "not specified"}
 System: ${system || "not specified"}
@@ -36234,12 +36423,16 @@ app.get("/flashcards", async (req, res) => {
     const { user } = await getAuthenticatedUser(req);
     const db = await readLiveDb();
     const courseId = String(req.query.course_id || req.query.courseId || "").trim();
-    let cards = Object.values(db.flashcards || {}).filter((card) => card.status !== "archived" && card.is_published !== false);
+    const isStaff = user.role === "admin" || user.role === "instructor";
+    const includeDrafts = isStaff && (req.query.admin === "true" || req.query.include_drafts === "true");
+    let cards = Object.values(db.flashcards || {}).filter((card) => card.status !== "archived" && (includeDrafts || card.is_published !== false));
     if (courseId) cards = cards.filter((card) => String(card.course_id) === courseId);
-    cards = cards.filter((card) => !card.user_id || String(card.user_id) === String(user.id) || user.role === "admin" || user.role === "instructor");
+    cards = cards.filter((card) => !card.user_id || String(card.user_id) === String(user.id) || isStaff);
     if (req.query.day_id) cards = cards.filter((card) => String(card.roadmap_day_id) === String(req.query.day_id));
     if (req.query.day_number) cards = cards.filter((card) => String(card.day_number) === String(req.query.day_number));
     if (req.query.scope) cards = cards.filter((card) => String(card.scope || "daily_topic") === String(req.query.scope));
+    if (req.query.system) cards = cards.filter((card) => ngNormalizeMasterMapSystemName(card.system || card.topic || "") === ngNormalizeMasterMapSystemName(req.query.system));
+    if (req.query.topic) cards = cards.filter((card) => String(card.topic || card.system || "").toLowerCase().includes(String(req.query.topic).toLowerCase()));
     if (req.query.due === "true") {
       const today = todayKey();
       cards = cards.filter((card) => !card.due_date || String(card.due_date) <= today);
@@ -36251,12 +36444,131 @@ app.get("/flashcards", async (req, res) => {
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
+app.post("/admin/flashcards/generate", async (req, res) => {
+  try {
+    const { user } = await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const crmDb = await readCrmDb();
+    const courseId = String(req.body.course_id || req.body.courseId || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+
+    const day = req.body.roadmap_day_id || req.body.day_id
+      ? ngFindRoadmapDay(db, { courseId, dayId: req.body.roadmap_day_id || req.body.day_id })
+      : null;
+    const system = String(req.body.system || day?.system || "").trim();
+    const rawTopics = Array.isArray(req.body.topics) ? req.body.topics : String(req.body.topic || req.body.topics || day?.first_aid_topics || "").split(/[\n,;]+/);
+    const topics = rawTopics.map((item) => String(item || "").trim()).filter(Boolean);
+    const topic = topics.join("; ") || String(day?.first_aid_topics || day?.topic || system || "General").trim();
+    const qids = ngNormalizeQidList(req.body.qids || req.body.uworld_qids || day?.uworld_qids || []);
+    const count = Math.max(1, Math.min(100, Number(req.body.count || 15)));
+    const resourceSource = String(req.body.resource_source || req.body.resource || "first_aid_training").trim();
+    const extraContext = String(req.body.resource_text || req.body.context || req.body.first_aid_context || "").trim();
+
+    const trainingText = [
+      day ? `Roadmap day: ${day.title || ""}\nSystem: ${day.system || ""}\nTopic: ${day.first_aid_topics || day.topic || ""}\nBook pages: ${day.first_aid_pages || ""}\nLecture: ${day.video_library_lecture || day.lecture_title || ""}\nQIDs: ${(day.uworld_qids || []).join(", ")}\nHomework: ${day.homework || ""}` : "",
+      extraContext,
+      ngTrainingTextForFlashcards(crmDb, { system, topic, weakConcept: req.body.weak_concept || "", qids }),
+    ].filter(Boolean).join("\n\n---\n\n");
+
+    const result = await ngGenerateFlashcardsWithAI({ trainingText, system, topic, weakConcept: req.body.weak_concept || "", qids, count });
+    const publishNow = req.body.publish === true || req.body.is_published === true;
+    const created = [];
+
+    for (const card of result.cards.slice(0, count)) {
+      const cardId = uuid();
+      db.flashcards[cardId] = {
+        id: cardId,
+        course_id: courseId,
+        roadmap_day_id: day?.id || req.body.roadmap_day_id || null,
+        day_number: day?.day_number || Number(req.body.day_number || 0),
+        system,
+        topic: card.tag || topic,
+        front: card.front,
+        back: card.back,
+        explanation: card.explanation || "",
+        tag: card.tag || topic,
+        difficulty: req.body.difficulty || card.difficulty || "medium",
+        scope: req.body.scope || "admin_generated",
+        source: result.model === "fallback-local" ? "admin_local_flashcard_generator" : "admin_ai_flashcard_generator",
+        resource_source: resourceSource,
+        qids,
+        weak_concept: req.body.weak_concept || "",
+        status: publishNow ? "published" : "draft",
+        is_published: publishNow,
+        created_by: user.id,
+        updated_by: user.id,
+        created_at: nowIso(),
+        updated_at: nowIso(),
+      };
+      created.push(db.flashcards[cardId]);
+    }
+
+    await writeLiveDb(db);
+    res.json({ success: true, count: created.length, flashcards: created, warnings: result.warnings || [], ai_model: result.model, saved_as: publishNow ? "published" : "draft", training_context_used: trainingText.length > 0 });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/flashcards/bulk-archive", async (req, res) => {
+  try {
+    const { user } = await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const courseId = String(req.body.course_id || req.body.courseId || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    const system = String(req.body.system || "").trim();
+    const dayId = String(req.body.roadmap_day_id || req.body.day_id || "").trim();
+    const archiveAll = req.body.archive_all === true;
+    let archived = 0;
+    for (const card of Object.values(db.flashcards || {})) {
+      if (!card || String(card.course_id || "") !== courseId) continue;
+      if (system && ngNormalizeMasterMapSystemName(card.system || card.topic || "") !== ngNormalizeMasterMapSystemName(system)) continue;
+      if (dayId && String(card.roadmap_day_id || "") !== dayId) continue;
+      const generated = /generated|roadmap|weak_area|daily_topic/i.test(String(card.source || card.scope || ""));
+      if (!archiveAll && !generated) continue;
+      card.status = "archived";
+      card.is_published = false;
+      card.archived_reason = req.body.reason || "admin_bulk_archive";
+      card.archived_at = nowIso();
+      card.updated_by = user.id;
+      card.updated_at = nowIso();
+      archived += 1;
+    }
+    await writeLiveDb(db);
+    res.json({ success: true, archived, message: `Archived ${archived} flashcards.` });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
 app.post("/admin/flashcards", async (req, res) => {
   try {
     const { user } = await requireAdminOrInstructor(req);
     const db = await readLiveDb();
     const id = req.body.id || uuid();
-    db.flashcards[id] = { ...(db.flashcards[id] || {}), id, course_id: req.body.course_id || db.flashcards[id]?.course_id || null, roadmap_day_id: req.body.roadmap_day_id || req.body.day_id || db.flashcards[id]?.roadmap_day_id || null, day_number: Number(req.body.day_number || db.flashcards[id]?.day_number || 0), system: req.body.system || db.flashcards[id]?.system || "", front: String(req.body.front || req.body.question || db.flashcards[id]?.front || "").trim(), back: String(req.body.back || req.body.answer || db.flashcards[id]?.back || "").trim(), explanation: String(req.body.explanation || db.flashcards[id]?.explanation || "").trim(), status: req.body.status || db.flashcards[id]?.status || "published", is_published: req.body.is_published !== false, updated_by: user.id, created_by: db.flashcards[id]?.created_by || user.id, created_at: db.flashcards[id]?.created_at || nowIso(), updated_at: nowIso() };
+    const previous = db.flashcards[id] || {};
+    const status = String(req.body.status || previous.status || (req.body.is_published === false ? "draft" : "published")).trim();
+    db.flashcards[id] = {
+      ...previous,
+      id,
+      course_id: req.body.course_id || previous.course_id || null,
+      roadmap_day_id: req.body.roadmap_day_id || req.body.day_id || previous.roadmap_day_id || null,
+      day_number: Number(req.body.day_number || previous.day_number || 0),
+      system: req.body.system || previous.system || "",
+      topic: req.body.topic || previous.topic || req.body.system || previous.system || "",
+      front: String(req.body.front || req.body.question || previous.front || "").trim(),
+      back: String(req.body.back || req.body.answer || previous.back || "").trim(),
+      explanation: String(req.body.explanation || previous.explanation || "").trim(),
+      tag: req.body.tag || previous.tag || req.body.topic || previous.topic || "",
+      difficulty: req.body.difficulty || previous.difficulty || "medium",
+      scope: req.body.scope || previous.scope || "daily_topic",
+      source: req.body.source || previous.source || "admin_manual",
+      resource_source: req.body.resource_source || previous.resource_source || null,
+      qids: ngNormalizeQidList(req.body.qids || previous.qids || []),
+      weak_concept: req.body.weak_concept || previous.weak_concept || "",
+      status,
+      is_published: req.body.is_published !== undefined ? Boolean(req.body.is_published) : status === "published",
+      updated_by: user.id,
+      created_by: previous.created_by || user.id,
+      created_at: previous.created_at || nowIso(),
+      updated_at: nowIso(),
+    };
     await writeLiveDb(db);
     res.json({ success: true, flashcard: db.flashcards[id] });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
