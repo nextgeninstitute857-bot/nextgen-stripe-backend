@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v140-roadmap-reset-ai-flashcards";
+const NEXTGEN_BACKEND_BUILD = "v141-session-notes-flashcards-weekly-assessment";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -1936,25 +1936,68 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
     };
   }
 
+  let learningContentResult = null;
+
+  if (sessionId && transcriptText) {
+    try {
+      learningContentResult = await ngProcessSessionLearningContent(db, {
+        sessionId,
+        transcriptText,
+        recordingPayload,
+      });
+
+      db.recordings[meetingId] = {
+        ...(db.recordings[meetingId] || recordingPayload),
+        learning_content_processed: learningContentResult?.success === true,
+        learning_content_processing_result: learningContentResult,
+        learning_content_processed_at: new Date().toISOString(),
+      };
+    } catch (error) {
+      learningContentResult = {
+        success: false,
+        error: error.message || "Learning content processing failed",
+      };
+
+      db.recordings[meetingId] = {
+        ...(db.recordings[meetingId] || recordingPayload),
+        learning_content_processed: false,
+        learning_content_processing_result: learningContentResult,
+        learning_content_processed_at: new Date().toISOString(),
+      };
+    }
+  }
+
   return {
-    recordingPayload,
+    recordingPayload: db.recordings[meetingId] || recordingPayload,
     sessionId,
     transcriptFile,
     transcriptText,
     transcriptRaw,
     transcriptImportError,
+    learningContentResult,
   };
 }
-
 
 const NEXTGEN_TASK_POINTS = {
   live_attendance: 10,
   video_library_watch: 10,
   assigned_qids_completed: 15,
+
+  read_first_aid_textbook: 5,
+  read_session_notes: 5,
+
+  first_aid_flashcards_reviewed: 5,
+  session_flashcards_reviewed: 5,
+
   weak_concepts_logged: 5,
-  flashcards_reviewed: 5,
   community_confusion_post: 5,
   daily_task_submitted: 10,
+
+  weekly_assessment_completed: 20,
+  grand_system_assessment_completed: 35,
+
+  // Backward compatibility with old task keys already used in your LMS.
+  flashcards_reviewed: 5,
   assessment_completed: 15,
   assessment_high_score_bonus: 5,
   daily_streak_bonus: 5,
@@ -1964,21 +2007,35 @@ const NEXTGEN_DAILY_TASK_ORDER = [
   "live_attendance",
   "video_library_watch",
   "assigned_qids_completed",
-  "weak_concepts_logged",
-  "flashcards_reviewed",
+  "read_first_aid_textbook",
+  "read_session_notes",
+  "first_aid_flashcards_reviewed",
+  "session_flashcards_reviewed",
   "community_confusion_post",
   "daily_task_submitted",
 ];
 
 function ngTaskLabel(key) {
   const labels = {
-    live_attendance: "Attend live First Aid session",
-    video_library_watch: "Watch matching NextGen UWorld Video Library QID explanations",
+    live_attendance: "Attend live session",
+    video_library_watch: "Watch assigned video",
     assigned_qids_completed: "Complete assigned UWorld QIDs",
+
+    read_first_aid_textbook: "Read assigned First Aid textbook pages",
+    read_session_notes: "Read session notes",
+
+    first_aid_flashcards_reviewed: "Review First Aid flashcards",
+    session_flashcards_reviewed: "Review session flashcards",
+
     weak_concepts_logged: "Mark wrong QIDs / weak concepts",
-    flashcards_reviewed: "Review assigned flashcards / weak-area cards",
     community_confusion_post: "Post one confusion point in Community Q&A",
     daily_task_submitted: "Submit full daily task completion",
+
+    weekly_assessment_completed: "Complete weekly assessment",
+    grand_system_assessment_completed: "Complete grand system assessment",
+
+    // Old labels kept so old routes/data do not break.
+    flashcards_reviewed: "Review assigned flashcards / weak-area cards",
     assessment_completed: "Complete assessment / mini-mock",
     assessment_high_score_bonus: "High assessment score bonus",
     daily_streak_bonus: "Daily streak bonus",
@@ -1997,17 +2054,61 @@ function ngNormalizeQidList(value) {
 }
 
 function ngBuildDefaultTaskItems(day = {}) {
-  const isAssessment = day.assessment_day === true || day.assessment_id;
-  const keys = isAssessment
-    ? ["assessment_completed", "weak_concepts_logged", "flashcards_reviewed", "community_confusion_post", "daily_task_submitted"]
-    : NEXTGEN_DAILY_TASK_ORDER;
+  const assessmentType = String(
+    day.assessment_type ||
+    day.assessment_scope ||
+    day.type ||
+    ""
+  ).toLowerCase();
+
+  const isWeeklyAssessment =
+    day.weekly_assessment_id ||
+    assessmentType.includes("weekly");
+
+  const isGrandAssessment =
+    day.grand_assessment_id ||
+    assessmentType.includes("grand") ||
+    assessmentType.includes("system_end") ||
+    assessmentType.includes("system-end");
+
+  const isLegacyAssessment = day.assessment_day === true || day.assessment_id;
+
+  const keys = isGrandAssessment
+    ? [
+        "grand_system_assessment_completed",
+        "weak_concepts_logged",
+        "first_aid_flashcards_reviewed",
+        "session_flashcards_reviewed",
+        "community_confusion_post",
+        "daily_task_submitted",
+      ]
+    : isWeeklyAssessment
+      ? [
+          "weekly_assessment_completed",
+          "weak_concepts_logged",
+          "session_flashcards_reviewed",
+          "community_confusion_post",
+          "daily_task_submitted",
+        ]
+      : isLegacyAssessment
+        ? [
+            "assessment_completed",
+            "weak_concepts_logged",
+            "flashcards_reviewed",
+            "community_confusion_post",
+            "daily_task_submitted",
+          ]
+        : NEXTGEN_DAILY_TASK_ORDER;
 
   return keys.map((key, index) => ({
     key,
+    id: key,
     label: ngTaskLabel(key),
+    title: ngTaskLabel(key),
     points: Number(NEXTGEN_TASK_POINTS[key] || 0),
     order: index + 1,
     required: key !== "weak_concepts_logged",
+    description: "",
   }));
 }
 
@@ -2031,6 +2132,428 @@ function ngGetTaskItems(day = {}) {
       description: item.description || "",
     };
   }).sort((a, b) => Number(a.order || 0) - Number(b.order || 0));
+}
+
+
+function ngGetRoadmapDaysForCourse(db, courseId) {
+  const roadmap = db.roadmaps?.[String(courseId)] || null;
+  return Array.isArray(roadmap?.days) ? roadmap.days : [];
+}
+
+function ngFindRoadmapDayForLiveSession(db, session = {}) {
+  const courseId = String(session.course_id || "").trim();
+  if (!courseId) return null;
+
+  const days = ngGetRoadmapDaysForCourse(db, courseId);
+
+  if (session.roadmap_day_id) {
+    const byRoadmapId = days.find((day) => String(day.id || "") === String(session.roadmap_day_id || ""));
+    if (byRoadmapId) return byRoadmapId;
+  }
+
+  return (
+    days.find((day) => String(day.live_session_id || "") === String(session.id || "")) ||
+    days.find((day) => String(day.session_id || "") === String(session.id || "")) ||
+    days.find((day) => String(day.date || "") === String(session.scheduled_date || session.date || "")) ||
+    null
+  );
+}
+
+function ngGetSessionNotesText(note = {}) {
+  return String(
+    note.cleaned_notes ||
+    note.student_notes ||
+    note.notes ||
+    note.transcript_text ||
+    note.transcript ||
+    note.content ||
+    ""
+  ).trim();
+}
+
+function ngShouldCreateWeeklyAssessment(day, weekDays = []) {
+  if (!day?.week_number || !day?.date) return false;
+
+  const dayDate = new Date(`${day.date}T00:00:00`);
+  const weekDayNumber = Number.isNaN(dayDate.getTime()) ? null : dayDate.getDay();
+
+  const futureTeachingDayExists = weekDays.some((item) => {
+    if (!item?.date || !day?.date) return false;
+
+    const status = String(item.status || "").toLowerCase();
+    if (["cancelled", "holiday", "skipped"].includes(status)) return false;
+    if (item.assessment_day === true) return false;
+
+    return String(item.date) > String(day.date);
+  });
+
+  // Saturday creates weekly test. Friday only creates it when there is no Saturday/live day left in that week.
+  return weekDayNumber === 6 || (weekDayNumber === 5 && !futureTeachingDayExists) || !futureTeachingDayExists;
+}
+
+function ngEnsureTaskItemOnDay(day, taskKey, description = "") {
+  if (!day || !taskKey) return;
+
+  const currentItems = ngGetTaskItems(day).filter((item) => item.key !== taskKey);
+  currentItems.push({
+    key: taskKey,
+    id: taskKey,
+    label: ngTaskLabel(taskKey),
+    title: ngTaskLabel(taskKey),
+    points: Number(NEXTGEN_TASK_POINTS[taskKey] || 0),
+    order: currentItems.length + 1,
+    required: taskKey !== "weak_concepts_logged",
+    description,
+  });
+
+  day.task_items = currentItems;
+  day.tasks = currentItems;
+}
+
+async function ngCreateSessionFlashcardsFromNotes(db, { session, day, cleanedNotes }) {
+  const sessionId = String(session?.id || "").trim();
+  const courseId = String(session?.course_id || day?.course_id || "").trim();
+
+  if (!sessionId || !courseId) return [];
+
+  db.flashcards = db.flashcards || {};
+
+  const existing = Object.values(db.flashcards || {}).filter((card) => {
+    return (
+      String(card.session_id || "") === sessionId &&
+      String(card.course_id || "") === courseId &&
+      String(card.source || "") === "session_notes_auto"
+    );
+  });
+
+  if (existing.length > 0) return existing;
+
+  const qids = ngNormalizeQidList(
+    day?.uworld_qids ||
+    day?.mapped_uworld_qids ||
+    day?.qids ||
+    day?.uworld_target ||
+    []
+  );
+
+  const result = await ngGenerateFlashcardsWithAI({
+    trainingText: cleanedNotes,
+    system: day?.system || session?.system || "",
+    topic: day?.topic || day?.title || session?.topic || "Session",
+    weakConcept: "Session key points",
+    qids,
+    count: 10,
+  });
+
+  const created = [];
+
+  for (const card of result.cards || []) {
+    const id = uuid();
+
+    db.flashcards[id] = {
+      id,
+      course_id: courseId,
+      user_id: null,
+      session_id: sessionId,
+      roadmap_day_id: day?.id || null,
+      day_number: day?.day_number || null,
+      week_number: day?.week_number || null,
+      system: day?.system || session?.system || "",
+      topic: day?.topic || day?.title || session?.topic || "Session",
+
+      front: card.front,
+      back: card.back,
+      explanation: card.explanation || "",
+      tag: card.tag || "session-notes",
+      difficulty: card.difficulty || "medium",
+
+      scope: "session",
+      source: "session_notes_auto",
+      source_label: "Session Notes",
+
+      qids,
+      due_date: day?.date || dateOnly(addDays(new Date(), 1)),
+
+      status: "published",
+      is_published: true,
+
+      created_by: "system",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    created.push(db.flashcards[id]);
+  }
+
+  if (day) {
+    day.session_flashcards_count = created.length;
+    day.session_flashcards_ready = created.length > 0;
+    ngEnsureTaskItemOnDay(day, "session_flashcards_reviewed", "Review flashcards generated from this session's notes.");
+  }
+
+  return created;
+}
+
+async function ngMaybeCreateWeeklyAssessmentFromNotes(db, { courseId, day }) {
+  if (!courseId || !day?.week_number) return null;
+
+  db.assessments = db.assessments || {};
+
+  const weekNumber = Number(day.week_number);
+
+  const existing = Object.values(db.assessments || {}).find((assessment) => {
+    return (
+      String(assessment.course_id || "") === String(courseId) &&
+      String(assessment.assessment_type || "") === "weekly" &&
+      Number(assessment.week_number || 0) === weekNumber
+    );
+  });
+
+  if (existing) return existing;
+
+  const weekDays = ngGetRoadmapDaysForCourse(db, courseId).filter((item) => {
+    return Number(item.week_number || 0) === weekNumber;
+  });
+
+  if (!ngShouldCreateWeeklyAssessment(day, weekDays)) return null;
+
+  const sourceParts = weekDays
+    .map((item) => {
+      const sessionId = item.live_session_id || item.session_id || null;
+      const note = sessionId ? db.notes?.[sessionId] : null;
+      const text = ngGetSessionNotesText(note || {});
+      if (!text) return "";
+
+      return [
+        `Day ${item.day_number || ""}: ${item.title || item.topic || "Session"}`,
+        `System: ${item.system || ""}`,
+        text,
+      ].join("\n");
+    })
+    .filter(Boolean);
+
+  const sourceText = sourceParts.join("\n\n---\n\n").trim();
+
+  if (sourceText.length < 300) return null;
+
+  const result = await generateQuestionsWithAI({
+    sourceText,
+    questionCount: 20,
+    difficulty: "medium",
+    questionType: "mcq",
+    metadata: {
+      course_id: courseId,
+      week_number: weekNumber,
+      source: "weekly_session_notes",
+    },
+  });
+
+  const questions = result.questions || [];
+  if (!questions.length) return null;
+
+  const id = uuid();
+
+  const assessment = {
+    id,
+    course_id: courseId,
+    session_id: null,
+    roadmap_day_id: day.id || null,
+    week_number: weekNumber,
+
+    title: `Week ${weekNumber} Assessment`,
+    description: "Weekly accountability assessment based on this week’s live sessions and session notes.",
+
+    source_type: "weekly_session_notes",
+    source_text: sourceText,
+
+    assessment_type: "weekly",
+    difficulty: "medium",
+    question_count: questions.length,
+    duration_minutes: 30,
+
+    questions,
+
+    secure_mode: true,
+    shuffle_questions: true,
+    show_result_after_submit: true,
+
+    is_published: true,
+    status: "published",
+
+    created_by: "system",
+    created_by_name: "NextGen LMS",
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    published_at: new Date().toISOString(),
+  };
+
+  db.assessments[id] = assessment;
+
+  day.weekly_assessment_id = id;
+  day.assessment_id = day.assessment_id || id;
+  day.assessment_day = true;
+  day.assessment_type = "weekly";
+  day.weekly_assessment_ready = true;
+
+  ngEnsureTaskItemOnDay(day, "weekly_assessment_completed", "Complete this week’s accountability assessment.");
+
+  return assessment;
+}
+
+async function ngProcessSessionLearningContent(db, { sessionId, transcriptText = "", recordingPayload = null }) {
+  const cleanSessionId = String(sessionId || "").trim();
+  if (!cleanSessionId) {
+    return { success: false, skipped: true, reason: "Missing session id" };
+  }
+
+  const note = db.notes?.[cleanSessionId] || null;
+  const session = db.liveSessions?.[cleanSessionId] || null;
+
+  if (!note && !session) {
+    return { success: false, skipped: true, reason: "Session not found" };
+  }
+
+  const sourceText = String(transcriptText || note?.transcript_text || note?.transcript_raw_vtt || "").trim();
+
+  if (sourceText.length < 300) {
+    return { success: false, skipped: true, reason: "Transcript too short" };
+  }
+
+  db.notes = db.notes || {};
+
+  const courseId =
+    session?.course_id ||
+    note?.course_id ||
+    recordingPayload?.course_id ||
+    null;
+
+  const day = session ? ngFindRoadmapDayForLiveSession(db, session) : null;
+
+  db.notes[cleanSessionId] = {
+    ...(db.notes[cleanSessionId] || {}),
+    session_id: cleanSessionId,
+    course_id: courseId,
+    content_processing_status: "processing",
+    content_processing_started_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  if (!isAIConfigured()) {
+    db.notes[cleanSessionId] = {
+      ...(db.notes[cleanSessionId] || {}),
+      content_processing_status: "waiting_for_config",
+      content_processing_error: getAIConfigError(),
+      updated_at: new Date().toISOString(),
+    };
+
+    return {
+      success: false,
+      skipped: true,
+      reason: getAIConfigError(),
+    };
+  }
+
+  const output = {
+    cleaned_notes_saved: false,
+    session_flashcards_created: 0,
+    weekly_assessment_created: false,
+    warnings: [],
+  };
+
+  try {
+    const cleaned = await cleanNotesWithAI({
+      sourceText,
+      sourceType: "zoom_transcript",
+      metadata: {
+        session_id: cleanSessionId,
+        course_id: courseId,
+        topic: session?.topic || session?.title || day?.title || "",
+        roadmap_day_id: day?.id || null,
+        day_number: day?.day_number || null,
+        week_number: day?.week_number || null,
+      },
+    });
+
+    const cleanedNotes = String(cleaned.cleaned_notes || "").trim();
+
+    db.notes[cleanSessionId] = {
+      ...(db.notes[cleanSessionId] || {}),
+      session_id: cleanSessionId,
+      course_id: courseId,
+      notes: cleanedNotes,
+      cleaned_notes: cleanedNotes,
+      student_notes: cleanedNotes,
+
+      source: "zoom_transcript",
+      auto_imported: true,
+      is_published: true,
+      status: "published",
+
+      content_processing_status: "notes_ready",
+      content_processing_model: cleaned.model || null,
+      content_processing_finished_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    output.cleaned_notes_saved = true;
+
+    if (day) {
+      day.session_notes_id = cleanSessionId;
+      day.session_notes_ready = true;
+      day.notes_status = "ready";
+      ngEnsureTaskItemOnDay(day, "read_session_notes", "Read the cleaned session notes after class.");
+    }
+
+    try {
+      const cards = await ngCreateSessionFlashcardsFromNotes(db, {
+        session,
+        day,
+        cleanedNotes,
+      });
+
+      output.session_flashcards_created = cards.length;
+    } catch (flashcardError) {
+      output.warnings.push(`Session flashcards failed: ${flashcardError.message}`);
+    }
+
+    try {
+      if (courseId && day) {
+        const assessment = await ngMaybeCreateWeeklyAssessmentFromNotes(db, {
+          courseId,
+          day,
+        });
+
+        output.weekly_assessment_created = Boolean(assessment);
+      }
+    } catch (assessmentError) {
+      output.warnings.push(`Weekly assessment failed: ${assessmentError.message}`);
+    }
+
+    db.notes[cleanSessionId] = {
+      ...(db.notes[cleanSessionId] || {}),
+      content_processing_status: "ready",
+      content_processing_warnings: output.warnings,
+      updated_at: new Date().toISOString(),
+    };
+
+    return {
+      success: true,
+      ...output,
+    };
+  } catch (error) {
+    db.notes[cleanSessionId] = {
+      ...(db.notes[cleanSessionId] || {}),
+      content_processing_status: "failed",
+      content_processing_error: error.message || "Session content processing failed",
+      updated_at: new Date().toISOString(),
+    };
+
+    return {
+      success: false,
+      error: error.message || "Session content processing failed",
+      ...output,
+    };
+  }
 }
 
 function ngTaskProgressKey({ courseId, userId, dayId }) {
@@ -2166,12 +2689,21 @@ function sanitizeRoadmapDay(day) {
     available_points: taskItems.reduce((sum, item) => sum + Number(item.points || 0), 0),
     points_config: NEXTGEN_TASK_POINTS,
     recording_link: day.recording_link || "", notes_link: day.notes_link || "", assessment_task: day.assessment_task || "",
-    assessment_day: Boolean(day.assessment_day), assessment_id: day.assessment_id || null,
+    session_notes_id: day.session_notes_id || null,
+    session_notes_ready: Boolean(day.session_notes_ready),
+    notes_status: day.notes_status || "",
+    session_flashcards_ready: Boolean(day.session_flashcards_ready),
+    session_flashcards_count: Number(day.session_flashcards_count || 0),
+    assessment_day: Boolean(day.assessment_day), assessment_id: day.assessment_id || day.weekly_assessment_id || day.grand_assessment_id || null,
+    assessment_type: day.assessment_type || null,
+    weekly_assessment_id: day.weekly_assessment_id || null,
+    weekly_assessment_ready: Boolean(day.weekly_assessment_ready),
+    grand_assessment_id: day.grand_assessment_id || null,
+    grand_assessment_ready: Boolean(day.grand_assessment_ready),
     flashcards_enabled: day.flashcards_enabled !== false,
     status: day.status || "scheduled", live_session_id: day.live_session_id || null, is_published: day.is_published !== false,
   };
 }
-
 function ngIsDailyTaskCompleted(progress) {
   if (!progress) return false;
   if (progress.completed === true) return true;
@@ -5468,6 +6000,38 @@ app.post("/student/assessments/:assessmentId/submit", async (req, res) => {
     };
 
     db.assessmentAttempts[key] = attempt;
+
+    const assessmentType = String(assessment.assessment_type || assessment.source_type || "").toLowerCase();
+    const roadmapDayId = assessment.roadmap_day_id || assessment.day_id || null;
+    const courseId = String(assessment.course_id || "").trim();
+
+    if (courseId && roadmapDayId) {
+      const day = ngFindRoadmapDay(db, { courseId, dayId: roadmapDayId });
+      if (day) {
+        const taskKey = assessmentType.includes("weekly")
+          ? "weekly_assessment_completed"
+          : assessmentType.includes("grand") || assessmentType.includes("system")
+            ? "grand_system_assessment_completed"
+            : "assessment_completed";
+
+        ngUpsertTaskCompletion(db, {
+          courseId,
+          userId: user.id,
+          userName: user.name || user.email || "Student",
+          day,
+          taskKey,
+          completed: true,
+          metadata: {
+            assessment_id: assessment.id,
+            assessment_title: assessment.title || "Assessment",
+            percentage: graded.percentage,
+          },
+        });
+
+        updateLeaderboard(db, { courseId, userId: user.id, userName: user.name || user.email || "Student" });
+      }
+    }
+
     await writeLiveDb(db);
 
     res.json({
@@ -36377,10 +36941,18 @@ app.post("/student/flashcards/:id/review", async (req, res) => {
     db.flashcardProgress = db.flashcardProgress || {};
     const key = `${courseId}:${user.id}:${card.id}`;
     db.flashcardProgress[key] = { id: key, course_id: courseId, user_id: user.id, flashcard_id: card.id, roadmap_day_id: card.roadmap_day_id || null, reviewed: true, confidence: req.body.confidence || null, reviewed_at: new Date().toISOString(), updated_at: new Date().toISOString() };
-    if (day) ngUpsertTaskCompletion(db, { courseId, userId: user.id, userName: user.name || user.email || "Student", day, taskKey: "flashcards_reviewed", completed: true, metadata: { flashcard_id: card.id, confidence: req.body.confidence || null } });
+
+    const cardScope = String(card.scope || card.source || card.source_label || "").toLowerCase();
+    const taskKey = cardScope.includes("session")
+      ? "session_flashcards_reviewed"
+      : cardScope.includes("first_aid") || cardScope.includes("first aid")
+        ? "first_aid_flashcards_reviewed"
+        : "flashcards_reviewed";
+
+    if (day) ngUpsertTaskCompletion(db, { courseId, userId: user.id, userName: user.name || user.email || "Student", day, taskKey, completed: true, metadata: { flashcard_id: card.id, confidence: req.body.confidence || null } });
     const leaderboard = courseId ? updateLeaderboard(db, { courseId, userId: user.id, userName: user.name || user.email || "Student" }) : null;
     await writeLiveDb(db);
-    res.json({ success: true, progress: db.flashcardProgress[key], leaderboard });
+    res.json({ success: true, progress: db.flashcardProgress[key], task_key: taskKey, leaderboard });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
@@ -37666,6 +38238,51 @@ process.on("unhandledRejection", (reason) => {
 
 process.on("uncaughtException", (error) => {
   console.error("UNCAUGHT EXCEPTION:", error);
+});
+
+
+app.post("/admin/sessions/:sessionId/process-learning-content", async (req, res) => {
+  try {
+    await requireLmsPermission(req, "lms.notes.manage");
+
+    const db = await readLiveDb();
+    const sessionId = String(req.params.sessionId || "").trim();
+
+    const note = db.notes?.[sessionId] || null;
+
+    if (!note) {
+      return res.status(404).json({
+        success: false,
+        error: "Session notes/transcript not found",
+      });
+    }
+
+    const transcriptText = String(
+      req.body.transcript_text ||
+      note.transcript_text ||
+      note.transcript_raw_vtt ||
+      ""
+    ).trim();
+
+    const result = await ngProcessSessionLearningContent(db, {
+      sessionId,
+      transcriptText,
+      recordingPayload: null,
+    });
+
+    await writeLiveDb(db);
+
+    res.json({
+      success: result?.success === true,
+      result,
+      note: db.notes?.[sessionId] || null,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to process session learning content",
+    });
+  }
 });
 
 app.listen(PORT, () => {
