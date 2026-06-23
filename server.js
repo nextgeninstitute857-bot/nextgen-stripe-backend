@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v141-session-notes-flashcards-weekly-assessment";
+const NEXTGEN_BACKEND_BUILD = "v142-safe-manual-notes-assessments";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -2210,6 +2210,27 @@ function ngEnsureTaskItemOnDay(day, taskKey, description = "") {
   day.tasks = currentItems;
 }
 
+function ngAutoPublishPreparedContentEnabled() {
+  return String(process.env.NEXTGEN_AUTO_PUBLISH_SESSION_CONTENT || "false").trim().toLowerCase() === "true";
+}
+
+function ngAutoWeeklyAssessmentEnabled() {
+  return String(process.env.NEXTGEN_AUTO_WEEKLY_ASSESSMENT || "false").trim().toLowerCase() === "true";
+}
+
+function ngSafeSourceSummary({ mode = "notes", noteIds = [], sessionIds = [], roadmapDayIds = [], system = "", dateFrom = "", dateTo = "", lastDays = null } = {}) {
+  const parts = [
+    `mode=${mode || "notes"}`,
+    system ? `system=${system}` : "",
+    dateFrom || dateTo ? `date_range=${dateFrom || "any"}..${dateTo || "any"}` : "",
+    lastDays ? `last_days=${lastDays}` : "",
+    noteIds.length ? `notes=${noteIds.length}` : "",
+    sessionIds.length ? `sessions=${sessionIds.length}` : "",
+    roadmapDayIds.length ? `roadmap_days=${roadmapDayIds.length}` : "",
+  ].filter(Boolean);
+  return parts.join(" | ");
+}
+
 async function ngCreateSessionFlashcardsFromNotes(db, { session, day, cleanedNotes }) {
   const sessionId = String(session?.id || "").trim();
   const courseId = String(session?.course_id || day?.course_id || "").trim();
@@ -2274,8 +2295,9 @@ async function ngCreateSessionFlashcardsFromNotes(db, { session, day, cleanedNot
       qids,
       due_date: day?.date || dateOnly(addDays(new Date(), 1)),
 
-      status: "published",
-      is_published: true,
+      // Prepared from session notes. Kept as draft until admin reviews/publishes.
+      status: ngAutoPublishPreparedContentEnabled() ? "published" : "draft",
+      is_published: ngAutoPublishPreparedContentEnabled(),
 
       created_by: "system",
       created_at: new Date().toISOString(),
@@ -2287,14 +2309,20 @@ async function ngCreateSessionFlashcardsFromNotes(db, { session, day, cleanedNot
 
   if (day) {
     day.session_flashcards_count = created.length;
-    day.session_flashcards_ready = created.length > 0;
-    ngEnsureTaskItemOnDay(day, "session_flashcards_reviewed", "Review flashcards generated from this session's notes.");
+    day.session_flashcards_draft_count = created.length;
+    day.session_flashcards_draft_ready = created.length > 0;
+    day.session_flashcards_ready = ngAutoPublishPreparedContentEnabled() && created.length > 0;
+    if (ngAutoPublishPreparedContentEnabled() && created.length > 0) {
+      ngEnsureTaskItemOnDay(day, "session_flashcards_reviewed", "Review flashcards generated from this session's notes.");
+    }
   }
 
   return created;
 }
 
 async function ngMaybeCreateWeeklyAssessmentFromNotes(db, { courseId, day }) {
+  // Safety default: weekly assessments are generated manually from admin, not automatically after every transcript.
+  if (!ngAutoWeeklyAssessmentEnabled()) return null;
   if (!courseId || !day?.week_number) return null;
 
   db.assessments = db.assessments || {};
@@ -2364,7 +2392,10 @@ async function ngMaybeCreateWeeklyAssessmentFromNotes(db, { courseId, day }) {
     description: "Weekly accountability assessment based on this week’s live sessions and session notes.",
 
     source_type: "weekly_session_notes",
-    source_text: sourceText,
+    source_note_ids: weekDays.map((item) => item.live_session_id || item.session_id || null).filter(Boolean),
+    source_session_ids: weekDays.map((item) => item.live_session_id || item.session_id || null).filter(Boolean),
+    source_roadmap_day_ids: weekDays.map((item) => item.id || null).filter(Boolean),
+    source_summary: ngSafeSourceSummary({ mode: "auto_weekly_notes", noteIds: weekDays.map((item) => item.live_session_id || item.session_id || null).filter(Boolean), roadmapDayIds: weekDays.map((item) => item.id || null).filter(Boolean), lastDays: 7 }),
 
     assessment_type: "weekly",
     difficulty: "medium",
@@ -2377,14 +2408,14 @@ async function ngMaybeCreateWeeklyAssessmentFromNotes(db, { courseId, day }) {
     shuffle_questions: true,
     show_result_after_submit: true,
 
-    is_published: true,
-    status: "published",
+    is_published: false,
+    status: "draft",
 
     created_by: "system",
     created_by_name: "NextGen LMS",
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
-    published_at: new Date().toISOString(),
+    published_at: null,
   };
 
   db.assessments[id] = assessment;
@@ -2457,6 +2488,7 @@ async function ngProcessSessionLearningContent(db, { sessionId, transcriptText =
     cleaned_notes_saved: false,
     session_flashcards_created: 0,
     weekly_assessment_created: false,
+    weekly_assessment_manual_required: true,
     warnings: [],
   };
 
@@ -2486,8 +2518,9 @@ async function ngProcessSessionLearningContent(db, { sessionId, transcriptText =
 
       source: "zoom_transcript",
       auto_imported: true,
-      is_published: true,
-      status: "published",
+      // Prepared notes stay in draft until admin reviews/publishes.
+      is_published: ngAutoPublishPreparedContentEnabled(),
+      status: ngAutoPublishPreparedContentEnabled() ? "published" : "draft",
 
       content_processing_status: "notes_ready",
       content_processing_model: cleaned.model || null,
@@ -2499,9 +2532,12 @@ async function ngProcessSessionLearningContent(db, { sessionId, transcriptText =
 
     if (day) {
       day.session_notes_id = cleanSessionId;
-      day.session_notes_ready = true;
-      day.notes_status = "ready";
-      ngEnsureTaskItemOnDay(day, "read_session_notes", "Read the cleaned session notes after class.");
+      day.session_notes_draft_ready = true;
+      day.session_notes_ready = ngAutoPublishPreparedContentEnabled();
+      day.notes_status = ngAutoPublishPreparedContentEnabled() ? "published" : "draft";
+      if (ngAutoPublishPreparedContentEnabled()) {
+        ngEnsureTaskItemOnDay(day, "read_session_notes", "Read the session notes after class.");
+      }
     }
 
     try {
@@ -2516,18 +2552,10 @@ async function ngProcessSessionLearningContent(db, { sessionId, transcriptText =
       output.warnings.push(`Session flashcards failed: ${flashcardError.message}`);
     }
 
-    try {
-      if (courseId && day) {
-        const assessment = await ngMaybeCreateWeeklyAssessmentFromNotes(db, {
-          courseId,
-          day,
-        });
-
-        output.weekly_assessment_created = Boolean(assessment);
-      }
-    } catch (assessmentError) {
-      output.warnings.push(`Weekly assessment failed: ${assessmentError.message}`);
-    }
+    // Weekly/system assessments are intentionally manual now to prevent memory spikes.
+    // Use the admin assessment generator from notes when ready.
+    output.weekly_assessment_created = false;
+    output.weekly_assessment_manual_required = true;
 
     db.notes[cleanSessionId] = {
       ...(db.notes[cleanSessionId] || {}),
@@ -3537,6 +3565,239 @@ app.post("/admin/assessments/generate-from-source", async (req, res) => {
     });
   }
 });
+function ngCleanDateOnly(value) {
+  return String(value || "").trim().slice(0, 10);
+}
+
+function ngNoteTextForAssessment(note = {}) {
+  return String(
+    note.student_notes ||
+    note.cleaned_notes ||
+    note.notes ||
+    note.content ||
+    ""
+  ).trim();
+}
+
+function ngCollectNotesAssessmentSource(db, {
+  courseId,
+  lastDays = null,
+  dateFrom = "",
+  dateTo = "",
+  system = "",
+  sessionIds = [],
+  roadmapDayIds = [],
+  includeDrafts = true,
+  maxChars = 60000,
+} = {}) {
+  const cleanCourseId = String(courseId || "").trim();
+  const cleanSystem = String(system || "").trim().toLowerCase();
+  const selectedSessionIds = new Set(normalizeIdList(sessionIds));
+  const selectedRoadmapDayIds = new Set(normalizeIdList(roadmapDayIds));
+
+  const now = new Date();
+  const lastDaysNumber = lastDays ? Math.max(1, Math.min(60, Number(lastDays || 7))) : null;
+  const minDate = lastDaysNumber ? dateOnly(addDays(now, -lastDaysNumber + 1)) : ngCleanDateOnly(dateFrom);
+  const maxDate = ngCleanDateOnly(dateTo) || dateOnly(now);
+
+  const roadmapDays = cleanCourseId ? ngGetRoadmapDaysForCourse(db, cleanCourseId) : [];
+  const roadmapBySessionId = {};
+  const roadmapById = {};
+  for (const day of roadmapDays) {
+    if (day?.id) roadmapById[String(day.id)] = day;
+    const sid = day?.live_session_id || day?.session_id || "";
+    if (sid) roadmapBySessionId[String(sid)] = day;
+  }
+
+  const rows = [];
+  for (const [noteId, note] of Object.entries(db.notes || {})) {
+    const sessionId = String(note.session_id || noteId || "").trim();
+    const session = db.liveSessions?.[sessionId] || null;
+    const day = roadmapBySessionId[sessionId] || (note.roadmap_day_id ? roadmapById[String(note.roadmap_day_id)] : null) || null;
+    const noteCourseId = note.course_id || session?.course_id || day?.course_id || "";
+
+    if (cleanCourseId && String(noteCourseId) !== cleanCourseId) continue;
+    if (!includeDrafts && note.is_published !== true) continue;
+    if (selectedSessionIds.size && !selectedSessionIds.has(sessionId)) continue;
+    if (selectedRoadmapDayIds.size && !selectedRoadmapDayIds.has(String(day?.id || note.roadmap_day_id || ""))) continue;
+
+    const sessionDate = ngCleanDateOnly(session?.scheduled_date || day?.date || note.created_at || note.updated_at || "");
+    if ((minDate || maxDate) && sessionDate) {
+      if (minDate && sessionDate < minDate) continue;
+      if (maxDate && sessionDate > maxDate) continue;
+    }
+
+    const rowSystem = String(day?.system || note.system || session?.system || "").trim().toLowerCase();
+    if (cleanSystem && rowSystem && rowSystem !== cleanSystem) continue;
+
+    const text = ngNoteTextForAssessment(note);
+    if (!text) continue;
+
+    rows.push({
+      noteId,
+      sessionId,
+      roadmapDayId: day?.id || note.roadmap_day_id || null,
+      dayNumber: day?.day_number || null,
+      weekNumber: day?.week_number || null,
+      date: sessionDate || "",
+      title: day?.title || session?.topic || session?.title || `Session ${sessionId}`,
+      system: day?.system || note.system || session?.system || "",
+      text,
+    });
+  }
+
+  rows.sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")) || Number(a.dayNumber || 0) - Number(b.dayNumber || 0));
+
+  let sourceText = "";
+  const used = [];
+  for (const row of rows) {
+    const chunk = [`Date: ${row.date || "N/A"}`, `Title: ${row.title}`, row.system ? `System: ${row.system}` : "", row.text].filter(Boolean).join("\n");
+    if (sourceText.length + chunk.length + 10 > Number(maxChars || 60000)) break;
+    sourceText += (sourceText ? "\n\n---\n\n" : "") + chunk;
+    used.push(row);
+  }
+
+  return {
+    sourceText,
+    notes: used,
+    source_note_ids: used.map((row) => row.noteId),
+    source_session_ids: used.map((row) => row.sessionId).filter(Boolean),
+    source_roadmap_day_ids: used.map((row) => row.roadmapDayId).filter(Boolean),
+    source_summary: ngSafeSourceSummary({
+      mode: "manual_notes_assessment",
+      noteIds: used.map((row) => row.noteId),
+      sessionIds: used.map((row) => row.sessionId).filter(Boolean),
+      roadmapDayIds: used.map((row) => row.roadmapDayId).filter(Boolean),
+      system,
+      dateFrom: minDate,
+      dateTo: maxDate,
+      lastDays: lastDaysNumber,
+    }),
+  };
+}
+
+app.post("/admin/assessments/generate-from-notes", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.assessments.create");
+
+    if (!isAIConfigured()) {
+      return res.status(500).json({ success: false, error: getAIConfigError() });
+    }
+
+    const db = await readLiveDb();
+    const courseId = String(req.body.course_id || "").trim();
+
+    if (!courseId) {
+      return res.status(400).json({ success: false, error: "course_id is required" });
+    }
+
+    const course = db.courses?.[courseId];
+    if (!course) {
+      return res.status(404).json({ success: false, error: "Course not found" });
+    }
+
+    const collected = ngCollectNotesAssessmentSource(db, {
+      courseId,
+      lastDays: req.body.last_days || req.body.days || null,
+      dateFrom: req.body.date_from || req.body.start_date || "",
+      dateTo: req.body.date_to || req.body.end_date || "",
+      system: req.body.system || "",
+      sessionIds: req.body.session_ids || req.body.selected_session_ids || [],
+      roadmapDayIds: req.body.roadmap_day_ids || req.body.selected_roadmap_day_ids || [],
+      includeDrafts: req.body.include_drafts !== false,
+      maxChars: req.body.max_source_chars || 60000,
+    });
+
+    if (!collected.sourceText || collected.sourceText.length < 300) {
+      return res.status(400).json({
+        success: false,
+        error: "Not enough session notes found for this assessment source.",
+        source_summary: collected.source_summary,
+      });
+    }
+
+    const questionCount = Math.max(1, Math.min(50, Number(req.body.question_count || 20)));
+    const difficulty = String(req.body.difficulty || "mixed").trim() || "mixed";
+    const assessmentType = String(req.body.assessment_type || req.body.type || "weekly_notes").trim() || "weekly_notes";
+
+    const result = await generateQuestionsWithAI({
+      sourceText: collected.sourceText,
+      questionCount,
+      difficulty,
+      questionType: req.body.question_type || "mcq",
+      metadata: {
+        course_id: courseId,
+        course_name: course.name || "",
+        assessment_type: assessmentType,
+        source_type: "session_notes",
+        source_summary: collected.source_summary,
+      },
+    });
+
+    const usageLog = await logAIUsage({
+      user,
+      action: "generate_notes_assessment",
+      model: result.model,
+      usage: result.usage,
+      sourceLength: collected.sourceText.length,
+      questionCount: result.questions.length,
+    });
+
+    const id = uuid();
+    const publishNow = req.body.publish_now === true || req.body.is_published === true;
+    const nowIsoValue = new Date().toISOString();
+
+    const assessment = {
+      id,
+      course_id: courseId,
+      session_id: null,
+      title: String(req.body.title || "").trim() || `${assessmentType.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())} Assessment`,
+      description: String(req.body.description || "").trim() || "Assessment generated from selected session notes.",
+      source_type: "session_notes",
+      source_note_ids: collected.source_note_ids,
+      source_session_ids: collected.source_session_ids,
+      source_roadmap_day_ids: collected.source_roadmap_day_ids,
+      source_summary: collected.source_summary,
+      assessment_type: assessmentType,
+      difficulty,
+      question_count: result.questions.length,
+      duration_minutes: req.body.duration_minutes ? Number(req.body.duration_minutes) : null,
+      questions: result.questions,
+      secure_mode: req.body.secure_mode !== false,
+      shuffle_questions: req.body.shuffle_questions !== false,
+      show_result_after_submit: req.body.show_result_after_submit !== false,
+      is_published: publishNow,
+      status: publishNow ? "published" : "draft",
+      created_by: user.id,
+      created_by_name: user.name || user.email || "Admin",
+      created_at: nowIsoValue,
+      updated_at: nowIsoValue,
+      published_at: publishNow ? nowIsoValue : null,
+      published_by: publishNow ? user.id : null,
+    };
+
+    db.assessments = db.assessments || {};
+    db.assessments[id] = assessment;
+    await writeLiveDb(db);
+
+    res.json({
+      success: true,
+      assessment,
+      questions: result.questions,
+      warnings: result.warnings,
+      source_summary: collected.source_summary,
+      source_note_count: collected.source_note_ids.length,
+      source_length_used: collected.sourceText.length,
+      ai_usage: usageLog,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to generate assessment from notes",
+    });
+  }
+});
+
 app.get("/admin/ai/usage", async (req, res) => {
   try {
     await requireAdmin(req);
@@ -5884,10 +6145,10 @@ app.post("/admin/roadmap/sync-live-sessions", async (req, res) => {
 app.post("/roadmap/progress/mark", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); const { course_id, day_id, completed = true } = req.body; const db = await readLiveDb(); const key = `${course_id}:${user.id}:${day_id}`; db.roadmapProgress[key] = { id: key, course_id, user_id: user.id, day_id, completed: Boolean(completed), completed_at: completed ? new Date().toISOString() : null, updated_at: new Date().toISOString() }; const leaderboard = updateLeaderboard(db, { courseId: course_id, userId: user.id, userName: user.name || user.email || "Student" }); await writeLiveDb(db); res.json({ success: true, progress: db.roadmapProgress[key], summary: buildProgressSummary({ db, courseId: course_id, userId: user.id }), leaderboard }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.get("/roadmap/progress/me", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); const db = await readLiveDb(); res.json({ success: true, summary: buildProgressSummary({ db, courseId: req.query.course_id, userId: user.id }), progress_items: Object.values(db.roadmapProgress || {}).filter((x) => String(x.course_id) === String(req.query.course_id) && String(x.user_id) === String(user.id)) }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 
-app.post("/admin/assessments/create", async (req, res) => { try { const { user } = await requireLmsPermission(req, "lms.assessments.create"); const { course_id, session_id = null, title, description = "", source_type = "manual_notes", source_text = "", question_count = 10, duration_minutes = null, topic = "Assessment" } = req.body; if (!course_id) return res.status(400).json({ success: false, error: "course_id is required" }); const db = await readLiveDb(); const notes = session_id ? db.notes[session_id] : null; const source = source_text || notes?.notes || notes?.transcript_text || ""; const id = uuid(); const assessment = { id, course_id, session_id, title: title || `${topic} Assessment`, description, source_type, source_text: source, question_count: Number(question_count), duration_minutes, questions: createDraftQuestions({ question_count, topic }), is_published: false, created_by: user.id, created_by_name: user.name || user.email || "Tutor", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), published_at: null }; db.assessments[id] = assessment; await writeLiveDb(db); res.json({ success: true, assessment }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.post("/admin/assessments/create", async (req, res) => { try { const { user } = await requireLmsPermission(req, "lms.assessments.create"); const { course_id, session_id = null, title, description = "", source_type = "manual_notes", question_count = 10, duration_minutes = null, topic = "Assessment" } = req.body; if (!course_id) return res.status(400).json({ success: false, error: "course_id is required" }); const db = await readLiveDb(); const notes = session_id ? db.notes[session_id] : null; const id = uuid(); const sourceNoteIds = session_id && notes ? [session_id] : []; const assessment = { id, course_id, session_id, title: title || `${topic} Assessment`, description, source_type, source_note_ids: sourceNoteIds, source_session_ids: session_id ? [session_id] : [], source_summary: session_id ? `Manual draft linked to session ${session_id}` : "Manual draft assessment", question_count: Number(question_count), duration_minutes, questions: createDraftQuestions({ question_count, topic }), is_published: false, status: "draft", created_by: user.id, created_by_name: user.name || user.email || "Tutor", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), published_at: null }; db.assessments[id] = assessment; await writeLiveDb(db); res.json({ success: true, assessment }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.get("/admin/assessments", async (req, res) => { try { await requireLmsPermission(req, "lms.assessments.view"); const db = await readLiveDb(); let items = Object.values(db.assessments || {}); if (req.query.course_id) items = items.filter((a) => String(a.course_id) === String(req.query.course_id)); if (req.query.session_id) items = items.filter((a) => String(a.session_id || "") === String(req.query.session_id)); items.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || ""))); res.json({ success: true, count: items.length, assessments: items }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.get("/admin/assessments/:assessmentId", async (req, res) => { try { await requireLmsPermission(req, "lms.assessments.view"); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a) return res.status(404).json({ success: false, error: "Assessment not found" }); res.json({ success: true, assessment: a }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
-app.patch("/admin/assessments/:assessmentId", async (req, res) => { try { await requireLmsPermission(req, "lms.assessments.create"); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a) return res.status(404).json({ success: false, error: "Assessment not found" }); const allowed = ["title", "description", "source_type", "source_text", "duration_minutes", "questions"]; for (const k of allowed) if (req.body[k] !== undefined) a[k] = req.body[k]; a.question_count = Array.isArray(a.questions) ? a.questions.length : a.question_count; a.updated_at = new Date().toISOString(); await writeLiveDb(db); res.json({ success: true, assessment: a }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.patch("/admin/assessments/:assessmentId", async (req, res) => { try { await requireLmsPermission(req, "lms.assessments.create"); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a) return res.status(404).json({ success: false, error: "Assessment not found" }); const allowed = ["title", "description", "source_type", "source_summary", "source_note_ids", "source_session_ids", "source_roadmap_day_ids", "duration_minutes", "questions"]; for (const k of allowed) if (req.body[k] !== undefined) a[k] = req.body[k]; a.question_count = Array.isArray(a.questions) ? a.questions.length : a.question_count; a.updated_at = new Date().toISOString(); await writeLiveDb(db); res.json({ success: true, assessment: a }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.post("/admin/assessments/:assessmentId/publish", async (req, res) => { try { const { user } = await requireLmsPermission(req, "lms.assessments.publish"); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a) return res.status(404).json({ success: false, error: "Assessment not found" }); const invalid = (a.questions || []).find((q) => !q.stem || !Array.isArray(q.options) || q.options.length < 2 || q.correct_index === undefined); if (req.body.is_published !== false && invalid) return res.status(400).json({ success: false, error: "Assessment has incomplete questions" }); a.is_published = req.body.is_published !== false; a.published_at = a.is_published ? new Date().toISOString() : null; a.published_by = a.is_published ? user.id : null; a.updated_at = new Date().toISOString(); await writeLiveDb(db); res.json({ success: true, assessment: a }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.delete("/admin/assessments/:assessmentId", async (req, res) => { try { await requireLmsPermission(req, "lms.assessments.delete"); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a) return res.status(404).json({ success: false, error: "Assessment not found" }); delete db.assessments[req.params.assessmentId]; await writeLiveDb(db); res.json({ success: true, deleted_assessment: a }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.get("/student/assessments", async (req, res) => {
