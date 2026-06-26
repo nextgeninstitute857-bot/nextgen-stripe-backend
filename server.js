@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v142-safe-manual-notes-assessments";
+const NEXTGEN_BACKEND_BUILD = "v143-crm-retention-guard";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -7514,6 +7514,290 @@ async function readCrmDb() {
   }
 }
 
+
+// v143: CRM retention guard.
+// Keeps the main CRM JSON small by archiving old high-volume logs before every CRM save.
+// This intentionally avoids touching leads, conversations, templates, campaigns, appointments,
+// settings, students, courses, or any LMS route data.
+const CRM_RETENTION_ARCHIVE_DIR = path.join(DATA_DIR, "crm-archive");
+
+const CRM_RETENTION_RULES = [
+  {
+    section: "message_logs",
+    trigger: Number(process.env.CRM_RETENTION_MESSAGE_LOGS_TRIGGER || 5000),
+    keep: Number(process.env.CRM_RETENTION_MESSAGE_LOGS_KEEP || 4000),
+  },
+  {
+    section: "outbound_messages",
+    trigger: Number(process.env.CRM_RETENTION_OUTBOUND_MESSAGES_TRIGGER || 5000),
+    keep: Number(process.env.CRM_RETENTION_OUTBOUND_MESSAGES_KEEP || 4000),
+  },
+  {
+    section: "ai_auto_runs",
+    trigger: Number(process.env.CRM_RETENTION_AI_AUTO_RUNS_TRIGGER || 1800),
+    keep: Number(process.env.CRM_RETENTION_AI_AUTO_RUNS_KEEP || 1500),
+  },
+  {
+    section: "integration_logs",
+    trigger: Number(process.env.CRM_RETENTION_INTEGRATION_LOGS_TRIGGER || 700),
+    keep: Number(process.env.CRM_RETENTION_INTEGRATION_LOGS_KEEP || 500),
+  },
+  {
+    section: "client_data_events",
+    trigger: Number(process.env.CRM_RETENTION_CLIENT_DATA_EVENTS_TRIGGER || 700),
+    keep: Number(process.env.CRM_RETENTION_CLIENT_DATA_EVENTS_KEEP || 500),
+  },
+  {
+    section: "crm_sales_briefs",
+    trigger: Number(process.env.CRM_RETENTION_SALES_BRIEFS_TRIGGER || 300),
+    keep: Number(process.env.CRM_RETENTION_SALES_BRIEFS_KEEP || 200),
+  },
+  {
+    section: "ai_training_deletion_logs",
+    trigger: Number(process.env.CRM_RETENTION_TRAINING_DELETION_LOGS_TRIGGER || 500),
+    keep: Number(process.env.CRM_RETENTION_TRAINING_DELETION_LOGS_KEEP || 300),
+  },
+  {
+    section: "community_post_history",
+    trigger: Number(process.env.CRM_RETENTION_COMMUNITY_POST_HISTORY_TRIGGER || 600),
+    keep: Number(process.env.CRM_RETENTION_COMMUNITY_POST_HISTORY_KEEP || 300),
+  },
+];
+
+const CRM_DELIVERY_LOCKS_TRIGGER = Number(process.env.CRM_RETENTION_DELIVERY_LOCKS_TRIGGER || 8000);
+const CRM_DELIVERY_LOCKS_KEEP_FULL = Number(process.env.CRM_RETENTION_DELIVERY_LOCKS_KEEP_FULL || 4000);
+
+const CRM_RETENTION_DATE_FIELDS = [
+  "created_at",
+  "createdAt",
+  "timestamp",
+  "time",
+  "date",
+  "sent_at",
+  "sentAt",
+  "updated_at",
+  "updatedAt",
+  "scheduled_at",
+  "scheduledAt",
+  "delivered_at",
+  "deliveredAt",
+  "last_sent_at",
+  "lastSentAt",
+  "locked_at",
+  "lockedAt",
+];
+
+function ngCrmRetentionEnabled() {
+  return String(process.env.NEXTGEN_CRM_RETENTION_GUARD || "true").toLowerCase() !== "false";
+}
+
+function ngCrmRetentionStamp() {
+  return nowIso().replace(/[:.]/g, "-");
+}
+
+function ngCrmRetentionTimeScore(record = {}, index = 0) {
+  for (const field of CRM_RETENTION_DATE_FIELDS) {
+    const value = record?.[field];
+    if (!value) continue;
+
+    const time = new Date(value).getTime();
+    if (Number.isFinite(time)) return time;
+  }
+
+  // Most CRM arrays are append-only. If no date is present, later index is treated as newer.
+  return Number(index || 0);
+}
+
+function ngCrmRetentionSplitKeepArchive(records = [], keepCount = 0) {
+  const indexed = records.map((item, index) => ({
+    item,
+    index,
+    score: ngCrmRetentionTimeScore(item, index),
+  }));
+
+  indexed.sort((a, b) => b.score - a.score || b.index - a.index);
+
+  const keepIndexes = new Set(indexed.slice(0, keepCount).map((item) => item.index));
+  const keep = [];
+  const archive = [];
+
+  records.forEach((item, index) => {
+    if (keepIndexes.has(index)) keep.push(item);
+    else archive.push(item);
+  });
+
+  return { keep, archive };
+}
+
+async function ngCrmRetentionArchiveRecords(section, records = [], reason = "retention_guard") {
+  if (!Array.isArray(records) || !records.length) return null;
+
+  await fs.mkdir(CRM_RETENTION_ARCHIVE_DIR, { recursive: true });
+
+  const archivePath = path.join(
+    CRM_RETENTION_ARCHIVE_DIR,
+    `${section}-${ngCrmRetentionStamp()}.json`
+  );
+
+  await fs.writeFile(
+    archivePath,
+    JSON.stringify(
+      {
+        section,
+        reason,
+        archived_at: nowIso(),
+        count: records.length,
+        records,
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  return archivePath;
+}
+
+function ngCrmCompactDeliveryLock(lock = {}) {
+  if (lock?.compacted === true) return lock;
+
+  const compact = {};
+  const keepFields = [
+    "id",
+    "key",
+    "lock_key",
+    "lockKey",
+    "dedupe_key",
+    "dedupeKey",
+    "message_key",
+    "messageKey",
+    "lead_id",
+    "leadId",
+    "contact_id",
+    "contactId",
+    "conversation_id",
+    "conversationId",
+    "message_id",
+    "messageId",
+    "campaign_id",
+    "campaignId",
+    "template_name",
+    "templateName",
+    "phone",
+    "to",
+    "channel",
+    "type",
+    "status",
+    "scheduled_at",
+    "scheduledAt",
+    "sent_at",
+    "sentAt",
+    "created_at",
+    "createdAt",
+    "updated_at",
+    "updatedAt",
+  ];
+
+  for (const field of keepFields) {
+    if (Object.prototype.hasOwnProperty.call(lock || {}, field)) {
+      compact[field] = lock[field];
+    }
+  }
+
+  compact.compacted = true;
+  compact.compacted_at = nowIso();
+
+  return compact;
+}
+
+function ngCrmRetentionCompactDeliveryLocks(db) {
+  const locks = Array.isArray(db.message_delivery_locks) ? db.message_delivery_locks : [];
+
+  if (locks.length <= CRM_DELIVERY_LOCKS_TRIGGER) {
+    return null;
+  }
+
+  const indexed = locks.map((item, index) => ({
+    index,
+    score: ngCrmRetentionTimeScore(item, index),
+  }));
+
+  indexed.sort((a, b) => b.score - a.score || b.index - a.index);
+
+  const keepFullIndexes = new Set(
+    indexed.slice(0, CRM_DELIVERY_LOCKS_KEEP_FULL).map((item) => item.index)
+  );
+
+  let compacted = 0;
+
+  db.message_delivery_locks = locks.map((lock, index) => {
+    if (keepFullIndexes.has(index)) return lock;
+    if (lock?.compacted === true) return lock;
+
+    compacted += 1;
+    return ngCrmCompactDeliveryLock(lock);
+  });
+
+  if (!compacted) return null;
+
+  return {
+    section: "message_delivery_locks",
+    action: "compacted_old_records_kept_all",
+    before: locks.length,
+    kept: locks.length,
+    archived: 0,
+    compacted,
+  };
+}
+
+async function ngApplyCrmRetentionGuard(db = {}) {
+  if (!ngCrmRetentionEnabled()) return [];
+
+  const report = [];
+
+  for (const rule of CRM_RETENTION_RULES) {
+    const records = Array.isArray(db[rule.section]) ? db[rule.section] : [];
+
+    if (records.length <= rule.trigger) continue;
+
+    const { keep, archive } = ngCrmRetentionSplitKeepArchive(records, rule.keep);
+    const archivePath = await ngCrmRetentionArchiveRecords(
+      rule.section,
+      archive,
+      "automatic_retention_guard"
+    );
+
+    db[rule.section] = keep;
+
+    report.push({
+      section: rule.section,
+      action: "archived_old_records",
+      before: records.length,
+      kept: keep.length,
+      archived: archive.length,
+      archive_file: archivePath,
+    });
+  }
+
+  const locksReport = ngCrmRetentionCompactDeliveryLocks(db);
+  if (locksReport) report.push(locksReport);
+
+  if (report.length) {
+    db.crm_retention_meta = {
+      ...(db.crm_retention_meta || {}),
+      enabled: true,
+      last_run_at: nowIso(),
+      archive_dir: CRM_RETENTION_ARCHIVE_DIR,
+      last_report: report,
+    };
+
+    console.log("CRM retention guard applied:", report);
+  }
+
+  return report;
+}
+
+
 async function writeCrmDb(db) {
   crmWriteQueue = crmWriteQueue.then(async () => {
     await ensureDataDir();
@@ -7524,6 +7808,8 @@ async function writeCrmDb(db) {
       model_pricing: Array.isArray(db.model_pricing) && db.model_pricing.length ? db.model_pricing : DEFAULT_CRM_MODEL_PRICING,
       updated_at: nowIso(),
     };
+    await ngApplyCrmRetentionGuard(nextDb);
+
     const tempPath = `${CRM_DB_PATH}.tmp`;
     await fs.writeFile(tempPath, JSON.stringify(nextDb, null, 2), "utf8");
     await fs.rename(tempPath, CRM_DB_PATH);
