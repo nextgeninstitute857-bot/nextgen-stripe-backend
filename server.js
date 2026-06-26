@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v143-crm-retention-guard";
+const NEXTGEN_BACKEND_BUILD = "v144-public-testimonials";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -36616,6 +36616,12 @@ app.post("/admin/crm/media-library/upload", async (req, res) => {
       trigger_keywords: req.body.trigger_keywords || req.body.keywords || [],
       ai_usage_context: req.body.ai_usage_context || req.body.context || req.body.description || "",
       caption_template: req.body.caption_template || req.body.caption || "",
+      testimonial_category: normalizeCrmString(req.body.testimonial_category || req.body.category || "Student Feedback"),
+      testimonial_quote: normalizeCrmString(req.body.testimonial_quote || req.body.quote || req.body.caption_template || req.body.caption || ""),
+      student_label: normalizeCrmString(req.body.student_label || req.body.student_name || "USMLE Step 1 Student"),
+      homepage_visible: req.body.homepage_visible !== false,
+      is_featured: req.body.is_featured === true || req.body.featured === true,
+      sort_order: Number(req.body.sort_order || 0) || 0,
       priority: Number(req.body.priority || 0) || 0,
       status: "active",
     }, null, brandId);
@@ -36623,6 +36629,81 @@ app.post("/admin/crm/media-library/upload", async (req, res) => {
     await writeCrmDb(db);
     res.json({ success: true, asset, public_url: publicUrl, relative_url: relativeUrl });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+
+function ngIsStudentTestimonialAsset(asset = {}) {
+  const values = [
+    asset.usage_area,
+    asset.type,
+    asset.asset_type,
+    asset.ai_usage_context,
+  ].map((value) => String(value || "").trim().toLowerCase());
+
+  return values.some((value) => [
+    "student_testimonial",
+    "student_testimonials",
+    "testimonial",
+    "testimonials",
+    "student_feedback",
+    "homepage_testimonial",
+  ].includes(value));
+}
+
+function ngPublicMediaUrl(req, asset = {}) {
+  const direct = String(asset.public_url || asset.url || asset.file_url || asset.media_url || asset.image_url || "").trim();
+  if (direct) return direct;
+
+  const relative = String(asset.relative_url || "").trim();
+  if (relative) return `${ngPublicBaseUrl(req)}${relative.startsWith("/") ? relative : `/${relative}`}`;
+
+  return "";
+}
+
+function ngSanitizePublicTestimonial(req, asset = {}) {
+  const imageUrl = ngPublicMediaUrl(req, asset);
+  return {
+    id: asset.id,
+    title: asset.title || asset.name || "Student Feedback",
+    category: asset.testimonial_category || asset.category || "Student Feedback",
+    quote: asset.testimonial_quote || asset.quote || asset.caption_template || "",
+    student_label: asset.student_label || asset.student_name || "USMLE Step 1 Student",
+    image_url: imageUrl,
+    public_url: imageUrl,
+    aspect_ratio: asset.aspect_ratio || "9:16",
+    featured: Boolean(asset.is_featured || asset.featured),
+    sort_order: Number(asset.sort_order || 0) || 0,
+    created_at: asset.created_at || null,
+  };
+}
+
+app.get("/public/testimonials", async (req, res) => {
+  try {
+    const db = await readCrmDb();
+    const limitRaw = Number(req.query.limit || 24);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 60) : 24;
+    const category = String(req.query.category || "").trim().toLowerCase();
+
+    const testimonials = ensureCrmArray(db, "media_assets")
+      .filter((asset) => ngIsStudentTestimonialAsset(asset))
+      .filter((asset) => asset.status !== "deleted" && asset.status !== "archived" && asset.status !== "inactive")
+      .filter((asset) => asset.homepage_visible !== false)
+      .map((asset) => ngSanitizePublicTestimonial(req, asset))
+      .filter((asset) => asset.image_url)
+      .filter((asset) => !category || String(asset.category || "").trim().toLowerCase() === category)
+      .sort((a, b) => {
+        if (a.featured !== b.featured) return a.featured ? -1 : 1;
+        if (Number(a.sort_order || 0) !== Number(b.sort_order || 0)) return Number(a.sort_order || 0) - Number(b.sort_order || 0);
+        return String(b.created_at || "").localeCompare(String(a.created_at || ""));
+      })
+      .slice(0, limit);
+
+    const categories = Array.from(new Set(testimonials.map((item) => item.category).filter(Boolean)));
+
+    res.json({ success: true, testimonials, categories, count: testimonials.length });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message || "Failed to load testimonials" });
+  }
 });
 
 app.post("/admin/crm/media-library/send-whatsapp", async (req, res) => {
@@ -38221,7 +38302,7 @@ app.patch("/admin/crm/media-library/:id/ayla-usage", async (req, res) => {
     const db = await readCrmDb();
     const asset = ensureCrmArray(db, "media_assets").find((item) => String(item.id) === String(req.params.id));
     if (!asset) return res.status(404).json({ success: false, error: "Media asset not found" });
-    const allowed = ["ai_send_enabled", "auto_send_with_ayla", "send_when_explaining", "usage_area", "trigger_keywords", "ai_usage_context", "caption_template", "priority", "status", "tags", "whatsapp_media_id"];
+    const allowed = ["ai_send_enabled", "auto_send_with_ayla", "send_when_explaining", "usage_area", "trigger_keywords", "ai_usage_context", "caption_template", "priority", "status", "tags", "whatsapp_media_id", "testimonial_category", "testimonial_quote", "student_label", "homepage_visible", "is_featured", "sort_order"];
     for (const key of allowed) if (req.body[key] !== undefined) asset[key] = req.body[key];
     Object.assign(asset, normalizeCrmCollectionPayload("media_assets", asset, asset, asset.brand_id || getCrmBrandId(req, db)));
     asset.updated_at = nowIso();
