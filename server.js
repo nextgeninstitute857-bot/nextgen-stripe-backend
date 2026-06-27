@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v146-media-rules-testimonials";
+const NEXTGEN_BACKEND_BUILD = "v147-crm-read-cache";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -7382,7 +7382,30 @@ function safeCrmJson(value, fallback) {
   }
 }
 
-async function readCrmDb() {
+
+// v147: CRM read cache.
+// The CRM admin dashboard fires many routes at once. Without this cache, every
+// request reads/parses the full CRM JSON separately, which can cause Render 502s
+// under concurrent admin page loads.
+const CRM_READ_CACHE_TTL_MS = Number(process.env.CRM_READ_CACHE_TTL_MS || 2500);
+let crmReadCache = null;
+let crmReadCacheAt = 0;
+let crmReadInFlight = null;
+
+function cloneCrmDbForRequest(db) {
+  if (!db) return null;
+
+  // Shallow clone keeps requests from replacing the root object while avoiding
+  // huge deep-clone memory spikes. Arrays are intentionally shared during the
+  // short cache window; writeCrmDb refreshes the cache after every save.
+  return {
+    ...db,
+    settings: { ...(db.settings || {}) },
+  };
+}
+
+
+async function readCrmDbFromDisk() {
   try {
     await ensureDataDir();
     const raw = await fs.readFile(CRM_DB_PATH, "utf8");
@@ -7513,6 +7536,32 @@ async function readCrmDb() {
     return { ...DEFAULT_CRM_DB };
   }
 }
+
+
+
+async function readCrmDb() {
+  const now = Date.now();
+
+  if (crmReadCache && now - crmReadCacheAt <= CRM_READ_CACHE_TTL_MS) {
+    return cloneCrmDbForRequest(crmReadCache);
+  }
+
+  if (!crmReadInFlight) {
+    crmReadInFlight = readCrmDbFromDisk()
+      .then((db) => {
+        crmReadCache = db;
+        crmReadCacheAt = Date.now();
+        return db;
+      })
+      .finally(() => {
+        crmReadInFlight = null;
+      });
+  }
+
+  const db = await crmReadInFlight;
+  return cloneCrmDbForRequest(db);
+}
+
 
 
 // v143: CRM retention guard.
@@ -7813,6 +7862,11 @@ async function writeCrmDb(db) {
     const tempPath = `${CRM_DB_PATH}.tmp`;
     await fs.writeFile(tempPath, JSON.stringify(nextDb, null, 2), "utf8");
     await fs.rename(tempPath, CRM_DB_PATH);
+
+    // Refresh read cache after every successful write.
+    crmReadCache = nextDb;
+    crmReadCacheAt = Date.now();
+    crmReadInFlight = null;
   });
   return crmWriteQueue;
 }
