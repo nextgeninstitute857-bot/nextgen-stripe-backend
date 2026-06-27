@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v148-safe-bulk-auto";
+const NEXTGEN_BACKEND_BUILD = "v149-demo-entitlement-guard";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -653,6 +653,130 @@ function getStudentFeatureAccess(db, user) {
   }
 
   return access;
+}
+
+
+function ngDemoSettingKeyForFeature(featureKey) {
+  const map = {
+    live_classes: "allow_live_classes",
+    recordings: "allow_recordings",
+    community: "allow_community",
+    assessments: "allow_assessments",
+    notes_transcripts: "allow_notes_transcripts",
+    leaderboard: "allow_leaderboard",
+    flashcards: "allow_flashcards",
+    roadmap: "allow_roadmap",
+    global_community: "allow_global_community",
+    study_partner: "allow_study_partner",
+    support: "allow_community",
+    video_library: "allow_video_library",
+    mini_mock: "allow_assessments",
+  };
+
+  return map[String(featureKey || "").trim()] || null;
+}
+
+function ngCourseFeatureAccess(db, user, { courseId, featureKey }) {
+  const cleanCourseId = String(courseId || "").trim();
+  const cleanFeatureKey = String(featureKey || "").trim();
+
+  if (!user?.id) {
+    return { allowed: false, reason: "User not authenticated" };
+  }
+
+  if (user.role === "admin" || user.role === "instructor") {
+    return { allowed: true, reason: "Staff access" };
+  }
+
+  if (!cleanCourseId) {
+    return { allowed: false, reason: "course_id is required" };
+  }
+
+  const catalogItem =
+    db.featureCatalog?.[cleanFeatureKey] ||
+    DEFAULT_FEATURE_CATALOG?.[cleanFeatureKey] ||
+    null;
+
+  if (catalogItem?.free_for_all === true) {
+    return { allowed: true, reason: "Free feature" };
+  }
+
+  const paidEnrollment =
+    db.enrollments?.[backendEnrollmentKey(cleanCourseId, user.id, "paid")] ||
+    null;
+
+  if (paidEnrollment?.access_granted !== false && paidEnrollment?.id) {
+    if (!paidEnrollment.plan_id) {
+      return {
+        allowed: true,
+        reason: "Manual paid access",
+        enrollment: paidEnrollment,
+        plan: null,
+      };
+    }
+
+    const plan = db.plans?.[String(paidEnrollment.plan_id)] || null;
+
+    if (plan?.is_active !== false && planIncludesFeature(plan, cleanFeatureKey)) {
+      return {
+        allowed: true,
+        reason: "Paid access",
+        enrollment: paidEnrollment,
+        plan,
+      };
+    }
+
+    return {
+      allowed: false,
+      reason: `Your current plan does not include ${cleanFeatureKey} access.`,
+      enrollment: paidEnrollment,
+      plan,
+    };
+  }
+
+  const demoSettings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
+  const demoEnrollment =
+    db.enrollments?.[backendEnrollmentKey(cleanCourseId, user.id, "demo")] ||
+    null;
+
+  if (demoEnrollment?.access_granted !== false && demoEnrollment?.is_demo === true) {
+    const course = db.courses?.[cleanCourseId] || null;
+    const settingKey = ngDemoSettingKeyForFeature(cleanFeatureKey);
+
+    if (!isDemoEnrollmentActive(demoEnrollment, demoSettings)) {
+      return { allowed: false, reason: "Demo access is expired or disabled", enrollment: demoEnrollment };
+    }
+
+    if (course?.demo_access_enabled === false) {
+      return { allowed: false, reason: "Demo access is disabled for this course", enrollment: demoEnrollment };
+    }
+
+    if (!settingKey || demoSettings[settingKey] !== true) {
+      return { allowed: false, reason: `${cleanFeatureKey} is not available in demo access`, enrollment: demoEnrollment };
+    }
+
+    return {
+      allowed: true,
+      reason: "Active demo access",
+      enrollment: demoEnrollment,
+      plan: null,
+    };
+  }
+
+  return {
+    allowed: false,
+    reason: `Your current plan does not include ${cleanFeatureKey} access.`,
+  };
+}
+
+function ngBlockLockedFeature(res, featureKey, reason) {
+  return res.status(403).json({
+    success: false,
+    locked: true,
+    feature: featureKey,
+    upgrade_url: "/plans",
+    error: reason || "This feature is locked. Please upgrade or renew access.",
+  });
 }
 
 function signExternalLibraryToken({ user, enrollment, plan, course, accessEndsAt }) {
@@ -5402,7 +5526,31 @@ app.get("/live/recordings", async (req, res) => {
   }
 });
 
-app.get("/live/recordings/published", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); const db = await readLiveDb(); if (req.query.course_id) { const e = getBackendEnrollment(db, { userId: user.id, courseId: req.query.course_id }); if (e?.is_demo && !db.demoSettings.allow_recordings) return res.json({ success: true, count: 0, recordings: [], demo_restricted: true }); } let recordings = Object.values(db.recordings || {}).filter((r) => r.published); if (req.query.course_id) recordings = recordings.filter((r) => String(r.course_id || "") === String(req.query.course_id)); res.json({ success: true, count: recordings.length, recordings: recordings.map(sanitizePublicRecording) }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.get("/live/recordings/published", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const courseId = String(req.query.course_id || req.query.courseId || "").trim();
+
+    if (courseId) {
+      const access = ngCourseFeatureAccess(db, user, {
+        courseId,
+        featureKey: "recordings",
+      });
+
+      if (!access.allowed) {
+        return ngBlockLockedFeature(res, "recordings", access.reason);
+      }
+    }
+
+    let recordings = Object.values(db.recordings || {}).filter((recording) => recording.published);
+    if (courseId) recordings = recordings.filter((recording) => String(recording.course_id || "") === String(courseId));
+
+    res.json({ success: true, count: recordings.length, recordings: recordings.map(sanitizePublicRecording) });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message });
+  }
+});
 
 
 
@@ -5560,9 +5708,113 @@ app.get(["/live/notes/:sessionId", "/admin/notes/:sessionId"], getNotesHandler);
 
 
 app.post("/live/attendance/mark", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); const db = await readLiveDb(); const { session_id, course_id, source = "classroom_opened" } = req.body; if (!session_id || !course_id) return res.status(400).json({ success: false, error: "session_id and course_id are required" }); const e = getBackendEnrollment(db, { userId: user.id, courseId: course_id }); if (!e && user.role !== "admin" && user.role !== "instructor") return res.status(403).json({ success: false, error: "No course access found" }); const key = `${user.id}:${session_id}`; db.attendance[key] = { id: key, user_id: user.id, user_name: user.name || user.email || "Student", session_id, course_id, date: todayKey(), source, marked_at: new Date().toISOString() }; const leaderboard = updateLeaderboard(db, { courseId: course_id, userId: user.id, userName: user.name || user.email || "Student" }); await writeLiveDb(db); res.json({ success: true, attendance: db.attendance[key], leaderboard }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
-app.get("/live/leaderboard", async (req, res) => { try { await getAuthenticatedUser(req); const db = await readLiveDb(); let list = Object.values(db.leaderboard || {}); if (req.query.course_id) list = list.filter((x) => String(x.course_id) === String(req.query.course_id)); list = list.sort((a, b) => Number(b.total_points || 0) - Number(a.total_points || 0)).map((x, i) => ({ rank: i + 1, ...x })); res.json({ success: true, count: list.length, leaderboard: list }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
-app.get("/live/community/:sessionId", async (req, res) => { try { await getAuthenticatedUser(req); const db = await readLiveDb(); const messages = db.communityMessages[req.params.sessionId] || []; res.json({ success: true, count: messages.length, messages }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
-app.post("/live/community/:sessionId", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); if (!req.body.message) return res.status(400).json({ success: false, error: "message is required" }); const db = await readLiveDb(); const session = db.liveSessions?.[String(req.params.sessionId)] || null; const courseId = req.body.course_id || session?.course_id || null; const item = { id: uuid(), session_id: req.params.sessionId, course_id: courseId, user_id: user.id, user_name: user.name || user.email || "Student", message: String(req.body.message).slice(0, 2000), created_at: new Date().toISOString() }; db.communityMessages[req.params.sessionId] = [...(db.communityMessages[req.params.sessionId] || []), item]; if (courseId && session?.roadmap_day_id) { const day = ngFindRoadmapDay(db, { courseId, dayId: session.roadmap_day_id }); if (day) ngUpsertTaskCompletion(db, { courseId, userId: user.id, userName: user.name || user.email || "Student", day, taskKey: "community_confusion_post", completed: true, metadata: { community_message_id: item.id, session_id: req.params.sessionId } }); updateLeaderboard(db, { courseId, userId: user.id, userName: user.name || user.email || "Student" }); } await writeLiveDb(db); res.json({ success: true, message: item, leaderboard: courseId ? db.leaderboard?.[courseUserKey(courseId, user.id)] || null : null }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.get("/live/leaderboard", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const courseId = String(req.query.course_id || req.query.courseId || "").trim();
+
+    if (courseId) {
+      const access = ngCourseFeatureAccess(db, user, {
+        courseId,
+        featureKey: "leaderboard",
+      });
+
+      if (!access.allowed) {
+        return ngBlockLockedFeature(res, "leaderboard", access.reason);
+      }
+    }
+
+    let list = Object.values(db.leaderboard || {});
+    if (courseId) list = list.filter((x) => String(x.course_id) === String(courseId));
+    list = list.sort((a, b) => Number(b.total_points || 0) - Number(a.total_points || 0)).map((x, i) => ({ rank: i + 1, ...x }));
+
+    res.json({ success: true, count: list.length, leaderboard: list });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message });
+  }
+});
+app.get("/live/community/:sessionId", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const session = db.liveSessions?.[String(req.params.sessionId)] || null;
+
+    if (!session?.id) {
+      return res.status(404).json({ success: false, error: "Session not found" });
+    }
+
+    const access = ngCourseFeatureAccess(db, user, {
+      courseId: session.course_id,
+      featureKey: "community",
+    });
+
+    if (!access.allowed) {
+      return ngBlockLockedFeature(res, "community", access.reason);
+    }
+
+    const messages = db.communityMessages[req.params.sessionId] || [];
+    res.json({ success: true, count: messages.length, messages });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message });
+  }
+});
+app.post("/live/community/:sessionId", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    if (!req.body.message) return res.status(400).json({ success: false, error: "message is required" });
+
+    const db = await readLiveDb();
+    const session = db.liveSessions?.[String(req.params.sessionId)] || null;
+
+    if (!session?.id) {
+      return res.status(404).json({ success: false, error: "Session not found" });
+    }
+
+    const courseId = req.body.course_id || session.course_id || null;
+    const access = ngCourseFeatureAccess(db, user, {
+      courseId,
+      featureKey: "community",
+    });
+
+    if (!access.allowed) {
+      return ngBlockLockedFeature(res, "community", access.reason);
+    }
+
+    const item = {
+      id: uuid(),
+      session_id: req.params.sessionId,
+      course_id: courseId,
+      user_id: user.id,
+      user_name: user.name || user.email || "Student",
+      message: String(req.body.message).slice(0, 2000),
+      created_at: new Date().toISOString(),
+    };
+
+    db.communityMessages[req.params.sessionId] = [...(db.communityMessages[req.params.sessionId] || []), item];
+
+    if (courseId && session?.roadmap_day_id) {
+      const day = ngFindRoadmapDay(db, { courseId, dayId: session.roadmap_day_id });
+      if (day) {
+        ngUpsertTaskCompletion(db, {
+          courseId,
+          userId: user.id,
+          userName: user.name || user.email || "Student",
+          day,
+          taskKey: "community_confusion_post",
+          completed: true,
+          metadata: { community_message_id: item.id, session_id: req.params.sessionId },
+        });
+      }
+      updateLeaderboard(db, { courseId, userId: user.id, userName: user.name || user.email || "Student" });
+    }
+
+    await writeLiveDb(db);
+    res.json({ success: true, message: item, leaderboard: courseId ? db.leaderboard?.[courseUserKey(courseId, user.id)] || null : null });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message });
+  }
+});
 
 
 function ngFindRoadmapDay(db, { courseId, dayId, dayNumber }) {
@@ -6159,13 +6411,13 @@ app.get("/student/assessments", async (req, res) => {
 
     if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
 
-    const enrollment = getBackendEnrollment(db, { userId: user.id, courseId });
-    if (!enrollment && user.role !== "admin" && user.role !== "instructor") {
-      return res.status(403).json({ success: false, error: "No course access found" });
-    }
+    const access = ngCourseFeatureAccess(db, user, {
+      courseId,
+      featureKey: "assessments",
+    });
 
-    if (enrollment?.is_demo && !db.demoSettings.allow_assessments) {
-      return res.json({ success: true, count: 0, assessments: [], demo_restricted: true });
+    if (!access.allowed) {
+      return ngBlockLockedFeature(res, "assessments", access.reason);
     }
 
     const items = Object.values(db.assessments || {})
@@ -6188,9 +6440,13 @@ app.get("/student/assessments/:assessmentId/take", async (req, res) => {
       return res.status(404).json({ success: false, error: "Assessment not found" });
     }
 
-    const enrollment = getBackendEnrollment(db, { userId: user.id, courseId: assessment.course_id });
-    if (!enrollment && user.role !== "admin" && user.role !== "instructor") {
-      return res.status(403).json({ success: false, error: "No course access found" });
+    const access = ngCourseFeatureAccess(db, user, {
+      courseId: assessment.course_id,
+      featureKey: "assessments",
+    });
+
+    if (!access.allowed) {
+      return ngBlockLockedFeature(res, "assessments", access.reason);
     }
 
     const existingAttempt = db.assessmentAttempts[assessmentAttemptKey(assessment.id, user.id)] || null;
@@ -6215,9 +6471,13 @@ app.post("/student/assessments/:assessmentId/submit", async (req, res) => {
       return res.status(404).json({ success: false, error: "Assessment not found" });
     }
 
-    const enrollment = getBackendEnrollment(db, { userId: user.id, courseId: assessment.course_id });
-    if (!enrollment && user.role !== "admin" && user.role !== "instructor") {
-      return res.status(403).json({ success: false, error: "No course access found" });
+    const access = ngCourseFeatureAccess(db, user, {
+      courseId: assessment.course_id,
+      featureKey: "assessments",
+    });
+
+    if (!access.allowed) {
+      return ngBlockLockedFeature(res, "assessments", access.reason);
     }
 
     const key = assessmentAttemptKey(assessment.id, user.id);
@@ -37683,8 +37943,14 @@ app.post("/student/flashcards/generate-weak-area", async (req, res) => {
     const crmDb = await readCrmDb();
     const courseId = String(req.body.course_id || req.body.courseId || "").trim();
     if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
-    const enrollment = getBackendEnrollment(db, { userId: user.id, courseId });
-    if (!enrollment && user.role !== "admin" && user.role !== "instructor") return res.status(403).json({ success: false, error: "No course access found" });
+    const access = ngCourseFeatureAccess(db, user, {
+      courseId,
+      featureKey: "flashcards",
+    });
+
+    if (!access.allowed) {
+      return ngBlockLockedFeature(res, "flashcards", access.reason);
+    }
     const day = req.body.day_id || req.body.roadmap_day_id ? ngFindRoadmapDay(db, { courseId, dayId: req.body.day_id || req.body.roadmap_day_id }) : null;
     const qids = ngNormalizeQidList(req.body.qids || req.body.wrong_qids || req.body.qid);
     const weakConcept = String(req.body.weak_concept || req.body.concept || req.body.topic || "").trim();
@@ -37736,6 +38002,14 @@ app.post("/student/flashcards/:id/review", async (req, res) => {
     const card = db.flashcards?.[String(req.params.id)] || null;
     if (!card) return res.status(404).json({ success: false, error: "Flashcard not found" });
     const courseId = String(card.course_id || req.body.course_id || "").trim();
+    const access = ngCourseFeatureAccess(db, user, {
+      courseId,
+      featureKey: "flashcards",
+    });
+
+    if (!access.allowed) {
+      return ngBlockLockedFeature(res, "flashcards", access.reason);
+    }
     const day = card.roadmap_day_id ? ngFindRoadmapDay(db, { courseId, dayId: card.roadmap_day_id }) : null;
     db.flashcardProgress = db.flashcardProgress || {};
     const key = `${courseId}:${user.id}:${card.id}`;
@@ -37796,6 +38070,17 @@ app.get("/flashcards", async (req, res) => {
     const courseId = String(req.query.course_id || req.query.courseId || "").trim();
     const isStaff = user.role === "admin" || user.role === "instructor";
     const includeDrafts = isStaff && (req.query.admin === "true" || req.query.include_drafts === "true");
+
+    if (courseId && !includeDrafts) {
+      const access = ngCourseFeatureAccess(db, user, {
+        courseId,
+        featureKey: "flashcards",
+      });
+
+      if (!access.allowed) {
+        return ngBlockLockedFeature(res, "flashcards", access.reason);
+      }
+    }
     let cards = Object.values(db.flashcards || {}).filter((card) => card.status !== "archived" && (includeDrafts || card.is_published !== false));
     if (courseId) cards = cards.filter((card) => String(card.course_id) === courseId);
     cards = cards.filter((card) => !card.user_id || String(card.user_id) === String(user.id) || isStaff);
