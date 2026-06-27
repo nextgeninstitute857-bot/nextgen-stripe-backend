@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v147-crm-read-cache";
+const NEXTGEN_BACKEND_BUILD = "v148-safe-bulk-auto";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -11260,7 +11260,7 @@ app.post("/admin/crm/import/confirm", async (req, res) => {
       summary,
       post_import_first_message_wakeup: postImportFirstMessageWakeup,
       message: postImportFirstMessageWakeup.scheduled
-        ? "Import completed. First WhatsApp messages will be sent automatically in the background."
+        ? "Import completed. First WhatsApp messages are queued and the Safe Bulk Sender will send the first batch automatically, then continue after the configured batch delay."
         : "Import completed.",
     });
   } catch (error) {
@@ -17881,6 +17881,36 @@ async function ngRunDueAutoFirstMessages({ db, brandId = null, limit = 25, actor
 
 const ngPostImportFirstMessageJobKeys = new Set();
 
+function ngCountEligibleAutoFirstMessageLeads(db = {}, brandId = null) {
+  return ensureCrmArray(db, "leads")
+    .filter((lead) => !brandId || String(lead.brand_id || "") === String(brandId || ""))
+    .filter((lead) => ngCanSendAutoFirstMessage(db, lead).ok)
+    .length;
+}
+
+function ngNextSafeBulkFirstMessageDelayMs(db = {}, settings = {}) {
+  const state = ngGetBulkFirstMessageState(db);
+  const nowMs = Date.now();
+
+  if (state.paused_until && new Date(state.paused_until).getTime() > nowMs) {
+    return { ok: false, reason: "bulk_first_message_paused_until", next_at: state.paused_until };
+  }
+
+  if (state.last_batch_sent_at) {
+    const nextAllowedAt = new Date(new Date(state.last_batch_sent_at).getTime() + Number(settings.batch_delay_minutes || 5) * 60000);
+    if (nextAllowedAt.getTime() > nowMs) {
+      return {
+        ok: true,
+        reason: "bulk_first_message_batch_cooldown",
+        next_at: nextAllowedAt.toISOString(),
+        delay_ms: Math.max(1500, nextAllowedAt.getTime() - nowMs + 1500),
+      };
+    }
+  }
+
+  return { ok: true, delay_ms: Math.max(1500, Number(process.env.NEXTGEN_SAFE_BULK_FIRST_MESSAGE_START_DELAY_MS || 1500)) };
+}
+
 function ngSchedulePostImportFirstMessageSend({ leadIds = [], brandId = null, batchId = "", actorId = "import_confirm", delayMs = null } = {}) {
   const cleanIds = Array.from(new Set((Array.isArray(leadIds) ? leadIds : [])
     .map((id) => String(id || "").trim())
@@ -17893,81 +17923,168 @@ function ngSchedulePostImportFirstMessageSend({ leadIds = [], brandId = null, ba
 
   ngPostImportFirstMessageJobKeys.add(jobKey);
 
-  const waitBetweenSendsMs = Math.max(
-    1500,
-    Math.min(15000, Number(delayMs || process.env.NEXTGEN_POST_IMPORT_FIRST_MESSAGE_DELAY_MS || 3500))
+  const firstDelayMs = Math.max(
+    1000,
+    Math.min(60000, Number(delayMs || process.env.NEXTGEN_SAFE_BULK_FIRST_MESSAGE_START_DELAY_MS || 1200))
   );
 
-  setTimeout(async () => {
+  const maxRuns = Math.max(
+    1,
+    Math.min(120, Number(process.env.NEXTGEN_SAFE_BULK_FIRST_MESSAGE_MAX_RUNS || 60))
+  );
+
+  const runSafeBulkBatch = async (runNumber = 1) => {
     const runStartedAt = nowIso();
-    const results = [];
+    let shouldKeepJobKey = false;
 
     try {
-      for (const leadId of cleanIds) {
-        const db = await readCrmDb();
-        const lead = getLeadByAnyId(db, leadId);
+      const db = await readCrmDb();
+      const settings = ngGetBulkFirstMessageSettings(db);
+      const state = ngGetBulkFirstMessageState(db);
+      const queuedBefore = ngCountEligibleAutoFirstMessageLeads(db, brandId);
 
-        if (!lead) {
-          results.push({ lead_id: leadId, sent: false, skipped: true, reason: "lead_not_found" });
-          await writeCrmDb(db);
-          continue;
-        }
-
-        const result = await ngSendAutoFirstMessageForLead({
-          db,
-          lead,
-          brandId: brandId || lead.brand_id || null,
-          actorId,
-          source: "post_import_auto_first_message",
-          dryRun: false,
-        });
-
+      if (queuedBefore <= 0) {
         ensureCrmArray(db, "post_import_auto_first_message_runs").unshift({
           id: uuid(),
           batch_id: batchId || null,
-          lead_id: lead.id || lead.lead_id || leadId,
-          name: lead.name || lead.student_name || "Lead",
-          to: getBestRecipientForChannel({ channel: "whatsapp", lead }),
-          success: Boolean(result.success),
-          sent: Boolean(result.sent),
-          skipped: Boolean(result.skipped),
-          reason: result.reason || result.error || null,
-          result,
+          lead_count: cleanIds.length,
+          queued_before: queuedBefore,
+          queued_after: 0,
+          sent: 0,
+          failed: 0,
+          skipped: true,
+          reason: "no_eligible_queued_first_messages",
           actor_id: actorId || "import_confirm",
-          source: "post_import_auto_first_message",
+          source: "safe_bulk_post_import_auto_first_message",
+          run_number: runNumber,
+          settings,
           started_at: runStartedAt,
           created_at: nowIso(),
         });
-
-        results.push({
-          lead_id: lead.id || lead.lead_id || leadId,
-          sent: Boolean(result.sent),
-          skipped: Boolean(result.skipped),
-          reason: result.reason || result.error || null,
-        });
-
         await writeCrmDb(db);
-        await new Promise((resolve) => setTimeout(resolve, waitBetweenSendsMs));
+        return;
       }
 
-      console.log("Post-import first-message sender finished", {
+      const timing = ngNextSafeBulkFirstMessageDelayMs(db, settings);
+      if (!timing.ok) {
+        ensureCrmArray(db, "post_import_auto_first_message_runs").unshift({
+          id: uuid(),
+          batch_id: batchId || null,
+          lead_count: cleanIds.length,
+          queued_before: queuedBefore,
+          sent: 0,
+          failed: 0,
+          skipped: true,
+          reason: timing.reason,
+          next_at: timing.next_at || null,
+          actor_id: actorId || "import_confirm",
+          source: "safe_bulk_post_import_auto_first_message",
+          run_number: runNumber,
+          settings,
+          started_at: runStartedAt,
+          created_at: nowIso(),
+        });
+        await writeCrmDb(db);
+        return;
+      }
+
+      if (timing.reason === "bulk_first_message_batch_cooldown" && runNumber <= maxRuns) {
+        shouldKeepJobKey = true;
+        setTimeout(() => runSafeBulkBatch(runNumber + 1), timing.delay_ms);
+        ensureCrmArray(db, "post_import_auto_first_message_runs").unshift({
+          id: uuid(),
+          batch_id: batchId || null,
+          lead_count: cleanIds.length,
+          queued_before: queuedBefore,
+          sent: 0,
+          failed: 0,
+          skipped: true,
+          reason: timing.reason,
+          next_at: timing.next_at || null,
+          next_run_in_ms: timing.delay_ms,
+          actor_id: actorId || "import_confirm",
+          source: "safe_bulk_post_import_auto_first_message",
+          run_number: runNumber,
+          settings,
+          started_at: runStartedAt,
+          created_at: nowIso(),
+        });
+        await writeCrmDb(db);
+        return;
+      }
+
+      const results = await ngRunDueAutoFirstMessages({
+        db,
+        brandId,
+        limit: settings.batch_size,
+        actorId,
+        dryRun: false,
+        bulkSettings: settings,
+      });
+
+      const sentCount = results.filter((item) => item.sent).length;
+      const failedCount = results.filter((item) => item.success === false).length;
+      const queuedAfter = ngCountEligibleAutoFirstMessageLeads(db, brandId);
+      const stopReason = results.find((item) => item.reason)?.reason || null;
+
+      ensureCrmArray(db, "post_import_auto_first_message_runs").unshift({
+        id: uuid(),
         batch_id: batchId || null,
-        processed: results.length,
-        sent: results.filter((item) => item.sent).length,
-        skipped: results.filter((item) => item.skipped).length,
+        lead_count: cleanIds.length,
+        queued_before: queuedBefore,
+        queued_after: queuedAfter,
+        result_count: results.length,
+        sent: sentCount,
+        failed: failedCount,
+        skipped: sentCount <= 0,
+        reason: stopReason,
+        results: results.slice(0, 25),
+        actor_id: actorId || "import_confirm",
+        source: "safe_bulk_post_import_auto_first_message",
+        run_number: runNumber,
+        settings,
+        started_at: runStartedAt,
+        created_at: nowIso(),
+      });
+
+      await writeCrmDb(db);
+
+      const nextState = ngGetBulkFirstMessageState(db);
+      const dailyRemaining = Math.max(0, Number(settings.daily_max || 0) - Number(nextState.sent_today || 0));
+      const pauseActive = nextState.paused_until && new Date(nextState.paused_until).getTime() > Date.now();
+
+      if (queuedAfter > 0 && dailyRemaining > 0 && !pauseActive && runNumber < maxRuns) {
+        shouldKeepJobKey = true;
+        const nextDelayMs = Math.max(60000, Number(settings.batch_delay_minutes || 5) * 60000 + 1500);
+        setTimeout(() => runSafeBulkBatch(runNumber + 1), nextDelayMs);
+      }
+
+      console.log("Safe bulk post-import first-message runner", {
+        batch_id: batchId || null,
+        run_number: runNumber,
+        queued_before: queuedBefore,
+        sent: sentCount,
+        failed: failedCount,
+        queued_after: queuedAfter,
+        next_run_scheduled: shouldKeepJobKey,
       });
     } catch (error) {
-      console.error("Post-import first-message sender failed:", error.message);
+      console.error("Safe bulk post-import first-message runner failed:", error.message);
     } finally {
-      ngPostImportFirstMessageJobKeys.delete(jobKey);
+      if (!shouldKeepJobKey) ngPostImportFirstMessageJobKeys.delete(jobKey);
     }
-  }, 1200);
+  };
+
+  setTimeout(() => runSafeBulkBatch(1), firstDelayMs);
 
   return {
     scheduled: true,
     job_key: jobKey,
     lead_count: cleanIds.length,
-    delay_ms: waitBetweenSendsMs,
+    mode: "safe_bulk_auto",
+    batch_size: "uses_safe_bulk_settings",
+    delay_minutes: "uses_safe_bulk_settings",
+    first_run_delay_ms: firstDelayMs,
   };
 }
 
