@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v145-student-dashboard-logo";
+const NEXTGEN_BACKEND_BUILD = "v146-media-rules-testimonials";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -36677,74 +36677,6 @@ function ngSanitizePublicTestimonial(req, asset = {}) {
   };
 }
 
-
-function ngIsStudentDashboardLogoAsset(asset = {}) {
-  const values = [
-    asset.usage_area,
-    asset.type,
-    asset.asset_type,
-    asset.ai_usage_context,
-    asset.title,
-    asset.name,
-  ].map((value) => String(value || "").trim().toLowerCase());
-
-  return values.some((value) => [
-    "student_dashboard_logo",
-    "student-dashboard-logo",
-    "student dashboard logo",
-    "dashboard_logo",
-    "student_logo",
-    "student_sidebar_logo",
-    "lms_student_logo",
-  ].includes(value));
-}
-
-function ngSanitizePublicStudentDashboardLogo(req, asset = {}) {
-  const imageUrl = ngPublicMediaUrl(req, asset);
-  return {
-    id: asset.id,
-    title: asset.title || asset.name || "Student Dashboard Logo",
-    image_url: imageUrl,
-    public_url: imageUrl,
-    aspect_ratio: asset.aspect_ratio || "16:9",
-    featured: Boolean(asset.is_featured || asset.featured),
-    sort_order: Number(asset.sort_order || 0) || 0,
-    created_at: asset.created_at || null,
-    updated_at: asset.updated_at || null,
-  };
-}
-
-app.get("/public/student-dashboard-logo", async (req, res) => {
-  try {
-    const db = await readCrmDb();
-
-    const logos = ensureCrmArray(db, "media_assets")
-      .filter((asset) => ngIsStudentDashboardLogoAsset(asset))
-      .filter((asset) => asset.status !== "deleted" && asset.status !== "archived" && asset.status !== "inactive")
-      .map((asset) => ngSanitizePublicStudentDashboardLogo(req, asset))
-      .filter((asset) => asset.image_url)
-      .sort((a, b) => {
-        if (a.featured !== b.featured) return a.featured ? -1 : 1;
-        if (Number(a.sort_order || 0) !== Number(b.sort_order || 0)) return Number(a.sort_order || 0) - Number(b.sort_order || 0);
-        return String(b.updated_at || b.created_at || "").localeCompare(String(a.updated_at || a.created_at || ""));
-      });
-
-    const logo = logos[0] || null;
-
-    res.json({
-      success: true,
-      logo,
-      asset: logo,
-      image_url: logo?.image_url || "",
-      public_url: logo?.public_url || "",
-      count: logos.length,
-    });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message || "Failed to load student dashboard logo" });
-  }
-});
-
-
 app.get("/public/testimonials", async (req, res) => {
   try {
     const db = await readCrmDb();
@@ -38353,6 +38285,123 @@ function ngMarkAylaMediaSent(db = {}, lead = {}, asset = {}, meta = {}) {
     metadata: { title: asset.title || asset.name || "", result: meta.result || null },
   }));
 }
+
+
+function ngFindCrmMediaAssetForRules(db = {}, id = "", body = {}) {
+  const assets = ensureCrmArray(db, "media_assets");
+  const cleanId = String(id || body.id || body.asset_id || body.media_asset_id || "").trim();
+
+  if (cleanId) {
+    const exact = assets.find((item) => String(item.id || "") === cleanId);
+    if (exact) return exact;
+  }
+
+  const publicUrl = String(body.public_url || body.url || body.file_url || body.media_url || body.image_url || "").trim();
+  if (publicUrl) {
+    const byPublicUrl = assets.find((item) => {
+      return [item.public_url, item.url, item.file_url, item.media_url, item.image_url]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+        .includes(publicUrl);
+    });
+    if (byPublicUrl) return byPublicUrl;
+  }
+
+  const relativeUrl = String(body.relative_url || body.relativeUrl || "").trim();
+  if (relativeUrl) {
+    const byRelativeUrl = assets.find((item) => String(item.relative_url || "").trim() === relativeUrl);
+    if (byRelativeUrl) return byRelativeUrl;
+  }
+
+  const title = String(body.title || body.name || "").trim();
+  const createdAt = String(body.created_at || "").trim();
+  if (title) {
+    const matches = assets.filter((item) => String(item.title || item.name || "").trim() === title);
+    if (matches.length === 1) return matches[0];
+    if (createdAt) {
+      const byTitleAndCreated = matches.find((item) => String(item.created_at || "").trim() === createdAt);
+      if (byTitleAndCreated) return byTitleAndCreated;
+    }
+  }
+
+  return null;
+}
+
+function ngApplyMediaRulesPayload(asset = {}, body = {}, req = {}, db = {}) {
+  const allowed = [
+    "ai_send_enabled",
+    "auto_send_with_ayla",
+    "send_when_explaining",
+    "usage_area",
+    "type",
+    "trigger_keywords",
+    "ai_usage_context",
+    "caption_template",
+    "priority",
+    "status",
+    "tags",
+    "whatsapp_media_id",
+    "testimonial_category",
+    "testimonial_quote",
+    "student_label",
+    "homepage_visible",
+    "is_featured",
+    "sort_order",
+    "aspect_ratio",
+  ];
+
+  for (const key of allowed) {
+    if (body[key] !== undefined) asset[key] = body[key];
+  }
+
+  if (asset.usage_area === undefined && asset.type) asset.usage_area = asset.type;
+  if (asset.type === undefined && asset.usage_area) asset.type = asset.usage_area;
+
+  Object.assign(asset, normalizeCrmCollectionPayload("media_assets", asset, asset, asset.brand_id || getCrmBrandId(req, db)));
+  asset.updated_at = nowIso();
+  return asset;
+}
+
+app.get("/admin/crm/media-rules", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+
+    const assets = ensureCrmArray(db, "media_assets")
+      .filter((asset) => !brandId || !asset.brand_id || String(asset.brand_id) === String(brandId))
+      .filter((asset) => asset.status !== "deleted" && asset.status !== "archived")
+      .sort((a, b) => String(b.updated_at || b.created_at || "").localeCompare(String(a.updated_at || a.created_at || "")));
+
+    res.json({ success: true, assets, media_assets: assets, count: assets.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.patch("/admin/crm/media-rules/:id", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const asset = ngFindCrmMediaAssetForRules(db, req.params.id, req.body || {});
+
+    if (!asset) {
+      return res.status(404).json({
+        success: false,
+        error: "Media asset not found",
+        id: req.params.id || null,
+      });
+    }
+
+    ngApplyMediaRulesPayload(asset, req.body || {}, req, db);
+    await writeCrmDb(db);
+
+    res.json({ success: true, asset });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
 
 app.get("/admin/crm/media-library/ayla-usage", async (req, res) => {
   try {
