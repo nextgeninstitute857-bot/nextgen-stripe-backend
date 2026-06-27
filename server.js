@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v144-public-testimonials";
+const NEXTGEN_BACKEND_BUILD = "v145-student-dashboard-logo";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -36676,6 +36676,74 @@ function ngSanitizePublicTestimonial(req, asset = {}) {
     created_at: asset.created_at || null,
   };
 }
+
+
+function ngIsStudentDashboardLogoAsset(asset = {}) {
+  const values = [
+    asset.usage_area,
+    asset.type,
+    asset.asset_type,
+    asset.ai_usage_context,
+    asset.title,
+    asset.name,
+  ].map((value) => String(value || "").trim().toLowerCase());
+
+  return values.some((value) => [
+    "student_dashboard_logo",
+    "student-dashboard-logo",
+    "student dashboard logo",
+    "dashboard_logo",
+    "student_logo",
+    "student_sidebar_logo",
+    "lms_student_logo",
+  ].includes(value));
+}
+
+function ngSanitizePublicStudentDashboardLogo(req, asset = {}) {
+  const imageUrl = ngPublicMediaUrl(req, asset);
+  return {
+    id: asset.id,
+    title: asset.title || asset.name || "Student Dashboard Logo",
+    image_url: imageUrl,
+    public_url: imageUrl,
+    aspect_ratio: asset.aspect_ratio || "16:9",
+    featured: Boolean(asset.is_featured || asset.featured),
+    sort_order: Number(asset.sort_order || 0) || 0,
+    created_at: asset.created_at || null,
+    updated_at: asset.updated_at || null,
+  };
+}
+
+app.get("/public/student-dashboard-logo", async (req, res) => {
+  try {
+    const db = await readCrmDb();
+
+    const logos = ensureCrmArray(db, "media_assets")
+      .filter((asset) => ngIsStudentDashboardLogoAsset(asset))
+      .filter((asset) => asset.status !== "deleted" && asset.status !== "archived" && asset.status !== "inactive")
+      .map((asset) => ngSanitizePublicStudentDashboardLogo(req, asset))
+      .filter((asset) => asset.image_url)
+      .sort((a, b) => {
+        if (a.featured !== b.featured) return a.featured ? -1 : 1;
+        if (Number(a.sort_order || 0) !== Number(b.sort_order || 0)) return Number(a.sort_order || 0) - Number(b.sort_order || 0);
+        return String(b.updated_at || b.created_at || "").localeCompare(String(a.updated_at || a.created_at || ""));
+      });
+
+    const logo = logos[0] || null;
+
+    res.json({
+      success: true,
+      logo,
+      asset: logo,
+      image_url: logo?.image_url || "",
+      public_url: logo?.public_url || "",
+      count: logos.length,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message || "Failed to load student dashboard logo" });
+  }
+});
+
 
 app.get("/public/testimonials", async (req, res) => {
   try {
