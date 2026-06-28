@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v149-demo-entitlement-guard";
+const NEXTGEN_BACKEND_BUILD = "v152-public-uworld-preview";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -37134,6 +37134,131 @@ app.get("/public/testimonials", async (req, res) => {
     res.json({ success: true, testimonials, categories, count: testimonials.length });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message || "Failed to load testimonials" });
+  }
+});
+
+
+function ngIsUworldVideoLibraryAsset(asset = {}) {
+  const values = [
+    asset.usage_area,
+    asset.type,
+    asset.asset_type,
+    asset.media_type,
+    asset.ai_usage_context,
+    asset.title,
+    asset.name,
+  ].map((value) => String(value || "").trim().toLowerCase());
+
+  return values.some((value) => [
+    "uworld_video_library",
+    "u_world_video_library",
+    "uworld library",
+    "uworld video library",
+    "video_library",
+    "complete_uworld_mastery",
+    "uworld_mastery",
+  ].includes(value)) || values.some((value) => value.includes("uworld") && value.includes("video"));
+}
+
+function ngIsPublicVideoAsset(asset = {}) {
+  const values = [
+    asset.asset_type,
+    asset.media_type,
+    asset.mime_type,
+    asset.file_name,
+    asset.public_url,
+    asset.relative_url,
+  ].join(" ").toLowerCase();
+
+  return values.includes("video/") || /\.(mp4|webm|mov)(\?|#|$)/i.test(String(asset.public_url || asset.relative_url || asset.file_name || ""));
+}
+
+function ngSanitizePublicMediaAsset(req, asset = {}) {
+  const publicUrl = ngPublicMediaUrl(req, asset);
+  const isVideo = ngIsPublicVideoAsset(asset);
+
+  return {
+    id: asset.id,
+    title: asset.title || asset.name || "Media Asset",
+    type: asset.type || asset.usage_area || "media",
+    usage_area: asset.usage_area || asset.ai_usage_context || asset.type || "",
+    ai_usage_context: asset.ai_usage_context || asset.usage_area || asset.type || "",
+    asset_type: asset.asset_type || asset.media_type || (isVideo ? "video" : "image"),
+    media_type: asset.media_type || asset.asset_type || (isVideo ? "video" : "image"),
+    mime_type: asset.mime_type || "",
+    public_url: publicUrl,
+    url: publicUrl,
+    file_url: publicUrl,
+    relative_url: asset.relative_url || "",
+    aspect_ratio: asset.aspect_ratio || (isVideo ? "16:9" : "auto"),
+    caption_template: asset.caption_template || asset.caption || "",
+    homepage_visible: asset.homepage_visible !== false,
+    featured: Boolean(asset.is_featured || asset.featured),
+    is_featured: Boolean(asset.is_featured || asset.featured),
+    sort_order: Number(asset.sort_order || 0) || 0,
+    priority: Number(asset.priority || 0) || 0,
+    created_at: asset.created_at || null,
+    updated_at: asset.updated_at || null,
+  };
+}
+
+app.get("/public/uworld-video-library-preview", async (req, res) => {
+  try {
+    const db = await readCrmDb();
+
+    const assets = ensureCrmArray(db, "media_assets")
+      .filter((asset) => ngIsUworldVideoLibraryAsset(asset))
+      .filter((asset) => asset.status !== "deleted" && asset.status !== "archived" && asset.status !== "inactive")
+      .filter((asset) => asset.homepage_visible !== false)
+      .map((asset) => ngSanitizePublicMediaAsset(req, asset))
+      .filter((asset) => asset.public_url)
+      .sort((a, b) => {
+        if (a.featured !== b.featured) return a.featured ? -1 : 1;
+        if (Number(a.sort_order || 0) !== Number(b.sort_order || 0)) return Number(a.sort_order || 0) - Number(b.sort_order || 0);
+        if (Number(a.priority || 0) !== Number(b.priority || 0)) return Number(b.priority || 0) - Number(a.priority || 0);
+        return String(b.created_at || "").localeCompare(String(a.created_at || ""));
+      });
+
+    res.json({
+      success: true,
+      asset: assets[0] || null,
+      assets,
+      count: assets.length,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message || "Failed to load UWorld video preview" });
+  }
+});
+
+app.get("/public/media-assets", async (req, res) => {
+  try {
+    const db = await readCrmDb();
+    const usageArea = String(req.query.usage_area || req.query.type || req.query.context || "").trim().toLowerCase();
+    const limitRaw = Number(req.query.limit || 24);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 60) : 24;
+
+    const assets = ensureCrmArray(db, "media_assets")
+      .filter((asset) => asset.status !== "deleted" && asset.status !== "archived" && asset.status !== "inactive")
+      .filter((asset) => asset.homepage_visible !== false)
+      .filter((asset) => {
+        if (!usageArea) return true;
+        const values = [asset.usage_area, asset.type, asset.ai_usage_context, asset.asset_type, asset.media_type]
+          .map((value) => String(value || "").trim().toLowerCase());
+        return values.includes(usageArea);
+      })
+      .map((asset) => ngSanitizePublicMediaAsset(req, asset))
+      .filter((asset) => asset.public_url)
+      .sort((a, b) => {
+        if (a.featured !== b.featured) return a.featured ? -1 : 1;
+        if (Number(a.sort_order || 0) !== Number(b.sort_order || 0)) return Number(a.sort_order || 0) - Number(b.sort_order || 0);
+        if (Number(a.priority || 0) !== Number(b.priority || 0)) return Number(b.priority || 0) - Number(a.priority || 0);
+        return String(b.created_at || "").localeCompare(String(a.created_at || ""));
+      })
+      .slice(0, limit);
+
+    res.json({ success: true, assets, count: assets.length });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message || "Failed to load media assets" });
   }
 });
 
