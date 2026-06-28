@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v152-public-uworld-preview";
+const NEXTGEN_BACKEND_BUILD = "v153-course-preview-video-flow";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -1092,6 +1092,40 @@ function normalizeCoursePayload(body = {}, existing = {}) {
     course_detail_image_url: String(body.course_detail_image_url ?? body.detail_image_url ?? existing.course_detail_image_url ?? existing.detail_image_url ?? "").trim(),
     mobile_image_url: String(body.mobile_image_url ?? existing.mobile_image_url ?? "").trim(),
     whatsapp_image_url: String(body.whatsapp_image_url ?? body.whatsapp_preview_image_url ?? existing.whatsapp_image_url ?? existing.whatsapp_preview_image_url ?? "").trim(),
+    preview_video_url: String(
+      body.preview_video_url ??
+      body.video_preview_url ??
+      body.course_preview_video_url ??
+      body.course_detail_video_url ??
+      body.uworld_preview_video_url ??
+      body.uworld_video_preview_url ??
+      body.uworld_library_preview_video_url ??
+      body.homepage_preview_video_url ??
+      existing.preview_video_url ??
+      existing.video_preview_url ??
+      existing.course_preview_video_url ??
+      existing.course_detail_video_url ??
+      existing.uworld_preview_video_url ??
+      existing.uworld_video_preview_url ??
+      existing.uworld_library_preview_video_url ??
+      existing.homepage_preview_video_url ??
+      ""
+    ).trim(),
+    preview_image_url: String(
+      body.preview_image_url ??
+      body.video_preview_image_url ??
+      body.course_preview_image_url ??
+      body.uworld_preview_image_url ??
+      body.uworld_video_preview_image_url ??
+      body.uworld_library_preview_image_url ??
+      existing.preview_image_url ??
+      existing.video_preview_image_url ??
+      existing.course_preview_image_url ??
+      existing.uworld_preview_image_url ??
+      existing.uworld_video_preview_image_url ??
+      existing.uworld_library_preview_image_url ??
+      ""
+    ).trim(),
     category: String(body.category ?? existing.category ?? "USMLE Step 1").trim() || "USMLE Step 1",
     course_type: String(body.course_type ?? existing.course_type ?? "Live Course").trim() || "Live Course",
     category_note: String(body.category_note ?? existing.category_note ?? "").trim(),
@@ -1126,6 +1160,52 @@ function sanitizeCourse(course) {
     course_detail_image_url: course.course_detail_image_url || course.detail_image_url || course.image_url || "",
     mobile_image_url: course.mobile_image_url || course.image_url || "",
     whatsapp_image_url: course.whatsapp_image_url || course.whatsapp_preview_image_url || course.image_url || "",
+    preview_video_url:
+      course.preview_video_url ||
+      course.video_preview_url ||
+      course.course_preview_video_url ||
+      course.course_detail_video_url ||
+      course.uworld_preview_video_url ||
+      course.uworld_video_preview_url ||
+      course.uworld_library_preview_video_url ||
+      course.homepage_preview_video_url ||
+      "",
+    video_preview_url:
+      course.preview_video_url ||
+      course.video_preview_url ||
+      course.course_preview_video_url ||
+      course.course_detail_video_url ||
+      course.uworld_preview_video_url ||
+      course.uworld_video_preview_url ||
+      course.uworld_library_preview_video_url ||
+      course.homepage_preview_video_url ||
+      "",
+    course_preview_video_url:
+      course.preview_video_url ||
+      course.video_preview_url ||
+      course.course_preview_video_url ||
+      course.course_detail_video_url ||
+      course.uworld_preview_video_url ||
+      course.uworld_video_preview_url ||
+      course.uworld_library_preview_video_url ||
+      course.homepage_preview_video_url ||
+      "",
+    preview_image_url:
+      course.preview_image_url ||
+      course.video_preview_image_url ||
+      course.course_preview_image_url ||
+      course.uworld_preview_image_url ||
+      course.uworld_video_preview_image_url ||
+      course.uworld_library_preview_image_url ||
+      "",
+    video_preview_image_url:
+      course.preview_image_url ||
+      course.video_preview_image_url ||
+      course.course_preview_image_url ||
+      course.uworld_preview_image_url ||
+      course.uworld_video_preview_image_url ||
+      course.uworld_library_preview_image_url ||
+      "",
     category: course.category || "USMLE Step 1",
     course_type: course.course_type || "Live Course",
     category_note: course.category_note || "",
@@ -38929,6 +39009,12 @@ function ngApplyMediaRulesPayload(asset = {}, body = {}, req = {}, db = {}) {
     "is_featured",
     "sort_order",
     "aspect_ratio",
+    "asset_type",
+    "media_type",
+    "mime_type",
+    "file_name",
+    "public_url",
+    "relative_url",
   ];
 
   for (const key of allowed) {
@@ -39000,7 +39086,7 @@ app.patch("/admin/crm/media-library/:id/ayla-usage", async (req, res) => {
     const db = await readCrmDb();
     const asset = ensureCrmArray(db, "media_assets").find((item) => String(item.id) === String(req.params.id));
     if (!asset) return res.status(404).json({ success: false, error: "Media asset not found" });
-    const allowed = ["ai_send_enabled", "auto_send_with_ayla", "send_when_explaining", "usage_area", "trigger_keywords", "ai_usage_context", "caption_template", "priority", "status", "tags", "whatsapp_media_id", "testimonial_category", "testimonial_quote", "student_label", "homepage_visible", "is_featured", "sort_order"];
+    const allowed = ["ai_send_enabled", "auto_send_with_ayla", "send_when_explaining", "usage_area", "type", "trigger_keywords", "ai_usage_context", "caption_template", "priority", "status", "tags", "whatsapp_media_id", "testimonial_category", "testimonial_quote", "student_label", "homepage_visible", "is_featured", "sort_order", "asset_type", "media_type", "mime_type", "file_name", "public_url", "relative_url", "aspect_ratio"];
     for (const key of allowed) if (req.body[key] !== undefined) asset[key] = req.body[key];
     Object.assign(asset, normalizeCrmCollectionPayload("media_assets", asset, asset, asset.brand_id || getCrmBrandId(req, db)));
     asset.updated_at = nowIso();
