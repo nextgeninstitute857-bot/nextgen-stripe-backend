@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v153-course-preview-video-flow";
+const NEXTGEN_BACKEND_BUILD = "v154-stripe-webhook-billing-access";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -145,6 +145,48 @@ app.use((req, res, next) => {
 app.options(/.*/, (req, res) => {
   applyNextGenCors(req, res);
   return res.status(204).end();
+});
+
+// Stripe webhooks must use the raw request body and must remain BEFORE express.json().
+// Browser GET is only a health check; Stripe sends POST events here.
+app.get("/stripe/webhook", (req, res) => {
+  res.json({
+    success: true,
+    endpoint: "/stripe/webhook",
+    method_required: "POST",
+    build: NEXTGEN_BACKEND_BUILD,
+    stripe_secret_configured: Boolean(process.env.STRIPE_SECRET_KEY),
+    stripe_webhook_secret_configured: Boolean(process.env.STRIPE_WEBHOOK_SECRET),
+    message: "Stripe webhook endpoint is online. Create a Stripe event destination to POST checkout.session.completed, checkout.session.expired, and payment_intent.payment_failed here.",
+  });
+});
+
+app.post("/stripe/webhook", express.raw({ type: "application/json", limit: "10mb" }), async (req, res) => {
+  const signature = req.headers["stripe-signature"];
+  const webhookSecret = String(process.env.STRIPE_WEBHOOK_SECRET || "").trim();
+
+  if (!webhookSecret) {
+    return res.status(400).json({
+      success: false,
+      error: "STRIPE_WEBHOOK_SECRET is not configured in Render. Create the Stripe webhook destination, copy whsec_..., add it to Render, then redeploy.",
+    });
+  }
+
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, signature, webhookSecret);
+  } catch (error) {
+    console.error("Stripe webhook signature verification failed:", error.message);
+    return res.status(400).json({ success: false, error: `Webhook signature verification failed: ${error.message}` });
+  }
+
+  try {
+    const result = await ngHandleStripeWebhookEvent(event, req);
+    return res.json({ success: true, received: true, event_id: event.id, event_type: event.type, result });
+  } catch (error) {
+    console.error("Stripe webhook processing error:", error.message);
+    return res.status(error.statusCode || 500).json({ success: false, received: true, event_id: event.id, event_type: event.type, error: error.message });
+  }
 });
 
 // AI-training PDFs are sent as base64 JSON, which is larger than the original PDF.
@@ -498,14 +540,15 @@ function getExternalLibraryAccess(db, user) {
 
     if (!plan) continue;
     if (plan.is_active === false) continue;
+    if (!isPaidEnrollmentActive(enrollment, plan)) continue;
     if (!planIncludesFeature(plan, "video_library")) continue;
 
     const course = enrollment.course_id
       ? db.courses?.[String(enrollment.course_id)] || null
       : null;
 
-    const accessDays = getPlanAccessDays(plan);
-    const accessEndsAt = addDays(new Date(), accessDays).toISOString();
+    const accessDays = Number(enrollment.access_days || getPlanAccessDays(plan));
+    const accessEndsAt = enrollment.access_expires_at || addDays(new Date(), accessDays).toISOString();
 
     return {
       allowed: true,
@@ -623,6 +666,7 @@ function getStudentFeatureAccess(db, user) {
       : null;
 
     if (!plan || plan.is_active === false) continue;
+    if (!isPaidEnrollmentActive(enrollment, plan)) continue;
 
     const course = enrollment.course_id
       ? db.courses?.[String(enrollment.course_id)] || null
@@ -705,7 +749,18 @@ function ngCourseFeatureAccess(db, user, { courseId, featureKey }) {
     db.enrollments?.[backendEnrollmentKey(cleanCourseId, user.id, "paid")] ||
     null;
 
-  if (paidEnrollment?.access_granted !== false && paidEnrollment?.id) {
+  if (paidEnrollment?.id) {
+    const plan = paidEnrollment.plan_id ? db.plans?.[String(paidEnrollment.plan_id)] || null : null;
+
+    if (!isPaidEnrollmentActive(paidEnrollment, plan)) {
+      return {
+        allowed: false,
+        reason: "Paid access is expired or revoked. Please renew access.",
+        enrollment: paidEnrollment,
+        plan,
+      };
+    }
+
     if (!paidEnrollment.plan_id) {
       return {
         allowed: true,
@@ -714,8 +769,6 @@ function ngCourseFeatureAccess(db, user, { courseId, featureKey }) {
         plan: null,
       };
     }
-
-    const plan = db.plans?.[String(paidEnrollment.plan_id)] || null;
 
     if (plan?.is_active !== false && planIncludesFeature(plan, cleanFeatureKey)) {
       return {
@@ -966,6 +1019,8 @@ function sanitizeAdminEnrollment(enrollment, db) {
   const isDemo = Boolean(enrollment.is_demo);
   const accessGranted = enrollment.access_granted !== false;
   const demoActive = isDemo ? isDemoEnrollmentActive(enrollment, { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) }) : true;
+  const paidActive = !isDemo ? isPaidEnrollmentActive(enrollment, plan) : false;
+  const daysRemaining = !isDemo ? ngPaidAccessDaysRemaining(enrollment) : null;
 
   return {
     id: enrollment.id,
@@ -986,8 +1041,17 @@ function sanitizeAdminEnrollment(enrollment, db) {
     is_active: accessGranted,
     is_demo: isDemo,
     type: isDemo ? "demo" : "paid",
-    status: !accessGranted ? "revoked" : isDemo ? (demoActive ? "demo_active" : "demo_expired") : "paid",
+    status: !accessGranted ? "revoked" : isDemo ? (demoActive ? "demo_active" : "demo_expired") : (paidActive ? "paid" : "expired"),
     demo_expiry: enrollment.demo_expiry || null,
+    access_starts_at: enrollment.access_starts_at || null,
+    access_expires_at: enrollment.access_expires_at || null,
+    expires_at: enrollment.access_expires_at || null,
+    renewal_due_at: enrollment.renewal_due_at || enrollment.access_expires_at || null,
+    access_days: enrollment.access_days || (plan ? getPlanAccessDays(plan) : null),
+    days_remaining: daysRemaining,
+    paid_at: enrollment.paid_at || null,
+    revoked_at: enrollment.revoked_at || null,
+    revoked_reason: enrollment.revoked_reason || null,
     progress_percentage: Number(enrollment.progress_percentage || 0),
     created_at: enrollment.created_at || null,
     updated_at: enrollment.updated_at || null,
@@ -1030,6 +1094,11 @@ function sanitizePayment(payment, db) {
     created_at: payment.created_at || payment.paid_at || payment.redeemed_at || null,
     updated_at: payment.updated_at || null,
     paid_at: payment.paid_at || null,
+    expired_at: payment.expired_at || null,
+    failed_at: payment.failed_at || null,
+    stripe_payment_intent: payment.stripe_payment_intent || payment.payment_intent || null,
+    stripe_payment_status: payment.stripe_payment_status || null,
+    failure_message: payment.failure_message || null,
     metadata: payment.metadata || {},
   };
 }
@@ -1883,7 +1952,7 @@ function isAdminOrInstructor(user, session) {
   );
 }
 
-function createBackendEnrollment(db, { userId, userName, courseId, isDemo, accessGranted = true, demoExpiry = null, planId = null }) {
+function createBackendEnrollment(db, { userId, userName, courseId, isDemo, accessGranted = true, demoExpiry = null, planId = null, accessStartsAt = null, accessExpiresAt = null, accessDays = null, paidAt = null }) {
   const key = backendEnrollmentKey(courseId, userId, isDemo ? "demo" : "paid");
   const previous = db.enrollments[key] || {};
   db.enrollments[key] = {
@@ -1897,15 +1966,300 @@ function createBackendEnrollment(db, { userId, userName, courseId, isDemo, acces
     access_granted: Boolean(accessGranted),
     is_demo: Boolean(isDemo),
     demo_expiry: demoExpiry,
+    access_starts_at: accessStartsAt || previous.access_starts_at || null,
+    access_expires_at: accessExpiresAt || previous.access_expires_at || null,
+    renewal_due_at: accessExpiresAt || previous.renewal_due_at || previous.access_expires_at || null,
+    access_days: accessDays || previous.access_days || null,
+    paid_at: paidAt || previous.paid_at || null,
+    revoked_at: previous.revoked_at || null,
+    revoked_reason: previous.revoked_reason || null,
     progress_percentage: previous.progress_percentage || 0,
     created_at: previous.created_at || new Date().toISOString(),
     updated_at: new Date().toISOString(),
   };
   return db.enrollments[key];
 }
+function ngPaidAccessExpiresAt(enrollment = {}) {
+  const raw = enrollment.access_expires_at || enrollment.expires_at || enrollment.renewal_due_at || null;
+  if (!raw) return null;
+  const date = new Date(raw);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function ngPaidAccessDaysRemaining(enrollment = {}) {
+  const expiresAt = ngPaidAccessExpiresAt(enrollment);
+  if (!expiresAt) return null;
+  return Math.ceil((expiresAt.getTime() - Date.now()) / (24 * 60 * 60 * 1000));
+}
+
+function isPaidEnrollmentActive(enrollment = {}, plan = null) {
+  if (!enrollment?.id) return false;
+  if (enrollment.is_demo === true) return false;
+  if (enrollment.access_granted === false) return false;
+
+  // Existing/manual enrollments without an explicit expiry stay active.
+  // New Stripe/free checkout enrollments get access_expires_at at activation time.
+  const expiresAt = ngPaidAccessExpiresAt(enrollment);
+  if (!expiresAt) return true;
+
+  return expiresAt.getTime() >= Date.now();
+}
+
+function ngApplyPaidAccessWindow(db = {}, enrollment = {}, { plan = null, paidAt = null, source = "paid_access" } = {}) {
+  if (!enrollment?.id) return enrollment;
+  const resolvedPlan = plan || (enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null);
+  const now = paidAt ? new Date(paidAt) : new Date();
+  const accessDays = getPlanAccessDays(resolvedPlan || {});
+  enrollment.access_granted = true;
+  enrollment.is_demo = false;
+  enrollment.access_starts_at = enrollment.access_starts_at || now.toISOString();
+  enrollment.paid_at = enrollment.paid_at || now.toISOString();
+  enrollment.access_days = accessDays;
+  enrollment.access_expires_at = addDays(now, accessDays).toISOString();
+  enrollment.renewal_due_at = enrollment.access_expires_at;
+  enrollment.revoked_at = null;
+  enrollment.revoked_reason = null;
+  enrollment.billing_source = source;
+  enrollment.updated_at = new Date().toISOString();
+  db.enrollments = db.enrollments || {};
+  db.enrollments[enrollment.id] = enrollment;
+  return enrollment;
+}
+
+function ngFindPaymentByStripeObject(db = {}, stripeObject = {}) {
+  const id = String(stripeObject.id || "");
+  const paymentIntentId = String(stripeObject.payment_intent || stripeObject.id || "");
+  if (id && db.payments?.[id]) return db.payments[id];
+  return Object.values(db.payments || {}).find((payment) => {
+    return (
+      String(payment.checkout_session_id || "") === id ||
+      String(payment.stripe_session_id || "") === id ||
+      String(payment.stripe_payment_intent || "") === paymentIntentId ||
+      String(payment.payment_intent || "") === paymentIntentId
+    );
+  }) || null;
+}
+
+function ngUpsertBillingEvent(db = {}, event = {}, status = "processed", metadata = {}) {
+  if (!Array.isArray(db.billingEvents)) db.billingEvents = [];
+  const existing = db.billingEvents.find((item) => String(item.event_id || "") === String(event.id || ""));
+  const payload = {
+    id: existing?.id || uuid(),
+    event_id: event.id || null,
+    type: event.type || null,
+    status,
+    metadata,
+    created_at: existing?.created_at || new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+  if (existing) Object.assign(existing, payload);
+  else db.billingEvents.unshift(payload);
+  db.billingEvents = db.billingEvents.slice(0, 500);
+  return payload;
+}
+
+async function ngFinalizeAffiliateAfterStripePayment(payment = {}) {
+  try {
+    const code = ngAffCode(payment.referral_code || payment.metadata?.referralCode || "");
+    if (!code) return { skipped: true, reason: "no_referral_code" };
+    const crmDb = ngAffiliateStore(await readCrmDb());
+    const affiliate = ngFindAffiliateByCode(crmDb, code);
+    if (!affiliate) return { skipped: true, reason: "affiliate_not_found" };
+
+    const existing = ensureCrmArray(crmDb, "referral_attributions").find((item) => String(item.payment_id || "") === String(payment.id || ""));
+    const commission = ngCreateCommissionLedgerEntry({
+      db: crmDb,
+      affiliate,
+      payment,
+      attribution: { student_id: payment.student_id || payment.user_id || null, course_id: payment.course_id || null, plan_id: payment.plan_id || null },
+      source: "stripe_webhook",
+    });
+
+    if (existing) {
+      existing.status = "converted";
+      existing.commission_id = commission.id;
+      existing.updated_at = new Date().toISOString();
+    } else {
+      crmDb.referral_attributions.unshift({
+        id: uuid(),
+        affiliate_id: affiliate.id,
+        affiliate_name: affiliate.name,
+        referral_code: affiliate.referral_code,
+        student_id: payment.student_id || payment.user_id || null,
+        course_id: payment.course_id || null,
+        plan_id: payment.plan_id || null,
+        payment_id: payment.id || null,
+        commission_id: commission.id,
+        status: "converted",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+    }
+
+    await writeCrmDb(crmDb);
+    return { success: true, commission_id: commission.id };
+  } catch (error) {
+    console.warn("Stripe webhook affiliate finalize skipped:", error.message);
+    return { skipped: true, error: error.message };
+  }
+}
+
+async function ngHandleStripeCheckoutCompleted(event = {}, req = null) {
+  const session = event.data?.object || {};
+  const db = await readLiveDb();
+  db.payments = db.payments || {};
+  db.enrollments = db.enrollments || {};
+
+  const metadata = session.metadata || {};
+  const payment = ngFindPaymentByStripeObject(db, session) || {};
+  const paymentId = payment.id || session.id;
+  const studentId = payment.student_id || payment.user_id || metadata.studentId || metadata.student_id || null;
+  const courseId = payment.course_id || metadata.courseId || metadata.course_id || null;
+  const planId = payment.plan_id || metadata.planId || metadata.plan_id || null;
+  const enrollmentId = payment.enrollment_id || metadata.enrollmentId || metadata.enrollment_id || (studentId && courseId ? backendEnrollmentKey(courseId, studentId, "paid") : null);
+
+  if (!studentId || !courseId || !enrollmentId) {
+    ngUpsertBillingEvent(db, event, "failed", { reason: "missing_student_course_or_enrollment", session_id: session.id || null });
+    await writeLiveDb(db);
+    const e = new Error("Stripe checkout completed but metadata is missing studentId/courseId/enrollmentId");
+    e.statusCode = 400;
+    throw e;
+  }
+
+  const plan = planId ? db.plans?.[String(planId)] || null : null;
+  const user = db.users?.[String(studentId)] || null;
+  let enrollment = findEnrollmentById(db, enrollmentId);
+  if (!enrollment) {
+    enrollment = createBackendEnrollment(db, {
+      userId: studentId,
+      userName: user?.name || user?.email || "Student",
+      courseId,
+      isDemo: false,
+      accessGranted: false,
+      planId,
+    });
+  }
+
+  const paidAt = session.created ? new Date(Number(session.created) * 1000).toISOString() : new Date().toISOString();
+  enrollment.plan_id = planId || enrollment.plan_id || null;
+  ngApplyPaidAccessWindow(db, enrollment, { plan, paidAt, source: "stripe_webhook_checkout_completed" });
+
+  db.payments[paymentId] = {
+    ...payment,
+    id: paymentId,
+    checkout_session_id: session.id || payment.checkout_session_id || null,
+    stripe_session_id: session.id || payment.stripe_session_id || null,
+    stripe_payment_intent: session.payment_intent || payment.stripe_payment_intent || null,
+    enrollment_id: enrollment.id,
+    user_id: studentId,
+    student_id: studentId,
+    course_id: courseId,
+    plan_id: planId || null,
+    plan_name: plan?.name || payment.plan_name || "Plan",
+    coupon_code: payment.coupon_code || metadata.couponCode || null,
+    referral_code: payment.referral_code || metadata.referralCode || null,
+    original_amount_cents: Number(payment.original_amount_cents ?? metadata.originalAmountCents ?? session.amount_subtotal ?? session.amount_total ?? 0) || 0,
+    discount_cents: Number(payment.discount_cents ?? metadata.discountCents ?? 0) || 0,
+    amount_cents: Number(session.amount_total ?? payment.amount_cents ?? metadata.finalAmountCents ?? 0) || 0,
+    final_amount_cents: Number(session.amount_total ?? payment.final_amount_cents ?? metadata.finalAmountCents ?? 0) || 0,
+    currency: String(session.currency || payment.currency || plan?.currency || "usd").toLowerCase(),
+    status: "completed",
+    payment_status: "completed",
+    stripe_payment_status: session.payment_status || null,
+    payment_method: "stripe",
+    source: "stripe_webhook",
+    paid_at: paidAt,
+    updated_at: new Date().toISOString(),
+    metadata: { ...(payment.metadata || {}), ...(metadata || {}), stripe_event_id: event.id || null },
+  };
+
+  let accessEmail = { attempted: false, sent: false, skipped: true, reason: "student_user_missing" };
+  if (user) {
+    const course = courseId ? db.courses?.[String(courseId)] || null : null;
+    accessEmail = await ngSendStudentAccessEmailSafe({
+      db,
+      req,
+      user,
+      enrollment,
+      course,
+      reason: "stripe_payment_completed_access_granted",
+    });
+    db.users[user.id] = user;
+  }
+
+  const affiliate = await ngFinalizeAffiliateAfterStripePayment(db.payments[paymentId]);
+  const billingEvent = ngUpsertBillingEvent(db, event, "processed", {
+    action: "checkout_completed_access_granted",
+    payment_id: paymentId,
+    enrollment_id: enrollment.id,
+    access_expires_at: enrollment.access_expires_at || null,
+    access_email: accessEmail,
+    affiliate,
+  });
+
+  await writeLiveDb(db);
+  return { action: "checkout_completed_access_granted", payment: sanitizePayment(db.payments[paymentId], db), enrollment: sanitizeAdminEnrollment(enrollment, db), billing_event: billingEvent, access_email: accessEmail };
+}
+
+async function ngHandleStripeCheckoutExpired(event = {}) {
+  const session = event.data?.object || {};
+  const db = await readLiveDb();
+  const payment = ngFindPaymentByStripeObject(db, session);
+  if (payment) {
+    payment.status = "expired";
+    payment.payment_status = "expired";
+    payment.expired_at = new Date().toISOString();
+    payment.updated_at = new Date().toISOString();
+    db.payments[payment.id] = payment;
+
+    const enrollment = payment.enrollment_id ? findEnrollmentById(db, payment.enrollment_id) : null;
+    if (enrollment && !enrollment.paid_at && enrollment.access_granted !== true) {
+      enrollment.access_granted = false;
+      enrollment.revoked_reason = "checkout_expired";
+      enrollment.revoked_at = new Date().toISOString();
+      enrollment.updated_at = new Date().toISOString();
+      db.enrollments[enrollment.id] = enrollment;
+    }
+  }
+  const billingEvent = ngUpsertBillingEvent(db, event, "processed", { action: "checkout_expired", payment_id: payment?.id || null });
+  await writeLiveDb(db);
+  return { action: "checkout_expired", payment: payment ? sanitizePayment(payment, db) : null, billing_event: billingEvent };
+}
+
+async function ngHandleStripePaymentFailed(event = {}) {
+  const intent = event.data?.object || {};
+  const db = await readLiveDb();
+  const payment = ngFindPaymentByStripeObject(db, intent);
+  if (payment) {
+    payment.status = "failed";
+    payment.payment_status = "failed";
+    payment.failure_message = intent.last_payment_error?.message || intent.cancellation_reason || "Stripe payment failed";
+    payment.failed_at = new Date().toISOString();
+    payment.updated_at = new Date().toISOString();
+    db.payments[payment.id] = payment;
+  }
+  const billingEvent = ngUpsertBillingEvent(db, event, "processed", { action: "payment_failed", payment_id: payment?.id || null, payment_intent: intent.id || null });
+  await writeLiveDb(db);
+  return { action: "payment_failed", payment: payment ? sanitizePayment(payment, db) : null, billing_event: billingEvent };
+}
+
+async function ngHandleStripeWebhookEvent(event = {}, req = null) {
+  if (!event?.id || !event?.type) throw new Error("Invalid Stripe event payload");
+
+  if (event.type === "checkout.session.completed") return ngHandleStripeCheckoutCompleted(event, req);
+  if (event.type === "checkout.session.expired") return ngHandleStripeCheckoutExpired(event);
+  if (event.type === "payment_intent.payment_failed") return ngHandleStripePaymentFailed(event);
+
+  const db = await readLiveDb();
+  const billingEvent = ngUpsertBillingEvent(db, event, "ignored", { reason: "unhandled_event_type" });
+  await writeLiveDb(db);
+  return { action: "ignored", billing_event: billingEvent };
+}
+
 function getBackendEnrollment(db, { userId, courseId }) {
   const paid = db.enrollments[backendEnrollmentKey(courseId, userId, "paid")];
-  if (paid?.access_granted) return paid;
+  const plan = paid?.plan_id ? db.plans?.[String(paid.plan_id)] || null : null;
+  if (paid?.id && isPaidEnrollmentActive(paid, plan)) return paid;
   const demo = db.enrollments[backendEnrollmentKey(courseId, userId, "demo")];
   if (demo?.access_granted) return demo;
   return null;
@@ -4843,6 +5197,11 @@ app.post("/admin/enrollments", async (req, res) => {
       planId: req.body.plan_id || null,
     });
 
+    if (!isDemo && enrollment.access_granted !== false) {
+      const plan = enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null;
+      if (plan && !enrollment.access_expires_at) ngApplyPaidAccessWindow(db, enrollment, { plan, paidAt: new Date().toISOString(), source: "admin_manual_enrollment" });
+    }
+
     if (req.body.progress_percentage !== undefined) {
       enrollment.progress_percentage = Number(req.body.progress_percentage || 0) || 0;
     }
@@ -4894,6 +5253,13 @@ app.patch("/admin/enrollments/:enrollmentId", async (req, res) => {
     if (req.body.is_active !== undefined) enrollment.access_granted = Boolean(req.body.is_active);
     if (req.body.demo_expiry !== undefined) enrollment.demo_expiry = req.body.demo_expiry || null;
     if (req.body.plan_id !== undefined) enrollment.plan_id = req.body.plan_id || null;
+    if (req.body.access_starts_at !== undefined) enrollment.access_starts_at = req.body.access_starts_at || null;
+    if (req.body.access_expires_at !== undefined) { enrollment.access_expires_at = req.body.access_expires_at || null; enrollment.renewal_due_at = enrollment.access_expires_at; }
+    if (req.body.access_days !== undefined) enrollment.access_days = req.body.access_days ? Number(req.body.access_days) : null;
+    if (enrollment.is_demo !== true && enrollment.access_granted !== false && req.body.access_expires_at === undefined) {
+      const plan = enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null;
+      if (plan && !enrollment.access_expires_at) ngApplyPaidAccessWindow(db, enrollment, { plan, paidAt: enrollment.paid_at || new Date().toISOString(), source: "admin_enrollment_patch" });
+    }
     if (req.body.progress_percentage !== undefined) enrollment.progress_percentage = Number(req.body.progress_percentage || 0) || 0;
     if (req.body.user_name !== undefined || req.body.student_name !== undefined || req.body.name !== undefined) {
       enrollment.user_name = String(req.body.user_name || req.body.student_name || req.body.name || enrollment.user_name || "Student").trim();
@@ -4927,6 +5293,8 @@ app.post("/admin/enrollments/:enrollmentId/revoke", async (req, res) => {
     }
 
     enrollment.access_granted = false;
+    enrollment.revoked_at = new Date().toISOString();
+    enrollment.revoked_reason = req.body.reason || req.body.revoked_reason || "admin_manual_revoke";
     enrollment.updated_at = new Date().toISOString();
     db.enrollments[enrollment.id] = enrollment;
 
@@ -5014,7 +5382,7 @@ app.patch("/admin/payments/:paymentId", async (req, res) => {
       return res.status(404).json({ success: false, error: "Payment not found" });
     }
 
-    const allowed = ["status", "payment_status", "amount_cents", "currency", "metadata", "paid_at"];
+    const allowed = ["status", "payment_status", "amount_cents", "currency", "metadata", "paid_at", "stripe_payment_intent", "failure_message"];
     for (const key of allowed) {
       if (req.body[key] !== undefined) payment[key] = req.body[key];
     }
@@ -5035,6 +5403,179 @@ app.patch("/admin/payments/:paymentId", async (req, res) => {
       error: error.message || "Failed to update payment",
     });
   }
+});
+
+function ngBuildBillingIssues(db = {}) {
+  const payments = buildDerivedPayments(db);
+  const enrollments = Object.values(db.enrollments || {}).map((item) => sanitizeAdminEnrollment(item, db));
+  const byEnrollmentId = Object.fromEntries(enrollments.map((item) => [String(item.id), item]));
+  const issues = [];
+  const now = Date.now();
+
+  for (const payment of payments) {
+    const status = String(payment.status || payment.payment_status || "").toLowerCase();
+    const enrollment = payment.enrollment_id ? byEnrollmentId[String(payment.enrollment_id)] : null;
+    const ageMinutes = payment.created_at ? Math.round((now - new Date(payment.created_at).getTime()) / 60000) : null;
+    const amount = Number(payment.amount_cents || 0);
+    const method = String(payment.payment_method || "").toLowerCase();
+
+    if (status === "pending" && method === "stripe" && ageMinutes !== null && ageMinutes >= 30) {
+      issues.push({ severity: "warning", type: "stripe_pending_30m", message: "Stripe checkout is pending for more than 30 minutes; student should remain blocked unless Stripe shows paid.", payment, enrollment, age_minutes: ageMinutes });
+    }
+
+    if (["completed", "paid", "succeeded"].includes(status) && amount > 0 && !enrollment) {
+      issues.push({ severity: "critical", type: "completed_payment_no_enrollment", message: "Paid payment exists but no enrollment is attached.", payment });
+    }
+
+    if (["completed", "paid", "succeeded"].includes(status) && amount > 0 && enrollment && enrollment.access_granted === false) {
+      issues.push({ severity: "critical", type: "completed_payment_access_blocked", message: "Paid payment exists but enrollment access is revoked/blocked.", payment, enrollment });
+    }
+  }
+
+  for (const enrollment of enrollments) {
+    if (enrollment.type !== "paid") continue;
+    const raw = db.enrollments?.[String(enrollment.id)] || null;
+    const plan = raw?.plan_id ? db.plans?.[String(raw.plan_id)] || null : null;
+    if (raw?.access_granted !== false && !isPaidEnrollmentActive(raw, plan)) {
+      issues.push({ severity: "critical", type: "paid_access_expired_but_not_revoked", message: "Paid access expiry date has passed but access_granted is still true.", enrollment });
+    }
+  }
+
+  return {
+    success: true,
+    ok: issues.filter((item) => item.severity === "critical").length === 0,
+    build: NEXTGEN_BACKEND_BUILD,
+    stripe_secret_configured: Boolean(process.env.STRIPE_SECRET_KEY),
+    stripe_webhook_secret_configured: Boolean(process.env.STRIPE_WEBHOOK_SECRET),
+    email_configured: Boolean(process.env.RESEND_API_KEY || process.env.SENDGRID_API_KEY || (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS)),
+    counts: { payments: payments.length, enrollments: enrollments.length, issues: issues.length },
+    issues,
+  };
+}
+
+async function ngSendBillingNoticeSafe({ db, user, enrollment, course, subject, text, reason }) {
+  const result = { attempted: true, sent: false, error: null, reason };
+  try {
+    if (!user?.email) throw new Error("Student email is missing");
+    const provider = await sendEmailMessage({ to: user.email, subject, text });
+    result.sent = true;
+    result.provider = provider?.provider || provider?.messageId || provider?.id || "email";
+    ngLogStudentEmail(db, { to: user.email, subject, status: "sent", provider_response: provider, reason, user_id: user.id, enrollment_id: enrollment?.id || null });
+  } catch (error) {
+    result.error = error.message;
+    ngLogStudentEmail(db, { to: user?.email || "", subject, status: "failed", error: error.message, reason, user_id: user?.id || null, enrollment_id: enrollment?.id || null });
+  }
+  return result;
+}
+
+async function ngRunPaidAccessExpiryCheck({ db, dryRun = false, sendEmails = true, source = "manual" } = {}) {
+  const now = new Date();
+  const result = { source, dry_run: dryRun, checked: 0, reminders: [], revoked: [], changed: false };
+
+  for (const enrollment of Object.values(db.enrollments || {})) {
+    if (!enrollment?.id || enrollment.is_demo === true || enrollment.access_granted === false) continue;
+    const expiresAt = ngPaidAccessExpiresAt(enrollment);
+    if (!expiresAt) continue;
+    result.checked += 1;
+    const days = Math.ceil((expiresAt.getTime() - now.getTime()) / (24 * 60 * 60 * 1000));
+    const user = db.users?.[String(enrollment.user_id)] || null;
+    const course = enrollment.course_id ? db.courses?.[String(enrollment.course_id)] || null : null;
+    enrollment.billing_notifications_sent = enrollment.billing_notifications_sent || {};
+
+    for (const target of [7, 3, 1]) {
+      const key = `renewal_${target}_days`;
+      if (days === target && !enrollment.billing_notifications_sent[key]) {
+        result.reminders.push({ enrollment_id: enrollment.id, days_remaining: target, user_email: user?.email || "" });
+        if (!dryRun) {
+          if (sendEmails) {
+            await ngSendBillingNoticeSafe({
+              db,
+              user,
+              enrollment,
+              course,
+              subject: `Your NextGen USMLE access expires in ${target} day${target === 1 ? "" : "s"}`,
+              text: `Hi Doctor,
+
+Your NextGen USMLE access${course?.name ? ` for ${course.name}` : ""} expires on ${dateOnly(expiresAt)}. Please renew before expiry to avoid interruption.
+
+NextGen USMLE Team`,
+              reason: key,
+            });
+          }
+          enrollment.billing_notifications_sent[key] = new Date().toISOString();
+          enrollment.updated_at = new Date().toISOString();
+          db.enrollments[enrollment.id] = enrollment;
+          result.changed = true;
+        }
+      }
+    }
+
+    if (expiresAt.getTime() < now.getTime()) {
+      result.revoked.push({ enrollment_id: enrollment.id, user_email: user?.email || "", expired_at: expiresAt.toISOString() });
+      if (!dryRun) {
+        enrollment.access_granted = false;
+        enrollment.revoked_at = new Date().toISOString();
+        enrollment.revoked_reason = "access_expired";
+        enrollment.updated_at = new Date().toISOString();
+        db.enrollments[enrollment.id] = enrollment;
+        result.changed = true;
+        if (sendEmails && !enrollment.billing_notifications_sent.access_expired) {
+          await ngSendBillingNoticeSafe({
+            db,
+            user,
+            enrollment,
+            course,
+            subject: "Your NextGen USMLE access has expired",
+            text: `Hi Doctor,
+
+Your NextGen USMLE access${course?.name ? ` for ${course.name}` : ""} has expired. Please renew access to continue using paid LMS features.
+
+NextGen USMLE Team`,
+            reason: "access_expired",
+          });
+          enrollment.billing_notifications_sent.access_expired = new Date().toISOString();
+        }
+      }
+    }
+  }
+
+  return result;
+}
+
+app.get("/admin/billing/status", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    res.json({
+      success: true,
+      build: NEXTGEN_BACKEND_BUILD,
+      stripe_secret_configured: Boolean(process.env.STRIPE_SECRET_KEY),
+      stripe_webhook_secret_configured: Boolean(process.env.STRIPE_WEBHOOK_SECRET),
+      webhook_endpoint: "https://nextgen-stripe-backend.onrender.com/stripe/webhook",
+      required_events: ["checkout.session.completed", "checkout.session.expired", "payment_intent.payment_failed"],
+      email_configured: Boolean(process.env.RESEND_API_KEY || process.env.SENDGRID_API_KEY || (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS)),
+      email_provider: process.env.RESEND_API_KEY ? "resend" : process.env.SENDGRID_API_KEY ? "sendgrid" : process.env.SMTP_HOST ? "smtp" : null,
+      billing_events_count: safeArray(db.billingEvents).length,
+    });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/admin/billing/issues", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    res.json(ngBuildBillingIssues(db));
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/billing/run-expiry", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    const result = await ngRunPaidAccessExpiryCheck({ db, dryRun: req.body.dry_run === true, sendEmails: req.body.send_emails !== false, source: "admin_manual" });
+    if (result.changed && req.body.dry_run !== true) await writeLiveDb(db);
+    res.json({ success: true, result });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
 
@@ -5285,7 +5826,9 @@ app.get("/enrollments/status", async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req); const courseId = req.query.course_id; if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
     const db = await readLiveDb(); const settings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) }; const paid = db.enrollments[backendEnrollmentKey(courseId, user.id, "paid")]; const demo = db.enrollments[backendEnrollmentKey(courseId, user.id, "demo")];
-    if (paid?.access_granted) return res.json({ success: true, status: "paid", enrollment: paid, demo_expiry: null, source: "backend" });
+    const paidPlan = paid?.plan_id ? db.plans?.[String(paid.plan_id)] || null : null;
+    if (paid?.access_granted && isPaidEnrollmentActive(paid, paidPlan)) return res.json({ success: true, status: "paid", enrollment: paid, demo_expiry: null, access_expires_at: paid.access_expires_at || null, source: "backend" });
+    if (paid?.access_granted && !isPaidEnrollmentActive(paid, paidPlan)) return res.json({ success: true, status: "paid_expired", enrollment: paid, demo_expiry: null, access_expires_at: paid.access_expires_at || null, source: "backend" });
     if (demo?.access_granted) return res.json({ success: true, status: isDemoEnrollmentActive(demo, settings) ? "demo_active" : "demo_expired", enrollment: demo, demo_expiry: demo.demo_expiry || null, source: "backend" });
     res.json({ success: true, status: "none", enrollment: null, demo_expiry: null, source: "backend" });
   } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); }
@@ -5303,6 +5846,7 @@ app.post("/stripe/create-checkout", async (req, res) => {
     const code = normalizeCouponCode(coupon_code); const coupon = code ? Object.values(db.coupons || {}).find((c) => c.code === code) : null; const pricing = buildCheckoutPricing({ plan, coupon, courseId }); if (!pricing.valid) return res.status(400).json({ success: false, error: pricing.error });
     if (pricing.final_amount_cents <= 0) {
       const enrollment = createBackendEnrollment(db, { userId: studentId, userName: user.name || user.email || "Student", courseId, isDemo: false, accessGranted: true, planId: plan.id });
+      ngApplyPaidAccessWindow(db, enrollment, { plan, paidAt: new Date().toISOString(), source: coupon?.id ? "coupon_checkout" : "free_checkout" });
       db.payments = db.payments || {};
       const paymentId = uuid();
       db.payments[paymentId] = {
@@ -39697,9 +40241,38 @@ app.post("/admin/sessions/:sessionId/process-learning-content", async (req, res)
   }
 });
 
+const NG_BILLING_RUNNER_STATE = { started: false, running: false, ticks: 0 };
+
+function ngStartBillingExpiryRunner() {
+  if (NG_BILLING_RUNNER_STATE.started) return;
+  if (process.env.NEXTGEN_BILLING_RUNNER_DISABLED === "true") return;
+  NG_BILLING_RUNNER_STATE.started = true;
+  const minutes = Math.max(30, Number(process.env.NEXTGEN_BILLING_RUNNER_MINUTES || 360) || 360);
+  const interval = setInterval(async () => {
+    if (NG_BILLING_RUNNER_STATE.running) return;
+    NG_BILLING_RUNNER_STATE.running = true;
+    NG_BILLING_RUNNER_STATE.ticks += 1;
+    try {
+      const db = await readLiveDb();
+      const result = await ngRunPaidAccessExpiryCheck({ db, dryRun: false, sendEmails: true, source: "automatic_runner" });
+      if (result.changed) await writeLiveDb(db);
+      if (result.revoked.length || result.reminders.length) {
+        console.log("Billing expiry runner:", JSON.stringify({ reminders: result.reminders.length, revoked: result.revoked.length }));
+      }
+    } catch (error) {
+      console.error("Billing expiry runner error:", error.message);
+    } finally {
+      NG_BILLING_RUNNER_STATE.running = false;
+    }
+  }, minutes * 60 * 1000);
+  if (typeof interval.unref === "function") interval.unref();
+  console.log(`Billing expiry runner enabled every ${minutes} minutes`);
+}
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   ngV116StartBackendHeartbeat();
+  ngStartBillingExpiryRunner();
   console.log(`DATA_DIR=${DATA_DIR}`);
   console.log(`LIVE_DB_PATH=${LIVE_DB_PATH}`);
 });
