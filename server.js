@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v155-aylamed-api-final-v1";
+const NEXTGEN_BACKEND_BUILD = "v156-aylamed-separated-auth-billing-access-cascade";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -346,6 +346,16 @@ const DEFAULT_LIVE_DB = {
   aylaRoadmapTasks: {},
   aylaActionLogs: {},
 
+  // AylaMed separated auth + billing + access. Do not share LMS users/plans/payments/enrollments.
+  aylaUsers: {},
+  aylaPlans: {},
+  aylaCoupons: {},
+  aylaCouponRedemptions: {},
+  aylaPayments: {},
+  aylaEnrollments: {},
+  aylaAccessLogs: {},
+  aylaAiUsageLogs: {},
+
   updatedAt: null,
 };
 
@@ -417,6 +427,14 @@ async function readLiveDb() {
       aylaKnowledgeLibrary: parsed.aylaKnowledgeLibrary || {},
       aylaRoadmapTasks: parsed.aylaRoadmapTasks || {},
       aylaActionLogs: parsed.aylaActionLogs || {},
+      aylaUsers: parsed.aylaUsers || {},
+      aylaPlans: parsed.aylaPlans || {},
+      aylaCoupons: parsed.aylaCoupons || {},
+      aylaCouponRedemptions: parsed.aylaCouponRedemptions || {},
+      aylaPayments: parsed.aylaPayments || {},
+      aylaEnrollments: parsed.aylaEnrollments || {},
+      aylaAccessLogs: parsed.aylaAccessLogs || {},
+      aylaAiUsageLogs: parsed.aylaAiUsageLogs || {},
       featureCatalog: { ...DEFAULT_FEATURE_CATALOG, ...(parsed.featureCatalog || {}) },
       demoSettings: { ...DEFAULT_DEMO_SETTINGS, ...(parsed.demoSettings || {}) },
     };
@@ -2277,6 +2295,13 @@ async function ngHandleStripePaymentFailed(event = {}) {
 
 async function ngHandleStripeWebhookEvent(event = {}, req = null) {
   if (!event?.id || !event?.type) throw new Error("Invalid Stripe event payload");
+
+  // v156: Route AylaMed Stripe events by metadata.app without touching LMS billing records.
+  const ngStripeObject = event.data?.object || {};
+  const ngStripeMetadata = ngStripeObject.metadata || {};
+  if (String(ngStripeMetadata.app || "").trim().toLowerCase() === "aylamed") {
+    return aylaHandleStripeWebhookEvent(event, req);
+  }
 
   if (event.type === "checkout.session.completed") return ngHandleStripeCheckoutCompleted(event, req);
   if (event.type === "checkout.session.expired") return ngHandleStripeCheckoutExpired(event);
@@ -40312,7 +40337,7 @@ function ngStartBillingExpiryRunner() {
 // - Frontend can connect to these routes later with VITE_API_BASE_URL pointing to this backend.
 // -----------------------------------------------------------------------------
 
-const AYLA_BACKEND_BUILD = "aylamed-api-final-v1";
+const AYLA_BACKEND_BUILD = "aylamed-separated-auth-billing-access-cascade-v156";
 
 const AYLA_EXAM_TRACKS = [
   "USMLE Step 1",
@@ -40339,6 +40364,15 @@ const AYLA_COLLECTIONS = {
   aylaStudyPartnerMatches: { route: "/api/ayla/study-partner-matches", prefix: "MATCH", label: "studyPartnerMatch" },
   aylaKnowledgeLibrary: { route: "/api/ayla/knowledge-library", prefix: "KL", label: "knowledgeItem" },
   aylaRoadmapTasks: { route: "/api/ayla/roadmap-tasks", prefix: "TASK", label: "roadmapTask" },
+
+  // v156 separated AylaMed billing/access collections.
+  aylaPlans: { route: "/api/ayla/plans", prefix: "AYLA-PLAN", label: "plan" },
+  aylaCoupons: { route: "/api/ayla/coupons", prefix: "AYLA-COUPON", label: "coupon" },
+  aylaCouponRedemptions: { route: "/api/ayla/coupon-redemptions", prefix: "AYLA-REDEEM", label: "couponRedemption" },
+  aylaPayments: { route: "/api/ayla/payments", prefix: "AYLA-PAY", label: "payment" },
+  aylaEnrollments: { route: "/api/ayla/enrollments", prefix: "AYLA-ENR", label: "enrollment" },
+  aylaAccessLogs: { route: "/api/ayla/access-logs", prefix: "AYLA-ACCESS", label: "accessLog" },
+  aylaAiUsageLogs: { route: "/api/ayla/ai-usage-logs", prefix: "AYLA-AI", label: "aiUsageLog" },
 };
 
 function aylaNow() {
@@ -40636,6 +40670,424 @@ async function aylaLog(db, type, message, payload = {}) {
   return log;
 }
 
+
+// -----------------------------------------------------------------------------
+// AYLAMED V156 SEPARATED AUTH / BILLING / ACCESS HELPERS
+// -----------------------------------------------------------------------------
+// These helpers deliberately reuse infrastructure-level logic only:
+// - same Stripe client
+// - same password hash/verify helper
+// - same coupon math idea
+// But they write only to ayla* collections and never to LMS users/plans/payments/enrollments.
+
+const AYLA_AUTH_JWT_SECRET = process.env.AYLA_AUTH_JWT_SECRET || `${AUTH_JWT_SECRET}_aylamed`;
+const AYLA_TOKEN_DAYS = Number(process.env.AYLA_TOKEN_DAYS || 30) || 30;
+const AYLA_DEFAULT_SUCCESS_URL = process.env.AYLA_SUCCESS_URL || "https://live.nextgenusmlelms.com/aylamed/payment-success";
+const AYLA_DEFAULT_CANCEL_URL = process.env.AYLA_CANCEL_URL || "https://live.nextgenusmlelms.com/aylamed/payment-cancel";
+
+function aylaNormalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+function aylaSanitizeUser(user) {
+  if (!user) return null;
+  return {
+    id: user.id,
+    email: user.email || "",
+    name: user.name || "",
+    phone: user.phone || "",
+    role: user.role || "student",
+    status: user.status || "active",
+    studentId: user.studentId || null,
+    createdAt: user.createdAt || user.created_at || null,
+    updatedAt: user.updatedAt || user.updated_at || null,
+  };
+}
+
+function aylaFindUserByEmail(db, email) {
+  const clean = aylaNormalizeEmail(email);
+  if (!clean) return null;
+  return aylaValues(db, "aylaUsers").find((user) => aylaNormalizeEmail(user.email) === clean) || null;
+}
+
+function aylaSignAuthToken(user) {
+  return jwt.sign(
+    { sub: user.id, email: user.email, role: user.role || "student", app: "aylamed" },
+    AYLA_AUTH_JWT_SECRET,
+    { expiresIn: `${AYLA_TOKEN_DAYS}d` }
+  );
+}
+
+async function aylaGetAuthenticatedUser(req) {
+  const token = String(req.headers.authorization || "").replace("Bearer ", "").trim();
+  if (!token) {
+    const e = new Error("AylaMed user not authenticated");
+    e.statusCode = 401;
+    throw e;
+  }
+
+  let decoded;
+  try {
+    decoded = jwt.verify(token, AYLA_AUTH_JWT_SECRET);
+  } catch {
+    const e = new Error("Invalid or expired AylaMed auth token");
+    e.statusCode = 401;
+    throw e;
+  }
+
+  if (decoded.app && decoded.app !== "aylamed") {
+    const e = new Error("Invalid token app namespace");
+    e.statusCode = 401;
+    throw e;
+  }
+
+  const db = await readLiveDb();
+  const user = aylaGetItem(db, "aylaUsers", decoded.sub);
+  if (!user?.id || user.status === "deleted") {
+    const e = new Error("AylaMed user not found");
+    e.statusCode = 401;
+    throw e;
+  }
+
+  return { user: aylaSanitizeUser(user), rawUser: user, token, db };
+}
+
+function aylaPlanAccessDays(plan) {
+  const days = Number(plan?.access_days ?? plan?.accessDays ?? 30);
+  return Number.isFinite(days) && days > 0 ? days : 30;
+}
+
+function aylaPlanIsDemo(plan) {
+  const type = String(plan?.plan_type || plan?.type || "").toLowerCase();
+  return Boolean(plan?.is_demo) || type === "demo" || type === "trial";
+}
+
+function aylaNormalizePlanPayload(body = {}, existing = {}) {
+  const priceCents = body.price_cents !== undefined
+    ? Number(body.price_cents || 0)
+    : body.price !== undefined
+      ? centsFromDollars(body.price)
+      : Number(existing.price_cents || 0);
+
+  return {
+    ...existing,
+    id: existing.id || body.id || aylaId("AYLA-PLAN"),
+    name: String(body.name ?? existing.name ?? "AylaMed Plan").trim(),
+    description: String(body.description ?? existing.description ?? "").trim(),
+    plan_type: String(body.plan_type ?? body.type ?? existing.plan_type ?? "monthly").trim() || "monthly",
+    billing_type: String(body.billing_type ?? existing.billing_type ?? (body.monthly ? "monthly" : "one_time")).trim() || "one_time",
+    price_cents: Math.max(0, Number.isFinite(priceCents) ? priceCents : 0),
+    currency: String(body.currency ?? existing.currency ?? "usd").trim().toLowerCase() || "usd",
+    access_days: aylaPlanIsDemo(body) ? Number(body.access_days ?? existing.access_days ?? 2) : aylaPlanAccessDays({ ...existing, ...body }),
+    included_features: aylaCleanArray(body.included_features ?? body.features ?? existing.included_features ?? []),
+    is_demo: Boolean(body.is_demo ?? existing.is_demo ?? aylaPlanIsDemo(body)),
+    is_full_access: Boolean(body.is_full_access ?? existing.is_full_access ?? String(body.plan_type || existing.plan_type || "").toLowerCase().includes("full")),
+    is_active: body.is_active !== undefined ? Boolean(body.is_active) : existing.is_active !== false,
+    is_public: body.is_public !== undefined ? Boolean(body.is_public) : existing.is_public !== false,
+    max_ai_actions_per_day: Number(body.max_ai_actions_per_day ?? existing.max_ai_actions_per_day ?? 20),
+    createdAt: existing.createdAt || body.createdAt || aylaNow(),
+    updatedAt: aylaNow(),
+  };
+}
+
+function aylaNormalizeCouponPayload(body = {}, existing = {}) {
+  return {
+    ...existing,
+    id: existing.id || body.id || aylaId("AYLA-COUPON"),
+    code: normalizeCouponCode(body.code ?? existing.code ?? ""),
+    description: String(body.description ?? existing.description ?? "").trim(),
+    discount_type: String(body.discount_type ?? existing.discount_type ?? "percentage").trim() || "percentage",
+    discount_value: Number(body.discount_value ?? existing.discount_value ?? 0),
+    max_uses: body.max_uses ?? existing.max_uses ?? null,
+    used_count: Number(existing.used_count ?? body.used_count ?? 0),
+    expires_at: body.expires_at ?? existing.expires_at ?? null,
+    plan_id: body.plan_id ?? existing.plan_id ?? null,
+    is_active: body.is_active !== undefined ? Boolean(body.is_active) : existing.is_active !== false,
+    createdAt: existing.createdAt || body.createdAt || aylaNow(),
+    updatedAt: aylaNow(),
+  };
+}
+
+function aylaCouponExpired(coupon) {
+  return Boolean(coupon?.expires_at) && new Date(coupon.expires_at).getTime() < Date.now();
+}
+
+function aylaValidateCoupon({ coupon, plan }) {
+  if (!coupon) return { valid: false, error: "Coupon not found" };
+  if (coupon.is_active === false) return { valid: false, error: "Coupon is inactive" };
+  if (aylaCouponExpired(coupon)) return { valid: false, error: "Coupon has expired" };
+  if (coupon.max_uses && Number(coupon.used_count || 0) >= Number(coupon.max_uses)) return { valid: false, error: "Coupon usage limit reached" };
+  if (coupon.plan_id && String(coupon.plan_id) !== String(plan?.id || "")) return { valid: false, error: "Coupon is not valid for this AylaMed plan" };
+  return { valid: true, error: null };
+}
+
+function aylaBuildPricing({ plan, coupon }) {
+  const original = Number(plan?.price_cents || 0);
+  if (coupon) {
+    const validation = aylaValidateCoupon({ coupon, plan });
+    if (!validation.valid) return { valid: false, error: validation.error };
+  }
+  const discount = coupon ? calculateDiscountCents(original, coupon) : 0;
+  return {
+    valid: true,
+    original_amount_cents: original,
+    discount_cents: discount,
+    final_amount_cents: Math.max(0, original - discount),
+    coupon_code: coupon?.code || null,
+  };
+}
+
+function aylaEnrollmentKey(userId, planId, type = "paid") {
+  return `ayla:${userId}:${planId || "manual"}:${type}`;
+}
+
+function aylaAccessExpiresAt({ plan, startsAt = aylaNow(), accessDays = null }) {
+  const days = Number(accessDays || aylaPlanAccessDays(plan));
+  const start = new Date(startsAt);
+  const expiry = new Date(start.getTime() + days * 24 * 60 * 60 * 1000);
+  return expiry.toISOString();
+}
+
+function aylaEnrollmentActive(enrollment) {
+  if (!enrollment || enrollment.access_granted === false) return false;
+  if (enrollment.status === "revoked" || enrollment.revoked_at) return false;
+  if (!enrollment.access_expires_at) return true;
+  return new Date(enrollment.access_expires_at).getTime() >= Date.now();
+}
+
+function aylaCreateOrUpdateEnrollment(db, { userId, plan, type = null, source = "manual", accessGranted = true, startsAt = aylaNow(), existingId = null, paymentId = null }) {
+  aylaEnsureCollection(db, "aylaEnrollments");
+  const cleanType = type || (aylaPlanIsDemo(plan) ? "demo" : "paid");
+  const id = existingId || aylaEnrollmentKey(userId, plan?.id || "manual", cleanType);
+  const existing = aylaGetItem(db, "aylaEnrollments", id) || {};
+  const enrollment = {
+    ...existing,
+    id,
+    user_id: userId,
+    ayla_user_id: userId,
+    plan_id: plan?.id || existing.plan_id || null,
+    plan_name: plan?.name || existing.plan_name || "Manual Access",
+    type: cleanType,
+    is_demo: cleanType === "demo" || aylaPlanIsDemo(plan),
+    access_granted: Boolean(accessGranted),
+    status: accessGranted ? "active" : "pending",
+    source,
+    payment_id: paymentId || existing.payment_id || null,
+    access_starts_at: existing.access_starts_at || startsAt,
+    access_expires_at: accessGranted ? aylaAccessExpiresAt({ plan, startsAt, accessDays: plan?.access_days }) : existing.access_expires_at || null,
+    revoked_at: null,
+    revoked_reason: null,
+    createdAt: existing.createdAt || aylaNow(),
+    updatedAt: aylaNow(),
+  };
+  aylaSetItem(db, "aylaEnrollments", enrollment);
+  return enrollment;
+}
+
+async function aylaAccessLog(db, action, payload = {}) {
+  aylaEnsureCollection(db, "aylaAccessLogs");
+  const log = { id: aylaId("AYLA-ACCESS"), action, payload, createdAt: aylaNow() };
+  aylaSetItem(db, "aylaAccessLogs", log);
+  return log;
+}
+
+function aylaUserActiveEnrollments(db, userId) {
+  return aylaValues(db, "aylaEnrollments").filter((enrollment) => String(enrollment.user_id || enrollment.ayla_user_id) === String(userId) && aylaEnrollmentActive(enrollment));
+}
+
+function aylaOwnerId(row) {
+  return String(row?.studentId || row?.student_id || row?.studentID || row?.diagnosticId || row?.diagnosticSubmissionId || row?.sourceDiagnosticId || row?.ownerId || row?.ayla_user_id || row?.user_id || "");
+}
+
+function aylaCascadeDeleteRelatedRecords(db, { studentId = null, diagnosticId = null, userId = null } = {}) {
+  const ids = new Set([studentId, diagnosticId].map((id) => String(id || "").trim()).filter(Boolean));
+  const deleted = [];
+
+  if (studentId) {
+    for (const dx of aylaValues(db, "aylaDiagnosticSubmissions")) {
+      if (String(dx.id) === String(studentId) || String(dx.studentId || dx.student_id || "") === String(studentId)) {
+        ids.add(String(dx.id));
+        aylaDeleteItem(db, "aylaDiagnosticSubmissions", dx.id);
+        deleted.push({ collection: "aylaDiagnosticSubmissions", id: dx.id });
+      }
+    }
+  }
+
+  const childCollections = [
+    "aylaRoadmapTasks",
+    "aylaQbankBlocks",
+    "aylaWeakAreaLogs",
+    "aylaFlashcards",
+    "aylaAssessmentResults",
+    "aylaStudyPartnerPool",
+  ];
+
+  for (const key of childCollections) {
+    for (const item of aylaValues(db, key)) {
+      const oid = aylaOwnerId(item);
+      const idMatch = ids.has(String(oid)) || ids.has(String(item.id || ""));
+      const studentMatch = studentId && String(item.studentId || item.student_id || "") === String(studentId);
+      const userMatch = userId && String(item.user_id || item.ayla_user_id || "") === String(userId);
+      if (idMatch || studentMatch || userMatch) {
+        aylaDeleteItem(db, key, item.id);
+        deleted.push({ collection: key, id: item.id });
+      }
+    }
+  }
+
+  for (const match of aylaValues(db, "aylaStudyPartnerMatches")) {
+    const values = [match.studentAId, match.studentBId, match.studentId, match.student_id, match.user_id, match.ayla_user_id].map((v) => String(v || ""));
+    if ([...ids].some((id) => values.includes(id)) || (userId && values.includes(String(userId)))) {
+      aylaDeleteItem(db, "aylaStudyPartnerMatches", match.id);
+      deleted.push({ collection: "aylaStudyPartnerMatches", id: match.id });
+    }
+  }
+
+  if (userId) {
+    for (const enrollment of aylaValues(db, "aylaEnrollments")) {
+      if (String(enrollment.user_id || enrollment.ayla_user_id || "") === String(userId)) {
+        aylaDeleteItem(db, "aylaEnrollments", enrollment.id);
+        deleted.push({ collection: "aylaEnrollments", id: enrollment.id });
+      }
+    }
+  }
+
+  return deleted;
+}
+
+function aylaCascadeBeforeDelete(db, collectionKey, existing) {
+  if (!existing?.id) return [];
+  if (collectionKey === "aylaStudents") {
+    return aylaCascadeDeleteRelatedRecords(db, { studentId: existing.id, userId: existing.ayla_user_id || existing.user_id || null });
+  }
+  if (collectionKey === "aylaDiagnosticSubmissions") {
+    return aylaCascadeDeleteRelatedRecords(db, { diagnosticId: existing.id, studentId: existing.studentId || existing.student_id || null });
+  }
+  if (collectionKey === "aylaEnrollments") {
+    return [];
+  }
+  return [];
+}
+
+async function aylaHandleStripeCheckoutCompleted(event = {}, req = null) {
+  const session = event.data?.object || {};
+  const metadata = session.metadata || {};
+  const db = await readLiveDb();
+  aylaEnsureSeedData(db);
+  aylaEnsureCollection(db, "aylaPayments");
+  aylaEnsureCollection(db, "aylaEnrollments");
+
+  const payment = aylaGetItem(db, "aylaPayments", session.id) || aylaValues(db, "aylaPayments").find((p) => p.stripe_session_id === session.id) || {};
+  const paymentId = payment.id || session.id;
+  const userId = payment.user_id || payment.ayla_user_id || metadata.aylaUserId || metadata.userId || null;
+  const planId = payment.plan_id || metadata.aylaPlanId || metadata.planId || null;
+  const enrollmentId = payment.enrollment_id || metadata.aylaEnrollmentId || null;
+
+  if (!userId || !planId) {
+    const e = new Error("AylaMed Stripe checkout completed but metadata is missing aylaUserId or aylaPlanId");
+    e.statusCode = 400;
+    throw e;
+  }
+
+  const plan = aylaGetItem(db, "aylaPlans", planId);
+  const paidAt = session.created ? new Date(Number(session.created) * 1000).toISOString() : aylaNow();
+  const enrollment = aylaCreateOrUpdateEnrollment(db, {
+    userId,
+    plan,
+    type: aylaPlanIsDemo(plan) ? "demo" : "paid",
+    source: "stripe_webhook_checkout_completed",
+    accessGranted: true,
+    startsAt: paidAt,
+    existingId: enrollmentId || undefined,
+    paymentId,
+  });
+
+  const completedPayment = {
+    ...payment,
+    id: paymentId,
+    checkout_session_id: session.id || payment.checkout_session_id || null,
+    stripe_session_id: session.id || payment.stripe_session_id || null,
+    stripe_payment_intent: session.payment_intent || payment.stripe_payment_intent || null,
+    enrollment_id: enrollment.id,
+    user_id: userId,
+    ayla_user_id: userId,
+    plan_id: planId,
+    plan_name: plan?.name || payment.plan_name || "AylaMed Plan",
+    coupon_code: payment.coupon_code || metadata.aylaCouponCode || null,
+    original_amount_cents: Number(payment.original_amount_cents ?? metadata.originalAmountCents ?? session.amount_subtotal ?? session.amount_total ?? 0) || 0,
+    discount_cents: Number(payment.discount_cents ?? metadata.discountCents ?? 0) || 0,
+    amount_cents: Number(session.amount_total ?? payment.amount_cents ?? metadata.finalAmountCents ?? 0) || 0,
+    final_amount_cents: Number(session.amount_total ?? payment.final_amount_cents ?? metadata.finalAmountCents ?? 0) || 0,
+    currency: String(session.currency || payment.currency || plan?.currency || "usd").toLowerCase(),
+    status: "completed",
+    payment_status: "completed",
+    payment_method: "stripe",
+    source: "aylamed_stripe_webhook",
+    paid_at: paidAt,
+    updatedAt: aylaNow(),
+    metadata: { ...(payment.metadata || {}), ...(metadata || {}), stripe_event_id: event.id || null },
+  };
+  aylaSetItem(db, "aylaPayments", completedPayment);
+  await aylaAccessLog(db, "stripe_checkout_completed_access_granted", { userId, planId, paymentId, enrollmentId: enrollment.id });
+  await aylaLog(db, "billing", "AylaMed Stripe payment completed and access granted", { userId, planId, paymentId, enrollmentId: enrollment.id });
+  await writeLiveDb(db);
+  return { action: "aylamed_checkout_completed_access_granted", payment: completedPayment, enrollment };
+}
+
+async function aylaHandleStripeCheckoutExpired(event = {}) {
+  const session = event.data?.object || {};
+  const db = await readLiveDb();
+  const payment = aylaGetItem(db, "aylaPayments", session.id) || aylaValues(db, "aylaPayments").find((p) => p.stripe_session_id === session.id);
+  if (payment) {
+    payment.status = "expired";
+    payment.payment_status = "expired";
+    payment.expired_at = aylaNow();
+    payment.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaPayments", payment);
+    if (payment.enrollment_id) {
+      const enrollment = aylaGetItem(db, "aylaEnrollments", payment.enrollment_id);
+      if (enrollment && enrollment.status === "pending") {
+        enrollment.status = "expired";
+        enrollment.access_granted = false;
+        enrollment.updatedAt = aylaNow();
+        aylaSetItem(db, "aylaEnrollments", enrollment);
+      }
+    }
+  }
+  await aylaAccessLog(db, "stripe_checkout_expired", { paymentId: payment?.id || session.id || null });
+  await writeLiveDb(db);
+  return { action: "aylamed_checkout_expired", payment: payment || null };
+}
+
+async function aylaHandleStripePaymentFailed(event = {}) {
+  const intent = event.data?.object || {};
+  const db = await readLiveDb();
+  const payment = aylaValues(db, "aylaPayments").find((p) => p.stripe_payment_intent === intent.id || p.payment_intent === intent.id);
+  if (payment) {
+    payment.status = "failed";
+    payment.payment_status = "failed";
+    payment.failure_message = intent.last_payment_error?.message || intent.cancellation_reason || "Stripe payment failed";
+    payment.failed_at = aylaNow();
+    payment.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaPayments", payment);
+  }
+  await aylaAccessLog(db, "stripe_payment_failed", { paymentId: payment?.id || null, paymentIntent: intent.id || null });
+  await writeLiveDb(db);
+  return { action: "aylamed_payment_failed", payment: payment || null };
+}
+
+async function aylaHandleStripeWebhookEvent(event = {}, req = null) {
+  if (event.type === "checkout.session.completed") return aylaHandleStripeCheckoutCompleted(event, req);
+  if (event.type === "checkout.session.expired") return aylaHandleStripeCheckoutExpired(event);
+  if (event.type === "payment_intent.payment_failed") return aylaHandleStripePaymentFailed(event);
+
+  const db = await readLiveDb();
+  aylaEnsureSeedData(db);
+  await aylaAccessLog(db, "stripe_event_ignored", { eventId: event.id || null, eventType: event.type || null });
+  await writeLiveDb(db);
+  return { action: "aylamed_ignored", event_type: event.type };
+}
+
 function aylaEnsureSeedData(db) {
   for (const key of Object.keys(AYLA_COLLECTIONS)) aylaEnsureCollection(db, key);
 
@@ -40664,6 +41116,15 @@ function aylaEnsureSeedData(db) {
       { id: "KL-AYLA-002", title: "QBank Assignment Logic", type: "QBank Mapping", status: "Active", tags: ["qbank", "blocks"], content: "Low scores use tutor mode. Medium risk uses targeted blocks. Readiness uses timed mixed blocks.", aiUse: "Used by assign-qbank-block." },
       { id: "KL-AYLA-003", title: "Flashcard Logic", type: "Flashcard Rules", status: "Active", tags: ["flashcards", "incorrects"], content: "Wrong questions, repeated incorrects, and assessment mistakes should become active recall cards.", aiUse: "Used by generate-flashcards." },
     ].forEach((item) => aylaSetItem(db, "aylaKnowledgeLibrary", { ...item, createdAt: aylaNow(), updatedAt: aylaNow() }));
+  }
+
+  // v156: Seed editable AylaMed-only demo/monthly/full plans if no AylaMed plan exists.
+  if (!aylaValues(db, "aylaPlans").length) {
+    [
+      aylaNormalizePlanPayload({ id: "AYLA-PLAN-DEMO-2D", name: "AylaMed 2-Day Demo", description: "Demo access for AylaMed only.", plan_type: "demo", billing_type: "free", price_cents: 0, access_days: 2, is_demo: true, included_features: ["diagnostic", "roadmap", "flashcards", "qbank", "weak_areas", "study_partner"], is_public: true }),
+      aylaNormalizePlanPayload({ id: "AYLA-PLAN-MONTHLY", name: "AylaMed Monthly Access", description: "Monthly AylaMed access.", plan_type: "monthly", billing_type: "monthly", price_cents: 10000, access_days: 30, included_features: ["diagnostic", "roadmap", "flashcards", "qbank", "weak_areas", "assessments", "study_partner", "knowledge_search"], is_public: true }),
+      aylaNormalizePlanPayload({ id: "AYLA-PLAN-FULL", name: "AylaMed Full Access", description: "Full AylaMed access.", plan_type: "full_access", billing_type: "one_time", price_cents: 30000, access_days: 150, is_full_access: true, included_features: ["diagnostic", "roadmap", "flashcards", "qbank", "weak_areas", "assessments", "study_partner", "knowledge_search", "ai_review"], is_public: true }),
+    ].forEach((item) => aylaSetItem(db, "aylaPlans", item));
   }
 }
 
@@ -40698,7 +41159,9 @@ function aylaRegisterCrud(collectionKey, config) {
       try {
         const db = await readLiveDb();
         aylaEnsureSeedData(db);
-        const item = { id: req.body.id || aylaId(prefix), ...req.body, createdAt: req.body.createdAt || aylaNow(), updatedAt: aylaNow() };
+        let item = { id: req.body.id || aylaId(prefix), ...req.body, createdAt: req.body.createdAt || aylaNow(), updatedAt: aylaNow() };
+        if (collectionKey === "aylaPlans") item = aylaNormalizePlanPayload(req.body);
+        if (collectionKey === "aylaCoupons") item = aylaNormalizeCouponPayload(req.body);
         aylaSetItem(db, collectionKey, item);
         await aylaLog(db, "create", `Created ${collectionKey} record`, { collectionKey, id: item.id });
         await writeLiveDb(db);
@@ -40715,7 +41178,9 @@ function aylaRegisterCrud(collectionKey, config) {
       aylaEnsureSeedData(db);
       const existing = aylaGetItem(db, collectionKey, req.params.id);
       if (!existing) return aylaSendError(res, 404, "AylaMed record not found");
-      const updated = { ...existing, ...req.body, id: existing.id, updatedAt: aylaNow() };
+      let updated = { ...existing, ...req.body, id: existing.id, updatedAt: aylaNow() };
+      if (collectionKey === "aylaPlans") updated = aylaNormalizePlanPayload(req.body, existing);
+      if (collectionKey === "aylaCoupons") updated = aylaNormalizeCouponPayload(req.body, existing);
       aylaSetItem(db, collectionKey, updated);
       await aylaLog(db, "update", `Updated ${collectionKey} record`, { collectionKey, id: updated.id });
       await writeLiveDb(db);
@@ -40729,16 +41194,329 @@ function aylaRegisterCrud(collectionKey, config) {
     try {
       const db = await readLiveDb();
       aylaEnsureSeedData(db);
+      const existing = aylaGetItem(db, collectionKey, req.params.id);
+      if (!existing) return aylaSendError(res, 404, "AylaMed record not found");
+      const cascadeDeleted = aylaCascadeBeforeDelete(db, collectionKey, existing);
       const deleted = aylaDeleteItem(db, collectionKey, req.params.id);
       if (!deleted) return aylaSendError(res, 404, "AylaMed record not found");
-      await aylaLog(db, "delete", `Deleted ${collectionKey} record`, { collectionKey, id: req.params.id });
+      await aylaLog(db, "delete", `Deleted ${collectionKey} record`, { collectionKey, id: req.params.id, cascadeDeleted });
       await writeLiveDb(db);
-      return aylaSendOk(res, { deletedId: req.params.id });
+      return aylaSendOk(res, { deletedId: req.params.id, cascadeDeleted });
     } catch (error) {
       return aylaSendError(res, 500, error.message || "Failed to delete AylaMed record");
     }
   });
 }
+
+
+// -----------------------------------------------------------------------------
+// AYLAMED V156 AUTH ROUTES - separate from LMS users/passwords
+// -----------------------------------------------------------------------------
+app.post("/api/ayla/auth/register", async (req, res) => {
+  try {
+    const email = aylaNormalizeEmail(req.body.email);
+    const password = String(req.body.password || "");
+    if (!email || !password) return aylaSendError(res, 400, "email and password are required");
+
+    const db = await readLiveDb();
+    aylaEnsureSeedData(db);
+    if (aylaFindUserByEmail(db, email)) return aylaSendError(res, 409, "AylaMed user already exists");
+
+    const hashed = hashPassword(password);
+    const user = {
+      id: req.body.id || aylaId("AYLA-USER"),
+      email,
+      name: String(req.body.name || req.body.fullName || "").trim(),
+      phone: String(req.body.phone || "").trim(),
+      role: req.body.role || "student",
+      status: "active",
+      studentId: req.body.studentId || null,
+      ...hashed,
+      createdAt: aylaNow(),
+      updatedAt: aylaNow(),
+    };
+
+    aylaSetItem(db, "aylaUsers", user);
+    await aylaLog(db, "auth", "AylaMed user registered", { userId: user.id, email: user.email });
+    await writeLiveDb(db);
+
+    return aylaSendOk(res, { user: aylaSanitizeUser(user), token: aylaSignAuthToken(user) }, 201);
+  } catch (error) {
+    return aylaSendError(res, 500, error.message || "Failed to register AylaMed user");
+  }
+});
+
+app.post("/api/ayla/auth/login", async (req, res) => {
+  try {
+    const email = aylaNormalizeEmail(req.body.email);
+    const password = String(req.body.password || "");
+    const db = await readLiveDb();
+    aylaEnsureSeedData(db);
+    const user = aylaFindUserByEmail(db, email);
+    if (!user || !verifyPassword(password, user)) return aylaSendError(res, 401, "Invalid AylaMed email or password");
+    if (user.status === "disabled" || user.status === "deleted") return aylaSendError(res, 403, "AylaMed user is disabled");
+
+    user.lastLoginAt = aylaNow();
+    user.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaUsers", user);
+    await writeLiveDb(db);
+
+    return aylaSendOk(res, { user: aylaSanitizeUser(user), token: aylaSignAuthToken(user) });
+  } catch (error) {
+    return aylaSendError(res, 500, error.message || "Failed to login AylaMed user");
+  }
+});
+
+app.get("/api/ayla/auth/me", async (req, res) => {
+  try {
+    const { user, db } = await aylaGetAuthenticatedUser(req);
+    const activeEnrollments = aylaUserActiveEnrollments(db, user.id);
+    return aylaSendOk(res, { user, activeEnrollments });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load AylaMed profile");
+  }
+});
+
+app.post("/api/ayla/auth/update-password", async (req, res) => {
+  try {
+    const { rawUser, db } = await aylaGetAuthenticatedUser(req);
+    const oldPassword = String(req.body.oldPassword || req.body.currentPassword || "");
+    const newPassword = String(req.body.newPassword || "");
+    if (!newPassword || newPassword.length < 6) return aylaSendError(res, 400, "newPassword must be at least 6 characters");
+    if (!verifyPassword(oldPassword, rawUser)) return aylaSendError(res, 401, "Current password is incorrect");
+    const hashed = hashPassword(newPassword);
+    rawUser.salt = hashed.salt;
+    rawUser.password_hash = hashed.password_hash;
+    rawUser.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaUsers", rawUser);
+    await writeLiveDb(db);
+    return aylaSendOk(res, { user: aylaSanitizeUser(rawUser) });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update AylaMed password");
+  }
+});
+
+app.post("/api/ayla/auth/logout", (req, res) => aylaSendOk(res, { loggedOut: true }));
+
+// Sanitized AylaMed user admin routes. They never expose password hashes.
+app.get("/api/ayla/users", async (req, res) => {
+  try {
+    const db = await readLiveDb();
+    aylaEnsureSeedData(db);
+    const users = aylaFilterRows(aylaValues(db, "aylaUsers").map(aylaSanitizeUser), req.query);
+    return aylaSendOk(res, { count: users.length, aylaUsers: users });
+  } catch (error) {
+    return aylaSendError(res, 500, error.message || "Failed to load AylaMed users");
+  }
+});
+
+app.put("/api/ayla/users/:id", async (req, res) => {
+  try {
+    const db = await readLiveDb();
+    aylaEnsureSeedData(db);
+    const existing = aylaGetItem(db, "aylaUsers", req.params.id);
+    if (!existing) return aylaSendError(res, 404, "AylaMed user not found");
+    const updated = {
+      ...existing,
+      email: req.body.email !== undefined ? aylaNormalizeEmail(req.body.email) : existing.email,
+      name: req.body.name !== undefined ? String(req.body.name || "").trim() : existing.name,
+      phone: req.body.phone !== undefined ? String(req.body.phone || "").trim() : existing.phone,
+      role: req.body.role || existing.role || "student",
+      status: req.body.status || existing.status || "active",
+      studentId: req.body.studentId !== undefined ? req.body.studentId : existing.studentId || null,
+      updatedAt: aylaNow(),
+    };
+    if (req.body.password) {
+      const hashed = hashPassword(String(req.body.password));
+      updated.salt = hashed.salt;
+      updated.password_hash = hashed.password_hash;
+    }
+    aylaSetItem(db, "aylaUsers", updated);
+    await aylaLog(db, "user", "AylaMed user updated", { userId: updated.id });
+    await writeLiveDb(db);
+    return aylaSendOk(res, { user: aylaSanitizeUser(updated) });
+  } catch (error) {
+    return aylaSendError(res, 500, error.message || "Failed to update AylaMed user");
+  }
+});
+
+app.delete("/api/ayla/users/:id", async (req, res) => {
+  try {
+    const db = await readLiveDb();
+    aylaEnsureSeedData(db);
+    const existing = aylaGetItem(db, "aylaUsers", req.params.id);
+    if (!existing) return aylaSendError(res, 404, "AylaMed user not found");
+    const cascadeDeleted = aylaCascadeDeleteRelatedRecords(db, { userId: existing.id, studentId: existing.studentId || null });
+    aylaDeleteItem(db, "aylaUsers", existing.id);
+    await aylaLog(db, "user", "AylaMed user deleted", { userId: existing.id, cascadeDeleted });
+    await writeLiveDb(db);
+    return aylaSendOk(res, { deletedId: existing.id, cascadeDeleted });
+  } catch (error) {
+    return aylaSendError(res, 500, error.message || "Failed to delete AylaMed user");
+  }
+});
+
+// -----------------------------------------------------------------------------
+// AYLAMED V156 BILLING / ACCESS ROUTES - separate from LMS billing records
+// -----------------------------------------------------------------------------
+app.get("/api/ayla/access/:userId", async (req, res) => {
+  try {
+    const db = await readLiveDb();
+    aylaEnsureSeedData(db);
+    const user = aylaGetItem(db, "aylaUsers", req.params.userId);
+    const activeEnrollments = aylaUserActiveEnrollments(db, req.params.userId);
+    return aylaSendOk(res, { user: aylaSanitizeUser(user), active: activeEnrollments.length > 0, activeEnrollments });
+  } catch (error) {
+    return aylaSendError(res, 500, error.message || "Failed to load AylaMed access");
+  }
+});
+
+app.post("/api/ayla/enrollments/grant-access", async (req, res) => {
+  try {
+    const db = await readLiveDb();
+    aylaEnsureSeedData(db);
+    let userId = req.body.userId || req.body.aylaUserId || null;
+    const email = aylaNormalizeEmail(req.body.email || "");
+
+    if (!userId && email) {
+      let user = aylaFindUserByEmail(db, email);
+      if (!user) {
+        const hashed = hashPassword(`AYLA_${crypto.randomBytes(24).toString("hex")}_Temp9!`);
+        user = { id: aylaId("AYLA-USER"), email, name: req.body.name || email, phone: req.body.phone || "", role: "student", status: "active", ...hashed, createdAt: aylaNow(), updatedAt: aylaNow() };
+        aylaSetItem(db, "aylaUsers", user);
+      }
+      userId = user.id;
+    }
+
+    if (!userId) return aylaSendError(res, 400, "userId or email is required");
+    const plan = aylaGetItem(db, "aylaPlans", req.body.planId || req.body.plan_id) || aylaNormalizePlanPayload({ id: "AYLA-PLAN-MANUAL", name: "Manual AylaMed Access", plan_type: req.body.type || "manual", price_cents: 0, access_days: Number(req.body.accessDays || req.body.access_days || 30) });
+    const enrollment = aylaCreateOrUpdateEnrollment(db, { userId, plan, type: req.body.type || (aylaPlanIsDemo(plan) ? "demo" : "manual"), source: req.body.source || "admin_grant", accessGranted: true, startsAt: aylaNow() });
+    await aylaAccessLog(db, "admin_grant_access", { userId, planId: plan.id, enrollmentId: enrollment.id });
+    await aylaLog(db, "access", "AylaMed access granted", { userId, planId: plan.id, enrollmentId: enrollment.id });
+    await writeLiveDb(db);
+    return aylaSendOk(res, { enrollment, user: aylaSanitizeUser(aylaGetItem(db, "aylaUsers", userId)) }, 201);
+  } catch (error) {
+    return aylaSendError(res, 500, error.message || "Failed to grant AylaMed access");
+  }
+});
+
+app.post("/api/ayla/enrollments/:id/revoke", async (req, res) => {
+  try {
+    const db = await readLiveDb();
+    aylaEnsureSeedData(db);
+    const enrollment = aylaGetItem(db, "aylaEnrollments", req.params.id);
+    if (!enrollment) return aylaSendError(res, 404, "AylaMed enrollment not found");
+    enrollment.access_granted = false;
+    enrollment.status = "revoked";
+    enrollment.revoked_at = aylaNow();
+    enrollment.revoked_reason = req.body.reason || "admin_revoked";
+    enrollment.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaEnrollments", enrollment);
+    await aylaAccessLog(db, "admin_revoke_access", { enrollmentId: enrollment.id, reason: enrollment.revoked_reason });
+    await writeLiveDb(db);
+    return aylaSendOk(res, { enrollment });
+  } catch (error) {
+    return aylaSendError(res, 500, error.message || "Failed to revoke AylaMed access");
+  }
+});
+
+app.post("/api/ayla/enrollments/:id/restore", async (req, res) => {
+  try {
+    const db = await readLiveDb();
+    aylaEnsureSeedData(db);
+    const enrollment = aylaGetItem(db, "aylaEnrollments", req.params.id);
+    if (!enrollment) return aylaSendError(res, 404, "AylaMed enrollment not found");
+    const plan = enrollment.plan_id ? aylaGetItem(db, "aylaPlans", enrollment.plan_id) : null;
+    enrollment.access_granted = true;
+    enrollment.status = "active";
+    enrollment.revoked_at = null;
+    enrollment.revoked_reason = null;
+    enrollment.access_expires_at = req.body.access_expires_at || enrollment.access_expires_at || aylaAccessExpiresAt({ plan });
+    enrollment.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaEnrollments", enrollment);
+    await aylaAccessLog(db, "admin_restore_access", { enrollmentId: enrollment.id });
+    await writeLiveDb(db);
+    return aylaSendOk(res, { enrollment });
+  } catch (error) {
+    return aylaSendError(res, 500, error.message || "Failed to restore AylaMed access");
+  }
+});
+
+app.post("/api/ayla/enrollments/:id/extend", async (req, res) => {
+  try {
+    const db = await readLiveDb();
+    aylaEnsureSeedData(db);
+    const enrollment = aylaGetItem(db, "aylaEnrollments", req.params.id);
+    if (!enrollment) return aylaSendError(res, 404, "AylaMed enrollment not found");
+    const days = Number(req.body.days || req.body.extendDays || 30);
+    const base = enrollment.access_expires_at && new Date(enrollment.access_expires_at).getTime() > Date.now() ? new Date(enrollment.access_expires_at) : new Date();
+    enrollment.access_expires_at = new Date(base.getTime() + Math.max(1, days) * 24 * 60 * 60 * 1000).toISOString();
+    enrollment.access_granted = true;
+    enrollment.status = "active";
+    enrollment.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaEnrollments", enrollment);
+    await aylaAccessLog(db, "admin_extend_access", { enrollmentId: enrollment.id, days });
+    await writeLiveDb(db);
+    return aylaSendOk(res, { enrollment });
+  } catch (error) {
+    return aylaSendError(res, 500, error.message || "Failed to extend AylaMed access");
+  }
+});
+
+app.post("/api/ayla/billing/create-checkout", async (req, res) => {
+  try {
+    const db = await readLiveDb();
+    aylaEnsureSeedData(db);
+    const userId = req.body.userId || req.body.aylaUserId || null;
+    const user = userId ? aylaGetItem(db, "aylaUsers", userId) : aylaFindUserByEmail(db, req.body.email || "");
+    if (!user) return aylaSendError(res, 404, "AylaMed user not found");
+
+    const plan = aylaGetItem(db, "aylaPlans", req.body.planId || req.body.plan_id);
+    if (!plan || plan.is_active === false) return aylaSendError(res, 404, "AylaMed plan not found or inactive");
+
+    const code = normalizeCouponCode(req.body.couponCode || req.body.coupon_code || "");
+    const coupon = code ? aylaValues(db, "aylaCoupons").find((c) => normalizeCouponCode(c.code) === code) : null;
+    const pricing = aylaBuildPricing({ plan, coupon });
+    if (!pricing.valid) return aylaSendError(res, 400, pricing.error);
+
+    if (pricing.final_amount_cents <= 0) {
+      const enrollment = aylaCreateOrUpdateEnrollment(db, { userId: user.id, plan, type: aylaPlanIsDemo(plan) ? "demo" : "paid", source: coupon?.id ? "aylamed_coupon_checkout" : "aylamed_free_checkout", accessGranted: true });
+      const payment = { id: aylaId("AYLA-PAY"), enrollment_id: enrollment.id, user_id: user.id, ayla_user_id: user.id, plan_id: plan.id, plan_name: plan.name, coupon_code: coupon?.code || null, original_amount_cents: pricing.original_amount_cents, discount_cents: pricing.discount_cents, amount_cents: 0, final_amount_cents: 0, currency: plan.currency || "usd", status: "completed", payment_status: "completed", payment_method: coupon?.id ? "coupon" : "free_checkout", source: "aylamed_free_checkout", paid_at: aylaNow(), createdAt: aylaNow(), updatedAt: aylaNow() };
+      aylaSetItem(db, "aylaPayments", payment);
+      enrollment.payment_id = payment.id;
+      aylaSetItem(db, "aylaEnrollments", enrollment);
+      if (coupon?.id) {
+        coupon.used_count = Number(coupon.used_count || 0) + 1;
+        coupon.updatedAt = aylaNow();
+        aylaSetItem(db, "aylaCoupons", coupon);
+        aylaSetItem(db, "aylaCouponRedemptions", { id: aylaId("AYLA-REDEEM"), coupon_id: coupon.id, coupon_code: coupon.code, plan_id: plan.id, enrollment_id: enrollment.id, user_id: user.id, original_amount_cents: pricing.original_amount_cents, discount_cents: pricing.discount_cents, final_amount_cents: 0, redeemed_at: aylaNow(), createdAt: aylaNow() });
+      }
+      await aylaAccessLog(db, "free_checkout_access_granted", { userId: user.id, planId: plan.id, paymentId: payment.id, enrollmentId: enrollment.id });
+      await writeLiveDb(db);
+      return aylaSendOk(res, { free_checkout: true, url: null, pricing, payment, enrollment, access_grant: { granted: true, enrollment_id: enrollment.id } });
+    }
+
+    const pendingEnrollment = aylaCreateOrUpdateEnrollment(db, { userId: user.id, plan, type: aylaPlanIsDemo(plan) ? "demo" : "paid", source: "aylamed_stripe_checkout_pending", accessGranted: false });
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      payment_method_types: ["card"],
+      line_items: [{ price_data: { currency: plan.currency || "usd", product_data: { name: plan.name, description: plan.description || "AylaMed access" }, unit_amount: pricing.final_amount_cents }, quantity: 1 }],
+      metadata: { app: "aylamed", aylaUserId: user.id, aylaPlanId: plan.id, aylaEnrollmentId: pendingEnrollment.id, aylaCouponCode: coupon?.code || "", originalAmountCents: String(pricing.original_amount_cents), discountCents: String(pricing.discount_cents), finalAmountCents: String(pricing.final_amount_cents) },
+      success_url: req.body.successUrl || req.body.success_url || AYLA_DEFAULT_SUCCESS_URL,
+      cancel_url: req.body.cancelUrl || req.body.cancel_url || AYLA_DEFAULT_CANCEL_URL,
+    });
+
+    const payment = { id: session.id, checkout_session_id: session.id, stripe_session_id: session.id, enrollment_id: pendingEnrollment.id, user_id: user.id, ayla_user_id: user.id, plan_id: plan.id, plan_name: plan.name, coupon_code: coupon?.code || null, original_amount_cents: pricing.original_amount_cents, discount_cents: pricing.discount_cents, amount_cents: pricing.final_amount_cents, final_amount_cents: pricing.final_amount_cents, currency: plan.currency || "usd", status: "pending", payment_status: "pending", payment_method: "stripe", source: "aylamed_stripe_checkout", createdAt: aylaNow(), updatedAt: aylaNow(), metadata: session.metadata || {} };
+    aylaSetItem(db, "aylaPayments", payment);
+    pendingEnrollment.payment_id = payment.id;
+    aylaSetItem(db, "aylaEnrollments", pendingEnrollment);
+    await aylaAccessLog(db, "stripe_checkout_created", { userId: user.id, planId: plan.id, paymentId: payment.id, enrollmentId: pendingEnrollment.id });
+    await writeLiveDb(db);
+    return aylaSendOk(res, { free_checkout: false, url: session.url, pricing, payment, enrollment: pendingEnrollment });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || error.response?.status || 500, error.response?.data?.message || error.message || "AylaMed checkout failed", error.response?.data || null);
+  }
+});
 
 app.get("/api/ayla/health", async (req, res) => {
   try {
@@ -40756,6 +41534,15 @@ app.get("/api/ayla/routes", (req, res) => {
     routes: [
       "GET /api/ayla/health",
       "GET /api/ayla/exams",
+      "POST /api/ayla/auth/register",
+      "POST /api/ayla/auth/login",
+      "GET /api/ayla/auth/me",
+      "GET /api/ayla/users",
+      "POST /api/ayla/billing/create-checkout",
+      "POST /api/ayla/enrollments/grant-access",
+      "POST /api/ayla/enrollments/:id/revoke",
+      "POST /api/ayla/enrollments/:id/restore",
+      "POST /api/ayla/enrollments/:id/extend",
       "POST /api/ayla/diagnostic-submissions",
       "GET /api/ayla/students/:id/dashboard",
       "POST /api/ayla/generate-roadmap",
@@ -40766,6 +41553,7 @@ app.get("/api/ayla/routes", (req, res) => {
       "POST /api/ayla/match-study-partner",
       "POST /api/ayla/knowledge-search",
       "CRUD routes for students, rules, qbank, weak areas, flashcards, assessments, study partners, knowledge library, roadmap tasks",
+      "CRUD routes for AylaMed-only plans, coupons, coupon redemptions, payments, enrollments, access logs, AI usage logs",
     ],
   });
 });
