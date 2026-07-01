@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v157-aylamed-access-log-health-cleanup";
+const NEXTGEN_BACKEND_BUILD = "v158-lms-light-bootstrap-live-center";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -5964,7 +5964,7 @@ app.post("/stripe/create-checkout", async (req, res) => {
   } catch (e) { res.status(e.statusCode || e.response?.status || 500).json({ success: false, error: e.response?.data?.message || e.message || "Checkout failed", details: e.response?.data || null }); }
 });
 
-app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
+app.get(["/hcgi/api/live-class/:sessionId", "/live/classroom/:courseId/:sessionId"], async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req);
     const db = await readLiveDb();
@@ -6015,7 +6015,8 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
       await writeLiveDb(db);
     }
 
-    const hasZoom = hasRealZoomMeetingId(session.zoom_meeting_id);
+    const manualJoinUrl = session.zoom_meeting_url || session.join_url || session.zoom_join_url || session.zoom_url || session.meeting_url || null;
+    const hasZoom = hasRealZoomMeetingId(session.zoom_meeting_id) || Boolean(manualJoinUrl);
     res.json({
       allowed: true,
       can_join: canJoin && hasZoom,
@@ -6024,8 +6025,8 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
       session: {
         id: session.id,
         topic: session.topic,
-        zoom_meeting_id: canJoin && hasZoom ? session.zoom_meeting_id : null,
-        meeting_password: canJoin && hasZoom ? session.meeting_password : null,
+        zoom_meeting_id: canJoin && hasRealZoomMeetingId(session.zoom_meeting_id) ? session.zoom_meeting_id : null,
+        meeting_password: canJoin && hasRealZoomMeetingId(session.zoom_meeting_id) ? session.meeting_password : null,
         scheduled_date: session.scheduled_date,
         scheduled_time: session.scheduled_time,
         scheduled_timezone: session.scheduled_timezone || DEFAULT_TIMEZONE,
@@ -6033,7 +6034,8 @@ app.get("/hcgi/api/live-class/:sessionId", async (req, res) => {
         instructor_id: session.instructor_id || null,
         instructor_name: session.instructor_name || null,
         status: session.status || "scheduled",
-        zoom_join_url: canJoin && hasZoom ? session.zoom_meeting_url : null,
+        zoom_join_url: canJoin && hasZoom ? manualJoinUrl : null,
+        join_url: canJoin && hasZoom ? manualJoinUrl : null,
         recording_url: session.recording_url || null,
       },
     });
@@ -7403,6 +7405,290 @@ app.get("/student/dashboard/summary", async (req, res) => {
     await writeLiveDb(db);
     res.json({ success: true, plan, roadmap, today: roadmap.today_day, performance: { study_streak: 0, best_streak: 0, total_study_time_hours: 0, average_mock_score: perf.average_score, latest_mock_score: perf.latest_score, best_mock_score: perf.best_score, attempts_count: perf.attempts_count }, focus_areas: perf.focus_areas, leaderboard: { points: leaderboard.total_points || 0, attendance_points: leaderboard.attendance_points || 0, task_points: leaderboard.task_points || 0, quiz_points: leaderboard.quiz_points || 0 }, assessments: { available: assessments.length, completed: completedAssessments.length, pending: Math.max(0, assessments.length - completedAssessments.length) } });
   } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); }
+});
+
+
+// -----------------------------------------------------------------------------
+// v158: Student LMS light bootstrap + merged Live/Classroom Center
+// -----------------------------------------------------------------------------
+// These routes are intentionally lightweight. They prevent the student app from
+// loading 120 live-session notes on first open. Notes are only exposed as status
+// flags here; full notes still load from /live/notes/:sessionId when a specific
+// session is opened.
+function ngStudentEnrollmentStatusForCourse(db, user, courseId) {
+  const settings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
+  const paid = db.enrollments?.[backendEnrollmentKey(courseId, user.id, "paid")];
+  const demo = db.enrollments?.[backendEnrollmentKey(courseId, user.id, "demo")];
+  const paidPlan = paid?.plan_id ? db.plans?.[String(paid.plan_id)] || null : null;
+
+  if (paid?.access_granted && isPaidEnrollmentActive(paid, paidPlan)) {
+    return { status: "paid", enrollment: paid, demo_expiry: null, access_expires_at: paid.access_expires_at || null, plan: paidPlan };
+  }
+  if (paid?.access_granted && !isPaidEnrollmentActive(paid, paidPlan)) {
+    return { status: "paid_expired", enrollment: paid, demo_expiry: null, access_expires_at: paid.access_expires_at || null, plan: paidPlan };
+  }
+  if (demo?.access_granted) {
+    return { status: isDemoEnrollmentActive(demo, settings) ? "demo_active" : "demo_expired", enrollment: demo, demo_expiry: demo.demo_expiry || null, access_expires_at: null, plan: null };
+  }
+  return { status: "none", enrollment: null, demo_expiry: null, access_expires_at: null, plan: null };
+}
+
+function ngStudentHasCourseAccessStatus(status) {
+  return ["paid", "demo_active", "demo_expired", "paid_expired"].includes(String(status || ""));
+}
+
+function ngSessionDateTimeMs(session) {
+  const start = getSessionStartUtc(session?.scheduled_date, session?.scheduled_time, session?.scheduled_timezone || DEFAULT_TIMEZONE);
+  return start ? start.getTime() : 0;
+}
+
+function ngSessionComputedStatus(session, nowMs = Date.now()) {
+  const raw = String(session?.status || "").toLowerCase();
+  if (["live", "live_now", "in_progress", "ongoing"].includes(raw)) return "live";
+  if (["completed", "ended", "past"].includes(raw)) return "completed";
+  if (["cancelled", "canceled"].includes(raw)) return "cancelled";
+  const startMs = ngSessionDateTimeMs(session);
+  if (!startMs) return "scheduled";
+  const durationMinutes = Number(session?.duration_minutes || DEFAULT_ZOOM_DURATION_MINUTES) || DEFAULT_ZOOM_DURATION_MINUTES;
+  const endMs = startMs + Math.max(30, durationMinutes) * 60 * 1000;
+  if (nowMs >= startMs && nowMs <= endMs) return "live";
+  if (nowMs > endMs) return "completed";
+  return "scheduled";
+}
+
+function ngCompactNotesMeta(note = null) {
+  if (!note) {
+    return {
+      available: false,
+      published: false,
+      notes_available: false,
+      transcript_available: false,
+      recording_available: false,
+      recording_url: null,
+      transcript_url: null,
+      updated_at: null,
+    };
+  }
+  const notesText = String(note.notes || note.cleaned_notes || note.summary || "").trim();
+  const transcriptText = String(note.transcript_text || note.transcript || "").trim();
+  const recordingUrl = note.recording_url || note.zoom_recording_url || note.recording_link || null;
+  const transcriptUrl = note.transcript_url || null;
+  const published = note.is_published !== false && String(note.status || "published").toLowerCase() !== "draft";
+  return {
+    available: published && Boolean(notesText || transcriptText || recordingUrl || transcriptUrl),
+    published,
+    notes_available: published && Boolean(notesText),
+    transcript_available: published && Boolean(transcriptText || transcriptUrl),
+    recording_available: published && Boolean(recordingUrl),
+    recording_url: recordingUrl,
+    transcript_url: transcriptUrl,
+    updated_at: note.updated_at || note.created_at || null,
+  };
+}
+
+function ngCompactSessionForLiveCenter(db, session, course = null) {
+  const safe = sanitizeLiveSession(session);
+  const note = db.notes?.[String(session.id)] || null;
+  const notesMeta = ngCompactNotesMeta(note);
+  const manualJoinUrl = safe.zoom_meeting_url || session.join_url || session.zoom_join_url || session.zoom_url || session.meeting_url || null;
+  const recordingUrl = notesMeta.recording_url || safe.recording_url || null;
+  const computed_status = ngSessionComputedStatus(session);
+  return {
+    ...safe,
+    computed_status,
+    join_url: manualJoinUrl,
+    zoom_join_url: manualJoinUrl,
+    zoom_url: manualJoinUrl,
+    has_join_url: Boolean(manualJoinUrl),
+    has_zoom_url: Boolean(manualJoinUrl),
+    recording_url: recordingUrl,
+    has_recording: Boolean(recordingUrl),
+    notes_meta: notesMeta,
+    notes_available: notesMeta.notes_available,
+    transcript_available: notesMeta.transcript_available,
+    recording_available: notesMeta.recording_available || Boolean(recordingUrl),
+    course_id: safe.course_id || course?.id || null,
+    course_name: course?.name || safe.course_name || "Course",
+  };
+}
+
+function ngBuildStudentCourseBundle(db, user, course, { sessionLimit = null } = {}) {
+  const access = ngStudentEnrollmentStatusForCourse(db, user, course.id);
+  if (!ngStudentHasCourseAccessStatus(access.status)) return null;
+
+  const roadmap = buildProgressSummary({ db, courseId: course.id, userId: user.id });
+  const todayRoadmapDay = roadmap.today_day?.id
+    ? ngFindRoadmapDay(db, { courseId: course.id, dayId: roadmap.today_day.id })
+    : ngFindRoadmapDay(db, { courseId: course.id });
+  const dailyTaskPacket = todayRoadmapDay
+    ? ngSanitizeDailyTaskPacket(db, { courseId: course.id, userId: user.id, day: todayRoadmapDay })
+    : null;
+  const attempts = getStudentAttempts(db, course.id, user.id);
+  const perf = performanceFromAttempts(attempts);
+  const assessments = Object.values(db.assessments || {}).filter((a) => String(a.course_id) === String(course.id) && a.is_published);
+  const assessmentsForStudent = assessments.map((assessment) => {
+    const attempt = db.assessmentAttempts?.[assessmentAttemptKey(assessment.id, user.id)] || null;
+    return sanitizeAssessmentForStudent(assessment, attempt);
+  });
+  const completedAssessments = assessmentsForStudent.filter((assessment) => assessment.result_visible === true || assessment.attempt_status === "completed");
+  const sessionsAll = Object.values(db.liveSessions || {})
+    .filter((session) => String(session.course_id || "") === String(course.id))
+    .sort((a, b) => (ngSessionDateTimeMs(a) || 0) - (ngSessionDateTimeMs(b) || 0));
+
+  const today = todayKey();
+  const todaySession = sessionsAll.find((session) => String(session.scheduled_date || "") === today) || null;
+  const nextSession = sessionsAll.find((session) => {
+    const status = ngSessionComputedStatus(session);
+    return status === "live" || (String(session.scheduled_date || "") >= today && status !== "cancelled");
+  }) || null;
+  const upcomingSessions = sessionsAll
+    .filter((session) => {
+      const status = ngSessionComputedStatus(session);
+      return status === "live" || (String(session.scheduled_date || "") >= today && status !== "cancelled");
+    })
+    .slice(0, 5)
+    .map((session) => ngCompactSessionForLiveCenter(db, session, course));
+
+  const sessionsForList = sessionLimit
+    ? sessionsAll.slice(0, Number(sessionLimit)).map((session) => ngCompactSessionForLiveCenter(db, session, course))
+    : sessionsAll.map((session) => ngCompactSessionForLiveCenter(db, session, course));
+
+  let plan = { name: access.status === "paid" ? (access.plan?.name || "Active") : access.status === "demo_active" ? "Demo" : access.status, days_left: null, is_demo: access.status.startsWith("demo") };
+  if (access.status.startsWith("demo") && access.demo_expiry) {
+    plan.days_left = Math.max(0, Math.ceil((new Date(`${access.demo_expiry}T23:59:59`).getTime() - Date.now()) / 86400000));
+  }
+  if (access.status === "paid" && access.access_expires_at) {
+    plan.days_left = ngPaidAccessDaysRemaining(access.enrollment);
+  }
+
+  return {
+    course: sanitizeCourse(course),
+    status: access.status,
+    enrollment: access.enrollment,
+    demo_expiry: access.demo_expiry,
+    access_expires_at: access.access_expires_at,
+    plan,
+    summary: {
+      plan,
+      roadmap,
+      today: roadmap.today_day,
+      performance: {
+        study_streak: 0,
+        best_streak: 0,
+        total_study_time_hours: 0,
+        average_mock_score: perf.average_score,
+        latest_mock_score: perf.latest_score,
+        best_mock_score: perf.best_score,
+        attempts_count: perf.attempts_count,
+      },
+      focus_areas: perf.focus_areas,
+      leaderboard: (() => {
+        const entry = db.leaderboard?.[courseUserKey(course.id, user.id)] || {};
+        return {
+          points: entry.total_points || 0,
+          attendance_points: entry.attendance_points || 0,
+          task_points: entry.task_points || 0,
+          quiz_points: entry.quiz_points || entry.assessment_points || 0,
+        };
+      })(),
+      assessments: {
+        available: assessments.length,
+        completed: completedAssessments.length,
+        pending: Math.max(0, assessments.length - completedAssessments.length),
+      },
+    },
+    today: dailyTaskPacket || roadmap.today_day,
+    dailyTask: {
+      packet: dailyTaskPacket,
+      summary: roadmap,
+      leaderboard: db.leaderboard?.[courseUserKey(course.id, user.id)] || null,
+    },
+    roadmapItems: [],
+    assessments: assessmentsForStudent,
+    today_live_session: todaySession ? ngCompactSessionForLiveCenter(db, todaySession, course) : null,
+    next_live_session: nextSession ? ngCompactSessionForLiveCenter(db, nextSession, course) : null,
+    upcoming_sessions: upcomingSessions,
+    sessions: sessionsForList,
+    sessions_count: sessionsAll.length,
+  };
+}
+
+app.get("/student/dashboard/bootstrap", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const requestedCourseId = String(req.query.course_id || "").trim();
+    const allCourses = Object.values(db.courses || {})
+      .map(sanitizeCourse)
+      .filter((course) => course.status !== "archived" && course.status !== "inactive");
+    const coursesToCheck = requestedCourseId ? allCourses.filter((course) => String(course.id) === requestedCourseId) : allCourses;
+    const featureAccess = getStudentFeatureAccess(db, user);
+    const bundles = coursesToCheck
+      .map((course) => ngBuildStudentCourseBundle(db, user, course, { sessionLimit: 5 }))
+      .filter(Boolean);
+    const primary = bundles[0] || null;
+    const announcements = Object.values(db.announcements || {})
+      .map(sanitizeAnnouncement)
+      .filter((item) => item.status !== "archived" && item.status !== "inactive" && (!item.course_id || !primary?.course?.id || String(item.course_id) === String(primary.course.id)))
+      .sort(sortNewestFirst)
+      .slice(0, Number(req.query.announcement_limit || 5));
+    const leaderboard = primary?.course?.id
+      ? Object.values(db.leaderboard || {})
+        .filter((entry) => String(entry.course_id) === String(primary.course.id))
+        .sort((a, b) => Number(b.total_points || 0) - Number(a.total_points || 0))
+        .slice(0, 10)
+        .map((entry, index) => ({ ...entry, rank: index + 1 }))
+      : [];
+
+    res.json({
+      success: true,
+      source: "student_dashboard_bootstrap_v158",
+      user: sanitizeUser(user),
+      feature_access: featureAccess,
+      features: featureAccess,
+      courses: bundles.map((bundle) => bundle.course),
+      course_bundles: bundles,
+      active_courses: bundles,
+      primary_course: primary?.course || null,
+      primary_bundle: primary,
+      announcements,
+      leaderboard,
+      counts: {
+        courses: bundles.length,
+        announcements: announcements.length,
+        leaderboard: leaderboard.length,
+      },
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to load dashboard bootstrap" });
+  }
+});
+
+app.get("/student/live-center", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const requestedCourseId = String(req.query.course_id || "").trim();
+    const allCourses = Object.values(db.courses || {})
+      .map(sanitizeCourse)
+      .filter((course) => course.status !== "archived" && course.status !== "inactive");
+    const coursesToCheck = requestedCourseId ? allCourses.filter((course) => String(course.id) === requestedCourseId) : allCourses;
+    const bundles = coursesToCheck
+      .map((course) => ngBuildStudentCourseBundle(db, user, course, { sessionLimit: null }))
+      .filter(Boolean);
+
+    res.json({
+      success: true,
+      source: "student_live_center_v158",
+      merged_tabs: ["live_sessions", "classrooms"],
+      note_strategy: "metadata_only_full_notes_lazy_loaded_by_session",
+      count: bundles.reduce((sum, bundle) => sum + Number(bundle.sessions_count || 0), 0),
+      course_bundles: bundles,
+      bundles,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to load live center" });
+  }
 });
 
 
