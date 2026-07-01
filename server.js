@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v156-aylamed-separated-auth-billing-access-cascade";
+const NEXTGEN_BACKEND_BUILD = "v157-aylamed-access-log-health-cleanup";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -40337,7 +40337,7 @@ function ngStartBillingExpiryRunner() {
 // - Frontend can connect to these routes later with VITE_API_BASE_URL pointing to this backend.
 // -----------------------------------------------------------------------------
 
-const AYLA_BACKEND_BUILD = "aylamed-separated-auth-billing-access-cascade-v156";
+const AYLA_BACKEND_BUILD = "aylamed-access-log-health-cleanup-v157";
 
 const AYLA_EXAM_TRACKS = [
   "USMLE Step 1",
@@ -40769,12 +40769,22 @@ function aylaNormalizePlanPayload(body = {}, existing = {}) {
       ? centsFromDollars(body.price)
       : Number(existing.price_cents || 0);
 
+  const requestedStatus = String(body.status ?? existing.status ?? "").trim().toLowerCase();
+  const inactiveStatuses = ["inactive", "archived", "disabled", "deleted"];
+  const isActive = body.is_active !== undefined
+    ? Boolean(body.is_active)
+    : requestedStatus
+      ? !inactiveStatuses.includes(requestedStatus)
+      : existing.is_active !== false;
+  const status = requestedStatus || (isActive ? "active" : "inactive");
+
   return {
     ...existing,
     id: existing.id || body.id || aylaId("AYLA-PLAN"),
     name: String(body.name ?? existing.name ?? "AylaMed Plan").trim(),
     description: String(body.description ?? existing.description ?? "").trim(),
     plan_type: String(body.plan_type ?? body.type ?? existing.plan_type ?? "monthly").trim() || "monthly",
+    status,
     billing_type: String(body.billing_type ?? existing.billing_type ?? (body.monthly ? "monthly" : "one_time")).trim() || "one_time",
     price_cents: Math.max(0, Number.isFinite(priceCents) ? priceCents : 0),
     currency: String(body.currency ?? existing.currency ?? "usd").trim().toLowerCase() || "usd",
@@ -40782,11 +40792,13 @@ function aylaNormalizePlanPayload(body = {}, existing = {}) {
     included_features: aylaCleanArray(body.included_features ?? body.features ?? existing.included_features ?? []),
     is_demo: Boolean(body.is_demo ?? existing.is_demo ?? aylaPlanIsDemo(body)),
     is_full_access: Boolean(body.is_full_access ?? existing.is_full_access ?? String(body.plan_type || existing.plan_type || "").toLowerCase().includes("full")),
-    is_active: body.is_active !== undefined ? Boolean(body.is_active) : existing.is_active !== false,
+    is_active: isActive,
     is_public: body.is_public !== undefined ? Boolean(body.is_public) : existing.is_public !== false,
     max_ai_actions_per_day: Number(body.max_ai_actions_per_day ?? existing.max_ai_actions_per_day ?? 20),
-    createdAt: existing.createdAt || body.createdAt || aylaNow(),
+    createdAt: existing.createdAt || body.createdAt || body.created_at || aylaNow(),
+    created_at: existing.created_at || existing.createdAt || body.created_at || body.createdAt || aylaNow(),
     updatedAt: aylaNow(),
+    updated_at: aylaNow(),
   };
 }
 
@@ -40884,9 +40896,44 @@ function aylaCreateOrUpdateEnrollment(db, { userId, plan, type = null, source = 
   return enrollment;
 }
 
+function aylaNormalizeAccessLogForAdmin(db, log = {}) {
+  const payload = log.payload && typeof log.payload === "object" ? log.payload : {};
+  const enrollmentId = log.enrollment_id || log.enrollmentId || payload.enrollment_id || payload.enrollmentId || null;
+  const enrollment = enrollmentId ? aylaGetItem(db, "aylaEnrollments", enrollmentId) : null;
+  const userId = log.user_id || log.userId || log.ayla_user_id || payload.user_id || payload.userId || payload.ayla_user_id || enrollment?.user_id || enrollment?.ayla_user_id || null;
+  const user = userId ? aylaGetItem(db, "aylaUsers", userId) : null;
+  const planId = log.plan_id || log.planId || payload.plan_id || payload.planId || enrollment?.plan_id || null;
+  const plan = planId ? aylaGetItem(db, "aylaPlans", planId) : null;
+  const paymentId = log.payment_id || log.paymentId || payload.payment_id || payload.paymentId || enrollment?.payment_id || null;
+  const createdAt = log.createdAt || log.created_at || payload.createdAt || payload.created_at || aylaNow();
+
+  return {
+    ...log,
+    id: log.id || aylaId("AYLA-ACCESS"),
+    action: log.action || payload.action || "access_log",
+    user_id: userId,
+    ayla_user_id: userId,
+    user_name: log.user_name || payload.user_name || payload.userName || user?.name || "",
+    user_email: log.user_email || payload.user_email || payload.userEmail || user?.email || "",
+    plan_id: planId,
+    plan_name: log.plan_name || payload.plan_name || payload.planName || plan?.name || enrollment?.plan_name || "",
+    enrollment_id: enrollmentId,
+    payment_id: paymentId,
+    actor_id: log.actor_id || payload.actor_id || payload.actorId || null,
+    actor_email: log.actor_email || payload.actor_email || payload.actorEmail || "",
+    reason: log.reason || payload.reason || payload.note || payload.message || "",
+    createdAt,
+    created_at: createdAt,
+    updatedAt: log.updatedAt || log.updated_at || createdAt,
+    updated_at: log.updated_at || log.updatedAt || createdAt,
+    payload,
+  };
+}
+
 async function aylaAccessLog(db, action, payload = {}) {
   aylaEnsureCollection(db, "aylaAccessLogs");
-  const log = { id: aylaId("AYLA-ACCESS"), action, payload, createdAt: aylaNow() };
+  const rawLog = { id: aylaId("AYLA-ACCESS"), action, payload, createdAt: aylaNow(), created_at: aylaNow() };
+  const log = aylaNormalizeAccessLogForAdmin(db, rawLog);
   aylaSetItem(db, "aylaAccessLogs", log);
   return log;
 }
@@ -41089,6 +41136,7 @@ async function aylaHandleStripeWebhookEvent(event = {}, req = null) {
 }
 
 function aylaEnsureSeedData(db) {
+  aylaEnsureCollection(db, "aylaUsers");
   for (const key of Object.keys(AYLA_COLLECTIONS)) aylaEnsureCollection(db, key);
 
   if (!aylaValues(db, "aylaRoadmapRules").length) {
@@ -41135,7 +41183,9 @@ function aylaRegisterCrud(collectionKey, config) {
     try {
       const db = await readLiveDb();
       aylaEnsureSeedData(db);
-      const rows = aylaFilterRows(aylaValues(db, collectionKey), req.query);
+      let rows = aylaFilterRows(aylaValues(db, collectionKey), req.query);
+      if (collectionKey === "aylaPlans") rows = rows.map((row) => aylaNormalizePlanPayload(row, row));
+      if (collectionKey === "aylaAccessLogs") rows = rows.map((row) => aylaNormalizeAccessLogForAdmin(db, row));
       return aylaSendOk(res, { count: rows.length, [collectionKey]: rows });
     } catch (error) {
       return aylaSendError(res, 500, error.message || "Failed to list AylaMed records");
@@ -41146,8 +41196,10 @@ function aylaRegisterCrud(collectionKey, config) {
     try {
       const db = await readLiveDb();
       aylaEnsureSeedData(db);
-      const item = aylaGetItem(db, collectionKey, req.params.id);
+      let item = aylaGetItem(db, collectionKey, req.params.id);
       if (!item) return aylaSendError(res, 404, "AylaMed record not found");
+      if (collectionKey === "aylaPlans") item = aylaNormalizePlanPayload(item, item);
+      if (collectionKey === "aylaAccessLogs") item = aylaNormalizeAccessLogForAdmin(db, item);
       return aylaSendOk(res, { [label]: item });
     } catch (error) {
       return aylaSendError(res, 500, error.message || "Failed to read AylaMed record");
@@ -41162,6 +41214,7 @@ function aylaRegisterCrud(collectionKey, config) {
         let item = { id: req.body.id || aylaId(prefix), ...req.body, createdAt: req.body.createdAt || aylaNow(), updatedAt: aylaNow() };
         if (collectionKey === "aylaPlans") item = aylaNormalizePlanPayload(req.body);
         if (collectionKey === "aylaCoupons") item = aylaNormalizeCouponPayload(req.body);
+        if (collectionKey === "aylaAccessLogs") item = aylaNormalizeAccessLogForAdmin(db, item);
         aylaSetItem(db, collectionKey, item);
         await aylaLog(db, "create", `Created ${collectionKey} record`, { collectionKey, id: item.id });
         await writeLiveDb(db);
@@ -41181,6 +41234,7 @@ function aylaRegisterCrud(collectionKey, config) {
       let updated = { ...existing, ...req.body, id: existing.id, updatedAt: aylaNow() };
       if (collectionKey === "aylaPlans") updated = aylaNormalizePlanPayload(req.body, existing);
       if (collectionKey === "aylaCoupons") updated = aylaNormalizeCouponPayload(req.body, existing);
+      if (collectionKey === "aylaAccessLogs") updated = aylaNormalizeAccessLogForAdmin(db, updated);
       aylaSetItem(db, collectionKey, updated);
       await aylaLog(db, "update", `Updated ${collectionKey} record`, { collectionKey, id: updated.id });
       await writeLiveDb(db);
@@ -41523,6 +41577,7 @@ app.get("/api/ayla/health", async (req, res) => {
     const db = await readLiveDb();
     aylaEnsureSeedData(db);
     const counts = Object.fromEntries(Object.keys(AYLA_COLLECTIONS).map((key) => [key, aylaValues(db, key).length]));
+    counts.aylaUsers = aylaValues(db, "aylaUsers").length;
     return aylaSendOk(res, { now: aylaNow(), counts, examTracks: AYLA_EXAM_TRACKS });
   } catch (error) {
     return aylaSendError(res, 500, error.message || "AylaMed health check failed");
