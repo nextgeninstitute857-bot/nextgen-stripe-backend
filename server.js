@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v168-demo-video-points-safety";
+const NEXTGEN_BACKEND_BUILD = "v171-enrollment-status-save-fix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -5797,23 +5797,88 @@ app.patch("/admin/enrollments/:enrollmentId", async (req, res) => {
       return res.status(404).json({ success: false, error: "Enrollment not found" });
     }
 
+    const now = new Date().toISOString();
+    const requestedStatus = String(req.body.status || req.body.access_status || "").trim().toLowerCase();
+    const demoSettings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
+
+    // v171: Admin Enrollments UI sends { status } from the dropdown.
+    // Older backend builds ignored that field, so "Save Access" appeared to work
+    // but the record stayed revoked/expired because access_granted was unchanged.
+    // Interpret status as the source of truth while still supporting explicit fields.
+    if (requestedStatus) {
+      if (["active", "paid", "approved"].includes(requestedStatus)) {
+        enrollment.is_demo = false;
+        enrollment.access_granted = true;
+        enrollment.revoked_at = null;
+        enrollment.revoked_reason = null;
+        enrollment.paid_at = enrollment.paid_at || now;
+        enrollment.access_starts_at = enrollment.access_starts_at || now;
+
+        const plan = enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null;
+        if (!enrollment.access_expires_at) {
+          if (plan) {
+            ngApplyPaidAccessWindow(db, enrollment, {
+              plan,
+              paidAt: enrollment.paid_at || now,
+              source: "admin_enrollment_status_patch",
+            });
+          } else {
+            // Manual/legacy paid access should be valid even without a plan.
+            enrollment.access_expires_at = null;
+            enrollment.renewal_due_at = null;
+          }
+        }
+      } else if (requestedStatus === "demo_active") {
+        enrollment.is_demo = true;
+        enrollment.access_granted = true;
+        enrollment.revoked_at = null;
+        enrollment.revoked_reason = null;
+        const days = Math.max(1, Number(demoSettings.duration_days || 7));
+        enrollment.demo_expiry = req.body.demo_expiry || req.body.expires_at || new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+      } else if (requestedStatus === "demo_expired") {
+        enrollment.is_demo = true;
+        enrollment.access_granted = true;
+        enrollment.demo_expiry = req.body.demo_expiry || req.body.expires_at || new Date(Date.now() - 60 * 1000).toISOString();
+      } else if (requestedStatus === "expired") {
+        enrollment.is_demo = false;
+        enrollment.access_granted = true;
+        enrollment.access_expires_at = req.body.access_expires_at || req.body.expires_at || new Date(Date.now() - 60 * 1000).toISOString();
+        enrollment.renewal_due_at = enrollment.access_expires_at;
+      } else if (["pending", "inactive", "cancelled", "canceled", "revoked"].includes(requestedStatus)) {
+        enrollment.access_granted = false;
+        enrollment.revoked_at = enrollment.revoked_at || now;
+        enrollment.revoked_reason = req.body.revoked_reason || req.body.reason || `admin_set_${requestedStatus}`;
+      }
+    }
+
     if (req.body.access_granted !== undefined) enrollment.access_granted = Boolean(req.body.access_granted);
     if (req.body.is_active !== undefined) enrollment.access_granted = Boolean(req.body.is_active);
+    if (req.body.is_demo !== undefined) enrollment.is_demo = Boolean(req.body.is_demo);
     if (req.body.demo_expiry !== undefined) enrollment.demo_expiry = req.body.demo_expiry || null;
     if (req.body.plan_id !== undefined) enrollment.plan_id = req.body.plan_id || null;
+    if (req.body.paid_at !== undefined) enrollment.paid_at = req.body.paid_at || null;
     if (req.body.access_starts_at !== undefined) enrollment.access_starts_at = req.body.access_starts_at || null;
     if (req.body.access_expires_at !== undefined) { enrollment.access_expires_at = req.body.access_expires_at || null; enrollment.renewal_due_at = enrollment.access_expires_at; }
     if (req.body.access_days !== undefined) enrollment.access_days = req.body.access_days ? Number(req.body.access_days) : null;
+
+    if (enrollment.access_granted !== false) {
+      enrollment.revoked_at = null;
+      enrollment.revoked_reason = null;
+    }
+
     if (enrollment.is_demo !== true && enrollment.access_granted !== false && req.body.access_expires_at === undefined) {
       const plan = enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null;
-      if (plan && !enrollment.access_expires_at) ngApplyPaidAccessWindow(db, enrollment, { plan, paidAt: enrollment.paid_at || new Date().toISOString(), source: "admin_enrollment_patch" });
+      if (plan && !enrollment.access_expires_at) ngApplyPaidAccessWindow(db, enrollment, { plan, paidAt: enrollment.paid_at || now, source: "admin_enrollment_patch" });
+      enrollment.paid_at = enrollment.paid_at || now;
+      enrollment.access_starts_at = enrollment.access_starts_at || now;
     }
+
     if (req.body.progress_percentage !== undefined) enrollment.progress_percentage = Number(req.body.progress_percentage || 0) || 0;
     if (req.body.user_name !== undefined || req.body.student_name !== undefined || req.body.name !== undefined) {
       enrollment.user_name = String(req.body.user_name || req.body.student_name || req.body.name || enrollment.user_name || "Student").trim();
     }
 
-    enrollment.updated_at = new Date().toISOString();
+    enrollment.updated_at = now;
     db.enrollments[enrollment.id] = enrollment;
 
     await writeLiveDb(db);
@@ -5821,6 +5886,7 @@ app.patch("/admin/enrollments/:enrollmentId", async (req, res) => {
     res.json({
       success: true,
       enrollment: sanitizeAdminEnrollment(enrollment, db),
+      source: "admin_enrollment_status_patch_v171",
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({
@@ -5829,7 +5895,6 @@ app.patch("/admin/enrollments/:enrollmentId", async (req, res) => {
     });
   }
 });
-
 app.post("/admin/enrollments/:enrollmentId/revoke", async (req, res) => {
   try {
     await requireAdmin(req);
