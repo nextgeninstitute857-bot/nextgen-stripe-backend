@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v173-recording-single-publish-verified";
+const NEXTGEN_BACKEND_BUILD = "v174-recording-course-session-link-fix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -6987,34 +6987,103 @@ app.post("/live/recordings/publish", async (req, res) => {
     const previous = db.recordings[key] || {};
     const legacy = legacyKey ? db.recordings[legacyKey] || {} : {};
 
+    const requestedSessionId = String(req.body.session_id || "").trim();
+    const previousSessionId = String(previous.session_id || legacy.session_id || "").trim();
+    const resolvedSessionId = requestedSessionId || previousSessionId || null;
+    const session = resolvedSessionId
+      ? db.liveSessions?.[resolvedSessionId] ||
+        Object.values(db.liveSessions || {}).find((item) => String(item.id || "") === String(resolvedSessionId)) ||
+        null
+      : null;
+
+    if (requestedSessionId && !session) {
+      return res.status(400).json({
+        success: false,
+        error: "Selected live session was not found. Refresh recordings and select the session again.",
+      });
+    }
+
+    const requestedCourseId = String(req.body.course_id || "").trim();
+    const sessionCourseId = String(session?.course_id || "").trim();
+
+    if (requestedCourseId && sessionCourseId && requestedCourseId !== sessionCourseId) {
+      return res.status(400).json({
+        success: false,
+        error: "Selected course does not match the selected live session.",
+      });
+    }
+
+    const resolvedCourseId =
+      requestedCourseId ||
+      sessionCourseId ||
+      String(previous.course_id || legacy.course_id || "").trim() ||
+      null;
+
+    // Permanent safety: students only see published recordings that are linked to a course.
+    // Do not allow the admin publish action to create another published row with course_id: null.
+    if (!resolvedCourseId) {
+      return res.status(400).json({
+        success: false,
+        error: "Select a course before publishing. Published recordings must be linked to a course so students can see them.",
+      });
+    }
+
+    const now = new Date().toISOString();
+    const recordingUrl = req.body.recording_url || previous.recording_url || legacy.recording_url || req.body.share_url || previous.share_url || legacy.share_url || null;
+    const shareUrl = req.body.share_url || previous.share_url || legacy.share_url || recordingUrl || null;
+    const cleanTopic = req.body.topic || session?.topic || session?.title || previous.topic || legacy.topic || null;
+
     db.recordings[key] = {
       ...previous,
       id: key,
       recording_key: key,
       meeting_id: meetingId || previous.meeting_id || legacy.meeting_id || null,
       uuid: req.body.uuid || previous.uuid || legacy.uuid || null,
-      session_id: req.body.session_id || previous.session_id || legacy.session_id || null,
-      course_id: req.body.course_id || previous.course_id || legacy.course_id || null,
-      topic: req.body.topic || previous.topic || legacy.topic || null,
+      session_id: resolvedSessionId,
+      course_id: resolvedCourseId,
+      topic: cleanTopic,
       start_time: req.body.start_time || previous.start_time || legacy.start_time || null,
       duration: req.body.duration || previous.duration || legacy.duration || null,
-      recording_url: req.body.recording_url || previous.recording_url || legacy.recording_url || null,
-      share_url: req.body.share_url || previous.share_url || legacy.share_url || null,
+      recording_url: recordingUrl,
+      share_url: shareUrl,
       download_url: req.body.download_url || previous.download_url || legacy.download_url || null,
       file_type: req.body.file_type || previous.file_type || legacy.file_type || null,
       recording_type: req.body.recording_type || previous.recording_type || legacy.recording_type || null,
       status: req.body.status || previous.status || legacy.status || null,
       published: req.body.published !== false,
-      published_at: new Date().toISOString(),
+      published_at: now,
       published_by: user.id,
+      updated_at: now,
     };
+
+    if (resolvedSessionId && db.liveSessions?.[resolvedSessionId]) {
+      db.liveSessions[resolvedSessionId] = {
+        ...(db.liveSessions[resolvedSessionId] || {}),
+        recording_key: key,
+        recording_url: recordingUrl,
+        recording_published: req.body.published !== false,
+        recording_published_at: now,
+        updated_at: now,
+      };
+
+      db.notes[resolvedSessionId] = {
+        ...(db.notes[resolvedSessionId] || {}),
+        session_id: resolvedSessionId,
+        course_id: resolvedCourseId,
+        recording_key: key,
+        recording_url: recordingUrl,
+        meeting_id: meetingId || previous.meeting_id || legacy.meeting_id || null,
+        recording_published: req.body.published !== false,
+        updated_at: now,
+      };
+    }
 
     if (legacyKey && legacyKey !== key && db.recordings[legacyKey]?.published) {
       db.recordings[legacyKey] = {
         ...(db.recordings[legacyKey] || {}),
         published: false,
         migrated_to_recording_key: key,
-        migrated_at: new Date().toISOString(),
+        migrated_at: now,
       };
     }
 
