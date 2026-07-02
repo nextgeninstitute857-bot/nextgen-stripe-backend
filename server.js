@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v161-roadmap-auto-live-center-sync";
+const NEXTGEN_BACKEND_BUILD = "v164-reviewed-roadmap-live-center-timezone";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
