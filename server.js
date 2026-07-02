@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v164-reviewed-roadmap-live-center-timezone";
+const NEXTGEN_BACKEND_BUILD = "v166-plan-course-checkout-success-fix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -5914,6 +5914,9 @@ app.post("/stripe/create-checkout", async (req, res) => {
     let plan = plan_id ? db.plans[plan_id] : Object.values(db.plans || {}).filter((p) => p.is_active !== false && (!p.course_id || String(p.course_id) === String(courseId))).sort((a, b) => Number(a.price_cents || 0) - Number(b.price_cents || 0))[0];
     if (!plan) plan = { id: "legacy_course_price", name: "NextGen Enrollment", description: "Course enrollment", price_cents: Math.round(Number(amount || 0) * 100), currency: "usd", billing_type: "one_time", course_id: courseId, included_features: [], is_active: true };
     if (plan.is_active === false) return res.status(404).json({ success: false, error: "Plan not found or inactive" });
+    const course = db.courses?.[String(courseId)] || null;
+    if (!course || course.status === "archived") return res.status(404).json({ success: false, error: "Selected course not found or inactive" });
+    if (plan.course_id && String(plan.course_id) !== String(courseId)) return res.status(400).json({ success: false, error: "Selected plan is connected to a different course. Please reopen the plan from the correct course." });
     const code = normalizeCouponCode(coupon_code); const coupon = code ? Object.values(db.coupons || {}).find((c) => c.code === code) : null; const pricing = buildCheckoutPricing({ plan, coupon, courseId }); if (!pricing.valid) return res.status(400).json({ success: false, error: pricing.error });
     if (pricing.final_amount_cents <= 0) {
       const enrollment = createBackendEnrollment(db, { userId: studentId, userName: user.name || user.email || "Student", courseId, isDemo: false, accessGranted: true, planId: plan.id });
@@ -5977,6 +5980,109 @@ app.post("/stripe/create-checkout", async (req, res) => {
     res.json({ success: true, free_checkout: false, url: session.url, plan: sanitizePlan(plan), pricing });
   } catch (e) { res.status(e.statusCode || e.response?.status || 500).json({ success: false, error: e.response?.data?.message || e.message || "Checkout failed", details: e.response?.data || null }); }
 });
+
+async function ngCheckoutResultResponse(db = {}, { sessionId = "", user = null, note = "" } = {}) {
+  const payment = ngFindPaymentByStripeObject(db, { id: sessionId }) || db.payments?.[String(sessionId)] || null;
+  const enrollment = payment?.enrollment_id ? findEnrollmentById(db, payment.enrollment_id) : null;
+  const plan = payment?.plan_id ? db.plans?.[String(payment.plan_id)] || null : (enrollment?.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null);
+  const course = payment?.course_id ? db.courses?.[String(payment.course_id)] || null : (enrollment?.course_id ? db.courses?.[String(enrollment.course_id)] || null : null);
+  const enrollmentActive = enrollment?.id
+    ? (enrollment.is_demo ? isDemoEnrollmentActive(enrollment, { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) }) : isPaidEnrollmentActive(enrollment, plan))
+    : false;
+
+  return {
+    success: true,
+    build: NEXTGEN_BACKEND_BUILD,
+    session_id: sessionId || null,
+    status: enrollmentActive ? "completed" : String(payment?.status || payment?.payment_status || "pending"),
+    payment_status: payment?.payment_status || payment?.status || null,
+    access_granted: Boolean(enrollment?.access_granted !== false && enrollmentActive),
+    note,
+    payment: payment ? sanitizePayment(payment, db) : null,
+    enrollment: enrollment ? sanitizeAdminEnrollment(enrollment, db) : null,
+    plan: plan ? sanitizePlan(plan) : null,
+    course: course ? sanitizeCourse(course) : null,
+    redirect: {
+      dashboard: course?.id ? `/student/dashboard?course_id=${encodeURIComponent(course.id)}` : "/student/dashboard",
+      course: course?.id ? `/courses/${encodeURIComponent(course.id)}` : "/courses",
+      live_sessions: course?.id ? `/student/live-sessions?course_id=${encodeURIComponent(course.id)}` : "/student/live-sessions",
+    },
+  };
+}
+
+async function ngHandleStripeCheckoutResultRequest(req, res) {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const sessionId = String(req.query.session_id || req.query.sessionId || req.body?.session_id || req.body?.sessionId || "").trim();
+
+    if (!sessionId) {
+      return res.status(400).json({ success: false, error: "session_id is required" });
+    }
+
+    let db = await readLiveDb();
+    let payment = ngFindPaymentByStripeObject(db, { id: sessionId }) || db.payments?.[String(sessionId)] || null;
+
+    if (payment?.user_id && String(payment.user_id) !== String(user.id) && user.role !== "admin") {
+      return res.status(403).json({ success: false, error: "Checkout session does not belong to the logged-in user" });
+    }
+
+    const enrollment = payment?.enrollment_id ? findEnrollmentById(db, payment.enrollment_id) : null;
+    const plan = payment?.plan_id ? db.plans?.[String(payment.plan_id)] || null : (enrollment?.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null);
+    const alreadyActive = enrollment?.id && enrollment.access_granted !== false && !enrollment.is_demo && isPaidEnrollmentActive(enrollment, plan);
+    const alreadyCompleted = ["completed", "paid", "succeeded"].includes(String(payment?.status || payment?.payment_status || "").toLowerCase());
+
+    if (alreadyActive && alreadyCompleted) {
+      return res.json(await ngCheckoutResultResponse(db, { sessionId, user, note: "access_already_active" }));
+    }
+
+    if (!process.env.STRIPE_SECRET_KEY) {
+      return res.status(503).json({ success: false, error: "Stripe secret key is not configured, so checkout cannot be verified immediately." });
+    }
+
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    const metadata = session.metadata || {};
+    const sessionStudentId = payment?.student_id || payment?.user_id || metadata.studentId || metadata.student_id || null;
+
+    if (sessionStudentId && String(sessionStudentId) !== String(user.id) && user.role !== "admin") {
+      return res.status(403).json({ success: false, error: "Stripe session belongs to a different student" });
+    }
+
+    const paid = ["paid", "no_payment_required"].includes(String(session.payment_status || "").toLowerCase());
+    const complete = String(session.status || "").toLowerCase() === "complete";
+
+    if (paid && complete) {
+      await ngHandleStripeCheckoutCompleted({
+        id: `manual_checkout_result_${session.id}`,
+        type: "checkout.session.completed",
+        data: { object: session },
+      }, req);
+
+      db = await readLiveDb();
+      return res.json(await ngCheckoutResultResponse(db, { sessionId, user, note: "access_verified_from_stripe" }));
+    }
+
+    return res.json({
+      success: true,
+      build: NEXTGEN_BACKEND_BUILD,
+      session_id: sessionId,
+      status: "pending",
+      payment_status: session.payment_status || payment?.payment_status || null,
+      access_granted: false,
+      message: "Payment is not completed yet. Please wait a few seconds and refresh this page.",
+      payment: payment ? sanitizePayment(payment, db) : null,
+    });
+  } catch (error) {
+    return res.status(error.statusCode || error.response?.status || 500).json({
+      success: false,
+      error: error.response?.data?.message || error.message || "Failed to verify checkout session",
+      details: error.response?.data || null,
+    });
+  }
+}
+
+app.get(["/stripe/checkout-result", "/stripe/checkout-status"], ngHandleStripeCheckoutResultRequest);
+app.post(["/stripe/checkout-result", "/stripe/checkout-status"], ngHandleStripeCheckoutResultRequest);
+
 
 app.get(["/hcgi/api/live-class/:sessionId", "/live/classroom/:courseId/:sessionId"], async (req, res) => {
   try {
