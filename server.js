@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v166-plan-course-checkout-success-fix";
+const NEXTGEN_BACKEND_BUILD = "v167-preserve-paid-access-checkout-fix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -2005,6 +2005,18 @@ function isAdminOrInstructor(user, session) {
 function createBackendEnrollment(db, { userId, userName, courseId, isDemo, accessGranted = true, demoExpiry = null, planId = null, accessStartsAt = null, accessExpiresAt = null, accessDays = null, paidAt = null }) {
   const key = backendEnrollmentKey(courseId, userId, isDemo ? "demo" : "paid");
   const previous = db.enrollments[key] || {};
+
+  // v167 safety: a pending checkout must never downgrade an already-active paid enrollment.
+  // This prevents /enrollments/prepare-checkout from turning a paid/coupon student into revoked access.
+  const previousPlan = previous?.plan_id ? db.plans?.[String(previous.plan_id)] || null : null;
+  const previousPaidActive =
+    !isDemo &&
+    previous?.id &&
+    previous.is_demo !== true &&
+    previous.access_granted !== false &&
+    isPaidEnrollmentActive(previous, previousPlan);
+  const nextAccessGranted = previousPaidActive && accessGranted === false ? true : Boolean(accessGranted);
+
   db.enrollments[key] = {
     ...previous,
     id: key,
@@ -2013,7 +2025,7 @@ function createBackendEnrollment(db, { userId, userName, courseId, isDemo, acces
     user_name: userName || previous.user_name || "Student",
     course_id: courseId,
     plan_id: planId || previous.plan_id || null,
-    access_granted: Boolean(accessGranted),
+    access_granted: nextAccessGranted,
     is_demo: Boolean(isDemo),
     demo_expiry: demoExpiry,
     access_starts_at: accessStartsAt || previous.access_starts_at || null,
@@ -2021,8 +2033,8 @@ function createBackendEnrollment(db, { userId, userName, courseId, isDemo, acces
     renewal_due_at: accessExpiresAt || previous.renewal_due_at || previous.access_expires_at || null,
     access_days: accessDays || previous.access_days || null,
     paid_at: paidAt || previous.paid_at || null,
-    revoked_at: previous.revoked_at || null,
-    revoked_reason: previous.revoked_reason || null,
+    revoked_at: nextAccessGranted ? null : previous.revoked_at || null,
+    revoked_reason: nextAccessGranted ? null : previous.revoked_reason || null,
     progress_percentage: previous.progress_percentage || 0,
     created_at: previous.created_at || new Date().toISOString(),
     updated_at: new Date().toISOString(),
@@ -5891,7 +5903,41 @@ app.get("/student/demo-status", async (req, res) => {
   }
 });
 app.post("/enrollments/prepare-checkout", async (req, res) => {
-  try { const { user } = await getAuthenticatedUser(req); const { course_id } = req.body; if (!course_id) return res.status(400).json({ success: false, error: "course_id is required" }); const db = await readLiveDb(); const enrollment = createBackendEnrollment(db, { userId: user.id, userName: user.name || user.email || "Student", courseId: course_id, isDemo: false, accessGranted: false }); await writeLiveDb(db); res.json({ success: true, enrollment, created: true, source: "backend" }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); }
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const { course_id } = req.body;
+    if (!course_id) return res.status(400).json({ success: false, error: "course_id is required" });
+
+    const db = await readLiveDb();
+    const enrollmentKey = backendEnrollmentKey(course_id, user.id, "paid");
+    const existing = db.enrollments?.[enrollmentKey] || null;
+    const existingPlan = existing?.plan_id ? db.plans?.[String(existing.plan_id)] || null : null;
+
+    // v167 safety: if the student already has active paid/coupon access, do not create
+    // a new pending enrollment with access_granted=false over the same key.
+    if (existing?.access_granted !== false && existing?.is_demo !== true && isPaidEnrollmentActive(existing, existingPlan)) {
+      return res.json({
+        success: true,
+        enrollment: existing,
+        created: false,
+        already_active: true,
+        source: "backend_prepare_checkout_preserved_active_paid_access",
+      });
+    }
+
+    const enrollment = createBackendEnrollment(db, {
+      userId: user.id,
+      userName: user.name || user.email || "Student",
+      courseId: course_id,
+      isDemo: false,
+      accessGranted: false,
+    });
+
+    await writeLiveDb(db);
+    res.json({ success: true, enrollment, created: true, source: "backend" });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message });
+  }
 });
 app.get("/enrollments/status", async (req, res) => {
   try {
