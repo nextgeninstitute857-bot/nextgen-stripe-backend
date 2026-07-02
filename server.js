@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v167-preserve-paid-access-checkout-fix";
+const NEXTGEN_BACKEND_BUILD = "v168-demo-video-points-safety";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -259,7 +259,7 @@ const DEFAULT_FEATURE_CATALOG = {
 
 const DEFAULT_DEMO_SETTINGS = {
   enabled: true,
-  duration_days: 2,
+  duration_days: 7,
   allow_live_classes: true,
   allow_roadmap: true,
   allow_community: true,
@@ -270,7 +270,7 @@ const DEFAULT_DEMO_SETTINGS = {
   allow_flashcards: true,
   allow_recordings: true,
   allow_notes_transcripts: true,
-  allow_video_library: false,
+  allow_video_library: true,
   max_live_sessions: null,
   updated_at: null,
 };
@@ -575,15 +575,16 @@ function getPlanAccessDays(plan) {
 }
 
 function getExternalLibraryAccess(db, user) {
+  const demoSettings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
   const enrollments = Object.values(db.enrollments || {}).filter((enrollment) => {
     return (
       String(enrollment.user_id) === String(user.id) &&
-      enrollment.access_granted !== false &&
-      enrollment.is_demo !== true
+      enrollment.access_granted !== false
     );
   });
 
-  for (const enrollment of enrollments) {
+  // Paid access has priority. A plan must explicitly include video_library.
+  for (const enrollment of enrollments.filter((item) => item.is_demo !== true)) {
     const plan = enrollment.plan_id
       ? db.plans?.[String(enrollment.plan_id)] || null
       : null;
@@ -607,7 +608,36 @@ function getExternalLibraryAccess(db, user) {
       course,
       accessDays,
       accessEndsAt,
+      source: "paid",
     };
+  }
+
+  // v168: demo access to the external UL/UWorld library follows the admin demo settings.
+  if (demoSettings.enabled !== false && demoSettings.allow_video_library === true) {
+    for (const enrollment of enrollments.filter((item) => item.is_demo === true)) {
+      if (!isDemoEnrollmentActive(enrollment, demoSettings)) continue;
+
+      const course = enrollment.course_id
+        ? db.courses?.[String(enrollment.course_id)] || null
+        : null;
+
+      if (course?.demo_access_enabled === false) continue;
+
+      const accessDays = Number(enrollment.access_days || demoSettings.duration_days || 7);
+      const accessEndsAt = enrollment.demo_expiry
+        ? new Date(`${enrollment.demo_expiry}T23:59:59`).toISOString()
+        : addDays(new Date(), accessDays).toISOString();
+
+      return {
+        allowed: true,
+        enrollment,
+        plan: null,
+        course,
+        accessDays,
+        accessEndsAt,
+        source: "demo",
+      };
+    }
   }
 
   return {
@@ -617,8 +647,10 @@ function getExternalLibraryAccess(db, user) {
     course: null,
     accessDays: 0,
     accessEndsAt: null,
+    source: null,
   };
 }
+
 
 function getStudentFeatureAccess(db, user) {
   const featureKeys = Object.keys({ ...DEFAULT_FEATURE_CATALOG, ...(db.featureCatalog || {}) });
@@ -2329,8 +2361,21 @@ function getBackendEnrollment(db, { userId, courseId }) {
   const paid = db.enrollments[backendEnrollmentKey(courseId, userId, "paid")];
   const plan = paid?.plan_id ? db.plans?.[String(paid.plan_id)] || null : null;
   if (paid?.id && isPaidEnrollmentActive(paid, plan)) return paid;
+
+  // v168: demo enrollment must also be time-valid here. Older routes rely on this helper,
+  // so returning expired demos here would leak locked content after the demo window ends.
   const demo = db.enrollments[backendEnrollmentKey(courseId, userId, "demo")];
-  if (demo?.access_granted) return demo;
+  const demoSettings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
+  const course = db.courses?.[String(courseId)] || null;
+  if (
+    demo?.access_granted &&
+    demo?.is_demo === true &&
+    course?.demo_access_enabled !== false &&
+    isDemoEnrollmentActive(demo, demoSettings)
+  ) {
+    return demo;
+  }
+
   return null;
 }
 function isDemoEnrollmentActive(enrollment, demoSettings) {
@@ -2338,6 +2383,50 @@ function isDemoEnrollmentActive(enrollment, demoSettings) {
   if (!demoSettings.enabled) return false;
   if (!enrollment.demo_expiry) return true;
   return new Date(`${enrollment.demo_expiry}T23:59:59`).getTime() >= Date.now();
+}
+
+function ngApplyDemoSettingsToExistingEnrollments(db, { durationDays, actorId = null, applyToExpired = true } = {}) {
+  const days = Math.max(1, Number(durationDays || DEFAULT_DEMO_SETTINGS.duration_days || 7));
+  const nextExpiry = dateOnly(addDays(new Date(), days));
+  let updated = 0;
+  let skipped = 0;
+
+  db.enrollments = db.enrollments || {};
+
+  for (const enrollment of Object.values(db.enrollments || {})) {
+    if (enrollment?.is_demo !== true) continue;
+    if (enrollment.access_granted === false) {
+      skipped += 1;
+      continue;
+    }
+
+    const course = enrollment.course_id ? db.courses?.[String(enrollment.course_id)] || null : null;
+    if (course?.demo_access_enabled === false) {
+      skipped += 1;
+      continue;
+    }
+
+    const wasExpired = !isDemoEnrollmentActive(enrollment, { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) });
+    if (wasExpired && applyToExpired === false) {
+      skipped += 1;
+      continue;
+    }
+
+    enrollment.demo_expiry = nextExpiry;
+    enrollment.expires_at = nextExpiry;
+    enrollment.access_days = days;
+    enrollment.demo_settings_applied_at = new Date().toISOString();
+    enrollment.demo_settings_applied_by = actorId || enrollment.demo_settings_applied_by || null;
+    enrollment.updated_at = new Date().toISOString();
+    updated += 1;
+  }
+
+  return {
+    updated,
+    skipped,
+    duration_days: days,
+    demo_expiry: nextExpiry,
+  };
 }
 async function getEnrollmentForCourse({ userId, courseId }) {
   const db = await readLiveDb();
@@ -2664,7 +2753,8 @@ function ngTaskLabel(key) {
     // Old labels kept so old routes/data do not break.
     flashcards_reviewed: "Review assigned flashcards / weak-area cards",
     assessment_completed: "Complete assessment / mini-mock",
-    assessment_high_score_bonus: "High assessment score bonus",
+    assessment_high_score_bonus: "Assessment score bonus",
+    assessment_score_bonus: "Assessment score bonus",
     daily_streak_bonus: "Daily streak bonus",
   };
   return labels[key] || key;
@@ -3461,6 +3551,158 @@ function updateLeaderboard(db, { courseId, userId, userName }) {
   return db.leaderboard[key];
 }
 
+function ngAwardPointEventOnce(db, { eventKey, courseId, userId, userName, taskKey, category = "task", label = "", points = 0, metadata = {} }) {
+  const cleanEventKey = String(eventKey || "").trim();
+  const cleanCourseId = String(courseId || "").trim();
+  const cleanUserId = String(userId || "").trim();
+  const cleanTaskKey = String(taskKey || "").trim();
+
+  if (!cleanEventKey || !cleanCourseId || !cleanUserId || !cleanTaskKey) {
+    return { awarded: false, reason: "missing_event_fields", event: null };
+  }
+
+  db.pointEvents = db.pointEvents || {};
+
+  if (db.pointEvents[cleanEventKey]) {
+    return { awarded: false, reason: "already_awarded", event: db.pointEvents[cleanEventKey] };
+  }
+
+  db.pointEvents[cleanEventKey] = {
+    id: cleanEventKey,
+    course_id: cleanCourseId,
+    user_id: cleanUserId,
+    user_name: userName || "Student",
+    task_key: cleanTaskKey,
+    category,
+    label: label || ngTaskLabel(cleanTaskKey),
+    points: Number(points || 0),
+    awarded_at: new Date().toISOString(),
+    metadata: metadata || {},
+  };
+
+  return { awarded: true, reason: "awarded", event: db.pointEvents[cleanEventKey] };
+}
+
+function ngIsAttendanceWindowOpen(session, nowMs = Date.now()) {
+  const startMs = ngSessionDateTimeMs(session);
+  if (!startMs) return false;
+  const durationMinutes = Number(session?.duration_minutes || DEFAULT_ZOOM_DURATION_MINUTES) || DEFAULT_ZOOM_DURATION_MINUTES;
+  const openMs = startMs - 15 * 60 * 1000;
+  const closeMs = startMs + Math.max(30, durationMinutes) * 60 * 1000 + 30 * 60 * 1000;
+  return nowMs >= openMs && nowMs <= closeMs;
+}
+
+function ngAssessmentScoreBonusPoints(percentage) {
+  const score = Number(percentage || 0);
+  if (score >= 90) return 20;
+  if (score >= 80) return 15;
+  if (score >= 70) return 10;
+  if (score >= 60) return 5;
+  if (score >= 50) return 3;
+  return 0;
+}
+
+function ngRecordVideoLibraryOpenForStudent(db, { user, courseId, roadmapDayId = null, source = "video_library_open", metadata = {} }) {
+  const cleanCourseId = String(courseId || "").trim();
+  if (!cleanCourseId) {
+    const error = new Error("course_id is required");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const access = ngCourseFeatureAccess(db, user, {
+    courseId: cleanCourseId,
+    featureKey: "video_library",
+  });
+
+  if (!access.allowed) {
+    return {
+      allowed: false,
+      locked: true,
+      reason: access.reason,
+      leaderboard: null,
+      awarded: false,
+      point_event: null,
+    };
+  }
+
+  // Staff previews should not affect student leaderboard.
+  if (user.role === "admin" || user.role === "instructor") {
+    return {
+      allowed: true,
+      locked: false,
+      reason: "Staff preview; no student points awarded",
+      leaderboard: null,
+      awarded: false,
+      point_event: null,
+    };
+  }
+
+  const day = roadmapDayId
+    ? ngFindRoadmapDay(db, { courseId: cleanCourseId, dayId: roadmapDayId })
+    : ngFindRoadmapDay(db, { courseId: cleanCourseId });
+
+  let awardResult = null;
+
+  if (day) {
+    const eventKey = ngPointEventKey({ courseId: cleanCourseId, userId: user.id, dayId: day.id, taskKey: "video_library_watch" });
+    const alreadyAwarded = Boolean(db.pointEvents?.[eventKey]);
+
+    ngUpsertTaskCompletion(db, {
+      courseId: cleanCourseId,
+      userId: user.id,
+      userName: user.name || user.email || "Student",
+      day,
+      taskKey: "video_library_watch",
+      completed: true,
+      metadata: {
+        source,
+        point_rule: "one_video_library_open_per_roadmap_day",
+        ...(metadata || {}),
+      },
+    });
+
+    awardResult = {
+      awarded: !alreadyAwarded,
+      reason: alreadyAwarded ? "already_awarded_for_roadmap_day" : "awarded_for_roadmap_day",
+      event: db.pointEvents?.[eventKey] || null,
+    };
+  } else {
+    const eventKey = `${cleanCourseId}:${user.id}:${todayKey()}:video_library_open`;
+    awardResult = ngAwardPointEventOnce(db, {
+      eventKey,
+      courseId: cleanCourseId,
+      userId: user.id,
+      userName: user.name || user.email || "Student",
+      taskKey: "video_library_watch",
+      category: "task",
+      label: "Open Video Library",
+      points: NEXTGEN_TASK_POINTS.video_library_watch,
+      metadata: {
+        source,
+        point_rule: "one_video_library_open_per_course_per_day",
+        ...(metadata || {}),
+      },
+    });
+  }
+
+  const leaderboard = updateLeaderboard(db, {
+    courseId: cleanCourseId,
+    userId: user.id,
+    userName: user.name || user.email || "Student",
+  });
+
+  return {
+    allowed: true,
+    locked: false,
+    reason: awardResult.reason,
+    roadmap_day_id: day?.id || null,
+    awarded: awardResult.awarded === true,
+    point_event: awardResult.event || null,
+    leaderboard,
+  };
+}
+
 function isAttemptReleased(attempt) {
   if (!attempt) return false;
   return attempt.released_to_student === true || attempt.review_status === "released";
@@ -3601,12 +3843,39 @@ function applyReleasedAssessmentAttemptToLeaderboard(db, attempt, assessment = n
   db.pointEvents = db.pointEvents || {};
   const baseEventKey = `${attempt.course_id}:${attempt.user_id}:assessment:${attempt.assessment_id}`;
   if (!db.pointEvents[baseEventKey]) {
-    db.pointEvents[baseEventKey] = { id: baseEventKey, course_id: attempt.course_id, user_id: attempt.user_id, user_name: attempt.user_name || "Student", assessment_id: attempt.assessment_id, task_key: "assessment_completed", category: "assessment", label: ngTaskLabel("assessment_completed"), points: NEXTGEN_TASK_POINTS.assessment_completed, awarded_at: new Date().toISOString(), metadata: { percentage: attempt.percentage } };
+    db.pointEvents[baseEventKey] = {
+      id: baseEventKey,
+      course_id: attempt.course_id,
+      user_id: attempt.user_id,
+      user_name: attempt.user_name || "Student",
+      assessment_id: attempt.assessment_id,
+      task_key: "assessment_completed",
+      category: "assessment",
+      label: ngTaskLabel("assessment_completed"),
+      // Keep completion credit stable so weaker students are not punished for attempting.
+      points: NEXTGEN_TASK_POINTS.assessment_completed,
+      awarded_at: new Date().toISOString(),
+      metadata: { percentage: attempt.percentage, point_rule: "assessment_submission_base_credit" },
+    };
   }
-  if (Number(attempt.percentage || 0) >= 80) {
-    const bonusEventKey = `${attempt.course_id}:${attempt.user_id}:assessment_high_score:${attempt.assessment_id}`;
+
+  const scoreBonus = ngAssessmentScoreBonusPoints(attempt.percentage);
+  if (scoreBonus > 0) {
+    const bonusEventKey = `${attempt.course_id}:${attempt.user_id}:assessment_score_bonus:${attempt.assessment_id}`;
     if (!db.pointEvents[bonusEventKey]) {
-      db.pointEvents[bonusEventKey] = { id: bonusEventKey, course_id: attempt.course_id, user_id: attempt.user_id, user_name: attempt.user_name || "Student", assessment_id: attempt.assessment_id, task_key: "assessment_high_score_bonus", category: "assessment", label: ngTaskLabel("assessment_high_score_bonus"), points: NEXTGEN_TASK_POINTS.assessment_high_score_bonus, awarded_at: new Date().toISOString(), metadata: { percentage: attempt.percentage } };
+      db.pointEvents[bonusEventKey] = {
+        id: bonusEventKey,
+        course_id: attempt.course_id,
+        user_id: attempt.user_id,
+        user_name: attempt.user_name || "Student",
+        assessment_id: attempt.assessment_id,
+        task_key: "assessment_high_score_bonus",
+        category: "assessment",
+        label: ngTaskLabel("assessment_high_score_bonus"),
+        points: scoreBonus,
+        awarded_at: new Date().toISOString(),
+        metadata: { percentage: attempt.percentage, point_rule: "tiered_score_bonus" },
+      };
     }
   }
 
@@ -4676,6 +4945,36 @@ app.get("/student/feature-access", async (req, res) => {
   }
 });
 
+app.post("/student/video-library/open", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const courseId = String(req.body.course_id || req.body.courseId || "").trim();
+    const roadmapDayId = String(req.body.roadmap_day_id || req.body.roadmapDayId || req.body.day_id || "").trim() || null;
+
+    const result = ngRecordVideoLibraryOpenForStudent(db, {
+      user,
+      courseId,
+      roadmapDayId,
+      source: String(req.body.source || "video_library_tab_open"),
+      metadata: {
+        route: "/student/video-library/open",
+        lecture_id: req.body.lecture_id || req.body.lectureId || null,
+        lecture_title: req.body.lecture_title || req.body.lectureTitle || null,
+      },
+    });
+
+    if (!result.allowed) {
+      return ngBlockLockedFeature(res, "video_library", result.reason);
+    }
+
+    await writeLiveDb(db);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to track video library open" });
+  }
+});
+
 app.post("/student/external-library/access", async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req);
@@ -4701,6 +5000,22 @@ app.post("/student/external-library/access", async (req, res) => {
       });
     }
 
+    const pointsResult = access.course?.id && user.role === "student"
+      ? ngRecordVideoLibraryOpenForStudent(db, {
+          user,
+          courseId: access.course.id,
+          roadmapDayId: req.body.roadmap_day_id || req.body.roadmapDayId || null,
+          source: "external_library_sso_open",
+          metadata: { route: "/student/external-library/access", access_source: access.source || null },
+        })
+      : null;
+
+    if (pointsResult && !pointsResult.allowed) {
+      return ngBlockLockedFeature(res, "video_library", pointsResult.reason);
+    }
+
+    await writeLiveDb(db);
+
     const token = signExternalLibraryToken({
       user,
       enrollment: access.enrollment,
@@ -4719,6 +5034,7 @@ app.post("/student/external-library/access", async (req, res) => {
       access_days: access.accessDays,
       plan: access.plan ? sanitizePlan(access.plan) : null,
       course: access.course ? sanitizeCourse(access.course) : null,
+      points: pointsResult ? { awarded: pointsResult.awarded, reason: pointsResult.reason, point_event: pointsResult.point_event, leaderboard: pointsResult.leaderboard } : null,
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({
@@ -5143,14 +5459,163 @@ app.patch("/admin/demo/settings", async (req, res) => {
   try {
     const { user } = await requireAdmin(req);
     const db = await readLiveDb();
-    const allowed = ["enabled", "duration_days", "allow_live_classes", "allow_roadmap", "allow_community", "allow_global_community", "allow_study_partner", "allow_assessments", "allow_leaderboard", "allow_recordings", "allow_notes_transcripts", "allow_video_library", "max_live_sessions"];
+    const allowed = ["enabled", "duration_days", "allow_live_classes", "allow_roadmap", "allow_community", "allow_global_community", "allow_study_partner", "allow_assessments", "allow_leaderboard", "allow_flashcards", "allow_recordings", "allow_notes_transcripts", "allow_video_library", "max_live_sessions"];
     const updates = {};
     for (const k of allowed) if (req.body[k] !== undefined) updates[k] = req.body[k];
-    if (updates.duration_days !== undefined) updates.duration_days = Math.max(1, Number(updates.duration_days || 2));
+    if (updates.duration_days !== undefined) updates.duration_days = Math.max(1, Number(updates.duration_days || 7));
     db.demoSettings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}), ...updates, updated_by: user.id, updated_at: new Date().toISOString() };
+
+    // v168: the admin Save Demo Settings button is the source of truth.
+    // Saving demo settings now also applies the selected duration to existing demo users.
+    const applyExisting = req.body.apply_to_existing_demos !== false;
+    const existing_demo_update = applyExisting
+      ? ngApplyDemoSettingsToExistingEnrollments(db, {
+          durationDays: db.demoSettings.duration_days,
+          actorId: user.id,
+          applyToExpired: req.body.apply_to_expired_demos !== false,
+        })
+      : { updated: 0, skipped: 0, duration_days: db.demoSettings.duration_days, demo_expiry: null };
+
     await writeLiveDb(db);
-    res.json({ success: true, demo_settings: db.demoSettings });
+    res.json({ success: true, demo_settings: db.demoSettings, existing_demo_update });
   } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); }
+});
+
+app.get("/admin/points/audit", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    const courseId = String(req.query.course_id || req.query.courseId || "").trim();
+    const userId = String(req.query.user_id || req.query.userId || "").trim();
+    const email = normalizeEmail(req.query.email || "");
+    const emailUser = email ? findUserByEmail(db, email) : null;
+    const finalUserId = userId || emailUser?.id || "";
+
+    let events = Object.values(db.pointEvents || {});
+    let attendance = Object.values(db.attendance || {});
+    let dailyTasks = Object.values(db.dailyTaskProgress || {});
+    let attempts = Object.values(db.assessmentAttempts || {});
+    let leaderboard = Object.values(db.leaderboard || {});
+
+    if (courseId) {
+      events = events.filter((item) => String(item.course_id || "") === courseId);
+      attendance = attendance.filter((item) => String(item.course_id || "") === courseId);
+      dailyTasks = dailyTasks.filter((item) => String(item.course_id || "") === courseId);
+      attempts = attempts.filter((item) => String(item.course_id || "") === courseId);
+      leaderboard = leaderboard.filter((item) => String(item.course_id || "") === courseId);
+    }
+
+    if (finalUserId) {
+      events = events.filter((item) => String(item.user_id || "") === finalUserId);
+      attendance = attendance.filter((item) => String(item.user_id || "") === finalUserId);
+      dailyTasks = dailyTasks.filter((item) => String(item.user_id || "") === finalUserId);
+      attempts = attempts.filter((item) => String(item.user_id || "") === finalUserId);
+      leaderboard = leaderboard.filter((item) => String(item.user_id || "") === finalUserId);
+    }
+
+    const eventIds = new Set();
+    const duplicateIds = [];
+    for (const event of events) {
+      if (eventIds.has(event.id)) duplicateIds.push(event.id);
+      eventIds.add(event.id);
+    }
+
+    const suspiciousAttendance = attendance.filter((item) => {
+      const session = db.liveSessions?.[String(item.session_id || "")] || null;
+      if (!session) return true;
+      const markedAt = item.marked_at ? new Date(item.marked_at).getTime() : Date.now();
+      return !ngIsAttendanceWindowOpen(session, markedAt);
+    });
+
+    const totals = events.reduce((acc, event) => {
+      const category = String(event.category || event.task_key || "task");
+      acc.total_points += Number(event.points || 0);
+      acc.by_category[category] = (acc.by_category[category] || 0) + Number(event.points || 0);
+      return acc;
+    }, { total_points: 0, by_category: {} });
+
+    res.json({
+      success: true,
+      filters: { course_id: courseId || null, user_id: finalUserId || null, email: email || null },
+      counts: {
+        point_events: events.length,
+        attendance: attendance.length,
+        daily_tasks: dailyTasks.length,
+        assessment_attempts: attempts.length,
+        leaderboard_rows: leaderboard.length,
+        duplicate_point_event_ids: duplicateIds.length,
+        suspicious_attendance: suspiciousAttendance.length,
+      },
+      totals,
+      duplicate_point_event_ids: duplicateIds,
+      suspicious_attendance: suspiciousAttendance,
+      leaderboard,
+      point_events: events.sort((a, b) => String(b.awarded_at || "").localeCompare(String(a.awarded_at || ""))),
+      attendance,
+      daily_tasks: dailyTasks,
+      assessment_attempts: attempts,
+    });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to audit points" });
+  }
+});
+
+app.get("/admin/lms-flow/audit", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    const courseId = String(req.query.course_id || req.query.courseId || "").trim();
+    const sessions = Object.values(db.liveSessions || {}).filter((item) => !courseId || String(item.course_id || "") === courseId);
+    const notes = Object.values(db.notes || {}).filter((item) => !courseId || String(item.course_id || "") === courseId);
+    const recordings = Object.values(db.recordings || {}).filter((item) => !courseId || String(item.course_id || "") === courseId);
+    const assessments = Object.values(db.assessments || {}).filter((item) => !courseId || String(item.course_id || "") === courseId);
+    const attempts = Object.values(db.assessmentAttempts || {}).filter((item) => !courseId || String(item.course_id || "") === courseId);
+    const demoEnrollments = Object.values(db.enrollments || {}).filter((item) => item.is_demo === true && (!courseId || String(item.course_id || "") === courseId));
+    const now = Date.now();
+
+    const notesPublished = notes.filter((item) => item.is_published !== false && String(item.status || "published") !== "draft");
+    const notesDraft = notes.filter((item) => item.is_published === false || String(item.status || "") === "draft");
+    const transcriptReady = notes.filter((item) => String(item.transcript_text || item.transcript || item.transcript_url || "").trim());
+
+    res.json({
+      success: true,
+      build: NEXTGEN_BACKEND_BUILD,
+      filters: { course_id: courseId || null },
+      config: {
+        auto_publish_session_content: ngAutoPublishPreparedContentEnabled(),
+        auto_weekly_assessment: ngAutoWeeklyAssessmentEnabled(),
+        demo_settings: { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) },
+      },
+      counts: {
+        live_sessions: sessions.length,
+        sessions_live_now: sessions.filter((s) => ngSessionComputedStatus(s) === "live").length,
+        sessions_completed: sessions.filter((s) => ngSessionComputedStatus(s) === "completed").length,
+        sessions_scheduled: sessions.filter((s) => ngSessionComputedStatus(s) === "scheduled").length,
+        recordings: recordings.length,
+        notes_total: notes.length,
+        notes_published: notesPublished.length,
+        notes_draft: notesDraft.length,
+        transcript_ready: transcriptReady.length,
+        assessments_total: assessments.length,
+        assessments_published: assessments.filter((a) => a.is_published === true).length,
+        assessment_attempts: attempts.length,
+        attempts_released: attempts.filter(isAttemptReleased).length,
+        demo_enrollments: demoEnrollments.length,
+        demo_active_now: demoEnrollments.filter((e) => isDemoEnrollmentActive(e, { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) })).length,
+        demo_expired_now: demoEnrollments.filter((e) => !isDemoEnrollmentActive(e, { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) })).length,
+        attendance_rows: Object.values(db.attendance || {}).filter((a) => !courseId || String(a.course_id || "") === courseId).length,
+        point_events: Object.values(db.pointEvents || {}).filter((a) => !courseId || String(a.course_id || "") === courseId).length,
+      },
+      latest: {
+        latest_session: sessions.sort((a, b) => String(b.scheduled_date || "").localeCompare(String(a.scheduled_date || "")))[0] || null,
+        latest_recording: recordings.sort((a, b) => String(b.start_time || b.created_at || "").localeCompare(String(a.start_time || a.created_at || "")))[0] || null,
+        latest_note: notes.sort((a, b) => String(b.updated_at || b.created_at || "").localeCompare(String(a.updated_at || a.created_at || "")))[0] || null,
+        latest_assessment: assessments.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")))[0] || null,
+      },
+    });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to audit LMS flow" });
+  }
 });
 
 app.get("/features", async (req, res) => { const db = await readLiveDb(); res.json({ success: true, features: Object.values(db.featureCatalog || {}) }); });
@@ -6556,7 +7021,53 @@ app.post(["/live/notes/:sessionId/unpublish", "/admin/notes/:sessionId/unpublish
 app.get(["/live/notes/:sessionId", "/admin/notes/:sessionId"], getNotesHandler);
 
 
-app.post("/live/attendance/mark", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); const db = await readLiveDb(); const { session_id, course_id, source = "classroom_opened" } = req.body; if (!session_id || !course_id) return res.status(400).json({ success: false, error: "session_id and course_id are required" }); const e = getBackendEnrollment(db, { userId: user.id, courseId: course_id }); if (!e && user.role !== "admin" && user.role !== "instructor") return res.status(403).json({ success: false, error: "No course access found" }); const key = `${user.id}:${session_id}`; db.attendance[key] = { id: key, user_id: user.id, user_name: user.name || user.email || "Student", session_id, course_id, date: todayKey(), source, marked_at: new Date().toISOString() }; const leaderboard = updateLeaderboard(db, { courseId: course_id, userId: user.id, userName: user.name || user.email || "Student" }); await writeLiveDb(db); res.json({ success: true, attendance: db.attendance[key], leaderboard }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.post("/live/attendance/mark", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const { session_id, course_id, source = "classroom_opened" } = req.body;
+    if (!session_id || !course_id) return res.status(400).json({ success: false, error: "session_id and course_id are required" });
+
+    const session = db.liveSessions?.[String(session_id)] || null;
+    if (!session) return res.status(404).json({ success: false, error: "Live session not found" });
+    if (String(session.course_id || "") !== String(course_id)) return res.status(400).json({ success: false, error: "Session does not belong to this course" });
+
+    const e = getBackendEnrollment(db, { userId: user.id, courseId: course_id });
+    if (!e && user.role !== "admin" && user.role !== "instructor") return res.status(403).json({ success: false, error: "No active course access found" });
+
+    if (user.role === "student" && !ngIsAttendanceWindowOpen(session)) {
+      return res.status(403).json({
+        success: false,
+        locked: true,
+        error: "Attendance can only be marked during the live-session window.",
+        session_status: ngSessionComputedStatus(session),
+        scheduled_date: session.scheduled_date || null,
+        scheduled_time: session.scheduled_time || null,
+        scheduled_timezone: session.scheduled_timezone || DEFAULT_TIMEZONE,
+      });
+    }
+
+    const key = `${user.id}:${session_id}`;
+    const existed = Boolean(db.attendance?.[key]);
+    db.attendance[key] = {
+      ...(db.attendance?.[key] || {}),
+      id: key,
+      user_id: user.id,
+      user_name: user.name || user.email || "Student",
+      session_id,
+      course_id,
+      date: todayKey(),
+      source,
+      marked_at: db.attendance?.[key]?.marked_at || new Date().toISOString(),
+      last_opened_at: new Date().toISOString(),
+    };
+    const leaderboard = updateLeaderboard(db, { courseId: course_id, userId: user.id, userName: user.name || user.email || "Student" });
+    await writeLiveDb(db);
+    res.json({ success: true, attendance: db.attendance[key], attendance_already_marked: existed, points_awarded_now: !existed, leaderboard });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message });
+  }
+});
 app.get("/live/leaderboard", async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req);
@@ -6727,6 +7238,43 @@ app.post("/student/daily-task/:dayId/task", async (req, res) => {
     if (!enrollment && user.role !== "admin" && user.role !== "instructor") return res.status(403).json({ success: false, error: "No course access found" });
     const day = ngFindRoadmapDay(db, { courseId, dayId: req.params.dayId });
     if (!day) return res.status(404).json({ success: false, error: "Roadmap day not found" });
+
+    const verifiedOnlyTasks = new Set([
+      "live_attendance",
+      "video_library_watch",
+      "assessment_completed",
+      "weekly_assessment_completed",
+      "grand_system_assessment_completed",
+      "assessment_high_score_bonus",
+      "flashcards_reviewed",
+      "first_aid_flashcards_reviewed",
+      "session_flashcards_reviewed",
+      "weak_concepts_logged",
+      "community_confusion_post",
+    ]);
+
+    if (user.role === "student" && verifiedOnlyTasks.has(taskKey)) {
+      return res.status(403).json({
+        success: false,
+        error: `${ngTaskLabel(taskKey)} is verified automatically after the real activity is completed.`,
+        automated: true,
+        task_key: taskKey,
+      });
+    }
+
+    if (user.role === "student" && taskKey === "daily_task_submitted" && req.body.completed !== false) {
+      const currentProgress = ngEnsureDailyTaskProgress(db, { courseId, userId: user.id, userName: user.name || user.email || "Student", day });
+      const taskItems = ngGetTaskItems(day).filter((item) => item.required !== false && item.key !== "daily_task_submitted");
+      const missing = taskItems.filter((item) => !currentProgress.tasks?.[item.key]?.completed).map((item) => item.key);
+      if (missing.length) {
+        return res.status(400).json({
+          success: false,
+          error: "Complete the required verified tasks before submitting the full daily task.",
+          missing_tasks: missing,
+        });
+      }
+    }
+
     const progress = ngUpsertTaskCompletion(db, { courseId, userId: user.id, userName: user.name || user.email || "Student", day, taskKey, completed: req.body.completed !== false, metadata: req.body.metadata || {} });
     const leaderboard = updateLeaderboard(db, { courseId, userId: user.id, userName: user.name || user.email || "Student" });
     await writeLiveDb(db);
@@ -7685,7 +8233,7 @@ function ngStudentEnrollmentStatusForCourse(db, user, courseId) {
 }
 
 function ngStudentHasCourseAccessStatus(status) {
-  return ["paid", "demo_active", "demo_expired", "paid_expired"].includes(String(status || ""));
+  return ["paid", "demo_active"].includes(String(status || ""));
 }
 
 function ngSessionDateTimeMs(session) {
