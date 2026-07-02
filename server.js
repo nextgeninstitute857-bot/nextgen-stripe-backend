@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v171-enrollment-status-save-fix";
+const NEXTGEN_BACKEND_BUILD = "v173-recording-single-publish-verified";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -1442,6 +1442,8 @@ function sortNewestFirst(a, b) {
 
 function sanitizePublicRecording(recording) {
   return {
+    id: recording.recording_key || recording.id || null,
+    recording_key: recording.recording_key || recording.id || null,
     meeting_id: recording.meeting_id || null,
     uuid: recording.uuid || null,
     topic: recording.topic || null,
@@ -2497,6 +2499,50 @@ function findVideoFile(recordingFiles = []) {
   );
 }
 
+function normalizeRecordingKeyPart(value) {
+  return String(value || "")
+    .trim()
+    .replace(/[^A-Za-z0-9._:-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 160);
+}
+
+function buildRecordingStorageKey(source = {}) {
+  const explicit =
+    source.recording_key ||
+    source.recordingKey ||
+    source.storage_key ||
+    source.zoom_recording_key ||
+    "";
+
+  if (explicit) return normalizeRecordingKeyPart(explicit);
+
+  const meetingId = source.meeting_id || source.meetingId || source.meetingID || "";
+  const uuid = source.uuid || source.meeting_uuid || source.recording_uuid || "";
+  const startTime = source.start_time || source.startTime || source.recording_start || "";
+  const fileId = source.file_id || source.recording_file_id || source.fileId || source.id || "";
+  const recordingType = source.recording_type || source.recordingType || source.file_type || source.fileType || "";
+  const url = source.recording_url || source.play_url || source.download_url || source.share_url || "";
+  const urlTail = String(url || "")
+    .split(/[?#]/)[0]
+    .split("/")
+    .filter(Boolean)
+    .slice(-2)
+    .join("_");
+
+  const parts = [meetingId, uuid, startTime, fileId, recordingType, urlTail]
+    .map(normalizeRecordingKeyPart)
+    .filter(Boolean);
+
+  if (!parts.length) return "";
+  return `zoom-recording:${parts.join(":")}`;
+}
+
+function getLegacyRecordingMeetingKey(source = {}) {
+  const meetingId = source.meeting_id || source.meetingId || source.meetingID || "";
+  return meetingId ? String(meetingId) : "";
+}
+
 async function downloadZoomTextFile(file, accessToken) {
   const baseUrl = file?.download_url || file?.play_url;
   if (!baseUrl) return "";
@@ -2514,9 +2560,15 @@ async function downloadZoomTextFile(file, accessToken) {
 
 function findSessionByMeetingIdInNotesOrRecordings(db, meetingId) {
   const key = String(meetingId || "");
-  const rec = db.recordings[key] || null;
+  const direct = db.recordings[key] || null;
 
-  if (rec?.session_id) return rec.session_id;
+  if (direct?.session_id) return direct.session_id;
+
+  const recording = Object.values(db.recordings || {}).find((rec) => {
+    return String(rec?.meeting_id || "") === key && rec?.session_id;
+  });
+
+  if (recording?.session_id) return recording.session_id;
 
   const session = Object.values(db.liveSessions || {}).find((s) => {
     return (
@@ -2565,10 +2617,23 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
     }
   }
 
-  const previous = db.recordings[meetingId] || {};
+  const recordingKey = buildRecordingStorageKey({
+    meeting_id: meetingId,
+    uuid: object.uuid,
+    start_time: object.start_time,
+    file_id: videoFile?.id,
+    recording_type: videoFile?.recording_type,
+    file_type: videoFile?.file_type,
+    recording_url: videoFile?.play_url || videoFile?.download_url || object.share_url,
+  });
+
+  const legacyKey = getLegacyRecordingMeetingKey({ meeting_id: meetingId });
+  const previous = db.recordings[recordingKey] || db.recordings[legacyKey] || {};
 
   const recordingPayload = {
     ...previous,
+    id: recordingKey,
+    recording_key: recordingKey,
     meeting_id: meetingId,
     uuid: object.uuid || previous.uuid || null,
     topic: object.topic || previous.topic || null,
@@ -2611,7 +2676,16 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
     received_at: new Date().toISOString(),
   };
 
-  db.recordings[meetingId] = recordingPayload;
+  db.recordings[recordingKey] = recordingPayload;
+
+  if (legacyKey && legacyKey !== recordingKey && db.recordings[legacyKey]?.published) {
+    db.recordings[legacyKey] = {
+      ...(db.recordings[legacyKey] || {}),
+      published: false,
+      migrated_to_recording_key: recordingKey,
+      migrated_at: new Date().toISOString(),
+    };
+  }
 
   const sessionId =
     previous.session_id ||
@@ -2662,8 +2736,8 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
         recordingPayload,
       });
 
-      db.recordings[meetingId] = {
-        ...(db.recordings[meetingId] || recordingPayload),
+      db.recordings[recordingKey] = {
+        ...(db.recordings[recordingKey] || recordingPayload),
         learning_content_processed: learningContentResult?.success === true,
         learning_content_processing_result: learningContentResult,
         learning_content_processed_at: new Date().toISOString(),
@@ -2674,8 +2748,8 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
         error: error.message || "Learning content processing failed",
       };
 
-      db.recordings[meetingId] = {
-        ...(db.recordings[meetingId] || recordingPayload),
+      db.recordings[recordingKey] = {
+        ...(db.recordings[recordingKey] || recordingPayload),
         learning_content_processed: false,
         learning_content_processing_result: learningContentResult,
         learning_content_processed_at: new Date().toISOString(),
@@ -2684,7 +2758,7 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
   }
 
   return {
-    recordingPayload: db.recordings[meetingId] || recordingPayload,
+    recordingPayload: db.recordings[recordingKey] || recordingPayload,
     sessionId,
     transcriptFile,
     transcriptText,
@@ -6809,22 +6883,40 @@ app.get("/zoom/recordings", async (req, res) => {
       const files = meeting.recording_files || [];
       const videoFile = findVideoFile(files);
       const transcriptFile = findTranscriptFile(files);
+      const meetingId = String(meeting.id || "");
+      const recordingUrl = videoFile?.play_url || meeting.share_url || videoFile?.download_url || null;
+      const recordingKey = buildRecordingStorageKey({
+        meeting_id: meetingId,
+        uuid: meeting.uuid,
+        start_time: meeting.start_time,
+        file_id: videoFile?.id,
+        recording_type: videoFile?.recording_type,
+        file_type: videoFile?.file_type,
+        recording_url: recordingUrl,
+      });
+      const saved = db.recordings[recordingKey] || {};
+      const legacy = db.recordings[meetingId] || {};
 
       return sanitizePublicRecording({
-        ...(db.recordings[String(meeting.id)] || {}),
-        meeting_id: String(meeting.id),
+        session_id: saved.session_id || legacy.session_id || null,
+        course_id: saved.course_id || legacy.course_id || null,
+        id: recordingKey,
+        recording_key: recordingKey,
+        meeting_id: meetingId,
         uuid: meeting.uuid,
-        topic: meeting.topic,
+        topic: saved.topic || meeting.topic,
         start_time: meeting.start_time,
         duration: meeting.duration,
         share_url: meeting.share_url,
-        recording_url: videoFile?.play_url || meeting.share_url || videoFile?.download_url || null,
+        recording_url: recordingUrl,
         download_url: videoFile?.download_url || null,
-        transcript_url: transcriptFile?.play_url || transcriptFile?.download_url || db.recordings[String(meeting.id)]?.transcript_url || null,
-        transcript_download_url: transcriptFile?.download_url || db.recordings[String(meeting.id)]?.transcript_download_url || null,
+        transcript_url: saved.transcript_url || transcriptFile?.play_url || transcriptFile?.download_url || null,
+        transcript_download_url: saved.transcript_download_url || transcriptFile?.download_url || null,
+        transcript_imported: saved.transcript_imported,
         file_type: videoFile?.file_type || null,
         recording_type: videoFile?.recording_type || null,
         status: videoFile?.status || "completed",
+        published: Boolean(saved.published),
       });
     });
 
@@ -6876,8 +6968,103 @@ app.post("/zoom/recordings/:meetingId/refresh-transcript", async (req, res) => {
     });
   }
 });
-app.post("/live/recordings/publish", async (req, res) => { try { const { user } = await requireLmsPermission(req, "lms.recordings.publish"); const db = await readLiveDb(); const key = String(req.body.meeting_id); if (!key) return res.status(400).json({ success: false, error: "meeting_id is required" }); db.recordings[key] = { ...(db.recordings[key] || {}), meeting_id: key, session_id: req.body.session_id || db.recordings[key]?.session_id || null, course_id: req.body.course_id || db.recordings[key]?.course_id || null, topic: req.body.topic || db.recordings[key]?.topic || null, recording_url: req.body.recording_url || db.recordings[key]?.recording_url || null, share_url: req.body.share_url || db.recordings[key]?.share_url || null, published: req.body.published !== false, published_at: new Date().toISOString(), published_by: user.id }; await writeLiveDb(db); res.json({ success: true, recording: db.recordings[key] }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
-app.post("/live/recordings/unpublish", async (req, res) => { try { await requireLmsPermission(req, "lms.recordings.unpublish"); const db = await readLiveDb(); const key = String(req.body.meeting_id); db.recordings[key] = { ...(db.recordings[key] || {}), meeting_id: key, published: false, unpublished_at: new Date().toISOString() }; await writeLiveDb(db); res.json({ success: true, recording: db.recordings[key] }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.post("/live/recordings/publish", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.recordings.publish");
+    const db = await readLiveDb();
+
+    const meetingId = String(req.body.meeting_id || "").trim();
+    const key = buildRecordingStorageKey(req.body);
+
+    if (!key) {
+      return res.status(400).json({
+        success: false,
+        error: "recording_key, uuid/start_time, or meeting_id is required",
+      });
+    }
+
+    const legacyKey = getLegacyRecordingMeetingKey(req.body);
+    const previous = db.recordings[key] || {};
+    const legacy = legacyKey ? db.recordings[legacyKey] || {} : {};
+
+    db.recordings[key] = {
+      ...previous,
+      id: key,
+      recording_key: key,
+      meeting_id: meetingId || previous.meeting_id || legacy.meeting_id || null,
+      uuid: req.body.uuid || previous.uuid || legacy.uuid || null,
+      session_id: req.body.session_id || previous.session_id || legacy.session_id || null,
+      course_id: req.body.course_id || previous.course_id || legacy.course_id || null,
+      topic: req.body.topic || previous.topic || legacy.topic || null,
+      start_time: req.body.start_time || previous.start_time || legacy.start_time || null,
+      duration: req.body.duration || previous.duration || legacy.duration || null,
+      recording_url: req.body.recording_url || previous.recording_url || legacy.recording_url || null,
+      share_url: req.body.share_url || previous.share_url || legacy.share_url || null,
+      download_url: req.body.download_url || previous.download_url || legacy.download_url || null,
+      file_type: req.body.file_type || previous.file_type || legacy.file_type || null,
+      recording_type: req.body.recording_type || previous.recording_type || legacy.recording_type || null,
+      status: req.body.status || previous.status || legacy.status || null,
+      published: req.body.published !== false,
+      published_at: new Date().toISOString(),
+      published_by: user.id,
+    };
+
+    if (legacyKey && legacyKey !== key && db.recordings[legacyKey]?.published) {
+      db.recordings[legacyKey] = {
+        ...(db.recordings[legacyKey] || {}),
+        published: false,
+        migrated_to_recording_key: key,
+        migrated_at: new Date().toISOString(),
+      };
+    }
+
+    await writeLiveDb(db);
+    res.json({ success: true, recording: sanitizePublicRecording(db.recordings[key]) });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message });
+  }
+});
+
+app.post("/live/recordings/unpublish", async (req, res) => {
+  try {
+    await requireLmsPermission(req, "lms.recordings.unpublish");
+    const db = await readLiveDb();
+    const key = buildRecordingStorageKey(req.body);
+
+    if (!key) {
+      return res.status(400).json({
+        success: false,
+        error: "recording_key, uuid/start_time, or meeting_id is required",
+      });
+    }
+
+    const meetingId = String(req.body.meeting_id || "").trim();
+    const legacyKey = getLegacyRecordingMeetingKey(req.body);
+
+    db.recordings[key] = {
+      ...(db.recordings[key] || {}),
+      id: key,
+      recording_key: key,
+      meeting_id: meetingId || db.recordings[key]?.meeting_id || null,
+      published: false,
+      unpublished_at: new Date().toISOString(),
+    };
+
+    if (legacyKey && legacyKey !== key && db.recordings[legacyKey]?.published) {
+      db.recordings[legacyKey] = {
+        ...(db.recordings[legacyKey] || {}),
+        published: false,
+        migrated_to_recording_key: key,
+        migrated_at: new Date().toISOString(),
+      };
+    }
+
+    await writeLiveDb(db);
+    res.json({ success: true, recording: sanitizePublicRecording(db.recordings[key]) });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message });
+  }
+});
 app.get("/live/recordings", async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req);
