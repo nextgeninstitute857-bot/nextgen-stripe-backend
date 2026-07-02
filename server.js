@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v158-lms-light-bootstrap-live-center";
+const NEXTGEN_BACKEND_BUILD = "v160-roadmap-academic-dependency-sync";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -6929,152 +6929,67 @@ app.post("/admin/roadmap/generate", async (req, res) => {
 });
 app.post("/admin/roadmap/sync-live-sessions", async (req, res) => {
   try {
-    await requireLmsPermission(req, "lms.roadmap.manage");
-
-    const courseId = String(req.body.course_id || "").trim();
+    const { user } = await requireLmsPermission(req, "lms.roadmap.manage");
+    const db = await readLiveDb();
+    const courseId = String(req.body.course_id || req.body.courseId || req.query.course_id || "").trim();
 
     if (!courseId) {
-      return res.status(400).json({
-        success: false,
-        error: "course_id is required",
-      });
-    }
-
-    const db = await readLiveDb();
-
-    const sessions = Object.values(db.liveSessions || {})
-      .filter((session) => String(session.course_id) === courseId)
-      .sort((a, b) => {
-        const ad = `${a.scheduled_date || ""} ${a.scheduled_time || ""}`;
-        const bd = `${b.scheduled_date || ""} ${b.scheduled_time || ""}`;
-        return ad.localeCompare(bd);
-      });
-
-    if (!sessions.length) {
-      return res.status(404).json({
-        success: false,
-        error: "No live sessions found for this course",
-      });
+      return res.status(400).json({ success: false, error: "course_id is required" });
     }
 
     let roadmapKey = courseId;
-    let roadmap = db.roadmaps?.[courseId];
+    let roadmap = db.roadmaps?.[courseId] || null;
 
     if (!roadmap) {
       const found = Object.entries(db.roadmaps || {}).find(([, value]) => {
-        return (
-          String(value.course_id || "") === courseId ||
-          String(value.courseId || "") === courseId
-        );
+        return String(value?.course_id || value?.courseId || "") === courseId;
       });
-
       if (found) {
         roadmapKey = found[0];
         roadmap = found[1];
       }
     }
 
-    if (!roadmap) {
-      return res.status(404).json({
-        success: false,
-        error: "Roadmap not found for this course",
-      });
+    if (!roadmap || !Array.isArray(roadmap.days) || !roadmap.days.length) {
+      return res.status(404).json({ success: false, error: "Roadmap not found or roadmap has no days" });
     }
 
-    const days = Array.isArray(roadmap.days)
-      ? roadmap.days
-      : Array.isArray(roadmap.items)
-        ? roadmap.items
-        : Array.isArray(roadmap.roadmap)
-          ? roadmap.roadmap
-          : [];
+    const skipSundays = roadmap.skip_sundays !== false && roadmap.settings?.skip_sundays !== false;
+    const startDate = roadmap.start_date || roadmap.settings?.start_date || roadmap.days[0]?.date || todayKey();
+    ngRecalculateRoadmapSchedule(db, roadmap, { startDate, skipSundays });
 
-    if (!days.length) {
-      return res.status(404).json({
-        success: false,
-        error: "Roadmap has no days to sync",
-      });
+    const dependencySync = { days_checked: 0, flashcards: 0, flashcard_progress: 0, assessments: 0, assessment_attempts: 0, notes: 0, roadmap_progress: 0, daily_task_progress: 0, point_events: 0, weak_concepts: 0, leaderboards_rebuilt: 0 };
+    for (const day of roadmap.days || []) {
+      const fromDayId = String(day.pushed_from_day_id || day.original_day_id || "").trim();
+      if (!fromDayId || ngRoadmapDayIsNoClass(day)) continue;
+      const partial = ngRelinkRoadmapDayDependencies(db, { courseId, fromDayId, toDay: day, actorId: user.id });
+      dependencySync.days_checked += 1;
+      for (const key of Object.keys(partial)) dependencySync[key] = Number(dependencySync[key] || 0) + Number(partial[key] || 0);
     }
 
-    const sessionByDate = new Map();
-    const sessionByDayNumber = new Map();
+    const sync = ngSyncLinkedLiveSessionsForRoadmap(db, roadmap, { actorId: user.id });
 
-    sessions.forEach((session, index) => {
-      if (session.scheduled_date) {
-        sessionByDate.set(String(session.scheduled_date).slice(0, 10), session);
-      }
-
-      const topic = String(session.topic || "");
-      const dayMatch = topic.match(/day\s*(\d+)/i);
-
-      if (dayMatch?.[1]) {
-        sessionByDayNumber.set(Number(dayMatch[1]), session);
-      }
-
-      sessionByDayNumber.set(index + 1, session);
-    });
-
-    let syncedCount = 0;
-
-    const syncedDays = days.map((day, index) => {
-      const dayNumber = Number(day.day_number || day.order || index + 1);
-      const dateKey = day.date ? String(day.date).slice(0, 10) : "";
-
-      const matchedSession =
-        (dateKey && sessionByDate.get(dateKey)) ||
-        sessionByDayNumber.get(dayNumber) ||
-        sessions[index];
-
-      if (!matchedSession?.id) {
-        return day;
-      }
-
-      syncedCount += 1;
-
-      db.liveSessions[matchedSession.id] = {
-        ...db.liveSessions[matchedSession.id],
-        roadmap_day_id: day.id || null,
-        updated_at: new Date().toISOString(),
-      };
-
-      return {
-        ...day,
-        live_session_id: matchedSession.id,
-        session_id: matchedSession.id,
-        scheduled_date: matchedSession.scheduled_date || day.scheduled_date || day.date || "",
-        scheduled_time: matchedSession.scheduled_time || day.scheduled_time || "",
-        status: day.status || "scheduled",
-      };
-    });
-
-    if (Array.isArray(roadmap.days)) {
-      roadmap.days = syncedDays;
-    } else if (Array.isArray(roadmap.items)) {
-      roadmap.items = syncedDays;
-    } else if (Array.isArray(roadmap.roadmap)) {
-      roadmap.roadmap = syncedDays;
-    } else {
-      roadmap.days = syncedDays;
-    }
-
-    roadmap.updated_at = new Date().toISOString();
     db.roadmaps[roadmapKey] = roadmap;
-
     await writeLiveDb(db);
+
+    const sessions = Object.values(db.liveSessions || {})
+      .filter((session) => String(session.course_id || "") === courseId)
+      .map(sanitizeLiveSession)
+      .sort((a, b) => String(a.scheduled_date || "").localeCompare(String(b.scheduled_date || "")) || String(a.scheduled_time || "").localeCompare(String(b.scheduled_time || "")));
 
     res.json({
       success: true,
       course_id: courseId,
-      synced_count: syncedCount,
-      total_days: syncedDays.length,
-      total_sessions: sessions.length,
+      roadmap_key: roadmapKey,
+      sync,
+      dependency_sync: dependencySync,
       roadmap,
+      sessions_count: sessions.length,
+      sessions,
+      message: "Roadmap and live sessions are now synced. Holiday/cancelled days have no active classroom; scheduled roadmap days have one live session.",
     });
   } catch (error) {
-    res.status(error.statusCode || 500).json({
-      success: false,
-      error: error.message || "Failed to sync roadmap with live sessions",
-    });
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to sync roadmap with live sessions" });
   }
 });
 app.post("/roadmap/progress/mark", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); const { course_id, day_id, completed = true } = req.body; const db = await readLiveDb(); const key = `${course_id}:${user.id}:${day_id}`; db.roadmapProgress[key] = { id: key, course_id, user_id: user.id, day_id, completed: Boolean(completed), completed_at: completed ? new Date().toISOString() : null, updated_at: new Date().toISOString() }; const leaderboard = updateLeaderboard(db, { courseId: course_id, userId: user.id, userName: user.name || user.email || "Student" }); await writeLiveDb(db); res.json({ success: true, progress: db.roadmapProgress[key], summary: buildProgressSummary({ db, courseId: course_id, userId: user.id }), leaderboard }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
@@ -38503,16 +38418,446 @@ function ngBuildMarathonDayFromMasterRow({ courseId, courseName, row, dayNumber,
   };
 }
 
-function ngSyncLinkedLiveSessionsForRoadmap(db, roadmap) {
-  const days = Array.isArray(roadmap?.days) ? roadmap.days : [];
-  for (const day of days) {
-    if (!day.live_session_id || !db.liveSessions?.[day.live_session_id]) continue;
-    const session = db.liveSessions[day.live_session_id];
-    session.scheduled_date = day.date || session.scheduled_date;
-    session.roadmap_day_id = day.id;
-    session.description = day.description || session.description;
-    session.updated_at = new Date().toISOString();
+function ngRoadmapDayIsNoClass(day = {}) {
+  const status = String(day.status || day.roadmap_status || "").trim().toLowerCase();
+  return status === "holiday" || status === "cancelled" || day.is_schedule_placeholder === true;
+}
+
+function ngRoadmapCourseId(roadmap = {}) {
+  return String(roadmap.course_id || roadmap.courseId || "").trim();
+}
+
+function ngRoadmapClassTime(roadmap = {}, day = {}) {
+  return String(
+    day.class_time ||
+    day.scheduled_time ||
+    roadmap.class_time ||
+    roadmap.settings?.class_time ||
+    "13:00"
+  ).trim() || "13:00";
+}
+
+function ngRoadmapTimezone(roadmap = {}, day = {}) {
+  return String(
+    day.scheduled_timezone ||
+    roadmap.scheduled_timezone ||
+    roadmap.timezone ||
+    roadmap.settings?.timezone ||
+    DEFAULT_TIMEZONE
+  ).trim() || DEFAULT_TIMEZONE;
+}
+
+function ngBuildLiveSessionTitleFromRoadmap(db, roadmap = {}, day = {}) {
+  const courseId = ngRoadmapCourseId(roadmap);
+  const courseName =
+    db.courses?.[courseId]?.name ||
+    roadmap.course_name ||
+    roadmap.name ||
+    "NextGen Live Course";
+
+  const dayTitle = String(
+    day.title ||
+    day.topic ||
+    day.first_aid_topics ||
+    day.system ||
+    `Day ${day.day_number || day.order || ""}`
+  ).trim();
+
+  if (!dayTitle) return `${courseName} — Live Class`;
+  if (dayTitle.toLowerCase().startsWith(String(courseName).toLowerCase())) return dayTitle;
+  return `${courseName} — ${dayTitle}`;
+}
+
+function ngCanMoveOrReuseLiveSession(session = {}) {
+  const status = String(session.status || "scheduled").trim().toLowerCase();
+  if (status === "completed") return false;
+  if (session.recording_url || session.recording_id || session.transcript_url) return false;
+  return true;
+}
+
+function ngGetSessionsByRoadmapDayId(db = {}, courseId = "") {
+  const map = new Map();
+  for (const session of Object.values(db.liveSessions || {})) {
+    if (!session?.id) continue;
+    if (courseId && String(session.course_id || "") !== String(courseId)) continue;
+    const dayId = String(session.roadmap_day_id || "").trim();
+    if (!dayId) continue;
+    if (!map.has(dayId)) map.set(dayId, []);
+    map.get(dayId).push(session);
   }
+  return map;
+}
+
+function ngPickRoadmapSessionCandidate(db, roadmap, day, usedSessionIds = new Set(), byRoadmapDayId = new Map()) {
+  const courseId = ngRoadmapCourseId(roadmap);
+  const candidateIds = [
+    day.live_session_id,
+    day.session_id,
+    day.pushed_live_session_id,
+    day.pushed_from_live_session_id,
+    day.original_day_snapshot?.live_session_id,
+    day.original_day_snapshot?.session_id,
+  ].map((value) => String(value || "").trim()).filter(Boolean);
+
+  const pushedFromDayId = String(day.pushed_from_day_id || day.original_day_id || "").trim();
+  const candidateSessions = [];
+
+  for (const id of candidateIds) {
+    if (db.liveSessions?.[id]) candidateSessions.push(db.liveSessions[id]);
+  }
+
+  for (const linkedDayId of [day.id, pushedFromDayId].map((value) => String(value || "").trim()).filter(Boolean)) {
+    for (const session of byRoadmapDayId.get(linkedDayId) || []) candidateSessions.push(session);
+  }
+
+  const seen = new Set();
+  for (const session of candidateSessions) {
+    if (!session?.id) continue;
+    if (seen.has(session.id)) continue;
+    seen.add(session.id);
+    if (usedSessionIds.has(session.id)) continue;
+    if (courseId && String(session.course_id || "") !== courseId) continue;
+    if (!ngCanMoveOrReuseLiveSession(session)) continue;
+    return session;
+  }
+
+  return null;
+}
+
+function ngSyncLinkedLiveSessionsForRoadmap(db, roadmap, options = {}) {
+  if (!roadmap || !Array.isArray(roadmap.days)) {
+    return { synced: 0, created: 0, cancelled: 0, skipped: 0 };
+  }
+
+  db.liveSessions = db.liveSessions || {};
+
+  const courseId = ngRoadmapCourseId(roadmap);
+  const course = courseId ? db.courses?.[courseId] || null : null;
+  const byRoadmapDayId = ngGetSessionsByRoadmapDayId(db, courseId);
+  const usedSessionIds = new Set();
+  const activeDayIds = new Set();
+  const now = new Date().toISOString();
+  const counts = { synced: 0, created: 0, cancelled: 0, skipped: 0 };
+
+  // First pass: every scheduled roadmap day must have exactly one live session.
+  for (const day of roadmap.days) {
+    if (!day?.id) {
+      counts.skipped += 1;
+      continue;
+    }
+
+    if (ngRoadmapDayIsNoClass(day)) {
+      day.live_session_id = null;
+      day.session_id = null;
+      continue;
+    }
+
+    activeDayIds.add(String(day.id));
+
+    let session = ngPickRoadmapSessionCandidate(db, roadmap, day, usedSessionIds, byRoadmapDayId);
+
+    if (!session) {
+      const sessionId = uuid();
+      session = {
+        id: sessionId,
+        course_id: courseId,
+        created_by: options.actorId || options.userId || day.created_by || roadmap.created_by || null,
+        created_at: now,
+      };
+      db.liveSessions[sessionId] = session;
+      counts.created += 1;
+    }
+
+    const title = ngBuildLiveSessionTitleFromRoadmap(db, roadmap, day);
+    const scheduledTime = ngRoadmapClassTime(roadmap, day);
+    const timezone = ngRoadmapTimezone(roadmap, day);
+
+    session.course_id = courseId;
+    session.topic = title;
+    session.title = title;
+    session.description = day.description || day.homework || session.description || "";
+    session.scheduled_date = day.date || session.scheduled_date || null;
+    session.scheduled_time = scheduledTime;
+    session.scheduled_timezone = timezone;
+    session.duration_minutes = Number(session.duration_minutes || DEFAULT_ZOOM_DURATION_MINUTES) || DEFAULT_ZOOM_DURATION_MINUTES;
+    session.instructor_id = session.instructor_id || null;
+    session.instructor_name = session.instructor_name || course?.instructor_name || "Dr. Ahmad";
+    session.status = String(session.status || "scheduled").toLowerCase() === "completed" ? session.status : "scheduled";
+    session.roadmap_day_id = day.id;
+    session.source = session.source || "roadmap_sync";
+    session.updated_by = options.actorId || options.userId || session.updated_by || null;
+    session.updated_at = now;
+
+    day.live_session_id = session.id;
+    day.session_id = session.id;
+    day.scheduled_date = day.date || day.scheduled_date || null;
+    day.scheduled_time = scheduledTime;
+    day.class_time = scheduledTime;
+    day.updated_at = now;
+
+    usedSessionIds.add(session.id);
+    counts.synced += 1;
+  }
+
+  // Second pass: holiday/cancelled placeholder days must not keep an active classroom.
+  for (const day of roadmap.days) {
+    if (!day?.id || !ngRoadmapDayIsNoClass(day)) continue;
+
+    const candidateIds = [day.live_session_id, day.session_id]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+
+    for (const linkedSession of byRoadmapDayId.get(String(day.id)) || []) {
+      if (linkedSession?.id) candidateIds.push(linkedSession.id);
+    }
+
+    for (const sessionId of Array.from(new Set(candidateIds))) {
+      const session = db.liveSessions?.[sessionId];
+      if (!session?.id) continue;
+      if (usedSessionIds.has(session.id)) continue;
+      if (String(session.course_id || "") !== courseId) continue;
+      if (!ngCanMoveOrReuseLiveSession(session)) continue;
+
+      session.status = "cancelled";
+      session.cancelled_reason = day.status === "holiday" ? "roadmap_holiday" : "roadmap_cancelled";
+      session.roadmap_day_id = day.id;
+      session.scheduled_date = day.date || session.scheduled_date || null;
+      session.scheduled_time = ngRoadmapClassTime(roadmap, day);
+      session.scheduled_timezone = ngRoadmapTimezone(roadmap, day);
+      session.title = ngBuildLiveSessionTitleFromRoadmap(db, roadmap, day);
+      session.topic = session.title;
+      session.updated_by = options.actorId || options.userId || session.updated_by || null;
+      session.updated_at = now;
+      counts.cancelled += 1;
+    }
+
+    day.live_session_id = null;
+    day.session_id = null;
+    day.updated_at = now;
+  }
+
+  roadmap.updated_at = now;
+  return counts;
+}
+
+
+function ngClearNoClassRoadmapFields(day = {}) {
+  const clearValues = {
+    resources: [],
+    resource_links: [],
+    uworld_qids: [],
+    mapped_uworld_qids: [],
+    qid_list: [],
+    qids: [],
+    uworld_target: "",
+    homework: "",
+    task_items: [],
+    tasks: [],
+    first_aid_topics: "",
+    first_aid_pages: null,
+    video_library_lecture: "",
+    lecture_title: "",
+    live_teaching_topic: "",
+    assessment_task: "",
+    assessment_day: false,
+    assessment_id: null,
+    weekly_assessment_id: null,
+    weekly_assessment_ready: false,
+    grand_assessment_id: null,
+    grand_assessment_ready: false,
+    live_session_id: null,
+    session_id: null,
+    session_notes_id: null,
+    session_notes_ready: false,
+    session_notes_draft_ready: false,
+    notes_status: "",
+    recording_link: "",
+    notes_link: "",
+    session_flashcards_ready: false,
+    session_flashcards_draft_ready: false,
+    session_flashcards_count: 0,
+    session_flashcards_draft_count: 0,
+    flashcard_tags: [],
+    flashcards_enabled: false,
+    community_prompt: "",
+  };
+
+  for (const [key, value] of Object.entries(clearValues)) {
+    day[key] = Array.isArray(value) ? [...value] : value;
+  }
+
+  return day;
+}
+
+function ngReplaceRoadmapDayIdList(values, fromDayId, toDayId) {
+  if (!Array.isArray(values)) return values;
+  return Array.from(new Set(values.map((item) => String(item || "") === String(fromDayId) ? toDayId : item).filter(Boolean)));
+}
+
+function ngRelinkRoadmapDayDependencies(db, { courseId = "", fromDayId = "", toDay = null, actorId = null } = {}) {
+  const cleanCourseId = String(courseId || "").trim();
+  const oldDayId = String(fromDayId || "").trim();
+  const newDayId = String(toDay?.id || "").trim();
+  const now = new Date().toISOString();
+  const counts = {
+    flashcards: 0,
+    flashcard_progress: 0,
+    assessments: 0,
+    assessment_attempts: 0,
+    notes: 0,
+    roadmap_progress: 0,
+    daily_task_progress: 0,
+    point_events: 0,
+    weak_concepts: 0,
+    leaderboards_rebuilt: 0,
+  };
+  const affectedUsers = new Set();
+
+  if (!oldDayId || !newDayId || oldDayId === newDayId) return counts;
+
+  const courseMatches = (item = {}) => {
+    if (!cleanCourseId) return true;
+    const itemCourseId = String(item.course_id || item.courseId || "").trim();
+    return !itemCourseId || itemCourseId === cleanCourseId;
+  };
+
+  const relinkDayFields = (item = {}) => {
+    let changed = false;
+    if (String(item.roadmap_day_id || "") === oldDayId) {
+      item.roadmap_day_id = newDayId;
+      changed = true;
+    }
+    if (String(item.day_id || "") === oldDayId) {
+      item.day_id = newDayId;
+      changed = true;
+    }
+    if (Array.isArray(item.source_roadmap_day_ids)) {
+      const next = ngReplaceRoadmapDayIdList(item.source_roadmap_day_ids, oldDayId, newDayId);
+      if (JSON.stringify(next) !== JSON.stringify(item.source_roadmap_day_ids)) {
+        item.source_roadmap_day_ids = next;
+        changed = true;
+      }
+    }
+    return changed;
+  };
+
+  for (const card of Object.values(db.flashcards || {})) {
+    if (!card?.id || !courseMatches(card)) continue;
+    if (!relinkDayFields(card)) continue;
+    card.day_number = toDay.day_number || card.day_number || null;
+    card.scheduled_date = toDay.date || card.scheduled_date || null;
+    card.due_date = card.due_date && String(card.due_date) === String(toDay.original_day_snapshot?.date || "") ? toDay.date : (card.due_date || toDay.date || null);
+    card.updated_by = actorId || card.updated_by || null;
+    card.updated_at = now;
+    counts.flashcards += 1;
+  }
+
+  for (const item of Object.values(db.flashcardProgress || {})) {
+    if (!item || !courseMatches(item)) continue;
+    if (!relinkDayFields(item)) continue;
+    if (item.user_id) affectedUsers.add(String(item.user_id));
+    item.updated_at = now;
+    counts.flashcard_progress += 1;
+  }
+
+  for (const assessment of Object.values(db.assessments || {})) {
+    if (!assessment?.id || !courseMatches(assessment)) continue;
+    if (!relinkDayFields(assessment)) continue;
+    assessment.day_number = toDay.day_number || assessment.day_number || null;
+    assessment.system = assessment.system || toDay.system || "";
+    assessment.updated_by = actorId || assessment.updated_by || null;
+    assessment.updated_at = now;
+    counts.assessments += 1;
+  }
+
+  for (const attempt of Object.values(db.assessmentAttempts || {})) {
+    if (!attempt || !courseMatches(attempt)) continue;
+    if (!relinkDayFields(attempt)) continue;
+    if (attempt.user_id) affectedUsers.add(String(attempt.user_id));
+    attempt.updated_at = now;
+    counts.assessment_attempts += 1;
+  }
+
+  for (const note of Object.values(db.notes || {})) {
+    if (!note || !courseMatches(note)) continue;
+    if (!relinkDayFields(note)) continue;
+    note.day_number = toDay.day_number || note.day_number || null;
+    note.updated_by = actorId || note.updated_by || null;
+    note.updated_at = now;
+    counts.notes += 1;
+  }
+
+  const rekeyBucketByDay = (bucketName) => {
+    const bucket = db[bucketName] || {};
+    const nextEntries = [];
+    for (const [id, item] of Object.entries(bucket)) {
+      if (!item || !courseMatches(item)) continue;
+      const matches = String(item.day_id || item.roadmap_day_id || "") === oldDayId || String(id).includes(oldDayId);
+      if (!matches) continue;
+      relinkDayFields(item);
+      item.day_number = toDay.day_number || item.day_number || null;
+      item.updated_at = now;
+      if (item.user_id) affectedUsers.add(String(item.user_id));
+
+      let nextId = String(item.id || id).replace(oldDayId, newDayId);
+      if (nextId === String(item.id || id) && cleanCourseId && item.user_id) nextId = `${cleanCourseId}:${item.user_id}:${newDayId}`;
+      item.id = nextId;
+      nextEntries.push([id, nextId, item]);
+    }
+
+    for (const [oldKey, newKey, item] of nextEntries) {
+      if (oldKey !== newKey) {
+        if (bucket[newKey]) {
+          bucket[newKey] = {
+            ...bucket[newKey],
+            ...item,
+            tasks: { ...(bucket[newKey].tasks || {}), ...(item.tasks || {}) },
+            updated_at: now,
+          };
+        } else {
+          bucket[newKey] = item;
+        }
+        delete bucket[oldKey];
+      } else {
+        bucket[oldKey] = item;
+      }
+    }
+
+    db[bucketName] = bucket;
+    return nextEntries.length;
+  };
+
+  counts.roadmap_progress += rekeyBucketByDay("roadmapProgress");
+  counts.daily_task_progress += rekeyBucketByDay("dailyTaskProgress");
+
+  for (const event of Object.values(db.pointEvents || {})) {
+    if (!event || !courseMatches(event)) continue;
+    if (!relinkDayFields(event)) continue;
+    event.day_number = toDay.day_number || event.day_number || null;
+    event.updated_at = now;
+    if (event.user_id) affectedUsers.add(String(event.user_id));
+    counts.point_events += 1;
+  }
+
+  for (const weak of Object.values(db.weakConceptLogs || {})) {
+    if (!weak || !courseMatches(weak)) continue;
+    if (!relinkDayFields(weak)) continue;
+    weak.day_number = toDay.day_number || weak.day_number || null;
+    weak.system = weak.system || toDay.system || "";
+    weak.updated_at = now;
+    if (weak.user_id) affectedUsers.add(String(weak.user_id));
+    counts.weak_concepts += 1;
+  }
+
+  if (cleanCourseId) {
+    for (const userId of affectedUsers) {
+      const user = db.users?.[userId] || null;
+      updateLeaderboard(db, { courseId: cleanCourseId, userId, userName: user?.name || user?.email || "Student" });
+      counts.leaderboards_rebuilt += 1;
+    }
+  }
+
+  return counts;
 }
 
 function ngRecalculateRoadmapSchedule(db, roadmap, { startDate = "", skipSundays = true } = {}) {
@@ -38733,27 +39078,24 @@ app.post("/admin/roadmap/:dayId/push-status", async (req, res) => {
     if (!["holiday", "cancelled"].includes(status)) return res.status(400).json({ success: false, error: "status must be holiday or cancelled" });
     const ref = ngFindAdminRoadmapDayRef(db, { courseId: req.body.course_id || req.query.course_id, dayId: req.params.dayId });
     if (!ref.roadmap || !ref.day) return res.status(404).json({ success: false, error: "Roadmap item not found" });
-    const originalContent = { ...ref.day, id: `${ref.courseId}:day:pushed:${uuid()}`, pushed_from_day_id: ref.day.id, status: "scheduled", roadmap_status: "scheduled", live_session_id: null, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), updated_by: user.id };
+    const originalDayId = String(ref.day.id || "").trim();
+    const originalContent = {
+      ...ref.day,
+      id: `${ref.courseId}:day:pushed:${uuid()}`,
+      pushed_from_day_id: originalDayId,
+      status: "scheduled",
+      roadmap_status: "scheduled",
+      live_session_id: null,
+      session_id: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      updated_by: user.id,
+    };
     const placeholderTitle = status === "holiday" ? "Holiday / No Live Class" : "Cancelled / Content Pushed";
-    ref.roadmap.days[ref.index] = {
+    ref.roadmap.days[ref.index] = ngClearNoClassRoadmapFields({
       ...ref.day,
       title: req.body.title || placeholderTitle,
       description: req.body.description || (status === "holiday" ? "No academic task today. The planned content has been pushed to the next teaching day." : "Class cancelled. The planned content has been pushed to the next teaching day."),
-      resources: [],
-      resource_links: [],
-      uworld_qids: [],
-      mapped_uworld_qids: [],
-      uworld_target: "",
-      homework: "",
-      task_items: [],
-      tasks: [],
-      first_aid_topics: "",
-      first_aid_pages: null,
-      video_library_lecture: "",
-      lecture_title: "",
-      assessment_day: false,
-      assessment_id: null,
-      live_session_id: null,
       status,
       roadmap_status: status,
       is_schedule_placeholder: true,
@@ -38761,14 +39103,22 @@ app.post("/admin/roadmap/:dayId/push-status", async (req, res) => {
       original_day_snapshot: req.body.keep_snapshot === false ? undefined : ref.day,
       updated_by: user.id,
       updated_at: new Date().toISOString(),
-    };
+    });
     ref.roadmap.days.splice(ref.index + 1, 0, originalContent);
     const skipSundays = ref.roadmap.skip_sundays !== false && ref.roadmap.settings?.skip_sundays !== false;
     const startDate = ref.roadmap.start_date || ref.roadmap.settings?.start_date || ref.roadmap.days[0]?.date || todayKey();
     ngRecalculateRoadmapSchedule(db, ref.roadmap, { startDate, skipSundays });
+    const movedContentDay = ref.roadmap.days.find((day) => String(day.id || "") === String(originalContent.id));
+    const dependencySync = ngRelinkRoadmapDayDependencies(db, {
+      courseId: ref.courseId,
+      fromDayId: originalDayId,
+      toDay: movedContentDay || originalContent,
+      actorId: user.id,
+    });
+    const liveSessionSync = ngSyncLinkedLiveSessionsForRoadmap(db, ref.roadmap, { actorId: user.id });
     db.roadmaps[ref.courseId] = ref.roadmap;
     await writeLiveDb(db);
-    res.json({ success: true, status, pushed: true, roadmap: ref.roadmap, days: ref.roadmap.days.map(sanitizeRoadmapDay), message: `${status} added and following content pushed forward.` });
+    res.json({ success: true, status, pushed: true, roadmap: ref.roadmap, days: ref.roadmap.days.map(sanitizeRoadmapDay), dependency_sync: dependencySync, live_session_sync: liveSessionSync, message: `${status} added and following content, live sessions, notes, flashcards, assessments, progress, and leaderboard links were pushed forward.` });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
