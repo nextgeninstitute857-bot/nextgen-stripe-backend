@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v160-roadmap-academic-dependency-sync";
+const NEXTGEN_BACKEND_BUILD = "v161-roadmap-auto-live-center-sync";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -4974,11 +4974,18 @@ app.delete("/admin/courses/:courseId", async (req, res) => {
 app.get("/live-sessions", async (req, res) => {
   try {
     const db = await readLiveDb();
+    const requestedCourseId = String(req.query.course_id || "").trim();
+    const autoLiveSync = requestedCourseId
+      ? ngAutoSyncRoadmapLiveSessionsForCourses(db, [requestedCourseId], { actorId: "public_live_sessions_read" })
+      : { checked: 0, changed: false, details: [] };
+
+    if (autoLiveSync.changed) await writeLiveDb(db);
+
     let sessions = Object.values(db.liveSessions || {}).map(sanitizeLiveSession);
-    if (req.query.course_id) sessions = sessions.filter((s) => String(s.course_id) === String(req.query.course_id));
+    if (requestedCourseId) sessions = sessions.filter((s) => String(s.course_id) === requestedCourseId);
     if (req.query.status) sessions = sessions.filter((s) => String(s.status) === String(req.query.status));
     sessions.sort((a, b) => String(a.scheduled_date || "").localeCompare(String(b.scheduled_date || "")) || String(a.scheduled_time || "").localeCompare(String(b.scheduled_time || "")));
-    res.json({ success: true, count: sessions.length, sessions });
+    res.json({ success: true, count: sessions.length, sessions, auto_live_sync: autoLiveSync });
   } catch (e) { res.status(500).json({ success: false, error: e.message || "Failed to load live sessions" }); }
 });
 
@@ -4993,12 +5000,19 @@ app.get("/live-sessions/:sessionId", async (req, res) => {
 
 app.get("/admin/live-sessions", async (req, res) => {
   try {
-    await requireLmsPermission(req, "lms.live_sessions.view");
+    const { user } = await requireLmsPermission(req, "lms.live_sessions.view");
     const db = await readLiveDb();
+    const requestedCourseId = String(req.query.course_id || "").trim();
+    const autoLiveSync = requestedCourseId
+      ? ngAutoSyncRoadmapLiveSessionsForCourses(db, [requestedCourseId], { actorId: user.id || "admin_live_sessions_read" })
+      : { checked: 0, changed: false, details: [] };
+
+    if (autoLiveSync.changed) await writeLiveDb(db);
+
     let sessions = Object.values(db.liveSessions || {}).map(sanitizeLiveSession);
-    if (req.query.course_id) sessions = sessions.filter((s) => String(s.course_id) === String(req.query.course_id));
+    if (requestedCourseId) sessions = sessions.filter((s) => String(s.course_id) === requestedCourseId);
     sessions.sort((a, b) => String(a.scheduled_date || "").localeCompare(String(b.scheduled_date || "")) || String(a.scheduled_time || "").localeCompare(String(b.scheduled_time || "")));
-    res.json({ success: true, count: sessions.length, sessions });
+    res.json({ success: true, count: sessions.length, sessions, auto_live_sync: autoLiveSync });
   } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to load admin live sessions" }); }
 });
 
@@ -7309,6 +7323,176 @@ app.post("/admin/assessment-attempts/:attemptId/release", async (req, res) => {
   }
 });
 
+
+
+// v161: Auto-repair live-session records from the roadmap when student pages read them.
+// This covers already-broken courses after a holiday push, without requiring a manual admin sync.
+function ngFindRoadmapEntryForCourse(db = {}, courseId = "") {
+  const cleanCourseId = String(courseId || "").trim();
+  if (!cleanCourseId) return { key: null, roadmap: null };
+
+  const direct = db.roadmaps?.[cleanCourseId] || null;
+  if (direct?.days && Array.isArray(direct.days)) {
+    return { key: cleanCourseId, roadmap: direct };
+  }
+
+  const found = Object.entries(db.roadmaps || {}).find(([, roadmap]) => {
+    return String(roadmap?.course_id || roadmap?.courseId || "") === cleanCourseId && Array.isArray(roadmap?.days);
+  });
+
+  return found ? { key: found[0], roadmap: found[1] } : { key: null, roadmap: null };
+}
+
+function ngPickLiveSessionForRoadmapDay(db = {}, courseId = "", day = {}) {
+  const ids = [
+    day.live_session_id,
+    day.session_id,
+    day.pushed_live_session_id,
+    day.pushed_from_live_session_id,
+    day.original_day_snapshot?.live_session_id,
+    day.original_day_snapshot?.session_id,
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+
+  for (const id of ids) {
+    const session = db.liveSessions?.[id];
+    if (session?.id && String(session.course_id || "") === String(courseId || "")) {
+      return session;
+    }
+  }
+
+  return (
+    Object.values(db.liveSessions || {}).find((session) => {
+      return (
+        session?.id &&
+        String(session.course_id || "") === String(courseId || "") &&
+        String(session.roadmap_day_id || "") === String(day.id || "")
+      );
+    }) || null
+  );
+}
+
+function ngRoadmapNeedsLiveSessionAutoSync(db = {}, roadmap = {}) {
+  if (!roadmap || !Array.isArray(roadmap.days) || !roadmap.days.length) return false;
+
+  const courseId = ngRoadmapCourseId(roadmap);
+  if (!courseId) return false;
+
+  const today = todayKey();
+
+  for (const day of roadmap.days || []) {
+    if (!day?.id) continue;
+
+    const dayDate = String(day.date || day.scheduled_date || "").slice(0, 10);
+    const shouldCheckFuture = !dayDate || dayDate >= today;
+    const linkedSession = ngPickLiveSessionForRoadmapDay(db, courseId, day);
+
+    if (ngRoadmapDayIsNoClass(day)) {
+      if (!linkedSession?.id) continue;
+      const status = String(linkedSession.status || "").toLowerCase();
+      if (!["cancelled", "canceled", "completed", "ended", "past"].includes(status)) return true;
+      continue;
+    }
+
+    if (!shouldCheckFuture) continue;
+
+    if (!linkedSession?.id) return true;
+
+    const status = String(linkedSession.status || "").toLowerCase();
+    if (["cancelled", "canceled"].includes(status)) return true;
+
+    const wantedDate = String(day.date || day.scheduled_date || "").slice(0, 10);
+    const wantedTime = String(ngRoadmapClassTime(roadmap, day) || "").trim();
+    const wantedTimezone = String(ngRoadmapTimezone(roadmap, day) || DEFAULT_TIMEZONE).trim();
+
+    if (wantedDate && String(linkedSession.scheduled_date || "").slice(0, 10) !== wantedDate) return true;
+    if (wantedTime && String(linkedSession.scheduled_time || "").trim() !== wantedTime) return true;
+    if (wantedTimezone && String(linkedSession.scheduled_timezone || DEFAULT_TIMEZONE).trim() !== wantedTimezone) return true;
+    if (String(linkedSession.roadmap_day_id || "") !== String(day.id || "")) return true;
+  }
+
+  return false;
+}
+
+function ngAutoSyncRoadmapLiveSessionsForCourses(db = {}, courseIds = [], options = {}) {
+  const ids = Array.from(new Set((Array.isArray(courseIds) ? courseIds : [courseIds]).map((id) => String(id || "").trim()).filter(Boolean)));
+  const result = {
+    checked: ids.length,
+    changed: false,
+    details: [],
+  };
+
+  for (const courseId of ids) {
+    const entry = ngFindRoadmapEntryForCourse(db, courseId);
+    const roadmap = entry.roadmap;
+
+    if (!roadmap || !Array.isArray(roadmap.days) || !roadmap.days.length) {
+      result.details.push({ course_id: courseId, skipped: true, reason: "no_roadmap" });
+      continue;
+    }
+
+    if (!ngRoadmapNeedsLiveSessionAutoSync(db, roadmap)) {
+      result.details.push({ course_id: courseId, skipped: true, reason: "already_synced" });
+      continue;
+    }
+
+    const skipSundays = roadmap.skip_sundays !== false && roadmap.settings?.skip_sundays !== false;
+    const startDate = roadmap.start_date || roadmap.settings?.start_date || roadmap.days[0]?.date || todayKey();
+
+    ngRecalculateRoadmapSchedule(db, roadmap, { startDate, skipSundays });
+
+    const dependencySync = {
+      days_checked: 0,
+      flashcards: 0,
+      flashcard_progress: 0,
+      assessments: 0,
+      assessment_attempts: 0,
+      notes: 0,
+      roadmap_progress: 0,
+      daily_task_progress: 0,
+      point_events: 0,
+      weak_concepts: 0,
+      leaderboards_rebuilt: 0,
+    };
+
+    for (const day of roadmap.days || []) {
+      const fromDayId = String(day.pushed_from_day_id || day.original_day_id || "").trim();
+      if (!fromDayId || ngRoadmapDayIsNoClass(day)) continue;
+
+      const partial = ngRelinkRoadmapDayDependencies(db, {
+        courseId,
+        fromDayId,
+        toDay: day,
+        actorId: options.actorId || options.userId || "student_auto_live_sync",
+      });
+
+      dependencySync.days_checked += 1;
+      for (const key of Object.keys(partial || {})) {
+        dependencySync[key] = Number(dependencySync[key] || 0) + Number(partial[key] || 0);
+      }
+    }
+
+    const liveSessionSync = ngSyncLinkedLiveSessionsForRoadmap(db, roadmap, {
+      actorId: options.actorId || options.userId || "student_auto_live_sync",
+    });
+
+    if (entry.key) db.roadmaps[entry.key] = roadmap;
+
+    result.changed = true;
+    result.details.push({
+      course_id: courseId,
+      skipped: false,
+      roadmap_key: entry.key,
+      dependency_sync: dependencySync,
+      live_session_sync: liveSessionSync,
+    });
+  }
+
+  return result;
+}
+
+
 app.get("/student/dashboard/summary", async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req); const courseId = req.query.course_id; if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
@@ -7537,6 +7721,12 @@ app.get("/student/dashboard/bootstrap", async (req, res) => {
       .map(sanitizeCourse)
       .filter((course) => course.status !== "archived" && course.status !== "inactive");
     const coursesToCheck = requestedCourseId ? allCourses.filter((course) => String(course.id) === requestedCourseId) : allCourses;
+    const autoLiveSync = ngAutoSyncRoadmapLiveSessionsForCourses(db, coursesToCheck.map((course) => course.id), {
+      actorId: user.id || "student_dashboard_bootstrap",
+    });
+
+    if (autoLiveSync.changed) await writeLiveDb(db);
+
     const featureAccess = getStudentFeatureAccess(db, user);
     const bundles = coursesToCheck
       .map((course) => ngBuildStudentCourseBundle(db, user, course, { sessionLimit: 5 }))
@@ -7568,6 +7758,7 @@ app.get("/student/dashboard/bootstrap", async (req, res) => {
       primary_bundle: primary,
       announcements,
       leaderboard,
+      auto_live_sync: autoLiveSync,
       counts: {
         courses: bundles.length,
         announcements: announcements.length,
@@ -7588,6 +7779,12 @@ app.get("/student/live-center", async (req, res) => {
       .map(sanitizeCourse)
       .filter((course) => course.status !== "archived" && course.status !== "inactive");
     const coursesToCheck = requestedCourseId ? allCourses.filter((course) => String(course.id) === requestedCourseId) : allCourses;
+    const autoLiveSync = ngAutoSyncRoadmapLiveSessionsForCourses(db, coursesToCheck.map((course) => course.id), {
+      actorId: user.id || "student_live_center",
+    });
+
+    if (autoLiveSync.changed) await writeLiveDb(db);
+
     const bundles = coursesToCheck
       .map((course) => ngBuildStudentCourseBundle(db, user, course, { sessionLimit: null }))
       .filter(Boolean);
@@ -7598,6 +7795,7 @@ app.get("/student/live-center", async (req, res) => {
       merged_tabs: ["live_sessions", "classrooms"],
       note_strategy: "metadata_only_full_notes_lazy_loaded_by_session",
       count: bundles.reduce((sum, bundle) => sum + Number(bundle.sessions_count || 0), 0),
+      auto_live_sync: autoLiveSync,
       course_bundles: bundles,
       bundles,
     });
