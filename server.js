@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v174-recording-course-session-link-fix";
+const NEXTGEN_BACKEND_BUILD = "v175b-adaptive-onboarding-baseline-reminders";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -202,6 +202,109 @@ app.get("/admin/debug/cors-check", (req, res) => {
   });
 });
 
+function ngDbSectionCount(db, key) {
+  const value = db?.[key];
+  if (Array.isArray(value)) return value.length;
+  if (value && typeof value === "object") return Object.keys(value).length;
+  return 0;
+}
+
+async function ngBuildDbSafetySnapshot() {
+  const db = await readLiveDb();
+  let fileStat = null;
+  try {
+    const stat = await fs.stat(LIVE_DB_PATH);
+    fileStat = {
+      path: LIVE_DB_PATH,
+      size_bytes: stat.size,
+      modified_at: stat.mtime?.toISOString?.() || null,
+    };
+  } catch (error) {
+    fileStat = { path: LIVE_DB_PATH, missing: true, error: error.message };
+  }
+
+  const sections = [
+    "users", "courses", "enrollments", "payments", "plans",
+    "roadmaps", "roadmapProgress", "liveSessions", "recordings", "notes",
+    "attendance", "leaderboard", "assessments", "assessmentAttempts",
+    "flashcards", "flashcardProgress", "dailyTaskProgress", "weakConceptLogs",
+    "weakAreaProfiles", "weakAreaHistory", "adaptiveAssignments", "adaptiveFlashcardQueues",
+    "pointEvents", "communityMessages", "globalCommunityPosts", "studyPartnerProfiles"
+  ];
+
+  return {
+    success: true,
+    build: NEXTGEN_BACKEND_BUILD,
+    data_dir: DATA_DIR,
+    live_db_path: LIVE_DB_PATH,
+    persistent_disk_warning: String(DATA_DIR || "").startsWith("/tmp"),
+    file: fileStat,
+    updatedAt: db.updatedAt || null,
+    counts: sections.reduce((acc, key) => {
+      acc[key] = ngDbSectionCount(db, key);
+      return acc;
+    }, {}),
+    now: new Date().toISOString(),
+  };
+}
+
+app.get("/admin/debug/db-safety-check", async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+    const snapshot = await ngBuildDbSafetySnapshot();
+    res.json(snapshot);
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/debug/backup-live-db", async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+    await ensureDataDir();
+    const backupDir = path.join(DATA_DIR, "backups");
+    await fs.mkdir(backupDir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const backupPath = path.join(backupDir, `live-session-db-${stamp}.json`);
+    try {
+      await fs.copyFile(LIVE_DB_PATH, backupPath);
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        await fs.writeFile(backupPath, JSON.stringify({ ...DEFAULT_LIVE_DB, updatedAt: new Date().toISOString() }, null, 2), "utf8");
+      } else {
+        throw error;
+      }
+    }
+    const stat = await fs.stat(backupPath);
+    const snapshot = await ngBuildDbSafetySnapshot();
+    res.json({
+      success: true,
+      backup_path: backupPath,
+      size_bytes: stat.size,
+      created_at: new Date().toISOString(),
+      safety_snapshot: snapshot,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/debug/export-live-db", async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+    const raw = await fs.readFile(LIVE_DB_PATH, "utf8").catch(async (error) => {
+      if (error.code === "ENOENT") return JSON.stringify({ ...DEFAULT_LIVE_DB, updatedAt: new Date().toISOString() }, null, 2);
+      throw error;
+    });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename=nextgen-live-db-${stamp}.json`);
+    res.send(raw);
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
 const POCKETBASE_URL = process.env.POCKETBASE_URL;
 const DATA_DIR = process.env.DATA_DIR || "/tmp";
 const MEDIA_DIR = path.join(DATA_DIR, "media");
@@ -321,6 +424,14 @@ const DEFAULT_LIVE_DB = {
   assessments: {},
   assessmentAttempts: {},
   flashcards: {},
+
+  // v175 adaptive LMS engine: additive only, does not overwrite legacy progress.
+  weakAreaProfiles: {},
+  weakAreaHistory: {},
+  adaptiveAssignments: {},
+  adaptiveFlashcardQueues: {},
+  adaptiveSettings: {},
+
   aiUsageLogs: {},
 
   qidLibrary: {},
@@ -406,6 +517,11 @@ async function readLiveDb() {
       assessments: parsed.assessments || {},
       assessmentAttempts: parsed.assessmentAttempts || {},
       flashcards: parsed.flashcards || {},
+      weakAreaProfiles: parsed.weakAreaProfiles || {},
+      weakAreaHistory: parsed.weakAreaHistory || {},
+      adaptiveAssignments: parsed.adaptiveAssignments || {},
+      adaptiveFlashcardQueues: parsed.adaptiveFlashcardQueues || {},
+      adaptiveSettings: parsed.adaptiveSettings || {},
       aiUsageLogs: parsed.aiUsageLogs || {},
       qidLibrary: parsed.qidLibrary || {},
       dailyTaskProgress: parsed.dailyTaskProgress || {},
@@ -3828,6 +3944,14 @@ function sanitizeAssessmentForStudent(assessment, attempt = null) {
     source_type: assessment.source_type || "manual_notes",
     question_count: (assessment.questions || []).length,
     duration_minutes: assessment.duration_minutes || null,
+    block_mode: Boolean(assessment.block_mode),
+    block_count: Number(assessment.block_count || 1),
+    questions_per_block: Number(assessment.questions_per_block || assessment.question_count || (assessment.questions || []).length || 0),
+    duration_per_block_minutes: assessment.duration_per_block_minutes || null,
+    total_questions: Number(assessment.total_questions || assessment.question_count || (assessment.questions || []).length || 0),
+    total_duration_minutes: assessment.total_duration_minutes || assessment.duration_minutes || null,
+    system: assessment.system || null,
+    assessment_type: assessment.assessment_type || assessment.source_type || null,
     starts_at: assessment.starts_at || assessment.start_at || assessment.opens_at || null,
     due_at: assessment.due_at || assessment.ends_at || assessment.deadline || null,
     attempts_allowed: assessment.attempts_allowed || 1,
@@ -3855,6 +3979,14 @@ function sanitizeAssessmentForTaking(assessment, existingAttempt = null) {
     title: assessment.title,
     description: assessment.description || "",
     duration_minutes: assessment.duration_minutes || null,
+    block_mode: Boolean(assessment.block_mode),
+    block_count: Number(assessment.block_count || 1),
+    questions_per_block: Number(assessment.questions_per_block || assessment.question_count || (assessment.questions || []).length || 0),
+    duration_per_block_minutes: assessment.duration_per_block_minutes || null,
+    total_questions: Number(assessment.total_questions || assessment.question_count || (assessment.questions || []).length || 0),
+    total_duration_minutes: assessment.total_duration_minutes || assessment.duration_minutes || null,
+    system: assessment.system || null,
+    assessment_type: assessment.assessment_type || assessment.source_type || null,
     starts_at: assessment.starts_at || assessment.start_at || assessment.opens_at || null,
     due_at: assessment.due_at || assessment.ends_at || assessment.deadline || null,
     attempts_allowed: assessment.attempts_allowed || 1,
@@ -3864,8 +3996,10 @@ function sanitizeAssessmentForTaking(assessment, existingAttempt = null) {
           id: q.id || `q${i + 1}`,
           stem: q.stem,
           options: q.options || [],
-          topic: q.topic || "General",
+          topic: q.topic || assessment.topic || "General",
+          system: q.system || assessment.system || q.topic || "General",
           difficulty: q.difficulty || "medium",
+          block_number: q.block_number || q.block || (assessment.block_mode ? Math.floor(i / Math.max(1, Number(assessment.questions_per_block || 1))) + 1 : 1),
           explanation: q.explanation || "",
           correct_index: q.correct_index,
         }))
@@ -3873,8 +4007,10 @@ function sanitizeAssessmentForTaking(assessment, existingAttempt = null) {
           id: q.id || `q${i + 1}`,
           stem: q.stem,
           options: q.options || [],
-          topic: q.topic || "General",
+          topic: q.topic || assessment.topic || "General",
+          system: q.system || assessment.system || q.topic || "General",
           difficulty: q.difficulty || "medium",
+          block_number: q.block_number || q.block || (assessment.block_mode ? Math.floor(i / Math.max(1, Number(assessment.questions_per_block || 1))) + 1 : 1),
         })),
   };
 }
@@ -3975,10 +4111,368 @@ function gradeAssessment(assessment, answers = {}) {
     const correct = Number(q.correct_index);
     const ok = Number(selected) === correct;
     if (ok) score += 1;
-    return { question_id: id, selected_index: selected ?? null, correct_index: correct, is_correct: ok, explanation: q.explanation || "", topic: q.topic || "General" };
+    const system = String(q.system || assessment.system || assessment.subject || "General").trim() || "General";
+    const topic = String(q.topic || assessment.topic || system || "General").trim() || "General";
+    const blockNumber = Number(q.block_number || q.block || Math.floor(i / Math.max(1, Number(assessment.questions_per_block || assessment.question_count || 1))) + 1);
+    return { question_id: id, selected_index: selected ?? null, correct_index: correct, is_correct: ok, explanation: q.explanation || "", topic, system, difficulty: q.difficulty || assessment.difficulty || "medium", block_number: blockNumber };
   });
   const total = (assessment.questions || []).length;
-  return { score, total, percentage: total ? Math.round((score / total) * 100) : 0, graded };
+  const bySystem = {};
+  const byTopic = {};
+  for (const row of graded) {
+    const systemKey = ngNormalizeMasterMapSystemName(row.system || "General") || "General";
+    const topicKey = row.topic || "General";
+    bySystem[systemKey] = bySystem[systemKey] || { system: systemKey, correct: 0, total: 0, mastery: 0 };
+    bySystem[systemKey].total += 1;
+    if (row.is_correct) bySystem[systemKey].correct += 1;
+    byTopic[topicKey] = byTopic[topicKey] || { topic: topicKey, system: systemKey, correct: 0, total: 0, mastery: 0 };
+    byTopic[topicKey].total += 1;
+    if (row.is_correct) byTopic[topicKey].correct += 1;
+  }
+  for (const row of Object.values(bySystem)) row.mastery = row.total ? Math.round((row.correct / row.total) * 100) : 0;
+  for (const row of Object.values(byTopic)) row.mastery = row.total ? Math.round((row.correct / row.total) * 100) : 0;
+  return { score, total, percentage: total ? Math.round((score / total) * 100) : 0, graded, by_system: bySystem, by_topic: byTopic };
+}
+
+const NEXTGEN_ADAPTIVE_SYSTEMS = [
+  "Cardiology", "MSK", "Central Nervous System", "Reproductive", "Endocrinology",
+  "GIT", "Renal", "Pulmonology", "Immunology", "Hematology", "Psychiatry",
+  "Biochemistry", "Microbiology", "Pharmacology", "Ethics", "Biostatistics"
+];
+
+const NEXTGEN_DEFAULT_ADAPTIVE_SETTINGS = {
+  required_daily_flashcards: 15,
+  adaptive_daily_flashcards: 5,
+  normal_daily_cap: 25,
+  catchup_daily_cap: 30,
+  baseline_block_count: 2,
+  baseline_questions_per_block: 20,
+  baseline_duration_per_block_minutes: 30,
+  baseline_initial_reminder_hours: 24,
+  baseline_daily_reminder_count: 3,
+  baseline_later_reminder_days: 3,
+  auto_assign_baseline_new_students: true,
+  auto_assign_baseline_demo_students: true,
+  auto_assign_baseline_existing_students: true,
+  mastery_label_new_baseline: "Before Program",
+  mastery_label_existing_baseline: "Starting Profile",
+  mastery_label_current: "Current Profile",
+  mastery_label_improvement: "Improvement",
+};
+
+function ngGetAdaptiveSettings(db, courseId = "global") {
+  const globalSettings = db.adaptiveSettings?.global || {};
+  const courseSettings = courseId ? db.adaptiveSettings?.[String(courseId)] || {} : {};
+  return { ...NEXTGEN_DEFAULT_ADAPTIVE_SETTINGS, ...globalSettings, ...courseSettings };
+}
+
+function ngNormalizeAssessmentBlockConfig(input = {}, fallback = {}) {
+  const blockMode = input.block_mode === true || input.block_mode === "true" || Number(input.block_count || fallback.block_count || 1) > 1;
+  const blockCount = Math.max(1, Math.min(10, Number(input.block_count ?? fallback.block_count ?? (blockMode ? 2 : 1)) || 1));
+  const questionsPerBlock = Math.max(1, Math.min(80, Number(input.questions_per_block ?? fallback.questions_per_block ?? input.question_count ?? fallback.question_count ?? 20) || 20));
+  const totalQuestions = blockMode ? blockCount * questionsPerBlock : Math.max(1, Math.min(200, Number(input.question_count ?? fallback.question_count ?? questionsPerBlock) || questionsPerBlock));
+  const durationPerBlock = Number(input.duration_per_block_minutes ?? fallback.duration_per_block_minutes ?? input.duration_minutes ?? fallback.duration_minutes ?? 0) || null;
+  const durationMinutes = blockMode && durationPerBlock ? blockCount * durationPerBlock : (Number(input.duration_minutes ?? fallback.duration_minutes ?? 0) || null);
+  return {
+    block_mode: Boolean(blockMode),
+    block_count: blockMode ? blockCount : 1,
+    questions_per_block: blockMode ? questionsPerBlock : totalQuestions,
+    duration_per_block_minutes: blockMode ? durationPerBlock : null,
+    duration_minutes: durationMinutes,
+    question_count: totalQuestions,
+    total_questions: totalQuestions,
+    total_duration_minutes: durationMinutes,
+  };
+}
+
+function ngApplyAssessmentBlockMetadata(assessment, blockConfig) {
+  const cfg = ngNormalizeAssessmentBlockConfig(blockConfig || assessment || {}, assessment || {});
+  assessment.block_mode = cfg.block_mode;
+  assessment.block_count = cfg.block_count;
+  assessment.questions_per_block = cfg.questions_per_block;
+  assessment.duration_per_block_minutes = cfg.duration_per_block_minutes;
+  assessment.duration_minutes = cfg.duration_minutes;
+  assessment.question_count = Array.isArray(assessment.questions) ? assessment.questions.length : cfg.question_count;
+  assessment.total_questions = assessment.question_count;
+  assessment.total_duration_minutes = cfg.duration_minutes;
+  if (Array.isArray(assessment.questions)) {
+    assessment.questions = assessment.questions.map((q, index) => ({
+      ...q,
+      block_number: cfg.block_mode ? Math.floor(index / Math.max(1, cfg.questions_per_block)) + 1 : 1,
+    }));
+  }
+  return assessment;
+}
+
+function ngWeakProfileKey(courseId, userId) {
+  return `${courseId}:${userId}`;
+}
+
+function ngEmptySystemProfile(system) {
+  return {
+    system,
+    baseline_mastery: null,
+    current_mastery: null,
+    improvement: 0,
+    questions_attempted: 0,
+    correct: 0,
+    weak_topics: [],
+    updated_at: null,
+  };
+}
+
+function ngEnsureWeakAreaProfile(db, { courseId, user, existingStudent = true }) {
+  db.weakAreaProfiles = db.weakAreaProfiles || {};
+  const key = ngWeakProfileKey(courseId, user.id);
+  const settings = ngGetAdaptiveSettings(db, courseId);
+  const previous = db.weakAreaProfiles[key] || {};
+  const systems = { ...(previous.systems || {}) };
+  for (const system of NEXTGEN_ADAPTIVE_SYSTEMS) {
+    const normalized = ngNormalizeMasterMapSystemName(system) || system;
+    systems[normalized] = { ...ngEmptySystemProfile(normalized), ...(systems[normalized] || {}) };
+  }
+  db.weakAreaProfiles[key] = {
+    id: key,
+    course_id: courseId,
+    user_id: user.id,
+    user_name: user.name || user.email || "Student",
+    user_email: user.email || "",
+    profile_mode: previous.profile_mode || (existingStudent ? "starting_profile" : "before_program"),
+    baseline_label: previous.baseline_label || (existingStudent ? settings.mastery_label_existing_baseline : settings.mastery_label_new_baseline),
+    current_label: previous.current_label || settings.mastery_label_current,
+    improvement_label: previous.improvement_label || settings.mastery_label_improvement,
+    baseline_status: previous.baseline_status || "not_started",
+    systems,
+    created_at: previous.created_at || new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+  return db.weakAreaProfiles[key];
+}
+
+function ngUpdateWeakAreaProfileFromAttempt(db, { assessment, attempt, user }) {
+  if (!assessment || !attempt || !user?.id) return null;
+  const courseId = String(assessment.course_id || attempt.course_id || "").trim();
+  if (!courseId) return null;
+  const profile = ngEnsureWeakAreaProfile(db, { courseId, user, existingStudent: true });
+  const graded = Array.isArray(attempt.graded_answers) ? attempt.graded_answers : [];
+  const topicStats = {};
+  for (const row of graded) {
+    const system = ngNormalizeMasterMapSystemName(row.system || assessment.system || row.topic || "General") || "General";
+    const topic = String(row.topic || system || "General").trim();
+    const item = profile.systems[system] || ngEmptySystemProfile(system);
+    item.questions_attempted = Number(item.questions_attempted || 0) + 1;
+    if (row.is_correct) item.correct = Number(item.correct || 0) + 1;
+    item.current_mastery = item.questions_attempted ? Math.round((Number(item.correct || 0) / Number(item.questions_attempted || 1)) * 100) : null;
+    if (item.baseline_mastery === null || item.baseline_mastery === undefined) item.baseline_mastery = item.current_mastery;
+    item.improvement = Number(item.current_mastery || 0) - Number(item.baseline_mastery || 0);
+    item.updated_at = new Date().toISOString();
+    profile.systems[system] = item;
+    topicStats[topic] = topicStats[topic] || { topic, system, correct: 0, total: 0 };
+    topicStats[topic].total += 1;
+    if (row.is_correct) topicStats[topic].correct += 1;
+  }
+  for (const stat of Object.values(topicStats)) {
+    const mastery = stat.total ? Math.round((stat.correct / stat.total) * 100) : 0;
+    if (mastery < 70) {
+      const item = profile.systems[stat.system] || ngEmptySystemProfile(stat.system);
+      const existing = new Set(item.weak_topics || []);
+      existing.add(stat.topic);
+      item.weak_topics = Array.from(existing).slice(0, 8);
+      profile.systems[stat.system] = item;
+    }
+  }
+  profile.last_assessment_id = assessment.id;
+  profile.last_attempt_id = attempt.id;
+  profile.baseline_status = profile.baseline_status === "not_started" ? "started" : profile.baseline_status;
+  profile.updated_at = new Date().toISOString();
+  db.weakAreaProfiles[profile.id] = profile;
+  db.weakAreaHistory = db.weakAreaHistory || {};
+  const historyId = `${profile.id}:${attempt.id}`;
+  db.weakAreaHistory[historyId] = {
+    id: historyId,
+    course_id: courseId,
+    user_id: user.id,
+    assessment_id: assessment.id,
+    attempt_id: attempt.id,
+    percentage: attempt.percentage,
+    systems: profile.systems,
+    created_at: new Date().toISOString(),
+  };
+  return profile;
+}
+
+function ngSanitizeWeakAreaProfile(profile, settings = NEXTGEN_DEFAULT_ADAPTIVE_SETTINGS) {
+  if (!profile) return null;
+  const rows = Object.values(profile.systems || {})
+    .map((item) => ({
+      system: item.system,
+      baseline_mastery: item.baseline_mastery,
+      current_mastery: item.current_mastery,
+      improvement: Number(item.improvement || 0),
+      questions_attempted: Number(item.questions_attempted || 0),
+      weak_topics: Array.isArray(item.weak_topics) ? item.weak_topics : [],
+      status: item.current_mastery === null || item.current_mastery === undefined
+        ? "Not measured"
+        : item.current_mastery >= 71
+          ? "Strong"
+          : item.current_mastery >= 41
+            ? "Improving"
+            : "Needs work",
+    }))
+    .sort((a, b) => {
+      const av = a.current_mastery === null || a.current_mastery === undefined ? 101 : a.current_mastery;
+      const bv = b.current_mastery === null || b.current_mastery === undefined ? 101 : b.current_mastery;
+      return av - bv;
+    });
+  return {
+    id: profile.id,
+    course_id: profile.course_id,
+    user_id: profile.user_id,
+    baseline_label: profile.baseline_label || settings.mastery_label_existing_baseline,
+    current_label: profile.current_label || settings.mastery_label_current,
+    improvement_label: profile.improvement_label || settings.mastery_label_improvement,
+    baseline_status: profile.baseline_status || "not_started",
+    systems: rows,
+    weakest_systems: rows.filter((row) => row.current_mastery !== null && row.current_mastery !== undefined).slice(0, 5),
+    updated_at: profile.updated_at || null,
+  };
+}
+
+
+function ngAdaptiveAssignmentKey(courseId, userId, assignmentType = "baseline_diagnostic") {
+  return `${courseId}:${userId}:${assignmentType}`;
+}
+
+function ngFindBaselineAssessment(db, { courseId }) {
+  return Object.values(db.assessments || {})
+    .filter((assessment) => {
+      if (String(assessment.course_id || "") !== String(courseId || "")) return false;
+      if (assessment.status === "archived") return false;
+      const raw = `${assessment.assessment_type || ""} ${assessment.source_type || ""} ${assessment.title || ""}`.toLowerCase();
+      return assessment.adaptive_baseline === true || raw.includes("baseline") || raw.includes("diagnostic");
+    })
+    .sort((a, b) => Number(Boolean(b.is_published)) - Number(Boolean(a.is_published)) || String(b.created_at || "").localeCompare(String(a.created_at || "")))[0] || null;
+}
+
+function ngGetAttemptForAssessmentUser(db, { assessmentId, userId }) {
+  if (!assessmentId || !userId) return null;
+  return db.assessmentAttempts?.[assessmentAttemptKey(assessmentId, userId)] || null;
+}
+
+function ngIsAssessmentAttemptSubmitted(attempt) {
+  return Boolean(attempt?.submitted_at || ["completed", "submitted", "pending_review", "reviewed", "released"].includes(String(attempt?.review_status || attempt?.status || "").toLowerCase()));
+}
+
+function ngNextBaselineReminderAt({ now = new Date(), reminderCount = 0, settings = {} }) {
+  const dailyCount = Math.max(1, Number(settings.baseline_daily_reminder_count || NEXTGEN_DEFAULT_ADAPTIVE_SETTINGS.baseline_daily_reminder_count));
+  if (Number(reminderCount || 0) < dailyCount) {
+    const hours = Math.max(1, Number(settings.baseline_initial_reminder_hours || NEXTGEN_DEFAULT_ADAPTIVE_SETTINGS.baseline_initial_reminder_hours));
+    return addDays(now, hours / 24).toISOString();
+  }
+  const days = Math.max(1, Number(settings.baseline_later_reminder_days || NEXTGEN_DEFAULT_ADAPTIVE_SETTINGS.baseline_later_reminder_days));
+  return addDays(now, days).toISOString();
+}
+
+function ngEnrollmentLooksNew(enrollment) {
+  const createdRaw = enrollment?.created_at || enrollment?.enrolled_at || enrollment?.started_at || enrollment?.paid_at || null;
+  if (!createdRaw) return false;
+  const createdTime = new Date(createdRaw).getTime();
+  if (!Number.isFinite(createdTime)) return false;
+  return Date.now() - createdTime <= 7 * 24 * 60 * 60 * 1000;
+}
+
+function ngEnsureBaselineOnboarding(db, { courseId, user, enrollment = null, source = "student_dashboard", markReminderSeen = true, existingStudent = null }) {
+  if (!courseId || !user?.id) return null;
+  db.adaptiveAssignments = db.adaptiveAssignments || {};
+  const settings = ngGetAdaptiveSettings(db, courseId);
+  const isExistingStudent = existingStudent === null ? !ngEnrollmentLooksNew(enrollment) : Boolean(existingStudent);
+  const profile = ngEnsureWeakAreaProfile(db, { courseId, user, existingStudent: isExistingStudent });
+  const baselineAssessment = ngFindBaselineAssessment(db, { courseId });
+  const attempt = baselineAssessment ? ngGetAttemptForAssessmentUser(db, { assessmentId: baselineAssessment.id, userId: user.id }) : null;
+  const completed = Boolean(attempt && ngIsAssessmentAttemptSubmitted(attempt));
+  const key = ngAdaptiveAssignmentKey(courseId, user.id, "baseline_diagnostic");
+  const previous = db.adaptiveAssignments[key] || {};
+  const now = new Date();
+  const nextTime = previous.next_reminder_at ? new Date(previous.next_reminder_at).getTime() : 0;
+  const dueNow = !completed && (!previous.last_notified_at || !nextTime || nextTime <= now.getTime());
+  const status = completed ? "completed" : baselineAssessment?.id ? "pending" : "missing_template";
+  const reminderCount = dueNow && markReminderSeen ? Number(previous.reminder_count || 0) + 1 : Number(previous.reminder_count || 0);
+  const assignment = {
+    id: key,
+    assignment_type: "baseline_diagnostic",
+    course_id: courseId,
+    user_id: user.id,
+    user_name: user.name || user.email || "Student",
+    user_email: user.email || "",
+    enrollment_id: enrollment?.id || previous.enrollment_id || null,
+    enrollment_type: enrollment?.is_demo ? "demo" : enrollment?.id ? "paid" : previous.enrollment_type || "unknown",
+    source,
+    status,
+    baseline_assessment_id: baselineAssessment?.id || null,
+    baseline_assessment_title: baselineAssessment?.title || null,
+    completed_attempt_id: completed ? attempt.id : previous.completed_attempt_id || null,
+    completed_at: completed ? (attempt.submitted_at || previous.completed_at || now.toISOString()) : null,
+    reminder_count: reminderCount,
+    last_notified_at: dueNow && markReminderSeen ? now.toISOString() : previous.last_notified_at || null,
+    next_reminder_at: completed ? null : (dueNow && markReminderSeen ? ngNextBaselineReminderAt({ now, reminderCount, settings }) : previous.next_reminder_at || now.toISOString()),
+    created_at: previous.created_at || now.toISOString(),
+    updated_at: now.toISOString(),
+  };
+  db.adaptiveAssignments[key] = assignment;
+  profile.baseline_status = completed ? "completed" : status;
+  profile.baseline_assessment_id = baselineAssessment?.id || profile.baseline_assessment_id || null;
+  profile.updated_at = now.toISOString();
+  db.weakAreaProfiles[profile.id] = profile;
+  const notification = !completed && dueNow ? {
+    type: status === "missing_template" ? "baseline_missing_template" : "baseline_due",
+    title: status === "missing_template" ? "Baseline assessment is being prepared" : "Complete your baseline diagnostic",
+    message: status === "missing_template"
+      ? "Your baseline weak-area assessment is being prepared by the LMS team. It will appear here when published."
+      : "Take your baseline diagnostic so the LMS can measure your starting mastery and target your weak systems.",
+    assessment_id: baselineAssessment?.id || null,
+    action_label: baselineAssessment?.id ? "Start baseline" : "Waiting for LMS team",
+    action_url: baselineAssessment?.id ? `/student/assessments/${baselineAssessment.id}` : "/student/assessments",
+    next_reminder_at: assignment.next_reminder_at,
+    reminder_count: assignment.reminder_count,
+  } : null;
+  return { profile, assignment, baseline_assessment: baselineAssessment, attempt, notification };
+}
+
+function ngBaselineSourceTextForCourse(db, { courseId }) {
+  const course = db.courses?.[String(courseId)] || {};
+  const roadmap = db.roadmaps?.[String(courseId)] || Object.values(db.roadmaps || {}).find((item) => String(item.course_id || item.id || "") === String(courseId));
+  const days = Array.isArray(roadmap?.days) ? roadmap.days : [];
+  const lines = [];
+  lines.push(`Course: ${course.name || course.title || "NextGen USMLE Course"}`);
+  if (course.description) lines.push(`Description: ${course.description}`);
+  for (const day of days.slice(0, 80)) {
+    lines.push([
+      `Day ${day.day_number || day.order || ""}`,
+      day.system || day.chapter || "",
+      day.title || "",
+      day.first_aid_topics || day.live_teaching_topic || "",
+      day.first_aid_pages || day.fa_pages || "",
+      day.uworld_target || "",
+    ].filter(Boolean).join(" — "));
+  }
+  return lines.filter(Boolean).join("\n");
+}
+
+function ngPublishedFlashcardsForDay(db, { courseId, dayId }) {
+  return Object.values(db.flashcards || {}).filter((card) =>
+    String(card.course_id || "") === String(courseId || "") &&
+    String(card.roadmap_day_id || "") === String(dayId || "") &&
+    card.status !== "archived" &&
+    card.is_published !== false
+  );
+}
+
+function ngEnsureFlashcardTaskOnDay(day, count = NEXTGEN_DEFAULT_ADAPTIVE_SETTINGS.required_daily_flashcards) {
+  if (!day) return;
+  day.flashcards_required_count = Number(day.flashcards_required_count || count || NEXTGEN_DEFAULT_ADAPTIVE_SETTINGS.required_daily_flashcards);
+  day.session_flashcards_ready = true;
+  day.session_flashcards_count = Number(count || day.session_flashcards_count || 0);
+  ngEnsureTaskItemOnDay(day, "first_aid_flashcards_reviewed", `Review ${day.flashcards_required_count} assigned flashcards.`);
 }
 // -----------------------------------------------------------------------------
 // AI Foundation: Notes Cleanup + Assessment Question Generation
@@ -4496,9 +4990,11 @@ app.post("/admin/assessments/generate-from-source", async (req, res) => {
       body: req.body || {},
     });
 
+    const blockConfig = ngNormalizeAssessmentBlockConfig(req.body || {});
+
     const result = await generateQuestionsWithAI({
       sourceText,
-      questionCount: req.body.question_count,
+      questionCount: blockConfig.question_count,
       difficulty: req.body.difficulty || "mixed",
       questionType: req.body.question_type || "mcq",
       metadata: {
@@ -8030,10 +8526,367 @@ app.post("/admin/roadmap/sync-live-sessions", async (req, res) => {
 app.post("/roadmap/progress/mark", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); const { course_id, day_id, completed = true } = req.body; const db = await readLiveDb(); const key = `${course_id}:${user.id}:${day_id}`; db.roadmapProgress[key] = { id: key, course_id, user_id: user.id, day_id, completed: Boolean(completed), completed_at: completed ? new Date().toISOString() : null, updated_at: new Date().toISOString() }; const leaderboard = updateLeaderboard(db, { courseId: course_id, userId: user.id, userName: user.name || user.email || "Student" }); await writeLiveDb(db); res.json({ success: true, progress: db.roadmapProgress[key], summary: buildProgressSummary({ db, courseId: course_id, userId: user.id }), leaderboard }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.get("/roadmap/progress/me", async (req, res) => { try { const { user } = await getAuthenticatedUser(req); const db = await readLiveDb(); res.json({ success: true, summary: buildProgressSummary({ db, courseId: req.query.course_id, userId: user.id }), progress_items: Object.values(db.roadmapProgress || {}).filter((x) => String(x.course_id) === String(req.query.course_id) && String(x.user_id) === String(user.id)) }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 
-app.post("/admin/assessments/create", async (req, res) => { try { const { user } = await requireLmsPermission(req, "lms.assessments.create"); const { course_id, session_id = null, title, description = "", source_type = "manual_notes", question_count = 10, duration_minutes = null, topic = "Assessment" } = req.body; if (!course_id) return res.status(400).json({ success: false, error: "course_id is required" }); const db = await readLiveDb(); const notes = session_id ? db.notes[session_id] : null; const id = uuid(); const sourceNoteIds = session_id && notes ? [session_id] : []; const assessment = { id, course_id, session_id, title: title || `${topic} Assessment`, description, source_type, source_note_ids: sourceNoteIds, source_session_ids: session_id ? [session_id] : [], source_summary: session_id ? `Manual draft linked to session ${session_id}` : "Manual draft assessment", question_count: Number(question_count), duration_minutes, questions: createDraftQuestions({ question_count, topic }), is_published: false, status: "draft", created_by: user.id, created_by_name: user.name || user.email || "Tutor", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), published_at: null }; db.assessments[id] = assessment; await writeLiveDb(db); res.json({ success: true, assessment }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.get("/student/weak-area-profile", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const courseId = String(req.query.course_id || req.query.courseId || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+
+    const access = ngCourseFeatureAccess(db, user, { courseId, featureKey: "assessments" });
+    if (!access.allowed) return ngBlockLockedFeature(res, "assessments", access.reason);
+
+    const enrollment = getBackendEnrollment(db, { userId: user.id, courseId });
+    const onboarding = ngEnsureBaselineOnboarding(db, {
+      courseId,
+      user,
+      enrollment,
+      source: "weak_area_profile_load",
+      markReminderSeen: false,
+      existingStudent: !ngEnrollmentLooksNew(enrollment),
+    });
+    await writeLiveDb(db);
+
+    res.json({
+      success: true,
+      profile: ngSanitizeWeakAreaProfile(onboarding.profile, ngGetAdaptiveSettings(db, courseId)),
+      assignment: onboarding.assignment,
+      baseline_assessment: onboarding.baseline_assessment ? sanitizeAssessmentForStudent(onboarding.baseline_assessment, onboarding.attempt) : null,
+      settings: ngGetAdaptiveSettings(db, courseId),
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+
+app.get("/student/adaptive/onboarding", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const courseId = String(req.query.course_id || req.query.courseId || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+
+    const access = ngCourseFeatureAccess(db, user, { courseId, featureKey: "assessments" });
+    if (!access.allowed) return ngBlockLockedFeature(res, "assessments", access.reason);
+
+    const enrollment = getBackendEnrollment(db, { userId: user.id, courseId });
+    const settings = ngGetAdaptiveSettings(db, courseId);
+    const isDemo = enrollment?.is_demo === true;
+    const isNew = ngEnrollmentLooksNew(enrollment);
+    const automaticAllowed = isDemo
+      ? settings.auto_assign_baseline_demo_students !== false
+      : isNew
+        ? settings.auto_assign_baseline_new_students !== false
+        : settings.auto_assign_baseline_existing_students !== false;
+
+    if (!automaticAllowed) {
+      const profile = ngEnsureWeakAreaProfile(db, { courseId, user, existingStudent: !isNew });
+      await writeLiveDb(db);
+      return res.json({ success: true, automatic: false, profile: ngSanitizeWeakAreaProfile(profile, settings), assignment: null, notification: null, settings });
+    }
+
+    const result = ngEnsureBaselineOnboarding(db, {
+      courseId,
+      user,
+      enrollment,
+      source: isDemo ? "demo_onboarding" : isNew ? "new_student_onboarding" : "existing_student_auto_onboarding",
+      markReminderSeen: req.query.preview !== "true",
+      existingStudent: !isNew,
+    });
+
+    await writeLiveDb(db);
+    res.json({
+      success: true,
+      automatic: true,
+      course_id: courseId,
+      profile: ngSanitizeWeakAreaProfile(result.profile, settings),
+      assignment: result.assignment,
+      baseline_assessment: result.baseline_assessment ? sanitizeAssessmentForStudent(result.baseline_assessment, result.attempt) : null,
+      notification: result.notification,
+      settings,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/adaptive/settings", async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const courseId = String(req.query.course_id || req.query.courseId || "global").trim() || "global";
+    res.json({ success: true, course_id: courseId, settings: ngGetAdaptiveSettings(db, courseId) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/adaptive/settings", async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    db.adaptiveSettings = db.adaptiveSettings || {};
+    const courseId = String(req.body.course_id || req.body.courseId || "global").trim() || "global";
+    const allowed = [
+      "required_daily_flashcards", "adaptive_daily_flashcards", "normal_daily_cap", "catchup_daily_cap",
+      "baseline_block_count", "baseline_questions_per_block", "baseline_duration_per_block_minutes",
+      "baseline_initial_reminder_hours", "baseline_daily_reminder_count", "baseline_later_reminder_days",
+      "auto_assign_baseline_new_students", "auto_assign_baseline_demo_students", "auto_assign_baseline_existing_students",
+      "mastery_label_new_baseline", "mastery_label_existing_baseline", "mastery_label_current", "mastery_label_improvement"
+    ];
+    const next = { ...(db.adaptiveSettings[courseId] || {}) };
+    for (const key of allowed) {
+      if (req.body[key] !== undefined) next[key] = req.body[key];
+    }
+    db.adaptiveSettings[courseId] = next;
+    await writeLiveDb(db);
+    res.json({ success: true, course_id: courseId, settings: ngGetAdaptiveSettings(db, courseId) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+
+app.get("/admin/adaptive/baseline-audit", async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const courseId = String(req.query.course_id || req.query.courseId || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    const baseline = ngFindBaselineAssessment(db, { courseId });
+    const activeEnrollments = Object.values(db.enrollments || {}).filter((enrollment) => {
+      if (String(enrollment.course_id || "") !== courseId) return false;
+      if (enrollment.access_granted === false) return false;
+      const user = db.users?.[String(enrollment.user_id || "")];
+      return Boolean(user?.id);
+    });
+    const rows = activeEnrollments.map((enrollment) => {
+      const user = db.users[String(enrollment.user_id)];
+      const assignment = db.adaptiveAssignments?.[ngAdaptiveAssignmentKey(courseId, user.id, "baseline_diagnostic")] || null;
+      const attempt = baseline ? ngGetAttemptForAssessmentUser(db, { assessmentId: baseline.id, userId: user.id }) : null;
+      return {
+        user_id: user.id,
+        name: user.name || user.email,
+        email: user.email,
+        enrollment_type: enrollment.is_demo ? "demo" : "paid",
+        assignment_status: assignment?.status || (baseline ? "not_assigned_yet" : "missing_template"),
+        reminder_count: Number(assignment?.reminder_count || 0),
+        next_reminder_at: assignment?.next_reminder_at || null,
+        completed: Boolean(attempt && ngIsAssessmentAttemptSubmitted(attempt)),
+        attempt_id: attempt?.id || null,
+      };
+    });
+    res.json({
+      success: true,
+      course_id: courseId,
+      baseline_exists: Boolean(baseline?.id),
+      baseline_assessment: baseline ? sanitizeAssessmentForStudent(baseline, null) : null,
+      message: baseline?.id ? "Baseline diagnostic exists." : "Baseline diagnostic missing — Generate now.",
+      enrolled_students: rows.length,
+      pending_count: rows.filter((row) => !row.completed).length,
+      completed_count: rows.filter((row) => row.completed).length,
+      rows,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/adaptive/generate-baseline-diagnostic", async (req, res) => {
+  try {
+    const { user } = await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const courseId = String(req.body.course_id || req.body.courseId || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    const settings = ngGetAdaptiveSettings(db, courseId);
+    const existing = ngFindBaselineAssessment(db, { courseId });
+    if (existing?.id && req.body.force_new !== true) {
+      return res.json({ success: true, created: false, assessment: existing, message: "Baseline diagnostic already exists for this course." });
+    }
+    const cfg = ngNormalizeAssessmentBlockConfig({
+      block_mode: true,
+      block_count: req.body.block_count ?? settings.baseline_block_count,
+      questions_per_block: req.body.questions_per_block ?? settings.baseline_questions_per_block,
+      duration_per_block_minutes: req.body.duration_per_block_minutes ?? settings.baseline_duration_per_block_minutes,
+    });
+    const sourceText = String(req.body.source_text || ngBaselineSourceTextForCourse(db, { courseId }) || "").trim();
+    let questions = [];
+    let warnings = [];
+    let aiUsage = null;
+    let aiModel = null;
+    if (sourceText.length >= 300 && isAIConfigured()) {
+      const ai = await generateQuestionsWithAI({
+        sourceText,
+        questionCount: cfg.total_questions,
+        difficulty: req.body.difficulty || "mixed",
+        questionType: "mcq",
+        metadata: { course_id: courseId, assessment_type: "baseline_diagnostic", block_count: cfg.block_count, questions_per_block: cfg.questions_per_block },
+      });
+      questions = ai.questions || [];
+      warnings = ai.warnings || [];
+      aiUsage = ai.usage || null;
+      aiModel = ai.model || null;
+    } else if (!isAIConfigured()) {
+      warnings.push("AI is not configured, so a draft baseline shell was created. Add questions before publishing.");
+    } else {
+      warnings.push("Not enough source text to generate questions, so a draft baseline shell was created. Add course roadmap/source text or questions before publishing.");
+    }
+    const id = uuid();
+    const assessment = ngApplyAssessmentBlockMetadata({
+      id,
+      course_id: courseId,
+      title: req.body.title || "Baseline Weak-Area Diagnostic",
+      description: req.body.description || "Initial diagnostic to measure system mastery and personalize flashcards.",
+      source_type: "baseline_diagnostic",
+      assessment_type: "baseline",
+      adaptive_baseline: true,
+      system: "Mixed Systems",
+      topic: "Baseline diagnostic",
+      questions,
+      is_published: questions.length > 0 && req.body.publish !== false,
+      created_by: user.id,
+      updated_by: user.id,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      ai_usage: aiUsage,
+      ai_model: aiModel,
+      warnings,
+    }, cfg);
+    assessment.published_at = assessment.is_published ? new Date().toISOString() : null;
+    db.assessments[id] = assessment;
+    await writeLiveDb(db);
+    res.json({ success: true, created: true, assessment, warnings, published: assessment.is_published, message: assessment.is_published ? "Baseline diagnostic generated and published." : "Baseline diagnostic draft created. Add questions before publishing." });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/adaptive/backfill-weak-profiles", async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const courseId = String(req.body.course_id || req.body.courseId || "").trim();
+    const dryRun = req.body.dry_run !== false;
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+
+    const activeEnrollments = Object.values(db.enrollments || {}).filter((enrollment) => {
+      if (String(enrollment.course_id || "") !== courseId) return false;
+      if (enrollment.access_granted === false) return false;
+      const user = db.users?.[String(enrollment.user_id || "")];
+      return Boolean(user?.id);
+    });
+
+    const actions = [];
+    for (const enrollment of activeEnrollments) {
+      const user = db.users[String(enrollment.user_id)];
+      const key = ngWeakProfileKey(courseId, user.id);
+      const exists = Boolean(db.weakAreaProfiles?.[key]);
+      const userAttempts = Object.values(db.assessmentAttempts || {}).filter((attempt) => String(attempt.course_id || "") === courseId && String(attempt.user_id || "") === String(user.id));
+      actions.push({ user_id: user.id, email: user.email, name: user.name || user.email, profile_exists: exists, existing_attempts: userAttempts.length, action: exists ? "refresh_existing_profile" : "create_starting_profile" });
+      if (!dryRun) {
+        ngEnsureBaselineOnboarding(db, {
+          courseId,
+          user,
+          enrollment,
+          source: "admin_existing_student_backfill",
+          markReminderSeen: false,
+          existingStudent: true,
+        });
+        for (const attempt of userAttempts) {
+          const assessment = db.assessments?.[String(attempt.assessment_id || "")];
+          if (assessment) ngUpdateWeakAreaProfileFromAttempt(db, { assessment, attempt, user });
+        }
+      }
+    }
+
+    if (!dryRun) await writeLiveDb(db);
+    res.json({ success: true, dry_run: dryRun, course_id: courseId, active_enrollments: activeEnrollments.length, to_create: actions.filter((a) => a.action === "create_starting_profile").length, to_refresh: actions.filter((a) => a.action === "refresh_existing_profile").length, actions });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/assessments/create", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.assessments.create");
+    const {
+      course_id,
+      session_id = null,
+      title,
+      description = "",
+      source_type = "manual_notes",
+      topic = "Assessment",
+      questions = null,
+      system = "",
+      assessment_type = "regular",
+    } = req.body;
+
+    if (!course_id) return res.status(400).json({ success: false, error: "course_id is required" });
+
+    const db = await readLiveDb();
+    const notes = session_id ? db.notes[session_id] : null;
+    const id = uuid();
+    const sourceNoteIds = session_id && notes ? [session_id] : [];
+    const blockConfig = ngNormalizeAssessmentBlockConfig(req.body || {});
+    const questionList = Array.isArray(questions) && questions.length
+      ? questions
+      : createDraftQuestions({ question_count: blockConfig.question_count, topic });
+
+    const assessment = ngApplyAssessmentBlockMetadata({
+      id,
+      course_id,
+      session_id,
+      title: title || `${topic} Assessment`,
+      description,
+      source_type,
+      assessment_type,
+      system: system || topic || "",
+      source_note_ids: sourceNoteIds,
+      source_session_ids: session_id ? [session_id] : [],
+      source_summary: session_id ? `Manual draft linked to session ${session_id}` : "Manual draft assessment",
+      questions: questionList,
+      is_published: false,
+      status: "draft",
+      created_by: user.id,
+      created_by_name: user.name || user.email || "Tutor",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      published_at: null,
+    }, blockConfig);
+
+    db.assessments[id] = assessment;
+    await writeLiveDb(db);
+    res.json({ success: true, assessment });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message });
+  }
+});
 app.get("/admin/assessments", async (req, res) => { try { await requireLmsPermission(req, "lms.assessments.view"); const db = await readLiveDb(); let items = Object.values(db.assessments || {}); if (req.query.course_id) items = items.filter((a) => String(a.course_id) === String(req.query.course_id)); if (req.query.session_id) items = items.filter((a) => String(a.session_id || "") === String(req.query.session_id)); items.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || ""))); res.json({ success: true, count: items.length, assessments: items }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.get("/admin/assessments/:assessmentId", async (req, res) => { try { await requireLmsPermission(req, "lms.assessments.view"); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a) return res.status(404).json({ success: false, error: "Assessment not found" }); res.json({ success: true, assessment: a }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
-app.patch("/admin/assessments/:assessmentId", async (req, res) => { try { await requireLmsPermission(req, "lms.assessments.create"); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a) return res.status(404).json({ success: false, error: "Assessment not found" }); const allowed = ["title", "description", "source_type", "source_summary", "source_note_ids", "source_session_ids", "source_roadmap_day_ids", "duration_minutes", "questions"]; for (const k of allowed) if (req.body[k] !== undefined) a[k] = req.body[k]; a.question_count = Array.isArray(a.questions) ? a.questions.length : a.question_count; a.updated_at = new Date().toISOString(); await writeLiveDb(db); res.json({ success: true, assessment: a }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.patch("/admin/assessments/:assessmentId", async (req, res) => {
+  try {
+    await requireLmsPermission(req, "lms.assessments.create");
+    const db = await readLiveDb();
+    const a = db.assessments[req.params.assessmentId];
+    if (!a) return res.status(404).json({ success: false, error: "Assessment not found" });
+
+    const allowed = [
+      "title", "description", "source_type", "source_summary", "source_note_ids",
+      "source_session_ids", "source_roadmap_day_ids", "duration_minutes",
+      "duration_per_block_minutes", "block_mode", "block_count", "questions_per_block",
+      "assessment_type", "system", "topic", "questions"
+    ];
+    for (const k of allowed) if (req.body[k] !== undefined) a[k] = req.body[k];
+
+    ngApplyAssessmentBlockMetadata(a, { ...a, ...(req.body || {}) });
+    a.updated_at = new Date().toISOString();
+    await writeLiveDb(db);
+    res.json({ success: true, assessment: a });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message });
+  }
+});
 app.post("/admin/assessments/:assessmentId/publish", async (req, res) => { try { const { user } = await requireLmsPermission(req, "lms.assessments.publish"); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a) return res.status(404).json({ success: false, error: "Assessment not found" }); const invalid = (a.questions || []).find((q) => !q.stem || !Array.isArray(q.options) || q.options.length < 2 || q.correct_index === undefined); if (req.body.is_published !== false && invalid) return res.status(400).json({ success: false, error: "Assessment has incomplete questions" }); a.is_published = req.body.is_published !== false; a.published_at = a.is_published ? new Date().toISOString() : null; a.published_by = a.is_published ? user.id : null; a.updated_at = new Date().toISOString(); await writeLiveDb(db); res.json({ success: true, assessment: a }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.delete("/admin/assessments/:assessmentId", async (req, res) => { try { await requireLmsPermission(req, "lms.assessments.delete"); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a) return res.status(404).json({ success: false, error: "Assessment not found" }); delete db.assessments[req.params.assessmentId]; await writeLiveDb(db); res.json({ success: true, deleted_assessment: a }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.get("/student/assessments", async (req, res) => {
@@ -8140,6 +8993,13 @@ app.post("/student/assessments/:assessmentId/submit", async (req, res) => {
       score: graded.score,
       total: graded.total,
       percentage: graded.percentage,
+      block_mode: Boolean(assessment.block_mode),
+      block_count: Number(assessment.block_count || 1),
+      questions_per_block: Number(assessment.questions_per_block || assessment.question_count || graded.total || 0),
+      duration_per_block_minutes: assessment.duration_per_block_minutes || null,
+      total_duration_minutes: assessment.total_duration_minutes || assessment.duration_minutes || null,
+      by_system: graded.by_system || {},
+      by_topic: graded.by_topic || {},
       graded_answers: graded.graded,
       submitted_at: now,
       auto_submitted: Boolean(req.body.auto_submitted),
@@ -8154,6 +9014,19 @@ app.post("/student/assessments/:assessmentId/submit", async (req, res) => {
     };
 
     db.assessmentAttempts[key] = attempt;
+
+    ngUpdateWeakAreaProfileFromAttempt(db, { assessment, attempt, user });
+
+    if (assessment.adaptive_baseline === true || String(assessment.assessment_type || assessment.source_type || "").toLowerCase().includes("baseline")) {
+      ngEnsureBaselineOnboarding(db, {
+        courseId: assessment.course_id,
+        user,
+        enrollment: getBackendEnrollment(db, { userId: user.id, courseId: assessment.course_id }),
+        source: "baseline_assessment_submitted",
+        markReminderSeen: false,
+        existingStudent: false,
+      });
+    }
 
     const assessmentType = String(assessment.assessment_type || assessment.source_type || "").toLowerCase();
     const roadmapDayId = assessment.roadmap_day_id || assessment.day_id || null;
@@ -40683,10 +41556,36 @@ app.post("/student/flashcards/:id/review", async (req, res) => {
         ? "first_aid_flashcards_reviewed"
         : "flashcards_reviewed";
 
-    if (day) ngUpsertTaskCompletion(db, { courseId, userId: user.id, userName: user.name || user.email || "Student", day, taskKey, completed: true, metadata: { flashcard_id: card.id, confidence: req.body.confidence || null } });
+    let flashcardTaskCompleted = false;
+    let reviewedRequiredCount = 1;
+    let requiredFlashcardCount = 1;
+
+    if (day) {
+      const dayCards = ngPublishedFlashcardsForDay(db, { courseId, dayId: day.id });
+      const requiredPool = dayCards.filter((item) => !item.user_id || String(item.user_id) === String(user.id));
+      const reviewedSet = new Set(Object.values(db.flashcardProgress || {})
+        .filter((progress) => String(progress.course_id) === String(courseId) && String(progress.user_id) === String(user.id) && progress.reviewed)
+        .map((progress) => String(progress.flashcard_id)));
+      reviewedRequiredCount = requiredPool.filter((item) => reviewedSet.has(String(item.id))).length;
+      requiredFlashcardCount = Math.min(Number(day.flashcards_required_count || ngGetAdaptiveSettings(db, courseId).required_daily_flashcards || 15), Math.max(1, requiredPool.length));
+      flashcardTaskCompleted = reviewedRequiredCount >= requiredFlashcardCount;
+
+      if (flashcardTaskCompleted) {
+        ngUpsertTaskCompletion(db, {
+          courseId,
+          userId: user.id,
+          userName: user.name || user.email || "Student",
+          day,
+          taskKey,
+          completed: true,
+          metadata: { flashcard_id: card.id, confidence: req.body.confidence || null, reviewed_count: reviewedRequiredCount, required_count: requiredFlashcardCount },
+        });
+      }
+    }
+
     const leaderboard = courseId ? updateLeaderboard(db, { courseId, userId: user.id, userName: user.name || user.email || "Student" }) : null;
     await writeLiveDb(db);
-    res.json({ success: true, progress: db.flashcardProgress[key], task_key: taskKey, leaderboard });
+    res.json({ success: true, progress: db.flashcardProgress[key], task_key: taskKey, task_completed: flashcardTaskCompleted, reviewed_count: reviewedRequiredCount, required_count: requiredFlashcardCount, leaderboard });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
@@ -40722,6 +41621,170 @@ app.post("/admin/qid-library/import", async (req, res) => {
     await writeLiveDb(db);
     res.json({ success: true, course_id: courseId, lectures: rows.length, qids: rows.reduce((sum, row) => sum + row.qids.length, 0), qid_library: db.qidLibrary[courseId] });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+function ngFlashcardSourceTextForAdmin(db, crmDb, { courseId, day, system, topic, qids, resourceSource, extraContext = "" }) {
+  const cleanSource = String(resourceSource || "first_aid_training").trim();
+  const parts = [];
+  const dayContext = day ? [
+    `Roadmap day: ${day.title || ""}`,
+    `System: ${day.system || system || ""}`,
+    `Topic: ${day.first_aid_topics || day.topic || topic || ""}`,
+    `Book pages: ${day.first_aid_pages || day.fa_pages || ""}`,
+    `Lecture: ${day.video_library_lecture || day.lecture_title || ""}`,
+    `QIDs: ${(day.uworld_qids || day.mapped_uworld_qids || qids || []).join(", ")}`,
+    `Homework: ${day.homework || ""}`,
+  ].filter(Boolean).join("
+") : "";
+
+  if (cleanSource === "roadmap_day") parts.push(dayContext);
+
+  if (cleanSource === "class_notes" || cleanSource === "transcript") {
+    const sessionId = day?.live_session_id || day?.session_id || day?.session_notes_id || "";
+    const note = sessionId ? db.notes?.[String(sessionId)] : null;
+    const noteText = cleanSource === "transcript"
+      ? String(note?.transcript_text || note?.transcript_raw_vtt || note?.transcript || "").trim()
+      : String(note?.student_notes || note?.cleaned_notes || note?.notes || note?.content || "").trim();
+    if (noteText) parts.push(noteText);
+    else parts.push(dayContext);
+  }
+
+  if (cleanSource === "wrong_qids") {
+    parts.push(`Weak QIDs / wrong QID review: ${(qids || []).join(", ")}`);
+    parts.push(dayContext);
+  }
+
+  if (cleanSource === "custom_resource") parts.push(extraContext);
+
+  if (cleanSource === "first_aid_training") {
+    parts.push(dayContext);
+    parts.push(ngTrainingTextForFlashcards(crmDb, { system, topic, weakConcept: "", qids }));
+  }
+
+  if (!parts.filter(Boolean).length) {
+    parts.push(dayContext);
+    parts.push(extraContext);
+    parts.push(ngTrainingTextForFlashcards(crmDb, { system, topic, weakConcept: "", qids }));
+  }
+
+  return parts.filter(Boolean).join("
+
+---
+
+");
+}
+
+function ngBuildFlashcardAudit(db, { courseId }) {
+  const days = ngGetRoadmapDaysForCourse(db, courseId).filter((day) => day.is_published !== false);
+  const settings = ngGetAdaptiveSettings(db, courseId);
+  return days.map((day) => {
+    const cards = Object.values(db.flashcards || {}).filter((card) =>
+      String(card.course_id || "") === String(courseId || "") &&
+      String(card.roadmap_day_id || "") === String(day.id || "") &&
+      card.status !== "archived"
+    );
+    const published = cards.filter((card) => card.is_published !== false && card.status !== "draft");
+    const drafts = cards.filter((card) => card.is_published === false || card.status === "draft");
+    const required = Number(day.flashcards_required_count || settings.required_daily_flashcards || 15);
+    return {
+      course_id: courseId,
+      roadmap_day_id: day.id,
+      day_id: day.id,
+      day_number: day.day_number || null,
+      date: day.date || null,
+      system: day.system || day.chapter || "",
+      topic: day.first_aid_topics || day.live_teaching_topic || day.title || "",
+      title: day.title || `Day ${day.day_number || ""}`,
+      qids: ngNormalizeQidList(day.uworld_qids || day.mapped_uworld_qids || day.qids || day.uworld_target),
+      required_count: required,
+      published_count: published.length,
+      draft_count: drafts.length,
+      total_count: cards.length,
+      missing: published.length < required,
+      student_visible: published.length > 0,
+      task_connected: ngGetTaskItems(day).some((task) => ["first_aid_flashcards_reviewed", "session_flashcards_reviewed", "flashcards_reviewed"].includes(task.key)),
+      suggested_count: Math.max(0, required - published.length),
+      resource_source: "first_aid_training",
+    };
+  });
+}
+
+app.get("/admin/flashcards/audit", async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const courseId = String(req.query.course_id || req.query.courseId || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    const rows = ngBuildFlashcardAudit(db, { courseId });
+    res.json({ success: true, course_id: courseId, count: rows.length, missing_count: rows.filter((row) => row.missing).length, audit: rows });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/flashcards/generate-missing", async (req, res) => {
+  try {
+    const { user } = await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const crmDb = await readCrmDb();
+    const courseId = String(req.body.course_id || req.body.courseId || "").trim();
+    const dayId = String(req.body.roadmap_day_id || req.body.day_id || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    if (!dayId) return res.status(400).json({ success: false, error: "roadmap_day_id is required" });
+
+    const day = ngFindRoadmapDay(db, { courseId, dayId });
+    if (!day) return res.status(404).json({ success: false, error: "Roadmap day not found" });
+
+    const auditRow = ngBuildFlashcardAudit(db, { courseId }).find((row) => String(row.roadmap_day_id) === dayId);
+    const settings = ngGetAdaptiveSettings(db, courseId);
+    const needed = Math.max(1, Number(req.body.count || auditRow?.suggested_count || settings.required_daily_flashcards || 15));
+    const system = String(day.system || day.chapter || req.body.system || "").trim();
+    const topic = String(day.first_aid_topics || day.live_teaching_topic || day.title || system || "General").trim();
+    const qids = ngNormalizeQidList(day.uworld_qids || day.mapped_uworld_qids || day.qids || day.uworld_target);
+    const resourceSource = String(req.body.resource_source || auditRow?.resource_source || "first_aid_training").trim();
+    const trainingText = ngFlashcardSourceTextForAdmin(db, crmDb, { courseId, day, system, topic, qids, resourceSource, extraContext: req.body.resource_text || "" });
+    const result = await ngGenerateFlashcardsWithAI({ trainingText, system, topic, weakConcept: "", qids, count: needed });
+    const created = [];
+
+    for (const card of result.cards.slice(0, needed)) {
+      const cardId = uuid();
+      db.flashcards[cardId] = {
+        id: cardId,
+        course_id: courseId,
+        user_id: null,
+        roadmap_day_id: day.id,
+        day_number: day.day_number || null,
+        week_number: day.week_number || null,
+        system,
+        topic: card.tag || topic,
+        front: card.front,
+        back: card.back,
+        explanation: card.explanation || "",
+        tag: card.tag || topic,
+        difficulty: req.body.difficulty || card.difficulty || "medium",
+        scope: "official_daily",
+        source: result.model === "fallback-local" ? "admin_local_flashcard_generator" : "admin_ai_flashcard_generator",
+        resource_source: resourceSource,
+        qids,
+        weak_concept: "",
+        due_date: day.date || todayKey(),
+        status: "published",
+        is_published: true,
+        created_by: user.id,
+        updated_by: user.id,
+        created_at: nowIso(),
+        updated_at: nowIso(),
+      };
+      created.push(db.flashcards[cardId]);
+    }
+
+    ngEnsureFlashcardTaskOnDay(day, Math.max(Number(day.flashcards_required_count || 0), created.length, settings.required_daily_flashcards || 15));
+    await writeLiveDb(db);
+    const freshAudit = ngBuildFlashcardAudit(db, { courseId }).find((row) => String(row.roadmap_day_id) === dayId) || null;
+    res.json({ success: true, count: created.length, flashcards: created, audit: freshAudit, warnings: result.warnings || [], ai_model: result.model, training_context_used: trainingText.length > 0 });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
 });
 
 app.get("/flashcards", async (req, res) => {
@@ -40781,11 +41844,15 @@ app.post("/admin/flashcards/generate", async (req, res) => {
     const resourceSource = String(req.body.resource_source || req.body.resource || "first_aid_training").trim();
     const extraContext = String(req.body.resource_text || req.body.context || req.body.first_aid_context || "").trim();
 
-    const trainingText = [
-      day ? `Roadmap day: ${day.title || ""}\nSystem: ${day.system || ""}\nTopic: ${day.first_aid_topics || day.topic || ""}\nBook pages: ${day.first_aid_pages || ""}\nLecture: ${day.video_library_lecture || day.lecture_title || ""}\nQIDs: ${(day.uworld_qids || []).join(", ")}\nHomework: ${day.homework || ""}` : "",
+    const trainingText = ngFlashcardSourceTextForAdmin(db, crmDb, {
+      courseId,
+      day,
+      system,
+      topic,
+      qids,
+      resourceSource,
       extraContext,
-      ngTrainingTextForFlashcards(crmDb, { system, topic, weakConcept: req.body.weak_concept || "", qids }),
-    ].filter(Boolean).join("\n\n---\n\n");
+    });
 
     const result = await ngGenerateFlashcardsWithAI({ trainingText, system, topic, weakConcept: req.body.weak_concept || "", qids, count });
     const publishNow = req.body.publish === true || req.body.is_published === true;
@@ -40820,8 +41887,12 @@ app.post("/admin/flashcards/generate", async (req, res) => {
       created.push(db.flashcards[cardId]);
     }
 
+    if (day && publishNow) {
+      ngEnsureFlashcardTaskOnDay(day, Math.max(Number(day.flashcards_required_count || 0), created.length, ngGetAdaptiveSettings(db, courseId).required_daily_flashcards || 15));
+    }
+
     await writeLiveDb(db);
-    res.json({ success: true, count: created.length, flashcards: created, warnings: result.warnings || [], ai_model: result.model, saved_as: publishNow ? "published" : "draft", training_context_used: trainingText.length > 0 });
+    res.json({ success: true, count: created.length, flashcards: created, warnings: result.warnings || [], ai_model: result.model, saved_as: publishNow ? "published" : "draft", training_context_used: trainingText.length > 0, audit: day ? (ngBuildFlashcardAudit(db, { courseId }).find((row) => String(row.roadmap_day_id) === String(day.id)) || null) : null });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
