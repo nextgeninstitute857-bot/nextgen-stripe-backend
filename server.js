@@ -41634,8 +41634,7 @@ function ngFlashcardSourceTextForAdmin(db, crmDb, { courseId, day, system, topic
     `Lecture: ${day.video_library_lecture || day.lecture_title || ""}`,
     `QIDs: ${(day.uworld_qids || day.mapped_uworld_qids || qids || []).join(", ")}`,
     `Homework: ${day.homework || ""}`,
-  ].filter(Boolean).join("
-") : "";
+  ].filter(Boolean).join("\n") : "";
 
   if (cleanSource === "roadmap_day") parts.push(dayContext);
 
@@ -41667,11 +41666,7 @@ function ngFlashcardSourceTextForAdmin(db, crmDb, { courseId, day, system, topic
     parts.push(ngTrainingTextForFlashcards(crmDb, { system, topic, weakConcept: "", qids }));
   }
 
-  return parts.filter(Boolean).join("
-
----
-
-");
+  return parts.filter(Boolean).join("\n\n---\n\n");
 }
 
 function ngBuildFlashcardAudit(db, { courseId }) {
