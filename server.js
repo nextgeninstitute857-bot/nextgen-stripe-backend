@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v176-access-live-baseline-dashboard-permanent-fix";
+const NEXTGEN_BACKEND_BUILD = "v177-dashboard-mastery-support-live-assessment-fix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -385,6 +385,7 @@ const DEFAULT_LIVE_DB = {
   courses: {},
   liveSessions: {},
   announcements: {},
+  announcementDismissals: {},
 
   recordings: {},
   notes: {},
@@ -489,6 +490,7 @@ async function readLiveDb() {
       courses: parsed.courses || {},
       liveSessions: parsed.liveSessions || {},
       announcements: parsed.announcements || {},
+      announcementDismissals: parsed.announcementDismissals || {},
       recordings: parsed.recordings || {},
       notes: parsed.notes || {},
       attendance: parsed.attendance || {},
@@ -1509,6 +1511,9 @@ function normalizeLiveSessionPayload(body = {}, existing = {}) {
     meeting_password: body.meeting_password ?? existing.meeting_password ?? null,
     zoom_meeting_url: body.zoom_meeting_url ?? existing.zoom_meeting_url ?? null,
     recording_url: body.recording_url ?? existing.recording_url ?? null,
+    cancelled_reason: body.cancelled_reason ?? existing.cancelled_reason ?? null,
+    archived_from_active: body.archived_from_active ?? existing.archived_from_active ?? false,
+    no_class_placeholder: body.no_class_placeholder ?? existing.no_class_placeholder ?? false,
   };
 }
 
@@ -1531,6 +1536,9 @@ function sanitizeLiveSession(session) {
     zoom_meeting_url: session.zoom_meeting_url || null,
     recording_url: session.recording_url || null,
     roadmap_day_id: session.roadmap_day_id || null,
+    cancelled_reason: session.cancelled_reason || null,
+    archived_from_active: Boolean(session.archived_from_active),
+    no_class_placeholder: Boolean(session.no_class_placeholder),
     created_by: session.created_by || null,
     updated_by: session.updated_by || null,
     created_at: session.created_at || null,
@@ -1545,12 +1553,66 @@ function sanitizeAnnouncement(item) {
     content: item.content || "",
     course_id: item.course_id || null,
     status: item.status || "active",
+    type: item.type || item.announcement_type || "general",
+    priority: item.priority || "normal",
+    action_url: item.action_url || item.actionUrl || null,
+    action_label: item.action_label || item.actionLabel || null,
+    dismissible: item.dismissible !== false,
+    metadata: item.metadata || {},
     created_by: item.created_by || null,
     updated_by: item.updated_by || null,
     created_at: item.created_at || item.created || null,
     updated_at: item.updated_at || null,
     created: item.created_at || item.created || null,
   };
+}
+
+function ngAnnouncementDismissalKey(userId, announcementId) {
+  return `${String(userId || "").trim()}:${String(announcementId || "").trim()}`;
+}
+
+function ngFilterDismissedAnnouncements(db = {}, userId = "", items = []) {
+  const dismissals = db.announcementDismissals || {};
+  return (items || []).filter((item) => !dismissals[ngAnnouncementDismissalKey(userId, item.id)]);
+}
+
+function ngUpsertCourseAnnouncement(db, payload = {}) {
+  db.announcements = db.announcements || {};
+  const now = new Date().toISOString();
+  const notificationKey = String(payload.notification_key || payload.key || "").trim();
+  const existing = notificationKey
+    ? Object.values(db.announcements || {}).find((item) => {
+        return String(item?.metadata?.notification_key || item?.notification_key || "") === notificationKey &&
+          String(item.status || "active") === "active";
+      })
+    : null;
+
+  const id = existing?.id || uuid();
+  const item = {
+    ...(existing || {}),
+    id,
+    title: String(payload.title || existing?.title || "Class Update").trim(),
+    content: String(payload.content || existing?.content || "Your schedule has been updated.").trim(),
+    course_id: payload.course_id || existing?.course_id || null,
+    status: payload.status || existing?.status || "active",
+    type: payload.type || existing?.type || "general",
+    priority: payload.priority || existing?.priority || "normal",
+    action_url: payload.action_url || existing?.action_url || null,
+    action_label: payload.action_label || existing?.action_label || null,
+    dismissible: payload.dismissible !== false,
+    metadata: {
+      ...(existing?.metadata || {}),
+      ...(payload.metadata || {}),
+      ...(notificationKey ? { notification_key: notificationKey } : {}),
+    },
+    created_by: existing?.created_by || payload.created_by || null,
+    updated_by: payload.updated_by || payload.created_by || existing?.updated_by || null,
+    created_at: existing?.created_at || now,
+    updated_at: now,
+  };
+
+  db.announcements[id] = item;
+  return item;
 }
 
 function sortNewestFirst(a, b) {
@@ -4102,7 +4164,31 @@ function applyReleasedAssessmentAttemptToLeaderboard(db, attempt, assessment = n
 
 function createDraftQuestions({ question_count = 10, topic = "Assessment" }) {
   const count = Math.max(1, Math.min(80, Number(question_count || 10)));
-  return Array.from({ length: count }).map((_, i) => ({ id: `q${i + 1}`, stem: `Draft MCQ ${i + 1}: edit this question for ${topic}.`, options: ["Option A", "Option B", "Option C", "Option D"], correct_index: 0, explanation: "Add explanation before publishing.", topic, difficulty: "medium" }));
+  const cleanTopic = String(topic || "Assessment").trim() || "Assessment";
+  return Array.from({ length: count }).map((_, i) => ({
+    id: `q${i + 1}`,
+    stem: `A patient presents with a clinical finding related to ${cleanTopic}. After reviewing the relevant physiology/pathology in the source material, which answer best explains the finding?`,
+    options: [
+      `Correct mechanism from ${cleanTopic}`,
+      `Plausible but incorrect mechanism`,
+      `Opposite physiologic change`,
+      `Unrelated associated finding`,
+      `Common distractor diagnosis`,
+    ],
+    correct_index: 0,
+    explanation: "Replace this draft with a source-grounded explanation before publishing. Explain why the correct choice is best and why each distractor is wrong.",
+    wrong_choice_explanations: [
+      "This option should be correct after editing.",
+      "Explain why this distractor is wrong.",
+      "Explain why this distractor is wrong.",
+      "Explain why this distractor is wrong.",
+      "Explain why this distractor is wrong.",
+    ],
+    topic: cleanTopic,
+    system: cleanTopic,
+    difficulty: i % 3 === 0 ? "hard" : "medium",
+    style: "original_usmle_vignette_draft",
+  }));
 }
 function gradeAssessment(assessment, answers = {}) {
   let score = 0;
@@ -4867,22 +4953,23 @@ function normalizeAIQuestions(inputQuestions = []) {
             optionsObject.B,
             optionsObject.C,
             optionsObject.D,
+            optionsObject.E,
           ];
 
       const cleanOptions = optionsArray
         .map((item) => String(item || "").trim())
         .filter(Boolean)
-        .slice(0, 4);
+        .slice(0, 5);
 
-      while (cleanOptions.length < 4) {
+      while (cleanOptions.length < 5) {
         cleanOptions.push(`Option ${String.fromCharCode(65 + cleanOptions.length)}`);
       }
 
       const correctLetter = String(question.correct_answer || "A").trim().toUpperCase();
-      const letterMap = { A: 0, B: 1, C: 2, D: 3 };
+      const letterMap = { A: 0, B: 1, C: 2, D: 3, E: 4 };
       const correctIndex =
         Number.isInteger(question.correct_index)
-          ? Math.max(0, Math.min(3, Number(question.correct_index)))
+          ? Math.max(0, Math.min(4, Number(question.correct_index)))
           : letterMap[correctLetter] ?? 0;
 
       return {
@@ -4896,14 +4983,20 @@ function normalizeAIQuestions(inputQuestions = []) {
         options: cleanOptions,
         correct_index: correctIndex,
         explanation: String(question.explanation || "").trim(),
+        wrong_choice_explanations: Array.isArray(question.wrong_choice_explanations)
+          ? question.wrong_choice_explanations.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 5)
+          : [],
+        tested_concept: String(question.tested_concept || question.concept || "").trim(),
+        system: String(question.system || question.subject || "General").trim(),
         topic: String(question.topic || question.source_lecture_name || "General").trim(),
         difficulty: String(question.difficulty || "medium").trim().toLowerCase(),
         points: Number(question.points || 1) || 1,
         source_lecture_id: question.source_lecture_id || null,
         source_lecture_name: question.source_lecture_name || null,
+        style: question.style || "original_usmle_vignette",
       };
     })
-    .filter((question) => question.stem && question.options.length >= 4);
+    .filter((question) => question.stem && question.options.length >= 5);
 }
 
 async function cleanNotesWithAI({ sourceText, sourceType, metadata = {} }) {
@@ -4964,18 +5057,26 @@ async function generateQuestionsWithAI({
   const count = Math.max(1, Math.min(50, Number(questionCount || 10)));
 
   const systemPrompt = `
-You are generating original USMLE-style assessment questions for NextGen USMLE.
+You are generating original USMLE Step 1 assessment questions for NextGen USMLE.
+
+Style target:
+- Original USMLE/NBME-style clinical vignette, not short recall.
+- Do NOT copy or paraphrase proprietary question-bank wording.
+- Use exam-style reasoning similar in rigor to commercial QBank questions, but the wording must be fully original.
 
 Rules:
-- Use only the provided source material.
-- Do not invent facts.
-- Do not copy proprietary question-bank content.
-- Do not use outside question bank wording.
+- Use only the provided source material and standard in-source concepts; do not invent unsupported facts.
+- Prefer long clinical stems with age, sex, presenting symptom, relevant history, physical exam, labs/vitals/imaging when appropriate.
+- Test mechanism, diagnosis, next best explanation, pathology, pharmacology, physiology, or ethics reasoning.
+- Avoid giveaway wording and avoid asking directly for a memorized fact unless the source is too limited.
+- Each question must have exactly 5 options: A, B, C, D, E.
+- Each option must be plausible and medically coherent.
+- Each question must have one best answer.
+- Include a clear explanation for the correct answer.
+- Include concise wrong-choice explanations for all options.
+- Include system, topic, tested_concept, and difficulty.
 - If there is not enough material, generate fewer questions and include a warning.
 - Return strict JSON only.
-- Each question must have A, B, C, D options.
-- Each question must have one correct answer.
-- Each explanation must be grounded in the provided source.
 `.trim();
 
   const userPrompt = `
@@ -4993,10 +5094,15 @@ Return JSON exactly in this shape:
         "A": "...",
         "B": "...",
         "C": "...",
-        "D": "..."
+        "D": "...",
+        "E": "..."
       },
       "correct_answer": "A",
       "explanation": "...",
+      "wrong_choice_explanations": ["A: ...", "B: ...", "C: ...", "D: ...", "E: ..."],
+      "system": "...",
+      "topic": "...",
+      "tested_concept": "...",
       "difficulty": "medium",
       "points": 1
     }
@@ -6093,6 +6199,44 @@ app.get("/announcements", async (req, res) => {
     announcements.sort(sortNewestFirst);
     res.json({ success: true, count: announcements.length, announcements });
   } catch (e) { res.status(500).json({ success: false, error: e.message || "Failed to load announcements" }); }
+});
+
+app.get("/student/announcements", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const courseId = String(req.query.course_id || "").trim();
+    let announcements = Object.values(db.announcements || {})
+      .map(sanitizeAnnouncement)
+      .filter((a) => String(a.status || "active") === "active");
+    if (courseId) announcements = announcements.filter((a) => !a.course_id || String(a.course_id) === courseId);
+    announcements = ngFilterDismissedAnnouncements(db, user.id, announcements).sort(sortNewestFirst);
+    res.json({ success: true, count: announcements.length, announcements });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to load student announcements" });
+  }
+});
+
+app.post("/student/announcements/:announcementId/dismiss", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const announcementId = String(req.params.announcementId || "").trim();
+    const item = db.announcements?.[announcementId];
+    if (!item) return res.status(404).json({ success: false, error: "Announcement not found" });
+    db.announcementDismissals = db.announcementDismissals || {};
+    const key = ngAnnouncementDismissalKey(user.id, announcementId);
+    db.announcementDismissals[key] = {
+      id: key,
+      user_id: user.id,
+      announcement_id: announcementId,
+      dismissed_at: new Date().toISOString(),
+    };
+    await writeLiveDb(db);
+    res.json({ success: true, dismissed: true, announcement: sanitizeAnnouncement(item) });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to dismiss announcement" });
+  }
 });
 
 app.get("/admin/announcements", async (req, res) => {
@@ -9770,9 +9914,13 @@ app.get("/student/dashboard/bootstrap", async (req, res) => {
       .map((course) => ngBuildStudentCourseBundle(db, user, course, { sessionLimit: 5 }))
       .filter(Boolean);
     const primary = bundles[0] || null;
-    const announcements = Object.values(db.announcements || {})
-      .map(sanitizeAnnouncement)
-      .filter((item) => item.status !== "archived" && item.status !== "inactive" && (!item.course_id || !primary?.course?.id || String(item.course_id) === String(primary.course.id)))
+    const announcements = ngFilterDismissedAnnouncements(
+      db,
+      user.id,
+      Object.values(db.announcements || {})
+        .map(sanitizeAnnouncement)
+        .filter((item) => String(item.status || "active") === "active" && (!item.course_id || !primary?.course?.id || String(item.course_id) === String(primary.course.id)))
+    )
       .sort(sortNewestFirst)
       .slice(0, Number(req.query.announcement_limit || 5));
     const leaderboard = primary?.course?.id
@@ -40856,6 +41004,8 @@ function ngSyncLinkedLiveSessionsForRoadmap(db, roadmap, options = {}) {
 
       session.status = "cancelled";
       session.cancelled_reason = day.status === "holiday" ? "roadmap_holiday" : "roadmap_cancelled";
+      session.archived_from_active = true;
+      session.no_class_placeholder = true;
       session.roadmap_day_id = day.id;
       session.scheduled_date = day.date || session.scheduled_date || null;
       session.scheduled_time = ngRoadmapClassTime(roadmap, day);
@@ -41314,8 +41464,34 @@ app.post("/admin/roadmap/:dayId/push-status", async (req, res) => {
     if (!["holiday", "cancelled"].includes(status)) return res.status(400).json({ success: false, error: "status must be holiday or cancelled" });
     const ref = ngFindAdminRoadmapDayRef(db, { courseId: req.body.course_id || req.query.course_id, dayId: req.params.dayId });
     if (!ref.roadmap || !ref.day) return res.status(404).json({ success: false, error: "Roadmap item not found" });
+
     const originalDayId = String(ref.day.id || "").trim();
-    const originalContent = {
+    const reason = String(req.body.reason || req.body.description || (status === "holiday" ? "Tutor is unavailable today." : "Class cancelled.")).trim();
+    const notificationKey = `roadmap_${status}:${ref.courseId}:${originalDayId}`;
+
+    if (ngRoadmapDayIsNoClass(ref.day) && ref.day.pushed_content_day_id) {
+      const movedDay = ref.roadmap.days.find((day) => String(day.id || "") === String(ref.day.pushed_content_day_id || "")) || null;
+      const liveSessionSync = ngSyncLinkedLiveSessionsForRoadmap(db, ref.roadmap, { actorId: user.id });
+      const announcement = ngUpsertCourseAnnouncement(db, {
+        notification_key: notificationKey,
+        course_id: ref.courseId,
+        type: "class_update",
+        priority: "high",
+        title: status === "holiday" ? "Class holiday / tutor unavailable" : "Class cancelled / content pushed",
+        content: `${ref.day.title || "Today's class"} is already marked ${status}. The planned content has been pushed to ${movedDay?.date || "the next teaching day"}. ${reason}`.trim(),
+        action_url: "/student/live-sessions",
+        action_label: "View updated schedule",
+        created_by: user.id,
+        updated_by: user.id,
+        metadata: { roadmap_day_id: originalDayId, pushed_content_day_id: ref.day.pushed_content_day_id || null, already_pushed: true },
+      });
+      if (liveSessionSync.changed) db.roadmaps[ref.courseId] = ref.roadmap;
+      await writeLiveDb(db);
+      return res.json({ success: true, status, pushed: false, already_pushed: true, roadmap: ref.roadmap, days: ref.roadmap.days.map(sanitizeRoadmapDay), live_session_sync: liveSessionSync, announcement: sanitizeAnnouncement(announcement), message: "This roadmap day was already pushed. No duplicate pushed session was created." });
+    }
+
+    const existingPushedContent = ref.roadmap.days.find((day) => String(day.pushed_from_day_id || day.original_day_id || "") === originalDayId && !ngRoadmapDayIsNoClass(day)) || null;
+    const originalContent = existingPushedContent || {
       ...ref.day,
       id: `${ref.courseId}:day:pushed:${uuid()}`,
       pushed_from_day_id: originalDayId,
@@ -41327,11 +41503,12 @@ app.post("/admin/roadmap/:dayId/push-status", async (req, res) => {
       updated_at: new Date().toISOString(),
       updated_by: user.id,
     };
+
     const placeholderTitle = status === "holiday" ? "Holiday / No Live Class" : "Cancelled / Content Pushed";
     ref.roadmap.days[ref.index] = ngClearNoClassRoadmapFields({
       ...ref.day,
       title: req.body.title || placeholderTitle,
-      description: req.body.description || (status === "holiday" ? "No academic task today. The planned content has been pushed to the next teaching day." : "Class cancelled. The planned content has been pushed to the next teaching day."),
+      description: reason || (status === "holiday" ? "No academic task today. The planned content has been pushed to the next teaching day." : "Class cancelled. The planned content has been pushed to the next teaching day."),
       status,
       roadmap_status: status,
       is_schedule_placeholder: true,
@@ -41340,7 +41517,9 @@ app.post("/admin/roadmap/:dayId/push-status", async (req, res) => {
       updated_by: user.id,
       updated_at: new Date().toISOString(),
     });
-    ref.roadmap.days.splice(ref.index + 1, 0, originalContent);
+
+    if (!existingPushedContent) ref.roadmap.days.splice(ref.index + 1, 0, originalContent);
+
     const skipSundays = ref.roadmap.skip_sundays !== false && ref.roadmap.settings?.skip_sundays !== false;
     const startDate = ref.roadmap.start_date || ref.roadmap.settings?.start_date || ref.roadmap.days[0]?.date || todayKey();
     ngRecalculateRoadmapSchedule(db, ref.roadmap, { startDate, skipSundays });
@@ -41352,9 +41531,22 @@ app.post("/admin/roadmap/:dayId/push-status", async (req, res) => {
       actorId: user.id,
     });
     const liveSessionSync = ngSyncLinkedLiveSessionsForRoadmap(db, ref.roadmap, { actorId: user.id });
+    const announcement = ngUpsertCourseAnnouncement(db, {
+      notification_key: notificationKey,
+      course_id: ref.courseId,
+      type: "class_update",
+      priority: "high",
+      title: status === "holiday" ? "Class holiday / tutor unavailable" : "Class cancelled / content pushed",
+      content: `${ref.day.title || "Today's class"} has been marked ${status === "holiday" ? "holiday/tutor unavailable" : "cancelled"}. Your roadmap has been shifted and the replacement session is now scheduled for ${movedContentDay?.date || "the next teaching day"}. ${reason}`.trim(),
+      action_url: "/student/live-sessions",
+      action_label: "View updated schedule",
+      created_by: user.id,
+      updated_by: user.id,
+      metadata: { roadmap_day_id: originalDayId, pushed_content_day_id: originalContent.id, replacement_date: movedContentDay?.date || null, status },
+    });
     db.roadmaps[ref.courseId] = ref.roadmap;
     await writeLiveDb(db);
-    res.json({ success: true, status, pushed: true, roadmap: ref.roadmap, days: ref.roadmap.days.map(sanitizeRoadmapDay), dependency_sync: dependencySync, live_session_sync: liveSessionSync, message: `${status} added and following content, live sessions, notes, flashcards, assessments, progress, and leaderboard links were pushed forward.` });
+    res.json({ success: true, status, pushed: true, roadmap: ref.roadmap, days: ref.roadmap.days.map(sanitizeRoadmapDay), dependency_sync: dependencySync, live_session_sync: liveSessionSync, announcement: sanitizeAnnouncement(announcement), message: `${status} added and following content, live sessions, notes, flashcards, assessments, progress, and leaderboard links were pushed forward.` });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
