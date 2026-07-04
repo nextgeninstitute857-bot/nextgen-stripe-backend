@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v175b-adaptive-onboarding-baseline-reminders";
+const NEXTGEN_BACKEND_BUILD = "v176-access-live-baseline-dashboard-permanent-fix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -312,6 +312,7 @@ const LIVE_DB_PATH = path.join(DATA_DIR, "live-session-db.json");
 app.use("/media", express.static(MEDIA_DIR, { maxAge: "30d", fallthrough: true }));
 const DEFAULT_TIMEZONE = "America/New_York";
 const DEFAULT_ZOOM_DURATION_MINUTES = 120;
+const NEXTGEN_CLASSROOM_OPEN_MINUTES_BEFORE = 3;
 const PENDING_ZOOM_PREFIX = "PENDING_ZOOM_";
 
 
@@ -4149,6 +4150,7 @@ const NEXTGEN_DEFAULT_ADAPTIVE_SETTINGS = {
   baseline_questions_per_block: 20,
   baseline_duration_per_block_minutes: 30,
   baseline_initial_reminder_hours: 24,
+  baseline_dismiss_reminder_minutes: 10,
   baseline_daily_reminder_count: 3,
   baseline_later_reminder_days: 3,
   auto_assign_baseline_new_students: true,
@@ -4364,13 +4366,128 @@ function ngIsAssessmentAttemptSubmitted(attempt) {
 }
 
 function ngNextBaselineReminderAt({ now = new Date(), reminderCount = 0, settings = {} }) {
-  const dailyCount = Math.max(1, Number(settings.baseline_daily_reminder_count || NEXTGEN_DEFAULT_ADAPTIVE_SETTINGS.baseline_daily_reminder_count));
-  if (Number(reminderCount || 0) < dailyCount) {
-    const hours = Math.max(1, Number(settings.baseline_initial_reminder_hours || NEXTGEN_DEFAULT_ADAPTIVE_SETTINGS.baseline_initial_reminder_hours));
-    return addDays(now, hours / 24).toISOString();
+  // v176: if a student dismisses/skips baseline, remind again after 10 minutes.
+  // Longer 24h/72h reminder rules were too weak for new/demo students during onboarding.
+  const minutes = Math.max(1, Number(settings.baseline_dismiss_reminder_minutes || NEXTGEN_DEFAULT_ADAPTIVE_SETTINGS.baseline_dismiss_reminder_minutes || 10));
+  return new Date(now.getTime() + minutes * 60 * 1000).toISOString();
+}
+
+function ngCreateDefaultBaselineQuestions({ courseName = "NextGen USMLE", totalQuestions = 40 } = {}) {
+  const bank = [
+    { system: "Cardiology", topic: "Pressure-volume loops", stem: "A patient has increased left ventricular end-diastolic volume with reduced ejection fraction after chronic hypertension. Which change best explains the reduced stroke volume?", options: ["Decreased myocardial contractility", "Decreased afterload", "Increased venous compliance", "Increased aortic valve area"], correct_index: 0, explanation: "Reduced contractility lowers stroke volume and ejection fraction." },
+    { system: "Cardiology", topic: "Murmurs", stem: "A harsh systolic murmur radiates to the carotids and increases with squatting. Which lesion is most likely?", options: ["Aortic stenosis", "Mitral valve prolapse", "Hypertrophic cardiomyopathy", "Tricuspid regurgitation"], correct_index: 0, explanation: "Aortic stenosis classically radiates to the carotids and increases with increased preload." },
+    { system: "MSK", topic: "Bone remodeling", stem: "A drug that prevents osteoclast-mediated bone resorption most directly inhibits which cell lineage?", options: ["Monocyte-macrophage lineage", "Osteoblast lineage", "Chondrocyte lineage", "Fibroblast lineage"], correct_index: 0, explanation: "Osteoclasts arise from the monocyte-macrophage lineage." },
+    { system: "MSK", topic: "Rheumatology", stem: "Morning stiffness, symmetric MCP/PIP joint pain, and anti-CCP antibodies most strongly suggest which diagnosis?", options: ["Rheumatoid arthritis", "Osteoarthritis", "Gout", "Pseudogout"], correct_index: 0, explanation: "Anti-CCP is highly specific for rheumatoid arthritis." },
+    { system: "Central Nervous System", topic: "Stroke localization", stem: "Weakness of the right face and arm with expressive aphasia most likely localizes to which artery territory?", options: ["Left middle cerebral artery", "Right anterior cerebral artery", "Basilar artery", "Posterior cerebral artery"], correct_index: 0, explanation: "Dominant MCA stroke causes contralateral face/arm weakness and aphasia." },
+    { system: "Central Nervous System", topic: "Basal ganglia", stem: "Bradykinesia, resting tremor, and rigidity are most associated with loss of dopaminergic neurons in which region?", options: ["Substantia nigra pars compacta", "Caudate nucleus", "Subthalamic nucleus", "Red nucleus"], correct_index: 0, explanation: "Parkinson disease involves degeneration of substantia nigra pars compacta." },
+    { system: "Reproductive", topic: "Pregnancy hormones", stem: "A hormone produced by syncytiotrophoblast maintains the corpus luteum during early pregnancy. Which hormone is this?", options: ["hCG", "Estriol", "Oxytocin", "Prolactin"], correct_index: 0, explanation: "hCG maintains the corpus luteum early in pregnancy." },
+    { system: "Reproductive", topic: "Embryology", stem: "Failure of testicular descent is associated with increased risk of which condition?", options: ["Infertility and testicular cancer", "Prostate cancer", "Hypospadias only", "Varicocele only"], correct_index: 0, explanation: "Cryptorchidism increases infertility and testicular cancer risk." },
+    { system: "Endocrinology", topic: "Diabetes", stem: "A patient with diabetic ketoacidosis has high anion gap metabolic acidosis due primarily to accumulation of which compounds?", options: ["Ketone bodies", "Lactate from sepsis", "Uremic toxins", "Salicylate metabolites"], correct_index: 0, explanation: "DKA causes accumulation of beta-hydroxybutyrate and acetoacetate." },
+    { system: "Endocrinology", topic: "Thyroid", stem: "Heat intolerance, weight loss, tremor, and low TSH most strongly suggest which physiologic state?", options: ["Primary hyperthyroidism", "Primary hypothyroidism", "Secondary adrenal insufficiency", "Primary hypoparathyroidism"], correct_index: 0, explanation: "Low TSH with thyrotoxic symptoms suggests primary hyperthyroidism." },
+    { system: "GIT", topic: "Inflammatory bowel disease", stem: "Transmural bowel inflammation with fistula formation is most characteristic of which disease?", options: ["Crohn disease", "Ulcerative colitis", "Celiac disease", "Irritable bowel syndrome"], correct_index: 0, explanation: "Crohn disease is transmural and can form fistulas." },
+    { system: "GIT", topic: "Liver disease", stem: "A patient with cirrhosis develops confusion and asterixis. Which substance is most implicated?", options: ["Ammonia", "Bilirubin", "Albumin", "Bile salts"], correct_index: 0, explanation: "Hepatic encephalopathy is strongly associated with hyperammonemia." },
+    { system: "Renal", topic: "Nephritic syndrome", stem: "Hematuria with RBC casts most directly indicates inflammation involving which structure?", options: ["Glomerulus", "Collecting duct", "Ureter", "Bladder mucosa"], correct_index: 0, explanation: "RBC casts indicate glomerular bleeding/inflammation." },
+    { system: "Renal", topic: "Tubular transport", stem: "A loop diuretic primarily inhibits which transporter?", options: ["Na-K-2Cl cotransporter", "Na-Cl cotransporter", "ENaC", "Carbonic anhydrase"], correct_index: 0, explanation: "Loop diuretics inhibit NKCC2 in the thick ascending limb." },
+    { system: "Pulmonology", topic: "Obstructive disease", stem: "A smoker with reduced FEV1/FVC and increased lung compliance most likely has which disease?", options: ["Emphysema", "Pulmonary fibrosis", "Sarcoidosis", "Pleural effusion"], correct_index: 0, explanation: "Emphysema is obstructive and increases lung compliance." },
+    { system: "Pulmonology", topic: "Gas exchange", stem: "In pulmonary embolism, which V/Q pattern occurs in the affected region?", options: ["High V/Q", "Low V/Q", "Zero V/Q", "Normal V/Q"], correct_index: 0, explanation: "Ventilated but underperfused lung has high V/Q." },
+    { system: "Immunology", topic: "Hypersensitivity", stem: "Anaphylaxis mediated by IgE and mast cell degranulation is which hypersensitivity type?", options: ["Type I", "Type II", "Type III", "Type IV"], correct_index: 0, explanation: "IgE-mediated immediate hypersensitivity is type I." },
+    { system: "Immunology", topic: "Complement", stem: "Deficiency of C5-C9 predisposes most strongly to infection by which organism group?", options: ["Neisseria species", "Staphylococcus aureus", "Candida species", "Mycobacteria"], correct_index: 0, explanation: "Terminal complement deficiency predisposes to Neisseria." },
+    { system: "Hematology", topic: "Anemia", stem: "Microcytic anemia with low ferritin is most consistent with which diagnosis?", options: ["Iron deficiency anemia", "Beta-thalassemia trait", "Anemia of chronic disease", "Sideroblastic anemia"], correct_index: 0, explanation: "Low ferritin is highly suggestive of iron deficiency." },
+    { system: "Hematology", topic: "Coagulation", stem: "An isolated prolonged PT with normal PTT early in disease most suggests deficiency of which factor?", options: ["Factor VII", "Factor VIII", "Factor IX", "Factor XII"], correct_index: 0, explanation: "Factor VII has the shortest half-life and affects PT." },
+    { system: "Psychiatry", topic: "Defense mechanisms", stem: "A student who failed an exam says the room was too cold and the questions were unfair. Which defense mechanism is most likely?", options: ["Rationalization", "Projection", "Sublimation", "Reaction formation"], correct_index: 0, explanation: "Rationalization creates acceptable explanations for uncomfortable outcomes." },
+    { system: "Psychiatry", topic: "Mood disorders", stem: "Decreased need for sleep, pressured speech, grandiosity, and risky behavior for 1 week indicate which episode?", options: ["Manic episode", "Major depressive episode", "Panic attack", "Adjustment disorder"], correct_index: 0, explanation: "A manic episode lasts at least 1 week or requires hospitalization." },
+    { system: "Biochemistry", topic: "Lysosomal storage", stem: "Hexosaminidase A deficiency with cherry-red macula is most consistent with which disease?", options: ["Tay-Sachs disease", "Niemann-Pick disease", "Gaucher disease", "Fabry disease"], correct_index: 0, explanation: "Tay-Sachs is due to hexosaminidase A deficiency." },
+    { system: "Biochemistry", topic: "Metabolism", stem: "A child with musty body odor and intellectual disability has deficiency of which enzyme?", options: ["Phenylalanine hydroxylase", "Homogentisate oxidase", "Branched-chain alpha-ketoacid dehydrogenase", "Galactose-1-phosphate uridyltransferase"], correct_index: 0, explanation: "PKU is due to phenylalanine hydroxylase deficiency." },
+    { system: "Microbiology", topic: "Gram positive cocci", stem: "Catalase-positive, coagulase-positive gram-positive cocci in clusters most likely identify which organism?", options: ["Staphylococcus aureus", "Streptococcus pyogenes", "Enterococcus faecalis", "Streptococcus pneumoniae"], correct_index: 0, explanation: "S aureus is catalase and coagulase positive." },
+    { system: "Microbiology", topic: "Viruses", stem: "A virus with a circular partially double-stranded DNA genome and reverse transcriptase is which virus?", options: ["Hepatitis B virus", "Hepatitis C virus", "HIV", "EBV"], correct_index: 0, explanation: "HBV is a DNA virus that uses reverse transcriptase." },
+    { system: "Pharmacology", topic: "Autonomics", stem: "A medication that causes urinary retention, dry mouth, and blurry vision most likely blocks which receptor?", options: ["Muscarinic acetylcholine receptor", "Nicotinic acetylcholine receptor", "Alpha-1 receptor", "Beta-2 receptor"], correct_index: 0, explanation: "Antimuscarinic effects include urinary retention, dry mouth, and blurry vision." },
+    { system: "Pharmacology", topic: "Antibiotics", stem: "A drug that inhibits bacterial cell wall cross-linking by binding PBPs belongs to which class?", options: ["Beta-lactams", "Macrolides", "Aminoglycosides", "Tetracyclines"], correct_index: 0, explanation: "Beta-lactams bind PBPs and inhibit peptidoglycan cross-linking." },
+    { system: "Ethics", topic: "Autonomy", stem: "A competent adult refuses a recommended treatment after understanding risks and benefits. What is the best next step?", options: ["Respect the refusal", "Treat because it benefits the patient", "Ask family to override", "Discharge immediately without discussion"], correct_index: 0, explanation: "Autonomy requires respecting informed refusal by a competent patient." },
+    { system: "Ethics", topic: "Confidentiality", stem: "A patient asks that her diagnosis not be shared with her spouse. What should the physician do?", options: ["Respect confidentiality unless there is a specific legal exception", "Tell the spouse because family has a right to know", "Document only and avoid discussion", "Ask the spouse for permission"], correct_index: 0, explanation: "Confidentiality is maintained unless a legal/ethical exception applies." },
+    { system: "Biostatistics", topic: "Screening tests", stem: "A highly sensitive screening test is most useful for which purpose?", options: ["Ruling out disease when negative", "Confirming disease when positive", "Increasing prevalence", "Eliminating false positives"], correct_index: 0, explanation: "Sensitive tests are useful to rule out disease when negative." },
+    { system: "Biostatistics", topic: "Risk", stem: "A relative risk of 2 means what?", options: ["The exposed group has twice the risk", "The exposed group has half the risk", "The exposure is protective", "There is no association"], correct_index: 0, explanation: "RR 2 indicates doubled risk in the exposed group." },
+    { system: "Cardiology", topic: "Arrhythmias", stem: "Irregularly irregular rhythm with absent P waves on ECG most likely represents which arrhythmia?", options: ["Atrial fibrillation", "Atrial flutter", "Ventricular tachycardia", "First-degree AV block"], correct_index: 0, explanation: "Atrial fibrillation has irregularly irregular rhythm and absent P waves." },
+    { system: "GIT", topic: "Malabsorption", stem: "Dermatitis herpetiformis and villous atrophy after gluten exposure most likely indicate which disease?", options: ["Celiac disease", "Whipple disease", "Crohn disease", "Lactose intolerance"], correct_index: 0, explanation: "Celiac disease is associated with gluten sensitivity and dermatitis herpetiformis." },
+    { system: "Renal", topic: "Acid-base", stem: "Kussmaul respirations are a compensatory response to which disturbance?", options: ["Metabolic acidosis", "Metabolic alkalosis", "Respiratory acidosis", "Respiratory alkalosis"], correct_index: 0, explanation: "Deep rapid breathing lowers CO2 to compensate for metabolic acidosis." },
+    { system: "Pulmonology", topic: "Restrictive disease", stem: "Decreased TLC with a normal or increased FEV1/FVC ratio suggests which pattern?", options: ["Restrictive lung disease", "Obstructive lung disease", "Upper airway obstruction", "Normal spirometry"], correct_index: 0, explanation: "Restriction reduces TLC and preserves/increases FEV1/FVC." },
+    { system: "Immunology", topic: "T cells", stem: "CD8 T cells recognize antigen presented on which MHC class?", options: ["MHC class I", "MHC class II", "CD1", "HLA-DP only"], correct_index: 0, explanation: "CD8 T cells recognize peptide on MHC I." },
+    { system: "Hematology", topic: "Hemoglobin", stem: "Sickle cell disease results from which type of mutation in beta-globin?", options: ["Missense mutation", "Nonsense mutation", "Frameshift deletion", "Trinucleotide repeat expansion"], correct_index: 0, explanation: "Sickle cell disease is due to a missense mutation in beta-globin." },
+    { system: "Endocrinology", topic: "Adrenal", stem: "Hyperpigmentation, hypotension, hyponatremia, and hyperkalemia suggest failure of which gland?", options: ["Adrenal cortex", "Posterior pituitary", "Thyroid gland", "Parathyroid gland"], correct_index: 0, explanation: "Primary adrenal insufficiency causes low cortisol/aldosterone and high ACTH hyperpigmentation." },
+    { system: "Reproductive", topic: "Ovarian cycle", stem: "The LH surge is primarily triggered by sustained high levels of which hormone?", options: ["Estradiol", "Progesterone", "Inhibin B", "hCG"], correct_index: 0, explanation: "Sustained high estradiol triggers positive feedback and the LH surge." },
+  ];
+  const wanted = Math.max(1, Math.min(80, Number(totalQuestions || 40)));
+  const out = [];
+  for (let i = 0; i < wanted; i += 1) {
+    const q = bank[i % bank.length];
+    out.push({
+      id: `baseline_q${i + 1}`,
+      stem: q.stem,
+      options: q.options,
+      correct_index: q.correct_index,
+      explanation: q.explanation,
+      topic: q.topic,
+      system: q.system,
+      difficulty: i < 12 ? "medium" : i < 30 ? "mixed" : "hard",
+      block_number: Math.floor(i / 20) + 1,
+      course_context: courseName,
+    });
   }
-  const days = Math.max(1, Number(settings.baseline_later_reminder_days || NEXTGEN_DEFAULT_ADAPTIVE_SETTINGS.baseline_later_reminder_days));
-  return addDays(now, days).toISOString();
+  return out;
+}
+
+function ngEnsureBaselineAssessmentTemplate(db, { courseId, creatorId = "system" } = {}) {
+  if (!courseId) return null;
+  const existing = ngFindBaselineAssessment(db, { courseId });
+  if (existing?.id) return existing;
+  db.assessments = db.assessments || {};
+  const course = db.courses?.[String(courseId)] || {};
+  const settings = ngGetAdaptiveSettings(db, courseId);
+  const cfg = ngNormalizeAssessmentBlockConfig({
+    block_mode: true,
+    block_count: settings.baseline_block_count || 2,
+    questions_per_block: settings.baseline_questions_per_block || 20,
+    duration_per_block_minutes: settings.baseline_duration_per_block_minutes || 30,
+  });
+  const id = uuid();
+  const assessment = ngApplyAssessmentBlockMetadata({
+    id,
+    course_id: String(courseId),
+    title: "Baseline Weak-Area Diagnostic",
+    description: "Required starting diagnostic. Your result unlocks the real mastery profile and weak-area targeting.",
+    source_type: "baseline_diagnostic",
+    assessment_type: "baseline",
+    adaptive_baseline: true,
+    system: "Mixed Systems",
+    topic: "Baseline diagnostic",
+    questions: ngCreateDefaultBaselineQuestions({ courseName: course.name || course.title || "NextGen USMLE", totalQuestions: cfg.total_questions }),
+    is_published: true,
+    created_by: creatorId,
+    updated_by: creatorId,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    published_at: new Date().toISOString(),
+    warnings: ["v176 default baseline template created automatically because no baseline existed for this course."],
+  }, cfg);
+  db.assessments[id] = assessment;
+  return assessment;
+}
+
+function ngGetCourseLiveWindow(db = {}, courseId = "", { now = new Date() } = {}) {
+  const nowMs = now.getTime();
+  for (const session of Object.values(db.liveSessions || {})) {
+    if (!session?.id) continue;
+    if (String(session.course_id || "") !== String(courseId || "")) continue;
+    if (["cancelled", "completed"].includes(String(session.status || "").toLowerCase())) continue;
+    const start = getSessionStartUtc(session.scheduled_date, session.scheduled_time, session.scheduled_timezone || DEFAULT_TIMEZONE);
+    if (!start) continue;
+    const duration = Math.max(30, Number(session.duration_minutes || DEFAULT_ZOOM_DURATION_MINUTES) || DEFAULT_ZOOM_DURATION_MINUTES);
+    const openAt = start.getTime() - NEXTGEN_CLASSROOM_OPEN_MINUTES_BEFORE * 60 * 1000;
+    const closeAt = start.getTime() + duration * 60 * 1000;
+    if (nowMs >= openAt && nowMs <= closeAt) {
+      return { active: true, session_id: session.id, topic: session.topic || session.title || "Live class", opens_at: new Date(openAt).toISOString(), closes_at: new Date(closeAt).toISOString() };
+    }
+  }
+  return { active: false };
 }
 
 function ngEnrollmentLooksNew(enrollment) {
@@ -4387,7 +4504,7 @@ function ngEnsureBaselineOnboarding(db, { courseId, user, enrollment = null, sou
   const settings = ngGetAdaptiveSettings(db, courseId);
   const isExistingStudent = existingStudent === null ? !ngEnrollmentLooksNew(enrollment) : Boolean(existingStudent);
   const profile = ngEnsureWeakAreaProfile(db, { courseId, user, existingStudent: isExistingStudent });
-  const baselineAssessment = ngFindBaselineAssessment(db, { courseId });
+  const baselineAssessment = ngEnsureBaselineAssessmentTemplate(db, { courseId, creatorId: "adaptive_onboarding" });
   const attempt = baselineAssessment ? ngGetAttemptForAssessmentUser(db, { assessmentId: baselineAssessment.id, userId: user.id }) : null;
   const completed = Boolean(attempt && ngIsAssessmentAttemptSubmitted(attempt));
   const key = ngAdaptiveAssignmentKey(courseId, user.id, "baseline_diagnostic");
@@ -4423,7 +4540,8 @@ function ngEnsureBaselineOnboarding(db, { courseId, user, enrollment = null, sou
   profile.baseline_assessment_id = baselineAssessment?.id || profile.baseline_assessment_id || null;
   profile.updated_at = now.toISOString();
   db.weakAreaProfiles[profile.id] = profile;
-  const notification = !completed && dueNow ? {
+  const liveWindow = ngGetCourseLiveWindow(db, courseId);
+  const notification = !completed && dueNow && !liveWindow.active ? {
     type: status === "missing_template" ? "baseline_missing_template" : "baseline_due",
     title: status === "missing_template" ? "Baseline assessment is being prepared" : "Complete your baseline diagnostic",
     message: status === "missing_template"
@@ -4434,7 +4552,12 @@ function ngEnsureBaselineOnboarding(db, { courseId, user, enrollment = null, sou
     action_url: baselineAssessment?.id ? `/student/assessments/${baselineAssessment.id}` : "/student/assessments",
     next_reminder_at: assignment.next_reminder_at,
     reminder_count: assignment.reminder_count,
+    suppressed_during_live_class: false,
   } : null;
+  if (!completed && dueNow && liveWindow.active) {
+    assignment.next_reminder_at = new Date(new Date(liveWindow.closes_at || now.toISOString()).getTime() + 10 * 60 * 1000).toISOString();
+    db.adaptiveAssignments[key] = assignment;
+  }
   return { profile, assignment, baseline_assessment: baselineAssessment, attempt, notification };
 }
 
@@ -7262,10 +7385,10 @@ app.get(["/hcgi/api/live-class/:sessionId", "/live/classroom/:courseId/:sessionI
     if (!start) joinReason = "Session date/time is not configured correctly";
     else if (session.status === "completed") joinReason = "Session is completed";
     else {
-      const openAt = new Date(start.getTime() - 60 * 1000);
+      const openAt = new Date(start.getTime() - NEXTGEN_CLASSROOM_OPEN_MINUTES_BEFORE * 60 * 1000);
       joinOpensAt = openAt.toISOString();
       canJoin = Date.now() >= openAt.getTime();
-      if (!canJoin) joinReason = "Classroom opens 1 minute before class starts";
+      if (!canJoin) joinReason = `Classroom opens ${NEXTGEN_CLASSROOM_OPEN_MINUTES_BEFORE} minutes before class starts`;
     }
 
     if (canJoin && !hasRealZoomMeetingId(session.zoom_meeting_id) && isAdminOrInstructor(user, session)) {
@@ -7288,6 +7411,8 @@ app.get(["/hcgi/api/live-class/:sessionId", "/live/classroom/:courseId/:sessionI
       can_join: canJoin && hasZoom,
       join_reason: canJoin && hasZoom ? "Classroom is open" : joinReason || "Waiting for tutor to open classroom",
       join_opens_at: joinOpensAt,
+      join_opens_minutes_before: NEXTGEN_CLASSROOM_OPEN_MINUTES_BEFORE,
+      zoom_missing: canJoin && !hasZoom,
       session: {
         id: session.id,
         topic: session.topic,
@@ -8560,7 +8685,7 @@ app.get("/student/weak-area-profile", async (req, res) => {
 });
 
 
-app.get("/student/adaptive/onboarding", async (req, res) => {
+app.get(["/student/adaptive/onboarding", "/student/baseline/status", "/student/baseline"], async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req);
     const db = await readLiveDb();
@@ -8631,7 +8756,7 @@ app.post("/admin/adaptive/settings", async (req, res) => {
     const allowed = [
       "required_daily_flashcards", "adaptive_daily_flashcards", "normal_daily_cap", "catchup_daily_cap",
       "baseline_block_count", "baseline_questions_per_block", "baseline_duration_per_block_minutes",
-      "baseline_initial_reminder_hours", "baseline_daily_reminder_count", "baseline_later_reminder_days",
+      "baseline_initial_reminder_hours", "baseline_dismiss_reminder_minutes", "baseline_daily_reminder_count", "baseline_later_reminder_days",
       "auto_assign_baseline_new_students", "auto_assign_baseline_demo_students", "auto_assign_baseline_existing_students",
       "mastery_label_new_baseline", "mastery_label_existing_baseline", "mastery_label_current", "mastery_label_improvement"
     ];
@@ -8648,7 +8773,7 @@ app.post("/admin/adaptive/settings", async (req, res) => {
 });
 
 
-app.get("/admin/adaptive/baseline-audit", async (req, res) => {
+app.get(["/admin/adaptive/baseline-audit", "/admin/baseline/status", "/admin/baseline", "/admin/baseline-diagnostic", "/admin/baseline-diagnostics"], async (req, res) => {
   try {
     await requireAdminOrInstructor(req);
     const db = await readLiveDb();
@@ -8693,7 +8818,7 @@ app.get("/admin/adaptive/baseline-audit", async (req, res) => {
   }
 });
 
-app.post("/admin/adaptive/generate-baseline-diagnostic", async (req, res) => {
+app.post(["/admin/adaptive/generate-baseline-diagnostic", "/admin/baseline/generate"], async (req, res) => {
   try {
     const { user } = await requireAdminOrInstructor(req);
     const db = await readLiveDb();
@@ -8728,9 +8853,11 @@ app.post("/admin/adaptive/generate-baseline-diagnostic", async (req, res) => {
       aiUsage = ai.usage || null;
       aiModel = ai.model || null;
     } else if (!isAIConfigured()) {
-      warnings.push("AI is not configured, so a draft baseline shell was created. Add questions before publishing.");
+      questions = ngCreateDefaultBaselineQuestions({ courseName: db.courses?.[String(courseId)]?.name || "NextGen USMLE", totalQuestions: cfg.total_questions });
+      warnings.push("AI is not configured, so v176 created a published default baseline question set. Admin can edit these questions anytime.");
     } else {
-      warnings.push("Not enough source text to generate questions, so a draft baseline shell was created. Add course roadmap/source text or questions before publishing.");
+      questions = ngCreateDefaultBaselineQuestions({ courseName: db.courses?.[String(courseId)]?.name || "NextGen USMLE", totalQuestions: cfg.total_questions });
+      warnings.push("Not enough source text for AI generation, so v176 created a published default baseline question set. Admin can edit these questions anytime.");
     }
     const id = uuid();
     const assessment = ngApplyAssessmentBlockMetadata({
@@ -8944,6 +9071,23 @@ app.get("/student/assessments/:assessmentId/take", async (req, res) => {
     });
   } catch (e) {
     res.status(e.statusCode || 500).json({ success: false, error: e.message });
+  }
+});
+
+
+app.get(["/admin/weak-area-profile", "/admin/weak-areas"], async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const courseId = String(req.query.course_id || req.query.courseId || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    const settings = ngGetAdaptiveSettings(db, courseId);
+    const profiles = Object.values(db.weakAreaProfiles || {})
+      .filter((profile) => String(profile.course_id || "") === courseId)
+      .map((profile) => ngSanitizeWeakAreaProfile(profile, settings));
+    res.json({ success: true, course_id: courseId, count: profiles.length, profiles });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
 });
 
