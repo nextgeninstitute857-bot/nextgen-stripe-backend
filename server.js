@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v177e-assessment-submit-lock-review-explanation-fix";
+const NEXTGEN_BACKEND_BUILD = "v177h-flashcards-holiday-weakarea-auto-flow";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -9112,8 +9112,18 @@ async function saveNotesHandler(req, res) {
       publishMode: "save",
     });
 
+    let flashcard_sync = null;
+    if (db.notes[sessionId]?.published === true || db.notes[sessionId]?.is_published === true) {
+      const crmDb = await readCrmDb().catch(() => ({}));
+      flashcard_sync = await ngAutoGenerateFlashcardsFromPublishedNotes(db, crmDb, {
+        sessionId,
+        actorId: user.id || "notes_save_publish",
+        maxCards: 12,
+      }).catch((error) => ({ created: 0, error: error.message }));
+    }
+
     await writeLiveDb(db);
-    res.json({ success: true, message: "Notes saved successfully", notes: db.notes[sessionId] });
+    res.json({ success: true, message: "Notes saved successfully", notes: db.notes[sessionId], flashcard_sync });
   } catch (e) {
     res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to save notes" });
   }
@@ -9137,8 +9147,15 @@ async function publishNotesHandler(req, res) {
       publishMode: "publish",
     });
 
+    const crmDb = await readCrmDb().catch(() => ({}));
+    const flashcard_sync = await ngAutoGenerateFlashcardsFromPublishedNotes(db, crmDb, {
+      sessionId,
+      actorId: user.id || "notes_publish",
+      maxCards: 12,
+    }).catch((error) => ({ created: 0, error: error.message }));
+
     await writeLiveDb(db);
-    res.json({ success: true, message: "Notes published successfully", notes: db.notes[sessionId] });
+    res.json({ success: true, message: "Notes published successfully", notes: db.notes[sessionId], flashcard_sync });
   } catch (e) {
     res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to publish notes" });
   }
@@ -10534,6 +10551,15 @@ app.post("/student/assessments/:assessmentId/submit", async (req, res) => {
 
     ngUpdateWeakAreaProfileFromAttempt(db, { assessment, attempt, user });
 
+    const crmDb = await readCrmDb().catch(() => ({}));
+    const weak_flashcard_sync = await ngAutoGenerateWeakAreaFlashcardsFromAttempt(db, crmDb, {
+      attempt,
+      assessment,
+      actorId: "assessment_submit",
+      maxTargets: 6,
+      cardsPerTarget: 3,
+    }).catch((error) => ({ created: 0, error: error.message }));
+
     if (assessment.adaptive_baseline === true || String(assessment.assessment_type || assessment.source_type || "").toLowerCase().includes("baseline")) {
       ngEnsureBaselineOnboarding(db, {
         courseId: assessment.course_id,
@@ -10582,6 +10608,7 @@ app.post("/student/assessments/:assessmentId/submit", async (req, res) => {
       success: true,
       message: "Assessment submitted. Result is under admin review.",
       attempt: sanitizeAttemptForStudent(attempt),
+      weak_flashcard_sync,
     });
   } catch (e) {
     res.status(e.statusCode || 500).json({ success: false, error: e.message });
@@ -10687,6 +10714,12 @@ app.patch("/admin/assessment-attempts/:attemptId/review", async (req, res) => {
       attempt.reviewed_by = user.id;
       attempt.reviewed_at = new Date().toISOString();
       applyReleasedAssessmentAttemptToLeaderboard(db, attempt, db.assessments?.[attempt.assessment_id]);
+      const crmDb = await readCrmDb().catch(() => ({}));
+      await ngAutoGenerateWeakAreaFlashcardsFromAttempt(db, crmDb, {
+        attempt,
+        assessment: db.assessments?.[attempt.assessment_id],
+        actorId: user.id || "assessment_review_release",
+      }).catch((error) => console.warn("Weak-area flashcard sync failed:", error.message));
     } else {
       attempt.reviewed_by = user.id;
       attempt.reviewed_at = new Date().toISOString();
@@ -10720,6 +10753,12 @@ app.post("/admin/assessment-attempts/:attemptId/release", async (req, res) => {
     attempt.reviewed_at = new Date().toISOString();
 
     const leaderboard = applyReleasedAssessmentAttemptToLeaderboard(db, attempt, db.assessments?.[attempt.assessment_id]);
+    const crmDb = await readCrmDb().catch(() => ({}));
+    const weak_flashcard_sync = await ngAutoGenerateWeakAreaFlashcardsFromAttempt(db, crmDb, {
+      attempt,
+      assessment: db.assessments?.[attempt.assessment_id],
+      actorId: user.id || "assessment_release",
+    }).catch((error) => ({ created: 0, error: error.message }));
 
     db.assessmentAttempts[attempt.id] = attempt;
     await writeLiveDb(db);
@@ -10728,6 +10767,7 @@ app.post("/admin/assessment-attempts/:attemptId/release", async (req, res) => {
       success: true,
       attempt: sanitizeAttemptForAdmin(attempt, db),
       leaderboard,
+      weak_flashcard_sync,
     });
   } catch (e) {
     res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to release assessment result" });
@@ -43269,6 +43309,443 @@ function ngBuildFlashcardAudit(db, { courseId }) {
   });
 }
 
+
+
+function ngIsNoClassRoadmapDay(day = {}) {
+  const text = `${day.status || ""} ${day.title || ""} ${day.topic || ""} ${day.description || ""} ${day.live_teaching_topic || ""}`.toLowerCase();
+  return Boolean(
+    day.no_class_placeholder === true ||
+    day.is_no_class_day === true ||
+    day.is_schedule_placeholder === true ||
+    ["holiday", "cancelled", "no_class", "no-class"].includes(String(day.status || "").toLowerCase()) ||
+    text.includes("holiday / no live class") ||
+    text.includes("holiday/no live class") ||
+    text.includes("no live class") ||
+    text.includes("no class today") ||
+    text.includes("tutor unavailable")
+  );
+}
+
+function ngIsNoClassLiveSession(db, session = {}) {
+  const status = String(session.status || "").toLowerCase();
+  const text = `${session.topic || ""} ${session.title || ""} ${session.description || ""} ${session.cancelled_reason || ""}`.toLowerCase();
+  const day = ngFindRoadmapDayForLiveSession(db, session);
+  return Boolean(
+    session.no_class_placeholder === true ||
+    session.is_no_class_day === true ||
+    session.is_schedule_placeholder === true ||
+    ngIsNoClassRoadmapDay(day || {}) ||
+    ["holiday", "no_class", "no-class"].includes(status) ||
+    text.includes("holiday / no live class") ||
+    text.includes("holiday/no live class") ||
+    text.includes("no live class") ||
+    text.includes("no class today") ||
+    text.includes("tutor unavailable")
+  );
+}
+
+function ngFlashcardFingerprint(value = "") {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().slice(0, 180);
+}
+
+function ngFlashcardBucket(card = {}) {
+  const blob = `${card.scope || ""} ${card.source || ""} ${card.resource_source || ""} ${card.tag || ""} ${card.topic || ""}`.toLowerCase();
+  if (card.user_id || blob.includes("weak") || blob.includes("adaptive") || blob.includes("assessment")) return "weak_area";
+  if (blob.includes("note") || blob.includes("transcript") || blob.includes("session")) return "tutor_notes";
+  if (blob.includes("first") || blob.includes("roadmap") || blob.includes("official_daily") || blob.includes("daily_topic")) return "class_first_aid";
+  return "published_bank";
+}
+
+function ngCardMatchesStudent(card = {}, userId = "") {
+  return !card.user_id || String(card.user_id || "") === String(userId || "");
+}
+
+function ngFindDuplicateFlashcard(db, payload = {}) {
+  const generationKey = String(payload.generation_key || "").trim();
+  const front = ngFlashcardFingerprint(payload.front || payload.question || "");
+  const courseId = String(payload.course_id || "");
+  const userId = String(payload.user_id || "");
+  const dayId = String(payload.roadmap_day_id || "");
+  const sessionId = String(payload.session_id || "");
+  const attemptId = String(payload.attempt_id || "");
+  return Object.values(db.flashcards || {}).find((card) => {
+    if (!card || card.status === "archived") return false;
+    if (generationKey && String(card.generation_key || "") === generationKey) return true;
+    if (String(card.course_id || "") !== courseId) return false;
+    if (String(card.user_id || "") !== userId) return false;
+    if (dayId && String(card.roadmap_day_id || "") !== dayId) return false;
+    if (sessionId && String(card.session_id || "") !== sessionId) return false;
+    if (attemptId && String(card.attempt_id || "") !== attemptId) return false;
+    return front && ngFlashcardFingerprint(card.front || card.question || "") === front;
+  }) || null;
+}
+
+function ngCreatePublishedFlashcard(db, payload = {}) {
+  db.flashcards = db.flashcards || {};
+  const duplicate = ngFindDuplicateFlashcard(db, payload);
+  if (duplicate) return { card: duplicate, created: false };
+  const id = payload.id || uuid();
+  const now = nowIso();
+  db.flashcards[id] = {
+    id,
+    course_id: payload.course_id || null,
+    user_id: payload.user_id || null,
+    session_id: payload.session_id || null,
+    assessment_id: payload.assessment_id || null,
+    attempt_id: payload.attempt_id || null,
+    roadmap_day_id: payload.roadmap_day_id || payload.day_id || null,
+    day_number: payload.day_number || null,
+    week_number: payload.week_number || null,
+    system: payload.system || "",
+    topic: payload.topic || payload.tag || payload.system || "General",
+    front: String(payload.front || payload.question || "").trim(),
+    back: String(payload.back || payload.answer || "").trim(),
+    explanation: String(payload.explanation || "").trim(),
+    tag: payload.tag || payload.topic || payload.system || "Review",
+    difficulty: payload.difficulty || "medium",
+    scope: payload.scope || "published_bank",
+    source: payload.source || "system_auto_flashcard_generator",
+    source_label: payload.source_label || null,
+    resource_source: payload.resource_source || null,
+    qids: ngNormalizeQidList(payload.qids || []),
+    weak_concept: payload.weak_concept || "",
+    due_date: payload.due_date || todayKey(),
+    generation_key: payload.generation_key || null,
+    status: "published",
+    is_published: true,
+    created_by: payload.created_by || "system",
+    updated_by: payload.updated_by || payload.created_by || "system",
+    created_at: now,
+    updated_at: now,
+  };
+  return { card: db.flashcards[id], created: true };
+}
+
+function ngSessionNotesTrainingText(db, { session, day, notes }) {
+  const noteText = ngGetSessionNotesText(notes || {});
+  const dayContext = [
+    `Roadmap day: ${day?.title || session?.topic || session?.title || ""}`,
+    `System: ${day?.system || session?.system || ""}`,
+    `Topic: ${day?.first_aid_topics || day?.topic || session?.topic || session?.title || ""}`,
+    `First Aid pages: ${day?.first_aid_pages || day?.fa_pages || ""}`,
+    `Mapped QIDs: ${ngNormalizeQidList(day?.uworld_qids || day?.mapped_uworld_qids || day?.qids || []).join(", ")}`,
+  ].filter(Boolean).join("\n");
+  return `${dayContext}\n\nPublished tutor/class notes:\n${noteText}`.trim().slice(0, 24000);
+}
+
+async function ngAutoGenerateFlashcardsFromPublishedNotes(db, crmDb, { sessionId, actorId = "system", maxCards = 12 } = {}) {
+  const cleanSessionId = String(sessionId || "").trim();
+  if (!cleanSessionId) return { created: 0, skipped: true, reason: "missing_session_id" };
+  const session = db.liveSessions?.[cleanSessionId] || null;
+  const notes = db.notes?.[cleanSessionId] || null;
+  if (!session || !notes) return { created: 0, skipped: true, reason: "missing_session_or_notes" };
+  const courseId = String(notes.course_id || session.course_id || "").trim();
+  if (!courseId) return { created: 0, skipped: true, reason: "missing_course_id" };
+  if (ngIsNoClassLiveSession(db, session)) return { created: 0, skipped: true, reason: "no_class_placeholder" };
+  if (notes.published !== true && notes.is_published !== true) return { created: 0, skipped: true, reason: "notes_not_published" };
+  const noteText = ngGetSessionNotesText(notes);
+  if (noteText.length < 120) return { created: 0, skipped: true, reason: "notes_too_short" };
+  const day = ngFindRoadmapDayForLiveSession(db, session);
+  if (day && ngIsNoClassRoadmapDay(day)) return { created: 0, skipped: true, reason: "roadmap_day_no_class" };
+  const existing = Object.values(db.flashcards || {}).filter((card) => {
+    return card.status !== "archived" &&
+      String(card.course_id || "") === courseId &&
+      String(card.session_id || "") === cleanSessionId &&
+      ["tutor_notes", "session_notes", "session"].some((needle) => String(card.scope || card.source || "").toLowerCase().includes(needle));
+  });
+  const target = Math.max(4, Math.min(20, Number(maxCards || 12)));
+  if (existing.length >= Math.min(8, target)) return { created: 0, skipped: true, reason: "already_generated", existing: existing.length };
+  const system = String(day?.system || session.system || session.chapter || "General").trim();
+  const topic = String(day?.first_aid_topics || day?.topic || session.topic || session.title || system || "Session notes").trim();
+  const qids = ngNormalizeQidList(day?.uworld_qids || day?.mapped_uworld_qids || day?.qids || []);
+  const trainingText = ngSessionNotesTrainingText(db, { session, day, notes });
+  const needed = Math.max(1, target - existing.length);
+  const result = await ngGenerateFlashcardsWithAI({ trainingText, system, topic, weakConcept: "", qids, count: needed });
+  let created = 0;
+  const cards = [];
+  for (const [index, card] of result.cards.slice(0, needed).entries()) {
+    const generationKey = `notes:${courseId}:${cleanSessionId}:${ngFlashcardFingerprint(card.front)}:${index}`;
+    const out = ngCreatePublishedFlashcard(db, {
+      course_id: courseId,
+      user_id: null,
+      session_id: cleanSessionId,
+      roadmap_day_id: day?.id || session.roadmap_day_id || null,
+      day_number: day?.day_number || null,
+      week_number: day?.week_number || null,
+      system,
+      topic: card.tag || topic,
+      front: card.front,
+      back: card.back,
+      explanation: card.explanation || "",
+      tag: card.tag || topic,
+      difficulty: card.difficulty || "medium",
+      scope: "tutor_notes",
+      source: result.model === "fallback-local" ? "auto_notes_local_flashcard_generator" : "auto_notes_ai_flashcard_generator",
+      source_label: "Tutor Notes",
+      resource_source: "published_notes",
+      qids,
+      due_date: todayKey(),
+      generation_key: generationKey,
+      created_by: actorId,
+    });
+    if (out.created) created += 1;
+    cards.push(out.card);
+  }
+  if (day && cards.length) {
+    day.session_flashcards_ready = true;
+    day.session_flashcards_count = Math.max(Number(day.session_flashcards_count || 0), existing.length + created);
+    ngEnsureTaskItemOnDay(day, "session_flashcards_reviewed", "Review flashcards generated from the published tutor notes.");
+  }
+  return { created, existing: existing.length, cards, warnings: result.warnings || [], ai_model: result.model };
+}
+
+async function ngAutoSyncPublishedNotesFlashcardsForCourse(db, crmDb, { courseId, actorId = "system", maxSessions = 30 } = {}) {
+  const cleanCourseId = String(courseId || "").trim();
+  const output = { checked: 0, created: 0, details: [] };
+  if (!cleanCourseId) return output;
+  const publishedNotes = Object.values(db.notes || {})
+    .filter((note) => String(note.course_id || "") === cleanCourseId && (note.published === true || note.is_published === true))
+    .sort((a, b) => String(b.published_at || b.updated_at || "").localeCompare(String(a.published_at || a.updated_at || "")))
+    .slice(0, Math.max(1, Number(maxSessions || 30)));
+  for (const note of publishedNotes) {
+    output.checked += 1;
+    try {
+      const result = await ngAutoGenerateFlashcardsFromPublishedNotes(db, crmDb, { sessionId: note.session_id, actorId });
+      output.created += Number(result.created || 0);
+      output.details.push({ session_id: note.session_id, ...result });
+    } catch (error) {
+      output.details.push({ session_id: note.session_id, error: error.message });
+    }
+  }
+  return output;
+}
+
+function ngWeakFlashcardTargetsFromAttempt(attempt = {}) {
+  const rows = Array.isArray(attempt.graded_answers) ? attempt.graded_answers : [];
+  const grouped = new Map();
+  for (const row of rows) {
+    if (row?.is_correct === true) continue;
+    const system = String(row.system || "General").trim() || "General";
+    const topic = String(row.topic || system).trim() || system;
+    const key = `${system}::${topic}`.toLowerCase();
+    const item = grouped.get(key) || { system, topic, count: 0, qids: [] };
+    item.count += 1;
+    if (row.question_id) item.qids.push(row.question_id);
+    grouped.set(key, item);
+  }
+  return Array.from(grouped.values()).sort((a, b) => b.count - a.count);
+}
+
+async function ngAutoGenerateWeakAreaFlashcardsFromAttempt(db, crmDb, { attempt, assessment, actorId = "system", maxTargets = 6, cardsPerTarget = 3 } = {}) {
+  if (!attempt?.id || !attempt?.course_id || !attempt?.user_id) return { created: 0, skipped: true, reason: "missing_attempt" };
+  const user = db.users?.[String(attempt.user_id)] || { id: attempt.user_id, name: attempt.user_name || "Student", email: attempt.user_email || "" };
+  const courseId = String(attempt.course_id || "").trim();
+  const targets = ngWeakFlashcardTargetsFromAttempt(attempt).slice(0, Math.max(1, Number(maxTargets || 6)));
+  if (!targets.length) return { created: 0, skipped: true, reason: "no_wrong_topics" };
+  let created = 0;
+  const cards = [];
+  for (const target of targets) {
+    const weakConcept = target.topic || target.system || "Weak area";
+    const qids = ngNormalizeQidList(target.qids || []);
+    const existing = Object.values(db.flashcards || {}).filter((card) => {
+      return card.status !== "archived" &&
+        String(card.course_id || "") === courseId &&
+        String(card.user_id || "") === String(user.id) &&
+        String(card.attempt_id || "") === String(attempt.id) &&
+        ngNormalizeMasterMapSystemName(card.system || "") === ngNormalizeMasterMapSystemName(target.system) &&
+        String(card.topic || card.weak_concept || "").toLowerCase().includes(String(weakConcept || "").toLowerCase().slice(0, 24));
+    });
+    if (existing.length >= Number(cardsPerTarget || 3)) continue;
+    const trainingText = ngTrainingTextForFlashcards(crmDb, { system: target.system, topic: target.topic, weakConcept, qids });
+    const result = await ngGenerateFlashcardsWithAI({ trainingText, system: target.system, topic: target.topic, weakConcept, qids, count: Number(cardsPerTarget || 3) - existing.length });
+    for (const [index, card] of result.cards.slice(0, Number(cardsPerTarget || 3) - existing.length).entries()) {
+      const generationKey = `weak:${courseId}:${user.id}:${attempt.id}:${target.system}:${target.topic}:${ngFlashcardFingerprint(card.front)}:${index}`;
+      const out = ngCreatePublishedFlashcard(db, {
+        course_id: courseId,
+        user_id: user.id,
+        assessment_id: attempt.assessment_id || assessment?.id || null,
+        attempt_id: attempt.id,
+        roadmap_day_id: assessment?.roadmap_day_id || null,
+        system: target.system,
+        topic: target.topic,
+        front: card.front,
+        back: card.back,
+        explanation: card.explanation || "",
+        tag: card.tag || target.topic,
+        difficulty: card.difficulty || "medium",
+        scope: "student_weak_area",
+        source: result.model === "fallback-local" ? "auto_weak_area_local_flashcard_generator" : "auto_weak_area_ai_flashcard_generator",
+        source_label: "Weak Area",
+        resource_source: "assessment_wrong_topics",
+        qids,
+        weak_concept: weakConcept,
+        due_date: todayKey(),
+        generation_key: generationKey,
+        created_by: actorId,
+      });
+      if (out.created) created += 1;
+      cards.push(out.card);
+    }
+  }
+  return { created, targets: targets.length, cards };
+}
+
+async function ngAutoSyncWeakAreaFlashcardsForStudent(db, crmDb, { courseId, user, actorId = "system", maxAttempts = 8 } = {}) {
+  const cleanCourseId = String(courseId || "").trim();
+  const output = { checked: 0, created: 0, details: [] };
+  if (!cleanCourseId || !user?.id) return output;
+  const attempts = Object.values(db.assessmentAttempts || {})
+    .filter((attempt) => String(attempt.course_id || "") === cleanCourseId && String(attempt.user_id || "") === String(user.id))
+    .sort((a, b) => String(b.submitted_at || "").localeCompare(String(a.submitted_at || "")))
+    .slice(0, Math.max(1, Number(maxAttempts || 8)));
+  for (const attempt of attempts) {
+    output.checked += 1;
+    const assessment = db.assessments?.[String(attempt.assessment_id || "")] || null;
+    try {
+      const result = await ngAutoGenerateWeakAreaFlashcardsFromAttempt(db, crmDb, { attempt, assessment, actorId });
+      output.created += Number(result.created || 0);
+      output.details.push({ attempt_id: attempt.id, ...result });
+    } catch (error) {
+      output.details.push({ attempt_id: attempt.id, error: error.message });
+    }
+  }
+  return output;
+}
+
+function ngSanitizeFlashcardForStudent(card = {}, reviewedSet = new Set()) {
+  return {
+    ...card,
+    bucket: ngFlashcardBucket(card),
+    reviewed: reviewedSet.has(String(card.id)),
+  };
+}
+
+function ngBuildStudentFlashcardSections(cards = []) {
+  return {
+    class_first_aid: cards.filter((card) => card.bucket === "class_first_aid"),
+    tutor_notes: cards.filter((card) => card.bucket === "tutor_notes"),
+    weak_area: cards.filter((card) => card.bucket === "weak_area"),
+    published_bank: cards.filter((card) => card.bucket === "published_bank"),
+  };
+}
+
+
+app.post("/admin/flashcards/publish-all-drafts", async (req, res) => {
+  try {
+    const { user } = await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const courseId = String(req.body.course_id || req.body.courseId || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    let published = 0;
+    for (const card of Object.values(db.flashcards || {})) {
+      if (!card || card.status === "archived") continue;
+      if (String(card.course_id || "") !== courseId) continue;
+      if (card.is_published === false || card.status === "draft") {
+        card.is_published = true;
+        card.status = "published";
+        card.published_at = nowIso();
+        card.published_by = user.id;
+        card.updated_by = user.id;
+        card.updated_at = nowIso();
+        published += 1;
+      }
+    }
+    await writeLiveDb(db);
+    res.json({ success: true, course_id: courseId, published, message: `Published ${published} draft flashcards.` });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/flashcards/generate-weak-area-all", async (req, res) => {
+  try {
+    const { user } = await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const crmDb = await readCrmDb().catch(() => ({}));
+    const courseId = String(req.body.course_id || req.body.courseId || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    const activeEnrollments = Object.values(db.enrollments || {}).filter((enrollment) => String(enrollment.course_id || "") === courseId && enrollment.access_granted !== false);
+    const users = activeEnrollments.map((enrollment) => db.users?.[String(enrollment.user_id || "")]).filter(Boolean);
+    let checked = 0;
+    let created = 0;
+    const details = [];
+    for (const student of users) {
+      checked += 1;
+      const result = await ngAutoSyncWeakAreaFlashcardsForStudent(db, crmDb, { courseId, user: student, actorId: user.id || "admin_weak_area_backfill" });
+      created += Number(result.created || 0);
+      details.push({ user_id: student.id, email: student.email, ...result });
+    }
+    await writeLiveDb(db);
+    res.json({ success: true, course_id: courseId, checked, created, details });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/flashcards/auto-sync", async (req, res) => {
+  try {
+    const { user } = await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const crmDb = await readCrmDb().catch(() => ({}));
+    const courseId = String(req.body.course_id || req.body.courseId || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    const daysAhead = Math.max(1, Math.min(14, Number(req.body.days_ahead || 7)));
+    const noteSync = await ngAutoSyncPublishedNotesFlashcardsForCourse(db, crmDb, { courseId, actorId: user.id || "admin_auto_sync" });
+    const auditRows = ngBuildFlashcardAudit(db, { courseId }).filter((row) => {
+      const day = ngFindRoadmapDay(db, { courseId, dayId: row.roadmap_day_id });
+      if (!day || ngIsNoClassRoadmapDay(day)) return false;
+      if (!row.missing) return false;
+      const date = String(row.date || "");
+      if (!date) return true;
+      const now = new Date(`${todayKey()}T00:00:00`).getTime();
+      const time = new Date(`${date}T00:00:00`).getTime();
+      if (Number.isNaN(time)) return true;
+      const diffDays = Math.round((time - now) / 86400000);
+      return diffDays >= -1 && diffDays <= daysAhead;
+    }).slice(0, 12);
+    let generatedDaily = 0;
+    const dailyDetails = [];
+    for (const row of auditRows) {
+      const day = ngFindRoadmapDay(db, { courseId, dayId: row.roadmap_day_id });
+      if (!day) continue;
+      const settings = ngGetAdaptiveSettings(db, courseId);
+      const needed = Math.max(1, Number(row.suggested_count || settings.required_daily_flashcards || 15));
+      const system = String(day.system || day.chapter || row.system || "General").trim();
+      const topic = String(day.first_aid_topics || day.live_teaching_topic || day.title || system).trim();
+      const qids = ngNormalizeQidList(day.uworld_qids || day.mapped_uworld_qids || day.qids || day.uworld_target);
+      const trainingText = ngFlashcardSourceTextForAdmin(db, crmDb, { courseId, day, system, topic, qids, resourceSource: row.resource_source || "first_aid_training", extraContext: req.body.resource_text || "" });
+      const result = await ngGenerateFlashcardsWithAI({ trainingText, system, topic, weakConcept: "", qids, count: needed });
+      let created = 0;
+      for (const [index, card] of result.cards.slice(0, needed).entries()) {
+        const out = ngCreatePublishedFlashcard(db, {
+          course_id: courseId,
+          user_id: null,
+          roadmap_day_id: day.id,
+          day_number: day.day_number || null,
+          week_number: day.week_number || null,
+          system,
+          topic: card.tag || topic,
+          front: card.front,
+          back: card.back,
+          explanation: card.explanation || "",
+          tag: card.tag || topic,
+          difficulty: card.difficulty || "medium",
+          scope: "official_daily",
+          source: result.model === "fallback-local" ? "auto_daily_local_flashcard_generator" : "auto_daily_ai_flashcard_generator",
+          source_label: "First Aid / Class Plan",
+          resource_source: row.resource_source || "first_aid_training",
+          qids,
+          due_date: day.date || todayKey(),
+          generation_key: `daily:${courseId}:${day.id}:${ngFlashcardFingerprint(card.front)}:${index}`,
+          created_by: user.id || "admin_auto_sync",
+        });
+        if (out.created) created += 1;
+      }
+      if (created > 0) ngEnsureFlashcardTaskOnDay(day, Math.max(Number(day.flashcards_required_count || 0), created, settings.required_daily_flashcards || 15));
+      generatedDaily += created;
+      dailyDetails.push({ day_id: day.id, day_number: day.day_number, created, ai_model: result.model, warnings: result.warnings || [] });
+    }
+    await writeLiveDb(db);
+    res.json({ success: true, course_id: courseId, days_ahead: daysAhead, note_sync: noteSync, daily_created: generatedDaily, daily_details: dailyDetails, audit: ngBuildFlashcardAudit(db, { courseId }) });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
 app.get("/admin/flashcards/audit", async (req, res) => {
   try {
     await requireAdminOrInstructor(req);
@@ -43342,6 +43819,65 @@ app.post("/admin/flashcards/generate-missing", async (req, res) => {
     await writeLiveDb(db);
     const freshAudit = ngBuildFlashcardAudit(db, { courseId }).find((row) => String(row.roadmap_day_id) === dayId) || null;
     res.json({ success: true, count: created.length, flashcards: created, audit: freshAudit, warnings: result.warnings || [], ai_model: result.model, training_context_used: trainingText.length > 0 });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+
+app.get("/student/flashcards/review", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const crmDb = await readCrmDb().catch(() => ({}));
+    const courseId = String(req.query.course_id || req.query.courseId || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    const access = ngCourseFeatureAccess(db, user, { courseId, featureKey: "flashcards" });
+    if (!access.allowed) return ngBlockLockedFeature(res, "flashcards", access.reason);
+
+    const noteSync = await ngAutoSyncPublishedNotesFlashcardsForCourse(db, crmDb, { courseId, actorId: "student_review_opened" });
+    const weakSync = await ngAutoSyncWeakAreaFlashcardsForStudent(db, crmDb, { courseId, user, actorId: "student_review_opened" });
+    if (Number(noteSync.created || 0) > 0 || Number(weakSync.created || 0) > 0) await writeLiveDb(db);
+
+    const today = todayKey();
+    const todayDay = ngFindRoadmapDay(db, { courseId });
+    const holidayToday = ngIsNoClassRoadmapDay(todayDay || {});
+    const reviewedSet = new Set(Object.values(db.flashcardProgress || {})
+      .filter((p) => String(p.user_id) === String(user.id) && p.reviewed)
+      .map((p) => String(p.flashcard_id)));
+
+    let cards = Object.values(db.flashcards || {}).filter((card) => {
+      if (!card || card.status === "archived" || card.is_published === false) return false;
+      if (String(card.course_id || "") !== courseId) return false;
+      if (!ngCardMatchesStudent(card, user.id)) return false;
+      if (card.due_date && String(card.due_date) > today) return false;
+      return true;
+    }).map((card) => ngSanitizeFlashcardForStudent(card, reviewedSet));
+
+    cards.sort((a, b) => {
+      const bucketOrder = { weak_area: 0, tutor_notes: 1, class_first_aid: 2, published_bank: 3 };
+      const ao = bucketOrder[a.bucket] ?? 9;
+      const bo = bucketOrder[b.bucket] ?? 9;
+      if (ao !== bo) return ao - bo;
+      return Number(a.reviewed) - Number(b.reviewed) || Number(a.day_number || 9999) - Number(b.day_number || 9999) || String(b.created_at || "").localeCompare(String(a.created_at || ""));
+    });
+
+    const sections = ngBuildStudentFlashcardSections(cards);
+    const reviewedCount = cards.filter((card) => card.reviewed).length;
+    res.json({
+      success: true,
+      course_id: courseId,
+      count: cards.length,
+      flashcards: cards,
+      sections,
+      reviewed_count: reviewedCount,
+      due_count: cards.length - reviewedCount,
+      note_sync: noteSync,
+      weak_area_sync: weakSync,
+      today: todayDay ? sanitizeRoadmapDay(todayDay) : null,
+      holiday_today: holidayToday,
+      holiday_message: holidayToday ? "Today is a holiday/no-live-class day. Class cards are paused, but published review cards and weak-area cards remain available." : null,
+    });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
