@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v177l-demo-access-self-heal-baseline-visibility-fix";
+const NEXTGEN_BACKEND_BUILD = "v177m-student-notes-published-only-dummy-filter-fix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -11645,6 +11645,142 @@ app.get("/student/live-center", async (req, res) => {
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to load live center" });
+  }
+});
+
+
+function ngStudentNotesSessionIsNoClass(session = {}) {
+  const status = String(session.status || "").trim().toLowerCase();
+  const text = [
+    session.topic,
+    session.title,
+    session.description,
+    session.cancelled_reason,
+    session.status,
+    session.type,
+    session.source,
+  ].map((value) => String(value || "").toLowerCase()).join(" ");
+
+  return Boolean(
+    session.no_class_placeholder === true ||
+    session.is_no_class_day === true ||
+    session.is_schedule_placeholder === true ||
+    session.holiday === true ||
+    ["holiday", "no_class", "no-class", "no class", "cancelled", "canceled"].includes(status) ||
+    text.includes("holiday / no live class") ||
+    text.includes("holiday/no live class") ||
+    text.includes("no live class") ||
+    text.includes("no class today") ||
+    text.includes("tutor unavailable") ||
+    text.includes("schedule placeholder")
+  );
+}
+
+function ngStudentNotesVisibleText(note = {}) {
+  return [
+    note.cleaned_notes,
+    note.student_notes,
+    note.notes,
+    note.content,
+    note.summary,
+  ]
+    .map((value) => String(value || "").trim())
+    .find(Boolean) || "";
+}
+
+function ngStudentNotesIsPublished(note = {}) {
+  if (!note) return false;
+  const status = String(note.status || "").trim().toLowerCase();
+  if (["draft", "unpublished", "archived", "hidden"].includes(status)) return false;
+  if (note.is_published === false || note.published === false) return false;
+  return Boolean(ngStudentNotesVisibleText(note));
+}
+
+function ngStudentNotesSessionForList(db = {}, session = {}, course = null) {
+  const safe = sanitizeLiveSession(session);
+  const note = db.notes?.[String(session.id || safe.id)] || null;
+  const notesText = ngStudentNotesVisibleText(note);
+  return {
+    ...safe,
+    course_id: safe.course_id || course?.id || null,
+    course_name: course?.name || safe.course_name || "Course",
+    notes_available: true,
+    has_notes: true,
+    has_clean_notes: true,
+    notes_meta: {
+      available: true,
+      published: true,
+      notes_available: true,
+      transcript_available: Boolean(note?.transcript_text || note?.transcript || note?.transcript_url),
+      recording_available: Boolean(note?.recording_url || safe.recording_url),
+      recording_url: note?.recording_url || safe.recording_url || null,
+      transcript_url: note?.transcript_url || null,
+      updated_at: note?.updated_at || note?.created_at || null,
+      preview: notesText.slice(0, 220),
+    },
+  };
+}
+
+app.get("/student/notes/sessions", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const requestedCourseId = String(req.query.course_id || req.query.courseId || "").trim();
+
+    const selfHeal = requestedCourseId
+      ? ngMaybeSelfHealDemoEnrollment(db, user, { courseId: requestedCourseId, source: "student_notes_sessions" })
+      : ngMaybeSelfHealDemoEnrollment(db, user, { source: "student_notes_sessions" });
+
+    if (selfHeal.changed) await writeLiveDb(db);
+
+    const allCourses = Object.values(db.courses || {})
+      .map(sanitizeCourse)
+      .filter((course) => course.status !== "archived" && course.status !== "inactive");
+
+    const coursesToCheck = requestedCourseId
+      ? allCourses.filter((course) => String(course.id) === requestedCourseId)
+      : allCourses;
+
+    const bundles = coursesToCheck.map((course) => {
+      const access = ngStudentEnrollmentStatusForCourse(db, user, course.id);
+      if (!ngStudentHasCourseAccessStatus(access.status)) return null;
+
+      const sessions = Object.values(db.liveSessions || {})
+        .filter((session) => String(session.course_id || "") === String(course.id))
+        .filter((session) => !ngStudentNotesSessionIsNoClass(session))
+        .filter((session) => ngStudentNotesIsPublished(db.notes?.[String(session.id)] || null))
+        .sort((a, b) => {
+          return String(a.scheduled_date || "").localeCompare(String(b.scheduled_date || "")) ||
+            String(a.scheduled_time || "").localeCompare(String(b.scheduled_time || ""));
+        })
+        .map((session) => ngStudentNotesSessionForList(db, session, course));
+
+      return {
+        course: sanitizeCourse(course),
+        status: access.status,
+        enrollment: access.enrollment,
+        demo_expiry: access.demo_expiry,
+        access_expires_at: access.access_expires_at,
+        count: sessions.length,
+        sessions,
+      };
+    }).filter(Boolean);
+
+    res.json({
+      success: true,
+      source: "student_notes_sessions_v177m_published_only",
+      strategy: "published_notes_only_no_holiday_placeholders",
+      count: bundles.reduce((sum, bundle) => sum + Number(bundle.count || 0), 0),
+      course_bundles: bundles,
+      bundles,
+      sessions: requestedCourseId ? (bundles[0]?.sessions || []) : [],
+      demo_access_self_heal: selfHeal,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to load student notes sessions",
+    });
   }
 });
 
