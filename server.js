@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v177n-dashboard-task-review-leaderboard-test-filter-fix";
+const NEXTGEN_BACKEND_BUILD = "v177o-holiday-dashboard-task-persistence-fix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -3567,16 +3567,38 @@ function ngPointEventKey({ courseId, userId, dayId, taskKey }) {
   return `${courseId}:${userId}:${dayId}:${taskKey}`;
 }
 
-function ngGetDailyTaskProgress(db, { courseId, userId, dayId }) {
+function ngGetDailyTaskProgress(db, { courseId, userId, dayId, day = null }) {
   db.dailyTaskProgress = db.dailyTaskProgress || {};
   const key = ngTaskProgressKey({ courseId, userId, dayId });
-  return db.dailyTaskProgress[key] || null;
+  return db.dailyTaskProgress[key] || (day ? ngFindCompatibleDailyTaskProgress(db, { courseId, userId, day }) : null);
+}
+
+// v177o: roadmap push/holiday sync can relink days.  When a day id changes,
+// keep the student's saved checklist by matching the same course/user/date/day_number.
+// This prevents Mark Reviewed from appearing to save and then disappearing after a dashboard refresh.
+function ngFindCompatibleDailyTaskProgress(db, { courseId, userId, day }) {
+  if (!day?.id) return null;
+  const cleanCourseId = String(courseId || "");
+  const cleanUserId = String(userId || "");
+  const cleanDate = String(day.date || day.scheduled_date || "").slice(0, 10);
+  const cleanDayNumber = String(day.day_number || "");
+
+  return Object.values(db.dailyTaskProgress || {}).find((item) => {
+    if (!item) return false;
+    if (String(item.course_id || "") !== cleanCourseId) return false;
+    if (String(item.user_id || "") !== cleanUserId) return false;
+    if (String(item.day_id || item.roadmap_day_id || "") === String(day.id || "")) return true;
+    if (cleanDate && String(item.date || "").slice(0, 10) === cleanDate) return true;
+    if (cleanDayNumber && String(item.day_number || "") === cleanDayNumber && String(item.system || "") === String(day.system || "")) return true;
+    return false;
+  }) || null;
 }
 
 function ngEnsureDailyTaskProgress(db, { courseId, userId, userName, day }) {
   db.dailyTaskProgress = db.dailyTaskProgress || {};
   const key = ngTaskProgressKey({ courseId, userId, dayId: day.id });
-  const previous = db.dailyTaskProgress[key] || {};
+  const compatiblePrevious = db.dailyTaskProgress[key] || ngFindCompatibleDailyTaskProgress(db, { courseId, userId, day }) || {};
+  const previous = compatiblePrevious || {};
   const tasks = previous.tasks && typeof previous.tasks === "object" ? previous.tasks : {};
   const taskItems = ngGetTaskItems(day);
   const completedTaskCount = taskItems.filter((item) => tasks[item.key]?.completed).length;
@@ -3683,7 +3705,7 @@ function ngUpsertTaskCompletion(db, { courseId, userId, userName, day, taskKey, 
 
 function sanitizeRoadmapDay(day) {
   const qids = ngNormalizeQidList(day.uworld_qids?.length ? day.uworld_qids : day.mapped_uworld_qids?.length ? day.mapped_uworld_qids : day.qids || day.uworld_target);
-  const taskItems = ngGetTaskItems(day);
+  const taskItems = (ngIsNoClassRoadmapDay(day) || ngRoadmapDayIsNoClass(day)) ? [] : ngGetTaskItems(day);
   return {
     id: day.id, course_id: day.course_id, week_number: day.week_number, day_number: day.day_number, date: day.date,
     system: day.system || day.chapter || "",
@@ -9824,8 +9846,25 @@ function ngFindRoadmapDay(db, { courseId, dayId, dayNumber }) {
 
 function ngSanitizeDailyTaskPacket(db, { courseId, userId, day }) {
   if (!day) return null;
-  const progress = ngGetDailyTaskProgress(db, { courseId, userId, dayId: day.id }) || ngEnsureDailyTaskProgress(db, { courseId, userId, userName: "Student", day });
+  const noClassDay = ngIsNoClassRoadmapDay(day) || ngRoadmapDayIsNoClass(day);
+  const progress = ngGetDailyTaskProgress(db, { courseId, userId, dayId: day.id, day }) || ngEnsureDailyTaskProgress(db, { courseId, userId, userName: "Student", day });
   const cleanDay = sanitizeRoadmapDay(day);
+
+  if (noClassDay) {
+    return {
+      ...cleanDay,
+      no_class_day: true,
+      is_no_class_day: true,
+      holiday: true,
+      task_items: [],
+      tasks: [],
+      progress: { ...(progress || {}), tasks: {}, completed_task_count: 0, total_task_count: 0, required_completed_count: 0, required_task_count: 0, completed: false },
+      earned_points: 0,
+      available_points: 0,
+      holiday_message: "No academic task today. The planned content has been pushed to the next teaching day.",
+    };
+  }
+
   const taskItems = cleanDay.task_items.map((task) => ({
     ...task,
     completed: Boolean(progress.tasks?.[task.key]?.completed),
@@ -9874,6 +9913,20 @@ app.post("/student/daily-task/:dayId/task", async (req, res) => {
     if (!enrollment && user.role !== "admin" && user.role !== "instructor") return res.status(403).json({ success: false, error: "No course access found" });
     const day = ngFindRoadmapDay(db, { courseId, dayId: req.params.dayId });
     if (!day) return res.status(404).json({ success: false, error: "Roadmap day not found" });
+
+    if (ngIsNoClassRoadmapDay(day) || ngRoadmapDayIsNoClass(day)) {
+      const leaderboard = updateLeaderboard(db, { courseId, userId: user.id, userName: user.name || user.email || "Student" });
+      await writeLiveDb(db);
+      return res.json({
+        success: true,
+        ignored: true,
+        no_class_day: true,
+        message: "No academic tasks today. The planned content has been pushed to the next teaching day.",
+        packet: ngSanitizeDailyTaskPacket(db, { courseId, userId: user.id, day }),
+        summary: buildProgressSummary({ db, courseId, userId: user.id }),
+        leaderboard,
+      });
+    }
 
     // v177n: only true system-verified tasks stay locked.
     // Content-review tasks shown on the dashboard must save when the student presses Mark Reviewed.
