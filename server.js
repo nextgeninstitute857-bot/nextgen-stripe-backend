@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v177-dashboard-mastery-support-live-assessment-fix";
+const NEXTGEN_BACKEND_BUILD = "v177b-baseline-answer-randomization-repair";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -3346,7 +3346,12 @@ async function ngMaybeCreateWeeklyAssessmentFromNotes(db, { courseId, day }) {
     },
   });
 
-  const questions = result.questions || [];
+  const questions = ngNormalizeAssessmentQuestionsForStorage(result.questions || [], {
+    assessmentId: `weekly:${courseId}:${weekNumber}`,
+    assessmentType: "weekly",
+    forceRandomize: true,
+    distributeCorrectIndex: false,
+  });
   if (!questions.length) return null;
 
   const id = uuid();
@@ -3976,6 +3981,8 @@ function sanitizeAttemptForStudent(attempt) {
     score: released ? attempt.score : null,
     total: released ? attempt.total : attempt.total || null,
     percentage: released ? attempt.percentage : null,
+    answers: attempt.answers || {},
+    marked_for_review: Array.isArray(attempt.marked_for_review) ? attempt.marked_for_review : [],
     graded_answers: released ? attempt.graded_answers || [] : [],
   };
 }
@@ -4162,10 +4169,193 @@ function applyReleasedAssessmentAttemptToLeaderboard(db, attempt, assessment = n
   });
 }
 
+
+const NEXTGEN_ASSESSMENT_OPTION_RANDOMIZATION_VERSION = "v177b-shuffled-answer-key";
+
+function ngHashStringToInt(value = "") {
+  const text = String(value || "");
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function ngSeededOptionShuffle(optionPairs = [], seedText = "") {
+  const pairs = optionPairs.map((item, index) => ({ ...item, _original_shuffle_index: index }));
+  const seed = ngHashStringToInt(seedText || "nextgen-assessment-options");
+  pairs.sort((a, b) => {
+    const av = ngHashStringToInt(`${seed}:${a.text}:${a._original_shuffle_index}`);
+    const bv = ngHashStringToInt(`${seed}:${b.text}:${b._original_shuffle_index}`);
+    return av - bv;
+  });
+  return pairs.map(({ _original_shuffle_index, ...rest }) => rest);
+}
+
+function ngNormalizeQuestionOptionsArray(question = {}) {
+  if (Array.isArray(question.options)) return question.options.map((item) => String(item || "").trim()).filter(Boolean);
+  const raw = question.options || {};
+  return [raw.A, raw.B, raw.C, raw.D, raw.E, question.option_a, question.option_b, question.option_c, question.option_d, question.option_e]
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+}
+
+function ngNormalizeAssessmentQuestionForStorage(question = {}, index = 0, context = {}) {
+  const options = ngNormalizeQuestionOptionsArray(question);
+  const originalCorrectIndex = Number.isFinite(Number(question.correct_index)) ? Number(question.correct_index) : 0;
+  const safeCorrectIndex = originalCorrectIndex >= 0 && originalCorrectIndex < options.length ? originalCorrectIndex : 0;
+  const correctAnswerText = options[safeCorrectIndex] || String(question.correct_answer || question.answer || "").trim();
+
+  if (!options.length || !correctAnswerText) {
+    return {
+      ...question,
+      id: question.id || `q${index + 1}`,
+      options,
+      correct_index: Number.isFinite(Number(question.correct_index)) ? Number(question.correct_index) : 0,
+    };
+  }
+
+  const pairs = options.map((text, optionIndex) => ({ text, isCorrect: optionIndex === safeCorrectIndex }));
+  const shouldShuffle = context.forceRandomize === true || question.answer_shuffle_version !== NEXTGEN_ASSESSMENT_OPTION_RANDOMIZATION_VERSION;
+  let shuffled = shouldShuffle
+    ? ngSeededOptionShuffle(pairs, `${NEXTGEN_ASSESSMENT_OPTION_RANDOMIZATION_VERSION}:${context.assessmentId || "draft"}:${question.id || `q${index + 1}`}::${question.stem || question.question || ""}:${index}`)
+    : pairs;
+
+  // For default/baseline questions that were authored with every correct answer at A,
+  // deliberately distribute the answer key across A/B/C/D/E instead of relying on chance.
+  if (context.distributeCorrectIndex === true && shuffled.length > 1) {
+    const desired = index % shuffled.length;
+    const currentCorrect = shuffled.findIndex((item) => item.isCorrect);
+    if (currentCorrect >= 0 && currentCorrect !== desired) {
+      const [correctPair] = shuffled.splice(currentCorrect, 1);
+      shuffled.splice(desired, 0, correctPair);
+    }
+  }
+
+  const nextCorrectIndex = Math.max(0, shuffled.findIndex((item) => item.isCorrect));
+  return {
+    ...question,
+    id: question.id || `q${index + 1}`,
+    stem: question.stem || question.question_text || question.question || `Question ${index + 1}`,
+    options: shuffled.map((item) => item.text),
+    correct_index: nextCorrectIndex,
+    answer_shuffle_version: NEXTGEN_ASSESSMENT_OPTION_RANDOMIZATION_VERSION,
+    answer_shuffle_applied_at: question.answer_shuffle_applied_at || new Date().toISOString(),
+  };
+}
+
+function ngNormalizeAssessmentQuestionsForStorage(questions = [], context = {}) {
+  return (Array.isArray(questions) ? questions : []).map((question, index) => ngNormalizeAssessmentQuestionForStorage(question, index, context));
+}
+
+function ngAssessmentAnswerKeyDistribution(assessment = {}) {
+  const counts = {};
+  const questions = Array.isArray(assessment.questions) ? assessment.questions : [];
+  for (const q of questions) {
+    const idx = Number.isFinite(Number(q.correct_index)) ? Number(q.correct_index) : -1;
+    counts[idx] = Number(counts[idx] || 0) + 1;
+  }
+  return counts;
+}
+
+function ngAssessmentLooksLikeCorruptedAOnlyBaseline(assessment = {}) {
+  if (!assessment || !Array.isArray(assessment.questions) || assessment.questions.length < 10) return false;
+  const rawType = String(assessment.assessment_type || assessment.source_type || assessment.title || "").toLowerCase();
+  const isBaseline = assessment.adaptive_baseline === true || rawType.includes("baseline") || rawType.includes("diagnostic");
+  if (!isBaseline) return false;
+  if (assessment.answer_key_repaired_version === NEXTGEN_ASSESSMENT_OPTION_RANDOMIZATION_VERSION) return false;
+  const questions = assessment.questions || [];
+  const aCount = questions.filter((q) => Number(q.correct_index) === 0).length;
+  const withOptions = questions.filter((q) => Array.isArray(q.options) && q.options.length >= 2).length;
+  return withOptions >= 10 && aCount / Math.max(1, withOptions) >= 0.8;
+}
+
+function ngResetWeakAreaProfileForUserCourse(db, { courseId, user }) {
+  if (!db || !courseId || !user?.id) return null;
+  db.weakAreaProfiles = db.weakAreaProfiles || {};
+  db.weakAreaHistory = db.weakAreaHistory || {};
+  const key = ngWeakProfileKey(courseId, user.id);
+  delete db.weakAreaProfiles[key];
+  for (const historyKey of Object.keys(db.weakAreaHistory || {})) {
+    const item = db.weakAreaHistory[historyKey];
+    if (String(item?.course_id || "") === String(courseId) && String(item?.user_id || "") === String(user.id)) {
+      delete db.weakAreaHistory[historyKey];
+    }
+  }
+  const profile = ngEnsureWeakAreaProfile(db, { courseId, user, existingStudent: true });
+  profile.baseline_status = "not_started";
+  profile.last_assessment_id = null;
+  profile.last_attempt_id = null;
+  profile.updated_at = new Date().toISOString();
+
+  const activeAttempts = Object.values(db.assessmentAttempts || {}).filter((attempt) => {
+    return String(attempt?.course_id || "") === String(courseId) && String(attempt?.user_id || "") === String(user.id);
+  });
+  for (const attempt of activeAttempts) {
+    const assessment = db.assessments?.[String(attempt.assessment_id || "")];
+    if (assessment) ngUpdateWeakAreaProfileFromAttempt(db, { assessment, attempt, user });
+  }
+  return db.weakAreaProfiles[key];
+}
+
+function ngArchiveAttemptsForRepairedBaseline(db, assessment, reason = "baseline_answer_key_repaired") {
+  if (!db || !assessment?.id) return { archived_count: 0, archived_attempt_ids: [] };
+  db.assessmentAttempts = db.assessmentAttempts || {};
+  db.archivedAssessmentAttempts = db.archivedAssessmentAttempts || {};
+  const archivedAttemptIds = [];
+  for (const key of Object.keys(db.assessmentAttempts)) {
+    const attempt = db.assessmentAttempts[key];
+    if (String(attempt?.assessment_id || "") !== String(assessment.id)) continue;
+    const archiveKey = `${key}:${NEXTGEN_ASSESSMENT_OPTION_RANDOMIZATION_VERSION}`;
+    db.archivedAssessmentAttempts[archiveKey] = {
+      ...attempt,
+      archived_original_key: key,
+      archived_at: new Date().toISOString(),
+      archive_reason: reason,
+      invalidated_for_retake: true,
+    };
+    delete db.assessmentAttempts[key];
+    archivedAttemptIds.push(key);
+    const user = db.users?.[String(attempt.user_id || "")];
+    if (user?.id) ngResetWeakAreaProfileForUserCourse(db, { courseId: assessment.course_id || attempt.course_id, user });
+  }
+  return { archived_count: archivedAttemptIds.length, archived_attempt_ids: archivedAttemptIds };
+}
+
+function ngRepairBaselineAssessmentAnswerKeyIfNeeded(db, assessment, { force = false } = {}) {
+  if (!assessment?.id || !Array.isArray(assessment.questions)) return { changed: false, reason: "missing_assessment" };
+  const shouldRepair = force === true || ngAssessmentLooksLikeCorruptedAOnlyBaseline(assessment);
+  if (!shouldRepair) return { changed: false, reason: "not_corrupted", distribution: ngAssessmentAnswerKeyDistribution(assessment) };
+
+  const beforeDistribution = ngAssessmentAnswerKeyDistribution(assessment);
+  assessment.questions = ngNormalizeAssessmentQuestionsForStorage(assessment.questions, {
+    assessmentId: assessment.id,
+    assessmentType: assessment.assessment_type || assessment.source_type || "baseline",
+    forceRandomize: true,
+    distributeCorrectIndex: true,
+  });
+  ngApplyAssessmentBlockMetadata(assessment, assessment);
+  assessment.answer_key_repaired_version = NEXTGEN_ASSESSMENT_OPTION_RANDOMIZATION_VERSION;
+  assessment.answer_key_repaired_at = new Date().toISOString();
+  assessment.updated_at = new Date().toISOString();
+  assessment.warnings = Array.isArray(assessment.warnings) ? assessment.warnings : [];
+  if (!assessment.warnings.some((item) => String(item).includes("v177b repaired baseline answer key"))) {
+    assessment.warnings.push("v177b repaired baseline answer key: answer choices were shuffled and existing corrupted baseline attempts were archived for retake.");
+  }
+  const archiveResult = ngArchiveAttemptsForRepairedBaseline(db, assessment, "corrupted_A_only_baseline_answer_key_repaired_v177b");
+  return {
+    changed: true,
+    before_distribution: beforeDistribution,
+    after_distribution: ngAssessmentAnswerKeyDistribution(assessment),
+    ...archiveResult,
+  };
+}
+
 function createDraftQuestions({ question_count = 10, topic = "Assessment" }) {
   const count = Math.max(1, Math.min(80, Number(question_count || 10)));
   const cleanTopic = String(topic || "Assessment").trim() || "Assessment";
-  return Array.from({ length: count }).map((_, i) => ({
+  const drafts = Array.from({ length: count }).map((_, i) => ({
     id: `q${i + 1}`,
     stem: `A patient presents with a clinical finding related to ${cleanTopic}. After reviewing the relevant physiology/pathology in the source material, which answer best explains the finding?`,
     options: [
@@ -4189,6 +4379,12 @@ function createDraftQuestions({ question_count = 10, topic = "Assessment" }) {
     difficulty: i % 3 === 0 ? "hard" : "medium",
     style: "original_usmle_vignette_draft",
   }));
+  return ngNormalizeAssessmentQuestionsForStorage(drafts, {
+    assessmentId: `draft:${cleanTopic}`,
+    assessmentType: "admin_draft",
+    forceRandomize: true,
+    distributeCorrectIndex: true,
+  });
 }
 function gradeAssessment(assessment, answers = {}) {
   let score = 0;
@@ -4288,6 +4484,9 @@ function ngApplyAssessmentBlockMetadata(assessment, blockConfig) {
       ...q,
       block_number: cfg.block_mode ? Math.floor(index / Math.max(1, cfg.questions_per_block)) + 1 : 1,
     }));
+    if (assessment.questions.some((q) => q.answer_shuffle_version === NEXTGEN_ASSESSMENT_OPTION_RANDOMIZATION_VERSION)) {
+      assessment.answer_shuffle_version = NEXTGEN_ASSESSMENT_OPTION_RANDOMIZATION_VERSION;
+    }
   }
   return assessment;
 }
@@ -4518,13 +4717,21 @@ function ngCreateDefaultBaselineQuestions({ courseName = "NextGen USMLE", totalQ
       course_context: courseName,
     });
   }
-  return out;
+  return ngNormalizeAssessmentQuestionsForStorage(out, {
+    assessmentId: `baseline:${courseName}`,
+    assessmentType: "baseline",
+    forceRandomize: true,
+    distributeCorrectIndex: true,
+  });
 }
 
 function ngEnsureBaselineAssessmentTemplate(db, { courseId, creatorId = "system" } = {}) {
   if (!courseId) return null;
   const existing = ngFindBaselineAssessment(db, { courseId });
-  if (existing?.id) return existing;
+  if (existing?.id) {
+    ngRepairBaselineAssessmentAnswerKeyIfNeeded(db, existing);
+    return existing;
+  }
   db.assessments = db.assessments || {};
   const course = db.courses?.[String(courseId)] || {};
   const settings = ngGetAdaptiveSettings(db, courseId);
@@ -5472,6 +5679,7 @@ app.post("/admin/assessments/generate-from-notes", async (req, res) => {
     };
 
     db.assessments = db.assessments || {};
+    assessment.answer_shuffle_version = assessment.answer_shuffle_version || NEXTGEN_ASSESSMENT_OPTION_RANDOMIZATION_VERSION;
     db.assessments[id] = assessment;
     await writeLiveDb(db);
 
@@ -8971,7 +9179,18 @@ app.post(["/admin/adaptive/generate-baseline-diagnostic", "/admin/baseline/gener
     const settings = ngGetAdaptiveSettings(db, courseId);
     const existing = ngFindBaselineAssessment(db, { courseId });
     if (existing?.id && req.body.force_new !== true) {
-      return res.json({ success: true, created: false, assessment: existing, message: "Baseline diagnostic already exists for this course." });
+      const repair = ngRepairBaselineAssessmentAnswerKeyIfNeeded(db, existing, { force: req.body.repair_answer_key === true });
+      if (repair.changed) await writeLiveDb(db);
+      return res.json({
+        success: true,
+        created: false,
+        repaired: repair.changed === true,
+        repair,
+        assessment: existing,
+        message: repair.changed
+          ? "Existing baseline diagnostic was repaired: answer choices were shuffled and corrupted attempts were archived for retake."
+          : "Baseline diagnostic already exists for this course."
+      });
     }
     const cfg = ngNormalizeAssessmentBlockConfig({
       block_mode: true,
@@ -9003,6 +9222,12 @@ app.post(["/admin/adaptive/generate-baseline-diagnostic", "/admin/baseline/gener
       questions = ngCreateDefaultBaselineQuestions({ courseName: db.courses?.[String(courseId)]?.name || "NextGen USMLE", totalQuestions: cfg.total_questions });
       warnings.push("Not enough source text for AI generation, so v176 created a published default baseline question set. Admin can edit these questions anytime.");
     }
+    questions = ngNormalizeAssessmentQuestionsForStorage(questions, {
+      assessmentId: `baseline:${courseId}:${Date.now()}`,
+      assessmentType: "baseline",
+      forceRandomize: true,
+      distributeCorrectIndex: true,
+    });
     const id = uuid();
     const assessment = ngApplyAssessmentBlockMetadata({
       id,
@@ -9028,6 +9253,31 @@ app.post(["/admin/adaptive/generate-baseline-diagnostic", "/admin/baseline/gener
     db.assessments[id] = assessment;
     await writeLiveDb(db);
     res.json({ success: true, created: true, assessment, warnings, published: assessment.is_published, message: assessment.is_published ? "Baseline diagnostic generated and published." : "Baseline diagnostic draft created. Add questions before publishing." });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+
+app.post(["/admin/adaptive/repair-baseline-answer-key", "/admin/baseline/repair-answer-key"], async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+    const db = await readLiveDb();
+    const courseId = String(req.body.course_id || req.body.courseId || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    const baseline = ngFindBaselineAssessment(db, { courseId });
+    if (!baseline?.id) return res.status(404).json({ success: false, error: "Baseline diagnostic not found" });
+    const repair = ngRepairBaselineAssessmentAnswerKeyIfNeeded(db, baseline, { force: req.body.force === true });
+    if (repair.changed) await writeLiveDb(db);
+    res.json({
+      success: true,
+      changed: repair.changed,
+      repair,
+      assessment: baseline,
+      message: repair.changed
+        ? "Baseline answer key repaired. Corrupted attempts were archived so affected students can retake."
+        : "Baseline answer key already looks repaired. No changes made.",
+    });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -9100,9 +9350,15 @@ app.post("/admin/assessments/create", async (req, res) => {
     const id = uuid();
     const sourceNoteIds = session_id && notes ? [session_id] : [];
     const blockConfig = ngNormalizeAssessmentBlockConfig(req.body || {});
-    const questionList = Array.isArray(questions) && questions.length
+    const rawQuestionList = Array.isArray(questions) && questions.length
       ? questions
       : createDraftQuestions({ question_count: blockConfig.question_count, topic });
+    const questionList = ngNormalizeAssessmentQuestionsForStorage(rawQuestionList, {
+      assessmentId: id,
+      assessmentType: assessment_type || source_type || "regular",
+      forceRandomize: true,
+      distributeCorrectIndex: false,
+    });
 
     const assessment = ngApplyAssessmentBlockMetadata({
       id,
@@ -9149,6 +9405,17 @@ app.patch("/admin/assessments/:assessmentId", async (req, res) => {
       "assessment_type", "system", "topic", "questions"
     ];
     for (const k of allowed) if (req.body[k] !== undefined) a[k] = req.body[k];
+    if (Array.isArray(req.body.questions)) {
+      const hasAttempts = Object.values(db.assessmentAttempts || {}).some((attempt) => String(attempt.assessment_id || "") === String(a.id));
+      a.questions = hasAttempts
+        ? req.body.questions
+        : ngNormalizeAssessmentQuestionsForStorage(req.body.questions, {
+            assessmentId: a.id,
+            assessmentType: a.assessment_type || a.source_type || "regular",
+            forceRandomize: true,
+            distributeCorrectIndex: false,
+          });
+    }
 
     ngApplyAssessmentBlockMetadata(a, { ...a, ...(req.body || {}) });
     a.updated_at = new Date().toISOString();
@@ -9158,7 +9425,39 @@ app.patch("/admin/assessments/:assessmentId", async (req, res) => {
     res.status(e.statusCode || 500).json({ success: false, error: e.message });
   }
 });
-app.post("/admin/assessments/:assessmentId/publish", async (req, res) => { try { const { user } = await requireLmsPermission(req, "lms.assessments.publish"); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a) return res.status(404).json({ success: false, error: "Assessment not found" }); const invalid = (a.questions || []).find((q) => !q.stem || !Array.isArray(q.options) || q.options.length < 2 || q.correct_index === undefined); if (req.body.is_published !== false && invalid) return res.status(400).json({ success: false, error: "Assessment has incomplete questions" }); a.is_published = req.body.is_published !== false; a.published_at = a.is_published ? new Date().toISOString() : null; a.published_by = a.is_published ? user.id : null; a.updated_at = new Date().toISOString(); await writeLiveDb(db); res.json({ success: true, assessment: a }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.post("/admin/assessments/:assessmentId/publish", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.assessments.publish");
+    const db = await readLiveDb();
+    const a = db.assessments[req.params.assessmentId];
+    if (!a) return res.status(404).json({ success: false, error: "Assessment not found" });
+
+    const hasAttempts = Object.values(db.assessmentAttempts || {}).some((attempt) => String(attempt.assessment_id || "") === String(a.id));
+    if (!hasAttempts && Array.isArray(a.questions)) {
+      const baselineRepair = ngRepairBaselineAssessmentAnswerKeyIfNeeded(db, a);
+      if (!baselineRepair.changed) {
+        a.questions = ngNormalizeAssessmentQuestionsForStorage(a.questions, {
+          assessmentId: a.id,
+          assessmentType: a.assessment_type || a.source_type || "regular",
+          forceRandomize: a.answer_shuffle_version !== NEXTGEN_ASSESSMENT_OPTION_RANDOMIZATION_VERSION,
+          distributeCorrectIndex: false,
+        });
+      }
+      ngApplyAssessmentBlockMetadata(a, a);
+    }
+
+    const invalid = (a.questions || []).find((q) => !q.stem || !Array.isArray(q.options) || q.options.length < 2 || q.correct_index === undefined);
+    if (req.body.is_published !== false && invalid) return res.status(400).json({ success: false, error: "Assessment has incomplete questions" });
+    a.is_published = req.body.is_published !== false;
+    a.published_at = a.is_published ? new Date().toISOString() : null;
+    a.published_by = a.is_published ? user.id : null;
+    a.updated_at = new Date().toISOString();
+    await writeLiveDb(db);
+    res.json({ success: true, assessment: a });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message });
+  }
+});
 app.delete("/admin/assessments/:assessmentId", async (req, res) => { try { await requireLmsPermission(req, "lms.assessments.delete"); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a) return res.status(404).json({ success: false, error: "Assessment not found" }); delete db.assessments[req.params.assessmentId]; await writeLiveDb(db); res.json({ success: true, deleted_assessment: a }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.get("/student/assessments", async (req, res) => {
   try {
@@ -9205,6 +9504,9 @@ app.get("/student/assessments/:assessmentId/take", async (req, res) => {
     if (!access.allowed) {
       return ngBlockLockedFeature(res, "assessments", access.reason);
     }
+
+    const repair = ngRepairBaselineAssessmentAnswerKeyIfNeeded(db, assessment);
+    if (repair.changed) await writeLiveDb(db);
 
     const existingAttempt = db.assessmentAttempts[assessmentAttemptKey(assessment.id, user.id)] || null;
 
@@ -9253,6 +9555,9 @@ app.post("/student/assessments/:assessmentId/submit", async (req, res) => {
     if (!access.allowed) {
       return ngBlockLockedFeature(res, "assessments", access.reason);
     }
+
+    const repair = ngRepairBaselineAssessmentAnswerKeyIfNeeded(db, assessment);
+    if (repair.changed) await writeLiveDb(db);
 
     const key = assessmentAttemptKey(assessment.id, user.id);
     const existingAttempt = db.assessmentAttempts[key] || null;
