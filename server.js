@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v177i-flashcard-student-queue-ui-fix";
+const NEXTGEN_BACKEND_BUILD = "v177l-demo-access-self-heal-baseline-visibility-fix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -6658,6 +6658,9 @@ app.post("/auth/login", async (req, res) => {
       });
     }
 
+    const selfHeal = ngMaybeSelfHealDemoEnrollment(db, user, { source: "auth_login" });
+    if (selfHeal.changed) await writeLiveDb(db);
+
     const token = signAuthToken(user);
     const safeUser = sanitizeUser(user);
 
@@ -6666,6 +6669,7 @@ app.post("/auth/login", async (req, res) => {
       token,
       user: safeUser,
       record: safeUser,
+      demo_access_self_heal: selfHeal,
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({
@@ -6807,6 +6811,7 @@ app.post("/auth/signup", async (req, res) => {
     });
 
     db.users[user.id] = user;
+    const selfHeal = ngMaybeSelfHealDemoEnrollment(db, user, { source: "auth_signup" });
     await writeLiveDb(db);
 
     const token = signAuthToken(user);
@@ -6818,6 +6823,7 @@ app.post("/auth/signup", async (req, res) => {
       user: safeUser,
       record: safeUser,
       created: true,
+      demo_access_self_heal: selfHeal,
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({
@@ -6831,11 +6837,14 @@ app.get("/student/feature-access", async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req);
     const db = await readLiveDb();
+    const selfHeal = ngMaybeSelfHealDemoEnrollment(db, user, { source: "student_feature_access" });
+    if (selfHeal.changed) await writeLiveDb(db);
     const features = getStudentFeatureAccess(db, user);
 
     res.json({
       success: true,
       features,
+      demo_access_self_heal: selfHeal,
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({
@@ -7017,11 +7026,15 @@ app.get("/external-library/sso/verify", async (req, res) => {
 app.get("/auth/me", async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const selfHeal = ngMaybeSelfHealDemoEnrollment(db, user, { source: "auth_me" });
+    if (selfHeal.changed) await writeLiveDb(db);
 
     res.json({
       success: true,
       user,
       record: user,
+      demo_access_self_heal: selfHeal,
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({
@@ -7088,6 +7101,7 @@ app.post("/auth/google", async (req, res) => {
       updated_at: new Date().toISOString(),
     };
 
+    const selfHeal = ngMaybeSelfHealDemoEnrollment(db, user, { source: "auth_google" });
     await writeLiveDb(db);
 
     const token = signAuthToken(user);
@@ -7099,6 +7113,7 @@ app.post("/auth/google", async (req, res) => {
       user: safeUser,
       record: safeUser,
       created,
+      demo_access_self_heal: selfHeal,
     });
   } catch (error) {
     console.error("Google auth error:", error.response?.data || error.message);
@@ -8169,6 +8184,250 @@ function enrichDemoEnrollment(enrollment, body = {}, activationSource = "demo_st
   return enrollment;
 }
 
+
+
+// v177l: Demo access self-heal for students who can log in but have no course enrollment.
+// Additive-only: never deletes users/payments/enrollments and never downgrades paid access.
+function ngActiveDemoEnabledCourses(db = {}, requestedCourseId = null) {
+  const cleanRequested = String(requestedCourseId || "").trim();
+  return Object.values(db.courses || {}).filter((course) => {
+    if (!course?.id) return false;
+    if (cleanRequested && String(course.id) !== cleanRequested) return false;
+    if (String(course.status || "active").toLowerCase() !== "active") return false;
+    if (course.demo_access_enabled === false) return false;
+    return true;
+  });
+}
+
+function ngCourseHasPublishedBaseline(db = {}, courseId = "") {
+  const cleanCourseId = String(courseId || "").trim();
+  if (!cleanCourseId) return false;
+  return Object.values(db.assessments || {}).some((assessment) => {
+    if (String(assessment.course_id || "") !== cleanCourseId) return false;
+    if (assessment.is_published === false) return false;
+    const text = `${assessment.title || ""} ${assessment.source_type || ""} ${assessment.assessment_type || ""}`;
+    return /baseline|diagnostic/i.test(text);
+  });
+}
+
+function ngPickDemoSelfHealCourses(db = {}, { courseId = null, allCourses = false } = {}) {
+  const cleanCourseId = String(courseId || "").trim();
+  const candidates = ngActiveDemoEnabledCourses(db, cleanCourseId || null);
+  if (cleanCourseId) return candidates;
+  const sorted = candidates.sort((a, b) => {
+    const aBaseline = ngCourseHasPublishedBaseline(db, a.id) ? 1 : 0;
+    const bBaseline = ngCourseHasPublishedBaseline(db, b.id) ? 1 : 0;
+    if (aBaseline !== bBaseline) return bBaseline - aBaseline;
+    return String(b.created_at || b.updated_at || "").localeCompare(String(a.created_at || a.updated_at || ""));
+  });
+  return allCourses ? sorted : sorted.slice(0, 1);
+}
+
+function ngAnyActiveStudentAccess(db = {}, user = {}, { courseId = null } = {}) {
+  const cleanCourseId = String(courseId || "").trim();
+  const settings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
+  return Object.values(db.enrollments || {}).some((enrollment) => {
+    if (String(enrollment.user_id || "") !== String(user?.id || "")) return false;
+    if (cleanCourseId && String(enrollment.course_id || "") !== cleanCourseId) return false;
+    if (enrollment.access_granted === false) return false;
+    if (enrollment.is_demo === true) {
+      const course = enrollment.course_id ? db.courses?.[String(enrollment.course_id)] || null : null;
+      return course?.demo_access_enabled !== false && isDemoEnrollmentActive(enrollment, settings);
+    }
+    const plan = enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null;
+    return isPaidEnrollmentActive(enrollment, plan);
+  });
+}
+
+function ngMaybeSelfHealDemoEnrollment(db = {}, user = {}, options = {}) {
+  const result = {
+    success: true,
+    changed: false,
+    source: options.source || "demo_self_heal",
+    reason: null,
+    checked_course_ids: [],
+    created_count: 0,
+    reused_count: 0,
+    skipped_count: 0,
+    created_enrollment_ids: [],
+    details: [],
+  };
+
+  if (!user?.id) {
+    result.reason = "missing_user";
+    return result;
+  }
+
+  if (user.role && user.role !== "student") {
+    result.reason = "staff_user_skipped";
+    return result;
+  }
+
+  const settings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
+  if (settings.enabled === false) {
+    result.reason = "demo_disabled";
+    return result;
+  }
+
+  db.enrollments = db.enrollments || {};
+
+  const courseId = String(options.courseId || options.course_id || "").trim();
+  const allCourses = options.allCourses === true || options.all_courses === true;
+  const repairExpired = options.repairExpired === true || options.repair_expired === true;
+  const dryRun = options.dryRun === true || options.dry_run === true;
+
+  if (!courseId && !allCourses && ngAnyActiveStudentAccess(db, user)) {
+    result.reason = "student_already_has_active_access";
+    return result;
+  }
+
+  const courses = ngPickDemoSelfHealCourses(db, { courseId, allCourses });
+  result.checked_course_ids = courses.map((course) => String(course.id));
+
+  if (!courses.length) {
+    result.reason = courseId ? "course_missing_or_demo_disabled" : "no_active_demo_enabled_course";
+    return result;
+  }
+
+  const demoExpiry = dateOnly(addDays(new Date(), Number(settings.duration_days || 7)));
+
+  for (const course of courses) {
+    const cleanCourseId = String(course.id);
+    const paid = db.enrollments?.[backendEnrollmentKey(cleanCourseId, user.id, "paid")];
+    const paidPlan = paid?.plan_id ? db.plans?.[String(paid.plan_id)] || null : null;
+
+    if (paid?.access_granted !== false && isPaidEnrollmentActive(paid, paidPlan)) {
+      result.skipped_count += 1;
+      result.details.push({ course_id: cleanCourseId, status: "skipped_paid_active", enrollment_id: paid.id });
+      continue;
+    }
+
+    const demoKey = backendEnrollmentKey(cleanCourseId, user.id, "demo");
+    const demo = db.enrollments?.[demoKey] || null;
+
+    if (demo?.access_granted !== false && demo?.is_demo === true && isDemoEnrollmentActive(demo, settings)) {
+      result.reused_count += 1;
+      result.details.push({ course_id: cleanCourseId, status: "already_demo_active", enrollment_id: demo.id, demo_expiry: demo.demo_expiry || null });
+      continue;
+    }
+
+    if (demo?.id && !repairExpired) {
+      result.skipped_count += 1;
+      result.details.push({
+        course_id: cleanCourseId,
+        status: demo.access_granted === false ? "skipped_demo_revoked" : "skipped_demo_expired",
+        enrollment_id: demo.id,
+        demo_expiry: demo.demo_expiry || null,
+      });
+      continue;
+    }
+
+    if (dryRun) {
+      result.created_count += 1;
+      result.details.push({ course_id: cleanCourseId, status: "would_create_demo", demo_expiry: demoExpiry });
+      continue;
+    }
+
+    const enrollment = createBackendEnrollment(db, {
+      userId: user.id,
+      userName: user.name || user.email || "Student",
+      courseId: cleanCourseId,
+      isDemo: true,
+      accessGranted: true,
+      demoExpiry,
+    });
+
+    enrichDemoEnrollment(enrollment, {
+      source: options.source || "demo_self_heal",
+      course_scope: allCourses ? "all_active" : "single_course",
+      intent: "access_repair",
+    }, options.source || "demo_self_heal");
+
+    enrollment.self_healed = true;
+    enrollment.self_heal_source = options.source || "demo_self_heal";
+    enrollment.self_healed_at = new Date().toISOString();
+    enrollment.updated_at = new Date().toISOString();
+    db.enrollments[enrollment.id] = enrollment;
+
+    result.changed = true;
+    result.created_count += 1;
+    result.created_enrollment_ids.push(enrollment.id);
+    result.details.push({ course_id: cleanCourseId, status: demo?.id ? "repaired_demo_expired" : "created_demo", enrollment_id: enrollment.id, demo_expiry: enrollment.demo_expiry || null });
+  }
+
+  result.reason = result.changed ? "demo_enrollment_created" : "no_change_needed";
+  return result;
+}
+
+function ngBuildDemoAccessAudit(db = {}, { courseId = null, includeUsersWithAnyEnrollment = false, repairExpired = false } = {}) {
+  const cleanCourseId = String(courseId || "").trim();
+  const courses = ngPickDemoSelfHealCourses(db, { courseId: cleanCourseId, allCourses: false });
+  const course = courses[0] || null;
+  const settings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
+  const rows = [];
+
+  if (!course) {
+    return {
+      success: true,
+      course_id: cleanCourseId || null,
+      course_name: null,
+      missing_count: 0,
+      expired_count: 0,
+      active_demo_count: 0,
+      paid_count: 0,
+      skipped_count: 0,
+      repairable_count: 0,
+      rows,
+      message: cleanCourseId ? "Course missing or demo disabled" : "No active demo-enabled course found",
+    };
+  }
+
+  for (const user of Object.values(db.users || {})) {
+    if (!user?.id || (user.role && user.role !== "student")) continue;
+    const paid = db.enrollments?.[backendEnrollmentKey(course.id, user.id, "paid")];
+    const paidPlan = paid?.plan_id ? db.plans?.[String(paid.plan_id)] || null : null;
+    const demo = db.enrollments?.[backendEnrollmentKey(course.id, user.id, "demo")];
+    const activePaid = paid?.access_granted !== false && isPaidEnrollmentActive(paid, paidPlan);
+    const activeDemo = demo?.access_granted !== false && demo?.is_demo === true && isDemoEnrollmentActive(demo, settings);
+    const hasAnyEnrollment = Object.values(db.enrollments || {}).some((enrollment) => String(enrollment.user_id || "") === String(user.id));
+
+    if (!includeUsersWithAnyEnrollment && hasAnyEnrollment && !paid?.id && !demo?.id) continue;
+
+    let status = "missing_demo";
+    if (activePaid) status = "paid_active";
+    else if (activeDemo) status = "demo_active";
+    else if (demo?.id && demo.access_granted === false) status = "demo_revoked";
+    else if (demo?.id) status = "demo_expired";
+
+    const repairable = status === "missing_demo" || (repairExpired && status === "demo_expired");
+    rows.push({
+      user_id: user.id,
+      name: user.name || user.email || "Student",
+      email: user.email || "",
+      course_id: course.id,
+      course_name: course.name || "Course",
+      status,
+      repairable,
+      enrollment_id: (paid || demo)?.id || null,
+      demo_expiry: demo?.demo_expiry || null,
+      created_at: user.created_at || null,
+    });
+  }
+
+  return {
+    success: true,
+    course_id: course.id,
+    course_name: course.name || "Course",
+    missing_count: rows.filter((row) => row.status === "missing_demo").length,
+    expired_count: rows.filter((row) => row.status === "demo_expired").length,
+    active_demo_count: rows.filter((row) => row.status === "demo_active").length,
+    paid_count: rows.filter((row) => row.status === "paid_active").length,
+    skipped_count: rows.filter((row) => row.status === "demo_revoked").length,
+    repairable_count: rows.filter((row) => row.repairable).length,
+    rows,
+  };
+}
+
 function getDemoExpiryDateTime(demoExpiry) {
   if (!demoExpiry) return null;
   const raw = String(demoExpiry || "").trim();
@@ -8365,11 +8624,102 @@ app.get("/student/demo-status", async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req);
     const db = await readLiveDb();
-    res.json(buildStudentDemoStatus(db, user));
+    const selfHeal = ngMaybeSelfHealDemoEnrollment(db, user, { source: "student_demo_status" });
+    if (selfHeal.changed) await writeLiveDb(db);
+    res.json({ ...buildStudentDemoStatus(db, user), demo_access_self_heal: selfHeal });
   } catch (e) {
     res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to load demo status" });
   }
 });
+
+
+app.get("/admin/demo/access-audit", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    const audit = ngBuildDemoAccessAudit(db, {
+      courseId: req.query.course_id || req.query.courseId || null,
+      includeUsersWithAnyEnrollment: req.query.include_all_users === "true" || req.query.include_users_with_any_enrollment === "true",
+      repairExpired: req.query.repair_expired === "true",
+    });
+    res.json({ ...audit, build: NEXTGEN_BACKEND_BUILD, source: "admin_demo_access_audit_v177l" });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to audit demo access" });
+  }
+});
+
+app.post("/admin/demo/repair-access", async (req, res) => {
+  try {
+    const { user: adminUser } = await requireAdmin(req);
+    const db = await readLiveDb();
+    const courseId = req.body.course_id || req.body.courseId || null;
+    const dryRun = req.body.dry_run === true;
+    const repairExpired = req.body.repair_expired === true;
+    const includeUsersWithAnyEnrollment = req.body.include_all_users === true || req.body.include_users_with_any_enrollment === true;
+    const limit = Math.max(1, Math.min(5000, Number(req.body.limit || 5000)));
+    const audit = ngBuildDemoAccessAudit(db, { courseId, includeUsersWithAnyEnrollment, repairExpired });
+    const rows = (audit.rows || []).filter((row) => row.repairable).slice(0, limit);
+    const results = [];
+    let changed = false;
+
+    for (const row of rows) {
+      const targetUser = db.users?.[String(row.user_id)] || null;
+      if (!targetUser?.id) continue;
+      const repair = ngMaybeSelfHealDemoEnrollment(db, targetUser, {
+        courseId: row.course_id,
+        source: "admin_demo_repair_access",
+        repairExpired,
+        dryRun,
+      });
+      if (repair.changed) changed = true;
+      results.push({
+        user_id: row.user_id,
+        email: row.email,
+        name: row.name,
+        course_id: row.course_id,
+        previous_status: row.status,
+        repair,
+      });
+    }
+
+    if (changed && !dryRun) {
+      db.demoAccessRepairLastRun = {
+        id: uuid(),
+        actor_id: adminUser.id,
+        actor_email: adminUser.email || "",
+        course_id: audit.course_id || null,
+        dry_run: false,
+        repair_expired: repairExpired,
+        repaired_count: results.filter((item) => item.repair?.changed).length,
+        checked_count: rows.length,
+        created_at: new Date().toISOString(),
+      };
+      await writeLiveDb(db);
+    }
+
+    res.json({
+      success: true,
+      build: NEXTGEN_BACKEND_BUILD,
+      dry_run: dryRun,
+      course_id: audit.course_id || null,
+      course_name: audit.course_name || null,
+      checked_count: rows.length,
+      repaired_count: results.filter((item) => item.repair?.changed || item.repair?.created_count > 0).length,
+      results,
+      before_audit: {
+        missing_count: audit.missing_count,
+        expired_count: audit.expired_count,
+        active_demo_count: audit.active_demo_count,
+        paid_count: audit.paid_count,
+        repairable_count: audit.repairable_count,
+      },
+      source: "admin_demo_repair_access_v177l",
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to repair demo access" });
+  }
+});
+
 app.post("/enrollments/prepare-checkout", async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req);
@@ -8410,12 +8760,15 @@ app.post("/enrollments/prepare-checkout", async (req, res) => {
 app.get("/enrollments/status", async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req); const courseId = req.query.course_id; if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
-    const db = await readLiveDb(); const settings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) }; const paid = db.enrollments[backendEnrollmentKey(courseId, user.id, "paid")]; const demo = db.enrollments[backendEnrollmentKey(courseId, user.id, "demo")];
+    const db = await readLiveDb();
+    const selfHeal = ngMaybeSelfHealDemoEnrollment(db, user, { courseId, source: "enrollment_status" });
+    if (selfHeal.changed) await writeLiveDb(db);
+    const settings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) }; const paid = db.enrollments[backendEnrollmentKey(courseId, user.id, "paid")]; const demo = db.enrollments[backendEnrollmentKey(courseId, user.id, "demo")];
     const paidPlan = paid?.plan_id ? db.plans?.[String(paid.plan_id)] || null : null;
-    if (paid?.access_granted && isPaidEnrollmentActive(paid, paidPlan)) return res.json({ success: true, status: "paid", enrollment: paid, demo_expiry: null, access_expires_at: paid.access_expires_at || null, source: "backend" });
-    if (paid?.access_granted && !isPaidEnrollmentActive(paid, paidPlan)) return res.json({ success: true, status: "paid_expired", enrollment: paid, demo_expiry: null, access_expires_at: paid.access_expires_at || null, source: "backend" });
-    if (demo?.access_granted) return res.json({ success: true, status: isDemoEnrollmentActive(demo, settings) ? "demo_active" : "demo_expired", enrollment: demo, demo_expiry: demo.demo_expiry || null, source: "backend" });
-    res.json({ success: true, status: "none", enrollment: null, demo_expiry: null, source: "backend" });
+    if (paid?.access_granted && isPaidEnrollmentActive(paid, paidPlan)) return res.json({ success: true, status: "paid", enrollment: paid, demo_expiry: null, access_expires_at: paid.access_expires_at || null, source: "backend", demo_access_self_heal: selfHeal });
+    if (paid?.access_granted && !isPaidEnrollmentActive(paid, paidPlan)) return res.json({ success: true, status: "paid_expired", enrollment: paid, demo_expiry: null, access_expires_at: paid.access_expires_at || null, source: "backend", demo_access_self_heal: selfHeal });
+    if (demo?.access_granted) return res.json({ success: true, status: isDemoEnrollmentActive(demo, settings) ? "demo_active" : "demo_expired", enrollment: demo, demo_expiry: demo.demo_expiry || null, source: "backend", demo_access_self_heal: selfHeal });
+    res.json({ success: true, status: "none", enrollment: null, demo_expiry: null, source: "backend", demo_access_self_heal: selfHeal });
   } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); }
 });
 app.post("/stripe/create-checkout", async (req, res) => {
@@ -10408,10 +10761,22 @@ app.get("/student/assessments", async (req, res) => {
 
     if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
 
-    const access = ngCourseFeatureAccess(db, user, {
+    let access = ngCourseFeatureAccess(db, user, {
       courseId,
       featureKey: "assessments",
     });
+
+    const selfHeal = !access.allowed
+      ? ngMaybeSelfHealDemoEnrollment(db, user, { courseId, source: "student_assessments" })
+      : ngMaybeSelfHealDemoEnrollment(db, user, { courseId, source: "student_assessments_check" });
+
+    if (selfHeal.changed) {
+      await writeLiveDb(db);
+      access = ngCourseFeatureAccess(db, user, {
+        courseId,
+        featureKey: "assessments",
+      });
+    }
 
     if (!access.allowed) {
       return ngBlockLockedFeature(res, "assessments", access.reason);
@@ -10437,10 +10802,22 @@ app.get("/student/assessments/:assessmentId/take", async (req, res) => {
       return res.status(404).json({ success: false, error: "Assessment not found" });
     }
 
-    const access = ngCourseFeatureAccess(db, user, {
+    let access = ngCourseFeatureAccess(db, user, {
       courseId: assessment.course_id,
       featureKey: "assessments",
     });
+
+    const selfHeal = !access.allowed
+      ? ngMaybeSelfHealDemoEnrollment(db, user, { courseId: assessment.course_id, source: "student_assessment_take" })
+      : ngMaybeSelfHealDemoEnrollment(db, user, { courseId: assessment.course_id, source: "student_assessment_take_check" });
+
+    if (selfHeal.changed) {
+      await writeLiveDb(db);
+      access = ngCourseFeatureAccess(db, user, {
+        courseId: assessment.course_id,
+        featureKey: "assessments",
+      });
+    }
 
     if (!access.allowed) {
       return ngBlockLockedFeature(res, "assessments", access.reason);
@@ -10488,10 +10865,22 @@ app.post("/student/assessments/:assessmentId/submit", async (req, res) => {
       return res.status(404).json({ success: false, error: "Assessment not found" });
     }
 
-    const access = ngCourseFeatureAccess(db, user, {
+    let access = ngCourseFeatureAccess(db, user, {
       courseId: assessment.course_id,
       featureKey: "assessments",
     });
+
+    const selfHeal = !access.allowed
+      ? ngMaybeSelfHealDemoEnrollment(db, user, { courseId: assessment.course_id, source: "student_assessment_submit" })
+      : ngMaybeSelfHealDemoEnrollment(db, user, { courseId: assessment.course_id, source: "student_assessment_submit_check" });
+
+    if (selfHeal.changed) {
+      await writeLiveDb(db);
+      access = ngCourseFeatureAccess(db, user, {
+        courseId: assessment.course_id,
+        featureKey: "assessments",
+      });
+    }
 
     if (!access.allowed) {
       return ngBlockLockedFeature(res, "assessments", access.reason);
