@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v177m-student-notes-published-only-dummy-filter-fix";
+const NEXTGEN_BACKEND_BUILD = "v177n-dashboard-task-review-leaderboard-test-filter-fix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -3656,6 +3656,12 @@ function ngUpsertTaskCompletion(db, { courseId, userId, userName, day, taskKey, 
     };
   }
 
+  // v177n: if an admin/student unmarks a manually reviewed task, remove the one-time point event too.
+  // This keeps the dashboard progress and leaderboard from showing stale points after a correction.
+  if (!completed && db.pointEvents[taskPointKey]) {
+    delete db.pointEvents[taskPointKey];
+  }
+
   ngEnsureDailyTaskProgress(db, { courseId, userId, userName, day });
 
   db.roadmapProgress = db.roadmapProgress || {};
@@ -3764,6 +3770,44 @@ function performanceFromAttempts(attempts) {
     focus_areas: Object.entries(topicScores).map(([name, scores]) => ({ name, score: Math.round(scores.reduce((s, x) => s + x, 0) / scores.length) })).sort((a, b) => a.score - b.score).slice(0, 5),
   };
 }
+function ngNormalizeLeaderboardIdentity(value = "") {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function ngIsLeaderboardHiddenUser(db = {}, entryOrUserId = null) {
+  const userId = typeof entryOrUserId === "object" ? entryOrUserId.user_id || entryOrUserId.userId || entryOrUserId.id : entryOrUserId;
+  const user = userId ? db.users?.[String(userId)] || null : null;
+  const entry = typeof entryOrUserId === "object" ? entryOrUserId : {};
+  const nameText = [user?.name, user?.email, entry?.user_name, entry?.student_name, entry?.email, entry?.student_email]
+    .map(ngNormalizeLeaderboardIdentity)
+    .join(" ");
+
+  if (user?.role === "admin" || user?.role === "instructor") return true;
+  if (user?.leaderboard_hidden === true || user?.exclude_from_leaderboard === true) return true;
+  if (entry?.leaderboard_hidden === true || entry?.exclude_from_leaderboard === true) return true;
+
+  // User-confirmed test/admin accounts should never appear in public student leaderboard.
+  const hiddenPatterns = [
+    "hassantiktok",
+    "tiktokhassan88",
+    "nextgenacademy89",
+    "nextgenadmin",
+    "teststudent",
+    "demotest"
+  ];
+
+  return hiddenPatterns.some((pattern) => nameText.includes(pattern));
+}
+
+function ngPublicLeaderboardList(db = {}, courseId = "", { limit = null } = {}) {
+  let list = Object.values(db.leaderboard || {});
+  if (courseId) list = list.filter((entry) => String(entry.course_id) === String(courseId));
+  list = list.filter((entry) => !ngIsLeaderboardHiddenUser(db, entry));
+  list = list.sort((a, b) => Number(b.total_points || 0) - Number(a.total_points || 0));
+  if (limit) list = list.slice(0, Number(limit));
+  return list.map((entry, index) => ({ rank: index + 1, ...entry }));
+}
+
 function updateLeaderboard(db, { courseId, userId, userName }) {
   db.pointEvents = db.pointEvents || {};
   const attendance = Object.values(db.attendance || {}).filter((a) => String(a.course_id) === String(courseId) && String(a.user_id) === String(userId));
@@ -9642,15 +9686,50 @@ app.get("/live/leaderboard", async (req, res) => {
       }
     }
 
-    let list = Object.values(db.leaderboard || {});
-    if (courseId) list = list.filter((x) => String(x.course_id) === String(courseId));
-    list = list.sort((a, b) => Number(b.total_points || 0) - Number(a.total_points || 0)).map((x, i) => ({ rank: i + 1, ...x }));
+    const list = ngPublicLeaderboardList(db, courseId);
 
-    res.json({ success: true, count: list.length, leaderboard: list });
+    res.json({ success: true, count: list.length, leaderboard: list, hidden_test_accounts: true });
   } catch (e) {
     res.status(e.statusCode || 500).json({ success: false, error: e.message });
   }
 });
+app.post("/admin/leaderboard/hide-user", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    const email = normalizeEmail(req.body.email || req.body.student_email || "");
+    const userId = String(req.body.user_id || req.body.userId || "").trim();
+    const name = String(req.body.name || req.body.user_name || "").trim().toLowerCase();
+
+    const user = Object.values(db.users || {}).find((item) => {
+      if (userId && String(item.id) === userId) return true;
+      if (email && normalizeEmail(item.email || "") === email) return true;
+      if (name && String(item.name || "").trim().toLowerCase() === name) return true;
+      return false;
+    }) || null;
+
+    if (!user?.id) return res.status(404).json({ success: false, error: "User not found" });
+
+    user.leaderboard_hidden = true;
+    user.exclude_from_leaderboard = true;
+    user.updated_at = new Date().toISOString();
+    db.users[user.id] = user;
+
+    for (const entry of Object.values(db.leaderboard || {})) {
+      if (String(entry.user_id) === String(user.id)) {
+        entry.leaderboard_hidden = true;
+        entry.exclude_from_leaderboard = true;
+        entry.updated_at = new Date().toISOString();
+      }
+    }
+
+    await writeLiveDb(db);
+    res.json({ success: true, hidden: true, user: sanitizeUser(user) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
 app.get("/live/community/:sessionId", async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req);
@@ -9796,21 +9875,18 @@ app.post("/student/daily-task/:dayId/task", async (req, res) => {
     const day = ngFindRoadmapDay(db, { courseId, dayId: req.params.dayId });
     if (!day) return res.status(404).json({ success: false, error: "Roadmap day not found" });
 
-    const verifiedOnlyTasks = new Set([
+    // v177n: only true system-verified tasks stay locked.
+    // Content-review tasks shown on the dashboard must save when the student presses Mark Reviewed.
+    // Otherwise the UI appears to mark them, then a refresh brings them back as incomplete.
+    const systemLockedTasks = new Set([
       "live_attendance",
-      "video_library_watch",
       "assessment_completed",
       "weekly_assessment_completed",
       "grand_system_assessment_completed",
       "assessment_high_score_bonus",
-      "flashcards_reviewed",
-      "first_aid_flashcards_reviewed",
-      "session_flashcards_reviewed",
-      "weak_concepts_logged",
-      "community_confusion_post",
     ]);
 
-    if (user.role === "student" && verifiedOnlyTasks.has(taskKey)) {
+    if (user.role === "student" && systemLockedTasks.has(taskKey)) {
       return res.status(403).json({
         success: false,
         error: `${ngTaskLabel(taskKey)} is verified automatically after the real activity is completed.`,
@@ -11581,12 +11657,17 @@ app.get("/student/dashboard/bootstrap", async (req, res) => {
     )
       .sort(sortNewestFirst)
       .slice(0, Number(req.query.announcement_limit || 5));
+    // Rebuild the current user's leaderboard from pointEvents before returning dashboard data.
+    // This prevents refreshes from showing old task points after a Mark Reviewed action.
+    for (const bundle of bundles) {
+      if (bundle?.course?.id) {
+        updateLeaderboard(db, { courseId: bundle.course.id, userId: user.id, userName: user.name || user.email || "Student" });
+      }
+    }
+    await writeLiveDb(db);
+
     const leaderboard = primary?.course?.id
-      ? Object.values(db.leaderboard || {})
-        .filter((entry) => String(entry.course_id) === String(primary.course.id))
-        .sort((a, b) => Number(b.total_points || 0) - Number(a.total_points || 0))
-        .slice(0, 10)
-        .map((entry, index) => ({ ...entry, rank: index + 1 }))
+      ? ngPublicLeaderboardList(db, primary.course.id, { limit: 10 })
       : [];
 
     res.json({
