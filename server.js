@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v177d-baseline-usmle-vignette-quality-guard";
+const NEXTGEN_BACKEND_BUILD = "v177e-assessment-submit-lock-review-explanation-fix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -4070,8 +4070,10 @@ function sanitizeAssessmentForTaking(assessment, existingAttempt = null) {
           system: q.system || assessment.system || q.topic || "General",
           difficulty: q.difficulty || "medium",
           block_number: q.block_number || q.block || (assessment.block_mode ? Math.floor(i / Math.max(1, Number(assessment.questions_per_block || 1))) + 1 : 1),
-          explanation: q.explanation || "",
+          explanation: q.explanation || q.detailed_explanation || "",
+          detailed_explanation: q.detailed_explanation || q.explanation || "",
           correct_index: q.correct_index,
+          wrong_choice_explanations: Array.isArray(q.wrong_choice_explanations) ? q.wrong_choice_explanations : [],
         }))
       : (assessment.questions || []).map((q, i) => ({
           id: q.id || `q${i + 1}`,
@@ -4201,6 +4203,56 @@ function ngNormalizeQuestionOptionsArray(question = {}) {
     .filter(Boolean);
 }
 
+function ngAssessmentSystemFromQuestion(question = {}, fallback = "General") {
+  return String(question.system || question.subject || question.topic || fallback || "General").trim() || "General";
+}
+
+function ngAssessmentTopicFromQuestion(question = {}, fallback = "General") {
+  return String(question.topic || question.concept || question.system || fallback || "General").trim() || "General";
+}
+
+function ngOptionExplanationAt(question = {}, optionIndex = 0) {
+  const raw = question.wrong_choice_explanations || question.option_explanations || question.choice_explanations || [];
+  if (Array.isArray(raw)) return String(raw[optionIndex] || "").trim();
+  if (raw && typeof raw === "object") {
+    const keys = [optionIndex, String(optionIndex), String.fromCharCode(65 + Number(optionIndex || 0))];
+    for (const key of keys) {
+      if (raw[key] !== undefined) return String(raw[key] || "").trim();
+    }
+  }
+  return "";
+}
+
+function ngDetailedCorrectExplanation(question = {}, options = [], correctIndex = 0) {
+  const system = ngAssessmentSystemFromQuestion(question);
+  const topic = ngAssessmentTopicFromQuestion(question, system);
+  const correctText = String(options?.[correctIndex] || question.correct_answer || question.answer || "the correct answer").trim();
+  const base = String(question.detailed_explanation || question.explanation || "").trim();
+
+  if (base.length >= 180) return base;
+
+  const first = base || `${correctText} is the best answer for the key finding in this vignette.`;
+  const mechanism = `This question is testing ${topic} within ${system}. Match the dominant clue in the stem to the underlying mechanism, then eliminate choices that do not explain that clue.`;
+  const example = `Clinical example: if a stem gives the same pattern again, look first for the finding that points to ${correctText}, then confirm it with the supporting history, examination, laboratory, or physiologic detail.`;
+  return `${first} ${mechanism} ${example}`;
+}
+
+function ngDetailedWrongChoiceExplanations(question = {}, options = [], correctIndex = 0) {
+  const system = ngAssessmentSystemFromQuestion(question);
+  const topic = ngAssessmentTopicFromQuestion(question, system);
+  const correctText = String(options?.[correctIndex] || question.correct_answer || question.answer || "the correct answer").trim();
+
+  return (Array.isArray(options) ? options : []).map((optionText, optionIndex) => {
+    const existing = ngOptionExplanationAt(question, optionIndex);
+    if (existing && existing.length >= 40) return existing;
+    if (Number(optionIndex) === Number(correctIndex)) {
+      return `Correct: ${ngDetailedCorrectExplanation(question, options, correctIndex)}`;
+    }
+    const choice = String(optionText || `Option ${String.fromCharCode(65 + optionIndex)}`).trim();
+    return `${choice} is less appropriate because the stem is pointing to ${correctText}. In ${topic}, the best answer must explain the main clinical or physiologic clue, not just be loosely associated with ${system}.`;
+  });
+}
+
 function ngNormalizeAssessmentQuestionForStorage(question = {}, index = 0, context = {}) {
   const options = ngNormalizeQuestionOptionsArray(question);
   const originalCorrectIndex = Number.isFinite(Number(question.correct_index)) ? Number(question.correct_index) : 0;
@@ -4216,7 +4268,11 @@ function ngNormalizeAssessmentQuestionForStorage(question = {}, index = 0, conte
     };
   }
 
-  const pairs = options.map((text, optionIndex) => ({ text, isCorrect: optionIndex === safeCorrectIndex }));
+  const pairs = options.map((text, optionIndex) => ({
+    text,
+    isCorrect: optionIndex === safeCorrectIndex,
+    explanation: ngOptionExplanationAt(question, optionIndex),
+  }));
   const shouldShuffle = context.forceRandomize === true || question.answer_shuffle_version !== NEXTGEN_ASSESSMENT_OPTION_RANDOMIZATION_VERSION;
   let shuffled = shouldShuffle
     ? ngSeededOptionShuffle(pairs, `${NEXTGEN_ASSESSMENT_OPTION_RANDOMIZATION_VERSION}:${context.assessmentId || "draft"}:${question.id || `q${index + 1}`}::${question.stem || question.question || ""}:${index}`)
@@ -4234,15 +4290,25 @@ function ngNormalizeAssessmentQuestionForStorage(question = {}, index = 0, conte
   }
 
   const nextCorrectIndex = Math.max(0, shuffled.findIndex((item) => item.isCorrect));
-  return {
+  const shuffledOptions = shuffled.map((item) => item.text);
+  const nextQuestion = {
     ...question,
     id: question.id || `q${index + 1}`,
     stem: question.stem || question.question_text || question.question || `Question ${index + 1}`,
-    options: shuffled.map((item) => item.text),
+    options: shuffledOptions,
     correct_index: nextCorrectIndex,
+    explanation: ngDetailedCorrectExplanation(question, shuffledOptions, nextCorrectIndex),
+    wrong_choice_explanations: shuffled.map((item, optionIndex) => {
+      if (item.explanation && item.explanation.length >= 40) return item.explanation;
+      if (item.isCorrect) return `Correct: ${ngDetailedCorrectExplanation(question, shuffledOptions, nextCorrectIndex)}`;
+      return `${item.text} is less appropriate because the clinical clues support ${shuffledOptions[nextCorrectIndex]}.`;
+    }),
     answer_shuffle_version: NEXTGEN_ASSESSMENT_OPTION_RANDOMIZATION_VERSION,
     answer_shuffle_applied_at: question.answer_shuffle_applied_at || new Date().toISOString(),
   };
+
+  nextQuestion.detailed_explanation = nextQuestion.explanation;
+  return nextQuestion;
 }
 
 function ngNormalizeAssessmentQuestionsForStorage(questions = [], context = {}) {
@@ -4397,7 +4463,26 @@ function gradeAssessment(assessment, answers = {}) {
     const system = String(q.system || assessment.system || assessment.subject || "General").trim() || "General";
     const topic = String(q.topic || assessment.topic || system || "General").trim() || "General";
     const blockNumber = Number(q.block_number || q.block || Math.floor(i / Math.max(1, Number(assessment.questions_per_block || assessment.question_count || 1))) + 1);
-    return { question_id: id, selected_index: selected ?? null, correct_index: correct, is_correct: ok, explanation: q.explanation || "", topic, system, difficulty: q.difficulty || assessment.difficulty || "medium", block_number: blockNumber };
+    const options = ngNormalizeQuestionOptionsArray(q);
+    const selectedIndex = selected === undefined || selected === null ? null : Number(selected);
+    const correctIndex = Number.isFinite(Number(correct)) ? Number(correct) : 0;
+    const wrongChoiceExplanations = ngDetailedWrongChoiceExplanations(q, options, correctIndex);
+    return {
+      question_id: id,
+      selected_index: selectedIndex,
+      selected_text: selectedIndex === null ? null : options[selectedIndex] || null,
+      correct_index: correctIndex,
+      correct_text: options[correctIndex] || null,
+      is_correct: ok,
+      explanation: ngDetailedCorrectExplanation(q, options, correctIndex),
+      detailed_explanation: ngDetailedCorrectExplanation(q, options, correctIndex),
+      wrong_choice_explanations: wrongChoiceExplanations,
+      options,
+      topic,
+      system,
+      difficulty: q.difficulty || assessment.difficulty || "medium",
+      block_number: blockNumber,
+    };
   });
   const total = (assessment.questions || []).length;
   const bySystem = {};
@@ -10421,7 +10506,7 @@ app.post("/student/assessments/:assessmentId/submit", async (req, res) => {
       user_name: user.name || user.email || "Student",
       user_email: user.email || "",
       answers: req.body.answers || {},
-      marked_for_review: Array.isArray(req.body.marked_for_review) ? req.body.marked_for_review : [],
+      marked_for_review: [],
       score: graded.score,
       total: graded.total,
       percentage: graded.percentage,
