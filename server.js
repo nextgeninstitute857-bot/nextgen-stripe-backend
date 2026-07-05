@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v177h-flashcards-holiday-weakarea-auto-flow";
+const NEXTGEN_BACKEND_BUILD = "v177i-flashcard-student-queue-ui-fix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -43629,6 +43629,55 @@ function ngBuildStudentFlashcardSections(cards = []) {
   };
 }
 
+function ngStudentFlashcardSectionCounts(cards = []) {
+  const sections = ngBuildStudentFlashcardSections(cards);
+  return Object.fromEntries(Object.entries(sections).map(([key, list]) => [key, list.length]));
+}
+
+function ngPickStudentDailyFlashcardQueue(cards = [], { limit = 28 } = {}) {
+  const max = Math.max(10, Math.min(40, Number(limit || 28)));
+  const picked = [];
+  const pickedIds = new Set();
+
+  const take = (bucket, n) => {
+    for (const card of cards) {
+      if (picked.length >= max) break;
+      if (pickedIds.has(String(card.id))) continue;
+      if (card.reviewed === true) continue;
+      if (bucket && card.bucket !== bucket) continue;
+      picked.push(card);
+      pickedIds.add(String(card.id));
+      if (picked.filter((item) => !bucket || item.bucket === bucket).length >= n) break;
+    }
+  };
+
+  // Daily queue is intentionally small. Do not dump the entire published bank on students.
+  take("weak_area", 10);
+  take("tutor_notes", 7);
+  take("class_first_aid", 8);
+  take("published_bank", 3);
+
+  for (const card of cards) {
+    if (picked.length >= max) break;
+    if (card.reviewed === true) continue;
+    if (pickedIds.has(String(card.id))) continue;
+    picked.push(card);
+    pickedIds.add(String(card.id));
+  }
+
+  // If everything due is reviewed, show a small read-only recent review set instead of an empty broken screen.
+  if (!picked.length) {
+    for (const card of cards) {
+      if (picked.length >= Math.min(10, max)) break;
+      if (pickedIds.has(String(card.id))) continue;
+      picked.push(card);
+      pickedIds.add(String(card.id));
+    }
+  }
+
+  return picked;
+}
+
 
 app.post("/admin/flashcards/publish-all-drafts", async (req, res) => {
   try {
@@ -43862,21 +43911,38 @@ app.get("/student/flashcards/review", async (req, res) => {
       return Number(a.reviewed) - Number(b.reviewed) || Number(a.day_number || 9999) - Number(b.day_number || 9999) || String(b.created_at || "").localeCompare(String(a.created_at || ""));
     });
 
-    const sections = ngBuildStudentFlashcardSections(cards);
-    const reviewedCount = cards.filter((card) => card.reviewed).length;
+    const availableCards = cards;
+    const availableSections = ngBuildStudentFlashcardSections(availableCards);
+    const queueLimit = Math.max(10, Math.min(40, Number(req.query.limit || 28)));
+    const queueCards = ngPickStudentDailyFlashcardQueue(availableCards, { limit: queueLimit });
+    const sections = ngBuildStudentFlashcardSections(queueCards);
+    const reviewedCount = queueCards.filter((card) => card.reviewed).length;
+    const totalReviewedCount = availableCards.filter((card) => card.reviewed).length;
+    const totalDueCount = availableCards.filter((card) => !card.reviewed).length;
+
     res.json({
       success: true,
       course_id: courseId,
-      count: cards.length,
-      flashcards: cards,
+      count: queueCards.length,
+      flashcards: queueCards,
       sections,
+      queue_limit: queueLimit,
+      queue_count: queueCards.length,
+      queue_due_count: queueCards.filter((card) => !card.reviewed).length,
+      available_count: availableCards.length,
+      available_due_count: totalDueCount,
+      available_reviewed_count: totalReviewedCount,
+      available_section_counts: ngStudentFlashcardSectionCounts(availableCards),
+      queue_section_counts: ngStudentFlashcardSectionCounts(queueCards),
       reviewed_count: reviewedCount,
-      due_count: cards.length - reviewedCount,
+      due_count: queueCards.length - reviewedCount,
+      review_bank_available: availableSections.published_bank.length,
       note_sync: noteSync,
       weak_area_sync: weakSync,
       today: todayDay ? sanitizeRoadmapDay(todayDay) : null,
       holiday_today: holidayToday,
       holiday_message: holidayToday ? "Today is a holiday/no-live-class day. Class cards are paused, but published review cards and weak-area cards remain available." : null,
+      message: availableCards.length > queueCards.length ? `Showing ${queueCards.length} focused cards today. ${availableCards.length} published cards stay safely in the background bank.` : null,
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
