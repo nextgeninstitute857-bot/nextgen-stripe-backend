@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v177b-baseline-answer-randomization-repair";
+const NEXTGEN_BACKEND_BUILD = "v177d-baseline-usmle-vignette-quality-guard";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -4658,48 +4658,850 @@ function ngNextBaselineReminderAt({ now = new Date(), reminderCount = 0, setting
 }
 
 function ngCreateDefaultBaselineQuestions({ courseName = "NextGen USMLE", totalQuestions = 40 } = {}) {
+  // v177d: original USMLE-style baseline bank. These questions are original and are not copied from any proprietary QBank.
+  // Correct answers are authored first for readability, then shuffled and distributed by ngNormalizeAssessmentQuestionsForStorage.
   const bank = [
-    { system: "Cardiology", topic: "Pressure-volume loops", stem: "A patient has increased left ventricular end-diastolic volume with reduced ejection fraction after chronic hypertension. Which change best explains the reduced stroke volume?", options: ["Decreased myocardial contractility", "Decreased afterload", "Increased venous compliance", "Increased aortic valve area"], correct_index: 0, explanation: "Reduced contractility lowers stroke volume and ejection fraction." },
-    { system: "Cardiology", topic: "Murmurs", stem: "A harsh systolic murmur radiates to the carotids and increases with squatting. Which lesion is most likely?", options: ["Aortic stenosis", "Mitral valve prolapse", "Hypertrophic cardiomyopathy", "Tricuspid regurgitation"], correct_index: 0, explanation: "Aortic stenosis classically radiates to the carotids and increases with increased preload." },
-    { system: "MSK", topic: "Bone remodeling", stem: "A drug that prevents osteoclast-mediated bone resorption most directly inhibits which cell lineage?", options: ["Monocyte-macrophage lineage", "Osteoblast lineage", "Chondrocyte lineage", "Fibroblast lineage"], correct_index: 0, explanation: "Osteoclasts arise from the monocyte-macrophage lineage." },
-    { system: "MSK", topic: "Rheumatology", stem: "Morning stiffness, symmetric MCP/PIP joint pain, and anti-CCP antibodies most strongly suggest which diagnosis?", options: ["Rheumatoid arthritis", "Osteoarthritis", "Gout", "Pseudogout"], correct_index: 0, explanation: "Anti-CCP is highly specific for rheumatoid arthritis." },
-    { system: "Central Nervous System", topic: "Stroke localization", stem: "Weakness of the right face and arm with expressive aphasia most likely localizes to which artery territory?", options: ["Left middle cerebral artery", "Right anterior cerebral artery", "Basilar artery", "Posterior cerebral artery"], correct_index: 0, explanation: "Dominant MCA stroke causes contralateral face/arm weakness and aphasia." },
-    { system: "Central Nervous System", topic: "Basal ganglia", stem: "Bradykinesia, resting tremor, and rigidity are most associated with loss of dopaminergic neurons in which region?", options: ["Substantia nigra pars compacta", "Caudate nucleus", "Subthalamic nucleus", "Red nucleus"], correct_index: 0, explanation: "Parkinson disease involves degeneration of substantia nigra pars compacta." },
-    { system: "Reproductive", topic: "Pregnancy hormones", stem: "A hormone produced by syncytiotrophoblast maintains the corpus luteum during early pregnancy. Which hormone is this?", options: ["hCG", "Estriol", "Oxytocin", "Prolactin"], correct_index: 0, explanation: "hCG maintains the corpus luteum early in pregnancy." },
-    { system: "Reproductive", topic: "Embryology", stem: "Failure of testicular descent is associated with increased risk of which condition?", options: ["Infertility and testicular cancer", "Prostate cancer", "Hypospadias only", "Varicocele only"], correct_index: 0, explanation: "Cryptorchidism increases infertility and testicular cancer risk." },
-    { system: "Endocrinology", topic: "Diabetes", stem: "A patient with diabetic ketoacidosis has high anion gap metabolic acidosis due primarily to accumulation of which compounds?", options: ["Ketone bodies", "Lactate from sepsis", "Uremic toxins", "Salicylate metabolites"], correct_index: 0, explanation: "DKA causes accumulation of beta-hydroxybutyrate and acetoacetate." },
-    { system: "Endocrinology", topic: "Thyroid", stem: "Heat intolerance, weight loss, tremor, and low TSH most strongly suggest which physiologic state?", options: ["Primary hyperthyroidism", "Primary hypothyroidism", "Secondary adrenal insufficiency", "Primary hypoparathyroidism"], correct_index: 0, explanation: "Low TSH with thyrotoxic symptoms suggests primary hyperthyroidism." },
-    { system: "GIT", topic: "Inflammatory bowel disease", stem: "Transmural bowel inflammation with fistula formation is most characteristic of which disease?", options: ["Crohn disease", "Ulcerative colitis", "Celiac disease", "Irritable bowel syndrome"], correct_index: 0, explanation: "Crohn disease is transmural and can form fistulas." },
-    { system: "GIT", topic: "Liver disease", stem: "A patient with cirrhosis develops confusion and asterixis. Which substance is most implicated?", options: ["Ammonia", "Bilirubin", "Albumin", "Bile salts"], correct_index: 0, explanation: "Hepatic encephalopathy is strongly associated with hyperammonemia." },
-    { system: "Renal", topic: "Nephritic syndrome", stem: "Hematuria with RBC casts most directly indicates inflammation involving which structure?", options: ["Glomerulus", "Collecting duct", "Ureter", "Bladder mucosa"], correct_index: 0, explanation: "RBC casts indicate glomerular bleeding/inflammation." },
-    { system: "Renal", topic: "Tubular transport", stem: "A loop diuretic primarily inhibits which transporter?", options: ["Na-K-2Cl cotransporter", "Na-Cl cotransporter", "ENaC", "Carbonic anhydrase"], correct_index: 0, explanation: "Loop diuretics inhibit NKCC2 in the thick ascending limb." },
-    { system: "Pulmonology", topic: "Obstructive disease", stem: "A smoker with reduced FEV1/FVC and increased lung compliance most likely has which disease?", options: ["Emphysema", "Pulmonary fibrosis", "Sarcoidosis", "Pleural effusion"], correct_index: 0, explanation: "Emphysema is obstructive and increases lung compliance." },
-    { system: "Pulmonology", topic: "Gas exchange", stem: "In pulmonary embolism, which V/Q pattern occurs in the affected region?", options: ["High V/Q", "Low V/Q", "Zero V/Q", "Normal V/Q"], correct_index: 0, explanation: "Ventilated but underperfused lung has high V/Q." },
-    { system: "Immunology", topic: "Hypersensitivity", stem: "Anaphylaxis mediated by IgE and mast cell degranulation is which hypersensitivity type?", options: ["Type I", "Type II", "Type III", "Type IV"], correct_index: 0, explanation: "IgE-mediated immediate hypersensitivity is type I." },
-    { system: "Immunology", topic: "Complement", stem: "Deficiency of C5-C9 predisposes most strongly to infection by which organism group?", options: ["Neisseria species", "Staphylococcus aureus", "Candida species", "Mycobacteria"], correct_index: 0, explanation: "Terminal complement deficiency predisposes to Neisseria." },
-    { system: "Hematology", topic: "Anemia", stem: "Microcytic anemia with low ferritin is most consistent with which diagnosis?", options: ["Iron deficiency anemia", "Beta-thalassemia trait", "Anemia of chronic disease", "Sideroblastic anemia"], correct_index: 0, explanation: "Low ferritin is highly suggestive of iron deficiency." },
-    { system: "Hematology", topic: "Coagulation", stem: "An isolated prolonged PT with normal PTT early in disease most suggests deficiency of which factor?", options: ["Factor VII", "Factor VIII", "Factor IX", "Factor XII"], correct_index: 0, explanation: "Factor VII has the shortest half-life and affects PT." },
-    { system: "Psychiatry", topic: "Defense mechanisms", stem: "A student who failed an exam says the room was too cold and the questions were unfair. Which defense mechanism is most likely?", options: ["Rationalization", "Projection", "Sublimation", "Reaction formation"], correct_index: 0, explanation: "Rationalization creates acceptable explanations for uncomfortable outcomes." },
-    { system: "Psychiatry", topic: "Mood disorders", stem: "Decreased need for sleep, pressured speech, grandiosity, and risky behavior for 1 week indicate which episode?", options: ["Manic episode", "Major depressive episode", "Panic attack", "Adjustment disorder"], correct_index: 0, explanation: "A manic episode lasts at least 1 week or requires hospitalization." },
-    { system: "Biochemistry", topic: "Lysosomal storage", stem: "Hexosaminidase A deficiency with cherry-red macula is most consistent with which disease?", options: ["Tay-Sachs disease", "Niemann-Pick disease", "Gaucher disease", "Fabry disease"], correct_index: 0, explanation: "Tay-Sachs is due to hexosaminidase A deficiency." },
-    { system: "Biochemistry", topic: "Metabolism", stem: "A child with musty body odor and intellectual disability has deficiency of which enzyme?", options: ["Phenylalanine hydroxylase", "Homogentisate oxidase", "Branched-chain alpha-ketoacid dehydrogenase", "Galactose-1-phosphate uridyltransferase"], correct_index: 0, explanation: "PKU is due to phenylalanine hydroxylase deficiency." },
-    { system: "Microbiology", topic: "Gram positive cocci", stem: "Catalase-positive, coagulase-positive gram-positive cocci in clusters most likely identify which organism?", options: ["Staphylococcus aureus", "Streptococcus pyogenes", "Enterococcus faecalis", "Streptococcus pneumoniae"], correct_index: 0, explanation: "S aureus is catalase and coagulase positive." },
-    { system: "Microbiology", topic: "Viruses", stem: "A virus with a circular partially double-stranded DNA genome and reverse transcriptase is which virus?", options: ["Hepatitis B virus", "Hepatitis C virus", "HIV", "EBV"], correct_index: 0, explanation: "HBV is a DNA virus that uses reverse transcriptase." },
-    { system: "Pharmacology", topic: "Autonomics", stem: "A medication that causes urinary retention, dry mouth, and blurry vision most likely blocks which receptor?", options: ["Muscarinic acetylcholine receptor", "Nicotinic acetylcholine receptor", "Alpha-1 receptor", "Beta-2 receptor"], correct_index: 0, explanation: "Antimuscarinic effects include urinary retention, dry mouth, and blurry vision." },
-    { system: "Pharmacology", topic: "Antibiotics", stem: "A drug that inhibits bacterial cell wall cross-linking by binding PBPs belongs to which class?", options: ["Beta-lactams", "Macrolides", "Aminoglycosides", "Tetracyclines"], correct_index: 0, explanation: "Beta-lactams bind PBPs and inhibit peptidoglycan cross-linking." },
-    { system: "Ethics", topic: "Autonomy", stem: "A competent adult refuses a recommended treatment after understanding risks and benefits. What is the best next step?", options: ["Respect the refusal", "Treat because it benefits the patient", "Ask family to override", "Discharge immediately without discussion"], correct_index: 0, explanation: "Autonomy requires respecting informed refusal by a competent patient." },
-    { system: "Ethics", topic: "Confidentiality", stem: "A patient asks that her diagnosis not be shared with her spouse. What should the physician do?", options: ["Respect confidentiality unless there is a specific legal exception", "Tell the spouse because family has a right to know", "Document only and avoid discussion", "Ask the spouse for permission"], correct_index: 0, explanation: "Confidentiality is maintained unless a legal/ethical exception applies." },
-    { system: "Biostatistics", topic: "Screening tests", stem: "A highly sensitive screening test is most useful for which purpose?", options: ["Ruling out disease when negative", "Confirming disease when positive", "Increasing prevalence", "Eliminating false positives"], correct_index: 0, explanation: "Sensitive tests are useful to rule out disease when negative." },
-    { system: "Biostatistics", topic: "Risk", stem: "A relative risk of 2 means what?", options: ["The exposed group has twice the risk", "The exposed group has half the risk", "The exposure is protective", "There is no association"], correct_index: 0, explanation: "RR 2 indicates doubled risk in the exposed group." },
-    { system: "Cardiology", topic: "Arrhythmias", stem: "Irregularly irregular rhythm with absent P waves on ECG most likely represents which arrhythmia?", options: ["Atrial fibrillation", "Atrial flutter", "Ventricular tachycardia", "First-degree AV block"], correct_index: 0, explanation: "Atrial fibrillation has irregularly irregular rhythm and absent P waves." },
-    { system: "GIT", topic: "Malabsorption", stem: "Dermatitis herpetiformis and villous atrophy after gluten exposure most likely indicate which disease?", options: ["Celiac disease", "Whipple disease", "Crohn disease", "Lactose intolerance"], correct_index: 0, explanation: "Celiac disease is associated with gluten sensitivity and dermatitis herpetiformis." },
-    { system: "Renal", topic: "Acid-base", stem: "Kussmaul respirations are a compensatory response to which disturbance?", options: ["Metabolic acidosis", "Metabolic alkalosis", "Respiratory acidosis", "Respiratory alkalosis"], correct_index: 0, explanation: "Deep rapid breathing lowers CO2 to compensate for metabolic acidosis." },
-    { system: "Pulmonology", topic: "Restrictive disease", stem: "Decreased TLC with a normal or increased FEV1/FVC ratio suggests which pattern?", options: ["Restrictive lung disease", "Obstructive lung disease", "Upper airway obstruction", "Normal spirometry"], correct_index: 0, explanation: "Restriction reduces TLC and preserves/increases FEV1/FVC." },
-    { system: "Immunology", topic: "T cells", stem: "CD8 T cells recognize antigen presented on which MHC class?", options: ["MHC class I", "MHC class II", "CD1", "HLA-DP only"], correct_index: 0, explanation: "CD8 T cells recognize peptide on MHC I." },
-    { system: "Hematology", topic: "Hemoglobin", stem: "Sickle cell disease results from which type of mutation in beta-globin?", options: ["Missense mutation", "Nonsense mutation", "Frameshift deletion", "Trinucleotide repeat expansion"], correct_index: 0, explanation: "Sickle cell disease is due to a missense mutation in beta-globin." },
-    { system: "Endocrinology", topic: "Adrenal", stem: "Hyperpigmentation, hypotension, hyponatremia, and hyperkalemia suggest failure of which gland?", options: ["Adrenal cortex", "Posterior pituitary", "Thyroid gland", "Parathyroid gland"], correct_index: 0, explanation: "Primary adrenal insufficiency causes low cortisol/aldosterone and high ACTH hyperpigmentation." },
-    { system: "Reproductive", topic: "Ovarian cycle", stem: "The LH surge is primarily triggered by sustained high levels of which hormone?", options: ["Estradiol", "Progesterone", "Inhibin B", "hCG"], correct_index: 0, explanation: "Sustained high estradiol triggers positive feedback and the LH surge." },
-  ];
+    {
+        "system": "Cardiology",
+        "topic": "Pressure-volume loops",
+        "stem": "A 62-year-old man with long-standing hypertension has progressive dyspnea and an echocardiogram showing increased left ventricular end-diastolic volume with reduced ejection fraction. Which change best explains his reduced stroke volume?",
+        "options": [
+            "Decreased myocardial contractility",
+            "Decreased left ventricular preload",
+            "Decreased systemic vascular resistance",
+            "Increased aortic valve area",
+            "Increased ventricular compliance without systolic dysfunction"
+        ],
+        "correct_index": 0,
+        "explanation": "Systolic dysfunction reduces contractility, lowering stroke volume and ejection fraction despite increased end-diastolic volume.",
+        "wrong_choice_explanations": [
+            "Correct: Systolic dysfunction reduces contractility, lowering stroke volume and ejection fraction despite increased end-diastolic volume.",
+            "Decreased left ventricular preload is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Decreased systemic vascular resistance is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Increased aortic valve area is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Increased ventricular compliance without systolic dysfunction is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Cardiology",
+        "topic": "Murmurs",
+        "stem": "A 74-year-old man has exertional syncope and a harsh crescendo-decrescendo systolic murmur at the right upper sternal border radiating to the carotids. Which maneuver most increases this murmur?",
+        "options": [
+            "Squatting",
+            "Standing from a seated position",
+            "Valsalva maneuver",
+            "Nitroglycerin administration",
+            "Handgrip alone"
+        ],
+        "correct_index": 0,
+        "explanation": "Aortic stenosis becomes louder with increased preload, such as squatting.",
+        "wrong_choice_explanations": [
+            "Correct: Aortic stenosis becomes louder with increased preload, such as squatting.",
+            "Standing from a seated position is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Valsalva maneuver is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Nitroglycerin administration is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Handgrip alone is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Cardiology",
+        "topic": "Arrhythmias",
+        "stem": "A 68-year-old woman has palpitations, an irregularly irregular pulse, and an ECG with absent discrete P waves. Which complication is she at greatest risk for without anticoagulation when indicated?",
+        "options": [
+            "Embolic stroke from left atrial thrombus",
+            "Torsades de pointes",
+            "Ventricular septal rupture",
+            "Acute tamponade",
+            "High-output failure from a shunt"
+        ],
+        "correct_index": 0,
+        "explanation": "Atrial fibrillation causes atrial stasis and increases thromboembolic stroke risk.",
+        "wrong_choice_explanations": [
+            "Correct: Atrial fibrillation causes atrial stasis and increases thromboembolic stroke risk.",
+            "Torsades de pointes is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Ventricular septal rupture is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Acute tamponade is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "High-output failure from a shunt is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "MSK",
+        "topic": "Bone remodeling",
+        "stem": "A 69-year-old woman with vertebral compression fractures starts a medication that reduces osteoclast-mediated bone resorption. Osteoclasts are derived from which lineage?",
+        "options": [
+            "Monocyte-macrophage lineage",
+            "Osteoblast lineage",
+            "Chondrocyte lineage",
+            "Fibroblast lineage",
+            "Megakaryocyte lineage"
+        ],
+        "correct_index": 0,
+        "explanation": "Osteoclasts are multinucleated bone-resorbing cells derived from monocyte-macrophage precursors.",
+        "wrong_choice_explanations": [
+            "Correct: Osteoclasts are multinucleated bone-resorbing cells derived from monocyte-macrophage precursors.",
+            "Osteoblast lineage is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Chondrocyte lineage is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Fibroblast lineage is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Megakaryocyte lineage is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "MSK",
+        "topic": "Rheumatology",
+        "stem": "A 38-year-old woman has 2 hours of morning stiffness, symmetric MCP and PIP swelling, and positive anti-CCP antibodies. Which diagnosis is most likely?",
+        "options": [
+            "Rheumatoid arthritis",
+            "Osteoarthritis",
+            "Gout",
+            "Pseudogout",
+            "Systemic sclerosis"
+        ],
+        "correct_index": 0,
+        "explanation": "Symmetric inflammatory small-joint arthritis with anti-CCP antibodies strongly suggests rheumatoid arthritis.",
+        "wrong_choice_explanations": [
+            "Correct: Symmetric inflammatory small-joint arthritis with anti-CCP antibodies strongly suggests rheumatoid arthritis.",
+            "Osteoarthritis is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Gout is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Pseudogout is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Systemic sclerosis is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "MSK",
+        "topic": "Peripheral nerve injury",
+        "stem": "A 21-year-old man sustains a midshaft humeral fracture and develops wrist drop with decreased sensation over the dorsal first web space. Which nerve is injured?",
+        "options": [
+            "Radial nerve",
+            "Median nerve",
+            "Ulnar nerve",
+            "Axillary nerve",
+            "Musculocutaneous nerve"
+        ],
+        "correct_index": 0,
+        "explanation": "The radial nerve travels in the spiral groove and is vulnerable in midshaft humeral fractures.",
+        "wrong_choice_explanations": [
+            "Correct: The radial nerve travels in the spiral groove and is vulnerable in midshaft humeral fractures.",
+            "Median nerve is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Ulnar nerve is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Axillary nerve is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Musculocutaneous nerve is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Central Nervous System",
+        "topic": "Stroke localization",
+        "stem": "A right-handed 59-year-old man develops sudden right lower facial droop, right arm weakness greater than leg weakness, and nonfluent aphasia. Which artery is occluded?",
+        "options": [
+            "Left middle cerebral artery",
+            "Right anterior cerebral artery",
+            "Left posterior cerebral artery",
+            "Basilar artery",
+            "Right posterior inferior cerebellar artery"
+        ],
+        "correct_index": 0,
+        "explanation": "Dominant MCA infarction causes contralateral face/arm weakness and aphasia.",
+        "wrong_choice_explanations": [
+            "Correct: Dominant MCA infarction causes contralateral face/arm weakness and aphasia.",
+            "Right anterior cerebral artery is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Left posterior cerebral artery is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Basilar artery is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Right posterior inferior cerebellar artery is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Central Nervous System",
+        "topic": "Basal ganglia",
+        "stem": "A 66-year-old man has resting tremor, bradykinesia, rigidity, and shuffling gait. Loss of dopaminergic neurons in which structure explains his findings?",
+        "options": [
+            "Substantia nigra pars compacta",
+            "Caudate nucleus",
+            "Subthalamic nucleus",
+            "Red nucleus",
+            "Cerebellar vermis"
+        ],
+        "correct_index": 0,
+        "explanation": "Parkinson disease is due to degeneration of dopaminergic neurons in the substantia nigra pars compacta.",
+        "wrong_choice_explanations": [
+            "Correct: Parkinson disease is due to degeneration of dopaminergic neurons in the substantia nigra pars compacta.",
+            "Caudate nucleus is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Subthalamic nucleus is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Red nucleus is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Cerebellar vermis is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Central Nervous System",
+        "topic": "Seizures",
+        "stem": "A 9-year-old child has brief staring episodes with immediate return to baseline. Hyperventilation provokes 3-Hz spike-and-wave discharges on EEG. Which drug is first-line?",
+        "options": [
+            "Ethosuximide",
+            "Phenytoin",
+            "Carbamazepine",
+            "Phenobarbital",
+            "Gabapentin"
+        ],
+        "correct_index": 0,
+        "explanation": "Absence seizures are treated first-line with ethosuximide, which blocks T-type calcium channels.",
+        "wrong_choice_explanations": [
+            "Correct: Absence seizures are treated first-line with ethosuximide, which blocks T-type calcium channels.",
+            "Phenytoin is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Carbamazepine is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Phenobarbital is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Gabapentin is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Reproductive",
+        "topic": "Pregnancy hormones",
+        "stem": "A patient is 6 weeks pregnant. Which structure produces the hormone that maintains the corpus luteum during early pregnancy?",
+        "options": [
+            "Syncytiotrophoblast",
+            "Cytotrophoblast",
+            "Corpus albicans",
+            "Fetal adrenal cortex",
+            "Maternal posterior pituitary"
+        ],
+        "correct_index": 0,
+        "explanation": "Syncytiotrophoblast produces hCG, which maintains the corpus luteum early in pregnancy.",
+        "wrong_choice_explanations": [
+            "Correct: Syncytiotrophoblast produces hCG, which maintains the corpus luteum early in pregnancy.",
+            "Cytotrophoblast is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Corpus albicans is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Fetal adrenal cortex is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Maternal posterior pituitary is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Reproductive",
+        "topic": "Ovarian cycle",
+        "stem": "A 29-year-old woman has a normal ovulatory cycle. The midcycle LH surge is triggered by sustained high levels of which hormone?",
+        "options": [
+            "Estradiol",
+            "Progesterone",
+            "Inhibin B",
+            "hCG",
+            "Prolactin"
+        ],
+        "correct_index": 0,
+        "explanation": "Sustained high estradiol causes positive feedback on the hypothalamic-pituitary axis and triggers the LH surge.",
+        "wrong_choice_explanations": [
+            "Correct: Sustained high estradiol causes positive feedback on the hypothalamic-pituitary axis and triggers the LH surge.",
+            "Progesterone is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Inhibin B is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "hCG is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Prolactin is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Reproductive",
+        "topic": "Male embryology",
+        "stem": "A newborn boy has hypospadias. Failure of which embryologic process best explains this anomaly?",
+        "options": [
+            "Fusion of urethral folds",
+            "Descent of testes through inguinal canal",
+            "Regression of paramesonephric ducts",
+            "Fusion of labioscrotal swellings only",
+            "Formation of the prostate from urogenital sinus"
+        ],
+        "correct_index": 0,
+        "explanation": "Hypospadias results from incomplete fusion of the urethral folds.",
+        "wrong_choice_explanations": [
+            "Correct: Hypospadias results from incomplete fusion of the urethral folds.",
+            "Descent of testes through inguinal canal is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Regression of paramesonephric ducts is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Fusion of labioscrotal swellings only is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Formation of the prostate from urogenital sinus is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Endocrinology",
+        "topic": "Diabetes",
+        "stem": "A 19-year-old man with type 1 diabetes has vomiting, Kussmaul respirations, glucose 460 mg/dL, and high anion gap metabolic acidosis. Which compounds primarily account for the acidosis?",
+        "options": [
+            "Beta-hydroxybutyrate and acetoacetate",
+            "Lactate from anaerobic glycolysis",
+            "Uremic sulfate and phosphate",
+            "Salicylate metabolites",
+            "Bicarbonate loss from diarrhea"
+        ],
+        "correct_index": 0,
+        "explanation": "Diabetic ketoacidosis is caused by accumulation of ketone bodies, especially beta-hydroxybutyrate and acetoacetate.",
+        "wrong_choice_explanations": [
+            "Correct: Diabetic ketoacidosis is caused by accumulation of ketone bodies, especially beta-hydroxybutyrate and acetoacetate.",
+            "Lactate from anaerobic glycolysis is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Uremic sulfate and phosphate is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Salicylate metabolites is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Bicarbonate loss from diarrhea is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Endocrinology",
+        "topic": "Thyroid",
+        "stem": "A 34-year-old woman has weight loss, heat intolerance, tremor, elevated free T4, and suppressed TSH. Which physiologic state is most likely?",
+        "options": [
+            "Primary hyperthyroidism",
+            "Primary hypothyroidism",
+            "Secondary hypothyroidism",
+            "Euthyroid sick syndrome",
+            "Primary adrenal insufficiency"
+        ],
+        "correct_index": 0,
+        "explanation": "High thyroid hormone with suppressed TSH indicates primary hyperthyroidism.",
+        "wrong_choice_explanations": [
+            "Correct: High thyroid hormone with suppressed TSH indicates primary hyperthyroidism.",
+            "Primary hypothyroidism is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Secondary hypothyroidism is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Euthyroid sick syndrome is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Primary adrenal insufficiency is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Endocrinology",
+        "topic": "Adrenal",
+        "stem": "A 45-year-old woman has fatigue, weight loss, hypotension, hyperpigmentation, hyponatremia, and hyperkalemia. Which hormone level is increased?",
+        "options": [
+            "ACTH",
+            "Aldosterone",
+            "Cortisol",
+            "Epinephrine",
+            "Insulin"
+        ],
+        "correct_index": 0,
+        "explanation": "Primary adrenal insufficiency lowers cortisol and aldosterone, increasing ACTH and causing hyperpigmentation.",
+        "wrong_choice_explanations": [
+            "Correct: Primary adrenal insufficiency lowers cortisol and aldosterone, increasing ACTH and causing hyperpigmentation.",
+            "Aldosterone is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Cortisol is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Epinephrine is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Insulin is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "GIT",
+        "topic": "Inflammatory bowel disease",
+        "stem": "A 28-year-old man has chronic abdominal pain, diarrhea, low-grade fever, and bowel contents draining from an abdominal skin lesion. Which pathologic feature explains this complication?",
+        "options": [
+            "Transmural inflammation",
+            "Continuous mucosal inflammation limited to the colon",
+            "Autoimmune parietal cell destruction",
+            "Villous atrophy after gluten exposure",
+            "Defective relaxation of the lower esophageal sphincter"
+        ],
+        "correct_index": 0,
+        "explanation": "Crohn disease causes transmural inflammation that can form fistulas.",
+        "wrong_choice_explanations": [
+            "Correct: Crohn disease causes transmural inflammation that can form fistulas.",
+            "Continuous mucosal inflammation limited to the colon is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Autoimmune parietal cell destruction is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Villous atrophy after gluten exposure is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Defective relaxation of the lower esophageal sphincter is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "GIT",
+        "topic": "Liver disease",
+        "stem": "A 54-year-old man with cirrhosis develops confusion and asterixis after an upper GI bleed. Which substance is most implicated?",
+        "options": [
+            "Ammonia",
+            "Conjugated bilirubin",
+            "Albumin",
+            "Bile salts",
+            "Pancreatic amylase"
+        ],
+        "correct_index": 0,
+        "explanation": "Hepatic encephalopathy is driven by ammonia and other neurotoxins, often triggered by GI bleeding.",
+        "wrong_choice_explanations": [
+            "Correct: Hepatic encephalopathy is driven by ammonia and other neurotoxins, often triggered by GI bleeding.",
+            "Conjugated bilirubin is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Albumin is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Bile salts is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Pancreatic amylase is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "GIT",
+        "topic": "Malabsorption",
+        "stem": "A patient has chronic diarrhea, weight loss, dermatitis herpetiformis, and villous atrophy that improves with gluten avoidance. Which antibody is most associated?",
+        "options": [
+            "Anti-tissue transglutaminase IgA",
+            "Anti-mitochondrial antibody",
+            "Anti-smooth muscle antibody",
+            "Anti-centromere antibody",
+            "Anti-desmoglein antibody"
+        ],
+        "correct_index": 0,
+        "explanation": "Celiac disease is associated with anti-tissue transglutaminase IgA antibodies.",
+        "wrong_choice_explanations": [
+            "Correct: Celiac disease is associated with anti-tissue transglutaminase IgA antibodies.",
+            "Anti-mitochondrial antibody is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Anti-smooth muscle antibody is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Anti-centromere antibody is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Anti-desmoglein antibody is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Renal",
+        "topic": "Nephritic syndrome",
+        "stem": "A 10-year-old boy has cola-colored urine 2 weeks after impetigo. Urinalysis shows dysmorphic RBCs and RBC casts. These casts localize bleeding to which structure?",
+        "options": [
+            "Glomerulus",
+            "Collecting duct",
+            "Ureter",
+            "Bladder mucosa",
+            "Prostate"
+        ],
+        "correct_index": 0,
+        "explanation": "RBC casts indicate glomerular bleeding/inflammation.",
+        "wrong_choice_explanations": [
+            "Correct: RBC casts indicate glomerular bleeding/inflammation.",
+            "Collecting duct is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Ureter is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Bladder mucosa is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Prostate is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Renal",
+        "topic": "Tubular transport",
+        "stem": "A patient with pulmonary edema receives a diuretic that blocks sodium, potassium, and chloride reabsorption in the thick ascending limb. Which transporter is inhibited?",
+        "options": [
+            "Na-K-2Cl cotransporter",
+            "Na-Cl cotransporter",
+            "Epithelial sodium channel",
+            "Carbonic anhydrase",
+            "Na-H exchanger"
+        ],
+        "correct_index": 0,
+        "explanation": "Loop diuretics inhibit NKCC2 in the thick ascending limb.",
+        "wrong_choice_explanations": [
+            "Correct: Loop diuretics inhibit NKCC2 in the thick ascending limb.",
+            "Na-Cl cotransporter is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Epithelial sodium channel is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Carbonic anhydrase is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Na-H exchanger is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Renal",
+        "topic": "Acid-base",
+        "stem": "A 23-year-old woman with panic symptoms has pH 7.52, PaCO2 25 mm Hg, and bicarbonate 21 mEq/L. Which primary disturbance is present?",
+        "options": [
+            "Respiratory alkalosis",
+            "Metabolic alkalosis",
+            "Respiratory acidosis",
+            "High anion gap metabolic acidosis",
+            "Non-anion gap metabolic acidosis"
+        ],
+        "correct_index": 0,
+        "explanation": "Alkalemia with low PaCO2 indicates primary respiratory alkalosis from hyperventilation.",
+        "wrong_choice_explanations": [
+            "Correct: Alkalemia with low PaCO2 indicates primary respiratory alkalosis from hyperventilation.",
+            "Metabolic alkalosis is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Respiratory acidosis is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "High anion gap metabolic acidosis is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Non-anion gap metabolic acidosis is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Pulmonology",
+        "topic": "Obstructive disease",
+        "stem": "A 67-year-old smoker has progressive dyspnea, decreased FEV1/FVC, increased total lung capacity, and destruction of alveolar walls. Which additional finding is most likely?",
+        "options": [
+            "Increased lung compliance",
+            "Decreased residual volume",
+            "Increased DLCO",
+            "Normal expiratory flow rates",
+            "Reduced physiologic dead space"
+        ],
+        "correct_index": 0,
+        "explanation": "Emphysema destroys elastic tissue, increasing compliance and causing air trapping.",
+        "wrong_choice_explanations": [
+            "Correct: Emphysema destroys elastic tissue, increasing compliance and causing air trapping.",
+            "Decreased residual volume is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Increased DLCO is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Normal expiratory flow rates is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Reduced physiologic dead space is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Pulmonology",
+        "topic": "Gas exchange",
+        "stem": "A 42-year-old woman develops acute pleuritic chest pain and hypoxemia after a long flight. CT angiography shows pulmonary embolism. What V/Q pattern occurs in affected alveoli?",
+        "options": [
+            "High V/Q ratio",
+            "Low V/Q ratio",
+            "Zero V/Q ratio",
+            "Normal V/Q ratio",
+            "Right-to-left intracardiac shunt"
+        ],
+        "correct_index": 0,
+        "explanation": "Pulmonary embolism creates ventilated but underperfused alveoli, causing high V/Q dead space.",
+        "wrong_choice_explanations": [
+            "Correct: Pulmonary embolism creates ventilated but underperfused alveoli, causing high V/Q dead space.",
+            "Low V/Q ratio is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Zero V/Q ratio is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Normal V/Q ratio is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Right-to-left intracardiac shunt is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Pulmonology",
+        "topic": "Restrictive disease",
+        "stem": "A patient has progressive dyspnea, decreased TLC, and a normal-to-increased FEV1/FVC ratio. Which pattern best describes this disease?",
+        "options": [
+            "Restrictive lung disease",
+            "Obstructive lung disease",
+            "Upper airway obstruction",
+            "Normal spirometry",
+            "Pure pulmonary vascular disease"
+        ],
+        "correct_index": 0,
+        "explanation": "Restriction decreases TLC and preserves or increases FEV1/FVC.",
+        "wrong_choice_explanations": [
+            "Correct: Restriction decreases TLC and preserves or increases FEV1/FVC.",
+            "Obstructive lung disease is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Upper airway obstruction is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Normal spirometry is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Pure pulmonary vascular disease is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Immunology",
+        "topic": "Hypersensitivity",
+        "stem": "A child develops wheezing, urticaria, hypotension, and lip swelling minutes after eating peanuts. Which mechanism is responsible?",
+        "options": [
+            "IgE-mediated mast cell degranulation",
+            "IgG-mediated complement activation",
+            "Immune complex deposition",
+            "Delayed T-cell inflammation",
+            "Defective neutrophil oxidative burst"
+        ],
+        "correct_index": 0,
+        "explanation": "Anaphylaxis is type I hypersensitivity mediated by IgE cross-linking and mast cell degranulation.",
+        "wrong_choice_explanations": [
+            "Correct: Anaphylaxis is type I hypersensitivity mediated by IgE cross-linking and mast cell degranulation.",
+            "IgG-mediated complement activation is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Immune complex deposition is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Delayed T-cell inflammation is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Defective neutrophil oxidative burst is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Immunology",
+        "topic": "Complement",
+        "stem": "A teenager has recurrent meningococcal infections despite otherwise normal immune function. Deficiency of which complement components best explains this?",
+        "options": [
+            "C5-C9",
+            "C1 esterase inhibitor",
+            "C3 only",
+            "Decay-accelerating factor",
+            "Factor H"
+        ],
+        "correct_index": 0,
+        "explanation": "Terminal complement deficiency impairs membrane attack complex formation and predisposes to Neisseria.",
+        "wrong_choice_explanations": [
+            "Correct: Terminal complement deficiency impairs membrane attack complex formation and predisposes to Neisseria.",
+            "C1 esterase inhibitor is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "C3 only is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Decay-accelerating factor is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Factor H is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Hematology",
+        "topic": "Anemia",
+        "stem": "A 44-year-old woman with heavy menstrual bleeding has microcytic anemia and low ferritin. Which additional finding is expected?",
+        "options": [
+            "Increased total iron-binding capacity",
+            "Increased ferritin",
+            "Decreased transferrin",
+            "Normal red cell distribution width",
+            "Increased hepcidin as the primary driver"
+        ],
+        "correct_index": 0,
+        "explanation": "Iron deficiency anemia causes low ferritin and increased TIBC/transferrin.",
+        "wrong_choice_explanations": [
+            "Correct: Iron deficiency anemia causes low ferritin and increased TIBC/transferrin.",
+            "Increased ferritin is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Decreased transferrin is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Normal red cell distribution width is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Increased hepcidin as the primary driver is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Hematology",
+        "topic": "Coagulation",
+        "stem": "A patient starts warfarin and early lab testing shows isolated prolonged PT with normal PTT. Reduced activity of which factor explains this?",
+        "options": [
+            "Factor VII",
+            "Factor VIII",
+            "Factor IX",
+            "Factor XII",
+            "von Willebrand factor"
+        ],
+        "correct_index": 0,
+        "explanation": "Factor VII has the shortest half-life among vitamin K-dependent factors and affects PT first.",
+        "wrong_choice_explanations": [
+            "Correct: Factor VII has the shortest half-life among vitamin K-dependent factors and affects PT first.",
+            "Factor VIII is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Factor IX is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Factor XII is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "von Willebrand factor is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Psychiatry",
+        "topic": "Defense mechanisms",
+        "stem": "A student who failed an exam says the room was too cold and the questions were unfair. Which defense mechanism is being used?",
+        "options": [
+            "Rationalization",
+            "Projection",
+            "Sublimation",
+            "Reaction formation",
+            "Displacement"
+        ],
+        "correct_index": 0,
+        "explanation": "Rationalization creates acceptable explanations for an uncomfortable outcome.",
+        "wrong_choice_explanations": [
+            "Correct: Rationalization creates acceptable explanations for an uncomfortable outcome.",
+            "Projection is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Sublimation is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Reaction formation is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Displacement is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Psychiatry",
+        "topic": "Mood disorders",
+        "stem": "A 25-year-old woman has 8 days of decreased need for sleep, pressured speech, grandiosity, distractibility, and excessive spending causing work impairment. Which episode is present?",
+        "options": [
+            "Manic episode",
+            "Hypomanic episode",
+            "Major depressive episode",
+            "Panic attack",
+            "Adjustment disorder"
+        ],
+        "correct_index": 0,
+        "explanation": "Mania lasts at least 1 week and causes marked impairment, hospitalization, or psychosis.",
+        "wrong_choice_explanations": [
+            "Correct: Mania lasts at least 1 week and causes marked impairment, hospitalization, or psychosis.",
+            "Hypomanic episode is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Major depressive episode is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Panic attack is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Adjustment disorder is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Biochemistry",
+        "topic": "Lysosomal storage",
+        "stem": "An infant has developmental regression, exaggerated startle response, and cherry-red macula. Hexosaminidase A activity is absent. What accumulates?",
+        "options": [
+            "GM2 ganglioside",
+            "Sphingomyelin",
+            "Glucocerebroside",
+            "Ceramide trihexoside",
+            "Heparan sulfate"
+        ],
+        "correct_index": 0,
+        "explanation": "Tay-Sachs disease causes GM2 ganglioside accumulation due to hexosaminidase A deficiency.",
+        "wrong_choice_explanations": [
+            "Correct: Tay-Sachs disease causes GM2 ganglioside accumulation due to hexosaminidase A deficiency.",
+            "Sphingomyelin is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Glucocerebroside is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Ceramide trihexoside is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Heparan sulfate is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Biochemistry",
+        "topic": "Metabolism",
+        "stem": "A child has intellectual disability, seizures, eczema, and musty body odor after missed newborn screening. Which enzyme is deficient?",
+        "options": [
+            "Phenylalanine hydroxylase",
+            "Homogentisate oxidase",
+            "Branched-chain alpha-ketoacid dehydrogenase",
+            "Galactose-1-phosphate uridyltransferase",
+            "Cystathionine beta-synthase"
+        ],
+        "correct_index": 0,
+        "explanation": "Phenylketonuria is usually due to phenylalanine hydroxylase deficiency.",
+        "wrong_choice_explanations": [
+            "Correct: Phenylketonuria is usually due to phenylalanine hydroxylase deficiency.",
+            "Homogentisate oxidase is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Branched-chain alpha-ketoacid dehydrogenase is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Galactose-1-phosphate uridyltransferase is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Cystathionine beta-synthase is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Microbiology",
+        "topic": "Gram positive cocci",
+        "stem": "An abscess culture grows catalase-positive, coagulase-positive gram-positive cocci in clusters. Which virulence factor helps form fibrin clots around infection sites?",
+        "options": [
+            "Coagulase",
+            "Protein A",
+            "Hyaluronidase",
+            "M protein",
+            "IgA protease"
+        ],
+        "correct_index": 0,
+        "explanation": "Staphylococcus aureus produces coagulase, which converts fibrinogen to fibrin.",
+        "wrong_choice_explanations": [
+            "Correct: Staphylococcus aureus produces coagulase, which converts fibrinogen to fibrin.",
+            "Protein A is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Hyaluronidase is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "M protein is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "IgA protease is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Microbiology",
+        "topic": "Viruses",
+        "stem": "A patient with chronic hepatitis has a circular partially double-stranded DNA virus that uses reverse transcriptase. Which virus is responsible?",
+        "options": [
+            "Hepatitis B virus",
+            "Hepatitis C virus",
+            "HIV",
+            "Epstein-Barr virus",
+            "Parvovirus B19"
+        ],
+        "correct_index": 0,
+        "explanation": "HBV is a partially double-stranded DNA virus that replicates through an RNA intermediate using reverse transcriptase.",
+        "wrong_choice_explanations": [
+            "Correct: HBV is a partially double-stranded DNA virus that replicates through an RNA intermediate using reverse transcriptase.",
+            "Hepatitis C virus is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "HIV is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Epstein-Barr virus is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Parvovirus B19 is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Pharmacology",
+        "topic": "Autonomics",
+        "stem": "An older adult takes an over-the-counter sleep aid and develops urinary retention, dry mouth, constipation, and blurry vision. Which receptor is blocked?",
+        "options": [
+            "Muscarinic acetylcholine receptor",
+            "Nicotinic acetylcholine receptor",
+            "Alpha-1 adrenergic receptor",
+            "Beta-2 adrenergic receptor",
+            "Dopamine D2 receptor"
+        ],
+        "correct_index": 0,
+        "explanation": "Antimuscarinic drugs cause urinary retention, dry mouth, constipation, and blurry vision.",
+        "wrong_choice_explanations": [
+            "Correct: Antimuscarinic drugs cause urinary retention, dry mouth, constipation, and blurry vision.",
+            "Nicotinic acetylcholine receptor is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Alpha-1 adrenergic receptor is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Beta-2 adrenergic receptor is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Dopamine D2 receptor is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Pharmacology",
+        "topic": "Antibiotics",
+        "stem": "A bactericidal antibiotic inhibits bacterial cell wall cross-linking by binding penicillin-binding proteins. Which class has this mechanism?",
+        "options": [
+            "Beta-lactams",
+            "Macrolides",
+            "Aminoglycosides",
+            "Tetracyclines",
+            "Fluoroquinolones"
+        ],
+        "correct_index": 0,
+        "explanation": "Beta-lactams bind PBPs and inhibit peptidoglycan cross-linking.",
+        "wrong_choice_explanations": [
+            "Correct: Beta-lactams bind PBPs and inhibit peptidoglycan cross-linking.",
+            "Macrolides is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Aminoglycosides is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Tetracyclines is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Fluoroquinolones is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Ethics",
+        "topic": "Autonomy",
+        "stem": "A competent adult refuses a recommended transfusion after risks, benefits, and alternatives are explained. The refusal may lead to death. What is the best next step?",
+        "options": [
+            "Respect the patient’s informed refusal",
+            "Give the transfusion because beneficence overrides refusal",
+            "Ask family to consent instead",
+            "Obtain a court order for all refusals",
+            "Discharge the patient without further care"
+        ],
+        "correct_index": 0,
+        "explanation": "A capacitated adult has the right to refuse treatment, even life-saving treatment.",
+        "wrong_choice_explanations": [
+            "Correct: A capacitated adult has the right to refuse treatment, even life-saving treatment.",
+            "Give the transfusion because beneficence overrides refusal is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Ask family to consent instead is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Obtain a court order for all refusals is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Discharge the patient without further care is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Ethics",
+        "topic": "Confidentiality",
+        "stem": "A patient asks that a new diagnosis not be shared with her spouse. The spouse later calls requesting details. What should the physician do?",
+        "options": [
+            "Decline to disclose without permission unless a legal exception applies",
+            "Tell the spouse because spouses have a right to know",
+            "Confirm the diagnosis but withhold treatment details",
+            "Ask the spouse to sign a confidentiality agreement",
+            "Avoid discussing the request with the patient"
+        ],
+        "correct_index": 0,
+        "explanation": "Confidentiality requires patient authorization before disclosure unless a specific exception applies.",
+        "wrong_choice_explanations": [
+            "Correct: Confidentiality requires patient authorization before disclosure unless a specific exception applies.",
+            "Tell the spouse because spouses have a right to know is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Confirm the diagnosis but withhold treatment details is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Ask the spouse to sign a confidentiality agreement is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Avoid discussing the request with the patient is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Biostatistics",
+        "topic": "Screening tests",
+        "stem": "A screening test is designed to miss as few true cases of a serious disease as possible. Which property should be maximized?",
+        "options": [
+            "Sensitivity",
+            "Specificity",
+            "Positive predictive value",
+            "Prevalence",
+            "Attributable risk"
+        ],
+        "correct_index": 0,
+        "explanation": "High sensitivity minimizes false negatives and helps rule out disease when negative.",
+        "wrong_choice_explanations": [
+            "Correct: High sensitivity minimizes false negatives and helps rule out disease when negative.",
+            "Specificity is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Positive predictive value is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Prevalence is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "Attributable risk is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    },
+    {
+        "system": "Biostatistics",
+        "topic": "Risk",
+        "stem": "In a cohort study, disease occurs in 20% of exposed patients and 10% of unexposed patients. What is the relative risk?",
+        "options": [
+            "2.0",
+            "0.5",
+            "1.0",
+            "10",
+            "20"
+        ],
+        "correct_index": 0,
+        "explanation": "Relative risk is exposed risk divided by unexposed risk: 0.20/0.10 = 2.0.",
+        "wrong_choice_explanations": [
+            "Correct: Relative risk is exposed risk divided by unexposed risk: 0.20/0.10 = 2.0.",
+            "0.5 is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "1.0 is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "10 is a plausible distractor, but it does not best explain the key finding in this vignette.",
+            "20 is a plausible distractor, but it does not best explain the key finding in this vignette."
+        ]
+    }
+];
   const wanted = Math.max(1, Math.min(80, Number(totalQuestions || 40)));
   const out = [];
   for (let i = 0; i < wanted; i += 1) {
@@ -4707,13 +5509,18 @@ function ngCreateDefaultBaselineQuestions({ courseName = "NextGen USMLE", totalQ
     out.push({
       id: `baseline_q${i + 1}`,
       stem: q.stem,
+      question_text: q.stem,
       options: q.options,
-      correct_index: q.correct_index,
+      correct_index: Number(q.correct_index || 0),
       explanation: q.explanation,
+      wrong_choice_explanations: Array.isArray(q.wrong_choice_explanations) ? q.wrong_choice_explanations : [],
       topic: q.topic,
       system: q.system,
+      tested_concept: q.topic,
       difficulty: i < 12 ? "medium" : i < 30 ? "mixed" : "hard",
       block_number: Math.floor(i / 20) + 1,
+      points: 1,
+      style: "original_usmle_vignette_baseline_v177d",
       course_context: courseName,
     });
   }
@@ -4724,6 +5531,7 @@ function ngCreateDefaultBaselineQuestions({ courseName = "NextGen USMLE", totalQ
     distributeCorrectIndex: true,
   });
 }
+
 
 function ngEnsureBaselineAssessmentTemplate(db, { courseId, creatorId = "system" } = {}) {
   if (!courseId) return null;
@@ -9222,18 +10030,49 @@ app.post(["/admin/adaptive/generate-baseline-diagnostic", "/admin/baseline/gener
       questions = ngCreateDefaultBaselineQuestions({ courseName: db.courses?.[String(courseId)]?.name || "NextGen USMLE", totalQuestions: cfg.total_questions });
       warnings.push("Not enough source text for AI generation, so v176 created a published default baseline question set. Admin can edit these questions anytime.");
     }
+    // v177c safety: AI generation can occasionally return too few questions or an unsafe answer-key pattern.
+    // Baseline must always be a complete, usable diagnostic because it gates the mastery profile.
+    const expectedBaselineQuestions = Math.max(1, Number(cfg.total_questions || 40) || 40);
+    const baselineCourseName = db.courses?.[String(courseId)]?.name || db.courses?.[String(courseId)]?.title || "NextGen USMLE";
+    if (!Array.isArray(questions)) questions = [];
+    const originalGeneratedCount = questions.length;
+    if (questions.length < expectedBaselineQuestions) {
+      const fallbackQuestions = ngCreateDefaultBaselineQuestions({
+        courseName: baselineCourseName,
+        totalQuestions: expectedBaselineQuestions,
+      });
+      questions = [...questions, ...fallbackQuestions].slice(0, expectedBaselineQuestions);
+      warnings.push(`v177d baseline USMLE-style quality guard: generator returned ${originalGeneratedCount}/${expectedBaselineQuestions} questions, so safe default questions were used to complete the diagnostic.`);
+    }
+
     questions = ngNormalizeAssessmentQuestionsForStorage(questions, {
       assessmentId: `baseline:${courseId}:${Date.now()}`,
       assessmentType: "baseline",
       forceRandomize: true,
       distributeCorrectIndex: true,
     });
+
+    const answerDistribution = questions.reduce((acc, q) => {
+      const idx = Number.isFinite(Number(q.correct_index)) ? Number(q.correct_index) : -1;
+      acc[idx] = Number(acc[idx] || 0) + 1;
+      return acc;
+    }, {});
+    const mostCommonAnswerCount = Math.max(0, ...Object.values(answerDistribution).map((n) => Number(n || 0)));
+    const unsafeAnswerPattern = questions.length >= 10 && mostCommonAnswerCount / Math.max(1, questions.length) >= 0.8;
+    if (questions.length < expectedBaselineQuestions || unsafeAnswerPattern) {
+      questions = ngCreateDefaultBaselineQuestions({
+        courseName: baselineCourseName,
+        totalQuestions: expectedBaselineQuestions,
+      });
+      warnings.push("v177d baseline USMLE-style quality guard: unsafe answer-key distribution detected, so the baseline was replaced with the corrected randomized USMLE-style baseline diagnostic.");
+    }
+
     const id = uuid();
     const assessment = ngApplyAssessmentBlockMetadata({
       id,
       course_id: courseId,
       title: req.body.title || "Baseline Weak-Area Diagnostic",
-      description: req.body.description || "Initial diagnostic to measure system mastery and personalize flashcards.",
+      description: req.body.description || "Original USMLE-style baseline diagnostic to measure system mastery and personalize flashcards.",
       source_type: "baseline_diagnostic",
       assessment_type: "baseline",
       adaptive_baseline: true,
