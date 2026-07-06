@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v177o-holiday-dashboard-task-persistence-fix";
+const NEXTGEN_BACKEND_BUILD = "v177p-flashcard-progress-persistence-full-demo-access-fix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -44299,14 +44299,17 @@ function ngPickStudentDailyFlashcardQueue(cards = [], { limit = 28 } = {}) {
   const pickedIds = new Set();
 
   const take = (bucket, n) => {
+    let bucketPicked = 0;
     for (const card of cards) {
-      if (picked.length >= max) break;
+      if (picked.length >= max || bucketPicked >= n) break;
       if (pickedIds.has(String(card.id))) continue;
-      if (card.reviewed === true) continue;
       if (bucket && card.bucket !== bucket) continue;
+      // v177p: keep reviewed cards inside today's selected queue.
+      // Previously reviewed cards were skipped, so after refresh the queue was rebuilt from the next unreviewed cards
+      // and students saw progress return to 0%. The daily queue must be stable while progress changes inside it.
       picked.push(card);
       pickedIds.add(String(card.id));
-      if (picked.filter((item) => !bucket || item.bucket === bucket).length >= n) break;
+      bucketPicked += 1;
     }
   };
 
@@ -44318,20 +44321,9 @@ function ngPickStudentDailyFlashcardQueue(cards = [], { limit = 28 } = {}) {
 
   for (const card of cards) {
     if (picked.length >= max) break;
-    if (card.reviewed === true) continue;
     if (pickedIds.has(String(card.id))) continue;
     picked.push(card);
     pickedIds.add(String(card.id));
-  }
-
-  // If everything due is reviewed, show a small read-only recent review set instead of an empty broken screen.
-  if (!picked.length) {
-    for (const card of cards) {
-      if (picked.length >= Math.min(10, max)) break;
-      if (pickedIds.has(String(card.id))) continue;
-      picked.push(card);
-      pickedIds.add(String(card.id));
-    }
   }
 
   return picked;
@@ -44567,7 +44559,8 @@ app.get("/student/flashcards/review", async (req, res) => {
       const ao = bucketOrder[a.bucket] ?? 9;
       const bo = bucketOrder[b.bucket] ?? 9;
       if (ao !== bo) return ao - bo;
-      return Number(a.reviewed) - Number(b.reviewed) || Number(a.day_number || 9999) - Number(b.day_number || 9999) || String(b.created_at || "").localeCompare(String(a.created_at || ""));
+      // v177p: never sort reviewed cards out of the daily queue. Progress must persist after refresh.
+      return Number(a.day_number || 9999) - Number(b.day_number || 9999) || String(a.created_at || "").localeCompare(String(b.created_at || ""));
     });
 
     const availableCards = cards;
