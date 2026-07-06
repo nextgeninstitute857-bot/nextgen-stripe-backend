@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v177r-host-zoom-app-start-link-hotfix";
+const NEXTGEN_BACKEND_BUILD = "v177s-open-zoom-student-session-safety-hotfix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -1563,6 +1563,8 @@ function sanitizeLiveSession(session) {
     cancelled_reason: session.cancelled_reason || null,
     archived_from_active: Boolean(session.archived_from_active),
     no_class_placeholder: Boolean(session.no_class_placeholder),
+    zoom_waiting_room_disabled_at: session.zoom_waiting_room_disabled_at || null,
+    join_before_host_enabled_at: session.join_before_host_enabled_at || null,
     created_by: session.created_by || null,
     updated_by: session.updated_by || null,
     created_at: session.created_at || null,
@@ -2652,7 +2654,7 @@ async function createZoomMeetingForLiveSession(session, timezone = DEFAULT_TIMEZ
   if (!start) throw new Error("Session scheduled date/time is invalid");
   const response = await axios.post("https://api.zoom.us/v2/users/me/meetings", {
     topic: session.topic || "Live Class", type: 2, start_time: start.toISOString(), duration: DEFAULT_ZOOM_DURATION_MINUTES, timezone,
-    settings: { host_video: true, participant_video: true, join_before_host: false, waiting_room: true, auto_recording: "cloud" },
+    settings: { host_video: true, participant_video: true, join_before_host: true, waiting_room: false, auto_recording: "cloud" },
   }, { headers: { Authorization: `Bearer ${accessToken}` } });
   return response.data;
 }
@@ -2665,6 +2667,33 @@ async function getZoomMeetingDetailsForHostStart(meetingId) {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   return response.data || null;
+}
+
+async function ngOpenZoomMeetingEntryForStudents(meetingId) {
+  const cleanMeetingId = String(meetingId || "").trim();
+  if (!cleanMeetingId || isPendingZoomId(cleanMeetingId)) {
+    return { success: false, skipped: true, reason: "No real Zoom meeting id" };
+  }
+
+  const accessToken = await getZoomAccessToken();
+  await axios.patch(
+    `https://api.zoom.us/v2/meetings/${encodeURIComponent(cleanMeetingId)}`,
+    {
+      settings: {
+        waiting_room: false,
+        join_before_host: true,
+      },
+    },
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+
+  return {
+    success: true,
+    meeting_id: cleanMeetingId,
+    waiting_room: false,
+    join_before_host: true,
+    updated_at: new Date().toISOString(),
+  };
 }
 
 function ngManualLiveJoinUrl(session = {}) {
@@ -2688,8 +2717,23 @@ async function ngEnsureHostZoomStartLink(db, session, user) {
   const existingStartUrl = session.zoom_start_url || session.host_start_url || session.start_url || null;
   const existingJoinUrl = ngManualLiveJoinUrl(session);
 
+  // Even if a host start URL already exists, keep the active Zoom meeting open for students.
+  // This prevents mentors from admitting 90 students one by one during live class.
+  if (existingStartUrl && hasRealZoomMeetingId(session.zoom_meeting_id)) {
+    let open_entry = null;
+    try {
+      open_entry = await ngOpenZoomMeetingEntryForStudents(session.zoom_meeting_id);
+      session.zoom_waiting_room_disabled_at = open_entry.updated_at;
+      session.join_before_host_enabled_at = open_entry.updated_at;
+      changed = true;
+    } catch (error) {
+      warning = `Host URL exists, but Zoom open-entry update failed: ${error.response?.data?.message || error.message}`;
+    }
+    return { start_url: existingStartUrl, join_url: existingJoinUrl, meeting: null, changed, warning, open_entry };
+  }
+
   if (existingStartUrl) {
-    return { start_url: existingStartUrl, join_url: existingJoinUrl, meeting: null, changed: false, warning: null };
+    return { start_url: existingStartUrl, join_url: existingJoinUrl, meeting: null, changed: false, warning: null, open_entry: null };
   }
 
   if (hasRealZoomMeetingId(session.zoom_meeting_id)) {
@@ -2731,6 +2775,19 @@ async function ngEnsureHostZoomStartLink(db, session, user) {
     }
   }
 
+  let open_entry = null;
+  if (hasRealZoomMeetingId(session.zoom_meeting_id)) {
+    try {
+      open_entry = await ngOpenZoomMeetingEntryForStudents(session.zoom_meeting_id);
+      session.zoom_waiting_room_disabled_at = open_entry.updated_at;
+      session.join_before_host_enabled_at = open_entry.updated_at;
+      changed = true;
+    } catch (error) {
+      const msg = `Zoom open-entry update failed: ${error.response?.data?.message || error.message}`;
+      warning = warning ? `${warning} ${msg}` : msg;
+    }
+  }
+
   if (!session.zoom_start_url && existingJoinUrl && !warning) {
     warning = "Only a participant join URL is available. It can open Zoom app, but true host start needs a Zoom-generated start URL.";
   }
@@ -2747,6 +2804,7 @@ async function ngEnsureHostZoomStartLink(db, session, user) {
     meeting,
     changed,
     warning,
+    open_entry,
   };
 }
 
@@ -7566,7 +7624,15 @@ app.get("/live-sessions", async (req, res) => {
 
     if (autoLiveSync.changed) await writeLiveDb(db);
 
-    let sessions = Object.values(db.liveSessions || {}).map(sanitizeLiveSession);
+    const studentVisibleCourseIds = new Set(
+      Object.values(db.courses || {})
+        .filter((course) => !ngCourseIsHiddenFromStudents(course))
+        .map((course) => String(course.id))
+    );
+    let sessions = Object.values(db.liveSessions || {})
+      .filter((session) => studentVisibleCourseIds.has(String(session.course_id || "")))
+      .filter((session) => ngStudentSessionCanShowInLiveList(session))
+      .map(sanitizeLiveSession);
     if (requestedCourseId) sessions = sessions.filter((s) => String(s.course_id) === requestedCourseId);
     if (req.query.status) sessions = sessions.filter((s) => String(s.status) === String(req.query.status));
     sessions.sort((a, b) => String(a.scheduled_date || "").localeCompare(String(b.scheduled_date || "")) || String(a.scheduled_time || "").localeCompare(String(b.scheduled_time || "")));
@@ -7680,6 +7746,48 @@ app.post("/admin/live-sessions/:sessionId/host-start-link", async (req, res) => 
       error: e.response?.data?.message || e.message || "Failed to create host start link",
       details: e.response?.data || null,
     });
+  }
+});
+
+
+app.post("/admin/live-sessions/:sessionId/open-entry", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.live_sessions.manage");
+    const db = await readLiveDb();
+    const session = db.liveSessions[String(req.params.sessionId)];
+    if (!session) return res.status(404).json({ success: false, error: "Live session not found" });
+
+    const ensure = await ngEnsureHostZoomStartLink(db, session, user);
+    if (!hasRealZoomMeetingId(session.zoom_meeting_id)) {
+      return res.status(400).json({
+        success: false,
+        build: NEXTGEN_BACKEND_BUILD,
+        error: ensure.warning || "No real Zoom meeting id is available for this session.",
+        session: sanitizeLiveSession(session),
+      });
+    }
+
+    const openEntry = ensure.open_entry || await ngOpenZoomMeetingEntryForStudents(session.zoom_meeting_id);
+    session.zoom_waiting_room_disabled_at = openEntry.updated_at || new Date().toISOString();
+    session.join_before_host_enabled_at = session.zoom_waiting_room_disabled_at;
+    session.updated_by = user.id;
+    session.updated_at = new Date().toISOString();
+    db.liveSessions[session.id] = session;
+    await writeLiveDb(db);
+
+    res.json({
+      success: true,
+      build: NEXTGEN_BACKEND_BUILD,
+      message: "Zoom entry opened for students. Waiting room disabled and join-before-host enabled for this meeting.",
+      open_entry: openEntry,
+      session: sanitizeLiveSession(session),
+      meeting_id: String(session.zoom_meeting_id || ""),
+      passcode: session.meeting_password || null,
+      join_url: ngManualLiveJoinUrl(session),
+      start_url: session.zoom_start_url || session.host_start_url || null,
+    });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, build: NEXTGEN_BACKEND_BUILD, error: e.response?.data?.message || e.message || "Failed to open Zoom entry" });
   }
 });
 
@@ -9347,11 +9455,17 @@ app.get(["/hcgi/api/live-class/:sessionId", "/live/classroom/:courseId/:sessionI
     if (!session?.id) return res.status(404).json({ allowed: false, error: "Session not found" });
 
     const courseId = session.course_id;
+    const course = courseId ? db.courses?.[String(courseId)] || null : null;
+    const staffAccess = isAdminOrInstructor(user, session);
+    if (!staffAccess && (ngSessionIsInternalTestOrHidden(session) || ngCourseIsHiddenFromStudents(course || {}))) {
+      return res.status(404).json({ allowed: false, error: "Session not found" });
+    }
+
     const enrollment = getBackendEnrollment(db, { userId: user.id, courseId });
     let allowed = false;
     let reason = "You don't have access to this session";
 
-    if (isAdminOrInstructor(user, session)) allowed = true;
+    if (staffAccess) allowed = true;
     else if (enrollment?.id) {
       if (enrollment.is_demo) {
         if (!isDemoEnrollmentActive(enrollment, db.demoSettings)) reason = "Demo access is expired or disabled";
@@ -9377,7 +9491,7 @@ app.get(["/hcgi/api/live-class/:sessionId", "/live/classroom/:courseId/:sessionI
       if (!canJoin) joinReason = `Classroom opens ${NEXTGEN_CLASSROOM_OPEN_MINUTES_BEFORE} minutes before class starts`;
     }
 
-    if (canJoin && !hasRealZoomMeetingId(session.zoom_meeting_id) && isAdminOrInstructor(user, session)) {
+    if (canJoin && !hasRealZoomMeetingId(session.zoom_meeting_id) && staffAccess) {
       const meeting = await createZoomMeetingForLiveSession(session, session.scheduled_timezone || DEFAULT_TIMEZONE);
       session.zoom_meeting_id = String(meeting.id);
       session.meeting_password = meeting.password || "pending";
@@ -9390,6 +9504,20 @@ app.get(["/hcgi/api/live-class/:sessionId", "/live/classroom/:courseId/:sessionI
       db.liveSessions[session.id] = session;
       db.recordings[String(meeting.id)] = { ...(db.recordings[String(meeting.id)] || {}), meeting_id: String(meeting.id), session_id: session.id, course_id: courseId, topic: session.topic, published: false, created_at: new Date().toISOString() };
       await writeLiveDb(db);
+    }
+
+    if (canJoin && staffAccess && hasRealZoomMeetingId(session.zoom_meeting_id)) {
+      try {
+        const openEntry = await ngOpenZoomMeetingEntryForStudents(session.zoom_meeting_id);
+        session.zoom_waiting_room_disabled_at = openEntry.updated_at;
+        session.join_before_host_enabled_at = openEntry.updated_at;
+        session.updated_by = user.id;
+        session.updated_at = new Date().toISOString();
+        db.liveSessions[session.id] = session;
+        await writeLiveDb(db);
+      } catch (openEntryError) {
+        console.warn("Zoom open-entry update from classroom failed:", openEntryError.response?.data?.message || openEntryError.message);
+      }
     }
 
     const manualJoinUrl = session.zoom_meeting_url || session.join_url || session.zoom_join_url || session.zoom_url || session.meeting_url || null;
@@ -9423,7 +9551,7 @@ app.get(["/hcgi/api/live-class/:sessionId", "/live/classroom/:courseId/:sessionI
 
 app.get("/zoom/zak", async (req, res) => { try { const token = await getZoomAccessToken(); const response = await axios.get("https://api.zoom.us/v2/users/me/token?type=zak", { headers: { Authorization: `Bearer ${token}` } }); res.json({ zak: response.data.token }); } catch (e) { res.status(500).json({ error: e.response?.data || e.message }); } });
 app.post("/zoom/generate-signature", async (req, res) => { try { const { meetingNumber, role } = req.body; const iat = Math.round(Date.now() / 1000) - 30; const exp = iat + 60 * 60 * 2; const signature = jwt.sign({ sdkKey: process.env.ZOOM_MEETING_SDK_KEY, mn: meetingNumber, role, iat, exp, appKey: process.env.ZOOM_MEETING_SDK_KEY, tokenExp: exp }, process.env.ZOOM_MEETING_SDK_SECRET, { algorithm: "HS256" }); res.json({ signature }); } catch (e) { res.status(500).json({ error: e.message }); } });
-app.post("/zoom/create-meeting", async (req, res) => { try { const token = await getZoomAccessToken(); const response = await axios.post("https://api.zoom.us/v2/users/me/meetings", { topic: req.body.topic, type: 2, start_time: req.body.start_time, duration: req.body.duration || DEFAULT_ZOOM_DURATION_MINUTES, timezone: req.body.timezone || DEFAULT_TIMEZONE, settings: { host_video: true, participant_video: true, join_before_host: false, waiting_room: true, auto_recording: "cloud" } }, { headers: { Authorization: `Bearer ${token}` } }); res.json({ success: true, meeting: response.data }); } catch (e) { res.status(500).json({ success: false, error: e.response?.data || e.message }); } });
+app.post("/zoom/create-meeting", async (req, res) => { try { const token = await getZoomAccessToken(); const response = await axios.post("https://api.zoom.us/v2/users/me/meetings", { topic: req.body.topic, type: 2, start_time: req.body.start_time, duration: req.body.duration || DEFAULT_ZOOM_DURATION_MINUTES, timezone: req.body.timezone || DEFAULT_TIMEZONE, settings: { host_video: true, participant_video: true, join_before_host: true, waiting_room: false, auto_recording: "cloud" } }, { headers: { Authorization: `Bearer ${token}` } }); res.json({ success: true, meeting: response.data }); } catch (e) { res.status(500).json({ success: false, error: e.response?.data || e.message }); } });
 
 app.post("/zoom/webhook", async (req, res) => {
   try {
@@ -11848,6 +11976,56 @@ function ngSessionComputedStatus(session, nowMs = Date.now()) {
   return "scheduled";
 }
 
+function ngSafetyText(...parts) {
+  return parts.map((value) => String(value || "").toLowerCase()).join(" ");
+}
+
+function ngCourseIsHiddenFromStudents(course = {}) {
+  const status = String(course.status || "active").toLowerCase();
+  const text = ngSafetyText(course.name, course.description, course.category, course.course_type);
+  return Boolean(
+    ["archived", "inactive", "draft"].includes(status) ||
+    course.student_visible === false ||
+    course.is_internal_test === true ||
+    course.internal_only === true ||
+    text.includes("private live flow test") ||
+    text.includes("internal live-class test") ||
+    text.includes("internal test")
+  );
+}
+
+function ngSessionIsInternalTestOrHidden(session = {}) {
+  const status = String(session.status || "scheduled").toLowerCase();
+  const text = ngSafetyText(session.topic, session.title, session.description, session.cancelled_reason, session.source, session.type);
+  return Boolean(
+    session.archived_from_active === true ||
+    session.no_class_placeholder === true ||
+    session.student_visible === false ||
+    ["archived", "cancelled", "canceled"].includes(status) ||
+    text.includes("ng live flow test") ||
+    text.includes("admin classroom check") ||
+    text.includes("host app + student join") ||
+    text.includes("private test") ||
+    text.includes("internal live-class test") ||
+    text.includes("holiday / no live class") ||
+    text.includes("holiday/no live class") ||
+    text.includes("no live class") ||
+    text.includes("no class today") ||
+    text.includes("tutor unavailable")
+  );
+}
+
+function ngStudentSessionCanShowInLiveList(session = {}) {
+  return !ngSessionIsInternalTestOrHidden(session);
+}
+
+function ngStudentSessionCanShowAsNext(session = {}, today = todayKey()) {
+  if (ngSessionIsInternalTestOrHidden(session)) return false;
+  const computed = ngSessionComputedStatus(session);
+  if (!["live", "scheduled"].includes(computed)) return false;
+  return computed === "live" || String(session.scheduled_date || "") >= today;
+}
+
 function ngCompactNotesMeta(note = null) {
   if (!note) {
     return {
@@ -11925,19 +12103,14 @@ function ngBuildStudentCourseBundle(db, user, course, { sessionLimit = null } = 
   const completedAssessments = assessmentsForStudent.filter((assessment) => assessment.result_visible === true || assessment.attempt_status === "completed");
   const sessionsAll = Object.values(db.liveSessions || {})
     .filter((session) => String(session.course_id || "") === String(course.id))
+    .filter((session) => ngStudentSessionCanShowInLiveList(session))
     .sort((a, b) => (ngSessionDateTimeMs(a) || 0) - (ngSessionDateTimeMs(b) || 0));
 
   const today = todayKey();
-  const todaySession = sessionsAll.find((session) => String(session.scheduled_date || "") === today) || null;
-  const nextSession = sessionsAll.find((session) => {
-    const status = ngSessionComputedStatus(session);
-    return status === "live" || (String(session.scheduled_date || "") >= today && status !== "cancelled");
-  }) || null;
+  const todaySession = sessionsAll.find((session) => String(session.scheduled_date || "") === today && ngStudentSessionCanShowAsNext(session, today)) || null;
+  const nextSession = sessionsAll.find((session) => ngStudentSessionCanShowAsNext(session, today)) || null;
   const upcomingSessions = sessionsAll
-    .filter((session) => {
-      const status = ngSessionComputedStatus(session);
-      return status === "live" || (String(session.scheduled_date || "") >= today && status !== "cancelled");
-    })
+    .filter((session) => ngStudentSessionCanShowAsNext(session, today))
     .slice(0, 5)
     .map((session) => ngCompactSessionForLiveCenter(db, session, course));
 
@@ -12012,7 +12185,7 @@ app.get("/student/dashboard/bootstrap", async (req, res) => {
     const requestedCourseId = String(req.query.course_id || "").trim();
     const allCourses = Object.values(db.courses || {})
       .map(sanitizeCourse)
-      .filter((course) => course.status !== "archived" && course.status !== "inactive");
+      .filter((course) => !ngCourseIsHiddenFromStudents(course));
     const coursesToCheck = requestedCourseId ? allCourses.filter((course) => String(course.id) === requestedCourseId) : allCourses;
     const autoLiveSync = ngAutoSyncRoadmapLiveSessionsForCourses(db, coursesToCheck.map((course) => course.id), {
       actorId: user.id || "student_dashboard_bootstrap",
@@ -12023,7 +12196,12 @@ app.get("/student/dashboard/bootstrap", async (req, res) => {
     const featureAccess = getStudentFeatureAccess(db, user);
     const bundles = coursesToCheck
       .map((course) => ngBuildStudentCourseBundle(db, user, course, { sessionLimit: 5 }))
-      .filter(Boolean);
+      .filter(Boolean)
+      .sort((a, b) => {
+        const ap = a.status === "paid" ? 0 : 1;
+        const bp = b.status === "paid" ? 0 : 1;
+        return ap - bp || String(a.course?.name || "").localeCompare(String(b.course?.name || ""));
+      });
     const primary = bundles[0] || null;
     const announcements = ngFilterDismissedAnnouncements(
       db,
@@ -12079,7 +12257,7 @@ app.get("/student/live-center", async (req, res) => {
     const requestedCourseId = String(req.query.course_id || "").trim();
     const allCourses = Object.values(db.courses || {})
       .map(sanitizeCourse)
-      .filter((course) => course.status !== "archived" && course.status !== "inactive");
+      .filter((course) => !ngCourseIsHiddenFromStudents(course));
     const coursesToCheck = requestedCourseId ? allCourses.filter((course) => String(course.id) === requestedCourseId) : allCourses;
     const autoLiveSync = ngAutoSyncRoadmapLiveSessionsForCourses(db, coursesToCheck.map((course) => course.id), {
       actorId: user.id || "student_live_center",
@@ -12089,7 +12267,12 @@ app.get("/student/live-center", async (req, res) => {
 
     const bundles = coursesToCheck
       .map((course) => ngBuildStudentCourseBundle(db, user, course, { sessionLimit: null }))
-      .filter(Boolean);
+      .filter(Boolean)
+      .sort((a, b) => {
+        const ap = a.status === "paid" ? 0 : 1;
+        const bp = b.status === "paid" ? 0 : 1;
+        return ap - bp || String(a.course?.name || "").localeCompare(String(b.course?.name || ""));
+      });
 
     res.json({
       success: true,
@@ -12193,7 +12376,7 @@ app.get("/student/notes/sessions", async (req, res) => {
 
     const allCourses = Object.values(db.courses || {})
       .map(sanitizeCourse)
-      .filter((course) => course.status !== "archived" && course.status !== "inactive");
+      .filter((course) => !ngCourseIsHiddenFromStudents(course));
 
     const coursesToCheck = requestedCourseId
       ? allCourses.filter((course) => String(course.id) === requestedCourseId)
