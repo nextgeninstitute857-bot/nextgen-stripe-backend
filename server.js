@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v177p-flashcard-progress-persistence-full-demo-access-fix";
+const NEXTGEN_BACKEND_BUILD = "v177q-admin-external-library-student-link-fix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -6947,6 +6947,165 @@ app.post("/student/video-library/open", async (req, res) => {
     res.json({ success: true, ...result });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to track video library open" });
+  }
+});
+
+
+function ngGetExternalLibraryAccessForCourse(db, user, requestedCourseId = "") {
+  const cleanCourseId = String(requestedCourseId || "").trim();
+
+  if (!cleanCourseId) {
+    return getExternalLibraryAccess(db, user);
+  }
+
+  const demoSettings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
+  const studentId = String(user?.id || "").trim();
+
+  const enrollments = Object.values(db.enrollments || {}).filter((enrollment) => {
+    return (
+      studentId &&
+      String(enrollment.user_id || "") === studentId &&
+      String(enrollment.course_id || "") === cleanCourseId &&
+      enrollment.access_granted !== false
+    );
+  });
+
+  for (const enrollment of enrollments.filter((item) => item.is_demo !== true)) {
+    const plan = enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null;
+    if (!plan) continue;
+    if (plan.is_active === false) continue;
+    if (!isPaidEnrollmentActive(enrollment, plan)) continue;
+    if (!planIncludesFeature(plan, "video_library")) continue;
+
+    const course = db.courses?.[cleanCourseId] || null;
+    const accessDays = Number(enrollment.access_days || getPlanAccessDays(plan));
+    const accessEndsAt = enrollment.access_expires_at || addDays(new Date(), accessDays).toISOString();
+
+    return {
+      allowed: true,
+      enrollment,
+      plan,
+      course,
+      accessDays,
+      accessEndsAt,
+      source: "paid",
+    };
+  }
+
+  if (demoSettings.enabled !== false && demoSettings.allow_video_library === true) {
+    for (const enrollment of enrollments.filter((item) => item.is_demo === true)) {
+      if (!isDemoEnrollmentActive(enrollment, demoSettings)) continue;
+
+      const course = db.courses?.[cleanCourseId] || null;
+      if (course?.demo_access_enabled === false) continue;
+
+      const accessDays = Number(enrollment.access_days || demoSettings.duration_days || 7);
+      const accessEndsAt = enrollment.demo_expiry
+        ? new Date(`${enrollment.demo_expiry}T23:59:59`).toISOString()
+        : addDays(new Date(), accessDays).toISOString();
+
+      return {
+        allowed: true,
+        enrollment,
+        plan: null,
+        course,
+        accessDays,
+        accessEndsAt,
+        source: "demo",
+      };
+    }
+  }
+
+  return {
+    allowed: false,
+    enrollment: enrollments[0] || null,
+    plan: enrollments[0]?.plan_id ? db.plans?.[String(enrollments[0].plan_id)] || null : null,
+    course: db.courses?.[cleanCourseId] || null,
+    accessDays: 0,
+    accessEndsAt: null,
+    source: null,
+    reason: enrollments.length
+      ? "Student has course enrollment, but it is expired, revoked, or the plan does not include video_library."
+      : "Student has no enrollment for this course.",
+  };
+}
+
+app.post("/admin/external-library/access-link", async (req, res) => {
+  try {
+    await requireAdminOrInstructor(req);
+
+    const email = normalizeEmail(req.body.email || req.body.student_email || req.body.user_email || "");
+    const courseId = String(req.body.course_id || req.body.courseId || "").trim();
+
+    if (!email) {
+      return res.status(400).json({ success: false, error: "student email is required" });
+    }
+
+    const db = await readLiveDb();
+    const rawUser = findUserByEmail(db, email);
+
+    if (!rawUser?.id) {
+      return res.status(404).json({ success: false, error: "Student account not found for this email" });
+    }
+
+    const user = sanitizeUser(rawUser);
+    const access = ngGetExternalLibraryAccessForCourse(db, user, courseId);
+
+    const matchingEnrollments = Object.values(db.enrollments || {})
+      .filter((enrollment) => {
+        if (String(enrollment.user_id || "") !== String(user.id)) return false;
+        if (courseId && String(enrollment.course_id || "") !== String(courseId)) return false;
+        return true;
+      })
+      .map((enrollment) => sanitizeAdminEnrollment(enrollment, db));
+
+    if (!access.allowed) {
+      return res.status(403).json({
+        success: false,
+        locked: true,
+        feature: "video_library",
+        error: access.reason || "Video Library access is not active for this student.",
+        student: user,
+        requested_course_id: courseId || null,
+        enrollments: matchingEnrollments,
+        plan: access.plan ? sanitizePlan(access.plan) : null,
+        course: access.course ? sanitizeCourse(access.course) : null,
+      });
+    }
+
+    const token = signExternalLibraryToken({
+      user,
+      enrollment: access.enrollment,
+      plan: access.plan,
+      course: access.course,
+      accessEndsAt: access.accessEndsAt,
+    });
+
+    const baseExternalUrl = EXTERNAL_LIBRARY_URL.replace(/\/$/, "");
+    const redirect_url = `${baseExternalUrl}/sso-login?token=${encodeURIComponent(token)}`;
+    const verify_url = `${baseExternalUrl}/external-library/sso/verify?token=${encodeURIComponent(token)}`;
+
+    res.json({
+      success: true,
+      build: NEXTGEN_BACKEND_BUILD,
+      source: "admin_external_library_student_link_v177q",
+      student: user,
+      requested_course_id: courseId || null,
+      redirect_url,
+      verify_url,
+      expires_in_minutes: EXTERNAL_LIBRARY_TOKEN_MINUTES,
+      access_ends_at: access.accessEndsAt,
+      access_days: access.accessDays,
+      access_source: access.source || null,
+      enrollment: access.enrollment ? sanitizeAdminEnrollment(access.enrollment, db) : null,
+      plan: access.plan ? sanitizePlan(access.plan) : null,
+      course: access.course ? sanitizeCourse(access.course) : null,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to generate admin external library access link",
+    });
   }
 });
 
