@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v177q-admin-external-library-student-link-fix";
+const NEXTGEN_BACKEND_BUILD = "v177r-host-zoom-app-start-link-hotfix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -1507,9 +1507,32 @@ function normalizeLiveSessionPayload(body = {}, existing = {}) {
     instructor_id: body.instructor_id ?? existing.instructor_id ?? null,
     instructor_name: String(body.instructor_name ?? existing.instructor_name ?? "").trim(),
     status: normalizeStatus(body.status ?? existing.status ?? "scheduled", "scheduled"),
-    zoom_meeting_id: body.zoom_meeting_id ?? existing.zoom_meeting_id ?? null,
-    meeting_password: body.meeting_password ?? existing.meeting_password ?? null,
-    zoom_meeting_url: body.zoom_meeting_url ?? existing.zoom_meeting_url ?? null,
+    zoom_meeting_id: body.zoom_meeting_id ?? body.meeting_id ?? existing.zoom_meeting_id ?? null,
+    meeting_password: body.meeting_password ?? body.password ?? existing.meeting_password ?? null,
+    zoom_meeting_url:
+      body.zoom_meeting_url ??
+      body.zoom_join_url ??
+      body.join_url ??
+      body.meeting_url ??
+      existing.zoom_meeting_url ??
+      existing.zoom_join_url ??
+      existing.join_url ??
+      existing.meeting_url ??
+      null,
+    zoom_start_url:
+      body.zoom_start_url ??
+      body.host_start_url ??
+      body.start_url ??
+      existing.zoom_start_url ??
+      existing.host_start_url ??
+      null,
+    host_start_url:
+      body.host_start_url ??
+      body.zoom_start_url ??
+      body.start_url ??
+      existing.host_start_url ??
+      existing.zoom_start_url ??
+      null,
     recording_url: body.recording_url ?? existing.recording_url ?? null,
     cancelled_reason: body.cancelled_reason ?? existing.cancelled_reason ?? null,
     archived_from_active: body.archived_from_active ?? existing.archived_from_active ?? false,
@@ -1534,6 +1557,7 @@ function sanitizeLiveSession(session) {
     zoom_meeting_id: session.zoom_meeting_id || null,
     meeting_password: session.meeting_password || null,
     zoom_meeting_url: session.zoom_meeting_url || null,
+    host_start_url_configured: Boolean(session.zoom_start_url || session.host_start_url),
     recording_url: session.recording_url || null,
     roadmap_day_id: session.roadmap_day_id || null,
     cancelled_reason: session.cancelled_reason || null,
@@ -2631,6 +2655,99 @@ async function createZoomMeetingForLiveSession(session, timezone = DEFAULT_TIMEZ
     settings: { host_video: true, participant_video: true, join_before_host: false, waiting_room: true, auto_recording: "cloud" },
   }, { headers: { Authorization: `Bearer ${accessToken}` } });
   return response.data;
+}
+
+async function getZoomMeetingDetailsForHostStart(meetingId) {
+  const cleanMeetingId = String(meetingId || "").trim();
+  if (!cleanMeetingId || isPendingZoomId(cleanMeetingId)) return null;
+  const accessToken = await getZoomAccessToken();
+  const response = await axios.get(`https://api.zoom.us/v2/meetings/${encodeURIComponent(cleanMeetingId)}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  return response.data || null;
+}
+
+function ngManualLiveJoinUrl(session = {}) {
+  return (
+    session.zoom_meeting_url ||
+    session.zoom_join_url ||
+    session.join_url ||
+    session.zoom_url ||
+    session.meeting_url ||
+    null
+  );
+}
+
+async function ngEnsureHostZoomStartLink(db, session, user) {
+  if (!session?.id) throw new Error("Live session is required");
+
+  let changed = false;
+  let warning = null;
+  let meeting = null;
+
+  const existingStartUrl = session.zoom_start_url || session.host_start_url || session.start_url || null;
+  const existingJoinUrl = ngManualLiveJoinUrl(session);
+
+  if (existingStartUrl) {
+    return { start_url: existingStartUrl, join_url: existingJoinUrl, meeting: null, changed: false, warning: null };
+  }
+
+  if (hasRealZoomMeetingId(session.zoom_meeting_id)) {
+    try {
+      meeting = await getZoomMeetingDetailsForHostStart(session.zoom_meeting_id);
+      if (meeting?.start_url) {
+        session.zoom_start_url = meeting.start_url;
+        session.host_start_url = meeting.start_url;
+        session.zoom_meeting_url = session.zoom_meeting_url || meeting.join_url || existingJoinUrl || null;
+        session.meeting_password = session.meeting_password || meeting.password || null;
+        changed = true;
+      }
+    } catch (error) {
+      warning = `Could not refresh Zoom host start URL: ${error.response?.data?.message || error.message}`;
+    }
+  }
+
+  if (!session.zoom_start_url && !hasRealZoomMeetingId(session.zoom_meeting_id)) {
+    try {
+      meeting = await createZoomMeetingForLiveSession(session, session.scheduled_timezone || DEFAULT_TIMEZONE);
+      session.zoom_meeting_id = String(meeting.id);
+      session.meeting_password = meeting.password || session.meeting_password || "pending";
+      session.zoom_meeting_url = meeting.join_url || session.zoom_meeting_url || null;
+      session.zoom_start_url = meeting.start_url || null;
+      session.host_start_url = meeting.start_url || null;
+      session.status = session.status || "scheduled";
+      db.recordings[String(meeting.id)] = {
+        ...(db.recordings[String(meeting.id)] || {}),
+        meeting_id: String(meeting.id),
+        session_id: session.id,
+        course_id: session.course_id || null,
+        topic: session.topic || session.title || "Live Class",
+        published: false,
+        created_at: db.recordings[String(meeting.id)]?.created_at || new Date().toISOString(),
+      };
+      changed = true;
+    } catch (error) {
+      warning = `Could not create Zoom meeting: ${error.response?.data?.message || error.message}`;
+    }
+  }
+
+  if (!session.zoom_start_url && existingJoinUrl && !warning) {
+    warning = "Only a participant join URL is available. It can open Zoom app, but true host start needs a Zoom-generated start URL.";
+  }
+
+  if (changed) {
+    session.updated_by = user?.id || session.updated_by || null;
+    session.updated_at = new Date().toISOString();
+    db.liveSessions[session.id] = session;
+  }
+
+  return {
+    start_url: session.zoom_start_url || session.host_start_url || null,
+    join_url: ngManualLiveJoinUrl(session),
+    meeting,
+    changed,
+    warning,
+  };
 }
 
 function stripVttToText(vtt) {
@@ -7520,6 +7637,52 @@ app.patch("/admin/live-sessions/:sessionId", async (req, res) => {
   } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to update live session" }); }
 });
 
+app.post("/admin/live-sessions/:sessionId/host-start-link", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.live_sessions.manage");
+    const db = await readLiveDb();
+    const session = db.liveSessions[String(req.params.sessionId)];
+    if (!session) return res.status(404).json({ success: false, error: "Live session not found" });
+
+    const result = await ngEnsureHostZoomStartLink(db, session, user);
+    if (result.changed) await writeLiveDb(db);
+
+    const startUrl = result.start_url || null;
+    const joinUrl = result.join_url || null;
+
+    if (!startUrl && !joinUrl) {
+      return res.status(400).json({
+        success: false,
+        error: result.warning || "No Zoom host or join URL is available for this session.",
+        session: sanitizeLiveSession(session),
+      });
+    }
+
+    res.json({
+      success: true,
+      build: NEXTGEN_BACKEND_BUILD,
+      session: sanitizeLiveSession(session),
+      start_url: startUrl,
+      host_start_url: startUrl,
+      zoom_start_url: startUrl,
+      join_url: joinUrl,
+      zoom_join_url: joinUrl,
+      meeting_id: session.zoom_meeting_id || null,
+      password: session.meeting_password || null,
+      warning: result.warning || null,
+      message: startUrl
+        ? "Open this link on the mentor iPad to launch the Zoom app as host for screen sharing."
+        : "Only participant join link is available. Use it in the Zoom app; true host start URL was not available.",
+    });
+  } catch (e) {
+    res.status(e.statusCode || e.response?.status || 500).json({
+      success: false,
+      error: e.response?.data?.message || e.message || "Failed to create host start link",
+      details: e.response?.data || null,
+    });
+  }
+});
+
 app.delete("/admin/live-sessions/:sessionId", async (req, res) => {
   try {
     await requireLmsPermission(req, "lms.live_sessions.manage");
@@ -9219,6 +9382,8 @@ app.get(["/hcgi/api/live-class/:sessionId", "/live/classroom/:courseId/:sessionI
       session.zoom_meeting_id = String(meeting.id);
       session.meeting_password = meeting.password || "pending";
       session.zoom_meeting_url = meeting.join_url || "pending";
+      session.zoom_start_url = meeting.start_url || session.zoom_start_url || null;
+      session.host_start_url = meeting.start_url || session.host_start_url || null;
       session.status = session.status || "scheduled";
       session.updated_by = user.id;
       session.updated_at = new Date().toISOString();
