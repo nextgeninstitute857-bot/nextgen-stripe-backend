@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v178-strict-notes-one-button-flashcard-scroll";
+const NEXTGEN_BACKEND_BUILD = "v180-auto-zoom-plus-duplicate-guards";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -312,7 +312,7 @@ const LIVE_DB_PATH = path.join(DATA_DIR, "live-session-db.json");
 app.use("/media", express.static(MEDIA_DIR, { maxAge: "30d", fallthrough: true }));
 const DEFAULT_TIMEZONE = "America/New_York";
 const DEFAULT_ZOOM_DURATION_MINUTES = 120;
-const NEXTGEN_CLASSROOM_OPEN_MINUTES_BEFORE = 3;
+const NEXTGEN_CLASSROOM_OPEN_MINUTES_BEFORE = 5;
 const PENDING_ZOOM_PREFIX = "PENDING_ZOOM_";
 
 
@@ -1534,6 +1534,7 @@ function normalizeLiveSessionPayload(body = {}, existing = {}) {
       existing.zoom_start_url ??
       null,
     recording_url: body.recording_url ?? existing.recording_url ?? null,
+    roadmap_day_id: body.roadmap_day_id ?? body.roadmapDayId ?? existing.roadmap_day_id ?? null,
     cancelled_reason: body.cancelled_reason ?? existing.cancelled_reason ?? null,
     archived_from_active: body.archived_from_active ?? existing.archived_from_active ?? false,
     no_class_placeholder: body.no_class_placeholder ?? existing.no_class_placeholder ?? false,
@@ -7981,9 +7982,27 @@ app.get("/admin/courses", async (req, res) => {
   try {
     await requireAdmin(req);
     const db = await readLiveDb();
-    const courses = Object.values(db.courses || {}).map(sanitizeCourse).sort(sortNewestFirst);
-    res.json({ success: true, count: courses.length, courses });
+    const includeHidden =
+      req.query.include_hidden === "true" ||
+      req.query.include_archived === "true" ||
+      req.query.debug === "true";
+
+    let courses = Object.values(db.courses || {});
+    if (!includeHidden) courses = courses.filter((course) => !ngCourseIsHiddenFromStudents(course));
+
+    courses = courses.map(sanitizeCourse).sort(sortNewestFirst);
+    res.json({ success: true, count: courses.length, courses, include_hidden: includeHidden });
   } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to load admin courses" }); }
+});
+
+app.get("/admin/courses/:courseId", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    const course = db.courses[String(req.params.courseId)] || null;
+    if (!course?.id) return res.status(404).json({ success: false, error: "Course not found" });
+    res.json({ success: true, course: sanitizeCourse(course) });
+  } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to load admin course" }); }
 });
 
 app.post("/admin/courses", async (req, res) => {
@@ -8081,28 +8100,79 @@ app.get("/admin/live-sessions", async (req, res) => {
 
     if (autoLiveSync.changed) await writeLiveDb(db);
 
-    let sessions = Object.values(db.liveSessions || {}).map(sanitizeLiveSession);
+    const includeHidden =
+      req.query.include_hidden === "true" ||
+      req.query.include_archived === "true" ||
+      req.query.debug === "true";
+
+    let sessions = Object.values(db.liveSessions || {});
     if (requestedCourseId) sessions = sessions.filter((s) => String(s.course_id) === requestedCourseId);
+    if (!includeHidden) sessions = sessions.filter((s) => !ngSessionIsInternalTestOrHidden(s));
+    sessions = sessions.map(sanitizeLiveSession);
     sessions.sort((a, b) => String(a.scheduled_date || "").localeCompare(String(b.scheduled_date || "")) || String(a.scheduled_time || "").localeCompare(String(b.scheduled_time || "")));
-    res.json({ success: true, count: sessions.length, sessions, auto_live_sync: autoLiveSync });
+    res.json({ success: true, count: sessions.length, sessions, auto_live_sync: autoLiveSync, include_hidden: includeHidden });
   } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to load admin live sessions" }); }
 });
+
+function ngNormalizeSessionTitleKey(value = "") {
+  return String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function ngFindActiveDuplicateLiveSession(db = {}, payload = {}) {
+  const courseId = String(payload.course_id || "").trim();
+  const roadmapDayId = String(payload.roadmap_day_id || payload.roadmapDayId || "").trim();
+  const scheduledDate = String(payload.scheduled_date || "").trim();
+  const scheduledTime = String(payload.scheduled_time || "").trim();
+  const titleKey = ngNormalizeSessionTitleKey(payload.title || payload.topic || "");
+
+  if (!courseId) return null;
+
+  return Object.values(db.liveSessions || {}).find((session) => {
+    if (!session?.id) return false;
+    if (String(session.course_id || "") !== courseId) return false;
+    if (ngSessionIsInternalTestOrHidden(session)) return false;
+
+    const status = String(session.status || "scheduled").toLowerCase();
+    if (["cancelled", "canceled", "archived", "hidden", "deleted", "completed"].includes(status)) return false;
+
+    if (roadmapDayId && String(session.roadmap_day_id || "") === roadmapDayId) return true;
+
+    return Boolean(
+      scheduledDate && scheduledTime && titleKey &&
+      String(session.scheduled_date || "") === scheduledDate &&
+      String(session.scheduled_time || "") === scheduledTime &&
+      ngNormalizeSessionTitleKey(session.title || session.topic || "") === titleKey
+    );
+  }) || null;
+}
 
 app.post("/admin/live-sessions", async (req, res) => {
   try {
     const { user } = await requireLmsPermission(req, "lms.live_sessions.manage");
     const db = await readLiveDb();
-    const id = uuid();
     const session = normalizeLiveSessionPayload(req.body);
+    if (!session.course_id) return res.status(400).json({ success: false, error: "course_id is required" });
+    if (!session.topic) return res.status(400).json({ success: false, error: "Session topic is required" });
+
+    const duplicate = ngFindActiveDuplicateLiveSession(db, session);
+    if (duplicate?.id) {
+      return res.json({
+        success: true,
+        duplicate_blocked: true,
+        created: false,
+        session: sanitizeLiveSession(duplicate),
+        message: "An active live session already exists for this roadmap day/date/time/title. Reused existing session instead of creating a duplicate.",
+      });
+    }
+
+    const id = uuid();
     session.id = id;
     session.created_by = user.id;
     session.created_at = new Date().toISOString();
     session.updated_at = new Date().toISOString();
-    if (!session.course_id) return res.status(400).json({ success: false, error: "course_id is required" });
-    if (!session.topic) return res.status(400).json({ success: false, error: "Session topic is required" });
     db.liveSessions[id] = session;
     await writeLiveDb(db);
-    res.json({ success: true, session: sanitizeLiveSession(session) });
+    res.json({ success: true, created: true, session: sanitizeLiveSession(session) });
   } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to create live session" }); }
 });
 
@@ -43757,7 +43827,15 @@ function ngPickRoadmapSessionCandidate(db, roadmap, day, usedSessionIds = new Se
     seen.add(session.id);
     if (usedSessionIds.has(session.id)) continue;
     if (courseId && String(session.course_id || "") !== courseId) continue;
-    if (!ngCanMoveOrReuseLiveSession(session)) continue;
+    if (ngSessionIsInternalTestOrHidden(session)) continue;
+
+    const sameRoadmapDay = String(session.roadmap_day_id || "") === String(day.id || "");
+    const sameScheduledDate = !day.date || String(session.scheduled_date || "") === String(day.date || "");
+
+    // Reuse an already-recorded session only when it is still linked to the same roadmap day/date.
+    // This prevents holiday/roadmap sync from creating an empty duplicate for a real recorded day,
+    // while still avoiding unsafe movement of old recorded sessions to a new date.
+    if (!ngCanMoveOrReuseLiveSession(session) && !(sameRoadmapDay && sameScheduledDate)) continue;
     return session;
   }
 
@@ -48555,10 +48633,343 @@ for (const [collectionKey, config] of Object.entries(AYLA_COLLECTIONS)) {
 // END AYLAMED BACKEND API FINAL V1
 // -----------------------------------------------------------------------------
 
+
+// -----------------------------------------------------------------------------
+// v179: Permanent 5-minute auto Zoom preparation guard
+// -----------------------------------------------------------------------------
+// Purpose:
+// - Automatically creates/opens Zoom exactly near class time so admins do not
+//   need emergency console scripts before every live class.
+// - Safe by default: skips hidden/test/holiday/cancelled/completed sessions.
+// - Preserves students, enrollments, payments, notes, recordings, roadmap data.
+// - Does not recreate Zoom if a real meeting already exists.
+const NEXTGEN_AUTO_ZOOM_PREP_ENABLED = String(process.env.NEXTGEN_AUTO_ZOOM_PREP_ENABLED || "true").toLowerCase() !== "false";
+const NEXTGEN_AUTO_ZOOM_PREP_MINUTES_BEFORE = Number(process.env.NEXTGEN_AUTO_ZOOM_PREP_MINUTES_BEFORE || 5) || 5;
+const NEXTGEN_AUTO_ZOOM_PREP_GRACE_MINUTES_AFTER = Number(process.env.NEXTGEN_AUTO_ZOOM_PREP_GRACE_MINUTES_AFTER || 15) || 15;
+const NEXTGEN_AUTO_ZOOM_PREP_INTERVAL_MS = Math.max(15000, Number(process.env.NEXTGEN_AUTO_ZOOM_PREP_INTERVAL_MS || 30000) || 30000);
+const NEXTGEN_AUTO_ZOOM_PREP_MAX_PER_TICK = Math.max(1, Number(process.env.NEXTGEN_AUTO_ZOOM_PREP_MAX_PER_TICK || 3) || 3);
+
+let ngAutoZoomPrepRunning = false;
+let ngAutoZoomPrepTimer = null;
+let ngAutoZoomPrepState = {
+  enabled: NEXTGEN_AUTO_ZOOM_PREP_ENABLED,
+  started_at: null,
+  last_run_at: null,
+  last_finished_at: null,
+  last_error: null,
+  last_result: null,
+  total_runs: 0,
+  total_prepared: 0,
+  total_opened: 0,
+  total_failed: 0,
+};
+
+function ngAutoZoomPrepSessionStartMs(session = {}) {
+  const start = getSessionStartUtc(session.scheduled_date, session.scheduled_time, session.scheduled_timezone || DEFAULT_TIMEZONE);
+  return start ? start.getTime() : 0;
+}
+
+function ngAutoZoomPrepShouldSkipSession(session = {}, nowMs = Date.now()) {
+  if (!session?.id) return { skip: true, reason: "missing_session" };
+  if (ngSessionIsInternalTestOrHidden(session)) return { skip: true, reason: "hidden_or_internal_or_no_class" };
+
+  const status = String(session.status || "scheduled").toLowerCase();
+  if (["cancelled", "canceled", "archived", "hidden", "deleted", "completed", "ended", "past"].includes(status)) {
+    return { skip: true, reason: `status_${status}` };
+  }
+
+  const startMs = ngAutoZoomPrepSessionStartMs(session);
+  if (!startMs) return { skip: true, reason: "invalid_date_time" };
+
+  const prepareFromMs = startMs - NEXTGEN_AUTO_ZOOM_PREP_MINUTES_BEFORE * 60 * 1000;
+  const prepareUntilMs = startMs + NEXTGEN_AUTO_ZOOM_PREP_GRACE_MINUTES_AFTER * 60 * 1000;
+
+  if (nowMs < prepareFromMs) return { skip: true, reason: "not_in_prepare_window_yet", prepare_from: new Date(prepareFromMs).toISOString() };
+  if (nowMs > prepareUntilMs) return { skip: true, reason: "prepare_window_passed", prepare_until: new Date(prepareUntilMs).toISOString() };
+
+  return { skip: false, reason: "in_prepare_window", start_at: new Date(startMs).toISOString() };
+}
+
+function ngAutoZoomPrepHasAlreadyOpened(session = {}) {
+  return Boolean(
+    hasRealZoomMeetingId(session.zoom_meeting_id) &&
+    ngManualLiveJoinUrl(session) &&
+    (session.zoom_waiting_room_disabled_at || session.auto_zoom_opened_at) &&
+    (session.join_before_host_enabled_at || session.auto_zoom_opened_at)
+  );
+}
+
+async function ngAutoZoomPrepOneSession(db, session, actorId = "auto_zoom_5min_scheduler") {
+  const now = new Date().toISOString();
+  const result = {
+    session_id: session?.id || null,
+    course_id: session?.course_id || null,
+    title: session?.title || session?.topic || null,
+    scheduled_date: session?.scheduled_date || null,
+    scheduled_time: session?.scheduled_time || null,
+    prepared: false,
+    opened: false,
+    changed: false,
+    skipped: false,
+    warning: null,
+    error: null,
+    meeting_id: session?.zoom_meeting_id || null,
+  };
+
+  if (!session?.id) {
+    result.skipped = true;
+    result.error = "missing_session";
+    return result;
+  }
+
+  if (ngAutoZoomPrepHasAlreadyOpened(session)) {
+    result.skipped = true;
+    result.meeting_id = String(session.zoom_meeting_id || "");
+    result.warning = "already_prepared_and_open";
+    return result;
+  }
+
+  try {
+    let meeting = null;
+
+    if (!hasRealZoomMeetingId(session.zoom_meeting_id)) {
+      meeting = await createZoomMeetingForLiveSession(session, session.scheduled_timezone || DEFAULT_TIMEZONE);
+      session.zoom_meeting_id = String(meeting.id);
+      session.meeting_password = meeting.password || session.meeting_password || "pending";
+      session.zoom_meeting_url = meeting.join_url || session.zoom_meeting_url || null;
+      session.zoom_start_url = meeting.start_url || session.zoom_start_url || null;
+      session.host_start_url = meeting.start_url || session.host_start_url || null;
+      session.status = session.status || "scheduled";
+      session.auto_zoom_prepared_at = now;
+      session.auto_zoom_prepared_by = actorId;
+      session.updated_by = actorId;
+      session.updated_at = now;
+
+      db.recordings[String(meeting.id)] = {
+        ...(db.recordings[String(meeting.id)] || {}),
+        meeting_id: String(meeting.id),
+        session_id: session.id,
+        course_id: session.course_id || null,
+        topic: session.topic || session.title || "Live Class",
+        published: false,
+        created_at: db.recordings[String(meeting.id)]?.created_at || now,
+        updated_at: now,
+      };
+
+      result.prepared = true;
+      result.changed = true;
+      result.meeting_id = String(meeting.id);
+    } else if (!ngManualLiveJoinUrl(session) || !session.zoom_start_url) {
+      try {
+        meeting = await getZoomMeetingDetailsForHostStart(session.zoom_meeting_id);
+        if (meeting?.join_url && !ngManualLiveJoinUrl(session)) {
+          session.zoom_meeting_url = meeting.join_url;
+          result.changed = true;
+        }
+        if (meeting?.start_url && !session.zoom_start_url) {
+          session.zoom_start_url = meeting.start_url;
+          session.host_start_url = meeting.start_url;
+          result.changed = true;
+        }
+        if (meeting?.password && !session.meeting_password) {
+          session.meeting_password = meeting.password;
+          result.changed = true;
+        }
+      } catch (refreshError) {
+        result.warning = `Could not refresh existing Zoom meeting details: ${refreshError.response?.data?.message || refreshError.message}`;
+      }
+      result.meeting_id = String(session.zoom_meeting_id || "");
+    }
+
+    if (hasRealZoomMeetingId(session.zoom_meeting_id)) {
+      try {
+        const openEntry = await ngOpenZoomMeetingEntryForStudents(session.zoom_meeting_id);
+        const openedAt = openEntry.updated_at || new Date().toISOString();
+        session.zoom_waiting_room_disabled_at = openedAt;
+        session.join_before_host_enabled_at = openedAt;
+        session.auto_zoom_opened_at = openedAt;
+        session.auto_zoom_opened_by = actorId;
+        session.updated_by = actorId;
+        session.updated_at = openedAt;
+        result.opened = true;
+        result.changed = true;
+        result.meeting_id = String(session.zoom_meeting_id || "");
+      } catch (openError) {
+        const msg = `Zoom open-entry update failed: ${openError.response?.data?.message || openError.message}`;
+        result.warning = result.warning ? `${result.warning} ${msg}` : msg;
+      }
+    }
+
+    if (result.changed) {
+      db.liveSessions[session.id] = session;
+    }
+
+    return result;
+  } catch (error) {
+    result.error = error.response?.data?.message || error.message || "auto_zoom_prepare_failed";
+    return result;
+  }
+}
+
+async function ngRunAutoZoomPrepareTick(reason = "interval") {
+  if (!NEXTGEN_AUTO_ZOOM_PREP_ENABLED) {
+    ngAutoZoomPrepState.enabled = false;
+    return { success: true, enabled: false, skipped: true, reason: "disabled" };
+  }
+
+  if (ngAutoZoomPrepRunning) {
+    return { success: true, enabled: true, skipped: true, reason: "already_running" };
+  }
+
+  ngAutoZoomPrepRunning = true;
+  const startedAt = new Date().toISOString();
+  const nowMs = Date.now();
+  const result = {
+    success: true,
+    build: NEXTGEN_BACKEND_BUILD,
+    reason,
+    started_at: startedAt,
+    checked: 0,
+    candidates: 0,
+    prepared: 0,
+    opened: 0,
+    changed: false,
+    failed: 0,
+    details: [],
+  };
+
+  try {
+    const db = await readLiveDb();
+    const sessions = Object.values(db.liveSessions || {})
+      .filter((session) => session?.id)
+      .sort((a, b) => ngAutoZoomPrepSessionStartMs(a) - ngAutoZoomPrepSessionStartMs(b));
+
+    for (const session of sessions) {
+      result.checked += 1;
+      const check = ngAutoZoomPrepShouldSkipSession(session, nowMs);
+      if (check.skip) continue;
+
+      result.candidates += 1;
+      const one = await ngAutoZoomPrepOneSession(db, session, "auto_zoom_5min_scheduler");
+      result.details.push(one);
+
+      if (one.prepared) result.prepared += 1;
+      if (one.opened) result.opened += 1;
+      if (one.changed) result.changed = true;
+      if (one.error) result.failed += 1;
+
+      if (result.details.length >= NEXTGEN_AUTO_ZOOM_PREP_MAX_PER_TICK) break;
+    }
+
+    if (result.changed) await writeLiveDb(db);
+
+    const finishedAt = new Date().toISOString();
+    result.finished_at = finishedAt;
+    ngAutoZoomPrepState = {
+      ...ngAutoZoomPrepState,
+      enabled: true,
+      last_run_at: startedAt,
+      last_finished_at: finishedAt,
+      last_error: null,
+      last_result: result,
+      total_runs: Number(ngAutoZoomPrepState.total_runs || 0) + 1,
+      total_prepared: Number(ngAutoZoomPrepState.total_prepared || 0) + result.prepared,
+      total_opened: Number(ngAutoZoomPrepState.total_opened || 0) + result.opened,
+      total_failed: Number(ngAutoZoomPrepState.total_failed || 0) + result.failed,
+    };
+
+    return result;
+  } catch (error) {
+    const failed = {
+      success: false,
+      build: NEXTGEN_BACKEND_BUILD,
+      reason,
+      started_at: startedAt,
+      finished_at: new Date().toISOString(),
+      error: error.message || "auto_zoom_prepare_tick_failed",
+    };
+    ngAutoZoomPrepState = {
+      ...ngAutoZoomPrepState,
+      enabled: true,
+      last_run_at: startedAt,
+      last_finished_at: failed.finished_at,
+      last_error: failed.error,
+      last_result: failed,
+      total_runs: Number(ngAutoZoomPrepState.total_runs || 0) + 1,
+      total_failed: Number(ngAutoZoomPrepState.total_failed || 0) + 1,
+    };
+    console.error("NextGen auto Zoom prepare tick failed:", failed.error);
+    return failed;
+  } finally {
+    ngAutoZoomPrepRunning = false;
+  }
+}
+
+function ngStartAutoZoomPrepareScheduler() {
+  if (!NEXTGEN_AUTO_ZOOM_PREP_ENABLED) {
+    console.log("NextGen auto Zoom prepare scheduler disabled by NEXTGEN_AUTO_ZOOM_PREP_ENABLED=false");
+    return null;
+  }
+
+  if (ngAutoZoomPrepTimer) return ngAutoZoomPrepTimer;
+
+  ngAutoZoomPrepState.started_at = new Date().toISOString();
+  console.log(`NextGen auto Zoom prepare scheduler enabled: ${NEXTGEN_AUTO_ZOOM_PREP_MINUTES_BEFORE} minutes before class, every ${NEXTGEN_AUTO_ZOOM_PREP_INTERVAL_MS}ms`);
+
+  ngAutoZoomPrepTimer = setInterval(() => {
+    ngRunAutoZoomPrepareTick("interval").catch((error) => {
+      console.error("NextGen auto Zoom prepare scheduler error:", error.message);
+    });
+  }, NEXTGEN_AUTO_ZOOM_PREP_INTERVAL_MS);
+
+  // Allow process to exit cleanly in local/dev tests.
+  if (typeof ngAutoZoomPrepTimer.unref === "function") ngAutoZoomPrepTimer.unref();
+
+  // Run once shortly after boot in case Render restarted inside the prepare window.
+  setTimeout(() => {
+    ngRunAutoZoomPrepareTick("startup_delayed").catch((error) => {
+      console.error("NextGen auto Zoom startup prepare error:", error.message);
+    });
+  }, 5000);
+
+  return ngAutoZoomPrepTimer;
+}
+
+app.get("/admin/live-sessions/auto-prepare-health", async (req, res) => {
+  try {
+    await requireLmsPermission(req, "lms.live_sessions.view");
+    res.json({
+      success: true,
+      build: NEXTGEN_BACKEND_BUILD,
+      config: {
+        enabled: NEXTGEN_AUTO_ZOOM_PREP_ENABLED,
+        minutes_before: NEXTGEN_AUTO_ZOOM_PREP_MINUTES_BEFORE,
+        grace_minutes_after: NEXTGEN_AUTO_ZOOM_PREP_GRACE_MINUTES_AFTER,
+        interval_ms: NEXTGEN_AUTO_ZOOM_PREP_INTERVAL_MS,
+        max_per_tick: NEXTGEN_AUTO_ZOOM_PREP_MAX_PER_TICK,
+      },
+      state: ngAutoZoomPrepState,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, build: NEXTGEN_BACKEND_BUILD, error: error.message });
+  }
+});
+
+app.post("/admin/live-sessions/auto-prepare-now", async (req, res) => {
+  try {
+    await requireLmsPermission(req, "lms.live_sessions.manage");
+    const result = await ngRunAutoZoomPrepareTick("manual_admin_trigger");
+    res.status(result.success === false ? 500 : 200).json(result);
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, build: NEXTGEN_BACKEND_BUILD, error: error.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   ngV116StartBackendHeartbeat();
   ngStartBillingExpiryRunner();
+  ngStartAutoZoomPrepareScheduler();
   console.log(`DATA_DIR=${DATA_DIR}`);
   console.log(`LIVE_DB_PATH=${LIVE_DB_PATH}`);
 });
