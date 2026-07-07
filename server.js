@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v177s-open-zoom-student-session-safety-hotfix";
+const NEXTGEN_BACKEND_BUILD = "v178-strict-notes-one-button-flashcard-scroll";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -6340,46 +6340,183 @@ function normalizeAIQuestions(inputQuestions = []) {
     .filter((question) => question.stem && question.options.length >= 5);
 }
 
+function ngSplitTranscriptForStrictNotes(sourceText, maxChars = Number(process.env.AI_NOTES_CHUNK_CHARS || 11000)) {
+  const clean = String(sourceText || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\n{4,}/g, "\n\n\n")
+    .trim();
+
+  const safeMaxChars = Math.max(4000, Math.min(25000, Number(maxChars || 11000)));
+
+  if (!clean) return [];
+  if (clean.length <= safeMaxChars) return [clean];
+
+  const lines = clean
+    .split(/\n+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  const chunks = [];
+  let current = "";
+
+  const pushCurrent = () => {
+    const trimmed = current.trim();
+    if (trimmed) chunks.push(trimmed);
+    current = "";
+  };
+
+  for (const line of lines) {
+    if (line.length > safeMaxChars) {
+      pushCurrent();
+      for (let i = 0; i < line.length; i += safeMaxChars) {
+        const piece = line.slice(i, i + safeMaxChars).trim();
+        if (piece) chunks.push(piece);
+      }
+      continue;
+    }
+
+    const next = current ? `${current}\n${line}` : line;
+
+    if (next.length > safeMaxChars && current.trim()) {
+      pushCurrent();
+      current = line;
+    } else {
+      current = next;
+    }
+  }
+
+  pushCurrent();
+  return chunks.filter(Boolean);
+}
+
+function ngStrictTranscriptNotesSystemPrompt() {
+  return `
+You are cleaning Zoom lecture transcripts for NextGen USMLE.
+
+Your task is to convert the tutor's Zoom transcript into detailed student lecture notes.
+
+CRITICAL RULES:
+- Use ONLY the provided transcript.
+- Do NOT add outside medical knowledge.
+- Do NOT add your own explanations.
+- Do NOT summarize.
+- Do NOT make a short outline.
+- Do NOT create generic conclusions unless the tutor actually gave one.
+- Preserve every distinct teaching point from the tutor.
+- Preserve mechanisms, examples, formulas, memory tricks, MCQ discussions, answer logic, and homework instructions.
+- Preserve the teaching order of the transcript.
+- Remove only Zoom noise: greetings, mic issues, repeated "okay/right/is it clear", irrelevant interruptions, and non-teaching chatter.
+- Correct obvious Zoom speech-to-text medical errors only when the intended term is clear.
+- If something is unclear in the transcript, write "Unclear in transcript" instead of guessing.
+- Do not mention student names unless the student's line is medically necessary.
+- Do not include raw timestamps.
+- Do not include speaker labels.
+- Do not write "summary".
+- Return clean lecture notes only.
+
+STYLE TARGET:
+Make the output look like detailed cleaned lecture notes:
+# Lecture Title
+## Main Topic
+### Subtopic
+Short clean paragraphs and bullets.
+
+The output should look like a cleaned transcript converted into notes, not a compressed summary.
+`.trim();
+}
+
+function ngNormalizeStrictNotesPart(text) {
+  return String(text || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/^#\s*(Clean Lecture Notes|Lecture Notes|.*?Clean Lecture Notes from Zoom Transcript).*?\n+/i, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function ngEnsureStrictNotesTitle(notes, metadata = {}) {
+  const text = String(notes || "").trim();
+  if (!text) return "";
+  if (/^#\s+/.test(text)) return text;
+
+  const topicTitle = String(metadata?.topic || metadata?.title || "").trim();
+  const finalTitle = topicTitle
+    ? `# ${topicTitle} — Clean Lecture Notes from Zoom Transcript`
+    : "# Clean Lecture Notes from Zoom Transcript";
+
+  return `${finalTitle}\n\n${text}`.trim();
+}
+
 async function cleanNotesWithAI({ sourceText, sourceType, metadata = {} }) {
   const cleanText = validateAISourceText(sourceText);
 
-  const systemPrompt = `
-You are cleaning lecture/session notes for NextGen USMLE.
-
-Rules:
-- Preserve the original meaning.
-- Do not add new medical facts.
-- Do not invent information.
-- Do not expand beyond the provided source.
-- Organize into clear headings and bullet points.
-- Correct grammar and formatting.
-- If content is unclear, label it as unclear instead of guessing.
-- Return clean notes only, not JSON.
-`.trim();
-
-  const userPrompt = `
-Source type: ${sourceType || "custom_text"}
-Metadata: ${JSON.stringify(metadata || {})}
-
-Clean and organize the following notes:
-
-${cleanText}
-`.trim();
-
   const model = getAICleanupModel();
+  const maxOutputTokens = Math.max(4000, Math.min(30000, Number(process.env.AI_NOTES_MAX_OUTPUT_TOKENS || 14000)));
+  const chunks = ngSplitTranscriptForStrictNotes(cleanText);
 
-  const result = await callOpenAIResponsesAPI({
-    model,
-    systemPrompt,
-    userPrompt,
-    maxOutputTokens: 5000,
-    jsonMode: false,
-  });
+  if (!chunks.length) {
+    const error = new Error("Transcript text is required");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const systemPrompt = ngStrictTranscriptNotesSystemPrompt();
+  const generatedParts = [];
+
+  for (let index = 0; index < chunks.length; index += 1) {
+    const partNumber = index + 1;
+    const totalParts = chunks.length;
+
+    const userPrompt = `
+Source type: ${sourceType || "zoom_transcript"}
+Metadata: ${JSON.stringify(metadata || {})}
+Transcript part: ${partNumber} of ${totalParts}
+
+Convert this transcript part into detailed transcript-only lecture notes.
+
+Important:
+- Do not summarize.
+- Do not add outside explanation.
+- Preserve every tutor teaching point in this part.
+- Keep the same teaching order.
+- If this part contains MCQ discussion, preserve the question logic and answer reasoning.
+- If this part contains homework, preserve it.
+- If this is not the first part, continue naturally without restarting the whole lecture.
+
+TRANSCRIPT PART:
+${chunks[index]}
+`.trim();
+
+    const result = await callOpenAIResponsesAPI({
+      model,
+      systemPrompt,
+      userPrompt,
+      maxOutputTokens,
+      jsonMode: false,
+    });
+
+    const text = ngNormalizeStrictNotesPart(result.text);
+
+    if (text) {
+      generatedParts.push({
+        text,
+        usage: result.usage,
+        model: result.raw_model || model,
+      });
+    }
+  }
+
+  const cleanedNotes = ngEnsureStrictNotesTitle(
+    generatedParts.map((part) => part.text).filter(Boolean).join("\n\n---\n\n"),
+    metadata
+  );
 
   return {
-    cleaned_notes: result.text,
-    usage: result.usage,
-    model: result.raw_model || model,
+    cleaned_notes: cleanedNotes.trim(),
+    usage: {
+      parts: generatedParts.map((part) => part.usage || {}),
+      part_count: generatedParts.length,
+    },
+    model: generatedParts[0]?.model || model,
   };
 }
 
@@ -6520,6 +6657,290 @@ app.post("/admin/ai/clean-notes", async (req, res) => {
     res.status(error.statusCode || 500).json({
       success: false,
       error: error.message || "Failed to clean notes with AI",
+    });
+  }
+});
+
+
+async function ngTryImportZoomTranscriptForSession(db, { session = null, existingNote = {}, matchingRecording = null }) {
+  const meetingId = String(
+    session?.zoom_meeting_id ||
+    session?.meeting_id ||
+    existingNote?.meeting_id ||
+    matchingRecording?.meeting_id ||
+    ""
+  ).trim();
+
+  if (!meetingId) {
+    return {
+      transcriptText: "",
+      transcriptRaw: "",
+      recordingPayload: matchingRecording || null,
+      transcriptImportError: "No Zoom meeting id found for this session",
+    };
+  }
+
+  try {
+    const { recording, accessToken } = await fetchZoomRecordingByMeetingId(meetingId);
+    const files = recording?.recording_files || [];
+    const transcriptFile = findTranscriptFile(files);
+    const videoFile = findVideoFile(files);
+
+    if (!transcriptFile) {
+      return {
+        transcriptText: "",
+        transcriptRaw: "",
+        recordingPayload: matchingRecording || null,
+        transcriptImportError: "Zoom recording found, but transcript file is not ready yet",
+      };
+    }
+
+    const transcriptRaw = await downloadZoomTextFile(transcriptFile, accessToken);
+    const transcriptText = stripVttToText(transcriptRaw);
+
+    const recordingUrl = videoFile?.play_url || recording?.share_url || videoFile?.download_url || matchingRecording?.recording_url || null;
+    const recordingKey = buildRecordingStorageKey({
+      meeting_id: meetingId,
+      uuid: recording?.uuid,
+      start_time: recording?.start_time,
+      file_id: videoFile?.id,
+      recording_type: videoFile?.recording_type,
+      file_type: videoFile?.file_type,
+      recording_url: recordingUrl,
+    }) || String(matchingRecording?.recording_key || matchingRecording?.id || meetingId);
+
+    const previous = db.recordings?.[recordingKey] || db.recordings?.[meetingId] || matchingRecording || {};
+    const now = new Date().toISOString();
+
+    const recordingPayload = {
+      ...previous,
+      id: recordingKey,
+      recording_key: recordingKey,
+      meeting_id: meetingId,
+      uuid: recording?.uuid || previous.uuid || null,
+      topic: recording?.topic || previous.topic || session?.topic || session?.title || null,
+      start_time: recording?.start_time || previous.start_time || null,
+      duration: recording?.duration || previous.duration || null,
+      share_url: recording?.share_url || previous.share_url || null,
+      recording_url: recordingUrl,
+      download_url: videoFile?.download_url || previous.download_url || null,
+      transcript_url: transcriptFile?.play_url || transcriptFile?.download_url || previous.transcript_url || null,
+      transcript_download_url: transcriptFile?.download_url || previous.transcript_download_url || null,
+      transcript_imported: Boolean(transcriptText),
+      transcript_import_error: transcriptText ? null : "Zoom transcript downloaded but text was empty",
+      file_type: videoFile?.file_type || previous.file_type || null,
+      recording_type: videoFile?.recording_type || previous.recording_type || null,
+      status: videoFile?.status || previous.status || "completed",
+      published: Boolean(previous.published),
+      received_at: previous.received_at || now,
+      updated_at: now,
+    };
+
+    db.recordings = db.recordings || {};
+    db.recordings[recordingKey] = recordingPayload;
+
+    return {
+      transcriptText,
+      transcriptRaw,
+      recordingPayload,
+      transcriptImportError: transcriptText ? null : "Zoom transcript downloaded but text was empty",
+    };
+  } catch (error) {
+    return {
+      transcriptText: "",
+      transcriptRaw: "",
+      recordingPayload: matchingRecording || null,
+      transcriptImportError: error.response?.data || error.message || "Zoom transcript import failed",
+    };
+  }
+}
+
+app.post("/admin/live-sessions/:sessionId/generate-clean-notes", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.notes.manage");
+
+    if (!isAIConfigured()) {
+      return res.status(500).json({
+        success: false,
+        error: getAIConfigError(),
+      });
+    }
+
+    const sessionId = String(req.params.sessionId || req.body.session_id || "").trim();
+
+    if (!sessionId) {
+      return res.status(400).json({
+        success: false,
+        error: "sessionId is required",
+      });
+    }
+
+    const db = await readLiveDb();
+
+    db.notes = db.notes || {};
+    db.recordings = db.recordings || {};
+
+    const session = db.liveSessions?.[sessionId] || null;
+    const existingNote = db.notes?.[sessionId] || {};
+
+    if (!session && !existingNote?.session_id) {
+      return res.status(404).json({
+        success: false,
+        error: "Session not found",
+      });
+    }
+
+    let matchingRecording =
+      Object.values(db.recordings || {}).find((recording) => {
+        const recordingSessionId = String(recording?.session_id || recording?.mapped_session_id || "").trim();
+        const recordingMeetingId = String(recording?.meeting_id || "").trim();
+        const sessionMeetingId = String(session?.zoom_meeting_id || session?.meeting_id || existingNote?.meeting_id || "").trim();
+
+        return (
+          recordingSessionId === sessionId ||
+          (recordingMeetingId && sessionMeetingId && recordingMeetingId === sessionMeetingId)
+        );
+      }) || null;
+
+    const pastedTranscript = String(
+      req.body.transcript_text ||
+      req.body.transcript ||
+      req.body.source_text ||
+      ""
+    ).trim();
+
+    let zoomImport = null;
+
+    if (!pastedTranscript && !String(existingNote.transcript_text || existingNote.transcript_raw_vtt || matchingRecording?.transcript_text || matchingRecording?.transcript_raw_vtt || "").trim()) {
+      zoomImport = await ngTryImportZoomTranscriptForSession(db, {
+        session,
+        existingNote,
+        matchingRecording,
+      });
+
+      if (zoomImport?.recordingPayload) {
+        matchingRecording = zoomImport.recordingPayload;
+      }
+    }
+
+    const sourceText = String(
+      pastedTranscript ||
+      existingNote.transcript_text ||
+      existingNote.transcript_raw_vtt ||
+      existingNote.transcript ||
+      existingNote.raw_transcript ||
+      matchingRecording?.transcript_text ||
+      matchingRecording?.transcript_raw_vtt ||
+      zoomImport?.transcriptText ||
+      zoomImport?.transcriptRaw ||
+      ""
+    ).trim();
+
+    if (sourceText.length < 300) {
+      return res.status(400).json({
+        success: false,
+        transcript_required: true,
+        error: "Transcript not found for this session. Paste the Zoom transcript and click Generate again.",
+        session_id: sessionId,
+        has_note: Boolean(existingNote && Object.keys(existingNote).length),
+        has_recording: Boolean(matchingRecording),
+        zoom_import_error: zoomImport?.transcriptImportError || null,
+        transcript_url:
+          existingNote.transcript_url ||
+          matchingRecording?.transcript_url ||
+          matchingRecording?.transcript_download_url ||
+          null,
+      });
+    }
+
+    const cleaned = await cleanNotesWithAI({
+      sourceText,
+      sourceType: "zoom_transcript",
+      metadata: {
+        session_id: sessionId,
+        course_id: session?.course_id || existingNote.course_id || req.body.course_id || null,
+        topic: session?.topic || session?.title || existingNote.topic || "",
+      },
+    });
+
+    const cleanedNotes = String(cleaned.cleaned_notes || "").trim();
+
+    if (cleanedNotes.length < 300) {
+      return res.status(500).json({
+        success: false,
+        error: "AI returned notes that were too short. Please retry.",
+      });
+    }
+
+    const now = new Date().toISOString();
+    const publish = req.body.publish === false ? false : true;
+
+    db.notes[sessionId] = {
+      ...existingNote,
+
+      session_id: sessionId,
+      course_id: session?.course_id || existingNote.course_id || req.body.course_id || null,
+
+      transcript_text: stripVttToText(sourceText) || sourceText,
+      transcript_raw_vtt: existingNote.transcript_raw_vtt || zoomImport?.transcriptRaw || "",
+      transcript_url: existingNote.transcript_url || matchingRecording?.transcript_url || null,
+      transcript_download_url: existingNote.transcript_download_url || matchingRecording?.transcript_download_url || null,
+      recording_url: existingNote.recording_url || matchingRecording?.recording_url || null,
+      meeting_id: existingNote.meeting_id || session?.zoom_meeting_id || session?.meeting_id || matchingRecording?.meeting_id || null,
+
+      notes: cleanedNotes,
+      cleaned_notes: cleanedNotes,
+      student_notes: cleanedNotes,
+
+      source: pastedTranscript ? "admin_pasted_zoom_transcript_ai" : "admin_one_button_zoom_transcript_ai",
+      clean_notes_style: "strict_transcript_only_detailed",
+      auto_imported: existingNote.auto_imported === true || Boolean(zoomImport?.transcriptText || existingNote.transcript_text),
+      is_published: publish,
+      status: publish ? "published" : "draft",
+
+      content_processing_status: "completed",
+      content_processing_error: null,
+      content_processing_completed_at: now,
+
+      ai_model: cleaned.model || null,
+      ai_usage: cleaned.usage || null,
+
+      created_at: existingNote.created_at || now,
+      updated_at: now,
+      updated_by: user?.id || "admin",
+    };
+
+    if (matchingRecording?.id || matchingRecording?.recording_key) {
+      const recordingKey = matchingRecording.id || matchingRecording.recording_key;
+
+      db.recordings[recordingKey] = {
+        ...matchingRecording,
+        session_id: sessionId,
+        course_id: session?.course_id || existingNote.course_id || matchingRecording.course_id || null,
+        learning_content_processed: true,
+        learning_content_processed_at: now,
+        transcript_imported: true,
+        updated_at: now,
+      };
+    }
+
+    await writeLiveDb(db);
+
+    return res.json({
+      success: true,
+      session_id: sessionId,
+      published: publish,
+      notes: db.notes[sessionId],
+      cleaned_notes: cleanedNotes,
+      message: publish
+        ? "Clean lecture notes generated and published."
+        : "Clean lecture notes generated as draft.",
+    });
+  } catch (error) {
+    console.error("Generate clean lecture notes error:", error);
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to generate clean lecture notes",
     });
   }
 });
