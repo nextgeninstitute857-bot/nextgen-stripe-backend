@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v183-readonly-streak-milestone";
+const NEXTGEN_BACKEND_BUILD = "v184-safe-streak-bonus";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -3245,6 +3245,7 @@ function ngTaskLabel(key) {
     assessment_high_score_bonus: "Assessment score bonus",
     assessment_score_bonus: "Assessment score bonus",
     daily_streak_bonus: "Daily streak bonus",
+    streak_milestone_bonus: "Study streak milestone bonus",
   };
   return labels[key] || key;
 }
@@ -4081,6 +4082,7 @@ function ngComputeStudentStudyStreak(db = {}, { courseId = "", userId = "" } = {
   for (const event of Object.values(db.pointEvents || {})) {
     if (String(event?.course_id || "") !== cleanCourseId) continue;
     if (String(event?.user_id || "") !== cleanUserId) continue;
+    if (ngIsStreakBonusPointEvent(event)) continue;
     if (Number(event.points || 0) <= 0) continue;
     addDate(event.awarded_at || event.created_at || event.updated_at);
   }
@@ -4124,6 +4126,143 @@ function ngComputeStudentStudyStreak(db = {}, { courseId = "", userId = "" } = {
 }
 
 const NEXTGEN_STREAK_MILESTONES = [3, 7, 14, 30, 60, 90, 120];
+
+// v184: Safe streak milestone bonuses. This does not backfill old points and does not recalculate old leaderboard totals.
+// A bonus is only created from live forward when a real student action creates the first study activity for that date.
+const NEXTGEN_STREAK_BONUS_POINTS = {
+  3: 10,
+  7: 25,
+  14: 50,
+  30: 100,
+  60: 150,
+  90: 200,
+  120: 300,
+};
+
+function ngStreakMilestoneEventKey({ courseId = "", userId = "", milestone = "" } = {}) {
+  const cleanCourseId = String(courseId || "").trim();
+  const cleanUserId = String(userId || "").trim();
+  const cleanMilestone = String(milestone || "").trim();
+  if (!cleanCourseId || !cleanUserId || !cleanMilestone) return "";
+  return `${cleanCourseId}:${cleanUserId}:streak_milestone:${cleanMilestone}`;
+}
+
+function ngIsStreakBonusPointEvent(event = {}) {
+  const category = String(event?.category || "").toLowerCase();
+  const taskKey = String(event?.task_key || "").toLowerCase();
+  return category === "streak_bonus" || taskKey.startsWith("streak_milestone_") || taskKey === "streak_milestone_bonus";
+}
+
+function ngStudentHadStudyActivityOnDate(db = {}, { courseId = "", userId = "", dateKey = todayKey() } = {}) {
+  const cleanCourseId = String(courseId || "").trim();
+  const cleanUserId = String(userId || "").trim();
+  const cleanDateKey = ngDateKeyFromAny(dateKey);
+  if (!cleanCourseId || !cleanUserId || !cleanDateKey) return false;
+
+  for (const item of Object.values(db.dailyTaskProgress || {})) {
+    if (String(item?.course_id || "") !== cleanCourseId) continue;
+    if (String(item?.user_id || "") !== cleanUserId) continue;
+    const itemDate = ngDateKeyFromAny(item.date || item.completed_at || item.updated_at || item.created_at);
+    if (itemDate !== cleanDateKey) continue;
+    const hasCompletedTask = Object.values(item.tasks || {}).some((task) => task?.completed === true);
+    if (item.completed === true || Number(item.completed_task_count || 0) > 0 || hasCompletedTask) return true;
+  }
+
+  for (const item of Object.values(db.roadmapProgress || {})) {
+    if (String(item?.course_id || "") !== cleanCourseId) continue;
+    if (String(item?.user_id || "") !== cleanUserId) continue;
+    if (item.completed !== true) continue;
+    const itemDate = ngDateKeyFromAny(item.completed_at || item.updated_at || item.created_at);
+    if (itemDate === cleanDateKey) return true;
+  }
+
+  for (const item of Object.values(db.attendance || {})) {
+    if (String(item?.course_id || "") !== cleanCourseId) continue;
+    if (String(item?.user_id || "") !== cleanUserId) continue;
+    const itemDate = ngDateKeyFromAny(item.date || item.marked_at || item.created_at || item.updated_at);
+    if (itemDate === cleanDateKey) return true;
+  }
+
+  for (const event of Object.values(db.pointEvents || {})) {
+    if (ngIsStreakBonusPointEvent(event)) continue;
+    if (String(event?.course_id || "") !== cleanCourseId) continue;
+    if (String(event?.user_id || "") !== cleanUserId) continue;
+    if (Number(event.points || 0) <= 0) continue;
+    const itemDate = ngDateKeyFromAny(event.awarded_at || event.created_at || event.updated_at);
+    if (itemDate === cleanDateKey) return true;
+  }
+
+  return false;
+}
+
+function ngMaybeAwardStreakMilestoneBonus(db = {}, { courseId = "", userId = "", userName = "Student", hadStudyActivityTodayBefore = true, source = "", metadata = {} } = {}) {
+  const cleanCourseId = String(courseId || "").trim();
+  const cleanUserId = String(userId || "").trim();
+
+  if (!cleanCourseId || !cleanUserId) {
+    return { awarded: false, reason: "missing_course_or_user", event: null, streak: null, leaderboard: null };
+  }
+
+  // Production safety: never backfill. Only the first real activity on a date can collect a milestone bonus.
+  if (hadStudyActivityTodayBefore === true) {
+    const streak = ngComputeStudentStudyStreakWithFreeze(db, { courseId: cleanCourseId, userId: cleanUserId });
+    return { awarded: false, reason: "not_first_study_activity_today", event: null, streak, leaderboard: db.leaderboard?.[courseUserKey(cleanCourseId, cleanUserId)] || null };
+  }
+
+  const streak = ngComputeStudentStudyStreakWithFreeze(db, { courseId: cleanCourseId, userId: cleanUserId });
+  const milestone = Number(streak?.streak_milestone?.current_milestone || 0);
+
+  if (!NEXTGEN_STREAK_MILESTONES.includes(milestone)) {
+    return { awarded: false, reason: "not_a_milestone_day", event: null, streak, leaderboard: db.leaderboard?.[courseUserKey(cleanCourseId, cleanUserId)] || null };
+  }
+
+  const points = Number(NEXTGEN_STREAK_BONUS_POINTS[milestone] || 0);
+  if (points <= 0) {
+    return { awarded: false, reason: "milestone_has_no_bonus_points", event: null, streak, leaderboard: db.leaderboard?.[courseUserKey(cleanCourseId, cleanUserId)] || null };
+  }
+
+  const eventKey = ngStreakMilestoneEventKey({ courseId: cleanCourseId, userId: cleanUserId, milestone });
+  const awardResult = ngAwardPointEventOnce(db, {
+    eventKey,
+    courseId: cleanCourseId,
+    userId: cleanUserId,
+    userName,
+    taskKey: `streak_milestone_${milestone}`,
+    category: "streak_bonus",
+    label: `${milestone}-day study streak bonus`,
+    points,
+    metadata: {
+      milestone,
+      streak_days: streak.study_streak,
+      source: source || "student_study_activity",
+      point_rule: "once_per_streak_milestone_no_backfill",
+      no_retroactive_backfill: true,
+      ...(metadata || {}),
+    },
+  });
+
+  const leaderboard = updateLeaderboard(db, {
+    courseId: cleanCourseId,
+    userId: cleanUserId,
+    userName,
+  });
+
+  const refreshedStreak = ngComputeStudentStudyStreakWithFreeze(db, { courseId: cleanCourseId, userId: cleanUserId });
+  refreshedStreak.streak_milestone = ngBuildStreakMilestoneMeta(refreshedStreak, {
+    db,
+    courseId: cleanCourseId,
+    userId: cleanUserId,
+    awardResult,
+  });
+
+  return {
+    ...awardResult,
+    milestone,
+    bonus_points: points,
+    streak: refreshedStreak,
+    leaderboard,
+  };
+}
 
 function ngIsSundayDateKey(dateKey = "") {
   const clean = ngDateKeyFromAny(dateKey);
@@ -4198,6 +4337,7 @@ function ngComputeStudentStudyStreakWithFreeze(db = {}, { courseId = "", userId 
   for (const event of Object.values(db.pointEvents || {})) {
     if (String(event?.course_id || "") !== cleanCourseId) continue;
     if (String(event?.user_id || "") !== cleanUserId) continue;
+    if (ngIsStreakBonusPointEvent(event)) continue;
     if (Number(event.points || 0) <= 0) continue;
     addDate(event.awarded_at || event.created_at || event.updated_at);
   }
@@ -4265,21 +4405,29 @@ function ngComputeStudentStudyStreakWithFreeze(db = {}, { courseId = "", userId 
     last_activity_date: sorted[sorted.length - 1] || null,
   };
 
-  result.streak_milestone = ngBuildStreakMilestoneMeta(result);
+  result.streak_milestone = ngBuildStreakMilestoneMeta(result, { db, courseId: cleanCourseId, userId: cleanUserId });
   return result;
 }
 
-function ngBuildStreakMilestoneMeta(streak = {}) {
+function ngBuildStreakMilestoneMeta(streak = {}, { db = null, courseId = "", userId = "", awardResult = null } = {}) {
   const current = Math.max(0, Number(streak.study_streak || streak.streak_days || 0));
   const previousMilestone = [...NEXTGEN_STREAK_MILESTONES].reverse().find((item) => item <= current) || null;
   const currentMilestone = NEXTGEN_STREAK_MILESTONES.includes(current) ? current : null;
   const nextMilestone = NEXTGEN_STREAK_MILESTONES.find((item) => item > current) || null;
+  const bonusPoints = currentMilestone ? Number(NEXTGEN_STREAK_BONUS_POINTS[currentMilestone] || 0) : 0;
+  const eventKey = currentMilestone ? ngStreakMilestoneEventKey({ courseId, userId, milestone: currentMilestone }) : "";
+  const existingEvent = eventKey && db?.pointEvents ? db.pointEvents[eventKey] || null : null;
+  const awardedNow = awardResult?.awarded === true;
+  const bonusAwarded = awardedNow || Boolean(existingEvent);
 
   return {
     enabled: true,
-    read_only: true,
-    points_unchanged: true,
+    read_only: false,
+    points_unchanged: false,
+    no_retroactive_backfill: true,
+    once_per_milestone: true,
     milestones: NEXTGEN_STREAK_MILESTONES,
+    bonus_points_by_milestone: NEXTGEN_STREAK_BONUS_POINTS,
     current_streak: current,
     is_milestone_today: Boolean(currentMilestone),
     current_milestone: currentMilestone,
@@ -4287,10 +4435,13 @@ function ngBuildStreakMilestoneMeta(streak = {}) {
     next_milestone: nextMilestone,
     days_to_next_milestone: nextMilestone ? Math.max(0, nextMilestone - current) : null,
     label: currentMilestone ? `${currentMilestone}-day streak milestone` : nextMilestone ? `${Math.max(0, nextMilestone - current)} day(s) to ${nextMilestone}-day streak` : "Maximum streak milestone reached",
-    // This is only the existing configured value for display/context. No streak point event is created here.
-    configured_bonus_points: Number(NEXTGEN_TASK_POINTS.daily_streak_bonus || 0),
-    awarded_now: false,
-    award_mode: "display_only_no_point_mutation",
+    bonus_points: bonusPoints,
+    configured_bonus_points: bonusPoints,
+    event_key: eventKey || null,
+    bonus_awarded: bonusAwarded,
+    awarded_now: awardedNow,
+    award_reason: awardResult?.reason || (bonusAwarded ? "already_awarded" : "not_awarded"),
+    award_mode: "future_first_activity_once_per_milestone",
   };
 }
 function ngNormalizeLeaderboardIdentity(value = "") {
@@ -4463,6 +4614,12 @@ function ngRecordVideoLibraryOpenForStudent(db, { user, courseId, roadmapDayId =
     };
   }
 
+  const hadStudyActivityTodayBefore = ngStudentHadStudyActivityOnDate(db, {
+    courseId: cleanCourseId,
+    userId: user.id,
+    dateKey: todayKey(),
+  });
+
   const day = roadmapDayId
     ? ngFindRoadmapDay(db, { courseId: cleanCourseId, dayId: roadmapDayId })
     : ngFindRoadmapDay(db, { courseId: cleanCourseId });
@@ -4511,7 +4668,16 @@ function ngRecordVideoLibraryOpenForStudent(db, { user, courseId, roadmapDayId =
     });
   }
 
-  const leaderboard = updateLeaderboard(db, {
+  const streak_bonus = ngMaybeAwardStreakMilestoneBonus(db, {
+    courseId: cleanCourseId,
+    userId: user.id,
+    userName: user.name || user.email || "Student",
+    hadStudyActivityTodayBefore,
+    source: "video_library_watch",
+    metadata: { roadmap_day_id: day?.id || null },
+  });
+
+  const leaderboard = streak_bonus?.leaderboard || updateLeaderboard(db, {
     courseId: cleanCourseId,
     userId: user.id,
     userName: user.name || user.email || "Student",
@@ -4524,6 +4690,7 @@ function ngRecordVideoLibraryOpenForStudent(db, { user, courseId, roadmapDayId =
     roadmap_day_id: day?.id || null,
     awarded: awardResult.awarded === true,
     point_event: awardResult.event || null,
+    streak_bonus,
     leaderboard,
   };
 }
@@ -11051,6 +11218,10 @@ app.post("/live/attendance/mark", async (req, res) => {
       });
     }
 
+    const hadStudyActivityTodayBefore = user.role === "student"
+      ? ngStudentHadStudyActivityOnDate(db, { courseId: course_id, userId: user.id, dateKey: todayKey() })
+      : true;
+
     const key = `${user.id}:${session_id}`;
     const existed = Boolean(db.attendance?.[key]);
     db.attendance[key] = {
@@ -11065,9 +11236,20 @@ app.post("/live/attendance/mark", async (req, res) => {
       marked_at: db.attendance?.[key]?.marked_at || new Date().toISOString(),
       last_opened_at: new Date().toISOString(),
     };
-    const leaderboard = updateLeaderboard(db, { courseId: course_id, userId: user.id, userName: user.name || user.email || "Student" });
+    const streak_bonus = user.role === "student" && !existed
+      ? ngMaybeAwardStreakMilestoneBonus(db, {
+          courseId: course_id,
+          userId: user.id,
+          userName: user.name || user.email || "Student",
+          hadStudyActivityTodayBefore,
+          source: "live_attendance",
+          metadata: { session_id, attendance_key: key },
+        })
+      : { awarded: false, reason: existed ? "attendance_already_marked" : "staff_or_not_applicable" };
+
+    const leaderboard = streak_bonus?.leaderboard || updateLeaderboard(db, { courseId: course_id, userId: user.id, userName: user.name || user.email || "Student" });
     await writeLiveDb(db);
-    res.json({ success: true, attendance: db.attendance[key], attendance_already_marked: existed, points_awarded_now: !existed, leaderboard });
+    res.json({ success: true, attendance: db.attendance[key], attendance_already_marked: existed, points_awarded_now: !existed, streak_bonus, leaderboard });
   } catch (e) {
     res.status(e.statusCode || 500).json({ success: false, error: e.message });
   }
@@ -11190,7 +11372,13 @@ app.post("/live/community/:sessionId", async (req, res) => {
       created_at: new Date().toISOString(),
     };
 
+    const hadStudyActivityTodayBefore = user.role === "student" && courseId
+      ? ngStudentHadStudyActivityOnDate(db, { courseId, userId: user.id, dateKey: todayKey() })
+      : true;
+
     db.communityMessages[req.params.sessionId] = [...(db.communityMessages[req.params.sessionId] || []), item];
+
+    let streak_bonus = { awarded: false, reason: "not_applicable" };
 
     if (courseId && session?.roadmap_day_id) {
       const day = ngFindRoadmapDay(db, { courseId, dayId: session.roadmap_day_id });
@@ -11205,11 +11393,22 @@ app.post("/live/community/:sessionId", async (req, res) => {
           metadata: { community_message_id: item.id, session_id: req.params.sessionId },
         });
       }
-      updateLeaderboard(db, { courseId, userId: user.id, userName: user.name || user.email || "Student" });
+      streak_bonus = user.role === "student"
+        ? ngMaybeAwardStreakMilestoneBonus(db, {
+            courseId,
+            userId: user.id,
+            userName: user.name || user.email || "Student",
+            hadStudyActivityTodayBefore,
+            source: "community_confusion_post",
+            metadata: { session_id: req.params.sessionId, community_message_id: item.id },
+          })
+        : { awarded: false, reason: "staff_or_not_applicable" };
+
+      if (!streak_bonus?.leaderboard) updateLeaderboard(db, { courseId, userId: user.id, userName: user.name || user.email || "Student" });
     }
 
     await writeLiveDb(db);
-    res.json({ success: true, message: item, leaderboard: courseId ? db.leaderboard?.[courseUserKey(courseId, user.id)] || null : null });
+    res.json({ success: true, message: item, streak_bonus, leaderboard: courseId ? db.leaderboard?.[courseUserKey(courseId, user.id)] || null : null });
   } catch (e) {
     res.status(e.statusCode || 500).json({ success: false, error: e.message });
   }
@@ -11344,10 +11543,24 @@ app.post("/student/daily-task/:dayId/task", async (req, res) => {
       }
     }
 
+    const hadStudyActivityTodayBefore = user.role === "student" && req.body.completed !== false
+      ? ngStudentHadStudyActivityOnDate(db, { courseId, userId: user.id, dateKey: todayKey() })
+      : true;
+
     const progress = ngUpsertTaskCompletion(db, { courseId, userId: user.id, userName: user.name || user.email || "Student", day, taskKey, completed: req.body.completed !== false, metadata: req.body.metadata || {} });
-    const leaderboard = updateLeaderboard(db, { courseId, userId: user.id, userName: user.name || user.email || "Student" });
+    const streak_bonus = user.role === "student" && req.body.completed !== false
+      ? ngMaybeAwardStreakMilestoneBonus(db, {
+          courseId,
+          userId: user.id,
+          userName: user.name || user.email || "Student",
+          hadStudyActivityTodayBefore,
+          source: `daily_task:${taskKey}`,
+          metadata: { roadmap_day_id: day.id, task_key: taskKey },
+        })
+      : { awarded: false, reason: "not_completed_or_staff" };
+    const leaderboard = streak_bonus?.leaderboard || updateLeaderboard(db, { courseId, userId: user.id, userName: user.name || user.email || "Student" });
     await writeLiveDb(db);
-    res.json({ success: true, progress, packet: ngSanitizeDailyTaskPacket(db, { courseId, userId: user.id, day }), summary: buildProgressSummary({ db, courseId, userId: user.id }), leaderboard });
+    res.json({ success: true, progress, packet: ngSanitizeDailyTaskPacket(db, { courseId, userId: user.id, day }), summary: buildProgressSummary({ db, courseId, userId: user.id }), streak_bonus, leaderboard });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
@@ -11361,6 +11574,10 @@ app.post("/student/daily-task/:dayId/weak-concept", async (req, res) => {
     if (!day) return res.status(404).json({ success: false, error: "Roadmap day not found" });
     const enrollment = getBackendEnrollment(db, { userId: user.id, courseId });
     if (!enrollment && user.role !== "admin" && user.role !== "instructor") return res.status(403).json({ success: false, error: "No course access found" });
+    const hadStudyActivityTodayBefore = user.role === "student"
+      ? ngStudentHadStudyActivityOnDate(db, { courseId, userId: user.id, dateKey: todayKey() })
+      : true;
+
     db.weakConceptLogs = db.weakConceptLogs || {};
     const id = uuid();
     db.weakConceptLogs[id] = {
@@ -11381,9 +11598,19 @@ app.post("/student/daily-task/:dayId/weak-concept", async (req, res) => {
       updated_at: new Date().toISOString(),
     };
     const progress = ngUpsertTaskCompletion(db, { courseId, userId: user.id, userName: user.name || user.email || "Student", day, taskKey: "weak_concepts_logged", completed: true, metadata: { weak_concept_log_id: id } });
-    const leaderboard = updateLeaderboard(db, { courseId, userId: user.id, userName: user.name || user.email || "Student" });
+    const streak_bonus = user.role === "student"
+      ? ngMaybeAwardStreakMilestoneBonus(db, {
+          courseId,
+          userId: user.id,
+          userName: user.name || user.email || "Student",
+          hadStudyActivityTodayBefore,
+          source: "weak_concepts_logged",
+          metadata: { roadmap_day_id: day.id, weak_concept_log_id: id },
+        })
+      : { awarded: false, reason: "staff_or_not_applicable" };
+    const leaderboard = streak_bonus?.leaderboard || updateLeaderboard(db, { courseId, userId: user.id, userName: user.name || user.email || "Student" });
     await writeLiveDb(db);
-    res.json({ success: true, weak_concept: db.weakConceptLogs[id], progress, leaderboard });
+    res.json({ success: true, weak_concept: db.weakConceptLogs[id], progress, streak_bonus, leaderboard });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
@@ -13220,7 +13447,7 @@ app.get("/student/dashboard/bootstrap", async (req, res) => {
 
     res.json({
       success: true,
-      source: "student_dashboard_bootstrap_v158",
+      source: "student_dashboard_bootstrap_v184",
       user: sanitizeUser(user),
       feature_access: featureAccess,
       features: featureAccess,
