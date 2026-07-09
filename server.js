@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v180-auto-zoom-plus-duplicate-guards";
+const NEXTGEN_BACKEND_BUILD = "v181-admin-paid-plan-guard";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -691,6 +691,66 @@ function getPlanAccessDays(plan) {
 
   const days = Number(plan.access_days);
   return Number.isFinite(days) && days > 0 ? days : 30;
+}
+
+function ngResolveAdminPaidPlan(db = {}, { courseId = "", requestedPlanId = "" } = {}) {
+  const cleanCourseId = String(courseId || "").trim();
+  const cleanRequestedPlanId = String(requestedPlanId || "").trim();
+
+  if (cleanRequestedPlanId) {
+    const requestedPlan = db.plans?.[cleanRequestedPlanId] || null;
+
+    if (!requestedPlan) {
+      const error = new Error("Selected paid plan was not found.");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    if (requestedPlan.is_active === false) {
+      const error = new Error("Selected paid plan is inactive.");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    if (requestedPlan.course_id && cleanCourseId && String(requestedPlan.course_id) !== cleanCourseId) {
+      const error = new Error("Selected paid plan does not belong to this course.");
+      error.statusCode = 400;
+      throw error;
+    }
+
+    return requestedPlan;
+  }
+
+  const activePlans = Object.values(db.plans || {})
+    .filter((plan) => plan && plan.is_active !== false)
+    .filter((plan) => {
+      if (!cleanCourseId) return true;
+      return !plan.course_id || String(plan.course_id) === cleanCourseId;
+    });
+
+  const sortBestPaidPlanFirst = (a, b) => {
+    const aCourseSpecific = a.course_id && String(a.course_id) === cleanCourseId ? 1 : 0;
+    const bCourseSpecific = b.course_id && String(b.course_id) === cleanCourseId ? 1 : 0;
+    if (aCourseSpecific !== bCourseSpecific) return bCourseSpecific - aCourseSpecific;
+
+    const aFeatured = a.is_featured ? 1 : 0;
+    const bFeatured = b.is_featured ? 1 : 0;
+    if (aFeatured !== bFeatured) return bFeatured - aFeatured;
+
+    return Number(b.price_cents || 0) - Number(a.price_cents || 0);
+  };
+
+  const videoLibraryPlan = activePlans
+    .filter((plan) =>
+      planIncludesFeature(plan, "video_library") ||
+      planIncludesFeature(plan, "uworld_library") ||
+      planIncludesFeature(plan, "uworld_video_library")
+    )
+    .sort(sortBestPaidPlanFirst)[0] || null;
+
+  if (videoLibraryPlan) return videoLibraryPlan;
+
+  return activePlans.sort(sortBestPaidPlanFirst)[0] || null;
 }
 
 function getExternalLibraryAccess(db, user) {
@@ -8675,6 +8735,17 @@ app.post("/admin/enrollments", async (req, res) => {
       db.users[user.id] = user;
     }
 
+    const resolvedPaidPlan = !isDemo && req.body.access_granted !== false
+      ? ngResolveAdminPaidPlan(db, { courseId, requestedPlanId: req.body.plan_id || "" })
+      : null;
+
+    if (!isDemo && req.body.access_granted !== false && !resolvedPaidPlan) {
+      return res.status(400).json({
+        success: false,
+        error: "A paid enrollment requires an active paid plan. Create/activate a plan first.",
+      });
+    }
+
     const enrollment = createBackendEnrollment(db, {
       userId: user.id,
       userName: user.name || name || user.email || "Student",
@@ -8682,12 +8753,21 @@ app.post("/admin/enrollments", async (req, res) => {
       isDemo,
       accessGranted: req.body.access_granted !== false,
       demoExpiry: req.body.demo_expiry || null,
-      planId: req.body.plan_id || null,
+      planId: resolvedPaidPlan?.id || null,
     });
 
     if (!isDemo && enrollment.access_granted !== false) {
-      const plan = enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null;
-      if (plan && !enrollment.access_expires_at) ngApplyPaidAccessWindow(db, enrollment, { plan, paidAt: new Date().toISOString(), source: "admin_manual_enrollment" });
+      const plan = resolvedPaidPlan || (enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null);
+      if (plan) {
+        enrollment.plan_id = plan.id;
+        if (!enrollment.access_expires_at) {
+          ngApplyPaidAccessWindow(db, enrollment, {
+            plan,
+            paidAt: new Date().toISOString(),
+            source: "admin_manual_enrollment",
+          });
+        }
+      }
     }
 
     if (req.body.progress_percentage !== undefined) {
@@ -8754,19 +8834,25 @@ app.patch("/admin/enrollments/:enrollmentId", async (req, res) => {
         enrollment.paid_at = enrollment.paid_at || now;
         enrollment.access_starts_at = enrollment.access_starts_at || now;
 
-        const plan = enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null;
+        const plan = ngResolveAdminPaidPlan(db, {
+          courseId: enrollment.course_id,
+          requestedPlanId: req.body.plan_id || enrollment.plan_id || "",
+        });
+
+        if (!plan) {
+          return res.status(400).json({
+            success: false,
+            error: "A paid enrollment requires an active paid plan. Create/activate a plan first.",
+          });
+        }
+
+        enrollment.plan_id = plan.id;
         if (!enrollment.access_expires_at) {
-          if (plan) {
-            ngApplyPaidAccessWindow(db, enrollment, {
-              plan,
-              paidAt: enrollment.paid_at || now,
-              source: "admin_enrollment_status_patch",
-            });
-          } else {
-            // Manual/legacy paid access should be valid even without a plan.
-            enrollment.access_expires_at = null;
-            enrollment.renewal_due_at = null;
-          }
+          ngApplyPaidAccessWindow(db, enrollment, {
+            plan,
+            paidAt: enrollment.paid_at || now,
+            source: "admin_enrollment_status_patch",
+          });
         }
       } else if (requestedStatus === "demo_active") {
         enrollment.is_demo = true;
@@ -8795,7 +8881,17 @@ app.patch("/admin/enrollments/:enrollmentId", async (req, res) => {
     if (req.body.is_active !== undefined) enrollment.access_granted = Boolean(req.body.is_active);
     if (req.body.is_demo !== undefined) enrollment.is_demo = Boolean(req.body.is_demo);
     if (req.body.demo_expiry !== undefined) enrollment.demo_expiry = req.body.demo_expiry || null;
-    if (req.body.plan_id !== undefined) enrollment.plan_id = req.body.plan_id || null;
+    if (req.body.plan_id !== undefined) {
+      if (req.body.plan_id) {
+        const selectedPlan = ngResolveAdminPaidPlan(db, {
+          courseId: enrollment.course_id,
+          requestedPlanId: req.body.plan_id,
+        });
+        enrollment.plan_id = selectedPlan.id;
+      } else if (enrollment.is_demo === true || enrollment.access_granted === false) {
+        enrollment.plan_id = null;
+      }
+    }
     if (req.body.paid_at !== undefined) enrollment.paid_at = req.body.paid_at || null;
     if (req.body.access_starts_at !== undefined) enrollment.access_starts_at = req.body.access_starts_at || null;
     if (req.body.access_expires_at !== undefined) { enrollment.access_expires_at = req.body.access_expires_at || null; enrollment.renewal_due_at = enrollment.access_expires_at; }
@@ -8807,8 +8903,26 @@ app.patch("/admin/enrollments/:enrollmentId", async (req, res) => {
     }
 
     if (enrollment.is_demo !== true && enrollment.access_granted !== false && req.body.access_expires_at === undefined) {
-      const plan = enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null;
-      if (plan && !enrollment.access_expires_at) ngApplyPaidAccessWindow(db, enrollment, { plan, paidAt: enrollment.paid_at || now, source: "admin_enrollment_patch" });
+      const plan = ngResolveAdminPaidPlan(db, {
+        courseId: enrollment.course_id,
+        requestedPlanId: enrollment.plan_id || "",
+      });
+
+      if (!plan) {
+        return res.status(400).json({
+          success: false,
+          error: "A paid enrollment requires an active paid plan. Create/activate a plan first.",
+        });
+      }
+
+      enrollment.plan_id = plan.id;
+      if (!enrollment.access_expires_at) {
+        ngApplyPaidAccessWindow(db, enrollment, {
+          plan,
+          paidAt: enrollment.paid_at || now,
+          source: "admin_enrollment_patch",
+        });
+      }
       enrollment.paid_at = enrollment.paid_at || now;
       enrollment.access_starts_at = enrollment.access_starts_at || now;
     }
