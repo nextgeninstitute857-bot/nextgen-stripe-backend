@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v181-admin-paid-plan-guard";
+const NEXTGEN_BACKEND_BUILD = "v183-readonly-streak-milestone";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -4028,6 +4028,271 @@ function performanceFromAttempts(attempts) {
     focus_areas: Object.entries(topicScores).map(([name, scores]) => ({ name, score: Math.round(scores.reduce((s, x) => s + x, 0) / scores.length) })).sort((a, b) => a.score - b.score).slice(0, 5),
   };
 }
+
+function ngDateKeyFromAny(value = null) {
+  if (!value) return "";
+  const text = String(value || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  if (/^\d{4}-\d{2}-\d{2}T/.test(text)) return text.slice(0, 10);
+  const parsed = new Date(text);
+  if (Number.isNaN(parsed.getTime())) return "";
+  return parsed.toISOString().slice(0, 10);
+}
+
+function ngPreviousDateKey(dateKey = "") {
+  const clean = ngDateKeyFromAny(dateKey);
+  if (!clean) return "";
+  const date = new Date(`${clean}T12:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() - 1);
+  return date.toISOString().slice(0, 10);
+}
+
+function ngComputeStudentStudyStreak(db = {}, { courseId = "", userId = "" } = {}) {
+  const cleanCourseId = String(courseId || "").trim();
+  const cleanUserId = String(userId || "").trim();
+  const dateSet = new Set();
+  const addDate = (value) => {
+    const key = ngDateKeyFromAny(value);
+    if (key) dateSet.add(key);
+  };
+
+  for (const item of Object.values(db.dailyTaskProgress || {})) {
+    if (String(item?.course_id || "") !== cleanCourseId) continue;
+    if (String(item?.user_id || "") !== cleanUserId) continue;
+    const hasCompletedTask = Object.values(item.tasks || {}).some((task) => task?.completed === true);
+    const studied = item.completed === true || Number(item.completed_task_count || 0) > 0 || hasCompletedTask;
+    if (!studied) continue;
+    addDate(item.date || item.completed_at || item.updated_at || item.created_at);
+  }
+
+  for (const item of Object.values(db.roadmapProgress || {})) {
+    if (String(item?.course_id || "") !== cleanCourseId) continue;
+    if (String(item?.user_id || "") !== cleanUserId) continue;
+    if (item.completed !== true) continue;
+    addDate(item.completed_at || item.updated_at || item.created_at);
+  }
+
+  for (const item of Object.values(db.attendance || {})) {
+    if (String(item?.course_id || "") !== cleanCourseId) continue;
+    if (String(item?.user_id || "") !== cleanUserId) continue;
+    addDate(item.marked_at || item.created_at || item.updated_at);
+  }
+
+  for (const event of Object.values(db.pointEvents || {})) {
+    if (String(event?.course_id || "") !== cleanCourseId) continue;
+    if (String(event?.user_id || "") !== cleanUserId) continue;
+    if (Number(event.points || 0) <= 0) continue;
+    addDate(event.awarded_at || event.created_at || event.updated_at);
+  }
+
+  const today = todayKey();
+  for (const dateKey of Array.from(dateSet)) {
+    if (dateKey > today) dateSet.delete(dateKey);
+  }
+
+  const sorted = Array.from(dateSet).sort();
+  let bestStreak = 0;
+  let running = 0;
+  let previous = "";
+
+  for (const dateKey of sorted) {
+    if (previous && ngPreviousDateKey(dateKey) === previous) running += 1;
+    else running = 1;
+    bestStreak = Math.max(bestStreak, running);
+    previous = dateKey;
+  }
+
+  const yesterday = ngPreviousDateKey(today);
+  let anchor = "";
+  if (dateSet.has(today)) anchor = today;
+  else if (dateSet.has(yesterday)) anchor = yesterday;
+
+  let currentStreak = 0;
+  let cursor = anchor;
+  while (cursor && dateSet.has(cursor)) {
+    currentStreak += 1;
+    cursor = ngPreviousDateKey(cursor);
+  }
+
+  return {
+    study_streak: currentStreak,
+    streak_days: currentStreak,
+    best_streak: bestStreak,
+    total_study_days: sorted.length,
+    last_activity_date: sorted[sorted.length - 1] || null,
+  };
+}
+
+const NEXTGEN_STREAK_MILESTONES = [3, 7, 14, 30, 60, 90, 120];
+
+function ngIsSundayDateKey(dateKey = "") {
+  const clean = ngDateKeyFromAny(dateKey);
+  if (!clean) return false;
+  const date = new Date(`${clean}T12:00:00.000Z`);
+  return date.getUTCDay() === 0;
+}
+
+function ngIsCourseFreezeDate(db = {}, courseId = "", dateKey = "") {
+  const cleanCourseId = String(courseId || "").trim();
+  const cleanDateKey = ngDateKeyFromAny(dateKey);
+  if (!cleanDateKey) return false;
+
+  // Sundays are skipped in the Marathon and should freeze a streak, not break it.
+  if (ngIsSundayDateKey(cleanDateKey)) return true;
+
+  const roadmap = db.roadmaps?.[cleanCourseId] || null;
+  const days = Array.isArray(roadmap?.days) ? roadmap.days : [];
+  return days.some((day) => {
+    if (String(day?.date || "") !== cleanDateKey) return false;
+    return ngIsNoClassRoadmapDay(day) || ngRoadmapDayIsNoClass(day);
+  });
+}
+
+function ngCanBridgeStreakGap(db = {}, courseId = "", previousDateKey = "", nextDateKey = "") {
+  const previous = ngDateKeyFromAny(previousDateKey);
+  const next = ngDateKeyFromAny(nextDateKey);
+  if (!previous || !next) return false;
+
+  let cursor = ngPreviousDateKey(next);
+  while (cursor && cursor > previous) {
+    if (!ngIsCourseFreezeDate(db, courseId, cursor)) return false;
+    cursor = ngPreviousDateKey(cursor);
+  }
+
+  return true;
+}
+
+function ngComputeStudentStudyStreakWithFreeze(db = {}, { courseId = "", userId = "" } = {}) {
+  const cleanCourseId = String(courseId || "").trim();
+  const cleanUserId = String(userId || "").trim();
+  const dateSet = new Set();
+  const addDate = (value) => {
+    const key = ngDateKeyFromAny(value);
+    if (key) dateSet.add(key);
+  };
+
+  for (const item of Object.values(db.dailyTaskProgress || {})) {
+    if (String(item?.course_id || "") !== cleanCourseId) continue;
+    if (String(item?.user_id || "") !== cleanUserId) continue;
+    const hasCompletedTask = Object.values(item.tasks || {}).some((task) => task?.completed === true);
+    const studied = item.completed === true || Number(item.completed_task_count || 0) > 0 || hasCompletedTask;
+    if (!studied) continue;
+    addDate(item.date || item.completed_at || item.updated_at || item.created_at);
+  }
+
+  for (const item of Object.values(db.roadmapProgress || {})) {
+    if (String(item?.course_id || "") !== cleanCourseId) continue;
+    if (String(item?.user_id || "") !== cleanUserId) continue;
+    if (item.completed !== true) continue;
+    addDate(item.completed_at || item.updated_at || item.created_at);
+  }
+
+  for (const item of Object.values(db.attendance || {})) {
+    if (String(item?.course_id || "") !== cleanCourseId) continue;
+    if (String(item?.user_id || "") !== cleanUserId) continue;
+    addDate(item.marked_at || item.created_at || item.updated_at);
+  }
+
+  // Read-only use of existing point events: this detects real study days already recorded by your live leaderboard system.
+  // It does not create, delete, recalculate, or mutate pointEvents.
+  for (const event of Object.values(db.pointEvents || {})) {
+    if (String(event?.course_id || "") !== cleanCourseId) continue;
+    if (String(event?.user_id || "") !== cleanUserId) continue;
+    if (Number(event.points || 0) <= 0) continue;
+    addDate(event.awarded_at || event.created_at || event.updated_at);
+  }
+
+  const today = todayKey();
+  for (const dateKey of Array.from(dateSet)) {
+    if (dateKey > today) dateSet.delete(dateKey);
+  }
+
+  const sorted = Array.from(dateSet).sort();
+  let bestStreak = 0;
+  let running = 0;
+  let previous = "";
+
+  for (const dateKey of sorted) {
+    if (previous && (ngPreviousDateKey(dateKey) === previous || ngCanBridgeStreakGap(db, cleanCourseId, previous, dateKey))) running += 1;
+    else running = 1;
+    bestStreak = Math.max(bestStreak, running);
+    previous = dateKey;
+  }
+
+  let anchor = "";
+  let cursor = today;
+  while (cursor) {
+    if (dateSet.has(cursor)) {
+      anchor = cursor;
+      break;
+    }
+
+    // Today/yesterday can be a Sunday or no-class/holiday date; freeze and keep searching backwards.
+    if (ngIsCourseFreezeDate(db, cleanCourseId, cursor)) {
+      cursor = ngPreviousDateKey(cursor);
+      continue;
+    }
+
+    const yesterday = ngPreviousDateKey(today);
+    if (cursor === today && dateSet.has(yesterday)) {
+      anchor = yesterday;
+    }
+    break;
+  }
+
+  let currentStreak = 0;
+  cursor = anchor;
+  while (cursor) {
+    if (dateSet.has(cursor)) {
+      currentStreak += 1;
+      cursor = ngPreviousDateKey(cursor);
+      continue;
+    }
+
+    if (ngIsCourseFreezeDate(db, cleanCourseId, cursor)) {
+      cursor = ngPreviousDateKey(cursor);
+      continue;
+    }
+
+    break;
+  }
+
+  const result = {
+    study_streak: currentStreak,
+    streak_days: currentStreak,
+    best_streak: bestStreak,
+    total_study_days: sorted.length,
+    last_activity_date: sorted[sorted.length - 1] || null,
+  };
+
+  result.streak_milestone = ngBuildStreakMilestoneMeta(result);
+  return result;
+}
+
+function ngBuildStreakMilestoneMeta(streak = {}) {
+  const current = Math.max(0, Number(streak.study_streak || streak.streak_days || 0));
+  const previousMilestone = [...NEXTGEN_STREAK_MILESTONES].reverse().find((item) => item <= current) || null;
+  const currentMilestone = NEXTGEN_STREAK_MILESTONES.includes(current) ? current : null;
+  const nextMilestone = NEXTGEN_STREAK_MILESTONES.find((item) => item > current) || null;
+
+  return {
+    enabled: true,
+    read_only: true,
+    points_unchanged: true,
+    milestones: NEXTGEN_STREAK_MILESTONES,
+    current_streak: current,
+    is_milestone_today: Boolean(currentMilestone),
+    current_milestone: currentMilestone,
+    reached_milestone: previousMilestone,
+    next_milestone: nextMilestone,
+    days_to_next_milestone: nextMilestone ? Math.max(0, nextMilestone - current) : null,
+    label: currentMilestone ? `${currentMilestone}-day streak milestone` : nextMilestone ? `${Math.max(0, nextMilestone - current)} day(s) to ${nextMilestone}-day streak` : "Maximum streak milestone reached",
+    // This is only the existing configured value for display/context. No streak point event is created here.
+    configured_bonus_points: Number(NEXTGEN_TASK_POINTS.daily_streak_bonus || 0),
+    awarded_now: false,
+    award_mode: "display_only_no_point_mutation",
+  };
+}
 function ngNormalizeLeaderboardIdentity(value = "") {
   return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
@@ -7926,6 +8191,65 @@ app.get("/auth/me", async (req, res) => {
   }
 });
 
+
+function ngNormalizeStudentDisplayName(value = "") {
+  return String(value || "").trim().replace(/\s+/g, " ");
+}
+
+function ngDisplayNameHasBlockedWord(value = "") {
+  const clean = String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ");
+  const blocked = [
+    "fuck", "fucker", "fucking", "shit", "bitch", "bastard", "asshole", "dick", "pussy",
+    "cunt", "whore", "slut", "porn", "sex", "nigger", "nigga", "fag", "faggot"
+  ];
+  return blocked.some((word) => new RegExp(`(^|\\s)${word}(\\s|$)`, "i").test(clean));
+}
+
+app.patch("/auth/me", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const existing = db.users?.[String(user.id)] || null;
+
+    if (!existing) {
+      return res.status(404).json({ success: false, error: "User account not found" });
+    }
+
+    const name = ngNormalizeStudentDisplayName(req.body?.name || req.body?.display_name || "");
+
+    if (name.length < 2 || name.length > 60) {
+      return res.status(400).json({ success: false, error: "Name must be between 2 and 60 characters." });
+    }
+
+    if (!/^[\p{L}\p{N} .'-]+$/u.test(name)) {
+      return res.status(400).json({ success: false, error: "Name can only include letters, numbers, spaces, apostrophes, periods, and hyphens." });
+    }
+
+    if (ngDisplayNameHasBlockedWord(name)) {
+      return res.status(400).json({ success: false, error: "Please choose a professional display name." });
+    }
+
+    existing.name = name;
+    existing.display_name = name;
+    existing.updated_at = new Date().toISOString();
+    db.users[existing.id] = existing;
+
+    // Keep existing leaderboard labels fresh without changing any points.
+    for (const entry of Object.values(db.leaderboard || {})) {
+      if (String(entry.user_id || "") === String(existing.id)) {
+        entry.user_name = name;
+        entry.updated_at = new Date().toISOString();
+      }
+    }
+
+    await writeLiveDb(db);
+
+    res.json({ success: true, user: sanitizeUser(existing), record: sanitizeUser(existing) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to update profile" });
+  }
+});
+
 app.post("/auth/logout", async (req, res) => {
   res.json({
     success: true,
@@ -10905,6 +11229,8 @@ function ngSanitizeDailyTaskPacket(db, { courseId, userId, day }) {
   if (!day) return null;
   const noClassDay = ngIsNoClassRoadmapDay(day) || ngRoadmapDayIsNoClass(day);
   const progress = ngGetDailyTaskProgress(db, { courseId, userId, dayId: day.id, day }) || ngEnsureDailyTaskProgress(db, { courseId, userId, userName: "Student", day });
+  const streak = ngComputeStudentStudyStreakWithFreeze(db, { courseId, userId });
+  const progressWithStreak = { ...(progress || {}), streak_days: streak.study_streak, best_streak: streak.best_streak, total_study_days: streak.total_study_days, last_activity_date: streak.last_activity_date, streak_milestone: streak.streak_milestone };
   const cleanDay = sanitizeRoadmapDay(day);
 
   if (noClassDay) {
@@ -10915,7 +11241,7 @@ function ngSanitizeDailyTaskPacket(db, { courseId, userId, day }) {
       holiday: true,
       task_items: [],
       tasks: [],
-      progress: { ...(progress || {}), tasks: {}, completed_task_count: 0, total_task_count: 0, required_completed_count: 0, required_task_count: 0, completed: false },
+      progress: { ...progressWithStreak, tasks: {}, completed_task_count: 0, total_task_count: 0, required_completed_count: 0, required_task_count: 0, completed: false },
       earned_points: 0,
       available_points: 0,
       holiday_message: "No academic task today. The planned content has been pushed to the next teaching day.",
@@ -10935,7 +11261,7 @@ function ngSanitizeDailyTaskPacket(db, { courseId, userId, day }) {
     ...cleanDay,
     task_items: taskItems,
     tasks: taskItems,
-    progress,
+    progress: progressWithStreak,
     earned_points: earnedPoints,
     available_points: taskItems.reduce((sum, task) => sum + Number(task.points || 0), 0),
   };
@@ -12521,15 +12847,68 @@ function ngAutoSyncRoadmapLiveSessionsForCourses(db = {}, courseIds = [], option
 
 app.get("/student/dashboard/summary", async (req, res) => {
   try {
-    const { user } = await getAuthenticatedUser(req); const courseId = req.query.course_id; if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
-    const db = await readLiveDb(); const enrollment = getBackendEnrollment(db, { userId: user.id, courseId }); const roadmap = buildProgressSummary({ db, courseId, userId: user.id }); const perf = performanceFromAttempts(getStudentAttempts(db, courseId, user.id)); const leaderboard = updateLeaderboard(db, { courseId, userId: user.id, userName: user.name || user.email || "Student" });
+    const { user } = await getAuthenticatedUser(req);
+    const courseId = String(req.query.course_id || req.query.courseId || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+
+    const db = await readLiveDb();
+    const enrollment = getBackendEnrollment(db, { userId: user.id, courseId });
+    const roadmap = buildProgressSummary({ db, courseId, userId: user.id });
+    const perf = performanceFromAttempts(getStudentAttempts(db, courseId, user.id));
+    const streak = ngComputeStudentStudyStreakWithFreeze(db, { courseId, userId: user.id });
+    const leaderboard = updateLeaderboard(db, { courseId, userId: user.id, userName: user.name || user.email || "Student" });
+
     let plan = { name: enrollment?.is_demo ? "Demo" : enrollment ? "Active" : "No active plan", days_left: null, is_demo: Boolean(enrollment?.is_demo) };
-    if (enrollment?.is_demo && enrollment.demo_expiry) plan.days_left = Math.max(0, Math.ceil((new Date(`${enrollment.demo_expiry}T23:59:59`).getTime() - Date.now()) / 86400000));
+    if (enrollment?.is_demo && enrollment.demo_expiry) {
+      plan.days_left = Math.max(0, Math.ceil((new Date(`${enrollment.demo_expiry}T23:59:59`).getTime() - Date.now()) / 86400000));
+    }
+
     const assessments = Object.values(db.assessments || {}).filter((a) => String(a.course_id) === String(courseId) && a.is_published);
-    const completedAssessments = assessments.filter((a) => { const attempt = db.assessmentAttempts[assessmentAttemptKey(a.id, user.id)]; return attempt && isAttemptReleased(attempt); });
+    const completedAssessments = assessments.filter((a) => {
+      const attempt = db.assessmentAttempts[assessmentAttemptKey(a.id, user.id)];
+      return attempt && isAttemptReleased(attempt);
+    });
+
     await writeLiveDb(db);
-    res.json({ success: true, plan, roadmap, today: roadmap.today_day, performance: { study_streak: 0, best_streak: 0, total_study_time_hours: 0, average_mock_score: perf.average_score, latest_mock_score: perf.latest_score, best_mock_score: perf.best_score, attempts_count: perf.attempts_count }, focus_areas: perf.focus_areas, leaderboard: { points: leaderboard.total_points || 0, attendance_points: leaderboard.attendance_points || 0, task_points: leaderboard.task_points || 0, quiz_points: leaderboard.quiz_points || 0 }, assessments: { available: assessments.length, completed: completedAssessments.length, pending: Math.max(0, assessments.length - completedAssessments.length) } });
-  } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); }
+
+    res.json({
+      success: true,
+      plan,
+      roadmap,
+      today: roadmap.today_day,
+      streak_days: streak.study_streak,
+      streak: streak.study_streak,
+      best_streak: streak.best_streak,
+      total_study_days: streak.total_study_days,
+      last_activity_date: streak.last_activity_date,
+      streak_milestone: streak.streak_milestone,
+      performance: {
+        study_streak: streak.study_streak,
+        best_streak: streak.best_streak,
+        total_study_days: streak.total_study_days,
+        streak_milestone: streak.streak_milestone,
+        total_study_time_hours: 0,
+        average_mock_score: perf.average_score,
+        latest_mock_score: perf.latest_score,
+        best_mock_score: perf.best_score,
+        attempts_count: perf.attempts_count,
+      },
+      focus_areas: perf.focus_areas,
+      leaderboard: {
+        points: leaderboard.total_points || 0,
+        attendance_points: leaderboard.attendance_points || 0,
+        task_points: leaderboard.task_points || 0,
+        quiz_points: leaderboard.quiz_points || 0,
+      },
+      assessments: {
+        available: assessments.length,
+        completed: completedAssessments.length,
+        pending: Math.max(0, assessments.length - completedAssessments.length),
+      },
+    });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message });
+  }
 });
 
 
@@ -12700,6 +13079,7 @@ function ngBuildStudentCourseBundle(db, user, course, { sessionLimit = null } = 
     : null;
   const attempts = getStudentAttempts(db, course.id, user.id);
   const perf = performanceFromAttempts(attempts);
+  const streak = ngComputeStudentStudyStreakWithFreeze(db, { courseId: course.id, userId: user.id });
   const assessments = Object.values(db.assessments || {}).filter((a) => String(a.course_id) === String(course.id) && a.is_published);
   const assessmentsForStudent = assessments.map((assessment) => {
     const attempt = db.assessmentAttempts?.[assessmentAttemptKey(assessment.id, user.id)] || null;
@@ -12742,9 +13122,17 @@ function ngBuildStudentCourseBundle(db, user, course, { sessionLimit = null } = 
       plan,
       roadmap,
       today: roadmap.today_day,
+      streak_days: streak.study_streak,
+      streak: streak.study_streak,
+      best_streak: streak.best_streak,
+      total_study_days: streak.total_study_days,
+      last_activity_date: streak.last_activity_date,
+      streak_milestone: streak.streak_milestone,
       performance: {
-        study_streak: 0,
-        best_streak: 0,
+        study_streak: streak.study_streak,
+        best_streak: streak.best_streak,
+        total_study_days: streak.total_study_days,
+        streak_milestone: streak.streak_milestone,
         total_study_time_hours: 0,
         average_mock_score: perf.average_score,
         latest_mock_score: perf.latest_score,
