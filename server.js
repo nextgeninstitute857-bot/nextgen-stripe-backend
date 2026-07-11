@@ -157,7 +157,7 @@ app.get("/stripe/webhook", (req, res) => {
     build: NEXTGEN_BACKEND_BUILD,
     stripe_secret_configured: Boolean(process.env.STRIPE_SECRET_KEY),
     stripe_webhook_secret_configured: Boolean(process.env.STRIPE_WEBHOOK_SECRET),
-    message: "Stripe webhook endpoint is online. Create a Stripe event destination to POST checkout.session.completed, checkout.session.expired, and payment_intent.payment_failed here.",
+    message: "Stripe webhook endpoint is online. Create a Stripe event destination to POST checkout.session.completed, checkout.session.expired, invoice.paid, invoice.payment_failed, customer.subscription.deleted, and payment_intent.payment_failed here.",
   });
 });
 
@@ -2610,7 +2610,12 @@ async function ngHandleStripeWebhookEvent(event = {}, req = null) {
 
   // v156: Route AylaMed Stripe events by metadata.app without touching LMS billing records.
   const ngStripeObject = event.data?.object || {};
-  const ngStripeMetadata = ngStripeObject.metadata || {};
+  const ngStripeMetadata = {
+    ...(ngStripeObject.metadata || {}),
+    ...(ngStripeObject.subscription_details?.metadata || {}),
+    ...(ngStripeObject.parent?.subscription_details?.metadata || {}),
+    ...(ngStripeObject.lines?.data?.[0]?.metadata || {}),
+  };
   if (String(ngStripeMetadata.app || "").trim().toLowerCase() === "aylamed") {
     return aylaHandleStripeWebhookEvent(event, req);
   }
@@ -47807,12 +47812,13 @@ function ngStartBillingExpiryRunner() {
 // -----------------------------------------------------------------------------
 // Safe integration notes:
 // - Namespaced under /api/ayla so it does not collide with existing LMS/CRM routes.
-// - Uses existing readLiveDb() / writeLiveDb() / LIVE_DB_PATH storage.
-// - Uses ayla* collections only; it does not mutate courses, enrollments, Stripe, CRM, or LMS data.
+// - Uses a physically separate AYLA_DB_PATH (/var/data/aylamed-db.json).
+// - Reads approved education knowledge from CRM AI Training Center without writing to CRM.
+// - Never writes LMS users, enrollments, payments, plans, features, CRM leads, or CRM users.
 // - Frontend can connect to these routes later with VITE_API_BASE_URL pointing to this backend.
 // -----------------------------------------------------------------------------
 
-const AYLA_BACKEND_BUILD = "aylamed-access-log-health-cleanup-v157";
+const AYLA_BACKEND_BUILD = "aylamed-separated-core-knowledge-ai-usage-v186";
 
 const AYLA_EXAM_TRACKS = [
   "USMLE Step 1",
@@ -47837,7 +47843,6 @@ const AYLA_COLLECTIONS = {
   aylaAssessmentResults: { route: "/api/ayla/assessment-results", prefix: "ASM", label: "assessmentResult", customPost: true },
   aylaStudyPartnerPool: { route: "/api/ayla/study-partner-pool", prefix: "SP", label: "studyPartnerCandidate" },
   aylaStudyPartnerMatches: { route: "/api/ayla/study-partner-matches", prefix: "MATCH", label: "studyPartnerMatch" },
-  aylaKnowledgeLibrary: { route: "/api/ayla/knowledge-library", prefix: "KL", label: "knowledgeItem" },
   aylaRoadmapTasks: { route: "/api/ayla/roadmap-tasks", prefix: "TASK", label: "roadmapTask" },
 
   // v156 separated AylaMed billing/access collections.
@@ -47849,6 +47854,173 @@ const AYLA_COLLECTIONS = {
   aylaAccessLogs: { route: "/api/ayla/access-logs", prefix: "AYLA-ACCESS", label: "accessLog" },
   aylaAiUsageLogs: { route: "/api/ayla/ai-usage-logs", prefix: "AYLA-AI", label: "aiUsageLog" },
 };
+
+const AYLA_DB_PATH = path.join(DATA_DIR, "aylamed-db.json");
+const AYLA_ADMIN_TOKEN = String(process.env.AYLA_ADMIN_TOKEN || "").trim();
+const AYLA_REQUIRE_STUDENT_AUTH = String(process.env.AYLA_REQUIRE_STUDENT_AUTH || "true").toLowerCase() !== "false";
+
+const DEFAULT_AYLA_SETTINGS = {
+  product: {
+    monthly_only: true,
+    product_name: "AylaMed",
+    target_message: "Adaptive preparation through Exam Day and Match Day",
+  },
+  demo: {
+    enabled: true,
+    duration_days: 7,
+    homepage_bar_enabled: true,
+    homepage_bar_text: "Start your {{days}}-day AylaMed demo",
+    button_text: "Start {{days}}-Day Demo",
+    plan_name: "AylaMed {{days}}-Day Demo",
+    description: "Try the diagnostic, personalized roadmap, QBank direction, revision tools, and approved knowledge guidance.",
+    included_features: ["diagnostic", "roadmap", "flashcards", "qbank", "weak_areas", "study_partner", "knowledge_search", "ai_coach"],
+  },
+  homepage: {
+    hero_eyebrow: "Adaptive medical preparation",
+    hero_title: "A personalized plan from today to Exam Day or Match Day.",
+    hero_description: "AylaMed turns your timeline, weak areas, study hours, QBank performance, and approved medical knowledge into a practical daily plan.",
+    monthly_badge: "Monthly access — renew as needed until your target date",
+  },
+};
+
+const DEFAULT_AYLA_AI_USAGE_SETTINGS = {
+  tracking_enabled: true,
+  observation_mode: true,
+  global_limit: {
+    enabled: false,
+    period: "monthly",
+    token_limit: null,
+    dollar_limit_usd: null,
+    warnings_enabled: false,
+    warning_percentages: [80, 95],
+  },
+  emergency_protection: {
+    enabled: true,
+    max_requests_per_hour: 60,
+    max_cost_per_day_usd: 25,
+  },
+};
+
+const DEFAULT_AYLA_DB = {
+  schema_version: 2,
+  aylaUsers: {},
+  aylaStudents: {},
+  aylaDiagnosticSubmissions: {},
+  aylaRoadmapRules: {},
+  aylaQbankRules: {},
+  aylaQbankBlocks: {},
+  aylaWeakAreaRules: {},
+  aylaWeakAreaLogs: {},
+  aylaFlashcardRules: {},
+  aylaFlashcards: {},
+  aylaAssessmentResults: {},
+  aylaStudyPartnerPool: {},
+  aylaStudyPartnerMatches: {},
+  aylaRoadmapTasks: {},
+  aylaActionLogs: {},
+  aylaPlans: {},
+  aylaCoupons: {},
+  aylaCouponRedemptions: {},
+  aylaPayments: {},
+  aylaEnrollments: {},
+  aylaAccessLogs: {},
+  aylaAiUsageLogs: {},
+  aylaSettings: DEFAULT_AYLA_SETTINGS,
+  aylaAiUsageSettings: DEFAULT_AYLA_AI_USAGE_SETTINGS,
+  aylaPlanAiLimits: {},
+  aylaStudentAiOverrides: {},
+  updatedAt: null,
+};
+
+let aylaWriteQueue = Promise.resolve();
+
+function aylaMergeSettings(value = {}) {
+  return {
+    ...DEFAULT_AYLA_SETTINGS,
+    ...(value || {}),
+    product: { ...DEFAULT_AYLA_SETTINGS.product, ...(value?.product || {}) },
+    demo: { ...DEFAULT_AYLA_SETTINGS.demo, ...(value?.demo || {}) },
+    homepage: { ...DEFAULT_AYLA_SETTINGS.homepage, ...(value?.homepage || {}) },
+  };
+}
+
+function aylaMergeAiUsageSettings(value = {}) {
+  return {
+    ...DEFAULT_AYLA_AI_USAGE_SETTINGS,
+    ...(value || {}),
+    global_limit: { ...DEFAULT_AYLA_AI_USAGE_SETTINGS.global_limit, ...(value?.global_limit || {}) },
+    emergency_protection: { ...DEFAULT_AYLA_AI_USAGE_SETTINGS.emergency_protection, ...(value?.emergency_protection || {}) },
+  };
+}
+
+async function readAylaDb() {
+  try {
+    await ensureDataDir();
+    const raw = await fs.readFile(AYLA_DB_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+    const next = { ...DEFAULT_AYLA_DB, ...parsed };
+    for (const key of Object.keys(DEFAULT_AYLA_DB)) {
+      if (key.startsWith("ayla") && key !== "aylaSettings" && key !== "aylaAiUsageSettings" && (!next[key] || typeof next[key] !== "object" || Array.isArray(next[key]))) next[key] = {};
+    }
+    next.aylaSettings = aylaMergeSettings(parsed.aylaSettings || {});
+    next.aylaAiUsageSettings = aylaMergeAiUsageSettings(parsed.aylaAiUsageSettings || {});
+    next.aylaPlanAiLimits = parsed.aylaPlanAiLimits && typeof parsed.aylaPlanAiLimits === "object" ? parsed.aylaPlanAiLimits : {};
+    next.aylaStudentAiOverrides = parsed.aylaStudentAiOverrides && typeof parsed.aylaStudentAiOverrides === "object" ? parsed.aylaStudentAiOverrides : {};
+    return next;
+  } catch (error) {
+    if (error.code === "ENOENT") return { ...DEFAULT_AYLA_DB, aylaSettings: aylaMergeSettings(), aylaAiUsageSettings: aylaMergeAiUsageSettings() };
+    console.error("AylaMed DB read error:", error.message);
+    throw error;
+  }
+}
+
+async function writeAylaDb(db) {
+  aylaWriteQueue = aylaWriteQueue.then(async () => {
+    await ensureDataDir();
+    const nextDb = {
+      ...DEFAULT_AYLA_DB,
+      ...db,
+      aylaSettings: aylaMergeSettings(db.aylaSettings || {}),
+      aylaAiUsageSettings: aylaMergeAiUsageSettings(db.aylaAiUsageSettings || {}),
+      updatedAt: new Date().toISOString(),
+    };
+    const tempPath = `${AYLA_DB_PATH}.tmp`;
+    await fs.writeFile(tempPath, JSON.stringify(nextDb, null, 2), "utf8");
+    await fs.rename(tempPath, AYLA_DB_PATH);
+  });
+  return aylaWriteQueue;
+}
+
+async function readAylaCrmSnapshot() {
+  try {
+    const raw = await fs.readFile(CRM_DB_PATH, "utf8");
+    return JSON.parse(raw);
+  } catch (error) {
+    if (error.code === "ENOENT") return {};
+    console.error("AylaMed read-only CRM knowledge snapshot error:", error.message);
+    throw error;
+  }
+}
+
+
+function aylaTemplate(value = "", days = 7) {
+  return String(value || "").replace(/\{\{\s*days\s*\}\}/gi, String(days));
+}
+
+function aylaAdminTokenFromRequest(req) {
+  return String(req.headers["x-admin-token"] || req.headers["x-ayla-admin-token"] || "").trim();
+}
+
+async function aylaRequireAdmin(req) {
+  if (!AYLA_ADMIN_TOKEN) return { configured: false, staging_open: true };
+  const supplied = aylaAdminTokenFromRequest(req);
+  if (!supplied || supplied !== AYLA_ADMIN_TOKEN) {
+    const error = new Error("AylaMed admin authentication required");
+    error.statusCode = 401;
+    throw error;
+  }
+  return { configured: true };
+}
 
 function aylaNow() {
   return new Date().toISOString();
@@ -47932,10 +48104,56 @@ function aylaSendError(res, status, error, details = null) {
 
 function aylaDaysToExam(dateValue) {
   if (!dateValue) return 0;
-  const date = new Date(dateValue);
+  const date = new Date(`${String(dateValue).slice(0, 10)}T23:59:59`);
   if (Number.isNaN(date.getTime())) return 0;
   const diff = date.getTime() - Date.now();
   return Math.max(0, Math.ceil(diff / (1000 * 60 * 60 * 24)));
+}
+
+function aylaDateOnly(value = new Date()) {
+  const date = value instanceof Date ? new Date(value) : new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toISOString().slice(0, 10);
+}
+
+function aylaAddDays(value, days = 0) {
+  const date = value instanceof Date ? new Date(value) : new Date(value || Date.now());
+  if (Number.isNaN(date.getTime())) return new Date();
+  date.setUTCDate(date.getUTCDate() + Number(days || 0));
+  return date;
+}
+
+function aylaTargetDateInfo(input = {}) {
+  const goalType = String(input.goalType || input.goal_type || input.targetType || input.target_type || "Exam Day").trim() || "Exam Day";
+  const examDate = String(input.examDate || input.exam_date || "").slice(0, 10);
+  const matchDate = String(input.matchDate || input.match_date || "").slice(0, 10);
+  const today = aylaDateOnly();
+  const future = [];
+
+  if ((goalType === "Exam Day" || goalType === "Both") && examDate && examDate >= today) {
+    future.push({ date: examDate, label: "Exam Day", type: "exam" });
+  }
+  if ((goalType === "Match Day" || goalType === "Both") && matchDate && matchDate >= today) {
+    future.push({ date: matchDate, label: "Match Day", type: "match" });
+  }
+
+  if (!future.length) {
+    if (examDate) future.push({ date: examDate, label: "Exam Day", type: "exam" });
+    else if (matchDate) future.push({ date: matchDate, label: "Match Day", type: "match" });
+  }
+
+  future.sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  const target = future[0] || { date: "", label: goalType === "Match Day" ? "Match Day" : "Target Day", type: goalType === "Match Day" ? "match" : "exam" };
+
+  return {
+    goalType,
+    examDate,
+    matchDate,
+    targetDate: target.date,
+    targetLabel: target.label,
+    targetType: target.type,
+    daysToTarget: aylaDaysToExam(target.date),
+  };
 }
 
 function aylaRisk(input = {}) {
@@ -47943,132 +48161,298 @@ function aylaRisk(input = {}) {
   const qbankAverage = aylaNumber(input.qbankAverage ?? input.qbank_average, 0);
   const qbankCompleted = aylaNumber(input.qbankCompleted ?? input.qbank_completed, 0);
   const targetScore = aylaNumber(input.targetScore ?? input.target_score, 65);
-  const daysToExam = aylaDaysToExam(input.examDate ?? input.exam_date) || aylaNumber(input.daysToExam ?? input.days_to_exam, 0);
+  const target = aylaTargetDateInfo(input);
+  const daysToTarget = target.daysToTarget || aylaNumber(input.daysToExam ?? input.days_to_exam ?? input.daysToTarget, 0);
   const isNewStudent = !currentScore && !qbankAverage && !qbankCompleted;
 
   if (isNewStudent) return "Baseline Needed";
-  if (daysToExam > 0 && daysToExam <= 30 && currentScore < targetScore) return "Critical";
+  if (daysToTarget > 0 && daysToTarget <= 14) return "Critical";
+  if (daysToTarget > 0 && daysToTarget <= 30 && (currentScore < targetScore || qbankAverage < targetScore)) return "Critical";
   if ((currentScore > 0 && currentScore < 45) || (qbankAverage > 0 && qbankAverage < 45)) return "High Risk";
   if ((currentScore >= 45 && currentScore < 60) || (qbankAverage >= 45 && qbankAverage < 60) || (qbankCompleted > 0 && qbankCompleted < 50)) return "Medium Risk";
   return "Focused Review";
 }
 
-function aylaRoadmapMode(riskLevel) {
+function aylaStudyPhase(input = {}, riskLevel = aylaRisk(input)) {
+  const target = aylaTargetDateInfo(input);
+  const days = target.daysToTarget;
+
+  if (target.targetType === "match") {
+    if (days > 90) return "Match Foundation";
+    if (days > 30) return "Application & Interview Readiness";
+    if (days > 7) return "Final Match Preparation";
+    return "Match Week";
+  }
+
+  if (riskLevel === "Baseline Needed") return "Baseline & Planning";
+  if (days > 120) return "Foundation Build";
+  if (days > 60) return "System Mastery";
+  if (days > 30) return "Weak-Area Repair";
+  if (days > 14) return "Assessment & Consolidation";
+  if (days > 0) return "Final Rapid Review";
+  return riskLevel === "Focused Review" ? "Readiness Maintenance" : "Adaptive Foundation";
+}
+
+function aylaRoadmapMode(riskLevel, input = {}) {
+  const phase = aylaStudyPhase(input, riskLevel);
+  if (phase === "Match Foundation" || phase === "Application & Interview Readiness" || phase === "Final Match Preparation" || phase === "Match Week") {
+    return `${phase} Roadmap`;
+  }
   return {
     "Baseline Needed": "Beginner Diagnostic Roadmap",
     Critical: "Urgent Rescue Roadmap",
     "High Risk": "Foundation Rebuild Roadmap",
     "Medium Risk": "System-wise Strengthening Roadmap",
     "Focused Review": "Exam Readiness Roadmap",
-  }[riskLevel] || "Beginner Diagnostic Roadmap";
+  }[riskLevel] || "Adaptive Medical Roadmap";
 }
 
-function aylaQbankPlan(riskLevel) {
-  return {
-    "Baseline Needed": "20 tutor-mode discovery questions",
-    Critical: "High-yield weak areas only",
-    "High Risk": "Tutor-mode weak-system blocks",
-    "Medium Risk": "Targeted weak-system blocks",
-    "Focused Review": "Timed mixed blocks + incorrect review",
-  }[riskLevel] || "20 tutor-mode discovery questions";
+function aylaDailyQuestionTarget(input = {}, riskLevel = aylaRisk(input)) {
+  const hours = Math.max(1, Math.min(12, aylaNumber(input.dailyHours ?? input.daily_hours, 4)));
+  if (riskLevel === "Baseline Needed") return 20;
+  if (riskLevel === "Critical") return Math.min(80, Math.max(20, Math.round(hours * 7)));
+  if (riskLevel === "High Risk") return Math.min(50, Math.max(20, Math.round(hours * 5)));
+  if (riskLevel === "Medium Risk") return Math.min(60, Math.max(25, Math.round(hours * 6)));
+  return Math.min(80, Math.max(30, Math.round(hours * 7)));
 }
 
-function aylaFlashcardPlan(riskLevel) {
+function aylaQbankPlan(riskLevel, input = {}) {
+  const count = aylaDailyQuestionTarget(input, riskLevel);
   return {
-    "Baseline Needed": "15 starter flashcards",
-    Critical: "Priority incorrect deck only",
-    "High Risk": "30 weak-concept cards/day",
-    "Medium Risk": "25 targeted cards/day",
-    "Focused Review": "Incorrects and assessment-miss cards",
-  }[riskLevel] || "15 starter flashcards";
+    "Baseline Needed": `${count} tutor-mode discovery questions/day`,
+    Critical: `${count} high-yield rescue questions/day`,
+    "High Risk": `${count} tutor-mode weak-system questions/day`,
+    "Medium Risk": `${count} targeted weak-system questions/day`,
+    "Focused Review": `${count} timed mixed questions/day + incorrect review`,
+  }[riskLevel] || `${count} targeted questions/day`;
+}
+
+function aylaFlashcardPlan(riskLevel, input = {}) {
+  const hours = Math.max(1, aylaNumber(input.dailyHours ?? input.daily_hours, 4));
+  const count = riskLevel === "Critical" ? Math.min(30, hours * 4) : riskLevel === "High Risk" ? Math.min(35, hours * 4) : Math.min(30, hours * 3);
+  return {
+    "Baseline Needed": "15 starter recall cards/day",
+    Critical: `${Math.round(count)} priority incorrect cards/day`,
+    "High Risk": `${Math.round(count)} weak-concept cards/day`,
+    "Medium Risk": `${Math.round(count)} targeted cards/day`,
+    "Focused Review": `${Math.round(count)} incorrect and assessment-miss cards/day`,
+  }[riskLevel] || `${Math.round(count)} targeted cards/day`;
 }
 
 function aylaMentorRule(riskLevel, input = {}) {
-  const daysToExam = aylaDaysToExam(input.examDate ?? input.exam_date) || aylaNumber(input.daysToExam ?? input.days_to_exam, 0);
-  if (riskLevel === "Critical") return "Required";
-  if (riskLevel === "High Risk" && daysToExam > 0 && daysToExam <= 60) return "Required";
+  const daysToTarget = aylaTargetDateInfo(input).daysToTarget;
+  if (riskLevel === "Critical") return "Recommended this week";
+  if (riskLevel === "High Risk" && daysToTarget > 0 && daysToTarget <= 60) return "Recommended";
   return "Optional";
 }
 
 function aylaRecommendation(input = {}) {
   const riskLevel = aylaRisk(input);
+  const target = aylaTargetDateInfo(input);
+  const phase = aylaStudyPhase(input, riskLevel);
+  const dailyHours = Math.max(1, Math.min(12, aylaNumber(input.dailyHours ?? input.daily_hours, 4)));
+  const weeklyStudyDays = Math.max(1, Math.min(7, aylaNumber(input.weeklyStudyDays ?? input.weekly_study_days, 6)));
+  const dailyQuestionTarget = aylaDailyQuestionTarget(input, riskLevel);
+  const dailyFlashcardTarget = riskLevel === "Baseline Needed" ? 15 : Math.min(35, Math.max(12, Math.round(dailyHours * 3.5)));
+
   return {
     riskLevel,
-    roadmapMode: aylaRoadmapMode(riskLevel),
-    qbankPlan: aylaQbankPlan(riskLevel),
-    flashcardPlan: aylaFlashcardPlan(riskLevel),
+    phase,
+    roadmapMode: aylaRoadmapMode(riskLevel, input),
+    qbankPlan: aylaQbankPlan(riskLevel, input),
+    flashcardPlan: aylaFlashcardPlan(riskLevel, input),
     mentorReview: aylaMentorRule(riskLevel, input),
-    daysToExam: aylaDaysToExam(input.examDate ?? input.exam_date) || aylaNumber(input.daysToExam ?? input.days_to_exam, 0),
+    daysToExam: aylaDaysToExam(input.examDate ?? input.exam_date),
+    daysToTarget: target.daysToTarget,
+    targetDate: target.targetDate,
+    targetLabel: target.targetLabel,
+    targetType: target.targetType,
+    goalType: target.goalType,
+    dailyHours,
+    weeklyStudyDays,
+    weeklyMinutes: dailyHours * 60 * weeklyStudyDays,
+    dailyQuestionTarget,
+    dailyFlashcardTarget,
+    weeklyQuestionTarget: dailyQuestionTarget * weeklyStudyDays,
+    weeklyAssessment: target.targetType === "match" ? "1 interview/application readiness review" : riskLevel === "Critical" ? "2 focused assessments" : "1 cumulative assessment",
+    intensity: riskLevel === "Critical" ? "Intensive" : riskLevel === "High Risk" ? "Structured" : riskLevel === "Focused Review" ? "Performance" : "Balanced",
     reason:
       riskLevel === "Baseline Needed"
-        ? "No baseline score or QBank data is available, so AylaMed starts with a diagnostic-first plan."
-        : riskLevel === "Critical"
-          ? "Exam timeline is short and performance is below target, so AylaMed uses urgent triage."
-          : riskLevel === "High Risk"
-            ? "Performance suggests foundation gaps, so AylaMed rebuilds concepts before heavy timed work."
-            : riskLevel === "Medium Risk"
-              ? "Performance is improving but weak systems still need targeted repair."
-              : "Student is near readiness, so AylaMed shifts toward timed mixed blocks and assessment review.",
+        ? "No reliable baseline score or QBank trend is available, so the first week collects data while building a sustainable routine."
+        : target.targetType === "match"
+          ? `The plan is organized around ${target.targetLabel}, with application, interview, rank-list, and final-week readiness tasks.`
+          : riskLevel === "Critical"
+            ? "The target date is close or performance is below target, so the roadmap prioritizes high-yield weak areas and rapid feedback."
+            : riskLevel === "High Risk"
+              ? "Performance suggests foundation gaps, so the plan combines concept repair with tutor-mode questions before heavy mixed blocks."
+              : riskLevel === "Medium Risk"
+                ? "The student has usable performance data, so the roadmap prioritizes weak systems, question review, and weekly reassessment."
+                : "Performance is near readiness, so the roadmap emphasizes timed mixed work, incorrect review, and final consolidation.",
   };
 }
 
 function aylaStudentFromDiagnostic(payload = {}, recommendation = aylaRecommendation(payload)) {
+  const preferredStudyDays = aylaCleanArray(payload.preferredStudyDays || payload.preferred_study_days);
   return {
     id: payload.studentId || payload.student_id || payload.id || aylaId("STU"),
+    aylaUserId: payload.aylaUserId || payload.ayla_user_id || payload.user_id || "",
     name: payload.studentName || payload.name || "Student",
     email: payload.email || "",
     phone: payload.phone || "",
     exam: payload.exam || payload.selectedExam || "USMLE Step 1",
     timezone: payload.timezone || "",
-    dailyHours: aylaNumber(payload.dailyHours ?? payload.daily_hours, 0),
+    goalType: payload.goalType || payload.goal_type || "Exam Day",
     examDate: payload.examDate || payload.exam_date || "",
+    matchDate: payload.matchDate || payload.match_date || "",
+    targetDate: recommendation.targetDate || "",
+    targetLabel: recommendation.targetLabel || "Target Day",
+    dailyHours: recommendation.dailyHours,
+    weeklyStudyDays: recommendation.weeklyStudyDays,
+    preferredStudyDays,
+    sessionLength: aylaNumber(payload.sessionLength ?? payload.session_length, 50),
+    restDay: payload.restDay || payload.rest_day || "Sunday",
     targetScore: aylaNumber(payload.targetScore ?? payload.target_score, 65),
     currentScore: aylaNumber(payload.currentScore ?? payload.current_score, 0),
     qbankCompleted: aylaNumber(payload.qbankCompleted ?? payload.qbank_completed, 0),
     qbankAverage: aylaNumber(payload.qbankAverage ?? payload.qbank_average, 0),
     riskLevel: recommendation.riskLevel,
     roadmapMode: recommendation.roadmapMode,
+    phase: recommendation.phase,
     weakAreas: aylaCleanArray(payload.selectedWeakAreas || payload.weakAreas || payload.weak_areas),
     selectedResources: aylaCleanArray(payload.selectedResources || payload.resources),
     studyPartner: payload.studyPartner || payload.study_partner || "Maybe later",
     studyLevel: payload.studyLevel || payload.study_level || "",
     attemptHistory: payload.attemptHistory || payload.attempt_history || "",
     mainDifficulty: payload.mainDifficulty || payload.main_difficulty || "",
+    graduationYear: payload.graduationYear || payload.graduation_year || "",
     status: payload.status || "Active",
     createdAt: payload.createdAt || aylaNow(),
     updatedAt: aylaNow(),
   };
 }
 
-function aylaBuildRoadmapTasks(student, recommendation = aylaRecommendation(student)) {
-  const weakArea = student.weakAreas?.[0] || "Baseline discovery";
+function aylaDayName(date) {
+  return new Intl.DateTimeFormat("en-US", { weekday: "long", timeZone: "UTC" }).format(date);
+}
 
-  if (recommendation.riskLevel === "Baseline Needed") {
-    return [
-      { id: aylaId("TASK"), studentId: student.id, title: "Complete baseline diagnostic assessment", category: "Assessment", priority: "High", status: "Pending", due: "Today", output: "Creates the first measurable baseline.", createdAt: aylaNow() },
-      { id: aylaId("TASK"), studentId: student.id, title: "Complete 20 tutor-mode discovery questions", category: "QBank", priority: "Medium", status: "Pending", due: "Today", output: "Finds the first weak systems and mistake patterns.", createdAt: aylaNow() },
-      { id: aylaId("TASK"), studentId: student.id, title: "Create first weak-area map", category: "Weak Areas", priority: "High", status: "Pending", due: "Today", output: "Feeds the Weak Area Engine.", createdAt: aylaNow() },
+function aylaTaskDuration(totalMinutes, ratio, minimum = 15) {
+  return Math.max(minimum, Math.round((totalMinutes * ratio) / 5) * 5);
+}
+
+function aylaPhasePlan(student, recommendation = aylaRecommendation(student)) {
+  const target = aylaTargetDateInfo(student);
+  const days = Math.max(7, target.daysToTarget || 90);
+  const today = new Date();
+
+  if (target.targetType === "match") {
+    const phases = [
+      { name: "Profile & Application Foundation", ratio: 0.35, focus: "CV, application narrative, documents, and program strategy" },
+      { name: "Interview Readiness", ratio: 0.35, focus: "Story bank, behavioral answers, specialty fit, and mock interviews" },
+      { name: "Ranking & Communication", ratio: 0.2, focus: "Program comparison, communication, and rank-list preparation" },
+      { name: "Match Week", ratio: 0.1, focus: "Final checklist, contingency planning, and wellbeing" },
     ];
+    let offset = 0;
+    return phases.map((phase, index) => {
+      const length = index === phases.length - 1 ? Math.max(1, days - offset) : Math.max(1, Math.round(days * phase.ratio));
+      const startDate = aylaDateOnly(aylaAddDays(today, offset));
+      const endDate = aylaDateOnly(aylaAddDays(today, offset + length - 1));
+      offset += length;
+      return { id: `PHASE-${index + 1}`, ...phase, startDate, endDate, days: length, active: recommendation.phase.includes(phase.name.split(" ")[0]) || index === 0 };
+    });
   }
 
-  return [
-    { id: aylaId("TASK"), studentId: student.id, title: `Repair priority weak area: ${weakArea}`, category: "Roadmap", priority: recommendation.riskLevel === "Critical" ? "Critical" : "High", status: "Pending", due: "Today", output: "Updates today's roadmap focus.", createdAt: aylaNow() },
-    { id: aylaId("TASK"), studentId: student.id, title: recommendation.qbankPlan, category: "QBank", priority: "High", status: "Pending", due: "Today", output: "Feeds QBank accuracy and incorrect tracking.", createdAt: aylaNow() },
-    { id: aylaId("TASK"), studentId: student.id, title: recommendation.flashcardPlan, category: "Flashcards", priority: "Medium", status: "Pending", due: "Today", output: "Reinforces incorrect and weak concepts.", createdAt: aylaNow() },
+  const phases = [
+    { name: "Foundation Build", ratio: 0.3, focus: "Core concepts and weak-system repair" },
+    { name: "System Mastery", ratio: 0.3, focus: "Targeted QBank blocks and structured review" },
+    { name: "Assessment & Consolidation", ratio: 0.25, focus: "Mixed blocks, incorrect review, and weekly assessment" },
+    { name: "Final Rapid Review", ratio: 0.15, focus: "High-yield recall, repeated misses, and exam-day readiness" },
   ];
+  let offset = 0;
+  return phases.map((phase, index) => {
+    const length = index === phases.length - 1 ? Math.max(1, days - offset) : Math.max(1, Math.round(days * phase.ratio));
+    const startDate = aylaDateOnly(aylaAddDays(today, offset));
+    const endDate = aylaDateOnly(aylaAddDays(today, offset + length - 1));
+    offset += length;
+    return { id: `PHASE-${index + 1}`, ...phase, startDate, endDate, days: length, active: recommendation.phase === phase.name || (index === 0 && recommendation.phase === "Baseline & Planning") };
+  });
+}
+
+function aylaIsStudyDay(student, date) {
+  const preferred = aylaCleanArray(student.preferredStudyDays);
+  const name = aylaDayName(date);
+  if (preferred.length) return preferred.includes(name);
+  if (student.restDay && name === student.restDay) return false;
+  const weeklyDays = Math.max(1, Math.min(7, aylaNumber(student.weeklyStudyDays, 6)));
+  const defaultOrder = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+  return defaultOrder.indexOf(name) < weeklyDays;
+}
+
+function aylaBuildRoadmapTasks(student, recommendation = aylaRecommendation(student)) {
+  const tasks = [];
+  const weakAreas = student.weakAreas?.length ? student.weakAreas : ["Baseline discovery"];
+  const resources = student.selectedResources?.length ? student.selectedResources : ["Primary review resource"];
+  const dailyMinutes = Math.max(60, recommendation.dailyHours * 60);
+  const today = new Date();
+  let focusIndex = 0;
+
+  for (let offset = 0; offset < 7; offset += 1) {
+    const date = aylaAddDays(today, offset);
+    const scheduledDate = aylaDateOnly(date);
+    const dayLabel = aylaDayName(date);
+    const isStudyDay = aylaIsStudyDay(student, date);
+
+    if (!isStudyDay) {
+      tasks.push({
+        id: aylaId("TASK"), studentId: student.id, title: "Recovery day + 15-minute light recall", category: "Recovery", taskType: "recovery", priority: "Low", status: "Pending", due: offset === 0 ? "Today" : dayLabel, scheduledDate, dayLabel, durationMinutes: 15, phase: recommendation.phase, system: "Wellbeing", topic: "Recovery and consistency", output: "Protects energy while maintaining recall.", knowledgeQuery: "recovery consistency study planning", createdAt: aylaNow(), updatedAt: aylaNow(),
+      });
+      continue;
+    }
+
+    const weakArea = weakAreas[focusIndex % weakAreas.length];
+    const resource = resources[focusIndex % resources.length];
+    focusIndex += 1;
+    const conceptMinutes = aylaTaskDuration(dailyMinutes, recommendation.riskLevel === "Focused Review" ? 0.25 : 0.35, 25);
+    const qbankMinutes = aylaTaskDuration(dailyMinutes, recommendation.riskLevel === "Baseline Needed" ? 0.35 : 0.4, 30);
+    const reviewMinutes = aylaTaskDuration(dailyMinutes, 0.2, 20);
+
+    const matchMode = recommendation.targetType === "match";
+    if (matchMode) {
+      const matchTopics = ["CV and experience inventory", "Personal statement story bank", "Behavioral interview answers", "Program research", "Communication and follow-up", "Rank-list decision framework", "Match-week contingency checklist"];
+      const topic = matchTopics[offset % matchTopics.length];
+      tasks.push({ id: aylaId("TASK"), studentId: student.id, title: `Complete ${topic}`, category: "Match Preparation", taskType: "match", priority: offset < 2 ? "High" : "Medium", status: "Pending", due: offset === 0 ? "Today" : dayLabel, scheduledDate, dayLabel, durationMinutes: conceptMinutes + qbankMinutes, phase: recommendation.phase, system: "Match", topic, output: `Moves the doctor closer to ${recommendation.targetLabel}.`, knowledgeQuery: `match day ${topic}`, createdAt: aylaNow(), updatedAt: aylaNow() });
+      tasks.push({ id: aylaId("TASK"), studentId: student.id, title: "Review progress and prepare tomorrow's evidence", category: "Review", taskType: "review", priority: "Medium", status: "Pending", due: offset === 0 ? "Today" : dayLabel, scheduledDate, dayLabel, durationMinutes: reviewMinutes, phase: recommendation.phase, system: "Match", topic: "Daily review", output: "Keeps application and interview preparation measurable.", knowledgeQuery: "match preparation progress review", createdAt: aylaNow(), updatedAt: aylaNow() });
+      continue;
+    }
+
+    tasks.push({
+      id: aylaId("TASK"), studentId: student.id, title: `${recommendation.phase}: revise ${weakArea}`, category: "Concept Review", taskType: "concept", priority: recommendation.riskLevel === "Critical" ? "Critical" : "High", status: "Pending", due: offset === 0 ? "Today" : dayLabel, scheduledDate, dayLabel, durationMinutes: conceptMinutes, phase: recommendation.phase, system: weakArea, topic: `${weakArea} high-yield review`, resource, output: `Uses ${resource} to repair the highest-priority gap.`, knowledgeQuery: `${student.exam} ${weakArea} ${recommendation.phase}`, createdAt: aylaNow(), updatedAt: aylaNow(),
+    });
+    tasks.push({
+      id: aylaId("TASK"), studentId: student.id, title: `Complete ${recommendation.dailyQuestionTarget} ${weakArea} questions`, category: "QBank", taskType: "qbank", priority: "High", status: "Pending", due: offset === 0 ? "Today" : dayLabel, scheduledDate, dayLabel, durationMinutes: qbankMinutes, phase: recommendation.phase, system: weakArea, topic: "Targeted QBank", questionCount: recommendation.dailyQuestionTarget, mode: recommendation.riskLevel === "Focused Review" ? "Timed Mixed" : "Tutor Mode", output: "Measures understanding and creates new weak-area evidence.", knowledgeQuery: `${weakArea} qbank incorrect review`, createdAt: aylaNow(), updatedAt: aylaNow(),
+    });
+    tasks.push({
+      id: aylaId("TASK"), studentId: student.id, title: `Review incorrects + ${recommendation.dailyFlashcardTarget} recall cards`, category: "Active Recall", taskType: "flashcards", priority: "Medium", status: "Pending", due: offset === 0 ? "Today" : dayLabel, scheduledDate, dayLabel, durationMinutes: reviewMinutes, phase: recommendation.phase, system: weakArea, topic: "Incorrect review", output: "Converts misses into active-recall prompts and tomorrow's priorities.", knowledgeQuery: `${weakArea} active recall incorrect review`, createdAt: aylaNow(), updatedAt: aylaNow(),
+    });
+  }
+
+  return tasks;
 }
 
 function aylaBuildQbankBlock(student, recommendation = aylaRecommendation(student), override = {}) {
+  const questionCount = aylaNumber(override.questionCount ?? override.question_count, recommendation.dailyQuestionTarget);
   return {
     id: override.id || aylaId("QB"),
     studentId: student.id,
     exam: student.exam,
     system: override.system || student.weakAreas?.[0] || "Baseline",
-    topic: override.topic || (recommendation.riskLevel === "Baseline Needed" ? "Diagnostic Discovery" : "Weak Concept Repair"),
+    topic: override.topic || (recommendation.riskLevel === "Baseline Needed" ? "Diagnostic Discovery" : `${recommendation.phase} Weak Concept Repair`),
     mode: override.mode || (recommendation.riskLevel === "Focused Review" ? "Timed Mixed" : recommendation.riskLevel === "Critical" ? "Rescue Blocks" : "Tutor Mode"),
-    questions: override.questions || recommendation.qbankPlan,
+    questions: override.questions || `${questionCount} questions`,
+    questionCount,
     priority: override.priority || (recommendation.riskLevel === "Critical" ? "Critical" : "High"),
     reviewMethod: override.reviewMethod || (recommendation.riskLevel === "Focused Review" ? "Timed review + incorrect-only notes" : "Tutor-mode explanations + why-wrong notes"),
+    phase: recommendation.phase,
+    scheduledDate: override.scheduledDate || aylaDateOnly(),
     status: override.status || "Assigned",
     createdAt: aylaNow(),
     updatedAt: aylaNow(),
@@ -48077,38 +48461,89 @@ function aylaBuildQbankBlock(student, recommendation = aylaRecommendation(studen
 
 function aylaBuildWeakAreaLogs(student, recommendation = aylaRecommendation(student)) {
   const areas = student.weakAreas?.length ? student.weakAreas : ["Baseline discovery pending"];
-  return areas.map((area) => ({
-    id: aylaId("WEAK"),
-    studentId: student.id,
-    exam: student.exam,
-    system: area,
-    topic: "Pending topic mapping",
-    weaknessType: recommendation.riskLevel === "Baseline Needed" ? "Baseline Discovery" : "Knowledge Gap",
-    priority: recommendation.riskLevel === "Critical" ? "Critical" : "High",
-    status: "Open",
-    action: "Assign mapped QBank + flashcards",
-    createdAt: aylaNow(),
-    updatedAt: aylaNow(),
+  return areas.map((area, index) => ({
+    id: aylaId("WEAK"), studentId: student.id, exam: student.exam, system: area, topic: index === 0 ? "Primary roadmap focus" : "Secondary roadmap focus", weaknessType: recommendation.riskLevel === "Baseline Needed" ? "Baseline Discovery" : "Knowledge Gap", priority: index === 0 ? (recommendation.riskLevel === "Critical" ? "Critical" : "High") : "Medium", status: "Open", action: `Review concepts → complete ${recommendation.dailyQuestionTarget} targeted questions → convert incorrects to recall`, phase: recommendation.phase, createdAt: aylaNow(), updatedAt: aylaNow(),
   }));
 }
 
 function aylaBuildFlashcards(student, recommendation = aylaRecommendation(student), source = "Adaptive Roadmap") {
-  const weakArea = student.weakAreas?.[0] || "Baseline";
-  return [
-    {
-      id: aylaId("CARD"),
-      studentId: student.id,
-      exam: student.exam,
-      front: `What is today's highest-yield priority for ${weakArea}?`,
-      back: recommendation.riskLevel === "Baseline Needed" ? "Complete baseline assessment and discovery QBank to identify true weak areas." : "Repair the concept, answer targeted questions, and convert wrong explanations into recall cards.",
-      source,
-      priority: recommendation.riskLevel === "Critical" ? "Critical" : "High",
-      status: "Due",
-      nextReview: "Today",
-      createdAt: aylaNow(),
-      updatedAt: aylaNow(),
-    },
-  ];
+  const areas = student.weakAreas?.length ? student.weakAreas.slice(0, 3) : ["Baseline planning"];
+  return areas.map((area, index) => ({
+    id: aylaId("CARD"), studentId: student.id, exam: student.exam, front: `What is the next action when ${area} remains weak after review?`, back: recommendation.riskLevel === "Baseline Needed" ? "Collect baseline evidence with tutor-mode questions, record the reason for each miss, and reprioritize the roadmap." : `Revisit the core concept, complete a focused ${area} block, classify each error, and schedule active recall.`, source, system: area, priority: index === 0 && recommendation.riskLevel === "Critical" ? "Critical" : index === 0 ? "High" : "Medium", status: "Due", nextReview: index === 0 ? "Today" : "Tomorrow", createdAt: aylaNow(), updatedAt: aylaNow(),
+  }));
+}
+
+function aylaKnowledgeExplicitScopes(item = {}) {
+  const raw = item.allowed_apps || item.scopes || item.apps || item.audience_scopes || [];
+  if (Array.isArray(raw)) return raw.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
+  return String(raw || "").split(/[\n,]+/).map((value) => value.trim().toLowerCase()).filter(Boolean);
+}
+
+function aylaTrainingItemEligible(item = {}, document = null) {
+  const active = item.active === true || item.is_active === true;
+  const approval = String(item.approval_status || item.status || "").toLowerCase();
+  const medical = String(item.medical_review_status || "approved").toLowerCase();
+  if (!active || !["approved", "active", "published"].includes(approval)) return false;
+  if (!["approved", "not_required", "", "complete"].includes(medical)) return false;
+  if (item.enforce_in_ai === false) return false;
+
+  const scopes = aylaKnowledgeExplicitScopes(item);
+  if (scopes.length && !scopes.some((scope) => ["all", "aylamed", "ayla", "medical_students", "lms_tutor_ai"].includes(scope))) return false;
+
+  const text = [item.title, item.category, item.source, item.audience, item.tags, item.content, document?.title, document?.category].join(" ").toLowerCase();
+  const educationSignals = ["education", "medical", "usmle", "first aid", "pathoma", "pathology", "physiology", "pharmacology", "anatomy", "biochemistry", "microbiology", "immunology", "cardiology", "renal", "neurology", "exam", "qbank", "revision", "match"].some((signal) => text.includes(signal));
+  const blockedSignals = ["lead objection", "sales script", "pricing objection", "whatsapp template", "campaign", "follow-up automation", "commission", "affiliate"].some((signal) => text.includes(signal));
+  return educationSignals && !blockedSignals;
+}
+
+function aylaKnowledgeTokens(value = "") {
+  return Array.from(new Set(String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").split(/\s+/).filter((token) => token.length > 2)));
+}
+
+function aylaSanitizeTrainingKnowledge(item = {}, document = null, score = 0) {
+  return {
+    id: item.id,
+    document_id: item.document_id || null,
+    document_title: document?.title || null,
+    title: item.title || document?.title || "Approved medical knowledge",
+    category: item.category || document?.category || "Education Knowledge",
+    tags: Array.isArray(item.tags) ? item.tags : aylaCleanArray(item.tags),
+    content: String(item.content || item.body || item.text || "").slice(0, 6000),
+    structured: item.structured && typeof item.structured === "object" ? item.structured : null,
+    source: "AI Training Center",
+    approval_status: item.approval_status || item.status || "approved",
+    score,
+  };
+}
+
+async function aylaSearchTrainingKnowledge({ query = "", limit = 8 } = {}) {
+  const crmDb = await readAylaCrmSnapshot();
+  const documents = new Map(ensureCrmArray(crmDb, "ai_training_documents").map((doc) => [String(doc.id), doc]));
+  const tokens = aylaKnowledgeTokens(query);
+  const rows = ensureCrmArray(crmDb, "ai_training_items")
+    .map((item) => ({ item, document: documents.get(String(item.document_id || "")) || null }))
+    .filter(({ item, document }) => aylaTrainingItemEligible(item, document))
+    .map(({ item, document }) => {
+      const haystack = [item.title, item.category, item.tags, item.content, item.structured, document?.title, document?.category].join(" ").toLowerCase();
+      let score = 0;
+      for (const token of tokens) {
+        if (String(item.title || "").toLowerCase().includes(token)) score += 12;
+        if (String(document?.title || "").toLowerCase().includes(token)) score += 10;
+        if (haystack.includes(token)) score += 3;
+      }
+      if (String(item.source || "").includes("education")) score += 2;
+      return { item, document, score };
+    })
+    .filter((row) => !tokens.length || row.score > 0)
+    .sort((a, b) => b.score - a.score || String(a.item.title || "").localeCompare(String(b.item.title || "")))
+    .slice(0, Math.max(1, Math.min(20, Number(limit || 8))))
+    .map(({ item, document, score }) => aylaSanitizeTrainingKnowledge(item, document, score));
+  return rows;
+}
+
+async function aylaKnowledgeForStudent(db, student, recommendation = aylaRecommendation(student), limit = 6) {
+  const query = [student.exam, recommendation.phase, recommendation.targetLabel, ...(aylaCleanArray(student.weakAreas)), ...(aylaCleanArray(student.selectedResources))].filter(Boolean).join(" ");
+  return aylaSearchTrainingKnowledge({ query, limit });
 }
 
 function aylaPartnerScore(a, b) {
@@ -48216,7 +48651,7 @@ async function aylaGetAuthenticatedUser(req) {
     throw e;
   }
 
-  const db = await readLiveDb();
+  const db = await readAylaDb();
   const user = aylaGetItem(db, "aylaUsers", decoded.sub);
   if (!user?.id || user.status === "deleted") {
     const e = new Error("AylaMed user not found");
@@ -48494,7 +48929,7 @@ function aylaCascadeBeforeDelete(db, collectionKey, existing) {
 async function aylaHandleStripeCheckoutCompleted(event = {}, req = null) {
   const session = event.data?.object || {};
   const metadata = session.metadata || {};
-  const db = await readLiveDb();
+  const db = await readAylaDb();
   aylaEnsureSeedData(db);
   aylaEnsureCollection(db, "aylaPayments");
   aylaEnsureCollection(db, "aylaEnrollments");
@@ -48523,6 +48958,9 @@ async function aylaHandleStripeCheckoutCompleted(event = {}, req = null) {
     existingId: enrollmentId || undefined,
     paymentId,
   });
+  enrollment.stripe_subscription_id = session.subscription || enrollment.stripe_subscription_id || null;
+  enrollment.updatedAt = aylaNow();
+  aylaSetItem(db, "aylaEnrollments", enrollment);
 
   const completedPayment = {
     ...payment,
@@ -48530,6 +48968,7 @@ async function aylaHandleStripeCheckoutCompleted(event = {}, req = null) {
     checkout_session_id: session.id || payment.checkout_session_id || null,
     stripe_session_id: session.id || payment.stripe_session_id || null,
     stripe_payment_intent: session.payment_intent || payment.stripe_payment_intent || null,
+    stripe_subscription_id: session.subscription || payment.stripe_subscription_id || null,
     enrollment_id: enrollment.id,
     user_id: userId,
     ayla_user_id: userId,
@@ -48552,13 +48991,13 @@ async function aylaHandleStripeCheckoutCompleted(event = {}, req = null) {
   aylaSetItem(db, "aylaPayments", completedPayment);
   await aylaAccessLog(db, "stripe_checkout_completed_access_granted", { userId, planId, paymentId, enrollmentId: enrollment.id });
   await aylaLog(db, "billing", "AylaMed Stripe payment completed and access granted", { userId, planId, paymentId, enrollmentId: enrollment.id });
-  await writeLiveDb(db);
+  await writeAylaDb(db);
   return { action: "aylamed_checkout_completed_access_granted", payment: completedPayment, enrollment };
 }
 
 async function aylaHandleStripeCheckoutExpired(event = {}) {
   const session = event.data?.object || {};
-  const db = await readLiveDb();
+  const db = await readAylaDb();
   const payment = aylaGetItem(db, "aylaPayments", session.id) || aylaValues(db, "aylaPayments").find((p) => p.stripe_session_id === session.id);
   if (payment) {
     payment.status = "expired";
@@ -48577,13 +49016,13 @@ async function aylaHandleStripeCheckoutExpired(event = {}) {
     }
   }
   await aylaAccessLog(db, "stripe_checkout_expired", { paymentId: payment?.id || session.id || null });
-  await writeLiveDb(db);
+  await writeAylaDb(db);
   return { action: "aylamed_checkout_expired", payment: payment || null };
 }
 
 async function aylaHandleStripePaymentFailed(event = {}) {
   const intent = event.data?.object || {};
-  const db = await readLiveDb();
+  const db = await readAylaDb();
   const payment = aylaValues(db, "aylaPayments").find((p) => p.stripe_payment_intent === intent.id || p.payment_intent === intent.id);
   if (payment) {
     payment.status = "failed";
@@ -48594,25 +49033,87 @@ async function aylaHandleStripePaymentFailed(event = {}) {
     aylaSetItem(db, "aylaPayments", payment);
   }
   await aylaAccessLog(db, "stripe_payment_failed", { paymentId: payment?.id || null, paymentIntent: intent.id || null });
-  await writeLiveDb(db);
+  await writeAylaDb(db);
   return { action: "aylamed_payment_failed", payment: payment || null };
+}
+
+
+async function aylaHandleStripeInvoicePaid(event = {}) {
+  const invoice = event.data?.object || {};
+  const metadata = { ...(invoice.metadata || {}), ...(invoice.subscription_details?.metadata || {}), ...(invoice.parent?.subscription_details?.metadata || {}) };
+  const db = await readAylaDb();
+  aylaEnsureSeedData(db);
+  const userId = metadata.aylaUserId || metadata.userId || null;
+  const planId = metadata.aylaPlanId || metadata.planId || "AYLA-PLAN-MONTHLY";
+  const plan = aylaGetItem(db, "aylaPlans", planId);
+  if (!userId || !plan) return { action: "aylamed_invoice_paid_ignored_missing_metadata" };
+
+  const existing = aylaValues(db, "aylaEnrollments").find((row) => String(row.user_id || "") === String(userId) && String(row.plan_id || "") === String(planId));
+  const enrollment = aylaCreateOrUpdateEnrollment(db, { userId, plan, type: "paid", source: "stripe_invoice_paid", accessGranted: true, startsAt: aylaNow(), existingId: existing?.id || null, paymentId: invoice.id || null });
+  enrollment.stripe_subscription_id = invoice.subscription || invoice.parent?.subscription_details?.subscription || existing?.stripe_subscription_id || null;
+  enrollment.access_expires_at = aylaAccessExpiresAt({ plan, startsAt: existing?.access_expires_at && new Date(existing.access_expires_at).getTime() > Date.now() ? existing.access_expires_at : aylaNow(), accessDays: 30 });
+  enrollment.status = "active";
+  enrollment.updatedAt = aylaNow();
+  aylaSetItem(db, "aylaEnrollments", enrollment);
+
+  const payment = { id: invoice.id || aylaId("AYLA-INVOICE"), stripe_invoice_id: invoice.id || null, stripe_subscription_id: enrollment.stripe_subscription_id, enrollment_id: enrollment.id, user_id: userId, ayla_user_id: userId, plan_id: planId, plan_name: plan.name, amount_cents: Number(invoice.amount_paid || 0), final_amount_cents: Number(invoice.amount_paid || 0), currency: invoice.currency || plan.currency || "usd", status: "completed", payment_status: "completed", payment_method: "stripe_subscription", source: "aylamed_invoice_paid", paid_at: aylaNow(), createdAt: aylaNow(), updatedAt: aylaNow(), metadata };
+  aylaSetItem(db, "aylaPayments", payment);
+  await aylaAccessLog(db, "stripe_monthly_renewal_access_extended", { userId, planId, paymentId: payment.id, enrollmentId: enrollment.id });
+  await writeAylaDb(db);
+  return { action: "aylamed_monthly_renewal_access_extended", payment, enrollment };
+}
+
+async function aylaHandleStripeInvoiceFailed(event = {}) {
+  const invoice = event.data?.object || {};
+  const metadata = { ...(invoice.metadata || {}), ...(invoice.subscription_details?.metadata || {}), ...(invoice.parent?.subscription_details?.metadata || {}) };
+  const db = await readAylaDb();
+  aylaEnsureSeedData(db);
+  const payment = { id: invoice.id || aylaId("AYLA-INVOICE"), stripe_invoice_id: invoice.id || null, stripe_subscription_id: invoice.subscription || null, user_id: metadata.aylaUserId || null, plan_id: metadata.aylaPlanId || "AYLA-PLAN-MONTHLY", amount_cents: Number(invoice.amount_due || 0), currency: invoice.currency || "usd", status: "failed", payment_status: "failed", payment_method: "stripe_subscription", source: "aylamed_invoice_failed", failure_message: "Monthly renewal payment failed", failed_at: aylaNow(), createdAt: aylaNow(), updatedAt: aylaNow(), metadata };
+  aylaSetItem(db, "aylaPayments", payment);
+  await aylaAccessLog(db, "stripe_monthly_renewal_failed", { userId: payment.user_id, planId: payment.plan_id, paymentId: payment.id });
+  await writeAylaDb(db);
+  return { action: "aylamed_monthly_renewal_failed", payment };
+}
+
+async function aylaHandleStripeSubscriptionDeleted(event = {}) {
+  const subscription = event.data?.object || {};
+  const metadata = subscription.metadata || {};
+  const db = await readAylaDb();
+  aylaEnsureSeedData(db);
+  const enrollment = aylaValues(db, "aylaEnrollments").find((row) => String(row.stripe_subscription_id || "") === String(subscription.id || "") || (metadata.aylaEnrollmentId && String(row.id) === String(metadata.aylaEnrollmentId)));
+  if (enrollment) {
+    enrollment.cancel_at_period_end = true;
+    enrollment.subscription_status = "cancelled";
+    enrollment.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaEnrollments", enrollment);
+  }
+  await aylaAccessLog(db, "stripe_subscription_cancelled", { subscriptionId: subscription.id || null, enrollmentId: enrollment?.id || null, userId: enrollment?.user_id || metadata.aylaUserId || null });
+  await writeAylaDb(db);
+  return { action: "aylamed_subscription_cancelled", enrollment: enrollment || null };
 }
 
 async function aylaHandleStripeWebhookEvent(event = {}, req = null) {
   if (event.type === "checkout.session.completed") return aylaHandleStripeCheckoutCompleted(event, req);
   if (event.type === "checkout.session.expired") return aylaHandleStripeCheckoutExpired(event);
+  if (event.type === "invoice.paid") return aylaHandleStripeInvoicePaid(event);
+  if (event.type === "invoice.payment_failed") return aylaHandleStripeInvoiceFailed(event);
+  if (event.type === "customer.subscription.deleted") return aylaHandleStripeSubscriptionDeleted(event);
   if (event.type === "payment_intent.payment_failed") return aylaHandleStripePaymentFailed(event);
 
-  const db = await readLiveDb();
+  const db = await readAylaDb();
   aylaEnsureSeedData(db);
   await aylaAccessLog(db, "stripe_event_ignored", { eventId: event.id || null, eventType: event.type || null });
-  await writeLiveDb(db);
+  await writeAylaDb(db);
   return { action: "aylamed_ignored", event_type: event.type };
 }
 
 function aylaEnsureSeedData(db) {
   aylaEnsureCollection(db, "aylaUsers");
   for (const key of Object.keys(AYLA_COLLECTIONS)) aylaEnsureCollection(db, key);
+  db.aylaSettings = aylaMergeSettings(db.aylaSettings || {});
+  db.aylaAiUsageSettings = aylaMergeAiUsageSettings(db.aylaAiUsageSettings || {});
+  aylaEnsureCollection(db, "aylaPlanAiLimits");
+  aylaEnsureCollection(db, "aylaStudentAiOverrides");
 
   if (!aylaValues(db, "aylaRoadmapRules").length) {
     [
@@ -48620,34 +49121,60 @@ function aylaEnsureSeedData(db) {
       { id: "RR-AYLA-002", name: "Foundation Rebuild Roadmap", riskLevel: "High Risk", status: "Active", condition: "Score below 45 or QBank average below 45.", roadmapOutput: "Foundation Rebuild Roadmap", qbankPlan: "Tutor-mode weak-system blocks", flashcardPlan: "30 weak-concept cards", mentorRule: "Required if exam is close" },
       { id: "RR-AYLA-003", name: "System-wise Strengthening Roadmap", riskLevel: "Medium Risk", status: "Active", condition: "Score or QBank average between 45 and 59.", roadmapOutput: "System-wise Strengthening Roadmap", qbankPlan: "Targeted weak-system blocks", flashcardPlan: "25 targeted cards", mentorRule: "Optional" },
       { id: "RR-AYLA-004", name: "Exam Readiness Roadmap", riskLevel: "Focused Review", status: "Active", condition: "Score or QBank average 60+.", roadmapOutput: "Exam Readiness Roadmap", qbankPlan: "Timed mixed blocks", flashcardPlan: "Incorrects and assessment misses", mentorRule: "Optional" },
-      { id: "RR-AYLA-005", name: "Urgent Rescue Roadmap", riskLevel: "Critical", status: "Active", condition: "Exam within 30 days and score below target.", roadmapOutput: "Urgent Rescue Roadmap", qbankPlan: "High-yield weak areas only", flashcardPlan: "Priority incorrect deck", mentorRule: "Required" },
+      { id: "RR-AYLA-005", name: "Urgent Rescue Roadmap", riskLevel: "Critical", status: "Active", condition: "Target within 30 days and performance below target.", roadmapOutput: "Urgent Rescue Roadmap", qbankPlan: "High-yield weak areas only", flashcardPlan: "Priority incorrect deck", mentorRule: "Required" },
     ].forEach((item) => aylaSetItem(db, "aylaRoadmapRules", { ...item, createdAt: aylaNow(), updatedAt: aylaNow() }));
   }
 
   if (!aylaValues(db, "aylaWeakAreaRules").length) {
     [
-      { id: "WA-AYLA-001", name: "Knowledge Gap Detector", weaknessType: "Knowledge Gap", priority: "High", status: "Active", action: "Mapped lecture + tutor-mode QBank + concept cards" },
+      { id: "WA-AYLA-001", name: "Knowledge Gap Detector", weaknessType: "Knowledge Gap", priority: "High", status: "Active", action: "Approved knowledge + tutor-mode QBank + concept cards" },
       { id: "WA-AYLA-002", name: "Recall Weakness Detector", weaknessType: "Recall Weakness", priority: "Medium", status: "Active", action: "Spaced repetition cards" },
       { id: "WA-AYLA-003", name: "Question Interpretation Detector", weaknessType: "Question Interpretation", priority: "High", status: "Active", action: "Stem breakdown drills" },
-      { id: "WA-AYLA-004", name: "Repeated Incorrect Escalation", weaknessType: "Repeated Incorrects", priority: "Critical", status: "Active", action: "Priority deck + mentor review" },
+      { id: "WA-AYLA-004", name: "Repeated Incorrect Escalation", weaknessType: "Repeated Incorrects", priority: "Critical", status: "Active", action: "Priority deck + review escalation" },
     ].forEach((item) => aylaSetItem(db, "aylaWeakAreaRules", { ...item, createdAt: aylaNow(), updatedAt: aylaNow() }));
   }
 
-  if (!aylaValues(db, "aylaKnowledgeLibrary").length) {
-    [
-      { id: "KL-AYLA-001", title: "Roadmap Decision Logic", type: "Roadmap Knowledge", status: "Active", tags: ["roadmap", "risk", "adaptive"], content: "Choose roadmap intensity based on score, QBank average, exam date, daily hours, and weak areas.", aiUse: "Used by diagnostic and roadmap generation." },
-      { id: "KL-AYLA-002", title: "QBank Assignment Logic", type: "QBank Mapping", status: "Active", tags: ["qbank", "blocks"], content: "Low scores use tutor mode. Medium risk uses targeted blocks. Readiness uses timed mixed blocks.", aiUse: "Used by assign-qbank-block." },
-      { id: "KL-AYLA-003", title: "Flashcard Logic", type: "Flashcard Rules", status: "Active", tags: ["flashcards", "incorrects"], content: "Wrong questions, repeated incorrects, and assessment mistakes should become active recall cards.", aiUse: "Used by generate-flashcards." },
-    ].forEach((item) => aylaSetItem(db, "aylaKnowledgeLibrary", { ...item, createdAt: aylaNow(), updatedAt: aylaNow() }));
-  }
+  const demo = db.aylaSettings.demo;
+  const demoDays = Math.max(1, Math.min(60, Number(demo.duration_days || 7)));
+  const existingDemo = aylaGetItem(db, "aylaPlans", "AYLA-PLAN-DEMO");
+  aylaSetItem(db, "aylaPlans", aylaNormalizePlanPayload({
+    ...(existingDemo || {}),
+    id: "AYLA-PLAN-DEMO",
+    name: aylaTemplate(demo.plan_name, demoDays),
+    description: demo.description,
+    plan_type: "demo",
+    billing_type: "free",
+    price_cents: 0,
+    access_days: demoDays,
+    is_demo: true,
+    included_features: demo.included_features,
+    is_active: demo.enabled !== false,
+    is_public: demo.enabled !== false,
+    status: demo.enabled !== false ? "active" : "inactive",
+  }, existingDemo || {}));
 
-  // v156: Seed editable AylaMed-only demo/monthly/full plans if no AylaMed plan exists.
-  if (!aylaValues(db, "aylaPlans").length) {
-    [
-      aylaNormalizePlanPayload({ id: "AYLA-PLAN-DEMO-2D", name: "AylaMed 2-Day Demo", description: "Demo access for AylaMed only.", plan_type: "demo", billing_type: "free", price_cents: 0, access_days: 2, is_demo: true, included_features: ["diagnostic", "roadmap", "flashcards", "qbank", "weak_areas", "study_partner"], is_public: true }),
-      aylaNormalizePlanPayload({ id: "AYLA-PLAN-MONTHLY", name: "AylaMed Monthly Access", description: "Monthly AylaMed access.", plan_type: "monthly", billing_type: "monthly", price_cents: 10000, access_days: 30, included_features: ["diagnostic", "roadmap", "flashcards", "qbank", "weak_areas", "assessments", "study_partner", "knowledge_search"], is_public: true }),
-      aylaNormalizePlanPayload({ id: "AYLA-PLAN-FULL", name: "AylaMed Full Access", description: "Full AylaMed access.", plan_type: "full_access", billing_type: "one_time", price_cents: 30000, access_days: 150, is_full_access: true, included_features: ["diagnostic", "roadmap", "flashcards", "qbank", "weak_areas", "assessments", "study_partner", "knowledge_search", "ai_review"], is_public: true }),
-    ].forEach((item) => aylaSetItem(db, "aylaPlans", item));
+  const existingMonthly = aylaGetItem(db, "aylaPlans", "AYLA-PLAN-MONTHLY");
+  aylaSetItem(db, "aylaPlans", aylaNormalizePlanPayload({
+    ...(existingMonthly || {}),
+    id: "AYLA-PLAN-MONTHLY",
+    name: existingMonthly?.name || "AylaMed Monthly Access",
+    description: existingMonthly?.description || "Monthly adaptive preparation through Exam Day or Match Day. Renews monthly until cancelled.",
+    plan_type: "monthly",
+    billing_type: "subscription_monthly",
+    price_cents: Number(existingMonthly?.price_cents ?? 10000),
+    access_days: 30,
+    included_features: existingMonthly?.included_features?.length ? existingMonthly.included_features : ["diagnostic", "roadmap", "flashcards", "qbank", "weak_areas", "assessments", "study_partner", "knowledge_search", "ai_coach"],
+    is_active: existingMonthly?.is_active !== false,
+    is_public: existingMonthly?.is_public !== false,
+    status: existingMonthly?.is_active === false ? "inactive" : "active",
+  }, existingMonthly || {}));
+
+  for (const oldPlan of aylaValues(db, "aylaPlans")) {
+    if (["AYLA-PLAN-DEMO", "AYLA-PLAN-MONTHLY"].includes(String(oldPlan.id))) continue;
+    const text = `${oldPlan.id || ""} ${oldPlan.name || ""} ${oldPlan.plan_type || ""}`.toLowerCase();
+    if (text.includes("full") || text.includes("demo")) {
+      aylaSetItem(db, "aylaPlans", aylaNormalizePlanPayload({ ...oldPlan, is_active: false, is_public: false, status: "archived" }, oldPlan));
+    }
   }
 }
 
@@ -48656,7 +49183,8 @@ function aylaRegisterCrud(collectionKey, config) {
 
   app.get(route, async (req, res) => {
     try {
-      const db = await readLiveDb();
+      if (collectionKey !== "aylaPlans") await aylaRequireAdmin(req);
+      const db = await readAylaDb();
       aylaEnsureSeedData(db);
       let rows = aylaFilterRows(aylaValues(db, collectionKey), req.query);
       if (collectionKey === "aylaPlans") rows = rows.map((row) => aylaNormalizePlanPayload(row, row));
@@ -48669,7 +49197,8 @@ function aylaRegisterCrud(collectionKey, config) {
 
   app.get(`${route}/:id`, async (req, res) => {
     try {
-      const db = await readLiveDb();
+      if (collectionKey !== "aylaPlans") await aylaRequireAdmin(req);
+      const db = await readAylaDb();
       aylaEnsureSeedData(db);
       let item = aylaGetItem(db, collectionKey, req.params.id);
       if (!item) return aylaSendError(res, 404, "AylaMed record not found");
@@ -48684,7 +49213,8 @@ function aylaRegisterCrud(collectionKey, config) {
   if (!customPost) {
     app.post(route, async (req, res) => {
       try {
-        const db = await readLiveDb();
+        await aylaRequireAdmin(req);
+        const db = await readAylaDb();
         aylaEnsureSeedData(db);
         let item = { id: req.body.id || aylaId(prefix), ...req.body, createdAt: req.body.createdAt || aylaNow(), updatedAt: aylaNow() };
         if (collectionKey === "aylaPlans") item = aylaNormalizePlanPayload(req.body);
@@ -48692,7 +49222,7 @@ function aylaRegisterCrud(collectionKey, config) {
         if (collectionKey === "aylaAccessLogs") item = aylaNormalizeAccessLogForAdmin(db, item);
         aylaSetItem(db, collectionKey, item);
         await aylaLog(db, "create", `Created ${collectionKey} record`, { collectionKey, id: item.id });
-        await writeLiveDb(db);
+        await writeAylaDb(db);
         return aylaSendOk(res, { [label]: item }, 201);
       } catch (error) {
         return aylaSendError(res, 500, error.message || "Failed to create AylaMed record");
@@ -48702,7 +49232,8 @@ function aylaRegisterCrud(collectionKey, config) {
 
   app.put(`${route}/:id`, async (req, res) => {
     try {
-      const db = await readLiveDb();
+      if (collectionKey !== "aylaPlans") await aylaRequireAdmin(req);
+      const db = await readAylaDb();
       aylaEnsureSeedData(db);
       const existing = aylaGetItem(db, collectionKey, req.params.id);
       if (!existing) return aylaSendError(res, 404, "AylaMed record not found");
@@ -48712,7 +49243,7 @@ function aylaRegisterCrud(collectionKey, config) {
       if (collectionKey === "aylaAccessLogs") updated = aylaNormalizeAccessLogForAdmin(db, updated);
       aylaSetItem(db, collectionKey, updated);
       await aylaLog(db, "update", `Updated ${collectionKey} record`, { collectionKey, id: updated.id });
-      await writeLiveDb(db);
+      await writeAylaDb(db);
       return aylaSendOk(res, { [label]: updated });
     } catch (error) {
       return aylaSendError(res, 500, error.message || "Failed to update AylaMed record");
@@ -48721,7 +49252,8 @@ function aylaRegisterCrud(collectionKey, config) {
 
   app.delete(`${route}/:id`, async (req, res) => {
     try {
-      const db = await readLiveDb();
+      await aylaRequireAdmin(req);
+      const db = await readAylaDb();
       aylaEnsureSeedData(db);
       const existing = aylaGetItem(db, collectionKey, req.params.id);
       if (!existing) return aylaSendError(res, 404, "AylaMed record not found");
@@ -48729,7 +49261,7 @@ function aylaRegisterCrud(collectionKey, config) {
       const deleted = aylaDeleteItem(db, collectionKey, req.params.id);
       if (!deleted) return aylaSendError(res, 404, "AylaMed record not found");
       await aylaLog(db, "delete", `Deleted ${collectionKey} record`, { collectionKey, id: req.params.id, cascadeDeleted });
-      await writeLiveDb(db);
+      await writeAylaDb(db);
       return aylaSendOk(res, { deletedId: req.params.id, cascadeDeleted });
     } catch (error) {
       return aylaSendError(res, 500, error.message || "Failed to delete AylaMed record");
@@ -48747,7 +49279,7 @@ app.post("/api/ayla/auth/register", async (req, res) => {
     const password = String(req.body.password || "");
     if (!email || !password) return aylaSendError(res, 400, "email and password are required");
 
-    const db = await readLiveDb();
+    const db = await readAylaDb();
     aylaEnsureSeedData(db);
     if (aylaFindUserByEmail(db, email)) return aylaSendError(res, 409, "AylaMed user already exists");
 
@@ -48767,7 +49299,7 @@ app.post("/api/ayla/auth/register", async (req, res) => {
 
     aylaSetItem(db, "aylaUsers", user);
     await aylaLog(db, "auth", "AylaMed user registered", { userId: user.id, email: user.email });
-    await writeLiveDb(db);
+    await writeAylaDb(db);
 
     return aylaSendOk(res, { user: aylaSanitizeUser(user), token: aylaSignAuthToken(user) }, 201);
   } catch (error) {
@@ -48779,7 +49311,7 @@ app.post("/api/ayla/auth/login", async (req, res) => {
   try {
     const email = aylaNormalizeEmail(req.body.email);
     const password = String(req.body.password || "");
-    const db = await readLiveDb();
+    const db = await readAylaDb();
     aylaEnsureSeedData(db);
     const user = aylaFindUserByEmail(db, email);
     if (!user || !verifyPassword(password, user)) return aylaSendError(res, 401, "Invalid AylaMed email or password");
@@ -48788,7 +49320,7 @@ app.post("/api/ayla/auth/login", async (req, res) => {
     user.lastLoginAt = aylaNow();
     user.updatedAt = aylaNow();
     aylaSetItem(db, "aylaUsers", user);
-    await writeLiveDb(db);
+    await writeAylaDb(db);
 
     return aylaSendOk(res, { user: aylaSanitizeUser(user), token: aylaSignAuthToken(user) });
   } catch (error) {
@@ -48818,7 +49350,7 @@ app.post("/api/ayla/auth/update-password", async (req, res) => {
     rawUser.password_hash = hashed.password_hash;
     rawUser.updatedAt = aylaNow();
     aylaSetItem(db, "aylaUsers", rawUser);
-    await writeLiveDb(db);
+    await writeAylaDb(db);
     return aylaSendOk(res, { user: aylaSanitizeUser(rawUser) });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update AylaMed password");
@@ -48830,7 +49362,8 @@ app.post("/api/ayla/auth/logout", (req, res) => aylaSendOk(res, { loggedOut: tru
 // Sanitized AylaMed user admin routes. They never expose password hashes.
 app.get("/api/ayla/users", async (req, res) => {
   try {
-    const db = await readLiveDb();
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
     aylaEnsureSeedData(db);
     const users = aylaFilterRows(aylaValues(db, "aylaUsers").map(aylaSanitizeUser), req.query);
     return aylaSendOk(res, { count: users.length, aylaUsers: users });
@@ -48841,7 +49374,8 @@ app.get("/api/ayla/users", async (req, res) => {
 
 app.put("/api/ayla/users/:id", async (req, res) => {
   try {
-    const db = await readLiveDb();
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
     aylaEnsureSeedData(db);
     const existing = aylaGetItem(db, "aylaUsers", req.params.id);
     if (!existing) return aylaSendError(res, 404, "AylaMed user not found");
@@ -48862,7 +49396,7 @@ app.put("/api/ayla/users/:id", async (req, res) => {
     }
     aylaSetItem(db, "aylaUsers", updated);
     await aylaLog(db, "user", "AylaMed user updated", { userId: updated.id });
-    await writeLiveDb(db);
+    await writeAylaDb(db);
     return aylaSendOk(res, { user: aylaSanitizeUser(updated) });
   } catch (error) {
     return aylaSendError(res, 500, error.message || "Failed to update AylaMed user");
@@ -48871,14 +49405,15 @@ app.put("/api/ayla/users/:id", async (req, res) => {
 
 app.delete("/api/ayla/users/:id", async (req, res) => {
   try {
-    const db = await readLiveDb();
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
     aylaEnsureSeedData(db);
     const existing = aylaGetItem(db, "aylaUsers", req.params.id);
     if (!existing) return aylaSendError(res, 404, "AylaMed user not found");
     const cascadeDeleted = aylaCascadeDeleteRelatedRecords(db, { userId: existing.id, studentId: existing.studentId || null });
     aylaDeleteItem(db, "aylaUsers", existing.id);
     await aylaLog(db, "user", "AylaMed user deleted", { userId: existing.id, cascadeDeleted });
-    await writeLiveDb(db);
+    await writeAylaDb(db);
     return aylaSendOk(res, { deletedId: existing.id, cascadeDeleted });
   } catch (error) {
     return aylaSendError(res, 500, error.message || "Failed to delete AylaMed user");
@@ -48890,7 +49425,7 @@ app.delete("/api/ayla/users/:id", async (req, res) => {
 // -----------------------------------------------------------------------------
 app.get("/api/ayla/access/:userId", async (req, res) => {
   try {
-    const db = await readLiveDb();
+    const db = await readAylaDb();
     aylaEnsureSeedData(db);
     const user = aylaGetItem(db, "aylaUsers", req.params.userId);
     const activeEnrollments = aylaUserActiveEnrollments(db, req.params.userId);
@@ -48902,7 +49437,8 @@ app.get("/api/ayla/access/:userId", async (req, res) => {
 
 app.post("/api/ayla/enrollments/grant-access", async (req, res) => {
   try {
-    const db = await readLiveDb();
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
     aylaEnsureSeedData(db);
     let userId = req.body.userId || req.body.aylaUserId || null;
     const email = aylaNormalizeEmail(req.body.email || "");
@@ -48922,7 +49458,7 @@ app.post("/api/ayla/enrollments/grant-access", async (req, res) => {
     const enrollment = aylaCreateOrUpdateEnrollment(db, { userId, plan, type: req.body.type || (aylaPlanIsDemo(plan) ? "demo" : "manual"), source: req.body.source || "admin_grant", accessGranted: true, startsAt: aylaNow() });
     await aylaAccessLog(db, "admin_grant_access", { userId, planId: plan.id, enrollmentId: enrollment.id });
     await aylaLog(db, "access", "AylaMed access granted", { userId, planId: plan.id, enrollmentId: enrollment.id });
-    await writeLiveDb(db);
+    await writeAylaDb(db);
     return aylaSendOk(res, { enrollment, user: aylaSanitizeUser(aylaGetItem(db, "aylaUsers", userId)) }, 201);
   } catch (error) {
     return aylaSendError(res, 500, error.message || "Failed to grant AylaMed access");
@@ -48931,7 +49467,8 @@ app.post("/api/ayla/enrollments/grant-access", async (req, res) => {
 
 app.post("/api/ayla/enrollments/:id/revoke", async (req, res) => {
   try {
-    const db = await readLiveDb();
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
     aylaEnsureSeedData(db);
     const enrollment = aylaGetItem(db, "aylaEnrollments", req.params.id);
     if (!enrollment) return aylaSendError(res, 404, "AylaMed enrollment not found");
@@ -48942,7 +49479,7 @@ app.post("/api/ayla/enrollments/:id/revoke", async (req, res) => {
     enrollment.updatedAt = aylaNow();
     aylaSetItem(db, "aylaEnrollments", enrollment);
     await aylaAccessLog(db, "admin_revoke_access", { enrollmentId: enrollment.id, reason: enrollment.revoked_reason });
-    await writeLiveDb(db);
+    await writeAylaDb(db);
     return aylaSendOk(res, { enrollment });
   } catch (error) {
     return aylaSendError(res, 500, error.message || "Failed to revoke AylaMed access");
@@ -48951,7 +49488,8 @@ app.post("/api/ayla/enrollments/:id/revoke", async (req, res) => {
 
 app.post("/api/ayla/enrollments/:id/restore", async (req, res) => {
   try {
-    const db = await readLiveDb();
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
     aylaEnsureSeedData(db);
     const enrollment = aylaGetItem(db, "aylaEnrollments", req.params.id);
     if (!enrollment) return aylaSendError(res, 404, "AylaMed enrollment not found");
@@ -48964,7 +49502,7 @@ app.post("/api/ayla/enrollments/:id/restore", async (req, res) => {
     enrollment.updatedAt = aylaNow();
     aylaSetItem(db, "aylaEnrollments", enrollment);
     await aylaAccessLog(db, "admin_restore_access", { enrollmentId: enrollment.id });
-    await writeLiveDb(db);
+    await writeAylaDb(db);
     return aylaSendOk(res, { enrollment });
   } catch (error) {
     return aylaSendError(res, 500, error.message || "Failed to restore AylaMed access");
@@ -48973,7 +49511,8 @@ app.post("/api/ayla/enrollments/:id/restore", async (req, res) => {
 
 app.post("/api/ayla/enrollments/:id/extend", async (req, res) => {
   try {
-    const db = await readLiveDb();
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
     aylaEnsureSeedData(db);
     const enrollment = aylaGetItem(db, "aylaEnrollments", req.params.id);
     if (!enrollment) return aylaSendError(res, 404, "AylaMed enrollment not found");
@@ -48985,7 +49524,7 @@ app.post("/api/ayla/enrollments/:id/extend", async (req, res) => {
     enrollment.updatedAt = aylaNow();
     aylaSetItem(db, "aylaEnrollments", enrollment);
     await aylaAccessLog(db, "admin_extend_access", { enrollmentId: enrollment.id, days });
-    await writeLiveDb(db);
+    await writeAylaDb(db);
     return aylaSendOk(res, { enrollment });
   } catch (error) {
     return aylaSendError(res, 500, error.message || "Failed to extend AylaMed access");
@@ -48994,14 +49533,15 @@ app.post("/api/ayla/enrollments/:id/extend", async (req, res) => {
 
 app.post("/api/ayla/billing/create-checkout", async (req, res) => {
   try {
-    const db = await readLiveDb();
+    const db = await readAylaDb();
     aylaEnsureSeedData(db);
     const userId = req.body.userId || req.body.aylaUserId || null;
     const user = userId ? aylaGetItem(db, "aylaUsers", userId) : aylaFindUserByEmail(db, req.body.email || "");
     if (!user) return aylaSendError(res, 404, "AylaMed user not found");
 
     const plan = aylaGetItem(db, "aylaPlans", req.body.planId || req.body.plan_id);
-    if (!plan || plan.is_active === false) return aylaSendError(res, 404, "AylaMed plan not found or inactive");
+    if (!plan || plan.is_active === false || plan.is_public === false) return aylaSendError(res, 404, "AylaMed plan not found or inactive");
+    if (!aylaPlanIsDemo(plan) && String(plan.id) !== "AYLA-PLAN-MONTHLY") return aylaSendError(res, 400, "AylaMed currently supports demo and monthly access only");
 
     const code = normalizeCouponCode(req.body.couponCode || req.body.coupon_code || "");
     const coupon = code ? aylaValues(db, "aylaCoupons").find((c) => normalizeCouponCode(c.code) === code) : null;
@@ -49018,30 +49558,33 @@ app.post("/api/ayla/billing/create-checkout", async (req, res) => {
         coupon.used_count = Number(coupon.used_count || 0) + 1;
         coupon.updatedAt = aylaNow();
         aylaSetItem(db, "aylaCoupons", coupon);
-        aylaSetItem(db, "aylaCouponRedemptions", { id: aylaId("AYLA-REDEEM"), coupon_id: coupon.id, coupon_code: coupon.code, plan_id: plan.id, enrollment_id: enrollment.id, user_id: user.id, original_amount_cents: pricing.original_amount_cents, discount_cents: pricing.discount_cents, final_amount_cents: 0, redeemed_at: aylaNow(), createdAt: aylaNow() });
       }
       await aylaAccessLog(db, "free_checkout_access_granted", { userId: user.id, planId: plan.id, paymentId: payment.id, enrollmentId: enrollment.id });
-      await writeLiveDb(db);
+      await writeAylaDb(db);
       return aylaSendOk(res, { free_checkout: true, url: null, pricing, payment, enrollment, access_grant: { granted: true, enrollment_id: enrollment.id } });
     }
 
-    const pendingEnrollment = aylaCreateOrUpdateEnrollment(db, { userId: user.id, plan, type: aylaPlanIsDemo(plan) ? "demo" : "paid", source: "aylamed_stripe_checkout_pending", accessGranted: false });
+    const pendingEnrollment = aylaCreateOrUpdateEnrollment(db, { userId: user.id, plan, type: "paid", source: "aylamed_stripe_subscription_pending", accessGranted: false });
+    const metadata = { app: "aylamed", aylaUserId: user.id, aylaPlanId: plan.id, aylaEnrollmentId: pendingEnrollment.id, aylaCouponCode: coupon?.code || "", originalAmountCents: String(pricing.original_amount_cents), discountCents: String(pricing.discount_cents), finalAmountCents: String(pricing.final_amount_cents) };
     const session = await stripe.checkout.sessions.create({
-      mode: "payment",
+      mode: "subscription",
       payment_method_types: ["card"],
-      line_items: [{ price_data: { currency: plan.currency || "usd", product_data: { name: plan.name, description: plan.description || "AylaMed access" }, unit_amount: pricing.final_amount_cents }, quantity: 1 }],
-      metadata: { app: "aylamed", aylaUserId: user.id, aylaPlanId: plan.id, aylaEnrollmentId: pendingEnrollment.id, aylaCouponCode: coupon?.code || "", originalAmountCents: String(pricing.original_amount_cents), discountCents: String(pricing.discount_cents), finalAmountCents: String(pricing.final_amount_cents) },
+      customer_email: user.email || undefined,
+      line_items: [{ price_data: { currency: plan.currency || "usd", product_data: { name: plan.name, description: plan.description || "AylaMed monthly access" }, unit_amount: pricing.final_amount_cents, recurring: { interval: "month" } }, quantity: 1 }],
+      metadata,
+      subscription_data: { metadata },
       success_url: req.body.successUrl || req.body.success_url || AYLA_DEFAULT_SUCCESS_URL,
       cancel_url: req.body.cancelUrl || req.body.cancel_url || AYLA_DEFAULT_CANCEL_URL,
     });
 
-    const payment = { id: session.id, checkout_session_id: session.id, stripe_session_id: session.id, enrollment_id: pendingEnrollment.id, user_id: user.id, ayla_user_id: user.id, plan_id: plan.id, plan_name: plan.name, coupon_code: coupon?.code || null, original_amount_cents: pricing.original_amount_cents, discount_cents: pricing.discount_cents, amount_cents: pricing.final_amount_cents, final_amount_cents: pricing.final_amount_cents, currency: plan.currency || "usd", status: "pending", payment_status: "pending", payment_method: "stripe", source: "aylamed_stripe_checkout", createdAt: aylaNow(), updatedAt: aylaNow(), metadata: session.metadata || {} };
+    const payment = { id: session.id, checkout_session_id: session.id, stripe_session_id: session.id, stripe_subscription_id: session.subscription || null, enrollment_id: pendingEnrollment.id, user_id: user.id, ayla_user_id: user.id, plan_id: plan.id, plan_name: plan.name, coupon_code: coupon?.code || null, original_amount_cents: pricing.original_amount_cents, discount_cents: pricing.discount_cents, amount_cents: pricing.final_amount_cents, final_amount_cents: pricing.final_amount_cents, currency: plan.currency || "usd", status: "pending", payment_status: "pending", payment_method: "stripe_subscription", source: "aylamed_stripe_checkout", createdAt: aylaNow(), updatedAt: aylaNow(), metadata };
     aylaSetItem(db, "aylaPayments", payment);
     pendingEnrollment.payment_id = payment.id;
+    pendingEnrollment.stripe_subscription_id = session.subscription || null;
     aylaSetItem(db, "aylaEnrollments", pendingEnrollment);
-    await aylaAccessLog(db, "stripe_checkout_created", { userId: user.id, planId: plan.id, paymentId: payment.id, enrollmentId: pendingEnrollment.id });
-    await writeLiveDb(db);
-    return aylaSendOk(res, { free_checkout: false, url: session.url, pricing, payment, enrollment: pendingEnrollment });
+    await aylaAccessLog(db, "stripe_subscription_checkout_created", { userId: user.id, planId: plan.id, paymentId: payment.id, enrollmentId: pendingEnrollment.id });
+    await writeAylaDb(db);
+    return aylaSendOk(res, { free_checkout: false, subscription: true, url: session.url, pricing, payment, enrollment: pendingEnrollment });
   } catch (error) {
     return aylaSendError(res, error.statusCode || error.response?.status || 500, error.response?.data?.message || error.message || "AylaMed checkout failed", error.response?.data || null);
   }
@@ -49049,11 +49592,12 @@ app.post("/api/ayla/billing/create-checkout", async (req, res) => {
 
 app.get("/api/ayla/health", async (req, res) => {
   try {
-    const db = await readLiveDb();
+    const db = await readAylaDb();
     aylaEnsureSeedData(db);
     const counts = Object.fromEntries(Object.keys(AYLA_COLLECTIONS).map((key) => [key, aylaValues(db, key).length]));
     counts.aylaUsers = aylaValues(db, "aylaUsers").length;
-    return aylaSendOk(res, { now: aylaNow(), counts, examTracks: AYLA_EXAM_TRACKS });
+    const knowledge = await aylaKnowledgeStatus();
+    return aylaSendOk(res, { now: aylaNow(), counts, examTracks: AYLA_EXAM_TRACKS, storage: { ayla_db_path: AYLA_DB_PATH, separate_from_lms: AYLA_DB_PATH !== LIVE_DB_PATH, separate_from_crm: AYLA_DB_PATH !== CRM_DB_PATH }, knowledge });
   } catch (error) {
     return aylaSendError(res, 500, error.message || "AylaMed health check failed");
   }
@@ -49063,6 +49607,10 @@ app.get("/api/ayla/routes", (req, res) => {
   return aylaSendOk(res, {
     routes: [
       "GET /api/ayla/health",
+      "GET /api/ayla/public-config",
+      "GET/PUT /api/ayla/admin/settings",
+      "GET /api/ayla/admin/ai-usage/overview",
+      "POST /api/ayla/ai/coach",
       "GET /api/ayla/exams",
       "POST /api/ayla/auth/register",
       "POST /api/ayla/auth/login",
@@ -49082,7 +49630,7 @@ app.get("/api/ayla/routes", (req, res) => {
       "POST /api/ayla/update-roadmap-after-assessment",
       "POST /api/ayla/match-study-partner",
       "POST /api/ayla/knowledge-search",
-      "CRUD routes for students, rules, qbank, weak areas, flashcards, assessments, study partners, knowledge library, roadmap tasks",
+      "CRUD routes for AylaMed operational data; knowledge is read-only from CRM AI Training Center",
       "CRUD routes for AylaMed-only plans, coupons, coupon redemptions, payments, enrollments, access logs, AI usage logs",
     ],
   });
@@ -49092,13 +49640,19 @@ app.get("/api/ayla/exams", (req, res) => aylaSendOk(res, { examTracks: AYLA_EXAM
 
 app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
   try {
-    const db = await readLiveDb();
+    const auth = AYLA_REQUIRE_STUDENT_AUTH ? await aylaGetAuthenticatedUser(req) : null;
+    const db = auth?.db || await readAylaDb();
     aylaEnsureSeedData(db);
     const recommendation = aylaRecommendation(req.body);
     const submission = {
       id: req.body.id || aylaId("DX"),
       ...req.body,
       exam: req.body.exam || req.body.selectedExam || "USMLE Step 1",
+      goalType: req.body.goalType || req.body.goal_type || "Exam Day",
+      examDate: req.body.examDate || req.body.exam_date || "",
+      matchDate: req.body.matchDate || req.body.match_date || "",
+      preferredStudyDays: aylaCleanArray(req.body.preferredStudyDays || req.body.preferred_study_days),
+      weeklyStudyDays: recommendation.weeklyStudyDays,
       selectedWeakAreas: aylaCleanArray(req.body.selectedWeakAreas || req.body.weakAreas),
       selectedResources: aylaCleanArray(req.body.selectedResources || req.body.resources),
       recommendation,
@@ -49107,22 +49661,37 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
       updatedAt: aylaNow(),
     };
 
+    if (auth?.user?.id) { submission.aylaUserId = auth.user.id; submission.ayla_user_id = auth.user.id; }
     const student = aylaStudentFromDiagnostic(submission, recommendation);
+    if (auth?.user?.id) { student.ayla_user_id = auth.user.id; student.user_id = auth.user.id; }
     const roadmapTasks = aylaBuildRoadmapTasks(student, recommendation);
     const qbankBlock = aylaBuildQbankBlock(student, recommendation);
     const weakAreaLogs = aylaBuildWeakAreaLogs(student, recommendation);
     const flashcards = aylaBuildFlashcards(student, recommendation);
+    const phasePlan = aylaPhasePlan(student, recommendation);
+    const knowledgeRecommendations = await aylaKnowledgeForStudent(db, student, recommendation, 6);
+
+    student.phasePlan = phasePlan;
+    student.updatedAt = aylaNow();
+    submission.studentId = student.id;
+    submission.phasePlan = phasePlan;
 
     aylaSetItem(db, "aylaDiagnosticSubmissions", submission);
     aylaSetItem(db, "aylaStudents", student);
+    aylaValues(db, "aylaRoadmapTasks").filter((item) => item.studentId === student.id).forEach((item) => aylaDeleteItem(db, "aylaRoadmapTasks", item.id));
     roadmapTasks.forEach((item) => aylaSetItem(db, "aylaRoadmapTasks", item));
     aylaSetItem(db, "aylaQbankBlocks", qbankBlock);
     weakAreaLogs.forEach((item) => aylaSetItem(db, "aylaWeakAreaLogs", item));
     flashcards.forEach((item) => aylaSetItem(db, "aylaFlashcards", item));
-    await aylaLog(db, "diagnostic", "AylaMed diagnostic submitted and student plan generated", { submissionId: submission.id, studentId: student.id, riskLevel: recommendation.riskLevel });
-    await writeLiveDb(db);
+    await aylaLog(db, "diagnostic", "AylaMed personalized diagnostic and 7-day roadmap generated", { submissionId: submission.id, studentId: student.id, riskLevel: recommendation.riskLevel, phase: recommendation.phase, targetDate: recommendation.targetDate });
+    await writeAylaDb(db);
 
-    return aylaSendOk(res, { diagnosticSubmission: submission, student, recommendation, generated: { roadmapTasks, qbankBlocks: [qbankBlock], weakAreaLogs, flashcards } }, 201);
+    return aylaSendOk(res, {
+      diagnosticSubmission: submission,
+      student,
+      recommendation,
+      generated: { roadmapTasks, qbankBlocks: [qbankBlock], weakAreaLogs, flashcards, phasePlan, knowledgeRecommendations },
+    }, 201);
   } catch (error) {
     return aylaSendError(res, 500, error.message || "Failed to submit AylaMed diagnostic");
   }
@@ -49130,16 +49699,38 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
 
 app.get("/api/ayla/students/:id/dashboard", async (req, res) => {
   try {
-    const db = await readLiveDb();
+    const auth = AYLA_REQUIRE_STUDENT_AUTH ? await aylaGetAuthenticatedUser(req) : null;
+    const db = auth?.db || await readAylaDb();
     aylaEnsureSeedData(db);
     const student = aylaGetItem(db, "aylaStudents", req.params.id);
     if (!student) return aylaSendError(res, 404, "AylaMed student not found");
+    if (auth?.user?.role !== "admin" && auth?.user?.id && String(student.ayla_user_id || student.user_id || "") !== String(auth.user.id)) return aylaSendError(res, 403, "This dashboard does not belong to the authenticated AylaMed user");
+
+    const recommendation = aylaRecommendation(student);
+    const roadmapTasks = aylaFilterRows(aylaValues(db, "aylaRoadmapTasks"), { studentId: student.id });
+    const phasePlan = Array.isArray(student.phasePlan) && student.phasePlan.length ? student.phasePlan : aylaPhasePlan(student, recommendation);
+    const knowledgeRecommendations = await aylaKnowledgeForStudent(db, student, recommendation, 6);
+    const today = aylaDateOnly();
 
     return aylaSendOk(res, {
-      student,
-      recommendation: aylaRecommendation(student),
+      student: { ...student, phase: recommendation.phase, phasePlan },
+      recommendation,
+      roadmapSummary: {
+        targetDate: recommendation.targetDate,
+        targetLabel: recommendation.targetLabel,
+        daysToTarget: recommendation.daysToTarget,
+        phase: recommendation.phase,
+        intensity: recommendation.intensity,
+        dailyHours: recommendation.dailyHours,
+        weeklyStudyDays: recommendation.weeklyStudyDays,
+        weeklyQuestionTarget: recommendation.weeklyQuestionTarget,
+        weeklyAssessment: recommendation.weeklyAssessment,
+        todayTaskCount: roadmapTasks.filter((item) => item.scheduledDate === today).length,
+      },
       dashboard: {
-        roadmapTasks: aylaFilterRows(aylaValues(db, "aylaRoadmapTasks"), { studentId: student.id }),
+        roadmapTasks,
+        phasePlan,
+        knowledgeRecommendations,
         qbankBlocks: aylaFilterRows(aylaValues(db, "aylaQbankBlocks"), { studentId: student.id }),
         weakAreaLogs: aylaFilterRows(aylaValues(db, "aylaWeakAreaLogs"), { studentId: student.id }),
         flashcards: aylaFilterRows(aylaValues(db, "aylaFlashcards"), { studentId: student.id }),
@@ -49154,20 +49745,29 @@ app.get("/api/ayla/students/:id/dashboard", async (req, res) => {
 
 app.post("/api/ayla/generate-roadmap", async (req, res) => {
   try {
-    const db = await readLiveDb();
+    const db = await readAylaDb();
     aylaEnsureSeedData(db);
     const existingStudent = req.body.studentId ? aylaGetItem(db, "aylaStudents", req.body.studentId) : null;
-    const recommendation = aylaRecommendation({ ...(existingStudent || {}), ...req.body });
-    const student = existingStudent || aylaStudentFromDiagnostic(req.body, recommendation);
+    const mergedInput = { ...(existingStudent || {}), ...req.body };
+    const recommendation = aylaRecommendation(mergedInput);
+    const student = existingStudent ? { ...existingStudent, ...aylaStudentFromDiagnostic({ ...existingStudent, ...req.body, id: existingStudent.id, createdAt: existingStudent.createdAt }, recommendation) } : aylaStudentFromDiagnostic(req.body, recommendation);
     const roadmapTasks = aylaBuildRoadmapTasks(student, recommendation);
+    const phasePlan = aylaPhasePlan(student, recommendation);
+    const knowledgeRecommendations = await aylaKnowledgeForStudent(db, student, recommendation, 6);
 
-    if (!existingStudent) aylaSetItem(db, "aylaStudents", student);
+    student.phasePlan = phasePlan;
+    student.phase = recommendation.phase;
+    student.targetDate = recommendation.targetDate;
+    student.targetLabel = recommendation.targetLabel;
+    student.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaStudents", student);
+
     aylaValues(db, "aylaRoadmapTasks").filter((item) => item.studentId === student.id).forEach((item) => aylaDeleteItem(db, "aylaRoadmapTasks", item.id));
     roadmapTasks.forEach((item) => aylaSetItem(db, "aylaRoadmapTasks", item));
-    await aylaLog(db, "roadmap", "AylaMed roadmap generated", { studentId: student.id, riskLevel: recommendation.riskLevel });
-    await writeLiveDb(db);
+    await aylaLog(db, "roadmap", "AylaMed personalized 7-day roadmap generated", { studentId: student.id, riskLevel: recommendation.riskLevel, phase: recommendation.phase, targetDate: recommendation.targetDate, taskCount: roadmapTasks.length });
+    await writeAylaDb(db);
 
-    return aylaSendOk(res, { student, recommendation, roadmapTasks });
+    return aylaSendOk(res, { student, recommendation, roadmapTasks, phasePlan, knowledgeRecommendations });
   } catch (error) {
     return aylaSendError(res, 500, error.message || "Failed to generate AylaMed roadmap");
   }
@@ -49175,7 +49775,7 @@ app.post("/api/ayla/generate-roadmap", async (req, res) => {
 
 app.post("/api/ayla/assign-qbank-block", async (req, res) => {
   try {
-    const db = await readLiveDb();
+    const db = await readAylaDb();
     aylaEnsureSeedData(db);
     const student = aylaGetItem(db, "aylaStudents", req.body.studentId);
     if (!student) return aylaSendError(res, 404, "AylaMed student not found");
@@ -49184,7 +49784,7 @@ app.post("/api/ayla/assign-qbank-block", async (req, res) => {
     const qbankBlock = aylaBuildQbankBlock(student, recommendation, req.body);
     aylaSetItem(db, "aylaQbankBlocks", qbankBlock);
     await aylaLog(db, "qbank", "AylaMed QBank block assigned", { studentId: student.id, qbankBlockId: qbankBlock.id });
-    await writeLiveDb(db);
+    await writeAylaDb(db);
 
     return aylaSendOk(res, { qbankBlock, recommendation }, 201);
   } catch (error) {
@@ -49194,7 +49794,7 @@ app.post("/api/ayla/assign-qbank-block", async (req, res) => {
 
 app.post("/api/ayla/generate-flashcards", async (req, res) => {
   try {
-    const db = await readLiveDb();
+    const db = await readAylaDb();
     aylaEnsureSeedData(db);
     const student = aylaGetItem(db, "aylaStudents", req.body.studentId);
     if (!student) return aylaSendError(res, 404, "AylaMed student not found");
@@ -49206,7 +49806,7 @@ app.post("/api/ayla/generate-flashcards", async (req, res) => {
 
     flashcards.forEach((card) => aylaSetItem(db, "aylaFlashcards", card));
     await aylaLog(db, "flashcards", "AylaMed flashcards generated", { studentId: student.id, count: flashcards.length });
-    await writeLiveDb(db);
+    await writeAylaDb(db);
 
     return aylaSendOk(res, { flashcards, recommendation }, 201);
   } catch (error) {
@@ -49216,7 +49816,7 @@ app.post("/api/ayla/generate-flashcards", async (req, res) => {
 
 app.post("/api/ayla/assessment-results", async (req, res) => {
   try {
-    const db = await readLiveDb();
+    const db = await readAylaDb();
     aylaEnsureSeedData(db);
     const assessmentResult = {
       id: req.body.id || aylaId("ASM"),
@@ -49246,7 +49846,7 @@ app.post("/api/ayla/assessment-results", async (req, res) => {
     }
 
     await aylaLog(db, "assessment", "AylaMed assessment result saved", { assessmentResultId: assessmentResult.id, studentId: assessmentResult.studentId || null, riskLevel: recommendation.riskLevel });
-    await writeLiveDb(db);
+    await writeAylaDb(db);
 
     return aylaSendOk(res, { assessmentResult, recommendation }, 201);
   } catch (error) {
@@ -49256,20 +49856,32 @@ app.post("/api/ayla/assessment-results", async (req, res) => {
 
 app.post("/api/ayla/update-roadmap-after-assessment", async (req, res) => {
   try {
-    const db = await readLiveDb();
+    const db = await readAylaDb();
     aylaEnsureSeedData(db);
     const assessment = req.body.assessmentId ? aylaGetItem(db, "aylaAssessmentResults", req.body.assessmentId) : null;
     const studentId = req.body.studentId || assessment?.studentId;
     const student = studentId ? aylaGetItem(db, "aylaStudents", studentId) : null;
     if (!student) return aylaSendError(res, 404, "AylaMed student not found");
 
+    if (assessment) {
+      student.currentScore = assessment.score || student.currentScore;
+      student.qbankAverage = assessment.qbankAverage || student.qbankAverage;
+      student.qbankCompleted = assessment.qbankCompleted || student.qbankCompleted;
+    }
+
     const recommendation = aylaRecommendation({ ...student, ...(assessment || {}), ...req.body });
     const roadmapTasks = aylaBuildRoadmapTasks(student, recommendation);
     const qbankBlock = aylaBuildQbankBlock(student, recommendation);
     const flashcards = aylaBuildFlashcards(student, recommendation, "Assessment Update");
+    const phasePlan = aylaPhasePlan(student, recommendation);
+    const knowledgeRecommendations = await aylaKnowledgeForStudent(db, student, recommendation, 6);
 
     student.riskLevel = recommendation.riskLevel;
     student.roadmapMode = recommendation.roadmapMode;
+    student.phase = recommendation.phase;
+    student.phasePlan = phasePlan;
+    student.targetDate = recommendation.targetDate;
+    student.targetLabel = recommendation.targetLabel;
     student.updatedAt = aylaNow();
     aylaSetItem(db, "aylaStudents", student);
 
@@ -49277,10 +49889,10 @@ app.post("/api/ayla/update-roadmap-after-assessment", async (req, res) => {
     roadmapTasks.forEach((item) => aylaSetItem(db, "aylaRoadmapTasks", item));
     aylaSetItem(db, "aylaQbankBlocks", qbankBlock);
     flashcards.forEach((card) => aylaSetItem(db, "aylaFlashcards", card));
-    await aylaLog(db, "roadmap-update", "AylaMed roadmap updated after assessment", { studentId: student.id, assessmentId: assessment?.id || null, riskLevel: recommendation.riskLevel });
-    await writeLiveDb(db);
+    await aylaLog(db, "roadmap-update", "AylaMed roadmap recalculated after assessment", { studentId: student.id, assessmentId: assessment?.id || null, riskLevel: recommendation.riskLevel, phase: recommendation.phase, taskCount: roadmapTasks.length });
+    await writeAylaDb(db);
 
-    return aylaSendOk(res, { student, recommendation, generated: { roadmapTasks, qbankBlocks: [qbankBlock], flashcards } });
+    return aylaSendOk(res, { student, recommendation, generated: { roadmapTasks, qbankBlocks: [qbankBlock], flashcards, phasePlan, knowledgeRecommendations } });
   } catch (error) {
     return aylaSendError(res, 500, error.message || "Failed to update AylaMed roadmap after assessment");
   }
@@ -49288,7 +49900,7 @@ app.post("/api/ayla/update-roadmap-after-assessment", async (req, res) => {
 
 app.post("/api/ayla/match-study-partner", async (req, res) => {
   try {
-    const db = await readLiveDb();
+    const db = await readAylaDb();
     aylaEnsureSeedData(db);
     const source = aylaGetItem(db, "aylaStudyPartnerPool", req.body.candidateId) || aylaGetItem(db, "aylaStudents", req.body.studentId);
     if (!source) return aylaSendError(res, 404, "AylaMed source student/candidate not found");
@@ -49323,7 +49935,7 @@ app.post("/api/ayla/match-study-partner", async (req, res) => {
     if (req.body.save !== false) {
       aylaSetItem(db, "aylaStudyPartnerMatches", match);
       await aylaLog(db, "study-partner", "AylaMed study partner match generated", { matchId: match.id, score: match.score });
-      await writeLiveDb(db);
+      await writeAylaDb(db);
     }
 
     return aylaSendOk(res, { match, ranked });
@@ -49334,19 +49946,216 @@ app.post("/api/ayla/match-study-partner", async (req, res) => {
 
 app.post("/api/ayla/knowledge-search", async (req, res) => {
   try {
-    const db = await readLiveDb();
+    const db = await readAylaDb();
     aylaEnsureSeedData(db);
-    const q = String(req.body.q || req.body.query || "").toLowerCase();
-    const results = aylaValues(db, "aylaKnowledgeLibrary").filter((item) => JSON.stringify(item).toLowerCase().includes(q));
-    return aylaSendOk(res, { count: results.length, results });
+    const q = String(req.body.q || req.body.query || req.body.search || "").trim();
+    const student = req.body.studentId ? aylaGetItem(db, "aylaStudents", req.body.studentId) : null;
+    const recommendation = student ? aylaRecommendation(student) : null;
+    const expandedQuery = [q, student?.exam, recommendation?.phase, ...(aylaCleanArray(student?.weakAreas))].filter(Boolean).join(" ");
+    const results = await aylaSearchTrainingKnowledge({ query: expandedQuery, limit: Number(req.body.limit || 8) });
+    return aylaSendOk(res, { count: results.length, available: results.length > 0, source: "CRM AI Training Center", read_only: true, message: results.length ? "Approved AI Training Center knowledge is ready." : "No approved matching medical knowledge was found.", personalizedFor: student?.id || null, results });
   } catch (error) {
-    return aylaSendError(res, 500, error.message || "Failed to search AylaMed knowledge library");
+    return aylaSendError(res, 500, error.message || "Failed to search AI Training Center knowledge");
   }
 });
 
+
+function aylaPublicPlan(plan = {}) {
+  return { id: plan.id, name: plan.name, description: plan.description, plan_type: plan.plan_type, billing_type: plan.billing_type, price_cents: Number(plan.price_cents || 0), currency: plan.currency || "usd", access_days: Number(plan.access_days || 0), included_features: aylaCleanArray(plan.included_features), is_demo: Boolean(plan.is_demo), is_active: plan.is_active !== false, is_public: plan.is_public !== false, status: plan.status || "active" };
+}
+
+async function aylaKnowledgeStatus() {
+  const crmDb = await readAylaCrmSnapshot();
+  const documents = ensureCrmArray(crmDb, "ai_training_documents");
+  const documentMap = new Map(documents.map((doc) => [String(doc.id), doc]));
+  const eligible = ensureCrmArray(crmDb, "ai_training_items").filter((item) => aylaTrainingItemEligible(item, documentMap.get(String(item.document_id || "")) || null));
+  const eligibleDocumentIds = new Set(eligible.map((item) => String(item.document_id || "")).filter(Boolean));
+  return { source: "CRM AI Training Center", read_only: true, eligible_items: eligible.length, eligible_documents: eligibleDocumentIds.size, total_training_items: ensureCrmArray(crmDb, "ai_training_items").length, total_documents: documents.length, managed_at: "/admin/crm/training" };
+}
+
+app.get("/api/ayla/public-config", async (req, res) => {
+  try {
+    const db = await readAylaDb();
+    aylaEnsureSeedData(db);
+    const settings = aylaMergeSettings(db.aylaSettings || {});
+    const days = Math.max(1, Number(settings.demo.duration_days || 7));
+    const plans = aylaValues(db, "aylaPlans").filter((plan) => plan.is_active !== false && plan.is_public !== false && ["AYLA-PLAN-DEMO", "AYLA-PLAN-MONTHLY"].includes(String(plan.id))).map(aylaPublicPlan);
+    const knowledge = await aylaKnowledgeStatus();
+    return aylaSendOk(res, { settings: { ...settings, demo: { ...settings.demo, duration_days: days, homepage_bar_text_rendered: aylaTemplate(settings.demo.homepage_bar_text, days), button_text_rendered: aylaTemplate(settings.demo.button_text, days), plan_name_rendered: aylaTemplate(settings.demo.plan_name, days) } }, plans, knowledge });
+  } catch (error) { return aylaSendError(res, 500, error.message || "Failed to load AylaMed public configuration"); }
+});
+
+app.get("/api/ayla/admin/settings", async (req, res) => {
+  try { await aylaRequireAdmin(req); const db = await readAylaDb(); aylaEnsureSeedData(db); return aylaSendOk(res, { settings: db.aylaSettings, aiUsageSettings: db.aylaAiUsageSettings, admin_auth_configured: Boolean(AYLA_ADMIN_TOKEN), storage: { ayla_db_path: AYLA_DB_PATH, lms_db_path: LIVE_DB_PATH, crm_db_path: CRM_DB_PATH } }); }
+  catch (error) { return aylaSendError(res, error.statusCode || 500, error.message); }
+});
+
+app.put("/api/ayla/admin/settings", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb(); aylaEnsureSeedData(db);
+    const incoming = req.body.settings || req.body || {};
+    db.aylaSettings = aylaMergeSettings({ ...db.aylaSettings, ...incoming, product: { ...db.aylaSettings.product, ...(incoming.product || {}) }, demo: { ...db.aylaSettings.demo, ...(incoming.demo || {}) }, homepage: { ...db.aylaSettings.homepage, ...(incoming.homepage || {}) } });
+    db.aylaSettings.product.monthly_only = true;
+    db.aylaSettings.demo.duration_days = Math.max(1, Math.min(60, Number(db.aylaSettings.demo.duration_days || 7)));
+    aylaEnsureSeedData(db);
+    await aylaLog(db, "settings", "AylaMed settings updated", { demo_days: db.aylaSettings.demo.duration_days, demo_enabled: db.aylaSettings.demo.enabled });
+    await writeAylaDb(db);
+    return aylaSendOk(res, { settings: db.aylaSettings, plans: aylaValues(db, "aylaPlans").map(aylaPublicPlan) });
+  } catch (error) { return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update AylaMed settings"); }
+});
+
+app.get("/api/ayla/admin/knowledge/status", async (req, res) => {
+  try { await aylaRequireAdmin(req); return aylaSendOk(res, { knowledge: await aylaKnowledgeStatus() }); }
+  catch (error) { return aylaSendError(res, error.statusCode || 500, error.message); }
+});
+
+function aylaPeriodStart(period = "monthly", now = new Date()) {
+  const d = new Date(now);
+  if (period === "daily") return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  if (period === "weekly") { const day = (d.getUTCDay() + 6) % 7; return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - day)); }
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
+}
+
+function aylaUsageRowsInPeriod(db, period = "monthly", userId = null) {
+  const start = aylaPeriodStart(period).getTime();
+  return aylaValues(db, "aylaAiUsageLogs").filter((row) => (!userId || String(row.user_id || "") === String(userId)) && new Date(row.createdAt || row.created_at || 0).getTime() >= start);
+}
+
+function aylaActivePlanForUser(db, userId) {
+  const enrollment = aylaUserActiveEnrollments(db, userId).find((row) => !row.is_demo) || aylaUserActiveEnrollments(db, userId)[0] || null;
+  return enrollment?.plan_id ? aylaGetItem(db, "aylaPlans", enrollment.plan_id) : null;
+}
+
+function aylaNormalizeLimit(value = {}, fallbackPeriod = "monthly") {
+  return { enabled: value.enabled === true, period: ["daily", "weekly", "monthly"].includes(String(value.period)) ? String(value.period) : fallbackPeriod, token_limit: value.token_limit === null || value.token_limit === "" || value.token_limit === undefined ? null : Math.max(0, Number(value.token_limit || 0)), dollar_limit_usd: value.dollar_limit_usd === null || value.dollar_limit_usd === "" || value.dollar_limit_usd === undefined ? null : Math.max(0, Number(value.dollar_limit_usd || 0)), warnings_enabled: value.warnings_enabled === true, warning_percentages: Array.isArray(value.warning_percentages) ? value.warning_percentages.map(Number).filter((n) => n > 0 && n < 100).sort((a,b)=>a-b) : [80,95] };
+}
+
+function aylaResolveUsagePolicy(db, userId) {
+  const override = db.aylaStudentAiOverrides?.[String(userId)] || null;
+  if (override?.mode === "unlimited") return { applied: false, source: "student_unlimited", warnings_enabled: false };
+  if (override?.mode === "blocked") return { applied: true, blocked: true, source: "student_blocked", period: "monthly", warnings_enabled: false };
+  if (override?.mode === "custom") return { ...aylaNormalizeLimit({ ...override, enabled: true }), applied: true, source: "student_override" };
+  const plan = aylaActivePlanForUser(db, userId);
+  const planLimit = plan ? db.aylaPlanAiLimits?.[String(plan.id)] : null;
+  if (planLimit?.enabled === true) return { ...aylaNormalizeLimit(planLimit), applied: true, source: "plan", plan_id: plan.id };
+  const global = aylaNormalizeLimit(db.aylaAiUsageSettings?.global_limit || {});
+  if (global.enabled) return { ...global, applied: true, source: "global" };
+  return { applied: false, source: "none", warnings_enabled: false };
+}
+
+function aylaUsageTotals(rows = []) {
+  return rows.reduce((acc, row) => { acc.requests += 1; acc.input_tokens += Number(row.input_tokens || 0); acc.output_tokens += Number(row.output_tokens || 0); acc.total_tokens += Number(row.total_tokens || 0); acc.estimated_cost_usd += Number(row.estimated_cost_usd || 0); return acc; }, { requests: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0, estimated_cost_usd: 0 });
+}
+
+function aylaUsageStatus(db, userId) {
+  const policy = aylaResolveUsagePolicy(db, userId);
+  if (!policy.applied) return { limit_applied: false, source: policy.source, warning: null, blocked: false };
+  if (policy.blocked) return { limit_applied: true, source: policy.source, warning: null, blocked: true, reason: "AI access is temporarily blocked by admin." };
+  const totals = aylaUsageTotals(aylaUsageRowsInPeriod(db, policy.period, userId));
+  const tokenPercent = policy.token_limit ? (totals.total_tokens / policy.token_limit) * 100 : 0;
+  const dollarPercent = policy.dollar_limit_usd ? (totals.estimated_cost_usd / policy.dollar_limit_usd) * 100 : 0;
+  const percent = Math.max(tokenPercent, dollarPercent);
+  const blocked = (policy.token_limit !== null && totals.total_tokens >= policy.token_limit) || (policy.dollar_limit_usd !== null && totals.estimated_cost_usd >= policy.dollar_limit_usd);
+  let warning = null;
+  if (policy.warnings_enabled && !blocked) {
+    const crossed = (policy.warning_percentages || []).filter((value) => percent >= value).pop();
+    if (crossed) warning = `You have used ${Math.round(percent)}% of your current AI allowance.`;
+  }
+  return { limit_applied: true, source: policy.source, period: policy.period, token_limit: policy.token_limit, dollar_limit_usd: policy.dollar_limit_usd, totals, percent: Number(percent.toFixed(2)), warning, blocked, reason: blocked ? "AI allowance reached. Existing roadmap and saved resources remain available." : null };
+}
+
+function aylaEmergencyProtectionStatus(db, userId) {
+  const settings = db.aylaAiUsageSettings?.emergency_protection || {};
+  if (settings.enabled === false) return { blocked: false };
+  const now = Date.now();
+  const hourRows = aylaValues(db, "aylaAiUsageLogs").filter((row) => String(row.user_id || "") === String(userId) && new Date(row.createdAt || 0).getTime() >= now - 3600000);
+  const dayRows = aylaUsageRowsInPeriod(db, "daily", userId);
+  if (Number(settings.max_requests_per_hour || 0) > 0 && hourRows.length >= Number(settings.max_requests_per_hour)) return { blocked: true, reason: "AI is temporarily paused by abuse protection. Please try again later." };
+  if (Number(settings.max_cost_per_day_usd || 0) > 0 && aylaUsageTotals(dayRows).estimated_cost_usd >= Number(settings.max_cost_per_day_usd)) return { blocked: true, reason: "AI is temporarily paused by safety protection. Please try again later." };
+  return { blocked: false };
+}
+
+async function aylaModelPricing(model) {
+  try {
+    const crmDb = await readAylaCrmSnapshot();
+    const row = ensureCrmArray(crmDb, "model_pricing").find((item) => String(item.model_name || "").toLowerCase() === String(model || "").toLowerCase() && item.active !== false);
+    if (row) return { input_per_1m: Number(row.input_cost_per_1m_tokens || 0), output_per_1m: Number(row.output_cost_per_1m_tokens || 0) };
+  } catch {}
+  return getAIModelPricing(model);
+}
+
+async function aylaEstimateCost(model, usage) {
+  const clean = normalizeAIUsage(usage);
+  const pricing = await aylaModelPricing(model);
+  return Number((((clean.input_tokens / 1000000) * pricing.input_per_1m) + ((clean.output_tokens / 1000000) * pricing.output_per_1m)).toFixed(6));
+}
+
+async function aylaRecordAiUsage(db, { user, studentId = null, feature, model, usage, status = "completed", durationMs = null }) {
+  if (db.aylaAiUsageSettings?.tracking_enabled === false) return null;
+  const clean = normalizeAIUsage(usage || {});
+  const plan = aylaActivePlanForUser(db, user.id);
+  const row = { id: aylaId("AYLA-AI"), user_id: user.id, user_email: user.email || "", user_name: user.name || "", student_id: studentId, plan_id: plan?.id || null, plan_name: plan?.name || null, feature, model, input_tokens: clean.input_tokens, output_tokens: clean.output_tokens, total_tokens: clean.total_tokens, estimated_cost_usd: await aylaEstimateCost(model, clean), status, duration_ms: durationMs, createdAt: aylaNow(), created_at: aylaNow() };
+  aylaSetItem(db, "aylaAiUsageLogs", row);
+  return row;
+}
+
+app.post("/api/ayla/ai/coach", async (req, res) => {
+  const started = Date.now();
+  try {
+    const { user, db } = await aylaGetAuthenticatedUser(req);
+    aylaEnsureSeedData(db);
+    const usageStatus = aylaUsageStatus(db, user.id);
+    if (usageStatus.blocked) return aylaSendError(res, 429, usageStatus.reason, usageStatus);
+    const emergency = aylaEmergencyProtectionStatus(db, user.id);
+    if (emergency.blocked) return aylaSendError(res, 429, emergency.reason);
+    const question = String(req.body.question || req.body.message || "").trim();
+    if (!question) return aylaSendError(res, 400, "question is required");
+    const student = req.body.studentId ? aylaGetItem(db, "aylaStudents", req.body.studentId) : aylaValues(db, "aylaStudents").find((row) => String(row.ayla_user_id || row.user_id || "") === String(user.id)) || null;
+    const knowledge = await aylaSearchTrainingKnowledge({ query: [question, student?.exam, ...(aylaCleanArray(student?.weakAreas))].filter(Boolean).join(" "), limit: 6 });
+    const context = knowledge.map((item, index) => `[${index + 1}] ${item.title}\n${item.content.slice(0, 1800)}`).join("\n\n");
+    const model = String(process.env.AYLA_AI_MODEL || process.env.AI_MODEL || "gpt-4o-mini");
+    const ai = await callOpenAIResponsesAPI({ model, maxOutputTokens: Math.max(500, Math.min(2200, Number(req.body.max_output_tokens || 1200))), systemPrompt: "You are AylaMed, an educational medical exam and Match preparation coach. Use only the supplied approved AI Training Center context for medical facts. Be practical, concise, and explicit when the context is insufficient. Do not claim to diagnose or treat a patient. Return plain text.", userPrompt: `Student profile: ${JSON.stringify(student ? { exam: student.exam, targetDate: student.targetDate || student.examDate || student.matchDate, weakAreas: student.weakAreas, phase: student.phase || student.roadmapMode } : {})}\n\nApproved context:\n${context || "No approved matching context was found."}\n\nQuestion:\n${question}` });
+    const log = await aylaRecordAiUsage(db, { user, studentId: student?.id || null, feature: req.body.feature || "ai_coach", model, usage: ai.usage, durationMs: Date.now() - started });
+    await writeAylaDb(db);
+    const after = aylaUsageStatus(db, user.id);
+    return aylaSendOk(res, { answer: ai.text, sources: knowledge.map((item) => ({ id: item.id, title: item.title, document_title: item.document_title, source: item.source })), usage: log, usage_status: after });
+  } catch (error) { return aylaSendError(res, error.statusCode || 500, error.message || "AylaMed AI coach failed"); }
+});
+
+function aylaPercentile(values = [], percentile = 0.5) {
+  const sorted = values.map(Number).filter(Number.isFinite).sort((a,b)=>a-b); if (!sorted.length) return 0; const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(percentile * sorted.length) - 1)); return sorted[index];
+}
+
+function aylaUsageAnalytics(db, period = "monthly") {
+  const rows = aylaUsageRowsInPeriod(db, period);
+  const grouped = new Map();
+  for (const row of rows) { const id = String(row.user_id || "unknown"); if (!grouped.has(id)) grouped.set(id, []); grouped.get(id).push(row); }
+  const students = Array.from(grouped.entries()).map(([userId, userRows]) => { const user = aylaGetItem(db, "aylaUsers", userId) || {}; const totals = aylaUsageTotals(userRows); const plan = aylaActivePlanForUser(db, userId); return { user_id: userId, name: user.name || userRows[0]?.user_name || "Student", email: user.email || userRows[0]?.user_email || "", plan_id: plan?.id || userRows[0]?.plan_id || null, plan_name: plan?.name || userRows[0]?.plan_name || null, ...totals, last_used_at: userRows.sort((a,b)=>String(b.createdAt).localeCompare(String(a.createdAt)))[0]?.createdAt || null, limit: aylaUsageStatus(db, userId) }; }).sort((a,b)=>b.estimated_cost_usd-a.estimated_cost_usd);
+  const totals = aylaUsageTotals(rows);
+  const tokenValues = students.map((row)=>row.total_tokens); const costValues = students.map((row)=>row.estimated_cost_usd);
+  const byFeature = {}; const byPlan = {};
+  for (const row of rows) { const feature = row.feature || "unknown"; byFeature[feature] = byFeature[feature] || { requests:0,total_tokens:0,estimated_cost_usd:0 }; byFeature[feature].requests += 1; byFeature[feature].total_tokens += Number(row.total_tokens||0); byFeature[feature].estimated_cost_usd += Number(row.estimated_cost_usd||0); const plan = row.plan_name || "No plan"; byPlan[plan] = byPlan[plan] || { requests:0,total_tokens:0,estimated_cost_usd:0 }; byPlan[plan].requests += 1; byPlan[plan].total_tokens += Number(row.total_tokens||0); byPlan[plan].estimated_cost_usd += Number(row.estimated_cost_usd||0); }
+  return { period, totals, active_students: students.length, average_tokens_per_student: students.length ? Math.round(totals.total_tokens/students.length) : 0, average_cost_per_student: students.length ? Number((totals.estimated_cost_usd/students.length).toFixed(6)) : 0, median_tokens: aylaPercentile(tokenValues,0.5), p75_tokens: aylaPercentile(tokenValues,0.75), p90_tokens: aylaPercentile(tokenValues,0.9), median_cost: aylaPercentile(costValues,0.5), p90_cost: aylaPercentile(costValues,0.9), students, by_feature: byFeature, by_plan: byPlan };
+}
+
+app.get("/api/ayla/admin/ai-usage/overview", async (req, res) => { try { await aylaRequireAdmin(req); const db = await readAylaDb(); aylaEnsureSeedData(db); return aylaSendOk(res, { analytics: aylaUsageAnalytics(db, String(req.query.period || "monthly")), settings: db.aylaAiUsageSettings, plan_limits: db.aylaPlanAiLimits, student_overrides: db.aylaStudentAiOverrides }); } catch (error) { return aylaSendError(res, error.statusCode || 500, error.message); } });
+app.get("/api/ayla/admin/ai-usage/students", async (req, res) => { try { await aylaRequireAdmin(req); const db = await readAylaDb(); aylaEnsureSeedData(db); const analytics = aylaUsageAnalytics(db, String(req.query.period || "monthly")); return aylaSendOk(res, { count: analytics.students.length, students: analytics.students }); } catch (error) { return aylaSendError(res, error.statusCode || 500, error.message); } });
+app.put("/api/ayla/admin/ai-usage/settings", async (req, res) => { try { await aylaRequireAdmin(req); const db = await readAylaDb(); aylaEnsureSeedData(db); db.aylaAiUsageSettings = aylaMergeAiUsageSettings({ ...db.aylaAiUsageSettings, ...(req.body || {}), global_limit: { ...db.aylaAiUsageSettings.global_limit, ...(req.body.global_limit || {}) }, emergency_protection: { ...db.aylaAiUsageSettings.emergency_protection, ...(req.body.emergency_protection || {}) } }); await writeAylaDb(db); return aylaSendOk(res, { settings: db.aylaAiUsageSettings }); } catch (error) { return aylaSendError(res, error.statusCode || 500, error.message); } });
+app.put("/api/ayla/admin/ai-usage/plans/:planId", async (req, res) => { try { await aylaRequireAdmin(req); const db = await readAylaDb(); aylaEnsureSeedData(db); db.aylaPlanAiLimits[String(req.params.planId)] = { ...aylaNormalizeLimit(req.body || {}), updatedAt: aylaNow() }; await writeAylaDb(db); return aylaSendOk(res, { plan_id: req.params.planId, limit: db.aylaPlanAiLimits[String(req.params.planId)] }); } catch (error) { return aylaSendError(res, error.statusCode || 500, error.message); } });
+app.put("/api/ayla/admin/ai-usage/students/:userId", async (req, res) => { try { await aylaRequireAdmin(req); const db = await readAylaDb(); aylaEnsureSeedData(db); const mode = ["inherit","custom","unlimited","blocked"].includes(String(req.body.mode)) ? String(req.body.mode) : "inherit"; db.aylaStudentAiOverrides[String(req.params.userId)] = { ...req.body, mode, updatedAt: aylaNow() }; await writeAylaDb(db); return aylaSendOk(res, { user_id: req.params.userId, override: db.aylaStudentAiOverrides[String(req.params.userId)] }); } catch (error) { return aylaSendError(res, error.statusCode || 500, error.message); } });
+app.delete("/api/ayla/admin/ai-usage/students/:userId", async (req, res) => { try { await aylaRequireAdmin(req); const db = await readAylaDb(); delete db.aylaStudentAiOverrides[String(req.params.userId)]; await writeAylaDb(db); return aylaSendOk(res, { user_id: req.params.userId, deleted: true }); } catch (error) { return aylaSendError(res, error.statusCode || 500, error.message); } });
+
+app.get("/api/ayla/admin/storage-safety", async (req, res) => { try { await aylaRequireAdmin(req); const aylaDb = await readAylaDb(); const knowledge = await aylaKnowledgeStatus(); const stat = await fs.stat(AYLA_DB_PATH).catch(()=>null); return aylaSendOk(res, { separation: { ayla_db_path: AYLA_DB_PATH, lms_db_path: LIVE_DB_PATH, crm_db_path: CRM_DB_PATH, ayla_writes_to_lms: false, ayla_writes_to_crm: false, knowledge_read_only_from_crm: true }, ayla_file: stat ? { size_bytes: stat.size, modified_at: stat.mtime.toISOString() } : { missing: true }, ayla_counts: Object.fromEntries(Object.keys(AYLA_COLLECTIONS).map((key)=>[key, aylaValues(aylaDb,key).length])), knowledge }); } catch (error) { return aylaSendError(res, error.statusCode || 500, error.message); } });
+
+app.post("/api/ayla/admin/backup", async (req, res) => { try { await aylaRequireAdmin(req); await ensureDataDir(); const dir = path.join(DATA_DIR,"backups"); await fs.mkdir(dir,{recursive:true}); const stamp = new Date().toISOString().replace(/[:.]/g,"-"); const backupPath = path.join(dir,`aylamed-db-${stamp}.json`); const db = await readAylaDb(); await fs.writeFile(backupPath, JSON.stringify(db,null,2),"utf8"); return aylaSendOk(res,{backup_path:backupPath,created_at:aylaNow()}); } catch (error) { return aylaSendError(res,error.statusCode||500,error.message); } });
+
+app.get("/api/ayla/admin/legacy-migration/preview", async (req,res)=>{ try { await aylaRequireAdmin(req); const live=await readLiveDb(); const counts={}; for (const key of [...Object.keys(AYLA_COLLECTIONS),"aylaUsers"]) counts[key]=aylaValues(live,key).length; return aylaSendOk(res,{source:LIVE_DB_PATH,destination:AYLA_DB_PATH,read_only:true,counts,message:"Preview only. No LMS or CRM record was changed."}); } catch(error){ return aylaSendError(res,error.statusCode||500,error.message); } });
+app.post("/api/ayla/admin/legacy-migration/copy", async (req,res)=>{ try { await aylaRequireAdmin(req); const live=await readLiveDb(); const db=await readAylaDb(); const copied={}; for (const key of [...Object.keys(AYLA_COLLECTIONS),"aylaUsers"]) { aylaEnsureCollection(db,key); let count=0; for (const item of aylaValues(live,key)) { if (!aylaGetItem(db,key,item.id)) { aylaSetItem(db,key,item); count+=1; } } copied[key]=count; } await writeAylaDb(db); return aylaSendOk(res,{copied,source_unchanged:true,message:"Only legacy AylaMed records were copied. live-session-db.json and crm-db.json were not modified."}); } catch(error){ return aylaSendError(res,error.statusCode||500,error.message); } });
+
 app.get("/api/ayla/action-logs", async (req, res) => {
   try {
-    const db = await readLiveDb();
+    const db = await readAylaDb();
     const actionLogs = aylaFilterRows(aylaValues(db, "aylaActionLogs"), req.query);
     return aylaSendOk(res, { count: actionLogs.length, actionLogs });
   } catch (error) {
@@ -49359,7 +50168,7 @@ for (const [collectionKey, config] of Object.entries(AYLA_COLLECTIONS)) {
 }
 
 // -----------------------------------------------------------------------------
-// END AYLAMED BACKEND API FINAL V1
+// END AYLAMED BACKEND API V186 — SEPARATE DATA / SHARED KNOWLEDGE / METERED AI
 // -----------------------------------------------------------------------------
 
 
@@ -49701,4 +50510,6 @@ app.listen(PORT, () => {
   ngStartAutoZoomPrepareScheduler();
   console.log(`DATA_DIR=${DATA_DIR}`);
   console.log(`LIVE_DB_PATH=${LIVE_DB_PATH}`);
+  console.log(`AYLA_DB_PATH=${AYLA_DB_PATH}`);
+  console.log(`CRM_DB_PATH=${CRM_DB_PATH}`);
 });
