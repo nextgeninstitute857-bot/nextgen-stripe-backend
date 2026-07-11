@@ -47818,7 +47818,7 @@ function ngStartBillingExpiryRunner() {
 // - Frontend can connect to these routes later with VITE_API_BASE_URL pointing to this backend.
 // -----------------------------------------------------------------------------
 
-const AYLA_BACKEND_BUILD = "aylamed-separated-core-knowledge-ai-usage-v186";
+const AYLA_BACKEND_BUILD = "aylamed-student-experience-roadmap-v187";
 
 const AYLA_EXAM_TRACKS = [
   "USMLE Step 1",
@@ -48157,16 +48157,25 @@ function aylaTargetDateInfo(input = {}) {
 }
 
 function aylaRisk(input = {}) {
+  const target = aylaTargetDateInfo(input);
+
+  // Match preparation is evaluated by readiness and timeline, not exam/QBank scores.
+  if (target.targetType === "match") {
+    if (target.daysToTarget > 90) return "Match Foundation";
+    if (target.daysToTarget > 30) return "Match Readiness";
+    if (target.daysToTarget > 7) return "Match Priority";
+    return "Match Week";
+  }
+
   const currentScore = aylaNumber(input.currentScore ?? input.current_score ?? input.score, 0);
   const qbankAverage = aylaNumber(input.qbankAverage ?? input.qbank_average, 0);
   const qbankCompleted = aylaNumber(input.qbankCompleted ?? input.qbank_completed, 0);
   const targetScore = aylaNumber(input.targetScore ?? input.target_score, 65);
-  const target = aylaTargetDateInfo(input);
   const daysToTarget = target.daysToTarget || aylaNumber(input.daysToExam ?? input.days_to_exam ?? input.daysToTarget, 0);
   const isNewStudent = !currentScore && !qbankAverage && !qbankCompleted;
 
   if (isNewStudent) return "Baseline Needed";
-  if (daysToTarget > 0 && daysToTarget <= 14) return "Critical";
+  if (daysToTarget > 0 && daysToTarget <= 15) return "Critical";
   if (daysToTarget > 0 && daysToTarget <= 30 && (currentScore < targetScore || qbankAverage < targetScore)) return "Critical";
   if ((currentScore > 0 && currentScore < 45) || (qbankAverage > 0 && qbankAverage < 45)) return "High Risk";
   if ((currentScore >= 45 && currentScore < 60) || (qbankAverage >= 45 && qbankAverage < 60) || (qbankCompleted > 0 && qbankCompleted < 50)) return "Medium Risk";
@@ -48188,14 +48197,19 @@ function aylaStudyPhase(input = {}, riskLevel = aylaRisk(input)) {
   if (days > 120) return "Foundation Build";
   if (days > 60) return "System Mastery";
   if (days > 30) return "Weak-Area Repair";
-  if (days > 14) return "Assessment & Consolidation";
-  if (days > 0) return "Final Rapid Review";
+  if (days > 15) return "Assessment & Consolidation";
+  if (days > 8) return "Final 14-Day Review";
+  if (days > 3) return "Final 7-Day Review";
+  if (days > 0) return "Final 48-Hour Protocol";
   return riskLevel === "Focused Review" ? "Readiness Maintenance" : "Adaptive Foundation";
 }
 
 function aylaRoadmapMode(riskLevel, input = {}) {
   const phase = aylaStudyPhase(input, riskLevel);
   if (phase === "Match Foundation" || phase === "Application & Interview Readiness" || phase === "Final Match Preparation" || phase === "Match Week") {
+    return `${phase} Roadmap`;
+  }
+  if (phase === "Final 48-Hour Protocol" || phase === "Final 7-Day Review" || phase === "Final 14-Day Review") {
     return `${phase} Roadmap`;
   }
   return {
@@ -48208,7 +48222,12 @@ function aylaRoadmapMode(riskLevel, input = {}) {
 }
 
 function aylaDailyQuestionTarget(input = {}, riskLevel = aylaRisk(input)) {
+  const target = aylaTargetDateInfo(input);
   const hours = Math.max(1, Math.min(12, aylaNumber(input.dailyHours ?? input.daily_hours, 4)));
+  if (target.targetType === "match") return 0;
+  if (target.daysToTarget > 0 && target.daysToTarget <= 3) return 10;
+  if (target.daysToTarget > 3 && target.daysToTarget <= 8) return Math.min(30, Math.max(15, Math.round(hours * 4)));
+  if (target.daysToTarget > 8 && target.daysToTarget <= 15) return Math.min(45, Math.max(20, Math.round(hours * 5)));
   if (riskLevel === "Baseline Needed") return 20;
   if (riskLevel === "Critical") return Math.min(80, Math.max(20, Math.round(hours * 7)));
   if (riskLevel === "High Risk") return Math.min(50, Math.max(20, Math.round(hours * 5)));
@@ -48217,7 +48236,12 @@ function aylaDailyQuestionTarget(input = {}, riskLevel = aylaRisk(input)) {
 }
 
 function aylaQbankPlan(riskLevel, input = {}) {
+  const target = aylaTargetDateInfo(input);
   const count = aylaDailyQuestionTarget(input, riskLevel);
+  if (target.targetType === "match") return "No QBank target — use application, interview, program, and ranking readiness tasks";
+  if (target.daysToTarget > 0 && target.daysToTarget <= 3) return `${count} confidence questions maximum, using flagged incorrects only`;
+  if (target.daysToTarget > 3 && target.daysToTarget <= 8) return `${count} high-yield mixed questions/day with incorrect-only review`;
+  if (target.daysToTarget > 8 && target.daysToTarget <= 15) return `${count} focused questions/day plus repeated-miss review`;
   return {
     "Baseline Needed": `${count} tutor-mode discovery questions/day`,
     Critical: `${count} high-yield rescue questions/day`,
@@ -48228,7 +48252,11 @@ function aylaQbankPlan(riskLevel, input = {}) {
 }
 
 function aylaFlashcardPlan(riskLevel, input = {}) {
+  const target = aylaTargetDateInfo(input);
   const hours = Math.max(1, aylaNumber(input.dailyHours ?? input.daily_hours, 4));
+  if (target.targetType === "match") return "No medical flashcard quota — use interview stories, program notes, and application checklists";
+  if (target.daysToTarget > 0 && target.daysToTarget <= 3) return "10–15 flagged recall prompts only; no new cards";
+  if (target.daysToTarget > 3 && target.daysToTarget <= 8) return "15–20 repeated-miss cards/day; no large new deck";
   const count = riskLevel === "Critical" ? Math.min(30, hours * 4) : riskLevel === "High Risk" ? Math.min(35, hours * 4) : Math.min(30, hours * 3);
   return {
     "Baseline Needed": "15 starter recall cards/day",
@@ -48240,20 +48268,57 @@ function aylaFlashcardPlan(riskLevel, input = {}) {
 }
 
 function aylaMentorRule(riskLevel, input = {}) {
-  const daysToTarget = aylaTargetDateInfo(input).daysToTarget;
+  const target = aylaTargetDateInfo(input);
+  if (target.targetType === "match") return target.daysToTarget <= 30 ? "Mock interview or application review recommended" : "Optional readiness review";
+  const daysToTarget = target.daysToTarget;
   if (riskLevel === "Critical") return "Recommended this week";
   if (riskLevel === "High Risk" && daysToTarget > 0 && daysToTarget <= 60) return "Recommended";
   return "Optional";
 }
 
 function aylaRecommendation(input = {}) {
-  const riskLevel = aylaRisk(input);
   const target = aylaTargetDateInfo(input);
+  const riskLevel = aylaRisk(input);
   const phase = aylaStudyPhase(input, riskLevel);
   const dailyHours = Math.max(1, Math.min(12, aylaNumber(input.dailyHours ?? input.daily_hours, 4)));
   const weeklyStudyDays = Math.max(1, Math.min(7, aylaNumber(input.weeklyStudyDays ?? input.weekly_study_days, 6)));
-  const dailyQuestionTarget = aylaDailyQuestionTarget(input, riskLevel);
-  const dailyFlashcardTarget = riskLevel === "Baseline Needed" ? 15 : Math.min(35, Math.max(12, Math.round(dailyHours * 3.5)));
+  const isMatch = target.targetType === "match";
+  const dailyQuestionTarget = isMatch ? 0 : aylaDailyQuestionTarget(input, riskLevel);
+  const dailyFlashcardTarget = isMatch
+    ? 0
+    : target.daysToTarget > 0 && target.daysToTarget <= 3
+      ? 15
+      : target.daysToTarget > 3 && target.daysToTarget <= 8
+        ? 20
+        : riskLevel === "Baseline Needed"
+          ? 15
+          : Math.min(35, Math.max(12, Math.round(dailyHours * 3.5)));
+
+  const examReason =
+    phase === "Final 48-Hour Protocol"
+      ? "The exam is within 48 hours, so the plan stops new content and heavy QBank work. It prioritizes flagged incorrects, rapid recall, formulas/images, sleep, logistics, and one short confidence block."
+      : phase === "Final 7-Day Review"
+        ? "The exam is within one week, so the plan prioritizes repeated misses, high-yield mixed review, recall, and exam-day readiness without opening large new topics."
+        : phase === "Final 14-Day Review"
+          ? "The exam is within two weeks, so the plan compresses review around high-yield weak areas, repeated misses, and focused assessments."
+          : riskLevel === "Baseline Needed"
+            ? "No reliable baseline score or QBank trend is available, so the first week collects data while building a sustainable routine."
+            : riskLevel === "Critical"
+              ? "The target date is close or performance is below target, so the roadmap prioritizes high-yield weak areas and rapid feedback."
+              : riskLevel === "High Risk"
+                ? "Performance suggests foundation gaps, so the plan combines concept repair with tutor-mode questions before heavy mixed blocks."
+                : riskLevel === "Medium Risk"
+                  ? "The student has usable performance data, so the roadmap prioritizes weak systems, question review, and weekly reassessment."
+                  : "Performance is near readiness, so the roadmap emphasizes timed mixed work, incorrect review, and final consolidation.";
+
+  const matchReason =
+    phase === "Match Week"
+      ? "Match Week is close, so the plan focuses on final communication, contingency preparation, wellbeing, documents, and schedule readiness."
+      : phase === "Final Match Preparation"
+        ? "The Match timeline is close, so the plan prioritizes interview refinement, program comparison, communication, ranking preparation, and unresolved application gaps."
+        : phase === "Application & Interview Readiness"
+          ? "The plan is organized around application quality, interview stories, program research, communication, and measurable readiness milestones."
+          : "The timeline allows structured profile building: CV evidence, application narrative, documents, program strategy, and an interview story bank.";
 
   return {
     riskLevel,
@@ -48273,21 +48338,30 @@ function aylaRecommendation(input = {}) {
     weeklyMinutes: dailyHours * 60 * weeklyStudyDays,
     dailyQuestionTarget,
     dailyFlashcardTarget,
-    weeklyQuestionTarget: dailyQuestionTarget * weeklyStudyDays,
-    weeklyAssessment: target.targetType === "match" ? "1 interview/application readiness review" : riskLevel === "Critical" ? "2 focused assessments" : "1 cumulative assessment",
-    intensity: riskLevel === "Critical" ? "Intensive" : riskLevel === "High Risk" ? "Structured" : riskLevel === "Focused Review" ? "Performance" : "Balanced",
-    reason:
-      riskLevel === "Baseline Needed"
-        ? "No reliable baseline score or QBank trend is available, so the first week collects data while building a sustainable routine."
-        : target.targetType === "match"
-          ? `The plan is organized around ${target.targetLabel}, with application, interview, rank-list, and final-week readiness tasks.`
-          : riskLevel === "Critical"
-            ? "The target date is close or performance is below target, so the roadmap prioritizes high-yield weak areas and rapid feedback."
-            : riskLevel === "High Risk"
-              ? "Performance suggests foundation gaps, so the plan combines concept repair with tutor-mode questions before heavy mixed blocks."
-              : riskLevel === "Medium Risk"
-                ? "The student has usable performance data, so the roadmap prioritizes weak systems, question review, and weekly reassessment."
-                : "Performance is near readiness, so the roadmap emphasizes timed mixed work, incorrect review, and final consolidation.",
+    weeklyQuestionTarget: isMatch ? 0 : dailyQuestionTarget * weeklyStudyDays,
+    weeklyAssessment: isMatch
+      ? (phase === "Match Week" ? "1 final Match Week readiness check" : "1 interview/application readiness review")
+      : phase === "Final 48-Hour Protocol"
+        ? "No full assessment; one short confidence block only"
+        : phase === "Final 7-Day Review"
+          ? "1 short focused assessment"
+          : phase === "Final 14-Day Review"
+            ? "1 focused assessment + repeated-miss review"
+            : riskLevel === "Critical"
+            ? "2 focused assessments"
+            : "1 cumulative assessment",
+    intensity: isMatch
+      ? (target.daysToTarget <= 7 ? "Match Week" : target.daysToTarget <= 30 ? "Priority" : "Structured")
+      : phase === "Final 48-Hour Protocol"
+        ? "Protective"
+        : riskLevel === "Critical"
+          ? "Intensive"
+          : riskLevel === "High Risk"
+            ? "Structured"
+            : riskLevel === "Focused Review"
+              ? "Performance"
+              : "Balanced",
+    reason: isMatch ? matchReason : examReason,
   };
 }
 
@@ -48341,7 +48415,7 @@ function aylaTaskDuration(totalMinutes, ratio, minimum = 15) {
 
 function aylaPhasePlan(student, recommendation = aylaRecommendation(student)) {
   const target = aylaTargetDateInfo(student);
-  const days = Math.max(7, target.daysToTarget || 90);
+  const days = Math.max(1, target.daysToTarget || 90);
   const today = new Date();
 
   if (target.targetType === "match") {
@@ -48349,7 +48423,7 @@ function aylaPhasePlan(student, recommendation = aylaRecommendation(student)) {
       { name: "Profile & Application Foundation", ratio: 0.35, focus: "CV, application narrative, documents, and program strategy" },
       { name: "Interview Readiness", ratio: 0.35, focus: "Story bank, behavioral answers, specialty fit, and mock interviews" },
       { name: "Ranking & Communication", ratio: 0.2, focus: "Program comparison, communication, and rank-list preparation" },
-      { name: "Match Week", ratio: 0.1, focus: "Final checklist, contingency planning, and wellbeing" },
+      { name: "Match Week", ratio: 0.1, focus: "Final checklist, contingency planning, schedule readiness, and wellbeing" },
     ];
     let offset = 0;
     return phases.map((phase, index) => {
@@ -48357,23 +48431,58 @@ function aylaPhasePlan(student, recommendation = aylaRecommendation(student)) {
       const startDate = aylaDateOnly(aylaAddDays(today, offset));
       const endDate = aylaDateOnly(aylaAddDays(today, offset + length - 1));
       offset += length;
-      return { id: `PHASE-${index + 1}`, ...phase, startDate, endDate, days: length, active: recommendation.phase.includes(phase.name.split(" ")[0]) || index === 0 };
+      const active =
+        (recommendation.phase === "Match Foundation" && index === 0) ||
+        (recommendation.phase === "Application & Interview Readiness" && index === 1) ||
+        (recommendation.phase === "Final Match Preparation" && (index === 1 || index === 2)) ||
+        (recommendation.phase === "Match Week" && index === 3);
+      return { id: `PHASE-${index + 1}`, ...phase, startDate, endDate, days: length, active };
     });
   }
 
-  const phases = [
-    { name: "Foundation Build", ratio: 0.3, focus: "Core concepts and weak-system repair" },
-    { name: "System Mastery", ratio: 0.3, focus: "Targeted QBank blocks and structured review" },
-    { name: "Assessment & Consolidation", ratio: 0.25, focus: "Mixed blocks, incorrect review, and weekly assessment" },
-    { name: "Final Rapid Review", ratio: 0.15, focus: "High-yield recall, repeated misses, and exam-day readiness" },
-  ];
+  if (days <= 3) {
+    return [{
+      id: "PHASE-48H",
+      name: "Final 48-Hour Protocol",
+      focus: "Flagged incorrects, rapid recall, formulas/images, sleep, logistics, and confidence",
+      startDate: aylaDateOnly(today),
+      endDate: aylaDateOnly(aylaAddDays(today, Math.max(0, days - 1))),
+      days,
+      active: true,
+    }];
+  }
+
+  const finalFortyEightDays = Math.min(2, days);
+  const finalWeekDays = Math.min(5, Math.max(0, days - finalFortyEightDays));
+  const coreDays = Math.max(0, days - finalFortyEightDays - finalWeekDays);
+  const phases = [];
+
+  if (coreDays > 0) {
+    const foundationDays = Math.max(1, Math.round(coreDays * 0.32));
+    const masteryDays = Math.max(1, Math.round(coreDays * 0.34));
+    const consolidationDays = Math.max(1, coreDays - foundationDays - masteryDays);
+    phases.push(
+      { name: "Foundation Build", days: foundationDays, focus: "Core concepts and weak-system repair" },
+      { name: "System Mastery", days: masteryDays, focus: "Targeted QBank blocks and structured review" },
+      { name: "Assessment & Consolidation", days: consolidationDays, focus: "Mixed blocks, incorrect review, and focused reassessment" },
+    );
+  }
+
+  if (finalWeekDays > 0) {
+    phases.push({ name: days <= 14 ? "Final 7-Day Review" : "Final Rapid Review", days: finalWeekDays, focus: "Repeated misses, high-yield recall, and exam-day readiness" });
+  }
+  phases.push({ name: "Final 48-Hour Protocol", days: finalFortyEightDays, focus: "No new content; flagged incorrects, rapid recall, logistics, sleep, and confidence" });
+
   let offset = 0;
   return phases.map((phase, index) => {
-    const length = index === phases.length - 1 ? Math.max(1, days - offset) : Math.max(1, Math.round(days * phase.ratio));
+    const length = Math.max(1, phase.days);
     const startDate = aylaDateOnly(aylaAddDays(today, offset));
     const endDate = aylaDateOnly(aylaAddDays(today, offset + length - 1));
     offset += length;
-    return { id: `PHASE-${index + 1}`, ...phase, startDate, endDate, days: length, active: recommendation.phase === phase.name || (index === 0 && recommendation.phase === "Baseline & Planning") };
+    const active = recommendation.phase === phase.name ||
+      (recommendation.phase === "Baseline & Planning" && index === 0) ||
+      (recommendation.phase === "Final 14-Day Review" && phase.name === "Final 7-Day Review");
+    return { id: `PHASE-${index + 1}`, ...phase, startDate, endDate, days: length, active };
   });
 }
 
@@ -48393,17 +48502,45 @@ function aylaBuildRoadmapTasks(student, recommendation = aylaRecommendation(stud
   const resources = student.selectedResources?.length ? student.selectedResources : ["Primary review resource"];
   const dailyMinutes = Math.max(60, recommendation.dailyHours * 60);
   const today = new Date();
+  const targetDays = Math.max(1, recommendation.daysToTarget || 7);
+  const scheduleDays = Math.min(7, targetDays);
   let focusIndex = 0;
 
-  for (let offset = 0; offset < 7; offset += 1) {
+  const addTask = (payload) => {
+    tasks.push({
+      id: aylaId("TASK"),
+      studentId: student.id,
+      status: "Pending",
+      canReschedule: true,
+      createdAt: aylaNow(),
+      updatedAt: aylaNow(),
+      ...payload,
+    });
+  };
+
+  for (let offset = 0; offset < scheduleDays; offset += 1) {
     const date = aylaAddDays(today, offset);
     const scheduledDate = aylaDateOnly(date);
     const dayLabel = aylaDayName(date);
     const isStudyDay = aylaIsStudyDay(student, date);
+    const due = offset === 0 ? "Today" : dayLabel;
 
-    if (!isStudyDay) {
-      tasks.push({
-        id: aylaId("TASK"), studentId: student.id, title: "Recovery day + 15-minute light recall", category: "Recovery", taskType: "recovery", priority: "Low", status: "Pending", due: offset === 0 ? "Today" : dayLabel, scheduledDate, dayLabel, durationMinutes: 15, phase: recommendation.phase, system: "Wellbeing", topic: "Recovery and consistency", output: "Protects energy while maintaining recall.", knowledgeQuery: "recovery consistency study planning", createdAt: aylaNow(), updatedAt: aylaNow(),
+    if (!isStudyDay && recommendation.phase !== "Final 48-Hour Protocol") {
+      addTask({
+        title: "Recovery day + 15-minute light recall",
+        category: "Recovery",
+        taskType: "recovery",
+        priority: "Low",
+        due,
+        scheduledDate,
+        dayLabel,
+        durationMinutes: 15,
+        phase: recommendation.phase,
+        system: "Wellbeing",
+        topic: "Recovery and consistency",
+        output: "Protects energy while maintaining recall.",
+        rationale: "Recovery is scheduled because consistency and sleep improve retention more than adding low-quality hours.",
+        knowledgeQuery: "recovery consistency study planning",
       });
       continue;
     }
@@ -48411,27 +48548,221 @@ function aylaBuildRoadmapTasks(student, recommendation = aylaRecommendation(stud
     const weakArea = weakAreas[focusIndex % weakAreas.length];
     const resource = resources[focusIndex % resources.length];
     focusIndex += 1;
-    const conceptMinutes = aylaTaskDuration(dailyMinutes, recommendation.riskLevel === "Focused Review" ? 0.25 : 0.35, 25);
-    const qbankMinutes = aylaTaskDuration(dailyMinutes, recommendation.riskLevel === "Baseline Needed" ? 0.35 : 0.4, 30);
-    const reviewMinutes = aylaTaskDuration(dailyMinutes, 0.2, 20);
 
     const matchMode = recommendation.targetType === "match";
     if (matchMode) {
-      const matchTopics = ["CV and experience inventory", "Personal statement story bank", "Behavioral interview answers", "Program research", "Communication and follow-up", "Rank-list decision framework", "Match-week contingency checklist"];
-      const topic = matchTopics[offset % matchTopics.length];
-      tasks.push({ id: aylaId("TASK"), studentId: student.id, title: `Complete ${topic}`, category: "Match Preparation", taskType: "match", priority: offset < 2 ? "High" : "Medium", status: "Pending", due: offset === 0 ? "Today" : dayLabel, scheduledDate, dayLabel, durationMinutes: conceptMinutes + qbankMinutes, phase: recommendation.phase, system: "Match", topic, output: `Moves the doctor closer to ${recommendation.targetLabel}.`, knowledgeQuery: `match day ${topic}`, createdAt: aylaNow(), updatedAt: aylaNow() });
-      tasks.push({ id: aylaId("TASK"), studentId: student.id, title: "Review progress and prepare tomorrow's evidence", category: "Review", taskType: "review", priority: "Medium", status: "Pending", due: offset === 0 ? "Today" : dayLabel, scheduledDate, dayLabel, durationMinutes: reviewMinutes, phase: recommendation.phase, system: "Match", topic: "Daily review", output: "Keeps application and interview preparation measurable.", knowledgeQuery: "match preparation progress review", createdAt: aylaNow(), updatedAt: aylaNow() });
+      const phaseTopics = {
+        "Match Foundation": [
+          "CV and experience inventory",
+          "Personal statement evidence map",
+          "Letters and document checklist",
+          "Specialty fit narrative",
+          "Program strategy baseline",
+          "Application gaps review",
+          "Weekly readiness summary",
+        ],
+        "Application & Interview Readiness": [
+          "Personal statement story bank",
+          "Behavioral interview answers",
+          "Clinical challenge stories",
+          "Program research shortlist",
+          "Why this specialty answer",
+          "Mock interview practice",
+          "Communication follow-up plan",
+        ],
+        "Final Match Preparation": [
+          "Program comparison matrix",
+          "Interview refinement",
+          "Post-interview communication review",
+          "Ranking criteria and priorities",
+          "Unresolved application gaps",
+          "Contingency planning",
+          "Final readiness review",
+        ],
+        "Match Week": [
+          "Match Week schedule and documents",
+          "Communication and contact checklist",
+          "Contingency and SOAP readiness",
+          "Travel and logistics confirmation",
+          "Wellbeing and support plan",
+          "Final document backup",
+          "Match Day checklist",
+        ],
+      };
+      const topics = phaseTopics[recommendation.phase] || phaseTopics["Match Foundation"];
+      const topic = topics[offset % topics.length];
+      const mainMinutes = aylaTaskDuration(dailyMinutes, 0.72, 45);
+      const reviewMinutes = aylaTaskDuration(dailyMinutes, 0.18, 20);
+
+      addTask({
+        title: `Complete ${topic}`,
+        category: "Match Preparation",
+        taskType: "match",
+        priority: offset < 2 ? "High" : "Medium",
+        due,
+        scheduledDate,
+        dayLabel,
+        durationMinutes: mainMinutes,
+        phase: recommendation.phase,
+        system: "Match",
+        topic,
+        output: `Creates measurable evidence for ${recommendation.targetLabel} readiness.`,
+        rationale: `This task is assigned because the current Match phase is ${recommendation.phase}.`,
+        knowledgeQuery: `match preparation ${topic}`,
+      });
+      addTask({
+        title: "Record evidence, gaps, and tomorrow's next action",
+        category: "Readiness Review",
+        taskType: "review",
+        priority: "Medium",
+        due,
+        scheduledDate,
+        dayLabel,
+        durationMinutes: reviewMinutes,
+        phase: recommendation.phase,
+        system: "Match",
+        topic: "Daily readiness review",
+        output: "Keeps application and interview preparation measurable.",
+        rationale: "A short evidence log prevents vague preparation and guides the next day's priority.",
+        knowledgeQuery: "match preparation progress review",
+      });
       continue;
     }
 
-    tasks.push({
-      id: aylaId("TASK"), studentId: student.id, title: `${recommendation.phase}: revise ${weakArea}`, category: "Concept Review", taskType: "concept", priority: recommendation.riskLevel === "Critical" ? "Critical" : "High", status: "Pending", due: offset === 0 ? "Today" : dayLabel, scheduledDate, dayLabel, durationMinutes: conceptMinutes, phase: recommendation.phase, system: weakArea, topic: `${weakArea} high-yield review`, resource, output: `Uses ${resource} to repair the highest-priority gap.`, knowledgeQuery: `${student.exam} ${weakArea} ${recommendation.phase}`, createdAt: aylaNow(), updatedAt: aylaNow(),
+    if (recommendation.phase === "Final 48-Hour Protocol") {
+      const shortBlock = Math.min(10, recommendation.dailyQuestionTarget || 10);
+      const recallMinutes = aylaTaskDuration(dailyMinutes, 0.25, 25);
+      const reviewMinutes = aylaTaskDuration(dailyMinutes, 0.22, 20);
+      const logisticsMinutes = aylaTaskDuration(dailyMinutes, 0.15, 15);
+
+      addTask({
+        title: `Review flagged ${weakArea} incorrects only`,
+        category: "Flagged Review",
+        taskType: "concept",
+        priority: "Critical",
+        due,
+        scheduledDate,
+        dayLabel,
+        durationMinutes: recallMinutes,
+        phase: recommendation.phase,
+        system: weakArea,
+        topic: "Repeated misses only",
+        resource,
+        output: "Closes known gaps without opening new content.",
+        rationale: "The exam is within 48 hours; only established weak points should be reviewed.",
+        knowledgeQuery: `${student.exam} ${weakArea} rapid high-yield review`,
+      });
+      addTask({
+        title: `Complete one ${shortBlock}-question confidence block`,
+        category: "Confidence Block",
+        taskType: "qbank",
+        priority: "High",
+        due,
+        scheduledDate,
+        dayLabel,
+        durationMinutes: reviewMinutes,
+        phase: recommendation.phase,
+        system: weakArea,
+        topic: "Flagged incorrects or high-yield mixed",
+        questionCount: shortBlock,
+        mode: "Short confidence block",
+        output: "Checks recall without fatigue or heavy score-chasing.",
+        rationale: "A short block preserves confidence; a full heavy block is intentionally avoided.",
+        knowledgeQuery: `${weakArea} flagged incorrect review`,
+      });
+      addTask({
+        title: "Rapid recall: formulas, images, algorithms, and repeated misses",
+        category: "Rapid Recall",
+        taskType: "flashcards",
+        priority: "High",
+        due,
+        scheduledDate,
+        dayLabel,
+        durationMinutes: recallMinutes,
+        phase: recommendation.phase,
+        system: "High Yield",
+        topic: "Rapid recall sheet",
+        output: "Refreshes high-yield memory without creating new notes or cards.",
+        rationale: "Final recall should use familiar material only.",
+        knowledgeQuery: `${student.exam} rapid recall formulas images algorithms`,
+      });
+      addTask({
+        title: offset === scheduleDays - 1 ? "Finalize sleep, travel, documents, food, and exam-day checklist" : "Protect sleep and confirm exam logistics",
+        category: "Exam Readiness",
+        taskType: "readiness",
+        priority: "Critical",
+        due,
+        scheduledDate,
+        dayLabel,
+        durationMinutes: logisticsMinutes,
+        phase: recommendation.phase,
+        system: "Wellbeing",
+        topic: "Exam-day logistics",
+        output: "Reduces preventable exam-day errors and protects performance.",
+        rationale: "Sleep and logistics have higher value than additional low-quality study in the final 48 hours.",
+        knowledgeQuery: "exam day logistics sleep final 48 hours",
+      });
+      continue;
+    }
+
+    const finalWeek = recommendation.phase === "Final 7-Day Review";
+    const finalTwoWeeks = recommendation.phase === "Final 14-Day Review";
+    const conceptRatio = finalWeek ? 0.28 : recommendation.riskLevel === "Focused Review" ? 0.25 : 0.35;
+    const qbankRatio = finalWeek ? 0.32 : recommendation.riskLevel === "Baseline Needed" ? 0.35 : 0.4;
+    const conceptMinutes = aylaTaskDuration(dailyMinutes, conceptRatio, 25);
+    const qbankMinutes = aylaTaskDuration(dailyMinutes, qbankRatio, 30);
+    const reviewMinutes = aylaTaskDuration(dailyMinutes, 0.2, 20);
+
+    addTask({
+      title: finalWeek ? `High-yield ${weakArea} repeated-miss review` : `${recommendation.phase}: revise ${weakArea}`,
+      category: "Concept Review",
+      taskType: "concept",
+      priority: recommendation.riskLevel === "Critical" ? "Critical" : "High",
+      due,
+      scheduledDate,
+      dayLabel,
+      durationMinutes: conceptMinutes,
+      phase: recommendation.phase,
+      system: weakArea,
+      topic: `${weakArea} high-yield review`,
+      resource,
+      output: finalWeek ? "Reviews only high-yield and repeated-miss concepts." : `Uses ${resource} to repair the highest-priority gap.`,
+      rationale: `${weakArea} is prioritized from the diagnostic and current ${recommendation.phase} timeline.`,
+      knowledgeQuery: `${student.exam} ${weakArea} ${recommendation.phase}`,
     });
-    tasks.push({
-      id: aylaId("TASK"), studentId: student.id, title: `Complete ${recommendation.dailyQuestionTarget} ${weakArea} questions`, category: "QBank", taskType: "qbank", priority: "High", status: "Pending", due: offset === 0 ? "Today" : dayLabel, scheduledDate, dayLabel, durationMinutes: qbankMinutes, phase: recommendation.phase, system: weakArea, topic: "Targeted QBank", questionCount: recommendation.dailyQuestionTarget, mode: recommendation.riskLevel === "Focused Review" ? "Timed Mixed" : "Tutor Mode", output: "Measures understanding and creates new weak-area evidence.", knowledgeQuery: `${weakArea} qbank incorrect review`, createdAt: aylaNow(), updatedAt: aylaNow(),
+    addTask({
+      title: `Complete ${recommendation.dailyQuestionTarget} ${weakArea} questions`,
+      category: "QBank",
+      taskType: "qbank",
+      priority: "High",
+      due,
+      scheduledDate,
+      dayLabel,
+      durationMinutes: qbankMinutes,
+      phase: recommendation.phase,
+      system: weakArea,
+      topic: finalTwoWeeks || finalWeek ? "High-yield focused QBank" : "Targeted QBank",
+      questionCount: recommendation.dailyQuestionTarget,
+      mode: finalWeek ? "Timed high-yield mixed" : recommendation.riskLevel === "Focused Review" ? "Timed Mixed" : "Tutor Mode",
+      output: "Measures understanding and creates new weak-area evidence.",
+      rationale: `The question count is matched to ${recommendation.dailyHours} available hours and the current timeline.`,
+      knowledgeQuery: `${weakArea} qbank incorrect review`,
     });
-    tasks.push({
-      id: aylaId("TASK"), studentId: student.id, title: `Review incorrects + ${recommendation.dailyFlashcardTarget} recall cards`, category: "Active Recall", taskType: "flashcards", priority: "Medium", status: "Pending", due: offset === 0 ? "Today" : dayLabel, scheduledDate, dayLabel, durationMinutes: reviewMinutes, phase: recommendation.phase, system: weakArea, topic: "Incorrect review", output: "Converts misses into active-recall prompts and tomorrow's priorities.", knowledgeQuery: `${weakArea} active recall incorrect review`, createdAt: aylaNow(), updatedAt: aylaNow(),
+    addTask({
+      title: `Review incorrects + ${recommendation.dailyFlashcardTarget} recall cards`,
+      category: "Active Recall",
+      taskType: "flashcards",
+      priority: "Medium",
+      due,
+      scheduledDate,
+      dayLabel,
+      durationMinutes: reviewMinutes,
+      phase: recommendation.phase,
+      system: weakArea,
+      topic: "Incorrect review",
+      output: "Converts misses into active-recall prompts and tomorrow's priorities.",
+      rationale: "Incorrect review is scheduled immediately so the roadmap can use the error pattern in the next adjustment.",
+      knowledgeQuery: `${weakArea} active recall incorrect review`,
     });
   }
 
@@ -48467,9 +48798,50 @@ function aylaBuildWeakAreaLogs(student, recommendation = aylaRecommendation(stud
 }
 
 function aylaBuildFlashcards(student, recommendation = aylaRecommendation(student), source = "Adaptive Roadmap") {
+  if (recommendation.targetType === "match") {
+    const topics = [
+      "Tell me about yourself",
+      "Why this specialty and program",
+      "A challenge or failure and what changed",
+      "A clinical teamwork example",
+      "Questions to ask the program",
+    ];
+    return topics.slice(0, 3).map((topic, index) => ({
+      id: aylaId("CARD"),
+      studentId: student.id,
+      exam: student.exam,
+      front: topic,
+      back: "Prepare a concise evidence-based answer, rehearse it aloud, and record one improvement for the next attempt.",
+      source,
+      system: "Match",
+      priority: index === 0 ? "High" : "Medium",
+      status: "Due",
+      nextReview: index === 0 ? "Today" : "Tomorrow",
+      createdAt: aylaNow(),
+      updatedAt: aylaNow(),
+    }));
+  }
+
   const areas = student.weakAreas?.length ? student.weakAreas.slice(0, 3) : ["Baseline planning"];
   return areas.map((area, index) => ({
-    id: aylaId("CARD"), studentId: student.id, exam: student.exam, front: `What is the next action when ${area} remains weak after review?`, back: recommendation.riskLevel === "Baseline Needed" ? "Collect baseline evidence with tutor-mode questions, record the reason for each miss, and reprioritize the roadmap." : `Revisit the core concept, complete a focused ${area} block, classify each error, and schedule active recall.`, source, system: area, priority: index === 0 && recommendation.riskLevel === "Critical" ? "Critical" : index === 0 ? "High" : "Medium", status: "Due", nextReview: index === 0 ? "Today" : "Tomorrow", createdAt: aylaNow(), updatedAt: aylaNow(),
+    id: aylaId("CARD"),
+    studentId: student.id,
+    exam: student.exam,
+    front: recommendation.phase === "Final 48-Hour Protocol"
+      ? `What is the single highest-yield repeated miss in ${area}?`
+      : `What is the next action when ${area} remains weak after review?`,
+    back: recommendation.phase === "Final 48-Hour Protocol"
+      ? "Review the familiar flagged concept once, state the rule aloud, and do not open a new topic."
+      : recommendation.riskLevel === "Baseline Needed"
+        ? "Collect baseline evidence with tutor-mode questions, record the reason for each miss, and reprioritize the roadmap."
+        : `Revisit the core concept, complete a focused ${area} block, classify each error, and schedule active recall.`,
+    source,
+    system: area,
+    priority: index === 0 && recommendation.riskLevel === "Critical" ? "Critical" : index === 0 ? "High" : "Medium",
+    status: "Due",
+    nextReview: index === 0 ? "Today" : "Tomorrow",
+    createdAt: aylaNow(),
+    updatedAt: aylaNow(),
   }));
 }
 
@@ -49665,7 +50037,7 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
     const student = aylaStudentFromDiagnostic(submission, recommendation);
     if (auth?.user?.id) { student.ayla_user_id = auth.user.id; student.user_id = auth.user.id; }
     const roadmapTasks = aylaBuildRoadmapTasks(student, recommendation);
-    const qbankBlock = aylaBuildQbankBlock(student, recommendation);
+    const qbankBlock = recommendation.targetType === "match" ? null : aylaBuildQbankBlock(student, recommendation);
     const weakAreaLogs = aylaBuildWeakAreaLogs(student, recommendation);
     const flashcards = aylaBuildFlashcards(student, recommendation);
     const phasePlan = aylaPhasePlan(student, recommendation);
@@ -49680,7 +50052,7 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
     aylaSetItem(db, "aylaStudents", student);
     aylaValues(db, "aylaRoadmapTasks").filter((item) => item.studentId === student.id).forEach((item) => aylaDeleteItem(db, "aylaRoadmapTasks", item.id));
     roadmapTasks.forEach((item) => aylaSetItem(db, "aylaRoadmapTasks", item));
-    aylaSetItem(db, "aylaQbankBlocks", qbankBlock);
+    if (qbankBlock) aylaSetItem(db, "aylaQbankBlocks", qbankBlock);
     weakAreaLogs.forEach((item) => aylaSetItem(db, "aylaWeakAreaLogs", item));
     flashcards.forEach((item) => aylaSetItem(db, "aylaFlashcards", item));
     await aylaLog(db, "diagnostic", "AylaMed personalized diagnostic and 7-day roadmap generated", { submissionId: submission.id, studentId: student.id, riskLevel: recommendation.riskLevel, phase: recommendation.phase, targetDate: recommendation.targetDate });
@@ -49690,7 +50062,7 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
       diagnosticSubmission: submission,
       student,
       recommendation,
-      generated: { roadmapTasks, qbankBlocks: [qbankBlock], weakAreaLogs, flashcards, phasePlan, knowledgeRecommendations },
+      generated: { roadmapTasks, qbankBlocks: qbankBlock ? [qbankBlock] : [], weakAreaLogs, flashcards, phasePlan, knowledgeRecommendations },
     }, 201);
   } catch (error) {
     return aylaSendError(res, 500, error.message || "Failed to submit AylaMed diagnostic");
@@ -49773,6 +50145,39 @@ app.post("/api/ayla/generate-roadmap", async (req, res) => {
   }
 });
 
+app.patch("/api/ayla/students/:studentId/roadmap-tasks/:taskId", async (req, res) => {
+  try {
+    const { user, db } = await aylaGetAuthenticatedUser(req);
+    aylaEnsureSeedData(db);
+    const student = aylaGetItem(db, "aylaStudents", req.params.studentId);
+    if (!student) return aylaSendError(res, 404, "AylaMed student not found");
+
+    const ownerId = String(student.aylaUserId || student.ayla_user_id || student.user_id || "");
+    const isOwner = ownerId && ownerId === String(user.id);
+    const isStaff = ["admin", "instructor"].includes(String(user.role || "").toLowerCase());
+    if (!isOwner && !isStaff) return aylaSendError(res, 403, "You cannot update another student's roadmap task");
+
+    const task = aylaGetItem(db, "aylaRoadmapTasks", req.params.taskId);
+    if (!task || String(task.studentId || task.student_id || "") !== String(student.id)) {
+      return aylaSendError(res, 404, "Roadmap task not found for this student");
+    }
+
+    const allowed = ["status", "scheduledDate", "due", "completedAt", "skippedAt", "movedAt"];
+    const patch = {};
+    for (const key of allowed) {
+      if (Object.prototype.hasOwnProperty.call(req.body || {}, key)) patch[key] = req.body[key];
+    }
+
+    const updated = { ...task, ...patch, id: task.id, studentId: student.id, updatedAt: aylaNow() };
+    aylaSetItem(db, "aylaRoadmapTasks", updated);
+    await aylaLog(db, "roadmap-task", "Student updated AylaMed roadmap task", { studentId: student.id, taskId: task.id, status: updated.status, scheduledDate: updated.scheduledDate });
+    await writeAylaDb(db);
+    return aylaSendOk(res, { roadmapTask: updated });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update roadmap task");
+  }
+});
+
 app.post("/api/ayla/assign-qbank-block", async (req, res) => {
   try {
     const db = await readAylaDb();
@@ -49781,6 +50186,9 @@ app.post("/api/ayla/assign-qbank-block", async (req, res) => {
     if (!student) return aylaSendError(res, 404, "AylaMed student not found");
 
     const recommendation = aylaRecommendation({ ...student, ...req.body });
+    if (recommendation.targetType === "match") {
+      return aylaSendError(res, 400, "QBank blocks are not assigned in Match Day mode. Use Match readiness tasks instead.");
+    }
     const qbankBlock = aylaBuildQbankBlock(student, recommendation, req.body);
     aylaSetItem(db, "aylaQbankBlocks", qbankBlock);
     await aylaLog(db, "qbank", "AylaMed QBank block assigned", { studentId: student.id, qbankBlockId: qbankBlock.id });
@@ -49871,7 +50279,7 @@ app.post("/api/ayla/update-roadmap-after-assessment", async (req, res) => {
 
     const recommendation = aylaRecommendation({ ...student, ...(assessment || {}), ...req.body });
     const roadmapTasks = aylaBuildRoadmapTasks(student, recommendation);
-    const qbankBlock = aylaBuildQbankBlock(student, recommendation);
+    const qbankBlock = recommendation.targetType === "match" ? null : aylaBuildQbankBlock(student, recommendation);
     const flashcards = aylaBuildFlashcards(student, recommendation, "Assessment Update");
     const phasePlan = aylaPhasePlan(student, recommendation);
     const knowledgeRecommendations = await aylaKnowledgeForStudent(db, student, recommendation, 6);
@@ -49887,12 +50295,12 @@ app.post("/api/ayla/update-roadmap-after-assessment", async (req, res) => {
 
     aylaValues(db, "aylaRoadmapTasks").filter((item) => item.studentId === student.id).forEach((item) => aylaDeleteItem(db, "aylaRoadmapTasks", item.id));
     roadmapTasks.forEach((item) => aylaSetItem(db, "aylaRoadmapTasks", item));
-    aylaSetItem(db, "aylaQbankBlocks", qbankBlock);
+    if (qbankBlock) aylaSetItem(db, "aylaQbankBlocks", qbankBlock);
     flashcards.forEach((card) => aylaSetItem(db, "aylaFlashcards", card));
     await aylaLog(db, "roadmap-update", "AylaMed roadmap recalculated after assessment", { studentId: student.id, assessmentId: assessment?.id || null, riskLevel: recommendation.riskLevel, phase: recommendation.phase, taskCount: roadmapTasks.length });
     await writeAylaDb(db);
 
-    return aylaSendOk(res, { student, recommendation, generated: { roadmapTasks, qbankBlocks: [qbankBlock], flashcards, phasePlan, knowledgeRecommendations } });
+    return aylaSendOk(res, { student, recommendation, generated: { roadmapTasks, qbankBlocks: qbankBlock ? [qbankBlock] : [], flashcards, phasePlan, knowledgeRecommendations } });
   } catch (error) {
     return aylaSendError(res, 500, error.message || "Failed to update AylaMed roadmap after assessment");
   }
