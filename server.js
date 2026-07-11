@@ -36064,7 +36064,19 @@ function ngEducationDocumentSummary(document = {}) {
   };
 }
 
+function ngIsAylaResourceDocument(document = {}) {
+  const pipeline = String(document.pipeline || "").toLowerCase();
+  const source = String(document.source || "").toLowerCase();
+  const audience = String(document.audience || "").toLowerCase();
+  const category = String(document.category || "").toLowerCase();
+  return pipeline === "aylamed_resource"
+    || source.includes("aylamed_resource_pipeline")
+    || audience.includes("aylamed_resource_engine")
+    || category.includes("aylamed resource intelligence");
+}
+
 async function ngProcessEducationDocumentBatch({ db, document, user, batchSize = 8 }) {
+  if (ngIsAylaResourceDocument(document)) return ngProcessAylaResourceDocumentBatch({ db, document, user, batchSize });
   db.ai_training_items = ensureCrmArray(db, "ai_training_items");
 
   const blocks = Array.isArray(document.source_blocks) ? document.source_blocks : [];
@@ -36374,12 +36386,13 @@ app.post("/admin/crm/ai-training/documents/:documentId/process-next-batch", asyn
       batchSize,
     });
 
+    const aylaResourceJob = ngIsAylaResourceDocument(document);
     ensureCrmArray(db, "approval_queue").unshift({
       id: uuid(),
       brand_id: req.body?.brand_id || null,
       action_id: document.id,
-      action_type: "medical_education_training_review_batch",
-      agent_name: "Education Knowledge Importer",
+      action_type: aylaResourceJob ? "aylamed_resource_review_batch" : "medical_education_training_review_batch",
+      agent_name: aylaResourceJob ? "AylaMed Resource Indexer" : "Education Knowledge Importer",
       channel: "ai_training_center",
       draft_content: `${document.title}: processed next batch. ${batchResult.createdItems.length} new chunks need medical review. ${document.remaining_chunks} source chunks remain.`,
       estimated_cost: estimateAICostUsd({ model: String(process.env.AI_EDUCATION_MODEL || process.env.AI_MODEL || "gpt-4o-mini"), usage: batchResult.ai_usage_summary }),
@@ -36393,15 +36406,16 @@ app.post("/admin/crm/ai-training/documents/:documentId/process-next-batch", asyn
 
     res.json({
       success: true,
-      mode: "education_document_next_batch",
+      mode: aylaResourceJob ? "aylamed_resource_next_batch" : "education_document_next_batch",
+      processor: aylaResourceJob ? "aylamed_resource_indexer" : "education_chunk_importer",
       document: ngEducationDocumentSummary(document),
       items_created: batchResult.createdItems.length,
       failed_blocks: batchResult.failedBlocks,
       remaining_chunks: document.remaining_chunks,
       processed_chunks: document.processed_chunks,
       message: document.remaining_chunks > 0
-        ? "Batch processed. Continue with process-next-batch for the remaining chunks."
-        : "Document processing complete. Review and approve only accurate chunks before AI use.",
+        ? (aylaResourceJob ? "AylaMed resource-index batch processed. Every remaining batch will continue through the page/topic/resource indexer." : "Batch processed. Continue with process-next-batch for the remaining chunks.")
+        : (aylaResourceJob ? "AylaMed resource indexing complete. Review exact pages, topics and mappings before approval and sync." : "Document processing complete. Review and approve only accurate chunks before AI use."),
       items: batchResult.createdItems.map((item) => ({
         id: item.id,
         title: item.title,
@@ -36460,12 +36474,13 @@ app.post("/admin/crm/ai-training/documents/:documentId/process-all-batches", asy
       if (!batchResult.createdItems?.length && !batchResult.failedBlocks?.length) break;
     }
 
+    const aylaResourceJob = ngIsAylaResourceDocument(document);
     ensureCrmArray(db, "approval_queue").unshift({
       id: uuid(),
       brand_id: req.body?.brand_id || null,
       action_id: document.id,
-      action_type: "medical_education_training_process_all",
-      agent_name: "Education Knowledge Importer",
+      action_type: aylaResourceJob ? "aylamed_resource_process_all" : "medical_education_training_process_all",
+      agent_name: aylaResourceJob ? "AylaMed Resource Indexer" : "Education Knowledge Importer",
       channel: "ai_training_center",
       draft_content: `${document.title}: process-all ran ${batches.length} batch(es), created ${totalCreated} new review chunks, ${document.remaining_chunks} source chunks remain.`,
       estimated_cost: estimateAICostUsd({ model: String(process.env.AI_EDUCATION_MODEL || process.env.AI_MODEL || "gpt-4o-mini"), usage: document.ai_usage_summary }),
@@ -36479,7 +36494,8 @@ app.post("/admin/crm/ai-training/documents/:documentId/process-all-batches", asy
 
     res.json({
       success: true,
-      mode: "education_document_process_all_batches",
+      mode: aylaResourceJob ? "aylamed_resource_process_all_batches" : "education_document_process_all_batches",
+      processor: aylaResourceJob ? "aylamed_resource_indexer" : "education_chunk_importer",
       document: ngEducationDocumentSummary(document),
       batches_processed: batches.length,
       items_created: totalCreated,
@@ -36488,8 +36504,8 @@ app.post("/admin/crm/ai-training/documents/:documentId/process-all-batches", asy
       processed_chunks: Number(document.processed_chunks || 0),
       complete: Number(document.remaining_chunks || 0) <= 0,
       message: Number(document.remaining_chunks || 0) <= 0
-        ? "Document processing complete. Review samples, then use approve-all if accurate."
-        : "Process-all stopped at the safety limit. Click Process All again to continue.",
+        ? (aylaResourceJob ? "AylaMed resource indexing complete. Review page/topic/QID/video mappings, then approve and sync if accurate." : "Document processing complete. Review samples, then use approve-all if accurate.")
+        : (aylaResourceJob ? "AylaMed indexing stopped at the safety limit. Click Process All again; it will continue with the same resource indexer." : "Process-all stopped at the safety limit. Click Process All again to continue."),
       batches,
     });
   } catch (error) {
@@ -36507,6 +36523,7 @@ app.post("/admin/crm/ai-training/documents/:documentId/approve-all", async (req,
     if (!document) return res.status(404).json({ success: false, error: "Education document import job not found" });
 
     const items = ensureCrmArray(db, "ai_training_items").filter((item) => String(item.document_id || "") === documentId);
+    const aylaResourceJob = ngIsAylaResourceDocument(document);
     const onlyNeedsReview = req.body?.only_needs_review !== false;
     let approvedCount = 0;
 
@@ -36517,7 +36534,11 @@ app.post("/admin/crm/ai-training/documents/:documentId/approve-all", async (req,
 
       item.active = true;
       item.is_active = true;
-      item.enforce_in_ai = true;
+      item.enforce_in_ai = aylaResourceJob ? false : true;
+      if (aylaResourceJob) {
+        item.audience = "aylamed_resource_engine";
+        item.resource_publish_scope = "aylamed_only";
+      }
       item.status = "approved";
       item.approval_status = "approved";
       item.medical_review_status = "approved";
@@ -36543,8 +36564,8 @@ app.post("/admin/crm/ai-training/documents/:documentId/approve-all", async (req,
       id: uuid(),
       brand_id: req.body?.brand_id || null,
       action_id: document.id,
-      action_type: "medical_education_training_approve_all",
-      agent_name: "Education Knowledge Importer",
+      action_type: aylaResourceJob ? "aylamed_resource_approve_all" : "medical_education_training_approve_all",
+      agent_name: aylaResourceJob ? "AylaMed Resource Indexer" : "Education Knowledge Importer",
       channel: "ai_training_center",
       draft_content: `${document.title}: ${approvedCount} education training chunks approved for AI use by ${user.email}.`,
       status: "approved",
@@ -36556,7 +36577,7 @@ app.post("/admin/crm/ai-training/documents/:documentId/approve-all", async (req,
 
     res.json({
       success: true,
-      mode: "education_document_approve_all",
+      mode: aylaResourceJob ? "aylamed_resource_approve_all" : "education_document_approve_all",
       document: ngEducationDocumentSummary(document),
       approved_count: approvedCount,
       total_items: items.length,
@@ -36678,6 +36699,14 @@ app.post("/admin/crm/ai-training/:id/approve", async (req, res) => {
     item.approved_by_email = user.email;
     item.approved_at = ngNowIso();
     item.updated_at = ngNowIso();
+    const aylaResourceItem = String(item.source || "").toLowerCase().includes("aylamed_resource_pipeline")
+      || String(item.audience || "").toLowerCase().includes("aylamed_resource_engine")
+      || String(item.category || "").toLowerCase().includes("aylamed resource intelligence");
+    if (aylaResourceItem) {
+      item.enforce_in_ai = false;
+      item.audience = "aylamed_resource_engine";
+      item.resource_publish_scope = "aylamed_only";
+    }
 
     await writeCrmDb(db);
     res.json({ success: true, item });
@@ -47818,7 +47847,7 @@ function ngStartBillingExpiryRunner() {
 // - Frontend can connect to these routes later with VITE_API_BASE_URL pointing to this backend.
 // -----------------------------------------------------------------------------
 
-const AYLA_BACKEND_BUILD = "aylamed-student-experience-roadmap-v187";
+const AYLA_BACKEND_BUILD = "aylamed-complete-smart-tutor-v189.3";
 
 const AYLA_EXAM_TRACKS = [
   "USMLE Step 1",
@@ -47844,6 +47873,26 @@ const AYLA_COLLECTIONS = {
   aylaStudyPartnerPool: { route: "/api/ayla/study-partner-pool", prefix: "SP", label: "studyPartnerCandidate" },
   aylaStudyPartnerMatches: { route: "/api/ayla/study-partner-matches", prefix: "MATCH", label: "studyPartnerMatch" },
   aylaRoadmapTasks: { route: "/api/ayla/roadmap-tasks", prefix: "TASK", label: "roadmapTask" },
+
+  // v189 resource intelligence, daily learning history, and AylaMed-only social data.
+  aylaResources: { route: "/api/ayla/resources", prefix: "AYLA-RES", label: "resource" },
+  aylaResourceAssignments: { route: "/api/ayla/resource-assignments", prefix: "AYLA-ASN", label: "resourceAssignment" },
+  aylaDailyPlans: { route: "/api/ayla/daily-plans", prefix: "AYLA-DAY", label: "dailyPlan" },
+  aylaReadingProgress: { route: "/api/ayla/reading-progress", prefix: "AYLA-READ", label: "readingProgress" },
+  aylaVideoProgress: { route: "/api/ayla/video-progress", prefix: "AYLA-VID", label: "videoProgress" },
+  aylaQuestionAttempts: { route: "/api/ayla/question-attempts", prefix: "AYLA-QA", label: "questionAttempt" },
+  aylaFlashcardReviews: { route: "/api/ayla/flashcard-reviews", prefix: "AYLA-FR", label: "flashcardReview" },
+  aylaAssessmentDefinitions: { route: "/api/ayla/assessment-definitions", prefix: "AYLA-DEF", label: "assessmentDefinition" },
+  aylaAssessmentAttempts: { route: "/api/ayla/assessment-attempts", prefix: "AYLA-ATT", label: "assessmentAttempt" },
+  aylaConceptMastery: { route: "/api/ayla/concept-mastery", prefix: "AYLA-MAST", label: "conceptMastery" },
+  aylaRevisionQueue: { route: "/api/ayla/revision-queue", prefix: "AYLA-REV", label: "revisionItem" },
+  aylaActivityHistory: { route: "/api/ayla/activity-history", prefix: "AYLA-ACT", label: "activity" },
+  aylaCommunityProfiles: { route: "/api/ayla/community-profiles", prefix: "AYLA-CP", label: "communityProfile" },
+  aylaCommunityMessages: { route: "/api/ayla/community-messages", prefix: "AYLA-MSG", label: "communityMessage" },
+  aylaCommunityReports: { route: "/api/ayla/community-reports", prefix: "AYLA-REP", label: "communityReport" },
+  aylaModerationActions: { route: "/api/ayla/moderation-actions", prefix: "AYLA-MOD", label: "moderationAction" },
+  aylaStudyPartnerRequests: { route: "/api/ayla/study-partner-requests", prefix: "AYLA-SPR", label: "studyPartnerRequest" },
+  aylaPasswordResetTokens: { route: "/api/ayla/password-reset-tokens", prefix: "AYLA-RESET", label: "passwordResetToken" },
 
   // v156 separated AylaMed billing/access collections.
   aylaPlans: { route: "/api/ayla/plans", prefix: "AYLA-PLAN", label: "plan" },
@@ -47878,8 +47927,53 @@ const DEFAULT_AYLA_SETTINGS = {
   homepage: {
     hero_eyebrow: "Adaptive medical preparation",
     hero_title: "A personalized plan from today to Exam Day or Match Day.",
-    hero_description: "AylaMed turns your timeline, weak areas, study hours, QBank performance, and approved medical knowledge into a practical daily plan.",
+    hero_description: "AylaMed assigns exact reading, Vimeo videos, external question IDs, internal MCQs, flashcards and assessments, then adapts from real completion history.",
     monthly_badge: "Monthly access — renew as needed until your target date",
+  },
+  resources: {
+    question_source_mode: "hybrid",
+    vimeo_enabled: true,
+    require_verified_mapping: true,
+    allow_external_question_ids: true,
+    allow_internal_mcqs: true,
+    assignment_mix: { reading: true, video: true, external_questions: true, internal_mcqs: true, flashcards: true, assessments: true },
+  },
+  adaptive: {
+    low_completion_days: 3,
+    low_completion_percent: 50,
+    overdue_warning_days: 2,
+    backlog_risk_multiplier: 1.15,
+    preserve_completed_history: true,
+    rebuild_future_only: true,
+    ai_tutor_enabled: true,
+    ai_tutor_model: "",
+    ai_tutor_max_candidates: 12,
+    strict_verified_resource_guard: true,
+    rest_day_mode: "revision_only",
+    rest_day_revision_minutes: 35,
+  },
+  assessment_policy: {
+    enabled: true,
+    weekly_min_completed_days: 4,
+    weak_question_minimum: 5,
+    weak_accuracy_threshold: 65,
+    difficult_flashcard_threshold: 4,
+    topic_completed_categories: 3,
+    system_completed_categories: 4,
+    final_readiness_days: 7,
+    topic_question_count: 8,
+    weak_area_question_count: 10,
+    system_question_count: 15,
+    weekly_question_count: 20,
+    final_question_count: 20,
+  },
+  community: {
+    enabled: true,
+    leaderboard_enabled: true,
+    study_partner_enabled: true,
+    chat_enabled: true,
+    profanity_filter_enabled: true,
+    max_messages_per_10_minutes: 15,
   },
 };
 
@@ -47902,7 +47996,7 @@ const DEFAULT_AYLA_AI_USAGE_SETTINGS = {
 };
 
 const DEFAULT_AYLA_DB = {
-  schema_version: 2,
+  schema_version: 3,
   aylaUsers: {},
   aylaStudents: {},
   aylaDiagnosticSubmissions: {},
@@ -47917,6 +48011,24 @@ const DEFAULT_AYLA_DB = {
   aylaStudyPartnerPool: {},
   aylaStudyPartnerMatches: {},
   aylaRoadmapTasks: {},
+  aylaResources: {},
+  aylaResourceAssignments: {},
+  aylaDailyPlans: {},
+  aylaReadingProgress: {},
+  aylaVideoProgress: {},
+  aylaQuestionAttempts: {},
+  aylaFlashcardReviews: {},
+  aylaAssessmentDefinitions: {},
+  aylaAssessmentAttempts: {},
+  aylaConceptMastery: {},
+  aylaRevisionQueue: {},
+  aylaActivityHistory: {},
+  aylaCommunityProfiles: {},
+  aylaCommunityMessages: {},
+  aylaCommunityReports: {},
+  aylaModerationActions: {},
+  aylaStudyPartnerRequests: {},
+  aylaPasswordResetTokens: {},
   aylaActionLogs: {},
   aylaPlans: {},
   aylaCoupons: {},
@@ -47941,6 +48053,14 @@ function aylaMergeSettings(value = {}) {
     product: { ...DEFAULT_AYLA_SETTINGS.product, ...(value?.product || {}) },
     demo: { ...DEFAULT_AYLA_SETTINGS.demo, ...(value?.demo || {}) },
     homepage: { ...DEFAULT_AYLA_SETTINGS.homepage, ...(value?.homepage || {}) },
+    resources: {
+      ...DEFAULT_AYLA_SETTINGS.resources,
+      ...(value?.resources || {}),
+      assignment_mix: { ...DEFAULT_AYLA_SETTINGS.resources.assignment_mix, ...(value?.resources?.assignment_mix || {}) },
+    },
+    adaptive: { ...DEFAULT_AYLA_SETTINGS.adaptive, ...(value?.adaptive || {}) },
+    assessment_policy: { ...DEFAULT_AYLA_SETTINGS.assessment_policy, ...(value?.assessment_policy || {}) },
+    community: { ...DEFAULT_AYLA_SETTINGS.community, ...(value?.community || {}) },
   };
 }
 
@@ -48351,7 +48471,7 @@ function aylaRecommendation(input = {}) {
             ? "2 focused assessments"
             : "1 cumulative assessment",
     intensity: isMatch
-      ? (target.daysToTarget <= 7 ? "Match Week" : target.daysToTarget <= 30 ? "Priority" : "Structured")
+      ? (target.daysToTarget <= aylaNumber(policy.final_readiness_days, 7) ? "Match Week" : target.daysToTarget <= 30 ? "Priority" : "Structured")
       : phase === "Final 48-Hour Protocol"
         ? "Protective"
         : riskLevel === "Critical"
@@ -48393,7 +48513,15 @@ function aylaStudentFromDiagnostic(payload = {}, recommendation = aylaRecommenda
     roadmapMode: recommendation.roadmapMode,
     phase: recommendation.phase,
     weakAreas: aylaCleanArray(payload.selectedWeakAreas || payload.weakAreas || payload.weak_areas),
+    systemBaselines: payload.systemBaselines || payload.system_baselines || payload.baselineBySystem || payload.baseline_by_system || payload.diagnosticSystemScores || payload.diagnostic_system_scores || {},
+    baselineSource: payload.baselineSource || payload.baseline_source || (aylaNumber(payload.currentScore ?? payload.current_score, 0) > 0 ? "diagnostic_global_score" : "awaiting_verified_baseline"),
+    baselineRecordedAt: payload.baselineRecordedAt || payload.baseline_recorded_at || (aylaNumber(payload.currentScore ?? payload.current_score, 0) > 0 ? aylaNow() : null),
     selectedResources: aylaCleanArray(payload.selectedResources || payload.resources),
+    questionSourcePreference: ["external", "internal", "hybrid"].includes(String(payload.questionSourcePreference || payload.question_source_preference)) ? String(payload.questionSourcePreference || payload.question_source_preference) : "hybrid",
+    studyPartnerOptIn: Boolean(payload.studyPartnerOptIn || payload.study_partner_opt_in),
+    availability: aylaCleanArray(payload.availability || payload.preferredStudyTimes || payload.preferred_study_times),
+    language: payload.language || "",
+    country: payload.country || "",
     studyPartner: payload.studyPartner || payload.study_partner || "Maybe later",
     studyLevel: payload.studyLevel || payload.study_level || "",
     attemptHistory: payload.attemptHistory || payload.attempt_history || "",
@@ -48873,15 +49001,92 @@ function aylaKnowledgeTokens(value = "") {
 }
 
 function aylaSanitizeTrainingKnowledge(item = {}, document = null, score = 0) {
+  const structured = item.structured && typeof item.structured === "object" ? item.structured : {};
+  const metadata = item.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const qids = aylaCleanArray(
+    structured.qids ||
+    structured.uworld_qids ||
+    structured.question_ids ||
+    metadata.qids ||
+    metadata.uworld_qids ||
+    item.qids ||
+    item.uworld_qids ||
+    []
+  );
+  const pageStart = structured.page_start ?? structured.start_page ?? metadata.page_start ?? item.page_start ?? null;
+  const pageEnd = structured.page_end ?? structured.end_page ?? metadata.page_end ?? item.page_end ?? null;
+  const pageRange = String(
+    structured.page_range ||
+    structured.pages ||
+    metadata.page_range ||
+    item.page_range ||
+    (pageStart && pageEnd ? `${pageStart}-${pageEnd}` : pageStart || "")
+  ).trim();
+  const videoUrl = String(
+    structured.video_url ||
+    structured.lecture_url ||
+    metadata.video_url ||
+    item.video_url ||
+    item.lecture_url ||
+    ""
+  ).trim();
+  const exactTopic = String(
+    structured.topic ||
+    structured.section_title ||
+    structured.chapter_topic ||
+    metadata.topic ||
+    item.topic ||
+    ""
+  ).trim();
+  const resourceName = String(
+    structured.resource_name ||
+    structured.resource ||
+    metadata.resource_name ||
+    item.resource_name ||
+    document?.title ||
+    ""
+  ).trim();
+  const exactReference = String(
+    structured.exact_reference ||
+    structured.reference ||
+    metadata.exact_reference ||
+    item.exact_reference ||
+    ""
+  ).trim();
+  const timestamp = String(
+    structured.timestamp ||
+    structured.video_timestamp ||
+    metadata.timestamp ||
+    item.timestamp ||
+    ""
+  ).trim();
+
+  const referenceReady = Boolean(
+    pageRange ||
+    qids.length ||
+    videoUrl ||
+    exactReference ||
+    (resourceName && exactTopic)
+  );
+
   return {
     id: item.id,
     document_id: item.document_id || null,
     document_title: document?.title || null,
-    title: item.title || document?.title || "Approved medical knowledge",
+    title: item.title || document?.title || "Education reference",
     category: item.category || document?.category || "Education Knowledge",
     tags: Array.isArray(item.tags) ? item.tags : aylaCleanArray(item.tags),
     content: String(item.content || item.body || item.text || "").slice(0, 6000),
-    structured: item.structured && typeof item.structured === "object" ? item.structured : null,
+    structured: Object.keys(structured).length ? structured : null,
+    resource_name: resourceName || null,
+    topic: exactTopic || null,
+    page_range: pageRange || null,
+    qids,
+    video_url: videoUrl || null,
+    video_title: structured.video_title || metadata.video_title || item.video_title || null,
+    timestamp: timestamp || null,
+    exact_reference: exactReference || null,
+    reference_ready: referenceReady,
     source: "AI Training Center",
     approval_status: item.approval_status || item.status || "approved",
     score,
@@ -48981,6 +49186,12 @@ function aylaSanitizeUser(user) {
     role: user.role || "student",
     status: user.status || "active",
     studentId: user.studentId || null,
+    publicUsername: user.publicUsername || user.public_username || "",
+    profileImageUrl: user.profileImageUrl || user.profile_image_url || "",
+    timezone: user.timezone || "",
+    country: user.country || "",
+    bio: user.bio || "",
+    authVersion: Number(user.authVersion || 1),
     createdAt: user.createdAt || user.created_at || null,
     updatedAt: user.updatedAt || user.updated_at || null,
   };
@@ -48994,7 +49205,7 @@ function aylaFindUserByEmail(db, email) {
 
 function aylaSignAuthToken(user) {
   return jwt.sign(
-    { sub: user.id, email: user.email, role: user.role || "student", app: "aylamed" },
+    { sub: user.id, email: user.email, role: user.role || "student", app: "aylamed", ver: Number(user.authVersion || 1) },
     AYLA_AUTH_JWT_SECRET,
     { expiresIn: `${AYLA_TOKEN_DAYS}d` }
   );
@@ -49027,6 +49238,11 @@ async function aylaGetAuthenticatedUser(req) {
   const user = aylaGetItem(db, "aylaUsers", decoded.sub);
   if (!user?.id || user.status === "deleted") {
     const e = new Error("AylaMed user not found");
+    e.statusCode = 401;
+    throw e;
+  }
+  if (Number(decoded.ver || 1) !== Number(user.authVersion || 1)) {
+    const e = new Error("AylaMed session was revoked. Please sign in again.");
     e.statusCode = 401;
     throw e;
   }
@@ -49229,19 +49445,47 @@ function aylaOwnerId(row) {
 }
 
 function aylaCascadeDeleteRelatedRecords(db, { studentId = null, diagnosticId = null, userId = null } = {}) {
-  const ids = new Set([studentId, diagnosticId].map((id) => String(id || "").trim()).filter(Boolean));
+  const studentIds = new Set([studentId].map((id) => String(id || "").trim()).filter(Boolean));
+  const diagnosticIds = new Set([diagnosticId].map((id) => String(id || "").trim()).filter(Boolean));
+  const userIds = new Set([userId].map((id) => String(id || "").trim()).filter(Boolean));
   const deleted = [];
 
-  if (studentId) {
-    for (const dx of aylaValues(db, "aylaDiagnosticSubmissions")) {
-      if (String(dx.id) === String(studentId) || String(dx.studentId || dx.student_id || "") === String(studentId)) {
-        ids.add(String(dx.id));
-        aylaDeleteItem(db, "aylaDiagnosticSubmissions", dx.id);
-        deleted.push({ collection: "aylaDiagnosticSubmissions", id: dx.id });
-      }
+  // Resolve every AylaMed student owned by this user so account cleanup remains
+  // complete without ever touching LMS or CRM records.
+  if (userId) {
+    for (const student of aylaValues(db, "aylaStudents")) {
+      if (String(student.ayla_user_id || student.user_id || "") === String(userId)) studentIds.add(String(student.id));
     }
   }
 
+  for (const dx of aylaValues(db, "aylaDiagnosticSubmissions")) {
+    const belongsToStudent = studentIds.has(String(dx.studentId || dx.student_id || ""));
+    const isDiagnostic = diagnosticIds.has(String(dx.id || ""));
+    const belongsToUser = userIds.has(String(dx.ayla_user_id || dx.user_id || ""));
+    if (belongsToStudent || isDiagnostic || belongsToUser) {
+      diagnosticIds.add(String(dx.id));
+      aylaDeleteItem(db, "aylaDiagnosticSubmissions", dx.id);
+      deleted.push({ collection: "aylaDiagnosticSubmissions", id: dx.id });
+    }
+  }
+
+  const scalarReferences = (item = {}) => [
+    item.studentId, item.student_id, item.ownerStudentId,
+    item.userId, item.user_id, item.ayla_user_id, item.ownerUserId,
+    item.diagnosticId, item.diagnosticSubmissionId, item.sourceDiagnosticId,
+    item.fromStudentId, item.toStudentId, item.reporterStudentId, item.reportedStudentId,
+    item.fromUserId, item.toUserId, item.reporterUserId, item.reportedUserId,
+    item.blockedByStudentId, item.removedByStudentId,
+    item.authorStudentId, item.authorUserId, item.targetStudentId, item.targetUserId,
+  ].map((value) => String(value || "")).filter(Boolean);
+
+  const rowBelongsToAccount = (item = {}) => {
+    const refs = scalarReferences(item);
+    return refs.some((value) => studentIds.has(value) || userIds.has(value) || diagnosticIds.has(value));
+  };
+
+  // Only student/account-owned AylaMed collections are cascaded. Global rules,
+  // approved resources, plans, coupons and assessment definitions are preserved.
   const childCollections = [
     "aylaRoadmapTasks",
     "aylaQbankBlocks",
@@ -49249,34 +49493,56 @@ function aylaCascadeDeleteRelatedRecords(db, { studentId = null, diagnosticId = 
     "aylaFlashcards",
     "aylaAssessmentResults",
     "aylaStudyPartnerPool",
+    "aylaStudyPartnerMatches",
+    "aylaResourceAssignments",
+    "aylaDailyPlans",
+    "aylaReadingProgress",
+    "aylaVideoProgress",
+    "aylaQuestionAttempts",
+    "aylaFlashcardReviews",
+    "aylaAssessmentAttempts",
+    "aylaConceptMastery",
+    "aylaRevisionQueue",
+    "aylaActivityHistory",
+    "aylaCommunityProfiles",
+    "aylaCommunityMessages",
+    "aylaCommunityReports",
+    "aylaModerationActions",
+    "aylaStudyPartnerRequests",
+    "aylaPasswordResetTokens",
+    "aylaCouponRedemptions",
+    "aylaAiUsageLogs",
   ];
 
   for (const key of childCollections) {
     for (const item of aylaValues(db, key)) {
-      const oid = aylaOwnerId(item);
-      const idMatch = ids.has(String(oid)) || ids.has(String(item.id || ""));
-      const studentMatch = studentId && String(item.studentId || item.student_id || "") === String(studentId);
-      const userMatch = userId && String(item.user_id || item.ayla_user_id || "") === String(userId);
-      if (idMatch || studentMatch || userMatch) {
+      if (rowBelongsToAccount(item)) {
         aylaDeleteItem(db, key, item.id);
         deleted.push({ collection: key, id: item.id });
       }
     }
   }
 
-  for (const match of aylaValues(db, "aylaStudyPartnerMatches")) {
-    const values = [match.studentAId, match.studentBId, match.studentId, match.student_id, match.user_id, match.ayla_user_id].map((v) => String(v || ""));
-    if ([...ids].some((id) => values.includes(id)) || (userId && values.includes(String(userId)))) {
-      aylaDeleteItem(db, "aylaStudyPartnerMatches", match.id);
-      deleted.push({ collection: "aylaStudyPartnerMatches", id: match.id });
-    }
-  }
-
   if (userId) {
+    // Enrollment access is account-owned and can be removed with the AylaMed
+    // account. Payments and access logs are intentionally retained as audit and
+    // accounting records; no existing payment history is deleted.
     for (const enrollment of aylaValues(db, "aylaEnrollments")) {
       if (String(enrollment.user_id || enrollment.ayla_user_id || "") === String(userId)) {
         aylaDeleteItem(db, "aylaEnrollments", enrollment.id);
         deleted.push({ collection: "aylaEnrollments", id: enrollment.id });
+      }
+    }
+  }
+
+  // Remove the account-owned AylaMed student profile only when this cascade was
+  // initiated for a user. Direct student deletion is handled by the generic CRUD
+  // route after this helper returns.
+  if (userId) {
+    for (const ownedStudentId of studentIds) {
+      if (aylaGetItem(db, "aylaStudents", ownedStudentId)) {
+        aylaDeleteItem(db, "aylaStudents", ownedStudentId);
+        deleted.push({ collection: "aylaStudents", id: ownedStudentId });
       }
     }
   }
@@ -49287,14 +49553,12 @@ function aylaCascadeDeleteRelatedRecords(db, { studentId = null, diagnosticId = 
 function aylaCascadeBeforeDelete(db, collectionKey, existing) {
   if (!existing?.id) return [];
   if (collectionKey === "aylaStudents") {
-    return aylaCascadeDeleteRelatedRecords(db, { studentId: existing.id, userId: existing.ayla_user_id || existing.user_id || null });
+    return aylaCascadeDeleteRelatedRecords(db, { studentId: existing.id, userId: null });
   }
   if (collectionKey === "aylaDiagnosticSubmissions") {
     return aylaCascadeDeleteRelatedRecords(db, { diagnosticId: existing.id, studentId: existing.studentId || existing.student_id || null });
   }
-  if (collectionKey === "aylaEnrollments") {
-    return [];
-  }
+  if (collectionKey === "aylaEnrollments") return [];
   return [];
 }
 
@@ -49664,6 +49928,12 @@ app.post("/api/ayla/auth/register", async (req, res) => {
       role: req.body.role || "student",
       status: "active",
       studentId: req.body.studentId || null,
+      publicUsername: String(req.body.publicUsername || "").trim(),
+      profileImageUrl: String(req.body.profileImageUrl || "").trim(),
+      timezone: String(req.body.timezone || "").trim(),
+      country: String(req.body.country || "").trim(),
+      bio: String(req.body.bio || "").trim(),
+      authVersion: 1,
       ...hashed,
       createdAt: aylaNow(),
       updatedAt: aylaNow(),
@@ -49702,9 +49972,27 @@ app.post("/api/ayla/auth/login", async (req, res) => {
 
 app.get("/api/ayla/auth/me", async (req, res) => {
   try {
-    const { user, db } = await aylaGetAuthenticatedUser(req);
+    const { user, rawUser, db } = await aylaGetAuthenticatedUser(req);
+    const linkedStudent = (
+      aylaValues(db, "aylaStudents")
+        .filter((row) => String(row.ayla_user_id || row.user_id || "") === String(user.id))
+        .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")))[0]
+      || null
+    );
+
+    if (linkedStudent?.id && String(rawUser.studentId || "") !== String(linkedStudent.id)) {
+      rawUser.studentId = linkedStudent.id;
+      rawUser.updatedAt = aylaNow();
+      aylaSetItem(db, "aylaUsers", rawUser);
+      await writeAylaDb(db);
+    }
+
     const activeEnrollments = aylaUserActiveEnrollments(db, user.id);
-    return aylaSendOk(res, { user, activeEnrollments });
+    return aylaSendOk(res, {
+      user: aylaSanitizeUser({ ...rawUser, studentId: linkedStudent?.id || rawUser.studentId || null }),
+      activeEnrollments,
+      student: linkedStudent ? { id: linkedStudent.id, exam: linkedStudent.exam || null, goalType: linkedStudent.goalType || null } : null,
+    });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load AylaMed profile");
   }
@@ -49720,6 +50008,7 @@ app.post("/api/ayla/auth/update-password", async (req, res) => {
     const hashed = hashPassword(newPassword);
     rawUser.salt = hashed.salt;
     rawUser.password_hash = hashed.password_hash;
+    rawUser.authVersion = Number(rawUser.authVersion || 1) + 1;
     rawUser.updatedAt = aylaNow();
     aylaSetItem(db, "aylaUsers", rawUser);
     await writeAylaDb(db);
@@ -49969,7 +50258,28 @@ app.get("/api/ayla/health", async (req, res) => {
     const counts = Object.fromEntries(Object.keys(AYLA_COLLECTIONS).map((key) => [key, aylaValues(db, key).length]));
     counts.aylaUsers = aylaValues(db, "aylaUsers").length;
     const knowledge = await aylaKnowledgeStatus();
-    return aylaSendOk(res, { now: aylaNow(), counts, examTracks: AYLA_EXAM_TRACKS, storage: { ayla_db_path: AYLA_DB_PATH, separate_from_lms: AYLA_DB_PATH !== LIVE_DB_PATH, separate_from_crm: AYLA_DB_PATH !== CRM_DB_PATH }, knowledge });
+    return aylaSendOk(res, {
+      now: aylaNow(),
+      counts,
+      examTracks: AYLA_EXAM_TRACKS,
+      storage: { ayla_db_path: AYLA_DB_PATH, separate_from_lms: AYLA_DB_PATH !== LIVE_DB_PATH, separate_from_crm: AYLA_DB_PATH !== CRM_DB_PATH },
+      knowledge,
+      capabilities: {
+        resource_intelligence: true,
+        page_aware_book_indexing: true,
+        vimeo_assignments: true,
+        external_internal_hybrid_questions: true,
+        server_verified_scoring: true,
+        revision_queue_daily_reassignment: true,
+        focused_daily_plan: true,
+        protected_rest_day: true,
+        adaptive_ai_tutor_with_verified_guard: true,
+        real_system_baselines: true,
+        partner_lifecycle: true,
+        community_moderation: true,
+        lms_crm_operational_writes: false,
+      },
+    });
   } catch (error) {
     return aylaSendError(res, 500, error.message || "AylaMed health check failed");
   }
@@ -49986,7 +50296,20 @@ app.get("/api/ayla/routes", (req, res) => {
       "GET /api/ayla/exams",
       "POST /api/ayla/auth/register",
       "POST /api/ayla/auth/login",
+      "POST /api/ayla/auth/forgot-password",
+      "POST /api/ayla/auth/reset-password",
       "GET /api/ayla/auth/me",
+      "GET|PUT /api/ayla/profile",
+      "GET /api/ayla/students/:studentId/daily-workspace",
+      "POST /api/ayla/students/:studentId/daily-workspace/rebuild",
+      "POST /api/ayla/students/:studentId/question-attempts",
+      "POST /api/ayla/students/:studentId/assessment-attempts",
+      "GET|POST|PATCH /api/ayla/study-partners/requests",
+      "POST /api/ayla/study-partners/requests/:id/report",
+      "GET|POST /api/ayla/community/messages",
+      "POST /api/ayla/admin/resources/sync-training-center",
+      "POST /api/ayla/admin/resources/register-vimeo",
+      "GET /api/ayla/community/leaderboard",
       "GET /api/ayla/users",
       "POST /api/ayla/billing/create-checkout",
       "POST /api/ayla/enrollments/grant-access",
@@ -50047,6 +50370,12 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
     student.updatedAt = aylaNow();
     submission.studentId = student.id;
     submission.phasePlan = phasePlan;
+
+    if (auth?.rawUser?.id) {
+      auth.rawUser.studentId = student.id;
+      auth.rawUser.updatedAt = aylaNow();
+      aylaSetItem(db, "aylaUsers", auth.rawUser);
+    }
 
     aylaSetItem(db, "aylaDiagnosticSubmissions", submission);
     aylaSetItem(db, "aylaStudents", student);
@@ -50403,7 +50732,7 @@ app.put("/api/ayla/admin/settings", async (req, res) => {
     await aylaRequireAdmin(req);
     const db = await readAylaDb(); aylaEnsureSeedData(db);
     const incoming = req.body.settings || req.body || {};
-    db.aylaSettings = aylaMergeSettings({ ...db.aylaSettings, ...incoming, product: { ...db.aylaSettings.product, ...(incoming.product || {}) }, demo: { ...db.aylaSettings.demo, ...(incoming.demo || {}) }, homepage: { ...db.aylaSettings.homepage, ...(incoming.homepage || {}) } });
+    db.aylaSettings = aylaMergeSettings({ ...db.aylaSettings, ...incoming, product: { ...db.aylaSettings.product, ...(incoming.product || {}) }, demo: { ...db.aylaSettings.demo, ...(incoming.demo || {}) }, homepage: { ...db.aylaSettings.homepage, ...(incoming.homepage || {}) }, resources: { ...db.aylaSettings.resources, ...(incoming.resources || {}), assignment_mix: { ...(db.aylaSettings.resources?.assignment_mix || {}), ...(incoming.resources?.assignment_mix || {}) } }, adaptive: { ...db.aylaSettings.adaptive, ...(incoming.adaptive || {}) }, community: { ...db.aylaSettings.community, ...(incoming.community || {}) } });
     db.aylaSettings.product.monthly_only = true;
     db.aylaSettings.demo.duration_days = Math.max(1, Math.min(60, Number(db.aylaSettings.demo.duration_days || 7)));
     aylaEnsureSeedData(db);
@@ -50570,6 +50899,2849 @@ app.get("/api/ayla/action-logs", async (req, res) => {
     return aylaSendError(res, 500, error.message || "Failed to load AylaMed action logs");
   }
 });
+
+// -----------------------------------------------------------------------------
+// AYLAMED V189 — RESOURCE INTELLIGENCE, DAILY LEARNING, SOCIAL ACCOUNTABILITY
+// -----------------------------------------------------------------------------
+// Safety boundary:
+// - All student/resource/history/social writes go only to AYLA_DB_PATH.
+// - CRM is touched only through additive AI Training Center resource-import routes.
+// - No LMS users, enrollments, payments, pointEvents, leaderboards, notes, recordings,
+//   or CRM leads/users are read-modified-written by these routes.
+// -----------------------------------------------------------------------------
+
+const AYLA_V189_SYSTEMS = [
+  "Cardiology",
+  "Renal",
+  "Respiratory",
+  "Gastrointestinal",
+  "Neurology",
+  "Endocrine",
+  "Reproductive",
+  "Hematology",
+  "Immunology",
+  "Musculoskeletal",
+  "Behavioral Science",
+];
+
+const AYLA_V189_RESOURCE_TYPES = new Set([
+  "book",
+  "reading",
+  "vimeo_video",
+  "video_transcript",
+  "external_question",
+  "external_qid_mapping",
+  "internal_mcq",
+  "flashcard",
+  "assessment",
+  "assessment_blueprint",
+  "revision_sheet",
+]);
+
+const AYLA_V189_PROFANITY = [
+  "fuck", "fucker", "fucking", "shit", "bitch", "bastard", "asshole", "motherfucker",
+  "dick", "cunt", "whore", "slut", "retard", "nigger", "nigga",
+  "harami", "madarchod", "behenchod", "benchod", "chutiya", "gaand", "gandu",
+];
+
+const AYLA_V189_MODERATION_ALLOWLIST = new Set([
+  "pakistan", "pakistani", "pakistanis", "pak", "kafir", "kafirs",
+]);
+
+const AYLA_V189_RESERVED_USERNAMES = new Set([
+  "admin", "administrator", "moderator", "mod", "support", "staff", "official",
+  "aylamed", "aylamedai", "nextgen", "nextgenusmle", "system", "root", "security",
+]);
+
+function aylaV189UsernameKey(value = "") {
+  return aylaV189CleanText(value).toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function aylaV189IsReservedUsername(value = "") {
+  const key = aylaV189UsernameKey(value);
+  if (!key) return false;
+  return AYLA_V189_RESERVED_USERNAMES.has(key) || [...AYLA_V189_RESERVED_USERNAMES].some((reserved) => key === `${reserved}official` || key === `official${reserved}`);
+}
+
+function aylaV189ExamKey(value = "") {
+  const key = aylaV189CleanText(value).toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (!key || ["all", "general", "any", "medicalexam"].includes(key)) return "all";
+  if (key.includes("step1")) return "usmle_step_1";
+  if (key.includes("step2")) return "usmle_step_2_ck";
+  if (key.includes("plab")) return "plab";
+  if (key.includes("mcc") || key.includes("canada")) return "canada";
+  if (key.includes("amc") || key.includes("australia")) return "australia";
+  if (key.includes("match")) return "match_day";
+  return key;
+}
+
+function aylaV189CleanText(value = "") {
+  return String(value || "").replace(/\u0000/g, "").replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
+}
+
+function aylaV189NormalizeModerationToken(value = "") {
+  return aylaV189CleanText(value)
+    .toLowerCase()
+    .replace(/0/g, "o")
+    .replace(/1|!/g, "i")
+    .replace(/3/g, "e")
+    .replace(/4|@/g, "a")
+    .replace(/5|\$/g, "s")
+    .replace(/7/g, "t")
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+function aylaV189ModerationTokens(value = "") {
+  const normalized = aylaV189CleanText(value)
+    .toLowerCase()
+    .replace(/0/g, "o")
+    .replace(/1|!/g, "i")
+    .replace(/3/g, "e")
+    .replace(/4|@/g, "a")
+    .replace(/5|\$/g, "s")
+    .replace(/7/g, "t");
+  return normalized.split(/[^a-z0-9]+/g).map(aylaV189NormalizeModerationToken).filter(Boolean);
+}
+
+function aylaV189ModerationCheck(value = "", extraWords = []) {
+  const tokens = aylaV189ModerationTokens(value);
+  const blocked = [...AYLA_V189_PROFANITY, ...aylaCleanArray(extraWords)]
+    .map(aylaV189NormalizeModerationToken)
+    .filter((word) => word.length >= 3 && !AYLA_V189_MODERATION_ALLOWLIST.has(word));
+
+  const blockedSet = new Set(blocked);
+  const exact = tokens.find((token) => blockedSet.has(token) && !AYLA_V189_MODERATION_ALLOWLIST.has(token));
+  if (exact) return { ok: false, matched: exact, mode: "exact_token" };
+
+  // Catch common spacing/symbol bypasses such as "f u c k" without treating a
+  // harmless longer word as profanity. Only consecutive one-character tokens
+  // are joined, so words such as "Pakistan" are never matched by substring.
+  for (let startIndex = 0; startIndex < tokens.length; startIndex += 1) {
+    if (tokens[startIndex].length !== 1) continue;
+    let joined = "";
+    for (let endIndex = startIndex; endIndex < Math.min(tokens.length, startIndex + 16); endIndex += 1) {
+      if (tokens[endIndex].length !== 1) break;
+      joined += tokens[endIndex];
+      if (blockedSet.has(joined) && !AYLA_V189_MODERATION_ALLOWLIST.has(joined)) {
+        return { ok: false, matched: joined, mode: "spaced_bypass" };
+      }
+    }
+  }
+
+  return { ok: true, matched: null, mode: null };
+}
+
+function aylaV189HashToken(value = "") {
+  return crypto.createHash("sha256").update(String(value || "")).digest("hex");
+}
+
+function aylaV189StudentOwned(student, user) {
+  return Boolean(student && user && String(student.ayla_user_id || student.user_id || "") === String(user.id));
+}
+
+async function aylaV189RequireStudent(req, requestedStudentId = "") {
+  const auth = await aylaGetAuthenticatedUser(req);
+  const db = auth.db;
+  let student = requestedStudentId ? aylaGetItem(db, "aylaStudents", requestedStudentId) : null;
+  if (!student && auth.rawUser?.studentId) student = aylaGetItem(db, "aylaStudents", auth.rawUser.studentId);
+  if (!student) {
+    student = aylaValues(db, "aylaStudents")
+      .filter((row) => String(row.ayla_user_id || row.user_id || "") === String(auth.user.id))
+      .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")))[0] || null;
+  }
+  if (!student) {
+    const error = new Error("AylaMed student profile not found");
+    error.statusCode = 404;
+    throw error;
+  }
+  if (!aylaV189StudentOwned(student, auth.user) && auth.user.role !== "admin") {
+    const error = new Error("This AylaMed student profile does not belong to the signed-in user");
+    error.statusCode = 403;
+    throw error;
+  }
+  return { ...auth, student };
+}
+
+function aylaV189ResourceType(value = "") {
+  const clean = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (clean === "video" || clean === "vimeo") return "vimeo_video";
+  if (clean === "external_qid" || clean === "qid" || clean === "uworld_qid") return "external_question";
+  if (clean === "mcq" || clean === "question") return "internal_mcq";
+  if (clean === "book_page" || clean === "pages") return "reading";
+  return AYLA_V189_RESOURCE_TYPES.has(clean) ? clean : "book";
+}
+
+function aylaV189PageRange(resource = {}) {
+  const printedStart = resource.printedPageStart ?? resource.printed_page_start;
+  const printedEnd = resource.printedPageEnd ?? resource.printed_page_end;
+  const pdfStart = resource.pdfPageStart ?? resource.pdf_page_start;
+  const pdfEnd = resource.pdfPageEnd ?? resource.pdf_page_end;
+  if (resource.pageRange || resource.page_range) return String(resource.pageRange || resource.page_range);
+  if (printedStart) return printedEnd && String(printedEnd) !== String(printedStart) ? `${printedStart}–${printedEnd}` : String(printedStart);
+  if (pdfStart) return pdfEnd && String(pdfEnd) !== String(pdfStart) ? `PDF ${pdfStart}–${pdfEnd}` : `PDF ${pdfStart}`;
+  return "";
+}
+
+function aylaV189VimeoEmbed(resource = {}) {
+  const direct = String(resource.vimeoEmbedUrl || resource.vimeo_embed_url || resource.embedUrl || resource.embed_url || "").trim();
+  if (direct) return direct;
+  const id = String(resource.vimeoId || resource.vimeo_id || "").trim();
+  const privacyHash = String(resource.vimeoPrivacyHash || resource.vimeo_privacy_hash || resource.privacyHash || resource.privacy_hash || "").trim();
+  if (id) return `https://player.vimeo.com/video/${encodeURIComponent(id)}${privacyHash ? `?h=${encodeURIComponent(privacyHash)}` : ""}`;
+  const url = String(resource.vimeoUrl || resource.vimeo_url || resource.videoUrl || resource.video_url || "").trim();
+  const match = url.match(/vimeo\.com\/(?:video\/)?(\d+)(?:\/([a-z0-9]+))?/i);
+  if (!match) return url;
+  return `https://player.vimeo.com/video/${match[1]}${match[2] ? `?h=${encodeURIComponent(match[2])}` : ""}`;
+}
+
+function aylaV189NormalizeResource(payload = {}, existing = {}) {
+  const type = aylaV189ResourceType(payload.type || payload.resourceType || payload.resource_type || existing.type);
+  const questionNumber = String(payload.questionNumber ?? payload.question_number ?? payload.originalQuestionNumber ?? payload.original_question_number ?? existing.questionNumber ?? existing.question_number ?? "").trim();
+  const title = aylaV189CleanText(payload.title || payload.name || existing.title || questionNumber || "AylaMed resource").slice(0, 240);
+  const mappedBook = payload.mappedBook && typeof payload.mappedBook === "object" ? payload.mappedBook : {};
+  const mappedVideo = payload.mappedVideo && typeof payload.mappedVideo === "object" ? payload.mappedVideo : {};
+  const system = aylaV189CleanText(payload.system || existing.system || "General").slice(0, 100);
+  const topic = aylaV189CleanText(payload.topic || existing.topic || title).slice(0, 180);
+  const estimatedMinutes = Math.max(1, Math.min(240, aylaNumber(payload.estimatedMinutes ?? payload.estimated_minutes ?? existing.estimatedMinutes ?? existing.estimated_minutes, type === "internal_mcq" || type === "external_question" ? 2 : type === "flashcard" ? 1 : type === "assessment" ? 30 : 20)));
+  const resource = {
+    ...existing,
+    ...payload,
+    id: existing.id || payload.id || aylaId("AYLA-RES"),
+    type,
+    title,
+    provider: aylaV189CleanText(payload.provider || existing.provider || (type === "vimeo_video" ? "Vimeo" : "AylaMed")),
+    examTrack: aylaV189CleanText(payload.examTrack || payload.exam_track || payload.exam || existing.examTrack || existing.exam_track || existing.exam || "All"),
+    resourceNumber: String((payload.resourceNumber ?? payload.resource_number ?? existing.resourceNumber ?? existing.resource_number ?? questionNumber) || "").trim(),
+    questionNumber,
+    system,
+    topic,
+    subtopics: aylaCleanArray(payload.subtopics ?? existing.subtopics),
+    concepts: aylaCleanArray(payload.concepts ?? existing.concepts),
+    difficulty: aylaV189CleanText(payload.difficulty || existing.difficulty || "Adaptive"),
+    priority: aylaV189CleanText(payload.priority || existing.priority || "High"),
+    bookTitle: aylaV189CleanText(payload.bookTitle || payload.book_title || payload.resourceName || payload.resource_name || existing.bookTitle || existing.book_title || ""),
+    edition: aylaV189CleanText(payload.edition || existing.edition || ""),
+    pdfPageStart: payload.pdfPageStart ?? payload.pdf_page_start ?? existing.pdfPageStart ?? existing.pdf_page_start ?? null,
+    pdfPageEnd: payload.pdfPageEnd ?? payload.pdf_page_end ?? existing.pdfPageEnd ?? existing.pdf_page_end ?? null,
+    printedPageStart: payload.printedPageStart ?? payload.printed_page_start ?? existing.printedPageStart ?? existing.printed_page_start ?? null,
+    printedPageEnd: payload.printedPageEnd ?? payload.printed_page_end ?? existing.printedPageEnd ?? existing.printed_page_end ?? null,
+    pageRange: aylaV189PageRange({ ...existing, ...payload }),
+    mappedBookResourceId: String(payload.mappedBookResourceId ?? payload.mapped_book_resource_id ?? mappedBook.resourceId ?? mappedBook.resource_id ?? existing.mappedBookResourceId ?? existing.mapped_book_resource_id ?? "").trim(),
+    mappedBookTitle: aylaV189CleanText(payload.mappedBookTitle || payload.mapped_book_title || mappedBook.title || mappedBook.bookTitle || mappedBook.book_title || existing.mappedBookTitle || existing.mapped_book_title || ""),
+    mappedBookEdition: aylaV189CleanText(payload.mappedBookEdition || payload.mapped_book_edition || mappedBook.edition || existing.mappedBookEdition || existing.mapped_book_edition || ""),
+    mappedBookPages: aylaV189CleanText(payload.mappedBookPages || payload.mapped_book_pages || mappedBook.pages || mappedBook.pageRange || mappedBook.page_range || existing.mappedBookPages || existing.mapped_book_pages || ""),
+    sourceUrl: aylaV189CleanText(payload.sourceUrl || payload.source_url || existing.sourceUrl || existing.source_url || ""),
+    vimeoId: String(payload.vimeoId ?? payload.vimeo_id ?? existing.vimeoId ?? existing.vimeo_id ?? "").trim(),
+    vimeoUrl: aylaV189CleanText(payload.vimeoUrl || payload.vimeo_url || payload.videoUrl || payload.video_url || existing.vimeoUrl || existing.vimeo_url || ""),
+    vimeoPrivacyHash: String(payload.vimeoPrivacyHash ?? payload.vimeo_privacy_hash ?? payload.privacyHash ?? payload.privacy_hash ?? existing.vimeoPrivacyHash ?? existing.vimeo_privacy_hash ?? "").trim(),
+    vimeoEmbedUrl: aylaV189CleanText(payload.vimeoEmbedUrl || payload.vimeo_embed_url || payload.embedUrl || payload.embed_url || existing.vimeoEmbedUrl || existing.vimeo_embed_url || ""),
+    mappedVideoResourceId: String(payload.mappedVideoResourceId ?? payload.mapped_video_resource_id ?? mappedVideo.resourceId ?? mappedVideo.resource_id ?? existing.mappedVideoResourceId ?? existing.mapped_video_resource_id ?? "").trim(),
+    mappedVideoTitle: aylaV189CleanText(payload.mappedVideoTitle || payload.mapped_video_title || mappedVideo.title || mappedVideo.videoTitle || mappedVideo.video_title || existing.mappedVideoTitle || existing.mapped_video_title || ""),
+    mappedVimeoId: String(payload.mappedVimeoId ?? payload.mapped_vimeo_id ?? mappedVideo.vimeoId ?? mappedVideo.vimeo_id ?? existing.mappedVimeoId ?? existing.mapped_vimeo_id ?? "").trim(),
+    mappedVimeoUrl: aylaV189CleanText(payload.mappedVimeoUrl || payload.mapped_vimeo_url || mappedVideo.vimeoUrl || mappedVideo.vimeo_url || mappedVideo.url || existing.mappedVimeoUrl || existing.mapped_vimeo_url || ""),
+    mappedVideoTimestamp: aylaV189CleanText(payload.mappedVideoTimestamp || payload.mapped_video_timestamp || mappedVideo.timestamp || existing.mappedVideoTimestamp || existing.mapped_video_timestamp || ""),
+    mappingStatus: aylaV189CleanText(payload.mappingStatus || payload.mapping_status || existing.mappingStatus || existing.mapping_status || ""),
+    videoStartSeconds: Math.max(0, aylaNumber(payload.videoStartSeconds ?? payload.video_start_seconds ?? existing.videoStartSeconds ?? existing.video_start_seconds, 0)),
+    videoEndSeconds: Math.max(0, aylaNumber(payload.videoEndSeconds ?? payload.video_end_seconds ?? existing.videoEndSeconds ?? existing.video_end_seconds, 0)),
+    timestamp: aylaV189CleanText(payload.timestamp || existing.timestamp || ""),
+    exactReference: aylaV189CleanText(payload.exactReference || payload.exact_reference || existing.exactReference || existing.exact_reference || ""),
+    transcript: aylaV189CleanText(payload.transcript || existing.transcript || "").slice(0, 20000),
+    stem: aylaV189CleanText(payload.stem || payload.question || existing.stem || existing.question || "").slice(0, 12000),
+    options: Array.isArray(payload.options) ? payload.options : Array.isArray(existing.options) ? existing.options : [],
+    correctAnswer: payload.correctAnswer ?? payload.correct_answer ?? existing.correctAnswer ?? existing.correct_answer ?? null,
+    correctAnswerIndex: payload.correctAnswerIndex ?? payload.correct_answer_index ?? existing.correctAnswerIndex ?? existing.correct_answer_index ?? null,
+    questionNumbers: aylaCleanArray(payload.questionNumbers ?? payload.question_numbers ?? payload.qids ?? existing.questionNumbers ?? existing.question_numbers ?? existing.qids),
+    explanation: aylaV189CleanText(payload.explanation || existing.explanation || "").slice(0, 12000),
+    distractorExplanations: payload.distractorExplanations || payload.distractor_explanations || existing.distractorExplanations || existing.distractor_explanations || {},
+    questions: Array.isArray(payload.questions) ? payload.questions.slice(0, 500) : Array.isArray(existing.questions) ? existing.questions.slice(0, 500) : [],
+    front: aylaV189CleanText(payload.front || existing.front || "").slice(0, 5000),
+    back: aylaV189CleanText(payload.back || existing.back || "").slice(0, 8000),
+    estimatedMinutes,
+    approved: payload.approved !== undefined ? Boolean(payload.approved) : existing.approved !== false,
+    status: aylaV189CleanText(payload.status || existing.status || "active").toLowerCase(),
+    verificationStatus: aylaV189CleanText(payload.verificationStatus || payload.verification_status || existing.verificationStatus || existing.verification_status || "verified"),
+    sourceTrainingItemId: payload.sourceTrainingItemId || payload.source_training_item_id || existing.sourceTrainingItemId || existing.source_training_item_id || null,
+    sourceDocumentId: payload.sourceDocumentId || payload.source_document_id || existing.sourceDocumentId || existing.source_document_id || null,
+    createdAt: existing.createdAt || payload.createdAt || aylaNow(),
+    updatedAt: aylaNow(),
+  };
+  resource.vimeoEmbedUrl = aylaV189VimeoEmbed(resource);
+  return resource;
+}
+
+function aylaV189TrainingRecords(item = {}, document = {}) {
+  const structured = item.structured && typeof item.structured === "object" ? item.structured : {};
+  const records = Array.isArray(structured.records) && structured.records.length ? structured.records : [structured];
+  return records.map((record, index) => {
+    const kind = record.resource_type || record.type || structured.resource_type || document.resource_kind || document.resource_type || "book";
+    const qids = aylaCleanArray(record.question_numbers || record.qids || record.question_ids || record.external_ids);
+    const base = {
+      type: kind,
+      title: record.title || record.topic || item.title || document.title,
+      provider: record.provider || document.provider || "AylaMed",
+      examTrack: record.exam_track || record.exam || document.exam_track || document.exam || "All",
+      resourceNumber: record.resource_number || record.question_number || qids[0] || "",
+      questionNumber: record.question_number || qids[0] || "",
+      system: record.system || "General",
+      topic: record.topic || record.section_title || item.title,
+      subtopics: record.subtopics,
+      concepts: record.concepts,
+      difficulty: record.difficulty,
+      priority: record.high_yield_priority || record.priority,
+      bookTitle: record.resource_name || record.book_title || document.title,
+      edition: record.edition || document.edition,
+      pdfPageStart: record.pdf_page_start || item.pdf_page_start,
+      pdfPageEnd: record.pdf_page_end || item.pdf_page_end,
+      printedPageStart: record.printed_page_start,
+      printedPageEnd: record.printed_page_end,
+      pageRange: record.page_range || record.printed_page_range || record.pdf_page_range,
+      mappedBookResourceId: record.mapped_book_resource_id,
+      mappedBookTitle: record.mapped_book_title || record.mapped_book?.title || record.mapped_book?.book_title,
+      mappedBookEdition: record.mapped_book_edition || record.mapped_book?.edition,
+      mappedBookPages: record.mapped_book_pages || record.mapped_pages || record.mapped_book?.pages || record.mapped_book?.page_range,
+      sourceUrl: record.source_url,
+      vimeoId: record.vimeo_id,
+      vimeoUrl: record.vimeo_url || record.video_url,
+      vimeoPrivacyHash: record.vimeo_privacy_hash || record.privacy_hash,
+      vimeoEmbedUrl: record.vimeo_embed_url || record.embed_url,
+      mappedVideoResourceId: record.mapped_video_resource_id,
+      mappedVideoTitle: record.mapped_video_title || record.mapped_video?.title || record.mapped_video?.video_title,
+      mappedVimeoId: record.mapped_vimeo_id || record.mapped_video?.vimeo_id,
+      mappedVimeoUrl: record.mapped_vimeo_url || record.mapped_video?.vimeo_url || record.mapped_video?.url,
+      mappedVideoTimestamp: record.mapped_video_timestamp || record.mapped_timestamp || record.mapped_video?.timestamp,
+      mappingStatus: record.mapping_status,
+      videoStartSeconds: record.video_start_seconds,
+      videoEndSeconds: record.video_end_seconds,
+      timestamp: record.timestamp,
+      exactReference: record.exact_reference,
+      transcript: record.transcript_excerpt,
+      stem: record.stem,
+      options: record.options,
+      correctAnswer: record.correct_answer,
+      correctAnswerIndex: record.correct_answer_index,
+      questionNumbers: record.question_numbers || record.qids,
+      explanation: record.explanation,
+      distractorExplanations: record.distractor_explanations,
+      questions: record.questions,
+      front: record.front,
+      back: record.back,
+      estimatedMinutes: record.estimated_minutes,
+      approved: true,
+      verificationStatus: "approved_ai_training_center",
+      sourceTrainingItemId: item.id,
+      sourceDocumentId: item.document_id || document.id,
+    };
+    if ((kind === "external_qid_mapping" || kind === "external_question") && qids.length > 1) {
+      return qids.map((qid) => ({ ...base, type: "external_question", questionNumber: qid, resourceNumber: qid, title: `${base.provider || "External"} ${qid} — ${base.topic || "Assigned question"}` }));
+    }
+    return [{ ...base, resourceNumber: base.resourceNumber || `${item.id || "item"}-${index + 1}` }];
+  }).flat();
+}
+
+function aylaV189MappingKey(value = "") {
+  return aylaV189CleanText(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function aylaV189EnrichResourceMappings(db, resource = {}) {
+  const out = { ...resource };
+  const all = aylaValues(db, "aylaResources").filter((row) => row.approved !== false && !["disabled", "deleted", "rejected", "archived"].includes(String(row.status || "").toLowerCase()));
+  const topicKey = aylaV189MappingKey(resource.topic);
+  const systemKey = aylaV189MappingKey(resource.system);
+  const exactMatch = (row) => aylaV189MappingKey(row.topic) === topicKey && aylaV189MappingKey(row.system) === systemKey;
+
+  let book = out.mappedBookResourceId ? all.find((row) => String(row.id) === String(out.mappedBookResourceId)) : null;
+  if (!book && topicKey) book = all.find((row) => ["book", "reading", "revision_sheet"].includes(aylaV189ResourceType(row.type)) && exactMatch(row));
+  if (book) {
+    out.mappedBookResourceId = out.mappedBookResourceId || book.id;
+    out.mappedBookTitle = out.mappedBookTitle || book.bookTitle || book.title || "";
+    out.mappedBookEdition = out.mappedBookEdition || book.edition || "";
+    out.mappedBookPages = out.mappedBookPages || book.pageRange || aylaV189PageRange(book);
+    out.mappingStatus = out.mappingStatus || "verified_exact_topic_link";
+  }
+
+  let video = out.mappedVideoResourceId ? all.find((row) => String(row.id) === String(out.mappedVideoResourceId)) : null;
+  if (!video && topicKey) video = all.find((row) => ["vimeo_video", "video_transcript"].includes(aylaV189ResourceType(row.type)) && exactMatch(row));
+  if (video) {
+    out.mappedVideoResourceId = out.mappedVideoResourceId || video.id;
+    out.mappedVideoTitle = out.mappedVideoTitle || video.title || "";
+    out.mappedVimeoId = out.mappedVimeoId || video.vimeoId || "";
+    out.mappedVimeoUrl = out.mappedVimeoUrl || video.vimeoUrl || video.vimeoEmbedUrl || "";
+    out.mappedVideoTimestamp = out.mappedVideoTimestamp || video.timestamp || "";
+    out.mappingStatus = out.mappingStatus || "verified_exact_topic_link";
+  }
+  return out;
+}
+
+function aylaV189RelevantResources(db, student, types = []) {
+  const selected = new Set(types.map(aylaV189ResourceType));
+  const staticWeak = aylaCleanArray(student.weakAreas || student.selectedWeakAreas).map((x) => String(x).toLowerCase());
+  const dynamicWeak = aylaV189SystemProgress(db, student)
+    .filter((row) => row.evidenceCount > 0 || row.weaknessPercent >= 55)
+    .slice(0, 4)
+    .map((row) => String(row.system || "").toLowerCase());
+  const weak = [...new Set([...dynamicWeak, ...staticWeak])];
+  const preferred = aylaCleanArray(student.selectedResources).map((x) => String(x).toLowerCase());
+  const studentExam = aylaV189ExamKey(student.exam || student.examTrack || student.exam_track || "all");
+  return aylaValues(db, "aylaResources")
+    .filter((resource) => resource.approved !== false && !["disabled", "deleted", "rejected", "archived"].includes(String(resource.status || "").toLowerCase()))
+    .filter((resource) => !selected.size || selected.has(aylaV189ResourceType(resource.type)))
+    .filter((resource) => {
+      const resourceExam = aylaV189ExamKey(resource.examTrack || resource.exam_track || resource.exam || "all");
+      return resourceExam === "all" || studentExam === "all" || resourceExam === studentExam;
+    })
+    .map((resource) => {
+      const enriched = aylaV189EnrichResourceMappings(db, resource);
+      let relevance = 0;
+      const system = String(enriched.system || "").toLowerCase();
+      const topic = String(enriched.topic || "").toLowerCase();
+      const dynamicIndex = dynamicWeak.findIndex((area) => system.includes(area) || topic.includes(area) || area.includes(system));
+      if (dynamicIndex >= 0) relevance += 60 - dynamicIndex * 8;
+      else if (staticWeak.some((area) => system.includes(area) || topic.includes(area) || area.includes(system))) relevance += 40;
+      if (preferred.some((name) => String(enriched.bookTitle || enriched.provider || enriched.title || "").toLowerCase().includes(name))) relevance += 20;
+      if (String(enriched.priority || "").toLowerCase().includes("critical")) relevance += 25;
+      else if (String(enriched.priority || "").toLowerCase().includes("high")) relevance += 15;
+      relevance += Math.max(0, 10 - aylaNumber(enriched.order, 10));
+      return { ...enriched, relevance };
+    })
+    .sort((a, b) => b.relevance - a.relevance || String(a.system || "").localeCompare(String(b.system || "")) || String(a.topic || "").localeCompare(String(b.topic || "")));
+}
+
+function aylaV189ResolveAssessmentQuestions(db, resource = {}) {
+  const embedded = Array.isArray(resource.questions) ? resource.questions : [];
+  if (embedded.length) {
+    return embedded.slice(0, 200).map((question, index) => {
+      const normalized = aylaV189NormalizeResource({
+        ...question,
+        id: question.id || `${resource.id || "assessment"}-Q${index + 1}`,
+        type: "internal_mcq",
+        examTrack: question.examTrack || question.exam_track || resource.examTrack || resource.exam_track || resource.exam,
+        provider: question.provider || resource.provider || "AylaMed",
+        questionNumber: question.questionNumber || question.question_number || question.resourceNumber || question.resource_number || `Q${index + 1}`,
+        system: question.system || resource.system,
+        topic: question.topic || resource.topic,
+        difficulty: question.difficulty || resource.difficulty,
+      });
+      return aylaV189AssignmentSnapshot(db, normalized, { resolveAssessment: false });
+    });
+  }
+  const numbers = aylaCleanArray(resource.questionNumbers || resource.question_numbers || resource.qids).map(String);
+  if (!numbers.length) return [];
+  const numberSet = new Set(numbers.map((value) => value.trim().toLowerCase()));
+  const matched = aylaValues(db, "aylaResources")
+    .filter((row) => aylaV189ResourceType(row.type) === "internal_mcq")
+    .filter((row) => numberSet.has(String(row.questionNumber || row.resourceNumber || "").trim().toLowerCase()))
+    .map((row) => aylaV189AssignmentSnapshot(db, aylaV189EnrichResourceMappings(db, row), { resolveAssessment: false }));
+  const order = new Map(numbers.map((value, index) => [String(value).trim().toLowerCase(), index]));
+  return matched.sort((a, b) => (order.get(String(a.questionNumber || a.resourceNumber).toLowerCase()) ?? 9999) - (order.get(String(b.questionNumber || b.resourceNumber).toLowerCase()) ?? 9999));
+}
+
+function aylaV189AssignmentSnapshot(db, resource = {}, options = {}) {
+  return {
+    resourceId: resource.id,
+    type: aylaV189ResourceType(resource.type),
+    provider: resource.provider || "",
+    examTrack: resource.examTrack || resource.exam_track || resource.exam || "All",
+    resourceNumber: resource.resourceNumber || resource.questionNumber || "",
+    questionNumber: resource.questionNumber || "",
+    title: resource.title || resource.topic || "Assigned resource",
+    system: resource.system || "General",
+    topic: resource.topic || "",
+    subtopics: aylaCleanArray(resource.subtopics),
+    concepts: aylaCleanArray(resource.concepts),
+    difficulty: resource.difficulty || "Adaptive",
+    bookTitle: resource.bookTitle || "",
+    edition: resource.edition || "",
+    pageRange: resource.pageRange || aylaV189PageRange(resource),
+    pdfPageStart: resource.pdfPageStart || null,
+    pdfPageEnd: resource.pdfPageEnd || null,
+    printedPageStart: resource.printedPageStart || null,
+    printedPageEnd: resource.printedPageEnd || null,
+    mappedBookResourceId: resource.mappedBookResourceId || "",
+    mappedBookTitle: resource.mappedBookTitle || "",
+    mappedBookEdition: resource.mappedBookEdition || "",
+    mappedBookPages: resource.mappedBookPages || "",
+    sourceUrl: resource.sourceUrl || "",
+    vimeoId: resource.vimeoId || "",
+    vimeoUrl: resource.vimeoUrl || "",
+    vimeoPrivacyHash: resource.vimeoPrivacyHash || "",
+    vimeoEmbedUrl: resource.vimeoEmbedUrl || aylaV189VimeoEmbed(resource),
+    mappedVideoResourceId: resource.mappedVideoResourceId || "",
+    mappedVideoTitle: resource.mappedVideoTitle || "",
+    mappedVimeoId: resource.mappedVimeoId || "",
+    mappedVimeoUrl: resource.mappedVimeoUrl || "",
+    mappedVideoTimestamp: resource.mappedVideoTimestamp || "",
+    mappingStatus: resource.mappingStatus || "",
+    timestamp: resource.timestamp || "",
+    exactReference: resource.exactReference || "",
+    videoStartSeconds: aylaNumber(resource.videoStartSeconds, 0),
+    videoEndSeconds: aylaNumber(resource.videoEndSeconds, 0),
+    stem: resource.stem || "",
+    options: Array.isArray(resource.options) ? resource.options : [],
+    correctAnswer: resource.correctAnswer ?? null,
+    correctAnswerIndex: resource.correctAnswerIndex ?? resource.correct_answer_index ?? null,
+    questionNumbers: aylaCleanArray(resource.questionNumbers || resource.question_numbers || resource.qids),
+    explanation: resource.explanation || "",
+    distractorExplanations: resource.distractorExplanations || {},
+    assessmentType: resource.assessmentType || resource.assessment_type || resource.assessmentKind || resource.assessment_kind || "",
+    tutorReason: resource.tutorReason || resource.tutor_reason || "",
+    scheduleTrigger: resource.scheduleTrigger || resource.schedule_trigger || "",
+    questions: options.resolveAssessment === false ? (Array.isArray(resource.questions) ? resource.questions : []) : (["assessment", "assessment_blueprint"].includes(aylaV189ResourceType(resource.type)) ? aylaV189ResolveAssessmentQuestions(db, resource) : (Array.isArray(resource.questions) ? resource.questions : [])),
+    front: resource.front || "",
+    back: resource.back || "",
+    estimatedMinutes: aylaNumber(resource.estimatedMinutes, 15),
+    verificationStatus: resource.verificationStatus || "verified",
+  };
+}
+
+
+function aylaV189CorrectAnswerIndex(question = {}) {
+  const options = Array.isArray(question.options) ? question.options : [];
+  const explicit = question.correctAnswerIndex ?? question.correct_answer_index;
+  if (explicit !== undefined && explicit !== null && explicit !== "") {
+    const numeric = Number(explicit);
+    if (Number.isInteger(numeric)) {
+      if (numeric >= 0 && numeric < options.length) return numeric;
+      if (numeric >= 1 && numeric <= options.length) return numeric - 1;
+    }
+  }
+  const answer = question.correctAnswer ?? question.correct_answer;
+  if (answer === undefined || answer === null || answer === "") return -1;
+  if (typeof answer === "number") {
+    if (answer >= 0 && answer < options.length) return answer;
+    if (answer >= 1 && answer <= options.length) return answer - 1;
+  }
+  const clean = String(answer).trim();
+  if (/^[A-Z]$/i.test(clean)) {
+    const index = clean.toUpperCase().charCodeAt(0) - 65;
+    return index >= 0 && index < options.length ? index : -1;
+  }
+  const numeric = Number(clean);
+  if (Number.isInteger(numeric)) {
+    if (numeric >= 0 && numeric < options.length) return numeric;
+    if (numeric >= 1 && numeric <= options.length) return numeric - 1;
+  }
+  return options.findIndex((option) => {
+    const value = typeof option === "string" ? option : option?.text ?? option?.label ?? option?.value ?? "";
+    return aylaV189CleanText(value).toLowerCase() === clean.toLowerCase();
+  });
+}
+
+function aylaV189QuestionIdentity(question = {}, index = 0) {
+  return String(question.resourceId || question.id || question.questionNumber || question.resourceNumber || `Q${index + 1}`);
+}
+
+function aylaV189FindAssignmentItem(assignment = {}, resourceId = "") {
+  const items = Array.isArray(assignment.items) ? assignment.items : [];
+  if (resourceId) {
+    const exact = items.find((item) => String(item.resourceId || "") === String(resourceId));
+    if (exact) return exact;
+  }
+  return items[0] || null;
+}
+
+function aylaV189LatestQuestionAttempt(db, studentId, assignmentId, resourceId) {
+  return aylaValues(db, "aylaQuestionAttempts")
+    .filter((row) => String(row.studentId) === String(studentId))
+    .filter((row) => !assignmentId || String(row.assignmentId || "") === String(assignmentId))
+    .filter((row) => !resourceId || String(row.resourceId || "") === String(resourceId))
+    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))[0] || null;
+}
+
+function aylaV189LatestAssessmentAttempt(db, studentId, assignmentId) {
+  return aylaValues(db, "aylaAssessmentAttempts")
+    .filter((row) => String(row.studentId) === String(studentId))
+    .filter((row) => !assignmentId || String(row.assignmentId || "") === String(assignmentId))
+    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))[0] || null;
+}
+
+function aylaV189HideQuestionAnswer(question = {}) {
+  const copy = { ...question };
+  delete copy.correctAnswer;
+  delete copy.correct_answer;
+  delete copy.correctAnswerIndex;
+  delete copy.correct_answer_index;
+  delete copy.explanation;
+  delete copy.distractorExplanations;
+  delete copy.distractor_explanations;
+  return copy;
+}
+
+function aylaV189SanitizeAssignmentForStudent(db, assignment = {}) {
+  const copy = JSON.parse(JSON.stringify(assignment || {}));
+  const category = String(copy.category || "");
+  copy.items = (Array.isArray(copy.items) ? copy.items : []).map((item) => {
+    const next = { ...item };
+    if (category === "internal_mcqs") {
+      const attempt = aylaV189LatestQuestionAttempt(db, copy.studentId, copy.id, item.resourceId);
+      const hidden = aylaV189HideQuestionAnswer(next);
+      if (attempt?.serverVerified) {
+        hidden.review = attempt.review || {
+          outcome: attempt.outcome,
+          selectedAnswer: attempt.selectedAnswer,
+          correctAnswerIndex: attempt.correctAnswerIndex,
+          explanation: attempt.explanation || "",
+          distractorExplanations: attempt.distractorExplanations || {},
+        };
+      }
+      return hidden;
+    }
+    if (category === "assessment") {
+      const attempt = aylaV189LatestAssessmentAttempt(db, copy.studentId, copy.id);
+      next.questions = (Array.isArray(next.questions) ? next.questions : []).map((question) => aylaV189HideQuestionAnswer(question));
+      if (attempt?.serverVerified) {
+        next.reviewAnswers = Array.isArray(attempt.reviewAnswers) ? attempt.reviewAnswers : [];
+        next.verifiedResult = {
+          scorePercent: attempt.scorePercent,
+          correct: attempt.correct,
+          incorrect: attempt.incorrect,
+          totalQuestions: attempt.totalQuestions,
+          createdAt: attempt.createdAt,
+        };
+      }
+      return next;
+    }
+    return next;
+  });
+  return copy;
+}
+
+function aylaV189SanitizePlanBundle(db, plan, assignments = []) {
+  return {
+    plan: plan ? JSON.parse(JSON.stringify(plan)) : null,
+    assignments: assignments.map((row) => aylaV189SanitizeAssignmentForStudent(db, row)),
+  };
+}
+
+function aylaV189CloseLinkedAssignments(db, assignment = {}) {
+  const linkedIds = aylaCleanArray(assignment.linkedAssignmentIds).map(String);
+  const closed = [];
+  for (const id of linkedIds) {
+    const linked = aylaGetItem(db, "aylaResourceAssignments", id);
+    if (!linked || ["completed", "cancelled", "superseded"].includes(String(linked.status || "").toLowerCase())) continue;
+    linked.status = "completed";
+    linked.progressPercent = 100;
+    linked.completedAt = linked.completedAt || aylaNow();
+    linked.recoveredAt = aylaNow();
+    linked.recoveredByAssignmentId = assignment.id;
+    linked.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaResourceAssignments", linked);
+    aylaV189UpdatePlanCompletion(db, linked.dailyPlanId);
+    closed.push(linked.id);
+  }
+  return closed;
+}
+
+function aylaV189CompleteRevisionQueueForAssignment(db, assignment = {}) {
+  const queueIds = new Set(aylaCleanArray(assignment.revisionQueueIds).map(String));
+  if (!queueIds.size) return [];
+  const completed = [];
+  for (const id of queueIds) {
+    const item = aylaGetItem(db, "aylaRevisionQueue", id);
+    if (!item || String(item.status || "").toLowerCase() === "completed") continue;
+    item.status = "completed";
+    item.completedAt = aylaNow();
+    item.completedByAssignmentId = assignment.id;
+    item.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaRevisionQueue", item);
+    completed.push(item.id);
+  }
+  return completed;
+}
+
+function aylaV189CompletedResourceIds(db, studentId) {
+  return new Set(aylaValues(db, "aylaResourceAssignments")
+    .filter((row) => String(row.studentId) === String(studentId) && String(row.status).toLowerCase() === "completed")
+    .flatMap((row) => aylaCleanArray(row.resourceIds || row.resourceId)));
+}
+
+function aylaV189OverdueAssignments(db, studentId, date) {
+  return aylaValues(db, "aylaResourceAssignments")
+    .filter((row) => String(row.studentId) === String(studentId))
+    .filter((row) => String(row.scheduledDate || "") < String(date || ""))
+    .filter((row) => !["completed", "skipped", "cancelled"].includes(String(row.status || "pending").toLowerCase()))
+    .sort((a, b) => String(a.scheduledDate || "").localeCompare(String(b.scheduledDate || "")));
+}
+
+function aylaV189MakeAssignment(db, student, plan, date, category, resources, title, options = {}) {
+  const rows = (Array.isArray(resources) ? resources : [resources]).filter(Boolean);
+  const snapshots = rows.map((row) => aylaV189AssignmentSnapshot(db, row));
+  const minutes = options.estimatedMinutes || snapshots.reduce((sum, row) => sum + aylaNumber(row.estimatedMinutes, 0), 0) || 15;
+  return {
+    id: aylaId("AYLA-ASN"),
+    studentId: student.id,
+    userId: student.ayla_user_id || student.user_id || null,
+    dailyPlanId: plan.id,
+    scheduledDate: date,
+    category,
+    type: options.type || category,
+    title,
+    system: options.system || snapshots[0]?.system || "General",
+    topic: options.topic || snapshots[0]?.topic || "",
+    resourceIds: snapshots.map((row) => row.resourceId),
+    items: snapshots,
+    estimatedMinutes: Math.max(1, Math.round(minutes)),
+    status: "pending",
+    priority: options.priority || snapshots[0]?.priority || "High",
+    assessmentType: options.assessmentType || snapshots[0]?.assessmentType || "",
+    tutorReason: options.tutorReason || snapshots[0]?.tutorReason || "",
+    scheduleTrigger: options.scheduleTrigger || snapshots[0]?.scheduleTrigger || "",
+    rationale: options.rationale || snapshots[0]?.tutorReason || "Assigned from verified resources and the student’s current weak-area and timeline profile.",
+    createdAt: aylaNow(),
+    updatedAt: aylaNow(),
+  };
+}
+
+function aylaV189StudyDaysRemaining(student, daysToTarget) {
+  const studyDays = Math.max(1, Math.min(7, aylaNumber(student.weeklyStudyDays || student.weekly_study_days, 6)));
+  return Math.max(1, Math.round(Math.max(1, daysToTarget) * (studyDays / 7)));
+}
+
+function aylaV189SystemKey(value = "") {
+  return aylaV189MappingKey(value || "General");
+}
+
+function aylaV189ExplicitBaseline(student = {}, system = "") {
+  const baselines = student.systemBaselines || student.system_baselines || {};
+  if (!baselines || typeof baselines !== "object" || Array.isArray(baselines)) return null;
+  const wanted = aylaV189SystemKey(system);
+  for (const [key, value] of Object.entries(baselines)) {
+    if (aylaV189SystemKey(key) !== wanted) continue;
+    const score = aylaNumber(typeof value === "object" ? value.score ?? value.percent ?? value.mastery : value, NaN);
+    if (Number.isFinite(score) && score >= 0 && score <= 100) {
+      return {
+        percent: Math.round(score),
+        source: typeof value === "object" ? value.source || "diagnostic_system_score" : "diagnostic_system_score",
+        recordedAt: typeof value === "object" ? value.recordedAt || value.recorded_at || student.baselineRecordedAt || null : student.baselineRecordedAt || null,
+      };
+    }
+  }
+  return null;
+}
+
+function aylaV189BaselineFromVerifiedHistory(db, student, system) {
+  const systemKey = aylaV189SystemKey(system);
+  const assessmentRows = aylaValues(db, "aylaAssessmentAttempts")
+    .filter((row) => String(row.studentId) === String(student.id) && row.serverVerified === true)
+    .filter((row) => aylaV189SystemKey(row.system) === systemKey)
+    .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
+  if (assessmentRows.length) {
+    const row = assessmentRows[0];
+    return { percent: Math.round(Math.max(0, Math.min(100, aylaNumber(row.scorePercent, 0)))), source: "first_verified_assessment", recordedAt: row.createdAt || null };
+  }
+
+  const questionRows = aylaValues(db, "aylaQuestionAttempts")
+    .filter((row) => String(row.studentId) === String(student.id))
+    .filter((row) => aylaV189SystemKey(row.system) === systemKey)
+    .filter((row) => row.serverVerified === true || String(row.sourceType || "").toLowerCase() === "external")
+    .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")))
+    .slice(0, 10);
+  if (questionRows.length >= 5) {
+    const correct = questionRows.filter((row) => String(row.outcome || "").toLowerCase() === "correct").length;
+    return { percent: Math.round((correct / questionRows.length) * 100), source: "first_verified_question_block", recordedAt: questionRows[questionRows.length - 1]?.createdAt || null };
+  }
+
+  const global = aylaNumber(student.currentScore ?? student.current_score, 0);
+  if (global > 0 && global <= 100) {
+    return { percent: Math.round(global), source: "diagnostic_global_score", recordedAt: student.baselineRecordedAt || student.createdAt || null };
+  }
+  return null;
+}
+
+function aylaV189CurrentSystemSignals(db, student, system) {
+  const key = aylaV189SystemKey(system);
+  const signals = [];
+
+  aylaValues(db, "aylaQuestionAttempts")
+    .filter((row) => String(row.studentId) === String(student.id) && aylaV189SystemKey(row.system) === key)
+    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
+    .slice(0, 80)
+    .forEach((row) => {
+      const outcome = String(row.outcome || row.result || "").toLowerCase();
+      if (outcome === "correct") signals.push({ value: 100, weight: 1.0, type: "question" });
+      else if (outcome === "guessed") signals.push({ value: 55, weight: 0.8, type: "question" });
+      else if (outcome === "incorrect" || outcome === "review_again") signals.push({ value: 15, weight: 1.0, type: "question" });
+    });
+
+  aylaValues(db, "aylaFlashcardReviews")
+    .filter((row) => String(row.studentId) === String(student.id) && aylaV189SystemKey(row.system) === key)
+    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
+    .slice(0, 80)
+    .forEach((row) => {
+      const rating = String(row.rating || "").toLowerCase();
+      const value = rating === "easy" ? 95 : rating === "good" ? 78 : rating === "hard" ? 45 : 18;
+      signals.push({ value, weight: 0.55, type: "flashcard" });
+    });
+
+  aylaValues(db, "aylaAssessmentAttempts")
+    .filter((row) => String(row.studentId) === String(student.id) && aylaV189SystemKey(row.system) === key && row.serverVerified === true)
+    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
+    .slice(0, 20)
+    .forEach((row) => signals.push({ value: Math.max(0, Math.min(100, aylaNumber(row.scorePercent, 0))), weight: 2.25, type: "assessment" }));
+
+  aylaValues(db, "aylaConceptMastery")
+    .filter((row) => String(row.studentId) === String(student.id) && aylaV189SystemKey(row.system) === key)
+    .forEach((row) => signals.push({ value: Math.max(0, Math.min(100, aylaNumber(row.masteryPercent ?? row.mastery_percent, 0))), weight: 1.5, type: "concept_mastery" }));
+
+  const completedAssignments = aylaValues(db, "aylaResourceAssignments")
+    .filter((row) => String(row.studentId) === String(student.id) && aylaV189SystemKey(row.system) === key)
+    .filter((row) => String(row.status || "").toLowerCase() === "completed");
+  const assignedAssignments = aylaValues(db, "aylaResourceAssignments")
+    .filter((row) => String(row.studentId) === String(student.id) && aylaV189SystemKey(row.system) === key)
+    .filter((row) => !["cancelled", "superseded"].includes(String(row.status || "").toLowerCase()));
+
+  const totalWeight = signals.reduce((sum, row) => sum + row.weight, 0);
+  const mastery = totalWeight ? Math.round(signals.reduce((sum, row) => sum + row.value * row.weight, 0) / totalWeight) : null;
+  const coverage = assignedAssignments.length ? Math.round((completedAssignments.length / assignedAssignments.length) * 100) : 0;
+  return {
+    mastery,
+    coverage,
+    signalCount: signals.length,
+    signalTypes: [...new Set(signals.map((row) => row.type))],
+    completedAssignments: completedAssignments.length,
+    assignedAssignments: assignedAssignments.length,
+  };
+}
+
+function aylaV189SystemProgress(db, student) {
+  return AYLA_V189_SYSTEMS.map((system) => {
+    const explicit = aylaV189ExplicitBaseline(student, system);
+    const baseline = explicit || aylaV189BaselineFromVerifiedHistory(db, student, system);
+    const current = aylaV189CurrentSystemSignals(db, student, system);
+    const mastery = current.mastery;
+    const baselinePercent = baseline?.percent ?? null;
+    return {
+      system,
+      baselinePercent,
+      baselineSource: baseline?.source || "awaiting_verified_baseline",
+      baselineRecordedAt: baseline?.recordedAt || null,
+      masteryPercent: mastery,
+      weaknessPercent: mastery === null ? null : Math.max(0, 100 - mastery),
+      improvementPercent: mastery === null || baselinePercent === null ? null : Math.round(mastery - baselinePercent),
+      coveragePercent: current.coverage,
+      evidenceCount: current.signalCount,
+      evidenceTypes: current.signalTypes,
+      completedAssignments: current.completedAssignments,
+      assignedAssignments: current.assignedAssignments,
+      trend: mastery === null || baselinePercent === null ? "baseline_needed" : mastery > baselinePercent + 4 ? "improving" : mastery < baselinePercent - 4 ? "declining" : "stable",
+    };
+  }).sort((a, b) => {
+    const aWeak = a.weaknessPercent === null ? -1 : a.weaknessPercent;
+    const bWeak = b.weaknessPercent === null ? -1 : b.weaknessPercent;
+    if (bWeak !== aWeak) return bWeak - aWeak;
+    return b.coveragePercent - a.coveragePercent;
+  });
+}
+
+function aylaV189RequiredResourceKey(resource = {}) {
+  const type = aylaV189ResourceType(resource.type);
+  const system = aylaV189SystemKey(resource.system);
+  const topic = aylaV189MappingKey(resource.topic || resource.title);
+  if (["book", "reading", "revision_sheet"].includes(type)) return `reading|${system}|${topic}|${aylaV189MappingKey(resource.bookTitle || resource.provider)}`;
+  if (["vimeo_video", "video_transcript"].includes(type)) return `video|${system}|${topic}`;
+  if (["external_question", "external_qid_mapping"].includes(type)) return `external|${aylaV189MappingKey(resource.provider)}|${String(resource.questionNumber || resource.resourceNumber).toLowerCase()}`;
+  if (type === "internal_mcq") return `internal|${String(resource.questionNumber || resource.resourceNumber || resource.id).toLowerCase()}`;
+  if (type === "flashcard") return `flashcard|${String(resource.resourceNumber || resource.id).toLowerCase()}`;
+  return `${type}|${system}|${topic}|${resource.id}`;
+}
+
+function aylaV189RequiredRoadmapWorkload(db, student) {
+  const completed = aylaV189CompletedResourceIds(db, student.id);
+  const mode = String(student.questionSourcePreference || student.question_source_preference || db.aylaSettings?.resources?.question_source_mode || "hybrid");
+  const selectedNames = aylaCleanArray(student.selectedResources).map((value) => aylaV189MappingKey(value));
+  const relevant = aylaV189RelevantResources(db, student)
+    .filter((row) => !completed.has(String(row.id)))
+    .filter((row) => {
+      const type = aylaV189ResourceType(row.type);
+      if (type === "external_question" && mode === "internal") return false;
+      if (type === "internal_mcq" && mode === "external") return false;
+      if (["assessment", "assessment_blueprint"].includes(type)) return false;
+      if (!selectedNames.length) return true;
+      if (["external_question", "internal_mcq", "flashcard"].includes(type)) return true;
+      const haystack = aylaV189MappingKey(`${row.bookTitle || ""} ${row.provider || ""} ${row.title || ""}`);
+      return selectedNames.some((name) => haystack.includes(name) || name.includes(haystack));
+    });
+
+  const deduped = new Map();
+  for (const resource of relevant) {
+    const key = aylaV189RequiredResourceKey(resource);
+    const existing = deduped.get(key);
+    if (!existing || aylaNumber(resource.relevance, 0) > aylaNumber(existing.relevance, 0)) deduped.set(key, resource);
+  }
+
+  const flashcardsByTopic = new Map();
+  const finalRows = [];
+  for (const resource of deduped.values()) {
+    if (aylaV189ResourceType(resource.type) !== "flashcard") {
+      finalRows.push(resource);
+      continue;
+    }
+    const key = `${aylaV189SystemKey(resource.system)}|${aylaV189MappingKey(resource.topic)}`;
+    const count = flashcardsByTopic.get(key) || 0;
+    if (count < 25) {
+      finalRows.push(resource);
+      flashcardsByTopic.set(key, count + 1);
+    }
+  }
+
+  const target = aylaTargetDateInfo(student);
+  const remainingWeeks = Math.max(1, Math.ceil(Math.max(1, target.daysToTarget || 1) / 7));
+  const assessmentMinutes = remainingWeeks * 35;
+  const resourceMinutes = finalRows.reduce((sum, row) => sum + Math.max(1, aylaNumber(row.estimatedMinutes, 15)), 0);
+  const byType = {};
+  finalRows.forEach((row) => {
+    const type = aylaV189ResourceType(row.type);
+    byType[type] = (byType[type] || 0) + 1;
+  });
+  return {
+    resources: finalRows,
+    resourceMinutes,
+    assessmentMinutes,
+    totalMinutes: resourceMinutes + assessmentMinutes,
+    byType,
+    deduplicatedCount: finalRows.length,
+  };
+}
+
+function aylaV189BacklogWarning(db, student, date, systemProgress = aylaV189SystemProgress(db, student)) {
+  const overdue = aylaV189OverdueAssignments(db, student.id, date)
+    .filter((row) => !["superseded", "cancelled"].includes(String(row.status || "").toLowerCase()));
+  const backlogMinutes = overdue.reduce((sum, row) => sum + aylaNumber(row.estimatedMinutes, 0), 0);
+  const target = aylaTargetDateInfo(student);
+  const dailyHours = Math.max(1, Math.min(16, aylaNumber(student.dailyHours || student.daily_hours, 3)));
+  const dailyCapacity = dailyHours * 60;
+  const workload = aylaV189RequiredRoadmapWorkload(db, student);
+  const studyDays = aylaV189StudyDaysRemaining(student, target.daysToTarget || 1);
+  const requiredDailyMinutes = Math.ceil((workload.totalMinutes + backlogMinutes) / studyDays);
+  const requiredHours = Math.max(0.5, Math.round((requiredDailyMinutes / 60) * 10) / 10);
+  const completionRecent = aylaValues(db, "aylaDailyPlans")
+    .filter((plan) => String(plan.studentId) === String(student.id) && String(plan.date || "") < String(date || ""))
+    .sort((a, b) => String(b.date).localeCompare(String(a.date)))
+    .slice(0, 3)
+    .map((plan) => aylaNumber(plan.completionPercent, 0));
+  const lowCompletion = completionRecent.length >= 3 && completionRecent.every((value) => value < 50);
+  const multiplier = Math.max(1, aylaNumber(db.aylaSettings?.adaptive?.backlog_risk_multiplier, 1.15));
+  const capacityRisk = requiredDailyMinutes > dailyCapacity * multiplier;
+  const examNear = target.daysToTarget > 0 && target.daysToTarget <= 30;
+  const severe = capacityRisk && examNear;
+  let level = "on_track";
+  let title = "Your workload is currently manageable.";
+  let message = "Complete today’s priority assignments and AylaMed will keep adapting future work.";
+  if (severe || backlogMinutes >= dailyCapacity * 2) {
+    level = "high";
+    title = `Your ${target.targetLabel || "target date"} is near and work is piling up.`;
+    message = `You have about ${Math.round(backlogMinutes / 6) / 10} hours overdue. At ${dailyHours} hours/day, the deduplicated remaining priority roadmap needs about ${requiredHours} hours/day. Increase study time, move the target date, or reduce lower-priority resources.`;
+  } else if (capacityRisk || lowCompletion || backlogMinutes > 0) {
+    level = "medium";
+    title = "Your current schedule needs attention.";
+    message = `AylaMed estimates about ${requiredHours} hours/day for the deduplicated priority roadmap and due backlog, while your profile currently allows ${dailyHours} hours/day.`;
+  }
+  return {
+    level,
+    title,
+    message,
+    targetDate: target.targetDate,
+    targetLabel: target.targetLabel,
+    daysToTarget: target.daysToTarget,
+    backlogCount: overdue.length,
+    backlogMinutes,
+    dailyCapacityMinutes: dailyCapacity,
+    requiredDailyMinutes,
+    requiredHours,
+    workload: {
+      deduplicatedResources: workload.deduplicatedCount,
+      resourceMinutes: workload.resourceMinutes,
+      assessmentMinutes: workload.assessmentMinutes,
+      byType: workload.byType,
+    },
+    weakSystems: systemProgress.filter((row) => row.weaknessPercent !== null).slice(0, 3).map((row) => row.system),
+    choices: level === "on_track" ? [] : ["Increase daily study time", "Move exam or Match date", "Reduce lower-priority resources", "Keep current plan and accept high-risk status"],
+  };
+}
+
+function aylaV189StudyDayStatus(student, date) {
+  const dayName = aylaDayName(new Date(`${date}T12:00:00Z`));
+  const preferred = aylaCleanArray(student.preferredStudyDays || student.preferred_study_days);
+  const restDay = String(student.restDay || student.rest_day || "Sunday").toLowerCase();
+  if (preferred.length) {
+    const allowed = preferred.some((day) => String(day).toLowerCase() === dayName.toLowerCase());
+    return { isStudyDay: allowed, dayName, reason: allowed ? "preferred_study_day" : "outside_preferred_study_days" };
+  }
+  if (dayName.toLowerCase() === restDay) return { isStudyDay: false, dayName, reason: "protected_rest_day" };
+  return { isStudyDay: true, dayName, reason: "scheduled_study_day" };
+}
+
+function aylaV189DueRevisionQueue(db, studentId, date) {
+  return aylaValues(db, "aylaRevisionQueue")
+    .filter((row) => String(row.studentId) === String(studentId))
+    .filter((row) => ["due", "assigned"].includes(String(row.status || "due").toLowerCase()))
+    .filter((row) => !row.dueDate || String(row.dueDate) <= String(date))
+    .sort((a, b) => String(a.dueDate || "").localeCompare(String(b.dueDate || "")) || String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
+}
+
+function aylaV189ResolveRevisionResource(db, revision = {}) {
+  let resourceId = revision.resourceId || revision.resource_id || "";
+  if (!resourceId && revision.sourceType === "question") {
+    const attempt = aylaGetItem(db, "aylaQuestionAttempts", revision.sourceId);
+    resourceId = attempt?.resourceId || "";
+  }
+  if (!resourceId && revision.sourceType === "flashcard") {
+    const review = aylaGetItem(db, "aylaFlashcardReviews", revision.sourceId);
+    resourceId = review?.resourceId || "";
+  }
+  if (resourceId) {
+    const resource = aylaGetItem(db, "aylaResources", resourceId);
+    if (resource) return aylaV189EnrichResourceMappings(db, resource);
+  }
+  const candidates = aylaValues(db, "aylaResources")
+    .filter((row) => row.approved !== false && !["disabled", "deleted", "rejected", "archived"].includes(String(row.status || "").toLowerCase()))
+    .filter((row) => !revision.system || aylaV189SystemKey(row.system) === aylaV189SystemKey(revision.system))
+    .filter((row) => !revision.topic || aylaV189MappingKey(row.topic) === aylaV189MappingKey(revision.topic));
+  if (revision.sourceType === "assessment") {
+    return candidates.find((row) => aylaV189ResourceType(row.type) === "internal_mcq")
+      || candidates.find((row) => aylaV189ResourceType(row.type) === "flashcard")
+      || candidates.find((row) => ["reading", "book", "revision_sheet"].includes(aylaV189ResourceType(row.type)))
+      || null;
+  }
+  return null;
+}
+
+function aylaV189AssessmentKey(value) {
+  return String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function aylaV189DaysBetween(fromValue, toValue) {
+  const from = new Date(String(fromValue || "").length === 10 ? `${fromValue}T12:00:00Z` : fromValue || 0);
+  const to = new Date(String(toValue || "").length === 10 ? `${toValue}T12:00:00Z` : toValue || 0);
+  if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime())) return 9999;
+  return Math.floor((to.getTime() - from.getTime()) / 86400000);
+}
+
+function aylaV189AssessmentDecision(db, student, date, options = {}) {
+  const target = aylaTargetDateInfo(student);
+  const policy = aylaMergeSettings(db.aylaSettings || {}).assessment_policy || DEFAULT_AYLA_SETTINGS.assessment_policy;
+  if (policy.enabled === false) return { status: "disabled", type: "not_due", label: "Smart assessments disabled", reason: "Assessment scheduling is disabled by Admin policy.", trigger: "admin_disabled", system: "General", topic: "", questionCount: 0, daysToTarget: target.daysToTarget };
+  const systemProgress = aylaV189SystemProgress(db, student);
+  const prioritySystem = systemProgress[0]?.system || aylaCleanArray(student.weakAreas)[0] || "General";
+  const attempts = aylaValues(db, "aylaAssessmentAttempts")
+    .filter((row) => String(row.studentId) === String(student.id))
+    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  const assignments = aylaValues(db, "aylaResourceAssignments")
+    .filter((row) => String(row.studentId) === String(student.id));
+  const completed = assignments.filter((row) => String(row.status || "").toLowerCase() === "completed");
+  const questionAttempts = aylaValues(db, "aylaQuestionAttempts")
+    .filter((row) => String(row.studentId) === String(student.id));
+  const cardReviews = aylaValues(db, "aylaFlashcardReviews")
+    .filter((row) => String(row.studentId) === String(student.id));
+  const recentCutoff = aylaDateOnly(aylaAddDays(new Date(`${date}T12:00:00Z`), -7));
+  const recentQuestions = questionAttempts.filter((row) => String(row.createdAt || "").slice(0, 10) >= recentCutoff);
+  const recentCards = cardReviews.filter((row) => String(row.createdAt || "").slice(0, 10) >= recentCutoff);
+
+  const base = {
+    status: "monitoring",
+    type: "not_due",
+    label: "Monitoring completion and readiness",
+    reason: "No assessment is due yet. AylaMed is watching topic completion, system coverage, weak-area signals, weekly consistency, and the target date.",
+    trigger: "adaptive_monitoring",
+    system: prioritySystem,
+    topic: "",
+    questionCount: 0,
+    daysToTarget: target.daysToTarget,
+  };
+
+  const lastAttempt = attempts[0];
+  const daysSinceAny = lastAttempt ? aylaV189DaysBetween(String(lastAttempt.createdAt || "").slice(0, 10), date) : 9999;
+  const recentSameType = (type, system = "", topic = "", withinDays = 5) => attempts.some((row) => {
+    const rowType = aylaV189AssessmentKey(row.assessmentType || row.assessment_type || "");
+    const typeMatch = rowType === aylaV189AssessmentKey(type);
+    const systemMatch = !system || aylaV189AssessmentKey(row.system) === aylaV189AssessmentKey(system);
+    const topicMatch = !topic || aylaV189AssessmentKey(row.topic) === aylaV189AssessmentKey(topic);
+    const age = aylaV189DaysBetween(String(row.createdAt || "").slice(0, 10), date);
+    return typeMatch && systemMatch && topicMatch && age >= 0 && age < withinDays;
+  });
+
+  if (options.includeAssessment === true) {
+    return { ...base, status: "due", type: "requested", label: "Tutor-requested checkpoint", reason: "A focused checkpoint was requested. AylaMed will use verified internal MCQs and adapt future work from the exact answers.", trigger: "manual_tutor_request", questionCount: 10 };
+  }
+
+  if (target.daysToTarget > 0 && target.daysToTarget <= aylaNumber(policy.final_readiness_days, 7) && daysSinceAny >= 2 && !recentSameType("final_readiness", "", "", 3)) {
+    return { ...base, status: "due", type: "final_readiness", label: "Final-readiness assessment", reason: `The ${target.targetLabel || "target date"} is ${target.daysToTarget} day${target.daysToTarget === 1 ? "" : "s"} away. A short cumulative readiness check is now more useful than adding more untested content.`, trigger: "target_date_pressure", questionCount: aylaNumber(policy.final_question_count, 20) };
+  }
+
+  const weakStats = new Map();
+  for (const row of recentQuestions) {
+    const system = row.system || prioritySystem;
+    const key = aylaV189AssessmentKey(system);
+    if (!weakStats.has(key)) weakStats.set(key, { system, total: 0, correct: 0, hardCards: 0 });
+    const stat = weakStats.get(key);
+    stat.total += 1;
+    if (String(row.outcome || "").toLowerCase() === "correct") stat.correct += 1;
+  }
+  for (const row of recentCards) {
+    const system = row.system || prioritySystem;
+    const key = aylaV189AssessmentKey(system);
+    if (!weakStats.has(key)) weakStats.set(key, { system, total: 0, correct: 0, hardCards: 0 });
+    if (["again", "hard"].includes(String(row.rating || "").toLowerCase())) weakStats.get(key).hardCards += 1;
+  }
+  const weakCandidate = [...weakStats.values()]
+    .map((row) => ({ ...row, accuracy: row.total ? Math.round((row.correct / row.total) * 100) : 100 }))
+    .filter((row) => (row.total >= aylaNumber(policy.weak_question_minimum, 5) && row.accuracy < aylaNumber(policy.weak_accuracy_threshold, 65)) || row.hardCards >= aylaNumber(policy.difficult_flashcard_threshold, 4))
+    .sort((a, b) => a.accuracy - b.accuracy || b.hardCards - a.hardCards)[0];
+  if (weakCandidate && !recentSameType("weak_area", weakCandidate.system, "", 3)) {
+    return { ...base, status: "due", type: "weak_area", label: `${weakCandidate.system} weak-area checkpoint`, reason: `Recent performance shows ${weakCandidate.accuracy}% question accuracy and ${weakCandidate.hardCards} difficult flashcard reviews in ${weakCandidate.system}. A focused assessment is required before adding more load.`, trigger: "performance_weakness", system: weakCandidate.system, questionCount: aylaNumber(policy.weak_area_question_count, 10) };
+  }
+
+  const topicGroups = new Map();
+  for (const row of completed) {
+    const topic = String(row.topic || "").trim();
+    const system = String(row.system || prioritySystem).trim();
+    if (!topic || topic.toLowerCase() === "backlog recovery") continue;
+    const key = `${aylaV189AssessmentKey(system)}::${aylaV189AssessmentKey(topic)}`;
+    if (!topicGroups.has(key)) topicGroups.set(key, { system, topic, categories: new Set(), latest: "", count: 0 });
+    const group = topicGroups.get(key);
+    group.categories.add(String(row.category || row.type || "task"));
+    group.count += 1;
+    const completedDate = String(row.completedAt || row.updatedAt || row.scheduledDate || "").slice(0, 10);
+    if (completedDate > group.latest) group.latest = completedDate;
+  }
+  const topicCandidate = [...topicGroups.values()]
+    .filter((row) => row.categories.size >= aylaNumber(policy.topic_completed_categories, 3) && row.count >= aylaNumber(policy.topic_completed_categories, 3))
+    .filter((row) => !attempts.some((attempt) => aylaV189AssessmentKey(attempt.topic) === aylaV189AssessmentKey(row.topic) && String(attempt.createdAt || "").slice(0, 10) >= row.latest))
+    .sort((a, b) => String(b.latest).localeCompare(String(a.latest)))[0];
+  if (topicCandidate && !recentSameType("topic", topicCandidate.system, topicCandidate.topic, 2)) {
+    return { ...base, status: "due", type: "topic", label: `${topicCandidate.topic} completion check`, reason: `Reading, video, questions, or recall work for ${topicCandidate.topic} has reached the completion threshold. AylaMed is checking whether the topic is truly retained before moving on.`, trigger: "topic_completion", system: topicCandidate.system, topic: topicCandidate.topic, questionCount: aylaNumber(policy.topic_question_count, 8) };
+  }
+
+  const systemGroups = new Map();
+  for (const row of completed) {
+    const system = String(row.system || "").trim();
+    if (!system || system.toLowerCase() === "general") continue;
+    const key = aylaV189AssessmentKey(system);
+    if (!systemGroups.has(key)) systemGroups.set(key, { system, categories: new Set(), latest: "", count: 0 });
+    const group = systemGroups.get(key);
+    group.categories.add(String(row.category || row.type || "task"));
+    group.count += 1;
+    const completedDate = String(row.completedAt || row.updatedAt || row.scheduledDate || "").slice(0, 10);
+    if (completedDate > group.latest) group.latest = completedDate;
+  }
+  const systemCandidate = [...systemGroups.values()]
+    .filter((row) => row.categories.size >= aylaNumber(policy.system_completed_categories, 4) && row.count >= Math.max(6, aylaNumber(policy.system_completed_categories, 4) + 2))
+    .filter((row) => !attempts.some((attempt) => aylaV189AssessmentKey(attempt.system) === aylaV189AssessmentKey(row.system) && ["system", "weekly", "final_readiness"].includes(aylaV189AssessmentKey(attempt.assessmentType || attempt.assessment_type)) && String(attempt.createdAt || "").slice(0, 10) >= row.latest))
+    .sort((a, b) => String(b.latest).localeCompare(String(a.latest)))[0];
+  if (systemCandidate && !recentSameType("system", systemCandidate.system, "", 4)) {
+    return { ...base, status: "due", type: "system", label: `${systemCandidate.system} system assessment`, reason: `${systemCandidate.system} has enough completed reading, video, question, and recall evidence for a system-level check. AylaMed will use the result to decide whether to advance or repair gaps.`, trigger: "system_completion", system: systemCandidate.system, questionCount: aylaNumber(policy.system_question_count, 15) };
+  }
+
+  const lastWeekly = attempts.find((row) => ["weekly", "cumulative"].includes(aylaV189AssessmentKey(row.assessmentType || row.assessment_type)));
+  const lastWeeklyDate = lastWeekly ? String(lastWeekly.createdAt || "").slice(0, 10) : "";
+  const completedPlansSince = aylaValues(db, "aylaDailyPlans").filter((plan) => String(plan.studentId) === String(student.id) && String(plan.status || "").toLowerCase() === "completed" && (!lastWeeklyDate || String(plan.date || "") > lastWeeklyDate) && String(plan.date || "") <= date).length;
+  const daysSinceWeekly = lastWeeklyDate ? aylaV189DaysBetween(lastWeeklyDate, date) : 9999;
+  const weeklyDue = completedPlansSince >= aylaNumber(policy.weekly_min_completed_days, 4) && (daysSinceWeekly >= 7 || new Date(`${date}T12:00:00Z`).getUTCDay() === 6);
+  if (weeklyDue && !recentSameType("weekly", "", "", 6)) {
+    return { ...base, status: "due", type: "weekly", label: "Weekly cumulative assessment", reason: `${completedPlansSince} productive study days have accumulated since the last weekly check. AylaMed is testing retention across recently studied systems, not simply following a fixed calendar.`, trigger: "weekly_learning_cycle", questionCount: aylaNumber(policy.weekly_question_count, 20) };
+  }
+
+  return base;
+}
+
+function aylaV189SmartAssessmentResource(db, student, decision, assessments, internalResources, date) {
+  if (!decision || decision.status !== "due") return null;
+  const systemKey = aylaV189AssessmentKey(decision.system);
+  const topicKey = aylaV189AssessmentKey(decision.topic);
+  const requestedType = aylaV189AssessmentKey(decision.type);
+  const scored = assessments.map((resource) => {
+    const questions = aylaV189ResolveAssessmentQuestions(db, resource);
+    if (!questions.length) return null;
+    let score = 0;
+    const type = aylaV189AssessmentKey(resource.assessmentType || resource.assessment_type || resource.assessmentKind || resource.assessment_kind);
+    const resourceSystem = aylaV189AssessmentKey(resource.system);
+    const resourceTopic = aylaV189AssessmentKey(resource.topic);
+    if (type && type === requestedType) score += 80;
+    if (systemKey && resourceSystem === systemKey) score += 50;
+    if (topicKey && resourceTopic === topicKey) score += 70;
+    if (!resourceSystem || resourceSystem === "general") score += 5;
+    return { resource, questions, score };
+  }).filter(Boolean).sort((a, b) => b.score - a.score);
+
+  if (scored.length && scored[0].score > 0) {
+    const chosen = scored[0].resource;
+    return {
+      ...chosen,
+      assessmentType: decision.type,
+      tutorReason: decision.reason,
+      scheduleTrigger: decision.trigger,
+      estimatedMinutes: Math.max(12, Math.min(90, aylaNumber(chosen.estimatedMinutes, decision.questionCount * 2))),
+    };
+  }
+
+  const recentCutoff = aylaDateOnly(aylaAddDays(new Date(`${date}T12:00:00Z`), -14));
+  const recentlyAttempted = new Set(aylaValues(db, "aylaQuestionAttempts")
+    .filter((row) => String(row.studentId) === String(student.id) && String(row.createdAt || "").slice(0, 10) >= recentCutoff)
+    .map((row) => String(row.resourceId || "")));
+  const matching = internalResources.filter((row) => {
+    const systemMatch = !systemKey || aylaV189AssessmentKey(row.system) === systemKey;
+    const topicMatch = !topicKey || aylaV189AssessmentKey(row.topic) === topicKey;
+    return systemMatch && topicMatch;
+  });
+  const systemWide = internalResources.filter((row) => !systemKey || aylaV189AssessmentKey(row.system) === systemKey);
+  const pool = [...matching, ...systemWide, ...internalResources].filter((row, index, all) => all.findIndex((candidate) => String(candidate.id) === String(row.id)) === index);
+  const fresh = pool.filter((row) => !recentlyAttempted.has(String(row.id)));
+  const selected = [...fresh, ...pool].filter((row, index, all) => all.findIndex((candidate) => String(candidate.id) === String(row.id)) === index).slice(0, decision.questionCount);
+  if (selected.length < Math.min(5, decision.questionCount)) return null;
+
+  return {
+    id: `AYLA-SMART-${student.id}-${date}-${String(decision.type).toUpperCase()}`,
+    type: "assessment",
+    provider: "AylaMed Tutor Brain",
+    examTrack: student.exam || student.examTrack || "All",
+    resourceNumber: `SMART-${String(decision.type).toUpperCase()}-${date.replaceAll("-", "")}`,
+    title: decision.label,
+    system: decision.system || "Mixed",
+    topic: decision.topic || "Cumulative review",
+    difficulty: "Adaptive",
+    assessmentType: decision.type,
+    tutorReason: decision.reason,
+    scheduleTrigger: decision.trigger,
+    questions: selected,
+    estimatedMinutes: Math.max(12, selected.length * 2),
+    approved: true,
+    verificationStatus: "assembled_from_approved_internal_mcqs",
+  };
+}
+
+function aylaV189SelectUnused(resources, used, limit = 1) {
+  const out = [];
+  for (const resource of resources) {
+    if (used.has(String(resource.id))) continue;
+    out.push(resource);
+    used.add(String(resource.id));
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function aylaV189ResourceFocusMatch(resource = {}, system = "", topic = "") {
+  const systemKey = aylaV189SystemKey(system);
+  const topicKey = aylaV189MappingKey(topic);
+  const rowSystem = aylaV189SystemKey(resource.system || "General");
+  const rowTopic = aylaV189MappingKey(resource.topic || "");
+  if (systemKey && rowSystem !== systemKey) return false;
+  if (topicKey && rowTopic !== topicKey) return false;
+  return true;
+}
+
+function aylaV189FocusCandidates(db, student, resources = [], revisions = [], overdue = []) {
+  const progress = aylaV189SystemProgress(db, student);
+  const progressBySystem = new Map(progress.map((row, index) => [aylaV189SystemKey(row.system), { row, index }]));
+  const groups = new Map();
+  const touch = (system, topic, points = 0, resourceId = null, reason = "") => {
+    const cleanSystem = aylaV189CleanText(system || "General") || "General";
+    const cleanTopic = aylaV189CleanText(topic || "") || "Core review";
+    const key = `${aylaV189SystemKey(cleanSystem)}::${aylaV189MappingKey(cleanTopic)}`;
+    if (!groups.has(key)) groups.set(key, { id: `FOCUS-${groups.size + 1}`, system: cleanSystem, topic: cleanTopic, score: 0, resourceIds: [], reasons: [] });
+    const row = groups.get(key);
+    row.score += points;
+    if (resourceId && !row.resourceIds.includes(String(resourceId))) row.resourceIds.push(String(resourceId));
+    if (reason && !row.reasons.includes(reason)) row.reasons.push(reason);
+  };
+
+  resources.forEach((resource) => {
+    const progressEntry = progressBySystem.get(aylaV189SystemKey(resource.system));
+    const weakness = progressEntry?.row?.weaknessPercent;
+    const weakBoost = Number.isFinite(weakness) ? weakness * 0.8 : Math.max(0, 30 - (progressEntry?.index || 0) * 4);
+    touch(resource.system, resource.topic, 10 + aylaNumber(resource.relevance, 0) + weakBoost, resource.id, "Verified mapped resources available");
+  });
+  revisions.forEach((revision) => touch(revision.system, revision.topic, 180, revision.resourceId, "Revision is due today"));
+  overdue.forEach((assignment) => touch(assignment.system, assignment.topic, 140, null, "Priority work is overdue"));
+  aylaCleanArray(student.weakAreas).forEach((system, index) => touch(system, "Core review", 90 - index * 8, null, "Selected weak area"));
+
+  return [...groups.values()]
+    .map((row) => ({ ...row, score: Math.round(row.score), resourceIds: row.resourceIds.slice(0, 30), reasons: row.reasons.slice(0, 4) }))
+    .sort((a, b) => b.score - a.score || a.system.localeCompare(b.system) || a.topic.localeCompare(b.topic))
+    .slice(0, 12);
+}
+
+async function aylaV189TutorProposal(db, student, date, focusCandidates = [], candidateResources = [], options = {}) {
+  const fallback = {
+    mode: "deterministic_verified",
+    focusCandidateId: focusCandidates[0]?.id || null,
+    preferredResourceIds: focusCandidates[0]?.resourceIds || [],
+    rationale: focusCandidates[0]?.reasons?.join("; ") || "Highest verified weak-area and due-work priority.",
+    workloadAdjustment: "standard",
+    usedAi: false,
+  };
+  const settings = aylaMergeSettings(db.aylaSettings || {});
+  if (options.skipAi || settings.adaptive?.ai_tutor_enabled === false || !isAIConfigured() || !focusCandidates.length) return fallback;
+  const user = aylaGetItem(db, "aylaUsers", student.ayla_user_id || student.user_id);
+  if (!user) return fallback;
+  const usageStatus = aylaUsageStatus(db, user.id);
+  const emergency = aylaEmergencyProtectionStatus(db, user.id);
+  if (usageStatus.blocked || emergency.blocked) return { ...fallback, mode: "deterministic_limit_fallback", rationale: usageStatus.reason || emergency.reason || fallback.rationale };
+
+  const maxCandidates = Math.max(4, Math.min(20, aylaNumber(settings.adaptive?.ai_tutor_max_candidates, 12)));
+  const allowedResources = candidateResources.slice(0, maxCandidates * 5).map((row) => ({
+    id: String(row.id), type: aylaV189ResourceType(row.type), system: row.system || "General", topic: row.topic || "", title: row.title || row.bookTitle || row.questionNumber || "Resource", minutes: aylaNumber(row.estimatedMinutes, 15), verificationStatus: row.verificationStatus || "verified",
+  }));
+  const resourceIds = new Set(allowedResources.map((row) => row.id));
+  const focusIds = new Set(focusCandidates.slice(0, maxCandidates).map((row) => row.id));
+  const model = String(settings.adaptive?.ai_tutor_model || process.env.AYLA_AI_MODEL || process.env.AI_MODEL || "gpt-4o-mini");
+  const started = Date.now();
+  try {
+    const ai = await callOpenAIResponsesAPI({
+      model,
+      jsonMode: true,
+      maxOutputTokens: 700,
+      systemPrompt: "You are the AylaMed planning brain. Select only from the supplied verified focus IDs and resource IDs. Never invent pages, videos, question IDs, resources, diagnoses, or medical facts. Return JSON with focusCandidateId, preferredResourceIds, rationale, and workloadAdjustment (reduce|standard|intensive).",
+      userPrompt: JSON.stringify({
+        date,
+        student: {
+          exam: student.exam || student.examTrack || "",
+          targetDate: aylaV189TargetDate(student),
+          dailyHours: aylaNumber(student.dailyHours, 3),
+          weakAreas: aylaCleanArray(student.weakAreas),
+          questionSourcePreference: student.questionSourcePreference || "hybrid",
+        },
+        focusCandidates: focusCandidates.slice(0, maxCandidates),
+        verifiedResources: allowedResources,
+        instruction: "Choose one focus candidate and optionally order up to 12 resource IDs that best support that exact system/topic. The backend will enforce capacity, rest days, due revision, and verified-resource guards.",
+      }),
+    });
+    const parsed = safeJsonParseFromAI(ai.text);
+    const chosenFocusId = focusIds.has(String(parsed.focusCandidateId || "")) ? String(parsed.focusCandidateId) : fallback.focusCandidateId;
+    const preferredResourceIds = aylaCleanArray(parsed.preferredResourceIds).map(String).filter((id) => resourceIds.has(id)).slice(0, 12);
+    await aylaRecordAiUsage(db, { user, studentId: student.id, feature: "daily_plan_tutor_brain", model, usage: ai.usage, durationMs: Date.now() - started });
+    return {
+      mode: "ai_proposed_backend_validated",
+      focusCandidateId: chosenFocusId,
+      preferredResourceIds,
+      rationale: aylaV189CleanText(parsed.rationale || fallback.rationale).slice(0, 700),
+      workloadAdjustment: ["reduce", "standard", "intensive"].includes(String(parsed.workloadAdjustment)) ? String(parsed.workloadAdjustment) : "standard",
+      usedAi: true,
+      model,
+    };
+  } catch (error) {
+    return { ...fallback, mode: "deterministic_ai_error_fallback", rationale: `${fallback.rationale} AI proposal was unavailable, so verified deterministic planning was used.` };
+  }
+}
+
+function aylaV189CategoryForResource(resource = {}, revision = {}) {
+  const type = aylaV189ResourceType(resource.type);
+  if (["vimeo_video", "video_transcript"].includes(type)) return "video";
+  if (["external_question", "external_qid_mapping"].includes(type)) return "external_questions";
+  if (type === "internal_mcq") return "internal_mcqs";
+  if (type === "flashcard") return "flashcards";
+  if (["assessment", "assessment_blueprint"].includes(type) || revision.sourceType === "assessment") return "assessment";
+  return "reading";
+}
+
+function aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, capacityMinutes, category, resources, title, options = {}) {
+  const rows = (Array.isArray(resources) ? resources : [resources]).filter(Boolean);
+  if (!rows.length) return null;
+  const assignment = aylaV189MakeAssignment(db, student, plan, plan.date, category, rows, title, options);
+  const allowance = options.allowOverCapacity ? capacityMinutes * 1.35 : capacityMinutes * 1.08;
+  if (assignments.length && plan.plannedMinutes + assignment.estimatedMinutes > allowance) return null;
+  assignments.push(assignment);
+  plan.plannedMinutes += assignment.estimatedMinutes;
+  return assignment;
+}
+
+async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), options = {}) {
+  const existing = aylaValues(db, "aylaDailyPlans").find((plan) => String(plan.studentId) === String(student.id) && String(plan.date) === String(date) && !["cancelled", "superseded"].includes(String(plan.status || "").toLowerCase()));
+  if (existing && !options.force) {
+    const assignments = aylaValues(db, "aylaResourceAssignments").filter((row) => String(row.dailyPlanId) === String(existing.id));
+    return { plan: existing, assignments, reused: true };
+  }
+
+  if (existing && options.force && String(date) >= aylaDateOnly()) {
+    existing.status = "superseded";
+    existing.supersededAt = aylaNow();
+    existing.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaDailyPlans", existing);
+    aylaValues(db, "aylaResourceAssignments")
+      .filter((row) => String(row.dailyPlanId) === String(existing.id) && String(row.status || "pending").toLowerCase() !== "completed")
+      .forEach((row) => {
+        row.status = "superseded";
+        row.updatedAt = aylaNow();
+        aylaSetItem(db, "aylaResourceAssignments", row);
+      });
+  }
+
+  const settings = aylaMergeSettings(db.aylaSettings || {});
+  const questionMode = ["external", "internal", "hybrid"].includes(String(student.questionSourcePreference || student.question_source_preference || settings.resources.question_source_mode))
+    ? String(student.questionSourcePreference || student.question_source_preference || settings.resources.question_source_mode)
+    : "hybrid";
+  let capacityMinutes = Math.max(60, Math.min(960, aylaNumber(student.dailyHours || student.daily_hours, 3) * 60));
+  const studyDay = aylaV189StudyDayStatus(student, date);
+  const restRevisionLimit = Math.max(15, Math.min(120, aylaNumber(settings.adaptive?.rest_day_revision_minutes, 35)));
+  if (!studyDay.isStudyDay) capacityMinutes = Math.min(capacityMinutes, restRevisionLimit);
+
+  const completedIds = aylaV189CompletedResourceIds(db, student.id);
+  const overdue = aylaV189OverdueAssignments(db, student.id, date)
+    .filter((row) => String(row.category || "") !== "overdue_review")
+    .filter((row) => !aylaValues(db, "aylaResourceAssignments").some((candidate) => String(candidate.scheduledDate) === String(date) && !["completed", "cancelled", "superseded"].includes(String(candidate.status || "").toLowerCase()) && aylaCleanArray(candidate.linkedAssignmentIds).map(String).includes(String(row.id))))
+    .slice(0, 12);
+  const dueRevisions = aylaV189DueRevisionQueue(db, student.id, date).slice(0, 20);
+  const allRelevant = aylaV189RelevantResources(db, student, ["book", "reading", "revision_sheet", "vimeo_video", "video_transcript", "external_question", "external_qid_mapping", "internal_mcq", "flashcard", "assessment", "assessment_blueprint"]);
+  const focusCandidates = aylaV189FocusCandidates(db, student, allRelevant, dueRevisions, overdue);
+  const tutorProposal = await aylaV189TutorProposal(db, student, date, focusCandidates, allRelevant, options);
+  const selectedFocus = focusCandidates.find((row) => String(row.id) === String(tutorProposal.focusCandidateId)) || focusCandidates[0] || { system: aylaCleanArray(student.weakAreas)[0] || "General", topic: "Core review", id: null, reasons: [] };
+  const focusSystem = selectedFocus.system || "General";
+  const focusTopic = selectedFocus.topic || "";
+  const preferenceRank = new Map(aylaCleanArray(tutorProposal.preferredResourceIds).map((id, index) => [String(id), index]));
+  const prioritize = (rows) => rows.slice().sort((a, b) => (preferenceRank.get(String(a.id)) ?? 9999) - (preferenceRank.get(String(b.id)) ?? 9999) || b.relevance - a.relevance);
+  const focused = (rows) => {
+    const exact = rows.filter((row) => aylaV189ResourceFocusMatch(row, focusSystem, focusTopic));
+    const systemWide = rows.filter((row) => aylaV189ResourceFocusMatch(row, focusSystem, ""));
+    return prioritize((exact.length ? exact : systemWide).filter((row, index, all) => all.findIndex((candidate) => String(candidate.id) === String(row.id)) === index));
+  };
+
+  const plan = {
+    id: aylaId("AYLA-DAY"),
+    studentId: student.id,
+    userId: student.ayla_user_id || student.user_id || null,
+    date,
+    version: existing ? aylaNumber(existing.version, 1) + 1 : 1,
+    status: "active",
+    questionSourceMode: questionMode,
+    capacityMinutes,
+    plannedMinutes: 0,
+    completionPercent: 0,
+    assignmentIds: [],
+    missingResourceTypes: [],
+    focusSystem,
+    focusTopic,
+    studyDay,
+    tutorBrain: {
+      ...tutorProposal,
+      selectedFocus: { id: selectedFocus.id, system: focusSystem, topic: focusTopic, reasons: selectedFocus.reasons || [] },
+      verifiedResourceGuard: true,
+      noInventedReferences: true,
+    },
+    createdAt: aylaNow(),
+    updatedAt: aylaNow(),
+  };
+  const assignments = [];
+  const reservedIds = new Set([...completedIds]);
+  const mix = settings.resources.assignment_mix || {};
+
+  // 1) Due revision is always considered before new content. Each queue record is linked
+  // to the assignment so successful completion closes the exact revision record.
+  for (const revision of dueRevisions) {
+    if (plan.plannedMinutes >= capacityMinutes) break;
+    const resource = aylaV189ResolveRevisionResource(db, revision);
+    if (!resource) continue;
+    const category = aylaV189CategoryForResource(resource, revision);
+    const title = revision.sourceType === "flashcard"
+      ? `Due flashcard review: ${resource.title || revision.topic || "Recall card"}`
+      : revision.sourceType === "question"
+        ? `Incorrect/flagged question review: ${resource.provider || "Question"} ${resource.questionNumber || resource.resourceNumber || ""}`.trim()
+        : `Weak-area revision: ${revision.topic || resource.topic || resource.title}`;
+    const assignment = aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, capacityMinutes, category, [resource], title, {
+      priority: "Critical",
+      system: revision.system || resource.system,
+      topic: revision.topic || resource.topic,
+      rationale: `This item is due from permanent revision history (${revision.sourceType || "review"}).`,
+      estimatedMinutes: Math.max(5, Math.min(30, aylaNumber(resource.estimatedMinutes, 12))),
+      allowOverCapacity: true,
+    });
+    if (assignment) {
+      assignment.revisionQueueIds = [revision.id];
+      assignment.revisionSourceType = revision.sourceType || "";
+      revision.status = "assigned";
+      revision.assignedDate = date;
+      revision.assignedAssignmentId = assignment.id;
+      revision.updatedAt = aylaNow();
+      aylaSetItem(db, "aylaRevisionQueue", revision);
+      reservedIds.add(String(resource.id));
+    }
+  }
+
+  // 2) Carry overdue work as individual actionable assignments so completing it closes
+  // the exact original assignment instead of leaving a repeated combined backlog card.
+  for (const old of overdue) {
+    if (plan.plannedMinutes >= capacityMinutes * 1.1) break;
+    const items = Array.isArray(old.items) ? JSON.parse(JSON.stringify(old.items)) : [];
+    const carry = {
+      id: aylaId("AYLA-ASN"), studentId: student.id, userId: student.ayla_user_id || student.user_id || null,
+      dailyPlanId: plan.id, scheduledDate: date, category: old.category || "reading", type: old.type || old.category || "reading",
+      title: `Overdue: ${old.title || "Priority assignment"}`, system: old.system || focusSystem, topic: old.topic || focusTopic,
+      resourceIds: aylaCleanArray(old.resourceIds).map(String), items,
+      linkedAssignmentIds: [old.id], estimatedMinutes: Math.max(5, aylaNumber(old.estimatedMinutes, 15)), status: "pending", priority: "Critical",
+      rationale: `Carried from ${old.scheduledDate || "an earlier day"}. Completing this task closes the original overdue record.`,
+      createdAt: aylaNow(), updatedAt: aylaNow(),
+    };
+    assignments.push(carry);
+    plan.plannedMinutes += carry.estimatedMinutes;
+    carry.resourceIds.forEach((id) => reservedIds.add(String(id)));
+  }
+
+  const assessmentDecision = aylaV189AssessmentDecision(db, student, date, options);
+  plan.assessmentTutor = assessmentDecision;
+
+  // Protected rest days contain only due revision and critical backlog. No normal new content.
+  if (!studyDay.isStudyDay) {
+    plan.assignmentIds = assignments.map((row) => row.id);
+    plan.empty = assignments.length === 0;
+    plan.message = assignments.length
+      ? `${studyDay.dayName} is a protected rest day. Only due revision and critical overdue work were assigned.`
+      : `${studyDay.dayName} is your protected rest day. No new content is assigned.`;
+    plan.missingResourceTypes = [];
+    aylaSetItem(db, "aylaDailyPlans", plan);
+    assignments.forEach((row) => aylaSetItem(db, "aylaResourceAssignments", row));
+    return { plan, assignments, reused: false };
+  }
+
+  const reading = focused(allRelevant.filter((row) => ["book", "reading", "revision_sheet"].includes(aylaV189ResourceType(row.type))));
+  const videos = focused(allRelevant.filter((row) => ["vimeo_video", "video_transcript"].includes(aylaV189ResourceType(row.type))));
+  const external = focused(allRelevant.filter((row) => ["external_question", "external_qid_mapping"].includes(aylaV189ResourceType(row.type))));
+  const internal = focused(allRelevant.filter((row) => aylaV189ResourceType(row.type) === "internal_mcq"));
+  const cards = focused(allRelevant.filter((row) => aylaV189ResourceType(row.type) === "flashcard"));
+  const assessments = focused(allRelevant.filter((row) => ["assessment", "assessment_blueprint"].includes(aylaV189ResourceType(row.type))));
+  const unused = (rows) => rows.filter((row) => !reservedIds.has(String(row.id)));
+  const select = (rows, limit) => aylaV189SelectUnused(unused(rows), reservedIds, limit);
+
+  const workloadFactor = tutorProposal.workloadAdjustment === "reduce" ? 0.82 : tutorProposal.workloadAdjustment === "intensive" ? 1.08 : 1;
+  const effectiveCapacity = Math.max(60, Math.min(960, Math.round(capacityMinutes * workloadFactor)));
+
+  if (mix.reading !== false) {
+    const pick = select(reading, 1);
+    if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "reading", pick, `${pick[0].bookTitle || pick[0].title}: ${pick[0].pageRange ? `pages ${pick[0].pageRange}` : pick[0].topic}`, { system: focusSystem, topic: pick[0].topic || focusTopic, rationale: `Exact verified reading for today’s focus: ${focusSystem}${focusTopic ? ` — ${focusTopic}` : ""}.` });
+    else plan.missingResourceTypes.push("reading_for_focus");
+  }
+
+  if (mix.video !== false) {
+    const pick = select(videos, 1);
+    if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "video", pick, `Watch: ${pick[0].title}`, { system: focusSystem, topic: pick[0].topic || focusTopic, rationale: `Mapped Vimeo teaching for the same daily focus; watch position and completion are saved.` });
+    else plan.missingResourceTypes.push("video_for_focus");
+  }
+
+  let assessmentScheduled = false;
+  if (mix.assessments !== false && assessmentDecision.status === "due") {
+    const decision = { ...assessmentDecision, system: assessmentDecision.system && assessmentDecision.system !== "General" ? assessmentDecision.system : focusSystem, topic: assessmentDecision.topic || focusTopic };
+    const smartAssessment = aylaV189SmartAssessmentResource(db, student, decision, assessments, internal, date);
+    if (smartAssessment) {
+      assessmentScheduled = Boolean(aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "assessment", [smartAssessment], smartAssessment.title || decision.label, {
+        estimatedMinutes: smartAssessment.estimatedMinutes, system: smartAssessment.system || focusSystem, topic: smartAssessment.topic || focusTopic,
+        priority: ["final_readiness", "weak_area"].includes(decision.type) ? "Critical" : "High", assessmentType: decision.type,
+        tutorReason: decision.reason, scheduleTrigger: decision.trigger, rationale: decision.reason,
+      }));
+      plan.assessmentTutor = { ...decision, status: assessmentScheduled ? "scheduled_today" : "deferred_capacity", questionCount: Array.isArray(smartAssessment.questions) ? smartAssessment.questions.length : decision.questionCount };
+    } else {
+      plan.assessmentTutor = { ...decision, status: "waiting_for_verified_mcqs", reason: `${decision.reason} Verified internal MCQs are not yet sufficient; AylaMed will not invent questions.` };
+      plan.missingResourceTypes.push("assessment_questions_for_focus");
+    }
+  }
+
+  if (mix.external_questions !== false && (questionMode === "external" || questionMode === "hybrid")) {
+    const pick = select(external, Math.max(1, Math.min(assessmentScheduled ? 8 : 20, Math.round(effectiveCapacity / (assessmentScheduled ? 55 : 32)))));
+    if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "external_questions", pick, `${pick[0].provider || "External"} assigned IDs: ${pick.map((row) => row.questionNumber || row.resourceNumber).filter(Boolean).join(", ")}`, { estimatedMinutes: pick.length * 2, system: focusSystem, topic: focusTopic, rationale: `Verified external question numbers mapped to ${focusSystem}${focusTopic ? ` — ${focusTopic}` : ""}.` });
+    else plan.missingResourceTypes.push("external_questions_for_focus");
+  }
+
+  if (!assessmentScheduled && mix.internal_mcqs !== false && (questionMode === "internal" || questionMode === "hybrid")) {
+    const pick = select(internal, Math.max(1, Math.min(10, Math.round(effectiveCapacity / 45))));
+    if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "internal_mcqs", pick, `AylaMed MCQs: ${pick.map((row) => row.questionNumber || row.resourceNumber).filter(Boolean).join(", ")}`, { estimatedMinutes: pick.length * 2, system: focusSystem, topic: focusTopic, rationale: `Original verified MCQs for the same daily focus. Correctness is scored only on the server.` });
+    else plan.missingResourceTypes.push("internal_mcqs_for_focus");
+  }
+
+  if (mix.flashcards !== false) {
+    const pick = select(cards, Math.max(1, Math.min(15, Math.round(effectiveCapacity / 20))));
+    if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "flashcards", pick, `${pick.length} recall cards — ${focusSystem}`, { estimatedMinutes: Math.max(5, pick.length), system: focusSystem, topic: focusTopic, rationale: `Spaced recall for today’s exact focus; Again/Hard responses return through the revision queue.` });
+    else plan.missingResourceTypes.push("flashcards_for_focus");
+  }
+
+  plan.assignmentIds = assignments.map((row) => row.id);
+  plan.systemFocus = focusSystem;
+  plan.topicFocus = focusTopic;
+  plan.empty = assignments.length === 0;
+  plan.message = assignments.length
+    ? `Today’s verified plan is saved around one focus: ${focusSystem}${focusTopic ? ` — ${focusTopic}` : ""}. Due revision and overdue work were prioritized before new content.`
+    : "No verified resources match today’s focus. Upload/approve books, Vimeo mappings, question banks, flashcards or assessments; AylaMed will not invent references.";
+  plan.missingResourceTypes = [...new Set(plan.missingResourceTypes)];
+  aylaSetItem(db, "aylaDailyPlans", plan);
+  assignments.forEach((row) => aylaSetItem(db, "aylaResourceAssignments", row));
+  return { plan, assignments, reused: false };
+}
+
+function aylaV189UpdatePlanCompletion(db, planId) {
+  const plan = aylaGetItem(db, "aylaDailyPlans", planId);
+  if (!plan) return null;
+  const assignments = aylaValues(db, "aylaResourceAssignments").filter((row) => String(row.dailyPlanId) === String(planId) && String(row.status || "").toLowerCase() !== "superseded");
+  const completed = assignments.filter((row) => String(row.status || "").toLowerCase() === "completed").length;
+  plan.completionPercent = assignments.length ? Math.round((completed / assignments.length) * 100) : 0;
+  plan.completedAssignments = completed;
+  plan.totalAssignments = assignments.length;
+  if (assignments.length && completed === assignments.length) {
+    plan.status = "completed";
+    plan.completedAt = plan.completedAt || aylaNow();
+  }
+  plan.updatedAt = aylaNow();
+  aylaSetItem(db, "aylaDailyPlans", plan);
+  return plan;
+}
+
+function aylaV189MaybeCompleteAssignment(db, assignmentId, historyCollection) {
+  if (!assignmentId) return { assignment: null, plan: null, completed: false };
+  const assignment = aylaGetItem(db, "aylaResourceAssignments", assignmentId);
+  if (!assignment) return { assignment: null, plan: null, completed: false };
+  const resourceIds = aylaCleanArray(assignment.resourceIds).map(String);
+  if (!resourceIds.length) return { assignment, plan: aylaV189UpdatePlanCompletion(db, assignment.dailyPlanId), completed: false };
+  const eligible = aylaValues(db, historyCollection).filter((row) => String(row.studentId) === String(assignment.studentId) && String(row.assignmentId) === String(assignment.id));
+  const completedIds = new Set(eligible.filter((row) => historyCollection !== "aylaQuestionAttempts" || !["not_attempted"].includes(String(row.outcome || "").toLowerCase())).map((row) => String(row.resourceId)));
+  const completed = resourceIds.every((id) => completedIds.has(id));
+  if (completed) {
+    assignment.status = "completed";
+    assignment.progressPercent = 100;
+    assignment.completedAt = assignment.completedAt || aylaNow();
+    assignment.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaResourceAssignments", assignment);
+    aylaV189CloseLinkedAssignments(db, assignment);
+    aylaV189CompleteRevisionQueueForAssignment(db, assignment);
+  }
+  return { assignment, plan: aylaV189UpdatePlanCompletion(db, assignment.dailyPlanId), completed };
+}
+
+async function aylaV189TomorrowPreview(db, student, date) {
+  const tomorrow = aylaDateOnly(aylaAddDays(new Date(`${date}T12:00:00Z`), 1));
+  const existing = aylaValues(db, "aylaDailyPlans").find((plan) => String(plan.studentId) === String(student.id) && String(plan.date) === tomorrow && !["cancelled", "superseded"].includes(String(plan.status || "").toLowerCase()));
+  if (existing) {
+    const assignments = aylaValues(db, "aylaResourceAssignments").filter((row) => String(row.dailyPlanId) === String(existing.id));
+    return { date: tomorrow, ...aylaV189SanitizePlanBundle(db, existing, assignments) };
+  }
+  const previewDb = JSON.parse(JSON.stringify(db));
+  const previewStudent = aylaGetItem(previewDb, "aylaStudents", student.id) || JSON.parse(JSON.stringify(student));
+  const built = await aylaV189BuildDailyPlan(previewDb, previewStudent, tomorrow, { force: false, skipAi: true });
+  return { date: tomorrow, ...aylaV189SanitizePlanBundle(previewDb, built.plan, built.assignments) };
+}
+
+function aylaV189RecordActivity(db, studentId, type, payload = {}) {
+  const activity = {
+    id: aylaId("AYLA-ACT"),
+    studentId,
+    type,
+    payload,
+    createdAt: aylaNow(),
+  };
+  aylaSetItem(db, "aylaActivityHistory", activity);
+  return activity;
+}
+
+function aylaV189TargetDate(student = {}) {
+  return aylaTargetDateInfo(student).targetDate || "";
+}
+
+function aylaV189MatchScore(a = {}, b = {}) {
+  if (!a?.id || !b?.id || String(a.id) === String(b.id)) return { score: 0, reasons: [] };
+  let score = 0;
+  const reasons = [];
+  if (a.exam && b.exam && String(a.exam) === String(b.exam)) { score += 20; reasons.push(`Same ${a.exam} track`); }
+  const aDate = aylaV189TargetDate(a);
+  const bDate = aylaV189TargetDate(b);
+  if (aDate && bDate) {
+    const diff = Math.abs(new Date(`${aDate}T12:00:00Z`).getTime() - new Date(`${bDate}T12:00:00Z`).getTime()) / 86400000;
+    if (diff <= 14) { score += 25; reasons.push("Very near exam dates"); }
+    else if (diff <= 30) { score += 18; reasons.push("Near exam dates"); }
+    else if (aDate.slice(0, 7) === bDate.slice(0, 7)) { score += 12; reasons.push("Same target month"); }
+  }
+  const aAvail = aylaCleanArray(a.availability || a.preferredStudyTimes).map((x) => x.toLowerCase());
+  const bAvail = aylaCleanArray(b.availability || b.preferredStudyTimes).map((x) => x.toLowerCase());
+  if (aAvail.some((slot) => bAvail.includes(slot))) { score += 12; reasons.push(`Both available ${aAvail.find((slot) => bAvail.includes(slot))}`); }
+  else if (a.timezone && b.timezone && a.timezone === b.timezone) { score += 8; reasons.push("Same timezone"); }
+  const sharedWeak = aylaCleanArray(a.weakAreas).filter((area) => aylaCleanArray(b.weakAreas).map((x) => x.toLowerCase()).includes(String(area).toLowerCase()));
+  if (sharedWeak.length) { score += Math.min(20, sharedWeak.length * 7); reasons.push(`Shared weak areas: ${sharedWeak.slice(0, 3).join(" and ")}`); }
+  const qA = aylaNumber(a.qbankCompleted, 0);
+  const qB = aylaNumber(b.qbankCompleted, 0);
+  if (qA || qB) {
+    const diff = Math.abs(qA - qB);
+    if (diff <= 10) { score += 10; reasons.push("Similar QBank completion"); }
+    else if (diff <= 20) { score += 6; reasons.push("Comparable QBank progress"); }
+  }
+  if (Math.abs(aylaNumber(a.dailyHours, 0) - aylaNumber(b.dailyHours, 0)) <= 1) { score += 8; reasons.push("Similar daily study capacity"); }
+  if (a.language && b.language && String(a.language).toLowerCase() === String(b.language).toLowerCase()) { score += 5; reasons.push(`Same preferred language: ${a.language}`); }
+  return { score: Math.max(0, Math.min(100, score)), reasons };
+}
+
+function aylaV189PartnerPublic(db, student = {}, viewer = null) {
+  const profile = aylaValues(db, "aylaCommunityProfiles").find((row) => String(row.studentId) === String(student.id));
+  const match = viewer ? aylaV189MatchScore(viewer, student) : { score: 0, reasons: [] };
+  return {
+    studentId: student.id,
+    username: profile?.username || student.publicUsername || student.name || "Doctor",
+    displayName: profile?.displayName || student.name || "Doctor",
+    profileImageUrl: profile?.profileImageUrl || "",
+    exam: student.exam || student.examTrack || "",
+    targetDate: aylaV189TargetDate(student),
+    timezone: student.timezone || "",
+    availability: aylaCleanArray(student.availability || student.preferredStudyTimes),
+    weakAreas: aylaCleanArray(student.weakAreas),
+    qbankCompleted: aylaNumber(student.qbankCompleted, 0),
+    dailyHours: aylaNumber(student.dailyHours, 0),
+    compatibilityScore: match.score,
+    compatibilityReasons: match.reasons,
+  };
+}
+
+function aylaV189PartnerRequestView(db, request = {}, viewerStudent = {}) {
+  const viewerId = String(viewerStudent.id || "");
+  const counterpartId = String(request.fromStudentId) === viewerId ? request.toStudentId : request.fromStudentId;
+  const counterpart = aylaGetItem(db, "aylaStudents", counterpartId) || {};
+  return {
+    id: request.id,
+    status: request.status,
+    direction: String(request.fromStudentId) === viewerId ? "sent" : "incoming",
+    counterpart: aylaV189PartnerPublic(db, counterpart, viewerStudent),
+    createdAt: request.createdAt,
+    updatedAt: request.updatedAt,
+    acceptedAt: request.acceptedAt || null,
+    declinedAt: request.declinedAt || null,
+    cancelledAt: request.cancelledAt || null,
+    removedAt: request.removedAt || null,
+    blockedAt: request.blockedAt || null,
+    blockedByMe: String(request.blockedByStudentId || "") === viewerId,
+  };
+}
+
+function aylaV189CommunityProfile(db, user, student) {
+  let profile = aylaValues(db, "aylaCommunityProfiles").find((row) => String(row.userId) === String(user.id));
+  if (!profile) {
+    const fallback = `doctor_${String(user.id || "user").replace(/[^a-z0-9]/gi, "").slice(-8).toLowerCase()}`;
+    profile = {
+      id: aylaId("AYLA-CP"),
+      userId: user.id,
+      studentId: student?.id || user.studentId || null,
+      username: user.publicUsername || fallback,
+      displayName: user.name || "Doctor",
+      bio: user.bio || "",
+      profileImageUrl: user.profileImageUrl || "",
+      studyPartnerOptIn: Boolean(student?.studyPartnerOptIn || student?.study_partner_opt_in),
+      mutedUntil: null,
+      banned: false,
+      strikes: 0,
+      createdAt: aylaNow(),
+      updatedAt: aylaNow(),
+    };
+    aylaSetItem(db, "aylaCommunityProfiles", profile);
+  }
+  return profile;
+}
+
+function aylaV189Leaderboard(db, period = "weekly") {
+  const now = new Date();
+  const start = aylaPeriodStart(period === "monthly" ? "monthly" : "weekly", now).getTime();
+  const students = aylaValues(db, "aylaStudents");
+  const profiles = aylaValues(db, "aylaCommunityProfiles");
+  return students.map((student) => {
+    const userId = student.ayla_user_id || student.user_id;
+    const profile = profiles.find((row) => String(row.studentId) === String(student.id) || String(row.userId) === String(userId));
+    const assignments = aylaValues(db, "aylaResourceAssignments").filter((row) => String(row.studentId) === String(student.id) && new Date(row.updatedAt || row.createdAt || 0).getTime() >= start);
+    const attempts = aylaValues(db, "aylaAssessmentAttempts").filter((row) => String(row.studentId) === String(student.id) && new Date(row.createdAt || 0).getTime() >= start);
+    const cards = aylaValues(db, "aylaFlashcardReviews").filter((row) => String(row.studentId) === String(student.id) && new Date(row.createdAt || 0).getTime() >= start);
+    const completed = assignments.filter((row) => String(row.status).toLowerCase() === "completed").length;
+    const completion = assignments.length ? Math.round((completed / assignments.length) * 100) : 0;
+    const assessmentAccuracy = attempts.length ? Math.round(attempts.reduce((sum, row) => sum + aylaNumber(row.scorePercent ?? row.score, 0), 0) / attempts.length) : 0;
+    const systems = aylaV189SystemProgress(db, student);
+    const verifiedImprovements = systems.map((row) => row.improvementPercent).filter((value) => Number.isFinite(Number(value)));
+    const improvement = verifiedImprovements.length
+      ? Math.round(verifiedImprovements.reduce((sum, value) => sum + Number(value), 0) / verifiedImprovements.length)
+      : null;
+    const activeDates = new Set(assignments.filter((row) => String(row.status).toLowerCase() === "completed").map((row) => String(row.updatedAt || "").slice(0, 10)));
+    const streak = activeDates.size;
+    const points = completed * 5 + Math.round(assessmentAccuracy * 0.2) + cards.length + Math.round(Math.max(0, Number(improvement || 0)) * 0.5) + streak * 2;
+    return {
+      studentId: student.id,
+      username: profile?.username || student.publicUsername || student.name || "Doctor",
+      profileImageUrl: profile?.profileImageUrl || "",
+      exam: student.exam || "",
+      points,
+      completionPercent: completion,
+      assessmentAccuracy,
+      improvementScore: improvement,
+      flashcardReviews: cards.length,
+      studyStreak: streak,
+    };
+  }).filter((row) => row.points > 0).sort((a, b) => b.points - a.points || Number(b.improvementScore || 0) - Number(a.improvementScore || 0)).map((row, index) => ({ ...row, rank: index + 1 }));
+}
+
+// -----------------------------------------------------------------------------
+// Password recovery — AylaMed-only users/tokens, shared email transport only.
+// -----------------------------------------------------------------------------
+app.post("/api/ayla/auth/forgot-password", async (req, res) => {
+  const generic = "If an AylaMed account exists for that email, a secure reset link has been sent.";
+  try {
+    const email = aylaNormalizeEmail(req.body.email);
+    const db = await readAylaDb();
+    aylaEnsureSeedData(db);
+    const user = aylaFindUserByEmail(db, email);
+    if (!user || ["disabled", "deleted"].includes(String(user.status || "").toLowerCase())) return aylaSendOk(res, { message: generic });
+    const rawToken = crypto.randomBytes(32).toString("hex");
+    const token = {
+      id: aylaId("AYLA-RESET"),
+      userId: user.id,
+      email: user.email,
+      tokenHash: aylaV189HashToken(rawToken),
+      expiresAt: new Date(Date.now() + 45 * 60 * 1000).toISOString(),
+      usedAt: null,
+      createdAt: aylaNow(),
+    };
+    aylaSetItem(db, "aylaPasswordResetTokens", token);
+    await writeAylaDb(db);
+    const base = String(process.env.AYLA_PUBLIC_URL || "https://aylamed.nextgenusmlelms.com").replace(/\/$/, "");
+    const resetUrl = `${base}/?reset_token=${encodeURIComponent(rawToken)}`;
+    try {
+      await sendEmailMessage({
+        to: user.email,
+        subject: "Reset your AylaMed password",
+        text: `A password reset was requested for your AylaMed account.\n\nOpen this secure link within 45 minutes:\n${resetUrl}\n\nIf you did not request this, ignore this email.`,
+      });
+      token.emailSentAt = aylaNow();
+      aylaSetItem(db, "aylaPasswordResetTokens", token);
+      await writeAylaDb(db);
+    } catch (emailError) {
+      console.error("AylaMed password reset email failed:", emailError.message);
+    }
+    return aylaSendOk(res, { message: generic });
+  } catch (error) {
+    console.error("AylaMed forgot password error:", error.message);
+    return aylaSendOk(res, { message: generic });
+  }
+});
+
+app.post("/api/ayla/auth/reset-password", async (req, res) => {
+  try {
+    const rawToken = String(req.body.token || "").trim();
+    const newPassword = String(req.body.newPassword || req.body.password || "");
+    if (!rawToken || newPassword.length < 8) return aylaSendError(res, 400, "A valid reset token and a password of at least 8 characters are required");
+    const db = await readAylaDb();
+    aylaEnsureSeedData(db);
+    const tokenHash = aylaV189HashToken(rawToken);
+    const reset = aylaValues(db, "aylaPasswordResetTokens").find((row) => row.tokenHash === tokenHash && !row.usedAt);
+    if (!reset || new Date(reset.expiresAt).getTime() < Date.now()) return aylaSendError(res, 400, "This password reset link is invalid or expired");
+    const user = aylaGetItem(db, "aylaUsers", reset.userId);
+    if (!user) return aylaSendError(res, 400, "This password reset link is invalid or expired");
+    const hashed = hashPassword(newPassword);
+    user.salt = hashed.salt;
+    user.password_hash = hashed.password_hash;
+    user.authVersion = Number(user.authVersion || 1) + 1;
+    user.updatedAt = aylaNow();
+    reset.usedAt = aylaNow();
+    reset.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaUsers", user);
+    aylaSetItem(db, "aylaPasswordResetTokens", reset);
+    await aylaLog(db, "auth", "AylaMed password reset completed and prior sessions revoked", { userId: user.id });
+    await writeAylaDb(db);
+    return aylaSendOk(res, { message: "Password reset complete. Sign in with your new password." });
+  } catch (error) {
+    return aylaSendError(res, 500, error.message || "Failed to reset AylaMed password");
+  }
+});
+
+// -----------------------------------------------------------------------------
+// Profile, exam-date/hours adaptation, and question-source preferences.
+// -----------------------------------------------------------------------------
+
+app.post("/api/ayla/profile/preview", async (req, res) => {
+  try {
+    const { student, db } = await aylaV189RequireStudent(req, req.body.studentId);
+    const proposed = { ...student };
+    const allowed = ["exam", "goalType", "examDate", "matchDate", "dailyHours", "weeklyStudyDays", "restDay", "timezone", "country", "language", "qbankCompleted", "qbankAverage", "studyPartnerOptIn"];
+    for (const key of allowed) if (req.body[key] !== undefined) proposed[key] = req.body[key];
+    if (req.body.availability !== undefined) proposed.availability = aylaCleanArray(req.body.availability);
+    if (req.body.preferredStudyDays !== undefined || req.body.preferred_study_days !== undefined) proposed.preferredStudyDays = aylaCleanArray(req.body.preferredStudyDays ?? req.body.preferred_study_days);
+    if (req.body.weakAreas !== undefined) proposed.weakAreas = aylaCleanArray(req.body.weakAreas);
+    if (req.body.selectedResources !== undefined) proposed.selectedResources = aylaCleanArray(req.body.selectedResources);
+    if (["external", "internal", "hybrid"].includes(String(req.body.questionSourcePreference))) proposed.questionSourcePreference = String(req.body.questionSourcePreference);
+    proposed.dailyHours = Math.max(1, Math.min(16, aylaNumber(proposed.dailyHours, 3)));
+    proposed.weeklyStudyDays = Math.max(1, Math.min(7, aylaNumber(proposed.weeklyStudyDays, 6)));
+    proposed.targetDate = aylaV189TargetDate(proposed);
+    const currentTarget = aylaTargetDateInfo(student);
+    const proposedTarget = aylaTargetDateInfo(proposed);
+    const currentWarning = aylaV189BacklogWarning(db, student, aylaDateOnly());
+    const proposedWarning = aylaV189BacklogWarning(db, proposed, aylaDateOnly());
+    return aylaSendOk(res, {
+      readOnly: true,
+      completed_history_preserved: true,
+      current: {
+        targetDate: currentTarget.targetDate,
+        daysToTarget: currentTarget.daysToTarget,
+        dailyHours: aylaNumber(student.dailyHours, 3),
+        weeklyStudyDays: aylaNumber(student.weeklyStudyDays, 6),
+        preferredStudyDays: aylaCleanArray(student.preferredStudyDays || student.preferred_study_days),
+        restDay: student.restDay || "Sunday",
+        questionSourcePreference: student.questionSourcePreference || "hybrid",
+        risk: currentWarning,
+      },
+      proposed: {
+        targetDate: proposedTarget.targetDate,
+        daysToTarget: proposedTarget.daysToTarget,
+        dailyHours: proposed.dailyHours,
+        weeklyStudyDays: proposed.weeklyStudyDays,
+        preferredStudyDays: aylaCleanArray(proposed.preferredStudyDays || proposed.preferred_study_days),
+        restDay: proposed.restDay || "Sunday",
+        questionSourcePreference: proposed.questionSourcePreference || "hybrid",
+        risk: proposedWarning,
+      },
+      message: "Preview only. No user, roadmap, history, LMS, CRM or leaderboard record was changed.",
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to preview profile changes");
+  }
+});
+
+app.get("/api/ayla/profile", async (req, res) => {
+  try {
+    const { user, rawUser, student, db } = await aylaV189RequireStudent(req);
+    const communityProfile = aylaV189CommunityProfile(db, user, student);
+    await writeAylaDb(db);
+    return aylaSendOk(res, { user: aylaSanitizeUser(rawUser), student, communityProfile, systemProgress: aylaV189SystemProgress(db, student), warning: aylaV189BacklogWarning(db, student, aylaDateOnly()) });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.put("/api/ayla/profile", async (req, res) => {
+  try {
+    const { user, rawUser, student, db } = await aylaV189RequireStudent(req, req.body.studentId);
+    const username = aylaV189CleanText(req.body.publicUsername ?? req.body.username ?? rawUser.publicUsername ?? "").replace(/\s+/g, "_").slice(0, 30);
+    if (username) {
+      if (!/^[a-zA-Z0-9_.-]{3,30}$/.test(username)) return aylaSendError(res, 400, "Community username must be 3–30 characters using letters, numbers, dot, dash or underscore");
+      if (aylaV189IsReservedUsername(username)) return aylaSendError(res, 400, "This username is reserved for AylaMed administration or official support");
+      const moderation = aylaV189ModerationCheck(username, db.aylaSettings?.community?.banned_words);
+      if (!moderation.ok) return aylaSendError(res, 400, "This community username contains prohibited language");
+      const duplicate = aylaValues(db, "aylaCommunityProfiles").find((row) => String(row.userId) !== String(user.id) && String(row.username || "").toLowerCase() === username.toLowerCase());
+      if (duplicate) return aylaSendError(res, 409, "This community username is already taken");
+    }
+    const allowedUser = ["name", "phone", "profileImageUrl", "timezone", "country", "bio"];
+    for (const key of allowedUser) if (req.body[key] !== undefined) rawUser[key] = aylaV189CleanText(req.body[key]).slice(0, key === "bio" ? 500 : 220);
+    if (username) rawUser.publicUsername = username;
+    rawUser.updatedAt = aylaNow();
+    const oldTarget = aylaV189TargetDate(student);
+    const allowedStudent = ["exam", "goalType", "examDate", "matchDate", "dailyHours", "weeklyStudyDays", "restDay", "timezone", "country", "language", "qbankCompleted", "qbankAverage", "studyPartnerOptIn"];
+    for (const key of allowedStudent) if (req.body[key] !== undefined) student[key] = req.body[key];
+    if (req.body.availability !== undefined) student.availability = aylaCleanArray(req.body.availability);
+    if (req.body.preferredStudyDays !== undefined || req.body.preferred_study_days !== undefined) student.preferredStudyDays = aylaCleanArray(req.body.preferredStudyDays ?? req.body.preferred_study_days);
+    if (req.body.weakAreas !== undefined) student.weakAreas = aylaCleanArray(req.body.weakAreas);
+    if (req.body.selectedResources !== undefined) student.selectedResources = aylaCleanArray(req.body.selectedResources);
+    if (["external", "internal", "hybrid"].includes(String(req.body.questionSourcePreference))) student.questionSourcePreference = String(req.body.questionSourcePreference);
+    student.dailyHours = Math.max(1, Math.min(16, aylaNumber(student.dailyHours, 3)));
+    student.weeklyStudyDays = Math.max(1, Math.min(7, aylaNumber(student.weeklyStudyDays, 6)));
+    student.targetDate = aylaV189TargetDate(student);
+    student.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaUsers", rawUser);
+    aylaSetItem(db, "aylaStudents", student);
+    const communityProfile = aylaV189CommunityProfile(db, user, student);
+    communityProfile.username = username || communityProfile.username;
+    communityProfile.displayName = rawUser.name || communityProfile.displayName;
+    communityProfile.bio = rawUser.bio || "";
+    communityProfile.profileImageUrl = rawUser.profileImageUrl || "";
+    communityProfile.studyPartnerOptIn = Boolean(student.studyPartnerOptIn);
+    communityProfile.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaCommunityProfiles", communityProfile);
+    const newTarget = aylaV189TargetDate(student);
+    const planningChanged = oldTarget !== newTarget || req.body.dailyHours !== undefined || req.body.weeklyStudyDays !== undefined || req.body.restDay !== undefined || req.body.preferredStudyDays !== undefined || req.body.preferred_study_days !== undefined || req.body.questionSourcePreference !== undefined || req.body.weakAreas !== undefined;
+    if (planningChanged) {
+      const today = aylaDateOnly();
+      aylaValues(db, "aylaDailyPlans").filter((row) => String(row.studentId) === String(student.id) && String(row.date || "") >= today && String(row.status || "").toLowerCase() !== "completed").forEach((row) => {
+        row.status = "superseded";
+        row.supersededReason = "Profile, target date or study capacity changed";
+        row.updatedAt = aylaNow();
+        aylaSetItem(db, "aylaDailyPlans", row);
+      });
+      aylaValues(db, "aylaResourceAssignments").filter((row) => String(row.studentId) === String(student.id) && String(row.scheduledDate || "") >= today && !["completed", "skipped"].includes(String(row.status || "").toLowerCase())).forEach((row) => {
+        row.status = "superseded";
+        row.updatedAt = aylaNow();
+        aylaSetItem(db, "aylaResourceAssignments", row);
+      });
+      await aylaV189BuildDailyPlan(db, student, today, { force: true });
+    }
+    aylaV189RecordActivity(db, student.id, "profile_updated", { planningChanged, oldTarget, newTarget, dailyHours: student.dailyHours });
+    await writeAylaDb(db);
+    return aylaSendOk(res, { user: aylaSanitizeUser(rawUser), student, communityProfile, planningChanged, warning: aylaV189BacklogWarning(db, student, aylaDateOnly()), systemProgress: aylaV189SystemProgress(db, student) });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update AylaMed profile");
+  }
+});
+
+// -----------------------------------------------------------------------------
+// Resource sync/registration. All synced copies are stored in AylaMed DB only.
+// -----------------------------------------------------------------------------
+app.post("/api/ayla/admin/resources/sync-training-center", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const crmDb = await readAylaCrmSnapshot();
+    const db = await readAylaDb();
+    aylaEnsureSeedData(db);
+    const documents = new Map(ensureCrmArray(crmDb, "ai_training_documents").map((doc) => [String(doc.id), doc]));
+    const eligibleItems = ensureCrmArray(crmDb, "ai_training_items").filter((item) => {
+      const doc = documents.get(String(item.document_id || "")) || {};
+      const approved = [item.approval_status, item.medical_review_status, item.status].some((status) => String(status || "").toLowerCase() === "approved") || item.active === true || item.is_active === true;
+      const source = `${item.source || ""} ${doc.source || ""} ${doc.pipeline || ""}`.toLowerCase();
+      return approved && (source.includes("aylamed_resource") || req.body.include_general_education === true);
+    });
+    let created = 0;
+    let updated = 0;
+    const typeCounts = {};
+    for (const item of eligibleItems) {
+      const document = documents.get(String(item.document_id || "")) || {};
+      for (const candidate of aylaV189TrainingRecords(item, document)) {
+        const existing = aylaValues(db, "aylaResources").find((row) => String(row.sourceTrainingItemId || "") === String(item.id) && String(row.resourceNumber || row.questionNumber || row.id) === String(candidate.resourceNumber || candidate.questionNumber || ""));
+        const resource = aylaV189NormalizeResource(candidate, existing || {});
+        aylaSetItem(db, "aylaResources", resource);
+        if (existing) updated += 1; else created += 1;
+        typeCounts[resource.type] = (typeCounts[resource.type] || 0) + 1;
+      }
+    }
+    await aylaLog(db, "resource-sync", "Approved AI Training Center resources synced into AylaMed", { created, updated, typeCounts, crm_source_unchanged: true });
+    await writeAylaDb(db);
+    return aylaSendOk(res, { created, updated, total: created + updated, typeCounts, crm_source_unchanged: true, lms_unchanged: true });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to sync AylaMed resources");
+  }
+});
+
+app.post("/api/ayla/admin/resources/register-vimeo", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
+    aylaEnsureSeedData(db);
+    if (!req.body.vimeoId && !req.body.vimeoUrl && !req.body.vimeo_url) return aylaSendError(res, 400, "Vimeo ID or Vimeo URL is required");
+    const resource = aylaV189NormalizeResource({ ...req.body, type: "vimeo_video", provider: "Vimeo", approved: req.body.approved !== false, verificationStatus: "admin_registered" });
+    aylaSetItem(db, "aylaResources", resource);
+    await aylaLog(db, "resource", "Vimeo resource registered", { resourceId: resource.id, vimeoId: resource.vimeoId });
+    await writeAylaDb(db);
+    return aylaSendOk(res, { resource }, 201);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to register Vimeo resource");
+  }
+});
+
+app.post("/api/ayla/admin/resources/bulk-import", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const rows = Array.isArray(req.body.resources) ? req.body.resources : Array.isArray(req.body.items) ? req.body.items : [];
+    if (!rows.length) return aylaSendError(res, 400, "resources array is required");
+    const db = await readAylaDb();
+    aylaEnsureSeedData(db);
+    const resources = rows.slice(0, 5000).map((row) => aylaV189NormalizeResource(row));
+    resources.forEach((row) => aylaSetItem(db, "aylaResources", row));
+    await writeAylaDb(db);
+    return aylaSendOk(res, { count: resources.length, resources }, 201);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to bulk-import AylaMed resources");
+  }
+});
+
+app.get("/api/ayla/admin/resources/coverage", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
+    const resources = aylaValues(db, "aylaResources");
+    const byType = {};
+    const bySystem = {};
+    resources.forEach((row) => {
+      byType[aylaV189ResourceType(row.type)] = (byType[aylaV189ResourceType(row.type)] || 0) + 1;
+      bySystem[row.system || "General"] = (bySystem[row.system || "General"] || 0) + 1;
+    });
+    const unverified = resources.filter((row) => row.approved === false || !String(row.verificationStatus || "").toLowerCase().includes("verified") && !String(row.verificationStatus || "").toLowerCase().includes("approved"));
+    const questionResources = resources.filter((row) => ["external_question", "internal_mcq"].includes(aylaV189ResourceType(row.type)));
+    const enrichedQuestions = questionResources.map((row) => aylaV189EnrichResourceMappings(db, row));
+    const mappedQuestions = enrichedQuestions.filter((row) => Boolean(row.mappedBookPages || row.mappedBookResourceId || row.mappedVideoResourceId || row.mappedVimeoId || row.mappedVimeoUrl));
+    return aylaSendOk(res, { total: resources.length, byType, bySystem, unverified: unverified.length, questionMappings: { total: questionResources.length, mapped: mappedQuestions.length, unmapped: Math.max(0, questionResources.length - mappedQuestions.length) }, missingTypes: ["reading", "vimeo_video", "external_question", "internal_mcq", "flashcard", "assessment"].filter((type) => !byType[type] && !(type === "reading" && byType.book)) });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+// -----------------------------------------------------------------------------
+// Daily workspace and permanent learning history.
+// -----------------------------------------------------------------------------
+app.get("/api/ayla/students/:studentId/daily-workspace", async (req, res) => {
+  try {
+    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId);
+    aylaEnsureSeedData(db);
+    const date = String(req.query.date || aylaDateOnly()).slice(0, 10);
+    const built = await aylaV189BuildDailyPlan(db, student, date, { force: false });
+    const systemProgress = aylaV189SystemProgress(db, student);
+    const warning = aylaV189BacklogWarning(db, student, date, systemProgress);
+    const history = aylaValues(db, "aylaActivityHistory").filter((row) => String(row.studentId) === String(student.id)).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 100);
+    const recentReadingProgress = aylaValues(db, "aylaReadingProgress").filter((row) => String(row.studentId) === String(student.id)).sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt))).slice(0, 100);
+    const recentVideoProgress = aylaValues(db, "aylaVideoProgress").filter((row) => String(row.studentId) === String(student.id)).sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt))).slice(0, 100);
+    const recentQuestionAttempts = aylaValues(db, "aylaQuestionAttempts").filter((row) => String(row.studentId) === String(student.id)).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 100);
+    const recentFlashcardReviews = aylaValues(db, "aylaFlashcardReviews").filter((row) => String(row.studentId) === String(student.id)).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 100);
+    const recentAssessments = aylaValues(db, "aylaAssessmentAttempts").filter((row) => String(row.studentId) === String(student.id)).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 50);
+    const recentPlans = aylaValues(db, "aylaDailyPlans").filter((row) => String(row.studentId) === String(student.id) && String(row.status || "").toLowerCase() !== "superseded").sort((a, b) => String(b.date).localeCompare(String(a.date))).slice(0, 14);
+    const historyCounts = {
+      readingProgress: aylaValues(db, "aylaReadingProgress").filter((row) => String(row.studentId) === String(student.id)).length,
+      videoProgress: aylaValues(db, "aylaVideoProgress").filter((row) => String(row.studentId) === String(student.id)).length,
+      questionAttempts: aylaValues(db, "aylaQuestionAttempts").filter((row) => String(row.studentId) === String(student.id)).length,
+      flashcardReviews: aylaValues(db, "aylaFlashcardReviews").filter((row) => String(row.studentId) === String(student.id)).length,
+      assessmentAttempts: aylaValues(db, "aylaAssessmentAttempts").filter((row) => String(row.studentId) === String(student.id)).length,
+      dailyPlans: aylaValues(db, "aylaDailyPlans").filter((row) => String(row.studentId) === String(student.id) && String(row.status || "").toLowerCase() !== "superseded").length,
+      activityEvents: aylaValues(db, "aylaActivityHistory").filter((row) => String(row.studentId) === String(student.id)).length,
+    };
+    const tomorrowPreview = await aylaV189TomorrowPreview(db, student, date);
+    await writeAylaDb(db);
+    const safeBundle = aylaV189SanitizePlanBundle(db, built.plan, built.assignments);
+    return aylaSendOk(res, { student, date, plan: safeBundle.plan, assignments: safeBundle.assignments, stablePlanReused: built.reused, tomorrowPreview, warning, systemProgress, history, historyCounts, recentReadingProgress, recentVideoProgress, recentQuestionAttempts, recentFlashcardReviews, recentAssessments, recentPlans, resourceCounts: Object.values(db.aylaResources || {}).reduce((acc, row) => { const type = aylaV189ResourceType(row.type); acc[type] = (acc[type] || 0) + 1; return acc; }, {}) });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load AylaMed daily workspace");
+  }
+});
+
+app.post("/api/ayla/students/:studentId/daily-workspace/rebuild", async (req, res) => {
+  try {
+    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId);
+    const date = String(req.body.date || aylaDateOnly()).slice(0, 10);
+    const built = await aylaV189BuildDailyPlan(db, student, date, { force: true, includeAssessment: req.body.includeAssessment === true });
+    aylaV189RecordActivity(db, student.id, "daily_plan_rebuilt", { date, reason: req.body.reason || "student_request" });
+    await writeAylaDb(db);
+    const safeBundle = aylaV189SanitizePlanBundle(db, built.plan, built.assignments);
+    return aylaSendOk(res, { plan: safeBundle.plan, assignments: safeBundle.assignments, warning: aylaV189BacklogWarning(db, student, date), systemProgress: aylaV189SystemProgress(db, student) });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to rebuild AylaMed daily workspace");
+  }
+});
+
+app.patch("/api/ayla/students/:studentId/assignments/:assignmentId", async (req, res) => {
+  try {
+    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId);
+    const assignment = aylaGetItem(db, "aylaResourceAssignments", req.params.assignmentId);
+    if (!assignment || String(assignment.studentId) !== String(student.id)) return aylaSendError(res, 404, "Assignment not found");
+    const allowedStatuses = ["pending", "in_progress", "completed", "skipped", "review_again"];
+    const requestedStatus = req.body.status && allowedStatuses.includes(String(req.body.status)) ? String(req.body.status) : null;
+    if (requestedStatus === "completed") {
+      const controlledHistory = {
+        video: "aylaVideoProgress",
+        external_questions: "aylaQuestionAttempts",
+        internal_mcqs: "aylaQuestionAttempts",
+        flashcards: "aylaFlashcardReviews",
+        assessment: "aylaAssessmentAttempts",
+      };
+      const historyCollection = controlledHistory[String(assignment.category || "")];
+      if (historyCollection) {
+        const resourceIds = aylaCleanArray(assignment.resourceIds).map(String);
+        const historyRows = aylaValues(db, historyCollection).filter((row) => String(row.studentId) === String(student.id) && String(row.assignmentId || "") === String(assignment.id));
+        const completedIds = new Set(historyRows.filter((row) => historyCollection !== "aylaQuestionAttempts" || String(row.outcome || "").toLowerCase() !== "not_attempted").map((row) => String(row.resourceId || "")));
+        const assessmentDone = historyCollection === "aylaAssessmentAttempts" && historyRows.length > 0;
+        const videoDone = historyCollection === "aylaVideoProgress" && historyRows.some((row) => row.completed === true || aylaNumber(row.watchedPercent, 0) >= 90);
+        const allResourcesDone = resourceIds.length > 0 && resourceIds.every((id) => completedIds.has(id));
+        if (!(assessmentDone || videoDone || allResourcesDone)) return aylaSendError(res, 409, "Complete the assigned activity and save its history before marking this assignment complete");
+      }
+    }
+    if (requestedStatus) assignment.status = requestedStatus;
+    if (req.body.progressPercent !== undefined) assignment.progressPercent = Math.max(0, Math.min(100, aylaNumber(req.body.progressPercent, 0)));
+    if (req.body.notes !== undefined) assignment.notes = aylaV189CleanText(req.body.notes).slice(0, 2000);
+    if (assignment.status === "completed") {
+      assignment.completedAt = assignment.completedAt || aylaNow();
+      assignment.progressPercent = 100;
+    }
+    if (assignment.status === "skipped") assignment.skippedAt = aylaNow();
+    assignment.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaResourceAssignments", assignment);
+    if (assignment.status === "completed") {
+      aylaV189CloseLinkedAssignments(db, assignment);
+      aylaV189CompleteRevisionQueueForAssignment(db, assignment);
+    }
+    if (String(assignment.category || "") === "reading") {
+      for (const item of Array.isArray(assignment.items) ? assignment.items : []) {
+        const existingReading = aylaValues(db, "aylaReadingProgress").find((row) => String(row.studentId) === String(student.id) && String(row.assignmentId || "") === String(assignment.id) && String(row.resourceId || "") === String(item.resourceId || "")) || {};
+        const readingProgress = {
+          ...existingReading,
+          id: existingReading.id || aylaId("AYLA-READ"),
+          studentId: student.id,
+          assignmentId: assignment.id,
+          resourceId: item.resourceId || null,
+          resourceNumber: item.resourceNumber || "",
+          bookTitle: item.bookTitle || item.title || "",
+          edition: item.edition || "",
+          system: item.system || assignment.system || "General",
+          topic: item.topic || assignment.topic || "",
+          pageRange: item.pageRange || item.mappedBookPages || "",
+          status: assignment.status,
+          progressPercent: aylaNumber(assignment.progressPercent, assignment.status === "completed" ? 100 : assignment.status === "in_progress" ? 50 : 0),
+          notes: assignment.notes || "",
+          startedAt: existingReading.startedAt || aylaNow(),
+          updatedAt: aylaNow(),
+        };
+        if (assignment.status === "completed") readingProgress.completedAt = existingReading.completedAt || aylaNow();
+        if (assignment.status === "skipped") readingProgress.skippedAt = aylaNow();
+        aylaSetItem(db, "aylaReadingProgress", readingProgress);
+      }
+    }
+    const plan = aylaV189UpdatePlanCompletion(db, assignment.dailyPlanId);
+    aylaV189RecordActivity(db, student.id, "assignment_updated", { assignmentId: assignment.id, status: assignment.status, category: assignment.category });
+    await writeAylaDb(db);
+    return aylaSendOk(res, { assignment: aylaV189SanitizeAssignmentForStudent(db, assignment), plan, warning: aylaV189BacklogWarning(db, student, aylaDateOnly()), systemProgress: aylaV189SystemProgress(db, student) });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update assignment");
+  }
+});
+
+app.post("/api/ayla/students/:studentId/video-progress", async (req, res) => {
+  try {
+    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId);
+    const resourceId = String(req.body.resourceId || "");
+    const existing = aylaValues(db, "aylaVideoProgress").find((row) => String(row.studentId) === String(student.id) && String(row.resourceId) === resourceId) || {};
+    const progress = {
+      ...existing,
+      id: existing.id || aylaId("AYLA-VID"),
+      studentId: student.id,
+      resourceId,
+      assignmentId: req.body.assignmentId || existing.assignmentId || null,
+      lastPositionSeconds: Math.max(0, aylaNumber(req.body.lastPositionSeconds, existing.lastPositionSeconds || 0)),
+      watchedPercent: Math.max(0, Math.min(100, aylaNumber(req.body.watchedPercent, existing.watchedPercent || 0))),
+      startedAt: existing.startedAt || aylaNow(),
+      completed: req.body.completed === true || aylaNumber(req.body.watchedPercent, 0) >= 90,
+      updatedAt: aylaNow(),
+    };
+    if (progress.completed) progress.completedAt = progress.completedAt || aylaNow();
+    aylaSetItem(db, "aylaVideoProgress", progress);
+    if (progress.completed && progress.assignmentId) {
+      const assignment = aylaGetItem(db, "aylaResourceAssignments", progress.assignmentId);
+      if (assignment) {
+        assignment.status = "completed";
+        assignment.progressPercent = 100;
+        assignment.completedAt = assignment.completedAt || aylaNow();
+        assignment.updatedAt = aylaNow();
+        aylaSetItem(db, "aylaResourceAssignments", assignment);
+        aylaV189CloseLinkedAssignments(db, assignment);
+        aylaV189CompleteRevisionQueueForAssignment(db, assignment);
+        aylaV189UpdatePlanCompletion(db, assignment.dailyPlanId);
+      }
+    }
+    aylaV189RecordActivity(db, student.id, "video_progress", { resourceId, watchedPercent: progress.watchedPercent, completed: progress.completed });
+    await writeAylaDb(db);
+    return aylaSendOk(res, { videoProgress: progress, systemProgress: aylaV189SystemProgress(db, student) });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to save video progress");
+  }
+});
+
+app.post("/api/ayla/students/:studentId/question-attempts", async (req, res) => {
+  try {
+    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId);
+    const assignmentId = req.body.assignmentId || null;
+    const resourceId = req.body.resourceId || null;
+    const assignment = assignmentId ? aylaGetItem(db, "aylaResourceAssignments", assignmentId) : null;
+    if (assignmentId && (!assignment || String(assignment.studentId) !== String(student.id))) return aylaSendError(res, 404, "Question assignment not found");
+    const item = assignment ? aylaV189FindAssignmentItem(assignment, resourceId) : null;
+    const sourceType = String(req.body.sourceType || req.body.source || (assignment?.category === "internal_mcqs" ? "internal" : "external")).toLowerCase();
+    const isInternal = sourceType === "internal" || String(assignment?.category || "") === "internal_mcqs";
+    let outcome = "not_attempted";
+    let selectedAnswer = req.body.selectedAnswer ?? null;
+    let correctAnswerIndex = null;
+    let serverVerified = false;
+    let review = null;
+    const wasGuessed = req.body.wasGuessed === true || String(req.body.confidence || "").toLowerCase() === "guessed";
+
+    if (isInternal) {
+      if (!assignment || !item) return aylaSendError(res, 400, "A verified internal MCQ assignment is required");
+      const storedQuestion = item;
+      const options = Array.isArray(storedQuestion.options) ? storedQuestion.options : [];
+      const selectedIndex = Number(selectedAnswer);
+      correctAnswerIndex = aylaV189CorrectAnswerIndex(storedQuestion);
+      if (!Number.isInteger(selectedIndex) || selectedIndex < 0 || selectedIndex >= options.length) return aylaSendError(res, 400, "A valid selectedAnswer index is required");
+      if (!Number.isInteger(correctAnswerIndex) || correctAnswerIndex < 0 || correctAnswerIndex >= options.length) return aylaSendError(res, 409, "This MCQ has no verified answer key and cannot be scored");
+      outcome = selectedIndex === correctAnswerIndex ? "correct" : "incorrect";
+      selectedAnswer = selectedIndex;
+      serverVerified = true;
+      review = {
+        outcome,
+        wasGuessed,
+        selectedAnswer: selectedIndex,
+        correctAnswerIndex,
+        correctAnswer: options[correctAnswerIndex],
+        explanation: storedQuestion.explanation || "",
+        distractorExplanations: storedQuestion.distractorExplanations || {},
+      };
+    } else {
+      outcome = String(req.body.outcome || req.body.result || "not_attempted").toLowerCase();
+      if (!["correct", "incorrect", "guessed", "not_attempted", "review_again"].includes(outcome)) return aylaSendError(res, 400, "Invalid external question outcome");
+    }
+
+    const attempt = {
+      id: aylaId("AYLA-QA"),
+      studentId: student.id,
+      assignmentId,
+      resourceId: item?.resourceId || resourceId || null,
+      sourceType: isInternal ? "internal" : "external",
+      provider: item?.provider || req.body.provider || "",
+      questionNumber: String(item?.questionNumber || item?.resourceNumber || req.body.questionNumber || req.body.question_number || ""),
+      system: item?.system || assignment?.system || req.body.system || "General",
+      topic: item?.topic || assignment?.topic || req.body.topic || "",
+      outcome,
+      selectedAnswer,
+      correctAnswerIndex,
+      wasGuessed,
+      serverVerified,
+      review,
+      confidence: req.body.confidence || "",
+      timeSeconds: Math.max(0, aylaNumber(req.body.timeSeconds, 0)),
+      createdAt: aylaNow(),
+    };
+    aylaSetItem(db, "aylaQuestionAttempts", attempt);
+    const needsRevision = ["incorrect", "guessed", "review_again"].includes(outcome) || wasGuessed;
+    if (needsRevision) {
+      const revision = {
+        id: aylaId("AYLA-REV"), studentId: student.id, sourceType: "question", sourceId: attempt.id,
+        resourceId: attempt.resourceId, assignmentId: attempt.assignmentId, provider: attempt.provider,
+        system: attempt.system, topic: attempt.topic, questionNumber: attempt.questionNumber,
+        dueDate: aylaDateOnly(aylaAddDays(new Date(), outcome === "incorrect" ? 1 : 2)), status: "due", createdAt: aylaNow(), updatedAt: aylaNow(),
+      };
+      aylaSetItem(db, "aylaRevisionQueue", revision);
+    }
+    const completion = aylaV189MaybeCompleteAssignment(db, attempt.assignmentId, "aylaQuestionAttempts");
+    aylaV189RecordActivity(db, student.id, "question_attempt", { attemptId: attempt.id, outcome, wasGuessed, serverVerified, questionNumber: attempt.questionNumber, assignmentCompleted: completion.completed });
+    await writeAylaDb(db);
+    return aylaSendOk(res, { attempt, review, assignment: completion.assignment ? aylaV189SanitizeAssignmentForStudent(db, completion.assignment) : null, plan: completion.plan, assignmentCompleted: completion.completed, systemProgress: aylaV189SystemProgress(db, student), warning: aylaV189BacklogWarning(db, student, aylaDateOnly()) }, 201);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to save question attempt");
+  }
+});
+
+app.post("/api/ayla/students/:studentId/flashcard-reviews", async (req, res) => {
+  try {
+    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId);
+    const rating = String(req.body.rating || "again").toLowerCase();
+    if (!["again", "hard", "good", "easy"].includes(rating)) return aylaSendError(res, 400, "Invalid flashcard rating");
+    const previous = aylaValues(db, "aylaFlashcardReviews").filter((row) => String(row.studentId) === String(student.id) && String(row.resourceId) === String(req.body.resourceId)).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0];
+    const previousInterval = Math.max(0, aylaNumber(previous?.intervalDays, 0));
+    const intervalDays = rating === "again" ? 1 : rating === "hard" ? Math.max(2, Math.round(previousInterval * 1.3) || 2) : rating === "good" ? Math.max(4, Math.round(previousInterval * 2.2) || 4) : Math.max(7, Math.round(previousInterval * 3.2) || 7);
+    const review = {
+      id: aylaId("AYLA-FR"),
+      studentId: student.id,
+      assignmentId: req.body.assignmentId || null,
+      resourceId: req.body.resourceId || null,
+      cardNumber: req.body.cardNumber || req.body.resourceNumber || "",
+      system: req.body.system || "General",
+      topic: req.body.topic || "",
+      rating,
+      intervalDays,
+      nextReviewDate: aylaDateOnly(aylaAddDays(new Date(), intervalDays)),
+      createdAt: aylaNow(),
+    };
+    aylaSetItem(db, "aylaFlashcardReviews", review);
+    if (rating === "again" || rating === "hard") {
+      aylaSetItem(db, "aylaRevisionQueue", { id: aylaId("AYLA-REV"), studentId: student.id, sourceType: "flashcard", sourceId: review.id, resourceId: review.resourceId, assignmentId: review.assignmentId, system: review.system, topic: review.topic, cardNumber: review.cardNumber, dueDate: review.nextReviewDate, status: "due", createdAt: aylaNow(), updatedAt: aylaNow() });
+    }
+    const completion = aylaV189MaybeCompleteAssignment(db, review.assignmentId, "aylaFlashcardReviews");
+    aylaV189RecordActivity(db, student.id, "flashcard_review", { resourceId: review.resourceId, rating, nextReviewDate: review.nextReviewDate, assignmentCompleted: completion.completed });
+    await writeAylaDb(db);
+    return aylaSendOk(res, { review, assignment: completion.assignment, plan: completion.plan, assignmentCompleted: completion.completed, systemProgress: aylaV189SystemProgress(db, student) }, 201);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to save flashcard review");
+  }
+});
+
+app.post("/api/ayla/students/:studentId/assessment-attempts", async (req, res) => {
+  try {
+    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId);
+    const assignment = aylaGetItem(db, "aylaResourceAssignments", req.body.assignmentId);
+    if (!assignment || String(assignment.studentId) !== String(student.id) || String(assignment.category || "") !== "assessment") return aylaSendError(res, 404, "Verified assessment assignment not found");
+    const assessmentItem = (Array.isArray(assignment.items) ? assignment.items : [])[0];
+    const questions = Array.isArray(assessmentItem?.questions) ? assessmentItem.questions : [];
+    if (!questions.length) return aylaSendError(res, 409, "This assessment has no verified internal MCQs");
+    const submitted = Array.isArray(req.body.answers) ? req.body.answers.slice(0, 500) : [];
+    const submittedMap = new Map(submitted.map((answer, index) => [String(answer.questionId || answer.resourceId || answer.questionNumber || answer.resourceNumber || `Q${index + 1}`), answer]));
+    const reviewAnswers = [];
+    const storedAnswers = [];
+    let correct = 0;
+    let scored = 0;
+    const weakTopics = new Set();
+    const repeatedErrors = new Set();
+
+    questions.forEach((question, index) => {
+      const identity = aylaV189QuestionIdentity(question, index);
+      const answer = submittedMap.get(identity) || submitted[index] || {};
+      const selectedIndex = Number(answer.selectedAnswer);
+      const options = Array.isArray(question.options) ? question.options : [];
+      const correctIndex = aylaV189CorrectAnswerIndex(question);
+      if (!Number.isInteger(correctIndex) || correctIndex < 0 || correctIndex >= options.length) return;
+      scored += 1;
+      const answered = Number.isInteger(selectedIndex) && selectedIndex >= 0 && selectedIndex < options.length;
+      const isCorrect = answered && selectedIndex === correctIndex;
+      if (isCorrect) correct += 1;
+      else {
+        weakTopics.add(question.topic || assignment.topic || "Unspecified concept");
+        const priorIncorrect = aylaValues(db, "aylaQuestionAttempts").some((row) => String(row.studentId) === String(student.id) && String(row.resourceId || row.questionNumber) === String(question.resourceId || question.questionNumber || identity) && String(row.outcome || "").toLowerCase() === "incorrect");
+        if (priorIncorrect) repeatedErrors.add(question.topic || assignment.topic || identity);
+      }
+      storedAnswers.push({
+        questionId: identity, resourceId: question.resourceId || null, questionNumber: question.questionNumber || question.resourceNumber || `Q${index + 1}`,
+        selectedAnswer: answered ? selectedIndex : null, outcome: isCorrect ? "correct" : "incorrect", flagged: answer.flagged === true,
+        timeSeconds: Math.max(0, aylaNumber(answer.timeSeconds, 0)), system: question.system || assignment.system || "General", topic: question.topic || assignment.topic || "",
+      });
+      reviewAnswers.push({
+        questionId: identity, resourceId: question.resourceId || null, questionNumber: question.questionNumber || question.resourceNumber || `Q${index + 1}`,
+        selectedAnswer: answered ? selectedIndex : null, correctAnswerIndex: correctIndex, correctAnswer: options[correctIndex], outcome: isCorrect ? "correct" : "incorrect",
+        explanation: question.explanation || "", distractorExplanations: question.distractorExplanations || {}, system: question.system || assignment.system || "General", topic: question.topic || assignment.topic || "",
+      });
+    });
+    if (!scored) return aylaSendError(res, 409, "No questions with verified answer keys were available for scoring");
+    const incorrect = scored - correct;
+    const scorePercent = Math.round((correct / scored) * 100);
+    const attempt = {
+      id: aylaId("AYLA-ATT"), studentId: student.id, assignmentId: assignment.id,
+      resourceId: assessmentItem?.resourceId || req.body.resourceId || null,
+      assessmentNumber: assessmentItem?.resourceNumber || req.body.assessmentNumber || req.body.resourceNumber || "",
+      title: assignment.title || assessmentItem?.title || "AylaMed assessment",
+      system: assignment.system || assessmentItem?.system || "General", topic: assignment.topic || assessmentItem?.topic || "",
+      scorePercent, correct, incorrect, totalQuestions: scored,
+      timeSeconds: Math.max(0, aylaNumber(req.body.timeSeconds, storedAnswers.reduce((sum, row) => sum + row.timeSeconds, 0))),
+      weakTopics: [...weakTopics], repeatedErrors: [...repeatedErrors], confidence: req.body.confidence || "",
+      assessmentType: assignment.assessmentType || assessmentItem?.assessmentType || "adaptive",
+      tutorReason: assignment.tutorReason || assessmentItem?.tutorReason || "",
+      scheduleTrigger: assignment.scheduleTrigger || assessmentItem?.scheduleTrigger || "adaptive",
+      answers: storedAnswers, reviewAnswers, serverVerified: true, scoringVersion: "server_verified_v189.3", createdAt: aylaNow(),
+    };
+    aylaSetItem(db, "aylaAssessmentAttempts", attempt);
+    assignment.status = "completed";
+    assignment.progressPercent = 100;
+    assignment.completedAt = assignment.completedAt || aylaNow();
+    assignment.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaResourceAssignments", assignment);
+    aylaV189CloseLinkedAssignments(db, assignment);
+    aylaV189CompleteRevisionQueueForAssignment(db, assignment);
+    aylaV189UpdatePlanCompletion(db, assignment.dailyPlanId);
+
+    reviewAnswers.filter((row) => row.outcome === "incorrect").forEach((row) => {
+      aylaSetItem(db, "aylaRevisionQueue", {
+        id: aylaId("AYLA-REV"), studentId: student.id, sourceType: "assessment", sourceId: attempt.id,
+        resourceId: row.resourceId, assignmentId: assignment.id, system: row.system, topic: row.topic,
+        questionNumber: row.questionNumber, dueDate: aylaDateOnly(aylaAddDays(new Date(), scorePercent < 60 ? 1 : 3)),
+        status: "due", createdAt: aylaNow(), updatedAt: aylaNow(),
+      });
+    });
+    aylaV189RecordActivity(db, student.id, "assessment_attempt", { attemptId: attempt.id, scorePercent, correct, incorrect, serverVerified: true, system: attempt.system });
+    const tomorrow = aylaDateOnly(aylaAddDays(new Date(), 1));
+    await aylaV189BuildDailyPlan(db, student, tomorrow, { force: true, includeAssessment: false });
+    await writeAylaDb(db);
+    return aylaSendOk(res, { attempt, reviewAnswers, assignment: aylaV189SanitizeAssignmentForStudent(db, assignment), systemProgress: aylaV189SystemProgress(db, student), warning: aylaV189BacklogWarning(db, student, aylaDateOnly()) }, 201);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to save assessment attempt");
+  }
+});
+
+// -----------------------------------------------------------------------------
+// AylaMed-only leaderboard, study partners, community and moderation.
+// -----------------------------------------------------------------------------
+app.get("/api/ayla/community/leaderboard", async (req, res) => {
+  try {
+    await aylaGetAuthenticatedUser(req);
+    const db = await readAylaDb();
+    const period = String(req.query.period || "weekly") === "monthly" ? "monthly" : "weekly";
+    return aylaSendOk(res, { period, source: "aylamed-db.json only", lms_leaderboard_unchanged: true, leaderboard: aylaV189Leaderboard(db, period) });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.get("/api/ayla/study-partners/matches", async (req, res) => {
+  try {
+    const { student, db } = await aylaV189RequireStudent(req, req.query.studentId);
+    const activePairs = aylaValues(db, "aylaStudyPartnerRequests").filter((row) => ["pending", "accepted", "blocked"].includes(String(row.status || "").toLowerCase()));
+    const candidates = aylaValues(db, "aylaStudents")
+      .filter((row) => String(row.id) !== String(student.id) && Boolean(row.studyPartnerOptIn || row.study_partner_opt_in))
+      .filter((row) => !activePairs.some((pair) => [String(pair.fromStudentId), String(pair.toStudentId)].includes(String(student.id)) && [String(pair.fromStudentId), String(pair.toStudentId)].includes(String(row.id))));
+    const matches = candidates.map((candidate) => aylaV189PartnerPublic(db, candidate, student))
+      .filter((row) => row.compatibilityScore > 0)
+      .sort((a, b) => b.compatibilityScore - a.compatibilityScore)
+      .slice(0, 20)
+      .map((row) => ({ ...row, score: row.compatibilityScore, reasons: row.compatibilityReasons }));
+    return aylaSendOk(res, { matches });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load study partner matches");
+  }
+});
+
+app.get("/api/ayla/study-partners/requests", async (req, res) => {
+  try {
+    const { student, db } = await aylaV189RequireStudent(req, req.query.studentId);
+    const rows = aylaValues(db, "aylaStudyPartnerRequests")
+      .filter((row) => [String(row.fromStudentId), String(row.toStudentId)].includes(String(student.id)))
+      .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")));
+    const visible = rows.map((row) => aylaV189PartnerRequestView(db, row, student));
+    return aylaSendOk(res, {
+      incoming: visible.filter((row) => row.status === "pending" && row.direction === "incoming"),
+      sent: visible.filter((row) => row.status === "pending" && row.direction === "sent"),
+      current: visible.filter((row) => row.status === "accepted"),
+      blocked: visible.filter((row) => row.status === "blocked" && row.blockedByMe),
+      history: visible.filter((row) => ["declined", "cancelled", "removed"].includes(String(row.status))),
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load study-partner requests");
+  }
+});
+
+app.post("/api/ayla/study-partners/requests", async (req, res) => {
+  try {
+    const { user, student, db } = await aylaV189RequireStudent(req, req.body.studentId);
+    const target = aylaGetItem(db, "aylaStudents", req.body.targetStudentId);
+    if (!target || String(target.id) === String(student.id)) return aylaSendError(res, 400, "Valid target study partner is required");
+    if (!Boolean(target.studyPartnerOptIn || target.study_partner_opt_in)) return aylaSendError(res, 409, "This doctor is not currently opted in to study-partner requests");
+    const pairRows = aylaValues(db, "aylaStudyPartnerRequests").filter((row) => [String(row.fromStudentId), String(row.toStudentId)].includes(String(student.id)) && [String(row.fromStudentId), String(row.toStudentId)].includes(String(target.id)));
+    const blocked = pairRows.find((row) => String(row.status || "").toLowerCase() === "blocked");
+    if (blocked) return aylaSendError(res, 403, "Study-partner contact is blocked between these accounts");
+    const existing = pairRows.find((row) => ["pending", "accepted"].includes(String(row.status || "").toLowerCase()));
+    if (existing) return aylaSendOk(res, { request: existing, duplicate: true });
+    const request = { id: aylaId("AYLA-SPR"), fromStudentId: student.id, fromUserId: user.id, toStudentId: target.id, toUserId: target.ayla_user_id || target.user_id || null, status: "pending", createdAt: aylaNow(), updatedAt: aylaNow() };
+    aylaSetItem(db, "aylaStudyPartnerRequests", request);
+    await writeAylaDb(db);
+    return aylaSendOk(res, { request }, 201);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.patch("/api/ayla/study-partners/requests/:id", async (req, res) => {
+  try {
+    const { student, db } = await aylaV189RequireStudent(req, req.body.studentId);
+    const request = aylaGetItem(db, "aylaStudyPartnerRequests", req.params.id);
+    if (!request || ![request.fromStudentId, request.toStudentId].map(String).includes(String(student.id))) return aylaSendError(res, 404, "Study partner request not found");
+    const action = String(req.body.action || req.body.status || "").toLowerCase();
+    const current = String(request.status || "pending").toLowerCase();
+    const isSender = String(request.fromStudentId) === String(student.id);
+    const isRecipient = String(request.toStudentId) === String(student.id);
+    if (action === "accepted" || action === "accept") {
+      if (!isRecipient || current !== "pending") return aylaSendError(res, 409, "Only the recipient can accept a pending request");
+      request.status = "accepted"; request.acceptedAt = aylaNow();
+    } else if (action === "declined" || action === "decline") {
+      if (!isRecipient || current !== "pending") return aylaSendError(res, 409, "Only the recipient can decline a pending request");
+      request.status = "declined"; request.declinedAt = aylaNow();
+    } else if (action === "cancelled" || action === "cancel") {
+      if (!isSender || current !== "pending") return aylaSendError(res, 409, "Only the sender can cancel a pending request");
+      request.status = "cancelled"; request.cancelledAt = aylaNow();
+    } else if (action === "removed" || action === "remove") {
+      if (current !== "accepted") return aylaSendError(res, 409, "Only a current partner can be removed");
+      request.status = "removed"; request.removedAt = aylaNow(); request.removedByStudentId = student.id;
+    } else if (action === "blocked" || action === "block") {
+      request.status = "blocked"; request.blockedAt = aylaNow(); request.blockedByStudentId = student.id;
+    } else if (action === "unblocked" || action === "unblock") {
+      if (current !== "blocked" || String(request.blockedByStudentId || "") !== String(student.id)) return aylaSendError(res, 409, "Only the student who blocked this account can unblock it");
+      request.status = "removed"; request.unblockedAt = aylaNow(); request.blockedByStudentId = null;
+    } else {
+      return aylaSendError(res, 400, "Invalid study-partner action");
+    }
+    request.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaStudyPartnerRequests", request);
+    aylaV189RecordActivity(db, student.id, "study_partner_action", { requestId: request.id, action, status: request.status });
+    await writeAylaDb(db);
+    return aylaSendOk(res, { request: aylaV189PartnerRequestView(db, request, student) });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.post("/api/ayla/study-partners/requests/:id/report", async (req, res) => {
+  try {
+    const { user, student, db } = await aylaV189RequireStudent(req, req.body.studentId);
+    const request = aylaGetItem(db, "aylaStudyPartnerRequests", req.params.id);
+    if (!request || ![request.fromStudentId, request.toStudentId].map(String).includes(String(student.id))) return aylaSendError(res, 404, "Study partner relationship not found");
+    const counterpartStudentId = String(request.fromStudentId) === String(student.id) ? request.toStudentId : request.fromStudentId;
+    const report = {
+      id: aylaId("AYLA-SPREP"), requestId: request.id, reporterStudentId: student.id, reporterUserId: user.id,
+      reportedStudentId: counterpartStudentId, reason: aylaV189CleanText(req.body.reason || "Study partner concern").slice(0, 500),
+      details: aylaV189CleanText(req.body.details || "").slice(0, 2000), status: "open", createdAt: aylaNow(), updatedAt: aylaNow(),
+    };
+    aylaSetItem(db, "aylaCommunityReports", report);
+    await writeAylaDb(db);
+    return aylaSendOk(res, { report }, 201);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to report study partner");
+  }
+});
+
+app.get("/api/ayla/community/profile", async (req, res) => {
+  try {
+    const { user, student, db } = await aylaV189RequireStudent(req);
+    const profile = aylaV189CommunityProfile(db, user, student);
+    await writeAylaDb(db);
+    return aylaSendOk(res, { profile });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.get("/api/ayla/community/messages", async (req, res) => {
+  try {
+    const { user, student, db } = await aylaV189RequireStudent(req);
+    aylaV189CommunityProfile(db, user, student);
+    const messages = aylaValues(db, "aylaCommunityMessages")
+      .filter((row) => !row.deletedAt && !row.hiddenAt)
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+      .slice(0, Math.max(1, Math.min(200, aylaNumber(req.query.limit, 80))))
+      .reverse();
+    const profiles = Object.fromEntries(aylaValues(db, "aylaCommunityProfiles").map((row) => [String(row.id), row]));
+    await writeAylaDb(db);
+    return aylaSendOk(res, { messages: messages.map((row) => ({ ...row, author: profiles[String(row.profileId)] ? { username: profiles[String(row.profileId)].username, displayName: profiles[String(row.profileId)].displayName, profileImageUrl: profiles[String(row.profileId)].profileImageUrl } : { username: row.username || "Doctor" } })) });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.post("/api/ayla/community/messages", async (req, res) => {
+  try {
+    const { user, student, db } = await aylaV189RequireStudent(req);
+    const profile = aylaV189CommunityProfile(db, user, student);
+    if (profile.banned) return aylaSendError(res, 403, "This community account is banned");
+    if (profile.mutedUntil && new Date(profile.mutedUntil).getTime() > Date.now()) return aylaSendError(res, 403, `This community account is muted until ${profile.mutedUntil}`);
+    const text = aylaV189CleanText(req.body.text || req.body.message).slice(0, 2000);
+    if (!text) return aylaSendError(res, 400, "Message is required");
+    const moderation = aylaV189ModerationCheck(text, db.aylaSettings?.community?.banned_words);
+    if (!moderation.ok) {
+      profile.strikes = aylaNumber(profile.strikes, 0) + 1;
+      if (profile.strikes >= 3) profile.mutedUntil = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+      profile.updatedAt = aylaNow();
+      aylaSetItem(db, "aylaCommunityProfiles", profile);
+      aylaSetItem(db, "aylaModerationActions", { id: aylaId("AYLA-MOD"), profileId: profile.id, userId: user.id, action: profile.strikes >= 3 ? "auto_mute" : "blocked_message", reason: "prohibited_language", matched: moderation.matched, createdAt: aylaNow() });
+      await writeAylaDb(db);
+      return aylaSendError(res, 422, "This message contains prohibited language. Please edit it before posting.");
+    }
+    const tenMinutesAgo = Date.now() - 10 * 60 * 1000;
+    const recentMessages = aylaValues(db, "aylaCommunityMessages").filter((row) => String(row.userId) === String(user.id) && new Date(row.createdAt || 0).getTime() >= tenMinutesAgo && !row.deletedAt);
+    const messageKey = text.toLowerCase().replace(/\s+/g, " ").trim();
+    if (recentMessages.some((row) => String(row.text || "").toLowerCase().replace(/\s+/g, " ").trim() === messageKey)) {
+      aylaSetItem(db, "aylaModerationActions", { id: aylaId("AYLA-MOD"), profileId: profile.id, userId: user.id, action: "duplicate_spam_blocked", reason: "repeated_message", createdAt: aylaNow() });
+      await writeAylaDb(db);
+      return aylaSendError(res, 429, "This message was already posted recently. Please avoid repeating the same message.");
+    }
+    const recentCount = recentMessages.length;
+    const max = Math.max(3, aylaNumber(db.aylaSettings?.community?.max_messages_per_10_minutes, 15));
+    if (recentCount >= max) return aylaSendError(res, 429, "Too many messages. Please wait before posting again.");
+    const message = { id: aylaId("AYLA-MSG"), userId: user.id, studentId: student.id, profileId: profile.id, username: profile.username, text, createdAt: aylaNow(), updatedAt: aylaNow(), reports: 0 };
+    aylaSetItem(db, "aylaCommunityMessages", message);
+    await writeAylaDb(db);
+    return aylaSendOk(res, { message: { ...message, author: { username: profile.username, displayName: profile.displayName, profileImageUrl: profile.profileImageUrl } } }, 201);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to post community message");
+  }
+});
+
+app.post("/api/ayla/community/messages/:id/report", async (req, res) => {
+  try {
+    const { user, student, db } = await aylaV189RequireStudent(req);
+    const message = aylaGetItem(db, "aylaCommunityMessages", req.params.id);
+    if (!message) return aylaSendError(res, 404, "Community message not found");
+    const existing = aylaValues(db, "aylaCommunityReports").find((row) => String(row.messageId) === String(message.id) && String(row.reporterUserId) === String(user.id));
+    if (existing) return aylaSendOk(res, { report: existing, duplicate: true });
+    const report = { id: aylaId("AYLA-REP"), messageId: message.id, reporterUserId: user.id, reporterStudentId: student.id, reason: aylaV189CleanText(req.body.reason || "Inappropriate content").slice(0, 500), status: "open", createdAt: aylaNow(), updatedAt: aylaNow() };
+    aylaSetItem(db, "aylaCommunityReports", report);
+    message.reports = aylaNumber(message.reports, 0) + 1;
+    if (message.reports >= 3) message.hiddenAt = aylaNow();
+    aylaSetItem(db, "aylaCommunityMessages", message);
+    await writeAylaDb(db);
+    return aylaSendOk(res, { report }, 201);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.post("/api/ayla/admin/community/moderate", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
+    const action = String(req.body.action || "").toLowerCase();
+    const profile = req.body.profileId ? aylaGetItem(db, "aylaCommunityProfiles", req.body.profileId) : null;
+    const message = req.body.messageId ? aylaGetItem(db, "aylaCommunityMessages", req.body.messageId) : null;
+    if (action === "delete_message" && message) { message.deletedAt = aylaNow(); message.updatedAt = aylaNow(); aylaSetItem(db, "aylaCommunityMessages", message); }
+    else if (action === "hide_message" && message) { message.hiddenAt = aylaNow(); message.updatedAt = aylaNow(); aylaSetItem(db, "aylaCommunityMessages", message); }
+    else if (action === "mute" && profile) { profile.mutedUntil = new Date(Date.now() + Math.max(1, aylaNumber(req.body.hours, 24)) * 3600000).toISOString(); profile.updatedAt = aylaNow(); aylaSetItem(db, "aylaCommunityProfiles", profile); }
+    else if (action === "unmute" && profile) { profile.mutedUntil = null; profile.updatedAt = aylaNow(); aylaSetItem(db, "aylaCommunityProfiles", profile); }
+    else if (action === "ban" && profile) { profile.banned = true; profile.updatedAt = aylaNow(); aylaSetItem(db, "aylaCommunityProfiles", profile); }
+    else if (action === "unban" && profile) { profile.banned = false; profile.updatedAt = aylaNow(); aylaSetItem(db, "aylaCommunityProfiles", profile); }
+    else return aylaSendError(res, 400, "Valid moderation action and target are required");
+    const moderation = { id: aylaId("AYLA-MOD"), action, profileId: profile?.id || null, messageId: message?.id || null, reason: aylaV189CleanText(req.body.reason || "Admin moderation").slice(0, 500), createdAt: aylaNow() };
+    aylaSetItem(db, "aylaModerationActions", moderation);
+    await writeAylaDb(db);
+    return aylaSendOk(res, { moderation, profile, message });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+// -----------------------------------------------------------------------------
+// Additive AI Training Center resource pipeline.
+// Existing education/company/CRM flows remain unchanged.
+// -----------------------------------------------------------------------------
+async function ngExtractPdfPagesV189(buffer) {
+  try {
+    const mod = await import("pdf-parse");
+    const pdfParse = mod.default || mod;
+    const pageTexts = [];
+    const pagerender = async (pageData) => {
+      const content = await pageData.getTextContent({ normalizeWhitespace: true, disableCombineTextItems: false });
+      let text = "";
+      let lastY = null;
+      for (const item of content.items || []) {
+        const y = item.transform?.[5];
+        if (lastY !== null && y !== lastY) text += "\n";
+        else if (text) text += " ";
+        text += String(item.str || "");
+        lastY = y;
+      }
+      const clean = ngNormalizeTrainingText(text);
+      pageTexts.push(clean);
+      return clean;
+    };
+    const data = await pdfParse(buffer, { pagerender });
+    return { text: ngNormalizeTrainingText(data?.text || pageTexts.join("\n\n")), page_texts: pageTexts, pages: data?.numpages || pageTexts.length || null, method: "pdf-parse-page-aware" };
+  } catch (error) {
+    const fallback = await ngExtractPdfText(buffer);
+    return { ...fallback, page_texts: [], parser_error: error.message };
+  }
+}
+
+function ngAylaResourceJsonShape(kind = "book") {
+  const common = `"resource_type":"${kind}","resource_name":"","edition":"","provider":"","exam_track":"All","system":"","topic":"","subtopics":[],"concepts":[],"difficulty":"","high_yield_priority":"","estimated_minutes":0,"pdf_page_start":null,"pdf_page_end":null,"printed_page_start":null,"printed_page_end":null,"page_range":"","exact_reference":""`;
+  if (kind === "video_transcript" || kind === "vimeo_video") return `{${common},"title":"","vimeo_id":"","vimeo_url":"","video_start_seconds":0,"video_end_seconds":0,"timestamp":"","transcript_excerpt":""}`;
+  if (kind === "external_qid_mapping" || kind === "external_question") return `{${common},"question_numbers":[],"mapped_book_resource_id":"","mapped_book_title":"","mapped_book_edition":"","mapped_book_pages":"","mapped_video_resource_id":"","mapped_video_title":"","mapped_vimeo_id":"","mapped_vimeo_url":"","mapped_video_timestamp":"","mapping_status":""}`;
+  if (kind === "internal_mcq") return `{${common},"question_number":"","stem":"","options":[],"correct_answer":"","explanation":"","distractor_explanations":{},"mapped_book_resource_id":"","mapped_book_title":"","mapped_book_edition":"","mapped_book_pages":"","mapped_video_resource_id":"","mapped_video_title":"","mapped_vimeo_id":"","mapped_vimeo_url":"","mapped_video_timestamp":"","mapping_status":""}`;
+  if (kind === "flashcard") return `{${common},"resource_number":"","front":"","back":""}`;
+  if (kind === "assessment" || kind === "assessment_blueprint") return `{${common},"resource_number":"","title":"","question_numbers":[],"assessment_type":"","recommended_timing":""}`;
+  return `{${common},"title":""}`;
+}
+
+async function ngCreateAylaResourceChunkWithAI({ sourceBlock, document, blockRecord, user }) {
+  const model = String(process.env.AI_EDUCATION_MODEL || process.env.AI_MODEL || "gpt-4o-mini").trim() || "gpt-4o-mini";
+  const kind = aylaV189ResourceType(document.resource_kind || document.resource_type || "book");
+  const systemPrompt = `You index licensed/allowed medical study resources for AylaMed. Extract precise assignable metadata. Never invent a page, question number, answer, Vimeo ID, timestamp or topic. If a field is not supported, leave it empty. Preserve question numbers exactly. For internal MCQs, preserve the uploaded question's own number and content. Return valid JSON only.`;
+  const userPrompt = `Resource kind: ${kind}\nDocument: ${document.title}\nEdition: ${document.edition || ""}\nProvider: ${document.provider || ""}\nExam track: ${document.exam_track || document.exam || "All"}\nPDF pages represented by this block: ${blockRecord.pdf_page_start || "unknown"}-${blockRecord.pdf_page_end || blockRecord.pdf_page_start || "unknown"}\n\nReturn JSON with this exact structure:\n{"records":[${ngAylaResourceJsonShape(kind)}],"confidence":0.0,"uncertain_fields":[]}\n\nUse multiple records when the block clearly contains multiple question IDs, MCQs, flashcards, timestamped video sections, or distinct topics.\n\nSource:\n"""${String(sourceBlock || "").slice(0, 10000)}"""`;
+  const ai = await callOpenAIResponsesAPI({ model, systemPrompt, userPrompt, maxOutputTokens: 3500, jsonMode: true });
+  await logAIUsage({ user, action: "aylamed_resource_index", model, usage: ai.usage, sourceLength: String(sourceBlock || "").length });
+  const parsed = safeJsonParseFromAI(ai.text);
+  return { parsed, model, usage: ai.usage };
+}
+
+async function ngProcessAylaResourceDocumentBatch({ db, document, user, batchSize = 6 }) {
+  db.ai_training_items = ensureCrmArray(db, "ai_training_items");
+  const blocks = Array.isArray(document.source_blocks) ? document.source_blocks : [];
+  const selected = blocks.filter((row) => String(row.status || "pending") === "pending").slice(0, Math.max(1, Math.min(12, aylaNumber(batchSize, 6))));
+  const createdItems = [];
+  const failedBlocks = [];
+  for (const blockRecord of selected) {
+    try {
+      const result = await ngCreateAylaResourceChunkWithAI({ sourceBlock: blockRecord.text, document, blockRecord, user });
+      const records = Array.isArray(result.parsed?.records) ? result.parsed.records : [];
+      const confidence = Math.max(0, Math.min(1, aylaNumber(result.parsed?.confidence, 0)));
+      const item = withTimestamps({
+        id: uuid(),
+        document_id: document.id,
+        title: `${document.title} — ${records[0]?.topic || records[0]?.title || `Resource block ${blockRecord.index}`}`.slice(0, 180),
+        category: "AylaMed Resource Intelligence",
+        audience: "aylamed_resource_engine",
+        tags: uniqueList(["aylamed", "resource_index", document.resource_kind, "needs_review"]),
+        content: `AylaMed resource index block ${blockRecord.index}. Review the structured records before approval.`,
+        structured: { ...result.parsed, resource_type: document.resource_kind },
+        source: "aylamed_resource_pipeline",
+        source_block_index: blockRecord.index,
+        source_block_count: blocks.length,
+        pdf_page_start: blockRecord.pdf_page_start || null,
+        pdf_page_end: blockRecord.pdf_page_end || null,
+        source_excerpt: String(blockRecord.text || "").slice(0, 900),
+        ai_model: result.model,
+        confidence,
+        active: false,
+        is_active: false,
+        enforce_in_ai: false,
+        status: "needs_review",
+        approval_status: "needs_review",
+        medical_review_status: "needs_review",
+        requires_human_review: true,
+        requires_medical_review: true,
+        priority: Number(document.priority || 8),
+        created_by: user.id,
+        created_by_email: user.email,
+      });
+      db.ai_training_items.unshift(item);
+      createdItems.push(item);
+      blockRecord.status = "processed";
+      blockRecord.item_id = item.id;
+      blockRecord.processed_at = ngNowIso();
+      blockRecord.confidence = confidence;
+    } catch (error) {
+      blockRecord.status = "failed";
+      blockRecord.error = error.message;
+      blockRecord.failed_at = ngNowIso();
+      failedBlocks.push({ block_index: blockRecord.index, error: error.message });
+    }
+  }
+  document.processed_chunks = blocks.filter((row) => row.status === "processed").length;
+  document.failed_chunks = blocks.filter((row) => row.status === "failed").length;
+  document.remaining_chunks = blocks.filter((row) => String(row.status || "pending") === "pending").length;
+  document.chunks_created = Number(document.chunks_created || 0) + createdItems.length;
+  document.status = document.remaining_chunks > 0 ? "in_progress" : "needs_review";
+  document.processing_status = document.remaining_chunks > 0 ? "partial" : "complete";
+  document.updated_at = ngNowIso();
+  return { processor: "aylamed_resource_indexer", createdItems, failedBlocks, remaining_chunks: document.remaining_chunks, processed_chunks: document.processed_chunks, failed_chunks: document.failed_chunks };
+}
+
+app.post("/admin/crm/ai-training/import-aylamed-resource-document", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const db = ngEnsureAiStore(await readCrmDb());
+    db.ai_training_documents = ensureCrmArray(db, "ai_training_documents");
+    db.ai_training_items = ensureCrmArray(db, "ai_training_items");
+    const filename = String(req.body.filename || req.body.name || "aylamed-resource.pdf").trim();
+    const mimeType = String(req.body.mime_type || req.body.mimeType || "application/pdf").trim();
+    const title = String(req.body.title || filename.replace(/\.[^.]+$/, "") || "AylaMed Resource").trim();
+    const kind = aylaV189ResourceType(req.body.resource_kind || req.body.resource_type || "book");
+    let extraction = { text: String(req.body.extracted_text || ""), page_texts: [], pages: null, method: "provided_text" };
+    if (!extraction.text && req.body.file_base64) {
+      const buffer = ngDecodeBase64File(req.body.file_base64);
+      extraction = mimeType.includes("pdf") || filename.toLowerCase().endsWith(".pdf") ? await ngExtractPdfPagesV189(buffer) : { text: buffer.toString("utf8"), page_texts: [], pages: null, method: "plain_text" };
+    }
+    const clean = ngNormalizeTrainingText(extraction.text || "");
+    const quality = ngIsReadableTrainingText(clean, { min_chars: 200, min_words: 20 });
+    if (!quality.ok) return res.status(422).json({ success: false, error: `AylaMed resource rejected: ${quality.reason}`, extraction: { method: extraction.method, pages: extraction.pages }, quality: quality.quality });
+    const sourceBlocks = [];
+    if (Array.isArray(extraction.page_texts) && extraction.page_texts.some(Boolean)) {
+      extraction.page_texts.forEach((pageText, index) => {
+        const chunks = ngSplitTrainingText(pageText, Math.max(1800, Math.min(7000, aylaNumber(req.body.chunk_size, 5000))));
+        chunks.forEach((text) => sourceBlocks.push({ text, pdf_page_start: index + 1, pdf_page_end: index + 1 }));
+      });
+    } else {
+      ngSplitTrainingText(clean, Math.max(1800, Math.min(7000, aylaNumber(req.body.chunk_size, 5000)))).forEach((text) => sourceBlocks.push({ text, pdf_page_start: null, pdf_page_end: null }));
+    }
+    const document = withTimestamps({
+      id: uuid(),
+      title,
+      filename,
+      mime_type: mimeType,
+      category: "AylaMed Resource Intelligence",
+      audience: "aylamed_resource_engine",
+      priority: Number(req.body.priority || 8),
+      source: "aylamed_resource_pipeline",
+      pipeline: "aylamed_resource",
+      resource_kind: kind,
+      edition: String(req.body.edition || "").trim(),
+      provider: String(req.body.provider || "").trim(),
+      exam_track: String(req.body.exam_track || req.body.exam || "All").trim(),
+      extraction_method: extraction.method,
+      pages: extraction.pages || null,
+      total_characters: clean.length,
+      total_source_chunks: sourceBlocks.length,
+      source_blocks: sourceBlocks.map((row, index) => ({ index: index + 1, text: row.text, pdf_page_start: row.pdf_page_start, pdf_page_end: row.pdf_page_end, status: "pending", characters: row.text.length })),
+      chunks_created: 0,
+      processed_chunks: 0,
+      failed_chunks: 0,
+      remaining_chunks: sourceBlocks.length,
+      status: "queued",
+      processing_status: "queued",
+      approval_status: "needs_review",
+      requires_medical_review: true,
+      active: false,
+      created_by: user.id,
+      created_by_email: user.email,
+    });
+    const batch = await ngProcessAylaResourceDocumentBatch({ db, document, user, batchSize: Math.max(1, Math.min(12, aylaNumber(req.body.batch_size, 6))) });
+    db.ai_training_documents.unshift(document);
+    ensureCrmArray(db, "approval_queue").unshift({ id: uuid(), action_id: document.id, action_type: "aylamed_resource_review", agent_name: "AylaMed Resource Indexer", channel: "ai_training_center", draft_content: `${title}: ${batch.createdItems.length} resource-index blocks created. Review and approve, then sync them to AylaMed.`, status: "pending", created_at: ngNowIso(), updated_at: ngNowIso() });
+    await writeCrmDb(db);
+    return res.json({ success: true, mode: "aylamed_resource_pipeline", document: ngEducationDocumentSummary(document), items_created: batch.createdItems.length, remaining_chunks: document.remaining_chunks, approval_required: true, message: "Resource index created as Needs Review. Approval does not change LMS/CRM users or LMS leaderboard." });
+  } catch (error) {
+    console.error("AylaMed resource import error:", error);
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
 
 for (const [collectionKey, config] of Object.entries(AYLA_COLLECTIONS)) {
   aylaRegisterCrud(collectionKey, config);
