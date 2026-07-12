@@ -47847,7 +47847,7 @@ function ngStartBillingExpiryRunner() {
 // - Frontend can connect to these routes later with VITE_API_BASE_URL pointing to this backend.
 // -----------------------------------------------------------------------------
 
-const AYLA_BACKEND_BUILD = "aylamed-smart-tutor-notebook-memory-v190E";
+const AYLA_BACKEND_BUILD = "aylamed-smart-tutor-notebook-ocr-v190F";
 
 const AYLA_EXAM_TRACKS = [
   "USMLE Step 1",
@@ -50304,6 +50304,13 @@ app.get("/api/ayla/health", async (req, res) => {
         real_system_baselines: true,
         partner_lifecycle: true,
         community_moderation: true,
+        smart_dynamic_notebooks: true,
+        notebook_version_history: true,
+        notebook_search: true,
+        notebook_flashcard_generation: true,
+        notebook_archive_and_soft_delete: true,
+        scanned_pdf_ocr_pipeline: true,
+        scanned_pdf_ocr_provider_configured: Boolean(process.env.AYLA_OCR_ENDPOINT),
         lms_crm_operational_writes: false,
       },
     });
@@ -50327,6 +50334,14 @@ app.get("/api/ayla/routes", (req, res) => {
       "POST /api/ayla/auth/reset-password",
       "GET /api/ayla/auth/me",
       "GET|PUT /api/ayla/profile",
+      "GET|POST /api/ayla/students/:studentId/notebooks",
+      "PUT /api/ayla/students/:studentId/notebooks/:id",
+      "PATCH /api/ayla/students/:studentId/notebooks/:id/archive",
+      "DELETE /api/ayla/students/:studentId/notebooks/:id (soft delete; versions retained)",
+      "GET /api/ayla/students/:studentId/notebooks/:id/versions",
+      "POST /api/ayla/students/:studentId/notebooks/:id/restore/:version",
+      "GET /api/ayla/students/:studentId/notebooks/search",
+      "POST /api/ayla/students/:studentId/notebooks/:id/generate-flashcards",
       "GET /api/ayla/students/:studentId/daily-workspace",
       "POST /api/ayla/students/:studentId/daily-workspace/rebuild",
       "POST /api/ayla/students/:studentId/question-attempts",
@@ -51291,6 +51306,8 @@ function aylaV189TrainingRecords(item = {}, document = {}) {
       front: record.front,
       back: record.back,
       estimatedMinutes: record.estimated_minutes,
+      authorizationStatus: record.authorization_status || record.authorizationStatus || structured.authorization_status || structured.authorizationStatus || item.authorization_status || item.authorizationStatus || document.authorization_status || document.authorizationStatus || "pending_review",
+      sourceAccessMode: record.source_access_mode || record.sourceAccessMode || structured.source_access_mode || structured.sourceAccessMode || item.source_access_mode || item.sourceAccessMode || document.source_access_mode || document.sourceAccessMode || "protected",
       approved: true,
       verificationStatus: "approved_ai_training_center",
       sourceTrainingItemId: item.id,
@@ -52988,7 +53005,7 @@ app.post("/api/ayla/admin/resources/register-vimeo", async (req, res) => {
     const db = await readAylaDb();
     aylaEnsureSeedData(db);
     if (!req.body.vimeoId && !req.body.vimeoUrl && !req.body.vimeo_url) return aylaSendError(res, 400, "Vimeo ID or Vimeo URL is required");
-    const stored = aylaV190StoreImportedResource(db, { ...req.body, type: "vimeo_video", provider: "Vimeo", approved: req.body.approved !== false, verificationStatus: "admin_registered" });
+    const stored = aylaV190StoreImportedResource(db, { ...req.body, type: "vimeo_video", provider: "Vimeo", approved: req.body.approved !== false, verificationStatus: "admin_registered", authorizationStatus: req.body.authorizationStatus || req.body.authorization_status || "admin_verified", sourceAccessMode: req.body.sourceAccessMode || req.body.source_access_mode || "protected" });
     const resource = stored.resource;
     await aylaLog(db, "resource", "Vimeo resource registered", { resourceId: resource.id, vimeoId: resource.vimeoId });
     await writeAylaDb(db);
@@ -53539,7 +53556,7 @@ app.post("/api/ayla/study-partners/requests/:id/report", async (req, res) => {
 // source-linked and permanently versioned. It never reads or writes LMS notes.
 const AYLA_NOTE_BLOCK_TYPES = new Set(["heading", "numbered_point", "text", "quote", "book_source", "question_source", "video_clip", "diagram", "drawing"]);
 function aylaV190NotebookMemory(db, student) {
-  const rows = aylaValues(db,"aylaNotebooks").filter((row)=>String(row.studentId)===String(student.id)&&!row.archivedAt);
+  const rows = aylaValues(db,"aylaNotebooks").filter((row)=>String(row.studentId)===String(student.id)&&!row.archivedAt&&!row.deletedAt);
   const topics=[...new Set(rows.flatMap((row)=>[row.system,row.topic,...aylaCleanArray(row.tags)]).map((x)=>aylaV189CleanText(x)).filter(Boolean))].slice(0,20);
   const textBlocks=rows.flatMap((row)=>(Array.isArray(row.blocks)?row.blocks:[]).filter((block)=>["heading","numbered_point","text","quote"].includes(block.type)&&block.text).map((block)=>({notebookId:row.id,system:row.system,topic:row.topic,text:block.text}))).slice(-50);
   return { notebookCount:rows.length, savedConceptCount:textBlocks.length, topics, recentConcepts:textBlocks.slice(-8).map((row)=>({notebookId:row.notebookId,system:row.system,topic:row.topic,text:String(row.text).slice(0,180)})) };
@@ -53586,12 +53603,63 @@ function aylaV190SaveNotebookVersion(db, notebook, reason = "saved") {
   const version = { id: aylaId("AYLA-NV"), notebookId: notebook.id, studentId: notebook.studentId, examTrackId: notebook.examTrackId, version: versions.length + 1, reason, title: notebook.title, system: notebook.system, topic: notebook.topic, tags: notebook.tags, blocks: JSON.parse(JSON.stringify(notebook.blocks || [])), createdAt: aylaNow() };
   aylaSetItem(db, "aylaNotebookVersions", version); notebook.currentVersion = version.version; return version;
 }
-app.get("/api/ayla/students/:studentId/notebooks", async (req, res) => { try { const { student, db } = await aylaV189RequireStudent(req, req.params.studentId); const notebooks = aylaValues(db,"aylaNotebooks").filter((row)=>String(row.studentId)===String(student.id)&&!row.archivedAt).sort((a,b)=>String(b.updatedAt).localeCompare(String(a.updatedAt))); return aylaSendOk(res,{notebooks}); } catch(error){ return aylaSendError(res,error.statusCode||500,error.message); } });
+app.get("/api/ayla/students/:studentId/notebooks", async (req, res) => {
+  try {
+    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId);
+    const includeArchived = String(req.query.includeArchived || req.query.include_archived || "false").toLowerCase() === "true";
+    const notebooks = aylaValues(db, "aylaNotebooks")
+      .filter((row) => String(row.studentId) === String(student.id))
+      .filter((row) => !row.deletedAt)
+      .filter((row) => includeArchived || !row.archivedAt)
+      .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    return aylaSendOk(res, { notebooks, includeArchived });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
 app.post("/api/ayla/students/:studentId/notebooks", async (req, res) => { try { const { student, db } = await aylaV189RequireStudent(req, req.params.studentId); const examTrackId=aylaCanonicalExamTrack(student.examTrackId||student.exam); const blocks=(Array.isArray(req.body.blocks)?req.body.blocks:[]).slice(0,200).map(aylaV190CleanNoteBlock); const errors=aylaV190ValidateNoteSources(db,student,blocks); if(errors.length)return aylaSendError(res,400,"Notebook contains invalid sources",errors); const notebook={id:aylaId("AYLA-NOTE"),studentId:student.id,userId:student.ayla_user_id||student.user_id||"",examTrackId,title:aylaV189CleanText(req.body.title||"Untitled medical note").slice(0,240),system:aylaV189CleanText(req.body.system||"General").slice(0,120),topic:aylaV189CleanText(req.body.topic||"").slice(0,240),tags:aylaCleanArray(req.body.tags).slice(0,30),paperStyle:aylaV189CleanText(req.body.paperStyle||"ruled"),inkStyle:aylaV189CleanText(req.body.inkStyle||"pen"),blocks,createdAt:aylaNow(),updatedAt:aylaNow()}; const version=aylaV190SaveNotebookVersion(db,notebook,"created"); aylaSetItem(db,"aylaNotebooks",notebook); aylaV189RecordActivity(db,student.id,"notebook_created",{notebookId:notebook.id,version:version.version}); await writeAylaDb(db); return aylaSendOk(res,{notebook,version},201); } catch(error){return aylaSendError(res,error.statusCode||500,error.message);} });
-app.put("/api/ayla/students/:studentId/notebooks/:id", async (req, res) => { try { const { student, db }=await aylaV189RequireStudent(req,req.params.studentId); const notebook=aylaGetItem(db,"aylaNotebooks",req.params.id); if(!notebook||String(notebook.studentId)!==String(student.id))return aylaSendError(res,404,"Notebook not found"); const blocks=(Array.isArray(req.body.blocks)?req.body.blocks:notebook.blocks||[]).slice(0,200).map(aylaV190CleanNoteBlock); const errors=aylaV190ValidateNoteSources(db,student,blocks); if(errors.length)return aylaSendError(res,400,"Notebook contains invalid sources",errors); notebook.title=aylaV189CleanText(req.body.title??notebook.title).slice(0,240); notebook.system=aylaV189CleanText(req.body.system??notebook.system).slice(0,120); notebook.topic=aylaV189CleanText(req.body.topic??notebook.topic).slice(0,240); notebook.tags=req.body.tags!==undefined?aylaCleanArray(req.body.tags).slice(0,30):notebook.tags; notebook.paperStyle=aylaV189CleanText(req.body.paperStyle||notebook.paperStyle||"ruled"); notebook.inkStyle=aylaV189CleanText(req.body.inkStyle||notebook.inkStyle||"pen"); notebook.blocks=blocks; notebook.updatedAt=aylaNow(); const version=aylaV190SaveNotebookVersion(db,notebook,"saved"); aylaSetItem(db,"aylaNotebooks",notebook); aylaV189RecordActivity(db,student.id,"notebook_saved",{notebookId:notebook.id,version:version.version}); await writeAylaDb(db); return aylaSendOk(res,{notebook,version}); } catch(error){return aylaSendError(res,error.statusCode||500,error.message);} });
-app.get("/api/ayla/students/:studentId/notebooks/:id/versions", async (req,res)=>{try{const {student,db}=await aylaV189RequireStudent(req,req.params.studentId);const notebook=aylaGetItem(db,"aylaNotebooks",req.params.id);if(!notebook||String(notebook.studentId)!==String(student.id))return aylaSendError(res,404,"Notebook not found");const versions=aylaValues(db,"aylaNotebookVersions").filter((row)=>String(row.notebookId)===String(notebook.id)).sort((a,b)=>Number(b.version)-Number(a.version));return aylaSendOk(res,{versions});}catch(error){return aylaSendError(res,error.statusCode||500,error.message);}});
-app.post("/api/ayla/students/:studentId/notebooks/:id/restore/:version",async(req,res)=>{try{const{student,db}=await aylaV189RequireStudent(req,req.params.studentId);const notebook=aylaGetItem(db,"aylaNotebooks",req.params.id);if(!notebook||String(notebook.studentId)!==String(student.id))return aylaSendError(res,404,"Notebook not found");const source=aylaValues(db,"aylaNotebookVersions").find((row)=>String(row.notebookId)===String(notebook.id)&&Number(row.version)===Number(req.params.version));if(!source)return aylaSendError(res,404,"Notebook version not found");notebook.title=source.title;notebook.system=source.system;notebook.topic=source.topic;notebook.tags=source.tags;notebook.blocks=JSON.parse(JSON.stringify(source.blocks||[]));notebook.updatedAt=aylaNow();const version=aylaV190SaveNotebookVersion(db,notebook,`restored_from_v${source.version}`);aylaSetItem(db,"aylaNotebooks",notebook);await writeAylaDb(db);return aylaSendOk(res,{notebook,version});}catch(error){return aylaSendError(res,error.statusCode||500,error.message);}});
-app.get("/api/ayla/students/:studentId/notebooks/search",async(req,res)=>{try{const{student,db}=await aylaV189RequireStudent(req,req.params.studentId);const query=aylaV189CleanText(req.query.q||"").toLowerCase();if(query.length<2)return aylaSendOk(res,{results:[]});const results=[];for(const note of aylaValues(db,"aylaNotebooks").filter((row)=>String(row.studentId)===String(student.id)&&!row.archivedAt)){for(const block of (Array.isArray(note.blocks)?note.blocks:[])){const hay=`${note.title} ${note.system} ${note.topic} ${aylaCleanArray(note.tags).join(" ")} ${block.text||""} ${block.sourceTitle||""} ${block.sourceReference||""}`.toLowerCase();if(hay.includes(query))results.push({notebookId:note.id,notebookTitle:note.title,system:note.system,topic:note.topic,blockId:block.id,blockType:block.type,text:block.text||block.sourceTitle||block.sourceReference||"",sourceReference:block.sourceReference||""});if(results.length>=80)break;}if(results.length>=80)break;}return aylaSendOk(res,{query,count:results.length,results});}catch(error){return aylaSendError(res,error.statusCode||500,error.message);}});
+app.put("/api/ayla/students/:studentId/notebooks/:id", async (req, res) => { try { const { student, db }=await aylaV189RequireStudent(req,req.params.studentId); const notebook=aylaGetItem(db,"aylaNotebooks",req.params.id); if(!notebook||String(notebook.studentId)!==String(student.id)||notebook.deletedAt)return aylaSendError(res,404,"Notebook not found"); const blocks=(Array.isArray(req.body.blocks)?req.body.blocks:notebook.blocks||[]).slice(0,200).map(aylaV190CleanNoteBlock); const errors=aylaV190ValidateNoteSources(db,student,blocks); if(errors.length)return aylaSendError(res,400,"Notebook contains invalid sources",errors); notebook.title=aylaV189CleanText(req.body.title??notebook.title).slice(0,240); notebook.system=aylaV189CleanText(req.body.system??notebook.system).slice(0,120); notebook.topic=aylaV189CleanText(req.body.topic??notebook.topic).slice(0,240); notebook.tags=req.body.tags!==undefined?aylaCleanArray(req.body.tags).slice(0,30):notebook.tags; notebook.paperStyle=aylaV189CleanText(req.body.paperStyle||notebook.paperStyle||"ruled"); notebook.inkStyle=aylaV189CleanText(req.body.inkStyle||notebook.inkStyle||"pen"); notebook.blocks=blocks; notebook.updatedAt=aylaNow(); const version=aylaV190SaveNotebookVersion(db,notebook,"saved"); aylaSetItem(db,"aylaNotebooks",notebook); aylaV189RecordActivity(db,student.id,"notebook_saved",{notebookId:notebook.id,version:version.version}); await writeAylaDb(db); return aylaSendOk(res,{notebook,version}); } catch(error){return aylaSendError(res,error.statusCode||500,error.message);} });
+
+app.patch("/api/ayla/students/:studentId/notebooks/:id/archive", async (req, res) => {
+  try {
+    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId);
+    const notebook = aylaGetItem(db, "aylaNotebooks", req.params.id);
+    if (!notebook || String(notebook.studentId) !== String(student.id) || notebook.deletedAt) return aylaSendError(res, 404, "Notebook not found");
+    const archived = req.body.archived !== false;
+    notebook.archivedAt = archived ? aylaNow() : null;
+    notebook.status = archived ? "archived" : "active";
+    notebook.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaNotebooks", notebook);
+    aylaV189RecordActivity(db, student.id, archived ? "notebook_archived" : "notebook_unarchived", { notebookId: notebook.id });
+    await writeAylaDb(db);
+    return aylaSendOk(res, { notebook, archived });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.delete("/api/ayla/students/:studentId/notebooks/:id", async (req, res) => {
+  try {
+    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId);
+    const notebook = aylaGetItem(db, "aylaNotebooks", req.params.id);
+    if (!notebook || String(notebook.studentId) !== String(student.id) || notebook.deletedAt) return aylaSendError(res, 404, "Notebook not found");
+    notebook.deletedAt = aylaNow();
+    notebook.archivedAt = notebook.archivedAt || notebook.deletedAt;
+    notebook.status = "deleted";
+    notebook.updatedAt = aylaNow();
+    const version = aylaV190SaveNotebookVersion(db, notebook, "soft_deleted");
+    aylaSetItem(db, "aylaNotebooks", notebook);
+    aylaV189RecordActivity(db, student.id, "notebook_soft_deleted", { notebookId: notebook.id, version: version.version, versionsRetained: true });
+    await writeAylaDb(db);
+    return aylaSendOk(res, { deleted: true, softDelete: true, versionsRetained: true, notebookId: notebook.id });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.get("/api/ayla/students/:studentId/notebooks/:id/versions", async (req,res)=>{try{const {student,db}=await aylaV189RequireStudent(req,req.params.studentId);const notebook=aylaGetItem(db,"aylaNotebooks",req.params.id);if(!notebook||String(notebook.studentId)!==String(student.id)||notebook.deletedAt)return aylaSendError(res,404,"Notebook not found");const versions=aylaValues(db,"aylaNotebookVersions").filter((row)=>String(row.notebookId)===String(notebook.id)).sort((a,b)=>Number(b.version)-Number(a.version));return aylaSendOk(res,{versions});}catch(error){return aylaSendError(res,error.statusCode||500,error.message);}});
+app.post("/api/ayla/students/:studentId/notebooks/:id/restore/:version",async(req,res)=>{try{const{student,db}=await aylaV189RequireStudent(req,req.params.studentId);const notebook=aylaGetItem(db,"aylaNotebooks",req.params.id);if(!notebook||String(notebook.studentId)!==String(student.id)||notebook.deletedAt)return aylaSendError(res,404,"Notebook not found");const source=aylaValues(db,"aylaNotebookVersions").find((row)=>String(row.notebookId)===String(notebook.id)&&Number(row.version)===Number(req.params.version));if(!source)return aylaSendError(res,404,"Notebook version not found");notebook.title=source.title;notebook.system=source.system;notebook.topic=source.topic;notebook.tags=source.tags;notebook.blocks=JSON.parse(JSON.stringify(source.blocks||[]));notebook.updatedAt=aylaNow();const version=aylaV190SaveNotebookVersion(db,notebook,`restored_from_v${source.version}`);aylaSetItem(db,"aylaNotebooks",notebook);await writeAylaDb(db);return aylaSendOk(res,{notebook,version});}catch(error){return aylaSendError(res,error.statusCode||500,error.message);}});
+app.get("/api/ayla/students/:studentId/notebooks/search",async(req,res)=>{try{const{student,db}=await aylaV189RequireStudent(req,req.params.studentId);const query=aylaV189CleanText(req.query.q||"").toLowerCase();if(query.length<2)return aylaSendOk(res,{results:[]});const results=[];for(const note of aylaValues(db,"aylaNotebooks").filter((row)=>String(row.studentId)===String(student.id)&&!row.archivedAt&&!row.deletedAt)){for(const block of (Array.isArray(note.blocks)?note.blocks:[])){const hay=`${note.title} ${note.system} ${note.topic} ${aylaCleanArray(note.tags).join(" ")} ${block.text||""} ${block.sourceTitle||""} ${block.sourceReference||""}`.toLowerCase();if(hay.includes(query))results.push({notebookId:note.id,notebookTitle:note.title,system:note.system,topic:note.topic,blockId:block.id,blockType:block.type,text:block.text||block.sourceTitle||block.sourceReference||"",sourceReference:block.sourceReference||""});if(results.length>=80)break;}if(results.length>=80)break;}return aylaSendOk(res,{query,count:results.length,results});}catch(error){return aylaSendError(res,error.statusCode||500,error.message);}});
 app.post("/api/ayla/students/:studentId/notebooks/:id/generate-flashcards", async (req, res) => {
   try {
     const { student, db } = await aylaV189RequireStudent(req, req.params.studentId);
@@ -53755,6 +53823,70 @@ async function ngExtractPdfPagesV189(buffer) {
   }
 }
 
+
+function ngAylaNormalizeOcrPageTexts(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((row) => ngNormalizeTrainingText(typeof row === "string" ? row : row?.text || row?.content || ""))
+    .filter(Boolean);
+}
+
+async function ngAylaExtractWithConfiguredOcr({ buffer, filename, mimeType, body = {} }) {
+  const suppliedPages = ngAylaNormalizeOcrPageTexts(body.ocr_page_texts || body.ocrPages || body.page_texts);
+  const suppliedText = ngNormalizeTrainingText(body.ocr_text || body.ocrText || body.extracted_ocr_text || "");
+  if (suppliedPages.length || suppliedText) {
+    const pageTexts = suppliedPages.length ? suppliedPages : [suppliedText];
+    return {
+      text: ngNormalizeTrainingText(pageTexts.join("\n\n")),
+      page_texts: pageTexts,
+      pages: pageTexts.length,
+      method: "client-supplied-ocr",
+      provider: "client",
+    };
+  }
+
+  const endpoint = String(process.env.AYLA_OCR_ENDPOINT || "").trim();
+  if (!endpoint) return null;
+  const apiKey = String(process.env.AYLA_OCR_API_KEY || "").trim();
+  const timeoutMs = Math.max(30000, Math.min(300000, Number(process.env.AYLA_OCR_TIMEOUT_MS || 180000)));
+  const response = await axios.post(endpoint, {
+    filename,
+    mime_type: mimeType,
+    file_base64: buffer.toString("base64"),
+    output: "page_texts",
+    preserve_page_numbers: true,
+  }, {
+    timeout: timeoutMs,
+    maxBodyLength: Infinity,
+    maxContentLength: Infinity,
+    headers: {
+      "Content-Type": "application/json",
+      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+    },
+  });
+
+  const payload = response?.data || {};
+  const pageTexts = ngAylaNormalizeOcrPageTexts(payload.page_texts || payload.pages || payload.results);
+  const text = ngNormalizeTrainingText(payload.text || payload.extracted_text || pageTexts.join("\n\n"));
+  if (!text) throw new Error("Configured OCR provider returned no readable text");
+  return {
+    text,
+    page_texts: pageTexts.length ? pageTexts : [text],
+    pages: Number(payload.page_count || payload.total_pages || pageTexts.length || 1),
+    method: "configured-ocr-provider",
+    provider: payload.provider || endpoint,
+  };
+}
+
+function ngAylaPdfLooksScanned(extraction = {}, quality = {}) {
+  const pages = Math.max(1, Number(extraction.pages || extraction.page_texts?.length || 1));
+  const textLength = String(extraction.text || "").trim().length;
+  const readablePages = Array.isArray(extraction.page_texts)
+    ? extraction.page_texts.filter((row) => String(row || "").trim().length >= 80).length
+    : 0;
+  return quality.ok === false || textLength / pages < 120 || (pages > 2 && readablePages / pages < 0.5);
+}
+
 function ngAylaResourceJsonShape(kind = "book") {
   const common = `"resource_type":"${kind}","resource_name":"","edition":"","provider":"","exam_track":"All","system":"","topic":"","subtopics":[],"concepts":[],"difficulty":"","high_yield_priority":"","estimated_minutes":0,"pdf_page_start":null,"pdf_page_end":null,"printed_page_start":null,"printed_page_end":null,"page_range":"","exact_reference":""`;
   if (kind === "video_transcript" || kind === "vimeo_video") return `{${common},"title":"","vimeo_id":"","vimeo_url":"","video_start_seconds":0,"video_end_seconds":0,"timestamp":"","transcript_excerpt":""}`;
@@ -53802,6 +53934,9 @@ async function ngProcessAylaResourceDocumentBatch({ db, document, user, batchSiz
         pdf_page_start: blockRecord.pdf_page_start || null,
         pdf_page_end: blockRecord.pdf_page_end || null,
         source_excerpt: String(blockRecord.text || "").slice(0, 900),
+        authorization_status: document.authorization_status || "pending_review",
+        source_access_mode: document.source_access_mode || "protected",
+        ocr_used: Boolean(document.ocr_used),
         ai_model: result.model,
         confidence,
         active: false,
@@ -53850,13 +53985,43 @@ app.post("/admin/crm/ai-training/import-aylamed-resource-document", async (req, 
     const title = String(req.body.title || filename.replace(/\.[^.]+$/, "") || "AylaMed Resource").trim();
     const kind = aylaV189ResourceType(req.body.resource_kind || req.body.resource_type || "book");
     let extraction = { text: String(req.body.extracted_text || ""), page_texts: [], pages: null, method: "provided_text" };
+    let sourceBuffer = null;
+    const isPdf = mimeType.includes("pdf") || filename.toLowerCase().endsWith(".pdf");
     if (!extraction.text && req.body.file_base64) {
-      const buffer = ngDecodeBase64File(req.body.file_base64);
-      extraction = mimeType.includes("pdf") || filename.toLowerCase().endsWith(".pdf") ? await ngExtractPdfPagesV189(buffer) : { text: buffer.toString("utf8"), page_texts: [], pages: null, method: "plain_text" };
+      sourceBuffer = ngDecodeBase64File(req.body.file_base64);
+      extraction = isPdf ? await ngExtractPdfPagesV189(sourceBuffer) : { text: sourceBuffer.toString("utf8"), page_texts: [], pages: null, method: "plain_text" };
     }
-    const clean = ngNormalizeTrainingText(extraction.text || "");
-    const quality = ngIsReadableTrainingText(clean, { min_chars: 200, min_words: 20 });
-    if (!quality.ok) return res.status(422).json({ success: false, error: `AylaMed resource rejected: ${quality.reason}`, extraction: { method: extraction.method, pages: extraction.pages }, quality: quality.quality });
+    let clean = ngNormalizeTrainingText(extraction.text || "");
+    let quality = ngIsReadableTrainingText(clean, { min_chars: 200, min_words: 20 });
+    const ocrRequested = Boolean(req.body.ocr_requested || req.body.use_ocr || req.body.scanned_pdf);
+    const scannedLikely = isPdf && ngAylaPdfLooksScanned(extraction, quality);
+    let ocrAttempted = false;
+    let ocrError = null;
+    if (isPdf && sourceBuffer && (ocrRequested || scannedLikely)) {
+      ocrAttempted = true;
+      try {
+        const ocrExtraction = await ngAylaExtractWithConfiguredOcr({ buffer: sourceBuffer, filename, mimeType, body: req.body });
+        if (ocrExtraction?.text) {
+          const ocrClean = ngNormalizeTrainingText(ocrExtraction.text);
+          const ocrQuality = ngIsReadableTrainingText(ocrClean, { min_chars: 200, min_words: 20 });
+          if (ocrQuality.ok || !quality.ok || ocrClean.length > clean.length) {
+            extraction = ocrExtraction;
+            clean = ocrClean;
+            quality = ocrQuality;
+          }
+        }
+      } catch (error) {
+        ocrError = error.message;
+      }
+    }
+    if (!quality.ok) return res.status(422).json({
+      success: false,
+      code: "AYLA_OCR_REQUIRED",
+      error: `AylaMed resource rejected: ${quality.reason}`,
+      message: "This PDF appears scanned or unreadable. Configure AYLA_OCR_ENDPOINT, upload an OCR/text PDF, or provide OCR text/page_texts.",
+      extraction: { method: extraction.method, pages: extraction.pages, scanned_likely: scannedLikely, ocr_attempted: ocrAttempted, ocr_provider_configured: Boolean(process.env.AYLA_OCR_ENDPOINT), ocr_error: ocrError },
+      quality: quality.quality,
+    });
     const sourceBlocks = [];
     if (Array.isArray(extraction.page_texts) && extraction.page_texts.some(Boolean)) {
       extraction.page_texts.forEach((pageText, index) => {
@@ -53880,6 +54045,11 @@ app.post("/admin/crm/ai-training/import-aylamed-resource-document", async (req, 
       edition: String(req.body.edition || "").trim(),
       provider: String(req.body.provider || "").trim(),
       exam_track: String(req.body.exam_track || req.body.exam || "All").trim(),
+      authorization_status: String(req.body.authorization_status || req.body.authorizationStatus || "pending_review").trim().toLowerCase(),
+      source_access_mode: String(req.body.source_access_mode || req.body.sourceAccessMode || "protected").trim().toLowerCase(),
+      ocr_requested: Boolean(req.body.ocr_requested || req.body.use_ocr || req.body.scanned_pdf),
+      ocr_used: String(extraction.method || "").includes("ocr"),
+      ocr_provider: extraction.provider || null,
       extraction_method: extraction.method,
       pages: extraction.pages || null,
       total_characters: clean.length,
