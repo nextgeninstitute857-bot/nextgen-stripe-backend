@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v184-safe-streak-bonus";
+const NEXTGEN_BACKEND_BUILD = "v190g-reusable-sunday-class";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -44943,17 +44943,121 @@ function ngRelinkRoadmapDayDependencies(db, { courseId = "", fromDayId = "", toD
   return counts;
 }
 
+function ngRoadmapActiveScheduleException(roadmap = {}, day = {}) {
+  const exceptions = Array.isArray(roadmap.schedule_exceptions)
+    ? roadmap.schedule_exceptions
+    : Array.isArray(roadmap.settings?.schedule_exceptions)
+      ? roadmap.settings.schedule_exceptions
+      : [];
+
+  return exceptions.find((item) => {
+    return item?.active !== false &&
+      String(item.anchor_day_id || item.day_id || "") === String(day.id || "") &&
+      /^\d{4}-\d{2}-\d{2}$/.test(String(item.override_date || item.move_to_date || ""));
+  }) || null;
+}
+
+function ngReplaceScheduledDateValue(value, fromDate, toDate) {
+  if (typeof value !== "string" || !fromDate || !toDate) return { changed: false, value };
+  if (value === fromDate) return { changed: true, value: toDate };
+  if (value.startsWith(`${fromDate}T`)) return { changed: true, value: `${toDate}${value.slice(fromDate.length)}` };
+  return { changed: false, value };
+}
+
+function ngShiftLinkedScheduleMetadata(db, { courseId = "", day = null, fromDate = "", toDate = "", actorId = null } = {}) {
+  const cleanCourseId = String(courseId || "").trim();
+  const dayId = String(day?.id || "").trim();
+  const sessionIds = new Set([
+    day?.live_session_id,
+    day?.session_id,
+    day?.pushed_live_session_id,
+    day?.pushed_from_live_session_id,
+  ].map((value) => String(value || "").trim()).filter(Boolean));
+  const now = new Date().toISOString();
+  const scheduleFields = [
+    "date",
+    "scheduled_date",
+    "schedule_date",
+    "assignment_date",
+    "available_date",
+    "target_date",
+    "due_date",
+    "scheduled_for",
+    "starts_at",
+    "start_at",
+    "opens_at",
+    "available_at",
+    "due_at",
+    "ends_at",
+    "closes_at",
+    "deadline",
+  ];
+  const buckets = [
+    "flashcards",
+    "flashcardProgress",
+    "assessments",
+    "assessmentAttempts",
+    "notes",
+    "recordings",
+    "roadmapProgress",
+    "dailyTaskProgress",
+    "pointEvents",
+    "weakConceptLogs",
+    "adaptiveAssignments",
+    "adaptiveFlashcardQueues",
+  ];
+  const counts = Object.fromEntries(buckets.map((key) => [key, 0]));
+
+  const isLinked = (item = {}, key = "") => {
+    const itemCourseId = String(item.course_id || item.courseId || "").trim();
+    if (itemCourseId && cleanCourseId && itemCourseId !== cleanCourseId) return false;
+    if (String(item.roadmap_day_id || "") === dayId) return true;
+    if (String(item.day_id || "") === dayId) return true;
+    if (Array.isArray(item.source_roadmap_day_ids) && item.source_roadmap_day_ids.some((id) => String(id || "") === dayId)) return true;
+    if (sessionIds.has(String(item.session_id || item.live_session_id || ""))) return true;
+    return Boolean(dayId && String(key || "").includes(dayId));
+  };
+
+  for (const bucketName of buckets) {
+    const bucket = db[bucketName] || {};
+    for (const [key, item] of Object.entries(bucket)) {
+      if (!item || typeof item !== "object" || !isLinked(item, key)) continue;
+      let changed = false;
+      for (const field of scheduleFields) {
+        if (item[field] === undefined || item[field] === null) continue;
+        const replacement = ngReplaceScheduledDateValue(item[field], fromDate, toDate);
+        if (!replacement.changed) continue;
+        item[field] = replacement.value;
+        changed = true;
+      }
+      if (!changed) continue;
+      item.updated_by = actorId || item.updated_by || null;
+      item.updated_at = now;
+      counts[bucketName] += 1;
+    }
+  }
+
+  return counts;
+}
+
 function ngRecalculateRoadmapSchedule(db, roadmap, { startDate = "", skipSundays = true } = {}) {
   if (!roadmap || !Array.isArray(roadmap.days) || !roadmap.days.length) return roadmap;
   const firstDate = startDate || roadmap.start_date || roadmap.settings?.start_date || roadmap.days[0]?.date || todayKey();
   let cursor = ngNextStudyDate(new Date(`${firstDate}T00:00:00`), skipSundays);
   roadmap.days.forEach((day, index) => {
     cursor = ngNextStudyDate(cursor, skipSundays);
+    const scheduleException = ngRoadmapActiveScheduleException(roadmap, day);
+    const scheduledDate = String(scheduleException?.override_date || scheduleException?.move_to_date || "").trim();
+    const effectiveCursor = scheduledDate ? new Date(`${scheduledDate}T00:00:00`) : new Date(cursor);
     day.day_number = index + 1;
     day.order = index + 1;
     day.week_number = Math.ceil((index + 1) / 7);
-    day.date = dateOnly(cursor);
+    day.date = dateOnly(effectiveCursor);
+    day.scheduled_date = day.date;
+    day.schedule_exception_id = scheduleException?.id || null;
+    day.schedule_exception_active = Boolean(scheduleException);
     day.updated_at = new Date().toISOString();
+    cursor = new Date(effectiveCursor);
     cursor.setDate(cursor.getDate() + 1);
   });
   ngSyncLinkedLiveSessionsForRoadmap(db, roadmap);
@@ -45151,6 +45255,300 @@ app.post("/admin/roadmap/import-master-map", async (req, res) => {
     await writeLiveDb(db);
     res.json({ success: true, template, count: rows.length, by_system: bySystem, system_sequence: systemSequence, first_system: systemSequence[0] || rows[0]?.system || null, map: { ...db.roadmapMasterMaps[template], rows: undefined }, message: `Master map imported: ${rows.length} rows` });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+// v190g port: this route is isolated to LMS roadmap scheduling; all supplied
+// v190f AylaMed flows remain unchanged.
+// v190g: reusable Sunday-class exception.
+// The admin roadmap can place the next Monday teaching packet on the preceding
+// Sunday. Every later teaching day advances, later Sundays remain skipped, and
+// roadmap/live-session ids remain unchanged so notes, recordings, assessments,
+// progress, attempts, flashcards and pointEvents stay linked.
+app.post("/admin/roadmap/:dayId/advance-schedule", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.roadmap.manage");
+    const confirmation = String(req.body.confirm || "").trim().toUpperCase();
+    if (confirmation !== "ADVANCE_ONE_TEACHING_DAY") {
+      return res.status(400).json({
+        success: false,
+        error: "Exact confirmation is required: ADVANCE_ONE_TEACHING_DAY",
+      });
+    }
+
+    const db = await readLiveDb();
+    const courseId = String(req.body.course_id || req.body.courseId || req.query.course_id || "").trim();
+    const moveToDate = String(req.body.move_to_date || req.body.target_date || "").slice(0, 10);
+    const expectedFromDate = String(req.body.expected_from_date || req.body.move_from_date || "").slice(0, 10);
+
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(moveToDate)) {
+      return res.status(400).json({ success: false, error: "move_to_date must be YYYY-MM-DD" });
+    }
+
+    const ref = ngFindAdminRoadmapDayRef(db, { courseId, dayId: req.params.dayId });
+    if (!ref.roadmap || !ref.day) return res.status(404).json({ success: false, error: "Roadmap item not found" });
+    if (ngRoadmapDayIsNoClass(ref.day)) {
+      return res.status(400).json({ success: false, error: "The anchor roadmap day is a holiday/cancelled placeholder" });
+    }
+
+    const roadmap = ref.roadmap;
+    const originalDate = String(ref.day.date || ref.day.scheduled_date || "").slice(0, 10);
+    const exceptionId = `advance_schedule:${courseId}:${ref.day.id}`;
+    const existingException = (Array.isArray(roadmap.schedule_exceptions) ? roadmap.schedule_exceptions : [])
+      .find((item) => String(item?.id || "") === exceptionId && item.active !== false);
+
+    if (existingException && String(existingException.override_date || "") === moveToDate) {
+      const existingAnnouncement = ngUpsertCourseAnnouncement(db, {
+        notification_key: exceptionId,
+        course_id: courseId,
+        type: "class_update",
+        priority: "high",
+        title: req.body.announcement_title || "Sunday class added — roadmap advanced",
+        content: req.body.announcement_content || `${ref.day.title || "The next scheduled lecture"} is scheduled for the selected Sunday. The next lesson moves to the original date, later teaching days advance by one teaching day, and future Sundays remain off.`,
+        action_url: "/student/live-sessions",
+        action_label: "View today’s session",
+        created_by: user.id,
+        updated_by: user.id,
+        metadata: { schedule_exception_id: exceptionId, anchor_day_id: ref.day.id, move_to_date: moveToDate },
+      });
+      await writeLiveDb(db);
+      return res.json({
+        success: true,
+        already_applied: true,
+        build: NEXTGEN_BACKEND_BUILD,
+        course_id: courseId,
+        anchor_day_id: ref.day.id,
+        move_to_date: moveToDate,
+        announcement: sanitizeAnnouncement(existingAnnouncement),
+        message: "This one-day roadmap advance was already applied. No second shift was created.",
+      });
+    }
+
+    if (expectedFromDate && originalDate !== expectedFromDate) {
+      return res.status(409).json({
+        success: false,
+        error: `Safety stop: anchor day is ${originalDate || "undated"}, not expected date ${expectedFromDate}`,
+      });
+    }
+
+    if (!originalDate) return res.status(400).json({ success: false, error: "Anchor roadmap day has no scheduled date" });
+    if (moveToDate >= originalDate) {
+      return res.status(400).json({ success: false, error: "move_to_date must be earlier than the current anchor date" });
+    }
+
+    const originalDateUtc = new Date(`${originalDate}T00:00:00Z`);
+    const moveToDateUtc = new Date(`${moveToDate}T00:00:00Z`);
+    const immediatelyPreviousDateUtc = new Date(originalDateUtc);
+    immediatelyPreviousDateUtc.setUTCDate(immediatelyPreviousDateUtc.getUTCDate() - 1);
+    const immediatelyPreviousDate = immediatelyPreviousDateUtc.toISOString().slice(0, 10);
+    if (originalDateUtc.getUTCDay() !== 1 || moveToDateUtc.getUTCDay() !== 0 || moveToDate !== immediatelyPreviousDate) {
+      return res.status(400).json({
+        success: false,
+        error: "Sunday-class safety requires a Monday teaching packet and the immediately preceding Sunday",
+        anchor_date: originalDate,
+        requested_sunday: moveToDate,
+      });
+    }
+
+    const occupiedRoadmapDay = (roadmap.days || []).find((day, index) => {
+      return index !== ref.index && !ngRoadmapDayIsNoClass(day) && String(day.date || day.scheduled_date || "").slice(0, 10) === moveToDate;
+    });
+    if (occupiedRoadmapDay) {
+      return res.status(409).json({
+        success: false,
+        error: "Safety stop: another active roadmap day already occupies the requested Sunday date",
+        occupied_day: sanitizeRoadmapDay(occupiedRoadmapDay),
+      });
+    }
+
+    const courseSessions = Object.values(db.liveSessions || {}).filter((session) => String(session?.course_id || "") === courseId);
+    const activeSessions = courseSessions.filter((session) => !ngSessionIsInternalTestOrHidden(session));
+    const targetSessions = activeSessions.filter((session) => {
+      return String(session.roadmap_day_id || "") === String(ref.day.id || "") ||
+        String(session.id || "") === String(ref.day.live_session_id || ref.day.session_id || "");
+    });
+    if (targetSessions.length !== 1) {
+      return res.status(409).json({
+        success: false,
+        error: `Safety stop: expected exactly one active live session for the anchor day, found ${targetSessions.length}`,
+        session_ids: targetSessions.map((session) => session.id),
+      });
+    }
+
+    const sundayConflict = activeSessions.find((session) => {
+      return String(session.id || "") !== String(targetSessions[0].id || "") &&
+        String(session.scheduled_date || "").slice(0, 10) === moveToDate;
+    });
+    if (sundayConflict) {
+      return res.status(409).json({
+        success: false,
+        error: "Safety stop: another active live session already exists on the requested Sunday date",
+        conflict_session_id: sundayConflict.id,
+      });
+    }
+
+    const affectedDays = (roadmap.days || []).slice(ref.index);
+    const beforeDates = new Map(affectedDays.map((day) => [String(day.id || ""), String(day.date || day.scheduled_date || "").slice(0, 10)]));
+    const beforeSessionIds = new Map();
+
+    for (const day of affectedDays) {
+      if (!day?.id || ngRoadmapDayIsNoClass(day)) continue;
+      const linked = activeSessions.filter((session) => {
+        return String(session.roadmap_day_id || "") === String(day.id || "") ||
+          String(session.id || "") === String(day.live_session_id || day.session_id || "");
+      });
+      if (linked.length !== 1) {
+        return res.status(409).json({
+          success: false,
+          error: `Safety stop: roadmap day ${day.id} has ${linked.length} active live sessions; no changes were made`,
+          roadmap_day_id: day.id,
+          session_ids: linked.map((session) => session.id),
+        });
+      }
+      beforeSessionIds.set(String(day.id), String(linked[0].id));
+    }
+
+    await ensureDataDir();
+    const backupDir = path.join(DATA_DIR, "backups");
+    await fs.mkdir(backupDir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const backupPath = path.join(backupDir, `live-session-db-before-one-day-advance-${stamp}.json`);
+    await fs.copyFile(LIVE_DB_PATH, backupPath);
+
+    const scheduleException = {
+      id: exceptionId,
+      type: "advance_teaching_schedule_from_anchor",
+      active: true,
+      course_id: courseId,
+      anchor_day_id: ref.day.id,
+      original_date: originalDate,
+      override_date: moveToDate,
+      skip_future_sundays: true,
+      preserve_roadmap_day_ids: true,
+      preserve_live_session_ids: true,
+      reason: String(req.body.reason || "Admin activated the reusable Sunday-class exception").trim(),
+      created_by: user.id,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    roadmap.schedule_exceptions = (Array.isArray(roadmap.schedule_exceptions) ? roadmap.schedule_exceptions : [])
+      .filter((item) => String(item?.id || "") !== exceptionId);
+    roadmap.schedule_exceptions.push(scheduleException);
+    roadmap.settings = { ...(roadmap.settings || {}), skip_sundays: true, schedule_exceptions: roadmap.schedule_exceptions };
+    roadmap.skip_sundays = true;
+
+    const startDate = roadmap.start_date || roadmap.settings?.start_date || roadmap.days?.[0]?.date || todayKey();
+    ngRecalculateRoadmapSchedule(db, roadmap, { startDate, skipSundays: true });
+
+    const dependencyDateUpdates = {};
+    let shiftedDays = 0;
+    for (const day of (roadmap.days || []).slice(ref.index)) {
+      const dayId = String(day.id || "");
+      const fromDate = beforeDates.get(dayId) || "";
+      const toDate = String(day.date || day.scheduled_date || "").slice(0, 10);
+      if (!fromDate || !toDate || fromDate === toDate) continue;
+      shiftedDays += 1;
+      const partial = ngShiftLinkedScheduleMetadata(db, {
+        courseId,
+        day,
+        fromDate,
+        toDate,
+        actorId: user.id,
+      });
+      for (const [key, value] of Object.entries(partial)) {
+        dependencyDateUpdates[key] = Number(dependencyDateUpdates[key] || 0) + Number(value || 0);
+      }
+    }
+
+    const afterActiveSessions = Object.values(db.liveSessions || {})
+      .filter((session) => String(session?.course_id || "") === courseId)
+      .filter((session) => !ngSessionIsInternalTestOrHidden(session));
+
+    for (const day of (roadmap.days || []).slice(ref.index)) {
+      if (!day?.id || ngRoadmapDayIsNoClass(day)) continue;
+      const beforeSessionId = beforeSessionIds.get(String(day.id));
+      const afterLinked = afterActiveSessions.filter((session) => String(session.roadmap_day_id || "") === String(day.id));
+      if (afterLinked.length !== 1 || String(afterLinked[0].id || "") !== String(beforeSessionId || "")) {
+        return res.status(409).json({
+          success: false,
+          error: `Safety stop before database write: live-session identity changed for roadmap day ${day.id}`,
+          roadmap_day_id: day.id,
+          expected_session_id: beforeSessionId || null,
+          actual_session_ids: afterLinked.map((session) => session.id),
+          backup_path: backupPath,
+        });
+      }
+    }
+
+    const anchorAfter = roadmap.days.find((day) => String(day.id || "") === String(ref.day.id || ""));
+    const anchorSessionAfter = afterActiveSessions.find((session) => String(session.roadmap_day_id || "") === String(ref.day.id || ""));
+    if (!anchorAfter || String(anchorAfter.date || "").slice(0, 10) !== moveToDate || String(anchorSessionAfter?.scheduled_date || "").slice(0, 10) !== moveToDate) {
+      return res.status(409).json({
+        success: false,
+        error: "Safety stop before database write: anchor roadmap day/session did not both move to the requested Sunday",
+        backup_path: backupPath,
+      });
+    }
+
+    const announcement = ngUpsertCourseAnnouncement(db, {
+      notification_key: exceptionId,
+      course_id: courseId,
+      type: "class_update",
+      priority: "high",
+      title: req.body.announcement_title || "Sunday class added — roadmap advanced",
+      content: req.body.announcement_content || `${anchorAfter.title || "The next scheduled lecture"} is scheduled for ${moveToDate}. The following lesson moves to ${originalDate}; all later teaching days advance by one teaching day while future Sundays remain off.`,
+      action_url: "/student/live-sessions",
+      action_label: "View today’s session",
+      created_by: user.id,
+      updated_by: user.id,
+      metadata: {
+        schedule_exception_id: exceptionId,
+        anchor_day_id: anchorAfter.id,
+        original_date: originalDate,
+        move_to_date: moveToDate,
+        shifted_days: shiftedDays,
+      },
+    });
+
+    roadmap.updated_by = user.id;
+    roadmap.updated_at = new Date().toISOString();
+    db.roadmaps[ref.courseId] = roadmap;
+    await writeLiveDb(db);
+
+    const preview = (roadmap.days || []).slice(ref.index, ref.index + 10).map((day) => ({
+      id: day.id,
+      day_number: day.day_number || day.order || null,
+      date: day.date || null,
+      title: day.title || null,
+      status: day.status || day.roadmap_status || "scheduled",
+      live_session_id: day.live_session_id || day.session_id || null,
+    }));
+
+    res.json({
+      success: true,
+      already_applied: false,
+      build: NEXTGEN_BACKEND_BUILD,
+      course_id: courseId,
+      anchor_day_id: anchorAfter.id,
+      anchor_session_id: anchorSessionAfter.id,
+      original_date: originalDate,
+      move_to_date: moveToDate,
+      shifted_roadmap_days: shiftedDays,
+      preserved_live_session_ids: beforeSessionIds.size,
+      dependency_date_updates: dependencyDateUpdates,
+      future_sundays_skipped: true,
+      points_deleted: 0,
+      attempts_deleted: 0,
+      students_deleted: 0,
+      backup_path: backupPath,
+      announcement: sanitizeAnnouncement(announcement),
+      preview,
+      message: "Sunday class activated. The selected teaching packet moved to Sunday, later lessons advanced by one teaching day, future Sundays remain off, and linked academic identities were preserved.",
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to apply one-day roadmap advance" });
+  }
 });
 
 app.post("/admin/roadmap/:dayId/push-status", async (req, res) => {
