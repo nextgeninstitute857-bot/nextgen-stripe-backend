@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v190h-permanent-memory-stability";
+const NEXTGEN_BACKEND_BUILD = "v190j-google-auth-futuristic-landing";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -48809,14 +48809,27 @@ function aylaAdminTokenFromRequest(req) {
 }
 
 async function aylaRequireAdmin(req) {
-  if (!AYLA_ADMIN_TOKEN) return { configured: false, staging_open: true };
+  const authorization = String(req.headers.authorization || "").trim();
+  if (authorization) {
+    const context = await getAuthenticatedUser(req);
+    if (String(context?.user?.role || "").toLowerCase() !== "admin") {
+      const error = new Error("AylaMed administrator access required");
+      error.statusCode = 403;
+      throw error;
+    }
+    return { configured: true, method: "bootstrap_admin_jwt", user: context.user };
+  }
+
   const supplied = aylaAdminTokenFromRequest(req);
-  if (!supplied || supplied !== AYLA_ADMIN_TOKEN) {
+  if (AYLA_ADMIN_TOKEN && supplied === AYLA_ADMIN_TOKEN) {
+    return { configured: true, method: "legacy_admin_token" };
+  }
+
+  {
     const error = new Error("AylaMed admin authentication required");
     error.statusCode = 401;
     throw error;
   }
-  return { configured: true };
 }
 
 function aylaNow() {
@@ -50651,6 +50664,32 @@ app.post("/api/ayla/auth/login", async (req, res) => {
   }
 });
 
+app.post("/api/ayla/auth/google", async (req, res) => {
+  try {
+    const profile = await verifyGoogleIdToken(req.body.id_token || req.body.credential);
+    const db = await readAylaDb();
+    aylaEnsureSeedData(db);
+    let user = aylaFindUserByEmail(db, profile.email);
+    const created = !user;
+    if (!user) {
+      user = { id: aylaId("AYLA-USER"), email: profile.email, name: profile.name, phone: "", role: "student", status: "active", studentId: null, publicUsername: "", profileImageUrl: profile.picture || "", google_sub: profile.google_sub, authProvider: "google", authVersion: 1, createdAt: aylaNow(), updatedAt: aylaNow() };
+    } else {
+      if (["disabled", "deleted"].includes(String(user.status || "").toLowerCase())) return aylaSendError(res, 403, "AylaMed user is disabled");
+      user.name = user.name || profile.name;
+      user.profileImageUrl = user.profileImageUrl || profile.picture || "";
+      user.google_sub = user.google_sub || profile.google_sub;
+      user.lastLoginAt = aylaNow();
+      user.updatedAt = aylaNow();
+    }
+    aylaSetItem(db, "aylaUsers", user);
+    await aylaLog(db, "auth", created ? "AylaMed Google user registered" : "AylaMed Google user signed in", { userId: user.id, email: user.email });
+    await writeAylaDb(db);
+    return aylaSendOk(res, { user: aylaSanitizeUser(user), token: aylaSignAuthToken(user), created });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Google sign-in failed");
+  }
+});
+
 app.get("/api/ayla/auth/me", async (req, res) => {
   try {
     const { user, rawUser, db } = await aylaGetAuthenticatedUser(req);
@@ -51419,7 +51458,7 @@ app.get("/api/ayla/public-config", async (req, res) => {
     const days = Math.max(1, Number(settings.demo.duration_days || 7));
     const plans = aylaValues(db, "aylaPlans").filter((plan) => plan.is_active !== false && plan.is_public !== false && ["AYLA-PLAN-DEMO", "AYLA-PLAN-MONTHLY"].includes(String(plan.id))).map(aylaPublicPlan);
     const knowledge = await aylaKnowledgeStatus();
-    return aylaSendOk(res, { settings: { ...settings, demo: { ...settings.demo, duration_days: days, homepage_bar_text_rendered: aylaTemplate(settings.demo.homepage_bar_text, days), button_text_rendered: aylaTemplate(settings.demo.button_text, days), plan_name_rendered: aylaTemplate(settings.demo.plan_name, days) } }, plans, knowledge });
+    return aylaSendOk(res, { settings: { ...settings, demo: { ...settings.demo, duration_days: days, homepage_bar_text_rendered: aylaTemplate(settings.demo.homepage_bar_text, days), button_text_rendered: aylaTemplate(settings.demo.button_text, days), plan_name_rendered: aylaTemplate(settings.demo.plan_name, days) } }, plans, knowledge, google_client_id: process.env.GOOGLE_CLIENT_ID || "" });
   } catch (error) { return aylaSendError(res, 500, error.message || "Failed to load AylaMed public configuration"); }
 });
 
