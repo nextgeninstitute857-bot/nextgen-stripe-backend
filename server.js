@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v190g-reusable-sunday-class";
+const NEXTGEN_BACKEND_BUILD = "v190h-permanent-memory-stability";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -190,8 +190,25 @@ app.post("/stripe/webhook", express.raw({ type: "application/json", limit: "10mb
 });
 
 // AI-training PDFs are sent as base64 JSON, which is larger than the original PDF.
-app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || "300mb" }));
-app.use(express.urlencoded({ extended: true, limit: process.env.JSON_BODY_LIMIT || "300mb" }));
+// A 300 MB global parser can temporarily allocate multiple copies of one request
+// (raw body, decoded string, Buffer, OCR payload) and terminate a 2 GB Render
+// instance. Keep the default bounded; operators can override it deliberately.
+function ngBoundedJsonBodyLimit(value = "40mb") {
+  const clean = String(value || "40mb").trim().toLowerCase();
+  const match = clean.match(/^(\d+(?:\.\d+)?)\s*(b|kb|mb|gb)?$/);
+  if (!match) return "40mb";
+  const amount = Number(match[1]);
+  const unit = match[2] || "b";
+  const multiplier = unit === "gb" ? 1024 ** 3 : unit === "mb" ? 1024 ** 2 : unit === "kb" ? 1024 : 1;
+  const requestedBytes = amount * multiplier;
+  const minimumBytes = 1024 * 1024;
+  const maximumBytes = 64 * 1024 * 1024;
+  return `${Math.round(Math.max(minimumBytes, Math.min(maximumBytes, requestedBytes)))}b`;
+}
+
+const NEXTGEN_JSON_BODY_LIMIT = ngBoundedJsonBodyLimit(process.env.JSON_BODY_LIMIT || "40mb");
+app.use(express.json({ limit: NEXTGEN_JSON_BODY_LIMIT }));
+app.use(express.urlencoded({ extended: true, limit: NEXTGEN_JSON_BODY_LIMIT }));
 
 app.get("/admin/debug/cors-check", (req, res) => {
   res.json({
@@ -292,14 +309,16 @@ app.post("/admin/debug/backup-live-db", async (req, res) => {
 app.get("/admin/debug/export-live-db", async (req, res) => {
   try {
     await requireAdminOrInstructor(req);
-    const raw = await fs.readFile(LIVE_DB_PATH, "utf8").catch(async (error) => {
-      if (error.code === "ENOENT") return JSON.stringify({ ...DEFAULT_LIVE_DB, updatedAt: new Date().toISOString() }, null, 2);
-      throw error;
-    });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename=nextgen-live-db-${stamp}.json`);
-    res.send(raw);
+    try {
+      await fs.access(LIVE_DB_PATH);
+      return res.sendFile(LIVE_DB_PATH);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      return res.json({ ...DEFAULT_LIVE_DB, updatedAt: new Date().toISOString() });
+    }
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -473,17 +492,176 @@ const DEFAULT_LIVE_DB = {
 };
 
 let writeQueue = Promise.resolve();
+let liveDbCache = null;
+let liveDbReadInFlight = null;
 
 async function ensureDataDir() {
   await fs.mkdir(DATA_DIR, { recursive: true });
 }
 
-async function readLiveDb() {
+// v190h: bounded-memory JSON persistence.
+// The old writers called JSON.stringify() on an entire database, temporarily
+// creating another full database-sized string in memory. This writer walks the
+// value and flushes small chunks to an atomic temporary file instead.
+const NEXTGEN_JSON_WRITE_BUFFER_BYTES = Math.max(
+  64 * 1024,
+  Math.min(4 * 1024 * 1024, Number(process.env.NEXTGEN_JSON_WRITE_BUFFER_BYTES || 512 * 1024) || 512 * 1024)
+);
+
+async function ngWriteJsonAtomicStreaming(filePath, value, label = "database") {
+  const tempPath = `${filePath}.tmp`;
+  let handle = null;
+  let pending = "";
+  let pendingBytes = 0;
+  const activeObjects = new WeakSet();
+
+  const flush = async () => {
+    if (!pending) return;
+    const chunk = pending;
+    pending = "";
+    pendingBytes = 0;
+    await handle.write(chunk, null, "utf8");
+  };
+
+  const writePiece = async (piece) => {
+    const text = String(piece ?? "");
+    if (!text) return;
+    const textBytes = Buffer.byteLength(text, "utf8");
+    if (textBytes >= NEXTGEN_JSON_WRITE_BUFFER_BYTES) {
+      await flush();
+      await handle.write(text, null, "utf8");
+      return;
+    }
+    pending += text;
+    pendingBytes += textBytes;
+    if (pendingBytes >= NEXTGEN_JSON_WRITE_BUFFER_BYTES) {
+      await flush();
+    }
+  };
+
+  const writeJsonString = async (input) => {
+    const text = String(input);
+    await writePiece('"');
+    const charsPerChunk = 64 * 1024;
+    for (let start = 0; start < text.length;) {
+      let end = Math.min(text.length, start + charsPerChunk);
+      if (end < text.length) {
+        const finalCode = text.charCodeAt(end - 1);
+        if (finalCode >= 0xd800 && finalCode <= 0xdbff) end -= 1;
+      }
+      const escaped = JSON.stringify(text.slice(start, end)).slice(1, -1);
+      await writePiece(escaped);
+      start = end;
+    }
+    await writePiece('"');
+  };
+
+  const writeValue = async (item, inArray = false) => {
+    if (item === null) {
+      await writePiece("null");
+      return;
+    }
+
+    const type = typeof item;
+    if (type === "string") {
+      await writeJsonString(item);
+      return;
+    }
+    if (type === "number") {
+      await writePiece(Number.isFinite(item) ? String(item) : "null");
+      return;
+    }
+    if (type === "boolean") {
+      await writePiece(item ? "true" : "false");
+      return;
+    }
+    if (type === "bigint") {
+      throw new TypeError("Cannot serialize BigInt to JSON");
+    }
+    if (type === "undefined" || type === "function" || type === "symbol") {
+      await writePiece(inArray ? "null" : "null");
+      return;
+    }
+
+    if (typeof item?.toJSON === "function") {
+      await writeValue(item.toJSON(), inArray);
+      return;
+    }
+    if (activeObjects.has(item)) {
+      throw new TypeError(`Cannot serialize circular structure in ${label}`);
+    }
+    activeObjects.add(item);
+
+    try {
+      if (Array.isArray(item)) {
+        await writePiece("[");
+        for (let index = 0; index < item.length; index += 1) {
+          if (index) await writePiece(",");
+          await writeValue(item[index], true);
+        }
+        await writePiece("]");
+        return;
+      }
+
+      await writePiece("{");
+      let written = 0;
+      for (const [key, child] of Object.entries(item)) {
+        const childType = typeof child;
+        if (childType === "undefined" || childType === "function" || childType === "symbol") continue;
+        if (written) await writePiece(",");
+        await writeJsonString(key);
+        await writePiece(":");
+        await writeValue(child, false);
+        written += 1;
+      }
+      await writePiece("}");
+    } finally {
+      activeObjects.delete(item);
+    }
+  };
+
   try {
     await ensureDataDir();
-    const raw = await fs.readFile(LIVE_DB_PATH, "utf8");
-    const parsed = JSON.parse(raw);
-    return {
+    handle = await fs.open(tempPath, "w");
+    await writeValue(value, false);
+    await flush();
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await fs.rename(tempPath, filePath);
+  } catch (error) {
+    try { if (handle) await handle.close(); } catch {}
+    try { await fs.unlink(tempPath); } catch {}
+    throw error;
+  }
+}
+
+const NEXTGEN_RENDER_MEMORY_LIMIT_MB = Math.max(256, Number(process.env.NEXTGEN_RENDER_MEMORY_LIMIT_MB || 2048) || 2048);
+const NEXTGEN_BACKGROUND_MEMORY_SOFT_PERCENT = Math.max(50, Math.min(90, Number(process.env.NEXTGEN_BACKGROUND_MEMORY_SOFT_PERCENT || 70) || 70));
+
+function ngMemoryStatus() {
+  const usage = process.memoryUsage();
+  const limitBytes = NEXTGEN_RENDER_MEMORY_LIMIT_MB * 1024 * 1024;
+  return {
+    rss: usage.rss,
+    rss_mb: Number((usage.rss / 1024 / 1024).toFixed(1)),
+    heap_used_mb: Number((usage.heapUsed / 1024 / 1024).toFixed(1)),
+    external_mb: Number((usage.external / 1024 / 1024).toFixed(1)),
+    limit_mb: NEXTGEN_RENDER_MEMORY_LIMIT_MB,
+    percent: Number((usage.rss / limitBytes * 100).toFixed(1)),
+    background_soft_percent: NEXTGEN_BACKGROUND_MEMORY_SOFT_PERCENT,
+  };
+}
+
+function ngBackgroundMemoryIsHigh(jobName = "background_job") {
+  const status = ngMemoryStatus();
+  if (status.percent < NEXTGEN_BACKGROUND_MEMORY_SOFT_PERCENT) return false;
+  console.warn(`${jobName} skipped because memory is ${status.rss_mb} MB (${status.percent}% of configured limit)`);
+  return true;
+}
+
+function ngMergeLiveDb(parsed = {}) {
+  return {
       ...DEFAULT_LIVE_DB,
       ...parsed,
       users: parsed.users || {},
@@ -557,15 +735,49 @@ async function readLiveDb() {
       featureCatalog: { ...DEFAULT_FEATURE_CATALOG, ...(parsed.featureCatalog || {}) },
       demoSettings: { ...DEFAULT_DEMO_SETTINGS, ...(parsed.demoSettings || {}) },
     };
+}
+
+function cloneLiveDbForRequest(db) {
+  return {
+    ...db,
+    featureCatalog: { ...(db?.featureCatalog || {}) },
+    demoSettings: { ...(db?.demoSettings || {}) },
+  };
+}
+
+async function readLiveDbFromDisk() {
+  try {
+    await ensureDataDir();
+    const raw = await fs.readFile(LIVE_DB_PATH, "utf8");
+    return ngMergeLiveDb(JSON.parse(raw));
   } catch (error) {
-    if (error.code === "ENOENT") return { ...DEFAULT_LIVE_DB };
-    console.error("Live DB read error:", error.message);
-    return { ...DEFAULT_LIVE_DB };
+    if (error.code === "ENOENT") return ngMergeLiveDb({});
+    console.error("Live DB read error (fail-closed):", error.message);
+    throw error;
   }
 }
 
+async function readLiveDb() {
+  if (liveDbCache) return cloneLiveDbForRequest(liveDbCache);
+  if (!liveDbReadInFlight) {
+    liveDbReadInFlight = readLiveDbFromDisk()
+      .then((db) => {
+        liveDbCache = db;
+        return db;
+      })
+      .finally(() => {
+        liveDbReadInFlight = null;
+      });
+  }
+  return cloneLiveDbForRequest(await liveDbReadInFlight);
+}
+
 async function writeLiveDb(db) {
-  writeQueue = writeQueue.then(async () => {
+  const task = writeQueue
+    .catch((error) => {
+      console.error("Previous LMS write failed; queue recovered:", error.message);
+    })
+    .then(async () => {
     await ensureDataDir();
     const nextDb = {
       ...DEFAULT_LIVE_DB,
@@ -574,11 +786,12 @@ async function writeLiveDb(db) {
       demoSettings: { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) },
       updatedAt: new Date().toISOString(),
     };
-    const tempPath = `${LIVE_DB_PATH}.tmp`;
-    await fs.writeFile(tempPath, JSON.stringify(nextDb, null, 2), "utf8");
-    await fs.rename(tempPath, LIVE_DB_PATH);
+    await ngWriteJsonAtomicStreaming(LIVE_DB_PATH, nextDb, "LMS database");
+    liveDbCache = nextDb;
+    liveDbReadInFlight = null;
   });
-  return writeQueue;
+  writeQueue = task;
+  return task;
 }
 
 function todayKey(date = new Date()) { return date.toISOString().slice(0, 10); }
@@ -7791,7 +8004,21 @@ app.get("/admin/ai/usage", async (req, res) => {
 app.get("/", (req, res) => res.send("NextGen Backend Running"));
 app.get("/health", async (req, res) => {
   const liveDbExists = await fs.access(LIVE_DB_PATH).then(() => true).catch(() => false);
-  res.json({ success: true, message: "Backend running", data_dir: DATA_DIR, live_db_path: LIVE_DB_PATH, live_db_exists: liveDbExists });
+  res.json({
+    success: true,
+    message: "Backend running",
+    build: NEXTGEN_BACKEND_BUILD,
+    data_dir: DATA_DIR,
+    live_db_path: LIVE_DB_PATH,
+    live_db_exists: liveDbExists,
+    json_body_limit: NEXTGEN_JSON_BODY_LIMIT,
+    memory: ngMemoryStatus(),
+    storage_cache: {
+      lms_loaded: Boolean(liveDbCache),
+      crm_loaded: Boolean(crmReadCache),
+      ayla_loaded: Boolean(aylaDbCache),
+    },
+  });
 })
 
 app.post("/auth/login", async (req, res) => {
@@ -14569,11 +14796,11 @@ function safeCrmJson(value, fallback) {
 }
 
 
-// v147: CRM read cache.
-// The CRM admin dashboard fires many routes at once. Without this cache, every
-// request reads/parses the full CRM JSON separately, which can cause Render 502s
-// under concurrent admin page loads.
-const CRM_READ_CACHE_TTL_MS = Number(process.env.CRM_READ_CACHE_TTL_MS || 2500);
+// v190h: process-lifetime CRM cache.
+// The former 2.5-second TTL reparsed the full CRM JSON continually while the
+// one-second automation heartbeat was active. A single Render instance is the
+// only writer, so the cache is refreshed after every atomic save and released
+// naturally on restart.
 let crmReadCache = null;
 let crmReadCacheAt = 0;
 let crmReadInFlight = null;
@@ -14718,17 +14945,15 @@ async function readCrmDbFromDisk() {
       return initial;
     }
 
-    console.error("CRM DB read error:", error.message);
-    return { ...DEFAULT_CRM_DB };
+    console.error("CRM DB read error (fail-closed):", error.message);
+    throw error;
   }
 }
 
 
 
 async function readCrmDb() {
-  const now = Date.now();
-
-  if (crmReadCache && now - crmReadCacheAt <= CRM_READ_CACHE_TTL_MS) {
+  if (crmReadCache) {
     return cloneCrmDbForRequest(crmReadCache);
   }
 
@@ -14874,20 +15099,16 @@ async function ngCrmRetentionArchiveRecords(section, records = [], reason = "ret
     `${section}-${ngCrmRetentionStamp()}.json`
   );
 
-  await fs.writeFile(
+  await ngWriteJsonAtomicStreaming(
     archivePath,
-    JSON.stringify(
-      {
-        section,
-        reason,
-        archived_at: nowIso(),
-        count: records.length,
-        records,
-      },
-      null,
-      2
-    ),
-    "utf8"
+    {
+      section,
+      reason,
+      archived_at: nowIso(),
+      count: records.length,
+      records,
+    },
+    `CRM ${section} archive`
   );
 
   return archivePath;
@@ -15034,7 +15255,11 @@ async function ngApplyCrmRetentionGuard(db = {}) {
 
 
 async function writeCrmDb(db) {
-  crmWriteQueue = crmWriteQueue.then(async () => {
+  const task = crmWriteQueue
+    .catch((error) => {
+      console.error("Previous CRM write failed; queue recovered:", error.message);
+    })
+    .then(async () => {
     await ensureDataDir();
     const nextDb = {
       ...DEFAULT_CRM_DB,
@@ -15045,16 +15270,15 @@ async function writeCrmDb(db) {
     };
     await ngApplyCrmRetentionGuard(nextDb);
 
-    const tempPath = `${CRM_DB_PATH}.tmp`;
-    await fs.writeFile(tempPath, JSON.stringify(nextDb, null, 2), "utf8");
-    await fs.rename(tempPath, CRM_DB_PATH);
+    await ngWriteJsonAtomicStreaming(CRM_DB_PATH, nextDb, "CRM database");
 
     // Refresh read cache after every successful write.
     crmReadCache = nextDb;
     crmReadCacheAt = Date.now();
     crmReadInFlight = null;
   });
-  return crmWriteQueue;
+  crmWriteQueue = task;
+  return task;
 }
 
 function createDefaultCrmBrand() {
@@ -47891,7 +48115,7 @@ function ngV116HeartbeatEnabled() {
 }
 
 function ngV116HeartbeatMs() {
-  return Math.max(1000, Math.min(10000, Number(process.env.NEXTGEN_BACKEND_HEARTBEAT_MS || 1000)));
+  return Math.max(5000, Math.min(60000, Number(process.env.NEXTGEN_BACKEND_HEARTBEAT_MS || 10000) || 10000));
 }
 
 function ngV116NoReplyWaitHours(db = {}) {
@@ -48039,6 +48263,9 @@ let ngV116LastScheduledRunAt = 0;
 async function ngV116RunBackendHeartbeatTick({ source = "backend_heartbeat" } = {}) {
   if (!ngV116HeartbeatEnabled()) return { skipped: true, reason: "disabled" };
   if (NG_V116_HEARTBEAT_STATE.running) return { skipped: true, reason: "previous_tick_running" };
+  if (ngBackgroundMemoryIsHigh("crm_backend_heartbeat")) {
+    return { skipped: true, reason: "memory_pressure", memory: ngMemoryStatus() };
+  }
   NG_V116_HEARTBEAT_STATE.running = true;
   NG_V116_HEARTBEAT_STATE.ticks += 1;
   NG_V116_HEARTBEAT_STATE.last_tick_at = nowIso();
@@ -48107,7 +48334,7 @@ function ngV116StartBackendHeartbeat() {
   }, intervalMs);
   setTimeout(() => {
     ngV116RunBackendHeartbeatTick({ source: "backend_startup" }).catch((error) => console.error("v116 heartbeat startup error:", error.message));
-  }, 1500);
+  }, 15000);
   console.log(`v116 backend heartbeat started: every ${intervalMs}ms for inbound/AI; scheduled jobs every ${Math.max(30000, Number(process.env.NEXTGEN_HEARTBEAT_SCHEDULED_MS || 60000))}ms`);
   return NG_V116_HEARTBEAT_STATE;
 }
@@ -48134,7 +48361,7 @@ app.use((err, req, res, next) => {
   if (err?.type === "entity.too.large" || err?.status === 413 || err?.statusCode === 413) {
     return res.status(413).json({
       success: false,
-      error: "Uploaded file is too large for one request. Split the PDF into smaller parts or increase JSON_BODY_LIMIT on Render.",
+      error: "Uploaded file is too large for one memory-safe request. Split the PDF into smaller parts (recommended maximum: about 30 MB per PDF).",
     });
   }
 
@@ -48214,6 +48441,7 @@ function ngStartBillingExpiryRunner() {
   const minutes = Math.max(30, Number(process.env.NEXTGEN_BILLING_RUNNER_MINUTES || 360) || 360);
   const interval = setInterval(async () => {
     if (NG_BILLING_RUNNER_STATE.running) return;
+    if (ngBackgroundMemoryIsHigh("billing_expiry_runner")) return;
     NG_BILLING_RUNNER_STATE.running = true;
     NG_BILLING_RUNNER_STATE.ticks += 1;
     try {
@@ -48466,6 +48694,8 @@ const DEFAULT_AYLA_DB = {
 };
 
 let aylaWriteQueue = Promise.resolve();
+let aylaDbCache = null;
+let aylaDbReadInFlight = null;
 
 function aylaMergeSettings(value = {}) {
   return {
@@ -48494,7 +48724,15 @@ function aylaMergeAiUsageSettings(value = {}) {
   };
 }
 
-async function readAylaDb() {
+function cloneAylaDbForRequest(db) {
+  return {
+    ...db,
+    aylaSettings: aylaMergeSettings(db?.aylaSettings || {}),
+    aylaAiUsageSettings: aylaMergeAiUsageSettings(db?.aylaAiUsageSettings || {}),
+  };
+}
+
+async function readAylaDbFromDisk() {
   try {
     await ensureDataDir();
     const raw = await fs.readFile(AYLA_DB_PATH, "utf8");
@@ -48510,13 +48748,32 @@ async function readAylaDb() {
     return next;
   } catch (error) {
     if (error.code === "ENOENT") return { ...DEFAULT_AYLA_DB, aylaSettings: aylaMergeSettings(), aylaAiUsageSettings: aylaMergeAiUsageSettings() };
-    console.error("AylaMed DB read error:", error.message);
+    console.error("AylaMed DB read error (fail-closed):", error.message);
     throw error;
   }
 }
 
+async function readAylaDb() {
+  if (aylaDbCache) return cloneAylaDbForRequest(aylaDbCache);
+  if (!aylaDbReadInFlight) {
+    aylaDbReadInFlight = readAylaDbFromDisk()
+      .then((db) => {
+        aylaDbCache = db;
+        return db;
+      })
+      .finally(() => {
+        aylaDbReadInFlight = null;
+      });
+  }
+  return cloneAylaDbForRequest(await aylaDbReadInFlight);
+}
+
 async function writeAylaDb(db) {
-  aylaWriteQueue = aylaWriteQueue.then(async () => {
+  const task = aylaWriteQueue
+    .catch((error) => {
+      console.error("Previous AylaMed write failed; queue recovered:", error.message);
+    })
+    .then(async () => {
     await ensureDataDir();
     const nextDb = {
       ...DEFAULT_AYLA_DB,
@@ -48525,19 +48782,18 @@ async function writeAylaDb(db) {
       aylaAiUsageSettings: aylaMergeAiUsageSettings(db.aylaAiUsageSettings || {}),
       updatedAt: new Date().toISOString(),
     };
-    const tempPath = `${AYLA_DB_PATH}.tmp`;
-    await fs.writeFile(tempPath, JSON.stringify(nextDb, null, 2), "utf8");
-    await fs.rename(tempPath, AYLA_DB_PATH);
+    await ngWriteJsonAtomicStreaming(AYLA_DB_PATH, nextDb, "AylaMed database");
+    aylaDbCache = nextDb;
+    aylaDbReadInFlight = null;
   });
-  return aylaWriteQueue;
+  aylaWriteQueue = task;
+  return task;
 }
 
 async function readAylaCrmSnapshot() {
   try {
-    const raw = await fs.readFile(CRM_DB_PATH, "utf8");
-    return JSON.parse(raw);
+    return await readCrmDb();
   } catch (error) {
-    if (error.code === "ENOENT") return {};
     console.error("AylaMed read-only CRM knowledge snapshot error:", error.message);
     throw error;
   }
@@ -51330,7 +51586,7 @@ app.delete("/api/ayla/admin/ai-usage/students/:userId", async (req, res) => { tr
 
 app.get("/api/ayla/admin/storage-safety", async (req, res) => { try { await aylaRequireAdmin(req); const aylaDb = await readAylaDb(); const knowledge = await aylaKnowledgeStatus(); const stat = await fs.stat(AYLA_DB_PATH).catch(()=>null); return aylaSendOk(res, { separation: { ayla_db_path: AYLA_DB_PATH, lms_db_path: LIVE_DB_PATH, crm_db_path: CRM_DB_PATH, ayla_writes_to_lms: false, ayla_writes_to_crm: false, knowledge_read_only_from_crm: true }, ayla_file: stat ? { size_bytes: stat.size, modified_at: stat.mtime.toISOString() } : { missing: true }, ayla_counts: Object.fromEntries(Object.keys(AYLA_COLLECTIONS).map((key)=>[key, aylaValues(aylaDb,key).length])), knowledge }); } catch (error) { return aylaSendError(res, error.statusCode || 500, error.message); } });
 
-app.post("/api/ayla/admin/backup", async (req, res) => { try { await aylaRequireAdmin(req); await ensureDataDir(); const dir = path.join(DATA_DIR,"backups"); await fs.mkdir(dir,{recursive:true}); const stamp = new Date().toISOString().replace(/[:.]/g,"-"); const backupPath = path.join(dir,`aylamed-db-${stamp}.json`); const db = await readAylaDb(); await fs.writeFile(backupPath, JSON.stringify(db,null,2),"utf8"); return aylaSendOk(res,{backup_path:backupPath,created_at:aylaNow()}); } catch (error) { return aylaSendError(res,error.statusCode||500,error.message); } });
+app.post("/api/ayla/admin/backup", async (req, res) => { try { await aylaRequireAdmin(req); await ensureDataDir(); const dir = path.join(DATA_DIR,"backups"); await fs.mkdir(dir,{recursive:true}); const stamp = new Date().toISOString().replace(/[:.]/g,"-"); const backupPath = path.join(dir,`aylamed-db-${stamp}.json`); const db = await readAylaDb(); await ngWriteJsonAtomicStreaming(backupPath, db, "AylaMed backup"); return aylaSendOk(res,{backup_path:backupPath,created_at:aylaNow()}); } catch (error) { return aylaSendError(res,error.statusCode||500,error.message); } });
 
 app.get("/api/ayla/admin/legacy-migration/preview", async (req,res)=>{ try { await aylaRequireAdmin(req); const live=await readLiveDb(); const counts={}; for (const key of [...Object.keys(AYLA_COLLECTIONS),"aylaUsers"]) counts[key]=aylaValues(live,key).length; return aylaSendOk(res,{source:LIVE_DB_PATH,destination:AYLA_DB_PATH,read_only:true,counts,message:"Preview only. No LMS or CRM record was changed."}); } catch(error){ return aylaSendError(res,error.statusCode||500,error.message); } });
 app.post("/api/ayla/admin/legacy-migration/copy", async (req,res)=>{ try { await aylaRequireAdmin(req); const live=await readLiveDb(); const db=await readAylaDb(); const copied={}; for (const key of [...Object.keys(AYLA_COLLECTIONS),"aylaUsers"]) { aylaEnsureCollection(db,key); let count=0; for (const item of aylaValues(live,key)) { if (!aylaGetItem(db,key,item.id)) { aylaSetItem(db,key,item); count+=1; } } copied[key]=count; } await writeAylaDb(db); return aylaSendOk(res,{copied,source_unchanged:true,message:"Only legacy AylaMed records were copied. live-session-db.json and crm-db.json were not modified."}); } catch(error){ return aylaSendError(res,error.statusCode||500,error.message); } });
@@ -54673,6 +54929,10 @@ async function ngRunAutoZoomPrepareTick(reason = "interval") {
     return { success: true, enabled: true, skipped: true, reason: "already_running" };
   }
 
+  if (ngBackgroundMemoryIsHigh("auto_zoom_prepare")) {
+    return { success: true, enabled: true, skipped: true, reason: "memory_pressure", memory: ngMemoryStatus() };
+  }
+
   ngAutoZoomPrepRunning = true;
   const startedAt = new Date().toISOString();
   const nowMs = Date.now();
@@ -54819,6 +55079,7 @@ app.post("/admin/live-sessions/auto-prepare-now", async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(`Backend build=${NEXTGEN_BACKEND_BUILD}; JSON body limit=${NEXTGEN_JSON_BODY_LIMIT}; memory soft guard=${NEXTGEN_BACKGROUND_MEMORY_SOFT_PERCENT}% of ${NEXTGEN_RENDER_MEMORY_LIMIT_MB} MB`);
   ngV116StartBackendHeartbeat();
   ngStartBillingExpiryRunner();
   ngStartAutoZoomPrepareScheduler();
