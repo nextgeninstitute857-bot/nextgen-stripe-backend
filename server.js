@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v190l-et-clock-hostinger-smtp";
+const NEXTGEN_BACKEND_BUILD = "v190m-premium-email-control-center";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -398,6 +398,329 @@ const DEFAULT_DEMO_SETTINGS = {
   updated_at: null,
 };
 
+const DEFAULT_EMAIL_SETTINGS = {
+  email_notifications_enabled: true,
+  admin_email: "nextgenacademy89@gmail.com",
+  sender_name: "NextGen USMLE",
+  reply_to: "support@nextgenusmlelms.com",
+  live_class_reminder_minutes: 60,
+  demo_expiring_days: 1,
+  bulk_send_limit: 250,
+  updated_at: null,
+};
+
+const DEFAULT_EMAIL_TEMPLATES = {
+  password_reset: {
+    key: "password_reset",
+    name: "Password Reset",
+    category: "Account & Security",
+    description: "Sent when a registered student requests a secure password-reset link.",
+    enabled: true,
+    subject: "Secure your NextGen USMLE account — reset your password",
+    body: `Hi {{student_name}},
+
+We received a request to reset your NextGen USMLE LMS password.
+
+Reset your password securely:
+{{reset_url}}
+
+For your security, this link expires in 1 hour. If you did not request this change, you can safely ignore this email.
+
+Warm regards,
+NextGen USMLE Student Success Team`,
+    variables: ["student_name", "student_email", "reset_url", "support_email"],
+  },
+  new_account_welcome: {
+    key: "new_account_welcome",
+    name: "New Account Welcome",
+    category: "Account & Security",
+    description: "Sent immediately after a student creates a new LMS account.",
+    enabled: true,
+    subject: "Welcome to NextGen USMLE — your learning account is ready",
+    body: `Hi {{student_name}},
+
+Welcome to NextGen USMLE. Your secure LMS account has been created successfully.
+
+Sign in here:
+{{login_url}}
+
+Creating an account does not automatically activate a free demo or paid plan. Return to the plan you selected to complete checkout, or choose Try Demo separately.
+
+We look forward to supporting your USMLE journey.
+
+Warm regards,
+NextGen USMLE Student Success Team`,
+    variables: ["student_name", "student_email", "login_url", "plans_url", "support_email"],
+  },
+  lms_credentials_access: {
+    key: "lms_credentials_access",
+    name: "LMS Credentials / Access",
+    category: "Enrollment & Access",
+    description: "Sent by admin credential actions or when LMS access details must be delivered.",
+    enabled: true,
+    subject: "Your NextGen USMLE LMS access is ready",
+    body: `Hi {{student_name}},
+
+Your NextGen USMLE LMS access is ready{{course_phrase}}.
+
+Login email:
+{{student_email}}
+
+{{access_instructions}}
+
+Open your dashboard:
+{{dashboard_url}}
+
+Please keep your credentials private. Our support team is available if you need assistance.
+
+Warm regards,
+NextGen USMLE Student Success Team`,
+    variables: ["student_name", "student_email", "course_name", "course_phrase", "access_instructions", "dashboard_url", "login_url", "reset_url", "temporary_password", "support_email"],
+  },
+  demo_activated: {
+    key: "demo_activated",
+    name: "Demo Activated",
+    category: "Demo Lifecycle",
+    description: "Sent when a student explicitly activates the free LMS demo.",
+    enabled: true,
+    subject: "Your NextGen USMLE LMS demo is now active",
+    body: `Hi {{student_name}},
+
+Your NextGen USMLE LMS demo is now active{{course_phrase}}.
+
+Demo access ends on:
+{{expiry_date}}
+
+Open your student dashboard:
+{{dashboard_url}}
+
+Use this time to explore the roadmap, live-class flow, assessments, flashcards, recordings, notes, and progress tools included in your demo settings.
+
+Warm regards,
+NextGen USMLE Student Success Team`,
+    variables: ["student_name", "course_name", "course_phrase", "expiry_date", "dashboard_url", "plans_url", "support_email"],
+  },
+  demo_expiring: {
+    key: "demo_expiring",
+    name: "Demo Expiring",
+    category: "Demo Lifecycle",
+    description: "Sent before an active demo reaches its expiry date.",
+    enabled: true,
+    subject: "Your NextGen USMLE demo ends soon",
+    body: `Hi {{student_name}},
+
+Your NextGen USMLE LMS demo{{course_phrase}} ends in {{days_remaining}} day{{days_suffix}} on {{expiry_date}}.
+
+Continue learning without interruption:
+{{plans_url}}
+
+Your account and existing learning records will remain secure. A paid plan is required to continue using locked LMS features after the demo ends.
+
+Warm regards,
+NextGen USMLE Student Success Team`,
+    variables: ["student_name", "course_name", "course_phrase", "days_remaining", "days_suffix", "expiry_date", "plans_url", "support_email"],
+  },
+  demo_expired: {
+    key: "demo_expired",
+    name: "Demo Expired",
+    category: "Demo Lifecycle",
+    description: "Sent once when a student's demo has expired.",
+    enabled: true,
+    subject: "Your NextGen USMLE demo has ended — continue with a plan",
+    body: `Hi {{student_name}},
+
+Your NextGen USMLE LMS demo{{course_phrase}} has ended.
+
+Choose a plan to restore full access:
+{{plans_url}}
+
+Your account remains available, and your existing LMS records are not deleted when the demo expires.
+
+Warm regards,
+NextGen USMLE Student Success Team`,
+    variables: ["student_name", "course_name", "course_phrase", "expiry_date", "plans_url", "support_email"],
+  },
+  payment_successful: {
+    key: "payment_successful",
+    name: "Payment Successful",
+    category: "Payment & Subscription",
+    description: "Sent after Stripe, free checkout, or a valid 100% coupon completes successfully.",
+    enabled: true,
+    subject: "Payment confirmed — NextGen USMLE",
+    body: `Hi {{student_name}},
+
+Your NextGen USMLE checkout has been completed successfully.
+
+Plan: {{plan_name}}
+Amount: {{amount}}
+Payment reference: {{payment_reference}}
+Payment date: {{payment_date}}
+
+Your payment and enrollment records are now connected to your LMS account.
+
+Warm regards,
+NextGen USMLE Student Success Team`,
+    variables: ["student_name", "plan_name", "amount", "payment_reference", "payment_date", "course_name", "support_email"],
+  },
+  paid_enrollment_confirmed: {
+    key: "paid_enrollment_confirmed",
+    name: "Paid Enrollment Confirmed",
+    category: "Enrollment & Access",
+    description: "Sent when paid or scholarship access is successfully granted.",
+    enabled: true,
+    subject: "Enrollment confirmed — your NextGen USMLE access is active",
+    body: `Hi {{student_name}},
+
+Your enrollment has been confirmed{{course_phrase}}.
+
+Plan: {{plan_name}}
+Access expiry: {{access_expiry}}
+
+Open your dashboard:
+{{dashboard_url}}
+
+You can now use the LMS features included in your plan.
+
+Warm regards,
+NextGen USMLE Student Success Team`,
+    variables: ["student_name", "course_name", "course_phrase", "plan_name", "access_expiry", "dashboard_url", "login_url", "support_email"],
+  },
+  subscription_expiring: {
+    key: "subscription_expiring",
+    name: "Subscription Expiring",
+    category: "Payment & Subscription",
+    description: "Sent 7, 3, and 1 day before paid access expires.",
+    enabled: true,
+    subject: "Your NextGen USMLE access expires in {{days_remaining}} day{{days_suffix}}",
+    body: `Hi {{student_name}},
+
+Your NextGen USMLE access{{course_phrase}} expires in {{days_remaining}} day{{days_suffix}} on {{expiry_date}}.
+
+Renew before expiry to avoid interruption:
+{{plans_url}}
+
+Your account and learning history remain protected.
+
+Warm regards,
+NextGen USMLE Student Success Team`,
+    variables: ["student_name", "course_name", "course_phrase", "days_remaining", "days_suffix", "expiry_date", "plans_url", "support_email"],
+  },
+  subscription_expired: {
+    key: "subscription_expired",
+    name: "Subscription Expired",
+    category: "Payment & Subscription",
+    description: "Sent when paid access expires.",
+    enabled: true,
+    subject: "Your NextGen USMLE access has expired",
+    body: `Hi {{student_name}},
+
+Your paid NextGen USMLE access{{course_phrase}} has expired.
+
+Renew your access here:
+{{plans_url}}
+
+Your LMS account and existing learning records remain secure.
+
+Warm regards,
+NextGen USMLE Student Success Team`,
+    variables: ["student_name", "course_name", "course_phrase", "expiry_date", "plans_url", "support_email"],
+  },
+  live_class_reminder: {
+    key: "live_class_reminder",
+    name: "Live Class Reminder",
+    category: "Learning Updates",
+    description: "Sent before a scheduled live class according to the reminder-minute setting.",
+    enabled: true,
+    subject: "Live class reminder — {{class_title}} at {{class_time}}",
+    body: `Hi {{student_name}},
+
+Your NextGen USMLE live class is coming up soon.
+
+Class: {{class_title}}
+Course: {{course_name}}
+Date: {{class_date}}
+Time: {{class_time}}
+
+Join from the LMS:
+{{live_class_url}}
+
+Please enter a few minutes early so you are ready when the session begins.
+
+Warm regards,
+NextGen USMLE Student Success Team`,
+    variables: ["student_name", "class_title", "course_name", "class_date", "class_time", "live_class_url", "support_email"],
+  },
+  new_recording_published: {
+    key: "new_recording_published",
+    name: "New Recording Published",
+    category: "Learning Updates",
+    description: "Queued for active course students when a recording is published.",
+    enabled: true,
+    subject: "New class recording available — {{recording_title}}",
+    body: `Hi {{student_name}},
+
+A new class recording is now available in your NextGen USMLE LMS.
+
+Recording: {{recording_title}}
+Course: {{course_name}}
+
+Watch the recording:
+{{recording_url}}
+
+Use it to review difficult concepts and reinforce your session notes.
+
+Warm regards,
+NextGen USMLE Student Success Team`,
+    variables: ["student_name", "recording_title", "course_name", "recording_url", "support_email"],
+  },
+  new_notes_published: {
+    key: "new_notes_published",
+    name: "New Notes Published",
+    category: "Learning Updates",
+    description: "Queued for active course students when session notes are published.",
+    enabled: true,
+    subject: "New session notes available — {{notes_title}}",
+    body: `Hi {{student_name}},
+
+New tutor notes are now available in your NextGen USMLE LMS.
+
+Session: {{notes_title}}
+Course: {{course_name}}
+
+Open the notes:
+{{notes_url}}
+
+Review them alongside your recording and flashcards for stronger retention.
+
+Warm regards,
+NextGen USMLE Student Success Team`,
+    variables: ["student_name", "notes_title", "course_name", "notes_url", "support_email"],
+  },
+  new_assessment_published: {
+    key: "new_assessment_published",
+    name: "New Assessment Published",
+    category: "Learning Updates",
+    description: "Queued for active course students when an assessment is published.",
+    enabled: true,
+    subject: "New assessment available — {{assessment_title}}",
+    body: `Hi {{student_name}},
+
+A new assessment is now available in your NextGen USMLE LMS.
+
+Assessment: {{assessment_title}}
+Course: {{course_name}}
+
+Open the assessment:
+{{assessment_url}}
+
+Complete it carefully so the LMS can update your performance and weak-area insights.
+
+Warm regards,
+NextGen USMLE Student Success Team`,
+    variables: ["student_name", "assessment_title", "course_name", "assessment_url", "support_email"],
+  },
+};
+
 const DEFAULT_LIVE_DB = {
   // Backend-owned LMS content and authentication. PocketBase is no longer required.
   users: {},
@@ -436,6 +759,11 @@ const DEFAULT_LIVE_DB = {
   payments: {},
   featureCatalog: DEFAULT_FEATURE_CATALOG,
   demoSettings: DEFAULT_DEMO_SETTINGS,
+  emailSettings: DEFAULT_EMAIL_SETTINGS,
+  emailTemplates: DEFAULT_EMAIL_TEMPLATES,
+  emailLogs: [],
+  emailBroadcasts: [],
+  emailAutomationState: {},
   googleAuthUsers: {},
 
   roadmaps: {},
@@ -660,6 +988,24 @@ function ngBackgroundMemoryIsHigh(jobName = "background_job") {
   return true;
 }
 
+function ngMergeEmailTemplates(stored = {}) {
+  const output = {};
+  for (const [key, base] of Object.entries(DEFAULT_EMAIL_TEMPLATES)) {
+    output[key] = {
+      ...base,
+      ...(stored?.[key] || {}),
+      key,
+      variables: Array.isArray(stored?.[key]?.variables)
+        ? stored[key].variables
+        : [...(base.variables || [])],
+    };
+  }
+  for (const [key, value] of Object.entries(stored || {})) {
+    if (!output[key] && value && typeof value === "object") output[key] = { ...value, key };
+  }
+  return output;
+}
+
 function ngMergeLiveDb(parsed = {}) {
   return {
       ...DEFAULT_LIVE_DB,
@@ -691,6 +1037,11 @@ function ngMergeLiveDb(parsed = {}) {
       coupons: parsed.coupons || {},
       couponRedemptions: parsed.couponRedemptions || {},
       payments: parsed.payments || {},
+      emailSettings: { ...DEFAULT_EMAIL_SETTINGS, ...(parsed.emailSettings || {}) },
+      emailTemplates: ngMergeEmailTemplates(parsed.emailTemplates || {}),
+      emailLogs: safeArray(parsed.emailLogs),
+      emailBroadcasts: safeArray(parsed.emailBroadcasts),
+      emailAutomationState: parsed.emailAutomationState || {},
       googleAuthUsers: parsed.googleAuthUsers || {},
       roadmaps: parsed.roadmaps || {},
       roadmapMasterMaps: parsed.roadmapMasterMaps || {},
@@ -742,6 +1093,11 @@ function cloneLiveDbForRequest(db) {
     ...db,
     featureCatalog: { ...(db?.featureCatalog || {}) },
     demoSettings: { ...(db?.demoSettings || {}) },
+    emailSettings: { ...DEFAULT_EMAIL_SETTINGS, ...(db?.emailSettings || {}) },
+    emailTemplates: ngMergeEmailTemplates(db?.emailTemplates || {}),
+    emailLogs: safeArray(db?.emailLogs),
+    emailBroadcasts: safeArray(db?.emailBroadcasts),
+    emailAutomationState: { ...(db?.emailAutomationState || {}) },
   };
 }
 
@@ -784,6 +1140,11 @@ async function writeLiveDb(db) {
       ...db,
       featureCatalog: { ...DEFAULT_FEATURE_CATALOG, ...(db.featureCatalog || {}) },
       demoSettings: { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) },
+      emailSettings: { ...DEFAULT_EMAIL_SETTINGS, ...(db.emailSettings || {}) },
+      emailTemplates: ngMergeEmailTemplates(db.emailTemplates || {}),
+      emailLogs: safeArray(db.emailLogs),
+      emailBroadcasts: safeArray(db.emailBroadcasts),
+      emailAutomationState: db.emailAutomationState || {},
       updatedAt: new Date().toISOString(),
     };
     await ngWriteJsonAtomicStreaming(LIVE_DB_PATH, nextDb, "LMS database");
@@ -2829,6 +3190,41 @@ async function ngHandleStripeCheckoutCompleted(event = {}, req = null) {
     db.users[user.id] = user;
   }
 
+  let paymentEmail = { attempted: false, sent: false, skipped: true, reason: "student_user_missing" };
+  let enrollmentEmail = { attempted: false, sent: false, skipped: true, reason: "student_user_missing" };
+  if (user) {
+    const course = courseId ? db.courses?.[String(courseId)] || null : null;
+    paymentEmail = await ngSendConfiguredEmailSafe({
+      db,
+      templateKey: "payment_successful",
+      to: user.email,
+      variables: ngEmailBaseVariables(db, user, {
+        course_name: course?.name || "",
+        plan_name: plan?.name || db.payments[paymentId]?.plan_name || "NextGen Plan",
+        amount: ngFormatCurrencyAmount(db.payments[paymentId]?.amount_cents || 0, db.payments[paymentId]?.currency || "usd"),
+        payment_reference: session.id || paymentId,
+        payment_date: dateOnly(new Date(paidAt)),
+      }),
+      reason: "stripe_payment_successful",
+      userId: user.id,
+      enrollmentId: enrollment.id,
+    });
+    enrollmentEmail = await ngSendConfiguredEmailSafe({
+      db,
+      templateKey: "paid_enrollment_confirmed",
+      to: user.email,
+      variables: ngEmailBaseVariables(db, user, {
+        course_name: course?.name || "",
+        course_phrase: ngEmailCoursePhrase(course?.name || ""),
+        plan_name: plan?.name || db.payments[paymentId]?.plan_name || "NextGen Plan",
+        access_expiry: enrollment.access_expires_at ? dateOnly(new Date(enrollment.access_expires_at)) : "No fixed expiry",
+      }),
+      reason: "stripe_paid_enrollment_confirmed",
+      userId: user.id,
+      enrollmentId: enrollment.id,
+    });
+  }
+
   const affiliate = await ngFinalizeAffiliateAfterStripePayment(db.payments[paymentId]);
   const billingEvent = ngUpsertBillingEvent(db, event, "processed", {
     action: "checkout_completed_access_granted",
@@ -2836,11 +3232,13 @@ async function ngHandleStripeCheckoutCompleted(event = {}, req = null) {
     enrollment_id: enrollment.id,
     access_expires_at: enrollment.access_expires_at || null,
     access_email: accessEmail,
+    payment_email: paymentEmail,
+    enrollment_email: enrollmentEmail,
     affiliate,
   });
 
   await writeLiveDb(db);
-  return { action: "checkout_completed_access_granted", payment: sanitizePayment(db.payments[paymentId], db), enrollment: sanitizeAdminEnrollment(enrollment, db), billing_event: billingEvent, access_email: accessEmail };
+  return { action: "checkout_completed_access_granted", payment: sanitizePayment(db.payments[paymentId], db), enrollment: sanitizeAdminEnrollment(enrollment, db), billing_event: billingEvent, access_email: accessEmail, payment_email: paymentEmail, enrollment_email: enrollmentEmail };
 }
 
 async function ngHandleStripeCheckoutExpired(event = {}) {
@@ -8268,11 +8666,11 @@ app.post("/auth/signup", async (req, res) => {
 
     // Account creation never grants demo/course access. Demo access is only created
     // when the student explicitly starts the demo from /try-demo or /demo/start.
-    const welcomeEmail = await ngSendTransactionalEmailSafe({
+    const welcomeEmail = await ngSendConfiguredEmailSafe({
       db,
+      templateKey: "new_account_welcome",
       to: user.email,
-      subject: "Your NextGen USMLE account is ready",
-      text: `Hi Doctor,\n\nYour NextGen USMLE account has been created successfully.\n\nLogin: ${ngStudentLoginUrl()}\n\nCreating an account does not activate a demo or paid plan. Return to the plan you selected to complete secure checkout, or choose Try Demo separately.\n\nNextGen USMLE Team`,
+      variables: ngEmailBaseVariables(db, user, {}),
       reason: "student_signup_account_created",
       userId: user.id,
     });
@@ -9971,18 +10369,20 @@ async function ngRunPaidAccessExpiryCheck({ db, dryRun = false, sendEmails = tru
         result.reminders.push({ enrollment_id: enrollment.id, days_remaining: target, user_email: user?.email || "" });
         if (!dryRun) {
           if (sendEmails) {
-            await ngSendBillingNoticeSafe({
+            await ngSendConfiguredEmailSafe({
               db,
-              user,
-              enrollment,
-              course,
-              subject: `Your NextGen USMLE access expires in ${target} day${target === 1 ? "" : "s"}`,
-              text: `Hi Doctor,
-
-Your NextGen USMLE access${course?.name ? ` for ${course.name}` : ""} expires on ${dateOnly(expiresAt)}. Please renew before expiry to avoid interruption.
-
-NextGen USMLE Team`,
+              templateKey: "subscription_expiring",
+              to: user?.email,
+              variables: ngEmailBaseVariables(db, user || {}, {
+                course_name: course?.name || "",
+                course_phrase: ngEmailCoursePhrase(course?.name || ""),
+                days_remaining: target,
+                days_suffix: target === 1 ? "" : "s",
+                expiry_date: dateOnly(expiresAt),
+              }),
               reason: key,
+              userId: user?.id || null,
+              enrollmentId: enrollment?.id || null,
             });
           }
           enrollment.billing_notifications_sent[key] = new Date().toISOString();
@@ -10003,23 +10403,211 @@ NextGen USMLE Team`,
         db.enrollments[enrollment.id] = enrollment;
         result.changed = true;
         if (sendEmails && !enrollment.billing_notifications_sent.access_expired) {
-          await ngSendBillingNoticeSafe({
+          await ngSendConfiguredEmailSafe({
             db,
-            user,
-            enrollment,
-            course,
-            subject: "Your NextGen USMLE access has expired",
-            text: `Hi Doctor,
-
-Your NextGen USMLE access${course?.name ? ` for ${course.name}` : ""} has expired. Please renew access to continue using paid LMS features.
-
-NextGen USMLE Team`,
+            templateKey: "subscription_expired",
+            to: user?.email,
+            variables: ngEmailBaseVariables(db, user || {}, {
+              course_name: course?.name || "",
+              course_phrase: ngEmailCoursePhrase(course?.name || ""),
+              expiry_date: dateOnly(expiresAt),
+            }),
             reason: "access_expired",
+            userId: user?.id || null,
+            enrollmentId: enrollment?.id || null,
           });
           enrollment.billing_notifications_sent.access_expired = new Date().toISOString();
         }
       }
     }
+  }
+
+  return result;
+}
+
+
+async function ngRunDemoEmailLifecycleCheck({ db, source = "automatic_runner" } = {}) {
+  const settings = ngGetEmailSettings(db);
+  db.emailAutomationState = db.emailAutomationState || {};
+  const result = { source, checked: 0, expiring: 0, expired: 0, changed: false };
+  const now = Date.now();
+  const expiringDays = Math.max(1, Number(settings.demo_expiring_days || 1));
+
+  for (const enrollment of Object.values(db.enrollments || {})) {
+    if (!enrollment?.id || enrollment.is_demo !== true || !enrollment.demo_expiry) continue;
+    result.checked += 1;
+
+    const expiry = getDemoExpiryDateTime(enrollment.demo_expiry);
+    if (!expiry) continue;
+
+    const user = db.users?.[String(enrollment.user_id)] || null;
+    if (!user?.email) continue;
+
+    const course = enrollment.course_id
+      ? db.courses?.[String(enrollment.course_id)] || null
+      : null;
+    const remainingMs = expiry.getTime() - now;
+    const daysRemaining = Math.max(0, Math.ceil(remainingMs / (24 * 60 * 60 * 1000)));
+
+    if (remainingMs > 0 && daysRemaining <= expiringDays) {
+      const stateKey = `demo_expiring:${enrollment.id}:${enrollment.demo_expiry}`;
+      if (!db.emailAutomationState[stateKey]) {
+        const send = await ngSendConfiguredEmailSafe({
+          db,
+          templateKey: "demo_expiring",
+          to: user.email,
+          variables: ngEmailBaseVariables(db, user, {
+            course_name: course?.name || "",
+            course_phrase: ngEmailCoursePhrase(course?.name || ""),
+            days_remaining: Math.max(1, daysRemaining),
+            days_suffix: Math.max(1, daysRemaining) === 1 ? "" : "s",
+            expiry_date: enrollment.demo_expiry,
+          }),
+          reason: "demo_expiring",
+          userId: user.id,
+          enrollmentId: enrollment.id,
+        });
+
+        if (send.sent) {
+          db.emailAutomationState[stateKey] = {
+            sent_at: new Date().toISOString(),
+            template_key: "demo_expiring",
+            user_id: user.id,
+            enrollment_id: enrollment.id,
+          };
+          result.expiring += 1;
+          result.changed = true;
+        }
+      }
+    }
+
+    if (remainingMs <= 0) {
+      const stateKey = `demo_expired:${enrollment.id}:${enrollment.demo_expiry}`;
+      if (!db.emailAutomationState[stateKey]) {
+        const send = await ngSendConfiguredEmailSafe({
+          db,
+          templateKey: "demo_expired",
+          to: user.email,
+          variables: ngEmailBaseVariables(db, user, {
+            course_name: course?.name || "",
+            course_phrase: ngEmailCoursePhrase(course?.name || ""),
+            expiry_date: enrollment.demo_expiry,
+          }),
+          reason: "demo_expired",
+          userId: user.id,
+          enrollmentId: enrollment.id,
+        });
+
+        if (send.sent) {
+          db.emailAutomationState[stateKey] = {
+            sent_at: new Date().toISOString(),
+            template_key: "demo_expired",
+            user_id: user.id,
+            enrollment_id: enrollment.id,
+          };
+          result.expired += 1;
+          result.changed = true;
+        }
+      }
+    }
+  }
+
+  return result;
+}
+
+function ngFormatSessionEtTime(session = {}) {
+  const timezone =
+    session.scheduled_timezone ||
+    session.timezone ||
+    session.timezone_str ||
+    DEFAULT_TIMEZONE;
+  const start = getSessionStartUtc(
+    session.scheduled_date,
+    session.scheduled_time,
+    timezone
+  );
+
+  if (!start) {
+    return {
+      start: null,
+      date: session.scheduled_date || "",
+      time: session.scheduled_time || "",
+    };
+  }
+
+  const date = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  }).format(start);
+  const time = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  })
+    .format(start)
+    .replace("EDT", "ET")
+    .replace("EST", "ET");
+
+  return { start, date, time };
+}
+
+async function ngRunLiveClassReminderCheck({ db, source = "automatic_runner" } = {}) {
+  const settings = ngGetEmailSettings(db);
+  db.emailAutomationState = db.emailAutomationState || {};
+  const reminderMinutes = Math.max(
+    5,
+    Math.min(1440, Number(settings.live_class_reminder_minutes || 60))
+  );
+  const now = Date.now();
+  const result = { source, checked: 0, queued: 0, changed: false };
+
+  for (const session of Object.values(db.liveSessions || {})) {
+    if (!session?.id) continue;
+    if (
+      session.cancelled === true ||
+      ["cancelled", "canceled"].includes(String(session.status || "").toLowerCase())
+    ) {
+      continue;
+    }
+
+    const formatted = ngFormatSessionEtTime(session);
+    if (!formatted.start) continue;
+
+    const diffMinutes = (formatted.start.getTime() - now) / 60000;
+    if (diffMinutes < 0 || diffMinutes > reminderMinutes) continue;
+
+    result.checked += 1;
+    const stateKey = `live_class_reminder:${session.id}:${session.scheduled_date}:${session.scheduled_time}`;
+    if (db.emailAutomationState[stateKey]) continue;
+
+    const course = session.course_id
+      ? db.courses?.[String(session.course_id)] || null
+      : null;
+    const queue = ngQueueCourseTemplateEmail(db, {
+      templateKey: "live_class_reminder",
+      courseId: session.course_id,
+      reason: "live_class_reminder",
+      commonVariables: {
+        class_title: session.topic || session.title || "Live Class",
+        course_name: course?.name || "Course",
+        class_date: formatted.date,
+        class_time: formatted.time,
+        live_class_url: `https://live.nextgenusmlelms.com/student/live-class/${encodeURIComponent(session.id)}`,
+      },
+      dedupeKey: stateKey,
+      createdBy: "system",
+    });
+
+    db.emailAutomationState[stateKey] = {
+      queued_at: new Date().toISOString(),
+      job_id: queue.job?.id || null,
+      template_key: "live_class_reminder",
+    };
+    result.queued += 1;
+    result.changed = true;
   }
 
   return result;
@@ -10522,11 +11110,15 @@ app.post("/demo/start", async (req, res) => {
         .map((item) => item.course_name || "Course")
         .filter(Boolean)
         .join(", ");
-      demoEmail = await ngSendTransactionalEmailSafe({
+      demoEmail = await ngSendConfiguredEmailSafe({
         db,
+        templateKey: "demo_activated",
         to: user.email,
-        subject: "Your NextGen USMLE demo is active",
-        text: `Hi Doctor,\n\nYour NextGen USMLE demo is now active${courseNames ? ` for ${courseNames}` : ""}.\n\nDemo expiry: ${demoExpiry}\nDashboard: https://live.nextgenusmlelms.com/student/dashboard\n\nWhen the demo ends, choose a paid plan to continue.\n\nNextGen USMLE Team`,
+        variables: ngEmailBaseVariables(db, user, {
+          course_name: courseNames,
+          course_phrase: ngEmailCoursePhrase(courseNames),
+          expiry_date: demoExpiry,
+        }),
         reason: "student_demo_activated",
         userId: user.id,
         enrollmentId: enrollments[0]?.id || null,
@@ -10794,8 +11386,41 @@ app.post("/stripe/create-checkout", async (req, res) => {
             reason: coupon?.id ? "coupon_checkout_access_granted" : "free_checkout_access_granted",
           })
         : { attempted: false, sent: false, skipped: true, reason: "student_user_missing" };
+      const paymentEmail = checkoutUser
+        ? await ngSendConfiguredEmailSafe({
+            db,
+            templateKey: "payment_successful",
+            to: checkoutUser.email,
+            variables: ngEmailBaseVariables(db, checkoutUser, {
+              course_name: course?.name || "",
+              plan_name: plan?.name || "NextGen Plan",
+              amount: ngFormatCurrencyAmount(0, plan.currency || "usd"),
+              payment_reference: paymentId,
+              payment_date: dateOnly(new Date()),
+            }),
+            reason: coupon?.id ? "coupon_checkout_successful" : "free_checkout_successful",
+            userId: checkoutUser.id,
+            enrollmentId: enrollment.id,
+          })
+        : { attempted: false, sent: false, skipped: true, reason: "student_user_missing" };
+      const enrollmentEmail = checkoutUser
+        ? await ngSendConfiguredEmailSafe({
+            db,
+            templateKey: "paid_enrollment_confirmed",
+            to: checkoutUser.email,
+            variables: ngEmailBaseVariables(db, checkoutUser, {
+              course_name: course?.name || "",
+              course_phrase: ngEmailCoursePhrase(course?.name || ""),
+              plan_name: plan?.name || "NextGen Plan",
+              access_expiry: enrollment.access_expires_at ? dateOnly(new Date(enrollment.access_expires_at)) : "No fixed expiry",
+            }),
+            reason: coupon?.id ? "coupon_paid_enrollment_confirmed" : "free_paid_enrollment_confirmed",
+            userId: checkoutUser.id,
+            enrollmentId: enrollment.id,
+          })
+        : { attempted: false, sent: false, skipped: true, reason: "student_user_missing" };
       await writeLiveDb(db);
-      return res.json({ success: true, free_checkout: true, url: null, plan: sanitizePlan(plan), pricing, access_grant: { granted: true, method: "backend_enrollment_granted", enrollment_id: enrollment.id }, access_email: accessEmail, message: "Access granted without Stripe checkout." });
+      return res.json({ success: true, free_checkout: true, url: null, plan: sanitizePlan(plan), pricing, access_grant: { granted: true, method: "backend_enrollment_granted", enrollment_id: enrollment.id }, access_email: accessEmail, payment_email: paymentEmail, enrollment_email: enrollmentEmail, message: "Access granted without Stripe checkout." });
     }
     const checkoutCancelUrl = ngBuildCheckoutCancelUrl(cancelUrl, {
       courseId,
@@ -11338,8 +11963,25 @@ app.post("/live/recordings/publish", async (req, res) => {
       };
     }
 
+    let email_notification = null;
+    if (db.recordings[key].published === true) {
+      const course = db.courses?.[String(resolvedCourseId)] || null;
+      email_notification = ngQueueCourseTemplateEmail(db, {
+        templateKey: "new_recording_published",
+        courseId: resolvedCourseId,
+        reason: "new_recording_published",
+        commonVariables: {
+          recording_title: cleanTopic || "New Class Recording",
+          course_name: course?.name || "Course",
+          recording_url: "https://live.nextgenusmlelms.com/student/recordings",
+        },
+        dedupeKey: `new_recording_published:${key}:${now}`,
+        createdBy: user.id,
+      });
+    }
+
     await writeLiveDb(db);
-    res.json({ success: true, recording: sanitizePublicRecording(db.recordings[key]) });
+    res.json({ success: true, recording: sanitizePublicRecording(db.recordings[key]), email_notification });
   } catch (e) {
     res.status(e.statusCode || 500).json({ success: false, error: e.message });
   }
@@ -11539,8 +12181,34 @@ async function publishNotesHandler(req, res) {
       maxCards: 12,
     }).catch((error) => ({ created: 0, error: error.message }));
 
+    const publishedNote = db.notes[sessionId];
+    const session = db.liveSessions?.[sessionId] || null;
+    const course = publishedNote?.course_id
+      ? db.courses?.[String(publishedNote.course_id)] || null
+      : null;
+    const email_notification = publishedNote?.course_id
+      ? ngQueueCourseTemplateEmail(db, {
+          templateKey: "new_notes_published",
+          courseId: publishedNote.course_id,
+          reason: "new_notes_published",
+          commonVariables: {
+            notes_title: session?.topic || session?.title || "New Session Notes",
+            course_name: course?.name || "Course",
+            notes_url: "https://live.nextgenusmlelms.com/student/notes",
+          },
+          dedupeKey: `new_notes_published:${sessionId}:${publishedNote.published_at || publishedNote.updated_at}`,
+          createdBy: user.id,
+        })
+      : null;
+
     await writeLiveDb(db);
-    res.json({ success: true, message: "Notes published successfully", notes: db.notes[sessionId], flashcard_sync });
+    res.json({
+      success: true,
+      message: "Notes published successfully",
+      notes: db.notes[sessionId],
+      flashcard_sync,
+      email_notification,
+    });
   } catch (e) {
     res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to publish notes" });
   }
@@ -12903,8 +13571,25 @@ app.post("/admin/assessments/:assessmentId/publish", async (req, res) => {
     a.published_at = a.is_published ? new Date().toISOString() : null;
     a.published_by = a.is_published ? user.id : null;
     a.updated_at = new Date().toISOString();
+    let email_notification = null;
+    if (a.is_published === true && a.course_id) {
+      const course = db.courses?.[String(a.course_id)] || null;
+      email_notification = ngQueueCourseTemplateEmail(db, {
+        templateKey: "new_assessment_published",
+        courseId: a.course_id,
+        reason: "new_assessment_published",
+        commonVariables: {
+          assessment_title: a.title || "New Assessment",
+          course_name: course?.name || "Course",
+          assessment_url: "https://live.nextgenusmlelms.com/student/assessments",
+        },
+        dedupeKey: `new_assessment_published:${a.id}:${a.published_at || a.updated_at}`,
+        createdBy: user.id,
+      });
+    }
+
     await writeLiveDb(db);
-    res.json({ success: true, assessment: a });
+    res.json({ success: true, assessment: a, email_notification });
   } catch (e) {
     res.status(e.statusCode || 500).json({ success: false, error: e.message });
   }
@@ -24431,6 +25116,331 @@ function ngEmailTransportStatus() {
   };
 }
 
+function ngGetEmailSettings(db = {}) {
+  return { ...DEFAULT_EMAIL_SETTINGS, ...(db.emailSettings || {}) };
+}
+
+function ngGetEmailTemplates(db = {}) {
+  return ngMergeEmailTemplates(db.emailTemplates || {});
+}
+
+function ngGetEmailTemplate(db = {}, key = "") {
+  return ngGetEmailTemplates(db)[String(key || "").trim()] || null;
+}
+
+function ngRenderEmailString(value = "", variables = {}) {
+  return String(value || "").replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_match, key) => {
+    const resolved = variables?.[key];
+    return resolved === null || resolved === undefined ? "" : String(resolved);
+  });
+}
+
+function ngEmailBaseVariables(db = {}, user = {}, extra = {}) {
+  const settings = ngGetEmailSettings(db);
+  return {
+    student_name: String(user?.name || user?.full_name || user?.display_name || "Doctor").trim() || "Doctor",
+    student_email: normalizeEmail(user?.email || extra.student_email || ""),
+    login_url: ngStudentLoginUrl(),
+    dashboard_url: "https://live.nextgenusmlelms.com/student/dashboard",
+    plans_url: "https://live.nextgenusmlelms.com/plans",
+    support_email: settings.reply_to || process.env.EMAIL_REPLY_TO || extractEmailAddress(getEmailFromAddress()),
+    days_suffix: "s",
+    ...extra,
+  };
+}
+
+function ngEmailCoursePhrase(courseName = "") {
+  const clean = String(courseName || "").trim();
+  return clean ? ` for ${clean}` : "";
+}
+
+function ngConfiguredEmailFrom(db = {}) {
+  const settings = ngGetEmailSettings(db);
+  const existing = getEmailFromAddress();
+  return `${String(settings.sender_name || extractEmailDisplayName(existing) || "NextGen USMLE").trim()} <${extractEmailAddress(existing)}>`;
+}
+
+function ngConfiguredEmailReplyTo(db = {}) {
+  const settings = ngGetEmailSettings(db);
+  return String(settings.reply_to || process.env.EMAIL_REPLY_TO || process.env.REPLY_TO_EMAIL || "").trim() || undefined;
+}
+
+function ngBuildEmailFromTemplate(db = {}, templateKey = "", variables = {}, overrides = {}) {
+  const template = ngGetEmailTemplate(db, templateKey);
+  if (!template) {
+    const error = new Error(`Email template not found: ${templateKey}`);
+    error.statusCode = 404;
+    throw error;
+  }
+  const mergedVariables = ngEmailBaseVariables(db, overrides.user || {}, variables || {});
+  const subjectSource = overrides.subject !== undefined ? overrides.subject : template.subject;
+  const bodySource = overrides.body !== undefined ? overrides.body : template.body;
+  return {
+    template,
+    variables: mergedVariables,
+    subject: ngRenderEmailString(subjectSource, mergedVariables).trim(),
+    text: ngRenderEmailString(bodySource, mergedVariables).trim(),
+  };
+}
+
+async function ngSendConfiguredEmailSafe({ db, templateKey, to, variables = {}, reason = "configured_email", userId = null, enrollmentId = null, subject = undefined, body = undefined, force = false } = {}) {
+  const settings = ngGetEmailSettings(db);
+  const template = ngGetEmailTemplate(db, templateKey);
+  const result = { attempted: false, sent: false, skipped: false, provider: null, error: null, reason, template_key: templateKey };
+
+  if (!template) {
+    result.error = `Email template not found: ${templateKey}`;
+    return result;
+  }
+  if (!force && settings.email_notifications_enabled !== true) {
+    result.skipped = true;
+    result.reason = "master_email_notifications_disabled";
+    return result;
+  }
+  if (!force && template.enabled === false) {
+    result.skipped = true;
+    result.reason = "email_template_disabled";
+    return result;
+  }
+
+  result.attempted = true;
+  let rendered = null;
+  try {
+    rendered = ngBuildEmailFromTemplate(db, templateKey, variables, { subject, body });
+    const provider = await sendEmailMessage({
+      to,
+      subject: rendered.subject,
+      text: rendered.text,
+      from: ngConfiguredEmailFrom(db),
+      replyTo: ngConfiguredEmailReplyTo(db),
+    });
+    result.sent = true;
+    result.provider = provider?.provider || provider?.messageId || provider?.id || "email";
+    result.subject = rendered.subject;
+    ngLogStudentEmail(db, { to, subject: rendered.subject, status: "sent", provider_response: provider, reason, template_key: templateKey, user_id: userId, enrollment_id: enrollmentId });
+  } catch (error) {
+    result.error = error.message;
+    ngLogStudentEmail(db, { to: to || "", subject: rendered?.subject || template?.subject || "NextGen USMLE", status: "failed", error: error.message, reason, template_key: templateKey, user_id: userId, enrollment_id: enrollmentId });
+  }
+  return result;
+}
+
+function ngResolveEmailAudience(db = {}, options = {}) {
+  const audience = String(options.audience || "single").trim().toLowerCase();
+  const courseId = String(options.course_id || options.courseId || "").trim();
+  const requestedUserIds = uniqueList([...(safeArray(options.user_ids)), ...(safeArray(options.userIds))].map(String));
+  const requestedEmails = uniqueList([
+    ...safeArray(options.emails),
+    ...String(options.email || options.to || "").split(/[\s,;]+/),
+  ].map(normalizeEmail).filter((email) => email && email.includes("@")));
+  const demoSettings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
+  const now = Date.now();
+  const rows = [];
+
+  const pushUser = (user, enrollment = null) => {
+    const email = normalizeEmail(user?.email || "");
+    if (!email || !email.includes("@")) return;
+    rows.push({
+      user_id: user?.id || null,
+      email,
+      name: user?.name || user?.full_name || "Doctor",
+      enrollment_id: enrollment?.id || null,
+      course_id: enrollment?.course_id || courseId || null,
+      variables: ngEmailBaseVariables(db, user, {}),
+    });
+  };
+
+  if (["single", "selected", "custom"].includes(audience)) {
+    for (const userId of requestedUserIds) {
+      const user = db.users?.[String(userId)] || null;
+      if (user) pushUser(user, null);
+    }
+    for (const email of requestedEmails) {
+      const user = findUserByEmail(db, email);
+      if (user) pushUser(user, null);
+      else rows.push({ user_id: null, email, name: "Doctor", enrollment_id: null, course_id: courseId || null, variables: ngEmailBaseVariables(db, {}, { student_email: email }) });
+    }
+  } else {
+    for (const user of Object.values(db.users || {})) {
+      if (!user?.id || String(user.role || "student").toLowerCase() !== "student") continue;
+      const enrollments = Object.values(db.enrollments || {}).filter((enrollment) => String(enrollment.user_id || "") === String(user.id));
+      const activePaid = enrollments.find((enrollment) => enrollment.is_demo !== true && isPaidEnrollmentActive(enrollment, enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null));
+      const activeDemo = enrollments.find((enrollment) => enrollment.is_demo === true && enrollment.access_granted !== false && isDemoEnrollmentActive(enrollment, demoSettings));
+      const expiredDemo = enrollments.find((enrollment) => enrollment.is_demo === true && !isDemoEnrollmentActive(enrollment, demoSettings));
+      const courseEnrollment = courseId ? enrollments.find((enrollment) => String(enrollment.course_id || "") === courseId && enrollment.access_granted !== false && (enrollment.is_demo === true ? isDemoEnrollmentActive(enrollment, demoSettings) : isPaidEnrollmentActive(enrollment, enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null))) : null;
+      const expiringPaid = enrollments.find((enrollment) => {
+        if (enrollment.is_demo === true || enrollment.access_granted === false) return false;
+        const expires = ngPaidAccessExpiresAt(enrollment);
+        if (!expires) return false;
+        const remaining = expires.getTime() - now;
+        return remaining > 0 && remaining <= 7 * 24 * 60 * 60 * 1000;
+      });
+
+      if (audience === "course_students" && courseEnrollment) pushUser(user, courseEnrollment);
+      else if (audience === "active_paid" && activePaid) pushUser(user, activePaid);
+      else if (audience === "active_demo" && activeDemo) pushUser(user, activeDemo);
+      else if (audience === "expired_demo" && expiredDemo) pushUser(user, expiredDemo);
+      else if (audience === "expiring_soon" && expiringPaid) pushUser(user, expiringPaid);
+      else if (audience === "all_active" && (activePaid || activeDemo)) pushUser(user, activePaid || activeDemo);
+      else if (audience === "all_students") pushUser(user, activePaid || activeDemo || enrollments[0] || null);
+    }
+  }
+
+  const unique = [];
+  const seen = new Set();
+  for (const row of rows) {
+    const email = normalizeEmail(row.email);
+    if (!email || seen.has(email)) continue;
+    seen.add(email);
+    unique.push({ ...row, email });
+  }
+  return unique;
+}
+
+function ngQueueEmailBroadcast(db = {}, payload = {}) {
+  db.emailBroadcasts = safeArray(db.emailBroadcasts);
+  const dedupeKey = String(payload.dedupe_key || "").trim();
+  if (dedupeKey) {
+    const existing = db.emailBroadcasts.find((job) => String(job.dedupe_key || "") === dedupeKey && ["queued", "running", "completed"].includes(String(job.status || "")));
+    if (existing) return { job: existing, created: false, duplicate: true };
+  }
+  const recipients = safeArray(payload.recipients).map((item) => ({
+    email: normalizeEmail(item.email || ""),
+    user_id: item.user_id || null,
+    name: item.name || "Doctor",
+    enrollment_id: item.enrollment_id || null,
+    course_id: item.course_id || null,
+    variables: item.variables || {},
+    status: "pending",
+    error: null,
+  })).filter((item) => item.email && item.email.includes("@"));
+  const job = {
+    id: uuid(),
+    template_key: payload.template_key || null,
+    subject_override: payload.subject_override ?? null,
+    body_override: payload.body_override ?? null,
+    reason: payload.reason || "admin_email_broadcast",
+    audience: payload.audience || "selected",
+    course_id: payload.course_id || null,
+    dedupe_key: dedupeKey || null,
+    force: payload.force === true,
+    common_variables: payload.common_variables || {},
+    recipients,
+    total_count: recipients.length,
+    sent_count: 0,
+    failed_count: 0,
+    skipped_count: 0,
+    cursor: 0,
+    status: recipients.length ? "queued" : "completed",
+    created_by: payload.created_by || null,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    completed_at: recipients.length ? null : new Date().toISOString(),
+  };
+  db.emailBroadcasts.unshift(job);
+  db.emailBroadcasts = db.emailBroadcasts.slice(0, 200);
+  return { job, created: true, duplicate: false };
+}
+
+async function ngProcessEmailBroadcastQueueOnce({ batchSize = 10 } = {}) {
+  const db = await readLiveDb();
+  db.emailBroadcasts = safeArray(db.emailBroadcasts);
+  const job = db.emailBroadcasts.find((item) => ["queued", "running"].includes(String(item.status || "")) && Number(item.cursor || 0) < safeArray(item.recipients).length);
+  if (!job) return { processed: false };
+
+  job.status = "running";
+  job.started_at = job.started_at || new Date().toISOString();
+  const start = Number(job.cursor || 0);
+  const end = Math.min(safeArray(job.recipients).length, start + Math.max(1, Math.min(25, Number(batchSize || 10))));
+
+  for (let index = start; index < end; index += 1) {
+    const recipient = job.recipients[index];
+    if (!recipient || recipient.status !== "pending") {
+      job.cursor = index + 1;
+      continue;
+    }
+    const result = await ngSendConfiguredEmailSafe({
+      db,
+      templateKey: job.template_key,
+      to: recipient.email,
+      variables: { ...job.common_variables, ...recipient.variables, student_name: recipient.name || "Doctor", student_email: recipient.email },
+      reason: job.reason,
+      userId: recipient.user_id,
+      enrollmentId: recipient.enrollment_id,
+      subject: job.subject_override === null ? undefined : job.subject_override,
+      body: job.body_override === null ? undefined : job.body_override,
+      force: job.force === true,
+    });
+    recipient.status = result.sent ? "sent" : result.skipped ? "skipped" : "failed";
+    recipient.error = result.error || null;
+    recipient.sent_at = result.sent ? new Date().toISOString() : null;
+    if (result.sent) job.sent_count = Number(job.sent_count || 0) + 1;
+    else if (result.skipped) job.skipped_count = Number(job.skipped_count || 0) + 1;
+    else job.failed_count = Number(job.failed_count || 0) + 1;
+    job.cursor = index + 1;
+  }
+
+  if (job.cursor >= safeArray(job.recipients).length) {
+    job.status = job.failed_count > 0 && job.sent_count === 0 ? "failed" : "completed";
+    job.completed_at = new Date().toISOString();
+  }
+  job.updated_at = new Date().toISOString();
+  await writeLiveDb(db);
+  return { processed: true, job_id: job.id, status: job.status, sent_count: job.sent_count, failed_count: job.failed_count, cursor: job.cursor, total_count: job.total_count };
+}
+
+function ngQueueCourseTemplateEmail(db = {}, { templateKey, courseId, reason, commonVariables = {}, dedupeKey = "", createdBy = null } = {}) {
+  const recipients = ngResolveEmailAudience(db, { audience: "course_students", course_id: courseId });
+  return ngQueueEmailBroadcast(db, {
+    template_key: templateKey,
+    recipients,
+    reason,
+    audience: "course_students",
+    course_id: courseId,
+    common_variables: commonVariables,
+    dedupe_key: dedupeKey,
+    created_by: createdBy,
+  });
+}
+
+function ngFormatCurrencyAmount(amountCents = 0, currency = "usd") {
+  const cents = Number(amountCents || 0);
+  if (cents <= 0) return "Free / fully discounted";
+  try {
+    return new Intl.NumberFormat("en-US", { style: "currency", currency: String(currency || "usd").toUpperCase() }).format(cents / 100);
+  } catch {
+    return `${(cents / 100).toFixed(2)} ${String(currency || "usd").toUpperCase()}`;
+  }
+}
+
+function ngEmailSampleVariables(db = {}) {
+  return ngEmailBaseVariables(db, { name: "Doctor Hassan", email: "student@example.com" }, {
+    course_name: "120-Day USMLE Step 1 Marathon",
+    course_phrase: " for 120-Day USMLE Step 1 Marathon",
+    plan_name: "90-Day Premium Plan",
+    expiry_date: "2026-08-15",
+    access_expiry: "2026-10-12",
+    days_remaining: "3",
+    days_suffix: "s",
+    reset_url: "https://live.nextgenusmlelms.com/reset-password?token=secure-preview-token",
+    temporary_password: "NG-Preview-4821",
+    access_instructions: "Temporary password: NG-Preview-4821\nPlease change your password after signing in.",
+    payment_reference: "cs_test_preview_123",
+    payment_date: new Date().toISOString().slice(0, 10),
+    amount: "$225.00 USD",
+    class_title: "Cardiology Day 9",
+    class_date: "2026-07-15",
+    class_time: "1:00 PM ET",
+    live_class_url: "https://live.nextgenusmlelms.com/student/live-sessions",
+    recording_title: "Cardiology Day 9 Recording",
+    recording_url: "https://live.nextgenusmlelms.com/student/recordings",
+    notes_title: "Cardiology Day 9 Notes",
+    notes_url: "https://live.nextgenusmlelms.com/student/notes",
+    assessment_title: "Cardiology Day 9 Assessment",
+    assessment_url: "https://live.nextgenusmlelms.com/student/assessments",
+  });
+}
+
 async function ngSendTransactionalEmailSafe({ db, to, subject, text, reason = "transactional_email", userId = null, enrollmentId = null } = {}) {
   const result = { attempted: true, sent: false, provider: null, error: null, reason };
   try {
@@ -24521,10 +25531,11 @@ function ngEmailTextToHtml(text = "") {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;")
     .replace(/\n/g, "<br />");
-  return `<div style="font-family:Arial,Helvetica,sans-serif;line-height:1.65;color:#071426;max-width:640px;margin:0 auto"><div style="border-top:4px solid #D4A017;padding:24px;border-left:1px solid #DAEAFF;border-right:1px solid #DAEAFF;border-bottom:1px solid #DAEAFF;border-radius:14px"><div style="font-weight:800;font-size:18px;margin-bottom:14px">NextGen USMLE</div><div>${escaped}</div></div></div>`;
+  const linked = escaped.replace(/(https?:\/\/[^<\s]+)/g, '<a href="$1" style="color:#1A4FBF;font-weight:700;text-decoration:none;word-break:break-word">$1</a>');
+  return `<div style="margin:0;padding:24px;background:#F6F9FE;font-family:Arial,Helvetica,sans-serif;color:#071426"><div style="max-width:640px;margin:0 auto;background:#FFFFFF;border:1px solid #DAEAFF;border-radius:18px;overflow:hidden;box-shadow:0 14px 40px rgba(26,79,191,.08)"><div style="height:5px;background:linear-gradient(90deg,#06101F,#D4A017,#06101F)"></div><div style="padding:28px"><div style="display:inline-block;padding:7px 12px;border-radius:999px;background:#06101F;color:#D4A017;font-size:11px;font-weight:800;letter-spacing:.14em;text-transform:uppercase;margin-bottom:18px">NextGen USMLE</div><div style="font-size:15px;line-height:1.75">${linked}</div><div style="margin-top:26px;padding-top:18px;border-top:1px solid #E4EEFC;color:#5A718A;font-size:12px">Structured USMLE preparation · Live learning · Smart revision</div></div></div></div>`;
 }
 
-async function sendEmailMessage({ to, subject = "NextGen USMLE", text = "" }) {
+async function sendEmailMessage({ to, subject = "NextGen USMLE", text = "", from: fromOverride = "", replyTo: replyToOverride = "" }) {
   const recipient = String(Array.isArray(to) ? to[0] : to || "").trim();
   if (!recipient || !recipient.includes("@")) {
     const error = new Error("A valid email recipient is required.");
@@ -24539,9 +25550,9 @@ async function sendEmailMessage({ to, subject = "NextGen USMLE", text = "" }) {
     throw error;
   }
 
-  const from = getEmailFromAddress();
+  const from = String(fromOverride || getEmailFromAddress()).trim() || getEmailFromAddress();
   const cleanSubject = String(subject || "NextGen USMLE").trim() || "NextGen USMLE";
-  const replyTo = process.env.EMAIL_REPLY_TO || process.env.REPLY_TO_EMAIL || undefined;
+  const replyTo = String(replyToOverride || process.env.EMAIL_REPLY_TO || process.env.REPLY_TO_EMAIL || "").trim() || undefined;
   const resolved = ngResolveEmailProvider();
 
   if (!resolved.provider) {
@@ -48287,28 +49298,41 @@ function ngLogStudentEmail(db = {}, payload = {}) {
 }
 
 async function ngSendStudentAccessEmailSafe({ db, req, user, enrollment = {}, course = {}, temporaryPassword = "", reason = "student_access" } = {}) {
-  const result = { attempted: true, sent: false, provider: null, error: null, reason };
-  try {
-    if (!user?.email) throw new Error("Student email is missing");
-    let resetToken = "";
-    let resetUrl = "";
-    if (!temporaryPassword) {
-      resetToken = crypto.randomBytes(32).toString("hex");
-      user.password_reset_token_hash = ngHashToken(resetToken);
-      user.password_reset_expires_at = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-      user.updated_at = nowIso();
-      resetUrl = ngStudentResetUrl(req, resetToken);
-    }
-    const body = ngStudentCredentialEmailBody({ user, course, enrollment, temporaryPassword, resetUrl, reason });
-    const provider = await sendEmailMessage({ to: user.email, subject: "Your NextGen USMLE LMS Access", text: body });
-    result.sent = true;
-    result.provider = provider?.provider || provider?.messageId || provider?.id || "email";
-    ngLogStudentEmail(db, { to: user.email, subject: "Your NextGen USMLE LMS Access", status: "sent", provider_response: provider, reason, user_id: user.id, enrollment_id: enrollment?.id || null });
-  } catch (error) {
-    result.error = error.message;
-    ngLogStudentEmail(db, { to: user?.email || "", subject: "Your NextGen USMLE LMS Access", status: "failed", error: error.message, reason, user_id: user?.id || null, enrollment_id: enrollment?.id || null });
+  if (!user?.email) {
+    return { attempted: true, sent: false, error: "Student email is missing", reason, template_key: "lms_credentials_access" };
   }
-  return result;
+
+  let resetUrl = "";
+  if (!temporaryPassword) {
+    const resetToken = crypto.randomBytes(32).toString("hex");
+    user.password_reset_token_hash = ngHashToken(resetToken);
+    user.password_reset_expires_at = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    user.updated_at = nowIso();
+    resetUrl = ngStudentResetUrl(req, resetToken);
+  }
+
+  const courseName = course?.name || enrollment?.course_name || "";
+  const accessInstructions = temporaryPassword
+    ? `Temporary password: ${temporaryPassword}
+Please change your password after signing in.`
+    : `Use your existing password. If you do not remember it, create a new password here:
+${resetUrl}`;
+
+  return ngSendConfiguredEmailSafe({
+    db,
+    templateKey: "lms_credentials_access",
+    to: user.email,
+    variables: ngEmailBaseVariables(db, user, {
+      course_name: courseName,
+      course_phrase: ngEmailCoursePhrase(courseName),
+      temporary_password: temporaryPassword,
+      reset_url: resetUrl,
+      access_instructions: accessInstructions,
+    }),
+    reason,
+    userId: user.id,
+    enrollmentId: enrollment?.id || null,
+  });
 }
 
 app.post("/auth/forgot-password", async (req, res) => {
@@ -48335,13 +49359,15 @@ app.post("/auth/forgot-password", async (req, res) => {
       user.password_reset_expires_at = new Date(Date.now() + 60 * 60 * 1000).toISOString();
       user.updated_at = nowIso();
       const resetUrl = ngStudentResetUrl(req, token);
-      try {
-        const provider = await sendEmailMessage({ to: user.email, subject: "Reset your NextGen USMLE LMS password", text: `Hi Doctor,\n\nUse this link to reset your password:\n${resetUrl}\n\nThis link expires in 1 hour.\n\nNextGen USMLE Team` });
-        ngLogStudentEmail(db, { to: user.email, subject: "Reset your NextGen USMLE LMS password", status: "sent", provider_response: provider, reason: "forgot_password", user_id: user.id });
-      } catch (emailError) {
-        deliveryFailed = true;
-        ngLogStudentEmail(db, { to: user.email, subject: "Reset your NextGen USMLE LMS password", status: "failed", error: emailError.message, reason: "forgot_password", user_id: user.id });
-      }
+      const resetEmail = await ngSendConfiguredEmailSafe({
+        db,
+        templateKey: "password_reset",
+        to: user.email,
+        variables: ngEmailBaseVariables(db, user, { reset_url: resetUrl }),
+        reason: "forgot_password",
+        userId: user.id,
+      });
+      deliveryFailed = resetEmail.attempted === true && resetEmail.sent !== true && resetEmail.skipped !== true;
       await writeLiveDb(db);
     }
 
@@ -48457,20 +49483,329 @@ app.get("/admin/email/status", async (req, res) => {
   try {
     await requireAdmin(req);
     res.json({ success: true, ...ngEmailTransportStatus() });
-  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/email-settings", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    const courses = Object.values(db.courses || {})
+      .filter((course) => course.status !== "archived")
+      .map((course) => ({ id: course.id, name: course.name || "Course" }));
+
+    res.json({
+      success: true,
+      settings: ngGetEmailSettings(db),
+      templates: Object.values(ngGetEmailTemplates(db)),
+      email_system: ngEmailTransportStatus(),
+      courses,
+      broadcasts: safeArray(db.emailBroadcasts).slice(0, 20).map((job) => ({ ...job, recipients: undefined })),
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.patch("/admin/email-settings", async (req, res) => {
+  try {
+    const { user } = await requireAdmin(req);
+    const db = await readLiveDb();
+    const previous = ngGetEmailSettings(db);
+    const next = {
+      ...previous,
+      email_notifications_enabled:
+        req.body.email_notifications_enabled !== undefined
+          ? Boolean(req.body.email_notifications_enabled)
+          : previous.email_notifications_enabled,
+      admin_email:
+        req.body.admin_email !== undefined
+          ? normalizeEmail(req.body.admin_email)
+          : previous.admin_email,
+      sender_name:
+        req.body.sender_name !== undefined
+          ? String(req.body.sender_name || "").trim()
+          : previous.sender_name,
+      reply_to:
+        req.body.reply_to !== undefined
+          ? normalizeEmail(req.body.reply_to)
+          : previous.reply_to,
+      live_class_reminder_minutes:
+        req.body.live_class_reminder_minutes !== undefined
+          ? Math.max(5, Math.min(1440, Number(req.body.live_class_reminder_minutes || 60)))
+          : previous.live_class_reminder_minutes,
+      demo_expiring_days:
+        req.body.demo_expiring_days !== undefined
+          ? Math.max(1, Math.min(7, Number(req.body.demo_expiring_days || 1)))
+          : previous.demo_expiring_days,
+      bulk_send_limit:
+        req.body.bulk_send_limit !== undefined
+          ? Math.max(1, Math.min(500, Number(req.body.bulk_send_limit || 250)))
+          : previous.bulk_send_limit,
+      updated_at: new Date().toISOString(),
+      updated_by: user.id,
+    };
+
+    if (!next.admin_email || !next.admin_email.includes("@")) {
+      return res.status(400).json({ success: false, error: "A valid admin email is required" });
+    }
+    if (!next.sender_name) {
+      return res.status(400).json({ success: false, error: "Sender name is required" });
+    }
+
+    db.emailSettings = next;
+    await writeLiveDb(db);
+    res.json({ success: true, settings: next, email_system: ngEmailTransportStatus() });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.patch("/admin/email/templates/:templateKey", async (req, res) => {
+  try {
+    const { user } = await requireAdmin(req);
+    const db = await readLiveDb();
+    const key = String(req.params.templateKey || "").trim();
+    const current = ngGetEmailTemplate(db, key);
+
+    if (!current) {
+      return res.status(404).json({ success: false, error: "Email template not found" });
+    }
+
+    db.emailTemplates = ngGetEmailTemplates(db);
+    db.emailTemplates[key] = {
+      ...current,
+      enabled: req.body.enabled !== undefined ? Boolean(req.body.enabled) : current.enabled,
+      subject: req.body.subject !== undefined ? String(req.body.subject || "").trim() : current.subject,
+      body: req.body.body !== undefined ? String(req.body.body || "").trim() : current.body,
+      updated_at: new Date().toISOString(),
+      updated_by: user.id,
+    };
+
+    if (!db.emailTemplates[key].subject) {
+      return res.status(400).json({ success: false, error: "Template subject is required" });
+    }
+    if (!db.emailTemplates[key].body) {
+      return res.status(400).json({ success: false, error: "Template body is required" });
+    }
+
+    await writeLiveDb(db);
+    res.json({ success: true, template: db.emailTemplates[key] });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/email/templates/:templateKey/reset", async (req, res) => {
+  try {
+    const { user } = await requireAdmin(req);
+    const db = await readLiveDb();
+    const key = String(req.params.templateKey || "").trim();
+    const base = DEFAULT_EMAIL_TEMPLATES[key];
+
+    if (!base) {
+      return res.status(404).json({ success: false, error: "Email template not found" });
+    }
+
+    db.emailTemplates = ngGetEmailTemplates(db);
+    db.emailTemplates[key] = {
+      ...base,
+      variables: [...(base.variables || [])],
+      updated_at: new Date().toISOString(),
+      updated_by: user.id,
+    };
+
+    await writeLiveDb(db);
+    res.json({ success: true, template: db.emailTemplates[key] });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/email/preview", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    const key = String(req.body.template_key || "").trim();
+    const rendered = ngBuildEmailFromTemplate(
+      db,
+      key,
+      { ...ngEmailSampleVariables(db), ...(req.body.variables || {}) },
+      { subject: req.body.subject, body: req.body.body }
+    );
+
+    res.json({
+      success: true,
+      template_key: key,
+      subject: rendered.subject,
+      text: rendered.text,
+      html: ngEmailTextToHtml(rendered.text),
+      variables: rendered.variables,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/email/templates/:templateKey/test", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    const settings = ngGetEmailSettings(db);
+    const to = normalizeEmail(
+      req.body.to ||
+        settings.admin_email ||
+        process.env.BOOTSTRAP_ADMIN_EMAIL ||
+        "nextgenacademy89@gmail.com"
+    );
+    const key = String(req.params.templateKey || "").trim();
+    const result = await ngSendConfiguredEmailSafe({
+      db,
+      templateKey: key,
+      to,
+      variables: { ...ngEmailSampleVariables(db), ...(req.body.variables || {}) },
+      subject: req.body.subject,
+      body: req.body.body,
+      reason: "admin_template_test",
+      force: true,
+    });
+
+    await writeLiveDb(db);
+
+    if (!result.sent) {
+      return res.status(502).json({
+        success: false,
+        error: result.error || "Template test email was not sent",
+        result,
+      });
+    }
+
+    res.json({ success: true, result, email_system: ngEmailTransportStatus() });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+      email_system: ngEmailTransportStatus(),
+    });
+  }
+});
+
+app.post("/admin/email/audience-preview", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    const recipients = ngResolveEmailAudience(db, req.body || {});
+
+    res.json({
+      success: true,
+      count: recipients.length,
+      recipients: recipients.slice(0, 50).map((item) => ({
+        user_id: item.user_id,
+        name: item.name,
+        email: item.email,
+        course_id: item.course_id,
+      })),
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/email/send", async (req, res) => {
+  try {
+    const { user } = await requireAdmin(req);
+    const db = await readLiveDb();
+    const settings = ngGetEmailSettings(db);
+    const templateKey = String(req.body.template_key || "").trim();
+
+    if (!ngGetEmailTemplate(db, templateKey)) {
+      return res.status(404).json({ success: false, error: "Select a valid email template" });
+    }
+
+    const recipients = ngResolveEmailAudience(db, req.body || {});
+    const limit = Math.max(1, Math.min(500, Number(settings.bulk_send_limit || 250)));
+
+    if (!recipients.length) {
+      return res.status(400).json({ success: false, error: "No valid recipients matched this selection" });
+    }
+    if (recipients.length > limit) {
+      return res.status(400).json({
+        success: false,
+        error: `This selection contains ${recipients.length} recipients. The current safety limit is ${limit}.`,
+      });
+    }
+
+    const queue = ngQueueEmailBroadcast(db, {
+      template_key: templateKey,
+      recipients,
+      subject_override: req.body.subject !== undefined ? String(req.body.subject || "") : null,
+      body_override: req.body.body !== undefined ? String(req.body.body || "") : null,
+      reason: "admin_manual_email",
+      audience: req.body.audience || "selected",
+      course_id: req.body.course_id || null,
+      common_variables: req.body.variables || {},
+      force: true,
+      created_by: user.id,
+    });
+
+    await writeLiveDb(db);
+    res.json({
+      success: true,
+      queued: true,
+      created: queue.created,
+      job: { ...queue.job, recipients: undefined },
+      recipient_count: recipients.length,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
 });
 
 app.post("/admin/email/test", async (req, res) => {
   try {
     await requireAdmin(req);
     const db = await readLiveDb();
-    const to = req.body.to || process.env.BOOTSTRAP_ADMIN_EMAIL || "nextgenacademy89@gmail.com";
-    const provider = await sendEmailMessage({ to, subject: req.body.subject || "NextGen email test", text: req.body.text || "✅ NextGen email sending is working." });
-    ngLogStudentEmail(db, { to, subject: req.body.subject || "NextGen email test", status: "sent", provider_response: provider, reason: "admin_email_test" });
+    const settings = ngGetEmailSettings(db);
+    const to = normalizeEmail(
+      req.body.to ||
+        settings.admin_email ||
+        process.env.BOOTSTRAP_ADMIN_EMAIL ||
+        "nextgenacademy89@gmail.com"
+    );
+    const result = await ngSendConfiguredEmailSafe({
+      db,
+      templateKey: "new_account_welcome",
+      to,
+      variables: ngEmailSampleVariables(db),
+      subject: req.body.subject || "NextGen email-system test",
+      body:
+        req.body.text ||
+        req.body.body ||
+        "Hi Doctor,\n\nThis is a live test from your NextGen USMLE email control center.\n\nThe Hostinger SMTP connection is working correctly.\n\nNextGen USMLE Team",
+      reason: "admin_email_test",
+      force: true,
+    });
+
     await writeLiveDb(db);
-    res.json({ success: true, provider, email_system: ngEmailTransportStatus() });
+
+    if (!result.sent) {
+      return res.status(502).json({
+        success: false,
+        error: result.error || "Test email failed",
+        result,
+        email_system: ngEmailTransportStatus(),
+      });
+    }
+
+    res.json({ success: true, result, email_system: ngEmailTransportStatus() });
   } catch (error) {
-    res.status(error.statusCode || 500).json({ success: false, error: error.message, email_system: ngEmailTransportStatus() });
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+      email_system: ngEmailTransportStatus(),
+    });
   }
 });
 
@@ -48478,8 +49813,30 @@ app.get("/admin/email/logs", async (req, res) => {
   try {
     await requireAdmin(req);
     const db = await readLiveDb();
-    res.json({ success: true, logs: safeArray(db.emailLogs).slice(0, 200), count: safeArray(db.emailLogs).length });
-  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+    res.json({
+      success: true,
+      logs: safeArray(db.emailLogs).slice(0, 300),
+      count: safeArray(db.emailLogs).length,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/email/broadcasts", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    res.json({
+      success: true,
+      broadcasts: safeArray(db.emailBroadcasts)
+        .slice(0, 100)
+        .map((job) => ({ ...job, recipients: undefined })),
+      count: safeArray(db.emailBroadcasts).length,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
 });
 
 app.get("/admin/prelaunch/flow-check", async (req, res) => {
@@ -48869,6 +50226,78 @@ app.post("/admin/sessions/:sessionId/process-learning-content", async (req, res)
     });
   }
 });
+
+const NG_EMAIL_QUEUE_RUNNER_STATE = { started: false, running: false, ticks: 0 };
+const NG_EMAIL_AUTOMATION_RUNNER_STATE = { started: false, running: false, ticks: 0 };
+
+function ngStartEmailQueueRunner() {
+  if (NG_EMAIL_QUEUE_RUNNER_STATE.started) return;
+  if (process.env.NEXTGEN_EMAIL_QUEUE_DISABLED === "true") return;
+
+  NG_EMAIL_QUEUE_RUNNER_STATE.started = true;
+  const seconds = Math.max(15, Number(process.env.NEXTGEN_EMAIL_QUEUE_SECONDS || 60) || 60);
+  const interval = setInterval(async () => {
+    if (NG_EMAIL_QUEUE_RUNNER_STATE.running) return;
+    if (ngBackgroundMemoryIsHigh("email_queue_runner")) return;
+
+    NG_EMAIL_QUEUE_RUNNER_STATE.running = true;
+    NG_EMAIL_QUEUE_RUNNER_STATE.ticks += 1;
+    try {
+      const result = await ngProcessEmailBroadcastQueueOnce({
+        batchSize: Number(process.env.NEXTGEN_EMAIL_QUEUE_BATCH_SIZE || 10) || 10,
+      });
+      if (result.processed) console.log("Email queue runner:", JSON.stringify(result));
+    } catch (error) {
+      console.error("Email queue runner error:", error.message);
+    } finally {
+      NG_EMAIL_QUEUE_RUNNER_STATE.running = false;
+    }
+  }, seconds * 1000);
+
+  if (typeof interval.unref === "function") interval.unref();
+  console.log(`Email queue runner enabled every ${seconds} seconds`);
+}
+
+function ngStartEmailAutomationRunner() {
+  if (NG_EMAIL_AUTOMATION_RUNNER_STATE.started) return;
+  if (process.env.NEXTGEN_EMAIL_AUTOMATION_DISABLED === "true") return;
+
+  NG_EMAIL_AUTOMATION_RUNNER_STATE.started = true;
+  const minutes = Math.max(
+    5,
+    Number(process.env.NEXTGEN_EMAIL_AUTOMATION_MINUTES || 15) || 15
+  );
+  const interval = setInterval(async () => {
+    if (NG_EMAIL_AUTOMATION_RUNNER_STATE.running) return;
+    if (ngBackgroundMemoryIsHigh("email_automation_runner")) return;
+
+    NG_EMAIL_AUTOMATION_RUNNER_STATE.running = true;
+    NG_EMAIL_AUTOMATION_RUNNER_STATE.ticks += 1;
+    try {
+      const db = await readLiveDb();
+      const demo = await ngRunDemoEmailLifecycleCheck({
+        db,
+        source: "automatic_runner",
+      });
+      const live = await ngRunLiveClassReminderCheck({
+        db,
+        source: "automatic_runner",
+      });
+
+      if (demo.changed || live.changed) await writeLiveDb(db);
+      if (demo.expiring || demo.expired || live.queued) {
+        console.log("Email automation runner:", JSON.stringify({ demo, live }));
+      }
+    } catch (error) {
+      console.error("Email automation runner error:", error.message);
+    } finally {
+      NG_EMAIL_AUTOMATION_RUNNER_STATE.running = false;
+    }
+  }, minutes * 60 * 1000);
+
+  if (typeof interval.unref === "function") interval.unref();
+  console.log(`Email automation runner enabled every ${minutes} minutes`);
+}
 
 const NG_BILLING_RUNNER_STATE = { started: false, running: false, ticks: 0 };
 
@@ -55563,6 +56992,8 @@ app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Backend build=${NEXTGEN_BACKEND_BUILD}; JSON body limit=${NEXTGEN_JSON_BODY_LIMIT}; memory soft guard=${NEXTGEN_BACKGROUND_MEMORY_SOFT_PERCENT}% of ${NEXTGEN_RENDER_MEMORY_LIMIT_MB} MB`);
   ngV116StartBackendHeartbeat();
+  ngStartEmailQueueRunner();
+  ngStartEmailAutomationRunner();
   ngStartBillingExpiryRunner();
   ngStartAutoZoomPrepareScheduler();
   console.log(`DATA_DIR=${DATA_DIR}`);
