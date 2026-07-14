@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v190j-google-auth-futuristic-landing";
+const NEXTGEN_BACKEND_BUILD = "v190k-safe-expired-access-checkout-email";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -8198,7 +8198,18 @@ app.post("/auth/signup", async (req, res) => {
     });
 
     db.users[user.id] = user;
-    const selfHeal = ngMaybeSelfHealDemoEnrollment(db, user, { source: "auth_signup" });
+
+    // Account creation never grants demo/course access. Demo access is only created
+    // when the student explicitly starts the demo from /try-demo or /demo/start.
+    const welcomeEmail = await ngSendTransactionalEmailSafe({
+      db,
+      to: user.email,
+      subject: "Your NextGen USMLE account is ready",
+      text: `Hi Doctor,\n\nYour NextGen USMLE account has been created successfully.\n\nLogin: ${ngStudentLoginUrl()}\n\nCreating an account does not activate a demo or paid plan. Return to the plan you selected to complete secure checkout, or choose Try Demo separately.\n\nNextGen USMLE Team`,
+      reason: "student_signup_account_created",
+      userId: user.id,
+    });
+
     await writeLiveDb(db);
 
     const token = signAuthToken(user);
@@ -8210,7 +8221,9 @@ app.post("/auth/signup", async (req, res) => {
       user: safeUser,
       record: safeUser,
       created: true,
-      demo_access_self_heal: selfHeal,
+      access_granted: false,
+      demo_started: false,
+      transactional_email: welcomeEmail,
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({
@@ -8706,7 +8719,18 @@ app.post("/auth/google", async (req, res) => {
       updated_at: new Date().toISOString(),
     };
 
-    const selfHeal = ngMaybeSelfHealDemoEnrollment(db, user, { source: "auth_google" });
+    let welcomeEmail = { attempted: false, sent: false, skipped: true, reason: "existing_google_user" };
+    if (created) {
+      welcomeEmail = await ngSendTransactionalEmailSafe({
+        db,
+        to: user.email,
+        subject: "Your NextGen USMLE account is ready",
+        text: `Hi Doctor,\n\nYour NextGen USMLE account has been created successfully with Google.\n\nLogin: ${ngStudentLoginUrl()}\n\nCreating an account does not activate a demo or paid plan. Return to the plan you selected to complete secure checkout, or choose Try Demo separately.\n\nNextGen USMLE Team`,
+        reason: "student_google_signup_account_created",
+        userId: user.id,
+      });
+    }
+
     await writeLiveDb(db);
 
     const token = signAuthToken(user);
@@ -8718,7 +8742,9 @@ app.post("/auth/google", async (req, res) => {
       user: safeUser,
       record: safeUser,
       created,
-      demo_access_self_heal: selfHeal,
+      access_granted: false,
+      demo_started: false,
+      transactional_email: welcomeEmail,
     });
   } catch (error) {
     console.error("Google auth error:", error.response?.data || error.message);
@@ -10087,6 +10113,20 @@ function ngMaybeSelfHealDemoEnrollment(db = {}, user = {}, options = {}) {
     return result;
   }
 
+  // v190k safety: demo access must only be created by the explicit /demo/start flow
+  // or an admin-approved repair. Login, signup, auth/me, feature checks, dashboard
+  // reads, assessment reads, and enrollment-status reads are strictly read-only.
+  const source = String(options.source || "demo_self_heal").trim().toLowerCase();
+  const explicitRepairAllowed =
+    options.explicitRepair === true ||
+    options.explicit_repair === true ||
+    source.startsWith("admin_demo_");
+
+  if (!explicitRepairAllowed) {
+    result.reason = "implicit_demo_creation_disabled";
+    return result;
+  }
+
   const settings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
   if (settings.enabled === false) {
     result.reason = "demo_disabled";
@@ -10408,6 +10448,24 @@ app.post("/demo/start", async (req, res) => {
       });
     }
 
+    let demoEmail = { attempted: false, sent: false, skipped: true, reason: "demo_not_newly_created" };
+    if (createdCount > 0 && user?.email) {
+      const courseNames = enrollments
+        .filter((item) => item.status === "demo_active")
+        .map((item) => item.course_name || "Course")
+        .filter(Boolean)
+        .join(", ");
+      demoEmail = await ngSendTransactionalEmailSafe({
+        db,
+        to: user.email,
+        subject: "Your NextGen USMLE demo is active",
+        text: `Hi Doctor,\n\nYour NextGen USMLE demo is now active${courseNames ? ` for ${courseNames}` : ""}.\n\nDemo expiry: ${demoExpiry}\nDashboard: https://live.nextgenusmlelms.com/student/dashboard\n\nWhen the demo ends, choose a paid plan to continue.\n\nNextGen USMLE Team`,
+        reason: "student_demo_activated",
+        userId: user.id,
+        enrollmentId: enrollments[0]?.id || null,
+      });
+    }
+
     await writeLiveDb(db);
 
     const status = buildStudentDemoStatus(db, user);
@@ -10426,6 +10484,7 @@ app.post("/demo/start", async (req, res) => {
       demo_settings: settings,
       demo_expiry: status.demo_expiry || demoExpiry,
       demo_status: status,
+      transactional_email: demoEmail,
       source: "backend",
       message: allCoursesRequested
         ? "Demo access granted for all active demo-enabled courses"
@@ -10595,6 +10654,25 @@ app.get("/enrollments/status", async (req, res) => {
     res.json({ success: true, status: "none", enrollment: null, demo_expiry: null, source: "backend", demo_access_self_heal: selfHeal });
   } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); }
 });
+function ngBuildCheckoutCancelUrl(rawCancelUrl = "", context = {}) {
+  const fallback = "https://live.nextgenusmlelms.com/payment-cancel";
+  try {
+    const url = new URL(String(rawCancelUrl || fallback));
+    if (context.courseId) url.searchParams.set("course_id", String(context.courseId));
+    if (context.planId) url.searchParams.set("plan_id", String(context.planId));
+    if (context.couponCode) url.searchParams.set("coupon_code", String(context.couponCode));
+    url.searchParams.set("checkout_cancelled", "1");
+    return url.toString();
+  } catch {
+    const params = new URLSearchParams();
+    if (context.courseId) params.set("course_id", String(context.courseId));
+    if (context.planId) params.set("plan_id", String(context.planId));
+    if (context.couponCode) params.set("coupon_code", String(context.couponCode));
+    params.set("checkout_cancelled", "1");
+    return `${fallback}?${params.toString()}`;
+  }
+}
+
 app.post("/stripe/create-checkout", async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req);
@@ -10638,10 +10716,26 @@ app.post("/stripe/create-checkout", async (req, res) => {
       };
       if (coupon?.id) { coupon.used_count = Number(coupon.used_count || 0) + 1; coupon.updated_at = new Date().toISOString(); db.couponRedemptions[uuid()] = { id: uuid(), coupon_id: coupon.id, coupon_code: coupon.code, plan_id: plan.id, enrollment_id: enrollment.id, student_id: studentId, course_id: courseId, original_amount_cents: pricing.original_amount_cents, discount_cents: pricing.discount_cents, final_amount_cents: 0, redeemed_at: new Date().toISOString() }; }
       if (ngAffCode(referral_code || ref || "")) { const crmDb = ngAffiliateStore(await readCrmDb()); const affiliate = ngFindAffiliateByCode(crmDb, referral_code || ref); if (affiliate) { const commission = ngCreateCommissionLedgerEntry({ db: crmDb, affiliate, payment: db.payments[paymentId], attribution: { student_id: studentId, course_id: courseId, plan_id: plan.id }, source: "free_checkout" }); crmDb.referral_attributions.unshift({ id: uuid(), affiliate_id: affiliate.id, affiliate_name: affiliate.name, referral_code: affiliate.referral_code, student_id: studentId, course_id: courseId, plan_id: plan.id, payment_id: paymentId, commission_id: commission.id, status: "converted", created_at: new Date().toISOString(), updated_at: new Date().toISOString() }); await writeCrmDb(crmDb); } }
+      const checkoutUser = db.users?.[String(studentId)] || user || null;
+      const accessEmail = checkoutUser
+        ? await ngSendStudentAccessEmailSafe({
+            db,
+            req,
+            user: checkoutUser,
+            enrollment,
+            course,
+            reason: coupon?.id ? "coupon_checkout_access_granted" : "free_checkout_access_granted",
+          })
+        : { attempted: false, sent: false, skipped: true, reason: "student_user_missing" };
       await writeLiveDb(db);
-      return res.json({ success: true, free_checkout: true, url: null, plan: sanitizePlan(plan), pricing, access_grant: { granted: true, method: "backend_enrollment_granted", enrollment_id: enrollment.id }, message: "Access granted without Stripe checkout." });
+      return res.json({ success: true, free_checkout: true, url: null, plan: sanitizePlan(plan), pricing, access_grant: { granted: true, method: "backend_enrollment_granted", enrollment_id: enrollment.id }, access_email: accessEmail, message: "Access granted without Stripe checkout." });
     }
-    const session = await stripe.checkout.sessions.create({ mode: "payment", payment_method_types: ["card"], line_items: [{ price_data: { currency: plan.currency || "usd", product_data: { name: plan.name, description: plan.description || "Course enrollment" }, unit_amount: pricing.final_amount_cents }, quantity: 1 }], metadata: { enrollmentId, studentId, courseId, planId: plan.id, couponCode: coupon?.code || "", referralCode: ngAffCode(referral_code || ref || ""), originalAmountCents: String(pricing.original_amount_cents), discountCents: String(pricing.discount_cents), finalAmountCents: String(pricing.final_amount_cents) }, success_url: successUrl || "https://live.nextgenusmlelms.com/payment-success", cancel_url: cancelUrl || "https://live.nextgenusmlelms.com/payment-cancel" });
+    const checkoutCancelUrl = ngBuildCheckoutCancelUrl(cancelUrl, {
+      courseId,
+      planId: plan.id,
+      couponCode: coupon?.code || "",
+    });
+    const session = await stripe.checkout.sessions.create({ mode: "payment", payment_method_types: ["card"], line_items: [{ price_data: { currency: plan.currency || "usd", product_data: { name: plan.name, description: plan.description || "Course enrollment" }, unit_amount: pricing.final_amount_cents }, quantity: 1 }], metadata: { enrollmentId, studentId, courseId, planId: plan.id, couponCode: coupon?.code || "", referralCode: ngAffCode(referral_code || ref || ""), originalAmountCents: String(pricing.original_amount_cents), discountCents: String(pricing.discount_cents), finalAmountCents: String(pricing.final_amount_cents) }, success_url: successUrl || "https://live.nextgenusmlelms.com/payment-success", cancel_url: checkoutCancelUrl });
     db.payments = db.payments || {};
     db.payments[session.id] = {
       id: session.id,
@@ -10668,7 +10762,19 @@ app.post("/stripe/create-checkout", async (req, res) => {
     };
     if (ngAffCode(referral_code || ref || "")) { const crmDb = ngAffiliateStore(await readCrmDb()); const affiliate = ngFindAffiliateByCode(crmDb, referral_code || ref); if (affiliate) { crmDb.referral_attributions.unshift({ id: uuid(), affiliate_id: affiliate.id, affiliate_name: affiliate.name, referral_code: affiliate.referral_code, student_id: studentId, course_id: courseId, plan_id: plan.id, payment_id: session.id, status: "pending_payment", created_at: new Date().toISOString(), updated_at: new Date().toISOString() }); await writeCrmDb(crmDb); } }
     await writeLiveDb(db);
-    res.json({ success: true, free_checkout: false, url: session.url, plan: sanitizePlan(plan), pricing });
+    res.json({
+      success: true,
+      free_checkout: false,
+      url: session.url,
+      plan: sanitizePlan(plan),
+      pricing,
+      checkout_context: {
+        course_id: courseId,
+        plan_id: plan.id,
+        coupon_code: coupon?.code || null,
+        cancel_url: checkoutCancelUrl,
+      },
+    });
   } catch (e) { res.status(e.statusCode || e.response?.status || 500).json({ success: false, error: e.response?.data?.message || e.message || "Checkout failed", details: e.response?.data || null }); }
 });
 
@@ -13400,6 +13506,22 @@ function ngStudentHasCourseAccessStatus(status) {
   return ["paid", "demo_active"].includes(String(status || ""));
 }
 
+function ngBuildStudentAccessSummary(db = {}, user = {}, courses = []) {
+  return safeArray(courses).map((course) => {
+    const access = ngStudentEnrollmentStatusForCourse(db, user, course.id);
+    return {
+      course: sanitizeCourse(course),
+      status: access.status,
+      enrollment: access.enrollment || null,
+      demo_expiry: access.demo_expiry || null,
+      access_expires_at: access.access_expires_at || null,
+      plan: access.plan ? sanitizePlan(access.plan) : null,
+      has_active_access: ngStudentHasCourseAccessStatus(access.status),
+      requires_renewal: ["demo_expired", "paid_expired"].includes(String(access.status || "")),
+    };
+  });
+}
+
 function ngSessionDateTimeMs(session) {
   const start = getSessionStartUtc(session?.scheduled_date, session?.scheduled_time, session?.scheduled_timezone || DEFAULT_TIMEZONE);
   return start ? start.getTime() : 0;
@@ -13646,6 +13768,7 @@ app.get("/student/dashboard/bootstrap", async (req, res) => {
     if (autoLiveSync.changed) await writeLiveDb(db);
 
     const featureAccess = getStudentFeatureAccess(db, user);
+    const accessSummary = ngBuildStudentAccessSummary(db, user, coursesToCheck);
     const bundles = coursesToCheck
       .map((course) => ngBuildStudentCourseBundle(db, user, course, { sessionLimit: 5 }))
       .filter(Boolean)
@@ -13686,6 +13809,9 @@ app.get("/student/dashboard/bootstrap", async (req, res) => {
       courses: bundles.map((bundle) => bundle.course),
       course_bundles: bundles,
       active_courses: bundles,
+      access_summary: accessSummary,
+      expired_access: accessSummary.filter((item) => item.requires_renewal),
+      has_expired_access: accessSummary.some((item) => item.requires_renewal),
       primary_course: primary?.course || null,
       primary_bundle: primary,
       announcements,
@@ -13693,6 +13819,8 @@ app.get("/student/dashboard/bootstrap", async (req, res) => {
       auto_live_sync: autoLiveSync,
       counts: {
         courses: bundles.length,
+        access_records: accessSummary.length,
+        expired_access: accessSummary.filter((item) => item.requires_renewal).length,
         announcements: announcements.length,
         leaderboard: leaderboard.length,
       },
@@ -24121,6 +24249,61 @@ function extractEmailAddress(value = "") {
   return clean.match(/<([^>]+)>/)?.[1] || clean;
 }
 
+function extractEmailDisplayName(value = "") {
+  const clean = String(value || "").trim();
+  const match = clean.match(/^\s*([^<]+?)\s*<[^>]+>\s*$/);
+  return match?.[1]?.trim() || "NextGen USMLE";
+}
+
+function ngEmailTransportStatus() {
+  const provider = process.env.RESEND_API_KEY
+    ? "resend"
+    : process.env.SENDGRID_API_KEY
+      ? "sendgrid"
+      : (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS)
+        ? "smtp"
+        : null;
+
+  return {
+    configured: Boolean(provider),
+    provider,
+    from: getEmailFromAddress(),
+    reply_to: process.env.EMAIL_REPLY_TO || process.env.REPLY_TO_EMAIL || null,
+    reset_url: process.env.STUDENT_RESET_PASSWORD_URL || "https://live.nextgenusmlelms.com/reset-password",
+    login_url: ngStudentLoginUrl(),
+  };
+}
+
+async function ngSendTransactionalEmailSafe({ db, to, subject, text, reason = "transactional_email", userId = null, enrollmentId = null } = {}) {
+  const result = { attempted: true, sent: false, provider: null, error: null, reason };
+  try {
+    const provider = await sendEmailMessage({ to, subject, text });
+    result.sent = true;
+    result.provider = provider?.provider || provider?.messageId || provider?.id || "email";
+    ngLogStudentEmail(db, {
+      to,
+      subject,
+      status: "sent",
+      provider_response: provider,
+      reason,
+      user_id: userId,
+      enrollment_id: enrollmentId,
+    });
+  } catch (error) {
+    result.error = error.message;
+    ngLogStudentEmail(db, {
+      to: to || "",
+      subject: subject || "NextGen USMLE",
+      status: "failed",
+      error: error.message,
+      reason,
+      user_id: userId,
+      enrollment_id: enrollmentId,
+    });
+  }
+  return result;
+}
+
 async function sendEmailMessage({ to, subject = "NextGen USMLE", text = "" }) {
   const recipient = String(Array.isArray(to) ? to[0] : to || "").trim();
   if (!recipient || !recipient.includes("@")) {
@@ -24147,6 +24330,9 @@ async function sendEmailMessage({ to, subject = "NextGen USMLE", text = "" }) {
         to: [recipient],
         subject: cleanSubject,
         text: cleanText,
+        ...(process.env.EMAIL_REPLY_TO || process.env.REPLY_TO_EMAIL
+          ? { reply_to: process.env.EMAIL_REPLY_TO || process.env.REPLY_TO_EMAIL }
+          : {}),
       },
       {
         headers: {
@@ -24165,7 +24351,10 @@ async function sendEmailMessage({ to, subject = "NextGen USMLE", text = "" }) {
       "https://api.sendgrid.com/v3/mail/send",
       {
         personalizations: [{ to: [{ email: recipient }] }],
-        from: { email: extractEmailAddress(from) },
+        from: { email: extractEmailAddress(from), name: extractEmailDisplayName(from) },
+        ...(process.env.EMAIL_REPLY_TO || process.env.REPLY_TO_EMAIL
+          ? { reply_to: { email: process.env.EMAIL_REPLY_TO || process.env.REPLY_TO_EMAIL } }
+          : {}),
         subject: cleanSubject,
         content: [{ type: "text/plain", value: cleanText }],
       },
@@ -24193,7 +24382,13 @@ async function sendEmailMessage({ to, subject = "NextGen USMLE", text = "" }) {
           pass: process.env.SMTP_PASS,
         },
       });
-      return transporter.sendMail({ from, to: recipient, subject: cleanSubject, text: cleanText });
+      return transporter.sendMail({
+        from,
+        to: recipient,
+        subject: cleanSubject,
+        text: cleanText,
+        replyTo: process.env.EMAIL_REPLY_TO || process.env.REPLY_TO_EMAIL || undefined,
+      });
     } catch (error) {
       const e = new Error(`SMTP is configured but nodemailer is not installed or failed: ${error.message}`);
       e.statusCode = 500;
@@ -47901,8 +48096,20 @@ app.post("/auth/forgot-password", async (req, res) => {
   try {
     const email = normalizeEmail(req.body.email || "");
     if (!email) return res.status(400).json({ success: false, error: "Email is required" });
+
+    const emailStatus = ngEmailTransportStatus();
+    if (!emailStatus.configured) {
+      return res.status(503).json({
+        success: false,
+        code: "EMAIL_NOT_CONFIGURED",
+        error: "Password-reset email is not configured yet. Please contact NextGen support while the email service is being connected.",
+        email_system: emailStatus,
+      });
+    }
+
     const db = await readLiveDb();
     const user = findUserByEmail(db, email);
+    let deliveryFailed = false;
     if (user) {
       const token = crypto.randomBytes(32).toString("hex");
       user.password_reset_token_hash = ngHashToken(token);
@@ -47913,10 +48120,20 @@ app.post("/auth/forgot-password", async (req, res) => {
         const provider = await sendEmailMessage({ to: user.email, subject: "Reset your NextGen USMLE LMS password", text: `Hi Doctor,\n\nUse this link to reset your password:\n${resetUrl}\n\nThis link expires in 1 hour.\n\nNextGen USMLE Team` });
         ngLogStudentEmail(db, { to: user.email, subject: "Reset your NextGen USMLE LMS password", status: "sent", provider_response: provider, reason: "forgot_password", user_id: user.id });
       } catch (emailError) {
+        deliveryFailed = true;
         ngLogStudentEmail(db, { to: user.email, subject: "Reset your NextGen USMLE LMS password", status: "failed", error: emailError.message, reason: "forgot_password", user_id: user.id });
       }
       await writeLiveDb(db);
     }
+
+    if (deliveryFailed) {
+      return res.status(502).json({
+        success: false,
+        code: "EMAIL_DELIVERY_FAILED",
+        error: "The password-reset email could not be delivered. Please contact NextGen support or try again shortly.",
+      });
+    }
+
     res.json({ success: true, message: "If this email exists, a reset link has been sent." });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
@@ -48020,7 +48237,7 @@ app.post("/admin/enrollments/:enrollmentId/send-credentials", async (req, res) =
 app.get("/admin/email/status", async (req, res) => {
   try {
     await requireAdmin(req);
-    res.json({ success: true, configured: Boolean(process.env.RESEND_API_KEY || process.env.SENDGRID_API_KEY || (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS)), provider: process.env.RESEND_API_KEY ? "resend" : process.env.SENDGRID_API_KEY ? "sendgrid" : process.env.SMTP_HOST ? "smtp" : null, from: getEmailFromAddress() });
+    res.json({ success: true, ...ngEmailTransportStatus() });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
