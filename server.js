@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v190k-safe-expired-access-checkout-email";
+const NEXTGEN_BACKEND_BUILD = "v190l-et-clock-hostinger-smtp";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -1418,23 +1418,84 @@ function createBackendUser({ email, name, password, role = "student", google_sub
 
 
 function getTimezoneOffsetMs(timeZone, date) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone, hour12: false, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
-  }).formatToParts(date);
-  const values = {};
-  for (const part of parts) if (part.type !== "literal") values[part.type] = part.value;
-  const asUtc = Date.UTC(Number(values.year), Number(values.month) - 1, Number(values.day), Number(values.hour), Number(values.minute), Number(values.second));
-  return asUtc - date.getTime();
+  try {
+    const parts = new Intl.DateTimeFormat("en-US-u-hc-h23", {
+      timeZone,
+      hour12: false,
+      hourCycle: "h23",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    }).formatToParts(date);
+    const values = {};
+    for (const part of parts) if (part.type !== "literal") values[part.type] = part.value;
+    const hour = Number(values.hour) === 24 ? 0 : Number(values.hour);
+    const asUtc = Date.UTC(
+      Number(values.year),
+      Number(values.month) - 1,
+      Number(values.day),
+      hour,
+      Number(values.minute),
+      Number(values.second)
+    );
+    return asUtc - date.getTime();
+  } catch (error) {
+    console.warn(`Invalid session timezone ${timeZone}; falling back to ${DEFAULT_TIMEZONE}:`, error.message);
+    if (timeZone !== DEFAULT_TIMEZONE) return getTimezoneOffsetMs(DEFAULT_TIMEZONE, date);
+    return -date.getTimezoneOffset() * 60 * 1000;
+  }
+}
+
+function ngParseSessionClockTime(value = "") {
+  const clean = String(value || "").trim();
+  const match = clean.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?$/i);
+  if (!match) return null;
+
+  let hour = Number(match[1]);
+  const minute = Number(match[2]);
+  const second = Number(match[3] || 0);
+  const meridiem = String(match[4] || "").toUpperCase();
+
+  if (meridiem) {
+    if (hour < 1 || hour > 12) return null;
+    if (meridiem === "AM" && hour === 12) hour = 0;
+    if (meridiem === "PM" && hour !== 12) hour += 12;
+  }
+
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) return null;
+  return { hour, minute, second };
 }
 
 function getSessionStartUtc(scheduledDate, scheduledTime, timezone = DEFAULT_TIMEZONE) {
-  if (!scheduledDate || !scheduledTime) return null;
-  const [year, month, day] = String(scheduledDate).split(" ")[0].split("-").map(Number);
-  const [hour, minute] = String(scheduledTime).split(":").map(Number);
-  if (!year || !month || !day || Number.isNaN(hour) || Number.isNaN(minute)) return null;
-  const utcGuess = new Date(Date.UTC(year, month - 1, day, hour, minute, 0));
-  const offset = getTimezoneOffsetMs(timezone, utcGuess);
-  return new Date(utcGuess.getTime() - offset);
+  const dateMatch = String(scheduledDate || "").trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+  const clock = ngParseSessionClockTime(scheduledTime);
+  if (!dateMatch || !clock) return null;
+
+  const year = Number(dateMatch[1]);
+  const month = Number(dateMatch[2]);
+  const day = Number(dateMatch[3]);
+  if (!year || month < 1 || month > 12 || day < 1 || day > 31) return null;
+
+  const targetTimezone = String(timezone || DEFAULT_TIMEZONE).trim() || DEFAULT_TIMEZONE;
+  const wallClockGuessMs = Date.UTC(year, month - 1, day, clock.hour, clock.minute, clock.second);
+  let resolvedMs = wallClockGuessMs;
+
+  // Iterate because the timezone offset can change around DST transitions.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const offset = getTimezoneOffsetMs(targetTimezone, new Date(resolvedMs));
+    const nextMs = wallClockGuessMs - offset;
+    if (Math.abs(nextMs - resolvedMs) < 1000) {
+      resolvedMs = nextMs;
+      break;
+    }
+    resolvedMs = nextMs;
+  }
+
+  const resolved = new Date(resolvedMs);
+  return Number.isNaN(resolved.getTime()) ? null : resolved;
 }
 
 function sanitizePlan(plan) {
@@ -1815,6 +1876,7 @@ function normalizeLiveSessionPayload(body = {}, existing = {}) {
 }
 
 function sanitizeLiveSession(session) {
+  const timing = ngSessionTimingWindow(session);
   return {
     id: session.id,
     course_id: session.course_id || null,
@@ -1828,6 +1890,11 @@ function sanitizeLiveSession(session) {
     instructor_id: session.instructor_id || null,
     instructor_name: session.instructor_name || null,
     status: session.status || "scheduled",
+    stored_status: session.status || "scheduled",
+    computed_status: timing.status,
+    start_at: timing.start_at,
+    end_at: timing.end_at,
+    join_opens_at: timing.join_opens_at,
     zoom_meeting_id: session.zoom_meeting_id || null,
     meeting_password: session.meeting_password || null,
     zoom_meeting_url: session.zoom_meeting_url || null,
@@ -9969,8 +10036,8 @@ app.get("/admin/billing/status", async (req, res) => {
       stripe_webhook_secret_configured: Boolean(process.env.STRIPE_WEBHOOK_SECRET),
       webhook_endpoint: "https://nextgen-stripe-backend.onrender.com/stripe/webhook",
       required_events: ["checkout.session.completed", "checkout.session.expired", "payment_intent.payment_failed"],
-      email_configured: Boolean(process.env.RESEND_API_KEY || process.env.SENDGRID_API_KEY || (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS)),
-      email_provider: process.env.RESEND_API_KEY ? "resend" : process.env.SENDGRID_API_KEY ? "sendgrid" : process.env.SMTP_HOST ? "smtp" : null,
+      email_configured: ngEmailTransportStatus().configured,
+      email_provider: ngEmailTransportStatus().provider,
       billing_events_count: safeArray(db.billingEvents).length,
     });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
@@ -10909,20 +10976,29 @@ app.get(["/hcgi/api/live-class/:sessionId", "/live/classroom/:courseId/:sessionI
     }
 
     if (!allowed) return res.json({ allowed: false, reason });
-    if (session.status === "cancelled") return res.json({ allowed: true, can_join: false, join_reason: "This session has been cancelled.", session: sanitizeLiveSession(session) });
 
-    const start = getSessionStartUtc(session.scheduled_date, session.scheduled_time, session.scheduled_timezone || DEFAULT_TIMEZONE);
+    const timing = ngSessionTimingWindow(session);
+    if (timing.status === "cancelled") {
+      return res.json({
+        allowed: true,
+        can_join: false,
+        join_reason: "This session has been cancelled.",
+        session: { ...sanitizeLiveSession(session), status: "cancelled", computed_status: "cancelled" },
+      });
+    }
+
     let canJoin = false;
     let joinReason = null;
-    let joinOpensAt = null;
+    const joinOpensAt = timing.join_opens_at;
 
-    if (!start) joinReason = "Session date/time is not configured correctly";
-    else if (session.status === "completed") joinReason = "Session is completed";
-    else {
-      const openAt = new Date(start.getTime() - NEXTGEN_CLASSROOM_OPEN_MINUTES_BEFORE * 60 * 1000);
-      joinOpensAt = openAt.toISOString();
-      canJoin = Date.now() >= openAt.getTime();
-      if (!canJoin) joinReason = `Classroom opens ${NEXTGEN_CLASSROOM_OPEN_MINUTES_BEFORE} minutes before class starts`;
+    if (!timing.start_ms) joinReason = "Session date/time is not configured correctly";
+    else if (timing.status === "completed") joinReason = "Session is completed";
+    else if (Date.now() < timing.join_opens_ms) {
+      joinReason = `Classroom opens ${NEXTGEN_CLASSROOM_OPEN_MINUTES_BEFORE} minutes before class starts`;
+    } else if (Date.now() > timing.end_ms) {
+      joinReason = "Session is completed";
+    } else {
+      canJoin = true;
     }
 
     if (canJoin && !hasRealZoomMeetingId(session.zoom_meeting_id) && staffAccess) {
@@ -10974,7 +11050,11 @@ app.get(["/hcgi/api/live-class/:sessionId", "/live/classroom/:courseId/:sessionI
         course_id: courseId,
         instructor_id: session.instructor_id || null,
         instructor_name: session.instructor_name || null,
-        status: session.status || "scheduled",
+        status: timing.status,
+        stored_status: session.status || "scheduled",
+        computed_status: timing.status,
+        start_at: timing.start_at,
+        end_at: timing.end_at,
         zoom_join_url: canJoin && hasZoom ? manualJoinUrl : null,
         join_url: canJoin && hasZoom ? manualJoinUrl : null,
         recording_url: session.recording_url || null,
@@ -13527,18 +13607,46 @@ function ngSessionDateTimeMs(session) {
   return start ? start.getTime() : 0;
 }
 
-function ngSessionComputedStatus(session, nowMs = Date.now()) {
-  const raw = String(session?.status || "").toLowerCase();
-  if (["live", "live_now", "in_progress", "ongoing"].includes(raw)) return "live";
-  if (["completed", "ended", "past"].includes(raw)) return "completed";
-  if (["cancelled", "canceled"].includes(raw)) return "cancelled";
+function ngSessionTimingWindow(session = {}, nowMs = Date.now()) {
+  const rawStatus = String(session?.status || "scheduled").trim().toLowerCase();
+  const cancelled = ["cancelled", "canceled"].includes(rawStatus);
   const startMs = ngSessionDateTimeMs(session);
-  if (!startMs) return "scheduled";
-  const durationMinutes = Number(session?.duration_minutes || DEFAULT_ZOOM_DURATION_MINUTES) || DEFAULT_ZOOM_DURATION_MINUTES;
-  const endMs = startMs + Math.max(30, durationMinutes) * 60 * 1000;
-  if (nowMs >= startMs && nowMs <= endMs) return "live";
-  if (nowMs > endMs) return "completed";
-  return "scheduled";
+  const durationMinutes = Math.max(
+    30,
+    Number(session?.duration_minutes || session?.duration || DEFAULT_ZOOM_DURATION_MINUTES) || DEFAULT_ZOOM_DURATION_MINUTES
+  );
+  const endMs = startMs ? startMs + durationMinutes * 60 * 1000 : 0;
+  const joinOpensMs = startMs ? startMs - NEXTGEN_CLASSROOM_OPEN_MINUTES_BEFORE * 60 * 1000 : 0;
+
+  let status = "scheduled";
+  if (cancelled) status = "cancelled";
+  else if (startMs) {
+    // The configured IANA timezone and schedule are authoritative. This prevents
+    // stale stored values such as "live" or "completed" from flipping the class
+    // several hours early/late for students in other time zones.
+    if (nowMs < startMs) status = "scheduled";
+    else if (nowMs <= endMs) status = "live";
+    else status = "completed";
+  } else if (["live", "live_now", "in_progress", "ongoing"].includes(rawStatus)) status = "live";
+  else if (["completed", "ended", "past"].includes(rawStatus)) status = "completed";
+  else if (["cancelled", "canceled"].includes(rawStatus)) status = "cancelled";
+
+  return {
+    status,
+    raw_status: rawStatus || "scheduled",
+    timezone: session?.scheduled_timezone || DEFAULT_TIMEZONE,
+    duration_minutes: durationMinutes,
+    start_ms: startMs || 0,
+    end_ms: endMs || 0,
+    join_opens_ms: joinOpensMs || 0,
+    start_at: startMs ? new Date(startMs).toISOString() : null,
+    end_at: endMs ? new Date(endMs).toISOString() : null,
+    join_opens_at: joinOpensMs ? new Date(joinOpensMs).toISOString() : null,
+  };
+}
+
+function ngSessionComputedStatus(session, nowMs = Date.now()) {
+  return ngSessionTimingWindow(session, nowMs).status;
 }
 
 function ngSafetyText(...parts) {
@@ -23623,7 +23731,7 @@ function getProviderStatus() {
       ready: hasEmail,
       enabled: hasEmail,
       status: hasEmail ? "active" : "not_configured",
-      provider: process.env.RESEND_API_KEY ? "resend" : process.env.SENDGRID_API_KEY ? "sendgrid" : process.env.SMTP_HOST ? "smtp" : null,
+      provider: ngEmailTransportStatus().provider,
       supports: ["text", "template", "automation", "bulk"],
       notes: hasEmail
         ? "Email credentials found. Resend, SendGrid, or SMTP can be used."
@@ -24255,22 +24363,71 @@ function extractEmailDisplayName(value = "") {
   return match?.[1]?.trim() || "NextGen USMLE";
 }
 
+function ngNormalizeEmailProvider(value = "") {
+  const clean = String(value || "").trim().toLowerCase();
+  if (["smtp", "hostinger", "hostinger_smtp"].includes(clean)) return "smtp";
+  if (["resend", "resend_api"].includes(clean)) return "resend";
+  if (["sendgrid", "send_grid"].includes(clean)) return "sendgrid";
+  return "";
+}
+
+function ngEmailProviderAvailability() {
+  return {
+    smtp: Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS),
+    resend: Boolean(process.env.RESEND_API_KEY),
+    sendgrid: Boolean(process.env.SENDGRID_API_KEY),
+  };
+}
+
+function ngResolveEmailProvider() {
+  const available = ngEmailProviderAvailability();
+  const requested = ngNormalizeEmailProvider(process.env.EMAIL_PROVIDER || process.env.MAIL_PROVIDER || "");
+
+  if (requested) {
+    return {
+      requested,
+      provider: available[requested] ? requested : null,
+      available,
+      error: available[requested] ? null : `${requested.toUpperCase()} was selected but its required environment variables are incomplete.`,
+    };
+  }
+
+  // Preserve the established provider order unless EMAIL_PROVIDER is explicitly set.
+  const provider = available.resend ? "resend" : available.sendgrid ? "sendgrid" : available.smtp ? "smtp" : null;
+  return { requested: null, provider, available, error: null };
+}
+
+function ngMaskEmailLogin(value = "") {
+  const clean = String(value || "").trim();
+  const at = clean.indexOf("@");
+  if (at <= 1) return clean ? `${clean.slice(0, 1)}***` : null;
+  return `${clean.slice(0, 2)}***${clean.slice(at)}`;
+}
+
 function ngEmailTransportStatus() {
-  const provider = process.env.RESEND_API_KEY
-    ? "resend"
-    : process.env.SENDGRID_API_KEY
-      ? "sendgrid"
-      : (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS)
-        ? "smtp"
-        : null;
+  const resolved = ngResolveEmailProvider();
+  const smtpPort = Number(process.env.SMTP_PORT || 465);
+  const smtpSecure = process.env.SMTP_SECURE === undefined
+    ? smtpPort === 465
+    : String(process.env.SMTP_SECURE).toLowerCase() === "true";
 
   return {
-    configured: Boolean(provider),
-    provider,
+    configured: Boolean(resolved.provider),
+    provider: resolved.provider,
+    requested_provider: resolved.requested,
+    provider_error: resolved.error,
+    available_providers: resolved.available,
     from: getEmailFromAddress(),
     reply_to: process.env.EMAIL_REPLY_TO || process.env.REPLY_TO_EMAIL || null,
     reset_url: process.env.STUDENT_RESET_PASSWORD_URL || "https://live.nextgenusmlelms.com/reset-password",
     login_url: ngStudentLoginUrl(),
+    smtp: {
+      configured: resolved.available.smtp,
+      host: process.env.SMTP_HOST || null,
+      port: smtpPort,
+      secure: smtpSecure,
+      user: ngMaskEmailLogin(process.env.SMTP_USER || ""),
+    },
   };
 }
 
@@ -24304,6 +24461,69 @@ async function ngSendTransactionalEmailSafe({ db, to, subject, text, reason = "t
   return result;
 }
 
+let ngSmtpTransporterCache = null;
+let ngSmtpTransporterSignature = "";
+
+async function ngGetSmtpTransporter() {
+  const host = String(process.env.SMTP_HOST || "").trim();
+  const user = String(process.env.SMTP_USER || "").trim();
+  const pass = String(process.env.SMTP_PASS || "");
+  const port = Number(process.env.SMTP_PORT || 465);
+  const secure = process.env.SMTP_SECURE === undefined
+    ? port === 465
+    : String(process.env.SMTP_SECURE).toLowerCase() === "true";
+  const requireTLS = process.env.SMTP_REQUIRE_TLS === undefined
+    ? port === 587
+    : String(process.env.SMTP_REQUIRE_TLS).toLowerCase() === "true";
+
+  if (!host || !user || !pass) {
+    const error = new Error("SMTP_HOST, SMTP_USER, and SMTP_PASS are required for SMTP email delivery.");
+    error.statusCode = 500;
+    throw error;
+  }
+
+  const signature = [host, port, secure, requireTLS, user, pass].join("|");
+  if (ngSmtpTransporterCache && ngSmtpTransporterSignature === signature) return ngSmtpTransporterCache;
+
+  let nodemailer;
+  try {
+    const imported = await import("nodemailer");
+    nodemailer = imported.default || imported;
+  } catch (error) {
+    const wrapped = new Error(`Hostinger SMTP is selected, but the backend dependency "nodemailer" is missing. Run npm install nodemailer and redeploy. Original error: ${error.message}`);
+    wrapped.statusCode = 500;
+    throw wrapped;
+  }
+
+  ngSmtpTransporterCache = nodemailer.createTransport({
+    host,
+    port,
+    secure,
+    requireTLS,
+    auth: { user, pass },
+    connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT_MS || 20000),
+    greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT_MS || 20000),
+    socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT_MS || 30000),
+    tls: {
+      minVersion: "TLSv1.2",
+      servername: host,
+    },
+  });
+  ngSmtpTransporterSignature = signature;
+  return ngSmtpTransporterCache;
+}
+
+function ngEmailTextToHtml(text = "") {
+  const escaped = String(text || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;")
+    .replace(/\n/g, "<br />");
+  return `<div style="font-family:Arial,Helvetica,sans-serif;line-height:1.65;color:#071426;max-width:640px;margin:0 auto"><div style="border-top:4px solid #D4A017;padding:24px;border-left:1px solid #DAEAFF;border-right:1px solid #DAEAFF;border-bottom:1px solid #DAEAFF;border-radius:14px"><div style="font-weight:800;font-size:18px;margin-bottom:14px">NextGen USMLE</div><div>${escaped}</div></div></div>`;
+}
+
 async function sendEmailMessage({ to, subject = "NextGen USMLE", text = "" }) {
   const recipient = String(Array.isArray(to) ? to[0] : to || "").trim();
   if (!recipient || !recipient.includes("@")) {
@@ -24321,8 +24541,41 @@ async function sendEmailMessage({ to, subject = "NextGen USMLE", text = "" }) {
 
   const from = getEmailFromAddress();
   const cleanSubject = String(subject || "NextGen USMLE").trim() || "NextGen USMLE";
+  const replyTo = process.env.EMAIL_REPLY_TO || process.env.REPLY_TO_EMAIL || undefined;
+  const resolved = ngResolveEmailProvider();
 
-  if (process.env.RESEND_API_KEY) {
+  if (!resolved.provider) {
+    const error = new Error(resolved.error || "Email sending requires a configured SMTP, Resend, or SendGrid provider.");
+    error.statusCode = 500;
+    throw error;
+  }
+
+  if (resolved.provider === "smtp") {
+    try {
+      const transporter = await ngGetSmtpTransporter();
+      const info = await transporter.sendMail({
+        from,
+        to: recipient,
+        subject: cleanSubject,
+        text: cleanText,
+        html: ngEmailTextToHtml(cleanText),
+        replyTo,
+      });
+      return {
+        provider: "smtp",
+        messageId: info.messageId || null,
+        accepted: info.accepted || [],
+        rejected: info.rejected || [],
+        response: info.response || null,
+      };
+    } catch (error) {
+      const wrapped = new Error(`SMTP delivery failed: ${error.message}`);
+      wrapped.statusCode = error.statusCode || 502;
+      throw wrapped;
+    }
+  }
+
+  if (resolved.provider === "resend") {
     const response = await axios.post(
       "https://api.resend.com/emails",
       {
@@ -24330,9 +24583,8 @@ async function sendEmailMessage({ to, subject = "NextGen USMLE", text = "" }) {
         to: [recipient],
         subject: cleanSubject,
         text: cleanText,
-        ...(process.env.EMAIL_REPLY_TO || process.env.REPLY_TO_EMAIL
-          ? { reply_to: process.env.EMAIL_REPLY_TO || process.env.REPLY_TO_EMAIL }
-          : {}),
+        html: ngEmailTextToHtml(cleanText),
+        ...(replyTo ? { reply_to: replyTo } : {}),
       },
       {
         headers: {
@@ -24342,63 +24594,30 @@ async function sendEmailMessage({ to, subject = "NextGen USMLE", text = "" }) {
         timeout: 30000,
       }
     );
-
     return { provider: "resend", ...response.data };
   }
 
-  if (process.env.SENDGRID_API_KEY) {
-    const response = await axios.post(
-      "https://api.sendgrid.com/v3/mail/send",
-      {
-        personalizations: [{ to: [{ email: recipient }] }],
-        from: { email: extractEmailAddress(from), name: extractEmailDisplayName(from) },
-        ...(process.env.EMAIL_REPLY_TO || process.env.REPLY_TO_EMAIL
-          ? { reply_to: { email: process.env.EMAIL_REPLY_TO || process.env.REPLY_TO_EMAIL } }
-          : {}),
-        subject: cleanSubject,
-        content: [{ type: "text/plain", value: cleanText }],
+  const response = await axios.post(
+    "https://api.sendgrid.com/v3/mail/send",
+    {
+      personalizations: [{ to: [{ email: recipient }] }],
+      from: { email: extractEmailAddress(from), name: extractEmailDisplayName(from) },
+      ...(replyTo ? { reply_to: { email: replyTo } } : {}),
+      subject: cleanSubject,
+      content: [
+        { type: "text/plain", value: cleanText },
+        { type: "text/html", value: ngEmailTextToHtml(cleanText) },
+      ],
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.SENDGRID_API_KEY}`,
+        "Content-Type": "application/json",
       },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.SENDGRID_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        timeout: 30000,
-      }
-    );
-
-    return { provider: "sendgrid", status: response.status };
-  }
-
-  if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
-    try {
-      const nodemailer = await import("nodemailer");
-      const transporter = nodemailer.default.createTransport({
-        host: process.env.SMTP_HOST,
-        port: Number(process.env.SMTP_PORT || 587),
-        secure: String(process.env.SMTP_SECURE || "false") === "true",
-        auth: {
-          user: process.env.SMTP_USER,
-          pass: process.env.SMTP_PASS,
-        },
-      });
-      return transporter.sendMail({
-        from,
-        to: recipient,
-        subject: cleanSubject,
-        text: cleanText,
-        replyTo: process.env.EMAIL_REPLY_TO || process.env.REPLY_TO_EMAIL || undefined,
-      });
-    } catch (error) {
-      const e = new Error(`SMTP is configured but nodemailer is not installed or failed: ${error.message}`);
-      e.statusCode = 500;
-      throw e;
+      timeout: 30000,
     }
-  }
-
-  const error = new Error("Email sending requires RESEND_API_KEY, SENDGRID_API_KEY, or SMTP_HOST/SMTP_USER/SMTP_PASS.");
-  error.statusCode = 500;
-  throw error;
+  );
+  return { provider: "sendgrid", status: response.status };
 }
 
 function getBestRecipientForChannel({ channel, to = "", lead = null, message = null }) {
@@ -48249,8 +48468,10 @@ app.post("/admin/email/test", async (req, res) => {
     const provider = await sendEmailMessage({ to, subject: req.body.subject || "NextGen email test", text: req.body.text || "✅ NextGen email sending is working." });
     ngLogStudentEmail(db, { to, subject: req.body.subject || "NextGen email test", status: "sent", provider_response: provider, reason: "admin_email_test" });
     await writeLiveDb(db);
-    res.json({ success: true, provider });
-  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+    res.json({ success: true, provider, email_system: ngEmailTransportStatus() });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message, email_system: ngEmailTransportStatus() });
+  }
 });
 
 app.get("/admin/email/logs", async (req, res) => {
@@ -48271,7 +48492,7 @@ app.get("/admin/prelaunch/flow-check", async (req, res) => {
     const aylaMedia = ngAylaMediaEligibleAssets(crmDb);
     const checks = [
       { key: "backend_build", ok: NEXTGEN_BACKEND_BUILD === "v71-student-access-ayla-media-flow-check", value: NEXTGEN_BACKEND_BUILD },
-      { key: "email_provider", ok: Boolean(process.env.RESEND_API_KEY || process.env.SENDGRID_API_KEY || (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS)), value: process.env.RESEND_API_KEY ? "resend" : process.env.SENDGRID_API_KEY ? "sendgrid" : process.env.SMTP_HOST ? "smtp" : "missing" },
+      { key: "email_provider", ok: ngEmailTransportStatus().configured, value: ngEmailTransportStatus().provider || ngEmailTransportStatus().provider_error || "missing" },
       { key: "whatsapp_provider", ok: Boolean(process.env.WHATSAPP_ACCESS_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID), value: process.env.WHATSAPP_PHONE_NUMBER_ID ? "configured" : "missing" },
       { key: "openai_provider", ok: isAIConfigured(), value: isAIConfigured() ? "configured" : "missing" },
       { key: "media_directory", ok: mediaWritable, value: MEDIA_DIR },
@@ -55038,11 +55259,16 @@ function ngAutoZoomPrepShouldSkipSession(session = {}, nowMs = Date.now()) {
   if (ngSessionIsInternalTestOrHidden(session)) return { skip: true, reason: "hidden_or_internal_or_no_class" };
 
   const status = String(session.status || "scheduled").toLowerCase();
-  if (["cancelled", "canceled", "archived", "hidden", "deleted", "completed", "ended", "past"].includes(status)) {
+  if (["cancelled", "canceled", "archived", "hidden", "deleted"].includes(status)) {
     return { skip: true, reason: `status_${status}` };
   }
 
-  const startMs = ngAutoZoomPrepSessionStartMs(session);
+  const timing = ngSessionTimingWindow(session, nowMs);
+  if (timing.status === "cancelled" || timing.status === "completed") {
+    return { skip: true, reason: `computed_${timing.status}` };
+  }
+
+  const startMs = timing.start_ms || ngAutoZoomPrepSessionStartMs(session);
   if (!startMs) return { skip: true, reason: "invalid_date_time" };
 
   const prepareFromMs = startMs - NEXTGEN_AUTO_ZOOM_PREP_MINUTES_BEFORE * 60 * 1000;
