@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v190m-premium-email-control-center";
+const NEXTGEN_BACKEND_BUILD = "v190n-paid-demo-priority-fix";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -1555,21 +1555,148 @@ function ngDemoSettingKeyForFeature(featureKey) {
   return map[String(featureKey || "").trim()] || null;
 }
 
+function ngEnrollmentCandidateTimestamp(enrollment = {}) {
+  const raw = enrollment.updated_at || enrollment.created_at || enrollment.paid_at || enrollment.access_starts_at || null;
+  const ms = raw ? new Date(raw).getTime() : 0;
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function ngFindCourseEnrollmentCandidates(db = {}, { userId, courseId, type = "all" } = {}) {
+  const cleanUserId = String(userId || "").trim();
+  const cleanCourseId = String(courseId || "").trim();
+  const cleanType = String(type || "all").trim().toLowerCase();
+
+  return Object.entries(db.enrollments || {})
+    .map(([storageKey, enrollment]) => ({ storageKey, enrollment }))
+    .filter(({ enrollment }) => {
+      if (!enrollment?.id) return false;
+      if (String(enrollment.user_id || "") !== cleanUserId) return false;
+      if (String(enrollment.course_id || "") !== cleanCourseId) return false;
+      if (cleanType === "paid" && enrollment.is_demo === true) return false;
+      if (cleanType === "demo" && enrollment.is_demo !== true) return false;
+      return true;
+    })
+    .sort((a, b) => {
+      const aCanonical = String(a.storageKey) === String(a.enrollment.id) ? 1 : 0;
+      const bCanonical = String(b.storageKey) === String(b.enrollment.id) ? 1 : 0;
+      if (aCanonical !== bCanonical) return bCanonical - aCanonical;
+      return ngEnrollmentCandidateTimestamp(b.enrollment) - ngEnrollmentCandidateTimestamp(a.enrollment);
+    });
+}
+
+function ngResolveCourseAccessRecord(db = {}, user = {}, courseId = "") {
+  const cleanCourseId = String(courseId || "").trim();
+  const cleanUserId = String(user?.id || user?.user_id || "").trim();
+  const demoSettings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
+  const course = db.courses?.[cleanCourseId] || null;
+
+  const paidCandidates = ngFindCourseEnrollmentCandidates(db, {
+    userId: cleanUserId,
+    courseId: cleanCourseId,
+    type: "paid",
+  });
+  const demoCandidates = ngFindCourseEnrollmentCandidates(db, {
+    userId: cleanUserId,
+    courseId: cleanCourseId,
+    type: "demo",
+  });
+
+  const activePaid = paidCandidates.find(({ enrollment }) => {
+    const plan = enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null;
+    return isPaidEnrollmentActive(enrollment, plan);
+  }) || null;
+
+  if (activePaid) {
+    const enrollment = activePaid.enrollment;
+    const plan = enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null;
+    return {
+      status: "paid",
+      enrollment,
+      plan,
+      demo_expiry: null,
+      access_expires_at: enrollment.access_expires_at || enrollment.expires_at || enrollment.renewal_due_at || null,
+      storage_key: activePaid.storageKey,
+      paid_candidates: paidCandidates.length,
+      demo_candidates: demoCandidates.length,
+    };
+  }
+
+  const activeDemo = demoCandidates.find(({ enrollment }) => {
+    return (
+      enrollment.access_granted !== false &&
+      course?.demo_access_enabled !== false &&
+      isDemoEnrollmentActive(enrollment, demoSettings)
+    );
+  }) || null;
+
+  if (activeDemo) {
+    return {
+      status: "demo_active",
+      enrollment: activeDemo.enrollment,
+      plan: null,
+      demo_expiry: activeDemo.enrollment.demo_expiry || null,
+      access_expires_at: null,
+      storage_key: activeDemo.storageKey,
+      paid_candidates: paidCandidates.length,
+      demo_candidates: demoCandidates.length,
+    };
+  }
+
+  const expiredPaid = paidCandidates.find(({ enrollment }) => enrollment.access_granted !== false) || null;
+  if (expiredPaid) {
+    const enrollment = expiredPaid.enrollment;
+    const plan = enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null;
+    return {
+      status: "paid_expired",
+      enrollment,
+      plan,
+      demo_expiry: null,
+      access_expires_at: enrollment.access_expires_at || enrollment.expires_at || enrollment.renewal_due_at || null,
+      storage_key: expiredPaid.storageKey,
+      paid_candidates: paidCandidates.length,
+      demo_candidates: demoCandidates.length,
+    };
+  }
+
+  const expiredDemo = demoCandidates.find(({ enrollment }) => enrollment.access_granted !== false) || null;
+  if (expiredDemo) {
+    return {
+      status: "demo_expired",
+      enrollment: expiredDemo.enrollment,
+      plan: null,
+      demo_expiry: expiredDemo.enrollment.demo_expiry || null,
+      access_expires_at: null,
+      storage_key: expiredDemo.storageKey,
+      paid_candidates: paidCandidates.length,
+      demo_candidates: demoCandidates.length,
+    };
+  }
+
+  const revokedPaid = paidCandidates[0] || null;
+  const revokedDemo = demoCandidates[0] || null;
+  const revoked = revokedPaid || revokedDemo;
+
+  return {
+    status: revoked ? "revoked" : "none",
+    enrollment: revoked?.enrollment || null,
+    plan: revokedPaid?.enrollment?.plan_id
+      ? db.plans?.[String(revokedPaid.enrollment.plan_id)] || null
+      : null,
+    demo_expiry: revokedDemo?.enrollment?.demo_expiry || null,
+    access_expires_at: revokedPaid?.enrollment?.access_expires_at || null,
+    storage_key: revoked?.storageKey || null,
+    paid_candidates: paidCandidates.length,
+    demo_candidates: demoCandidates.length,
+  };
+}
+
 function ngCourseFeatureAccess(db, user, { courseId, featureKey }) {
   const cleanCourseId = String(courseId || "").trim();
   const cleanFeatureKey = String(featureKey || "").trim();
 
-  if (!user?.id) {
-    return { allowed: false, reason: "User not authenticated" };
-  }
-
-  if (user.role === "admin" || user.role === "instructor") {
-    return { allowed: true, reason: "Staff access" };
-  }
-
-  if (!cleanCourseId) {
-    return { allowed: false, reason: "course_id is required" };
-  }
+  if (!user?.id) return { allowed: false, reason: "User not authenticated" };
+  if (user.role === "admin" || user.role === "instructor") return { allowed: true, reason: "Staff access" };
+  if (!cleanCourseId) return { allowed: false, reason: "course_id is required" };
 
   const catalogItem =
     db.featureCatalog?.[cleanFeatureKey] ||
@@ -1580,80 +1707,70 @@ function ngCourseFeatureAccess(db, user, { courseId, featureKey }) {
     return { allowed: true, reason: "Free feature" };
   }
 
-  const paidEnrollment =
-    db.enrollments?.[backendEnrollmentKey(cleanCourseId, user.id, "paid")] ||
-    null;
+  const resolved = ngResolveCourseAccessRecord(db, user, cleanCourseId);
 
-  if (paidEnrollment?.id) {
-    const plan = paidEnrollment.plan_id ? db.plans?.[String(paidEnrollment.plan_id)] || null : null;
+  if (resolved.status === "paid") {
+    const enrollment = resolved.enrollment;
+    const plan = resolved.plan;
 
-    if (!isPaidEnrollmentActive(paidEnrollment, plan)) {
-      return {
-        allowed: false,
-        reason: "Paid access is expired or revoked. Please renew access.",
-        enrollment: paidEnrollment,
-        plan,
-      };
-    }
-
-    if (!paidEnrollment.plan_id) {
-      return {
-        allowed: true,
-        reason: "Manual paid access",
-        enrollment: paidEnrollment,
-        plan: null,
-      };
+    if (!enrollment.plan_id) {
+      return { allowed: true, reason: "Manual paid access", enrollment, plan: null };
     }
 
     if (plan?.is_active !== false && planIncludesFeature(plan, cleanFeatureKey)) {
-      return {
-        allowed: true,
-        reason: "Paid access",
-        enrollment: paidEnrollment,
-        plan,
-      };
+      return { allowed: true, reason: "Paid access", enrollment, plan };
     }
 
     return {
       allowed: false,
       reason: `Your current plan does not include ${cleanFeatureKey} access.`,
-      enrollment: paidEnrollment,
+      enrollment,
       plan,
     };
   }
 
-  const demoSettings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
-  const demoEnrollment =
-    db.enrollments?.[backendEnrollmentKey(cleanCourseId, user.id, "demo")] ||
-    null;
-
-  if (demoEnrollment?.access_granted !== false && demoEnrollment?.is_demo === true) {
+  if (resolved.status === "demo_active") {
+    const enrollment = resolved.enrollment;
+    const demoSettings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
     const course = db.courses?.[cleanCourseId] || null;
     const settingKey = ngDemoSettingKeyForFeature(cleanFeatureKey);
 
-    if (!isDemoEnrollmentActive(demoEnrollment, demoSettings)) {
-      return { allowed: false, reason: "Demo access is expired or disabled", enrollment: demoEnrollment };
-    }
-
     if (course?.demo_access_enabled === false) {
-      return { allowed: false, reason: "Demo access is disabled for this course", enrollment: demoEnrollment };
+      return { allowed: false, reason: "Demo access is disabled for this course", enrollment };
     }
 
     if (!settingKey || demoSettings[settingKey] !== true) {
-      return { allowed: false, reason: `${cleanFeatureKey} is not available in demo access`, enrollment: demoEnrollment };
+      return { allowed: false, reason: `${cleanFeatureKey} is not available in demo access`, enrollment };
     }
 
+    return { allowed: true, reason: "Active demo access", enrollment, plan: null };
+  }
+
+  if (resolved.status === "paid_expired") {
     return {
-      allowed: true,
-      reason: "Active demo access",
-      enrollment: demoEnrollment,
+      allowed: false,
+      reason: "Paid access is expired. Please renew access.",
+      enrollment: resolved.enrollment,
+      plan: resolved.plan,
+    };
+  }
+
+  if (resolved.status === "demo_expired") {
+    return {
+      allowed: false,
+      reason: "Demo access is expired. Please choose a paid plan.",
+      enrollment: resolved.enrollment,
       plan: null,
     };
   }
 
   return {
     allowed: false,
-    reason: `Your current plan does not include ${cleanFeatureKey} access.`,
+    reason: resolved.status === "revoked"
+      ? "Course access is revoked. Please contact support."
+      : `Your current plan does not include ${cleanFeatureKey} access.`,
+    enrollment: resolved.enrollment || null,
+    plan: resolved.plan || null,
   };
 }
 
@@ -3309,25 +3426,10 @@ async function ngHandleStripeWebhookEvent(event = {}, req = null) {
 }
 
 function getBackendEnrollment(db, { userId, courseId }) {
-  const paid = db.enrollments[backendEnrollmentKey(courseId, userId, "paid")];
-  const plan = paid?.plan_id ? db.plans?.[String(paid.plan_id)] || null : null;
-  if (paid?.id && isPaidEnrollmentActive(paid, plan)) return paid;
-
-  // v168: demo enrollment must also be time-valid here. Older routes rely on this helper,
-  // so returning expired demos here would leak locked content after the demo window ends.
-  const demo = db.enrollments[backendEnrollmentKey(courseId, userId, "demo")];
-  const demoSettings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
-  const course = db.courses?.[String(courseId)] || null;
-  if (
-    demo?.access_granted &&
-    demo?.is_demo === true &&
-    course?.demo_access_enabled !== false &&
-    isDemoEnrollmentActive(demo, demoSettings)
-  ) {
-    return demo;
-  }
-
-  return null;
+  const resolved = ngResolveCourseAccessRecord(db, { id: userId }, courseId);
+  return ["paid", "demo_active"].includes(String(resolved.status || ""))
+    ? resolved.enrollment
+    : null;
 }
 function isDemoEnrollmentActive(enrollment, demoSettings) {
   if (!enrollment?.is_demo) return true;
@@ -9910,6 +10012,67 @@ app.get("/admin/enrollments", async (req, res) => {
   }
 });
 
+app.get("/admin/enrollments/access-priority-audit", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    const requestedEmail = normalizeEmail(req.query.email || "");
+    const rows = [];
+
+    const pairs = new Map();
+    for (const enrollment of Object.values(db.enrollments || {})) {
+      if (!enrollment?.user_id || !enrollment?.course_id) continue;
+      const user = db.users?.[String(enrollment.user_id)] || null;
+      if (requestedEmail && normalizeEmail(user?.email) !== requestedEmail) continue;
+      const key = `${enrollment.user_id}:${enrollment.course_id}`;
+      pairs.set(key, { userId: enrollment.user_id, courseId: enrollment.course_id, user });
+    }
+
+    for (const pair of pairs.values()) {
+      const resolved = ngResolveCourseAccessRecord(db, { id: pair.userId }, pair.courseId);
+      const paidCandidates = ngFindCourseEnrollmentCandidates(db, { userId: pair.userId, courseId: pair.courseId, type: "paid" });
+      const demoCandidates = ngFindCourseEnrollmentCandidates(db, { userId: pair.userId, courseId: pair.courseId, type: "demo" });
+      if (!paidCandidates.length || !demoCandidates.length) continue;
+
+      rows.push({
+        user_id: pair.userId,
+        email: pair.user?.email || "",
+        name: pair.user?.name || "Student",
+        course_id: pair.courseId,
+        course_name: db.courses?.[String(pair.courseId)]?.name || "Course",
+        resolved_status: resolved.status,
+        resolved_enrollment_id: resolved.enrollment?.id || null,
+        paid: paidCandidates.map(({ storageKey, enrollment }) => ({
+          storage_key: storageKey,
+          id: enrollment.id,
+          access_granted: enrollment.access_granted !== false,
+          active: isPaidEnrollmentActive(enrollment, enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null),
+          plan_id: enrollment.plan_id || null,
+          access_expires_at: enrollment.access_expires_at || enrollment.expires_at || enrollment.renewal_due_at || null,
+        })),
+        demo: demoCandidates.map(({ storageKey, enrollment }) => ({
+          storage_key: storageKey,
+          id: enrollment.id,
+          access_granted: enrollment.access_granted !== false,
+          active: isDemoEnrollmentActive(enrollment, { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) }),
+          demo_expiry: enrollment.demo_expiry || null,
+        })),
+      });
+    }
+
+    res.json({
+      success: true,
+      build: NEXTGEN_BACKEND_BUILD,
+      count: rows.length,
+      rows,
+      read_only: true,
+      message: "Active paid access always wins; otherwise an active demo wins before expired/revoked history.",
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
 app.post("/admin/enrollments", async (req, res) => {
   try {
     await requireAdmin(req);
@@ -10025,7 +10188,7 @@ app.patch("/admin/enrollments/:enrollmentId", async (req, res) => {
   try {
     await requireAdmin(req);
     const db = await readLiveDb();
-    const enrollment = findEnrollmentById(db, req.params.enrollmentId);
+    let enrollment = findEnrollmentById(db, req.params.enrollmentId);
 
     if (!enrollment) {
       return res.status(404).json({ success: false, error: "Enrollment not found" });
@@ -10034,6 +10197,36 @@ app.patch("/admin/enrollments/:enrollmentId", async (req, res) => {
     const now = new Date().toISOString();
     const requestedStatus = String(req.body.status || req.body.access_status || "").trim().toLowerCase();
     const demoSettings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
+
+    // v190n: Converting a demo card to paid access must create/update the canonical
+    // :paid record. The original demo record remains untouched as history. This
+    // prevents paid access from being stored under a :demo key and then ignored by
+    // student access checks when the demo expires.
+    if (["active", "paid", "approved"].includes(requestedStatus)) {
+      const paidKey = backendEnrollmentKey(enrollment.course_id, enrollment.user_id, "paid");
+      if (String(enrollment.id) !== String(paidKey)) {
+        const sourceEnrollment = enrollment;
+        const existingPaid = db.enrollments?.[paidKey] || {};
+        enrollment = {
+          ...existingPaid,
+          id: paidKey,
+          backend_owned: true,
+          user_id: sourceEnrollment.user_id,
+          user_name: sourceEnrollment.user_name || existingPaid.user_name || "Student",
+          course_id: sourceEnrollment.course_id,
+          plan_id: existingPaid.plan_id || sourceEnrollment.plan_id || null,
+          access_granted: existingPaid.access_granted !== false,
+          is_demo: false,
+          demo_expiry: null,
+          progress_percentage: Number(existingPaid.progress_percentage ?? sourceEnrollment.progress_percentage ?? 0) || 0,
+          created_at: existingPaid.created_at || new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          canonicalized_from_enrollment_id: sourceEnrollment.id,
+          canonicalized_at: new Date().toISOString(),
+        };
+        db.enrollments[paidKey] = enrollment;
+      }
+    }
 
     // v171: Admin Enrollments UI sends { status } from the dropdown.
     // Older backend builds ignored that field, so "Save Access" appeared to work
@@ -11301,17 +11494,33 @@ app.post("/enrollments/prepare-checkout", async (req, res) => {
 });
 app.get("/enrollments/status", async (req, res) => {
   try {
-    const { user } = await getAuthenticatedUser(req); const courseId = req.query.course_id; if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    const { user } = await getAuthenticatedUser(req);
+    const courseId = String(req.query.course_id || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+
     const db = await readLiveDb();
     const selfHeal = ngMaybeSelfHealDemoEnrollment(db, user, { courseId, source: "enrollment_status" });
     if (selfHeal.changed) await writeLiveDb(db);
-    const settings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) }; const paid = db.enrollments[backendEnrollmentKey(courseId, user.id, "paid")]; const demo = db.enrollments[backendEnrollmentKey(courseId, user.id, "demo")];
-    const paidPlan = paid?.plan_id ? db.plans?.[String(paid.plan_id)] || null : null;
-    if (paid?.access_granted && isPaidEnrollmentActive(paid, paidPlan)) return res.json({ success: true, status: "paid", enrollment: paid, demo_expiry: null, access_expires_at: paid.access_expires_at || null, source: "backend", demo_access_self_heal: selfHeal });
-    if (paid?.access_granted && !isPaidEnrollmentActive(paid, paidPlan)) return res.json({ success: true, status: "paid_expired", enrollment: paid, demo_expiry: null, access_expires_at: paid.access_expires_at || null, source: "backend", demo_access_self_heal: selfHeal });
-    if (demo?.access_granted) return res.json({ success: true, status: isDemoEnrollmentActive(demo, settings) ? "demo_active" : "demo_expired", enrollment: demo, demo_expiry: demo.demo_expiry || null, source: "backend", demo_access_self_heal: selfHeal });
-    res.json({ success: true, status: "none", enrollment: null, demo_expiry: null, source: "backend", demo_access_self_heal: selfHeal });
-  } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); }
+
+    const resolved = ngResolveCourseAccessRecord(db, user, courseId);
+    return res.json({
+      success: true,
+      status: resolved.status,
+      enrollment: resolved.enrollment || null,
+      plan: resolved.plan ? sanitizePlan(resolved.plan) : null,
+      demo_expiry: resolved.demo_expiry || null,
+      access_expires_at: resolved.access_expires_at || null,
+      source: "backend_paid_demo_priority_v190n",
+      access_resolution: {
+        storage_key: resolved.storage_key || null,
+        paid_candidates: Number(resolved.paid_candidates || 0),
+        demo_candidates: Number(resolved.demo_candidates || 0),
+      },
+      demo_access_self_heal: selfHeal,
+    });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message });
+  }
 });
 function ngBuildCheckoutCancelUrl(rawCancelUrl = "", context = {}) {
   const fallback = "https://live.nextgenusmlelms.com/payment-cancel";
@@ -14250,21 +14459,7 @@ app.get("/student/dashboard/summary", async (req, res) => {
 // flags here; full notes still load from /live/notes/:sessionId when a specific
 // session is opened.
 function ngStudentEnrollmentStatusForCourse(db, user, courseId) {
-  const settings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
-  const paid = db.enrollments?.[backendEnrollmentKey(courseId, user.id, "paid")];
-  const demo = db.enrollments?.[backendEnrollmentKey(courseId, user.id, "demo")];
-  const paidPlan = paid?.plan_id ? db.plans?.[String(paid.plan_id)] || null : null;
-
-  if (paid?.access_granted && isPaidEnrollmentActive(paid, paidPlan)) {
-    return { status: "paid", enrollment: paid, demo_expiry: null, access_expires_at: paid.access_expires_at || null, plan: paidPlan };
-  }
-  if (paid?.access_granted && !isPaidEnrollmentActive(paid, paidPlan)) {
-    return { status: "paid_expired", enrollment: paid, demo_expiry: null, access_expires_at: paid.access_expires_at || null, plan: paidPlan };
-  }
-  if (demo?.access_granted) {
-    return { status: isDemoEnrollmentActive(demo, settings) ? "demo_active" : "demo_expired", enrollment: demo, demo_expiry: demo.demo_expiry || null, access_expires_at: null, plan: null };
-  }
-  return { status: "none", enrollment: null, demo_expiry: null, access_expires_at: null, plan: null };
+  return ngResolveCourseAccessRecord(db, user, courseId);
 }
 
 function ngStudentHasCourseAccessStatus(status) {
@@ -14817,13 +15012,21 @@ const DEFAULT_COMMUNITY_CATEGORIES = [
 
 function hasAnyActiveEnrollment(db, user, { includeDemo = true } = {}) {
   if (!user?.id) return false;
-  return Object.values(db.enrollments || {}).some((enrollment) => {
-    if (String(enrollment.user_id) !== String(user.id)) return false;
-    if (enrollment.access_granted === false) return false;
-    if (!includeDemo && enrollment.is_demo) return false;
-    if (enrollment.is_demo && !isDemoEnrollmentActive(enrollment, { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) })) return false;
-    return true;
-  });
+
+  const courseIds = new Set(
+    Object.values(db.enrollments || {})
+      .filter((enrollment) => String(enrollment.user_id || "") === String(user.id))
+      .map((enrollment) => String(enrollment.course_id || "").trim())
+      .filter(Boolean)
+  );
+
+  for (const courseId of courseIds) {
+    const resolved = ngResolveCourseAccessRecord(db, user, courseId);
+    if (resolved.status === "paid") return true;
+    if (includeDemo && resolved.status === "demo_active") return true;
+  }
+
+  return false;
 }
 
 function sanitizeGlobalCommunityPost(post = {}) {
