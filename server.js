@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v192-system-day-roadmap-safety";
+const NEXTGEN_BACKEND_BUILD = "v193-verified-zoom-host-launch";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -3807,13 +3807,171 @@ async function getZoomAccessToken() {
   );
   return response.data.access_token;
 }
+
+function ngZoomConfiguredHostUser() {
+  return String(
+    process.env.ZOOM_HOST_USER_ID ||
+    process.env.ZOOM_HOST_EMAIL ||
+    "me"
+  ).trim() || "me";
+}
+
+function ngIsAllowedZoomHostname(hostname = "") {
+  const host = String(hostname || "").trim().toLowerCase();
+  return (
+    host === "zoom.us" ||
+    host.endsWith(".zoom.us") ||
+    host === "zoom.com" ||
+    host.endsWith(".zoom.com") ||
+    host === "zoomgov.com" ||
+    host.endsWith(".zoomgov.com")
+  );
+}
+
+function ngInspectZoomHostStartUrl(rawUrl, { meetingId = null, joinUrl = null } = {}) {
+  const inspection = {
+    valid: false,
+    is_https: false,
+    is_zoom_domain: false,
+    is_host_start_path: false,
+    is_attendee_path: false,
+    has_zak_token: false,
+    meeting_id_matches: false,
+    same_as_join_url: false,
+    hostname: null,
+    path_kind: "invalid",
+  };
+
+  const raw = String(rawUrl || "").trim();
+  if (!raw) return inspection;
+
+  try {
+    const parsed = new URL(raw);
+    const expectedMeetingId = String(meetingId || "").replace(/\D/g, "");
+    const hostPathMatch = parsed.pathname.match(/^\/s\/(\d+)(?:\/|$)/i);
+    const attendeePath = /^\/(?:j|wc|w)\//i.test(parsed.pathname);
+    const pathMeetingId = String(hostPathMatch?.[1] || "").replace(/\D/g, "");
+    const zak = String(parsed.searchParams.get("zak") || "").trim();
+
+    inspection.is_https = parsed.protocol === "https:";
+    inspection.is_zoom_domain = ngIsAllowedZoomHostname(parsed.hostname);
+    inspection.is_host_start_path = Boolean(hostPathMatch);
+    inspection.is_attendee_path = attendeePath;
+    inspection.has_zak_token = zak.length >= 20;
+    inspection.meeting_id_matches = Boolean(pathMeetingId) && (
+      !expectedMeetingId || pathMeetingId === expectedMeetingId
+    );
+    inspection.hostname = parsed.hostname;
+    inspection.path_kind = hostPathMatch ? "host_start" : attendeePath ? "attendee" : "unknown";
+
+    if (joinUrl) {
+      try {
+        inspection.same_as_join_url = parsed.toString() === new URL(String(joinUrl)).toString();
+      } catch {
+        inspection.same_as_join_url = raw === String(joinUrl || "").trim();
+      }
+    }
+
+    inspection.valid = Boolean(
+      inspection.is_https &&
+      inspection.is_zoom_domain &&
+      inspection.is_host_start_path &&
+      !inspection.is_attendee_path &&
+      inspection.has_zak_token &&
+      inspection.meeting_id_matches &&
+      !inspection.same_as_join_url
+    );
+  } catch {
+    inspection.path_kind = "invalid";
+  }
+
+  return inspection;
+}
+
+function ngBuildZoomHostStartUrlWithZak({ startUrl = null, joinUrl = null, meetingId = null, zak = null } = {}) {
+  const cleanMeetingId = String(meetingId || "").replace(/\D/g, "");
+  const cleanZak = String(zak || "").trim();
+  if (!cleanMeetingId || cleanZak.length < 20) return null;
+
+  let parsed = null;
+  for (const candidate of [startUrl, joinUrl]) {
+    if (!candidate) continue;
+    try {
+      const next = new URL(String(candidate));
+      if (next.protocol === "https:" && ngIsAllowedZoomHostname(next.hostname)) {
+        parsed = next;
+        break;
+      }
+    } catch {
+      // Try the next Zoom-provided URL.
+    }
+  }
+
+  if (!parsed) parsed = new URL(`https://zoom.us/s/${cleanMeetingId}`);
+  parsed.pathname = `/s/${cleanMeetingId}`;
+  parsed.searchParams.set("zak", cleanZak);
+  parsed.hash = "";
+  return parsed.toString();
+}
+
+async function getZoomUserZakToken(userId) {
+  const cleanUserId = String(userId || "").trim();
+  if (!cleanUserId) throw new Error("Zoom meeting host id is missing");
+  const accessToken = await getZoomAccessToken();
+  const response = await axios.get(
+    `https://api.zoom.us/v2/users/${encodeURIComponent(cleanUserId)}/token`,
+    {
+      params: { type: "zak" },
+      headers: { Authorization: `Bearer ${accessToken}` },
+    }
+  );
+  const token = String(response.data?.token || "").trim();
+  if (token.length < 20) throw new Error("Zoom did not return a usable host ZAK token");
+  return token;
+}
+
+async function ngBuildVerifiedZoomHostStartLink(meeting = {}, fallbackJoinUrl = null) {
+  const meetingId = String(meeting.id || "").trim();
+  const joinUrl = meeting.join_url || fallbackJoinUrl || null;
+  let candidate = meeting.start_url || null;
+  let source = "meeting_start_url";
+  let zakRefreshWarning = null;
+
+  if (meeting.host_id) {
+    try {
+      const freshZak = await getZoomUserZakToken(meeting.host_id);
+      const refreshedCandidate = ngBuildZoomHostStartUrlWithZak({
+        startUrl: meeting.start_url,
+        joinUrl,
+        meetingId,
+        zak: freshZak,
+      });
+      if (refreshedCandidate) {
+        candidate = refreshedCandidate;
+        source = "fresh_host_zak";
+      }
+    } catch (error) {
+      zakRefreshWarning = error.response?.data?.message || error.message || "Could not refresh the Zoom host token";
+    }
+  }
+
+  const inspection = ngInspectZoomHostStartUrl(candidate, { meetingId, joinUrl });
+  return {
+    start_url: inspection.valid ? candidate : null,
+    source,
+    inspection,
+    zak_refresh_warning: zakRefreshWarning,
+  };
+}
+
 async function createZoomMeetingForLiveSession(session, timezone = DEFAULT_TIMEZONE) {
   const accessToken = await getZoomAccessToken();
   const start = getSessionStartUtc(session.scheduled_date, session.scheduled_time, timezone);
   if (!start) throw new Error("Session scheduled date/time is invalid");
-  const response = await axios.post("https://api.zoom.us/v2/users/me/meetings", {
+  const zoomHostUser = ngZoomConfiguredHostUser();
+  const response = await axios.post(`https://api.zoom.us/v2/users/${encodeURIComponent(zoomHostUser)}/meetings`, {
     topic: session.topic || "Live Class", type: 2, start_time: start.toISOString(), duration: DEFAULT_ZOOM_DURATION_MINUTES, timezone,
-    settings: { host_video: true, participant_video: true, join_before_host: true, waiting_room: false, auto_recording: "cloud" },
+    settings: { host_video: true, participant_video: true, join_before_host: true, waiting_room: false, meeting_authentication: false, auto_recording: "cloud" },
   }, { headers: { Authorization: `Bearer ${accessToken}` } });
   return response.data;
 }
@@ -3841,6 +3999,7 @@ async function ngOpenZoomMeetingEntryForStudents(meetingId) {
       settings: {
         waiting_room: false,
         join_before_host: true,
+        meeting_authentication: false,
       },
     },
     { headers: { Authorization: `Bearer ${accessToken}` } }
@@ -3851,6 +4010,7 @@ async function ngOpenZoomMeetingEntryForStudents(meetingId) {
     meeting_id: cleanMeetingId,
     waiting_room: false,
     join_before_host: true,
+    meeting_authentication: false,
     updated_at: new Date().toISOString(),
   };
 }
@@ -3874,18 +4034,32 @@ async function ngEnsureHostZoomStartLink(db, session, user) {
   let meeting = null;
   const existingJoinUrl = ngManualLiveJoinUrl(session);
   let verifiedStartUrl = null;
+  let hostLinkInspection = null;
+  let hostLinkSource = null;
+  let zakRefreshWarning = null;
 
   if (hasRealZoomMeetingId(session.zoom_meeting_id)) {
     try {
       meeting = await getZoomMeetingDetailsForHostStart(session.zoom_meeting_id);
       if (meeting?.start_url) {
-        verifiedStartUrl = meeting.start_url;
-        session.zoom_start_url = meeting.start_url;
-        session.host_start_url = meeting.start_url;
+        const verified = await ngBuildVerifiedZoomHostStartLink(meeting, existingJoinUrl);
+        verifiedStartUrl = verified.start_url;
+        hostLinkInspection = verified.inspection;
+        hostLinkSource = verified.source;
+        zakRefreshWarning = verified.zak_refresh_warning;
+        if (verifiedStartUrl) {
+          session.zoom_start_url = verifiedStartUrl;
+          session.host_start_url = verifiedStartUrl;
+        }
         session.zoom_meeting_url = session.zoom_meeting_url || meeting.join_url || existingJoinUrl || null;
         session.meeting_password = session.meeting_password || meeting.password || null;
-        session.zoom_host_url_refreshed_at = new Date().toISOString();
+        session.zoom_host_id = meeting.host_id || session.zoom_host_id || null;
+        session.zoom_host_email = meeting.host_email || session.zoom_host_email || null;
+        session.zoom_host_url_refreshed_at = verifiedStartUrl ? new Date().toISOString() : session.zoom_host_url_refreshed_at || null;
         changed = true;
+        if (!verifiedStartUrl) {
+          warning = "Zoom did not return a fresh tokenized host start URL. The attendee link was blocked and will not be opened.";
+        }
       } else {
         warning = "Zoom did not return a host start URL for this meeting.";
       }
@@ -3897,12 +4071,20 @@ async function ngEnsureHostZoomStartLink(db, session, user) {
   if (!hasRealZoomMeetingId(session.zoom_meeting_id)) {
     try {
       meeting = await createZoomMeetingForLiveSession(session, session.scheduled_timezone || DEFAULT_TIMEZONE);
+      const verified = await ngBuildVerifiedZoomHostStartLink(meeting, meeting.join_url || existingJoinUrl);
       session.zoom_meeting_id = String(meeting.id);
       session.meeting_password = meeting.password || session.meeting_password || "pending";
       session.zoom_meeting_url = meeting.join_url || session.zoom_meeting_url || null;
-      session.zoom_start_url = meeting.start_url || null;
-      session.host_start_url = meeting.start_url || null;
-      verifiedStartUrl = meeting.start_url || null;
+      verifiedStartUrl = verified.start_url;
+      hostLinkInspection = verified.inspection;
+      hostLinkSource = verified.source;
+      zakRefreshWarning = verified.zak_refresh_warning;
+      if (verifiedStartUrl) {
+        session.zoom_start_url = verifiedStartUrl;
+        session.host_start_url = verifiedStartUrl;
+      }
+      session.zoom_host_id = meeting.host_id || null;
+      session.zoom_host_email = meeting.host_email || null;
       session.zoom_host_url_refreshed_at = verifiedStartUrl ? new Date().toISOString() : null;
       session.status = session.status || "scheduled";
       db.recordings[String(meeting.id)] = {
@@ -3915,6 +4097,9 @@ async function ngEnsureHostZoomStartLink(db, session, user) {
         created_at: db.recordings[String(meeting.id)]?.created_at || new Date().toISOString(),
       };
       changed = true;
+      if (!verifiedStartUrl) {
+        warning = "Zoom created the meeting but did not return a fresh tokenized host start URL. The attendee link was blocked and will not be opened.";
+      }
     } catch (error) {
       warning = `Could not create Zoom meeting: ${error.response?.data?.message || error.message}`;
     }
@@ -3951,6 +4136,11 @@ async function ngEnsureHostZoomStartLink(db, session, user) {
     warning,
     open_entry,
     host_url_verified: Boolean(verifiedStartUrl),
+    host_link_inspection: hostLinkInspection,
+    host_link_source: hostLinkSource,
+    zak_refresh_warning: zakRefreshWarning,
+    zoom_host_id: meeting?.host_id || session.zoom_host_id || null,
+    zoom_host_email: meeting?.host_email || session.zoom_host_email || null,
   };
 }
 
@@ -10269,8 +10459,15 @@ app.post("/admin/live-sessions/:sessionId/host-start-link", async (req, res) => 
     if (!startUrl || result.host_url_verified !== true) {
       return res.status(400).json({
         success: false,
+        build: NEXTGEN_BACKEND_BUILD,
         error: result.warning || "A verified Zoom host start URL is not available for this session.",
         session: sanitizeLiveSession(session),
+        host_link_check: result.host_link_inspection || null,
+        host_zak_refreshed: result.host_link_source === "fresh_host_zak",
+        host_zak_refresh_warning: result.zak_refresh_warning || null,
+        zoom_host_id: result.zoom_host_id || null,
+        zoom_host_email: result.zoom_host_email || null,
+        zoom_host_user_configured: ngZoomConfiguredHostUser() !== "me",
       });
     }
 
@@ -10278,16 +10475,26 @@ app.post("/admin/live-sessions/:sessionId/host-start-link", async (req, res) => 
       success: true,
       build: NEXTGEN_BACKEND_BUILD,
       session: sanitizeLiveSession(session),
+      launch_url: startUrl,
       start_url: startUrl,
       host_start_url: startUrl,
       zoom_start_url: startUrl,
       join_url: joinUrl,
       zoom_join_url: joinUrl,
       host_url_verified: true,
+      host_link_type: result.host_link_inspection?.path_kind || "host_start",
+      host_link_has_zak: result.host_link_inspection?.has_zak_token === true,
+      host_link_meeting_matches: result.host_link_inspection?.meeting_id_matches === true,
+      host_link_source: result.host_link_source || "meeting_start_url",
+      host_zak_refreshed: result.host_link_source === "fresh_host_zak",
+      host_zak_refresh_warning: result.zak_refresh_warning || null,
       meeting_id: session.zoom_meeting_id || null,
       password: session.meeting_password || null,
+      zoom_host_id: result.zoom_host_id || null,
+      zoom_host_email: result.zoom_host_email || null,
+      zoom_host_user_configured: ngZoomConfiguredHostUser() !== "me",
       warning: result.warning || null,
-      message: "Open this verified host link on the mentor iPad to launch the Zoom app as host for screen sharing.",
+      message: "A fresh Zoom host URL was verified. Zoom opens its handoff page first, then launches the Zoom Workplace app. If Zoom asks for sign-in, use the meeting owner's Zoom account.",
     });
   } catch (e) {
     res.status(e.statusCode || e.response?.status || 500).json({
