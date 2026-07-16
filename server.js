@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v190n-paid-demo-priority-fix";
+const NEXTGEN_BACKEND_BUILD = "v191-requested-automation-safety";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -207,8 +207,218 @@ function ngBoundedJsonBodyLimit(value = "40mb") {
 }
 
 const NEXTGEN_JSON_BODY_LIMIT = ngBoundedJsonBodyLimit(process.env.JSON_BODY_LIMIT || "40mb");
-app.use(express.json({ limit: NEXTGEN_JSON_BODY_LIMIT }));
+app.use(express.json({
+  limit: NEXTGEN_JSON_BODY_LIMIT,
+  verify: (req, _res, buffer) => {
+    // Zoom signs the exact raw request bytes. Retain only this webhook body so
+    // signature verification remains possible without changing other routes.
+    if (String(req.originalUrl || req.url || "").split("?")[0] === "/zoom/webhook") {
+      req.zoomRawBody = Buffer.from(buffer || "");
+    }
+  },
+}));
 app.use(express.urlencoded({ extended: true, limit: NEXTGEN_JSON_BODY_LIMIT }));
+
+const META_CAPI_ALLOWED_EVENTS = new Set(["Lead"]);
+const metaCapiRateBuckets = new Map();
+const metaCapiAcceptedEventIds = new Map();
+
+function ngMetaCapiConfig() {
+  return {
+    token: String(process.env.META_CAPI_TOKEN || "").trim(),
+    pixelId: String(process.env.META_PIXEL_ID || "").trim(),
+    graphVersion: String(process.env.META_GRAPH_VERSION || "v25.0").trim().replace(/^\/+|\/+$/g, "") || "v25.0",
+    testEventCode: String(process.env.META_TEST_EVENT_CODE || "").trim(),
+  };
+}
+
+function ngMetaCapiAllowedOrigin(origin = "") {
+  const clean = String(origin || "").trim().replace(/\/$/, "");
+  if (!clean) return true;
+  if (isNextGenAllowedOrigin(clean)) return true;
+  const configured = String(process.env.META_CAPI_ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((item) => item.trim().replace(/\/$/, ""))
+    .filter(Boolean);
+  return configured.includes(clean);
+}
+
+function ngMetaCapiClientIp(req) {
+  return String(req.headers["x-forwarded-for"] || req.socket?.remoteAddress || req.ip || "")
+    .split(",")[0]
+    .trim()
+    .slice(0, 80);
+}
+
+function ngMetaCapiRateAllowed(req, nowMs = Date.now()) {
+  const key = ngMetaCapiClientIp(req) || "unknown";
+  const windowMs = 10 * 60 * 1000;
+  const maxRequests = 30;
+  const previous = metaCapiRateBuckets.get(key);
+  const bucket = !previous || nowMs - previous.startedAt >= windowMs
+    ? { startedAt: nowMs, count: 0 }
+    : previous;
+  bucket.count += 1;
+  metaCapiRateBuckets.set(key, bucket);
+
+  if (metaCapiRateBuckets.size > 2000) {
+    for (const [bucketKey, value] of metaCapiRateBuckets.entries()) {
+      if (nowMs - Number(value.startedAt || 0) >= windowMs) metaCapiRateBuckets.delete(bucketKey);
+    }
+  }
+
+  return bucket.count <= maxRequests;
+}
+
+function ngMetaCapiHash(value = "") {
+  const clean = String(value || "").trim().toLowerCase();
+  return clean ? crypto.createHash("sha256").update(clean).digest("hex") : "";
+}
+
+function ngMetaCapiCookie(req, name) {
+  const raw = String(req.headers.cookie || "");
+  for (const pair of raw.split(";")) {
+    const index = pair.indexOf("=");
+    if (index < 0) continue;
+    if (pair.slice(0, index).trim() !== name) continue;
+    try {
+      return decodeURIComponent(pair.slice(index + 1).trim()).slice(0, 240);
+    } catch {
+      return pair.slice(index + 1).trim().slice(0, 240);
+    }
+  }
+  return "";
+}
+
+function ngMetaCapiSourceUrl(value = "") {
+  const clean = String(value || "").trim().slice(0, 1000);
+  if (!clean) return "";
+  try {
+    const url = new URL(clean);
+    if (!["http:", "https:"].includes(url.protocol)) return "";
+    if (!ngMetaCapiAllowedOrigin(url.origin)) return "";
+    return url.toString();
+  } catch {
+    return "";
+  }
+}
+
+function ngMetaCapiEventWasAccepted(eventId, nowMs = Date.now()) {
+  const ttlMs = 48 * 60 * 60 * 1000;
+  const acceptedAt = Number(metaCapiAcceptedEventIds.get(eventId) || 0);
+  if (acceptedAt && nowMs - acceptedAt < ttlMs) return true;
+  if (metaCapiAcceptedEventIds.size > 5000) {
+    for (const [id, timestamp] of metaCapiAcceptedEventIds.entries()) {
+      if (nowMs - Number(timestamp || 0) >= ttlMs) metaCapiAcceptedEventIds.delete(id);
+    }
+  }
+  return false;
+}
+
+app.get("/api/capi-event/health", (_req, res) => {
+  const config = ngMetaCapiConfig();
+  res.json({
+    success: true,
+    configured: Boolean(config.token && config.pixelId),
+    pixel_id: config.pixelId || null,
+    graph_version: config.graphVersion,
+    test_mode: Boolean(config.testEventCode),
+    accepted_events: Array.from(META_CAPI_ALLOWED_EVENTS),
+  });
+});
+
+app.post("/api/capi-event", async (req, res) => {
+  const origin = String(req.headers.origin || "").trim();
+  if (!ngMetaCapiAllowedOrigin(origin)) {
+    return res.status(403).json({ success: false, error: "This website origin is not allowed." });
+  }
+  if (!ngMetaCapiRateAllowed(req)) {
+    return res.status(429).json({ success: false, error: "Too many conversion requests. Please retry later." });
+  }
+
+  const config = ngMetaCapiConfig();
+  if (!config.token || !config.pixelId) {
+    return res.status(503).json({ success: false, error: "Meta Conversions API is not configured yet." });
+  }
+
+  const eventName = String(req.body?.eventName || req.body?.event_name || "").trim();
+  const eventId = String(req.body?.eventId || req.body?.event_id || "").trim();
+  const email = String(req.body?.email || "").trim().toLowerCase().slice(0, 320);
+  const phone = String(req.body?.phone || "").replace(/\D/g, "").slice(0, 24);
+  const sourceUrl = ngMetaCapiSourceUrl(req.body?.sourceUrl || req.body?.source_url || "");
+
+  if (!META_CAPI_ALLOWED_EVENTS.has(eventName)) {
+    return res.status(400).json({ success: false, error: "Unsupported conversion event." });
+  }
+  if (!/^[A-Za-z0-9._:-]{8,160}$/.test(eventId)) {
+    return res.status(400).json({ success: false, error: "A valid eventId is required for deduplication." });
+  }
+  if (!email && !phone) {
+    return res.status(400).json({ success: false, error: "Email or phone is required." });
+  }
+  if (!sourceUrl) {
+    return res.status(400).json({ success: false, error: "A valid NextGen sourceUrl is required." });
+  }
+  if (ngMetaCapiEventWasAccepted(eventId)) {
+    return res.json({ success: true, duplicate: true, event_id: eventId, events_received: 1 });
+  }
+
+  const fbp = String(req.body?.fbp || ngMetaCapiCookie(req, "_fbp") || "").trim().slice(0, 240);
+  const fbc = String(req.body?.fbc || ngMetaCapiCookie(req, "_fbc") || "").trim().slice(0, 240);
+  const userData = {
+    client_ip_address: ngMetaCapiClientIp(req) || undefined,
+    client_user_agent: String(req.headers["user-agent"] || "").slice(0, 500) || undefined,
+    em: email ? [ngMetaCapiHash(email)] : undefined,
+    ph: phone ? [ngMetaCapiHash(phone)] : undefined,
+    fbp: fbp || undefined,
+    fbc: fbc || undefined,
+  };
+
+  const payload = {
+    data: [{
+      event_name: eventName,
+      event_time: Math.floor(Date.now() / 1000),
+      action_source: "website",
+      event_id: eventId,
+      event_source_url: sourceUrl,
+      user_data: userData,
+    }],
+    ...(config.testEventCode ? { test_event_code: config.testEventCode } : {}),
+  };
+
+  try {
+    const response = await axios.post(
+      `https://graph.facebook.com/${encodeURIComponent(config.graphVersion)}/${encodeURIComponent(config.pixelId)}/events`,
+      payload,
+      {
+        params: { access_token: config.token },
+        headers: { "Content-Type": "application/json" },
+        timeout: 12000,
+      }
+    );
+    metaCapiAcceptedEventIds.set(eventId, Date.now());
+    return res.json({
+      success: true,
+      event_id: eventId,
+      events_received: Number(response.data?.events_received || 0),
+      messages: response.data?.messages || [],
+      fbtrace_id: response.data?.fbtrace_id || null,
+      test_mode: Boolean(config.testEventCode),
+    });
+  } catch (error) {
+    const status = Number(error.response?.status || 502);
+    console.error("Meta CAPI request failed:", {
+      status,
+      code: error.response?.data?.error?.code || null,
+      message: error.response?.data?.error?.message || error.message,
+    });
+    return res.status(status >= 400 && status < 600 ? status : 502).json({
+      success: false,
+      error: "Meta conversion delivery failed.",
+      meta_error_code: error.response?.data?.error?.code || null,
+    });
+  }
+});
 
 app.get("/admin/debug/cors-check", (req, res) => {
   res.json({
@@ -2305,12 +2515,66 @@ function sanitizeCourse(course) {
   };
 }
 
+function ngDayFirstContentTitle(value = "", { dayNumber = null, system = "", fallback = "" } = {}) {
+  const raw = String(value || fallback || "").replace(/\s+/g, " ").trim();
+  if (!raw) return "";
+
+  const embeddedMatch = raw.match(/\bday\s*#?\s*(\d{1,3})\b/i);
+  const numericDay = Number(dayNumber || embeddedMatch?.[1] || 0);
+  if (!numericDay) return raw;
+
+  const coursePrefix = (part) => {
+    const clean = String(part || "").toLowerCase();
+    return (
+      /\b\d+\s*-?\s*day\b/.test(clean) && /\b(?:usmle|step\s*1|marathon|course|program)\b/.test(clean)
+    ) || (/\b(?:usmle|step\s*1)\b/.test(clean) && /\b(?:marathon|course|program)\b/.test(clean));
+  };
+
+  const dayPattern = new RegExp(`\\bday\\s*#?\\s*${numericDay}\\b`, "ig");
+  const rawParts = raw
+    .split(/\s+(?:—|–|\|)\s+|\s+-\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const candidates = [];
+
+  const addCandidate = (part) => {
+    let clean = String(part || "").replace(dayPattern, " ").replace(/^\s*[:;,—–-]+|[:;,—–-]+\s*$/g, "").replace(/\s+/g, " ").trim();
+    if (!clean || coursePrefix(clean)) return;
+    candidates.push(clean);
+  };
+
+  if (system && String(system).trim() && String(system).toLowerCase() !== "mixed systems") {
+    addCandidate(system);
+  }
+  for (const part of rawParts) {
+    if (coursePrefix(part)) continue;
+    addCandidate(part);
+  }
+
+  const unique = [];
+  const seen = new Set();
+  for (const part of candidates) {
+    const key = part.toLowerCase().replace(/[^a-z0-9]+/g, "");
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    unique.push(part);
+  }
+
+  return [`Day ${numericDay}`, ...unique].join(" — ");
+}
+
 function normalizeLiveSessionPayload(body = {}, existing = {}) {
+  const rawTopic = String(body.topic ?? existing.topic ?? body.title ?? existing.title ?? "").trim();
+  const rawTitle = String(body.title ?? existing.title ?? body.topic ?? existing.topic ?? "").trim();
+  const dayNumber = body.day_number ?? body.dayNumber ?? existing.day_number ?? null;
+  const system = String(body.system ?? existing.system ?? "").trim();
   return {
     ...existing,
     course_id: String(body.course_id ?? existing.course_id ?? "").trim(),
-    topic: String(body.topic ?? existing.topic ?? body.title ?? existing.title ?? "").trim(),
-    title: String(body.title ?? existing.title ?? body.topic ?? existing.topic ?? "").trim(),
+    topic: ngDayFirstContentTitle(rawTopic, { dayNumber, system }),
+    title: ngDayFirstContentTitle(rawTitle, { dayNumber, system }),
+    day_number: dayNumber ? Number(dayNumber) : existing.day_number ?? null,
+    system,
     description: String(body.description ?? existing.description ?? "").trim(),
     scheduled_date: String(body.scheduled_date ?? existing.scheduled_date ?? "").trim(),
     scheduled_time: String(body.scheduled_time ?? existing.scheduled_time ?? "").trim(),
@@ -2355,11 +2619,21 @@ function normalizeLiveSessionPayload(body = {}, existing = {}) {
 
 function sanitizeLiveSession(session) {
   const timing = ngSessionTimingWindow(session);
+  const topic = ngDayFirstContentTitle(session.topic || session.title || "Live Class", {
+    dayNumber: session.day_number,
+    system: session.system,
+  });
+  const title = ngDayFirstContentTitle(session.title || session.topic || "Live Class", {
+    dayNumber: session.day_number,
+    system: session.system,
+  });
   return {
     id: session.id,
     course_id: session.course_id || null,
-    topic: session.topic || session.title || "Live Class",
-    title: session.title || session.topic || "Live Class",
+    topic: topic || "Live Class",
+    title: title || topic || "Live Class",
+    day_number: session.day_number || null,
+    system: session.system || null,
     description: session.description || "",
     scheduled_date: session.scheduled_date || null,
     scheduled_time: session.scheduled_time || null,
@@ -2465,12 +2739,18 @@ function sortNewestFirst(a, b) {
 }
 
 function sanitizePublicRecording(recording) {
+  const topic = ngDayFirstContentTitle(recording.topic || "", {
+    dayNumber: recording.day_number,
+    system: recording.system,
+  });
   return {
     id: recording.recording_key || recording.id || null,
     recording_key: recording.recording_key || recording.id || null,
     meeting_id: recording.meeting_id || null,
     uuid: recording.uuid || null,
-    topic: recording.topic || null,
+    topic: topic || null,
+    day_number: recording.day_number || null,
+    system: recording.system || null,
     start_time: recording.start_time || null,
     duration: recording.duration || null,
     recording_url: recording.recording_url || recording.share_url || null,
@@ -3559,45 +3839,29 @@ async function ngEnsureHostZoomStartLink(db, session, user) {
   let changed = false;
   let warning = null;
   let meeting = null;
-
-  const existingStartUrl = session.zoom_start_url || session.host_start_url || session.start_url || null;
   const existingJoinUrl = ngManualLiveJoinUrl(session);
-
-  // Even if a host start URL already exists, keep the active Zoom meeting open for students.
-  // This prevents mentors from admitting 90 students one by one during live class.
-  if (existingStartUrl && hasRealZoomMeetingId(session.zoom_meeting_id)) {
-    let open_entry = null;
-    try {
-      open_entry = await ngOpenZoomMeetingEntryForStudents(session.zoom_meeting_id);
-      session.zoom_waiting_room_disabled_at = open_entry.updated_at;
-      session.join_before_host_enabled_at = open_entry.updated_at;
-      changed = true;
-    } catch (error) {
-      warning = `Host URL exists, but Zoom open-entry update failed: ${error.response?.data?.message || error.message}`;
-    }
-    return { start_url: existingStartUrl, join_url: existingJoinUrl, meeting: null, changed, warning, open_entry };
-  }
-
-  if (existingStartUrl) {
-    return { start_url: existingStartUrl, join_url: existingJoinUrl, meeting: null, changed: false, warning: null, open_entry: null };
-  }
+  let verifiedStartUrl = null;
 
   if (hasRealZoomMeetingId(session.zoom_meeting_id)) {
     try {
       meeting = await getZoomMeetingDetailsForHostStart(session.zoom_meeting_id);
       if (meeting?.start_url) {
+        verifiedStartUrl = meeting.start_url;
         session.zoom_start_url = meeting.start_url;
         session.host_start_url = meeting.start_url;
         session.zoom_meeting_url = session.zoom_meeting_url || meeting.join_url || existingJoinUrl || null;
         session.meeting_password = session.meeting_password || meeting.password || null;
+        session.zoom_host_url_refreshed_at = new Date().toISOString();
         changed = true;
+      } else {
+        warning = "Zoom did not return a host start URL for this meeting.";
       }
     } catch (error) {
       warning = `Could not refresh Zoom host start URL: ${error.response?.data?.message || error.message}`;
     }
   }
 
-  if (!session.zoom_start_url && !hasRealZoomMeetingId(session.zoom_meeting_id)) {
+  if (!hasRealZoomMeetingId(session.zoom_meeting_id)) {
     try {
       meeting = await createZoomMeetingForLiveSession(session, session.scheduled_timezone || DEFAULT_TIMEZONE);
       session.zoom_meeting_id = String(meeting.id);
@@ -3605,6 +3869,8 @@ async function ngEnsureHostZoomStartLink(db, session, user) {
       session.zoom_meeting_url = meeting.join_url || session.zoom_meeting_url || null;
       session.zoom_start_url = meeting.start_url || null;
       session.host_start_url = meeting.start_url || null;
+      verifiedStartUrl = meeting.start_url || null;
+      session.zoom_host_url_refreshed_at = verifiedStartUrl ? new Date().toISOString() : null;
       session.status = session.status || "scheduled";
       db.recordings[String(meeting.id)] = {
         ...(db.recordings[String(meeting.id)] || {}),
@@ -3634,8 +3900,8 @@ async function ngEnsureHostZoomStartLink(db, session, user) {
     }
   }
 
-  if (!session.zoom_start_url && existingJoinUrl && !warning) {
-    warning = "Only a participant join URL is available. It can open Zoom app, but true host start needs a Zoom-generated start URL.";
+  if (!verifiedStartUrl && !warning) {
+    warning = "Zoom did not provide a verified host start URL. The participant link will not be used for Host App.";
   }
 
   if (changed) {
@@ -3645,12 +3911,13 @@ async function ngEnsureHostZoomStartLink(db, session, user) {
   }
 
   return {
-    start_url: session.zoom_start_url || session.host_start_url || null,
+    start_url: verifiedStartUrl,
     join_url: ngManualLiveJoinUrl(session),
     meeting,
     changed,
     warning,
     open_entry,
+    host_url_verified: Boolean(verifiedStartUrl),
   };
 }
 
@@ -3689,14 +3956,27 @@ function findTranscriptFile(recordingFiles = []) {
 
 function findVideoFile(recordingFiles = []) {
   const files = Array.isArray(recordingFiles) ? recordingFiles : [];
+  const videos = files.filter((file) => {
+    const fileType = String(file.file_type || file.file_extension || "").toUpperCase();
+    return fileType.includes("MP4") && String(file.status || "completed").toLowerCase() !== "deleted";
+  });
+  if (!videos.length) return null;
 
-  return (
-    files.find((file) => String(file.file_type || "").toUpperCase() === "MP4") ||
-    files.find((file) => String(file.recording_type || "").toLowerCase().includes("shared_screen")) ||
-    files.find((file) => String(file.file_type || "").toUpperCase().includes("MP4")) ||
-    files[0] ||
-    null
-  );
+  return videos.sort((a, b) => {
+    const score = (file) => {
+      const type = String(file.recording_type || "").toLowerCase();
+      let value = 0;
+      if (type.includes("shared_screen_with_speaker_view")) value += 120;
+      else if (type.includes("shared_screen_with_gallery_view")) value += 115;
+      else if (type.includes("shared_screen")) value += 110;
+      else if (type.includes("active_speaker")) value += 70;
+      else if (type.includes("gallery_view")) value += 60;
+      if (String(file.status || "completed").toLowerCase() === "completed") value += 20;
+      value += Math.min(20, Number(file.file_size || 0) / (50 * 1024 * 1024));
+      return value;
+    };
+    return score(b) - score(a);
+  })[0];
 }
 
 function normalizeRecordingKeyPart(value) {
@@ -3780,6 +4060,78 @@ function findSessionByMeetingIdInNotesOrRecordings(db, meetingId) {
   return session?.id || null;
 }
 
+function ngZoomRecordingSessionEligible(db, session = {}) {
+  if (!session?.id || !session.course_id) return false;
+  const status = String(session.status || "scheduled").toLowerCase();
+  if (["cancelled", "canceled", "archived", "hidden", "deleted"].includes(status)) return false;
+  if (ngSessionIsInternalTestOrHidden(session)) return false;
+  if (ngIsNoClassLiveSession(db, session)) return false;
+  return true;
+}
+
+function ngResolveExactSessionForZoomRecording(db, object = {}, previous = {}) {
+  const meetingId = String(object.id || object.meeting_id || "").trim();
+  if (!meetingId) return { session: null, exact: false, reason: "missing_meeting_id" };
+  const recordingUuid = String(object.uuid || "").trim();
+  const recordingStartMs = new Date(object.start_time || "").getTime();
+  const candidates = Object.values(db.liveSessions || {}).filter((session) => {
+    if (!ngZoomRecordingSessionEligible(db, session)) return false;
+    return String(session.zoom_meeting_id || session.meeting_id || "").trim() === meetingId;
+  });
+
+  if (!candidates.length) return { session: null, exact: false, reason: "no_eligible_session_with_meeting_id" };
+
+  const ranked = candidates.map((session) => {
+    const sessionUuid = String(session.zoom_meeting_uuid || session.meeting_uuid || session.occurrence_uuid || "").trim();
+    const uuidMatch = Boolean(recordingUuid && sessionUuid && recordingUuid === sessionUuid);
+    const start = getSessionStartUtc(session.scheduled_date, session.scheduled_time, session.scheduled_timezone || DEFAULT_TIMEZONE);
+    const startMs = start?.getTime?.() || NaN;
+    const timeDifferenceMs = Number.isFinite(recordingStartMs) && Number.isFinite(startMs)
+      ? Math.abs(recordingStartMs - startMs)
+      : null;
+    const previousMatch = String(previous.session_id || "") === String(session.id);
+    const topic = String(object.topic || "").toLowerCase();
+    const sessionTopic = String(session.topic || session.title || "").toLowerCase();
+    const topicMatch = Boolean(topic && sessionTopic && (topic.includes(sessionTopic.slice(0, 40)) || sessionTopic.includes(topic.slice(0, 40))));
+    let score = uuidMatch ? 1000000 : 0;
+    if (timeDifferenceMs !== null) score += Math.max(0, 200000 - timeDifferenceMs / 1000);
+    if (previousMatch) score += 5000;
+    if (topicMatch) score += 1000;
+    return { session, uuidMatch, timeDifferenceMs, previousMatch, topicMatch, score };
+  }).sort((a, b) => b.score - a.score);
+
+  const best = ranked[0];
+  const second = ranked[1] || null;
+  const maxDifferenceMs = candidates.length > 1 ? 8 * 60 * 60 * 1000 : 12 * 60 * 60 * 1000;
+  const timeMarginMs = best.timeDifferenceMs !== null && second?.timeDifferenceMs !== null
+    ? second.timeDifferenceMs - best.timeDifferenceMs
+    : null;
+  let exact = false;
+  if (best.uuidMatch) exact = true;
+  else if (best.timeDifferenceMs === null) exact = candidates.length === 1;
+  else {
+    const clearlyClosestOccurrence = candidates.length === 1 || second?.timeDifferenceMs === null || Number(timeMarginMs) >= 30 * 60 * 1000;
+    exact = best.timeDifferenceMs <= maxDifferenceMs && clearlyClosestOccurrence;
+  }
+  if (!exact) {
+    return {
+      session: null,
+      exact: false,
+      reason: candidates.length > 1 ? "ambiguous_recurring_meeting_occurrence" : "recording_time_does_not_match_session",
+      candidate_count: candidates.length,
+    };
+  }
+
+  return {
+    session: best.session,
+    exact: true,
+    reason: best.uuidMatch ? "meeting_id_and_uuid" : best.timeDifferenceMs === null ? "unique_meeting_id" : "meeting_id_and_start_time",
+    candidate_count: candidates.length,
+    time_difference_minutes: best.timeDifferenceMs === null ? null : Math.round(best.timeDifferenceMs / 60000),
+    next_candidate_margin_minutes: timeMarginMs === null ? null : Math.round(timeMarginMs / 60000),
+  };
+}
+
 async function fetchZoomRecordingByMeetingId(meetingId) {
   const accessToken = await getZoomAccessToken();
   const encodedMeetingId = encodeURIComponent(String(meetingId || ""));
@@ -3829,6 +4181,23 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
 
   const legacyKey = getLegacyRecordingMeetingKey({ meeting_id: meetingId });
   const previous = db.recordings[recordingKey] || db.recordings[legacyKey] || {};
+  const exactMatch = ngResolveExactSessionForZoomRecording(db, object, previous);
+  const matchedSession = exactMatch.exact ? exactMatch.session : null;
+  const matchedDay = matchedSession ? ngFindRoadmapDayForLiveSession(db, matchedSession) : null;
+  const canAutoPublish = Boolean(
+    matchedSession?.id &&
+    matchedSession.course_id &&
+    videoFile &&
+    String(videoFile.status || "completed").toLowerCase() === "completed" &&
+    !previous.unpublished_at &&
+    previous.auto_publish_disabled !== true
+  );
+  const becamePublished = previous.published !== true && canAutoPublish;
+  const canonicalTopic = ngDayFirstContentTitle(
+    matchedSession?.topic || matchedSession?.title || object.topic || previous.topic || "Live Session Recording",
+    { dayNumber: matchedDay?.day_number || matchedSession?.day_number, system: matchedDay?.system || matchedSession?.system }
+  );
+  const receivedAt = new Date().toISOString();
 
   const recordingPayload = {
     ...previous,
@@ -3836,7 +4205,12 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
     recording_key: recordingKey,
     meeting_id: meetingId,
     uuid: object.uuid || previous.uuid || null,
-    topic: object.topic || previous.topic || null,
+    session_id: matchedSession?.id || previous.session_id || null,
+    course_id: matchedSession?.course_id || previous.course_id || null,
+    roadmap_day_id: matchedDay?.id || matchedSession?.roadmap_day_id || previous.roadmap_day_id || null,
+    day_number: matchedDay?.day_number || matchedSession?.day_number || previous.day_number || null,
+    system: matchedDay?.system || matchedSession?.system || previous.system || null,
+    topic: canonicalTopic || null,
     start_time: object.start_time || previous.start_time || null,
     duration: object.duration || previous.duration || null,
 
@@ -3872,8 +4246,17 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
     recording_type: videoFile?.recording_type || previous.recording_type || null,
     status: videoFile?.status || previous.status || "completed",
 
-    published: Boolean(previous.published),
-    received_at: new Date().toISOString(),
+    published: previous.published === true || canAutoPublish,
+    published_at: previous.published_at || (canAutoPublish ? receivedAt : null),
+    published_by: previous.published_by || (canAutoPublish ? "system:zoom-recording-automation" : null),
+    auto_published: previous.auto_published === true || becamePublished,
+    auto_published_at: previous.auto_published_at || (becamePublished ? receivedAt : null),
+    exact_session_match: exactMatch.exact === true,
+    exact_session_match_reason: exactMatch.reason || null,
+    exact_session_match_time_difference_minutes: exactMatch.time_difference_minutes ?? null,
+    selected_video_file_id: videoFile?.id || previous.selected_video_file_id || null,
+    received_at: previous.received_at || receivedAt,
+    updated_at: receivedAt,
   };
 
   db.recordings[recordingKey] = recordingPayload;
@@ -3887,12 +4270,18 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
     };
   }
 
-  const sessionId =
-    previous.session_id ||
-    findSessionByMeetingIdInNotesOrRecordings(db, meetingId) ||
-    null;
+  const sessionId = matchedSession?.id || null;
 
   if (sessionId) {
+    db.liveSessions[sessionId] = {
+      ...(db.liveSessions[sessionId] || matchedSession),
+      recording_key: recordingKey,
+      recording_url: recordingPayload.recording_url,
+      recording_published: recordingPayload.published === true,
+      recording_published_at: recordingPayload.published_at || null,
+      recording_match_reason: exactMatch.reason || null,
+      updated_at: receivedAt,
+    };
     db.notes[sessionId] = {
       ...(db.notes[sessionId] || {}),
       session_id: sessionId,
@@ -3922,13 +4311,32 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
         ? "zoom_transcript"
         : db.notes[sessionId]?.source || "manual",
       auto_imported: Boolean(transcriptText || db.notes[sessionId]?.auto_imported),
-      updated_at: new Date().toISOString(),
+      recording_key: recordingKey,
+      recording_published: recordingPayload.published === true,
+      updated_at: receivedAt,
     };
+  }
+
+  let emailNotification = null;
+  if (becamePublished && matchedSession?.course_id) {
+    const course = db.courses?.[String(matchedSession.course_id)] || null;
+    emailNotification = ngQueueCourseTemplateEmail(db, {
+      templateKey: "new_recording_published",
+      courseId: matchedSession.course_id,
+      reason: "zoom_recording_auto_published",
+      commonVariables: {
+        recording_title: canonicalTopic || "New Class Recording",
+        course_name: course?.name || "Course",
+        recording_url: "https://live.nextgenusmlelms.com/student/recordings",
+      },
+      dedupeKey: `zoom_recording_auto_published:${recordingKey}`,
+      createdBy: "system:zoom-recording-automation",
+    });
   }
 
   let learningContentResult = null;
 
-  if (sessionId && transcriptText) {
+  if (sessionId && transcriptText && previous.learning_content_processed !== true) {
     try {
       learningContentResult = await ngProcessSessionLearningContent(db, {
         sessionId,
@@ -3965,6 +4373,9 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
     transcriptRaw,
     transcriptImportError,
     learningContentResult,
+    exactMatch,
+    autoPublished: becamePublished,
+    emailNotification,
   };
 }
 
@@ -4732,7 +5143,7 @@ function sanitizeRoadmapDay(day) {
     id: day.id, course_id: day.course_id, week_number: day.week_number, day_number: day.day_number, date: day.date,
     system: day.system || day.chapter || "",
     chapter: day.chapter || day.system || "",
-    title: day.title, description: day.description || "", resources: day.resources || [], resource_links: day.resource_links || [],
+    title: ngDayFirstContentTitle(day.title, { dayNumber: day.day_number, system: day.system || day.chapter }), description: day.description || "", resources: day.resources || [], resource_links: day.resource_links || [],
     uworld_target: day.uworld_target || (qids.length ? qids.join(",") : ""), first_aid_topics: day.first_aid_topics || "", live_teaching_topic: day.live_teaching_topic || "",
     first_aid_pages: day.first_aid_pages || day.fa_pages || null,
     lecture_id: day.lecture_id || null, lecture_title: day.lecture_title || "", video_library_lecture: day.video_library_lecture || day.lecture_title || "",
@@ -5488,12 +5899,15 @@ function isAttemptReleased(attempt) {
 function sanitizeAttemptForStudent(attempt) {
   if (!attempt) return null;
   const released = isAttemptReleased(attempt);
+  const autoReleaseAt = ngAssessmentAttemptAutoReleaseAt(attempt);
   return {
     id: attempt.id,
     assessment_id: attempt.assessment_id,
     course_id: attempt.course_id,
     session_id: attempt.session_id || null,
     submitted_at: attempt.submitted_at || null,
+    auto_release_at: autoReleaseAt,
+    auto_released: attempt.auto_released === true,
     review_status: attempt.review_status || (released ? "released" : "pending_review"),
     released_to_student: released,
     admin_feedback: released ? (attempt.admin_feedback || "") : "",
@@ -5512,7 +5926,10 @@ function sanitizeAttemptForAdmin(attempt, db) {
   const user = db.users?.[attempt.user_id] || null;
   return {
     ...attempt,
-    assessment_title: assessment?.title || attempt.assessment_title || "Assessment",
+    assessment_title: ngDayFirstContentTitle(assessment?.title || attempt.assessment_title || "Assessment", {
+      dayNumber: assessment?.day_number || attempt.day_number,
+      system: assessment?.system || attempt.system,
+    }),
     course_name: course?.name || "Course",
     student_name: user?.name || attempt.user_name || "Student",
     student_email: user?.email || attempt.user_email || "",
@@ -5524,11 +5941,12 @@ function sanitizeAttemptForAdmin(attempt, db) {
 
 function sanitizeAssessmentForStudent(assessment, attempt = null) {
   const released = isAttemptReleased(attempt);
+  const autoReleaseAt = attempt ? ngAssessmentAttemptAutoReleaseAt(attempt) : null;
   return {
     id: assessment.id,
     course_id: assessment.course_id,
     session_id: assessment.session_id || null,
-    title: assessment.title,
+    title: ngDayFirstContentTitle(assessment.title, { dayNumber: assessment.day_number, system: assessment.system }),
     description: assessment.description || "",
     source_type: assessment.source_type || "manual_notes",
     question_count: (assessment.questions || []).length,
@@ -5556,6 +5974,8 @@ function sanitizeAssessmentForStudent(assessment, attempt = null) {
     attempt_percentage: released ? attempt?.percentage ?? null : null,
     admin_feedback: released ? attempt?.admin_feedback || "" : "",
     submitted_at: attempt?.submitted_at || null,
+    auto_release_at: autoReleaseAt,
+    auto_released: attempt?.auto_released === true,
   };
 }
 
@@ -5565,7 +5985,7 @@ function sanitizeAssessmentForTaking(assessment, existingAttempt = null) {
     id: assessment.id,
     course_id: assessment.course_id,
     session_id: assessment.session_id || null,
-    title: assessment.title,
+    title: ngDayFirstContentTitle(assessment.title, { dayNumber: assessment.day_number, system: assessment.system }),
     description: assessment.description || "",
     duration_minutes: assessment.duration_minutes || null,
     block_mode: Boolean(assessment.block_mode),
@@ -5688,6 +6108,83 @@ function applyReleasedAssessmentAttemptToLeaderboard(db, attempt, assessment = n
     userId: attempt.user_id,
     userName: attempt.user_name || "Student",
   });
+}
+
+const NEXTGEN_ASSESSMENT_AUTO_RELEASE_MS = 60 * 1000;
+
+function ngAssessmentAttemptAutoReleaseAt(attempt = {}) {
+  if (attempt.auto_release_at) return attempt.auto_release_at;
+  const submittedMs = new Date(attempt.submitted_at || attempt.created_at || "").getTime();
+  if (!Number.isFinite(submittedMs)) return null;
+  return new Date(submittedMs + NEXTGEN_ASSESSMENT_AUTO_RELEASE_MS).toISOString();
+}
+
+function ngAutoReleaseAssessmentAttemptsInDb(db, { now = new Date(), courseId = "", userId = "", limit = 500 } = {}) {
+  const nowMs = now.getTime();
+  const result = { checked: 0, released: 0, repaired_leaderboards: 0, changed: false, attempt_ids: [] };
+  const attempts = Object.values(db.assessmentAttempts || {})
+    .filter((attempt) => !courseId || String(attempt.course_id || "") === String(courseId))
+    .filter((attempt) => !userId || String(attempt.user_id || "") === String(userId))
+    // Pending attempts go first so a large history of already released results
+    // can never delay a new student's one-minute automatic release.
+    .sort((a, b) => {
+      const releaseDifference = Number(isAttemptReleased(a)) - Number(isAttemptReleased(b));
+      if (releaseDifference) return releaseDifference;
+      return String(a.submitted_at || "").localeCompare(String(b.submitted_at || ""));
+    })
+    .slice(0, Math.max(1, Number(limit || 500)));
+
+  for (const attempt of attempts) {
+    result.checked += 1;
+    if (isAttemptReleased(attempt)) {
+      if (attempt.leaderboard_applied !== true) {
+        applyReleasedAssessmentAttemptToLeaderboard(db, attempt, db.assessments?.[String(attempt.assessment_id || "")]);
+        result.repaired_leaderboards += 1;
+        result.changed = true;
+      }
+      continue;
+    }
+
+    const autoReleaseAt = ngAssessmentAttemptAutoReleaseAt(attempt);
+    if (!autoReleaseAt) continue;
+    if (!attempt.auto_release_at) {
+      attempt.auto_release_at = autoReleaseAt;
+      result.changed = true;
+    }
+    const releaseMs = new Date(autoReleaseAt).getTime();
+    if (!Number.isFinite(releaseMs) || nowMs < releaseMs) continue;
+
+    const releasedAt = now.toISOString();
+    attempt.review_status = "released";
+    attempt.released_to_student = true;
+    attempt.reviewed_by = attempt.reviewed_by || "system:assessment-auto-release";
+    attempt.reviewed_at = attempt.reviewed_at || releasedAt;
+    attempt.released_at = attempt.released_at || releasedAt;
+    attempt.auto_released = true;
+    attempt.auto_released_at = attempt.auto_released_at || releasedAt;
+    attempt.release_source = attempt.release_source || "automatic_60_second_release";
+    applyReleasedAssessmentAttemptToLeaderboard(db, attempt, db.assessments?.[String(attempt.assessment_id || "")]);
+    db.assessmentAttempts[attempt.id] = attempt;
+    result.released += 1;
+    result.changed = true;
+    result.attempt_ids.push(attempt.id);
+  }
+
+  return result;
+}
+
+function ngScheduleAssessmentAutoRelease(attempt = {}) {
+  const autoReleaseAt = ngAssessmentAttemptAutoReleaseAt(attempt);
+  const releaseMs = new Date(autoReleaseAt || "").getTime();
+  if (!attempt.id || !Number.isFinite(releaseMs)) return { scheduled: false, reason: "missing_release_time" };
+  const delayMs = Math.max(0, Math.min(2147000000, releaseMs - Date.now() + 250));
+  const timer = setTimeout(() => {
+    ngRunAssessmentAutoReleaseTick(`attempt_due:${attempt.id}`).catch((error) => {
+      console.error("Scheduled assessment auto-release failed:", error.message);
+    });
+  }, delayMs);
+  if (typeof timer.unref === "function") timer.unref();
+  return { scheduled: true, auto_release_at: autoReleaseAt, delay_ms: delayMs };
 }
 
 
@@ -6027,6 +6524,67 @@ const NEXTGEN_ADAPTIVE_SYSTEMS = [
   "Biochemistry", "Microbiology", "Pharmacology", "Ethics", "Biostatistics"
 ];
 
+function ngAdaptiveSystemName(value = "") {
+  const raw = String(value || "").trim();
+  const clean = raw.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  if (!clean) return null;
+  const mapped = ngNormalizeMasterMapSystemName(raw);
+  const direct = NEXTGEN_ADAPTIVE_SYSTEMS.find((system) => system.toLowerCase() === String(mapped || "").toLowerCase());
+  if (direct) return direct;
+  if (clean.includes("biochem") || clean.includes("molecular") || clean.includes("genetic")) return "Biochemistry";
+  if (clean.includes("micro") || clean.includes("bacter") || clean.includes("virus") || clean.includes("fung")) return "Microbiology";
+  if (clean.includes("pharm") || clean.includes("drug")) return "Pharmacology";
+  if (clean.includes("ethic") || clean.includes("communication") || clean.includes("legal")) return "Ethics";
+  if (clean.includes("biostat") || clean.includes("epidemi") || clean.includes("study design") || clean === "statistics") return "Biostatistics";
+  return null;
+}
+
+function ngIsBaselineAssessment(assessment = {}) {
+  const raw = `${assessment.assessment_type || ""} ${assessment.source_type || ""} ${assessment.title || ""}`.toLowerCase();
+  return assessment.adaptive_baseline === true || raw.includes("baseline") || raw.includes("diagnostic");
+}
+
+function ngAssessmentSystemCoverage(assessment = {}) {
+  const questions = Array.isArray(assessment.questions) ? assessment.questions : [];
+  const counts = Object.fromEntries(NEXTGEN_ADAPTIVE_SYSTEMS.map((system) => [system, 0]));
+  const unrecognized = [];
+  for (const question of questions) {
+    const rawSystem = ngAssessmentSystemFromQuestion(question, assessment.system || "");
+    const system = ngAdaptiveSystemName(rawSystem);
+    if (system) counts[system] += 1;
+    else if (rawSystem) unrecognized.push(String(rawSystem));
+  }
+  const minimumPerSystem = questions.length >= NEXTGEN_ADAPTIVE_SYSTEMS.length * 2 ? 2 : 1;
+  const missingSystems = NEXTGEN_ADAPTIVE_SYSTEMS.filter((system) => counts[system] === 0);
+  const underrepresentedSystems = NEXTGEN_ADAPTIVE_SYSTEMS.filter((system) => counts[system] < minimumPerSystem);
+  return {
+    expected_systems: NEXTGEN_ADAPTIVE_SYSTEMS,
+    expected_system_count: NEXTGEN_ADAPTIVE_SYSTEMS.length,
+    covered_system_count: NEXTGEN_ADAPTIVE_SYSTEMS.length - missingSystems.length,
+    minimum_questions_per_system: minimumPerSystem,
+    all_systems_covered: missingSystems.length === 0,
+    diagnostic_coverage_ready: underrepresentedSystems.length === 0,
+    counts,
+    missing_systems: missingSystems,
+    underrepresented_systems: underrepresentedSystems,
+    unrecognized_system_labels: Array.from(new Set(unrecognized)).slice(0, 20),
+  };
+}
+
+function ngAttemptSystemStats(attempt = {}, assessment = {}) {
+  const stats = {};
+  for (const row of Array.isArray(attempt.graded_answers) ? attempt.graded_answers : []) {
+    const system = ngAdaptiveSystemName(row.system || assessment.system || row.topic || "") || ngNormalizeMasterMapSystemName(row.system || assessment.system || row.topic || "General") || "General";
+    stats[system] = stats[system] || { system, correct: 0, total: 0, mastery: 0 };
+    stats[system].total += 1;
+    if (row.is_correct === true) stats[system].correct += 1;
+  }
+  for (const item of Object.values(stats)) {
+    item.mastery = item.total ? Math.round((item.correct / item.total) * 100) : 0;
+  }
+  return stats;
+}
+
 const NEXTGEN_DEFAULT_ADAPTIVE_SETTINGS = {
   required_daily_flashcards: 15,
   adaptive_daily_flashcards: 5,
@@ -6146,18 +6704,33 @@ function ngUpdateWeakAreaProfileFromAttempt(db, { assessment, attempt, user }) {
   if (!courseId) return null;
   const profile = ngEnsureWeakAreaProfile(db, { courseId, user, existingStudent: true });
   const graded = Array.isArray(attempt.graded_answers) ? attempt.graded_answers : [];
+  const systemStats = ngAttemptSystemStats(attempt, assessment);
+  const baselineAttempt = ngIsBaselineAssessment(assessment);
   const topicStats = {};
-  for (const row of graded) {
-    const system = ngNormalizeMasterMapSystemName(row.system || assessment.system || row.topic || "General") || "General";
-    const topic = String(row.topic || system || "General").trim();
+
+  // Update each system once from the complete system result. The previous
+  // per-question update captured baseline_mastery after the first question.
+  for (const stat of Object.values(systemStats)) {
+    const system = stat.system || "General";
     const item = profile.systems[system] || ngEmptySystemProfile(system);
-    item.questions_attempted = Number(item.questions_attempted || 0) + 1;
-    if (row.is_correct) item.correct = Number(item.correct || 0) + 1;
-    item.current_mastery = item.questions_attempted ? Math.round((Number(item.correct || 0) / Number(item.questions_attempted || 1)) * 100) : null;
-    if (item.baseline_mastery === null || item.baseline_mastery === undefined) item.baseline_mastery = item.current_mastery;
-    item.improvement = Number(item.current_mastery || 0) - Number(item.baseline_mastery || 0);
+    item.questions_attempted = Number(item.questions_attempted || 0) + Number(stat.total || 0);
+    item.correct = Number(item.correct || 0) + Number(stat.correct || 0);
+    item.current_mastery = item.questions_attempted
+      ? Math.round((Number(item.correct || 0) / Number(item.questions_attempted || 1)) * 100)
+      : null;
+    if (baselineAttempt && (item.baseline_mastery === null || item.baseline_mastery === undefined)) {
+      item.baseline_mastery = stat.mastery;
+    }
+    item.improvement = item.baseline_mastery === null || item.baseline_mastery === undefined
+      ? 0
+      : Number(item.current_mastery || 0) - Number(item.baseline_mastery || 0);
     item.updated_at = new Date().toISOString();
     profile.systems[system] = item;
+  }
+
+  for (const row of graded) {
+    const system = ngAdaptiveSystemName(row.system || assessment.system || row.topic || "") || ngNormalizeMasterMapSystemName(row.system || assessment.system || row.topic || "General") || "General";
+    const topic = String(row.topic || system || "General").trim();
     topicStats[topic] = topicStats[topic] || { topic, system, correct: 0, total: 0 };
     topicStats[topic].total += 1;
     if (row.is_correct) topicStats[topic].correct += 1;
@@ -6174,9 +6747,10 @@ function ngUpdateWeakAreaProfileFromAttempt(db, { assessment, attempt, user }) {
   }
   profile.last_assessment_id = assessment.id;
   profile.last_attempt_id = attempt.id;
-  profile.baseline_status = profile.baseline_status === "not_started" ? "started" : profile.baseline_status;
+  profile.baseline_status = baselineAttempt ? "completed" : (profile.baseline_status === "not_started" ? "started" : profile.baseline_status);
   profile.updated_at = new Date().toISOString();
   db.weakAreaProfiles[profile.id] = profile;
+  ngRepairWeakAreaBaselineMasteryFromAttempts(db, { courseId, userId: user.id, profile });
   db.weakAreaHistory = db.weakAreaHistory || {};
   const historyId = `${profile.id}:${attempt.id}`;
   db.weakAreaHistory[historyId] = {
@@ -6186,10 +6760,50 @@ function ngUpdateWeakAreaProfileFromAttempt(db, { assessment, attempt, user }) {
     assessment_id: assessment.id,
     attempt_id: attempt.id,
     percentage: attempt.percentage,
-    systems: profile.systems,
+    systems: JSON.parse(JSON.stringify(profile.systems || {})),
     created_at: new Date().toISOString(),
   };
   return profile;
+}
+
+function ngRepairWeakAreaBaselineMasteryFromAttempts(db, { courseId, userId, profile = null } = {}) {
+  const cleanCourseId = String(courseId || "").trim();
+  const cleanUserId = String(userId || "").trim();
+  const target = profile || db.weakAreaProfiles?.[ngWeakProfileKey(cleanCourseId, cleanUserId)] || null;
+  if (!target || !cleanCourseId || !cleanUserId) return { changed: false, reason: "missing_profile" };
+
+  const baselineAttempts = Object.values(db.assessmentAttempts || {})
+    .filter((attempt) => String(attempt.course_id || "") === cleanCourseId && String(attempt.user_id || "") === cleanUserId)
+    .map((attempt) => ({ attempt, assessment: db.assessments?.[String(attempt.assessment_id || "")] || null }))
+    .filter(({ assessment }) => ngIsBaselineAssessment(assessment || {}))
+    .sort((a, b) => String(a.attempt.submitted_at || "").localeCompare(String(b.attempt.submitted_at || "")));
+
+  const first = baselineAttempts[0];
+  if (!first) return { changed: false, reason: "no_baseline_attempt" };
+  const stats = ngAttemptSystemStats(first.attempt, first.assessment || {});
+  let changed = false;
+  for (const stat of Object.values(stats)) {
+    const item = target.systems?.[stat.system] || ngEmptySystemProfile(stat.system);
+    if (Number(item.baseline_mastery) !== Number(stat.mastery) || item.baseline_mastery === null || item.baseline_mastery === undefined) {
+      item.baseline_mastery = stat.mastery;
+      changed = true;
+    }
+    item.improvement = item.current_mastery === null || item.current_mastery === undefined
+      ? 0
+      : Number(item.current_mastery || 0) - Number(item.baseline_mastery || 0);
+    target.systems[stat.system] = item;
+  }
+  if (target.baseline_status !== "completed") {
+    target.baseline_status = "completed";
+    changed = true;
+  }
+  if (changed) {
+    target.baseline_mastery_repaired_at = new Date().toISOString();
+    target.baseline_mastery_repair_source_attempt_id = first.attempt.id;
+    target.updated_at = new Date().toISOString();
+  }
+  db.weakAreaProfiles[target.id] = target;
+  return { changed, attempt_id: first.attempt.id, systems_repaired: Object.keys(stats).length };
 }
 
 function ngSanitizeWeakAreaProfile(profile, settings = NEXTGEN_DEFAULT_ADAPTIVE_SETTINGS) {
@@ -7107,9 +7721,31 @@ function ngCreateDefaultBaselineQuestions({ courseName = "NextGen USMLE", totalQ
     }
 ];
   const wanted = Math.max(1, Math.min(80, Number(totalQuestions || 40)));
+  const bySystem = new Map(NEXTGEN_ADAPTIVE_SYSTEMS.map((system) => [system, []]));
+  for (const question of bank) {
+    const system = ngAdaptiveSystemName(question.system) || question.system;
+    if (!bySystem.has(system)) bySystem.set(system, []);
+    bySystem.get(system).push(question);
+  }
+  const balancedBank = [];
+  let round = 0;
+  while (balancedBank.length < bank.length) {
+    let added = 0;
+    for (const system of NEXTGEN_ADAPTIVE_SYSTEMS) {
+      const question = bySystem.get(system)?.[round];
+      if (!question) continue;
+      balancedBank.push(question);
+      added += 1;
+    }
+    if (!added) break;
+    round += 1;
+  }
+  for (const question of bank) {
+    if (!balancedBank.includes(question)) balancedBank.push(question);
+  }
   const out = [];
   for (let i = 0; i < wanted; i += 1) {
-    const q = bank[i % bank.length];
+    const q = balancedBank[i % balancedBank.length];
     out.push({
       id: `baseline_q${i + 1}`,
       stem: q.stem,
@@ -7154,6 +7790,7 @@ function ngEnsureBaselineAssessmentTemplate(db, { courseId, creatorId = "system"
     duration_per_block_minutes: settings.baseline_duration_per_block_minutes || 30,
   });
   const id = uuid();
+  const questions = ngCreateDefaultBaselineQuestions({ courseName: course.name || course.title || "NextGen USMLE", totalQuestions: cfg.total_questions });
   const assessment = ngApplyAssessmentBlockMetadata({
     id,
     course_id: String(courseId),
@@ -7164,7 +7801,8 @@ function ngEnsureBaselineAssessmentTemplate(db, { courseId, creatorId = "system"
     adaptive_baseline: true,
     system: "Mixed Systems",
     topic: "Baseline diagnostic",
-    questions: ngCreateDefaultBaselineQuestions({ courseName: course.name || course.title || "NextGen USMLE", totalQuestions: cfg.total_questions }),
+    questions,
+    system_coverage: ngAssessmentSystemCoverage({ questions }),
     is_published: true,
     created_by: creatorId,
     updated_by: creatorId,
@@ -9583,10 +10221,10 @@ app.post("/admin/live-sessions/:sessionId/host-start-link", async (req, res) => 
     const startUrl = result.start_url || null;
     const joinUrl = result.join_url || null;
 
-    if (!startUrl && !joinUrl) {
+    if (!startUrl || result.host_url_verified !== true) {
       return res.status(400).json({
         success: false,
-        error: result.warning || "No Zoom host or join URL is available for this session.",
+        error: result.warning || "A verified Zoom host start URL is not available for this session.",
         session: sanitizeLiveSession(session),
       });
     }
@@ -9600,12 +10238,11 @@ app.post("/admin/live-sessions/:sessionId/host-start-link", async (req, res) => 
       zoom_start_url: startUrl,
       join_url: joinUrl,
       zoom_join_url: joinUrl,
+      host_url_verified: true,
       meeting_id: session.zoom_meeting_id || null,
       password: session.meeting_password || null,
       warning: result.warning || null,
-      message: startUrl
-        ? "Open this link on the mentor iPad to launch the Zoom app as host for screen sharing."
-        : "Only participant join link is available. Use it in the Zoom app; true host start URL was not available.",
+      message: "Open this verified host link on the mentor iPad to launch the Zoom app as host for screen sharing.",
     });
   } catch (e) {
     res.status(e.statusCode || e.response?.status || 500).json({
@@ -11901,8 +12538,32 @@ app.get("/zoom/zak", async (req, res) => { try { const token = await getZoomAcce
 app.post("/zoom/generate-signature", async (req, res) => { try { const { meetingNumber, role } = req.body; const iat = Math.round(Date.now() / 1000) - 30; const exp = iat + 60 * 60 * 2; const signature = jwt.sign({ sdkKey: process.env.ZOOM_MEETING_SDK_KEY, mn: meetingNumber, role, iat, exp, appKey: process.env.ZOOM_MEETING_SDK_KEY, tokenExp: exp }, process.env.ZOOM_MEETING_SDK_SECRET, { algorithm: "HS256" }); res.json({ signature }); } catch (e) { res.status(500).json({ error: e.message }); } });
 app.post("/zoom/create-meeting", async (req, res) => { try { const token = await getZoomAccessToken(); const response = await axios.post("https://api.zoom.us/v2/users/me/meetings", { topic: req.body.topic, type: 2, start_time: req.body.start_time, duration: req.body.duration || DEFAULT_ZOOM_DURATION_MINUTES, timezone: req.body.timezone || DEFAULT_TIMEZONE, settings: { host_video: true, participant_video: true, join_before_host: true, waiting_room: false, auto_recording: "cloud" } }, { headers: { Authorization: `Bearer ${token}` } }); res.json({ success: true, meeting: response.data }); } catch (e) { res.status(500).json({ success: false, error: e.response?.data || e.message }); } });
 
+function ngVerifyZoomWebhookRequest(req) {
+  const secret = String(process.env.ZOOM_WEBHOOK_SECRET_TOKEN || "").trim();
+  if (!secret) return { valid: false, status: 503, error: "ZOOM_WEBHOOK_SECRET_TOKEN is not configured." };
+  const timestamp = String(req.headers["x-zm-request-timestamp"] || "").trim();
+  const provided = String(req.headers["x-zm-signature"] || "").trim();
+  const rawBody = Buffer.isBuffer(req.zoomRawBody) ? req.zoomRawBody.toString("utf8") : "";
+  const timestampMs = Number(timestamp) * 1000;
+  if (!timestamp || !provided || !rawBody || !Number.isFinite(timestampMs)) {
+    return { valid: false, status: 401, error: "Zoom webhook signature headers are missing." };
+  }
+  if (Math.abs(Date.now() - timestampMs) > 5 * 60 * 1000) {
+    return { valid: false, status: 401, error: "Zoom webhook timestamp is outside the allowed window." };
+  }
+  const expected = `v0=${crypto.createHmac("sha256", secret).update(`v0:${timestamp}:${rawBody}`).digest("hex")}`;
+  const expectedBuffer = Buffer.from(expected);
+  const providedBuffer = Buffer.from(provided);
+  const valid = expectedBuffer.length === providedBuffer.length && crypto.timingSafeEqual(expectedBuffer, providedBuffer);
+  return valid ? { valid: true } : { valid: false, status: 401, error: "Invalid Zoom webhook signature." };
+}
+
 app.post("/zoom/webhook", async (req, res) => {
   try {
+    const verification = ngVerifyZoomWebhookRequest(req);
+    if (!verification.valid) {
+      return res.status(verification.status || 401).json({ success: false, error: verification.error });
+    }
     const event = req.body.event;
 
     if (event === "endpoint.url_validation") {
@@ -11936,6 +12597,9 @@ app.post("/zoom/webhook", async (req, res) => {
         transcript_imported: Boolean(result.transcriptText),
         transcript_url: result.recordingPayload.transcript_url,
         session_id: result.sessionId,
+        exact_session_match: result.exactMatch?.exact === true,
+        exact_session_match_reason: result.exactMatch?.reason || null,
+        auto_published: result.autoPublished === true,
       });
     }
 
@@ -11943,8 +12607,8 @@ app.post("/zoom/webhook", async (req, res) => {
   } catch (e) {
     console.error("Zoom webhook error:", e.response?.data || e.message);
 
-    // Return 200 so Zoom does not keep retrying forever for app-side errors.
-    res.status(200).json({
+    // A non-2xx response lets Zoom retry temporary processing failures.
+    res.status(e.statusCode || 500).json({
       success: false,
       error: e.response?.data || e.message,
     });
@@ -13319,6 +13983,11 @@ app.get("/student/weak-area-profile", async (req, res) => {
       markReminderSeen: false,
       existingStudent: !ngEnrollmentLooksNew(enrollment),
     });
+    const baselineMasteryRepair = ngRepairWeakAreaBaselineMasteryFromAttempts(db, {
+      courseId,
+      userId: user.id,
+      profile: onboarding.profile,
+    });
     await writeLiveDb(db);
 
     res.json({
@@ -13327,6 +13996,7 @@ app.get("/student/weak-area-profile", async (req, res) => {
       assignment: onboarding.assignment,
       baseline_assessment: onboarding.baseline_assessment ? sanitizeAssessmentForStudent(onboarding.baseline_assessment, onboarding.attempt) : null,
       settings: ngGetAdaptiveSettings(db, courseId),
+      baseline_mastery_repair: baselineMasteryRepair,
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
@@ -13356,8 +14026,13 @@ app.get(["/student/adaptive/onboarding", "/student/baseline/status", "/student/b
 
     if (!automaticAllowed) {
       const profile = ngEnsureWeakAreaProfile(db, { courseId, user, existingStudent: !isNew });
+      const baselineMasteryRepair = ngRepairWeakAreaBaselineMasteryFromAttempts(db, {
+        courseId,
+        userId: user.id,
+        profile,
+      });
       await writeLiveDb(db);
-      return res.json({ success: true, automatic: false, profile: ngSanitizeWeakAreaProfile(profile, settings), assignment: null, notification: null, settings });
+      return res.json({ success: true, automatic: false, profile: ngSanitizeWeakAreaProfile(profile, settings), assignment: null, notification: null, settings, baseline_mastery_repair: baselineMasteryRepair });
     }
 
     const result = ngEnsureBaselineOnboarding(db, {
@@ -13367,6 +14042,12 @@ app.get(["/student/adaptive/onboarding", "/student/baseline/status", "/student/b
       source: isDemo ? "demo_onboarding" : isNew ? "new_student_onboarding" : "existing_student_auto_onboarding",
       markReminderSeen: req.query.preview !== "true",
       existingStudent: !isNew,
+    });
+
+    const baselineMasteryRepair = ngRepairWeakAreaBaselineMasteryFromAttempts(db, {
+      courseId,
+      userId: user.id,
+      profile: result.profile,
     });
 
     await writeLiveDb(db);
@@ -13379,6 +14060,7 @@ app.get(["/student/adaptive/onboarding", "/student/baseline/status", "/student/b
       baseline_assessment: result.baseline_assessment ? sanitizeAssessmentForStudent(result.baseline_assessment, result.attempt) : null,
       notification: result.notification,
       settings,
+      baseline_mastery_repair: baselineMasteryRepair,
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
@@ -13429,6 +14111,7 @@ app.get(["/admin/adaptive/baseline-audit", "/admin/baseline/status", "/admin/bas
     const courseId = String(req.query.course_id || req.query.courseId || "").trim();
     if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
     const baseline = ngFindBaselineAssessment(db, { courseId });
+    const coverage = baseline ? ngAssessmentSystemCoverage(baseline) : null;
     const activeEnrollments = Object.values(db.enrollments || {}).filter((enrollment) => {
       if (String(enrollment.course_id || "") !== courseId) return false;
       if (enrollment.access_granted === false) return false;
@@ -13456,7 +14139,13 @@ app.get(["/admin/adaptive/baseline-audit", "/admin/baseline/status", "/admin/bas
       course_id: courseId,
       baseline_exists: Boolean(baseline?.id),
       baseline_assessment: baseline ? sanitizeAssessmentForStudent(baseline, null) : null,
-      message: baseline?.id ? "Baseline diagnostic exists." : "Baseline diagnostic missing — Generate now.",
+      baseline_coverage: coverage,
+      coverage_ready: Boolean(coverage?.diagnostic_coverage_ready),
+      message: baseline?.id
+        ? coverage?.diagnostic_coverage_ready
+          ? `Baseline diagnostic covers all ${coverage.expected_system_count} systems.`
+          : `Baseline exists but needs coverage correction for: ${(coverage?.underrepresented_systems || []).join(", ") || "unknown systems"}.`
+        : "Baseline diagnostic missing — Generate now.",
       enrolled_students: rows.length,
       pending_count: rows.filter((row) => !row.completed).length,
       completed_count: rows.filter((row) => row.completed).length,
@@ -13478,15 +14167,19 @@ app.post(["/admin/adaptive/generate-baseline-diagnostic", "/admin/baseline/gener
     if (existing?.id && req.body.force_new !== true) {
       const repair = ngRepairBaselineAssessmentAnswerKeyIfNeeded(db, existing, { force: req.body.repair_answer_key === true });
       if (repair.changed) await writeLiveDb(db);
+      const coverage = ngAssessmentSystemCoverage(existing);
       return res.json({
         success: true,
         created: false,
         repaired: repair.changed === true,
         repair,
+        coverage,
         assessment: existing,
         message: repair.changed
           ? "Existing baseline diagnostic was repaired: answer choices were shuffled and corrupted attempts were archived for retake."
-          : "Baseline diagnostic already exists for this course."
+          : coverage.diagnostic_coverage_ready
+            ? `Baseline diagnostic already exists and covers all ${coverage.expected_system_count} systems.`
+            : `Baseline diagnostic exists but is underrepresented in: ${coverage.underrepresented_systems.join(", ")}. Existing attempts were preserved; create a corrected version only after reviewing this audit.`
       });
     }
     const cfg = ngNormalizeAssessmentBlockConfig({
@@ -13495,6 +14188,12 @@ app.post(["/admin/adaptive/generate-baseline-diagnostic", "/admin/baseline/gener
       questions_per_block: req.body.questions_per_block ?? settings.baseline_questions_per_block,
       duration_per_block_minutes: req.body.duration_per_block_minutes ?? settings.baseline_duration_per_block_minutes,
     });
+    if (cfg.total_questions < NEXTGEN_ADAPTIVE_SYSTEMS.length) {
+      return res.status(400).json({
+        success: false,
+        error: `Baseline diagnostic needs at least ${NEXTGEN_ADAPTIVE_SYSTEMS.length} questions so every configured system can be measured.`,
+      });
+    }
     const sourceText = String(req.body.source_text || ngBaselineSourceTextForCourse(db, { courseId }) || "").trim();
     let questions = [];
     let warnings = [];
@@ -13556,6 +14255,16 @@ app.post(["/admin/adaptive/generate-baseline-diagnostic", "/admin/baseline/gener
       warnings.push("v177d baseline USMLE-style quality guard: unsafe answer-key distribution detected, so the baseline was replaced with the corrected randomized USMLE-style baseline diagnostic.");
     }
 
+    let coverage = ngAssessmentSystemCoverage({ questions });
+    if (!coverage.diagnostic_coverage_ready) {
+      questions = ngCreateDefaultBaselineQuestions({
+        courseName: baselineCourseName,
+        totalQuestions: expectedBaselineQuestions,
+      });
+      coverage = ngAssessmentSystemCoverage({ questions });
+      warnings.push(`v191 system-coverage guard replaced an incomplete generated baseline so all ${coverage.expected_system_count} configured systems are diagnosed.`);
+    }
+
     const id = uuid();
     const assessment = ngApplyAssessmentBlockMetadata({
       id,
@@ -13575,12 +14284,13 @@ app.post(["/admin/adaptive/generate-baseline-diagnostic", "/admin/baseline/gener
       updated_at: new Date().toISOString(),
       ai_usage: aiUsage,
       ai_model: aiModel,
+      system_coverage: coverage,
       warnings,
     }, cfg);
     assessment.published_at = assessment.is_published ? new Date().toISOString() : null;
     db.assessments[id] = assessment;
     await writeLiveDb(db);
-    res.json({ success: true, created: true, assessment, warnings, published: assessment.is_published, message: assessment.is_published ? "Baseline diagnostic generated and published." : "Baseline diagnostic draft created. Add questions before publishing." });
+    res.json({ success: true, created: true, assessment, coverage, warnings, published: assessment.is_published, message: assessment.is_published ? `Baseline diagnostic generated and published with ${coverage.covered_system_count}/${coverage.expected_system_count} systems covered.` : "Baseline diagnostic draft created. Add questions before publishing." });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -13717,7 +14427,7 @@ app.post("/admin/assessments/create", async (req, res) => {
     res.status(e.statusCode || 500).json({ success: false, error: e.message });
   }
 });
-app.get("/admin/assessments", async (req, res) => { try { await requireLmsPermission(req, "lms.assessments.view"); const db = await readLiveDb(); let items = Object.values(db.assessments || {}); if (req.query.course_id) items = items.filter((a) => String(a.course_id) === String(req.query.course_id)); if (req.query.session_id) items = items.filter((a) => String(a.session_id || "") === String(req.query.session_id)); items.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || ""))); res.json({ success: true, count: items.length, assessments: items }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.get("/admin/assessments", async (req, res) => { try { await requireLmsPermission(req, "lms.assessments.view"); const db = await readLiveDb(); let items = Object.values(db.assessments || {}); if (req.query.course_id) items = items.filter((a) => String(a.course_id) === String(req.query.course_id)); if (req.query.session_id) items = items.filter((a) => String(a.session_id || "") === String(req.query.session_id)); items.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || ""))); items = items.map((assessment) => ({ ...assessment, title: ngDayFirstContentTitle(assessment.title, { dayNumber: assessment.day_number, system: assessment.system }) })); res.json({ success: true, count: items.length, assessments: items }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.get("/admin/assessments/:assessmentId", async (req, res) => { try { await requireLmsPermission(req, "lms.assessments.view"); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a) return res.status(404).json({ success: false, error: "Assessment not found" }); res.json({ success: true, assessment: a }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.patch("/admin/assessments/:assessmentId", async (req, res) => {
   try {
@@ -13833,11 +14543,18 @@ app.get("/student/assessments", async (req, res) => {
       return ngBlockLockedFeature(res, "assessments", access.reason);
     }
 
+    const autoRelease = ngAutoReleaseAssessmentAttemptsInDb(db, {
+      courseId,
+      userId: user.id,
+      limit: 100,
+    });
+    if (autoRelease.changed) await writeLiveDb(db);
+
     const items = Object.values(db.assessments || {})
       .filter((assessment) => String(assessment.course_id) === String(courseId) && assessment.is_published)
       .map((assessment) => sanitizeAssessmentForStudent(assessment, db.assessmentAttempts[assessmentAttemptKey(assessment.id, user.id)]));
 
-    res.json({ success: true, count: items.length, assessments: items });
+    res.json({ success: true, count: items.length, assessments: items, auto_release: autoRelease });
   } catch (e) {
     res.status(e.statusCode || 500).json({ success: false, error: e.message });
   }
@@ -13874,8 +14591,13 @@ app.get("/student/assessments/:assessmentId/take", async (req, res) => {
       return ngBlockLockedFeature(res, "assessments", access.reason);
     }
 
+    const autoRelease = ngAutoReleaseAssessmentAttemptsInDb(db, {
+      courseId: assessment.course_id,
+      userId: user.id,
+      limit: 20,
+    });
     const repair = ngRepairBaselineAssessmentAnswerKeyIfNeeded(db, assessment);
-    if (repair.changed) await writeLiveDb(db);
+    if (repair.changed || autoRelease.changed) await writeLiveDb(db);
 
     const existingAttempt = db.assessmentAttempts[assessmentAttemptKey(assessment.id, user.id)] || null;
 
@@ -13883,6 +14605,7 @@ app.get("/student/assessments/:assessmentId/take", async (req, res) => {
       success: true,
       assessment: sanitizeAssessmentForTaking(assessment, existingAttempt),
       existing_attempt: existingAttempt ? sanitizeAttemptForStudent(existingAttempt) : null,
+      auto_release: autoRelease,
     });
   } catch (e) {
     res.status(e.statusCode || 500).json({ success: false, error: e.message });
@@ -13897,10 +14620,20 @@ app.get(["/admin/weak-area-profile", "/admin/weak-areas"], async (req, res) => {
     const courseId = String(req.query.course_id || req.query.courseId || "").trim();
     if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
     const settings = ngGetAdaptiveSettings(db, courseId);
-    const profiles = Object.values(db.weakAreaProfiles || {})
-      .filter((profile) => String(profile.course_id || "") === courseId)
-      .map((profile) => ngSanitizeWeakAreaProfile(profile, settings));
-    res.json({ success: true, course_id: courseId, count: profiles.length, profiles });
+    const storedProfiles = Object.values(db.weakAreaProfiles || {})
+      .filter((profile) => String(profile.course_id || "") === courseId);
+    let repairedProfiles = 0;
+    for (const profile of storedProfiles) {
+      const repair = ngRepairWeakAreaBaselineMasteryFromAttempts(db, {
+        courseId,
+        userId: profile.user_id,
+        profile,
+      });
+      if (repair.changed) repairedProfiles += 1;
+    }
+    if (repairedProfiles > 0) await writeLiveDb(db);
+    const profiles = storedProfiles.map((profile) => ngSanitizeWeakAreaProfile(profile, settings));
+    res.json({ success: true, course_id: courseId, count: profiles.length, profiles, baseline_profiles_repaired: repairedProfiles });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -13976,6 +14709,7 @@ app.post("/student/assessments/:assessmentId/submit", async (req, res) => {
       by_topic: graded.by_topic || {},
       graded_answers: graded.graded,
       submitted_at: now,
+      auto_release_at: new Date(new Date(now).getTime() + NEXTGEN_ASSESSMENT_AUTO_RELEASE_MS).toISOString(),
       auto_submitted: Boolean(req.body.auto_submitted),
       review_status: "pending_review",
       released_to_student: false,
@@ -13999,6 +14733,10 @@ app.post("/student/assessments/:assessmentId/submit", async (req, res) => {
       maxTargets: 6,
       cardsPerTarget: 3,
     }).catch((error) => ({ created: 0, error: error.message }));
+    attempt.weak_flashcard_sync_status = weak_flashcard_sync?.error ? "retry_pending" : "completed";
+    attempt.weak_flashcard_sync_created = Number(weak_flashcard_sync?.created || 0);
+    attempt.weak_flashcard_sync_error = weak_flashcard_sync?.error || null;
+    attempt.weak_flashcard_sync_updated_at = new Date().toISOString();
 
     if (assessment.adaptive_baseline === true || String(assessment.assessment_type || assessment.source_type || "").toLowerCase().includes("baseline")) {
       ngEnsureBaselineOnboarding(db, {
@@ -14043,12 +14781,14 @@ app.post("/student/assessments/:assessmentId/submit", async (req, res) => {
     }
 
     await writeLiveDb(db);
+    const auto_release_schedule = ngScheduleAssessmentAutoRelease(attempt);
 
     res.json({
       success: true,
-      message: "Assessment submitted. Result is under admin review.",
+      message: "Assessment submitted. Your result will release automatically in one minute.",
       attempt: sanitizeAttemptForStudent(attempt),
       weak_flashcard_sync,
+      auto_release_schedule,
     });
   } catch (e) {
     res.status(e.statusCode || 500).json({ success: false, error: e.message });
@@ -14059,6 +14799,8 @@ app.get("/admin/assessments/report/:courseId", async (req, res) => {
   try {
     await requireLmsPermission(req, "lms.assessments.review_attempts");
     const db = await readLiveDb();
+    const autoRelease = ngAutoReleaseAssessmentAttemptsInDb(db, { courseId: req.params.courseId, limit: 1000 });
+    if (autoRelease.changed) await writeLiveDb(db);
     const assessments = Object.values(db.assessments || {}).filter((assessment) => String(assessment.course_id) === String(req.params.courseId));
     const attempts = Object.values(db.assessmentAttempts || {}).filter((attempt) => String(attempt.course_id) === String(req.params.courseId));
 
@@ -14085,6 +14827,7 @@ app.get("/admin/assessments/report/:courseId", async (req, res) => {
       attempts_count: attempts.length,
       pending_review_count: attempts.filter((attempt) => !attempt.released_to_student && attempt.review_status !== "released").length,
       reports,
+      auto_release: autoRelease,
     });
   } catch (e) {
     res.status(e.statusCode || 500).json({ success: false, error: e.message });
@@ -14097,6 +14840,8 @@ app.get("/admin/assessment-attempts", async (req, res) => {
     const db = await readLiveDb();
     const courseId = req.query.course_id ? String(req.query.course_id) : "";
     const assessmentId = req.query.assessment_id ? String(req.query.assessment_id) : "";
+    const autoRelease = ngAutoReleaseAssessmentAttemptsInDb(db, { courseId, limit: 1000 });
+    if (autoRelease.changed) await writeLiveDb(db);
 
     let attempts = Object.values(db.assessmentAttempts || {});
     if (courseId) attempts = attempts.filter((attempt) => String(attempt.course_id) === courseId);
@@ -14106,7 +14851,7 @@ app.get("/admin/assessment-attempts", async (req, res) => {
       .map((attempt) => sanitizeAttemptForAdmin(attempt, db))
       .sort((a, b) => String(b.submitted_at || "").localeCompare(String(a.submitted_at || "")));
 
-    res.json({ success: true, count: attempts.length, attempts });
+    res.json({ success: true, count: attempts.length, attempts, auto_release: autoRelease });
   } catch (e) {
     res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to load assessment attempts" });
   }
@@ -46389,8 +47134,10 @@ function ngBuildLiveSessionTitleFromRoadmap(db, roadmap = {}, day = {}) {
   ).trim();
 
   if (!dayTitle) return `${courseName} — Live Class`;
-  if (dayTitle.toLowerCase().startsWith(String(courseName).toLowerCase())) return dayTitle;
-  return `${courseName} — ${dayTitle}`;
+  return ngDayFirstContentTitle(`${courseName} — ${dayTitle}`, {
+    dayNumber: day.day_number || day.order,
+    system: day.system || day.chapter,
+  });
 }
 
 function ngCanMoveOrReuseLiveSession(session = {}) {
@@ -46517,6 +47264,8 @@ function ngSyncLinkedLiveSessionsForRoadmap(db, roadmap, options = {}) {
     session.instructor_name = session.instructor_name || course?.instructor_name || "Dr. Ahmad";
     session.status = String(session.status || "scheduled").toLowerCase() === "completed" ? session.status : "scheduled";
     session.roadmap_day_id = day.id;
+    session.day_number = day.day_number || day.order || null;
+    session.system = day.system || day.chapter || session.system || "";
     session.source = session.source || "roadmap_sync";
     session.updated_by = options.actorId || options.userId || session.updated_by || null;
     session.updated_at = now;
@@ -47606,8 +48355,10 @@ app.post("/admin/roadmap/apply-marathon-template", async (req, res) => {
         const session = {
           id: sessionId,
           course_id: courseId,
-          topic: `${db.courses[courseId].name || "120-Day Marathon"} — Day ${day.day_number}: ${day.title || day.system}`,
-          title: `${db.courses[courseId].name || "120-Day Marathon"} — Day ${day.day_number}: ${day.title || day.system}`,
+          topic: ngDayFirstContentTitle(`${db.courses[courseId].name || "120-Day Marathon"} — Day ${day.day_number}: ${day.title || day.system}`, { dayNumber: day.day_number, system: day.system }),
+          title: ngDayFirstContentTitle(`${db.courses[courseId].name || "120-Day Marathon"} — Day ${day.day_number}: ${day.title || day.system}`, { dayNumber: day.day_number, system: day.system }),
+          day_number: day.day_number || null,
+          system: day.system || "",
           description: day.description,
           scheduled_date: day.date,
           scheduled_time: classTime,
@@ -47627,7 +48378,7 @@ app.post("/admin/roadmap/apply-marathon-template", async (req, res) => {
       }
       if (createAssessments && day.assessment_day) {
         const assessmentId = uuid();
-        db.assessments[assessmentId] = { id: assessmentId, course_id: courseId, session_id: null, roadmap_day_id: day.id, title: day.title, description: day.description, source_type: usedMasterMap ? "master_map" : "system_end_marathon_template", questions: [], duration_minutes: 60, attempts_allowed: 1, is_published: false, assessment_type: "system_end", system: day.system, created_by: user.id, created_at: nowIso(), updated_at: nowIso() };
+        db.assessments[assessmentId] = { id: assessmentId, course_id: courseId, session_id: null, roadmap_day_id: day.id, day_number: day.day_number || null, title: ngDayFirstContentTitle(day.title, { dayNumber: day.day_number, system: day.system }), description: day.description, source_type: usedMasterMap ? "master_map" : "system_end_marathon_template", questions: [], duration_minutes: 60, attempts_allowed: 1, is_published: false, assessment_type: "system_end", system: day.system, created_by: user.id, created_at: nowIso(), updated_at: nowIso() };
         day.assessment_id = assessmentId;
         assessmentsCreated.push(db.assessments[assessmentId]);
       }
@@ -48283,8 +49034,15 @@ async function ngAutoSyncWeakAreaFlashcardsForStudent(db, crmDb, { courseId, use
       const result = await ngAutoGenerateWeakAreaFlashcardsFromAttempt(db, crmDb, { attempt, assessment, actorId });
       output.created += Number(result.created || 0);
       output.details.push({ attempt_id: attempt.id, ...result });
+      attempt.weak_flashcard_sync_status = "completed";
+      attempt.weak_flashcard_sync_created = Number(attempt.weak_flashcard_sync_created || 0) + Number(result.created || 0);
+      attempt.weak_flashcard_sync_error = null;
+      attempt.weak_flashcard_sync_updated_at = nowIso();
     } catch (error) {
       output.details.push({ attempt_id: attempt.id, error: error.message });
+      attempt.weak_flashcard_sync_status = "retry_pending";
+      attempt.weak_flashcard_sync_error = String(error.message || "Weak-area card generation failed").slice(0, 500);
+      attempt.weak_flashcard_sync_updated_at = nowIso();
     }
   }
   return output;
@@ -48346,6 +49104,81 @@ function ngPickStudentDailyFlashcardQueue(cards = [], { limit = 28 } = {}) {
   }
 
   return picked;
+}
+
+function ngStableStudentDailyFlashcardQueue(db, { courseId, userId, date = todayKey(), cards = [], limit = 28 } = {}) {
+  db.adaptiveFlashcardQueues = db.adaptiveFlashcardQueues || {};
+  const max = Math.max(10, Math.min(40, Number(limit || 28)));
+  const key = `${courseId}:${userId}:${date}`;
+  const previous = db.adaptiveFlashcardQueues[key] || null;
+  const byId = new Map(cards.map((card) => [String(card.id), card]));
+  let selected = (Array.isArray(previous?.card_ids) ? previous.card_ids : [])
+    .map((id) => byId.get(String(id)))
+    .filter(Boolean)
+    .slice(0, max);
+  const selectedIds = new Set(selected.map((card) => String(card.id)));
+
+  const prioritized = [...cards].sort((a, b) => {
+    if (Boolean(a.reviewed) !== Boolean(b.reviewed)) return Number(Boolean(a.reviewed)) - Number(Boolean(b.reviewed));
+    const order = { weak_area: 0, tutor_notes: 1, class_first_aid: 2, published_bank: 3 };
+    const bucketDiff = (order[a.bucket] ?? 9) - (order[b.bucket] ?? 9);
+    if (bucketDiff) return bucketDiff;
+    if (a.bucket === "weak_area") return String(b.created_at || "").localeCompare(String(a.created_at || ""));
+    return Number(a.day_number || 9999) - Number(b.day_number || 9999) || String(b.created_at || "").localeCompare(String(a.created_at || ""));
+  });
+
+  if (!previous) {
+    selected = ngPickStudentDailyFlashcardQueue(prioritized, { limit: max });
+    selectedIds.clear();
+    selected.forEach((card) => selectedIds.add(String(card.id)));
+  } else {
+    // Inject newly generated, unreviewed weak-area cards immediately. Prefer
+    // replacing reviewed/non-weak cards so today's saved progress stays visible.
+    const newWeakCards = prioritized.filter((card) => card.bucket === "weak_area" && !card.reviewed && !selectedIds.has(String(card.id)));
+    for (const card of newWeakCards) {
+      if (selected.length >= max) {
+        let replaceIndex = -1;
+        for (let index = selected.length - 1; index >= 0; index -= 1) {
+          if (selected[index].reviewed || selected[index].bucket !== "weak_area") {
+            replaceIndex = index;
+            break;
+          }
+        }
+        // If today's queue is entirely unreviewed weak cards, replace its
+        // oldest tail card so the newest assessment-generated card still shows.
+        if (replaceIndex < 0) replaceIndex = selected.length - 1;
+        if (replaceIndex < 0) break;
+        selectedIds.delete(String(selected[replaceIndex].id));
+        selected.splice(replaceIndex, 1);
+      }
+      selected.unshift(card);
+      selectedIds.add(String(card.id));
+    }
+
+    for (const card of prioritized) {
+      if (selected.length >= max) break;
+      if (selectedIds.has(String(card.id))) continue;
+      selected.push(card);
+      selectedIds.add(String(card.id));
+    }
+  }
+
+  const cardIds = selected.slice(0, max).map((card) => String(card.id));
+  const previousIds = Array.isArray(previous?.card_ids) ? previous.card_ids.map(String) : [];
+  const changed = !previous || cardIds.length !== previousIds.length || cardIds.some((id, index) => id !== previousIds[index]);
+  db.adaptiveFlashcardQueues[key] = {
+    ...(previous || {}),
+    id: key,
+    course_id: courseId,
+    user_id: userId,
+    queue_date: date,
+    card_ids: cardIds,
+    limit: max,
+    created_at: previous?.created_at || nowIso(),
+    updated_at: changed ? nowIso() : (previous?.updated_at || nowIso()),
+  };
+
+  return { key, cards: selected.slice(0, max), changed, queue: db.adaptiveFlashcardQueues[key] };
 }
 
 
@@ -48556,7 +49389,7 @@ app.get("/student/flashcards/review", async (req, res) => {
 
     const noteSync = await ngAutoSyncPublishedNotesFlashcardsForCourse(db, crmDb, { courseId, actorId: "student_review_opened" });
     const weakSync = await ngAutoSyncWeakAreaFlashcardsForStudent(db, crmDb, { courseId, user, actorId: "student_review_opened" });
-    if (Number(noteSync.created || 0) > 0 || Number(weakSync.created || 0) > 0) await writeLiveDb(db);
+    const flashcardSyncChanged = Number(noteSync.created || 0) > 0 || Number(weakSync.created || 0) > 0;
 
     const today = todayKey();
     const todayDay = ngFindRoadmapDay(db, { courseId });
@@ -48578,14 +49411,24 @@ app.get("/student/flashcards/review", async (req, res) => {
       const ao = bucketOrder[a.bucket] ?? 9;
       const bo = bucketOrder[b.bucket] ?? 9;
       if (ao !== bo) return ao - bo;
-      // v177p: never sort reviewed cards out of the daily queue. Progress must persist after refresh.
+      if (a.bucket === "weak_area" && Boolean(a.reviewed) === Boolean(b.reviewed)) {
+        return String(b.created_at || "").localeCompare(String(a.created_at || ""));
+      }
       return Number(a.day_number || 9999) - Number(b.day_number || 9999) || String(a.created_at || "").localeCompare(String(b.created_at || ""));
     });
 
     const availableCards = cards;
     const availableSections = ngBuildStudentFlashcardSections(availableCards);
     const queueLimit = Math.max(10, Math.min(40, Number(req.query.limit || 28)));
-    const queueCards = ngPickStudentDailyFlashcardQueue(availableCards, { limit: queueLimit });
+    const stableQueue = ngStableStudentDailyFlashcardQueue(db, {
+      courseId,
+      userId: user.id,
+      date: today,
+      cards: availableCards,
+      limit: queueLimit,
+    });
+    const queueCards = stableQueue.cards;
+    if (flashcardSyncChanged || stableQueue.changed) await writeLiveDb(db);
     const sections = ngBuildStudentFlashcardSections(queueCards);
     const reviewedCount = queueCards.filter((card) => card.reviewed).length;
     const totalReviewedCount = availableCards.filter((card) => card.reviewed).length;
@@ -48599,6 +49442,8 @@ app.get("/student/flashcards/review", async (req, res) => {
       sections,
       queue_limit: queueLimit,
       queue_count: queueCards.length,
+      queue_date: today,
+      queue_stable: true,
       queue_due_count: queueCards.filter((card) => !card.reviewed).length,
       available_count: availableCards.length,
       available_due_count: totalDueCount,
@@ -57191,6 +58036,183 @@ app.post("/admin/live-sessions/auto-prepare-now", async (req, res) => {
   }
 });
 
+let ngAssessmentAutoReleaseTimer = null;
+let ngAssessmentAutoReleaseRunning = false;
+
+async function ngRunAssessmentAutoReleaseTick(reason = "interval") {
+  if (ngAssessmentAutoReleaseRunning) return { success: true, skipped: true, reason: "already_running" };
+  ngAssessmentAutoReleaseRunning = true;
+  try {
+    const db = await readLiveDb();
+    const result = ngAutoReleaseAssessmentAttemptsInDb(db, { limit: 5000 });
+    if (result.changed) await writeLiveDb(db);
+    return { success: true, reason, ...result };
+  } catch (error) {
+    console.error("Assessment auto-release tick failed:", error.message);
+    return { success: false, reason, error: error.message };
+  } finally {
+    ngAssessmentAutoReleaseRunning = false;
+  }
+}
+
+function ngStartAssessmentAutoReleaseScheduler() {
+  if (ngAssessmentAutoReleaseTimer) return ngAssessmentAutoReleaseTimer;
+  ngAssessmentAutoReleaseTimer = setInterval(() => {
+    ngRunAssessmentAutoReleaseTick("interval").catch((error) => console.error("Assessment auto-release scheduler failed:", error.message));
+  }, 15000);
+  if (typeof ngAssessmentAutoReleaseTimer.unref === "function") ngAssessmentAutoReleaseTimer.unref();
+  setTimeout(() => {
+    ngRunAssessmentAutoReleaseTick("startup").catch((error) => console.error("Assessment startup auto-release failed:", error.message));
+  }, 5000);
+  return ngAssessmentAutoReleaseTimer;
+}
+
+let ngWeakFlashcardAutomationTimer = null;
+let ngWeakFlashcardAutomationRunning = false;
+
+function ngWeakAttemptNeedsFlashcardSync(db, attempt = {}) {
+  const targets = ngWeakFlashcardTargetsFromAttempt(attempt).slice(0, 6);
+  if (!targets.length) return false;
+  const activeCards = Object.values(db.flashcards || {}).filter((card) => {
+    return card.status !== "archived" &&
+      card.is_published !== false &&
+      String(card.attempt_id || "") === String(attempt.id || "") &&
+      String(card.user_id || "") === String(attempt.user_id || "");
+  });
+  return activeCards.length < targets.length * 3 || attempt.weak_flashcard_sync_status === "retry_pending";
+}
+
+async function ngRunWeakFlashcardAutomationTick(reason = "interval") {
+  if (ngWeakFlashcardAutomationRunning) return { success: true, skipped: true, reason: "already_running" };
+  ngWeakFlashcardAutomationRunning = true;
+  try {
+    const db = await readLiveDb();
+    const crmDb = await readCrmDb().catch(() => ({}));
+    const attempts = Object.values(db.assessmentAttempts || {})
+      .filter((attempt) => ngWeakAttemptNeedsFlashcardSync(db, attempt))
+      .sort((a, b) => String(b.submitted_at || "").localeCompare(String(a.submitted_at || "")))
+      .slice(0, 4);
+    let created = 0;
+    const details = [];
+    for (const attempt of attempts) {
+      const assessment = db.assessments?.[String(attempt.assessment_id || "")] || null;
+      try {
+        const result = await ngAutoGenerateWeakAreaFlashcardsFromAttempt(db, crmDb, {
+          attempt,
+          assessment,
+          actorId: "system:weak-flashcard-retry",
+          maxTargets: 6,
+          cardsPerTarget: 3,
+        });
+        created += Number(result.created || 0);
+        attempt.weak_flashcard_sync_status = "completed";
+        attempt.weak_flashcard_sync_created = Number(attempt.weak_flashcard_sync_created || 0) + Number(result.created || 0);
+        attempt.weak_flashcard_sync_error = null;
+        attempt.weak_flashcard_sync_updated_at = nowIso();
+        details.push({ attempt_id: attempt.id, created: Number(result.created || 0), status: "completed" });
+      } catch (error) {
+        attempt.weak_flashcard_sync_status = "retry_pending";
+        attempt.weak_flashcard_sync_error = String(error.message || "Weak-area card generation failed").slice(0, 500);
+        attempt.weak_flashcard_sync_updated_at = nowIso();
+        details.push({ attempt_id: attempt.id, created: 0, status: "retry_pending", error: attempt.weak_flashcard_sync_error });
+      }
+    }
+    if (attempts.length) await writeLiveDb(db);
+    return { success: true, reason, checked: attempts.length, created, details };
+  } catch (error) {
+    console.error("Weak-area flashcard automation tick failed:", error.message);
+    return { success: false, reason, error: error.message };
+  } finally {
+    ngWeakFlashcardAutomationRunning = false;
+  }
+}
+
+function ngStartWeakFlashcardAutomationScheduler() {
+  if (ngWeakFlashcardAutomationTimer) return ngWeakFlashcardAutomationTimer;
+  const intervalMs = Math.max(60000, Number(process.env.WEAK_FLASHCARD_AUTOMATION_INTERVAL_MS || 300000));
+  ngWeakFlashcardAutomationTimer = setInterval(() => {
+    ngRunWeakFlashcardAutomationTick("interval").catch((error) => console.error("Weak-area flashcard scheduler failed:", error.message));
+  }, intervalMs);
+  if (typeof ngWeakFlashcardAutomationTimer.unref === "function") ngWeakFlashcardAutomationTimer.unref();
+  setTimeout(() => {
+    ngRunWeakFlashcardAutomationTick("startup_backfill").catch((error) => console.error("Weak-area startup backfill failed:", error.message));
+  }, 20000);
+  return ngWeakFlashcardAutomationTimer;
+}
+
+let ngZoomRecordingRecoveryTimer = null;
+let ngZoomRecordingRecoveryRunning = false;
+const NEXTGEN_ZOOM_RECORDING_RECOVERY_ENABLED = String(process.env.ZOOM_RECORDING_RECOVERY_ENABLED || "true").toLowerCase() !== "false";
+
+async function ngRunZoomRecordingRecoveryTick(reason = "interval") {
+  if (!NEXTGEN_ZOOM_RECORDING_RECOVERY_ENABLED) return { success: true, skipped: true, reason: "disabled" };
+  if (ngZoomRecordingRecoveryRunning) return { success: true, skipped: true, reason: "already_running" };
+  ngZoomRecordingRecoveryRunning = true;
+  try {
+    const db = await readLiveDb();
+    const knownMeetingIds = new Set(Object.values(db.liveSessions || {})
+      .filter((session) => ngZoomRecordingSessionEligible(db, session))
+      .map((session) => String(session.zoom_meeting_id || session.meeting_id || "").trim())
+      .filter(Boolean));
+    if (!knownMeetingIds.size) return { success: true, reason, checked: 0, imported: 0 };
+
+    const token = await getZoomAccessToken();
+    const from = todayKey(addDays(new Date(), -3));
+    const to = todayKey();
+    const response = await axios.get("https://api.zoom.us/v2/users/me/recordings", {
+      params: { from, to, page_size: 100 },
+      headers: { Authorization: `Bearer ${token}` },
+      timeout: 20000,
+    });
+    const meetings = (response.data?.meetings || [])
+      .filter((meeting) => knownMeetingIds.has(String(meeting.id || "")))
+      .slice(0, 12);
+    let imported = 0;
+    let autoPublished = 0;
+    const details = [];
+    for (const meeting of meetings) {
+      const existing = Object.values(db.recordings || {}).find((recording) => {
+        return String(recording.meeting_id || "") === String(meeting.id || "") &&
+          (!meeting.uuid || String(recording.uuid || "") === String(meeting.uuid || ""));
+      });
+      const hasTranscriptFile = (meeting.recording_files || []).some((file) => Boolean(findTranscriptFile([file])));
+      if (existing?.published === true && existing?.exact_session_match === true && (existing.transcript_imported === true || !hasTranscriptFile)) {
+        details.push({ meeting_id: String(meeting.id || ""), skipped: true, reason: "already_imported" });
+        continue;
+      }
+      const result = await upsertZoomRecordingFromObject({ db, object: meeting, accessToken: token, forceImportTranscript: true });
+      imported += 1;
+      if (result.autoPublished) autoPublished += 1;
+      details.push({
+        meeting_id: String(meeting.id || ""),
+        session_id: result.sessionId || null,
+        exact_match: result.exactMatch?.exact === true,
+        auto_published: result.autoPublished === true,
+      });
+    }
+    if (imported) await writeLiveDb(db);
+    return { success: true, reason, checked: meetings.length, imported, auto_published: autoPublished, details };
+  } catch (error) {
+    console.error("Zoom recording recovery tick failed:", error.response?.data?.message || error.message);
+    return { success: false, reason, error: error.response?.data?.message || error.message };
+  } finally {
+    ngZoomRecordingRecoveryRunning = false;
+  }
+}
+
+function ngStartZoomRecordingRecoveryScheduler() {
+  if (!NEXTGEN_ZOOM_RECORDING_RECOVERY_ENABLED || ngZoomRecordingRecoveryTimer) return ngZoomRecordingRecoveryTimer;
+  const intervalMs = Math.max(5 * 60 * 1000, Number(process.env.ZOOM_RECORDING_RECOVERY_INTERVAL_MS || 15 * 60 * 1000));
+  ngZoomRecordingRecoveryTimer = setInterval(() => {
+    ngRunZoomRecordingRecoveryTick("interval").catch((error) => console.error("Zoom recording recovery scheduler failed:", error.message));
+  }, intervalMs);
+  if (typeof ngZoomRecordingRecoveryTimer.unref === "function") ngZoomRecordingRecoveryTimer.unref();
+  setTimeout(() => {
+    ngRunZoomRecordingRecoveryTick("startup_recovery").catch((error) => console.error("Zoom recording startup recovery failed:", error.message));
+  }, 30000);
+  return ngZoomRecordingRecoveryTimer;
+}
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Backend build=${NEXTGEN_BACKEND_BUILD}; JSON body limit=${NEXTGEN_JSON_BODY_LIMIT}; memory soft guard=${NEXTGEN_BACKGROUND_MEMORY_SOFT_PERCENT}% of ${NEXTGEN_RENDER_MEMORY_LIMIT_MB} MB`);
@@ -57199,6 +58221,9 @@ app.listen(PORT, () => {
   ngStartEmailAutomationRunner();
   ngStartBillingExpiryRunner();
   ngStartAutoZoomPrepareScheduler();
+  ngStartAssessmentAutoReleaseScheduler();
+  ngStartWeakFlashcardAutomationScheduler();
+  ngStartZoomRecordingRecoveryScheduler();
   console.log(`DATA_DIR=${DATA_DIR}`);
   console.log(`LIVE_DB_PATH=${LIVE_DB_PATH}`);
   console.log(`AYLA_DB_PATH=${AYLA_DB_PATH}`);
