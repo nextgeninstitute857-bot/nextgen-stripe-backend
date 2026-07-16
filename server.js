@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v191-requested-automation-safety";
+const NEXTGEN_BACKEND_BUILD = "v192-system-day-roadmap-safety";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -2515,65 +2515,91 @@ function sanitizeCourse(course) {
   };
 }
 
-function ngDayFirstContentTitle(value = "", { dayNumber = null, system = "", fallback = "" } = {}) {
+function ngDayFirstContentTitle(
+  value = "",
+  { systemDay = null, dayInSystem = null, dayNumber = null, system = "", fallback = "" } = {}
+) {
   const raw = String(value || fallback || "").replace(/\s+/g, " ").trim();
   if (!raw) return "";
 
-  const embeddedMatch = raw.match(/\bday\s*#?\s*(\d{1,3})\b/i);
-  const numericDay = Number(dayNumber || embeddedMatch?.[1] || 0);
-  if (!numericDay) return raw;
-
-  const coursePrefix = (part) => {
-    const clean = String(part || "").toLowerCase();
-    return (
-      /\b\d+\s*-?\s*day\b/.test(clean) && /\b(?:usmle|step\s*1|marathon|course|program)\b/.test(clean)
-    ) || (/\b(?:usmle|step\s*1)\b/.test(clean) && /\b(?:marathon|course|program)\b/.test(clean));
-  };
-
-  const dayPattern = new RegExp(`\\bday\\s*#?\\s*${numericDay}\\b`, "ig");
+  const cleanSystem = String(system || "").replace(/\s+/g, " ").trim();
   const rawParts = raw
+    .replace(/(\bday\s*#?\s*\d{1,3})\s*:\s*/gi, "$1 — ")
     .split(/\s+(?:—|–|\|)\s+|\s+-\s+/)
     .map((part) => part.trim())
     .filter(Boolean);
-  const candidates = [];
+  const embeddedDays = Array.from(raw.matchAll(/\bday\s*#?\s*(\d{1,3})\b/gi));
 
-  const addCandidate = (part) => {
-    let clean = String(part || "").replace(dayPattern, " ").replace(/^\s*[:;,—–-]+|[:;,—–-]+\s*$/g, "").replace(/\s+/g, " ").trim();
-    if (!clean || coursePrefix(clean)) return;
-    candidates.push(clean);
+  const normalizedKey = (text) => String(text || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const systemKey = normalizedKey(cleanSystem);
+  const systemPart = cleanSystem
+    ? rawParts.find((part) => {
+        const partKey = normalizedKey(part);
+        return partKey.includes(systemKey) && /\bday\s*#?\s*\d{1,3}\b/i.test(part);
+      })
+    : null;
+  const embeddedSystemDay = systemPart?.match(/\bday\s*#?\s*(\d{1,3})\b/i)?.[1] || null;
+  const lastEmbeddedDay = embeddedDays.length ? embeddedDays[embeddedDays.length - 1][1] : null;
+  const numericSystemDay = Number(systemDay || dayInSystem || embeddedSystemDay || lastEmbeddedDay || dayNumber || 0) || null;
+  if (!numericSystemDay) return raw;
+
+  const isCoursePrefix = (part) => {
+    const clean = String(part || "").toLowerCase();
+    return (
+      (/\b\d+\s*-?\s*day\b/.test(clean) && /\b(?:usmle|step\s*1|marathon|course|program)\b/.test(clean)) ||
+      (/\b(?:usmle|step\s*1)\b/.test(clean) && /\b(?:marathon|course|program)\b/.test(clean))
+    );
   };
 
-  if (system && String(system).trim() && String(system).toLowerCase() !== "mixed systems") {
-    addCandidate(system);
-  }
+  const escapeRegExp = (text) => String(text || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const systemPattern = cleanSystem ? new RegExp(`^${escapeRegExp(cleanSystem)}\\b`, "i") : null;
+  const candidates = [];
+
   for (const part of rawParts) {
-    if (coursePrefix(part)) continue;
-    addCandidate(part);
+    if (isCoursePrefix(part)) continue;
+    let clean = String(part)
+      .replace(/\bday\s*#?\s*\d{1,3}\b/gi, " ")
+      .replace(/^\s*[:;,—–-]+|[:;,—–-]+\s*$/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (systemPattern) {
+      clean = clean.replace(systemPattern, " ").replace(/^\s*[:;,—–-]+/, "").replace(/\s+/g, " ").trim();
+    }
+    if (!clean || isCoursePrefix(clean) || (systemKey && normalizedKey(clean) === systemKey)) continue;
+    candidates.push(clean);
   }
 
-  const unique = [];
+  const output = [];
   const seen = new Set();
-  for (const part of candidates) {
-    const key = part.toLowerCase().replace(/[^a-z0-9]+/g, "");
-    if (!key || seen.has(key)) continue;
+  const pushUnique = (part) => {
+    const clean = String(part || "").replace(/\s+/g, " ").trim();
+    const key = normalizedKey(clean);
+    if (!clean || !key || seen.has(key)) return;
     seen.add(key);
-    unique.push(part);
-  }
+    output.push(clean);
+  };
 
-  return [`Day ${numericDay}`, ...unique].join(" — ");
+  if (cleanSystem && cleanSystem.toLowerCase() !== "mixed systems") pushUnique(cleanSystem);
+  if (numericSystemDay) pushUnique(`Day ${numericSystemDay}`);
+  for (const part of candidates) pushUnique(part);
+
+  return output.join(" — ") || raw;
 }
 
 function normalizeLiveSessionPayload(body = {}, existing = {}) {
   const rawTopic = String(body.topic ?? existing.topic ?? body.title ?? existing.title ?? "").trim();
   const rawTitle = String(body.title ?? existing.title ?? body.topic ?? existing.topic ?? "").trim();
   const dayNumber = body.day_number ?? body.dayNumber ?? existing.day_number ?? null;
+  const systemDay = body.system_day ?? body.day_in_system ?? body.systemDay ?? existing.system_day ?? existing.day_in_system ?? null;
   const system = String(body.system ?? existing.system ?? "").trim();
   return {
     ...existing,
     course_id: String(body.course_id ?? existing.course_id ?? "").trim(),
-    topic: ngDayFirstContentTitle(rawTopic, { dayNumber, system }),
-    title: ngDayFirstContentTitle(rawTitle, { dayNumber, system }),
+    topic: ngDayFirstContentTitle(rawTopic, { systemDay, dayNumber, system }),
+    title: ngDayFirstContentTitle(rawTitle, { systemDay, dayNumber, system }),
     day_number: dayNumber ? Number(dayNumber) : existing.day_number ?? null,
+    instructional_day_number: body.instructional_day_number ?? existing.instructional_day_number ?? (dayNumber ? Number(dayNumber) : null),
+    system_day: systemDay ? Number(systemDay) : existing.system_day ?? null,
     system,
     description: String(body.description ?? existing.description ?? "").trim(),
     scheduled_date: String(body.scheduled_date ?? existing.scheduled_date ?? "").trim(),
@@ -2620,10 +2646,12 @@ function normalizeLiveSessionPayload(body = {}, existing = {}) {
 function sanitizeLiveSession(session) {
   const timing = ngSessionTimingWindow(session);
   const topic = ngDayFirstContentTitle(session.topic || session.title || "Live Class", {
+    systemDay: session.system_day || session.day_in_system,
     dayNumber: session.day_number,
     system: session.system,
   });
   const title = ngDayFirstContentTitle(session.title || session.topic || "Live Class", {
+    systemDay: session.system_day || session.day_in_system,
     dayNumber: session.day_number,
     system: session.system,
   });
@@ -2633,6 +2661,8 @@ function sanitizeLiveSession(session) {
     topic: topic || "Live Class",
     title: title || topic || "Live Class",
     day_number: session.day_number || null,
+    instructional_day_number: session.instructional_day_number || session.day_number || null,
+    system_day: session.system_day || session.day_in_system || null,
     system: session.system || null,
     description: session.description || "",
     scheduled_date: session.scheduled_date || null,
@@ -2740,6 +2770,7 @@ function sortNewestFirst(a, b) {
 
 function sanitizePublicRecording(recording) {
   const topic = ngDayFirstContentTitle(recording.topic || "", {
+    systemDay: recording.system_day || recording.day_in_system,
     dayNumber: recording.day_number,
     system: recording.system,
   });
@@ -2750,6 +2781,8 @@ function sanitizePublicRecording(recording) {
     uuid: recording.uuid || null,
     topic: topic || null,
     day_number: recording.day_number || null,
+    instructional_day_number: recording.instructional_day_number || recording.day_number || null,
+    system_day: recording.system_day || recording.day_in_system || null,
     system: recording.system || null,
     start_time: recording.start_time || null,
     duration: recording.duration || null,
@@ -4195,7 +4228,11 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
   const becamePublished = previous.published !== true && canAutoPublish;
   const canonicalTopic = ngDayFirstContentTitle(
     matchedSession?.topic || matchedSession?.title || object.topic || previous.topic || "Live Session Recording",
-    { dayNumber: matchedDay?.day_number || matchedSession?.day_number, system: matchedDay?.system || matchedSession?.system }
+    {
+      systemDay: matchedDay?.system_day || matchedDay?.day_in_system || matchedSession?.system_day,
+      dayNumber: matchedDay?.day_number || matchedSession?.day_number,
+      system: matchedDay?.system || matchedSession?.system,
+    }
   );
   const receivedAt = new Date().toISOString();
 
@@ -4209,6 +4246,8 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
     course_id: matchedSession?.course_id || previous.course_id || null,
     roadmap_day_id: matchedDay?.id || matchedSession?.roadmap_day_id || previous.roadmap_day_id || null,
     day_number: matchedDay?.day_number || matchedSession?.day_number || previous.day_number || null,
+    instructional_day_number: matchedDay?.instructional_day_number || matchedDay?.day_number || matchedSession?.instructional_day_number || previous.instructional_day_number || null,
+    system_day: matchedDay?.system_day || matchedDay?.day_in_system || matchedSession?.system_day || previous.system_day || null,
     system: matchedDay?.system || matchedSession?.system || previous.system || null,
     topic: canonicalTopic || null,
     start_time: object.start_time || previous.start_time || null,
@@ -4756,7 +4795,7 @@ async function ngMaybeCreateWeeklyAssessmentFromNotes(db, { courseId, day }) {
       if (!text) return "";
 
       return [
-        `Day ${item.day_number || ""}: ${item.title || item.topic || "Session"}`,
+        ngRoadmapCanonicalDayTitle(item),
         `System: ${item.system || ""}`,
         text,
       ].join("\n");
@@ -5140,10 +5179,10 @@ function sanitizeRoadmapDay(day) {
   const qids = ngNormalizeQidList(day.uworld_qids?.length ? day.uworld_qids : day.mapped_uworld_qids?.length ? day.mapped_uworld_qids : day.qids || day.uworld_target);
   const taskItems = (ngIsNoClassRoadmapDay(day) || ngRoadmapDayIsNoClass(day)) ? [] : ngGetTaskItems(day);
   return {
-    id: day.id, course_id: day.course_id, week_number: day.week_number, day_number: day.day_number, date: day.date,
+    id: day.id, course_id: day.course_id, week_number: day.week_number, day_number: day.day_number, instructional_day_number: day.instructional_day_number || day.day_number || null, system_day: day.system_day || day.day_in_system || null, schedule_slot_number: day.schedule_slot_number || day.order || null, date: day.date,
     system: day.system || day.chapter || "",
     chapter: day.chapter || day.system || "",
-    title: ngDayFirstContentTitle(day.title, { dayNumber: day.day_number, system: day.system || day.chapter }), description: day.description || "", resources: day.resources || [], resource_links: day.resource_links || [],
+    title: ngDayFirstContentTitle(day.title, { systemDay: day.system_day || day.day_in_system, dayNumber: day.day_number, system: day.system || day.chapter }), description: day.description || "", resources: day.resources || [], resource_links: day.resource_links || [],
     uworld_target: day.uworld_target || (qids.length ? qids.join(",") : ""), first_aid_topics: day.first_aid_topics || "", live_teaching_topic: day.live_teaching_topic || "",
     first_aid_pages: day.first_aid_pages || day.fa_pages || null,
     lecture_id: day.lecture_id || null, lecture_title: day.lecture_title || "", video_library_lecture: day.video_library_lecture || day.lecture_title || "",
@@ -5178,6 +5217,7 @@ function ngIsDailyTaskCompleted(progress) {
 function buildProgressSummary({ db, courseId, userId }) {
   const roadmap = db.roadmaps[String(courseId)] || null;
   const days = (roadmap?.days || []).filter((d) => d.is_published !== false);
+  const teachingDays = days.filter((day) => !ngIsNoClassRoadmapDay(day) && !ngRoadmapDayIsNoClass(day));
   const progressItems = Object.values(db.roadmapProgress || {}).filter((p) => String(p.course_id) === String(courseId) && String(p.user_id) === String(userId));
   const completedIds = new Set(progressItems.filter((p) => p.completed).map((p) => p.day_id));
 
@@ -5187,11 +5227,11 @@ function buildProgressSummary({ db, courseId, userId }) {
     }
   }
 
-  const total = days.length;
-  const completed = days.filter((d) => completedIds.has(d.id)).length;
+  const total = teachingDays.length;
+  const completed = teachingDays.filter((d) => completedIds.has(d.id)).length;
   const today = todayKey();
-  const todayDay = days.find((d) => d.date === today) || days.find((d) => !completedIds.has(d.id)) || days[0] || null;
-  const completedSystems = Array.from(new Set(days.filter((d) => completedIds.has(d.id)).map((d) => d.system || d.chapter).filter(Boolean)));
+  const todayDay = days.find((d) => d.date === today) || teachingDays.find((d) => !completedIds.has(d.id)) || teachingDays[0] || null;
+  const completedSystems = Array.from(new Set(teachingDays.filter((d) => completedIds.has(d.id)).map((d) => d.system || d.chapter).filter(Boolean)));
   const currentSystem = todayDay?.system || todayDay?.chapter || null;
   return {
     course_id: courseId,
@@ -5927,6 +5967,7 @@ function sanitizeAttemptForAdmin(attempt, db) {
   return {
     ...attempt,
     assessment_title: ngDayFirstContentTitle(assessment?.title || attempt.assessment_title || "Assessment", {
+      systemDay: assessment?.system_day || attempt.system_day,
       dayNumber: assessment?.day_number || attempt.day_number,
       system: assessment?.system || attempt.system,
     }),
@@ -5946,7 +5987,10 @@ function sanitizeAssessmentForStudent(assessment, attempt = null) {
     id: assessment.id,
     course_id: assessment.course_id,
     session_id: assessment.session_id || null,
-    title: ngDayFirstContentTitle(assessment.title, { dayNumber: assessment.day_number, system: assessment.system }),
+    title: ngDayFirstContentTitle(assessment.title, { systemDay: assessment.system_day || assessment.day_in_system, dayNumber: assessment.day_number, system: assessment.system }),
+    day_number: assessment.day_number || null,
+    instructional_day_number: assessment.instructional_day_number || assessment.day_number || null,
+    system_day: assessment.system_day || assessment.day_in_system || null,
     description: assessment.description || "",
     source_type: assessment.source_type || "manual_notes",
     question_count: (assessment.questions || []).length,
@@ -5985,7 +6029,10 @@ function sanitizeAssessmentForTaking(assessment, existingAttempt = null) {
     id: assessment.id,
     course_id: assessment.course_id,
     session_id: assessment.session_id || null,
-    title: ngDayFirstContentTitle(assessment.title, { dayNumber: assessment.day_number, system: assessment.system }),
+    title: ngDayFirstContentTitle(assessment.title, { systemDay: assessment.system_day || assessment.day_in_system, dayNumber: assessment.day_number, system: assessment.system }),
+    day_number: assessment.day_number || null,
+    instructional_day_number: assessment.instructional_day_number || assessment.day_number || null,
+    system_day: assessment.system_day || assessment.day_in_system || null,
     description: assessment.description || "",
     duration_minutes: assessment.duration_minutes || null,
     block_mode: Boolean(assessment.block_mode),
@@ -7913,9 +7960,7 @@ function ngBaselineSourceTextForCourse(db, { courseId }) {
   if (course.description) lines.push(`Description: ${course.description}`);
   for (const day of days.slice(0, 80)) {
     lines.push([
-      `Day ${day.day_number || day.order || ""}`,
-      day.system || day.chapter || "",
-      day.title || "",
+      ngRoadmapCanonicalDayTitle(day),
       day.first_aid_topics || day.live_teaching_topic || "",
       day.first_aid_pages || day.fa_pages || "",
       day.uworld_target || "",
@@ -12780,7 +12825,15 @@ app.post("/live/recordings/publish", async (req, res) => {
     const now = new Date().toISOString();
     const recordingUrl = req.body.recording_url || previous.recording_url || legacy.recording_url || req.body.share_url || previous.share_url || legacy.share_url || null;
     const shareUrl = req.body.share_url || previous.share_url || legacy.share_url || recordingUrl || null;
-    const cleanTopic = req.body.topic || session?.topic || session?.title || previous.topic || legacy.topic || null;
+    const roadmapDay = session ? ngFindRoadmapDayForLiveSession(db, session) : null;
+    const cleanTopic = ngDayFirstContentTitle(
+      req.body.topic || session?.topic || session?.title || previous.topic || legacy.topic || "Live Session Recording",
+      {
+        systemDay: roadmapDay?.system_day || roadmapDay?.day_in_system || session?.system_day,
+        dayNumber: roadmapDay?.day_number || session?.day_number,
+        system: roadmapDay?.system || session?.system,
+      }
+    );
 
     db.recordings[key] = {
       ...previous,
@@ -12790,6 +12843,11 @@ app.post("/live/recordings/publish", async (req, res) => {
       uuid: req.body.uuid || previous.uuid || legacy.uuid || null,
       session_id: resolvedSessionId,
       course_id: resolvedCourseId,
+      roadmap_day_id: roadmapDay?.id || session?.roadmap_day_id || previous.roadmap_day_id || legacy.roadmap_day_id || null,
+      day_number: roadmapDay?.day_number || session?.day_number || previous.day_number || legacy.day_number || null,
+      instructional_day_number: roadmapDay?.instructional_day_number || roadmapDay?.day_number || session?.instructional_day_number || previous.instructional_day_number || null,
+      system_day: roadmapDay?.system_day || roadmapDay?.day_in_system || session?.system_day || previous.system_day || null,
+      system: roadmapDay?.system || session?.system || previous.system || legacy.system || null,
       topic: cleanTopic,
       start_time: req.body.start_time || previous.start_time || legacy.start_time || null,
       duration: req.body.duration || previous.duration || legacy.duration || null,
@@ -12819,6 +12877,11 @@ app.post("/live/recordings/publish", async (req, res) => {
         ...(db.notes[resolvedSessionId] || {}),
         session_id: resolvedSessionId,
         course_id: resolvedCourseId,
+        roadmap_day_id: roadmapDay?.id || session?.roadmap_day_id || null,
+        day_number: roadmapDay?.day_number || session?.day_number || null,
+        instructional_day_number: roadmapDay?.instructional_day_number || roadmapDay?.day_number || session?.instructional_day_number || null,
+        system_day: roadmapDay?.system_day || roadmapDay?.day_in_system || session?.system_day || null,
+        system: roadmapDay?.system || session?.system || null,
         recording_key: key,
         recording_url: recordingUrl,
         meeting_id: meetingId || previous.meeting_id || legacy.meeting_id || null,
@@ -12905,9 +12968,10 @@ app.get("/live/recordings", async (req, res) => {
     const { user } = await getAuthenticatedUser(req);
     const db = await readLiveDb();
     const isStaff = user.role === "admin" || user.role === "instructor";
+    const requestedCourseId = String(req.query.course_id || req.query.courseId || "").trim();
 
-    if (req.query.course_id) {
-      const enrollment = getBackendEnrollment(db, { userId: user.id, courseId: req.query.course_id });
+    if (requestedCourseId) {
+      const enrollment = getBackendEnrollment(db, { userId: user.id, courseId: requestedCourseId });
       if (!enrollment && !isStaff) {
         return res.status(403).json({ success: false, error: "No course access found" });
       }
@@ -12916,12 +12980,17 @@ app.get("/live/recordings", async (req, res) => {
       }
     }
 
+    const autoRoadmapSync = requestedCourseId
+      ? ngAutoSyncRoadmapLiveSessionsForCourses(db, [requestedCourseId], { actorId: user.id || "recordings_title_sync" })
+      : { changed: false, checked: 0, details: [] };
+    if (autoRoadmapSync.changed) await writeLiveDb(db);
+
     let recordings = Object.values(db.recordings || {});
     if (!isStaff) recordings = recordings.filter((recording) => recording.published);
-    if (req.query.course_id) recordings = recordings.filter((recording) => String(recording.course_id || "") === String(req.query.course_id));
+    if (requestedCourseId) recordings = recordings.filter((recording) => String(recording.course_id || "") === requestedCourseId);
 
     recordings.sort(sortNewestFirst);
-    res.json({ success: true, count: recordings.length, recordings: recordings.map(sanitizePublicRecording) });
+    res.json({ success: true, count: recordings.length, recordings: recordings.map(sanitizePublicRecording), auto_roadmap_sync: autoRoadmapSync });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to load live recordings" });
   }
@@ -12944,10 +13013,15 @@ app.get("/live/recordings/published", async (req, res) => {
       }
     }
 
+    const autoRoadmapSync = courseId
+      ? ngAutoSyncRoadmapLiveSessionsForCourses(db, [courseId], { actorId: user.id || "published_recordings_title_sync" })
+      : { changed: false, checked: 0, details: [] };
+    if (autoRoadmapSync.changed) await writeLiveDb(db);
+
     let recordings = Object.values(db.recordings || {}).filter((recording) => recording.published);
     if (courseId) recordings = recordings.filter((recording) => String(recording.course_id || "") === String(courseId));
 
-    res.json({ success: true, count: recordings.length, recordings: recordings.map(sanitizePublicRecording) });
+    res.json({ success: true, count: recordings.length, recordings: recordings.map(sanitizePublicRecording), auto_roadmap_sync: autoRoadmapSync });
   } catch (e) {
     res.status(e.statusCode || 500).json({ success: false, error: e.message });
   }
@@ -12958,12 +13032,18 @@ app.get("/live/recordings/published", async (req, res) => {
 function buildNotesPayload({ db, sessionId, body = {}, user, publishMode = "save" }) {
   const previous = db.notes?.[sessionId] || {};
   const session = db.liveSessions?.[sessionId] || null;
+  const roadmapDay = session ? ngFindRoadmapDayForLiveSession(db, session) : null;
   const now = new Date().toISOString();
 
   const notesPayload = {
     ...previous,
     session_id: sessionId,
     course_id: body.course_id || previous.course_id || session?.course_id || null,
+    roadmap_day_id: roadmapDay?.id || session?.roadmap_day_id || previous.roadmap_day_id || null,
+    day_number: roadmapDay?.day_number || session?.day_number || previous.day_number || null,
+    instructional_day_number: roadmapDay?.instructional_day_number || roadmapDay?.day_number || session?.instructional_day_number || previous.instructional_day_number || null,
+    system_day: roadmapDay?.system_day || roadmapDay?.day_in_system || session?.system_day || previous.system_day || null,
+    system: roadmapDay?.system || session?.system || previous.system || null,
     notes: body.notes !== undefined ? String(body.notes || "") : String(previous.notes || ""),
     transcript_url: body.transcript_url || previous.transcript_url || null,
     transcript_text: body.transcript_text !== undefined ? String(body.transcript_text || "") : String(previous.transcript_text || ""),
@@ -13576,10 +13656,11 @@ app.post("/student/daily-task/:dayId/weak-concept", async (req, res) => {
 function ngBuildPublicRoadmapProgress(days = []) {
   const today = todayKey();
   const published = days.filter((d) => d.is_published !== false);
-  const completed = published.filter((d) => ["completed", "done"].includes(String(d.status || "").toLowerCase()));
+  const teachingDays = published.filter((day) => !ngIsNoClassRoadmapDay(day) && !ngRoadmapDayIsNoClass(day));
+  const completed = teachingDays.filter((d) => ["completed", "done"].includes(String(d.status || "").toLowerCase()));
   const current = published.find((d) => d.date === today) || published.find((d) => new Date(`${d.date}T00:00:00`).getTime() >= new Date(`${today}T00:00:00`).getTime()) || published[published.length - 1] || null;
   const systems = [];
-  for (const day of published) {
+  for (const day of teachingDays) {
     const system = day.system || day.chapter || "General";
     let item = systems.find((x) => x.system === system);
     if (!item) {
@@ -13595,7 +13676,7 @@ function ngBuildPublicRoadmapProgress(days = []) {
     else if (current && item.system === (current.system || current.chapter)) item.status = "current";
   }
   return {
-    total_days: published.length,
+    total_days: teachingDays.length,
     completed_days: completed.length,
     current_day: current ? sanitizeRoadmapDay(current) : null,
     current_system: current?.system || current?.chapter || null,
@@ -13619,6 +13700,8 @@ function ngFindAdminRoadmapDayRef(db, { courseId = "", dayId = "" } = {}) {
 
 function ngNormalizeAdminRoadmapPayload(body = {}, existing = {}) {
   const dayNumber = Number(body.day_number ?? body.order ?? existing.day_number ?? existing.order ?? 1) || 1;
+  const systemDayRaw = body.system_day ?? body.day_in_system ?? body.systemDay ?? existing.system_day ?? existing.day_in_system ?? null;
+  const systemDay = Number(systemDayRaw || 0) || null;
   const weekNumber = Number(body.week_number ?? existing.week_number ?? Math.ceil(dayNumber / 7)) || Math.ceil(dayNumber / 7);
   const status = String(body.roadmap_status ?? body.status ?? existing.roadmap_status ?? existing.status ?? "scheduled").trim() || "scheduled";
   const qids = ngNormalizeQidList(body.uworld_qids || body.mapped_uworld_qids || body.qids || body.qid_list || body.uworld_target || existing.uworld_qids || existing.mapped_uworld_qids || []);
@@ -13628,6 +13711,9 @@ function ngNormalizeAdminRoadmapPayload(body = {}, existing = {}) {
     description: String(body.description ?? existing.description ?? "").trim(),
     order: dayNumber,
     day_number: dayNumber,
+    instructional_day_number: Number(body.instructional_day_number ?? existing.instructional_day_number ?? dayNumber) || dayNumber,
+    system_day: systemDay,
+    day_in_system: systemDay,
     week_number: weekNumber,
     date: body.date === null ? "" : String(body.date ?? existing.date ?? "").trim(),
     resources: Array.isArray(body.resources) ? body.resources : normalizeArray(body.resources ?? existing.resources ?? []),
@@ -13740,12 +13826,13 @@ app.get("/roadmap/course/:courseId", async (req, res) => {
   const db = await readLiveDb();
   const roadmap = db.roadmaps[String(req.params.courseId)] || null;
   const days = (roadmap?.days || []).filter((d) => d.is_published !== false);
+  const teachingDays = days.filter((day) => !ngIsNoClassRoadmapDay(day) && !ngRoadmapDayIsNoClass(day));
   const publicProgress = ngBuildPublicRoadmapProgress(days);
   res.json({
     success: true,
     roadmap: roadmap ? { id: roadmap.id, course_id: roadmap.course_id, course_name: roadmap.course_name, settings: roadmap.settings, created_at: roadmap.created_at, updated_at: roadmap.updated_at, title: roadmap.title || "" } : null,
     days: days.map(sanitizeRoadmapDay),
-    summary: { total_days: roadmap?.days?.length || 0, shown_days: days.length, total_weeks: Math.ceil((roadmap?.days?.length || 0) / 7), public_progress: publicProgress },
+    summary: { total_days: teachingDays.length, schedule_slots: days.length, shown_days: days.length, total_weeks: Math.ceil(teachingDays.length / 7), public_progress: publicProgress },
   });
 });
 app.post("/admin/roadmap/generate", async (req, res) => {
@@ -13925,7 +14012,7 @@ app.post("/admin/roadmap/sync-live-sessions", async (req, res) => {
 
     const skipSundays = roadmap.skip_sundays !== false && roadmap.settings?.skip_sundays !== false;
     const startDate = roadmap.start_date || roadmap.settings?.start_date || roadmap.days[0]?.date || todayKey();
-    ngRecalculateRoadmapSchedule(db, roadmap, { startDate, skipSundays });
+    ngRecalculateRoadmapSchedule(db, roadmap, { startDate, skipSundays, actorId: user.id });
 
     const dependencySync = { days_checked: 0, flashcards: 0, flashcard_progress: 0, assessments: 0, assessment_attempts: 0, notes: 0, roadmap_progress: 0, daily_task_progress: 0, point_events: 0, weak_concepts: 0, leaderboards_rebuilt: 0 };
     for (const day of roadmap.days || []) {
@@ -13936,6 +14023,7 @@ app.post("/admin/roadmap/sync-live-sessions", async (req, res) => {
       for (const key of Object.keys(partial)) dependencySync[key] = Number(dependencySync[key] || 0) + Number(partial[key] || 0);
     }
 
+    const sequenceMetadataSync = ngSyncRoadmapSequenceMetadata(db, roadmap, { actorId: user.id });
     const sync = ngSyncLinkedLiveSessionsForRoadmap(db, roadmap, { actorId: user.id });
 
     db.roadmaps[roadmapKey] = roadmap;
@@ -13952,6 +14040,7 @@ app.post("/admin/roadmap/sync-live-sessions", async (req, res) => {
       roadmap_key: roadmapKey,
       sync,
       dependency_sync: dependencySync,
+      sequence_metadata_sync: sequenceMetadataSync,
       roadmap,
       sessions_count: sessions.length,
       sessions,
@@ -14427,7 +14516,7 @@ app.post("/admin/assessments/create", async (req, res) => {
     res.status(e.statusCode || 500).json({ success: false, error: e.message });
   }
 });
-app.get("/admin/assessments", async (req, res) => { try { await requireLmsPermission(req, "lms.assessments.view"); const db = await readLiveDb(); let items = Object.values(db.assessments || {}); if (req.query.course_id) items = items.filter((a) => String(a.course_id) === String(req.query.course_id)); if (req.query.session_id) items = items.filter((a) => String(a.session_id || "") === String(req.query.session_id)); items.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || ""))); items = items.map((assessment) => ({ ...assessment, title: ngDayFirstContentTitle(assessment.title, { dayNumber: assessment.day_number, system: assessment.system }) })); res.json({ success: true, count: items.length, assessments: items }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.get("/admin/assessments", async (req, res) => { try { await requireLmsPermission(req, "lms.assessments.view"); const db = await readLiveDb(); let items = Object.values(db.assessments || {}); if (req.query.course_id) items = items.filter((a) => String(a.course_id) === String(req.query.course_id)); if (req.query.session_id) items = items.filter((a) => String(a.session_id || "") === String(req.query.session_id)); items.sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || ""))); items = items.map((assessment) => ({ ...assessment, title: ngDayFirstContentTitle(assessment.title, { systemDay: assessment.system_day || assessment.day_in_system, dayNumber: assessment.day_number, system: assessment.system }) })); res.json({ success: true, count: items.length, assessments: items }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.get("/admin/assessments/:assessmentId", async (req, res) => { try { await requireLmsPermission(req, "lms.assessments.view"); const db = await readLiveDb(); const a = db.assessments[req.params.assessmentId]; if (!a) return res.status(404).json({ success: false, error: "Assessment not found" }); res.json({ success: true, assessment: a }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.patch("/admin/assessments/:assessmentId", async (req, res) => {
   try {
@@ -14543,18 +14632,22 @@ app.get("/student/assessments", async (req, res) => {
       return ngBlockLockedFeature(res, "assessments", access.reason);
     }
 
+    const autoRoadmapSync = ngAutoSyncRoadmapLiveSessionsForCourses(db, [courseId], {
+      actorId: user.id || "student_assessments_title_sync",
+    });
+
     const autoRelease = ngAutoReleaseAssessmentAttemptsInDb(db, {
       courseId,
       userId: user.id,
       limit: 100,
     });
-    if (autoRelease.changed) await writeLiveDb(db);
+    if (autoRelease.changed || autoRoadmapSync.changed) await writeLiveDb(db);
 
     const items = Object.values(db.assessments || {})
       .filter((assessment) => String(assessment.course_id) === String(courseId) && assessment.is_published)
       .map((assessment) => sanitizeAssessmentForStudent(assessment, db.assessmentAttempts[assessmentAttemptKey(assessment.id, user.id)]));
 
-    res.json({ success: true, count: items.length, assessments: items, auto_release: autoRelease });
+    res.json({ success: true, count: items.length, assessments: items, auto_release: autoRelease, auto_roadmap_sync: autoRoadmapSync });
   } catch (e) {
     res.status(e.statusCode || 500).json({ success: false, error: e.message });
   }
@@ -14591,13 +14684,17 @@ app.get("/student/assessments/:assessmentId/take", async (req, res) => {
       return ngBlockLockedFeature(res, "assessments", access.reason);
     }
 
+    const autoRoadmapSync = ngAutoSyncRoadmapLiveSessionsForCourses(db, [assessment.course_id], {
+      actorId: user.id || "student_assessment_take_title_sync",
+    });
+
     const autoRelease = ngAutoReleaseAssessmentAttemptsInDb(db, {
       courseId: assessment.course_id,
       userId: user.id,
       limit: 20,
     });
     const repair = ngRepairBaselineAssessmentAnswerKeyIfNeeded(db, assessment);
-    if (repair.changed || autoRelease.changed) await writeLiveDb(db);
+    if (repair.changed || autoRelease.changed || autoRoadmapSync.changed) await writeLiveDb(db);
 
     const existingAttempt = db.assessmentAttempts[assessmentAttemptKey(assessment.id, user.id)] || null;
 
@@ -14606,6 +14703,7 @@ app.get("/student/assessments/:assessmentId/take", async (req, res) => {
       assessment: sanitizeAssessmentForTaking(assessment, existingAttempt),
       existing_attempt: existingAttempt ? sanitizeAttemptForStudent(existingAttempt) : null,
       auto_release: autoRelease,
+      auto_roadmap_sync: autoRoadmapSync,
     });
   } catch (e) {
     res.status(e.statusCode || 500).json({ success: false, error: e.message });
@@ -15017,14 +15115,45 @@ function ngRoadmapNeedsLiveSessionAutoSync(db = {}, roadmap = {}) {
 
   const today = todayKey();
 
-  for (const day of roadmap.days || []) {
+  const sequenceEntries = ngRoadmapSequenceEntries(roadmap.days || []);
+
+  for (const { day, scheduleSlotNumber, instructionalDayNumber, systemDay, noClass } of sequenceEntries) {
     if (!day?.id) continue;
 
     const dayDate = String(day.date || day.scheduled_date || "").slice(0, 10);
     const shouldCheckFuture = !dayDate || dayDate >= today;
     const linkedSession = ngPickLiveSessionForRoadmapDay(db, courseId, day);
 
-    if (ngRoadmapDayIsNoClass(day)) {
+    if (Number(day.order || day.schedule_slot_number || 0) !== scheduleSlotNumber) return true;
+    if (Number(day.schedule_slot_number || day.order || 0) !== scheduleSlotNumber) return true;
+
+    if (noClass) {
+      if (day.day_number !== null && day.day_number !== undefined && day.day_number !== "") return true;
+      if (day.instructional_day_number !== null && day.instructional_day_number !== undefined && day.instructional_day_number !== "") return true;
+      if (day.system_day !== null && day.system_day !== undefined && day.system_day !== "") return true;
+      if (day.day_in_system !== null && day.day_in_system !== undefined && day.day_in_system !== "") return true;
+    } else {
+      if (Number(day.day_number || 0) !== instructionalDayNumber) return true;
+      if (Number(day.instructional_day_number || day.day_number || 0) !== instructionalDayNumber) return true;
+      if (Number(day.system_day || day.day_in_system || 0) !== systemDay) return true;
+
+      const expectedDay = {
+        ...day,
+        day_number: instructionalDayNumber,
+        instructional_day_number: instructionalDayNumber,
+        system_day: systemDay,
+        day_in_system: systemDay,
+      };
+      const expectedTitle = ngBuildLiveSessionTitleFromRoadmap(db, roadmap, expectedDay);
+      if (String(day.title || "").trim() !== expectedTitle) return true;
+      if (linkedSession?.id) {
+        if (Number(linkedSession.day_number || 0) !== instructionalDayNumber) return true;
+        if (Number(linkedSession.system_day || linkedSession.day_in_system || 0) !== systemDay) return true;
+        if (String(linkedSession.topic || linkedSession.title || "").trim() !== expectedTitle) return true;
+      }
+    }
+
+    if (noClass) {
       if (!linkedSession?.id) continue;
       const status = String(linkedSession.status || "").toLowerCase();
       if (!["cancelled", "canceled", "completed", "ended", "past"].includes(status)) return true;
@@ -15076,7 +15205,7 @@ function ngAutoSyncRoadmapLiveSessionsForCourses(db = {}, courseIds = [], option
     const skipSundays = roadmap.skip_sundays !== false && roadmap.settings?.skip_sundays !== false;
     const startDate = roadmap.start_date || roadmap.settings?.start_date || roadmap.days[0]?.date || todayKey();
 
-    ngRecalculateRoadmapSchedule(db, roadmap, { startDate, skipSundays });
+    ngRecalculateRoadmapSchedule(db, roadmap, { startDate, skipSundays, actorId: options.actorId || options.userId || "student_auto_live_sync" });
 
     const dependencySync = {
       days_checked: 0,
@@ -15109,6 +15238,10 @@ function ngAutoSyncRoadmapLiveSessionsForCourses(db = {}, courseIds = [], option
       }
     }
 
+    const sequenceMetadataSync = ngSyncRoadmapSequenceMetadata(db, roadmap, {
+      actorId: options.actorId || options.userId || "student_auto_live_sync",
+    });
+
     const liveSessionSync = ngSyncLinkedLiveSessionsForRoadmap(db, roadmap, {
       actorId: options.actorId || options.userId || "student_auto_live_sync",
     });
@@ -15121,6 +15254,7 @@ function ngAutoSyncRoadmapLiveSessionsForCourses(db = {}, courseIds = [], option
       skipped: false,
       roadmap_key: entry.key,
       dependency_sync: dependencySync,
+      sequence_metadata_sync: sequenceMetadataSync,
       live_session_sync: liveSessionSync,
     });
   }
@@ -15695,6 +15829,15 @@ app.get("/student/notes/sessions", async (req, res) => {
       ? allCourses.filter((course) => String(course.id) === requestedCourseId)
       : allCourses;
 
+    const autoRoadmapSync = ngAutoSyncRoadmapLiveSessionsForCourses(
+      db,
+      coursesToCheck
+        .filter((course) => ngStudentHasCourseAccessStatus(ngStudentEnrollmentStatusForCourse(db, user, course.id).status))
+        .map((course) => course.id),
+      { actorId: user.id || "student_notes_title_sync" }
+    );
+    if (autoRoadmapSync.changed) await writeLiveDb(db);
+
     const bundles = coursesToCheck.map((course) => {
       const access = ngStudentEnrollmentStatusForCourse(db, user, course.id);
       if (!ngStudentHasCourseAccessStatus(access.status)) return null;
@@ -15729,6 +15872,7 @@ app.get("/student/notes/sessions", async (req, res) => {
       bundles,
       sessions: requestedCourseId ? (bundles[0]?.sessions || []) : [],
       demo_access_self_heal: selfHeal,
+      auto_roadmap_sync: autoRoadmapSync,
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({
@@ -46923,6 +47067,7 @@ function ngSafeJsonArrayFromBody(value) {
 
 function ngNormalizeMasterMapRows(value) {
   const rows = ngSafeJsonArrayFromBody(value);
+  const systemCounters = new Map();
   return rows.map((row, index) => {
     const dayNumber = Number(row.day_number ?? row.day ?? row.day_no ?? row.order ?? row.sequence ?? index + 1) || (index + 1);
     const system = ngNormalizeMasterMapSystemName(row.system ?? row.chapter ?? row.subject ?? row.organ_system ?? "");
@@ -46931,13 +47076,19 @@ function ngNormalizeMasterMapRows(value) {
     const firstAidPages = String(row.first_aid_pages ?? row.fa_pages ?? row.pages ?? row.page_range ?? "").trim();
     const firstAidTopics = String(row.first_aid_topics ?? row.fa_topics ?? row.fa_topic ?? topic ?? "").trim();
     const lectureTitle = String(row.video_library_lecture ?? row.lecture_title ?? row.video_lecture ?? row.library_lecture ?? row.recorded_lecture ?? "").trim();
-    const title = String(row.title ?? row.day_title ?? "").trim() || `${system} Day ${dayNumber} — ${topic || firstAidTopics || "Daily Review"}`;
+    const explicitSystemDay = Number(row.system_day ?? row.day_in_system ?? row.systemDay ?? 0) || null;
+    const nextSystemDay = Number(systemCounters.get(system) || 0) + 1;
+    const systemDay = explicitSystemDay || nextSystemDay;
+    systemCounters.set(system, Math.max(nextSystemDay, systemDay));
+    const title = String(row.title ?? row.day_title ?? "").trim() || `${system} Day ${systemDay} — ${topic || firstAidTopics || "Daily Review"}`;
     return {
       ...row,
       source_index: index + 1,
       day_number: dayNumber,
       week_number: Number(row.week_number ?? row.week ?? Math.ceil(dayNumber / 7)) || Math.ceil(dayNumber / 7),
       system,
+      system_day: systemDay,
+      day_in_system: systemDay,
       chapter: String(row.chapter ?? system ?? "").trim() || system,
       topic,
       title,
@@ -47056,8 +47207,13 @@ function ngBuildMarathonDayFromMasterRow({ courseId, courseName, row, dayNumber,
     system: row.system,
     chapter: row.chapter || row.system,
     system_day: row.system_day || row.day_in_system || null,
+    day_in_system: row.system_day || row.day_in_system || null,
     topic,
-    title: row.title || `${row.system} Day ${dayNumber} — ${topic}`,
+    title: ngDayFirstContentTitle(row.title || topic, {
+      systemDay: row.system_day || row.day_in_system,
+      dayNumber,
+      system: row.system,
+    }),
     description,
     first_aid_pages: row.first_aid_pages || null,
     first_aid_topics: row.first_aid_topics || topic,
@@ -47093,6 +47249,46 @@ function ngRoadmapDayIsNoClass(day = {}) {
   return status === "holiday" || status === "cancelled" || day.is_schedule_placeholder === true;
 }
 
+function ngRoadmapSequenceEntries(days = []) {
+  let instructionalDay = 0;
+  const systemCounters = new Map();
+
+  return (Array.isArray(days) ? days : []).map((day, index) => {
+    const noClass = ngRoadmapDayIsNoClass(day);
+    const scheduleSlotNumber = index + 1;
+    if (noClass) {
+      return { day, index, noClass, scheduleSlotNumber, instructionalDayNumber: null, systemDay: null };
+    }
+
+    instructionalDay += 1;
+    const normalizedSystem = ngNormalizeMasterMapSystemName(day.system || day.chapter || "") || String(day.system || day.chapter || "Unspecified").trim().toLowerCase();
+    const systemDay = Number(systemCounters.get(normalizedSystem) || 0) + 1;
+    systemCounters.set(normalizedSystem, systemDay);
+    return { day, index, noClass, scheduleSlotNumber, instructionalDayNumber: instructionalDay, systemDay };
+  });
+}
+
+function ngRoadmapCanonicalDayTitle(day = {}) {
+  const rawTitle = String(day.title || day.topic || day.first_aid_topics || day.system || "Live Class").trim();
+  if (ngRoadmapDayIsNoClass(day)) return rawTitle || "No Live Class";
+
+  const firstAidPages = String(day.first_aid_pages || day.fa_pages || "").trim();
+  const titleKey = rawTitle.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const pagesKey = firstAidPages.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const formattedPages = firstAidPages && !/(?:\bfa\b|\bfirst\s+aid\b|\bpp?\.)/i.test(firstAidPages)
+    ? `FA pp. ${firstAidPages}`
+    : firstAidPages;
+  const titleWithPages = formattedPages && pagesKey && !titleKey.includes(pagesKey)
+    ? `${rawTitle} — ${formattedPages}`
+    : rawTitle;
+
+  return ngDayFirstContentTitle(titleWithPages, {
+    systemDay: day.system_day || day.day_in_system,
+    dayNumber: day.day_number,
+    system: day.system || day.chapter,
+  });
+}
+
 function ngRoadmapCourseId(roadmap = {}) {
   return String(roadmap.course_id || roadmap.courseId || "").trim();
 }
@@ -47118,26 +47314,7 @@ function ngRoadmapTimezone(roadmap = {}, day = {}) {
 }
 
 function ngBuildLiveSessionTitleFromRoadmap(db, roadmap = {}, day = {}) {
-  const courseId = ngRoadmapCourseId(roadmap);
-  const courseName =
-    db.courses?.[courseId]?.name ||
-    roadmap.course_name ||
-    roadmap.name ||
-    "NextGen Live Course";
-
-  const dayTitle = String(
-    day.title ||
-    day.topic ||
-    day.first_aid_topics ||
-    day.system ||
-    `Day ${day.day_number || day.order || ""}`
-  ).trim();
-
-  if (!dayTitle) return `${courseName} — Live Class`;
-  return ngDayFirstContentTitle(`${courseName} — ${dayTitle}`, {
-    dayNumber: day.day_number || day.order,
-    system: day.system || day.chapter,
-  });
+  return ngRoadmapCanonicalDayTitle(day);
 }
 
 function ngCanMoveOrReuseLiveSession(session = {}) {
@@ -47264,7 +47441,9 @@ function ngSyncLinkedLiveSessionsForRoadmap(db, roadmap, options = {}) {
     session.instructor_name = session.instructor_name || course?.instructor_name || "Dr. Ahmad";
     session.status = String(session.status || "scheduled").toLowerCase() === "completed" ? session.status : "scheduled";
     session.roadmap_day_id = day.id;
-    session.day_number = day.day_number || day.order || null;
+    session.day_number = day.day_number || null;
+    session.instructional_day_number = day.instructional_day_number || day.day_number || null;
+    session.system_day = day.system_day || day.day_in_system || null;
     session.system = day.system || day.chapter || session.system || "";
     session.source = session.source || "roadmap_sync";
     session.updated_by = options.actorId || options.userId || session.updated_by || null;
@@ -47305,6 +47484,9 @@ function ngSyncLinkedLiveSessionsForRoadmap(db, roadmap, options = {}) {
       session.archived_from_active = true;
       session.no_class_placeholder = true;
       session.roadmap_day_id = day.id;
+      session.day_number = null;
+      session.instructional_day_number = null;
+      session.system_day = null;
       session.scheduled_date = day.date || session.scheduled_date || null;
       session.scheduled_time = ngRoadmapClassTime(roadmap, day);
       session.scheduled_timezone = ngRoadmapTimezone(roadmap, day);
@@ -47425,10 +47607,18 @@ function ngRelinkRoadmapDayDependencies(db, { courseId = "", fromDayId = "", toD
     return changed;
   };
 
+  const applySequenceFields = (item = {}) => {
+    item.day_number = toDay.day_number || null;
+    item.instructional_day_number = toDay.instructional_day_number || toDay.day_number || null;
+    item.system_day = toDay.system_day || toDay.day_in_system || null;
+    item.day_in_system = toDay.system_day || toDay.day_in_system || null;
+    item.system = toDay.system || toDay.chapter || item.system || "";
+  };
+
   for (const card of Object.values(db.flashcards || {})) {
     if (!card?.id || !courseMatches(card)) continue;
     if (!relinkDayFields(card)) continue;
-    card.day_number = toDay.day_number || card.day_number || null;
+    applySequenceFields(card);
     card.scheduled_date = toDay.date || card.scheduled_date || null;
     card.due_date = card.due_date && String(card.due_date) === String(toDay.original_day_snapshot?.date || "") ? toDay.date : (card.due_date || toDay.date || null);
     card.updated_by = actorId || card.updated_by || null;
@@ -47439,6 +47629,7 @@ function ngRelinkRoadmapDayDependencies(db, { courseId = "", fromDayId = "", toD
   for (const item of Object.values(db.flashcardProgress || {})) {
     if (!item || !courseMatches(item)) continue;
     if (!relinkDayFields(item)) continue;
+    applySequenceFields(item);
     if (item.user_id) affectedUsers.add(String(item.user_id));
     item.updated_at = now;
     counts.flashcard_progress += 1;
@@ -47447,8 +47638,8 @@ function ngRelinkRoadmapDayDependencies(db, { courseId = "", fromDayId = "", toD
   for (const assessment of Object.values(db.assessments || {})) {
     if (!assessment?.id || !courseMatches(assessment)) continue;
     if (!relinkDayFields(assessment)) continue;
-    assessment.day_number = toDay.day_number || assessment.day_number || null;
-    assessment.system = assessment.system || toDay.system || "";
+    applySequenceFields(assessment);
+    assessment.title = ngDayFirstContentTitle(assessment.title, { systemDay: assessment.system_day, dayNumber: assessment.day_number, system: assessment.system });
     assessment.updated_by = actorId || assessment.updated_by || null;
     assessment.updated_at = now;
     counts.assessments += 1;
@@ -47457,6 +47648,7 @@ function ngRelinkRoadmapDayDependencies(db, { courseId = "", fromDayId = "", toD
   for (const attempt of Object.values(db.assessmentAttempts || {})) {
     if (!attempt || !courseMatches(attempt)) continue;
     if (!relinkDayFields(attempt)) continue;
+    applySequenceFields(attempt);
     if (attempt.user_id) affectedUsers.add(String(attempt.user_id));
     attempt.updated_at = now;
     counts.assessment_attempts += 1;
@@ -47465,7 +47657,7 @@ function ngRelinkRoadmapDayDependencies(db, { courseId = "", fromDayId = "", toD
   for (const note of Object.values(db.notes || {})) {
     if (!note || !courseMatches(note)) continue;
     if (!relinkDayFields(note)) continue;
-    note.day_number = toDay.day_number || note.day_number || null;
+    applySequenceFields(note);
     note.updated_by = actorId || note.updated_by || null;
     note.updated_at = now;
     counts.notes += 1;
@@ -47479,7 +47671,7 @@ function ngRelinkRoadmapDayDependencies(db, { courseId = "", fromDayId = "", toD
       const matches = String(item.day_id || item.roadmap_day_id || "") === oldDayId || String(id).includes(oldDayId);
       if (!matches) continue;
       relinkDayFields(item);
-      item.day_number = toDay.day_number || item.day_number || null;
+      applySequenceFields(item);
       item.updated_at = now;
       if (item.user_id) affectedUsers.add(String(item.user_id));
 
@@ -47517,7 +47709,7 @@ function ngRelinkRoadmapDayDependencies(db, { courseId = "", fromDayId = "", toD
   for (const event of Object.values(db.pointEvents || {})) {
     if (!event || !courseMatches(event)) continue;
     if (!relinkDayFields(event)) continue;
-    event.day_number = toDay.day_number || event.day_number || null;
+    applySequenceFields(event);
     event.updated_at = now;
     if (event.user_id) affectedUsers.add(String(event.user_id));
     counts.point_events += 1;
@@ -47526,8 +47718,7 @@ function ngRelinkRoadmapDayDependencies(db, { courseId = "", fromDayId = "", toD
   for (const weak of Object.values(db.weakConceptLogs || {})) {
     if (!weak || !courseMatches(weak)) continue;
     if (!relinkDayFields(weak)) continue;
-    weak.day_number = toDay.day_number || weak.day_number || null;
-    weak.system = weak.system || toDay.system || "";
+    applySequenceFields(weak);
     weak.updated_at = now;
     if (weak.user_id) affectedUsers.add(String(weak.user_id));
     counts.weak_concepts += 1;
@@ -47641,27 +47832,151 @@ function ngShiftLinkedScheduleMetadata(db, { courseId = "", day = null, fromDate
   return counts;
 }
 
-function ngRecalculateRoadmapSchedule(db, roadmap, { startDate = "", skipSundays = true } = {}) {
+function ngSyncRoadmapSequenceMetadata(db, roadmap, { actorId = null } = {}) {
+  if (!roadmap || !Array.isArray(roadmap.days)) return { changed: 0, buckets: {} };
+
+  const courseId = ngRoadmapCourseId(roadmap);
+  const activeDays = roadmap.days.filter((day) => day?.id && !ngRoadmapDayIsNoClass(day));
+  const dayById = new Map(activeDays.map((day) => [String(day.id), day]));
+  const dayBySessionId = new Map();
+
+  for (const day of activeDays) {
+    for (const sessionId of [day.live_session_id, day.session_id]) {
+      if (sessionId) dayBySessionId.set(String(sessionId), day);
+    }
+  }
+  for (const session of Object.values(db.liveSessions || {})) {
+    const day = dayById.get(String(session?.roadmap_day_id || ""));
+    if (day && session?.id) dayBySessionId.set(String(session.id), day);
+  }
+
+  const assessmentDayById = new Map();
+  for (const assessment of Object.values(db.assessments || {})) {
+    const day = dayById.get(String(assessment?.roadmap_day_id || assessment?.day_id || "")) ||
+      dayBySessionId.get(String(assessment?.session_id || ""));
+    if (day && assessment?.id) assessmentDayById.set(String(assessment.id), day);
+  }
+
+  const resolveDay = (item = {}, key = "") => {
+    const itemCourseId = String(item.course_id || item.courseId || "").trim();
+    if (courseId && itemCourseId && itemCourseId !== courseId) return null;
+
+    for (const id of [item.roadmap_day_id, item.day_id]) {
+      const day = dayById.get(String(id || ""));
+      if (day) return day;
+    }
+    for (const id of Array.isArray(item.source_roadmap_day_ids) ? item.source_roadmap_day_ids : []) {
+      const day = dayById.get(String(id || ""));
+      if (day) return day;
+    }
+    for (const id of [item.session_id, item.live_session_id, key]) {
+      const day = dayBySessionId.get(String(id || ""));
+      if (day) return day;
+    }
+    const assessmentDay = assessmentDayById.get(String(item.assessment_id || ""));
+    if (assessmentDay) return assessmentDay;
+    return null;
+  };
+
+  const bucketNames = [
+    "flashcards",
+    "flashcardProgress",
+    "assessments",
+    "assessmentAttempts",
+    "notes",
+    "recordings",
+    "roadmapProgress",
+    "dailyTaskProgress",
+    "pointEvents",
+    "weakConceptLogs",
+    "adaptiveAssignments",
+    "adaptiveFlashcardQueues",
+    "attendance",
+  ];
+  const counts = Object.fromEntries(bucketNames.map((name) => [name, 0]));
+  const now = new Date().toISOString();
+  let changedTotal = 0;
+
+  for (const bucketName of bucketNames) {
+    for (const [key, item] of Object.entries(db[bucketName] || {})) {
+      if (!item || typeof item !== "object") continue;
+      const day = resolveDay(item, key);
+      if (!day) continue;
+
+      const wanted = {
+        day_number: day.day_number || null,
+        instructional_day_number: day.instructional_day_number || day.day_number || null,
+        system_day: day.system_day || day.day_in_system || null,
+        day_in_system: day.system_day || day.day_in_system || null,
+        system: day.system || day.chapter || "",
+      };
+      let changed = false;
+      for (const [field, value] of Object.entries(wanted)) {
+        if (item[field] === value) continue;
+        item[field] = value;
+        changed = true;
+      }
+
+      if (bucketName === "assessments" && item.title) {
+        const title = ngDayFirstContentTitle(item.title, { systemDay: wanted.system_day, dayNumber: wanted.day_number, system: wanted.system });
+        if (title && title !== item.title) {
+          item.title = title;
+          changed = true;
+        }
+      }
+      if (bucketName === "recordings" && item.topic) {
+        const topic = ngDayFirstContentTitle(item.topic, { systemDay: wanted.system_day, dayNumber: wanted.day_number, system: wanted.system });
+        if (topic && topic !== item.topic) {
+          item.topic = topic;
+          changed = true;
+        }
+      }
+
+      if (!changed) continue;
+      item.sequence_metadata_updated_at = now;
+      item.sequence_metadata_updated_by = actorId || item.sequence_metadata_updated_by || null;
+      counts[bucketName] += 1;
+      changedTotal += 1;
+    }
+  }
+
+  return { changed: changedTotal, buckets: counts };
+}
+
+function ngRecalculateRoadmapSchedule(db, roadmap, { startDate = "", skipSundays = true, actorId = null } = {}) {
   if (!roadmap || !Array.isArray(roadmap.days) || !roadmap.days.length) return roadmap;
   const firstDate = startDate || roadmap.start_date || roadmap.settings?.start_date || roadmap.days[0]?.date || todayKey();
   let cursor = ngNextStudyDate(new Date(`${firstDate}T00:00:00`), skipSundays);
-  roadmap.days.forEach((day, index) => {
+  const sequenceEntries = ngRoadmapSequenceEntries(roadmap.days);
+  sequenceEntries.forEach(({ day, scheduleSlotNumber, instructionalDayNumber, systemDay, noClass }) => {
     cursor = ngNextStudyDate(cursor, skipSundays);
     const scheduleException = ngRoadmapActiveScheduleException(roadmap, day);
     const scheduledDate = String(scheduleException?.override_date || scheduleException?.move_to_date || "").trim();
     const effectiveCursor = scheduledDate ? new Date(`${scheduledDate}T00:00:00`) : new Date(cursor);
-    day.day_number = index + 1;
-    day.order = index + 1;
-    day.week_number = Math.ceil((index + 1) / 7);
+    day.schedule_slot_number = scheduleSlotNumber;
+    day.order = scheduleSlotNumber;
+    day.day_number = noClass ? null : instructionalDayNumber;
+    day.instructional_day_number = noClass ? null : instructionalDayNumber;
+    day.system_day = noClass ? null : systemDay;
+    day.day_in_system = noClass ? null : systemDay;
+    day.week_number = noClass ? Math.ceil(scheduleSlotNumber / 7) : Math.ceil(instructionalDayNumber / 7);
     day.date = dateOnly(effectiveCursor);
     day.scheduled_date = day.date;
     day.schedule_exception_id = scheduleException?.id || null;
     day.schedule_exception_active = Boolean(scheduleException);
+    if (!noClass) day.title = ngRoadmapCanonicalDayTitle(day);
     day.updated_at = new Date().toISOString();
     cursor = new Date(effectiveCursor);
     cursor.setDate(cursor.getDate() + 1);
   });
-  ngSyncLinkedLiveSessionsForRoadmap(db, roadmap);
+  const activeCount = sequenceEntries.filter((entry) => !entry.noClass).length;
+  roadmap.instructional_days = activeCount;
+  roadmap.schedule_slots = roadmap.days.length;
+  roadmap.settings = roadmap.settings || {};
+  roadmap.settings.duration_days = activeCount;
+  roadmap.settings.schedule_slots = roadmap.days.length;
+  roadmap.sequence_metadata_sync = ngSyncRoadmapSequenceMetadata(db, roadmap, { actorId });
+  ngSyncLinkedLiveSessionsForRoadmap(db, roadmap, { actorId });
   roadmap.updated_at = new Date().toISOString();
   return roadmap;
 }
@@ -47785,7 +48100,8 @@ function ngBuildMarathonDay({ courseId, dayNumber, weekNumber, date, system, sys
     : `Live First Aid session with Dr. Ahmad for ${system}. After class, watch the matching UWorld Video Library QID explanations, complete the assigned UWorld QIDs externally, log weak concepts, review flashcards, earn leaderboard points, and post one confusing concept in Community Q&A.`;
   return {
     id: uuid(), course_id: courseId, week_number: weekNumber, day_number: dayNumber, date: dateOnly(date),
-    system, system_day: systemDay, title, description,
+    instructional_day_number: dayNumber, system, system_day: systemDay, day_in_system: systemDay,
+    title: ngDayFirstContentTitle(title, { systemDay, dayNumber, system }), description,
     resources: isAssessment ? ["First Aid", "UWorld Video Library", "Assessment", "Incorrect Review", "Leaderboard", "Community Q&A"] : ["First Aid", "Pathoma", "UWorld Video Library", "Live Session Recording", "Class Notes", "Daily Flashcards", "Community Q&A", "Leaderboard"],
     resource_links: [],
     uworld_target: isAssessment ? `${system} system-end assessment + incorrect review` : (qids || `${system} mapped QIDs: 30-40 MCQs or assigned block`),
@@ -47856,6 +48172,315 @@ app.post("/admin/roadmap/import-master-map", async (req, res) => {
     await writeLiveDb(db);
     res.json({ success: true, template, count: rows.length, by_system: bySystem, system_sequence: systemSequence, first_system: systemSequence[0] || rows[0]?.system || null, map: { ...db.roadmapMasterMaps[template], rows: undefined }, message: `Master map imported: ${rows.length} rows` });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+// Adds real teaching packets to an existing medical-system block without
+// replacing any existing roadmap day. Preview is the default; applying the
+// extension preserves all existing roadmap/live-session identities and shifts
+// only later scheduled dates.
+app.post("/admin/roadmap/extend-system", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.roadmap.manage");
+    const db = await readLiveDb();
+    const courseId = String(req.body.course_id || req.body.courseId || "").trim();
+    const requestedSystem = String(req.body.system || req.body.chapter || "").trim();
+    const requestedDays = ngSafeJsonArrayFromBody(req.body.days || req.body.new_days || req.body.rows || []);
+    const dryRun = req.body.dry_run !== false;
+
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    if (!requestedSystem) return res.status(400).json({ success: false, error: "system is required" });
+    if (!requestedDays.length) {
+      return res.status(400).json({
+        success: false,
+        error: "days must contain at least one real teaching packet; blank or dummy roadmap days are not created",
+      });
+    }
+    if (requestedDays.length > 14) {
+      return res.status(400).json({ success: false, error: "A maximum of 14 system days can be added in one operation" });
+    }
+    if (req.body.count !== undefined && Number(req.body.count) !== requestedDays.length) {
+      return res.status(400).json({ success: false, error: "count must match the number of supplied days" });
+    }
+
+    const entry = ngFindRoadmapEntryForCourse(db, courseId);
+    const roadmap = entry.roadmap;
+    if (!roadmap || !Array.isArray(roadmap.days) || !roadmap.days.length) {
+      return res.status(404).json({ success: false, error: "Roadmap not found or roadmap has no days" });
+    }
+
+    const normalizedRequestedSystem = ngNormalizeMasterMapSystemName(requestedSystem) || requestedSystem.toLowerCase();
+    const matchingIndexes = roadmap.days
+      .map((day, index) => ({ day, index }))
+      .filter(({ day }) => !ngRoadmapDayIsNoClass(day))
+      .filter(({ day }) => {
+        const key = ngNormalizeMasterMapSystemName(day.system || day.chapter || "") || String(day.system || day.chapter || "").trim().toLowerCase();
+        return key === normalizedRequestedSystem;
+      });
+
+    if (!matchingIndexes.length) {
+      return res.status(404).json({ success: false, error: `No existing ${requestedSystem} teaching block was found` });
+    }
+
+    const lastSystemEntry = matchingIndexes[matchingIndexes.length - 1];
+    const terminalSystemDayIsAssessment = Boolean(
+      lastSystemEntry.day.assessment_day ||
+      lastSystemEntry.day.assessment_id ||
+      /(?:system[\s-]*end|grand\s+system).*assessment|assessment.*correction/i.test(String(lastSystemEntry.day.title || lastSystemEntry.day.assessment_type || ""))
+    );
+    const insertionIndex = terminalSystemDayIsAssessment ? lastSystemEntry.index : lastSystemEntry.index + 1;
+    const insertionAnchorEntry = [...matchingIndexes].reverse().find((item) => item.index < insertionIndex) || lastSystemEntry;
+    const canonicalSystem = String(lastSystemEntry.day.system || lastSystemEntry.day.chapter || requestedSystem).trim();
+    const laterDays = roadmap.days.slice(insertionIndex).filter((day) => day?.id && !ngRoadmapDayIsNoClass(day));
+    const laterDayIds = new Set(laterDays.map((day) => String(day.id)));
+    const laterSessions = Object.values(db.liveSessions || {}).filter((session) => {
+      return String(session?.course_id || "") === courseId && laterDayIds.has(String(session?.roadmap_day_id || ""));
+    });
+    const laterSessionIds = new Set(laterSessions.map((session) => String(session.id || "")).filter(Boolean));
+    const today = todayKey();
+
+    const alreadyStartedDay = laterDays.find((day) => {
+      const date = String(day.date || day.scheduled_date || "").slice(0, 10);
+      return date && date <= today;
+    });
+    const lockedSession = laterSessions.find((session) => {
+      const status = String(session.status || "scheduled").trim().toLowerCase();
+      return ["completed", "ended", "past", "live", "in_progress", "in-progress"].includes(status) ||
+        Boolean(session.recording_url || session.recording_id || session.transcript_url);
+    });
+    const lockedRecording = Object.values(db.recordings || {}).find((recording) => {
+      return laterDayIds.has(String(recording?.roadmap_day_id || "")) || laterSessionIds.has(String(recording?.session_id || ""));
+    });
+    const lockedAttendance = Object.values(db.attendance || {}).find((attendance) => {
+      return laterDayIds.has(String(attendance?.roadmap_day_id || attendance?.day_id || "")) ||
+        laterSessionIds.has(String(attendance?.session_id || attendance?.live_session_id || ""));
+    });
+
+    if (alreadyStartedDay || lockedSession || lockedRecording || lockedAttendance) {
+      return res.status(409).json({
+        success: false,
+        error: "Safety stop: a later system has already started or has attendance/recording data, so its schedule was not moved",
+        locked_roadmap_day_id: alreadyStartedDay?.id || lockedSession?.roadmap_day_id || lockedRecording?.roadmap_day_id || lockedAttendance?.roadmap_day_id || null,
+        locked_session_id: lockedSession?.id || lockedRecording?.session_id || lockedAttendance?.session_id || null,
+      });
+    }
+
+    const meaningfulDays = [];
+    const existingSystemDaysTotal = matchingIndexes.length;
+    const currentSystemDayCount = matchingIndexes.filter((item) => item.index < insertionIndex).length;
+    for (let index = 0; index < requestedDays.length; index += 1) {
+      const raw = requestedDays[index] && typeof requestedDays[index] === "object" ? requestedDays[index] : {};
+      const contentTitle = String(raw.title || raw.topic || raw.first_aid_topics || raw.live_teaching_topic || "").trim();
+      const qids = ngNormalizeQidList(raw.uworld_qids || raw.mapped_uworld_qids || raw.qids || raw.uworld_target || []);
+      const hasMappedWork = Boolean(
+        String(raw.first_aid_pages || raw.fa_pages || raw.first_aid_topics || raw.description || raw.homework || raw.video_library_lecture || raw.lecture_title || "").trim() ||
+        qids.length
+      );
+      if (!contentTitle || !hasMappedWork) {
+        return res.status(400).json({
+          success: false,
+          error: `Added day ${index + 1} needs a real title/topic plus mapped pages, topics, QIDs, homework, description, or lecture content`,
+        });
+      }
+
+      const systemDay = currentSystemDayCount + index + 1;
+      const now = new Date().toISOString();
+      const normalized = ngNormalizeAdminRoadmapPayload(
+        {
+          ...raw,
+          title: contentTitle,
+          system: canonicalSystem,
+          chapter: raw.chapter || canonicalSystem,
+          system_day: systemDay,
+          day_in_system: systemDay,
+          day_number: insertionIndex + index + 1,
+          status: "scheduled",
+          roadmap_status: "scheduled",
+          uworld_qids: qids,
+          mapped_uworld_qids: qids,
+          is_published: raw.is_published !== false,
+        },
+        {
+          id: `${courseId}:day:extension:${uuid()}`,
+          course_id: courseId,
+          created_by: user.id,
+          created_at: now,
+        }
+      );
+
+      normalized.system_day = systemDay;
+      normalized.day_in_system = systemDay;
+      normalized.topic = String(raw.topic || raw.first_aid_topics || contentTitle).trim();
+      normalized.live_teaching_topic = String(raw.live_teaching_topic || raw.topic || raw.first_aid_topics || contentTitle).trim();
+      normalized.lecture_id = raw.lecture_id || raw.video_library_lecture_id || null;
+      normalized.community_prompt = String(raw.community_prompt || "").trim();
+      normalized.assessment_task = String(raw.assessment_task || "").trim();
+      normalized.live_session_id = null;
+      normalized.session_id = null;
+      normalized.source = "admin_system_extension";
+      normalized.extension_system = canonicalSystem;
+      normalized.extension_requested_by = user.id;
+      normalized.updated_by = user.id;
+      normalized.updated_at = now;
+      normalized.title = ngRoadmapCanonicalDayTitle(normalized);
+      meaningfulDays.push(normalized);
+    }
+
+    const skipSundays = roadmap.skip_sundays !== false && roadmap.settings?.skip_sundays !== false;
+    const startDate = roadmap.start_date || roadmap.settings?.start_date || roadmap.days[0]?.date || todayKey();
+    const clone = (value) => JSON.parse(JSON.stringify(value));
+    const previewRoadmap = clone(roadmap);
+    previewRoadmap.days.splice(insertionIndex, 0, ...clone(meaningfulDays));
+    const previewDb = {
+      courses: clone(db.courses || {}),
+      liveSessions: clone(db.liveSessions || {}),
+      assessments: clone(db.assessments || {}),
+    };
+    ngRecalculateRoadmapSchedule(previewDb, previewRoadmap, { startDate, skipSundays, actorId: user.id });
+
+    const insertedPreview = previewRoadmap.days
+      .filter((day) => meaningfulDays.some((created) => String(created.id) === String(day.id)))
+      .map(sanitizeRoadmapDay);
+    const shiftedPreview = previewRoadmap.days
+      .slice(insertionIndex + meaningfulDays.length, insertionIndex + meaningfulDays.length + 8)
+      .map(sanitizeRoadmapDay);
+
+    if (dryRun) {
+      return res.json({
+        success: true,
+        dry_run: true,
+        applied: false,
+        course_id: courseId,
+        system: canonicalSystem,
+        existing_system_days: existingSystemDaysTotal,
+        insertion_base_system_day: currentSystemDayCount,
+        added_system_days: meaningfulDays.length,
+        insertion_after_roadmap_day_id: insertionAnchorEntry.day.id,
+        terminal_assessment_moved_to_end: terminalSystemDayIsAssessment,
+        new_instructional_days: previewRoadmap.instructional_days,
+        new_schedule_slots: previewRoadmap.schedule_slots,
+        inserted_days: insertedPreview,
+        next_days_preview: shiftedPreview,
+        confirmation_required: "EXTEND_SYSTEM_ROADMAP",
+        message: `Preview only: ${meaningfulDays.length} ${canonicalSystem} teaching day(s) will be inserted before the next system. No data was changed.`,
+      });
+    }
+
+    if (String(req.body.confirm || "").trim().toUpperCase() !== "EXTEND_SYSTEM_ROADMAP") {
+      return res.status(400).json({
+        success: false,
+        error: "Exact confirmation is required: EXTEND_SYSTEM_ROADMAP",
+      });
+    }
+
+    const protectedBuckets = ["users", "enrollments", "payments", "notes", "recordings", "assessments", "assessmentAttempts", "flashcards", "flashcardProgress", "roadmapProgress", "dailyTaskProgress", "pointEvents", "weakConceptLogs", "leaderboard", "attendance"];
+    const protectedCountsBefore = Object.fromEntries(protectedBuckets.map((name) => [name, Object.keys(db[name] || {}).length]));
+    const existingDayIds = new Set(roadmap.days.map((day) => String(day.id || "")).filter(Boolean));
+    const existingSessionByDay = new Map(
+      roadmap.days
+        .filter((day) => day?.id && !ngRoadmapDayIsNoClass(day) && (day.live_session_id || day.session_id))
+        .map((day) => [String(day.id), String(day.live_session_id || day.session_id)])
+    );
+    const oldDates = new Map(roadmap.days.map((day) => [String(day.id || ""), String(day.date || day.scheduled_date || "").slice(0, 10)]));
+
+    await ensureDataDir();
+    const backupDir = path.join(DATA_DIR, "backups");
+    await fs.mkdir(backupDir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const safeSystemFileName = String(normalizedRequestedSystem || "system").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "system";
+    const backupPath = path.join(backupDir, `live-session-db-before-${safeSystemFileName}-extension-${stamp}.json`);
+    try {
+      await fs.copyFile(LIVE_DB_PATH, backupPath);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      await fs.writeFile(backupPath, JSON.stringify(db, null, 2), "utf8");
+    }
+
+    roadmap.days.splice(insertionIndex, 0, ...meaningfulDays);
+    ngRecalculateRoadmapSchedule(db, roadmap, { startDate, skipSundays, actorId: user.id });
+
+    const shiftedMetadata = {};
+    for (const day of roadmap.days) {
+      if (!existingDayIds.has(String(day.id || ""))) continue;
+      const beforeDate = oldDates.get(String(day.id || "")) || "";
+      const afterDate = String(day.date || day.scheduled_date || "").slice(0, 10);
+      if (!beforeDate || !afterDate || beforeDate === afterDate) continue;
+      const counts = ngShiftLinkedScheduleMetadata(db, {
+        courseId,
+        day,
+        fromDate: beforeDate,
+        toDate: afterDate,
+        actorId: user.id,
+      });
+      for (const [name, count] of Object.entries(counts)) shiftedMetadata[name] = Number(shiftedMetadata[name] || 0) + Number(count || 0);
+    }
+
+    const sequenceMetadataSync = ngSyncRoadmapSequenceMetadata(db, roadmap, { actorId: user.id });
+    const liveSessionSync = ngSyncLinkedLiveSessionsForRoadmap(db, roadmap, { actorId: user.id });
+
+    for (const dayId of existingDayIds) {
+      if (!roadmap.days.some((day) => String(day.id || "") === dayId)) {
+        return res.status(409).json({ success: false, error: `Safety stop before database write: existing roadmap day ${dayId} was not preserved`, backup_path: backupPath });
+      }
+    }
+    for (const [dayId, sessionId] of existingSessionByDay) {
+      const day = roadmap.days.find((item) => String(item.id || "") === dayId);
+      if (!day || String(day.live_session_id || day.session_id || "") !== sessionId) {
+        return res.status(409).json({ success: false, error: `Safety stop before database write: live-session identity changed for roadmap day ${dayId}`, expected_session_id: sessionId, actual_session_id: day?.live_session_id || day?.session_id || null, backup_path: backupPath });
+      }
+    }
+    for (const bucketName of protectedBuckets) {
+      const afterCount = Object.keys(db[bucketName] || {}).length;
+      if (afterCount < protectedCountsBefore[bucketName]) {
+        return res.status(409).json({ success: false, error: `Safety stop before database write: ${bucketName} count decreased`, before: protectedCountsBefore[bucketName], after: afterCount, backup_path: backupPath });
+      }
+    }
+
+    roadmap.system_extensions = Array.isArray(roadmap.system_extensions) ? roadmap.system_extensions : [];
+    roadmap.system_extensions.push({
+      id: `system_extension:${courseId}:${uuid()}`,
+      system: canonicalSystem,
+      added_day_ids: meaningfulDays.map((day) => day.id),
+      count: meaningfulDays.length,
+      insertion_after_roadmap_day_id: insertionAnchorEntry.day.id,
+      terminal_assessment_moved_to_end: terminalSystemDayIsAssessment,
+      preserved_existing_days: existingDayIds.size,
+      preserved_existing_live_sessions: existingSessionByDay.size,
+      created_by: user.id,
+      created_at: new Date().toISOString(),
+    });
+    roadmap.updated_by = user.id;
+    roadmap.updated_at = new Date().toISOString();
+    db.roadmaps[entry.key || courseId] = roadmap;
+    await writeLiveDb(db);
+
+    const appliedInsertedDays = roadmap.days
+      .filter((day) => meaningfulDays.some((created) => String(created.id) === String(day.id)))
+      .map(sanitizeRoadmapDay);
+    return res.json({
+      success: true,
+      dry_run: false,
+      applied: true,
+      course_id: courseId,
+      system: canonicalSystem,
+      added_system_days: meaningfulDays.length,
+      instructional_days: roadmap.instructional_days,
+      schedule_slots: roadmap.schedule_slots,
+      inserted_days: appliedInsertedDays,
+      shifted_schedule_metadata: shiftedMetadata,
+      sequence_metadata_sync: sequenceMetadataSync,
+      live_session_sync: liveSessionSync,
+      preserved_existing_roadmap_days: existingDayIds.size,
+      preserved_existing_live_sessions: existingSessionByDay.size,
+      users_deleted: 0,
+      attempts_deleted: 0,
+      recordings_deleted: 0,
+      points_deleted: 0,
+      backup_path: backupPath,
+      message: `${meaningfulDays.length} ${canonicalSystem} teaching day(s) were inserted before the next system. Existing academic identities and student data were preserved.`,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to extend roadmap system" });
+  }
 });
 
 // v190g port: this route is isolated to LMS roadmap scheduling; all supplied
@@ -48040,7 +48665,7 @@ app.post("/admin/roadmap/:dayId/advance-schedule", async (req, res) => {
     roadmap.skip_sundays = true;
 
     const startDate = roadmap.start_date || roadmap.settings?.start_date || roadmap.days?.[0]?.date || todayKey();
-    ngRecalculateRoadmapSchedule(db, roadmap, { startDate, skipSundays: true });
+    ngRecalculateRoadmapSchedule(db, roadmap, { startDate, skipSundays: true, actorId: user.id });
 
     const dependencyDateUpdates = {};
     let shiftedDays = 0;
@@ -48218,7 +48843,7 @@ app.post("/admin/roadmap/:dayId/push-status", async (req, res) => {
 
     const skipSundays = ref.roadmap.skip_sundays !== false && ref.roadmap.settings?.skip_sundays !== false;
     const startDate = ref.roadmap.start_date || ref.roadmap.settings?.start_date || ref.roadmap.days[0]?.date || todayKey();
-    ngRecalculateRoadmapSchedule(db, ref.roadmap, { startDate, skipSundays });
+    ngRecalculateRoadmapSchedule(db, ref.roadmap, { startDate, skipSundays, actorId: user.id });
     const movedContentDay = ref.roadmap.days.find((day) => String(day.id || "") === String(originalContent.id));
     const dependencySync = ngRelinkRoadmapDayDependencies(db, {
       courseId: ref.courseId,
@@ -48226,6 +48851,7 @@ app.post("/admin/roadmap/:dayId/push-status", async (req, res) => {
       toDay: movedContentDay || originalContent,
       actorId: user.id,
     });
+    const sequenceMetadataSync = ngSyncRoadmapSequenceMetadata(db, ref.roadmap, { actorId: user.id });
     const liveSessionSync = ngSyncLinkedLiveSessionsForRoadmap(db, ref.roadmap, { actorId: user.id });
     const announcement = ngUpsertCourseAnnouncement(db, {
       notification_key: notificationKey,
@@ -48242,7 +48868,7 @@ app.post("/admin/roadmap/:dayId/push-status", async (req, res) => {
     });
     db.roadmaps[ref.courseId] = ref.roadmap;
     await writeLiveDb(db);
-    res.json({ success: true, status, pushed: true, roadmap: ref.roadmap, days: ref.roadmap.days.map(sanitizeRoadmapDay), dependency_sync: dependencySync, live_session_sync: liveSessionSync, announcement: sanitizeAnnouncement(announcement), message: `${status} added and following content, live sessions, notes, flashcards, assessments, progress, and leaderboard links were pushed forward.` });
+    res.json({ success: true, status, pushed: true, roadmap: ref.roadmap, days: ref.roadmap.days.map(sanitizeRoadmapDay), dependency_sync: dependencySync, sequence_metadata_sync: sequenceMetadataSync, live_session_sync: liveSessionSync, announcement: sanitizeAnnouncement(announcement), message: `${status} added and following content, live sessions, notes, flashcards, assessments, progress, and leaderboard links were pushed forward.` });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
@@ -48328,7 +48954,21 @@ app.post("/admin/roadmap/apply-marathon-template", async (req, res) => {
     if (usedMasterMap) {
       masterRows = ngSortMasterRowsForSequence(masterRows, masterSystemSequence).slice(0, requestedDuration);
       const dates = ngBuildStudyDates(startDateRaw, masterRows.length, skipSundays);
-      days = masterRows.map((row, index) => ngBuildMarathonDayFromMasterRow({ courseId, courseName: db.courses[courseId].name || "Course", row, dayNumber: index + 1, date: dates[index], classTime, template }));
+      const systemDayCounters = new Map();
+      days = masterRows.map((row, index) => {
+        const systemKey = ngNormalizeMasterMapSystemName(row.system || row.chapter || "") || String(row.system || "").trim().toLowerCase();
+        const nextSystemDay = Number(systemDayCounters.get(systemKey) || 0) + 1;
+        systemDayCounters.set(systemKey, nextSystemDay);
+        return ngBuildMarathonDayFromMasterRow({
+          courseId,
+          courseName: db.courses[courseId].name || "Course",
+          row: { ...row, system_day: nextSystemDay, day_in_system: nextSystemDay },
+          dayNumber: index + 1,
+          date: dates[index],
+          classTime,
+          template,
+        });
+      });
     } else {
       const systems = Array.isArray(req.body.system_plan) && req.body.system_plan.length ? req.body.system_plan : ngDefaultMarathonSystems();
       let dayNumber = 1;
@@ -48355,9 +48995,11 @@ app.post("/admin/roadmap/apply-marathon-template", async (req, res) => {
         const session = {
           id: sessionId,
           course_id: courseId,
-          topic: ngDayFirstContentTitle(`${db.courses[courseId].name || "120-Day Marathon"} — Day ${day.day_number}: ${day.title || day.system}`, { dayNumber: day.day_number, system: day.system }),
-          title: ngDayFirstContentTitle(`${db.courses[courseId].name || "120-Day Marathon"} — Day ${day.day_number}: ${day.title || day.system}`, { dayNumber: day.day_number, system: day.system }),
+          topic: ngBuildLiveSessionTitleFromRoadmap(db, { course_id: courseId }, day),
+          title: ngBuildLiveSessionTitleFromRoadmap(db, { course_id: courseId }, day),
           day_number: day.day_number || null,
+          instructional_day_number: day.instructional_day_number || day.day_number || null,
+          system_day: day.system_day || day.day_in_system || null,
           system: day.system || "",
           description: day.description,
           scheduled_date: day.date,
@@ -48378,14 +49020,14 @@ app.post("/admin/roadmap/apply-marathon-template", async (req, res) => {
       }
       if (createAssessments && day.assessment_day) {
         const assessmentId = uuid();
-        db.assessments[assessmentId] = { id: assessmentId, course_id: courseId, session_id: null, roadmap_day_id: day.id, day_number: day.day_number || null, title: ngDayFirstContentTitle(day.title, { dayNumber: day.day_number, system: day.system }), description: day.description, source_type: usedMasterMap ? "master_map" : "system_end_marathon_template", questions: [], duration_minutes: 60, attempts_allowed: 1, is_published: false, assessment_type: "system_end", system: day.system, created_by: user.id, created_at: nowIso(), updated_at: nowIso() };
+        db.assessments[assessmentId] = { id: assessmentId, course_id: courseId, session_id: null, roadmap_day_id: day.id, day_number: day.day_number || null, instructional_day_number: day.instructional_day_number || day.day_number || null, system_day: day.system_day || day.day_in_system || null, title: ngDayFirstContentTitle(day.title, { systemDay: day.system_day || day.day_in_system, dayNumber: day.day_number, system: day.system }), description: day.description, source_type: usedMasterMap ? "master_map" : "system_end_marathon_template", questions: [], duration_minutes: 60, attempts_allowed: 1, is_published: false, assessment_type: "system_end", system: day.system, created_by: user.id, created_at: nowIso(), updated_at: nowIso() };
         day.assessment_id = assessmentId;
         assessmentsCreated.push(db.assessments[assessmentId]);
       }
       if (createFlashcards && !day.assessment_day && !["holiday", "cancelled"].includes(String(day.status || "").toLowerCase())) {
         for (const card of ngBuildDailyFlashcardsForDay(day)) {
           const cardId = uuid();
-          db.flashcards[cardId] = { id: cardId, course_id: courseId, roadmap_day_id: day.id, day_number: day.day_number, system: day.system, topic: day.topic || day.first_aid_topics || "", front: card.front, back: card.back, explanation: card.explanation, scope: "daily_topic", source: "roadmap_auto_generated", resource_source: "roadmap_master_map", status: "published", is_published: true, created_by: user.id, created_at: nowIso(), updated_at: nowIso() };
+          db.flashcards[cardId] = { id: cardId, course_id: courseId, roadmap_day_id: day.id, day_number: day.day_number, instructional_day_number: day.instructional_day_number || day.day_number || null, system_day: day.system_day || day.day_in_system || null, system: day.system, topic: day.topic || day.first_aid_topics || "", front: card.front, back: card.back, explanation: card.explanation, scope: "daily_topic", source: "roadmap_auto_generated", resource_source: "roadmap_master_map", status: "published", is_published: true, created_by: user.id, created_at: nowIso(), updated_at: nowIso() };
           flashcardsCreated.push(db.flashcards[cardId]);
         }
       }
@@ -48723,7 +49365,7 @@ function ngBuildFlashcardAudit(db, { courseId }) {
       date: day.date || null,
       system: day.system || day.chapter || "",
       topic: day.first_aid_topics || day.live_teaching_topic || day.title || "",
-      title: day.title || `Day ${day.day_number || ""}`,
+      title: ngRoadmapCanonicalDayTitle(day),
       qids: ngNormalizeQidList(day.uworld_qids || day.mapped_uworld_qids || day.qids || day.uworld_target),
       required_count: required,
       published_count: published.length,
