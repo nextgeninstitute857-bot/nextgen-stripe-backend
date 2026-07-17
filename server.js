@@ -4,7 +4,10 @@ import {
   scheduleFlashcardReview,
   validateFlashcardContent,
 } from "./lib/flashcard-engine.js";
-import { shadowWriteFlashcardReview } from "./lib/flashcard-postgres.js";
+import {
+  flashcardPostgresStatus,
+  shadowWriteFlashcardReview,
+} from "./lib/flashcard-postgres.js";
 import cors from "cors";
 import dotenv from "dotenv";
 import Stripe from "stripe";
@@ -19,7 +22,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v195-stable-recording-publish-state";
+const NEXTGEN_BACKEND_BUILD = "v198-v197-flashcard-shadow-restored";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -548,6 +551,7 @@ app.use("/media", express.static(MEDIA_DIR, { maxAge: "30d", fallthrough: true }
 const DEFAULT_TIMEZONE = "America/New_York";
 const DEFAULT_ZOOM_DURATION_MINUTES = 120;
 const NEXTGEN_CLASSROOM_OPEN_MINUTES_BEFORE = 5;
+const NEXTGEN_LIVE_SESSION_AUTO_COMPLETE_MINUTES = 60;
 const PENDING_ZOOM_PREFIX = "PENDING_ZOOM_";
 
 
@@ -2685,10 +2689,12 @@ function sanitizeLiveSession(session) {
     computed_status: timing.status,
     start_at: timing.start_at,
     end_at: timing.end_at,
+    auto_complete_after_minutes: timing.auto_complete_after_minutes,
+    auto_completed_at: session.auto_completed_at || null,
     join_opens_at: timing.join_opens_at,
     zoom_meeting_id: session.zoom_meeting_id || null,
     meeting_password: session.meeting_password || null,
-    zoom_meeting_url: session.zoom_meeting_url || null,
+    zoom_meeting_url: ngManualLiveJoinUrl(session),
     host_start_url_configured: Boolean(session.zoom_start_url || session.host_start_url),
     recording_url: session.recording_url || null,
     roadmap_day_id: session.roadmap_day_id || null,
@@ -3910,6 +3916,82 @@ function ngInspectZoomHostStartUrl(rawUrl, { meetingId = null, joinUrl = null } 
   return inspection;
 }
 
+function ngInspectZoomAttendeeJoinUrl(rawUrl, { meetingId = null } = {}) {
+  const inspection = {
+    valid: false,
+    is_https: false,
+    is_zoom_domain: false,
+    is_attendee_path: false,
+    meeting_id_matches: false,
+    meeting_id_in_url: null,
+    hostname: null,
+  };
+
+  const raw = String(rawUrl || "").trim();
+  if (!raw) return inspection;
+
+  try {
+    const parsed = new URL(raw);
+    const expectedMeetingId = String(meetingId || "").replace(/\D/g, "");
+    const standardPath = parsed.pathname.match(/^\/(?:j|w)\/(\d+)(?:\/|$)/i);
+    const webClientPath = parsed.pathname.match(/^\/wc\/(\d+)\/join(?:\/|$)/i);
+    const pathMeetingId = String(standardPath?.[1] || webClientPath?.[1] || "").replace(/\D/g, "");
+
+    inspection.is_https = parsed.protocol === "https:";
+    inspection.is_zoom_domain = ngIsAllowedZoomHostname(parsed.hostname);
+    inspection.is_attendee_path = Boolean(pathMeetingId);
+    inspection.meeting_id_matches = Boolean(pathMeetingId) && (
+      !expectedMeetingId || pathMeetingId === expectedMeetingId
+    );
+    inspection.meeting_id_in_url = pathMeetingId || null;
+    inspection.hostname = parsed.hostname;
+    inspection.valid = Boolean(
+      inspection.is_https &&
+      inspection.is_zoom_domain &&
+      inspection.is_attendee_path &&
+      inspection.meeting_id_matches
+    );
+  } catch {
+    return inspection;
+  }
+
+  return inspection;
+}
+
+function ngApplyZoomMeetingDetailsToSession(session = {}, meeting = {}) {
+  const meetingId = String(meeting.id || session.zoom_meeting_id || "").trim();
+  const joinInspection = ngInspectZoomAttendeeJoinUrl(meeting.join_url, { meetingId });
+  let changed = false;
+
+  if (joinInspection.valid && meeting.join_url) {
+    for (const key of ["zoom_meeting_url", "zoom_join_url", "join_url"]) {
+      if (String(session[key] || "") !== String(meeting.join_url)) {
+        session[key] = meeting.join_url;
+        changed = true;
+      }
+    }
+  }
+
+  if (meeting.password && String(session.meeting_password || "") !== String(meeting.password)) {
+    session.meeting_password = meeting.password;
+    changed = true;
+  }
+  if (meeting.host_id && String(session.zoom_host_id || "") !== String(meeting.host_id)) {
+    session.zoom_host_id = meeting.host_id;
+    changed = true;
+  }
+  if (meeting.host_email && String(session.zoom_host_email || "") !== String(meeting.host_email)) {
+    session.zoom_host_email = meeting.host_email;
+    changed = true;
+  }
+
+  return {
+    changed,
+    join_url: joinInspection.valid ? meeting.join_url : null,
+    join_inspection: joinInspection,
+  };
+}
+
 function ngBuildZoomHostStartUrlWithZak({ startUrl = null, joinUrl = null, meetingId = null, zak = null } = {}) {
   const cleanMeetingId = String(meetingId || "").replace(/\D/g, "");
   const cleanZak = String(zak || "").trim();
@@ -4038,14 +4120,23 @@ async function ngOpenZoomMeetingEntryForStudents(meetingId) {
 }
 
 function ngManualLiveJoinUrl(session = {}) {
-  return (
-    session.zoom_meeting_url ||
-    session.zoom_join_url ||
-    session.join_url ||
-    session.zoom_url ||
-    session.meeting_url ||
-    null
-  );
+  const candidates = [
+    session.zoom_meeting_url,
+    session.zoom_join_url,
+    session.join_url,
+    session.zoom_url,
+    session.meeting_url,
+  ].filter(Boolean);
+  const meetingId = String(session.zoom_meeting_id || session.meeting_id || "").trim();
+
+  if (hasRealZoomMeetingId(meetingId)) {
+    const verified = candidates.find((candidate) => {
+      return ngInspectZoomAttendeeJoinUrl(candidate, { meetingId }).valid;
+    });
+    return verified || null;
+  }
+
+  return candidates[0] || null;
 }
 
 async function ngEnsureHostZoomStartLink(db, session, user) {
@@ -4059,12 +4150,16 @@ async function ngEnsureHostZoomStartLink(db, session, user) {
   let hostLinkInspection = null;
   let hostLinkSource = null;
   let zakRefreshWarning = null;
+  let attendeeJoinInspection = null;
 
   if (hasRealZoomMeetingId(session.zoom_meeting_id)) {
     try {
       meeting = await getZoomMeetingDetailsForHostStart(session.zoom_meeting_id);
+      const appliedMeeting = ngApplyZoomMeetingDetailsToSession(session, meeting || {});
+      attendeeJoinInspection = appliedMeeting.join_inspection;
+      if (appliedMeeting.changed) changed = true;
       if (meeting?.start_url) {
-        const verified = await ngBuildVerifiedZoomHostStartLink(meeting, existingJoinUrl);
+        const verified = await ngBuildVerifiedZoomHostStartLink(meeting, appliedMeeting.join_url || existingJoinUrl);
         verifiedStartUrl = verified.start_url;
         hostLinkInspection = verified.inspection;
         hostLinkSource = verified.source;
@@ -4073,10 +4168,6 @@ async function ngEnsureHostZoomStartLink(db, session, user) {
           session.zoom_start_url = verifiedStartUrl;
           session.host_start_url = verifiedStartUrl;
         }
-        session.zoom_meeting_url = session.zoom_meeting_url || meeting.join_url || existingJoinUrl || null;
-        session.meeting_password = session.meeting_password || meeting.password || null;
-        session.zoom_host_id = meeting.host_id || session.zoom_host_id || null;
-        session.zoom_host_email = meeting.host_email || session.zoom_host_email || null;
         session.zoom_host_url_refreshed_at = verifiedStartUrl ? new Date().toISOString() : session.zoom_host_url_refreshed_at || null;
         changed = true;
         if (!verifiedStartUrl) {
@@ -4095,8 +4186,9 @@ async function ngEnsureHostZoomStartLink(db, session, user) {
       meeting = await createZoomMeetingForLiveSession(session, session.scheduled_timezone || DEFAULT_TIMEZONE);
       const verified = await ngBuildVerifiedZoomHostStartLink(meeting, meeting.join_url || existingJoinUrl);
       session.zoom_meeting_id = String(meeting.id);
+      const appliedMeeting = ngApplyZoomMeetingDetailsToSession(session, meeting);
+      attendeeJoinInspection = appliedMeeting.join_inspection;
       session.meeting_password = meeting.password || session.meeting_password || "pending";
-      session.zoom_meeting_url = meeting.join_url || session.zoom_meeting_url || null;
       verifiedStartUrl = verified.start_url;
       hostLinkInspection = verified.inspection;
       hostLinkSource = verified.source;
@@ -4133,6 +4225,7 @@ async function ngEnsureHostZoomStartLink(db, session, user) {
       open_entry = await ngOpenZoomMeetingEntryForStudents(session.zoom_meeting_id);
       session.zoom_waiting_room_disabled_at = open_entry.updated_at;
       session.join_before_host_enabled_at = open_entry.updated_at;
+      session.student_entry_verified_meeting_id = String(session.zoom_meeting_id || "");
       changed = true;
     } catch (error) {
       const msg = `Zoom open-entry update failed: ${error.response?.data?.message || error.message}`;
@@ -4143,6 +4236,11 @@ async function ngEnsureHostZoomStartLink(db, session, user) {
   if (!verifiedStartUrl && !warning) {
     warning = "Zoom did not provide a verified host start URL. The participant link will not be used for Host App.";
   }
+  const verifiedJoinUrl = ngManualLiveJoinUrl(session);
+  if (!verifiedJoinUrl) {
+    const msg = "Zoom did not provide a student join URL for the same meeting. Host launch is blocked so the admin and students cannot enter different meetings.";
+    warning = warning ? `${warning} ${msg}` : msg;
+  }
 
   if (changed) {
     session.updated_by = user?.id || session.updated_by || null;
@@ -4152,7 +4250,7 @@ async function ngEnsureHostZoomStartLink(db, session, user) {
 
   return {
     start_url: verifiedStartUrl,
-    join_url: ngManualLiveJoinUrl(session),
+    join_url: verifiedJoinUrl,
     meeting,
     changed,
     warning,
@@ -4160,6 +4258,7 @@ async function ngEnsureHostZoomStartLink(db, session, user) {
     host_url_verified: Boolean(verifiedStartUrl),
     host_link_inspection: hostLinkInspection,
     host_link_source: hostLinkSource,
+    join_link_inspection: attendeeJoinInspection || ngInspectZoomAttendeeJoinUrl(verifiedJoinUrl, { meetingId: session.zoom_meeting_id }),
     zak_refresh_warning: zakRefreshWarning,
     zoom_host_id: meeting?.host_id || session.zoom_host_id || null,
     zoom_host_email: meeting?.host_email || session.zoom_host_email || null,
@@ -9575,6 +9674,7 @@ app.get("/health", async (req, res) => {
     live_db_exists: liveDbExists,
     json_body_limit: NEXTGEN_JSON_BODY_LIMIT,
     memory: ngMemoryStatus(),
+    flashcard_postgres: flashcardPostgresStatus(),
     storage_cache: {
       lms_loaded: Boolean(liveDbCache),
       crm_loaded: Boolean(crmReadCache),
@@ -10468,8 +10568,11 @@ app.get("/admin/live-sessions", async (req, res) => {
     const autoLiveSync = requestedCourseId
       ? ngAutoSyncRoadmapLiveSessionsForCourses(db, [requestedCourseId], { actorId: user.id || "admin_live_sessions_read" })
       : { checked: 0, changed: false, details: [] };
+    const autoCompletion = ngAutoCompleteExpiredLiveSessions(db, {
+      actorId: user.id || "admin_live_sessions_read",
+    });
 
-    if (autoLiveSync.changed) await writeLiveDb(db);
+    if (autoLiveSync.changed || autoCompletion.changed) await writeLiveDb(db);
 
     const includeHidden =
       req.query.include_hidden === "true" ||
@@ -10481,7 +10584,14 @@ app.get("/admin/live-sessions", async (req, res) => {
     if (!includeHidden) sessions = sessions.filter((s) => !ngSessionIsInternalTestOrHidden(s));
     sessions = sessions.map(sanitizeLiveSession);
     sessions.sort((a, b) => String(a.scheduled_date || "").localeCompare(String(b.scheduled_date || "")) || String(a.scheduled_time || "").localeCompare(String(b.scheduled_time || "")));
-    res.json({ success: true, count: sessions.length, sessions, auto_live_sync: autoLiveSync, include_hidden: includeHidden });
+    res.json({
+      success: true,
+      count: sessions.length,
+      sessions,
+      auto_live_sync: autoLiveSync,
+      auto_completion: autoCompletion,
+      include_hidden: includeHidden,
+    });
   } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to load admin live sessions" }); }
 });
 
@@ -10573,18 +10683,24 @@ app.post("/admin/live-sessions/:sessionId/host-start-link", async (req, res) => 
     if (!session) return res.status(404).json({ success: false, error: "Live session not found" });
 
     const result = await ngEnsureHostZoomStartLink(db, session, user);
-    if (result.changed) await writeLiveDb(db);
-
     const startUrl = result.start_url || null;
     const joinUrl = result.join_url || null;
+    const joinLinkCheck = result.join_link_inspection || ngInspectZoomAttendeeJoinUrl(joinUrl, {
+      meetingId: session.zoom_meeting_id,
+    });
+    const studentEntryOpen = result.open_entry?.success === true;
 
-    if (!startUrl || result.host_url_verified !== true) {
+    if (!startUrl || result.host_url_verified !== true || !joinUrl || joinLinkCheck.valid !== true || !studentEntryOpen) {
+      if (result.changed) await writeLiveDb(db);
       return res.status(400).json({
         success: false,
         build: NEXTGEN_BACKEND_BUILD,
-        error: result.warning || "A verified Zoom host start URL is not available for this session.",
+        error: result.warning || "The host link and student join link could not both be verified for the same Zoom meeting.",
         session: sanitizeLiveSession(session),
         host_link_check: result.host_link_inspection || null,
+        student_join_link_check: joinLinkCheck,
+        student_join_ready: false,
+        student_entry_open: studentEntryOpen,
         host_zak_refreshed: result.host_link_source === "fresh_host_zak",
         host_zak_refresh_warning: result.zak_refresh_warning || null,
         zoom_host_id: result.zoom_host_id || null,
@@ -10592,6 +10708,9 @@ app.post("/admin/live-sessions/:sessionId/host-start-link", async (req, res) => 
         zoom_host_user_configured: ngZoomConfiguredHostUser() !== "me",
       });
     }
+
+    const joinAuthority = ngMarkAuthoritativeStudentJoinSession(db, session, user.id);
+    if (result.changed || joinAuthority.changed) await writeLiveDb(db);
 
     res.json({
       success: true,
@@ -10603,6 +10722,11 @@ app.post("/admin/live-sessions/:sessionId/host-start-link", async (req, res) => 
       zoom_start_url: startUrl,
       join_url: joinUrl,
       zoom_join_url: joinUrl,
+      student_join_ready: true,
+      student_entry_open: true,
+      student_join_meeting_matches: joinLinkCheck.meeting_id_matches === true,
+      student_join_link_type: "attendee",
+      student_join_authority: joinAuthority,
       host_url_verified: true,
       host_link_type: result.host_link_inspection?.path_kind || "host_start",
       host_link_has_zak: result.host_link_inspection?.has_zak_token === true,
@@ -10648,6 +10772,7 @@ app.post("/admin/live-sessions/:sessionId/open-entry", async (req, res) => {
     const openEntry = ensure.open_entry || await ngOpenZoomMeetingEntryForStudents(session.zoom_meeting_id);
     session.zoom_waiting_room_disabled_at = openEntry.updated_at || new Date().toISOString();
     session.join_before_host_enabled_at = session.zoom_waiting_room_disabled_at;
+    session.student_entry_verified_meeting_id = String(session.zoom_meeting_id || "");
     session.updated_by = user.id;
     session.updated_at = new Date().toISOString();
     db.liveSessions[session.id] = session;
@@ -10666,6 +10791,81 @@ app.post("/admin/live-sessions/:sessionId/open-entry", async (req, res) => {
     });
   } catch (e) {
     res.status(e.statusCode || 500).json({ success: false, build: NEXTGEN_BACKEND_BUILD, error: e.response?.data?.message || e.message || "Failed to open Zoom entry" });
+  }
+});
+
+app.get("/admin/live-sessions/student-join-audit", async (req, res) => {
+  try {
+    await requireLmsPermission(req, "lms.live_sessions.view");
+    const db = await readLiveDb();
+    const requestedDate = String(req.query.date || todayKey()).trim();
+    const requestedCourseId = String(req.query.course_id || req.query.courseId || "").trim();
+    const sessions = Object.values(db.liveSessions || {})
+      .filter((session) => !ngSessionIsInternalTestOrHidden(session))
+      .filter((session) => !requestedDate || String(session.scheduled_date || "") === requestedDate)
+      .filter((session) => !requestedCourseId || String(session.course_id || "") === requestedCourseId)
+      .sort((a, b) => (ngSessionDateTimeMs(a) || 0) - (ngSessionDateTimeMs(b) || 0));
+
+    const rows = sessions.map((session) => {
+      const authoritative = ngPickAuthoritativeStudentJoinSession(db, session) || session;
+      const joinUrl = ngManualLiveJoinUrl(authoritative);
+      const joinCheck = ngInspectZoomAttendeeJoinUrl(joinUrl, {
+        meetingId: authoritative.zoom_meeting_id,
+      });
+      const timing = ngSessionTimingWindow(authoritative);
+      const competing = sessions.filter((candidate) => {
+        return ngLiveSessionsCompeteForSameStudentJoin(session, candidate);
+      });
+      const entryOpen = Boolean(
+        authoritative.zoom_waiting_room_disabled_at &&
+        authoritative.join_before_host_enabled_at &&
+        String(authoritative.student_entry_verified_meeting_id || "") === String(authoritative.zoom_meeting_id || "")
+      );
+
+      return {
+        session_id: session.id,
+        title: session.topic || session.title || "Live Class",
+        scheduled_date: session.scheduled_date || null,
+        scheduled_time: session.scheduled_time || null,
+        course_id: session.course_id || null,
+        authoritative_session_id: authoritative.id,
+        is_authoritative: String(authoritative.id) === String(session.id),
+        redirected_from_competing_session: String(authoritative.id) !== String(session.id),
+        competing_session_ids: competing.map((candidate) => candidate.id),
+        meeting_id: authoritative.zoom_meeting_id || null,
+        verified_student_join_url: joinCheck.valid === true,
+        student_join_meeting_matches: joinCheck.meeting_id_matches === true,
+        student_entry_open: entryOpen,
+        student_join_ready_now: Boolean(
+          ["live", "scheduled"].includes(timing.status) &&
+          Date.now() >= timing.join_opens_ms &&
+          Date.now() <= timing.end_ms &&
+          joinCheck.valid === true &&
+          entryOpen
+        ),
+        computed_status: timing.status,
+        start_at: timing.start_at,
+        end_at: timing.end_at,
+        host_launch_requested_at: authoritative.host_launch_requested_at || null,
+      };
+    });
+
+    res.json({
+      success: true,
+      build: NEXTGEN_BACKEND_BUILD,
+      read_only: true,
+      date: requestedDate,
+      course_id: requestedCourseId || null,
+      count: rows.length,
+      ready_count: rows.filter((row) => row.student_join_ready_now).length,
+      rows,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      build: NEXTGEN_BACKEND_BUILD,
+      error: error.message || "Failed to audit student live-session entry",
+    });
   }
 });
 
@@ -12797,8 +12997,15 @@ app.get(["/hcgi/api/live-class/:sessionId", "/live/classroom/:courseId/:sessionI
   try {
     const { user } = await getAuthenticatedUser(req);
     const db = await readLiveDb();
-    let session = db.liveSessions[String(req.params.sessionId)] || null;
-    if (!session?.id) return res.status(404).json({ allowed: false, error: "Session not found" });
+    const requestedSession = db.liveSessions[String(req.params.sessionId)] || null;
+    if (!requestedSession?.id) return res.status(404).json({ allowed: false, error: "Session not found" });
+
+    const requestedStaffAccess = isAdminOrInstructor(user, requestedSession);
+    let session = requestedStaffAccess
+      ? requestedSession
+      : ngPickAuthoritativeStudentJoinSession(db, requestedSession);
+    if (!session?.id) session = requestedSession;
+    const redirectedFromCompetingSession = String(session.id) !== String(requestedSession.id);
 
     const courseId = session.course_id;
     const course = courseId ? db.courses?.[String(courseId)] || null : null;
@@ -12861,34 +13068,75 @@ app.get(["/hcgi/api/live-class/:sessionId", "/live/classroom/:courseId/:sessionI
       await writeLiveDb(db);
     }
 
-    if (canJoin && staffAccess && hasRealZoomMeetingId(session.zoom_meeting_id)) {
+    if (canJoin && hasRealZoomMeetingId(session.zoom_meeting_id)) {
       try {
-        const openEntry = await ngOpenZoomMeetingEntryForStudents(session.zoom_meeting_id);
-        session.zoom_waiting_room_disabled_at = openEntry.updated_at;
-        session.join_before_host_enabled_at = openEntry.updated_at;
-        session.updated_by = user.id;
-        session.updated_at = new Date().toISOString();
-        db.liveSessions[session.id] = session;
-        await writeLiveDb(db);
+        let studentEntryChanged = false;
+        if (!ngManualLiveJoinUrl(session)) {
+          const meeting = await getZoomMeetingDetailsForHostStart(session.zoom_meeting_id);
+          const appliedMeeting = ngApplyZoomMeetingDetailsToSession(session, meeting || {});
+          if (!appliedMeeting.join_url || appliedMeeting.join_inspection?.valid !== true) {
+            throw new Error("Zoom did not return a student join link matching this session's meeting ID");
+          }
+          studentEntryChanged = appliedMeeting.changed;
+          if (studentEntryChanged) {
+            session.updated_by = user.id;
+            session.updated_at = new Date().toISOString();
+            db.liveSessions[session.id] = session;
+            await writeLiveDb(db);
+          }
+        }
+        const entryAlreadyOpen = Boolean(
+          session.zoom_waiting_room_disabled_at &&
+          session.join_before_host_enabled_at &&
+          String(session.student_entry_verified_meeting_id || "") === String(session.zoom_meeting_id || "")
+        );
+        if (!entryAlreadyOpen) {
+          const openEntry = await ngOpenZoomMeetingEntryForStudents(session.zoom_meeting_id);
+          session.zoom_waiting_room_disabled_at = openEntry.updated_at;
+          session.join_before_host_enabled_at = openEntry.updated_at;
+          session.student_entry_verified_meeting_id = String(session.zoom_meeting_id || "");
+          session.student_entry_last_verified_at = openEntry.updated_at;
+          session.student_entry_last_verified_by = user.id;
+          session.updated_by = user.id;
+          session.updated_at = new Date().toISOString();
+          db.liveSessions[session.id] = session;
+          if (studentEntryChanged || openEntry.success === true) await writeLiveDb(db);
+        }
       } catch (openEntryError) {
-        console.warn("Zoom open-entry update from classroom failed:", openEntryError.response?.data?.message || openEntryError.message);
+        console.warn("Zoom student-entry self-heal failed:", openEntryError.response?.data?.message || openEntryError.message);
       }
     }
 
-    const manualJoinUrl = session.zoom_meeting_url || session.join_url || session.zoom_join_url || session.zoom_url || session.meeting_url || null;
-    const hasZoom = hasRealZoomMeetingId(session.zoom_meeting_id) || Boolean(manualJoinUrl);
+    const manualJoinUrl = ngManualLiveJoinUrl(session);
+    const studentJoinLinkCheck = ngInspectZoomAttendeeJoinUrl(manualJoinUrl, {
+      meetingId: session.zoom_meeting_id,
+    });
+    const hasZoom = hasRealZoomMeetingId(session.zoom_meeting_id) && studentJoinLinkCheck.valid === true;
+    const studentJoinReady = Boolean(
+      hasZoom &&
+      session.zoom_waiting_room_disabled_at &&
+      session.join_before_host_enabled_at &&
+      String(session.student_entry_verified_meeting_id || "") === String(session.zoom_meeting_id || "")
+    );
     res.json({
       allowed: true,
-      can_join: canJoin && hasZoom,
-      join_reason: canJoin && hasZoom ? "Classroom is open" : joinReason || "Waiting for tutor to open classroom",
+      can_join: canJoin && studentJoinReady,
+      join_reason: canJoin && studentJoinReady
+        ? "Classroom is open"
+        : joinReason || "The student Zoom entry is not verified yet. Refresh the classroom or ask the tutor to press Host App again.",
       join_opens_at: joinOpensAt,
       join_opens_minutes_before: NEXTGEN_CLASSROOM_OPEN_MINUTES_BEFORE,
       zoom_missing: canJoin && !hasZoom,
+      student_join_ready: studentJoinReady,
+      student_join_link_check: studentJoinLinkCheck,
+      requested_session_id: requestedSession.id,
+      resolved_session_id: session.id,
+      redirected_from_competing_session: redirectedFromCompetingSession,
       session: {
         id: session.id,
         topic: session.topic,
-        zoom_meeting_id: canJoin && hasRealZoomMeetingId(session.zoom_meeting_id) ? session.zoom_meeting_id : null,
-        meeting_password: canJoin && hasRealZoomMeetingId(session.zoom_meeting_id) ? session.meeting_password : null,
+        zoom_meeting_id: canJoin && studentJoinReady ? session.zoom_meeting_id : null,
+        meeting_password: canJoin && studentJoinReady ? session.meeting_password : null,
         scheduled_date: session.scheduled_date,
         scheduled_time: session.scheduled_time,
         scheduled_timezone: session.scheduled_timezone || DEFAULT_TIMEZONE,
@@ -12900,8 +13148,8 @@ app.get(["/hcgi/api/live-class/:sessionId", "/live/classroom/:courseId/:sessionI
         computed_status: timing.status,
         start_at: timing.start_at,
         end_at: timing.end_at,
-        zoom_join_url: canJoin && hasZoom ? manualJoinUrl : null,
-        join_url: canJoin && hasZoom ? manualJoinUrl : null,
+        zoom_join_url: canJoin && studentJoinReady ? manualJoinUrl : null,
+        join_url: canJoin && studentJoinReady ? manualJoinUrl : null,
         recording_url: session.recording_url || null,
       },
     });
@@ -15778,20 +16026,22 @@ function ngSessionDateTimeMs(session) {
 function ngSessionTimingWindow(session = {}, nowMs = Date.now()) {
   const rawStatus = String(session?.status || "scheduled").trim().toLowerCase();
   const cancelled = ["cancelled", "canceled"].includes(rawStatus);
+  const manuallyCompleted = ["completed", "ended", "past"].includes(rawStatus);
   const startMs = ngSessionDateTimeMs(session);
-  const durationMinutes = Math.max(
+  const scheduledDurationMinutes = Math.max(
     30,
     Number(session?.duration_minutes || session?.duration || DEFAULT_ZOOM_DURATION_MINUTES) || DEFAULT_ZOOM_DURATION_MINUTES
   );
-  const endMs = startMs ? startMs + durationMinutes * 60 * 1000 : 0;
+  const lifecycleDurationMinutes = NEXTGEN_LIVE_SESSION_AUTO_COMPLETE_MINUTES;
+  const endMs = startMs ? startMs + lifecycleDurationMinutes * 60 * 1000 : 0;
   const joinOpensMs = startMs ? startMs - NEXTGEN_CLASSROOM_OPEN_MINUTES_BEFORE * 60 * 1000 : 0;
 
   let status = "scheduled";
   if (cancelled) status = "cancelled";
+  else if (manuallyCompleted) status = "completed";
   else if (startMs) {
-    // The configured IANA timezone and schedule are authoritative. This prevents
-    // stale stored values such as "live" or "completed" from flipping the class
-    // several hours early/late for students in other time zones.
+    // The configured IANA timezone and schedule are authoritative. Every live
+    // session leaves active LMS views exactly one hour after its scheduled start.
     if (nowMs < startMs) status = "scheduled";
     else if (nowMs <= endMs) status = "live";
     else status = "completed";
@@ -15803,13 +16053,49 @@ function ngSessionTimingWindow(session = {}, nowMs = Date.now()) {
     status,
     raw_status: rawStatus || "scheduled",
     timezone: session?.scheduled_timezone || DEFAULT_TIMEZONE,
-    duration_minutes: durationMinutes,
+    duration_minutes: lifecycleDurationMinutes,
+    scheduled_duration_minutes: scheduledDurationMinutes,
+    auto_complete_after_minutes: NEXTGEN_LIVE_SESSION_AUTO_COMPLETE_MINUTES,
     start_ms: startMs || 0,
     end_ms: endMs || 0,
     join_opens_ms: joinOpensMs || 0,
     start_at: startMs ? new Date(startMs).toISOString() : null,
     end_at: endMs ? new Date(endMs).toISOString() : null,
     join_opens_at: joinOpensMs ? new Date(joinOpensMs).toISOString() : null,
+  };
+}
+
+function ngAutoCompleteExpiredLiveSessions(db = {}, {
+  actorId = "live_session_one_hour_auto_complete",
+  nowMs = Date.now(),
+} = {}) {
+  const completedIds = [];
+  const completedAt = new Date(nowMs).toISOString();
+
+  for (const session of Object.values(db.liveSessions || {})) {
+    if (!session?.id) continue;
+
+    const storedStatus = String(session.status || "scheduled").trim().toLowerCase();
+    if (["completed", "ended", "past", "cancelled", "canceled", "archived", "hidden", "deleted"].includes(storedStatus)) {
+      continue;
+    }
+
+    const timing = ngSessionTimingWindow(session, nowMs);
+    if (!timing.start_ms || nowMs <= timing.end_ms || timing.status !== "completed") continue;
+
+    session.status = "completed";
+    session.auto_completed_at = session.auto_completed_at || completedAt;
+    session.auto_completed_by = session.auto_completed_by || actorId;
+    session.updated_at = completedAt;
+    db.liveSessions[session.id] = session;
+    completedIds.push(session.id);
+  }
+
+  return {
+    changed: completedIds.length > 0,
+    completed_count: completedIds.length,
+    completed_session_ids: completedIds,
+    auto_complete_after_minutes: NEXTGEN_LIVE_SESSION_AUTO_COMPLETE_MINUTES,
   };
 }
 
@@ -15854,6 +16140,108 @@ function ngSessionIsInternalTestOrHidden(session = {}) {
     text.includes("no class today") ||
     text.includes("tutor unavailable")
   );
+}
+
+function ngLiveSessionsCompeteForSameStudentJoin(left = {}, right = {}) {
+  if (!left?.id || !right?.id) return false;
+  if (String(left.course_id || "") !== String(right.course_id || "")) return false;
+  if (String(left.scheduled_date || "") !== String(right.scheduled_date || "")) return false;
+
+  const leftStart = ngSessionDateTimeMs(left);
+  const rightStart = ngSessionDateTimeMs(right);
+  if (leftStart && rightStart) return Math.abs(leftStart - rightStart) <= 10 * 60 * 1000;
+
+  return String(left.scheduled_time || "").trim() === String(right.scheduled_time || "").trim();
+}
+
+function ngStudentJoinAuthorityRank(session = {}) {
+  const timestamp = (value) => {
+    const parsed = new Date(value || "").getTime();
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+  const hasVerifiedJoin = Boolean(
+    hasRealZoomMeetingId(session.zoom_meeting_id) &&
+    ngManualLiveJoinUrl(session)
+  );
+
+  return [
+    session.student_join_authoritative_at ? 1 : 0,
+    timestamp(session.student_join_authoritative_at),
+    session.host_launch_requested_at ? 1 : 0,
+    timestamp(session.host_launch_requested_at),
+    session.zoom_waiting_room_disabled_at || session.auto_zoom_opened_at ? 1 : 0,
+    hasVerifiedJoin ? 1 : 0,
+    hasRealZoomMeetingId(session.zoom_meeting_id) ? 1 : 0,
+    session.roadmap_day_id ? 1 : 0,
+    timestamp(session.updated_at || session.created_at),
+  ];
+}
+
+function ngCompareStudentJoinAuthority(left = {}, right = {}) {
+  const leftRank = ngStudentJoinAuthorityRank(left);
+  const rightRank = ngStudentJoinAuthorityRank(right);
+  for (let index = 0; index < Math.max(leftRank.length, rightRank.length); index += 1) {
+    const difference = Number(rightRank[index] || 0) - Number(leftRank[index] || 0);
+    if (difference) return difference;
+  }
+  return String(left.id || "").localeCompare(String(right.id || ""));
+}
+
+function ngPickAuthoritativeStudentJoinSession(db = {}, requestedSession = {}) {
+  const candidates = Object.values(db.liveSessions || {})
+    .filter((session) => !ngSessionIsInternalTestOrHidden(session))
+    .filter((session) => ngLiveSessionsCompeteForSameStudentJoin(requestedSession, session))
+    .sort(ngCompareStudentJoinAuthority);
+  return candidates[0] || requestedSession || null;
+}
+
+function ngDeduplicateStudentJoinSessions(db = {}, sessions = []) {
+  const selected = [];
+  for (const session of sessions) {
+    const collisionIndex = selected.findIndex((existing) => {
+      return ngLiveSessionsCompeteForSameStudentJoin(existing, session);
+    });
+    if (collisionIndex < 0) {
+      selected.push(session);
+      continue;
+    }
+    if (ngCompareStudentJoinAuthority(session, selected[collisionIndex]) < 0) {
+      selected[collisionIndex] = session;
+    }
+  }
+  return selected.sort((a, b) => (ngSessionDateTimeMs(a) || 0) - (ngSessionDateTimeMs(b) || 0));
+}
+
+function ngMarkAuthoritativeStudentJoinSession(db = {}, session = {}, actorId = "admin") {
+  const now = new Date().toISOString();
+  const competing = Object.values(db.liveSessions || {})
+    .filter((candidate) => !ngSessionIsInternalTestOrHidden(candidate))
+    .filter((candidate) => ngLiveSessionsCompeteForSameStudentJoin(session, candidate));
+
+  for (const candidate of competing) {
+    if (String(candidate.id) === String(session.id)) {
+      candidate.student_join_authoritative_at = now;
+      candidate.student_join_authoritative_by = actorId;
+      candidate.host_launch_requested_at = now;
+      candidate.student_join_superseded_by = null;
+      candidate.student_join_superseded_at = null;
+    } else {
+      candidate.student_join_superseded_by = session.id;
+      candidate.student_join_superseded_at = now;
+    }
+    candidate.updated_at = now;
+    db.liveSessions[candidate.id] = candidate;
+  }
+
+  return {
+    changed: competing.length > 0,
+    authoritative_session_id: session.id,
+    competing_session_ids: competing.map((candidate) => candidate.id),
+    superseded_session_ids: competing
+      .filter((candidate) => String(candidate.id) !== String(session.id))
+      .map((candidate) => candidate.id),
+    marked_at: now,
+  };
 }
 
 function ngStudentSessionCanShowInLiveList(session = {}) {
@@ -15901,7 +16289,7 @@ function ngCompactSessionForLiveCenter(db, session, course = null) {
   const safe = sanitizeLiveSession(session);
   const note = db.notes?.[String(session.id)] || null;
   const notesMeta = ngCompactNotesMeta(note);
-  const manualJoinUrl = safe.zoom_meeting_url || session.join_url || session.zoom_join_url || session.zoom_url || session.meeting_url || null;
+  const manualJoinUrl = ngManualLiveJoinUrl(session);
   const recordingUrl = notesMeta.recording_url || safe.recording_url || null;
   const computed_status = ngSessionComputedStatus(session);
   return {
@@ -15943,10 +16331,11 @@ function ngBuildStudentCourseBundle(db, user, course, { sessionLimit = null } = 
     return sanitizeAssessmentForStudent(assessment, attempt);
   });
   const completedAssessments = assessmentsForStudent.filter((assessment) => assessment.result_visible === true || assessment.attempt_status === "completed");
-  const sessionsAll = Object.values(db.liveSessions || {})
+  const rawStudentSessions = Object.values(db.liveSessions || {})
     .filter((session) => String(session.course_id || "") === String(course.id))
     .filter((session) => ngStudentSessionCanShowInLiveList(session))
     .sort((a, b) => (ngSessionDateTimeMs(a) || 0) - (ngSessionDateTimeMs(b) || 0));
+  const sessionsAll = ngDeduplicateStudentJoinSessions(db, rawStudentSessions);
 
   const today = todayKey();
   const todaySession = sessionsAll.find((session) => String(session.scheduled_date || "") === today && ngStudentSessionCanShowAsNext(session, today)) || null;
@@ -49623,39 +50012,22 @@ app.post("/student/flashcards/:id/review", async (req, res) => {
     const schedule = scheduleFlashcardReview(previousProgress, req.body.rating || req.body.confidence || "good", new Date());
     const reviewEventId = uuid();
     db.flashcardReviewEvents[reviewEventId] = {
-      id: reviewEventId,
-      app: "lms",
-      course_id: courseId,
-      user_id: user.id,
-      flashcard_id: card.id,
-      roadmap_day_id: card.roadmap_day_id || null,
-      rating: schedule.rating,
-      confidence: req.body.confidence || null,
-      interval_days: schedule.interval_days,
-      ease_factor: schedule.ease_factor,
-      lapses: schedule.lapses,
-      reviewed_at: schedule.reviewed_at,
-      next_review_date: schedule.next_review_date,
-      created_at: schedule.reviewed_at,
+      id: reviewEventId, app: "lms", course_id: courseId, user_id: user.id,
+      flashcard_id: card.id, roadmap_day_id: card.roadmap_day_id || null,
+      rating: schedule.rating, confidence: req.body.confidence || null,
+      interval_days: schedule.interval_days, ease_factor: schedule.ease_factor,
+      lapses: schedule.lapses, reviewed_at: schedule.reviewed_at,
+      next_review_date: schedule.next_review_date, created_at: schedule.reviewed_at,
     };
     db.flashcardProgress[key] = {
-      ...previousProgress,
-      id: key,
-      course_id: courseId,
-      user_id: user.id,
-      flashcard_id: card.id,
-      roadmap_day_id: card.roadmap_day_id || null,
-      reviewed: true,
-      rating: schedule.rating,
-      confidence: req.body.confidence || null,
-      interval_days: schedule.interval_days,
-      ease_factor: schedule.ease_factor,
+      ...previousProgress, id: key, course_id: courseId, user_id: user.id,
+      flashcard_id: card.id, roadmap_day_id: card.roadmap_day_id || null,
+      reviewed: true, rating: schedule.rating, confidence: req.body.confidence || null,
+      interval_days: schedule.interval_days, ease_factor: schedule.ease_factor,
       lapses: schedule.lapses,
       review_count: Math.max(0, Number(previousProgress.review_count || 0)) + 1,
-      last_review_event_id: reviewEventId,
-      reviewed_at: schedule.reviewed_at,
-      next_review_date: schedule.next_review_date,
-      due_date: schedule.next_review_date,
+      last_review_event_id: reviewEventId, reviewed_at: schedule.reviewed_at,
+      next_review_date: schedule.next_review_date, due_date: schedule.next_review_date,
       updated_at: schedule.reviewed_at,
     };
 
@@ -49697,26 +50069,16 @@ app.post("/student/flashcards/:id/review", async (req, res) => {
     await writeLiveDb(db);
     await shadowWriteFlashcardReview({
       event: {
-        ...db.flashcardReviewEvents[reviewEventId],
-        scope_type: "course",
-        scope_id: courseId,
-        source_event_id: `lms:${reviewEventId}`,
-        flashcard_id: `lms:${card.id}`,
+        ...db.flashcardReviewEvents[reviewEventId], scope_type: "course", scope_id: courseId,
+        source_event_id: `lms:${reviewEventId}`, flashcard_id: `lms:${card.id}`,
         source_data: { roadmap_day_id: card.roadmap_day_id || null },
       },
       state: {
-        app: "lms",
-        scope_type: "course",
-        scope_id: courseId,
-        user_id: user.id,
-        flashcard_id: `lms:${card.id}`,
-        rating: schedule.rating,
-        interval_days: schedule.interval_days,
-        ease_factor: schedule.ease_factor,
-        lapses: schedule.lapses,
-        review_count: db.flashcardProgress[key].review_count,
-        last_review_event_id: reviewEventId,
-        reviewed_at: schedule.reviewed_at,
+        app: "lms", scope_type: "course", scope_id: courseId, user_id: user.id,
+        flashcard_id: `lms:${card.id}`, rating: schedule.rating,
+        interval_days: schedule.interval_days, ease_factor: schedule.ease_factor,
+        lapses: schedule.lapses, review_count: db.flashcardProgress[key].review_count,
+        last_review_event_id: reviewEventId, reviewed_at: schedule.reviewed_at,
         next_review_date: schedule.next_review_date,
       },
     }).catch((error) => console.warn("LMS flashcard shadow write failed; JSON remains authoritative:", error.message));
@@ -58016,11 +58378,7 @@ app.post("/api/ayla/students/:studentId/flashcard-reviews", async (req, res) => 
     if (!["again", "hard", "good", "easy"].includes(rating)) return aylaSendError(res, 400, "Invalid flashcard rating");
     const previousReviews = aylaValues(db, "aylaFlashcardReviews").filter((row) => String(row.studentId) === String(student.id) && String(row.resourceId) === String(req.body.resourceId)).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
     const previous = previousReviews[0];
-    const schedule = scheduleFlashcardReview({
-      interval_days: previous?.intervalDays,
-      ease_factor: previous?.easeFactor,
-      lapses: previous?.lapses,
-    }, rating, new Date());
+    const schedule = scheduleFlashcardReview({ interval_days: previous?.intervalDays, ease_factor: previous?.easeFactor, lapses: previous?.lapses }, rating, new Date());
     const review = {
       id: aylaId("AYLA-FR"),
       app: "aylamed",
@@ -58049,10 +58407,10 @@ app.post("/api/ayla/students/:studentId/flashcard-reviews", async (req, res) => 
         id: review.id, app: "aylamed", scope_type: "exam_track",
         scope_id: String(student.examTrackId || student.exam_track_id || student.exam || "unscoped-aylamed"),
         user_id: student.id, flashcard_id: `aylamed:ayla.resources:${review.resourceId}`,
-        source_event_id: `aylamed:${review.id}`, rating: review.rating,
-        confidence: null, interval_days: review.intervalDays, ease_factor: review.easeFactor,
-        lapses: review.lapses, reviewed_at: review.createdAt,
-        next_review_date: review.nextReviewDate, source_data: { assignment_id: review.assignmentId, card_number: review.cardNumber },
+        source_event_id: `aylamed:${review.id}`, rating: review.rating, confidence: null,
+        interval_days: review.intervalDays, ease_factor: review.easeFactor, lapses: review.lapses,
+        reviewed_at: review.createdAt, next_review_date: review.nextReviewDate,
+        source_data: { assignment_id: review.assignmentId, card_number: review.cardNumber },
       },
       state: {
         app: "aylamed", scope_type: "exam_track",
@@ -58060,8 +58418,7 @@ app.post("/api/ayla/students/:studentId/flashcard-reviews", async (req, res) => 
         user_id: student.id, flashcard_id: `aylamed:ayla.resources:${review.resourceId}`,
         rating: review.rating, interval_days: review.intervalDays, ease_factor: review.easeFactor,
         lapses: review.lapses, review_count: previousReviews.length + 1,
-        last_review_event_id: review.id, reviewed_at: review.createdAt,
-        next_review_date: review.nextReviewDate,
+        last_review_event_id: review.id, reviewed_at: review.createdAt, next_review_date: review.nextReviewDate,
       },
     }).catch((error) => console.warn("AylaMed flashcard shadow write failed; JSON remains authoritative:", error.message));
     return aylaSendOk(res, { review, assignment: completion.assignment, plan: completion.plan, assignmentCompleted: completion.completed, systemProgress: aylaV189SystemProgress(db, student) }, 201);
@@ -58890,7 +59247,8 @@ function ngAutoZoomPrepHasAlreadyOpened(session = {}) {
     hasRealZoomMeetingId(session.zoom_meeting_id) &&
     ngManualLiveJoinUrl(session) &&
     (session.zoom_waiting_room_disabled_at || session.auto_zoom_opened_at) &&
-    (session.join_before_host_enabled_at || session.auto_zoom_opened_at)
+    (session.join_before_host_enabled_at || session.auto_zoom_opened_at) &&
+    String(session.student_entry_verified_meeting_id || "") === String(session.zoom_meeting_id || "")
   );
 }
 
@@ -58930,8 +59288,8 @@ async function ngAutoZoomPrepOneSession(db, session, actorId = "auto_zoom_5min_s
     if (!hasRealZoomMeetingId(session.zoom_meeting_id)) {
       meeting = await createZoomMeetingForLiveSession(session, session.scheduled_timezone || DEFAULT_TIMEZONE);
       session.zoom_meeting_id = String(meeting.id);
+      ngApplyZoomMeetingDetailsToSession(session, meeting);
       session.meeting_password = meeting.password || session.meeting_password || "pending";
-      session.zoom_meeting_url = meeting.join_url || session.zoom_meeting_url || null;
       session.zoom_start_url = meeting.start_url || session.zoom_start_url || null;
       session.host_start_url = meeting.start_url || session.host_start_url || null;
       session.status = session.status || "scheduled";
@@ -58957,10 +59315,8 @@ async function ngAutoZoomPrepOneSession(db, session, actorId = "auto_zoom_5min_s
     } else if (!ngManualLiveJoinUrl(session) || !session.zoom_start_url) {
       try {
         meeting = await getZoomMeetingDetailsForHostStart(session.zoom_meeting_id);
-        if (meeting?.join_url && !ngManualLiveJoinUrl(session)) {
-          session.zoom_meeting_url = meeting.join_url;
-          result.changed = true;
-        }
+        const appliedMeeting = ngApplyZoomMeetingDetailsToSession(session, meeting || {});
+        if (appliedMeeting.changed) result.changed = true;
         if (meeting?.start_url && !session.zoom_start_url) {
           session.zoom_start_url = meeting.start_url;
           session.host_start_url = meeting.start_url;
@@ -58982,6 +59338,7 @@ async function ngAutoZoomPrepOneSession(db, session, actorId = "auto_zoom_5min_s
         const openedAt = openEntry.updated_at || new Date().toISOString();
         session.zoom_waiting_room_disabled_at = openedAt;
         session.join_before_host_enabled_at = openedAt;
+        session.student_entry_verified_meeting_id = String(session.zoom_meeting_id || "");
         session.auto_zoom_opened_at = openedAt;
         session.auto_zoom_opened_by = actorId;
         session.updated_by = actorId;
@@ -59039,16 +59396,30 @@ async function ngRunAutoZoomPrepareTick(reason = "interval") {
 
   try {
     const db = await readLiveDb();
+    const autoCompletion = ngAutoCompleteExpiredLiveSessions(db, {
+      actorId: "live_session_one_hour_scheduler",
+      nowMs,
+    });
+    result.auto_completed = autoCompletion.completed_count;
+    result.auto_completed_session_ids = autoCompletion.completed_session_ids;
+    if (autoCompletion.changed) result.changed = true;
     const sessions = Object.values(db.liveSessions || {})
       .filter((session) => session?.id)
       .sort((a, b) => ngAutoZoomPrepSessionStartMs(a) - ngAutoZoomPrepSessionStartMs(b));
+    const eligibleSessions = [];
 
     for (const session of sessions) {
       result.checked += 1;
       const check = ngAutoZoomPrepShouldSkipSession(session, nowMs);
       if (check.skip) continue;
+      eligibleSessions.push(session);
+    }
 
-      result.candidates += 1;
+    result.candidates = eligibleSessions.length;
+    const authoritativeSessions = ngDeduplicateStudentJoinSessions(db, eligibleSessions);
+    result.competing_sessions_skipped = Math.max(0, eligibleSessions.length - authoritativeSessions.length);
+
+    for (const session of authoritativeSessions) {
       const one = await ngAutoZoomPrepOneSession(db, session, "auto_zoom_5min_scheduler");
       result.details.push(one);
 
