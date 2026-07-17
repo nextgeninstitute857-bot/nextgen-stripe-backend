@@ -1,4 +1,10 @@
 import express from "express";
+import {
+  flashcardCapabilities,
+  scheduleFlashcardReview,
+  validateFlashcardContent,
+} from "./lib/flashcard-engine.js";
+import { shadowWriteFlashcardReview } from "./lib/flashcard-postgres.js";
 import cors from "cors";
 import dotenv from "dotenv";
 import Stripe from "stripe";
@@ -454,7 +460,7 @@ async function ngBuildDbSafetySnapshot() {
     "users", "courses", "enrollments", "payments", "plans",
     "roadmaps", "roadmapProgress", "liveSessions", "recordings", "notes",
     "attendance", "leaderboard", "assessments", "assessmentAttempts",
-    "flashcards", "flashcardProgress", "dailyTaskProgress", "weakConceptLogs",
+    "flashcards", "flashcardProgress", "flashcardReviewEvents", "dailyTaskProgress", "weakConceptLogs",
     "weakAreaProfiles", "weakAreaHistory", "adaptiveAssignments", "adaptiveFlashcardQueues",
     "pointEvents", "communityMessages", "globalCommunityPosts", "studyPartnerProfiles"
   ];
@@ -997,6 +1003,8 @@ const DEFAULT_LIVE_DB = {
   dailyTaskProgress: {},
   weakConceptLogs: {},
   flashcardProgress: {},
+  // Append-only LMS review ledger. flashcardProgress remains the compatibility/current-state view.
+  flashcardReviewEvents: {},
   pointEvents: {},
 
   // AylaMed adaptive medical exam platform data. Namespaced separately so it does not touch existing LMS/CRM tables.
@@ -1269,6 +1277,7 @@ function ngMergeLiveDb(parsed = {}) {
       dailyTaskProgress: parsed.dailyTaskProgress || {},
       weakConceptLogs: parsed.weakConceptLogs || {},
       flashcardProgress: parsed.flashcardProgress || {},
+      flashcardReviewEvents: parsed.flashcardReviewEvents || {},
       pointEvents: parsed.pointEvents || {},
       aylaStudents: parsed.aylaStudents || {},
       aylaDiagnosticSubmissions: parsed.aylaDiagnosticSubmissions || {},
@@ -48520,13 +48529,9 @@ function ngBuildMarathonDay({ courseId, dayNumber, weekNumber, date, system, sys
 }
 
 function ngBuildDailyFlashcardsForDay(day) {
-  if (!day || day.assessment_day) return [];
-  const topic = day.first_aid_topics || day.system || "today’s topic";
-  return [
-    { front: `What is the key concept for ${topic}?`, back: `Review the live class notes for ${topic}, then connect the mechanism to the assigned UWorld QIDs.`, explanation: "Use active recall before watching the video explanation." },
-    { front: `Which mistake should you avoid in ${day.system}?`, back: "Do not memorize the answer only. Identify the mechanism, diagnosis clue, and wrong-option trap.", explanation: "This card is for correction-based revision." },
-    { front: `What should you do after completing today’s ${day.system} QIDs?`, back: "Watch the matching UWorld Video Library QID explanations first, complete assigned UWorld QIDs externally, log wrongs/weak concepts, review notes/recording, post one confusing concept in Community Q&A, and submit the daily task.", explanation: "This links daily study work to leaderboard accountability." },
-  ];
+  // A roadmap title alone is not enough evidence for an answer-bearing medical
+  // card. Keep existing cards, but do not create generic study-instruction cards.
+  return [];
 }
 
 
@@ -49485,32 +49490,19 @@ function ngNormalizeAIFlashcards(cards = []) {
     explanation: String(card.explanation || card.rationale || "").trim(),
     tag: String(card.tag || card.topic || "weak-area").trim(),
     difficulty: String(card.difficulty || "medium").trim(),
-  })).filter((card) => card.front && card.back);
-}
-
-function ngBuildLocalFlashcardDrafts({ system = "", topic = "", weakConcept = "", qids = [], count = 8, resourceSource = "roadmap" } = {}) {
-  const n = Math.max(1, Math.min(100, Number(count || 8)));
-  const cleanSystem = system || "General";
-  const cleanTopic = topic || weakConcept || cleanSystem;
-  const qidList = Array.isArray(qids) ? qids : ngNormalizeQidList(qids);
-  const templates = [
-    (i) => ({ front: `${cleanTopic}: what is the core mechanism?`, back: `Explain the core mechanism for ${cleanTopic} in ${cleanSystem}, then connect it to the assigned resource.`, explanation: `Generated draft from ${resourceSource}. Edit before publishing if needed.`, tag: cleanTopic, difficulty: "medium" }),
-    (i) => ({ front: `${cleanTopic}: what clue should trigger this concept?`, back: `Identify the key vignette clue, the diagnosis clue, and the common trap for ${cleanTopic}.`, explanation: "Use this for active recall before solving QIDs.", tag: "recognition", difficulty: "medium" }),
-    (i) => ({ front: `${cleanTopic}: what is the most common wrong-option trap?`, back: `Write why the tempting wrong answer is wrong, then compare it with the correct mechanism.`, explanation: "Correction-based review card.", tag: "trap", difficulty: "hard" }),
-    (i) => ({ front: `${cleanTopic}: which First Aid line/page should be reviewed?`, back: `Review the assigned book page or note section for ${cleanTopic}, then summarize it in one mechanism sentence.`, explanation: "Book-linked review card.", tag: "book-review", difficulty: "medium" }),
-    (i) => ({ front: qidList.length ? `QID ${qidList[(i - 1) % qidList.length]}: what concept is being tested?` : `${cleanTopic}: what question pattern tests this?`, back: `Map the question back to ${cleanTopic}: mechanism → clue → answer → wrong-option trap.`, explanation: "Mapped QID review card.", tag: "qid-map", difficulty: "medium" }),
-  ];
-  return Array.from({ length: n }, (_, index) => templates[index % templates.length](index + 1));
+  })).filter((card) => validateFlashcardContent(card).valid);
 }
 
 async function ngGenerateFlashcardsWithAI({ trainingText, system, topic, weakConcept, qids = [], count = 8 }) {
   const clean = String(trainingText || "").trim();
   if (!isAIConfigured() || clean.length < 300) {
     return {
-      cards: ngBuildLocalFlashcardDrafts({ system, topic, weakConcept, qids, count, resourceSource: clean.length >= 300 ? "training" : "local-fallback" }),
+      // Never publish prompt-like placeholders as medical answers. Admins can
+      // retry after configuration/context is available; existing cards remain unchanged.
+      cards: [],
       usage: {},
-      model: "fallback-local",
-      warnings: [!isAIConfigured() ? getAIConfigError() : "Training context was too short"],
+      model: "quality-gate-no-generation",
+      warnings: [!isAIConfigured() ? getAIConfigError() : "Training context was too short", "No cards were created because answer-bearing source content is required."],
     };
   }
 
@@ -49611,6 +49603,9 @@ app.post("/student/flashcards/:id/review", async (req, res) => {
     const db = await readLiveDb();
     const card = db.flashcards?.[String(req.params.id)] || null;
     if (!card) return res.status(404).json({ success: false, error: "Flashcard not found" });
+    if (card.user_id && String(card.user_id) !== String(user.id)) {
+      return res.status(404).json({ success: false, error: "Flashcard not found" });
+    }
     const courseId = String(card.course_id || req.body.course_id || "").trim();
     const access = ngCourseFeatureAccess(db, user, {
       courseId,
@@ -49622,8 +49617,47 @@ app.post("/student/flashcards/:id/review", async (req, res) => {
     }
     const day = card.roadmap_day_id ? ngFindRoadmapDay(db, { courseId, dayId: card.roadmap_day_id }) : null;
     db.flashcardProgress = db.flashcardProgress || {};
+    db.flashcardReviewEvents = db.flashcardReviewEvents || {};
     const key = `${courseId}:${user.id}:${card.id}`;
-    db.flashcardProgress[key] = { id: key, course_id: courseId, user_id: user.id, flashcard_id: card.id, roadmap_day_id: card.roadmap_day_id || null, reviewed: true, confidence: req.body.confidence || null, reviewed_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+    const previousProgress = db.flashcardProgress[key] || {};
+    const schedule = scheduleFlashcardReview(previousProgress, req.body.rating || req.body.confidence || "good", new Date());
+    const reviewEventId = uuid();
+    db.flashcardReviewEvents[reviewEventId] = {
+      id: reviewEventId,
+      app: "lms",
+      course_id: courseId,
+      user_id: user.id,
+      flashcard_id: card.id,
+      roadmap_day_id: card.roadmap_day_id || null,
+      rating: schedule.rating,
+      confidence: req.body.confidence || null,
+      interval_days: schedule.interval_days,
+      ease_factor: schedule.ease_factor,
+      lapses: schedule.lapses,
+      reviewed_at: schedule.reviewed_at,
+      next_review_date: schedule.next_review_date,
+      created_at: schedule.reviewed_at,
+    };
+    db.flashcardProgress[key] = {
+      ...previousProgress,
+      id: key,
+      course_id: courseId,
+      user_id: user.id,
+      flashcard_id: card.id,
+      roadmap_day_id: card.roadmap_day_id || null,
+      reviewed: true,
+      rating: schedule.rating,
+      confidence: req.body.confidence || null,
+      interval_days: schedule.interval_days,
+      ease_factor: schedule.ease_factor,
+      lapses: schedule.lapses,
+      review_count: Math.max(0, Number(previousProgress.review_count || 0)) + 1,
+      last_review_event_id: reviewEventId,
+      reviewed_at: schedule.reviewed_at,
+      next_review_date: schedule.next_review_date,
+      due_date: schedule.next_review_date,
+      updated_at: schedule.reviewed_at,
+    };
 
     const cardScope = String(card.scope || card.source || card.source_label || "").toLowerCase();
     const taskKey = cardScope.includes("session")
@@ -49661,7 +49695,32 @@ app.post("/student/flashcards/:id/review", async (req, res) => {
 
     const leaderboard = courseId ? updateLeaderboard(db, { courseId, userId: user.id, userName: user.name || user.email || "Student" }) : null;
     await writeLiveDb(db);
-    res.json({ success: true, progress: db.flashcardProgress[key], task_key: taskKey, task_completed: flashcardTaskCompleted, reviewed_count: reviewedRequiredCount, required_count: requiredFlashcardCount, leaderboard });
+    await shadowWriteFlashcardReview({
+      event: {
+        ...db.flashcardReviewEvents[reviewEventId],
+        scope_type: "course",
+        scope_id: courseId,
+        source_event_id: `lms:${reviewEventId}`,
+        flashcard_id: `lms:${card.id}`,
+        source_data: { roadmap_day_id: card.roadmap_day_id || null },
+      },
+      state: {
+        app: "lms",
+        scope_type: "course",
+        scope_id: courseId,
+        user_id: user.id,
+        flashcard_id: `lms:${card.id}`,
+        rating: schedule.rating,
+        interval_days: schedule.interval_days,
+        ease_factor: schedule.ease_factor,
+        lapses: schedule.lapses,
+        review_count: db.flashcardProgress[key].review_count,
+        last_review_event_id: reviewEventId,
+        reviewed_at: schedule.reviewed_at,
+        next_review_date: schedule.next_review_date,
+      },
+    }).catch((error) => console.warn("LMS flashcard shadow write failed; JSON remains authoritative:", error.message));
+    res.json({ success: true, progress: db.flashcardProgress[key], review_event_id: reviewEventId, task_key: taskKey, task_completed: flashcardTaskCompleted, reviewed_count: reviewedRequiredCount, required_count: requiredFlashcardCount, leaderboard });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
@@ -55228,23 +55287,23 @@ app.post("/api/ayla/assign-qbank-block", async (req, res) => {
 
 app.post("/api/ayla/generate-flashcards", async (req, res) => {
   try {
-    const db = await readAylaDb();
-    aylaEnsureSeedData(db);
-    const student = aylaGetItem(db, "aylaStudents", req.body.studentId);
-    if (!student) return aylaSendError(res, 404, "AylaMed student not found");
+    const { student, db } = await aylaV189RequireStudent(req, req.body.studentId);
+    if (!flashcardCapabilities("aylamed").studentSourceCreation) return aylaSendError(res, 403, "Flashcard creation is not enabled for this application");
 
     const recommendation = aylaRecommendation({ ...student, ...req.body });
-    const flashcards = Array.isArray(req.body.cards) && req.body.cards.length
-      ? req.body.cards.map((card) => ({ id: card.id || aylaId("CARD"), studentId: student.id, exam: student.exam, front: card.front, back: card.back, source: card.source || "Manual", priority: card.priority || (recommendation.riskLevel === "Critical" ? "Critical" : "High"), status: card.status || "Due", nextReview: card.nextReview || "Today", createdAt: aylaNow(), updatedAt: aylaNow() }))
-      : aylaBuildFlashcards(student, recommendation, req.body.source || "Generated");
+    const submittedCards = Array.isArray(req.body.cards) ? req.body.cards.slice(0, 100) : [];
+    const rejected = submittedCards.map((card, index) => ({ index, card, quality: validateFlashcardContent(card) })).filter((row) => !row.quality.valid);
+    const flashcards = submittedCards.filter((card) => validateFlashcardContent(card).valid)
+      .map((card) => ({ id: card.id || aylaId("CARD"), app: "aylamed", studentId: student.id, examTrackId: student.examTrackId || null, exam: student.exam, front: String(card.front).trim(), back: String(card.back).trim(), explanation: String(card.explanation || "").trim(), source: card.source || "Manual", priority: card.priority || (recommendation.riskLevel === "Critical" ? "Critical" : "High"), status: card.status || "Due", nextReview: card.nextReview || "Today", createdAt: aylaNow(), updatedAt: aylaNow() }));
+    if (!flashcards.length) return aylaSendError(res, 422, "No answer-bearing flashcards passed the quality check");
 
     flashcards.forEach((card) => aylaSetItem(db, "aylaFlashcards", card));
-    await aylaLog(db, "flashcards", "AylaMed flashcards generated", { studentId: student.id, count: flashcards.length });
+    await aylaLog(db, "flashcards", "AylaMed flashcards generated", { studentId: student.id, count: flashcards.length, rejected: rejected.length });
     await writeAylaDb(db);
 
-    return aylaSendOk(res, { flashcards, recommendation }, 201);
+    return aylaSendOk(res, { flashcards, recommendation, rejected: rejected.map((row) => ({ index: row.index, reasons: row.quality.reasons })) }, 201);
   } catch (error) {
-    return aylaSendError(res, 500, error.message || "Failed to generate AylaMed flashcards");
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to generate AylaMed flashcards");
   }
 });
 
@@ -57955,21 +58014,28 @@ app.post("/api/ayla/students/:studentId/flashcard-reviews", async (req, res) => 
     const { student, db } = await aylaV189RequireStudent(req, req.params.studentId);
     const rating = String(req.body.rating || "again").toLowerCase();
     if (!["again", "hard", "good", "easy"].includes(rating)) return aylaSendError(res, 400, "Invalid flashcard rating");
-    const previous = aylaValues(db, "aylaFlashcardReviews").filter((row) => String(row.studentId) === String(student.id) && String(row.resourceId) === String(req.body.resourceId)).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0];
-    const previousInterval = Math.max(0, aylaNumber(previous?.intervalDays, 0));
-    const intervalDays = rating === "again" ? 1 : rating === "hard" ? Math.max(2, Math.round(previousInterval * 1.3) || 2) : rating === "good" ? Math.max(4, Math.round(previousInterval * 2.2) || 4) : Math.max(7, Math.round(previousInterval * 3.2) || 7);
+    const previousReviews = aylaValues(db, "aylaFlashcardReviews").filter((row) => String(row.studentId) === String(student.id) && String(row.resourceId) === String(req.body.resourceId)).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+    const previous = previousReviews[0];
+    const schedule = scheduleFlashcardReview({
+      interval_days: previous?.intervalDays,
+      ease_factor: previous?.easeFactor,
+      lapses: previous?.lapses,
+    }, rating, new Date());
     const review = {
       id: aylaId("AYLA-FR"),
+      app: "aylamed",
       studentId: student.id,
       assignmentId: req.body.assignmentId || null,
       resourceId: req.body.resourceId || null,
       cardNumber: req.body.cardNumber || req.body.resourceNumber || "",
       system: req.body.system || "General",
       topic: req.body.topic || "",
-      rating,
-      intervalDays,
-      nextReviewDate: aylaDateOnly(aylaAddDays(new Date(), intervalDays)),
-      createdAt: aylaNow(),
+      rating: schedule.rating,
+      intervalDays: schedule.interval_days,
+      easeFactor: schedule.ease_factor,
+      lapses: schedule.lapses,
+      nextReviewDate: schedule.next_review_date,
+      createdAt: schedule.reviewed_at,
     };
     aylaSetItem(db, "aylaFlashcardReviews", review);
     if (rating === "again" || rating === "hard") {
@@ -57978,6 +58044,26 @@ app.post("/api/ayla/students/:studentId/flashcard-reviews", async (req, res) => 
     const completion = aylaV189MaybeCompleteAssignment(db, review.assignmentId, "aylaFlashcardReviews");
     aylaV189RecordActivity(db, student.id, "flashcard_review", { resourceId: review.resourceId, rating, nextReviewDate: review.nextReviewDate, assignmentCompleted: completion.completed });
     await writeAylaDb(db);
+    await shadowWriteFlashcardReview({
+      event: {
+        id: review.id, app: "aylamed", scope_type: "exam_track",
+        scope_id: String(student.examTrackId || student.exam_track_id || student.exam || "unscoped-aylamed"),
+        user_id: student.id, flashcard_id: `aylamed:ayla.resources:${review.resourceId}`,
+        source_event_id: `aylamed:${review.id}`, rating: review.rating,
+        confidence: null, interval_days: review.intervalDays, ease_factor: review.easeFactor,
+        lapses: review.lapses, reviewed_at: review.createdAt,
+        next_review_date: review.nextReviewDate, source_data: { assignment_id: review.assignmentId, card_number: review.cardNumber },
+      },
+      state: {
+        app: "aylamed", scope_type: "exam_track",
+        scope_id: String(student.examTrackId || student.exam_track_id || student.exam || "unscoped-aylamed"),
+        user_id: student.id, flashcard_id: `aylamed:ayla.resources:${review.resourceId}`,
+        rating: review.rating, interval_days: review.intervalDays, ease_factor: review.easeFactor,
+        lapses: review.lapses, review_count: previousReviews.length + 1,
+        last_review_event_id: review.id, reviewed_at: review.createdAt,
+        next_review_date: review.nextReviewDate,
+      },
+    }).catch((error) => console.warn("AylaMed flashcard shadow write failed; JSON remains authoritative:", error.message));
     return aylaSendOk(res, { review, assignment: completion.assignment, plan: completion.plan, assignmentCompleted: completion.completed, systemProgress: aylaV189SystemProgress(db, student) }, 201);
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to save flashcard review");
