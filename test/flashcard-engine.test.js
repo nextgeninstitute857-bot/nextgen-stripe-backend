@@ -38,8 +38,12 @@ test("quality gate accepts an answer-bearing card", () => {
   assert.equal(result.valid, true);
 });
 
-test("Postgres remains a disabled shadow when its flag is not enabled", () => {
+test("Postgres shadow status follows configuration while JSON remains authoritative", () => {
   const status = flashcardPostgresStatus();
-  assert.equal(status.shadow_write_enabled, false);
+  const expected = Boolean(
+    String(process.env.DATABASE_URL || "").trim()
+    && String(process.env.NEXTGEN_FLASHCARD_PG_SHADOW_WRITE || "false").toLowerCase() === "true"
+  );
+  assert.equal(status.shadow_write_enabled, expected);
   assert.equal(status.read_source, "json");
 });
