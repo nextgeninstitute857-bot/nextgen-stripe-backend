@@ -8,6 +8,19 @@ import {
   flashcardPostgresStatus,
   shadowWriteFlashcardReview,
 } from "./lib/flashcard-postgres.js";
+import {
+  contentRegistryStatus,
+  createContentImportJob,
+  finishContentImportPreview,
+  getContentImportJob,
+} from "./lib/content-registry-postgres.js";
+import {
+  cleanupContentImportFiles,
+  extractSafeZipInventory,
+  previewUniversalQuestionZip,
+  receiveContentZip,
+} from "./lib/content-zip-import.js";
+import { normalizeExamTrack, slug as contentSlug } from "./lib/content-import-adapter.js";
 import cors from "cors";
 import dotenv from "dotenv";
 import Stripe from "stripe";
@@ -22,7 +35,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v198-v197-flashcard-shadow-restored";
+const NEXTGEN_BACKEND_BUILD = "v199-content-registry-preview";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -9675,6 +9688,7 @@ app.get("/health", async (req, res) => {
     json_body_limit: NEXTGEN_JSON_BODY_LIMIT,
     memory: ngMemoryStatus(),
     flashcard_postgres: flashcardPostgresStatus(),
+    content_registry: contentRegistryStatus(),
     storage_cache: {
       lms_loaded: Boolean(liveDbCache),
       crm_loaded: Boolean(crmReadCache),
@@ -32516,6 +32530,85 @@ app.post("/admin/assistant/actions/:id/execute", async (req, res) => {
 // -------------------------
 // AI Training Center
 // -------------------------
+
+const CONTENT_IMPORT_DESTINATIONS = new Set([
+  "aylamed_qbank", "lms_assessment", "baseline_diagnostic", "roadmap",
+  "marketing", "personal_assessment", "revision", "flashcards",
+]);
+
+function ngParseContentDestinations(value) {
+  let rows = [];
+  try { rows = Array.isArray(value) ? value : JSON.parse(String(value || "[]")); }
+  catch { rows = String(value || "").split(","); }
+  return [...new Set(rows.map((row) => contentSlug(row, "")).filter((row) => CONTENT_IMPORT_DESTINATIONS.has(row)))];
+}
+
+async function ngRunContentImportPreview({ jobId, upload, metadata }) {
+  let inventory;
+  try {
+    inventory = await extractSafeZipInventory(upload.file, jobId, DATA_DIR);
+    const preview = await previewUniversalQuestionZip({ inventory, ...metadata });
+    await finishContentImportPreview(jobId, {
+      ...preview.counts,
+      missing_media_samples: preview.missingMedia,
+      collections: preview.collections,
+    }, preview.errors);
+  } catch (error) {
+    console.error("Content Registry preview failed:", jobId, error);
+    await finishContentImportPreview(jobId, { failed: true }, [{ error: error.message || "Preview failed" }]).catch(() => {});
+  } finally {
+    await cleanupContentImportFiles(upload.file, inventory?.workDir);
+  }
+}
+
+app.post("/admin/crm/ai-training/content-imports/preview", async (req, res) => {
+  let upload;
+  try {
+    const { user } = await requireCrmAdmin(req);
+    if (!String(req.headers["content-type"] || "").toLowerCase().includes("multipart/form-data")) {
+      return res.status(415).json({ success: false, error: "multipart/form-data with a ZIP field is required" });
+    }
+    upload = await receiveContentZip(req, DATA_DIR);
+    const examTrack = normalizeExamTrack(upload.fields.exam_track || upload.fields.examTrack);
+    const sourceNamespace = contentSlug(upload.fields.source_namespace || upload.fields.sourceNamespace || upload.fields.source_provider || upload.fields.sourceProvider);
+    const sourceProvider = String(upload.fields.source_provider || upload.fields.sourceProvider || "unknown").trim();
+    const collectionTitle = String(upload.fields.collection_title || upload.fields.collectionTitle || upload.originalFilename.replace(/\.zip$/i, "")).trim();
+    if (examTrack === "unknown") throw Object.assign(new Error("exam_track is required"), { statusCode: 400 });
+    if (sourceNamespace === "unknown") throw Object.assign(new Error("source_namespace or source_provider is required"), { statusCode: 400 });
+    const destinations = ngParseContentDestinations(upload.fields.destinations);
+    const jobId = crypto.randomUUID();
+    await createContentImportJob({
+      id: jobId, examTrack, sourceNamespace, sourceProvider, collectionTitle,
+      originalFilename: upload.originalFilename, zipSha256: upload.sha256,
+      destinations, createdBy: String(user.id),
+    });
+    void ngRunContentImportPreview({
+      jobId, upload,
+      metadata: { examTrack, sourceNamespace, sourceProvider, collectionTitle },
+    });
+    upload = null;
+    return res.status(202).json({
+      success: true, job_id: jobId, status: "previewing", exam_track: examTrack,
+      source_namespace: sourceNamespace, destinations,
+      poll_url: `/admin/crm/ai-training/content-imports/${jobId}`,
+      message: "ZIP accepted. Preview runs asynchronously with bounded memory; nothing is published yet.",
+    });
+  } catch (error) {
+    if (upload?.file) await cleanupContentImportFiles(upload.file);
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message || "Content ZIP preview failed" });
+  }
+});
+
+app.get("/admin/crm/ai-training/content-imports/:jobId", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const job = await getContentImportJob(req.params.jobId);
+    if (!job) return res.status(404).json({ success: false, error: "Content import job not found" });
+    return res.json({ success: true, job });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
 
 app.get("/admin/crm/ai-training", async (req, res) => {
   try {
