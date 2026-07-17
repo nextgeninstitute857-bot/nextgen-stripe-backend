@@ -13,7 +13,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v193-verified-zoom-host-launch";
+const NEXTGEN_BACKEND_BUILD = "v195-stable-recording-publish-state";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -2768,6 +2768,19 @@ function sortNewestFirst(a, b) {
   return String(b.created_at || b.created || "").localeCompare(String(a.created_at || a.created || ""));
 }
 
+function sortRecordingsNewestFirst(a, b) {
+  const recordingDate = (recording = {}) => String(
+    recording.start_time ||
+    recording.published_at ||
+    recording.received_at ||
+    recording.created_at ||
+    recording.created ||
+    ""
+  );
+
+  return recordingDate(b).localeCompare(recordingDate(a));
+}
+
 function sanitizePublicRecording(recording) {
   const topic = ngDayFirstContentTitle(recording.topic || "", {
     systemDay: recording.system_day || recording.day_in_system,
@@ -4233,6 +4246,18 @@ function buildRecordingStorageKey(source = {}) {
     .slice(-2)
     .join("_");
 
+  // A Zoom occurrence keeps the same meeting UUID/start time while its MP4
+  // files can finish processing, change priority, or receive a new file ID.
+  // Use only occurrence-level fields whenever they are available so a later
+  // Zoom refresh cannot make a published recording look like a new row.
+  const occurrenceParts = [meetingId, uuid, startTime]
+    .map(normalizeRecordingKeyPart)
+    .filter(Boolean);
+
+  if (meetingId && (uuid || startTime)) {
+    return `zoom-recording:${occurrenceParts.join(":")}`;
+  }
+
   const parts = [meetingId, uuid, startTime, fileId, recordingType, urlTail]
     .map(normalizeRecordingKeyPart)
     .filter(Boolean);
@@ -4244,6 +4269,59 @@ function buildRecordingStorageKey(source = {}) {
 function getLegacyRecordingMeetingKey(source = {}) {
   const meetingId = source.meeting_id || source.meetingId || source.meetingID || "";
   return meetingId ? String(meetingId) : "";
+}
+
+function ngZoomRecordingOccurrenceMatches(recording = {}, source = {}) {
+  const recordingMeetingId = String(recording.meeting_id || "").trim();
+  const sourceMeetingId = String(source.meeting_id || source.meetingId || source.id || "").trim();
+  if (!recordingMeetingId || !sourceMeetingId || recordingMeetingId !== sourceMeetingId) return false;
+
+  const recordingUuid = String(recording.uuid || recording.meeting_uuid || "").trim();
+  const sourceUuid = String(source.uuid || source.meeting_uuid || "").trim();
+  if (recordingUuid && sourceUuid) return recordingUuid === sourceUuid;
+
+  const recordingStart = String(recording.start_time || "").trim();
+  const sourceStart = String(source.start_time || "").trim();
+  if (!recordingStart || !sourceStart) return false;
+  if (recordingStart === sourceStart) return true;
+
+  const recordingStartMs = new Date(recordingStart).getTime();
+  const sourceStartMs = new Date(sourceStart).getTime();
+  return Number.isFinite(recordingStartMs) &&
+    Number.isFinite(sourceStartMs) &&
+    Math.abs(recordingStartMs - sourceStartMs) <= 2 * 60 * 1000;
+}
+
+function ngFindStoredZoomRecordingOccurrence(db, source = {}) {
+  const stableKey = buildRecordingStorageKey({
+    meeting_id: source.meeting_id || source.meetingId || source.id,
+    uuid: source.uuid || source.meeting_uuid,
+    start_time: source.start_time,
+  });
+  const direct = stableKey ? db.recordings?.[stableKey] || null : null;
+
+  const candidates = Object.entries(db.recordings || {})
+    .filter(([, recording]) => ngZoomRecordingOccurrenceMatches(recording, source))
+    .map(([key, recording]) => {
+      let score = 0;
+      if (recording.assignment_locked === true || recording.assignment_source === "admin_explicit_session") score += 1000;
+      if (recording.published === true) score += 300;
+      if (recording.exact_session_match === true) score += 100;
+      if (recording.recording_url || recording.share_url) score += 20;
+      if (key === stableKey) score += 10;
+      return { key, recording, score };
+    })
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return String(b.recording.updated_at || b.recording.published_at || "")
+        .localeCompare(String(a.recording.updated_at || a.recording.published_at || ""));
+    });
+
+  return candidates[0]
+    ? { key: candidates[0].key, recording: candidates[0].recording, match: "stored_occurrence" }
+    : direct
+      ? { key: stableKey, recording: direct, match: "stable_key" }
+    : { key: stableKey, recording: null, match: "new_occurrence" };
 }
 
 async function downloadZoomTextFile(file, accessToken) {
@@ -4392,7 +4470,7 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
     }
   }
 
-  const recordingKey = buildRecordingStorageKey({
+  const computedRecordingKey = buildRecordingStorageKey({
     meeting_id: meetingId,
     uuid: object.uuid,
     start_time: object.start_time,
@@ -4402,10 +4480,36 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
     recording_url: videoFile?.play_url || videoFile?.download_url || object.share_url,
   });
 
+  const storedOccurrence = ngFindStoredZoomRecordingOccurrence(db, object);
+  const recordingKey = storedOccurrence.key || computedRecordingKey;
   const legacyKey = getLegacyRecordingMeetingKey({ meeting_id: meetingId });
-  const previous = db.recordings[recordingKey] || db.recordings[legacyKey] || {};
+  // Never inherit publish/session state from a meeting-ID-only legacy row when
+  // the Zoom occurrence has its own UUID/start time. Recurring meetings share
+  // one meeting ID, which is what previously caused one day's state to leak.
+  const previous = storedOccurrence.recording || {};
   const exactMatch = ngResolveExactSessionForZoomRecording(db, object, previous);
-  const matchedSession = exactMatch.exact ? exactMatch.session : null;
+  const hasAdminAssignment = Boolean(
+    previous.assignment_locked === true ||
+    previous.assignment_source === "admin_explicit_session"
+  );
+  const adminAssignedSessionId = hasAdminAssignment
+    ? String(previous.session_id || "").trim()
+    : "";
+  const adminAssignedSession = adminAssignedSessionId
+    ? db.liveSessions?.[adminAssignedSessionId] ||
+      Object.values(db.liveSessions || {}).find((item) => String(item.id || "") === adminAssignedSessionId) ||
+      null
+    : null;
+  const effectiveMatch = hasAdminAssignment
+    ? {
+        session: adminAssignedSession,
+        exact: Boolean(adminAssignedSession),
+        reason: adminAssignedSession ? "admin_explicit_session" : "admin_assigned_session_missing",
+        candidate_count: adminAssignedSession ? 1 : 0,
+        time_difference_minutes: null,
+      }
+    : exactMatch;
+  const matchedSession = effectiveMatch.exact ? effectiveMatch.session : null;
   const matchedDay = matchedSession ? ngFindRoadmapDayForLiveSession(db, matchedSession) : null;
   const canAutoPublish = Boolean(
     matchedSession?.id &&
@@ -4480,9 +4584,13 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
     published_by: previous.published_by || (canAutoPublish ? "system:zoom-recording-automation" : null),
     auto_published: previous.auto_published === true || becamePublished,
     auto_published_at: previous.auto_published_at || (becamePublished ? receivedAt : null),
-    exact_session_match: exactMatch.exact === true,
-    exact_session_match_reason: exactMatch.reason || null,
-    exact_session_match_time_difference_minutes: exactMatch.time_difference_minutes ?? null,
+    assignment_source: hasAdminAssignment
+      ? "admin_explicit_session"
+      : previous.assignment_source || (matchedSession ? "zoom_exact_match" : null),
+    assignment_locked: hasAdminAssignment,
+    exact_session_match: effectiveMatch.exact === true,
+    exact_session_match_reason: effectiveMatch.reason || null,
+    exact_session_match_time_difference_minutes: effectiveMatch.time_difference_minutes ?? null,
     selected_video_file_id: videoFile?.id || previous.selected_video_file_id || null,
     received_at: previous.received_at || receivedAt,
     updated_at: receivedAt,
@@ -4490,7 +4598,12 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
 
   db.recordings[recordingKey] = recordingPayload;
 
-  if (legacyKey && legacyKey !== recordingKey && db.recordings[legacyKey]?.published) {
+  if (
+    legacyKey &&
+    legacyKey !== recordingKey &&
+    db.recordings[legacyKey]?.published &&
+    ngZoomRecordingOccurrenceMatches(db.recordings[legacyKey], object)
+  ) {
     db.recordings[legacyKey] = {
       ...(db.recordings[legacyKey] || {}),
       published: false,
@@ -4508,7 +4621,7 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
       recording_url: recordingPayload.recording_url,
       recording_published: recordingPayload.published === true,
       recording_published_at: recordingPayload.published_at || null,
-      recording_match_reason: exactMatch.reason || null,
+      recording_match_reason: effectiveMatch.reason || null,
       updated_at: receivedAt,
     };
     db.notes[sessionId] = {
@@ -4602,7 +4715,7 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
     transcriptRaw,
     transcriptImportError,
     learningContentResult,
-    exactMatch,
+    exactMatch: effectiveMatch,
     autoPublished: becamePublished,
     emailNotification,
   };
@@ -12886,7 +12999,7 @@ app.get("/zoom/recordings", async (req, res) => {
       const transcriptFile = findTranscriptFile(files);
       const meetingId = String(meeting.id || "");
       const recordingUrl = videoFile?.play_url || meeting.share_url || videoFile?.download_url || null;
-      const recordingKey = buildRecordingStorageKey({
+      const computedRecordingKey = buildRecordingStorageKey({
         meeting_id: meetingId,
         uuid: meeting.uuid,
         start_time: meeting.start_time,
@@ -12895,17 +13008,30 @@ app.get("/zoom/recordings", async (req, res) => {
         file_type: videoFile?.file_type,
         recording_url: recordingUrl,
       });
-      const saved = db.recordings[recordingKey] || {};
-      const legacy = db.recordings[meetingId] || {};
+      const storedOccurrence = ngFindStoredZoomRecordingOccurrence(db, meeting);
+      const recordingKey = storedOccurrence.key || computedRecordingKey;
+      const saved = storedOccurrence.recording || {};
+      const exactMatch = ngResolveExactSessionForZoomRecording(db, meeting, saved);
+      const matchedSession = saved.session_id
+        ? db.liveSessions?.[String(saved.session_id)] || null
+        : exactMatch.exact
+          ? exactMatch.session
+          : null;
+      const matchedDay = matchedSession ? ngFindRoadmapDayForLiveSession(db, matchedSession) : null;
 
       return sanitizePublicRecording({
-        session_id: saved.session_id || legacy.session_id || null,
-        course_id: saved.course_id || legacy.course_id || null,
+        session_id: saved.session_id || matchedSession?.id || null,
+        course_id: saved.course_id || matchedSession?.course_id || null,
         id: recordingKey,
         recording_key: recordingKey,
         meeting_id: meetingId,
         uuid: meeting.uuid,
-        topic: saved.topic || meeting.topic,
+        topic: saved.topic || matchedSession?.topic || matchedSession?.title || meeting.topic,
+        roadmap_day_id: saved.roadmap_day_id || matchedDay?.id || matchedSession?.roadmap_day_id || null,
+        day_number: saved.day_number || matchedDay?.day_number || matchedSession?.day_number || null,
+        instructional_day_number: saved.instructional_day_number || matchedDay?.instructional_day_number || matchedDay?.day_number || matchedSession?.instructional_day_number || null,
+        system_day: saved.system_day || matchedDay?.system_day || matchedDay?.day_in_system || matchedSession?.system_day || null,
+        system: saved.system || matchedDay?.system || matchedSession?.system || null,
         start_time: meeting.start_time,
         duration: meeting.duration,
         share_url: meeting.share_url,
@@ -13004,6 +13130,13 @@ app.post("/live/recordings/publish", async (req, res) => {
       });
     }
 
+    const explicitSessionSelection = Boolean(requestedSessionId);
+    const sessionReassigned = Boolean(
+      explicitSessionSelection &&
+      previousSessionId &&
+      requestedSessionId !== previousSessionId
+    );
+
     const requestedCourseId = String(req.body.course_id || "").trim();
     const sessionCourseId = String(session?.course_id || "").trim();
 
@@ -13030,11 +13163,47 @@ app.post("/live/recordings/publish", async (req, res) => {
     }
 
     const now = new Date().toISOString();
+    const wasAlreadyPublished = previous.published === true || legacy.published === true;
     const recordingUrl = req.body.recording_url || previous.recording_url || legacy.recording_url || req.body.share_url || previous.share_url || legacy.share_url || null;
     const shareUrl = req.body.share_url || previous.share_url || legacy.share_url || recordingUrl || null;
     const roadmapDay = session ? ngFindRoadmapDayForLiveSession(db, session) : null;
+    const keepPreviousAssignmentMetadata = !sessionReassigned;
+    const previousRoadmapDayId = keepPreviousAssignmentMetadata
+      ? previous.roadmap_day_id || legacy.roadmap_day_id || null
+      : null;
+    const previousDayNumber = keepPreviousAssignmentMetadata
+      ? previous.day_number || legacy.day_number || null
+      : null;
+    const previousInstructionalDayNumber = keepPreviousAssignmentMetadata
+      ? previous.instructional_day_number || legacy.instructional_day_number || null
+      : null;
+    const previousSystemDay = keepPreviousAssignmentMetadata
+      ? previous.system_day || legacy.system_day || null
+      : null;
+    const previousSystem = keepPreviousAssignmentMetadata
+      ? previous.system || legacy.system || null
+      : null;
+    const previousAssignmentHistory = Array.isArray(previous.assignment_history)
+      ? previous.assignment_history
+      : Array.isArray(legacy.assignment_history)
+        ? legacy.assignment_history
+        : [];
+    const assignmentHistory = explicitSessionSelection
+      ? [
+          ...previousAssignmentHistory,
+          {
+            from_session_id: previousSessionId || null,
+            to_session_id: resolvedSessionId,
+            assigned_at: now,
+            assigned_by: user.id,
+          },
+        ]
+      : previousAssignmentHistory;
+    const requestedTopic = explicitSessionSelection && session
+      ? session.topic || session.title || req.body.topic
+      : req.body.topic || session?.topic || session?.title;
     const cleanTopic = ngDayFirstContentTitle(
-      req.body.topic || session?.topic || session?.title || previous.topic || legacy.topic || "Live Session Recording",
+      requestedTopic || previous.topic || legacy.topic || "Live Session Recording",
       {
         systemDay: roadmapDay?.system_day || roadmapDay?.day_in_system || session?.system_day,
         dayNumber: roadmapDay?.day_number || session?.day_number,
@@ -13050,11 +13219,11 @@ app.post("/live/recordings/publish", async (req, res) => {
       uuid: req.body.uuid || previous.uuid || legacy.uuid || null,
       session_id: resolvedSessionId,
       course_id: resolvedCourseId,
-      roadmap_day_id: roadmapDay?.id || session?.roadmap_day_id || previous.roadmap_day_id || legacy.roadmap_day_id || null,
-      day_number: roadmapDay?.day_number || session?.day_number || previous.day_number || legacy.day_number || null,
-      instructional_day_number: roadmapDay?.instructional_day_number || roadmapDay?.day_number || session?.instructional_day_number || previous.instructional_day_number || null,
-      system_day: roadmapDay?.system_day || roadmapDay?.day_in_system || session?.system_day || previous.system_day || null,
-      system: roadmapDay?.system || session?.system || previous.system || legacy.system || null,
+      roadmap_day_id: roadmapDay?.id || session?.roadmap_day_id || previousRoadmapDayId,
+      day_number: roadmapDay?.day_number || session?.day_number || previousDayNumber,
+      instructional_day_number: roadmapDay?.instructional_day_number || roadmapDay?.day_number || session?.instructional_day_number || previousInstructionalDayNumber,
+      system_day: roadmapDay?.system_day || roadmapDay?.day_in_system || session?.system_day || previousSystemDay,
+      system: roadmapDay?.system || session?.system || previousSystem,
       topic: cleanTopic,
       start_time: req.body.start_time || previous.start_time || legacy.start_time || null,
       duration: req.body.duration || previous.duration || legacy.duration || null,
@@ -13065,8 +13234,20 @@ app.post("/live/recordings/publish", async (req, res) => {
       recording_type: req.body.recording_type || previous.recording_type || legacy.recording_type || null,
       status: req.body.status || previous.status || legacy.status || null,
       published: req.body.published !== false,
-      published_at: now,
-      published_by: user.id,
+      published_at: wasAlreadyPublished ? previous.published_at || legacy.published_at || now : now,
+      published_by: wasAlreadyPublished ? previous.published_by || legacy.published_by || user.id : user.id,
+      assignment_source: explicitSessionSelection
+        ? "admin_explicit_session"
+        : previous.assignment_source || legacy.assignment_source || "existing_recording_mapping",
+      assignment_locked: explicitSessionSelection
+        ? true
+        : previous.assignment_locked === true || legacy.assignment_locked === true,
+      assigned_at: explicitSessionSelection ? now : previous.assigned_at || legacy.assigned_at || null,
+      assigned_by: explicitSessionSelection ? user.id : previous.assigned_by || legacy.assigned_by || null,
+      reassigned_from_session_id: sessionReassigned
+        ? previousSessionId
+        : previous.reassigned_from_session_id || legacy.reassigned_from_session_id || null,
+      assignment_history: assignmentHistory,
       updated_at: now,
     };
 
@@ -13097,7 +13278,12 @@ app.post("/live/recordings/publish", async (req, res) => {
       };
     }
 
-    if (legacyKey && legacyKey !== key && db.recordings[legacyKey]?.published) {
+    if (
+      legacyKey &&
+      legacyKey !== key &&
+      db.recordings[legacyKey]?.published &&
+      ngZoomRecordingOccurrenceMatches(db.recordings[legacyKey], req.body)
+    ) {
       db.recordings[legacyKey] = {
         ...(db.recordings[legacyKey] || {}),
         published: false,
@@ -13107,7 +13293,7 @@ app.post("/live/recordings/publish", async (req, res) => {
     }
 
     let email_notification = null;
-    if (db.recordings[key].published === true) {
+    if (db.recordings[key].published === true && !wasAlreadyPublished) {
       const course = db.courses?.[String(resolvedCourseId)] || null;
       email_notification = ngQueueCourseTemplateEmail(db, {
         templateKey: "new_recording_published",
@@ -13155,7 +13341,12 @@ app.post("/live/recordings/unpublish", async (req, res) => {
       unpublished_at: new Date().toISOString(),
     };
 
-    if (legacyKey && legacyKey !== key && db.recordings[legacyKey]?.published) {
+    if (
+      legacyKey &&
+      legacyKey !== key &&
+      db.recordings[legacyKey]?.published &&
+      ngZoomRecordingOccurrenceMatches(db.recordings[legacyKey], req.body)
+    ) {
       db.recordings[legacyKey] = {
         ...(db.recordings[legacyKey] || {}),
         published: false,
@@ -13196,7 +13387,7 @@ app.get("/live/recordings", async (req, res) => {
     if (!isStaff) recordings = recordings.filter((recording) => recording.published);
     if (requestedCourseId) recordings = recordings.filter((recording) => String(recording.course_id || "") === requestedCourseId);
 
-    recordings.sort(sortNewestFirst);
+    recordings.sort(sortRecordingsNewestFirst);
     res.json({ success: true, count: recordings.length, recordings: recordings.map(sanitizePublicRecording), auto_roadmap_sync: autoRoadmapSync });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to load live recordings" });
@@ -13227,6 +13418,8 @@ app.get("/live/recordings/published", async (req, res) => {
 
     let recordings = Object.values(db.recordings || {}).filter((recording) => recording.published);
     if (courseId) recordings = recordings.filter((recording) => String(recording.course_id || "") === String(courseId));
+
+    recordings.sort(sortRecordingsNewestFirst);
 
     res.json({ success: true, count: recordings.length, recordings: recordings.map(sanitizePublicRecording), auto_roadmap_sync: autoRoadmapSync });
   } catch (e) {
@@ -58992,18 +59185,41 @@ function ngStartWeakFlashcardAutomationScheduler() {
 let ngZoomRecordingRecoveryTimer = null;
 let ngZoomRecordingRecoveryRunning = false;
 const NEXTGEN_ZOOM_RECORDING_RECOVERY_ENABLED = String(process.env.ZOOM_RECORDING_RECOVERY_ENABLED || "true").toLowerCase() !== "false";
+const NEXTGEN_ZOOM_RECORDING_RECOVERY_INTERVAL_MS = Math.max(
+  5 * 60 * 1000,
+  Number(process.env.ZOOM_RECORDING_RECOVERY_INTERVAL_MS || 15 * 60 * 1000)
+);
+const ngZoomRecordingRecoveryState = {
+  last_started_at: null,
+  last_finished_at: null,
+  last_success_at: null,
+  last_error: null,
+  last_result: null,
+};
+
+function ngRememberZoomRecordingRecoveryResult(result = {}) {
+  ngZoomRecordingRecoveryState.last_result = result;
+  if (result.success !== false) {
+    ngZoomRecordingRecoveryState.last_success_at = new Date().toISOString();
+    ngZoomRecordingRecoveryState.last_error = null;
+  }
+  return result;
+}
 
 async function ngRunZoomRecordingRecoveryTick(reason = "interval") {
   if (!NEXTGEN_ZOOM_RECORDING_RECOVERY_ENABLED) return { success: true, skipped: true, reason: "disabled" };
   if (ngZoomRecordingRecoveryRunning) return { success: true, skipped: true, reason: "already_running" };
   ngZoomRecordingRecoveryRunning = true;
+  ngZoomRecordingRecoveryState.last_started_at = new Date().toISOString();
   try {
     const db = await readLiveDb();
     const knownMeetingIds = new Set(Object.values(db.liveSessions || {})
       .filter((session) => ngZoomRecordingSessionEligible(db, session))
       .map((session) => String(session.zoom_meeting_id || session.meeting_id || "").trim())
       .filter(Boolean));
-    if (!knownMeetingIds.size) return { success: true, reason, checked: 0, imported: 0 };
+    if (!knownMeetingIds.size) {
+      return ngRememberZoomRecordingRecoveryResult({ success: true, reason, checked: 0, imported: 0 });
+    }
 
     const token = await getZoomAccessToken();
     const from = todayKey(addDays(new Date(), -3));
@@ -59040,27 +59256,61 @@ async function ngRunZoomRecordingRecoveryTick(reason = "interval") {
       });
     }
     if (imported) await writeLiveDb(db);
-    return { success: true, reason, checked: meetings.length, imported, auto_published: autoPublished, details };
+    return ngRememberZoomRecordingRecoveryResult({ success: true, reason, checked: meetings.length, imported, auto_published: autoPublished, details });
   } catch (error) {
-    console.error("Zoom recording recovery tick failed:", error.response?.data?.message || error.message);
-    return { success: false, reason, error: error.response?.data?.message || error.message };
+    const errorMessage = error.response?.data?.message || error.message;
+    console.error("Zoom recording recovery tick failed:", errorMessage);
+    ngZoomRecordingRecoveryState.last_error = errorMessage;
+    return ngRememberZoomRecordingRecoveryResult({ success: false, reason, error: errorMessage });
   } finally {
     ngZoomRecordingRecoveryRunning = false;
+    ngZoomRecordingRecoveryState.last_finished_at = new Date().toISOString();
   }
 }
 
 function ngStartZoomRecordingRecoveryScheduler() {
   if (!NEXTGEN_ZOOM_RECORDING_RECOVERY_ENABLED || ngZoomRecordingRecoveryTimer) return ngZoomRecordingRecoveryTimer;
-  const intervalMs = Math.max(5 * 60 * 1000, Number(process.env.ZOOM_RECORDING_RECOVERY_INTERVAL_MS || 15 * 60 * 1000));
   ngZoomRecordingRecoveryTimer = setInterval(() => {
     ngRunZoomRecordingRecoveryTick("interval").catch((error) => console.error("Zoom recording recovery scheduler failed:", error.message));
-  }, intervalMs);
+  }, NEXTGEN_ZOOM_RECORDING_RECOVERY_INTERVAL_MS);
   if (typeof ngZoomRecordingRecoveryTimer.unref === "function") ngZoomRecordingRecoveryTimer.unref();
   setTimeout(() => {
     ngRunZoomRecordingRecoveryTick("startup_recovery").catch((error) => console.error("Zoom recording startup recovery failed:", error.message));
   }, 30000);
   return ngZoomRecordingRecoveryTimer;
 }
+
+app.get("/admin/recordings/automation-status", async (req, res) => {
+  try {
+    await requireLmsPermission(req, "lms.recordings.manage");
+    res.json({
+      success: true,
+      build: NEXTGEN_BACKEND_BUILD,
+      enabled: NEXTGEN_ZOOM_RECORDING_RECOVERY_ENABLED,
+      running: ngZoomRecordingRecoveryRunning,
+      scheduler_started: Boolean(ngZoomRecordingRecoveryTimer),
+      interval_ms: NEXTGEN_ZOOM_RECORDING_RECOVERY_INTERVAL_MS,
+      webhook_configured: Boolean(String(process.env.ZOOM_WEBHOOK_SECRET_TOKEN || "").trim()),
+      ...ngZoomRecordingRecoveryState,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/recordings/automation-run-now", async (req, res) => {
+  try {
+    await requireLmsPermission(req, "lms.recordings.manage");
+    const result = await ngRunZoomRecordingRecoveryTick("manual_admin_check");
+    res.status(result.success === false ? 500 : 200).json({
+      ...result,
+      build: NEXTGEN_BACKEND_BUILD,
+      state: ngZoomRecordingRecoveryState,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
