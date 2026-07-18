@@ -10,20 +10,15 @@ import {
 } from "./lib/flashcard-postgres.js";
 import {
   contentRegistryStatus,
-  claimContentImportDraft,
-  createContentMediaImportJob,
-  createContentVideoImportJob,
-  createContentImportJob,
+  claimContentImportDraft,  createContentMediaImportJob,
+  createContentVideoImportJob,  createContentImportJob,
   finishContentMediaImportJob,
-  finishContentVideoImportJob,
-  finishContentImportPreview,
+  finishContentVideoImportJob,  finishContentImportPreview,
   getContentMediaImportJob,
-  getContentMediaReferences,
-  getContentVideoImportJob,
+  getContentMediaReferences,  getContentVideoImportJob,
   getContentImportJob,
   importContentQuestionBatch,
-  saveContentMediaMatches,
-  saveContentVideoMatch,
+  saveContentMediaMatches,  saveContentVideoMatch,
   setContentImportJobStatus,
 } from "./lib/content-registry-postgres.js";
 import {
@@ -38,14 +33,10 @@ import {
   deleteR2Object,
   matchMediaReferences,
   uploadMediaZipToR2,
-} from "./lib/content-media-r2.js";
-import {
-  contentVideoStatus,
-  extractReferencedVideos,
-  matchVideoReferences,
-  uploadVideoToVimeo,
-} from "./lib/content-video-vimeo.js";
-import { normalizeExamTrack, slug as contentSlug } from "./lib/content-import-adapter.js";
+} from "./lib/content-media-r2.js";import {
+  contentVideoStatus,  extractReferencedVideos,
+  matchVideoReferences,  uploadVideoToVimeo,
+} from "./lib/content-video-vimeo.js";import { normalizeExamTrack, slug as contentSlug } from "./lib/content-import-adapter.js";
 import cors from "cors";
 import dotenv from "dotenv";
 import Stripe from "stripe";
@@ -60,7 +51,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v202-content-video-vimeo-draft";
+const NEXTGEN_BACKEND_BUILD = "v202-content-video-vimeo-draft-zoom-host-gate-r1";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -2741,6 +2732,9 @@ function sanitizeLiveSession(session) {
     no_class_placeholder: Boolean(session.no_class_placeholder),
     zoom_waiting_room_disabled_at: session.zoom_waiting_room_disabled_at || null,
     join_before_host_enabled_at: session.join_before_host_enabled_at || null,
+    join_before_host_disabled_at: session.join_before_host_disabled_at || null,
+    zoom_host_gate_verified_at: session.zoom_host_gate_verified_at || null,
+    student_zoom_entry_mode: session.student_zoom_entry_mode || null,
     created_by: session.created_by || null,
     updated_by: session.updated_by || null,
     created_at: session.created_at || null,
@@ -4106,6 +4100,79 @@ async function ngBuildVerifiedZoomHostStartLink(meeting = {}, fallbackJoinUrl = 
   };
 }
 
+function ngZoomHostRequiredMeetingSettings() {
+  // Students keep the normal attendee link and do not need manual admission.
+  // Zoom holds them at "waiting for host" until the configured host starts;
+  // automatic cloud recording then begins with the real hosted meeting.
+  return {
+    host_video: true,
+    participant_video: true,
+    join_before_host: false,
+    waiting_room: false,
+    meeting_authentication: false,
+    auto_recording: "cloud",
+  };
+}
+
+function ngZoomHostRequiredMeetingPatchSettings() {
+  return {
+    join_before_host: false,
+    waiting_room: false,
+    auto_recording: "cloud",
+  };
+}
+
+function ngAssertZoomHostRequiredSettings(meeting = {}, context = "Zoom meeting") {
+  const settings = meeting?.settings || {};
+  const failures = [];
+
+  if (settings.join_before_host !== false) failures.push("join_before_host was not disabled");
+  if (settings.waiting_room !== false) failures.push("waiting_room was not disabled");
+  if (String(settings.auto_recording || "").toLowerCase() !== "cloud") {
+    failures.push("automatic cloud recording was not enabled");
+  }
+
+  if (failures.length) {
+    const error = new Error(`${context} host-gate verification failed: ${failures.join("; ")}`);
+    error.statusCode = 502;
+    throw error;
+  }
+
+  return {
+    join_before_host: false,
+    waiting_room: false,
+    auto_recording: "cloud",
+  };
+}
+
+function ngApplyZoomHostGateToSession(session = {}, hostGate = {}) {
+  const verifiedAt = hostGate.updated_at || new Date().toISOString();
+
+  if (session.join_before_host_enabled_at && !session.join_before_host_last_enabled_at) {
+    session.join_before_host_last_enabled_at = session.join_before_host_enabled_at;
+  }
+
+  session.join_before_host_enabled_at = null;
+  session.join_before_host_disabled_at = verifiedAt;
+  session.zoom_host_gate_verified_at = verifiedAt;
+  session.zoom_waiting_room_disabled_at = verifiedAt;
+  session.student_entry_verified_meeting_id = String(session.zoom_meeting_id || hostGate.meeting_id || "");
+  session.student_zoom_entry_mode = "host_required";
+  session.zoom_auto_recording_mode = "cloud";
+
+  return verifiedAt;
+}
+
+function ngStudentZoomEntryIsHostGated(session = {}) {
+  return Boolean(
+    hasRealZoomMeetingId(session.zoom_meeting_id) &&
+    ngManualLiveJoinUrl(session) &&
+    session.zoom_host_gate_verified_at &&
+    session.join_before_host_disabled_at &&
+    String(session.student_entry_verified_meeting_id || "") === String(session.zoom_meeting_id || "")
+  );
+}
+
 async function createZoomMeetingForLiveSession(session, timezone = DEFAULT_TIMEZONE) {
   const accessToken = await getZoomAccessToken();
   const start = getSessionStartUtc(session.scheduled_date, session.scheduled_time, timezone);
@@ -4113,8 +4180,9 @@ async function createZoomMeetingForLiveSession(session, timezone = DEFAULT_TIMEZ
   const zoomHostUser = ngZoomConfiguredHostUser();
   const response = await axios.post(`https://api.zoom.us/v2/users/${encodeURIComponent(zoomHostUser)}/meetings`, {
     topic: session.topic || "Live Class", type: 2, start_time: start.toISOString(), duration: DEFAULT_ZOOM_DURATION_MINUTES, timezone,
-    settings: { host_video: true, participant_video: true, join_before_host: true, waiting_room: false, meeting_authentication: false, auto_recording: "cloud" },
+    settings: ngZoomHostRequiredMeetingSettings(),
   }, { headers: { Authorization: `Bearer ${accessToken}` } });
+  ngAssertZoomHostRequiredSettings(response.data, "New Zoom meeting");
   return response.data;
 }
 
@@ -4128,7 +4196,7 @@ async function getZoomMeetingDetailsForHostStart(meetingId) {
   return response.data || null;
 }
 
-async function ngOpenZoomMeetingEntryForStudents(meetingId) {
+async function ngRequireZoomHostBeforeStudentEntry(meetingId) {
   const cleanMeetingId = String(meetingId || "").trim();
   if (!cleanMeetingId || isPendingZoomId(cleanMeetingId)) {
     return { success: false, skipped: true, reason: "No real Zoom meeting id" };
@@ -4138,21 +4206,28 @@ async function ngOpenZoomMeetingEntryForStudents(meetingId) {
   await axios.patch(
     `https://api.zoom.us/v2/meetings/${encodeURIComponent(cleanMeetingId)}`,
     {
-      settings: {
-        waiting_room: false,
-        join_before_host: true,
-        meeting_authentication: false,
-      },
+      settings: ngZoomHostRequiredMeetingPatchSettings(),
     },
     { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+
+  const verification = await axios.get(
+    `https://api.zoom.us/v2/meetings/${encodeURIComponent(cleanMeetingId)}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  const appliedSettings = ngAssertZoomHostRequiredSettings(
+    verification.data,
+    `Zoom meeting ${cleanMeetingId}`
   );
 
   return {
     success: true,
     meeting_id: cleanMeetingId,
-    waiting_room: false,
-    join_before_host: true,
+    waiting_room: appliedSettings.waiting_room,
+    join_before_host: appliedSettings.join_before_host,
     meeting_authentication: false,
+    auto_recording: appliedSettings.auto_recording,
+    host_required: true,
     updated_at: new Date().toISOString(),
   };
 }
@@ -4257,16 +4332,14 @@ async function ngEnsureHostZoomStartLink(db, session, user) {
     }
   }
 
-  let open_entry = null;
+  let host_gate = null;
   if (hasRealZoomMeetingId(session.zoom_meeting_id)) {
     try {
-      open_entry = await ngOpenZoomMeetingEntryForStudents(session.zoom_meeting_id);
-      session.zoom_waiting_room_disabled_at = open_entry.updated_at;
-      session.join_before_host_enabled_at = open_entry.updated_at;
-      session.student_entry_verified_meeting_id = String(session.zoom_meeting_id || "");
+      host_gate = await ngRequireZoomHostBeforeStudentEntry(session.zoom_meeting_id);
+      ngApplyZoomHostGateToSession(session, host_gate);
       changed = true;
     } catch (error) {
-      const msg = `Zoom open-entry update failed: ${error.response?.data?.message || error.message}`;
+      const msg = `Zoom host-required entry update failed: ${error.response?.data?.message || error.message}`;
       warning = warning ? `${warning} ${msg}` : msg;
     }
   }
@@ -4292,7 +4365,8 @@ async function ngEnsureHostZoomStartLink(db, session, user) {
     meeting,
     changed,
     warning,
-    open_entry,
+    host_gate,
+    open_entry: host_gate,
     host_url_verified: Boolean(verifiedStartUrl),
     host_link_inspection: hostLinkInspection,
     host_link_source: hostLinkSource,
@@ -9715,8 +9789,7 @@ app.get("/health", async (req, res) => {
     memory: ngMemoryStatus(),
     flashcard_postgres: flashcardPostgresStatus(),
     content_registry: contentRegistryStatus(),
-    content_media: contentMediaStatus(),
-    content_video: contentVideoStatus(),
+    content_media: contentMediaStatus(),    content_video: contentVideoStatus(),
     storage_cache: {
       lms_loaded: Boolean(liveDbCache),
       crm_loaded: Boolean(crmReadCache),
@@ -10730,9 +10803,9 @@ app.post("/admin/live-sessions/:sessionId/host-start-link", async (req, res) => 
     const joinLinkCheck = result.join_link_inspection || ngInspectZoomAttendeeJoinUrl(joinUrl, {
       meetingId: session.zoom_meeting_id,
     });
-    const studentEntryOpen = result.open_entry?.success === true;
+    const studentEntryReady = result.host_gate?.success === true && ngStudentZoomEntryIsHostGated(session);
 
-    if (!startUrl || result.host_url_verified !== true || !joinUrl || joinLinkCheck.valid !== true || !studentEntryOpen) {
+    if (!startUrl || result.host_url_verified !== true || !joinUrl || joinLinkCheck.valid !== true || !studentEntryReady) {
       if (result.changed) await writeLiveDb(db);
       return res.status(400).json({
         success: false,
@@ -10742,7 +10815,9 @@ app.post("/admin/live-sessions/:sessionId/host-start-link", async (req, res) => 
         host_link_check: result.host_link_inspection || null,
         student_join_link_check: joinLinkCheck,
         student_join_ready: false,
-        student_entry_open: studentEntryOpen,
+        student_entry_open: false,
+        student_entry_mode: "host_required",
+        join_before_host: false,
         host_zak_refreshed: result.host_link_source === "fresh_host_zak",
         host_zak_refresh_warning: result.zak_refresh_warning || null,
         zoom_host_id: result.zoom_host_id || null,
@@ -10766,6 +10841,8 @@ app.post("/admin/live-sessions/:sessionId/host-start-link", async (req, res) => 
       zoom_join_url: joinUrl,
       student_join_ready: true,
       student_entry_open: true,
+      student_entry_mode: "host_required",
+      join_before_host: false,
       student_join_meeting_matches: joinLinkCheck.meeting_id_matches === true,
       student_join_link_type: "attendee",
       student_join_authority: joinAuthority,
@@ -10782,7 +10859,7 @@ app.post("/admin/live-sessions/:sessionId/host-start-link", async (req, res) => 
       zoom_host_email: result.zoom_host_email || null,
       zoom_host_user_configured: ngZoomConfiguredHostUser() !== "me",
       warning: result.warning || null,
-      message: "A fresh Zoom host URL was verified. Zoom opens its handoff page first, then launches the Zoom Workplace app. If Zoom asks for sign-in, use the meeting owner's Zoom account.",
+      message: "A fresh Zoom host URL was verified. Students may open the attendee link, but Zoom will not start the meeting or cloud recording until the configured host starts it. If Zoom asks for sign-in, use the meeting owner's Zoom account.",
     });
   } catch (e) {
     res.status(e.statusCode || e.response?.status || 500).json({
@@ -10811,10 +10888,8 @@ app.post("/admin/live-sessions/:sessionId/open-entry", async (req, res) => {
       });
     }
 
-    const openEntry = ensure.open_entry || await ngOpenZoomMeetingEntryForStudents(session.zoom_meeting_id);
-    session.zoom_waiting_room_disabled_at = openEntry.updated_at || new Date().toISOString();
-    session.join_before_host_enabled_at = session.zoom_waiting_room_disabled_at;
-    session.student_entry_verified_meeting_id = String(session.zoom_meeting_id || "");
+    const hostGate = ensure.host_gate || await ngRequireZoomHostBeforeStudentEntry(session.zoom_meeting_id);
+    ngApplyZoomHostGateToSession(session, hostGate);
     session.updated_by = user.id;
     session.updated_at = new Date().toISOString();
     db.liveSessions[session.id] = session;
@@ -10823,8 +10898,11 @@ app.post("/admin/live-sessions/:sessionId/open-entry", async (req, res) => {
     res.json({
       success: true,
       build: NEXTGEN_BACKEND_BUILD,
-      message: "Zoom entry opened for students. Waiting room disabled and join-before-host enabled for this meeting.",
-      open_entry: openEntry,
+      message: "Student Zoom link verified. The meeting and automatic cloud recording remain blocked until the configured host starts it.",
+      open_entry: hostGate,
+      host_gate: hostGate,
+      student_entry_mode: "host_required",
+      join_before_host: false,
       session: sanitizeLiveSession(session),
       meeting_id: String(session.zoom_meeting_id || ""),
       passcode: session.meeting_password || null,
@@ -10858,11 +10936,7 @@ app.get("/admin/live-sessions/student-join-audit", async (req, res) => {
       const competing = sessions.filter((candidate) => {
         return ngLiveSessionsCompeteForSameStudentJoin(session, candidate);
       });
-      const entryOpen = Boolean(
-        authoritative.zoom_waiting_room_disabled_at &&
-        authoritative.join_before_host_enabled_at &&
-        String(authoritative.student_entry_verified_meeting_id || "") === String(authoritative.zoom_meeting_id || "")
-      );
+      const hostGateVerified = ngStudentZoomEntryIsHostGated(authoritative);
 
       return {
         session_id: session.id,
@@ -10877,13 +10951,16 @@ app.get("/admin/live-sessions/student-join-audit", async (req, res) => {
         meeting_id: authoritative.zoom_meeting_id || null,
         verified_student_join_url: joinCheck.valid === true,
         student_join_meeting_matches: joinCheck.meeting_id_matches === true,
-        student_entry_open: entryOpen,
+        student_entry_open: hostGateVerified,
+        student_entry_mode: "host_required",
+        join_before_host: false,
+        host_gate_verified: hostGateVerified,
         student_join_ready_now: Boolean(
           ["live", "scheduled"].includes(timing.status) &&
           Date.now() >= timing.join_opens_ms &&
           Date.now() <= timing.end_ms &&
           joinCheck.valid === true &&
-          entryOpen
+          hostGateVerified
         ),
         computed_status: timing.status,
         start_at: timing.start_at,
@@ -13127,25 +13204,19 @@ app.get(["/hcgi/api/live-class/:sessionId", "/live/classroom/:courseId/:sessionI
             await writeLiveDb(db);
           }
         }
-        const entryAlreadyOpen = Boolean(
-          session.zoom_waiting_room_disabled_at &&
-          session.join_before_host_enabled_at &&
-          String(session.student_entry_verified_meeting_id || "") === String(session.zoom_meeting_id || "")
-        );
-        if (!entryAlreadyOpen) {
-          const openEntry = await ngOpenZoomMeetingEntryForStudents(session.zoom_meeting_id);
-          session.zoom_waiting_room_disabled_at = openEntry.updated_at;
-          session.join_before_host_enabled_at = openEntry.updated_at;
-          session.student_entry_verified_meeting_id = String(session.zoom_meeting_id || "");
-          session.student_entry_last_verified_at = openEntry.updated_at;
+        const entryAlreadyHostGated = ngStudentZoomEntryIsHostGated(session);
+        if (!entryAlreadyHostGated) {
+          const hostGate = await ngRequireZoomHostBeforeStudentEntry(session.zoom_meeting_id);
+          const verifiedAt = ngApplyZoomHostGateToSession(session, hostGate);
+          session.student_entry_last_verified_at = verifiedAt;
           session.student_entry_last_verified_by = user.id;
           session.updated_by = user.id;
           session.updated_at = new Date().toISOString();
           db.liveSessions[session.id] = session;
-          if (studentEntryChanged || openEntry.success === true) await writeLiveDb(db);
+          if (studentEntryChanged || hostGate.success === true) await writeLiveDb(db);
         }
-      } catch (openEntryError) {
-        console.warn("Zoom student-entry self-heal failed:", openEntryError.response?.data?.message || openEntryError.message);
+      } catch (hostGateError) {
+        console.warn("Zoom host-required student-entry verification failed:", hostGateError.response?.data?.message || hostGateError.message);
       }
     }
 
@@ -13154,22 +13225,19 @@ app.get(["/hcgi/api/live-class/:sessionId", "/live/classroom/:courseId/:sessionI
       meetingId: session.zoom_meeting_id,
     });
     const hasZoom = hasRealZoomMeetingId(session.zoom_meeting_id) && studentJoinLinkCheck.valid === true;
-    const studentJoinReady = Boolean(
-      hasZoom &&
-      session.zoom_waiting_room_disabled_at &&
-      session.join_before_host_enabled_at &&
-      String(session.student_entry_verified_meeting_id || "") === String(session.zoom_meeting_id || "")
-    );
+    const studentJoinReady = Boolean(hasZoom && ngStudentZoomEntryIsHostGated(session));
     res.json({
       allowed: true,
       can_join: canJoin && studentJoinReady,
       join_reason: canJoin && studentJoinReady
-        ? "Classroom is open"
+        ? "Classroom link is ready. Zoom will wait for the host to start the meeting."
         : joinReason || "The student Zoom entry is not verified yet. Refresh the classroom or ask the tutor to press Host App again.",
       join_opens_at: joinOpensAt,
       join_opens_minutes_before: NEXTGEN_CLASSROOM_OPEN_MINUTES_BEFORE,
       zoom_missing: canJoin && !hasZoom,
       student_join_ready: studentJoinReady,
+      student_entry_mode: "host_required",
+      join_before_host: false,
       student_join_link_check: studentJoinLinkCheck,
       requested_session_id: requestedSession.id,
       resolved_session_id: session.id,
@@ -13200,7 +13268,7 @@ app.get(["/hcgi/api/live-class/:sessionId", "/live/classroom/:courseId/:sessionI
 
 app.get("/zoom/zak", async (req, res) => { try { const token = await getZoomAccessToken(); const response = await axios.get("https://api.zoom.us/v2/users/me/token?type=zak", { headers: { Authorization: `Bearer ${token}` } }); res.json({ zak: response.data.token }); } catch (e) { res.status(500).json({ error: e.response?.data || e.message }); } });
 app.post("/zoom/generate-signature", async (req, res) => { try { const { meetingNumber, role } = req.body; const iat = Math.round(Date.now() / 1000) - 30; const exp = iat + 60 * 60 * 2; const signature = jwt.sign({ sdkKey: process.env.ZOOM_MEETING_SDK_KEY, mn: meetingNumber, role, iat, exp, appKey: process.env.ZOOM_MEETING_SDK_KEY, tokenExp: exp }, process.env.ZOOM_MEETING_SDK_SECRET, { algorithm: "HS256" }); res.json({ signature }); } catch (e) { res.status(500).json({ error: e.message }); } });
-app.post("/zoom/create-meeting", async (req, res) => { try { const token = await getZoomAccessToken(); const response = await axios.post("https://api.zoom.us/v2/users/me/meetings", { topic: req.body.topic, type: 2, start_time: req.body.start_time, duration: req.body.duration || DEFAULT_ZOOM_DURATION_MINUTES, timezone: req.body.timezone || DEFAULT_TIMEZONE, settings: { host_video: true, participant_video: true, join_before_host: true, waiting_room: false, auto_recording: "cloud" } }, { headers: { Authorization: `Bearer ${token}` } }); res.json({ success: true, meeting: response.data }); } catch (e) { res.status(500).json({ success: false, error: e.response?.data || e.message }); } });
+app.post("/zoom/create-meeting", async (req, res) => { try { const token = await getZoomAccessToken(); const response = await axios.post("https://api.zoom.us/v2/users/me/meetings", { topic: req.body.topic, type: 2, start_time: req.body.start_time, duration: req.body.duration || DEFAULT_ZOOM_DURATION_MINUTES, timezone: req.body.timezone || DEFAULT_TIMEZONE, settings: ngZoomHostRequiredMeetingSettings() }, { headers: { Authorization: `Bearer ${token}` } }); ngAssertZoomHostRequiredSettings(response.data, "New Zoom meeting"); res.json({ success: true, meeting: response.data }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.response?.data || e.message }); } });
 
 function ngVerifyZoomWebhookRequest(req) {
   const secret = String(process.env.ZOOM_WEBHOOK_SECRET_TOKEN || "").trim();
@@ -16211,7 +16279,7 @@ function ngStudentJoinAuthorityRank(session = {}) {
     timestamp(session.student_join_authoritative_at),
     session.host_launch_requested_at ? 1 : 0,
     timestamp(session.host_launch_requested_at),
-    session.zoom_waiting_room_disabled_at || session.auto_zoom_opened_at ? 1 : 0,
+    session.zoom_host_gate_verified_at || session.auto_zoom_host_gated_at || session.zoom_waiting_room_disabled_at || session.auto_zoom_opened_at ? 1 : 0,
     hasVerifiedJoin ? 1 : 0,
     hasRealZoomMeetingId(session.zoom_meeting_id) ? 1 : 0,
     session.roadmap_day_id ? 1 : 0,
@@ -32697,8 +32765,7 @@ async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload }) {
   const uploadedObjects = [];
   let persistenceCommitted = false;
   try {
-    const references = await getContentMediaReferences(parentJob.id, "image");
-    const uploaded = await uploadMediaZipToR2({
+    const references = await getContentMediaReferences(parentJob.id, "image");    const uploaded = await uploadMediaZipToR2({
       zipFile: upload.file,
       examTrack: parentJob.exam_track,
       sourceNamespace: parentJob.source_namespace,
@@ -32778,87 +32845,46 @@ app.get("/admin/crm/ai-training/content-media-imports/:mediaJobId", async (req, 
     return res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
 });
-
-async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload }) {
-  const workDir = path.join(DATA_DIR, "content-imports", `${videoJob.id}-videos`);
-  try {
-    const references = await getContentMediaReferences(parentJob.id, "video");
-    const extracted = await extractReferencedVideos({ zipFile: upload.file, workDir, references });
-    const report = matchVideoReferences(references, extracted.videos);
-    let linked = 0;
-    const failures = [];
-    for (const match of report.matches) {
-      try {
-        const uploaded = await uploadVideoToVimeo({
-          file: match.video.localFile, sizeBytes: match.video.sizeBytes,
-          name: `${match.studentQid} · ${path.basename(match.video.originalName)}`,
-          description: `AylaMed private explanation video for ${match.studentQid}. Import ${parentJob.id}.`,
-        });
-        linked += await saveContentVideoMatch({ videoJobId: videoJob.id, parentJob, match, uploaded });
-      } catch (error) {
-        failures.push({ student_qid: match.studentQid, media_ref: match.mediaRef, error: error.response?.data?.error || error.message });
-      }
-    }
-    const warning = report.ambiguous.length || report.missing.length || failures.length;
-    await finishContentVideoImportJob(videoJob.id, warning ? "draft_imported_with_warnings" : "draft_imported", {
-      zip_entries: extracted.entries,
-      video_references: references.length,
-      videos_found: extracted.videos.length,
-      matched: report.matches.length,
-      uploaded_to_vimeo: report.matches.length - failures.length,
-      linked,
-      missing: report.missing.length,
-      ambiguous: report.ambiguous.length,
-      unreferenced: report.unreferenced.length,
-      failed: failures.length,
-      missing_samples: report.missing.slice(0, 100).map((item) => ({ student_qid: item.studentQid, media_ref: item.mediaRef })),
-      ambiguous_samples: report.ambiguous.slice(0, 100),
-    }, failures);
-  } catch (error) {
-    console.error("Content Registry Vimeo import failed:", videoJob.id, error);
-    await finishContentVideoImportJob(videoJob.id, "draft_import_failed", { failed: true }, [{ error: error.message || "Video import failed" }]).catch(() => {});
-  } finally {
-    await cleanupContentImportFiles(upload.file, workDir);
-  }
-}
-
+async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload }) {  const workDir = path.join(DATA_DIR, "content-imports", `${videoJob.id}-videos`);
+  try {    const references = await getContentMediaReferences(parentJob.id, "video");
+    const extracted = await extractReferencedVideos({ zipFile: upload.file, workDir, references });    const report = matchVideoReferences(references, extracted.videos);
+    let linked = 0;    const failures = [];
+    for (const match of report.matches) {      try {
+        const uploaded = await uploadVideoToVimeo({          file: match.video.localFile, sizeBytes: match.video.sizeBytes,
+          name: `${match.studentQid} · ${path.basename(match.video.originalName)}`,          description: `AylaMed private explanation video for ${match.studentQid}. Import ${parentJob.id}.`,
+        });        linked += await saveContentVideoMatch({ videoJobId: videoJob.id, parentJob, match, uploaded });
+      } catch (error) {        failures.push({ student_qid: match.studentQid, media_ref: match.mediaRef, error: error.response?.data?.error || error.message });
+      }    }
+    const warning = report.ambiguous.length || report.missing.length || failures.length;    await finishContentVideoImportJob(videoJob.id, warning ? "draft_imported_with_warnings" : "draft_imported", {
+      zip_entries: extracted.entries,      video_references: references.length,
+      videos_found: extracted.videos.length,      matched: report.matches.length,
+      uploaded_to_vimeo: report.matches.length - failures.length,      linked,
+      missing: report.missing.length,      ambiguous: report.ambiguous.length,
+      unreferenced: report.unreferenced.length,      failed: failures.length,
+      missing_samples: report.missing.slice(0, 100).map((item) => ({ student_qid: item.studentQid, media_ref: item.mediaRef })),      ambiguous_samples: report.ambiguous.slice(0, 100),
+    }, failures);  } catch (error) {
+    console.error("Content Registry Vimeo import failed:", videoJob.id, error);    await finishContentVideoImportJob(videoJob.id, "draft_import_failed", { failed: true }, [{ error: error.message || "Video import failed" }]).catch(() => {});
+  } finally {    await cleanupContentImportFiles(upload.file, workDir);
+  }}
 app.post("/admin/crm/ai-training/content-imports/:jobId/videos/import-draft", async (req, res) => {
-  let upload;
-  try {
-    const { user } = await requireCrmAdmin(req);
-    if (!contentVideoStatus().configured) return res.status(503).json({ success: false, error: "Vimeo access token is not configured" });
-    if (!String(req.headers["content-type"] || "").toLowerCase().includes("multipart/form-data")) {
-      return res.status(415).json({ success: false, error: "multipart/form-data with a video media ZIP is required" });
-    }
-    const parentJob = await getContentImportJob(req.params.jobId);
-    if (!parentJob) return res.status(404).json({ success: false, error: "Content import job not found" });
-    if (!["draft_imported", "draft_imported_with_warnings"].includes(String(parentJob.status))) {
-      return res.status(409).json({ success: false, error: "Questions must be imported as drafts before videos can be attached" });
-    }
-    upload = await receiveContentZip(req, DATA_DIR);
-    const videoJob = await createContentVideoImportJob({ id: crypto.randomUUID(), contentImportJobId: parentJob.id,
-      zipSha256: upload.sha256, originalFilename: upload.originalFilename, createdBy: String(user.id) });
-    void ngRunContentVideoDraftImport({ videoJob, parentJob, upload });
-    upload = null;
-    return res.status(202).json({ success: true, video_job_id: videoJob.id, content_import_job_id: parentJob.id,
-      status: "uploading", poll_url: `/admin/crm/ai-training/content-video-imports/${videoJob.id}`,
-      message: "Video ZIP accepted. Referenced videos are uploading privately to Vimeo as disabled drafts." });
-  } catch (error) {
-    if (upload?.file) await cleanupContentImportFiles(upload.file);
-    return res.status(error.statusCode || 500).json({ success: false, error: error.message || "Video ZIP import failed" });
-  }
+  let upload;  try {
+    const { user } = await requireCrmAdmin(req);    if (!contentVideoStatus().configured) return res.status(503).json({ success: false, error: "Vimeo access token is not configured" });
+    if (!String(req.headers["content-type"] || "").toLowerCase().includes("multipart/form-data")) {      return res.status(415).json({ success: false, error: "multipart/form-data with a video media ZIP is required" });
+    }    const parentJob = await getContentImportJob(req.params.jobId);
+    if (!parentJob) return res.status(404).json({ success: false, error: "Content import job not found" });    if (!["draft_imported", "draft_imported_with_warnings"].includes(String(parentJob.status))) {
+      return res.status(409).json({ success: false, error: "Questions must be imported as drafts before videos can be attached" });    }
+    upload = await receiveContentZip(req, DATA_DIR);    const videoJob = await createContentVideoImportJob({ id: crypto.randomUUID(), contentImportJobId: parentJob.id,
+      zipSha256: upload.sha256, originalFilename: upload.originalFilename, createdBy: String(user.id) });    void ngRunContentVideoDraftImport({ videoJob, parentJob, upload });
+    upload = null;    return res.status(202).json({ success: true, video_job_id: videoJob.id, content_import_job_id: parentJob.id,
+      status: "uploading", poll_url: `/admin/crm/ai-training/content-video-imports/${videoJob.id}`,      message: "Video ZIP accepted. Referenced videos are uploading privately to Vimeo as disabled drafts." });
+  } catch (error) {    if (upload?.file) await cleanupContentImportFiles(upload.file);
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message || "Video ZIP import failed" });  }
 });
-
-app.get("/admin/crm/ai-training/content-video-imports/:videoJobId", async (req, res) => {
-  try {
-    await requireCrmAdmin(req);
-    const job = await getContentVideoImportJob(req.params.videoJobId);
-    if (!job) return res.status(404).json({ success: false, error: "Video import job not found" });
-    return res.json({ success: true, job, storage: contentVideoStatus() });
-  } catch (error) {
-    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
-  }
-});
+app.get("/admin/crm/ai-training/content-video-imports/:videoJobId", async (req, res) => {  try {
+    await requireCrmAdmin(req);    const job = await getContentVideoImportJob(req.params.videoJobId);
+    if (!job) return res.status(404).json({ success: false, error: "Video import job not found" });    return res.json({ success: true, job, storage: contentVideoStatus() });
+  } catch (error) {    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }});
 
 app.get("/admin/crm/ai-training", async (req, res) => {
   try {
@@ -59585,14 +59611,8 @@ function ngAutoZoomPrepShouldSkipSession(session = {}, nowMs = Date.now()) {
   return { skip: false, reason: "in_prepare_window", start_at: new Date(startMs).toISOString() };
 }
 
-function ngAutoZoomPrepHasAlreadyOpened(session = {}) {
-  return Boolean(
-    hasRealZoomMeetingId(session.zoom_meeting_id) &&
-    ngManualLiveJoinUrl(session) &&
-    (session.zoom_waiting_room_disabled_at || session.auto_zoom_opened_at) &&
-    (session.join_before_host_enabled_at || session.auto_zoom_opened_at) &&
-    String(session.student_entry_verified_meeting_id || "") === String(session.zoom_meeting_id || "")
-  );
+function ngAutoZoomPrepIsAlreadyHostGated(session = {}) {
+  return ngStudentZoomEntryIsHostGated(session);
 }
 
 async function ngAutoZoomPrepOneSession(db, session, actorId = "auto_zoom_5min_scheduler") {
@@ -59605,6 +59625,7 @@ async function ngAutoZoomPrepOneSession(db, session, actorId = "auto_zoom_5min_s
     scheduled_time: session?.scheduled_time || null,
     prepared: false,
     opened: false,
+    host_gated: false,
     changed: false,
     skipped: false,
     warning: null,
@@ -59618,10 +59639,10 @@ async function ngAutoZoomPrepOneSession(db, session, actorId = "auto_zoom_5min_s
     return result;
   }
 
-  if (ngAutoZoomPrepHasAlreadyOpened(session)) {
+  if (ngAutoZoomPrepIsAlreadyHostGated(session)) {
     result.skipped = true;
     result.meeting_id = String(session.zoom_meeting_id || "");
-    result.warning = "already_prepared_and_open";
+    result.warning = "already_prepared_and_host_gated";
     return result;
   }
 
@@ -59677,20 +59698,18 @@ async function ngAutoZoomPrepOneSession(db, session, actorId = "auto_zoom_5min_s
 
     if (hasRealZoomMeetingId(session.zoom_meeting_id)) {
       try {
-        const openEntry = await ngOpenZoomMeetingEntryForStudents(session.zoom_meeting_id);
-        const openedAt = openEntry.updated_at || new Date().toISOString();
-        session.zoom_waiting_room_disabled_at = openedAt;
-        session.join_before_host_enabled_at = openedAt;
-        session.student_entry_verified_meeting_id = String(session.zoom_meeting_id || "");
-        session.auto_zoom_opened_at = openedAt;
-        session.auto_zoom_opened_by = actorId;
+        const hostGate = await ngRequireZoomHostBeforeStudentEntry(session.zoom_meeting_id);
+        const verifiedAt = ngApplyZoomHostGateToSession(session, hostGate);
+        session.auto_zoom_host_gated_at = verifiedAt;
+        session.auto_zoom_host_gated_by = actorId;
         session.updated_by = actorId;
-        session.updated_at = openedAt;
+        session.updated_at = verifiedAt;
         result.opened = true;
+        result.host_gated = true;
         result.changed = true;
         result.meeting_id = String(session.zoom_meeting_id || "");
-      } catch (openError) {
-        const msg = `Zoom open-entry update failed: ${openError.response?.data?.message || openError.message}`;
+      } catch (hostGateError) {
+        const msg = `Zoom host-required entry update failed: ${hostGateError.response?.data?.message || hostGateError.message}`;
         result.warning = result.warning ? `${result.warning} ${msg}` : msg;
       }
     }
