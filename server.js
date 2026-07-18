@@ -22,10 +22,14 @@ import {
   getContentMediaReferences,
   getContentVideoImportJob,
   getContentImportJob,
+  getContentQbankCatalog,
   importContentQuestionBatch,
+  listContentCollections,
   saveContentMediaMatches,
   saveContentVideoMatch,
   setContentImportJobStatus,
+  updateContentCollectionControls,
+  upsertContentTaxonomyMapping,
 } from "./lib/content-registry-postgres.js";
 import {
   cleanupContentImportFiles,
@@ -61,36 +65,23 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v204-content-video-global-dedupe";
+const NEXTGEN_BACKEND_BUILD = "v205-content-registry-control-plane";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
   "https://www.live.nextgenusmlelms.com",
   "https://lms.nextgenusmlelms.com",
   "https://www.lms.nextgenusmlelms.com",
-  "https://nextgenusmlelms.com",
-  "https://www.nextgenusmlelms.com",
-  "http://localhost:5173",
-  "http://localhost:3000",
+  ...String(process.env.NEXTGEN_CORS_ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((value) => value.trim().replace(/\/$/, ""))
+    .filter(Boolean),
 ];
 
 function isNextGenAllowedOrigin(origin = "") {
   const clean = String(origin || "").trim().replace(/\/$/, "");
   if (!clean) return false;
-  if (allowedOrigins.includes(clean)) return true;
-
-  // Allow any current/future NextGen subdomain without needing another backend edit.
-  try {
-    const url = new URL(clean);
-    const host = String(url.hostname || "").toLowerCase();
-    if (host === "nextgenusmlelms.com" || host.endsWith(".nextgenusmlelms.com")) return true;
-    if (host === "usmlecorner.com" || host.endsWith(".usmlecorner.com")) return true;
-    if (host === "localhost" || host === "127.0.0.1") return true;
-  } catch {
-    return false;
-  }
-
-  return false;
+  return allowedOrigins.includes(clean);
 }
 
 function getCorsRequestHeaders(req) {
@@ -129,11 +120,6 @@ function applyNextGenCors(req, res) {
     if (isNextGenAllowedOrigin(origin)) {
       res.setHeader("Access-Control-Allow-Origin", origin);
       res.setHeader("Access-Control-Allow-Credentials", "true");
-    } else {
-      // Do not crash preflight for unknown origins. This keeps errors debuggable instead of fake CORS failures.
-      // Admin/API routes still require auth, so this does not bypass backend authorization.
-      res.setHeader("Access-Control-Allow-Origin", origin);
-      res.setHeader("Access-Control-Allow-Credentials", "true");
     }
     res.setHeader("Vary", "Origin, Access-Control-Request-Headers, Access-Control-Request-Method");
   } else {
@@ -150,6 +136,10 @@ function applyNextGenCors(req, res) {
 // Hard CORS/preflight guard. This must remain before all routes and before body parsing.
 app.use((req, res, next) => {
   applyNextGenCors(req, res);
+  const origin = String(req.headers.origin || "").trim().replace(/\/$/, "");
+  if (origin && !isNextGenAllowedOrigin(origin)) {
+    return res.status(403).json({ success: false, error: "This website origin is not allowed." });
+  }
   if (req.method === "OPTIONS") {
     return res.status(204).end();
   }
@@ -158,7 +148,10 @@ app.use((req, res, next) => {
 
 // Keep cors(), but make it non-blocking. The manual guard above is the source of truth.
 const corsOptions = {
-  origin: true,
+  origin(origin, callback) {
+    if (!origin || isNextGenAllowedOrigin(origin)) return callback(null, true);
+    return callback(new Error("This website origin is not allowed."));
+  },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
   allowedHeaders: [
@@ -32964,6 +32957,77 @@ app.get("/admin/crm/ai-training/content-video-imports/:videoJobId", async (req, 
     const job = await getContentVideoImportJob(req.params.videoJobId);
     if (!job) return res.status(404).json({ success: false, error: "Video import job not found" });
     return res.json({ success: true, job, storage: contentVideoStatus() });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/ai-training/content-registry/collections", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const examTrack = req.query.exam_track ? normalizeExamTrack(req.query.exam_track) : "";
+    const collections = await listContentCollections({
+      examTrack: examTrack === "unknown" ? "" : examTrack,
+      status: String(req.query.status || "").trim().toLowerCase(),
+      limit: req.query.limit,
+      offset: req.query.offset,
+    });
+    return res.json({ success: true, count: collections.length, collections });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/ai-training/content-registry/collections/:collectionId/controls", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const collection = await updateContentCollectionControls({
+      collectionId: req.params.collectionId,
+      status: req.body.status,
+      destinations: req.body.destinations,
+      displayPolicy: req.body.display_policy || req.body.displayPolicy,
+      actorId: String(user.id),
+    });
+    return res.json({
+      success: true, collection,
+      message: "Collection controls saved. Content was routed without deleting questions or historical activity.",
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-training/content-registry/taxonomy-mappings", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const examTrack = normalizeExamTrack(req.body.exam_track || req.body.examTrack);
+    const sourceNamespace = contentSlug(req.body.source_namespace || req.body.sourceNamespace);
+    if (examTrack === "unknown" || sourceNamespace === "unknown") {
+      return res.status(400).json({ success: false, error: "exam_track and source_namespace are required" });
+    }
+    const mapping = await upsertContentTaxonomyMapping({
+      examTrack, sourceNamespace,
+      sourceSystemId: req.body.source_system_id ?? req.body.sourceSystemId ?? "",
+      sourceSubjectId: req.body.source_subject_id ?? req.body.sourceSubjectId ?? "",
+      taxonomy: req.body.taxonomy || req.body,
+      actorId: String(user.id),
+    });
+    return res.json({
+      success: true, mapping,
+      message: "Taxonomy mapping saved and applied to matching questions. Future imports can reuse this provider mapping.",
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/api/ayla/qbank/catalog", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.query.student_id || ""));
+    const examTrack = normalizeExamTrack(auth.student.examTrackId || auth.student.examTrack || auth.student.exam || auth.student.exam_track);
+    if (examTrack === "unknown") return res.status(409).json({ success: false, error: "Student exam track is not configured" });
+    const catalog = await getContentQbankCatalog({ examTrack, destination: "aylamed_qbank" });
+    return res.json({ success: true, exam_track: examTrack, count: catalog.length, catalog });
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
