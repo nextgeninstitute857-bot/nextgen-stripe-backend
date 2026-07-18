@@ -11,10 +11,15 @@ import {
 import {
   contentRegistryStatus,
   claimContentImportDraft,
+  createContentMediaImportJob,
   createContentImportJob,
+  finishContentMediaImportJob,
   finishContentImportPreview,
+  getContentMediaImportJob,
+  getContentMediaReferences,
   getContentImportJob,
   importContentQuestionBatch,
+  saveContentMediaMatches,
   setContentImportJobStatus,
 } from "./lib/content-registry-postgres.js";
 import {
@@ -24,6 +29,12 @@ import {
   previewUniversalQuestionZip,
   receiveContentZip,
 } from "./lib/content-zip-import.js";
+import {
+  contentMediaStatus,
+  deleteR2Object,
+  matchMediaReferences,
+  uploadMediaZipToR2,
+} from "./lib/content-media-r2.js";
 import { normalizeExamTrack, slug as contentSlug } from "./lib/content-import-adapter.js";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -39,7 +50,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v200-content-registry-draft-import";
+const NEXTGEN_BACKEND_BUILD = "v201-content-media-r2-draft";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -9693,6 +9704,7 @@ app.get("/health", async (req, res) => {
     memory: ngMemoryStatus(),
     flashcard_postgres: flashcardPostgresStatus(),
     content_registry: contentRegistryStatus(),
+    content_media: contentMediaStatus(),
     storage_cache: {
       lms_loaded: Boolean(liveDbCache),
       crm_loaded: Boolean(crmReadCache),
@@ -32666,6 +32678,92 @@ app.post("/admin/crm/ai-training/content-imports/:jobId/import-draft", async (re
   } catch (error) {
     if (upload?.file) await cleanupContentImportFiles(upload.file);
     return res.status(error.statusCode || 500).json({ success: false, error: error.message || "Draft import failed" });
+  }
+});
+
+async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload }) {
+  const uploadedObjects = [];
+  let persistenceCommitted = false;
+  try {
+    const references = await getContentMediaReferences(parentJob.id);
+    const uploaded = await uploadMediaZipToR2({
+      zipFile: upload.file,
+      examTrack: parentJob.exam_track,
+      sourceNamespace: parentJob.source_namespace,
+      importJobId: parentJob.id,
+      onAsset: (asset) => uploadedObjects.push(asset.objectKey),
+    });
+    const report = matchMediaReferences(references, uploaded.assets);
+    const saved = await saveContentMediaMatches({
+      mediaJobId: mediaJob.id, parentJob, assets: uploaded.assets, matches: report.matches,
+    });
+    persistenceCommitted = true;
+    for (const duplicateObjectKey of saved.duplicateObjects) {
+      await deleteR2Object(duplicateObjectKey).catch((error) => console.warn("R2 duplicate cleanup failed:", error.message));
+    }
+    await finishContentMediaImportJob(mediaJob.id, report.ambiguous.length ? "draft_imported_with_warnings" : "draft_imported", {
+      zip_entries: uploaded.entries,
+      uncompressed_bytes: uploaded.uncompressedBytes,
+      images_uploaded: uploaded.assets.length,
+      question_media_references: references.length,
+      matched: report.matches.length,
+      linked: saved.links,
+      missing: report.missing.length,
+      ambiguous: report.ambiguous.length,
+      unreferenced: report.unreferenced.length,
+      duplicate_images: saved.duplicateObjects.length,
+      missing_samples: report.missing.slice(0, 100).map((item) => ({ student_qid: item.studentQid, media_ref: item.mediaRef })),
+      ambiguous_samples: report.ambiguous.slice(0, 100),
+      unreferenced_samples: report.unreferenced.slice(0, 100).map((item) => item.originalName),
+    }, []);
+  } catch (error) {
+    console.error("Content Registry media import failed:", mediaJob.id, error);
+    if (!persistenceCommitted) await Promise.allSettled(uploadedObjects.map((objectKey) => deleteR2Object(objectKey)));
+    await finishContentMediaImportJob(mediaJob.id, "draft_import_failed", { failed: true }, [{ error: error.message || "Media import failed" }]).catch(() => {});
+  } finally {
+    await cleanupContentImportFiles(upload.file);
+  }
+}
+
+app.post("/admin/crm/ai-training/content-imports/:jobId/media/import-draft", async (req, res) => {
+  let upload;
+  try {
+    const { user } = await requireCrmAdmin(req);
+    if (!contentMediaStatus().configured) return res.status(503).json({ success: false, error: "Cloudflare R2 is not configured" });
+    if (!String(req.headers["content-type"] || "").toLowerCase().includes("multipart/form-data")) {
+      return res.status(415).json({ success: false, error: "multipart/form-data with an image ZIP is required" });
+    }
+    const parentJob = await getContentImportJob(req.params.jobId);
+    if (!parentJob) return res.status(404).json({ success: false, error: "Content import job not found" });
+    if (!["draft_imported", "draft_imported_with_warnings"].includes(String(parentJob.status))) {
+      return res.status(409).json({ success: false, error: "Questions must be imported as drafts before media can be attached" });
+    }
+    upload = await receiveContentZip(req, DATA_DIR);
+    const mediaJob = await createContentMediaImportJob({
+      id: crypto.randomUUID(), contentImportJobId: parentJob.id, zipSha256: upload.sha256,
+      originalFilename: upload.originalFilename, createdBy: String(user.id),
+    });
+    void ngRunContentMediaDraftImport({ mediaJob, parentJob, upload });
+    upload = null;
+    return res.status(202).json({
+      success: true, media_job_id: mediaJob.id, content_import_job_id: parentJob.id, status: "uploading",
+      poll_url: `/admin/crm/ai-training/content-media-imports/${mediaJob.id}`,
+      message: "Image ZIP accepted. Objects and mappings remain private disabled drafts.",
+    });
+  } catch (error) {
+    if (upload?.file) await cleanupContentImportFiles(upload.file);
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message || "Media ZIP import failed" });
+  }
+});
+
+app.get("/admin/crm/ai-training/content-media-imports/:mediaJobId", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const job = await getContentMediaImportJob(req.params.mediaJobId);
+    if (!job) return res.status(404).json({ success: false, error: "Media import job not found" });
+    return res.json({ success: true, job, storage: contentMediaStatus() });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
 });
 
