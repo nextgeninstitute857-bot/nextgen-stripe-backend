@@ -10,15 +10,20 @@ import {
 } from "./lib/flashcard-postgres.js";
 import {
   contentRegistryStatus,
-  claimContentImportDraft,  createContentMediaImportJob,
-  createContentVideoImportJob,  createContentImportJob,
+  claimContentImportDraft,
+  createContentMediaImportJob,
+  createContentVideoImportJob,
+  createContentImportJob,
   finishContentMediaImportJob,
-  finishContentVideoImportJob,  finishContentImportPreview,
+  finishContentVideoImportJob,
+  finishContentImportPreview,
   getContentMediaImportJob,
-  getContentMediaReferences,  getContentVideoImportJob,
+  getContentMediaReferences,
+  getContentVideoImportJob,
   getContentImportJob,
   importContentQuestionBatch,
-  saveContentMediaMatches,  saveContentVideoMatch,
+  saveContentMediaMatches,
+  saveContentVideoMatch,
   setContentImportJobStatus,
 } from "./lib/content-registry-postgres.js";
 import {
@@ -33,10 +38,14 @@ import {
   deleteR2Object,
   matchMediaReferences,
   uploadMediaZipToR2,
-} from "./lib/content-media-r2.js";import {
-  contentVideoStatus,  extractReferencedVideos,
-  matchVideoReferences,  uploadVideoToVimeo,
-} from "./lib/content-video-vimeo.js";import { normalizeExamTrack, slug as contentSlug } from "./lib/content-import-adapter.js";
+} from "./lib/content-media-r2.js";
+import {
+  contentVideoStatus,
+  extractReferencedVideos,
+  matchVideoReferences,
+  uploadVideoToVimeo,
+} from "./lib/content-video-vimeo.js";
+import { normalizeExamTrack, slug as contentSlug } from "./lib/content-import-adapter.js";
 import cors from "cors";
 import dotenv from "dotenv";
 import Stripe from "stripe";
@@ -51,7 +60,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v202-content-video-vimeo-draft-zoom-host-gate-r1";
+const NEXTGEN_BACKEND_BUILD = "v203-content-video-vimeo-draft-zoom-host-gate";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -9789,7 +9798,8 @@ app.get("/health", async (req, res) => {
     memory: ngMemoryStatus(),
     flashcard_postgres: flashcardPostgresStatus(),
     content_registry: contentRegistryStatus(),
-    content_media: contentMediaStatus(),    content_video: contentVideoStatus(),
+    content_media: contentMediaStatus(),
+    content_video: contentVideoStatus(),
     storage_cache: {
       lms_loaded: Boolean(liveDbCache),
       crm_loaded: Boolean(crmReadCache),
@@ -32765,7 +32775,8 @@ async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload }) {
   const uploadedObjects = [];
   let persistenceCommitted = false;
   try {
-    const references = await getContentMediaReferences(parentJob.id, "image");    const uploaded = await uploadMediaZipToR2({
+    const references = await getContentMediaReferences(parentJob.id, "image");
+    const uploaded = await uploadMediaZipToR2({
       zipFile: upload.file,
       examTrack: parentJob.exam_track,
       sourceNamespace: parentJob.source_namespace,
@@ -32845,46 +32856,87 @@ app.get("/admin/crm/ai-training/content-media-imports/:mediaJobId", async (req, 
     return res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
 });
-async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload }) {  const workDir = path.join(DATA_DIR, "content-imports", `${videoJob.id}-videos`);
-  try {    const references = await getContentMediaReferences(parentJob.id, "video");
-    const extracted = await extractReferencedVideos({ zipFile: upload.file, workDir, references });    const report = matchVideoReferences(references, extracted.videos);
-    let linked = 0;    const failures = [];
-    for (const match of report.matches) {      try {
-        const uploaded = await uploadVideoToVimeo({          file: match.video.localFile, sizeBytes: match.video.sizeBytes,
-          name: `${match.studentQid} · ${path.basename(match.video.originalName)}`,          description: `AylaMed private explanation video for ${match.studentQid}. Import ${parentJob.id}.`,
-        });        linked += await saveContentVideoMatch({ videoJobId: videoJob.id, parentJob, match, uploaded });
-      } catch (error) {        failures.push({ student_qid: match.studentQid, media_ref: match.mediaRef, error: error.response?.data?.error || error.message });
-      }    }
-    const warning = report.ambiguous.length || report.missing.length || failures.length;    await finishContentVideoImportJob(videoJob.id, warning ? "draft_imported_with_warnings" : "draft_imported", {
-      zip_entries: extracted.entries,      video_references: references.length,
-      videos_found: extracted.videos.length,      matched: report.matches.length,
-      uploaded_to_vimeo: report.matches.length - failures.length,      linked,
-      missing: report.missing.length,      ambiguous: report.ambiguous.length,
-      unreferenced: report.unreferenced.length,      failed: failures.length,
-      missing_samples: report.missing.slice(0, 100).map((item) => ({ student_qid: item.studentQid, media_ref: item.mediaRef })),      ambiguous_samples: report.ambiguous.slice(0, 100),
-    }, failures);  } catch (error) {
-    console.error("Content Registry Vimeo import failed:", videoJob.id, error);    await finishContentVideoImportJob(videoJob.id, "draft_import_failed", { failed: true }, [{ error: error.message || "Video import failed" }]).catch(() => {});
-  } finally {    await cleanupContentImportFiles(upload.file, workDir);
-  }}
+
+async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload }) {
+  const workDir = path.join(DATA_DIR, "content-imports", `${videoJob.id}-videos`);
+  try {
+    const references = await getContentMediaReferences(parentJob.id, "video");
+    const extracted = await extractReferencedVideos({ zipFile: upload.file, workDir, references });
+    const report = matchVideoReferences(references, extracted.videos);
+    let linked = 0;
+    const failures = [];
+    for (const match of report.matches) {
+      try {
+        const uploaded = await uploadVideoToVimeo({
+          file: match.video.localFile, sizeBytes: match.video.sizeBytes,
+          name: `${match.studentQid} · ${path.basename(match.video.originalName)}`,
+          description: `AylaMed private explanation video for ${match.studentQid}. Import ${parentJob.id}.`,
+        });
+        linked += await saveContentVideoMatch({ videoJobId: videoJob.id, parentJob, match, uploaded });
+      } catch (error) {
+        failures.push({ student_qid: match.studentQid, media_ref: match.mediaRef, error: error.response?.data?.error || error.message });
+      }
+    }
+    const warning = report.ambiguous.length || report.missing.length || failures.length;
+    await finishContentVideoImportJob(videoJob.id, warning ? "draft_imported_with_warnings" : "draft_imported", {
+      zip_entries: extracted.entries,
+      video_references: references.length,
+      videos_found: extracted.videos.length,
+      matched: report.matches.length,
+      uploaded_to_vimeo: report.matches.length - failures.length,
+      linked,
+      missing: report.missing.length,
+      ambiguous: report.ambiguous.length,
+      unreferenced: report.unreferenced.length,
+      failed: failures.length,
+      missing_samples: report.missing.slice(0, 100).map((item) => ({ student_qid: item.studentQid, media_ref: item.mediaRef })),
+      ambiguous_samples: report.ambiguous.slice(0, 100),
+    }, failures);
+  } catch (error) {
+    console.error("Content Registry Vimeo import failed:", videoJob.id, error);
+    await finishContentVideoImportJob(videoJob.id, "draft_import_failed", { failed: true }, [{ error: error.message || "Video import failed" }]).catch(() => {});
+  } finally {
+    await cleanupContentImportFiles(upload.file, workDir);
+  }
+}
+
 app.post("/admin/crm/ai-training/content-imports/:jobId/videos/import-draft", async (req, res) => {
-  let upload;  try {
-    const { user } = await requireCrmAdmin(req);    if (!contentVideoStatus().configured) return res.status(503).json({ success: false, error: "Vimeo access token is not configured" });
-    if (!String(req.headers["content-type"] || "").toLowerCase().includes("multipart/form-data")) {      return res.status(415).json({ success: false, error: "multipart/form-data with a video media ZIP is required" });
-    }    const parentJob = await getContentImportJob(req.params.jobId);
-    if (!parentJob) return res.status(404).json({ success: false, error: "Content import job not found" });    if (!["draft_imported", "draft_imported_with_warnings"].includes(String(parentJob.status))) {
-      return res.status(409).json({ success: false, error: "Questions must be imported as drafts before videos can be attached" });    }
-    upload = await receiveContentZip(req, DATA_DIR);    const videoJob = await createContentVideoImportJob({ id: crypto.randomUUID(), contentImportJobId: parentJob.id,
-      zipSha256: upload.sha256, originalFilename: upload.originalFilename, createdBy: String(user.id) });    void ngRunContentVideoDraftImport({ videoJob, parentJob, upload });
-    upload = null;    return res.status(202).json({ success: true, video_job_id: videoJob.id, content_import_job_id: parentJob.id,
-      status: "uploading", poll_url: `/admin/crm/ai-training/content-video-imports/${videoJob.id}`,      message: "Video ZIP accepted. Referenced videos are uploading privately to Vimeo as disabled drafts." });
-  } catch (error) {    if (upload?.file) await cleanupContentImportFiles(upload.file);
-    return res.status(error.statusCode || 500).json({ success: false, error: error.message || "Video ZIP import failed" });  }
+  let upload;
+  try {
+    const { user } = await requireCrmAdmin(req);
+    if (!contentVideoStatus().configured) return res.status(503).json({ success: false, error: "Vimeo access token is not configured" });
+    if (!String(req.headers["content-type"] || "").toLowerCase().includes("multipart/form-data")) {
+      return res.status(415).json({ success: false, error: "multipart/form-data with a video media ZIP is required" });
+    }
+    const parentJob = await getContentImportJob(req.params.jobId);
+    if (!parentJob) return res.status(404).json({ success: false, error: "Content import job not found" });
+    if (!["draft_imported", "draft_imported_with_warnings"].includes(String(parentJob.status))) {
+      return res.status(409).json({ success: false, error: "Questions must be imported as drafts before videos can be attached" });
+    }
+    upload = await receiveContentZip(req, DATA_DIR);
+    const videoJob = await createContentVideoImportJob({ id: crypto.randomUUID(), contentImportJobId: parentJob.id,
+      zipSha256: upload.sha256, originalFilename: upload.originalFilename, createdBy: String(user.id) });
+    void ngRunContentVideoDraftImport({ videoJob, parentJob, upload });
+    upload = null;
+    return res.status(202).json({ success: true, video_job_id: videoJob.id, content_import_job_id: parentJob.id,
+      status: "uploading", poll_url: `/admin/crm/ai-training/content-video-imports/${videoJob.id}`,
+      message: "Video ZIP accepted. Referenced videos are uploading privately to Vimeo as disabled drafts." });
+  } catch (error) {
+    if (upload?.file) await cleanupContentImportFiles(upload.file);
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message || "Video ZIP import failed" });
+  }
 });
-app.get("/admin/crm/ai-training/content-video-imports/:videoJobId", async (req, res) => {  try {
-    await requireCrmAdmin(req);    const job = await getContentVideoImportJob(req.params.videoJobId);
-    if (!job) return res.status(404).json({ success: false, error: "Video import job not found" });    return res.json({ success: true, job, storage: contentVideoStatus() });
-  } catch (error) {    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
-  }});
+
+app.get("/admin/crm/ai-training/content-video-imports/:videoJobId", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const job = await getContentVideoImportJob(req.params.videoJobId);
+    if (!job) return res.status(404).json({ success: false, error: "Video import job not found" });
+    return res.json({ success: true, job, storage: contentVideoStatus() });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
 
 app.get("/admin/crm/ai-training", async (req, res) => {
   try {
