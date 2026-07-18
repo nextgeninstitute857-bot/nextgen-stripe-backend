@@ -10,13 +10,17 @@ import {
 } from "./lib/flashcard-postgres.js";
 import {
   contentRegistryStatus,
+  claimContentImportDraft,
   createContentImportJob,
   finishContentImportPreview,
   getContentImportJob,
+  importContentQuestionBatch,
+  setContentImportJobStatus,
 } from "./lib/content-registry-postgres.js";
 import {
   cleanupContentImportFiles,
   extractSafeZipInventory,
+  importUniversalQuestionZip,
   previewUniversalQuestionZip,
   receiveContentZip,
 } from "./lib/content-zip-import.js";
@@ -35,7 +39,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v199-content-registry-preview";
+const NEXTGEN_BACKEND_BUILD = "v200-content-registry-draft-import";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -32561,6 +32565,26 @@ async function ngRunContentImportPreview({ jobId, upload, metadata }) {
   }
 }
 
+async function ngRunContentDraftImport({ job, upload }) {
+  let inventory;
+  try {
+    inventory = await extractSafeZipInventory(upload.file, `${job.id}-draft`, DATA_DIR);
+    const imported = await importUniversalQuestionZip({
+      inventory, job,
+      batchSize: Math.max(25, Math.min(250, Number(process.env.NEXTGEN_CONTENT_IMPORT_BATCH_SIZE || 100))),
+      onBatch: ({ collectionKey, collectionTitle, rows }) => importContentQuestionBatch({
+        job, collectionKey, collectionTitle, rows, destinations: Array.isArray(job.destinations) ? job.destinations : [],
+      }),
+    });
+    await setContentImportJobStatus(job.id, imported.errors.length ? "draft_imported_with_warnings" : "draft_imported", imported.totals, imported.errors);
+  } catch (error) {
+    console.error("Content Registry draft import failed:", job.id, error);
+    await setContentImportJobStatus(job.id, "draft_import_failed", { failed: true }, [{ error: error.message || "Draft import failed" }]).catch(() => {});
+  } finally {
+    await cleanupContentImportFiles(upload.file, inventory?.workDir);
+  }
+}
+
 app.post("/admin/crm/ai-training/content-imports/preview", async (req, res) => {
   let upload;
   try {
@@ -32607,6 +32631,41 @@ app.get("/admin/crm/ai-training/content-imports/:jobId", async (req, res) => {
     return res.json({ success: true, job });
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-training/content-imports/:jobId/import-draft", async (req, res) => {
+  let upload;
+  try {
+    await requireCrmAdmin(req);
+    if (!String(req.headers["content-type"] || "").toLowerCase().includes("multipart/form-data")) {
+      return res.status(415).json({ success: false, error: "multipart/form-data with the original ZIP is required" });
+    }
+    const existing = await getContentImportJob(req.params.jobId);
+    if (!existing) return res.status(404).json({ success: false, error: "Content import job not found" });
+    if (!["preview_ready", "preview_with_warnings"].includes(String(existing.status))) {
+      return res.status(409).json({ success: false, error: `Import job cannot be committed from status ${existing.status}` });
+    }
+    upload = await receiveContentZip(req, DATA_DIR);
+    if (String(upload.sha256) !== String(existing.zip_sha256)) {
+      await cleanupContentImportFiles(upload.file); upload = null;
+      return res.status(409).json({ success: false, error: "ZIP checksum does not match the approved preview. Upload the exact same ZIP." });
+    }
+    const claimed = await claimContentImportDraft(existing.id);
+    if (!claimed) {
+      await cleanupContentImportFiles(upload.file); upload = null;
+      return res.status(409).json({ success: false, error: "Import job was already claimed or its status changed" });
+    }
+    void ngRunContentDraftImport({ job: claimed, upload });
+    upload = null;
+    return res.status(202).json({
+      success: true, job_id: claimed.id, status: "importing_draft",
+      poll_url: `/admin/crm/ai-training/content-imports/${claimed.id}`,
+      message: "Checksum verified. Questions are importing as disabled drafts; nothing is published.",
+    });
+  } catch (error) {
+    if (upload?.file) await cleanupContentImportFiles(upload.file);
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message || "Draft import failed" });
   }
 });
 
