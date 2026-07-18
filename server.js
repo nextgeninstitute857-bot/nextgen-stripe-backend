@@ -17,6 +17,7 @@ import {
   finishContentMediaImportJob,
   finishContentVideoImportJob,
   finishContentImportPreview,
+  findReusableContentVideo,
   getContentMediaImportJob,
   getContentMediaReferences,
   getContentVideoImportJob,
@@ -60,7 +61,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v203-content-video-vimeo-draft-zoom-host-gate";
+const NEXTGEN_BACKEND_BUILD = "v204-content-video-global-dedupe";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -32864,15 +32865,41 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload }) {
     const extracted = await extractReferencedVideos({ zipFile: upload.file, workDir, references });
     const report = matchVideoReferences(references, extracted.videos);
     let linked = 0;
+    let newlyUploaded = 0;
+    let reusedAssets = 0;
+    let reusedMappings = 0;
     const failures = [];
     for (const match of report.matches) {
       try {
-        const uploaded = await uploadVideoToVimeo({
-          file: match.video.localFile, sizeBytes: match.video.sizeBytes,
-          name: `${match.studentQid} · ${path.basename(match.video.originalName)}`,
-          description: `AylaMed private explanation video for ${match.studentQid}. Import ${parentJob.id}.`,
+        const reusable = await findReusableContentVideo({
+          questionId: match.questionId, mediaRef: match.mediaRef, sha256: match.video.sha256,
         });
-        linked += await saveContentVideoMatch({ videoJobId: videoJob.id, parentJob, match, uploaded });
+        if (reusable.mapping) {
+          reusedMappings += 1;
+          continue;
+        }
+
+        let uploaded;
+        let reusableAssetId = null;
+        if (reusable.asset) {
+          reusableAssetId = reusable.asset.id;
+          uploaded = {
+            providerUri: reusable.asset.provider_uri,
+            providerId: reusable.asset.provider_id,
+            embedUrl: reusable.asset.embed_url,
+          };
+          reusedAssets += 1;
+        } else {
+          uploaded = await uploadVideoToVimeo({
+            file: match.video.localFile, sizeBytes: match.video.sizeBytes,
+            name: `${match.studentQid} · ${path.basename(match.video.originalName)}`,
+            description: `AylaMed private explanation video for ${match.studentQid}. Import ${parentJob.id}.`,
+          });
+          newlyUploaded += 1;
+        }
+        linked += await saveContentVideoMatch({
+          videoJobId: videoJob.id, parentJob, match, uploaded, reusableAssetId,
+        });
       } catch (error) {
         failures.push({ student_qid: match.studentQid, media_ref: match.mediaRef, error: error.response?.data?.error || error.message });
       }
@@ -32883,7 +32910,11 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload }) {
       video_references: references.length,
       videos_found: extracted.videos.length,
       matched: report.matches.length,
-      uploaded_to_vimeo: report.matches.length - failures.length,
+      uploaded_to_vimeo: newlyUploaded,
+      newly_uploaded: newlyUploaded,
+      reused_assets: reusedAssets,
+      reused_mappings: reusedMappings,
+      reused_total: reusedAssets + reusedMappings,
       linked,
       missing: report.missing.length,
       ambiguous: report.ambiguous.length,
