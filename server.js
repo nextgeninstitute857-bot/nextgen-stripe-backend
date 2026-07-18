@@ -4540,14 +4540,15 @@ function ngResolveExactSessionForZoomRecording(db, object = {}, previous = {}) {
   const best = ranked[0];
   const second = ranked[1] || null;
   const maxDifferenceMs = candidates.length > 1 ? 8 * 60 * 60 * 1000 : 12 * 60 * 60 * 1000;
-  const timeMarginMs = best.timeDifferenceMs !== null && second?.timeDifferenceMs !== null
+  const secondHasTimeDifference = Boolean(second && second.timeDifferenceMs !== null);
+  const timeMarginMs = best.timeDifferenceMs !== null && secondHasTimeDifference
     ? second.timeDifferenceMs - best.timeDifferenceMs
     : null;
   let exact = false;
   if (best.uuidMatch) exact = true;
   else if (best.timeDifferenceMs === null) exact = candidates.length === 1;
   else {
-    const clearlyClosestOccurrence = candidates.length === 1 || second?.timeDifferenceMs === null || Number(timeMarginMs) >= 30 * 60 * 1000;
+    const clearlyClosestOccurrence = candidates.length === 1 || !second || second.timeDifferenceMs === null || Number(timeMarginMs) >= 30 * 60 * 1000;
     exact = best.timeDifferenceMs <= maxDifferenceMs && clearlyClosestOccurrence;
   }
   if (!exact) {
