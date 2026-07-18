@@ -27,6 +27,11 @@ test("media references normalize double extensions", () => {
   assert.ok(mediaMatchKeys("iMD/U612.jpg.png").includes("u612"));
 });
 
+test("high-resolution export prefixes map to the original JSON reference", () => {
+  assert.ok(mediaMatchKeys("highresdefault_U17115.png").includes("u17115.png"));
+  assert.ok(mediaMatchKeys("highresdefault_L29978.jpg.png").includes("l29978.jpg"));
+});
+
 test("exact duplicate hash ignores harmless HTML spacing", () => {
   const answers = [{ answerId: 1, answerText: "Alpha" }, { answerId: 2, answerText: "Beta" }];
   assert.equal(
