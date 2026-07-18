@@ -3,8 +3,13 @@ import assert from "node:assert/strict";
 import { contentMediaStatus, matchMediaReferences, safeMediaEntryName } from "../lib/content-media-r2.js";
 
 test("R2 remains disabled until every private credential is configured", () => {
-  assert.equal(contentMediaStatus().configured, false);
-  assert.equal(contentMediaStatus().public_access, false);
+  assert.equal(contentMediaStatus({}).configured, false);
+  assert.equal(contentMediaStatus({
+    CLOUDFLARE_R2_ACCOUNT_ID: "account",
+    CLOUDFLARE_R2_ACCESS_KEY_ID: "access",
+    CLOUDFLARE_R2_SECRET_ACCESS_KEY: "secret",
+  }).configured, false);
+  assert.equal(contentMediaStatus({}).public_access, false);
 });
 
 test("media ZIP entry validation rejects traversal and non-images", () => {
