@@ -27,8 +27,10 @@ import {
   getContentVideoImportJob,
   getContentImportJob,
   getContentQbankCatalog,
+  getContentQbankQuestions,
   getContentRegistryFlashcardQuestion,
   importContentQuestionBatch,
+  listContentQbankQuestions,
   listContentRegistryFlashcardQuestions,
   listContentCollections,
   saveContentMediaMatches,
@@ -37,6 +39,23 @@ import {
   updateContentCollectionControls,
   upsertContentTaxonomyMapping,
 } from "./lib/content-registry-postgres.js";
+import {
+  AYLA_QBANK_STATE_COLLECTIONS,
+  canRevealAylaQbankAnswer,
+  createAylaQbankSession,
+  finalizeAylaQbankSession,
+  mergeConcurrentAylaQbankCollection,
+  normalizeAylaQbankExamTrack,
+  normalizeAylaQbankFilters,
+  normalizeAylaQbankMode,
+  qbankSessionHistoryRow,
+  qbankSessionQuestion,
+  recordAylaQbankAnswer,
+  requireAylaQbankEntitlement,
+  sanitizeAylaQbankQuestion,
+  sanitizeAylaQbankSession,
+  setAylaQbankQuestionMark,
+} from "./lib/aylamed-qbank.js";
 import {
   contentRegistryFlashcardId,
   contentRegistryQuestionId,
@@ -78,7 +97,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v206-registry-backed-lms-flashcards";
+const NEXTGEN_BACKEND_BUILD = "v207-aylamed-student-qbank";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -33070,14 +33089,528 @@ app.post("/admin/crm/ai-training/content-registry/taxonomy-mappings", async (req
 app.get("/api/ayla/qbank/catalog", async (req, res) => {
   try {
     const auth = await aylaV189RequireStudent(req, String(req.query.student_id || ""));
-    const examTrack = normalizeExamTrack(auth.student.examTrackId || auth.student.examTrack || auth.student.exam || auth.student.exam_track);
-    if (examTrack === "unknown") return res.status(409).json({ success: false, error: "Student exam track is not configured" });
+    const access = aylaRequireQbankAccess(auth.db, auth.user, auth.student, req.query.exam_track || req.query.examTrack || "");
+    const examTrack = access.exam_track;
     const catalog = await getContentQbankCatalog({ examTrack, destination: "aylamed_qbank" });
-    return res.json({ success: true, exam_track: examTrack, count: catalog.length, catalog });
+    return aylaSendOk(res, {
+      exam_track: examTrack,
+      entitlement: { type: access.entitlement_type, expires_at: access.expires_at || null },
+      count: catalog.length,
+      question_count: catalog.reduce((sum, row) => sum + Number(row.question_count || 0), 0),
+      catalog,
+    });
   } catch (error) {
-    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+    return aylaSendError(res, error.statusCode || 500, error.message);
   }
 });
+
+app.post("/api/ayla/qbank/sessions", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.body.student_id || req.body.studentId || ""));
+    const access = aylaRequireQbankAccess(auth.db, auth.user, auth.student, req.body.exam_track || req.body.examTrack || "");
+    const requestedCount = Number(req.body.question_count ?? req.body.questionCount ?? 40);
+    if (!Number.isInteger(requestedCount) || requestedCount < 1 || requestedCount > 200) {
+      return aylaSendError(res, 400, "question_count must be an integer between 1 and 200");
+    }
+    const filters = normalizeAylaQbankFilters(req.body.filters || req.body);
+    const requestedMode = normalizeAylaQbankMode(req.body.mode || "tutor");
+    const requestedBlockSize = Math.max(1, Math.min(40, Math.trunc(Number(req.body.block_size ?? req.body.blockSize ?? 40) || 40)));
+    const idempotencyKey = String(req.headers["idempotency-key"] || req.body.idempotency_key || req.body.idempotencyKey || "").trim().slice(0, 120);
+
+    let origin = "personal";
+    let roadmapAssignmentId = null;
+    const requestedRoadmapAssignmentId = String(req.body.roadmap_assignment_id || req.body.roadmapAssignmentId || "").trim();
+    if (requestedRoadmapAssignmentId) {
+      const assignment = aylaGetItem(auth.db, "aylaResourceAssignments", requestedRoadmapAssignmentId);
+      if (!assignment || String(assignment.studentId || "") !== String(auth.student.id)) return aylaSendError(res, 404, "Roadmap assignment not found");
+      if (!aylaQbankRoadmapAssignmentEligible(assignment)) return aylaSendError(res, 409, "Roadmap assignment is not a QBank question assignment");
+      const assignmentExam = normalizeAylaQbankExamTrack(assignment.examTrackId || assignment.examTrack || assignment.exam_track || "");
+      if (assignmentExam && assignmentExam !== access.exam_track) return aylaSendError(res, 403, "Roadmap assignment belongs to another exam track");
+      origin = "roadmap";
+      roadmapAssignmentId = assignment.id;
+    }
+
+    const idempotencyFingerprint = crypto.createHash("sha256").update(JSON.stringify({
+      examTrack: access.exam_track,
+      mode: requestedMode,
+      requestedCount,
+      blockSize: requestedBlockSize,
+      filters,
+      origin,
+      roadmapAssignmentId,
+      timeLimitMinutes: req.body.time_limit_minutes ?? req.body.timeLimitMinutes ?? null,
+    })).digest("hex");
+    if (idempotencyKey) {
+      const existing = aylaValues(auth.db, "aylaQbankSessions").find((row) =>
+        String(row.userId || "") === String(auth.user.id)
+        && String(row.studentId || "") === String(auth.student.id)
+        && String(row.idempotencyKey || "") === idempotencyKey);
+      if (existing) {
+        if (String(existing.idempotencyFingerprint || "") !== idempotencyFingerprint) return aylaSendError(res, 409, "Idempotency key was already used for a different QBank session request");
+        aylaRequireQbankAccess(auth.db, auth.user, auth.student, existing.examTrack);
+        const bundle = await aylaPlayableQbankSession(auth.db, existing);
+        return aylaSendOk(res, {
+          ...bundle,
+          requested_question_count: Number(existing.requestedQuestionCount || existing.questionCount || 0),
+          selected_question_count: Number(existing.questionCount || 0),
+          partial_selection: Number(existing.questionCount || 0) < Number(existing.requestedQuestionCount || existing.questionCount || 0),
+          idempotent_replay: true,
+        });
+      }
+    }
+
+    const selected = await listContentQbankQuestions({
+      examTrack: access.exam_track,
+      destination: "aylamed_qbank",
+      systemKey: filters.system_key,
+      subsystemKey: filters.subsystem_key,
+      topicKey: filters.topic_key,
+      subtopicKey: filters.subtopic_key,
+      limit: requestedCount,
+      seed: crypto.randomUUID(),
+    });
+    if (!selected.length) return aylaSendError(res, 409, "No approved QBank questions match this exam track and filter selection");
+
+    const sessionId = aylaId("AYLA-QBS");
+    const questionMappings = selected.map((question) => ({ ref: crypto.randomUUID(), contentQuestionId: question.id }));
+    const mutation = await mutateAylaDb(async (db) => {
+      const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, access.exam_track);
+      if (idempotencyKey) {
+        const existing = aylaValues(db, "aylaQbankSessions").find((row) =>
+          String(row.userId || "") === String(auth.user.id)
+          && String(row.studentId || "") === String(auth.student.id)
+          && String(row.idempotencyKey || "") === idempotencyKey);
+        if (existing) {
+          if (String(existing.idempotencyFingerprint || "") !== idempotencyFingerprint) {
+            const error = new Error("Idempotency key was already used for a different QBank session request");
+            error.statusCode = 409;
+            throw error;
+          }
+          return { session: existing, replayed: true };
+        }
+      }
+      if (roadmapAssignmentId) {
+        const assignment = aylaGetItem(db, "aylaResourceAssignments", roadmapAssignmentId);
+        if (!assignment || String(assignment.studentId || "") !== String(fresh.student.id)) {
+          const error = new Error("Roadmap assignment not found");
+          error.statusCode = 404;
+          throw error;
+        }
+        if (!aylaQbankRoadmapAssignmentEligible(assignment)) {
+          const error = new Error("Roadmap assignment is not a QBank question assignment");
+          error.statusCode = 409;
+          throw error;
+        }
+      }
+      const session = createAylaQbankSession({
+        id: sessionId,
+        userId: fresh.user.id,
+        studentId: fresh.student.id,
+        examTrack: fresh.entitlement.exam_track,
+        mode: requestedMode,
+        questions: questionMappings,
+        filters,
+        blockSize: requestedBlockSize,
+        origin,
+        roadmapAssignmentId,
+        timeLimitMinutes: req.body.time_limit_minutes ?? req.body.timeLimitMinutes ?? null,
+        entitlement: fresh.entitlement,
+      });
+      session.idempotencyKey = idempotencyKey || null;
+      session.idempotencyFingerprint = idempotencyKey ? idempotencyFingerprint : null;
+      session.requestedQuestionCount = requestedCount;
+      aylaSetItem(db, "aylaQbankSessions", session);
+      aylaQbankEvent(db, session, "session_created", { mode: session.mode, questionCount: session.questionCount, origin: session.origin });
+      aylaV189RecordActivity(db, session.studentId, "qbank_session_created", { sessionId: session.id, examTrack: session.examTrack, questionCount: session.questionCount, mode: session.mode });
+      return { session, replayed: false };
+    });
+    const latestDb = await readAylaDb();
+    const bundle = await aylaPlayableQbankSession(latestDb, mutation.session);
+    return aylaSendOk(res, {
+      ...bundle,
+      requested_question_count: requestedCount,
+      selected_question_count: mutation.session.questionCount,
+      partial_selection: mutation.session.questionCount < requestedCount,
+      idempotent_replay: mutation.replayed,
+    }, mutation.replayed ? 200 : 201);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.get("/api/ayla/qbank/sessions/:sessionId", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.query.student_id || ""));
+    const session = aylaOwnedQbankSession(auth.db, auth.user, auth.student, req.params.sessionId);
+    aylaRequireQbankAccess(auth.db, auth.user, auth.student, session.examTrack);
+    return aylaSendOk(res, await aylaPlayableQbankSession(auth.db, session));
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.post("/api/ayla/qbank/sessions/:sessionId/answers", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.body.student_id || req.body.studentId || ""));
+    const session = aylaOwnedQbankSession(auth.db, auth.user, auth.student, req.params.sessionId);
+    aylaRequireQbankAccess(auth.db, auth.user, auth.student, session.examTrack);
+    const questionRef = String(req.body.question_ref || req.body.questionRef || "").trim();
+    const mapping = qbankSessionQuestion(session, questionRef);
+    if (!mapping) return aylaSendError(res, 404, "Question does not belong to this QBank session");
+    const [question] = await getContentQbankQuestions({ questionIds: [mapping.contentQuestionId], examTrack: session.examTrack, destination: "aylamed_qbank" });
+    if (!question) return aylaSendError(res, 409, "This question is no longer approved for QBank delivery");
+    const selectedAnswerId = Number(req.body.selected_answer_id ?? req.body.selectedAnswerId);
+    if (!question.answers.some((row) => Number(row.answer_id) === selectedAnswerId)) return aylaSendError(res, 400, "selected_answer_id is not a valid answer choice");
+
+    const mutation = await mutateAylaDb(async (db) => {
+      const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, session.examTrack);
+      const current = aylaOwnedQbankSession(db, fresh.user, fresh.student, session.id);
+      const currentMapping = qbankSessionQuestion(current, questionRef);
+      if (!currentMapping || String(currentMapping.contentQuestionId) !== String(mapping.contentQuestionId)) {
+        const error = new Error("Question does not belong to this QBank session");
+        error.statusCode = 404;
+        throw error;
+      }
+      const recorded = recordAylaQbankAnswer(current, {
+        questionRef,
+        selectedAnswerId,
+        correctAnswerId: question.correct_answer_id,
+        elapsedMs: req.body.elapsed_ms ?? req.body.elapsedMs ?? null,
+      });
+      if (!recorded.replayed) {
+        aylaSetItem(db, "aylaQbankSessions", recorded.session);
+        const immediate = recorded.session.mode === "tutor";
+        const attempt = immediate ? aylaRecordQbankAttempt(db, recorded.session, currentMapping, recorded.answer, question).attempt : null;
+        aylaQbankEvent(db, recorded.session, "answer_recorded", immediate
+          ? { questionRef, correct: recorded.answer.correct, attemptId: attempt?.id || null }
+          : { questionRef, resultWithheldUntilSubmit: true });
+        if (immediate) {
+          aylaV189RecordActivity(db, recorded.session.studentId, "qbank_question_answered", { sessionId: recorded.session.id, questionRef, correct: recorded.answer.correct, examTrack: recorded.session.examTrack });
+        }
+      }
+      return recorded;
+    });
+    const latestDb = await readAylaDb();
+    const current = aylaOwnedQbankSession(latestDb, auth.user, auth.student, session.id);
+    const renderedQuestion = await aylaPlayableQbankQuestion(latestDb, current, mapping, question);
+    return aylaSendOk(res, {
+      session: sanitizeAylaQbankSession(current),
+      question: renderedQuestion,
+      idempotent_replay: mutation.replayed,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.post("/api/ayla/qbank/sessions/:sessionId/submit", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.body.student_id || req.body.studentId || ""));
+    const initial = aylaOwnedQbankSession(auth.db, auth.user, auth.student, req.params.sessionId);
+    aylaRequireQbankAccess(auth.db, auth.user, auth.student, initial.examTrack);
+    const reviewQuestions = await getContentQbankQuestions({
+      questionIds: (initial.questions || []).map((row) => row.contentQuestionId),
+      examTrack: initial.examTrack,
+      destination: "aylamed_qbank",
+    });
+    const reviewById = new Map(reviewQuestions.map((row) => [String(row.id), row]));
+    const mutation = await mutateAylaDb(async (db) => {
+      const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, initial.examTrack);
+      const current = aylaOwnedQbankSession(db, fresh.user, fresh.student, initial.id);
+      const finalized = finalizeAylaQbankSession(current);
+      if (!finalized.replayed) {
+        aylaSetItem(db, "aylaQbankSessions", finalized.session);
+        if (finalized.session.mode === "test") {
+          for (const [questionRef, answer] of Object.entries(finalized.session.answers || {})) {
+            const mapping = qbankSessionQuestion(finalized.session, questionRef);
+            if (!mapping) continue;
+            aylaRecordQbankAttempt(db, finalized.session, mapping, answer, reviewById.get(String(mapping.contentQuestionId)) || {});
+          }
+        }
+        if (finalized.session.origin === "roadmap" && finalized.session.roadmapAssignmentId) {
+          const assignment = aylaGetItem(db, "aylaResourceAssignments", finalized.session.roadmapAssignmentId);
+          if (assignment && String(assignment.studentId || "") === String(finalized.session.studentId) && aylaQbankRoadmapAssignmentEligible(assignment)) {
+            assignment.status = "completed";
+            assignment.progressPercent = 100;
+            assignment.qbankSessionIds = [...new Set([...(Array.isArray(assignment.qbankSessionIds) ? assignment.qbankSessionIds : []), finalized.session.id])];
+            assignment.completedAt = assignment.completedAt || finalized.session.submittedAt;
+            assignment.updatedAt = finalized.session.submittedAt;
+            aylaSetItem(db, "aylaResourceAssignments", assignment);
+            if (assignment.dailyPlanId) aylaV189UpdatePlanCompletion(db, assignment.dailyPlanId);
+          }
+        }
+        aylaQbankEvent(db, finalized.session, "session_submitted", {
+          scorePercent: finalized.session.scorePercent,
+          correctCount: finalized.session.correctCount,
+          questionCount: finalized.session.questionCount,
+        });
+        aylaV189RecordActivity(db, finalized.session.studentId, "qbank_session_submitted", {
+          sessionId: finalized.session.id,
+          examTrack: finalized.session.examTrack,
+          scorePercent: finalized.session.scorePercent,
+          questionCount: finalized.session.questionCount,
+        });
+      }
+      return finalized;
+    });
+    const latestDb = await readAylaDb();
+    const session = aylaOwnedQbankSession(latestDb, auth.user, auth.student, initial.id);
+    return aylaSendOk(res, { ...(await aylaPlayableQbankSession(latestDb, session)), idempotent_replay: mutation.replayed });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.get("/api/ayla/qbank/history", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.query.student_id || ""));
+    const access = aylaRequireQbankAccess(auth.db, auth.user, auth.student, req.query.exam_track || req.query.examTrack || "");
+    const limit = Math.max(1, Math.min(200, Number(req.query.limit) || 50));
+    const offset = Math.max(0, Number(req.query.offset) || 0);
+    const rows = aylaValues(auth.db, "aylaQbankSessions")
+      .filter((row) => String(row.userId || "") === String(auth.user.id) && String(row.studentId || "") === String(auth.student.id))
+      .filter((row) => String(row.examTrack || "") === String(access.exam_track))
+      .sort((a, b) => String(b.submittedAt || b.updatedAt || b.createdAt || "").localeCompare(String(a.submittedAt || a.updatedAt || a.createdAt || "")));
+    return aylaSendOk(res, {
+      exam_track: access.exam_track,
+      total: rows.length,
+      limit,
+      offset,
+      history: rows.slice(offset, offset + limit).map(qbankSessionHistoryRow),
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+async function aylaHandleQbankMark(req, res, marked) {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.body?.student_id || req.body?.studentId || req.query.student_id || ""));
+    const initial = aylaOwnedQbankSession(auth.db, auth.user, auth.student, req.params.sessionId);
+    aylaRequireQbankAccess(auth.db, auth.user, auth.student, initial.examTrack);
+    const questionRef = String(req.params.questionRef || "").trim();
+    if (!qbankSessionQuestion(initial, questionRef)) return aylaSendError(res, 404, "Question does not belong to this QBank session");
+    const session = await mutateAylaDb(async (db) => {
+      const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, initial.examTrack);
+      const current = aylaOwnedQbankSession(db, fresh.user, fresh.student, initial.id);
+      const updated = setAylaQbankQuestionMark(current, questionRef, marked);
+      aylaSetItem(db, "aylaQbankSessions", updated);
+      aylaQbankEvent(db, updated, marked ? "question_marked" : "question_unmarked", { questionRef });
+      return updated;
+    });
+    return aylaSendOk(res, { session: sanitizeAylaQbankSession(session), question_ref: questionRef, marked });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+}
+
+app.put("/api/ayla/qbank/sessions/:sessionId/questions/:questionRef/mark", (req, res) => aylaHandleQbankMark(req, res, req.body?.marked !== false));
+app.delete("/api/ayla/qbank/sessions/:sessionId/questions/:questionRef/mark", (req, res) => aylaHandleQbankMark(req, res, false));
+
+async function aylaHandleQbankBookmark(req, res, bookmarked) {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.body?.student_id || req.body?.studentId || req.query.student_id || ""));
+    const initial = aylaOwnedQbankSession(auth.db, auth.user, auth.student, req.params.sessionId);
+    aylaRequireQbankAccess(auth.db, auth.user, auth.student, initial.examTrack);
+    const mapping = qbankSessionQuestion(initial, req.params.questionRef);
+    if (!mapping) return aylaSendError(res, 404, "Question does not belong to this QBank session");
+    const result = await mutateAylaDb(async (db) => {
+      const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, initial.examTrack);
+      const current = aylaOwnedQbankSession(db, fresh.user, fresh.student, initial.id);
+      const currentMapping = qbankSessionQuestion(current, req.params.questionRef);
+      if (!currentMapping || String(currentMapping.contentQuestionId) !== String(mapping.contentQuestionId)) {
+        const error = new Error("Question does not belong to this QBank session");
+        error.statusCode = 404;
+        throw error;
+      }
+      const existing = aylaValues(db, "aylaQbankBookmarks")
+        .filter((row) => String(row.studentId || "") === String(current.studentId))
+        .filter((row) => String(row.examTrack || "") === String(current.examTrack))
+        .find((row) => String(row.contentQuestionId || "") === String(currentMapping.contentQuestionId));
+      const bookmark = {
+        ...(existing || {}),
+        id: existing?.id || aylaId("AYLA-QBB"),
+        studentId: current.studentId,
+        userId: current.userId,
+        examTrack: current.examTrack,
+        sessionId: current.id,
+        questionRef: currentMapping.ref,
+        contentQuestionId: currentMapping.contentQuestionId,
+        deletedAt: bookmarked ? null : aylaNow(),
+        createdAt: existing?.createdAt || aylaNow(),
+        updatedAt: aylaNow(),
+      };
+      aylaSetItem(db, "aylaQbankBookmarks", bookmark);
+      aylaQbankEvent(db, current, bookmarked ? "question_bookmarked" : "question_unbookmarked", { questionRef: currentMapping.ref, bookmarkId: bookmark.id });
+      return bookmark;
+    });
+    return aylaSendOk(res, { bookmark: { id: result.id, question_ref: result.questionRef, bookmarked: !result.deletedAt, updated_at: result.updatedAt } });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+}
+
+app.put("/api/ayla/qbank/sessions/:sessionId/questions/:questionRef/bookmark", (req, res) => aylaHandleQbankBookmark(req, res, true));
+app.delete("/api/ayla/qbank/sessions/:sessionId/questions/:questionRef/bookmark", (req, res) => aylaHandleQbankBookmark(req, res, false));
+
+async function aylaHandleQbankNoteDelete(req, res) {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.body?.student_id || req.body?.studentId || req.query.student_id || ""));
+    const initial = aylaOwnedQbankSession(auth.db, auth.user, auth.student, req.params.sessionId);
+    aylaRequireQbankAccess(auth.db, auth.user, auth.student, initial.examTrack);
+    const mapping = qbankSessionQuestion(initial, req.params.questionRef);
+    if (!mapping) return aylaSendError(res, 404, "Question does not belong to this QBank session");
+    const note = await mutateAylaDb(async (db) => {
+      const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, initial.examTrack);
+      const current = aylaOwnedQbankSession(db, fresh.user, fresh.student, initial.id);
+      const existing = aylaValues(db, "aylaQbankNotes")
+        .filter((row) => String(row.studentId || "") === String(current.studentId) && String(row.examTrack || "") === String(current.examTrack))
+        .find((row) => String(row.contentQuestionId || "") === String(mapping.contentQuestionId));
+      if (!existing || existing.deletedAt) return null;
+      existing.deletedAt = aylaNow();
+      existing.updatedAt = existing.deletedAt;
+      aylaSetItem(db, "aylaQbankNotes", existing);
+      aylaQbankEvent(db, current, "question_note_deleted", { questionRef: mapping.ref, noteId: existing.id });
+      return existing;
+    });
+    return aylaSendOk(res, { deleted: Boolean(note), note_id: note?.id || null });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+}
+
+app.put("/api/ayla/qbank/sessions/:sessionId/questions/:questionRef/note", async (req, res) => {
+  try {
+    const text = String(req.body.note ?? req.body.text ?? "").replace(/\u0000/g, "").trim();
+    if (!text) return aylaSendError(res, 400, "note text is required");
+    if (text.length > 20000) return aylaSendError(res, 400, "note text cannot exceed 20,000 characters");
+    const auth = await aylaV189RequireStudent(req, String(req.body.student_id || req.body.studentId || ""));
+    const initial = aylaOwnedQbankSession(auth.db, auth.user, auth.student, req.params.sessionId);
+    aylaRequireQbankAccess(auth.db, auth.user, auth.student, initial.examTrack);
+    const mapping = qbankSessionQuestion(initial, req.params.questionRef);
+    if (!mapping) return aylaSendError(res, 404, "Question does not belong to this QBank session");
+    const note = await mutateAylaDb(async (db) => {
+      const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, initial.examTrack);
+      const current = aylaOwnedQbankSession(db, fresh.user, fresh.student, initial.id);
+      const existing = aylaValues(db, "aylaQbankNotes")
+        .filter((row) => String(row.studentId || "") === String(current.studentId) && String(row.examTrack || "") === String(current.examTrack))
+        .find((row) => String(row.contentQuestionId || "") === String(mapping.contentQuestionId));
+      const versions = Array.isArray(existing?.versions) ? [...existing.versions] : [];
+      if (existing?.text && existing.text !== text) versions.push({ text: existing.text, savedAt: existing.updatedAt || existing.createdAt });
+      const next = {
+        ...(existing || {}),
+        id: existing?.id || aylaId("AYLA-QBN"),
+        studentId: current.studentId,
+        userId: current.userId,
+        examTrack: current.examTrack,
+        sessionId: current.id,
+        questionRef: mapping.ref,
+        contentQuestionId: mapping.contentQuestionId,
+        text,
+        versions: versions.slice(-50),
+        deletedAt: null,
+        createdAt: existing?.createdAt || aylaNow(),
+        updatedAt: aylaNow(),
+      };
+      aylaSetItem(db, "aylaQbankNotes", next);
+      aylaQbankEvent(db, current, existing ? "question_note_updated" : "question_note_created", { questionRef: mapping.ref, noteId: next.id });
+      return next;
+    });
+    return aylaSendOk(res, { note: { id: note.id, question_ref: note.questionRef, text: note.text, updated_at: note.updatedAt } });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.delete("/api/ayla/qbank/sessions/:sessionId/questions/:questionRef/note", aylaHandleQbankNoteDelete);
+
+async function aylaHandleQbankRevision(req, res, enabled) {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.body?.student_id || req.body?.studentId || req.query.student_id || ""));
+    const initial = aylaOwnedQbankSession(auth.db, auth.user, auth.student, req.params.sessionId);
+    aylaRequireQbankAccess(auth.db, auth.user, auth.student, initial.examTrack);
+    const mapping = qbankSessionQuestion(initial, req.params.questionRef);
+    if (!mapping) return aylaSendError(res, 404, "Question does not belong to this QBank session");
+    let question = null;
+    if (enabled) [question] = await getContentQbankQuestions({ questionIds: [mapping.contentQuestionId], examTrack: initial.examTrack, destination: "aylamed_qbank" });
+    const revision = await mutateAylaDb(async (db) => {
+      const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, initial.examTrack);
+      const current = aylaOwnedQbankSession(db, fresh.user, fresh.student, initial.id);
+      const currentMapping = qbankSessionQuestion(current, req.params.questionRef);
+      if (!currentMapping) {
+        const error = new Error("Question does not belong to this QBank session");
+        error.statusCode = 404;
+        throw error;
+      }
+      if (enabled) {
+        const item = aylaUpsertQbankRevision(db, current, currentMapping, question || {}, "student_added");
+        aylaQbankEvent(db, current, "question_added_to_revision", { questionRef: currentMapping.ref, revisionId: item.id });
+        return item;
+      }
+      const item = aylaValues(db, "aylaRevisionQueue")
+        .filter((row) => String(row.studentId || "") === String(current.studentId) && String(row.examTrack || "") === String(current.examTrack))
+        .filter((row) => String(row.sourceType || "") === "qbank_question")
+        .find((row) => String(row.sourceId || row.contentQuestionId || "") === String(currentMapping.contentQuestionId));
+      if (!item) return null;
+      item.status = "removed";
+      item.removedAt = aylaNow();
+      item.updatedAt = item.removedAt;
+      aylaSetItem(db, "aylaRevisionQueue", item);
+      aylaQbankEvent(db, current, "question_removed_from_revision", { questionRef: currentMapping.ref, revisionId: item.id });
+      return item;
+    });
+    return aylaSendOk(res, { revision: revision ? { id: revision.id, question_ref: revision.questionRef, in_revision: enabled, status: revision.status, updated_at: revision.updatedAt } : null });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+}
+
+app.post("/api/ayla/qbank/sessions/:sessionId/questions/:questionRef/revision", (req, res) => aylaHandleQbankRevision(req, res, true));
+app.delete("/api/ayla/qbank/sessions/:sessionId/questions/:questionRef/revision", (req, res) => aylaHandleQbankRevision(req, res, false));
+
+async function aylaQbankSavedList(req, res, collection, responseKey) {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.query.student_id || ""));
+    const access = aylaRequireQbankAccess(auth.db, auth.user, auth.student, req.query.exam_track || req.query.examTrack || "");
+    const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 50));
+    const rows = aylaValues(auth.db, collection)
+      .filter((row) => String(row.userId || "") === String(auth.user.id) && String(row.studentId || "") === String(auth.student.id))
+      .filter((row) => String(row.examTrack || "") === String(access.exam_track) && !row.deletedAt)
+      .filter((row) => collection !== "aylaRevisionQueue" || (String(row.sourceType || "") === "qbank_question" && !["removed", "completed"].includes(String(row.status || "due").toLowerCase())))
+      .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")))
+      .slice(0, limit);
+    const content = await getContentQbankQuestions({
+      questionIds: rows.map((row) => row.contentQuestionId || row.sourceId),
+      examTrack: access.exam_track,
+      destination: "aylamed_qbank",
+    });
+    const byId = new Map(content.map((row) => [String(row.id), row]));
+    const items = [];
+    for (const row of rows) {
+      const saved = aylaQbankSavedItemSession(auth.db, row);
+      const reveal = canRevealAylaQbankAnswer(saved.session, saved.mapping.ref);
+      const reasons = Array.isArray(row.reasons) ? row.reasons : [];
+      const publicReasons = reveal ? reasons : reasons.filter((reason) => reason !== "incorrect_answer");
+      if (collection === "aylaRevisionQueue" && !reveal && !publicReasons.length) continue;
+      items.push({
+        id: row.id,
+        status: row.status || null,
+        reasons: publicReasons,
+        note: collection === "aylaQbankNotes" ? { text: row.text || "", updated_at: row.updatedAt || null } : null,
+        created_at: row.createdAt || null,
+        updated_at: row.updatedAt || null,
+        question: await aylaPlayableQbankQuestion(auth.db, saved.session, saved.mapping, byId.get(String(row.contentQuestionId || row.sourceId)) || null),
+      });
+    }
+    return aylaSendOk(res, { exam_track: access.exam_track, count: items.length, [responseKey]: items });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+}
+
+app.get("/api/ayla/qbank/bookmarks", (req, res) => aylaQbankSavedList(req, res, "aylaQbankBookmarks", "bookmarks"));
+app.get("/api/ayla/qbank/notes", (req, res) => aylaQbankSavedList(req, res, "aylaQbankNotes", "notes"));
+app.get("/api/ayla/qbank/revision", (req, res) => aylaQbankSavedList(req, res, "aylaRevisionQueue", "revision"));
 
 app.get("/admin/crm/ai-training", async (req, res) => {
   try {
@@ -53543,11 +54076,12 @@ function ngStartBillingExpiryRunner() {
 // - Frontend can connect to these routes later with VITE_API_BASE_URL pointing to this backend.
 // -----------------------------------------------------------------------------
 
-const AYLA_BACKEND_BUILD = "aylamed-smart-tutor-notebook-ocr-v190F";
+const AYLA_BACKEND_BUILD = "aylamed-student-qbank-v207";
 
 const AYLA_EXAM_TRACKS = [
   "USMLE Step 1",
   "USMLE Step 2 CK",
+  "USMLE Step 3",
   "PLAB",
   "AMC",
   "MCCQE",
@@ -53558,6 +54092,7 @@ const AYLA_EXAM_TRACKS = [
 const AYLA_EXAM_REGISTRY = Object.freeze({
   usmle_step_1: { id: "usmle_step_1", label: "USMLE Step 1", aliases: ["step 1", "step1", "usmle step 1"], curriculumVersion: "2026.1", systems: ["Cardiovascular", "Renal", "Respiratory", "Gastrointestinal", "Neurology", "Endocrine", "Reproductive", "Hematology", "Immunology", "Musculoskeletal", "Behavioral Science", "Biochemistry", "Pharmacology", "Microbiology", "Biostatistics and Ethics"] },
   usmle_step_2_ck: { id: "usmle_step_2_ck", label: "USMLE Step 2 CK", aliases: ["step 2", "step2", "step 2 ck", "usmle step 2 ck"], curriculumVersion: "2026.1", systems: ["Internal Medicine", "Surgery", "Obstetrics and Gynecology", "Pediatrics", "Psychiatry", "Emergency Medicine", "Family Medicine", "Preventive Medicine", "Ethics and Biostatistics"] },
+  usmle_step_3: { id: "usmle_step_3", label: "USMLE Step 3", aliases: ["step 3", "step3", "usmle step 3"], curriculumVersion: "2026.1", systems: ["Internal Medicine", "Surgery", "Pediatrics", "Obstetrics and Gynecology", "Psychiatry", "Emergency Medicine", "Family Medicine", "Preventive Medicine", "Biostatistics and Ethics", "Computer-based Case Simulations"] },
   plab: { id: "plab", label: "PLAB", aliases: ["plab", "plab 1", "plab1", "professional and linguistic assessments board"], curriculumVersion: "2026.1", systems: ["Medicine", "Surgery", "Emergency Medicine", "Obstetrics and Gynecology", "Pediatrics", "Psychiatry", "General Practice", "Clinical Ethics", "Communication Skills", "Patient Safety", "UK Clinical Guidelines"] },
   amc: { id: "amc", label: "AMC", aliases: ["amc", "australian medical council", "australia"], curriculumVersion: "2026.1", systems: ["Medicine", "Surgery", "Women's Health", "Child Health", "Mental Health", "Population Health", "Ethics", "Australian Clinical Practice"] },
   mccqe: { id: "mccqe", label: "MCCQE", aliases: ["mccqe", "mccqe1", "mccqe part 1", "medical council of canada", "canada"], curriculumVersion: "2026.1", systems: ["Family Medicine", "Internal Medicine", "Surgery", "Pediatrics", "Obstetrics and Gynecology", "Psychiatry", "Emergency Medicine", "Preventive Care", "Ethics and Communication"] },
@@ -53578,6 +54113,10 @@ const AYLA_COLLECTIONS = {
   aylaRoadmapRules: { route: "/api/ayla/roadmap-rules", prefix: "RR", label: "roadmapRule" },
   aylaQbankRules: { route: "/api/ayla/qbank-rules", prefix: "QR", label: "qbankRule" },
   aylaQbankBlocks: { route: "/api/ayla/qbank-blocks", prefix: "QB", label: "qbankBlock" },
+  aylaQbankSessions: { route: "/api/ayla/admin/qbank-sessions", prefix: "AYLA-QBS", label: "qbankSession", customPost: true, immutableAdminWrites: true },
+  aylaQbankBookmarks: { route: "/api/ayla/admin/qbank-bookmarks", prefix: "AYLA-QBB", label: "qbankBookmark", customPost: true, immutableAdminWrites: true },
+  aylaQbankNotes: { route: "/api/ayla/admin/qbank-notes", prefix: "AYLA-QBN", label: "qbankNote", customPost: true, immutableAdminWrites: true },
+  aylaQbankEvents: { route: "/api/ayla/admin/qbank-events", prefix: "AYLA-QBE", label: "qbankEvent", customPost: true, immutableAdminWrites: true },
   aylaWeakAreaRules: { route: "/api/ayla/weak-area-rules", prefix: "WA", label: "weakAreaRule" },
   aylaWeakAreaLogs: { route: "/api/ayla/weak-area-logs", prefix: "WEAK", label: "weakAreaLog" },
   aylaFlashcardRules: { route: "/api/ayla/flashcard-rules", prefix: "FR", label: "flashcardRule" },
@@ -53712,13 +54251,18 @@ const DEFAULT_AYLA_AI_USAGE_SETTINGS = {
 };
 
 const DEFAULT_AYLA_DB = {
-  schema_version: 3,
+  schema_version: 4,
+  qbank_state_version: 0,
   aylaUsers: {},
   aylaStudents: {},
   aylaDiagnosticSubmissions: {},
   aylaRoadmapRules: {},
   aylaQbankRules: {},
   aylaQbankBlocks: {},
+  aylaQbankSessions: {},
+  aylaQbankBookmarks: {},
+  aylaQbankNotes: {},
+  aylaQbankEvents: {},
   aylaWeakAreaRules: {},
   aylaWeakAreaLogs: {},
   aylaFlashcardRules: {},
@@ -53808,6 +54352,8 @@ async function readAylaDbFromDisk() {
     const raw = await fs.readFile(AYLA_DB_PATH, "utf8");
     const parsed = JSON.parse(raw);
     const next = { ...DEFAULT_AYLA_DB, ...parsed };
+    next.schema_version = Math.max(Number(parsed.schema_version || 0), Number(DEFAULT_AYLA_DB.schema_version || 0));
+    next.qbank_state_version = Math.max(0, Number(parsed.qbank_state_version || 0));
     for (const key of Object.keys(DEFAULT_AYLA_DB)) {
       if (key.startsWith("ayla") && key !== "aylaSettings" && key !== "aylaAiUsageSettings" && (!next[key] || typeof next[key] !== "object" || Array.isArray(next[key]))) next[key] = {};
     }
@@ -53845,17 +54391,56 @@ async function writeAylaDb(db) {
     })
     .then(async () => {
     await ensureDataDir();
+    const incomingQbankVersion = Math.max(0, Number(db.qbank_state_version || 0));
+    const latestQbankVersion = Math.max(0, Number(aylaDbCache?.qbank_state_version || 0));
+    const preparedDb = { ...db };
+    if (aylaDbCache && latestQbankVersion > incomingQbankVersion) {
+      for (const key of AYLA_QBANK_STATE_COLLECTIONS) {
+        preparedDb[key] = mergeConcurrentAylaQbankCollection(aylaDbCache[key], db[key]);
+      }
+    }
     const nextDb = {
       ...DEFAULT_AYLA_DB,
-      ...db,
-      aylaSettings: aylaMergeSettings(db.aylaSettings || {}),
-      aylaAiUsageSettings: aylaMergeAiUsageSettings(db.aylaAiUsageSettings || {}),
+      ...preparedDb,
+      schema_version: DEFAULT_AYLA_DB.schema_version,
+      qbank_state_version: Math.max(incomingQbankVersion, latestQbankVersion),
+      aylaSettings: aylaMergeSettings(preparedDb.aylaSettings || {}),
+      aylaAiUsageSettings: aylaMergeAiUsageSettings(preparedDb.aylaAiUsageSettings || {}),
       updatedAt: new Date().toISOString(),
     };
     await ngWriteJsonAtomicStreaming(AYLA_DB_PATH, nextDb, "AylaMed database");
     aylaDbCache = nextDb;
     aylaDbReadInFlight = null;
   });
+  aylaWriteQueue = task;
+  return task;
+}
+
+async function mutateAylaDb(mutator) {
+  const task = aylaWriteQueue
+    .catch((error) => {
+      console.error("Previous AylaMed write failed; atomic mutation queue recovered:", error.message);
+    })
+    .then(async () => {
+      const current = aylaDbCache
+        ? JSON.parse(JSON.stringify(aylaDbCache))
+        : await readAylaDbFromDisk();
+      const result = await mutator(current);
+      const nextDb = {
+        ...DEFAULT_AYLA_DB,
+        ...current,
+        schema_version: DEFAULT_AYLA_DB.schema_version,
+        qbank_state_version: Math.max(0, Number(current.qbank_state_version || 0)) + 1,
+        aylaSettings: aylaMergeSettings(current.aylaSettings || {}),
+        aylaAiUsageSettings: aylaMergeAiUsageSettings(current.aylaAiUsageSettings || {}),
+        updatedAt: new Date().toISOString(),
+      };
+      await ensureDataDir();
+      await ngWriteJsonAtomicStreaming(AYLA_DB_PATH, nextDb, "AylaMed atomic database mutation");
+      aylaDbCache = nextDb;
+      aylaDbReadInFlight = null;
+      return result;
+    });
   aylaWriteQueue = task;
   return task;
 }
@@ -55204,6 +55789,232 @@ function aylaUserActiveEnrollments(db, userId) {
   return aylaValues(db, "aylaEnrollments").filter((enrollment) => String(enrollment.user_id || enrollment.ayla_user_id) === String(userId) && aylaEnrollmentActive(enrollment));
 }
 
+function aylaQbankExamTrack(student = {}, requested = "") {
+  const examTrack = normalizeAylaQbankExamTrack(
+    requested || student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam,
+  );
+  if (!examTrack) {
+    const error = new Error("A supported AylaMed QBank exam track is required");
+    error.statusCode = 409;
+    throw error;
+  }
+  return examTrack;
+}
+
+function aylaRequireQbankAccess(db, user, student, requestedExamTrack = "") {
+  const examTrack = aylaQbankExamTrack(student, requestedExamTrack);
+  return requireAylaQbankEntitlement({
+    enrollments: aylaValues(db, "aylaEnrollments"),
+    plansById: db.aylaPlans || {},
+    userId: user.id,
+    student,
+    requestedExamTrack: examTrack,
+    feature: "qbank",
+  });
+}
+
+function aylaRevalidateQbankContext(db, userId, studentId, examTrack) {
+  const rawUser = aylaGetItem(db, "aylaUsers", userId);
+  const student = aylaGetItem(db, "aylaStudents", studentId);
+  if (!rawUser || ["disabled", "deleted"].includes(String(rawUser.status || "").toLowerCase())) {
+    const error = new Error("AylaMed user is no longer active");
+    error.statusCode = 401;
+    throw error;
+  }
+  if (!student || String(student.ayla_user_id || student.user_id || "") !== String(rawUser.id)) {
+    const error = new Error("AylaMed student profile not found");
+    error.statusCode = 404;
+    throw error;
+  }
+  const user = aylaSanitizeUser(rawUser);
+  const entitlement = aylaRequireQbankAccess(db, user, student, examTrack);
+  return { user, rawUser, student, entitlement };
+}
+
+function aylaOwnedQbankSession(db, user, student, sessionId) {
+  const session = aylaGetItem(db, "aylaQbankSessions", sessionId);
+  if (!session || String(session.userId || session.user_id || "") !== String(user.id) || String(session.studentId || session.student_id || "") !== String(student.id)) {
+    const error = new Error("AylaMed QBank session not found");
+    error.statusCode = 404;
+    throw error;
+  }
+  return session;
+}
+
+function aylaQbankEvent(db, session, type, payload = {}) {
+  const event = {
+    id: aylaId("AYLA-QBE"),
+    sessionId: session.id,
+    studentId: session.studentId,
+    userId: session.userId,
+    examTrack: session.examTrack,
+    type,
+    payload,
+    createdAt: aylaNow(),
+  };
+  aylaSetItem(db, "aylaQbankEvents", event);
+  return event;
+}
+
+function aylaQbankRoadmapAssignmentEligible(assignment = {}) {
+  const type = String(assignment.category || assignment.type || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  return ["qbank", "qbank_block", "questions", "internal_mcq", "internal_mcqs", "external_question", "external_questions"].includes(type);
+}
+
+function aylaQbankQuestionState(db, session, contentQuestionId) {
+  const owned = (collection) => aylaValues(db, collection)
+    .filter((row) => String(row.studentId || "") === String(session.studentId))
+    .filter((row) => String(row.examTrack || "") === String(session.examTrack))
+    .filter((row) => String(row.contentQuestionId || row.sourceId || "") === String(contentQuestionId));
+  return {
+    bookmark: owned("aylaQbankBookmarks").sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")))[0] || null,
+    note: owned("aylaQbankNotes").sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")))[0] || null,
+    revision: owned("aylaRevisionQueue")
+      .filter((row) => String(row.sourceType || "") === "qbank_question")
+      .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")))[0] || null,
+  };
+}
+
+function aylaUpsertQbankRevision(db, session, mapping, question = {}, reason = "student_added") {
+  const existing = aylaValues(db, "aylaRevisionQueue")
+    .filter((row) => String(row.studentId || "") === String(session.studentId))
+    .filter((row) => String(row.examTrack || "") === String(session.examTrack))
+    .filter((row) => String(row.sourceType || "") === "qbank_question")
+    .filter((row) => String(row.sourceId || row.contentQuestionId || "") === String(mapping.contentQuestionId))
+    .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")))[0];
+  const reasons = [...new Set([...(Array.isArray(existing?.reasons) ? existing.reasons : []), String(reason || "student_added")])];
+  const revision = {
+    ...(existing || {}),
+    id: existing?.id || aylaId("AYLA-REV"),
+    studentId: session.studentId,
+    userId: session.userId,
+    examTrack: session.examTrack,
+    sourceType: "qbank_question",
+    sourceId: mapping.contentQuestionId,
+    contentQuestionId: mapping.contentQuestionId,
+    sessionId: session.id,
+    questionRef: mapping.ref,
+    system: question.system_key || question.taxonomy?.system_key || existing?.system || "",
+    topic: question.topic_key || question.taxonomy?.topic_key || existing?.topic || "",
+    reasons,
+    status: "due",
+    dueDate: aylaDateOnly(),
+    removedAt: null,
+    completedAt: null,
+    createdAt: existing?.createdAt || aylaNow(),
+    updatedAt: aylaNow(),
+  };
+  aylaSetItem(db, "aylaRevisionQueue", revision);
+  return revision;
+}
+
+function aylaRecordQbankAttempt(db, session, mapping, answer, question = {}) {
+  const existing = aylaValues(db, "aylaQuestionAttempts").find((row) =>
+    String(row.sessionId || "") === String(session.id)
+    && String(row.questionRef || "") === String(mapping.ref)
+    && String(row.sourceType || "") === "content_registry_qbank");
+  if (existing) return { attempt: existing, created: false };
+  const attempt = {
+    id: aylaId("AYLA-QA"),
+    studentId: session.studentId,
+    userId: session.userId,
+    examTrack: session.examTrack,
+    sessionId: session.id,
+    questionRef: mapping.ref,
+    resourceId: mapping.contentQuestionId,
+    contentQuestionId: mapping.contentQuestionId,
+    sourceType: "content_registry_qbank",
+    selectedAnswerId: answer.selectedAnswerId,
+    outcome: answer.correct ? "correct" : "incorrect",
+    serverVerified: true,
+    system: question.system_key || question.taxonomy?.system_key || "",
+    topic: question.topic_key || question.taxonomy?.topic_key || "",
+    createdAt: answer.answeredAt || aylaNow(),
+    updatedAt: answer.answeredAt || aylaNow(),
+  };
+  aylaSetItem(db, "aylaQuestionAttempts", attempt);
+  if (!answer.correct) aylaUpsertQbankRevision(db, session, mapping, question, "incorrect_answer");
+  return { attempt, created: true };
+}
+
+async function aylaPlayableQbankQuestion(db, session, mapping, rawQuestion = null) {
+  let raw = rawQuestion;
+  if (!raw) {
+    [raw] = await getContentQbankQuestions({
+      questionIds: [mapping.contentQuestionId],
+      examTrack: session.examTrack,
+      destination: "aylamed_qbank",
+    });
+  }
+  if (!raw) {
+    return {
+      question_ref: mapping.ref,
+      unavailable: true,
+      marked: Boolean(session.marks?.[mapping.ref]),
+      answered: Boolean(session.answers?.[mapping.ref]),
+      message: "This question is no longer available for delivery.",
+    };
+  }
+  const playable = await ngRegistryQuestionWithPlayableMedia(raw);
+  const state = aylaQbankQuestionState(db, session, mapping.contentQuestionId);
+  return sanitizeAylaQbankQuestion(playable, {
+    session,
+    questionRef: mapping.ref,
+    bookmark: state.bookmark,
+    note: state.note,
+    revision: state.revision,
+  });
+}
+
+function aylaQbankSavedItemSession(db, item) {
+  const sessions = aylaValues(db, "aylaQbankSessions")
+    .filter((row) => String(row.studentId || "") === String(item.studentId || ""))
+    .filter((row) => String(row.examTrack || "") === String(item.examTrack || ""))
+    .filter((row) => (row.questions || []).some((mapping) => String(mapping.contentQuestionId) === String(item.contentQuestionId || item.sourceId || "")))
+    .sort((a, b) => {
+      if (String(a.id) === String(item.sessionId || "")) return -1;
+      if (String(b.id) === String(item.sessionId || "")) return 1;
+      return String(b.submittedAt || b.updatedAt || "").localeCompare(String(a.submittedAt || a.updatedAt || ""));
+    });
+  const source = sessions[0] || null;
+  if (source) {
+    return {
+      session: source,
+      mapping: source.questions.find((row) => String(row.contentQuestionId) === String(item.contentQuestionId || item.sourceId || "")),
+    };
+  }
+  const mapping = { ref: item.questionRef || crypto.randomUUID(), contentQuestionId: item.contentQuestionId || item.sourceId };
+  return {
+    session: {
+      id: item.sessionId || "saved-qbank-item",
+      userId: item.userId,
+      studentId: item.studentId,
+      examTrack: item.examTrack,
+      mode: "test",
+      status: "in_progress",
+      questions: [mapping],
+      answers: {},
+      marks: {},
+    },
+    mapping,
+  };
+}
+
+async function aylaPlayableQbankSession(db, session) {
+  const mappings = Array.isArray(session.questions) ? session.questions : [];
+  const content = await getContentQbankQuestions({
+    questionIds: mappings.map((row) => row.contentQuestionId),
+    examTrack: session.examTrack,
+    destination: "aylamed_qbank",
+  });
+  const byId = new Map(content.map((row) => [String(row.id), row]));
+  const questions = [];
+  for (const mapping of mappings) {
+    questions.push(await aylaPlayableQbankQuestion(db, session, mapping, byId.get(String(mapping.contentQuestionId)) || null));
+  }
+  return { session: sanitizeAylaQbankSession(session), questions };
+}
+
 function aylaOwnerId(row) {
   return String(row?.studentId || row?.student_id || row?.studentID || row?.diagnosticId || row?.diagnosticSubmissionId || row?.sourceDiagnosticId || row?.ownerId || row?.ayla_user_id || row?.user_id || "");
 }
@@ -56072,6 +56883,11 @@ app.get("/api/ayla/health", async (req, res) => {
         notebook_search: true,
         notebook_flashcard_generation: true,
         notebook_archive_and_soft_delete: true,
+        registry_backed_qbank_catalog: true,
+        qbank_tutor_and_test_modes: true,
+        qbank_server_verified_scoring: true,
+        qbank_bookmarks_notes_and_revision: true,
+        qbank_exam_entitlement_isolation: true,
         scanned_pdf_ocr_pipeline: true,
         scanned_pdf_ocr_provider_configured: Boolean(process.env.AYLA_OCR_ENDPOINT),
         lms_crm_operational_writes: false,
@@ -56096,6 +56912,15 @@ app.get("/api/ayla/routes", (req, res) => {
       "POST /api/ayla/auth/forgot-password",
       "POST /api/ayla/auth/reset-password",
       "GET /api/ayla/auth/me",
+      "GET /api/ayla/qbank/catalog",
+      "POST /api/ayla/qbank/sessions",
+      "GET /api/ayla/qbank/sessions/:sessionId",
+      "POST /api/ayla/qbank/sessions/:sessionId/answers",
+      "POST /api/ayla/qbank/sessions/:sessionId/submit",
+      "GET /api/ayla/qbank/history",
+      "GET /api/ayla/qbank/bookmarks",
+      "GET /api/ayla/qbank/notes",
+      "GET /api/ayla/qbank/revision",
       "GET|PUT /api/ayla/profile",
       "GET|POST /api/ayla/students/:studentId/notebooks",
       "PUT /api/ayla/students/:studentId/notebooks/:id",

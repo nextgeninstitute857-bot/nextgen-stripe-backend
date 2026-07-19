@@ -32,8 +32,9 @@ test('taxonomy mappings are exam and provider namespace scoped and reused on fut
   assert.match(server, /content-registry\/taxonomy-mappings/);
 });
 
-test('student catalog requires AylaMed ownership and only exposes approved enabled QBank content', () => {
+test('student catalog requires ownership, exam entitlement, and approved enabled QBank content', () => {
   assert.match(server, /aylaV189RequireStudent\(req/);
+  assert.match(server, /aylaRequireQbankAccess\(auth\.db, auth\.user, auth\.student/);
   assert.match(postgres, /q\.status='approved'/);
   assert.match(postgres, /c\.status='approved'/);
   assert.match(postgres, /d\.destination=\$2 AND d\.enabled=TRUE/);
