@@ -29,16 +29,28 @@ import {
   getContentQbankCatalog,
   getContentQbankQuestions,
   getContentRegistryFlashcardQuestion,
+  getContentTaxonomyCoverage,
   importContentQuestionBatch,
   listContentQbankQuestions,
   listContentRegistryFlashcardQuestions,
   listContentCollections,
+  listContentTaxonomyAuditEvents,
+  listContentTaxonomyReviewQueue,
+  removeContentQuestionTaxonomyOverride,
+  reviewContentTaxonomyMapping,
   saveContentMediaMatches,
   saveContentVideoMatch,
   setContentImportJobStatus,
   updateContentCollectionControls,
+  upsertContentQuestionTaxonomyOverride,
   upsertContentTaxonomyMapping,
 } from "./lib/content-registry-postgres.js";
+import {
+  CONTENT_TAXONOMY_EXAM_TRACKS,
+  normalizeContentTaxonomyExamTrack,
+  normalizeContentTaxonomyReviewAction,
+  normalizeContentTaxonomyReviewState,
+} from "./lib/content-taxonomy-control.js";
 import {
   AYLA_QBANK_STATE_COLLECTIONS,
   canRevealAylaQbankAnswer,
@@ -106,7 +118,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v208-aylamed-multi-exam-shell";
+const NEXTGEN_BACKEND_BUILD = "v209-content-taxonomy-governance";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -33071,12 +33083,65 @@ app.put("/admin/crm/ai-training/content-registry/collections/:collectionId/contr
   }
 });
 
+app.get("/admin/crm/ai-training/content-registry/taxonomy/review-queue", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const requestedExamTrack = String(req.query.exam_track || req.query.examTrack || "").trim();
+    const examTrack = requestedExamTrack ? normalizeContentTaxonomyExamTrack(requestedExamTrack) : "";
+    if (requestedExamTrack && !examTrack) return res.status(400).json({ success: false, error: "Unsupported exam_track" });
+    const requestedState = String(req.query.state || req.query.review_state || "").trim();
+    const state = requestedState ? normalizeContentTaxonomyReviewState(requestedState) : "";
+    if (requestedState && !state) return res.status(400).json({ success: false, error: "Unsupported taxonomy review state" });
+    const sourceNamespace = String(req.query.source_namespace || req.query.sourceNamespace || "").trim();
+    const queue = await listContentTaxonomyReviewQueue({
+      examTrack,
+      sourceNamespace: sourceNamespace ? contentSlug(sourceNamespace) : "",
+      state,
+      limit: req.query.limit,
+      offset: req.query.offset,
+    });
+    return res.json({
+      success: true,
+      count: queue.length,
+      filters: { exam_track: examTrack || null, source_namespace: sourceNamespace ? contentSlug(sourceNamespace) : null, state: state || null },
+      queue,
+      review_states: ["unmapped", "needs_review", "approved", "rejected", "disabled"],
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/ai-training/content-registry/taxonomy/coverage", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const requestedExamTrack = String(req.query.exam_track || req.query.examTrack || "").trim();
+    const examTrack = requestedExamTrack ? normalizeContentTaxonomyExamTrack(requestedExamTrack) : null;
+    if (requestedExamTrack && !examTrack) return res.status(400).json({ success: false, error: "Unsupported exam_track" });
+    const report = await getContentTaxonomyCoverage({
+      examTracks: examTrack ? [examTrack] : CONTENT_TAXONOMY_EXAM_TRACKS.map((exam) => exam.id),
+    });
+    return res.json({
+      success: true,
+      ...report,
+      validation_contract: {
+        question_complete_when: ["system_key", "topic_key"],
+        provider_pair_ready_when: "active mapping with approved review status",
+        zero_content_exam_state: "no_content",
+        approval_state_changed: false,
+      },
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
 app.post("/admin/crm/ai-training/content-registry/taxonomy-mappings", async (req, res) => {
   try {
     const { user } = await requireCrmAdmin(req);
-    const examTrack = normalizeExamTrack(req.body.exam_track || req.body.examTrack);
+    const examTrack = normalizeContentTaxonomyExamTrack(req.body.exam_track || req.body.examTrack);
     const sourceNamespace = contentSlug(req.body.source_namespace || req.body.sourceNamespace);
-    if (examTrack === "unknown" || sourceNamespace === "unknown") {
+    if (!examTrack || sourceNamespace === "unknown") {
       return res.status(400).json({ success: false, error: "exam_track and source_namespace are required" });
     }
     const mapping = await upsertContentTaxonomyMapping({
@@ -33085,11 +33150,131 @@ app.post("/admin/crm/ai-training/content-registry/taxonomy-mappings", async (req
       sourceSubjectId: req.body.source_subject_id ?? req.body.sourceSubjectId ?? "",
       taxonomy: req.body.taxonomy || req.body,
       actorId: String(user.id),
+      reviewStatus: "approved",
+      origin: "manual_override",
+      confidence: req.body.confidence,
+      reviewNotes: req.body.review_notes || req.body.reviewNotes || req.body.note || "",
     });
     return res.json({
       success: true, mapping,
-      message: "Taxonomy mapping saved and applied to matching questions. Future imports can reuse this provider mapping.",
+      message: "Taxonomy override approved, audited, and applied to matching questions without replacing question-level exceptions. Future imports can reuse it.",
     });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-training/content-registry/taxonomy-mappings/suggest", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const examTrack = normalizeContentTaxonomyExamTrack(req.body.exam_track || req.body.examTrack);
+    const sourceNamespace = contentSlug(req.body.source_namespace || req.body.sourceNamespace);
+    if (!examTrack || sourceNamespace === "unknown") {
+      return res.status(400).json({ success: false, error: "exam_track and source_namespace are required" });
+    }
+    const mapping = await upsertContentTaxonomyMapping({
+      examTrack,
+      sourceNamespace,
+      sourceSystemId: req.body.source_system_id ?? req.body.sourceSystemId ?? "",
+      sourceSubjectId: req.body.source_subject_id ?? req.body.sourceSubjectId ?? "",
+      taxonomy: req.body.taxonomy || req.body,
+      actorId: String(user.id),
+      reviewStatus: "pending",
+      origin: "automatic_suggestion",
+      confidence: req.body.confidence,
+      reviewNotes: req.body.reason || req.body.review_notes || req.body.reviewNotes || "",
+    });
+    return res.status(202).json({
+      success: true,
+      mapping,
+      applied: false,
+      message: mapping.suggestion_skipped
+        ? "An approved mapping already exists, so the automatic suggestion was audited without replacing it."
+        : "Automatic taxonomy suggestion queued for human review. It will not affect questions until approved.",
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-training/content-registry/taxonomy-mappings/:mappingId/review", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const action = normalizeContentTaxonomyReviewAction(req.body.action);
+    if (!action) return res.status(400).json({ success: false, error: "action must be approve, reject, disable, or reopen" });
+    const mapping = await reviewContentTaxonomyMapping({
+      mappingId: req.params.mappingId,
+      action,
+      taxonomy: req.body.taxonomy || null,
+      note: req.body.note || req.body.review_notes || req.body.reviewNotes || "",
+      confidence: req.body.confidence,
+      actorId: String(user.id),
+    });
+    return res.json({
+      success: true,
+      action,
+      mapping,
+      message: action === "approve"
+        ? "Taxonomy mapping approved and applied to matching questions. Active question overrides were preserved."
+        : `Taxonomy mapping ${action} recorded. Existing content and history were not deleted.`,
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/ai-training/content-registry/taxonomy-mappings/:mappingId/history", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const events = await listContentTaxonomyAuditEvents({ mappingId: req.params.mappingId, limit: req.query.limit });
+    return res.json({ success: true, mapping_id: req.params.mappingId, count: events.length, events });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/ai-training/content-registry/questions/:questionId/taxonomy-override", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const override = await upsertContentQuestionTaxonomyOverride({
+      questionId: req.params.questionId,
+      taxonomy: req.body.taxonomy || req.body,
+      reason: req.body.reason || req.body.note || "",
+      actorId: String(user.id),
+    });
+    return res.json({
+      success: true,
+      override,
+      message: "Question taxonomy override saved and audited. Provider mapping updates cannot overwrite this exception.",
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete("/admin/crm/ai-training/content-registry/questions/:questionId/taxonomy-override", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const override = await removeContentQuestionTaxonomyOverride({
+      questionId: req.params.questionId,
+      reason: req.body?.reason || req.body?.note || "",
+      actorId: String(user.id),
+    });
+    return res.json({
+      success: true,
+      override,
+      message: "Question override disabled and audited. A unique approved provider mapping was restored when one existed.",
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/ai-training/content-registry/questions/:questionId/taxonomy-history", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const events = await listContentTaxonomyAuditEvents({ questionId: req.params.questionId, limit: req.query.limit });
+    return res.json({ success: true, question_id: req.params.questionId, count: events.length, events });
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -57218,6 +57403,9 @@ app.get("/api/ayla/health", async (req, res) => {
         paid_entitlement_overrides_demo_per_exam: true,
         entitlement_aware_feature_navigation: true,
         legacy_enrollment_single_dashboard_binding: true,
+        content_taxonomy_review_queue: true,
+        content_taxonomy_question_overrides: true,
+        content_taxonomy_all_exam_coverage: true,
         scanned_pdf_ocr_pipeline: true,
         scanned_pdf_ocr_provider_configured: Boolean(process.env.AYLA_OCR_ENDPOINT),
         lms_crm_operational_writes: false,
