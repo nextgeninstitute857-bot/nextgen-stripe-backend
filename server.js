@@ -5,6 +5,10 @@ import {
   validateFlashcardContent,
 } from "./lib/flashcard-engine.js";
 import {
+  flashcardMatchesCurrentSystem,
+  flashcardPriorityRank,
+} from "./lib/flashcard-queue-policy.js";
+import {
   flashcardPostgresStatus,
   shadowWriteFlashcardReview,
 } from "./lib/flashcard-postgres.js";
@@ -35,6 +39,7 @@ import {
 } from "./lib/content-registry-postgres.js";
 import {
   contentRegistryFlashcardId,
+  contentRegistryQuestionId,
   normalizeCourseExamTrack,
   registryQuestionToFlashcard,
 } from "./lib/content-registry-flashcards.js";
@@ -50590,7 +50595,7 @@ app.get("/student/flashcards/registry", async (req, res) => {
   }
 });
 
-app.post("/student/flashcards/registry/:questionId/review", async (req, res) => {
+async function ngReviewContentRegistryFlashcard(req, res, questionId = req.params.questionId) {
   try {
     const { user } = await getAuthenticatedUser(req);
     const db = await readLiveDb();
@@ -50602,7 +50607,7 @@ app.post("/student/flashcards/registry/:questionId/review", async (req, res) => 
     if (examTrack === "unknown") {
       return res.status(409).json({ success: false, error: "This course does not have a configured exam track" });
     }
-    const question = await getContentRegistryFlashcardQuestion({ questionId: req.params.questionId, examTrack });
+    const question = await getContentRegistryFlashcardQuestion({ questionId, examTrack });
     if (!question) return res.status(404).json({ success: false, error: "Approved QBank flashcard not found for this exam" });
 
     const flashcardId = contentRegistryFlashcardId(question.id);
@@ -50652,10 +50657,14 @@ app.post("/student/flashcards/registry/:questionId/review", async (req, res) => 
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
-});
+}
+
+app.post("/student/flashcards/registry/:questionId/review", ngReviewContentRegistryFlashcard);
 
 app.post("/student/flashcards/:id/review", async (req, res) => {
   try {
+    const registryQuestionId = contentRegistryQuestionId(req.params.id);
+    if (registryQuestionId) return ngReviewContentRegistryFlashcard(req, res, registryQuestionId);
     const { user } = await getAuthenticatedUser(req);
     const db = await readLiveDb();
     const card = db.flashcards?.[String(req.params.id)] || null;
@@ -51221,11 +51230,11 @@ function ngPickStudentDailyFlashcardQueue(cards = [], { limit = 28 } = {}) {
     }
   };
 
-  // Daily queue is intentionally small. Do not dump the entire published bank on students.
+  // Core live-LMS learning always wins. The published/QBank bank only fills
+  // unused slots after weak-area, session-note, and current class-system cards.
   take("weak_area", 10);
-  take("tutor_notes", 7);
-  take("class_first_aid", 8);
-  take("published_bank", 3);
+  take("tutor_notes", 8);
+  take("class_first_aid", 10);
 
   for (const card of cards) {
     if (picked.length >= max) break;
@@ -51237,7 +51246,7 @@ function ngPickStudentDailyFlashcardQueue(cards = [], { limit = 28 } = {}) {
   return picked;
 }
 
-function ngStableStudentDailyFlashcardQueue(db, { courseId, userId, date = todayKey(), cards = [], limit = 28 } = {}) {
+function ngStableStudentDailyFlashcardQueue(db, { courseId, userId, date = todayKey(), cards = [], limit = 28, currentSystem = "" } = {}) {
   db.adaptiveFlashcardQueues = db.adaptiveFlashcardQueues || {};
   const max = Math.max(10, Math.min(40, Number(limit || 28)));
   const key = `${courseId}:${userId}:${date}`;
@@ -51251,9 +51260,8 @@ function ngStableStudentDailyFlashcardQueue(db, { courseId, userId, date = today
 
   const prioritized = [...cards].sort((a, b) => {
     if (Boolean(a.reviewed) !== Boolean(b.reviewed)) return Number(Boolean(a.reviewed)) - Number(Boolean(b.reviewed));
-    const order = { weak_area: 0, tutor_notes: 1, class_first_aid: 2, published_bank: 3 };
-    const bucketDiff = (order[a.bucket] ?? 9) - (order[b.bucket] ?? 9);
-    if (bucketDiff) return bucketDiff;
+    const priorityDiff = flashcardPriorityRank(a, currentSystem) - flashcardPriorityRank(b, currentSystem);
+    if (priorityDiff) return priorityDiff;
     if (a.bucket === "weak_area") return String(b.created_at || "").localeCompare(String(a.created_at || ""));
     return Number(a.day_number || 9999) - Number(b.day_number || 9999) || String(b.created_at || "").localeCompare(String(a.created_at || ""));
   });
@@ -51263,20 +51271,23 @@ function ngStableStudentDailyFlashcardQueue(db, { courseId, userId, date = today
     selectedIds.clear();
     selected.forEach((card) => selectedIds.add(String(card.id)));
   } else {
-    // Inject newly generated, unreviewed weak-area cards immediately. Prefer
-    // replacing reviewed/non-weak cards so today's saved progress stays visible.
-    const newWeakCards = prioritized.filter((card) => card.bucket === "weak_area" && !card.reviewed && !selectedIds.has(String(card.id)));
-    for (const card of newWeakCards) {
+    // Inject newly generated weak-area and current-system session/class cards.
+    // Prefer replacing published-bank, reviewed, or non-current-system cards.
+    const urgentCards = prioritized.filter((card) => !card.reviewed && !selectedIds.has(String(card.id)) && (
+      card.bucket === "weak_area" ||
+      (["tutor_notes", "class_first_aid"].includes(card.bucket) && flashcardMatchesCurrentSystem(card, currentSystem))
+    ));
+    for (const card of urgentCards) {
       if (selected.length >= max) {
         let replaceIndex = -1;
         for (let index = selected.length - 1; index >= 0; index -= 1) {
-          if (selected[index].reviewed || selected[index].bucket !== "weak_area") {
+          if (selected[index].bucket === "published_bank" || selected[index].reviewed || !flashcardMatchesCurrentSystem(selected[index], currentSystem)) {
             replaceIndex = index;
             break;
           }
         }
-        // If today's queue is entirely unreviewed weak cards, replace its
-        // oldest tail card so the newest assessment-generated card still shows.
+        // If the queue is entirely urgent, replace its tail with the newest
+        // weak/current-system item.
         if (replaceIndex < 0) replaceIndex = selected.length - 1;
         if (replaceIndex < 0) break;
         selectedIds.delete(String(selected[replaceIndex].id));
@@ -51537,11 +51548,23 @@ app.get("/student/flashcards/review", async (req, res) => {
       return true;
     }).map((card) => ngSanitizeFlashcardForStudent(card, reviewedSet));
 
+    // Approved registry questions are a supporting premium bank. They are
+    // deliberately appended as published_bank cards so the queue policy can
+    // only use them after weak-area, live-session, and current-system cards.
+    const examTrack = ngCourseExamTrack(db, user, courseId);
+    if (examTrack !== "unknown" && flashcardCapabilities("lms").qbankSource) {
+      const registryQuestions = await listContentRegistryFlashcardQuestions({ examTrack, limit: 40, offset: 0 });
+      const playableRegistryQuestions = await Promise.all(registryQuestions.map(ngRegistryQuestionWithPlayableMedia));
+      cards.push(...playableRegistryQuestions.map((question) => registryQuestionToFlashcard(question, {
+        courseId,
+        reviewed: reviewedSet.has(contentRegistryFlashcardId(question.id)),
+      })));
+    }
+
     cards.sort((a, b) => {
-      const bucketOrder = { weak_area: 0, tutor_notes: 1, class_first_aid: 2, published_bank: 3 };
-      const ao = bucketOrder[a.bucket] ?? 9;
-      const bo = bucketOrder[b.bucket] ?? 9;
-      if (ao !== bo) return ao - bo;
+      const currentSystem = String(todayDay?.system || todayDay?.current_system || todayDay?.topic || "");
+      const priorityDiff = flashcardPriorityRank(a, currentSystem) - flashcardPriorityRank(b, currentSystem);
+      if (priorityDiff) return priorityDiff;
       if (a.bucket === "weak_area" && Boolean(a.reviewed) === Boolean(b.reviewed)) {
         return String(b.created_at || "").localeCompare(String(a.created_at || ""));
       }
@@ -51557,6 +51580,7 @@ app.get("/student/flashcards/review", async (req, res) => {
       date: today,
       cards: availableCards,
       limit: queueLimit,
+      currentSystem: String(todayDay?.system || todayDay?.current_system || todayDay?.topic || ""),
     });
     const queueCards = stableQueue.cards;
     if (flashcardSyncChanged || stableQueue.changed) await writeLiveDb(db);
