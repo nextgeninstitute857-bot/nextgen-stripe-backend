@@ -23,7 +23,9 @@ import {
   getContentVideoImportJob,
   getContentImportJob,
   getContentQbankCatalog,
+  getContentRegistryFlashcardQuestion,
   importContentQuestionBatch,
+  listContentRegistryFlashcardQuestions,
   listContentCollections,
   saveContentMediaMatches,
   saveContentVideoMatch,
@@ -31,6 +33,11 @@ import {
   updateContentCollectionControls,
   upsertContentTaxonomyMapping,
 } from "./lib/content-registry-postgres.js";
+import {
+  contentRegistryFlashcardId,
+  normalizeCourseExamTrack,
+  registryQuestionToFlashcard,
+} from "./lib/content-registry-flashcards.js";
 import {
   cleanupContentImportFiles,
   extractSafeZipInventory,
@@ -40,6 +47,7 @@ import {
 } from "./lib/content-zip-import.js";
 import {
   contentMediaStatus,
+  createPrivateMediaUrl,
   deleteR2Object,
   matchMediaReferences,
   uploadMediaZipToR2,
@@ -65,7 +73,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v205-content-registry-control-plane";
+const NEXTGEN_BACKEND_BUILD = "v206-registry-backed-lms-flashcards";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -32924,6 +32932,39 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload }) {
   }
 }
 
+function ngCourseExamTrack(db, user, courseId) {
+  const cleanCourseId = String(courseId || "").trim();
+  const course = db.courses?.[cleanCourseId] || {};
+  const access = ngResolveCourseAccessRecord(db, user, cleanCourseId);
+  const enrollment = access.enrollment || {};
+  const candidates = [
+    course.exam_track, course.examTrack, course.exam_type, course.exam,
+    course.program_track, course.slug, course.title, course.name,
+    enrollment.exam_track, enrollment.examTrack, enrollment.exam_type, enrollment.exam,
+  ];
+  return normalizeCourseExamTrack(candidates);
+}
+
+async function ngRegistryQuestionWithPlayableMedia(question = {}) {
+  const media = await Promise.all((Array.isArray(question.media) ? question.media : []).map(async (item) => ({
+    id: item.id,
+    ref: item.ref,
+    placement: item.placement || "explanation",
+    content_type: item.content_type || "image/*",
+    url: await createPrivateMediaUrl(item.object_key, 300),
+    expires_in_seconds: 300,
+  })));
+  const videos = (Array.isArray(question.videos) ? question.videos : []).map((item) => ({
+    id: item.id,
+    ref: item.ref,
+    placement: item.placement || "explanation",
+    provider: "vimeo",
+    provider_id: item.provider_id,
+    embed_url: item.embed_url,
+  }));
+  return { ...question, media, videos };
+}
+
 app.post("/admin/crm/ai-training/content-imports/:jobId/videos/import-draft", async (req, res) => {
   let upload;
   try {
@@ -50500,6 +50541,117 @@ app.post("/student/flashcards/generate-weak-area", async (req, res) => {
     await writeLiveDb(db);
     res.json({ success: true, count: created.length, flashcards: created, warnings: result.warnings || [], ai_model: result.model, training_context_used: Boolean(trainingText), leaderboard });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.get("/student/flashcards/registry", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const courseId = String(req.query.course_id || req.query.courseId || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    const access = ngCourseFeatureAccess(db, user, { courseId, featureKey: "flashcards" });
+    if (!access.allowed) return ngBlockLockedFeature(res, "flashcards", access.reason);
+    const examTrack = ngCourseExamTrack(db, user, courseId);
+    if (examTrack === "unknown") {
+      return res.status(409).json({ success: false, error: "This course does not have a configured exam track" });
+    }
+    const questions = await listContentRegistryFlashcardQuestions({
+      examTrack,
+      systemKey: String(req.query.system || req.query.system_key || "").trim(),
+      subsystemKey: String(req.query.subsystem || req.query.subsystem_key || "").trim(),
+      topicKey: String(req.query.topic || req.query.topic_key || "").trim(),
+      limit: req.query.limit,
+      offset: req.query.offset,
+    });
+    const progressByCard = new Map(Object.values(db.flashcardProgress || {})
+      .filter((item) => String(item.course_id) === courseId && String(item.user_id) === String(user.id))
+      .map((item) => [String(item.flashcard_id), item]));
+    const playableQuestions = await Promise.all(questions.map(ngRegistryQuestionWithPlayableMedia));
+    const flashcards = playableQuestions.map((question) => {
+      const id = contentRegistryFlashcardId(question.id);
+      const progress = progressByCard.get(id) || null;
+      return {
+        ...registryQuestionToFlashcard(question, { courseId, reviewed: Boolean(progress?.reviewed) }),
+        progress,
+      };
+    });
+    return res.json({
+      success: true,
+      course_id: courseId,
+      exam_track: examTrack,
+      source: "approved_content_registry",
+      read_only: true,
+      answer_mode: "reveal_only",
+      count: flashcards.length,
+      flashcards,
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/student/flashcards/registry/:questionId/review", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const courseId = String(req.body.course_id || req.body.courseId || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    const access = ngCourseFeatureAccess(db, user, { courseId, featureKey: "flashcards" });
+    if (!access.allowed) return ngBlockLockedFeature(res, "flashcards", access.reason);
+    const examTrack = ngCourseExamTrack(db, user, courseId);
+    if (examTrack === "unknown") {
+      return res.status(409).json({ success: false, error: "This course does not have a configured exam track" });
+    }
+    const question = await getContentRegistryFlashcardQuestion({ questionId: req.params.questionId, examTrack });
+    if (!question) return res.status(404).json({ success: false, error: "Approved QBank flashcard not found for this exam" });
+
+    const flashcardId = contentRegistryFlashcardId(question.id);
+    db.flashcardProgress = db.flashcardProgress || {};
+    db.flashcardReviewEvents = db.flashcardReviewEvents || {};
+    const key = `${courseId}:${user.id}:${flashcardId}`;
+    const previousProgress = db.flashcardProgress[key] || {};
+    const schedule = scheduleFlashcardReview(previousProgress, req.body.rating || req.body.confidence || "good", new Date());
+    const reviewEventId = uuid();
+    db.flashcardReviewEvents[reviewEventId] = {
+      id: reviewEventId, app: "lms", course_id: courseId, user_id: user.id,
+      flashcard_id: flashcardId, registry_question_id: question.id,
+      rating: schedule.rating, confidence: req.body.confidence || null,
+      interval_days: schedule.interval_days, ease_factor: schedule.ease_factor,
+      lapses: schedule.lapses, reviewed_at: schedule.reviewed_at,
+      next_review_date: schedule.next_review_date, created_at: schedule.reviewed_at,
+      source: "content_registry_mcq", exam_track: examTrack,
+    };
+    db.flashcardProgress[key] = {
+      ...previousProgress, id: key, course_id: courseId, user_id: user.id,
+      flashcard_id: flashcardId, registry_question_id: question.id,
+      reviewed: true, rating: schedule.rating, confidence: req.body.confidence || null,
+      interval_days: schedule.interval_days, ease_factor: schedule.ease_factor,
+      lapses: schedule.lapses,
+      review_count: Math.max(0, Number(previousProgress.review_count || 0)) + 1,
+      last_review_event_id: reviewEventId, reviewed_at: schedule.reviewed_at,
+      next_review_date: schedule.next_review_date, due_date: schedule.next_review_date,
+      updated_at: schedule.reviewed_at, source: "content_registry_mcq", exam_track: examTrack,
+    };
+    await writeLiveDb(db);
+    await shadowWriteFlashcardReview({
+      event: {
+        ...db.flashcardReviewEvents[reviewEventId], scope_type: "course", scope_id: courseId,
+        source_event_id: `lms:${reviewEventId}`, flashcard_id: `lms:${flashcardId}`,
+        source_data: { registry_question_id: question.id, exam_track: examTrack },
+      },
+      state: {
+        app: "lms", scope_type: "course", scope_id: courseId, user_id: user.id,
+        flashcard_id: `lms:${flashcardId}`, rating: schedule.rating,
+        interval_days: schedule.interval_days, ease_factor: schedule.ease_factor,
+        lapses: schedule.lapses, review_count: db.flashcardProgress[key].review_count,
+        last_review_event_id: reviewEventId, reviewed_at: schedule.reviewed_at,
+        next_review_date: schedule.next_review_date,
+      },
+    }).catch((error) => console.warn("Registry flashcard shadow write failed; JSON remains authoritative:", error.message));
+    return res.json({ success: true, progress: db.flashcardProgress[key], review_event_id: reviewEventId });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
 });
 
 app.post("/student/flashcards/:id/review", async (req, res) => {
