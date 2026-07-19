@@ -185,8 +185,8 @@ test("stale general database writes cannot erase newer Content Hub progress", ()
 test("server and registry wire one entitlement-guarded Content Hub into the existing roadmap", () => {
   const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
   const postgres = fs.readFileSync(new URL("../lib/content-registry-postgres.js", import.meta.url), "utf8");
-  assert.match(server, /const NEXTGEN_BACKEND_BUILD = "v211-aylamed-library-reader"/);
-  assert.match(server, /const AYLA_BACKEND_BUILD = "aylamed-library-reader-v211"/);
+  assert.match(server, /const NEXTGEN_BACKEND_BUILD = "v212-aylamed-dynamic-notebook"/);
+  assert.match(server, /const AYLA_BACKEND_BUILD = "aylamed-dynamic-notebook-v212"/);
   assert.match(server, /app\.get\("\/api\/ayla\/students\/:studentId\/content-hub"/);
   assert.match(server, /app\.get\("\/api\/ayla\/students\/:studentId\/content-hub\/videos\/:videoId"/);
   assert.match(server, /app\.post\("\/api\/ayla\/students\/:studentId\/content-hub\/videos\/:videoId\/progress", aylaV210SaveVideoProgress\)/);
