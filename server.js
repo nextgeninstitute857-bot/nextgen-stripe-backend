@@ -31,6 +31,7 @@ import {
   getContentRegistryFlashcardQuestion,
   getContentTaxonomyCoverage,
   importContentQuestionBatch,
+  listContentHubVideos,
   listContentQbankQuestions,
   listContentRegistryFlashcardQuestions,
   listContentCollections,
@@ -78,6 +79,16 @@ import {
   resolveAylaStudentShell,
 } from "./lib/aylamed-student-shell.js";
 import {
+  aylaContentHubAssignmentProgress,
+  aylaContentHubVideoMatchesId,
+  buildAylaContentHubCatalog,
+  mergeAylaContentHubProgress,
+  mergeAylaContentHubProgressCollection,
+  normalizeAylaContentHubVideos,
+  sanitizeAylaContentHubVideo,
+  selectAylaRoadmapVideo,
+} from "./lib/aylamed-content-hub.js";
+import {
   contentRegistryFlashcardId,
   contentRegistryQuestionId,
   normalizeCourseExamTrack,
@@ -118,7 +129,8 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v209-content-taxonomy-governance";
+const NEXTGEN_BACKEND_BUILD = "v210-aylamed-content-hub";
+const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -32686,7 +32698,7 @@ app.post("/admin/assistant/actions/:id/execute", async (req, res) => {
 
 const CONTENT_IMPORT_DESTINATIONS = new Set([
   "aylamed_qbank", "lms_assessment", "baseline_diagnostic", "roadmap",
-  "marketing", "personal_assessment", "revision", "flashcards",
+  "content_hub", "marketing", "personal_assessment", "revision", "flashcards",
 ]);
 
 function ngParseContentDestinations(value) {
@@ -54270,7 +54282,7 @@ function ngStartBillingExpiryRunner() {
 // - Frontend can connect to these routes later with VITE_API_BASE_URL pointing to this backend.
 // -----------------------------------------------------------------------------
 
-const AYLA_BACKEND_BUILD = "aylamed-multi-exam-shell-v208";
+const AYLA_BACKEND_BUILD = "aylamed-content-hub-v210";
 
 const AYLA_EXAM_TRACKS = [
   "USMLE Step 1",
@@ -54586,6 +54598,12 @@ async function writeAylaDb(db) {
     const incomingQbankVersion = Math.max(0, Number(db.qbank_state_version || 0));
     const latestQbankVersion = Math.max(0, Number(aylaDbCache?.qbank_state_version || 0));
     const preparedDb = { ...db };
+    if (aylaDbCache) {
+      preparedDb.aylaVideoProgress = mergeAylaContentHubProgressCollection(
+        aylaDbCache.aylaVideoProgress,
+        db.aylaVideoProgress,
+      );
+    }
     if (aylaDbCache && latestQbankVersion > incomingQbankVersion) {
       for (const key of AYLA_QBANK_STATE_COLLECTIONS) {
         preparedDb[key] = mergeConcurrentAylaQbankCollection(aylaDbCache[key], db[key]);
@@ -57406,6 +57424,11 @@ app.get("/api/ayla/health", async (req, res) => {
         content_taxonomy_review_queue: true,
         content_taxonomy_question_overrides: true,
         content_taxonomy_all_exam_coverage: true,
+        content_taxonomy_build: CONTENT_TAXONOMY_BUILD,
+        embedded_content_hub_playlists: true,
+        registry_backed_content_hub: true,
+        verified_roadmap_video_assignment: true,
+        monotonic_video_progress: true,
         scanned_pdf_ocr_pipeline: true,
         scanned_pdf_ocr_provider_configured: Boolean(process.env.AYLA_OCR_ENDPOINT),
         lms_crm_operational_writes: false,
@@ -57452,6 +57475,9 @@ app.get("/api/ayla/routes", (req, res) => {
       "POST /api/ayla/students/:studentId/notebooks/:id/generate-flashcards",
       "GET /api/ayla/students/:studentId/daily-workspace",
       "POST /api/ayla/students/:studentId/daily-workspace/rebuild",
+      "GET /api/ayla/students/:studentId/content-hub",
+      "GET /api/ayla/students/:studentId/content-hub/videos/:videoId",
+      "POST /api/ayla/students/:studentId/content-hub/videos/:videoId/progress",
       "POST /api/ayla/students/:studentId/question-attempts",
       "POST /api/ayla/students/:studentId/assessment-attempts",
       "GET|POST|PATCH /api/ayla/study-partners/requests",
@@ -58344,6 +58370,7 @@ function aylaV189NormalizeResource(payload = {}, existing = {}) {
     id: existing.id || payload.id || aylaId("AYLA-RES"),
     type,
     title,
+    description: aylaV189CleanText(payload.description || existing.description || "").slice(0, 2000),
     provider: aylaV189CleanText(payload.provider || existing.provider || (type === "vimeo_video" ? "Vimeo" : "AylaMed")),
     examTrackId,
     examTrack: examDefinition?.label || "Unmapped",
@@ -58380,6 +58407,12 @@ function aylaV189NormalizeResource(payload = {}, existing = {}) {
     mappedVimeoUrl: aylaV189CleanText(payload.mappedVimeoUrl || payload.mapped_vimeo_url || mappedVideo.vimeoUrl || mappedVideo.vimeo_url || mappedVideo.url || existing.mappedVimeoUrl || existing.mapped_vimeo_url || ""),
     mappedVideoTimestamp: aylaV189CleanText(payload.mappedVideoTimestamp || payload.mapped_video_timestamp || mappedVideo.timestamp || existing.mappedVideoTimestamp || existing.mapped_video_timestamp || ""),
     mappingStatus: aylaV189CleanText(payload.mappingStatus || payload.mapping_status || existing.mappingStatus || existing.mapping_status || ""),
+    playlistKey: aylaV189CleanText(payload.playlistKey || payload.playlist_key || existing.playlistKey || existing.playlist_key || "").slice(0, 180),
+    playlistTitle: aylaV189CleanText(payload.playlistTitle || payload.playlist_title || existing.playlistTitle || existing.playlist_title || "").slice(0, 180),
+    durationSeconds: Math.max(0, Math.min(86400, aylaNumber(payload.durationSeconds ?? payload.duration_seconds ?? existing.durationSeconds ?? existing.duration_seconds, 0))),
+    sourceLabelVisible: payload.sourceLabelVisible !== undefined || payload.source_label_visible !== undefined
+      ? Boolean(payload.sourceLabelVisible ?? payload.source_label_visible)
+      : Boolean(existing.sourceLabelVisible ?? existing.source_label_visible),
     videoStartSeconds: Math.max(0, aylaNumber(payload.videoStartSeconds ?? payload.video_start_seconds ?? existing.videoStartSeconds ?? existing.video_start_seconds, 0)),
     videoEndSeconds: Math.max(0, aylaNumber(payload.videoEndSeconds ?? payload.video_end_seconds ?? existing.videoEndSeconds ?? existing.video_end_seconds, 0)),
     timestamp: aylaV189CleanText(payload.timestamp || existing.timestamp || ""),
@@ -58574,6 +58607,77 @@ function aylaV189RelevantResources(db, student, types = []) {
     .sort((a, b) => b.relevance - a.relevance || String(a.system || "").localeCompare(String(b.system || "")) || String(a.topic || "").localeCompare(String(b.topic || "")));
 }
 
+function aylaV210StudentFeatureAllowed(db, student, feature) {
+  const userId = student?.ayla_user_id || student?.aylaUserId || student?.user_id || student?.userId;
+  const rawUser = userId ? aylaGetItem(db, "aylaUsers", userId) : null;
+  if (!rawUser) return false;
+  try {
+    return aylaDashboardEntitlement(db, aylaSanitizeUser(rawUser), student, feature).allowed === true;
+  } catch {
+    return false;
+  }
+}
+
+function aylaV210VideoAssignments(db, student) {
+  return aylaValues(db, "aylaResourceAssignments")
+    .filter((row) => String(row.studentId || row.student_id || "") === String(student.id))
+    .filter((row) => String(row.category || row.type || "").toLowerCase() === "video")
+    .filter((row) => !["cancelled", "canceled", "skipped", "superseded"].includes(String(row.status || "").toLowerCase()));
+}
+
+function aylaV210AssignmentForVideo(assignments, video, assignmentId = "") {
+  return assignments.filter((assignment) => {
+    if (assignmentId && String(assignment.id) !== String(assignmentId)) return false;
+    const ids = [
+      ...aylaCleanArray(assignment.resourceIds || assignment.resource_ids),
+      ...(Array.isArray(assignment.items) ? assignment.items.map((item) => item?.resourceId || item?.resource_id).filter(Boolean) : []),
+    ];
+    return ids.some((id) => aylaContentHubVideoMatchesId(video, id));
+  }).sort((left, right) => String(right.updatedAt || right.updated_at || right.createdAt || right.created_at || "")
+    .localeCompare(String(left.updatedAt || left.updated_at || left.createdAt || left.created_at || "")))[0] || null;
+}
+
+async function aylaV210RegistryVideoInputs(student, destinations) {
+  if (!contentRegistryStatus().configured) return { rows: [], warning: null };
+  const examTrack = normalizeAylaRegistryExamTrack(
+    student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam,
+  );
+  if (!examTrack) return { rows: [], warning: "unsupported_student_exam_track" };
+  try {
+    const rows = await listContentHubVideos({ examTrack, destinations, limit: 500, offset: 0 });
+    return { rows, warning: null };
+  } catch (error) {
+    console.warn("AylaMed Content Hub registry read unavailable:", error.message);
+    return { rows: [], warning: "content_registry_temporarily_unavailable" };
+  }
+}
+
+async function aylaV210EligibleVideos(db, student, { forRoadmap = false } = {}) {
+  const examTrackId = aylaCanonicalExamTrack(
+    student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam,
+  );
+  if (!examTrackId) return { videos: [], assignments: [], warning: "unsupported_student_exam_track" };
+  const assignments = aylaV210VideoAssignments(db, student);
+  const legacy = aylaV189RelevantResources(db, student, ["vimeo_video", "video_transcript"])
+    .map((row) => ({
+      ...row,
+      sourceType: "legacy",
+      deliveryDestinations: ["aylamed_content_hub", "aylamed_roadmap"],
+    }));
+  const registry = await aylaV210RegistryVideoInputs(
+    student,
+    forRoadmap ? ["aylamed_roadmap"] : ["aylamed_content_hub", "aylamed_roadmap"],
+  );
+  let videos = normalizeAylaContentHubVideos([...legacy, ...registry.rows], { examTrack: examTrackId });
+  if (!forRoadmap) {
+    videos = videos.filter((video) =>
+      video.sourceType !== "registry"
+        || video.deliveryDestinations.includes("aylamed_content_hub")
+        || Boolean(aylaV210AssignmentForVideo(assignments, video)));
+  }
+  return { videos, assignments, warning: registry.warning };
+}
+
 function aylaV189ResolveAssessmentQuestions(db, resource = {}) {
   const embedded = Array.isArray(resource.questions) ? resource.questions : [];
   if (embedded.length) {
@@ -58637,6 +58741,13 @@ function aylaV189AssignmentSnapshot(db, resource = {}, options = {}) {
     vimeoUrl: resource.vimeoUrl || "",
     vimeoPrivacyHash: resource.vimeoPrivacyHash || "",
     vimeoEmbedUrl: resource.vimeoEmbedUrl || aylaV189VimeoEmbed(resource),
+    playlistKey: resource.playlistKey || resource.playlist_key || "",
+    playlistTitle: resource.playlistTitle || resource.playlist_title || resource.system || "",
+    durationSeconds: aylaNumber(resource.durationSeconds ?? resource.duration_seconds, 0),
+    sourceLabel: resource.sourceLabel || resource.source_label || null,
+    sourceType: resource.sourceType || resource.source_type || "legacy",
+    deliveryDestinations: aylaCleanArray(resource.deliveryDestinations || resource.delivery_destinations),
+    aliasResourceIds: aylaCleanArray(resource.aliasResourceIds || resource.alias_resource_ids),
     mappedVideoResourceId: resource.mappedVideoResourceId || "",
     mappedVideoTitle: resource.mappedVideoTitle || "",
     mappedVimeoId: resource.mappedVimeoId || "",
@@ -58743,6 +58854,40 @@ function aylaV189SanitizeAssignmentForStudent(db, assignment = {}) {
   const category = String(copy.category || "");
   copy.items = (Array.isArray(copy.items) ? copy.items : []).map((item) => {
     const next = { ...item };
+    if (category === "video") {
+      const verified = normalizeAylaContentHubVideos([next], { examTrack: next.examTrackId || next.examTrack })[0] || null;
+      delete next.vimeoUrl;
+      delete next.vimeo_url;
+      delete next.videoUrl;
+      delete next.video_url;
+      delete next.vimeoId;
+      delete next.vimeo_id;
+      delete next.vimeoPrivacyHash;
+      delete next.vimeo_privacy_hash;
+      delete next.mappedVimeoId;
+      delete next.mapped_vimeo_id;
+      delete next.mappedVimeoUrl;
+      delete next.mapped_vimeo_url;
+      delete next.providerId;
+      delete next.provider_id;
+      delete next.providerUri;
+      delete next.provider_uri;
+      delete next.sourceUrl;
+      delete next.source_url;
+      if (!verified) {
+        delete next.vimeoEmbedUrl;
+        delete next.vimeo_embed_url;
+        next.playbackAvailable = false;
+        return next;
+      }
+      next.vimeoEmbedUrl = verified.vimeoEmbedUrl;
+      next.playbackAvailable = true;
+      next.playlistKey = verified.playlistKey;
+      next.playlistTitle = verified.playlistTitle;
+      next.sourceLabel = verified.sourceLabel || null;
+      if (!verified.sourceLabel) delete next.provider;
+      return next;
+    }
     if (category === "internal_mcqs") {
       const attempt = aylaV189LatestQuestionAttempt(db, copy.studentId, copy.id, item.resourceId);
       const hidden = aylaV189HideQuestionAnswer(next);
@@ -59553,7 +59698,15 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     .filter((row) => !aylaValues(db, "aylaResourceAssignments").some((candidate) => String(candidate.scheduledDate) === String(date) && !["completed", "cancelled", "superseded"].includes(String(candidate.status || "").toLowerCase()) && aylaCleanArray(candidate.linkedAssignmentIds).map(String).includes(String(row.id))))
     .slice(0, 12);
   const dueRevisions = aylaV189DueRevisionQueue(db, student.id, date).slice(0, 20);
-  const allRelevant = aylaV189RelevantResources(db, student, ["book", "reading", "revision_sheet", "vimeo_video", "video_transcript", "external_question", "external_qid_mapping", "internal_mcq", "flashcard", "assessment", "assessment_blueprint"]);
+  const contentHubEnabled = aylaV210StudentFeatureAllowed(db, student, "content_hub");
+  const storedRelevant = aylaV189RelevantResources(db, student, ["book", "reading", "revision_sheet", "vimeo_video", "video_transcript", "external_question", "external_qid_mapping", "internal_mcq", "flashcard", "assessment", "assessment_blueprint"]);
+  const contentHub = contentHubEnabled
+    ? await aylaV210EligibleVideos(db, student, { forRoadmap: true })
+    : { videos: [], assignments: [], warning: null };
+  const allRelevant = [
+    ...storedRelevant.filter((row) => !["vimeo_video", "video_transcript"].includes(aylaV189ResourceType(row.type))),
+    ...contentHub.videos,
+  ];
   const focusCandidates = aylaV189FocusCandidates(db, student, allRelevant, dueRevisions, overdue);
   const tutorProposal = await aylaV189TutorProposal(db, student, date, focusCandidates, allRelevant, options);
   const selectedFocus = focusCandidates.find((row) => String(row.id) === String(tutorProposal.focusCandidateId)) || focusCandidates[0] || { system: aylaCleanArray(student.weakAreas)[0] || "General", topic: "Core review", id: null, reasons: [] };
@@ -59582,6 +59735,8 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     missingResourceTypes: [],
     focusSystem,
     focusTopic,
+    contentHubEnabled,
+    contentHubRegistryWarning: contentHub.warning,
     notebookMemory: aylaV190NotebookMemory(db, student),
     studyDay,
     tutorBrain: {
@@ -59682,9 +59837,18 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     else plan.missingResourceTypes.push("reading_for_focus");
   }
 
-  if (mix.video !== false) {
-    const pick = select(videos, 1);
-    if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "video", pick, `Watch: ${pick[0].title}`, { system: focusSystem, topic: pick[0].topic || focusTopic, rationale: `Mapped Vimeo teaching for the same daily focus; watch position and completion are saved.` });
+  if (mix.video !== false && contentHubEnabled) {
+    const selection = selectAylaRoadmapVideo({
+      videos,
+      examTrack: student.examTrackId || student.exam_track_id || student.exam,
+      focusSystem,
+      focusTopic,
+      progressRows: aylaValues(db, "aylaVideoProgress").filter((row) => String(row.studentId || row.student_id || "") === String(student.id)),
+      reservedResourceIds: [...reservedIds],
+      preferredResourceIds: aylaCleanArray(tutorProposal.preferredResourceIds),
+    });
+    const pick = selection.video ? [selection.video] : [];
+    if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "video", pick, `Watch: ${pick[0].title}`, { system: focusSystem, topic: pick[0].topic || focusTopic, rationale: `${selection.resumed ? "Resume" : "Watch"} the ${selection.match_level.replace(/_/g, " ")} verified embedded video for today’s focus; watch position and completion are saved.` });
     else plan.missingResourceTypes.push("video_for_focus");
   }
 
@@ -60365,45 +60529,142 @@ app.patch("/api/ayla/students/:studentId/assignments/:assignmentId", async (req,
   }
 });
 
-app.post("/api/ayla/students/:studentId/video-progress", async (req, res) => {
+app.get("/api/ayla/students/:studentId/content-hub", async (req, res) => {
   try {
     const { student, db } = await aylaV189RequireStudent(req, req.params.studentId, "content_hub");
-    const resourceId = String(req.body.resourceId || "");
-    const existing = aylaValues(db, "aylaVideoProgress").find((row) => String(row.studentId) === String(student.id) && String(row.resourceId) === resourceId) || {};
-    const progress = {
-      ...existing,
-      id: existing.id || aylaId("AYLA-VID"),
-      studentId: student.id,
-      resourceId,
-      assignmentId: req.body.assignmentId || existing.assignmentId || null,
-      lastPositionSeconds: Math.max(0, aylaNumber(req.body.lastPositionSeconds, existing.lastPositionSeconds || 0)),
-      watchedPercent: Math.max(0, Math.min(100, aylaNumber(req.body.watchedPercent, existing.watchedPercent || 0))),
-      startedAt: existing.startedAt || aylaNow(),
-      completed: req.body.completed === true || aylaNumber(req.body.watchedPercent, 0) >= 90,
-      updatedAt: aylaNow(),
-    };
-    if (progress.completed) progress.completedAt = progress.completedAt || aylaNow();
-    aylaSetItem(db, "aylaVideoProgress", progress);
-    if (progress.completed && progress.assignmentId) {
-      const assignment = aylaGetItem(db, "aylaResourceAssignments", progress.assignmentId);
-      if (assignment) {
-        assignment.status = "completed";
-        assignment.progressPercent = 100;
-        assignment.completedAt = assignment.completedAt || aylaNow();
-        assignment.updatedAt = aylaNow();
-        aylaSetItem(db, "aylaResourceAssignments", assignment);
-        aylaV189CloseLinkedAssignments(db, assignment);
-        aylaV189CompleteRevisionQueueForAssignment(db, assignment);
-        aylaV189UpdatePlanCompletion(db, assignment.dailyPlanId);
-      }
+    const eligible = await aylaV210EligibleVideos(db, student);
+    const catalog = buildAylaContentHubCatalog({
+      videos: eligible.videos,
+      examTrack: student.examTrackId || student.exam_track_id || student.exam,
+      progressRows: aylaValues(db, "aylaVideoProgress").filter((row) => String(row.studentId || row.student_id || "") === String(student.id)),
+      assignments: eligible.assignments,
+      filters: {
+        system: req.query.system || req.query.system_key,
+        topic: req.query.topic || req.query.topic_key,
+        playlist: req.query.playlist || req.query.playlist_key,
+        search: req.query.search || req.query.q,
+      },
+      limit: req.query.limit,
+      offset: req.query.offset,
+    });
+    return aylaSendOk(res, {
+      catalog,
+      registry_warning: eligible.warning,
+      playback: { provider: "vimeo", embedded_only: true, outbound_links: false, completion_threshold_percent: 90 },
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load Content Hub");
+  }
+});
+
+app.get("/api/ayla/students/:studentId/content-hub/videos/:videoId", async (req, res) => {
+  try {
+    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId, "content_hub");
+    const eligible = await aylaV210EligibleVideos(db, student);
+    const video = eligible.videos.find((row) => aylaContentHubVideoMatchesId(row, req.params.videoId));
+    if (!video) return aylaSendError(res, 404, "Content Hub video not found for this exam dashboard");
+    const assignment = aylaV210AssignmentForVideo(eligible.assignments, video);
+    const progress = aylaValues(db, "aylaVideoProgress")
+      .filter((row) => String(row.studentId || row.student_id || "") === String(student.id))
+      .filter((row) => aylaContentHubVideoMatchesId(video, row.resourceId || row.resource_id))
+      .sort((left, right) => String(right.updatedAt || right.updated_at || "").localeCompare(String(left.updatedAt || left.updated_at || "")))[0] || null;
+    return aylaSendOk(res, {
+      video: sanitizeAylaContentHubVideo(video, { progress, assignment }),
+      registry_warning: eligible.warning,
+      playback: { provider: "vimeo", embedded_only: true, outbound_links: false, completion_threshold_percent: 90 },
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load Content Hub video");
+  }
+});
+
+function aylaV210AssignmentVideoCompletion(db, student, assignment) {
+  if (!assignment) return { assignment: null, plan: null, completed: false };
+  const rows = aylaValues(db, "aylaVideoProgress")
+    .filter((row) => String(row.studentId || row.student_id || "") === String(student.id));
+  const summary = aylaContentHubAssignmentProgress(assignment, rows);
+  const alreadyCompleted = String(assignment.status || "").toLowerCase() === "completed";
+  assignment.progressPercent = alreadyCompleted ? 100 : summary.watched_percent;
+  if (summary.completed || alreadyCompleted) {
+    assignment.status = "completed";
+    assignment.progressPercent = 100;
+    assignment.completedAt = assignment.completedAt || aylaNow();
+    aylaV189CloseLinkedAssignments(db, assignment);
+    aylaV189CompleteRevisionQueueForAssignment(db, assignment);
+  } else if (assignment.progressPercent > 0 && !["completed", "skipped"].includes(String(assignment.status || "").toLowerCase())) {
+    assignment.status = "in_progress";
+  }
+  assignment.updatedAt = aylaNow();
+  aylaSetItem(db, "aylaResourceAssignments", assignment);
+  return { assignment, plan: aylaV189UpdatePlanCompletion(db, assignment.dailyPlanId), completed: summary.completed || alreadyCompleted };
+}
+
+async function aylaV210SaveVideoProgress(req, res) {
+  try {
+    const initial = await aylaV189RequireStudent(req, req.params.studentId, "content_hub");
+    const requestedResourceId = String(req.params.videoId || req.body.resourceId || req.body.resource_id || "").trim();
+    if (!requestedResourceId) return aylaSendError(res, 400, "A Content Hub video ID is required");
+    const eligible = await aylaV210EligibleVideos(initial.db, initial.student);
+    const video = eligible.videos.find((row) => aylaContentHubVideoMatchesId(row, requestedResourceId));
+    if (!video) return aylaSendError(res, 404, "Content Hub video not found for this exam dashboard");
+    const requestedAssignmentId = String(req.body.assignmentId || req.body.assignment_id || "").trim();
+    if (requestedAssignmentId && !aylaV210AssignmentForVideo(eligible.assignments, video, requestedAssignmentId)) {
+      return aylaSendError(res, 404, "Video assignment not found for this student");
     }
-    aylaV189RecordActivity(db, student.id, "video_progress", { resourceId, watchedPercent: progress.watchedPercent, completed: progress.completed });
-    await writeAylaDb(db);
-    return aylaSendOk(res, { videoProgress: progress, systemProgress: aylaV189SystemProgress(db, student) });
+
+    const result = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const rawUser = aylaGetItem(db, "aylaUsers", initial.user.id);
+      const student = aylaGetItem(db, "aylaStudents", initial.student.id);
+      if (!rawUser || !student || !aylaV189StudentOwned(student, rawUser)) throw Object.assign(new Error("AylaMed student profile not found"), { statusCode: 404 });
+      aylaDashboardEntitlement(db, aylaSanitizeUser(rawUser), student, "content_hub");
+      const assignments = aylaV210VideoAssignments(db, student);
+      const assignment = requestedAssignmentId ? aylaV210AssignmentForVideo(assignments, video, requestedAssignmentId) : aylaV210AssignmentForVideo(assignments, video);
+      if (requestedAssignmentId && !assignment) throw Object.assign(new Error("Video assignment not found for this student"), { statusCode: 404 });
+      const existing = aylaValues(db, "aylaVideoProgress")
+        .filter((row) => String(row.studentId || row.student_id || "") === String(student.id))
+        .filter((row) => aylaContentHubVideoMatchesId(video, row.resourceId || row.resource_id))
+        .sort((left, right) => String(right.updatedAt || right.updated_at || "").localeCompare(String(left.updatedAt || left.updated_at || "")))[0] || {};
+      const progress = mergeAylaContentHubProgress(existing, {
+        id: existing.id || aylaId("AYLA-VID"),
+        studentId: student.id,
+        resourceId: video.id,
+        aliasResourceIds: video.aliasResourceIds,
+        assignmentId: assignment?.id || null,
+        lastPositionSeconds: req.body.lastPositionSeconds ?? req.body.last_position_seconds,
+        watchedPercent: req.body.watchedPercent ?? req.body.watched_percent,
+        sourceType: video.sourceType,
+        examTrackId: video.examTrackId,
+      });
+      aylaSetItem(db, "aylaVideoProgress", progress);
+      const assignmentState = aylaV210AssignmentVideoCompletion(db, student, assignment);
+      aylaV189RecordActivity(db, student.id, "content_hub_video_progress", {
+        resourceId: video.id,
+        assignmentId: assignment?.id || null,
+        watchedPercent: progress.watchedPercent,
+        completed: progress.completed,
+      });
+      return {
+        progress,
+        assignment: assignmentState.assignment ? aylaV189SanitizeAssignmentForStudent(db, assignmentState.assignment) : null,
+        plan: assignmentState.plan,
+        systemProgress: aylaV189SystemProgress(db, student),
+      };
+    });
+    return aylaSendOk(res, {
+      videoProgress: result.progress,
+      video: sanitizeAylaContentHubVideo(video, { progress: result.progress, assignment: result.assignment }),
+      assignment: result.assignment,
+      plan: result.plan,
+      systemProgress: result.systemProgress,
+    });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to save video progress");
   }
-});
+}
+
+app.post("/api/ayla/students/:studentId/content-hub/videos/:videoId/progress", aylaV210SaveVideoProgress);
+app.post("/api/ayla/students/:studentId/video-progress", aylaV210SaveVideoProgress);
 
 app.post("/api/ayla/students/:studentId/question-attempts", async (req, res) => {
   try {
