@@ -5,12 +5,17 @@ import {
   validateFlashcardContent,
 } from "./lib/flashcard-engine.js";
 import {
+  flashcardMatchesCurrentSystem,
+  flashcardPriorityRank,
+} from "./lib/flashcard-queue-policy.js";
+import {
   flashcardPostgresStatus,
   shadowWriteFlashcardReview,
 } from "./lib/flashcard-postgres.js";
 import {
   contentRegistryStatus,
   claimContentImportDraft,
+  createExternalQbankDeliverySession,
   createContentMediaImportJob,
   createContentVideoImportJob,
   createContentImportJob,
@@ -22,11 +27,157 @@ import {
   getContentMediaReferences,
   getContentVideoImportJob,
   getContentImportJob,
+  getContentQbankCatalog,
+  getContentQbankQuestions,
+  getContentRegistryFlashcardQuestion,
+  getContentTaxonomyCoverage,
+  getExternalQbankDeliverySession,
   importContentQuestionBatch,
+  listContentHubVideos,
+  listContentOperationalJobs,
+  listExternalQbankAuditEvents,
+  listExternalQbankDeliverySessions,
+  listContentQbankQuestions,
+  listContentRegistryFlashcardQuestions,
+  listContentCollections,
+  listContentTaxonomyAuditEvents,
+  listContentTaxonomyReviewQueue,
+  removeContentQuestionTaxonomyOverride,
+  recordExternalQbankAuditEvent,
+  recordExternalQbankDeliveryAnswer,
+  reviewContentTaxonomyMapping,
   saveContentMediaMatches,
   saveContentVideoMatch,
   setContentImportJobStatus,
+  submitExternalQbankDeliverySession,
+  updateContentCollectionControls,
+  upsertContentQuestionTaxonomyOverride,
+  upsertContentTaxonomyMapping,
 } from "./lib/content-registry-postgres.js";
+import {
+  CONTENT_TAXONOMY_EXAM_TRACKS,
+  normalizeContentTaxonomyExamTrack,
+  normalizeContentTaxonomyReviewAction,
+  normalizeContentTaxonomyReviewState,
+} from "./lib/content-taxonomy-control.js";
+import {
+  AYLA_QBANK_STATE_COLLECTIONS,
+  canRevealAylaQbankAnswer,
+  createAylaQbankSession,
+  finalizeAylaQbankSession,
+  mergeConcurrentAylaQbankCollection,
+  normalizeAylaQbankExamTrack,
+  normalizeAylaQbankFilters,
+  normalizeAylaQbankMode,
+  qbankSessionHistoryRow,
+  qbankSessionQuestion,
+  recordAylaQbankAnswer,
+  requireAylaQbankEntitlement,
+  sanitizeAylaQbankQuestion,
+  sanitizeAylaQbankSession,
+  setAylaQbankQuestionMark,
+} from "./lib/aylamed-qbank.js";
+import {
+  AYLA_STUDENT_FEATURES,
+  aylaScopedEnrollmentKey,
+  aylaShellEnrollmentActive,
+  normalizeAylaRegistryExamTrack,
+  normalizeAylaShellExamTrack,
+  resolveAylaExamFeatureEntitlement,
+  resolveAylaStudentShell,
+} from "./lib/aylamed-student-shell.js";
+import {
+  aylaContentHubAssignmentProgress,
+  aylaContentHubVideoMatchesId,
+  buildAylaContentHubCatalog,
+  mergeAylaContentHubProgress,
+  mergeAylaContentHubProgressCollection,
+  normalizeAylaContentHubVideos,
+  sanitizeAylaContentHubVideo,
+  selectAylaRoadmapVideo,
+} from "./lib/aylamed-content-hub.js";
+import {
+  aylaLibraryStudentTitle,
+  aylaLibraryStudentPageRange,
+  aylaLibraryAssignmentProgress,
+  aylaLibraryResourceMatchesId,
+  buildAylaLibraryCatalog,
+  buildAylaLibraryPage,
+  buildAylaLibraryReader,
+  findAylaLibraryPage,
+  hydrateAylaLibraryResourceFromCrm,
+  combineAylaLibraryProgressRows,
+  mergeAylaLibraryProgress,
+  mergeAylaLibraryProgressCollection,
+  normalizeAylaLibraryResource,
+  normalizeAylaLibraryResources,
+  sanitizeAylaHiddenSourceText,
+  selectAylaRoadmapReading,
+} from "./lib/aylamed-library.js";
+import {
+  aylaNotebookSourceFingerprint,
+  aylaNotebookTimestampSeconds,
+  createAylaNotebookCaptureBlocks,
+  mergeConcurrentAylaNotebookCollection,
+  normalizeAylaNotebookSourceKind,
+  sanitizeAylaNotebook,
+  selectAylaNotebookSourceExcerpt,
+} from "./lib/aylamed-dynamic-notebook.js";
+import {
+  AYLA_PERSONAL_TUTOR_ENGINE,
+  buildAylaPersonalTutorDecision,
+  formatAylaPersonalTutorAnswer,
+  isAylaPersonalTutorPlanningIntent,
+  validateAylaPersonalTutorPlanCommand,
+} from "./lib/aylamed-personal-tutor.js";
+import {
+  applyAylaPlanFeaturePatch,
+  aylaPlanFeatureMatrixRow,
+  normalizeAylaPlanFeatures,
+  publicAylaPlanFeatureCatalog,
+} from "./lib/aylamed-plan-controls.js";
+import {
+  aylaSuccessStoryMaterialFingerprint,
+  normalizeAylaSuccessStoryDraft,
+  reviewAylaSuccessStory,
+  sanitizeAylaSuccessStoryForAdmin,
+  selectAylaSuccessStoryStrategies,
+} from "./lib/aylamed-success-story-training.js";
+import {
+  EXTERNAL_QBANK_API_VERSION,
+  ExternalQbankRateLimiter,
+  authenticateExternalQbankClient,
+  externalQbankConfigStatus,
+  externalQbankOriginAllowed,
+  issueExternalQbankEntitlementToken,
+  normalizeExternalQbankSessionRequest,
+  sanitizeExternalQbankQuestion,
+  sanitizeExternalQbankSession,
+  verifyExternalQbankEntitlementToken,
+} from "./lib/external-qbank-delivery.js";
+import {
+  buildCrossSystemWeakAreaSummary,
+  calculateLearningPartnerCompatibility,
+  computeLearningStreak,
+  learningDateKey,
+  rankLearningLeaderboard,
+  resolveStrictLmsIdentity,
+  sanitizeLearningPartnerProfile,
+} from "./lib/learning-progress-services.js";
+import {
+  STUDENT_PROFILE_CONTRACT_VERSION,
+  applyStudentProfilePatch,
+  normalizeStudentProfilePhone,
+  normalizeStudentProfileRecord,
+  sanitizeStudentProfileForOwner,
+  studentProfilePolicy,
+} from "./lib/student-profile-governance.js";
+import {
+  contentRegistryFlashcardId,
+  contentRegistryQuestionId,
+  normalizeCourseExamTrack,
+  registryQuestionToFlashcard,
+} from "./lib/content-registry-flashcards.js";
 import {
   cleanupContentImportFiles,
   extractSafeZipInventory,
@@ -34,8 +185,12 @@ import {
   previewUniversalQuestionZip,
   receiveContentZip,
 } from "./lib/content-zip-import.js";
+import { SafeBackgroundQueue } from "./lib/safe-background-jobs.js";
+import { ResumableContentUploadStore } from "./lib/resumable-content-upload.js";
+import { storagePerformanceSnapshot } from "./lib/operations-monitoring.js";
 import {
   contentMediaStatus,
+  createPrivateMediaUrl,
   deleteR2Object,
   matchMediaReferences,
   uploadMediaZipToR2,
@@ -61,36 +216,26 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v204-content-video-global-dedupe";
+const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
+const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
   "https://www.live.nextgenusmlelms.com",
   "https://lms.nextgenusmlelms.com",
   "https://www.lms.nextgenusmlelms.com",
-  "https://nextgenusmlelms.com",
-  "https://www.nextgenusmlelms.com",
-  "http://localhost:5173",
-  "http://localhost:3000",
+  ...String(process.env.NEXTGEN_CORS_ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((value) => value.trim().replace(/\/$/, ""))
+    .filter(Boolean),
 ];
 
-function isNextGenAllowedOrigin(origin = "") {
+function isNextGenAllowedOrigin(origin = "", req = null) {
   const clean = String(origin || "").trim().replace(/\/$/, "");
   if (!clean) return false;
   if (allowedOrigins.includes(clean)) return true;
-
-  // Allow any current/future NextGen subdomain without needing another backend edit.
-  try {
-    const url = new URL(clean);
-    const host = String(url.hostname || "").toLowerCase();
-    if (host === "nextgenusmlelms.com" || host.endsWith(".nextgenusmlelms.com")) return true;
-    if (host === "usmlecorner.com" || host.endsWith(".usmlecorner.com")) return true;
-    if (host === "localhost" || host === "127.0.0.1") return true;
-  } catch {
-    return false;
-  }
-
-  return false;
+  const requestPath = String(req?.originalUrl || req?.url || "").split("?")[0];
+  return requestPath.startsWith("/api/external-qbank/") && externalQbankOriginAllowed(clean);
 }
 
 function getCorsRequestHeaders(req) {
@@ -126,12 +271,7 @@ function applyNextGenCors(req, res) {
   // Strong browser fix: for browser calls, reflect the valid origin so Authorization headers work.
   // For server-to-server/curl/Render health checks, use wildcard.
   if (origin) {
-    if (isNextGenAllowedOrigin(origin)) {
-      res.setHeader("Access-Control-Allow-Origin", origin);
-      res.setHeader("Access-Control-Allow-Credentials", "true");
-    } else {
-      // Do not crash preflight for unknown origins. This keeps errors debuggable instead of fake CORS failures.
-      // Admin/API routes still require auth, so this does not bypass backend authorization.
+    if (isNextGenAllowedOrigin(origin, req)) {
       res.setHeader("Access-Control-Allow-Origin", origin);
       res.setHeader("Access-Control-Allow-Credentials", "true");
     }
@@ -150,6 +290,10 @@ function applyNextGenCors(req, res) {
 // Hard CORS/preflight guard. This must remain before all routes and before body parsing.
 app.use((req, res, next) => {
   applyNextGenCors(req, res);
+  const origin = String(req.headers.origin || "").trim().replace(/\/$/, "");
+  if (origin && !isNextGenAllowedOrigin(origin, req)) {
+    return res.status(403).json({ success: false, error: "This website origin is not allowed." });
+  }
   if (req.method === "OPTIONS") {
     return res.status(204).end();
   }
@@ -158,7 +302,10 @@ app.use((req, res, next) => {
 
 // Keep cors(), but make it non-blocking. The manual guard above is the source of truth.
 const corsOptions = {
-  origin: true,
+  origin(origin, callback) {
+    if (!origin || isNextGenAllowedOrigin(origin)) return callback(null, true);
+    return callback(new Error("This website origin is not allowed."));
+  },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
   allowedHeaders: [
@@ -181,7 +328,14 @@ const corsOptions = {
 
 app.use((req, res, next) => {
   applyNextGenCors(req, res);
-  return cors(corsOptions)(req, res, (error) => {
+  const requestCorsOptions = {
+    ...corsOptions,
+    origin(origin, callback) {
+      if (!origin || isNextGenAllowedOrigin(origin, req)) return callback(null, true);
+      return callback(new Error("This website origin is not allowed."));
+    },
+  };
+  return cors(requestCorsOptions)(req, res, (error) => {
     if (error) {
       console.warn("Non-blocking CORS warning:", error.message);
       applyNextGenCors(req, res);
@@ -586,6 +740,22 @@ const POCKETBASE_URL = process.env.POCKETBASE_URL;
 const DATA_DIR = process.env.DATA_DIR || "/tmp";
 const MEDIA_DIR = path.join(DATA_DIR, "media");
 const LIVE_DB_PATH = path.join(DATA_DIR, "live-session-db.json");
+const NG_CONTENT_OPERATIONS_ROOT = path.join(DATA_DIR, "content-operations");
+const ngContentBackgroundQueue = new SafeBackgroundQueue({
+  directory: path.join(NG_CONTENT_OPERATIONS_ROOT, "jobs"),
+  maxConcurrency: Math.max(1, Math.min(3, Number(process.env.NEXTGEN_CONTENT_JOB_CONCURRENCY || 1) || 1)),
+  laneConcurrency: { question_zip: 1, image_zip: 1, video_zip: 1 },
+  retryBaseMs: Math.max(1_000, Number(process.env.NEXTGEN_CONTENT_JOB_RETRY_BASE_MS || 15_000) || 15_000),
+  memoryRetryMs: Math.max(5_000, Number(process.env.NEXTGEN_CONTENT_JOB_MEMORY_RETRY_MS || 30_000) || 30_000),
+  memoryGate: () => ngBackgroundMemoryIsHigh("content_operations_queue"),
+});
+const ngContentUploadStore = new ResumableContentUploadStore({
+  directory: path.join(NG_CONTENT_OPERATIONS_ROOT, "uploads"),
+  maxUploadBytes: Math.max(1024 * 1024, Number(process.env.NEXTGEN_CONTENT_MAX_ZIP_BYTES || 5 * 1024 ** 3)),
+  chunkSize: Math.max(256 * 1024, Number(process.env.NEXTGEN_CONTENT_UPLOAD_CHUNK_BYTES || 8 * 1024 ** 2)),
+  maxChunkBytes: Math.max(1024 * 1024, Number(process.env.NEXTGEN_CONTENT_UPLOAD_MAX_CHUNK_BYTES || 16 * 1024 ** 2)),
+  sessionTtlMs: Math.max(60 * 60 * 1000, Number(process.env.NEXTGEN_CONTENT_UPLOAD_TTL_MS || 48 * 60 * 60 * 1000)),
+});
 app.use("/media", express.static(MEDIA_DIR, { maxAge: "30d", fallthrough: true }));
 const DEFAULT_TIMEZONE = "America/New_York";
 const DEFAULT_ZOOM_DURATION_MINUTES = 120;
@@ -1008,6 +1178,7 @@ const DEFAULT_LIVE_DB = {
   studyPartnerRequests: {},
   studyPartnerMatches: {},
   studyPartnerReports: {},
+  studentProfileAuditEvents: {},
 
   // Backend-only enrollments. PocketBase enrollments are intentionally bypassed.
   enrollments: {},
@@ -1293,6 +1464,7 @@ function ngMergeLiveDb(parsed = {}) {
       studyPartnerRequests: parsed.studyPartnerRequests || {},
       studyPartnerMatches: parsed.studyPartnerMatches || {},
       studyPartnerReports: parsed.studyPartnerReports || {},
+      studentProfileAuditEvents: parsed.studentProfileAuditEvents || {},
       enrollments: parsed.enrollments || {},
       plans: parsed.plans || {},
       coupons: parsed.coupons || {},
@@ -1413,6 +1585,38 @@ async function writeLiveDb(db) {
     liveDbCache = nextDb;
     liveDbReadInFlight = null;
   });
+  writeQueue = task;
+  return task;
+}
+
+async function mutateLiveDb(mutator) {
+  const task = writeQueue
+    .catch((error) => {
+      console.error("Previous LMS write failed; atomic mutation queue recovered:", error.message);
+    })
+    .then(async () => {
+      const current = liveDbCache
+        ? JSON.parse(JSON.stringify(liveDbCache))
+        : await readLiveDbFromDisk();
+      const result = await mutator(current);
+      const nextDb = {
+        ...DEFAULT_LIVE_DB,
+        ...current,
+        featureCatalog: { ...DEFAULT_FEATURE_CATALOG, ...(current.featureCatalog || {}) },
+        demoSettings: { ...DEFAULT_DEMO_SETTINGS, ...(current.demoSettings || {}) },
+        emailSettings: { ...DEFAULT_EMAIL_SETTINGS, ...(current.emailSettings || {}) },
+        emailTemplates: ngMergeEmailTemplates(current.emailTemplates || {}),
+        emailLogs: safeArray(current.emailLogs),
+        emailBroadcasts: safeArray(current.emailBroadcasts),
+        emailAutomationState: current.emailAutomationState || {},
+        updatedAt: new Date().toISOString(),
+      };
+      await ensureDataDir();
+      await ngWriteJsonAtomicStreaming(LIVE_DB_PATH, nextDb, "LMS atomic database mutation");
+      liveDbCache = nextDb;
+      liveDbReadInFlight = null;
+      return result;
+    });
   writeQueue = task;
   return task;
 }
@@ -6057,21 +6261,7 @@ function ngIsCourseFreezeDate(db = {}, courseId = "", dateKey = "") {
   });
 }
 
-function ngCanBridgeStreakGap(db = {}, courseId = "", previousDateKey = "", nextDateKey = "") {
-  const previous = ngDateKeyFromAny(previousDateKey);
-  const next = ngDateKeyFromAny(nextDateKey);
-  if (!previous || !next) return false;
-
-  let cursor = ngPreviousDateKey(next);
-  while (cursor && cursor > previous) {
-    if (!ngIsCourseFreezeDate(db, courseId, cursor)) return false;
-    cursor = ngPreviousDateKey(cursor);
-  }
-
-  return true;
-}
-
-function ngComputeStudentStudyStreakWithFreeze(db = {}, { courseId = "", userId = "" } = {}) {
+function ngStudentStudyActivityDates(db = {}, { courseId = "", userId = "" } = {}) {
   const cleanCourseId = String(courseId || "").trim();
   const cleanUserId = String(userId || "").trim();
   const dateSet = new Set();
@@ -6111,69 +6301,17 @@ function ngComputeStudentStudyStreakWithFreeze(db = {}, { courseId = "", userId 
     if (Number(event.points || 0) <= 0) continue;
     addDate(event.awarded_at || event.created_at || event.updated_at);
   }
+  return [...dateSet].sort();
+}
 
-  const today = todayKey();
-  for (const dateKey of Array.from(dateSet)) {
-    if (dateKey > today) dateSet.delete(dateKey);
-  }
-
-  const sorted = Array.from(dateSet).sort();
-  let bestStreak = 0;
-  let running = 0;
-  let previous = "";
-
-  for (const dateKey of sorted) {
-    if (previous && (ngPreviousDateKey(dateKey) === previous || ngCanBridgeStreakGap(db, cleanCourseId, previous, dateKey))) running += 1;
-    else running = 1;
-    bestStreak = Math.max(bestStreak, running);
-    previous = dateKey;
-  }
-
-  let anchor = "";
-  let cursor = today;
-  while (cursor) {
-    if (dateSet.has(cursor)) {
-      anchor = cursor;
-      break;
-    }
-
-    // Today/yesterday can be a Sunday or no-class/holiday date; freeze and keep searching backwards.
-    if (ngIsCourseFreezeDate(db, cleanCourseId, cursor)) {
-      cursor = ngPreviousDateKey(cursor);
-      continue;
-    }
-
-    const yesterday = ngPreviousDateKey(today);
-    if (cursor === today && dateSet.has(yesterday)) {
-      anchor = yesterday;
-    }
-    break;
-  }
-
-  let currentStreak = 0;
-  cursor = anchor;
-  while (cursor) {
-    if (dateSet.has(cursor)) {
-      currentStreak += 1;
-      cursor = ngPreviousDateKey(cursor);
-      continue;
-    }
-
-    if (ngIsCourseFreezeDate(db, cleanCourseId, cursor)) {
-      cursor = ngPreviousDateKey(cursor);
-      continue;
-    }
-
-    break;
-  }
-
-  const result = {
-    study_streak: currentStreak,
-    streak_days: currentStreak,
-    best_streak: bestStreak,
-    total_study_days: sorted.length,
-    last_activity_date: sorted[sorted.length - 1] || null,
-  };
+function ngComputeStudentStudyStreakWithFreeze(db = {}, { courseId = "", userId = "" } = {}) {
+  const cleanCourseId = String(courseId || "").trim();
+  const cleanUserId = String(userId || "").trim();
+  const result = computeLearningStreak({
+    activityDates: ngStudentStudyActivityDates(db, { courseId: cleanCourseId, userId: cleanUserId }),
+    today: todayKey(),
+    isFreezeDate: (dateKey) => ngIsCourseFreezeDate(db, cleanCourseId, dateKey),
+  });
 
   result.streak_milestone = ngBuildStreakMilestoneMeta(result, { db, courseId: cleanCourseId, userId: cleanUserId });
   return result;
@@ -6247,9 +6385,11 @@ function ngPublicLeaderboardList(db = {}, courseId = "", { limit = null } = {}) 
   let list = Object.values(db.leaderboard || {});
   if (courseId) list = list.filter((entry) => String(entry.course_id) === String(courseId));
   list = list.filter((entry) => !ngIsLeaderboardHiddenUser(db, entry));
-  list = list.sort((a, b) => Number(b.total_points || 0) - Number(a.total_points || 0));
-  if (limit) list = list.slice(0, Number(limit));
-  return list.map((entry, index) => ({ rank: index + 1, ...entry }));
+  return rankLearningLeaderboard(list, {
+    scoreFields: ["total_points", "assessment_points", "task_points", "attendance_points"],
+    identityFields: ["user_id", "id", "user_name"],
+    limit,
+  });
 }
 
 function updateLeaderboard(db, { courseId, userId, userName }) {
@@ -10376,11 +10516,16 @@ app.get("/auth/me", async (req, res) => {
     const db = await readLiveDb();
     const selfHeal = ngMaybeSelfHealDemoEnrollment(db, user, { source: "auth_me" });
     if (selfHeal.changed) await writeLiveDb(db);
+    const rawUser = db.users?.[String(user.id)] || user;
 
+    res.setHeader("Cache-Control", "private, no-store");
     res.json({
       success: true,
       user,
       record: user,
+      profile_contract: STUDENT_PROFILE_CONTRACT_VERSION,
+      profile: sanitizeStudentProfileForOwner(rawUser),
+      profile_policy: studentProfilePolicy(),
       demo_access_self_heal: selfHeal,
     });
   } catch (error) {
@@ -10391,62 +10536,145 @@ app.get("/auth/me", async (req, res) => {
   }
 });
 
-
-function ngNormalizeStudentDisplayName(value = "") {
-  return String(value || "").trim().replace(/\s+/g, " ");
+function ngStoreStudentProfileOnUser(user, profile, { camelCase = false } = {}) {
+  const stored = { ...profile, contract_version: STUDENT_PROFILE_CONTRACT_VERSION };
+  user.student_profile = stored;
+  user.name = stored.display_name;
+  user.display_name = stored.display_name;
+  user.public_username = stored.username;
+  user.bio = stored.bio;
+  user.phone = stored.phone;
+  user.phone_verified = stored.phone_verified === true;
+  user.phone_verified_at = stored.phone_verified_at || null;
+  user.timezone = stored.timezone;
+  user.language = stored.language;
+  user.country_code = stored.country_code;
+  user.profile_visibility = stored.profile_visibility;
+  user.discoverable = stored.discoverable === true;
+  user.display_name_changed_at = stored.display_name_changed_at || null;
+  user.username_changed_at = stored.username_changed_at || null;
+  user.updated_at = stored.updated_at;
+  if (camelCase) {
+    user.studentProfile = stored;
+    user.displayName = stored.display_name;
+    user.publicUsername = stored.username;
+    user.phoneVerified = stored.phone_verified === true;
+    user.phoneVerifiedAt = stored.phone_verified_at || null;
+    user.countryCode = stored.country_code;
+    user.profileVisibility = stored.profile_visibility;
+    user.displayNameChangedAt = stored.display_name_changed_at || null;
+    user.usernameChangedAt = stored.username_changed_at || null;
+    user.updatedAt = stored.updated_at;
+  }
+  return user;
 }
 
-function ngDisplayNameHasBlockedWord(value = "") {
-  const clean = String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ");
-  const blocked = [
-    "fuck", "fucker", "fucking", "shit", "bitch", "bastard", "asshole", "dick", "pussy",
-    "cunt", "whore", "slut", "porn", "sex", "nigger", "nigga", "fag", "faggot"
-  ];
-  return blocked.some((word) => new RegExp(`(^|\\s)${word}(\\s|$)`, "i").test(clean));
+function ngStudentProfileUsernameAvailable(users = {}, userId = "", username = "") {
+  const key = String(username || "").toLocaleLowerCase("en-US");
+  return !Object.values(users || {}).some((candidate) => {
+    if (String(candidate?.id || "") === String(userId || "")) return false;
+    return normalizeStudentProfileRecord(candidate).username.toLocaleLowerCase("en-US") === key;
+  });
+}
+
+function ngCascadeLmsProfileLabel(db, userId, displayName) {
+  const cleanUserId = String(userId || "");
+  const updateByUserId = (collection, idField = "user_id", nameField = "user_name") => {
+    for (const row of Object.values(collection || {})) {
+      if (String(row?.[idField] || "") === cleanUserId) row[nameField] = displayName;
+    }
+  };
+  updateByUserId(db.leaderboard);
+  updateByUserId(db.communityMessages);
+  updateByUserId(db.globalCommunityPosts);
+  updateByUserId(db.globalCommunityComments);
+  updateByUserId(db.globalCommunityReactions);
+  updateByUserId(db.globalCommunityReports);
+  updateByUserId(db.studyPartnerProfiles);
+  for (const row of Object.values(db.studyPartnerRequests || {})) {
+    if (String(row?.from_user_id || "") === cleanUserId) row.from_user_name = displayName;
+    if (String(row?.to_user_id || "") === cleanUserId) row.to_user_name = displayName;
+  }
+  for (const row of Object.values(db.studyPartnerMatches || {})) {
+    if (String(row?.user_a_id || "") === cleanUserId) row.user_a_name = displayName;
+    if (String(row?.user_b_id || "") === cleanUserId) row.user_b_name = displayName;
+  }
+}
+
+function ngStudentProfileAuditEvent({ product, userId, changedFields, createdAt }) {
+  return {
+    id: uuid(),
+    event_type: "student_profile_updated",
+    product,
+    user_id: String(userId),
+    actor_user_id: String(userId),
+    changed_fields: [...changedFields],
+    contains_profile_values: false,
+    created_at: createdAt,
+  };
 }
 
 app.patch("/auth/me", async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req);
-    const db = await readLiveDb();
-    const existing = db.users?.[String(user.id)] || null;
-
-    if (!existing) {
-      return res.status(404).json({ success: false, error: "User account not found" });
-    }
-
-    const name = ngNormalizeStudentDisplayName(req.body?.name || req.body?.display_name || "");
-
-    if (name.length < 2 || name.length > 60) {
-      return res.status(400).json({ success: false, error: "Name must be between 2 and 60 characters." });
-    }
-
-    if (!/^[\p{L}\p{N} .'-]+$/u.test(name)) {
-      return res.status(400).json({ success: false, error: "Name can only include letters, numbers, spaces, apostrophes, periods, and hyphens." });
-    }
-
-    if (ngDisplayNameHasBlockedWord(name)) {
-      return res.status(400).json({ success: false, error: "Please choose a professional display name." });
-    }
-
-    existing.name = name;
-    existing.display_name = name;
-    existing.updated_at = new Date().toISOString();
-    db.users[existing.id] = existing;
-
-    // Keep existing leaderboard labels fresh without changing any points.
-    for (const entry of Object.values(db.leaderboard || {})) {
-      if (String(entry.user_id || "") === String(existing.id)) {
-        entry.user_name = name;
-        entry.updated_at = new Date().toISOString();
+    const mutation = await mutateLiveDb(async (db) => {
+      const existing = db.users?.[String(user.id)] || null;
+      if (!existing) {
+        const error = new Error("User account not found");
+        error.statusCode = 404;
+        throw error;
       }
-    }
+      if (["disabled", "deleted", "blocked"].includes(String(existing.status || "active").toLowerCase())) {
+        const error = new Error("User account is not active");
+        error.statusCode = 403;
+        throw error;
+      }
+      db.studentProfileAuditEvents = db.studentProfileAuditEvents || {};
+      const applied = applyStudentProfilePatch(existing, req.body || {}, {
+        userId: existing.id,
+        events: db.studentProfileAuditEvents,
+        extraBlockedWords: String(process.env.NEXTGEN_PROFILE_BLOCKED_WORDS || "").split(",").map((word) => word.trim()).filter(Boolean),
+        isUsernameAvailable: (username) => ngStudentProfileUsernameAvailable(db.users, existing.id, username),
+      });
+      if (applied.changed) {
+        ngStoreStudentProfileOnUser(existing, applied.profile);
+        db.users[String(existing.id)] = existing;
+        if (applied.changedFields.includes("display_name")) {
+          ngCascadeLmsProfileLabel(db, existing.id, applied.profile.display_name);
+        }
+        const event = ngStudentProfileAuditEvent({
+          product: "lms",
+          userId: existing.id,
+          changedFields: applied.changedFields,
+          createdAt: applied.profile.updated_at,
+        });
+        db.studentProfileAuditEvents[event.id] = event;
+      }
+      return {
+        applied,
+        user: sanitizeUser(existing),
+        profile: sanitizeStudentProfileForOwner(existing),
+      };
+    });
 
-    await writeLiveDb(db);
-
-    res.json({ success: true, user: sanitizeUser(existing), record: sanitizeUser(existing) });
+    res.setHeader("Cache-Control", "private, no-store");
+    res.json({
+      success: true,
+      user: mutation.user,
+      record: mutation.user,
+      profile_contract: STUDENT_PROFILE_CONTRACT_VERSION,
+      profile: mutation.profile,
+      profile_policy: studentProfilePolicy(),
+      changed_fields: mutation.applied.changedFields,
+      phone_verification_reset: mutation.applied.phoneChanged,
+    });
   } catch (error) {
-    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to update profile" });
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to update profile",
+      code: error.code || null,
+      details: error.details || undefined,
+    });
   }
 });
 
@@ -16924,6 +17152,81 @@ function sanitizeStudyPartnerProfile(profile = {}, currentUserId = null, exposeC
   };
 }
 
+function ngStudyPartnerProfileValidationRecord(user = {}) {
+  const base = normalizeStudentProfileRecord(user);
+  return {
+    ...user,
+    student_profile: {
+      ...base,
+      bio: "",
+      profile_visibility: "private",
+      discoverable: false,
+    },
+  };
+}
+
+function ngValidatedStudyPartnerBio(user = {}, value = "") {
+  return applyStudentProfilePatch(ngStudyPartnerProfileValidationRecord(user), { bio: value }, {
+    userId: user.id,
+    events: [],
+    extraBlockedWords: String(process.env.NEXTGEN_PROFILE_BLOCKED_WORDS || "").split(",").map((word) => word.trim()).filter(Boolean),
+  }).profile.bio;
+}
+
+function ngValidatedStudyPartnerText(user = {}, value = "", field = "profile field", max = 120) {
+  const output = ngValidatedStudyPartnerBio(user, value).replace(/\s+/gu, " ").trim();
+  if ([...output].length > max) {
+    const error = new Error(`${field} must be ${max} characters or fewer`);
+    error.statusCode = 400;
+    throw error;
+  }
+  return output;
+}
+
+function ngValidatedStudyPartnerList(user = {}, value, field, { maxItems = 20, maxLength = 80 } = {}) {
+  if (!Array.isArray(value)) {
+    const error = new Error(`${field} must be a list`);
+    error.statusCode = 400;
+    throw error;
+  }
+  if (value.length > maxItems) {
+    const error = new Error(`${field} can contain at most ${maxItems} items`);
+    error.statusCode = 400;
+    throw error;
+  }
+  return [...new Set(value.map((item) => ngValidatedStudyPartnerText(user, item, field, maxLength)).filter(Boolean))];
+}
+
+function ngValidatedStudyPartnerProfileField(user = {}, field, value) {
+  return applyStudentProfilePatch(ngStudyPartnerProfileValidationRecord(user), { [field]: value }, {
+    userId: user.id,
+    events: [],
+  }).profile[field];
+}
+
+function ngValidatedStudyPartnerDate(value) {
+  if (value === null || value === "") return null;
+  const output = String(value || "").trim();
+  const parsed = new Date(`${output}T00:00:00.000Z`);
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(output) || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== output) {
+    const error = new Error("Target exam date must use YYYY-MM-DD format");
+    error.statusCode = 400;
+    throw error;
+  }
+  return output;
+}
+
+function ngNormalizeTelegramUsername(user = {}, value = "") {
+  const output = String(value || "").normalize("NFKC").trim().replace(/^@/, "");
+  if (!output) return "";
+  if (!/^[A-Za-z][A-Za-z0-9_]{4,31}$/u.test(output)) {
+    const error = new Error("Telegram username must use 5–32 letters, numbers, or underscores and start with a letter");
+    error.statusCode = 400;
+    throw error;
+  }
+  return ngValidatedStudyPartnerText(user, output, "Telegram username", 32);
+}
+
 function calculateStudyPartnerCompatibility(a = {}, b = {}) {
   let score = 0;
   const reasons = [];
@@ -17276,6 +17579,7 @@ app.get("/study-partner/profile/me", async (req, res) => {
     const access = canAccessStudyPartner({ db, user });
     if (!access.allowed) return res.status(403).json({ success: false, error: access.error });
     const profile = Object.values(db.studyPartnerProfiles || {}).find((p) => String(p.user_id) === String(user.id)) || null;
+    res.setHeader("Cache-Control", "private, no-store");
     res.json({ success: true, profile: profile ? sanitizeStudyPartnerProfile(profile, user.id) : null });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to load study partner profile" });
@@ -17284,48 +17588,98 @@ app.get("/study-partner/profile/me", async (req, res) => {
 
 app.post("/study-partner/profile/me", async (req, res) => {
   try {
-    const { user } = await getAuthenticatedUser(req);
-    const db = await readLiveDb();
-    const access = canAccessStudyPartner({ db, user });
-    if (!access.allowed) return res.status(403).json({ success: false, error: access.error });
+    const { user: authenticatedUser } = await getAuthenticatedUser(req);
+    const profile = await mutateLiveDb(async (db) => {
+      const storedUser = db.users?.[String(authenticatedUser.id)];
+      if (!storedUser?.id) throw Object.assign(new Error("User not found"), { statusCode: 401 });
+      const user = sanitizeUser(storedUser);
+      const access = canAccessStudyPartner({ db, user });
+      if (!access.allowed) throw Object.assign(new Error(access.error), { statusCode: 403 });
 
-    const existing = Object.values(db.studyPartnerProfiles || {}).find((p) => String(p.user_id) === String(user.id)) || null;
-    const id = existing?.id || uuid();
-    const profile = {
-      ...(existing || {}),
-      id,
-      user_id: user.id,
-      user_name: user.name || user.email || "Student",
-      email: req.body.email || existing?.email || user.email || "",
-      whatsapp: req.body.whatsapp || existing?.whatsapp || "",
-      telegram_username: req.body.telegram_username || existing?.telegram_username || "",
-      exam_type: req.body.exam_type || existing?.exam_type || "Step 1",
-      current_stage: req.body.current_stage || existing?.current_stage || "",
-      timezone: req.body.timezone || existing?.timezone || "",
-      country: req.body.country || existing?.country || "",
-      target_exam_date: req.body.target_exam_date || existing?.target_exam_date || null,
-      current_resources: Array.isArray(req.body.current_resources) ? req.body.current_resources : existing?.current_resources || [],
-      current_subjects: Array.isArray(req.body.current_subjects) ? req.body.current_subjects : existing?.current_subjects || [],
-      available_hours_per_day: Number(req.body.available_hours_per_day ?? existing?.available_hours_per_day ?? 0),
-      available_hours_per_week: Number(req.body.available_hours_per_week ?? existing?.available_hours_per_week ?? 0),
-      preferred_time_blocks: Array.isArray(req.body.preferred_time_blocks) ? req.body.preferred_time_blocks : existing?.preferred_time_blocks || [],
-      study_style: req.body.study_style || existing?.study_style || "",
-      looking_for: Array.isArray(req.body.looking_for) ? req.body.looking_for : existing?.looking_for || [],
-      language_preference: Array.isArray(req.body.language_preference) ? req.body.language_preference : existing?.language_preference || [],
-      bio: String(req.body.bio || existing?.bio || "").slice(0, 1000),
-      visibility: req.body.visibility || existing?.visibility || "students_only",
-      allow_requests: req.body.allow_requests !== undefined ? Boolean(req.body.allow_requests) : existing?.allow_requests !== false,
-      show_contact_after_accept: req.body.show_contact_after_accept !== undefined ? Boolean(req.body.show_contact_after_accept) : existing?.show_contact_after_accept !== false,
-      status: req.body.status || existing?.status || "active",
-      created_at: existing?.created_at || new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
+      const existing = Object.values(db.studyPartnerProfiles || {}).find((p) => String(p.user_id) === String(user.id)) || null;
+      if (req.body.email !== undefined && String(req.body.email || "").trim().toLowerCase() !== String(user.email || "").trim().toLowerCase()) {
+        throw Object.assign(new Error("Account email cannot be changed through the study partner profile"), { statusCode: 403 });
+      }
+      if (req.body.status !== undefined && String(req.body.status) !== String(existing?.status || "active")) {
+        throw Object.assign(new Error("Profile moderation status is controlled by the platform"), { statusCode: 403 });
+      }
+      for (const field of ["allow_requests", "show_contact_after_accept"]) {
+        if (req.body[field] !== undefined && typeof req.body[field] !== "boolean") {
+          throw Object.assign(new Error(`${field} must be true or false`), { statusCode: 400 });
+        }
+      }
 
-    db.studyPartnerProfiles[id] = profile;
-    await writeLiveDb(db);
-    res.json({ success: true, profile: sanitizeStudyPartnerProfile(profile, user.id) });
+      const id = existing?.id || uuid();
+      const visibility = req.body.visibility !== undefined
+        ? String(req.body.visibility || "").trim().toLowerCase()
+        : existing?.visibility || "students_only";
+      if (!["private", "students_only"].includes(visibility)) {
+        throw Object.assign(new Error("Study partner visibility must be private or students_only"), { statusCode: 400 });
+      }
+      const bio = req.body.bio !== undefined
+        ? ngValidatedStudyPartnerBio(user, req.body.bio)
+        : existing?.bio || "";
+      const whatsapp = req.body.whatsapp !== undefined
+        ? normalizeStudentProfilePhone(req.body.whatsapp)
+        : existing?.whatsapp || "";
+      const telegramUsername = req.body.telegram_username !== undefined
+        ? ngNormalizeTelegramUsername(user, req.body.telegram_username)
+        : existing?.telegram_username || "";
+      const examType = req.body.exam_type !== undefined ? ngValidatedStudyPartnerText(user, req.body.exam_type, "Exam type", 80) : existing?.exam_type || "Step 1";
+      const currentStage = req.body.current_stage !== undefined ? ngValidatedStudyPartnerText(user, req.body.current_stage, "Current stage", 120) : existing?.current_stage || "";
+      const timezone = req.body.timezone !== undefined ? ngValidatedStudyPartnerProfileField(user, "timezone", req.body.timezone) : existing?.timezone || "";
+      const country = req.body.country !== undefined ? ngValidatedStudyPartnerProfileField(user, "country_code", req.body.country) : existing?.country || "";
+      const targetExamDate = req.body.target_exam_date !== undefined ? ngValidatedStudyPartnerDate(req.body.target_exam_date) : existing?.target_exam_date || null;
+      const currentResources = req.body.current_resources !== undefined ? ngValidatedStudyPartnerList(user, req.body.current_resources, "Current resources") : existing?.current_resources || [];
+      const currentSubjects = req.body.current_subjects !== undefined ? ngValidatedStudyPartnerList(user, req.body.current_subjects, "Current subjects") : existing?.current_subjects || [];
+      const preferredTimeBlocks = req.body.preferred_time_blocks !== undefined ? ngValidatedStudyPartnerList(user, req.body.preferred_time_blocks, "Preferred time blocks") : existing?.preferred_time_blocks || [];
+      const studyStyle = req.body.study_style !== undefined ? ngValidatedStudyPartnerText(user, req.body.study_style, "Study style", 120) : existing?.study_style || "";
+      const lookingFor = req.body.looking_for !== undefined ? ngValidatedStudyPartnerList(user, req.body.looking_for, "Looking for") : existing?.looking_for || [];
+      const languagePreference = req.body.language_preference !== undefined ? ngValidatedStudyPartnerList(user, req.body.language_preference, "Language preference", { maxItems: 10, maxLength: 35 }) : existing?.language_preference || [];
+      const hoursPerDay = req.body.available_hours_per_day !== undefined ? Number(req.body.available_hours_per_day) : Number(existing?.available_hours_per_day || 0);
+      const hoursPerWeek = req.body.available_hours_per_week !== undefined ? Number(req.body.available_hours_per_week) : Number(existing?.available_hours_per_week || 0);
+      if (!Number.isFinite(hoursPerDay) || hoursPerDay < 0 || hoursPerDay > 24 || !Number.isFinite(hoursPerWeek) || hoursPerWeek < 0 || hoursPerWeek > 168) {
+        throw Object.assign(new Error("Study availability must be between 0–24 hours per day and 0–168 hours per week"), { statusCode: 400 });
+      }
+
+      const updated = {
+        ...(existing || {}),
+        id,
+        user_id: user.id,
+        user_name: user.name || user.email || "Student",
+        email: user.email || "",
+        whatsapp,
+        telegram_username: telegramUsername,
+        exam_type: examType,
+        current_stage: currentStage,
+        timezone,
+        country,
+        target_exam_date: targetExamDate,
+        current_resources: currentResources,
+        current_subjects: currentSubjects,
+        available_hours_per_day: hoursPerDay,
+        available_hours_per_week: hoursPerWeek,
+        preferred_time_blocks: preferredTimeBlocks,
+        study_style: studyStyle,
+        looking_for: lookingFor,
+        language_preference: languagePreference,
+        bio,
+        visibility,
+        allow_requests: req.body.allow_requests !== undefined ? req.body.allow_requests : existing?.allow_requests !== false,
+        show_contact_after_accept: req.body.show_contact_after_accept !== undefined ? req.body.show_contact_after_accept : existing?.show_contact_after_accept !== false,
+        status: existing?.status || "active",
+        created_at: existing?.created_at || new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+
+      db.studyPartnerProfiles = db.studyPartnerProfiles || {};
+      db.studyPartnerProfiles[id] = updated;
+      return sanitizeStudyPartnerProfile(updated, user.id);
+    });
+    res.setHeader("Cache-Control", "private, no-store");
+    return res.json({ success: true, profile });
   } catch (error) {
-    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to save study partner profile" });
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to save study partner profile" });
   }
 });
 
@@ -17343,7 +17697,7 @@ app.get("/study-partner/matches", async (req, res) => {
       .filter((p) => String(p.user_id) !== String(user.id))
       .filter((p) => p.status === "active")
       .filter((p) => p.allow_requests !== false)
-      .filter((p) => p.visibility !== "hidden");
+      .filter((p) => !["hidden", "private"].includes(String(p.visibility || "students_only")));
 
     let matches = profiles.map((profile) => {
       const compatibility = calculateStudyPartnerCompatibility(myProfile, profile);
@@ -17561,6 +17915,8 @@ const DEFAULT_CRM_DB = {
   outreach_queue: [],
   import_batches: [],
   ai_training: [],
+  ai_success_stories: [],
+  ai_success_story_audit_logs: [],
   ai_strategies: [],
   ai_actions: [],
   ai_feedback: [],
@@ -17736,6 +18092,10 @@ function safeCrmJson(value, fallback) {
 let crmReadCache = null;
 let crmReadCacheAt = 0;
 let crmReadInFlight = null;
+let crmReadOnlySnapshotCache = null;
+let crmReadOnlySnapshotCacheAt = 0;
+let crmReadOnlySnapshotInFlight = null;
+const CRM_READ_ONLY_SNAPSHOT_TTL_MS = Math.max(1000, Math.min(60000, Number(process.env.CRM_READ_ONLY_SNAPSHOT_TTL_MS || 5000)));
 
 function cloneCrmDbForRequest(db) {
   if (!db) return null;
@@ -17768,6 +18128,8 @@ async function readCrmDbFromDisk() {
       outreach_queue: Array.isArray(parsed.outreach_queue) ? parsed.outreach_queue : [],
       import_batches: Array.isArray(parsed.import_batches) ? parsed.import_batches : [],
       ai_training: Array.isArray(parsed.ai_training) ? parsed.ai_training : [],
+      ai_success_stories: Array.isArray(parsed.ai_success_stories) ? parsed.ai_success_stories : [],
+      ai_success_story_audit_logs: Array.isArray(parsed.ai_success_story_audit_logs) ? parsed.ai_success_story_audit_logs : [],
       ai_strategies: Array.isArray(parsed.ai_strategies) ? parsed.ai_strategies : [],
       ai_actions: Array.isArray(parsed.ai_actions) ? parsed.ai_actions : [],
       ai_feedback: Array.isArray(parsed.ai_feedback) ? parsed.ai_feedback : [],
@@ -17894,6 +18256,8 @@ async function readCrmDb() {
       .then((db) => {
         crmReadCache = db;
         crmReadCacheAt = Date.now();
+        crmReadOnlySnapshotCache = db;
+        crmReadOnlySnapshotCacheAt = Date.now();
         return db;
       })
       .finally(() => {
@@ -17903,6 +18267,42 @@ async function readCrmDb() {
 
   const db = await crmReadInFlight;
   return cloneCrmDbForRequest(db);
+}
+
+// Cross-product consumers must never initialize, seed, or persist CRM state.
+// This reader deliberately returns the stored snapshot as-is and treats a
+// missing CRM database as an empty knowledge source.
+async function readCrmDbSnapshotOnly({ fresh = false, cache = true } = {}) {
+  if (!fresh && crmReadOnlySnapshotCache && Date.now() - crmReadOnlySnapshotCacheAt < CRM_READ_ONLY_SNAPSHOT_TTL_MS) {
+    return { ...crmReadOnlySnapshotCache };
+  }
+  const load = async () => {
+    try {
+      const raw = await fs.readFile(CRM_DB_PATH, "utf8");
+      const parsed = JSON.parse(raw);
+      const snapshot = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+      if (cache) {
+        crmReadOnlySnapshotCache = snapshot;
+        crmReadOnlySnapshotCacheAt = Date.now();
+      }
+      return { ...snapshot };
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        if (cache) {
+          crmReadOnlySnapshotCache = {};
+          crmReadOnlySnapshotCacheAt = Date.now();
+        }
+        return {};
+      }
+      console.error("CRM read-only snapshot error (fail-closed):", error.message);
+      throw error;
+    }
+  };
+  if (fresh || !cache) return load();
+  if (!crmReadOnlySnapshotInFlight) {
+    crmReadOnlySnapshotInFlight = load().finally(() => { crmReadOnlySnapshotInFlight = null; });
+  }
+  return crmReadOnlySnapshotInFlight;
 }
 
 
@@ -17948,6 +18348,11 @@ const CRM_RETENTION_RULES = [
     section: "ai_training_deletion_logs",
     trigger: Number(process.env.CRM_RETENTION_TRAINING_DELETION_LOGS_TRIGGER || 500),
     keep: Number(process.env.CRM_RETENTION_TRAINING_DELETION_LOGS_KEEP || 300),
+  },
+  {
+    section: "ai_success_story_audit_logs",
+    trigger: Number(process.env.CRM_RETENTION_SUCCESS_STORY_AUDIT_TRIGGER || 1200),
+    keep: Number(process.env.CRM_RETENTION_SUCCESS_STORY_AUDIT_KEEP || 1000),
   },
   {
     section: "community_post_history",
@@ -18208,7 +18613,46 @@ async function writeCrmDb(db) {
     crmReadCache = nextDb;
     crmReadCacheAt = Date.now();
     crmReadInFlight = null;
+    crmReadOnlySnapshotCache = nextDb;
+    crmReadOnlySnapshotCacheAt = Date.now();
+    crmReadOnlySnapshotInFlight = null;
   });
+  crmWriteQueue = task;
+  return task;
+}
+
+// Governance workflows use a read-modify-write operation inside the CRM write
+// queue so optimistic versions cannot be defeated by two concurrent reviews.
+async function mutateCrmDb(mutator) {
+  const task = crmWriteQueue
+    .catch((error) => {
+      console.error("Previous CRM write failed; atomic mutation queue recovered:", error.message);
+    })
+    .then(async () => {
+      const stored = await readCrmDbSnapshotOnly({ fresh: true, cache: false });
+      const current = {
+        ...stored,
+        settings: { ...DEFAULT_CRM_SETTINGS, ...(stored.settings || {}) },
+      };
+      const result = await mutator(current);
+      const nextDb = {
+        ...DEFAULT_CRM_DB,
+        ...current,
+        settings: { ...DEFAULT_CRM_SETTINGS, ...(current.settings || {}) },
+        model_pricing: Array.isArray(current.model_pricing) && current.model_pricing.length ? current.model_pricing : DEFAULT_CRM_MODEL_PRICING,
+        updated_at: nowIso(),
+      };
+      await ensureDataDir();
+      await ngApplyCrmRetentionGuard(nextDb);
+      await ngWriteJsonAtomicStreaming(CRM_DB_PATH, nextDb, "CRM atomic governance mutation");
+      crmReadCache = nextDb;
+      crmReadCacheAt = Date.now();
+      crmReadInFlight = null;
+      crmReadOnlySnapshotCache = nextDb;
+      crmReadOnlySnapshotCacheAt = Date.now();
+      crmReadOnlySnapshotInFlight = null;
+      return result;
+    });
   crmWriteQueue = task;
   return task;
 }
@@ -32640,7 +33084,7 @@ app.post("/admin/assistant/actions/:id/execute", async (req, res) => {
 
 const CONTENT_IMPORT_DESTINATIONS = new Set([
   "aylamed_qbank", "lms_assessment", "baseline_diagnostic", "roadmap",
-  "marketing", "personal_assessment", "revision", "flashcards",
+  "content_hub", "marketing", "personal_assessment", "revision", "flashcards", "external_qbank",
 ]);
 
 function ngParseContentDestinations(value) {
@@ -32650,52 +33094,198 @@ function ngParseContentDestinations(value) {
   return [...new Set(rows.map((row) => contentSlug(row, "")).filter((row) => CONTENT_IMPORT_DESTINATIONS.has(row)))];
 }
 
-async function ngRunContentImportPreview({ jobId, upload, metadata }) {
+function ngContentUploadMetadata(body = {}) {
+  const source = body?.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata)
+    ? body.metadata
+    : body;
+  return {
+    exam_track: String(source.exam_track || source.examTrack || "").slice(0, 80),
+    source_namespace: String(source.source_namespace || source.sourceNamespace || "").slice(0, 160),
+    source_provider: String(source.source_provider || source.sourceProvider || "").slice(0, 160),
+    collection_title: String(source.collection_title || source.collectionTitle || "").slice(0, 240),
+    destinations: Array.isArray(source.destinations)
+      ? source.destinations.slice(0, 20).map((item) => String(item).slice(0, 80))
+      : String(source.destinations || "").slice(0, 2_000),
+  };
+}
+
+async function ngReceiveOrResolveContentZip(req, allowedPurposes) {
+  const contentType = String(req.headers["content-type"] || "").toLowerCase();
+  if (contentType.includes("multipart/form-data")) {
+    const upload = await receiveContentZip(req, DATA_DIR);
+    return { ...upload, owned: true, uploadId: null };
+  }
+  const uploadId = String(req.body?.upload_id || req.body?.uploadId || "").trim();
+  if (!uploadId) throw Object.assign(new Error("Use multipart/form-data or provide a finalized upload_id"), { statusCode: 415 });
+  const upload = await ngContentUploadStore.resolveFinalized(uploadId, { allowedPurposes });
+  return { ...upload, fields: { ...(upload.fields || {}), ...(req.body || {}) } };
+}
+
+async function ngCleanupRejectedContentUpload(upload) {
+  if (upload?.owned === true && upload.file) await cleanupContentImportFiles(upload.file);
+}
+
+async function ngQueueContentOperation({ type, lane, upload, domainJobId, metadata = {}, maxAttempts = 3 }) {
+  const backgroundJobId = crypto.randomUUID();
+  if (upload.uploadId) await ngContentUploadStore.acquire(upload.uploadId, backgroundJobId);
+  try {
+    const queued = await ngContentBackgroundQueue.enqueue({
+      id: backgroundJobId,
+      type,
+      lane,
+      maxAttempts,
+      idempotencyKey: `${type}:${domainJobId}`,
+      payload: {
+        file: upload.file,
+        owned_file: upload.owned === true,
+        upload_id: upload.uploadId || null,
+        domain_job_id: domainJobId,
+        metadata,
+      },
+      metadata: {
+        domain_job_id: domainJobId,
+        purpose: lane,
+        original_filename: upload.originalFilename,
+      },
+    });
+    if (queued.deduplicated && upload.uploadId) {
+      await ngContentUploadStore.release(upload.uploadId, backgroundJobId).catch(() => {});
+    }
+    return queued.job;
+  } catch (error) {
+    if (upload.uploadId) await ngContentUploadStore.release(upload.uploadId, backgroundJobId).catch(() => {});
+    throw error;
+  }
+}
+
+function ngContentBackgroundJobs(domainJobId) {
+  return ngContentBackgroundQueue.list({ limit: 500 }).filter((job) => String(job.metadata?.domain_job_id) === String(domainJobId));
+}
+
+app.post("/admin/crm/ai-training/content-uploads", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const session = await ngContentUploadStore.create({
+      originalFilename: req.body?.original_filename || req.body?.filename,
+      totalBytes: req.body?.total_bytes,
+      expectedSha256: req.body?.sha256 || req.body?.expected_sha256,
+      purpose: req.body?.purpose || "question_zip",
+      createdBy: String(user.id),
+      metadata: ngContentUploadMetadata(req.body || {}),
+    });
+    return res.status(201).json({
+      success: true,
+      upload: session,
+      chunk_url_template: `/admin/crm/ai-training/content-uploads/${session.id}/chunks/{index}`,
+      finalize_url: `/admin/crm/ai-training/content-uploads/${session.id}/finalize`,
+      message: "Upload session created. Send each chunk as application/octet-stream; ZIP bytes stay on persistent disk.",
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/ai-training/content-uploads/:uploadId/chunks/:index", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    if (!String(req.headers["content-type"] || "").toLowerCase().includes("application/octet-stream")) {
+      return res.status(415).json({ success: false, error: "Chunk Content-Type must be application/octet-stream" });
+    }
+    const result = await ngContentUploadStore.writeChunk(req.params.uploadId, req.params.index, req, {
+      contentLength: req.headers["content-length"],
+      expectedSha256: req.headers["x-chunk-sha256"],
+    });
+    return res.status(result.deduplicated ? 200 : 201).json({ success: true, ...result });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/ai-training/content-uploads/:uploadId", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    return res.json({ success: true, upload: await ngContentUploadStore.get(req.params.uploadId) });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-training/content-uploads/:uploadId/finalize", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const result = await ngContentUploadStore.finalize(req.params.uploadId, { expectedSha256: req.body?.sha256 });
+    return res.json({ success: true, upload: result.session, sha256: result.sha256, deduplicated: result.deduplicated });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete("/admin/crm/ai-training/content-uploads/:uploadId", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    return res.json({ success: true, upload: await ngContentUploadStore.cancel(req.params.uploadId) });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+async function ngRunContentImportPreview({ jobId, upload, metadata, queueContext }) {
   let inventory;
   try {
+    await setContentImportJobStatus(jobId, "previewing");
+    await queueContext.heartbeat({ stage: "extracting_zip" });
     inventory = await extractSafeZipInventory(upload.file, jobId, DATA_DIR);
+    await queueContext.heartbeat({ stage: "previewing_questions", zip_entries: inventory.entryCount });
     const preview = await previewUniversalQuestionZip({ inventory, ...metadata });
+    await queueContext.heartbeat({ stage: "preview_complete", counts: preview.counts });
     await finishContentImportPreview(jobId, {
       ...preview.counts,
       missing_media_samples: preview.missingMedia,
       collections: preview.collections,
     }, preview.errors);
+    return preview;
   } catch (error) {
     console.error("Content Registry preview failed:", jobId, error);
-    await finishContentImportPreview(jobId, { failed: true }, [{ error: error.message || "Preview failed" }]).catch(() => {});
+    await setContentImportJobStatus(jobId, "preview_retrying", { failed: true }, [{ error: error.message || "Preview failed" }]).catch(() => {});
+    throw error;
   } finally {
-    await cleanupContentImportFiles(upload.file, inventory?.workDir);
+    await cleanupContentImportFiles(inventory?.workDir);
   }
 }
 
-async function ngRunContentDraftImport({ job, upload }) {
+async function ngRunContentDraftImport({ job, upload, queueContext }) {
   let inventory;
   try {
+    await setContentImportJobStatus(job.id, "importing_draft");
+    await queueContext.heartbeat({ stage: "extracting_zip" });
     inventory = await extractSafeZipInventory(upload.file, `${job.id}-draft`, DATA_DIR);
     const imported = await importUniversalQuestionZip({
       inventory, job,
+      checkpoint: queueContext.job.checkpoint,
+      onCheckpoint: queueContext.updateCheckpoint,
       batchSize: Math.max(25, Math.min(250, Number(process.env.NEXTGEN_CONTENT_IMPORT_BATCH_SIZE || 100))),
       onBatch: ({ collectionKey, collectionTitle, rows }) => importContentQuestionBatch({
         job, collectionKey, collectionTitle, rows, destinations: Array.isArray(job.destinations) ? job.destinations : [],
       }),
     });
+    await queueContext.heartbeat({ stage: "draft_import_complete", totals: imported.totals });
     await setContentImportJobStatus(job.id, imported.errors.length ? "draft_imported_with_warnings" : "draft_imported", imported.totals, imported.errors);
+    return imported;
   } catch (error) {
     console.error("Content Registry draft import failed:", job.id, error);
-    await setContentImportJobStatus(job.id, "draft_import_failed", { failed: true }, [{ error: error.message || "Draft import failed" }]).catch(() => {});
+    await setContentImportJobStatus(job.id, "draft_import_retrying", { failed: true }, [{ error: error.message || "Draft import failed" }]).catch(() => {});
+    throw error;
   } finally {
-    await cleanupContentImportFiles(upload.file, inventory?.workDir);
+    await cleanupContentImportFiles(inventory?.workDir);
   }
 }
 
 app.post("/admin/crm/ai-training/content-imports/preview", async (req, res) => {
   let upload;
+  let jobId = "";
   try {
     const { user } = await requireCrmAdmin(req);
-    if (!String(req.headers["content-type"] || "").toLowerCase().includes("multipart/form-data")) {
-      return res.status(415).json({ success: false, error: "multipart/form-data with a ZIP field is required" });
-    }
-    upload = await receiveContentZip(req, DATA_DIR);
+    upload = await ngReceiveOrResolveContentZip(req, ["question_zip"]);
     const examTrack = normalizeExamTrack(upload.fields.exam_track || upload.fields.examTrack);
     const sourceNamespace = contentSlug(upload.fields.source_namespace || upload.fields.sourceNamespace || upload.fields.source_provider || upload.fields.sourceProvider);
     const sourceProvider = String(upload.fields.source_provider || upload.fields.sourceProvider || "unknown").trim();
@@ -32703,25 +33293,27 @@ app.post("/admin/crm/ai-training/content-imports/preview", async (req, res) => {
     if (examTrack === "unknown") throw Object.assign(new Error("exam_track is required"), { statusCode: 400 });
     if (sourceNamespace === "unknown") throw Object.assign(new Error("source_namespace or source_provider is required"), { statusCode: 400 });
     const destinations = ngParseContentDestinations(upload.fields.destinations);
-    const jobId = crypto.randomUUID();
+    jobId = crypto.randomUUID();
     await createContentImportJob({
       id: jobId, examTrack, sourceNamespace, sourceProvider, collectionTitle,
       originalFilename: upload.originalFilename, zipSha256: upload.sha256,
       destinations, createdBy: String(user.id),
     });
-    void ngRunContentImportPreview({
-      jobId, upload,
+    await setContentImportJobStatus(jobId, "preview_queued");
+    const backgroundJob = await ngQueueContentOperation({
+      type: "content_question_preview", lane: "question_zip", upload, domainJobId: jobId,
       metadata: { examTrack, sourceNamespace, sourceProvider, collectionTitle },
     });
     upload = null;
     return res.status(202).json({
-      success: true, job_id: jobId, status: "previewing", exam_track: examTrack,
+      success: true, job_id: jobId, background_job_id: backgroundJob.id, status: "preview_queued", exam_track: examTrack,
       source_namespace: sourceNamespace, destinations,
       poll_url: `/admin/crm/ai-training/content-imports/${jobId}`,
       message: "ZIP accepted. Preview runs asynchronously with bounded memory; nothing is published yet.",
     });
   } catch (error) {
-    if (upload?.file) await cleanupContentImportFiles(upload.file);
+    if (jobId) await setContentImportJobStatus(jobId, "preview_queue_failed", { failed: true }, [{ error: error.message }]).catch(() => {});
+    await ngCleanupRejectedContentUpload(upload);
     return res.status(error.statusCode || 500).json({ success: false, error: error.message || "Content ZIP preview failed" });
   }
 });
@@ -32731,7 +33323,7 @@ app.get("/admin/crm/ai-training/content-imports/:jobId", async (req, res) => {
     await requireCrmAdmin(req);
     const job = await getContentImportJob(req.params.jobId);
     if (!job) return res.status(404).json({ success: false, error: "Content import job not found" });
-    return res.json({ success: true, job });
+    return res.json({ success: true, job, background_jobs: ngContentBackgroundJobs(job.id) });
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -32739,43 +33331,47 @@ app.get("/admin/crm/ai-training/content-imports/:jobId", async (req, res) => {
 
 app.post("/admin/crm/ai-training/content-imports/:jobId/import-draft", async (req, res) => {
   let upload;
+  let claimed = null;
+  let priorStatus = "";
   try {
     await requireCrmAdmin(req);
-    if (!String(req.headers["content-type"] || "").toLowerCase().includes("multipart/form-data")) {
-      return res.status(415).json({ success: false, error: "multipart/form-data with the original ZIP is required" });
-    }
     const existing = await getContentImportJob(req.params.jobId);
+    priorStatus = String(existing?.status || "");
     if (!existing) return res.status(404).json({ success: false, error: "Content import job not found" });
     if (!["preview_ready", "preview_with_warnings"].includes(String(existing.status))) {
       return res.status(409).json({ success: false, error: `Import job cannot be committed from status ${existing.status}` });
     }
-    upload = await receiveContentZip(req, DATA_DIR);
+    upload = await ngReceiveOrResolveContentZip(req, ["question_zip"]);
     if (String(upload.sha256) !== String(existing.zip_sha256)) {
-      await cleanupContentImportFiles(upload.file); upload = null;
+      await ngCleanupRejectedContentUpload(upload); upload = null;
       return res.status(409).json({ success: false, error: "ZIP checksum does not match the approved preview. Upload the exact same ZIP." });
     }
-    const claimed = await claimContentImportDraft(existing.id);
+    claimed = await claimContentImportDraft(existing.id);
     if (!claimed) {
-      await cleanupContentImportFiles(upload.file); upload = null;
+      await ngCleanupRejectedContentUpload(upload); upload = null;
       return res.status(409).json({ success: false, error: "Import job was already claimed or its status changed" });
     }
-    void ngRunContentDraftImport({ job: claimed, upload });
+    const backgroundJob = await ngQueueContentOperation({
+      type: "content_question_draft", lane: "question_zip", upload, domainJobId: claimed.id,
+    });
     upload = null;
     return res.status(202).json({
-      success: true, job_id: claimed.id, status: "importing_draft",
+      success: true, job_id: claimed.id, background_job_id: backgroundJob.id, status: "importing_draft",
       poll_url: `/admin/crm/ai-training/content-imports/${claimed.id}`,
       message: "Checksum verified. Questions are importing as disabled drafts; nothing is published.",
     });
   } catch (error) {
-    if (upload?.file) await cleanupContentImportFiles(upload.file);
+    if (claimed?.id) await setContentImportJobStatus(claimed.id, priorStatus || "preview_ready").catch(() => {});
+    await ngCleanupRejectedContentUpload(upload);
     return res.status(error.statusCode || 500).json({ success: false, error: error.message || "Draft import failed" });
   }
 });
 
-async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload }) {
+async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload, queueContext }) {
   const uploadedObjects = [];
   let persistenceCommitted = false;
   try {
+    await queueContext.heartbeat({ stage: "uploading_private_images" });
     const references = await getContentMediaReferences(parentJob.id, "image");
     const uploaded = await uploadMediaZipToR2({
       zipFile: upload.file,
@@ -32792,6 +33388,7 @@ async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload }) {
     for (const duplicateObjectKey of saved.duplicateObjects) {
       await deleteR2Object(duplicateObjectKey).catch((error) => console.warn("R2 duplicate cleanup failed:", error.message));
     }
+    await queueContext.heartbeat({ stage: "image_import_complete", matched: report.matches.length, linked: saved.links });
     await finishContentMediaImportJob(mediaJob.id, report.ambiguous.length ? "draft_imported_with_warnings" : "draft_imported", {
       zip_entries: uploaded.entries,
       uncompressed_bytes: uploaded.uncompressedBytes,
@@ -32807,42 +33404,43 @@ async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload }) {
       ambiguous_samples: report.ambiguous.slice(0, 100),
       unreferenced_samples: report.unreferenced.slice(0, 100).map((item) => item.originalName),
     }, []);
+    return { report, saved };
   } catch (error) {
     console.error("Content Registry media import failed:", mediaJob.id, error);
     if (!persistenceCommitted) await Promise.allSettled(uploadedObjects.map((objectKey) => deleteR2Object(objectKey)));
-    await finishContentMediaImportJob(mediaJob.id, "draft_import_failed", { failed: true }, [{ error: error.message || "Media import failed" }]).catch(() => {});
-  } finally {
-    await cleanupContentImportFiles(upload.file);
+    await finishContentMediaImportJob(mediaJob.id, "draft_import_retrying", { failed: true }, [{ error: error.message || "Media import failed" }]).catch(() => {});
+    throw error;
   }
 }
 
 app.post("/admin/crm/ai-training/content-imports/:jobId/media/import-draft", async (req, res) => {
   let upload;
+  let mediaJob = null;
   try {
     const { user } = await requireCrmAdmin(req);
     if (!contentMediaStatus().configured) return res.status(503).json({ success: false, error: "Cloudflare R2 is not configured" });
-    if (!String(req.headers["content-type"] || "").toLowerCase().includes("multipart/form-data")) {
-      return res.status(415).json({ success: false, error: "multipart/form-data with an image ZIP is required" });
-    }
     const parentJob = await getContentImportJob(req.params.jobId);
     if (!parentJob) return res.status(404).json({ success: false, error: "Content import job not found" });
     if (!["draft_imported", "draft_imported_with_warnings"].includes(String(parentJob.status))) {
       return res.status(409).json({ success: false, error: "Questions must be imported as drafts before media can be attached" });
     }
-    upload = await receiveContentZip(req, DATA_DIR);
-    const mediaJob = await createContentMediaImportJob({
+    upload = await ngReceiveOrResolveContentZip(req, ["image_zip"]);
+    mediaJob = await createContentMediaImportJob({
       id: crypto.randomUUID(), contentImportJobId: parentJob.id, zipSha256: upload.sha256,
       originalFilename: upload.originalFilename, createdBy: String(user.id),
     });
-    void ngRunContentMediaDraftImport({ mediaJob, parentJob, upload });
+    const backgroundJob = await ngQueueContentOperation({
+      type: "content_image_draft", lane: "image_zip", upload, domainJobId: mediaJob.id,
+    });
     upload = null;
     return res.status(202).json({
-      success: true, media_job_id: mediaJob.id, content_import_job_id: parentJob.id, status: "uploading",
+      success: true, media_job_id: mediaJob.id, background_job_id: backgroundJob.id, content_import_job_id: parentJob.id, status: "queued",
       poll_url: `/admin/crm/ai-training/content-media-imports/${mediaJob.id}`,
       message: "Image ZIP accepted. Objects and mappings remain private disabled drafts.",
     });
   } catch (error) {
-    if (upload?.file) await cleanupContentImportFiles(upload.file);
+    if (mediaJob?.id) await finishContentMediaImportJob(mediaJob.id, "queue_failed", { failed: true }, [{ error: error.message }]).catch(() => {});
+    await ngCleanupRejectedContentUpload(upload);
     return res.status(error.statusCode || 500).json({ success: false, error: error.message || "Media ZIP import failed" });
   }
 });
@@ -32852,15 +33450,17 @@ app.get("/admin/crm/ai-training/content-media-imports/:mediaJobId", async (req, 
     await requireCrmAdmin(req);
     const job = await getContentMediaImportJob(req.params.mediaJobId);
     if (!job) return res.status(404).json({ success: false, error: "Media import job not found" });
-    return res.json({ success: true, job, storage: contentMediaStatus() });
+    return res.json({ success: true, job, background_jobs: ngContentBackgroundJobs(job.id), storage: contentMediaStatus() });
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
 });
 
-async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload }) {
+async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queueContext }) {
   const workDir = path.join(DATA_DIR, "content-imports", `${videoJob.id}-videos`);
   try {
+    await cleanupContentImportFiles(workDir);
+    await queueContext.heartbeat({ stage: "extracting_private_videos" });
     const references = await getContentMediaReferences(parentJob.id, "video");
     const extracted = await extractReferencedVideos({ zipFile: upload.file, workDir, references });
     const report = matchVideoReferences(references, extracted.videos);
@@ -32869,6 +33469,7 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload }) {
     let reusedAssets = 0;
     let reusedMappings = 0;
     const failures = [];
+    let processed = 0;
     for (const match of report.matches) {
       try {
         const reusable = await findReusableContentVideo({
@@ -32903,8 +33504,22 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload }) {
       } catch (error) {
         failures.push({ student_qid: match.studentQid, media_ref: match.mediaRef, error: error.response?.data?.error || error.message });
       }
+      processed += 1;
+      await queueContext.updateCheckpoint({
+        version: 1,
+        videos_processed: processed,
+        videos_total: report.matches.length,
+      }, {
+        stage: "uploading_private_videos",
+        videos_processed: processed,
+        videos_total: report.matches.length,
+        newly_uploaded: newlyUploaded,
+        reused: reusedAssets + reusedMappings,
+        failures: failures.length,
+      });
     }
     const warning = report.ambiguous.length || report.missing.length || failures.length;
+    await queueContext.heartbeat({ stage: "video_import_complete", matched: report.matches.length, linked });
     await finishContentVideoImportJob(videoJob.id, warning ? "draft_imported_with_warnings" : "draft_imported", {
       zip_entries: extracted.entries,
       video_references: references.length,
@@ -32923,37 +33538,74 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload }) {
       missing_samples: report.missing.slice(0, 100).map((item) => ({ student_qid: item.studentQid, media_ref: item.mediaRef })),
       ambiguous_samples: report.ambiguous.slice(0, 100),
     }, failures);
+    return { report, failures, linked };
   } catch (error) {
     console.error("Content Registry Vimeo import failed:", videoJob.id, error);
-    await finishContentVideoImportJob(videoJob.id, "draft_import_failed", { failed: true }, [{ error: error.message || "Video import failed" }]).catch(() => {});
+    await finishContentVideoImportJob(videoJob.id, "draft_import_retrying", { failed: true }, [{ error: error.message || "Video import failed" }]).catch(() => {});
+    throw error;
   } finally {
-    await cleanupContentImportFiles(upload.file, workDir);
+    await cleanupContentImportFiles(workDir);
   }
+}
+
+function ngCourseExamTrack(db, user, courseId) {
+  const cleanCourseId = String(courseId || "").trim();
+  const course = db.courses?.[cleanCourseId] || {};
+  const access = ngResolveCourseAccessRecord(db, user, cleanCourseId);
+  const enrollment = access.enrollment || {};
+  const candidates = [
+    course.exam_track, course.examTrack, course.exam_type, course.exam,
+    course.program_track, course.slug, course.title, course.name,
+    enrollment.exam_track, enrollment.examTrack, enrollment.exam_type, enrollment.exam,
+  ];
+  return normalizeCourseExamTrack(candidates);
+}
+
+async function ngRegistryQuestionWithPlayableMedia(question = {}) {
+  const media = await Promise.all((Array.isArray(question.media) ? question.media : []).map(async (item) => ({
+    id: item.id,
+    ref: item.ref,
+    placement: item.placement || "explanation",
+    content_type: item.content_type || "image/*",
+    url: await createPrivateMediaUrl(item.object_key, 300),
+    expires_in_seconds: 300,
+  })));
+  const videos = (Array.isArray(question.videos) ? question.videos : []).map((item) => ({
+    id: item.id,
+    ref: item.ref,
+    placement: item.placement || "explanation",
+    provider: "vimeo",
+    provider_id: item.provider_id,
+    embed_url: item.embed_url,
+  }));
+  return { ...question, media, videos };
 }
 
 app.post("/admin/crm/ai-training/content-imports/:jobId/videos/import-draft", async (req, res) => {
   let upload;
+  let videoJob = null;
   try {
     const { user } = await requireCrmAdmin(req);
     if (!contentVideoStatus().configured) return res.status(503).json({ success: false, error: "Vimeo access token is not configured" });
-    if (!String(req.headers["content-type"] || "").toLowerCase().includes("multipart/form-data")) {
-      return res.status(415).json({ success: false, error: "multipart/form-data with a video media ZIP is required" });
-    }
     const parentJob = await getContentImportJob(req.params.jobId);
     if (!parentJob) return res.status(404).json({ success: false, error: "Content import job not found" });
     if (!["draft_imported", "draft_imported_with_warnings"].includes(String(parentJob.status))) {
       return res.status(409).json({ success: false, error: "Questions must be imported as drafts before videos can be attached" });
     }
-    upload = await receiveContentZip(req, DATA_DIR);
-    const videoJob = await createContentVideoImportJob({ id: crypto.randomUUID(), contentImportJobId: parentJob.id,
+    upload = await ngReceiveOrResolveContentZip(req, ["video_zip"]);
+    videoJob = await createContentVideoImportJob({ id: crypto.randomUUID(), contentImportJobId: parentJob.id,
       zipSha256: upload.sha256, originalFilename: upload.originalFilename, createdBy: String(user.id) });
-    void ngRunContentVideoDraftImport({ videoJob, parentJob, upload });
+    const backgroundJob = await ngQueueContentOperation({
+      type: "content_video_draft", lane: "video_zip", upload, domainJobId: videoJob.id,
+      maxAttempts: 2,
+    });
     upload = null;
-    return res.status(202).json({ success: true, video_job_id: videoJob.id, content_import_job_id: parentJob.id,
-      status: "uploading", poll_url: `/admin/crm/ai-training/content-video-imports/${videoJob.id}`,
+    return res.status(202).json({ success: true, video_job_id: videoJob.id, background_job_id: backgroundJob.id, content_import_job_id: parentJob.id,
+      status: "queued", poll_url: `/admin/crm/ai-training/content-video-imports/${videoJob.id}`,
       message: "Video ZIP accepted. Referenced videos are uploading privately to Vimeo as disabled drafts." });
   } catch (error) {
-    if (upload?.file) await cleanupContentImportFiles(upload.file);
+    if (videoJob?.id) await finishContentVideoImportJob(videoJob.id, "queue_failed", { failed: true }, [{ error: error.message }]).catch(() => {});
+    await ngCleanupRejectedContentUpload(upload);
     return res.status(error.statusCode || 500).json({ success: false, error: error.message || "Video ZIP import failed" });
   }
 });
@@ -32963,11 +33615,1446 @@ app.get("/admin/crm/ai-training/content-video-imports/:videoJobId", async (req, 
     await requireCrmAdmin(req);
     const job = await getContentVideoImportJob(req.params.videoJobId);
     if (!job) return res.status(404).json({ success: false, error: "Video import job not found" });
-    return res.json({ success: true, job, storage: contentVideoStatus() });
+    return res.json({ success: true, job, background_jobs: ngContentBackgroundJobs(job.id), storage: contentVideoStatus() });
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
 });
+
+function ngQueuedContentUpload(backgroundJob) {
+  const payload = backgroundJob.payload || {};
+  return {
+    file: payload.file,
+    owned: payload.owned_file === true,
+    uploadId: payload.upload_id || null,
+  };
+}
+
+async function ngContentQueueCanRecover(backgroundJob) {
+  const file = String(backgroundJob.payload?.file || "");
+  if (!file) return false;
+  return fs.access(file).then(() => true).catch(() => false);
+}
+
+async function ngContentQueueTerminal(backgroundJob, finalFailure, cancelled) {
+  const upload = ngQueuedContentUpload(backgroundJob);
+  if (upload.uploadId) await ngContentUploadStore.release(upload.uploadId, backgroundJob.id).catch(() => {});
+  if (upload.owned && ["completed", "cancelled"].includes(backgroundJob.status)) {
+    await cleanupContentImportFiles(upload.file);
+  }
+  if (backgroundJob.status === "failed" && typeof finalFailure === "function") {
+    await finalFailure(backgroundJob.error || "Background import exhausted its retries").catch(() => {});
+  }
+  if (backgroundJob.status === "cancelled" && typeof cancelled === "function") {
+    await cancelled("Cancelled by an administrator").catch(() => {});
+  }
+}
+
+ngContentBackgroundQueue.register("content_question_preview", async (queueContext) => {
+  const payload = queueContext.job.payload;
+  await ngRunContentImportPreview({
+    jobId: payload.domain_job_id,
+    upload: ngQueuedContentUpload(queueContext.job),
+    metadata: payload.metadata || {},
+    queueContext,
+  });
+}, {
+  canRecover: ngContentQueueCanRecover,
+  onTerminal: (job) => ngContentQueueTerminal(job, (message) => setContentImportJobStatus(
+    job.payload.domain_job_id, "preview_failed", { failed: true }, [{ error: message }],
+  ), (message) => setContentImportJobStatus(job.payload.domain_job_id, "preview_cancelled", { cancelled: true }, [{ error: message }])),
+});
+
+ngContentBackgroundQueue.register("content_question_draft", async (queueContext) => {
+  const domainJob = await getContentImportJob(queueContext.job.payload.domain_job_id);
+  if (!domainJob) throw new Error("Content import job no longer exists");
+  await ngRunContentDraftImport({ job: domainJob, upload: ngQueuedContentUpload(queueContext.job), queueContext });
+}, {
+  canRecover: ngContentQueueCanRecover,
+  onTerminal: (job) => ngContentQueueTerminal(job, (message) => setContentImportJobStatus(
+    job.payload.domain_job_id, "draft_import_failed", { failed: true }, [{ error: message }],
+  ), (message) => setContentImportJobStatus(job.payload.domain_job_id, "draft_import_cancelled", { cancelled: true }, [{ error: message }])),
+});
+
+ngContentBackgroundQueue.register("content_image_draft", async (queueContext) => {
+  const mediaJob = await getContentMediaImportJob(queueContext.job.payload.domain_job_id);
+  if (!mediaJob) throw new Error("Content image import job no longer exists");
+  const parentJob = await getContentImportJob(mediaJob.content_import_job_id);
+  if (!parentJob) throw new Error("Parent content import job no longer exists");
+  await ngRunContentMediaDraftImport({ mediaJob, parentJob, upload: ngQueuedContentUpload(queueContext.job), queueContext });
+}, {
+  canRecover: ngContentQueueCanRecover,
+  onTerminal: (job) => ngContentQueueTerminal(job, (message) => finishContentMediaImportJob(
+    job.payload.domain_job_id, "draft_import_failed", { failed: true }, [{ error: message }],
+  ), (message) => finishContentMediaImportJob(job.payload.domain_job_id, "draft_import_cancelled", { cancelled: true }, [{ error: message }])),
+});
+
+ngContentBackgroundQueue.register("content_video_draft", async (queueContext) => {
+  const videoJob = await getContentVideoImportJob(queueContext.job.payload.domain_job_id);
+  if (!videoJob) throw new Error("Content video import job no longer exists");
+  const parentJob = await getContentImportJob(videoJob.content_import_job_id);
+  if (!parentJob) throw new Error("Parent content import job no longer exists");
+  await ngRunContentVideoDraftImport({ videoJob, parentJob, upload: ngQueuedContentUpload(queueContext.job), queueContext });
+}, {
+  canRecover: ngContentQueueCanRecover,
+  onTerminal: (job) => ngContentQueueTerminal(job, (message) => finishContentVideoImportJob(
+    job.payload.domain_job_id, "draft_import_failed", { failed: true }, [{ error: message }],
+  ), (message) => finishContentVideoImportJob(job.payload.domain_job_id, "draft_import_cancelled", { cancelled: true }, [{ error: message }])),
+});
+
+app.get("/admin/crm/operations/content-jobs", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    await Promise.all([ngContentBackgroundQueue.initialize(), ngContentUploadStore.initialize()]);
+    const queueJobs = ngContentBackgroundQueue.list({
+      status: String(req.query.status || ""),
+      type: String(req.query.type || ""),
+      lane: String(req.query.lane || ""),
+      limit: req.query.limit || 100,
+    });
+    const staleCutoff = Date.now() - Math.max(60_000, Number(process.env.NEXTGEN_CONTENT_JOB_STALE_MS || 15 * 60 * 1000));
+    let registryJobs = null;
+    let registryError = null;
+    try { registryJobs = await listContentOperationalJobs({ limit: req.query.limit || 50 }); }
+    catch (error) { registryError = error.message; }
+    return res.json({
+      success: true,
+      build: NEXTGEN_BACKEND_BUILD,
+      summary: ngContentBackgroundQueue.summary(),
+      stale_running_jobs: queueJobs.filter((job) => ["running", "pause_requested", "cancel_requested"].includes(job.status)
+        && Date.parse(job.heartbeat_at || job.started_at || 0) < staleCutoff).map((job) => job.id),
+      jobs: queueJobs,
+      registry_jobs: registryJobs,
+      registry_error: registryError,
+      upload_summary: await ngContentUploadStore.summary(),
+      uploads: await ngContentUploadStore.list({ limit: req.query.upload_limit || 50 }),
+      controls: ["pause", "resume", "cancel", "retry"],
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/operations/content-jobs/:backgroundJobId/actions/:action", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    await ngContentBackgroundQueue.initialize();
+    const action = String(req.params.action || "").trim().toLowerCase();
+    if (!["pause", "resume", "cancel", "retry"].includes(action)) {
+      return res.status(400).json({ success: false, error: "Action must be pause, resume, cancel, or retry" });
+    }
+    const existing = ngContentBackgroundQueue.get(req.params.backgroundJobId, { includePayload: true });
+    if (!existing) return res.status(404).json({ success: false, error: "Background job not found" });
+    let reacquiredUpload = false;
+    if (action === "retry" && existing.payload?.upload_id) {
+      await ngContentUploadStore.acquire(existing.payload.upload_id, existing.id);
+      reacquiredUpload = true;
+    }
+    try {
+      const job = await ngContentBackgroundQueue[action](existing.id);
+      return res.json({ success: true, job });
+    } catch (error) {
+      if (reacquiredUpload) await ngContentUploadStore.release(existing.payload.upload_id, existing.id).catch(() => {});
+      throw error;
+    }
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/operations/content-uploads/cleanup-expired", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const leases = await ngContentUploadStore.reconcileLeases(ngContentBackgroundQueue.activeJobIds());
+    return res.json({ success: true, leases, cleanup: await ngContentUploadStore.cleanupExpired() });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/operations/storage-performance", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const databases = {};
+    for (const [key, file] of Object.entries({ lms: LIVE_DB_PATH, crm: CRM_DB_PATH, ayla: AYLA_DB_PATH })) {
+      const stat = await fs.stat(file).catch(() => null);
+      databases[key] = stat ? { exists: true, size_bytes: stat.size, modified_at: stat.mtime.toISOString() } : { exists: false };
+    }
+    const snapshot = await storagePerformanceSnapshot({
+      dataDir: DATA_DIR,
+      roots: {
+        content_operations: NG_CONTENT_OPERATIONS_ROOT,
+        content_imports: path.join(DATA_DIR, "content-imports"),
+        media: MEDIA_DIR,
+      },
+      memory: ngMemoryStatus(),
+      queue: ngContentBackgroundQueue,
+      uploads: ngContentUploadStore,
+      storage: {
+        persistent_disk_expected: !String(DATA_DIR).startsWith("/tmp"),
+        databases,
+        postgres: contentRegistryStatus(),
+        r2: contentMediaStatus(),
+        vimeo: contentVideoStatus(),
+      },
+    });
+    return res.json({ success: true, build: NEXTGEN_BACKEND_BUILD, ...snapshot });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/ai-training/content-registry/collections", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const examTrack = req.query.exam_track ? normalizeExamTrack(req.query.exam_track) : "";
+    const collections = await listContentCollections({
+      examTrack: examTrack === "unknown" ? "" : examTrack,
+      status: String(req.query.status || "").trim().toLowerCase(),
+      limit: req.query.limit,
+      offset: req.query.offset,
+    });
+    return res.json({ success: true, count: collections.length, collections });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/ai-training/content-registry/collections/:collectionId/controls", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const collection = await updateContentCollectionControls({
+      collectionId: req.params.collectionId,
+      status: req.body.status,
+      destinations: req.body.destinations,
+      displayPolicy: req.body.display_policy || req.body.displayPolicy,
+      actorId: String(user.id),
+    });
+    return res.json({
+      success: true, collection,
+      message: "Collection controls saved. Content was routed without deleting questions or historical activity.",
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/ai-training/content-registry/taxonomy/review-queue", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const requestedExamTrack = String(req.query.exam_track || req.query.examTrack || "").trim();
+    const examTrack = requestedExamTrack ? normalizeContentTaxonomyExamTrack(requestedExamTrack) : "";
+    if (requestedExamTrack && !examTrack) return res.status(400).json({ success: false, error: "Unsupported exam_track" });
+    const requestedState = String(req.query.state || req.query.review_state || "").trim();
+    const state = requestedState ? normalizeContentTaxonomyReviewState(requestedState) : "";
+    if (requestedState && !state) return res.status(400).json({ success: false, error: "Unsupported taxonomy review state" });
+    const sourceNamespace = String(req.query.source_namespace || req.query.sourceNamespace || "").trim();
+    const queue = await listContentTaxonomyReviewQueue({
+      examTrack,
+      sourceNamespace: sourceNamespace ? contentSlug(sourceNamespace) : "",
+      state,
+      limit: req.query.limit,
+      offset: req.query.offset,
+    });
+    return res.json({
+      success: true,
+      count: queue.length,
+      filters: { exam_track: examTrack || null, source_namespace: sourceNamespace ? contentSlug(sourceNamespace) : null, state: state || null },
+      queue,
+      review_states: ["unmapped", "needs_review", "approved", "rejected", "disabled"],
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/ai-training/content-registry/taxonomy/coverage", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const requestedExamTrack = String(req.query.exam_track || req.query.examTrack || "").trim();
+    const examTrack = requestedExamTrack ? normalizeContentTaxonomyExamTrack(requestedExamTrack) : null;
+    if (requestedExamTrack && !examTrack) return res.status(400).json({ success: false, error: "Unsupported exam_track" });
+    const report = await getContentTaxonomyCoverage({
+      examTracks: examTrack ? [examTrack] : CONTENT_TAXONOMY_EXAM_TRACKS.map((exam) => exam.id),
+    });
+    return res.json({
+      success: true,
+      ...report,
+      validation_contract: {
+        question_complete_when: ["system_key", "topic_key"],
+        provider_pair_ready_when: "active mapping with approved review status",
+        zero_content_exam_state: "no_content",
+        approval_state_changed: false,
+      },
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-training/content-registry/taxonomy-mappings", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const examTrack = normalizeContentTaxonomyExamTrack(req.body.exam_track || req.body.examTrack);
+    const sourceNamespace = contentSlug(req.body.source_namespace || req.body.sourceNamespace);
+    if (!examTrack || sourceNamespace === "unknown") {
+      return res.status(400).json({ success: false, error: "exam_track and source_namespace are required" });
+    }
+    const mapping = await upsertContentTaxonomyMapping({
+      examTrack, sourceNamespace,
+      sourceSystemId: req.body.source_system_id ?? req.body.sourceSystemId ?? "",
+      sourceSubjectId: req.body.source_subject_id ?? req.body.sourceSubjectId ?? "",
+      taxonomy: req.body.taxonomy || req.body,
+      actorId: String(user.id),
+      reviewStatus: "approved",
+      origin: "manual_override",
+      confidence: req.body.confidence,
+      reviewNotes: req.body.review_notes || req.body.reviewNotes || req.body.note || "",
+    });
+    return res.json({
+      success: true, mapping,
+      message: "Taxonomy override approved, audited, and applied to matching questions without replacing question-level exceptions. Future imports can reuse it.",
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-training/content-registry/taxonomy-mappings/suggest", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const examTrack = normalizeContentTaxonomyExamTrack(req.body.exam_track || req.body.examTrack);
+    const sourceNamespace = contentSlug(req.body.source_namespace || req.body.sourceNamespace);
+    if (!examTrack || sourceNamespace === "unknown") {
+      return res.status(400).json({ success: false, error: "exam_track and source_namespace are required" });
+    }
+    const mapping = await upsertContentTaxonomyMapping({
+      examTrack,
+      sourceNamespace,
+      sourceSystemId: req.body.source_system_id ?? req.body.sourceSystemId ?? "",
+      sourceSubjectId: req.body.source_subject_id ?? req.body.sourceSubjectId ?? "",
+      taxonomy: req.body.taxonomy || req.body,
+      actorId: String(user.id),
+      reviewStatus: "pending",
+      origin: "automatic_suggestion",
+      confidence: req.body.confidence,
+      reviewNotes: req.body.reason || req.body.review_notes || req.body.reviewNotes || "",
+    });
+    return res.status(202).json({
+      success: true,
+      mapping,
+      applied: false,
+      message: mapping.suggestion_skipped
+        ? "An approved mapping already exists, so the automatic suggestion was audited without replacing it."
+        : "Automatic taxonomy suggestion queued for human review. It will not affect questions until approved.",
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-training/content-registry/taxonomy-mappings/:mappingId/review", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const action = normalizeContentTaxonomyReviewAction(req.body.action);
+    if (!action) return res.status(400).json({ success: false, error: "action must be approve, reject, disable, or reopen" });
+    const mapping = await reviewContentTaxonomyMapping({
+      mappingId: req.params.mappingId,
+      action,
+      taxonomy: req.body.taxonomy || null,
+      note: req.body.note || req.body.review_notes || req.body.reviewNotes || "",
+      confidence: req.body.confidence,
+      actorId: String(user.id),
+    });
+    return res.json({
+      success: true,
+      action,
+      mapping,
+      message: action === "approve"
+        ? "Taxonomy mapping approved and applied to matching questions. Active question overrides were preserved."
+        : `Taxonomy mapping ${action} recorded. Existing content and history were not deleted.`,
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/ai-training/content-registry/taxonomy-mappings/:mappingId/history", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const events = await listContentTaxonomyAuditEvents({ mappingId: req.params.mappingId, limit: req.query.limit });
+    return res.json({ success: true, mapping_id: req.params.mappingId, count: events.length, events });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/ai-training/content-registry/questions/:questionId/taxonomy-override", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const override = await upsertContentQuestionTaxonomyOverride({
+      questionId: req.params.questionId,
+      taxonomy: req.body.taxonomy || req.body,
+      reason: req.body.reason || req.body.note || "",
+      actorId: String(user.id),
+    });
+    return res.json({
+      success: true,
+      override,
+      message: "Question taxonomy override saved and audited. Provider mapping updates cannot overwrite this exception.",
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete("/admin/crm/ai-training/content-registry/questions/:questionId/taxonomy-override", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const override = await removeContentQuestionTaxonomyOverride({
+      questionId: req.params.questionId,
+      reason: req.body?.reason || req.body?.note || "",
+      actorId: String(user.id),
+    });
+    return res.json({
+      success: true,
+      override,
+      message: "Question override disabled and audited. A unique approved provider mapping was restored when one existed.",
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/ai-training/content-registry/questions/:questionId/taxonomy-history", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const events = await listContentTaxonomyAuditEvents({ questionId: req.params.questionId, limit: req.query.limit });
+    return res.json({ success: true, question_id: req.params.questionId, count: events.length, events });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// v218: Headless external QBank delivery
+// -----------------------------------------------------------------------------
+// External sites receive approved Content Registry questions through short-lived,
+// exam-scoped entitlements. They never receive provider credentials, database
+// access, raw subject identifiers, or correct answers before the configured
+// tutor/test release point.
+const ngExternalQbankRateLimiter = new ExternalQbankRateLimiter();
+const NG_EXTERNAL_QBANK_ROOT = `/api/external-qbank/${EXTERNAL_QBANK_API_VERSION}`;
+const NG_EXTERNAL_QBANK_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function ngExternalQbankNoStore(res) {
+  res.setHeader("Cache-Control", "no-store, max-age=0");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Vary", "Authorization, Origin");
+}
+
+function ngExternalQbankError(message, statusCode = 400, code = "EXTERNAL_QBANK_INVALID_REQUEST") {
+  return Object.assign(new Error(message), { statusCode, code });
+}
+
+function ngExternalQbankSendError(res, error) {
+  ngExternalQbankNoStore(res);
+  const status = Math.max(400, Math.min(599, Number(error?.statusCode || 500)));
+  const isServerError = status >= 500;
+  if (isServerError) console.error("External QBank delivery error:", error?.message || error);
+  return res.status(status).json({
+    success: false,
+    api_version: EXTERNAL_QBANK_API_VERSION,
+    build: NEXTGEN_BACKEND_BUILD,
+    code: String(error?.code || (isServerError ? "EXTERNAL_QBANK_SERVICE_UNAVAILABLE" : "EXTERNAL_QBANK_REQUEST_FAILED")),
+    error: isServerError ? "External QBank service is temporarily unavailable" : String(error?.message || "External QBank request failed"),
+  });
+}
+
+function ngExternalQbankTakeRate(req, key, { limit, windowMs }) {
+  const clientIp = String(req.headers["x-forwarded-for"] || req.ip || req.socket?.remoteAddress || "unknown")
+    .split(",")[0].trim().slice(0, 80) || "unknown";
+  const result = ngExternalQbankRateLimiter.take(`${key}:${clientIp}`, { limit, windowMs });
+  ngExternalQbankRateHeaders(req.res, result);
+  if (!result.allowed) {
+    const error = ngExternalQbankError("External QBank request rate limit exceeded", 429, "EXTERNAL_QBANK_RATE_LIMITED");
+    error.retryAfterSeconds = result.retry_after_seconds;
+    throw error;
+  }
+  return result;
+}
+
+function ngExternalQbankRateHeaders(res, result) {
+  if (!res || !result) return;
+  res.setHeader("X-RateLimit-Remaining", String(result.remaining));
+  if (!result.allowed) res.setHeader("Retry-After", String(result.retry_after_seconds));
+}
+
+function ngExternalQbankBearer(req, requiredScope) {
+  ngExternalQbankTakeRate(req, "external-qbank:protected", { limit: 300, windowMs: 60_000 });
+  const match = String(req.headers.authorization || "").match(/^Bearer\s+(.+)$/i);
+  if (!match) throw ngExternalQbankError("A Bearer entitlement token is required", 401, "EXTERNAL_QBANK_TOKEN_REQUIRED");
+  const auth = verifyExternalQbankEntitlementToken(match[1], {
+    requiredScope,
+    origin: String(req.headers.origin || ""),
+  });
+  ngExternalQbankTakeRate(req, `external-qbank:${auth.client.id}:${auth.claims.subject_hash}`, { limit: 600, windowMs: 60_000 });
+  return auth;
+}
+
+function ngExternalQbankAssertExam(value, auth) {
+  if (value == null || String(value).trim() === "") return auth.claims.exam_track;
+  const examTrack = normalizeAylaQbankExamTrack(value);
+  if (!examTrack || examTrack !== auth.claims.exam_track) {
+    throw ngExternalQbankError("The requested exam track does not match this entitlement", 403, "EXTERNAL_QBANK_EXAM_DENIED");
+  }
+  return examTrack;
+}
+
+function ngExternalQbankAssertOwnedSession(session, auth) {
+  if (!session
+    || String(session.exam_track) !== String(auth.claims.exam_track)
+    || String(session.destination_scope) !== String(auth.client.destinationScope)
+    || String(session.entitlement_hash) !== String(auth.claims.entitlement_hash)) {
+    throw ngExternalQbankError("External QBank session not found", 404, "EXTERNAL_QBANK_SESSION_NOT_FOUND");
+  }
+  return session;
+}
+
+function ngExternalQbankSessionId(value) {
+  const id = String(value || "").trim();
+  if (!NG_EXTERNAL_QBANK_UUID.test(id)) throw ngExternalQbankError("External QBank session not found", 404, "EXTERNAL_QBANK_SESSION_NOT_FOUND");
+  return id;
+}
+
+function ngExternalQbankQuestionItem(session, questionRef) {
+  const ref = String(questionRef || "").trim();
+  if (!NG_EXTERNAL_QBANK_UUID.test(ref)) throw ngExternalQbankError("Question not found in this external QBank session", 404, "EXTERNAL_QBANK_QUESTION_NOT_FOUND");
+  const item = (Array.isArray(session.items) ? session.items : []).find((row) => String(row.question_ref) === ref);
+  if (!item) throw ngExternalQbankError("Question not found in this external QBank session", 404, "EXTERNAL_QBANK_QUESTION_NOT_FOUND");
+  return item;
+}
+
+async function ngExternalQbankLoadSession(auth, sessionId) {
+  const session = await getExternalQbankDeliverySession({
+    sessionId: ngExternalQbankSessionId(sessionId),
+    clientId: auth.client.id,
+    subjectHash: auth.claims.subject_hash,
+    entitlementHash: auth.claims.entitlement_hash,
+  });
+  return ngExternalQbankAssertOwnedSession(session, auth);
+}
+
+async function ngExternalQbankPlayableQuestion(auth, session, item, rawQuestion = null) {
+  let raw = rawQuestion;
+  if (!raw) {
+    [raw] = await getContentQbankQuestions({
+      questionIds: [item.question_id],
+      examTrack: auth.claims.exam_track,
+      destination: "external_qbank",
+      destinationScope: auth.client.destinationScope,
+    });
+  }
+  if (!raw) {
+    return {
+      question_ref: item.question_ref,
+      unavailable: true,
+      answered: item.selected_answer_id != null,
+      message: "This question is no longer approved for delivery.",
+    };
+  }
+  const playable = await ngRegistryQuestionWithPlayableMedia(raw);
+  return sanitizeExternalQbankQuestion(playable, session, item);
+}
+
+async function ngExternalQbankPlayableSession(auth, session, preloaded = []) {
+  const items = Array.isArray(session.items) ? session.items : [];
+  let content = Array.isArray(preloaded) ? preloaded : [];
+  if (!content.length && items.length) {
+    content = await getContentQbankQuestions({
+      questionIds: items.map((item) => item.question_id),
+      examTrack: auth.claims.exam_track,
+      destination: "external_qbank",
+      destinationScope: auth.client.destinationScope,
+    });
+  }
+  const byId = new Map(content.map((question) => [String(question.id), question]));
+  const questions = [];
+  for (const item of items) {
+    questions.push(await ngExternalQbankPlayableQuestion(auth, session, item, byId.get(String(item.question_id)) || null));
+  }
+  return { session: sanitizeExternalQbankSession(session), questions };
+}
+
+app.get(`${NG_EXTERNAL_QBANK_ROOT}/status`, (req, res) => {
+  try {
+    ngExternalQbankTakeRate(req, "external-qbank:status", { limit: 60, windowMs: 60_000 });
+    const status = externalQbankConfigStatus();
+    const registry = contentRegistryStatus();
+    res.setHeader("Cache-Control", "public, max-age=30");
+    return res.json({
+      success: true,
+      api_version: EXTERNAL_QBANK_API_VERSION,
+      build: NEXTGEN_BACKEND_BUILD,
+      configured: status.configured && registry.configured,
+    });
+  } catch (error) {
+    return ngExternalQbankSendError(res, error);
+  }
+});
+
+app.post(`${NG_EXTERNAL_QBANK_ROOT}/entitlements/exchange`, async (req, res) => {
+  try {
+    ngExternalQbankNoStore(res);
+    ngExternalQbankTakeRate(req, "external-qbank:entitlement-exchange", { limit: 30, windowMs: 10 * 60_000 });
+    if (req.headers.origin) {
+      throw ngExternalQbankError("Entitlement exchange must be performed by the trusted site server", 403, "EXTERNAL_QBANK_SERVER_TO_SERVER_REQUIRED");
+    }
+    const client = authenticateExternalQbankClient(req.headers.authorization || "");
+    const token = issueExternalQbankEntitlementToken({
+      client,
+      externalSubject: req.body?.external_subject ?? req.body?.externalSubject,
+      examTrack: req.body?.exam_track ?? req.body?.examTrack,
+      entitlementReference: req.body?.entitlement_reference ?? req.body?.entitlementReference,
+      entitlementExpiresAt: req.body?.entitlement_expires_at ?? req.body?.entitlementExpiresAt,
+      requestedScopes: req.body?.scopes,
+    });
+    const issued = verifyExternalQbankEntitlementToken(token.access_token);
+    await recordExternalQbankAuditEvent({
+      clientId: client.id,
+      subjectHash: issued.claims.subject_hash,
+      entitlementHash: issued.claims.entitlement_hash,
+      examTrack: issued.claims.exam_track,
+      action: "entitlement_exchanged",
+      metadata: {
+        token_version: client.tokenVersion,
+        scopes: issued.claims.scopes,
+        entitlement_expires_at: issued.claims.entitlement_expires_at,
+      },
+    });
+    return res.json({ success: true, api_version: EXTERNAL_QBANK_API_VERSION, build: NEXTGEN_BACKEND_BUILD, ...token });
+  } catch (error) {
+    return ngExternalQbankSendError(res, error);
+  }
+});
+
+app.get(`${NG_EXTERNAL_QBANK_ROOT}/site-config`, (req, res) => {
+  try {
+    ngExternalQbankNoStore(res);
+    const auth = ngExternalQbankBearer(req, "catalog:read");
+    return res.json({
+      success: true,
+      api_version: EXTERNAL_QBANK_API_VERSION,
+      build: NEXTGEN_BACKEND_BUILD,
+      site: { client_id: auth.client.id, name: auth.client.name },
+      exam_track: auth.claims.exam_track,
+      scopes: auth.claims.scopes,
+      modes: ["tutor", "test"],
+      max_session_questions: auth.client.maxSessionQuestions,
+      answer_policy: {
+        tutor: "correct answer and explanation are released after that question is submitted",
+        test: "correct answers and explanations are released only after final session submission",
+      },
+      media_policy: { images: "short-lived private URLs", videos: "private or unlisted Vimeo embeds" },
+    });
+  } catch (error) {
+    return ngExternalQbankSendError(res, error);
+  }
+});
+
+app.get(`${NG_EXTERNAL_QBANK_ROOT}/catalog`, async (req, res) => {
+  try {
+    const auth = ngExternalQbankBearer(req, "catalog:read");
+    const examTrack = ngExternalQbankAssertExam(req.query.exam_track ?? req.query.examTrack, auth);
+    const catalog = await getContentQbankCatalog({
+      examTrack,
+      destination: "external_qbank",
+      destinationScope: auth.client.destinationScope,
+    });
+    res.setHeader("Cache-Control", "private, max-age=60");
+    res.setHeader("Vary", "Authorization, Origin");
+    return res.json({
+      success: true,
+      api_version: EXTERNAL_QBANK_API_VERSION,
+      build: NEXTGEN_BACKEND_BUILD,
+      exam_track: examTrack,
+      count: catalog.length,
+      question_count: catalog.reduce((sum, row) => sum + Number(row.question_count || 0), 0),
+      catalog,
+    });
+  } catch (error) {
+    return ngExternalQbankSendError(res, error);
+  }
+});
+
+app.post(`${NG_EXTERNAL_QBANK_ROOT}/sessions`, async (req, res) => {
+  try {
+    ngExternalQbankNoStore(res);
+    const auth = ngExternalQbankBearer(req, "sessions:write");
+    ngExternalQbankAssertExam(req.body?.exam_track ?? req.body?.examTrack, auth);
+    const request = normalizeExternalQbankSessionRequest(req.body || {}, auth.client);
+    const rawIdempotencyKey = String(req.headers["idempotency-key"] || req.body?.idempotency_key || req.body?.idempotencyKey || "").trim();
+    if (rawIdempotencyKey.length > 120) throw ngExternalQbankError("Idempotency-Key cannot exceed 120 characters");
+    const requestFingerprint = crypto.createHash("sha256").update(JSON.stringify({
+      exam_track: auth.claims.exam_track,
+      mode: request.mode,
+      question_count: request.questionCount,
+      block_size: request.blockSize,
+      filters: request.filters,
+      time_limit_minutes: request.timeLimitMinutes,
+    })).digest("hex");
+    const idempotencyKey = rawIdempotencyKey
+      ? crypto.createHash("sha256").update(`${auth.claims.entitlement_hash}\u0000${rawIdempotencyKey}`).digest("hex")
+      : null;
+    const selected = await listContentQbankQuestions({
+      examTrack: auth.claims.exam_track,
+      destination: "external_qbank",
+      destinationScope: auth.client.destinationScope,
+      systemKey: request.filters.system_key,
+      subsystemKey: request.filters.subsystem_key,
+      topicKey: request.filters.topic_key,
+      subtopicKey: request.filters.subtopic_key,
+      limit: request.questionCount,
+      seed: idempotencyKey || crypto.randomUUID(),
+    });
+    const mutation = await createExternalQbankDeliverySession({
+      id: crypto.randomUUID(),
+      clientId: auth.client.id,
+      subjectHash: auth.claims.subject_hash,
+      entitlementHash: auth.claims.entitlement_hash,
+      examTrack: auth.claims.exam_track,
+      destinationScope: auth.client.destinationScope,
+      mode: request.mode,
+      questions: selected,
+      filters: request.filters,
+      blockSize: request.blockSize,
+      timeLimitMinutes: request.timeLimitMinutes,
+      entitlementExpiresAt: auth.claims.entitlement_expires_at,
+      idempotencyKey,
+      requestFingerprint,
+    });
+    const session = ngExternalQbankAssertOwnedSession(mutation.session, auth);
+    const bundle = await ngExternalQbankPlayableSession(auth, session, mutation.replayed ? [] : selected);
+    return res.status(mutation.replayed ? 200 : 201).json({
+      success: true,
+      api_version: EXTERNAL_QBANK_API_VERSION,
+      build: NEXTGEN_BACKEND_BUILD,
+      ...bundle,
+      requested_question_count: request.questionCount,
+      selected_question_count: Number(session.question_count || 0),
+      partial_selection: Number(session.question_count || 0) < request.questionCount,
+      idempotent_replay: mutation.replayed,
+    });
+  } catch (error) {
+    return ngExternalQbankSendError(res, error);
+  }
+});
+
+app.get(`${NG_EXTERNAL_QBANK_ROOT}/sessions`, async (req, res) => {
+  try {
+    ngExternalQbankNoStore(res);
+    const auth = ngExternalQbankBearer(req, "sessions:read");
+    const examTrack = ngExternalQbankAssertExam(req.query.exam_track ?? req.query.examTrack, auth);
+    const sessions = await listExternalQbankDeliverySessions({
+      clientId: auth.client.id,
+      subjectHash: auth.claims.subject_hash,
+      entitlementHash: auth.claims.entitlement_hash,
+      examTrack,
+      limit: req.query.limit,
+      offset: req.query.offset,
+    });
+    return res.json({
+      success: true,
+      api_version: EXTERNAL_QBANK_API_VERSION,
+      build: NEXTGEN_BACKEND_BUILD,
+      exam_track: examTrack,
+      count: sessions.length,
+      sessions: sessions.map(sanitizeExternalQbankSession),
+    });
+  } catch (error) {
+    return ngExternalQbankSendError(res, error);
+  }
+});
+
+app.get(`${NG_EXTERNAL_QBANK_ROOT}/sessions/:sessionId`, async (req, res) => {
+  try {
+    ngExternalQbankNoStore(res);
+    const auth = ngExternalQbankBearer(req, "sessions:read");
+    const session = await ngExternalQbankLoadSession(auth, req.params.sessionId);
+    return res.json({ success: true, api_version: EXTERNAL_QBANK_API_VERSION, build: NEXTGEN_BACKEND_BUILD, ...(await ngExternalQbankPlayableSession(auth, session)) });
+  } catch (error) {
+    return ngExternalQbankSendError(res, error);
+  }
+});
+
+app.get(`${NG_EXTERNAL_QBANK_ROOT}/sessions/:sessionId/questions/:questionRef`, async (req, res) => {
+  try {
+    ngExternalQbankNoStore(res);
+    const auth = ngExternalQbankBearer(req, "sessions:read");
+    const session = await ngExternalQbankLoadSession(auth, req.params.sessionId);
+    const item = ngExternalQbankQuestionItem(session, req.params.questionRef);
+    const question = await ngExternalQbankPlayableQuestion(auth, session, item);
+    return res.json({ success: true, api_version: EXTERNAL_QBANK_API_VERSION, build: NEXTGEN_BACKEND_BUILD, session: sanitizeExternalQbankSession(session), question });
+  } catch (error) {
+    return ngExternalQbankSendError(res, error);
+  }
+});
+
+app.post(`${NG_EXTERNAL_QBANK_ROOT}/sessions/:sessionId/answers`, async (req, res) => {
+  try {
+    ngExternalQbankNoStore(res);
+    const auth = ngExternalQbankBearer(req, "answers:write");
+    const session = await ngExternalQbankLoadSession(auth, req.params.sessionId);
+    const item = ngExternalQbankQuestionItem(session, req.body?.question_ref ?? req.body?.questionRef);
+    const selectedAnswerId = Number(req.body?.selected_answer_id ?? req.body?.selectedAnswerId);
+    if (!Number.isInteger(selectedAnswerId)) throw ngExternalQbankError("selected_answer_id is not a valid answer choice");
+    if (item.selected_answer_id != null) {
+      const replay = await recordExternalQbankDeliveryAnswer({
+        sessionId: session.id,
+        clientId: auth.client.id,
+        subjectHash: auth.claims.subject_hash,
+        entitlementHash: auth.claims.entitlement_hash,
+        questionRef: item.question_ref,
+        selectedAnswerId,
+        isCorrect: item.is_correct === true,
+        elapsedMs: req.body?.elapsed_ms ?? req.body?.elapsedMs ?? null,
+      });
+      const current = ngExternalQbankAssertOwnedSession(replay.session, auth);
+      const currentItem = ngExternalQbankQuestionItem(current, item.question_ref);
+      return res.json({
+        success: true,
+        api_version: EXTERNAL_QBANK_API_VERSION,
+        build: NEXTGEN_BACKEND_BUILD,
+        session: sanitizeExternalQbankSession(current),
+        question: await ngExternalQbankPlayableQuestion(auth, current, currentItem),
+        idempotent_replay: true,
+      });
+    }
+    const [question] = await getContentQbankQuestions({
+      questionIds: [item.question_id],
+      examTrack: auth.claims.exam_track,
+      destination: "external_qbank",
+      destinationScope: auth.client.destinationScope,
+    });
+    if (!question) throw ngExternalQbankError("This question is no longer approved for delivery", 409, "EXTERNAL_QBANK_QUESTION_UNAVAILABLE");
+    if (!question.answers.some((answer) => Number(answer.answer_id) === selectedAnswerId)) {
+      throw ngExternalQbankError("selected_answer_id is not a valid answer choice");
+    }
+    const mutation = await recordExternalQbankDeliveryAnswer({
+      sessionId: session.id,
+      clientId: auth.client.id,
+      subjectHash: auth.claims.subject_hash,
+      entitlementHash: auth.claims.entitlement_hash,
+      questionRef: item.question_ref,
+      selectedAnswerId,
+      isCorrect: selectedAnswerId === Number(question.correct_answer_id),
+      elapsedMs: req.body?.elapsed_ms ?? req.body?.elapsedMs ?? null,
+    });
+    const current = ngExternalQbankAssertOwnedSession(mutation.session, auth);
+    const currentItem = ngExternalQbankQuestionItem(current, item.question_ref);
+    return res.json({
+      success: true,
+      api_version: EXTERNAL_QBANK_API_VERSION,
+      build: NEXTGEN_BACKEND_BUILD,
+      session: sanitizeExternalQbankSession(current),
+      question: await ngExternalQbankPlayableQuestion(auth, current, currentItem, question),
+      idempotent_replay: mutation.replayed,
+    });
+  } catch (error) {
+    return ngExternalQbankSendError(res, error);
+  }
+});
+
+app.post(`${NG_EXTERNAL_QBANK_ROOT}/sessions/:sessionId/submit`, async (req, res) => {
+  try {
+    ngExternalQbankNoStore(res);
+    const auth = ngExternalQbankBearer(req, "answers:write");
+    const initial = await ngExternalQbankLoadSession(auth, req.params.sessionId);
+    const mutation = await submitExternalQbankDeliverySession({
+      sessionId: initial.id,
+      clientId: auth.client.id,
+      subjectHash: auth.claims.subject_hash,
+      entitlementHash: auth.claims.entitlement_hash,
+    });
+    const session = ngExternalQbankAssertOwnedSession(mutation.session, auth);
+    return res.json({
+      success: true,
+      api_version: EXTERNAL_QBANK_API_VERSION,
+      build: NEXTGEN_BACKEND_BUILD,
+      ...(await ngExternalQbankPlayableSession(auth, session)),
+      idempotent_replay: mutation.replayed,
+    });
+  } catch (error) {
+    return ngExternalQbankSendError(res, error);
+  }
+});
+
+app.get("/admin/crm/ai-training/external-qbank/clients", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const config = externalQbankConfigStatus();
+    const registry = contentRegistryStatus();
+    return res.json({
+      success: true,
+      build: NEXTGEN_BACKEND_BUILD,
+      ...config,
+      configured: config.configured && registry.configured,
+      client_configuration_ready: config.configured,
+      content_registry_configured: registry.configured,
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/ai-training/external-qbank/audit", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const sessionId = String(req.query.session_id || req.query.sessionId || "").trim();
+    if (sessionId && !NG_EXTERNAL_QBANK_UUID.test(sessionId)) return res.status(400).json({ success: false, error: "session_id must be a UUID" });
+    const events = await listExternalQbankAuditEvents({
+      clientId: String(req.query.client_id || req.query.clientId || "").trim().toLowerCase(),
+      sessionId: sessionId || null,
+      limit: req.query.limit,
+      offset: req.query.offset,
+    });
+    return res.json({ success: true, build: NEXTGEN_BACKEND_BUILD, count: events.length, events });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/api/ayla/qbank/catalog", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.query.student_id || ""), "qbank");
+    const access = aylaRequireQbankAccess(auth.db, auth.user, auth.student, req.query.exam_track || req.query.examTrack || "");
+    const examTrack = access.exam_track;
+    const catalog = await getContentQbankCatalog({ examTrack, destination: "aylamed_qbank" });
+    return aylaSendOk(res, {
+      exam_track: examTrack,
+      entitlement: { type: access.entitlement_type, expires_at: access.expires_at || null },
+      count: catalog.length,
+      question_count: catalog.reduce((sum, row) => sum + Number(row.question_count || 0), 0),
+      catalog,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.post("/api/ayla/qbank/sessions", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.body.student_id || req.body.studentId || ""), "qbank");
+    const access = aylaRequireQbankAccess(auth.db, auth.user, auth.student, req.body.exam_track || req.body.examTrack || "");
+    const requestedCount = Number(req.body.question_count ?? req.body.questionCount ?? 40);
+    if (!Number.isInteger(requestedCount) || requestedCount < 1 || requestedCount > 200) {
+      return aylaSendError(res, 400, "question_count must be an integer between 1 and 200");
+    }
+    const filters = normalizeAylaQbankFilters(req.body.filters || req.body);
+    const requestedMode = normalizeAylaQbankMode(req.body.mode || "tutor");
+    const requestedBlockSize = Math.max(1, Math.min(40, Math.trunc(Number(req.body.block_size ?? req.body.blockSize ?? 40) || 40)));
+    const idempotencyKey = String(req.headers["idempotency-key"] || req.body.idempotency_key || req.body.idempotencyKey || "").trim().slice(0, 120);
+
+    let origin = "personal";
+    let roadmapAssignmentId = null;
+    const requestedRoadmapAssignmentId = String(req.body.roadmap_assignment_id || req.body.roadmapAssignmentId || "").trim();
+    if (requestedRoadmapAssignmentId) {
+      const assignment = aylaGetItem(auth.db, "aylaResourceAssignments", requestedRoadmapAssignmentId);
+      if (!assignment || String(assignment.studentId || "") !== String(auth.student.id)) return aylaSendError(res, 404, "Roadmap assignment not found");
+      if (!aylaQbankRoadmapAssignmentEligible(assignment)) return aylaSendError(res, 409, "Roadmap assignment is not a QBank question assignment");
+      const assignmentExam = normalizeAylaQbankExamTrack(assignment.examTrackId || assignment.examTrack || assignment.exam_track || "");
+      if (assignmentExam && assignmentExam !== access.exam_track) return aylaSendError(res, 403, "Roadmap assignment belongs to another exam track");
+      origin = "roadmap";
+      roadmapAssignmentId = assignment.id;
+    }
+
+    const idempotencyFingerprint = crypto.createHash("sha256").update(JSON.stringify({
+      examTrack: access.exam_track,
+      mode: requestedMode,
+      requestedCount,
+      blockSize: requestedBlockSize,
+      filters,
+      origin,
+      roadmapAssignmentId,
+      timeLimitMinutes: req.body.time_limit_minutes ?? req.body.timeLimitMinutes ?? null,
+    })).digest("hex");
+    if (idempotencyKey) {
+      const existing = aylaValues(auth.db, "aylaQbankSessions").find((row) =>
+        String(row.userId || "") === String(auth.user.id)
+        && String(row.studentId || "") === String(auth.student.id)
+        && String(row.idempotencyKey || "") === idempotencyKey);
+      if (existing) {
+        if (String(existing.idempotencyFingerprint || "") !== idempotencyFingerprint) return aylaSendError(res, 409, "Idempotency key was already used for a different QBank session request");
+        aylaRequireQbankAccess(auth.db, auth.user, auth.student, existing.examTrack);
+        const bundle = await aylaPlayableQbankSession(auth.db, existing);
+        return aylaSendOk(res, {
+          ...bundle,
+          requested_question_count: Number(existing.requestedQuestionCount || existing.questionCount || 0),
+          selected_question_count: Number(existing.questionCount || 0),
+          partial_selection: Number(existing.questionCount || 0) < Number(existing.requestedQuestionCount || existing.questionCount || 0),
+          idempotent_replay: true,
+        });
+      }
+    }
+
+    const selected = await listContentQbankQuestions({
+      examTrack: access.exam_track,
+      destination: "aylamed_qbank",
+      systemKey: filters.system_key,
+      subsystemKey: filters.subsystem_key,
+      topicKey: filters.topic_key,
+      subtopicKey: filters.subtopic_key,
+      limit: requestedCount,
+      seed: crypto.randomUUID(),
+    });
+    if (!selected.length) return aylaSendError(res, 409, "No approved QBank questions match this exam track and filter selection");
+
+    const sessionId = aylaId("AYLA-QBS");
+    const questionMappings = selected.map((question) => ({ ref: crypto.randomUUID(), contentQuestionId: question.id }));
+    const mutation = await mutateAylaDb(async (db) => {
+      const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, access.exam_track);
+      if (idempotencyKey) {
+        const existing = aylaValues(db, "aylaQbankSessions").find((row) =>
+          String(row.userId || "") === String(auth.user.id)
+          && String(row.studentId || "") === String(auth.student.id)
+          && String(row.idempotencyKey || "") === idempotencyKey);
+        if (existing) {
+          if (String(existing.idempotencyFingerprint || "") !== idempotencyFingerprint) {
+            const error = new Error("Idempotency key was already used for a different QBank session request");
+            error.statusCode = 409;
+            throw error;
+          }
+          return { session: existing, replayed: true };
+        }
+      }
+      if (roadmapAssignmentId) {
+        const assignment = aylaGetItem(db, "aylaResourceAssignments", roadmapAssignmentId);
+        if (!assignment || String(assignment.studentId || "") !== String(fresh.student.id)) {
+          const error = new Error("Roadmap assignment not found");
+          error.statusCode = 404;
+          throw error;
+        }
+        if (!aylaQbankRoadmapAssignmentEligible(assignment)) {
+          const error = new Error("Roadmap assignment is not a QBank question assignment");
+          error.statusCode = 409;
+          throw error;
+        }
+      }
+      const session = createAylaQbankSession({
+        id: sessionId,
+        userId: fresh.user.id,
+        studentId: fresh.student.id,
+        examTrack: fresh.entitlement.exam_track,
+        mode: requestedMode,
+        questions: questionMappings,
+        filters,
+        blockSize: requestedBlockSize,
+        origin,
+        roadmapAssignmentId,
+        timeLimitMinutes: req.body.time_limit_minutes ?? req.body.timeLimitMinutes ?? null,
+        entitlement: fresh.entitlement,
+      });
+      session.idempotencyKey = idempotencyKey || null;
+      session.idempotencyFingerprint = idempotencyKey ? idempotencyFingerprint : null;
+      session.requestedQuestionCount = requestedCount;
+      aylaSetItem(db, "aylaQbankSessions", session);
+      aylaQbankEvent(db, session, "session_created", { mode: session.mode, questionCount: session.questionCount, origin: session.origin });
+      aylaV189RecordActivity(db, session.studentId, "qbank_session_created", { sessionId: session.id, examTrack: session.examTrack, questionCount: session.questionCount, mode: session.mode });
+      return { session, replayed: false };
+    });
+    const latestDb = await readAylaDb();
+    const bundle = await aylaPlayableQbankSession(latestDb, mutation.session);
+    return aylaSendOk(res, {
+      ...bundle,
+      requested_question_count: requestedCount,
+      selected_question_count: mutation.session.questionCount,
+      partial_selection: mutation.session.questionCount < requestedCount,
+      idempotent_replay: mutation.replayed,
+    }, mutation.replayed ? 200 : 201);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.get("/api/ayla/qbank/sessions/:sessionId", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.query.student_id || ""), "qbank");
+    const session = aylaOwnedQbankSession(auth.db, auth.user, auth.student, req.params.sessionId);
+    aylaRequireQbankAccess(auth.db, auth.user, auth.student, session.examTrack);
+    return aylaSendOk(res, await aylaPlayableQbankSession(auth.db, session));
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.post("/api/ayla/qbank/sessions/:sessionId/answers", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.body.student_id || req.body.studentId || ""), "qbank");
+    const session = aylaOwnedQbankSession(auth.db, auth.user, auth.student, req.params.sessionId);
+    aylaRequireQbankAccess(auth.db, auth.user, auth.student, session.examTrack);
+    const questionRef = String(req.body.question_ref || req.body.questionRef || "").trim();
+    const mapping = qbankSessionQuestion(session, questionRef);
+    if (!mapping) return aylaSendError(res, 404, "Question does not belong to this QBank session");
+    const [question] = await getContentQbankQuestions({ questionIds: [mapping.contentQuestionId], examTrack: session.examTrack, destination: "aylamed_qbank" });
+    if (!question) return aylaSendError(res, 409, "This question is no longer approved for QBank delivery");
+    const selectedAnswerId = Number(req.body.selected_answer_id ?? req.body.selectedAnswerId);
+    if (!question.answers.some((row) => Number(row.answer_id) === selectedAnswerId)) return aylaSendError(res, 400, "selected_answer_id is not a valid answer choice");
+
+    const mutation = await mutateAylaDb(async (db) => {
+      const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, session.examTrack);
+      const current = aylaOwnedQbankSession(db, fresh.user, fresh.student, session.id);
+      const currentMapping = qbankSessionQuestion(current, questionRef);
+      if (!currentMapping || String(currentMapping.contentQuestionId) !== String(mapping.contentQuestionId)) {
+        const error = new Error("Question does not belong to this QBank session");
+        error.statusCode = 404;
+        throw error;
+      }
+      const recorded = recordAylaQbankAnswer(current, {
+        questionRef,
+        selectedAnswerId,
+        correctAnswerId: question.correct_answer_id,
+        elapsedMs: req.body.elapsed_ms ?? req.body.elapsedMs ?? null,
+      });
+      if (!recorded.replayed) {
+        aylaSetItem(db, "aylaQbankSessions", recorded.session);
+        const immediate = recorded.session.mode === "tutor";
+        const attempt = immediate ? aylaRecordQbankAttempt(db, recorded.session, currentMapping, recorded.answer, question).attempt : null;
+        aylaQbankEvent(db, recorded.session, "answer_recorded", immediate
+          ? { questionRef, correct: recorded.answer.correct, attemptId: attempt?.id || null }
+          : { questionRef, resultWithheldUntilSubmit: true });
+        if (immediate) {
+          aylaV189RecordActivity(db, recorded.session.studentId, "qbank_question_answered", { sessionId: recorded.session.id, questionRef, correct: recorded.answer.correct, examTrack: recorded.session.examTrack });
+        }
+      }
+      return recorded;
+    });
+    const latestDb = await readAylaDb();
+    const current = aylaOwnedQbankSession(latestDb, auth.user, auth.student, session.id);
+    const renderedQuestion = await aylaPlayableQbankQuestion(latestDb, current, mapping, question);
+    return aylaSendOk(res, {
+      session: sanitizeAylaQbankSession(current),
+      question: renderedQuestion,
+      idempotent_replay: mutation.replayed,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.post("/api/ayla/qbank/sessions/:sessionId/submit", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.body.student_id || req.body.studentId || ""), "qbank");
+    const initial = aylaOwnedQbankSession(auth.db, auth.user, auth.student, req.params.sessionId);
+    aylaRequireQbankAccess(auth.db, auth.user, auth.student, initial.examTrack);
+    const reviewQuestions = await getContentQbankQuestions({
+      questionIds: (initial.questions || []).map((row) => row.contentQuestionId),
+      examTrack: initial.examTrack,
+      destination: "aylamed_qbank",
+    });
+    const reviewById = new Map(reviewQuestions.map((row) => [String(row.id), row]));
+    const mutation = await mutateAylaDb(async (db) => {
+      const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, initial.examTrack);
+      const current = aylaOwnedQbankSession(db, fresh.user, fresh.student, initial.id);
+      const finalized = finalizeAylaQbankSession(current);
+      if (!finalized.replayed) {
+        aylaSetItem(db, "aylaQbankSessions", finalized.session);
+        if (finalized.session.mode === "test") {
+          for (const [questionRef, answer] of Object.entries(finalized.session.answers || {})) {
+            const mapping = qbankSessionQuestion(finalized.session, questionRef);
+            if (!mapping) continue;
+            aylaRecordQbankAttempt(db, finalized.session, mapping, answer, reviewById.get(String(mapping.contentQuestionId)) || {});
+          }
+        }
+        if (finalized.session.origin === "roadmap" && finalized.session.roadmapAssignmentId) {
+          const assignment = aylaGetItem(db, "aylaResourceAssignments", finalized.session.roadmapAssignmentId);
+          if (assignment && String(assignment.studentId || "") === String(finalized.session.studentId) && aylaQbankRoadmapAssignmentEligible(assignment)) {
+            assignment.status = "completed";
+            assignment.progressPercent = 100;
+            assignment.qbankSessionIds = [...new Set([...(Array.isArray(assignment.qbankSessionIds) ? assignment.qbankSessionIds : []), finalized.session.id])];
+            assignment.completedAt = assignment.completedAt || finalized.session.submittedAt;
+            assignment.updatedAt = finalized.session.submittedAt;
+            aylaSetItem(db, "aylaResourceAssignments", assignment);
+            if (assignment.dailyPlanId) aylaV189UpdatePlanCompletion(db, assignment.dailyPlanId);
+          }
+        }
+        aylaQbankEvent(db, finalized.session, "session_submitted", {
+          scorePercent: finalized.session.scorePercent,
+          correctCount: finalized.session.correctCount,
+          questionCount: finalized.session.questionCount,
+        });
+        aylaV189RecordActivity(db, finalized.session.studentId, "qbank_session_submitted", {
+          sessionId: finalized.session.id,
+          examTrack: finalized.session.examTrack,
+          scorePercent: finalized.session.scorePercent,
+          questionCount: finalized.session.questionCount,
+        });
+      }
+      return finalized;
+    });
+    const latestDb = await readAylaDb();
+    const session = aylaOwnedQbankSession(latestDb, auth.user, auth.student, initial.id);
+    return aylaSendOk(res, { ...(await aylaPlayableQbankSession(latestDb, session)), idempotent_replay: mutation.replayed });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.get("/api/ayla/qbank/history", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.query.student_id || ""), "qbank");
+    const access = aylaRequireQbankAccess(auth.db, auth.user, auth.student, req.query.exam_track || req.query.examTrack || "");
+    const limit = Math.max(1, Math.min(200, Number(req.query.limit) || 50));
+    const offset = Math.max(0, Number(req.query.offset) || 0);
+    const rows = aylaValues(auth.db, "aylaQbankSessions")
+      .filter((row) => String(row.userId || "") === String(auth.user.id) && String(row.studentId || "") === String(auth.student.id))
+      .filter((row) => String(row.examTrack || "") === String(access.exam_track))
+      .sort((a, b) => String(b.submittedAt || b.updatedAt || b.createdAt || "").localeCompare(String(a.submittedAt || a.updatedAt || a.createdAt || "")));
+    return aylaSendOk(res, {
+      exam_track: access.exam_track,
+      total: rows.length,
+      limit,
+      offset,
+      history: rows.slice(offset, offset + limit).map(qbankSessionHistoryRow),
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+async function aylaHandleQbankMark(req, res, marked) {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.body?.student_id || req.body?.studentId || req.query.student_id || ""), "qbank");
+    const initial = aylaOwnedQbankSession(auth.db, auth.user, auth.student, req.params.sessionId);
+    aylaRequireQbankAccess(auth.db, auth.user, auth.student, initial.examTrack);
+    const questionRef = String(req.params.questionRef || "").trim();
+    if (!qbankSessionQuestion(initial, questionRef)) return aylaSendError(res, 404, "Question does not belong to this QBank session");
+    const session = await mutateAylaDb(async (db) => {
+      const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, initial.examTrack);
+      const current = aylaOwnedQbankSession(db, fresh.user, fresh.student, initial.id);
+      const currentMapping = qbankSessionQuestion(current, questionRef);
+      if (!currentMapping) throw Object.assign(new Error("Question does not belong to this QBank session"), { statusCode: 404 });
+      const updated = setAylaQbankQuestionMark(current, questionRef, marked);
+      aylaSetItem(db, "aylaQbankSessions", updated);
+      if (marked) aylaUpsertQbankRevision(db, updated, currentMapping, {}, "marked_for_review");
+      else aylaRemoveQbankRevisionReason(db, updated, currentMapping, "marked_for_review");
+      aylaQbankEvent(db, updated, marked ? "question_marked" : "question_unmarked", { questionRef });
+      return updated;
+    });
+    return aylaSendOk(res, { session: sanitizeAylaQbankSession(session), question_ref: questionRef, marked });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+}
+
+app.put("/api/ayla/qbank/sessions/:sessionId/questions/:questionRef/mark", (req, res) => aylaHandleQbankMark(req, res, req.body?.marked !== false));
+app.delete("/api/ayla/qbank/sessions/:sessionId/questions/:questionRef/mark", (req, res) => aylaHandleQbankMark(req, res, false));
+
+async function aylaHandleQbankBookmark(req, res, bookmarked) {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.body?.student_id || req.body?.studentId || req.query.student_id || ""), "qbank");
+    const initial = aylaOwnedQbankSession(auth.db, auth.user, auth.student, req.params.sessionId);
+    aylaRequireQbankAccess(auth.db, auth.user, auth.student, initial.examTrack);
+    const mapping = qbankSessionQuestion(initial, req.params.questionRef);
+    if (!mapping) return aylaSendError(res, 404, "Question does not belong to this QBank session");
+    const result = await mutateAylaDb(async (db) => {
+      const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, initial.examTrack);
+      const current = aylaOwnedQbankSession(db, fresh.user, fresh.student, initial.id);
+      const currentMapping = qbankSessionQuestion(current, req.params.questionRef);
+      if (!currentMapping || String(currentMapping.contentQuestionId) !== String(mapping.contentQuestionId)) {
+        const error = new Error("Question does not belong to this QBank session");
+        error.statusCode = 404;
+        throw error;
+      }
+      const existing = aylaValues(db, "aylaQbankBookmarks")
+        .filter((row) => String(row.studentId || "") === String(current.studentId))
+        .filter((row) => String(row.examTrack || "") === String(current.examTrack))
+        .find((row) => String(row.contentQuestionId || "") === String(currentMapping.contentQuestionId));
+      const bookmark = {
+        ...(existing || {}),
+        id: existing?.id || aylaId("AYLA-QBB"),
+        studentId: current.studentId,
+        userId: current.userId,
+        examTrack: current.examTrack,
+        sessionId: current.id,
+        questionRef: currentMapping.ref,
+        contentQuestionId: currentMapping.contentQuestionId,
+        deletedAt: bookmarked ? null : aylaNow(),
+        createdAt: existing?.createdAt || aylaNow(),
+        updatedAt: aylaNow(),
+      };
+      aylaSetItem(db, "aylaQbankBookmarks", bookmark);
+      if (bookmarked) aylaUpsertQbankRevision(db, current, currentMapping, {}, "bookmarked");
+      else aylaRemoveQbankRevisionReason(db, current, currentMapping, "bookmarked");
+      aylaQbankEvent(db, current, bookmarked ? "question_bookmarked" : "question_unbookmarked", { questionRef: currentMapping.ref, bookmarkId: bookmark.id });
+      return bookmark;
+    });
+    return aylaSendOk(res, { bookmark: { id: result.id, question_ref: result.questionRef, bookmarked: !result.deletedAt, updated_at: result.updatedAt } });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+}
+
+app.put("/api/ayla/qbank/sessions/:sessionId/questions/:questionRef/bookmark", (req, res) => aylaHandleQbankBookmark(req, res, true));
+app.delete("/api/ayla/qbank/sessions/:sessionId/questions/:questionRef/bookmark", (req, res) => aylaHandleQbankBookmark(req, res, false));
+
+async function aylaHandleQbankNoteDelete(req, res) {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.body?.student_id || req.body?.studentId || req.query.student_id || ""), "qbank");
+    const initial = aylaOwnedQbankSession(auth.db, auth.user, auth.student, req.params.sessionId);
+    aylaRequireQbankAccess(auth.db, auth.user, auth.student, initial.examTrack);
+    const mapping = qbankSessionQuestion(initial, req.params.questionRef);
+    if (!mapping) return aylaSendError(res, 404, "Question does not belong to this QBank session");
+    const note = await mutateAylaDb(async (db) => {
+      const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, initial.examTrack);
+      const current = aylaOwnedQbankSession(db, fresh.user, fresh.student, initial.id);
+      const existing = aylaValues(db, "aylaQbankNotes")
+        .filter((row) => String(row.studentId || "") === String(current.studentId) && String(row.examTrack || "") === String(current.examTrack))
+        .find((row) => String(row.contentQuestionId || "") === String(mapping.contentQuestionId));
+      if (!existing || existing.deletedAt) return null;
+      existing.deletedAt = aylaNow();
+      existing.updatedAt = existing.deletedAt;
+      aylaSetItem(db, "aylaQbankNotes", existing);
+      aylaQbankEvent(db, current, "question_note_deleted", { questionRef: mapping.ref, noteId: existing.id });
+      return existing;
+    });
+    return aylaSendOk(res, { deleted: Boolean(note), note_id: note?.id || null });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+}
+
+app.put("/api/ayla/qbank/sessions/:sessionId/questions/:questionRef/note", async (req, res) => {
+  try {
+    const text = String(req.body.note ?? req.body.text ?? "").replace(/\u0000/g, "").trim();
+    if (!text) return aylaSendError(res, 400, "note text is required");
+    if (text.length > 20000) return aylaSendError(res, 400, "note text cannot exceed 20,000 characters");
+    const auth = await aylaV189RequireStudent(req, String(req.body.student_id || req.body.studentId || ""), "qbank");
+    const initial = aylaOwnedQbankSession(auth.db, auth.user, auth.student, req.params.sessionId);
+    aylaRequireQbankAccess(auth.db, auth.user, auth.student, initial.examTrack);
+    const mapping = qbankSessionQuestion(initial, req.params.questionRef);
+    if (!mapping) return aylaSendError(res, 404, "Question does not belong to this QBank session");
+    const note = await mutateAylaDb(async (db) => {
+      const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, initial.examTrack);
+      const current = aylaOwnedQbankSession(db, fresh.user, fresh.student, initial.id);
+      const existing = aylaValues(db, "aylaQbankNotes")
+        .filter((row) => String(row.studentId || "") === String(current.studentId) && String(row.examTrack || "") === String(current.examTrack))
+        .find((row) => String(row.contentQuestionId || "") === String(mapping.contentQuestionId));
+      const versions = Array.isArray(existing?.versions) ? [...existing.versions] : [];
+      if (existing?.text && existing.text !== text) versions.push({ text: existing.text, savedAt: existing.updatedAt || existing.createdAt });
+      const next = {
+        ...(existing || {}),
+        id: existing?.id || aylaId("AYLA-QBN"),
+        studentId: current.studentId,
+        userId: current.userId,
+        examTrack: current.examTrack,
+        sessionId: current.id,
+        questionRef: mapping.ref,
+        contentQuestionId: mapping.contentQuestionId,
+        text,
+        versions: versions.slice(-50),
+        deletedAt: null,
+        createdAt: existing?.createdAt || aylaNow(),
+        updatedAt: aylaNow(),
+      };
+      aylaSetItem(db, "aylaQbankNotes", next);
+      aylaQbankEvent(db, current, existing ? "question_note_updated" : "question_note_created", { questionRef: mapping.ref, noteId: next.id });
+      return next;
+    });
+    return aylaSendOk(res, { note: { id: note.id, question_ref: note.questionRef, text: note.text, updated_at: note.updatedAt } });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.delete("/api/ayla/qbank/sessions/:sessionId/questions/:questionRef/note", aylaHandleQbankNoteDelete);
+
+async function aylaHandleQbankRevision(req, res, enabled) {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.body?.student_id || req.body?.studentId || req.query.student_id || ""), "qbank");
+    const initial = aylaOwnedQbankSession(auth.db, auth.user, auth.student, req.params.sessionId);
+    aylaRequireQbankAccess(auth.db, auth.user, auth.student, initial.examTrack);
+    const mapping = qbankSessionQuestion(initial, req.params.questionRef);
+    if (!mapping) return aylaSendError(res, 404, "Question does not belong to this QBank session");
+    let question = null;
+    if (enabled) [question] = await getContentQbankQuestions({ questionIds: [mapping.contentQuestionId], examTrack: initial.examTrack, destination: "aylamed_qbank" });
+    const revision = await mutateAylaDb(async (db) => {
+      const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, initial.examTrack);
+      const current = aylaOwnedQbankSession(db, fresh.user, fresh.student, initial.id);
+      const currentMapping = qbankSessionQuestion(current, req.params.questionRef);
+      if (!currentMapping) {
+        const error = new Error("Question does not belong to this QBank session");
+        error.statusCode = 404;
+        throw error;
+      }
+      if (enabled) {
+        const item = aylaUpsertQbankRevision(db, current, currentMapping, question || {}, "student_added");
+        aylaQbankEvent(db, current, "question_added_to_revision", { questionRef: currentMapping.ref, revisionId: item.id });
+        return item;
+      }
+      const item = aylaValues(db, "aylaRevisionQueue")
+        .filter((row) => String(row.studentId || "") === String(current.studentId) && String(row.examTrack || "") === String(current.examTrack))
+        .filter((row) => String(row.sourceType || "") === "qbank_question")
+        .find((row) => String(row.sourceId || row.contentQuestionId || "") === String(currentMapping.contentQuestionId));
+      if (!item) return null;
+      item.status = "removed";
+      item.removedAt = aylaNow();
+      item.updatedAt = item.removedAt;
+      aylaSetItem(db, "aylaRevisionQueue", item);
+      aylaQbankEvent(db, current, "question_removed_from_revision", { questionRef: currentMapping.ref, revisionId: item.id });
+      return item;
+    });
+    return aylaSendOk(res, { revision: revision ? { id: revision.id, question_ref: revision.questionRef, in_revision: enabled, status: revision.status, updated_at: revision.updatedAt } : null });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+}
+
+app.post("/api/ayla/qbank/sessions/:sessionId/questions/:questionRef/revision", (req, res) => aylaHandleQbankRevision(req, res, true));
+app.delete("/api/ayla/qbank/sessions/:sessionId/questions/:questionRef/revision", (req, res) => aylaHandleQbankRevision(req, res, false));
+
+async function aylaQbankSavedList(req, res, collection, responseKey) {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.query.student_id || ""), "qbank");
+    const access = aylaRequireQbankAccess(auth.db, auth.user, auth.student, req.query.exam_track || req.query.examTrack || "");
+    const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 50));
+    const rows = aylaValues(auth.db, collection)
+      .filter((row) => String(row.userId || "") === String(auth.user.id) && String(row.studentId || "") === String(auth.student.id))
+      .filter((row) => String(row.examTrack || "") === String(access.exam_track) && !row.deletedAt)
+      .filter((row) => collection !== "aylaRevisionQueue" || (String(row.sourceType || "") === "qbank_question" && !["removed", "completed"].includes(String(row.status || "due").toLowerCase())))
+      .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")))
+      .slice(0, limit);
+    const content = await getContentQbankQuestions({
+      questionIds: rows.map((row) => row.contentQuestionId || row.sourceId),
+      examTrack: access.exam_track,
+      destination: "aylamed_qbank",
+    });
+    const byId = new Map(content.map((row) => [String(row.id), row]));
+    const items = [];
+    for (const row of rows) {
+      const saved = aylaQbankSavedItemSession(auth.db, row);
+      const reveal = canRevealAylaQbankAnswer(saved.session, saved.mapping.ref);
+      const reasons = Array.isArray(row.reasons) ? row.reasons : [];
+      const publicReasons = reveal ? reasons : reasons.filter((reason) => reason !== "incorrect_answer");
+      if (collection === "aylaRevisionQueue" && !reveal && !publicReasons.length) continue;
+      items.push({
+        id: row.id,
+        status: row.status || null,
+        reasons: publicReasons,
+        note: collection === "aylaQbankNotes" ? { text: row.text || "", updated_at: row.updatedAt || null } : null,
+        created_at: row.createdAt || null,
+        updated_at: row.updatedAt || null,
+        question: await aylaPlayableQbankQuestion(auth.db, saved.session, saved.mapping, byId.get(String(row.contentQuestionId || row.sourceId)) || null),
+      });
+    }
+    return aylaSendOk(res, { exam_track: access.exam_track, count: items.length, [responseKey]: items });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+}
+
+app.get("/api/ayla/qbank/bookmarks", (req, res) => aylaQbankSavedList(req, res, "aylaQbankBookmarks", "bookmarks"));
+app.get("/api/ayla/qbank/notes", (req, res) => aylaQbankSavedList(req, res, "aylaQbankNotes", "notes"));
+app.get("/api/ayla/qbank/revision", (req, res) => aylaQbankSavedList(req, res, "aylaRevisionQueue", "revision"));
 
 app.get("/admin/crm/ai-training", async (req, res) => {
   try {
@@ -40728,6 +42815,223 @@ app.post("/admin/crm/ai-training/:id/reject", async (req, res) => {
     res.json({ success: true, item });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// V216 — governed Success Story Training inside the CRM AI Training Center.
+// Stories are isolated from generic CRM training items. AylaMed can read only
+// approved, anonymized strategy fields; source references and outcomes remain
+// CRM-admin-only and never become roadmap commands or medical-fact context.
+// -----------------------------------------------------------------------------
+
+function ngV216SuccessStoryActor(admin = {}) {
+  return {
+    id: admin.user?.id || null,
+    email: admin.user?.email || null,
+  };
+}
+
+function ngV216ExpectedStoryVersion(story = {}, input = {}) {
+  const current = Math.max(1, Number(story.governance_version || 1));
+  const supplied = input.expected_governance_version ?? input.expectedGovernanceVersion ?? input.expected_version ?? input.expectedVersion;
+  if (supplied === undefined) {
+    throw Object.assign(new Error("expected_governance_version is required"), { statusCode: 400, code: "SUCCESS_STORY_VERSION_REQUIRED", details: { current_governance_version: current } });
+  }
+  if (Number(supplied) !== current) {
+    throw Object.assign(new Error("Success story changed; reload before saving"), { statusCode: 409, code: "STALE_SUCCESS_STORY_VERSION", details: { current_governance_version: current } });
+  }
+  return current;
+}
+
+function ngV216SuccessStoryAudit(db, { story, action, actor, previousStatus = null, previousVersion = null, note = null }) {
+  const row = {
+    id: uuid(),
+    story_id: story.id,
+    action,
+    previous_status: previousStatus,
+    status: story.status,
+    previous_governance_version: previousVersion,
+    governance_version: story.governance_version,
+    approval_version: story.approval_version,
+    exam_track_id: story.exam_track_id,
+    actor_id: actor.id,
+    actor_email: actor.email,
+    note: String(note || "").replace(/\u0000/g, "").trim().slice(0, 1000) || null,
+    created_at: nowIso(),
+  };
+  ensureCrmArray(db, "ai_success_story_audit_logs").unshift(row);
+  return row;
+}
+
+function ngV216SuccessStoryError(res, error, fallback) {
+  return res.status(error.statusCode || 500).json({
+    success: false,
+    error: error.message || fallback,
+    ...(error.code ? { code: error.code } : {}),
+    ...(error.details ? { details: error.details } : {}),
+  });
+}
+
+app.get("/admin/crm/ai-training/success-stories", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDbSnapshotOnly();
+    const requestedExam = req.query.exam_track || req.query.examTrack;
+    const examTrackId = requestedExam ? normalizeAylaShellExamTrack(requestedExam) : null;
+    if (requestedExam && !examTrackId) return res.status(400).json({ success: false, error: "A supported exam track is required", code: "INVALID_SUCCESS_STORY_EXAM_TRACK" });
+    const status = String(req.query.status || "").trim().toLowerCase();
+    const stories = [...ensureCrmArray(db, "ai_success_stories")]
+      .filter((story) => !status || String(story.status || "").toLowerCase() === status)
+      .filter((story) => !examTrackId || normalizeAylaShellExamTrack(story.exam_track_id) === examTrackId)
+      .sort((left, right) => String(right.updated_at || right.created_at || "").localeCompare(String(left.updated_at || left.created_at || "")))
+      .map(sanitizeAylaSuccessStoryForAdmin);
+    return res.json({
+      success: true,
+      count: stories.length,
+      stories,
+      controls: {
+        approval_required: true,
+        consent_required: true,
+        anonymization_required: true,
+        exact_exam_match_required: true,
+        outcome_shared_with_tutor: false,
+        approved_edits_require_reapproval: true,
+        hard_delete_supported: false,
+      },
+    });
+  } catch (error) {
+    return ngV216SuccessStoryError(res, error, "Failed to load Success Story Training");
+  }
+});
+
+app.get("/admin/crm/ai-training/success-stories/audit", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDbSnapshotOnly();
+    const storyId = String(req.query.story_id || req.query.storyId || "").trim();
+    const rows = [...ensureCrmArray(db, "ai_success_story_audit_logs")]
+      .filter((row) => !storyId || String(row.story_id || "") === storyId)
+      .sort((left, right) => String(right.created_at || "").localeCompare(String(left.created_at || "")))
+      .slice(0, 1000);
+    return res.json({ success: true, count: rows.length, audit: rows });
+  } catch (error) {
+    return ngV216SuccessStoryError(res, error, "Failed to load Success Story Training audit");
+  }
+});
+
+app.post("/admin/crm/ai-training/success-stories", async (req, res) => {
+  try {
+    const admin = await requireCrmAdmin(req);
+    const actor = ngV216SuccessStoryActor(admin);
+    const result = await mutateCrmDb(async (db) => {
+      const now = nowIso();
+      const story = normalizeAylaSuccessStoryDraft(req.body || {}, {}, now);
+      story.id = uuid();
+      story.status = "draft";
+      story.approval_status = "draft";
+      story.active = false;
+      story.is_active = false;
+      story.created_by = actor.id;
+      story.created_by_email = actor.email;
+      story.updated_by = actor.id;
+      story.updated_by_email = actor.email;
+      ensureCrmArray(db, "ai_success_stories").unshift(story);
+      const audit = ngV216SuccessStoryAudit(db, { story, action: "create_draft", actor });
+      return { story, audit };
+    });
+    return res.status(201).json({ success: true, story: sanitizeAylaSuccessStoryForAdmin(result.story), audit: result.audit });
+  } catch (error) {
+    return ngV216SuccessStoryError(res, error, "Failed to create Success Story Training draft");
+  }
+});
+
+app.put("/admin/crm/ai-training/success-stories/:storyId", async (req, res) => {
+  try {
+    const admin = await requireCrmAdmin(req);
+    const actor = ngV216SuccessStoryActor(admin);
+    const result = await mutateCrmDb(async (db) => {
+      const stories = ensureCrmArray(db, "ai_success_stories");
+      const index = stories.findIndex((story) => String(story.id || "") === String(req.params.storyId));
+      if (index < 0) throw Object.assign(new Error("Success story not found"), { statusCode: 404, code: "SUCCESS_STORY_NOT_FOUND" });
+      const existing = stories[index];
+      const currentVersion = ngV216ExpectedStoryVersion(existing, req.body || {});
+      const previousFingerprint = aylaSuccessStoryMaterialFingerprint(existing);
+      const updated = normalizeAylaSuccessStoryDraft(req.body || {}, existing, nowIso());
+      const materialChanged = previousFingerprint !== aylaSuccessStoryMaterialFingerprint(updated);
+      if (materialChanged && String(existing.status || "").toLowerCase() === "approved") {
+        updated.status = "needs_review";
+        updated.approval_status = "needs_review";
+        updated.active = false;
+        updated.is_active = false;
+      }
+      updated.governance_version = currentVersion + 1;
+      updated.updated_by = actor.id;
+      updated.updated_by_email = actor.email;
+      stories[index] = updated;
+      const audit = ngV216SuccessStoryAudit(db, {
+        story: updated,
+        action: materialChanged ? "edit_material" : "edit_no_material_change",
+        actor,
+        previousStatus: existing.status,
+        previousVersion: currentVersion,
+        note: materialChanged && existing.status === "approved" ? "Approved story changed and was returned to review" : null,
+      });
+      return { story: updated, audit, reapprovalRequired: materialChanged && existing.status === "approved" };
+    });
+    return res.json({ success: true, story: sanitizeAylaSuccessStoryForAdmin(result.story), audit: result.audit, reapproval_required: result.reapprovalRequired });
+  } catch (error) {
+    return ngV216SuccessStoryError(res, error, "Failed to update Success Story Training draft");
+  }
+});
+
+app.post("/admin/crm/ai-training/success-stories/:storyId/review", async (req, res) => {
+  try {
+    const admin = await requireCrmAdmin(req);
+    const actor = ngV216SuccessStoryActor(admin);
+    const result = await mutateCrmDb(async (db) => {
+      const stories = ensureCrmArray(db, "ai_success_stories");
+      const index = stories.findIndex((story) => String(story.id || "") === String(req.params.storyId));
+      if (index < 0) throw Object.assign(new Error("Success story not found"), { statusCode: 404, code: "SUCCESS_STORY_NOT_FOUND" });
+      const existing = stories[index];
+      const currentVersion = ngV216ExpectedStoryVersion(existing, req.body || {});
+      const reviewed = reviewAylaSuccessStory(existing, { ...req.body, reviewer: actor }, nowIso());
+      stories[index] = reviewed;
+      const audit = ngV216SuccessStoryAudit(db, {
+        story: reviewed,
+        action: String(req.body.action || "").trim().toLowerCase(),
+        actor,
+        previousStatus: existing.status,
+        previousVersion: currentVersion,
+        note: req.body.note || req.body.review_note,
+      });
+      return { story: reviewed, audit };
+    });
+    return res.json({ success: true, story: sanitizeAylaSuccessStoryForAdmin(result.story), audit: result.audit });
+  } catch (error) {
+    return ngV216SuccessStoryError(res, error, "Failed to review Success Story Training");
+  }
+});
+
+app.delete("/admin/crm/ai-training/success-stories/:storyId", async (req, res) => {
+  try {
+    const admin = await requireCrmAdmin(req);
+    const actor = ngV216SuccessStoryActor(admin);
+    const result = await mutateCrmDb(async (db) => {
+      const stories = ensureCrmArray(db, "ai_success_stories");
+      const index = stories.findIndex((story) => String(story.id || "") === String(req.params.storyId));
+      if (index < 0) throw Object.assign(new Error("Success story not found"), { statusCode: 404, code: "SUCCESS_STORY_NOT_FOUND" });
+      const existing = stories[index];
+      const input = { ...req.query, ...(req.body || {}) };
+      const currentVersion = ngV216ExpectedStoryVersion(existing, input);
+      const archived = reviewAylaSuccessStory(existing, { action: "archive", note: input.note || "Archived by CRM administrator", reviewer: actor }, nowIso());
+      stories[index] = archived;
+      const audit = ngV216SuccessStoryAudit(db, { story: archived, action: "archive", actor, previousStatus: existing.status, previousVersion: currentVersion, note: input.note || "Archived by CRM administrator" });
+      return { story: archived, audit };
+    });
+    return res.json({ success: true, archived: true, deleted: false, history_preserved: true, story: sanitizeAylaSuccessStoryForAdmin(result.story), audit: result.audit });
+  } catch (error) {
+    return ngV216SuccessStoryError(res, error, "Failed to archive Success Story Training");
   }
 });
 
@@ -50438,8 +52742,123 @@ app.post("/student/flashcards/generate-weak-area", async (req, res) => {
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
+app.get("/student/flashcards/registry", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const courseId = String(req.query.course_id || req.query.courseId || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    const access = ngCourseFeatureAccess(db, user, { courseId, featureKey: "flashcards" });
+    if (!access.allowed) return ngBlockLockedFeature(res, "flashcards", access.reason);
+    const examTrack = ngCourseExamTrack(db, user, courseId);
+    if (examTrack === "unknown") {
+      return res.status(409).json({ success: false, error: "This course does not have a configured exam track" });
+    }
+    const questions = await listContentRegistryFlashcardQuestions({
+      examTrack,
+      systemKey: String(req.query.system || req.query.system_key || "").trim(),
+      subsystemKey: String(req.query.subsystem || req.query.subsystem_key || "").trim(),
+      topicKey: String(req.query.topic || req.query.topic_key || "").trim(),
+      limit: req.query.limit,
+      offset: req.query.offset,
+    });
+    const progressByCard = new Map(Object.values(db.flashcardProgress || {})
+      .filter((item) => String(item.course_id) === courseId && String(item.user_id) === String(user.id))
+      .map((item) => [String(item.flashcard_id), item]));
+    const playableQuestions = await Promise.all(questions.map(ngRegistryQuestionWithPlayableMedia));
+    const flashcards = playableQuestions.map((question) => {
+      const id = contentRegistryFlashcardId(question.id);
+      const progress = progressByCard.get(id) || null;
+      return {
+        ...registryQuestionToFlashcard(question, { courseId, reviewed: Boolean(progress?.reviewed) }),
+        progress,
+      };
+    });
+    return res.json({
+      success: true,
+      course_id: courseId,
+      exam_track: examTrack,
+      source: "approved_content_registry",
+      read_only: true,
+      answer_mode: "reveal_only",
+      count: flashcards.length,
+      flashcards,
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+async function ngReviewContentRegistryFlashcard(req, res, questionId = req.params.questionId) {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = await readLiveDb();
+    const courseId = String(req.body.course_id || req.body.courseId || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    const access = ngCourseFeatureAccess(db, user, { courseId, featureKey: "flashcards" });
+    if (!access.allowed) return ngBlockLockedFeature(res, "flashcards", access.reason);
+    const examTrack = ngCourseExamTrack(db, user, courseId);
+    if (examTrack === "unknown") {
+      return res.status(409).json({ success: false, error: "This course does not have a configured exam track" });
+    }
+    const question = await getContentRegistryFlashcardQuestion({ questionId, examTrack });
+    if (!question) return res.status(404).json({ success: false, error: "Approved QBank flashcard not found for this exam" });
+
+    const flashcardId = contentRegistryFlashcardId(question.id);
+    db.flashcardProgress = db.flashcardProgress || {};
+    db.flashcardReviewEvents = db.flashcardReviewEvents || {};
+    const key = `${courseId}:${user.id}:${flashcardId}`;
+    const previousProgress = db.flashcardProgress[key] || {};
+    const schedule = scheduleFlashcardReview(previousProgress, req.body.rating || req.body.confidence || "good", new Date());
+    const reviewEventId = uuid();
+    db.flashcardReviewEvents[reviewEventId] = {
+      id: reviewEventId, app: "lms", course_id: courseId, user_id: user.id,
+      flashcard_id: flashcardId, registry_question_id: question.id,
+      rating: schedule.rating, confidence: req.body.confidence || null,
+      interval_days: schedule.interval_days, ease_factor: schedule.ease_factor,
+      lapses: schedule.lapses, reviewed_at: schedule.reviewed_at,
+      next_review_date: schedule.next_review_date, created_at: schedule.reviewed_at,
+      source: "content_registry_mcq", exam_track: examTrack,
+    };
+    db.flashcardProgress[key] = {
+      ...previousProgress, id: key, course_id: courseId, user_id: user.id,
+      flashcard_id: flashcardId, registry_question_id: question.id,
+      reviewed: true, rating: schedule.rating, confidence: req.body.confidence || null,
+      interval_days: schedule.interval_days, ease_factor: schedule.ease_factor,
+      lapses: schedule.lapses,
+      review_count: Math.max(0, Number(previousProgress.review_count || 0)) + 1,
+      last_review_event_id: reviewEventId, reviewed_at: schedule.reviewed_at,
+      next_review_date: schedule.next_review_date, due_date: schedule.next_review_date,
+      updated_at: schedule.reviewed_at, source: "content_registry_mcq", exam_track: examTrack,
+    };
+    await writeLiveDb(db);
+    await shadowWriteFlashcardReview({
+      event: {
+        ...db.flashcardReviewEvents[reviewEventId], scope_type: "course", scope_id: courseId,
+        source_event_id: `lms:${reviewEventId}`, flashcard_id: `lms:${flashcardId}`,
+        source_data: { registry_question_id: question.id, exam_track: examTrack },
+      },
+      state: {
+        app: "lms", scope_type: "course", scope_id: courseId, user_id: user.id,
+        flashcard_id: `lms:${flashcardId}`, rating: schedule.rating,
+        interval_days: schedule.interval_days, ease_factor: schedule.ease_factor,
+        lapses: schedule.lapses, review_count: db.flashcardProgress[key].review_count,
+        last_review_event_id: reviewEventId, reviewed_at: schedule.reviewed_at,
+        next_review_date: schedule.next_review_date,
+      },
+    }).catch((error) => console.warn("Registry flashcard shadow write failed; JSON remains authoritative:", error.message));
+    return res.json({ success: true, progress: db.flashcardProgress[key], review_event_id: reviewEventId });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+}
+
+app.post("/student/flashcards/registry/:questionId/review", ngReviewContentRegistryFlashcard);
+
 app.post("/student/flashcards/:id/review", async (req, res) => {
   try {
+    const registryQuestionId = contentRegistryQuestionId(req.params.id);
+    if (registryQuestionId) return ngReviewContentRegistryFlashcard(req, res, registryQuestionId);
     const { user } = await getAuthenticatedUser(req);
     const db = await readLiveDb();
     const card = db.flashcards?.[String(req.params.id)] || null;
@@ -51005,11 +53424,11 @@ function ngPickStudentDailyFlashcardQueue(cards = [], { limit = 28 } = {}) {
     }
   };
 
-  // Daily queue is intentionally small. Do not dump the entire published bank on students.
+  // Core live-LMS learning always wins. The published/QBank bank only fills
+  // unused slots after weak-area, session-note, and current class-system cards.
   take("weak_area", 10);
-  take("tutor_notes", 7);
-  take("class_first_aid", 8);
-  take("published_bank", 3);
+  take("tutor_notes", 8);
+  take("class_first_aid", 10);
 
   for (const card of cards) {
     if (picked.length >= max) break;
@@ -51021,7 +53440,7 @@ function ngPickStudentDailyFlashcardQueue(cards = [], { limit = 28 } = {}) {
   return picked;
 }
 
-function ngStableStudentDailyFlashcardQueue(db, { courseId, userId, date = todayKey(), cards = [], limit = 28 } = {}) {
+function ngStableStudentDailyFlashcardQueue(db, { courseId, userId, date = todayKey(), cards = [], limit = 28, currentSystem = "" } = {}) {
   db.adaptiveFlashcardQueues = db.adaptiveFlashcardQueues || {};
   const max = Math.max(10, Math.min(40, Number(limit || 28)));
   const key = `${courseId}:${userId}:${date}`;
@@ -51035,9 +53454,8 @@ function ngStableStudentDailyFlashcardQueue(db, { courseId, userId, date = today
 
   const prioritized = [...cards].sort((a, b) => {
     if (Boolean(a.reviewed) !== Boolean(b.reviewed)) return Number(Boolean(a.reviewed)) - Number(Boolean(b.reviewed));
-    const order = { weak_area: 0, tutor_notes: 1, class_first_aid: 2, published_bank: 3 };
-    const bucketDiff = (order[a.bucket] ?? 9) - (order[b.bucket] ?? 9);
-    if (bucketDiff) return bucketDiff;
+    const priorityDiff = flashcardPriorityRank(a, currentSystem) - flashcardPriorityRank(b, currentSystem);
+    if (priorityDiff) return priorityDiff;
     if (a.bucket === "weak_area") return String(b.created_at || "").localeCompare(String(a.created_at || ""));
     return Number(a.day_number || 9999) - Number(b.day_number || 9999) || String(b.created_at || "").localeCompare(String(a.created_at || ""));
   });
@@ -51047,20 +53465,23 @@ function ngStableStudentDailyFlashcardQueue(db, { courseId, userId, date = today
     selectedIds.clear();
     selected.forEach((card) => selectedIds.add(String(card.id)));
   } else {
-    // Inject newly generated, unreviewed weak-area cards immediately. Prefer
-    // replacing reviewed/non-weak cards so today's saved progress stays visible.
-    const newWeakCards = prioritized.filter((card) => card.bucket === "weak_area" && !card.reviewed && !selectedIds.has(String(card.id)));
-    for (const card of newWeakCards) {
+    // Inject newly generated weak-area and current-system session/class cards.
+    // Prefer replacing published-bank, reviewed, or non-current-system cards.
+    const urgentCards = prioritized.filter((card) => !card.reviewed && !selectedIds.has(String(card.id)) && (
+      card.bucket === "weak_area" ||
+      (["tutor_notes", "class_first_aid"].includes(card.bucket) && flashcardMatchesCurrentSystem(card, currentSystem))
+    ));
+    for (const card of urgentCards) {
       if (selected.length >= max) {
         let replaceIndex = -1;
         for (let index = selected.length - 1; index >= 0; index -= 1) {
-          if (selected[index].reviewed || selected[index].bucket !== "weak_area") {
+          if (selected[index].bucket === "published_bank" || selected[index].reviewed || !flashcardMatchesCurrentSystem(selected[index], currentSystem)) {
             replaceIndex = index;
             break;
           }
         }
-        // If today's queue is entirely unreviewed weak cards, replace its
-        // oldest tail card so the newest assessment-generated card still shows.
+        // If the queue is entirely urgent, replace its tail with the newest
+        // weak/current-system item.
         if (replaceIndex < 0) replaceIndex = selected.length - 1;
         if (replaceIndex < 0) break;
         selectedIds.delete(String(selected[replaceIndex].id));
@@ -51321,11 +53742,23 @@ app.get("/student/flashcards/review", async (req, res) => {
       return true;
     }).map((card) => ngSanitizeFlashcardForStudent(card, reviewedSet));
 
+    // Approved registry questions are a supporting premium bank. They are
+    // deliberately appended as published_bank cards so the queue policy can
+    // only use them after weak-area, live-session, and current-system cards.
+    const examTrack = ngCourseExamTrack(db, user, courseId);
+    if (examTrack !== "unknown" && flashcardCapabilities("lms").qbankSource) {
+      const registryQuestions = await listContentRegistryFlashcardQuestions({ examTrack, limit: 40, offset: 0 });
+      const playableRegistryQuestions = await Promise.all(registryQuestions.map(ngRegistryQuestionWithPlayableMedia));
+      cards.push(...playableRegistryQuestions.map((question) => registryQuestionToFlashcard(question, {
+        courseId,
+        reviewed: reviewedSet.has(contentRegistryFlashcardId(question.id)),
+      })));
+    }
+
     cards.sort((a, b) => {
-      const bucketOrder = { weak_area: 0, tutor_notes: 1, class_first_aid: 2, published_bank: 3 };
-      const ao = bucketOrder[a.bucket] ?? 9;
-      const bo = bucketOrder[b.bucket] ?? 9;
-      if (ao !== bo) return ao - bo;
+      const currentSystem = String(todayDay?.system || todayDay?.current_system || todayDay?.topic || "");
+      const priorityDiff = flashcardPriorityRank(a, currentSystem) - flashcardPriorityRank(b, currentSystem);
+      if (priorityDiff) return priorityDiff;
       if (a.bucket === "weak_area" && Boolean(a.reviewed) === Boolean(b.reviewed)) {
         return String(b.created_at || "").localeCompare(String(a.created_at || ""));
       }
@@ -51341,6 +53774,7 @@ app.get("/student/flashcards/review", async (req, res) => {
       date: today,
       cards: availableCards,
       limit: queueLimit,
+      currentSystem: String(todayDay?.system || todayDay?.current_system || todayDay?.topic || ""),
     });
     const queueCards = stableQueue.cards;
     if (flashcardSyncChanged || stableQueue.changed) await writeLiveDb(db);
@@ -53303,11 +55737,12 @@ function ngStartBillingExpiryRunner() {
 // - Frontend can connect to these routes later with VITE_API_BASE_URL pointing to this backend.
 // -----------------------------------------------------------------------------
 
-const AYLA_BACKEND_BUILD = "aylamed-smart-tutor-notebook-ocr-v190F";
+const AYLA_BACKEND_BUILD = "aylamed-safe-shared-student-profile-v219";
 
 const AYLA_EXAM_TRACKS = [
   "USMLE Step 1",
   "USMLE Step 2 CK",
+  "USMLE Step 3",
   "PLAB",
   "AMC",
   "MCCQE",
@@ -53318,6 +55753,7 @@ const AYLA_EXAM_TRACKS = [
 const AYLA_EXAM_REGISTRY = Object.freeze({
   usmle_step_1: { id: "usmle_step_1", label: "USMLE Step 1", aliases: ["step 1", "step1", "usmle step 1"], curriculumVersion: "2026.1", systems: ["Cardiovascular", "Renal", "Respiratory", "Gastrointestinal", "Neurology", "Endocrine", "Reproductive", "Hematology", "Immunology", "Musculoskeletal", "Behavioral Science", "Biochemistry", "Pharmacology", "Microbiology", "Biostatistics and Ethics"] },
   usmle_step_2_ck: { id: "usmle_step_2_ck", label: "USMLE Step 2 CK", aliases: ["step 2", "step2", "step 2 ck", "usmle step 2 ck"], curriculumVersion: "2026.1", systems: ["Internal Medicine", "Surgery", "Obstetrics and Gynecology", "Pediatrics", "Psychiatry", "Emergency Medicine", "Family Medicine", "Preventive Medicine", "Ethics and Biostatistics"] },
+  usmle_step_3: { id: "usmle_step_3", label: "USMLE Step 3", aliases: ["step 3", "step3", "usmle step 3"], curriculumVersion: "2026.1", systems: ["Internal Medicine", "Surgery", "Pediatrics", "Obstetrics and Gynecology", "Psychiatry", "Emergency Medicine", "Family Medicine", "Preventive Medicine", "Biostatistics and Ethics", "Computer-based Case Simulations"] },
   plab: { id: "plab", label: "PLAB", aliases: ["plab", "plab 1", "plab1", "professional and linguistic assessments board"], curriculumVersion: "2026.1", systems: ["Medicine", "Surgery", "Emergency Medicine", "Obstetrics and Gynecology", "Pediatrics", "Psychiatry", "General Practice", "Clinical Ethics", "Communication Skills", "Patient Safety", "UK Clinical Guidelines"] },
   amc: { id: "amc", label: "AMC", aliases: ["amc", "australian medical council", "australia"], curriculumVersion: "2026.1", systems: ["Medicine", "Surgery", "Women's Health", "Child Health", "Mental Health", "Population Health", "Ethics", "Australian Clinical Practice"] },
   mccqe: { id: "mccqe", label: "MCCQE", aliases: ["mccqe", "mccqe1", "mccqe part 1", "medical council of canada", "canada"], curriculumVersion: "2026.1", systems: ["Family Medicine", "Internal Medicine", "Surgery", "Pediatrics", "Obstetrics and Gynecology", "Psychiatry", "Emergency Medicine", "Preventive Care", "Ethics and Communication"] },
@@ -53325,9 +55761,7 @@ const AYLA_EXAM_REGISTRY = Object.freeze({
 });
 
 function aylaCanonicalExamTrack(value = "") {
-  const clean = String(value || "").trim().toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
-  if (!clean || ["all", "general", "any", "other", "other medical exam"].includes(clean)) return null;
-  return Object.values(AYLA_EXAM_REGISTRY).find((track) => track.id.replace(/_/g, " ") === clean || track.label.toLowerCase() === clean || track.aliases.includes(clean))?.id || null;
+  return normalizeAylaShellExamTrack(value);
 }
 
 function aylaExamTrackDefinition(value = "") { const id = aylaCanonicalExamTrack(value); return id ? AYLA_EXAM_REGISTRY[id] : null; }
@@ -53338,6 +55772,10 @@ const AYLA_COLLECTIONS = {
   aylaRoadmapRules: { route: "/api/ayla/roadmap-rules", prefix: "RR", label: "roadmapRule" },
   aylaQbankRules: { route: "/api/ayla/qbank-rules", prefix: "QR", label: "qbankRule" },
   aylaQbankBlocks: { route: "/api/ayla/qbank-blocks", prefix: "QB", label: "qbankBlock" },
+  aylaQbankSessions: { route: "/api/ayla/admin/qbank-sessions", prefix: "AYLA-QBS", label: "qbankSession", customPost: true, immutableAdminWrites: true },
+  aylaQbankBookmarks: { route: "/api/ayla/admin/qbank-bookmarks", prefix: "AYLA-QBB", label: "qbankBookmark", customPost: true, immutableAdminWrites: true },
+  aylaQbankNotes: { route: "/api/ayla/admin/qbank-notes", prefix: "AYLA-QBN", label: "qbankNote", customPost: true, immutableAdminWrites: true },
+  aylaQbankEvents: { route: "/api/ayla/admin/qbank-events", prefix: "AYLA-QBE", label: "qbankEvent", customPost: true, immutableAdminWrites: true },
   aylaWeakAreaRules: { route: "/api/ayla/weak-area-rules", prefix: "WA", label: "weakAreaRule" },
   aylaWeakAreaLogs: { route: "/api/ayla/weak-area-logs", prefix: "WEAK", label: "weakAreaLog" },
   aylaFlashcardRules: { route: "/api/ayla/flashcard-rules", prefix: "FR", label: "flashcardRule" },
@@ -53398,7 +55836,7 @@ const DEFAULT_AYLA_SETTINGS = {
     button_text: "Start {{days}}-Day Demo",
     plan_name: "AylaMed {{days}}-Day Demo",
     description: "Try the diagnostic, personalized roadmap, QBank direction, revision tools, and approved knowledge guidance.",
-    included_features: ["diagnostic", "roadmap", "flashcards", "qbank", "weak_areas", "study_partner", "knowledge_search", "ai_coach"],
+    included_features: ["diagnostic", "roadmap", "personal_tutor", "library", "qbank", "revision", "flashcards", "study_partner"],
   },
   homepage: {
     hero_eyebrow: "Adaptive medical preparation",
@@ -53472,13 +55910,18 @@ const DEFAULT_AYLA_AI_USAGE_SETTINGS = {
 };
 
 const DEFAULT_AYLA_DB = {
-  schema_version: 3,
+  schema_version: 13,
+  qbank_state_version: 0,
   aylaUsers: {},
   aylaStudents: {},
   aylaDiagnosticSubmissions: {},
   aylaRoadmapRules: {},
   aylaQbankRules: {},
   aylaQbankBlocks: {},
+  aylaQbankSessions: {},
+  aylaQbankBookmarks: {},
+  aylaQbankNotes: {},
+  aylaQbankEvents: {},
   aylaWeakAreaRules: {},
   aylaWeakAreaLogs: {},
   aylaFlashcardRules: {},
@@ -53508,6 +55951,7 @@ const DEFAULT_AYLA_DB = {
   aylaModerationActions: {},
   aylaStudyPartnerRequests: {},
   aylaPasswordResetTokens: {},
+  aylaProfileAuditEvents: {},
   aylaActionLogs: {},
   aylaPlans: {},
   aylaCoupons: {},
@@ -53528,7 +55972,7 @@ let aylaDbCache = null;
 let aylaDbReadInFlight = null;
 
 function aylaMergeSettings(value = {}) {
-  return {
+  const merged = {
     ...DEFAULT_AYLA_SETTINGS,
     ...(value || {}),
     product: { ...DEFAULT_AYLA_SETTINGS.product, ...(value?.product || {}) },
@@ -53543,6 +55987,8 @@ function aylaMergeSettings(value = {}) {
     assessment_policy: { ...DEFAULT_AYLA_SETTINGS.assessment_policy, ...(value?.assessment_policy || {}) },
     community: { ...DEFAULT_AYLA_SETTINGS.community, ...(value?.community || {}) },
   };
+  merged.demo.included_features = normalizeAylaPlanFeatures(merged.demo.included_features).features;
+  return merged;
 }
 
 function aylaMergeAiUsageSettings(value = {}) {
@@ -53568,6 +56014,8 @@ async function readAylaDbFromDisk() {
     const raw = await fs.readFile(AYLA_DB_PATH, "utf8");
     const parsed = JSON.parse(raw);
     const next = { ...DEFAULT_AYLA_DB, ...parsed };
+    next.schema_version = Math.max(Number(parsed.schema_version || 0), Number(DEFAULT_AYLA_DB.schema_version || 0));
+    next.qbank_state_version = Math.max(0, Number(parsed.qbank_state_version || 0));
     for (const key of Object.keys(DEFAULT_AYLA_DB)) {
       if (key.startsWith("ayla") && key !== "aylaSettings" && key !== "aylaAiUsageSettings" && (!next[key] || typeof next[key] !== "object" || Array.isArray(next[key]))) next[key] = {};
     }
@@ -53605,11 +56053,39 @@ async function writeAylaDb(db) {
     })
     .then(async () => {
     await ensureDataDir();
+    const incomingQbankVersion = Math.max(0, Number(db.qbank_state_version || 0));
+    const latestQbankVersion = Math.max(0, Number(aylaDbCache?.qbank_state_version || 0));
+    const preparedDb = { ...db };
+    if (aylaDbCache) {
+      preparedDb.aylaVideoProgress = mergeAylaContentHubProgressCollection(
+        aylaDbCache.aylaVideoProgress,
+        db.aylaVideoProgress,
+      );
+      preparedDb.aylaReadingProgress = mergeAylaLibraryProgressCollection(
+        aylaDbCache.aylaReadingProgress,
+        db.aylaReadingProgress,
+      );
+      preparedDb.aylaNotebooks = mergeConcurrentAylaNotebookCollection(
+        aylaDbCache.aylaNotebooks,
+        db.aylaNotebooks,
+      );
+      preparedDb.aylaNotebookVersions = mergeConcurrentAylaNotebookCollection(
+        aylaDbCache.aylaNotebookVersions,
+        db.aylaNotebookVersions,
+      );
+    }
+    if (aylaDbCache && latestQbankVersion > incomingQbankVersion) {
+      for (const key of AYLA_QBANK_STATE_COLLECTIONS) {
+        preparedDb[key] = mergeConcurrentAylaQbankCollection(aylaDbCache[key], db[key]);
+      }
+    }
     const nextDb = {
       ...DEFAULT_AYLA_DB,
-      ...db,
-      aylaSettings: aylaMergeSettings(db.aylaSettings || {}),
-      aylaAiUsageSettings: aylaMergeAiUsageSettings(db.aylaAiUsageSettings || {}),
+      ...preparedDb,
+      schema_version: DEFAULT_AYLA_DB.schema_version,
+      qbank_state_version: Math.max(incomingQbankVersion, latestQbankVersion),
+      aylaSettings: aylaMergeSettings(preparedDb.aylaSettings || {}),
+      aylaAiUsageSettings: aylaMergeAiUsageSettings(preparedDb.aylaAiUsageSettings || {}),
       updatedAt: new Date().toISOString(),
     };
     await ngWriteJsonAtomicStreaming(AYLA_DB_PATH, nextDb, "AylaMed database");
@@ -53620,9 +56096,38 @@ async function writeAylaDb(db) {
   return task;
 }
 
+async function mutateAylaDb(mutator) {
+  const task = aylaWriteQueue
+    .catch((error) => {
+      console.error("Previous AylaMed write failed; atomic mutation queue recovered:", error.message);
+    })
+    .then(async () => {
+      const current = aylaDbCache
+        ? JSON.parse(JSON.stringify(aylaDbCache))
+        : await readAylaDbFromDisk();
+      const result = await mutator(current);
+      const nextDb = {
+        ...DEFAULT_AYLA_DB,
+        ...current,
+        schema_version: DEFAULT_AYLA_DB.schema_version,
+        qbank_state_version: Math.max(0, Number(current.qbank_state_version || 0)) + 1,
+        aylaSettings: aylaMergeSettings(current.aylaSettings || {}),
+        aylaAiUsageSettings: aylaMergeAiUsageSettings(current.aylaAiUsageSettings || {}),
+        updatedAt: new Date().toISOString(),
+      };
+      await ensureDataDir();
+      await ngWriteJsonAtomicStreaming(AYLA_DB_PATH, nextDb, "AylaMed atomic database mutation");
+      aylaDbCache = nextDb;
+      aylaDbReadInFlight = null;
+      return result;
+    });
+  aylaWriteQueue = task;
+  return task;
+}
+
 async function readAylaCrmSnapshot() {
   try {
-    return await readCrmDb();
+    return await readCrmDbSnapshotOnly();
   } catch (error) {
     console.error("AylaMed read-only CRM knowledge snapshot error:", error.message);
     throw error;
@@ -54647,6 +57152,20 @@ async function aylaKnowledgeForStudent(db, student, recommendation = aylaRecomme
   return aylaSearchTrainingKnowledge({ query, limit });
 }
 
+async function aylaSuccessStoryStrategiesForStudent(student = {}, assignments = [], limit = 3) {
+  const crmDb = await readAylaCrmSnapshot();
+  const focus = [
+    ...(aylaCleanArray(student.weakAreas)),
+    ...(Array.isArray(assignments) ? assignments.flatMap((row) => [row?.system, row?.topic, row?.title]) : []),
+  ].filter(Boolean);
+  return selectAylaSuccessStoryStrategies({
+    stories: ensureCrmArray(crmDb, "ai_success_stories"),
+    examTrack: student.examTrackId || student.exam_track_id || student.exam,
+    focus,
+    limit,
+  });
+}
+
 function aylaPartnerScore(a, b) {
   if (!a || !b || a.id === b.id || a.studentId === b.studentId) return 0;
   let score = 0;
@@ -54710,6 +57229,7 @@ function aylaSanitizeUser(user) {
     role: user.role || "student",
     status: user.status || "active",
     studentId: user.studentId || null,
+    activeExamTrackId: aylaCanonicalExamTrack(user.activeExamTrackId || user.active_exam_track_id) || null,
     publicUsername: user.publicUsername || user.public_username || "",
     profileImageUrl: user.profileImageUrl || user.profile_image_url || "",
     timezone: user.timezone || "",
@@ -54784,7 +57304,7 @@ function aylaPlanIsDemo(plan) {
   return Boolean(plan?.is_demo) || type === "demo" || type === "trial";
 }
 
-function aylaNormalizePlanPayload(body = {}, existing = {}) {
+function aylaNormalizePlanPayload(body = {}, existing = {}, { strictControls = false } = {}) {
   const priceCents = body.price_cents !== undefined
     ? Number(body.price_cents || 0)
     : body.price !== undefined
@@ -54799,6 +57319,25 @@ function aylaNormalizePlanPayload(body = {}, existing = {}) {
       ? !inactiveStatuses.includes(requestedStatus)
       : existing.is_active !== false;
   const status = requestedStatus || (isActive ? "active" : "inactive");
+  const examTrackInput = body.exam_tracks ?? body.examTracks ?? body.exam_track_ids ?? body.examTrackIds
+    ?? body.exam_track_id ?? body.examTrackId ?? body.exam_track ?? body.exam
+    ?? existing.exam_tracks ?? existing.examTracks ?? existing.exam_track_ids ?? existing.examTrackIds
+    ?? existing.exam_track_id ?? existing.examTrackId ?? existing.exam_track ?? existing.exam;
+  const examTracks = [...new Set(aylaCleanArray(examTrackInput).map(normalizeAylaShellExamTrack).filter(Boolean))];
+  if (strictControls && examTrackInput !== undefined) {
+    const suppliedTracks = aylaCleanArray(examTrackInput).filter(Boolean);
+    if (examTracks.length !== suppliedTracks.length) {
+      throw Object.assign(new Error("Every AylaMed plan exam track must be supported and unique"), { statusCode: 400, code: "INVALID_PLAN_EXAM_TRACK" });
+    }
+  }
+  const suppliedFeatureInput = body.included_features !== undefined ? body.included_features : body.features;
+  const normalizedFeatureInput = suppliedFeatureInput === undefined
+    ? undefined
+    : normalizeAylaPlanFeatures(suppliedFeatureInput, { rejectUnknown: strictControls }).features;
+  const featureControls = applyAylaPlanFeaturePatch(existing, {
+    ...(normalizedFeatureInput !== undefined ? { included_features: normalizedFeatureInput } : {}),
+    ...(body.is_full_access !== undefined ? { is_full_access: body.is_full_access } : {}),
+  });
 
   return {
     ...existing,
@@ -54811,12 +57350,14 @@ function aylaNormalizePlanPayload(body = {}, existing = {}) {
     price_cents: Math.max(0, Number.isFinite(priceCents) ? priceCents : 0),
     currency: String(body.currency ?? existing.currency ?? "usd").trim().toLowerCase() || "usd",
     access_days: aylaPlanIsDemo(body) ? Number(body.access_days ?? existing.access_days ?? 2) : aylaPlanAccessDays({ ...existing, ...body }),
-    included_features: aylaCleanArray(body.included_features ?? body.features ?? existing.included_features ?? []),
+    included_features: featureControls.included_features,
+    exam_tracks: examTracks,
     is_demo: Boolean(body.is_demo ?? existing.is_demo ?? aylaPlanIsDemo(body)),
-    is_full_access: Boolean(body.is_full_access ?? existing.is_full_access ?? String(body.plan_type || existing.plan_type || "").toLowerCase().includes("full")),
+    is_full_access: featureControls.is_full_access,
     is_active: isActive,
     is_public: body.is_public !== undefined ? Boolean(body.is_public) : existing.is_public !== false,
     max_ai_actions_per_day: Number(body.max_ai_actions_per_day ?? existing.max_ai_actions_per_day ?? 20),
+    feature_matrix_version: Math.max(1, Number(body.feature_matrix_version ?? existing.feature_matrix_version ?? 1) || 1),
     createdAt: existing.createdAt || body.createdAt || body.created_at || aylaNow(),
     created_at: existing.created_at || existing.createdAt || body.created_at || body.createdAt || aylaNow(),
     updatedAt: aylaNow(),
@@ -54871,8 +57412,55 @@ function aylaBuildPricing({ plan, coupon }) {
   };
 }
 
-function aylaEnrollmentKey(userId, planId, type = "paid") {
-  return `ayla:${userId}:${planId || "manual"}:${type}`;
+function aylaEnrollmentKey(userId, planId, type = "paid", examTrack = null) {
+  return aylaScopedEnrollmentKey(userId, planId, type, examTrack);
+}
+
+function aylaExamTrackFromPayload(payload = {}) {
+  return payload.examTrackId ?? payload.exam_track_id ?? payload.examTrack ?? payload.exam_track ?? payload.exam ?? null;
+}
+
+function aylaEnrollmentScopeFromPayload(db, user = {}, payload = {}) {
+  const explicitStudentId = payload.studentId || payload.student_id || null;
+  const explicitExamTrack = aylaExamTrackFromPayload(payload);
+  if (explicitStudentId) {
+    const student = aylaGetItem(db, "aylaStudents", explicitStudentId);
+    return {
+      studentId: explicitStudentId,
+      examTrack: explicitExamTrack || student?.examTrackId || student?.exam_track_id || student?.exam || null,
+    };
+  }
+  if (explicitExamTrack) {
+    const examTrackId = aylaCanonicalExamTrack(explicitExamTrack);
+    const matchingProfiles = aylaOwnedStudentsForUser(db, user.id).filter((student) => aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam) === examTrackId);
+    return { studentId: matchingProfiles.length === 1 ? matchingProfiles[0].id : null, examTrack: explicitExamTrack };
+  }
+  const activeStudent = user.studentId ? aylaGetItem(db, "aylaStudents", user.studentId) : null;
+  if (activeStudent && String(activeStudent.ayla_user_id || activeStudent.aylaUserId || activeStudent.user_id || activeStudent.userId || "") === String(user.id || "")) {
+    return { studentId: activeStudent.id, examTrack: activeStudent.examTrackId || activeStudent.exam_track_id || activeStudent.exam || null };
+  }
+  return { studentId: null, examTrack: null };
+}
+
+function aylaAssertStudentExamIdentity(student = {}, payload = {}) {
+  const requestedValue = aylaExamTrackFromPayload(payload);
+  if (requestedValue === null || requestedValue === undefined || String(requestedValue).trim() === "") {
+    return aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam);
+  }
+  const requestedExamTrackId = aylaCanonicalExamTrack(requestedValue);
+  if (!requestedExamTrackId) {
+    const error = new Error("Unsupported AylaMed exam track");
+    error.statusCode = 400;
+    throw error;
+  }
+  const currentExamTrackId = aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam);
+  if (currentExamTrackId && requestedExamTrackId !== currentExamTrackId) {
+    const error = new Error("An exam dashboard cannot be converted into another exam");
+    error.statusCode = 409;
+    error.code = "EXAM_IDENTITY_IMMUTABLE";
+    throw error;
+  }
+  return currentExamTrackId || requestedExamTrackId;
 }
 
 function aylaAccessExpiresAt({ plan, startsAt = aylaNow(), accessDays = null }) {
@@ -54883,17 +57471,72 @@ function aylaAccessExpiresAt({ plan, startsAt = aylaNow(), accessDays = null }) 
 }
 
 function aylaEnrollmentActive(enrollment) {
-  if (!enrollment || enrollment.access_granted === false) return false;
-  if (enrollment.status === "revoked" || enrollment.revoked_at) return false;
-  if (!enrollment.access_expires_at) return true;
-  return new Date(enrollment.access_expires_at).getTime() >= Date.now();
+  return aylaShellEnrollmentActive(enrollment);
 }
 
-function aylaCreateOrUpdateEnrollment(db, { userId, plan, type = null, source = "manual", accessGranted = true, startsAt = aylaNow(), existingId = null, paymentId = null }) {
+function aylaCreateOrUpdateEnrollment(db, {
+  userId,
+  plan,
+  type = null,
+  source = "manual",
+  accessGranted = true,
+  startsAt = aylaNow(),
+  existingId = null,
+  paymentId = null,
+  examTrack = null,
+  studentId = null,
+}) {
   aylaEnsureCollection(db, "aylaEnrollments");
   const cleanType = type || (aylaPlanIsDemo(plan) ? "demo" : "paid");
-  const id = existingId || aylaEnrollmentKey(userId, plan?.id || "manual", cleanType);
+  const hasExamInput = examTrack !== null && examTrack !== undefined && String(examTrack).trim() !== "";
+  let cleanExamTrack = hasExamInput ? aylaCanonicalExamTrack(examTrack) : null;
+  if (hasExamInput && !cleanExamTrack) {
+    const error = new Error("A supported AylaMed exam track is required");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const requestedStudentId = studentId ? String(studentId) : null;
+  const requestedStudent = requestedStudentId ? aylaGetItem(db, "aylaStudents", requestedStudentId) : null;
+  if (requestedStudentId && !requestedStudent) {
+    const error = new Error("AylaMed student profile not found for this enrollment");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (requestedStudent && String(requestedStudent.ayla_user_id || requestedStudent.aylaUserId || requestedStudent.user_id || requestedStudent.userId || "") !== String(userId || "")) {
+    const error = new Error("The AylaMed student profile does not belong to this enrollment user");
+    error.statusCode = 403;
+    throw error;
+  }
+  const studentExamTrack = requestedStudent ? aylaCanonicalExamTrack(requestedStudent.examTrackId || requestedStudent.exam_track_id || requestedStudent.exam) : null;
+  if (!cleanExamTrack && studentExamTrack) cleanExamTrack = studentExamTrack;
+  if (cleanExamTrack && studentExamTrack && cleanExamTrack !== studentExamTrack) {
+    const error = new Error("The enrollment exam track does not match the AylaMed student profile");
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const sameScopedEnrollment = cleanExamTrack
+    ? aylaValues(db, "aylaEnrollments").find((row) =>
+        String(row.user_id || row.ayla_user_id || "") === String(userId || "")
+        && String(row.plan_id || "") === String(plan?.id || "manual")
+        && String(row.type || "paid") === String(cleanType)
+        && aylaCanonicalExamTrack(row.exam_track_id || row.examTrackId || row.exam_track || row.exam) === cleanExamTrack)
+    : null;
+  const reusableId = sameScopedEnrollment?.id || aylaEnrollmentKey(userId, plan?.id || "manual", cleanType, cleanExamTrack);
+  const reusableEnrollment = aylaGetItem(db, "aylaEnrollments", reusableId);
+  const preserveActiveDuringCheckout = !existingId && !accessGranted && aylaEnrollmentActive(reusableEnrollment);
+  const id = existingId || (preserveActiveDuringCheckout ? aylaId("AYLA-ENR-PENDING") : reusableId);
   const existing = aylaGetItem(db, "aylaEnrollments", id) || {};
+  const existingExamTrack = aylaCanonicalExamTrack(existing.exam_track_id || existing.examTrackId || existing.exam_track || existing.examTrack || existing.exam);
+  const scopedExamTrack = cleanExamTrack || existingExamTrack;
+  const scopedStudentId = requestedStudentId || existing.student_id || existing.studentId || null;
+  const allowedPlanTracks = aylaCleanArray(plan?.exam_tracks || plan?.examTracks).map(aylaCanonicalExamTrack).filter(Boolean);
+  if (scopedExamTrack && allowedPlanTracks.length && !allowedPlanTracks.includes(scopedExamTrack)) {
+    const error = new Error("This AylaMed plan does not support the requested exam track");
+    error.statusCode = 409;
+    throw error;
+  }
   const enrollment = {
     ...existing,
     id,
@@ -54901,12 +57544,20 @@ function aylaCreateOrUpdateEnrollment(db, { userId, plan, type = null, source = 
     ayla_user_id: userId,
     plan_id: plan?.id || existing.plan_id || null,
     plan_name: plan?.name || existing.plan_name || "Manual Access",
+    included_features: aylaCleanArray(plan?.included_features ?? existing.included_features ?? []),
+    is_full_access: Boolean(plan?.is_full_access ?? existing.is_full_access),
     type: cleanType,
     is_demo: cleanType === "demo" || aylaPlanIsDemo(plan),
     access_granted: Boolean(accessGranted),
     status: accessGranted ? "active" : "pending",
     source,
     payment_id: paymentId || existing.payment_id || null,
+    exam_track_id: scopedExamTrack || null,
+    examTrackId: scopedExamTrack || null,
+    exam_track: scopedExamTrack ? normalizeAylaRegistryExamTrack(scopedExamTrack) : null,
+    student_id: scopedStudentId,
+    studentId: scopedStudentId,
+    legacy_unscoped: !scopedExamTrack,
     access_starts_at: existing.access_starts_at || startsAt,
     access_expires_at: accessGranted ? aylaAccessExpiresAt({ plan, startsAt, accessDays: plan?.access_days }) : existing.access_expires_at || null,
     revoked_at: null,
@@ -54961,7 +57612,393 @@ async function aylaAccessLog(db, action, payload = {}) {
 }
 
 function aylaUserActiveEnrollments(db, userId) {
-  return aylaValues(db, "aylaEnrollments").filter((enrollment) => String(enrollment.user_id || enrollment.ayla_user_id) === String(userId) && aylaEnrollmentActive(enrollment));
+  return aylaValues(db, "aylaEnrollments").filter((enrollment) => String(enrollment.user_id || enrollment.ayla_user_id || enrollment.userId || enrollment.aylaUserId || "") === String(userId) && aylaEnrollmentActive(enrollment));
+}
+
+function aylaOwnedStudentsForUser(db, userId) {
+  return aylaValues(db, "aylaStudents").filter((student) => String(student.ayla_user_id || student.aylaUserId || student.user_id || student.userId || "") === String(userId || ""));
+}
+
+function aylaEnrollmentExamScopes(db, enrollment = {}) {
+  const plan = enrollment.plan_id ? aylaGetItem(db, "aylaPlans", enrollment.plan_id) : null;
+  return [...new Set([
+    enrollment.exam_track_id,
+    enrollment.examTrackId,
+    enrollment.exam_track,
+    enrollment.examTrack,
+    enrollment.exam,
+    ...aylaCleanArray(enrollment.exam_tracks || enrollment.examTracks),
+    plan?.exam_track_id,
+    plan?.examTrackId,
+    plan?.exam_track,
+    plan?.examTrack,
+    plan?.exam,
+    ...aylaCleanArray(plan?.exam_tracks || plan?.examTracks),
+  ].map(aylaCanonicalExamTrack).filter(Boolean))];
+}
+
+function aylaBindLegacyEnrollmentScopes(db, rawUser) {
+  // One-time migration: an old unscoped grant must stay with the dashboard that
+  // owned it before multi-exam switching existed. Never let it follow a switch.
+  const profiles = aylaOwnedStudentsForUser(db, rawUser?.id);
+  const byId = new Map(profiles.map((student) => [String(student.id), student]));
+  const selectedProfile = byId.get(String(rawUser?.studentId || "")) || (profiles.length === 1 ? profiles[0] : null);
+  let bound = 0;
+  for (const enrollment of aylaValues(db, "aylaEnrollments")) {
+    if (String(enrollment.user_id || enrollment.ayla_user_id || enrollment.userId || enrollment.aylaUserId || "") !== String(rawUser?.id || "")) continue;
+    if (aylaEnrollmentExamScopes(db, enrollment).length) continue;
+    const enrollmentProfile = byId.get(String(enrollment.student_id || enrollment.studentId || "")) || null;
+    const profile = enrollmentProfile || selectedProfile;
+    const examTrackId = aylaCanonicalExamTrack(profile?.examTrackId || profile?.exam_track_id || profile?.exam);
+    if (!profile || !examTrackId) continue;
+    enrollment.exam_track_id = examTrackId;
+    enrollment.examTrackId = examTrackId;
+    enrollment.exam_track = normalizeAylaRegistryExamTrack(examTrackId);
+    enrollment.student_id = profile.id;
+    enrollment.studentId = profile.id;
+    enrollment.legacy_unscoped = false;
+    enrollment.legacy_bound_from_unscoped = true;
+    enrollment.legacy_bound_at = enrollment.legacy_bound_at || aylaNow();
+    enrollment.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaEnrollments", enrollment);
+    bound += 1;
+  }
+  return bound;
+}
+
+function aylaBuildStudentShell(db, rawUser, { requestedStudentId = null, requestedExamTrack = null } = {}) {
+  return resolveAylaStudentShell({
+    userId: rawUser?.id,
+    students: aylaOwnedStudentsForUser(db, rawUser?.id),
+    enrollments: aylaValues(db, "aylaEnrollments"),
+    plansById: db.aylaPlans || {},
+    activeStudentId: rawUser?.studentId || null,
+    requestedStudentId,
+    requestedExamTrack,
+  });
+}
+
+function aylaCurrentStudentShell(db, rawUser) {
+  const selectedStudent = rawUser?.studentId ? aylaGetItem(db, "aylaStudents", rawUser.studentId) : null;
+  const selectedOwned = selectedStudent && String(selectedStudent.ayla_user_id || selectedStudent.aylaUserId || selectedStudent.user_id || selectedStudent.userId || "") === String(rawUser?.id || "");
+  const selectionUser = selectedOwned ? rawUser : { ...rawUser, studentId: null, activeExamTrackId: null, active_exam_track_id: null };
+  const selectedExamTrack = aylaCanonicalExamTrack(
+    rawUser?.activeExamTrackId || rawUser?.active_exam_track_id
+      || (selectedOwned ? selectedStudent.examTrackId || selectedStudent.exam_track_id || selectedStudent.exam : null),
+  );
+  let shell = aylaBuildStudentShell(db, selectionUser, {
+    requestedStudentId: selectedOwned ? selectedStudent.id : null,
+    requestedExamTrack: selectedExamTrack,
+  });
+  if (shell.denied_reason || !shell.active_dashboard) shell = aylaBuildStudentShell(db, selectionUser);
+  return shell;
+}
+
+function aylaPersistShellSelection(db, rawUser, shell) {
+  const studentId = shell?.active_student_id || null;
+  const examTrackId = shell?.active_exam_track_id || null;
+  const changed = String(rawUser.studentId || "") !== String(studentId || "")
+    || String(rawUser.activeExamTrackId || rawUser.active_exam_track_id || "") !== String(examTrackId || "");
+  if (!changed) return false;
+  rawUser.studentId = studentId;
+  rawUser.activeExamTrackId = examTrackId;
+  delete rawUser.active_exam_track_id;
+  rawUser.updatedAt = aylaNow();
+  aylaSetItem(db, "aylaUsers", rawUser);
+  return true;
+}
+
+function aylaDashboardEntitlement(db, user, student, feature = null) {
+  const examTrackId = aylaCanonicalExamTrack(student?.examTrackId || student?.exam_track_id || student?.examTrack || student?.exam_track || student?.exam);
+  if (!examTrackId) {
+    const error = new Error("The AylaMed student profile has no supported exam track");
+    error.statusCode = 409;
+    error.code = "INVALID_STUDENT_EXAM_TRACK";
+    throw error;
+  }
+  if (user?.role === "admin") {
+    return {
+      allowed: true,
+      reason: "admin_access",
+      exam_track_id: examTrackId,
+      exam_track: normalizeAylaRegistryExamTrack(examTrackId),
+      entitlement_type: "admin",
+      enabled_features: AYLA_STUDENT_FEATURES.map((item) => item.key),
+    };
+  }
+  const access = resolveAylaExamFeatureEntitlement({
+    enrollments: aylaValues(db, "aylaEnrollments"),
+    plansById: db.aylaPlans || {},
+    userId: user?.id,
+    requestedExamTrack: examTrackId,
+    feature,
+    legacyExamTrack: examTrackId,
+    legacyStudentId: student?.id || null,
+    defaultStudentId: user?.studentId || null,
+    enforceStudentScope: true,
+  });
+  if (access.allowed) return access;
+  const messages = {
+    no_active_exam_entitlement: "No active AylaMed enrollment grants access to this exam dashboard",
+    feature_not_included: "This feature is not included in the active AylaMed plan for this exam dashboard",
+    invalid_exam_track: "A supported AylaMed exam track is required",
+  };
+  const error = new Error(messages[access.reason] || "This AylaMed exam dashboard is not available");
+  error.statusCode = 403;
+  error.code = String(access.reason || "DASHBOARD_ACCESS_DENIED").toUpperCase();
+  error.access = access;
+  throw error;
+}
+
+function aylaQbankExamTrack(student = {}, requested = "") {
+  const examTrack = normalizeAylaQbankExamTrack(
+    requested || student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam,
+  );
+  if (!examTrack) {
+    const error = new Error("A supported AylaMed QBank exam track is required");
+    error.statusCode = 409;
+    throw error;
+  }
+  return examTrack;
+}
+
+function aylaRequireQbankAccess(db, user, student, requestedExamTrack = "") {
+  const examTrack = aylaQbankExamTrack(student, requestedExamTrack);
+  const profileExamTrack = aylaQbankExamTrack(student);
+  if (examTrack !== profileExamTrack) {
+    const error = new Error("The requested QBank exam does not match this AylaMed dashboard");
+    error.statusCode = 403;
+    error.code = "QBANK_STUDENT_EXAM_MISMATCH";
+    throw error;
+  }
+  return requireAylaQbankEntitlement({
+    enrollments: aylaValues(db, "aylaEnrollments"),
+    plansById: db.aylaPlans || {},
+    userId: user.id,
+    student,
+    requestedExamTrack: examTrack,
+    feature: "qbank",
+    defaultStudentId: user.studentId || null,
+  });
+}
+
+function aylaRevalidateQbankContext(db, userId, studentId, examTrack) {
+  const rawUser = aylaGetItem(db, "aylaUsers", userId);
+  const student = aylaGetItem(db, "aylaStudents", studentId);
+  if (!rawUser || ["disabled", "deleted"].includes(String(rawUser.status || "").toLowerCase())) {
+    const error = new Error("AylaMed user is no longer active");
+    error.statusCode = 401;
+    throw error;
+  }
+  if (!student || String(student.ayla_user_id || student.aylaUserId || student.user_id || student.userId || "") !== String(rawUser.id)) {
+    const error = new Error("AylaMed student profile not found");
+    error.statusCode = 404;
+    throw error;
+  }
+  const user = aylaSanitizeUser(rawUser);
+  const entitlement = aylaRequireQbankAccess(db, user, student, examTrack);
+  return { user, rawUser, student, entitlement };
+}
+
+function aylaOwnedQbankSession(db, user, student, sessionId) {
+  const session = aylaGetItem(db, "aylaQbankSessions", sessionId);
+  if (!session || String(session.userId || session.user_id || "") !== String(user.id) || String(session.studentId || session.student_id || "") !== String(student.id)) {
+    const error = new Error("AylaMed QBank session not found");
+    error.statusCode = 404;
+    throw error;
+  }
+  return session;
+}
+
+function aylaQbankEvent(db, session, type, payload = {}) {
+  const event = {
+    id: aylaId("AYLA-QBE"),
+    sessionId: session.id,
+    studentId: session.studentId,
+    userId: session.userId,
+    examTrack: session.examTrack,
+    type,
+    payload,
+    createdAt: aylaNow(),
+  };
+  aylaSetItem(db, "aylaQbankEvents", event);
+  return event;
+}
+
+function aylaQbankRoadmapAssignmentEligible(assignment = {}) {
+  const type = String(assignment.category || assignment.type || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  return ["qbank", "qbank_block", "questions", "internal_mcq", "internal_mcqs", "external_question", "external_questions"].includes(type);
+}
+
+function aylaQbankQuestionState(db, session, contentQuestionId) {
+  const owned = (collection) => aylaValues(db, collection)
+    .filter((row) => String(row.studentId || "") === String(session.studentId))
+    .filter((row) => String(row.examTrack || "") === String(session.examTrack))
+    .filter((row) => String(row.contentQuestionId || row.sourceId || "") === String(contentQuestionId));
+  return {
+    bookmark: owned("aylaQbankBookmarks").sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")))[0] || null,
+    note: owned("aylaQbankNotes").sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")))[0] || null,
+    revision: owned("aylaRevisionQueue")
+      .filter((row) => String(row.sourceType || "") === "qbank_question")
+      .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")))[0] || null,
+  };
+}
+
+function aylaUpsertQbankRevision(db, session, mapping, question = {}, reason = "student_added") {
+  const existing = aylaValues(db, "aylaRevisionQueue")
+    .filter((row) => String(row.studentId || "") === String(session.studentId))
+    .filter((row) => String(row.examTrack || "") === String(session.examTrack))
+    .filter((row) => String(row.sourceType || "") === "qbank_question")
+    .filter((row) => String(row.sourceId || row.contentQuestionId || "") === String(mapping.contentQuestionId))
+    .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")))[0];
+  const reasons = [...new Set([...(Array.isArray(existing?.reasons) ? existing.reasons : []), String(reason || "student_added")])];
+  const revision = {
+    ...(existing || {}),
+    id: existing?.id || aylaId("AYLA-REV"),
+    studentId: session.studentId,
+    userId: session.userId,
+    examTrack: session.examTrack,
+    sourceType: "qbank_question",
+    sourceId: mapping.contentQuestionId,
+    contentQuestionId: mapping.contentQuestionId,
+    sessionId: session.id,
+    questionRef: mapping.ref,
+    system: question.system_key || question.taxonomy?.system_key || existing?.system || "",
+    topic: question.topic_key || question.taxonomy?.topic_key || existing?.topic || "",
+    reasons,
+    status: "due",
+    dueDate: aylaDateOnly(),
+    removedAt: null,
+    completedAt: null,
+    createdAt: existing?.createdAt || aylaNow(),
+    updatedAt: aylaNow(),
+  };
+  aylaSetItem(db, "aylaRevisionQueue", revision);
+  return revision;
+}
+
+function aylaRemoveQbankRevisionReason(db, session, mapping, reason = "") {
+  const existing = aylaValues(db, "aylaRevisionQueue")
+    .filter((row) => String(row.studentId || "") === String(session.studentId))
+    .filter((row) => String(row.examTrack || "") === String(session.examTrack))
+    .filter((row) => String(row.sourceType || "") === "qbank_question")
+    .find((row) => String(row.sourceId || row.contentQuestionId || "") === String(mapping.contentQuestionId));
+  if (!existing) return null;
+  existing.reasons = aylaCleanArray(existing.reasons).filter((item) => String(item) !== String(reason));
+  if (!existing.reasons.length) {
+    existing.status = "removed";
+    existing.removedAt = aylaNow();
+  }
+  existing.updatedAt = aylaNow();
+  aylaSetItem(db, "aylaRevisionQueue", existing);
+  return existing;
+}
+
+function aylaRecordQbankAttempt(db, session, mapping, answer, question = {}) {
+  const existing = aylaValues(db, "aylaQuestionAttempts").find((row) =>
+    String(row.sessionId || "") === String(session.id)
+    && String(row.questionRef || "") === String(mapping.ref)
+    && String(row.sourceType || "") === "content_registry_qbank");
+  if (existing) return { attempt: existing, created: false };
+  const attempt = {
+    id: aylaId("AYLA-QA"),
+    studentId: session.studentId,
+    userId: session.userId,
+    examTrack: session.examTrack,
+    sessionId: session.id,
+    questionRef: mapping.ref,
+    resourceId: mapping.contentQuestionId,
+    contentQuestionId: mapping.contentQuestionId,
+    sourceType: "content_registry_qbank",
+    selectedAnswerId: answer.selectedAnswerId,
+    outcome: answer.correct ? "correct" : "incorrect",
+    serverVerified: true,
+    system: question.system_key || question.taxonomy?.system_key || "",
+    topic: question.topic_key || question.taxonomy?.topic_key || "",
+    createdAt: answer.answeredAt || aylaNow(),
+    updatedAt: answer.answeredAt || aylaNow(),
+  };
+  aylaSetItem(db, "aylaQuestionAttempts", attempt);
+  if (!answer.correct) aylaUpsertQbankRevision(db, session, mapping, question, "incorrect_answer");
+  return { attempt, created: true };
+}
+
+async function aylaPlayableQbankQuestion(db, session, mapping, rawQuestion = null) {
+  let raw = rawQuestion;
+  if (!raw) {
+    [raw] = await getContentQbankQuestions({
+      questionIds: [mapping.contentQuestionId],
+      examTrack: session.examTrack,
+      destination: "aylamed_qbank",
+    });
+  }
+  if (!raw) {
+    return {
+      question_ref: mapping.ref,
+      unavailable: true,
+      marked: Boolean(session.marks?.[mapping.ref]),
+      answered: Boolean(session.answers?.[mapping.ref]),
+      message: "This question is no longer available for delivery.",
+    };
+  }
+  const playable = await ngRegistryQuestionWithPlayableMedia(raw);
+  const state = aylaQbankQuestionState(db, session, mapping.contentQuestionId);
+  return sanitizeAylaQbankQuestion(playable, {
+    session,
+    questionRef: mapping.ref,
+    bookmark: state.bookmark,
+    note: state.note,
+    revision: state.revision,
+  });
+}
+
+function aylaQbankSavedItemSession(db, item) {
+  const sessions = aylaValues(db, "aylaQbankSessions")
+    .filter((row) => String(row.studentId || "") === String(item.studentId || ""))
+    .filter((row) => String(row.examTrack || "") === String(item.examTrack || ""))
+    .filter((row) => (row.questions || []).some((mapping) => String(mapping.contentQuestionId) === String(item.contentQuestionId || item.sourceId || "")))
+    .sort((a, b) => {
+      if (String(a.id) === String(item.sessionId || "")) return -1;
+      if (String(b.id) === String(item.sessionId || "")) return 1;
+      return String(b.submittedAt || b.updatedAt || "").localeCompare(String(a.submittedAt || a.updatedAt || ""));
+    });
+  const source = sessions[0] || null;
+  if (source) {
+    return {
+      session: source,
+      mapping: source.questions.find((row) => String(row.contentQuestionId) === String(item.contentQuestionId || item.sourceId || "")),
+    };
+  }
+  const mapping = { ref: item.questionRef || crypto.randomUUID(), contentQuestionId: item.contentQuestionId || item.sourceId };
+  return {
+    session: {
+      id: item.sessionId || "saved-qbank-item",
+      userId: item.userId,
+      studentId: item.studentId,
+      examTrack: item.examTrack,
+      mode: "test",
+      status: "in_progress",
+      questions: [mapping],
+      answers: {},
+      marks: {},
+    },
+    mapping,
+  };
+}
+
+async function aylaPlayableQbankSession(db, session) {
+  const mappings = Array.isArray(session.questions) ? session.questions : [];
+  const content = await getContentQbankQuestions({
+    questionIds: mappings.map((row) => row.contentQuestionId),
+    examTrack: session.examTrack,
+    destination: "aylamed_qbank",
+  });
+  const byId = new Map(content.map((row) => [String(row.id), row]));
+  const questions = [];
+  for (const mapping of mappings) {
+    questions.push(await aylaPlayableQbankQuestion(db, session, mapping, byId.get(String(mapping.contentQuestionId)) || null));
+  }
+  return { session: sanitizeAylaQbankSession(session), questions };
 }
 
 function aylaOwnerId(row) {
@@ -55099,6 +58136,8 @@ async function aylaHandleStripeCheckoutCompleted(event = {}, req = null) {
   const userId = payment.user_id || payment.ayla_user_id || metadata.aylaUserId || metadata.userId || null;
   const planId = payment.plan_id || metadata.aylaPlanId || metadata.planId || null;
   const enrollmentId = payment.enrollment_id || metadata.aylaEnrollmentId || null;
+  const examTrackId = payment.exam_track_id || metadata.aylaExamTrackId || null;
+  const studentId = payment.student_id || metadata.aylaStudentId || null;
 
   if (!userId || !planId) {
     const e = new Error("AylaMed Stripe checkout completed but metadata is missing aylaUserId or aylaPlanId");
@@ -55117,6 +58156,8 @@ async function aylaHandleStripeCheckoutCompleted(event = {}, req = null) {
     startsAt: paidAt,
     existingId: enrollmentId || undefined,
     paymentId,
+    examTrack: examTrackId,
+    studentId,
   });
   enrollment.stripe_subscription_id = session.subscription || enrollment.stripe_subscription_id || null;
   enrollment.updatedAt = aylaNow();
@@ -55134,6 +58175,8 @@ async function aylaHandleStripeCheckoutCompleted(event = {}, req = null) {
     ayla_user_id: userId,
     plan_id: planId,
     plan_name: plan?.name || payment.plan_name || "AylaMed Plan",
+    exam_track_id: enrollment.exam_track_id,
+    student_id: enrollment.student_id,
     coupon_code: payment.coupon_code || metadata.aylaCouponCode || null,
     original_amount_cents: Number(payment.original_amount_cents ?? metadata.originalAmountCents ?? session.amount_subtotal ?? session.amount_total ?? 0) || 0,
     discount_cents: Number(payment.discount_cents ?? metadata.discountCents ?? 0) || 0,
@@ -55208,15 +58251,24 @@ async function aylaHandleStripeInvoicePaid(event = {}) {
   const plan = aylaGetItem(db, "aylaPlans", planId);
   if (!userId || !plan) return { action: "aylamed_invoice_paid_ignored_missing_metadata" };
 
-  const existing = aylaValues(db, "aylaEnrollments").find((row) => String(row.user_id || "") === String(userId) && String(row.plan_id || "") === String(planId));
-  const enrollment = aylaCreateOrUpdateEnrollment(db, { userId, plan, type: "paid", source: "stripe_invoice_paid", accessGranted: true, startsAt: aylaNow(), existingId: existing?.id || null, paymentId: invoice.id || null });
+  const metadataExamTrack = aylaCanonicalExamTrack(metadata.aylaExamTrackId || metadata.examTrackId || metadata.exam_track_id);
+  const subscriptionId = invoice.subscription || invoice.parent?.subscription_details?.subscription || null;
+  const candidates = aylaValues(db, "aylaEnrollments").filter((row) => String(row.user_id || row.ayla_user_id || "") === String(userId) && String(row.plan_id || "") === String(planId));
+  const existing = (metadata.aylaEnrollmentId ? aylaGetItem(db, "aylaEnrollments", metadata.aylaEnrollmentId) : null)
+    || candidates.find((row) => subscriptionId && String(row.stripe_subscription_id || "") === String(subscriptionId))
+    || candidates.find((row) => metadataExamTrack && aylaCanonicalExamTrack(row.exam_track_id || row.exam_track) === metadataExamTrack)
+    || candidates.find((row) => !aylaCanonicalExamTrack(row.exam_track_id || row.exam_track))
+    || (!metadataExamTrack && candidates.length === 1 ? candidates[0] : null)
+    || null;
+  if (!existing && !metadataExamTrack && candidates.length > 1) return { action: "aylamed_invoice_paid_ignored_ambiguous_exam_scope" };
+  const enrollment = aylaCreateOrUpdateEnrollment(db, { userId, plan, type: "paid", source: "stripe_invoice_paid", accessGranted: true, startsAt: aylaNow(), existingId: existing?.id || null, paymentId: invoice.id || null, examTrack: metadataExamTrack || existing?.exam_track_id || null, studentId: metadata.aylaStudentId || existing?.student_id || null });
   enrollment.stripe_subscription_id = invoice.subscription || invoice.parent?.subscription_details?.subscription || existing?.stripe_subscription_id || null;
   enrollment.access_expires_at = aylaAccessExpiresAt({ plan, startsAt: existing?.access_expires_at && new Date(existing.access_expires_at).getTime() > Date.now() ? existing.access_expires_at : aylaNow(), accessDays: 30 });
   enrollment.status = "active";
   enrollment.updatedAt = aylaNow();
   aylaSetItem(db, "aylaEnrollments", enrollment);
 
-  const payment = { id: invoice.id || aylaId("AYLA-INVOICE"), stripe_invoice_id: invoice.id || null, stripe_subscription_id: enrollment.stripe_subscription_id, enrollment_id: enrollment.id, user_id: userId, ayla_user_id: userId, plan_id: planId, plan_name: plan.name, amount_cents: Number(invoice.amount_paid || 0), final_amount_cents: Number(invoice.amount_paid || 0), currency: invoice.currency || plan.currency || "usd", status: "completed", payment_status: "completed", payment_method: "stripe_subscription", source: "aylamed_invoice_paid", paid_at: aylaNow(), createdAt: aylaNow(), updatedAt: aylaNow(), metadata };
+  const payment = { id: invoice.id || aylaId("AYLA-INVOICE"), stripe_invoice_id: invoice.id || null, stripe_subscription_id: enrollment.stripe_subscription_id, enrollment_id: enrollment.id, user_id: userId, ayla_user_id: userId, plan_id: planId, plan_name: plan.name, exam_track_id: enrollment.exam_track_id, student_id: enrollment.student_id, amount_cents: Number(invoice.amount_paid || 0), final_amount_cents: Number(invoice.amount_paid || 0), currency: invoice.currency || plan.currency || "usd", status: "completed", payment_status: "completed", payment_method: "stripe_subscription", source: "aylamed_invoice_paid", paid_at: aylaNow(), createdAt: aylaNow(), updatedAt: aylaNow(), metadata };
   aylaSetItem(db, "aylaPayments", payment);
   await aylaAccessLog(db, "stripe_monthly_renewal_access_extended", { userId, planId, paymentId: payment.id, enrollmentId: enrollment.id });
   await writeAylaDb(db);
@@ -55228,7 +58280,7 @@ async function aylaHandleStripeInvoiceFailed(event = {}) {
   const metadata = { ...(invoice.metadata || {}), ...(invoice.subscription_details?.metadata || {}), ...(invoice.parent?.subscription_details?.metadata || {}) };
   const db = await readAylaDb();
   aylaEnsureSeedData(db);
-  const payment = { id: invoice.id || aylaId("AYLA-INVOICE"), stripe_invoice_id: invoice.id || null, stripe_subscription_id: invoice.subscription || null, user_id: metadata.aylaUserId || null, plan_id: metadata.aylaPlanId || "AYLA-PLAN-MONTHLY", amount_cents: Number(invoice.amount_due || 0), currency: invoice.currency || "usd", status: "failed", payment_status: "failed", payment_method: "stripe_subscription", source: "aylamed_invoice_failed", failure_message: "Monthly renewal payment failed", failed_at: aylaNow(), createdAt: aylaNow(), updatedAt: aylaNow(), metadata };
+  const payment = { id: invoice.id || aylaId("AYLA-INVOICE"), stripe_invoice_id: invoice.id || null, stripe_subscription_id: invoice.subscription || null, user_id: metadata.aylaUserId || null, plan_id: metadata.aylaPlanId || "AYLA-PLAN-MONTHLY", exam_track_id: aylaCanonicalExamTrack(metadata.aylaExamTrackId || metadata.examTrackId || metadata.exam_track_id), student_id: metadata.aylaStudentId || null, amount_cents: Number(invoice.amount_due || 0), currency: invoice.currency || "usd", status: "failed", payment_status: "failed", payment_method: "stripe_subscription", source: "aylamed_invoice_failed", failure_message: "Monthly renewal payment failed", failed_at: aylaNow(), createdAt: aylaNow(), updatedAt: aylaNow(), metadata };
   aylaSetItem(db, "aylaPayments", payment);
   await aylaAccessLog(db, "stripe_monthly_renewal_failed", { userId: payment.user_id, planId: payment.plan_id, paymentId: payment.id });
   await writeAylaDb(db);
@@ -55270,6 +58322,7 @@ async function aylaHandleStripeWebhookEvent(event = {}, req = null) {
 function aylaEnsureSeedData(db) {
   aylaEnsureCollection(db, "aylaUsers");
   for (const key of Object.keys(AYLA_COLLECTIONS)) aylaEnsureCollection(db, key);
+  aylaEnsureCollection(db, "aylaProfileAuditEvents");
   db.aylaSettings = aylaMergeSettings(db.aylaSettings || {});
   db.aylaAiUsageSettings = aylaMergeAiUsageSettings(db.aylaAiUsageSettings || {});
   aylaEnsureCollection(db, "aylaPlanAiLimits");
@@ -55323,19 +58376,14 @@ function aylaEnsureSeedData(db) {
     billing_type: "subscription_monthly",
     price_cents: Number(existingMonthly?.price_cents ?? 10000),
     access_days: 30,
-    included_features: existingMonthly?.included_features?.length ? existingMonthly.included_features : ["diagnostic", "roadmap", "flashcards", "qbank", "weak_areas", "assessments", "study_partner", "knowledge_search", "ai_coach"],
+    included_features: existingMonthly?.included_features?.length ? existingMonthly.included_features : ["diagnostic", "roadmap", "personal_tutor", "assessments", "library", "qbank", "revision", "flashcards", "study_partner"],
     is_active: existingMonthly?.is_active !== false,
     is_public: existingMonthly?.is_public !== false,
     status: existingMonthly?.is_active === false ? "inactive" : "active",
   }, existingMonthly || {}));
 
-  for (const oldPlan of aylaValues(db, "aylaPlans")) {
-    if (["AYLA-PLAN-DEMO", "AYLA-PLAN-MONTHLY"].includes(String(oldPlan.id))) continue;
-    const text = `${oldPlan.id || ""} ${oldPlan.name || ""} ${oldPlan.plan_type || ""}`.toLowerCase();
-    if (text.includes("full") || text.includes("demo")) {
-      aylaSetItem(db, "aylaPlans", aylaNormalizePlanPayload({ ...oldPlan, is_active: false, is_public: false, status: "archived" }, oldPlan));
-    }
-  }
+  // Additional subscription plans are retained. Admin feature controls, not a
+  // seed-time name heuristic, decide whether a plan is active or public.
 }
 
 function aylaRegisterCrud(collectionKey, config) {
@@ -55347,7 +58395,7 @@ function aylaRegisterCrud(collectionKey, config) {
       const db = await readAylaDb();
       aylaEnsureSeedData(db);
       let rows = aylaFilterRows(aylaValues(db, collectionKey), req.query);
-      if (collectionKey === "aylaPlans") rows = rows.map((row) => aylaNormalizePlanPayload(row, row));
+      if (collectionKey === "aylaPlans") rows = rows.filter((row) => row.is_active !== false && row.is_public !== false).map((row) => aylaPublicPlan(aylaNormalizePlanPayload(row, row)));
       if (collectionKey === "aylaAccessLogs") rows = rows.map((row) => aylaNormalizeAccessLogForAdmin(db, row));
       return aylaSendOk(res, { count: rows.length, [collectionKey]: rows });
     } catch (error) {
@@ -55362,7 +58410,10 @@ function aylaRegisterCrud(collectionKey, config) {
       aylaEnsureSeedData(db);
       let item = aylaGetItem(db, collectionKey, req.params.id);
       if (!item) return aylaSendError(res, 404, "AylaMed record not found");
-      if (collectionKey === "aylaPlans") item = aylaNormalizePlanPayload(item, item);
+      if (collectionKey === "aylaPlans") {
+        if (item.is_active === false || item.is_public === false) return aylaSendError(res, 404, "AylaMed plan not found");
+        item = aylaPublicPlan(aylaNormalizePlanPayload(item, item));
+      }
       if (collectionKey === "aylaAccessLogs") item = aylaNormalizeAccessLogForAdmin(db, item);
       return aylaSendOk(res, { [label]: item });
     } catch (error) {
@@ -55377,7 +58428,7 @@ function aylaRegisterCrud(collectionKey, config) {
         const db = await readAylaDb();
         aylaEnsureSeedData(db);
         let item = { id: req.body.id || aylaId(prefix), ...req.body, createdAt: req.body.createdAt || aylaNow(), updatedAt: aylaNow() };
-        if (collectionKey === "aylaPlans") item = aylaNormalizePlanPayload(req.body);
+        if (collectionKey === "aylaPlans") item = aylaNormalizePlanPayload(req.body, {}, { strictControls: true });
         if (collectionKey === "aylaCoupons") item = aylaNormalizeCouponPayload(req.body);
         if (collectionKey === "aylaAccessLogs") item = aylaNormalizeAccessLogForAdmin(db, item);
         aylaSetItem(db, collectionKey, item);
@@ -55385,20 +58436,63 @@ function aylaRegisterCrud(collectionKey, config) {
         await writeAylaDb(db);
         return aylaSendOk(res, { [label]: item }, 201);
       } catch (error) {
-        return aylaSendError(res, 500, error.message || "Failed to create AylaMed record");
+        return aylaSendError(res, error.statusCode || 500, error.message || "Failed to create AylaMed record", error.code ? { code: error.code } : null);
       }
     });
   }
 
   if (!immutableAdminWrites) app.put(`${route}/:id`, async (req, res) => {
     try {
-      if (collectionKey !== "aylaPlans") await aylaRequireAdmin(req);
+      const admin = await aylaRequireAdmin(req);
+      if (collectionKey === "aylaPlans") {
+        const featureChanged = req.body.included_features !== undefined
+          || req.body.features !== undefined
+          || req.body.feature_overrides !== undefined
+          || req.body.featureOverrides !== undefined
+          || req.body.is_full_access !== undefined;
+        const updated = await mutateAylaDb(async (db) => {
+          aylaEnsureSeedData(db);
+          const existing = aylaGetItem(db, collectionKey, req.params.id);
+          if (!existing) throw Object.assign(new Error("AylaMed record not found"), { statusCode: 404 });
+          let nextBody = req.body;
+          let currentVersion = Math.max(1, Number(existing.feature_matrix_version || 1));
+          if (featureChanged) {
+            currentVersion = aylaV215ExpectedFeatureVersion(existing, req.body);
+            const controls = applyAylaPlanFeaturePatch(existing, req.body);
+            nextBody = {
+              ...req.body,
+              included_features: controls.included_features,
+              is_full_access: controls.is_full_access,
+              feature_matrix_version: currentVersion + 1,
+            };
+          }
+          const next = aylaNormalizePlanPayload(nextBody, existing, { strictControls: true });
+          if (featureChanged) {
+            next.feature_matrix_updated_at = aylaNow();
+            next.feature_matrix_updated_by = aylaV215AdminAuditActor(admin);
+          }
+          aylaSetItem(db, collectionKey, next);
+          if (aylaPlanIsDemo(next)) db.aylaSettings.demo.included_features = [...next.included_features];
+          await aylaLog(db, featureChanged ? "plan_feature_matrix" : "plan_update", featureChanged ? "AylaMed plan feature matrix updated through the compatible plan route" : "AylaMed plan metadata updated", {
+            planId: next.id,
+            ...(featureChanged ? {
+              previousVersion: currentVersion,
+              featureMatrixVersion: next.feature_matrix_version,
+              previousFeatures: normalizeAylaPlanFeatures(existing.included_features).features,
+              includedFeatures: next.included_features,
+              isFullAccess: next.is_full_access,
+            } : {}),
+            actor: aylaV215AdminAuditActor(admin),
+          });
+          return next;
+        });
+        return aylaSendOk(res, { [label]: updated });
+      }
       const db = await readAylaDb();
       aylaEnsureSeedData(db);
       const existing = aylaGetItem(db, collectionKey, req.params.id);
       if (!existing) return aylaSendError(res, 404, "AylaMed record not found");
       let updated = { ...existing, ...req.body, id: existing.id, updatedAt: aylaNow() };
-      if (collectionKey === "aylaPlans") updated = aylaNormalizePlanPayload(req.body, existing);
       if (collectionKey === "aylaCoupons") updated = aylaNormalizeCouponPayload(req.body, existing);
       if (collectionKey === "aylaAccessLogs") updated = aylaNormalizeAccessLogForAdmin(db, updated);
       aylaSetItem(db, collectionKey, updated);
@@ -55406,7 +58500,7 @@ function aylaRegisterCrud(collectionKey, config) {
       await writeAylaDb(db);
       return aylaSendOk(res, { [label]: updated });
     } catch (error) {
-      return aylaSendError(res, 500, error.message || "Failed to update AylaMed record");
+      return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update AylaMed record", error.code ? { code: error.code } : null);
     }
   });
 
@@ -55417,6 +58511,14 @@ function aylaRegisterCrud(collectionKey, config) {
       aylaEnsureSeedData(db);
       const existing = aylaGetItem(db, collectionKey, req.params.id);
       if (!existing) return aylaSendError(res, 404, "AylaMed record not found");
+      if (collectionKey === "aylaPlans") {
+        const archived = aylaNormalizePlanPayload({ is_active: false, is_public: false, status: "archived" }, existing, { strictControls: true });
+        archived.archivedAt = aylaNow();
+        aylaSetItem(db, collectionKey, archived);
+        await aylaLog(db, "plan_archive", "Archived AylaMed plan without deleting enrollment history", { planId: archived.id });
+        await writeAylaDb(db);
+        return aylaSendOk(res, { archivedPlan: aylaPlanFeatureMatrixRow(archived), deleted: false, history_preserved: true });
+      }
       const cascadeDeleted = aylaCascadeBeforeDelete(db, collectionKey, existing);
       const deleted = aylaDeleteItem(db, collectionKey, req.params.id);
       if (!deleted) return aylaSendError(res, 404, "AylaMed record not found");
@@ -55445,13 +58547,14 @@ app.post("/api/ayla/auth/register", async (req, res) => {
 
     const hashed = hashPassword(password);
     const user = {
-      id: req.body.id || aylaId("AYLA-USER"),
+      id: aylaId("AYLA-USER"),
       email,
       name: String(req.body.name || req.body.fullName || "").trim(),
       phone: String(req.body.phone || "").trim(),
-      role: req.body.role || "student",
+      role: "student",
       status: "active",
-      studentId: req.body.studentId || null,
+      studentId: null,
+      activeExamTrackId: null,
       publicUsername: String(req.body.publicUsername || "").trim(),
       profileImageUrl: String(req.body.profileImageUrl || "").trim(),
       timezone: String(req.body.timezone || "").trim(),
@@ -55523,28 +58626,71 @@ app.post("/api/ayla/auth/google", async (req, res) => {
 app.get("/api/ayla/auth/me", async (req, res) => {
   try {
     const { user, rawUser, db } = await aylaGetAuthenticatedUser(req);
-    const linkedStudent = (
-      aylaValues(db, "aylaStudents")
-        .filter((row) => String(row.ayla_user_id || row.user_id || "") === String(user.id))
-        .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")))[0]
-      || null
-    );
-
-    if (linkedStudent?.id && String(rawUser.studentId || "") !== String(linkedStudent.id)) {
-      rawUser.studentId = linkedStudent.id;
-      rawUser.updatedAt = aylaNow();
-      aylaSetItem(db, "aylaUsers", rawUser);
-      await writeAylaDb(db);
-    }
-
+    const legacyBound = aylaBindLegacyEnrollmentScopes(db, rawUser);
+    const shell = aylaCurrentStudentShell(db, rawUser);
+    const selectionChanged = aylaPersistShellSelection(db, rawUser, shell);
+    if (legacyBound || selectionChanged) await writeAylaDb(db);
+    const linkedStudent = shell.active_student_id ? aylaGetItem(db, "aylaStudents", shell.active_student_id) : null;
     const activeEnrollments = aylaUserActiveEnrollments(db, user.id);
+    res.setHeader("Cache-Control", "private, no-store");
     return aylaSendOk(res, {
-      user: aylaSanitizeUser({ ...rawUser, studentId: linkedStudent?.id || rawUser.studentId || null }),
+      user: aylaSanitizeUser(rawUser),
+      profile_contract: STUDENT_PROFILE_CONTRACT_VERSION,
+      profile: sanitizeStudentProfileForOwner(rawUser),
+      profile_policy: studentProfilePolicy(),
       activeEnrollments,
-      student: linkedStudent ? { id: linkedStudent.id, exam: linkedStudent.exam || null, goalType: linkedStudent.goalType || null } : null,
+      student: linkedStudent ? { id: linkedStudent.id, examTrackId: aylaCanonicalExamTrack(linkedStudent.examTrackId || linkedStudent.exam_track_id || linkedStudent.exam), exam: linkedStudent.exam || null, goalType: linkedStudent.goalType || null } : null,
+      shell,
+      dashboards: shell.dashboards,
+      activeDashboard: shell.active_dashboard,
     });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load AylaMed profile");
+  }
+});
+
+app.get("/api/ayla/shell", async (req, res) => {
+  try {
+    const { rawUser, db } = await aylaGetAuthenticatedUser(req);
+    const legacyBound = aylaBindLegacyEnrollmentScopes(db, rawUser);
+    const shell = aylaCurrentStudentShell(db, rawUser);
+    const selectionChanged = aylaPersistShellSelection(db, rawUser, shell);
+    if (legacyBound || selectionChanged) await writeAylaDb(db);
+    return aylaSendOk(res, { user: aylaSanitizeUser(rawUser), shell, dashboards: shell.dashboards, activeDashboard: shell.active_dashboard });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load the AylaMed student shell");
+  }
+});
+
+app.post("/api/ayla/shell/switch", async (req, res) => {
+  try {
+    const { rawUser, db } = await aylaGetAuthenticatedUser(req);
+    const legacyBound = aylaBindLegacyEnrollmentScopes(db, rawUser);
+    if (legacyBound) await writeAylaDb(db);
+    const requestedStudentId = req.body.studentId || req.body.student_id || null;
+    const requestedExamTrack = aylaExamTrackFromPayload(req.body);
+    if (!requestedStudentId && !requestedExamTrack) return aylaSendError(res, 400, "studentId or a supported examTrackId is required");
+    const shell = aylaBuildStudentShell(db, rawUser, { requestedStudentId, requestedExamTrack });
+    if (shell.denied_reason || !shell.active_dashboard) {
+      const status = shell.denied_reason === "student_not_owned" ? 404 : shell.denied_reason === "invalid_exam_track" ? 400 : 403;
+      return aylaSendError(res, status, "This AylaMed exam dashboard is not available", { reason: shell.denied_reason || "no_active_exam_entitlement" });
+    }
+    if (shell.active_dashboard.profile_status !== "ready" || !shell.active_student_id) {
+      return aylaSendError(res, 409, "Complete the diagnostic setup for this exam before switching dashboards", { reason: "setup_required", dashboard: shell.active_dashboard });
+    }
+    aylaPersistShellSelection(db, rawUser, shell);
+    await aylaLog(db, "student_shell", "AylaMed exam dashboard switched", { userId: rawUser.id, studentId: shell.active_student_id, examTrackId: shell.active_exam_track_id });
+    await writeAylaDb(db);
+    return aylaSendOk(res, {
+      switched: true,
+      state_copied: false,
+      user: aylaSanitizeUser(rawUser),
+      shell,
+      dashboards: shell.dashboards,
+      activeDashboard: shell.active_dashboard,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to switch the AylaMed exam dashboard");
   }
 });
 
@@ -55665,14 +58811,15 @@ app.post("/api/ayla/enrollments/grant-access", async (req, res) => {
     }
 
     if (!userId) return aylaSendError(res, 400, "userId or email is required");
-    const plan = aylaGetItem(db, "aylaPlans", req.body.planId || req.body.plan_id) || aylaNormalizePlanPayload({ id: "AYLA-PLAN-MANUAL", name: "Manual AylaMed Access", plan_type: req.body.type || "manual", price_cents: 0, access_days: Number(req.body.accessDays || req.body.access_days || 30) });
-    const enrollment = aylaCreateOrUpdateEnrollment(db, { userId, plan, type: req.body.type || (aylaPlanIsDemo(plan) ? "demo" : "manual"), source: req.body.source || "admin_grant", accessGranted: true, startsAt: aylaNow() });
-    await aylaAccessLog(db, "admin_grant_access", { userId, planId: plan.id, enrollmentId: enrollment.id });
+    const plan = aylaGetItem(db, "aylaPlans", req.body.planId || req.body.plan_id) || aylaNormalizePlanPayload({ id: "AYLA-PLAN-MANUAL", name: "Manual AylaMed Access", plan_type: req.body.type || "manual", price_cents: 0, access_days: Number(req.body.accessDays || req.body.access_days || 30), included_features: req.body.included_features || req.body.features || [], is_full_access: req.body.is_full_access !== false });
+    const scope = aylaEnrollmentScopeFromPayload(db, aylaGetItem(db, "aylaUsers", userId) || { id: userId }, req.body);
+    const enrollment = aylaCreateOrUpdateEnrollment(db, { userId, plan, type: req.body.type || (aylaPlanIsDemo(plan) ? "demo" : "manual"), source: req.body.source || "admin_grant", accessGranted: true, startsAt: aylaNow(), examTrack: scope.examTrack, studentId: scope.studentId });
+    await aylaAccessLog(db, "admin_grant_access", { userId, planId: plan.id, enrollmentId: enrollment.id, examTrackId: enrollment.exam_track_id, studentId: enrollment.student_id });
     await aylaLog(db, "access", "AylaMed access granted", { userId, planId: plan.id, enrollmentId: enrollment.id });
     await writeAylaDb(db);
     return aylaSendOk(res, { enrollment, user: aylaSanitizeUser(aylaGetItem(db, "aylaUsers", userId)) }, 201);
   } catch (error) {
-    return aylaSendError(res, 500, error.message || "Failed to grant AylaMed access");
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to grant AylaMed access");
   }
 });
 
@@ -55752,7 +58899,11 @@ app.post("/api/ayla/billing/create-checkout", async (req, res) => {
 
     const plan = aylaGetItem(db, "aylaPlans", req.body.planId || req.body.plan_id);
     if (!plan || plan.is_active === false || plan.is_public === false) return aylaSendError(res, 404, "AylaMed plan not found or inactive");
-    if (!aylaPlanIsDemo(plan) && String(plan.id) !== "AYLA-PLAN-MONTHLY") return aylaSendError(res, 400, "AylaMed currently supports demo and monthly access only");
+    const billingType = String(plan.billing_type || plan.plan_type || "").toLowerCase();
+    if (!aylaPlanIsDemo(plan) && db.aylaSettings?.product?.monthly_only !== false && !["monthly", "subscription", "subscription_monthly"].includes(billingType)) {
+      return aylaSendError(res, 400, "This AylaMed product accepts active monthly subscription plans only");
+    }
+    const scope = aylaEnrollmentScopeFromPayload(db, user, req.body);
 
     const code = normalizeCouponCode(req.body.couponCode || req.body.coupon_code || "");
     const coupon = code ? aylaValues(db, "aylaCoupons").find((c) => normalizeCouponCode(c.code) === code) : null;
@@ -55760,8 +58911,8 @@ app.post("/api/ayla/billing/create-checkout", async (req, res) => {
     if (!pricing.valid) return aylaSendError(res, 400, pricing.error);
 
     if (pricing.final_amount_cents <= 0) {
-      const enrollment = aylaCreateOrUpdateEnrollment(db, { userId: user.id, plan, type: aylaPlanIsDemo(plan) ? "demo" : "paid", source: coupon?.id ? "aylamed_coupon_checkout" : "aylamed_free_checkout", accessGranted: true });
-      const payment = { id: aylaId("AYLA-PAY"), enrollment_id: enrollment.id, user_id: user.id, ayla_user_id: user.id, plan_id: plan.id, plan_name: plan.name, coupon_code: coupon?.code || null, original_amount_cents: pricing.original_amount_cents, discount_cents: pricing.discount_cents, amount_cents: 0, final_amount_cents: 0, currency: plan.currency || "usd", status: "completed", payment_status: "completed", payment_method: coupon?.id ? "coupon" : "free_checkout", source: "aylamed_free_checkout", paid_at: aylaNow(), createdAt: aylaNow(), updatedAt: aylaNow() };
+      const enrollment = aylaCreateOrUpdateEnrollment(db, { userId: user.id, plan, type: aylaPlanIsDemo(plan) ? "demo" : "paid", source: coupon?.id ? "aylamed_coupon_checkout" : "aylamed_free_checkout", accessGranted: true, examTrack: scope.examTrack, studentId: scope.studentId });
+      const payment = { id: aylaId("AYLA-PAY"), enrollment_id: enrollment.id, user_id: user.id, ayla_user_id: user.id, plan_id: plan.id, plan_name: plan.name, exam_track_id: enrollment.exam_track_id, student_id: enrollment.student_id, coupon_code: coupon?.code || null, original_amount_cents: pricing.original_amount_cents, discount_cents: pricing.discount_cents, amount_cents: 0, final_amount_cents: 0, currency: plan.currency || "usd", status: "completed", payment_status: "completed", payment_method: coupon?.id ? "coupon" : "free_checkout", source: "aylamed_free_checkout", paid_at: aylaNow(), createdAt: aylaNow(), updatedAt: aylaNow() };
       aylaSetItem(db, "aylaPayments", payment);
       enrollment.payment_id = payment.id;
       aylaSetItem(db, "aylaEnrollments", enrollment);
@@ -55775,8 +58926,8 @@ app.post("/api/ayla/billing/create-checkout", async (req, res) => {
       return aylaSendOk(res, { free_checkout: true, url: null, pricing, payment, enrollment, access_grant: { granted: true, enrollment_id: enrollment.id } });
     }
 
-    const pendingEnrollment = aylaCreateOrUpdateEnrollment(db, { userId: user.id, plan, type: "paid", source: "aylamed_stripe_subscription_pending", accessGranted: false });
-    const metadata = { app: "aylamed", aylaUserId: user.id, aylaPlanId: plan.id, aylaEnrollmentId: pendingEnrollment.id, aylaCouponCode: coupon?.code || "", originalAmountCents: String(pricing.original_amount_cents), discountCents: String(pricing.discount_cents), finalAmountCents: String(pricing.final_amount_cents) };
+    const pendingEnrollment = aylaCreateOrUpdateEnrollment(db, { userId: user.id, plan, type: "paid", source: "aylamed_stripe_subscription_pending", accessGranted: false, examTrack: scope.examTrack, studentId: scope.studentId });
+    const metadata = { app: "aylamed", aylaUserId: user.id, aylaPlanId: plan.id, aylaEnrollmentId: pendingEnrollment.id, aylaExamTrackId: pendingEnrollment.exam_track_id || "", aylaStudentId: pendingEnrollment.student_id || "", aylaCouponCode: coupon?.code || "", originalAmountCents: String(pricing.original_amount_cents), discountCents: String(pricing.discount_cents), finalAmountCents: String(pricing.final_amount_cents) };
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
       payment_method_types: ["card"],
@@ -55788,7 +58939,7 @@ app.post("/api/ayla/billing/create-checkout", async (req, res) => {
       cancel_url: req.body.cancelUrl || req.body.cancel_url || AYLA_DEFAULT_CANCEL_URL,
     });
 
-    const payment = { id: session.id, checkout_session_id: session.id, stripe_session_id: session.id, stripe_subscription_id: session.subscription || null, enrollment_id: pendingEnrollment.id, user_id: user.id, ayla_user_id: user.id, plan_id: plan.id, plan_name: plan.name, coupon_code: coupon?.code || null, original_amount_cents: pricing.original_amount_cents, discount_cents: pricing.discount_cents, amount_cents: pricing.final_amount_cents, final_amount_cents: pricing.final_amount_cents, currency: plan.currency || "usd", status: "pending", payment_status: "pending", payment_method: "stripe_subscription", source: "aylamed_stripe_checkout", createdAt: aylaNow(), updatedAt: aylaNow(), metadata };
+    const payment = { id: session.id, checkout_session_id: session.id, stripe_session_id: session.id, stripe_subscription_id: session.subscription || null, enrollment_id: pendingEnrollment.id, user_id: user.id, ayla_user_id: user.id, plan_id: plan.id, plan_name: plan.name, exam_track_id: pendingEnrollment.exam_track_id, student_id: pendingEnrollment.student_id, coupon_code: coupon?.code || null, original_amount_cents: pricing.original_amount_cents, discount_cents: pricing.discount_cents, amount_cents: pricing.final_amount_cents, final_amount_cents: pricing.final_amount_cents, currency: plan.currency || "usd", status: "pending", payment_status: "pending", payment_method: "stripe_subscription", source: "aylamed_stripe_checkout", createdAt: aylaNow(), updatedAt: aylaNow(), metadata };
     aylaSetItem(db, "aylaPayments", payment);
     pendingEnrollment.payment_id = payment.id;
     pendingEnrollment.stripe_subscription_id = session.subscription || null;
@@ -55832,6 +58983,59 @@ app.get("/api/ayla/health", async (req, res) => {
         notebook_search: true,
         notebook_flashcard_generation: true,
         notebook_archive_and_soft_delete: true,
+        notebook_cross_surface_capture: true,
+        notebook_exact_page_return_links: true,
+        notebook_video_timestamp_return_links: true,
+        notebook_current_source_revalidation: true,
+        registry_backed_qbank_catalog: true,
+        qbank_tutor_and_test_modes: true,
+        qbank_server_verified_scoring: true,
+        qbank_bookmarks_notes_and_revision: true,
+        qbank_exam_entitlement_isolation: true,
+        multi_exam_student_shell: true,
+        persistent_exam_dashboard_switcher: true,
+        per_exam_student_state_isolation: true,
+        paid_entitlement_overrides_demo_per_exam: true,
+        entitlement_aware_feature_navigation: true,
+        legacy_enrollment_single_dashboard_binding: true,
+        content_taxonomy_review_queue: true,
+        content_taxonomy_question_overrides: true,
+        content_taxonomy_all_exam_coverage: true,
+        content_taxonomy_build: CONTENT_TAXONOMY_BUILD,
+        embedded_content_hub_playlists: true,
+        registry_backed_content_hub: true,
+        verified_roadmap_video_assignment: true,
+        monotonic_video_progress: true,
+        page_turn_library_reader: true,
+        approved_exact_page_delivery: true,
+        verified_roadmap_reading_assignment: true,
+        monotonic_reading_progress: true,
+        personal_tutor_single_roadmap_engine: true,
+        personal_tutor_complete_progress_snapshot: true,
+        personal_tutor_overload_and_question_volume: true,
+        personal_tutor_notebook_recommendation: true,
+        personal_tutor_cross_system_weak_pattern: true,
+        personal_tutor_version_checked_plan_changes: true,
+        shared_lms_aylamed_streak_engine: true,
+        strict_exact_identity_lms_progress_bridge: true,
+        read_only_exam_scoped_lms_progress: true,
+        federated_streak_without_cross_product_points: true,
+        separate_authoritative_leaderboard_lanes: true,
+        verified_cross_system_weak_area_summary: true,
+        consolidated_revision_feed: true,
+        contact_safe_study_partner_enrichment: true,
+        atomic_study_partner_lifecycle: true,
+        admin_plan_feature_matrix: true,
+        atomic_versioned_plan_controls: true,
+        plan_authoritative_existing_enrollments: true,
+        demo_duration_and_feature_controls: true,
+        plan_archive_preserves_history: true,
+        crm_success_story_training_governance: true,
+        versioned_success_story_approval: true,
+        exact_exam_success_story_consumption: true,
+        anonymized_outcome_free_tutor_strategies: true,
+        approved_story_edits_require_reapproval: true,
+        success_stories_never_change_roadmap_automatically: true,
         scanned_pdf_ocr_pipeline: true,
         scanned_pdf_ocr_provider_configured: Boolean(process.env.AYLA_OCR_ENDPOINT),
         lms_crm_operational_writes: false,
@@ -55848,14 +59052,36 @@ app.get("/api/ayla/routes", (req, res) => {
       "GET /api/ayla/health",
       "GET /api/ayla/public-config",
       "GET/PUT /api/ayla/admin/settings",
+      "GET /api/ayla/admin/plan-feature-matrix",
+      "PUT /api/ayla/admin/plans/:planId/features",
+      "PUT /api/ayla/admin/demo-controls",
+      "GET/POST /admin/crm/ai-training/success-stories",
+      "PUT/DELETE /admin/crm/ai-training/success-stories/:storyId",
+      "POST /admin/crm/ai-training/success-stories/:storyId/review",
+      "GET /admin/crm/ai-training/success-stories/audit",
       "GET /api/ayla/admin/ai-usage/overview",
       "POST /api/ayla/ai/coach",
+      "GET /api/ayla/students/:studentId/library",
+      "GET /api/ayla/students/:studentId/library/resources/:resourceId",
+      "GET /api/ayla/students/:studentId/library/resources/:resourceId/pages/:pageNumber",
+      "POST /api/ayla/students/:studentId/library/resources/:resourceId/progress",
       "GET /api/ayla/exams",
       "POST /api/ayla/auth/register",
       "POST /api/ayla/auth/login",
       "POST /api/ayla/auth/forgot-password",
       "POST /api/ayla/auth/reset-password",
       "GET /api/ayla/auth/me",
+      "GET /api/ayla/shell",
+      "POST /api/ayla/shell/switch",
+      "GET /api/ayla/qbank/catalog",
+      "POST /api/ayla/qbank/sessions",
+      "GET /api/ayla/qbank/sessions/:sessionId",
+      "POST /api/ayla/qbank/sessions/:sessionId/answers",
+      "POST /api/ayla/qbank/sessions/:sessionId/submit",
+      "GET /api/ayla/qbank/history",
+      "GET /api/ayla/qbank/bookmarks",
+      "GET /api/ayla/qbank/notes",
+      "GET /api/ayla/qbank/revision",
       "GET|PUT /api/ayla/profile",
       "GET|POST /api/ayla/students/:studentId/notebooks",
       "PUT /api/ayla/students/:studentId/notebooks/:id",
@@ -55865,8 +59091,16 @@ app.get("/api/ayla/routes", (req, res) => {
       "POST /api/ayla/students/:studentId/notebooks/:id/restore/:version",
       "GET /api/ayla/students/:studentId/notebooks/search",
       "POST /api/ayla/students/:studentId/notebooks/:id/generate-flashcards",
+      "POST /api/ayla/students/:studentId/notebooks/capture",
+      "GET /api/ayla/students/:studentId/personal-tutor",
+      "POST /api/ayla/students/:studentId/personal-tutor/apply",
+      "GET /api/ayla/students/:studentId/progress",
+      "GET /api/ayla/students/:studentId/revision",
       "GET /api/ayla/students/:studentId/daily-workspace",
       "POST /api/ayla/students/:studentId/daily-workspace/rebuild",
+      "GET /api/ayla/students/:studentId/content-hub",
+      "GET /api/ayla/students/:studentId/content-hub/videos/:videoId",
+      "POST /api/ayla/students/:studentId/content-hub/videos/:videoId/progress",
       "POST /api/ayla/students/:studentId/question-attempts",
       "POST /api/ayla/students/:studentId/assessment-attempts",
       "GET|POST|PATCH /api/ayla/study-partners/requests",
@@ -55901,15 +59135,41 @@ app.get("/api/ayla/exams", (req, res) => aylaSendOk(res, { examTracks: Object.va
 app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
   try {
     const examTrackId = aylaCanonicalExamTrack(req.body.examTrackId || req.body.exam_track_id || req.body.exam || req.body.selectedExam);
-    if (!examTrackId) return aylaSendError(res, 400, "Select a supported exam track: USMLE Step 1, USMLE Step 2 CK, PLAB, AMC, MCCQE, or NCLEX");
+    if (!examTrackId) return aylaSendError(res, 400, "Select a supported exam track: USMLE Step 1, USMLE Step 2 CK, USMLE Step 3, PLAB, AMC, MCCQE, or NCLEX");
     const examDefinition = AYLA_EXAM_REGISTRY[examTrackId];
     const auth = AYLA_REQUIRE_STUDENT_AUTH ? await aylaGetAuthenticatedUser(req) : null;
     const db = auth?.db || await readAylaDb();
     aylaEnsureSeedData(db);
+    let setupAccess = null;
+    if (auth?.user?.id) {
+      const ownedProfiles = aylaOwnedStudentsForUser(db, auth.user.id);
+      const existingDashboard = ownedProfiles.find((row) => aylaCanonicalExamTrack(row.examTrackId || row.exam_track_id || row.exam) === examTrackId) || null;
+      if (existingDashboard) {
+        return aylaSendError(res, 409, "An AylaMed dashboard already exists for this exam. Switch to that dashboard instead of creating another profile.", { reason: "dashboard_already_exists", studentId: existingDashboard.id, examTrackId });
+      }
+      if (auth.user.role === "admin") {
+        setupAccess = { allowed: true, reason: "admin_access", exam_track_id: examTrackId, entitlement_type: "admin", enrollment_id: null, explicitly_scoped: true };
+      } else {
+        setupAccess = resolveAylaExamFeatureEntitlement({
+          enrollments: aylaValues(db, "aylaEnrollments"),
+          plansById: db.aylaPlans || {},
+          userId: auth.user.id,
+          requestedExamTrack: examTrackId,
+          feature: "diagnostic",
+          legacyExamTrack: examTrackId,
+          legacyStudentId: `new:${examTrackId}`,
+          defaultStudentId: ownedProfiles.length ? auth.rawUser.studentId || null : null,
+          enforceStudentScope: true,
+        });
+        if (!setupAccess.allowed || (!setupAccess.explicitly_scoped && ownedProfiles.length > 0)) {
+          return aylaSendError(res, 403, "An active exam-scoped AylaMed enrollment is required before creating another exam dashboard", { reason: setupAccess.reason || "no_active_exam_entitlement", examTrackId });
+        }
+      }
+    }
     const recommendation = aylaRecommendation(req.body);
     const submission = {
-      id: req.body.id || aylaId("DX"),
       ...req.body,
+      id: aylaId("DX"),
       examTrackId,
       exam: examDefinition.label,
       curriculumVersion: examDefinition.curriculumVersion,
@@ -55927,7 +59187,7 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
     };
 
     if (auth?.user?.id) { submission.aylaUserId = auth.user.id; submission.ayla_user_id = auth.user.id; }
-    const student = aylaStudentFromDiagnostic(submission, recommendation);
+    const student = aylaStudentFromDiagnostic({ ...submission, studentId: null, student_id: null }, recommendation);
     if (auth?.user?.id) { student.ayla_user_id = auth.user.id; student.user_id = auth.user.id; }
     const roadmapTasks = aylaBuildRoadmapTasks(student, recommendation);
     const qbankBlock = recommendation.targetType === "match" ? null : aylaBuildQbankBlock(student, recommendation);
@@ -55943,18 +59203,34 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
 
     if (auth?.rawUser?.id) {
       auth.rawUser.studentId = student.id;
+      auth.rawUser.activeExamTrackId = examTrackId;
       auth.rawUser.updatedAt = aylaNow();
       aylaSetItem(db, "aylaUsers", auth.rawUser);
     }
 
+    if (setupAccess?.enrollment_id) {
+      const enrollment = aylaGetItem(db, "aylaEnrollments", setupAccess.enrollment_id);
+      if (enrollment) {
+        enrollment.exam_track_id = examTrackId;
+        enrollment.examTrackId = examTrackId;
+        enrollment.exam_track = normalizeAylaRegistryExamTrack(examTrackId);
+        enrollment.student_id = student.id;
+        enrollment.studentId = student.id;
+        enrollment.legacy_unscoped = false;
+        enrollment.updatedAt = aylaNow();
+        aylaSetItem(db, "aylaEnrollments", enrollment);
+      }
+    }
+
     aylaSetItem(db, "aylaDiagnosticSubmissions", submission);
     aylaSetItem(db, "aylaStudents", student);
+    if (auth?.rawUser?.id) aylaBindLegacyEnrollmentScopes(db, auth.rawUser);
     aylaValues(db, "aylaRoadmapTasks").filter((item) => item.studentId === student.id).forEach((item) => aylaDeleteItem(db, "aylaRoadmapTasks", item.id));
     roadmapTasks.forEach((item) => aylaSetItem(db, "aylaRoadmapTasks", item));
     if (qbankBlock) aylaSetItem(db, "aylaQbankBlocks", qbankBlock);
     weakAreaLogs.forEach((item) => aylaSetItem(db, "aylaWeakAreaLogs", item));
     flashcards.forEach((item) => aylaSetItem(db, "aylaFlashcards", item));
-    await aylaLog(db, "diagnostic", "AylaMed personalized diagnostic and 7-day roadmap generated", { submissionId: submission.id, studentId: student.id, riskLevel: recommendation.riskLevel, phase: recommendation.phase, targetDate: recommendation.targetDate });
+    await aylaLog(db, "diagnostic", "AylaMed personalized diagnostic and 7-day roadmap generated", { submissionId: submission.id, studentId: student.id, examTrackId, enrollmentId: setupAccess?.enrollment_id || null, riskLevel: recommendation.riskLevel, phase: recommendation.phase, targetDate: recommendation.targetDate });
     await writeAylaDb(db);
 
     return aylaSendOk(res, {
@@ -55964,18 +59240,14 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
       generated: { roadmapTasks, qbankBlocks: qbankBlock ? [qbankBlock] : [], weakAreaLogs, flashcards, phasePlan, knowledgeRecommendations },
     }, 201);
   } catch (error) {
-    return aylaSendError(res, 500, error.message || "Failed to submit AylaMed diagnostic");
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to submit AylaMed diagnostic");
   }
 });
 
 app.get("/api/ayla/students/:id/dashboard", async (req, res) => {
   try {
-    const auth = AYLA_REQUIRE_STUDENT_AUTH ? await aylaGetAuthenticatedUser(req) : null;
-    const db = auth?.db || await readAylaDb();
+    const { student, db, dashboardAccess, shell } = await aylaV189RequireStudent(req, req.params.id);
     aylaEnsureSeedData(db);
-    const student = aylaGetItem(db, "aylaStudents", req.params.id);
-    if (!student) return aylaSendError(res, 404, "AylaMed student not found");
-    if (auth?.user?.role !== "admin" && auth?.user?.id && String(student.ayla_user_id || student.user_id || "") !== String(auth.user.id)) return aylaSendError(res, 403, "This dashboard does not belong to the authenticated AylaMed user");
 
     const recommendation = aylaRecommendation(student);
     const roadmapTasks = aylaFilterRows(aylaValues(db, "aylaRoadmapTasks"), { studentId: student.id });
@@ -55985,6 +59257,8 @@ app.get("/api/ayla/students/:id/dashboard", async (req, res) => {
 
     return aylaSendOk(res, {
       student: { ...student, phase: recommendation.phase, phasePlan },
+      examDashboard: shell?.active_dashboard || null,
+      dashboardAccess,
       recommendation,
       roadmapSummary: {
         targetDate: recommendation.targetDate,
@@ -56010,18 +59284,18 @@ app.get("/api/ayla/students/:id/dashboard", async (req, res) => {
       },
     });
   } catch (error) {
-    return aylaSendError(res, 500, error.message || "Failed to load AylaMed dashboard");
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load AylaMed dashboard", error.access || null);
   }
 });
 
 app.post("/api/ayla/generate-roadmap", async (req, res) => {
   try {
-    const db = await readAylaDb();
+    const { student: existingStudent, db } = await aylaV189RequireStudent(req, req.body.studentId, "roadmap");
     aylaEnsureSeedData(db);
-    const existingStudent = req.body.studentId ? aylaGetItem(db, "aylaStudents", req.body.studentId) : null;
+    aylaAssertStudentExamIdentity(existingStudent, req.body);
     const mergedInput = { ...(existingStudent || {}), ...req.body };
     const recommendation = aylaRecommendation(mergedInput);
-    const student = existingStudent ? { ...existingStudent, ...aylaStudentFromDiagnostic({ ...existingStudent, ...req.body, id: existingStudent.id, createdAt: existingStudent.createdAt }, recommendation) } : aylaStudentFromDiagnostic(req.body, recommendation);
+    const student = { ...existingStudent, ...aylaStudentFromDiagnostic({ ...existingStudent, ...req.body, id: existingStudent.id, studentId: existingStudent.id, examTrackId: existingStudent.examTrackId, exam: existingStudent.exam, createdAt: existingStudent.createdAt }, recommendation), id: existingStudent.id, ayla_user_id: existingStudent.ayla_user_id, user_id: existingStudent.user_id };
     const roadmapTasks = aylaBuildRoadmapTasks(student, recommendation);
     const phasePlan = aylaPhasePlan(student, recommendation);
     const knowledgeRecommendations = await aylaKnowledgeForStudent(db, student, recommendation, 6);
@@ -56040,7 +59314,7 @@ app.post("/api/ayla/generate-roadmap", async (req, res) => {
 
     return aylaSendOk(res, { student, recommendation, roadmapTasks, phasePlan, knowledgeRecommendations });
   } catch (error) {
-    return aylaSendError(res, 500, error.message || "Failed to generate AylaMed roadmap");
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to generate AylaMed roadmap");
   }
 });
 
@@ -56055,6 +59329,7 @@ app.patch("/api/ayla/students/:studentId/roadmap-tasks/:taskId", async (req, res
     const isOwner = ownerId && ownerId === String(user.id);
     const isStaff = ["admin", "instructor"].includes(String(user.role || "").toLowerCase());
     if (!isOwner && !isStaff) return aylaSendError(res, 403, "You cannot update another student's roadmap task");
+    if (isOwner) aylaDashboardEntitlement(db, user, student, "roadmap");
 
     const task = aylaGetItem(db, "aylaRoadmapTasks", req.params.taskId);
     if (!task || String(task.studentId || task.student_id || "") !== String(student.id)) {
@@ -56079,10 +59354,9 @@ app.patch("/api/ayla/students/:studentId/roadmap-tasks/:taskId", async (req, res
 
 app.post("/api/ayla/assign-qbank-block", async (req, res) => {
   try {
-    const db = await readAylaDb();
+    const { student, db } = await aylaV189RequireStudent(req, req.body.studentId, "qbank");
     aylaEnsureSeedData(db);
-    const student = aylaGetItem(db, "aylaStudents", req.body.studentId);
-    if (!student) return aylaSendError(res, 404, "AylaMed student not found");
+    aylaAssertStudentExamIdentity(student, req.body);
 
     const recommendation = aylaRecommendation({ ...student, ...req.body });
     if (recommendation.targetType === "match") {
@@ -56095,13 +59369,14 @@ app.post("/api/ayla/assign-qbank-block", async (req, res) => {
 
     return aylaSendOk(res, { qbankBlock, recommendation }, 201);
   } catch (error) {
-    return aylaSendError(res, 500, error.message || "Failed to assign AylaMed QBank block");
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to assign AylaMed QBank block");
   }
 });
 
 app.post("/api/ayla/generate-flashcards", async (req, res) => {
   try {
-    const { student, db } = await aylaV189RequireStudent(req, req.body.studentId);
+    const { student, db } = await aylaV189RequireStudent(req, req.body.studentId, "flashcards");
+    aylaAssertStudentExamIdentity(student, req.body);
     if (!flashcardCapabilities("aylamed").studentSourceCreation) return aylaSendError(res, 403, "Flashcard creation is not enabled for this application");
 
     const recommendation = aylaRecommendation({ ...student, ...req.body });
@@ -56123,11 +59398,13 @@ app.post("/api/ayla/generate-flashcards", async (req, res) => {
 
 app.post("/api/ayla/assessment-results", async (req, res) => {
   try {
-    const db = await readAylaDb();
+    const { student, db } = await aylaV189RequireStudent(req, req.body.studentId, "assessments");
     aylaEnsureSeedData(db);
     const assessmentResult = {
-      id: req.body.id || aylaId("ASM"),
       ...req.body,
+      id: aylaId("ASM"),
+      studentId: student.id,
+      examTrackId: aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam),
       score: aylaNumber(req.body.score, 0),
       previousScore: aylaNumber(req.body.previousScore, 0),
       qbankAverage: aylaNumber(req.body.qbankAverage, 0),
@@ -56139,36 +59416,36 @@ app.post("/api/ayla/assessment-results", async (req, res) => {
 
     aylaSetItem(db, "aylaAssessmentResults", assessmentResult);
 
-    const student = assessmentResult.studentId ? aylaGetItem(db, "aylaStudents", assessmentResult.studentId) : null;
-    const recommendation = aylaRecommendation({ ...(student || {}), currentScore: assessmentResult.score, qbankAverage: assessmentResult.qbankAverage, qbankCompleted: assessmentResult.qbankCompleted });
+    const recommendation = aylaRecommendation({ ...student, currentScore: assessmentResult.score, qbankAverage: assessmentResult.qbankAverage, qbankCompleted: assessmentResult.qbankCompleted });
 
-    if (student) {
-      student.currentScore = assessmentResult.score || student.currentScore;
-      student.qbankAverage = assessmentResult.qbankAverage || student.qbankAverage;
-      student.qbankCompleted = assessmentResult.qbankCompleted || student.qbankCompleted;
-      student.riskLevel = recommendation.riskLevel;
-      student.roadmapMode = recommendation.roadmapMode;
-      student.updatedAt = aylaNow();
-      aylaSetItem(db, "aylaStudents", student);
-    }
+    student.currentScore = assessmentResult.score || student.currentScore;
+    student.qbankAverage = assessmentResult.qbankAverage || student.qbankAverage;
+    student.qbankCompleted = assessmentResult.qbankCompleted || student.qbankCompleted;
+    student.riskLevel = recommendation.riskLevel;
+    student.roadmapMode = recommendation.roadmapMode;
+    student.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaStudents", student);
 
     await aylaLog(db, "assessment", "AylaMed assessment result saved", { assessmentResultId: assessmentResult.id, studentId: assessmentResult.studentId || null, riskLevel: recommendation.riskLevel });
     await writeAylaDb(db);
 
     return aylaSendOk(res, { assessmentResult, recommendation }, 201);
   } catch (error) {
-    return aylaSendError(res, 500, error.message || "Failed to save AylaMed assessment result");
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to save AylaMed assessment result");
   }
 });
 
 app.post("/api/ayla/update-roadmap-after-assessment", async (req, res) => {
   try {
-    const db = await readAylaDb();
+    const requestedAssessmentId = req.body.assessmentId || null;
+    const auth = await aylaGetAuthenticatedUser(req);
+    const assessment = requestedAssessmentId ? aylaGetItem(auth.db, "aylaAssessmentResults", requestedAssessmentId) : null;
+    const studentId = req.body.studentId || assessment?.studentId || auth.rawUser.studentId;
+    const { student, db } = await aylaV189RequireStudent(req, studentId, "roadmap");
     aylaEnsureSeedData(db);
-    const assessment = req.body.assessmentId ? aylaGetItem(db, "aylaAssessmentResults", req.body.assessmentId) : null;
-    const studentId = req.body.studentId || assessment?.studentId;
-    const student = studentId ? aylaGetItem(db, "aylaStudents", studentId) : null;
-    if (!student) return aylaSendError(res, 404, "AylaMed student not found");
+    if (assessment && String(assessment.studentId || "") !== String(student.id)) return aylaSendError(res, 404, "Assessment result not found for this exam dashboard");
+    if (assessment?.examTrackId && aylaCanonicalExamTrack(assessment.examTrackId) !== aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam)) return aylaSendError(res, 404, "Assessment result not found for this exam dashboard");
+    aylaAssertStudentExamIdentity(student, req.body);
 
     if (assessment) {
       student.currentScore = assessment.score || student.currentScore;
@@ -56201,74 +59478,58 @@ app.post("/api/ayla/update-roadmap-after-assessment", async (req, res) => {
 
     return aylaSendOk(res, { student, recommendation, generated: { roadmapTasks, qbankBlocks: qbankBlock ? [qbankBlock] : [], flashcards, phasePlan, knowledgeRecommendations } });
   } catch (error) {
-    return aylaSendError(res, 500, error.message || "Failed to update AylaMed roadmap after assessment");
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update AylaMed roadmap after assessment");
   }
 });
 
 app.post("/api/ayla/match-study-partner", async (req, res) => {
   try {
-    const db = await readAylaDb();
+    const { student: source, db } = await aylaV189RequireStudent(req, req.body.studentId, "study_partner");
     aylaEnsureSeedData(db);
-    const source = aylaGetItem(db, "aylaStudyPartnerPool", req.body.candidateId) || aylaGetItem(db, "aylaStudents", req.body.studentId);
-    if (!source) return aylaSendError(res, 404, "AylaMed source student/candidate not found");
-
-    const pool = aylaValues(db, "aylaStudyPartnerPool").filter((candidate) => {
-      if (candidate.id === source.id || candidate.studentId === source.id || candidate.studentId === source.studentId) return false;
-      if (req.body.exam && candidate.exam !== req.body.exam) return false;
-      return true;
+    const sourceExamTrackId = aylaCanonicalExamTrack(source.examTrackId || source.exam_track_id || source.exam);
+    const liveDb = await readLiveDb();
+    const activePairs = aylaValues(db, "aylaStudyPartnerRequests").filter((row) => ["pending", "accepted", "blocked"].includes(String(row.status || "").toLowerCase()));
+    const ranked = aylaValues(db, "aylaStudents")
+      .filter((candidate) => String(candidate.id || "") !== String(source.id || ""))
+      .filter((candidate) => Boolean(candidate.studyPartnerOptIn || candidate.study_partner_opt_in))
+      .filter((candidate) => aylaV219StudentProfileDiscoverable(db, candidate))
+      .filter((candidate) => aylaCanonicalExamTrack(candidate.examTrackId || candidate.exam_track_id || candidate.exam) === sourceExamTrackId)
+      .filter((candidate) => !activePairs.some((pair) => [String(pair.fromStudentId), String(pair.toStudentId)].includes(String(source.id)) && [String(pair.fromStudentId), String(pair.toStudentId)].includes(String(candidate.id))))
+      .map((candidate) => aylaV189PartnerPublic(db, candidate, source, liveDb))
+      .filter((candidate) => candidate.compatibilityScore > 0)
+      .sort((left, right) => right.compatibilityScore - left.compatibilityScore || String(left.studentId).localeCompare(String(right.studentId)))
+      .slice(0, 20);
+    return aylaSendOk(res, {
+      match: ranked[0] || null,
+      ranked,
+      saved: false,
+      lifecycle_required: true,
+      request_endpoint: "/api/ayla/study-partners/requests",
+      message: "Compatibility suggestions are read-only. A relationship starts only through the consent-based request lifecycle.",
     });
-
-    const ranked = pool
-      .map((candidate) => ({ candidate, score: aylaPartnerScore(source, candidate), reason: aylaPartnerReason(source, candidate, aylaPartnerScore(source, candidate)) }))
-      .sort((a, b) => b.score - a.score);
-
-    const best = ranked[0] || null;
-    if (!best) return aylaSendOk(res, { match: null, ranked });
-
-    const match = {
-      id: aylaId("MATCH"),
-      studentAId: source.studentId || source.id,
-      studentA: source.name,
-      studentBId: best.candidate.studentId || best.candidate.id,
-      studentB: best.candidate.name,
-      exam: source.exam,
-      score: best.score,
-      reason: best.reason,
-      status: best.score >= 70 ? "Suggested" : "Needs Review",
-      createdAt: aylaNow(),
-      updatedAt: aylaNow(),
-    };
-
-    if (req.body.save !== false) {
-      aylaSetItem(db, "aylaStudyPartnerMatches", match);
-      await aylaLog(db, "study-partner", "AylaMed study partner match generated", { matchId: match.id, score: match.score });
-      await writeAylaDb(db);
-    }
-
-    return aylaSendOk(res, { match, ranked });
   } catch (error) {
-    return aylaSendError(res, 500, error.message || "Failed to match AylaMed study partner");
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to match AylaMed study partner");
   }
 });
 
 app.post("/api/ayla/knowledge-search", async (req, res) => {
   try {
-    const db = await readAylaDb();
+    const { student, db } = await aylaV189RequireStudent(req, req.body.studentId, "library");
     aylaEnsureSeedData(db);
     const q = String(req.body.q || req.body.query || req.body.search || "").trim();
-    const student = req.body.studentId ? aylaGetItem(db, "aylaStudents", req.body.studentId) : null;
-    const recommendation = student ? aylaRecommendation(student) : null;
+    const recommendation = aylaRecommendation(student);
     const expandedQuery = [q, student?.exam, recommendation?.phase, ...(aylaCleanArray(student?.weakAreas))].filter(Boolean).join(" ");
     const results = await aylaSearchTrainingKnowledge({ query: expandedQuery, limit: Number(req.body.limit || 8) });
     return aylaSendOk(res, { count: results.length, available: results.length > 0, source: "CRM AI Training Center", read_only: true, message: results.length ? "Approved AI Training Center knowledge is ready." : "No approved matching medical knowledge was found.", personalizedFor: student?.id || null, results });
   } catch (error) {
-    return aylaSendError(res, 500, error.message || "Failed to search AI Training Center knowledge");
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to search AI Training Center knowledge");
   }
 });
 
 
 function aylaPublicPlan(plan = {}) {
-  return { id: plan.id, name: plan.name, description: plan.description, plan_type: plan.plan_type, billing_type: plan.billing_type, price_cents: Number(plan.price_cents || 0), currency: plan.currency || "usd", access_days: Number(plan.access_days || 0), included_features: aylaCleanArray(plan.included_features), is_demo: Boolean(plan.is_demo), is_active: plan.is_active !== false, is_public: plan.is_public !== false, status: plan.status || "active" };
+  const matrix = aylaPlanFeatureMatrixRow(plan);
+  return { id: plan.id, name: plan.name, description: plan.description, plan_type: plan.plan_type, billing_type: plan.billing_type, price_cents: Number(plan.price_cents || 0), currency: plan.currency || "usd", access_days: Number(plan.access_days || 0), included_features: matrix.included_features, feature_matrix: matrix.features, feature_matrix_version: matrix.feature_matrix_version, is_full_access: matrix.is_full_access, exam_tracks: aylaCleanArray(plan.exam_tracks).map(aylaCanonicalExamTrack).filter(Boolean), is_demo: Boolean(plan.is_demo), is_active: plan.is_active !== false, is_public: plan.is_public !== false, status: plan.status || "active" };
 }
 
 async function aylaKnowledgeStatus() {
@@ -56277,7 +59538,9 @@ async function aylaKnowledgeStatus() {
   const documentMap = new Map(documents.map((doc) => [String(doc.id), doc]));
   const eligible = ensureCrmArray(crmDb, "ai_training_items").filter((item) => aylaTrainingItemEligible(item, documentMap.get(String(item.document_id || "")) || null));
   const eligibleDocumentIds = new Set(eligible.map((item) => String(item.document_id || "")).filter(Boolean));
-  return { source: "CRM AI Training Center", read_only: true, eligible_items: eligible.length, eligible_documents: eligibleDocumentIds.size, total_training_items: ensureCrmArray(crmDb, "ai_training_items").length, total_documents: documents.length, managed_at: "/admin/crm/training" };
+  const successStories = ensureCrmArray(crmDb, "ai_success_stories");
+  const eligibleSuccessStories = successStories.map(sanitizeAylaSuccessStoryForAdmin).filter((story) => story.consumption_eligible);
+  return { source: "CRM AI Training Center", read_only: true, eligible_items: eligible.length, eligible_documents: eligibleDocumentIds.size, total_training_items: ensureCrmArray(crmDb, "ai_training_items").length, total_documents: documents.length, eligible_success_stories: eligibleSuccessStories.length, total_success_stories: successStories.length, success_story_outcomes_exposed: false, managed_at: "/admin/crm/ai-training" };
 }
 
 app.get("/api/ayla/public-config", async (req, res) => {
@@ -56286,9 +59549,12 @@ app.get("/api/ayla/public-config", async (req, res) => {
     aylaEnsureSeedData(db);
     const settings = aylaMergeSettings(db.aylaSettings || {});
     const days = Math.max(1, Number(settings.demo.duration_days || 7));
-    const plans = aylaValues(db, "aylaPlans").filter((plan) => plan.is_active !== false && plan.is_public !== false && ["AYLA-PLAN-DEMO", "AYLA-PLAN-MONTHLY"].includes(String(plan.id))).map(aylaPublicPlan);
+    const plans = aylaValues(db, "aylaPlans")
+      .filter((plan) => plan.is_active !== false && plan.is_public !== false)
+      .sort((left, right) => Number(aylaPlanIsDemo(right)) - Number(aylaPlanIsDemo(left)) || String(left.name || "").localeCompare(String(right.name || "")))
+      .map(aylaPublicPlan);
     const knowledge = await aylaKnowledgeStatus();
-    return aylaSendOk(res, { settings: { ...settings, demo: { ...settings.demo, duration_days: days, homepage_bar_text_rendered: aylaTemplate(settings.demo.homepage_bar_text, days), button_text_rendered: aylaTemplate(settings.demo.button_text, days), plan_name_rendered: aylaTemplate(settings.demo.plan_name, days) } }, plans, knowledge, google_client_id: process.env.GOOGLE_CLIENT_ID || "" });
+    return aylaSendOk(res, { settings: { ...settings, demo: { ...settings.demo, duration_days: days, homepage_bar_text_rendered: aylaTemplate(settings.demo.homepage_bar_text, days), button_text_rendered: aylaTemplate(settings.demo.button_text, days), plan_name_rendered: aylaTemplate(settings.demo.plan_name, days) } }, plans, featureCatalog: publicAylaPlanFeatureCatalog(), knowledge, google_client_id: process.env.GOOGLE_CLIENT_ID || "" });
   } catch (error) { return aylaSendError(res, 500, error.message || "Failed to load AylaMed public configuration"); }
 });
 
@@ -56302,14 +59568,208 @@ app.put("/api/ayla/admin/settings", async (req, res) => {
     await aylaRequireAdmin(req);
     const db = await readAylaDb(); aylaEnsureSeedData(db);
     const incoming = req.body.settings || req.body || {};
+    if (incoming.demo?.included_features !== undefined) {
+      incoming.demo.included_features = normalizeAylaPlanFeatures(incoming.demo.included_features, { rejectUnknown: true }).features;
+    }
+    const previousDemoFeatures = normalizeAylaPlanFeatures(db.aylaSettings.demo?.included_features).features;
     db.aylaSettings = aylaMergeSettings({ ...db.aylaSettings, ...incoming, product: { ...db.aylaSettings.product, ...(incoming.product || {}) }, demo: { ...db.aylaSettings.demo, ...(incoming.demo || {}) }, homepage: { ...db.aylaSettings.homepage, ...(incoming.homepage || {}) }, resources: { ...db.aylaSettings.resources, ...(incoming.resources || {}), assignment_mix: { ...(db.aylaSettings.resources?.assignment_mix || {}), ...(incoming.resources?.assignment_mix || {}) } }, adaptive: { ...db.aylaSettings.adaptive, ...(incoming.adaptive || {}) }, community: { ...db.aylaSettings.community, ...(incoming.community || {}) } });
     db.aylaSettings.product.monthly_only = true;
     db.aylaSettings.demo.duration_days = Math.max(1, Math.min(60, Number(db.aylaSettings.demo.duration_days || 7)));
     aylaEnsureSeedData(db);
+    const nextDemoFeatures = normalizeAylaPlanFeatures(db.aylaSettings.demo?.included_features).features;
+    if (JSON.stringify(previousDemoFeatures) !== JSON.stringify(nextDemoFeatures)) {
+      const demoPlan = aylaGetItem(db, "aylaPlans", "AYLA-PLAN-DEMO");
+      demoPlan.feature_matrix_version = Math.max(1, Number(demoPlan.feature_matrix_version || 1)) + 1;
+      demoPlan.feature_matrix_updated_at = aylaNow();
+      aylaSetItem(db, "aylaPlans", demoPlan);
+    }
     await aylaLog(db, "settings", "AylaMed settings updated", { demo_days: db.aylaSettings.demo.duration_days, demo_enabled: db.aylaSettings.demo.enabled });
     await writeAylaDb(db);
     return aylaSendOk(res, { settings: db.aylaSettings, plans: aylaValues(db, "aylaPlans").map(aylaPublicPlan) });
-  } catch (error) { return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update AylaMed settings"); }
+  } catch (error) { return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update AylaMed settings", error.code ? { code: error.code } : null); }
+});
+
+function aylaV215PlanEnrollmentImpact(db = {}, planId = "") {
+  const rows = aylaValues(db, "aylaEnrollments").filter((enrollment) => String(enrollment.plan_id || "") === String(planId));
+  return {
+    total_enrollments: rows.length,
+    active_enrollments: rows.filter(aylaEnrollmentActive).length,
+    demo_enrollments: rows.filter((row) => row.is_demo === true || String(row.type || "").toLowerCase() === "demo").length,
+    enrollment_records_changed_by_feature_update: 0,
+    learning_history_deleted: false,
+  };
+}
+
+function aylaV215ExpectedFeatureVersion(plan = {}, input = {}) {
+  const current = Math.max(1, Number(plan.feature_matrix_version || 1));
+  const supplied = input.expected_feature_matrix_version ?? input.expectedFeatureMatrixVersion ?? input.expected_version ?? input.expectedVersion;
+  if (supplied !== undefined && Number(supplied) !== current) {
+    throw Object.assign(new Error("Plan feature matrix changed; reload before saving"), {
+      statusCode: 409,
+      code: "STALE_PLAN_FEATURE_MATRIX",
+      currentVersion: current,
+    });
+  }
+  return current;
+}
+
+function aylaV215AdminAuditActor(admin = {}) {
+  return {
+    method: admin.method || "unknown",
+    user_id: admin.user?.id || null,
+    user_email: admin.user?.email || null,
+  };
+}
+
+app.get("/api/ayla/admin/plan-feature-matrix", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
+    aylaEnsureSeedData(db);
+    const plans = aylaValues(db, "aylaPlans")
+      .map((plan) => aylaNormalizePlanPayload(plan, plan))
+      .sort((left, right) => Number(Boolean(right.is_demo)) - Number(Boolean(left.is_demo)) || String(left.name || "").localeCompare(String(right.name || "")));
+    return aylaSendOk(res, {
+      featureCatalog: publicAylaPlanFeatureCatalog(),
+      plans: plans.map((plan) => ({ ...aylaPlanFeatureMatrixRow(plan), enrollmentImpact: aylaV215PlanEnrollmentImpact(db, plan.id) })),
+      demo: {
+        ...db.aylaSettings.demo,
+        included_features: normalizeAylaPlanFeatures(db.aylaSettings.demo?.included_features).features,
+        plan_id: "AYLA-PLAN-DEMO",
+      },
+      controls: {
+        plan_is_live_feature_authority: true,
+        enrollment_snapshots_are_legacy_fallback_only: true,
+        paid_entitlement_overrides_demo: true,
+        feature_disable_deletes_history: false,
+        optimistic_versioning: true,
+      },
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load plan feature matrix", error.code ? { code: error.code } : null);
+  }
+});
+
+app.put("/api/ayla/admin/plans/:planId/features", async (req, res) => {
+  try {
+    const admin = await aylaRequireAdmin(req);
+    if (req.body.included_features === undefined && req.body.features === undefined && req.body.feature_overrides === undefined && req.body.featureOverrides === undefined && req.body.is_full_access === undefined) {
+      return aylaSendError(res, 400, "included_features, feature_overrides, or is_full_access is required");
+    }
+    const result = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const existing = aylaGetItem(db, "aylaPlans", req.params.planId);
+      if (!existing) throw Object.assign(new Error("AylaMed plan not found"), { statusCode: 404 });
+      const currentVersion = aylaV215ExpectedFeatureVersion(existing, req.body);
+      const controls = applyAylaPlanFeaturePatch(existing, req.body);
+      const updated = aylaNormalizePlanPayload({
+        included_features: controls.included_features,
+        is_full_access: controls.is_full_access,
+        feature_matrix_version: currentVersion + 1,
+      }, existing, { strictControls: true });
+      updated.feature_matrix_updated_at = aylaNow();
+      updated.feature_matrix_updated_by = aylaV215AdminAuditActor(admin);
+      aylaSetItem(db, "aylaPlans", updated);
+      if (aylaPlanIsDemo(updated)) db.aylaSettings.demo.included_features = [...updated.included_features];
+      await aylaLog(db, "plan_feature_matrix", "AylaMed plan feature matrix updated", {
+        planId: updated.id,
+        previousVersion: currentVersion,
+        featureMatrixVersion: updated.feature_matrix_version,
+        previousFeatures: normalizeAylaPlanFeatures(existing.included_features).features,
+        includedFeatures: updated.included_features,
+        isFullAccess: updated.is_full_access,
+        actor: aylaV215AdminAuditActor(admin),
+      });
+      return { plan: updated, impact: aylaV215PlanEnrollmentImpact(db, updated.id) };
+    });
+    return aylaSendOk(res, { plan: aylaPlanFeatureMatrixRow(result.plan), impact: result.impact });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update plan feature matrix", {
+      ...(error.code ? { code: error.code } : {}),
+      ...(error.currentVersion ? { current_feature_matrix_version: error.currentVersion } : {}),
+    });
+  }
+});
+
+app.put("/api/ayla/admin/demo-controls", async (req, res) => {
+  try {
+    const admin = await aylaRequireAdmin(req);
+    const result = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const existing = aylaGetItem(db, "aylaPlans", "AYLA-PLAN-DEMO");
+      if (!existing) throw Object.assign(new Error("AylaMed demo plan not found"), { statusCode: 404 });
+      const currentVersion = aylaV215ExpectedFeatureVersion(existing, req.body);
+      const currentDemo = db.aylaSettings.demo || {};
+      const incomingDemo = req.body.demo && typeof req.body.demo === "object" ? req.body.demo : req.body;
+      const allowedText = ["homepage_bar_text", "button_text", "plan_name", "description"];
+      const nextDemo = { ...currentDemo };
+      if (incomingDemo.enabled !== undefined) nextDemo.enabled = incomingDemo.enabled === true;
+      if (incomingDemo.homepage_bar_enabled !== undefined) nextDemo.homepage_bar_enabled = incomingDemo.homepage_bar_enabled === true;
+      if (incomingDemo.duration_days !== undefined) {
+        const days = Number(incomingDemo.duration_days);
+        if (!Number.isInteger(days) || days < 1 || days > 60) throw Object.assign(new Error("Demo duration_days must be an integer from 1 to 60"), { statusCode: 400, code: "INVALID_DEMO_DURATION" });
+        nextDemo.duration_days = days;
+      }
+      for (const key of allowedText) {
+        if (incomingDemo[key] !== undefined) nextDemo[key] = String(incomingDemo[key] || "").replace(/\u0000/g, "").trim().slice(0, key === "description" ? 1000 : 300);
+      }
+      const hasFeaturePatch = incomingDemo.included_features !== undefined || incomingDemo.features !== undefined || incomingDemo.feature_overrides !== undefined || incomingDemo.featureOverrides !== undefined || incomingDemo.is_full_access !== undefined;
+      const controls = hasFeaturePatch ? applyAylaPlanFeaturePatch(existing, incomingDemo) : applyAylaPlanFeaturePatch(existing, {});
+      nextDemo.included_features = controls.included_features;
+      db.aylaSettings.demo = nextDemo;
+
+      const planPatch = {
+        name: aylaTemplate(nextDemo.plan_name, nextDemo.duration_days),
+        description: nextDemo.description,
+        access_days: nextDemo.duration_days,
+        included_features: controls.included_features,
+        is_full_access: controls.is_full_access,
+        is_active: nextDemo.enabled !== false,
+        is_public: nextDemo.enabled !== false,
+        status: nextDemo.enabled !== false ? "active" : "inactive",
+        feature_matrix_version: currentVersion + 1,
+      };
+      if (incomingDemo.exam_tracks !== undefined || incomingDemo.examTracks !== undefined) planPatch.exam_tracks = incomingDemo.exam_tracks ?? incomingDemo.examTracks;
+      const updated = aylaNormalizePlanPayload(planPatch, existing, { strictControls: true });
+      updated.feature_matrix_updated_at = aylaNow();
+      updated.feature_matrix_updated_by = aylaV215AdminAuditActor(admin);
+      aylaSetItem(db, "aylaPlans", updated);
+
+      let adjustedEnrollments = 0;
+      if (req.body.apply_to_active_enrollments === true || req.body.applyToActiveEnrollments === true) {
+        for (const enrollment of aylaValues(db, "aylaEnrollments")) {
+          if (String(enrollment.plan_id || "") !== String(updated.id) || !aylaEnrollmentActive(enrollment)) continue;
+          const startsAt = enrollment.access_starts_at || enrollment.createdAt || aylaNow();
+          enrollment.access_expires_at = aylaAccessExpiresAt({ plan: updated, startsAt, accessDays: updated.access_days });
+          enrollment.updatedAt = aylaNow();
+          aylaSetItem(db, "aylaEnrollments", enrollment);
+          adjustedEnrollments += 1;
+        }
+      }
+      await aylaLog(db, "demo_controls", "AylaMed demo controls updated", {
+        planId: updated.id,
+        previousVersion: currentVersion,
+        featureMatrixVersion: updated.feature_matrix_version,
+        enabled: nextDemo.enabled,
+        durationDays: nextDemo.duration_days,
+        includedFeatures: updated.included_features,
+        existingEnrollmentsAdjusted: adjustedEnrollments,
+        actor: aylaV215AdminAuditActor(admin),
+      });
+      return { plan: updated, demo: nextDemo, adjustedEnrollments, impact: aylaV215PlanEnrollmentImpact(db, updated.id) };
+    });
+    return aylaSendOk(res, {
+      demo: result.demo,
+      plan: aylaPlanFeatureMatrixRow(result.plan),
+      existing_demo_enrollments_adjusted: result.adjustedEnrollments,
+      impact: result.impact,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update demo controls", {
+      ...(error.code ? { code: error.code } : {}),
+      ...(error.currentVersion ? { current_feature_matrix_version: error.currentVersion } : {}),
+    });
+  }
 });
 
 app.get("/api/ayla/admin/knowledge/status", async (req, res) => {
@@ -56410,23 +59870,38 @@ async function aylaRecordAiUsage(db, { user, studentId = null, feature, model, u
 app.post("/api/ayla/ai/coach", async (req, res) => {
   const started = Date.now();
   try {
-    const { user, db } = await aylaGetAuthenticatedUser(req);
+    const { user, student, db } = await aylaV189RequireStudent(req, req.body.studentId, "personal_tutor");
     aylaEnsureSeedData(db);
+    const question = String(req.body.question || req.body.message || "").trim();
+    if (!question) return aylaSendError(res, 400, "question is required");
+    const tutorDate = String(req.body.date || aylaDateOnly()).slice(0, 10);
+    if (isAylaPersonalTutorPlanningIntent(question)) {
+      const tutorSnapshot = await aylaV213AtomicTutorSnapshot({ user, student }, tutorDate);
+      return aylaSendOk(res, {
+        answer: formatAylaPersonalTutorAnswer(tutorSnapshot.decision),
+        sources: [],
+        usage: null,
+        usage_status: aylaUsageStatus(db, user.id),
+        personal_tutor: tutorSnapshot.decision,
+        roadmap: { plan: tutorSnapshot.plan, assignments: tutorSnapshot.assignments, stablePlanReused: tutorSnapshot.stablePlanReused },
+        deterministic: true,
+      });
+    }
+    aylaDashboardEntitlement(db, user, student, "roadmap");
+    const tutorSnapshot = await aylaV213PersonalTutorSnapshot(db, user, student, tutorDate);
     const usageStatus = aylaUsageStatus(db, user.id);
     if (usageStatus.blocked) return aylaSendError(res, 429, usageStatus.reason, usageStatus);
     const emergency = aylaEmergencyProtectionStatus(db, user.id);
     if (emergency.blocked) return aylaSendError(res, 429, emergency.reason);
-    const question = String(req.body.question || req.body.message || "").trim();
-    if (!question) return aylaSendError(res, 400, "question is required");
-    const student = req.body.studentId ? aylaGetItem(db, "aylaStudents", req.body.studentId) : aylaValues(db, "aylaStudents").find((row) => String(row.ayla_user_id || row.user_id || "") === String(user.id)) || null;
     const knowledge = await aylaSearchTrainingKnowledge({ query: [question, student?.exam, ...(aylaCleanArray(student?.weakAreas))].filter(Boolean).join(" "), limit: 6 });
     const context = knowledge.map((item, index) => `[${index + 1}] ${item.title}\n${item.content.slice(0, 1800)}`).join("\n\n");
+    const successStrategyContext = (tutorSnapshot.decision.successStoryGuidance?.strategies || []).map((item, index) => `[S${index + 1}] ${item.patternLabel}\n${item.strategySteps.map((step) => `- ${step.action}${step.useWhen ? ` (use when: ${step.useWhen})` : ""}${step.caution ? ` (caution: ${step.caution})` : ""}`).join("\n")}\nApplicability: ${item.applicabilityNotes || "Adapt only when it fits the current roadmap assignment."}\nLimitations: ${item.limitations || "Outcomes vary; this does not promise the same result."}`).join("\n\n");
     const model = String(process.env.AYLA_AI_MODEL || process.env.AI_MODEL || "gpt-4o-mini");
-    const ai = await callOpenAIResponsesAPI({ model, maxOutputTokens: Math.max(500, Math.min(2200, Number(req.body.max_output_tokens || 1200))), systemPrompt: "You are AylaMed, an educational medical exam and Match preparation coach. Use only the supplied approved AI Training Center context for medical facts. Be practical, concise, and explicit when the context is insufficient. Do not claim to diagnose or treat a patient. Return plain text.", userPrompt: `Student profile: ${JSON.stringify(student ? { exam: student.exam, targetDate: student.targetDate || student.examDate || student.matchDate, weakAreas: student.weakAreas, phase: student.phase || student.roadmapMode } : {})}\n\nApproved context:\n${context || "No approved matching context was found."}\n\nQuestion:\n${question}` });
+    const ai = await callOpenAIResponsesAPI({ model, maxOutputTokens: Math.max(500, Math.min(2200, Number(req.body.max_output_tokens || 1200))), systemPrompt: "You are AylaMed, an educational medical exam and Match preparation coach. Use only the supplied approved AI Training Center context for medical facts. Success-story strategy context is advisory study-process evidence only: never treat it as medical fact, expose student identity or outcome details, promise the same score/result, or blindly copy another student's plan. The supplied adaptive roadmap is authoritative: do not create a second schedule, replace its next action, invent resources, or claim that you changed it. Be practical, concise, and explicit when context is insufficient. Do not claim to diagnose or treat a patient. Return plain text.", userPrompt: `Student profile: ${JSON.stringify(student ? { exam: student.exam, targetDate: student.targetDate || student.examDate || student.matchDate, weakAreas: student.weakAreas, phase: student.phase || student.roadmapMode } : {})}\n\nAuthoritative roadmap context: ${JSON.stringify({ engine: tutorSnapshot.decision.engine, plan: tutorSnapshot.decision.generatedFromPlan, nextAction: tutorSnapshot.decision.nextAction, workload: tutorSnapshot.decision.workload, weakPattern: tutorSnapshot.decision.crossSystemWeakTopic })}\n\nApproved medical knowledge context:\n${context || "No approved matching medical context was found."}\n\nApproved anonymized success-story strategy context (advisory only; outcomes deliberately omitted):\n${successStrategyContext || "No approved matching strategy context was found."}\n\nQuestion:\n${question}` });
     const log = await aylaRecordAiUsage(db, { user, studentId: student?.id || null, feature: req.body.feature || "ai_coach", model, usage: ai.usage, durationMs: Date.now() - started });
     await writeAylaDb(db);
     const after = aylaUsageStatus(db, user.id);
-    return aylaSendOk(res, { answer: ai.text, sources: knowledge.map((item) => ({ id: item.id, title: item.title, document_title: item.document_title, source: item.source })), usage: log, usage_status: after });
+    return aylaSendOk(res, { answer: ai.text, sources: knowledge.map((item) => ({ id: item.id, title: item.title, document_title: item.document_title, source: item.source })), success_story_guidance: tutorSnapshot.decision.successStoryGuidance, usage: log, usage_status: after, roadmap_context: { engine: tutorSnapshot.decision.engine, plan: tutorSnapshot.decision.generatedFromPlan, nextAction: tutorSnapshot.decision.nextAction } });
   } catch (error) { return aylaSendError(res, error.statusCode || 500, error.message || "AylaMed AI coach failed"); }
 });
 
@@ -56609,18 +60084,41 @@ function aylaV189HashToken(value = "") {
 }
 
 function aylaV189StudentOwned(student, user) {
-  return Boolean(student && user && String(student.ayla_user_id || student.user_id || "") === String(user.id));
+  return Boolean(student && user && String(student.ayla_user_id || student.aylaUserId || student.user_id || student.userId || "") === String(user.id));
 }
 
-async function aylaV189RequireStudent(req, requestedStudentId = "") {
+function aylaV208FeatureForStudentRoute(req) {
+  const route = String(req.path || req.originalUrl || "").toLowerCase();
+  if (route.includes("/qbank") || route.includes("question-attempts") || route.includes("assign-qbank")) return "qbank";
+  if (route.includes("notebook")) return "dynamic_notebook";
+  if (route.includes("/revision")) return "revision";
+  if (route.includes("/progress")) return "progress";
+  if (route.includes("flashcard")) return "flashcards";
+  if (route.includes("assessment")) return "assessments";
+  if (route.includes("video-progress") || route.includes("content-hub")) return "content_hub";
+  if (route.includes("study-partner") || route.includes("match-study-partner")) return "study_partner";
+  if (route.includes("community/leaderboard")) return "leaderboard";
+  if (route.includes("knowledge-search") || route.includes("/library")) return "library";
+  if (route.includes("ai/coach") || route.includes("personal-tutor")) return "personal_tutor";
+  if (route.includes("daily-workspace") || route.includes("roadmap") || route.includes("/assignments/")) return "roadmap";
+  return null;
+}
+
+async function aylaV189RequireStudent(req, requestedStudentId = "", feature = null) {
   const auth = await aylaGetAuthenticatedUser(req);
   const db = auth.db;
+  const legacyBound = aylaBindLegacyEnrollmentScopes(db, auth.rawUser);
+  if (legacyBound) await writeAylaDb(db);
   let student = requestedStudentId ? aylaGetItem(db, "aylaStudents", requestedStudentId) : null;
+  if (requestedStudentId && !student) {
+    const error = new Error("AylaMed student profile not found");
+    error.statusCode = 404;
+    throw error;
+  }
   if (!student && auth.rawUser?.studentId) student = aylaGetItem(db, "aylaStudents", auth.rawUser.studentId);
   if (!student) {
-    student = aylaValues(db, "aylaStudents")
-      .filter((row) => String(row.ayla_user_id || row.user_id || "") === String(auth.user.id))
-      .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")))[0] || null;
+    const defaultShell = aylaBuildStudentShell(db, auth.rawUser);
+    student = defaultShell.active_student_id ? aylaGetItem(db, "aylaStudents", defaultShell.active_student_id) : null;
   }
   if (!student) {
     const error = new Error("AylaMed student profile not found");
@@ -56632,7 +60130,20 @@ async function aylaV189RequireStudent(req, requestedStudentId = "") {
     error.statusCode = 403;
     throw error;
   }
-  return { ...auth, student };
+  const dashboardAccess = aylaDashboardEntitlement(db, auth.user, student, feature || aylaV208FeatureForStudentRoute(req));
+  const shell = auth.user.role === "admin"
+    ? null
+    : aylaBuildStudentShell(db, auth.rawUser, {
+        requestedStudentId: student.id,
+        requestedExamTrack: dashboardAccess.exam_track_id,
+      });
+  if (shell?.denied_reason || !shell?.active_dashboard) {
+    const error = new Error("No active AylaMed enrollment grants access to this exam dashboard");
+    error.statusCode = 403;
+    error.code = String(shell?.denied_reason || "NO_ACTIVE_EXAM_ENTITLEMENT").toUpperCase();
+    throw error;
+  }
+  return { ...auth, student, dashboardAccess, shell };
 }
 
 function aylaV189ResourceType(value = "") {
@@ -56684,12 +60195,14 @@ function aylaV189NormalizeResource(payload = {}, existing = {}) {
     id: existing.id || payload.id || aylaId("AYLA-RES"),
     type,
     title,
+    description: aylaV189CleanText(payload.description || existing.description || "").slice(0, 2000),
     provider: aylaV189CleanText(payload.provider || existing.provider || (type === "vimeo_video" ? "Vimeo" : "AylaMed")),
     examTrackId,
     examTrack: examDefinition?.label || "Unmapped",
     curriculumVersion: aylaV189CleanText(payload.curriculumVersion || payload.curriculum_version || existing.curriculumVersion || existing.curriculum_version || examDefinition?.curriculumVersion || ""),
     authorizationStatus: aylaV189CleanText(payload.authorizationStatus || payload.authorization_status || existing.authorizationStatus || existing.authorization_status || "pending_review").toLowerCase(),
     sourceAccessMode: aylaV189CleanText(payload.sourceAccessMode || payload.source_access_mode || existing.sourceAccessMode || existing.source_access_mode || "protected").toLowerCase(),
+    sourceLabel: aylaV189CleanText(payload.sourceLabel || payload.source_label || existing.sourceLabel || existing.source_label || "").slice(0, 180),
     resourceNumber: String((payload.resourceNumber ?? payload.resource_number ?? existing.resourceNumber ?? existing.resource_number ?? questionNumber) || "").trim(),
     questionNumber,
     system,
@@ -56720,6 +60233,12 @@ function aylaV189NormalizeResource(payload = {}, existing = {}) {
     mappedVimeoUrl: aylaV189CleanText(payload.mappedVimeoUrl || payload.mapped_vimeo_url || mappedVideo.vimeoUrl || mappedVideo.vimeo_url || mappedVideo.url || existing.mappedVimeoUrl || existing.mapped_vimeo_url || ""),
     mappedVideoTimestamp: aylaV189CleanText(payload.mappedVideoTimestamp || payload.mapped_video_timestamp || mappedVideo.timestamp || existing.mappedVideoTimestamp || existing.mapped_video_timestamp || ""),
     mappingStatus: aylaV189CleanText(payload.mappingStatus || payload.mapping_status || existing.mappingStatus || existing.mapping_status || ""),
+    playlistKey: aylaV189CleanText(payload.playlistKey || payload.playlist_key || existing.playlistKey || existing.playlist_key || "").slice(0, 180),
+    playlistTitle: aylaV189CleanText(payload.playlistTitle || payload.playlist_title || existing.playlistTitle || existing.playlist_title || "").slice(0, 180),
+    durationSeconds: Math.max(0, Math.min(86400, aylaNumber(payload.durationSeconds ?? payload.duration_seconds ?? existing.durationSeconds ?? existing.duration_seconds, 0))),
+    sourceLabelVisible: payload.sourceLabelVisible !== undefined || payload.source_label_visible !== undefined
+      ? Boolean(payload.sourceLabelVisible ?? payload.source_label_visible)
+      : Boolean(existing.sourceLabelVisible ?? existing.source_label_visible),
     videoStartSeconds: Math.max(0, aylaNumber(payload.videoStartSeconds ?? payload.video_start_seconds ?? existing.videoStartSeconds ?? existing.video_start_seconds, 0)),
     videoEndSeconds: Math.max(0, aylaNumber(payload.videoEndSeconds ?? payload.video_end_seconds ?? existing.videoEndSeconds ?? existing.video_end_seconds, 0)),
     timestamp: aylaV189CleanText(payload.timestamp || existing.timestamp || ""),
@@ -56831,6 +60350,14 @@ function aylaV189TrainingRecords(item = {}, document = {}) {
       estimatedMinutes: record.estimated_minutes,
       authorizationStatus: record.authorization_status || record.authorizationStatus || structured.authorization_status || structured.authorizationStatus || item.authorization_status || item.authorizationStatus || document.authorization_status || document.authorizationStatus || "pending_review",
       sourceAccessMode: record.source_access_mode || record.sourceAccessMode || structured.source_access_mode || structured.sourceAccessMode || item.source_access_mode || item.sourceAccessMode || document.source_access_mode || document.sourceAccessMode || "protected",
+      sourceLabelVisible: record.source_label_visible !== undefined
+        ? Boolean(record.source_label_visible)
+        : structured.source_label_visible !== undefined
+          ? Boolean(structured.source_label_visible)
+          : item.source_label_visible !== undefined
+            ? Boolean(item.source_label_visible)
+            : Boolean(document.source_label_visible),
+      sourceLabel: record.source_label || structured.source_label || item.source_label || document.source_label || document.provider || document.title || "",
       approved: true,
       verificationStatus: "approved_ai_training_center",
       sourceTrainingItemId: item.id,
@@ -56914,6 +60441,129 @@ function aylaV189RelevantResources(db, student, types = []) {
     .sort((a, b) => b.relevance - a.relevance || String(a.system || "").localeCompare(String(b.system || "")) || String(a.topic || "").localeCompare(String(b.topic || "")));
 }
 
+function aylaV210StudentFeatureAllowed(db, student, feature) {
+  const userId = student?.ayla_user_id || student?.aylaUserId || student?.user_id || student?.userId;
+  const rawUser = userId ? aylaGetItem(db, "aylaUsers", userId) : null;
+  if (!rawUser) return false;
+  try {
+    return aylaDashboardEntitlement(db, aylaSanitizeUser(rawUser), student, feature).allowed === true;
+  } catch {
+    return false;
+  }
+}
+
+function aylaV210VideoAssignments(db, student) {
+  return aylaValues(db, "aylaResourceAssignments")
+    .filter((row) => String(row.studentId || row.student_id || "") === String(student.id))
+    .filter((row) => String(row.category || row.type || "").toLowerCase() === "video")
+    .filter((row) => !["cancelled", "canceled", "skipped", "superseded"].includes(String(row.status || "").toLowerCase()));
+}
+
+function aylaV210AssignmentForVideo(assignments, video, assignmentId = "") {
+  return assignments.filter((assignment) => {
+    if (assignmentId && String(assignment.id) !== String(assignmentId)) return false;
+    const ids = [
+      ...aylaCleanArray(assignment.resourceIds || assignment.resource_ids),
+      ...(Array.isArray(assignment.items) ? assignment.items.map((item) => item?.resourceId || item?.resource_id).filter(Boolean) : []),
+    ];
+    return ids.some((id) => aylaContentHubVideoMatchesId(video, id));
+  }).sort((left, right) => String(right.updatedAt || right.updated_at || right.createdAt || right.created_at || "")
+    .localeCompare(String(left.updatedAt || left.updated_at || left.createdAt || left.created_at || "")))[0] || null;
+}
+
+async function aylaV210RegistryVideoInputs(student, destinations) {
+  if (!contentRegistryStatus().configured) return { rows: [], warning: null };
+  const examTrack = normalizeAylaRegistryExamTrack(
+    student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam,
+  );
+  if (!examTrack) return { rows: [], warning: "unsupported_student_exam_track" };
+  try {
+    const rows = await listContentHubVideos({ examTrack, destinations, limit: 500, offset: 0 });
+    return { rows, warning: null };
+  } catch (error) {
+    console.warn("AylaMed Content Hub registry read unavailable:", error.message);
+    return { rows: [], warning: "content_registry_temporarily_unavailable" };
+  }
+}
+
+async function aylaV210EligibleVideos(db, student, { forRoadmap = false } = {}) {
+  const examTrackId = aylaCanonicalExamTrack(
+    student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam,
+  );
+  if (!examTrackId) return { videos: [], assignments: [], warning: "unsupported_student_exam_track" };
+  const assignments = aylaV210VideoAssignments(db, student);
+  const legacy = aylaV189RelevantResources(db, student, ["vimeo_video", "video_transcript"])
+    .map((row) => ({
+      ...row,
+      sourceType: "legacy",
+      deliveryDestinations: ["aylamed_content_hub", "aylamed_roadmap"],
+    }));
+  const registry = await aylaV210RegistryVideoInputs(
+    student,
+    forRoadmap ? ["aylamed_roadmap"] : ["aylamed_content_hub", "aylamed_roadmap"],
+  );
+  let videos = normalizeAylaContentHubVideos([...legacy, ...registry.rows], { examTrack: examTrackId });
+  if (!forRoadmap) {
+    videos = videos.filter((video) =>
+      video.sourceType !== "registry"
+        || video.deliveryDestinations.includes("aylamed_content_hub")
+        || Boolean(aylaV210AssignmentForVideo(assignments, video)));
+  }
+  return { videos, assignments, warning: registry.warning };
+}
+
+async function aylaV211EligibleReadings(db, student) {
+  const examTrack = student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam;
+  const stored = aylaV189RelevantResources(db, student, ["book", "reading", "revision_sheet"]);
+  let crmDb = null;
+  let warning = null;
+  if (stored.some((resource) => resource.sourceDocumentId || resource.source_document_id)) {
+    try {
+      crmDb = await readAylaCrmSnapshot();
+    } catch (error) {
+      console.warn("AylaMed Library CRM page read unavailable:", error.message);
+      warning = "approved_page_source_temporarily_unavailable";
+    }
+  }
+  const documentsById = new Map((Array.isArray(crmDb?.ai_training_documents) ? crmDb.ai_training_documents : [])
+    .map((document) => [String(document.id || ""), document]));
+  const itemsByDocumentId = new Map();
+  for (const item of Array.isArray(crmDb?.ai_training_items) ? crmDb.ai_training_items : []) {
+    const documentId = String(item.document_id || item.documentId || "");
+    if (!itemsByDocumentId.has(documentId)) itemsByDocumentId.set(documentId, []);
+    itemsByDocumentId.get(documentId).push(item);
+  }
+  const hydrated = stored.map((resource) => {
+    if (!resource.sourceDocumentId && !resource.source_document_id) return resource;
+    const documentId = String(resource.sourceDocumentId || resource.source_document_id || "");
+    return crmDb ? hydrateAylaLibraryResourceFromCrm({
+      documents: [documentsById.get(documentId)].filter(Boolean),
+      items: itemsByDocumentId.get(documentId) || [],
+      resource,
+    }) : null;
+  }).filter(Boolean);
+  return { resources: normalizeAylaLibraryResources(hydrated, { examTrack }), warning };
+}
+
+function aylaV211ReadingAssignments(db, student) {
+  return aylaValues(db, "aylaResourceAssignments")
+    .filter((row) => String(row.studentId || row.student_id || "") === String(student.id))
+    .filter((row) => String(row.category || row.type || "").toLowerCase() === "reading")
+    .filter((row) => !["cancelled", "canceled", "skipped", "superseded"].includes(String(row.status || "").toLowerCase()));
+}
+
+function aylaV211AssignmentForReading(assignments, resource, assignmentId = "") {
+  return assignments.filter((assignment) => {
+    if (assignmentId && String(assignment.id) !== String(assignmentId)) return false;
+    const ids = [
+      ...aylaCleanArray(assignment.resourceIds || assignment.resource_ids),
+      ...(Array.isArray(assignment.items) ? assignment.items.map((item) => item?.resourceId || item?.resource_id).filter(Boolean) : []),
+    ];
+    return ids.some((id) => aylaLibraryResourceMatchesId(resource, id));
+  }).sort((left, right) => String(right.updatedAt || right.updated_at || right.createdAt || right.created_at || "")
+    .localeCompare(String(left.updatedAt || left.updated_at || left.createdAt || left.created_at || "")))[0] || null;
+}
+
 function aylaV189ResolveAssessmentQuestions(db, resource = {}) {
   const embedded = Array.isArray(resource.questions) ? resource.questions : [];
   if (embedded.length) {
@@ -56977,6 +60627,13 @@ function aylaV189AssignmentSnapshot(db, resource = {}, options = {}) {
     vimeoUrl: resource.vimeoUrl || "",
     vimeoPrivacyHash: resource.vimeoPrivacyHash || "",
     vimeoEmbedUrl: resource.vimeoEmbedUrl || aylaV189VimeoEmbed(resource),
+    playlistKey: resource.playlistKey || resource.playlist_key || "",
+    playlistTitle: resource.playlistTitle || resource.playlist_title || resource.system || "",
+    durationSeconds: aylaNumber(resource.durationSeconds ?? resource.duration_seconds, 0),
+    sourceLabel: resource.sourceLabel || resource.source_label || null,
+    sourceType: resource.sourceType || resource.source_type || "legacy",
+    deliveryDestinations: aylaCleanArray(resource.deliveryDestinations || resource.delivery_destinations),
+    aliasResourceIds: aylaCleanArray(resource.aliasResourceIds || resource.alias_resource_ids),
     mappedVideoResourceId: resource.mappedVideoResourceId || "",
     mappedVideoTitle: resource.mappedVideoTitle || "",
     mappedVimeoId: resource.mappedVimeoId || "",
@@ -56985,6 +60642,11 @@ function aylaV189AssignmentSnapshot(db, resource = {}, options = {}) {
     mappingStatus: resource.mappingStatus || "",
     timestamp: resource.timestamp || "",
     exactReference: resource.exactReference || "",
+    readerReady: resource.readerReady === true,
+    readerPageCount: Math.max(0, aylaNumber(resource.readerPageCount, 0)),
+    readerFirstPageKey: resource.readerFirstPageKey || "",
+    readerLastPageKey: resource.readerLastPageKey || "",
+    sourceLabelVisible: resource.sourceLabelVisible === true,
     videoStartSeconds: aylaNumber(resource.videoStartSeconds, 0),
     videoEndSeconds: aylaNumber(resource.videoEndSeconds, 0),
     stem: resource.stem || "",
@@ -57083,6 +60745,90 @@ function aylaV189SanitizeAssignmentForStudent(db, assignment = {}) {
   const category = String(copy.category || "");
   copy.items = (Array.isArray(copy.items) ? copy.items : []).map((item) => {
     const next = { ...item };
+    if (category === "video") {
+      const verified = normalizeAylaContentHubVideos([next], { examTrack: next.examTrackId || next.examTrack })[0] || null;
+      delete next.vimeoUrl;
+      delete next.vimeo_url;
+      delete next.videoUrl;
+      delete next.video_url;
+      delete next.vimeoId;
+      delete next.vimeo_id;
+      delete next.vimeoPrivacyHash;
+      delete next.vimeo_privacy_hash;
+      delete next.mappedVimeoId;
+      delete next.mapped_vimeo_id;
+      delete next.mappedVimeoUrl;
+      delete next.mapped_vimeo_url;
+      delete next.providerId;
+      delete next.provider_id;
+      delete next.providerUri;
+      delete next.provider_uri;
+      delete next.sourceUrl;
+      delete next.source_url;
+      if (!verified) {
+        delete next.vimeoEmbedUrl;
+        delete next.vimeo_embed_url;
+        next.playbackAvailable = false;
+        return next;
+      }
+      next.vimeoEmbedUrl = verified.vimeoEmbedUrl;
+      next.playbackAvailable = true;
+      next.playlistKey = verified.playlistKey;
+      next.playlistTitle = verified.playlistTitle;
+      next.sourceLabel = verified.sourceLabel || null;
+      if (!verified.sourceLabel) delete next.provider;
+      return next;
+    }
+    if (category === "reading") {
+      delete next.sourceUrl;
+      delete next.source_url;
+      delete next.aliasResourceIds;
+      delete next.alias_resource_ids;
+      delete next.sourceType;
+      delete next.source_type;
+      const basePath = `/api/ayla/students/${encodeURIComponent(String(copy.studentId || ""))}/library/resources/${encodeURIComponent(String(next.resourceId || ""))}`;
+      const assignmentQuery = copy.id ? `?assignment_id=${encodeURIComponent(String(copy.id))}` : "";
+      next.readerPath = next.readerReady ? `${basePath}${assignmentQuery}` : null;
+      next.readerPagePath = next.readerReady && next.readerFirstPageKey
+        ? `${basePath}/pages/${encodeURIComponent(String(next.readerFirstPageKey).replace(":", "-"))}${assignmentQuery}`
+        : null;
+      if (!next.sourceLabelVisible) {
+        const hiddenSourceContext = { ...next };
+        const continueReading = /^\s*continue\s*:/i.test(String(copy.title || ""));
+        const safeReadingTitle = aylaLibraryStudentTitle(hiddenSourceContext);
+        const safePageRange = aylaLibraryStudentPageRange(hiddenSourceContext);
+        const safeDescription = sanitizeAylaHiddenSourceText(next.description, hiddenSourceContext, "", 2000);
+        const safeSystem = sanitizeAylaHiddenSourceText(next.system, hiddenSourceContext, "General");
+        const safeTopic = sanitizeAylaHiddenSourceText(next.topic, hiddenSourceContext, "General reading");
+        const safeSubtopics = aylaCleanArray(next.subtopics).map((item) => sanitizeAylaHiddenSourceText(item, hiddenSourceContext, "")).filter(Boolean);
+        const safeConcepts = aylaCleanArray(next.concepts).map((item) => sanitizeAylaHiddenSourceText(item, hiddenSourceContext, "")).filter(Boolean);
+        next.sourceLabel = null;
+        next.bookTitle = "AylaMed Reading";
+        next.title = safeReadingTitle;
+        next.description = safeDescription;
+        next.system = safeSystem;
+        next.topic = safeTopic;
+        next.subtopics = safeSubtopics;
+        next.concepts = safeConcepts;
+        next.pageRange = safePageRange;
+        next.edition = "";
+        next.resourceNumber = "";
+        next.questionNumber = "";
+        next.exactReference = "";
+        next.mappedBookResourceId = "";
+        next.mappedBookTitle = "";
+        next.mappedBookEdition = "";
+        next.mappedBookPages = "";
+        delete next.provider;
+        copy.system = sanitizeAylaHiddenSourceText(copy.system, hiddenSourceContext, safeSystem);
+        copy.topic = sanitizeAylaHiddenSourceText(copy.topic, hiddenSourceContext, safeTopic);
+        copy.rationale = sanitizeAylaHiddenSourceText(copy.rationale, hiddenSourceContext, "Open the verified exact pages in the page-turn reader.", 1000);
+        copy.title = copy.items.length === 1
+          ? `${continueReading ? "Continue" : "Read"}: ${safeReadingTitle}${safePageRange ? ` — ${safePageRange}` : ""}`
+          : "Assigned page-turn readings";
+      }
+      return next;
+    }
     if (category === "internal_mcqs") {
       const attempt = aylaV189LatestQuestionAttempt(db, copy.studentId, copy.id, item.resourceId);
       const hidden = aylaV189HideQuestionAnswer(next);
@@ -57117,9 +60863,51 @@ function aylaV189SanitizeAssignmentForStudent(db, assignment = {}) {
   return copy;
 }
 
+function aylaV211SanitizePlanReadingSources(plan, assignments = []) {
+  if (!plan) return null;
+  const safe = JSON.parse(JSON.stringify(plan));
+  const hiddenContexts = assignments.flatMap((assignment) => Array.isArray(assignment.items) ? assignment.items : [])
+    .filter((item) => item && item.sourceLabelVisible === false);
+  for (const context of hiddenContexts) {
+    const cleanField = (target, key, fallback = "") => {
+      if (target && typeof target[key] === "string") target[key] = sanitizeAylaHiddenSourceText(target[key], context, fallback, 1200);
+    };
+    cleanField(safe, "focusSystem", "General");
+    cleanField(safe, "focusTopic", "General reading");
+    cleanField(safe, "systemFocus", "General");
+    cleanField(safe, "topicFocus", "General reading");
+    cleanField(safe, "message", "Today's verified page-turn reading is ready.");
+    cleanField(safe.tutorBrain, "rationale", "Verified exact-page reading selected.");
+    cleanField(safe.tutorBrain?.selectedFocus, "system", "General");
+    cleanField(safe.tutorBrain?.selectedFocus, "topic", "General reading");
+    if (Array.isArray(safe.tutorBrain?.selectedFocus?.reasons)) {
+      safe.tutorBrain.selectedFocus.reasons = safe.tutorBrain.selectedFocus.reasons
+        .map((reason) => sanitizeAylaHiddenSourceText(reason, context, "", 500))
+        .filter(Boolean);
+    }
+    cleanField(safe.assessmentTutor, "label", "Adaptive assessment");
+    cleanField(safe.assessmentTutor, "reason", "Adaptive readiness check.");
+    cleanField(safe.assessmentTutor, "system", "General");
+    cleanField(safe.assessmentTutor, "topic", "General reading");
+  }
+  return safe;
+}
+
+function aylaV211SanitizeStoredPlan(db, plan, assignments = []) {
+  if (!plan) return null;
+  const byId = new Map();
+  for (const assignment of [
+    ...aylaValues(db, "aylaResourceAssignments").filter((row) => String(row.dailyPlanId || "") === String(plan.id || "")),
+    ...assignments,
+  ]) {
+    if (assignment?.id) byId.set(String(assignment.id), assignment);
+  }
+  return aylaV211SanitizePlanReadingSources(plan, [...byId.values()]);
+}
+
 function aylaV189SanitizePlanBundle(db, plan, assignments = []) {
   return {
-    plan: plan ? JSON.parse(JSON.stringify(plan)) : null,
+    plan: aylaV211SanitizeStoredPlan(db, plan, assignments),
     assignments: assignments.map((row) => aylaV189SanitizeAssignmentForStudent(db, row)),
   };
 }
@@ -57170,7 +60958,7 @@ function aylaV189OverdueAssignments(db, studentId, date) {
   return aylaValues(db, "aylaResourceAssignments")
     .filter((row) => String(row.studentId) === String(studentId))
     .filter((row) => String(row.scheduledDate || "") < String(date || ""))
-    .filter((row) => !["completed", "skipped", "cancelled"].includes(String(row.status || "pending").toLowerCase()))
+    .filter((row) => !["completed", "skipped", "cancelled", "superseded", "moved"].includes(String(row.status || "pending").toLowerCase()))
     .sort((a, b) => String(a.scheduledDate || "").localeCompare(String(b.scheduledDate || "")));
 }
 
@@ -57779,8 +61567,27 @@ async function aylaV189TutorProposal(db, student, date, focusCandidates = [], ca
     preferredResourceIds: focusCandidates[0]?.resourceIds || [],
     rationale: focusCandidates[0]?.reasons?.join("; ") || "Highest verified weak-area and due-work priority.",
     workloadAdjustment: "standard",
+    questionVolumeAdjustment: "standard",
     usedAi: false,
   };
+  const tutorDirective = options.tutorDirective && typeof options.tutorDirective === "object" ? options.tutorDirective : null;
+  if (tutorDirective) {
+    const workloadAdjustment = ["reduce", "standard", "intensive"].includes(String(tutorDirective.workloadAdjustment))
+      ? String(tutorDirective.workloadAdjustment)
+      : "standard";
+    const questionVolumeAdjustment = ["reduce", "standard", "intensive"].includes(String(tutorDirective.questionVolumeAdjustment))
+      ? String(tutorDirective.questionVolumeAdjustment)
+      : "standard";
+    return {
+      ...fallback,
+      mode: "personal_tutor_applied_single_roadmap",
+      rationale: `A version-checked Personal Tutor recommendation rebalanced the existing adaptive roadmap (${workloadAdjustment} workload; ${questionVolumeAdjustment} question volume).`,
+      workloadAdjustment,
+      questionVolumeAdjustment,
+      personalTutorEngine: AYLA_PERSONAL_TUTOR_ENGINE,
+      usedAi: false,
+    };
+  }
   const settings = aylaMergeSettings(db.aylaSettings || {});
   if (options.skipAi || settings.adaptive?.ai_tutor_enabled === false || !isAIConfigured() || !focusCandidates.length) return fallback;
   const user = aylaGetItem(db, "aylaUsers", student.ayla_user_id || student.user_id);
@@ -57802,7 +61609,7 @@ async function aylaV189TutorProposal(db, student, date, focusCandidates = [], ca
       model,
       jsonMode: true,
       maxOutputTokens: 700,
-      systemPrompt: "You are the AylaMed planning brain. Select only from the supplied verified focus IDs and resource IDs. Never invent pages, videos, question IDs, resources, diagnoses, or medical facts. Return JSON with focusCandidateId, preferredResourceIds, rationale, and workloadAdjustment (reduce|standard|intensive).",
+      systemPrompt: "You are the AylaMed planning brain. Select only from the supplied verified focus IDs and resource IDs. Never invent pages, videos, question IDs, resources, diagnoses, or medical facts. Return JSON with focusCandidateId, preferredResourceIds, rationale, workloadAdjustment (reduce|standard|intensive), and questionVolumeAdjustment (reduce|standard|intensive).",
       userPrompt: JSON.stringify({
         date,
         student: {
@@ -57828,6 +61635,7 @@ async function aylaV189TutorProposal(db, student, date, focusCandidates = [], ca
       preferredResourceIds,
       rationale: aylaV189CleanText(parsed.rationale || fallback.rationale).slice(0, 700),
       workloadAdjustment: ["reduce", "standard", "intensive"].includes(String(parsed.workloadAdjustment)) ? String(parsed.workloadAdjustment) : "standard",
+      questionVolumeAdjustment: ["reduce", "standard", "intensive"].includes(String(parsed.questionVolumeAdjustment)) ? String(parsed.questionVolumeAdjustment) : "standard",
       usedAi: true,
       model,
     };
@@ -57893,9 +61701,27 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     .filter((row) => !aylaValues(db, "aylaResourceAssignments").some((candidate) => String(candidate.scheduledDate) === String(date) && !["completed", "cancelled", "superseded"].includes(String(candidate.status || "").toLowerCase()) && aylaCleanArray(candidate.linkedAssignmentIds).map(String).includes(String(row.id))))
     .slice(0, 12);
   const dueRevisions = aylaV189DueRevisionQueue(db, student.id, date).slice(0, 20);
-  const allRelevant = aylaV189RelevantResources(db, student, ["book", "reading", "revision_sheet", "vimeo_video", "video_transcript", "external_question", "external_qid_mapping", "internal_mcq", "flashcard", "assessment", "assessment_blueprint"]);
+  const contentHubEnabled = aylaV210StudentFeatureAllowed(db, student, "content_hub");
+  const libraryEnabled = aylaV210StudentFeatureAllowed(db, student, "library");
+  const storedRelevant = aylaV189RelevantResources(db, student, ["book", "reading", "revision_sheet", "vimeo_video", "video_transcript", "external_question", "external_qid_mapping", "internal_mcq", "flashcard", "assessment", "assessment_blueprint"]);
+  const contentHub = contentHubEnabled
+    ? await aylaV210EligibleVideos(db, student, { forRoadmap: true })
+    : { videos: [], assignments: [], warning: null };
+  const library = libraryEnabled
+    ? await aylaV211EligibleReadings(db, student)
+    : { resources: [], warning: null };
+  const allRelevant = [
+    ...storedRelevant.filter((row) => !["book", "reading", "revision_sheet", "vimeo_video", "video_transcript"].includes(aylaV189ResourceType(row.type))),
+    ...library.resources,
+    ...contentHub.videos,
+  ];
   const focusCandidates = aylaV189FocusCandidates(db, student, allRelevant, dueRevisions, overdue);
   const tutorProposal = await aylaV189TutorProposal(db, student, date, focusCandidates, allRelevant, options);
+  const questionVolumeFactor = tutorProposal.questionVolumeAdjustment === "reduce"
+    ? 0.65
+    : tutorProposal.questionVolumeAdjustment === "intensive"
+      ? 1.2
+      : 1;
   const selectedFocus = focusCandidates.find((row) => String(row.id) === String(tutorProposal.focusCandidateId)) || focusCandidates[0] || { system: aylaCleanArray(student.weakAreas)[0] || "General", topic: "Core review", id: null, reasons: [] };
   const focusSystem = selectedFocus.system || "General";
   const focusTopic = selectedFocus.topic || "";
@@ -57922,10 +61748,17 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     missingResourceTypes: [],
     focusSystem,
     focusTopic,
+    contentHubEnabled,
+    contentHubRegistryWarning: contentHub.warning,
+    libraryEnabled,
+    libraryPageSourceWarning: library.warning,
     notebookMemory: aylaV190NotebookMemory(db, student),
     studyDay,
     tutorBrain: {
       ...tutorProposal,
+      personalTutorEngine: AYLA_PERSONAL_TUTOR_ENGINE,
+      authoritativeRoadmapPlanId: null,
+      createsSecondPlan: false,
       selectedFocus: { id: selectedFocus.id, system: focusSystem, topic: focusTopic, reasons: selectedFocus.reasons || [] },
       verifiedResourceGuard: true,
       noInventedReferences: true,
@@ -57941,9 +61774,13 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   // to the assignment so successful completion closes the exact revision record.
   for (const revision of dueRevisions) {
     if (plan.plannedMinutes >= capacityMinutes) break;
-    const resource = aylaV189ResolveRevisionResource(db, revision);
+    let resource = aylaV189ResolveRevisionResource(db, revision);
     if (!resource) continue;
     const category = aylaV189CategoryForResource(resource, revision);
+    if (category === "reading") {
+      resource = library.resources.find((row) => aylaLibraryResourceMatchesId(row, resource.id)) || null;
+      if (!resource) continue;
+    }
     const title = revision.sourceType === "flashcard"
       ? `Due flashcard review: ${resource.title || revision.topic || "Recall card"}`
       : revision.sourceType === "question"
@@ -57973,12 +61810,19 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   // the exact original assignment instead of leaving a repeated combined backlog card.
   for (const old of overdue) {
     if (plan.plannedMinutes >= capacityMinutes * 1.1) break;
-    const items = Array.isArray(old.items) ? JSON.parse(JSON.stringify(old.items)) : [];
+    let items = Array.isArray(old.items) ? JSON.parse(JSON.stringify(old.items)) : [];
+    let resourceIds = aylaCleanArray(old.resourceIds).map(String);
+    if (String(old.category || "").toLowerCase() === "reading") {
+      const exactResources = library.resources.filter((resource) => resourceIds.some((id) => aylaLibraryResourceMatchesId(resource, id)));
+      if (!exactResources.length || exactResources.length !== resourceIds.length) continue;
+      items = exactResources.map((resource) => aylaV189AssignmentSnapshot(db, resource));
+      resourceIds = items.map((item) => String(item.resourceId));
+    }
     const carry = {
       id: aylaId("AYLA-ASN"), studentId: student.id, userId: student.ayla_user_id || student.user_id || null,
       dailyPlanId: plan.id, scheduledDate: date, category: old.category || "reading", type: old.type || old.category || "reading",
       title: `Overdue: ${old.title || "Priority assignment"}`, system: old.system || focusSystem, topic: old.topic || focusTopic,
-      resourceIds: aylaCleanArray(old.resourceIds).map(String), items,
+      resourceIds, items,
       linkedAssignmentIds: [old.id], estimatedMinutes: Math.max(5, aylaNumber(old.estimatedMinutes, 15)), status: "pending", priority: "Critical",
       rationale: `Carried from ${old.scheduledDate || "an earlier day"}. Completing this task closes the original overdue record.`,
       createdAt: aylaNow(), updatedAt: aylaNow(),
@@ -57988,7 +61832,14 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     carry.resourceIds.forEach((id) => reservedIds.add(String(id)));
   }
 
-  const assessmentDecision = aylaV189AssessmentDecision(db, student, date, options);
+  const rawAssessmentDecision = aylaV189AssessmentDecision(db, student, date, options);
+  const assessmentDecision = {
+    ...rawAssessmentDecision,
+    questionCount: rawAssessmentDecision.questionCount > 0
+      ? Math.max(5, Math.min(80, Math.round(rawAssessmentDecision.questionCount * questionVolumeFactor)))
+      : 0,
+  };
+  plan.tutorBrain.authoritativeRoadmapPlanId = plan.id;
   plan.assessmentTutor = assessmentDecision;
 
   // Protected rest days contain only due revision and critical backlog. No normal new content.
@@ -58017,14 +61868,35 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   const effectiveCapacity = Math.max(60, Math.min(960, Math.round(capacityMinutes * workloadFactor)));
 
   if (mix.reading !== false) {
-    const pick = select(reading, 1);
-    if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "reading", pick, `${pick[0].bookTitle || pick[0].title}: ${pick[0].pageRange ? `pages ${pick[0].pageRange}` : pick[0].topic}`, { system: focusSystem, topic: pick[0].topic || focusTopic, rationale: `Exact verified reading for today’s focus: ${focusSystem}${focusTopic ? ` — ${focusTopic}` : ""}.` });
-    else plan.missingResourceTypes.push("reading_for_focus");
+    const selection = selectAylaRoadmapReading({
+      resources: reading,
+      examTrack: student.examTrackId || student.exam_track_id || student.exam,
+      focusSystem,
+      focusTopic,
+      progressRows: aylaValues(db, "aylaReadingProgress").filter((row) => String(row.studentId || row.student_id || "") === String(student.id)),
+      reservedResourceIds: [...reservedIds],
+      preferredResourceIds: aylaCleanArray(tutorProposal.preferredResourceIds),
+    });
+    const pick = selection.resource ? [selection.resource] : [];
+    if (pick.length) {
+      const readingLabel = pick[0].sourceLabelVisible ? pick[0].bookTitle || pick[0].title : pick[0].title || pick[0].topic || "Approved reading";
+      aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "reading", pick, `${selection.resumed ? "Continue" : "Read"}: ${readingLabel} — ${pick[0].pageRange}`, { system: focusSystem, topic: pick[0].topic || focusTopic, rationale: `${selection.resumed ? "Resume" : "Open"} the ${selection.match_level.replace(/_/g, " ")} verified page-turn reading for today’s focus. The assignment opens the exact approved pages and completes only after every page is read.` });
+    }
+    else plan.missingResourceTypes.push(libraryEnabled ? "exact_page_reading_for_focus" : "library_feature_not_enabled");
   }
 
-  if (mix.video !== false) {
-    const pick = select(videos, 1);
-    if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "video", pick, `Watch: ${pick[0].title}`, { system: focusSystem, topic: pick[0].topic || focusTopic, rationale: `Mapped Vimeo teaching for the same daily focus; watch position and completion are saved.` });
+  if (mix.video !== false && contentHubEnabled) {
+    const selection = selectAylaRoadmapVideo({
+      videos,
+      examTrack: student.examTrackId || student.exam_track_id || student.exam,
+      focusSystem,
+      focusTopic,
+      progressRows: aylaValues(db, "aylaVideoProgress").filter((row) => String(row.studentId || row.student_id || "") === String(student.id)),
+      reservedResourceIds: [...reservedIds],
+      preferredResourceIds: aylaCleanArray(tutorProposal.preferredResourceIds),
+    });
+    const pick = selection.video ? [selection.video] : [];
+    if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "video", pick, `Watch: ${pick[0].title}`, { system: focusSystem, topic: pick[0].topic || focusTopic, rationale: `${selection.resumed ? "Resume" : "Watch"} the ${selection.match_level.replace(/_/g, " ")} verified embedded video for today’s focus; watch position and completion are saved.` });
     else plan.missingResourceTypes.push("video_for_focus");
   }
 
@@ -58046,13 +61918,13 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   }
 
   if (mix.external_questions !== false && (questionMode === "external" || questionMode === "hybrid")) {
-    const pick = select(external, Math.max(1, Math.min(assessmentScheduled ? 8 : 20, Math.round(effectiveCapacity / (assessmentScheduled ? 55 : 32)))));
+    const pick = select(external, Math.max(1, Math.min(assessmentScheduled ? 8 : 24, Math.round((effectiveCapacity / (assessmentScheduled ? 55 : 32)) * questionVolumeFactor))));
     if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "external_questions", pick, `${pick[0].provider || "External"} assigned IDs: ${pick.map((row) => row.questionNumber || row.resourceNumber).filter(Boolean).join(", ")}`, { estimatedMinutes: pick.length * 2, system: focusSystem, topic: focusTopic, rationale: `Verified external question numbers mapped to ${focusSystem}${focusTopic ? ` — ${focusTopic}` : ""}.` });
     else plan.missingResourceTypes.push("external_questions_for_focus");
   }
 
   if (!assessmentScheduled && mix.internal_mcqs !== false && (questionMode === "internal" || questionMode === "hybrid")) {
-    const pick = select(internal, Math.max(1, Math.min(10, Math.round(effectiveCapacity / 45))));
+    const pick = select(internal, Math.max(1, Math.min(12, Math.round((effectiveCapacity / 45) * questionVolumeFactor))));
     if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "internal_mcqs", pick, `AylaMed MCQs: ${pick.map((row) => row.questionNumber || row.resourceNumber).filter(Boolean).join(", ")}`, { estimatedMinutes: pick.length * 2, system: focusSystem, topic: focusTopic, rationale: `Original verified MCQs for the same daily focus. Correctness is scored only on the server.` });
     else plan.missingResourceTypes.push("internal_mcqs_for_focus");
   }
@@ -58127,6 +61999,193 @@ async function aylaV189TomorrowPreview(db, student, date) {
   return { date: tomorrow, ...aylaV189SanitizePlanBundle(previewDb, built.plan, built.assignments) };
 }
 
+function aylaV213TutorStudentRows(db, collection, studentId, mapper) {
+  return aylaValues(db, collection)
+    .filter((row) => String(row.studentId || row.student_id || "") === String(studentId))
+    .sort((left, right) => String(right.createdAt || right.updatedAt || "").localeCompare(String(left.createdAt || left.updatedAt || "")))
+    .slice(0, 500)
+    .map(mapper);
+}
+
+async function aylaV213TutorNotebooks(db, user, student) {
+  if (!aylaV210StudentFeatureAllowed(db, student, "dynamic_notebook")) return [];
+  const rows = aylaValues(db, "aylaNotebooks")
+    .filter((row) => String(row.studentId || "") === String(student.id) && !row.archivedAt && !row.deletedAt)
+    .sort((left, right) => String(right.updatedAt || "").localeCompare(String(left.updatedAt || "")))
+    .slice(0, 50);
+  const notebooks = [];
+  for (const row of rows) {
+    const safe = await aylaV212RenderNotebook(db, user, student, row);
+    notebooks.push({
+      id: safe.id,
+      title: safe.title,
+      system: safe.system,
+      topic: safe.topic,
+      updatedAt: safe.updatedAt,
+      blocks: (Array.isArray(safe.blocks) ? safe.blocks : []).filter((block) => block.contentOrigin !== "approved_source").map((block) => ({
+        id: block.id,
+        type: block.type,
+        text: block.text,
+        contentOrigin: block.contentOrigin,
+        createdAt: block.createdAt,
+        updatedAt: block.updatedAt,
+      })),
+    });
+  }
+  return notebooks;
+}
+
+async function aylaV213PersonalTutorSnapshot(db, user, student, date = aylaDateOnly(), options = {}) {
+  const cleanDate = String(date || aylaDateOnly()).slice(0, 10);
+  const built = await aylaV189BuildDailyPlan(db, student, cleanDate, { force: false, ...(options.buildOptions || {}) });
+  const safeBundle = aylaV189SanitizePlanBundle(db, built.plan, built.assignments);
+  const recentPlans = aylaValues(db, "aylaDailyPlans")
+    .filter((row) => String(row.studentId || "") === String(student.id))
+    .filter((row) => !["cancelled", "superseded"].includes(String(row.status || "").toLowerCase()))
+    .sort((left, right) => String(right.date || "").localeCompare(String(left.date || "")))
+    .slice(0, 30)
+    .map((row) => ({
+      id: row.id,
+      date: row.date,
+      status: row.status,
+      completionPercent: row.completionPercent,
+      plannedMinutes: row.plannedMinutes,
+      capacityMinutes: row.capacityMinutes,
+    }));
+  const questionAttempts = aylaV213TutorStudentRows(db, "aylaQuestionAttempts", student.id, (row) => ({
+    outcome: row.outcome || row.result,
+    system: row.system,
+    topic: row.topic,
+    sourceType: row.sourceType || row.source_type,
+    serverVerified: row.serverVerified === true,
+    createdAt: row.createdAt,
+  }));
+  const assessmentAttempts = aylaV213TutorStudentRows(db, "aylaAssessmentAttempts", student.id, (row) => ({
+    scorePercent: row.scorePercent ?? row.score_percent ?? row.score,
+    system: row.system,
+    topic: row.topic,
+    assessmentType: row.assessmentType || row.assessment_type,
+    serverVerified: row.serverVerified === true,
+    createdAt: row.createdAt,
+  }));
+  const flashcardReviews = aylaV213TutorStudentRows(db, "aylaFlashcardReviews", student.id, (row) => ({
+    rating: row.rating,
+    system: row.system,
+    topic: row.topic,
+    createdAt: row.createdAt,
+  }));
+  const conceptMastery = aylaV213TutorStudentRows(db, "aylaConceptMastery", student.id, (row) => ({
+    masteryPercent: row.masteryPercent ?? row.mastery_percent,
+    system: row.system,
+    topic: row.topic,
+    updatedAt: row.updatedAt,
+  }));
+  const revisionItems = aylaV213TutorStudentRows(db, "aylaRevisionQueue", student.id, (row) => ({
+    id: row.id,
+    status: row.status,
+    dueDate: row.dueDate,
+    system: row.system,
+    topic: row.topic,
+  }));
+  const notebooks = await aylaV213TutorNotebooks(db, user, student);
+  let lmsProgress = { linked: false, courses: [], weakSignals: [], read_only: true, lms_writes: false };
+  try {
+    const liveDb = await readLiveDb();
+    lmsProgress = aylaV214LmsContext(db, liveDb, user, student);
+    for (const signal of lmsProgress.weakSignals || []) {
+      conceptMastery.push({
+        masteryPercent: Math.max(0, 100 - Number(signal.weaknessScore || 0)),
+        system: signal.system,
+        topic: signal.topic,
+        updatedAt: null,
+        source: signal.source,
+      });
+    }
+  } catch (error) {
+    console.warn("Personal Tutor continuing without optional read-only LMS progress:", error.message);
+  }
+  let successStoryStrategies = [];
+  try {
+    successStoryStrategies = await aylaSuccessStoryStrategiesForStudent(student, safeBundle.assignments, 3);
+  } catch (error) {
+    console.warn("Personal Tutor continuing without optional read-only success-story strategies:", error.message);
+  }
+  const decision = buildAylaPersonalTutorDecision({
+    date: cleanDate,
+    student,
+    plan: safeBundle.plan,
+    assignments: safeBundle.assignments,
+    recentPlans,
+    warning: aylaV189BacklogWarning(db, student, cleanDate),
+    systemProgress: aylaV189SystemProgress(db, student),
+    questionAttempts,
+    assessmentAttempts,
+    flashcardReviews,
+    conceptMastery,
+    revisionItems,
+    notebooks,
+    successStoryStrategies,
+    surfaceProgress: {
+      reading: aylaValues(db, "aylaReadingProgress").filter((row) => String(row.studentId || "") === String(student.id)).length,
+      video: aylaValues(db, "aylaVideoProgress").filter((row) => String(row.studentId || "") === String(student.id)).length,
+      flashcards: aylaValues(db, "aylaFlashcardReviews").filter((row) => String(row.studentId || "") === String(student.id)).length,
+      revision: aylaValues(db, "aylaRevisionQueue").filter((row) => String(row.studentId || "") === String(student.id)).length,
+      notebooks: notebooks.length,
+      linkedLmsCourses: lmsProgress.courses?.length || 0,
+    },
+  });
+  return {
+    date: cleanDate,
+    decision,
+    plan: safeBundle.plan,
+    assignments: safeBundle.assignments,
+    stablePlanReused: built.reused,
+    progressIntegration: {
+      linkedLms: Boolean(lmsProgress.linked),
+      linkedCourseCount: lmsProgress.courses?.length || 0,
+      weakEvidenceFedToTutor: lmsProgress.weakSignals?.length || 0,
+      approvedSuccessStoryStrategiesFedToTutor: successStoryStrategies.length,
+      lmsReadOnly: true,
+      lmsWrites: false,
+      crmReadOnly: true,
+      crmWrites: false,
+      successStoryOutcomesIncluded: false,
+    },
+  };
+}
+
+function aylaV213AtomicTutorContext(db, initial) {
+  aylaEnsureSeedData(db);
+  const rawUser = aylaGetItem(db, "aylaUsers", initial.user.id);
+  const student = aylaGetItem(db, "aylaStudents", initial.student.id);
+  if (!rawUser || ["disabled", "deleted"].includes(String(rawUser.status || "").toLowerCase())) {
+    const error = new Error("AylaMed user is no longer active");
+    error.statusCode = 401;
+    throw error;
+  }
+  if (!student || !aylaV189StudentOwned(student, rawUser)) {
+    const error = new Error("AylaMed student profile not found");
+    error.statusCode = 404;
+    throw error;
+  }
+  const user = aylaSanitizeUser(rawUser);
+  aylaDashboardEntitlement(db, user, student, "personal_tutor");
+  aylaDashboardEntitlement(db, user, student, "roadmap");
+  return { rawUser, user, student };
+}
+
+async function aylaV213AtomicTutorSnapshot(initial, date) {
+  return mutateAylaDb(async (db) => {
+    const { user, student } = aylaV213AtomicTutorContext(db, initial);
+    const snapshot = await aylaV213PersonalTutorSnapshot(db, user, student, date);
+    return {
+      ...snapshot,
+      systemProgress: aylaV189SystemProgress(db, student),
+      warning: aylaV189BacklogWarning(db, student, date),
+    };
+  });
+}
+
 function aylaV189RecordActivity(db, studentId, type, payload = {}) {
   const activity = {
     id: aylaId("AYLA-ACT"),
@@ -58143,40 +62202,462 @@ function aylaV189TargetDate(student = {}) {
   return aylaTargetDateInfo(student).targetDate || "";
 }
 
-function aylaV189MatchScore(a = {}, b = {}) {
-  if (!a?.id || !b?.id || String(a.id) === String(b.id)) return { score: 0, reasons: [] };
-  let score = 0;
-  const reasons = [];
-  if (a.exam && b.exam && String(a.exam) === String(b.exam)) { score += 20; reasons.push(`Same ${a.exam} track`); }
-  const aDate = aylaV189TargetDate(a);
-  const bDate = aylaV189TargetDate(b);
-  if (aDate && bDate) {
-    const diff = Math.abs(new Date(`${aDate}T12:00:00Z`).getTime() - new Date(`${bDate}T12:00:00Z`).getTime()) / 86400000;
-    if (diff <= 14) { score += 25; reasons.push("Very near exam dates"); }
-    else if (diff <= 30) { score += 18; reasons.push("Near exam dates"); }
-    else if (aDate.slice(0, 7) === bDate.slice(0, 7)) { score += 12; reasons.push("Same target month"); }
-  }
-  const aAvail = aylaCleanArray(a.availability || a.preferredStudyTimes).map((x) => x.toLowerCase());
-  const bAvail = aylaCleanArray(b.availability || b.preferredStudyTimes).map((x) => x.toLowerCase());
-  if (aAvail.some((slot) => bAvail.includes(slot))) { score += 12; reasons.push(`Both available ${aAvail.find((slot) => bAvail.includes(slot))}`); }
-  else if (a.timezone && b.timezone && a.timezone === b.timezone) { score += 8; reasons.push("Same timezone"); }
-  const sharedWeak = aylaCleanArray(a.weakAreas).filter((area) => aylaCleanArray(b.weakAreas).map((x) => x.toLowerCase()).includes(String(area).toLowerCase()));
-  if (sharedWeak.length) { score += Math.min(20, sharedWeak.length * 7); reasons.push(`Shared weak areas: ${sharedWeak.slice(0, 3).join(" and ")}`); }
-  const qA = aylaNumber(a.qbankCompleted, 0);
-  const qB = aylaNumber(b.qbankCompleted, 0);
-  if (qA || qB) {
-    const diff = Math.abs(qA - qB);
-    if (diff <= 10) { score += 10; reasons.push("Similar QBank completion"); }
-    else if (diff <= 20) { score += 6; reasons.push("Comparable QBank progress"); }
-  }
-  if (Math.abs(aylaNumber(a.dailyHours, 0) - aylaNumber(b.dailyHours, 0)) <= 1) { score += 8; reasons.push("Similar daily study capacity"); }
-  if (a.language && b.language && String(a.language).toLowerCase() === String(b.language).toLowerCase()) { score += 5; reasons.push(`Same preferred language: ${a.language}`); }
-  return { score: Math.max(0, Math.min(100, score)), reasons };
+function aylaV214RawUserForStudent(db, student = {}) {
+  const userId = student.ayla_user_id || student.aylaUserId || student.user_id || student.userId || "";
+  return userId ? aylaGetItem(db, "aylaUsers", userId) : null;
 }
 
-function aylaV189PartnerPublic(db, student = {}, viewer = null) {
+function aylaV214AtomicStudentContext(db = {}, initial = {}, feature = null) {
+  aylaEnsureSeedData(db);
+  const rawUser = aylaGetItem(db, "aylaUsers", initial.user?.id);
+  const student = aylaGetItem(db, "aylaStudents", initial.student?.id);
+  if (!rawUser || ["disabled", "deleted", "blocked"].includes(String(rawUser.status || "active").toLowerCase())) {
+    throw Object.assign(new Error("AylaMed user is no longer active"), { statusCode: 401 });
+  }
+  const user = aylaSanitizeUser(rawUser);
+  if (!student || !aylaV189StudentOwned(student, user)) {
+    throw Object.assign(new Error("AylaMed student profile not found"), { statusCode: 404 });
+  }
+  aylaDashboardEntitlement(db, user, student, feature);
+  return { rawUser, user, student };
+}
+
+function aylaV214LmsCourseTrack(liveDb = {}, enrollment = {}) {
+  const course = liveDb.courses?.[String(enrollment.course_id || enrollment.courseId || "")] || {};
+  return normalizeCourseExamTrack([
+    course.exam_track, course.examTrack, course.exam_type, course.exam, course.program_track, course.slug, course.title, course.name,
+    enrollment.exam_track, enrollment.examTrack, enrollment.exam_type, enrollment.exam,
+  ]);
+}
+
+function aylaV214LmsEnrollmentActive(liveDb = {}, enrollment = {}) {
+  if (!enrollment?.id || enrollment.access_granted === false) return false;
+  if (enrollment.is_demo === true) return isDemoEnrollmentActive(enrollment, { ...DEFAULT_DEMO_SETTINGS, ...(liveDb.demoSettings || {}) });
+  return isPaidEnrollmentActive(enrollment, enrollment.plan_id ? liveDb.plans?.[String(enrollment.plan_id)] || null : null);
+}
+
+function aylaV214SafeLmsLeaderboardEntry(entry = {}) {
+  return {
+    rank: Math.max(1, Number(entry.rank || 1)),
+    user_name: String(entry.user_name || entry.student_name || "Student").slice(0, 160),
+    total_points: Math.max(0, Number(entry.total_points || 0)),
+    attendance_points: Math.max(0, Number(entry.attendance_points || 0)),
+    task_points: Math.max(0, Number(entry.task_points || 0)),
+    assessment_points: Math.max(0, Number(entry.assessment_points || entry.quiz_points || 0)),
+    updated_at: entry.updated_at || null,
+  };
+}
+
+function aylaV214LmsWeakSignals(course = {}) {
+  const signals = [];
+  for (const row of course.weakAreaProfile?.systems || []) {
+    const mastery = Number(row.current_mastery);
+    const evidenceCount = Math.max(0, Number(row.questions_attempted || 0));
+    if (!Number.isFinite(mastery) || mastery >= 70 || evidenceCount < 1) continue;
+    signals.push({
+      topic: row.system,
+      system: row.system,
+      source: `lms:${course.course_id}`,
+      evidenceType: "lms_system_mastery",
+      evidenceCount,
+      weaknessScore: 100 - mastery,
+      verified: true,
+    });
+    for (const topic of aylaCleanArray(row.weak_topics)) {
+      signals.push({
+        topic,
+        system: row.system,
+        source: `lms:${course.course_id}`,
+        evidenceType: "lms_weak_topic",
+        evidenceCount: 1,
+        weaknessScore: 100 - mastery,
+        verified: true,
+      });
+    }
+  }
+  return signals;
+}
+
+function aylaV214LmsContext(aylaDb = {}, liveDb = {}, user = {}, student = {}) {
+  const identity = resolveStrictLmsIdentity({
+    aylaUser: aylaV214RawUserForStudent(aylaDb, student) || user,
+    student,
+    lmsUsers: Object.values(liveDb.users || {}),
+  });
+  const base = {
+    linked: false,
+    identity: {
+      linked: identity.linked,
+      method: identity.method,
+      reason: identity.reason,
+      lms_user_id: identity.lmsUserId,
+    },
+    exam_track: normalizeCourseExamTrack(student.examTrackId || student.exam_track_id || student.exam),
+    courses: [],
+    activityDates: [],
+    weakSignals: [],
+    partnerProfile: null,
+    read_only: true,
+    lms_writes: false,
+  };
+  if (!identity.linked || !identity.lmsUserId || base.exam_track === "unknown") return base;
+
+  const enrollmentByCourse = new Map();
+  for (const enrollment of Object.values(liveDb.enrollments || {})) {
+    if (String(enrollment.user_id || enrollment.userId || "") !== String(identity.lmsUserId)) continue;
+    if (!aylaV214LmsEnrollmentActive(liveDb, enrollment)) continue;
+    if (aylaV214LmsCourseTrack(liveDb, enrollment) !== base.exam_track) continue;
+    const courseId = String(enrollment.course_id || enrollment.courseId || "").trim();
+    if (!courseId) continue;
+    const existing = enrollmentByCourse.get(courseId);
+    if (!existing || String(enrollment.updated_at || enrollment.created_at || "") > String(existing.updated_at || existing.created_at || "")) {
+      enrollmentByCourse.set(courseId, enrollment);
+    }
+  }
+
+  for (const [courseId] of enrollmentByCourse) {
+    const course = liveDb.courses?.[courseId] || {};
+    const activityDates = ngStudentStudyActivityDates(liveDb, { courseId, userId: identity.lmsUserId });
+    const rawStreak = ngComputeStudentStudyStreakWithFreeze(liveDb, { courseId, userId: identity.lmsUserId });
+    const leaderboard = ngPublicLeaderboardList(liveDb, courseId, { limit: 25 });
+    const viewerEntry = leaderboard.find((entry) => String(entry.user_id || "") === String(identity.lmsUserId)) || null;
+    const weakProfile = ngSanitizeWeakAreaProfile(liveDb.weakAreaProfiles?.[ngWeakProfileKey(courseId, identity.lmsUserId)] || null);
+    const progress = buildProgressSummary({ db: liveDb, courseId, userId: identity.lmsUserId });
+    const lane = {
+      course_id: courseId,
+      course_name: String(course.title || course.name || courseId).slice(0, 200),
+      exam_track: base.exam_track,
+      progress: {
+        total_days: progress.total_days,
+        completed_days: progress.completed_days,
+        remaining_days: progress.remaining_days,
+        progress_percentage: progress.progress_percentage,
+        current_week: progress.current_week,
+        current_day: progress.current_day,
+        current_system: progress.current_system,
+        completed_systems: progress.completed_systems,
+      },
+      streak: {
+        study_streak: rawStreak.study_streak,
+        best_streak: rawStreak.best_streak,
+        total_study_days: rawStreak.total_study_days,
+        last_activity_date: rawStreak.last_activity_date,
+        current_start_date: rawStreak.current_start_date,
+        read_only: true,
+        bonus_points_unchanged: true,
+      },
+      leaderboard: leaderboard.map(aylaV214SafeLmsLeaderboardEntry),
+      viewer_leaderboard: viewerEntry ? aylaV214SafeLmsLeaderboardEntry(viewerEntry) : null,
+      weakAreaProfile: weakProfile ? {
+        baseline_status: weakProfile.baseline_status,
+        systems: weakProfile.systems,
+        weakest_systems: weakProfile.weakest_systems,
+        updated_at: weakProfile.updated_at,
+      } : null,
+      activityDates,
+      authority: "lms_live_db_read_only",
+    };
+    base.courses.push(lane);
+    base.activityDates.push(...activityDates);
+    base.weakSignals.push(...aylaV214LmsWeakSignals(lane));
+  }
+
+  const rawPartnerProfile = Object.values(liveDb.studyPartnerProfiles || {})
+    .find((profile) => String(profile.user_id || "") === String(identity.lmsUserId)) || null;
+  if (rawPartnerProfile) {
+    const safe = sanitizeLearningPartnerProfile(rawPartnerProfile);
+    const profileTrack = normalizeCourseExamTrack(safe.examTrack);
+    if (safe.status === "active" && safe.visibility !== "hidden" && safe.allowRequests && (profileTrack === "unknown" || profileTrack === base.exam_track)) {
+      base.partnerProfile = safe;
+    }
+  }
+
+  base.activityDates = [...new Set(base.activityDates)].sort();
+  base.linked = base.courses.length > 0;
+  if (!base.linked && base.identity.linked) base.identity.reason = "no_matching_active_exam_enrollment";
+  return base;
+}
+
+function aylaV214AylaActivityDates(db = {}, student = {}) {
+  const studentId = String(student.id || "");
+  const dates = new Set();
+  const add = (value) => {
+    const key = learningDateKey(value);
+    if (key) dates.add(key);
+  };
+  for (const row of aylaValues(db, "aylaResourceAssignments")) {
+    if (String(row.studentId || "") !== studentId || String(row.status || "").toLowerCase() !== "completed") continue;
+    add(row.completedAt || row.updatedAt || row.createdAt);
+  }
+  for (const collection of ["aylaReadingProgress", "aylaVideoProgress"]) {
+    for (const row of aylaValues(db, collection)) {
+      if (String(row.studentId || "") !== studentId) continue;
+      const progressed = row.completed === true || Number(row.progressPercent ?? row.progress_percent ?? row.percent ?? row.positionSeconds ?? row.position_seconds ?? row.currentPage ?? row.current_page ?? 0) > 0;
+      if (progressed) add(row.completedAt || row.lastOpenedAt || row.updatedAt || row.createdAt);
+    }
+  }
+  for (const row of aylaValues(db, "aylaQuestionAttempts")) {
+    if (String(row.studentId || "") === studentId && row.serverVerified === true) add(row.createdAt || row.updatedAt);
+  }
+  for (const row of aylaValues(db, "aylaAssessmentAttempts")) {
+    if (String(row.studentId || "") === studentId && row.serverVerified === true) add(row.submittedAt || row.createdAt || row.updatedAt);
+  }
+  for (const row of aylaValues(db, "aylaFlashcardReviews")) {
+    if (String(row.studentId || "") === studentId) add(row.createdAt || row.updatedAt);
+  }
+  for (const row of aylaValues(db, "aylaNotebooks")) {
+    if (String(row.studentId || "") !== studentId || row.deletedAt || row.archivedAt) continue;
+    const hasStudentWork = (Array.isArray(row.blocks) ? row.blocks : []).some((block) => block && block.contentOrigin !== "approved_source" && String(block.text || "").trim());
+    if (hasStudentWork) add(row.updatedAt || row.createdAt);
+  }
+  return [...dates].sort();
+}
+
+function aylaV214WeakSignals(db = {}, student = {}, lmsContext = null) {
+  const studentId = String(student.id || "");
+  const signals = [];
+  for (const row of aylaValues(db, "aylaQuestionAttempts")) {
+    if (String(row.studentId || "") !== studentId || row.serverVerified !== true) continue;
+    const outcome = String(row.outcome || row.result || "").toLowerCase();
+    if (!["incorrect", "guessed", "review_again"].includes(outcome)) continue;
+    signals.push({ topic: row.topic || row.system, system: row.system, source: "aylamed_questions", evidenceType: outcome, weaknessScore: outcome === "incorrect" ? 85 : 65, verified: true });
+  }
+  for (const row of aylaValues(db, "aylaFlashcardReviews")) {
+    if (String(row.studentId || "") !== studentId) continue;
+    const rating = String(row.rating || "").toLowerCase();
+    if (!["again", "hard"].includes(rating)) continue;
+    signals.push({ topic: row.topic || row.system, system: row.system, source: "aylamed_flashcards", evidenceType: `flashcard_${rating}`, weaknessScore: rating === "again" ? 80 : 60, verified: true });
+  }
+  for (const row of aylaValues(db, "aylaAssessmentAttempts")) {
+    if (String(row.studentId || "") !== studentId || row.serverVerified !== true) continue;
+    const score = Math.max(0, Math.min(100, Number(row.scorePercent ?? row.score_percent ?? row.score ?? 0) || 0));
+    for (const topic of aylaCleanArray(row.weakTopics || row.weak_topics || row.topic || row.system)) {
+      signals.push({ topic, system: row.system, source: "aylamed_assessments", evidenceType: "assessment_weak_topic", weaknessScore: 100 - score, verified: true });
+    }
+  }
+  for (const row of aylaValues(db, "aylaConceptMastery")) {
+    if (String(row.studentId || "") !== studentId) continue;
+    const mastery = Number(row.masteryPercent ?? row.mastery_percent);
+    if (!Number.isFinite(mastery) || mastery >= 70) continue;
+    signals.push({ topic: row.topic || row.system, system: row.system, source: "aylamed_concept_mastery", evidenceType: "concept_mastery", evidenceCount: Number(row.evidenceCount || 1), weaknessScore: 100 - mastery, verified: true });
+  }
+  for (const row of aylaV189SystemProgress(db, student)) {
+    if (row.masteryPercent === null || Number(row.masteryPercent) >= 70 || Number(row.evidenceCount || 0) < 1) continue;
+    signals.push({ topic: row.system, system: row.system, source: "aylamed_system_progress", evidenceType: "system_mastery", evidenceCount: row.evidenceCount, weaknessScore: row.weaknessPercent, verified: true });
+  }
+  if (lmsContext?.linked) signals.push(...lmsContext.weakSignals);
+  return signals;
+}
+
+function aylaV214RevisionFeed(db = {}, student = {}, weakSummary = null, date = aylaDateOnly()) {
+  const studentId = String(student.id || "");
+  const examTrackId = aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam);
+  const rows = new Map();
+  const add = (input = {}) => {
+    const resourceId = String(input.resourceId || input.contentQuestionId || "").trim();
+    const topic = String(input.topic || input.system || "General").trim();
+    const key = resourceId ? `resource:${resourceId}` : `${String(input.system || "General").toLowerCase()}|${topic.toLowerCase()}|${String(input.sourceId || input.sourceType || "topic")}`;
+    const existing = rows.get(key) || {
+      id: input.id || `revision:${crypto.createHash("sha256").update(`${studentId}|${key}`).digest("hex").slice(0, 16)}`,
+      resourceId: resourceId || null,
+      contentQuestionId: input.contentQuestionId || null,
+      questionRef: input.questionRef || null,
+      questionNumber: input.questionNumber || null,
+      cardNumber: input.cardNumber || null,
+      system: input.system || "General",
+      topic,
+      dueDate: input.dueDate || date,
+      status: input.status || "due",
+      origins: [],
+      reasons: [],
+      queueIds: [],
+      createdAt: input.createdAt || null,
+      updatedAt: input.updatedAt || input.createdAt || null,
+    };
+    existing.origins = [...new Set([...existing.origins, ...aylaCleanArray(input.origins || input.sourceType || "revision")])];
+    existing.reasons = [...new Set([...existing.reasons, ...aylaCleanArray(input.reasons || input.reason)])];
+    existing.queueIds = [...new Set([...existing.queueIds, ...aylaCleanArray(input.queueIds || input.id)])];
+    if (String(input.dueDate || "") && (!existing.dueDate || String(input.dueDate) < String(existing.dueDate))) existing.dueDate = input.dueDate;
+    rows.set(key, existing);
+  };
+
+  for (const row of aylaValues(db, "aylaRevisionQueue")) {
+    if (String(row.studentId || "") !== studentId || ["removed", "deleted"].includes(String(row.status || "").toLowerCase())) continue;
+    const rowExam = aylaCanonicalExamTrack(row.examTrack || row.examTrackId || student.examTrackId || student.exam);
+    if (rowExam && rowExam !== examTrackId) continue;
+    add({ ...row, origins: [row.sourceType || "scheduled_revision"], reasons: row.reasons || row.reason || (row.tutorScheduled ? ["tutor_scheduled"] : []) });
+  }
+  for (const session of aylaValues(db, "aylaQbankSessions")) {
+    if (String(session.studentId || "") !== studentId || aylaCanonicalExamTrack(session.examTrack) !== examTrackId) continue;
+    for (const [questionRef, marked] of Object.entries(session.marks || {})) {
+      if (!marked) continue;
+      const mapping = qbankSessionQuestion(session, questionRef);
+      if (mapping) add({ contentQuestionId: mapping.contentQuestionId, resourceId: mapping.contentQuestionId, questionRef, sourceId: mapping.contentQuestionId, sourceType: "marked_question", reason: "marked_for_review", updatedAt: session.updatedAt || session.createdAt });
+    }
+  }
+  for (const row of aylaValues(db, "aylaQbankBookmarks")) {
+    if (String(row.studentId || "") !== studentId || row.deletedAt || aylaCanonicalExamTrack(row.examTrack) !== examTrackId) continue;
+    add({ ...row, resourceId: row.contentQuestionId, sourceType: "bookmark", reason: "bookmarked", dueDate: date });
+  }
+  for (const row of aylaValues(db, "aylaQuestionAttempts")) {
+    if (String(row.studentId || "") !== studentId || row.serverVerified !== true || !["incorrect", "guessed", "review_again"].includes(String(row.outcome || "").toLowerCase())) continue;
+    add({ ...row, sourceType: "verified_mistake", sourceId: row.id, reason: String(row.outcome || "review_again").toLowerCase(), dueDate: date });
+  }
+  for (const row of aylaValues(db, "aylaFlashcardReviews")) {
+    if (String(row.studentId || "") !== studentId || !["again", "hard"].includes(String(row.rating || "").toLowerCase())) continue;
+    add({ ...row, sourceType: "difficult_card", sourceId: row.id, reason: `flashcard_${String(row.rating).toLowerCase()}`, dueDate: row.nextReviewDate || date });
+  }
+  for (const row of weakSummary?.weakAreas || []) {
+    add({ sourceType: "verified_weak_topic", sourceId: row.topic, system: row.systems[0] || "General", topic: row.topic, reason: "weak_topic", dueDate: date });
+  }
+  const items = [...rows.values()].sort((left, right) => String(left.dueDate || "").localeCompare(String(right.dueDate || "")) || String(right.updatedAt || "").localeCompare(String(left.updatedAt || "")) || left.topic.localeCompare(right.topic));
+  const sourceCounts = {};
+  for (const item of items) for (const source of item.origins) sourceCounts[source] = Number(sourceCounts[source] || 0) + 1;
+  return {
+    date,
+    total: items.length,
+    due: items.filter((row) => !row.dueDate || String(row.dueDate) <= String(date)).length,
+    sourceCounts,
+    items: items.slice(0, 100),
+    answer_keys_included: false,
+  };
+}
+
+function aylaV214ProgressSnapshot(db = {}, liveDb = {}, user = {}, student = {}, date = aylaDateOnly()) {
+  const lms = aylaV214LmsContext(db, liveDb, user, student);
+  const aylaDates = aylaV214AylaActivityDates(db, student);
+  const aylaStreak = computeLearningStreak({
+    activityDates: aylaDates,
+    today: date,
+    isFreezeDate: (dateKey) => !aylaV189StudyDayStatus(student, dateKey).isStudyDay,
+  });
+  const federatedStreak = computeLearningStreak({
+    activityDates: [...aylaDates, ...lms.activityDates],
+    today: date,
+    isFreezeDate: (dateKey) => {
+      if (!aylaV189StudyDayStatus(student, dateKey).isStudyDay) return true;
+      return lms.courses.length > 0 && lms.courses.every((course) => ngIsCourseFreezeDate(liveDb, course.course_id, dateKey));
+    },
+  });
+  const weakAreas = buildCrossSystemWeakAreaSummary(aylaV214WeakSignals(db, student, lms));
+  const revision = aylaV214RevisionFeed(db, student, weakAreas, date);
+  const assignments = aylaValues(db, "aylaResourceAssignments").filter((row) => String(row.studentId || "") === String(student.id));
+  const activeAssignments = assignments.filter((row) => !["cancelled", "superseded", "moved"].includes(String(row.status || "").toLowerCase()));
+  const completedAssignments = activeAssignments.filter((row) => String(row.status || "").toLowerCase() === "completed");
+  const questionAttempts = aylaValues(db, "aylaQuestionAttempts").filter((row) => String(row.studentId || "") === String(student.id) && row.serverVerified === true);
+  const correctQuestions = questionAttempts.filter((row) => String(row.outcome || "").toLowerCase() === "correct").length;
+  const systemProgress = aylaV189SystemProgress(db, student);
+  return {
+    date,
+    examTrackId: aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam),
+    summary: {
+      assigned: activeAssignments.length,
+      completed: completedAssignments.length,
+      completionPercent: activeAssignments.length ? Math.round((completedAssignments.length / activeAssignments.length) * 100) : 0,
+      verifiedQuestions: questionAttempts.length,
+      questionAccuracyPercent: questionAttempts.length ? Math.round((correctQuestions / questionAttempts.length) * 100) : null,
+      assessmentAttempts: aylaValues(db, "aylaAssessmentAttempts").filter((row) => String(row.studentId || "") === String(student.id) && row.serverVerified === true).length,
+      readingSessions: aylaValues(db, "aylaReadingProgress").filter((row) => String(row.studentId || "") === String(student.id)).length,
+      videoSessions: aylaValues(db, "aylaVideoProgress").filter((row) => String(row.studentId || "") === String(student.id)).length,
+      flashcardReviews: aylaValues(db, "aylaFlashcardReviews").filter((row) => String(row.studentId || "") === String(student.id)).length,
+      notebookCount: aylaValues(db, "aylaNotebooks").filter((row) => String(row.studentId || "") === String(student.id) && !row.deletedAt).length,
+      revisionDue: revision.due,
+    },
+    systemProgress,
+    weakAreas,
+    revision,
+    streaks: {
+      aylamed: { ...aylaStreak, authority: "aylamed_db" },
+      lms: lms.courses.map((course) => ({ course_id: course.course_id, course_name: course.course_name, ...course.streak })),
+      federated: { ...federatedStreak, authority: "read_only_union", awards_points: false },
+      lms_bonus_points_unchanged: true,
+    },
+    lms: {
+      linked: lms.linked,
+      identity: lms.identity,
+      courses: lms.courses.map(({ activityDates, weakAreaProfile, ...course }) => ({ ...course, weakAreaProfile })),
+      read_only: true,
+      writes_performed: false,
+    },
+    feeds: {
+      personalTutor: true,
+      adaptiveRoadmap: true,
+      assessments: true,
+      flashcards: true,
+      revision: true,
+      studyPartner: true,
+      leaderboard: true,
+      one_authoritative_progress_snapshot: true,
+    },
+    privacy: {
+      correct_answers_server_only: true,
+      lms_contacts_exposed: false,
+      cross_product_points_combined: false,
+    },
+  };
+}
+
+function aylaV214PartnerInput(db = {}, liveDb = null, student = {}) {
+  const base = {
+    examTrack: student.exam || student.examTrack || student.examTrackId || "",
+    targetDate: aylaV189TargetDate(student),
+    timezone: student.timezone || "",
+    availability: aylaCleanArray(student.availability || student.preferredStudyTimes),
+    subjects: aylaCleanArray(student.weakAreas),
+    resources: aylaCleanArray(student.selectedResources),
+    dailyHours: aylaNumber(student.dailyHours, 0),
+    studyStyle: student.studyStyle || student.study_style || "",
+    languages: aylaCleanArray(student.languages || student.language),
+  };
+  if (!liveDb) return { profile: sanitizeLearningPartnerProfile(base), lmsEnriched: false };
+  const user = aylaV214RawUserForStudent(db, student) || {};
+  const lms = aylaV214LmsContext(db, liveDb, user, student);
+  if (!lms.linked || !lms.partnerProfile) return { profile: sanitizeLearningPartnerProfile(base), lmsEnriched: false };
+  const linked = lms.partnerProfile;
+  return {
+    profile: sanitizeLearningPartnerProfile({
+      ...linked,
+      ...base,
+      examTrack: base.examTrack || linked.examTrack,
+      targetDate: base.targetDate || linked.targetDate,
+      timezone: base.timezone || linked.timezone,
+      availability: [...new Set([...base.availability, ...linked.availability])],
+      subjects: [...new Set([...base.subjects, ...linked.subjects])],
+      resources: [...new Set([...base.resources, ...linked.resources])],
+      dailyHours: base.dailyHours || linked.dailyHours,
+      studyStyle: base.studyStyle || linked.studyStyle,
+      languages: [...new Set([...base.languages, ...linked.languages])],
+    }),
+    lmsEnriched: true,
+  };
+}
+
+function aylaV189MatchScore(a = {}, b = {}) {
+  if (!a?.id || !b?.id || String(a.id) === String(b.id)) return { score: 0, reasons: [] };
+  return calculateLearningPartnerCompatibility(aylaV214PartnerInput({}, null, a).profile, aylaV214PartnerInput({}, null, b).profile);
+}
+
+function aylaV219StudentProfileDiscoverable(db, student = {}) {
+  if (!Boolean(student.studyPartnerOptIn || student.study_partner_opt_in)) return false;
+  const user = aylaV214RawUserForStudent(db, student);
+  if (user?.student_profile || user?.studentProfile) {
+    const accountProfile = normalizeStudentProfileRecord(user);
+    if (accountProfile.profile_visibility !== "students_only" || accountProfile.discoverable !== true) return false;
+  }
+  const profile = aylaValues(db, "aylaCommunityProfiles").find((row) => (
+    String(row.studentId || "") === String(student.id || "")
+    || (user && String(row.userId || "") === String(user.id || ""))
+  ));
+  if (!profile) return true;
+  if (profile.banned || profile.profileVisibility === "private" || profile.discoverable === false) return false;
+  return true;
+}
+
+function aylaV189PartnerPublic(db, student = {}, viewer = null, liveDb = null) {
   const profile = aylaValues(db, "aylaCommunityProfiles").find((row) => String(row.studentId) === String(student.id));
-  const match = viewer ? aylaV189MatchScore(viewer, student) : { score: 0, reasons: [] };
+  const studentInput = aylaV214PartnerInput(db, liveDb, student);
+  const viewerInput = viewer ? aylaV214PartnerInput(db, liveDb, viewer) : null;
+  const match = viewerInput ? calculateLearningPartnerCompatibility(viewerInput.profile, studentInput.profile) : { score: 0, reasons: [] };
   return {
     studentId: student.id,
     username: profile?.username || student.publicUsername || student.name || "Doctor",
@@ -58189,12 +62670,16 @@ function aylaV189PartnerPublic(db, student = {}, viewer = null) {
     weakAreas: aylaCleanArray(student.weakAreas),
     qbankCompleted: aylaNumber(student.qbankCompleted, 0),
     dailyHours: aylaNumber(student.dailyHours, 0),
+    studyStyle: studentInput.profile.studyStyle,
+    languagePreferences: studentInput.profile.languages,
+    preferenceSource: studentInput.lmsEnriched ? "aylamed_plus_lms_read_only" : "aylamed",
+    lmsContactsExposed: false,
     compatibilityScore: match.score,
     compatibilityReasons: match.reasons,
   };
 }
 
-function aylaV189PartnerRequestView(db, request = {}, viewerStudent = {}) {
+function aylaV189PartnerRequestView(db, request = {}, viewerStudent = {}, liveDb = null) {
   const viewerId = String(viewerStudent.id || "");
   const counterpartId = String(request.fromStudentId) === viewerId ? request.toStudentId : request.fromStudentId;
   const counterpart = aylaGetItem(db, "aylaStudents", counterpartId) || {};
@@ -58202,7 +62687,7 @@ function aylaV189PartnerRequestView(db, request = {}, viewerStudent = {}) {
     id: request.id,
     status: request.status,
     direction: String(request.fromStudentId) === viewerId ? "sent" : "incoming",
-    counterpart: aylaV189PartnerPublic(db, counterpart, viewerStudent),
+    counterpart: aylaV189PartnerPublic(db, counterpart, viewerStudent, liveDb),
     createdAt: request.createdAt,
     updatedAt: request.updatedAt,
     acceptedAt: request.acceptedAt || null,
@@ -58217,15 +62702,21 @@ function aylaV189PartnerRequestView(db, request = {}, viewerStudent = {}) {
 function aylaV189CommunityProfile(db, user, student) {
   let profile = aylaValues(db, "aylaCommunityProfiles").find((row) => String(row.userId) === String(user.id));
   if (!profile) {
-    const fallback = `doctor_${String(user.id || "user").replace(/[^a-z0-9]/gi, "").slice(-8).toLowerCase()}`;
+    const rawUser = aylaGetItem(db, "aylaUsers", user.id) || user;
+    const accountProfile = normalizeStudentProfileRecord(rawUser);
+    const accountProfileConfigured = Boolean(rawUser.student_profile || rawUser.studentProfile);
+    const fallback = aylaV219FallbackUsername(user.id);
+    const legacyIdentity = aylaV219SafeLegacyCommunityIdentity(db, rawUser);
     profile = {
       id: aylaId("AYLA-CP"),
       userId: user.id,
       studentId: student?.id || user.studentId || null,
-      username: user.publicUsername || fallback,
-      displayName: user.name || "Doctor",
-      bio: user.bio || "",
+      username: accountProfileConfigured ? accountProfile.username || fallback : legacyIdentity.username,
+      displayName: accountProfileConfigured ? accountProfile.display_name || "Doctor" : legacyIdentity.displayName,
+      bio: accountProfileConfigured ? accountProfile.bio : legacyIdentity.bio,
       profileImageUrl: user.profileImageUrl || "",
+      profileVisibility: accountProfileConfigured ? accountProfile.profile_visibility : "students_only",
+      discoverable: accountProfileConfigured ? accountProfile.discoverable === true : Boolean(student?.studyPartnerOptIn || student?.study_partner_opt_in),
       studyPartnerOptIn: Boolean(student?.studyPartnerOptIn || student?.study_partner_opt_in),
       mutedUntil: null,
       banned: false,
@@ -58234,6 +62725,9 @@ function aylaV189CommunityProfile(db, user, student) {
       updatedAt: aylaNow(),
     };
     aylaSetItem(db, "aylaCommunityProfiles", profile);
+  } else {
+    if (!profile.profileVisibility) profile.profileVisibility = "students_only";
+    if (profile.discoverable === undefined) profile.discoverable = Boolean(profile.studyPartnerOptIn);
   }
   return profile;
 }
@@ -58241,13 +62735,17 @@ function aylaV189CommunityProfile(db, user, student) {
 function aylaV189Leaderboard(db, period = "weekly") {
   const now = new Date();
   const start = aylaPeriodStart(period === "monthly" ? "monthly" : "weekly", now).getTime();
-  const students = aylaValues(db, "aylaStudents");
+  const students = aylaValues(db, "aylaStudents").filter((student) => {
+    const user = aylaV214RawUserForStudent(db, student);
+    return user && !["disabled", "deleted", "blocked"].includes(String(user.status || "active").toLowerCase());
+  });
   const profiles = aylaValues(db, "aylaCommunityProfiles");
-  return students.map((student) => {
+  const rows = students.map((student) => {
     const userId = student.ayla_user_id || student.user_id;
     const profile = profiles.find((row) => String(row.studentId) === String(student.id) || String(row.userId) === String(userId));
+    if (profile?.banned || profile?.leaderboardHidden) return null;
     const assignments = aylaValues(db, "aylaResourceAssignments").filter((row) => String(row.studentId) === String(student.id) && new Date(row.updatedAt || row.createdAt || 0).getTime() >= start);
-    const attempts = aylaValues(db, "aylaAssessmentAttempts").filter((row) => String(row.studentId) === String(student.id) && new Date(row.createdAt || 0).getTime() >= start);
+    const attempts = aylaValues(db, "aylaAssessmentAttempts").filter((row) => String(row.studentId) === String(student.id) && row.serverVerified === true && new Date(row.createdAt || 0).getTime() >= start);
     const cards = aylaValues(db, "aylaFlashcardReviews").filter((row) => String(row.studentId) === String(student.id) && new Date(row.createdAt || 0).getTime() >= start);
     const completed = assignments.filter((row) => String(row.status).toLowerCase() === "completed").length;
     const completion = assignments.length ? Math.round((completed / assignments.length) * 100) : 0;
@@ -58257,14 +62755,18 @@ function aylaV189Leaderboard(db, period = "weekly") {
     const improvement = verifiedImprovements.length
       ? Math.round(verifiedImprovements.reduce((sum, value) => sum + Number(value), 0) / verifiedImprovements.length)
       : null;
-    const activeDates = new Set(assignments.filter((row) => String(row.status).toLowerCase() === "completed").map((row) => String(row.updatedAt || "").slice(0, 10)));
-    const streak = activeDates.size;
+    const streak = computeLearningStreak({
+      activityDates: aylaV214AylaActivityDates(db, student),
+      today: aylaDateOnly(),
+      isFreezeDate: (dateKey) => !aylaV189StudyDayStatus(student, dateKey).isStudyDay,
+    }).study_streak;
     const points = completed * 5 + Math.round(assessmentAccuracy * 0.2) + cards.length + Math.round(Math.max(0, Number(improvement || 0)) * 0.5) + streak * 2;
     return {
       studentId: student.id,
       username: profile?.username || student.publicUsername || student.name || "Doctor",
       profileImageUrl: profile?.profileImageUrl || "",
       exam: student.exam || "",
+      examTrackId: aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam),
       points,
       completionPercent: completion,
       assessmentAccuracy,
@@ -58272,7 +62774,11 @@ function aylaV189Leaderboard(db, period = "weekly") {
       flashcardReviews: cards.length,
       studyStreak: streak,
     };
-  }).filter((row) => row.points > 0).sort((a, b) => b.points - a.points || Number(b.improvementScore || 0) - Number(a.improvementScore || 0)).map((row, index) => ({ ...row, rank: index + 1 }));
+  }).filter((row) => row && row.points > 0);
+  return rankLearningLeaderboard(rows, {
+    scoreFields: ["points", "improvementScore", "assessmentAccuracy", "completionPercent"],
+    identityFields: ["studentId", "username"],
+  });
 }
 
 // -----------------------------------------------------------------------------
@@ -58352,6 +62858,205 @@ app.post("/api/ayla/auth/reset-password", async (req, res) => {
 // Profile, exam-date/hours adaptation, and question-source preferences.
 // -----------------------------------------------------------------------------
 
+function aylaV219FallbackUsername(userId = "") {
+  return `doctor_${String(userId || "user").replace(/[^a-z0-9]/gi, "").slice(-8).toLowerCase()}`;
+}
+
+function aylaV219SafeLegacyCommunityIdentity(db, rawUser = {}) {
+  const base = {
+    id: rawUser.id,
+    name: "Doctor",
+    student_profile: {
+      display_name: "Doctor",
+      username: "",
+      bio: "",
+      profile_visibility: "private",
+      discoverable: false,
+    },
+  };
+  const options = {
+    userId: rawUser.id,
+    events: [],
+    extraBlockedWords: db.aylaSettings?.community?.banned_words,
+  };
+  let displayName = "Doctor";
+  let username = aylaV219FallbackUsername(rawUser.id);
+  let bio = "";
+  try { displayName = applyStudentProfilePatch(base, { display_name: rawUser.name || "Doctor" }, options).profile.display_name; } catch {}
+  try { username = applyStudentProfilePatch(base, { username: rawUser.publicUsername || rawUser.public_username || "" }, options).profile.username || username; } catch {}
+  try { bio = applyStudentProfilePatch(base, { bio: rawUser.bio || "" }, options).profile.bio; } catch {}
+  return { displayName, username, bio };
+}
+
+function aylaV219LegacyAccountProfilePatch(body = {}, rawUser = {}) {
+  const patch = {};
+  const valueFrom = (...keys) => {
+    for (const key of keys) {
+      if (Object.prototype.hasOwnProperty.call(body, key)) return { supplied: true, value: body[key] };
+    }
+    return { supplied: false, value: undefined };
+  };
+  const fields = [
+    ["display_name", ["display_name", "displayName", "name"]],
+    ["username", ["username", "public_username", "publicUsername"]],
+    ["bio", ["bio"]],
+    ["phone", ["phone", "phone_number", "phoneNumber"]],
+    ["address_line_1", ["address_line_1", "addressLine1", "address"]],
+    ["address_line_2", ["address_line_2", "addressLine2"]],
+    ["city", ["city", "locality"]],
+    ["region", ["region", "state", "province"]],
+    ["postal_code", ["postal_code", "postalCode", "zip_code", "zipCode"]],
+    ["country_code", ["country_code", "countryCode"]],
+    ["timezone", ["timezone"]],
+    ["language", ["language", "locale"]],
+    ["profile_visibility", ["profile_visibility", "profileVisibility"]],
+    ["discoverable", ["discoverable"]],
+  ];
+  for (const [field, aliases] of fields) {
+    const selected = valueFrom(...aliases);
+    if (selected.supplied) patch[field] = selected.value;
+  }
+  const immutable = [
+    "email", "role", "status", "verified", "phone_verified", "phoneVerified", "authVersion",
+    "plan_id", "planId", "payment_id", "paymentId", "points", "score",
+  ].filter((key) => Object.prototype.hasOwnProperty.call(body, key));
+  if (immutable.length) {
+    const error = new Error(`Security-controlled profile fields cannot be edited here: ${immutable.join(", ")}`);
+    error.statusCode = 403;
+    error.code = "PROFILE_FIELD_IMMUTABLE";
+    error.details = { fields: immutable };
+    throw error;
+  }
+  if (Object.prototype.hasOwnProperty.call(body, "profileImageUrl") || Object.prototype.hasOwnProperty.call(body, "profile_image_url") || Object.prototype.hasOwnProperty.call(body, "avatar_url")) {
+    const requested = String(body.profileImageUrl ?? body.profile_image_url ?? body.avatar_url ?? "");
+    const existing = String(rawUser.profileImageUrl || rawUser.profile_image_url || "");
+    if (requested !== existing) {
+      const error = new Error("Profile image changes require the managed upload flow");
+      error.statusCode = 400;
+      error.code = "PROFILE_AVATAR_MANAGED_UPLOAD_REQUIRED";
+      throw error;
+    }
+  }
+  return patch;
+}
+
+function aylaV219UsernameAvailable(db, userId, username) {
+  const key = String(username || "").toLocaleLowerCase("en-US");
+  const userTaken = aylaValues(db, "aylaUsers").some((candidate) => {
+    if (String(candidate.id || "") === String(userId || "")) return false;
+    return normalizeStudentProfileRecord(candidate).username.toLocaleLowerCase("en-US") === key;
+  });
+  if (userTaken) return false;
+  return !aylaValues(db, "aylaCommunityProfiles").some((profile) => (
+    String(profile.userId || "") !== String(userId || "")
+    && String(profile.username || "").toLocaleLowerCase("en-US") === key
+  ));
+}
+
+function aylaV219ApplyAccountProfile(db, rawUser, payload, {
+  payloadIsCanonical = false,
+  ensureCommunityProfile = false,
+  student = null,
+} = {}) {
+  aylaEnsureCollection(db, "aylaProfileAuditEvents");
+  const applied = applyStudentProfilePatch(rawUser, payload, {
+    payloadIsCanonical,
+    userId: rawUser.id,
+    events: db.aylaProfileAuditEvents,
+    extraBlockedWords: db.aylaSettings?.community?.banned_words,
+    isUsernameAvailable: (username) => aylaV219UsernameAvailable(db, rawUser.id, username),
+  });
+  if (!applied.changed) {
+    const existingCommunityProfile = aylaValues(db, "aylaCommunityProfiles").find((row) => String(row.userId) === String(rawUser.id)) || null;
+    return { applied, communityProfile: existingCommunityProfile };
+  }
+
+  ngStoreStudentProfileOnUser(rawUser, applied.profile, { camelCase: true });
+  aylaSetItem(db, "aylaUsers", rawUser);
+
+  const ownedStudents = aylaValues(db, "aylaStudents").filter((row) => aylaV189StudentOwned(row, rawUser));
+  if (applied.changedFields.includes("display_name") || applied.changedFields.includes("username")) {
+    for (const owned of ownedStudents) {
+      if (applied.changedFields.includes("display_name")) owned.name = applied.profile.display_name;
+      if (applied.changedFields.includes("username")) owned.publicUsername = applied.profile.username;
+      owned.updatedAt = applied.profile.updated_at;
+      aylaSetItem(db, "aylaStudents", owned);
+    }
+  }
+
+  let communityProfile = aylaValues(db, "aylaCommunityProfiles").find((row) => String(row.userId) === String(rawUser.id)) || null;
+  if (!communityProfile && (ensureCommunityProfile || applied.profile.profile_visibility === "students_only" || applied.profile.discoverable)) {
+    communityProfile = aylaV189CommunityProfile(db, aylaSanitizeUser(rawUser), student || ownedStudents[0] || null);
+  }
+  if (communityProfile) {
+    communityProfile.username = applied.profile.username || aylaV219FallbackUsername(rawUser.id);
+    communityProfile.displayName = applied.profile.display_name || "Doctor";
+    communityProfile.bio = applied.profile.bio;
+    communityProfile.profileVisibility = applied.profile.profile_visibility;
+    communityProfile.discoverable = applied.profile.discoverable === true;
+    communityProfile.updatedAt = applied.profile.updated_at;
+    aylaSetItem(db, "aylaCommunityProfiles", communityProfile);
+  }
+
+  const event = ngStudentProfileAuditEvent({
+    product: "aylamed",
+    userId: rawUser.id,
+    changedFields: applied.changedFields,
+    createdAt: applied.profile.updated_at,
+  });
+  db.aylaProfileAuditEvents[event.id] = event;
+  return { applied, communityProfile };
+}
+
+app.get("/api/ayla/account/profile", async (req, res) => {
+  try {
+    const { rawUser } = await aylaGetAuthenticatedUser(req);
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, {
+      profile_contract: STUDENT_PROFILE_CONTRACT_VERSION,
+      profile: sanitizeStudentProfileForOwner(rawUser),
+      profile_policy: studentProfilePolicy(),
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load AylaMed account profile", error.details);
+  }
+});
+
+app.patch("/api/ayla/account/profile", async (req, res) => {
+  try {
+    const auth = await aylaGetAuthenticatedUser(req);
+    const mutation = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const rawUser = aylaGetItem(db, "aylaUsers", auth.rawUser.id);
+      if (!rawUser || ["disabled", "deleted", "blocked"].includes(String(rawUser.status || "active").toLowerCase())) {
+        const error = new Error("AylaMed user is no longer active");
+        error.statusCode = 401;
+        throw error;
+      }
+      const result = aylaV219ApplyAccountProfile(db, rawUser, req.body || {});
+      return {
+        result,
+        user: aylaSanitizeUser(rawUser),
+        profile: sanitizeStudentProfileForOwner(rawUser),
+      };
+    });
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, {
+      user: mutation.user,
+      profile_contract: STUDENT_PROFILE_CONTRACT_VERSION,
+      profile: mutation.profile,
+      profile_policy: studentProfilePolicy(),
+      changed_fields: mutation.result.applied.changedFields,
+      phone_verification_reset: mutation.result.applied.phoneChanged,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update AylaMed account profile", {
+      code: error.code || null,
+      ...(error.details || {}),
+    });
+  }
+});
+
 app.post("/api/ayla/profile/preview", async (req, res) => {
   try {
     const { student, db } = await aylaV189RequireStudent(req, req.body.studentId);
@@ -58361,6 +63066,8 @@ app.post("/api/ayla/profile/preview", async (req, res) => {
     if (req.body.exam !== undefined || req.body.examTrackId !== undefined) {
       const track = aylaExamTrackDefinition(req.body.examTrackId || req.body.exam);
       if (!track) return aylaSendError(res, 400, "Unsupported exam track");
+      const currentExamTrackId = aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam);
+      if (currentExamTrackId && track.id !== currentExamTrackId) return aylaSendError(res, 409, "An exam dashboard cannot be converted into another exam. Create or switch to a separately entitled dashboard.", { reason: "exam_identity_immutable", currentExamTrackId, requestedExamTrackId: track.id });
       proposed.examTrackId = track.id; proposed.exam = track.label; proposed.curriculumVersion = track.curriculumVersion;
     }
     if (req.body.availability !== undefined) proposed.availability = aylaCleanArray(req.body.availability);
@@ -58410,6 +63117,7 @@ app.get("/api/ayla/profile", async (req, res) => {
     const { user, rawUser, student, db } = await aylaV189RequireStudent(req);
     const communityProfile = aylaV189CommunityProfile(db, user, student);
     await writeAylaDb(db);
+    res.setHeader("Cache-Control", "private, no-store");
     return aylaSendOk(res, { user: aylaSanitizeUser(rawUser), student, communityProfile, systemProgress: aylaV189SystemProgress(db, student), warning: aylaV189BacklogWarning(db, student, aylaDateOnly()) });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message);
@@ -58418,69 +63126,92 @@ app.get("/api/ayla/profile", async (req, res) => {
 
 app.put("/api/ayla/profile", async (req, res) => {
   try {
-    const { user, rawUser, student, db } = await aylaV189RequireStudent(req, req.body.studentId);
-    const username = aylaV189CleanText(req.body.publicUsername ?? req.body.username ?? rawUser.publicUsername ?? "").replace(/\s+/g, "_").slice(0, 30);
-    if (username) {
-      if (!/^[a-zA-Z0-9_.-]{3,30}$/.test(username)) return aylaSendError(res, 400, "Community username must be 3–30 characters using letters, numbers, dot, dash or underscore");
-      if (aylaV189IsReservedUsername(username)) return aylaSendError(res, 400, "This username is reserved for AylaMed administration or official support");
-      const moderation = aylaV189ModerationCheck(username, db.aylaSettings?.community?.banned_words);
-      if (!moderation.ok) return aylaSendError(res, 400, "This community username contains prohibited language");
-      const duplicate = aylaValues(db, "aylaCommunityProfiles").find((row) => String(row.userId) !== String(user.id) && String(row.username || "").toLowerCase() === username.toLowerCase());
-      if (duplicate) return aylaSendError(res, 409, "This community username is already taken");
-    }
-    const allowedUser = ["name", "phone", "profileImageUrl", "timezone", "country", "bio"];
-    for (const key of allowedUser) if (req.body[key] !== undefined) rawUser[key] = aylaV189CleanText(req.body[key]).slice(0, key === "bio" ? 500 : 220);
-    if (username) rawUser.publicUsername = username;
-    rawUser.updatedAt = aylaNow();
-    const oldTarget = aylaV189TargetDate(student);
-    const allowedStudent = ["goalType", "examDate", "matchDate", "dailyHours", "weeklyStudyDays", "restDay", "timezone", "country", "language", "qbankCompleted", "qbankAverage", "studyPartnerOptIn"];
-    for (const key of allowedStudent) if (req.body[key] !== undefined) student[key] = req.body[key];
-    if (req.body.exam !== undefined || req.body.examTrackId !== undefined) {
-      const track = aylaExamTrackDefinition(req.body.examTrackId || req.body.exam);
-      if (!track) return aylaSendError(res, 400, "Unsupported exam track");
-      student.examTrackId = track.id; student.exam = track.label; student.curriculumVersion = track.curriculumVersion;
-    }
-    if (req.body.availability !== undefined) student.availability = aylaCleanArray(req.body.availability);
-    if (req.body.preferredStudyDays !== undefined || req.body.preferred_study_days !== undefined) student.preferredStudyDays = aylaCleanArray(req.body.preferredStudyDays ?? req.body.preferred_study_days);
-    if (req.body.weakAreas !== undefined) student.weakAreas = aylaCleanArray(req.body.weakAreas);
-    if (req.body.selectedResources !== undefined) student.selectedResources = aylaCleanArray(req.body.selectedResources);
-    if (["external", "internal", "hybrid"].includes(String(req.body.questionSourcePreference))) student.questionSourcePreference = String(req.body.questionSourcePreference);
-    student.dailyHours = Math.max(1, Math.min(16, aylaNumber(student.dailyHours, 3)));
-    student.weeklyStudyDays = Math.max(1, Math.min(7, aylaNumber(student.weeklyStudyDays, 6)));
-    student.targetDate = aylaV189TargetDate(student);
-    student.updatedAt = aylaNow();
-    aylaSetItem(db, "aylaUsers", rawUser);
-    aylaSetItem(db, "aylaStudents", student);
-    const communityProfile = aylaV189CommunityProfile(db, user, student);
-    communityProfile.username = username || communityProfile.username;
-    communityProfile.displayName = rawUser.name || communityProfile.displayName;
-    communityProfile.bio = rawUser.bio || "";
-    communityProfile.profileImageUrl = rawUser.profileImageUrl || "";
-    communityProfile.studyPartnerOptIn = Boolean(student.studyPartnerOptIn);
-    communityProfile.updatedAt = aylaNow();
-    aylaSetItem(db, "aylaCommunityProfiles", communityProfile);
-    const newTarget = aylaV189TargetDate(student);
-    const planningChanged = oldTarget !== newTarget || req.body.exam !== undefined || req.body.examTrackId !== undefined || req.body.dailyHours !== undefined || req.body.weeklyStudyDays !== undefined || req.body.restDay !== undefined || req.body.preferredStudyDays !== undefined || req.body.preferred_study_days !== undefined || req.body.questionSourcePreference !== undefined || req.body.weakAreas !== undefined;
-    if (planningChanged) {
-      const today = aylaDateOnly();
-      aylaValues(db, "aylaDailyPlans").filter((row) => String(row.studentId) === String(student.id) && String(row.date || "") >= today && String(row.status || "").toLowerCase() !== "completed").forEach((row) => {
-        row.status = "superseded";
-        row.supersededReason = "Profile, target date or study capacity changed";
-        row.updatedAt = aylaNow();
-        aylaSetItem(db, "aylaDailyPlans", row);
-      });
-      aylaValues(db, "aylaResourceAssignments").filter((row) => String(row.studentId) === String(student.id) && String(row.scheduledDate || "") >= today && !["completed", "skipped"].includes(String(row.status || "").toLowerCase())).forEach((row) => {
-        row.status = "superseded";
-        row.updatedAt = aylaNow();
-        aylaSetItem(db, "aylaResourceAssignments", row);
-      });
-      await aylaV189BuildDailyPlan(db, student, today, { force: true });
-    }
-    aylaV189RecordActivity(db, student.id, "profile_updated", { planningChanged, oldTarget, newTarget, dailyHours: student.dailyHours });
-    await writeAylaDb(db);
-    return aylaSendOk(res, { user: aylaSanitizeUser(rawUser), student, communityProfile, planningChanged, warning: aylaV189BacklogWarning(db, student, aylaDateOnly()), systemProgress: aylaV189SystemProgress(db, student) });
+    const initial = await aylaV189RequireStudent(req, req.body.studentId);
+    const result = await mutateAylaDb(async (db) => {
+      const { rawUser, student } = aylaV214AtomicStudentContext(db, initial);
+      const accountPatch = aylaV219LegacyAccountProfilePatch(req.body || {}, rawUser);
+      const accountProfileResult = Object.keys(accountPatch).length
+        ? aylaV219ApplyAccountProfile(db, rawUser, accountPatch, { payloadIsCanonical: true, ensureCommunityProfile: true, student })
+        : { applied: { changed: false, changedFields: [], phoneChanged: false }, communityProfile: null };
+      const oldTarget = aylaV189TargetDate(student);
+      const allowedStudent = ["goalType", "examDate", "matchDate", "dailyHours", "weeklyStudyDays", "restDay", "timezone", "country", "language", "qbankCompleted", "qbankAverage", "studyPartnerOptIn"];
+      for (const key of allowedStudent) if (req.body[key] !== undefined) student[key] = req.body[key];
+      if (req.body.exam !== undefined || req.body.examTrackId !== undefined) {
+        const track = aylaExamTrackDefinition(req.body.examTrackId || req.body.exam);
+        if (!track) throw Object.assign(new Error("Unsupported exam track"), { statusCode: 400 });
+        const currentExamTrackId = aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam);
+        if (currentExamTrackId && track.id !== currentExamTrackId) {
+          const error = new Error("An exam dashboard cannot be converted into another exam. Create or switch to a separately entitled dashboard.");
+          error.statusCode = 409;
+          error.details = { reason: "exam_identity_immutable", currentExamTrackId, requestedExamTrackId: track.id };
+          throw error;
+        }
+        student.examTrackId = track.id;
+        student.exam = track.label;
+        student.curriculumVersion = track.curriculumVersion;
+      }
+      if (req.body.availability !== undefined) student.availability = aylaCleanArray(req.body.availability);
+      if (req.body.preferredStudyDays !== undefined || req.body.preferred_study_days !== undefined) student.preferredStudyDays = aylaCleanArray(req.body.preferredStudyDays ?? req.body.preferred_study_days);
+      if (req.body.weakAreas !== undefined) student.weakAreas = aylaCleanArray(req.body.weakAreas);
+      if (req.body.selectedResources !== undefined) student.selectedResources = aylaCleanArray(req.body.selectedResources);
+      if (["external", "internal", "hybrid"].includes(String(req.body.questionSourcePreference))) student.questionSourcePreference = String(req.body.questionSourcePreference);
+      student.dailyHours = Math.max(1, Math.min(16, aylaNumber(student.dailyHours, 3)));
+      student.weeklyStudyDays = Math.max(1, Math.min(7, aylaNumber(student.weeklyStudyDays, 6)));
+      student.targetDate = aylaV189TargetDate(student);
+      student.updatedAt = aylaNow();
+      aylaSetItem(db, "aylaStudents", student);
+
+      const accountProfile = normalizeStudentProfileRecord(rawUser);
+      const accountProfileConfigured = Boolean(rawUser.student_profile || rawUser.studentProfile);
+      const legacyIdentity = aylaV219SafeLegacyCommunityIdentity(db, rawUser);
+      const communityProfile = accountProfileResult.communityProfile || aylaV189CommunityProfile(db, aylaSanitizeUser(rawUser), student);
+      communityProfile.username = accountProfileConfigured ? accountProfile.username || communityProfile.username : legacyIdentity.username;
+      communityProfile.displayName = accountProfileConfigured ? accountProfile.display_name || "Doctor" : legacyIdentity.displayName;
+      communityProfile.bio = accountProfileConfigured ? accountProfile.bio : legacyIdentity.bio;
+      communityProfile.profileImageUrl = rawUser.profileImageUrl || "";
+      communityProfile.studyPartnerOptIn = Boolean(student.studyPartnerOptIn);
+      communityProfile.updatedAt = aylaNow();
+      aylaSetItem(db, "aylaCommunityProfiles", communityProfile);
+
+      const newTarget = aylaV189TargetDate(student);
+      const planningChanged = oldTarget !== newTarget || req.body.exam !== undefined || req.body.examTrackId !== undefined || req.body.dailyHours !== undefined || req.body.weeklyStudyDays !== undefined || req.body.restDay !== undefined || req.body.preferredStudyDays !== undefined || req.body.preferred_study_days !== undefined || req.body.questionSourcePreference !== undefined || req.body.weakAreas !== undefined;
+      if (planningChanged) {
+        const today = aylaDateOnly();
+        aylaValues(db, "aylaDailyPlans").filter((row) => String(row.studentId) === String(student.id) && String(row.date || "") >= today && String(row.status || "").toLowerCase() !== "completed").forEach((row) => {
+          row.status = "superseded";
+          row.supersededReason = "Profile, target date or study capacity changed";
+          row.updatedAt = aylaNow();
+          aylaSetItem(db, "aylaDailyPlans", row);
+        });
+        aylaValues(db, "aylaResourceAssignments").filter((row) => String(row.studentId) === String(student.id) && String(row.scheduledDate || "") >= today && !["completed", "skipped"].includes(String(row.status || "").toLowerCase())).forEach((row) => {
+          row.status = "superseded";
+          row.updatedAt = aylaNow();
+          aylaSetItem(db, "aylaResourceAssignments", row);
+        });
+        await aylaV189BuildDailyPlan(db, student, today, { force: true });
+      }
+      aylaV189RecordActivity(db, student.id, "profile_updated", { planningChanged, oldTarget, newTarget, dailyHours: student.dailyHours });
+      return {
+        user: aylaSanitizeUser(rawUser),
+        profile_contract: STUDENT_PROFILE_CONTRACT_VERSION,
+        profile: sanitizeStudentProfileForOwner(rawUser),
+        profile_policy: studentProfilePolicy(),
+        changed_fields: accountProfileResult.applied.changedFields,
+        phone_verification_reset: accountProfileResult.applied.phoneChanged,
+        student,
+        communityProfile,
+        planningChanged,
+        warning: aylaV189BacklogWarning(db, student, aylaDateOnly()),
+        systemProgress: aylaV189SystemProgress(db, student),
+      };
+    });
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, result);
   } catch (error) {
-    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update AylaMed profile");
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update AylaMed profile", {
+      code: error.code || null,
+      ...(error.details || {}),
+    });
   }
 });
 
@@ -58579,21 +63310,112 @@ app.get("/api/ayla/admin/resources/coverage", async (req, res) => {
 // -----------------------------------------------------------------------------
 // Daily workspace and permanent learning history.
 // -----------------------------------------------------------------------------
+app.get("/api/ayla/students/:studentId/personal-tutor", async (req, res) => {
+  try {
+    const initial = await aylaV189RequireStudent(req, req.params.studentId, "personal_tutor");
+    const date = String(req.query.date || aylaDateOnly()).slice(0, 10);
+    const snapshot = await aylaV213AtomicTutorSnapshot(initial, date);
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, {
+      ...snapshot,
+      answer: formatAylaPersonalTutorAnswer(snapshot.decision),
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load Personal Tutor");
+  }
+});
+
+app.post("/api/ayla/students/:studentId/personal-tutor/apply", async (req, res) => {
+  try {
+    const initial = await aylaV189RequireStudent(req, req.params.studentId, "personal_tutor");
+    const date = String(req.body.date || aylaDateOnly()).slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return aylaSendError(res, 400, "A valid roadmap date is required");
+    if (date < aylaDateOnly()) return aylaSendError(res, 409, "Personal Tutor cannot rebuild a past roadmap day");
+    const result = await mutateAylaDb(async (db) => {
+      const { user, student } = aylaV213AtomicTutorContext(db, initial);
+      const expectedPlanId = String(req.body.expectedPlanId || req.body.expected_plan_id || "").trim();
+      const expectedPlanVersion = Number(req.body.expectedPlanVersion ?? req.body.expected_plan_version ?? -1);
+      const recommendationId = String(req.body.recommendationId || req.body.recommendation_id || "").trim();
+      const replay = aylaValues(db, "aylaActivityHistory").find((row) =>
+        String(row.studentId || "") === String(student.id)
+        && row.type === "personal_tutor_recommendation_applied"
+        && String(row.payload?.sourcePlanId || "") === expectedPlanId
+        && Number(row.payload?.sourcePlanVersion) === expectedPlanVersion
+        && String(row.payload?.recommendationId || "") === recommendationId);
+      if (replay) {
+        const snapshot = await aylaV213PersonalTutorSnapshot(db, user, student, date);
+        return {
+          ...snapshot,
+          answer: formatAylaPersonalTutorAnswer(snapshot.decision),
+          applied: true,
+          idempotentReplay: true,
+          appliedRecommendationId: recommendationId,
+          resultPlanId: replay.payload?.resultPlanId || snapshot.plan?.id || null,
+        };
+      }
+
+      const before = await aylaV213PersonalTutorSnapshot(db, user, student, date);
+      let validated;
+      try {
+        validated = validateAylaPersonalTutorPlanCommand(req.body, before.decision);
+      } catch (error) {
+        error.statusCode = ["STALE_TUTOR_RECOMMENDATION", "TUTOR_RECOMMENDATION_NOT_FOUND"].includes(error.code) ? 409 : 400;
+        throw error;
+      }
+      const rebuilt = await aylaV189BuildDailyPlan(db, student, date, {
+        force: true,
+        skipAi: true,
+        includeAssessment: validated.directive.includeAssessment,
+        tutorDirective: validated.directive,
+      });
+      aylaV189RecordActivity(db, student.id, "personal_tutor_recommendation_applied", {
+        commandKey: validated.commandKey,
+        recommendationId: validated.recommendation.id,
+        recommendationKind: validated.recommendation.kind,
+        sourcePlanId: before.plan.id,
+        sourcePlanVersion: before.plan.version,
+        resultPlanId: rebuilt.plan.id,
+        resultPlanVersion: rebuilt.plan.version,
+        date,
+        completedHistoryPreserved: true,
+        engine: AYLA_PERSONAL_TUTOR_ENGINE,
+      });
+      const snapshot = await aylaV213PersonalTutorSnapshot(db, user, student, date);
+      return {
+        ...snapshot,
+        answer: formatAylaPersonalTutorAnswer(snapshot.decision),
+        applied: true,
+        idempotentReplay: false,
+        appliedRecommendationId: validated.recommendation.id,
+        resultPlanId: rebuilt.plan.id,
+      };
+    });
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, result);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to apply Personal Tutor recommendation", error.code ? { code: error.code } : null);
+  }
+});
+
 app.get("/api/ayla/students/:studentId/daily-workspace", async (req, res) => {
   try {
-    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId);
+    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId, "roadmap");
     aylaEnsureSeedData(db);
     const date = String(req.query.date || aylaDateOnly()).slice(0, 10);
     const built = await aylaV189BuildDailyPlan(db, student, date, { force: false });
     const systemProgress = aylaV189SystemProgress(db, student);
     const warning = aylaV189BacklogWarning(db, student, date, systemProgress);
     const history = aylaValues(db, "aylaActivityHistory").filter((row) => String(row.studentId) === String(student.id)).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 100);
-    const recentReadingProgress = aylaValues(db, "aylaReadingProgress").filter((row) => String(row.studentId) === String(student.id)).sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt))).slice(0, 100);
+    const recentReadingProgress = aylaValues(db, "aylaReadingProgress").filter((row) => String(row.studentId) === String(student.id)).sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt))).slice(0, 100).map(aylaV211SanitizeReadingProgress);
     const recentVideoProgress = aylaValues(db, "aylaVideoProgress").filter((row) => String(row.studentId) === String(student.id)).sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt))).slice(0, 100);
     const recentQuestionAttempts = aylaValues(db, "aylaQuestionAttempts").filter((row) => String(row.studentId) === String(student.id)).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 100);
     const recentFlashcardReviews = aylaValues(db, "aylaFlashcardReviews").filter((row) => String(row.studentId) === String(student.id)).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 100);
     const recentAssessments = aylaValues(db, "aylaAssessmentAttempts").filter((row) => String(row.studentId) === String(student.id)).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 50);
-    const recentPlans = aylaValues(db, "aylaDailyPlans").filter((row) => String(row.studentId) === String(student.id) && String(row.status || "").toLowerCase() !== "superseded").sort((a, b) => String(b.date).localeCompare(String(a.date))).slice(0, 14);
+    const recentPlans = aylaValues(db, "aylaDailyPlans")
+      .filter((row) => String(row.studentId) === String(student.id) && String(row.status || "").toLowerCase() !== "superseded")
+      .sort((a, b) => String(b.date).localeCompare(String(a.date)))
+      .slice(0, 14)
+      .map((row) => aylaV211SanitizeStoredPlan(db, row));
     const historyCounts = {
       readingProgress: aylaValues(db, "aylaReadingProgress").filter((row) => String(row.studentId) === String(student.id)).length,
       videoProgress: aylaValues(db, "aylaVideoProgress").filter((row) => String(row.studentId) === String(student.id)).length,
@@ -58614,7 +63436,7 @@ app.get("/api/ayla/students/:studentId/daily-workspace", async (req, res) => {
 
 app.post("/api/ayla/students/:studentId/daily-workspace/rebuild", async (req, res) => {
   try {
-    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId);
+    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId, "roadmap");
     const date = String(req.body.date || aylaDateOnly()).slice(0, 10);
     const built = await aylaV189BuildDailyPlan(db, student, date, { force: true, includeAssessment: req.body.includeAssessment === true });
     aylaV189RecordActivity(db, student.id, "daily_plan_rebuilt", { date, reason: req.body.reason || "student_request" });
@@ -58628,13 +63450,14 @@ app.post("/api/ayla/students/:studentId/daily-workspace/rebuild", async (req, re
 
 app.patch("/api/ayla/students/:studentId/assignments/:assignmentId", async (req, res) => {
   try {
-    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId);
+    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId, "roadmap");
     const assignment = aylaGetItem(db, "aylaResourceAssignments", req.params.assignmentId);
     if (!assignment || String(assignment.studentId) !== String(student.id)) return aylaSendError(res, 404, "Assignment not found");
     const allowedStatuses = ["pending", "in_progress", "completed", "skipped", "review_again"];
     const requestedStatus = req.body.status && allowedStatuses.includes(String(req.body.status)) ? String(req.body.status) : null;
     if (requestedStatus === "completed") {
       const controlledHistory = {
+        reading: "aylaReadingProgress",
         video: "aylaVideoProgress",
         external_questions: "aylaQuestionAttempts",
         internal_mcqs: "aylaQuestionAttempts",
@@ -58647,13 +63470,14 @@ app.patch("/api/ayla/students/:studentId/assignments/:assignmentId", async (req,
         const historyRows = aylaValues(db, historyCollection).filter((row) => String(row.studentId) === String(student.id) && String(row.assignmentId || "") === String(assignment.id));
         const completedIds = new Set(historyRows.filter((row) => historyCollection !== "aylaQuestionAttempts" || String(row.outcome || "").toLowerCase() !== "not_attempted").map((row) => String(row.resourceId || "")));
         const assessmentDone = historyCollection === "aylaAssessmentAttempts" && historyRows.length > 0;
-        const videoDone = historyCollection === "aylaVideoProgress" && historyRows.some((row) => row.completed === true || aylaNumber(row.watchedPercent, 0) >= 90);
-        const allResourcesDone = resourceIds.length > 0 && resourceIds.every((id) => completedIds.has(id));
-        if (!(assessmentDone || videoDone || allResourcesDone)) return aylaSendError(res, 409, "Complete the assigned activity and save its history before marking this assignment complete");
+        const videoDone = historyCollection === "aylaVideoProgress" && resourceIds.length > 0 && resourceIds.every((id) => historyRows.some((row) => String(row.resourceId || "") === id && (row.completed === true || aylaNumber(row.watchedPercent, 0) >= 90)));
+        const readingDone = historyCollection === "aylaReadingProgress" && resourceIds.length > 0 && resourceIds.every((id) => historyRows.some((row) => String(row.resourceId || "") === id && (row.completed === true || aylaNumber(row.progressPercent, 0) >= 100)));
+        const allResourcesDone = !["aylaVideoProgress", "aylaReadingProgress"].includes(historyCollection) && resourceIds.length > 0 && resourceIds.every((id) => completedIds.has(id));
+        if (!(assessmentDone || videoDone || readingDone || allResourcesDone)) return aylaSendError(res, 409, "Complete the assigned activity and save its verified history before marking this assignment complete");
       }
     }
     if (requestedStatus) assignment.status = requestedStatus;
-    if (req.body.progressPercent !== undefined) assignment.progressPercent = Math.max(0, Math.min(100, aylaNumber(req.body.progressPercent, 0)));
+    if (req.body.progressPercent !== undefined && !["reading", "video"].includes(String(assignment.category || "").toLowerCase())) assignment.progressPercent = Math.max(0, Math.min(100, aylaNumber(req.body.progressPercent, 0)));
     if (req.body.notes !== undefined) assignment.notes = aylaV189CleanText(req.body.notes).slice(0, 2000);
     if (assignment.status === "completed") {
       assignment.completedAt = assignment.completedAt || aylaNow();
@@ -58669,6 +63493,7 @@ app.patch("/api/ayla/students/:studentId/assignments/:assignmentId", async (req,
     if (String(assignment.category || "") === "reading") {
       for (const item of Array.isArray(assignment.items) ? assignment.items : []) {
         const existingReading = aylaValues(db, "aylaReadingProgress").find((row) => String(row.studentId) === String(student.id) && String(row.assignmentId || "") === String(assignment.id) && String(row.resourceId || "") === String(item.resourceId || "")) || {};
+        const hiddenSource = item.sourceLabelVisible === false;
         const readingProgress = {
           ...existingReading,
           id: existingReading.id || aylaId("AYLA-READ"),
@@ -58676,18 +63501,18 @@ app.patch("/api/ayla/students/:studentId/assignments/:assignmentId", async (req,
           assignmentId: assignment.id,
           resourceId: item.resourceId || null,
           resourceNumber: item.resourceNumber || "",
-          bookTitle: item.bookTitle || item.title || "",
-          edition: item.edition || "",
-          system: item.system || assignment.system || "General",
-          topic: item.topic || assignment.topic || "",
-          pageRange: item.pageRange || item.mappedBookPages || "",
-          status: assignment.status,
-          progressPercent: aylaNumber(assignment.progressPercent, assignment.status === "completed" ? 100 : assignment.status === "in_progress" ? 50 : 0),
+          bookTitle: hiddenSource ? "AylaMed Reading" : item.bookTitle || item.title || "",
+          edition: hiddenSource ? "" : item.edition || "",
+          system: hiddenSource ? sanitizeAylaHiddenSourceText(item.system || assignment.system, item, "General") : item.system || assignment.system || "General",
+          topic: hiddenSource ? sanitizeAylaHiddenSourceText(item.topic || assignment.topic, item, "General reading") : item.topic || assignment.topic || "",
+          pageRange: hiddenSource ? aylaLibraryStudentPageRange(item) : item.pageRange || item.mappedBookPages || "",
+          status: existingReading.completed === true ? "completed" : assignment.status,
+          progressPercent: existingReading.completed === true ? 100 : Math.max(0, aylaNumber(existingReading.progressPercent, 0)),
           notes: assignment.notes || "",
           startedAt: existingReading.startedAt || aylaNow(),
           updatedAt: aylaNow(),
         };
-        if (assignment.status === "completed") readingProgress.completedAt = existingReading.completedAt || aylaNow();
+        if (existingReading.completed === true) readingProgress.completedAt = existingReading.completedAt || aylaNow();
         if (assignment.status === "skipped") readingProgress.skippedAt = aylaNow();
         aylaSetItem(db, "aylaReadingProgress", readingProgress);
       }
@@ -58695,55 +63520,407 @@ app.patch("/api/ayla/students/:studentId/assignments/:assignmentId", async (req,
     const plan = aylaV189UpdatePlanCompletion(db, assignment.dailyPlanId);
     aylaV189RecordActivity(db, student.id, "assignment_updated", { assignmentId: assignment.id, status: assignment.status, category: assignment.category });
     await writeAylaDb(db);
-    return aylaSendOk(res, { assignment: aylaV189SanitizeAssignmentForStudent(db, assignment), plan, warning: aylaV189BacklogWarning(db, student, aylaDateOnly()), systemProgress: aylaV189SystemProgress(db, student) });
+    return aylaSendOk(res, { assignment: aylaV189SanitizeAssignmentForStudent(db, assignment), plan: aylaV211SanitizeStoredPlan(db, plan, [assignment]), warning: aylaV189BacklogWarning(db, student, aylaDateOnly()), systemProgress: aylaV189SystemProgress(db, student) });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update assignment");
   }
 });
 
-app.post("/api/ayla/students/:studentId/video-progress", async (req, res) => {
+// -----------------------------------------------------------------------------
+// v211 Library: entitlement-scoped page-turn reading backed by approved pages.
+// -----------------------------------------------------------------------------
+function aylaV211LatestReadingProgress(db, student, resource, assignment = null) {
+  const assignmentId = String(assignment?.id || "");
+  const rows = aylaValues(db, "aylaReadingProgress")
+    .filter((row) => String(row.studentId || row.student_id || "") === String(student.id))
+    .filter((row) => aylaLibraryResourceMatchesId(resource, row.resourceId || row.resource_id));
+  const scoped = assignmentId
+    ? rows.filter((row) => !row.assignmentId && !row.assignment_id || String(row.assignmentId || row.assignment_id) === assignmentId)
+    : rows;
+  return combineAylaLibraryProgressRows(scoped.length ? scoped : rows);
+}
+
+function aylaV211SanitizeReadingProgress(progress = {}) {
+  const safe = { ...progress };
+  safe.system = sanitizeAylaHiddenSourceText(safe.system, progress, "General");
+  safe.topic = sanitizeAylaHiddenSourceText(safe.topic, progress, "General reading");
+  safe.pageRange = sanitizeAylaHiddenSourceText(safe.pageRange || safe.page_range, progress, "", 120);
+  delete safe.bookTitle;
+  delete safe.book_title;
+  delete safe.edition;
+  delete safe.provider;
+  delete safe.sourceLabel;
+  delete safe.source_label;
+  delete safe.sourceUrl;
+  delete safe.source_url;
+  delete safe.exactReference;
+  delete safe.exact_reference;
+  delete safe.mappedBookResourceId;
+  delete safe.mapped_book_resource_id;
+  delete safe.mappedBookTitle;
+  delete safe.mapped_book_title;
+  delete safe.mappedBookEdition;
+  delete safe.mapped_book_edition;
+  return safe;
+}
+
+function aylaV211AssignmentReadingCompletion(db, student, assignment) {
+  if (!assignment) return { assignment: null, plan: null, completed: false };
+  const rows = aylaValues(db, "aylaReadingProgress")
+    .filter((row) => String(row.studentId || row.student_id || "") === String(student.id));
+  const summary = aylaLibraryAssignmentProgress(assignment, rows);
+  const alreadyCompleted = String(assignment.status || "").toLowerCase() === "completed";
+  assignment.progressPercent = alreadyCompleted ? 100 : summary.progress_percent;
+  if (summary.completed || alreadyCompleted) {
+    assignment.status = "completed";
+    assignment.progressPercent = 100;
+    assignment.completedAt = assignment.completedAt || aylaNow();
+    aylaV189CloseLinkedAssignments(db, assignment);
+    aylaV189CompleteRevisionQueueForAssignment(db, assignment);
+  } else if (assignment.progressPercent > 0 && !["completed", "skipped"].includes(String(assignment.status || "").toLowerCase())) {
+    assignment.status = "in_progress";
+  }
+  assignment.updatedAt = aylaNow();
+  aylaSetItem(db, "aylaResourceAssignments", assignment);
+  return { assignment, plan: aylaV189UpdatePlanCompletion(db, assignment.dailyPlanId), completed: summary.completed || alreadyCompleted };
+}
+
+app.get("/api/ayla/students/:studentId/library", async (req, res) => {
   try {
-    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId);
-    const resourceId = String(req.body.resourceId || "");
-    const existing = aylaValues(db, "aylaVideoProgress").find((row) => String(row.studentId) === String(student.id) && String(row.resourceId) === resourceId) || {};
-    const progress = {
-      ...existing,
-      id: existing.id || aylaId("AYLA-VID"),
+    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId, "library");
+    res.setHeader("Cache-Control", "private, no-store");
+    const eligible = await aylaV211EligibleReadings(db, student);
+    const catalog = buildAylaLibraryCatalog({
+      resources: eligible.resources,
+      examTrack: student.examTrackId || student.exam_track_id || student.exam,
       studentId: student.id,
-      resourceId,
-      assignmentId: req.body.assignmentId || existing.assignmentId || null,
-      lastPositionSeconds: Math.max(0, aylaNumber(req.body.lastPositionSeconds, existing.lastPositionSeconds || 0)),
-      watchedPercent: Math.max(0, Math.min(100, aylaNumber(req.body.watchedPercent, existing.watchedPercent || 0))),
-      startedAt: existing.startedAt || aylaNow(),
-      completed: req.body.completed === true || aylaNumber(req.body.watchedPercent, 0) >= 90,
-      updatedAt: aylaNow(),
-    };
-    if (progress.completed) progress.completedAt = progress.completedAt || aylaNow();
-    aylaSetItem(db, "aylaVideoProgress", progress);
-    if (progress.completed && progress.assignmentId) {
-      const assignment = aylaGetItem(db, "aylaResourceAssignments", progress.assignmentId);
-      if (assignment) {
-        assignment.status = "completed";
-        assignment.progressPercent = 100;
-        assignment.completedAt = assignment.completedAt || aylaNow();
-        assignment.updatedAt = aylaNow();
-        aylaSetItem(db, "aylaResourceAssignments", assignment);
-        aylaV189CloseLinkedAssignments(db, assignment);
-        aylaV189CompleteRevisionQueueForAssignment(db, assignment);
-        aylaV189UpdatePlanCompletion(db, assignment.dailyPlanId);
-      }
-    }
-    aylaV189RecordActivity(db, student.id, "video_progress", { resourceId, watchedPercent: progress.watchedPercent, completed: progress.completed });
-    await writeAylaDb(db);
-    return aylaSendOk(res, { videoProgress: progress, systemProgress: aylaV189SystemProgress(db, student) });
+      progressRows: aylaValues(db, "aylaReadingProgress").filter((row) => String(row.studentId || row.student_id || "") === String(student.id)),
+      assignments: aylaV211ReadingAssignments(db, student),
+      filters: {
+        system: req.query.system || req.query.system_key,
+        topic: req.query.topic || req.query.topic_key,
+        search: req.query.search || req.query.q,
+      },
+      limit: req.query.limit,
+      offset: req.query.offset,
+    });
+    return aylaSendOk(res, {
+      catalog,
+      page_source_warning: eligible.warning,
+      reader: { mode: "page_turn", continuous_pdf_scroll: false, completion_threshold_percent: 100, source: "approved_exact_page_text" },
+    });
   } catch (error) {
-    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to save video progress");
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load AylaMed Library");
   }
 });
 
+app.get("/api/ayla/students/:studentId/library/resources/:resourceId", async (req, res) => {
+  try {
+    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId, "library");
+    res.setHeader("Cache-Control", "private, no-store");
+    const eligible = await aylaV211EligibleReadings(db, student);
+    const resource = eligible.resources.find((row) => aylaLibraryResourceMatchesId(row, req.params.resourceId));
+    if (!resource) return aylaSendError(res, 404, "Library reading not found for this exam dashboard");
+    const requestedAssignmentId = String(req.query.assignment_id || req.query.assignmentId || "");
+    const assignment = aylaV211AssignmentForReading(aylaV211ReadingAssignments(db, student), resource, requestedAssignmentId);
+    if (requestedAssignmentId && !assignment) return aylaSendError(res, 404, "Reading assignment not found for this student");
+    const progress = aylaV211LatestReadingProgress(db, student, resource, assignment);
+    const reader = buildAylaLibraryReader(resource, {
+      examTrack: student.examTrackId || student.exam_track_id || student.exam,
+      studentId: student.id,
+      progress,
+      assignment,
+    });
+    if (!reader) return aylaSendError(res, 409, "This reading has no complete approved exact-page content");
+    return aylaSendOk(res, { reader, page_source_warning: eligible.warning });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to open Library reading");
+  }
+});
+
+app.get("/api/ayla/students/:studentId/library/resources/:resourceId/pages/:pageNumber", async (req, res) => {
+  try {
+    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId, "library");
+    res.setHeader("Cache-Control", "private, no-store");
+    const eligible = await aylaV211EligibleReadings(db, student);
+    const resource = eligible.resources.find((row) => aylaLibraryResourceMatchesId(row, req.params.resourceId));
+    if (!resource) return aylaSendError(res, 404, "Library reading not found for this exam dashboard");
+    const requestedAssignmentId = String(req.query.assignment_id || req.query.assignmentId || "");
+    const assignment = aylaV211AssignmentForReading(aylaV211ReadingAssignments(db, student), resource, requestedAssignmentId);
+    if (requestedAssignmentId && !assignment) return aylaSendError(res, 404, "Reading assignment not found for this student");
+    const progress = aylaV211LatestReadingProgress(db, student, resource, assignment);
+    const page = buildAylaLibraryPage(resource, req.params.pageNumber, {
+      examTrack: student.examTrackId || student.exam_track_id || student.exam,
+      studentId: student.id,
+      progress,
+      assignment,
+    });
+    if (!page) return aylaSendError(res, 404, "Exact Library page not found");
+    return aylaSendOk(res, { ...page, page_source_warning: eligible.warning });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load Library page");
+  }
+});
+
+app.post("/api/ayla/students/:studentId/library/resources/:resourceId/progress", async (req, res) => {
+  try {
+    const initial = await aylaV189RequireStudent(req, req.params.studentId, "library");
+    res.setHeader("Cache-Control", "private, no-store");
+    const eligible = await aylaV211EligibleReadings(initial.db, initial.student);
+    const resource = eligible.resources.find((row) => aylaLibraryResourceMatchesId(row, req.params.resourceId));
+    if (!resource) return aylaSendError(res, 404, "Library reading not found for this exam dashboard");
+    const selector = req.body.pageKey || req.body.page_key || req.body.page || req.body.pdfPage || req.body.pdf_page;
+    const requestedPage = findAylaLibraryPage(resource, selector, { examTrack: resource.examTrackId });
+    if (!requestedPage) return aylaSendError(res, 400, "A valid exact page from this reading is required");
+    const requestedAssignmentId = String(req.body.assignmentId || req.body.assignment_id || "").trim();
+    const initialAssignments = aylaV211ReadingAssignments(initial.db, initial.student);
+    if (requestedAssignmentId && !aylaV211AssignmentForReading(initialAssignments, resource, requestedAssignmentId)) {
+      return aylaSendError(res, 404, "Reading assignment not found for this student");
+    }
+
+    const result = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const rawUser = aylaGetItem(db, "aylaUsers", initial.user.id);
+      const student = aylaGetItem(db, "aylaStudents", initial.student.id);
+      if (!rawUser || !student || !aylaV189StudentOwned(student, rawUser)) throw Object.assign(new Error("AylaMed student profile not found"), { statusCode: 404 });
+      aylaDashboardEntitlement(db, aylaSanitizeUser(rawUser), student, "library");
+      const currentStored = aylaV189RelevantResources(db, student, ["book", "reading", "revision_sheet"])
+        .find((row) => aylaLibraryResourceMatchesId(resource, row.id));
+      const crmBacked = Boolean(currentStored?.sourceDocumentId || currentStored?.source_document_id);
+      const sameCrmSource = !crmBacked || (
+        String(currentStored.sourceDocumentId || currentStored.source_document_id || "") === String(resource.sourceDocumentId || "")
+        && String(currentStored.sourceTrainingItemId || currentStored.source_training_item_id || "") === String(resource.sourceTrainingItemId || "")
+      );
+      const currentInput = currentStored && sameCrmSource
+        ? crmBacked
+          ? {
+              ...currentStored,
+              readerPages: resource.readerPages,
+              sourceLabelVisible: resource.sourceLabelVisible,
+              sourceLabel: resource.sourceLabel,
+            }
+          : currentStored
+        : null;
+      const currentResource = currentInput
+        ? normalizeAylaLibraryResource(currentInput, { examTrack: student.examTrackId || student.exam_track_id || student.exam })
+        : null;
+      if (!currentResource) throw Object.assign(new Error("Library reading is no longer available"), { statusCode: 404 });
+      const page = findAylaLibraryPage(currentResource, requestedPage.key, { examTrack: currentResource.examTrackId });
+      if (!page) throw Object.assign(new Error("Exact Library page is no longer available"), { statusCode: 409 });
+      const assignments = aylaV211ReadingAssignments(db, student);
+      const assignment = requestedAssignmentId
+        ? aylaV211AssignmentForReading(assignments, currentResource, requestedAssignmentId)
+        : aylaV211AssignmentForReading(assignments, currentResource);
+      if (requestedAssignmentId && !assignment) throw Object.assign(new Error("Reading assignment not found for this student"), { statusCode: 404 });
+      const resourceProgressRows = aylaValues(db, "aylaReadingProgress")
+        .filter((row) => String(row.studentId || row.student_id || "") === String(student.id))
+        .filter((row) => aylaLibraryResourceMatchesId(currentResource, row.resourceId || row.resource_id));
+      const scopedExisting = resourceProgressRows
+        .filter((row) => assignment ? String(row.assignmentId || row.assignment_id || "") === String(assignment.id) : !row.assignmentId && !row.assignment_id)
+        .sort((left, right) => String(right.updatedAt || right.updated_at || "").localeCompare(String(left.updatedAt || left.updated_at || "")))[0] || {};
+      const carried = combineAylaLibraryProgressRows(resourceProgressRows) || {};
+      const existing = {
+        ...carried,
+        ...scopedExisting,
+        id: scopedExisting.id || aylaId("AYLA-READ"),
+        assignmentId: assignment?.id || null,
+        readPageKeys: carried.readPageKeys || scopedExisting.readPageKeys || [],
+        progressPercent: Math.max(aylaNumber(carried.progressPercent, 0), aylaNumber(scopedExisting.progressPercent, 0)),
+        completed: carried.completed === true || scopedExisting.completed === true,
+      };
+      const markRead = !(req.body.read === false || String(req.body.read || "").toLowerCase() === "false");
+      const alreadyRead = aylaCleanArray(existing.readPageKeys || existing.read_page_keys).includes(page.key);
+      const progress = mergeAylaLibraryProgress(existing, {
+        id: existing.id,
+        studentId: student.id,
+        assignmentId: assignment?.id || null,
+        resourceId: currentResource.id,
+        pageKey: page.key,
+        read: markRead,
+        notes: req.body.notes !== undefined ? aylaV189CleanText(req.body.notes).slice(0, 2000) : existing.notes || "",
+        bookTitle: currentResource.sourceLabelVisible ? currentResource.bookTitle : "AylaMed Reading",
+        edition: currentResource.sourceLabelVisible ? currentResource.edition : "",
+        pageRange: currentResource.sourceLabelVisible ? currentResource.pageRange : aylaLibraryStudentPageRange(currentResource),
+        system: currentResource.sourceLabelVisible ? currentResource.system : sanitizeAylaHiddenSourceText(currentResource.system, currentResource, "General"),
+        topic: currentResource.sourceLabelVisible ? currentResource.topic : sanitizeAylaHiddenSourceText(currentResource.topic, currentResource, "General reading"),
+        examTrackId: currentResource.examTrackId,
+      }, currentResource);
+      aylaSetItem(db, "aylaReadingProgress", progress);
+      const assignmentState = aylaV211AssignmentReadingCompletion(db, student, assignment);
+      if (markRead && !alreadyRead) {
+        aylaV189RecordActivity(db, student.id, "library_page_progress", {
+          resourceId: currentResource.id,
+          assignmentId: assignment?.id || null,
+          pageKey: page.key,
+          progressPercent: progress.progressPercent,
+          completed: progress.completed,
+        });
+      }
+      return {
+        resource: currentResource,
+        progress,
+        assignment: assignmentState.assignment ? aylaV189SanitizeAssignmentForStudent(db, assignmentState.assignment) : null,
+        plan: aylaV211SanitizeStoredPlan(db, assignmentState.plan, assignmentState.assignment ? [assignmentState.assignment] : []),
+        systemProgress: aylaV189SystemProgress(db, student),
+      };
+    });
+    return aylaSendOk(res, {
+      readingProgress: aylaV211SanitizeReadingProgress(result.progress),
+      reader: buildAylaLibraryReader(result.resource, {
+        examTrack: result.resource.examTrackId,
+        studentId: initial.student.id,
+        progress: result.progress,
+        assignment: result.assignment,
+      }),
+      assignment: result.assignment,
+      plan: result.plan,
+      systemProgress: result.systemProgress,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to save Library page progress");
+  }
+});
+
+app.get("/api/ayla/students/:studentId/content-hub", async (req, res) => {
+  try {
+    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId, "content_hub");
+    const eligible = await aylaV210EligibleVideos(db, student);
+    const catalog = buildAylaContentHubCatalog({
+      videos: eligible.videos,
+      examTrack: student.examTrackId || student.exam_track_id || student.exam,
+      progressRows: aylaValues(db, "aylaVideoProgress").filter((row) => String(row.studentId || row.student_id || "") === String(student.id)),
+      assignments: eligible.assignments,
+      filters: {
+        system: req.query.system || req.query.system_key,
+        topic: req.query.topic || req.query.topic_key,
+        playlist: req.query.playlist || req.query.playlist_key,
+        search: req.query.search || req.query.q,
+      },
+      limit: req.query.limit,
+      offset: req.query.offset,
+    });
+    return aylaSendOk(res, {
+      catalog,
+      registry_warning: eligible.warning,
+      playback: { provider: "vimeo", embedded_only: true, outbound_links: false, completion_threshold_percent: 90 },
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load Content Hub");
+  }
+});
+
+app.get("/api/ayla/students/:studentId/content-hub/videos/:videoId", async (req, res) => {
+  try {
+    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId, "content_hub");
+    const eligible = await aylaV210EligibleVideos(db, student);
+    const video = eligible.videos.find((row) => aylaContentHubVideoMatchesId(row, req.params.videoId));
+    if (!video) return aylaSendError(res, 404, "Content Hub video not found for this exam dashboard");
+    const assignment = aylaV210AssignmentForVideo(eligible.assignments, video);
+    const progress = aylaValues(db, "aylaVideoProgress")
+      .filter((row) => String(row.studentId || row.student_id || "") === String(student.id))
+      .filter((row) => aylaContentHubVideoMatchesId(video, row.resourceId || row.resource_id))
+      .sort((left, right) => String(right.updatedAt || right.updated_at || "").localeCompare(String(left.updatedAt || left.updated_at || "")))[0] || null;
+    return aylaSendOk(res, {
+      video: sanitizeAylaContentHubVideo(video, { progress, assignment }),
+      registry_warning: eligible.warning,
+      playback: { provider: "vimeo", embedded_only: true, outbound_links: false, completion_threshold_percent: 90 },
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load Content Hub video");
+  }
+});
+
+function aylaV210AssignmentVideoCompletion(db, student, assignment) {
+  if (!assignment) return { assignment: null, plan: null, completed: false };
+  const rows = aylaValues(db, "aylaVideoProgress")
+    .filter((row) => String(row.studentId || row.student_id || "") === String(student.id));
+  const summary = aylaContentHubAssignmentProgress(assignment, rows);
+  const alreadyCompleted = String(assignment.status || "").toLowerCase() === "completed";
+  assignment.progressPercent = alreadyCompleted ? 100 : summary.watched_percent;
+  if (summary.completed || alreadyCompleted) {
+    assignment.status = "completed";
+    assignment.progressPercent = 100;
+    assignment.completedAt = assignment.completedAt || aylaNow();
+    aylaV189CloseLinkedAssignments(db, assignment);
+    aylaV189CompleteRevisionQueueForAssignment(db, assignment);
+  } else if (assignment.progressPercent > 0 && !["completed", "skipped"].includes(String(assignment.status || "").toLowerCase())) {
+    assignment.status = "in_progress";
+  }
+  assignment.updatedAt = aylaNow();
+  aylaSetItem(db, "aylaResourceAssignments", assignment);
+  return { assignment, plan: aylaV189UpdatePlanCompletion(db, assignment.dailyPlanId), completed: summary.completed || alreadyCompleted };
+}
+
+async function aylaV210SaveVideoProgress(req, res) {
+  try {
+    const initial = await aylaV189RequireStudent(req, req.params.studentId, "content_hub");
+    const requestedResourceId = String(req.params.videoId || req.body.resourceId || req.body.resource_id || "").trim();
+    if (!requestedResourceId) return aylaSendError(res, 400, "A Content Hub video ID is required");
+    const eligible = await aylaV210EligibleVideos(initial.db, initial.student);
+    const video = eligible.videos.find((row) => aylaContentHubVideoMatchesId(row, requestedResourceId));
+    if (!video) return aylaSendError(res, 404, "Content Hub video not found for this exam dashboard");
+    const requestedAssignmentId = String(req.body.assignmentId || req.body.assignment_id || "").trim();
+    if (requestedAssignmentId && !aylaV210AssignmentForVideo(eligible.assignments, video, requestedAssignmentId)) {
+      return aylaSendError(res, 404, "Video assignment not found for this student");
+    }
+
+    const result = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const rawUser = aylaGetItem(db, "aylaUsers", initial.user.id);
+      const student = aylaGetItem(db, "aylaStudents", initial.student.id);
+      if (!rawUser || !student || !aylaV189StudentOwned(student, rawUser)) throw Object.assign(new Error("AylaMed student profile not found"), { statusCode: 404 });
+      aylaDashboardEntitlement(db, aylaSanitizeUser(rawUser), student, "content_hub");
+      const assignments = aylaV210VideoAssignments(db, student);
+      const assignment = requestedAssignmentId ? aylaV210AssignmentForVideo(assignments, video, requestedAssignmentId) : aylaV210AssignmentForVideo(assignments, video);
+      if (requestedAssignmentId && !assignment) throw Object.assign(new Error("Video assignment not found for this student"), { statusCode: 404 });
+      const existing = aylaValues(db, "aylaVideoProgress")
+        .filter((row) => String(row.studentId || row.student_id || "") === String(student.id))
+        .filter((row) => aylaContentHubVideoMatchesId(video, row.resourceId || row.resource_id))
+        .sort((left, right) => String(right.updatedAt || right.updated_at || "").localeCompare(String(left.updatedAt || left.updated_at || "")))[0] || {};
+      const progress = mergeAylaContentHubProgress(existing, {
+        id: existing.id || aylaId("AYLA-VID"),
+        studentId: student.id,
+        resourceId: video.id,
+        aliasResourceIds: video.aliasResourceIds,
+        assignmentId: assignment?.id || null,
+        lastPositionSeconds: req.body.lastPositionSeconds ?? req.body.last_position_seconds,
+        watchedPercent: req.body.watchedPercent ?? req.body.watched_percent,
+        sourceType: video.sourceType,
+        examTrackId: video.examTrackId,
+      });
+      aylaSetItem(db, "aylaVideoProgress", progress);
+      const assignmentState = aylaV210AssignmentVideoCompletion(db, student, assignment);
+      aylaV189RecordActivity(db, student.id, "content_hub_video_progress", {
+        resourceId: video.id,
+        assignmentId: assignment?.id || null,
+        watchedPercent: progress.watchedPercent,
+        completed: progress.completed,
+      });
+      return {
+        progress,
+        assignment: assignmentState.assignment ? aylaV189SanitizeAssignmentForStudent(db, assignmentState.assignment) : null,
+        plan: aylaV211SanitizeStoredPlan(db, assignmentState.plan, assignmentState.assignment ? [assignmentState.assignment] : []),
+        systemProgress: aylaV189SystemProgress(db, student),
+      };
+    });
+    return aylaSendOk(res, {
+      videoProgress: result.progress,
+      video: sanitizeAylaContentHubVideo(video, { progress: result.progress, assignment: result.assignment }),
+      assignment: result.assignment,
+      plan: result.plan,
+      systemProgress: result.systemProgress,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to save video progress");
+  }
+}
+
+app.post("/api/ayla/students/:studentId/content-hub/videos/:videoId/progress", aylaV210SaveVideoProgress);
+app.post("/api/ayla/students/:studentId/video-progress", aylaV210SaveVideoProgress);
+
 app.post("/api/ayla/students/:studentId/question-attempts", async (req, res) => {
   try {
-    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId);
+    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId, "qbank");
     const assignmentId = req.body.assignmentId || null;
     const resourceId = req.body.resourceId || null;
     const assignment = assignmentId ? aylaGetItem(db, "aylaResourceAssignments", assignmentId) : null;
@@ -58817,7 +63994,7 @@ app.post("/api/ayla/students/:studentId/question-attempts", async (req, res) => 
     const completion = aylaV189MaybeCompleteAssignment(db, attempt.assignmentId, "aylaQuestionAttempts");
     aylaV189RecordActivity(db, student.id, "question_attempt", { attemptId: attempt.id, outcome, wasGuessed, serverVerified, questionNumber: attempt.questionNumber, assignmentCompleted: completion.completed });
     await writeAylaDb(db);
-    return aylaSendOk(res, { attempt, review, assignment: completion.assignment ? aylaV189SanitizeAssignmentForStudent(db, completion.assignment) : null, plan: completion.plan, assignmentCompleted: completion.completed, systemProgress: aylaV189SystemProgress(db, student), warning: aylaV189BacklogWarning(db, student, aylaDateOnly()) }, 201);
+    return aylaSendOk(res, { attempt, review, assignment: completion.assignment ? aylaV189SanitizeAssignmentForStudent(db, completion.assignment) : null, plan: aylaV211SanitizeStoredPlan(db, completion.plan, completion.assignment ? [completion.assignment] : []), assignmentCompleted: completion.completed, systemProgress: aylaV189SystemProgress(db, student), warning: aylaV189BacklogWarning(db, student, aylaDateOnly()) }, 201);
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to save question attempt");
   }
@@ -58825,7 +64002,7 @@ app.post("/api/ayla/students/:studentId/question-attempts", async (req, res) => 
 
 app.post("/api/ayla/students/:studentId/flashcard-reviews", async (req, res) => {
   try {
-    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId);
+    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId, "flashcards");
     const rating = String(req.body.rating || "again").toLowerCase();
     if (!["again", "hard", "good", "easy"].includes(rating)) return aylaSendError(res, 400, "Invalid flashcard rating");
     const previousReviews = aylaValues(db, "aylaFlashcardReviews").filter((row) => String(row.studentId) === String(student.id) && String(row.resourceId) === String(req.body.resourceId)).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
@@ -58873,7 +64050,7 @@ app.post("/api/ayla/students/:studentId/flashcard-reviews", async (req, res) => 
         last_review_event_id: review.id, reviewed_at: review.createdAt, next_review_date: review.nextReviewDate,
       },
     }).catch((error) => console.warn("AylaMed flashcard shadow write failed; JSON remains authoritative:", error.message));
-    return aylaSendOk(res, { review, assignment: completion.assignment, plan: completion.plan, assignmentCompleted: completion.completed, systemProgress: aylaV189SystemProgress(db, student) }, 201);
+    return aylaSendOk(res, { review, assignment: completion.assignment, plan: aylaV211SanitizeStoredPlan(db, completion.plan, completion.assignment ? [completion.assignment] : []), assignmentCompleted: completion.completed, systemProgress: aylaV189SystemProgress(db, student) }, 201);
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to save flashcard review");
   }
@@ -58881,7 +64058,7 @@ app.post("/api/ayla/students/:studentId/flashcard-reviews", async (req, res) => 
 
 app.post("/api/ayla/students/:studentId/assessment-attempts", async (req, res) => {
   try {
-    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId);
+    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId, "assessments");
     const assignment = aylaGetItem(db, "aylaResourceAssignments", req.body.assignmentId);
     if (!assignment || String(assignment.studentId) !== String(student.id) || String(assignment.category || "") !== "assessment") return aylaSendError(res, 404, "Verified assessment assignment not found");
     const assessmentItem = (Array.isArray(assignment.items) ? assignment.items : [])[0];
@@ -58969,14 +64146,73 @@ app.post("/api/ayla/students/:studentId/assessment-attempts", async (req, res) =
 });
 
 // -----------------------------------------------------------------------------
-// AylaMed-only leaderboard, study partners, community and moderation.
+// Shared progress, revision, leaderboard and study-partner services. AylaMed
+// may read an exact-identity, exact-exam LMS snapshot; only the Ayla DB is ever
+// mutated by these routes and LMS scoring lanes are never combined with Ayla.
 // -----------------------------------------------------------------------------
+app.get("/api/ayla/students/:studentId/progress", async (req, res) => {
+  try {
+    const { user, student, db } = await aylaV189RequireStudent(req, req.params.studentId, "progress");
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.date || "")) ? String(req.query.date) : aylaDateOnly();
+    const liveDb = await readLiveDb();
+    return aylaSendOk(res, { progress: aylaV214ProgressSnapshot(db, liveDb, user, student, date) });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load progress");
+  }
+});
+
+app.get("/api/ayla/students/:studentId/revision", async (req, res) => {
+  try {
+    const { user, student, db } = await aylaV189RequireStudent(req, req.params.studentId, "revision");
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.date || "")) ? String(req.query.date) : aylaDateOnly();
+    const liveDb = await readLiveDb();
+    const progress = aylaV214ProgressSnapshot(db, liveDb, user, student, date);
+    return aylaSendOk(res, {
+      revision: progress.revision,
+      weakAreas: progress.weakAreas,
+      progressFeed: { date: progress.date, completion: progress.summary, streaks: progress.streaks },
+      privacy: progress.privacy,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load revision");
+  }
+});
+
 app.get("/api/ayla/community/leaderboard", async (req, res) => {
   try {
-    await aylaGetAuthenticatedUser(req);
-    const db = await readAylaDb();
+    const { user, student, db } = await aylaV189RequireStudent(req, req.query.studentId, "leaderboard");
     const period = String(req.query.period || "weekly") === "monthly" ? "monthly" : "weekly";
-    return aylaSendOk(res, { period, source: "aylamed-db.json only", lms_leaderboard_unchanged: true, leaderboard: aylaV189Leaderboard(db, period) });
+    const examTrackId = aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam);
+    const leaderboard = rankLearningLeaderboard(
+      aylaV189Leaderboard(db, period).filter((row) => aylaCanonicalExamTrack(row.examTrackId || row.exam_track_id || row.exam) === examTrackId),
+      { scoreFields: ["points", "improvementScore", "assessmentAccuracy", "completionPercent"], identityFields: ["studentId", "username"] },
+    );
+    const liveDb = await readLiveDb();
+    const lms = aylaV214LmsContext(db, liveDb, user, student);
+    return aylaSendOk(res, {
+      period,
+      examTrackId,
+      leaderboard,
+      lanes: {
+        aylamed: { scoring_period: period, authority: "aylamed_db", leaderboard },
+        lms: lms.courses.map((course) => ({
+          course_id: course.course_id,
+          course_name: course.course_name,
+          scoring_period: "existing_lms_total",
+          authority: "lms_live_db_read_only",
+          leaderboard: course.leaderboard,
+          viewer: course.viewer_leaderboard,
+        })),
+      },
+      viewer: {
+        aylamed: leaderboard.find((row) => String(row.studentId || "") === String(student.id)) || null,
+        lms: lms.courses.map((course) => ({ course_id: course.course_id, entry: course.viewer_leaderboard })),
+      },
+      source: "separate_authoritative_lanes",
+      cross_product_points_combined: false,
+      lms_read_only: true,
+      lms_leaderboard_unchanged: true,
+    });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message);
   }
@@ -58984,17 +64220,21 @@ app.get("/api/ayla/community/leaderboard", async (req, res) => {
 
 app.get("/api/ayla/study-partners/matches", async (req, res) => {
   try {
-    const { student, db } = await aylaV189RequireStudent(req, req.query.studentId);
+    const { student, db } = await aylaV189RequireStudent(req, req.query.studentId, "study_partner");
+    const liveDb = await readLiveDb();
+    const examTrackId = aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam);
     const activePairs = aylaValues(db, "aylaStudyPartnerRequests").filter((row) => ["pending", "accepted", "blocked"].includes(String(row.status || "").toLowerCase()));
     const candidates = aylaValues(db, "aylaStudents")
       .filter((row) => String(row.id) !== String(student.id) && Boolean(row.studyPartnerOptIn || row.study_partner_opt_in))
+      .filter((row) => aylaV219StudentProfileDiscoverable(db, row))
+      .filter((row) => aylaCanonicalExamTrack(row.examTrackId || row.exam_track_id || row.exam) === examTrackId)
       .filter((row) => !activePairs.some((pair) => [String(pair.fromStudentId), String(pair.toStudentId)].includes(String(student.id)) && [String(pair.fromStudentId), String(pair.toStudentId)].includes(String(row.id))));
-    const matches = candidates.map((candidate) => aylaV189PartnerPublic(db, candidate, student))
+    const matches = candidates.map((candidate) => aylaV189PartnerPublic(db, candidate, student, liveDb))
       .filter((row) => row.compatibilityScore > 0)
       .sort((a, b) => b.compatibilityScore - a.compatibilityScore)
       .slice(0, 20)
       .map((row) => ({ ...row, score: row.compatibilityScore, reasons: row.compatibilityReasons }));
-    return aylaSendOk(res, { matches });
+    return aylaSendOk(res, { matches, matching: { exam_isolated: true, lms_preferences_read_only: true, lms_contacts_exposed: false } });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load study partner matches");
   }
@@ -59002,11 +64242,12 @@ app.get("/api/ayla/study-partners/matches", async (req, res) => {
 
 app.get("/api/ayla/study-partners/requests", async (req, res) => {
   try {
-    const { student, db } = await aylaV189RequireStudent(req, req.query.studentId);
+    const { student, db } = await aylaV189RequireStudent(req, req.query.studentId, "study_partner");
+    const liveDb = await readLiveDb();
     const rows = aylaValues(db, "aylaStudyPartnerRequests")
       .filter((row) => [String(row.fromStudentId), String(row.toStudentId)].includes(String(student.id)))
       .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")));
-    const visible = rows.map((row) => aylaV189PartnerRequestView(db, row, student));
+    const visible = rows.map((row) => aylaV189PartnerRequestView(db, row, student, liveDb));
     return aylaSendOk(res, {
       incoming: visible.filter((row) => row.status === "pending" && row.direction === "incoming"),
       sent: visible.filter((row) => row.status === "pending" && row.direction === "sent"),
@@ -59021,19 +64262,38 @@ app.get("/api/ayla/study-partners/requests", async (req, res) => {
 
 app.post("/api/ayla/study-partners/requests", async (req, res) => {
   try {
-    const { user, student, db } = await aylaV189RequireStudent(req, req.body.studentId);
-    const target = aylaGetItem(db, "aylaStudents", req.body.targetStudentId);
-    if (!target || String(target.id) === String(student.id)) return aylaSendError(res, 400, "Valid target study partner is required");
-    if (!Boolean(target.studyPartnerOptIn || target.study_partner_opt_in)) return aylaSendError(res, 409, "This doctor is not currently opted in to study-partner requests");
-    const pairRows = aylaValues(db, "aylaStudyPartnerRequests").filter((row) => [String(row.fromStudentId), String(row.toStudentId)].includes(String(student.id)) && [String(row.fromStudentId), String(row.toStudentId)].includes(String(target.id)));
-    const blocked = pairRows.find((row) => String(row.status || "").toLowerCase() === "blocked");
-    if (blocked) return aylaSendError(res, 403, "Study-partner contact is blocked between these accounts");
-    const existing = pairRows.find((row) => ["pending", "accepted"].includes(String(row.status || "").toLowerCase()));
-    if (existing) return aylaSendOk(res, { request: existing, duplicate: true });
-    const request = { id: aylaId("AYLA-SPR"), fromStudentId: student.id, fromUserId: user.id, toStudentId: target.id, toUserId: target.ayla_user_id || target.user_id || null, status: "pending", createdAt: aylaNow(), updatedAt: aylaNow() };
-    aylaSetItem(db, "aylaStudyPartnerRequests", request);
-    await writeAylaDb(db);
-    return aylaSendOk(res, { request }, 201);
+    const initial = await aylaV189RequireStudent(req, req.body.studentId, "study_partner");
+    const result = await mutateAylaDb(async (db) => {
+      const { user, student } = aylaV214AtomicStudentContext(db, initial, "study_partner");
+      const target = aylaGetItem(db, "aylaStudents", req.body.targetStudentId);
+      if (!target || String(target.id) === String(student.id)) throw Object.assign(new Error("Valid target study partner is required"), { statusCode: 400 });
+      if (aylaCanonicalExamTrack(target.examTrackId || target.exam_track_id || target.exam) !== aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam)) {
+        throw Object.assign(new Error("Study partners must belong to the same exam dashboard"), { statusCode: 409 });
+      }
+      if (!Boolean(student.studyPartnerOptIn || student.study_partner_opt_in)) throw Object.assign(new Error("Opt in before sending study-partner requests"), { statusCode: 409 });
+      if (!Boolean(target.studyPartnerOptIn || target.study_partner_opt_in)) throw Object.assign(new Error("This doctor is not currently opted in to study-partner requests"), { statusCode: 409 });
+      if (!aylaV219StudentProfileDiscoverable(db, target)) throw Object.assign(new Error("This doctor is not currently discoverable for new study-partner requests"), { statusCode: 409 });
+      const pairRows = aylaValues(db, "aylaStudyPartnerRequests").filter((row) => [String(row.fromStudentId), String(row.toStudentId)].includes(String(student.id)) && [String(row.fromStudentId), String(row.toStudentId)].includes(String(target.id)));
+      if (pairRows.some((row) => String(row.status || "").toLowerCase() === "blocked")) throw Object.assign(new Error("Study-partner contact is blocked between these accounts"), { statusCode: 403 });
+      const existing = pairRows.find((row) => ["pending", "accepted"].includes(String(row.status || "").toLowerCase()));
+      if (existing) return { request: existing, student, duplicate: true };
+      const request = {
+        id: aylaId("AYLA-SPR"),
+        fromStudentId: student.id,
+        fromUserId: user.id,
+        toStudentId: target.id,
+        toUserId: target.ayla_user_id || target.user_id || null,
+        status: "pending",
+        createdAt: aylaNow(),
+        updatedAt: aylaNow(),
+      };
+      aylaSetItem(db, "aylaStudyPartnerRequests", request);
+      aylaV189RecordActivity(db, student.id, "study_partner_action", { requestId: request.id, action: "requested", status: request.status });
+      return { request, student, duplicate: false };
+    });
+    const latestDb = await readAylaDb();
+    const liveDb = await readLiveDb();
+    return aylaSendOk(res, { request: aylaV189PartnerRequestView(latestDb, result.request, result.student, liveDb), duplicate: result.duplicate }, result.duplicate ? 200 : 201);
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message);
   }
@@ -59041,38 +64301,66 @@ app.post("/api/ayla/study-partners/requests", async (req, res) => {
 
 app.patch("/api/ayla/study-partners/requests/:id", async (req, res) => {
   try {
-    const { student, db } = await aylaV189RequireStudent(req, req.body.studentId);
-    const request = aylaGetItem(db, "aylaStudyPartnerRequests", req.params.id);
-    if (!request || ![request.fromStudentId, request.toStudentId].map(String).includes(String(student.id))) return aylaSendError(res, 404, "Study partner request not found");
-    const action = String(req.body.action || req.body.status || "").toLowerCase();
-    const current = String(request.status || "pending").toLowerCase();
-    const isSender = String(request.fromStudentId) === String(student.id);
-    const isRecipient = String(request.toStudentId) === String(student.id);
-    if (action === "accepted" || action === "accept") {
-      if (!isRecipient || current !== "pending") return aylaSendError(res, 409, "Only the recipient can accept a pending request");
-      request.status = "accepted"; request.acceptedAt = aylaNow();
-    } else if (action === "declined" || action === "decline") {
-      if (!isRecipient || current !== "pending") return aylaSendError(res, 409, "Only the recipient can decline a pending request");
-      request.status = "declined"; request.declinedAt = aylaNow();
-    } else if (action === "cancelled" || action === "cancel") {
-      if (!isSender || current !== "pending") return aylaSendError(res, 409, "Only the sender can cancel a pending request");
-      request.status = "cancelled"; request.cancelledAt = aylaNow();
-    } else if (action === "removed" || action === "remove") {
-      if (current !== "accepted") return aylaSendError(res, 409, "Only a current partner can be removed");
-      request.status = "removed"; request.removedAt = aylaNow(); request.removedByStudentId = student.id;
-    } else if (action === "blocked" || action === "block") {
-      request.status = "blocked"; request.blockedAt = aylaNow(); request.blockedByStudentId = student.id;
-    } else if (action === "unblocked" || action === "unblock") {
-      if (current !== "blocked" || String(request.blockedByStudentId || "") !== String(student.id)) return aylaSendError(res, 409, "Only the student who blocked this account can unblock it");
-      request.status = "removed"; request.unblockedAt = aylaNow(); request.blockedByStudentId = null;
-    } else {
-      return aylaSendError(res, 400, "Invalid study-partner action");
-    }
-    request.updatedAt = aylaNow();
-    aylaSetItem(db, "aylaStudyPartnerRequests", request);
-    aylaV189RecordActivity(db, student.id, "study_partner_action", { requestId: request.id, action, status: request.status });
-    await writeAylaDb(db);
-    return aylaSendOk(res, { request: aylaV189PartnerRequestView(db, request, student) });
+    const initial = await aylaV189RequireStudent(req, req.body.studentId, "study_partner");
+    const result = await mutateAylaDb(async (db) => {
+      const { student } = aylaV214AtomicStudentContext(db, initial, "study_partner");
+      const request = aylaGetItem(db, "aylaStudyPartnerRequests", req.params.id);
+      if (!request || ![request.fromStudentId, request.toStudentId].map(String).includes(String(student.id))) throw Object.assign(new Error("Study partner request not found"), { statusCode: 404 });
+      const action = String(req.body.action || req.body.status || "").toLowerCase();
+      const current = String(request.status || "pending").toLowerCase();
+      const isSender = String(request.fromStudentId) === String(student.id);
+      const isRecipient = String(request.toStudentId) === String(student.id);
+      let idempotent = false;
+      if (["accepted", "accept"].includes(action)) {
+        if (isRecipient && current === "accepted") idempotent = true;
+        else {
+          if (!isRecipient || current !== "pending") throw Object.assign(new Error("Only the recipient can accept a pending request"), { statusCode: 409 });
+          const counterpart = aylaGetItem(db, "aylaStudents", request.fromStudentId);
+          if (!counterpart || aylaCanonicalExamTrack(counterpart.examTrackId || counterpart.exam) !== aylaCanonicalExamTrack(student.examTrackId || student.exam)) throw Object.assign(new Error("Study-partner exam tracks no longer match"), { statusCode: 409 });
+          request.status = "accepted"; request.acceptedAt = aylaNow();
+        }
+      } else if (["declined", "decline"].includes(action)) {
+        if (isRecipient && current === "declined") idempotent = true;
+        else {
+          if (!isRecipient || current !== "pending") throw Object.assign(new Error("Only the recipient can decline a pending request"), { statusCode: 409 });
+          request.status = "declined"; request.declinedAt = aylaNow();
+        }
+      } else if (["cancelled", "cancel"].includes(action)) {
+        if (isSender && current === "cancelled") idempotent = true;
+        else {
+          if (!isSender || current !== "pending") throw Object.assign(new Error("Only the sender can cancel a pending request"), { statusCode: 409 });
+          request.status = "cancelled"; request.cancelledAt = aylaNow();
+        }
+      } else if (["removed", "remove"].includes(action)) {
+        if (current === "removed") idempotent = true;
+        else {
+          if (current !== "accepted") throw Object.assign(new Error("Only a current partner can be removed"), { statusCode: 409 });
+          request.status = "removed"; request.removedAt = aylaNow(); request.removedByStudentId = student.id;
+        }
+      } else if (["blocked", "block"].includes(action)) {
+        if (current === "blocked" && String(request.blockedByStudentId || "") === String(student.id)) idempotent = true;
+        else {
+          request.status = "blocked"; request.blockedAt = aylaNow(); request.blockedByStudentId = student.id;
+        }
+      } else if (["unblocked", "unblock"].includes(action)) {
+        if (current === "removed" && request.unblockedAt && String(request.unblockedByStudentId || "") === String(student.id)) idempotent = true;
+        else {
+          if (current !== "blocked" || String(request.blockedByStudentId || "") !== String(student.id)) throw Object.assign(new Error("Only the student who blocked this account can unblock it"), { statusCode: 409 });
+          request.status = "removed"; request.unblockedAt = aylaNow(); request.unblockedByStudentId = student.id; request.blockedByStudentId = null;
+        }
+      } else {
+        throw Object.assign(new Error("Invalid study-partner action"), { statusCode: 400 });
+      }
+      if (!idempotent) {
+        request.updatedAt = aylaNow();
+        aylaSetItem(db, "aylaStudyPartnerRequests", request);
+        aylaV189RecordActivity(db, student.id, "study_partner_action", { requestId: request.id, action, status: request.status });
+      }
+      return { request, student, idempotent };
+    });
+    const latestDb = await readAylaDb();
+    const liveDb = await readLiveDb();
+    return aylaSendOk(res, { request: aylaV189PartnerRequestView(latestDb, result.request, result.student, liveDb), idempotent: result.idempotent });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message);
   }
@@ -59080,18 +64368,32 @@ app.patch("/api/ayla/study-partners/requests/:id", async (req, res) => {
 
 app.post("/api/ayla/study-partners/requests/:id/report", async (req, res) => {
   try {
-    const { user, student, db } = await aylaV189RequireStudent(req, req.body.studentId);
-    const request = aylaGetItem(db, "aylaStudyPartnerRequests", req.params.id);
-    if (!request || ![request.fromStudentId, request.toStudentId].map(String).includes(String(student.id))) return aylaSendError(res, 404, "Study partner relationship not found");
-    const counterpartStudentId = String(request.fromStudentId) === String(student.id) ? request.toStudentId : request.fromStudentId;
-    const report = {
-      id: aylaId("AYLA-SPREP"), requestId: request.id, reporterStudentId: student.id, reporterUserId: user.id,
-      reportedStudentId: counterpartStudentId, reason: aylaV189CleanText(req.body.reason || "Study partner concern").slice(0, 500),
-      details: aylaV189CleanText(req.body.details || "").slice(0, 2000), status: "open", createdAt: aylaNow(), updatedAt: aylaNow(),
-    };
-    aylaSetItem(db, "aylaCommunityReports", report);
-    await writeAylaDb(db);
-    return aylaSendOk(res, { report }, 201);
+    const initial = await aylaV189RequireStudent(req, req.body.studentId, "study_partner");
+    const result = await mutateAylaDb(async (db) => {
+      const { user, student } = aylaV214AtomicStudentContext(db, initial, "study_partner");
+      const request = aylaGetItem(db, "aylaStudyPartnerRequests", req.params.id);
+      if (!request || ![request.fromStudentId, request.toStudentId].map(String).includes(String(student.id))) throw Object.assign(new Error("Study partner relationship not found"), { statusCode: 404 });
+      const counterpartStudentId = String(request.fromStudentId) === String(student.id) ? request.toStudentId : request.fromStudentId;
+      const reason = aylaV189CleanText(req.body.reason || "Study partner concern").slice(0, 500);
+      const details = aylaV189CleanText(req.body.details || "").slice(0, 2000);
+      const idempotencyKey = aylaV189CleanText(req.body.idempotencyKey || req.body.idempotency_key || "").slice(0, 180);
+      const existing = aylaValues(db, "aylaCommunityReports").find((row) => (
+        String(row.requestId || "") === String(request.id)
+        && String(row.reporterStudentId || "") === String(student.id)
+        && String(row.status || "open") === "open"
+        && ((idempotencyKey && String(row.idempotencyKey || "") === idempotencyKey) || (!idempotencyKey && row.reason === reason && row.details === details))
+      ));
+      if (existing) return { report: existing, duplicate: true };
+      const report = {
+        id: aylaId("AYLA-SPREP"), requestId: request.id, reporterStudentId: student.id, reporterUserId: user.id,
+        reportedStudentId: counterpartStudentId, reason, details, idempotencyKey: idempotencyKey || null,
+        status: "open", createdAt: aylaNow(), updatedAt: aylaNow(),
+      };
+      aylaSetItem(db, "aylaCommunityReports", report);
+      aylaV189RecordActivity(db, student.id, "study_partner_report", { requestId: request.id, reportId: report.id });
+      return { report, duplicate: false };
+    });
+    return aylaSendOk(res, { report: result.report, duplicate: result.duplicate }, result.duplicate ? 200 : 201);
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to report study partner");
   }
@@ -59129,19 +64431,342 @@ function aylaV190CleanNoteBlock(block = {}, index = 0) {
     imageUrl: aylaV189CleanText(block.imageUrl || block.image_url || "").slice(0, 4000),
     dataUrl: dataUrl.startsWith("data:image/") && dataUrl.length <= 350000 ? dataUrl : "",
     caption: aylaV189CleanText(block.caption || "").slice(0, 500),
+    contentOrigin: aylaV189CleanText(block.contentOrigin || block.content_origin || "").slice(0, 40),
+    visualStyle: aylaV189CleanText(block.visualStyle || block.visual_style || "").slice(0, 40),
+    sourceState: aylaV189CleanText(block.sourceState || block.source_state || "").slice(0, 40),
+    captureKey: aylaV189CleanText(block.captureKey || block.capture_key || "").slice(0, 180),
+    linkedCaptureKey: aylaV189CleanText(block.linkedCaptureKey || block.linked_capture_key || "").slice(0, 180),
+    source: block.source && typeof block.source === "object" ? JSON.parse(JSON.stringify(block.source)) : null,
     createdAt: block.createdAt || aylaNow(), updatedAt: aylaNow(),
   };
 }
-function aylaV190ValidateNoteSources(db, student, blocks = []) {
-  const examTrackId = aylaCanonicalExamTrack(student.examTrackId || student.exam);
-  const errors = [];
-  blocks.forEach((block, index) => {
-    if (!block.resourceId) return;
-    const resource = aylaGetItem(db, "aylaResources", block.resourceId);
-    if (!resource) errors.push(`Block ${index + 1}: source resource was not found`);
-    else if (aylaCanonicalExamTrack(resource.examTrackId || resource.examTrack) !== examTrackId) errors.push(`Block ${index + 1}: cross-exam source is not allowed`);
+function aylaV212NotebookError(message, statusCode = 400, code = "INVALID_NOTEBOOK_SOURCE") {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  error.code = code;
+  return error;
+}
+
+function aylaV212NotebookSourceInput(input = {}) {
+  const nested = input.source && typeof input.source === "object" ? input.source : {};
+  return {
+    ...nested,
+    ...input,
+    sourceType: input.sourceType || input.source_type || input.sourceKind || input.source_kind || nested.kind || nested.sourceType,
+    resourceId: input.resourceId || input.resource_id || nested.resourceId || nested.resource_id,
+    assignmentId: input.assignmentId || input.assignment_id || nested.assignmentId || nested.assignment_id,
+    pageKey: input.pageKey || input.page_key || nested.pageKey || nested.page_key || input.pdfPage || input.pdf_page,
+    sessionId: input.sessionId || input.session_id || nested.sessionId || nested.session_id,
+    questionRef: input.questionRef || input.question_ref || input.questionId || input.question_id || nested.questionRef || nested.question_ref,
+    assessmentId: input.assessmentId || input.assessment_id || nested.assessmentId || nested.assessment_id,
+    attemptId: input.attemptId || input.attempt_id || nested.attemptId || nested.attempt_id,
+    revisionId: input.revisionId || input.revision_id || nested.revisionId || nested.revision_id,
+    timestampSeconds: input.timestampSeconds ?? input.timestamp_seconds ?? input.startSeconds ?? input.start_seconds ?? nested.timestampSeconds ?? nested.timestamp_seconds,
+    captureSection: input.captureSection || input.capture_section || nested.captureSection || nested.capture_section,
+    sourceExcerpt: input.sourceExcerpt ?? input.source_excerpt ?? input.excerpt ?? (normalizeAylaNotebookSourceKind(input.sourceType || input.source_type || nested.kind, input.type) ? input.text : ""),
+  };
+}
+
+function aylaV212ExactSourceExcerpt(canonicalText, requestedExcerpt, label) {
+  const excerpt = selectAylaNotebookSourceExcerpt(canonicalText, requestedExcerpt);
+  if (excerpt === null) throw aylaV212NotebookError(`${label} excerpt does not match the current authorized source`, 409, "NOTEBOOK_SOURCE_EXCERPT_MISMATCH");
+  return excerpt;
+}
+
+function aylaV212AssessmentReviewRow(attempt = {}, questionRef = "") {
+  const wanted = String(questionRef || "").trim();
+  return (Array.isArray(attempt.reviewAnswers) ? attempt.reviewAnswers : []).find((row) => [
+    row.questionId,
+    row.resourceId,
+    row.questionNumber,
+  ].some((value) => String(value || "") === wanted)) || null;
+}
+
+async function aylaV212ResolveNotebookSource(db, user, student, rawInput = {}) {
+  const input = aylaV212NotebookSourceInput(rawInput);
+  const kind = normalizeAylaNotebookSourceKind(input.sourceType, input.type);
+  if (!kind) throw aylaV212NotebookError("A supported notebook source type is required");
+  const examTrackId = aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam);
+  if (!examTrackId) throw aylaV212NotebookError("A valid exam dashboard is required", 409, "NOTEBOOK_EXAM_REQUIRED");
+  const sourceBase = {
+    kind,
+    examTrackId,
+    available: true,
+    captureSection: aylaV189CleanText(input.captureSection || "source").slice(0, 80),
+  };
+
+  if (kind === "library_page") {
+    aylaDashboardEntitlement(db, user, student, "library");
+    const eligible = await aylaV211EligibleReadings(db, student);
+    const resource = eligible.resources.find((row) => aylaLibraryResourceMatchesId(row, input.resourceId));
+    if (!resource) throw aylaV212NotebookError("Library source is not currently available for this exam dashboard", 404, "NOTEBOOK_LIBRARY_SOURCE_UNAVAILABLE");
+    const assignment = input.assignmentId
+      ? aylaV211AssignmentForReading(aylaV211ReadingAssignments(db, student), resource, input.assignmentId)
+      : aylaV211AssignmentForReading(aylaV211ReadingAssignments(db, student), resource);
+    if (input.assignmentId && !assignment) throw aylaV212NotebookError("Reading assignment does not belong to this student", 404, "NOTEBOOK_READING_ASSIGNMENT_NOT_FOUND");
+    const page = buildAylaLibraryPage(resource, input.pageKey, {
+      examTrack: examTrackId,
+      studentId: student.id,
+      progress: aylaV211LatestReadingProgress(db, student, resource, assignment),
+      assignment,
+    });
+    if (!page) throw aylaV212NotebookError("Exact approved Library page is not currently available", 404, "NOTEBOOK_LIBRARY_PAGE_UNAVAILABLE");
+    const pageReference = page.page.exact_reference
+      || `${page.resource.book_title || "AylaMed Reading"} — ${page.page.printed_page ? `page ${page.page.printed_page}` : `PDF page ${page.page.pdf_page}`}`;
+    return {
+      ...sourceBase,
+      resourceId: resource.id,
+      assignmentId: assignment?.id || "",
+      pageKey: page.page.key,
+      pdfPage: page.page.pdf_page,
+      printedPage: page.page.printed_page,
+      title: page.resource.title,
+      reference: pageReference,
+      excerpt: aylaV212ExactSourceExcerpt(page.page.content, input.sourceExcerpt, "Library page"),
+      system: page.resource.system,
+      topic: page.resource.topic,
+    };
+  }
+
+  if (kind === "content_video") {
+    aylaDashboardEntitlement(db, user, student, "content_hub");
+    const eligible = await aylaV210EligibleVideos(db, student);
+    const video = eligible.videos.find((row) => aylaContentHubVideoMatchesId(row, input.resourceId));
+    if (!video) throw aylaV212NotebookError("Content Hub video is not currently available for this exam dashboard", 404, "NOTEBOOK_VIDEO_SOURCE_UNAVAILABLE");
+    const assignment = input.assignmentId
+      ? aylaV210AssignmentForVideo(eligible.assignments, video, input.assignmentId)
+      : aylaV210AssignmentForVideo(eligible.assignments, video);
+    if (input.assignmentId && !assignment) throw aylaV212NotebookError("Video assignment does not belong to this student", 404, "NOTEBOOK_VIDEO_ASSIGNMENT_NOT_FOUND");
+    if (String(input.sourceExcerpt || "").trim()) throw aylaV212NotebookError("Video source text must come from a verified transcript; save your own observation as the note", 409, "NOTEBOOK_VIDEO_EXCERPT_UNVERIFIED");
+    const safeVideo = sanitizeAylaContentHubVideo(video, { assignment });
+    const requestedSeconds = aylaNotebookTimestampSeconds(input.timestampSeconds);
+    const verifiedDuration = Math.max(0, Number(safeVideo.duration_seconds || video.videoEndSeconds || 0));
+    if (requestedSeconds > 0 && !verifiedDuration) throw aylaV212NotebookError("Verified video duration metadata is required before saving a timestamp", 409, "NOTEBOOK_VIDEO_DURATION_UNVERIFIED");
+    if (verifiedDuration && requestedSeconds > verifiedDuration) throw aylaV212NotebookError("Video timestamp is outside the verified video duration", 409, "NOTEBOOK_VIDEO_TIMESTAMP_OUT_OF_RANGE");
+    const seconds = requestedSeconds;
+    return {
+      ...sourceBase,
+      resourceId: video.id,
+      assignmentId: assignment?.id || "",
+      providerVideoId: video.providerKey,
+      timestampSeconds: seconds,
+      durationSeconds: verifiedDuration,
+      title: safeVideo.title,
+      reference: seconds ? `Video timestamp ${aylaNotebookTimestampSeconds(seconds) >= 3600 ? new Date(seconds * 1000).toISOString().slice(11, 19) : new Date(seconds * 1000).toISOString().slice(14, 19)}` : "Video",
+      excerpt: "",
+      system: safeVideo.system,
+      topic: safeVideo.topic,
+    };
+  }
+
+  if (kind === "qbank_question") {
+    aylaRequireQbankAccess(db, user, student, examTrackId);
+    const session = aylaOwnedQbankSession(db, user, student, input.sessionId);
+    const mapping = qbankSessionQuestion(session, input.questionRef);
+    if (!mapping) throw aylaV212NotebookError("Question does not belong to this QBank session", 404, "NOTEBOOK_QBANK_QUESTION_NOT_FOUND");
+    const question = await aylaPlayableQbankQuestion(db, session, mapping);
+    if (!question || question.unavailable) throw aylaV212NotebookError("QBank question is no longer approved for delivery", 404, "NOTEBOOK_QBANK_SOURCE_UNAVAILABLE");
+    const section = String(input.captureSection || "question").toLowerCase();
+    const wantsExplanation = ["answer", "correct_answer", "explanation", "result"].includes(section);
+    if (wantsExplanation && !question.explanation_available) {
+      throw aylaV212NotebookError("Correct answers and explanations remain server-only until tutor-mode answer submission or final test submission", 409, "NOTEBOOK_QBANK_ANSWER_NOT_RELEASED");
+    }
+    const canonical = wantsExplanation
+      ? section === "correct_answer"
+        ? `Correct answer choice: ${question.correct_answer_id}`
+        : question.explanation_html
+      : question.question_html;
+    return {
+      ...sourceBase,
+      resourceId: mapping.contentQuestionId,
+      sessionId: session.id,
+      questionRef: mapping.ref,
+      captureSection: wantsExplanation ? section : "question",
+      title: question.title || question.display_question_id || "QBank question",
+      reference: question.display_question_id || `Question ${mapping.ref}`,
+      questionNumber: question.display_question_id || "",
+      excerpt: aylaV212ExactSourceExcerpt(canonical, input.sourceExcerpt, wantsExplanation ? "QBank explanation" : "QBank question"),
+      system: question.system_key || question.taxonomy?.system_key || "General",
+      topic: question.topic_key || question.taxonomy?.topic_key || "",
+    };
+  }
+
+  if (kind === "assessment_question") {
+    aylaDashboardEntitlement(db, user, student, "assessments");
+    const attempt = aylaGetItem(db, "aylaAssessmentAttempts", input.attemptId);
+    if (!attempt || String(attempt.studentId || "") !== String(student.id) || attempt.serverVerified !== true) {
+      throw aylaV212NotebookError("Submitted assessment review was not found for this student", 404, "NOTEBOOK_ASSESSMENT_REVIEW_NOT_FOUND");
+    }
+    const assignment = aylaGetItem(db, "aylaResourceAssignments", attempt.assignmentId);
+    if (!assignment || String(assignment.studentId || "") !== String(student.id)) throw aylaV212NotebookError("Assessment assignment is no longer available", 404, "NOTEBOOK_ASSESSMENT_SOURCE_UNAVAILABLE");
+    const assignmentExam = aylaCanonicalExamTrack(assignment.examTrackId || assignment.examTrack || assignment.exam_track || student.examTrackId || student.exam);
+    if (assignmentExam !== examTrackId) throw aylaV212NotebookError("Cross-exam assessment capture is not allowed", 403, "NOTEBOOK_CROSS_EXAM_SOURCE");
+    const review = aylaV212AssessmentReviewRow(attempt, input.questionRef);
+    if (!review) throw aylaV212NotebookError("Assessment question review was not found", 404, "NOTEBOOK_ASSESSMENT_QUESTION_NOT_FOUND");
+    const section = String(input.captureSection || "explanation").toLowerCase();
+    const assessmentItem = (Array.isArray(assignment.items) ? assignment.items : [])[0] || {};
+    const sourceQuestion = (Array.isArray(assessmentItem.questions) ? assessmentItem.questions : []).find((question, index) => {
+      const identity = aylaV189QuestionIdentity(question, index);
+      return [identity, question.resourceId, question.questionNumber, question.resourceNumber]
+        .some((value) => String(value || "") === String(review.questionId || review.resourceId || review.questionNumber || ""));
+    }) || null;
+    const canonical = section === "correct_answer"
+      ? `Correct answer: ${typeof review.correctAnswer === "string" ? review.correctAnswer : JSON.stringify(review.correctAnswer ?? "")}`
+      : section === "question"
+        ? sourceQuestion?.stem || sourceQuestion?.question || sourceQuestion?.title || ""
+        : review.explanation || `Assessment result: ${review.outcome || "reviewed"}`;
+    if (!canonical) throw aylaV212NotebookError("Requested assessment source text is not currently available", 409, "NOTEBOOK_ASSESSMENT_SECTION_UNAVAILABLE");
+    return {
+      ...sourceBase,
+      assignmentId: assignment.id,
+      assessmentId: assignment.id,
+      attemptId: attempt.id,
+      questionRef: review.questionId || review.resourceId || review.questionNumber,
+      captureSection: section,
+      title: attempt.title || assignment.title || "Assessment review",
+      reference: review.questionNumber ? `Question ${review.questionNumber}` : "Assessment question",
+      questionNumber: review.questionNumber || "",
+      excerpt: aylaV212ExactSourceExcerpt(canonical, input.sourceExcerpt, "Assessment review"),
+      system: review.system || attempt.system || assignment.system || "General",
+      topic: review.topic || attempt.topic || assignment.topic || "",
+    };
+  }
+
+  if (kind === "roadmap_question") {
+    aylaDashboardEntitlement(db, user, student, "qbank");
+    const assignment = aylaGetItem(db, "aylaResourceAssignments", input.assignmentId);
+    if (!assignment || String(assignment.studentId || "") !== String(student.id)) throw aylaV212NotebookError("Roadmap question assignment was not found", 404, "NOTEBOOK_ROADMAP_QUESTION_NOT_FOUND");
+    const item = aylaV189FindAssignmentItem(assignment, input.resourceId || input.questionRef);
+    if (!item) throw aylaV212NotebookError("Roadmap question was not found", 404, "NOTEBOOK_ROADMAP_QUESTION_NOT_FOUND");
+    const attempt = input.attemptId
+      ? aylaGetItem(db, "aylaQuestionAttempts", input.attemptId)
+      : aylaV189LatestQuestionAttempt(db, student.id, assignment.id, item.resourceId);
+    if (attempt && String(attempt.studentId || "") !== String(student.id)) throw aylaV212NotebookError("Question attempt does not belong to this student", 404, "NOTEBOOK_QUESTION_ATTEMPT_NOT_FOUND");
+    const section = String(input.captureSection || "question").toLowerCase();
+    const wantsReview = ["answer", "correct_answer", "explanation", "result"].includes(section);
+    if (wantsReview && (!attempt || attempt.serverVerified !== true || !attempt.review)) {
+      throw aylaV212NotebookError("Correct answers and explanations remain server-only until answer submission", 409, "NOTEBOOK_QUESTION_ANSWER_NOT_RELEASED");
+    }
+    const canonical = wantsReview
+      ? section === "correct_answer"
+        ? `Correct answer: ${attempt.review.correctAnswer ?? attempt.review.correctAnswerIndex ?? ""}`
+        : attempt.review.explanation || `Result: ${attempt.outcome || "reviewed"}`
+      : item.stem || item.question || item.title || assignment.title;
+    return {
+      ...sourceBase,
+      resourceId: item.resourceId || "",
+      assignmentId: assignment.id,
+      attemptId: attempt?.id || "",
+      questionRef: item.resourceId || item.questionNumber || input.questionRef,
+      captureSection: wantsReview ? section : "question",
+      title: item.title || assignment.title || "Roadmap question",
+      reference: item.questionNumber ? `Question ${item.questionNumber}` : "Roadmap question",
+      questionNumber: item.questionNumber || "",
+      excerpt: aylaV212ExactSourceExcerpt(canonical, input.sourceExcerpt, "Roadmap question"),
+      system: item.system || assignment.system || "General",
+      topic: item.topic || assignment.topic || "",
+    };
+  }
+
+  aylaDashboardEntitlement(db, user, student, "revision");
+  const revision = aylaGetItem(db, "aylaRevisionQueue", input.revisionId);
+  if (!revision || String(revision.studentId || "") !== String(student.id) || ["removed", "deleted"].includes(String(revision.status || "").toLowerCase())) {
+    throw aylaV212NotebookError("Revision item was not found for this student", 404, "NOTEBOOK_REVISION_ITEM_NOT_FOUND");
+  }
+  const revisionExam = aylaCanonicalExamTrack(revision.examTrack || revision.examTrackId || student.examTrackId || student.exam);
+  if (revisionExam !== examTrackId) throw aylaV212NotebookError("Cross-exam revision capture is not allowed", 403, "NOTEBOOK_CROSS_EXAM_SOURCE");
+  const canonical = [revision.system, revision.topic, revision.questionNumber || revision.cardNumber, ...(Array.isArray(revision.reasons) ? revision.reasons : [])].filter(Boolean).join(" — ");
+  return {
+    ...sourceBase,
+    revisionId: revision.id,
+    resourceId: revision.resourceId || revision.contentQuestionId || revision.sourceId || "",
+    assignmentId: revision.assignmentId || "",
+    sessionId: revision.sessionId || "",
+    questionRef: revision.questionRef || revision.questionNumber || "",
+    title: revision.topic || revision.system || "Revision item",
+    reference: revision.questionNumber ? `Question ${revision.questionNumber}` : "Scheduled revision",
+    questionNumber: revision.questionNumber || "",
+    excerpt: aylaV212ExactSourceExcerpt(canonical, input.sourceExcerpt, "Revision item"),
+    system: revision.system || "General",
+    topic: revision.topic || "",
+  };
+}
+
+async function aylaV212CurrentNotebookSources(db, user, student, notebook = {}) {
+  const currentSources = new Map();
+  for (const block of Array.isArray(notebook.blocks) ? notebook.blocks : []) {
+    const kind = normalizeAylaNotebookSourceKind(block.source?.kind || block.sourceType, block.type);
+    if (!kind) continue;
+    try {
+      currentSources.set(String(block.id), await aylaV212ResolveNotebookSource(db, user, student, block));
+    } catch {
+      currentSources.set(String(block.id), { kind, available: false });
+    }
+  }
+  return currentSources;
+}
+
+async function aylaV212RenderNotebook(db, user, student, notebook = {}) {
+  return sanitizeAylaNotebook(notebook, {
+    currentSources: await aylaV212CurrentNotebookSources(db, user, student, notebook),
   });
-  return errors;
+}
+
+async function aylaV212CanonicalNotebookBlocks(db, user, student, rawBlocks = [], existingBlocks = []) {
+  const existingById = new Map((Array.isArray(existingBlocks) ? existingBlocks : []).map((block) => [String(block.id), block]));
+  const output = [];
+  for (const [index, raw] of (Array.isArray(rawBlocks) ? rawBlocks : []).slice(0, 200).entries()) {
+    const cleaned = aylaV190CleanNoteBlock(raw, index);
+    const kind = normalizeAylaNotebookSourceKind(cleaned.source?.kind || cleaned.sourceType, cleaned.type);
+    if (!kind) {
+      cleaned.resourceId = "";
+      cleaned.sourceType = "";
+      cleaned.sourceTitle = "";
+      cleaned.sourceReference = "";
+      cleaned.sourceUrl = "";
+      cleaned.vimeoId = "";
+      cleaned.startSeconds = 0;
+      cleaned.endSeconds = 0;
+      cleaned.source = null;
+      cleaned.contentOrigin = "student_authored";
+      cleaned.visualStyle = cleaned.visualStyle || "handwriting";
+      output.push(cleaned);
+      continue;
+    }
+    try {
+      const source = await aylaV212ResolveNotebookSource(db, user, student, cleaned);
+      const capture = createAylaNotebookCaptureBlocks({
+        source,
+        captureKey: cleaned.captureKey || aylaNotebookSourceFingerprint(source),
+        idFactory: () => cleaned.id || aylaId("NB"),
+      });
+      output.push({
+        ...capture.blocks[0],
+        id: cleaned.id || capture.blocks[0].id,
+        order: index,
+        color: cleaned.color || capture.blocks[0].color,
+        caption: cleaned.caption || capture.blocks[0].caption,
+        createdAt: cleaned.createdAt || capture.blocks[0].createdAt,
+        updatedAt: aylaNow(),
+      });
+    } catch (error) {
+      const existing = existingById.get(String(cleaned.id));
+      if (!existing || !normalizeAylaNotebookSourceKind(existing.source?.kind || existing.sourceType, existing.type)) throw error;
+      output.push({ ...existing, order: index, updatedAt: existing.updatedAt || aylaNow() });
+    }
+  }
+  return output;
+}
+
+function aylaV212AtomicNotebookContext(db, initial) {
+  aylaEnsureSeedData(db);
+  const rawUser = aylaGetItem(db, "aylaUsers", initial.user.id);
+  const student = aylaGetItem(db, "aylaStudents", initial.student.id);
+  if (!rawUser || ["disabled", "deleted"].includes(String(rawUser.status || "").toLowerCase())) throw aylaV212NotebookError("AylaMed user is no longer active", 401, "NOTEBOOK_USER_INACTIVE");
+  if (!student || !aylaV189StudentOwned(student, rawUser)) throw aylaV212NotebookError("AylaMed student profile not found", 404, "NOTEBOOK_STUDENT_NOT_FOUND");
+  const user = aylaSanitizeUser(rawUser);
+  aylaDashboardEntitlement(db, user, student, "dynamic_notebook");
+  return { rawUser, user, student };
 }
 function aylaV190SaveNotebookVersion(db, notebook, reason = "saved") {
   const versions = aylaValues(db, "aylaNotebookVersions").filter((row) => String(row.notebookId) === String(notebook.id));
@@ -59150,34 +64775,189 @@ function aylaV190SaveNotebookVersion(db, notebook, reason = "saved") {
 }
 app.get("/api/ayla/students/:studentId/notebooks", async (req, res) => {
   try {
-    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId);
+    const { user, student, db } = await aylaV189RequireStudent(req, req.params.studentId, "dynamic_notebook");
     const includeArchived = String(req.query.includeArchived || req.query.include_archived || "false").toLowerCase() === "true";
     const notebooks = aylaValues(db, "aylaNotebooks")
       .filter((row) => String(row.studentId) === String(student.id))
       .filter((row) => !row.deletedAt)
       .filter((row) => includeArchived || !row.archivedAt)
       .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
-    return aylaSendOk(res, { notebooks, includeArchived });
+    const safeNotebooks = [];
+    for (const notebook of notebooks) safeNotebooks.push(await aylaV212RenderNotebook(db, user, student, notebook));
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, { notebooks: safeNotebooks, includeArchived });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message);
   }
 });
-app.post("/api/ayla/students/:studentId/notebooks", async (req, res) => { try { const { student, db } = await aylaV189RequireStudent(req, req.params.studentId); const examTrackId=aylaCanonicalExamTrack(student.examTrackId||student.exam); const blocks=(Array.isArray(req.body.blocks)?req.body.blocks:[]).slice(0,200).map(aylaV190CleanNoteBlock); const errors=aylaV190ValidateNoteSources(db,student,blocks); if(errors.length)return aylaSendError(res,400,"Notebook contains invalid sources",errors); const notebook={id:aylaId("AYLA-NOTE"),studentId:student.id,userId:student.ayla_user_id||student.user_id||"",examTrackId,title:aylaV189CleanText(req.body.title||"Untitled medical note").slice(0,240),system:aylaV189CleanText(req.body.system||"General").slice(0,120),topic:aylaV189CleanText(req.body.topic||"").slice(0,240),tags:aylaCleanArray(req.body.tags).slice(0,30),paperStyle:aylaV189CleanText(req.body.paperStyle||"ruled"),inkStyle:aylaV189CleanText(req.body.inkStyle||"pen"),blocks,createdAt:aylaNow(),updatedAt:aylaNow()}; const version=aylaV190SaveNotebookVersion(db,notebook,"created"); aylaSetItem(db,"aylaNotebooks",notebook); aylaV189RecordActivity(db,student.id,"notebook_created",{notebookId:notebook.id,version:version.version}); await writeAylaDb(db); return aylaSendOk(res,{notebook,version},201); } catch(error){return aylaSendError(res,error.statusCode||500,error.message);} });
-app.put("/api/ayla/students/:studentId/notebooks/:id", async (req, res) => { try { const { student, db }=await aylaV189RequireStudent(req,req.params.studentId); const notebook=aylaGetItem(db,"aylaNotebooks",req.params.id); if(!notebook||String(notebook.studentId)!==String(student.id)||notebook.deletedAt)return aylaSendError(res,404,"Notebook not found"); const blocks=(Array.isArray(req.body.blocks)?req.body.blocks:notebook.blocks||[]).slice(0,200).map(aylaV190CleanNoteBlock); const errors=aylaV190ValidateNoteSources(db,student,blocks); if(errors.length)return aylaSendError(res,400,"Notebook contains invalid sources",errors); notebook.title=aylaV189CleanText(req.body.title??notebook.title).slice(0,240); notebook.system=aylaV189CleanText(req.body.system??notebook.system).slice(0,120); notebook.topic=aylaV189CleanText(req.body.topic??notebook.topic).slice(0,240); notebook.tags=req.body.tags!==undefined?aylaCleanArray(req.body.tags).slice(0,30):notebook.tags; notebook.paperStyle=aylaV189CleanText(req.body.paperStyle||notebook.paperStyle||"ruled"); notebook.inkStyle=aylaV189CleanText(req.body.inkStyle||notebook.inkStyle||"pen"); notebook.blocks=blocks; notebook.updatedAt=aylaNow(); const version=aylaV190SaveNotebookVersion(db,notebook,"saved"); aylaSetItem(db,"aylaNotebooks",notebook); aylaV189RecordActivity(db,student.id,"notebook_saved",{notebookId:notebook.id,version:version.version}); await writeAylaDb(db); return aylaSendOk(res,{notebook,version}); } catch(error){return aylaSendError(res,error.statusCode||500,error.message);} });
+app.post("/api/ayla/students/:studentId/notebooks", async (req, res) => {
+  try {
+    const initial = await aylaV189RequireStudent(req, req.params.studentId, "dynamic_notebook");
+    const result = await mutateAylaDb(async (db) => {
+      const { user, student } = aylaV212AtomicNotebookContext(db, initial);
+      const examTrackId = aylaCanonicalExamTrack(student.examTrackId || student.exam);
+      const blocks = await aylaV212CanonicalNotebookBlocks(db, user, student, req.body.blocks || []);
+      const notebook = {
+        id: aylaId("AYLA-NOTE"),
+        studentId: student.id,
+        userId: student.ayla_user_id || student.user_id || "",
+        examTrackId,
+        title: aylaV189CleanText(req.body.title || "Untitled medical note").slice(0, 240),
+        system: aylaV189CleanText(req.body.system || "General").slice(0, 120),
+        topic: aylaV189CleanText(req.body.topic || "").slice(0, 240),
+        tags: aylaCleanArray(req.body.tags).slice(0, 30),
+        paperStyle: aylaV189CleanText(req.body.paperStyle || "ruled"),
+        inkStyle: aylaV189CleanText(req.body.inkStyle || "pen"),
+        blocks,
+        status: "active",
+        createdAt: aylaNow(),
+        updatedAt: aylaNow(),
+      };
+      const version = aylaV190SaveNotebookVersion(db, notebook, "created");
+      aylaSetItem(db, "aylaNotebooks", notebook);
+      aylaV189RecordActivity(db, student.id, "notebook_created", { notebookId: notebook.id, version: version.version });
+      return {
+        notebook: await aylaV212RenderNotebook(db, user, student, notebook),
+        version: { ...version, blocks: (await aylaV212RenderNotebook(db, user, student, version)).blocks },
+      };
+    });
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, result, 201);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.post("/api/ayla/students/:studentId/notebooks/capture", async (req, res) => {
+  try {
+    const initial = await aylaV189RequireStudent(req, req.params.studentId, "dynamic_notebook");
+    const result = await mutateAylaDb(async (db) => {
+      const { user, student } = aylaV212AtomicNotebookContext(db, initial);
+      const source = await aylaV212ResolveNotebookSource(db, user, student, req.body.source || req.body);
+      const noteText = aylaV189CleanText(req.body.noteText || req.body.note_text || "").slice(0, 12000);
+      const fingerprint = aylaNotebookSourceFingerprint(source, noteText);
+      let notebook = req.body.notebookId || req.body.notebook_id
+        ? aylaGetItem(db, "aylaNotebooks", req.body.notebookId || req.body.notebook_id)
+        : null;
+      if (notebook && (String(notebook.studentId) !== String(student.id) || notebook.deletedAt)) throw aylaV212NotebookError("Notebook not found", 404, "NOTEBOOK_NOT_FOUND");
+      if (!notebook) {
+        notebook = aylaValues(db, "aylaNotebooks")
+          .filter((row) => String(row.studentId || "") === String(student.id) && !row.deletedAt)
+          .find((row) => (Array.isArray(row.blocks) ? row.blocks : []).some((block) => String(block.captureKey || "") === fingerprint)) || null;
+      }
+      if (!notebook) {
+        notebook = {
+          id: aylaId("AYLA-NOTE"),
+          studentId: student.id,
+          userId: student.ayla_user_id || student.user_id || "",
+          examTrackId: aylaCanonicalExamTrack(student.examTrackId || student.exam),
+          title: aylaV189CleanText(req.body.notebookTitle || req.body.notebook_title || source.title || "Saved medical source").slice(0, 240),
+          system: aylaV189CleanText(req.body.system || source.system || "General").slice(0, 120),
+          topic: aylaV189CleanText(req.body.topic || source.topic || "").slice(0, 240),
+          tags: aylaCleanArray(req.body.tags).slice(0, 30),
+          paperStyle: aylaV189CleanText(req.body.paperStyle || req.body.paper_style || "ruled"),
+          inkStyle: aylaV189CleanText(req.body.inkStyle || req.body.ink_style || "pen"),
+          blocks: [],
+          status: "active",
+          createdAt: aylaNow(),
+          updatedAt: aylaNow(),
+        };
+      }
+      const existingCapture = (Array.isArray(notebook.blocks) ? notebook.blocks : [])
+        .find((block) => String(block.captureKey || "") === fingerprint);
+      if (existingCapture) {
+        return {
+          notebook: await aylaV212RenderNotebook(db, user, student, notebook),
+          capturedBlockId: existingCapture.id,
+          captureKey: fingerprint,
+          idempotentReplay: true,
+          version: notebook.currentVersion || 0,
+        };
+      }
+      const capture = createAylaNotebookCaptureBlocks({
+        source,
+        noteText,
+        noteColor: req.body.noteColor || req.body.note_color || "navy",
+        captureKey: fingerprint,
+        idFactory: () => aylaId("NB"),
+      });
+      const existingBlocks = Array.isArray(notebook.blocks) ? notebook.blocks : [];
+      if (existingBlocks.length + capture.blocks.length > 200) throw aylaV212NotebookError("A notebook cannot contain more than 200 blocks", 409, "NOTEBOOK_BLOCK_LIMIT");
+      notebook.blocks = [...existingBlocks, ...capture.blocks].map((block, index) => ({ ...block, order: index }));
+      notebook.updatedAt = aylaNow();
+      const reason = notebook.currentVersion ? "source_captured" : "created_from_capture";
+      const version = aylaV190SaveNotebookVersion(db, notebook, reason);
+      aylaSetItem(db, "aylaNotebooks", notebook);
+      aylaV189RecordActivity(db, student.id, "notebook_source_captured", {
+        notebookId: notebook.id,
+        blockId: capture.blocks[0].id,
+        sourceType: source.kind,
+        version: version.version,
+      });
+      return {
+        notebook: await aylaV212RenderNotebook(db, user, student, notebook),
+        capturedBlockId: capture.blocks[0].id,
+        captureKey: capture.captureKey,
+        idempotentReplay: false,
+        version: version.version,
+      };
+    });
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, result, result.idempotentReplay ? 200 : 201);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.put("/api/ayla/students/:studentId/notebooks/:id", async (req, res) => {
+  try {
+    const initial = await aylaV189RequireStudent(req, req.params.studentId, "dynamic_notebook");
+    const result = await mutateAylaDb(async (db) => {
+      const { user, student } = aylaV212AtomicNotebookContext(db, initial);
+      const notebook = aylaGetItem(db, "aylaNotebooks", req.params.id);
+      if (!notebook || String(notebook.studentId) !== String(student.id) || notebook.deletedAt) throw aylaV212NotebookError("Notebook not found", 404, "NOTEBOOK_NOT_FOUND");
+      const blocks = req.body.blocks !== undefined
+        ? await aylaV212CanonicalNotebookBlocks(db, user, student, req.body.blocks, notebook.blocks || [])
+        : notebook.blocks || [];
+      notebook.title = aylaV189CleanText(req.body.title ?? notebook.title).slice(0, 240);
+      notebook.system = aylaV189CleanText(req.body.system ?? notebook.system).slice(0, 120);
+      notebook.topic = aylaV189CleanText(req.body.topic ?? notebook.topic).slice(0, 240);
+      notebook.tags = req.body.tags !== undefined ? aylaCleanArray(req.body.tags).slice(0, 30) : notebook.tags;
+      notebook.paperStyle = aylaV189CleanText(req.body.paperStyle || notebook.paperStyle || "ruled");
+      notebook.inkStyle = aylaV189CleanText(req.body.inkStyle || notebook.inkStyle || "pen");
+      notebook.blocks = blocks;
+      notebook.updatedAt = aylaNow();
+      const version = aylaV190SaveNotebookVersion(db, notebook, "saved");
+      aylaSetItem(db, "aylaNotebooks", notebook);
+      aylaV189RecordActivity(db, student.id, "notebook_saved", { notebookId: notebook.id, version: version.version });
+      return {
+        notebook: await aylaV212RenderNotebook(db, user, student, notebook),
+        version: { ...version, blocks: (await aylaV212RenderNotebook(db, user, student, version)).blocks },
+      };
+    });
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, result);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
 
 app.patch("/api/ayla/students/:studentId/notebooks/:id/archive", async (req, res) => {
   try {
-    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId);
-    const notebook = aylaGetItem(db, "aylaNotebooks", req.params.id);
-    if (!notebook || String(notebook.studentId) !== String(student.id) || notebook.deletedAt) return aylaSendError(res, 404, "Notebook not found");
-    const archived = req.body.archived !== false;
-    notebook.archivedAt = archived ? aylaNow() : null;
-    notebook.status = archived ? "archived" : "active";
-    notebook.updatedAt = aylaNow();
-    aylaSetItem(db, "aylaNotebooks", notebook);
-    aylaV189RecordActivity(db, student.id, archived ? "notebook_archived" : "notebook_unarchived", { notebookId: notebook.id });
-    await writeAylaDb(db);
-    return aylaSendOk(res, { notebook, archived });
+    const initial = await aylaV189RequireStudent(req, req.params.studentId, "dynamic_notebook");
+    const result = await mutateAylaDb(async (db) => {
+      const { user, student } = aylaV212AtomicNotebookContext(db, initial);
+      const notebook = aylaGetItem(db, "aylaNotebooks", req.params.id);
+      if (!notebook || String(notebook.studentId) !== String(student.id) || notebook.deletedAt) throw aylaV212NotebookError("Notebook not found", 404, "NOTEBOOK_NOT_FOUND");
+      const archived = req.body.archived !== false;
+      notebook.archivedAt = archived ? aylaNow() : null;
+      notebook.status = archived ? "archived" : "active";
+      notebook.updatedAt = aylaNow();
+      aylaSetItem(db, "aylaNotebooks", notebook);
+      aylaV189RecordActivity(db, student.id, archived ? "notebook_archived" : "notebook_unarchived", { notebookId: notebook.id });
+      return { notebook: await aylaV212RenderNotebook(db, user, student, notebook), archived };
+    });
+    return aylaSendOk(res, result);
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message);
   }
@@ -59185,29 +64965,129 @@ app.patch("/api/ayla/students/:studentId/notebooks/:id/archive", async (req, res
 
 app.delete("/api/ayla/students/:studentId/notebooks/:id", async (req, res) => {
   try {
-    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId);
-    const notebook = aylaGetItem(db, "aylaNotebooks", req.params.id);
-    if (!notebook || String(notebook.studentId) !== String(student.id) || notebook.deletedAt) return aylaSendError(res, 404, "Notebook not found");
-    notebook.deletedAt = aylaNow();
-    notebook.archivedAt = notebook.archivedAt || notebook.deletedAt;
-    notebook.status = "deleted";
-    notebook.updatedAt = aylaNow();
-    const version = aylaV190SaveNotebookVersion(db, notebook, "soft_deleted");
-    aylaSetItem(db, "aylaNotebooks", notebook);
-    aylaV189RecordActivity(db, student.id, "notebook_soft_deleted", { notebookId: notebook.id, version: version.version, versionsRetained: true });
-    await writeAylaDb(db);
-    return aylaSendOk(res, { deleted: true, softDelete: true, versionsRetained: true, notebookId: notebook.id });
+    const initial = await aylaV189RequireStudent(req, req.params.studentId, "dynamic_notebook");
+    const result = await mutateAylaDb(async (db) => {
+      const { student } = aylaV212AtomicNotebookContext(db, initial);
+      const notebook = aylaGetItem(db, "aylaNotebooks", req.params.id);
+      if (!notebook || String(notebook.studentId) !== String(student.id) || notebook.deletedAt) throw aylaV212NotebookError("Notebook not found", 404, "NOTEBOOK_NOT_FOUND");
+      notebook.deletedAt = aylaNow();
+      notebook.archivedAt = notebook.archivedAt || notebook.deletedAt;
+      notebook.status = "deleted";
+      notebook.updatedAt = aylaNow();
+      const version = aylaV190SaveNotebookVersion(db, notebook, "soft_deleted");
+      aylaSetItem(db, "aylaNotebooks", notebook);
+      aylaV189RecordActivity(db, student.id, "notebook_soft_deleted", { notebookId: notebook.id, version: version.version, versionsRetained: true });
+      return { deleted: true, softDelete: true, versionsRetained: true, notebookId: notebook.id };
+    });
+    return aylaSendOk(res, result);
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message);
   }
 });
 
-app.get("/api/ayla/students/:studentId/notebooks/:id/versions", async (req,res)=>{try{const {student,db}=await aylaV189RequireStudent(req,req.params.studentId);const notebook=aylaGetItem(db,"aylaNotebooks",req.params.id);if(!notebook||String(notebook.studentId)!==String(student.id)||notebook.deletedAt)return aylaSendError(res,404,"Notebook not found");const versions=aylaValues(db,"aylaNotebookVersions").filter((row)=>String(row.notebookId)===String(notebook.id)).sort((a,b)=>Number(b.version)-Number(a.version));return aylaSendOk(res,{versions});}catch(error){return aylaSendError(res,error.statusCode||500,error.message);}});
-app.post("/api/ayla/students/:studentId/notebooks/:id/restore/:version",async(req,res)=>{try{const{student,db}=await aylaV189RequireStudent(req,req.params.studentId);const notebook=aylaGetItem(db,"aylaNotebooks",req.params.id);if(!notebook||String(notebook.studentId)!==String(student.id)||notebook.deletedAt)return aylaSendError(res,404,"Notebook not found");const source=aylaValues(db,"aylaNotebookVersions").find((row)=>String(row.notebookId)===String(notebook.id)&&Number(row.version)===Number(req.params.version));if(!source)return aylaSendError(res,404,"Notebook version not found");notebook.title=source.title;notebook.system=source.system;notebook.topic=source.topic;notebook.tags=source.tags;notebook.blocks=JSON.parse(JSON.stringify(source.blocks||[]));notebook.updatedAt=aylaNow();const version=aylaV190SaveNotebookVersion(db,notebook,`restored_from_v${source.version}`);aylaSetItem(db,"aylaNotebooks",notebook);await writeAylaDb(db);return aylaSendOk(res,{notebook,version});}catch(error){return aylaSendError(res,error.statusCode||500,error.message);}});
-app.get("/api/ayla/students/:studentId/notebooks/search",async(req,res)=>{try{const{student,db}=await aylaV189RequireStudent(req,req.params.studentId);const query=aylaV189CleanText(req.query.q||"").toLowerCase();if(query.length<2)return aylaSendOk(res,{results:[]});const results=[];for(const note of aylaValues(db,"aylaNotebooks").filter((row)=>String(row.studentId)===String(student.id)&&!row.archivedAt&&!row.deletedAt)){for(const block of (Array.isArray(note.blocks)?note.blocks:[])){const hay=`${note.title} ${note.system} ${note.topic} ${aylaCleanArray(note.tags).join(" ")} ${block.text||""} ${block.sourceTitle||""} ${block.sourceReference||""}`.toLowerCase();if(hay.includes(query))results.push({notebookId:note.id,notebookTitle:note.title,system:note.system,topic:note.topic,blockId:block.id,blockType:block.type,text:block.text||block.sourceTitle||block.sourceReference||"",sourceReference:block.sourceReference||""});if(results.length>=80)break;}if(results.length>=80)break;}return aylaSendOk(res,{query,count:results.length,results});}catch(error){return aylaSendError(res,error.statusCode||500,error.message);}});
+app.get("/api/ayla/students/:studentId/notebooks/:id/versions", async (req, res) => {
+  try {
+    const { user, student, db } = await aylaV189RequireStudent(req, req.params.studentId, "dynamic_notebook");
+    const notebook = aylaGetItem(db, "aylaNotebooks", req.params.id);
+    if (!notebook || String(notebook.studentId) !== String(student.id) || notebook.deletedAt) return aylaSendError(res, 404, "Notebook not found");
+    const versions = aylaValues(db, "aylaNotebookVersions")
+      .filter((row) => String(row.notebookId) === String(notebook.id))
+      .sort((a, b) => Number(b.version) - Number(a.version));
+    const safeVersions = [];
+    for (const version of versions) {
+      const rendered = await aylaV212RenderNotebook(db, user, student, version);
+      safeVersions.push({
+        id: version.id,
+        notebookId: version.notebookId,
+        version: version.version,
+        reason: version.reason,
+        title: rendered.title,
+        system: rendered.system,
+        topic: rendered.topic,
+        tags: rendered.tags,
+        blocks: rendered.blocks,
+        createdAt: version.createdAt,
+      });
+    }
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, { versions: safeVersions });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.post("/api/ayla/students/:studentId/notebooks/:id/restore/:version", async (req, res) => {
+  try {
+    const initial = await aylaV189RequireStudent(req, req.params.studentId, "dynamic_notebook");
+    const result = await mutateAylaDb(async (db) => {
+      const { user, student } = aylaV212AtomicNotebookContext(db, initial);
+      const notebook = aylaGetItem(db, "aylaNotebooks", req.params.id);
+      if (!notebook || String(notebook.studentId) !== String(student.id) || notebook.deletedAt) throw aylaV212NotebookError("Notebook not found", 404, "NOTEBOOK_NOT_FOUND");
+      const source = aylaValues(db, "aylaNotebookVersions")
+        .find((row) => String(row.notebookId) === String(notebook.id) && Number(row.version) === Number(req.params.version));
+      if (!source) throw aylaV212NotebookError("Notebook version not found", 404, "NOTEBOOK_VERSION_NOT_FOUND");
+      notebook.title = source.title;
+      notebook.system = source.system;
+      notebook.topic = source.topic;
+      notebook.tags = source.tags;
+      notebook.blocks = JSON.parse(JSON.stringify(source.blocks || []));
+      notebook.updatedAt = aylaNow();
+      const version = aylaV190SaveNotebookVersion(db, notebook, `restored_from_v${source.version}`);
+      aylaSetItem(db, "aylaNotebooks", notebook);
+      aylaV189RecordActivity(db, student.id, "notebook_version_restored", { notebookId: notebook.id, sourceVersion: source.version, version: version.version });
+      return {
+        notebook: await aylaV212RenderNotebook(db, user, student, notebook),
+        version: version.version,
+        restoredFromVersion: source.version,
+      };
+    });
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, result);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.get("/api/ayla/students/:studentId/notebooks/search", async (req, res) => {
+  try {
+    const { user, student, db } = await aylaV189RequireStudent(req, req.params.studentId, "dynamic_notebook");
+    const query = aylaV189CleanText(req.query.q || "").toLowerCase();
+    if (query.length < 2) return aylaSendOk(res, { query, count: 0, results: [] });
+    const results = [];
+    const notes = aylaValues(db, "aylaNotebooks")
+      .filter((row) => String(row.studentId) === String(student.id) && !row.archivedAt && !row.deletedAt);
+    for (const rawNote of notes) {
+      const note = await aylaV212RenderNotebook(db, user, student, rawNote);
+      for (const block of note.blocks) {
+        const hay = `${note.title} ${note.system} ${note.topic} ${aylaCleanArray(note.tags).join(" ")} ${block.text || ""} ${block.sourceTitle || ""} ${block.sourceReference || ""}`.toLowerCase();
+        if (hay.includes(query)) {
+          results.push({
+            notebookId: note.id,
+            notebookTitle: note.title,
+            system: note.system,
+            topic: note.topic,
+            blockId: block.id,
+            blockType: block.type,
+            text: block.text || block.sourceTitle || block.sourceReference || "",
+            sourceReference: block.sourceReference || "",
+            sourceState: block.sourceState || null,
+            returnLink: block.returnLink || null,
+          });
+        }
+        if (results.length >= 80) break;
+      }
+      if (results.length >= 80) break;
+    }
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, { query, count: results.length, results });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
 app.post("/api/ayla/students/:studentId/notebooks/:id/generate-flashcards", async (req, res) => {
   try {
-    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId);
+    const { user, student, db } = await aylaV189RequireStudent(req, req.params.studentId, "dynamic_notebook");
+    aylaDashboardEntitlement(db, user, student, "flashcards");
     const note = aylaGetItem(db, "aylaNotebooks", req.params.id);
     if (!note || String(note.studentId) !== String(student.id)) return aylaSendError(res, 404, "Notebook not found");
     const selectedIds = new Set(aylaCleanArray(req.body.blockIds || req.body.block_ids).map(String));
@@ -59592,6 +65472,8 @@ app.post("/admin/crm/ai-training/import-aylamed-resource-document", async (req, 
       exam_track: String(req.body.exam_track || req.body.exam || "All").trim(),
       authorization_status: String(req.body.authorization_status || req.body.authorizationStatus || "pending_review").trim().toLowerCase(),
       source_access_mode: String(req.body.source_access_mode || req.body.sourceAccessMode || "protected").trim().toLowerCase(),
+      source_label_visible: req.body.source_label_visible === true || req.body.sourceLabelVisible === true,
+      source_label: String(req.body.source_label || req.body.sourceLabel || req.body.provider || title).trim().slice(0, 180),
       ocr_requested: Boolean(req.body.ocr_requested || req.body.use_ocr || req.body.scanned_pdf),
       ocr_used: String(extraction.method || "").includes("ocr"),
       ocr_provider: extraction.provider || null,
@@ -60214,6 +66096,25 @@ app.post("/admin/recordings/automation-run-now", async (req, res) => {
   }
 });
 
+let ngContentOperationsCleanupTimer = null;
+
+function ngStartContentOperationsScheduler() {
+  Promise.all([ngContentUploadStore.initialize(), ngContentBackgroundQueue.initialize()])
+    .then(() => ngContentUploadStore.reconcileLeases(ngContentBackgroundQueue.activeJobIds()))
+    .then(() => ngContentUploadStore.cleanupExpired())
+    .then((cleanup) => console.log(`Content operations queue ready; expired upload sessions removed=${cleanup.removed}`))
+    .catch((error) => console.error("Content operations startup recovery failed:", error.message));
+  if (!ngContentOperationsCleanupTimer) {
+    const intervalMs = Math.max(60 * 60 * 1000, Number(process.env.NEXTGEN_CONTENT_UPLOAD_CLEANUP_INTERVAL_MS || 6 * 60 * 60 * 1000));
+    ngContentOperationsCleanupTimer = setInterval(() => {
+      ngContentUploadStore.reconcileLeases(ngContentBackgroundQueue.activeJobIds())
+        .then(() => ngContentUploadStore.cleanupExpired())
+        .catch((error) => console.warn("Expired content upload cleanup failed:", error.message));
+    }, intervalMs);
+    ngContentOperationsCleanupTimer.unref?.();
+  }
+}
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Backend build=${NEXTGEN_BACKEND_BUILD}; JSON body limit=${NEXTGEN_JSON_BODY_LIMIT}; memory soft guard=${NEXTGEN_BACKGROUND_MEMORY_SOFT_PERCENT}% of ${NEXTGEN_RENDER_MEMORY_LIMIT_MB} MB`);
@@ -60225,6 +66126,7 @@ app.listen(PORT, () => {
   ngStartAssessmentAutoReleaseScheduler();
   ngStartWeakFlashcardAutomationScheduler();
   ngStartZoomRecordingRecoveryScheduler();
+  ngStartContentOperationsScheduler();
   console.log(`DATA_DIR=${DATA_DIR}`);
   console.log(`LIVE_DB_PATH=${LIVE_DB_PATH}`);
   console.log(`AYLA_DB_PATH=${AYLA_DB_PATH}`);
