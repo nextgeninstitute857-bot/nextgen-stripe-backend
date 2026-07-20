@@ -10,6 +10,7 @@ import { flashcardPostgresStatus } from "../lib/flashcard-postgres.js";
 
 test("LMS cannot gain AylaMed student source-creation features", () => {
   assert.equal(flashcardCapabilities("lms").studentSourceCreation, false);
+  assert.equal(flashcardCapabilities("lms").qbankSource, true);
   assert.equal(flashcardCapabilities("lms").videoTimestampSource, false);
   assert.equal(flashcardCapabilities("aylamed").studentSourceCreation, true);
 });

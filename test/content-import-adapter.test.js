@@ -12,6 +12,9 @@ import {
 
 test("exam aliases normalize without leaking track-specific IDs", () => {
   assert.equal(normalizeExamTrack("STEP 1"), "usmle-step-1");
+  assert.equal(normalizeExamTrack("usmle_step_1"), "usmle-step-1");
+  assert.equal(normalizeExamTrack("USMLE Step 2 CK"), "usmle-step-2");
+  assert.equal(normalizeExamTrack("usmle_step_3"), "usmle-step-3");
   assert.equal(normalizeExamTrack("NCLEX"), "nclex");
 });
 
