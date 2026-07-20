@@ -44,6 +44,7 @@ test('credentialed CORS is limited to exact owned LMS origins and explicit envir
   for (const origin of [
     'https://live.nextgenusmlelms.com', 'https://www.live.nextgenusmlelms.com',
     'https://lms.nextgenusmlelms.com', 'https://www.lms.nextgenusmlelms.com',
+    'https://mediumslateblue-otter-394719.hostingersite.com',
   ]) assert.match(server, new RegExp(origin.replaceAll('.', '\\.')));
   assert.match(server, /NEXTGEN_CORS_ALLOWED_ORIGINS/);
   assert.doesNotMatch(server, /usmlecorner\.com/);
