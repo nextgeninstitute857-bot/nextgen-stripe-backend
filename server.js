@@ -224,6 +224,7 @@ const allowedOrigins = [
   "https://www.live.nextgenusmlelms.com",
   "https://lms.nextgenusmlelms.com",
   "https://www.lms.nextgenusmlelms.com",
+  "https://mediumslateblue-otter-394719.hostingersite.com",
   ...String(process.env.NEXTGEN_CORS_ALLOWED_ORIGINS || "")
     .split(",")
     .map((value) => value.trim().replace(/\/$/, ""))
