@@ -12,8 +12,9 @@ test("R2 remains disabled until every private credential is configured", () => {
   assert.equal(contentMediaStatus({}).public_access, false);
 });
 
-test("media ZIP entry validation rejects traversal and non-images", () => {
+test("media ZIP entry validation accepts image/audio and rejects unsafe or unsupported files", () => {
   assert.equal(safeMediaEntryName("images/U612.jpg.png"), "images/U612.jpg.png");
+  assert.equal(safeMediaEntryName("heart-sounds/12360.mp3"), "heart-sounds/12360.mp3");
   assert.equal(safeMediaEntryName("../private.png"), null);
   assert.equal(safeMediaEntryName("/absolute/private.png"), null);
   assert.equal(safeMediaEntryName("C:\\private.png"), null);
@@ -38,8 +39,26 @@ test("media matching is deterministic and reports missing and unreferenced files
 test("ambiguous filename matches are quarantined rather than guessed", () => {
   const report = matchMediaReferences([{ questionId: "q1", mediaRef: "diagram.png" }], [
     { originalName: "a/diagram.png", sha256: "sha-a" },
-    { originalName: "b/diagram.jpg", sha256: "sha-b" },
+    { originalName: "b/diagram.png", sha256: "sha-b" },
   ]);
   assert.equal(report.matches.length, 0);
   assert.equal(report.ambiguous.length, 1);
+});
+
+test("an exact media filename wins before high-resolution fallback aliases", () => {
+  const report = matchMediaReferences([{ questionId: "q1", mediaRef: "L1436.jpg" }], [
+    { originalName: "L1436.jpg", sha256: "low" },
+    { originalName: "highresdefault_L1436.jpg", sha256: "high" },
+  ]);
+  assert.equal(report.matches.length, 1);
+  assert.equal(report.matches[0].asset.sha256, "low");
+});
+
+test("an exact ZIP-relative path resolves duplicate basenames", () => {
+  const report = matchMediaReferences([{ questionId: "q1", mediaRef: "chapter-a/diagram.png" }], [
+    { originalName: "chapter-a/diagram.png", sha256: "a" },
+    { originalName: "chapter-b/diagram.png", sha256: "b" },
+  ]);
+  assert.equal(report.matches.length, 1);
+  assert.equal(report.matches[0].asset.sha256, "a");
 });

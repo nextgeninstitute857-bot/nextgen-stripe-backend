@@ -187,6 +187,9 @@ import {
 } from "./lib/content-zip-import.js";
 import { SafeBackgroundQueue } from "./lib/safe-background-jobs.js";
 import { ResumableContentUploadStore } from "./lib/resumable-content-upload.js";
+import { CloudContentUploadStore } from "./lib/cloud-content-upload.js";
+import { contentZipSourceExists } from "./lib/content-zip-source.js";
+import { ensureContentR2BrowserCors } from "./lib/content-r2-storage.js";
 import { storagePerformanceSnapshot } from "./lib/operations-monitoring.js";
 import {
   contentMediaStatus,
@@ -199,8 +202,10 @@ import {
   contentVideoStatus,
   extractReferencedVideos,
   matchVideoReferences,
+  openReferencedVideoStream,
   uploadVideoToVimeo,
 } from "./lib/content-video-vimeo.js";
+import { buildVimeoLibraryManifest, fetchVimeoLibrary } from "./lib/vimeo-library-manifest.js";
 import { normalizeExamTrack, slug as contentSlug } from "./lib/content-import-adapter.js";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -209,7 +214,11 @@ import axios from "axios";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import fs from "fs/promises";
+import fsSync from "node:fs";
 import path from "path";
+import { PassThrough } from "node:stream";
+import { pipeline as pipelineStreams } from "node:stream/promises";
+import { createGzip } from "node:zlib";
 
 dotenv.config();
 
@@ -217,6 +226,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
+const CONTENT_INGESTION_BUILD = "v220-direct-qbank-media-ingestion";
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
 
 const allowedOrigins = [
@@ -751,13 +761,20 @@ const ngContentBackgroundQueue = new SafeBackgroundQueue({
   memoryRetryMs: Math.max(5_000, Number(process.env.NEXTGEN_CONTENT_JOB_MEMORY_RETRY_MS || 30_000) || 30_000),
   memoryGate: () => ngBackgroundMemoryIsHigh("content_operations_queue"),
 });
-const ngContentUploadStore = new ResumableContentUploadStore({
-  directory: path.join(NG_CONTENT_OPERATIONS_ROOT, "uploads"),
-  maxUploadBytes: Math.max(1024 * 1024, Number(process.env.NEXTGEN_CONTENT_MAX_ZIP_BYTES || 5 * 1024 ** 3)),
-  chunkSize: Math.max(256 * 1024, Number(process.env.NEXTGEN_CONTENT_UPLOAD_CHUNK_BYTES || 8 * 1024 ** 2)),
-  maxChunkBytes: Math.max(1024 * 1024, Number(process.env.NEXTGEN_CONTENT_UPLOAD_MAX_CHUNK_BYTES || 16 * 1024 ** 2)),
-  sessionTtlMs: Math.max(60 * 60 * 1000, Number(process.env.NEXTGEN_CONTENT_UPLOAD_TTL_MS || 48 * 60 * 60 * 1000)),
-});
+const ngContentUploadStore = contentMediaStatus().configured
+  ? new CloudContentUploadStore({
+    directory: path.join(NG_CONTENT_OPERATIONS_ROOT, "cloud-uploads"),
+    maxUploadBytes: Math.max(1024 * 1024, Number(process.env.NEXTGEN_CONTENT_DIRECT_MAX_ZIP_BYTES || 50 * 1024 ** 3)),
+    partSize: Math.max(5 * 1024 ** 2, Number(process.env.NEXTGEN_CONTENT_UPLOAD_PART_BYTES || 64 * 1024 ** 2)),
+    sessionTtlMs: Math.max(60 * 60 * 1000, Number(process.env.NEXTGEN_CONTENT_UPLOAD_TTL_MS || 72 * 60 * 60 * 1000)),
+  })
+  : new ResumableContentUploadStore({
+    directory: path.join(NG_CONTENT_OPERATIONS_ROOT, "uploads"),
+    maxUploadBytes: Math.max(1024 * 1024, Number(process.env.NEXTGEN_CONTENT_MAX_ZIP_BYTES || 5 * 1024 ** 3)),
+    chunkSize: Math.max(256 * 1024, Number(process.env.NEXTGEN_CONTENT_UPLOAD_CHUNK_BYTES || 8 * 1024 ** 2)),
+    maxChunkBytes: Math.max(1024 * 1024, Number(process.env.NEXTGEN_CONTENT_UPLOAD_MAX_CHUNK_BYTES || 16 * 1024 ** 2)),
+    sessionTtlMs: Math.max(60 * 60 * 1000, Number(process.env.NEXTGEN_CONTENT_UPLOAD_TTL_MS || 48 * 60 * 60 * 1000)),
+  });
 app.use("/media", express.static(MEDIA_DIR, { maxAge: "30d", fallthrough: true }));
 const DEFAULT_TIMEZONE = "America/New_York";
 const DEFAULT_ZOOM_DURATION_MINUTES = 120;
@@ -1270,9 +1287,11 @@ const NEXTGEN_JSON_WRITE_BUFFER_BYTES = Math.max(
   Math.min(4 * 1024 * 1024, Number(process.env.NEXTGEN_JSON_WRITE_BUFFER_BYTES || 512 * 1024) || 512 * 1024)
 );
 
-async function ngWriteJsonAtomicStreaming(filePath, value, label = "database") {
+async function ngWriteJsonAtomicStreaming(filePath, value, label = "database", { gzip = false } = {}) {
   const tempPath = `${filePath}.tmp`;
   let handle = null;
+  let streamInput = null;
+  let streamPipeline = null;
   let pending = "";
   let pendingBytes = 0;
   const activeObjects = new WeakSet();
@@ -1282,7 +1301,11 @@ async function ngWriteJsonAtomicStreaming(filePath, value, label = "database") {
     const chunk = pending;
     pending = "";
     pendingBytes = 0;
-    await handle.write(chunk, null, "utf8");
+    if (streamInput) {
+      if (!streamInput.write(chunk, "utf8")) await new Promise((resolve) => streamInput.once("drain", resolve));
+    } else {
+      await handle.write(chunk, null, "utf8");
+    }
   };
 
   const writePiece = async (piece) => {
@@ -1291,7 +1314,11 @@ async function ngWriteJsonAtomicStreaming(filePath, value, label = "database") {
     const textBytes = Buffer.byteLength(text, "utf8");
     if (textBytes >= NEXTGEN_JSON_WRITE_BUFFER_BYTES) {
       await flush();
-      await handle.write(text, null, "utf8");
+      if (streamInput) {
+        if (!streamInput.write(text, "utf8")) await new Promise((resolve) => streamInput.once("drain", resolve));
+      } else {
+        await handle.write(text, null, "utf8");
+      }
       return;
     }
     pending += text;
@@ -1384,14 +1411,32 @@ async function ngWriteJsonAtomicStreaming(filePath, value, label = "database") {
 
   try {
     await ensureDataDir();
-    handle = await fs.open(tempPath, "w");
+    if (gzip) {
+      streamInput = new PassThrough();
+      streamPipeline = pipelineStreams(
+        streamInput,
+        createGzip({ level: 9 }),
+        fsSync.createWriteStream(tempPath, { flags: "w" }),
+      );
+    } else {
+      handle = await fs.open(tempPath, "w");
+    }
     await writeValue(value, false);
     await flush();
-    await handle.sync();
-    await handle.close();
-    handle = null;
+    if (streamInput) {
+      streamInput.end();
+      await streamPipeline;
+      streamInput = null;
+      streamPipeline = null;
+    } else {
+      await handle.sync();
+      await handle.close();
+      handle = null;
+    }
     await fs.rename(tempPath, filePath);
   } catch (error) {
+    try { streamInput?.destroy(error); } catch {}
+    try { await streamPipeline; } catch {}
     try { if (handle) await handle.close(); } catch {}
     try { await fs.unlink(tempPath); } catch {}
     throw error;
@@ -9934,6 +9979,7 @@ app.get("/health", async (req, res) => {
     success: true,
     message: "Backend running",
     build: NEXTGEN_BACKEND_BUILD,
+    content_ingestion_build: CONTENT_INGESTION_BUILD,
     data_dir: DATA_DIR,
     live_db_path: LIVE_DB_PATH,
     live_db_exists: liveDbExists,
@@ -18314,6 +18360,9 @@ async function readCrmDbSnapshotOnly({ fresh = false, cache = true } = {}) {
 // This intentionally avoids touching leads, conversations, templates, campaigns, appointments,
 // settings, students, courses, or any LMS route data.
 const CRM_RETENTION_ARCHIVE_DIR = path.join(DATA_DIR, "crm-archive");
+const CRM_RETENTION_ARCHIVE_MAX_FILES = Math.max(10, Number(process.env.CRM_RETENTION_ARCHIVE_MAX_FILES || 200));
+const CRM_RETENTION_ARCHIVE_MAX_BYTES = Math.max(64 * 1024 ** 2, Number(process.env.CRM_RETENTION_ARCHIVE_MAX_BYTES || 512 * 1024 ** 2));
+const CRM_RETENTION_ARCHIVE_MAX_AGE_MS = Math.max(24 * 60 * 60 * 1000, Number(process.env.CRM_RETENTION_ARCHIVE_MAX_AGE_DAYS || 90) * 24 * 60 * 60 * 1000);
 
 const CRM_RETENTION_RULES = [
   {
@@ -18433,10 +18482,20 @@ async function ngCrmRetentionArchiveRecords(section, records = [], reason = "ret
 
   await fs.mkdir(CRM_RETENTION_ARCHIVE_DIR, { recursive: true });
 
+  const digest = crypto.createHash("sha256").update(`${section}\n${reason}\n`);
+  for (const record of records) digest.update(JSON.stringify(record)).update("\n");
+  const archiveDigest = digest.digest("hex");
+
   const archivePath = path.join(
     CRM_RETENTION_ARCHIVE_DIR,
-    `${section}-${ngCrmRetentionStamp()}.json`
+    `${section}-${archiveDigest.slice(0, 24)}.json.gz`
   );
+
+  const existing = await fs.stat(archivePath).catch(() => null);
+  if (existing?.isFile()) {
+    await ngCrmRetentionPruneArchives();
+    return archivePath;
+  }
 
   await ngWriteJsonAtomicStreaming(
     archivePath,
@@ -18444,13 +18503,52 @@ async function ngCrmRetentionArchiveRecords(section, records = [], reason = "ret
       section,
       reason,
       archived_at: nowIso(),
+      sha256: archiveDigest,
       count: records.length,
       records,
     },
-    `CRM ${section} archive`
+    `CRM ${section} archive`,
+    { gzip: true },
   );
 
+  await ngCrmRetentionPruneArchives();
+
   return archivePath;
+}
+
+async function ngCrmRetentionPruneArchives() {
+  await fs.mkdir(CRM_RETENTION_ARCHIVE_DIR, { recursive: true });
+  const entries = await fs.readdir(CRM_RETENTION_ARCHIVE_DIR, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !/\.json(?:\.gz)?$/i.test(entry.name)) continue;
+    const file = path.join(CRM_RETENTION_ARCHIVE_DIR, entry.name);
+    const stat = await fs.stat(file).catch(() => null);
+    if (stat) files.push({ file, name: entry.name, size: stat.size, modified: stat.mtimeMs });
+  }
+  files.sort((a, b) => b.modified - a.modified || a.name.localeCompare(b.name));
+  const now = Date.now();
+  let keptFiles = 0;
+  let keptBytes = 0;
+  let removedFiles = 0;
+  let removedBytes = 0;
+  for (const item of files) {
+    const withinAge = now - item.modified <= CRM_RETENTION_ARCHIVE_MAX_AGE_MS;
+    const withinCount = keptFiles < CRM_RETENTION_ARCHIVE_MAX_FILES;
+    const withinBytes = keptBytes + item.size <= CRM_RETENTION_ARCHIVE_MAX_BYTES;
+    const keep = keptFiles === 0 || (withinAge && withinCount && withinBytes);
+    if (keep) {
+      keptFiles += 1;
+      keptBytes += item.size;
+      continue;
+    }
+    await fs.unlink(item.file).catch((error) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+    removedFiles += 1;
+    removedBytes += item.size;
+  }
+  return { kept_files: keptFiles, kept_bytes: keptBytes, removed_files: removedFiles, removed_bytes: removedBytes };
 }
 
 function ngCrmCompactDeliveryLock(lock = {}) {
@@ -33139,6 +33237,7 @@ async function ngQueueContentOperation({ type, lane, upload, domainJobId, metada
       idempotencyKey: `${type}:${domainJobId}`,
       payload: {
         file: upload.file,
+        source: upload.source || null,
         owned_file: upload.owned === true,
         upload_id: upload.uploadId || null,
         domain_job_id: domainJobId,
@@ -33178,9 +33277,15 @@ app.post("/admin/crm/ai-training/content-uploads", async (req, res) => {
     return res.status(201).json({
       success: true,
       upload: session,
-      chunk_url_template: `/admin/crm/ai-training/content-uploads/${session.id}/chunks/{index}`,
+      ...(session.transport === "r2_multipart" ? {
+        presign_parts_url: `/admin/crm/ai-training/content-uploads/${session.id}/parts/presign`,
+      } : {
+        chunk_url_template: `/admin/crm/ai-training/content-uploads/${session.id}/chunks/{index}`,
+      }),
       finalize_url: `/admin/crm/ai-training/content-uploads/${session.id}/finalize`,
-      message: "Upload session created. Send each chunk as application/octet-stream; ZIP bytes stay on persistent disk.",
+      message: session.transport === "r2_multipart"
+        ? "Direct R2 multipart session created. The ZIP bypasses Render disk and can be resumed."
+        : "Upload session created. Send each chunk as application/octet-stream.",
     });
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, error: error.message });
@@ -33190,6 +33295,10 @@ app.post("/admin/crm/ai-training/content-uploads", async (req, res) => {
 app.put("/admin/crm/ai-training/content-uploads/:uploadId/chunks/:index", async (req, res) => {
   try {
     await requireCrmAdmin(req);
+    if (typeof ngContentUploadStore.writeChunk !== "function") {
+      req.resume();
+      return res.status(409).json({ success: false, error: "This upload uses direct R2 multipart. Request signed part URLs instead." });
+    }
     if (!String(req.headers["content-type"] || "").toLowerCase().includes("application/octet-stream")) {
       return res.status(415).json({ success: false, error: "Chunk Content-Type must be application/octet-stream" });
     }
@@ -33198,6 +33307,19 @@ app.put("/admin/crm/ai-training/content-uploads/:uploadId/chunks/:index", async 
       expectedSha256: req.headers["x-chunk-sha256"],
     });
     return res.status(result.deduplicated ? 200 : 201).json({ success: true, ...result });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-training/content-uploads/:uploadId/parts/presign", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    if (typeof ngContentUploadStore.signParts !== "function") {
+      return res.status(409).json({ success: false, error: "Direct R2 multipart upload is not configured" });
+    }
+    const indices = Array.isArray(req.body?.indices) ? req.body.indices : [req.body?.index];
+    return res.json({ success: true, parts: await ngContentUploadStore.signParts(req.params.uploadId, indices) });
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -33216,7 +33338,7 @@ app.post("/admin/crm/ai-training/content-uploads/:uploadId/finalize", async (req
   try {
     await requireCrmAdmin(req);
     const result = await ngContentUploadStore.finalize(req.params.uploadId, { expectedSha256: req.body?.sha256 });
-    return res.json({ success: true, upload: result.session, sha256: result.sha256, deduplicated: result.deduplicated });
+    return res.json({ success: true, upload: result.session, sha256: result.sha256, fingerprint: result.sha256, deduplicated: result.deduplicated });
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -33236,7 +33358,7 @@ async function ngRunContentImportPreview({ jobId, upload, metadata, queueContext
   try {
     await setContentImportJobStatus(jobId, "previewing");
     await queueContext.heartbeat({ stage: "extracting_zip" });
-    inventory = await extractSafeZipInventory(upload.file, jobId, DATA_DIR);
+    inventory = await extractSafeZipInventory(upload.source || upload.file, jobId, DATA_DIR);
     await queueContext.heartbeat({ stage: "previewing_questions", zip_entries: inventory.entryCount });
     const preview = await previewUniversalQuestionZip({ inventory, ...metadata });
     await queueContext.heartbeat({ stage: "preview_complete", counts: preview.counts });
@@ -33260,7 +33382,7 @@ async function ngRunContentDraftImport({ job, upload, queueContext }) {
   try {
     await setContentImportJobStatus(job.id, "importing_draft");
     await queueContext.heartbeat({ stage: "extracting_zip" });
-    inventory = await extractSafeZipInventory(upload.file, `${job.id}-draft`, DATA_DIR);
+    inventory = await extractSafeZipInventory(upload.source || upload.file, `${job.id}-draft`, DATA_DIR);
     const imported = await importUniversalQuestionZip({
       inventory, job,
       checkpoint: queueContext.job.checkpoint,
@@ -33374,9 +33496,10 @@ async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload, queue
   let persistenceCommitted = false;
   try {
     await queueContext.heartbeat({ stage: "uploading_private_images" });
-    const references = await getContentMediaReferences(parentJob.id, "image");
+    const references = await getContentMediaReferences(parentJob.id, "r2");
     const uploaded = await uploadMediaZipToR2({
-      zipFile: upload.file,
+      zipSource: upload.source || upload.file,
+      references,
       examTrack: parentJob.exam_track,
       sourceNamespace: parentJob.source_namespace,
       importJobId: parentJob.id,
@@ -33394,14 +33517,15 @@ async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload, queue
     await finishContentMediaImportJob(mediaJob.id, report.ambiguous.length ? "draft_imported_with_warnings" : "draft_imported", {
       zip_entries: uploaded.entries,
       uncompressed_bytes: uploaded.uncompressedBytes,
-      images_uploaded: uploaded.assets.length,
+      images_uploaded: uploaded.assets.filter((asset) => asset.mediaKind === "image").length,
+      audio_uploaded: uploaded.assets.filter((asset) => asset.mediaKind === "audio").length,
       question_media_references: references.length,
       matched: report.matches.length,
       linked: saved.links,
       missing: report.missing.length,
       ambiguous: report.ambiguous.length,
       unreferenced: report.unreferenced.length,
-      duplicate_images: saved.duplicateObjects.length,
+      duplicate_assets: saved.duplicateObjects.length,
       missing_samples: report.missing.slice(0, 100).map((item) => ({ student_qid: item.studentQid, media_ref: item.mediaRef })),
       ambiguous_samples: report.ambiguous.slice(0, 100),
       unreferenced_samples: report.unreferenced.slice(0, 100).map((item) => item.originalName),
@@ -33426,7 +33550,7 @@ app.post("/admin/crm/ai-training/content-imports/:jobId/media/import-draft", asy
     if (!["draft_imported", "draft_imported_with_warnings"].includes(String(parentJob.status))) {
       return res.status(409).json({ success: false, error: "Questions must be imported as drafts before media can be attached" });
     }
-    upload = await ngReceiveOrResolveContentZip(req, ["image_zip"]);
+    upload = await ngReceiveOrResolveContentZip(req, ["image_zip", "media_zip"]);
     mediaJob = await createContentMediaImportJob({
       id: crypto.randomUUID(), contentImportJobId: parentJob.id, zipSha256: upload.sha256,
       originalFilename: upload.originalFilename, createdBy: String(user.id),
@@ -33438,7 +33562,7 @@ app.post("/admin/crm/ai-training/content-imports/:jobId/media/import-draft", asy
     return res.status(202).json({
       success: true, media_job_id: mediaJob.id, background_job_id: backgroundJob.id, content_import_job_id: parentJob.id, status: "queued",
       poll_url: `/admin/crm/ai-training/content-media-imports/${mediaJob.id}`,
-      message: "Image ZIP accepted. Objects and mappings remain private disabled drafts.",
+      message: "Media package accepted. Referenced images and audio are deduplicated into private disabled drafts.",
     });
   } catch (error) {
     if (mediaJob?.id) await finishContentMediaImportJob(mediaJob.id, "queue_failed", { failed: true }, [{ error: error.message }]).catch(() => {});
@@ -33464,7 +33588,7 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
     await cleanupContentImportFiles(workDir);
     await queueContext.heartbeat({ stage: "extracting_private_videos" });
     const references = await getContentMediaReferences(parentJob.id, "video");
-    const extracted = await extractReferencedVideos({ zipFile: upload.file, workDir, references });
+    const extracted = await extractReferencedVideos({ zipSource: upload.source || upload.file, references });
     const report = matchVideoReferences(references, extracted.videos);
     let linked = 0;
     let newlyUploaded = 0;
@@ -33494,7 +33618,7 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
           reusedAssets += 1;
         } else {
           uploaded = await uploadVideoToVimeo({
-            file: match.video.localFile, sizeBytes: match.video.sizeBytes,
+            stream: await openReferencedVideoStream(match.video), sizeBytes: match.video.sizeBytes,
             name: `${match.studentQid} · ${path.basename(match.video.originalName)}`,
             description: `AylaMed private explanation video for ${match.studentQid}. Import ${parentJob.id}.`,
           });
@@ -33568,9 +33692,10 @@ async function ngRegistryQuestionWithPlayableMedia(question = {}) {
     id: item.id,
     ref: item.ref,
     placement: item.placement || "explanation",
+    kind: item.kind || (String(item.content_type || "").startsWith("audio/") ? "audio" : "image"),
     content_type: item.content_type || "image/*",
-    url: await createPrivateMediaUrl(item.object_key, 300),
-    expires_in_seconds: 300,
+    url: await createPrivateMediaUrl(item.object_key, 900),
+    expires_in_seconds: 900,
   })));
   const videos = (Array.isArray(question.videos) ? question.videos : []).map((item) => ({
     id: item.id,
@@ -33594,7 +33719,7 @@ app.post("/admin/crm/ai-training/content-imports/:jobId/videos/import-draft", as
     if (!["draft_imported", "draft_imported_with_warnings"].includes(String(parentJob.status))) {
       return res.status(409).json({ success: false, error: "Questions must be imported as drafts before videos can be attached" });
     }
-    upload = await ngReceiveOrResolveContentZip(req, ["video_zip"]);
+    upload = await ngReceiveOrResolveContentZip(req, ["video_zip", "media_zip"]);
     videoJob = await createContentVideoImportJob({ id: crypto.randomUUID(), contentImportJobId: parentJob.id,
       zipSha256: upload.sha256, originalFilename: upload.originalFilename, createdBy: String(user.id) });
     const backgroundJob = await ngQueueContentOperation({
@@ -33627,12 +33752,14 @@ function ngQueuedContentUpload(backgroundJob) {
   const payload = backgroundJob.payload || {};
   return {
     file: payload.file,
+    source: payload.source || null,
     owned: payload.owned_file === true,
     uploadId: payload.upload_id || null,
   };
 }
 
 async function ngContentQueueCanRecover(backgroundJob) {
+  if (backgroundJob.payload?.source) return contentZipSourceExists(backgroundJob.payload.source);
   const file = String(backgroundJob.payload?.file || "");
   if (!file) return false;
   return fs.access(file).then(() => true).catch(() => false);
@@ -59110,6 +59237,7 @@ app.get("/api/ayla/routes", (req, res) => {
       "GET|POST /api/ayla/community/messages",
       "POST /api/ayla/admin/resources/sync-training-center",
       "POST /api/ayla/admin/resources/register-vimeo",
+      "POST /api/ayla/admin/resources/sync-vimeo-library",
       "GET /api/ayla/community/leaderboard",
       "GET /api/ayla/users",
       "POST /api/ayla/billing/create-checkout",
@@ -63327,6 +63455,66 @@ app.get("/api/ayla/students/:studentId/personal-tutor", async (req, res) => {
   }
 });
 
+app.post("/api/ayla/admin/resources/sync-vimeo-library", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const examTrack = String(req.body.exam_track || req.body.examTrack || req.body.exam_track_id || req.body.examTrackId || "").trim();
+    if (!examTrack) return aylaSendError(res, 400, "exam_track is required for Vimeo library sync");
+    const videos = await fetchVimeoLibrary({ maximum: Math.max(1, Math.min(5000, Number(req.body.maximum || 5000))) });
+    const manifest = buildVimeoLibraryManifest(videos, {
+      examTrack,
+      defaultPlaylist: String(req.body.default_playlist || req.body.defaultPlaylist || "").trim(),
+    });
+    const previewOnly = req.body.commit !== true && req.body.preview_only !== false;
+    const readyRows = manifest.filter((row) => row.ready);
+    const pendingRows = manifest.filter((row) => !row.ready);
+    if (previewOnly) {
+      return aylaSendOk(res, {
+        preview_only: true,
+        videos_seen: videos.length,
+        ready: readyRows.length,
+        pending_metadata: pendingRows.length,
+        manifest: manifest.slice(0, 500),
+        manifest_truncated: manifest.length > 500,
+        message: "Manifest generated from Vimeo IDs, tags, descriptions and controlled title inference. Nothing was imported.",
+      });
+    }
+    const db = await readAylaDb();
+    aylaEnsureSeedData(db);
+    const existingByVimeo = new Map(aylaValues(db, "aylaResources")
+      .filter((row) => String(row.vimeoId || row.vimeo_id || "").trim())
+      .map((row) => [String(row.vimeoId || row.vimeo_id), row]));
+    let created = 0;
+    let updated = 0;
+    let quarantined = 0;
+    for (const row of manifest) {
+      const existing = existingByVimeo.get(String(row.resource.vimeoId || "")) || {};
+      const candidate = existing.id && req.body.reassign_existing !== true
+        ? { ...row.resource, examTrackId: existing.examTrackId || existing.exam_track_id, examTrack: existing.examTrack || existing.exam_track }
+        : row.resource;
+      const stored = aylaV190StoreImportedResource(db, candidate, existing);
+      if (stored.quarantined) quarantined += 1;
+      else if (existing.id) updated += 1;
+      else created += 1;
+    }
+    await aylaLog(db, "resource-sync", "Vimeo account library synchronized", {
+      videos_seen: videos.length, created, updated, quarantined, automatic_manifest: true,
+    });
+    await writeAylaDb(db);
+    return aylaSendOk(res, {
+      preview_only: false,
+      videos_seen: videos.length,
+      created,
+      updated,
+      quarantined,
+      pending_metadata: pendingRows.length,
+      message: "Vimeo library synchronized. Exact and controlled-inference metadata is active; unresolved videos are quarantined as a batch instead of guessed.",
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || error.response?.status || 500, error.response?.data?.error || error.message || "Failed to sync Vimeo library");
+  }
+});
+
 app.post("/api/ayla/students/:studentId/personal-tutor/apply", async (req, res) => {
   try {
     const initial = await aylaV189RequireStudent(req, req.params.studentId, "personal_tutor");
@@ -66101,6 +66289,16 @@ app.post("/admin/recordings/automation-run-now", async (req, res) => {
 let ngContentOperationsCleanupTimer = null;
 
 function ngStartContentOperationsScheduler() {
+  ngCrmRetentionPruneArchives()
+    .then((result) => {
+      if (result.removed_files) console.log("CRM archive retention pruned:", result);
+    })
+    .catch((error) => console.warn("CRM archive retention cleanup failed:", error.message));
+  if (contentMediaStatus().configured) {
+    ensureContentR2BrowserCors(allowedOrigins)
+      .then(() => console.log("Cloudflare R2 browser upload CORS is ready"))
+      .catch((error) => console.warn("Cloudflare R2 browser upload CORS setup failed:", error.message));
+  }
   Promise.all([ngContentUploadStore.initialize(), ngContentBackgroundQueue.initialize()])
     .then(() => ngContentUploadStore.reconcileLeases(ngContentBackgroundQueue.activeJobIds()))
     .then(() => ngContentUploadStore.cleanupExpired())
