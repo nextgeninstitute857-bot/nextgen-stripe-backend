@@ -231,6 +231,7 @@ const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
 const ROADMAP_EXTENSION_BUILD = "v221-system-aware-roadmap-extension";
 const RECORDING_ASSIGNMENT_BUILD = "v222-safe-recording-detach";
 const RECORDING_DUPLICATE_CLEANUP_BUILD = "v223-safe-recording-duplicate-cleanup";
+const STUDENT_NOTES_RESOLVER_BUILD = "v224-roadmap-safe-notes-resolver";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -9986,6 +9987,7 @@ app.get("/health", async (req, res) => {
     roadmap_extension_build: ROADMAP_EXTENSION_BUILD,
     recording_assignment_build: RECORDING_ASSIGNMENT_BUILD,
     recording_duplicate_cleanup_build: RECORDING_DUPLICATE_CLEANUP_BUILD,
+    student_notes_resolver_build: STUDENT_NOTES_RESOLVER_BUILD,
     data_dir: DATA_DIR,
     live_db_path: LIVE_DB_PATH,
     live_db_exists: liveDbExists,
@@ -14739,20 +14741,25 @@ async function getNotesHandler(req, res) {
     const { user } = await getAuthenticatedUser(req);
     const db = await readLiveDb();
     const sessionId = String(req.params.sessionId || "").trim();
-    const notes = db.notes?.[sessionId] || null;
+    const session = db.liveSessions?.[sessionId] || null;
+    const isStaff = user.role === "admin" || user.role === "instructor";
+    const directNotes = db.notes?.[sessionId] || null;
+    const resolved = directNotes && (isStaff || !session)
+      ? { note: directNotes, note_key: sessionId, matched_by: "storage_key" }
+      : ngResolveStudentNotesForSession(db, session, { publishedOnly: !isStaff });
+    const notes = resolved?.note || null;
 
     if (!notes) {
       return res.json({ success: true, notes: null });
     }
 
-    const isStaff = user.role === "admin" || user.role === "instructor";
-
-    if (!isStaff && notes.published !== true && notes.is_published !== true) {
+    if (!isStaff && !ngStudentNotesIsPublished(notes)) {
       return res.json({ success: true, notes: null, unpublished: true });
     }
 
-    if (notes?.course_id) {
-      const enrollment = getBackendEnrollment(db, { userId: user.id, courseId: notes.course_id });
+    const notesCourseId = String(notes?.course_id || session?.course_id || "").trim();
+    if (notesCourseId) {
+      const enrollment = getBackendEnrollment(db, { userId: user.id, courseId: notesCourseId });
       if (!enrollment && !isStaff) {
         return res.status(403).json({ success: false, error: "No course access found" });
       }
@@ -14761,7 +14768,16 @@ async function getNotesHandler(req, res) {
       }
     }
 
-    res.json({ success: true, notes });
+    const responseNotes = session && resolved?.matched_by !== "storage_key"
+      ? {
+          ...notes,
+          session_id: sessionId,
+          course_id: notesCourseId || null,
+          roadmap_day_id: session.roadmap_day_id || notes.roadmap_day_id || null,
+        }
+      : notes;
+
+    res.json({ success: true, notes: responseNotes });
   } catch (e) {
     res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to load notes" });
   }
@@ -17467,9 +17483,108 @@ function ngStudentNotesIsPublished(note = {}) {
   return Boolean(ngStudentNotesVisibleText(note));
 }
 
-function ngStudentNotesSessionForList(db = {}, session = {}, course = null) {
+function ngStudentNotesUpdatedAtMs(note = {}) {
+  const parsed = new Date(note.updated_at || note.published_at || note.created_at || 0).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function ngResolveStudentNotesForSession(db = {}, session = null, { publishedOnly = false } = {}) {
+  const targetSessionId = String(session?.id || "").trim();
+  if (!targetSessionId) return null;
+
+  const targetCourseId = String(session?.course_id || "").trim();
+  const targetRoadmapDayId = String(session?.roadmap_day_id || "").trim();
+  const candidates = [];
+
+  for (const [noteKey, note] of Object.entries(db.notes || {})) {
+    if (!note || typeof note !== "object") continue;
+
+    const declaredSessionId = String(note.session_id || note.live_session_id || "").trim();
+    const sourceSession = db.liveSessions?.[declaredSessionId] || db.liveSessions?.[String(noteKey)] || null;
+    const candidateCourseId = String(note.course_id || sourceSession?.course_id || "").trim();
+    if (targetCourseId && candidateCourseId && candidateCourseId !== targetCourseId) continue;
+
+    const storageKeyMatch = String(noteKey) === targetSessionId;
+    const declaredSessionMatch = declaredSessionId === targetSessionId;
+    const noteRoadmapMatch = Boolean(
+      targetRoadmapDayId &&
+      String(note.roadmap_day_id || note.day_id || "").trim() === targetRoadmapDayId
+    );
+    const sourceSessionRoadmapMatch = Boolean(
+      targetRoadmapDayId &&
+      String(sourceSession?.roadmap_day_id || "").trim() === targetRoadmapDayId
+    );
+
+    if (!storageKeyMatch && !declaredSessionMatch && !noteRoadmapMatch && !sourceSessionRoadmapMatch) continue;
+    if (publishedOnly && !ngStudentNotesIsPublished(note)) continue;
+
+    let matchScore = 0;
+    let matchedBy = "source_session_roadmap_day_id";
+    if (storageKeyMatch) {
+      matchScore = 500;
+      matchedBy = "storage_key";
+    } else if (declaredSessionMatch) {
+      matchScore = 400;
+      matchedBy = "session_id";
+    } else if (noteRoadmapMatch) {
+      matchScore = 300;
+      matchedBy = "roadmap_day_id";
+    } else if (sourceSessionRoadmapMatch) {
+      matchScore = 200;
+    }
+
+    if (note.published === true || note.is_published === true) matchScore += 25;
+    candidates.push({
+      note,
+      note_key: String(noteKey),
+      matched_by: matchedBy,
+      match_score: matchScore,
+      updated_at_ms: ngStudentNotesUpdatedAtMs(note),
+    });
+  }
+
+  candidates.sort((left, right) =>
+    Number(right.match_score || 0) - Number(left.match_score || 0) ||
+    Number(right.updated_at_ms || 0) - Number(left.updated_at_ms || 0) ||
+    String(left.note_key || "").localeCompare(String(right.note_key || ""))
+  );
+  return candidates[0] || null;
+}
+
+function ngStudentNotesRoadmapSessionAuthority(db = {}, session = {}) {
+  const day = ngFindRoadmapDayForLiveSession(db, session);
+  const authoritativeSessionId = String(day?.live_session_id || day?.session_id || "").trim();
+  if (authoritativeSessionId && authoritativeSessionId === String(session.id || "")) return 1000;
+  if (session.roadmap_day_id) return 100;
+  return 0;
+}
+
+function ngStudentNotesResolvedSessionRows(db = {}, sessions = []) {
+  const selectedByNoteKey = new Map();
+
+  for (const session of sessions) {
+    const resolved = ngResolveStudentNotesForSession(db, session, { publishedOnly: true });
+    if (!resolved?.note) continue;
+
+    const selectionRank =
+      ngStudentNotesRoadmapSessionAuthority(db, session) +
+      Number(resolved.match_score || 0);
+    const existing = selectedByNoteKey.get(resolved.note_key);
+    if (!existing || selectionRank > existing.selection_rank) {
+      selectedByNoteKey.set(resolved.note_key, {
+        session,
+        note: resolved.note,
+        selection_rank: selectionRank,
+      });
+    }
+  }
+
+  return Array.from(selectedByNoteKey.values());
+}
+
+function ngStudentNotesSessionForList(db = {}, session = {}, course = null, resolvedNote = null) {
   const safe = sanitizeLiveSession(session);
-  const note = db.notes?.[String(session.id || safe.id)] || null;
+  const note = resolvedNote || ngResolveStudentNotesForSession(db, session, { publishedOnly: true })?.note || null;
   const notesText = ngStudentNotesVisibleText(note);
   return {
     ...safe,
@@ -17525,15 +17640,16 @@ app.get("/student/notes/sessions", async (req, res) => {
       const access = ngStudentEnrollmentStatusForCourse(db, user, course.id);
       if (!ngStudentHasCourseAccessStatus(access.status)) return null;
 
-      const sessions = Object.values(db.liveSessions || {})
+      const eligibleSessions = Object.values(db.liveSessions || {})
         .filter((session) => String(session.course_id || "") === String(course.id))
-        .filter((session) => !ngStudentNotesSessionIsNoClass(session))
-        .filter((session) => ngStudentNotesIsPublished(db.notes?.[String(session.id)] || null))
+        .filter((session) => !ngStudentNotesSessionIsNoClass(session));
+
+      const sessions = ngStudentNotesResolvedSessionRows(db, eligibleSessions)
         .sort((a, b) => {
-          return String(a.scheduled_date || "").localeCompare(String(b.scheduled_date || "")) ||
-            String(a.scheduled_time || "").localeCompare(String(b.scheduled_time || ""));
+          return String(a.session?.scheduled_date || "").localeCompare(String(b.session?.scheduled_date || "")) ||
+            String(a.session?.scheduled_time || "").localeCompare(String(b.session?.scheduled_time || ""));
         })
-        .map((session) => ngStudentNotesSessionForList(db, session, course));
+        .map((row) => ngStudentNotesSessionForList(db, row.session, course, row.note));
 
       return {
         course: sanitizeCourse(course),
@@ -17548,8 +17664,9 @@ app.get("/student/notes/sessions", async (req, res) => {
 
     res.json({
       success: true,
-      source: "student_notes_sessions_v177m_published_only",
-      strategy: "published_notes_only_no_holiday_placeholders",
+      source: "student_notes_sessions_v224_roadmap_safe_resolver",
+      strategy: "published_notes_resolved_by_storage_session_or_roadmap_identity",
+      student_notes_resolver_build: STUDENT_NOTES_RESOLVER_BUILD,
       count: bundles.reduce((sum, bundle) => sum + Number(bundle.count || 0), 0),
       course_bundles: bundles,
       bundles,
