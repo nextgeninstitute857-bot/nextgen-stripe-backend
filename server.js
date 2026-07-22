@@ -231,7 +231,7 @@ const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
 const ROADMAP_EXTENSION_BUILD = "v221-system-aware-roadmap-extension";
 const RECORDING_ASSIGNMENT_BUILD = "v222-safe-recording-detach";
 const RECORDING_DUPLICATE_CLEANUP_BUILD = "v223-safe-recording-duplicate-cleanup";
-const STUDENT_NOTES_RESOLVER_BUILD = "v224-roadmap-safe-notes-resolver";
+const STUDENT_NOTES_RESOLVER_BUILD = "v225-course-system-day-notes-resolver";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -17488,12 +17488,60 @@ function ngStudentNotesUpdatedAtMs(note = {}) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function ngStudentNotesContentIdentity(record = {}, fallback = null) {
+  const title = [
+    record.title,
+    record.topic,
+    record.notes_title,
+    record.session_title,
+    record.lecture_title,
+  ].map((value) => String(value || "").trim()).find(Boolean) || "";
+  const titleMatch = title.match(/^(.+?)(?:\s*[—–-]\s*|\s+)day\s*0*(\d{1,3})\b/i);
+  const explicitSystem = String(
+    record.system ||
+    record.chapter ||
+    record.medical_system ||
+    record.organ_system ||
+    record.system_name ||
+    ""
+  ).trim();
+  const fallbackSystem = String(
+    fallback?.system ||
+    fallback?.chapter ||
+    fallback?.medical_system ||
+    fallback?.organ_system ||
+    fallback?.system_name ||
+    ""
+  ).trim();
+  const rawSystem = explicitSystem || String(titleMatch?.[1] || "").trim() || fallbackSystem;
+  const normalizedSystem = rawSystem
+    ? String(ngNormalizeMasterMapSystemName(rawSystem) || rawSystem).trim().toLowerCase()
+    : "";
+
+  const explicitDay = Number(
+    record.system_day ??
+    record.day_in_system ??
+    record.systemDay ??
+    0
+  );
+  const titleDay = Number(titleMatch?.[2] || 0);
+  const systemDay = Number.isInteger(explicitDay) && explicitDay > 0
+    ? explicitDay
+    : Number.isInteger(titleDay) && titleDay > 0
+      ? titleDay
+      : 0;
+
+  return { system: normalizedSystem, system_day: systemDay };
+}
+
 function ngResolveStudentNotesForSession(db = {}, session = null, { publishedOnly = false } = {}) {
   const targetSessionId = String(session?.id || "").trim();
   if (!targetSessionId) return null;
 
   const targetCourseId = String(session?.course_id || "").trim();
   const targetRoadmapDayId = String(session?.roadmap_day_id || "").trim();
+  const targetRoadmapDay = ngFindRoadmapDayForLiveSession(db, session);
+  const targetIdentity = ngStudentNotesContentIdentity(targetRoadmapDay || session, session);
   const candidates = [];
 
   for (const [noteKey, note] of Object.entries(db.notes || {})) {
@@ -17514,25 +17562,52 @@ function ngResolveStudentNotesForSession(db = {}, session = null, { publishedOnl
       targetRoadmapDayId &&
       String(sourceSession?.roadmap_day_id || "").trim() === targetRoadmapDayId
     );
+    const noteIdentity = ngStudentNotesContentIdentity(note, sourceSession);
+    const identitiesComparable = Boolean(
+      targetIdentity.system &&
+      targetIdentity.system_day &&
+      noteIdentity.system &&
+      noteIdentity.system_day
+    );
+    const courseSystemDayMatch = Boolean(
+      targetCourseId &&
+      candidateCourseId === targetCourseId &&
+      identitiesComparable &&
+      noteIdentity.system === targetIdentity.system &&
+      noteIdentity.system_day === targetIdentity.system_day
+    );
+    const contentIdentityConflict = Boolean(
+      identitiesComparable &&
+      !courseSystemDayMatch
+    );
 
-    if (!storageKeyMatch && !declaredSessionMatch && !noteRoadmapMatch && !sourceSessionRoadmapMatch) continue;
+    if (!storageKeyMatch && !declaredSessionMatch && !noteRoadmapMatch && !sourceSessionRoadmapMatch && !courseSystemDayMatch) continue;
+    // A roadmap recovery can reuse a live-session id for a later class. When a
+    // note retains an explicit system/day identity that conflicts with that
+    // reused session, the stale session link must not override its content
+    // identity. An explicit matching roadmap-day id remains authoritative.
+    if (contentIdentityConflict && !noteRoadmapMatch) continue;
     if (publishedOnly && !ngStudentNotesIsPublished(note)) continue;
 
     let matchScore = 0;
     let matchedBy = "source_session_roadmap_day_id";
-    if (storageKeyMatch) {
-      matchScore = 500;
+    if (noteRoadmapMatch) {
+      matchScore = 700;
+      matchedBy = "roadmap_day_id";
+    } else if (storageKeyMatch) {
+      matchScore = 600;
       matchedBy = "storage_key";
     } else if (declaredSessionMatch) {
-      matchScore = 400;
+      matchScore = 500;
       matchedBy = "session_id";
-    } else if (noteRoadmapMatch) {
-      matchScore = 300;
-      matchedBy = "roadmap_day_id";
+    } else if (courseSystemDayMatch) {
+      matchScore = 450;
+      matchedBy = "course_system_day";
     } else if (sourceSessionRoadmapMatch) {
-      matchScore = 200;
+      matchScore = 300;
     }
 
+    if (courseSystemDayMatch) matchScore += 250;
     if (note.published === true || note.is_published === true) matchScore += 25;
     candidates.push({
       note,
@@ -17664,8 +17739,8 @@ app.get("/student/notes/sessions", async (req, res) => {
 
     res.json({
       success: true,
-      source: "student_notes_sessions_v224_roadmap_safe_resolver",
-      strategy: "published_notes_resolved_by_storage_session_or_roadmap_identity",
+      source: "student_notes_sessions_v225_course_system_day_resolver",
+      strategy: "published_notes_resolved_by_storage_session_roadmap_or_exact_course_system_day_identity",
       student_notes_resolver_build: STUDENT_NOTES_RESOLVER_BUILD,
       count: bundles.reduce((sum, bundle) => sum + Number(bundle.count || 0), 0),
       course_bundles: bundles,

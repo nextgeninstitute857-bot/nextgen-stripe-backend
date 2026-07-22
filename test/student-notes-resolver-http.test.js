@@ -81,7 +81,7 @@ function session({ id, courseId, day, roadmapDayId, date, pages, status = "compl
   };
 }
 
-test("student notes resolve published legacy records by session and roadmap identity without rewriting data", { timeout: 70_000 }, async () => {
+test("student notes resolve published legacy records by session, roadmap, or exact course system-day identity without rewriting data", { timeout: 70_000 }, async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "student-notes-resolver-http-"));
   const livePath = path.join(dataDir, "live-session-db.json");
   const crmPath = path.join(dataDir, "crm-db.json");
@@ -148,9 +148,15 @@ test("student notes resolve published legacy records by session and roadmap iden
   const notes = {
     "legacy-note-day-10": {
       id: "legacy-note-day-10",
-      session_id: sessionIds[10],
+      // This reproduces the remaining live failure after the roadmap repair:
+      // the note still points at a session slot later reused for Day 13 and no
+      // longer has its original roadmap-day id. Its preserved Cardiology Day
+      // 10 identity is the only safe way to reconnect it for student reads.
+      session_id: sessionIds[13],
       course_id: courseId,
-      roadmap_day_id: dayIds[10],
+      roadmap_day_id: null,
+      system: "Cardiology",
+      system_day: 10,
       cleaned_notes: "Cardiology Day 10 clean tutor notes. ".repeat(8),
       published: true,
       is_published: true,
@@ -204,6 +210,16 @@ test("student notes resolve published legacy records by session and roadmap iden
       published: true,
       is_published: true,
       updated_at: "2026-07-23T13:00:00.000Z",
+    },
+    "unknown-course-cardio-day-10": {
+      id: "unknown-course-cardio-day-10",
+      session_id: "missing-session",
+      system: "Cardiology",
+      system_day: 10,
+      cleaned_notes: "A note without a verified course must not be used by the system-day fallback.",
+      published: true,
+      is_published: true,
+      updated_at: "2026-07-24T13:00:00.000Z",
     },
   };
 
@@ -304,7 +320,7 @@ test("student notes resolve published legacy records by session and roadmap iden
   try {
     await waitForHealth(baseUrl, child, output);
     const health = await api(baseUrl, "/health");
-    assert.equal(health.payload.student_notes_resolver_build, "v224-roadmap-safe-notes-resolver");
+    assert.equal(health.payload.student_notes_resolver_build, "v225-course-system-day-notes-resolver");
 
     const login = await api(baseUrl, "/auth/login", {
       method: "POST",
@@ -315,7 +331,7 @@ test("student notes resolve published legacy records by session and roadmap iden
 
     const list = await api(baseUrl, `/student/notes/sessions?course_id=${encodeURIComponent(courseId)}`, { token });
     assert.equal(list.response.status, 200, JSON.stringify(list.payload));
-    assert.equal(list.payload.student_notes_resolver_build, "v224-roadmap-safe-notes-resolver");
+    assert.equal(list.payload.student_notes_resolver_build, "v225-course-system-day-notes-resolver");
     assert.deepEqual(list.payload.sessions.map((item) => item.id), [
       sessionIds[10],
       sessionIds[11],
@@ -340,6 +356,12 @@ test("student notes resolve published legacy records by session and roadmap iden
     assert.equal(day12.response.status, 200, JSON.stringify(day12.payload));
     assert.equal(day12.payload.notes.session_id, sessionIds[12]);
     assert.match(day12.payload.notes.cleaned_notes, /without explicit publication flags/);
+
+    const day13 = await api(baseUrl, `/live/notes/${sessionIds[13]}`, { token });
+    assert.equal(day13.response.status, 200, JSON.stringify(day13.payload));
+    assert.equal(day13.payload.notes.session_id, sessionIds[13]);
+    assert.match(day13.payload.notes.cleaned_notes, /Day 13 clean tutor notes/);
+    assert.doesNotMatch(day13.payload.notes.cleaned_notes, /Day 10 clean tutor notes/);
 
     const saved = JSON.parse(await fs.readFile(livePath, "utf8"));
     assert.deepEqual(saved.notes, notesBefore, "Read-only note resolution must not rewrite or duplicate notes");
