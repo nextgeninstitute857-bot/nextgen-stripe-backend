@@ -229,6 +229,7 @@ const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
 const CONTENT_INGESTION_BUILD = "v220-direct-qbank-media-ingestion";
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
 const ROADMAP_EXTENSION_BUILD = "v221-system-aware-roadmap-extension";
+const RECORDING_ASSIGNMENT_BUILD = "v222-safe-recording-detach";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -9982,6 +9983,7 @@ app.get("/health", async (req, res) => {
     build: NEXTGEN_BACKEND_BUILD,
     content_ingestion_build: CONTENT_INGESTION_BUILD,
     roadmap_extension_build: ROADMAP_EXTENSION_BUILD,
+    recording_assignment_build: RECORDING_ASSIGNMENT_BUILD,
     data_dir: DATA_DIR,
     live_db_path: LIVE_DB_PATH,
     live_db_exists: liveDbExists,
@@ -13667,6 +13669,7 @@ app.get("/zoom/recordings", async (req, res) => {
       const storedOccurrence = ngFindStoredZoomRecordingOccurrence(db, meeting);
       const recordingKey = storedOccurrence.key || computedRecordingKey;
       const saved = storedOccurrence.recording || {};
+      if (saved.hidden_from_recordings === true) return null;
       const exactMatch = ngResolveExactSessionForZoomRecording(db, meeting, saved);
       const matchedSession = saved.session_id
         ? db.liveSessions?.[String(saved.session_id)] || null
@@ -13701,7 +13704,7 @@ app.get("/zoom/recordings", async (req, res) => {
         status: videoFile?.status || "completed",
         published: Boolean(saved.published),
       });
-    });
+    }).filter(Boolean);
 
     res.json({ success: true, from, to, count: recordings.length, recordings });
   } catch (e) {
@@ -14017,6 +14020,199 @@ app.post("/live/recordings/unpublish", async (req, res) => {
     res.status(e.statusCode || 500).json({ success: false, error: e.message });
   }
 });
+
+// Detach a wrong admin recording-to-session assignment without deleting the
+// Zoom recording or the real roadmap/live-session record. This is intentionally
+// limited to unpublished recordings with no attendance on the assigned session.
+app.post("/admin/recordings/detach-assignment", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.recordings.manage");
+    const requestedKey = buildRecordingStorageKey(req.body);
+    const expectedSessionId = String(req.body.expected_session_id || req.body.session_id || "").trim();
+    const expectedStartDate = String(req.body.expected_start_date || "").trim().slice(0, 10);
+    const confirmation = String(req.body.confirm || "").trim().toUpperCase();
+
+    if (!requestedKey) {
+      return res.status(400).json({
+        success: false,
+        error: "recording_key, uuid/start_time, or meeting_id is required",
+      });
+    }
+    if (!expectedSessionId) {
+      return res.status(400).json({ success: false, error: "expected_session_id is required" });
+    }
+    if (confirmation !== "DETACH_RECORDING_ASSIGNMENT") {
+      return res.status(400).json({
+        success: false,
+        error: "Exact confirmation is required: DETACH_RECORDING_ASSIGNMENT",
+      });
+    }
+
+    const result = await mutateLiveDb(async (db) => {
+      const storedEntry = Object.entries(db.recordings || {}).find(([storageKey, recording]) => {
+        return storageKey === requestedKey ||
+          String(recording?.recording_key || recording?.id || "") === requestedKey;
+      });
+      if (!storedEntry) {
+        const error = new Error("Recording was not found; nothing was changed");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      const [storageKey, recording] = storedEntry;
+      const assignedSessionId = String(recording?.session_id || "").trim();
+      if (assignedSessionId !== expectedSessionId) {
+        const error = new Error("Recording assignment changed after audit; nothing was changed");
+        error.statusCode = 409;
+        throw error;
+      }
+      if (expectedStartDate && String(recording?.start_time || "").slice(0, 10) !== expectedStartDate) {
+        const error = new Error("Recording start date changed after audit; nothing was changed");
+        error.statusCode = 409;
+        throw error;
+      }
+      if (recording?.published === true) {
+        const error = new Error("Published recordings cannot be detached by this safety operation");
+        error.statusCode = 409;
+        throw error;
+      }
+
+      const assignedSession = db.liveSessions?.[assignedSessionId] || null;
+      if (!assignedSession) {
+        const error = new Error("Assigned live session was not found; nothing was changed");
+        error.statusCode = 409;
+        throw error;
+      }
+      const sessionStatus = String(assignedSession.status || "scheduled").trim().toLowerCase();
+      if (sessionStatus !== "scheduled") {
+        const error = new Error("Only a future scheduled session can be detached by this safety operation");
+        error.statusCode = 409;
+        throw error;
+      }
+
+      const attendanceCount = Object.values(db.attendance || {}).filter((attendance) => {
+        return String(attendance?.session_id || attendance?.live_session_id || "") === assignedSessionId;
+      }).length;
+      if (attendanceCount > 0) {
+        const error = new Error("The assigned session has attendance; recording assignment was not detached");
+        error.statusCode = 409;
+        throw error;
+      }
+
+      await ensureDataDir();
+      const backupDir = path.join(DATA_DIR, "backups");
+      await fs.mkdir(backupDir, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const backupPath = path.join(backupDir, `live-session-db-before-recording-detach-${stamp}.json`);
+      await ngWriteJsonAtomicStreaming(backupPath, db, "LMS recording-detach backup");
+
+      const now = new Date().toISOString();
+      const recordingUrl = String(recording.recording_url || recording.share_url || "").trim();
+      const sessionPointsToRecording =
+        String(assignedSession.recording_key || assignedSession.recording_id || "") === storageKey ||
+        Boolean(recordingUrl && String(assignedSession.recording_url || "").trim() === recordingUrl);
+
+      if (sessionPointsToRecording) {
+        db.liveSessions[assignedSessionId] = {
+          ...assignedSession,
+          recording_key: null,
+          recording_id: null,
+          recording_url: null,
+          recording_published: false,
+          recording_published_at: null,
+          recording_match_reason: null,
+          updated_by: user.id,
+          updated_at: now,
+        };
+      }
+
+      let notesLinksCleared = 0;
+      for (const [noteKey, note] of Object.entries(db.notes || {})) {
+        if (String(note?.session_id || "") !== assignedSessionId) continue;
+        if (String(note?.recording_key || "") !== storageKey) continue;
+        db.notes[noteKey] = {
+          ...note,
+          recording_key: null,
+          recording_url: null,
+          recording_published: false,
+          updated_by: user.id,
+          updated_at: now,
+        };
+        notesLinksCleared += 1;
+      }
+
+      const assignmentHistory = Array.isArray(recording.assignment_history)
+        ? recording.assignment_history
+        : [];
+      db.recordings[storageKey] = {
+        ...recording,
+        id: storageKey,
+        recording_key: storageKey,
+        session_id: null,
+        roadmap_day_id: null,
+        day_number: null,
+        instructional_day_number: null,
+        system_day: null,
+        system: null,
+        published: false,
+        auto_publish_disabled: true,
+        assignment_source: "admin_detached_wrong_assignment",
+        assignment_locked: true,
+        hidden_from_recordings: req.body.hide !== false,
+        detached_from_session_id: assignedSessionId,
+        detached_from_roadmap_day_id: recording.roadmap_day_id || assignedSession.roadmap_day_id || null,
+        detached_at: now,
+        detached_by: user.id,
+        assignment_history: [
+          ...assignmentHistory,
+          {
+            from_session_id: assignedSessionId,
+            to_session_id: null,
+            assigned_at: now,
+            assigned_by: user.id,
+            reason: "wrong_unpublished_future_assignment_detached",
+          },
+        ],
+        unpublished_at: recording.unpublished_at || now,
+        updated_at: now,
+      };
+
+      return {
+        recording_key: storageKey,
+        detached_from_session_id: assignedSessionId,
+        detached_from_roadmap_day_id: recording.roadmap_day_id || assignedSession.roadmap_day_id || null,
+        recording_preserved: true,
+        recording_hidden: db.recordings[storageKey].hidden_from_recordings === true,
+        live_session_preserved: true,
+        session_recording_link_cleared: sessionPointsToRecording,
+        notes_recording_links_cleared: notesLinksCleared,
+        attendance_count: attendanceCount,
+        backup_path: backupPath,
+      };
+    });
+
+    res.json({
+      success: true,
+      recording_assignment_build: RECORDING_ASSIGNMENT_BUILD,
+      ...result,
+      users_deleted: 0,
+      enrollments_deleted: 0,
+      payments_deleted: 0,
+      roadmap_days_deleted: 0,
+      live_sessions_deleted: 0,
+      recordings_deleted: 0,
+      notes_deleted: 0,
+      attempts_deleted: 0,
+      points_deleted: 0,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to detach recording assignment",
+    });
+  }
+});
+
 app.get("/live/recordings", async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req);
@@ -14040,6 +14236,8 @@ app.get("/live/recordings", async (req, res) => {
     if (autoRoadmapSync.changed) await writeLiveDb(db);
 
     let recordings = Object.values(db.recordings || {});
+    const includeHidden = isStaff && req.query.include_hidden === "true";
+    if (!includeHidden) recordings = recordings.filter((recording) => recording.hidden_from_recordings !== true);
     if (!isStaff) recordings = recordings.filter((recording) => recording.published);
     if (requestedCourseId) recordings = recordings.filter((recording) => String(recording.course_id || "") === requestedCourseId);
 
