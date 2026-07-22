@@ -229,6 +229,8 @@ const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
 const CONTENT_INGESTION_BUILD = "v220-direct-qbank-media-ingestion";
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
 const ROADMAP_EXTENSION_BUILD = "v221-system-aware-roadmap-extension";
+const RECORDING_ASSIGNMENT_BUILD = "v222-safe-recording-detach";
+const RECORDING_DUPLICATE_CLEANUP_BUILD = "v223-safe-recording-duplicate-cleanup";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -9982,6 +9984,8 @@ app.get("/health", async (req, res) => {
     build: NEXTGEN_BACKEND_BUILD,
     content_ingestion_build: CONTENT_INGESTION_BUILD,
     roadmap_extension_build: ROADMAP_EXTENSION_BUILD,
+    recording_assignment_build: RECORDING_ASSIGNMENT_BUILD,
+    recording_duplicate_cleanup_build: RECORDING_DUPLICATE_CLEANUP_BUILD,
     data_dir: DATA_DIR,
     live_db_path: LIVE_DB_PATH,
     live_db_exists: liveDbExists,
@@ -13667,6 +13671,7 @@ app.get("/zoom/recordings", async (req, res) => {
       const storedOccurrence = ngFindStoredZoomRecordingOccurrence(db, meeting);
       const recordingKey = storedOccurrence.key || computedRecordingKey;
       const saved = storedOccurrence.recording || {};
+      if (saved.hidden_from_recordings === true) return null;
       const exactMatch = ngResolveExactSessionForZoomRecording(db, meeting, saved);
       const matchedSession = saved.session_id
         ? db.liveSessions?.[String(saved.session_id)] || null
@@ -13701,7 +13706,7 @@ app.get("/zoom/recordings", async (req, res) => {
         status: videoFile?.status || "completed",
         published: Boolean(saved.published),
       });
-    });
+    }).filter(Boolean);
 
     res.json({ success: true, from, to, count: recordings.length, recordings });
   } catch (e) {
@@ -14017,6 +14022,485 @@ app.post("/live/recordings/unpublish", async (req, res) => {
     res.status(e.statusCode || 500).json({ success: false, error: e.message });
   }
 });
+
+// Detach a wrong admin recording-to-session assignment without deleting the
+// Zoom recording or the real roadmap/live-session record. This is intentionally
+// limited to unpublished recordings with no attendance on the assigned session.
+app.post("/admin/recordings/detach-assignment", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.recordings.manage");
+    const requestedKey = buildRecordingStorageKey(req.body);
+    const expectedSessionId = String(req.body.expected_session_id || req.body.session_id || "").trim();
+    const expectedStartDate = String(req.body.expected_start_date || "").trim().slice(0, 10);
+    const confirmation = String(req.body.confirm || "").trim().toUpperCase();
+
+    if (!requestedKey) {
+      return res.status(400).json({
+        success: false,
+        error: "recording_key, uuid/start_time, or meeting_id is required",
+      });
+    }
+    if (!expectedSessionId) {
+      return res.status(400).json({ success: false, error: "expected_session_id is required" });
+    }
+    if (confirmation !== "DETACH_RECORDING_ASSIGNMENT") {
+      return res.status(400).json({
+        success: false,
+        error: "Exact confirmation is required: DETACH_RECORDING_ASSIGNMENT",
+      });
+    }
+
+    const result = await mutateLiveDb(async (db) => {
+      const storedEntry = Object.entries(db.recordings || {}).find(([storageKey, recording]) => {
+        return storageKey === requestedKey ||
+          String(recording?.recording_key || recording?.id || "") === requestedKey;
+      });
+      if (!storedEntry) {
+        const error = new Error("Recording was not found; nothing was changed");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      const [storageKey, recording] = storedEntry;
+      const assignedSessionId = String(recording?.session_id || "").trim();
+      if (assignedSessionId !== expectedSessionId) {
+        const error = new Error("Recording assignment changed after audit; nothing was changed");
+        error.statusCode = 409;
+        throw error;
+      }
+      if (expectedStartDate && String(recording?.start_time || "").slice(0, 10) !== expectedStartDate) {
+        const error = new Error("Recording start date changed after audit; nothing was changed");
+        error.statusCode = 409;
+        throw error;
+      }
+      if (recording?.published === true) {
+        const error = new Error("Published recordings cannot be detached by this safety operation");
+        error.statusCode = 409;
+        throw error;
+      }
+
+      const assignedSession = db.liveSessions?.[assignedSessionId] || null;
+      if (!assignedSession) {
+        const error = new Error("Assigned live session was not found; nothing was changed");
+        error.statusCode = 409;
+        throw error;
+      }
+      const sessionStatus = String(assignedSession.status || "scheduled").trim().toLowerCase();
+      if (sessionStatus !== "scheduled") {
+        const error = new Error("Only a future scheduled session can be detached by this safety operation");
+        error.statusCode = 409;
+        throw error;
+      }
+
+      const attendanceCount = Object.values(db.attendance || {}).filter((attendance) => {
+        return String(attendance?.session_id || attendance?.live_session_id || "") === assignedSessionId;
+      }).length;
+      if (attendanceCount > 0) {
+        const error = new Error("The assigned session has attendance; recording assignment was not detached");
+        error.statusCode = 409;
+        throw error;
+      }
+
+      await ensureDataDir();
+      const backupDir = path.join(DATA_DIR, "backups");
+      await fs.mkdir(backupDir, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const backupPath = path.join(backupDir, `live-session-db-before-recording-detach-${stamp}.json`);
+      await ngWriteJsonAtomicStreaming(backupPath, db, "LMS recording-detach backup");
+
+      const now = new Date().toISOString();
+      const recordingUrl = String(recording.recording_url || recording.share_url || "").trim();
+      const sessionPointsToRecording =
+        String(assignedSession.recording_key || assignedSession.recording_id || "") === storageKey ||
+        Boolean(recordingUrl && String(assignedSession.recording_url || "").trim() === recordingUrl);
+
+      if (sessionPointsToRecording) {
+        db.liveSessions[assignedSessionId] = {
+          ...assignedSession,
+          recording_key: null,
+          recording_id: null,
+          recording_url: null,
+          recording_published: false,
+          recording_published_at: null,
+          recording_match_reason: null,
+          updated_by: user.id,
+          updated_at: now,
+        };
+      }
+
+      let notesLinksCleared = 0;
+      for (const [noteKey, note] of Object.entries(db.notes || {})) {
+        if (String(note?.session_id || "") !== assignedSessionId) continue;
+        if (String(note?.recording_key || "") !== storageKey) continue;
+        db.notes[noteKey] = {
+          ...note,
+          recording_key: null,
+          recording_url: null,
+          recording_published: false,
+          updated_by: user.id,
+          updated_at: now,
+        };
+        notesLinksCleared += 1;
+      }
+
+      const assignmentHistory = Array.isArray(recording.assignment_history)
+        ? recording.assignment_history
+        : [];
+      db.recordings[storageKey] = {
+        ...recording,
+        id: storageKey,
+        recording_key: storageKey,
+        session_id: null,
+        roadmap_day_id: null,
+        day_number: null,
+        instructional_day_number: null,
+        system_day: null,
+        system: null,
+        published: false,
+        auto_publish_disabled: true,
+        assignment_source: "admin_detached_wrong_assignment",
+        assignment_locked: true,
+        hidden_from_recordings: req.body.hide !== false,
+        detached_from_session_id: assignedSessionId,
+        detached_from_roadmap_day_id: recording.roadmap_day_id || assignedSession.roadmap_day_id || null,
+        detached_at: now,
+        detached_by: user.id,
+        assignment_history: [
+          ...assignmentHistory,
+          {
+            from_session_id: assignedSessionId,
+            to_session_id: null,
+            assigned_at: now,
+            assigned_by: user.id,
+            reason: "wrong_unpublished_future_assignment_detached",
+          },
+        ],
+        unpublished_at: recording.unpublished_at || now,
+        updated_at: now,
+      };
+
+      return {
+        recording_key: storageKey,
+        detached_from_session_id: assignedSessionId,
+        detached_from_roadmap_day_id: recording.roadmap_day_id || assignedSession.roadmap_day_id || null,
+        recording_preserved: true,
+        recording_hidden: db.recordings[storageKey].hidden_from_recordings === true,
+        live_session_preserved: true,
+        session_recording_link_cleared: sessionPointsToRecording,
+        notes_recording_links_cleared: notesLinksCleared,
+        attendance_count: attendanceCount,
+        backup_path: backupPath,
+      };
+    });
+
+    res.json({
+      success: true,
+      recording_assignment_build: RECORDING_ASSIGNMENT_BUILD,
+      ...result,
+      users_deleted: 0,
+      enrollments_deleted: 0,
+      payments_deleted: 0,
+      roadmap_days_deleted: 0,
+      live_sessions_deleted: 0,
+      recordings_deleted: 0,
+      notes_deleted: 0,
+      attempts_deleted: 0,
+      points_deleted: 0,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to detach recording assignment",
+    });
+  }
+});
+
+// Canonicalize one live session that has several published recording rows.
+// This operation is deliberately narrow: the admin supplies every exact raw
+// storage key, the one keeper must be playable, every clone must have zero
+// duration, and the supplied set must equal all published rows for the exact
+// course/session. Rows are preserved, not deleted.
+app.post("/admin/recordings/cleanup-session-duplicates", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.recordings.manage");
+    const courseId = String(req.body.course_id || "").trim();
+    const sessionId = String(req.body.session_id || "").trim();
+    const expectedSessionDate = String(req.body.expected_session_date || "").trim().slice(0, 10);
+    const keeperRequestedKey = String(req.body.keeper_recording_key || "").trim();
+    const cloneRequestedKeys = Array.isArray(req.body.clone_recording_keys)
+      ? req.body.clone_recording_keys.map((value) => String(value || "").trim()).filter(Boolean)
+      : [];
+    const expectedKeeperMeetingId = String(req.body.expected_keeper_meeting_id || "").trim();
+    const expectedCloneMeetingId = String(req.body.expected_clone_meeting_id || "").trim();
+    const confirmation = String(req.body.confirm || "").trim().toUpperCase();
+
+    if (!courseId || !sessionId || !expectedSessionDate || !keeperRequestedKey) {
+      return res.status(400).json({
+        success: false,
+        error: "course_id, session_id, expected_session_date, and keeper_recording_key are required",
+      });
+    }
+    if (cloneRequestedKeys.length < 1 || cloneRequestedKeys.length > 20) {
+      return res.status(400).json({
+        success: false,
+        error: "clone_recording_keys must contain between 1 and 20 exact keys",
+      });
+    }
+    if (new Set(cloneRequestedKeys).size !== cloneRequestedKeys.length) {
+      return res.status(400).json({ success: false, error: "clone_recording_keys contains duplicates" });
+    }
+    if (cloneRequestedKeys.includes(keeperRequestedKey)) {
+      return res.status(400).json({ success: false, error: "The keeper cannot also be a clone" });
+    }
+    if (confirmation !== "CLEANUP_SESSION_RECORDING_DUPLICATES") {
+      return res.status(400).json({
+        success: false,
+        error: "Exact confirmation is required: CLEANUP_SESSION_RECORDING_DUPLICATES",
+      });
+    }
+
+    const result = await mutateLiveDb(async (db) => {
+      const recordingEntries = Object.entries(db.recordings || {});
+      const findExactEntry = (requestedKey) => recordingEntries.find(([storageKey, recording]) => {
+        return storageKey === requestedKey ||
+          String(recording?.recording_key || "") === requestedKey ||
+          String(recording?.id || "") === requestedKey;
+      }) || null;
+      const durationMinutes = (recording = {}) => {
+        const value = Number(recording.duration ?? recording.duration_minutes ?? 0);
+        return Number.isFinite(value) && value > 0 ? value : 0;
+      };
+      const recordingDate = (recording = {}) => String(
+        recording.start_time || recording.published_at || recording.created_at || ""
+      ).slice(0, 10);
+      const titleIsExpectedSession = (value) => {
+        const title = String(value || "");
+        return /(?:cardio|cardiology)/i.test(title) && /day\s*0?9\b/i.test(title);
+      };
+
+      const sessionEntry = Object.entries(db.liveSessions || {}).find(([storageKey, session]) => {
+        return storageKey === sessionId || String(session?.id || "") === sessionId;
+      }) || null;
+      if (!sessionEntry) {
+        const error = new Error("Exact live session was not found; nothing was changed");
+        error.statusCode = 409;
+        throw error;
+      }
+      const [sessionStorageKey, session] = sessionEntry;
+      if (String(session.course_id || "") !== courseId) {
+        const error = new Error("Live-session course changed after preview; nothing was changed");
+        error.statusCode = 409;
+        throw error;
+      }
+      if (String(session.scheduled_date || "").slice(0, 10) !== expectedSessionDate) {
+        const error = new Error("Live-session date changed after preview; nothing was changed");
+        error.statusCode = 409;
+        throw error;
+      }
+      if (!titleIsExpectedSession(session.topic || session.title)) {
+        const error = new Error("This protected cleanup accepts only the audited Cardiology Day 9 session");
+        error.statusCode = 409;
+        throw error;
+      }
+
+      const keeperEntry = findExactEntry(keeperRequestedKey);
+      if (!keeperEntry) {
+        const error = new Error("Exact keeper recording key was not found; nothing was changed");
+        error.statusCode = 409;
+        throw error;
+      }
+      const [keeperStorageKey, keeper] = keeperEntry;
+      if (
+        keeper.published !== true ||
+        String(keeper.course_id || "") !== courseId ||
+        String(keeper.session_id || "") !== sessionId ||
+        recordingDate(keeper) !== expectedSessionDate ||
+        !titleIsExpectedSession(keeper.topic || keeper.title) ||
+        durationMinutes(keeper) < 5 ||
+        !String(keeper.recording_url || keeper.share_url || "").trim()
+      ) {
+        const error = new Error("Keeper no longer matches the audited playable Day 9 recording; nothing was changed");
+        error.statusCode = 409;
+        throw error;
+      }
+      if (expectedKeeperMeetingId && String(keeper.meeting_id || "") !== expectedKeeperMeetingId) {
+        const error = new Error("Keeper meeting ID changed after preview; nothing was changed");
+        error.statusCode = 409;
+        throw error;
+      }
+
+      const cloneEntries = cloneRequestedKeys.map((requestedKey) => {
+        const entry = findExactEntry(requestedKey);
+        if (!entry) {
+          const error = new Error(`Exact clone recording key was not found: ${requestedKey}`);
+          error.statusCode = 409;
+          throw error;
+        }
+        return entry;
+      });
+      const cloneStorageKeys = cloneEntries.map(([storageKey]) => storageKey);
+      if (new Set(cloneStorageKeys).size !== cloneStorageKeys.length || cloneStorageKeys.includes(keeperStorageKey)) {
+        const error = new Error("Resolved recording storage keys are not unique; nothing was changed");
+        error.statusCode = 409;
+        throw error;
+      }
+
+      for (const [, clone] of cloneEntries) {
+        if (
+          clone.published !== true ||
+          String(clone.course_id || "") !== courseId ||
+          String(clone.session_id || "") !== sessionId ||
+          !titleIsExpectedSession(clone.topic || clone.title) ||
+          durationMinutes(clone) !== 0
+        ) {
+          const error = new Error("A proposed clone is no longer a published zero-duration Day 9 row; nothing was changed");
+          error.statusCode = 409;
+          throw error;
+        }
+        if (expectedCloneMeetingId && String(clone.meeting_id || "") !== expectedCloneMeetingId) {
+          const error = new Error("A clone meeting ID changed after preview; nothing was changed");
+          error.statusCode = 409;
+          throw error;
+        }
+      }
+
+      const publishedSessionEntries = recordingEntries.filter(([, recording]) => {
+        return recording?.published === true &&
+          String(recording.course_id || "") === courseId &&
+          String(recording.session_id || "") === sessionId;
+      });
+      const expectedPublishedStorageKeys = new Set([keeperStorageKey, ...cloneStorageKeys]);
+      const actualPublishedStorageKeys = new Set(publishedSessionEntries.map(([storageKey]) => storageKey));
+      if (
+        actualPublishedStorageKeys.size !== expectedPublishedStorageKeys.size ||
+        [...actualPublishedStorageKeys].some((storageKey) => !expectedPublishedStorageKeys.has(storageKey))
+      ) {
+        const error = new Error("Published Day 9 set changed after preview; refresh before cleanup");
+        error.statusCode = 409;
+        throw error;
+      }
+
+      await ensureDataDir();
+      const backupDir = path.join(DATA_DIR, "backups");
+      await fs.mkdir(backupDir, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const backupPath = path.join(backupDir, `live-session-db-before-recording-duplicate-cleanup-${stamp}.json`);
+      await ngWriteJsonAtomicStreaming(backupPath, db, "LMS recording-duplicate cleanup backup");
+
+      const now = new Date().toISOString();
+      const keeperUrl = keeper.recording_url || keeper.share_url;
+      db.recordings[keeperStorageKey] = {
+        ...keeper,
+        id: keeperStorageKey,
+        recording_key: keeperStorageKey,
+        course_id: courseId,
+        session_id: sessionId,
+        published: true,
+        hidden_from_recordings: false,
+        assignment_source: "admin_explicit_session",
+        assignment_locked: true,
+        duplicate_cleanup_keeper_at: now,
+        duplicate_cleanup_keeper_by: user.id,
+        updated_at: now,
+      };
+
+      for (const [storageKey, clone] of cloneEntries) {
+        const assignmentHistory = Array.isArray(clone.assignment_history)
+          ? clone.assignment_history
+          : [];
+        db.recordings[storageKey] = {
+          ...clone,
+          id: storageKey,
+          recording_key: storageKey,
+          session_id: null,
+          roadmap_day_id: null,
+          day_number: null,
+          instructional_day_number: null,
+          system_day: null,
+          system: null,
+          published: false,
+          auto_publish_disabled: true,
+          assignment_source: "admin_duplicate_cleanup",
+          assignment_locked: true,
+          hidden_from_recordings: true,
+          detached_from_session_id: sessionId,
+          detached_from_roadmap_day_id: clone.roadmap_day_id || session.roadmap_day_id || null,
+          detached_at: now,
+          detached_by: user.id,
+          unpublished_at: now,
+          assignment_history: [
+            ...assignmentHistory,
+            {
+              from_session_id: sessionId,
+              to_session_id: null,
+              assigned_at: now,
+              assigned_by: user.id,
+              reason: "zero_duration_duplicate_hidden",
+            },
+          ],
+          updated_at: now,
+        };
+      }
+
+      db.liveSessions[sessionStorageKey] = {
+        ...session,
+        recording_key: keeperStorageKey,
+        recording_id: keeperStorageKey,
+        recording_url: keeperUrl,
+        recording_published: true,
+        recording_published_at: keeper.published_at || now,
+        recording_match_reason: "admin_duplicate_cleanup_keeper",
+        updated_by: user.id,
+        updated_at: now,
+      };
+
+      let notesRelinked = 0;
+      for (const [noteKey, note] of Object.entries(db.notes || {})) {
+        if (String(note?.session_id || "") !== sessionId) continue;
+        db.notes[noteKey] = {
+          ...note,
+          recording_key: keeperStorageKey,
+          recording_url: keeperUrl,
+          meeting_id: keeper.meeting_id || note.meeting_id || null,
+          recording_published: true,
+          updated_by: user.id,
+          updated_at: now,
+        };
+        notesRelinked += 1;
+      }
+
+      return {
+        keeper_recording_key: keeperStorageKey,
+        keeper_duration_minutes: durationMinutes(keeper),
+        clone_recording_keys: cloneStorageKeys,
+        clones_hidden: cloneStorageKeys.length,
+        notes_relinked: notesRelinked,
+        backup_path: backupPath,
+      };
+    });
+
+    res.json({
+      success: true,
+      recording_duplicate_cleanup_build: RECORDING_DUPLICATE_CLEANUP_BUILD,
+      ...result,
+      recordings_deleted: 0,
+      live_sessions_deleted: 0,
+      roadmap_days_deleted: 0,
+      notes_deleted: 0,
+      users_deleted: 0,
+      enrollments_deleted: 0,
+      payments_deleted: 0,
+      assessment_attempts_deleted: 0,
+      points_deleted: 0,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to clean duplicate recordings",
+    });
+  }
+});
+
 app.get("/live/recordings", async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req);
@@ -14040,6 +14524,8 @@ app.get("/live/recordings", async (req, res) => {
     if (autoRoadmapSync.changed) await writeLiveDb(db);
 
     let recordings = Object.values(db.recordings || {});
+    const includeHidden = isStaff && req.query.include_hidden === "true";
+    if (!includeHidden) recordings = recordings.filter((recording) => recording.hidden_from_recordings !== true);
     if (!isStaff) recordings = recordings.filter((recording) => recording.published);
     if (requestedCourseId) recordings = recordings.filter((recording) => String(recording.course_id || "") === requestedCourseId);
 
