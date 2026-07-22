@@ -228,6 +228,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
 const CONTENT_INGESTION_BUILD = "v220-direct-qbank-media-ingestion";
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
+const ROADMAP_EXTENSION_BUILD = "v221-system-aware-roadmap-extension";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -9980,6 +9981,7 @@ app.get("/health", async (req, res) => {
     message: "Backend running",
     build: NEXTGEN_BACKEND_BUILD,
     content_ingestion_build: CONTENT_INGESTION_BUILD,
+    roadmap_extension_build: ROADMAP_EXTENSION_BUILD,
     data_dir: DATA_DIR,
     live_db_path: LIVE_DB_PATH,
     live_db_exists: liveDbExists,
@@ -51857,14 +51859,131 @@ app.post("/admin/roadmap/import-master-map", async (req, res) => {
 // replacing any existing roadmap day. Preview is the default; applying the
 // extension preserves all existing roadmap/live-session identities and shifts
 // only later scheduled dates.
+function ngCloneDisplacedRoadmapPacket(day = {}, { courseId = "", actorId = null, now = new Date().toISOString() } = {}) {
+  const restored = JSON.parse(JSON.stringify(day || {}));
+  restored.id = `${courseId}:day:displaced:${uuid()}`;
+  restored.course_id = courseId || restored.course_id || null;
+  restored.live_session_id = null;
+  restored.session_id = null;
+  restored.session_notes_id = null;
+  restored.session_notes_ready = false;
+  restored.notes_status = "";
+  restored.session_flashcards_ready = false;
+  restored.session_flashcards_count = 0;
+  restored.recording_link = "";
+  restored.notes_link = "";
+  restored.assessment_id = null;
+  restored.weekly_assessment_id = null;
+  restored.weekly_assessment_ready = false;
+  restored.grand_assessment_id = null;
+  restored.grand_assessment_ready = false;
+  restored.status = "scheduled";
+  restored.roadmap_status = "scheduled";
+  restored.source = "admin_system_extension_displaced_restore";
+  restored.displaced_from_roadmap_day_id = day.id || null;
+  restored.displaced_from_live_session_id = day.live_session_id || day.session_id || null;
+  restored.created_by = actorId;
+  restored.created_at = now;
+  restored.updated_by = actorId;
+  restored.updated_at = now;
+  restored.schedule_exception_id = null;
+  restored.schedule_exception_active = false;
+
+  for (const key of [
+    "pushed_from_day_id",
+    "pushed_content_day_id",
+    "pushed_live_session_id",
+    "pushed_from_live_session_id",
+    "original_day_id",
+    "original_day_snapshot",
+  ]) delete restored[key];
+
+  return restored;
+}
+
+function ngReuseRoadmapSlotForSystemExtension(target = {}, extensionDay = {}, {
+  actorId = null,
+  displacedReplacementDayId = null,
+  now = new Date().toISOString(),
+} = {}) {
+  const previous = JSON.parse(JSON.stringify(target || {}));
+  const preservedKeys = [
+    "id",
+    "course_id",
+    "date",
+    "scheduled_date",
+    "schedule_slot_number",
+    "order",
+    "day_number",
+    "instructional_day_number",
+    "week_number",
+    "live_session_id",
+    "session_id",
+    "session_notes_id",
+    "session_notes_ready",
+    "notes_status",
+    "session_flashcards_ready",
+    "session_flashcards_count",
+    "recording_link",
+    "notes_link",
+    "assessment_id",
+    "assessment_type",
+    "weekly_assessment_id",
+    "weekly_assessment_ready",
+    "grand_assessment_id",
+    "grand_assessment_ready",
+    "created_by",
+    "created_at",
+    "schedule_exception_id",
+    "schedule_exception_active",
+    "is_published",
+    "published",
+    "status",
+    "roadmap_status",
+  ];
+  const preserved = {};
+  for (const key of preservedKeys) {
+    if (previous[key] !== undefined) preserved[key] = previous[key];
+  }
+
+  for (const key of Object.keys(target)) delete target[key];
+  Object.assign(target, JSON.parse(JSON.stringify(extensionDay || {})), preserved, {
+    source: "admin_system_extension_reused_existing_slot",
+    reassigned_from_system: previous.system || previous.chapter || null,
+    reassigned_from_system_day: previous.system_day || previous.day_in_system || null,
+    reassigned_from_title: previous.title || null,
+    displaced_packet_restored_as_day_id: displacedReplacementDayId,
+    extension_requested_by: actorId,
+    reassigned_at: now,
+    updated_by: actorId,
+    updated_at: now,
+  });
+  target.title = ngRoadmapCanonicalDayTitle(target);
+  return target;
+}
+
 app.post("/admin/roadmap/extend-system", async (req, res) => {
   try {
     const { user } = await requireLmsPermission(req, "lms.roadmap.manage");
     const db = await readLiveDb();
     const courseId = String(req.body.course_id || req.body.courseId || "").trim();
     const requestedSystem = String(req.body.system || req.body.chapter || "").trim();
-    const requestedDays = ngSafeJsonArrayFromBody(req.body.days || req.body.new_days || req.body.rows || []);
+    const suppliedDays = ngSafeJsonArrayFromBody(req.body.days || req.body.new_days || req.body.rows || []);
+    const quickAdd = req.body.quick_add === true || String(req.body.quick_add || "").toLowerCase() === "true";
+    const requestedCount = Number(req.body.count ?? suppliedDays.length ?? 0);
+    const requestedDays = suppliedDays.length
+      ? suppliedDays
+      : quickAdd && requestedCount > 0
+        ? Array.from({ length: requestedCount }, () => ({}))
+        : [];
     const dryRun = req.body.dry_run !== false;
+    const afterDayId = String(req.body.after_day_id || req.body.afterDayId || req.body.insertion_after_roadmap_day_id || "").trim();
+    const reuseAdjacentStartedDays = Math.max(0, Number(
+      req.body.reuse_adjacent_started_days ??
+      req.body.reuse_started_days ??
+      req.body.already_taught_adjacent_days ??
+      0
+    ) || 0);
 
     if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
     if (!requestedSystem) return res.status(400).json({ success: false, error: "system is required" });
@@ -51877,8 +51996,11 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
     if (requestedDays.length > 14) {
       return res.status(400).json({ success: false, error: "A maximum of 14 system days can be added in one operation" });
     }
-    if (req.body.count !== undefined && Number(req.body.count) !== requestedDays.length) {
+    if (requestedCount && requestedCount !== requestedDays.length) {
       return res.status(400).json({ success: false, error: "count must match the number of supplied days" });
+    }
+    if (reuseAdjacentStartedDays > requestedDays.length) {
+      return res.status(400).json({ success: false, error: "reuse_adjacent_started_days cannot exceed the number of added system days" });
     }
 
     const entry = ngFindRoadmapEntryForCourse(db, courseId);
@@ -51906,17 +52028,72 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
       lastSystemEntry.day.assessment_id ||
       /(?:system[\s-]*end|grand\s+system).*assessment|assessment.*correction/i.test(String(lastSystemEntry.day.title || lastSystemEntry.day.assessment_type || ""))
     );
-    const insertionIndex = terminalSystemDayIsAssessment ? lastSystemEntry.index : lastSystemEntry.index + 1;
-    const insertionAnchorEntry = [...matchingIndexes].reverse().find((item) => item.index < insertionIndex) || lastSystemEntry;
+    const explicitAnchorEntry = afterDayId
+      ? matchingIndexes.find((item) => String(item.day.id || "") === afterDayId) || null
+      : null;
+    if (afterDayId && !explicitAnchorEntry) {
+      return res.status(400).json({ success: false, error: "after_day_id must identify a teaching day in the selected system" });
+    }
+    const defaultInsertionIndex = terminalSystemDayIsAssessment ? lastSystemEntry.index : lastSystemEntry.index + 1;
+    const insertionIndex = explicitAnchorEntry
+      ? (explicitAnchorEntry.day.assessment_day ? explicitAnchorEntry.index : explicitAnchorEntry.index + 1)
+      : defaultInsertionIndex;
+    const insertionAnchorEntry = explicitAnchorEntry || [...matchingIndexes].reverse().find((item) => item.index < insertionIndex) || lastSystemEntry;
     const canonicalSystem = String(lastSystemEntry.day.system || lastSystemEntry.day.chapter || requestedSystem).trim();
-    const laterDays = roadmap.days.slice(insertionIndex).filter((day) => day?.id && !ngRoadmapDayIsNoClass(day));
+    if (reuseAdjacentStartedDays > 0 && insertionIndex !== defaultInsertionIndex) {
+      return res.status(400).json({ success: false, error: "Started adjacent days can only be recovered when extending the end of a system block" });
+    }
+
+    const today = todayKey();
+    const adjacentTeachingEntries = [];
+    let adjacentSystemKey = "";
+    for (let index = insertionIndex; index < roadmap.days.length; index += 1) {
+      const day = roadmap.days[index];
+      if (!day?.id || ngRoadmapDayIsNoClass(day)) continue;
+      const daySystemKey = ngNormalizeMasterMapSystemName(day.system || day.chapter || "") || String(day.system || day.chapter || "").trim().toLowerCase();
+      if (daySystemKey === normalizedRequestedSystem) break;
+      if (!adjacentSystemKey) adjacentSystemKey = daySystemKey;
+      if (daySystemKey !== adjacentSystemKey) break;
+      adjacentTeachingEntries.push({ day, index });
+    }
+
+    const reusedEntries = adjacentTeachingEntries.slice(0, reuseAdjacentStartedDays);
+    if (reusedEntries.length !== reuseAdjacentStartedDays) {
+      return res.status(409).json({ success: false, error: "Not enough adjacent next-system days exist for the requested recovery" });
+    }
+    for (const item of reusedEntries) {
+      const date = String(item.day.date || item.day.scheduled_date || "").slice(0, 10);
+      if (!date || date > today) {
+        return res.status(409).json({
+          success: false,
+          error: "Only adjacent days already reached on the calendar can be reused as completed/current extension days",
+          roadmap_day_id: item.day.id,
+          date: date || null,
+        });
+      }
+      if (
+        item.day.assessment_day ||
+        item.day.assessment_id ||
+        item.day.weekly_assessment_id ||
+        item.day.grand_assessment_id
+      ) {
+        return res.status(409).json({
+          success: false,
+          error: "Safety stop: an adjacent day with an assessment cannot be automatically reclassified",
+          roadmap_day_id: item.day.id,
+        });
+      }
+    }
+
+    const reusedDayIds = new Set(reusedEntries.map((item) => String(item.day.id)));
+    const laterDays = roadmap.days
+      .slice(insertionIndex)
+      .filter((day) => day?.id && !ngRoadmapDayIsNoClass(day) && !reusedDayIds.has(String(day.id)));
     const laterDayIds = new Set(laterDays.map((day) => String(day.id)));
     const laterSessions = Object.values(db.liveSessions || {}).filter((session) => {
       return String(session?.course_id || "") === courseId && laterDayIds.has(String(session?.roadmap_day_id || ""));
     });
     const laterSessionIds = new Set(laterSessions.map((session) => String(session.id || "")).filter(Boolean));
-    const today = todayKey();
-
     const alreadyStartedDay = laterDays.find((day) => {
       const date = String(day.date || day.scheduled_date || "").slice(0, 10);
       return date && date <= today;
@@ -51948,25 +52125,47 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
     const currentSystemDayCount = matchingIndexes.filter((item) => item.index < insertionIndex).length;
     for (let index = 0; index < requestedDays.length; index += 1) {
       const raw = requestedDays[index] && typeof requestedDays[index] === "object" ? requestedDays[index] : {};
-      const contentTitle = String(raw.title || raw.topic || raw.first_aid_topics || raw.live_teaching_topic || "").trim();
+      const systemDay = currentSystemDayCount + index + 1;
+      const rowQuickAdd = quickAdd || raw.quick_add === true;
+      const contentTitle = String(
+        raw.title ||
+        raw.topic ||
+        raw.first_aid_topics ||
+        raw.live_teaching_topic ||
+        (rowQuickAdd ? `${canonicalSystem} — Day ${systemDay}` : "")
+      ).trim();
       const qids = ngNormalizeQidList(raw.uworld_qids || raw.mapped_uworld_qids || raw.qids || raw.uworld_target || []);
       const hasMappedWork = Boolean(
         String(raw.first_aid_pages || raw.fa_pages || raw.first_aid_topics || raw.description || raw.homework || raw.video_library_lecture || raw.lecture_title || "").trim() ||
         qids.length
       );
-      if (!contentTitle || !hasMappedWork) {
+      if (!contentTitle || (!hasMappedWork && !rowQuickAdd)) {
         return res.status(400).json({
           success: false,
           error: `Added day ${index + 1} needs a real title/topic plus mapped pages, topics, QIDs, homework, description, or lecture content`,
         });
       }
 
-      const systemDay = currentSystemDayCount + index + 1;
       const now = new Date().toISOString();
+      const inheritedTaskItems = Array.isArray(raw.task_items) && raw.task_items.length
+        ? raw.task_items
+        : Array.isArray(insertionAnchorEntry.day.task_items) && insertionAnchorEntry.day.task_items.length
+          ? JSON.parse(JSON.stringify(insertionAnchorEntry.day.task_items))
+          : ngBuildDefaultTaskItems({ assessment_day: Boolean(raw.assessment_day) });
+      const quickDescription = `Live ${canonicalSystem} teaching day. Session notes, the class recording, review cards, and any connected assessment remain attached to this roadmap day as they are published.`;
+      const quickHomework = "Review the live-session notes and recording, complete the assigned follow-up work, and submit the connected daily tasks.";
       const normalized = ngNormalizeAdminRoadmapPayload(
         {
           ...raw,
           title: contentTitle,
+          description: String(raw.description || (rowQuickAdd ? quickDescription : "")).trim(),
+          homework: String(raw.homework || (rowQuickAdd ? quickHomework : "")).trim(),
+          resources: Array.isArray(raw.resources) && raw.resources.length
+            ? raw.resources
+            : rowQuickAdd
+              ? ["Live class", "Class notes", "Recording", "Review cards", "Assessment"]
+              : raw.resources,
+          task_items: inheritedTaskItems,
           system: canonicalSystem,
           chapter: raw.chapter || canonicalSystem,
           system_day: systemDay,
@@ -51998,6 +52197,9 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
       normalized.source = "admin_system_extension";
       normalized.extension_system = canonicalSystem;
       normalized.extension_requested_by = user.id;
+      normalized.content_status = hasMappedWork ? "mapped" : "pending_mapping";
+      normalized.content_pending = !hasMappedWork;
+      normalized.quick_added = rowQuickAdd;
       normalized.updated_by = user.id;
       normalized.updated_at = now;
       normalized.title = ngRoadmapCanonicalDayTitle(normalized);
@@ -52007,25 +52209,70 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
     const skipSundays = roadmap.skip_sundays !== false && roadmap.settings?.skip_sundays !== false;
     const startDate = roadmap.start_date || roadmap.settings?.start_date || roadmap.days[0]?.date || todayKey();
     const clone = (value) => JSON.parse(JSON.stringify(value));
+    const operationNow = new Date().toISOString();
+    const displacedReplacementDays = reusedEntries.map((item) => ngCloneDisplacedRoadmapPacket(item.day, {
+      courseId,
+      actorId: user.id,
+      now: operationNow,
+    }));
+
+    const mutateRoadmapForExtension = (targetRoadmap) => {
+      const finalExtensionDayIds = [];
+      const reassignedDays = [];
+
+      for (let index = 0; index < reusedEntries.length; index += 1) {
+        const sourceEntry = reusedEntries[index];
+        const target = targetRoadmap.days.find((day) => String(day.id || "") === String(sourceEntry.day.id));
+        if (!target) throw new Error(`Recovery roadmap day not found: ${sourceEntry.day.id}`);
+        const before = sanitizeRoadmapDay(target);
+        ngReuseRoadmapSlotForSystemExtension(target, meaningfulDays[index], {
+          actorId: user.id,
+          displacedReplacementDayId: displacedReplacementDays[index]?.id || null,
+          now: operationNow,
+        });
+        finalExtensionDayIds.push(String(target.id));
+        reassignedDays.push({ before, after: sanitizeRoadmapDay(target) });
+      }
+
+      const remainingExtensionDays = meaningfulDays.slice(reusedEntries.length).map(clone);
+      for (const day of remainingExtensionDays) finalExtensionDayIds.push(String(day.id));
+      const restoredPackets = displacedReplacementDays.map(clone);
+      const insertionPoint = reusedEntries.length
+        ? Math.max(...reusedEntries.map((item) => targetRoadmap.days.findIndex((day) => String(day.id || "") === String(item.day.id)))) + 1
+        : insertionIndex;
+      targetRoadmap.days.splice(insertionPoint, 0, ...remainingExtensionDays, ...restoredPackets);
+
+      return {
+        finalExtensionDayIds,
+        restoredPacketDayIds: restoredPackets.map((day) => String(day.id)),
+        reassignedDays,
+      };
+    };
+
     const previewRoadmap = clone(roadmap);
-    previewRoadmap.days.splice(insertionIndex, 0, ...clone(meaningfulDays));
     const previewDb = {
       courses: clone(db.courses || {}),
       liveSessions: clone(db.liveSessions || {}),
       assessments: clone(db.assessments || {}),
     };
+    const previewMutation = mutateRoadmapForExtension(previewRoadmap);
     ngRecalculateRoadmapSchedule(previewDb, previewRoadmap, { startDate, skipSundays, actorId: user.id });
 
     const insertedPreview = previewRoadmap.days
-      .filter((day) => meaningfulDays.some((created) => String(created.id) === String(day.id)))
+      .filter((day) => previewMutation.finalExtensionDayIds.includes(String(day.id)))
       .map(sanitizeRoadmapDay);
+    const restoredPreview = previewRoadmap.days
+      .filter((day) => previewMutation.restoredPacketDayIds.includes(String(day.id)))
+      .map(sanitizeRoadmapDay);
+    const lastExtensionPreviewIndex = Math.max(...previewMutation.finalExtensionDayIds.map((id) => previewRoadmap.days.findIndex((day) => String(day.id || "") === id)));
     const shiftedPreview = previewRoadmap.days
-      .slice(insertionIndex + meaningfulDays.length, insertionIndex + meaningfulDays.length + 8)
+      .slice(lastExtensionPreviewIndex + 1, lastExtensionPreviewIndex + 9)
       .map(sanitizeRoadmapDay);
 
     if (dryRun) {
       return res.json({
         success: true,
+        roadmap_extension_build: ROADMAP_EXTENSION_BUILD,
         dry_run: true,
         applied: false,
         course_id: courseId,
@@ -52033,14 +52280,21 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
         existing_system_days: existingSystemDaysTotal,
         insertion_base_system_day: currentSystemDayCount,
         added_system_days: meaningfulDays.length,
+        roadmap_days_added: meaningfulDays.length,
+        reused_adjacent_started_days: reusedEntries.length,
         insertion_after_roadmap_day_id: insertionAnchorEntry.day.id,
         terminal_assessment_moved_to_end: terminalSystemDayIsAssessment,
         new_instructional_days: previewRoadmap.instructional_days,
         new_schedule_slots: previewRoadmap.schedule_slots,
         inserted_days: insertedPreview,
+        reassigned_existing_days: previewMutation.reassignedDays,
+        restored_displaced_days: restoredPreview,
         next_days_preview: shiftedPreview,
+        roadmap_updated_at: roadmap.updated_at || null,
         confirmation_required: "EXTEND_SYSTEM_ROADMAP",
-        message: `Preview only: ${meaningfulDays.length} ${canonicalSystem} teaching day(s) will be inserted before the next system. No data was changed.`,
+        message: reusedEntries.length
+          ? `Preview only: ${meaningfulDays.length} ${canonicalSystem} teaching day(s) will be added; ${reusedEntries.length} reached adjacent day(s) will keep their identities and the displaced next-system packets will be restored after the extension. No data was changed.`
+          : `Preview only: ${meaningfulDays.length} ${canonicalSystem} teaching day(s) will be inserted. No data was changed.`,
       });
     }
 
@@ -52048,6 +52302,15 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
       return res.status(400).json({
         success: false,
         error: "Exact confirmation is required: EXTEND_SYSTEM_ROADMAP",
+      });
+    }
+    const expectedRoadmapUpdatedAt = String(req.body.expected_roadmap_updated_at || "").trim();
+    if (expectedRoadmapUpdatedAt && expectedRoadmapUpdatedAt !== String(roadmap.updated_at || "")) {
+      return res.status(409).json({
+        success: false,
+        error: "Roadmap changed after preview. Refresh and preview the extension again before applying.",
+        expected_roadmap_updated_at: expectedRoadmapUpdatedAt,
+        actual_roadmap_updated_at: roadmap.updated_at || null,
       });
     }
 
@@ -52074,16 +52337,26 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
       await fs.writeFile(backupPath, JSON.stringify(db, null, 2), "utf8");
     }
 
-    roadmap.days.splice(insertionIndex, 0, ...meaningfulDays);
-    ngRecalculateRoadmapSchedule(db, roadmap, { startDate, skipSundays, actorId: user.id });
+    // Stage the complete operation away from the live in-memory cache. A failed
+    // safety check must not leave rejected roadmap/session mutations available
+    // to another request or a later unrelated database write.
+    const workingDb = clone(db);
+    const workingEntry = ngFindRoadmapEntryForCourse(workingDb, courseId);
+    const workingRoadmap = workingEntry.roadmap;
+    if (!workingRoadmap || !Array.isArray(workingRoadmap.days)) {
+      return res.status(409).json({ success: false, error: "Roadmap disappeared before the extension could be staged", backup_path: backupPath });
+    }
+
+    const appliedMutation = mutateRoadmapForExtension(workingRoadmap);
+    ngRecalculateRoadmapSchedule(workingDb, workingRoadmap, { startDate, skipSundays, actorId: user.id });
 
     const shiftedMetadata = {};
-    for (const day of roadmap.days) {
+    for (const day of workingRoadmap.days) {
       if (!existingDayIds.has(String(day.id || ""))) continue;
       const beforeDate = oldDates.get(String(day.id || "")) || "";
       const afterDate = String(day.date || day.scheduled_date || "").slice(0, 10);
       if (!beforeDate || !afterDate || beforeDate === afterDate) continue;
-      const counts = ngShiftLinkedScheduleMetadata(db, {
+      const counts = ngShiftLinkedScheduleMetadata(workingDb, {
         courseId,
         day,
         fromDate: beforeDate,
@@ -52093,58 +52366,79 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
       for (const [name, count] of Object.entries(counts)) shiftedMetadata[name] = Number(shiftedMetadata[name] || 0) + Number(count || 0);
     }
 
-    const sequenceMetadataSync = ngSyncRoadmapSequenceMetadata(db, roadmap, { actorId: user.id });
-    const liveSessionSync = ngSyncLinkedLiveSessionsForRoadmap(db, roadmap, { actorId: user.id });
+    const sequenceMetadataSync = ngSyncRoadmapSequenceMetadata(workingDb, workingRoadmap, { actorId: user.id });
+    const liveSessionSync = ngSyncLinkedLiveSessionsForRoadmap(workingDb, workingRoadmap, { actorId: user.id });
 
     for (const dayId of existingDayIds) {
-      if (!roadmap.days.some((day) => String(day.id || "") === dayId)) {
+      if (!workingRoadmap.days.some((day) => String(day.id || "") === dayId)) {
         return res.status(409).json({ success: false, error: `Safety stop before database write: existing roadmap day ${dayId} was not preserved`, backup_path: backupPath });
       }
     }
     for (const [dayId, sessionId] of existingSessionByDay) {
-      const day = roadmap.days.find((item) => String(item.id || "") === dayId);
+      const day = workingRoadmap.days.find((item) => String(item.id || "") === dayId);
       if (!day || String(day.live_session_id || day.session_id || "") !== sessionId) {
-        return res.status(409).json({ success: false, error: `Safety stop before database write: live-session identity changed for roadmap day ${dayId}`, expected_session_id: sessionId, actual_session_id: day?.live_session_id || day?.session_id || null, backup_path: backupPath });
+        const expectedSession = workingDb.liveSessions?.[sessionId] || null;
+        return res.status(409).json({
+          success: false,
+          error: `Safety stop before database write: live-session identity changed for roadmap day ${dayId}`,
+          expected_session_id: sessionId,
+          actual_session_id: day?.live_session_id || day?.session_id || null,
+          roadmap_day_date: day?.date || day?.scheduled_date || null,
+          expected_session_date: expectedSession?.scheduled_date || null,
+          expected_session_roadmap_day_id: expectedSession?.roadmap_day_id || null,
+          expected_session_hidden: expectedSession ? ngSessionIsInternalTestOrHidden(expectedSession) : null,
+          backup_path: backupPath,
+        });
       }
     }
     for (const bucketName of protectedBuckets) {
-      const afterCount = Object.keys(db[bucketName] || {}).length;
+      const afterCount = Object.keys(workingDb[bucketName] || {}).length;
       if (afterCount < protectedCountsBefore[bucketName]) {
         return res.status(409).json({ success: false, error: `Safety stop before database write: ${bucketName} count decreased`, before: protectedCountsBefore[bucketName], after: afterCount, backup_path: backupPath });
       }
     }
 
-    roadmap.system_extensions = Array.isArray(roadmap.system_extensions) ? roadmap.system_extensions : [];
-    roadmap.system_extensions.push({
+    workingRoadmap.system_extensions = Array.isArray(workingRoadmap.system_extensions) ? workingRoadmap.system_extensions : [];
+    workingRoadmap.system_extensions.push({
       id: `system_extension:${courseId}:${uuid()}`,
       system: canonicalSystem,
-      added_day_ids: meaningfulDays.map((day) => day.id),
+      added_day_ids: appliedMutation.finalExtensionDayIds,
       count: meaningfulDays.length,
       insertion_after_roadmap_day_id: insertionAnchorEntry.day.id,
+      reused_adjacent_started_days: reusedEntries.length,
+      restored_displaced_day_ids: appliedMutation.restoredPacketDayIds,
       terminal_assessment_moved_to_end: terminalSystemDayIsAssessment,
       preserved_existing_days: existingDayIds.size,
       preserved_existing_live_sessions: existingSessionByDay.size,
       created_by: user.id,
       created_at: new Date().toISOString(),
     });
-    roadmap.updated_by = user.id;
-    roadmap.updated_at = new Date().toISOString();
-    db.roadmaps[entry.key || courseId] = roadmap;
-    await writeLiveDb(db);
+    workingRoadmap.updated_by = user.id;
+    workingRoadmap.updated_at = new Date().toISOString();
+    workingDb.roadmaps[workingEntry.key || entry.key || courseId] = workingRoadmap;
+    await writeLiveDb(workingDb);
 
-    const appliedInsertedDays = roadmap.days
-      .filter((day) => meaningfulDays.some((created) => String(created.id) === String(day.id)))
+    const appliedInsertedDays = workingRoadmap.days
+      .filter((day) => appliedMutation.finalExtensionDayIds.includes(String(day.id)))
+      .map(sanitizeRoadmapDay);
+    const appliedRestoredDays = workingRoadmap.days
+      .filter((day) => appliedMutation.restoredPacketDayIds.includes(String(day.id)))
       .map(sanitizeRoadmapDay);
     return res.json({
       success: true,
+      roadmap_extension_build: ROADMAP_EXTENSION_BUILD,
       dry_run: false,
       applied: true,
       course_id: courseId,
       system: canonicalSystem,
       added_system_days: meaningfulDays.length,
-      instructional_days: roadmap.instructional_days,
-      schedule_slots: roadmap.schedule_slots,
+      roadmap_days_added: meaningfulDays.length,
+      reused_adjacent_started_days: reusedEntries.length,
+      instructional_days: workingRoadmap.instructional_days,
+      schedule_slots: workingRoadmap.schedule_slots,
       inserted_days: appliedInsertedDays,
+      reassigned_existing_days: appliedMutation.reassignedDays,
+      restored_displaced_days: appliedRestoredDays,
       shifted_schedule_metadata: shiftedMetadata,
       sequence_metadata_sync: sequenceMetadataSync,
       live_session_sync: liveSessionSync,
@@ -52155,7 +52449,10 @@ app.post("/admin/roadmap/extend-system", async (req, res) => {
       recordings_deleted: 0,
       points_deleted: 0,
       backup_path: backupPath,
-      message: `${meaningfulDays.length} ${canonicalSystem} teaching day(s) were inserted before the next system. Existing academic identities and student data were preserved.`,
+      roadmap_updated_at: workingRoadmap.updated_at || null,
+      message: reusedEntries.length
+        ? `${meaningfulDays.length} ${canonicalSystem} teaching day(s) were added. ${reusedEntries.length} reached day(s) kept their live-session identities, and the displaced next-system packets were restored after the extension.`
+        : `${meaningfulDays.length} ${canonicalSystem} teaching day(s) were inserted. Existing academic identities and student data were preserved.`,
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to extend roadmap system" });
