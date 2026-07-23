@@ -82,8 +82,10 @@ import {
 } from "./lib/aylamed-qbank.js";
 import {
   AYLA_ONBOARDING_PRESETS,
+  buildAylaStartingReadinessReport,
   buildAylaVerifiedDiagnosticBaseline,
   normalizeAylaOnboardingSubmission,
+  reconcileAylaRoadmapOutline,
 } from "./lib/aylamed-onboarding.js";
 import {
   AYLA_STUDENT_FEATURES,
@@ -249,6 +251,7 @@ const RECORDING_ASSIGNMENT_BUILD = "v222-safe-recording-detach";
 const RECORDING_DUPLICATE_CLEANUP_BUILD = "v223-safe-recording-duplicate-cleanup";
 const STUDENT_NOTES_RESOLVER_BUILD = "v225-course-system-day-notes-resolver";
 const AYLA_ADAPTIVE_CORE_BUILD = "v227-verified-adaptive-loop";
+const AYLA_STARTING_READINESS_BUILD = "v229-starting-readiness-loop";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -10002,6 +10005,7 @@ app.get("/health", async (req, res) => {
     build: NEXTGEN_BACKEND_BUILD,
     content_ingestion_build: CONTENT_INGESTION_BUILD,
     aylamed_adaptive_core_build: AYLA_ADAPTIVE_CORE_BUILD,
+    aylamed_starting_readiness_build: AYLA_STARTING_READINESS_BUILD,
     roadmap_extension_build: ROADMAP_EXTENSION_BUILD,
     recording_assignment_build: RECORDING_ASSIGNMENT_BUILD,
     recording_duplicate_cleanup_build: RECORDING_DUPLICATE_CLEANUP_BUILD,
@@ -35959,6 +35963,7 @@ app.post("/api/ayla/qbank/sessions/:sessionId/submit", async (req, res) => {
           }
         }
         let verifiedBaseline = null;
+        let baselineRecommendation = null;
         if (finalized.session.purpose === "baseline_diagnostic") {
           if (fresh.student.serverVerifiedBaseline === true && String(fresh.student.diagnosticSessionId || "") !== String(finalized.session.id)) {
             const error = new Error("A different verified starting diagnostic is already final");
@@ -35973,7 +35978,7 @@ app.post("/api/ayla/qbank/sessions/:sessionId/submit", async (req, res) => {
             examDefinition,
           });
           Object.assign(fresh.student, baseline);
-          const baselineRecommendation = aylaRecommendation(fresh.student);
+          baselineRecommendation = aylaRecommendation(fresh.student);
           fresh.student.riskLevel = baselineRecommendation.riskLevel;
           fresh.student.roadmapMode = baselineRecommendation.roadmapMode;
           fresh.student.phase = baselineRecommendation.phase;
@@ -36010,6 +36015,30 @@ app.post("/api/ayla/qbank/sessions/:sessionId/submit", async (req, res) => {
           purpose: finalized.session.purpose || "practice",
         });
         const weakAreas = aylaV227RefreshWeakAreaProjection(db, fresh.student);
+        let startingReadinessReport = null;
+        let roadmapOutlineRefresh = null;
+        if (baselineRecommendation) {
+          roadmapOutlineRefresh = aylaV229StoreFutureRoadmapOutline(
+            db,
+            fresh.student,
+            aylaBuildRoadmapTasks(fresh.student, baselineRecommendation),
+            {
+              fromDate: aylaDateOnly(),
+              reason: "verified_baseline_diagnostic",
+            },
+          );
+          const examTrackId = aylaCanonicalExamTrack(
+            fresh.student.examTrackId || fresh.student.exam_track_id || fresh.student.exam,
+          );
+          startingReadinessReport = buildAylaStartingReadinessReport({
+            student: fresh.student,
+            recommendation: baselineRecommendation,
+            roadmapTasks: roadmapOutlineRefresh.activeTasks,
+            weakAreaLogs: aylaValues(db, "aylaWeakAreaLogs")
+              .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, fresh.student)),
+            examDefinition: examTrackId ? AYLA_EXAM_REGISTRY[examTrackId] : {},
+          });
+        }
         const tomorrow = aylaDateOnly(aylaAddDays(new Date(), 1));
         let futureRoadmap = { status: "deferred_safe_retry", date: tomorrow };
         try {
@@ -36038,7 +36067,16 @@ app.post("/api/ayla/qbank/sessions/:sessionId/submit", async (req, res) => {
           weak_areas_refreshed: weakAreas.count,
           shared_weak_topics: weakAreas.sharedUnderlyingTopics,
           future_roadmap: futureRoadmap,
+          roadmap_outline: roadmapOutlineRefresh ? {
+            generation_id: roadmapOutlineRefresh.generationId,
+            generated_tasks: roadmapOutlineRefresh.generatedTasks.length,
+            preserved_completed: roadmapOutlineRefresh.preservedCompleted,
+            preserved_past: roadmapOutlineRefresh.preservedPast,
+            superseded_future: roadmapOutlineRefresh.supersededFuture,
+            completed_history_protected: true,
+          } : null,
           verified_baseline: verifiedBaseline,
+          starting_readiness_report: startingReadinessReport,
           answer_keys_included: false,
         };
       }
@@ -58486,6 +58524,45 @@ function aylaBuildRoadmapTasks(student, recommendation = aylaRecommendation(stud
   return tasks;
 }
 
+function aylaV229ActiveRoadmapOutline(db, student) {
+  return aylaValues(db, "aylaRoadmapTasks")
+    .filter((item) => String(item.studentId || item.student_id || "") === String(student.id || ""))
+    .filter((item) => !["cancelled", "superseded"].includes(String(item.status || "").toLowerCase()))
+    .sort((left, right) => (
+      String(left.scheduledDate || left.scheduled_date || "").localeCompare(
+        String(right.scheduledDate || right.scheduled_date || ""),
+      )
+      || String(left.createdAt || left.created_at || "").localeCompare(String(right.createdAt || right.created_at || ""))
+      || String(left.id || "").localeCompare(String(right.id || ""))
+    ));
+}
+
+function aylaV229StoreFutureRoadmapOutline(
+  db,
+  student,
+  nextTasks = [],
+  { fromDate = aylaDateOnly(), reason = "adaptive_refresh" } = {},
+) {
+  const generationId = aylaId("AYLA-ROADMAP-GEN");
+  const reconciled = reconcileAylaRoadmapOutline({
+    existingTasks: aylaValues(db, "aylaRoadmapTasks"),
+    nextTasks,
+    studentId: student.id,
+    fromDate,
+    generationId,
+    reason,
+    now: aylaNow(),
+  });
+
+  reconciled.updates.forEach((item) => aylaSetItem(db, "aylaRoadmapTasks", item));
+  reconciled.generatedTasks.forEach((item) => aylaSetItem(db, "aylaRoadmapTasks", item));
+
+  return {
+    ...reconciled,
+    activeTasks: aylaV229ActiveRoadmapOutline(db, student),
+  };
+}
+
 function aylaBuildQbankBlock(student, recommendation = aylaRecommendation(student), override = {}) {
   const questionCount = aylaNumber(override.questionCount ?? override.question_count, recommendation.dailyQuestionTarget);
   return {
@@ -60598,6 +60675,10 @@ app.get("/api/ayla/health", async (req, res) => {
       knowledge,
       capabilities: {
         adaptive_core_build: AYLA_ADAPTIVE_CORE_BUILD,
+        starting_readiness_build: AYLA_STARTING_READINESS_BUILD,
+        evidence_aware_starting_report: true,
+        three_path_tutor_roadmap_handoff: true,
+        future_outline_supersession_without_history_deletion: true,
         verified_qbank_weak_area_projection: true,
         private_mistake_flashcard_queue: true,
         qbank_future_roadmap_refresh: true,
@@ -60876,11 +60957,25 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
     aylaSetItem(db, "aylaDiagnosticSubmissions", submission);
     aylaSetItem(db, "aylaStudents", student);
     if (auth?.rawUser?.id) aylaBindLegacyEnrollmentScopes(db, auth.rawUser);
-    aylaValues(db, "aylaRoadmapTasks").filter((item) => item.studentId === student.id).forEach((item) => aylaDeleteItem(db, "aylaRoadmapTasks", item.id));
-    roadmapTasks.forEach((item) => aylaSetItem(db, "aylaRoadmapTasks", item));
+    const roadmapOutlineRefresh = aylaV229StoreFutureRoadmapOutline(
+      db,
+      student,
+      roadmapTasks,
+      {
+        fromDate: aylaDateOnly(),
+        reason: `onboarding_${onboarding.onboardingPath}`,
+      },
+    );
     if (qbankBlock) aylaSetItem(db, "aylaQbankBlocks", qbankBlock);
     weakAreaLogs.forEach((item) => aylaSetItem(db, "aylaWeakAreaLogs", item));
     flashcards.forEach((item) => aylaSetItem(db, "aylaFlashcards", item));
+    const startingReadinessReport = buildAylaStartingReadinessReport({
+      student,
+      recommendation,
+      roadmapTasks: roadmapOutlineRefresh.activeTasks,
+      weakAreaLogs,
+      examDefinition,
+    });
     await aylaLog(db, "diagnostic", "AylaMed personalized diagnostic and 7-day roadmap generated", { submissionId: submission.id, studentId: student.id, examTrackId, enrollmentId: setupAccess?.enrollment_id || null, riskLevel: recommendation.riskLevel, phase: recommendation.phase, targetDate: recommendation.targetDate });
     await writeAylaDb(db);
 
@@ -60888,6 +60983,7 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
       diagnosticSubmission: submission,
       student,
       recommendation,
+      startingReadinessReport,
       generated: { roadmapTasks, qbankBlocks: qbankBlock ? [qbankBlock] : [], weakAreaLogs, flashcards, phasePlan, knowledgeRecommendations },
       nextStep: onboarding.onboardingPath === "diagnostic_test"
         ? { type: "baseline_diagnostic", route: "/dashboard/qbank?diagnostic=1", questionCount: 40, blockSize: 20 }
@@ -60904,16 +61000,28 @@ app.get("/api/ayla/students/:id/dashboard", async (req, res) => {
     aylaEnsureSeedData(db);
 
     const recommendation = aylaRecommendation(student);
-    const roadmapTasks = aylaFilterRows(aylaValues(db, "aylaRoadmapTasks"), { studentId: student.id });
+    const roadmapTasks = aylaV229ActiveRoadmapOutline(db, student);
     const phasePlan = Array.isArray(student.phasePlan) && student.phasePlan.length ? student.phasePlan : aylaPhasePlan(student, recommendation);
     const knowledgeRecommendations = await aylaKnowledgeForStudent(db, student, recommendation, 6);
     const today = aylaDateOnly();
+    const weakAreaLogs = aylaValues(db, "aylaWeakAreaLogs")
+      .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student))
+      .filter((row) => String(row.status || "Open").toLowerCase() !== "resolved");
+    const examTrackId = aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam);
+    const startingReadinessReport = buildAylaStartingReadinessReport({
+      student,
+      recommendation,
+      roadmapTasks,
+      weakAreaLogs,
+      examDefinition: examTrackId ? AYLA_EXAM_REGISTRY[examTrackId] : {},
+    });
 
     return aylaSendOk(res, {
       student: { ...student, phase: recommendation.phase, phasePlan },
       examDashboard: shell?.active_dashboard || null,
       dashboardAccess,
       recommendation,
+      startingReadinessReport,
       roadmapSummary: {
         targetDate: recommendation.targetDate,
         targetLabel: recommendation.targetLabel,
@@ -60931,9 +61039,7 @@ app.get("/api/ayla/students/:id/dashboard", async (req, res) => {
         phasePlan,
         knowledgeRecommendations,
         qbankBlocks: aylaFilterRows(aylaValues(db, "aylaQbankBlocks"), { studentId: student.id }),
-        weakAreaLogs: aylaValues(db, "aylaWeakAreaLogs")
-          .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student))
-          .filter((row) => String(row.status || "Open").toLowerCase() !== "resolved"),
+        weakAreaLogs,
         flashcards: aylaFilterRows(aylaValues(db, "aylaFlashcards"), { studentId: student.id }),
         assessmentResults: aylaFilterRows(aylaValues(db, "aylaAssessmentResults"), { studentId: student.id }),
         studyPartnerMatches: aylaValues(db, "aylaStudyPartnerMatches").filter((item) => item.studentAId === student.id || item.studentBId === student.id),
@@ -60963,12 +61069,43 @@ app.post("/api/ayla/generate-roadmap", async (req, res) => {
     student.updatedAt = aylaNow();
     aylaSetItem(db, "aylaStudents", student);
 
-    aylaValues(db, "aylaRoadmapTasks").filter((item) => item.studentId === student.id).forEach((item) => aylaDeleteItem(db, "aylaRoadmapTasks", item.id));
-    roadmapTasks.forEach((item) => aylaSetItem(db, "aylaRoadmapTasks", item));
+    const roadmapOutlineRefresh = aylaV229StoreFutureRoadmapOutline(
+      db,
+      student,
+      roadmapTasks,
+      {
+        fromDate: aylaDateOnly(),
+        reason: "student_roadmap_rebuild",
+      },
+    );
+    const examTrackId = aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam);
+    const startingReadinessReport = buildAylaStartingReadinessReport({
+      student,
+      recommendation,
+      roadmapTasks: roadmapOutlineRefresh.activeTasks,
+      weakAreaLogs: aylaValues(db, "aylaWeakAreaLogs")
+        .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student)),
+      examDefinition: examTrackId ? AYLA_EXAM_REGISTRY[examTrackId] : {},
+    });
     await aylaLog(db, "roadmap", "AylaMed personalized 7-day roadmap generated", { studentId: student.id, riskLevel: recommendation.riskLevel, phase: recommendation.phase, targetDate: recommendation.targetDate, taskCount: roadmapTasks.length });
     await writeAylaDb(db);
 
-    return aylaSendOk(res, { student, recommendation, roadmapTasks, phasePlan, knowledgeRecommendations });
+    return aylaSendOk(res, {
+      student,
+      recommendation,
+      roadmapTasks: roadmapOutlineRefresh.activeTasks,
+      roadmapRefresh: {
+        generationId: roadmapOutlineRefresh.generationId,
+        generatedTasks: roadmapOutlineRefresh.generatedTasks.length,
+        preservedCompleted: roadmapOutlineRefresh.preservedCompleted,
+        preservedPast: roadmapOutlineRefresh.preservedPast,
+        supersededFuture: roadmapOutlineRefresh.supersededFuture,
+        completedHistoryProtected: true,
+      },
+      startingReadinessReport,
+      phasePlan,
+      knowledgeRecommendations,
+    });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to generate AylaMed roadmap");
   }
@@ -61125,14 +61262,49 @@ app.post("/api/ayla/update-roadmap-after-assessment", async (req, res) => {
     student.updatedAt = aylaNow();
     aylaSetItem(db, "aylaStudents", student);
 
-    aylaValues(db, "aylaRoadmapTasks").filter((item) => item.studentId === student.id).forEach((item) => aylaDeleteItem(db, "aylaRoadmapTasks", item.id));
-    roadmapTasks.forEach((item) => aylaSetItem(db, "aylaRoadmapTasks", item));
+    const roadmapOutlineRefresh = aylaV229StoreFutureRoadmapOutline(
+      db,
+      student,
+      roadmapTasks,
+      {
+        fromDate: aylaDateOnly(),
+        reason: assessment ? "verified_assessment_refresh" : "assessment_roadmap_refresh",
+      },
+    );
     if (qbankBlock) aylaSetItem(db, "aylaQbankBlocks", qbankBlock);
     flashcards.forEach((card) => aylaSetItem(db, "aylaFlashcards", card));
+    const examTrackId = aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam);
+    const startingReadinessReport = buildAylaStartingReadinessReport({
+      student,
+      recommendation,
+      roadmapTasks: roadmapOutlineRefresh.activeTasks,
+      weakAreaLogs: aylaValues(db, "aylaWeakAreaLogs")
+        .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student)),
+      examDefinition: examTrackId ? AYLA_EXAM_REGISTRY[examTrackId] : {},
+    });
     await aylaLog(db, "roadmap-update", "AylaMed roadmap recalculated after assessment", { studentId: student.id, assessmentId: assessment?.id || null, riskLevel: recommendation.riskLevel, phase: recommendation.phase, taskCount: roadmapTasks.length });
     await writeAylaDb(db);
 
-    return aylaSendOk(res, { student, recommendation, generated: { roadmapTasks, qbankBlocks: qbankBlock ? [qbankBlock] : [], flashcards, phasePlan, knowledgeRecommendations } });
+    return aylaSendOk(res, {
+      student,
+      recommendation,
+      startingReadinessReport,
+      roadmapRefresh: {
+        generationId: roadmapOutlineRefresh.generationId,
+        generatedTasks: roadmapOutlineRefresh.generatedTasks.length,
+        preservedCompleted: roadmapOutlineRefresh.preservedCompleted,
+        preservedPast: roadmapOutlineRefresh.preservedPast,
+        supersededFuture: roadmapOutlineRefresh.supersededFuture,
+        completedHistoryProtected: true,
+      },
+      generated: {
+        roadmapTasks: roadmapOutlineRefresh.activeTasks,
+        qbankBlocks: qbankBlock ? [qbankBlock] : [],
+        flashcards,
+        phasePlan,
+        knowledgeRecommendations,
+      },
+    });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update AylaMed roadmap after assessment");
   }
@@ -63823,9 +63995,20 @@ async function aylaV213PersonalTutorSnapshot(db, user, student, date = aylaDateO
       linkedLmsCourses: lmsProgress.courses?.length || 0,
     },
   });
+  const recommendation = aylaRecommendation(student);
+  const examTrackId = aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam);
+  const startingReadinessReport = buildAylaStartingReadinessReport({
+    student,
+    recommendation,
+    roadmapTasks: aylaV229ActiveRoadmapOutline(db, student),
+    weakAreaLogs: aylaValues(db, "aylaWeakAreaLogs")
+      .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student)),
+    examDefinition: examTrackId ? AYLA_EXAM_REGISTRY[examTrackId] : {},
+  });
   return {
     date: cleanDate,
     decision,
+    startingReadinessReport,
     plan: safeBundle.plan,
     assignments: safeBundle.assignments,
     stablePlanReused: built.reused,

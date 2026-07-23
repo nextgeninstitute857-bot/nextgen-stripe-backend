@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import {
   AYLA_ONBOARDING_PRESETS,
+  buildAylaStartingReadinessReport,
   buildAylaVerifiedDiagnosticBaseline,
   normalizeAylaOnboardingSubmission,
+  reconcileAylaRoadmapOutline,
 } from "../lib/aylamed-onboarding.js";
 
 const step1 = {
@@ -147,8 +149,210 @@ test("unsubmitted and ordinary practice sessions cannot manufacture a verified b
   );
 });
 
+test("starting readiness report distinguishes verified, provisional, and discovery evidence", () => {
+  const recommendation = {
+    riskLevel: "Medium Risk",
+    phase: "System Mastery",
+    roadmapMode: "System-wise Strengthening Roadmap",
+    reason: "Use the measured weak systems first.",
+    dailyHours: 4,
+    weeklyStudyDays: 6,
+    dailyQuestionTarget: 30,
+    dailyFlashcardTarget: 14,
+    weeklyAssessment: "1 cumulative assessment",
+  };
+  const roadmapTasks = [
+    {
+      id: "task-1",
+      scheduledDate: "2026-07-24",
+      dayLabel: "Friday",
+      title: "Revise Cardiovascular",
+      category: "Concept Review",
+      system: "Cardiovascular",
+      durationMinutes: 60,
+      status: "Pending",
+    },
+    {
+      id: "old-task",
+      scheduledDate: "2026-07-24",
+      title: "Old provisional plan",
+      category: "Concept Review",
+      system: "Renal",
+      durationMinutes: 60,
+      status: "Superseded",
+    },
+  ];
+  const verified = buildAylaStartingReadinessReport({
+    student: {
+      id: "student-1",
+      examTrackId: "usmle_step_1",
+      exam: "USMLE Step 1",
+      onboardingPath: "diagnostic_test",
+      onboardingStatus: "complete",
+      serverVerifiedBaseline: true,
+      currentScore: 52,
+      dailyHours: 4,
+      weeklyStudyDays: 6,
+      systemBaselines: {
+        Cardiovascular: { score: 25, correct: 1, total: 4 },
+        Renal: { score: 75, correct: 3, total: 4 },
+      },
+      diagnosticCoverage: {
+        questionCount: 40,
+        mappedQuestionCount: 40,
+        systemsCovered: 5,
+        systemsExpected: 5,
+        coveragePercent: 100,
+      },
+    },
+    recommendation,
+    roadmapTasks,
+    examDefinition: step1,
+    generatedAt: "2026-07-24T13:00:00.000Z",
+  });
+  assert.equal(verified.evidence.kind, "server_verified_diagnostic");
+  assert.equal(verified.readiness.score, 52);
+  assert.equal(verified.readiness.passPrediction, false);
+  assert.equal(verified.readiness.passProbability, null);
+  assert.deepEqual(verified.weakAreas.map((row) => row.system), ["Cardiovascular"]);
+  assert.equal(verified.firstSevenDays.taskCount, 1);
+  assert.equal(verified.firstSevenDays.completedHistoryProtected, true);
+  assert.equal(verified.tutorBriefing.authoritativeRoadmap, true);
+  assert.equal(verified.nextAction.route, "/dashboard/personal-tutor");
+
+  const provisional = buildAylaStartingReadinessReport({
+    student: {
+      id: "student-2",
+      examTrackId: "usmle_step_1",
+      exam: "USMLE Step 1",
+      onboardingPath: "quick_profile",
+      onboardingStatus: "ready",
+      qbankAverage: 55,
+      qbankCompleted: 50,
+      weakAreas: ["Renal"],
+    },
+    recommendation,
+    roadmapTasks,
+    examDefinition: step1,
+  });
+  assert.equal(provisional.evidence.kind, "provisional_self_report");
+  assert.equal(provisional.readiness.score, null);
+  assert.equal(provisional.reportedStartingPoint.qbankAverageBand, "50–59%");
+  assert.deepEqual(provisional.weakAreas.map((row) => row.system), ["Renal"]);
+  assert.equal(provisional.weakAreas[0].confidence, "provisional");
+
+  const fresh = buildAylaStartingReadinessReport({
+    student: {
+      id: "student-3",
+      examTrackId: "nclex",
+      exam: "NCLEX",
+      onboardingPath: "starting_fresh",
+      onboardingStatus: "ready",
+    },
+    recommendation: {
+      ...recommendation,
+      riskLevel: "Baseline Needed",
+      phase: "Baseline & Planning",
+      roadmapMode: "Beginner Diagnostic Roadmap",
+    },
+    examDefinition: nclex,
+  });
+  assert.equal(fresh.evidence.kind, "discovery_start");
+  assert.equal(fresh.readiness.score, null);
+  assert.equal(fresh.noWeaknessInvented, true);
+  assert.equal(fresh.tutorBriefing.primaryFocus, "Baseline discovery");
+});
+
+test("pending diagnostic report never presents an unverified score", () => {
+  const report = buildAylaStartingReadinessReport({
+    student: {
+      id: "student-pending",
+      examTrackId: "usmle_step_1",
+      exam: "USMLE Step 1",
+      onboardingPath: "diagnostic_test",
+      onboardingStatus: "diagnostic_pending",
+      currentScore: 99,
+      serverVerifiedBaseline: false,
+    },
+    recommendation: {
+      riskLevel: "Baseline Needed",
+      phase: "Baseline & Planning",
+      roadmapMode: "Beginner Diagnostic Roadmap",
+    },
+    examDefinition: step1,
+  });
+  assert.equal(report.evidence.kind, "diagnostic_pending");
+  assert.equal(report.readiness.score, null);
+  assert.equal(report.nextAction.kind, "complete_diagnostic");
+  assert.equal(report.nextAction.route, "/dashboard/qbank?diagnostic=1");
+});
+
+test("roadmap reconciliation preserves completed and past rows while superseding future incomplete work", () => {
+  const existingTasks = [
+    {
+      id: "completed",
+      studentId: "student-1",
+      scheduledDate: "2026-07-24",
+      status: "Completed",
+      title: "Finished task",
+    },
+    {
+      id: "past",
+      studentId: "student-1",
+      scheduledDate: "2026-07-23",
+      status: "Pending",
+      title: "Past incomplete task",
+    },
+    {
+      id: "future",
+      studentId: "student-1",
+      scheduledDate: "2026-07-25",
+      status: "Pending",
+      title: "Old future task",
+    },
+    {
+      id: "foreign",
+      studentId: "student-2",
+      scheduledDate: "2026-07-25",
+      status: "Pending",
+      title: "Another student's task",
+    },
+  ];
+  const snapshot = structuredClone(existingTasks);
+  const refresh = reconcileAylaRoadmapOutline({
+    existingTasks,
+    nextTasks: [{
+      id: "replacement",
+      studentId: "student-1",
+      scheduledDate: "2026-07-25",
+      status: "Pending",
+      title: "Verified replacement",
+    }],
+    studentId: "student-1",
+    fromDate: "2026-07-24",
+    generationId: "generation-1",
+    reason: "verified_baseline_diagnostic",
+    now: "2026-07-24T13:00:00.000Z",
+  });
+
+  assert.deepEqual(existingTasks, snapshot, "pure reconciliation must not mutate stored history");
+  assert.equal(refresh.preservedCompleted, 1);
+  assert.equal(refresh.preservedPast, 1);
+  assert.equal(refresh.supersededFuture, 1);
+  assert.equal(refresh.updates[0].id, "future");
+  assert.equal(refresh.updates[0].status, "Superseded");
+  assert.equal(refresh.generatedTasks[0].roadmapGenerationId, "generation-1");
+  assert.deepEqual(
+    refresh.activeTasks.map((row) => row.id),
+    ["past", "completed", "replacement"],
+  );
+  assert.equal(refresh.activeTasks.some((row) => row.id === "foreign"), false);
+  assert.equal(refresh.completedHistoryProtected, true);
+});
+
 test("server wires onboarding into the existing isolated diagnostic and QBank routes", () => {
   const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
+  assert.match(server, /const AYLA_STARTING_READINESS_BUILD = "v229-starting-readiness-loop"/);
   const diagnosticRoute = server.slice(
     server.indexOf('app.post("/api/ayla/diagnostic-submissions"'),
     server.indexOf('app.get("/api/ayla/students/:id/dashboard"'),
@@ -169,5 +373,9 @@ test("server wires onboarding into the existing isolated diagnostic and QBank ro
   assert.match(qbankCreate, /resumed_existing_diagnostic: true/);
   assert.match(qbankSubmit, /buildAylaVerifiedDiagnosticBaseline/);
   assert.match(qbankSubmit, /verified_baseline: verifiedBaseline/);
+  assert.match(qbankSubmit, /aylaV229StoreFutureRoadmapOutline/);
+  assert.match(qbankSubmit, /starting_readiness_report: startingReadinessReport/);
   assert.match(qbankSubmit, /aylaV189BuildDailyPlan\(db, fresh\.student, tomorrow/);
+  assert.match(diagnosticRoute, /buildAylaStartingReadinessReport/);
+  assert.doesNotMatch(server, /aylaDeleteItem\(db, "aylaRoadmapTasks"/);
 });
