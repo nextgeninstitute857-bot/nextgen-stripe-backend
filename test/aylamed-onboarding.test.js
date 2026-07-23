@@ -174,12 +174,21 @@ test("starting readiness report distinguishes verified, provisional, and discove
     },
     {
       id: "old-task",
-      scheduledDate: "2026-07-24",
+      scheduledDate: "2026-07-23",
       title: "Old provisional plan",
       category: "Concept Review",
       system: "Renal",
       durationMinutes: 60,
-      status: "Superseded",
+      status: "Pending",
+    },
+    {
+      id: "completed-task",
+      scheduledDate: "2026-07-24",
+      title: "Already completed",
+      category: "Concept Review",
+      system: "Respiratory",
+      durationMinutes: 45,
+      status: "Completed",
     },
   ];
   const verified = buildAylaStartingReadinessReport({
@@ -216,6 +225,7 @@ test("starting readiness report distinguishes verified, provisional, and discove
   assert.equal(verified.readiness.passProbability, null);
   assert.deepEqual(verified.weakAreas.map((row) => row.system), ["Cardiovascular"]);
   assert.equal(verified.firstSevenDays.taskCount, 1);
+  assert.deepEqual(verified.firstSevenDays.days.map((day) => day.date), ["2026-07-24"]);
   assert.equal(verified.firstSevenDays.completedHistoryProtected, true);
   assert.equal(verified.tutorBriefing.authoritativeRoadmap, true);
   assert.equal(verified.nextAction.route, "/dashboard/personal-tutor");
