@@ -146,7 +146,7 @@ test("v214 federates progress read-only and keeps social lifecycle inside AylaMe
       "attempt-fake": { id: "attempt-fake", studentId: "student-1", serverVerified: false, outcome: "incorrect", system: "Neurology", topic: "CLIENT-FABRICATED-WEAKNESS", createdAt: at(today) },
     },
     aylaFlashcardReviews: {
-      "review-1": { id: "review-1", studentId: "student-1", resourceId: "card-1", rating: "hard", system: "Respiratory", topic: "Perfusion", nextReviewDate: today, createdAt: at(today) },
+      "review-1": { id: "review-1", studentId: "student-1", resourceId: "card-1", serverVerified: true, rating: "hard", system: "Respiratory", topic: "Perfusion", nextReviewDate: today, createdAt: at(today) },
     },
     aylaQbankSessions: {
       "session-1": { id: "session-1", userId: "user-1", studentId: "student-1", examTrack: "usmle-step-1", mode: "test", status: "in_progress", questions: [{ ref: "qref-1", contentQuestionId: "question-marked" }], answers: {}, marks: { "qref-1": true }, createdAt: at(today), updatedAt: at(today) },

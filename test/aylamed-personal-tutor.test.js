@@ -122,11 +122,43 @@ test("cross-system weakness is reported only from repeated verified evidence", (
       { serverVerified: true, outcome: "incorrect", system: "Renal", topic: "Perfusion" },
       { serverVerified: false, outcome: "incorrect", system: "Respiratory", topic: "Fabricated topic" },
     ],
-    flashcardReviews: [{ rating: "hard", system: "Respiratory", topic: "Perfusion" }],
+    flashcardReviews: [{ serverVerified: true, rating: "hard", system: "Respiratory", topic: "Perfusion" }],
   }));
   assert.equal(decision.crossSystemWeakTopic.topic, "Perfusion");
   assert.deepEqual(decision.crossSystemWeakTopic.systems, ["Cardiovascular", "Renal", "Respiratory"]);
   assert.doesNotMatch(JSON.stringify(decision), /Fabricated topic/);
+});
+
+test("external self-reported outcomes cannot change Personal Tutor workload or weak areas", () => {
+  const decision = buildAylaPersonalTutorDecision(baseInput({
+    questionAttempts: Array.from({ length: 12 }, (_, index) => ({
+      serverVerified: false,
+      sourceType: "external",
+      outcome: "incorrect",
+      system: index % 2 ? "Renal" : "Cardiovascular",
+      topic: "CLIENT-CLAIMED-WEAKNESS",
+    })),
+  }));
+  assert.equal(decision.progressEvidence.verifiedQuestionAttempts, 0);
+  assert.equal(decision.progressEvidence.verifiedQuestionAccuracyPercent, null);
+  assert.equal(decision.crossSystemWeakTopic, null);
+  assert.doesNotMatch(JSON.stringify(decision), /CLIENT-CLAIMED-WEAKNESS/);
+});
+
+test("a newer correct answer or successful card review resolves older weak evidence for that resource", () => {
+  const decision = buildAylaPersonalTutorDecision(baseInput({
+    questionAttempts: [
+      { resourceId: "question-1", serverVerified: true, outcome: "correct", system: "Cardiovascular", topic: "Resolved topic" },
+      { resourceId: "question-1", serverVerified: true, outcome: "incorrect", system: "Cardiovascular", topic: "Resolved topic" },
+    ],
+    flashcardReviews: [
+      { resourceId: "card-1", serverVerified: true, rating: "good", system: "Renal", topic: "Resolved topic" },
+      { resourceId: "card-1", serverVerified: true, rating: "hard", system: "Renal", topic: "Resolved topic" },
+    ],
+  }));
+  assert.equal(decision.progressEvidence.verifiedQuestionAttempts, 1);
+  assert.equal(decision.progressEvidence.verifiedQuestionAccuracyPercent, 100);
+  assert.equal(decision.crossSystemWeakTopic, null);
 });
 
 test("notebook recommendation uses only student-authored text, never imported source blocks", () => {

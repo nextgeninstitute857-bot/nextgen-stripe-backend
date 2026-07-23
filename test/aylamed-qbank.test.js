@@ -51,7 +51,11 @@ const registryQuestion = {
     { answer_id: 2, text_html: "Choice B" },
   ],
   taxonomy: { system_key: "cardiovascular", topic_key: "murmurs" },
-  media: [{ id: "stem-image", placement: "question", url: "signed-stem" }, { id: "explanation-image", placement: "explanation", url: "signed-explanation" }],
+  media: [
+    { id: "stem-image", placement: "question", kind: "image", content_type: "image/png", url: "signed-stem" },
+    { id: "heart-sound", placement: "question", kind: "audio", content_type: "audio/mpeg", url: "signed-audio" },
+    { id: "explanation-image", placement: "explanation", kind: "image", content_type: "image/png", url: "signed-explanation" },
+  ],
   videos: [{ id: "explanation-video", placement: "explanation", embed_url: "https://player.vimeo.com/video/1" }],
 };
 
@@ -142,7 +146,8 @@ test("tutor mode hides answer material until the immutable answer is recorded", 
   const before = sanitizeAylaQbankQuestion(registryQuestion, { session, questionRef: "ref-1" });
   assert.equal(before.correct_answer_id, null);
   assert.equal(before.explanation_html, null);
-  assert.deepEqual(before.media.map((row) => row.id), ["stem-image"]);
+  assert.deepEqual(before.media.map((row) => row.id), ["stem-image", "heart-sound"]);
+  assert.equal(before.media.find((row) => row.id === "heart-sound").kind, "audio");
   assert.deepEqual(before.videos, []);
 
   const recorded = recordAylaQbankAnswer(session, { questionRef: "ref-1", selectedAnswerId: 1, correctAnswerId: 2, now: new Date("2026-07-19T12:01:00.000Z") });

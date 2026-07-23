@@ -94,6 +94,21 @@ test("authenticated Personal Tutor rebalances only the versioned adaptive roadma
       verificationStatus: "approved_ai_training_center",
     };
   }
+  resources["verified-card"] = {
+    id: "verified-card",
+    type: "flashcard",
+    ownerStudentId: "student-1",
+    examTrackId: "usmle_step_1",
+    examTrack: "USMLE Step 1",
+    system: "Cardiology",
+    topic: "Perfusion",
+    front: "What controls perfusion?",
+    back: "Verified recall answer",
+    approved: true,
+    status: "active",
+    authorizationStatus: "owned",
+    verificationStatus: "server_verified_mistake",
+  };
   const currentItems = Object.values(resources).slice(0, 20).map((row) => ({
     resourceId: row.id,
     resourceNumber: row.resourceNumber,
@@ -240,7 +255,7 @@ test("authenticated Personal Tutor rebalances only the versioned adaptive roadma
       "foreign-attempt": { id: "foreign-attempt", studentId: "student-other", serverVerified: true, outcome: "incorrect", system: "Neurology", topic: "FOREIGN-EXAM-TOPIC", createdAt: now },
     },
     aylaFlashcardReviews: {
-      "review-1": { id: "review-1", studentId: "student-1", rating: "hard", system: "Respiratory", topic: "Perfusion", createdAt: now },
+      "review-1": { id: "review-1", studentId: "student-1", serverVerified: true, rating: "hard", system: "Respiratory", topic: "Perfusion", createdAt: now },
     },
     aylaNotebooks: {
       "notebook-1": {
@@ -357,6 +372,29 @@ test("authenticated Personal Tutor rebalances only the versioned adaptive roadma
     assert.equal(chat.payload.personal_tutor.engine, "ayla_adaptive_roadmap_v189");
     assert.equal(chat.payload.usage, null);
     assert.equal(chat.payload.roadmap.plan.id, applied.payload.plan.id);
+
+    const fabricatedCard = await api(baseUrl, "/api/ayla/students/student-1/flashcard-reviews", {
+      method: "POST",
+      token,
+      body: { resourceId: "client-invented-card", system: "Neurology", topic: "CLIENT-FABRICATED-WEAKNESS", rating: "hard" },
+    });
+    assert.equal(fabricatedCard.response.status, 404, JSON.stringify(fabricatedCard.payload));
+
+    const verifiedCard = await api(baseUrl, "/api/ayla/students/student-1/flashcard-reviews", {
+      method: "POST",
+      token,
+      body: {
+        resourceId: "verified-card",
+        system: "Neurology",
+        topic: "CLIENT-FABRICATED-WEAKNESS",
+        rating: "good",
+      },
+    });
+    assert.equal(verifiedCard.response.status, 201, JSON.stringify(verifiedCard.payload));
+    assert.equal(verifiedCard.payload.review.serverVerified, true);
+    assert.equal(verifiedCard.payload.review.system, "Cardiology");
+    assert.equal(verifiedCard.payload.review.topic, "Perfusion");
+    assert.doesNotMatch(JSON.stringify(verifiedCard.payload), /CLIENT-FABRICATED-WEAKNESS/);
 
     const stored = JSON.parse(await fs.readFile(aylaPath, "utf8"));
     assert.equal(stored.aylaDailyPlans["plan-current"].status, "superseded");
