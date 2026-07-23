@@ -7,6 +7,7 @@ import {
   mergeConcurrentAylaQbankCollection,
   normalizeAylaQbankExamTrack,
   normalizeAylaQbankMode,
+  normalizeAylaQbankPurpose,
   recordAylaQbankAnswer,
   resolveAylaQbankEntitlement,
   sanitizeAylaQbankQuestion,
@@ -64,6 +65,7 @@ test("AylaMed and Content Registry exam aliases resolve to one canonical boundar
   assert.equal(normalizeAylaQbankExamTrack("USMLE Step 2 CK"), "usmle-step-2");
   assert.equal(normalizeAylaQbankExamTrack("usmle_step_3"), "usmle-step-3");
   assert.equal(normalizeAylaQbankMode("assessment mode"), "test");
+  assert.equal(normalizeAylaQbankPurpose("take diagnostic"), "baseline_diagnostic");
 });
 
 test("unscoped legacy enrollment is restricted to the owned student profile exam", () => {
@@ -139,6 +141,33 @@ test("session builder deduplicates questions and creates bounded blocks", () => 
   assert.equal(session.questionCount, 3);
   assert.deepEqual(session.blocks.map((block) => block.questionRefs), [["one", "two"], ["three"]]);
   assert.deepEqual(sanitizeAylaQbankSession(session).questions, [{ question_ref: "one" }, { question_ref: "two" }, { question_ref: "three" }]);
+});
+
+test("baseline diagnostics are explicitly tagged and can only use sealed test mode", () => {
+  const session = createAylaQbankSession({
+    id: "diagnostic-session",
+    userId: "user-1",
+    studentId: "student-1",
+    examTrack: "USMLE Step 1",
+    mode: "test",
+    purpose: "baseline_diagnostic",
+    questions: [{ ref: "one", contentQuestionId: "q1" }],
+  });
+  const safe = sanitizeAylaQbankSession(session);
+  assert.equal(session.purpose, "baseline_diagnostic");
+  assert.equal(safe.purpose, "baseline_diagnostic");
+  assert.throws(
+    () => createAylaQbankSession({
+      id: "unsafe-diagnostic",
+      userId: "user-1",
+      studentId: "student-1",
+      examTrack: "USMLE Step 1",
+      mode: "tutor",
+      purpose: "baseline_diagnostic",
+      questions: [{ ref: "one", contentQuestionId: "q1" }],
+    }),
+    (error) => error.code === "DIAGNOSTIC_REQUIRES_TEST_MODE",
+  );
 });
 
 test("tutor mode hides answer material until the immutable answer is recorded", () => {
