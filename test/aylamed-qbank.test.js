@@ -1,13 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import {
   canRevealAylaQbankAnswer,
+  canSubmitAylaQbankRoadmapSession,
   createAylaQbankSession,
   finalizeAylaQbankSession,
   mergeConcurrentAylaQbankCollection,
   normalizeAylaQbankExamTrack,
   normalizeAylaQbankMode,
   normalizeAylaQbankPurpose,
+  qbankRoadmapAssignmentQuestionIds,
+  qbankRoadmapSessionMatchesAssignment,
   recordAylaQbankAnswer,
   resolveAylaQbankEntitlement,
   sanitizeAylaQbankQuestion,
@@ -141,6 +145,90 @@ test("session builder deduplicates questions and creates bounded blocks", () => 
   assert.equal(session.questionCount, 3);
   assert.deepEqual(session.blocks.map((block) => block.questionRefs), [["one", "two"], ["three"]]);
   assert.deepEqual(sanitizeAylaQbankSession(session).questions, [{ question_ref: "one" }, { question_ref: "two" }, { question_ref: "three" }]);
+});
+
+test("roadmap QBank sessions use only the assignment's explicit question identities", () => {
+  const question1 = "11111111-1111-4111-8111-111111111111";
+  const question2 = "22222222-2222-4222-8222-222222222222";
+  const question3 = "33333333-3333-4333-8333-333333333333";
+  const unrelatedAlias = "44444444-4444-4444-8444-444444444444";
+  const ids = qbankRoadmapAssignmentQuestionIds({
+    resourceIds: [question2, unrelatedAlias, "legacy-question-id"],
+    items: [
+      { contentQuestionId: question1, resourceId: "legacy-one" },
+      { content_question_id: question2 },
+      { resourceId: question3 },
+    ],
+  });
+  assert.deepEqual(ids, [question1, question2, question3]);
+  assert.deepEqual(qbankRoadmapAssignmentQuestionIds({
+    resourceIds: [question1, question2, question1, "legacy-question-id"],
+  }), [question1, question2]);
+  assert.equal(qbankRoadmapSessionMatchesAssignment({
+    questions: [
+      { ref: "one", contentQuestionId: question1 },
+      { ref: "two", contentQuestionId: question2 },
+      { ref: "three", contentQuestionId: question3 },
+    ],
+  }, {
+    resourceIds: [question1, question2, question3],
+  }), true);
+  assert.equal(qbankRoadmapSessionMatchesAssignment({
+    questions: [{ ref: "one", contentQuestionId: question2 }],
+  }, {
+    resourceIds: [question1],
+  }), false);
+});
+
+test("a roadmap QBank block cannot complete while assigned questions remain unanswered", () => {
+  const session = createAylaQbankSession({
+    id: "roadmap-session",
+    userId: "user-1",
+    studentId: "student-1",
+    examTrack: "usmle_step_1",
+    mode: "tutor",
+    origin: "roadmap",
+    roadmapAssignmentId: "assignment-1",
+    questions: [
+      { ref: "one", contentQuestionId: "q1" },
+      { ref: "two", contentQuestionId: "q2" },
+    ],
+  });
+  assert.equal(canSubmitAylaQbankRoadmapSession(session), false);
+  const oneAnswered = recordAylaQbankAnswer(session, {
+    questionRef: "one",
+    selectedAnswerId: 1,
+    correctAnswerId: 1,
+  }).session;
+  oneAnswered.answers.unrelated = { selectedAnswerId: 1 };
+  assert.equal(canSubmitAylaQbankRoadmapSession(oneAnswered), false);
+  const complete = recordAylaQbankAnswer(oneAnswered, {
+    questionRef: "two",
+    selectedAnswerId: 1,
+    correctAnswerId: 2,
+  }).session;
+  assert.equal(canSubmitAylaQbankRoadmapSession(complete), true);
+  assert.equal(canSubmitAylaQbankRoadmapSession(sessionFixture("test", 2)), true);
+});
+
+test("server keeps exact roadmap QBank identity through create, resume, and completion", () => {
+  const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
+  assert.match(server, /const AYLA_SINGLE_ROADMAP_BUILD = "v230-single-roadmap-execution"/);
+  const createRoute = server.slice(
+    server.indexOf('app.post("/api/ayla/qbank/sessions"'),
+    server.indexOf('app.get("/api/ayla/qbank/sessions/:sessionId"'),
+  );
+  const submitRoute = server.slice(
+    server.indexOf('app.post("/api/ayla/qbank/sessions/:sessionId/submit"'),
+    server.indexOf('app.get("/api/ayla/qbank/history"'),
+  );
+  assert.match(createRoute, /qbankRoadmapAssignmentQuestionIds\(assignment\)/);
+  assert.match(createRoute, /qbankRoadmapSessionMatchesAssignment\(activeRoadmapSession, assignment\)/);
+  assert.match(createRoute, /getContentQbankQuestions\(\{\s*questionIds: roadmapQuestionIds/s);
+  assert.match(createRoute, /private_drafts_exposed: false/);
+  assert.match(submitRoute, /canSubmitAylaQbankRoadmapSession\(current\)/);
+  assert.match(submitRoute, /assignmentIsActive/);
+  assert.match(submitRoute, /qbankRoadmapSessionMatchesAssignment\(finalized\.session, assignment\)/);
 });
 
 test("baseline diagnostics are explicitly tagged and can only use sealed test mode", () => {

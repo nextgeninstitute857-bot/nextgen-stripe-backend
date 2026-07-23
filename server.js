@@ -65,6 +65,7 @@ import {
 import {
   AYLA_QBANK_STATE_COLLECTIONS,
   canRevealAylaQbankAnswer,
+  canSubmitAylaQbankRoadmapSession,
   createAylaQbankSession,
   finalizeAylaQbankSession,
   mergeConcurrentAylaQbankCollection,
@@ -74,6 +75,8 @@ import {
   normalizeAylaQbankPurpose,
   qbankSessionHistoryRow,
   qbankSessionQuestion,
+  qbankRoadmapAssignmentQuestionIds,
+  qbankRoadmapSessionMatchesAssignment,
   recordAylaQbankAnswer,
   requireAylaQbankEntitlement,
   sanitizeAylaQbankQuestion,
@@ -252,6 +255,7 @@ const RECORDING_DUPLICATE_CLEANUP_BUILD = "v223-safe-recording-duplicate-cleanup
 const STUDENT_NOTES_RESOLVER_BUILD = "v225-course-system-day-notes-resolver";
 const AYLA_ADAPTIVE_CORE_BUILD = "v227-verified-adaptive-loop";
 const AYLA_STARTING_READINESS_BUILD = "v229-starting-readiness-loop";
+const AYLA_SINGLE_ROADMAP_BUILD = "v230-single-roadmap-execution";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -10006,6 +10010,7 @@ app.get("/health", async (req, res) => {
     content_ingestion_build: CONTENT_INGESTION_BUILD,
     aylamed_adaptive_core_build: AYLA_ADAPTIVE_CORE_BUILD,
     aylamed_starting_readiness_build: AYLA_STARTING_READINESS_BUILD,
+    aylamed_single_roadmap_build: AYLA_SINGLE_ROADMAP_BUILD,
     roadmap_extension_build: ROADMAP_EXTENSION_BUILD,
     recording_assignment_build: RECORDING_ASSIGNMENT_BUILD,
     recording_duplicate_cleanup_build: RECORDING_DUPLICATE_CLEANUP_BUILD,
@@ -35722,26 +35727,57 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
 
     let origin = "personal";
     let roadmapAssignmentId = null;
+    let roadmapQuestionIds = [];
     const requestedRoadmapAssignmentId = String(req.body.roadmap_assignment_id || req.body.roadmapAssignmentId || "").trim();
     if (requestedRoadmapAssignmentId) {
       const assignment = aylaGetItem(auth.db, "aylaResourceAssignments", requestedRoadmapAssignmentId);
       if (!assignment || String(assignment.studentId || "") !== String(auth.student.id)) return aylaSendError(res, 404, "Roadmap assignment not found");
       if (!aylaQbankRoadmapAssignmentEligible(assignment)) return aylaSendError(res, 409, "Roadmap assignment is not a QBank question assignment");
+      if (["completed", "cancelled", "canceled", "skipped", "superseded"].includes(String(assignment.status || "").toLowerCase())) {
+        return aylaSendError(res, 409, "This roadmap QBank assignment is no longer active");
+      }
       const assignmentExam = normalizeAylaQbankExamTrack(assignment.examTrackId || assignment.examTrack || assignment.exam_track || "");
       if (assignmentExam && assignmentExam !== access.exam_track) return aylaSendError(res, 403, "Roadmap assignment belongs to another exam track");
+      roadmapQuestionIds = qbankRoadmapAssignmentQuestionIds(assignment);
+      if (!roadmapQuestionIds.length) return aylaSendError(res, 409, "This roadmap assignment has no published QBank question identities");
       origin = "roadmap";
       roadmapAssignmentId = assignment.id;
+
+      const activeRoadmapSession = aylaValues(auth.db, "aylaQbankSessions").find((row) =>
+        String(row.userId || "") === String(auth.user.id)
+        && String(row.studentId || "") === String(auth.student.id)
+        && String(row.examTrack || "") === String(access.exam_track)
+        && String(row.origin || "") === "roadmap"
+        && String(row.roadmapAssignmentId || "") === String(roadmapAssignmentId)
+        && String(row.status || "") === "in_progress");
+      if (activeRoadmapSession) {
+        if (!qbankRoadmapSessionMatchesAssignment(activeRoadmapSession, assignment)) {
+          return aylaSendError(res, 409, "This roadmap QBank assignment changed after its earlier session began. Refresh the roadmap before continuing.");
+        }
+        const bundle = await aylaPlayableQbankSession(auth.db, activeRoadmapSession);
+        return aylaSendOk(res, {
+          ...bundle,
+          requested_question_count: Number(activeRoadmapSession.requestedQuestionCount || activeRoadmapSession.questionCount || 0),
+          selected_question_count: Number(activeRoadmapSession.questionCount || 0),
+          partial_selection: false,
+          idempotent_replay: true,
+          resumed_existing_roadmap: true,
+        });
+      }
     }
+    const effectiveRequestedCount = roadmapAssignmentId ? roadmapQuestionIds.length : requestedCount;
+    const effectiveFilters = roadmapAssignmentId ? normalizeAylaQbankFilters({}) : filters;
 
     const idempotencyFingerprint = crypto.createHash("sha256").update(JSON.stringify({
       examTrack: access.exam_track,
       mode: requestedMode,
       purpose,
-      requestedCount,
+      requestedCount: effectiveRequestedCount,
       blockSize: requestedBlockSize,
-      filters,
+      filters: effectiveFilters,
       origin,
       roadmapAssignmentId,
+      roadmapQuestionIds,
       timeLimitMinutes: req.body.time_limit_minutes ?? req.body.timeLimitMinutes ?? null,
     })).digest("hex");
     if (idempotencyKey) {
@@ -35763,12 +35799,36 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
       }
     }
 
-    const selection = await aylaSelectQbankSessionQuestions({
-      examTrack: access.exam_track,
-      requestedCount,
-      filters,
-      purpose,
-    });
+    let selection;
+    if (roadmapAssignmentId) {
+      const rows = await getContentQbankQuestions({
+        questionIds: roadmapQuestionIds,
+        examTrack: access.exam_track,
+        destination: "aylamed_qbank",
+      });
+      const byId = new Map(rows.map((row) => [String(row.id || ""), row]));
+      const selected = roadmapQuestionIds.map((id) => byId.get(String(id))).filter(Boolean);
+      if (selected.length !== roadmapQuestionIds.length) {
+        return aylaSendError(
+          res,
+          409,
+          "One or more assigned QBank questions are not currently approved for student delivery",
+          {
+            assigned: roadmapQuestionIds.length,
+            approved: selected.length,
+            private_drafts_exposed: false,
+          },
+        );
+      }
+      selection = { selected, availableSystemKeys: [], selectedSystemKeys: [] };
+    } else {
+      selection = await aylaSelectQbankSessionQuestions({
+        examTrack: access.exam_track,
+        requestedCount: effectiveRequestedCount,
+        filters: effectiveFilters,
+        purpose,
+      });
+    }
     const selected = selection.selected;
     if (!selected.length) return aylaSendError(res, 409, "No approved QBank questions match this exam track and filter selection");
 
@@ -35802,6 +35862,12 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
           error.statusCode = 409;
           throw error;
         }
+        const currentQuestionIds = qbankRoadmapAssignmentQuestionIds(assignment);
+        if (JSON.stringify(currentQuestionIds) !== JSON.stringify(roadmapQuestionIds)) {
+          const error = new Error("The roadmap QBank assignment changed before the session was created. Refresh the roadmap and try again.");
+          error.statusCode = 409;
+          throw error;
+        }
       }
       const session = createAylaQbankSession({
         id: sessionId,
@@ -35811,7 +35877,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         mode: requestedMode,
         purpose,
         questions: questionMappings,
-        filters,
+        filters: effectiveFilters,
         blockSize: requestedBlockSize,
         origin,
         roadmapAssignmentId,
@@ -35820,7 +35886,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
       });
       session.idempotencyKey = idempotencyKey || null;
       session.idempotencyFingerprint = idempotencyKey ? idempotencyFingerprint : null;
-      session.requestedQuestionCount = requestedCount;
+      session.requestedQuestionCount = effectiveRequestedCount;
       if (purpose === "baseline_diagnostic") {
         session.diagnosticCoverage = {
           availableSystemCount: selection.availableSystemKeys.length,
@@ -35837,9 +35903,9 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
     const bundle = await aylaPlayableQbankSession(latestDb, mutation.session);
     return aylaSendOk(res, {
       ...bundle,
-      requested_question_count: requestedCount,
+      requested_question_count: effectiveRequestedCount,
       selected_question_count: mutation.session.questionCount,
-      partial_selection: mutation.session.questionCount < requestedCount,
+      partial_selection: mutation.session.questionCount < effectiveRequestedCount,
       idempotent_replay: mutation.replayed,
     }, mutation.replayed ? 200 : 201);
   } catch (error) {
@@ -35938,6 +36004,12 @@ app.post("/api/ayla/qbank/sessions/:sessionId/submit", async (req, res) => {
     const mutation = await mutateAylaDb(async (db) => {
       const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, initial.examTrack);
       const current = aylaOwnedQbankSession(db, fresh.user, fresh.student, initial.id);
+      if (!canSubmitAylaQbankRoadmapSession(current)) {
+        const error = new Error("Answer every assigned question before completing this roadmap QBank block");
+        error.statusCode = 409;
+        error.code = "ROADMAP_QBANK_INCOMPLETE";
+        throw error;
+      }
       const finalized = finalizeAylaQbankSession(current);
       let adaptiveUpdate = null;
       if (!finalized.replayed) {
@@ -35952,7 +36024,14 @@ app.post("/api/ayla/qbank/sessions/:sessionId/submit", async (req, res) => {
         }
         if (finalized.session.origin === "roadmap" && finalized.session.roadmapAssignmentId) {
           const assignment = aylaGetItem(db, "aylaResourceAssignments", finalized.session.roadmapAssignmentId);
-          if (assignment && String(assignment.studentId || "") === String(finalized.session.studentId) && aylaQbankRoadmapAssignmentEligible(assignment)) {
+          const assignmentIsActive = assignment
+            && !["completed", "cancelled", "canceled", "skipped", "superseded"].includes(String(assignment.status || "").toLowerCase());
+          if (
+            assignmentIsActive
+            && String(assignment.studentId || "") === String(finalized.session.studentId)
+            && aylaQbankRoadmapAssignmentEligible(assignment)
+            && qbankRoadmapSessionMatchesAssignment(finalized.session, assignment)
+          ) {
             assignment.status = "completed";
             assignment.progressPercent = 100;
             assignment.qbankSessionIds = [...new Set([...(Array.isArray(assignment.qbankSessionIds) ? assignment.qbankSessionIds : []), finalized.session.id])];
@@ -60676,8 +60755,12 @@ app.get("/api/ayla/health", async (req, res) => {
       capabilities: {
         adaptive_core_build: AYLA_ADAPTIVE_CORE_BUILD,
         starting_readiness_build: AYLA_STARTING_READINESS_BUILD,
+        single_roadmap_build: AYLA_SINGLE_ROADMAP_BUILD,
         evidence_aware_starting_report: true,
         three_path_tutor_roadmap_handoff: true,
+        read_only_seven_day_forecast: true,
+        exact_tutor_assignment_handoff: true,
+        exact_roadmap_qbank_selection: true,
         future_outline_supersession_without_history_deletion: true,
         verified_qbank_weak_area_projection: true,
         private_mistake_flashcard_queue: true,

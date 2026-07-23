@@ -72,6 +72,16 @@ test("Personal Tutor chooses the next modality from the one stored roadmap", () 
   assert.equal(decision.nextAction.assignmentId, "revision-1");
   assert.equal(decision.nextAction.modality, "revise");
   assert.equal(decision.nextAction.returnLink, "/roadmap/assignments/revision-1");
+  assert.deepEqual(decision.nextAction.actionTarget, {
+    kind: "roadmap_assignment",
+    route: "/dashboard/roadmap",
+    query: { assignment: "revision-1" },
+    appRoute: "/dashboard/roadmap?assignment=revision-1",
+    assignmentId: "revision-1",
+  });
+  const navigation = decision.recommendations.find((row) => row.kind === "continue_next_assignment");
+  assert.equal(navigation.appRoute, "/dashboard/roadmap?assignment=revision-1");
+  assert.equal(navigation.actionTarget.assignmentId, "revision-1");
 });
 
 test("overload reduces question volume and produces only a version-checked single-roadmap directive", () => {
@@ -178,6 +188,7 @@ test("notebook recommendation uses only student-authored text, never imported so
   }));
   assert.equal(decision.notebook.notebookId, "notebook-1");
   assert.equal(decision.notebook.studentNotePreview, "My own perfusion mnemonic");
+  assert.equal(decision.notebook.actionTarget.appRoute, "/dashboard/notebook/notebook-1");
   assert.doesNotMatch(JSON.stringify(decision), /PRIVATE PUBLISHER SOURCE ANSWER/);
 });
 

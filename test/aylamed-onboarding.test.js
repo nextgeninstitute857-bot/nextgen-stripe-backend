@@ -227,7 +227,12 @@ test("starting readiness report distinguishes verified, provisional, and discove
   assert.equal(verified.firstSevenDays.taskCount, 1);
   assert.deepEqual(verified.firstSevenDays.days.map((day) => day.date), ["2026-07-24"]);
   assert.equal(verified.firstSevenDays.completedHistoryProtected, true);
+  assert.equal(verified.firstSevenDays.kind, "adaptive_forecast");
+  assert.equal(verified.firstSevenDays.readOnly, true);
+  assert.equal(verified.firstSevenDays.authoritativeExecution, false);
+  assert.equal(verified.firstSevenDays.executionRoute, "/dashboard/roadmap");
   assert.equal(verified.tutorBriefing.authoritativeRoadmap, true);
+  assert.equal(verified.tutorBriefing.forecastIsAuthoritativeExecution, false);
   assert.equal(verified.nextAction.route, "/dashboard/personal-tutor");
 
   const provisional = buildAylaStartingReadinessReport({
