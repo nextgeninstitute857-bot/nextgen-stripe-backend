@@ -35,6 +35,7 @@ import {
   importContentQuestionBatch,
   listContentHubVideos,
   listContentOperationalJobs,
+  listContentMediaImportAssets,
   listExternalQbankAuditEvents,
   listExternalQbankDeliverySessions,
   listContentQbankQuestions,
@@ -49,6 +50,7 @@ import {
   saveContentMediaMatches,
   saveContentVideoMatch,
   setContentImportJobStatus,
+  stageContentMediaImportAsset,
   submitExternalQbankDeliverySession,
   updateContentCollectionControls,
   upsertContentQuestionTaxonomyOverride,
@@ -186,6 +188,7 @@ import {
   receiveContentZip,
 } from "./lib/content-zip-import.js";
 import { SafeBackgroundQueue } from "./lib/safe-background-jobs.js";
+import { contentJobMonitoring } from "./lib/content-job-monitoring.js";
 import { ResumableContentUploadStore } from "./lib/resumable-content-upload.js";
 import { CloudContentUploadStore } from "./lib/cloud-content-upload.js";
 import { contentZipSourceExists } from "./lib/content-zip-source.js";
@@ -195,6 +198,7 @@ import {
   contentMediaStatus,
   createPrivateMediaUrl,
   deleteR2Object,
+  inspectMediaZip,
   matchMediaReferences,
   uploadMediaZipToR2,
 } from "./lib/content-media-r2.js";
@@ -226,7 +230,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CONTENT_INGESTION_BUILD = "v220-direct-qbank-media-ingestion";
+const CONTENT_INGESTION_BUILD = "v226-resumable-media-progress";
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
 const ROADMAP_EXTENSION_BUILD = "v221-system-aware-roadmap-extension";
 const RECORDING_ASSIGNMENT_BUILD = "v222-safe-recording-detach";
@@ -33943,6 +33947,47 @@ function ngContentBackgroundJobs(domainJobId) {
   return ngContentBackgroundQueue.list({ limit: 500 }).filter((job) => String(job.metadata?.domain_job_id) === String(domainJobId));
 }
 
+function ngContentBackgroundSnapshot(domainJobId) {
+  const backgroundJobs = ngContentBackgroundJobs(domainJobId);
+  const monitoring = contentJobMonitoring(backgroundJobs, {
+    staleMs: Math.max(30_000, Number(process.env.NEXTGEN_CONTENT_PROGRESS_STALE_MS || 3 * 60 * 1000)),
+  });
+  const detailed = monitoring.background_job_id
+    ? ngContentBackgroundQueue.get(monitoring.background_job_id, { includePayload: true })
+    : null;
+  return {
+    backgroundJobs,
+    monitoring,
+    resumeUploadId: detailed?.payload?.upload_id || null,
+  };
+}
+
+function ngContentProgressTracker(initialStage = "") {
+  let stage = String(initialStage || "");
+  let lastMovementAt = new Date().toISOString();
+  let lastFiles = 0;
+  let lastBytes = 0;
+  return (input = {}) => {
+    const progress = { ...(input || {}) };
+    const nextStage = String(progress.stage || stage || "");
+    const files = Math.max(0, Number(progress.files_processed || 0));
+    const bytes = Math.max(0, Number(progress.bytes_processed || 0));
+    const stageChanged = nextStage !== stage;
+    const moved = stageChanged || progress.movement === true || files > lastFiles || bytes > lastBytes;
+    if (moved) lastMovementAt = new Date().toISOString();
+    if (stageChanged) {
+      lastFiles = files;
+      lastBytes = bytes;
+    } else {
+      lastFiles = Math.max(lastFiles, files);
+      lastBytes = Math.max(lastBytes, bytes);
+    }
+    stage = nextStage;
+    delete progress.movement;
+    return { ...progress, stage: nextStage, movement_at: lastMovementAt };
+  };
+}
+
 app.post("/admin/crm/ai-training/content-uploads", async (req, res) => {
   try {
     const { user } = await requireCrmAdmin(req);
@@ -34127,7 +34172,14 @@ app.get("/admin/crm/ai-training/content-imports/:jobId", async (req, res) => {
     await requireCrmAdmin(req);
     const job = await getContentImportJob(req.params.jobId);
     if (!job) return res.status(404).json({ success: false, error: "Content import job not found" });
-    return res.json({ success: true, job, background_jobs: ngContentBackgroundJobs(job.id) });
+    const snapshot = ngContentBackgroundSnapshot(job.id);
+    return res.json({
+      success: true,
+      job,
+      background_jobs: snapshot.backgroundJobs,
+      monitoring: snapshot.monitoring,
+      resume_upload_id: snapshot.resumeUploadId,
+    });
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -34172,33 +34224,113 @@ app.post("/admin/crm/ai-training/content-imports/:jobId/import-draft", async (re
 });
 
 async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload, queueContext }) {
-  const uploadedObjects = [];
-  let persistenceCommitted = false;
+  const trackProgress = ngContentProgressTracker("indexing_media_zip");
   try {
-    await queueContext.heartbeat({ stage: "uploading_private_images" });
     const references = await getContentMediaReferences(parentJob.id, "r2");
+    const existingAssets = await listContentMediaImportAssets(mediaJob.id);
+    await finishContentMediaImportJob(mediaJob.id, "uploading", {
+      resumable: true,
+      staged_assets: existingAssets.length,
+      question_media_references: references.length,
+    }, []);
+    await queueContext.heartbeat(trackProgress({
+      stage: "indexing_media_zip",
+      files_processed: 0,
+      files_total: 0,
+      bytes_processed: 0,
+      bytes_total: 0,
+      resumed_files: existingAssets.length,
+      newly_uploaded: 0,
+      percent: 0,
+    }));
+    const inventory = await inspectMediaZip({
+      zipSource: upload.source || upload.file,
+      references,
+      onProgress: (progress) => queueContext.heartbeat(trackProgress(progress)),
+    });
+    await queueContext.heartbeat(trackProgress({
+      stage: "uploading_private_images",
+      files_processed: 0,
+      files_total: inventory.candidateEntries,
+      bytes_processed: 0,
+      bytes_total: inventory.candidateUncompressedBytes,
+      resumed_files: existingAssets.length,
+      newly_uploaded: 0,
+      percent: 0,
+    }));
     const uploaded = await uploadMediaZipToR2({
       zipSource: upload.source || upload.file,
       references,
       examTrack: parentJob.exam_track,
       sourceNamespace: parentJob.source_namespace,
       importJobId: parentJob.id,
-      onAsset: (asset) => uploadedObjects.push(asset.objectKey),
+      mediaImportJobId: mediaJob.id,
+      inventory,
+      existingAssets,
+      onProgress: (progress) => queueContext.heartbeat(trackProgress(progress)),
+      onAsset: async (asset, { entryIndex, progress }) => {
+        await stageContentMediaImportAsset({
+          mediaImportJobId: mediaJob.id,
+          entryIndex,
+          asset,
+        });
+        await queueContext.updateCheckpoint({
+          version: 2,
+          media_entry_index: entryIndex,
+          files_processed: progress.files_processed,
+          files_total: progress.files_total,
+          bytes_processed: progress.bytes_processed,
+          bytes_total: progress.bytes_total,
+        }, trackProgress(progress));
+      },
     });
+    await queueContext.heartbeat(trackProgress({
+      stage: "matching_private_media",
+      files_processed: uploaded.assets.length,
+      files_total: uploaded.candidateEntries,
+      bytes_processed: uploaded.candidateUncompressedBytes,
+      bytes_total: uploaded.candidateUncompressedBytes,
+      resumed_files: uploaded.resumedFiles,
+      newly_uploaded: uploaded.newlyUploaded,
+      percent: 99,
+    }));
     const report = matchMediaReferences(references, uploaded.assets);
+    await queueContext.heartbeat(trackProgress({
+      stage: "saving_private_media",
+      files_processed: uploaded.assets.length,
+      files_total: uploaded.candidateEntries,
+      bytes_processed: uploaded.candidateUncompressedBytes,
+      bytes_total: uploaded.candidateUncompressedBytes,
+      resumed_files: uploaded.resumedFiles,
+      newly_uploaded: uploaded.newlyUploaded,
+      percent: 99,
+    }));
     const saved = await saveContentMediaMatches({
       mediaJobId: mediaJob.id, parentJob, assets: uploaded.assets, matches: report.matches,
     });
-    persistenceCommitted = true;
     for (const duplicateObjectKey of saved.duplicateObjects) {
       await deleteR2Object(duplicateObjectKey).catch((error) => console.warn("R2 duplicate cleanup failed:", error.message));
     }
-    await queueContext.heartbeat({ stage: "image_import_complete", matched: report.matches.length, linked: saved.links });
+    await queueContext.heartbeat(trackProgress({
+      stage: "image_import_complete",
+      files_processed: uploaded.assets.length,
+      files_total: uploaded.candidateEntries,
+      bytes_processed: uploaded.candidateUncompressedBytes,
+      bytes_total: uploaded.candidateUncompressedBytes,
+      resumed_files: uploaded.resumedFiles,
+      newly_uploaded: uploaded.newlyUploaded,
+      matched: report.matches.length,
+      linked: saved.links,
+      percent: 100,
+      completed: true,
+    }));
     await finishContentMediaImportJob(mediaJob.id, report.ambiguous.length ? "draft_imported_with_warnings" : "draft_imported", {
       zip_entries: uploaded.entries,
       uncompressed_bytes: uploaded.uncompressedBytes,
       images_uploaded: uploaded.assets.filter((asset) => asset.mediaKind === "image").length,
       audio_uploaded: uploaded.assets.filter((asset) => asset.mediaKind === "audio").length,
+      resumed_files: uploaded.resumedFiles,
+      newly_uploaded: uploaded.newlyUploaded,
       question_media_references: references.length,
       matched: report.matches.length,
       linked: saved.links,
@@ -34213,8 +34345,12 @@ async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload, queue
     return { report, saved };
   } catch (error) {
     console.error("Content Registry media import failed:", mediaJob.id, error);
-    if (!persistenceCommitted) await Promise.allSettled(uploadedObjects.map((objectKey) => deleteR2Object(objectKey)));
-    await finishContentMediaImportJob(mediaJob.id, "draft_import_retrying", { failed: true }, [{ error: error.message || "Media import failed" }]).catch(() => {});
+    const stagedAssets = await listContentMediaImportAssets(mediaJob.id).catch(() => []);
+    await finishContentMediaImportJob(mediaJob.id, "draft_import_retrying", {
+      failed: true,
+      resumable: true,
+      staged_assets: stagedAssets.length,
+    }, [{ error: error.message || "Media import failed" }]).catch(() => {});
     throw error;
   }
 }
@@ -34256,7 +34392,15 @@ app.get("/admin/crm/ai-training/content-media-imports/:mediaJobId", async (req, 
     await requireCrmAdmin(req);
     const job = await getContentMediaImportJob(req.params.mediaJobId);
     if (!job) return res.status(404).json({ success: false, error: "Media import job not found" });
-    return res.json({ success: true, job, background_jobs: ngContentBackgroundJobs(job.id), storage: contentMediaStatus() });
+    const snapshot = ngContentBackgroundSnapshot(job.id);
+    return res.json({
+      success: true,
+      job,
+      background_jobs: snapshot.backgroundJobs,
+      monitoring: snapshot.monitoring,
+      resume_upload_id: snapshot.resumeUploadId,
+      storage: contentMediaStatus(),
+    });
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -34264,68 +34408,160 @@ app.get("/admin/crm/ai-training/content-media-imports/:mediaJobId", async (req, 
 
 async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queueContext }) {
   const workDir = path.join(DATA_DIR, "content-imports", `${videoJob.id}-videos`);
+  const trackProgress = ngContentProgressTracker("extracting_private_videos");
   try {
     await cleanupContentImportFiles(workDir);
-    await queueContext.heartbeat({ stage: "extracting_private_videos" });
     const references = await getContentMediaReferences(parentJob.id, "video");
-    const extracted = await extractReferencedVideos({ zipSource: upload.source || upload.file, references });
+    await finishContentVideoImportJob(videoJob.id, "uploading", {
+      resumable: true,
+      video_references: references.length,
+    }, []);
+    await queueContext.heartbeat(trackProgress({
+      stage: "extracting_private_videos",
+      files_processed: 0,
+      files_total: 0,
+      bytes_processed: 0,
+      bytes_total: 0,
+      percent: 0,
+    }));
+    const extracted = await extractReferencedVideos({
+      zipSource: upload.source || upload.file,
+      references,
+      onProgress: (progress) => queueContext.heartbeat(trackProgress(progress)),
+    });
     const report = matchVideoReferences(references, extracted.videos);
-    let linked = 0;
-    let newlyUploaded = 0;
-    let reusedAssets = 0;
-    let reusedMappings = 0;
-    const failures = [];
-    let processed = 0;
-    for (const match of report.matches) {
+    const checkpoint = queueContext.job.checkpoint || {};
+    const resumeProcessed = Math.max(0, Math.min(
+      report.matches.length,
+      Number(checkpoint.videos_processed || 0),
+    ));
+    let linked = Math.max(0, Number(checkpoint.linked || 0));
+    let newlyUploaded = Math.max(0, Number(checkpoint.newly_uploaded || 0));
+    let reusedAssets = Math.max(0, Number(checkpoint.reused_assets || 0));
+    let reusedMappings = Math.max(0, Number(checkpoint.reused_mappings || 0));
+    const failures = Array.isArray(checkpoint.failure_samples)
+      ? checkpoint.failure_samples.slice(0, 500)
+      : [];
+    let processed = resumeProcessed;
+    let bytesProcessed = Math.max(0, Number(checkpoint.bytes_processed || 0))
+      || report.matches.slice(0, resumeProcessed).reduce((total, match) => total + Number(match.video?.sizeBytes || 0), 0);
+    const bytesTotal = report.matches.reduce((total, match) => total + Number(match.video?.sizeBytes || 0), 0);
+    await queueContext.heartbeat(trackProgress({
+      stage: "uploading_private_videos",
+      files_processed: processed,
+      files_total: report.matches.length,
+      bytes_processed: bytesProcessed,
+      bytes_total: bytesTotal,
+      resumed_files: resumeProcessed,
+      newly_uploaded: newlyUploaded,
+      reused: reusedAssets + reusedMappings,
+      failures: failures.length,
+      percent: report.matches.length ? Math.min(99, Math.round((processed / report.matches.length) * 100)) : 99,
+    }));
+    for (let index = resumeProcessed; index < report.matches.length; index += 1) {
+      const match = report.matches[index];
       try {
         const reusable = await findReusableContentVideo({
           questionId: match.questionId, mediaRef: match.mediaRef, sha256: match.video.sha256,
         });
         if (reusable.mapping) {
           reusedMappings += 1;
-          continue;
-        }
-
-        let uploaded;
-        let reusableAssetId = null;
-        if (reusable.asset) {
-          reusableAssetId = reusable.asset.id;
-          uploaded = {
-            providerUri: reusable.asset.provider_uri,
-            providerId: reusable.asset.provider_id,
-            embedUrl: reusable.asset.embed_url,
-          };
-          reusedAssets += 1;
         } else {
-          uploaded = await uploadVideoToVimeo({
-            stream: await openReferencedVideoStream(match.video), sizeBytes: match.video.sizeBytes,
-            name: `${match.studentQid} · ${path.basename(match.video.originalName)}`,
-            description: `AylaMed private explanation video for ${match.studentQid}. Import ${parentJob.id}.`,
+          let uploaded;
+          let reusableAssetId = null;
+          if (reusable.asset) {
+            reusableAssetId = reusable.asset.id;
+            uploaded = {
+              providerUri: reusable.asset.provider_uri,
+              providerId: reusable.asset.provider_id,
+              embedUrl: reusable.asset.embed_url,
+            };
+            reusedAssets += 1;
+          } else {
+            let lastLoaded = 0;
+            uploaded = await uploadVideoToVimeo({
+              stream: await openReferencedVideoStream(match.video),
+              sizeBytes: match.video.sizeBytes,
+              name: `${match.studentQid} · ${path.basename(match.video.originalName)}`,
+              description: `AylaMed private explanation video for ${match.studentQid}. Import ${parentJob.id}.`,
+              onProgress: ({ loaded, total }) => {
+                const moving = Number(loaded || 0) > lastLoaded;
+                lastLoaded = Math.max(lastLoaded, Number(loaded || 0));
+                return queueContext.heartbeat(trackProgress({
+                  stage: "uploading_private_videos",
+                  files_processed: processed,
+                  files_total: report.matches.length,
+                  bytes_processed: bytesProcessed + lastLoaded,
+                  bytes_total: bytesTotal,
+                  current_file: match.video.originalName,
+                  current_file_bytes: lastLoaded,
+                  current_file_total_bytes: Number(total || match.video.sizeBytes || 0),
+                  resumed_files: resumeProcessed,
+                  newly_uploaded: newlyUploaded,
+                  reused: reusedAssets + reusedMappings,
+                  failures: failures.length,
+                  percent: report.matches.length
+                    ? Math.min(99, Math.round(((processed + (lastLoaded / Math.max(1, Number(match.video.sizeBytes || 1)))) / report.matches.length) * 100))
+                    : 99,
+                  movement: moving,
+                }));
+              },
+            });
+            newlyUploaded += 1;
+          }
+          linked += await saveContentVideoMatch({
+            videoJobId: videoJob.id, parentJob, match, uploaded, reusableAssetId,
           });
-          newlyUploaded += 1;
         }
-        linked += await saveContentVideoMatch({
-          videoJobId: videoJob.id, parentJob, match, uploaded, reusableAssetId,
-        });
       } catch (error) {
         failures.push({ student_qid: match.studentQid, media_ref: match.mediaRef, error: error.response?.data?.error || error.message });
       }
       processed += 1;
+      bytesProcessed += Number(match.video?.sizeBytes || 0);
       await queueContext.updateCheckpoint({
-        version: 1,
+        version: 2,
         videos_processed: processed,
         videos_total: report.matches.length,
-      }, {
+        bytes_processed: bytesProcessed,
+        bytes_total: bytesTotal,
+        newly_uploaded: newlyUploaded,
+        reused_assets: reusedAssets,
+        reused_mappings: reusedMappings,
+        linked,
+        failure_samples: failures.slice(0, 500),
+      }, trackProgress({
         stage: "uploading_private_videos",
-        videos_processed: processed,
-        videos_total: report.matches.length,
+        files_processed: processed,
+        files_total: report.matches.length,
+        bytes_processed: bytesProcessed,
+        bytes_total: bytesTotal,
+        current_file: match.video.originalName,
+        current_file_bytes: Number(match.video.sizeBytes || 0),
+        current_file_total_bytes: Number(match.video.sizeBytes || 0),
+        resumed_files: resumeProcessed,
         newly_uploaded: newlyUploaded,
         reused: reusedAssets + reusedMappings,
         failures: failures.length,
-      });
+        percent: report.matches.length ? Math.min(99, Math.round((processed / report.matches.length) * 100)) : 99,
+        movement: true,
+      }));
     }
     const warning = report.ambiguous.length || report.missing.length || failures.length;
-    await queueContext.heartbeat({ stage: "video_import_complete", matched: report.matches.length, linked });
+    await queueContext.heartbeat(trackProgress({
+      stage: "video_import_complete",
+      files_processed: report.matches.length,
+      files_total: report.matches.length,
+      bytes_processed: bytesTotal,
+      bytes_total: bytesTotal,
+      resumed_files: resumeProcessed,
+      newly_uploaded: newlyUploaded,
+      reused: reusedAssets + reusedMappings,
+      failures: failures.length,
+      matched: report.matches.length,
+      linked,
+      percent: 100,
+      completed: true,
+    }));
     await finishContentVideoImportJob(videoJob.id, warning ? "draft_imported_with_warnings" : "draft_imported", {
       zip_entries: extracted.entries,
       video_references: references.length,
@@ -34341,6 +34577,7 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
       ambiguous: report.ambiguous.length,
       unreferenced: report.unreferenced.length,
       failed: failures.length,
+      resumed_files: resumeProcessed,
       missing_samples: report.missing.slice(0, 100).map((item) => ({ student_qid: item.studentQid, media_ref: item.mediaRef })),
       ambiguous_samples: report.ambiguous.slice(0, 100),
     }, failures);
@@ -34422,7 +34659,15 @@ app.get("/admin/crm/ai-training/content-video-imports/:videoJobId", async (req, 
     await requireCrmAdmin(req);
     const job = await getContentVideoImportJob(req.params.videoJobId);
     if (!job) return res.status(404).json({ success: false, error: "Video import job not found" });
-    return res.json({ success: true, job, background_jobs: ngContentBackgroundJobs(job.id), storage: contentVideoStatus() });
+    const snapshot = ngContentBackgroundSnapshot(job.id);
+    return res.json({
+      success: true,
+      job,
+      background_jobs: snapshot.backgroundJobs,
+      monitoring: snapshot.monitoring,
+      resume_upload_id: snapshot.resumeUploadId,
+      storage: contentVideoStatus(),
+    });
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }

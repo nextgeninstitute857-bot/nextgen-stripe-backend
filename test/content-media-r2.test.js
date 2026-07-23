@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { contentMediaStatus, matchMediaReferences, safeMediaEntryName } from "../lib/content-media-r2.js";
+import { contentR2Timeouts, signContentR2UploadPart } from "../lib/content-r2-storage.js";
 
 test("R2 remains disabled until every private credential is configured", () => {
   assert.equal(contentMediaStatus({}).configured, false);
@@ -10,6 +11,56 @@ test("R2 remains disabled until every private credential is configured", () => {
     CLOUDFLARE_R2_SECRET_ACCESS_KEY: "secret",
   }).configured, false);
   assert.equal(contentMediaStatus({}).public_access, false);
+});
+
+test("R2 requests have bounded connection, idle, and total timeouts", () => {
+  assert.deepEqual(contentR2Timeouts({}), {
+    connection_ms: 10_000,
+    socket_idle_ms: 120_000,
+    request_ms: 300_000,
+  });
+  assert.deepEqual(contentR2Timeouts({
+    NEXTGEN_CONTENT_R2_CONNECTION_TIMEOUT_MS: "2500",
+    NEXTGEN_CONTENT_R2_SOCKET_TIMEOUT_MS: "45000",
+    NEXTGEN_CONTENT_R2_REQUEST_TIMEOUT_MS: "90000",
+  }), {
+    connection_ms: 2500,
+    socket_idle_ms: 45000,
+    request_ms: 90000,
+  });
+});
+
+test("R2 multipart presigning omits unsupported optional checksum parameters", async () => {
+  const names = [
+    "CLOUDFLARE_R2_ACCOUNT_ID",
+    "CLOUDFLARE_R2_ACCESS_KEY_ID",
+    "CLOUDFLARE_R2_SECRET_ACCESS_KEY",
+    "CLOUDFLARE_R2_BUCKET",
+  ];
+  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  Object.assign(process.env, {
+    CLOUDFLARE_R2_ACCOUNT_ID: "test-account",
+    CLOUDFLARE_R2_ACCESS_KEY_ID: "test-access-key",
+    CLOUDFLARE_R2_SECRET_ACCESS_KEY: "test-secret-key",
+    CLOUDFLARE_R2_BUCKET: "test-bucket",
+  });
+
+  try {
+    const signed = new URL(await signContentR2UploadPart({
+      objectKey: "content-staging/test/archive.zip",
+      uploadId: "test-upload-id",
+      partNumber: 1,
+    }));
+    assert.equal(signed.searchParams.has("x-amz-checksum-crc32"), false);
+    assert.equal(signed.searchParams.has("x-amz-sdk-checksum-algorithm"), false);
+    assert.equal(signed.searchParams.get("partNumber"), "1");
+    assert.equal(signed.searchParams.get("uploadId"), "test-upload-id");
+  } finally {
+    for (const name of names) {
+      if (previous[name] === undefined) delete process.env[name];
+      else process.env[name] = previous[name];
+    }
+  }
 });
 
 test("media ZIP entry validation accepts image/audio and rejects unsafe or unsupported files", () => {
