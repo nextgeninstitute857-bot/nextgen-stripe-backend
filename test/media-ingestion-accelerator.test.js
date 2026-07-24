@@ -305,3 +305,61 @@ test("media pipeline aborts and drains every worker before surfacing a transfer 
   }), /simulated R2 failure|aborted/);
   assert.equal(counters.active, 0);
 });
+
+test("resume validation heartbeats while durable files are skipped without re-upload", async () => {
+  const entries = Array.from({ length: 600 }, (_, index) => ({
+    fileName: `images/resumed-${index + 1}.png`,
+    uncompressedSize: 10,
+    generalPurposeBitFlag: 0,
+  }));
+  const existingAssets = entries.map((entry, index) => ({
+    entryIndex: index + 1,
+    originalName: entry.fileName,
+    objectKey: `existing/${index + 1}`,
+    sha256: crypto.createHash("sha256").update(entry.fileName).digest("hex"),
+    sizeBytes: entry.uncompressedSize,
+    contentType: "image/png",
+    mediaKind: "image",
+  }));
+  const progressRows = [];
+  let uploadsCreated = 0;
+  const result = await uploadMediaZipToR2({
+    zipSource: { type: "test" },
+    references: entries.map((entry, index) => ({
+      questionId: `question-${index + 1}`,
+      mediaRef: entry.fileName,
+    })),
+    examTrack: "usmle-step-1",
+    sourceNamespace: "provider",
+    importJobId: "import-job",
+    mediaImportJobId: "media-job",
+    inventory: {
+      candidateEntries: entries.length,
+      candidateUncompressedBytes: entries.length * 10,
+    },
+    existingAssets,
+    onProgress: async (progress) => progressRows.push(progress),
+    adapters: {
+      openZip: async () => new FakeZip(entries),
+      openEntry: async () => {
+        throw new Error("durable entries must not be reopened");
+      },
+      r2Client: {},
+      r2Bucket: "test-bucket",
+      createUpload: () => {
+        uploadsCreated += 1;
+        throw new Error("durable entries must not be re-uploaded");
+      },
+    },
+  });
+
+  const validation = progressRows.find((progress) => (
+    progress.stage === "validating_media_resume"
+    && progress.recovery_entries_scanned >= 500
+    && progress.resumed_files_validated >= 500
+  ));
+  assert.ok(validation, "expected a resume-validation progress heartbeat");
+  assert.equal(uploadsCreated, 0);
+  assert.equal(result.resumedFiles, 600);
+  assert.equal(result.newlyUploaded, 0);
+});
