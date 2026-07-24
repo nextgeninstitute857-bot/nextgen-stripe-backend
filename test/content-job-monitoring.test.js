@@ -45,6 +45,39 @@ test("media monitoring reports durable processed/total progress", () => {
   assert.equal(monitoring.worker_unresponsive, false);
 });
 
+test("accelerated media monitoring exposes workers, checkpoint lag, speed, and ETA", () => {
+  const monitoring = contentJobMonitoring([job({
+    progress: {
+      stage: "uploading_private_images",
+      files_processed: 9_200,
+      files_total: 35_037,
+      bytes_processed: 1_710_000_000,
+      durable_bytes_processed: 1_700_000_000,
+      bytes_total: 6_700_000_000,
+      resumed_files: 9_157,
+      newly_uploaded: 43,
+      workers_configured: 4,
+      workers_active: 4,
+      checkpoint_batch_size: 25,
+      checkpoint_pending: 7,
+      files_per_minute: 81.25,
+      eta_seconds: 19_080,
+      inventory_cache: "legacy_v2_totals",
+      accelerated: true,
+    },
+  })], { nowMs: NOW });
+
+  assert.equal(monitoring.workers_configured, 4);
+  assert.equal(monitoring.workers_active, 4);
+  assert.equal(monitoring.checkpoint_batch_size, 25);
+  assert.equal(monitoring.checkpoint_pending, 7);
+  assert.equal(monitoring.files_per_minute, 81.25);
+  assert.equal(monitoring.eta_seconds, 19_080);
+  assert.equal(monitoring.durable_bytes_processed, 1_700_000_000);
+  assert.equal(monitoring.inventory_cache, "legacy_v2_totals");
+  assert.equal(monitoring.accelerated, true);
+});
+
 test("fresh worker heartbeats do not hide a transfer that stopped moving", () => {
   const monitoring = contentJobMonitoring([job({
     heartbeat_at: "2026-07-23T05:59:50.000Z",

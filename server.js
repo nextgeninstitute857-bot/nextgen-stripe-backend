@@ -50,7 +50,7 @@ import {
   saveContentMediaMatches,
   saveContentVideoMatch,
   setContentImportJobStatus,
-  stageContentMediaImportAsset,
+  stageContentMediaImportAssets,
   submitExternalQbankDeliverySession,
   updateContentCollectionControls,
   upsertContentQuestionTaxonomyOverride,
@@ -240,6 +240,11 @@ import {
   uploadMediaZipToR2,
 } from "./lib/content-media-r2.js";
 import {
+  buildMediaCheckpoint,
+  mediaInventoryCacheKey,
+  resolveMediaInventoryCheckpoint,
+} from "./lib/media-ingestion-accelerator.js";
+import {
   contentVideoStatus,
   extractReferencedVideos,
   matchVideoReferences,
@@ -267,7 +272,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CONTENT_INGESTION_BUILD = "v226-resumable-media-progress";
+const CONTENT_INGESTION_BUILD = "v232-media-ingestion-accelerator";
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
 const ROADMAP_EXTENSION_BUILD = "v221-system-aware-roadmap-extension";
 const RECORDING_ASSIGNMENT_BUILD = "v222-safe-recording-detach";
@@ -34276,36 +34281,70 @@ async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload, queue
   try {
     const references = await getContentMediaReferences(parentJob.id, "r2");
     const existingAssets = await listContentMediaImportAssets(mediaJob.id);
+    const existingBytes = existingAssets.reduce(
+      (total, asset) => total + Math.max(0, Number(asset.sizeBytes || 0)),
+      0,
+    );
+    const inventoryCacheKey = mediaInventoryCacheKey({
+      zipSha256: mediaJob.zip_sha256,
+      references,
+    });
+    const previousCheckpoint = queueContext.job.checkpoint || {};
+    const cachedInventory = resolveMediaInventoryCheckpoint(previousCheckpoint, inventoryCacheKey);
+    let inventory = cachedInventory.inventory;
+    let inventorySource = cachedInventory.source;
+    let durableCheckpoint = previousCheckpoint;
     await finishContentMediaImportJob(mediaJob.id, "uploading", {
       resumable: true,
+      accelerated: true,
       staged_assets: existingAssets.length,
       question_media_references: references.length,
+      inventory_cache: inventorySource,
     }, []);
-    await queueContext.heartbeat(trackProgress({
-      stage: "indexing_media_zip",
-      files_processed: 0,
-      files_total: 0,
-      bytes_processed: 0,
-      bytes_total: 0,
-      resumed_files: existingAssets.length,
-      newly_uploaded: 0,
-      percent: 0,
-    }));
-    const inventory = await inspectMediaZip({
-      zipSource: upload.source || upload.file,
-      references,
-      onProgress: (progress) => queueContext.heartbeat(trackProgress(progress)),
-    });
-    await queueContext.heartbeat(trackProgress({
+
+    if (!inventory) {
+      await queueContext.heartbeat(trackProgress({
+        stage: "indexing_media_zip",
+        files_processed: 0,
+        files_total: 0,
+        bytes_processed: 0,
+        bytes_total: 0,
+        resumed_files: existingAssets.length,
+        newly_uploaded: 0,
+        inventory_cache: "miss",
+        percent: 0,
+      }));
+      inventory = await inspectMediaZip({
+        zipSource: upload.source || upload.file,
+        references,
+        onProgress: (progress) => queueContext.heartbeat(trackProgress(progress)),
+      });
+      inventorySource = "fresh_index";
+    }
+
+    const initialProgress = {
       stage: "uploading_private_images",
-      files_processed: 0,
+      files_processed: existingAssets.length,
       files_total: inventory.candidateEntries,
-      bytes_processed: 0,
+      bytes_processed: existingBytes,
+      durable_bytes_processed: existingBytes,
       bytes_total: inventory.candidateUncompressedBytes,
       resumed_files: existingAssets.length,
       newly_uploaded: 0,
-      percent: 0,
-    }));
+      inventory_cache: inventorySource,
+      accelerated: true,
+      percent: inventory.candidateEntries > 0
+        ? Math.min(99, Math.round((existingAssets.length / inventory.candidateEntries) * 100))
+        : 0,
+    };
+    durableCheckpoint = buildMediaCheckpoint({
+      previous: durableCheckpoint,
+      cacheKey: inventoryCacheKey,
+      inventory,
+      progress: initialProgress,
+    });
+    await queueContext.updateCheckpoint(durableCheckpoint, trackProgress(initialProgress));
+
     const uploaded = await uploadMediaZipToR2({
       zipSource: upload.source || upload.file,
       references,
@@ -34316,20 +34355,21 @@ async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload, queue
       inventory,
       existingAssets,
       onProgress: (progress) => queueContext.heartbeat(trackProgress(progress)),
-      onAsset: async (asset, { entryIndex, progress }) => {
-        await stageContentMediaImportAsset({
+      onAssets: async (assets, { lastEntryIndex, progress }) => {
+        await stageContentMediaImportAssets({
           mediaImportJobId: mediaJob.id,
-          entryIndex,
-          asset,
+          assets,
         });
-        await queueContext.updateCheckpoint({
-          version: 2,
-          media_entry_index: entryIndex,
-          files_processed: progress.files_processed,
-          files_total: progress.files_total,
-          bytes_processed: progress.bytes_processed,
-          bytes_total: progress.bytes_total,
-        }, trackProgress(progress));
+        durableCheckpoint = buildMediaCheckpoint({
+          previous: durableCheckpoint,
+          cacheKey: inventoryCacheKey,
+          inventory,
+          progress: {
+            ...progress,
+            media_entry_index: lastEntryIndex,
+          },
+        });
+        await queueContext.updateCheckpoint(durableCheckpoint, trackProgress(progress));
       },
     });
     await queueContext.heartbeat(trackProgress({
@@ -34367,6 +34407,9 @@ async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload, queue
       bytes_total: uploaded.candidateUncompressedBytes,
       resumed_files: uploaded.resumedFiles,
       newly_uploaded: uploaded.newlyUploaded,
+      workers_configured: uploaded.workersConfigured,
+      maximum_workers_active: uploaded.maximumWorkersActive,
+      inventory_cache: inventorySource,
       matched: report.matches.length,
       linked: saved.links,
       percent: 100,
@@ -34379,6 +34422,9 @@ async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload, queue
       audio_uploaded: uploaded.assets.filter((asset) => asset.mediaKind === "audio").length,
       resumed_files: uploaded.resumedFiles,
       newly_uploaded: uploaded.newlyUploaded,
+      workers_configured: uploaded.workersConfigured,
+      maximum_workers_active: uploaded.maximumWorkersActive,
+      inventory_cache: inventorySource,
       question_media_references: references.length,
       matched: report.matches.length,
       linked: saved.links,
