@@ -94,7 +94,7 @@ test("a mistake card is not created without a verified answer-bearing prompt", (
 
 test("server wires the verified adaptive loop without replacing ingestion or completed roadmap history", () => {
   const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
-  assert.match(server, /const CONTENT_INGESTION_BUILD = "v232-media-ingestion-accelerator"/);
+  assert.match(server, /const CONTENT_INGESTION_BUILD = "v232\.1-recovery-scan-cache"/);
   assert.match(server, /const AYLA_ADAPTIVE_CORE_BUILD = "v227-verified-adaptive-loop"/);
   assert.match(server, /function aylaV227SystemsForStudent[\s\S]*?aylaAdaptiveSystemsForStudent\(student, AYLA_EXAM_REGISTRY/);
   assert.match(server, /function aylaRecordQbankAttempt[\s\S]*?aylaV227UpsertMistakeFlashcard/);
