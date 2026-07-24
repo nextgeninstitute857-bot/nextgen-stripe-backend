@@ -91,6 +91,26 @@ import {
   reconcileAylaRoadmapOutline,
 } from "./lib/aylamed-onboarding.js";
 import {
+  DEFAULT_AYLA_MARKETING_SETTINGS,
+  aylaAttributionWindowOpen,
+  aylaCampaignIsActive,
+  aylaMarketingAdminOptions,
+  aylaMarketingMetrics,
+  aylaReferralSelfCheck,
+  aylaRewardDefinitionsForMilestone,
+  aylaRewardReadyAt,
+  aylaRewardReleaseEligible,
+  buildAylaPublicReadinessSnapshot,
+  buildAylaReadinessShareCopy,
+  normalizeAylaAttributionStatus,
+  normalizeAylaCampaign,
+  normalizeAylaMarketingSettings,
+  normalizeAylaReferralCode,
+  normalizeAylaRewardStatus,
+  publicAylaMarketingSettings,
+  renderAylaReadinessCardSvg,
+} from "./lib/aylamed-marketing-referrals.js";
+import {
   AYLA_STUDENT_FEATURES,
   aylaScopedEnrollmentKey,
   aylaShellEnrollmentActive,
@@ -256,6 +276,7 @@ const STUDENT_NOTES_RESOLVER_BUILD = "v225-course-system-day-notes-resolver";
 const AYLA_ADAPTIVE_CORE_BUILD = "v227-verified-adaptive-loop";
 const AYLA_STARTING_READINESS_BUILD = "v229-starting-readiness-loop";
 const AYLA_SINGLE_ROADMAP_BUILD = "v230-single-roadmap-execution";
+const AYLA_MARKETING_BUILD = "v231-readiness-sharing-referrals";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -399,7 +420,7 @@ app.get("/stripe/webhook", (req, res) => {
     build: NEXTGEN_BACKEND_BUILD,
     stripe_secret_configured: Boolean(process.env.STRIPE_SECRET_KEY),
     stripe_webhook_secret_configured: Boolean(process.env.STRIPE_WEBHOOK_SECRET),
-    message: "Stripe webhook endpoint is online. Create a Stripe event destination to POST checkout.session.completed, checkout.session.expired, invoice.paid, invoice.payment_failed, customer.subscription.deleted, and payment_intent.payment_failed here.",
+    message: "Stripe webhook endpoint is online. Create a Stripe event destination to POST checkout.session.completed, checkout.session.expired, invoice.paid, invoice.payment_failed, customer.subscription.deleted, payment_intent.payment_failed, charge.refunded, refund.created, and refund.updated here.",
   });
 });
 
@@ -4073,6 +4094,10 @@ async function ngHandleStripeWebhookEvent(event = {}, req = null) {
     ...(ngStripeObject.parent?.subscription_details?.metadata || {}),
     ...(ngStripeObject.lines?.data?.[0]?.metadata || {}),
   };
+  if (["charge.refunded", "refund.created", "refund.updated"].includes(String(event.type || ""))) {
+    const aylaRefund = await aylaHandleStripeRefund(event, { ignoreWhenUnmatched: true });
+    if (aylaRefund.matched) return aylaRefund;
+  }
   if (String(ngStripeMetadata.app || "").trim().toLowerCase() === "aylamed") {
     return aylaHandleStripeWebhookEvent(event, req);
   }
@@ -36043,6 +36068,7 @@ app.post("/api/ayla/qbank/sessions/:sessionId/submit", async (req, res) => {
         }
         let verifiedBaseline = null;
         let baselineRecommendation = null;
+        let referralMilestone = null;
         if (finalized.session.purpose === "baseline_diagnostic") {
           if (fresh.student.serverVerifiedBaseline === true && String(fresh.student.diagnosticSessionId || "") !== String(finalized.session.id)) {
             const error = new Error("A different verified starting diagnostic is already final");
@@ -36078,6 +36104,14 @@ app.post("/api/ayla/qbank/sessions/:sessionId/submit", async (req, res) => {
             scorePercent: baseline.currentScore,
             systemsCovered: baseline.diagnosticCoverage.systemsCovered,
             mappedQuestionCount: baseline.diagnosticCoverage.mappedQuestionCount,
+          });
+          referralMilestone = aylaRecordReferralMilestone(db, {
+            referredUserId: fresh.user.id,
+            referredStudentId: fresh.student.id,
+            type: "verified_diagnostic_completed",
+            serverVerified: true,
+            source: "baseline_diagnostic_submit",
+            occurredAt: finalized.session.submittedAt || aylaNow(),
           });
         }
         aylaQbankEvent(db, finalized.session, "session_submitted", {
@@ -36156,6 +36190,11 @@ app.post("/api/ayla/qbank/sessions/:sessionId/submit", async (req, res) => {
           } : null,
           verified_baseline: verifiedBaseline,
           starting_readiness_report: startingReadinessReport,
+          referral_milestone: referralMilestone ? {
+            recorded: referralMilestone.recorded,
+            reason: referralMilestone.reason,
+            rewards_created: referralMilestone.rewards_created,
+          } : null,
           answer_keys_included: false,
         };
       }
@@ -57558,6 +57597,7 @@ const DEFAULT_AYLA_SETTINGS = {
     profanity_filter_enabled: true,
     max_messages_per_10_minutes: 15,
   },
+  marketing: DEFAULT_AYLA_MARKETING_SETTINGS,
 };
 
 const DEFAULT_AYLA_AI_USAGE_SETTINGS = {
@@ -57622,6 +57662,13 @@ const DEFAULT_AYLA_DB = {
   aylaPasswordResetTokens: {},
   aylaProfileAuditEvents: {},
   aylaActionLogs: {},
+  aylaMarketingCampaigns: {},
+  aylaReferralCodes: {},
+  aylaReferralAttributions: {},
+  aylaReferralMilestones: {},
+  aylaReferralRewards: {},
+  aylaReadinessShares: {},
+  aylaMarketingEvents: {},
   aylaPlans: {},
   aylaCoupons: {},
   aylaCouponRedemptions: {},
@@ -57655,6 +57702,9 @@ function aylaMergeSettings(value = {}) {
     adaptive: { ...DEFAULT_AYLA_SETTINGS.adaptive, ...(value?.adaptive || {}) },
     assessment_policy: { ...DEFAULT_AYLA_SETTINGS.assessment_policy, ...(value?.assessment_policy || {}) },
     community: { ...DEFAULT_AYLA_SETTINGS.community, ...(value?.community || {}) },
+    marketing: normalizeAylaMarketingSettings(value?.marketing || {}, {
+      current: DEFAULT_AYLA_SETTINGS.marketing,
+    }),
   };
   merged.demo.included_features = normalizeAylaPlanFeatures(merged.demo.included_features).features;
   return merged;
@@ -59071,6 +59121,7 @@ function aylaNormalizePlanPayload(body = {}, existing = {}, { strictControls = f
     included_features: featureControls.included_features,
     exam_tracks: examTracks,
     is_demo: Boolean(body.is_demo ?? existing.is_demo ?? aylaPlanIsDemo(body)),
+    is_featured: Boolean(body.is_featured ?? existing.is_featured ?? false),
     is_full_access: featureControls.is_full_access,
     is_active: isActive,
     is_public: body.is_public !== undefined ? Boolean(body.is_public) : existing.is_public !== false,
@@ -59871,6 +59922,105 @@ function aylaCascadeDeleteRelatedRecords(db, { studentId = null, diagnosticId = 
     }
   }
 
+  const marketingErasedAt = aylaNow();
+  const affectedAttributionIds = new Set();
+  const deletedUserMatch = (value) => userIds.has(String(value || ""));
+  const deletedStudentMatch = (value) => studentIds.has(String(value || ""));
+  for (const share of aylaValues(db, "aylaReadinessShares")) {
+    if (
+      !deletedUserMatch(share.owner_user_id)
+      && !deletedStudentMatch(share.owner_student_id)
+    ) continue;
+    share.status = "revoked";
+    share.status_reason = "owner_account_removed";
+    share.token = crypto.randomBytes(24).toString("base64url");
+    share.owner_user_id = null;
+    share.owner_student_id = null;
+    share.privacy_erased_at = marketingErasedAt;
+    share.updatedAt = marketingErasedAt;
+    aylaSetItem(db, "aylaReadinessShares", share);
+    deleted.push({ collection: "aylaReadinessShares", id: share.id, action: "revoked_anonymized" });
+  }
+  for (const referralCode of aylaValues(db, "aylaReferralCodes")) {
+    if (
+      !deletedUserMatch(referralCode.owner_user_id)
+      && !deletedStudentMatch(referralCode.owner_student_id)
+    ) continue;
+    referralCode.status = "revoked";
+    referralCode.owner_user_id = null;
+    referralCode.owner_student_id = null;
+    referralCode.privacy_erased_at = marketingErasedAt;
+    referralCode.updatedAt = marketingErasedAt;
+    aylaSetItem(db, "aylaReferralCodes", referralCode);
+    deleted.push({ collection: "aylaReferralCodes", id: referralCode.id, action: "revoked_anonymized" });
+  }
+  for (const attribution of aylaValues(db, "aylaReferralAttributions")) {
+    const affected = deletedUserMatch(attribution.referrer_user_id)
+      || deletedUserMatch(attribution.referred_user_id)
+      || deletedStudentMatch(attribution.referrer_student_id)
+      || deletedStudentMatch(attribution.referred_student_id);
+    if (!affected) continue;
+    attribution.status = "cancelled";
+    if (deletedUserMatch(attribution.referrer_user_id)) attribution.referrer_user_id = null;
+    if (deletedUserMatch(attribution.referred_user_id)) attribution.referred_user_id = null;
+    if (deletedStudentMatch(attribution.referrer_student_id)) attribution.referrer_student_id = null;
+    if (deletedStudentMatch(attribution.referred_student_id)) attribution.referred_student_id = null;
+    attribution.privacy_erased_at = marketingErasedAt;
+    attribution.updatedAt = marketingErasedAt;
+    aylaSetItem(db, "aylaReferralAttributions", attribution);
+    affectedAttributionIds.add(String(attribution.id));
+    deleted.push({ collection: "aylaReferralAttributions", id: attribution.id, action: "cancelled_anonymized" });
+  }
+  for (const reward of aylaValues(db, "aylaReferralRewards")) {
+    const affected = affectedAttributionIds.has(String(reward.attribution_id || ""))
+      || deletedUserMatch(reward.referrer_user_id)
+      || deletedUserMatch(reward.referred_user_id)
+      || deletedUserMatch(reward.beneficiary_user_id);
+    if (!affected) continue;
+    if (String(reward.status || "") !== "fulfilled") {
+      reward.status = "cancelled";
+      reward.cancelled_at = marketingErasedAt;
+      reward.cancelled_reason = "referral_account_removed";
+    }
+    if (deletedUserMatch(reward.referrer_user_id)) reward.referrer_user_id = null;
+    if (deletedUserMatch(reward.referred_user_id)) reward.referred_user_id = null;
+    if (deletedUserMatch(reward.beneficiary_user_id)) reward.beneficiary_user_id = null;
+    reward.privacy_erased_at = marketingErasedAt;
+    reward.updatedAt = marketingErasedAt;
+    aylaSetItem(db, "aylaReferralRewards", reward);
+    deleted.push({ collection: "aylaReferralRewards", id: reward.id, action: "anonymized" });
+  }
+  for (const milestone of aylaValues(db, "aylaReferralMilestones")) {
+    const affected = affectedAttributionIds.has(String(milestone.attribution_id || ""))
+      || deletedUserMatch(milestone.referrer_user_id)
+      || deletedUserMatch(milestone.referred_user_id)
+      || deletedStudentMatch(milestone.referred_student_id);
+    if (!affected) continue;
+    if (deletedUserMatch(milestone.referrer_user_id)) milestone.referrer_user_id = null;
+    if (deletedUserMatch(milestone.referred_user_id)) milestone.referred_user_id = null;
+    if (deletedStudentMatch(milestone.referred_student_id)) milestone.referred_student_id = null;
+    milestone.privacy_erased_at = marketingErasedAt;
+    milestone.updatedAt = marketingErasedAt;
+    aylaSetItem(db, "aylaReferralMilestones", milestone);
+    deleted.push({ collection: "aylaReferralMilestones", id: milestone.id, action: "anonymized" });
+  }
+  for (const event of aylaValues(db, "aylaMarketingEvents")) {
+    let changed = false;
+    for (const field of ["owner_user_id", "referrer_user_id", "referred_user_id"]) {
+      if (!deletedUserMatch(event[field])) continue;
+      event[field] = null;
+      changed = true;
+    }
+    for (const field of ["owner_student_id", "referrer_student_id", "referred_student_id"]) {
+      if (!deletedStudentMatch(event[field])) continue;
+      event[field] = null;
+      changed = true;
+    }
+    if (!changed) continue;
+    event.privacy_erased_at = marketingErasedAt;
+    aylaSetItem(db, "aylaMarketingEvents", event);
+  }
+
   if (userId) {
     // Enrollment access is account-owned and can be removed with the AylaMed
     // account. Payments and access logs are intentionally retained as audit and
@@ -59979,10 +60129,34 @@ async function aylaHandleStripeCheckoutCompleted(event = {}, req = null) {
     metadata: { ...(payment.metadata || {}), ...(metadata || {}), stripe_event_id: event.id || null },
   };
   aylaSetItem(db, "aylaPayments", completedPayment);
+  const referralMilestone = aylaRecordReferralMilestone(db, {
+    referredUserId: userId,
+    referredStudentId: enrollment.student_id,
+    type: "paid_conversion",
+    serverVerified: true,
+    payment: completedPayment,
+    source: "stripe_checkout_completed",
+    occurredAt: paidAt,
+  });
   await aylaAccessLog(db, "stripe_checkout_completed_access_granted", { userId, planId, paymentId, enrollmentId: enrollment.id });
-  await aylaLog(db, "billing", "AylaMed Stripe payment completed and access granted", { userId, planId, paymentId, enrollmentId: enrollment.id });
+  await aylaLog(db, "billing", "AylaMed Stripe payment completed and access granted", {
+    userId,
+    planId,
+    paymentId,
+    enrollmentId: enrollment.id,
+    referralMilestoneRecorded: referralMilestone.recorded,
+  });
   await writeAylaDb(db);
-  return { action: "aylamed_checkout_completed_access_granted", payment: completedPayment, enrollment };
+  return {
+    action: "aylamed_checkout_completed_access_granted",
+    payment: completedPayment,
+    enrollment,
+    referral_milestone: {
+      recorded: referralMilestone.recorded,
+      reason: referralMilestone.reason,
+      rewards_created: referralMilestone.rewards_created,
+    },
+  };
 }
 
 async function aylaHandleStripeCheckoutExpired(event = {}) {
@@ -60057,9 +60231,27 @@ async function aylaHandleStripeInvoicePaid(event = {}) {
 
   const payment = { id: invoice.id || aylaId("AYLA-INVOICE"), stripe_invoice_id: invoice.id || null, stripe_subscription_id: enrollment.stripe_subscription_id, enrollment_id: enrollment.id, user_id: userId, ayla_user_id: userId, plan_id: planId, plan_name: plan.name, exam_track_id: enrollment.exam_track_id, student_id: enrollment.student_id, amount_cents: Number(invoice.amount_paid || 0), final_amount_cents: Number(invoice.amount_paid || 0), currency: invoice.currency || plan.currency || "usd", status: "completed", payment_status: "completed", payment_method: "stripe_subscription", source: "aylamed_invoice_paid", paid_at: aylaNow(), createdAt: aylaNow(), updatedAt: aylaNow(), metadata };
   aylaSetItem(db, "aylaPayments", payment);
+  const referralMilestone = aylaRecordReferralMilestone(db, {
+    referredUserId: userId,
+    referredStudentId: enrollment.student_id,
+    type: "paid_conversion",
+    serverVerified: true,
+    payment,
+    source: "stripe_invoice_paid",
+    occurredAt: payment.paid_at,
+  });
   await aylaAccessLog(db, "stripe_monthly_renewal_access_extended", { userId, planId, paymentId: payment.id, enrollmentId: enrollment.id });
   await writeAylaDb(db);
-  return { action: "aylamed_monthly_renewal_access_extended", payment, enrollment };
+  return {
+    action: "aylamed_monthly_renewal_access_extended",
+    payment,
+    enrollment,
+    referral_milestone: {
+      recorded: referralMilestone.recorded,
+      reason: referralMilestone.reason,
+      rewards_created: referralMilestone.rewards_created,
+    },
+  };
 }
 
 async function aylaHandleStripeInvoiceFailed(event = {}) {
@@ -60091,6 +60283,168 @@ async function aylaHandleStripeSubscriptionDeleted(event = {}) {
   return { action: "aylamed_subscription_cancelled", enrollment: enrollment || null };
 }
 
+async function aylaHandleStripeRefund(event = {}, { ignoreWhenUnmatched = false } = {}) {
+  const object = event.data?.object || {};
+  const db = await readAylaDb();
+  aylaEnsureSeedData(db);
+  const paymentIntentId = String(object.payment_intent || object.payment_intent_id || "").trim();
+  const invoiceId = String(object.invoice || "").trim();
+  const chargeId = String(
+    event.type === "charge.refunded" ? object.id : object.charge || object.charge_id || "",
+  ).trim();
+  const payment = aylaValues(db, "aylaPayments").find((row) => (
+    (paymentIntentId && String(row.stripe_payment_intent || row.payment_intent || "") === paymentIntentId)
+    || (invoiceId && String(row.stripe_invoice_id || "") === invoiceId)
+    || (chargeId && String(row.stripe_charge_id || row.charge_id || "") === chargeId)
+  ));
+  if (!payment) {
+    if (ignoreWhenUnmatched) return { action: "aylamed_refund_not_matched", matched: false };
+    return { action: "aylamed_refund_ignored_missing_payment", matched: false };
+  }
+
+  const refundStatus = String(object.status || "").toLowerCase();
+  if (["failed", "canceled", "cancelled"].includes(refundStatus)) {
+    payment.refund_status = refundStatus;
+    payment.referral_reward_review_status = null;
+    payment.refund_review_cleared_at = aylaNow();
+    payment.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaPayments", payment);
+    await writeAylaDb(db);
+    return {
+      action: "aylamed_failed_refund_ignored",
+      matched: true,
+      payment_id: payment.id,
+      enrollment_access_changed: false,
+    };
+  }
+  if (["pending", "requires_action"].includes(refundStatus)) {
+    payment.refund_status = refundStatus;
+    payment.referral_reward_review_status = "refund_pending";
+    payment.refund_review_started_at = payment.refund_review_started_at || aylaNow();
+    payment.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaPayments", payment);
+    aylaMarketingRecordEvent(db, "paid_conversion_refund_pending", {
+      payment_id: payment.id,
+      refund_event_id: event.id || null,
+    });
+    await writeAylaDb(db);
+    return {
+      action: "aylamed_pending_refund_observed",
+      matched: true,
+      payment_id: payment.id,
+      enrollment_access_changed: false,
+    };
+  }
+  const refundedAmount = Math.max(
+    0,
+    Number(object.amount_refunded ?? object.amount ?? payment.refunded_amount_cents ?? 0) || 0,
+  );
+  const originalAmount = Math.max(
+    0,
+    Number(payment.final_amount_cents ?? payment.amount_cents ?? 0) || 0,
+  );
+  const fullyRefunded = object.refunded === true
+    || (originalAmount > 0 && refundedAmount >= originalAmount);
+  const now = aylaNow();
+  payment.status = fullyRefunded ? "refunded" : "partially_refunded";
+  payment.payment_status = payment.status;
+  payment.refunded_amount_cents = Math.max(
+    Number(payment.refunded_amount_cents || 0),
+    refundedAmount,
+  );
+  payment.stripe_charge_id = chargeId || payment.stripe_charge_id || null;
+  payment.refund_event_id = event.id || payment.refund_event_id || null;
+  payment.refund_status = refundStatus || (fullyRefunded ? "succeeded" : "partial");
+  payment.referral_reward_review_status = null;
+  payment.refunded_at = now;
+  payment.updatedAt = now;
+  aylaSetItem(db, "aylaPayments", payment);
+
+  let rewardsCancelled = 0;
+  let fulfilledRewardsFlagged = 0;
+  for (const reward of aylaValues(db, "aylaReferralRewards")) {
+    if (String(reward.payment_id || "") !== String(payment.id)) continue;
+    if (String(reward.status || "") === "fulfilled") {
+      reward.refund_after_fulfillment = true;
+      reward.refund_recorded_at = now;
+      reward.refunded_payment_id = payment.id;
+      reward.updatedAt = now;
+      aylaSetItem(db, "aylaReferralRewards", reward);
+      fulfilledRewardsFlagged += 1;
+      continue;
+    }
+    if (String(reward.status || "") === "cancelled") continue;
+    reward.status = "cancelled";
+    reward.cancelled_at = now;
+    reward.cancelled_reason = `payment_${payment.status}`;
+    reward.updatedAt = now;
+    aylaSetItem(db, "aylaReferralRewards", reward);
+    rewardsCancelled += 1;
+  }
+
+  const reversedMilestones = [];
+  const affectedAttributionIds = new Set();
+  for (const milestone of aylaValues(db, "aylaReferralMilestones")) {
+    if (
+      String(milestone.payment_id || "") !== String(payment.id)
+      || String(milestone.type || "") !== "paid_conversion"
+      || String(milestone.status || "") === "reversed"
+    ) continue;
+    milestone.status = "reversed";
+    milestone.reversed_at = now;
+    milestone.reversal_reason = payment.status;
+    milestone.updatedAt = now;
+    aylaSetItem(db, "aylaReferralMilestones", milestone);
+    reversedMilestones.push(milestone.id);
+    if (milestone.attribution_id) affectedAttributionIds.add(String(milestone.attribution_id));
+  }
+  for (const attributionId of affectedAttributionIds) {
+    const attribution = aylaGetItem(db, "aylaReferralAttributions", attributionId);
+    if (!attribution || ["blocked", "cancelled"].includes(String(attribution.status || ""))) continue;
+    const hasVerifiedDiagnostic = aylaValues(db, "aylaReferralMilestones").some((row) => (
+      String(row.attribution_id || "") === attributionId
+      && String(row.type || "") === "verified_diagnostic_completed"
+      && String(row.status || "") !== "reversed"
+    ));
+    attribution.status = normalizeAylaAttributionStatus(
+      hasVerifiedDiagnostic ? "diagnostic_completed" : "attributed",
+    );
+    attribution.paid_conversion_at = null;
+    attribution.payment_id = null;
+    attribution.plan_id = null;
+    attribution.refunded_payment_id = payment.id;
+    attribution.refunded_at = now;
+    attribution.updatedAt = now;
+    aylaSetItem(db, "aylaReferralAttributions", attribution);
+  }
+
+  aylaMarketingRecordEvent(db, "paid_conversion_reversed", {
+    payment_id: payment.id,
+    refund_event_id: event.id || null,
+    payment_status: payment.status,
+    rewards_cancelled: rewardsCancelled,
+    fulfilled_rewards_flagged: fulfilledRewardsFlagged,
+    milestones_reversed: reversedMilestones.length,
+  });
+  await aylaAccessLog(db, "stripe_refund_referral_rewards_cancelled", {
+    paymentId: payment.id,
+    refundEventId: event.id || null,
+    rewardsCancelled,
+    fulfilledRewardsFlagged,
+    enrollmentAccessChanged: false,
+  });
+  await writeAylaDb(db);
+  return {
+    action: "aylamed_refund_recorded",
+    matched: true,
+    payment,
+    rewards_cancelled: rewardsCancelled,
+    fulfilled_rewards_flagged: fulfilledRewardsFlagged,
+    milestones_reversed: reversedMilestones.length,
+    enrollment_access_changed: false,
+  };
+}
+
 async function aylaHandleStripeWebhookEvent(event = {}, req = null) {
   if (event.type === "checkout.session.completed") return aylaHandleStripeCheckoutCompleted(event, req);
   if (event.type === "checkout.session.expired") return aylaHandleStripeCheckoutExpired(event);
@@ -60098,6 +60452,9 @@ async function aylaHandleStripeWebhookEvent(event = {}, req = null) {
   if (event.type === "invoice.payment_failed") return aylaHandleStripeInvoiceFailed(event);
   if (event.type === "customer.subscription.deleted") return aylaHandleStripeSubscriptionDeleted(event);
   if (event.type === "payment_intent.payment_failed") return aylaHandleStripePaymentFailed(event);
+  if (["charge.refunded", "refund.created", "refund.updated"].includes(String(event.type || ""))) {
+    return aylaHandleStripeRefund(event);
+  }
 
   const db = await readAylaDb();
   aylaEnsureSeedData(db);
@@ -60110,6 +60467,15 @@ function aylaEnsureSeedData(db) {
   aylaEnsureCollection(db, "aylaUsers");
   for (const key of Object.keys(AYLA_COLLECTIONS)) aylaEnsureCollection(db, key);
   aylaEnsureCollection(db, "aylaProfileAuditEvents");
+  for (const key of [
+    "aylaMarketingCampaigns",
+    "aylaReferralCodes",
+    "aylaReferralAttributions",
+    "aylaReferralMilestones",
+    "aylaReferralRewards",
+    "aylaReadinessShares",
+    "aylaMarketingEvents",
+  ]) aylaEnsureCollection(db, key);
   db.aylaSettings = aylaMergeSettings(db.aylaSettings || {});
   db.aylaAiUsageSettings = aylaMergeAiUsageSettings(db.aylaAiUsageSettings || {});
   aylaEnsureCollection(db, "aylaPlanAiLimits");
@@ -60166,6 +60532,7 @@ function aylaEnsureSeedData(db) {
     included_features: existingMonthly?.included_features?.length ? existingMonthly.included_features : ["diagnostic", "roadmap", "personal_tutor", "assessments", "library", "qbank", "revision", "flashcards", "study_partner"],
     is_active: existingMonthly?.is_active !== false,
     is_public: existingMonthly?.is_public !== false,
+    is_featured: existingMonthly?.is_featured !== false,
     status: existingMonthly?.is_active === false ? "inactive" : "active",
   }, existingMonthly || {}));
 
@@ -60354,10 +60721,23 @@ app.post("/api/ayla/auth/register", async (req, res) => {
     };
 
     aylaSetItem(db, "aylaUsers", user);
+    const referral = aylaAttachReferralAttribution(db, {
+      rawCode: req.body.referralCode || req.body.referral_code || req.body.ref || "",
+      referredUser: user,
+      source: "password_registration",
+    });
     await aylaLog(db, "auth", "AylaMed user registered", { userId: user.id, email: user.email });
     await writeAylaDb(db);
 
-    return aylaSendOk(res, { user: aylaSanitizeUser(user), token: aylaSignAuthToken(user) }, 201);
+    return aylaSendOk(res, {
+      user: aylaSanitizeUser(user),
+      token: aylaSignAuthToken(user),
+      referral: {
+        attached: referral.attached,
+        reason: referral.reason,
+        attribution_id: referral.attribution?.id || null,
+      },
+    }, 201);
   } catch (error) {
     return aylaSendError(res, 500, error.message || "Failed to register AylaMed user");
   }
@@ -60402,9 +60782,25 @@ app.post("/api/ayla/auth/google", async (req, res) => {
       user.updatedAt = aylaNow();
     }
     aylaSetItem(db, "aylaUsers", user);
+    const referral = created
+      ? aylaAttachReferralAttribution(db, {
+          rawCode: req.body.referralCode || req.body.referral_code || req.body.ref || "",
+          referredUser: user,
+          source: "google_registration",
+        })
+      : { attached: false, reason: "existing_user" };
     await aylaLog(db, "auth", created ? "AylaMed Google user registered" : "AylaMed Google user signed in", { userId: user.id, email: user.email });
     await writeAylaDb(db);
-    return aylaSendOk(res, { user: aylaSanitizeUser(user), token: aylaSignAuthToken(user), created });
+    return aylaSendOk(res, {
+      user: aylaSanitizeUser(user),
+      token: aylaSignAuthToken(user),
+      created,
+      referral: {
+        attached: referral.attached,
+        reason: referral.reason,
+        attribution_id: referral.attribution?.id || null,
+      },
+    });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Google sign-in failed");
   }
@@ -60691,6 +61087,7 @@ app.post("/api/ayla/billing/create-checkout", async (req, res) => {
       return aylaSendError(res, 400, "This AylaMed product accepts active monthly subscription plans only");
     }
     const scope = aylaEnrollmentScopeFromPayload(db, user, req.body);
+    const referralAttribution = aylaMarketingReferralAttributionForUser(db, user.id);
 
     const code = normalizeCouponCode(req.body.couponCode || req.body.coupon_code || "");
     const coupon = code ? aylaValues(db, "aylaCoupons").find((c) => normalizeCouponCode(c.code) === code) : null;
@@ -60699,7 +61096,7 @@ app.post("/api/ayla/billing/create-checkout", async (req, res) => {
 
     if (pricing.final_amount_cents <= 0) {
       const enrollment = aylaCreateOrUpdateEnrollment(db, { userId: user.id, plan, type: aylaPlanIsDemo(plan) ? "demo" : "paid", source: coupon?.id ? "aylamed_coupon_checkout" : "aylamed_free_checkout", accessGranted: true, examTrack: scope.examTrack, studentId: scope.studentId });
-      const payment = { id: aylaId("AYLA-PAY"), enrollment_id: enrollment.id, user_id: user.id, ayla_user_id: user.id, plan_id: plan.id, plan_name: plan.name, exam_track_id: enrollment.exam_track_id, student_id: enrollment.student_id, coupon_code: coupon?.code || null, original_amount_cents: pricing.original_amount_cents, discount_cents: pricing.discount_cents, amount_cents: 0, final_amount_cents: 0, currency: plan.currency || "usd", status: "completed", payment_status: "completed", payment_method: coupon?.id ? "coupon" : "free_checkout", source: "aylamed_free_checkout", paid_at: aylaNow(), createdAt: aylaNow(), updatedAt: aylaNow() };
+      const payment = { id: aylaId("AYLA-PAY"), enrollment_id: enrollment.id, user_id: user.id, ayla_user_id: user.id, plan_id: plan.id, plan_name: plan.name, exam_track_id: enrollment.exam_track_id, student_id: enrollment.student_id, coupon_code: coupon?.code || null, referral_code: referralAttribution?.referral_code || null, referral_attribution_id: referralAttribution?.id || null, original_amount_cents: pricing.original_amount_cents, discount_cents: pricing.discount_cents, amount_cents: 0, final_amount_cents: 0, currency: plan.currency || "usd", status: "completed", payment_status: "completed", payment_method: coupon?.id ? "coupon" : "free_checkout", source: "aylamed_free_checkout", paid_at: aylaNow(), createdAt: aylaNow(), updatedAt: aylaNow() };
       aylaSetItem(db, "aylaPayments", payment);
       enrollment.payment_id = payment.id;
       aylaSetItem(db, "aylaEnrollments", enrollment);
@@ -60714,7 +61111,7 @@ app.post("/api/ayla/billing/create-checkout", async (req, res) => {
     }
 
     const pendingEnrollment = aylaCreateOrUpdateEnrollment(db, { userId: user.id, plan, type: "paid", source: "aylamed_stripe_subscription_pending", accessGranted: false, examTrack: scope.examTrack, studentId: scope.studentId });
-    const metadata = { app: "aylamed", aylaUserId: user.id, aylaPlanId: plan.id, aylaEnrollmentId: pendingEnrollment.id, aylaExamTrackId: pendingEnrollment.exam_track_id || "", aylaStudentId: pendingEnrollment.student_id || "", aylaCouponCode: coupon?.code || "", originalAmountCents: String(pricing.original_amount_cents), discountCents: String(pricing.discount_cents), finalAmountCents: String(pricing.final_amount_cents) };
+    const metadata = { app: "aylamed", aylaUserId: user.id, aylaPlanId: plan.id, aylaEnrollmentId: pendingEnrollment.id, aylaExamTrackId: pendingEnrollment.exam_track_id || "", aylaStudentId: pendingEnrollment.student_id || "", aylaCouponCode: coupon?.code || "", aylaReferralCode: referralAttribution?.referral_code || "", aylaReferralAttributionId: referralAttribution?.id || "", originalAmountCents: String(pricing.original_amount_cents), discountCents: String(pricing.discount_cents), finalAmountCents: String(pricing.final_amount_cents) };
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
       payment_method_types: ["card"],
@@ -60726,7 +61123,7 @@ app.post("/api/ayla/billing/create-checkout", async (req, res) => {
       cancel_url: req.body.cancelUrl || req.body.cancel_url || AYLA_DEFAULT_CANCEL_URL,
     });
 
-    const payment = { id: session.id, checkout_session_id: session.id, stripe_session_id: session.id, stripe_subscription_id: session.subscription || null, enrollment_id: pendingEnrollment.id, user_id: user.id, ayla_user_id: user.id, plan_id: plan.id, plan_name: plan.name, exam_track_id: pendingEnrollment.exam_track_id, student_id: pendingEnrollment.student_id, coupon_code: coupon?.code || null, original_amount_cents: pricing.original_amount_cents, discount_cents: pricing.discount_cents, amount_cents: pricing.final_amount_cents, final_amount_cents: pricing.final_amount_cents, currency: plan.currency || "usd", status: "pending", payment_status: "pending", payment_method: "stripe_subscription", source: "aylamed_stripe_checkout", createdAt: aylaNow(), updatedAt: aylaNow(), metadata };
+    const payment = { id: session.id, checkout_session_id: session.id, stripe_session_id: session.id, stripe_subscription_id: session.subscription || null, enrollment_id: pendingEnrollment.id, user_id: user.id, ayla_user_id: user.id, plan_id: plan.id, plan_name: plan.name, exam_track_id: pendingEnrollment.exam_track_id, student_id: pendingEnrollment.student_id, coupon_code: coupon?.code || null, referral_code: referralAttribution?.referral_code || null, referral_attribution_id: referralAttribution?.id || null, original_amount_cents: pricing.original_amount_cents, discount_cents: pricing.discount_cents, amount_cents: pricing.final_amount_cents, final_amount_cents: pricing.final_amount_cents, currency: plan.currency || "usd", status: "pending", payment_status: "pending", payment_method: "stripe_subscription", source: "aylamed_stripe_checkout", createdAt: aylaNow(), updatedAt: aylaNow(), metadata };
     aylaSetItem(db, "aylaPayments", payment);
     pendingEnrollment.payment_id = payment.id;
     pendingEnrollment.stripe_subscription_id = session.subscription || null;
@@ -60745,6 +61142,7 @@ app.get("/api/ayla/health", async (req, res) => {
     aylaEnsureSeedData(db);
     const counts = Object.fromEntries(Object.keys(AYLA_COLLECTIONS).map((key) => [key, aylaValues(db, key).length]));
     counts.aylaUsers = aylaValues(db, "aylaUsers").length;
+    for (const key of AYLA_MARKETING_COLLECTION_KEYS) counts[key] = aylaValues(db, key).length;
     const knowledge = await aylaKnowledgeStatus();
     return aylaSendOk(res, {
       now: aylaNow(),
@@ -60756,6 +61154,12 @@ app.get("/api/ayla/health", async (req, res) => {
         adaptive_core_build: AYLA_ADAPTIVE_CORE_BUILD,
         starting_readiness_build: AYLA_STARTING_READINESS_BUILD,
         single_roadmap_build: AYLA_SINGLE_ROADMAP_BUILD,
+        marketing_build: AYLA_MARKETING_BUILD,
+        anonymous_readiness_sharing: true,
+        whatsapp_referral_loop: true,
+        admin_governed_referral_rewards: true,
+        paid_reward_refund_hold: true,
+        paid_reward_refund_reversal: true,
         evidence_aware_starting_report: true,
         three_path_tutor_roadmap_handoff: true,
         read_only_seven_day_forecast: true,
@@ -60855,6 +61259,15 @@ app.get("/api/ayla/routes", (req, res) => {
       "GET /api/ayla/admin/plan-feature-matrix",
       "PUT /api/ayla/admin/plans/:planId/features",
       "PUT /api/ayla/admin/demo-controls",
+      "GET /api/ayla/admin/marketing",
+      "PUT /api/ayla/admin/marketing/settings",
+      "POST/PATCH /api/ayla/admin/marketing/campaigns",
+      "PATCH /api/ayla/admin/marketing/referrals/:attributionId",
+      "POST/PATCH /api/ayla/admin/marketing/rewards",
+      "GET/POST /api/ayla/students/:studentId/referral-center",
+      "POST /api/ayla/students/:studentId/readiness-shares",
+      "GET /api/ayla/readiness-shares/:token",
+      "GET /api/ayla/readiness-shares/:token/card.svg",
       "GET/POST /admin/crm/ai-training/success-stories",
       "PUT/DELETE /admin/crm/ai-training/success-stories/:storyId",
       "POST /admin/crm/ai-training/success-stories/:storyId/review",
@@ -61440,7 +61853,7 @@ app.post("/api/ayla/knowledge-search", async (req, res) => {
 
 function aylaPublicPlan(plan = {}) {
   const matrix = aylaPlanFeatureMatrixRow(plan);
-  return { id: plan.id, name: plan.name, description: plan.description, plan_type: plan.plan_type, billing_type: plan.billing_type, price_cents: Number(plan.price_cents || 0), currency: plan.currency || "usd", access_days: Number(plan.access_days || 0), included_features: matrix.included_features, feature_matrix: matrix.features, feature_matrix_version: matrix.feature_matrix_version, is_full_access: matrix.is_full_access, exam_tracks: aylaCleanArray(plan.exam_tracks).map(aylaCanonicalExamTrack).filter(Boolean), is_demo: Boolean(plan.is_demo), is_active: plan.is_active !== false, is_public: plan.is_public !== false, status: plan.status || "active" };
+  return { id: plan.id, name: plan.name, description: plan.description, plan_type: plan.plan_type, billing_type: plan.billing_type, price_cents: Number(plan.price_cents || 0), currency: plan.currency || "usd", access_days: Number(plan.access_days || 0), included_features: matrix.included_features, feature_matrix: matrix.features, feature_matrix_version: matrix.feature_matrix_version, is_full_access: matrix.is_full_access, exam_tracks: aylaCleanArray(plan.exam_tracks).map(aylaCanonicalExamTrack).filter(Boolean), is_demo: Boolean(plan.is_demo), is_featured: Boolean(plan.is_featured), is_active: plan.is_active !== false, is_public: plan.is_public !== false, status: plan.status || "active" };
 }
 
 async function aylaKnowledgeStatus() {
@@ -61454,6 +61867,671 @@ async function aylaKnowledgeStatus() {
   return { source: "CRM AI Training Center", read_only: true, eligible_items: eligible.length, eligible_documents: eligibleDocumentIds.size, total_training_items: ensureCrmArray(crmDb, "ai_training_items").length, total_documents: documents.length, eligible_success_stories: eligibleSuccessStories.length, total_success_stories: successStories.length, success_story_outcomes_exposed: false, managed_at: "/admin/crm/ai-training" };
 }
 
+const AYLA_MARKETING_COLLECTION_KEYS = Object.freeze([
+  "aylaMarketingCampaigns",
+  "aylaReferralCodes",
+  "aylaReferralAttributions",
+  "aylaReferralMilestones",
+  "aylaReferralRewards",
+  "aylaReadinessShares",
+  "aylaMarketingEvents",
+]);
+const aylaMarketingPublicEventRateLimiter = new ExternalQbankRateLimiter({ maxBuckets: 25_000 });
+
+function aylaMarketingSettings(db = {}) {
+  db.aylaSettings = aylaMergeSettings(db.aylaSettings || {});
+  return db.aylaSettings.marketing;
+}
+
+function aylaMarketingRecordEvent(db, type, payload = {}) {
+  aylaEnsureCollection(db, "aylaMarketingEvents");
+  const event = {
+    id: aylaId("AYLA-MKT-EVT"),
+    type: String(type || "marketing_event").trim().toLowerCase(),
+    ...payload,
+    createdAt: payload.createdAt || aylaNow(),
+  };
+  aylaSetItem(db, "aylaMarketingEvents", event);
+  return event;
+}
+
+function aylaMarketingTakePublicEventRate(req, token = "") {
+  const clientIp = String(req.headers["x-forwarded-for"] || req.ip || req.socket?.remoteAddress || "unknown")
+    .split(",")[0].trim().slice(0, 80) || "unknown";
+  const tokenHash = crypto.createHash("sha256").update(String(token || "")).digest("hex").slice(0, 20);
+  const result = aylaMarketingPublicEventRateLimiter.take(
+    `readiness-event:${tokenHash}:${clientIp}`,
+    { limit: 30, windowMs: 10 * 60 * 1000 },
+  );
+  aylaMarketingRateHeaders(req.res, result);
+  if (!result.allowed) {
+    throw Object.assign(new Error("Readiness event rate limit exceeded"), {
+      statusCode: 429,
+      code: "READINESS_EVENT_RATE_LIMITED",
+    });
+  }
+}
+
+function aylaMarketingRateHeaders(res, result) {
+  if (!res || !result) return;
+  res.setHeader("X-RateLimit-Remaining", String(result.remaining));
+  if (!result.allowed) res.setHeader("Retry-After", String(result.retry_after_seconds));
+}
+
+function aylaMarketingSortNewest(rows = []) {
+  return [...rows].sort((left, right) => (
+    String(right.updatedAt || right.createdAt || "").localeCompare(
+      String(left.updatedAt || left.createdAt || ""),
+    )
+    || String(left.id || "").localeCompare(String(right.id || ""))
+  ));
+}
+
+function aylaMarketingPublicBaseUrl(req, settings = {}) {
+  const configured = String(settings?.sharing?.public_site_url || "").trim().replace(/\/+$/, "");
+  if (configured) return configured;
+  const requestOrigin = String(req?.get?.("origin") || "").trim().replace(/\/+$/, "");
+  if (requestOrigin && isNextGenAllowedOrigin(requestOrigin, req)) return requestOrigin;
+  return "";
+}
+
+function aylaMarketingApiBaseUrl(req) {
+  const forwarded = String(req.headers?.["x-forwarded-proto"] || "").split(",")[0].trim();
+  const protocol = ["http", "https"].includes(forwarded) ? forwarded : req.protocol || "https";
+  const host = String(req.get?.("host") || "").trim();
+  return host ? `${protocol}://${host}` : "";
+}
+
+function aylaMarketingShareUrl(share = {}, req = null) {
+  const base = String(share.public_site_url || "").trim().replace(/\/+$/, "")
+    || aylaMarketingPublicBaseUrl(req, { sharing: { public_site_url: "" } });
+  const pathValue = `/readiness/${encodeURIComponent(String(share.token || ""))}`;
+  return base ? `${base}${pathValue}` : pathValue;
+}
+
+function aylaMarketingCardUrl(share = {}, req = null) {
+  const base = aylaMarketingApiBaseUrl(req);
+  const pathValue = `/api/ayla/readiness-shares/${encodeURIComponent(String(share.token || ""))}/card.svg`;
+  return base ? `${base}${pathValue}` : pathValue;
+}
+
+function aylaMarketingReferralUrl(code = {}, req = null, settings = {}) {
+  const base = aylaMarketingPublicBaseUrl(req, settings);
+  const params = new URLSearchParams();
+  params.set("ref", String(code.code || ""));
+  if (code.campaign_id) params.set("campaign", String(code.campaign_id));
+  params.set("register", "1");
+  const pathValue = `/?${params.toString()}`;
+  return base ? `${base}${pathValue}` : pathValue;
+}
+
+function aylaMarketingFindCode(db, rawCode = "") {
+  const code = normalizeAylaReferralCode(rawCode);
+  if (!code) return null;
+  return aylaValues(db, "aylaReferralCodes").find((row) => (
+    normalizeAylaReferralCode(row.code) === code
+  )) || null;
+}
+
+function aylaMarketingReferralAttributionForUser(db, userId = "") {
+  return aylaMarketingSortNewest(
+    aylaValues(db, "aylaReferralAttributions").filter((row) => (
+      String(row.referred_user_id || "") === String(userId || "")
+    )),
+  )[0] || null;
+}
+
+function aylaMarketingActiveCampaignForStudent(db, student = {}, channels = []) {
+  const examTrackId = aylaCanonicalExamTrack(
+    student.examTrackId || student.exam_track_id || student.exam,
+  );
+  const requiredChannels = new Set(
+    aylaCleanArray(channels).map((channel) => String(channel).toLowerCase()),
+  );
+  return aylaMarketingSortNewest(aylaValues(db, "aylaMarketingCampaigns"))
+    .filter((row) => aylaCampaignIsActive(row))
+    .filter((row) => {
+      const exams = aylaCleanArray(row.exam_track_ids).map(aylaCanonicalExamTrack).filter(Boolean);
+      return !exams.length || exams.includes(examTrackId);
+    })
+    .filter((row) => {
+      if (!requiredChannels.size) return true;
+      const campaignChannels = aylaCleanArray(row.channels)
+        .map((channel) => String(channel).toLowerCase());
+      return campaignChannels.some((channel) => requiredChannels.has(channel));
+    })[0] || null;
+}
+
+function aylaMarketingSettingsForCampaign(settingsInput = {}, campaign = null) {
+  const settings = normalizeAylaMarketingSettings(settingsInput);
+  if (!campaign) return settings;
+  const channels = new Set(
+    aylaCleanArray(campaign.channels).map((channel) => String(channel).toLowerCase()),
+  );
+  if (campaign.cta_label && channels.has("readiness_card")) {
+    settings.sharing.cta_label = String(campaign.cta_label).trim().slice(0, 180);
+  }
+  if (campaign.whatsapp_message && channels.has("whatsapp")) {
+    settings.sharing.whatsapp_message = String(campaign.whatsapp_message).trim().slice(0, 1600);
+  }
+  return settings;
+}
+
+function aylaMarketingGenerateReferralCode(db) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const code = normalizeAylaReferralCode(`AYLA${crypto.randomBytes(5).toString("hex")}`);
+    if (!aylaMarketingFindCode(db, code)) return code;
+  }
+  throw Object.assign(new Error("Could not allocate a unique AylaMed referral code"), {
+    statusCode: 503,
+    code: "REFERRAL_CODE_ALLOCATION_FAILED",
+  });
+}
+
+function aylaEnsureStudentReferralCode(db, { user = {}, student = {}, campaign = null } = {}) {
+  const settings = aylaMarketingSettings(db);
+  if (!settings.program.enabled || !settings.program.referrals_enabled) {
+    throw Object.assign(new Error("AylaMed referrals are currently disabled"), {
+      statusCode: 403,
+      code: "REFERRALS_DISABLED",
+    });
+  }
+  const existing = aylaMarketingSortNewest(
+    aylaValues(db, "aylaReferralCodes").filter((row) => (
+      String(row.owner_user_id || "") === String(user.id || "")
+      && String(row.owner_student_id || "") === String(student.id || "")
+      && String(row.status || "active") !== "revoked"
+    )),
+  )[0];
+  if (existing) {
+    const linkedCampaign = existing.campaign_id
+      ? aylaGetItem(db, "aylaMarketingCampaigns", existing.campaign_id)
+      : null;
+    const nextCampaignId = campaign?.id || null;
+    if (
+      (!existing.campaign_id && nextCampaignId)
+      || (existing.campaign_id && !aylaCampaignIsActive(linkedCampaign) && existing.campaign_id !== nextCampaignId)
+    ) {
+      existing.campaign_id = nextCampaignId;
+      existing.updatedAt = aylaNow();
+      aylaSetItem(db, "aylaReferralCodes", existing);
+    }
+    return { code: existing, created: false };
+  }
+  const record = {
+    id: aylaId("AYLA-REF-CODE"),
+    code: aylaMarketingGenerateReferralCode(db),
+    owner_user_id: user.id,
+    owner_student_id: student.id,
+    exam_track_id: aylaCanonicalExamTrack(
+      student.examTrackId || student.exam_track_id || student.exam,
+    ),
+    campaign_id: campaign?.id || null,
+    status: "active",
+    used_count: 0,
+    createdAt: aylaNow(),
+    updatedAt: aylaNow(),
+  };
+  aylaSetItem(db, "aylaReferralCodes", record);
+  aylaMarketingRecordEvent(db, "referral_code_activated", {
+    referral_code_id: record.id,
+    owner_user_id: record.owner_user_id,
+    owner_student_id: record.owner_student_id,
+    campaign_id: record.campaign_id,
+  });
+  return { code: record, created: true };
+}
+
+function aylaAttachReferralAttribution(db, {
+  rawCode = "",
+  referredUser = {},
+  source = "registration",
+} = {}) {
+  const settings = aylaMarketingSettings(db);
+  const code = normalizeAylaReferralCode(rawCode);
+  if (!code) return { attached: false, reason: "no_referral_code" };
+  if (!settings.program.enabled || !settings.program.referrals_enabled) {
+    return { attached: false, reason: "referrals_disabled" };
+  }
+  const record = aylaMarketingFindCode(db, code);
+  if (!record || String(record.status || "active") !== "active") {
+    return { attached: false, reason: "invalid_referral_code" };
+  }
+  const campaign = record.campaign_id
+    ? aylaGetItem(db, "aylaMarketingCampaigns", record.campaign_id)
+    : null;
+  if (record.campaign_id && !aylaCampaignIsActive(campaign)) {
+    return { attached: false, reason: "campaign_not_active" };
+  }
+  const referrer = aylaGetItem(db, "aylaUsers", record.owner_user_id);
+  if (
+    settings.attribution.block_self_referrals
+    && aylaReferralSelfCheck({
+      referrerUserId: referrer?.id,
+      referredUserId: referredUser?.id,
+      referrerEmail: referrer?.email,
+      referredEmail: referredUser?.email,
+    })
+  ) {
+    aylaMarketingRecordEvent(db, "self_referral_blocked", {
+      referral_code_id: record.id,
+      referrer_user_id: referrer?.id || null,
+      referred_user_id: referredUser?.id || null,
+    });
+    return { attached: false, reason: "self_referral_blocked" };
+  }
+  const existing = aylaMarketingReferralAttributionForUser(db, referredUser.id);
+  if (existing) {
+    return {
+      attached: normalizeAylaReferralCode(existing.referral_code) === code,
+      reason: settings.attribution.first_touch_only ? "first_touch_preserved" : "already_attributed",
+      attribution: existing,
+    };
+  }
+
+  const now = aylaNow();
+  const attribution = {
+    id: aylaId("AYLA-REF-ATTR"),
+    referral_code_id: record.id,
+    referral_code: record.code,
+    campaign_id: record.campaign_id || null,
+    referrer_user_id: record.owner_user_id,
+    referrer_student_id: record.owner_student_id,
+    referred_user_id: referredUser.id,
+    referred_student_id: referredUser.studentId || null,
+    campaign_eligible_plan_ids: aylaCleanArray(campaign?.eligible_plan_ids),
+    status: "attributed",
+    source: String(source || "registration").slice(0, 120),
+    attributed_at: now,
+    signup_at: now,
+    createdAt: now,
+    updatedAt: now,
+  };
+  record.used_count = Number(record.used_count || 0) + 1;
+  record.updatedAt = now;
+  aylaSetItem(db, "aylaReferralCodes", record);
+  aylaSetItem(db, "aylaReferralAttributions", attribution);
+  referredUser.referral_attribution_id = attribution.id;
+  referredUser.source_referral_code = record.code;
+  referredUser.updatedAt = now;
+  aylaSetItem(db, "aylaUsers", referredUser);
+  aylaMarketingRecordEvent(db, "referred_signup", {
+    attribution_id: attribution.id,
+    referral_code_id: record.id,
+    campaign_id: record.campaign_id || null,
+    referrer_user_id: record.owner_user_id,
+    referred_user_id: referredUser.id,
+  });
+  return { attached: true, reason: "attributed", attribution };
+}
+
+function aylaMarketingPlanEligible(settings = {}, planId = "", campaignEligiblePlanIds = []) {
+  const eligible = aylaCleanArray(settings.attribution?.eligible_plan_ids);
+  if (eligible.length && !eligible.includes(String(planId || ""))) return false;
+  const campaignEligible = aylaCleanArray(campaignEligiblePlanIds);
+  return !campaignEligible.length || campaignEligible.includes(String(planId || ""));
+}
+
+function aylaMarketingPlanAvailable(plan = {}) {
+  return plan.is_active !== false
+    && plan.is_public !== false
+    && !["archived", "inactive", "disabled"].includes(String(plan.status || "").toLowerCase());
+}
+
+function aylaMarketingMonthlyRewardedReferralCount(db, referrerUserId = "", now = new Date()) {
+  const date = new Date(now);
+  const month = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+  return new Set(
+    aylaValues(db, "aylaReferralRewards")
+      .filter((row) => (
+        String(row.referrer_user_id || "") === String(referrerUserId || "")
+        && String(row.createdAt || "").slice(0, 7) === month
+        && String(row.status || "") !== "cancelled"
+      ))
+      .map((row) => String(row.milestone_id || row.id || ""))
+      .filter(Boolean),
+  ).size;
+}
+
+function aylaRecordReferralMilestone(db, {
+  referredUserId = "",
+  referredStudentId = "",
+  type = "",
+  serverVerified = false,
+  payment = null,
+  source = "",
+  occurredAt = null,
+} = {}) {
+  const settings = aylaMarketingSettings(db);
+  if (!settings.program.enabled || !settings.program.referrals_enabled) {
+    return { recorded: false, reason: "referrals_disabled", rewards_created: 0 };
+  }
+  const attribution = aylaMarketingReferralAttributionForUser(db, referredUserId);
+  if (!attribution) return { recorded: false, reason: "not_attributed", rewards_created: 0 };
+  if (["blocked", "cancelled"].includes(String(attribution.status || ""))) {
+    return { recorded: false, reason: "attribution_blocked", rewards_created: 0 };
+  }
+  if (!aylaAttributionWindowOpen(attribution, settings, occurredAt || new Date())) {
+    return { recorded: false, reason: "attribution_window_expired", rewards_created: 0 };
+  }
+
+  const milestoneType = String(type || "").toLowerCase();
+  if (!["verified_diagnostic_completed", "paid_conversion"].includes(milestoneType)) {
+    return { recorded: false, reason: "unsupported_milestone", rewards_created: 0 };
+  }
+  if (
+    milestoneType === "verified_diagnostic_completed"
+    && settings.attribution.require_verified_diagnostic
+    && serverVerified !== true
+  ) {
+    return { recorded: false, reason: "diagnostic_not_server_verified", rewards_created: 0 };
+  }
+  if (milestoneType === "paid_conversion") {
+    const amount = Math.max(0, Number(payment?.final_amount_cents ?? payment?.amount_cents ?? 0) || 0);
+    if (!payment || !["completed", "paid"].includes(String(payment.status || payment.payment_status || "").toLowerCase())) {
+      return { recorded: false, reason: "payment_not_completed", rewards_created: 0 };
+    }
+    const campaign = attribution.campaign_id
+      ? aylaGetItem(db, "aylaMarketingCampaigns", attribution.campaign_id)
+      : null;
+    const campaignEligiblePlanIds = Array.isArray(attribution.campaign_eligible_plan_ids)
+      ? attribution.campaign_eligible_plan_ids
+      : aylaCleanArray(campaign?.eligible_plan_ids);
+    if (!aylaMarketingPlanEligible(settings, payment.plan_id, campaignEligiblePlanIds)) {
+      return { recorded: false, reason: "plan_not_eligible", rewards_created: 0 };
+    }
+    if (amount < Number(settings.rewards.paid.minimum_amount_cents || 0)) {
+      return { recorded: false, reason: "payment_below_minimum", rewards_created: 0 };
+    }
+  }
+
+  const duplicate = aylaValues(db, "aylaReferralMilestones").find((row) => (
+    String(row.attribution_id || "") === String(attribution.id)
+    && String(row.type || "") === milestoneType
+  ));
+  if (duplicate) {
+    return { recorded: false, reason: "milestone_already_recorded", milestone: duplicate, rewards_created: 0 };
+  }
+
+  const timestamp = occurredAt || aylaNow();
+  const milestone = {
+    id: aylaId("AYLA-REF-MILESTONE"),
+    attribution_id: attribution.id,
+    type: milestoneType,
+    campaign_id: attribution.campaign_id || null,
+    referral_code_id: attribution.referral_code_id,
+    referrer_user_id: attribution.referrer_user_id,
+    referred_user_id: attribution.referred_user_id,
+    referred_student_id: referredStudentId || attribution.referred_student_id || null,
+    payment_id: payment?.id || null,
+    plan_id: payment?.plan_id || null,
+    amount_cents: Math.max(0, Number(payment?.final_amount_cents ?? payment?.amount_cents ?? 0) || 0),
+    source: String(source || milestoneType).slice(0, 120),
+    server_verified: milestoneType === "verified_diagnostic_completed" ? serverVerified === true : true,
+    occurred_at: timestamp,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  aylaSetItem(db, "aylaReferralMilestones", milestone);
+  attribution.referred_student_id = referredStudentId || attribution.referred_student_id || null;
+  attribution.status = normalizeAylaAttributionStatus(
+    milestoneType === "paid_conversion"
+      ? "paid"
+      : String(attribution.status) === "paid" ? "paid" : "diagnostic_completed",
+  );
+  attribution.diagnostic_completed_at = milestoneType === "verified_diagnostic_completed"
+    ? timestamp
+    : attribution.diagnostic_completed_at || null;
+  attribution.paid_conversion_at = milestoneType === "paid_conversion"
+    ? timestamp
+    : attribution.paid_conversion_at || null;
+  attribution.payment_id = payment?.id || attribution.payment_id || null;
+  attribution.plan_id = payment?.plan_id || attribution.plan_id || null;
+  attribution.updatedAt = timestamp;
+  aylaSetItem(db, "aylaReferralAttributions", attribution);
+
+  const rewardDefinitions = aylaRewardDefinitionsForMilestone(settings, milestoneType);
+  const existingMonthlyRewardedReferrals = aylaMarketingMonthlyRewardedReferralCount(
+    db,
+    attribution.referrer_user_id,
+    new Date(timestamp),
+  );
+  const cap = Number(settings.rewards.max_rewards_per_referrer_per_month || 25);
+  const rewards = [];
+  for (const definition of rewardDefinitions) {
+    const duplicateReward = aylaValues(db, "aylaReferralRewards").find((row) => (
+      String(row.milestone_id || "") === String(milestone.id)
+      && String(row.beneficiary_role || "") === String(definition.beneficiary_role)
+    ));
+    if (duplicateReward) continue;
+    const beneficiaryUserId = definition.beneficiary_role === "referrer"
+      ? attribution.referrer_user_id
+      : attribution.referred_user_id;
+    const reward = {
+      id: aylaId("AYLA-REF-REWARD"),
+      attribution_id: attribution.id,
+      milestone_id: milestone.id,
+      milestone_type: milestoneType,
+      campaign_id: attribution.campaign_id || null,
+      payment_id: payment?.id || null,
+      plan_id: payment?.plan_id || null,
+      referrer_user_id: attribution.referrer_user_id,
+      referred_user_id: attribution.referred_user_id,
+      beneficiary_user_id: beneficiaryUserId,
+      beneficiary_role: definition.beneficiary_role,
+      label: definition.label,
+      value: definition.value,
+      unit: definition.unit,
+      fulfillment_mode: "manual",
+      status: existingMonthlyRewardedReferrals >= cap ? "manual_review" : "pending_hold",
+      ready_at: aylaRewardReadyAt(timestamp, definition.hold_days),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    aylaSetItem(db, "aylaReferralRewards", reward);
+    rewards.push(reward);
+  }
+  aylaMarketingRecordEvent(db, milestoneType, {
+    attribution_id: attribution.id,
+    milestone_id: milestone.id,
+    campaign_id: attribution.campaign_id || null,
+    payment_id: payment?.id || null,
+    rewards_created: rewards.length,
+  });
+  return { recorded: true, reason: "milestone_recorded", milestone, rewards, rewards_created: rewards.length };
+}
+
+function aylaBuildShareReadinessReport(db, student = {}) {
+  const recommendation = aylaRecommendation(student);
+  const examTrackId = aylaCanonicalExamTrack(
+    student.examTrackId || student.exam_track_id || student.exam,
+  );
+  const weakAreaLogs = aylaValues(db, "aylaWeakAreaLogs")
+    .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student))
+    .filter((row) => String(row.status || "Open").toLowerCase() !== "resolved");
+  return buildAylaStartingReadinessReport({
+    student,
+    recommendation,
+    roadmapTasks: aylaV229ActiveRoadmapOutline(db, student),
+    weakAreaLogs,
+    examDefinition: examTrackId ? AYLA_EXAM_REGISTRY[examTrackId] : {},
+  });
+}
+
+function aylaReadinessShareAvailable(share = {}, now = new Date()) {
+  if (!share || String(share.status || "active") !== "active") return false;
+  if (!share.expires_at) return true;
+  const expiry = new Date(share.expires_at).getTime();
+  return Number.isFinite(expiry) && expiry > new Date(now).getTime();
+}
+
+function aylaMarketingSharingAvailable(db = {}) {
+  const settings = aylaMarketingSettings(db);
+  return settings.program.enabled === true && settings.program.sharing_enabled === true;
+}
+
+function aylaReadinessShareByToken(db, token = "") {
+  const clean = String(token || "").trim();
+  if (!clean) return null;
+  const candidate = Buffer.from(clean);
+  return aylaValues(db, "aylaReadinessShares").find((row) => {
+    const stored = Buffer.from(String(row.token || ""));
+    return stored.length === candidate.length
+      && stored.length > 0
+      && crypto.timingSafeEqual(stored, candidate);
+  }) || null;
+}
+
+function aylaReadinessShareOwnerResponse(db, share = {}, req = null) {
+  const events = aylaValues(db, "aylaMarketingEvents").filter((row) => (
+    String(row.share_id || "") === String(share.id || "")
+  ));
+  const shareUrl = aylaMarketingShareUrl(share, req);
+  const settings = normalizeAylaMarketingSettings(share.settings_snapshot || aylaMarketingSettings(db));
+  const currentSettings = aylaMarketingSettings(db);
+  settings.program.whatsapp_enabled = Boolean(
+    currentSettings.program.enabled
+    && currentSettings.program.sharing_enabled
+    && currentSettings.program.whatsapp_enabled,
+  );
+  const copy = buildAylaReadinessShareCopy(share.public_snapshot, settings, shareUrl);
+  return {
+    id: share.id,
+    status: share.status || "active",
+    created_at: share.createdAt || null,
+    expires_at: share.expires_at || null,
+    share_url: shareUrl,
+    card_url: aylaMarketingCardUrl(share, req),
+    referral_code: share.referral_code || null,
+    campaign_id: share.campaign_id || null,
+    snapshot: share.public_snapshot,
+    copy,
+    metrics: {
+      views: events.filter((row) => row.type === "share_view").length,
+      whatsapp_shares: events.filter((row) => row.type === "whatsapp_share").length,
+      copies: events.filter((row) => row.type === "copy_share_link").length,
+    },
+  };
+}
+
+function aylaReadinessSharePublicResponse(db, share = {}, req = null) {
+  const owner = aylaReadinessShareOwnerResponse(db, share, req);
+  const currentSettings = aylaMarketingSettings(db);
+  const referralRecord = (share.referral_code_id
+    ? aylaGetItem(db, "aylaReferralCodes", share.referral_code_id)
+    : null) || aylaMarketingFindCode(db, share.referral_code);
+  const referralCampaign = referralRecord?.campaign_id
+    ? aylaGetItem(db, "aylaMarketingCampaigns", referralRecord.campaign_id)
+    : null;
+  const referralsEnabled = Boolean(
+    currentSettings.program.enabled && currentSettings.program.referrals_enabled,
+  );
+  const referralUsable = Boolean(
+    referralsEnabled
+    && referralRecord
+    && String(referralRecord.status || "active") === "active"
+    && (!referralRecord.campaign_id || aylaCampaignIsActive(referralCampaign))
+  );
+  const base = String(share.public_site_url || "").trim().replace(/\/+$/, "")
+    || aylaMarketingPublicBaseUrl(req, currentSettings);
+  const params = new URLSearchParams();
+  if (referralUsable) params.set("ref", referralRecord.code);
+  const referralCampaignId = referralRecord?.campaign_id || null;
+  if (referralUsable && referralCampaignId) {
+    params.set("campaign", referralCampaignId);
+  }
+  params.set("register", "1");
+  const ctaUrl = base ? `${base}/?${params.toString()}` : `/?${params.toString()}`;
+  return {
+    status: owner.status,
+    created_at: owner.created_at,
+    expires_at: owner.expires_at,
+    snapshot: owner.snapshot,
+    copy: owner.copy,
+    card_url: owner.card_url,
+    cta_url: ctaUrl,
+    referral_code: referralUsable ? referralRecord.code : null,
+    campaign_id: owner.campaign_id,
+    privacy: owner.snapshot?.privacy || { anonymous: true },
+  };
+}
+
+function aylaMarketingAdminOverview(db, req = null) {
+  const settings = aylaMarketingSettings(db);
+  const campaigns = aylaMarketingSortNewest(aylaValues(db, "aylaMarketingCampaigns"));
+  const shares = aylaMarketingSortNewest(aylaValues(db, "aylaReadinessShares"));
+  const events = aylaMarketingSortNewest(aylaValues(db, "aylaMarketingEvents"));
+  const attributions = aylaMarketingSortNewest(aylaValues(db, "aylaReferralAttributions"));
+  const milestones = aylaMarketingSortNewest(aylaValues(db, "aylaReferralMilestones"));
+  const rewards = aylaMarketingSortNewest(aylaValues(db, "aylaReferralRewards"));
+  const payments = aylaValues(db, "aylaPayments");
+  const plans = aylaValues(db, "aylaPlans")
+    .map((plan) => ({
+      ...aylaPublicPlan(plan),
+      marketing_eligible: aylaMarketingPlanAvailable(plan),
+    }))
+    .sort((left, right) => String(left.name || "").localeCompare(String(right.name || "")));
+  const now = Date.now();
+  return {
+    settings,
+    metrics: aylaMarketingMetrics({ campaigns, shares, events, attributions, milestones, rewards, payments }),
+    plan_options: plans,
+    exam_options: Object.values(AYLA_EXAM_REGISTRY).map((row) => ({ id: row.id, label: row.label })),
+    options: aylaMarketingAdminOptions(),
+    campaigns: campaigns.slice(0, 250).map((campaign) => ({
+      ...campaign,
+      admin_actions: ["draft", "active", "paused", "archived"]
+        .filter((status) => status !== String(campaign.status || "draft")),
+    })),
+    shares: shares.slice(0, 250).map((share) => ({
+      ...aylaReadinessShareOwnerResponse(db, share, req),
+      admin_actions: String(share.status || "active") === "active"
+        ? ["revoke"]
+        : share.expires_at && new Date(share.expires_at).getTime() <= now
+          ? []
+          : ["reactivate"],
+    })),
+    referral_codes: aylaMarketingSortNewest(aylaValues(db, "aylaReferralCodes")).slice(0, 250)
+      .map((code) => ({
+        ...code,
+        admin_actions: String(code.status || "active") === "active"
+          ? ["revoke"]
+          : ["reactivate"],
+      })),
+    attributions: attributions.slice(0, 500).map((attribution) => ({
+      ...attribution,
+      admin_actions: ["blocked", "cancelled"].includes(String(attribution.status || ""))
+        ? ["restore"]
+        : ["block", "cancel"],
+    })),
+    milestones: milestones.slice(0, 500),
+    rewards: rewards.slice(0, 500).map((reward) => {
+      const advanceBlocked = Boolean(aylaMarketingRewardAdvanceBlockCode(db, reward));
+      return {
+        ...reward,
+        admin_actions: String(reward.status || "") === "ready_for_fulfillment"
+          ? [...(advanceBlocked ? [] : ["fulfill"]), "cancel"]
+          : ["pending_hold", "manual_review"].includes(String(reward.status || ""))
+            ? [
+                ...(new Date(reward.ready_at || 0).getTime() <= now && !advanceBlocked ? ["approve"] : []),
+                "cancel",
+              ]
+            : [],
+      };
+    }),
+    controls: {
+      data_store: "aylamed-db.json",
+      writes_to_lms: false,
+      writes_to_crm: false,
+      rewards_auto_fulfilled: false,
+      paid_rewards_require_hold_release: true,
+      frontend_values_are_authoritative: false,
+      canonical_plan_controls_route: "/admin/billing",
+      canonical_demo_controls_route: "/admin/billing",
+    },
+  };
+}
+
 app.get("/api/ayla/public-config", async (req, res) => {
   try {
     const db = await readAylaDb();
@@ -61465,7 +62543,23 @@ app.get("/api/ayla/public-config", async (req, res) => {
       .sort((left, right) => Number(aylaPlanIsDemo(right)) - Number(aylaPlanIsDemo(left)) || String(left.name || "").localeCompare(String(right.name || "")))
       .map(aylaPublicPlan);
     const knowledge = await aylaKnowledgeStatus();
-    return aylaSendOk(res, { settings: { ...settings, demo: { ...settings.demo, duration_days: days, homepage_bar_text_rendered: aylaTemplate(settings.demo.homepage_bar_text, days), button_text_rendered: aylaTemplate(settings.demo.button_text, days), plan_name_rendered: aylaTemplate(settings.demo.plan_name, days) } }, plans, featureCatalog: publicAylaPlanFeatureCatalog(), knowledge, google_client_id: process.env.GOOGLE_CLIENT_ID || "" });
+    return aylaSendOk(res, {
+      settings: {
+        ...settings,
+        marketing: publicAylaMarketingSettings(settings.marketing),
+        demo: {
+          ...settings.demo,
+          duration_days: days,
+          homepage_bar_text_rendered: aylaTemplate(settings.demo.homepage_bar_text, days),
+          button_text_rendered: aylaTemplate(settings.demo.button_text, days),
+          plan_name_rendered: aylaTemplate(settings.demo.plan_name, days),
+        },
+      },
+      plans,
+      featureCatalog: publicAylaPlanFeatureCatalog(),
+      knowledge,
+      google_client_id: process.env.GOOGLE_CLIENT_ID || "",
+    });
   } catch (error) { return aylaSendError(res, 500, error.message || "Failed to load AylaMed public configuration"); }
 });
 
@@ -61479,11 +62573,12 @@ app.put("/api/ayla/admin/settings", async (req, res) => {
     await aylaRequireAdmin(req);
     const db = await readAylaDb(); aylaEnsureSeedData(db);
     const incoming = req.body.settings || req.body || {};
+    const protectedMarketingSettings = db.aylaSettings.marketing;
     if (incoming.demo?.included_features !== undefined) {
       incoming.demo.included_features = normalizeAylaPlanFeatures(incoming.demo.included_features, { rejectUnknown: true }).features;
     }
     const previousDemoFeatures = normalizeAylaPlanFeatures(db.aylaSettings.demo?.included_features).features;
-    db.aylaSettings = aylaMergeSettings({ ...db.aylaSettings, ...incoming, product: { ...db.aylaSettings.product, ...(incoming.product || {}) }, demo: { ...db.aylaSettings.demo, ...(incoming.demo || {}) }, homepage: { ...db.aylaSettings.homepage, ...(incoming.homepage || {}) }, resources: { ...db.aylaSettings.resources, ...(incoming.resources || {}), assignment_mix: { ...(db.aylaSettings.resources?.assignment_mix || {}), ...(incoming.resources?.assignment_mix || {}) } }, adaptive: { ...db.aylaSettings.adaptive, ...(incoming.adaptive || {}) }, community: { ...db.aylaSettings.community, ...(incoming.community || {}) } });
+    db.aylaSettings = aylaMergeSettings({ ...db.aylaSettings, ...incoming, marketing: protectedMarketingSettings, product: { ...db.aylaSettings.product, ...(incoming.product || {}) }, demo: { ...db.aylaSettings.demo, ...(incoming.demo || {}) }, homepage: { ...db.aylaSettings.homepage, ...(incoming.homepage || {}) }, resources: { ...db.aylaSettings.resources, ...(incoming.resources || {}), assignment_mix: { ...(db.aylaSettings.resources?.assignment_mix || {}), ...(incoming.resources?.assignment_mix || {}) } }, adaptive: { ...db.aylaSettings.adaptive, ...(incoming.adaptive || {}) }, community: { ...db.aylaSettings.community, ...(incoming.community || {}) } });
     db.aylaSettings.product.monthly_only = true;
     db.aylaSettings.demo.duration_days = Math.max(1, Math.min(60, Number(db.aylaSettings.demo.duration_days || 7)));
     aylaEnsureSeedData(db);
@@ -61682,6 +62777,840 @@ app.put("/api/ayla/admin/demo-controls", async (req, res) => {
     });
   }
 });
+
+// -----------------------------------------------------------------------------
+// AYLAMED V231 READINESS SHARING + STUDENT REFERRALS
+// All writes remain inside /var/data/aylamed-db.json.
+// -----------------------------------------------------------------------------
+app.get("/api/ayla/admin/marketing", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
+    aylaEnsureSeedData(db);
+    return aylaSendOk(res, {
+      marketing_build: AYLA_MARKETING_BUILD,
+      marketing: aylaMarketingAdminOverview(db, req),
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load AylaMed marketing controls", error.code ? { code: error.code } : null);
+  }
+});
+
+app.put("/api/ayla/admin/marketing/settings", async (req, res) => {
+  try {
+    const admin = await aylaRequireAdmin(req);
+    const result = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const current = aylaMarketingSettings(db);
+      const expectedRevision = req.body.expected_revision ?? req.body.expectedRevision;
+      if (expectedRevision !== undefined && Number(expectedRevision) !== Number(current.revision || 1)) {
+        throw Object.assign(new Error("Marketing settings changed; reload before saving"), {
+          statusCode: 409,
+          code: "STALE_MARKETING_SETTINGS",
+          currentRevision: current.revision,
+        });
+      }
+      const validPlanIds = aylaValues(db, "aylaPlans")
+        .filter(aylaMarketingPlanAvailable)
+        .map((plan) => String(plan.id));
+      const next = normalizeAylaMarketingSettings(req.body.settings || req.body || {}, {
+        current,
+        validPlanIds,
+      });
+      next.revision = Math.max(1, Number(current.revision || 1)) + 1;
+      next.updated_at = aylaNow();
+      next.updated_by = aylaV215AdminAuditActor(admin);
+      db.aylaSettings.marketing = next;
+      await aylaLog(db, "marketing_settings", "AylaMed marketing and referral settings updated", {
+        revision: next.revision,
+        programEnabled: next.program.enabled,
+        sharingEnabled: next.program.sharing_enabled,
+        whatsappEnabled: next.program.whatsapp_enabled,
+        referralsEnabled: next.program.referrals_enabled,
+        eligiblePlanIds: next.attribution.eligible_plan_ids,
+        diagnosticRewardsEnabled: next.rewards.diagnostic.enabled,
+        paidRewardsEnabled: next.rewards.paid.enabled,
+        actor: aylaV215AdminAuditActor(admin),
+      });
+      return next;
+    });
+    const db = await readAylaDb();
+    return aylaSendOk(res, {
+      settings: result,
+      marketing: aylaMarketingAdminOverview(db, req),
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update AylaMed marketing settings", {
+      ...(error.code ? { code: error.code } : {}),
+      ...(error.currentRevision ? { current_revision: error.currentRevision } : {}),
+    });
+  }
+});
+
+app.post("/api/ayla/admin/marketing/campaigns", async (req, res) => {
+  try {
+    const admin = await aylaRequireAdmin(req);
+    const campaign = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const settings = aylaMarketingSettings(db);
+      const normalized = normalizeAylaCampaign({
+        ...req.body,
+        cta_label: req.body.cta_label || settings.sharing.cta_label,
+        whatsapp_message: req.body.whatsapp_message || settings.sharing.whatsapp_message,
+      });
+      if (!normalized.name) throw Object.assign(new Error("Campaign name is required"), { statusCode: 400, code: "CAMPAIGN_NAME_REQUIRED" });
+      const planIds = new Set(
+        aylaValues(db, "aylaPlans").filter(aylaMarketingPlanAvailable).map((plan) => String(plan.id)),
+      );
+      const unknownPlans = normalized.eligible_plan_ids.filter((id) => !planIds.has(String(id)));
+      if (unknownPlans.length) throw Object.assign(new Error(`Unknown AylaMed plan(s): ${unknownPlans.join(", ")}`), { statusCode: 400, code: "UNKNOWN_MARKETING_PLAN" });
+      const unknownExams = normalized.exam_track_ids.filter((id) => !AYLA_EXAM_REGISTRY[aylaCanonicalExamTrack(id)]);
+      if (unknownExams.length) throw Object.assign(new Error(`Unsupported exam track(s): ${unknownExams.join(", ")}`), { statusCode: 400, code: "UNKNOWN_MARKETING_EXAM" });
+      const now = aylaNow();
+      const record = {
+        ...normalized,
+        id: aylaId("AYLA-CAMPAIGN"),
+        revision: 1,
+        created_by: aylaV215AdminAuditActor(admin),
+        createdAt: now,
+        updatedAt: now,
+      };
+      aylaSetItem(db, "aylaMarketingCampaigns", record);
+      aylaMarketingRecordEvent(db, "campaign_created", {
+        campaign_id: record.id,
+        status: record.status,
+      });
+      return record;
+    });
+    return aylaSendOk(res, { campaign }, 201);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to create AylaMed campaign", error.code ? { code: error.code } : null);
+  }
+});
+
+app.patch("/api/ayla/admin/marketing/campaigns/:campaignId", async (req, res) => {
+  try {
+    const admin = await aylaRequireAdmin(req);
+    const campaign = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const existing = aylaGetItem(db, "aylaMarketingCampaigns", req.params.campaignId);
+      if (!existing) throw Object.assign(new Error("AylaMed marketing campaign not found"), { statusCode: 404 });
+      const expectedRevision = req.body.expected_revision ?? req.body.expectedRevision;
+      if (expectedRevision !== undefined && Number(expectedRevision) !== Number(existing.revision || 1)) {
+        throw Object.assign(new Error("Campaign changed; reload before saving"), {
+          statusCode: 409,
+          code: "STALE_MARKETING_CAMPAIGN",
+          currentRevision: existing.revision || 1,
+        });
+      }
+      const normalized = normalizeAylaCampaign(req.body, existing);
+      if (!normalized.name) throw Object.assign(new Error("Campaign name is required"), { statusCode: 400, code: "CAMPAIGN_NAME_REQUIRED" });
+      const planIds = new Set(
+        aylaValues(db, "aylaPlans").filter(aylaMarketingPlanAvailable).map((plan) => String(plan.id)),
+      );
+      const planEligibilityChanged = req.body.eligible_plan_ids !== undefined
+        || req.body.eligiblePlanIds !== undefined;
+      const unknownPlans = planEligibilityChanged
+        ? normalized.eligible_plan_ids.filter((id) => !planIds.has(String(id)))
+        : [];
+      if (unknownPlans.length) throw Object.assign(new Error(`Unknown AylaMed plan(s): ${unknownPlans.join(", ")}`), { statusCode: 400, code: "UNKNOWN_MARKETING_PLAN" });
+      const unknownExams = normalized.exam_track_ids.filter((id) => !AYLA_EXAM_REGISTRY[aylaCanonicalExamTrack(id)]);
+      if (unknownExams.length) throw Object.assign(new Error(`Unsupported exam track(s): ${unknownExams.join(", ")}`), { statusCode: 400, code: "UNKNOWN_MARKETING_EXAM" });
+      normalized.revision = Math.max(1, Number(existing.revision || 1)) + 1;
+      normalized.updated_by = aylaV215AdminAuditActor(admin);
+      normalized.updatedAt = aylaNow();
+      aylaSetItem(db, "aylaMarketingCampaigns", normalized);
+      aylaMarketingRecordEvent(db, "campaign_updated", {
+        campaign_id: normalized.id,
+        status: normalized.status,
+      });
+      return normalized;
+    });
+    return aylaSendOk(res, { campaign });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update AylaMed campaign", {
+      ...(error.code ? { code: error.code } : {}),
+      ...(error.currentRevision ? { current_revision: error.currentRevision } : {}),
+    });
+  }
+});
+
+app.patch("/api/ayla/admin/marketing/shares/:shareId", async (req, res) => {
+  try {
+    const admin = await aylaRequireAdmin(req);
+    const share = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const existing = aylaGetItem(db, "aylaReadinessShares", req.params.shareId);
+      if (!existing) throw Object.assign(new Error("Readiness share not found"), { statusCode: 404 });
+      const action = String(req.body.action || "").toLowerCase();
+      if (!["revoke", "reactivate"].includes(action)) {
+        throw Object.assign(new Error("Use revoke or reactivate"), { statusCode: 400, code: "INVALID_SHARE_ACTION" });
+      }
+      if (action === "reactivate" && existing.expires_at && new Date(existing.expires_at).getTime() <= Date.now()) {
+        throw Object.assign(new Error("Expired readiness shares cannot be reactivated"), { statusCode: 409, code: "SHARE_EXPIRED" });
+      }
+      existing.status = action === "revoke" ? "revoked" : "active";
+      existing.updatedAt = aylaNow();
+      existing.updated_by = aylaV215AdminAuditActor(admin);
+      existing.status_reason = String(req.body.reason || "").trim().slice(0, 500) || null;
+      aylaSetItem(db, "aylaReadinessShares", existing);
+      aylaMarketingRecordEvent(db, action === "revoke" ? "share_revoked" : "share_reactivated", {
+        share_id: existing.id,
+        campaign_id: existing.campaign_id || null,
+      });
+      return existing;
+    });
+    const db = await readAylaDb();
+    return aylaSendOk(res, { share: aylaReadinessShareOwnerResponse(db, share, req) });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update readiness share", error.code ? { code: error.code } : null);
+  }
+});
+
+app.patch("/api/ayla/admin/marketing/referral-codes/:codeId", async (req, res) => {
+  try {
+    const admin = await aylaRequireAdmin(req);
+    const code = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const existing = aylaGetItem(db, "aylaReferralCodes", req.params.codeId);
+      if (!existing) throw Object.assign(new Error("Referral code not found"), { statusCode: 404 });
+      const action = String(req.body.action || "").toLowerCase();
+      if (!["revoke", "reactivate"].includes(action)) {
+        throw Object.assign(new Error("Use revoke or reactivate"), {
+          statusCode: 400,
+          code: "INVALID_REFERRAL_CODE_ACTION",
+        });
+      }
+      if (action === "reactivate") {
+        const owner = aylaGetItem(db, "aylaUsers", existing.owner_user_id);
+        const student = aylaGetItem(db, "aylaStudents", existing.owner_student_id);
+        if (
+          !owner
+          || !student
+          || ["disabled", "deleted"].includes(String(owner.status || "").toLowerCase())
+          || (!aylaV189StudentOwned(student, owner) && owner.role !== "admin")
+        ) {
+          throw Object.assign(new Error("The referral-code owner is no longer eligible"), {
+            statusCode: 409,
+            code: "REFERRAL_CODE_OWNER_UNAVAILABLE",
+          });
+        }
+        const activeConflict = aylaValues(db, "aylaReferralCodes").find((row) => (
+          String(row.id) !== String(existing.id)
+          && String(row.owner_user_id || "") === String(existing.owner_user_id || "")
+          && String(row.owner_student_id || "") === String(existing.owner_student_id || "")
+          && String(row.status || "active") !== "revoked"
+        ));
+        if (activeConflict) {
+          throw Object.assign(new Error("This student already has an active referral code"), {
+            statusCode: 409,
+            code: "ACTIVE_REFERRAL_CODE_EXISTS",
+          });
+        }
+      }
+      existing.status = action === "revoke" ? "revoked" : "active";
+      existing.status_reason = String(req.body.reason || "").trim().slice(0, 500) || null;
+      existing.updated_by = aylaV215AdminAuditActor(admin);
+      existing.updatedAt = aylaNow();
+      aylaSetItem(db, "aylaReferralCodes", existing);
+      aylaMarketingRecordEvent(db, `referral_code_${action}`, {
+        referral_code_id: existing.id,
+        campaign_id: existing.campaign_id || null,
+      });
+      return existing;
+    });
+    return aylaSendOk(res, { referral_code: code });
+  } catch (error) {
+    return aylaSendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Failed to update referral code",
+      error.code ? { code: error.code } : null,
+    );
+  }
+});
+
+app.patch("/api/ayla/admin/marketing/referrals/:attributionId", async (req, res) => {
+  try {
+    const admin = await aylaRequireAdmin(req);
+    const result = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const attribution = aylaGetItem(db, "aylaReferralAttributions", req.params.attributionId);
+      if (!attribution) throw Object.assign(new Error("Referral attribution not found"), { statusCode: 404 });
+      const action = String(req.body.action || "").toLowerCase();
+      if (!["block", "cancel", "restore"].includes(action)) {
+        throw Object.assign(new Error("Use block, cancel, or restore"), { statusCode: 400, code: "INVALID_REFERRAL_ACTION" });
+      }
+      if (action === "restore") {
+        if (!["blocked", "cancelled"].includes(String(attribution.status || "").toLowerCase())) {
+          throw Object.assign(new Error("Only a blocked or cancelled referral can be restored"), {
+            statusCode: 409,
+            code: "REFERRAL_NOT_RESTORABLE",
+          });
+        }
+        const milestones = aylaValues(db, "aylaReferralMilestones").filter((row) => (
+          String(row.attribution_id || "") === String(attribution.id)
+          && String(row.status || "").toLowerCase() !== "reversed"
+        ));
+        attribution.status = normalizeAylaAttributionStatus(
+          milestones.some((row) => row.type === "paid_conversion")
+            ? "paid"
+            : milestones.some((row) => row.type === "verified_diagnostic_completed")
+              ? "diagnostic_completed"
+              : "attributed",
+        );
+      } else {
+        attribution.status = normalizeAylaAttributionStatus(action === "block" ? "blocked" : "cancelled");
+      }
+      attribution.review_note = String(req.body.note || req.body.reason || "").trim().slice(0, 1000) || null;
+      attribution.reviewed_by = aylaV215AdminAuditActor(admin);
+      attribution.updatedAt = aylaNow();
+      aylaSetItem(db, "aylaReferralAttributions", attribution);
+      let rewardsCancelled = 0;
+      if (action !== "restore") {
+        for (const reward of aylaValues(db, "aylaReferralRewards")) {
+          if (
+            String(reward.attribution_id || "") !== String(attribution.id)
+            || ["fulfilled", "cancelled"].includes(String(reward.status || ""))
+          ) continue;
+          reward.status = "cancelled";
+          reward.cancelled_at = aylaNow();
+          reward.cancelled_reason = `referral_${attribution.status}`;
+          reward.updatedAt = aylaNow();
+          aylaSetItem(db, "aylaReferralRewards", reward);
+          rewardsCancelled += 1;
+        }
+      }
+      aylaMarketingRecordEvent(db, `referral_${action}`, {
+        attribution_id: attribution.id,
+        rewards_cancelled: rewardsCancelled,
+      });
+      return { attribution, rewardsCancelled };
+    });
+    return aylaSendOk(res, {
+      attribution: result.attribution,
+      rewards_cancelled: result.rewardsCancelled,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to review referral", error.code ? { code: error.code } : null);
+  }
+});
+
+app.post("/api/ayla/admin/marketing/rewards/release-eligible", async (req, res) => {
+  try {
+    const admin = await aylaRequireAdmin(req);
+    const result = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const blockedAttributionIds = aylaValues(db, "aylaReferralAttributions")
+        .filter((row) => ["blocked", "cancelled"].includes(String(row.status || "")))
+        .map((row) => row.id);
+      const invalidPaymentIds = aylaValues(db, "aylaPayments")
+        .filter((row) => ["refunded", "partially_refunded", "refund_pending", "failed", "expired", "cancelled"].includes(String(row.status || row.payment_status || "").toLowerCase()))
+        .map((row) => row.id);
+      const released = [];
+      for (const reward of aylaValues(db, "aylaReferralRewards")) {
+        if (aylaMarketingRewardAdvanceBlockCode(db, reward)) continue;
+        if (!aylaRewardReleaseEligible(reward, { blockedAttributionIds, invalidPaymentIds })) continue;
+        reward.status = "ready_for_fulfillment";
+        reward.released_at = aylaNow();
+        reward.released_by = aylaV215AdminAuditActor(admin);
+        reward.updatedAt = aylaNow();
+        aylaSetItem(db, "aylaReferralRewards", reward);
+        released.push(reward);
+      }
+      aylaMarketingRecordEvent(db, "eligible_rewards_released", {
+        count: released.length,
+      });
+      return released;
+    });
+    return aylaSendOk(res, {
+      released_count: result.length,
+      rewards: result,
+      auto_fulfilled: false,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to release eligible rewards");
+  }
+});
+
+const AYLA_MARKETING_VALID_REWARD_PAYMENT_STATUSES = new Set([
+  "completed",
+  "paid",
+  "succeeded",
+]);
+
+function aylaMarketingRewardAdvanceBlockCode(db, reward = {}) {
+  const attribution = aylaGetItem(db, "aylaReferralAttributions", reward.attribution_id);
+  if (
+    !attribution
+    || ["blocked", "cancelled"].includes(String(attribution.status || "").toLowerCase())
+  ) return "REWARD_ATTRIBUTION_INVALID";
+  if (!reward.payment_id) return null;
+  const payment = aylaGetItem(db, "aylaPayments", reward.payment_id);
+  if (
+    !payment
+    || String(payment.referral_reward_review_status || "").toLowerCase() === "refund_pending"
+    || !AYLA_MARKETING_VALID_REWARD_PAYMENT_STATUSES.has(
+      String(payment.status || payment.payment_status || "").toLowerCase(),
+    )
+  ) return "REWARD_PAYMENT_INVALID";
+  return null;
+}
+
+function aylaMarketingAssertRewardCanAdvance(db, reward = {}) {
+  const blockCode = aylaMarketingRewardAdvanceBlockCode(db, reward);
+  if (blockCode === "REWARD_ATTRIBUTION_INVALID") {
+    throw Object.assign(new Error("This referral is blocked or no longer available"), {
+      statusCode: 409,
+      code: blockCode,
+    });
+  }
+  if (blockCode === "REWARD_PAYMENT_INVALID") {
+    throw Object.assign(new Error("This reward is tied to an invalid or refunded payment"), {
+      statusCode: 409,
+      code: blockCode,
+    });
+  }
+}
+
+app.patch("/api/ayla/admin/marketing/rewards/:rewardId", async (req, res) => {
+  try {
+    const admin = await aylaRequireAdmin(req);
+    const reward = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const existing = aylaGetItem(db, "aylaReferralRewards", req.params.rewardId);
+      if (!existing) throw Object.assign(new Error("Referral reward not found"), { statusCode: 404 });
+      const action = String(req.body.action || "").toLowerCase();
+      if (!["approve", "fulfill", "cancel"].includes(action)) {
+        throw Object.assign(new Error("Use approve, fulfill, or cancel"), { statusCode: 400, code: "INVALID_REWARD_ACTION" });
+      }
+      if (action === "approve") {
+        aylaMarketingAssertRewardCanAdvance(db, existing);
+        if (!["pending_hold", "manual_review"].includes(String(existing.status || ""))) {
+          throw Object.assign(new Error("Only pending or manual-review rewards can be approved"), { statusCode: 409 });
+        }
+        if (new Date(existing.ready_at || 0).getTime() > Date.now()) {
+          throw Object.assign(new Error("The configured reward hold has not ended"), { statusCode: 409, code: "REWARD_HOLD_ACTIVE" });
+        }
+        existing.status = "ready_for_fulfillment";
+        existing.released_at = aylaNow();
+      } else if (action === "fulfill") {
+        aylaMarketingAssertRewardCanAdvance(db, existing);
+        if (String(existing.status || "") !== "ready_for_fulfillment") {
+          throw Object.assign(new Error("Release this reward before marking it fulfilled"), { statusCode: 409, code: "REWARD_NOT_RELEASED" });
+        }
+        existing.status = "fulfilled";
+        existing.fulfilled_at = aylaNow();
+      } else {
+        if (String(existing.status || "") === "fulfilled") {
+          throw Object.assign(new Error("A fulfilled reward cannot be cancelled here"), { statusCode: 409 });
+        }
+        existing.status = "cancelled";
+        existing.cancelled_at = aylaNow();
+      }
+      existing.admin_note = String(req.body.note || "").trim().slice(0, 1000) || existing.admin_note || null;
+      existing.updated_by = aylaV215AdminAuditActor(admin);
+      existing.updatedAt = aylaNow();
+      normalizeAylaRewardStatus(existing.status);
+      aylaSetItem(db, "aylaReferralRewards", existing);
+      aylaMarketingRecordEvent(db, `reward_${action}`, {
+        reward_id: existing.id,
+        attribution_id: existing.attribution_id,
+      });
+      return existing;
+    });
+    return aylaSendOk(res, { reward, automatic_payment_or_access_change: false });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update referral reward", error.code ? { code: error.code } : null);
+  }
+});
+
+app.get("/api/ayla/students/:studentId/referral-center", async (req, res) => {
+  try {
+    const { user, student, db } = await aylaV189RequireStudent(req, req.params.studentId);
+    aylaEnsureSeedData(db);
+    const settings = aylaMarketingSettings(db);
+    const availableCampaign = aylaMarketingActiveCampaignForStudent(db, student, ["referral_link"]);
+    const code = aylaMarketingSortNewest(
+      aylaValues(db, "aylaReferralCodes").filter((row) => (
+        String(row.owner_user_id || "") === String(user.id)
+        && String(row.owner_student_id || "") === String(student.id)
+        && String(row.status || "active") !== "revoked"
+      )),
+    )[0] || null;
+    const linkedCampaign = code?.campaign_id
+      ? aylaGetItem(db, "aylaMarketingCampaigns", code.campaign_id)
+      : null;
+    const linkedCampaignActive = code?.campaign_id
+      ? aylaCampaignIsActive(linkedCampaign)
+      : false;
+    const campaign = code
+      ? linkedCampaignActive ? linkedCampaign : null
+      : availableCampaign;
+    const canRefresh = Boolean(
+      code
+      && (
+        (code.campaign_id && !linkedCampaignActive)
+        || (!code.campaign_id && availableCampaign)
+      )
+    );
+    const attributions = aylaMarketingSortNewest(
+      aylaValues(db, "aylaReferralAttributions").filter((row) => (
+        String(row.referrer_user_id || "") === String(user.id)
+      )),
+    );
+    const rewards = aylaMarketingSortNewest(
+      aylaValues(db, "aylaReferralRewards").filter((row) => (
+        String(row.beneficiary_user_id || "") === String(user.id)
+      )),
+    );
+    const shares = aylaMarketingSortNewest(
+      aylaValues(db, "aylaReadinessShares").filter((row) => (
+        String(row.owner_user_id || "") === String(user.id)
+        && String(row.owner_student_id || "") === String(student.id)
+      )),
+    ).slice(0, 20).map((share) => aylaReadinessShareOwnerResponse(db, share, req));
+    return aylaSendOk(res, {
+      program: publicAylaMarketingSettings(settings),
+      campaign: campaign ? {
+        id: campaign.id,
+        name: campaign.name,
+        channels: campaign.channels,
+        cta_label: campaign.cta_label,
+        ends_at: campaign.ends_at,
+      } : null,
+      referral: code ? {
+        id: code.id,
+        code: code.code,
+        status: code.status,
+        created_at: code.createdAt,
+        referral_url: aylaMarketingReferralUrl(code, req, settings),
+        needs_campaign_refresh: canRefresh,
+      } : null,
+      can_activate: Boolean(settings.program.enabled && settings.program.referrals_enabled && !code),
+      can_refresh: Boolean(settings.program.enabled && settings.program.referrals_enabled && canRefresh),
+      stats: {
+        referred_signups: attributions.filter((row) => !["blocked", "cancelled"].includes(String(row.status))).length,
+        verified_diagnostics: attributions.filter((row) => ["diagnostic_completed", "paid"].includes(String(row.status))).length,
+        paid_conversions: attributions.filter((row) => String(row.status) === "paid").length,
+        rewards_pending: rewards.filter((row) => ["pending_hold", "manual_review"].includes(String(row.status))).length,
+        rewards_ready: rewards.filter((row) => String(row.status) === "ready_for_fulfillment").length,
+        rewards_fulfilled: rewards.filter((row) => String(row.status) === "fulfilled").length,
+      },
+      referrals: attributions.slice(0, 100).map((row) => ({
+        id: row.id,
+        status: row.status,
+        campaign_id: row.campaign_id || null,
+        attributed_at: row.attributed_at || null,
+        diagnostic_completed_at: row.diagnostic_completed_at || null,
+        paid_conversion_at: row.paid_conversion_at || null,
+      })),
+      rewards: rewards.slice(0, 100).map((row) => ({
+        id: row.id,
+        label: row.label,
+        value: row.value,
+        unit: row.unit,
+        status: row.status,
+        beneficiary_role: row.beneficiary_role,
+        ready_at: row.ready_at,
+        fulfilled_at: row.fulfilled_at || null,
+      })),
+      shares,
+      privacy: {
+        referred_student_identity_exposed: false,
+        reward_fulfillment_automatic: false,
+      },
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load referral centre", error.code ? { code: error.code } : null);
+  }
+});
+
+app.post("/api/ayla/students/:studentId/referral-center/activate", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, req.params.studentId);
+    const result = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const user = aylaGetItem(db, "aylaUsers", auth.user.id);
+      const student = aylaGetItem(db, "aylaStudents", auth.student.id);
+      if (!user || !student || (!aylaV189StudentOwned(student, user) && user.role !== "admin")) {
+        throw Object.assign(new Error("Referral owner is no longer available"), { statusCode: 403 });
+      }
+      const campaign = aylaMarketingActiveCampaignForStudent(db, student, ["referral_link"]);
+      return aylaEnsureStudentReferralCode(db, { user, student, campaign });
+    });
+    return aylaSendOk(res, {
+      referral: result.code,
+      created: result.created,
+    }, result.created ? 201 : 200);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to activate referral link", error.code ? { code: error.code } : null);
+  }
+});
+
+app.post("/api/ayla/students/:studentId/readiness-shares", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, req.params.studentId);
+    const publicSiteUrl = aylaMarketingPublicBaseUrl(req, aylaMarketingSettings(auth.db));
+    const result = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const settings = aylaMarketingSettings(db);
+      const user = aylaGetItem(db, "aylaUsers", auth.user.id);
+      const student = aylaGetItem(db, "aylaStudents", auth.student.id);
+      if (!user || !student || (!aylaV189StudentOwned(student, user) && user.role !== "admin")) {
+        throw Object.assign(new Error("Readiness report owner is no longer available"), { statusCode: 403 });
+      }
+      const campaign = aylaMarketingActiveCampaignForStudent(
+        db,
+        student,
+        ["readiness_card", "whatsapp"],
+      );
+      const referralCampaign = aylaMarketingActiveCampaignForStudent(
+        db,
+        student,
+        ["referral_link"],
+      );
+      const shareSettings = aylaMarketingSettingsForCampaign(settings, campaign);
+      const report = aylaBuildShareReadinessReport(db, student);
+      const snapshot = buildAylaPublicReadinessSnapshot(report, shareSettings);
+      const snapshotHash = crypto.createHash("sha256").update(JSON.stringify({
+        snapshot,
+        settings_revision: shareSettings.revision,
+        campaign_id: campaign?.id || null,
+        campaign_revision: campaign?.revision || null,
+        share_message: shareSettings.sharing.share_message,
+        whatsapp_message: shareSettings.sharing.whatsapp_message,
+        card_title: shareSettings.sharing.card_title,
+        card_subtitle: shareSettings.sharing.card_subtitle,
+      })).digest("hex");
+      const activeShares = aylaMarketingSortNewest(
+        aylaValues(db, "aylaReadinessShares").filter((row) => (
+          String(row.owner_user_id || "") === String(user.id)
+          && String(row.owner_student_id || "") === String(student.id)
+          && aylaReadinessShareAvailable(row)
+        )),
+      );
+      const reusable = req.body.force_new !== true
+        ? activeShares.find((row) => String(row.snapshot_hash || "") === snapshotHash)
+        : null;
+      if (reusable) return { share: reusable, created: false };
+      if (activeShares.length >= Number(settings.sharing.max_active_links_per_student || 3)) {
+        throw Object.assign(new Error("Revoke an older readiness share before creating another"), {
+          statusCode: 409,
+          code: "READINESS_SHARE_LIMIT_REACHED",
+        });
+      }
+      const referral = settings.program.referrals_enabled
+        ? aylaEnsureStudentReferralCode(db, { user, student, campaign: referralCampaign })
+        : { code: null, created: false };
+      const now = new Date();
+      const expires = new Date(now);
+      expires.setUTCDate(expires.getUTCDate() + Number(settings.sharing.expiry_days || 30));
+      const share = {
+        id: aylaId("AYLA-READINESS-SHARE"),
+        token: crypto.randomBytes(24).toString("base64url"),
+        owner_user_id: user.id,
+        owner_student_id: student.id,
+        exam_track_id: aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam),
+        campaign_id: campaign?.id || null,
+        referral_code_id: referral.code?.id || null,
+        referral_code: referral.code?.code || null,
+        referral_campaign_id: referral.code?.campaign_id || null,
+        public_site_url: publicSiteUrl,
+        public_snapshot: snapshot,
+        snapshot_hash: snapshotHash,
+        report_version: report.version || 1,
+        evidence_kind: snapshot.evidence.kind,
+        settings_revision: shareSettings.revision,
+        settings_snapshot: {
+          version: shareSettings.version,
+          revision: shareSettings.revision,
+          program: { ...shareSettings.program },
+          sharing: { ...shareSettings.sharing, card_theme: { ...shareSettings.sharing.card_theme } },
+        },
+        status: "active",
+        expires_at: expires.toISOString(),
+        createdAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+      };
+      aylaSetItem(db, "aylaReadinessShares", share);
+      aylaMarketingRecordEvent(db, "share_created", {
+        share_id: share.id,
+        campaign_id: share.campaign_id,
+        referral_campaign_id: share.referral_campaign_id,
+        referral_code_id: share.referral_code_id,
+        owner_user_id: share.owner_user_id,
+        owner_student_id: share.owner_student_id,
+        evidence_kind: share.evidence_kind,
+      });
+      return { share, created: true };
+    });
+    const db = await readAylaDb();
+    return aylaSendOk(res, {
+      share: aylaReadinessShareOwnerResponse(db, result.share, req),
+      created: result.created,
+    }, result.created ? 201 : 200);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to create readiness share", error.code ? { code: error.code } : null);
+  }
+});
+
+app.post("/api/ayla/students/:studentId/readiness-shares/:shareId/events", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, req.params.studentId);
+    const type = String(req.body.type || "").toLowerCase();
+    if (!["whatsapp_share", "copy_share_link"].includes(type)) {
+      return aylaSendError(res, 400, "Use whatsapp_share or copy_share_link");
+    }
+    const event = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const share = aylaGetItem(db, "aylaReadinessShares", req.params.shareId);
+      if (
+        !share
+        || String(share.owner_user_id || "") !== String(auth.user.id)
+        || String(share.owner_student_id || "") !== String(auth.student.id)
+      ) throw Object.assign(new Error("Readiness share not found"), { statusCode: 404 });
+      const settings = aylaMarketingSettings(db);
+      if (!aylaMarketingSharingAvailable(db) || !aylaReadinessShareAvailable(share)) {
+        throw Object.assign(new Error("This readiness share is no longer available"), {
+          statusCode: 410,
+          code: "READINESS_SHARE_UNAVAILABLE",
+        });
+      }
+      if (type === "whatsapp_share" && settings.program.whatsapp_enabled !== true) {
+        throw Object.assign(new Error("WhatsApp sharing is currently disabled"), {
+          statusCode: 403,
+          code: "WHATSAPP_SHARING_DISABLED",
+        });
+      }
+      return aylaMarketingRecordEvent(db, type, {
+        share_id: share.id,
+        campaign_id: share.campaign_id || null,
+        referral_code_id: share.referral_code_id || null,
+        owner_user_id: share.owner_user_id,
+      });
+    });
+    return aylaSendOk(res, { event: { id: event.id, type: event.type, createdAt: event.createdAt } }, 201);
+  } catch (error) {
+    return aylaSendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Failed to record share action",
+      error.code ? { code: error.code } : null,
+    );
+  }
+});
+
+app.get("/api/ayla/referrals/:code", async (req, res) => {
+  try {
+    const db = await readAylaDb();
+    aylaEnsureSeedData(db);
+    const settings = aylaMarketingSettings(db);
+    const code = aylaMarketingFindCode(db, req.params.code);
+    if (
+      !settings.program.enabled
+      || !settings.program.referrals_enabled
+      || !code
+      || String(code.status || "active") !== "active"
+    ) return aylaSendError(res, 404, "Referral invitation is not available");
+    const campaign = code.campaign_id ? aylaGetItem(db, "aylaMarketingCampaigns", code.campaign_id) : null;
+    if (code.campaign_id && !aylaCampaignIsActive(campaign)) {
+      return aylaSendError(res, 410, "This referral campaign is no longer active");
+    }
+    return aylaSendOk(res, {
+      referral: {
+        code: code.code,
+        campaign: campaign ? {
+          id: campaign.id,
+          name: campaign.name,
+          cta_label: campaign.cta_label || settings.sharing.cta_label,
+          ends_at: campaign.ends_at || null,
+        } : null,
+        program_name: settings.program.program_name,
+        cta_label: settings.sharing.cta_label,
+      },
+      owner_identity_exposed: false,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to resolve referral invitation");
+  }
+});
+
+app.get("/api/ayla/readiness-shares/:token", async (req, res) => {
+  try {
+    const db = await readAylaDb();
+    aylaEnsureSeedData(db);
+    const share = aylaReadinessShareByToken(db, req.params.token);
+    if (!share) return aylaSendError(res, 404, "Readiness share not found");
+    if (!aylaReadinessShareAvailable(share)) return aylaSendError(res, 410, "This readiness share is no longer available");
+    if (!aylaMarketingSharingAvailable(db)) return aylaSendError(res, 410, "Readiness sharing is currently paused");
+    res.setHeader("Cache-Control", "no-store, max-age=0");
+    return aylaSendOk(res, {
+      marketing_build: AYLA_MARKETING_BUILD,
+      share: aylaReadinessSharePublicResponse(db, share, req),
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load readiness share");
+  }
+});
+
+app.get("/api/ayla/readiness-shares/:token/card.svg", async (req, res) => {
+  try {
+    const db = await readAylaDb();
+    aylaEnsureSeedData(db);
+    const share = aylaReadinessShareByToken(db, req.params.token);
+    if (!share) return aylaSendError(res, 404, "Readiness share not found");
+    if (!aylaReadinessShareAvailable(share)) return aylaSendError(res, 410, "This readiness share is no longer available");
+    if (!aylaMarketingSharingAvailable(db)) return aylaSendError(res, 410, "Readiness sharing is currently paused");
+    const settings = normalizeAylaMarketingSettings(share.settings_snapshot || aylaMarketingSettings(db));
+    const svg = renderAylaReadinessCardSvg(share.public_snapshot, settings);
+    res.setHeader("Content-Type", "image/svg+xml; charset=utf-8");
+    res.setHeader("Cache-Control", "no-store, max-age=0");
+    res.setHeader("Content-Disposition", `inline; filename="aylamed-readiness-${String(share.id || "card").replace(/[^a-zA-Z0-9_-]/g, "")}.svg"`);
+    return res.status(200).send(svg);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to render readiness card");
+  }
+});
+
+app.post("/api/ayla/readiness-shares/:token/events", async (req, res) => {
+  try {
+    const type = String(req.body.type || "").toLowerCase();
+    if (type !== "share_view") return aylaSendError(res, 400, "Only share_view is accepted on the public report");
+    const clientEventId = String(req.body.event_id || req.body.eventId || "").trim().slice(0, 120);
+    if (clientEventId.length < 8) return aylaSendError(res, 400, "A stable event_id is required");
+    aylaMarketingTakePublicEventRate(req, req.params.token);
+    const result = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const share = aylaReadinessShareByToken(db, req.params.token);
+      if (!share) throw Object.assign(new Error("Readiness share not found"), { statusCode: 404 });
+      if (!aylaReadinessShareAvailable(share)) throw Object.assign(new Error("This readiness share is no longer available"), { statusCode: 410 });
+      if (!aylaMarketingSharingAvailable(db)) {
+        throw Object.assign(new Error("Readiness sharing is currently paused"), { statusCode: 410 });
+      }
+      const eventKey = crypto.createHash("sha256")
+        .update(`${share.id}|${type}|${clientEventId}`)
+        .digest("hex");
+      const existing = aylaValues(db, "aylaMarketingEvents").find((row) => String(row.event_key || "") === eventKey);
+      if (existing) return { event: existing, duplicate: true };
+      const event = aylaMarketingRecordEvent(db, type, {
+        event_key: eventKey,
+        share_id: share.id,
+        campaign_id: share.campaign_id || null,
+        referral_code_id: share.referral_code_id || null,
+      });
+      return { event, duplicate: false };
+    });
+    return aylaSendOk(res, {
+      event: { id: result.event.id, type: result.event.type, createdAt: result.event.createdAt },
+      duplicate: result.duplicate,
+    }, result.duplicate ? 200 : 201);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to record readiness view");
+  }
+});
+
+// AYLAMED V231 MARKETING END
 
 app.get("/api/ayla/admin/knowledge/status", async (req, res) => {
   try { await aylaRequireAdmin(req); return aylaSendOk(res, { knowledge: await aylaKnowledgeStatus() }); }
