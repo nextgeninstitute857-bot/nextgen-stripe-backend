@@ -272,7 +272,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CONTENT_INGESTION_BUILD = "v232-media-ingestion-accelerator";
+const CONTENT_INGESTION_BUILD = "v232.1-recovery-scan-cache";
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
 const ROADMAP_EXTENSION_BUILD = "v221-system-aware-roadmap-extension";
 const RECORDING_ASSIGNMENT_BUILD = "v222-safe-recording-detach";
@@ -34317,6 +34317,7 @@ async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload, queue
       inventory = await inspectMediaZip({
         zipSource: upload.source || upload.file,
         references,
+        directoryCacheKey: inventoryCacheKey,
         onProgress: (progress) => queueContext.heartbeat(trackProgress(progress)),
       });
       inventorySource = "fresh_index";
@@ -34354,6 +34355,7 @@ async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload, queue
       mediaImportJobId: mediaJob.id,
       inventory,
       existingAssets,
+      directoryCacheKey: inventoryCacheKey,
       onProgress: (progress) => queueContext.heartbeat(trackProgress(progress)),
       onAssets: async (assets, { lastEntryIndex, progress }) => {
         await stageContentMediaImportAssets({
