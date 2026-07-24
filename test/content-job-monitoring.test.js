@@ -78,6 +78,36 @@ test("accelerated media monitoring exposes workers, checkpoint lag, speed, and E
   assert.equal(monitoring.accelerated, true);
 });
 
+test("recovery monitoring exposes persistent ZIP-cache validation without claiming new uploads", () => {
+  const monitoring = contentJobMonitoring([job({
+    progress: {
+      stage: "validating_media_resume",
+      files_processed: 14_240,
+      files_total: 35_037,
+      resumed_files: 14_240,
+      resumed_files_validated: 8_000,
+      recovery_entries_scanned: 8_500,
+      recovery_entries_total: 37_155,
+      directory_cache: "persistent_hit",
+      directory_cache_bytes: 3_500_000,
+      directory_cache_persistent: true,
+      recovery_phase: "validating_durable_entries",
+      entry_open_timeout_ms: 45_000,
+      newly_uploaded: 0,
+      movement_at: "2026-07-23T05:59:55.000Z",
+    },
+  })], { nowMs: NOW });
+
+  assert.equal(monitoring.stage_label, "Validating saved media from the local ZIP cache");
+  assert.equal(monitoring.files_processed, 14_240);
+  assert.equal(monitoring.resumed_files_validated, 8_000);
+  assert.equal(monitoring.recovery_entries_scanned, 8_500);
+  assert.equal(monitoring.recovery_entries_total, 37_155);
+  assert.equal(monitoring.directory_cache, "persistent_hit");
+  assert.equal(monitoring.directory_cache_persistent, true);
+  assert.equal(monitoring.newly_uploaded, 0);
+});
+
 test("fresh worker heartbeats do not hide a transfer that stopped moving", () => {
   const monitoring = contentJobMonitoring([job({
     heartbeat_at: "2026-07-23T05:59:50.000Z",
