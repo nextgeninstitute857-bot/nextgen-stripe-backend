@@ -8,12 +8,13 @@ const registry = fs.readFileSync(fileURLToPath(new URL("../lib/content-registry-
 
 test("video import checks mappings and global SHA before Vimeo upload", () => {
   const runner = server.match(/async function ngRunContentVideoDraftImport[\s\S]*?\n}\n\napp\.post/)?.[0] || "";
-  const lookup = runner.indexOf("findReusableContentVideo");
-  const upload = runner.indexOf("uploadVideoToVimeo");
-  assert.ok(lookup >= 0, "missing reusable-video lookup");
+  const batchLoop = runner.slice(runner.indexOf("for (let index = resumeProcessed"));
+  const lookup = batchLoop.indexOf("findReusableContentVideos(batch)");
+  const upload = batchLoop.indexOf("uploadVideoGroup(group)");
+  assert.ok(lookup >= 0, "missing batch reusable-video lookup");
   assert.ok(upload > lookup, "Vimeo upload must occur only after the reusable-video lookup");
-  assert.match(runner, /if \(reusable\.mapping\)/);
-  assert.match(runner, /if \(reusable\.asset\)/);
+  assert.match(batchLoop, /reusable\.mappingKeys\.has\(key\)/);
+  assert.match(batchLoop, /new Map\(reusable\.assetsBySha\)/);
 });
 
 test("reusable asset lookup is global by exact SHA", () => {

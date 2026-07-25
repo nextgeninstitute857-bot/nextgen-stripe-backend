@@ -24,7 +24,7 @@ test("media assets and question links are committed with set-based PostgreSQL ba
 });
 
 test("media finalization checkpoints every committed batch and stays private", () => {
-  assert.match(server, /const CONTENT_INGESTION_BUILD = "v232\.2-resumable-media-finalization"/);
+  assert.match(server, /const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD/);
   assert.match(server, /finalizeMediaInBatches\(\{/);
   assert.match(server, /saveContentMediaMatchBatch\(\{/);
   assert.match(server, /buildMediaFinalizationCheckpoint\(\{/);

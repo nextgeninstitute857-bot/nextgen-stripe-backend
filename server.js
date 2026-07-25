@@ -15,6 +15,7 @@ import {
 import {
   contentRegistryStatus,
   claimContentImportDraft,
+  createContentBackgroundJobStore,
   createExternalQbankDeliverySession,
   createContentMediaImportJob,
   createContentVideoImportJob,
@@ -22,7 +23,7 @@ import {
   finishContentMediaImportJob,
   finishContentVideoImportJob,
   finishContentImportPreview,
-  findReusableContentVideo,
+  findReusableContentVideos,
   getContentMediaImportJob,
   getContentMediaReferences,
   getContentVideoImportJob,
@@ -48,7 +49,8 @@ import {
   recordExternalQbankDeliveryAnswer,
   reviewContentTaxonomyMapping,
   saveContentMediaMatchBatch,
-  saveContentVideoMatch,
+  saveContentVideoAsset,
+  saveContentVideoLinksBatch,
   setContentImportJobStatus,
   stageContentMediaImportAssets,
   submitExternalQbankDeliverySession,
@@ -272,6 +274,13 @@ import {
   upsertVimeoCatalogDraft,
   vimeoCatalogSummary,
 } from "./lib/vimeo-library-manifest.js";
+import {
+  AdaptiveCapacityGate,
+  MULTI_QBANK_INGESTION_BUILD,
+  buildQbankIngestionDashboard,
+  isProviderRateLimit,
+  multiQbankIngestionConfig,
+} from "./lib/multi-qbank-ingestion.js";
 import { normalizeExamTrack, slug as contentSlug } from "./lib/content-import-adapter.js";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -292,7 +301,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CONTENT_INGESTION_BUILD = "v232.2-resumable-media-finalization";
+const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
 const ROADMAP_EXTENSION_BUILD = "v221-system-aware-roadmap-extension";
 const RECORDING_ASSIGNMENT_BUILD = "v222-safe-recording-detach";
@@ -828,13 +837,50 @@ const DATA_DIR = process.env.DATA_DIR || "/tmp";
 const MEDIA_DIR = path.join(DATA_DIR, "media");
 const LIVE_DB_PATH = path.join(DATA_DIR, "live-session-db.json");
 const NG_CONTENT_OPERATIONS_ROOT = path.join(DATA_DIR, "content-operations");
+const ngMultiQbankConfig = multiQbankIngestionConfig();
+const ngContentJobStore = contentRegistryStatus().configured
+  ? createContentBackgroundJobStore({
+      ownerId: `content-web-${process.pid}-${crypto.randomUUID()}`,
+      leaseMs: ngMultiQbankConfig.job_lease_ms,
+    })
+  : null;
+const ngMediaTransferGate = new AdaptiveCapacityGate({
+  name: "r2_media_transfers",
+  minimum: ngMultiQbankConfig.media_min_transfer_limit,
+  normal: ngMultiQbankConfig.media_global_transfer_limit,
+  maximum: ngMultiQbankConfig.media_global_transfer_limit,
+  memorySoftPercent: ngMultiQbankConfig.memory_soft_percent,
+  memoryHardPercent: ngMultiQbankConfig.memory_hard_percent,
+  memoryProvider: () => ngMemoryStatus(),
+});
+const ngMediaFinalizerGate = new AdaptiveCapacityGate({
+  name: "postgres_media_finalizer",
+  minimum: 1,
+  normal: ngMultiQbankConfig.postgres_finalizers,
+  maximum: ngMultiQbankConfig.postgres_finalizers,
+  memorySoftPercent: ngMultiQbankConfig.memory_soft_percent,
+  memoryHardPercent: ngMultiQbankConfig.memory_hard_percent,
+  memoryProvider: () => ngMemoryStatus(),
+});
+const ngVimeoUploadGate = new AdaptiveCapacityGate({
+  name: "vimeo_uploads",
+  minimum: 1,
+  normal: ngMultiQbankConfig.vimeo_uploads,
+  maximum: ngMultiQbankConfig.vimeo_uploads,
+  memorySoftPercent: ngMultiQbankConfig.memory_soft_percent,
+  memoryHardPercent: ngMultiQbankConfig.memory_hard_percent,
+  memoryProvider: () => ngMemoryStatus(),
+});
+const ngInFlightVimeoUploads = new Map();
 const ngContentBackgroundQueue = new SafeBackgroundQueue({
   directory: path.join(NG_CONTENT_OPERATIONS_ROOT, "jobs"),
-  maxConcurrency: Math.max(1, Math.min(3, Number(process.env.NEXTGEN_CONTENT_JOB_CONCURRENCY || 1) || 1)),
-  laneConcurrency: { question_zip: 1, image_zip: 1, video_zip: 1, ayla_vimeo_ai: 1 },
+  maxConcurrency: ngMultiQbankConfig.max_active_jobs,
+  laneConcurrency: ngMultiQbankConfig.lane_concurrency,
   retryBaseMs: Math.max(1_000, Number(process.env.NEXTGEN_CONTENT_JOB_RETRY_BASE_MS || 15_000) || 15_000),
   memoryRetryMs: Math.max(5_000, Number(process.env.NEXTGEN_CONTENT_JOB_MEMORY_RETRY_MS || 30_000) || 30_000),
   memoryGate: () => ngBackgroundMemoryIsHigh("content_operations_queue"),
+  persistentStore: ngContentJobStore,
+  leaseRetryMs: Math.max(5_000, Math.floor(ngMultiQbankConfig.job_lease_ms / 4)),
 });
 const ngContentUploadStore = contentMediaStatus().configured
   ? new CloudContentUploadStore({
@@ -34050,6 +34096,27 @@ function ngContentBackgroundSnapshot(domainJobId) {
   };
 }
 
+function ngMultiQbankControlPlaneSnapshot() {
+  return {
+    build: CONTENT_INGESTION_BUILD,
+    config: ngMultiQbankConfig,
+    memory: ngMemoryStatus(),
+    queue: ngContentBackgroundQueue.summary(),
+    capacity: {
+      r2_media_transfers: ngMediaTransferGate.snapshot(),
+      postgres_media_finalizer: ngMediaFinalizerGate.snapshot(),
+      vimeo_uploads: ngVimeoUploadGate.snapshot(),
+    },
+    safeguards: {
+      student_visibility: "disabled_drafts_until_approval",
+      binary_uploads_in_postgres: false,
+      one_postgres_finalizer: true,
+      qbank_explanation_videos_separate_from_lecture_catalog: true,
+      persistent_disk_not_horizontally_shared: true,
+    },
+  };
+}
+
 function ngContentProgressTracker(initialStage = "") {
   let stage = String(initialStage || "");
   let lastMovementAt = new Date().toISOString();
@@ -34391,6 +34458,8 @@ async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload, queue
       inventory,
       existingAssets,
       directoryCacheKey: inventoryCacheKey,
+      concurrency: ngMultiQbankConfig.media_workers_per_job,
+      transferGate: ngMediaTransferGate,
       onProgress: (progress) => queueContext.heartbeat(trackProgress(progress)),
       onAssets: async (assets, { lastEntryIndex, progress }) => {
         await stageContentMediaImportAssets({
@@ -34440,120 +34509,157 @@ async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload, queue
     );
     const finalizationBatchesTotal = resumedFinalization.batchesCommitted
       + remainingFinalizationBatches;
-    await queueContext.heartbeat(trackProgress({
-      stage: "saving_private_media",
-      files_processed: uploaded.assets.length,
-      files_total: uploaded.candidateEntries,
-      bytes_processed: uploaded.candidateUncompressedBytes,
-      bytes_total: uploaded.candidateUncompressedBytes,
-      resumed_files: uploaded.resumedFiles,
-      newly_uploaded: uploaded.newlyUploaded,
-      finalization_assets_committed: resumedFinalization.assetsCommitted,
-      finalization_assets_total: uploaded.assets.length,
-      finalization_links_verified: finalizationLinks,
-      finalization_batches_committed: resumedFinalization.batchesCommitted,
-      finalization_batches_total: finalizationBatchesTotal,
-      finalization_batch_size: finalizationConfig.batch_size,
-      finalization_cache: resumedFinalization.source,
-      percent: 99,
-    }));
-    const finalizationRun = await finalizeMediaInBatches({
-      assets: uploaded.assets,
-      matches: report.matches,
-      batchSize: finalizationConfig.batch_size,
-      startOffset: resumedFinalization.assetsCommitted,
-      onBatch: async ({
-        assets,
-        matches,
-        nextOffset,
-        batchNumber,
-      }) => {
-        const savedBatch = await saveContentMediaMatchBatch({
-          mediaJobId: mediaJob.id,
-          parentJob,
-          assets,
-          matches,
-        });
-        for (const duplicateObjectKey of savedBatch.duplicateObjects) {
-          await deleteR2Object(duplicateObjectKey).catch((error) => {
-            console.warn("R2 duplicate cleanup failed:", error.message);
-          });
-        }
-        finalizationLinks += savedBatch.links;
-        finalizationLinksCreated += savedBatch.linksCreated;
-        finalizationLinkConflicts += savedBatch.linkConflicts;
-        finalizationDuplicateObjects += savedBatch.duplicateObjects.length;
-        const batchesCommitted = resumedFinalization.batchesCommitted + batchNumber;
-        durableCheckpoint = buildMediaFinalizationCheckpoint({
-          previous: durableCheckpoint,
-          cacheKey: finalizationKey,
-          assetsTotal: uploaded.assets.length,
-          assetsCommitted: nextOffset,
-          linksVerified: finalizationLinks,
-          linksCreated: finalizationLinksCreated,
-          linkConflicts: finalizationLinkConflicts,
-          duplicateObjects: finalizationDuplicateObjects,
-          batchesCommitted,
-          batchSize: finalizationConfig.batch_size,
-        });
-        await queueContext.updateCheckpoint(durableCheckpoint, trackProgress({
-          stage: "saving_private_media",
+    let releaseFinalizer = null;
+    let finalizerError = null;
+    let finalizationBatchesCommitted = resumedFinalization.batchesCommitted;
+    try {
+      releaseFinalizer = await ngMediaFinalizerGate.acquire({
+        metadata: {
+          media_import_job_id: mediaJob.id,
+          content_import_job_id: parentJob.id,
+        },
+        onWait: (gate) => queueContext.heartbeat(trackProgress({
+          stage: "waiting_for_postgres_finalizer",
           files_processed: uploaded.assets.length,
           files_total: uploaded.candidateEntries,
           bytes_processed: uploaded.candidateUncompressedBytes,
           bytes_total: uploaded.candidateUncompressedBytes,
           resumed_files: uploaded.resumedFiles,
           newly_uploaded: uploaded.newlyUploaded,
-          finalization_assets_committed: nextOffset,
+          finalization_assets_committed: resumedFinalization.assetsCommitted,
           finalization_assets_total: uploaded.assets.length,
           finalization_links_verified: finalizationLinks,
-          finalization_links_created: finalizationLinksCreated,
-          finalization_link_conflicts: finalizationLinkConflicts,
-          finalization_batches_committed: batchesCommitted,
+          finalization_batches_committed: resumedFinalization.batchesCommitted,
           finalization_batches_total: finalizationBatchesTotal,
           finalization_batch_size: finalizationConfig.batch_size,
           finalization_cache: resumedFinalization.source,
-          movement: true,
+          finalizer_gate: gate,
           percent: 99,
-        }));
-      },
-    });
-    const finalizationBatchesCommitted = resumedFinalization.batchesCommitted
-      + finalizationRun.batchesCommitted;
-    durableCheckpoint = buildMediaFinalizationCheckpoint({
-      previous: durableCheckpoint,
-      cacheKey: finalizationKey,
-      assetsTotal: uploaded.assets.length,
-      assetsCommitted: uploaded.assets.length,
-      linksVerified: finalizationLinks,
-      linksCreated: finalizationLinksCreated,
-      linkConflicts: finalizationLinkConflicts,
-      duplicateObjects: finalizationDuplicateObjects,
-      batchesCommitted: finalizationBatchesCommitted,
-      batchSize: finalizationConfig.batch_size,
-      completed: true,
-    });
-    await queueContext.updateCheckpoint(durableCheckpoint, trackProgress({
-      stage: "saving_private_media",
-      files_processed: uploaded.assets.length,
-      files_total: uploaded.candidateEntries,
-      bytes_processed: uploaded.candidateUncompressedBytes,
-      bytes_total: uploaded.candidateUncompressedBytes,
-      resumed_files: uploaded.resumedFiles,
-      newly_uploaded: uploaded.newlyUploaded,
-      finalization_assets_committed: uploaded.assets.length,
-      finalization_assets_total: uploaded.assets.length,
-      finalization_links_verified: finalizationLinks,
-      finalization_links_created: finalizationLinksCreated,
-      finalization_link_conflicts: finalizationLinkConflicts,
-      finalization_batches_committed: finalizationBatchesCommitted,
-      finalization_batches_total: finalizationBatchesTotal,
-      finalization_batch_size: finalizationConfig.batch_size,
-      finalization_cache: resumedFinalization.source,
-      finalization_complete: true,
-      movement: true,
-      percent: 99,
-    }));
+        })),
+      });
+      await queueContext.heartbeat(trackProgress({
+        stage: "saving_private_media",
+        files_processed: uploaded.assets.length,
+        files_total: uploaded.candidateEntries,
+        bytes_processed: uploaded.candidateUncompressedBytes,
+        bytes_total: uploaded.candidateUncompressedBytes,
+        resumed_files: uploaded.resumedFiles,
+        newly_uploaded: uploaded.newlyUploaded,
+        finalization_assets_committed: resumedFinalization.assetsCommitted,
+        finalization_assets_total: uploaded.assets.length,
+        finalization_links_verified: finalizationLinks,
+        finalization_batches_committed: resumedFinalization.batchesCommitted,
+        finalization_batches_total: finalizationBatchesTotal,
+        finalization_batch_size: finalizationConfig.batch_size,
+        finalization_cache: resumedFinalization.source,
+        finalizer_gate: ngMediaFinalizerGate.snapshot(),
+        percent: 99,
+      }));
+      const finalizationRun = await finalizeMediaInBatches({
+        assets: uploaded.assets,
+        matches: report.matches,
+        batchSize: finalizationConfig.batch_size,
+        startOffset: resumedFinalization.assetsCommitted,
+        onBatch: async ({
+          assets,
+          matches,
+          nextOffset,
+          batchNumber,
+        }) => {
+          const savedBatch = await saveContentMediaMatchBatch({
+            mediaJobId: mediaJob.id,
+            parentJob,
+            assets,
+            matches,
+          });
+          for (const duplicateObjectKey of savedBatch.duplicateObjects) {
+            await deleteR2Object(duplicateObjectKey).catch((error) => {
+              console.warn("R2 duplicate cleanup failed:", error.message);
+            });
+          }
+          finalizationLinks += savedBatch.links;
+          finalizationLinksCreated += savedBatch.linksCreated;
+          finalizationLinkConflicts += savedBatch.linkConflicts;
+          finalizationDuplicateObjects += savedBatch.duplicateObjects.length;
+          const batchesCommitted = resumedFinalization.batchesCommitted + batchNumber;
+          durableCheckpoint = buildMediaFinalizationCheckpoint({
+            previous: durableCheckpoint,
+            cacheKey: finalizationKey,
+            assetsTotal: uploaded.assets.length,
+            assetsCommitted: nextOffset,
+            linksVerified: finalizationLinks,
+            linksCreated: finalizationLinksCreated,
+            linkConflicts: finalizationLinkConflicts,
+            duplicateObjects: finalizationDuplicateObjects,
+            batchesCommitted,
+            batchSize: finalizationConfig.batch_size,
+          });
+          await queueContext.updateCheckpoint(durableCheckpoint, trackProgress({
+            stage: "saving_private_media",
+            files_processed: uploaded.assets.length,
+            files_total: uploaded.candidateEntries,
+            bytes_processed: uploaded.candidateUncompressedBytes,
+            bytes_total: uploaded.candidateUncompressedBytes,
+            resumed_files: uploaded.resumedFiles,
+            newly_uploaded: uploaded.newlyUploaded,
+            finalization_assets_committed: nextOffset,
+            finalization_assets_total: uploaded.assets.length,
+            finalization_links_verified: finalizationLinks,
+            finalization_links_created: finalizationLinksCreated,
+            finalization_link_conflicts: finalizationLinkConflicts,
+            finalization_batches_committed: batchesCommitted,
+            finalization_batches_total: finalizationBatchesTotal,
+            finalization_batch_size: finalizationConfig.batch_size,
+            finalization_cache: resumedFinalization.source,
+            finalizer_gate: ngMediaFinalizerGate.snapshot(),
+            movement: true,
+            percent: 99,
+          }));
+        },
+      });
+      finalizationBatchesCommitted = resumedFinalization.batchesCommitted
+        + finalizationRun.batchesCommitted;
+      durableCheckpoint = buildMediaFinalizationCheckpoint({
+        previous: durableCheckpoint,
+        cacheKey: finalizationKey,
+        assetsTotal: uploaded.assets.length,
+        assetsCommitted: uploaded.assets.length,
+        linksVerified: finalizationLinks,
+        linksCreated: finalizationLinksCreated,
+        linkConflicts: finalizationLinkConflicts,
+        duplicateObjects: finalizationDuplicateObjects,
+        batchesCommitted: finalizationBatchesCommitted,
+        batchSize: finalizationConfig.batch_size,
+        completed: true,
+      });
+      await queueContext.updateCheckpoint(durableCheckpoint, trackProgress({
+        stage: "saving_private_media",
+        files_processed: uploaded.assets.length,
+        files_total: uploaded.candidateEntries,
+        bytes_processed: uploaded.candidateUncompressedBytes,
+        bytes_total: uploaded.candidateUncompressedBytes,
+        resumed_files: uploaded.resumedFiles,
+        newly_uploaded: uploaded.newlyUploaded,
+        finalization_assets_committed: uploaded.assets.length,
+        finalization_assets_total: uploaded.assets.length,
+        finalization_links_verified: finalizationLinks,
+        finalization_links_created: finalizationLinksCreated,
+        finalization_link_conflicts: finalizationLinkConflicts,
+        finalization_batches_committed: finalizationBatchesCommitted,
+        finalization_batches_total: finalizationBatchesTotal,
+        finalization_batch_size: finalizationConfig.batch_size,
+        finalization_cache: resumedFinalization.source,
+        finalization_complete: true,
+        finalizer_gate: ngMediaFinalizerGate.snapshot(),
+        movement: true,
+        percent: 99,
+      }));
+    } catch (error) {
+      finalizerError = error;
+      throw error;
+    } finally {
+      releaseFinalizer?.({ error: finalizerError });
+    }
     const saved = {
       links: finalizationLinks,
       linksCreated: finalizationLinksCreated,
@@ -34707,6 +34813,10 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
     const failures = Array.isArray(checkpoint.failure_samples)
       ? checkpoint.failure_samples.slice(0, 500)
       : [];
+    let failureCount = Math.max(
+      failures.length,
+      Number(checkpoint.failure_count || 0),
+    );
     let processed = resumeProcessed;
     let bytesProcessed = Math.max(0, Number(checkpoint.bytes_processed || 0))
       || report.matches.slice(0, resumeProcessed).reduce((total, match) => total + Number(match.video?.sizeBytes || 0), 0);
@@ -34720,43 +34830,126 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
       resumed_files: resumeProcessed,
       newly_uploaded: newlyUploaded,
       reused: reusedAssets + reusedMappings,
-      failures: failures.length,
+      failures: failureCount,
       percent: report.matches.length ? Math.min(99, Math.round((processed / report.matches.length) * 100)) : 99,
     }));
-    for (let index = resumeProcessed; index < report.matches.length; index += 1) {
-      const match = report.matches[index];
-      try {
-        const reusable = await findReusableContentVideo({
-          questionId: match.questionId, mediaRef: match.mediaRef, sha256: match.video.sha256,
-        });
-        if (reusable.mapping) {
-          reusedMappings += 1;
-        } else {
-          let uploaded;
-          let reusableAssetId = null;
-          if (reusable.asset) {
-            reusableAssetId = reusable.asset.id;
-            uploaded = {
-              providerUri: reusable.asset.provider_uri,
-              providerId: reusable.asset.provider_id,
-              embedUrl: reusable.asset.embed_url,
-            };
-            reusedAssets += 1;
-          } else {
-            let lastLoaded = 0;
-            uploaded = await uploadVideoToVimeo({
-              stream: await openReferencedVideoStream(match.video),
+    let videoLinksCreated = Math.max(0, Number(checkpoint.links_created || 0));
+    const activeVimeoBytes = new Map();
+    const vimeoUploadParallelism = Math.max(1, ngMultiQbankConfig.vimeo_uploads);
+    const videoLinkBatchSize = Math.max(
+      25,
+      Math.min(1_000, Number(process.env.NEXTGEN_CONTENT_VIDEO_LINK_BATCH_SIZE || 500)),
+    );
+    const fatalVideoError = (error) => Boolean(
+      isProviderRateLimit(error)
+      || error?.name === "SafeJobControlError"
+      || error?.name === "SafeJobLeaseError"
+      || error?.fatalVideoPersistence === true,
+    );
+    const awaitSharedVimeoUpload = async (operation, match) => {
+      const outcome = operation.then(
+        (value) => ({ completed: true, value }),
+        (error) => ({ completed: true, error }),
+      );
+      while (true) {
+        let timer;
+        const result = await Promise.race([
+          outcome,
+          new Promise((resolve) => {
+            timer = setTimeout(() => resolve({ completed: false }), 15_000);
+            timer.unref?.();
+          }),
+        ]);
+        clearTimeout(timer);
+        if (result.completed) {
+          if (result.error) throw result.error;
+          return result.value;
+        }
+        await queueContext.heartbeat(trackProgress({
+          stage: "waiting_for_shared_vimeo_upload",
+          files_processed: processed,
+          files_total: report.matches.length,
+          bytes_processed: bytesProcessed,
+          bytes_total: bytesTotal,
+          current_file: match.video.originalName,
+          current_file_bytes: 0,
+          current_file_total_bytes: Number(match.video.sizeBytes || 0),
+          resumed_files: resumeProcessed,
+          newly_uploaded: newlyUploaded,
+          reused: reusedAssets + reusedMappings,
+          failures: failureCount,
+          vimeo_gate: ngVimeoUploadGate.snapshot(),
+          vimeo_uploads_configured: vimeoUploadParallelism,
+          percent: report.matches.length
+            ? Math.min(99, Math.round((processed / report.matches.length) * 100))
+            : 99,
+        }));
+      }
+    };
+    const uploadVideoGroup = async (group) => {
+      const match = group.matches[0];
+      const sha256 = group.sha256;
+      let uploadOperation = ngInFlightVimeoUploads.get(sha256);
+      let ownsUpload = false;
+      if (!uploadOperation) {
+        ownsUpload = true;
+        uploadOperation = (async () => {
+          let lastLoaded = 0;
+          let releaseVimeo = null;
+          let vimeoError = null;
+          try {
+            releaseVimeo = await ngVimeoUploadGate.acquire({
+              metadata: {
+                video_import_job_id: videoJob.id,
+                content_import_job_id: parentJob.id,
+                media_ref: match.mediaRef,
+                sha256,
+              },
+              onWait: (gate) => queueContext.heartbeat(trackProgress({
+                stage: "waiting_for_vimeo_capacity",
+                files_processed: processed,
+                files_total: report.matches.length,
+                bytes_processed: bytesProcessed + [...activeVimeoBytes.values()]
+                  .reduce((total, value) => total + Number(value || 0), 0),
+                bytes_total: bytesTotal,
+                current_file: match.video.originalName,
+                current_file_bytes: lastLoaded,
+                current_file_total_bytes: Number(match.video.sizeBytes || 0),
+                resumed_files: resumeProcessed,
+                newly_uploaded: newlyUploaded,
+                reused: reusedAssets + reusedMappings,
+                failures: failureCount,
+                vimeo_gate: gate,
+                vimeo_uploads_configured: vimeoUploadParallelism,
+                percent: report.matches.length
+                  ? Math.min(99, Math.round((processed / report.matches.length) * 100))
+                  : 99,
+              })),
+            });
+            return await uploadVideoToVimeo({
+              streamFactory: () => openReferencedVideoStream(match.video),
               sizeBytes: match.video.sizeBytes,
               name: `${match.studentQid} · ${path.basename(match.video.originalName)}`,
               description: `AylaMed private explanation video for ${match.studentQid}. Import ${parentJob.id}.`,
-              onProgress: ({ loaded, total }) => {
+              rateLimitAttempts: ngMultiQbankConfig.vimeo_rate_limit_attempts,
+              onProgress: ({
+                loaded,
+                total,
+                rate_limited: rateLimited,
+                retry_attempt: retryAttempt,
+                retry_in_ms: retryInMs,
+                stage,
+              }) => {
                 const moving = Number(loaded || 0) > lastLoaded;
                 lastLoaded = Math.max(lastLoaded, Number(loaded || 0));
+                activeVimeoBytes.set(sha256, lastLoaded);
+                const activeBytes = [...activeVimeoBytes.values()]
+                  .reduce((sum, value) => sum + Number(value || 0), 0);
                 return queueContext.heartbeat(trackProgress({
-                  stage: "uploading_private_videos",
+                  stage: stage || "uploading_private_videos",
                   files_processed: processed,
                   files_total: report.matches.length,
-                  bytes_processed: bytesProcessed + lastLoaded,
+                  bytes_processed: bytesProcessed + activeBytes,
                   bytes_total: bytesTotal,
                   current_file: match.video.originalName,
                   current_file_bytes: lastLoaded,
@@ -34764,7 +34957,12 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
                   resumed_files: resumeProcessed,
                   newly_uploaded: newlyUploaded,
                   reused: reusedAssets + reusedMappings,
-                  failures: failures.length,
+                  failures: failureCount,
+                  vimeo_gate: ngVimeoUploadGate.snapshot(),
+                  vimeo_uploads_configured: vimeoUploadParallelism,
+                  rate_limited: rateLimited === true,
+                  retry_attempt: Number(retryAttempt || 0),
+                  retry_in_ms: Number(retryInMs || 0),
                   percent: report.matches.length
                     ? Math.min(99, Math.round(((processed + (lastLoaded / Math.max(1, Number(match.video.sizeBytes || 1)))) / report.matches.length) * 100))
                     : 99,
@@ -34772,19 +34970,124 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
                 }));
               },
             });
-            newlyUploaded += 1;
+          } catch (error) {
+            vimeoError = error;
+            throw error;
+          } finally {
+            activeVimeoBytes.delete(sha256);
+            releaseVimeo?.({ error: vimeoError });
           }
-          linked += await saveContentVideoMatch({
-            videoJobId: videoJob.id, parentJob, match, uploaded, reusableAssetId,
-          });
-        }
-      } catch (error) {
-        failures.push({ student_qid: match.studentQid, media_ref: match.mediaRef, error: error.response?.data?.error || error.message });
+        })();
+        ngInFlightVimeoUploads.set(sha256, uploadOperation);
+        void uploadOperation.then(() => {
+          const expiry = setTimeout(() => {
+            if (ngInFlightVimeoUploads.get(sha256) === uploadOperation) {
+              ngInFlightVimeoUploads.delete(sha256);
+            }
+          }, 10 * 60 * 1000);
+          expiry.unref?.();
+        }).catch(() => {
+          if (ngInFlightVimeoUploads.get(sha256) === uploadOperation) {
+            ngInFlightVimeoUploads.delete(sha256);
+          }
+        });
       }
-      processed += 1;
-      bytesProcessed += Number(match.video?.sizeBytes || 0);
+      const uploaded = ownsUpload
+        ? await uploadOperation
+        : await awaitSharedVimeoUpload(uploadOperation, match);
+      let asset;
+      try {
+        asset = await saveContentVideoAsset({
+          videoJobId: videoJob.id,
+          parentJob,
+          video: match.video,
+          uploaded,
+        });
+      } catch (error) {
+        error.fatalVideoPersistence = true;
+        throw error;
+      }
+      return { asset, ownsUpload };
+    };
+
+    for (let index = resumeProcessed; index < report.matches.length; index += videoLinkBatchSize) {
+      const batch = report.matches.slice(index, index + videoLinkBatchSize);
+      const reusable = await findReusableContentVideos(batch);
+      const pendingMatches = [];
+      for (const match of batch) {
+        const key = `${match.questionId}\u0000${match.mediaRef}`;
+        if (reusable.mappingKeys.has(key)) reusedMappings += 1;
+        else pendingMatches.push(match);
+      }
+      const groupsBySha = new Map();
+      for (const match of pendingMatches) {
+        const sha256 = String(match.video?.sha256 || "");
+        if (!groupsBySha.has(sha256)) groupsBySha.set(sha256, { sha256, matches: [] });
+        groupsBySha.get(sha256).matches.push(match);
+      }
+      const assetsBySha = new Map(reusable.assetsBySha);
+      const linkableMatches = [];
+      const uploadGroups = [];
+      for (const group of groupsBySha.values()) {
+        if (assetsBySha.has(group.sha256)) {
+          reusedAssets += group.matches.length;
+          linkableMatches.push(...group.matches);
+        } else {
+          uploadGroups.push(group);
+        }
+      }
+      for (let groupIndex = 0; groupIndex < uploadGroups.length; groupIndex += vimeoUploadParallelism) {
+        const uploadBatch = uploadGroups.slice(groupIndex, groupIndex + vimeoUploadParallelism);
+        const uploadResults = await Promise.all(uploadBatch.map(async (group) => {
+          try {
+            return { group, ...(await uploadVideoGroup(group)) };
+          } catch (error) {
+            return { group, error };
+          }
+        }));
+        for (const result of uploadResults) {
+          if (result.error) {
+            if (fatalVideoError(result.error)) throw result.error;
+            failureCount += result.group.matches.length;
+            for (const match of result.group.matches) {
+              if (failures.length >= 500) break;
+              failures.push({
+                student_qid: match.studentQid,
+                media_ref: match.mediaRef,
+                error: result.error.response?.data?.error || result.error.message,
+              });
+            }
+            continue;
+          }
+          assetsBySha.set(result.group.sha256, result.asset);
+          linkableMatches.push(...result.group.matches);
+          newlyUploaded += result.ownsUpload ? 1 : 0;
+          reusedAssets += result.ownsUpload
+            ? Math.max(0, result.group.matches.length - 1)
+            : result.group.matches.length;
+        }
+      }
+      let savedLinks;
+      try {
+        savedLinks = await saveContentVideoLinksBatch({
+          videoJobId: videoJob.id,
+          matches: linkableMatches,
+          assetsBySha,
+        });
+      } catch (error) {
+        error.fatalVideoPersistence = true;
+        throw error;
+      }
+      linked += Number(savedLinks.linksVerified || 0);
+      videoLinksCreated += Number(savedLinks.linksCreated || 0);
+      processed += batch.length;
+      bytesProcessed += batch.reduce(
+        (total, match) => total + Number(match.video?.sizeBytes || 0),
+        0,
+      );
+      const currentMatch = batch.at(-1);
       await queueContext.updateCheckpoint({
-        version: 2,
+        version: 4,
         videos_processed: processed,
         videos_total: report.matches.length,
         bytes_processed: bytesProcessed,
@@ -34793,6 +35096,10 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
         reused_assets: reusedAssets,
         reused_mappings: reusedMappings,
         linked,
+        links_created: videoLinksCreated,
+        vimeo_uploads_configured: vimeoUploadParallelism,
+        video_link_batch_size: videoLinkBatchSize,
+        failure_count: failureCount,
         failure_samples: failures.slice(0, 500),
       }, trackProgress({
         stage: "uploading_private_videos",
@@ -34800,18 +35107,23 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
         files_total: report.matches.length,
         bytes_processed: bytesProcessed,
         bytes_total: bytesTotal,
-        current_file: match.video.originalName,
-        current_file_bytes: Number(match.video.sizeBytes || 0),
-        current_file_total_bytes: Number(match.video.sizeBytes || 0),
+        current_file: currentMatch.video.originalName,
+        current_file_bytes: Number(currentMatch.video.sizeBytes || 0),
+        current_file_total_bytes: Number(currentMatch.video.sizeBytes || 0),
         resumed_files: resumeProcessed,
         newly_uploaded: newlyUploaded,
         reused: reusedAssets + reusedMappings,
-        failures: failures.length,
+        linked,
+        links_created: videoLinksCreated,
+        failures: failureCount,
+        vimeo_gate: ngVimeoUploadGate.snapshot(),
+        vimeo_uploads_configured: vimeoUploadParallelism,
+        video_link_batch_size: videoLinkBatchSize,
         percent: report.matches.length ? Math.min(99, Math.round((processed / report.matches.length) * 100)) : 99,
         movement: true,
       }));
     }
-    const warning = report.ambiguous.length || report.missing.length || failures.length;
+    const warning = report.ambiguous.length || report.missing.length || failureCount;
     await queueContext.heartbeat(trackProgress({
       stage: "video_import_complete",
       files_processed: report.matches.length,
@@ -34821,9 +35133,12 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
       resumed_files: resumeProcessed,
       newly_uploaded: newlyUploaded,
       reused: reusedAssets + reusedMappings,
-      failures: failures.length,
+      failures: failureCount,
       matched: report.matches.length,
       linked,
+      links_created: videoLinksCreated,
+      vimeo_uploads_configured: vimeoUploadParallelism,
+      video_link_batch_size: videoLinkBatchSize,
       percent: 100,
       completed: true,
     }));
@@ -34838,10 +35153,13 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
       reused_mappings: reusedMappings,
       reused_total: reusedAssets + reusedMappings,
       linked,
+      links_created: videoLinksCreated,
+      vimeo_uploads_configured: vimeoUploadParallelism,
+      video_link_batch_size: videoLinkBatchSize,
       missing: report.missing.length,
       ambiguous: report.ambiguous.length,
       unreferenced: report.unreferenced.length,
-      failed: failures.length,
+      failed: failureCount,
       resumed_files: resumeProcessed,
       missing_samples: report.missing.slice(0, 100).map((item) => ({ student_qid: item.studentQid, media_ref: item.mediaRef })),
       ambiguous_samples: report.ambiguous.slice(0, 100),
@@ -35043,21 +35361,58 @@ app.get("/admin/crm/operations/content-jobs", async (req, res) => {
     let registryError = null;
     try { registryJobs = await listContentOperationalJobs({ limit: req.query.limit || 50 }); }
     catch (error) { registryError = error.message; }
+    const allQueueJobs = ngContentBackgroundQueue.list({ limit: 500 });
+    const controlPlane = ngMultiQbankControlPlaneSnapshot();
     return res.json({
       success: true,
       build: NEXTGEN_BACKEND_BUILD,
+      content_ingestion_build: CONTENT_INGESTION_BUILD,
       summary: ngContentBackgroundQueue.summary(),
       stale_running_jobs: queueJobs.filter((job) => ["running", "pause_requested", "cancel_requested"].includes(job.status)
         && Date.parse(job.heartbeat_at || job.started_at || 0) < staleCutoff).map((job) => job.id),
       jobs: queueJobs,
       registry_jobs: registryJobs,
       registry_error: registryError,
+      qbank_ingestion: registryJobs
+        ? buildQbankIngestionDashboard({
+            registryJobs,
+            backgroundJobs: allQueueJobs,
+            controlPlane,
+          })
+        : null,
+      control_plane: controlPlane,
       upload_summary: await ngContentUploadStore.summary(),
       uploads: await ngContentUploadStore.list({ limit: req.query.upload_limit || 50 }),
       controls: ["pause", "resume", "cancel", "retry"],
     });
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/operations/qbank-ingestion", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    await Promise.all([ngContentBackgroundQueue.initialize(), ngContentUploadStore.initialize()]);
+    const registryJobs = await listContentOperationalJobs({
+      limit: Math.max(1, Math.min(200, Number(req.query.limit || 100))),
+    });
+    const dashboard = buildQbankIngestionDashboard({
+      registryJobs,
+      backgroundJobs: ngContentBackgroundQueue.list({ limit: 500 }),
+      controlPlane: ngMultiQbankControlPlaneSnapshot(),
+    });
+    return res.json({
+      success: true,
+      ...dashboard,
+      controls: ["pause", "resume", "cancel", "retry"],
+      refresh_after_seconds: 5,
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+    });
   }
 });
 
