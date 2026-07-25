@@ -6,7 +6,10 @@ import {
   buildVimeoLibraryManifest,
   buildVimeoTopicClassificationRequest,
   extractVimeoWebSearchEvidence,
+  fetchVimeoFolder,
+  fetchVimeoFolders,
   fetchVimeoLibrary,
+  normalizeVimeoFolderId,
   normalizeVimeoTopicClassification,
   rankVimeoQbankTaxonomyCandidates,
   upsertVimeoCatalogDraft,
@@ -103,6 +106,8 @@ function successfulClassification(draft = catalogDraft(), overrides = {}) {
 test("Vimeo discovery creates private drafts and preserves provider playback metadata", () => {
   const [row] = buildVimeoLibraryManifest([vimeoVideo()], {
     allowedSystems: ["Cardiovascular", "Renal"],
+    catalogSourceId: "AYLA-VIMEO-SOURCE-usmle-step-1-9988",
+    sourceFolder: { uri: "/me/projects/9988", name: "AylaMed lectures" },
   });
   assert.equal(row.ready, false);
   assert.equal(row.readyForClassification, true);
@@ -112,15 +117,21 @@ test("Vimeo discovery creates private drafts and preserves provider playback met
   assert.equal(row.resource.topic, "Ischemic heart disease");
   assert.equal(row.resource.vimeoId, "123456");
   assert.equal(row.resource.vimeoPrivacyHash, "abc123");
+  assert.equal(row.resource.sourceType, "vimeo_folder_library");
+  assert.equal(row.resource.catalogSourceId, "AYLA-VIMEO-SOURCE-usmle-step-1-9988");
+  assert.equal(row.resource.sourceData.folder_id, "9988");
+  assert.equal(row.resource.sourceData.folder_name, "AylaMed lectures");
   assert.equal(row.resource.approved, false);
   assert.equal(row.resource.status, "draft_review");
   assert.deepEqual(row.resource.deliveryDestinations, []);
 });
 
-test("Vimeo discovery paginates through an account with more than 400 lectures", async () => {
+test("Vimeo discovery paginates through the selected folder with more than 400 lectures", async () => {
   const requestedPages = [];
+  const requestedPaths = [];
   const apiClient = {
     async get(path, { params }) {
+      requestedPaths.push(path);
       requestedPages.push(params.page);
       const start = (params.page - 1) * 100;
       return {
@@ -129,19 +140,62 @@ test("Vimeo discovery paginates through an account with more than 400 lectures",
             uri: `/videos/${start + index + 1}`,
             name: `Medical topic ${start + index + 1}`,
           })),
-          paging: { next: params.page < 5 ? `/me/videos?page=${params.page + 1}` : null },
+          paging: { next: params.page < 5 ? `/me/projects/9988/videos?page=${params.page + 1}` : null },
         },
       };
     },
   };
   const videos = await fetchVimeoLibrary({
+    folderId: "9988",
     token: "test-token",
     maximum: 450,
     apiClient,
   });
   assert.equal(videos.length, 450);
   assert.deepEqual(requestedPages, [1, 2, 3, 4, 5]);
+  assert.deepEqual([...new Set(requestedPaths)], ["/me/projects/9988/videos"]);
   assert.equal(videos[449].uri, "/videos/450");
+});
+
+test("folder discovery and ongoing video sync have no fixed 400-lecture ceiling", async () => {
+  const folderRequests = [];
+  const apiClient = {
+    async get(path, { params } = {}) {
+      folderRequests.push({ path, page: params?.page || null });
+      if (path === "/me/projects") {
+        return {
+          data: {
+            data: [{ uri: "/users/7/projects/9988", name: "AylaMed lectures", metadata: { connections: { videos: { total: 525 } } } }],
+            paging: { next: null },
+          },
+        };
+      }
+      if (path === "/me/projects/9988") {
+        return { data: { uri: "/users/7/projects/9988", name: "AylaMed lectures" } };
+      }
+      const page = params.page;
+      const count = page <= 5 ? 100 : 25;
+      const start = (page - 1) * 100;
+      return {
+        data: {
+          data: Array.from({ length: count }, (_, index) => ({
+            uri: `/videos/${start + index + 1}`,
+            name: `Medical topic ${start + index + 1}`,
+          })),
+          paging: { next: page < 6 ? `/me/projects/9988/videos?page=${page + 1}` : null },
+        },
+      };
+    },
+  };
+  const folders = await fetchVimeoFolders({ apiClient });
+  const folder = await fetchVimeoFolder({ folderId: folders[0].uri, apiClient });
+  const videos = await fetchVimeoLibrary({ folderId: folder.id, apiClient });
+  assert.equal(normalizeVimeoFolderId("https://vimeo.com/manage/folders/9988"), "9988");
+  assert.equal(folders[0].video_count, 525);
+  assert.equal(folder.id, "9988");
+  assert.equal(videos.length, 525);
+  assert.equal(folderRequests.filter((row) => row.path === "/me/projects/9988/videos").length, 6);
+  assert.equal(folderRequests.some((row) => row.path === "/me/videos"), false);
 });
 
 test("a generic but named title stays private and classifiable instead of being guessed active", () => {
@@ -357,6 +411,19 @@ test("approval is revision-checked and is the only step that enables student des
   assert.equal(approved.resource.adminApproval.reviewer.email, "owner@example.com");
 });
 
+test("a lecture missing from its managed folder cannot be newly approved or deleted implicitly", () => {
+  const draft = catalogDraft();
+  const missingDraft = {
+    ...draft,
+    folderMembershipStatus: "missing_from_folder",
+    classification: successfulClassification(draft),
+    revision: 2,
+  };
+  assert.throws(() => approveVimeoCatalogDraft(missingDraft, {
+    expectedRevision: 2,
+  }), (error) => error.code === "VIMEO_FOLDER_MEMBERSHIP_REQUIRED");
+});
+
 test("a broader QBank candidate can describe the topic but is not stored as a direct QBank link", () => {
   const draft = catalogDraft();
   const classification = successfulClassification(draft, { qbank_match_kind: "broader_topic" });
@@ -396,6 +463,11 @@ test("server wiring is draft-first, background researched, and explicit-review o
   assert.match(server, /aylaV189ResourceType\(resource\.type\) === "vimeo_video" && aliasTopics\.includes\(topicKey\)/);
   assert.match(server, /app\.post\("\/api\/ayla\/admin\/resources\/vimeo-catalog\/classification-jobs"/);
   assert.match(server, /app\.post\("\/api\/ayla\/admin\/resources\/vimeo-catalog\/review"/);
+  assert.match(server, /app\.get\("\/api\/ayla\/admin\/resources\/vimeo-folders"/);
+  assert.match(server, /app\.get\("\/api\/ayla\/admin\/resources\/vimeo-catalog\/sources"/);
+  assert.match(server, /ngStartAylaVimeoFolderSyncScheduler\(\)/);
+  assert.match(server, /content_operations_have_priority/);
+  assert.match(server, /folderMembershipStatus: "missing_from_folder"/);
   assert.match(server, /active_resources_created: 0/);
   assert.match(server, /Provide between 1 and 100 explicitly selected review items/);
   assert.match(server, /deliveryDestinations: \["aylamed_content_hub", "aylamed_roadmap"\]/);
