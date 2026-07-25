@@ -7,10 +7,15 @@ import { setTimeout as delay } from "node:timers/promises";
 import {
   BoundedTaskPool,
   MediaAssetBatcher,
+  buildMediaFinalizationCheckpoint,
   buildMediaCheckpoint,
+  finalizeMediaInBatches,
   mediaAcceleratorConfig,
+  mediaFinalizationCacheKey,
+  mediaFinalizationConfig,
   mediaInventoryCacheKey,
   mediaRateSnapshot,
+  resolveMediaFinalizationCheckpoint,
   resolveMediaInventoryCheckpoint,
 } from "../lib/media-ingestion-accelerator.js";
 import { uploadMediaZipToR2 } from "../lib/content-media-r2.js";
@@ -141,6 +146,107 @@ test("rate and ETA exclude instant resume skips from transfer speed", () => {
     files_per_minute: 10,
     eta_seconds: 120,
   });
+});
+
+test("media finalization is bounded and keyed to the immutable job inventory", () => {
+  assert.deepEqual(mediaFinalizationConfig({}), { batch_size: 250 });
+  assert.deepEqual(mediaFinalizationConfig({
+    NEXTGEN_CONTENT_MEDIA_FINALIZATION_BATCH_SIZE: "999999",
+  }), { batch_size: 1_000 });
+  const key = mediaFinalizationCacheKey({
+    mediaJobId: "media-job",
+    inventoryCacheKey: "inventory-key",
+  });
+  assert.equal(key, mediaFinalizationCacheKey({
+    mediaJobId: "media-job",
+    inventoryCacheKey: "inventory-key",
+  }));
+  assert.notEqual(key, mediaFinalizationCacheKey({
+    mediaJobId: "different-job",
+    inventoryCacheKey: "inventory-key",
+  }));
+});
+
+test("35,037 media records finalize in committed batches with no lost or repeated matches", async () => {
+  const assets = Array.from({ length: 35_037 }, (_, index) => ({
+    sha256: `sha-${index}`,
+    objectKey: `private/${index}`,
+  }));
+  const matches = assets.map((asset, index) => ({
+    questionId: `question-${index}`,
+    mediaRef: `image-${index}.png`,
+    asset,
+  }));
+  const committed = [];
+  const linked = [];
+  const result = await finalizeMediaInBatches({
+    assets,
+    matches,
+    batchSize: 250,
+    onBatch: async (batch) => {
+      committed.push([batch.offset, batch.nextOffset]);
+      linked.push(...batch.matches.map((match) => match.questionId));
+    },
+  });
+
+  assert.equal(result.assetsCommitted, 35_037);
+  assert.equal(result.batchesCommitted, 141);
+  assert.deepEqual(committed[0], [0, 250]);
+  assert.deepEqual(committed.at(-1), [35_000, 35_037]);
+  assert.equal(new Set(linked).size, 35_037);
+});
+
+test("media finalization resumes after the last committed batch and handles duplicate hashes once", async () => {
+  const assets = Array.from({ length: 1_100 }, (_, index) => ({
+    sha256: index === 900 ? "sha-5" : `sha-${index}`,
+    objectKey: `private/${index}`,
+  }));
+  const matches = assets.slice(0, 900).map((asset, index) => ({
+    questionId: `question-${index}`,
+    mediaRef: `image-${index}.png`,
+    asset,
+  }));
+  const cacheKey = mediaFinalizationCacheKey({
+    mediaJobId: "media-job",
+    inventoryCacheKey: "inventory-key",
+  });
+  let checkpoint = {};
+  const firstPassMatches = [];
+  await assert.rejects(() => finalizeMediaInBatches({
+    assets,
+    matches,
+    batchSize: 250,
+    onBatch: async (batch) => {
+      if (batch.batchNumber === 4) throw new Error("simulated interruption");
+      firstPassMatches.push(...batch.matches.map((match) => match.questionId));
+      checkpoint = buildMediaFinalizationCheckpoint({
+        previous: checkpoint,
+        cacheKey,
+        assetsTotal: assets.length,
+        assetsCommitted: batch.nextOffset,
+        linksVerified: firstPassMatches.length,
+        batchesCommitted: batch.batchNumber,
+        batchSize: batch.batchSize,
+      });
+    },
+  }), /simulated interruption/);
+
+  const resumed = resolveMediaFinalizationCheckpoint(checkpoint, cacheKey, assets.length);
+  assert.equal(resumed.assetsCommitted, 750);
+  const secondPassMatches = [];
+  const secondPass = await finalizeMediaInBatches({
+    assets,
+    matches,
+    batchSize: 250,
+    startOffset: resumed.assetsCommitted,
+    onBatch: async (batch) => {
+      secondPassMatches.push(...batch.matches.map((match) => match.questionId));
+    },
+  });
+  assert.equal(secondPass.assetsCommitted, 1_100);
+  assert.equal(secondPass.batchesCommitted, 2);
+  assert.equal(new Set([...firstPassMatches, ...secondPassMatches]).size, 900);
+  assert.equal(secondPassMatches.includes("question-5"), false);
 });
 
 class FakeZip extends EventEmitter {

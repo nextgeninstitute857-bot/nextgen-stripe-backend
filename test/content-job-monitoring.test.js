@@ -108,6 +108,40 @@ test("recovery monitoring exposes persistent ZIP-cache validation without claimi
   assert.equal(monitoring.newly_uploaded, 0);
 });
 
+test("finalization monitoring exposes committed database batches and remains active at 99 percent", () => {
+  const monitoring = contentJobMonitoring([job({
+    progress: {
+      stage: "saving_private_media",
+      files_processed: 35_037,
+      files_total: 35_037,
+      bytes_processed: 6_700_000_000,
+      bytes_total: 6_700_000_000,
+      finalization_assets_committed: 12_500,
+      finalization_assets_total: 35_037,
+      finalization_links_verified: 9_850,
+      finalization_links_created: 9_850,
+      finalization_link_conflicts: 0,
+      finalization_batches_committed: 50,
+      finalization_batches_total: 141,
+      finalization_batch_size: 250,
+      finalization_cache: "validated_cache",
+      movement_at: "2026-07-23T05:59:55.000Z",
+      percent: 99,
+    },
+  })], { nowMs: NOW });
+
+  assert.equal(monitoring.stage_label, "Saving private draft links");
+  assert.equal(monitoring.percent, 99);
+  assert.equal(monitoring.finalization_assets_committed, 12_500);
+  assert.equal(monitoring.finalization_assets_total, 35_037);
+  assert.equal(monitoring.finalization_links_verified, 9_850);
+  assert.equal(monitoring.finalization_batches_committed, 50);
+  assert.equal(monitoring.finalization_batches_total, 141);
+  assert.equal(monitoring.finalization_batch_size, 250);
+  assert.equal(monitoring.finalization_cache, "validated_cache");
+  assert.equal(monitoring.stalled, false);
+});
+
 test("fresh worker heartbeats do not hide a transfer that stopped moving", () => {
   const monitoring = contentJobMonitoring([job({
     heartbeat_at: "2026-07-23T05:59:50.000Z",

@@ -47,7 +47,7 @@ import {
   recordExternalQbankAuditEvent,
   recordExternalQbankDeliveryAnswer,
   reviewContentTaxonomyMapping,
-  saveContentMediaMatches,
+  saveContentMediaMatchBatch,
   saveContentVideoMatch,
   setContentImportJobStatus,
   stageContentMediaImportAssets,
@@ -240,8 +240,13 @@ import {
   uploadMediaZipToR2,
 } from "./lib/content-media-r2.js";
 import {
+  buildMediaFinalizationCheckpoint,
   buildMediaCheckpoint,
+  finalizeMediaInBatches,
+  mediaFinalizationCacheKey,
+  mediaFinalizationConfig,
   mediaInventoryCacheKey,
+  resolveMediaFinalizationCheckpoint,
   resolveMediaInventoryCheckpoint,
 } from "./lib/media-ingestion-accelerator.js";
 import {
@@ -272,7 +277,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CONTENT_INGESTION_BUILD = "v232.1-recovery-scan-cache";
+const CONTENT_INGESTION_BUILD = "v232.2-resumable-media-finalization";
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
 const ROADMAP_EXTENSION_BUILD = "v221-system-aware-roadmap-extension";
 const RECORDING_ASSIGNMENT_BUILD = "v222-safe-recording-detach";
@@ -34385,6 +34390,26 @@ async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload, queue
       percent: 99,
     }));
     const report = matchMediaReferences(references, uploaded.assets);
+    const finalizationConfig = mediaFinalizationConfig();
+    const finalizationKey = mediaFinalizationCacheKey({
+      mediaJobId: mediaJob.id,
+      inventoryCacheKey,
+    });
+    const resumedFinalization = resolveMediaFinalizationCheckpoint(
+      durableCheckpoint,
+      finalizationKey,
+      uploaded.assets.length,
+    );
+    let finalizationLinks = resumedFinalization.linksVerified;
+    let finalizationLinksCreated = resumedFinalization.linksCreated;
+    let finalizationLinkConflicts = resumedFinalization.linkConflicts;
+    let finalizationDuplicateObjects = resumedFinalization.duplicateObjects;
+    const remainingFinalizationBatches = Math.ceil(
+      Math.max(0, uploaded.assets.length - resumedFinalization.assetsCommitted)
+        / finalizationConfig.batch_size,
+    );
+    const finalizationBatchesTotal = resumedFinalization.batchesCommitted
+      + remainingFinalizationBatches;
     await queueContext.heartbeat(trackProgress({
       stage: "saving_private_media",
       files_processed: uploaded.assets.length,
@@ -34393,14 +34418,119 @@ async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload, queue
       bytes_total: uploaded.candidateUncompressedBytes,
       resumed_files: uploaded.resumedFiles,
       newly_uploaded: uploaded.newlyUploaded,
+      finalization_assets_committed: resumedFinalization.assetsCommitted,
+      finalization_assets_total: uploaded.assets.length,
+      finalization_links_verified: finalizationLinks,
+      finalization_batches_committed: resumedFinalization.batchesCommitted,
+      finalization_batches_total: finalizationBatchesTotal,
+      finalization_batch_size: finalizationConfig.batch_size,
+      finalization_cache: resumedFinalization.source,
       percent: 99,
     }));
-    const saved = await saveContentMediaMatches({
-      mediaJobId: mediaJob.id, parentJob, assets: uploaded.assets, matches: report.matches,
+    const finalizationRun = await finalizeMediaInBatches({
+      assets: uploaded.assets,
+      matches: report.matches,
+      batchSize: finalizationConfig.batch_size,
+      startOffset: resumedFinalization.assetsCommitted,
+      onBatch: async ({
+        assets,
+        matches,
+        nextOffset,
+        batchNumber,
+      }) => {
+        const savedBatch = await saveContentMediaMatchBatch({
+          mediaJobId: mediaJob.id,
+          parentJob,
+          assets,
+          matches,
+        });
+        for (const duplicateObjectKey of savedBatch.duplicateObjects) {
+          await deleteR2Object(duplicateObjectKey).catch((error) => {
+            console.warn("R2 duplicate cleanup failed:", error.message);
+          });
+        }
+        finalizationLinks += savedBatch.links;
+        finalizationLinksCreated += savedBatch.linksCreated;
+        finalizationLinkConflicts += savedBatch.linkConflicts;
+        finalizationDuplicateObjects += savedBatch.duplicateObjects.length;
+        const batchesCommitted = resumedFinalization.batchesCommitted + batchNumber;
+        durableCheckpoint = buildMediaFinalizationCheckpoint({
+          previous: durableCheckpoint,
+          cacheKey: finalizationKey,
+          assetsTotal: uploaded.assets.length,
+          assetsCommitted: nextOffset,
+          linksVerified: finalizationLinks,
+          linksCreated: finalizationLinksCreated,
+          linkConflicts: finalizationLinkConflicts,
+          duplicateObjects: finalizationDuplicateObjects,
+          batchesCommitted,
+          batchSize: finalizationConfig.batch_size,
+        });
+        await queueContext.updateCheckpoint(durableCheckpoint, trackProgress({
+          stage: "saving_private_media",
+          files_processed: uploaded.assets.length,
+          files_total: uploaded.candidateEntries,
+          bytes_processed: uploaded.candidateUncompressedBytes,
+          bytes_total: uploaded.candidateUncompressedBytes,
+          resumed_files: uploaded.resumedFiles,
+          newly_uploaded: uploaded.newlyUploaded,
+          finalization_assets_committed: nextOffset,
+          finalization_assets_total: uploaded.assets.length,
+          finalization_links_verified: finalizationLinks,
+          finalization_links_created: finalizationLinksCreated,
+          finalization_link_conflicts: finalizationLinkConflicts,
+          finalization_batches_committed: batchesCommitted,
+          finalization_batches_total: finalizationBatchesTotal,
+          finalization_batch_size: finalizationConfig.batch_size,
+          finalization_cache: resumedFinalization.source,
+          movement: true,
+          percent: 99,
+        }));
+      },
     });
-    for (const duplicateObjectKey of saved.duplicateObjects) {
-      await deleteR2Object(duplicateObjectKey).catch((error) => console.warn("R2 duplicate cleanup failed:", error.message));
-    }
+    const finalizationBatchesCommitted = resumedFinalization.batchesCommitted
+      + finalizationRun.batchesCommitted;
+    durableCheckpoint = buildMediaFinalizationCheckpoint({
+      previous: durableCheckpoint,
+      cacheKey: finalizationKey,
+      assetsTotal: uploaded.assets.length,
+      assetsCommitted: uploaded.assets.length,
+      linksVerified: finalizationLinks,
+      linksCreated: finalizationLinksCreated,
+      linkConflicts: finalizationLinkConflicts,
+      duplicateObjects: finalizationDuplicateObjects,
+      batchesCommitted: finalizationBatchesCommitted,
+      batchSize: finalizationConfig.batch_size,
+      completed: true,
+    });
+    await queueContext.updateCheckpoint(durableCheckpoint, trackProgress({
+      stage: "saving_private_media",
+      files_processed: uploaded.assets.length,
+      files_total: uploaded.candidateEntries,
+      bytes_processed: uploaded.candidateUncompressedBytes,
+      bytes_total: uploaded.candidateUncompressedBytes,
+      resumed_files: uploaded.resumedFiles,
+      newly_uploaded: uploaded.newlyUploaded,
+      finalization_assets_committed: uploaded.assets.length,
+      finalization_assets_total: uploaded.assets.length,
+      finalization_links_verified: finalizationLinks,
+      finalization_links_created: finalizationLinksCreated,
+      finalization_link_conflicts: finalizationLinkConflicts,
+      finalization_batches_committed: finalizationBatchesCommitted,
+      finalization_batches_total: finalizationBatchesTotal,
+      finalization_batch_size: finalizationConfig.batch_size,
+      finalization_cache: resumedFinalization.source,
+      finalization_complete: true,
+      movement: true,
+      percent: 99,
+    }));
+    const saved = {
+      links: finalizationLinks,
+      linksCreated: finalizationLinksCreated,
+      linkConflicts: finalizationLinkConflicts,
+      duplicateObjects: finalizationDuplicateObjects,
+      batchesCommitted: finalizationBatchesCommitted,
+    };
     await queueContext.heartbeat(trackProgress({
       stage: "image_import_complete",
       files_processed: uploaded.assets.length,
@@ -34414,10 +34544,15 @@ async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload, queue
       inventory_cache: inventorySource,
       matched: report.matches.length,
       linked: saved.links,
+      finalization_links_created: saved.linksCreated,
+      finalization_link_conflicts: saved.linkConflicts,
+      finalization_batches_committed: saved.batchesCommitted,
       percent: 100,
       completed: true,
     }));
-    await finishContentMediaImportJob(mediaJob.id, report.ambiguous.length ? "draft_imported_with_warnings" : "draft_imported", {
+    await finishContentMediaImportJob(mediaJob.id, report.ambiguous.length || saved.linkConflicts
+      ? "draft_imported_with_warnings"
+      : "draft_imported", {
       zip_entries: uploaded.entries,
       uncompressed_bytes: uploaded.uncompressedBytes,
       images_uploaded: uploaded.assets.filter((asset) => asset.mediaKind === "image").length,
@@ -34430,10 +34565,14 @@ async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload, queue
       question_media_references: references.length,
       matched: report.matches.length,
       linked: saved.links,
+      links_created: saved.linksCreated,
+      link_conflicts: saved.linkConflicts,
+      finalization_batches: saved.batchesCommitted,
+      finalization_batch_size: finalizationConfig.batch_size,
       missing: report.missing.length,
       ambiguous: report.ambiguous.length,
       unreferenced: report.unreferenced.length,
-      duplicate_assets: saved.duplicateObjects.length,
+      duplicate_assets: saved.duplicateObjects,
       missing_samples: report.missing.slice(0, 100).map((item) => ({ student_qid: item.studentQid, media_ref: item.mediaRef })),
       ambiguous_samples: report.ambiguous.slice(0, 100),
       unreferenced_samples: report.unreferenced.slice(0, 100).map((item) => item.originalName),
@@ -49262,6 +49401,11 @@ async function runNextGenAutopilotSchedulerOnce() {
     const now = Date.now();
     const due = ngContentArray(db, "community_scheduled_posts")
       .filter((post) => !post.deleted_at && ["scheduled", "ready_to_post"].includes(String(post.status || "").toLowerCase()))
+      .filter((post) => !ngPostPublished(post))
+      .filter((post) => {
+        const lockUntil = new Date(post.publish_lock_until || "").getTime();
+        return !Number.isFinite(lockUntil) || lockUntil <= now;
+      })
       .filter((post) => post.scheduled_at && new Date(post.scheduled_at).getTime() <= now)
       .filter((post) => ngContentCanPublish(post))
       .filter((post) => ngAnswerCanPublishAfterQuestion(db, post).allowed)
