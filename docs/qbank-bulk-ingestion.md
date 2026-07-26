@@ -1,4 +1,4 @@
-# v239 private QBank readiness and bulk ingestion
+# v239 QBank readiness with v240 legacy CDM case ingestion
 
 This workflow removes the need to upload each question image through the CRM.
 It sends one prepared ZIP per bank to private R2 staging, then reuses that exact
@@ -100,5 +100,19 @@ The supplied mapping is intentionally:
 - Amedex: AMC
 - MPlusX: AMC
 
-ACE CDM remains blocked from the ordinary MCQ importer, and eTG remains outside
-the QBank workflow.
+ACE CDM remains blocked from the ordinary MCQ importer. In v240 it may be
+prepared only with:
+
+```json
+{
+  "exam_track": "mccqe",
+  "source_format": "legacy_cdm_write_in_v1",
+  "destinations": ["aylamed_cdm", "roadmap"]
+}
+```
+
+That dedicated path discards the source `I know this / I don't know this`
+controls, preserves the 144 case groups and 187 ordered steps, and keeps all
+content private until rights, collection approval, and both delivery
+destinations are explicitly enabled. eTG remains outside the QBank/CDM
+workflow.

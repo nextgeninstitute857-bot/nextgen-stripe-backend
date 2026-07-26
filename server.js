@@ -27,6 +27,7 @@ import {
   findReusableContentVideos,
   getContentMediaImportJob,
   getContentMediaReferences,
+  getContentCdmCase,
   getContentVideoImportJob,
   getContentImportJob,
   getContentQbankCatalog,
@@ -45,6 +46,7 @@ import {
   listContentQbankQuestions,
   listContentRegistryFlashcardQuestions,
   listContentCollections,
+  listContentCdmCases,
   listContentTaxonomyAuditEvents,
   listContentTaxonomyReviewQueue,
   normalizeContentSourceProfile,
@@ -91,6 +93,18 @@ import {
   sanitizeAylaQbankSession,
   setAylaQbankQuestionMark,
 } from "./lib/aylamed-qbank.js";
+import {
+  AYLA_CDM_STATE_COLLECTIONS,
+  cdmRoadmapAssignmentCaseId,
+  cdmRoadmapAssignmentEligible,
+  cdmRoadmapSessionMatchesAssignment,
+  cdmSessionHistoryRow,
+  createAylaCdmSession,
+  finalizeAylaCdmSession,
+  recordAylaCdmResponse,
+  recordAylaCdmSelfReview,
+  sanitizeAylaCdmSession,
+} from "./lib/aylamed-cdm.js";
 import {
   AYLA_ONBOARDING_PRESETS,
   buildAylaStartingReadinessReport,
@@ -293,7 +307,11 @@ import {
   normalizeBulkQbankMediaAliases,
   normalizeContentRightsStatus,
 } from "./lib/qbank-bulk-ingestion.js";
-import { normalizeExamTrack, slug as contentSlug } from "./lib/content-import-adapter.js";
+import {
+  CONTENT_CDM_INTERACTION_FORMAT,
+  normalizeExamTrack,
+  slug as contentSlug,
+} from "./lib/content-import-adapter.js";
 import cors from "cors";
 import dotenv from "dotenv";
 import Stripe from "stripe";
@@ -34015,13 +34033,33 @@ app.post("/admin/assistant/actions/:id/execute", async (req, res) => {
 const CONTENT_IMPORT_DESTINATIONS = new Set([
   "aylamed_qbank", "lms_assessment", "baseline_diagnostic", "roadmap",
   "content_hub", "marketing", "personal_assessment", "revision", "flashcards", "external_qbank",
+  "aylamed_cdm",
 ]);
 
 function ngParseContentDestinations(value) {
   let rows = [];
   try { rows = Array.isArray(value) ? value : JSON.parse(String(value || "[]")); }
   catch { rows = String(value || "").split(","); }
-  return [...new Set(rows.map((row) => contentSlug(row, "")).filter((row) => CONTENT_IMPORT_DESTINATIONS.has(row)))];
+  return [...new Set(rows
+    .map((row) => contentSlug(row, ""))
+    .map((row) => ["cdm", "legacy-cdm", "legacy_cdm"].includes(row) ? "aylamed_cdm" : row)
+    .filter((row) => CONTENT_IMPORT_DESTINATIONS.has(row)))];
+}
+
+function ngNormalizeContentSourceFormat(value = "") {
+  const clean = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (["cdm", "legacy_cdm", "cdm_write_in", "legacy_cdm_write_in"].includes(clean)) {
+    return CONTENT_CDM_INTERACTION_FORMAT;
+  }
+  if (!clean || ["single_best_answer", "single_best_answer_v1", "sba", "mcq"].includes(clean)) {
+    return "single_best_answer_v1";
+  }
+  const error = new Error(
+    "source_format must be single_best_answer_v1 or legacy_cdm_write_in_v1",
+  );
+  error.statusCode = 400;
+  error.code = "INVALID_CONTENT_SOURCE_FORMAT";
+  throw error;
 }
 
 function ngContentUploadMetadata(body = {}) {
@@ -34320,6 +34358,9 @@ app.post("/admin/crm/ai-training/content-imports/preview", async (req, res) => {
     const sourceRightsStatus = normalizeContentRightsStatus(
       upload.fields.source_rights_status || upload.fields.sourceRightsStatus || "unverified",
     );
+    const sourceFormat = ngNormalizeContentSourceFormat(
+      upload.fields.source_format || upload.fields.sourceFormat,
+    );
     const collectionTitle = String(upload.fields.collection_title || upload.fields.collectionTitle || upload.originalFilename.replace(/\.zip$/i, "")).trim();
     if (examTrack === "unknown") throw Object.assign(new Error("exam_track is required"), { statusCode: 400 });
     if (sourceNamespace === "unknown") throw Object.assign(new Error("source_namespace or source_provider is required"), { statusCode: 400 });
@@ -34331,7 +34372,7 @@ app.post("/admin/crm/ai-training/content-imports/preview", async (req, res) => {
     jobId = crypto.randomUUID();
     await createContentImportJob({
       id: jobId, examTrack, sourceNamespace, sourceProvider, sourceProfile,
-      sourceRightsStatus, collectionTitle,
+      sourceRightsStatus, sourceFormat, collectionTitle,
       originalFilename: upload.originalFilename, zipSha256: upload.sha256,
       destinations, mediaAliases, mediaAliasesFingerprint, createdBy: String(user.id),
     });
@@ -34344,7 +34385,9 @@ app.post("/admin/crm/ai-training/content-imports/preview", async (req, res) => {
         sourceProvider,
         sourceProfile,
         sourceRightsStatus,
+        sourceFormat,
         collectionTitle,
+        destinations,
         mediaAliases,
       },
     });
@@ -34352,7 +34395,7 @@ app.post("/admin/crm/ai-training/content-imports/preview", async (req, res) => {
     return res.status(202).json({
       success: true, job_id: jobId, background_job_id: backgroundJob.id, status: "preview_queued", exam_track: examTrack,
       source_namespace: sourceNamespace, source_profile: sourceProfile,
-      source_rights_status: sourceRightsStatus, destinations,
+      source_rights_status: sourceRightsStatus, source_format: sourceFormat, destinations,
       media_aliases: mediaAliases.length,
       media_aliases_fingerprint: mediaAliasesFingerprint,
       poll_url: `/admin/crm/ai-training/content-imports/${jobId}`,
@@ -37579,6 +37622,547 @@ async function aylaQbankSavedList(req, res, collection, responseKey) {
 app.get("/api/ayla/qbank/bookmarks", (req, res) => aylaQbankSavedList(req, res, "aylaQbankBookmarks", "bookmarks"));
 app.get("/api/ayla/qbank/notes", (req, res) => aylaQbankSavedList(req, res, "aylaQbankNotes", "notes"));
 app.get("/api/ayla/qbank/revision", (req, res) => aylaQbankSavedList(req, res, "aylaRevisionQueue", "revision"));
+
+function aylaOwnedCdmSession(db, user, student, sessionId) {
+  const session = aylaGetItem(db, "aylaCdmSessions", String(sessionId || ""));
+  if (!session
+    || String(session.userId || "") !== String(user.id)
+    || String(session.studentId || "") !== String(student.id)) {
+    const error = new Error("CDM session not found");
+    error.statusCode = 404;
+    error.code = "CDM_SESSION_NOT_FOUND";
+    throw error;
+  }
+  return session;
+}
+
+function aylaCdmEvent(db, session, action, metadata = {}) {
+  const event = {
+    id: aylaId("AYLA-CDME"),
+    userId: session.userId,
+    studentId: session.studentId,
+    examTrack: session.examTrack,
+    sessionId: session.id,
+    caseId: session.caseId,
+    action,
+    metadata: metadata && typeof metadata === "object" ? metadata : {},
+    createdAt: aylaNow(),
+    updatedAt: aylaNow(),
+  };
+  aylaSetItem(db, "aylaCdmEvents", event);
+  return event;
+}
+
+function aylaCdmLegacyNotice() {
+  return {
+    title: "Legacy clinical decision practice",
+    message: "This case format is retained for clinical decision skill practice. It is not the current MCCQE format and does not produce an MCCQE readiness score.",
+    current_mccqe_format: "230 multiple-choice questions",
+    cdm_removed_from_current_exam: true,
+    scoring: "student_self_review_only",
+  };
+}
+
+async function aylaPlayableCdmSession(db, session) {
+  const sourceCase = await getContentCdmCase({
+    caseId: session.caseId,
+    examTrack: session.examTrack,
+    destination: "aylamed_cdm",
+  });
+  if (!sourceCase) {
+    return {
+      session: sanitizeAylaCdmSession(session),
+      case: {
+        case_id: session.caseId,
+        title: session.caseTitle,
+        unavailable: true,
+        message: "This case is no longer approved for student delivery.",
+        steps: [],
+      },
+      notice: aylaCdmLegacyNotice(),
+    };
+  }
+  const mappingByQuestionId = new Map((session.steps || [])
+    .map((row) => [String(row.contentQuestionId || ""), row]));
+  const currentIndex = Math.max(0, Number(session.currentStepIndex || 0));
+  const steps = [];
+  for (const [index, rawStep] of sourceCase.steps.entries()) {
+    const mapping = mappingByQuestionId.get(String(rawStep.id || ""));
+    if (!mapping) continue;
+    const response = session.responses?.[mapping.ref] || null;
+    const review = session.reviews?.[mapping.ref] || null;
+    const locked = index > currentIndex && !review;
+    if (locked) {
+      steps.push({
+        step_ref: mapping.ref,
+        position: index + 1,
+        title: `Step ${index + 1}`,
+        locked: true,
+        response_locked: false,
+        reviewed: false,
+      });
+      continue;
+    }
+    const playable = await ngRegistryQuestionWithPlayableMedia(rawStep);
+    const revealKey = Boolean(response);
+    const visibleMedia = (playable.media || []).filter((item) => {
+      const placement = String(item.placement || "explanation");
+      return placement === "question" || revealKey;
+    });
+    const visibleVideos = (playable.videos || []).filter((item) => {
+      const placement = String(item.placement || "explanation");
+      return placement === "question" || revealKey;
+    });
+    steps.push({
+      step_ref: mapping.ref,
+      content_question_id: mapping.contentQuestionId,
+      position: index + 1,
+      title: rawStep.title || `Step ${index + 1}`,
+      question_html: rawStep.question_html,
+      explanation_html: revealKey ? rawStep.explanation_html : null,
+      max_responses: Number(rawStep.max_responses || mapping.maxResponses || 1),
+      has_dangerous_acts_in_key: revealKey ? rawStep.has_dangerous_acts === true : null,
+      response_locked: Boolean(response),
+      reviewed: Boolean(review),
+      response: response ? {
+        responses: response.responses,
+        response_count: response.responseCount,
+        max_responses: response.maxResponses,
+        over_limit: response.overLimit,
+        confidence: response.confidence,
+        locked_at: response.lockedAt,
+      } : null,
+      self_review: review ? {
+        marks: review.marks,
+        correct_count: review.correctCount,
+        not_acceptable_count: review.notAcceptableCount,
+        dangerous_act_count: review.dangerousActCount,
+        needs_revision: review.needsRevision,
+        note: review.note,
+        reviewed_at: review.reviewedAt,
+      } : null,
+      taxonomy: rawStep.taxonomy || {},
+      media: visibleMedia,
+      videos: visibleVideos,
+      locked: false,
+    });
+  }
+  return {
+    session: sanitizeAylaCdmSession(session),
+    case: {
+      case_id: sourceCase.case_id,
+      title: sourceCase.title,
+      case_number: sourceCase.case_number,
+      step_count: sourceCase.step_count,
+      source_label: sourceCase.source_label,
+      interaction_format: sourceCase.interaction_format,
+      scoring_mode: sourceCase.scoring_mode,
+      legacy_exam_format: true,
+      steps,
+    },
+    notice: aylaCdmLegacyNotice(),
+  };
+}
+
+function aylaUpsertCdmRevision(db, session, sourceCase, mapping, response, review) {
+  if (!review?.needsRevision) return null;
+  const existing = aylaValues(db, "aylaRevisionQueue").find((row) =>
+    String(row.studentId || "") === String(session.studentId)
+    && String(row.sourceType || "") === "legacy_cdm_case"
+    && String(row.sourceId || "") === String(session.caseId));
+  const step = (sourceCase?.steps || []).find((row) => String(row.id) === String(mapping.contentQuestionId)) || {};
+  const reasons = [
+    ...(review.dangerousActCount > 0 ? ["dangerous_act_self_marked"] : []),
+    ...(review.notAcceptableCount > 0 ? ["not_acceptable_response"] : []),
+    ...(response.overLimit ? ["maximum_response_count_exceeded"] : []),
+    ...(response.confidence === "not_sure" ? ["low_confidence"] : []),
+  ];
+  const item = {
+    ...(existing || {}),
+    id: existing?.id || aylaId("AYLA-REV"),
+    userId: session.userId,
+    studentId: session.studentId,
+    examTrack: session.examTrack,
+    sourceType: "legacy_cdm_case",
+    sourceId: session.caseId,
+    resourceId: session.caseId,
+    sourceSessionId: session.id,
+    sourceQuestionRef: mapping.ref,
+    contentQuestionId: mapping.contentQuestionId,
+    title: session.caseTitle,
+    system: step.taxonomy?.system_key || "Clinical decision practice",
+    subsystem: step.taxonomy?.subsystem_key || "",
+    topic: step.taxonomy?.topic_key || "Clinical decision practice",
+    reasons: [...new Set([...(existing?.reasons || []), ...reasons])],
+    priority: review.dangerousActCount > 0 ? "Critical" : "High",
+    status: "due",
+    evidenceType: "student_self_reviewed_legacy_cdm_practice",
+    serverVerifiedScore: false,
+    dueDate: aylaDateOnly(aylaAddDays(new Date(), review.dangerousActCount > 0 ? 1 : 3)),
+    createdAt: existing?.createdAt || aylaNow(),
+    updatedAt: aylaNow(),
+  };
+  aylaSetItem(db, "aylaRevisionQueue", item);
+  return item;
+}
+
+app.get("/api/ayla/cdm/catalog", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.query.student_id || ""), "qbank");
+    const access = aylaRequireQbankAccess(
+      auth.db,
+      auth.user,
+      auth.student,
+      req.query.exam_track || req.query.examTrack || "",
+    );
+    if (access.exam_track !== "mccqe") {
+      return aylaSendError(res, 409, "Legacy CDM practice is available only inside the MCCQE roadmap");
+    }
+    const cases = await listContentCdmCases({
+      examTrack: access.exam_track,
+      destination: "aylamed_cdm",
+      systemKey: req.query.system_key || "",
+      subsystemKey: req.query.subsystem_key || "",
+      topicKey: req.query.topic_key || "",
+      limit: req.query.limit,
+      seed: `${auth.student.id}:${String(req.query.seed || aylaDateOnly())}`,
+    });
+    return aylaSendOk(res, {
+      exam_track: access.exam_track,
+      count: cases.length,
+      step_count: cases.reduce((sum, row) => sum + Number(row.step_count || 0), 0),
+      cases,
+      notice: aylaCdmLegacyNotice(),
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message, error.details);
+  }
+});
+
+app.post("/api/ayla/cdm/sessions", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.body.student_id || req.body.studentId || ""), "qbank");
+    const access = aylaRequireQbankAccess(
+      auth.db,
+      auth.user,
+      auth.student,
+      req.body.exam_track || req.body.examTrack || "",
+    );
+    if (access.exam_track !== "mccqe") {
+      return aylaSendError(res, 409, "Legacy CDM practice is available only inside the MCCQE roadmap");
+    }
+    const roadmapAssignmentId = String(
+      req.body.roadmap_assignment_id || req.body.roadmapAssignmentId || "",
+    ).trim();
+    let caseId = String(req.body.case_id || req.body.caseId || "").trim();
+    let origin = "personal";
+    if (roadmapAssignmentId) {
+      const assignment = aylaGetItem(auth.db, "aylaResourceAssignments", roadmapAssignmentId);
+      if (!assignment || String(assignment.studentId || "") !== String(auth.student.id)) {
+        return aylaSendError(res, 404, "Roadmap CDM assignment not found");
+      }
+      if (!cdmRoadmapAssignmentEligible(assignment)) {
+        return aylaSendError(res, 409, "Roadmap assignment is not a CDM case");
+      }
+      if (["completed", "cancelled", "canceled", "skipped", "superseded"].includes(
+        String(assignment.status || "").toLowerCase(),
+      )) {
+        return aylaSendError(res, 409, "This roadmap CDM assignment is no longer active");
+      }
+      caseId = cdmRoadmapAssignmentCaseId(assignment);
+      origin = "roadmap";
+    }
+    if (!caseId) return aylaSendError(res, 400, "case_id or roadmap_assignment_id is required");
+
+    const active = aylaValues(auth.db, "aylaCdmSessions").find((row) =>
+      String(row.userId || "") === String(auth.user.id)
+      && String(row.studentId || "") === String(auth.student.id)
+      && String(row.examTrack || "") === String(access.exam_track)
+      && String(row.caseId || "") === caseId
+      && String(row.roadmapAssignmentId || "") === roadmapAssignmentId
+      && String(row.status || "") === "in_progress");
+    if (active) {
+      return aylaSendOk(res, {
+        ...(await aylaPlayableCdmSession(auth.db, active)),
+        idempotent_replay: true,
+      });
+    }
+
+    const sourceCase = await getContentCdmCase({
+      caseId,
+      examTrack: access.exam_track,
+      destination: "aylamed_cdm",
+    });
+    if (!sourceCase?.steps?.length) {
+      return aylaSendError(res, 409, "This CDM case is not currently approved for student delivery");
+    }
+    const sessionId = aylaId("AYLA-CDM");
+    const created = await mutateAylaDb(async (db) => {
+      const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, access.exam_track);
+      if (roadmapAssignmentId) {
+        const assignment = aylaGetItem(db, "aylaResourceAssignments", roadmapAssignmentId);
+        if (!assignment
+          || String(assignment.studentId || "") !== String(fresh.student.id)
+          || !cdmRoadmapAssignmentEligible(assignment)
+          || cdmRoadmapAssignmentCaseId(assignment) !== caseId) {
+          const error = new Error("The roadmap CDM assignment changed before the session was created");
+          error.statusCode = 409;
+          throw error;
+        }
+      }
+      const session = createAylaCdmSession({
+        id: sessionId,
+        userId: fresh.user.id,
+        studentId: fresh.student.id,
+        examTrack: access.exam_track,
+        caseId,
+        caseTitle: sourceCase.title,
+        origin,
+        roadmapAssignmentId: roadmapAssignmentId || null,
+        entitlement: fresh.entitlement,
+        steps: sourceCase.steps.map((step) => ({
+          ref: crypto.randomUUID(),
+          contentQuestionId: step.id,
+          maxResponses: step.max_responses,
+        })),
+      });
+      aylaSetItem(db, "aylaCdmSessions", session);
+      aylaCdmEvent(db, session, "session_created", {
+        stepCount: session.stepCount,
+        origin: session.origin,
+      });
+      aylaV189RecordActivity(db, session.studentId, "legacy_cdm_session_created", {
+        sessionId: session.id,
+        caseId: session.caseId,
+        examTrack: session.examTrack,
+        scoreGenerated: false,
+      });
+      return session;
+    });
+    const latestDb = await readAylaDb();
+    return aylaSendOk(res, {
+      ...(await aylaPlayableCdmSession(latestDb, created)),
+      idempotent_replay: false,
+    }, 201);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message, error.details);
+  }
+});
+
+app.get("/api/ayla/cdm/sessions/:sessionId", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.query.student_id || ""), "qbank");
+    const session = aylaOwnedCdmSession(auth.db, auth.user, auth.student, req.params.sessionId);
+    aylaRequireQbankAccess(auth.db, auth.user, auth.student, session.examTrack);
+    return aylaSendOk(res, await aylaPlayableCdmSession(auth.db, session));
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.post("/api/ayla/cdm/sessions/:sessionId/responses", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.body.student_id || req.body.studentId || ""), "qbank");
+    const initial = aylaOwnedCdmSession(auth.db, auth.user, auth.student, req.params.sessionId);
+    aylaRequireQbankAccess(auth.db, auth.user, auth.student, initial.examTrack);
+    const mutation = await mutateAylaDb(async (db) => {
+      const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, initial.examTrack);
+      const current = aylaOwnedCdmSession(db, fresh.user, fresh.student, initial.id);
+      const result = recordAylaCdmResponse(current, {
+        stepRef: req.body.step_ref || req.body.stepRef,
+        responses: req.body.responses ?? req.body.response_lines ?? req.body.responseLines,
+        confidence: req.body.confidence,
+      });
+      aylaSetItem(db, "aylaCdmSessions", result.session);
+      if (!result.replayed) {
+        aylaCdmEvent(db, result.session, "responses_locked", {
+          stepRef: result.response.stepRef,
+          responseCount: result.response.responseCount,
+          maxResponses: result.response.maxResponses,
+          overLimit: result.response.overLimit,
+          confidence: result.response.confidence,
+          answerKeyIncluded: false,
+        });
+      }
+      return result;
+    });
+    const latestDb = await readAylaDb();
+    const current = aylaOwnedCdmSession(latestDb, auth.user, auth.student, initial.id);
+    return aylaSendOk(res, {
+      ...(await aylaPlayableCdmSession(latestDb, current)),
+      idempotent_replay: mutation.replayed,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.post("/api/ayla/cdm/sessions/:sessionId/reviews", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.body.student_id || req.body.studentId || ""), "qbank");
+    const initial = aylaOwnedCdmSession(auth.db, auth.user, auth.student, req.params.sessionId);
+    aylaRequireQbankAccess(auth.db, auth.user, auth.student, initial.examTrack);
+    const sourceCase = await getContentCdmCase({
+      caseId: initial.caseId,
+      examTrack: initial.examTrack,
+      destination: "aylamed_cdm",
+    });
+    if (!sourceCase) return aylaSendError(res, 409, "This CDM case is no longer approved for student delivery");
+    const mutation = await mutateAylaDb(async (db) => {
+      const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, initial.examTrack);
+      const current = aylaOwnedCdmSession(db, fresh.user, fresh.student, initial.id);
+      const stepRef = String(req.body.step_ref || req.body.stepRef || "").trim();
+      const mapping = (current.steps || []).find((row) => String(row.ref) === stepRef);
+      if (!mapping) {
+        const error = new Error("Step does not belong to this CDM session");
+        error.statusCode = 404;
+        throw error;
+      }
+      const result = recordAylaCdmSelfReview(current, {
+        stepRef,
+        marks: req.body.marks,
+        note: req.body.note,
+      });
+      aylaSetItem(db, "aylaCdmSessions", result.session);
+      if (!result.replayed) {
+        const response = result.session.responses?.[stepRef];
+        const attempt = {
+          id: aylaId("AYLA-CDMA"),
+          userId: result.session.userId,
+          studentId: result.session.studentId,
+          examTrack: result.session.examTrack,
+          sessionId: result.session.id,
+          caseId: result.session.caseId,
+          stepRef,
+          contentQuestionId: mapping.contentQuestionId,
+          responseCount: response?.responseCount || 0,
+          maxResponses: response?.maxResponses || mapping.maxResponses,
+          overLimit: response?.overLimit === true,
+          confidence: response?.confidence,
+          selfReview: result.review,
+          evidenceType: "student_self_reviewed_legacy_cdm_practice",
+          scorePercent: null,
+          serverVerifiedScore: false,
+          createdAt: result.review.reviewedAt,
+          updatedAt: result.review.reviewedAt,
+        };
+        aylaSetItem(db, "aylaCdmAttempts", attempt);
+        const revision = aylaUpsertCdmRevision(
+          db,
+          result.session,
+          sourceCase,
+          mapping,
+          response,
+          result.review,
+        );
+        aylaCdmEvent(db, result.session, "step_self_reviewed", {
+          stepRef,
+          correctCount: result.review.correctCount,
+          notAcceptableCount: result.review.notAcceptableCount,
+          dangerousActCount: result.review.dangerousActCount,
+          revisionId: revision?.id || null,
+          scoreGenerated: false,
+        });
+      }
+      return result;
+    });
+    const latestDb = await readAylaDb();
+    const current = aylaOwnedCdmSession(latestDb, auth.user, auth.student, initial.id);
+    return aylaSendOk(res, {
+      ...(await aylaPlayableCdmSession(latestDb, current)),
+      idempotent_replay: mutation.replayed,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.post("/api/ayla/cdm/sessions/:sessionId/complete", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.body.student_id || req.body.studentId || ""), "qbank");
+    const initial = aylaOwnedCdmSession(auth.db, auth.user, auth.student, req.params.sessionId);
+    aylaRequireQbankAccess(auth.db, auth.user, auth.student, initial.examTrack);
+    const mutation = await mutateAylaDb(async (db) => {
+      const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, initial.examTrack);
+      const current = aylaOwnedCdmSession(db, fresh.user, fresh.student, initial.id);
+      const result = finalizeAylaCdmSession(current);
+      if (!result.replayed) {
+        aylaSetItem(db, "aylaCdmSessions", result.session);
+        if (result.session.origin === "roadmap" && result.session.roadmapAssignmentId) {
+          const assignment = aylaGetItem(db, "aylaResourceAssignments", result.session.roadmapAssignmentId);
+          const active = assignment
+            && String(assignment.studentId || "") === String(result.session.studentId)
+            && !["completed", "cancelled", "canceled", "skipped", "superseded"].includes(
+              String(assignment.status || "").toLowerCase(),
+            );
+          if (active
+            && cdmRoadmapAssignmentEligible(assignment)
+            && cdmRoadmapSessionMatchesAssignment(result.session, assignment)) {
+            assignment.status = "completed";
+            assignment.progressPercent = 100;
+            assignment.cdmSessionIds = [...new Set([
+              ...(Array.isArray(assignment.cdmSessionIds) ? assignment.cdmSessionIds : []),
+              result.session.id,
+            ])];
+            assignment.completedAt = assignment.completedAt || result.session.completedAt;
+            assignment.updatedAt = result.session.completedAt;
+            aylaSetItem(db, "aylaResourceAssignments", assignment);
+            if (assignment.dailyPlanId) aylaV189UpdatePlanCompletion(db, assignment.dailyPlanId);
+          }
+        }
+        aylaCdmEvent(db, result.session, "case_completed", {
+          ...result.session.summary,
+          scoreGenerated: false,
+        });
+        aylaV189RecordActivity(db, result.session.studentId, "legacy_cdm_case_completed", {
+          sessionId: result.session.id,
+          caseId: result.session.caseId,
+          examTrack: result.session.examTrack,
+          revisionNeeded: result.session.summary?.revisionNeeded === true,
+          scoreGenerated: false,
+        });
+      }
+      return result;
+    });
+    const latestDb = await readAylaDb();
+    const current = aylaOwnedCdmSession(latestDb, auth.user, auth.student, initial.id);
+    return aylaSendOk(res, {
+      ...(await aylaPlayableCdmSession(latestDb, current)),
+      idempotent_replay: mutation.replayed,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.get("/api/ayla/cdm/history", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.query.student_id || ""), "qbank");
+    const access = aylaRequireQbankAccess(
+      auth.db,
+      auth.user,
+      auth.student,
+      req.query.exam_track || req.query.examTrack || "",
+    );
+    const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 20));
+    const rows = aylaValues(auth.db, "aylaCdmSessions")
+      .filter((row) => String(row.userId || "") === String(auth.user.id))
+      .filter((row) => String(row.studentId || "") === String(auth.student.id))
+      .filter((row) => String(row.examTrack || "") === String(access.exam_track))
+      .sort((a, b) => String(b.completedAt || b.updatedAt || "").localeCompare(
+        String(a.completedAt || a.updatedAt || ""),
+      ))
+      .slice(0, limit);
+    return aylaSendOk(res, {
+      exam_track: access.exam_track,
+      count: rows.length,
+      history: rows.map(cdmSessionHistoryRow),
+      notice: aylaCdmLegacyNotice(),
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
 
 app.get("/admin/crm/ai-training", async (req, res) => {
   try {
@@ -58677,7 +59261,7 @@ const DEFAULT_AYLA_SETTINGS = {
     require_verified_mapping: true,
     allow_external_question_ids: true,
     allow_internal_mcqs: true,
-    assignment_mix: { reading: true, video: true, external_questions: true, internal_mcqs: true, flashcards: true, assessments: true },
+    assignment_mix: { reading: true, video: true, external_questions: true, internal_mcqs: true, cdm_cases: true, flashcards: true, assessments: true },
   },
   adaptive: {
     low_completion_days: 3,
@@ -58750,6 +59334,9 @@ const DEFAULT_AYLA_DB = {
   aylaQbankBookmarks: {},
   aylaQbankNotes: {},
   aylaQbankEvents: {},
+  aylaCdmSessions: {},
+  aylaCdmEvents: {},
+  aylaCdmAttempts: {},
   aylaWeakAreaRules: {},
   aylaWeakAreaLogs: {},
   aylaFlashcardRules: {},
@@ -58916,7 +59503,7 @@ async function writeAylaDb(db) {
       );
     }
     if (aylaDbCache && latestQbankVersion > incomingQbankVersion) {
-      for (const key of AYLA_QBANK_STATE_COLLECTIONS) {
+      for (const key of [...AYLA_QBANK_STATE_COLLECTIONS, ...AYLA_CDM_STATE_COLLECTIONS]) {
         preparedDb[key] = mergeConcurrentAylaQbankCollection(aylaDbCache[key], db[key]);
       }
     }
@@ -61022,6 +61609,9 @@ function aylaCascadeDeleteRelatedRecords(db, { studentId = null, diagnosticId = 
     "aylaReadingProgress",
     "aylaVideoProgress",
     "aylaQuestionAttempts",
+    "aylaCdmSessions",
+    "aylaCdmEvents",
+    "aylaCdmAttempts",
     "aylaFlashcardReviews",
     "aylaAssessmentAttempts",
     "aylaConceptMastery",
@@ -64945,6 +65535,7 @@ const AYLA_V189_RESOURCE_TYPES = new Set([
   "assessment",
   "assessment_blueprint",
   "revision_sheet",
+  "legacy_cdm_case",
 ]);
 
 const AYLA_V189_PROFANITY = [
@@ -65053,7 +65644,7 @@ function aylaV189StudentOwned(student, user) {
 
 function aylaV208FeatureForStudentRoute(req) {
   const route = String(req.path || req.originalUrl || "").toLowerCase();
-  if (route.includes("/qbank") || route.includes("question-attempts") || route.includes("assign-qbank")) return "qbank";
+  if (route.includes("/qbank") || route.includes("/cdm") || route.includes("question-attempts") || route.includes("assign-qbank")) return "qbank";
   if (route.includes("notebook")) return "dynamic_notebook";
   if (route.includes("/revision")) return "revision";
   if (route.includes("/progress")) return "progress";
@@ -65115,6 +65706,7 @@ function aylaV189ResourceType(value = "") {
   if (clean === "video" || clean === "vimeo") return "vimeo_video";
   if (clean === "external_qid" || clean === "qid" || clean === "uworld_qid") return "external_question";
   if (clean === "mcq" || clean === "question") return "internal_mcq";
+  if (clean === "cdm" || clean === "cdm_case") return "legacy_cdm_case";
   if (clean === "book_page" || clean === "pages") return "reading";
   return AYLA_V189_RESOURCE_TYPES.has(clean) ? clean : "book";
 }
@@ -65168,7 +65760,7 @@ function aylaV189NormalizeResource(payload = {}, existing = {}) {
       ?? existing.hierarchyPath
       ?? existing.hierarchy_path,
   );
-  const estimatedMinutes = Math.max(1, Math.min(240, aylaNumber(payload.estimatedMinutes ?? payload.estimated_minutes ?? existing.estimatedMinutes ?? existing.estimated_minutes, type === "internal_mcq" || type === "external_question" ? 2 : type === "flashcard" ? 1 : type === "assessment" ? 30 : 20)));
+  const estimatedMinutes = Math.max(1, Math.min(240, aylaNumber(payload.estimatedMinutes ?? payload.estimated_minutes ?? existing.estimatedMinutes ?? existing.estimated_minutes, type === "internal_mcq" || type === "external_question" ? 2 : type === "legacy_cdm_case" ? 12 : type === "flashcard" ? 1 : type === "assessment" ? 30 : 20)));
   const examTrackId = aylaCanonicalExamTrack(payload.examTrackId || payload.exam_track_id || payload.examTrack || payload.exam_track || payload.exam || existing.examTrackId || existing.exam_track_id || existing.examTrack || existing.exam_track || existing.exam);
   const examDefinition = examTrackId ? AYLA_EXAM_REGISTRY[examTrackId] : null;
   const resource = {
@@ -65522,6 +66114,57 @@ async function aylaV210EligibleVideos(db, student, { forRoadmap = false } = {}) 
   return { videos, assignments, warning: registry.warning };
 }
 
+async function aylaV240EligibleCdmCases(db, student, date = aylaDateOnly()) {
+  const examTrack = normalizeAylaRegistryExamTrack(
+    student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam,
+  );
+  if (examTrack !== "mccqe") return { cases: [], warning: null };
+  if (!contentRegistryStatus().configured) return { cases: [], warning: null };
+  try {
+    const completedCaseIds = new Set(aylaValues(db, "aylaCdmSessions")
+      .filter((row) => String(row.studentId || "") === String(student.id))
+      .filter((row) => String(row.examTrack || "") === "mccqe")
+      .filter((row) => String(row.status || "") === "completed")
+      .map((row) => String(row.caseId || "")));
+    const rows = await listContentCdmCases({
+      examTrack,
+      destination: "aylamed_roadmap",
+      limit: 100,
+      seed: `${student.id}:${date}`,
+    });
+    return {
+      cases: rows
+        .filter((row) => !completedCaseIds.has(String(row.case_id || "")))
+        .map((row) => ({
+          id: row.case_id,
+          type: "legacy_cdm_case",
+          title: `${row.title || "Clinical decision case"} · ${row.step_count} step${Number(row.step_count) === 1 ? "" : "s"}`,
+          description: "Write one clinical action per line, then self-review it against the historical marking key.",
+          provider: row.source_label || "Approved clinical decision source",
+          examTrackId: "mccqe",
+          examTrack: "MCCQE",
+          system: row.system_key || "Clinical decision practice",
+          subsystem: row.subsystem_key || "",
+          topic: row.topic_key || "Clinical decision practice",
+          estimatedMinutes: Math.max(8, Math.min(45, Number(row.step_count || 1) * 8)),
+          authorizationStatus: "approved_registry_collection",
+          sourceAccessMode: "protected",
+          verificationStatus: "approved_content_registry",
+          deliveryDestinations: ["aylamed_cdm", "aylamed_roadmap"],
+          cdmCaseId: row.case_id,
+          cdmStepCount: Number(row.step_count || 0),
+          interactionFormat: "legacy_cdm_write_in_v1",
+          legacyExamFormat: true,
+          relevance: 35,
+        })),
+      warning: null,
+    };
+  } catch (error) {
+    console.warn("AylaMed CDM roadmap registry read unavailable:", error.message);
+    return { cases: [], warning: "cdm_registry_temporarily_unavailable" };
+  }
+}
+
 async function aylaV211EligibleReadings(db, student) {
   const examTrack = student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam;
   const stored = aylaV189RelevantResources(db, student, ["book", "reading", "revision_sheet"]);
@@ -65686,6 +66329,10 @@ function aylaV189AssignmentSnapshot(db, resource = {}, options = {}) {
     back: resource.back || "",
     estimatedMinutes: aylaNumber(resource.estimatedMinutes, 15),
     verificationStatus: resource.verificationStatus || "verified",
+    cdmCaseId: resource.cdmCaseId || resource.cdm_case_id || (aylaV189ResourceType(resource.type) === "legacy_cdm_case" ? resource.id : ""),
+    cdmStepCount: Math.max(0, aylaNumber(resource.cdmStepCount ?? resource.cdm_step_count ?? resource.stepCount ?? resource.step_count, 0)),
+    interactionFormat: resource.interactionFormat || resource.interaction_format || "",
+    legacyExamFormat: resource.legacyExamFormat === true || resource.legacy_exam_format === true,
   };
 }
 
@@ -66323,6 +66970,27 @@ function aylaV189DueRevisionQueue(db, student, date) {
 
 function aylaV189ResolveRevisionResource(db, revision = {}, student = {}) {
   const studentExam = aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam);
+  if (String(revision.sourceType || "") === "legacy_cdm_case" && revision.sourceId) {
+    return {
+      id: String(revision.sourceId),
+      type: "legacy_cdm_case",
+      title: revision.title || "Legacy clinical decision case review",
+      provider: "Approved clinical decision source",
+      examTrackId: studentExam,
+      examTrack: AYLA_EXAM_REGISTRY[studentExam]?.label || "MCCQE",
+      system: revision.system || "Clinical decision practice",
+      subsystem: revision.subsystem || "",
+      topic: revision.topic || "Clinical decision practice",
+      estimatedMinutes: 12,
+      approved: true,
+      status: "active",
+      authorizationStatus: "approved_registry_collection",
+      verificationStatus: "student_self_reviewed_legacy_cdm_practice",
+      cdmCaseId: String(revision.sourceId),
+      interactionFormat: "legacy_cdm_write_in_v1",
+      legacyExamFormat: true,
+    };
+  }
   const eligible = (resource) => Boolean(resource
     && resource.approved !== false
     && !["disabled", "deleted", "rejected", "archived", "quarantined"].includes(String(resource.status || "").toLowerCase())
@@ -66743,6 +67411,7 @@ function aylaV189CategoryForResource(resource = {}, revision = {}) {
   if (["external_question", "external_qid_mapping"].includes(type)) return "external_questions";
   if (type === "internal_mcq") return "internal_mcqs";
   if (type === "flashcard") return "flashcards";
+  if (type === "legacy_cdm_case") return "cdm_case";
   if (["assessment", "assessment_blueprint"].includes(type) || revision.sourceType === "assessment") return "assessment";
   return "reading";
 }
@@ -66800,6 +67469,9 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   const dueRevisions = aylaV189DueRevisionQueue(db, student, date).slice(0, 20);
   const contentHubEnabled = aylaV210StudentFeatureAllowed(db, student, "content_hub");
   const libraryEnabled = aylaV210StudentFeatureAllowed(db, student, "library");
+  const cdmEnabled = aylaCanonicalExamTrack(
+    student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam,
+  ) === "mccqe" && aylaV210StudentFeatureAllowed(db, student, "qbank");
   const storedRelevant = aylaV189RelevantResources(db, student, ["book", "reading", "revision_sheet", "vimeo_video", "video_transcript", "external_question", "external_qid_mapping", "internal_mcq", "flashcard", "assessment", "assessment_blueprint"]);
   const contentHub = contentHubEnabled
     ? await aylaV210EligibleVideos(db, student, { forRoadmap: true })
@@ -66807,6 +67479,9 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   const library = libraryEnabled
     ? await aylaV211EligibleReadings(db, student)
     : { resources: [], warning: null };
+  const cdm = cdmEnabled
+    ? await aylaV240EligibleCdmCases(db, student, date)
+    : { cases: [], warning: null };
   const allRelevant = [
     ...storedRelevant.filter((row) => !["book", "reading", "revision_sheet", "vimeo_video", "video_transcript"].includes(aylaV189ResourceType(row.type))),
     ...library.resources,
@@ -66854,6 +67529,8 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     contentHubRegistryWarning: contentHub.warning,
     libraryEnabled,
     libraryPageSourceWarning: library.warning,
+    cdmEnabled,
+    cdmRegistryWarning: cdm.warning,
     notebookMemory: aylaV190NotebookMemory(db, student),
     studyDay,
     tutorBrain: {
@@ -67067,6 +67744,36 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       rationale: "Original verified MCQs for the same daily focus. Correctness is scored only on the server.",
     });
     else plan.missingResourceTypes.push("internal_mcqs_for_focus");
+  }
+
+  if (mix.cdm_cases !== false && cdmEnabled) {
+    const pick = cdm.cases.slice(0, 1);
+    if (pick.length) {
+      const assignment = aylaV189BuildDailyPlanAddAssignment(
+        db,
+        student,
+        plan,
+        assignments,
+        effectiveCapacity,
+        "cdm_case",
+        pick,
+        `Clinical decision practice: ${pick[0].title}`,
+        {
+          type: "cdm_case",
+          estimatedMinutes: pick[0].estimatedMinutes,
+          system: pick[0].system,
+          subsystem: pick[0].subsystem,
+          topic: pick[0].topic,
+          priority: "High",
+          rationale: "An approved legacy CDM case for written clinical-decision practice. Completion requires every step to be answered and self-reviewed; it does not create an MCCQE score.",
+        },
+      );
+      if (assignment) assignment.cdmCaseId = pick[0].cdmCaseId;
+    } else if (cdm.warning) {
+      plan.missingResourceTypes.push(cdm.warning);
+    } else {
+      plan.missingResourceTypes.push("legacy_cdm_case_for_mccqe");
+    }
   }
 
   if (mix.flashcards !== false) {

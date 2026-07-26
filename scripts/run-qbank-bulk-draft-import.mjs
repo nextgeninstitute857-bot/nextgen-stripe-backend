@@ -191,7 +191,7 @@ async function inspectLocalBanks(manifest) {
 }
 
 async function rehearseLocalBanks(manifest) {
-  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "aylamed-v239-rehearsal-"));
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), `aylamed-${manifest.version}-rehearsal-`));
   const seenHashesByExam = new Map();
   const banks = [];
   try {
@@ -211,6 +211,8 @@ async function rehearseLocalBanks(manifest) {
           sourceNamespace: bank.source_namespace,
           sourceProvider: bank.source_provider,
           collectionTitle: bank.collection_title,
+          sourceFormat: bank.source_format,
+          destinations: bank.destinations,
           mediaAliases: bank.media_aliases,
           duplicateLookup: async (_examTrack, hashes) => ({
             exact: hashes.filter((hash) => seenHashes.has(hash)).map((hash) => ({ canonical_hash: hash })),
@@ -228,7 +230,9 @@ async function rehearseLocalBanks(manifest) {
             exam_track: bank.exam_track,
             source_namespace: bank.source_namespace,
             source_provider: bank.source_provider,
+            source_format: bank.source_format,
             collection_title: bank.collection_title,
+            destinations: bank.destinations,
             media_aliases: bank.media_aliases,
           },
           batchSize: 100,
@@ -263,6 +267,7 @@ async function rehearseLocalBanks(manifest) {
           exam_track: bank.exam_track,
           source_profile: bank.source_profile,
           source_rights_status: bank.source_rights_status,
+          source_format: bank.source_format,
           zip_sha256: bank.sha256,
           preview: preview.counts,
           draft_import: imported.totals,
@@ -280,7 +285,7 @@ async function rehearseLocalBanks(manifest) {
       }
     }
     return {
-      version: "v239",
+      version: manifest.version,
       mode: "local_private_draft_rehearsal",
       network_requests: 0,
       production_writes: 0,
@@ -394,6 +399,7 @@ async function uploadPreparedBundle({ api, bank, bankState, onState }) {
           source_provider: bank.source_provider,
           source_profile: bank.source_profile,
           source_rights_status: bank.source_rights_status,
+          source_format: bank.source_format,
           collection_title: bank.collection_title,
           destinations: bank.destinations,
           media_aliases_count: bank.media_aliases.length,
@@ -408,7 +414,7 @@ async function uploadPreparedBundle({ api, bank, bankState, onState }) {
   }
   if (upload.status === "finalized") return upload;
   if (upload.transport !== "r2_multipart") {
-    throw statusError("The v239 bulk runner requires direct R2 multipart uploads");
+    throw statusError("The bulk runner requires direct R2 multipart uploads");
   }
 
   const received = new Set((upload.received_indices || []).map(Number));
@@ -515,6 +521,7 @@ async function runBank({
         source_provider: bank.source_provider,
         source_profile: bank.source_profile,
         source_rights_status: bank.source_rights_status,
+        source_format: bank.source_format,
         collection_title: bank.collection_title,
         destinations: bank.destinations,
         media_aliases: bank.media_aliases,
@@ -684,6 +691,7 @@ async function main() {
         exam_track: bank.exam_track,
         source_profile: bank.source_profile,
         source_rights_status: bank.source_rights_status,
+        source_format: bank.source_format,
         bundle_zip: bank.bundle_zip,
         total_bytes: bank.total_bytes,
         sha256: bank.sha256,
@@ -705,11 +713,11 @@ async function main() {
     "--state-file",
     path.join(
       os.tmpdir(),
-      `aylamed-v239-${crypto.createHash("sha1").update(manifestFile).digest("hex")}.state.json`,
+      `aylamed-${executableManifest.version}-${crypto.createHash("sha1").update(manifestFile).digest("hex")}.state.json`,
     ),
   ));
   const state = await readJson(stateFile, {
-    version: "v239",
+    version: executableManifest.version,
     manifest_file: manifestFile,
     created_at: new Date().toISOString(),
     banks: {},

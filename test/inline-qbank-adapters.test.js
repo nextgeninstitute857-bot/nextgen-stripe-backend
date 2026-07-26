@@ -14,6 +14,8 @@ async function previewFixture({
   examTrack = "usmle-step-1",
   mediaNames = [],
   mediaAliases = [],
+  sourceFormat = "",
+  destinations = [],
 }) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "aylamed-inline-bank-"));
   const questionName = `${stem}.db_questions.json`;
@@ -38,6 +40,8 @@ async function previewFixture({
       sourceNamespace: namespace,
       sourceProvider: provider,
       collectionTitle: "Fixture",
+      sourceFormat,
+      destinations,
       mediaAliases,
       duplicateLookup: async () => ({ exact: [], source: [] }),
     });
@@ -96,6 +100,7 @@ test("AMBOSS paired exports preview through the provider-aware SBA adapter", asy
     stem: "ambossqb-USMLE Step 12025",
     question: {
       id: 1,
+      title: "CASE 1 - Question 1",
       question: '<p onclick="alert(1)">Stem?</p>',
       explanation: "<p>Explanation</p>",
       corrAns: 2,
@@ -220,4 +225,58 @@ test("CDM self-rating exports are quarantined and block ordinary MCQ draft impor
   assert.deepEqual(preview.counts.source_adapters, { cdm_self_rating_v1: 1 });
   assert.deepEqual(preview.counts.item_formats, { cdm_self_rating_case: 1 });
   assert.ok(preview.errors[0].errors.includes("specialized_cdm_interaction_required"));
+});
+
+test("CDM exports preview only through the dedicated write-in destination", async () => {
+  const preview = await previewFixture({
+    provider: "AceQBank",
+    namespace: "aceqbank-cdm-2024",
+    stem: "aceqbank-cdm-2024",
+    examTrack: "mccqe",
+    sourceFormat: "legacy_cdm_write_in_v1",
+    destinations: ["aylamed_cdm", "roadmap"],
+    question: {
+      id: 10,
+      parentQId: 10,
+      title: "CASE 7 - Question 1",
+      question: '<p>Clinical case</p><img src="case-7.png">',
+      explanation: "<p>Maximum number of allowed responses: 2</p><p>Correct answer(s)</p>",
+      corrAns: 1,
+      sysId: 0,
+      subId: 0,
+    },
+    answers: [
+      { id: 1, qId: 10, answerId: 1, answerText: "I know this" },
+      { id: 2, qId: 10, answerId: 2, answerText: "I don't know this" },
+    ],
+    mediaNames: ["case-7.png"],
+  });
+  assert.equal(preview.counts.import_blocked, false);
+  assert.equal(preview.counts.valid_questions, 1);
+  assert.equal(preview.counts.cdm_cases, 1);
+  assert.equal(preview.counts.cdm_steps, 1);
+  assert.equal(preview.counts.cdm_self_rating_controls_ignored, 2);
+  assert.equal(preview.counts.media_matched, 1);
+});
+
+test("CDM destination refuses ordinary SBA rows", async () => {
+  const preview = await previewFixture({
+    provider: "AceQBank",
+    namespace: "incorrect-specialized-upload",
+    examTrack: "mccqe",
+    sourceFormat: "legacy_cdm_write_in_v1",
+    destinations: ["aylamed_cdm"],
+    question: {
+      id: 11,
+      question: "<p>Ordinary question</p>",
+      explanation: "<p>Explanation</p>",
+      corrAns: 1,
+    },
+    answers: [
+      { id: 1, qId: 11, answerId: 1, answerText: "A" },
+      { id: 2, qId: 11, answerId: 2, answerText: "B" },
+    ],
+  });
+  assert.equal(preview.counts.import_blocked, true);
+  assert.deepEqual(preview.counts.blocking_reasons, { source_format_item_mismatch: 1 });
 });

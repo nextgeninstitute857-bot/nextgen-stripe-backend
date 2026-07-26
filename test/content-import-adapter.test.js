@@ -15,6 +15,7 @@ import {
   resolveContentSourceExamHint,
   resolveContentSourceAdapter,
   sanitizeImportedHtml,
+  validateAdaptedCdmStep,
   validateAdaptedQuestion,
 } from "../lib/content-import-adapter.js";
 
@@ -117,6 +118,7 @@ test("exam hints use exact export evidence instead of treating a multi-exam prov
 test("CDM self-rating exports are detected and blocked from ordinary MCQ scoring", () => {
   const question = {
     id: 1,
+    title: "CASE 1 - Question 1",
     question: "<p>CDM CASE 1</p>",
     explanation: "<p>Maximum number of allowed responses: 3</p><p>Correct answer(s)</p>",
     corrAns: 1,
@@ -135,6 +137,15 @@ test("CDM self-rating exports are detected and blocked from ordinary MCQ scoring
   assert.equal(row.sourceData.source_adapter, CONTENT_SOURCE_ADAPTERS.cdmSelfRating);
   assert.equal(row.sourceData.item_format, "cdm_self_rating_case");
   assert.equal(row.sourceData.scoring_mode, "self_rating_not_mastery");
+  assert.equal(row.sourceData.interaction_format, "legacy_cdm_write_in_v1");
+  assert.equal(row.sourceData.case_source_id, "1");
+  assert.equal(row.sourceData.case_number, 1);
+  assert.equal(row.sourceData.step_number, 1);
+  assert.equal(row.sourceData.max_responses, 3);
+  assert.equal(row.sourceData.source_self_rating_controls_ignored, 2);
+  assert.equal(row.correctAnswerId, -1);
+  assert.deepEqual(row.answers, []);
+  assert.deepEqual(validateAdaptedCdmStep(row), []);
   assert.ok(validateAdaptedQuestion(row).includes("specialized_cdm_interaction_required"));
 });
 

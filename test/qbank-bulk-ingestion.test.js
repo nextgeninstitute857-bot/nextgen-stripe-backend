@@ -108,6 +108,39 @@ test("reviewed media aliases are exact, fingerprinted, and cannot alter placemen
   );
 });
 
+test("legacy CDM manifests are MCCQE-only and cannot enter SBA destinations", () => {
+  const manifest = normalizeBulkQbankManifest({
+    banks: [bank({
+      bundle_zip: "./ace-cdm.zip",
+      exam_track: "mccqe",
+      source_provider: "ACE QBank",
+      source_namespace: "aceqbank-cdm-2024",
+      collection_title: "ACE Legacy CDM 2024",
+      source_format: "legacy_cdm_write_in_v1",
+      destinations: ["aylamed_cdm", "roadmap"],
+    })],
+  });
+  assert.equal(manifest.version, "v240");
+  assert.equal(manifest.banks[0].source_profile, "aceqbank_style");
+  assert.equal(manifest.banks[0].source_format, "legacy_cdm_write_in_v1");
+  assert.throws(
+    () => normalizeBulkQbankManifest({
+      banks: [bank({
+        source_format: "legacy_cdm_write_in_v1",
+        destinations: ["aylamed_cdm", "aylamed_qbank"],
+      })],
+    }),
+    (error) => error.code === "CDM_EXAM_TRACK_MISMATCH"
+      || error.code === "CDM_DESTINATION_MISMATCH",
+  );
+  assert.throws(
+    () => normalizeBulkQbankManifest({
+      banks: [bank({ destinations: ["aylamed_cdm"] })],
+    }),
+    (error) => error.code === "CDM_SOURCE_FORMAT_REQUIRED",
+  );
+});
+
 test("rights metadata permits private preparation but distinguishes verified distribution rights", () => {
   assert.equal(normalizeContentRightsStatus("pending review"), "unverified");
   assert.equal(normalizeContentRightsStatus("authorised"), "authorized");
