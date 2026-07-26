@@ -139,6 +139,10 @@ test("collection display policy reveals only the administrator-approved question
 test("administrator QBank presentation controls keep source choice separate from question identity", () => {
   assert.equal(normalizeContentSourceProfile("", "UWorld licensed bank"), "uworld_style");
   assert.equal(normalizeContentSourceProfile("AMBOSS style"), "amboss_style");
+  assert.equal(normalizeContentSourceProfile("", "CanadaQBank"), "canadaqbank_style");
+  assert.equal(normalizeContentSourceProfile("", "ACE QBank"), "aceqbank_style");
+  assert.equal(normalizeContentSourceProfile("", "Amedex"), "amedex_style");
+  assert.equal(normalizeContentSourceProfile("", "MPlusX"), "mplusx_style");
   const unified = normalizeContentQbankPresentationPolicy({
     student_bank_mode: "unified",
   }, "USMLE Step 1");
@@ -330,6 +334,36 @@ test("tutor mode hides answer material until the immutable answer is recorded", 
     () => recordAylaQbankAnswer(recorded.session, { questionRef: "ref-1", selectedAnswerId: 2, correctAnswerId: 2 }),
     (error) => error.code === "QBANK_ANSWER_LOCKED" && error.statusCode === 409,
   );
+});
+
+test("answer-choice images stay attached to their own answer before and after reveal", () => {
+  const session = sessionFixture("tutor");
+  const question = {
+    ...registryQuestion,
+    media: [
+      ...registryQuestion.media,
+      { id: "choice-a-image", placement: "answer:1", kind: "image", content_type: "image/png", url: "signed-choice-a" },
+    ],
+  };
+  const before = sanitizeAylaQbankQuestion(question, {
+    session,
+    questionRef: "ref-1",
+  });
+  assert.deepEqual(before.answers[0].media.map((item) => item.id), ["choice-a-image"]);
+  assert.deepEqual(before.answers[1].media, []);
+  assert.equal(before.media.some((item) => item.id === "choice-a-image"), false);
+
+  const answered = recordAylaQbankAnswer(session, {
+    questionRef: "ref-1",
+    selectedAnswerId: 2,
+    correctAnswerId: 2,
+  });
+  const after = sanitizeAylaQbankQuestion(question, {
+    session: answered.session,
+    questionRef: "ref-1",
+  });
+  assert.deepEqual(after.answers[0].media.map((item) => item.id), ["choice-a-image"]);
+  assert.equal(after.media.some((item) => item.id === "choice-a-image"), false);
 });
 
 test("test mode withholds correctness, explanation, and automatic revision signal until submit", () => {

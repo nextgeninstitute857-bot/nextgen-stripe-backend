@@ -30,12 +30,19 @@ test('QBank presentation policy is persistent per exam and cannot alter roadmap 
 });
 
 test('source learning profiles remain separate from collection question-ID display policy', () => {
-  for (const profile of ['uworld_style', 'amboss_style', 'aylamed_original', 'other']) {
+  for (const profile of [
+    'uworld_style', 'amboss_style', 'canadaqbank_style', 'aceqbank_style',
+    'amedex_style', 'mplusx_style', 'aylamed_original', 'other',
+  ]) {
     assert.match(postgres, new RegExp(`"${profile}"`));
   }
   assert.match(postgres, /source_profile TEXT NOT NULL DEFAULT 'other'/);
   assert.match(postgres, /LOWER\(source_provider\) LIKE '%uworld%'.*?'uworld_style'/s);
   assert.match(postgres, /LOWER\(source_provider\) LIKE '%amboss%'.*?'amboss_style'/s);
+  assert.match(postgres, /LOWER\(source_provider\) LIKE '%canadaqbank%'.*?'canadaqbank_style'/s);
+  assert.match(postgres, /LOWER\(source_provider\) LIKE '%aceqbank%'.*?'aceqbank_style'/s);
+  assert.match(postgres, /LOWER\(source_provider\) LIKE '%amedex%'.*?'amedex_style'/s);
+  assert.match(postgres, /LOWER\(source_provider\) LIKE '%mplusx%'.*?'mplusx_style'/s);
   assert.match(postgres, /display_policy JSONB NOT NULL DEFAULT/);
   assert.match(server, /sourceProfile: req\.body\.source_profile \?\? req\.body\.sourceProfile/);
 });
@@ -49,6 +56,13 @@ test('taxonomy mappings are exam and provider namespace scoped and reused on fut
   assert.match(postgres, /UNIQUE\(exam_track, source_namespace, source_system_id, source_subject_id\)/);
   assert.match(postgres, /m\.source_system_id=q\.system_key AND m\.source_subject_id=q\.subject_key/);
   assert.match(server, /content-registry\/taxonomy-mappings/);
+});
+
+test('specialized CDM cases cannot be claimed by the ordinary MCQ draft importer', () => {
+  assert.match(server, /counts\?\.import_blocked === true/);
+  assert.match(server, /blocking specialized-format or exam-mapping issue/);
+  assert.match(postgres, /counts->>'import_blocked'/);
+  assert.match(postgres, /counts->>'blocking_issues'/);
 });
 
 test('student catalog requires ownership, exam entitlement, and approved enabled QBank content', () => {

@@ -34027,6 +34027,8 @@ function ngContentUploadMetadata(body = {}) {
     exam_track: String(source.exam_track || source.examTrack || "").slice(0, 80),
     source_namespace: String(source.source_namespace || source.sourceNamespace || "").slice(0, 160),
     source_provider: String(source.source_provider || source.sourceProvider || "").slice(0, 160),
+    source_profile: String(source.source_profile || source.sourceProfile || "").slice(0, 80),
+    source_format: String(source.source_format || source.sourceFormat || "").slice(0, 80),
     collection_title: String(source.collection_title || source.collectionTitle || "").slice(0, 240),
     destinations: Array.isArray(source.destinations)
       ? source.destinations.slice(0, 20).map((item) => String(item).slice(0, 80))
@@ -34362,6 +34364,16 @@ app.post("/admin/crm/ai-training/content-imports/:jobId/import-draft", async (re
     const existing = await getContentImportJob(req.params.jobId);
     priorStatus = String(existing?.status || "");
     if (!existing) return res.status(404).json({ success: false, error: "Content import job not found" });
+    if (existing.counts?.import_blocked === true || Number(existing.counts?.blocking_issues || 0) > 0) {
+      return res.status(409).json({
+        success: false,
+        error: "This preview contains a blocking specialized-format or exam-mapping issue and cannot be imported through the ordinary MCQ adapter.",
+        blocking_collections: Array.isArray(existing.counts?.blocking_collections)
+          ? existing.counts.blocking_collections
+          : [],
+        blocking_reasons: existing.counts?.blocking_reasons || {},
+      });
+    }
     if (!["preview_ready", "preview_with_warnings"].includes(String(existing.status))) {
       return res.status(409).json({ success: false, error: `Import job cannot be committed from status ${existing.status}` });
     }

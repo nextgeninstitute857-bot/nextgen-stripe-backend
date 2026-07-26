@@ -65,6 +65,7 @@ test("R2 multipart presigning omits unsupported optional checksum parameters", a
 
 test("media ZIP entry validation accepts image/audio and rejects unsafe or unsupported files", () => {
   assert.equal(safeMediaEntryName("images/U612.jpg.png"), "images/U612.jpg.png");
+  assert.equal(safeMediaEntryName("legacy/clinical-diagram.bmp"), "legacy/clinical-diagram.bmp");
   assert.equal(safeMediaEntryName("heart-sounds/12360.mp3"), "heart-sounds/12360.mp3");
   assert.equal(safeMediaEntryName("../private.png"), null);
   assert.equal(safeMediaEntryName("/absolute/private.png"), null);
