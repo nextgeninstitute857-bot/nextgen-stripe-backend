@@ -19,10 +19,11 @@ import {
   resolveMediaInventoryCheckpoint,
 } from "../lib/media-ingestion-accelerator.js";
 import { uploadMediaZipToR2 } from "../lib/content-media-r2.js";
+import { AdaptiveCapacityGate } from "../lib/multi-qbank-ingestion.js";
 
-test("media accelerator defaults to four bounded workers and clamps unsafe overrides", () => {
+test("media accelerator defaults to eight bounded workers and clamps unsafe overrides", () => {
   assert.deepEqual(mediaAcceleratorConfig({}), {
-    concurrency: 4,
+    concurrency: 8,
     checkpoint_batch_size: 25,
     checkpoint_interval_ms: 5_000,
     progress_interval_ms: 15_000,
@@ -33,7 +34,7 @@ test("media accelerator defaults to four bounded workers and clamps unsafe overr
     NEXTGEN_CONTENT_MEDIA_CHECKPOINT_INTERVAL_MS: "20",
     NEXTGEN_CONTENT_MEDIA_PROGRESS_INTERVAL_MS: "999999",
   }), {
-    concurrency: 8,
+    concurrency: 12,
     checkpoint_batch_size: 1,
     checkpoint_interval_ms: 1_000,
     progress_interval_ms: 60_000,
@@ -149,7 +150,7 @@ test("rate and ETA exclude instant resume skips from transfer speed", () => {
 });
 
 test("media finalization is bounded and keyed to the immutable job inventory", () => {
-  assert.deepEqual(mediaFinalizationConfig({}), { batch_size: 250 });
+  assert.deepEqual(mediaFinalizationConfig({}), { batch_size: 1_000 });
   assert.deepEqual(mediaFinalizationConfig({
     NEXTGEN_CONTENT_MEDIA_FINALIZATION_BATCH_SIZE: "999999",
   }), { batch_size: 1_000 });
@@ -369,6 +370,64 @@ test("media ZIP pipeline skips durable rows and persists only new uploads in bat
   assert.equal(progressRows.at(-1).files_processed, 8);
   assert.equal(progressRows.at(-1).workers_active, 0);
   assert.equal(progressRows.at(-1).checkpoint_pending, 0);
+});
+
+test("two QBank media jobs can each request eight workers without exceeding twelve shared transfers", async () => {
+  const counters = { active: 0, maximum: 0 };
+  const gate = new AdaptiveCapacityGate({
+    name: "two-qbank-r2",
+    minimum: 4,
+    normal: 12,
+    maximum: 12,
+    memoryProvider: () => ({ percent: 30 }),
+  });
+  const runJob = (jobNumber) => {
+    const entries = Array.from({ length: 16 }, (_, index) => {
+      const body = Buffer.from(`qbank-${jobNumber}-image-${index + 1}`);
+      return {
+        fileName: `qbank-${jobNumber}/images/${index + 1}.png`,
+        uncompressedSize: body.length,
+        generalPurposeBitFlag: 0,
+        body,
+      };
+    });
+    return uploadMediaZipToR2({
+      zipSource: { type: "test", jobNumber },
+      references: entries.map((entry, index) => ({
+        questionId: `qbank-${jobNumber}-question-${index + 1}`,
+        mediaRef: entry.fileName,
+      })),
+      examTrack: "usmle-step-1",
+      sourceNamespace: `provider-${jobNumber}`,
+      importJobId: `import-job-${jobNumber}`,
+      mediaImportJobId: `media-job-${jobNumber}`,
+      inventory: {
+        candidateEntries: entries.length,
+        candidateUncompressedBytes: entries.reduce((total, entry) => total + entry.body.length, 0),
+      },
+      concurrency: 8,
+      checkpointBatchSize: 4,
+      checkpointIntervalMs: 60_000,
+      transferGate: gate,
+      onAssets: async () => {},
+      adapters: {
+        openZip: async () => new FakeZip(entries),
+        openEntry: async (sourceZip, entry) => Readable.from(entry.body),
+        r2Client: {},
+        r2Bucket: "test-bucket",
+        createUpload: (options) => new FakeUpload(options, counters),
+      },
+    });
+  };
+  const [first, second] = await Promise.all([runJob(1), runJob(2)]);
+  assert.equal(first.newlyUploaded, 16);
+  assert.equal(second.newlyUploaded, 16);
+  assert.equal(first.maximumWorkersActive, 8);
+  assert.equal(second.maximumWorkersActive, 8);
+  assert.ok(counters.maximum >= 8);
+  assert.ok(counters.maximum <= 12);
+  assert.equal(gate.snapshot().maximum_active_observed, counters.maximum);
+  assert.equal(gate.snapshot().active, 0);
 });
 
 test("media pipeline aborts and drains every worker before surfacing a transfer failure", async () => {

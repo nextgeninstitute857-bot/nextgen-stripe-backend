@@ -140,6 +140,33 @@ test("roadmap assignment prefers an exact verified focus and never reassigns com
   assert.equal(next.match_level, "system");
 });
 
+test("roadmap and catalog filters recognize approved medical and QBank topic aliases", () => {
+  const aliased = legacyVideo({
+    id: "aliased",
+    vimeoId: "777",
+    vimeoUrl: "",
+    topic: "Ischemic heart disease",
+    topicAliases: ["Acute myocardial infarction", "STEMI"],
+    qbankTaxonomy: { topicKey: "Acute coronary syndrome", subtopicKey: "Myocardial infarction" },
+    deliveryDestinations: ["aylamed_content_hub", "aylamed_roadmap"],
+  });
+  const selected = selectAylaRoadmapVideo({
+    examTrack: "usmle_step_1",
+    videos: [aliased],
+    focusSystem: "Cardiovascular",
+    focusTopic: "Acute myocardial infarction",
+  });
+  assert.equal(selected.video.id, "aliased");
+  assert.equal(selected.match_level, "exact_topic");
+
+  const catalog = buildAylaContentHubCatalog({
+    examTrack: "usmle_step_1",
+    videos: [aliased],
+    filters: { topic: "Acute coronary syndrome" },
+  });
+  assert.equal(catalog.total, 1);
+});
+
 test("video progress is monotonic and completion requires the verified 90 percent threshold", () => {
   const current = { id: "p1", watchedPercent: 65, lastPositionSeconds: 420, completed: false, updatedAt: "2026-07-19T10:00:00.000Z" };
   const stale = mergeAylaContentHubProgress(current, { watchedPercent: 20, lastPositionSeconds: 100, completed: true }, new Date("2026-07-19T10:01:00.000Z"));

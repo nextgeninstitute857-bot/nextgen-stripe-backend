@@ -25,3 +25,16 @@ test("video matching is deterministic and never guesses ambiguity", () => {
   assert.equal(two.matches.length, 0);
   assert.equal(two.ambiguous.length, 1);
 });
+
+test("video matching uses contextual paths before duplicate basenames", () => {
+  const report = matchVideoReferences([{
+    questionId: "q1",
+    mediaRef: "clip.mp4",
+    matchPaths: ["exports/cardio/videos/clip.mp4"],
+  }], [
+    { originalName: "part-2/exports/cardio/videos/clip.mp4", sha256: "cardio" },
+    { originalName: "part-2/exports/renal/videos/clip.mp4", sha256: "renal" },
+  ]);
+  assert.equal(report.matches.length, 1);
+  assert.equal(report.matches[0].video.sha256, "cardio");
+});

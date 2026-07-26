@@ -13,8 +13,10 @@ import {
   shadowWriteFlashcardReview,
 } from "./lib/flashcard-postgres.js";
 import {
+  auditContentMediaLinks,
   contentRegistryStatus,
   claimContentImportDraft,
+  createContentBackgroundJobStore,
   createExternalQbankDeliverySession,
   createContentMediaImportJob,
   createContentVideoImportJob,
@@ -22,7 +24,7 @@ import {
   finishContentMediaImportJob,
   finishContentVideoImportJob,
   finishContentImportPreview,
-  findReusableContentVideo,
+  findReusableContentVideos,
   getContentMediaImportJob,
   getContentMediaReferences,
   getContentVideoImportJob,
@@ -48,7 +50,8 @@ import {
   recordExternalQbankDeliveryAnswer,
   reviewContentTaxonomyMapping,
   saveContentMediaMatchBatch,
-  saveContentVideoMatch,
+  saveContentVideoAsset,
+  saveContentVideoLinksBatch,
   setContentImportJobStatus,
   stageContentMediaImportAssets,
   submitExternalQbankDeliverySession,
@@ -256,7 +259,29 @@ import {
   openReferencedVideoStream,
   uploadVideoToVimeo,
 } from "./lib/content-video-vimeo.js";
-import { buildVimeoLibraryManifest, fetchVimeoLibrary } from "./lib/vimeo-library-manifest.js";
+import {
+  DEFAULT_VIMEO_MEDICAL_SOURCE_DOMAINS,
+  VIMEO_LIBRARY_CATALOG_BUILD,
+  approveVimeoCatalogDraft,
+  buildVimeoLibraryManifest,
+  buildVimeoTopicClassificationRequest,
+  extractVimeoWebSearchEvidence,
+  fetchVimeoFolder,
+  fetchVimeoFolders,
+  fetchVimeoLibrary,
+  normalizeVimeoFolderId,
+  normalizeVimeoTopicClassification,
+  rejectVimeoCatalogDraft,
+  upsertVimeoCatalogDraft,
+  vimeoCatalogSummary,
+} from "./lib/vimeo-library-manifest.js";
+import {
+  AdaptiveCapacityGate,
+  MULTI_QBANK_INGESTION_BUILD,
+  buildQbankIngestionDashboard,
+  isProviderRateLimit,
+  multiQbankIngestionConfig,
+} from "./lib/multi-qbank-ingestion.js";
 import { normalizeExamTrack, slug as contentSlug } from "./lib/content-import-adapter.js";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -277,7 +302,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CONTENT_INGESTION_BUILD = "v232.2-resumable-media-finalization";
+const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
 const ROADMAP_EXTENSION_BUILD = "v221-system-aware-roadmap-extension";
 const RECORDING_ASSIGNMENT_BUILD = "v222-safe-recording-detach";
@@ -287,6 +312,7 @@ const AYLA_ADAPTIVE_CORE_BUILD = "v227-verified-adaptive-loop";
 const AYLA_STARTING_READINESS_BUILD = "v229-starting-readiness-loop";
 const AYLA_SINGLE_ROADMAP_BUILD = "v230-single-roadmap-execution";
 const AYLA_MARKETING_BUILD = "v231-readiness-sharing-referrals";
+const AYLA_VIMEO_CATALOG_BUILD = VIMEO_LIBRARY_CATALOG_BUILD;
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -812,13 +838,50 @@ const DATA_DIR = process.env.DATA_DIR || "/tmp";
 const MEDIA_DIR = path.join(DATA_DIR, "media");
 const LIVE_DB_PATH = path.join(DATA_DIR, "live-session-db.json");
 const NG_CONTENT_OPERATIONS_ROOT = path.join(DATA_DIR, "content-operations");
+const ngMultiQbankConfig = multiQbankIngestionConfig();
+const ngContentJobStore = contentRegistryStatus().configured
+  ? createContentBackgroundJobStore({
+      ownerId: `content-web-${process.pid}-${crypto.randomUUID()}`,
+      leaseMs: ngMultiQbankConfig.job_lease_ms,
+    })
+  : null;
+const ngMediaTransferGate = new AdaptiveCapacityGate({
+  name: "r2_media_transfers",
+  minimum: ngMultiQbankConfig.media_min_transfer_limit,
+  normal: ngMultiQbankConfig.media_global_transfer_limit,
+  maximum: ngMultiQbankConfig.media_global_transfer_limit,
+  memorySoftPercent: ngMultiQbankConfig.memory_soft_percent,
+  memoryHardPercent: ngMultiQbankConfig.memory_hard_percent,
+  memoryProvider: () => ngMemoryStatus(),
+});
+const ngMediaFinalizerGate = new AdaptiveCapacityGate({
+  name: "postgres_media_finalizer",
+  minimum: 1,
+  normal: ngMultiQbankConfig.postgres_finalizers,
+  maximum: ngMultiQbankConfig.postgres_finalizers,
+  memorySoftPercent: ngMultiQbankConfig.memory_soft_percent,
+  memoryHardPercent: ngMultiQbankConfig.memory_hard_percent,
+  memoryProvider: () => ngMemoryStatus(),
+});
+const ngVimeoUploadGate = new AdaptiveCapacityGate({
+  name: "vimeo_uploads",
+  minimum: 1,
+  normal: ngMultiQbankConfig.vimeo_uploads,
+  maximum: ngMultiQbankConfig.vimeo_uploads,
+  memorySoftPercent: ngMultiQbankConfig.memory_soft_percent,
+  memoryHardPercent: ngMultiQbankConfig.memory_hard_percent,
+  memoryProvider: () => ngMemoryStatus(),
+});
+const ngInFlightVimeoUploads = new Map();
 const ngContentBackgroundQueue = new SafeBackgroundQueue({
   directory: path.join(NG_CONTENT_OPERATIONS_ROOT, "jobs"),
-  maxConcurrency: Math.max(1, Math.min(3, Number(process.env.NEXTGEN_CONTENT_JOB_CONCURRENCY || 1) || 1)),
-  laneConcurrency: { question_zip: 1, image_zip: 1, video_zip: 1 },
+  maxConcurrency: ngMultiQbankConfig.max_active_jobs,
+  laneConcurrency: ngMultiQbankConfig.lane_concurrency,
   retryBaseMs: Math.max(1_000, Number(process.env.NEXTGEN_CONTENT_JOB_RETRY_BASE_MS || 15_000) || 15_000),
   memoryRetryMs: Math.max(5_000, Number(process.env.NEXTGEN_CONTENT_JOB_MEMORY_RETRY_MS || 30_000) || 30_000),
   memoryGate: () => ngBackgroundMemoryIsHigh("content_operations_queue"),
+  persistentStore: ngContentJobStore,
+  leaseRetryMs: Math.max(5_000, Math.floor(ngMultiQbankConfig.job_lease_ms / 4)),
 });
 const ngContentUploadStore = contentMediaStatus().configured
   ? new CloudContentUploadStore({
@@ -8916,6 +8979,11 @@ async function callOpenAIResponsesAPI({
   userPrompt,
   maxOutputTokens = 3000,
   jsonMode = false,
+  tools = null,
+  toolChoice = null,
+  include = null,
+  reasoning = null,
+  textFormat = null,
 }) {
   if (!isAIConfigured()) {
     const error = new Error(getAIConfigError());
@@ -8935,6 +9003,13 @@ async function callOpenAIResponsesAPI({
   if (jsonMode) {
     payload.text = { format: { type: "json_object" } };
   }
+  if (textFormat && typeof textFormat === "object") {
+    payload.text = { format: textFormat };
+  }
+  if (Array.isArray(tools) && tools.length) payload.tools = tools;
+  if (toolChoice) payload.tool_choice = toolChoice;
+  if (Array.isArray(include) && include.length) payload.include = include;
+  if (reasoning && typeof reasoning === "object") payload.reasoning = reasoning;
 
   try {
     const response = await axios.post(
@@ -8954,6 +9029,8 @@ async function callOpenAIResponsesAPI({
       usage: normalizeAIUsage(response.data?.usage || {}),
       model,
       raw_model: response.data?.model || model,
+      response_id: response.data?.id || null,
+      output: Array.isArray(response.data?.output) ? response.data.output : [],
     };
   } catch (error) {
     const apiMessage =
@@ -33989,6 +34066,7 @@ async function ngQueueContentOperation({ type, lane, upload, domainJobId, metada
         domain_job_id: domainJobId,
         purpose: lane,
         original_filename: upload.originalFilename,
+        ...(metadata && typeof metadata === "object" ? metadata : {}),
       },
     });
     if (queued.deduplicated && upload.uploadId) {
@@ -34017,6 +34095,28 @@ function ngContentBackgroundSnapshot(domainJobId) {
     backgroundJobs,
     monitoring,
     resumeUploadId: detailed?.payload?.upload_id || null,
+  };
+}
+
+function ngMultiQbankControlPlaneSnapshot() {
+  return {
+    build: CONTENT_INGESTION_BUILD,
+    config: ngMultiQbankConfig,
+    memory: ngMemoryStatus(),
+    queue: ngContentBackgroundQueue.summary(),
+    capacity: {
+      r2_media_transfers: ngMediaTransferGate.snapshot(),
+      postgres_media_finalizer: ngMediaFinalizerGate.snapshot(),
+      vimeo_uploads: ngVimeoUploadGate.snapshot(),
+    },
+    safeguards: {
+      student_visibility: "disabled_drafts_until_approval",
+      binary_uploads_in_postgres: false,
+      one_postgres_finalizer: true,
+      contextual_media_repair: "audit_first_without_binary_reupload",
+      qbank_explanation_videos_separate_from_lecture_catalog: true,
+      persistent_disk_not_horizontally_shared: true,
+    },
   };
 }
 
@@ -34361,6 +34461,8 @@ async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload, queue
       inventory,
       existingAssets,
       directoryCacheKey: inventoryCacheKey,
+      concurrency: ngMultiQbankConfig.media_workers_per_job,
+      transferGate: ngMediaTransferGate,
       onProgress: (progress) => queueContext.heartbeat(trackProgress(progress)),
       onAssets: async (assets, { lastEntryIndex, progress }) => {
         await stageContentMediaImportAssets({
@@ -34410,120 +34512,157 @@ async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload, queue
     );
     const finalizationBatchesTotal = resumedFinalization.batchesCommitted
       + remainingFinalizationBatches;
-    await queueContext.heartbeat(trackProgress({
-      stage: "saving_private_media",
-      files_processed: uploaded.assets.length,
-      files_total: uploaded.candidateEntries,
-      bytes_processed: uploaded.candidateUncompressedBytes,
-      bytes_total: uploaded.candidateUncompressedBytes,
-      resumed_files: uploaded.resumedFiles,
-      newly_uploaded: uploaded.newlyUploaded,
-      finalization_assets_committed: resumedFinalization.assetsCommitted,
-      finalization_assets_total: uploaded.assets.length,
-      finalization_links_verified: finalizationLinks,
-      finalization_batches_committed: resumedFinalization.batchesCommitted,
-      finalization_batches_total: finalizationBatchesTotal,
-      finalization_batch_size: finalizationConfig.batch_size,
-      finalization_cache: resumedFinalization.source,
-      percent: 99,
-    }));
-    const finalizationRun = await finalizeMediaInBatches({
-      assets: uploaded.assets,
-      matches: report.matches,
-      batchSize: finalizationConfig.batch_size,
-      startOffset: resumedFinalization.assetsCommitted,
-      onBatch: async ({
-        assets,
-        matches,
-        nextOffset,
-        batchNumber,
-      }) => {
-        const savedBatch = await saveContentMediaMatchBatch({
-          mediaJobId: mediaJob.id,
-          parentJob,
-          assets,
-          matches,
-        });
-        for (const duplicateObjectKey of savedBatch.duplicateObjects) {
-          await deleteR2Object(duplicateObjectKey).catch((error) => {
-            console.warn("R2 duplicate cleanup failed:", error.message);
-          });
-        }
-        finalizationLinks += savedBatch.links;
-        finalizationLinksCreated += savedBatch.linksCreated;
-        finalizationLinkConflicts += savedBatch.linkConflicts;
-        finalizationDuplicateObjects += savedBatch.duplicateObjects.length;
-        const batchesCommitted = resumedFinalization.batchesCommitted + batchNumber;
-        durableCheckpoint = buildMediaFinalizationCheckpoint({
-          previous: durableCheckpoint,
-          cacheKey: finalizationKey,
-          assetsTotal: uploaded.assets.length,
-          assetsCommitted: nextOffset,
-          linksVerified: finalizationLinks,
-          linksCreated: finalizationLinksCreated,
-          linkConflicts: finalizationLinkConflicts,
-          duplicateObjects: finalizationDuplicateObjects,
-          batchesCommitted,
-          batchSize: finalizationConfig.batch_size,
-        });
-        await queueContext.updateCheckpoint(durableCheckpoint, trackProgress({
-          stage: "saving_private_media",
+    let releaseFinalizer = null;
+    let finalizerError = null;
+    let finalizationBatchesCommitted = resumedFinalization.batchesCommitted;
+    try {
+      releaseFinalizer = await ngMediaFinalizerGate.acquire({
+        metadata: {
+          media_import_job_id: mediaJob.id,
+          content_import_job_id: parentJob.id,
+        },
+        onWait: (gate) => queueContext.heartbeat(trackProgress({
+          stage: "waiting_for_postgres_finalizer",
           files_processed: uploaded.assets.length,
           files_total: uploaded.candidateEntries,
           bytes_processed: uploaded.candidateUncompressedBytes,
           bytes_total: uploaded.candidateUncompressedBytes,
           resumed_files: uploaded.resumedFiles,
           newly_uploaded: uploaded.newlyUploaded,
-          finalization_assets_committed: nextOffset,
+          finalization_assets_committed: resumedFinalization.assetsCommitted,
           finalization_assets_total: uploaded.assets.length,
           finalization_links_verified: finalizationLinks,
-          finalization_links_created: finalizationLinksCreated,
-          finalization_link_conflicts: finalizationLinkConflicts,
-          finalization_batches_committed: batchesCommitted,
+          finalization_batches_committed: resumedFinalization.batchesCommitted,
           finalization_batches_total: finalizationBatchesTotal,
           finalization_batch_size: finalizationConfig.batch_size,
           finalization_cache: resumedFinalization.source,
-          movement: true,
+          finalizer_gate: gate,
           percent: 99,
-        }));
-      },
-    });
-    const finalizationBatchesCommitted = resumedFinalization.batchesCommitted
-      + finalizationRun.batchesCommitted;
-    durableCheckpoint = buildMediaFinalizationCheckpoint({
-      previous: durableCheckpoint,
-      cacheKey: finalizationKey,
-      assetsTotal: uploaded.assets.length,
-      assetsCommitted: uploaded.assets.length,
-      linksVerified: finalizationLinks,
-      linksCreated: finalizationLinksCreated,
-      linkConflicts: finalizationLinkConflicts,
-      duplicateObjects: finalizationDuplicateObjects,
-      batchesCommitted: finalizationBatchesCommitted,
-      batchSize: finalizationConfig.batch_size,
-      completed: true,
-    });
-    await queueContext.updateCheckpoint(durableCheckpoint, trackProgress({
-      stage: "saving_private_media",
-      files_processed: uploaded.assets.length,
-      files_total: uploaded.candidateEntries,
-      bytes_processed: uploaded.candidateUncompressedBytes,
-      bytes_total: uploaded.candidateUncompressedBytes,
-      resumed_files: uploaded.resumedFiles,
-      newly_uploaded: uploaded.newlyUploaded,
-      finalization_assets_committed: uploaded.assets.length,
-      finalization_assets_total: uploaded.assets.length,
-      finalization_links_verified: finalizationLinks,
-      finalization_links_created: finalizationLinksCreated,
-      finalization_link_conflicts: finalizationLinkConflicts,
-      finalization_batches_committed: finalizationBatchesCommitted,
-      finalization_batches_total: finalizationBatchesTotal,
-      finalization_batch_size: finalizationConfig.batch_size,
-      finalization_cache: resumedFinalization.source,
-      finalization_complete: true,
-      movement: true,
-      percent: 99,
-    }));
+        })),
+      });
+      await queueContext.heartbeat(trackProgress({
+        stage: "saving_private_media",
+        files_processed: uploaded.assets.length,
+        files_total: uploaded.candidateEntries,
+        bytes_processed: uploaded.candidateUncompressedBytes,
+        bytes_total: uploaded.candidateUncompressedBytes,
+        resumed_files: uploaded.resumedFiles,
+        newly_uploaded: uploaded.newlyUploaded,
+        finalization_assets_committed: resumedFinalization.assetsCommitted,
+        finalization_assets_total: uploaded.assets.length,
+        finalization_links_verified: finalizationLinks,
+        finalization_batches_committed: resumedFinalization.batchesCommitted,
+        finalization_batches_total: finalizationBatchesTotal,
+        finalization_batch_size: finalizationConfig.batch_size,
+        finalization_cache: resumedFinalization.source,
+        finalizer_gate: ngMediaFinalizerGate.snapshot(),
+        percent: 99,
+      }));
+      const finalizationRun = await finalizeMediaInBatches({
+        assets: uploaded.assets,
+        matches: report.matches,
+        batchSize: finalizationConfig.batch_size,
+        startOffset: resumedFinalization.assetsCommitted,
+        onBatch: async ({
+          assets,
+          matches,
+          nextOffset,
+          batchNumber,
+        }) => {
+          const savedBatch = await saveContentMediaMatchBatch({
+            mediaJobId: mediaJob.id,
+            parentJob,
+            assets,
+            matches,
+          });
+          for (const duplicateObjectKey of savedBatch.duplicateObjects) {
+            await deleteR2Object(duplicateObjectKey).catch((error) => {
+              console.warn("R2 duplicate cleanup failed:", error.message);
+            });
+          }
+          finalizationLinks += savedBatch.links;
+          finalizationLinksCreated += savedBatch.linksCreated;
+          finalizationLinkConflicts += savedBatch.linkConflicts;
+          finalizationDuplicateObjects += savedBatch.duplicateObjects.length;
+          const batchesCommitted = resumedFinalization.batchesCommitted + batchNumber;
+          durableCheckpoint = buildMediaFinalizationCheckpoint({
+            previous: durableCheckpoint,
+            cacheKey: finalizationKey,
+            assetsTotal: uploaded.assets.length,
+            assetsCommitted: nextOffset,
+            linksVerified: finalizationLinks,
+            linksCreated: finalizationLinksCreated,
+            linkConflicts: finalizationLinkConflicts,
+            duplicateObjects: finalizationDuplicateObjects,
+            batchesCommitted,
+            batchSize: finalizationConfig.batch_size,
+          });
+          await queueContext.updateCheckpoint(durableCheckpoint, trackProgress({
+            stage: "saving_private_media",
+            files_processed: uploaded.assets.length,
+            files_total: uploaded.candidateEntries,
+            bytes_processed: uploaded.candidateUncompressedBytes,
+            bytes_total: uploaded.candidateUncompressedBytes,
+            resumed_files: uploaded.resumedFiles,
+            newly_uploaded: uploaded.newlyUploaded,
+            finalization_assets_committed: nextOffset,
+            finalization_assets_total: uploaded.assets.length,
+            finalization_links_verified: finalizationLinks,
+            finalization_links_created: finalizationLinksCreated,
+            finalization_link_conflicts: finalizationLinkConflicts,
+            finalization_batches_committed: batchesCommitted,
+            finalization_batches_total: finalizationBatchesTotal,
+            finalization_batch_size: finalizationConfig.batch_size,
+            finalization_cache: resumedFinalization.source,
+            finalizer_gate: ngMediaFinalizerGate.snapshot(),
+            movement: true,
+            percent: 99,
+          }));
+        },
+      });
+      finalizationBatchesCommitted = resumedFinalization.batchesCommitted
+        + finalizationRun.batchesCommitted;
+      durableCheckpoint = buildMediaFinalizationCheckpoint({
+        previous: durableCheckpoint,
+        cacheKey: finalizationKey,
+        assetsTotal: uploaded.assets.length,
+        assetsCommitted: uploaded.assets.length,
+        linksVerified: finalizationLinks,
+        linksCreated: finalizationLinksCreated,
+        linkConflicts: finalizationLinkConflicts,
+        duplicateObjects: finalizationDuplicateObjects,
+        batchesCommitted: finalizationBatchesCommitted,
+        batchSize: finalizationConfig.batch_size,
+        completed: true,
+      });
+      await queueContext.updateCheckpoint(durableCheckpoint, trackProgress({
+        stage: "saving_private_media",
+        files_processed: uploaded.assets.length,
+        files_total: uploaded.candidateEntries,
+        bytes_processed: uploaded.candidateUncompressedBytes,
+        bytes_total: uploaded.candidateUncompressedBytes,
+        resumed_files: uploaded.resumedFiles,
+        newly_uploaded: uploaded.newlyUploaded,
+        finalization_assets_committed: uploaded.assets.length,
+        finalization_assets_total: uploaded.assets.length,
+        finalization_links_verified: finalizationLinks,
+        finalization_links_created: finalizationLinksCreated,
+        finalization_link_conflicts: finalizationLinkConflicts,
+        finalization_batches_committed: finalizationBatchesCommitted,
+        finalization_batches_total: finalizationBatchesTotal,
+        finalization_batch_size: finalizationConfig.batch_size,
+        finalization_cache: resumedFinalization.source,
+        finalization_complete: true,
+        finalizer_gate: ngMediaFinalizerGate.snapshot(),
+        movement: true,
+        percent: 99,
+      }));
+    } catch (error) {
+      finalizerError = error;
+      throw error;
+    } finally {
+      releaseFinalizer?.({ error: finalizerError });
+    }
     const saved = {
       links: finalizationLinks,
       linksCreated: finalizationLinksCreated,
@@ -34641,6 +34780,221 @@ app.get("/admin/crm/ai-training/content-media-imports/:mediaJobId", async (req, 
   }
 });
 
+function ngContentMediaAuditFingerprint(mediaJob, report, linkAudit) {
+  const digest = crypto.createHash("sha256");
+  digest.update(String(mediaJob?.id || ""));
+  digest.update("\u0000");
+  digest.update(String(mediaJob?.updated_at || ""));
+  for (const match of [...(report?.matches || [])].sort((left, right) =>
+    `${left.questionId}\u0000${left.mediaRef}`.localeCompare(`${right.questionId}\u0000${right.mediaRef}`))) {
+    digest.update(`\n${match.questionId}\u0000${match.mediaRef}\u0000${match.asset?.sha256 || ""}`);
+  }
+  digest.update(`\nmissing:${report?.missing?.length || 0}`);
+  digest.update(`\nambiguous:${report?.ambiguous?.length || 0}`);
+  digest.update(`\nunreferenced:${report?.unreferenced?.length || 0}`);
+  digest.update(`\nexisting:${linkAudit?.exactMatches?.length || 0}`);
+  digest.update(`\nrepairable:${linkAudit?.missingMatches?.length || 0}`);
+  digest.update(`\nconflicts:${linkAudit?.conflictingMatches?.length || 0}`);
+  return digest.digest("hex");
+}
+
+async function ngBuildContentMediaMappingAudit(mediaJobId) {
+  const mediaJob = await getContentMediaImportJob(mediaJobId);
+  if (!mediaJob) throw Object.assign(new Error("Media import job not found"), { statusCode: 404 });
+  if (!String(mediaJob.status || "").startsWith("draft_imported")) {
+    throw Object.assign(
+      new Error("Wait for the media import to finish before auditing its draft links"),
+      { statusCode: 409 },
+    );
+  }
+  const parentJob = await getContentImportJob(mediaJob.content_import_job_id);
+  if (!parentJob) throw Object.assign(new Error("Parent content import job not found"), { statusCode: 404 });
+  const [references, assets] = await Promise.all([
+    getContentMediaReferences(parentJob.id, "r2"),
+    listContentMediaImportAssets(mediaJob.id),
+  ]);
+  const report = matchMediaReferences(references, assets);
+  const linkAudit = await auditContentMediaLinks(report.matches);
+  const fingerprint = ngContentMediaAuditFingerprint(mediaJob, report, linkAudit);
+  return {
+    mediaJob,
+    parentJob,
+    references,
+    assets,
+    report,
+    linkAudit,
+    fingerprint,
+  };
+}
+
+function ngPublicContentMediaMappingAudit(audit) {
+  const { mediaJob, references, assets, report, linkAudit, fingerprint } = audit;
+  return {
+    media_job_id: mediaJob.id,
+    content_import_job_id: mediaJob.content_import_job_id,
+    media_job_updated_at: mediaJob.updated_at,
+    audit_fingerprint: fingerprint,
+    contextual_path_matching: true,
+    references: references.length,
+    staged_assets: assets.length,
+    projected_matched: report.matches.length,
+    existing_exact_links: linkAudit.exactMatches.length,
+    repairable_links: linkAudit.missingMatches.length,
+    protected_conflicts: linkAudit.conflictingMatches.length,
+    remaining_missing: report.missing.length,
+    remaining_ambiguous: report.ambiguous.length,
+    projected_unreferenced: report.unreferenced.length,
+    no_binary_reupload_required: true,
+    overwrites_existing_links: false,
+    student_visibility: "disabled_drafts_until_collection_approval",
+    missing_samples: report.missing.slice(0, 50).map((item) => ({
+      student_qid: item.studentQid,
+      media_ref: item.mediaRef,
+      match_paths: item.matchPaths || [],
+    })),
+    ambiguous_samples: report.ambiguous.slice(0, 50).map((item) => ({
+      student_qid: item.studentQid,
+      media_ref: item.mediaRef,
+      match_paths: item.matchPaths || [],
+      candidates: (item.candidates || []).slice(0, 20),
+    })),
+    conflict_samples: linkAudit.conflictingMatches.slice(0, 50).map((item) => ({
+      student_qid: item.studentQid,
+      media_ref: item.mediaRef,
+    })),
+  };
+}
+
+app.get("/admin/crm/ai-training/content-media-imports/:mediaJobId/mapping-audit", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const audit = await ngBuildContentMediaMappingAudit(req.params.mediaJobId);
+    return res.json({
+      success: true,
+      audit: ngPublicContentMediaMappingAudit(audit),
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-training/content-media-imports/:mediaJobId/reconcile-draft-links", async (req, res) => {
+  let releaseFinalizer = null;
+  let finalizerError = null;
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const audit = await ngBuildContentMediaMappingAudit(req.params.mediaJobId);
+    const expectedFingerprint = String(req.body?.audit_fingerprint || "");
+    if (!expectedFingerprint || expectedFingerprint !== audit.fingerprint) {
+      return res.status(409).json({
+        success: false,
+        error: "The media mapping audit changed. Refresh the dry-run audit before applying repairs.",
+      });
+    }
+    releaseFinalizer = await ngMediaFinalizerGate.acquire({
+      metadata: {
+        operation: "contextual_media_link_reconciliation",
+        media_import_job_id: audit.mediaJob.id,
+        content_import_job_id: audit.parentJob.id,
+      },
+    });
+    const assetBySha = new Map(audit.assets.map((asset) => [String(asset.sha256 || ""), asset]));
+    let linksCreated = 0;
+    let linksVerified = 0;
+    let linkConflicts = 0;
+    const duplicateObjects = new Set();
+    const batchSize = 1_000;
+    for (let index = 0; index < audit.linkAudit.missingMatches.length; index += batchSize) {
+      const matches = audit.linkAudit.missingMatches.slice(index, index + batchSize);
+      const assets = [...new Set(matches.map((match) => String(match.asset?.sha256 || "")))]
+        .map((sha256) => assetBySha.get(sha256))
+        .filter(Boolean);
+      const saved = await saveContentMediaMatchBatch({
+        mediaJobId: audit.mediaJob.id,
+        parentJob: audit.parentJob,
+        assets,
+        matches,
+      });
+      linksCreated += Number(saved.linksCreated || 0);
+      linksVerified += Number(saved.links || 0);
+      linkConflicts += Number(saved.linkConflicts || 0);
+      for (const objectKey of saved.duplicateObjects || []) duplicateObjects.add(objectKey);
+    }
+    for (const objectKey of duplicateObjects) {
+      await deleteR2Object(objectKey).catch((error) => {
+        console.warn("Contextual media duplicate cleanup failed:", error.message);
+      });
+    }
+    const afterLinks = await auditContentMediaLinks(audit.report.matches);
+    const remainingWarning = audit.report.missing.length
+      || audit.report.ambiguous.length
+      || afterLinks.conflictingMatches.length;
+    const counts = {
+      ...(audit.mediaJob.counts || {}),
+      question_media_references: audit.references.length,
+      matched: audit.report.matches.length,
+      linked: afterLinks.exactMatches.length,
+      links_created: Number(audit.mediaJob.counts?.links_created || 0) + linksCreated,
+      link_conflicts: afterLinks.conflictingMatches.length,
+      missing: audit.report.missing.length,
+      ambiguous: audit.report.ambiguous.length,
+      unreferenced: audit.report.unreferenced.length,
+      contextual_path_matching: true,
+      contextual_reconciliation_fingerprint: audit.fingerprint,
+      contextual_links_created: linksCreated,
+      contextual_links_verified: linksVerified,
+      contextual_link_conflicts: linkConflicts,
+      contextual_reconciled_at: new Date().toISOString(),
+      contextual_reconciled_by: String(user.id),
+    };
+    const errors = [
+      ...audit.report.missing.slice(0, 100).map((item) => ({
+        kind: "missing",
+        student_qid: item.studentQid,
+        media_ref: item.mediaRef,
+      })),
+      ...audit.report.ambiguous.slice(0, 100).map((item) => ({
+        kind: "ambiguous",
+        student_qid: item.studentQid,
+        media_ref: item.mediaRef,
+        candidates: (item.candidates || []).slice(0, 20),
+      })),
+      ...afterLinks.conflictingMatches.slice(0, 100).map((item) => ({
+        kind: "protected_existing_conflict",
+        student_qid: item.studentQid,
+        media_ref: item.mediaRef,
+      })),
+    ];
+    await finishContentMediaImportJob(
+      audit.mediaJob.id,
+      remainingWarning ? "draft_imported_with_warnings" : "draft_imported",
+      counts,
+      errors,
+    );
+    return res.json({
+      success: true,
+      repair: {
+        media_job_id: audit.mediaJob.id,
+        audit_fingerprint: audit.fingerprint,
+        links_created: linksCreated,
+        links_verified: linksVerified,
+        protected_conflicts: afterLinks.conflictingMatches.length,
+        remaining_missing: audit.report.missing.length,
+        remaining_ambiguous: audit.report.ambiguous.length,
+        projected_unreferenced: audit.report.unreferenced.length,
+        binary_files_reuploaded: 0,
+        existing_links_overwritten: 0,
+        student_resources_published: 0,
+      },
+    });
+  } catch (error) {
+    finalizerError = error;
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  } finally {
+    releaseFinalizer?.({ error: finalizerError });
+  }
+});
+
 async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queueContext }) {
   const workDir = path.join(DATA_DIR, "content-imports", `${videoJob.id}-videos`);
   const trackProgress = ngContentProgressTracker("extracting_private_videos");
@@ -34677,6 +35031,10 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
     const failures = Array.isArray(checkpoint.failure_samples)
       ? checkpoint.failure_samples.slice(0, 500)
       : [];
+    let failureCount = Math.max(
+      failures.length,
+      Number(checkpoint.failure_count || 0),
+    );
     let processed = resumeProcessed;
     let bytesProcessed = Math.max(0, Number(checkpoint.bytes_processed || 0))
       || report.matches.slice(0, resumeProcessed).reduce((total, match) => total + Number(match.video?.sizeBytes || 0), 0);
@@ -34690,43 +35048,126 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
       resumed_files: resumeProcessed,
       newly_uploaded: newlyUploaded,
       reused: reusedAssets + reusedMappings,
-      failures: failures.length,
+      failures: failureCount,
       percent: report.matches.length ? Math.min(99, Math.round((processed / report.matches.length) * 100)) : 99,
     }));
-    for (let index = resumeProcessed; index < report.matches.length; index += 1) {
-      const match = report.matches[index];
-      try {
-        const reusable = await findReusableContentVideo({
-          questionId: match.questionId, mediaRef: match.mediaRef, sha256: match.video.sha256,
-        });
-        if (reusable.mapping) {
-          reusedMappings += 1;
-        } else {
-          let uploaded;
-          let reusableAssetId = null;
-          if (reusable.asset) {
-            reusableAssetId = reusable.asset.id;
-            uploaded = {
-              providerUri: reusable.asset.provider_uri,
-              providerId: reusable.asset.provider_id,
-              embedUrl: reusable.asset.embed_url,
-            };
-            reusedAssets += 1;
-          } else {
-            let lastLoaded = 0;
-            uploaded = await uploadVideoToVimeo({
-              stream: await openReferencedVideoStream(match.video),
+    let videoLinksCreated = Math.max(0, Number(checkpoint.links_created || 0));
+    const activeVimeoBytes = new Map();
+    const vimeoUploadParallelism = Math.max(1, ngMultiQbankConfig.vimeo_uploads);
+    const videoLinkBatchSize = Math.max(
+      25,
+      Math.min(1_000, Number(process.env.NEXTGEN_CONTENT_VIDEO_LINK_BATCH_SIZE || 500)),
+    );
+    const fatalVideoError = (error) => Boolean(
+      isProviderRateLimit(error)
+      || error?.name === "SafeJobControlError"
+      || error?.name === "SafeJobLeaseError"
+      || error?.fatalVideoPersistence === true,
+    );
+    const awaitSharedVimeoUpload = async (operation, match) => {
+      const outcome = operation.then(
+        (value) => ({ completed: true, value }),
+        (error) => ({ completed: true, error }),
+      );
+      while (true) {
+        let timer;
+        const result = await Promise.race([
+          outcome,
+          new Promise((resolve) => {
+            timer = setTimeout(() => resolve({ completed: false }), 15_000);
+            timer.unref?.();
+          }),
+        ]);
+        clearTimeout(timer);
+        if (result.completed) {
+          if (result.error) throw result.error;
+          return result.value;
+        }
+        await queueContext.heartbeat(trackProgress({
+          stage: "waiting_for_shared_vimeo_upload",
+          files_processed: processed,
+          files_total: report.matches.length,
+          bytes_processed: bytesProcessed,
+          bytes_total: bytesTotal,
+          current_file: match.video.originalName,
+          current_file_bytes: 0,
+          current_file_total_bytes: Number(match.video.sizeBytes || 0),
+          resumed_files: resumeProcessed,
+          newly_uploaded: newlyUploaded,
+          reused: reusedAssets + reusedMappings,
+          failures: failureCount,
+          vimeo_gate: ngVimeoUploadGate.snapshot(),
+          vimeo_uploads_configured: vimeoUploadParallelism,
+          percent: report.matches.length
+            ? Math.min(99, Math.round((processed / report.matches.length) * 100))
+            : 99,
+        }));
+      }
+    };
+    const uploadVideoGroup = async (group) => {
+      const match = group.matches[0];
+      const sha256 = group.sha256;
+      let uploadOperation = ngInFlightVimeoUploads.get(sha256);
+      let ownsUpload = false;
+      if (!uploadOperation) {
+        ownsUpload = true;
+        uploadOperation = (async () => {
+          let lastLoaded = 0;
+          let releaseVimeo = null;
+          let vimeoError = null;
+          try {
+            releaseVimeo = await ngVimeoUploadGate.acquire({
+              metadata: {
+                video_import_job_id: videoJob.id,
+                content_import_job_id: parentJob.id,
+                media_ref: match.mediaRef,
+                sha256,
+              },
+              onWait: (gate) => queueContext.heartbeat(trackProgress({
+                stage: "waiting_for_vimeo_capacity",
+                files_processed: processed,
+                files_total: report.matches.length,
+                bytes_processed: bytesProcessed + [...activeVimeoBytes.values()]
+                  .reduce((total, value) => total + Number(value || 0), 0),
+                bytes_total: bytesTotal,
+                current_file: match.video.originalName,
+                current_file_bytes: lastLoaded,
+                current_file_total_bytes: Number(match.video.sizeBytes || 0),
+                resumed_files: resumeProcessed,
+                newly_uploaded: newlyUploaded,
+                reused: reusedAssets + reusedMappings,
+                failures: failureCount,
+                vimeo_gate: gate,
+                vimeo_uploads_configured: vimeoUploadParallelism,
+                percent: report.matches.length
+                  ? Math.min(99, Math.round((processed / report.matches.length) * 100))
+                  : 99,
+              })),
+            });
+            return await uploadVideoToVimeo({
+              streamFactory: () => openReferencedVideoStream(match.video),
               sizeBytes: match.video.sizeBytes,
               name: `${match.studentQid} · ${path.basename(match.video.originalName)}`,
               description: `AylaMed private explanation video for ${match.studentQid}. Import ${parentJob.id}.`,
-              onProgress: ({ loaded, total }) => {
+              rateLimitAttempts: ngMultiQbankConfig.vimeo_rate_limit_attempts,
+              onProgress: ({
+                loaded,
+                total,
+                rate_limited: rateLimited,
+                retry_attempt: retryAttempt,
+                retry_in_ms: retryInMs,
+                stage,
+              }) => {
                 const moving = Number(loaded || 0) > lastLoaded;
                 lastLoaded = Math.max(lastLoaded, Number(loaded || 0));
+                activeVimeoBytes.set(sha256, lastLoaded);
+                const activeBytes = [...activeVimeoBytes.values()]
+                  .reduce((sum, value) => sum + Number(value || 0), 0);
                 return queueContext.heartbeat(trackProgress({
-                  stage: "uploading_private_videos",
+                  stage: stage || "uploading_private_videos",
                   files_processed: processed,
                   files_total: report.matches.length,
-                  bytes_processed: bytesProcessed + lastLoaded,
+                  bytes_processed: bytesProcessed + activeBytes,
                   bytes_total: bytesTotal,
                   current_file: match.video.originalName,
                   current_file_bytes: lastLoaded,
@@ -34734,7 +35175,12 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
                   resumed_files: resumeProcessed,
                   newly_uploaded: newlyUploaded,
                   reused: reusedAssets + reusedMappings,
-                  failures: failures.length,
+                  failures: failureCount,
+                  vimeo_gate: ngVimeoUploadGate.snapshot(),
+                  vimeo_uploads_configured: vimeoUploadParallelism,
+                  rate_limited: rateLimited === true,
+                  retry_attempt: Number(retryAttempt || 0),
+                  retry_in_ms: Number(retryInMs || 0),
                   percent: report.matches.length
                     ? Math.min(99, Math.round(((processed + (lastLoaded / Math.max(1, Number(match.video.sizeBytes || 1)))) / report.matches.length) * 100))
                     : 99,
@@ -34742,19 +35188,124 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
                 }));
               },
             });
-            newlyUploaded += 1;
+          } catch (error) {
+            vimeoError = error;
+            throw error;
+          } finally {
+            activeVimeoBytes.delete(sha256);
+            releaseVimeo?.({ error: vimeoError });
           }
-          linked += await saveContentVideoMatch({
-            videoJobId: videoJob.id, parentJob, match, uploaded, reusableAssetId,
-          });
-        }
-      } catch (error) {
-        failures.push({ student_qid: match.studentQid, media_ref: match.mediaRef, error: error.response?.data?.error || error.message });
+        })();
+        ngInFlightVimeoUploads.set(sha256, uploadOperation);
+        void uploadOperation.then(() => {
+          const expiry = setTimeout(() => {
+            if (ngInFlightVimeoUploads.get(sha256) === uploadOperation) {
+              ngInFlightVimeoUploads.delete(sha256);
+            }
+          }, 10 * 60 * 1000);
+          expiry.unref?.();
+        }).catch(() => {
+          if (ngInFlightVimeoUploads.get(sha256) === uploadOperation) {
+            ngInFlightVimeoUploads.delete(sha256);
+          }
+        });
       }
-      processed += 1;
-      bytesProcessed += Number(match.video?.sizeBytes || 0);
+      const uploaded = ownsUpload
+        ? await uploadOperation
+        : await awaitSharedVimeoUpload(uploadOperation, match);
+      let asset;
+      try {
+        asset = await saveContentVideoAsset({
+          videoJobId: videoJob.id,
+          parentJob,
+          video: match.video,
+          uploaded,
+        });
+      } catch (error) {
+        error.fatalVideoPersistence = true;
+        throw error;
+      }
+      return { asset, ownsUpload };
+    };
+
+    for (let index = resumeProcessed; index < report.matches.length; index += videoLinkBatchSize) {
+      const batch = report.matches.slice(index, index + videoLinkBatchSize);
+      const reusable = await findReusableContentVideos(batch);
+      const pendingMatches = [];
+      for (const match of batch) {
+        const key = `${match.questionId}\u0000${match.mediaRef}`;
+        if (reusable.mappingKeys.has(key)) reusedMappings += 1;
+        else pendingMatches.push(match);
+      }
+      const groupsBySha = new Map();
+      for (const match of pendingMatches) {
+        const sha256 = String(match.video?.sha256 || "");
+        if (!groupsBySha.has(sha256)) groupsBySha.set(sha256, { sha256, matches: [] });
+        groupsBySha.get(sha256).matches.push(match);
+      }
+      const assetsBySha = new Map(reusable.assetsBySha);
+      const linkableMatches = [];
+      const uploadGroups = [];
+      for (const group of groupsBySha.values()) {
+        if (assetsBySha.has(group.sha256)) {
+          reusedAssets += group.matches.length;
+          linkableMatches.push(...group.matches);
+        } else {
+          uploadGroups.push(group);
+        }
+      }
+      for (let groupIndex = 0; groupIndex < uploadGroups.length; groupIndex += vimeoUploadParallelism) {
+        const uploadBatch = uploadGroups.slice(groupIndex, groupIndex + vimeoUploadParallelism);
+        const uploadResults = await Promise.all(uploadBatch.map(async (group) => {
+          try {
+            return { group, ...(await uploadVideoGroup(group)) };
+          } catch (error) {
+            return { group, error };
+          }
+        }));
+        for (const result of uploadResults) {
+          if (result.error) {
+            if (fatalVideoError(result.error)) throw result.error;
+            failureCount += result.group.matches.length;
+            for (const match of result.group.matches) {
+              if (failures.length >= 500) break;
+              failures.push({
+                student_qid: match.studentQid,
+                media_ref: match.mediaRef,
+                error: result.error.response?.data?.error || result.error.message,
+              });
+            }
+            continue;
+          }
+          assetsBySha.set(result.group.sha256, result.asset);
+          linkableMatches.push(...result.group.matches);
+          newlyUploaded += result.ownsUpload ? 1 : 0;
+          reusedAssets += result.ownsUpload
+            ? Math.max(0, result.group.matches.length - 1)
+            : result.group.matches.length;
+        }
+      }
+      let savedLinks;
+      try {
+        savedLinks = await saveContentVideoLinksBatch({
+          videoJobId: videoJob.id,
+          matches: linkableMatches,
+          assetsBySha,
+        });
+      } catch (error) {
+        error.fatalVideoPersistence = true;
+        throw error;
+      }
+      linked += Number(savedLinks.linksVerified || 0);
+      videoLinksCreated += Number(savedLinks.linksCreated || 0);
+      processed += batch.length;
+      bytesProcessed += batch.reduce(
+        (total, match) => total + Number(match.video?.sizeBytes || 0),
+        0,
+      );
+      const currentMatch = batch.at(-1);
       await queueContext.updateCheckpoint({
-        version: 2,
+        version: 4,
         videos_processed: processed,
         videos_total: report.matches.length,
         bytes_processed: bytesProcessed,
@@ -34763,6 +35314,10 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
         reused_assets: reusedAssets,
         reused_mappings: reusedMappings,
         linked,
+        links_created: videoLinksCreated,
+        vimeo_uploads_configured: vimeoUploadParallelism,
+        video_link_batch_size: videoLinkBatchSize,
+        failure_count: failureCount,
         failure_samples: failures.slice(0, 500),
       }, trackProgress({
         stage: "uploading_private_videos",
@@ -34770,18 +35325,23 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
         files_total: report.matches.length,
         bytes_processed: bytesProcessed,
         bytes_total: bytesTotal,
-        current_file: match.video.originalName,
-        current_file_bytes: Number(match.video.sizeBytes || 0),
-        current_file_total_bytes: Number(match.video.sizeBytes || 0),
+        current_file: currentMatch.video.originalName,
+        current_file_bytes: Number(currentMatch.video.sizeBytes || 0),
+        current_file_total_bytes: Number(currentMatch.video.sizeBytes || 0),
         resumed_files: resumeProcessed,
         newly_uploaded: newlyUploaded,
         reused: reusedAssets + reusedMappings,
-        failures: failures.length,
+        linked,
+        links_created: videoLinksCreated,
+        failures: failureCount,
+        vimeo_gate: ngVimeoUploadGate.snapshot(),
+        vimeo_uploads_configured: vimeoUploadParallelism,
+        video_link_batch_size: videoLinkBatchSize,
         percent: report.matches.length ? Math.min(99, Math.round((processed / report.matches.length) * 100)) : 99,
         movement: true,
       }));
     }
-    const warning = report.ambiguous.length || report.missing.length || failures.length;
+    const warning = report.ambiguous.length || report.missing.length || failureCount;
     await queueContext.heartbeat(trackProgress({
       stage: "video_import_complete",
       files_processed: report.matches.length,
@@ -34791,9 +35351,12 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
       resumed_files: resumeProcessed,
       newly_uploaded: newlyUploaded,
       reused: reusedAssets + reusedMappings,
-      failures: failures.length,
+      failures: failureCount,
       matched: report.matches.length,
       linked,
+      links_created: videoLinksCreated,
+      vimeo_uploads_configured: vimeoUploadParallelism,
+      video_link_batch_size: videoLinkBatchSize,
       percent: 100,
       completed: true,
     }));
@@ -34808,10 +35371,13 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
       reused_mappings: reusedMappings,
       reused_total: reusedAssets + reusedMappings,
       linked,
+      links_created: videoLinksCreated,
+      vimeo_uploads_configured: vimeoUploadParallelism,
+      video_link_batch_size: videoLinkBatchSize,
       missing: report.missing.length,
       ambiguous: report.ambiguous.length,
       unreferenced: report.unreferenced.length,
-      failed: failures.length,
+      failed: failureCount,
       resumed_files: resumeProcessed,
       missing_samples: report.missing.slice(0, 100).map((item) => ({ student_qid: item.studentQid, media_ref: item.mediaRef })),
       ambiguous_samples: report.ambiguous.slice(0, 100),
@@ -34908,6 +35474,152 @@ app.get("/admin/crm/ai-training/content-video-imports/:videoJobId", async (req, 
   }
 });
 
+async function ngBuildContentVideoReconcileAudit(videoJobId) {
+  const videoJob = await getContentVideoImportJob(videoJobId);
+  if (!videoJob) throw Object.assign(new Error("Video import job not found"), { statusCode: 404 });
+  if (!String(videoJob.status || "").startsWith("draft_imported")) {
+    throw Object.assign(
+      new Error("Wait for the Vimeo job to finish before preparing contextual reconciliation"),
+      { statusCode: 409 },
+    );
+  }
+  const parentJob = await getContentImportJob(videoJob.content_import_job_id);
+  if (!parentJob) throw Object.assign(new Error("Parent content import job not found"), { statusCode: 404 });
+  const snapshot = ngContentBackgroundSnapshot(videoJob.id);
+  const uploadId = String(snapshot.resumeUploadId || "");
+  const upload = uploadId
+    ? await ngContentUploadStore.get(uploadId).catch(() => null)
+    : null;
+  const existingRepair = ngContentBackgroundQueue.list({ limit: 500 }).find((job) =>
+    String(job.metadata?.repair_of_video_job_id || "") === String(videoJob.id)
+    && !["failed", "cancelled"].includes(String(job.status || "")));
+  const fingerprint = crypto.createHash("sha256")
+    .update([
+      videoJob.id,
+      String(videoJob.updated_at || ""),
+      uploadId,
+      String(upload?.status || ""),
+      String(upload?.expires_at || ""),
+    ].join("\u0000"))
+    .digest("hex");
+  return {
+    videoJob,
+    parentJob,
+    snapshot,
+    uploadId,
+    upload,
+    existingRepair,
+    fingerprint,
+  };
+}
+
+app.get("/admin/crm/ai-training/content-video-imports/:videoJobId/reconcile-audit", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const audit = await ngBuildContentVideoReconcileAudit(req.params.videoJobId);
+    return res.json({
+      success: true,
+      audit: {
+        video_job_id: audit.videoJob.id,
+        content_import_job_id: audit.parentJob.id,
+        audit_fingerprint: audit.fingerprint,
+        package_available: audit.upload?.status === "finalized",
+        package_expires_at: audit.upload?.expires_at || null,
+        existing_repair_background_job_id: audit.existingRepair?.id || null,
+        existing_repair_video_job_id: audit.existingRepair?.metadata?.domain_job_id || null,
+        contextual_path_matching: true,
+        sha256_vimeo_deduplication: true,
+        existing_vimeo_assets_reused: true,
+        source_zip_uploaded_again: false,
+        existing_video_links_overwritten: false,
+        student_visibility: "disabled_drafts_until_collection_approval",
+      },
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-training/content-video-imports/:videoJobId/reconcile-draft-links", async (req, res) => {
+  let upload = null;
+  let repairJob = null;
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const audit = await ngBuildContentVideoReconcileAudit(req.params.videoJobId);
+    const expectedFingerprint = String(req.body?.audit_fingerprint || "");
+    if (!expectedFingerprint || expectedFingerprint !== audit.fingerprint) {
+      return res.status(409).json({
+        success: false,
+        error: "The Vimeo reconciliation audit changed. Refresh it before starting the repair.",
+      });
+    }
+    if (audit.existingRepair) {
+      return res.status(200).json({
+        success: true,
+        deduplicated: true,
+        video_job_id: audit.existingRepair.metadata?.domain_job_id || null,
+        background_job_id: audit.existingRepair.id,
+        message: "The contextual Vimeo repair is already queued, running, or completed.",
+      });
+    }
+    if (!audit.uploadId || audit.upload?.status !== "finalized") {
+      return res.status(410).json({
+        success: false,
+        error: "The saved private media ZIP is no longer available for video reconciliation",
+      });
+    }
+    upload = await ngContentUploadStore.resolveFinalized(audit.uploadId, {
+      allowedPurposes: ["video_zip", "media_zip"],
+    });
+    repairJob = await createContentVideoImportJob({
+      id: crypto.randomUUID(),
+      contentImportJobId: audit.parentJob.id,
+      zipSha256: upload.sha256,
+      originalFilename: upload.originalFilename,
+      createdBy: String(user.id),
+    });
+    const backgroundJob = await ngQueueContentOperation({
+      type: "content_video_draft",
+      lane: "video_zip",
+      upload,
+      domainJobId: repairJob.id,
+      metadata: {
+        repair_of_video_job_id: audit.videoJob.id,
+        contextual_media_repair: true,
+      },
+      maxAttempts: 2,
+    });
+    upload = null;
+    return res.status(202).json({
+      success: true,
+      deduplicated: false,
+      video_job_id: repairJob.id,
+      background_job_id: backgroundJob.id,
+      content_import_job_id: audit.parentJob.id,
+      repair_of_video_job_id: audit.videoJob.id,
+      status: "queued",
+      poll_url: `/admin/crm/ai-training/content-video-imports/${repairJob.id}`,
+      safeguards: {
+        source_zip_uploaded_again: false,
+        sha256_vimeo_deduplication: true,
+        existing_video_links_overwritten: false,
+        student_resources_published: 0,
+      },
+    });
+  } catch (error) {
+    if (repairJob?.id) {
+      await finishContentVideoImportJob(
+        repairJob.id,
+        "queue_failed",
+        { failed: true, contextual_media_repair: true },
+        [{ error: error.message }],
+      ).catch(() => {});
+    }
+    await ngCleanupRejectedContentUpload(upload);
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
 function ngQueuedContentUpload(backgroundJob) {
   const payload = backgroundJob.payload || {};
   return {
@@ -34991,6 +35703,13 @@ ngContentBackgroundQueue.register("content_video_draft", async (queueContext) =>
   ), (message) => finishContentVideoImportJob(job.payload.domain_job_id, "draft_import_cancelled", { cancelled: true }, [{ error: message }])),
 });
 
+ngContentBackgroundQueue.register("ayla_vimeo_catalog_classification", async (queueContext) => {
+  await ngRunAylaVimeoCatalogClassificationJob(queueContext);
+}, {
+  canRecover: ngAylaVimeoCatalogJobCanRecover,
+  onTerminal: ngAylaVimeoCatalogJobTerminal,
+});
+
 app.get("/admin/crm/operations/content-jobs", async (req, res) => {
   try {
     await requireCrmAdmin(req);
@@ -35006,21 +35725,58 @@ app.get("/admin/crm/operations/content-jobs", async (req, res) => {
     let registryError = null;
     try { registryJobs = await listContentOperationalJobs({ limit: req.query.limit || 50 }); }
     catch (error) { registryError = error.message; }
+    const allQueueJobs = ngContentBackgroundQueue.list({ limit: 500 });
+    const controlPlane = ngMultiQbankControlPlaneSnapshot();
     return res.json({
       success: true,
       build: NEXTGEN_BACKEND_BUILD,
+      content_ingestion_build: CONTENT_INGESTION_BUILD,
       summary: ngContentBackgroundQueue.summary(),
       stale_running_jobs: queueJobs.filter((job) => ["running", "pause_requested", "cancel_requested"].includes(job.status)
         && Date.parse(job.heartbeat_at || job.started_at || 0) < staleCutoff).map((job) => job.id),
       jobs: queueJobs,
       registry_jobs: registryJobs,
       registry_error: registryError,
+      qbank_ingestion: registryJobs
+        ? buildQbankIngestionDashboard({
+            registryJobs,
+            backgroundJobs: allQueueJobs,
+            controlPlane,
+          })
+        : null,
+      control_plane: controlPlane,
       upload_summary: await ngContentUploadStore.summary(),
       uploads: await ngContentUploadStore.list({ limit: req.query.upload_limit || 50 }),
       controls: ["pause", "resume", "cancel", "retry"],
     });
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/operations/qbank-ingestion", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    await Promise.all([ngContentBackgroundQueue.initialize(), ngContentUploadStore.initialize()]);
+    const registryJobs = await listContentOperationalJobs({
+      limit: Math.max(1, Math.min(200, Number(req.query.limit || 100))),
+    });
+    const dashboard = buildQbankIngestionDashboard({
+      registryJobs,
+      backgroundJobs: ngContentBackgroundQueue.list({ limit: 500 }),
+      controlPlane: ngMultiQbankControlPlaneSnapshot(),
+    });
+    return res.json({
+      success: true,
+      ...dashboard,
+      controls: ["pause", "resume", "cancel", "retry"],
+      refresh_after_seconds: 5,
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+    });
   }
 });
 
@@ -57688,6 +58444,9 @@ const AYLA_COLLECTIONS = {
   // v189 resource intelligence, daily learning history, and AylaMed-only social data.
   aylaResources: { route: "/api/ayla/resources", prefix: "AYLA-RES", label: "resource" },
   aylaResourceQuarantine: { route: "/api/ayla/resource-quarantine", prefix: "AYLA-QUAR", label: "quarantinedResource" },
+  aylaVimeoCatalogSources: { route: "/api/ayla/admin/resources/vimeo-catalog/sources", prefix: "AYLA-VIMEO-SOURCE", label: "vimeoCatalogSource", customPost: true, immutableAdminWrites: true },
+  aylaVimeoCatalogDrafts: { route: "/api/ayla/admin/resources/vimeo-catalog", prefix: "AYLA-VIMEO-DRAFT", label: "vimeoCatalogDraft", customPost: true, immutableAdminWrites: true },
+  aylaVimeoCatalogJobs: { route: "/api/ayla/admin/resources/vimeo-catalog/jobs", prefix: "AYLA-VIMEO-JOB", label: "vimeoCatalogJob", customPost: true, immutableAdminWrites: true },
   aylaNotebooks: { route: "/api/ayla/notebooks", prefix: "AYLA-NOTE", label: "notebook", customPost: true, immutableAdminWrites: true },
   aylaNotebookVersions: { route: "/api/ayla/notebook-versions", prefix: "AYLA-NV", label: "notebookVersion", customPost: true, immutableAdminWrites: true },
   aylaResourceAssignments: { route: "/api/ayla/resource-assignments", prefix: "AYLA-ASN", label: "resourceAssignment" },
@@ -57833,6 +58592,9 @@ const DEFAULT_AYLA_DB = {
   aylaRoadmapTasks: {},
   aylaResources: {},
   aylaResourceQuarantine: {},
+  aylaVimeoCatalogSources: {},
+  aylaVimeoCatalogDrafts: {},
+  aylaVimeoCatalogJobs: {},
   aylaNotebooks: {},
   aylaNotebookVersions: {},
   aylaResourceAssignments: {},
@@ -64235,11 +64997,14 @@ function aylaV189NormalizeResource(payload = {}, existing = {}) {
     authorizationStatus: aylaV189CleanText(payload.authorizationStatus || payload.authorization_status || existing.authorizationStatus || existing.authorization_status || "pending_review").toLowerCase(),
     sourceAccessMode: aylaV189CleanText(payload.sourceAccessMode || payload.source_access_mode || existing.sourceAccessMode || existing.source_access_mode || "protected").toLowerCase(),
     sourceLabel: aylaV189CleanText(payload.sourceLabel || payload.source_label || existing.sourceLabel || existing.source_label || "").slice(0, 180),
+    sourceType: aylaV189CleanText(payload.sourceType || payload.source_type || existing.sourceType || existing.source_type || "").slice(0, 100),
     resourceNumber: String((payload.resourceNumber ?? payload.resource_number ?? existing.resourceNumber ?? existing.resource_number ?? questionNumber) || "").trim(),
     questionNumber,
     system,
     topic,
+    subtopic: aylaV189CleanText(payload.subtopic || payload.subtopicKey || payload.subtopic_key || existing.subtopic || existing.subtopicKey || existing.subtopic_key || "").slice(0, 240),
     subtopics: aylaCleanArray(payload.subtopics ?? existing.subtopics),
+    topicAliases: aylaCleanArray(payload.topicAliases ?? payload.topic_aliases ?? existing.topicAliases ?? existing.topic_aliases).slice(0, 24),
     concepts: aylaCleanArray(payload.concepts ?? existing.concepts),
     difficulty: aylaV189CleanText(payload.difficulty || existing.difficulty || "Adaptive"),
     priority: aylaV189CleanText(payload.priority || existing.priority || "High"),
@@ -64290,6 +65055,14 @@ function aylaV189NormalizeResource(payload = {}, existing = {}) {
     approved: examTrackId ? (payload.approved !== undefined ? Boolean(payload.approved) : existing.approved !== false) : false,
     status: examTrackId ? aylaV189CleanText(payload.status || existing.status || "active").toLowerCase() : "quarantined",
     verificationStatus: aylaV189CleanText(payload.verificationStatus || payload.verification_status || existing.verificationStatus || existing.verification_status || "verified"),
+    deliveryDestinations: aylaCleanArray(payload.deliveryDestinations ?? payload.delivery_destinations ?? payload.destinations ?? existing.deliveryDestinations ?? existing.delivery_destinations).slice(0, 20),
+    qbankTaxonomy: payload.qbankTaxonomy || payload.qbank_taxonomy || existing.qbankTaxonomy || existing.qbank_taxonomy || null,
+    qbankLinkStatus: aylaV189CleanText(payload.qbankLinkStatus || payload.qbank_link_status || existing.qbankLinkStatus || existing.qbank_link_status || "").slice(0, 100),
+    classificationEvidence: payload.classificationEvidence || payload.classification_evidence || existing.classificationEvidence || existing.classification_evidence || null,
+    adminApproval: payload.adminApproval || payload.admin_approval || existing.adminApproval || existing.admin_approval || null,
+    sourceFingerprint: aylaV189CleanText(payload.sourceFingerprint || payload.source_fingerprint || existing.sourceFingerprint || existing.source_fingerprint || "").slice(0, 100),
+    sourceData: payload.sourceData || payload.source_data || existing.sourceData || existing.source_data || null,
+    relevance: Math.max(-1000, Math.min(1000, aylaNumber(payload.relevance ?? payload.roadmap_priority ?? existing.relevance ?? existing.roadmap_priority, 0))),
     sourceTrainingItemId: payload.sourceTrainingItemId || payload.source_training_item_id || existing.sourceTrainingItemId || existing.source_training_item_id || null,
     sourceDocumentId: payload.sourceDocumentId || payload.source_document_id || existing.sourceDocumentId || existing.source_document_id || null,
     createdAt: existing.createdAt || payload.createdAt || aylaNow(),
@@ -65578,9 +66351,25 @@ function aylaV189ResourceFocusMatch(resource = {}, system = "", topic = "") {
   const systemKey = aylaV189SystemKey(system);
   const topicKey = aylaV189MappingKey(topic);
   const rowSystem = aylaV189SystemKey(resource.system || "General");
-  const rowTopic = aylaV189MappingKey(resource.topic || "");
+  const primaryTopics = [
+    resource.topic,
+    resource.subtopic,
+  ].map((value) => aylaV189MappingKey(value || "")).filter(Boolean);
+  const aliasTopics = [
+    ...(Array.isArray(resource.topicAliases) ? resource.topicAliases : []),
+    ...(Array.isArray(resource.topic_aliases) ? resource.topic_aliases : []),
+    resource.qbankTaxonomy?.topicKey,
+    resource.qbankTaxonomy?.subtopicKey,
+    resource.qbank_taxonomy?.topic_key,
+    resource.qbank_taxonomy?.subtopic_key,
+  ].map((value) => aylaV189MappingKey(value || "")).filter(Boolean);
+  if (topicKey) {
+    const topicMatch = primaryTopics.includes(topicKey) || aliasTopics.includes(topicKey);
+    if (!topicMatch) return false;
+    if (!systemKey || rowSystem === systemKey) return true;
+    return aylaV189ResourceType(resource.type) === "vimeo_video" && aliasTopics.includes(topicKey);
+  }
   if (systemKey && rowSystem !== systemKey) return false;
-  if (topicKey && rowTopic !== topicKey) return false;
   return true;
 }
 
@@ -67502,63 +68291,1186 @@ app.get("/api/ayla/students/:studentId/personal-tutor", async (req, res) => {
   }
 });
 
-app.post("/api/ayla/admin/resources/sync-vimeo-library", async (req, res) => {
+const AYLA_VIMEO_CLASSIFIABLE_STATUSES = new Set([
+  "pending_classification",
+  "classification_failed",
+  "needs_reapproval",
+  "needs_review",
+]);
+const aylaVimeoTaxonomyCache = new Map();
+
+function aylaVimeoCatalogAdminActor(auth = {}) {
+  const user = auth.user || {};
+  return {
+    id: String(user.id || user.user_id || auth.method || "aylamed-admin").slice(0, 180),
+    email: String(user.email || user.user_email || "").slice(0, 320),
+    name: String(user.name || user.full_name || user.email || "AylaMed administrator").slice(0, 240),
+  };
+}
+
+function aylaVimeoCatalogModel() {
+  return String(process.env.AYLA_VIMEO_CLASSIFIER_MODEL || "gpt-5.6").trim() || "gpt-5.6";
+}
+
+function aylaVimeoCatalogAllowedDomains() {
+  const configured = String(process.env.AYLA_VIMEO_MEDICAL_SOURCE_DOMAINS || "")
+    .split(",")
+    .map((value) => value.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, ""))
+    .filter(Boolean);
+  return configured.length ? [...new Set(configured)].slice(0, 100) : [...DEFAULT_VIMEO_MEDICAL_SOURCE_DOMAINS];
+}
+
+function aylaVimeoCanonicalSystem(examTrackId, value = "") {
+  const wanted = aylaV189SystemKey(value);
+  return (AYLA_EXAM_REGISTRY[examTrackId]?.systems || []).find((system) => aylaV189SystemKey(system) === wanted) || "";
+}
+
+async function aylaVimeoCatalogTaxonomy(examTrackId) {
+  const registryTrack = normalizeAylaRegistryExamTrack(examTrackId);
+  if (!registryTrack) {
+    const error = new Error("A supported exam track is required for Vimeo classification");
+    error.statusCode = 400;
+    throw error;
+  }
+  const now = Date.now();
+  const cached = aylaVimeoTaxonomyCache.get(registryTrack);
+  if (cached && cached.expiresAt > now) return cached.promise;
+  const promise = getContentQbankCatalog({
+    examTrack: registryTrack,
+    destination: "aylamed_qbank",
+  }).then((rows) => Array.isArray(rows) ? rows : []);
+  aylaVimeoTaxonomyCache.set(registryTrack, { expiresAt: now + 15 * 60 * 1000, promise });
+  try {
+    return await promise;
+  } catch (error) {
+    aylaVimeoTaxonomyCache.delete(registryTrack);
+    throw error;
+  }
+}
+
+function aylaVimeoCatalogJobProgress(job = {}) {
+  const total = Math.max(0, Number(job.total || job.draftIds?.length || 0));
+  const completed = Math.max(0, Number(job.completedCount || 0));
+  const failed = Math.max(0, Number(job.failedCount || 0));
+  const cancelled = Math.max(0, Number(job.cancelledCount || 0));
+  const skipped = Math.max(0, Number(job.skippedCount || 0));
+  const processed = Math.min(total, completed + failed + cancelled + skipped);
+  return {
+    total,
+    completed,
+    failed,
+    cancelled,
+    skipped,
+    processed,
+    pending: Math.max(0, total - processed),
+    percent: total ? Math.min(100, Math.round((processed / total) * 100)) : 100,
+  };
+}
+
+function aylaVimeoSettleCatalogJob(db, domainJob, queueJobId, outcome, {
+  draftId = "",
+  error = "",
+} = {}) {
+  const settled = new Set(Array.isArray(domainJob.settledQueueJobIds) ? domainJob.settledQueueJobIds : []);
+  if (settled.has(String(queueJobId))) return domainJob;
+  settled.add(String(queueJobId));
+  domainJob.settledQueueJobIds = [...settled].slice(-5000);
+  if (outcome === "completed") domainJob.completedCount = Number(domainJob.completedCount || 0) + 1;
+  else if (outcome === "cancelled") domainJob.cancelledCount = Number(domainJob.cancelledCount || 0) + 1;
+  else if (outcome === "skipped") domainJob.skippedCount = Number(domainJob.skippedCount || 0) + 1;
+  else domainJob.failedCount = Number(domainJob.failedCount || 0) + 1;
+  if (error) {
+    domainJob.errors = [
+      ...(Array.isArray(domainJob.errors) ? domainJob.errors : []),
+      { draftId: String(draftId), queueJobId: String(queueJobId), error: String(error).slice(0, 2000), at: aylaNow() },
+    ].slice(-200);
+  }
+  const progress = aylaVimeoCatalogJobProgress(domainJob);
+  domainJob.progress = progress;
+  if (progress.processed >= progress.total) {
+    domainJob.status = progress.failed || progress.cancelled || progress.skipped ? "completed_with_review_items" : "completed";
+    domainJob.finishedAt = aylaNow();
+  } else {
+    domainJob.status = "running";
+  }
+  domainJob.updatedAt = aylaNow();
+  aylaSetItem(db, "aylaVimeoCatalogJobs", domainJob);
+  return domainJob;
+}
+
+async function ngAylaVimeoCatalogJobCanRecover(backgroundJob = {}) {
+  try {
+    const db = await readAylaDb();
+    const domainJob = aylaGetItem(db, "aylaVimeoCatalogJobs", backgroundJob.payload?.domain_job_id);
+    const draft = aylaGetItem(db, "aylaVimeoCatalogDrafts", backgroundJob.payload?.draft_id);
+    return Boolean(domainJob && draft);
+  } catch {
+    return false;
+  }
+}
+
+async function ngAylaVimeoCatalogJobTerminal(backgroundJob = {}) {
+  if (backgroundJob.status === "completed") return;
+  const outcome = backgroundJob.status === "cancelled" ? "cancelled" : "failed";
+  await mutateAylaDb(async (db) => {
+    const domainJob = aylaGetItem(db, "aylaVimeoCatalogJobs", backgroundJob.payload?.domain_job_id);
+    if (!domainJob) return null;
+    const settled = new Set(Array.isArray(domainJob.settledQueueJobIds) ? domainJob.settledQueueJobIds : []);
+    if (settled.has(String(backgroundJob.id))) return domainJob;
+    const draft = aylaGetItem(db, "aylaVimeoCatalogDrafts", backgroundJob.payload?.draft_id);
+    if (draft
+      && Number(draft.revision || 0) === Number(backgroundJob.payload?.expected_revision)
+      && String(draft.lastClassificationQueueJobId || "") === String(backgroundJob.id)) {
+      draft.status = outcome === "cancelled" ? "pending_classification" : "classification_failed";
+      draft.classificationStatus = outcome === "cancelled" ? "cancelled" : "failed";
+      draft.classificationError = String(backgroundJob.error || (outcome === "cancelled" ? "Classification cancelled" : "Classification failed")).slice(0, 2000);
+      draft.revision = Number(draft.revision || 0) + 1;
+      draft.updatedAt = aylaNow();
+      aylaSetItem(db, "aylaVimeoCatalogDrafts", draft);
+    }
+    return aylaVimeoSettleCatalogJob(db, domainJob, backgroundJob.id, outcome, {
+      draftId: backgroundJob.payload?.draft_id,
+      error: backgroundJob.error || (outcome === "cancelled" ? "Classification cancelled" : "Classification failed"),
+    });
+  });
+}
+
+async function ngRunAylaVimeoCatalogClassificationJob(queueContext) {
+  const payload = queueContext.job.payload || {};
+  const domainJobId = String(payload.domain_job_id || "");
+  const draftId = String(payload.draft_id || "");
+  const expectedRevision = Number(payload.expected_revision);
+  const queueJobId = String(queueContext.job.id);
+  let snapshot = await readAylaDb();
+  let domainJob = aylaGetItem(snapshot, "aylaVimeoCatalogJobs", domainJobId);
+  let draft = aylaGetItem(snapshot, "aylaVimeoCatalogDrafts", draftId);
+  if (!domainJob || !draft) {
+    const error = new Error("Vimeo catalog job or draft no longer exists");
+    error.statusCode = 404;
+    throw error;
+  }
+  if ((domainJob.settledQueueJobIds || []).includes(queueJobId)) return;
+  if (String(draft.lastClassificationQueueJobId || "") === queueJobId
+    && draft.classificationStatus === "completed"
+    && draft.classification) {
+    await mutateAylaDb(async (db) => {
+      const currentJob = aylaGetItem(db, "aylaVimeoCatalogJobs", domainJobId);
+      if (currentJob) aylaVimeoSettleCatalogJob(db, currentJob, queueJobId, "completed", { draftId });
+    });
+    return;
+  }
+  if (Number(draft.revision || 0) !== expectedRevision) {
+    await mutateAylaDb(async (db) => {
+      const currentJob = aylaGetItem(db, "aylaVimeoCatalogJobs", domainJobId);
+      if (currentJob) aylaVimeoSettleCatalogJob(db, currentJob, queueJobId, "skipped", {
+        draftId,
+        error: "Draft changed after this classification job was queued",
+      });
+    });
+    return;
+  }
+
+  await mutateAylaDb(async (db) => {
+    const currentJob = aylaGetItem(db, "aylaVimeoCatalogJobs", domainJobId);
+    const currentDraft = aylaGetItem(db, "aylaVimeoCatalogDrafts", draftId);
+    if (!currentJob || !currentDraft || Number(currentDraft.revision || 0) !== expectedRevision) return;
+    currentJob.status = "running";
+    currentJob.startedAt ||= aylaNow();
+    currentJob.currentDraftId = draftId;
+    currentJob.currentTitle = currentDraft.sourceTitle;
+    currentJob.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaVimeoCatalogJobs", currentJob);
+    currentDraft.classificationStatus = "classifying";
+    currentDraft.classificationError = "";
+    currentDraft.lastClassificationJobId = domainJobId;
+    currentDraft.lastClassificationQueueJobId = queueJobId;
+    currentDraft.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaVimeoCatalogDrafts", currentDraft);
+  });
+  await queueContext.heartbeat({
+    stage: "researching_medical_topic",
+    domain_job_id: domainJobId,
+    draft_id: draftId,
+    title: draft.sourceTitle,
+    ...aylaVimeoCatalogJobProgress(domainJob),
+  });
+
+  const examDefinition = AYLA_EXAM_REGISTRY[draft.examTrackId];
+  if (!examDefinition) {
+    const error = new Error("The Vimeo draft has an unsupported exam track");
+    error.statusCode = 400;
+    throw error;
+  }
+  const taxonomyRows = await aylaVimeoCatalogTaxonomy(draft.examTrackId);
+  const request = buildVimeoTopicClassificationRequest(draft, {
+    examTrackLabel: examDefinition.label,
+    allowedSystems: examDefinition.systems,
+    taxonomyRows,
+    allowedDomains: aylaVimeoCatalogAllowedDomains(),
+  });
+  const model = aylaVimeoCatalogModel();
+  const started = Date.now();
+  const ai = await callOpenAIResponsesAPI({
+    model,
+    systemPrompt: request.systemPrompt,
+    userPrompt: request.userPrompt,
+    maxOutputTokens: Math.max(1200, Math.min(4000, Number(process.env.AYLA_VIMEO_CLASSIFIER_MAX_OUTPUT_TOKENS || 2200))),
+    tools: request.tools,
+    toolChoice: request.toolChoice,
+    include: request.include,
+    reasoning: request.reasoning,
+    textFormat: request.textFormat,
+  });
+  const proposal = safeJsonParseFromAI(ai.text);
+  const evidence = extractVimeoWebSearchEvidence(ai.output);
+  const classification = normalizeVimeoTopicClassification({
+    draft,
+    proposal,
+    request,
+    evidence,
+    model: ai.raw_model || model,
+    responseId: ai.response_id,
+    usage: ai.usage,
+  });
+
+  const settledJob = await mutateAylaDb(async (db) => {
+    const currentJob = aylaGetItem(db, "aylaVimeoCatalogJobs", domainJobId);
+    const currentDraft = aylaGetItem(db, "aylaVimeoCatalogDrafts", draftId);
+    if (!currentJob || !currentDraft) return null;
+    if (Number(currentDraft.revision || 0) !== expectedRevision) {
+      return aylaVimeoSettleCatalogJob(db, currentJob, queueJobId, "skipped", {
+        draftId,
+        error: "Draft changed while its title was being researched; the result was safely discarded",
+      });
+    }
+    currentDraft.status = classification.approvalReadiness === "ready_for_owner_approval"
+      ? "classified_pending_approval"
+      : "needs_review";
+    currentDraft.reviewStatus = currentDraft.reviewStatus === "needs_reapproval" ? "needs_reapproval" : "pending";
+    currentDraft.classificationStatus = "completed";
+    currentDraft.classification = classification;
+    currentDraft.classificationError = "";
+    currentDraft.lastClassificationJobId = domainJobId;
+    currentDraft.lastClassificationQueueJobId = queueJobId;
+    currentDraft.revision = Number(currentDraft.revision || 0) + 1;
+    currentDraft.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaVimeoCatalogDrafts", currentDraft);
+    await aylaRecordAiUsage(db, {
+      user: domainJob.requestedBy || { id: "aylamed-admin", email: "", name: "AylaMed administrator" },
+      feature: "vimeo_catalog_web_classification",
+      model: ai.raw_model || model,
+      usage: ai.usage,
+      durationMs: Date.now() - started,
+    });
+    return aylaVimeoSettleCatalogJob(db, currentJob, queueJobId, "completed", { draftId });
+  });
+  await queueContext.heartbeat({
+    stage: "awaiting_owner_approval",
+    domain_job_id: domainJobId,
+    draft_id: draftId,
+    approval_readiness: classification.approvalReadiness,
+    confidence_percent: classification.confidencePercent,
+    ...(settledJob?.progress || {}),
+  });
+}
+
+async function aylaQueueVimeoCatalogClassification({
+  examTrackId,
+  drafts = [],
+  actor = { id: "aylamed-vimeo-folder-runner", email: "", name: "AylaMed Vimeo folder runner" },
+  catalogSourceId = "",
+  trigger = "manual_admin",
+  reclassifyApproved = false,
+} = {}) {
+  const eligibleDrafts = (Array.isArray(drafts) ? drafts : []).filter((row) =>
+    row
+    && row.examTrackId === examTrackId
+    && row.folderMembershipStatus !== "missing_from_folder"
+    && row.readyForClassification !== false
+    && row.sourceTitle
+    && row.vimeoId
+    && (reclassifyApproved || row.reviewStatus !== "approved"));
+  if (!eligibleDrafts.length) return null;
+  const domainJob = {
+    id: aylaId("AYLA-VIMEO-JOB"),
+    type: "vimeo_catalog_web_classification",
+    status: "queued",
+    examTrackId,
+    examTrack: AYLA_EXAM_REGISTRY[examTrackId].label,
+    catalogSourceId: catalogSourceId || null,
+    trigger,
+    model: aylaVimeoCatalogModel(),
+    sourcePolicy: {
+      webSearchRequired: true,
+      allowedDomains: aylaVimeoCatalogAllowedDomains(),
+      titleIsTopicHeading: true,
+      videoContentInspected: false,
+    },
+    draftIds: eligibleDrafts.map((row) => row.id),
+    total: eligibleDrafts.length,
+    completedCount: 0,
+    failedCount: 0,
+    cancelledCount: 0,
+    skippedCount: 0,
+    settledQueueJobIds: [],
+    queueJobIds: [],
+    errors: [],
+    requestedBy: actor,
+    createdAt: aylaNow(),
+    updatedAt: aylaNow(),
+    startedAt: null,
+    finishedAt: null,
+    catalogBuild: AYLA_VIMEO_CATALOG_BUILD,
+  };
+  await mutateAylaDb(async (current) => {
+    aylaSetItem(current, "aylaVimeoCatalogJobs", domainJob);
+    return domainJob;
+  });
+  const queuedIds = [];
+  const enqueueErrors = [];
+  for (const draft of eligibleDrafts) {
+    try {
+      const queued = await ngContentBackgroundQueue.enqueue({
+        id: crypto.randomUUID(),
+        type: "ayla_vimeo_catalog_classification",
+        lane: "ayla_vimeo_ai",
+        maxAttempts: 8,
+        priority: -20,
+        idempotencyKey: `ayla-vimeo-classify:${domainJob.id}:${draft.id}:${draft.revision}`,
+        payload: {
+          domain_job_id: domainJob.id,
+          draft_id: draft.id,
+          expected_revision: Number(draft.revision || 0),
+        },
+        metadata: {
+          domain_job_id: domainJob.id,
+          draft_id: draft.id,
+          exam_track_id: examTrackId,
+          catalog_source_id: catalogSourceId || null,
+          purpose: "web_grounded_medical_title_classification",
+        },
+      });
+      queuedIds.push(queued.job.id);
+    } catch (error) {
+      enqueueErrors.push({ draftId: draft.id, error: String(error.message || error).slice(0, 1000) });
+    }
+  }
+  const savedJob = await mutateAylaDb(async (current) => {
+    const currentJob = aylaGetItem(current, "aylaVimeoCatalogJobs", domainJob.id);
+    currentJob.queueJobIds = [...new Set([...(currentJob.queueJobIds || []), ...queuedIds])];
+    currentJob.enqueuedCount = queuedIds.length;
+    currentJob.enqueueErrors = enqueueErrors;
+    if (enqueueErrors.length) {
+      currentJob.failedCount = Number(currentJob.failedCount || 0) + enqueueErrors.length;
+      currentJob.errors = [
+        ...(currentJob.errors || []),
+        ...enqueueErrors.map((row) => ({
+          draftId: row.draftId,
+          queueJobId: null,
+          error: row.error,
+          at: aylaNow(),
+        })),
+      ].slice(-200);
+      currentJob.progress = aylaVimeoCatalogJobProgress(currentJob);
+    }
+    currentJob.updatedAt = aylaNow();
+    if (!queuedIds.length) {
+      currentJob.status = "failed_to_enqueue";
+      currentJob.finishedAt = aylaNow();
+    } else if (currentJob.progress?.processed >= currentJob.progress?.total) {
+      currentJob.status = "completed_with_review_items";
+      currentJob.finishedAt = aylaNow();
+    }
+    aylaSetItem(current, "aylaVimeoCatalogJobs", currentJob);
+    return currentJob;
+  });
+  return {
+    job: savedJob,
+    queued: queuedIds.length,
+    enqueueErrors,
+    pollUrl: `/api/ayla/admin/resources/vimeo-catalog/jobs/${encodeURIComponent(domainJob.id)}`,
+  };
+}
+
+function aylaVimeoCatalogSourceId(examTrackId, folderId) {
+  const safeExam = String(examTrackId || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  const safeFolder = normalizeVimeoFolderId(folderId);
+  if (!safeExam || !safeFolder) return "";
+  return `AYLA-VIMEO-SOURCE-${safeExam}-${safeFolder}`;
+}
+
+function aylaVimeoCatalogSourceFromInput(input = {}, existing = {}) {
+  const requestedExamTrack = String(
+    input.exam_track
+    || input.examTrack
+    || input.exam_track_id
+    || input.examTrackId
+    || existing.examTrackId
+    || "",
+  ).trim();
+  const examTrackId = aylaCanonicalExamTrack(requestedExamTrack);
+  if (!examTrackId || !AYLA_EXAM_REGISTRY[examTrackId]) {
+    const error = new Error("A supported exam_track is required for the Vimeo folder source");
+    error.statusCode = 400;
+    throw error;
+  }
+  const folderId = normalizeVimeoFolderId(
+    input.folder_id
+    || input.folderId
+    || input.folder_uri
+    || input.folderUri
+    || existing.folderId
+    || existing.folderUri
+    || "",
+  );
+  if (!folderId) {
+    const error = new Error("Select the exact Vimeo Library folder before syncing lectures");
+    error.statusCode = 400;
+    error.code = "VIMEO_FOLDER_REQUIRED";
+    throw error;
+  }
+  const id = existing.id || aylaVimeoCatalogSourceId(examTrackId, folderId);
+  const syncIntervalMinutes = Math.max(
+    60,
+    Math.min(
+      7 * 24 * 60,
+      Number(input.sync_interval_minutes ?? input.syncIntervalMinutes ?? existing.syncIntervalMinutes ?? 360) || 360,
+    ),
+  );
+  return {
+    ...existing,
+    id,
+    type: "vimeo_folder_catalog_source",
+    provider: "Vimeo",
+    examTrackId,
+    examTrack: AYLA_EXAM_REGISTRY[examTrackId].label,
+    folderId,
+    folderUri: String(input.folder_uri || input.folderUri || existing.folderUri || `/me/projects/${folderId}`).trim().slice(0, 240),
+    folderName: String(input.folder_name || input.folderName || existing.folderName || "").trim().slice(0, 240),
+    defaultPlaylist: String(input.default_playlist || input.defaultPlaylist || existing.defaultPlaylist || "").trim().slice(0, 180),
+    enabled: input.enabled === undefined ? existing.enabled !== false : input.enabled !== false,
+    autoSyncEnabled: input.auto_sync_enabled === undefined && input.autoSyncEnabled === undefined
+      ? existing.autoSyncEnabled !== false
+      : input.auto_sync_enabled === true || input.autoSyncEnabled === true,
+    autoClassifyNew: input.auto_classify_new === undefined && input.autoClassifyNew === undefined
+      ? existing.autoClassifyNew !== false
+      : input.auto_classify_new === true || input.autoClassifyNew === true,
+    syncIntervalMinutes,
+    approvalRequired: true,
+    activeResourcesCreatedBySync: false,
+    sourceNamespace: `vimeo_folder:${folderId}`,
+    catalogBuild: AYLA_VIMEO_CATALOG_BUILD,
+  };
+}
+
+function aylaVimeoCatalogDraftSourceMatches(row = {}, source = {}) {
+  if (String(row.examTrackId || "") !== String(source.examTrackId || "")) return false;
+  if (row.catalogSourceId) return String(row.catalogSourceId) === String(source.id);
+  if (row.folderId) return String(row.folderId) === String(source.folderId);
+  return true;
+}
+
+async function aylaSyncVimeoCatalogSource({
+  source,
+  actor = { id: "aylamed-vimeo-folder-runner", email: "", name: "AylaMed Vimeo folder runner" },
+  previewOnly = false,
+  reason = "manual_admin_sync",
+} = {}) {
+  const normalizedSource = aylaVimeoCatalogSourceFromInput(source, source);
+  const [folder, videos] = await Promise.all([
+    fetchVimeoFolder({ folderId: normalizedSource.folderId }),
+    fetchVimeoLibrary({ folderId: normalizedSource.folderId }),
+  ]);
+  const resolvedSource = {
+    ...normalizedSource,
+    folderId: folder.id || normalizedSource.folderId,
+    folderUri: folder.uri || normalizedSource.folderUri,
+    folderName: folder.name || normalizedSource.folderName || `Vimeo folder ${normalizedSource.folderId}`,
+  };
+  const syncRunId = `AYLA-VIMEO-SYNC-${Date.now()}-${crypto.randomUUID().split("-")[0].toUpperCase()}`;
+  const manifest = buildVimeoLibraryManifest(videos, {
+    examTrack: resolvedSource.examTrackId,
+    defaultPlaylist: resolvedSource.defaultPlaylist || resolvedSource.folderName,
+    allowedSystems: AYLA_EXAM_REGISTRY[resolvedSource.examTrackId].systems,
+    catalogSourceId: resolvedSource.id,
+    sourceFolder: folder,
+  });
+  const classifiableRows = manifest.filter((row) => row.readyForClassification);
+  const pendingRows = manifest.filter((row) => !row.readyForClassification);
+  if (previewOnly) {
+    return {
+      previewOnly: true,
+      source: resolvedSource,
+      folder,
+      videosSeen: videos.length,
+      readyForClassification: classifiableRows.length,
+      pendingMetadata: pendingRows.length,
+      manifest,
+      manifestTruncated: false,
+      activeResourcesCreated: 0,
+      approvalRequired: true,
+    };
+  }
+
+  const result = await mutateAylaDb(async (db) => {
+    aylaEnsureSeedData(db);
+    const sourceDrafts = aylaValues(db, "aylaVimeoCatalogDrafts")
+      .filter((row) => aylaVimeoCatalogDraftSourceMatches(row, resolvedSource));
+    const existingDrafts = new Map(
+      sourceDrafts
+        .filter((row) => String(row.vimeoId || "").trim())
+        .map((row) => [String(row.vimeoId), row]),
+    );
+    const existingResources = new Map(
+      aylaValues(db, "aylaResources")
+        .filter((row) =>
+          String(row.vimeoId || row.vimeo_id || "").trim()
+          && String(row.examTrackId || row.exam_track_id || "") === resolvedSource.examTrackId)
+        .map((row) => [String(row.vimeoId || row.vimeo_id), row]),
+    );
+    const seenProviderIds = new Set();
+    let created = 0;
+    let updated = 0;
+    let unchanged = 0;
+    let skipped = 0;
+    let restoredToFolder = 0;
+    let preservedActiveResources = 0;
+    const autoClassificationDrafts = [];
+    for (const row of manifest) {
+      const providerId = String(row.resource?.vimeoId || "");
+      if (!providerId) {
+        skipped += 1;
+        continue;
+      }
+      seenProviderIds.add(providerId);
+      const existingDraft = existingDrafts.get(providerId) || {};
+      const wasMissing = existingDraft.folderMembershipStatus === "missing_from_folder";
+      const existingResource = existingResources.get(providerId) || null;
+      const seededExisting = existingDraft.id ? existingDraft : existingResource ? {
+        approvedResourceId: existingResource.id,
+        reviewStatus: "approved",
+        status: "approved",
+        sourceFingerprint: existingResource.sourceFingerprint || existingResource.source_fingerprint || "",
+        resourceId: existingResource.id,
+        resourceCreatedAt: existingResource.createdAt || existingResource.created_at || null,
+      } : {};
+      const upserted = upsertVimeoCatalogDraft(row, seededExisting, {
+        actorId: actor.id,
+        actorEmail: actor.email,
+        syncRunId,
+      });
+      if (existingResource) {
+        upserted.draft.approvedResourceId ||= existingResource.id;
+        upserted.draft.resourceCreatedAt ||= existingResource.createdAt || existingResource.created_at || null;
+        preservedActiveResources += 1;
+      }
+      aylaSetItem(db, "aylaVimeoCatalogDrafts", upserted.draft);
+      existingDrafts.set(providerId, upserted.draft);
+      if (
+        (upserted.created || upserted.changed || (wasMissing && !upserted.draft.classification))
+        && upserted.draft.readyForClassification !== false
+        && upserted.draft.reviewStatus !== "approved"
+      ) {
+        autoClassificationDrafts.push(upserted.draft);
+      }
+      if (wasMissing) restoredToFolder += 1;
+      if (upserted.created) created += 1;
+      else if (upserted.changed) updated += 1;
+      else unchanged += 1;
+    }
+
+    let missingFromFolder = 0;
+    for (const draft of sourceDrafts) {
+      const providerId = String(draft.vimeoId || "");
+      if (!providerId || seenProviderIds.has(providerId) || draft.folderMembershipStatus === "missing_from_folder") continue;
+      const next = {
+        ...draft,
+        folderMembershipStatus: "missing_from_folder",
+        missingFromFolderAt: aylaNow(),
+        lastFolderReconciliationSyncRunId: syncRunId,
+        revision: Number(draft.revision || 0) + 1,
+        updatedAt: aylaNow(),
+      };
+      aylaSetItem(db, "aylaVimeoCatalogDrafts", next);
+      missingFromFolder += 1;
+    }
+
+    const timestamp = aylaNow();
+    const savedSource = {
+      ...resolvedSource,
+      folderVideoCount: Number(folder.video_count || videos.length),
+      lastSyncRunId: syncRunId,
+      lastSyncReason: reason,
+      lastSyncedAt: timestamp,
+      lastSyncSucceededAt: timestamp,
+      lastSyncError: null,
+      lastSyncCounts: {
+        videosSeen: videos.length,
+        created,
+        updated,
+        unchanged,
+        skipped,
+        restoredToFolder,
+        missingFromFolder,
+      },
+      nextSyncAt: resolvedSource.autoSyncEnabled
+        ? new Date(Date.now() + resolvedSource.syncIntervalMinutes * 60 * 1000).toISOString()
+        : null,
+      createdAt: resolvedSource.createdAt || timestamp,
+      updatedAt: timestamp,
+    };
+    aylaSetItem(db, "aylaVimeoCatalogSources", savedSource);
+    await aylaLog(db, "resource-sync", "Vimeo folder library reconciled as private review drafts", {
+      catalog_source_id: savedSource.id,
+      folder_id: savedSource.folderId,
+      folder_name: savedSource.folderName,
+      exam_track_id: savedSource.examTrackId,
+      sync_run_id: syncRunId,
+      reason,
+      videos_seen: videos.length,
+      drafts_created: created,
+      drafts_updated: updated,
+      drafts_unchanged: unchanged,
+      restored_to_folder: restoredToFolder,
+      missing_from_folder: missingFromFolder,
+      skipped,
+      preserved_active_resources: preservedActiveResources,
+      active_resources_created: 0,
+      approval_required: true,
+      catalog_build: AYLA_VIMEO_CATALOG_BUILD,
+    });
+    return {
+      savedSource,
+      created,
+      updated,
+      unchanged,
+      skipped,
+      restoredToFolder,
+      missingFromFolder,
+      preservedActiveResources,
+      autoClassificationDrafts,
+      summary: vimeoCatalogSummary(
+        aylaValues(db, "aylaVimeoCatalogDrafts")
+          .filter((row) => aylaVimeoCatalogDraftSourceMatches(row, savedSource)),
+      ),
+    };
+  });
+  let automaticClassification = {
+    enabled: resolvedSource.autoClassifyNew === true,
+    eligible: result.autoClassificationDrafts.length,
+    queued: 0,
+    skippedReason: null,
+    job: null,
+    pollUrl: null,
+    enqueueErrors: [],
+  };
+  if (resolvedSource.autoClassifyNew === true && result.autoClassificationDrafts.length) {
+    if (!isAIConfigured()) {
+      automaticClassification.skippedReason = getAIConfigError();
+    } else {
+      try {
+        const queued = await aylaQueueVimeoCatalogClassification({
+          examTrackId: resolvedSource.examTrackId,
+          drafts: result.autoClassificationDrafts,
+          actor,
+          catalogSourceId: resolvedSource.id,
+          trigger: reason === "manual_admin_sync" ? "folder_sync_manual" : "folder_sync_automatic",
+        });
+        automaticClassification = {
+          ...automaticClassification,
+          queued: queued?.queued || 0,
+          job: queued?.job || null,
+          pollUrl: queued?.pollUrl || null,
+          enqueueErrors: queued?.enqueueErrors || [],
+        };
+      } catch (error) {
+        automaticClassification.skippedReason = String(error.message || error).slice(0, 2000);
+      }
+    }
+  }
+  const { autoClassificationDrafts, ...publicResult } = result;
+  return {
+    previewOnly: false,
+    source: result.savedSource,
+    folder,
+    videosSeen: videos.length,
+    readyForClassification: classifiableRows.length,
+    pendingMetadata: pendingRows.length,
+    activeResourcesCreated: 0,
+    approvalRequired: true,
+    automaticClassification,
+    ...publicResult,
+  };
+}
+
+app.get("/api/ayla/admin/resources/vimeo-folders", async (req, res) => {
   try {
     await aylaRequireAdmin(req);
-    const examTrack = String(req.body.exam_track || req.body.examTrack || req.body.exam_track_id || req.body.examTrackId || "").trim();
-    if (!examTrack) return aylaSendError(res, 400, "exam_track is required for Vimeo library sync");
-    const videos = await fetchVimeoLibrary({ maximum: Math.max(1, Math.min(5000, Number(req.body.maximum || 5000))) });
-    const manifest = buildVimeoLibraryManifest(videos, {
-      examTrack,
-      defaultPlaylist: String(req.body.default_playlist || req.body.defaultPlaylist || "").trim(),
+    const folders = await fetchVimeoFolders();
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, {
+      folders,
+      total: folders.length,
+      provider: "Vimeo",
+      select_by: "folder_id",
+      message: "Select the exact Vimeo Library folder that AylaMed should continuously reconcile.",
     });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || error.response?.status || 500, error.response?.data?.error || error.message || "Failed to load Vimeo folders");
+  }
+});
+
+app.get("/api/ayla/admin/resources/vimeo-catalog/sources", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
+    const sources = aylaValues(db, "aylaVimeoCatalogSources")
+      .sort((left, right) => String(left.examTrack || "").localeCompare(String(right.examTrack || ""))
+        || String(left.folderName || "").localeCompare(String(right.folderName || "")));
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, {
+      build: AYLA_VIMEO_CATALOG_BUILD,
+      total: sources.length,
+      sources,
+      ongoing_folder_sync: true,
+      approval_required: true,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load Vimeo catalog sources");
+  }
+});
+
+app.patch("/api/ayla/admin/resources/vimeo-catalog/sources/:sourceId", async (req, res) => {
+  try {
+    const auth = await aylaRequireAdmin(req);
+    const actor = aylaVimeoCatalogAdminActor(auth);
+    const updated = await mutateAylaDb(async (db) => {
+      const source = aylaGetItem(db, "aylaVimeoCatalogSources", req.params.sourceId);
+      if (!source) {
+        const error = new Error("Vimeo folder catalog source not found");
+        error.statusCode = 404;
+        throw error;
+      }
+      const next = aylaVimeoCatalogSourceFromInput({
+        ...(req.body || {}),
+        exam_track: source.examTrackId,
+        folder_id: source.folderId,
+        folder_uri: source.folderUri,
+        folder_name: source.folderName,
+      }, source);
+      next.updatedAt = aylaNow();
+      next.updatedBy = actor;
+      next.nextSyncAt = next.autoSyncEnabled
+        ? new Date(Date.now() + next.syncIntervalMinutes * 60 * 1000).toISOString()
+        : null;
+      aylaSetItem(db, "aylaVimeoCatalogSources", next);
+      await aylaLog(db, "resource-sync-settings", "Vimeo folder catalog source settings updated", {
+        source_id: next.id,
+        enabled: next.enabled,
+        auto_sync_enabled: next.autoSyncEnabled,
+        sync_interval_minutes: next.syncIntervalMinutes,
+        auto_classify_new: next.autoClassifyNew,
+        actor,
+      });
+      return next;
+    });
+    return aylaSendOk(res, {
+      source: updated,
+      message: "The ongoing Vimeo folder sync settings were updated. Existing drafts and active lectures were preserved.",
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update Vimeo catalog source", error.code ? { code: error.code } : null);
+  }
+});
+
+app.post("/api/ayla/admin/resources/sync-vimeo-library", async (req, res) => {
+  try {
+    const auth = await aylaRequireAdmin(req);
+    const sourceId = String(req.body.source_id || req.body.sourceId || "").trim();
+    const db = sourceId ? await readAylaDb() : null;
+    const storedSource = sourceId ? aylaGetItem(db, "aylaVimeoCatalogSources", sourceId) : null;
+    if (sourceId && !storedSource) return aylaSendError(res, 404, "Vimeo folder catalog source not found");
+    const source = aylaVimeoCatalogSourceFromInput(req.body || {}, storedSource || {});
     const previewOnly = req.body.commit !== true && req.body.preview_only !== false;
-    const readyRows = manifest.filter((row) => row.ready);
-    const pendingRows = manifest.filter((row) => !row.ready);
+    const actor = aylaVimeoCatalogAdminActor(auth);
+    const result = await aylaSyncVimeoCatalogSource({
+      source,
+      actor,
+      previewOnly,
+      reason: previewOnly ? "manual_admin_preview" : "manual_admin_sync",
+    });
     if (previewOnly) {
       return aylaSendOk(res, {
         preview_only: true,
-        videos_seen: videos.length,
-        ready: readyRows.length,
-        pending_metadata: pendingRows.length,
-        manifest: manifest.slice(0, 500),
-        manifest_truncated: manifest.length > 500,
-        message: "Manifest generated from Vimeo IDs, tags, descriptions and controlled title inference. Nothing was imported.",
+        source: result.source,
+        folder: result.folder,
+        videos_seen: result.videosSeen,
+        ready_for_classification: result.readyForClassification,
+        active_resources_created: 0,
+        pending_metadata: result.pendingMetadata,
+        manifest: result.manifest.slice(0, 500),
+        manifest_truncated: result.manifest.length > 500,
+        approval_required: true,
+        ongoing_folder_sync: true,
+        message: "Private Vimeo folder preview generated. No video was saved, classified, approved, or made visible to students.",
       });
     }
-    const db = await readAylaDb();
-    aylaEnsureSeedData(db);
-    const existingByVimeo = new Map(aylaValues(db, "aylaResources")
-      .filter((row) => String(row.vimeoId || row.vimeo_id || "").trim())
-      .map((row) => [String(row.vimeoId || row.vimeo_id), row]));
-    let created = 0;
-    let updated = 0;
-    let quarantined = 0;
-    for (const row of manifest) {
-      const existing = existingByVimeo.get(String(row.resource.vimeoId || "")) || {};
-      const candidate = existing.id && req.body.reassign_existing !== true
-        ? { ...row.resource, examTrackId: existing.examTrackId || existing.exam_track_id, examTrack: existing.examTrack || existing.exam_track }
-        : row.resource;
-      const stored = aylaV190StoreImportedResource(db, candidate, existing);
-      if (stored.quarantined) quarantined += 1;
-      else if (existing.id) updated += 1;
-      else created += 1;
-    }
-    await aylaLog(db, "resource-sync", "Vimeo account library synchronized", {
-      videos_seen: videos.length, created, updated, quarantined, automatic_manifest: true,
-    });
-    await writeAylaDb(db);
     return aylaSendOk(res, {
       preview_only: false,
-      videos_seen: videos.length,
-      created,
-      updated,
-      quarantined,
-      pending_metadata: pendingRows.length,
-      message: "Vimeo library synchronized. Exact and controlled-inference metadata is active; unresolved videos are quarantined as a batch instead of guessed.",
+      source: result.source,
+      folder: result.folder,
+      videos_seen: result.videosSeen,
+      drafts_created: result.created,
+      drafts_updated: result.updated,
+      drafts_unchanged: result.unchanged,
+      drafts_restored_to_folder: result.restoredToFolder,
+      drafts_missing_from_folder: result.missingFromFolder,
+      skipped: result.skipped,
+      pending_metadata: result.pendingMetadata,
+      active_resources_created: 0,
+      existing_active_resources_preserved: result.preservedActiveResources,
+      approval_required: true,
+      ongoing_folder_sync: true,
+      automatic_classification: result.automaticClassification,
+      summary: result.summary,
+      next_step: "Start a web-grounded classification job, review the evidence, then approve selected mappings.",
+      message: "The complete Vimeo folder was reconciled. New and changed title headings are private drafts; unchanged work was preserved; missing items were flagged without deletion.",
     });
   } catch (error) {
-    return aylaSendError(res, error.statusCode || error.response?.status || 500, error.response?.data?.error || error.message || "Failed to sync Vimeo library");
+    return aylaSendError(res, error.statusCode || error.response?.status || 500, error.response?.data?.error || error.message || "Failed to sync Vimeo folder", error.code ? { code: error.code } : null);
+  }
+});
+
+const AYLA_VIMEO_FOLDER_SYNC_ENABLED = String(process.env.AYLA_VIMEO_FOLDER_SYNC_DISABLED || "false").toLowerCase() !== "true";
+const AYLA_VIMEO_FOLDER_RUNNER_INTERVAL_MS = Math.max(
+  30 * 60 * 1000,
+  Number(process.env.AYLA_VIMEO_FOLDER_RUNNER_INTERVAL_MS || 60 * 60 * 1000),
+);
+const aylaVimeoFolderRunnerState = {
+  started: false,
+  running: false,
+  lastStartedAt: null,
+  lastFinishedAt: null,
+  lastSuccessAt: null,
+  lastError: null,
+  lastResult: null,
+};
+let aylaVimeoFolderRunnerTimer = null;
+
+async function ngRunAylaVimeoFolderSyncTick(reason = "scheduled_folder_reconciliation") {
+  if (!AYLA_VIMEO_FOLDER_SYNC_ENABLED) return { skipped: true, reason: "disabled" };
+  if (aylaVimeoFolderRunnerState.running) return { skipped: true, reason: "already_running" };
+  if (ngBackgroundMemoryIsHigh("ayla_vimeo_folder_sync")) return { skipped: true, reason: "memory_guard" };
+  const queueSummary = ngContentBackgroundQueue.summary();
+  const vimeoAiLane = queueSummary.lanes?.ayla_vimeo_ai || {};
+  const higherPriorityActive = Math.max(0, Number(queueSummary.active || 0) - Number(vimeoAiLane.running || 0));
+  const higherPriorityQueued = Math.max(0, Number(queueSummary.counts?.queued || 0) - Number(vimeoAiLane.queued || 0));
+  if (higherPriorityActive > 0 || higherPriorityQueued > 0) {
+    return { skipped: true, reason: "content_operations_have_priority" };
+  }
+  aylaVimeoFolderRunnerState.running = true;
+  aylaVimeoFolderRunnerState.lastStartedAt = aylaNow();
+  try {
+    const db = await readAylaDb();
+    const nowMs = Date.now();
+    const dueSources = aylaValues(db, "aylaVimeoCatalogSources")
+      .filter((source) => source.enabled !== false && source.autoSyncEnabled === true)
+      .filter((source) => !source.nextSyncAt || Date.parse(source.nextSyncAt) <= nowMs)
+      .sort((left, right) => String(left.nextSyncAt || "").localeCompare(String(right.nextSyncAt || "")))
+      .slice(0, 2);
+    if (!dueSources.length) {
+      const idle = { skipped: true, reason: "no_folder_sources_due", checked: 0 };
+      aylaVimeoFolderRunnerState.lastResult = idle;
+      aylaVimeoFolderRunnerState.lastSuccessAt = aylaNow();
+      return idle;
+    }
+    const results = [];
+    for (const source of dueSources) {
+      try {
+        const synced = await aylaSyncVimeoCatalogSource({
+          source,
+          reason,
+          previewOnly: false,
+        });
+        results.push({
+          source_id: source.id,
+          folder_id: source.folderId,
+          videos_seen: synced.videosSeen,
+          created: synced.created,
+          updated: synced.updated,
+          unchanged: synced.unchanged,
+          missing_from_folder: synced.missingFromFolder,
+          classification_queued: synced.automaticClassification?.queued || 0,
+          success: true,
+        });
+      } catch (error) {
+        const message = String(error.response?.data?.error || error.message || error).slice(0, 2000);
+        results.push({ source_id: source.id, folder_id: source.folderId, success: false, error: message });
+        await mutateAylaDb(async (current) => {
+          const saved = aylaGetItem(current, "aylaVimeoCatalogSources", source.id);
+          if (!saved) return null;
+          saved.lastSyncAttemptAt = aylaNow();
+          saved.lastSyncError = message;
+          saved.nextSyncAt = new Date(Date.now() + Math.max(60, Number(saved.syncIntervalMinutes || 360)) * 60 * 1000).toISOString();
+          saved.updatedAt = aylaNow();
+          aylaSetItem(current, "aylaVimeoCatalogSources", saved);
+          return saved;
+        });
+      }
+    }
+    const result = {
+      skipped: false,
+      checked: results.length,
+      succeeded: results.filter((row) => row.success).length,
+      failed: results.filter((row) => !row.success).length,
+      results,
+    };
+    aylaVimeoFolderRunnerState.lastResult = result;
+    aylaVimeoFolderRunnerState.lastError = result.failed ? `${result.failed} Vimeo folder source(s) failed` : null;
+    if (!result.failed) aylaVimeoFolderRunnerState.lastSuccessAt = aylaNow();
+    return result;
+  } catch (error) {
+    aylaVimeoFolderRunnerState.lastError = String(error.message || error).slice(0, 2000);
+    throw error;
+  } finally {
+    aylaVimeoFolderRunnerState.running = false;
+    aylaVimeoFolderRunnerState.lastFinishedAt = aylaNow();
+  }
+}
+
+function ngStartAylaVimeoFolderSyncScheduler() {
+  if (!AYLA_VIMEO_FOLDER_SYNC_ENABLED || aylaVimeoFolderRunnerState.started) return aylaVimeoFolderRunnerTimer;
+  aylaVimeoFolderRunnerState.started = true;
+  aylaVimeoFolderRunnerTimer = setInterval(() => {
+    ngRunAylaVimeoFolderSyncTick().catch((error) => console.warn("AylaMed Vimeo folder sync failed:", error.message));
+  }, AYLA_VIMEO_FOLDER_RUNNER_INTERVAL_MS);
+  aylaVimeoFolderRunnerTimer.unref?.();
+  setTimeout(() => {
+    ngRunAylaVimeoFolderSyncTick("startup_folder_reconciliation")
+      .catch((error) => console.warn("AylaMed Vimeo startup folder sync failed:", error.message));
+  }, 2 * 60 * 1000).unref?.();
+  return aylaVimeoFolderRunnerTimer;
+}
+
+app.get("/api/ayla/admin/resources/vimeo-catalog/sync-status", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    return aylaSendOk(res, {
+      build: AYLA_VIMEO_CATALOG_BUILD,
+      enabled: AYLA_VIMEO_FOLDER_SYNC_ENABLED,
+      scheduler_started: aylaVimeoFolderRunnerState.started,
+      interval_ms: AYLA_VIMEO_FOLDER_RUNNER_INTERVAL_MS,
+      content_operations_priority_guard: true,
+      ...aylaVimeoFolderRunnerState,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load Vimeo folder sync status");
+  }
+});
+
+app.get("/api/ayla/admin/resources/vimeo-catalog", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
+    const requestedExam = String(req.query.exam_track || req.query.examTrack || "").trim();
+    const examTrackId = requestedExam ? aylaCanonicalExamTrack(requestedExam) : "";
+    if (requestedExam && !examTrackId) return aylaSendError(res, 400, "Unsupported exam_track");
+    const sourceId = String(req.query.source_id || req.query.sourceId || "").trim();
+    const status = String(req.query.status || "").trim().toLowerCase();
+    const reviewStatus = String(req.query.review_status || req.query.reviewStatus || "").trim().toLowerCase();
+    const classificationStatus = String(req.query.classification_status || req.query.classificationStatus || "").trim().toLowerCase();
+    const membershipStatus = String(req.query.folder_membership_status || req.query.folderMembershipStatus || "").trim().toLowerCase();
+    const system = aylaV189SystemKey(req.query.system || "");
+    const search = String(req.query.q || req.query.search || "").trim().toLowerCase().slice(0, 180);
+    const limit = Math.max(1, Math.min(200, Number(req.query.limit || 50)));
+    const offset = Math.max(0, Number(req.query.offset || 0));
+    const scoped = aylaValues(db, "aylaVimeoCatalogDrafts")
+      .filter((row) => (!examTrackId || row.examTrackId === examTrackId)
+        && (!sourceId || String(row.catalogSourceId || "") === sourceId));
+    const filtered = scoped.filter((row) => {
+      if (status && String(row.status || "").toLowerCase() !== status) return false;
+      if (reviewStatus && String(row.reviewStatus || "").toLowerCase() !== reviewStatus) return false;
+      if (classificationStatus && String(row.classificationStatus || "").toLowerCase() !== classificationStatus) return false;
+      if (membershipStatus && String(row.folderMembershipStatus || "present").toLowerCase() !== membershipStatus) return false;
+      if (system && aylaV189SystemKey(row.classification?.medicalSystem || row.seedMapping?.system || "") !== system) return false;
+      if (search && !`${row.sourceTitle || ""} ${row.sourceDescription || ""} ${row.classification?.canonicalTopic || ""} ${(row.classification?.topicAliases || []).join(" ")}`.toLowerCase().includes(search)) return false;
+      return true;
+    }).sort((left, right) =>
+      String(left.status || "").localeCompare(String(right.status || ""))
+      || String(left.sourceTitle || "").localeCompare(String(right.sourceTitle || "")));
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, {
+      build: AYLA_VIMEO_CATALOG_BUILD,
+      total: filtered.length,
+      limit,
+      offset,
+      has_more: offset + limit < filtered.length,
+      summary: vimeoCatalogSummary(scoped),
+      drafts: filtered.slice(offset, offset + limit),
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load Vimeo catalog");
+  }
+});
+
+app.post("/api/ayla/admin/resources/vimeo-catalog/classification-jobs", async (req, res) => {
+  try {
+    const auth = await aylaRequireAdmin(req);
+    if (!isAIConfigured()) return aylaSendError(res, 503, getAIConfigError());
+    const requestedExam = String(req.body.exam_track || req.body.examTrack || req.body.exam_track_id || req.body.examTrackId || "").trim();
+    const examTrackId = aylaCanonicalExamTrack(requestedExam);
+    if (!examTrackId || !AYLA_EXAM_REGISTRY[examTrackId]) return aylaSendError(res, 400, "A supported exam_track is required");
+    const sourceId = String(req.body.source_id || req.body.sourceId || "").trim();
+    const requestedIds = [...new Set((Array.isArray(req.body.draft_ids) ? req.body.draft_ids : Array.isArray(req.body.draftIds) ? req.body.draftIds : [])
+      .map((value) => String(value || "").trim()).filter(Boolean))].slice(0, 5000);
+    const includeNeedsReview = req.body.include_needs_review === true || req.body.includeNeedsReview === true;
+    const reclassifyApproved = req.body.reclassify_approved === true || req.body.reclassifyApproved === true;
+    const db = await readAylaDb();
+    let drafts = aylaValues(db, "aylaVimeoCatalogDrafts").filter((row) =>
+      row.examTrackId === examTrackId
+      && (!sourceId || String(row.catalogSourceId || "") === sourceId)
+      && row.folderMembershipStatus !== "missing_from_folder");
+    if (requestedIds.length) {
+      const wanted = new Set(requestedIds);
+      drafts = drafts.filter((row) => wanted.has(String(row.id)));
+      const missing = requestedIds.filter((id) => !drafts.some((row) => String(row.id) === id));
+      if (missing.length) return aylaSendError(res, 404, `Vimeo drafts not found for this exam track: ${missing.slice(0, 10).join(", ")}`);
+    } else {
+      drafts = drafts.filter((row) => AYLA_VIMEO_CLASSIFIABLE_STATUSES.has(String(row.status || ""))
+        && (includeNeedsReview || row.status !== "needs_review"));
+    }
+    drafts = drafts.filter((row) => row.readyForClassification !== false
+      && row.sourceTitle
+      && row.vimeoId
+      && (reclassifyApproved || row.reviewStatus !== "approved"));
+    if (!drafts.length) return aylaSendError(res, 409, "No eligible private Vimeo drafts need classification");
+    const actor = aylaVimeoCatalogAdminActor(auth);
+    const queued = await aylaQueueVimeoCatalogClassification({
+      examTrackId,
+      catalogSourceId: sourceId || null,
+      drafts,
+      actor,
+      trigger: "manual_admin",
+      reclassifyApproved,
+    });
+    if (!queued) return aylaSendError(res, 409, "No eligible private Vimeo drafts need classification");
+    return aylaSendOk(res, {
+      job: queued.job,
+      queued: queued.queued,
+      enqueue_errors: queued.enqueueErrors,
+      poll_url: queued.pollUrl,
+      approval_required_after_classification: true,
+      message: "Each Vimeo title will be researched separately. Results remain private until you approve selected mappings.",
+    }, 202);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to start Vimeo classification");
+  }
+});
+
+app.get("/api/ayla/admin/resources/vimeo-catalog/jobs/:jobId", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    await ngContentBackgroundQueue.initialize();
+    const db = await readAylaDb();
+    const job = aylaGetItem(db, "aylaVimeoCatalogJobs", req.params.jobId);
+    if (!job) return aylaSendError(res, 404, "Vimeo catalog classification job not found");
+    const queueJobs = (job.queueJobIds || []).map((id) => ngContentBackgroundQueue.get(id)).filter(Boolean);
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, {
+      job: { ...job, progress: aylaVimeoCatalogJobProgress(job) },
+      queue: {
+        total: queueJobs.length,
+        counts: queueJobs.reduce((counts, row) => ({ ...counts, [row.status]: Number(counts[row.status] || 0) + 1 }), {}),
+        active: queueJobs.filter((row) => ["queued", "running", "retry_wait", "paused", "pause_requested", "cancel_requested"].includes(row.status)),
+      },
+      approval_required: true,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load Vimeo classification job");
+  }
+});
+
+app.post("/api/ayla/admin/resources/vimeo-catalog/review", async (req, res) => {
+  try {
+    const auth = await aylaRequireAdmin(req);
+    const action = String(req.body.action || "").trim().toLowerCase();
+    if (!["approve", "reject"].includes(action)) return aylaSendError(res, 400, "action must be approve or reject");
+    const items = Array.isArray(req.body.items) ? req.body.items : [];
+    if (!items.length || items.length > 100) return aylaSendError(res, 400, "Provide between 1 and 100 explicitly selected review items");
+    const actor = aylaVimeoCatalogAdminActor(auth);
+    const result = await mutateAylaDb(async (db) => {
+      const reviewed = [];
+      for (const item of items) {
+        const id = String(item.id || item.draft_id || item.draftId || "").trim();
+        const draft = aylaGetItem(db, "aylaVimeoCatalogDrafts", id);
+        if (!draft) {
+          const error = new Error(`Vimeo catalog draft not found: ${id || "(missing id)"}`);
+          error.statusCode = 404;
+          throw error;
+        }
+        const expectedRevision = item.expected_revision ?? item.expectedRevision;
+        if (action === "reject") {
+          const rejected = rejectVimeoCatalogDraft(draft, {
+            expectedRevision,
+            reason: item.reason || req.body.reason || "",
+            actor,
+          });
+          aylaSetItem(db, "aylaVimeoCatalogDrafts", rejected);
+          reviewed.push({ id, action, revision: rejected.revision, active_resource_changed: false });
+          continue;
+        }
+        const approved = approveVimeoCatalogDraft(draft, {
+          expectedRevision,
+          overrides: item.overrides || {},
+          actor,
+        });
+        const canonicalSystem = aylaVimeoCanonicalSystem(approved.resource.examTrackId, approved.resource.system);
+        if (!canonicalSystem) {
+          const error = new Error(`Approved system must match the ${AYLA_EXAM_REGISTRY[approved.resource.examTrackId]?.label || "exam"} taxonomy`);
+          error.statusCode = 400;
+          throw error;
+        }
+        approved.resource.system = canonicalSystem;
+        const existingResource = aylaGetItem(db, "aylaResources", approved.resource.id)
+          || aylaValues(db, "aylaResources").find((row) => String(row.vimeoId || row.vimeo_id || "") === String(approved.resource.vimeoId))
+          || {};
+        const stored = aylaV190StoreImportedResource(db, approved.resource, existingResource);
+        if (stored.quarantined) {
+          const error = new Error(`Approved Vimeo resource failed validation: ${stored.errors.join("; ")}`);
+          error.statusCode = 400;
+          throw error;
+        }
+        approved.draft.approvedResourceId = stored.resource.id;
+        approved.draft.resourceCreatedAt = stored.resource.createdAt;
+        aylaSetItem(db, "aylaVimeoCatalogDrafts", approved.draft);
+        reviewed.push({
+          id,
+          action,
+          revision: approved.draft.revision,
+          active_resource_changed: true,
+          resource_id: stored.resource.id,
+          delivery_destinations: stored.resource.deliveryDestinations,
+        });
+      }
+      await aylaLog(db, "resource-review", `Vimeo catalog mappings ${action}d`, {
+        action,
+        count: reviewed.length,
+        draft_ids: reviewed.map((row) => row.id),
+        reviewer: actor,
+        catalog_build: AYLA_VIMEO_CATALOG_BUILD,
+      });
+      return reviewed;
+    });
+    return aylaSendOk(res, {
+      action,
+      count: result.length,
+      reviewed: result,
+      message: action === "approve"
+        ? "Only the selected, revision-checked Vimeo mappings are now available to the Content Hub and Personal Tutor roadmap."
+        : "The selected drafts were rejected. No Vimeo video or existing active resource was deleted.",
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to review Vimeo mappings", error.code ? { code: error.code } : null);
   }
 });
 
@@ -70506,6 +72418,7 @@ app.listen(PORT, () => {
   ngStartWeakFlashcardAutomationScheduler();
   ngStartZoomRecordingRecoveryScheduler();
   ngStartContentOperationsScheduler();
+  ngStartAylaVimeoFolderSyncScheduler();
   console.log(`DATA_DIR=${DATA_DIR}`);
   console.log(`LIVE_DB_PATH=${LIVE_DB_PATH}`);
   console.log(`AYLA_DB_PATH=${AYLA_DB_PATH}`);

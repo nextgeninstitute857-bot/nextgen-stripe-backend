@@ -113,3 +113,33 @@ test("an exact ZIP-relative path resolves duplicate basenames", () => {
   assert.equal(report.matches.length, 1);
   assert.equal(report.matches[0].asset.sha256, "a");
 });
+
+test("a contextual source path repairs an old basename-only media reference", () => {
+  const report = matchMediaReferences([{
+    questionId: "q1",
+    mediaRef: "diagram.png",
+    matchPaths: [
+      "exports/cardio/images/diagram.png",
+      "images/diagram.png",
+    ],
+  }], [
+    { originalName: "package/exports/cardio/images/diagram.png", sha256: "cardio" },
+    { originalName: "package/exports/renal/images/diagram.png", sha256: "renal" },
+  ]);
+  assert.equal(report.matches.length, 1);
+  assert.equal(report.matches[0].asset.sha256, "cardio");
+  assert.equal(report.ambiguous.length, 0);
+});
+
+test("contextual matching still quarantines a genuinely ambiguous path", () => {
+  const report = matchMediaReferences([{
+    questionId: "q1",
+    mediaRef: "diagram.png",
+    matchPaths: ["images/diagram.png"],
+  }], [
+    { originalName: "package-a/images/diagram.png", sha256: "a" },
+    { originalName: "package-b/images/diagram.png", sha256: "b" },
+  ]);
+  assert.equal(report.matches.length, 0);
+  assert.equal(report.ambiguous.length, 1);
+});
