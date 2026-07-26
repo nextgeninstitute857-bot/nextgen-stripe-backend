@@ -27,7 +27,7 @@ async function waitFor(check, timeoutMs = 3_000) {
 
 test("v239 defaults to two QBank media lanes with bounded shared capacity", () => {
   assert.deepEqual(multiQbankIngestionConfig({}), {
-    build: "v244-latest-edition-media-fallback",
+    build: "v245-worker-fallback-fingerprint",
     max_active_jobs: 4,
     lane_concurrency: {
       question_zip: 2,

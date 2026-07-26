@@ -35408,7 +35408,11 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
       }`,
       onProgress: (progress) => queueContext.heartbeat(trackProgress(progress)),
     });
-    const report = matchVideoReferences(references, extracted.videos);
+    const report = matchVideoReferences(references, extracted.videos, {
+      ...(candidateEditions.length ? {
+        candidatePriority: ngContentCandidatePriority(candidateEditions),
+      } : {}),
+    });
     const checkpoint = queueContext.job.checkpoint || {};
     const resumeProcessed = Math.max(0, Math.min(
       report.matches.length,
@@ -35891,7 +35895,14 @@ async function ngBuildContentVideoReconcileAudit(videoJobId) {
     : null;
   const existingRepair = ngContentBackgroundQueue.list({ limit: 500 }).find((job) =>
     String(job.metadata?.repair_of_video_job_id || "") === String(videoJob.id)
-    && !["failed", "cancelled"].includes(String(job.status || "")));
+    && [
+      "queued",
+      "running",
+      "retry_wait",
+      "paused",
+      "pause_requested",
+      "cancel_requested",
+    ].includes(String(job.status || "")));
   const fingerprint = crypto.createHash("sha256")
     .update([
       videoJob.id,
@@ -35973,7 +35984,14 @@ async function ngBuildContentVideoEditionAudit(videoJobId, editionInput) {
     String(job.metadata?.edition_repair_of_video_job_id || "")
       === String(base.videoJob.id)
     && String(job.metadata?.edition || "") === edition
-    && !["failed", "cancelled"].includes(String(job.status || "")));
+    && [
+      "queued",
+      "running",
+      "retry_wait",
+      "paused",
+      "pause_requested",
+      "cancel_requested",
+    ].includes(String(job.status || "")));
   return {
     ...base,
     edition,
@@ -36403,7 +36421,14 @@ async function ngBuildContentVideoFallbackAudit(
     && (Array.isArray(job.metadata?.candidate_editions)
       ? job.metadata.candidate_editions.join(",")
       : "") === candidateKey
-    && !["failed", "cancelled"].includes(String(job.status || "")));
+    && [
+      "queued",
+      "running",
+      "retry_wait",
+      "paused",
+      "pause_requested",
+      "cancel_requested",
+    ].includes(String(job.status || "")));
   const audit = {
     ...base,
     edition,

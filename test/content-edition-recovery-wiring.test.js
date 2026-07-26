@@ -117,6 +117,11 @@ test("cross-edition video fallback is fingerprint guarded and keeps the target q
   assert.match(video, /archiveFingerprint/);
   assert.match(server, /target_question_edition_only: true/);
   assert.match(server, /latest_edition_preference: true/);
+  assert.match(
+    server,
+    /matchVideoReferences\(references, extracted\.videos, \{\s*\.\.\.\(candidateEditions\.length \? \{\s*candidatePriority: ngContentCandidatePriority\(candidateEditions\)/,
+  );
+  assert.match(server, /"retry_wait",\s*"paused"/);
 });
 
 test("cross-edition image and audio fallback is fingerprint guarded and latest-first", () => {
