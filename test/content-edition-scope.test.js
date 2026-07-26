@@ -21,6 +21,8 @@ test("content edition scope reads exact years without matching adjacent digits",
   assert.equal(contentPathMatchesEdition("STEP1-2026-march/media/17407.mp4", "2026"), true);
   assert.equal(contentPathMatchesEdition("STEP1-2025-march/media/17407.mp4", "2026"), false);
   assert.equal(contentPathMatchesEdition("folder/120260/file.mp4", "2026"), false);
+  assert.deepEqual(contentPathEditions("uworldSTEP12016_questions.json"), ["2016"]);
+  assert.deepEqual(contentPathEditions("uworldSTEP12015_questions.json"), ["2015"]);
 });
 
 test("reference edition is determined by the selected source snapshot, not old aliases", () => {

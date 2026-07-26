@@ -102,3 +102,18 @@ test("existing video mappings are audited and never overwritten", () => {
   assert.match(server, /auditContentVideoMappings\(report\.matches\)/);
   assert.match(server, /existing_video_links_overwritten: false/);
 });
+
+test("cross-edition video fallback is fingerprint guarded and keeps the target question edition", () => {
+  assert.match(
+    server,
+    /content-video-imports\/:videoJobId\/fallback-audit/,
+  );
+  assert.match(
+    server,
+    /content-video-imports\/:videoJobId\/reconcile-fallback-draft-links/,
+  );
+  assert.match(server, /candidate_editions/);
+  assert.match(video, /cleanCandidateEditions/);
+  assert.match(video, /archiveFingerprint/);
+  assert.match(server, /target_question_edition_only: true/);
+});

@@ -35363,6 +35363,13 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
     const edition = normalizeContentEdition(
       queueContext.job.payload?.metadata?.edition,
     );
+    const candidateEditions = [...new Set(
+      (Array.isArray(queueContext.job.payload?.metadata?.candidate_editions)
+        ? queueContext.job.payload.metadata.candidate_editions
+        : [])
+        .map((value) => normalizeContentEdition(value))
+        .filter(Boolean),
+    )];
     const allReferences = await getContentMediaReferences(parentJob.id, "video");
     const references = edition
       ? filterContentReferencesByEdition(allReferences, edition)
@@ -35373,6 +35380,10 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
       ...(edition ? {
         edition,
         edition_scoped: true,
+        ...(candidateEditions.length ? {
+          candidate_editions: candidateEditions,
+          cross_edition_fallback: true,
+        } : {}),
         other_editions_touched: [],
       } : {}),
     }, []);
@@ -35388,7 +35399,12 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
       zipSource: upload.source || upload.file,
       references,
       edition,
-      directoryCacheKey: `${videoJob.zip_sha256}:videos:${edition || "all"}`,
+      candidateEditions,
+      directoryCacheKey: `${videoJob.zip_sha256}:videos:${
+        candidateEditions.length
+          ? candidateEditions.join(",")
+          : edition || "all"
+      }`,
       onProgress: (progress) => queueContext.heartbeat(trackProgress(progress)),
     });
     const report = matchVideoReferences(references, extracted.videos);
@@ -35737,6 +35753,10 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
       ...(edition ? {
         edition,
         edition_scoped: true,
+        ...(candidateEditions.length ? {
+          candidate_editions: candidateEditions,
+          cross_edition_fallback: true,
+        } : {}),
         other_editions_touched: [],
       } : {}),
       zip_entries: extracted.entries,
@@ -36112,6 +36132,250 @@ app.post("/admin/crm/ai-training/content-video-imports/:videoJobId/reconcile-edi
           failed: true,
           edition: normalizeContentEdition(req.body?.edition),
           edition_scoped: true,
+        },
+        [{ error: error.message }],
+      ).catch(() => {});
+    }
+    await ngCleanupRejectedContentUpload(upload);
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+function ngContentFallbackEditions(value, targetEdition) {
+  const raw = Array.isArray(value)
+    ? value
+    : String(value || "").split(",");
+  const editions = [...new Set(raw
+    .map((item) => normalizeContentEdition(item))
+    .filter((item) => item && item !== targetEdition))];
+  if (!editions.length) {
+    throw Object.assign(
+      new Error("candidate_editions must contain at least one four-digit fallback year"),
+      { statusCode: 400 },
+    );
+  }
+  return editions.slice(0, 20);
+}
+
+function ngContentVideoFallbackFingerprint(audit) {
+  return crypto.createHash("sha256")
+    .update([
+      ngContentVideoEditionAuditFingerprint({
+        videoJob: audit.videoJob,
+        upload: audit.resolvedUpload,
+        edition: audit.edition,
+        references: audit.references,
+        videos: audit.inventory.videos,
+        report: audit.report,
+      }),
+      ...audit.candidateEditions,
+    ].join("\u0000"))
+    .digest("hex");
+}
+
+async function ngBuildContentVideoFallbackAudit(
+  videoJobId,
+  editionInput,
+  candidateInput,
+) {
+  const edition = ngContentEdition(editionInput);
+  const candidateEditions = ngContentFallbackEditions(candidateInput, edition);
+  const base = await ngBuildContentVideoReconcileAudit(videoJobId);
+  if (!base.uploadId || base.upload?.status !== "finalized") {
+    throw Object.assign(
+      new Error("The saved private video ZIP is no longer available"),
+      { statusCode: 410 },
+    );
+  }
+  const resolvedUpload = await ngContentUploadStore.resolveFinalized(
+    base.uploadId,
+    { allowedPurposes: ["video_zip", "media_zip"] },
+  );
+  const allReferences = await getContentMediaReferences(base.parentJob.id, "video");
+  const references = filterContentReferencesByEdition(allReferences, edition);
+  const inventory = await inspectContentVideoEntries({
+    zipSource: resolvedUpload.source || resolvedUpload.file,
+    editions: candidateEditions,
+    directoryCacheKey:
+      `${base.videoJob.zip_sha256}:videos:${candidateEditions.join(",")}`,
+  });
+  const report = matchVideoReferences(references, inventory.videos);
+  const mappings = await auditContentVideoMappings(report.matches);
+  const candidateKey = candidateEditions.join(",");
+  const existingRepair = ngContentBackgroundQueue.list({ limit: 500 }).find((job) =>
+    String(job.metadata?.fallback_repair_of_video_job_id || "")
+      === String(base.videoJob.id)
+    && String(job.metadata?.edition || "") === edition
+    && (Array.isArray(job.metadata?.candidate_editions)
+      ? job.metadata.candidate_editions.join(",")
+      : "") === candidateKey
+    && !["failed", "cancelled"].includes(String(job.status || "")));
+  const audit = {
+    ...base,
+    edition,
+    candidateEditions,
+    resolvedUpload,
+    references,
+    inventory,
+    report,
+    mappings,
+    existingRepair,
+  };
+  return {
+    ...audit,
+    fingerprint: ngContentVideoFallbackFingerprint(audit),
+  };
+}
+
+function ngPublicContentVideoFallbackAudit(audit) {
+  return {
+    edition: audit.edition,
+    candidate_editions: audit.candidateEditions,
+    video_job_id: audit.videoJob.id,
+    content_import_job_id: audit.parentJob.id,
+    audit_fingerprint: audit.fingerprint,
+    package_available: true,
+    package_expires_at: audit.upload?.expires_at || null,
+    archive_entries: audit.inventory.entries,
+    candidate_video_files: audit.inventory.videos.length,
+    video_references: audit.references.length,
+    exact_matches: audit.report.matches.length,
+    already_linked: audit.mappings.linked.length,
+    repairable_links: audit.mappings.missing.length,
+    remaining_missing: audit.report.missing.length,
+    remaining_ambiguous: audit.report.ambiguous.length,
+    unreferenced_candidate_videos: audit.report.unreferenced.length,
+    existing_repair_background_job_id: audit.existingRepair?.id || null,
+    existing_repair_video_job_id:
+      audit.existingRepair?.metadata?.domain_job_id || null,
+    target_question_edition_only: true,
+    exact_media_ref_matching: true,
+    archive_duplicate_identity: "size_and_crc32_then_sha256_on_extract",
+    filename_treated_as_question_id: false,
+    sha256_vimeo_deduplication: true,
+    existing_video_links_overwritten: false,
+    other_editions_touched: [],
+    student_visibility: "disabled_drafts_until_collection_approval",
+    missing_samples: audit.report.missing.slice(0, 50).map((item) => ({
+      student_qid: item.studentQid,
+      media_ref: item.mediaRef,
+    })),
+    ambiguous_samples: audit.report.ambiguous.slice(0, 50).map((item) => ({
+      student_qid: item.studentQid,
+      media_ref: item.mediaRef,
+      candidates: (item.candidates || []).slice(0, 20),
+    })),
+  };
+}
+
+app.get("/admin/crm/ai-training/content-video-imports/:videoJobId/fallback-audit", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const audit = await ngBuildContentVideoFallbackAudit(
+      req.params.videoJobId,
+      req.query?.edition,
+      req.query?.candidate_editions,
+    );
+    return res.json({
+      success: true,
+      audit: ngPublicContentVideoFallbackAudit(audit),
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+app.post("/admin/crm/ai-training/content-video-imports/:videoJobId/reconcile-fallback-draft-links", async (req, res) => {
+  let upload = null;
+  let repairJob = null;
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const audit = await ngBuildContentVideoFallbackAudit(
+      req.params.videoJobId,
+      req.body?.edition,
+      req.body?.candidate_editions,
+    );
+    const expectedFingerprint = String(req.body?.audit_fingerprint || "");
+    if (!expectedFingerprint || expectedFingerprint !== audit.fingerprint) {
+      return res.status(409).json({
+        success: false,
+        error: "The fallback video audit changed. Refresh the dry-run before starting recovery.",
+      });
+    }
+    if (audit.existingRepair) {
+      return res.status(200).json({
+        success: true,
+        deduplicated: true,
+        edition: audit.edition,
+        candidate_editions: audit.candidateEditions,
+        video_job_id: audit.existingRepair.metadata?.domain_job_id || null,
+        background_job_id: audit.existingRepair.id,
+        message: "This fallback recovery is already queued, running, or completed.",
+      });
+    }
+    upload = audit.resolvedUpload;
+    repairJob = await createContentVideoImportJob({
+      id: crypto.randomUUID(),
+      contentImportJobId: audit.parentJob.id,
+      zipSha256: upload.sha256,
+      originalFilename: upload.originalFilename,
+      createdBy: String(user.id),
+    });
+    const backgroundJob = await ngQueueContentOperation({
+      type: "content_video_draft",
+      lane: "video_zip",
+      upload,
+      domainJobId: repairJob.id,
+      metadata: {
+        edition: audit.edition,
+        candidate_editions: audit.candidateEditions,
+        edition_scoped: true,
+        cross_edition_fallback: true,
+        fallback_repair_of_video_job_id: audit.videoJob.id,
+        fallback_audit_fingerprint: audit.fingerprint,
+        contextual_media_repair: true,
+      },
+      maxAttempts: 2,
+    });
+    upload = null;
+    return res.status(202).json({
+      success: true,
+      deduplicated: false,
+      edition: audit.edition,
+      candidate_editions: audit.candidateEditions,
+      video_job_id: repairJob.id,
+      background_job_id: backgroundJob.id,
+      content_import_job_id: audit.parentJob.id,
+      repair_of_video_job_id: audit.videoJob.id,
+      status: "queued",
+      poll_url:
+        `/admin/crm/ai-training/content-video-imports/${repairJob.id}`,
+      safeguards: {
+        target_question_edition_only: true,
+        other_editions_touched: [],
+        source_zip_uploaded_again: false,
+        filename_treated_as_question_id: false,
+        sha256_vimeo_deduplication: true,
+        existing_video_links_overwritten: false,
+        student_resources_published: 0,
+      },
+    });
+  } catch (error) {
+    if (repairJob?.id) {
+      await finishContentVideoImportJob(
+        repairJob.id,
+        "queue_failed",
+        {
+          failed: true,
+          edition: normalizeContentEdition(req.body?.edition),
+          candidate_editions: req.body?.candidate_editions || [],
+          cross_edition_fallback: true,
         },
         [{ error: error.message }],
       ).catch(() => {});
