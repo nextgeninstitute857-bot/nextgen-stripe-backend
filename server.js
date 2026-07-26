@@ -30,6 +30,7 @@ import {
   getContentVideoImportJob,
   getContentImportJob,
   getContentQbankCatalog,
+  getContentQbankPresentationPolicy,
   getContentQbankQuestions,
   getContentRegistryFlashcardQuestion,
   getContentTaxonomyCoverage,
@@ -46,9 +47,11 @@ import {
   listContentCollections,
   listContentTaxonomyAuditEvents,
   listContentTaxonomyReviewQueue,
+  normalizeContentSourceProfile,
   removeContentQuestionTaxonomyOverride,
   recordExternalQbankAuditEvent,
   recordExternalQbankDeliveryAnswer,
+  resolveContentQbankStudentSourceProfile,
   reviewContentTaxonomyMapping,
   saveContentMediaMatchBatch,
   saveContentVideoAsset,
@@ -57,6 +60,7 @@ import {
   stageContentMediaImportAssets,
   submitExternalQbankDeliverySession,
   updateContentCollectionControls,
+  upsertContentQbankPresentationPolicy,
   upsertContentQuestionTaxonomyOverride,
   upsertContentTaxonomyMapping,
 } from "./lib/content-registry-postgres.js";
@@ -34298,25 +34302,29 @@ app.post("/admin/crm/ai-training/content-imports/preview", async (req, res) => {
     const examTrack = normalizeExamTrack(upload.fields.exam_track || upload.fields.examTrack);
     const sourceNamespace = contentSlug(upload.fields.source_namespace || upload.fields.sourceNamespace || upload.fields.source_provider || upload.fields.sourceProvider);
     const sourceProvider = String(upload.fields.source_provider || upload.fields.sourceProvider || "unknown").trim();
+    const sourceProfile = normalizeContentSourceProfile(
+      upload.fields.source_profile || upload.fields.sourceProfile,
+      sourceProvider,
+    );
     const collectionTitle = String(upload.fields.collection_title || upload.fields.collectionTitle || upload.originalFilename.replace(/\.zip$/i, "")).trim();
     if (examTrack === "unknown") throw Object.assign(new Error("exam_track is required"), { statusCode: 400 });
     if (sourceNamespace === "unknown") throw Object.assign(new Error("source_namespace or source_provider is required"), { statusCode: 400 });
     const destinations = ngParseContentDestinations(upload.fields.destinations);
     jobId = crypto.randomUUID();
     await createContentImportJob({
-      id: jobId, examTrack, sourceNamespace, sourceProvider, collectionTitle,
+      id: jobId, examTrack, sourceNamespace, sourceProvider, sourceProfile, collectionTitle,
       originalFilename: upload.originalFilename, zipSha256: upload.sha256,
       destinations, createdBy: String(user.id),
     });
     await setContentImportJobStatus(jobId, "preview_queued");
     const backgroundJob = await ngQueueContentOperation({
       type: "content_question_preview", lane: "question_zip", upload, domainJobId: jobId,
-      metadata: { examTrack, sourceNamespace, sourceProvider, collectionTitle },
+      metadata: { examTrack, sourceNamespace, sourceProvider, sourceProfile, collectionTitle },
     });
     upload = null;
     return res.status(202).json({
       success: true, job_id: jobId, background_job_id: backgroundJob.id, status: "preview_queued", exam_track: examTrack,
-      source_namespace: sourceNamespace, destinations,
+      source_namespace: sourceNamespace, source_profile: sourceProfile, destinations,
       poll_url: `/admin/crm/ai-training/content-imports/${jobId}`,
       message: "ZIP accepted. Preview runs asynchronously with bounded memory; nothing is published yet.",
     });
@@ -35901,11 +35909,44 @@ app.put("/admin/crm/ai-training/content-registry/collections/:collectionId/contr
       status: req.body.status,
       destinations: req.body.destinations,
       displayPolicy: req.body.display_policy || req.body.displayPolicy,
+      sourceProfile: req.body.source_profile ?? req.body.sourceProfile,
       actorId: String(user.id),
     });
     return res.json({
       success: true, collection,
       message: "Collection controls saved. Content was routed without deleting questions or historical activity.",
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/ai-training/content-registry/qbank-presentation-policy", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const examTrack = normalizeContentTaxonomyExamTrack(req.query.exam_track || req.query.examTrack);
+    if (!examTrack) return res.status(400).json({ success: false, error: "A supported exam_track is required" });
+    const policy = await getContentQbankPresentationPolicy({ examTrack });
+    return res.json({ success: true, policy });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.put("/admin/crm/ai-training/content-registry/qbank-presentation-policy", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const examTrack = normalizeContentTaxonomyExamTrack(req.body.exam_track || req.body.examTrack);
+    if (!examTrack) return res.status(400).json({ success: false, error: "A supported exam_track is required" });
+    const policy = await upsertContentQbankPresentationPolicy({
+      examTrack,
+      studentBankMode: req.body.student_bank_mode || req.body.studentBankMode,
+      actorId: String(user.id),
+    });
+    return res.json({
+      success: true,
+      policy,
+      message: "Student QBank presentation saved. Roadmap and Personal Tutor continue using all approved source profiles.",
     });
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, error: error.message });
@@ -36602,6 +36643,7 @@ async function aylaSelectQbankSessionQuestions({
   requestedCount,
   filters,
   purpose,
+  sourceProfile = "",
 } = {}) {
   if (purpose !== "baseline_diagnostic") {
     const selected = await listContentQbankQuestions({
@@ -36611,6 +36653,7 @@ async function aylaSelectQbankSessionQuestions({
       subsystemKey: filters.subsystem_key,
       topicKey: filters.topic_key,
       subtopicKey: filters.subtopic_key,
+      sourceProfile,
       limit: requestedCount,
       seed: crypto.randomUUID(),
     });
@@ -36664,15 +36707,44 @@ async function aylaSelectQbankSessionQuestions({
   return { selected, availableSystemKeys, selectedSystemKeys };
 }
 
+function aylaStudentQbankPresentationPolicy(policy = {}, selectedSourceProfile = "") {
+  return {
+    student_bank_mode: policy.student_bank_mode || "unified_aylamed",
+    student_can_choose_source_profile: policy.student_can_choose_source_profile === true,
+    student_brand_label: policy.student_brand_label || "AylaMed QBank",
+    selected_source_profile: selectedSourceProfile || null,
+    available_source_profiles: (Array.isArray(policy.available_source_profiles)
+      ? policy.available_source_profiles
+      : []).map((row) => ({
+      source_profile: row.source_profile,
+      question_count: Number(row.question_count || 0),
+      collection_count: Number(row.collection_count || 0),
+    })),
+    roadmap_source_strategy: "all_approved_profiles",
+    personal_tutor_source_strategy: "all_approved_profiles",
+    exact_duplicates_count_once: true,
+  };
+}
+
 app.get("/api/ayla/qbank/catalog", async (req, res) => {
   try {
     const auth = await aylaV189RequireStudent(req, String(req.query.student_id || ""), "qbank");
     const access = aylaRequireQbankAccess(auth.db, auth.user, auth.student, req.query.exam_track || req.query.examTrack || "");
     const examTrack = access.exam_track;
-    const catalog = await getContentQbankCatalog({ examTrack, destination: "aylamed_qbank" });
+    const presentationPolicy = await getContentQbankPresentationPolicy({ examTrack });
+    const sourceProfile = resolveContentQbankStudentSourceProfile(
+      presentationPolicy,
+      req.query.source_profile || req.query.sourceProfile || "",
+    );
+    const catalog = await getContentQbankCatalog({
+      examTrack,
+      destination: "aylamed_qbank",
+      sourceProfile,
+    });
     return aylaSendOk(res, {
       exam_track: examTrack,
       entitlement: { type: access.entitlement_type, expires_at: access.expires_at || null },
+      presentation: aylaStudentQbankPresentationPolicy(presentationPolicy, sourceProfile),
       count: catalog.length,
       question_count: catalog.reduce((sum, row) => sum + Number(row.question_count || 0), 0),
       catalog,
@@ -36763,6 +36835,13 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
     }
     const effectiveRequestedCount = roadmapAssignmentId ? roadmapQuestionIds.length : requestedCount;
     const effectiveFilters = roadmapAssignmentId ? normalizeAylaQbankFilters({}) : filters;
+    const presentationPolicy = await getContentQbankPresentationPolicy({ examTrack: access.exam_track });
+    const sourceProfile = roadmapAssignmentId || purpose === "baseline_diagnostic"
+      ? ""
+      : resolveContentQbankStudentSourceProfile(
+        presentationPolicy,
+        req.body.source_profile || req.body.sourceProfile || "",
+      );
 
     const idempotencyFingerprint = crypto.createHash("sha256").update(JSON.stringify({
       examTrack: access.exam_track,
@@ -36774,6 +36853,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
       origin,
       roadmapAssignmentId,
       roadmapQuestionIds,
+      sourceProfile,
       timeLimitMinutes: req.body.time_limit_minutes ?? req.body.timeLimitMinutes ?? null,
     })).digest("hex");
     if (idempotencyKey) {
@@ -36823,6 +36903,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         requestedCount: effectiveRequestedCount,
         filters: effectiveFilters,
         purpose,
+        sourceProfile,
       });
     }
     const selected = selection.selected;
@@ -36877,6 +36958,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         blockSize: requestedBlockSize,
         origin,
         roadmapAssignmentId,
+        sourceProfile,
         timeLimitMinutes: req.body.time_limit_minutes ?? req.body.timeLimitMinutes ?? null,
         entitlement: fresh.entitlement,
       });
@@ -36891,7 +36973,13 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         };
       }
       aylaSetItem(db, "aylaQbankSessions", session);
-      aylaQbankEvent(db, session, "session_created", { mode: session.mode, purpose: session.purpose, questionCount: session.questionCount, origin: session.origin });
+      aylaQbankEvent(db, session, "session_created", {
+        mode: session.mode,
+        purpose: session.purpose,
+        questionCount: session.questionCount,
+        origin: session.origin,
+        sourceProfile: session.sourceProfile || null,
+      });
       aylaV189RecordActivity(db, session.studentId, "qbank_session_created", { sessionId: session.id, examTrack: session.examTrack, questionCount: session.questionCount, mode: session.mode, purpose: session.purpose });
       return { session, replayed: false };
     });
@@ -36928,7 +37016,12 @@ app.post("/api/ayla/qbank/sessions/:sessionId/answers", async (req, res) => {
     const questionRef = String(req.body.question_ref || req.body.questionRef || "").trim();
     const mapping = qbankSessionQuestion(session, questionRef);
     if (!mapping) return aylaSendError(res, 404, "Question does not belong to this QBank session");
-    const [question] = await getContentQbankQuestions({ questionIds: [mapping.contentQuestionId], examTrack: session.examTrack, destination: "aylamed_qbank" });
+    const [question] = await getContentQbankQuestions({
+      questionIds: [mapping.contentQuestionId],
+      examTrack: session.examTrack,
+      destination: "aylamed_qbank",
+      sourceProfile: session.sourceProfile || "",
+    });
     if (!question) return aylaSendError(res, 409, "This question is no longer approved for QBank delivery");
     const selectedAnswerId = Number(req.body.selected_answer_id ?? req.body.selectedAnswerId);
     if (!question.answers.some((row) => Number(row.answer_id) === selectedAnswerId)) return aylaSendError(res, 400, "selected_answer_id is not a valid answer choice");
@@ -36995,6 +37088,7 @@ app.post("/api/ayla/qbank/sessions/:sessionId/submit", async (req, res) => {
       questionIds: (initial.questions || []).map((row) => row.contentQuestionId),
       examTrack: initial.examTrack,
       destination: "aylamed_qbank",
+      sourceProfile: initial.sourceProfile || "",
     });
     const reviewById = new Map(reviewQuestions.map((row) => [String(row.id), row]));
     const mutation = await mutateAylaDb(async (db) => {
@@ -37360,7 +37454,12 @@ async function aylaHandleQbankRevision(req, res, enabled) {
     const mapping = qbankSessionQuestion(initial, req.params.questionRef);
     if (!mapping) return aylaSendError(res, 404, "Question does not belong to this QBank session");
     let question = null;
-    if (enabled) [question] = await getContentQbankQuestions({ questionIds: [mapping.contentQuestionId], examTrack: initial.examTrack, destination: "aylamed_qbank" });
+    if (enabled) [question] = await getContentQbankQuestions({
+      questionIds: [mapping.contentQuestionId],
+      examTrack: initial.examTrack,
+      destination: "aylamed_qbank",
+      sourceProfile: initial.sourceProfile || "",
+    });
     const revision = await mutateAylaDb(async (db) => {
       const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, initial.examTrack);
       const current = aylaOwnedQbankSession(db, fresh.user, fresh.student, initial.id);
@@ -60750,6 +60849,7 @@ async function aylaPlayableQbankQuestion(db, session, mapping, rawQuestion = nul
       questionIds: [mapping.contentQuestionId],
       examTrack: session.examTrack,
       destination: "aylamed_qbank",
+      sourceProfile: session.sourceProfile || "",
     });
   }
   if (!raw) {
@@ -60812,6 +60912,7 @@ async function aylaPlayableQbankSession(db, session) {
     questionIds: mappings.map((row) => row.contentQuestionId),
     examTrack: session.examTrack,
     destination: "aylamed_qbank",
+    sourceProfile: session.sourceProfile || "",
   });
   const byId = new Map(content.map((row) => [String(row.id), row]));
   const questions = [];
@@ -65337,8 +65438,7 @@ async function aylaV210RegistryVideoInputs(student, destinations) {
   try {
     const rows = [];
     const pageSize = 500;
-    const maximumRows = 5000;
-    while (rows.length < maximumRows) {
+    while (true) {
       const page = await listContentHubVideos({
         examTrack,
         destinations,
@@ -65348,10 +65448,7 @@ async function aylaV210RegistryVideoInputs(student, destinations) {
       rows.push(...page);
       if (page.length < pageSize) break;
     }
-    return {
-      rows,
-      warning: rows.length >= maximumRows ? "content_registry_video_limit_reached" : null,
-    };
+    return { rows, warning: null };
   } catch (error) {
     console.warn("AylaMed Content Hub registry read unavailable:", error.message);
     return { rows: [], warning: "content_registry_temporarily_unavailable" };

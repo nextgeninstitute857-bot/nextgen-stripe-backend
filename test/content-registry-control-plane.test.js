@@ -21,6 +21,25 @@ test('question ID display policy supports internal, source, both, and hidden mod
   for (const mode of ['provider', 'neutral', 'hidden']) assert.match(postgres, new RegExp(`'${mode}'`));
 });
 
+test('QBank presentation policy is persistent per exam and cannot alter roadmap or tutor source coverage', () => {
+  assert.match(postgres, /CREATE TABLE IF NOT EXISTS content_qbank_presentation_policies/);
+  assert.match(postgres, /student_bank_mode TEXT NOT NULL DEFAULT 'unified_aylamed'/);
+  assert.match(server, /content-registry\/qbank-presentation-policy/);
+  assert.match(server, /Roadmap and Personal Tutor continue using all approved source profiles/);
+  assert.match(server, /roadmapAssignmentId \|\| purpose === "baseline_diagnostic"\s*\?\s*""/);
+});
+
+test('source learning profiles remain separate from collection question-ID display policy', () => {
+  for (const profile of ['uworld_style', 'amboss_style', 'aylamed_original', 'other']) {
+    assert.match(postgres, new RegExp(`"${profile}"`));
+  }
+  assert.match(postgres, /source_profile TEXT NOT NULL DEFAULT 'other'/);
+  assert.match(postgres, /LOWER\(source_provider\) LIKE '%uworld%'.*?'uworld_style'/s);
+  assert.match(postgres, /LOWER\(source_provider\) LIKE '%amboss%'.*?'amboss_style'/s);
+  assert.match(postgres, /display_policy JSONB NOT NULL DEFAULT/);
+  assert.match(server, /sourceProfile: req\.body\.source_profile \?\? req\.body\.sourceProfile/);
+});
+
 test('disabling one collection cannot unapprove a question shared by another approved collection', () => {
   assert.match(postgres, /approved_collection\.status='approved'/);
   assert.match(postgres, /THEN 'approved' ELSE 'draft'/);

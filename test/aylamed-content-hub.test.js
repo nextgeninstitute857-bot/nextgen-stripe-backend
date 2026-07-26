@@ -314,7 +314,8 @@ test("server and registry wire one entitlement-guarded Content Hub into the exis
   assert.match(server, /function aylaV189BuildDailyPlan[\s\S]*?selectAylaRoadmapVideo\(/);
   assert.match(server, /focusSubsystem,/);
   assert.match(server, /subsystem: req\.query\.subsystem \|\| req\.query\.subsystem_key/);
-  assert.match(server, /while \(rows\.length < maximumRows\)/);
+  assert.match(server, /const pageSize = 500;[\s\S]*?while \(true\)[\s\S]*?offset: rows\.length/);
+  assert.doesNotMatch(server, /content_registry_video_limit_reached/);
   assert.match(postgres, /'aylamed_content_hub'/);
   assert.match(postgres, /export async function listContentHubVideos/);
   assert.match(postgres, /q\.status='approved' AND c\.status='approved' AND d\.enabled=TRUE/);
