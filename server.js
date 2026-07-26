@@ -288,7 +288,11 @@ import {
   isProviderRateLimit,
   multiQbankIngestionConfig,
 } from "./lib/multi-qbank-ingestion.js";
-import { normalizeContentRightsStatus } from "./lib/qbank-bulk-ingestion.js";
+import {
+  bulkQbankMediaAliasFingerprint,
+  normalizeBulkQbankMediaAliases,
+  normalizeContentRightsStatus,
+} from "./lib/qbank-bulk-ingestion.js";
 import { normalizeExamTrack, slug as contentSlug } from "./lib/content-import-adapter.js";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -34260,6 +34264,7 @@ async function ngRunContentImportPreview({ jobId, upload, metadata, queueContext
     await finishContentImportPreview(jobId, {
       ...preview.counts,
       missing_media_samples: preview.missingMedia,
+      media_quarantine_samples: preview.mediaQuarantine,
       collections: preview.collections,
     }, preview.errors);
     return preview;
@@ -34319,12 +34324,16 @@ app.post("/admin/crm/ai-training/content-imports/preview", async (req, res) => {
     if (examTrack === "unknown") throw Object.assign(new Error("exam_track is required"), { statusCode: 400 });
     if (sourceNamespace === "unknown") throw Object.assign(new Error("source_namespace or source_provider is required"), { statusCode: 400 });
     const destinations = ngParseContentDestinations(upload.fields.destinations);
+    const mediaAliases = normalizeBulkQbankMediaAliases(
+      upload.fields.media_aliases || upload.fields.mediaAliases || [],
+    );
+    const mediaAliasesFingerprint = bulkQbankMediaAliasFingerprint(mediaAliases);
     jobId = crypto.randomUUID();
     await createContentImportJob({
       id: jobId, examTrack, sourceNamespace, sourceProvider, sourceProfile,
       sourceRightsStatus, collectionTitle,
       originalFilename: upload.originalFilename, zipSha256: upload.sha256,
-      destinations, createdBy: String(user.id),
+      destinations, mediaAliases, mediaAliasesFingerprint, createdBy: String(user.id),
     });
     await setContentImportJobStatus(jobId, "preview_queued");
     const backgroundJob = await ngQueueContentOperation({
@@ -34336,6 +34345,7 @@ app.post("/admin/crm/ai-training/content-imports/preview", async (req, res) => {
         sourceProfile,
         sourceRightsStatus,
         collectionTitle,
+        mediaAliases,
       },
     });
     upload = null;
@@ -34343,6 +34353,8 @@ app.post("/admin/crm/ai-training/content-imports/preview", async (req, res) => {
       success: true, job_id: jobId, background_job_id: backgroundJob.id, status: "preview_queued", exam_track: examTrack,
       source_namespace: sourceNamespace, source_profile: sourceProfile,
       source_rights_status: sourceRightsStatus, destinations,
+      media_aliases: mediaAliases.length,
+      media_aliases_fingerprint: mediaAliasesFingerprint,
       poll_url: `/admin/crm/ai-training/content-imports/${jobId}`,
       message: "ZIP accepted. Preview runs asynchronously with bounded memory; nothing is published yet.",
     });

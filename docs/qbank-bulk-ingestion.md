@@ -1,4 +1,4 @@
-# v238 private QBank bulk ingestion
+# v239 private QBank readiness and bulk ingestion
 
 This workflow removes the need to upload each question image through the CRM.
 It sends one prepared ZIP per bank to private R2 staging, then reuses that exact
@@ -8,6 +8,11 @@ finalized upload for:
 2. disabled-draft question import;
 3. exact stem, answer-choice and explanation media matching;
 4. safe missing-link reconciliation after a read-only audit.
+
+v239 also accepts a reviewed media-alias file per bank. An alias may only add
+an exact packaged asset path to an existing question/media reference; it cannot
+change the question, answer, placement, scoring or student visibility. The ZIP
+hash and alias fingerprint are bound together in the resumable state file.
 
 It never approves a collection, enables a student destination, publishes
 content, or writes directly to PostgreSQL. External YouTube/Vimeo links remain
@@ -38,6 +43,40 @@ node scripts/run-qbank-bulk-draft-import.mjs \
 ```
 
 This reads and hashes the local ZIPs. It makes zero network requests.
+
+## Full local rehearsal
+
+```sh
+node scripts/run-qbank-bulk-draft-import.mjs \
+  --manifest /secure/path/qbank-manifest.json \
+  --rehearse-local
+```
+
+The rehearsal runs the real streaming preview and draft importer against every
+prepared ZIP, simulates exam-scoped duplicate reuse in memory, validates exact
+stem/answer/explanation placement, and emits a quarantine report. It performs
+zero network requests and zero database writes.
+
+Each optional `media_aliases_file` is a private JSON file:
+
+```json
+{
+  "aliases": [
+    {
+      "source_item_id": "3114",
+      "media_ref": "wp-content/uploads/example.bmp",
+      "asset_path": "prepared-bank/3114_example.bmp",
+      "placement": "question",
+      "evidence": "question_id_and_reference"
+    }
+  ]
+}
+```
+
+Supported evidence values are `question_id_and_reference`,
+`unique_semantic_suffix`, `unique_closest_semantic_suffix`, and
+`admin_verified`. Missing or ambiguous assets remain quarantined; the runner
+never guesses them.
 
 ## Private-draft execution
 

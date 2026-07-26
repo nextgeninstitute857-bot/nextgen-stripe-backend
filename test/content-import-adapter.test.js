@@ -248,6 +248,63 @@ test("adapter keeps answer-choice images on the exact answer placement", () => {
   assert.equal(row.sourceData.media_placements["choice-b.png"], "answer:2");
 });
 
+test("supplemental filenames containing spaces stay whole instead of creating a false suffix reference", () => {
+  const row = adaptUniversalQuestion({
+    id: 9812,
+    question: "<p>Stem</p>",
+    explanation: '<p>Why</p><img src="9812_Screen Shot 2021-11-01 at 2.12.25 pm.png">',
+    otherMedias: "9812_Screen Shot 2021-11-01 at 2.12.25 pm.png",
+    corrAns: 1,
+  }, [
+    { id: 1, qId: 9812, answerId: 1, answerText: "A" },
+    { id: 2, qId: 9812, answerId: 2, answerText: "B" },
+  ], {
+    examTrack: "amc",
+    sourceProvider: "MPlusX",
+    sourceNamespace: "mplusx-2025",
+    collectionKey: "mplusx",
+  });
+  assert.deepEqual(row.media, ["9812_Screen Shot 2021-11-01 at 2.12.25 pm.png"]);
+  assert.equal(row.media.includes("pm.png"), false);
+});
+
+test("reviewed media aliases add an exact asset path without changing placement", () => {
+  const row = adaptUniversalQuestion({
+    id: 3114,
+    question: '<p>Stem</p><img src="wp-content/uploads/diagram.bmp">',
+    explanation: "<p>Why</p>",
+    corrAns: 1,
+  }, [
+    { id: 1, qId: 3114, answerId: 1, answerText: "A" },
+    { id: 2, qId: 3114, answerId: 2, answerText: "B" },
+  ], {
+    examTrack: "amc",
+    sourceProvider: "MPlusX",
+    sourceNamespace: "mplusx-2025",
+    collectionKey: "mplusx",
+    mediaAliases: [{
+      alias_key: "reviewed-alias",
+      source_item_id: "3114",
+      media_ref: "wp-content/uploads/diagram.bmp",
+      asset_path: "mplusx/3114_diagram.bmp",
+      placement: "question",
+      evidence: "question_id_and_reference",
+    }],
+  });
+  assert.deepEqual(row.sourceData.media_match_paths["wp-content/uploads/diagram.bmp"], [
+    "mplusx/3114_diagram.bmp",
+    "wp-content/uploads/diagram.bmp",
+  ]);
+  assert.equal(row.sourceData.media_placements["wp-content/uploads/diagram.bmp"], "question");
+  assert.deepEqual(row.sourceData.media_aliases_applied, [{
+    alias_key: "reviewed-alias",
+    media_ref: "wp-content/uploads/diagram.bmp",
+    asset_path: "mplusx/3114_diagram.bmp",
+    placement: "question",
+    evidence: "question_id_and_reference",
+  }]);
+});
+
 test("external explanation videos are preserved as private review metadata, not upload media", () => {
   const html = '<a onclick="open_url(`https://youtu.be/AbCdEf12345`)">Watch</a>';
   const videos = extractExternalVideoReferences({ html, placement: "explanation" });

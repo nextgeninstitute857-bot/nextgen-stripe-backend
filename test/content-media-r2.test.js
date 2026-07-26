@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { contentMediaStatus, matchMediaReferences, safeMediaEntryName } from "../lib/content-media-r2.js";
+import {
+  contentMediaReferenceKeys,
+  contentMediaStatus,
+  matchMediaReferences,
+  safeMediaEntryName,
+} from "../lib/content-media-r2.js";
 import { contentR2Timeouts, signContentR2UploadPart } from "../lib/content-r2-storage.js";
 
 test("R2 remains disabled until every private credential is configured", () => {
@@ -204,4 +209,13 @@ test("contextual matching still quarantines a genuinely ambiguous path", () => {
   ]);
   assert.equal(report.matches.length, 0);
   assert.equal(report.ambiguous.length, 1);
+});
+
+test("reviewed match paths make renamed packaged assets eligible for private upload", () => {
+  const keys = contentMediaReferenceKeys([{
+    mediaRef: "wp-content/uploads/diagram.bmp",
+    matchPaths: ["mplusx/3114_diagram.bmp"],
+  }]);
+  assert.equal(keys.has("diagram.bmp"), true);
+  assert.equal(keys.has("3114_diagram.bmp"), true);
 });

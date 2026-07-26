@@ -12,6 +12,8 @@ async function previewFixture({
   answers,
   stem = "fixture",
   examTrack = "usmle-step-1",
+  mediaNames = [],
+  mediaAliases = [],
 }) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "aylamed-inline-bank-"));
   const questionName = `${stem}.db_questions.json`;
@@ -23,7 +25,7 @@ async function previewFixture({
   try {
     return await previewUniversalQuestionZip({
       inventory: {
-        names: [questionName, answerName],
+        names: [questionName, answerName, ...mediaNames],
         extractedJson: new Map([
           [questionName, questionPath],
           [answerName, answerPath],
@@ -36,12 +38,56 @@ async function previewFixture({
       sourceNamespace: namespace,
       sourceProvider: provider,
       collectionTitle: "Fixture",
+      mediaAliases,
       duplicateLookup: async () => ({ exact: [], source: [] }),
     });
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
   }
 }
+
+test("reviewed aliases resolve renamed packaged media and leave absent assets quarantined", async () => {
+  const preview = await previewFixture({
+    provider: "MPlusX",
+    namespace: "mplusx-2025",
+    stem: "mplusx-2025",
+    examTrack: "amc",
+    mediaNames: ["mplusx/3114_diagram.bmp"],
+    mediaAliases: [{
+      alias_key: "alias-3114",
+      source_item_id: "3114",
+      media_ref: "wp-content/uploads/diagram.bmp",
+      asset_path: "mplusx/3114_diagram.bmp",
+      placement: "question",
+      evidence: "question_id_and_reference",
+    }],
+    question: {
+      id: 3114,
+      question: '<p>Stem?</p><img src="wp-content/uploads/diagram.bmp">',
+      explanation: '<p>Explanation</p><img src="missing-explanation.jpg">',
+      corrAns: 2,
+      sysId: 26,
+      subId: 0,
+    },
+    answers: [
+      { id: 1, qId: 3114, answerId: 1, answerText: "A" },
+      { id: 2, qId: 3114, answerId: 2, answerText: "B" },
+    ],
+  });
+  assert.equal(preview.counts.media_aliases_declared, 1);
+  assert.equal(preview.counts.media_aliases_applied, 1);
+  assert.equal(preview.counts.media_matched, 1);
+  assert.equal(preview.counts.media_missing, 1);
+  assert.equal(preview.counts.media_ambiguous, 0);
+  assert.deepEqual(preview.mediaQuarantine, [{
+    source_item_id: "3114",
+    placement: "explanation",
+    media_ref: "missing-explanation.jpg",
+    reason: "packaged_asset_missing",
+    accepted_asset_path: "",
+    candidates: [],
+  }]);
+});
 
 test("AMBOSS paired exports preview through the provider-aware SBA adapter", async () => {
   const preview = await previewFixture({

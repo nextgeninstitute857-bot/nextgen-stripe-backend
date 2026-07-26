@@ -5,6 +5,7 @@ import {
   MIXED_QBANK_UPLOAD_PURPOSE,
   contentRightsAreVerified,
   contentUploadPurposeAllowed,
+  normalizeBulkQbankMediaAliases,
   normalizeBulkQbankManifest,
   normalizeContentRightsStatus,
 } from "../lib/qbank-bulk-ingestion.js";
@@ -58,7 +59,7 @@ test("bulk manifests are private-draft only, provider-aware, and bounded to two 
       }),
     ],
   });
-  assert.equal(manifest.version, "v238");
+  assert.equal(manifest.version, "v239");
   assert.equal(manifest.mode, "private_draft_only");
   assert.equal(manifest.upload_purpose, MIXED_QBANK_UPLOAD_PURPOSE);
   assert.equal(manifest.concurrency, 2);
@@ -75,6 +76,35 @@ test("bulk manifests are private-draft only, provider-aware, and bounded to two 
   assert.throws(
     () => normalizeBulkQbankManifest({ banks: [bank({ draft_only: false })] }),
     (error) => error.code === "QBANK_BULK_DRAFT_ONLY",
+  );
+});
+
+test("reviewed media aliases are exact, fingerprinted, and cannot alter placement implicitly", () => {
+  const aliases = normalizeBulkQbankMediaAliases([
+    {
+      source_item_id: "3114",
+      media_ref: "wp-content/uploads/diagram.bmp",
+      asset_path: "prepared/3114_diagram.bmp",
+      placement: "question",
+      evidence: "question_id_and_reference",
+    },
+  ]);
+  assert.equal(aliases.length, 1);
+  assert.match(aliases[0].alias_key, /^[a-f0-9]{64}$/);
+  assert.equal(aliases[0].reviewed, true);
+  const manifest = normalizeBulkQbankManifest({
+    banks: [bank({ media_aliases: aliases })],
+  });
+  assert.equal(manifest.banks[0].media_aliases.length, 1);
+  assert.match(manifest.banks[0].media_aliases_fingerprint, /^[a-f0-9]{64}$/);
+  assert.throws(
+    () => normalizeBulkQbankMediaAliases([{
+      source_item_id: "3114",
+      media_ref: "diagram.bmp",
+      asset_path: "prepared/diagram.bmp",
+      placement: "answer",
+    }]),
+    (error) => error.code === "INVALID_QBANK_MEDIA_ALIAS_PLACEMENT",
   );
 });
 
@@ -103,5 +133,7 @@ test("bulk runner is resumable, checksum-bound, memory-bounded, and never enable
   assert.match(runner, /Promise\.allSettled/);
   assert.match(runner, /collections_approved: 0/);
   assert.match(runner, /student_destinations_enabled: 0/);
+  assert.match(runner, /--rehearse-local/);
+  assert.match(runner, /input_signature/);
   assert.doesNotMatch(runner, /requireBulkQbankExecutionRights/);
 });

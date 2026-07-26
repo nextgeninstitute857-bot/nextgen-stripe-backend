@@ -9,6 +9,12 @@ import {
   MIXED_QBANK_UPLOAD_PURPOSE,
   normalizeBulkQbankManifest,
 } from "../lib/qbank-bulk-ingestion.js";
+import {
+  cleanupContentImportFiles,
+  extractSafeZipInventory,
+  importUniversalQuestionZip,
+  previewUniversalQuestionZip,
+} from "../lib/content-zip-import.js";
 
 const PREVIEW_TERMINAL = new Set([
   "preview_ready",
@@ -55,10 +61,12 @@ function usage() {
   return [
     "Usage:",
     "  node scripts/run-qbank-bulk-draft-import.mjs --manifest /path/to/manifest.json",
+    "  node scripts/run-qbank-bulk-draft-import.mjs --manifest /path/to/manifest.json --rehearse-local",
     "  node scripts/run-qbank-bulk-draft-import.mjs --manifest /path/to/manifest.json --execute-private-drafts",
     "",
     "Execution requires AYLAMED_CRM_BASE_URL and AYLAMED_CRM_ADMIN_TOKEN.",
-    "Without --execute-private-drafts this command only validates local ZIP files and rights metadata.",
+    "Without an execution flag this command only validates local ZIP files and rights metadata.",
+    "--rehearse-local performs a full local preview and simulated draft import with zero network requests.",
     "It never approves collections, enables student destinations, publishes content, or writes directly to PostgreSQL.",
   ].join("\n");
 }
@@ -101,6 +109,31 @@ async function readJson(filename, fallback = null) {
     if (error.code === "ENOENT" && fallback !== null) return structuredClone(fallback);
     throw error;
   }
+}
+
+async function hydrateMediaAliasFiles(rawManifest, manifestDirectory) {
+  const source = Array.isArray(rawManifest)
+    ? { banks: rawManifest }
+    : structuredClone(rawManifest || {});
+  source.banks = await Promise.all((Array.isArray(source.banks) ? source.banks : [])
+    .map(async (bank) => {
+      const aliasFile = String(
+        bank.media_aliases_file || bank.mediaAliasesFile || "",
+      ).trim();
+      if (!aliasFile) return bank;
+      const filename = path.resolve(manifestDirectory, aliasFile);
+      const payload = await readJson(filename);
+      const aliases = Array.isArray(payload) ? payload : payload?.aliases;
+      if (!Array.isArray(aliases)) {
+        throw statusError(
+          `Media alias file must contain an aliases array: ${filename}`,
+          400,
+          "INVALID_QBANK_MEDIA_ALIAS_FILE",
+        );
+      }
+      return { ...bank, media_aliases: aliases };
+    }));
+  return source;
 }
 
 async function writeState(filename, state) {
@@ -155,6 +188,107 @@ async function inspectLocalBanks(manifest) {
     });
   }
   return { ...manifest, banks: inspected };
+}
+
+async function rehearseLocalBanks(manifest) {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "aylamed-v239-rehearsal-"));
+  const seenHashesByExam = new Map();
+  const banks = [];
+  try {
+    for (const bank of manifest.banks) {
+      const seenHashes = seenHashesByExam.get(bank.exam_track) || new Set();
+      seenHashesByExam.set(bank.exam_track, seenHashes);
+      let inventory;
+      try {
+        inventory = await extractSafeZipInventory(
+          bank.bundle_zip,
+          crypto.randomUUID(),
+          dataDir,
+        );
+        const preview = await previewUniversalQuestionZip({
+          inventory,
+          examTrack: bank.exam_track,
+          sourceNamespace: bank.source_namespace,
+          sourceProvider: bank.source_provider,
+          collectionTitle: bank.collection_title,
+          mediaAliases: bank.media_aliases,
+          duplicateLookup: async (_examTrack, hashes) => ({
+            exact: hashes.filter((hash) => seenHashes.has(hash)).map((hash) => ({ canonical_hash: hash })),
+            source: [],
+          }),
+        });
+        assertPreviewCanImport({
+          status: preview.errors.length ? "preview_with_warnings" : "preview_ready",
+          counts: preview.counts,
+        });
+        const imported = await importUniversalQuestionZip({
+          inventory,
+          job: {
+            id: `local-${crypto.randomUUID()}`,
+            exam_track: bank.exam_track,
+            source_namespace: bank.source_namespace,
+            source_provider: bank.source_provider,
+            collection_title: bank.collection_title,
+            media_aliases: bank.media_aliases,
+          },
+          batchSize: 100,
+          onBatch: async ({ rows }) => {
+            let created = 0;
+            let reused = 0;
+            for (const row of rows) {
+              if (seenHashes.has(row.contentHash)) reused += 1;
+              else {
+                seenHashes.add(row.contentHash);
+                created += 1;
+              }
+            }
+            return {
+              created,
+              reused,
+              aliasesCreated: rows.length,
+              sourceDuplicates: 0,
+              answers: rows.reduce((total, row) => total + row.answers.length, 0),
+            };
+          },
+        });
+        if (Number(imported.totals.valid_questions || 0) !== Number(preview.counts.valid_questions || 0)) {
+          throw statusError(
+            `${bank.collection_title} rehearsal count changed between preview and draft import`,
+            409,
+            "QBANK_REHEARSAL_COUNT_MISMATCH",
+          );
+        }
+        banks.push({
+          collection_title: bank.collection_title,
+          exam_track: bank.exam_track,
+          source_profile: bank.source_profile,
+          source_rights_status: bank.source_rights_status,
+          zip_sha256: bank.sha256,
+          preview: preview.counts,
+          draft_import: imported.totals,
+          warning_samples: preview.errors.slice(0, 20),
+          media_quarantine_samples: preview.mediaQuarantine.slice(0, 50),
+          safeguards: {
+            database_writes: 0,
+            network_requests: 0,
+            collections_approved: 0,
+            student_destinations_enabled: 0,
+          },
+        });
+      } finally {
+        await cleanupContentImportFiles(inventory?.workDir);
+      }
+    }
+    return {
+      version: "v239",
+      mode: "local_private_draft_rehearsal",
+      network_requests: 0,
+      production_writes: 0,
+      banks,
+    };
+  } finally {
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
 }
 
 function createApi({ baseUrl, token }) {
@@ -262,6 +396,8 @@ async function uploadPreparedBundle({ api, bank, bankState, onState }) {
           source_rights_status: bank.source_rights_status,
           collection_title: bank.collection_title,
           destinations: bank.destinations,
+          media_aliases_count: bank.media_aliases.length,
+          media_aliases_fingerprint: bank.media_aliases_fingerprint,
         },
       },
     });
@@ -272,7 +408,7 @@ async function uploadPreparedBundle({ api, bank, bankState, onState }) {
   }
   if (upload.status === "finalized") return upload;
   if (upload.transport !== "r2_multipart") {
-    throw statusError("The v238 bulk runner requires direct R2 multipart uploads");
+    throw statusError("The v239 bulk runner requires direct R2 multipart uploads");
   }
 
   const received = new Set((upload.received_indices || []).map(Number));
@@ -381,6 +517,7 @@ async function runBank({
         source_rights_status: bank.source_rights_status,
         collection_title: bank.collection_title,
         destinations: bank.destinations,
+        media_aliases: bank.media_aliases,
       },
     });
     bankState.question_job_id = preview.job_id;
@@ -517,12 +654,25 @@ async function main() {
   const manifestFile = path.resolve(manifestArgument);
   const manifestDirectory = path.dirname(manifestFile);
   const rawManifest = await readJson(manifestFile);
+  const hydratedManifest = await hydrateMediaAliasFiles(rawManifest, manifestDirectory);
   const normalized = resolveBankPaths(
-    normalizeBulkQbankManifest(rawManifest),
+    normalizeBulkQbankManifest(hydratedManifest),
     manifestDirectory,
   );
   const inspected = await inspectLocalBanks(normalized);
   const execute = hasArgument("--execute-private-drafts");
+  const rehearse = hasArgument("--rehearse-local");
+  if (execute && rehearse) {
+    throw statusError(
+      "Choose either --rehearse-local or --execute-private-drafts, not both",
+      400,
+      "QBANK_RUN_MODE_CONFLICT",
+    );
+  }
+  if (rehearse) {
+    process.stdout.write(`${safeJson(await rehearseLocalBanks(inspected))}\n`);
+    return;
+  }
   if (!execute) {
     process.stdout.write(`${safeJson({
       mode: "dry_run",
@@ -538,6 +688,8 @@ async function main() {
         total_bytes: bank.total_bytes,
         sha256: bank.sha256,
         destinations: bank.destinations,
+        media_aliases: bank.media_aliases.length,
+        media_aliases_fingerprint: bank.media_aliases_fingerprint,
       })),
     })}\n`);
     return;
@@ -553,11 +705,11 @@ async function main() {
     "--state-file",
     path.join(
       os.tmpdir(),
-      `aylamed-v238-${crypto.createHash("sha1").update(manifestFile).digest("hex")}.state.json`,
+      `aylamed-v239-${crypto.createHash("sha1").update(manifestFile).digest("hex")}.state.json`,
     ),
   ));
   const state = await readJson(stateFile, {
-    version: "v238",
+    version: "v239",
     manifest_file: manifestFile,
     created_at: new Date().toISOString(),
     banks: {},
@@ -594,6 +746,17 @@ async function main() {
         started_at: new Date().toISOString(),
       };
       try {
+        const inputSignature = `${bank.sha256}:${bank.media_aliases_fingerprint || "no-aliases"}`;
+        if (state.banks[key].input_signature
+          && state.banks[key].input_signature !== inputSignature) {
+          throw statusError(
+            `${bank.collection_title} ZIP or reviewed media aliases changed; use a new state file`,
+            409,
+            "QBANK_BULK_INPUT_CHANGED",
+          );
+        }
+        state.banks[key].input_signature = inputSignature;
+        state.banks[key].media_aliases = bank.media_aliases.length;
         await runBank({
           api,
           bank,

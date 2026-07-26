@@ -73,6 +73,15 @@ test('source learning profiles remain separate from collection question-ID displ
   assert.match(server, /sourceProfile: req\.body\.source_profile \?\? req\.body\.sourceProfile/);
 });
 
+test('reviewed QBank media aliases persist with the preview job and remain path-only metadata', () => {
+  assert.match(postgres, /media_aliases JSONB NOT NULL DEFAULT '\[\]'::jsonb/);
+  assert.match(postgres, /media_aliases_fingerprint TEXT NOT NULL DEFAULT ''/);
+  assert.match(postgres, /JSON\.stringify\(job\.mediaAliases \|\| \[\]\)/);
+  assert.match(server, /normalizeBulkQbankMediaAliases/);
+  assert.match(server, /media_quarantine_samples: preview\.mediaQuarantine/);
+  assert.match(server, /mediaAliasesFingerprint/);
+});
+
 test('disabling one collection cannot unapprove a question shared by another approved collection', () => {
   assert.match(postgres, /approved_collection\.status='approved'/);
   assert.match(postgres, /THEN 'approved' ELSE 'draft'/);
