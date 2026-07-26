@@ -1,0 +1,72 @@
+{
+  "concurrency": 2,
+  "apply_safe_link_repairs": true,
+  "banks": [
+    {
+      "bundle_zip": "../prepared-qbanks/amboss-usmle-step-1-2025.zip",
+      "exam_track": "usmle-step-1",
+      "source_provider": "AMBOSS",
+      "source_namespace": "amboss-usmle-step-1-2025",
+      "source_profile": "amboss_style",
+      "source_rights_status": "unverified",
+      "collection_title": "AMBOSS USMLE Step 1 2025",
+      "destinations": ["aylamed_qbank", "roadmap", "personal_assessment"],
+      "draft_only": true,
+      "attach_media": true,
+      "import_packaged_videos": false
+    },
+    {
+      "bundle_zip": "../prepared-qbanks/canadaqbank-usmle-step-1-2025.zip",
+      "exam_track": "usmle-step-1",
+      "source_provider": "CanadaQBank",
+      "source_namespace": "canadaqbank-usmle-step-1-2025",
+      "source_profile": "canadaqbank_style",
+      "source_rights_status": "unverified",
+      "collection_title": "CanadaQBank USMLE Step 1 2025",
+      "destinations": ["aylamed_qbank", "roadmap", "personal_assessment"],
+      "draft_only": true,
+      "attach_media": true,
+      "import_packaged_videos": false
+    },
+    {
+      "bundle_zip": "../prepared-qbanks/amedex-amc-mcq-2025.zip",
+      "exam_track": "amc",
+      "source_provider": "Amedex",
+      "source_namespace": "amedex-amc-mcq-2025",
+      "source_profile": "amedex_style",
+      "source_rights_status": "unverified",
+      "collection_title": "Amedex AMC MCQ 2025",
+      "destinations": ["aylamed_qbank", "roadmap", "personal_assessment"],
+      "draft_only": true,
+      "attach_media": true,
+      "import_packaged_videos": false
+    },
+    {
+      "bundle_zip": "../prepared-qbanks/mplusx-amc-2025.zip",
+      "exam_track": "amc",
+      "source_provider": "MPlusX",
+      "source_namespace": "mplusx-amc-2025",
+      "source_profile": "mplusx_style",
+      "source_rights_status": "unverified",
+      "collection_title": "MPlusX AMC 2025",
+      "destinations": ["aylamed_qbank", "roadmap", "personal_assessment"],
+      "draft_only": true,
+      "attach_media": true,
+      "import_packaged_videos": false
+    },
+    {
+      "bundle_zip": "../prepared-qbanks/aceqbank-cdm-2024.zip",
+      "exam_track": "mccqe",
+      "source_provider": "ACE QBank",
+      "source_namespace": "aceqbank-cdm-2024",
+      "source_profile": "aceqbank_style",
+      "source_rights_status": "unverified",
+      "source_format": "legacy_cdm_write_in_v1",
+      "collection_title": "ACE Legacy CDM 2024",
+      "destinations": ["aylamed_cdm", "roadmap"],
+      "draft_only": true,
+      "attach_media": true,
+      "import_packaged_videos": false
+    }
+  ]
+}

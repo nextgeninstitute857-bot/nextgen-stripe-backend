@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { contentMediaStatus, matchMediaReferences, safeMediaEntryName } from "../lib/content-media-r2.js";
+import {
+  contentMediaReferenceKeys,
+  contentMediaStatus,
+  matchMediaReferences,
+  safeMediaEntryName,
+} from "../lib/content-media-r2.js";
 import { contentR2Timeouts, signContentR2UploadPart } from "../lib/content-r2-storage.js";
 
 test("R2 remains disabled until every private credential is configured", () => {
@@ -65,6 +70,7 @@ test("R2 multipart presigning omits unsupported optional checksum parameters", a
 
 test("media ZIP entry validation accepts image/audio and rejects unsafe or unsupported files", () => {
   assert.equal(safeMediaEntryName("images/U612.jpg.png"), "images/U612.jpg.png");
+  assert.equal(safeMediaEntryName("legacy/clinical-diagram.bmp"), "legacy/clinical-diagram.bmp");
   assert.equal(safeMediaEntryName("heart-sounds/12360.mp3"), "heart-sounds/12360.mp3");
   assert.equal(safeMediaEntryName("../private.png"), null);
   assert.equal(safeMediaEntryName("/absolute/private.png"), null);
@@ -203,4 +209,13 @@ test("contextual matching still quarantines a genuinely ambiguous path", () => {
   ]);
   assert.equal(report.matches.length, 0);
   assert.equal(report.ambiguous.length, 1);
+});
+
+test("reviewed match paths make renamed packaged assets eligible for private upload", () => {
+  const keys = contentMediaReferenceKeys([{
+    mediaRef: "wp-content/uploads/diagram.bmp",
+    matchPaths: ["mplusx/3114_diagram.bmp"],
+  }]);
+  assert.equal(keys.has("diagram.bmp"), true);
+  assert.equal(keys.has("3114_diagram.bmp"), true);
 });

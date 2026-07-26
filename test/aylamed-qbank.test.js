@@ -17,7 +17,12 @@ import {
   sanitizeAylaQbankQuestion,
   sanitizeAylaQbankSession,
 } from "../lib/aylamed-qbank.js";
-import { contentQbankQuestionDisplay } from "../lib/content-registry-postgres.js";
+import {
+  contentQbankQuestionDisplay,
+  normalizeContentQbankPresentationPolicy,
+  normalizeContentSourceProfile,
+  resolveContentQbankStudentSourceProfile,
+} from "../lib/content-registry-postgres.js";
 
 const future = "2099-01-01T00:00:00.000Z";
 
@@ -131,6 +136,42 @@ test("collection display policy reveals only the administrator-approved question
   assert.equal(both.source_label, "Source QID");
 });
 
+test("administrator QBank presentation controls keep source choice separate from question identity", () => {
+  assert.equal(normalizeContentSourceProfile("", "UWorld licensed bank"), "uworld_style");
+  assert.equal(normalizeContentSourceProfile("AMBOSS style"), "amboss_style");
+  assert.equal(normalizeContentSourceProfile("", "CanadaQBank"), "canadaqbank_style");
+  assert.equal(normalizeContentSourceProfile("", "ACE QBank"), "aceqbank_style");
+  assert.equal(normalizeContentSourceProfile("", "Amedex"), "amedex_style");
+  assert.equal(normalizeContentSourceProfile("", "MPlusX"), "mplusx_style");
+  const unified = normalizeContentQbankPresentationPolicy({
+    student_bank_mode: "unified",
+  }, "USMLE Step 1");
+  assert.equal(unified.student_bank_mode, "unified_aylamed");
+  assert.equal(unified.student_can_choose_source_profile, false);
+  assert.equal(unified.roadmap_source_strategy, "all_approved_profiles");
+  assert.throws(
+    () => resolveContentQbankStudentSourceProfile(unified, "uworld_style"),
+    (error) => error.code === "QBANK_SOURCE_SWITCH_DISABLED" && error.statusCode === 403,
+  );
+
+  const switchable = {
+    ...normalizeContentQbankPresentationPolicy({
+      student_bank_mode: "student_choice",
+    }, "USMLE Step 1"),
+    available_source_profiles: [
+      { source_profile: "uworld_style", question_count: 100 },
+      { source_profile: "amboss_style", question_count: 80 },
+    ],
+  };
+  assert.equal(resolveContentQbankStudentSourceProfile(switchable, "UWorld"), "uworld_style");
+  assert.equal(resolveContentQbankStudentSourceProfile(switchable, "AMBOSS"), "amboss_style");
+  assert.equal(resolveContentQbankStudentSourceProfile(switchable, ""), "");
+  assert.throws(
+    () => resolveContentQbankStudentSourceProfile(switchable, "AylaMed Original"),
+    (error) => error.code === "QBANK_SOURCE_PROFILE_UNAVAILABLE" && error.statusCode === 400,
+  );
+});
+
 test("session builder deduplicates questions and creates bounded blocks", () => {
   const session = createAylaQbankSession({
     id: "session-blocks", userId: "user-1", studentId: "student-1", examTrack: "step 1", mode: "tutor",
@@ -145,6 +186,20 @@ test("session builder deduplicates questions and creates bounded blocks", () => 
   assert.equal(session.questionCount, 3);
   assert.deepEqual(session.blocks.map((block) => block.questionRefs), [["one", "two"], ["three"]]);
   assert.deepEqual(sanitizeAylaQbankSession(session).questions, [{ question_ref: "one" }, { question_ref: "two" }, { question_ref: "three" }]);
+});
+
+test("self-study sessions preserve the selected source profile while roadmap sessions may remain combined", () => {
+  const session = createAylaQbankSession({
+    id: "source-session",
+    userId: "user-1",
+    studentId: "student-1",
+    examTrack: "usmle-step-1",
+    sourceProfile: "amboss_style",
+    questions: [{ ref: "one", contentQuestionId: "q1" }],
+  });
+  assert.equal(session.sourceProfile, "amboss_style");
+  assert.equal(sanitizeAylaQbankSession(session).source_profile, "amboss_style");
+  assert.equal(sessionFixture("tutor").sourceProfile, null);
 });
 
 test("roadmap QBank sessions use only the assignment's explicit question identities", () => {
@@ -279,6 +334,36 @@ test("tutor mode hides answer material until the immutable answer is recorded", 
     () => recordAylaQbankAnswer(recorded.session, { questionRef: "ref-1", selectedAnswerId: 2, correctAnswerId: 2 }),
     (error) => error.code === "QBANK_ANSWER_LOCKED" && error.statusCode === 409,
   );
+});
+
+test("answer-choice images stay attached to their own answer before and after reveal", () => {
+  const session = sessionFixture("tutor");
+  const question = {
+    ...registryQuestion,
+    media: [
+      ...registryQuestion.media,
+      { id: "choice-a-image", placement: "answer:1", kind: "image", content_type: "image/png", url: "signed-choice-a" },
+    ],
+  };
+  const before = sanitizeAylaQbankQuestion(question, {
+    session,
+    questionRef: "ref-1",
+  });
+  assert.deepEqual(before.answers[0].media.map((item) => item.id), ["choice-a-image"]);
+  assert.deepEqual(before.answers[1].media, []);
+  assert.equal(before.media.some((item) => item.id === "choice-a-image"), false);
+
+  const answered = recordAylaQbankAnswer(session, {
+    questionRef: "ref-1",
+    selectedAnswerId: 2,
+    correctAnswerId: 2,
+  });
+  const after = sanitizeAylaQbankQuestion(question, {
+    session: answered.session,
+    questionRef: "ref-1",
+  });
+  assert.deepEqual(after.answers[0].media.map((item) => item.id), ["choice-a-image"]);
+  assert.equal(after.media.some((item) => item.id === "choice-a-image"), false);
 });
 
 test("test mode withholds correctness, explanation, and automatic revision signal until submit", () => {

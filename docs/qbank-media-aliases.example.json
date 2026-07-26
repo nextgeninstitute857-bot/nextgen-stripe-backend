@@ -1,0 +1,11 @@
+{
+  "aliases": [
+    {
+      "source_item_id": "3114",
+      "media_ref": "wp-content/uploads/example-diagram.bmp",
+      "asset_path": "prepared-bank/3114_example-diagram.bmp",
+      "placement": "question",
+      "evidence": "question_id_and_reference"
+    }
+  ]
+}

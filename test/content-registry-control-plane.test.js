@@ -16,9 +16,70 @@ test('collection destinations are persistent controls rather than upload-only in
   assert.match(server, /content-registry\/collections\/:collectionId\/controls/);
 });
 
+test('unverified content may be prepared privately but cannot be approved or enabled for students', () => {
+  const draftRoute = server.slice(
+    server.indexOf('app.post("/admin/crm/ai-training/content-imports/:jobId/import-draft"'),
+    server.indexOf('app.get("/admin/crm/ai-training/content-imports/:jobId"'),
+  );
+  const mediaRoute = server.slice(
+    server.indexOf('app.post("/admin/crm/ai-training/content-imports/:jobId/media/import-draft"'),
+    server.indexOf('app.get("/admin/crm/ai-training/content-media-imports/:mediaJobId"'),
+  );
+  const videoRoute = server.slice(
+    server.indexOf('app.post("/admin/crm/ai-training/content-imports/:jobId/videos/import-draft"'),
+    server.indexOf('app.get("/admin/crm/ai-training/content-video-imports/:videoJobId"'),
+  );
+  for (const route of [draftRoute, mediaRoute, videoRoute]) {
+    assert.doesNotMatch(route, /CONTENT_RIGHTS_VERIFICATION_REQUIRED/);
+  }
+  assert.match(postgres, /requiresVerifiedRights = cleanStatus === 'approved'/);
+  assert.match(postgres, /controls\?\.some\(\(row\) => row\.enabled\)/);
+  assert.match(postgres, /CONTENT_RIGHTS_VERIFICATION_REQUIRED/);
+  assert.match(postgres, /CONTENT_RIGHTS_DOWNGRADE_REQUIRES_DISABLE/);
+  assert.match(
+    postgres,
+    /WHEN content_collections\.source_rights_status IN \('owned','licensed','authorized'\)[\s\S]*?THEN content_collections\.source_rights_status/,
+  );
+});
+
 test('question ID display policy supports internal, source, both, and hidden modes', () => {
   for (const mode of ['internal', 'source', 'both', 'hidden']) assert.match(postgres, new RegExp(`'${mode}'`));
   for (const mode of ['provider', 'neutral', 'hidden']) assert.match(postgres, new RegExp(`'${mode}'`));
+});
+
+test('QBank presentation policy is persistent per exam and cannot alter roadmap or tutor source coverage', () => {
+  assert.match(postgres, /CREATE TABLE IF NOT EXISTS content_qbank_presentation_policies/);
+  assert.match(postgres, /student_bank_mode TEXT NOT NULL DEFAULT 'unified_aylamed'/);
+  assert.match(server, /content-registry\/qbank-presentation-policy/);
+  assert.match(server, /Roadmap and Personal Tutor continue using all approved source profiles/);
+  assert.match(server, /roadmapAssignmentId \|\| purpose === "baseline_diagnostic"\s*\?\s*""/);
+});
+
+test('source learning profiles remain separate from collection question-ID display policy', () => {
+  for (const profile of [
+    'uworld_style', 'amboss_style', 'canadaqbank_style', 'aceqbank_style',
+    'amedex_style', 'mplusx_style', 'aylamed_original', 'other',
+  ]) {
+    assert.match(postgres, new RegExp(`"${profile}"`));
+  }
+  assert.match(postgres, /source_profile TEXT NOT NULL DEFAULT 'other'/);
+  assert.match(postgres, /LOWER\(source_provider\) LIKE '%uworld%'.*?'uworld_style'/s);
+  assert.match(postgres, /LOWER\(source_provider\) LIKE '%amboss%'.*?'amboss_style'/s);
+  assert.match(postgres, /LOWER\(source_provider\) LIKE '%canadaqbank%'.*?'canadaqbank_style'/s);
+  assert.match(postgres, /LOWER\(source_provider\) LIKE '%aceqbank%'.*?'aceqbank_style'/s);
+  assert.match(postgres, /LOWER\(source_provider\) LIKE '%amedex%'.*?'amedex_style'/s);
+  assert.match(postgres, /LOWER\(source_provider\) LIKE '%mplusx%'.*?'mplusx_style'/s);
+  assert.match(postgres, /display_policy JSONB NOT NULL DEFAULT/);
+  assert.match(server, /sourceProfile: req\.body\.source_profile \?\? req\.body\.sourceProfile/);
+});
+
+test('reviewed QBank media aliases persist with the preview job and remain path-only metadata', () => {
+  assert.match(postgres, /media_aliases JSONB NOT NULL DEFAULT '\[\]'::jsonb/);
+  assert.match(postgres, /media_aliases_fingerprint TEXT NOT NULL DEFAULT ''/);
+  assert.match(postgres, /JSON\.stringify\(job\.mediaAliases \|\| \[\]\)/);
+  assert.match(server, /normalizeBulkQbankMediaAliases/);
+  assert.match(server, /media_quarantine_samples: preview\.mediaQuarantine/);
+  assert.match(server, /mediaAliasesFingerprint/);
 });
 
 test('disabling one collection cannot unapprove a question shared by another approved collection', () => {
@@ -30,6 +91,13 @@ test('taxonomy mappings are exam and provider namespace scoped and reused on fut
   assert.match(postgres, /UNIQUE\(exam_track, source_namespace, source_system_id, source_subject_id\)/);
   assert.match(postgres, /m\.source_system_id=q\.system_key AND m\.source_subject_id=q\.subject_key/);
   assert.match(server, /content-registry\/taxonomy-mappings/);
+});
+
+test('specialized CDM cases cannot be claimed by the ordinary MCQ draft importer', () => {
+  assert.match(server, /counts\?\.import_blocked === true/);
+  assert.match(server, /blocking specialized-format or exam-mapping issue/);
+  assert.match(postgres, /counts->>'import_blocked'/);
+  assert.match(postgres, /counts->>'blocking_issues'/);
 });
 
 test('student catalog requires ownership, exam entitlement, and approved enabled QBank content', () => {

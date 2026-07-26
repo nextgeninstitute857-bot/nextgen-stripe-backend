@@ -70,6 +70,7 @@ function successfulClassification(draft = catalogDraft(), overrides = {}) {
   const proposal = {
     interpreted_title: "Acute coronary syndrome",
     medical_system: "Cardiovascular",
+    medical_subsystem: "Ischemic heart disease",
     canonical_topic: "Acute coronary syndrome",
     subtopic: "Myocardial infarction",
     topic_aliases: ["ACS", "Acute myocardial ischemia"],
@@ -123,6 +124,29 @@ test("Vimeo discovery creates private drafts and preserves provider playback met
   assert.equal(row.resource.sourceData.folder_name, "AylaMed lectures");
   assert.equal(row.resource.approved, false);
   assert.equal(row.resource.status, "draft_review");
+  assert.deepEqual(row.resource.deliveryDestinations, []);
+});
+
+test("Vimeo metadata seeds preserve subsystem and subtopic without making the draft active", () => {
+  const [row] = buildVimeoLibraryManifest([
+    vimeoVideo({
+      description: [
+        "system: Cardiovascular",
+        "subsystem: Ischemic heart disease",
+        "topic: Acute coronary syndrome",
+        "subtopic: Myocardial infarction",
+        "playlist: Cardiology core",
+      ].join("\n"),
+    }),
+  ], {
+    examTrack: "usmle-step-1",
+    allowedSystems: ["Cardiovascular", "Renal"],
+  });
+  assert.equal(row.resource.system, "Cardiovascular");
+  assert.equal(row.resource.subsystem, "Ischemic heart disease");
+  assert.equal(row.resource.topic, "Acute coronary syndrome");
+  assert.equal(row.resource.subtopic, "Myocardial infarction");
+  assert.equal(row.resource.approved, false);
   assert.deepEqual(row.resource.deliveryDestinations, []);
 });
 
@@ -270,6 +294,15 @@ test("classification request requires web search and a strict review schema", ()
     examTrackLabel: "USMLE Step 1",
     allowedSystems: ["Cardiovascular", "Renal"],
     taxonomyRows: taxonomyRows(),
+    taxonomyDefinition: {
+      labels: {
+        system: "Organ system or foundational domain",
+        subsystem: "Subsystem or discipline",
+        topic: "Topic",
+        subtopic: "Learning objective",
+      },
+      blueprint_axes: ["organ_system", "physician_task_or_competency", "discipline"],
+    },
     allowedDomains: ["ncbi.nlm.nih.gov", "usmle.org"],
   });
   assert.equal(request.toolChoice, "required");
@@ -278,9 +311,12 @@ test("classification request requires web search and a strict review schema", ()
   assert.deepEqual(request.tools[0].filters.allowed_domains, ["ncbi.nlm.nih.gov", "usmle.org"]);
   assert.equal(request.textFormat.type, "json_schema");
   assert.equal(request.textFormat.strict, true);
+  assert.ok(request.textFormat.schema.required.includes("medical_subsystem"));
+  assert.equal(request.taxonomyDefinition.labels.system, "Organ system or foundational domain");
   assert.match(request.systemPrompt, /Do not claim to inspect, watch, hear, or transcribe the video/);
   assert.match(request.systemPrompt, /untrusted metadata/);
   assert.match(request.systemPrompt, /owner is not a doctor/i);
+  assert.match(request.systemPrompt, /compatibility names/i);
 });
 
 test("web-search evidence captures consulted sources and message citations", () => {
@@ -314,6 +350,7 @@ test("web-search evidence captures consulted sources and message citations", () 
 test("high-confidence researched classification is reviewable but never student-visible", () => {
   const classification = successfulClassification();
   assert.equal(classification.medicalSystem, "Cardiovascular");
+  assert.equal(classification.medicalSubsystem, "Ischemic heart disease");
   assert.equal(classification.qbankTopic.topicKey, "Acute coronary syndrome");
   assert.equal(classification.qbankMatchKind, "exact_title");
   assert.equal(classification.webSearchPerformed, true);
@@ -321,6 +358,41 @@ test("high-confidence researched classification is reviewable but never student-
   assert.equal(classification.approvalReadiness, "ready_for_owner_approval");
   assert.equal(classification.requiresOwnerApproval, true);
   assert.equal(classification.studentVisible, false);
+});
+
+test("a QBank candidate from another system is never stored as a direct taxonomy link", () => {
+  const draft = catalogDraft();
+  const request = buildVimeoTopicClassificationRequest(draft, {
+    allowedSystems: ["Cardiovascular", "Renal"],
+    taxonomyRows: taxonomyRows(),
+  });
+  const classification = normalizeVimeoTopicClassification({
+    draft,
+    request,
+    proposal: {
+      interpreted_title: "Acute coronary syndrome",
+      medical_system: "Renal",
+      medical_subsystem: "Renal vascular disease",
+      canonical_topic: "Acute coronary syndrome",
+      subtopic: "",
+      topic_aliases: [],
+      qbank_topic_ref: request.candidates[0].ref,
+      qbank_match_kind: "exact_title",
+      plain_language_summary: "Conflicting hierarchy proposal.",
+      classification_reason: "The proposed system does not match the approved candidate.",
+      confidence_percent: 95,
+      ambiguity_flags: [],
+      alternative_mappings: [],
+    },
+    evidence: {
+      performed: true,
+      sources: [{ url: "https://www.ncbi.nlm.nih.gov/books/NBK459157/", title: "ACS" }],
+    },
+  });
+  assert.equal(classification.qbankTopic, null);
+  assert.equal(classification.qbankMatchKind, "no_match");
+  assert.ok(classification.ambiguityFlags.includes("qbank_system_mismatch"));
+  assert.equal(classification.approvalReadiness, "medical_review_recommended");
 });
 
 test("missing research evidence forces medical review and blocks approval", () => {
@@ -406,9 +478,32 @@ test("approval is revision-checked and is the only step that enables student des
   assert.equal(approved.draft.status, "approved");
   assert.equal(approved.resource.approved, true);
   assert.equal(approved.resource.status, "active");
+  assert.equal(approved.resource.subsystem, "Ischemic heart disease");
+  assert.deepEqual(approved.resource.hierarchyPath, [
+    "Cardiovascular",
+    "Ischemic heart disease",
+    "Acute coronary syndrome",
+    "Myocardial infarction",
+  ]);
   assert.deepEqual(approved.resource.deliveryDestinations, ["aylamed_content_hub", "aylamed_roadmap"]);
   assert.equal(approved.resource.qbankLinkStatus, "approved_exact_or_synonym_link");
   assert.equal(approved.resource.adminApproval.reviewer.email, "owner@example.com");
+});
+
+test("approval cannot flatten a researched lecture by omitting its subsystem", () => {
+  const draft = catalogDraft();
+  const classification = {
+    ...successfulClassification(draft),
+    medicalSubsystem: "",
+    qbankTopic: null,
+  };
+  assert.throws(() => approveVimeoCatalogDraft({
+    ...draft,
+    classification,
+    revision: 2,
+  }, {
+    expectedRevision: 2,
+  }), (error) => error.code === "VIMEO_MAPPING_INCOMPLETE");
 });
 
 test("a lecture missing from its managed folder cannot be newly approved or deleted implicitly", () => {
@@ -426,7 +521,12 @@ test("a lecture missing from its managed folder cannot be newly approved or dele
 
 test("a broader QBank candidate can describe the topic but is not stored as a direct QBank link", () => {
   const draft = catalogDraft();
-  const classification = successfulClassification(draft, { qbank_match_kind: "broader_topic" });
+  const classification = successfulClassification(draft, {
+    qbank_match_kind: "broader_topic",
+    medical_subsystem: "Acute ischemic syndromes",
+    canonical_topic: "ST-elevation myocardial infarction",
+    subtopic: "Immediate reperfusion decisions",
+  });
   const approved = approveVimeoCatalogDraft({
     ...draft,
     classification,
@@ -436,6 +536,9 @@ test("a broader QBank candidate can describe the topic but is not stored as a di
   });
   assert.equal(approved.resource.qbankTaxonomy, null);
   assert.equal(approved.resource.qbankLinkStatus, "approved_related_topic_without_direct_qbank_link");
+  assert.equal(approved.resource.subsystem, "Acute ischemic syndromes");
+  assert.equal(approved.resource.topic, "ST-elevation myocardial infarction");
+  assert.equal(approved.resource.subtopic, "Immediate reperfusion decisions");
 });
 
 test("catalog summary keeps approval readiness and web verification visible", () => {
@@ -451,6 +554,10 @@ test("catalog summary keeps approval readiness and web verification visible", ()
   assert.equal(summary.qbankLinked, 2);
   assert.equal(summary.readyForApproval, 1);
   assert.equal(summary.approved, 1);
+  assert.equal(summary.hierarchyComplete, 2);
+  assert.equal(summary.hierarchyIncomplete, 1);
+  assert.equal(summary.approvedHierarchyComplete, 1);
+  assert.equal(summary.bySubsystem["Cardiovascular → Ischemic heart disease"], 2);
 });
 
 test("server wiring is draft-first, background researched, and explicit-review only", () => {
@@ -463,6 +570,7 @@ test("server wiring is draft-first, background researched, and explicit-review o
   assert.match(server, /aylaV189ResourceType\(resource\.type\) === "vimeo_video" && aliasTopics\.includes\(topicKey\)/);
   assert.match(server, /app\.post\("\/api\/ayla\/admin\/resources\/vimeo-catalog\/classification-jobs"/);
   assert.match(server, /app\.post\("\/api\/ayla\/admin\/resources\/vimeo-catalog\/review"/);
+  assert.match(server, /taxonomyDefinition: aylaContentHubTaxonomyDefinition\(draft\.examTrackId\)/);
   assert.match(server, /app\.get\("\/api\/ayla\/admin\/resources\/vimeo-folders"/);
   assert.match(server, /app\.get\("\/api\/ayla\/admin\/resources\/vimeo-catalog\/sources"/);
   assert.match(server, /ngStartAylaVimeoFolderSyncScheduler\(\)/);
@@ -471,4 +579,5 @@ test("server wiring is draft-first, background researched, and explicit-review o
   assert.match(server, /active_resources_created: 0/);
   assert.match(server, /Provide between 1 and 100 explicitly selected review items/);
   assert.match(server, /deliveryDestinations: \["aylamed_content_hub", "aylamed_roadmap"\]/);
+  assert.match(server, /row\.classification\?\.medicalSubsystem/);
 });

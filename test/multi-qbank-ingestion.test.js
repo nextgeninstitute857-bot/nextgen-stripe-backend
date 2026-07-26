@@ -22,12 +22,12 @@ async function waitFor(check, timeoutMs = 3_000) {
     if (result) return result;
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
-  throw new Error("Timed out waiting for v234 state");
+  throw new Error("Timed out waiting for v239 state");
 }
 
-test("v234 defaults to two QBank media lanes with bounded shared capacity", () => {
+test("v239 defaults to two QBank media lanes with bounded shared capacity", () => {
   assert.deepEqual(multiQbankIngestionConfig({}), {
-    build: "v234-multi-qbank-ingestion",
+    build: "v239-qbank-readiness",
     max_active_jobs: 4,
     lane_concurrency: {
       question_zip: 2,
@@ -293,7 +293,7 @@ test("QBank dashboard groups questions, media, videos, and background stages", (
   assert.deepEqual(dashboard.control_plane, { capacity: { test: true } });
 });
 
-test("v234 server wiring keeps binaries private and serializes only finalization", async () => {
+test("v239 server wiring keeps binaries private and serializes only finalization", async () => {
   const server = await fs.readFile(new URL("../server.js", import.meta.url), "utf8");
   const postgres = await fs.readFile(new URL("../lib/content-registry-postgres.js", import.meta.url), "utf8");
   assert.match(server, /const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD/);

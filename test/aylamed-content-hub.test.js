@@ -4,6 +4,7 @@ import fs from "node:fs";
 import {
   aylaContentHubAssignmentProgress,
   aylaContentHubEmbedUrl,
+  aylaContentHubTaxonomyDefinition,
   buildAylaContentHubCatalog,
   mergeAylaContentHubProgress,
   mergeAylaContentHubProgressCollection,
@@ -37,7 +38,9 @@ function registryVideo(overrides = {}) {
     title: "Cardiac murmurs registry lesson",
     exam_track: "usmle-step-1",
     system_key: "Cardiovascular",
+    subsystem_key: "Valvular disease",
     topic_key: "Murmurs",
+    subtopic_key: "Aortic stenosis",
     provider_id: "123456789",
     embed_url: "https://player.vimeo.com/video/123456789?h=privatehash",
     authorization_status: "approved_collection",
@@ -76,9 +79,80 @@ test("duplicate provider videos collapse into deterministic playlist entries", (
   assert.equal(catalog.total, 1);
   assert.equal(catalog.playlists.length, 1);
   assert.equal(catalog.playlists[0].title, "Cardiovascular");
+  assert.deepEqual(catalog.playlists[0].subsystems, ["Valvular disease"]);
   assert.deepEqual(catalog.playlists[0].topics, ["Murmurs"]);
   assert.equal(catalog.videos[0].source_type, "registry");
   assert.equal(catalog.videos[0].source_label, "Source");
+});
+
+test("Content Hub exposes a complete exam-aware hierarchy without changing compatibility field names", () => {
+  const catalog = buildAylaContentHubCatalog({
+    examTrack: "usmle_step_1",
+    videos: [
+      legacyVideo({
+        id: "valve-video",
+        vimeoId: "4441",
+        vimeoUrl: "",
+        subsystem: "Valvular disease",
+        topic: "Cardiac murmurs",
+        subtopic: "Aortic stenosis",
+      }),
+      legacyVideo({
+        id: "ischemia-video",
+        vimeoId: "4442",
+        vimeoUrl: "",
+        subsystem: "Ischemic heart disease",
+        topic: "Acute coronary syndrome",
+        subtopic: "Myocardial infarction",
+      }),
+    ],
+  });
+  assert.equal(catalog.taxonomy.labels.system, "Organ system or foundational domain");
+  assert.deepEqual(catalog.taxonomy.primary_navigation, ["exam", "system", "subsystem", "topic", "subtopic"]);
+  assert.equal(catalog.hierarchy.length, 1);
+  assert.equal(catalog.hierarchy[0].title, "Cardiovascular");
+  assert.equal(catalog.hierarchy[0].video_count, 2);
+  assert.deepEqual(
+    catalog.hierarchy[0].subsystems.map((row) => row.title),
+    ["Ischemic heart disease", "Valvular disease"],
+  );
+  assert.deepEqual(
+    catalog.videos.find((row) => row.id === "valve-video").hierarchy_path,
+    ["Cardiovascular", "Valvular disease", "Cardiac murmurs", "Aortic stenosis"],
+  );
+
+  const filtered = buildAylaContentHubCatalog({
+    examTrack: "usmle_step_1",
+    videos: catalog.videos.map((row) => ({
+      ...row,
+      examTrackId: "usmle_step_1",
+      vimeoEmbedUrl: row.embed_url,
+      authorizationStatus: "licensed",
+      approved: true,
+      status: "active",
+    })),
+    filters: { subsystem: "Valvular disease", subtopic: "Aortic stenosis" },
+  });
+  assert.equal(filtered.total, 1);
+  assert.equal(filtered.videos[0].id, "valve-video");
+});
+
+test("the visible Unclassified subsystem node remains selectable", () => {
+  const catalog = buildAylaContentHubCatalog({
+    examTrack: "usmle_step_1",
+    videos: [legacyVideo({ subsystem: "" })],
+    filters: { subsystem: "unclassified" },
+  });
+  assert.equal(catalog.total, 1);
+  assert.equal(catalog.hierarchy[0].subsystems[0].key, "unclassified");
+  assert.equal(catalog.videos[0].id, "legacy-video-1");
+});
+
+test("exam-specific navigation labels keep non-USMLE blueprints recognizable", () => {
+  assert.equal(aylaContentHubTaxonomyDefinition("plab").labels.system, "Area of clinical practice");
+  assert.equal(aylaContentHubTaxonomyDefinition("mccqe").blueprint_axes.includes("physician_activity"), true);
+  assert.equal(aylaContentHubTaxonomyDefinition("nclex").labels.system, "Client Need");
+  assert.equal(aylaContentHubTaxonomyDefinition("nclex").labels.subsystem, "Subcategory");
 });
 
 test("roadmap-only registry delivery is visible only while linked to the student's assignment", () => {
@@ -138,6 +212,34 @@ test("roadmap assignment prefers an exact verified focus and never reassigns com
   });
   assert.equal(next.video.id, "system");
   assert.equal(next.match_level, "system");
+});
+
+test("roadmap assignment respects subsystem boundaries before topic scoring", () => {
+  const valve = legacyVideo({
+    id: "valve",
+    vimeoId: "556",
+    vimeoUrl: "",
+    subsystem: "Valvular disease",
+    topic: "Aortic stenosis",
+    deliveryDestinations: ["aylamed_roadmap"],
+  });
+  const ischemia = legacyVideo({
+    id: "ischemia",
+    vimeoId: "557",
+    vimeoUrl: "",
+    subsystem: "Ischemic heart disease",
+    topic: "Aortic stenosis",
+    deliveryDestinations: ["aylamed_roadmap"],
+  });
+  const selected = selectAylaRoadmapVideo({
+    examTrack: "usmle_step_1",
+    videos: [ischemia, valve],
+    focusSystem: "Cardiovascular",
+    focusSubsystem: "Valvular disease",
+    focusTopic: "Aortic stenosis",
+  });
+  assert.equal(selected.video.id, "valve");
+  assert.equal(selected.match_level, "exact_topic");
 });
 
 test("roadmap and catalog filters recognize approved medical and QBank topic aliases", () => {
@@ -221,6 +323,10 @@ test("server and registry wire one entitlement-guarded Content Hub into the exis
   assert.match(server, /aylaV189RequireStudent\(req, req\.params\.studentId, "content_hub"\)/);
   assert.match(server, /mutateAylaDb\(async \(db\) =>[\s\S]*?aylaDashboardEntitlement\(db, aylaSanitizeUser\(rawUser\), student, "content_hub"\)/);
   assert.match(server, /function aylaV189BuildDailyPlan[\s\S]*?selectAylaRoadmapVideo\(/);
+  assert.match(server, /focusSubsystem,/);
+  assert.match(server, /subsystem: req\.query\.subsystem \|\| req\.query\.subsystem_key/);
+  assert.match(server, /const pageSize = 500;[\s\S]*?while \(true\)[\s\S]*?offset: rows\.length/);
+  assert.doesNotMatch(server, /content_registry_video_limit_reached/);
   assert.match(postgres, /'aylamed_content_hub'/);
   assert.match(postgres, /export async function listContentHubVideos/);
   assert.match(postgres, /q\.status='approved' AND c\.status='approved' AND d\.enabled=TRUE/);
@@ -228,5 +334,7 @@ test("server and registry wire one entitlement-guarded Content Hub into the exis
   const deliveryQuery = postgres.slice(postgres.indexOf("export async function listContentHubVideos"), postgres.indexOf("export async function getContentQbankCatalog"));
   assert.match(deliveryQuery, /SELECT va\.id,q\.exam_track/);
   assert.match(deliveryQuery, /WHERE q\.exam_track=ANY\(\$1::text\[\]\)/);
+  assert.match(deliveryQuery, /q\.taxonomy->>'subsystem_key'/);
+  assert.match(deliveryQuery, /primary_subsystem_key AS subsystem_key/);
   assert.doesNotMatch(deliveryQuery, /va\.exam_track=ANY/);
 });
