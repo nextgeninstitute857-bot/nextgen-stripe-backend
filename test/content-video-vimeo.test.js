@@ -38,3 +38,17 @@ test("video matching uses contextual paths before duplicate basenames", () => {
   assert.equal(report.matches.length, 1);
   assert.equal(report.matches[0].video.sha256, "cardio");
 });
+
+test("video matching uses the question edition without guessing across packages", () => {
+  const report = matchVideoReferences([{
+    questionId: "q1",
+    mediaRef: "17407.mp4",
+    sourceSnapshot: "uworldSTEP1-2026-march_questions.json",
+  }], [
+    { originalName: "STEP1-2025-March/iMD/17407.mp4", sha256: "2025" },
+    { originalName: "STEP1-2026-march/iMD/17407.mp4", sha256: "2026" },
+  ]);
+  assert.equal(report.matches.length, 1);
+  assert.equal(report.matches[0].video.sha256, "2026");
+  assert.equal(report.ambiguous.length, 0);
+});

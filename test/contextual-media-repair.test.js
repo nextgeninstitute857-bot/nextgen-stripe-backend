@@ -7,6 +7,14 @@ const registry = fs.readFileSync(
   new URL("../lib/content-registry-postgres.js", import.meta.url),
   "utf8",
 );
+const r2RepairStart = server.indexOf(
+  'app.post("/admin/crm/ai-training/content-media-imports/:mediaJobId/reconcile-draft-links"',
+);
+const r2RepairEnd = server.indexOf(
+  "async function ngRunContentVideoDraftImport",
+  r2RepairStart,
+);
+const r2Repair = server.slice(r2RepairStart, r2RepairEnd);
 
 test("contextual media repair is audit-first and fingerprint guarded", () => {
   assert.match(
@@ -26,8 +34,25 @@ test("R2 reconciliation inserts only missing draft links without publishing or o
   assert.match(server, /existing_links_overwritten: 0/);
   assert.match(server, /student_resources_published: 0/);
   assert.match(server, /binary_files_reuploaded: 0/);
+  assert.match(r2Repair, /binary_objects_deleted: 0/);
+  assert.match(r2Repair, /duplicate_objects_preserved/);
+  assert.doesNotMatch(r2Repair, /deleteR2Object/);
   assert.match(registry, /export async function auditContentMediaLinks/);
   assert.match(registry, /LEFT JOIN content_question_media qm/);
+});
+
+test("R2 repair pools completed sibling packages and uses canonical plus alias editions", () => {
+  assert.match(server, /listContentMediaImportAssetsForParent\(parentJob\.id\)/);
+  assert.match(server, /cross_package_asset_pool: true/);
+  assert.match(server, /source_media_job_ids: sourceMediaJobIds/);
+  assert.match(
+    registry,
+    /export async function listContentMediaImportAssetsForParent\(contentImportJobId\)/,
+  );
+  assert.match(registry, /jobs\.status LIKE 'draft_imported%'/);
+  assert.match(registry, /AS source_snapshot_aliases/);
+  assert.match(registry, /sourceSnapshot: sourceFile/);
+  assert.match(registry, /sourceSnapshotAliases:/);
 });
 
 test("Vimeo reconciliation reuses the saved package and deduplicates repeated starts", () => {

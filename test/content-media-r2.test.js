@@ -105,6 +105,67 @@ test("an exact media filename wins before high-resolution fallback aliases", () 
   assert.equal(report.matches[0].asset.sha256, "low");
 });
 
+test("the canonical question edition resolves duplicate filenames across media packages", () => {
+  const report = matchMediaReferences([{
+    questionId: "q1",
+    mediaRef: "L26809.jpg",
+    sourceSnapshot: "uworldSTEP1-2026-march_questions.json",
+  }], [
+    { originalName: "STEP1-2025-March/L26809.jpg", sha256: "2025" },
+    { originalName: "uworldSTEP1-2026-march/L26809.jpg", sha256: "2026" },
+  ]);
+  assert.equal(report.matches.length, 1);
+  assert.equal(report.matches[0].asset.sha256, "2026");
+  assert.equal(report.ambiguous.length, 0);
+});
+
+test("an exact filename still wins over high-resolution aliases inside the selected edition", () => {
+  const report = matchMediaReferences([{
+    questionId: "q1",
+    mediaRef: "L1436.jpg",
+    sourceSnapshot: "uworldSTEP1-2026-march_questions.json",
+  }], [
+    { originalName: "STEP1-2025-March/L1436.jpg", sha256: "old" },
+    { originalName: "STEP1-2026-march/highresdefault_L1436.jpg", sha256: "high" },
+    { originalName: "STEP1-2026-march/L1436.jpg", sha256: "exact" },
+  ]);
+  assert.equal(report.matches.length, 1);
+  assert.equal(report.matches[0].asset.sha256, "exact");
+});
+
+test("a unique source alias edition repairs a reference absent from its canonical snapshot", () => {
+  const report = matchMediaReferences([{
+    questionId: "q1",
+    mediaRef: "L26361.jpg",
+    sourceSnapshot: "uworldSTEP1-2023_questions.json",
+    sourceSnapshotAliases: ["uworldSTEP1-2025-March"],
+  }], [
+    { originalName: "STEP1-2025-March/L26361.jpg", sha256: "alias-edition" },
+    { originalName: "STEP1-2026-march/L26361.jpg", sha256: "other-edition" },
+  ]);
+  assert.equal(report.matches.length, 1);
+  assert.equal(report.matches[0].asset.sha256, "alias-edition");
+});
+
+test("multiple different assets in an alias edition remain quarantined", () => {
+  const report = matchMediaReferences([{
+    questionId: "q1",
+    mediaRef: "L26361.jpg",
+    sourceSnapshot: "uworldSTEP1-2023_questions.json",
+    sourceSnapshotAliases: ["uworldSTEP1-2025-March"],
+  }], [
+    { originalName: "package-a/STEP1-2025-March/L26361.jpg", sha256: "a" },
+    { originalName: "package-b/STEP1-2025-March/L26361.jpg", sha256: "b" },
+    { originalName: "STEP1-2026-march/L26361.jpg", sha256: "other-edition" },
+  ]);
+  assert.equal(report.matches.length, 0);
+  assert.equal(report.ambiguous.length, 1);
+  assert.deepEqual(report.ambiguous[0].candidates, [
+    "package-a/STEP1-2025-March/L26361.jpg",
+    "package-b/STEP1-2025-March/L26361.jpg",
+  ]);
+});
+
 test("an exact ZIP-relative path resolves duplicate basenames", () => {
   const report = matchMediaReferences([{ questionId: "q1", mediaRef: "chapter-a/diagram.png" }], [
     { originalName: "chapter-a/diagram.png", sha256: "a" },

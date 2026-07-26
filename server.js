@@ -38,6 +38,7 @@ import {
   listContentHubVideos,
   listContentOperationalJobs,
   listContentMediaImportAssets,
+  listContentMediaImportAssetsForParent,
   listExternalQbankAuditEvents,
   listExternalQbankDeliverySessions,
   listContentQbankQuestions,
@@ -34780,11 +34781,18 @@ app.get("/admin/crm/ai-training/content-media-imports/:mediaJobId", async (req, 
   }
 });
 
-function ngContentMediaAuditFingerprint(mediaJob, report, linkAudit) {
+function ngContentMediaAuditFingerprint(mediaJob, assets, report, linkAudit) {
   const digest = crypto.createHash("sha256");
   digest.update(String(mediaJob?.id || ""));
   digest.update("\u0000");
   digest.update(String(mediaJob?.updated_at || ""));
+  for (const asset of [...(assets || [])].sort((left, right) =>
+    `${left.mediaImportJobId}\u0000${left.entryIndex}\u0000${left.sha256}`
+      .localeCompare(`${right.mediaImportJobId}\u0000${right.entryIndex}\u0000${right.sha256}`))) {
+    digest.update(
+      `\nasset:${asset.mediaImportJobId}\u0000${asset.entryIndex}\u0000${asset.sha256}\u0000${asset.originalName}`,
+    );
+  }
   for (const match of [...(report?.matches || [])].sort((left, right) =>
     `${left.questionId}\u0000${left.mediaRef}`.localeCompare(`${right.questionId}\u0000${right.mediaRef}`))) {
     digest.update(`\n${match.questionId}\u0000${match.mediaRef}\u0000${match.asset?.sha256 || ""}`);
@@ -34811,11 +34819,14 @@ async function ngBuildContentMediaMappingAudit(mediaJobId) {
   if (!parentJob) throw Object.assign(new Error("Parent content import job not found"), { statusCode: 404 });
   const [references, assets] = await Promise.all([
     getContentMediaReferences(parentJob.id, "r2"),
-    listContentMediaImportAssets(mediaJob.id),
+    listContentMediaImportAssetsForParent(parentJob.id),
   ]);
   const report = matchMediaReferences(references, assets);
   const linkAudit = await auditContentMediaLinks(report.matches);
-  const fingerprint = ngContentMediaAuditFingerprint(mediaJob, report, linkAudit);
+  const fingerprint = ngContentMediaAuditFingerprint(mediaJob, assets, report, linkAudit);
+  const sourceMediaJobIds = [...new Set(assets
+    .map((asset) => String(asset.mediaImportJobId || ""))
+    .filter(Boolean))];
   return {
     mediaJob,
     parentJob,
@@ -34824,17 +34835,29 @@ async function ngBuildContentMediaMappingAudit(mediaJobId) {
     report,
     linkAudit,
     fingerprint,
+    sourceMediaJobIds,
   };
 }
 
 function ngPublicContentMediaMappingAudit(audit) {
-  const { mediaJob, references, assets, report, linkAudit, fingerprint } = audit;
+  const {
+    mediaJob,
+    references,
+    assets,
+    report,
+    linkAudit,
+    fingerprint,
+    sourceMediaJobIds,
+  } = audit;
   return {
     media_job_id: mediaJob.id,
     content_import_job_id: mediaJob.content_import_job_id,
     media_job_updated_at: mediaJob.updated_at,
     audit_fingerprint: fingerprint,
     contextual_path_matching: true,
+    edition_aware_matching: true,
+    cross_package_asset_pool: true,
+    source_media_job_ids: sourceMediaJobIds,
     references: references.length,
     staged_assets: assets.length,
     projected_matched: report.matches.length,
@@ -34845,6 +34868,8 @@ function ngPublicContentMediaMappingAudit(audit) {
     remaining_ambiguous: report.ambiguous.length,
     projected_unreferenced: report.unreferenced.length,
     no_binary_reupload_required: true,
+    deletes_uploaded_objects: false,
+    binary_objects_deleted: 0,
     overwrites_existing_links: false,
     student_visibility: "disabled_drafts_until_collection_approval",
     missing_samples: report.missing.slice(0, 50).map((item) => ({
@@ -34920,11 +34945,6 @@ app.post("/admin/crm/ai-training/content-media-imports/:mediaJobId/reconcile-dra
       linkConflicts += Number(saved.linkConflicts || 0);
       for (const objectKey of saved.duplicateObjects || []) duplicateObjects.add(objectKey);
     }
-    for (const objectKey of duplicateObjects) {
-      await deleteR2Object(objectKey).catch((error) => {
-        console.warn("Contextual media duplicate cleanup failed:", error.message);
-      });
-    }
     const afterLinks = await auditContentMediaLinks(audit.report.matches);
     const remainingWarning = audit.report.missing.length
       || audit.report.ambiguous.length
@@ -34940,10 +34960,15 @@ app.post("/admin/crm/ai-training/content-media-imports/:mediaJobId/reconcile-dra
       ambiguous: audit.report.ambiguous.length,
       unreferenced: audit.report.unreferenced.length,
       contextual_path_matching: true,
+      edition_aware_matching: true,
+      cross_package_asset_pool: true,
+      source_media_job_ids: audit.sourceMediaJobIds,
       contextual_reconciliation_fingerprint: audit.fingerprint,
       contextual_links_created: linksCreated,
       contextual_links_verified: linksVerified,
       contextual_link_conflicts: linkConflicts,
+      contextual_duplicate_objects_preserved: duplicateObjects.size,
+      contextual_binary_objects_deleted: 0,
       contextual_reconciled_at: new Date().toISOString(),
       contextual_reconciled_by: String(user.id),
     };
@@ -34983,6 +35008,8 @@ app.post("/admin/crm/ai-training/content-media-imports/:mediaJobId/reconcile-dra
         remaining_ambiguous: audit.report.ambiguous.length,
         projected_unreferenced: audit.report.unreferenced.length,
         binary_files_reuploaded: 0,
+        binary_objects_deleted: 0,
+        duplicate_objects_preserved: duplicateObjects.size,
         existing_links_overwritten: 0,
         student_resources_published: 0,
       },
