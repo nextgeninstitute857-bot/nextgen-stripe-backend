@@ -13,6 +13,7 @@ import {
   shadowWriteFlashcardReview,
 } from "./lib/flashcard-postgres.js";
 import {
+  auditContentMediaLinks,
   contentRegistryStatus,
   claimContentImportDraft,
   createContentBackgroundJobStore,
@@ -34065,6 +34066,7 @@ async function ngQueueContentOperation({ type, lane, upload, domainJobId, metada
         domain_job_id: domainJobId,
         purpose: lane,
         original_filename: upload.originalFilename,
+        ...(metadata && typeof metadata === "object" ? metadata : {}),
       },
     });
     if (queued.deduplicated && upload.uploadId) {
@@ -34111,6 +34113,7 @@ function ngMultiQbankControlPlaneSnapshot() {
       student_visibility: "disabled_drafts_until_approval",
       binary_uploads_in_postgres: false,
       one_postgres_finalizer: true,
+      contextual_media_repair: "audit_first_without_binary_reupload",
       qbank_explanation_videos_separate_from_lecture_catalog: true,
       persistent_disk_not_horizontally_shared: true,
     },
@@ -34777,6 +34780,221 @@ app.get("/admin/crm/ai-training/content-media-imports/:mediaJobId", async (req, 
   }
 });
 
+function ngContentMediaAuditFingerprint(mediaJob, report, linkAudit) {
+  const digest = crypto.createHash("sha256");
+  digest.update(String(mediaJob?.id || ""));
+  digest.update("\u0000");
+  digest.update(String(mediaJob?.updated_at || ""));
+  for (const match of [...(report?.matches || [])].sort((left, right) =>
+    `${left.questionId}\u0000${left.mediaRef}`.localeCompare(`${right.questionId}\u0000${right.mediaRef}`))) {
+    digest.update(`\n${match.questionId}\u0000${match.mediaRef}\u0000${match.asset?.sha256 || ""}`);
+  }
+  digest.update(`\nmissing:${report?.missing?.length || 0}`);
+  digest.update(`\nambiguous:${report?.ambiguous?.length || 0}`);
+  digest.update(`\nunreferenced:${report?.unreferenced?.length || 0}`);
+  digest.update(`\nexisting:${linkAudit?.exactMatches?.length || 0}`);
+  digest.update(`\nrepairable:${linkAudit?.missingMatches?.length || 0}`);
+  digest.update(`\nconflicts:${linkAudit?.conflictingMatches?.length || 0}`);
+  return digest.digest("hex");
+}
+
+async function ngBuildContentMediaMappingAudit(mediaJobId) {
+  const mediaJob = await getContentMediaImportJob(mediaJobId);
+  if (!mediaJob) throw Object.assign(new Error("Media import job not found"), { statusCode: 404 });
+  if (!String(mediaJob.status || "").startsWith("draft_imported")) {
+    throw Object.assign(
+      new Error("Wait for the media import to finish before auditing its draft links"),
+      { statusCode: 409 },
+    );
+  }
+  const parentJob = await getContentImportJob(mediaJob.content_import_job_id);
+  if (!parentJob) throw Object.assign(new Error("Parent content import job not found"), { statusCode: 404 });
+  const [references, assets] = await Promise.all([
+    getContentMediaReferences(parentJob.id, "r2"),
+    listContentMediaImportAssets(mediaJob.id),
+  ]);
+  const report = matchMediaReferences(references, assets);
+  const linkAudit = await auditContentMediaLinks(report.matches);
+  const fingerprint = ngContentMediaAuditFingerprint(mediaJob, report, linkAudit);
+  return {
+    mediaJob,
+    parentJob,
+    references,
+    assets,
+    report,
+    linkAudit,
+    fingerprint,
+  };
+}
+
+function ngPublicContentMediaMappingAudit(audit) {
+  const { mediaJob, references, assets, report, linkAudit, fingerprint } = audit;
+  return {
+    media_job_id: mediaJob.id,
+    content_import_job_id: mediaJob.content_import_job_id,
+    media_job_updated_at: mediaJob.updated_at,
+    audit_fingerprint: fingerprint,
+    contextual_path_matching: true,
+    references: references.length,
+    staged_assets: assets.length,
+    projected_matched: report.matches.length,
+    existing_exact_links: linkAudit.exactMatches.length,
+    repairable_links: linkAudit.missingMatches.length,
+    protected_conflicts: linkAudit.conflictingMatches.length,
+    remaining_missing: report.missing.length,
+    remaining_ambiguous: report.ambiguous.length,
+    projected_unreferenced: report.unreferenced.length,
+    no_binary_reupload_required: true,
+    overwrites_existing_links: false,
+    student_visibility: "disabled_drafts_until_collection_approval",
+    missing_samples: report.missing.slice(0, 50).map((item) => ({
+      student_qid: item.studentQid,
+      media_ref: item.mediaRef,
+      match_paths: item.matchPaths || [],
+    })),
+    ambiguous_samples: report.ambiguous.slice(0, 50).map((item) => ({
+      student_qid: item.studentQid,
+      media_ref: item.mediaRef,
+      match_paths: item.matchPaths || [],
+      candidates: (item.candidates || []).slice(0, 20),
+    })),
+    conflict_samples: linkAudit.conflictingMatches.slice(0, 50).map((item) => ({
+      student_qid: item.studentQid,
+      media_ref: item.mediaRef,
+    })),
+  };
+}
+
+app.get("/admin/crm/ai-training/content-media-imports/:mediaJobId/mapping-audit", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const audit = await ngBuildContentMediaMappingAudit(req.params.mediaJobId);
+    return res.json({
+      success: true,
+      audit: ngPublicContentMediaMappingAudit(audit),
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-training/content-media-imports/:mediaJobId/reconcile-draft-links", async (req, res) => {
+  let releaseFinalizer = null;
+  let finalizerError = null;
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const audit = await ngBuildContentMediaMappingAudit(req.params.mediaJobId);
+    const expectedFingerprint = String(req.body?.audit_fingerprint || "");
+    if (!expectedFingerprint || expectedFingerprint !== audit.fingerprint) {
+      return res.status(409).json({
+        success: false,
+        error: "The media mapping audit changed. Refresh the dry-run audit before applying repairs.",
+      });
+    }
+    releaseFinalizer = await ngMediaFinalizerGate.acquire({
+      metadata: {
+        operation: "contextual_media_link_reconciliation",
+        media_import_job_id: audit.mediaJob.id,
+        content_import_job_id: audit.parentJob.id,
+      },
+    });
+    const assetBySha = new Map(audit.assets.map((asset) => [String(asset.sha256 || ""), asset]));
+    let linksCreated = 0;
+    let linksVerified = 0;
+    let linkConflicts = 0;
+    const duplicateObjects = new Set();
+    const batchSize = 1_000;
+    for (let index = 0; index < audit.linkAudit.missingMatches.length; index += batchSize) {
+      const matches = audit.linkAudit.missingMatches.slice(index, index + batchSize);
+      const assets = [...new Set(matches.map((match) => String(match.asset?.sha256 || "")))]
+        .map((sha256) => assetBySha.get(sha256))
+        .filter(Boolean);
+      const saved = await saveContentMediaMatchBatch({
+        mediaJobId: audit.mediaJob.id,
+        parentJob: audit.parentJob,
+        assets,
+        matches,
+      });
+      linksCreated += Number(saved.linksCreated || 0);
+      linksVerified += Number(saved.links || 0);
+      linkConflicts += Number(saved.linkConflicts || 0);
+      for (const objectKey of saved.duplicateObjects || []) duplicateObjects.add(objectKey);
+    }
+    for (const objectKey of duplicateObjects) {
+      await deleteR2Object(objectKey).catch((error) => {
+        console.warn("Contextual media duplicate cleanup failed:", error.message);
+      });
+    }
+    const afterLinks = await auditContentMediaLinks(audit.report.matches);
+    const remainingWarning = audit.report.missing.length
+      || audit.report.ambiguous.length
+      || afterLinks.conflictingMatches.length;
+    const counts = {
+      ...(audit.mediaJob.counts || {}),
+      question_media_references: audit.references.length,
+      matched: audit.report.matches.length,
+      linked: afterLinks.exactMatches.length,
+      links_created: Number(audit.mediaJob.counts?.links_created || 0) + linksCreated,
+      link_conflicts: afterLinks.conflictingMatches.length,
+      missing: audit.report.missing.length,
+      ambiguous: audit.report.ambiguous.length,
+      unreferenced: audit.report.unreferenced.length,
+      contextual_path_matching: true,
+      contextual_reconciliation_fingerprint: audit.fingerprint,
+      contextual_links_created: linksCreated,
+      contextual_links_verified: linksVerified,
+      contextual_link_conflicts: linkConflicts,
+      contextual_reconciled_at: new Date().toISOString(),
+      contextual_reconciled_by: String(user.id),
+    };
+    const errors = [
+      ...audit.report.missing.slice(0, 100).map((item) => ({
+        kind: "missing",
+        student_qid: item.studentQid,
+        media_ref: item.mediaRef,
+      })),
+      ...audit.report.ambiguous.slice(0, 100).map((item) => ({
+        kind: "ambiguous",
+        student_qid: item.studentQid,
+        media_ref: item.mediaRef,
+        candidates: (item.candidates || []).slice(0, 20),
+      })),
+      ...afterLinks.conflictingMatches.slice(0, 100).map((item) => ({
+        kind: "protected_existing_conflict",
+        student_qid: item.studentQid,
+        media_ref: item.mediaRef,
+      })),
+    ];
+    await finishContentMediaImportJob(
+      audit.mediaJob.id,
+      remainingWarning ? "draft_imported_with_warnings" : "draft_imported",
+      counts,
+      errors,
+    );
+    return res.json({
+      success: true,
+      repair: {
+        media_job_id: audit.mediaJob.id,
+        audit_fingerprint: audit.fingerprint,
+        links_created: linksCreated,
+        links_verified: linksVerified,
+        protected_conflicts: afterLinks.conflictingMatches.length,
+        remaining_missing: audit.report.missing.length,
+        remaining_ambiguous: audit.report.ambiguous.length,
+        projected_unreferenced: audit.report.unreferenced.length,
+        binary_files_reuploaded: 0,
+        existing_links_overwritten: 0,
+        student_resources_published: 0,
+      },
+    });
+  } catch (error) {
+    finalizerError = error;
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  } finally {
+    releaseFinalizer?.({ error: finalizerError });
+  }
+});
+
 async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queueContext }) {
   const workDir = path.join(DATA_DIR, "content-imports", `${videoJob.id}-videos`);
   const trackProgress = ngContentProgressTracker("extracting_private_videos");
@@ -35252,6 +35470,152 @@ app.get("/admin/crm/ai-training/content-video-imports/:videoJobId", async (req, 
       storage: contentVideoStatus(),
     });
   } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+async function ngBuildContentVideoReconcileAudit(videoJobId) {
+  const videoJob = await getContentVideoImportJob(videoJobId);
+  if (!videoJob) throw Object.assign(new Error("Video import job not found"), { statusCode: 404 });
+  if (!String(videoJob.status || "").startsWith("draft_imported")) {
+    throw Object.assign(
+      new Error("Wait for the Vimeo job to finish before preparing contextual reconciliation"),
+      { statusCode: 409 },
+    );
+  }
+  const parentJob = await getContentImportJob(videoJob.content_import_job_id);
+  if (!parentJob) throw Object.assign(new Error("Parent content import job not found"), { statusCode: 404 });
+  const snapshot = ngContentBackgroundSnapshot(videoJob.id);
+  const uploadId = String(snapshot.resumeUploadId || "");
+  const upload = uploadId
+    ? await ngContentUploadStore.get(uploadId).catch(() => null)
+    : null;
+  const existingRepair = ngContentBackgroundQueue.list({ limit: 500 }).find((job) =>
+    String(job.metadata?.repair_of_video_job_id || "") === String(videoJob.id)
+    && !["failed", "cancelled"].includes(String(job.status || "")));
+  const fingerprint = crypto.createHash("sha256")
+    .update([
+      videoJob.id,
+      String(videoJob.updated_at || ""),
+      uploadId,
+      String(upload?.status || ""),
+      String(upload?.expires_at || ""),
+    ].join("\u0000"))
+    .digest("hex");
+  return {
+    videoJob,
+    parentJob,
+    snapshot,
+    uploadId,
+    upload,
+    existingRepair,
+    fingerprint,
+  };
+}
+
+app.get("/admin/crm/ai-training/content-video-imports/:videoJobId/reconcile-audit", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const audit = await ngBuildContentVideoReconcileAudit(req.params.videoJobId);
+    return res.json({
+      success: true,
+      audit: {
+        video_job_id: audit.videoJob.id,
+        content_import_job_id: audit.parentJob.id,
+        audit_fingerprint: audit.fingerprint,
+        package_available: audit.upload?.status === "finalized",
+        package_expires_at: audit.upload?.expires_at || null,
+        existing_repair_background_job_id: audit.existingRepair?.id || null,
+        existing_repair_video_job_id: audit.existingRepair?.metadata?.domain_job_id || null,
+        contextual_path_matching: true,
+        sha256_vimeo_deduplication: true,
+        existing_vimeo_assets_reused: true,
+        source_zip_uploaded_again: false,
+        existing_video_links_overwritten: false,
+        student_visibility: "disabled_drafts_until_collection_approval",
+      },
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-training/content-video-imports/:videoJobId/reconcile-draft-links", async (req, res) => {
+  let upload = null;
+  let repairJob = null;
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const audit = await ngBuildContentVideoReconcileAudit(req.params.videoJobId);
+    const expectedFingerprint = String(req.body?.audit_fingerprint || "");
+    if (!expectedFingerprint || expectedFingerprint !== audit.fingerprint) {
+      return res.status(409).json({
+        success: false,
+        error: "The Vimeo reconciliation audit changed. Refresh it before starting the repair.",
+      });
+    }
+    if (audit.existingRepair) {
+      return res.status(200).json({
+        success: true,
+        deduplicated: true,
+        video_job_id: audit.existingRepair.metadata?.domain_job_id || null,
+        background_job_id: audit.existingRepair.id,
+        message: "The contextual Vimeo repair is already queued, running, or completed.",
+      });
+    }
+    if (!audit.uploadId || audit.upload?.status !== "finalized") {
+      return res.status(410).json({
+        success: false,
+        error: "The saved private media ZIP is no longer available for video reconciliation",
+      });
+    }
+    upload = await ngContentUploadStore.resolveFinalized(audit.uploadId, {
+      allowedPurposes: ["video_zip", "media_zip"],
+    });
+    repairJob = await createContentVideoImportJob({
+      id: crypto.randomUUID(),
+      contentImportJobId: audit.parentJob.id,
+      zipSha256: upload.sha256,
+      originalFilename: upload.originalFilename,
+      createdBy: String(user.id),
+    });
+    const backgroundJob = await ngQueueContentOperation({
+      type: "content_video_draft",
+      lane: "video_zip",
+      upload,
+      domainJobId: repairJob.id,
+      metadata: {
+        repair_of_video_job_id: audit.videoJob.id,
+        contextual_media_repair: true,
+      },
+      maxAttempts: 2,
+    });
+    upload = null;
+    return res.status(202).json({
+      success: true,
+      deduplicated: false,
+      video_job_id: repairJob.id,
+      background_job_id: backgroundJob.id,
+      content_import_job_id: audit.parentJob.id,
+      repair_of_video_job_id: audit.videoJob.id,
+      status: "queued",
+      poll_url: `/admin/crm/ai-training/content-video-imports/${repairJob.id}`,
+      safeguards: {
+        source_zip_uploaded_again: false,
+        sha256_vimeo_deduplication: true,
+        existing_video_links_overwritten: false,
+        student_resources_published: 0,
+      },
+    });
+  } catch (error) {
+    if (repairJob?.id) {
+      await finishContentVideoImportJob(
+        repairJob.id,
+        "queue_failed",
+        { failed: true, contextual_media_repair: true },
+        [{ error: error.message }],
+      ).catch(() => {});
+    }
+    await ngCleanupRejectedContentUpload(upload);
     return res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
 });

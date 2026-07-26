@@ -5,6 +5,7 @@ import {
   contentHash,
   extractMediaReferences,
   mediaMatchKeys,
+  mediaReferencePathCandidates,
   normalizeExamTrack,
   pairQuestionAnswerFiles,
   validateAdaptedQuestion,
@@ -30,6 +31,31 @@ test("media references normalize double extensions", () => {
   assert.deepEqual(extractMediaReferences("This sentence, however, is ordinary prose."), []);
   assert.deepEqual(extractMediaReferences("Listen to 12360.mp3, then review clip-1.mp4."), ["12360.mp3", "clip-1.mp4"]);
   assert.ok(mediaMatchKeys("iMD/U612.jpg.png").includes("u612"));
+});
+
+test("media references preserve ZIP-relative paths and resolve them beside the source JSON", () => {
+  assert.deepEqual(
+    extractMediaReferences('<img src="../media/chapter-a/diagram.png?size=2">'),
+    ["media/chapter-a/diagram.png"],
+  );
+  assert.deepEqual(
+    mediaReferencePathCandidates("images/diagram.png", {
+      sourceFile: "exports/step1/cardio_questions.json",
+    }),
+    [
+      "exports/step1/images/diagram.png",
+      "images/diagram.png",
+    ],
+  );
+  assert.deepEqual(
+    mediaReferencePathCandidates("../shared/diagram.png", {
+      sourceFile: "exports/step1/cardio_questions.json",
+    }),
+    [
+      "exports/shared/diagram.png",
+      "shared/diagram.png",
+    ],
+  );
 });
 
 test("question/answer snapshots are ordered newest-first", () => {
@@ -79,6 +105,26 @@ test("adapter preserves question versus explanation media placement", () => {
   assert.equal(row.sourceData.media_placements["explanation.jpg"], "explanation");
   assert.equal(row.sourceData.media_placements["12360.mp3"], "explanation");
   assert.equal(row.sourceData.media_placements["clip.mp4"], "explanation");
+});
+
+test("adapter stores contextual media match paths without changing the question placement", () => {
+  const row = adaptUniversalQuestion({
+    id: 13,
+    question: '<p>Stem</p><img src="images/shared.png">',
+    explanation: "<p>Why</p>",
+    corrAns: 1,
+  }, [{ id: 1, qId: 13, answerId: 1, answerText: "A" }, { id: 2, qId: 13, answerId: 2, answerText: "B" }], {
+    examTrack: "step 1",
+    sourceNamespace: "provider-a",
+    collectionKey: "march",
+    sourceFile: "exports/cardio/cardio_questions.json",
+  });
+  assert.deepEqual(row.media, ["images/shared.png"]);
+  assert.deepEqual(row.sourceData.media_match_paths["images/shared.png"], [
+    "exports/cardio/images/shared.png",
+    "images/shared.png",
+  ]);
+  assert.equal(row.sourceData.media_placements["images/shared.png"], "question");
 });
 
 test("adapter collapses semantic low/high-resolution duplicates without moving question figures", () => {
