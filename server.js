@@ -14,6 +14,7 @@ import {
 } from "./lib/flashcard-postgres.js";
 import {
   auditContentMediaLinks,
+  auditContentVideoMappings,
   contentRegistryStatus,
   claimContentImportDraft,
   createContentBackgroundJobStore,
@@ -275,10 +276,16 @@ import {
 import {
   contentVideoStatus,
   extractReferencedVideos,
+  inspectContentVideoEntries,
   matchVideoReferences,
   openReferencedVideoStream,
   uploadVideoToVimeo,
 } from "./lib/content-video-vimeo.js";
+import {
+  filterContentAssetsByEdition,
+  filterContentReferencesByEdition,
+  normalizeContentEdition,
+} from "./lib/content-edition-scope.js";
 import {
   DEFAULT_VIMEO_MEDICAL_SOURCE_DOMAINS,
   VIMEO_LIBRARY_CATALOG_BUILD,
@@ -34982,6 +34989,240 @@ function ngPublicContentMediaMappingAudit(audit) {
   };
 }
 
+function ngContentEdition(value) {
+  const edition = normalizeContentEdition(value);
+  if (!edition) {
+    throw Object.assign(
+      new Error("edition must be a four-digit year such as 2026"),
+      { statusCode: 400 },
+    );
+  }
+  return edition;
+}
+
+function ngEditionAuditFingerprint(baseFingerprint, edition) {
+  return crypto.createHash("sha256")
+    .update(`${String(baseFingerprint || "")}\u0000edition:${ngContentEdition(edition)}`)
+    .digest("hex");
+}
+
+async function ngBuildContentMediaEditionAudit(mediaJobId, editionInput) {
+  const edition = ngContentEdition(editionInput);
+  const mediaJob = await getContentMediaImportJob(mediaJobId);
+  if (!mediaJob) {
+    throw Object.assign(new Error("Media import job not found"), {
+      statusCode: 404,
+    });
+  }
+  if (!String(mediaJob.status || "").startsWith("draft_imported")) {
+    throw Object.assign(
+      new Error("Wait for the media import to finish before auditing an edition"),
+      { statusCode: 409 },
+    );
+  }
+  const parentJob = await getContentImportJob(mediaJob.content_import_job_id);
+  if (!parentJob) {
+    throw Object.assign(new Error("Parent content import job not found"), {
+      statusCode: 404,
+    });
+  }
+  const [allReferences, allAssets] = await Promise.all([
+    getContentMediaReferences(parentJob.id, "r2"),
+    listContentMediaImportAssetsForParent(parentJob.id),
+  ]);
+  const references = filterContentReferencesByEdition(allReferences, edition);
+  const assets = filterContentAssetsByEdition(allAssets, edition);
+  const report = matchMediaReferences(references, assets);
+  const linkAudit = await auditContentMediaLinks(report.matches);
+  const baseFingerprint = ngContentMediaAuditFingerprint(
+    mediaJob,
+    assets,
+    report,
+    linkAudit,
+  );
+  return {
+    mediaJob,
+    parentJob,
+    edition,
+    references,
+    assets,
+    report,
+    linkAudit,
+    fingerprint: ngEditionAuditFingerprint(baseFingerprint, edition),
+    sourceMediaJobIds: [...new Set(assets
+      .map((asset) => String(asset.mediaImportJobId || ""))
+      .filter(Boolean))],
+  };
+}
+
+function ngPublicContentMediaEditionAudit(audit) {
+  return {
+    edition: audit.edition,
+    media_job_id: audit.mediaJob.id,
+    content_import_job_id: audit.parentJob.id,
+    audit_fingerprint: audit.fingerprint,
+    references: audit.references.length,
+    staged_assets: audit.assets.length,
+    exact_matches: audit.report.matches.length,
+    already_linked: audit.linkAudit.exactMatches.length,
+    repairable_links: audit.linkAudit.missingMatches.length,
+    protected_conflicts: audit.linkAudit.conflictingMatches.length,
+    remaining_missing: audit.report.missing.length,
+    remaining_ambiguous: audit.report.ambiguous.length,
+    unreferenced_assets: audit.report.unreferenced.length,
+    source_media_job_ids: audit.sourceMediaJobIds,
+    exact_media_ref_matching: true,
+    source_snapshot_scoped: true,
+    other_editions_touched: [],
+    overwrites_existing_links: false,
+    deletes_uploaded_objects: false,
+    student_visibility: "disabled_drafts_until_collection_approval",
+    ambiguous_samples: audit.report.ambiguous.slice(0, 50).map((item) => ({
+      student_qid: item.studentQid,
+      media_ref: item.mediaRef,
+      candidates: (item.candidates || []).slice(0, 20),
+    })),
+    conflict_samples: audit.linkAudit.conflictingMatches.slice(0, 50).map((item) => ({
+      student_qid: item.studentQid,
+      media_ref: item.mediaRef,
+    })),
+  };
+}
+
+app.get("/admin/crm/ai-training/content-media-imports/:mediaJobId/edition-audit", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const audit = await ngBuildContentMediaEditionAudit(
+      req.params.mediaJobId,
+      req.query?.edition,
+    );
+    return res.json({
+      success: true,
+      audit: ngPublicContentMediaEditionAudit(audit),
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+app.post("/admin/crm/ai-training/content-media-imports/:mediaJobId/reconcile-edition-draft-links", async (req, res) => {
+  let releaseFinalizer = null;
+  let finalizerError = null;
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const audit = await ngBuildContentMediaEditionAudit(
+      req.params.mediaJobId,
+      req.body?.edition,
+    );
+    const expectedFingerprint = String(req.body?.audit_fingerprint || "");
+    if (!expectedFingerprint || expectedFingerprint !== audit.fingerprint) {
+      return res.status(409).json({
+        success: false,
+        error: "The edition media audit changed. Refresh the dry-run before applying repairs.",
+      });
+    }
+    releaseFinalizer = await ngMediaFinalizerGate.acquire({
+      metadata: {
+        operation: "edition_media_link_reconciliation",
+        edition: audit.edition,
+        media_import_job_id: audit.mediaJob.id,
+        content_import_job_id: audit.parentJob.id,
+      },
+    });
+    const assetBySha = new Map(
+      audit.assets.map((asset) => [String(asset.sha256 || ""), asset]),
+    );
+    let linksCreated = 0;
+    let linksVerified = 0;
+    let linkConflicts = 0;
+    const duplicateObjects = new Set();
+    const batchSize = 1_000;
+    for (
+      let index = 0;
+      index < audit.linkAudit.missingMatches.length;
+      index += batchSize
+    ) {
+      const matches = audit.linkAudit.missingMatches.slice(
+        index,
+        index + batchSize,
+      );
+      const assets = [...new Set(
+        matches.map((match) => String(match.asset?.sha256 || "")),
+      )].map((sha256) => assetBySha.get(sha256)).filter(Boolean);
+      const saved = await saveContentMediaMatchBatch({
+        mediaJobId: audit.mediaJob.id,
+        parentJob: audit.parentJob,
+        assets,
+        matches,
+      });
+      linksCreated += Number(saved.linksCreated || 0);
+      linksVerified += Number(saved.links || 0);
+      linkConflicts += Number(saved.linkConflicts || 0);
+      for (const objectKey of saved.duplicateObjects || []) {
+        duplicateObjects.add(objectKey);
+      }
+    }
+    const afterLinks = await auditContentMediaLinks(audit.report.matches);
+    const editionResult = {
+      audit_fingerprint: audit.fingerprint,
+      exact_matches: audit.report.matches.length,
+      already_linked_before: audit.linkAudit.exactMatches.length,
+      links_created: linksCreated,
+      links_verified: linksVerified,
+      protected_conflicts: afterLinks.conflictingMatches.length,
+      remaining_missing: audit.report.missing.length,
+      remaining_ambiguous: audit.report.ambiguous.length,
+      duplicate_objects_preserved: duplicateObjects.size,
+      binary_objects_deleted: 0,
+      existing_links_overwritten: 0,
+      student_resources_published: 0,
+      reconciled_at: new Date().toISOString(),
+      reconciled_by: String(user.id),
+    };
+    const priorEditionResults = audit.mediaJob.counts?.edition_reconciliations;
+    const counts = {
+      ...(audit.mediaJob.counts || {}),
+      edition_reconciliations: {
+        ...(priorEditionResults && typeof priorEditionResults === "object"
+          ? priorEditionResults
+          : {}),
+        [audit.edition]: editionResult,
+      },
+    };
+    const warnings = audit.report.ambiguous.length
+      || audit.report.missing.length
+      || afterLinks.conflictingMatches.length
+      || linkConflicts;
+    await finishContentMediaImportJob(
+      audit.mediaJob.id,
+      warnings ? "draft_imported_with_warnings" : "draft_imported",
+      counts,
+      audit.mediaJob.errors || [],
+    );
+    return res.json({
+      success: true,
+      repair: {
+        edition: audit.edition,
+        media_job_id: audit.mediaJob.id,
+        ...editionResult,
+        other_editions_touched: [],
+        binary_files_reuploaded: 0,
+      },
+    });
+  } catch (error) {
+    finalizerError = error;
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+    });
+  } finally {
+    releaseFinalizer?.({ error: finalizerError });
+  }
+});
+
 app.get("/admin/crm/ai-training/content-media-imports/:mediaJobId/mapping-audit", async (req, res) => {
   try {
     await requireCrmAdmin(req);
@@ -35119,10 +35360,21 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
   const trackProgress = ngContentProgressTracker("extracting_private_videos");
   try {
     await cleanupContentImportFiles(workDir);
-    const references = await getContentMediaReferences(parentJob.id, "video");
+    const edition = normalizeContentEdition(
+      queueContext.job.payload?.metadata?.edition,
+    );
+    const allReferences = await getContentMediaReferences(parentJob.id, "video");
+    const references = edition
+      ? filterContentReferencesByEdition(allReferences, edition)
+      : allReferences;
     await finishContentVideoImportJob(videoJob.id, "uploading", {
       resumable: true,
       video_references: references.length,
+      ...(edition ? {
+        edition,
+        edition_scoped: true,
+        other_editions_touched: [],
+      } : {}),
     }, []);
     await queueContext.heartbeat(trackProgress({
       stage: "extracting_private_videos",
@@ -35135,6 +35387,8 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
     const extracted = await extractReferencedVideos({
       zipSource: upload.source || upload.file,
       references,
+      edition,
+      directoryCacheKey: `${videoJob.zip_sha256}:videos:${edition || "all"}`,
       onProgress: (progress) => queueContext.heartbeat(trackProgress(progress)),
     });
     const report = matchVideoReferences(references, extracted.videos);
@@ -35480,6 +35734,11 @@ async function ngRunContentVideoDraftImport({ videoJob, parentJob, upload, queue
       completed: true,
     }));
     await finishContentVideoImportJob(videoJob.id, warning ? "draft_imported_with_warnings" : "draft_imported", {
+      ...(edition ? {
+        edition,
+        edition_scoped: true,
+        other_editions_touched: [],
+      } : {}),
       zip_entries: extracted.entries,
       video_references: references.length,
       videos_found: extracted.videos.length,
@@ -35631,6 +35890,239 @@ async function ngBuildContentVideoReconcileAudit(videoJobId) {
     fingerprint,
   };
 }
+
+function ngContentVideoEditionAuditFingerprint({
+  videoJob,
+  upload,
+  edition,
+  references,
+  videos,
+  report,
+}) {
+  const digest = crypto.createHash("sha256");
+  digest.update([
+    String(videoJob?.id || ""),
+    String(videoJob?.updated_at || ""),
+    String(upload?.uploadId || upload?.id || ""),
+    String(upload?.sha256 || upload?.fingerprint || ""),
+    ngContentEdition(edition),
+  ].join("\u0000"));
+  for (const reference of [...references].sort((left, right) =>
+    `${left.questionId}\u0000${left.mediaRef}`
+      .localeCompare(`${right.questionId}\u0000${right.mediaRef}`))) {
+    digest.update(
+      `\nref:${reference.questionId}\u0000${reference.mediaRef}\u0000${reference.sourceSnapshot}`,
+    );
+  }
+  for (const video of [...videos].sort((left, right) =>
+    String(left.originalName).localeCompare(String(right.originalName)))) {
+    digest.update(
+      `\nvideo:${video.originalName}\u0000${video.sizeBytes}\u0000${video.crc32 || 0}`,
+    );
+  }
+  digest.update(`\nmatched:${report.matches.length}`);
+  digest.update(`\nmissing:${report.missing.length}`);
+  digest.update(`\nambiguous:${report.ambiguous.length}`);
+  return digest.digest("hex");
+}
+
+async function ngBuildContentVideoEditionAudit(videoJobId, editionInput) {
+  const edition = ngContentEdition(editionInput);
+  const base = await ngBuildContentVideoReconcileAudit(videoJobId);
+  if (!base.uploadId || base.upload?.status !== "finalized") {
+    throw Object.assign(
+      new Error("The saved private video ZIP is no longer available"),
+      { statusCode: 410 },
+    );
+  }
+  const resolvedUpload = await ngContentUploadStore.resolveFinalized(
+    base.uploadId,
+    { allowedPurposes: ["video_zip", "media_zip"] },
+  );
+  const allReferences = await getContentMediaReferences(base.parentJob.id, "video");
+  const references = filterContentReferencesByEdition(allReferences, edition);
+  const inventory = await inspectContentVideoEntries({
+    zipSource: resolvedUpload.source || resolvedUpload.file,
+    edition,
+    directoryCacheKey: `${base.videoJob.zip_sha256}:videos:${edition}`,
+  });
+  const report = matchVideoReferences(references, inventory.videos);
+  const mappings = await auditContentVideoMappings(report.matches);
+  const existingRepair = ngContentBackgroundQueue.list({ limit: 500 }).find((job) =>
+    String(job.metadata?.edition_repair_of_video_job_id || "")
+      === String(base.videoJob.id)
+    && String(job.metadata?.edition || "") === edition
+    && !["failed", "cancelled"].includes(String(job.status || "")));
+  return {
+    ...base,
+    edition,
+    resolvedUpload,
+    references,
+    inventory,
+    report,
+    mappings,
+    existingEditionRepair: existingRepair,
+    fingerprint: ngContentVideoEditionAuditFingerprint({
+      videoJob: base.videoJob,
+      upload: resolvedUpload,
+      edition,
+      references,
+      videos: inventory.videos,
+      report,
+    }),
+  };
+}
+
+function ngPublicContentVideoEditionAudit(audit) {
+  return {
+    edition: audit.edition,
+    video_job_id: audit.videoJob.id,
+    content_import_job_id: audit.parentJob.id,
+    audit_fingerprint: audit.fingerprint,
+    package_available: true,
+    package_expires_at: audit.upload?.expires_at || null,
+    archive_entries: audit.inventory.entries,
+    video_files_found: audit.inventory.videos.length,
+    video_references: audit.references.length,
+    exact_matches: audit.report.matches.length,
+    already_linked: audit.mappings.linked.length,
+    repairable_links: audit.mappings.missing.length,
+    remaining_missing: audit.report.missing.length,
+    remaining_ambiguous: audit.report.ambiguous.length,
+    unreferenced_video_files: audit.report.unreferenced.length,
+    existing_repair_background_job_id:
+      audit.existingEditionRepair?.id || null,
+    existing_repair_video_job_id:
+      audit.existingEditionRepair?.metadata?.domain_job_id || null,
+    source_snapshot_scoped: true,
+    all_edition_videos_inventoried_before_matching: true,
+    filename_treated_as_question_id: false,
+    sha256_vimeo_deduplication: true,
+    existing_video_links_overwritten: false,
+    other_editions_touched: [],
+    student_visibility: "disabled_drafts_until_collection_approval",
+    missing_samples: audit.report.missing.slice(0, 50).map((item) => ({
+      student_qid: item.studentQid,
+      media_ref: item.mediaRef,
+    })),
+    ambiguous_samples: audit.report.ambiguous.slice(0, 50).map((item) => ({
+      student_qid: item.studentQid,
+      media_ref: item.mediaRef,
+      candidates: (item.candidates || []).slice(0, 20),
+    })),
+  };
+}
+
+app.get("/admin/crm/ai-training/content-video-imports/:videoJobId/edition-audit", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const audit = await ngBuildContentVideoEditionAudit(
+      req.params.videoJobId,
+      req.query?.edition,
+    );
+    return res.json({
+      success: true,
+      audit: ngPublicContentVideoEditionAudit(audit),
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+app.post("/admin/crm/ai-training/content-video-imports/:videoJobId/reconcile-edition-draft-links", async (req, res) => {
+  let upload = null;
+  let repairJob = null;
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const audit = await ngBuildContentVideoEditionAudit(
+      req.params.videoJobId,
+      req.body?.edition,
+    );
+    const expectedFingerprint = String(req.body?.audit_fingerprint || "");
+    if (!expectedFingerprint || expectedFingerprint !== audit.fingerprint) {
+      return res.status(409).json({
+        success: false,
+        error: "The edition video audit changed. Refresh the dry-run before starting recovery.",
+      });
+    }
+    if (audit.existingEditionRepair) {
+      return res.status(200).json({
+        success: true,
+        deduplicated: true,
+        edition: audit.edition,
+        video_job_id:
+          audit.existingEditionRepair.metadata?.domain_job_id || null,
+        background_job_id: audit.existingEditionRepair.id,
+        message: "This edition recovery is already queued, running, or completed.",
+      });
+    }
+    upload = audit.resolvedUpload;
+    repairJob = await createContentVideoImportJob({
+      id: crypto.randomUUID(),
+      contentImportJobId: audit.parentJob.id,
+      zipSha256: upload.sha256,
+      originalFilename: upload.originalFilename,
+      createdBy: String(user.id),
+    });
+    const backgroundJob = await ngQueueContentOperation({
+      type: "content_video_draft",
+      lane: "video_zip",
+      upload,
+      domainJobId: repairJob.id,
+      metadata: {
+        edition: audit.edition,
+        edition_scoped: true,
+        edition_repair_of_video_job_id: audit.videoJob.id,
+        edition_audit_fingerprint: audit.fingerprint,
+        contextual_media_repair: true,
+      },
+      maxAttempts: 2,
+    });
+    upload = null;
+    return res.status(202).json({
+      success: true,
+      deduplicated: false,
+      edition: audit.edition,
+      video_job_id: repairJob.id,
+      background_job_id: backgroundJob.id,
+      content_import_job_id: audit.parentJob.id,
+      repair_of_video_job_id: audit.videoJob.id,
+      status: "queued",
+      poll_url:
+        `/admin/crm/ai-training/content-video-imports/${repairJob.id}`,
+      safeguards: {
+        other_editions_touched: [],
+        source_zip_uploaded_again: false,
+        all_edition_videos_inventoried_before_matching: true,
+        filename_treated_as_question_id: false,
+        sha256_vimeo_deduplication: true,
+        existing_video_links_overwritten: false,
+        student_resources_published: 0,
+      },
+    });
+  } catch (error) {
+    if (repairJob?.id) {
+      await finishContentVideoImportJob(
+        repairJob.id,
+        "queue_failed",
+        {
+          failed: true,
+          edition: normalizeContentEdition(req.body?.edition),
+          edition_scoped: true,
+        },
+        [{ error: error.message }],
+      ).catch(() => {});
+    }
+    await ngCleanupRejectedContentUpload(upload);
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
 
 app.get("/admin/crm/ai-training/content-video-imports/:videoJobId/reconcile-audit", async (req, res) => {
   try {

@@ -11,6 +11,8 @@ test("video references are classified without treating images as videos", () => 
   assert.equal(isVideoMediaRef("media/87311.mp4"), true);
   assert.equal(isVideoMediaRef("image/87311.png"), false);
   assert.equal(safeVideoEntryName("iMD/17407.mp4"), "iMD/17407.mp4");
+  assert.equal(safeVideoEntryName("iMD/17407.mkv"), "iMD/17407.mkv");
+  assert.equal(safeVideoEntryName("iMD/17407.wmv"), "iMD/17407.wmv");
   assert.equal(safeVideoEntryName("../17407.mp4"), null);
   assert.equal(safeVideoEntryName("iMD/17407.exe"), null);
 });
