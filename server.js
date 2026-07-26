@@ -282,6 +282,7 @@ import {
   uploadVideoToVimeo,
 } from "./lib/content-video-vimeo.js";
 import {
+  contentPathMatchesEdition,
   filterContentAssetsByEdition,
   filterContentReferencesByEdition,
   normalizeContentEdition,
@@ -36160,6 +36161,193 @@ function ngContentFallbackEditions(value, targetEdition) {
   return editions.slice(0, 20);
 }
 
+function ngContentCandidatePriority(candidateEditions = []) {
+  return (asset) => candidateEditions.findIndex((candidate) =>
+    contentPathMatchesEdition(asset?.originalName, candidate));
+}
+
+async function ngBuildContentMediaFallbackAudit(
+  mediaJobId,
+  editionInput,
+  candidateInput,
+) {
+  const edition = ngContentEdition(editionInput);
+  const candidateEditions = ngContentFallbackEditions(candidateInput, edition);
+  const base = await ngBuildContentMediaMappingAudit(mediaJobId);
+  const references = filterContentReferencesByEdition(base.references, edition);
+  const assets = base.assets.filter((asset) => candidateEditions.some((candidate) =>
+    contentPathMatchesEdition(asset?.originalName, candidate)));
+  const report = matchMediaReferences(references, assets, {
+    candidatePriority: ngContentCandidatePriority(candidateEditions),
+  });
+  const linkAudit = await auditContentMediaLinks(report.matches);
+  const fingerprint = crypto.createHash("sha256")
+    .update([
+      ngContentMediaAuditFingerprint(base.mediaJob, assets, report, linkAudit),
+      edition,
+      ...candidateEditions,
+    ].join("\u0000"))
+    .digest("hex");
+  return {
+    ...base,
+    edition,
+    candidateEditions,
+    references,
+    assets,
+    report,
+    linkAudit,
+    fingerprint,
+  };
+}
+
+function ngPublicContentMediaFallbackAudit(audit) {
+  return {
+    edition: audit.edition,
+    candidate_editions: audit.candidateEditions,
+    media_job_id: audit.mediaJob.id,
+    content_import_job_id: audit.parentJob.id,
+    audit_fingerprint: audit.fingerprint,
+    references: audit.references.length,
+    candidate_assets: audit.assets.length,
+    exact_matches: audit.report.matches.length,
+    already_linked: audit.linkAudit.exactMatches.length,
+    repairable_links: audit.linkAudit.missingMatches.length,
+    protected_conflicts: audit.linkAudit.conflictingMatches.length,
+    remaining_missing: audit.report.missing.length,
+    remaining_ambiguous: audit.report.ambiguous.length,
+    unreferenced_candidate_assets: audit.report.unreferenced.length,
+    latest_edition_preference: true,
+    target_question_edition_only: true,
+    exact_media_ref_matching: true,
+    existing_media_links_overwritten: false,
+    other_editions_touched: [],
+    student_visibility: "disabled_drafts_until_collection_approval",
+    ambiguous_samples: audit.report.ambiguous.slice(0, 50).map((item) => ({
+      student_qid: item.studentQid,
+      media_ref: item.mediaRef,
+      candidates: (item.candidates || []).slice(0, 20),
+    })),
+  };
+}
+
+app.get("/admin/crm/ai-training/content-media-imports/:mediaJobId/fallback-audit", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const audit = await ngBuildContentMediaFallbackAudit(
+      req.params.mediaJobId,
+      req.query?.edition,
+      req.query?.candidate_editions,
+    );
+    return res.json({
+      success: true,
+      audit: ngPublicContentMediaFallbackAudit(audit),
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+app.post("/admin/crm/ai-training/content-media-imports/:mediaJobId/reconcile-fallback-draft-links", async (req, res) => {
+  let releaseFinalizer = null;
+  let finalizerError = null;
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const audit = await ngBuildContentMediaFallbackAudit(
+      req.params.mediaJobId,
+      req.body?.edition,
+      req.body?.candidate_editions,
+    );
+    const expectedFingerprint = String(req.body?.audit_fingerprint || "");
+    if (!expectedFingerprint || expectedFingerprint !== audit.fingerprint) {
+      return res.status(409).json({
+        success: false,
+        error: "The fallback media audit changed. Refresh the dry-run before applying repairs.",
+      });
+    }
+    releaseFinalizer = await ngMediaFinalizerGate.acquire({
+      metadata: {
+        operation: "cross_edition_media_link_reconciliation",
+        edition: audit.edition,
+        candidate_editions: audit.candidateEditions,
+        media_import_job_id: audit.mediaJob.id,
+        content_import_job_id: audit.parentJob.id,
+      },
+    });
+    const assetBySha = new Map(
+      audit.assets.map((asset) => [String(asset.sha256 || ""), asset]),
+    );
+    let linksCreated = 0;
+    let linksVerified = 0;
+    let linkConflicts = 0;
+    const duplicateObjects = new Set();
+    const batchSize = 1_000;
+    for (
+      let index = 0;
+      index < audit.linkAudit.missingMatches.length;
+      index += batchSize
+    ) {
+      const matches = audit.linkAudit.missingMatches.slice(
+        index,
+        index + batchSize,
+      );
+      const assets = [...new Set(
+        matches.map((match) => String(match.asset?.sha256 || "")),
+      )].map((sha256) => assetBySha.get(sha256)).filter(Boolean);
+      const saved = await saveContentMediaMatchBatch({
+        mediaJobId: audit.mediaJob.id,
+        parentJob: audit.parentJob,
+        assets,
+        matches,
+      });
+      linksCreated += Number(saved.linksCreated || 0);
+      linksVerified += Number(saved.links || 0);
+      linkConflicts += Number(saved.linkConflicts || 0);
+      for (const objectKey of saved.duplicateObjects || []) {
+        duplicateObjects.add(objectKey);
+      }
+    }
+    const afterLinks = await auditContentMediaLinks(audit.report.matches);
+    return res.json({
+      success: true,
+      repair: {
+        edition: audit.edition,
+        candidate_editions: audit.candidateEditions,
+        media_job_id: audit.mediaJob.id,
+        audit_fingerprint: audit.fingerprint,
+        exact_matches: audit.report.matches.length,
+        already_linked_before: audit.linkAudit.exactMatches.length,
+        links_created: linksCreated,
+        links_verified: linksVerified,
+        protected_conflicts: afterLinks.conflictingMatches.length,
+        remaining_missing: audit.report.missing.length,
+        remaining_ambiguous: audit.report.ambiguous.length,
+        duplicate_objects_preserved: duplicateObjects.size,
+        finalization_conflicts: linkConflicts,
+        binary_files_reuploaded: 0,
+        binary_objects_deleted: 0,
+        existing_links_overwritten: 0,
+        student_resources_published: 0,
+        latest_edition_preference: true,
+        target_question_edition_only: true,
+        other_editions_touched: [],
+        reconciled_at: new Date().toISOString(),
+        reconciled_by: String(user.id),
+      },
+    });
+  } catch (error) {
+    finalizerError = error;
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+    });
+  } finally {
+    releaseFinalizer?.({ error: finalizerError });
+  }
+});
+
 function ngContentVideoFallbackFingerprint(audit) {
   return crypto.createHash("sha256")
     .update([
@@ -36202,7 +36390,10 @@ async function ngBuildContentVideoFallbackAudit(
     directoryCacheKey:
       `${base.videoJob.zip_sha256}:videos:${candidateEditions.join(",")}`,
   });
-  const report = matchVideoReferences(references, inventory.videos);
+  const report = matchVideoReferences(references, inventory.videos, {
+    candidatePriority: (video) => candidateEditions.findIndex((candidate) =>
+      contentPathMatchesEdition(video?.originalName, candidate)),
+  });
   const mappings = await auditContentVideoMappings(report.matches);
   const candidateKey = candidateEditions.join(",");
   const existingRepair = ngContentBackgroundQueue.list({ limit: 500 }).find((job) =>
@@ -36251,6 +36442,7 @@ function ngPublicContentVideoFallbackAudit(audit) {
     existing_repair_background_job_id: audit.existingRepair?.id || null,
     existing_repair_video_job_id:
       audit.existingRepair?.metadata?.domain_job_id || null,
+    latest_edition_preference: true,
     target_question_edition_only: true,
     exact_media_ref_matching: true,
     archive_duplicate_identity: "size_and_crc32_then_sha256_on_extract",

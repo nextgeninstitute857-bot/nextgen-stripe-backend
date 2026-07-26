@@ -54,3 +54,19 @@ test("video matching uses the question edition without guessing across packages"
   assert.equal(report.matches[0].video.sha256, "2026");
   assert.equal(report.ambiguous.length, 0);
 });
+
+test("video fallback can prefer the newest uniquely ranked exact media reference", () => {
+  const report = matchVideoReferences([{
+    questionId: "q1",
+    mediaRef: "17407.mp4",
+    sourceSnapshot: "uworldSTEP1-2023_questions.json",
+  }], [
+    { originalName: "STEP1-2025-March/iMD/17407.mp4", sha256: "2025" },
+    { originalName: "STEP1-2026-march/iMD/17407.mp4", sha256: "2026" },
+  ], {
+    candidatePriority: (video) =>
+      video.originalName.includes("2026") ? 0 : 1,
+  });
+  assert.equal(report.matches.length, 1);
+  assert.equal(report.matches[0].video.sha256, "2026");
+});

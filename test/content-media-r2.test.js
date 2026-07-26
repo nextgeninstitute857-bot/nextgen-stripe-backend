@@ -172,6 +172,43 @@ test("multiple different assets in an alias edition remain quarantined", () => {
   ]);
 });
 
+test("cross-edition media matching prefers the newest uniquely ranked exact reference", () => {
+  const report = matchMediaReferences([{
+    questionId: "q1",
+    mediaRef: "L26361.jpg",
+    sourceSnapshot: "uworldSTEP1-2023_questions.json",
+  }], [
+    { originalName: "STEP1-2025-March/L26361.jpg", sha256: "2025" },
+    { originalName: "STEP1-2026-march/L26361.jpg", sha256: "2026" },
+  ], {
+    candidatePriority: (asset) =>
+      asset.originalName.includes("2026") ? 0 : 1,
+  });
+  assert.equal(report.matches.length, 1);
+  assert.equal(report.matches[0].asset.sha256, "2026");
+});
+
+test("cross-edition media matching quarantines duplicate assets in the newest rank", () => {
+  const report = matchMediaReferences([{
+    questionId: "q1",
+    mediaRef: "L26361.jpg",
+    sourceSnapshot: "uworldSTEP1-2023_questions.json",
+  }], [
+    { originalName: "a/STEP1-2026-march/L26361.jpg", sha256: "a" },
+    { originalName: "b/STEP1-2026-march/L26361.jpg", sha256: "b" },
+    { originalName: "STEP1-2025-March/L26361.jpg", sha256: "2025" },
+  ], {
+    candidatePriority: (asset) =>
+      asset.originalName.includes("2026") ? 0 : 1,
+  });
+  assert.equal(report.matches.length, 0);
+  assert.equal(report.ambiguous.length, 1);
+  assert.deepEqual(report.ambiguous[0].candidates, [
+    "a/STEP1-2026-march/L26361.jpg",
+    "b/STEP1-2026-march/L26361.jpg",
+  ]);
+});
+
 test("an exact ZIP-relative path resolves duplicate basenames", () => {
   const report = matchMediaReferences([{ questionId: "q1", mediaRef: "chapter-a/diagram.png" }], [
     { originalName: "chapter-a/diagram.png", sha256: "a" },
