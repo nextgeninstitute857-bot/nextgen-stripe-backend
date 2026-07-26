@@ -125,6 +125,7 @@ import {
 } from "./lib/aylamed-student-shell.js";
 import {
   aylaContentHubAssignmentProgress,
+  aylaContentHubTaxonomyDefinition,
   aylaContentHubVideoMatchesId,
   buildAylaContentHubCatalog,
   mergeAylaContentHubProgress,
@@ -65006,7 +65007,25 @@ function aylaV189NormalizeResource(payload = {}, existing = {}) {
   const mappedBook = payload.mappedBook && typeof payload.mappedBook === "object" ? payload.mappedBook : {};
   const mappedVideo = payload.mappedVideo && typeof payload.mappedVideo === "object" ? payload.mappedVideo : {};
   const system = aylaV189CleanText(payload.system || existing.system || "General").slice(0, 100);
+  const subsystem = aylaV189CleanText(
+    payload.subsystem
+      || payload.subsystemKey
+      || payload.subsystem_key
+      || payload.qbankTaxonomy?.subsystemKey
+      || payload.qbank_taxonomy?.subsystem_key
+      || existing.subsystem
+      || existing.subsystemKey
+      || existing.subsystem_key
+      || "",
+  ).slice(0, 180);
   const topic = aylaV189CleanText(payload.topic || existing.topic || title).slice(0, 180);
+  const subtopic = aylaV189CleanText(payload.subtopic || payload.subtopicKey || payload.subtopic_key || existing.subtopic || existing.subtopicKey || existing.subtopic_key || "").slice(0, 240);
+  const suppliedHierarchyPath = aylaCleanArray(
+    payload.hierarchyPath
+      ?? payload.hierarchy_path
+      ?? existing.hierarchyPath
+      ?? existing.hierarchy_path,
+  );
   const estimatedMinutes = Math.max(1, Math.min(240, aylaNumber(payload.estimatedMinutes ?? payload.estimated_minutes ?? existing.estimatedMinutes ?? existing.estimated_minutes, type === "internal_mcq" || type === "external_question" ? 2 : type === "flashcard" ? 1 : type === "assessment" ? 30 : 20)));
   const examTrackId = aylaCanonicalExamTrack(payload.examTrackId || payload.exam_track_id || payload.examTrack || payload.exam_track || payload.exam || existing.examTrackId || existing.exam_track_id || existing.examTrack || existing.exam_track || existing.exam);
   const examDefinition = examTrackId ? AYLA_EXAM_REGISTRY[examTrackId] : null;
@@ -65028,8 +65047,9 @@ function aylaV189NormalizeResource(payload = {}, existing = {}) {
     resourceNumber: String((payload.resourceNumber ?? payload.resource_number ?? existing.resourceNumber ?? existing.resource_number ?? questionNumber) || "").trim(),
     questionNumber,
     system,
+    subsystem,
     topic,
-    subtopic: aylaV189CleanText(payload.subtopic || payload.subtopicKey || payload.subtopic_key || existing.subtopic || existing.subtopicKey || existing.subtopic_key || "").slice(0, 240),
+    subtopic,
     subtopics: aylaCleanArray(payload.subtopics ?? existing.subtopics),
     topicAliases: aylaCleanArray(payload.topicAliases ?? payload.topic_aliases ?? existing.topicAliases ?? existing.topic_aliases).slice(0, 24),
     concepts: aylaCleanArray(payload.concepts ?? existing.concepts),
@@ -65083,6 +65103,7 @@ function aylaV189NormalizeResource(payload = {}, existing = {}) {
     status: examTrackId ? aylaV189CleanText(payload.status || existing.status || "active").toLowerCase() : "quarantined",
     verificationStatus: aylaV189CleanText(payload.verificationStatus || payload.verification_status || existing.verificationStatus || existing.verification_status || "verified"),
     deliveryDestinations: aylaCleanArray(payload.deliveryDestinations ?? payload.delivery_destinations ?? payload.destinations ?? existing.deliveryDestinations ?? existing.delivery_destinations).slice(0, 20),
+    hierarchyPath: (suppliedHierarchyPath.length ? suppliedHierarchyPath : [system, subsystem, topic, subtopic].filter(Boolean)).slice(0, 5),
     qbankTaxonomy: payload.qbankTaxonomy || payload.qbank_taxonomy || existing.qbankTaxonomy || existing.qbank_taxonomy || null,
     qbankLinkStatus: aylaV189CleanText(payload.qbankLinkStatus || payload.qbank_link_status || existing.qbankLinkStatus || existing.qbank_link_status || "").slice(0, 100),
     classificationEvidence: payload.classificationEvidence || payload.classification_evidence || existing.classificationEvidence || existing.classification_evidence || null,
@@ -65212,7 +65233,11 @@ function aylaV189EnrichResourceMappings(db, resource = {}) {
   const all = aylaValues(db, "aylaResources").filter((row) => row.approved !== false && row.status !== "quarantined" && aylaCanonicalExamTrack(row.examTrackId || row.examTrack || row.exam_track || row.exam) === resourceExam && !["disabled", "deleted", "rejected", "archived"].includes(String(row.status || "").toLowerCase()));
   const topicKey = aylaV189MappingKey(resource.topic);
   const systemKey = aylaV189MappingKey(resource.system);
-  const exactMatch = (row) => aylaV189MappingKey(row.topic) === topicKey && aylaV189MappingKey(row.system) === systemKey;
+  const subsystemKey = aylaV189MappingKey(resource.subsystem);
+  const exactMatch = (row) =>
+    aylaV189MappingKey(row.topic) === topicKey
+    && aylaV189MappingKey(row.system) === systemKey
+    && (!subsystemKey || aylaV189MappingKey(row.subsystem) === subsystemKey);
 
   let book = out.mappedBookResourceId ? all.find((row) => String(row.id) === String(out.mappedBookResourceId)) : null;
   if (!book && topicKey) book = all.find((row) => ["book", "reading", "revision_sheet"].includes(aylaV189ResourceType(row.type)) && exactMatch(row));
@@ -65310,8 +65335,23 @@ async function aylaV210RegistryVideoInputs(student, destinations) {
   );
   if (!examTrack) return { rows: [], warning: "unsupported_student_exam_track" };
   try {
-    const rows = await listContentHubVideos({ examTrack, destinations, limit: 500, offset: 0 });
-    return { rows, warning: null };
+    const rows = [];
+    const pageSize = 500;
+    const maximumRows = 5000;
+    while (rows.length < maximumRows) {
+      const page = await listContentHubVideos({
+        examTrack,
+        destinations,
+        limit: pageSize,
+        offset: rows.length,
+      });
+      rows.push(...page);
+      if (page.length < pageSize) break;
+    }
+    return {
+      rows,
+      warning: rows.length >= maximumRows ? "content_registry_video_limit_reached" : null,
+    };
   } catch (error) {
     console.warn("AylaMed Content Hub registry read unavailable:", error.message);
     return { rows: [], warning: "content_registry_temporarily_unavailable" };
@@ -65439,8 +65479,20 @@ function aylaV189AssignmentSnapshot(db, resource = {}, options = {}) {
     questionNumber: resource.questionNumber || "",
     title: resource.title || resource.topic || "Assigned resource",
     system: resource.system || "General",
+    subsystem: resource.subsystem || resource.subsystemKey || resource.subsystem_key || "",
     topic: resource.topic || "",
+    subtopic: resource.subtopic || resource.subtopicKey || resource.subtopic_key || "",
     subtopics: aylaCleanArray(resource.subtopics),
+    hierarchyPath: aylaCleanArray(
+      resource.hierarchyPath
+        || resource.hierarchy_path
+        || [
+          resource.system || "General",
+          resource.subsystem || resource.subsystemKey || resource.subsystem_key || "",
+          resource.topic || "",
+          resource.subtopic || resource.subtopicKey || resource.subtopic_key || "",
+        ].filter(Boolean),
+    ),
     concepts: aylaCleanArray(resource.concepts),
     difficulty: resource.difficulty || "Adaptive",
     bookTitle: resource.bookTitle || "",
@@ -65705,12 +65757,15 @@ function aylaV211SanitizePlanReadingSources(plan, assignments = []) {
       if (target && typeof target[key] === "string") target[key] = sanitizeAylaHiddenSourceText(target[key], context, fallback, 1200);
     };
     cleanField(safe, "focusSystem", "General");
+    cleanField(safe, "focusSubsystem", "General");
     cleanField(safe, "focusTopic", "General reading");
     cleanField(safe, "systemFocus", "General");
+    cleanField(safe, "subsystemFocus", "General");
     cleanField(safe, "topicFocus", "General reading");
     cleanField(safe, "message", "Today's verified page-turn reading is ready.");
     cleanField(safe.tutorBrain, "rationale", "Verified exact-page reading selected.");
     cleanField(safe.tutorBrain?.selectedFocus, "system", "General");
+    cleanField(safe.tutorBrain?.selectedFocus, "subsystem", "General");
     cleanField(safe.tutorBrain?.selectedFocus, "topic", "General reading");
     if (Array.isArray(safe.tutorBrain?.selectedFocus?.reasons)) {
       safe.tutorBrain.selectedFocus.reasons = safe.tutorBrain.selectedFocus.reasons
@@ -65810,6 +65865,7 @@ function aylaV189MakeAssignment(db, student, plan, date, category, resources, ti
     type: options.type || category,
     title,
     system: options.system || snapshots[0]?.system || "General",
+    subsystem: options.subsystem || snapshots[0]?.subsystem || "",
     topic: options.topic || snapshots[0]?.topic || "",
     resourceIds: snapshots.map((row) => row.resourceId),
     items: snapshots,
@@ -66351,6 +66407,7 @@ function aylaV189SmartAssessmentResource(db, student, decision, assessments, int
     resourceNumber: `SMART-${String(decision.type).toUpperCase()}-${date.replaceAll("-", "")}`,
     title: decision.label,
     system: decision.system || "Mixed",
+    subsystem: decision.subsystem || "",
     topic: decision.topic || "Cumulative review",
     difficulty: "Adaptive",
     assessmentType: decision.type,
@@ -66374,10 +66431,19 @@ function aylaV189SelectUnused(resources, used, limit = 1) {
   return out;
 }
 
-function aylaV189ResourceFocusMatch(resource = {}, system = "", topic = "") {
+function aylaV189ResourceFocusMatch(resource = {}, system = "", topic = "", subsystem = "") {
   const systemKey = aylaV189SystemKey(system);
+  const subsystemKey = aylaV189MappingKey(subsystem);
   const topicKey = aylaV189MappingKey(topic);
   const rowSystem = aylaV189SystemKey(resource.system || "General");
+  const rowSubsystem = aylaV189MappingKey(
+    resource.subsystem
+      || resource.subsystemKey
+      || resource.subsystem_key
+      || resource.qbankTaxonomy?.subsystemKey
+      || resource.qbank_taxonomy?.subsystem_key
+      || "",
+  );
   const primaryTopics = [
     resource.topic,
     resource.subtopic,
@@ -66393,10 +66459,12 @@ function aylaV189ResourceFocusMatch(resource = {}, system = "", topic = "") {
   if (topicKey) {
     const topicMatch = primaryTopics.includes(topicKey) || aliasTopics.includes(topicKey);
     if (!topicMatch) return false;
+    if (subsystemKey && rowSubsystem !== subsystemKey) return false;
     if (!systemKey || rowSystem === systemKey) return true;
     return aylaV189ResourceType(resource.type) === "vimeo_video" && aliasTopics.includes(topicKey);
   }
   if (systemKey && rowSystem !== systemKey) return false;
+  if (subsystemKey && rowSubsystem !== subsystemKey) return false;
   return true;
 }
 
@@ -66404,11 +66472,20 @@ function aylaV189FocusCandidates(db, student, resources = [], revisions = [], ov
   const progress = aylaV189SystemProgress(db, student);
   const progressBySystem = new Map(progress.map((row, index) => [aylaV189SystemKey(row.system), { row, index }]));
   const groups = new Map();
-  const touch = (system, topic, points = 0, resourceId = null, reason = "") => {
+  const touch = (system, subsystem, topic, points = 0, resourceId = null, reason = "") => {
     const cleanSystem = aylaV189CleanText(system || "General") || "General";
+    const cleanSubsystem = aylaV189CleanText(subsystem || "");
     const cleanTopic = aylaV189CleanText(topic || "") || "Core review";
-    const key = `${aylaV189SystemKey(cleanSystem)}::${aylaV189MappingKey(cleanTopic)}`;
-    if (!groups.has(key)) groups.set(key, { id: `FOCUS-${groups.size + 1}`, system: cleanSystem, topic: cleanTopic, score: 0, resourceIds: [], reasons: [] });
+    const key = `${aylaV189SystemKey(cleanSystem)}::${aylaV189MappingKey(cleanSubsystem)}::${aylaV189MappingKey(cleanTopic)}`;
+    if (!groups.has(key)) groups.set(key, {
+      id: `FOCUS-${groups.size + 1}`,
+      system: cleanSystem,
+      subsystem: cleanSubsystem,
+      topic: cleanTopic,
+      score: 0,
+      resourceIds: [],
+      reasons: [],
+    });
     const row = groups.get(key);
     row.score += points;
     if (resourceId && !row.resourceIds.includes(String(resourceId))) row.resourceIds.push(String(resourceId));
@@ -66419,11 +66496,11 @@ function aylaV189FocusCandidates(db, student, resources = [], revisions = [], ov
     const progressEntry = progressBySystem.get(aylaV189SystemKey(resource.system));
     const weakness = progressEntry?.row?.weaknessPercent;
     const weakBoost = Number.isFinite(weakness) ? weakness * 0.8 : Math.max(0, 30 - (progressEntry?.index || 0) * 4);
-    touch(resource.system, resource.topic, 10 + aylaNumber(resource.relevance, 0) + weakBoost, resource.id, "Verified mapped resources available");
+    touch(resource.system, resource.subsystem, resource.topic, 10 + aylaNumber(resource.relevance, 0) + weakBoost, resource.id, "Verified mapped resources available");
   });
-  revisions.forEach((revision) => touch(revision.system, revision.topic, 180, revision.resourceId, "Revision is due today"));
-  overdue.forEach((assignment) => touch(assignment.system, assignment.topic, 140, null, "Priority work is overdue"));
-  aylaCleanArray(student.weakAreas).forEach((system, index) => touch(system, "Core review", 90 - index * 8, null, "Selected weak area"));
+  revisions.forEach((revision) => touch(revision.system, revision.subsystem, revision.topic, 180, revision.resourceId, "Revision is due today"));
+  overdue.forEach((assignment) => touch(assignment.system, assignment.subsystem, assignment.topic, 140, null, "Priority work is overdue"));
+  aylaCleanArray(student.weakAreas).forEach((system, index) => touch(system, "", "Core review", 90 - index * 8, null, "Selected weak area"));
 
   return [...groups.values()]
     .map((row) => ({ ...row, score: Math.round(row.score), resourceIds: row.resourceIds.slice(0, 30), reasons: row.reasons.slice(0, 4) }))
@@ -66469,7 +66546,14 @@ async function aylaV189TutorProposal(db, student, date, focusCandidates = [], ca
 
   const maxCandidates = Math.max(4, Math.min(20, aylaNumber(settings.adaptive?.ai_tutor_max_candidates, 12)));
   const allowedResources = candidateResources.slice(0, maxCandidates * 5).map((row) => ({
-    id: String(row.id), type: aylaV189ResourceType(row.type), system: row.system || "General", topic: row.topic || "", title: row.title || row.bookTitle || row.questionNumber || "Resource", minutes: aylaNumber(row.estimatedMinutes, 15), verificationStatus: row.verificationStatus || "verified",
+    id: String(row.id),
+    type: aylaV189ResourceType(row.type),
+    system: row.system || "General",
+    subsystem: row.subsystem || "",
+    topic: row.topic || "",
+    title: row.title || row.bookTitle || row.questionNumber || "Resource",
+    minutes: aylaNumber(row.estimatedMinutes, 15),
+    verificationStatus: row.verificationStatus || "verified",
   }));
   const resourceIds = new Set(allowedResources.map((row) => row.id));
   const focusIds = new Set(focusCandidates.slice(0, maxCandidates).map((row) => row.id));
@@ -66493,7 +66577,7 @@ async function aylaV189TutorProposal(db, student, date, focusCandidates = [], ca
         },
         focusCandidates: focusCandidates.slice(0, maxCandidates),
         verifiedResources: allowedResources,
-        instruction: "Choose one focus candidate and optionally order up to 12 resource IDs that best support that exact system/topic. The backend will enforce capacity, rest days, due revision, and verified-resource guards.",
+        instruction: "Choose one focus candidate and optionally order up to 12 resource IDs that best support that exact system/subsystem/topic. The backend will enforce capacity, rest days, due revision, and verified-resource guards.",
       }),
     });
     const parsed = safeJsonParseFromAI(ai.text);
@@ -66599,13 +66683,16 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       : 1;
   const selectedFocus = focusCandidates.find((row) => String(row.id) === String(tutorProposal.focusCandidateId)) || focusCandidates[0] || { system: aylaCleanArray(student.weakAreas)[0] || "General", topic: "Core review", id: null, reasons: [] };
   const focusSystem = selectedFocus.system || "General";
+  const focusSubsystem = selectedFocus.subsystem || "";
   const focusTopic = selectedFocus.topic || "";
   const preferenceRank = new Map(aylaCleanArray(tutorProposal.preferredResourceIds).map((id, index) => [String(id), index]));
   const prioritize = (rows) => rows.slice().sort((a, b) => (preferenceRank.get(String(a.id)) ?? 9999) - (preferenceRank.get(String(b.id)) ?? 9999) || b.relevance - a.relevance);
   const focused = (rows) => {
-    const exact = rows.filter((row) => aylaV189ResourceFocusMatch(row, focusSystem, focusTopic));
+    const exact = rows.filter((row) => aylaV189ResourceFocusMatch(row, focusSystem, focusTopic, focusSubsystem));
+    const subsystemWide = rows.filter((row) => aylaV189ResourceFocusMatch(row, focusSystem, "", focusSubsystem));
     const systemWide = rows.filter((row) => aylaV189ResourceFocusMatch(row, focusSystem, ""));
-    return prioritize((exact.length ? exact : systemWide).filter((row, index, all) => all.findIndex((candidate) => String(candidate.id) === String(row.id)) === index));
+    return prioritize((exact.length ? exact : subsystemWide.length ? subsystemWide : systemWide)
+      .filter((row, index, all) => all.findIndex((candidate) => String(candidate.id) === String(row.id)) === index));
   };
 
   const plan = {
@@ -66623,6 +66710,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     assignmentIds: [],
     missingResourceTypes: [],
     focusSystem,
+    focusSubsystem,
     focusTopic,
     contentHubEnabled,
     contentHubRegistryWarning: contentHub.warning,
@@ -66635,7 +66723,13 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       personalTutorEngine: AYLA_PERSONAL_TUTOR_ENGINE,
       authoritativeRoadmapPlanId: null,
       createsSecondPlan: false,
-      selectedFocus: { id: selectedFocus.id, system: focusSystem, topic: focusTopic, reasons: selectedFocus.reasons || [] },
+      selectedFocus: {
+        id: selectedFocus.id,
+        system: focusSystem,
+        subsystem: focusSubsystem,
+        topic: focusTopic,
+        reasons: selectedFocus.reasons || [],
+      },
       verifiedResourceGuard: true,
       noInventedReferences: true,
     },
@@ -66757,7 +66851,12 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     const pick = selection.resource ? [selection.resource] : [];
     if (pick.length) {
       const readingLabel = pick[0].sourceLabelVisible ? pick[0].bookTitle || pick[0].title : pick[0].title || pick[0].topic || "Approved reading";
-      aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "reading", pick, `${selection.resumed ? "Continue" : "Read"}: ${readingLabel} — ${pick[0].pageRange}`, { system: focusSystem, topic: pick[0].topic || focusTopic, rationale: `${selection.resumed ? "Resume" : "Open"} the ${selection.match_level.replace(/_/g, " ")} verified page-turn reading for today’s focus. The assignment opens the exact approved pages and completes only after every page is read.` });
+      aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "reading", pick, `${selection.resumed ? "Continue" : "Read"}: ${readingLabel} — ${pick[0].pageRange}`, {
+        system: focusSystem,
+        subsystem: pick[0].subsystem || focusSubsystem,
+        topic: pick[0].topic || focusTopic,
+        rationale: `${selection.resumed ? "Resume" : "Open"} the ${selection.match_level.replace(/_/g, " ")} verified page-turn reading for today’s focus. The assignment opens the exact approved pages and completes only after every page is read.`,
+      });
     }
     else plan.missingResourceTypes.push(libraryEnabled ? "exact_page_reading_for_focus" : "library_feature_not_enabled");
   }
@@ -66767,23 +66866,37 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       videos,
       examTrack: student.examTrackId || student.exam_track_id || student.exam,
       focusSystem,
+      focusSubsystem,
       focusTopic,
       progressRows: aylaValues(db, "aylaVideoProgress").filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student)),
       reservedResourceIds: [...reservedIds],
       preferredResourceIds: aylaCleanArray(tutorProposal.preferredResourceIds),
     });
     const pick = selection.video ? [selection.video] : [];
-    if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "video", pick, `Watch: ${pick[0].title}`, { system: focusSystem, topic: pick[0].topic || focusTopic, rationale: `${selection.resumed ? "Resume" : "Watch"} the ${selection.match_level.replace(/_/g, " ")} verified embedded video for today’s focus; watch position and completion are saved.` });
+    if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "video", pick, `Watch: ${pick[0].title}`, {
+      system: focusSystem,
+      subsystem: pick[0].subsystem || focusSubsystem,
+      topic: pick[0].topic || focusTopic,
+      rationale: `${selection.resumed ? "Resume" : "Watch"} the ${selection.match_level.replace(/_/g, " ")} verified embedded video for today’s focus; watch position and completion are saved.`,
+    });
     else plan.missingResourceTypes.push("video_for_focus");
   }
 
   let assessmentScheduled = false;
   if (mix.assessments !== false && assessmentDecision.status === "due") {
-    const decision = { ...assessmentDecision, system: assessmentDecision.system && assessmentDecision.system !== "General" ? assessmentDecision.system : focusSystem, topic: assessmentDecision.topic || focusTopic };
+    const decision = {
+      ...assessmentDecision,
+      system: assessmentDecision.system && assessmentDecision.system !== "General" ? assessmentDecision.system : focusSystem,
+      subsystem: assessmentDecision.subsystem || focusSubsystem,
+      topic: assessmentDecision.topic || focusTopic,
+    };
     const smartAssessment = aylaV189SmartAssessmentResource(db, student, decision, assessments, internal, date);
     if (smartAssessment) {
       assessmentScheduled = Boolean(aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "assessment", [smartAssessment], smartAssessment.title || decision.label, {
-        estimatedMinutes: smartAssessment.estimatedMinutes, system: smartAssessment.system || focusSystem, topic: smartAssessment.topic || focusTopic,
+        estimatedMinutes: smartAssessment.estimatedMinutes,
+        system: smartAssessment.system || focusSystem,
+        subsystem: smartAssessment.subsystem || focusSubsystem,
+        topic: smartAssessment.topic || focusTopic,
         priority: ["final_readiness", "weak_area"].includes(decision.type) ? "Critical" : "High", assessmentType: decision.type,
         tutorReason: decision.reason, scheduleTrigger: decision.trigger, rationale: decision.reason,
       }));
@@ -66796,28 +66909,47 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
 
   if (mix.external_questions !== false && (questionMode === "external" || questionMode === "hybrid")) {
     const pick = select(external, Math.max(1, Math.min(assessmentScheduled ? 8 : 24, Math.round((effectiveCapacity / (assessmentScheduled ? 55 : 32)) * questionVolumeFactor))));
-    if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "external_questions", pick, `${pick[0].provider || "External"} assigned IDs: ${pick.map((row) => row.questionNumber || row.resourceNumber).filter(Boolean).join(", ")}`, { estimatedMinutes: pick.length * 2, system: focusSystem, topic: focusTopic, rationale: `Verified external question numbers mapped to ${focusSystem}${focusTopic ? ` — ${focusTopic}` : ""}.` });
+    if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "external_questions", pick, `${pick[0].provider || "External"} assigned IDs: ${pick.map((row) => row.questionNumber || row.resourceNumber).filter(Boolean).join(", ")}`, {
+      estimatedMinutes: pick.length * 2,
+      system: focusSystem,
+      subsystem: focusSubsystem,
+      topic: focusTopic,
+      rationale: `Verified external question numbers mapped to ${focusSystem}${focusTopic ? ` — ${focusTopic}` : ""}.`,
+    });
     else plan.missingResourceTypes.push("external_questions_for_focus");
   }
 
   if (!assessmentScheduled && mix.internal_mcqs !== false && (questionMode === "internal" || questionMode === "hybrid")) {
     const pick = select(internal, Math.max(1, Math.min(12, Math.round((effectiveCapacity / 45) * questionVolumeFactor))));
-    if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "internal_mcqs", pick, `AylaMed MCQs: ${pick.map((row) => row.questionNumber || row.resourceNumber).filter(Boolean).join(", ")}`, { estimatedMinutes: pick.length * 2, system: focusSystem, topic: focusTopic, rationale: `Original verified MCQs for the same daily focus. Correctness is scored only on the server.` });
+    if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "internal_mcqs", pick, `AylaMed MCQs: ${pick.map((row) => row.questionNumber || row.resourceNumber).filter(Boolean).join(", ")}`, {
+      estimatedMinutes: pick.length * 2,
+      system: focusSystem,
+      subsystem: focusSubsystem,
+      topic: focusTopic,
+      rationale: "Original verified MCQs for the same daily focus. Correctness is scored only on the server.",
+    });
     else plan.missingResourceTypes.push("internal_mcqs_for_focus");
   }
 
   if (mix.flashcards !== false) {
     const pick = select(cards, Math.max(1, Math.min(15, Math.round(effectiveCapacity / 20))));
-    if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "flashcards", pick, `${pick.length} recall cards — ${focusSystem}`, { estimatedMinutes: Math.max(5, pick.length), system: focusSystem, topic: focusTopic, rationale: `Spaced recall for today’s exact focus; Again/Hard responses return through the revision queue.` });
+    if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "flashcards", pick, `${pick.length} recall cards — ${focusSystem}`, {
+      estimatedMinutes: Math.max(5, pick.length),
+      system: focusSystem,
+      subsystem: focusSubsystem,
+      topic: focusTopic,
+      rationale: "Spaced recall for today’s exact focus; Again/Hard responses return through the revision queue.",
+    });
     else plan.missingResourceTypes.push("flashcards_for_focus");
   }
 
   plan.assignmentIds = assignments.map((row) => row.id);
   plan.systemFocus = focusSystem;
+  plan.subsystemFocus = focusSubsystem;
   plan.topicFocus = focusTopic;
   plan.empty = assignments.length === 0;
   plan.message = assignments.length
-    ? `Today’s verified plan is saved around one focus: ${focusSystem}${focusTopic ? ` — ${focusTopic}` : ""}. Due revision and overdue work were prioritized before new content.`
+    ? `Today’s verified plan is saved around one focus: ${[focusSystem, focusSubsystem, focusTopic].filter(Boolean).join(" — ")}. Due revision and overdue work were prioritized before new content.`
     : "No verified resources match today’s focus. Upload/approve books, Vimeo mappings, question banks, flashcards or assessments; AylaMed will not invent references.";
   plan.missingResourceTypes = [...new Set(plan.missingResourceTypes)];
   aylaSetItem(db, "aylaDailyPlans", plan);
@@ -68533,6 +68665,7 @@ async function ngRunAylaVimeoCatalogClassificationJob(queueContext) {
     examTrackLabel: examDefinition.label,
     allowedSystems: examDefinition.systems,
     taxonomyRows,
+    taxonomyDefinition: aylaContentHubTaxonomyDefinition(draft.examTrackId),
     allowedDomains: aylaVimeoCatalogAllowedDomains(),
   });
   const model = aylaVimeoCatalogModel();
@@ -69308,6 +69441,8 @@ app.get("/api/ayla/admin/resources/vimeo-catalog", async (req, res) => {
     const classificationStatus = String(req.query.classification_status || req.query.classificationStatus || "").trim().toLowerCase();
     const membershipStatus = String(req.query.folder_membership_status || req.query.folderMembershipStatus || "").trim().toLowerCase();
     const system = aylaV189SystemKey(req.query.system || "");
+    const subsystem = aylaV189MappingKey(req.query.subsystem || "");
+    const topic = aylaV189MappingKey(req.query.topic || "");
     const search = String(req.query.q || req.query.search || "").trim().toLowerCase().slice(0, 180);
     const limit = Math.max(1, Math.min(200, Number(req.query.limit || 50)));
     const offset = Math.max(0, Number(req.query.offset || 0));
@@ -69320,7 +69455,26 @@ app.get("/api/ayla/admin/resources/vimeo-catalog", async (req, res) => {
       if (classificationStatus && String(row.classificationStatus || "").toLowerCase() !== classificationStatus) return false;
       if (membershipStatus && String(row.folderMembershipStatus || "present").toLowerCase() !== membershipStatus) return false;
       if (system && aylaV189SystemKey(row.classification?.medicalSystem || row.seedMapping?.system || "") !== system) return false;
-      if (search && !`${row.sourceTitle || ""} ${row.sourceDescription || ""} ${row.classification?.canonicalTopic || ""} ${(row.classification?.topicAliases || []).join(" ")}`.toLowerCase().includes(search)) return false;
+      if (subsystem && aylaV189MappingKey(
+        row.classification?.medicalSubsystem
+          || row.classification?.qbankTopic?.subsystemKey
+          || row.seedMapping?.subsystem
+          || "",
+      ) !== subsystem) return false;
+      if (topic && aylaV189MappingKey(
+        row.classification?.canonicalTopic
+          || row.classification?.qbankTopic?.topicKey
+          || row.seedMapping?.topic
+          || "",
+      ) !== topic) return false;
+      if (search && ![
+        row.sourceTitle,
+        row.sourceDescription,
+        row.classification?.medicalSystem,
+        row.classification?.medicalSubsystem,
+        row.classification?.canonicalTopic,
+        ...(row.classification?.topicAliases || []),
+      ].filter(Boolean).join(" ").toLowerCase().includes(search)) return false;
       return true;
     }).sort((left, right) =>
       String(left.status || "").localeCompare(String(right.status || ""))
@@ -69333,6 +69487,7 @@ app.get("/api/ayla/admin/resources/vimeo-catalog", async (req, res) => {
       offset,
       has_more: offset + limit < filtered.length,
       summary: vimeoCatalogSummary(scoped),
+      taxonomy: examTrackId ? aylaContentHubTaxonomyDefinition(examTrackId) : null,
       drafts: filtered.slice(offset, offset + limit),
     });
   } catch (error) {
@@ -69968,7 +70123,9 @@ app.get("/api/ayla/students/:studentId/content-hub", async (req, res) => {
       assignments: eligible.assignments,
       filters: {
         system: req.query.system || req.query.system_key,
+        subsystem: req.query.subsystem || req.query.subsystem_key,
         topic: req.query.topic || req.query.topic_key,
+        subtopic: req.query.subtopic || req.query.subtopic_key,
         playlist: req.query.playlist || req.query.playlist_key,
         search: req.query.search || req.query.q,
       },
