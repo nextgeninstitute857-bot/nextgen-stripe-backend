@@ -7,6 +7,10 @@ const video = fs.readFileSync(
   new URL("../lib/content-video-vimeo.js", import.meta.url),
   "utf8",
 );
+const zipSource = fs.readFileSync(
+  new URL("../lib/content-zip-source.js", import.meta.url),
+  "utf8",
+);
 const registry = fs.readFileSync(
   new URL("../lib/content-registry-postgres.js", import.meta.url),
   "utf8",
@@ -68,6 +72,25 @@ test("edition video recovery inventories every video in the year before referenc
   assert.match(server, /matchVideoReferences\(references, inventory\.videos\)/);
   assert.match(server, /filename_treated_as_question_id: false/);
   assert.match(server, /sha256_vimeo_deduplication: true/);
+});
+
+test("Vimeo streaming reuses the edition ZIP directory cache", () => {
+  assert.match(
+    video,
+    /directoryCacheKey: String\(directoryCacheKey \|\| ""\)/,
+  );
+  assert.match(
+    video,
+    /\{ directoryCacheKey: video\?\.directoryCacheKey \|\| "" \}/,
+  );
+  assert.match(
+    zipSource,
+    /openNamedContentZipEntry\(value, entryName, \{\s*directoryCacheKey = ""/,
+  );
+  assert.match(
+    zipSource,
+    /openContentZip\(value, \{\s*autoClose: false,\s*directoryCacheKey,/,
+  );
 });
 
 test("existing video mappings are audited and never overwritten", () => {
