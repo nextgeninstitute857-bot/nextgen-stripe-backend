@@ -137,6 +137,17 @@ test("Content Hub exposes a complete exam-aware hierarchy without changing compa
   assert.equal(filtered.videos[0].id, "valve-video");
 });
 
+test("the visible Unclassified subsystem node remains selectable", () => {
+  const catalog = buildAylaContentHubCatalog({
+    examTrack: "usmle_step_1",
+    videos: [legacyVideo({ subsystem: "" })],
+    filters: { subsystem: "unclassified" },
+  });
+  assert.equal(catalog.total, 1);
+  assert.equal(catalog.hierarchy[0].subsystems[0].key, "unclassified");
+  assert.equal(catalog.videos[0].id, "legacy-video-1");
+});
+
 test("exam-specific navigation labels keep non-USMLE blueprints recognizable", () => {
   assert.equal(aylaContentHubTaxonomyDefinition("plab").labels.system, "Area of clinical practice");
   assert.equal(aylaContentHubTaxonomyDefinition("mccqe").blueprint_axes.includes("physician_activity"), true);

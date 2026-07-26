@@ -288,6 +288,7 @@ import {
   isProviderRateLimit,
   multiQbankIngestionConfig,
 } from "./lib/multi-qbank-ingestion.js";
+import { normalizeContentRightsStatus } from "./lib/qbank-bulk-ingestion.js";
 import { normalizeExamTrack, slug as contentSlug } from "./lib/content-import-adapter.js";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -34028,6 +34029,9 @@ function ngContentUploadMetadata(body = {}) {
     source_namespace: String(source.source_namespace || source.sourceNamespace || "").slice(0, 160),
     source_provider: String(source.source_provider || source.sourceProvider || "").slice(0, 160),
     source_profile: String(source.source_profile || source.sourceProfile || "").slice(0, 80),
+    source_rights_status: String(
+      source.source_rights_status || source.sourceRightsStatus || "unverified",
+    ).slice(0, 80),
     source_format: String(source.source_format || source.sourceFormat || "").slice(0, 80),
     collection_title: String(source.collection_title || source.collectionTitle || "").slice(0, 240),
     destinations: Array.isArray(source.destinations)
@@ -34308,25 +34312,37 @@ app.post("/admin/crm/ai-training/content-imports/preview", async (req, res) => {
       upload.fields.source_profile || upload.fields.sourceProfile,
       sourceProvider,
     );
+    const sourceRightsStatus = normalizeContentRightsStatus(
+      upload.fields.source_rights_status || upload.fields.sourceRightsStatus || "unverified",
+    );
     const collectionTitle = String(upload.fields.collection_title || upload.fields.collectionTitle || upload.originalFilename.replace(/\.zip$/i, "")).trim();
     if (examTrack === "unknown") throw Object.assign(new Error("exam_track is required"), { statusCode: 400 });
     if (sourceNamespace === "unknown") throw Object.assign(new Error("source_namespace or source_provider is required"), { statusCode: 400 });
     const destinations = ngParseContentDestinations(upload.fields.destinations);
     jobId = crypto.randomUUID();
     await createContentImportJob({
-      id: jobId, examTrack, sourceNamespace, sourceProvider, sourceProfile, collectionTitle,
+      id: jobId, examTrack, sourceNamespace, sourceProvider, sourceProfile,
+      sourceRightsStatus, collectionTitle,
       originalFilename: upload.originalFilename, zipSha256: upload.sha256,
       destinations, createdBy: String(user.id),
     });
     await setContentImportJobStatus(jobId, "preview_queued");
     const backgroundJob = await ngQueueContentOperation({
       type: "content_question_preview", lane: "question_zip", upload, domainJobId: jobId,
-      metadata: { examTrack, sourceNamespace, sourceProvider, sourceProfile, collectionTitle },
+      metadata: {
+        examTrack,
+        sourceNamespace,
+        sourceProvider,
+        sourceProfile,
+        sourceRightsStatus,
+        collectionTitle,
+      },
     });
     upload = null;
     return res.status(202).json({
       success: true, job_id: jobId, background_job_id: backgroundJob.id, status: "preview_queued", exam_track: examTrack,
-      source_namespace: sourceNamespace, source_profile: sourceProfile, destinations,
+      source_namespace: sourceNamespace, source_profile: sourceProfile,
+      source_rights_status: sourceRightsStatus, destinations,
       poll_url: `/admin/crm/ai-training/content-imports/${jobId}`,
       message: "ZIP accepted. Preview runs asynchronously with bounded memory; nothing is published yet.",
     });
@@ -35922,6 +35938,7 @@ app.put("/admin/crm/ai-training/content-registry/collections/:collectionId/contr
       destinations: req.body.destinations,
       displayPolicy: req.body.display_policy || req.body.displayPolicy,
       sourceProfile: req.body.source_profile ?? req.body.sourceProfile,
+      sourceRightsStatus: req.body.source_rights_status ?? req.body.sourceRightsStatus,
       actorId: String(user.id),
     });
     return res.json({

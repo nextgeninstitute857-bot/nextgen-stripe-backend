@@ -16,6 +16,32 @@ test('collection destinations are persistent controls rather than upload-only in
   assert.match(server, /content-registry\/collections\/:collectionId\/controls/);
 });
 
+test('unverified content may be prepared privately but cannot be approved or enabled for students', () => {
+  const draftRoute = server.slice(
+    server.indexOf('app.post("/admin/crm/ai-training/content-imports/:jobId/import-draft"'),
+    server.indexOf('app.get("/admin/crm/ai-training/content-imports/:jobId"'),
+  );
+  const mediaRoute = server.slice(
+    server.indexOf('app.post("/admin/crm/ai-training/content-imports/:jobId/media/import-draft"'),
+    server.indexOf('app.get("/admin/crm/ai-training/content-media-imports/:mediaJobId"'),
+  );
+  const videoRoute = server.slice(
+    server.indexOf('app.post("/admin/crm/ai-training/content-imports/:jobId/videos/import-draft"'),
+    server.indexOf('app.get("/admin/crm/ai-training/content-video-imports/:videoJobId"'),
+  );
+  for (const route of [draftRoute, mediaRoute, videoRoute]) {
+    assert.doesNotMatch(route, /CONTENT_RIGHTS_VERIFICATION_REQUIRED/);
+  }
+  assert.match(postgres, /requiresVerifiedRights = cleanStatus === 'approved'/);
+  assert.match(postgres, /controls\?\.some\(\(row\) => row\.enabled\)/);
+  assert.match(postgres, /CONTENT_RIGHTS_VERIFICATION_REQUIRED/);
+  assert.match(postgres, /CONTENT_RIGHTS_DOWNGRADE_REQUIRES_DISABLE/);
+  assert.match(
+    postgres,
+    /WHEN content_collections\.source_rights_status IN \('owned','licensed','authorized'\)[\s\S]*?THEN content_collections\.source_rights_status/,
+  );
+});
+
 test('question ID display policy supports internal, source, both, and hidden modes', () => {
   for (const mode of ['internal', 'source', 'both', 'hidden']) assert.match(postgres, new RegExp(`'${mode}'`));
   for (const mode of ['provider', 'neutral', 'hidden']) assert.match(postgres, new RegExp(`'${mode}'`));
