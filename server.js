@@ -34338,12 +34338,37 @@ app.delete("/admin/crm/ai-training/content-uploads/:uploadId", async (req, res) 
   }
 });
 
+function ngQuestionZipDirectoryCacheKey(upload = {}, job = {}) {
+  const fingerprint = String(
+    upload.sha256
+    || job.zip_sha256
+    || job.zipSha256
+    || "",
+  ).trim();
+  return fingerprint ? `${fingerprint}:questions` : "";
+}
+
+function ngQuestionZipRecoveryHeartbeat(queueContext) {
+  return async (progress = {}) => queueContext.heartbeat({
+    stage: "extracting_zip",
+    zip_recovery: progress,
+  });
+}
+
 async function ngRunContentImportPreview({ jobId, upload, metadata, queueContext }) {
   let inventory;
   try {
     await setContentImportJobStatus(jobId, "previewing");
     await queueContext.heartbeat({ stage: "extracting_zip" });
-    inventory = await extractSafeZipInventory(upload.source || upload.file, jobId, DATA_DIR);
+    inventory = await extractSafeZipInventory(
+      upload.source || upload.file,
+      jobId,
+      DATA_DIR,
+      {
+        directoryCacheKey: ngQuestionZipDirectoryCacheKey(upload),
+        onDirectoryCacheProgress: ngQuestionZipRecoveryHeartbeat(queueContext),
+      },
+    );
     await queueContext.heartbeat({ stage: "previewing_questions", zip_entries: inventory.entryCount });
     const preview = await previewUniversalQuestionZip({ inventory, ...metadata });
     await queueContext.heartbeat({ stage: "preview_complete", counts: preview.counts });
@@ -34368,7 +34393,15 @@ async function ngRunContentDraftImport({ job, upload, queueContext }) {
   try {
     await setContentImportJobStatus(job.id, "importing_draft");
     await queueContext.heartbeat({ stage: "extracting_zip" });
-    inventory = await extractSafeZipInventory(upload.source || upload.file, `${job.id}-draft`, DATA_DIR);
+    inventory = await extractSafeZipInventory(
+      upload.source || upload.file,
+      `${job.id}-draft`,
+      DATA_DIR,
+      {
+        directoryCacheKey: ngQuestionZipDirectoryCacheKey(upload, job),
+        onDirectoryCacheProgress: ngQuestionZipRecoveryHeartbeat(queueContext),
+      },
+    );
     const imported = await importUniversalQuestionZip({
       inventory, job,
       checkpoint: queueContext.job.checkpoint,
