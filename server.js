@@ -348,6 +348,7 @@ import {
   normalizeExamTrack,
   slug as contentSlug,
 } from "./lib/content-import-adapter.js";
+import { mutateJsonCopyOnWrite } from "./lib/json-copy-on-write.js";
 import cors from "cors";
 import dotenv from "dotenv";
 import Stripe from "stripe";
@@ -379,6 +380,7 @@ const AYLA_SINGLE_ROADMAP_BUILD = "v230-single-roadmap-execution";
 const AYLA_MARKETING_BUILD = "v231-readiness-sharing-referrals";
 const AYLA_VIMEO_CATALOG_BUILD = VIMEO_LIBRARY_CATALOG_BUILD;
 const AYLA_PRIVATE_PILOT_BUILD = "v247-step1-private-pilot";
+const MEMORY_STABILITY_BUILD = "v248-copy-on-write-db-mutations";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -1830,10 +1832,9 @@ async function mutateLiveDb(mutator) {
       console.error("Previous LMS write failed; atomic mutation queue recovered:", error.message);
     })
     .then(async () => {
-      const current = liveDbCache
-        ? JSON.parse(JSON.stringify(liveDbCache))
-        : await readLiveDbFromDisk();
-      const result = await mutator(current);
+      const source = liveDbCache || await readLiveDbFromDisk();
+      const mutation = await mutateJsonCopyOnWrite(source, mutator);
+      const current = mutation.value;
       const nextDb = {
         ...DEFAULT_LIVE_DB,
         ...current,
@@ -1850,7 +1851,7 @@ async function mutateLiveDb(mutator) {
       await ngWriteJsonAtomicStreaming(LIVE_DB_PATH, nextDb, "LMS atomic database mutation");
       liveDbCache = nextDb;
       liveDbReadInFlight = null;
-      return result;
+      return mutation.result;
     });
   writeQueue = task;
   return task;
@@ -10190,6 +10191,7 @@ app.get("/health", async (req, res) => {
     aylamed_starting_readiness_build: AYLA_STARTING_READINESS_BUILD,
     aylamed_single_roadmap_build: AYLA_SINGLE_ROADMAP_BUILD,
     aylamed_private_pilot_build: AYLA_PRIVATE_PILOT_BUILD,
+    memory_stability_build: MEMORY_STABILITY_BUILD,
     roadmap_extension_build: ROADMAP_EXTENSION_BUILD,
     recording_assignment_build: RECORDING_ASSIGNMENT_BUILD,
     recording_duplicate_cleanup_build: RECORDING_DUPLICATE_CLEANUP_BUILD,
@@ -19615,12 +19617,13 @@ async function mutateCrmDb(mutator) {
       console.error("Previous CRM write failed; atomic mutation queue recovered:", error.message);
     })
     .then(async () => {
-      const stored = await readCrmDbSnapshotOnly({ fresh: true, cache: false });
-      const current = {
+      const stored = crmReadCache || await readCrmDbSnapshotOnly({ fresh: true, cache: false });
+      const source = {
         ...stored,
         settings: { ...DEFAULT_CRM_SETTINGS, ...(stored.settings || {}) },
       };
-      const result = await mutator(current);
+      const mutation = await mutateJsonCopyOnWrite(source, mutator);
+      const current = mutation.value;
       const nextDb = {
         ...DEFAULT_CRM_DB,
         ...current,
@@ -19637,7 +19640,7 @@ async function mutateCrmDb(mutator) {
       crmReadOnlySnapshotCache = nextDb;
       crmReadOnlySnapshotCacheAt = Date.now();
       crmReadOnlySnapshotInFlight = null;
-      return result;
+      return mutation.result;
     });
   crmWriteQueue = task;
   return task;
@@ -60793,10 +60796,9 @@ async function mutateAylaDb(mutator) {
       console.error("Previous AylaMed write failed; atomic mutation queue recovered:", error.message);
     })
     .then(async () => {
-      const current = aylaDbCache
-        ? JSON.parse(JSON.stringify(aylaDbCache))
-        : await readAylaDbFromDisk();
-      const result = await mutator(current);
+      const source = aylaDbCache || await readAylaDbFromDisk();
+      const mutation = await mutateJsonCopyOnWrite(source, mutator);
+      const current = mutation.value;
       const nextDb = {
         ...DEFAULT_AYLA_DB,
         ...current,
@@ -60810,7 +60812,7 @@ async function mutateAylaDb(mutator) {
       await ngWriteJsonAtomicStreaming(AYLA_DB_PATH, nextDb, "AylaMed atomic database mutation");
       aylaDbCache = nextDb;
       aylaDbReadInFlight = null;
-      return result;
+      return mutation.result;
     });
   aylaWriteQueue = task;
   return task;
