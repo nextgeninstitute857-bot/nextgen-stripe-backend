@@ -34089,7 +34089,13 @@ function ngNormalizeContentSourceFormat(value = "") {
   if (["cdm", "legacy_cdm", "cdm_write_in", "legacy_cdm_write_in"].includes(clean)) {
     return CONTENT_CDM_INTERACTION_FORMAT;
   }
-  if (!clean || ["single_best_answer", "single_best_answer_v1", "sba", "mcq"].includes(clean)) {
+  if (!clean || [
+    "single_best_answer",
+    "single_best_answer_v1",
+    "sba",
+    "mcq",
+    "universal_uworld_json_zip",
+  ].includes(clean)) {
     return "single_best_answer_v1";
   }
   const error = new Error(

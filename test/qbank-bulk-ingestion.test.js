@@ -79,6 +79,13 @@ test("bulk manifests are private-draft only, provider-aware, and bounded to two 
   );
 });
 
+test("legacy universal JSON ZIP metadata remains compatible with the SBA importer", () => {
+  const manifest = normalizeBulkQbankManifest({
+    banks: [bank({ source_format: "universal_uworld_json_zip" })],
+  });
+  assert.equal(manifest.banks[0].source_format, "single_best_answer_v1");
+});
+
 test("reviewed media aliases are exact, fingerprinted, and cannot alter placement implicitly", () => {
   const aliases = normalizeBulkQbankMediaAliases([
     {
