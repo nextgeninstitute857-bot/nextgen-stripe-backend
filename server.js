@@ -34095,6 +34095,7 @@ function ngNormalizeContentSourceFormat(value = "") {
     "sba",
     "mcq",
     "universal_uworld_json_zip",
+    "universal_uworld_style_json_zip",
   ].includes(clean)) {
     return "single_best_answer_v1";
   }
