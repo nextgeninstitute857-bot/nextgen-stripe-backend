@@ -138,3 +138,24 @@ test("cross-edition image and audio fallback is fingerprint guarded and latest-f
   assert.match(server, /existing_links_overwritten: 0/);
   assert.match(server, /student_resources_published: 0/);
 });
+
+test("verified video aliases have a separate fingerprinted dry-run and protected apply path", () => {
+  assert.match(
+    server,
+    /content-video-imports\/:videoJobId\/verified-alias-audit/,
+  );
+  assert.match(
+    server,
+    /content-video-imports\/:videoJobId\/reconcile-verified-alias-draft-links/,
+  );
+  assert.match(server, /evidence-labelled verified video alias/);
+  assert.match(server, /verified_video_alias_link_reconciliation/);
+  assert.match(server, /auditContentVideoAliasMappings/);
+  assert.match(server, /binary_files_reuploaded: 0/);
+  assert.match(server, /existing_links_overwritten: 0/);
+  assert.match(server, /student_resources_published: 0/);
+  assert.match(
+    registry,
+    /export async function auditContentVideoAliasMappings/,
+  );
+});

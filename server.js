@@ -14,6 +14,7 @@ import {
 } from "./lib/flashcard-postgres.js";
 import {
   auditContentMediaLinks,
+  auditContentVideoAliasMappings,
   auditContentVideoMappings,
   contentRegistryStatus,
   claimContentImportDraft,
@@ -25,6 +26,7 @@ import {
   finishContentMediaImportJob,
   finishContentVideoImportJob,
   finishContentImportPreview,
+  findContentVideoAssetsByOriginalNames,
   findReusableContentVideos,
   getContentMediaImportJob,
   getContentMediaReferences,
@@ -278,6 +280,8 @@ import {
   extractReferencedVideos,
   inspectContentVideoEntries,
   matchVideoReferences,
+  matchVideoReferencesByVerifiedAliases,
+  normalizeVerifiedVideoAliases,
   openReferencedVideoStream,
   uploadVideoToVimeo,
 } from "./lib/content-video-vimeo.js";
@@ -36602,6 +36606,251 @@ app.post("/admin/crm/ai-training/content-video-imports/:videoJobId/reconcile-fal
       success: false,
       error: error.message,
     });
+  }
+});
+
+async function ngBuildContentVideoVerifiedAliasAudit(
+  videoJobId,
+  editionInput,
+  candidateInput,
+  aliasInput,
+) {
+  const edition = ngContentEdition(editionInput);
+  const candidateEditions = ngContentFallbackEditions(candidateInput, edition);
+  const aliases = normalizeVerifiedVideoAliases(aliasInput);
+  if (!aliases.length) {
+    throw Object.assign(
+      new Error("At least one evidence-labelled verified video alias is required"),
+      { statusCode: 400 },
+    );
+  }
+  const base = await ngBuildContentVideoReconcileAudit(videoJobId);
+  if (!base.uploadId || base.upload?.status !== "finalized") {
+    throw Object.assign(
+      new Error("The saved private video ZIP is no longer available"),
+      { statusCode: 410 },
+    );
+  }
+  const resolvedUpload = await ngContentUploadStore.resolveFinalized(
+    base.uploadId,
+    { allowedPurposes: ["video_zip", "media_zip"] },
+  );
+  const allReferences = await getContentMediaReferences(base.parentJob.id, "video");
+  const references = filterContentReferencesByEdition(allReferences, edition);
+  const inventory = await inspectContentVideoEntries({
+    zipSource: resolvedUpload.source || resolvedUpload.file,
+    editions: candidateEditions,
+    directoryCacheKey:
+      `${base.videoJob.zip_sha256}:videos:${candidateEditions.join(",")}`,
+  });
+  const report = matchVideoReferencesByVerifiedAliases(
+    references,
+    inventory.videos,
+    aliases,
+    { candidatePriority: ngContentCandidatePriority(candidateEditions) },
+  );
+  const assetsByOriginalName = await findContentVideoAssetsByOriginalNames({
+    examTrack: base.parentJob.exam_track,
+    sourceNamespace: base.parentJob.source_namespace,
+    originalNames: report.matches.map((match) => match.video?.originalName),
+  });
+  const missingAssetMatches = [];
+  const recoverableMatches = [];
+  const assetsBySha = new Map();
+  for (const match of report.matches) {
+    const asset = assetsByOriginalName.get(String(match.video?.originalName || ""));
+    if (!asset?.id || !asset?.sha256) {
+      missingAssetMatches.push(match);
+      continue;
+    }
+    const recoverable = {
+      ...match,
+      video: {
+        ...match.video,
+        sha256: String(asset.sha256),
+      },
+    };
+    recoverableMatches.push(recoverable);
+    assetsBySha.set(String(asset.sha256), asset);
+  }
+  const linkAudit = await auditContentVideoAliasMappings(recoverableMatches);
+  const fingerprint = crypto.createHash("sha256")
+    .update([
+      ngContentVideoEditionAuditFingerprint({
+        videoJob: base.videoJob,
+        upload: resolvedUpload,
+        edition,
+        references,
+        videos: inventory.videos,
+        report,
+      }),
+      ...candidateEditions,
+      ...report.aliases.map((alias) =>
+        `${alias.mediaRef}\u0000${alias.videoName}\u0000${alias.evidence}`),
+      ...recoverableMatches
+        .map((match) =>
+          `${match.questionId}\u0000${match.mediaRef}\u0000${match.video.sha256}`)
+        .sort(),
+      `missing-assets:${missingAssetMatches.length}`,
+    ].join("\u0000"))
+    .digest("hex");
+  return {
+    ...base,
+    edition,
+    candidateEditions,
+    aliases: report.aliases,
+    resolvedUpload,
+    references,
+    inventory,
+    report,
+    recoverableMatches,
+    missingAssetMatches,
+    assetsBySha,
+    linkAudit,
+    fingerprint,
+  };
+}
+
+function ngPublicContentVideoVerifiedAliasAudit(audit) {
+  const perAlias = audit.aliases.map((alias) => {
+    const matching = audit.recoverableMatches.filter((match) =>
+      String(match.mediaRef).toLowerCase() === alias.mediaRef.toLowerCase());
+    const exactKeys = new Set(audit.linkAudit.exactMatches.map((match) =>
+      `${match.questionId}\u0000${match.mediaRef}`));
+    const missingKeys = new Set(audit.linkAudit.missingMatches.map((match) =>
+      `${match.questionId}\u0000${match.mediaRef}`));
+    return {
+      media_ref: alias.mediaRef,
+      video_name: alias.videoName,
+      evidence: alias.evidence,
+      exact_matches: matching.length,
+      already_linked: matching.filter((match) =>
+        exactKeys.has(`${match.questionId}\u0000${match.mediaRef}`)).length,
+      repairable_links: matching.filter((match) =>
+        missingKeys.has(`${match.questionId}\u0000${match.mediaRef}`)).length,
+    };
+  });
+  return {
+    edition: audit.edition,
+    candidate_editions: audit.candidateEditions,
+    video_job_id: audit.videoJob.id,
+    content_import_job_id: audit.parentJob.id,
+    audit_fingerprint: audit.fingerprint,
+    package_available: true,
+    package_expires_at: audit.upload?.expires_at || null,
+    archive_entries: audit.inventory.entries,
+    candidate_video_files: audit.inventory.videos.length,
+    video_references: audit.references.length,
+    verified_aliases: audit.aliases.length,
+    verified_alias_matches: audit.recoverableMatches.length,
+    already_linked: audit.linkAudit.exactMatches.length,
+    repairable_links: audit.linkAudit.missingMatches.length,
+    protected_conflicts: audit.linkAudit.conflictingMatches.length,
+    remaining_missing:
+      audit.report.missing.length + audit.missingAssetMatches.length,
+    remaining_ambiguous: audit.report.ambiguous.length,
+    missing_vimeo_assets: audit.missingAssetMatches.length,
+    per_alias: perAlias,
+    evidence_required: true,
+    latest_edition_preference: true,
+    target_question_edition_only: true,
+    filename_treated_as_question_id: false,
+    existing_video_links_overwritten: false,
+    binary_files_reuploaded: 0,
+    other_editions_touched: [],
+    student_visibility: "disabled_drafts_until_collection_approval",
+  };
+}
+
+app.post("/admin/crm/ai-training/content-video-imports/:videoJobId/verified-alias-audit", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const audit = await ngBuildContentVideoVerifiedAliasAudit(
+      req.params.videoJobId,
+      req.body?.edition,
+      req.body?.candidate_editions,
+      req.body?.aliases,
+    );
+    return res.json({
+      success: true,
+      audit: ngPublicContentVideoVerifiedAliasAudit(audit),
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+app.post("/admin/crm/ai-training/content-video-imports/:videoJobId/reconcile-verified-alias-draft-links", async (req, res) => {
+  let releaseFinalizer = null;
+  let finalizerError = null;
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const audit = await ngBuildContentVideoVerifiedAliasAudit(
+      req.params.videoJobId,
+      req.body?.edition,
+      req.body?.candidate_editions,
+      req.body?.aliases,
+    );
+    const expectedFingerprint = String(req.body?.audit_fingerprint || "");
+    if (!expectedFingerprint || expectedFingerprint !== audit.fingerprint) {
+      return res.status(409).json({
+        success: false,
+        error: "The verified video-alias audit changed. Refresh the dry-run before applying repairs.",
+      });
+    }
+    releaseFinalizer = await ngMediaFinalizerGate.acquire({
+      metadata: {
+        operation: "verified_video_alias_link_reconciliation",
+        edition: audit.edition,
+        candidate_editions: audit.candidateEditions,
+        video_import_job_id: audit.videoJob.id,
+        content_import_job_id: audit.parentJob.id,
+      },
+    });
+    const saved = await saveContentVideoLinksBatch({
+      videoJobId: audit.videoJob.id,
+      matches: audit.linkAudit.missingMatches,
+      assetsBySha: audit.assetsBySha,
+    });
+    const afterLinks = await auditContentVideoAliasMappings(
+      audit.recoverableMatches,
+    );
+    return res.json({
+      success: true,
+      repair: {
+        edition: audit.edition,
+        candidate_editions: audit.candidateEditions,
+        video_job_id: audit.videoJob.id,
+        audit_fingerprint: audit.fingerprint,
+        verified_aliases: audit.aliases.length,
+        verified_alias_matches: audit.recoverableMatches.length,
+        links_created: Number(saved.linksCreated || 0),
+        links_verified: afterLinks.exactMatches.length,
+        protected_conflicts: afterLinks.conflictingMatches.length,
+        remaining_missing:
+          audit.report.missing.length + audit.missingAssetMatches.length,
+        remaining_ambiguous: audit.report.ambiguous.length,
+        binary_files_reuploaded: 0,
+        binary_objects_deleted: 0,
+        existing_links_overwritten: 0,
+        student_resources_published: 0,
+        target_question_edition_only: true,
+        other_editions_touched: [],
+        reconciled_at: new Date().toISOString(),
+        reconciled_by: String(user.id),
+      },
+    });
+  } catch (error) {
+    finalizerError = error;
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+    });
+  } finally {
+    releaseFinalizer?.({ error: finalizerError });
   }
 });
 

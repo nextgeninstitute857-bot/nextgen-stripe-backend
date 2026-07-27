@@ -1,6 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { contentVideoStatus, isVideoMediaRef, matchVideoReferences, safeVideoEntryName } from "../lib/content-video-vimeo.js";
+import {
+  contentVideoStatus,
+  isVideoMediaRef,
+  matchVideoReferences,
+  matchVideoReferencesByVerifiedAliases,
+  normalizeVerifiedVideoAliases,
+  safeVideoEntryName,
+} from "../lib/content-video-vimeo.js";
 
 test("Vimeo remains disabled until an access token is configured", () => {
   assert.equal(contentVideoStatus({}).configured, false);
@@ -69,4 +76,59 @@ test("video fallback can prefer the newest uniquely ranked exact media reference
   });
   assert.equal(report.matches.length, 1);
   assert.equal(report.matches[0].video.sha256, "2026");
+});
+
+test("verified content aliases require evidence and match the newest unique video", () => {
+  const aliases = normalizeVerifiedVideoAliases([
+    {
+      media_ref: "S1_aortic_stenosis.mov",
+      video_name: "71364.mp4",
+      evidence: "visual title frame",
+    },
+    {
+      media_ref: "unsafe.mov",
+      video_name: "../unsafe.mp4",
+      evidence: "invalid traversal",
+    },
+  ]);
+  assert.equal(aliases.length, 1);
+  const report = matchVideoReferencesByVerifiedAliases([{
+    questionId: "q1",
+    mediaRef: "S1_aortic_stenosis.mov",
+  }, {
+    questionId: "q2",
+    mediaRef: "S1_2109.mov",
+  }], [
+    {
+      originalName: "STEP1-2025/71364.mp4",
+      archiveFingerprint: "old",
+    },
+    {
+      originalName: "STEP1-2026/71364.mp4",
+      archiveFingerprint: "new",
+    },
+  ], aliases, {
+    candidatePriority: (video) =>
+      video.originalName.includes("2026") ? 0 : 1,
+  });
+  assert.equal(report.matches.length, 1);
+  assert.equal(report.matches[0].video.archiveFingerprint, "new");
+  assert.equal(report.matches[0].matchMethod, "admin_verified_content_alias");
+  assert.equal(report.missing.length, 1);
+});
+
+test("verified content aliases quarantine conflicting best-priority videos", () => {
+  const report = matchVideoReferencesByVerifiedAliases([{
+    questionId: "q1",
+    mediaRef: "S1_S3.mov",
+  }], [
+    { originalName: "a/76843.mp4", archiveFingerprint: "a" },
+    { originalName: "b/76843.mp4", archiveFingerprint: "b" },
+  ], [{
+    media_ref: "S1_S3.mov",
+    video_name: "76843.mp4",
+    evidence: "visual title frame",
+  }]);
+  assert.equal(report.matches.length, 0);
+  assert.equal(report.ambiguous.length, 1);
 });
