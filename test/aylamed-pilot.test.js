@@ -36,7 +36,7 @@ test("pilot time advances independently and is capped at two weeks", () => {
   assert.throws(() => advanceAylaPilotStudyDate({ id: "real-1" }, 1), /Only a private pilot student/);
 });
 
-test("AylaMe feed distinguishes delivered work from pending promises and narrates verified reviews", () => {
+test("Ayla notification feed distinguishes delivered work from pending promises and narrates verified reviews", () => {
   const feed = buildAylaMateActivityFeed({
     student: { id: "pilot-1", pilotTest: true, examDate: "", timezone: "" },
     date: "2026-07-28",

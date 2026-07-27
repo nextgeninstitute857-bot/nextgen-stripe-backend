@@ -64583,7 +64583,7 @@ app.get("/api/ayla/students/:id/dashboard", async (req, res) => {
     const todayAssignments = todayPlan
       ? aylaValues(db, "aylaResourceAssignments").filter((row) => String(row.planId || "") === String(todayPlan.id))
       : [];
-    const aylaMeFeed = buildAylaMateActivityFeed({
+    const aylaMedFeed = buildAylaMateActivityFeed({
       student,
       date: today,
       systemProgress,
@@ -64623,8 +64623,9 @@ app.get("/api/ayla/students/:id/dashboard", async (req, res) => {
         qbankBlocks: aylaFilterRows(aylaValues(db, "aylaQbankBlocks"), { studentId: student.id }),
         weakAreaLogs,
         systemProgress,
-        aylaMeFeed,
-        aylaMateFeed: aylaMeFeed,
+        aylaMedFeed,
+        aylaMeFeed: aylaMedFeed,
+        aylaMateFeed: aylaMedFeed,
         flashcards: aylaFilterRows(aylaValues(db, "aylaFlashcards"), { studentId: student.id }),
         assessmentResults: aylaFilterRows(aylaValues(db, "aylaAssessmentResults"), { studentId: student.id }),
         studyPartnerMatches: aylaValues(db, "aylaStudyPartnerMatches").filter((item) => item.studentAId === student.id || item.studentBId === student.id),
@@ -71008,7 +71009,7 @@ app.get("/api/ayla/admin/pilot/cohorts/:cohortId/report", async (req, res) => {
     const report = students.map((student) => {
       const filter = (collection) => aylaValues(db, collection).filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student));
       const systemProgress = aylaV189SystemProgress(db, student);
-      const aylaMeFeed = buildAylaMateActivityFeed({
+      const aylaMedFeed = buildAylaMateActivityFeed({
         student,
         date: aylaV247StudyDate(student),
         systemProgress,
@@ -71039,8 +71040,9 @@ app.get("/api/ayla/admin/pilot/cohorts/:cohortId/report", async (req, res) => {
           weakAreaCards: aylaValues(db, "aylaResources").filter((row) => String(row.ownerStudentId || row.studentId || "") === String(student.id) && row.bucket === "weak_area").length,
         },
         systemProgress,
-        aylaMeFeed,
-        aylaMateFeed: aylaMeFeed,
+        aylaMedFeed,
+        aylaMeFeed: aylaMedFeed,
+        aylaMateFeed: aylaMedFeed,
       };
     });
     return aylaSendOk(res, {
@@ -72596,7 +72598,7 @@ app.get("/api/ayla/students/:studentId/daily-workspace", async (req, res) => {
       activityEvents: aylaValues(db, "aylaActivityHistory").filter((row) => String(row.studentId) === String(student.id)).length,
     };
     const tomorrowPreview = await aylaV189TomorrowPreview(db, student, date);
-    const aylaMeFeed = buildAylaMateActivityFeed({
+    const aylaMedFeed = buildAylaMateActivityFeed({
       student,
       date,
       systemProgress,
@@ -72611,7 +72613,7 @@ app.get("/api/ayla/students/:studentId/daily-workspace", async (req, res) => {
     });
     await writeAylaDb(db);
     const safeBundle = aylaV189SanitizePlanBundle(db, built.plan, built.assignments);
-    return aylaSendOk(res, { student, date, pilotTime: aylaPilotStudyDate(student), plan: safeBundle.plan, assignments: safeBundle.assignments, stablePlanReused: built.reused, tomorrowPreview, warning, systemProgress, aylaMeFeed, aylaMateFeed: aylaMeFeed, history, historyCounts, recentReadingProgress, recentVideoProgress, recentQuestionAttempts, recentFlashcardReviews, recentAssessments, recentPlans, resourceCounts: Object.values(db.aylaResources || {}).reduce((acc, row) => { const type = aylaV189ResourceType(row.type); acc[type] = (acc[type] || 0) + 1; return acc; }, {}) });
+    return aylaSendOk(res, { student, date, pilotTime: aylaPilotStudyDate(student), plan: safeBundle.plan, assignments: safeBundle.assignments, stablePlanReused: built.reused, tomorrowPreview, warning, systemProgress, aylaMedFeed, aylaMeFeed: aylaMedFeed, aylaMateFeed: aylaMedFeed, history, historyCounts, recentReadingProgress, recentVideoProgress, recentQuestionAttempts, recentFlashcardReviews, recentAssessments, recentPlans, resourceCounts: Object.values(db.aylaResources || {}).reduce((acc, row) => { const type = aylaV189ResourceType(row.type); acc[type] = (acc[type] || 0) + 1; return acc; }, {}) });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load AylaMed daily workspace");
   }
