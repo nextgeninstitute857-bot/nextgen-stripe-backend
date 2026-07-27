@@ -62669,6 +62669,31 @@ function aylaV227UpsertMistakeFlashcard(db, {
   return { resource, created: !existing };
 }
 
+function aylaCanonicalQbankEvidence(question = {}, examTrack = "") {
+  const examTrackId = aylaCanonicalExamTrack(examTrack);
+  const rawSystem = String(
+    question.system_key
+      || question.taxonomy?.system_key
+      || question.system
+      || "",
+  ).trim();
+  const canonicalSystem = aylaV227CanonicalSystemForStudent({ examTrack: examTrackId }, rawSystem, "");
+  const system = canonicalSystem || "General";
+  return {
+    rawSystem,
+    canonicalSystem,
+    taxonomyVerified: Boolean(canonicalSystem),
+    question: {
+      ...question,
+      system_key: system,
+      taxonomy: {
+        ...(question.taxonomy && typeof question.taxonomy === "object" ? question.taxonomy : {}),
+        system_key: system,
+      },
+    },
+  };
+}
+
 function aylaRecordQbankAttempt(db, session, mapping, answer, question = {}) {
   const existing = aylaValues(db, "aylaQuestionAttempts").find((row) =>
     String(row.sessionId || "") === String(session.id)
@@ -62676,6 +62701,8 @@ function aylaRecordQbankAttempt(db, session, mapping, answer, question = {}) {
     && String(row.sourceType || "") === "content_registry_qbank");
   if (existing) return { attempt: existing, created: false };
   const exam = aylaV227ExamFields({ examTrack: session.examTrack });
+  const evidence = aylaCanonicalQbankEvidence(question, session.examTrack);
+  const safeQuestion = evidence.question;
   const attempt = {
     id: aylaId("AYLA-QA"),
     studentId: session.studentId,
@@ -62692,10 +62719,12 @@ function aylaRecordQbankAttempt(db, session, mapping, answer, question = {}) {
     selectedAnswerId: answer.selectedAnswerId,
     outcome: answer.correct ? "correct" : "incorrect",
     serverVerified: true,
-    system: question.system_key || question.taxonomy?.system_key || "",
-    subsystem: question.subsystem_key || question.taxonomy?.subsystem_key || "",
-    topic: question.topic_key || question.taxonomy?.topic_key || "",
-    subtopic: question.subtopic_key || question.taxonomy?.subtopic_key || "",
+    taxonomyVerified: evidence.taxonomyVerified,
+    sourceSystemId: evidence.taxonomyVerified ? null : evidence.rawSystem || null,
+    system: safeQuestion.system_key,
+    subsystem: safeQuestion.subsystem_key || safeQuestion.taxonomy?.subsystem_key || "",
+    topic: safeQuestion.topic_key || safeQuestion.taxonomy?.topic_key || "",
+    subtopic: safeQuestion.subtopic_key || safeQuestion.taxonomy?.subtopic_key || "",
     createdAt: answer.answeredAt || aylaNow(),
     updatedAt: answer.answeredAt || aylaNow(),
   };
@@ -62711,9 +62740,9 @@ function aylaRecordQbankAttempt(db, session, mapping, answer, question = {}) {
       sourceSessionId: session.id,
       sourceQuestionRef: mapping.ref,
       sourceAttemptId: attempt.id,
-      question,
+      question: safeQuestion,
     });
-    revision = aylaUpsertQbankRevision(db, session, mapping, question, "incorrect_answer");
+    revision = aylaUpsertQbankRevision(db, session, mapping, safeQuestion, "incorrect_answer");
     if (flashcard.resource) {
       attempt.weakAreaFlashcardResourceId = flashcard.resource.id;
       revision.resourceId = flashcard.resource.id;
@@ -68067,6 +68096,12 @@ function aylaV227SystemsForStudent(student = {}) {
   return aylaAdaptiveSystemsForStudent(student, AYLA_EXAM_REGISTRY, AYLA_V189_SYSTEMS);
 }
 
+function aylaV227CanonicalSystemForStudent(student = {}, value = "", fallback = "General") {
+  const wanted = aylaV189SystemKey(value);
+  return aylaV227SystemsForStudent(student)
+    .find((system) => aylaV189SystemKey(system) === wanted) || fallback;
+}
+
 function aylaV227ExamFields(student = {}) {
   const examTrackId = aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam);
   return {
@@ -69680,7 +69715,8 @@ function aylaV214WeakSignals(db = {}, student = {}, lmsContext = null) {
   for (const row of latestQuestions.values()) {
     const outcome = String(row.outcome || row.result || "").toLowerCase();
     if (!["incorrect", "guessed", "review_again"].includes(outcome)) continue;
-    signals.push({ topic: row.topic || row.system, system: row.system, source: "aylamed_questions", evidenceType: outcome, weaknessScore: outcome === "incorrect" ? 85 : 65, verified: true });
+    const system = aylaV227CanonicalSystemForStudent(student, row.system, "General");
+    signals.push({ topic: row.topic || system, system, source: "aylamed_questions", evidenceType: outcome, weaknessScore: outcome === "incorrect" ? 85 : 65, verified: true });
   }
   const latestFlashcards = new Map();
   aylaValues(db, "aylaFlashcardReviews")
@@ -69693,7 +69729,8 @@ function aylaV214WeakSignals(db = {}, student = {}, lmsContext = null) {
   for (const row of latestFlashcards.values()) {
     const rating = String(row.rating || "").toLowerCase();
     if (!["again", "hard"].includes(rating)) continue;
-    signals.push({ topic: row.topic || row.system, system: row.system, source: "aylamed_flashcards", evidenceType: `flashcard_${rating}`, weaknessScore: rating === "again" ? 80 : 60, verified: true });
+    const system = aylaV227CanonicalSystemForStudent(student, row.system, "General");
+    signals.push({ topic: row.topic || system, system, source: "aylamed_flashcards", evidenceType: `flashcard_${rating}`, weaknessScore: rating === "again" ? 80 : 60, verified: true });
   }
   for (const row of aylaValues(db, "aylaAssessmentAttempts")) {
     if (!aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true })) continue;
@@ -69797,8 +69834,9 @@ function aylaV214RevisionFeed(db = {}, student = {}, weakSummary = null, date = 
   const rows = new Map();
   const add = (input = {}) => {
     const resourceId = String(input.resourceId || input.contentQuestionId || "").trim();
-    const topic = String(input.topic || input.system || "General").trim();
-    const key = resourceId ? `resource:${resourceId}` : `${String(input.system || "General").toLowerCase()}|${topic.toLowerCase()}|${String(input.sourceId || input.sourceType || "topic")}`;
+    const system = aylaV227CanonicalSystemForStudent(student, input.system, "General");
+    const topic = String(input.topic || system).trim();
+    const key = resourceId ? `resource:${resourceId}` : `${system.toLowerCase()}|${topic.toLowerCase()}|${String(input.sourceId || input.sourceType || "topic")}`;
     const existing = rows.get(key) || {
       id: input.id || `revision:${crypto.createHash("sha256").update(`${studentId}|${key}`).digest("hex").slice(0, 16)}`,
       resourceId: resourceId || null,
@@ -69806,7 +69844,7 @@ function aylaV214RevisionFeed(db = {}, student = {}, weakSummary = null, date = 
       questionRef: input.questionRef || null,
       questionNumber: input.questionNumber || null,
       cardNumber: input.cardNumber || null,
-      system: input.system || "General",
+      system,
       topic,
       dueDate: input.dueDate || date,
       status: input.status || "due",

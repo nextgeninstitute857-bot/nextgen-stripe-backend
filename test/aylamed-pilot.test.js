@@ -57,6 +57,13 @@ test("Ayla notification feed distinguishes delivered work from pending promises 
       outcome: "incorrect",
       system: "Cardiovascular",
       topic: "Heart failure",
+    }, {
+      id: "attempt-opaque-taxonomy",
+      studentId: "pilot-1",
+      serverVerified: true,
+      outcome: "incorrect",
+      system: "1",
+      topic: "Verified concept",
     }],
     flashcardReviews: [{
       id: "review-1",
@@ -78,6 +85,9 @@ test("Ayla notification feed distinguishes delivered work from pending promises 
   const miss = feed.find((row) => row.id === "question-miss-attempt-1");
   assert.equal(miss.status, "recorded");
   assert.match(miss.message, /no mistake card is marked as delivered yet/i);
+  const opaque = feed.find((row) => row.id === "question-miss-attempt-opaque-taxonomy");
+  assert.equal(opaque.title, "A weak area was added to focused review");
+  assert.doesNotMatch(opaque.title, /\b1\b/);
   const review = feed.find((row) => row.id === "flashcard-review-review-1");
   assert.equal(review.status, "delivered");
   assert.match(review.message, /next recall is scheduled for 2026-07-31/i);

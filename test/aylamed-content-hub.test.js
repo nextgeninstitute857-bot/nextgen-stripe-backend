@@ -63,6 +63,23 @@ test("Vimeo inputs become embedded-player URLs and never require an outbound pub
   assert.equal("provider_uri" in student, false);
 });
 
+test("raw media filenames never become student-facing video titles", () => {
+  const mapped = normalizeAylaContentHubVideo(registryVideo({
+    title: "iMD/17407.mp4",
+    original_name: "iMD/17407.mp4",
+    topic_key: "Acute coronary syndrome",
+  }));
+  assert.equal(mapped.title, "Acute coronary syndrome");
+
+  const fallback = normalizeAylaContentHubVideo(registryVideo({
+    title: "iMD/17407.mp4",
+    original_name: "iMD/17407.mp4",
+    topic_key: "",
+    subtopic_key: "",
+  }));
+  assert.equal(fallback.title, "Focused video review");
+});
+
 test("Content Hub fails closed for another exam, unverified rights, and non-Vimeo playback", () => {
   assert.equal(normalizeAylaContentHubVideo(legacyVideo(), { examTrack: "nclex" }), null);
   assert.equal(normalizeAylaContentHubVideo(legacyVideo({ authorizationStatus: "pending_review" })), null);
