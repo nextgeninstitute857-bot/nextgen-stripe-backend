@@ -217,6 +217,17 @@ import {
   selectAylaSuccessStoryStrategies,
 } from "./lib/aylamed-success-story-training.js";
 import {
+  AYLA_STEP1_PILOT,
+  advanceAylaPilotStudyDate,
+  aylaPilotStudyDate,
+  buildAylaMateActivityFeed,
+  buildAylaStep1PilotScenarios,
+} from "./lib/aylamed-pilot.js";
+import {
+  compareAylaExamPathways,
+  estimateAylaExamPathway,
+} from "./lib/aylamed-pathway-estimator.js";
+import {
   EXTERNAL_QBANK_API_VERSION,
   ExternalQbankRateLimiter,
   authenticateExternalQbankClient,
@@ -363,6 +374,7 @@ const AYLA_STARTING_READINESS_BUILD = "v229-starting-readiness-loop";
 const AYLA_SINGLE_ROADMAP_BUILD = "v230-single-roadmap-execution";
 const AYLA_MARKETING_BUILD = "v231-readiness-sharing-referrals";
 const AYLA_VIMEO_CATALOG_BUILD = VIMEO_LIBRARY_CATALOG_BUILD;
+const AYLA_PRIVATE_PILOT_BUILD = "v247-step1-private-pilot";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -10173,6 +10185,7 @@ app.get("/health", async (req, res) => {
     aylamed_adaptive_core_build: AYLA_ADAPTIVE_CORE_BUILD,
     aylamed_starting_readiness_build: AYLA_STARTING_READINESS_BUILD,
     aylamed_single_roadmap_build: AYLA_SINGLE_ROADMAP_BUILD,
+    aylamed_private_pilot_build: AYLA_PRIVATE_PILOT_BUILD,
     roadmap_extension_build: ROADMAP_EXTENSION_BUILD,
     recording_assignment_build: RECORDING_ASSIGNMENT_BUILD,
     recording_duplicate_cleanup_build: RECORDING_DUPLICATE_CLEANUP_BUILD,
@@ -60451,6 +60464,8 @@ const AYLA_COLLECTIONS = {
   aylaModerationActions: { route: "/api/ayla/moderation-actions", prefix: "AYLA-MOD", label: "moderationAction" },
   aylaStudyPartnerRequests: { route: "/api/ayla/study-partner-requests", prefix: "AYLA-SPR", label: "studyPartnerRequest" },
   aylaPasswordResetTokens: { route: "/api/ayla/password-reset-tokens", prefix: "AYLA-RESET", label: "passwordResetToken" },
+  aylaPilotCohorts: { route: "/api/ayla/admin/pilot-cohorts", prefix: "AYLA-PILOT", label: "pilotCohort", customPost: true, immutableAdminWrites: true },
+  aylaPilotAuditEvents: { route: "/api/ayla/admin/pilot-audit-events", prefix: "AYLA-PILOT-EVENT", label: "pilotAuditEvent", customPost: true, immutableAdminWrites: true },
 
   // v156 separated AylaMed billing/access collections.
   aylaPlans: { route: "/api/ayla/plans", prefix: "AYLA-PLAN", label: "plan" },
@@ -60604,6 +60619,8 @@ const DEFAULT_AYLA_DB = {
   aylaModerationActions: {},
   aylaStudyPartnerRequests: {},
   aylaPasswordResetTokens: {},
+  aylaPilotCohorts: {},
+  aylaPilotAuditEvents: {},
   aylaProfileAuditEvents: {},
   aylaActionLogs: {},
   aylaMarketingCampaigns: {},
@@ -60922,6 +60939,14 @@ function aylaDateOnly(value = new Date()) {
   const date = value instanceof Date ? new Date(value) : new Date(value);
   if (Number.isNaN(date.getTime())) return "";
   return date.toISOString().slice(0, 10);
+}
+
+function aylaV247StudyDate(student = {}, requestedDate = "") {
+  if (student.pilotTest === true || student.pilot_test === true) {
+    return aylaPilotStudyDate(student, new Date()).date;
+  }
+  const requested = String(requestedDate || "").slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(requested) ? requested : aylaDateOnly();
 }
 
 function aylaAddDays(value, days = 0) {
@@ -64104,6 +64129,9 @@ app.get("/api/ayla/health", async (req, res) => {
         starting_readiness_build: AYLA_STARTING_READINESS_BUILD,
         single_roadmap_build: AYLA_SINGLE_ROADMAP_BUILD,
         marketing_build: AYLA_MARKETING_BUILD,
+        private_pilot_build: AYLA_PRIVATE_PILOT_BUILD,
+        exact_exam_date_pathway_estimator: true,
+        private_step1_accelerated_pilot: true,
         anonymous_readiness_sharing: true,
         whatsapp_referral_loop: true,
         admin_governed_referral_rewards: true,
@@ -64310,6 +64338,87 @@ app.get("/api/ayla/exams", (req, res) => aylaSendOk(res, {
   },
 }));
 
+app.post("/api/ayla/pathway-estimate", (req, res) => {
+  try {
+    const estimate = estimateAylaExamPathway(req.body || {});
+    return aylaSendOk(res, { estimate });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 400, error.message || "Failed to estimate the exam pathway");
+  }
+});
+
+app.post("/api/ayla/pathway-compare", (req, res) => {
+  try {
+    const pathways = compareAylaExamPathways(req.body || {});
+    return aylaSendOk(res, {
+      pathways,
+      comparisonOnly: true,
+      passPrediction: false,
+      message: "Compare the workload and tradeoffs for each horizon, then confirm a date only after reviewing verified assessment evidence.",
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 400, error.message || "Failed to compare exam pathways");
+  }
+});
+
+app.post("/api/ayla/students/:studentId/pathway-estimate", async (req, res) => {
+  try {
+    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId, "roadmap");
+    const questionAttempts = aylaValues(db, "aylaQuestionAttempts")
+      .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true }));
+    const completedQuestionIds = new Set(questionAttempts.map((row) => String(row.resourceId || row.contentQuestionId || row.sourceQuestionId || row.id)));
+    const assessmentAttempts = aylaValues(db, "aylaAssessmentAttempts")
+      .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true }))
+      .sort((left, right) => String(right.submittedAt || right.createdAt || "").localeCompare(String(left.submittedAt || left.createdAt || "")));
+    const assignedVideos = aylaValues(db, "aylaResourceAssignments")
+      .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student) && String(row.category || "").toLowerCase() === "video");
+    const completedVideos = assignedVideos.filter((row) => String(row.status || "").toLowerCase() === "completed");
+    const assignedReadings = aylaValues(db, "aylaResourceAssignments")
+      .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student) && String(row.category || "").toLowerCase() === "reading");
+    const completedReadings = assignedReadings.filter((row) => String(row.status || "").toLowerCase() === "completed");
+    const verifiedQbankPercent = completedQuestionIds.size
+      ? Math.min(100, Math.round((completedQuestionIds.size / 3600) * 100))
+      : null;
+    const latestAssessment = assessmentAttempts[0] || null;
+    const estimateInput = {
+      ...student,
+      ...req.body,
+      examTrackId: aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam),
+      qbankCompletedPercent: verifiedQbankPercent ?? aylaNumber(student.qbankCompleted, 0),
+      lectureCompletedPercent: assignedVideos.length
+        ? Math.round((completedVideos.length / assignedVideos.length) * 100)
+        : aylaNumber(req.body.lectureCompletedPercent ?? req.body.lecture_completed_percent, 0),
+      readingCompletedPercent: assignedReadings.length
+        ? Math.round((completedReadings.length / assignedReadings.length) * 100)
+        : aylaNumber(req.body.readingCompletedPercent ?? req.body.reading_completed_percent, 0),
+      latestAssessmentPercent: latestAssessment
+        ? aylaNumber(latestAssessment.scorePercent ?? latestAssessment.score, 0)
+        : aylaNumber(student.currentScore, 0),
+      baselineVerified: Boolean(latestAssessment || student.serverVerifiedBaseline),
+    };
+    const pathways = req.body.compare === true
+      ? compareAylaExamPathways(estimateInput)
+      : [estimateAylaExamPathway(estimateInput)];
+    return aylaSendOk(res, {
+      studentId: student.id,
+      pathways,
+      inputEvidence: {
+        verifiedQuestionAttempts: questionAttempts.length,
+        uniqueVerifiedQuestions: completedQuestionIds.size,
+        verifiedAssessmentId: latestAssessment?.id || null,
+        assignedVideos: assignedVideos.length,
+        completedVideos: completedVideos.length,
+        assignedReadings: assignedReadings.length,
+        completedReadings: completedReadings.length,
+        selfReportedQbankFallback: verifiedQbankPercent === null,
+      },
+      passPrediction: false,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to estimate the student exam pathway");
+  }
+});
+
 app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
   try {
     const examTrackId = aylaCanonicalExamTrack(req.body.examTrackId || req.body.exam_track_id || req.body.exam || req.body.selectedExam);
@@ -64451,7 +64560,7 @@ app.get("/api/ayla/students/:id/dashboard", async (req, res) => {
     const roadmapTasks = aylaV229ActiveRoadmapOutline(db, student);
     const phasePlan = Array.isArray(student.phasePlan) && student.phasePlan.length ? student.phasePlan : aylaPhasePlan(student, recommendation);
     const knowledgeRecommendations = await aylaKnowledgeForStudent(db, student, recommendation, 6);
-    const today = aylaDateOnly();
+    const today = aylaV247StudyDate(student);
     const weakAreaLogs = aylaValues(db, "aylaWeakAreaLogs")
       .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student))
       .filter((row) => String(row.status || "Open").toLowerCase() !== "resolved");
@@ -64463,12 +64572,32 @@ app.get("/api/ayla/students/:id/dashboard", async (req, res) => {
       weakAreaLogs,
       examDefinition: examTrackId ? AYLA_EXAM_REGISTRY[examTrackId] : {},
     });
+    const systemProgress = aylaV189SystemProgress(db, student);
+    const todayPlan = aylaValues(db, "aylaDailyPlans")
+      .filter((row) => String(row.studentId || "") === String(student.id) && String(row.date || "") === today)
+      .sort((left, right) => Number(right.version || 0) - Number(left.version || 0))[0] || null;
+    const todayAssignments = todayPlan
+      ? aylaValues(db, "aylaResourceAssignments").filter((row) => String(row.planId || "") === String(todayPlan.id))
+      : [];
+    const aylaMateFeed = buildAylaMateActivityFeed({
+      student,
+      date: today,
+      systemProgress,
+      plan: todayPlan,
+      assignments: todayAssignments,
+      activityHistory: aylaValues(db, "aylaActivityHistory"),
+      questionAttempts: aylaValues(db, "aylaQuestionAttempts"),
+      assessmentAttempts: aylaValues(db, "aylaAssessmentAttempts"),
+      resources: aylaValues(db, "aylaResources"),
+      revisionQueue: aylaValues(db, "aylaRevisionQueue"),
+    });
 
     return aylaSendOk(res, {
       student: { ...student, phase: recommendation.phase, phasePlan },
       examDashboard: shell?.active_dashboard || null,
       dashboardAccess,
       recommendation,
+      pilotTime: aylaPilotStudyDate(student),
       startingReadinessReport,
       roadmapSummary: {
         targetDate: recommendation.targetDate,
@@ -64488,6 +64617,8 @@ app.get("/api/ayla/students/:id/dashboard", async (req, res) => {
         knowledgeRecommendations,
         qbankBlocks: aylaFilterRows(aylaValues(db, "aylaQbankBlocks"), { studentId: student.id }),
         weakAreaLogs,
+        systemProgress,
+        aylaMateFeed,
         flashcards: aylaFilterRows(aylaValues(db, "aylaFlashcards"), { studentId: student.id }),
         assessmentResults: aylaFilterRows(aylaValues(db, "aylaAssessmentResults"), { studentId: student.id }),
         studyPartnerMatches: aylaValues(db, "aylaStudyPartnerMatches").filter((item) => item.studentAId === student.id || item.studentBId === student.id),
@@ -69497,28 +69628,28 @@ function aylaV214AylaActivityDates(db = {}, student = {}) {
   };
   for (const row of aylaValues(db, "aylaResourceAssignments")) {
     if (!aylaAdaptiveEvidenceMatchesStudent(row, student) || String(row.status || "").toLowerCase() !== "completed") continue;
-    add(row.completedAt || row.updatedAt || row.createdAt);
+    add(row.studyDate || row.study_date || row.completedAt || row.updatedAt || row.createdAt);
   }
   for (const collection of ["aylaReadingProgress", "aylaVideoProgress"]) {
     for (const row of aylaValues(db, collection)) {
       if (!aylaAdaptiveEvidenceMatchesStudent(row, student)) continue;
       const progressed = row.completed === true || Number(row.progressPercent ?? row.progress_percent ?? row.percent ?? row.positionSeconds ?? row.position_seconds ?? row.currentPage ?? row.current_page ?? 0) > 0;
-      if (progressed) add(row.completedAt || row.lastOpenedAt || row.updatedAt || row.createdAt);
+      if (progressed) add(row.studyDate || row.study_date || row.completedAt || row.lastOpenedAt || row.updatedAt || row.createdAt);
     }
   }
   for (const row of aylaValues(db, "aylaQuestionAttempts")) {
-    if (aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true })) add(row.createdAt || row.updatedAt);
+    if (aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true })) add(row.studyDate || row.study_date || row.createdAt || row.updatedAt);
   }
   for (const row of aylaValues(db, "aylaAssessmentAttempts")) {
-    if (aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true })) add(row.submittedAt || row.createdAt || row.updatedAt);
+    if (aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true })) add(row.studyDate || row.study_date || row.submittedAt || row.createdAt || row.updatedAt);
   }
   for (const row of aylaValues(db, "aylaFlashcardReviews")) {
-    if (aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true })) add(row.createdAt || row.updatedAt);
+    if (aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true })) add(row.studyDate || row.study_date || row.createdAt || row.updatedAt);
   }
   for (const row of aylaValues(db, "aylaNotebooks")) {
     if (!aylaAdaptiveEvidenceMatchesStudent(row, student) || row.deletedAt || row.archivedAt) continue;
     const hasStudentWork = (Array.isArray(row.blocks) ? row.blocks : []).some((block) => block && block.contentOrigin !== "approved_source" && String(block.text || "").trim());
-    if (hasStudentWork) add(row.updatedAt || row.createdAt);
+    if (hasStudentWork) add(row.studyDate || row.study_date || row.updatedAt || row.createdAt);
   }
   return [...dates].sort();
 }
@@ -69948,6 +70079,7 @@ function aylaV189Leaderboard(db, period = "weekly") {
   const now = new Date();
   const start = aylaPeriodStart(period === "monthly" ? "monthly" : "weekly", now).getTime();
   const students = aylaValues(db, "aylaStudents").filter((student) => {
+    if (student.pilotTest === true || student.pilot_test === true || student.excludeFromLeaderboard === true || student.exclude_from_leaderboard === true) return false;
     const user = aylaV214RawUserForStudent(db, student);
     return user && !["disabled", "deleted", "blocked"].includes(String(user.status || "active").toLowerCase());
   });
@@ -70519,13 +70651,410 @@ app.get("/api/ayla/admin/resources/coverage", async (req, res) => {
   }
 });
 
+app.get("/api/ayla/admin/pilot/step1/preview", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
+    aylaEnsureSeedData(db);
+    const scenarios = buildAylaStep1PilotScenarios();
+    const qbankCollections = await getContentQbankCatalog({
+      examTrack: "usmle-step-1",
+      destination: "aylamed_qbank",
+    }).catch(() => []);
+    const lectureDrafts = aylaValues(db, "aylaVimeoCatalogDrafts")
+      .filter((row) => aylaCanonicalExamTrack(row.examTrackId || row.exam_track_id || row.examTrack || row.exam_track || row.exam) === "usmle_step_1");
+    const isStep1Resource = (row) =>
+      aylaCanonicalExamTrack(row.examTrackId || row.exam_track_id || row.examTrack || row.exam_track || row.exam) === "usmle_step_1";
+    const approvedLectures = aylaValues(db, "aylaResources")
+      .filter((row) => isStep1Resource(row) && aylaV189ResourceType(row.type) === "vimeo_video" && row.approved !== false);
+    const approvedBooks = aylaValues(db, "aylaResources")
+      .filter((row) => isStep1Resource(row) && ["reading", "book"].includes(aylaV189ResourceType(row.type)) && row.approved !== false);
+    return aylaSendOk(res, {
+      writePerformed: false,
+      confirmationRequired: AYLA_STEP1_PILOT.confirmation,
+      plan: {
+        id: AYLA_STEP1_PILOT.planId,
+        name: "AylaMed Private Step 1 Pilot",
+        public: false,
+        examTracks: ["usmle_step_1"],
+        features: AYLA_STEP1_PILOT.features,
+        leaderboard: false,
+        studyPartnerDiscovery: false,
+      },
+      scenarios,
+      readiness: {
+        qbankCollections: qbankCollections.length,
+        qbankCollectionSummaries: qbankCollections.slice(0, 20).map((row) => ({
+          id: row.id || row.collection_id || null,
+          name: row.name || row.title || row.source || "Step 1 collection",
+          source: row.source || row.provider || "",
+          questionCount: Number(row.question_count || row.questionCount || row.total_questions || 0),
+        })),
+        lectureDrafts: lectureDrafts.length,
+        lectureClassified: lectureDrafts.filter((row) => String(row.status || "").includes("classified")).length,
+        lectureApproved: approvedLectures.length,
+        booksApproved: approvedBooks.length,
+        stagedLaunch: {
+          qbankAndAdaptiveEngine: qbankCollections.length > 0 ? "ready_for_private_pilot" : "blocked_no_approved_qbank_collection",
+          lectures: approvedLectures.length > 0 ? "approved_subset_available" : "classification_or_approval_pending",
+          books: approvedBooks.length > 0 ? "approved_subset_available" : "exact_page_import_pending",
+        },
+      },
+      safeguards: [
+        "Creates AylaMed-only users, students, plans, enrollments, and pilot audit records.",
+        "Does not write LMS or CRM student data.",
+        "Does not publish any plan or resource to ordinary students.",
+        "Does not invent diagnostic scores or completion history.",
+        "Does not seed verified weak-area flashcards before a real verified miss.",
+        "Pilot students are excluded from leaderboard and partner discovery.",
+      ],
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to preview the private Step 1 pilot");
+  }
+});
+
+app.post("/api/ayla/admin/pilot/step1/cohorts", async (req, res) => {
+  try {
+    const admin = await aylaRequireAdmin(req);
+    if (String(req.body.confirmation || "") !== AYLA_STEP1_PILOT.confirmation) {
+      return aylaSendError(res, 400, `Type "${AYLA_STEP1_PILOT.confirmation}" to create the private pilot cohort`);
+    }
+    const result = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const anchorDate = aylaDateOnly();
+      const cohortKey = `step1-${anchorDate}`;
+      const existing = aylaValues(db, "aylaPilotCohorts")
+        .find((row) => row.cohortKey === cohortKey && String(row.status || "active") === "active");
+      if (existing) {
+        return {
+          cohort: existing,
+          credentials: [],
+          alreadyExists: true,
+          message: "The active Step 1 pilot cohort already exists. Passwords are intentionally not stored or re-disclosed.",
+        };
+      }
+
+      const plan = aylaNormalizePlanPayload({
+        id: AYLA_STEP1_PILOT.planId,
+        name: "AylaMed Private Step 1 Pilot",
+        description: "Hidden evaluation access for evidence-based Step 1 onboarding, roadmap, QBank, notes, progress, and approved content testing.",
+        plan_type: "pilot",
+        billing_type: "free",
+        price_cents: 0,
+        access_days: 30,
+        included_features: AYLA_STEP1_PILOT.features,
+        exam_tracks: ["usmle_step_1"],
+        is_active: true,
+        is_public: false,
+        is_featured: false,
+      }, aylaGetItem(db, "aylaPlans", AYLA_STEP1_PILOT.planId) || {}, { strictControls: true });
+      aylaSetItem(db, "aylaPlans", plan);
+
+      const cohort = {
+        id: aylaId("AYLA-PILOT"),
+        cohortKey,
+        name: "USMLE Step 1 private launch cohort",
+        examTrackId: "usmle_step_1",
+        planId: plan.id,
+        status: "active",
+        private: true,
+        anchorDate,
+        maxSimulatedDays: AYLA_STEP1_PILOT.maxDays,
+        studentIds: [],
+        userIds: [],
+        scenarioKeys: [],
+        studentVisibility: false,
+        lmsWrites: false,
+        crmWrites: false,
+        createdBy: admin.user?.id || admin.method || "aylamed-admin",
+        createdAt: aylaNow(),
+        updatedAt: aylaNow(),
+      };
+      const credentials = [];
+
+      for (const scenario of buildAylaStep1PilotScenarios(anchorDate)) {
+        const email = `step1.${scenario.key}.${anchorDate.replace(/-/g, "")}@pilot.aylamed.local`;
+        if (aylaFindUserByEmail(db, email)) {
+          throw Object.assign(new Error(`Pilot account already exists for ${scenario.key}`), { statusCode: 409 });
+        }
+        const password = `Ayla!${crypto.randomBytes(12).toString("base64url")}9`;
+        const hashed = hashPassword(password);
+        const user = {
+          id: aylaId("AYLA-USER"),
+          email,
+          name: scenario.name,
+          phone: "",
+          role: "student",
+          status: "active",
+          studentId: null,
+          activeExamTrackId: "usmle_step_1",
+          publicUsername: "",
+          profileImageUrl: "",
+          timezone: scenario.timezone,
+          country: "",
+          bio: "",
+          authVersion: 1,
+          pilotTest: true,
+          pilot_test: true,
+          pilotCohortId: cohort.id,
+          excludeFromLeaderboard: true,
+          ...hashed,
+          createdAt: aylaNow(),
+          updatedAt: aylaNow(),
+        };
+        const examDefinition = AYLA_EXAM_REGISTRY.usmle_step_1;
+        const onboarding = normalizeAylaOnboardingSubmission({
+          onboardingPath: scenario.onboardingPath,
+          studyStage: scenario.onboardingPath === "starting_fresh" ? "not_started" : "first_pass_in_progress",
+          selectedWeakAreas: scenario.selectedWeakAreas,
+          qbankCompleted: scenario.qbankCompleted || 0,
+          qbankAverage: scenario.qbankAverage || 0,
+        }, { examDefinition });
+        const diagnosticInput = {
+          ...scenario,
+          ...onboarding,
+          aylaUserId: user.id,
+          ayla_user_id: user.id,
+          user_id: user.id,
+          email,
+          examTrackId: "usmle_step_1",
+          exam: examDefinition.label,
+          studentName: scenario.name,
+          goalType: "Exam Day",
+          preferredStudyDays: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].slice(0, scenario.weeklyStudyDays),
+          studyPartnerOptIn: false,
+        };
+        const recommendation = aylaRecommendation(diagnosticInput);
+        const student = {
+          ...aylaStudentFromDiagnostic(diagnosticInput, recommendation),
+          ayla_user_id: user.id,
+          user_id: user.id,
+          pilotTest: true,
+          pilot_test: true,
+          pilotCohortId: cohort.id,
+          pilotScenarioKey: scenario.key,
+          pilotIntendedDiagnosticProfile: scenario.diagnosticProfile,
+          excludeFromLeaderboard: true,
+          studyPartnerOptIn: false,
+          examDatePolicy: scenario.examDatePolicy,
+          timezonePolicy: scenario.timezonePolicy,
+          pilotSimulation: {
+            enabled: true,
+            anchorDate,
+            dayOffset: 0,
+            simulatedDate: anchorDate,
+            maxAdvanceDays: AYLA_STEP1_PILOT.maxDays,
+          },
+        };
+        user.studentId = student.id;
+        aylaSetItem(db, "aylaUsers", user);
+        aylaSetItem(db, "aylaStudents", student);
+
+        const submission = {
+          ...diagnosticInput,
+          id: aylaId("DX"),
+          studentId: student.id,
+          examTrackId: "usmle_step_1",
+          status: onboarding.onboardingStatus === "diagnostic_pending" ? "Diagnostic Pending" : "Received",
+          recommendation,
+          pilotTest: true,
+          createdAt: aylaNow(),
+          updatedAt: aylaNow(),
+        };
+        aylaSetItem(db, "aylaDiagnosticSubmissions", submission);
+        const roadmapTasks = aylaBuildRoadmapTasks(student, recommendation);
+        aylaV229StoreFutureRoadmapOutline(db, student, roadmapTasks, {
+          fromDate: anchorDate,
+          reason: `private_pilot_${scenario.key}`,
+        });
+        const qbankBlock = aylaBuildQbankBlock(student, recommendation, { scheduledDate: anchorDate });
+        aylaSetItem(db, "aylaQbankBlocks", qbankBlock);
+        aylaBuildWeakAreaLogs(student, recommendation).forEach((row) => aylaSetItem(db, "aylaWeakAreaLogs", row));
+        const enrollment = aylaCreateOrUpdateEnrollment(db, {
+          userId: user.id,
+          plan,
+          type: "pilot",
+          source: "admin_private_step1_pilot",
+          accessGranted: true,
+          startsAt: aylaNow(),
+          examTrack: "usmle_step_1",
+          studentId: student.id,
+        });
+        aylaSetItem(db, "aylaCommunityProfiles", {
+          id: aylaId("AYLA-CP"),
+          userId: user.id,
+          studentId: student.id,
+          username: `Private Pilot ${cohort.studentIds.length + 1}`,
+          profileVisibility: "hidden",
+          discoverable: false,
+          allowRequests: false,
+          studyPartnerOptIn: false,
+          leaderboardHidden: true,
+          banned: false,
+          strikes: 0,
+          createdAt: aylaNow(),
+          updatedAt: aylaNow(),
+        });
+
+        cohort.studentIds.push(student.id);
+        cohort.userIds.push(user.id);
+        cohort.scenarioKeys.push(scenario.key);
+        credentials.push({
+          scenarioKey: scenario.key,
+          name: scenario.name,
+          email,
+          password,
+          studentId: student.id,
+          enrollmentId: enrollment.id,
+          onboardingPath: scenario.onboardingPath,
+          examDate: scenario.examDate || null,
+          timezone: scenario.timezone || null,
+          dashboardRoute: "/?signin=1",
+        });
+      }
+
+      aylaSetItem(db, "aylaPilotCohorts", cohort);
+      aylaSetItem(db, "aylaPilotAuditEvents", {
+        id: aylaId("AYLA-PILOT-EVENT"),
+        cohortId: cohort.id,
+        action: "private_step1_cohort_created",
+        actorId: admin.user?.id || admin.method || "aylamed-admin",
+        studentIds: cohort.studentIds,
+        studentVisibility: false,
+        lmsWrites: false,
+        crmWrites: false,
+        createdAt: aylaNow(),
+      });
+      return { cohort, credentials, alreadyExists: false };
+    });
+    return aylaSendOk(res, {
+      ...result,
+      credentialDisclosure: result.credentials.length ? "one_time" : "not_repeated",
+      message: result.message || "Five private Step 1 pilot students were created. No diagnostic result or completion history was fabricated.",
+    }, result.alreadyExists ? 200 : 201);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to create the private Step 1 pilot cohort");
+  }
+});
+
+app.post("/api/ayla/admin/pilot/students/:studentId/advance", async (req, res) => {
+  try {
+    const admin = await aylaRequireAdmin(req);
+    if (String(req.body.confirmation || "") !== String(req.params.studentId)) {
+      return aylaSendError(res, 400, "Type the exact pilot student ID to advance its simulated study date");
+    }
+    const result = await mutateAylaDb(async (db) => {
+      const existing = aylaGetItem(db, "aylaStudents", req.params.studentId);
+      if (!existing) throw Object.assign(new Error("AylaMed pilot student not found"), { statusCode: 404 });
+      const before = aylaPilotStudyDate(existing);
+      const student = {
+        ...advanceAylaPilotStudyDate(existing, req.body.days || 1),
+        updatedAt: aylaNow(),
+      };
+      const after = aylaPilotStudyDate(student);
+      aylaSetItem(db, "aylaStudents", student);
+      const built = await aylaV189BuildDailyPlan(db, student, after.date, { force: false });
+      const event = {
+        id: aylaId("AYLA-PILOT-EVENT"),
+        cohortId: student.pilotCohortId,
+        studentId: student.id,
+        action: "pilot_study_date_advanced",
+        days: after.dayOffset - before.dayOffset,
+        fromDate: before.date,
+        toDate: after.date,
+        completedHistoryPreserved: true,
+        actorId: admin.user?.id || admin.method || "aylamed-admin",
+        createdAt: aylaNow(),
+      };
+      aylaSetItem(db, "aylaPilotAuditEvents", event);
+      return {
+        student,
+        before,
+        after,
+        plan: aylaV189SanitizePlanBundle(db, built.plan, built.assignments),
+        event,
+      };
+    });
+    return aylaSendOk(res, {
+      ...result,
+      productionClockChanged: false,
+      completedHistoryPreserved: true,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to advance the pilot study date");
+  }
+});
+
+app.get("/api/ayla/admin/pilot/cohorts/:cohortId/report", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
+    const cohort = aylaGetItem(db, "aylaPilotCohorts", req.params.cohortId);
+    if (!cohort) return aylaSendError(res, 404, "AylaMed pilot cohort not found");
+    const students = cohort.studentIds.map((id) => aylaGetItem(db, "aylaStudents", id)).filter(Boolean);
+    const report = students.map((student) => {
+      const filter = (collection) => aylaValues(db, collection).filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student));
+      const systemProgress = aylaV189SystemProgress(db, student);
+      return {
+        studentId: student.id,
+        name: student.name,
+        scenarioKey: student.pilotScenarioKey,
+        onboardingPath: student.onboardingPath,
+        examDate: student.examDate || null,
+        timezone: student.timezone || null,
+        pilotTime: aylaPilotStudyDate(student),
+        counts: {
+          dailyPlans: filter("aylaDailyPlans").length,
+          assignments: filter("aylaResourceAssignments").length,
+          verifiedQuestions: filter("aylaQuestionAttempts").filter((row) => row.serverVerified === true).length,
+          assessments: filter("aylaAssessmentAttempts").filter((row) => row.serverVerified === true).length,
+          notebooks: filter("aylaNotebooks").length,
+          videoProgress: filter("aylaVideoProgress").length,
+          readingProgress: filter("aylaReadingProgress").length,
+          flashcardReviews: filter("aylaFlashcardReviews").length,
+          weakAreaCards: aylaValues(db, "aylaResources").filter((row) => String(row.ownerStudentId || row.studentId || "") === String(student.id) && row.bucket === "weak_area").length,
+        },
+        systemProgress,
+        aylaMateFeed: buildAylaMateActivityFeed({
+          student,
+          date: aylaV247StudyDate(student),
+          systemProgress,
+          activityHistory: filter("aylaActivityHistory"),
+          questionAttempts: filter("aylaQuestionAttempts"),
+          assessmentAttempts: filter("aylaAssessmentAttempts"),
+          resources: aylaValues(db, "aylaResources"),
+          revisionQueue: filter("aylaRevisionQueue"),
+        }),
+      };
+    });
+    return aylaSendOk(res, {
+      cohort,
+      report,
+      warnings: {
+        noFabricatedHistory: true,
+        lectureApprovalPending: !aylaValues(db, "aylaResources").some((row) =>
+          aylaCanonicalExamTrack(row.examTrackId || row.exam_track_id || row.examTrack || row.exam_track || row.exam) === "usmle_step_1"
+          && aylaV189ResourceType(row.type) === "vimeo_video"
+          && row.approved !== false),
+        bookImportPending: !aylaValues(db, "aylaResources").some((row) =>
+          aylaCanonicalExamTrack(row.examTrackId || row.exam_track_id || row.examTrack || row.exam_track || row.exam) === "usmle_step_1"
+          && ["reading", "book"].includes(aylaV189ResourceType(row.type))
+          && row.approved !== false),
+      },
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load the pilot cohort report");
+  }
+});
+
 // -----------------------------------------------------------------------------
 // Daily workspace and permanent learning history.
 // -----------------------------------------------------------------------------
 app.get("/api/ayla/students/:studentId/personal-tutor", async (req, res) => {
   try {
     const initial = await aylaV189RequireStudent(req, req.params.studentId, "personal_tutor");
-    const date = String(req.query.date || aylaDateOnly()).slice(0, 10);
+    const date = aylaV247StudyDate(initial.student, req.query.date);
     const snapshot = await aylaV213AtomicTutorSnapshot(initial, date);
     res.setHeader("Cache-Control", "private, no-store");
     return aylaSendOk(res, {
@@ -71954,9 +72483,9 @@ app.post("/api/ayla/admin/resources/vimeo-catalog/review", async (req, res) => {
 app.post("/api/ayla/students/:studentId/personal-tutor/apply", async (req, res) => {
   try {
     const initial = await aylaV189RequireStudent(req, req.params.studentId, "personal_tutor");
-    const date = String(req.body.date || aylaDateOnly()).slice(0, 10);
+    const date = aylaV247StudyDate(initial.student, req.body.date);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return aylaSendError(res, 400, "A valid roadmap date is required");
-    if (date < aylaDateOnly()) return aylaSendError(res, 409, "Personal Tutor cannot rebuild a past roadmap day");
+    if (date < aylaV247StudyDate(initial.student)) return aylaSendError(res, 409, "Personal Tutor cannot rebuild a past roadmap day");
     const result = await mutateAylaDb(async (db) => {
       const { user, student } = aylaV213AtomicTutorContext(db, initial);
       const expectedPlanId = String(req.body.expectedPlanId || req.body.expected_plan_id || "").trim();
@@ -72027,7 +72556,7 @@ app.get("/api/ayla/students/:studentId/daily-workspace", async (req, res) => {
   try {
     const { student, db } = await aylaV189RequireStudent(req, req.params.studentId, "roadmap");
     aylaEnsureSeedData(db);
-    const date = String(req.query.date || aylaDateOnly()).slice(0, 10);
+    const date = aylaV247StudyDate(student, req.query.date);
     const built = await aylaV189BuildDailyPlan(db, student, date, { force: false });
     const systemProgress = aylaV189SystemProgress(db, student);
     const warning = aylaV189BacklogWarning(db, student, date, systemProgress);
@@ -72052,9 +72581,21 @@ app.get("/api/ayla/students/:studentId/daily-workspace", async (req, res) => {
       activityEvents: aylaValues(db, "aylaActivityHistory").filter((row) => String(row.studentId) === String(student.id)).length,
     };
     const tomorrowPreview = await aylaV189TomorrowPreview(db, student, date);
+    const aylaMateFeed = buildAylaMateActivityFeed({
+      student,
+      date,
+      systemProgress,
+      plan: built.plan,
+      assignments: built.assignments,
+      activityHistory: history,
+      questionAttempts: recentQuestionAttempts,
+      assessmentAttempts: recentAssessments,
+      resources: aylaValues(db, "aylaResources"),
+      revisionQueue: aylaValues(db, "aylaRevisionQueue"),
+    });
     await writeAylaDb(db);
     const safeBundle = aylaV189SanitizePlanBundle(db, built.plan, built.assignments);
-    return aylaSendOk(res, { student, date, plan: safeBundle.plan, assignments: safeBundle.assignments, stablePlanReused: built.reused, tomorrowPreview, warning, systemProgress, history, historyCounts, recentReadingProgress, recentVideoProgress, recentQuestionAttempts, recentFlashcardReviews, recentAssessments, recentPlans, resourceCounts: Object.values(db.aylaResources || {}).reduce((acc, row) => { const type = aylaV189ResourceType(row.type); acc[type] = (acc[type] || 0) + 1; return acc; }, {}) });
+    return aylaSendOk(res, { student, date, pilotTime: aylaPilotStudyDate(student), plan: safeBundle.plan, assignments: safeBundle.assignments, stablePlanReused: built.reused, tomorrowPreview, warning, systemProgress, aylaMateFeed, history, historyCounts, recentReadingProgress, recentVideoProgress, recentQuestionAttempts, recentFlashcardReviews, recentAssessments, recentPlans, resourceCounts: Object.values(db.aylaResources || {}).reduce((acc, row) => { const type = aylaV189ResourceType(row.type); acc[type] = (acc[type] || 0) + 1; return acc; }, {}) });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load AylaMed daily workspace");
   }
@@ -72063,7 +72604,7 @@ app.get("/api/ayla/students/:studentId/daily-workspace", async (req, res) => {
 app.post("/api/ayla/students/:studentId/daily-workspace/rebuild", async (req, res) => {
   try {
     const { student, db } = await aylaV189RequireStudent(req, req.params.studentId, "roadmap");
-    const date = String(req.body.date || aylaDateOnly()).slice(0, 10);
+    const date = aylaV247StudyDate(student, req.body.date);
     const built = await aylaV189BuildDailyPlan(db, student, date, { force: true, includeAssessment: req.body.includeAssessment === true });
     aylaV189RecordActivity(db, student.id, "daily_plan_rebuilt", { date, reason: req.body.reason || "student_request" });
     await writeAylaDb(db);
