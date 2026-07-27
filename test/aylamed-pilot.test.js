@@ -7,6 +7,10 @@ import {
   buildAylaMateActivityFeed,
   buildAylaStep1PilotScenarios,
 } from "../lib/aylamed-pilot.js";
+import {
+  aylaPilotContentScope,
+  aylaPilotContentVisibleToStudent,
+} from "../lib/aylamed-pilot-content.js";
 
 test("Step 1 pilot matrix covers five distinct onboarding and timing conditions", () => {
   const scenarios = buildAylaStep1PilotScenarios("2026-07-27");
@@ -64,4 +68,54 @@ test("AylaMate feed distinguishes delivered work from pending promises", () => {
   const miss = feed.find((row) => row.id === "question-miss-attempt-1");
   assert.equal(miss.status, "recorded");
   assert.match(miss.message, /no mistake card is marked as delivered yet/i);
+});
+
+test("private pilot content is invisible to ordinary students", () => {
+  const resource = {
+    id: "book-1",
+    accessScope: "private_pilot",
+    pilotCohortId: "cohort-1",
+  };
+  assert.deepEqual(aylaPilotContentScope(resource), {
+    accessScope: "private_pilot",
+    pilotOnly: true,
+    pilotCohortId: "cohort-1",
+    pilotStudentIds: [],
+  });
+  assert.equal(aylaPilotContentVisibleToStudent(resource, {
+    id: "ordinary-1",
+    pilotTest: false,
+    pilotCohortId: "cohort-1",
+  }), false);
+  assert.equal(aylaPilotContentVisibleToStudent(resource, {
+    id: "pilot-other",
+    pilotTest: true,
+    pilotCohortId: "cohort-2",
+  }), false);
+  assert.equal(aylaPilotContentVisibleToStudent(resource, {
+    id: "pilot-1",
+    pilotTest: true,
+    pilotCohortId: "cohort-1",
+  }), true);
+});
+
+test("pilot student allowlists narrow cohort content without affecting standard resources", () => {
+  const scoped = {
+    pilot_only: true,
+    pilot_student_ids: ["pilot-1", "pilot-2"],
+  };
+  assert.equal(aylaPilotContentVisibleToStudent(scoped, {
+    id: "pilot-1",
+    pilotTest: true,
+  }), true);
+  assert.equal(aylaPilotContentVisibleToStudent(scoped, {
+    id: "pilot-3",
+    pilotTest: true,
+  }), false);
+  assert.equal(aylaPilotContentVisibleToStudent({
+    id: "ordinary-book",
+  }, {
+    id: "ordinary-1",
+    pilotTest: false,
+  }), true);
 });

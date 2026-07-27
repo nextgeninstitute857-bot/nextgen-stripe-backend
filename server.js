@@ -145,6 +145,10 @@ import {
   resolveAylaStudentShell,
 } from "./lib/aylamed-student-shell.js";
 import {
+  aylaPilotContentScope,
+  aylaPilotContentVisibleToStudent,
+} from "./lib/aylamed-pilot-content.js";
+import {
   aylaContentHubAssignmentProgress,
   aylaContentHubTaxonomyDefinition,
   aylaContentHubVideoMatchesId,
@@ -67132,6 +67136,7 @@ function aylaV189NormalizeResource(payload = {}, existing = {}) {
   const estimatedMinutes = Math.max(1, Math.min(240, aylaNumber(payload.estimatedMinutes ?? payload.estimated_minutes ?? existing.estimatedMinutes ?? existing.estimated_minutes, type === "internal_mcq" || type === "external_question" ? 2 : type === "legacy_cdm_case" ? 12 : type === "flashcard" ? 1 : type === "assessment" ? 30 : 20)));
   const examTrackId = aylaCanonicalExamTrack(payload.examTrackId || payload.exam_track_id || payload.examTrack || payload.exam_track || payload.exam || existing.examTrackId || existing.exam_track_id || existing.examTrack || existing.exam_track || existing.exam);
   const examDefinition = examTrackId ? AYLA_EXAM_REGISTRY[examTrackId] : null;
+  const pilotContentScope = aylaPilotContentScope({ ...existing, ...payload });
   const resource = {
     ...existing,
     ...payload,
@@ -67142,6 +67147,10 @@ function aylaV189NormalizeResource(payload = {}, existing = {}) {
     provider: aylaV189CleanText(payload.provider || existing.provider || (type === "vimeo_video" ? "Vimeo" : "AylaMed")),
     examTrackId,
     examTrack: examDefinition?.label || "Unmapped",
+    accessScope: pilotContentScope.accessScope,
+    pilotOnly: pilotContentScope.pilotOnly,
+    pilotCohortId: pilotContentScope.pilotCohortId,
+    pilotStudentIds: pilotContentScope.pilotStudentIds,
     curriculumVersion: aylaV189CleanText(payload.curriculumVersion || payload.curriculum_version || existing.curriculumVersion || existing.curriculum_version || examDefinition?.curriculumVersion || ""),
     authorizationStatus: aylaV189CleanText(payload.authorizationStatus || payload.authorization_status || existing.authorizationStatus || existing.authorization_status || "pending_review").toLowerCase(),
     sourceAccessMode: aylaV189CleanText(payload.sourceAccessMode || payload.source_access_mode || existing.sourceAccessMode || existing.source_access_mode || "protected").toLowerCase(),
@@ -67379,6 +67388,7 @@ function aylaV189RelevantResources(db, student, types = []) {
   return aylaValues(db, "aylaResources")
     .filter((resource) => resource.approved !== false && !["disabled", "deleted", "rejected", "archived"].includes(String(resource.status || "").toLowerCase()))
     .filter((resource) => !resource.ownerStudentId || String(resource.ownerStudentId) === String(student.id))
+    .filter((resource) => aylaPilotContentVisibleToStudent(resource, student))
     .filter((resource) => !selected.size || selected.has(aylaV189ResourceType(resource.type)))
     .filter((resource) => {
       const resourceExam = aylaCanonicalExamTrack(resource.examTrackId || resource.examTrack || resource.exam_track || resource.exam);
