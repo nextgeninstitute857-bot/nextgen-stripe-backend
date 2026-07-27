@@ -36,7 +36,7 @@ test("pilot time advances independently and is capped at two weeks", () => {
   assert.throws(() => advanceAylaPilotStudyDate({ id: "real-1" }, 1), /Only a private pilot student/);
 });
 
-test("AylaMate feed distinguishes delivered work from pending promises", () => {
+test("AylaMe feed distinguishes delivered work from pending promises and narrates verified reviews", () => {
   const feed = buildAylaMateActivityFeed({
     student: { id: "pilot-1", pilotTest: true, examDate: "", timezone: "" },
     date: "2026-07-28",
@@ -54,9 +54,19 @@ test("AylaMate feed distinguishes delivered work from pending promises", () => {
       id: "attempt-1",
       studentId: "pilot-1",
       serverVerified: true,
-      correct: false,
+      outcome: "incorrect",
       system: "Cardiovascular",
       topic: "Heart failure",
+    }],
+    flashcardReviews: [{
+      id: "review-1",
+      studentId: "pilot-1",
+      serverVerified: true,
+      resourceId: "card-1",
+      system: "Cardiovascular",
+      topic: "Cardiac preload",
+      rating: "good",
+      nextReviewDate: "2026-07-31",
     }],
     resources: [],
     plan: { id: "plan-1", version: 2, reason: "Verified weak-area evidence." },
@@ -68,6 +78,9 @@ test("AylaMate feed distinguishes delivered work from pending promises", () => {
   const miss = feed.find((row) => row.id === "question-miss-attempt-1");
   assert.equal(miss.status, "recorded");
   assert.match(miss.message, /no mistake card is marked as delivered yet/i);
+  const review = feed.find((row) => row.id === "flashcard-review-review-1");
+  assert.equal(review.status, "delivered");
+  assert.match(review.message, /next recall is scheduled for 2026-07-31/i);
 });
 
 test("private pilot content is invisible to ordinary students", () => {
