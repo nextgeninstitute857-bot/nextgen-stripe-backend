@@ -156,6 +156,14 @@ import {
   selectAylaRoadmapVideo,
 } from "./lib/aylamed-content-hub.js";
 import {
+  applyAylaVimeoPermanentRemoval,
+  aylaVimeoAllowedFor,
+  normalizeAylaVimeoDeliveryControl,
+  previewAylaVimeoPermanentRemoval,
+  resolveAylaVimeoDelivery,
+  summarizeAylaVimeoDeliveryControls,
+} from "./lib/aylamed-vimeo-delivery-controls.js";
+import {
   aylaLibraryStudentTitle,
   aylaLibraryStudentPageRange,
   aylaLibraryAssignmentProgress,
@@ -298,6 +306,7 @@ import {
   buildVimeoLibraryManifest,
   buildVimeoTopicClassificationRequest,
   extractVimeoWebSearchEvidence,
+  fetchVimeoLectureEvidence,
   fetchVimeoFolder,
   fetchVimeoFolders,
   fetchVimeoLibrary,
@@ -60421,6 +60430,8 @@ const AYLA_COLLECTIONS = {
   aylaVimeoCatalogSources: { route: "/api/ayla/admin/resources/vimeo-catalog/sources", prefix: "AYLA-VIMEO-SOURCE", label: "vimeoCatalogSource", customPost: true, immutableAdminWrites: true },
   aylaVimeoCatalogDrafts: { route: "/api/ayla/admin/resources/vimeo-catalog", prefix: "AYLA-VIMEO-DRAFT", label: "vimeoCatalogDraft", customPost: true, immutableAdminWrites: true },
   aylaVimeoCatalogJobs: { route: "/api/ayla/admin/resources/vimeo-catalog/jobs", prefix: "AYLA-VIMEO-JOB", label: "vimeoCatalogJob", customPost: true, immutableAdminWrites: true },
+  aylaVimeoDeliveryControls: { route: "/api/ayla/admin/resources/vimeo-delivery-controls", prefix: "AYLA-VIMEO-DELIVERY", label: "vimeoDeliveryControl", customPost: true, immutableAdminWrites: true },
+  aylaVimeoRemovalTombstones: { route: "/api/ayla/admin/resources/vimeo-removal-tombstones", prefix: "AYLA-VIMEO-REMOVED", label: "vimeoRemovalTombstone", customPost: true, immutableAdminWrites: true },
   aylaNotebooks: { route: "/api/ayla/notebooks", prefix: "AYLA-NOTE", label: "notebook", customPost: true, immutableAdminWrites: true },
   aylaNotebookVersions: { route: "/api/ayla/notebook-versions", prefix: "AYLA-NV", label: "notebookVersion", customPost: true, immutableAdminWrites: true },
   aylaResourceAssignments: { route: "/api/ayla/resource-assignments", prefix: "AYLA-ASN", label: "resourceAssignment" },
@@ -60572,6 +60583,8 @@ const DEFAULT_AYLA_DB = {
   aylaVimeoCatalogSources: {},
   aylaVimeoCatalogDrafts: {},
   aylaVimeoCatalogJobs: {},
+  aylaVimeoDeliveryControls: {},
+  aylaVimeoRemovalTombstones: {},
   aylaNotebooks: {},
   aylaNotebookVersions: {},
   aylaResourceAssignments: {},
@@ -64258,6 +64271,9 @@ app.get("/api/ayla/routes", (req, res) => {
       "POST /api/ayla/admin/resources/sync-training-center",
       "POST /api/ayla/admin/resources/register-vimeo",
       "POST /api/ayla/admin/resources/sync-vimeo-library",
+      "GET|PUT /api/ayla/admin/resources/vimeo-delivery-controls",
+      "DELETE /api/ayla/admin/resources/vimeo-delivery-controls/:controlId",
+      "POST /api/ayla/admin/resources/vimeo-catalog/permanent-removal (preview-first, typed confirmation)",
       "GET /api/ayla/community/leaderboard",
       "GET /api/ayla/users",
       "POST /api/ayla/billing/create-checkout",
@@ -67310,24 +67326,28 @@ async function aylaV210RegistryVideoInputs(student, destinations) {
   }
 }
 
-async function aylaV210EligibleVideos(db, student, { forRoadmap = false } = {}) {
+async function aylaV210EligibleVideos(db, student, { forRoadmap = false, forNotes = false } = {}) {
   const examTrackId = aylaCanonicalExamTrack(
     student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam,
   );
   if (!examTrackId) return { videos: [], assignments: [], warning: "unsupported_student_exam_track" };
   const assignments = aylaV210VideoAssignments(db, student);
+  const deliveryControls = aylaValues(db, "aylaVimeoDeliveryControls");
+  const destination = forNotes ? "notes" : forRoadmap ? "roadmap" : "content_hub";
   const legacy = aylaV189RelevantResources(db, student, ["vimeo_video", "video_transcript"])
+    .filter((row) => aylaVimeoAllowedFor(row, deliveryControls, destination))
     .map((row) => ({
       ...row,
       sourceType: "legacy",
       deliveryDestinations: ["aylamed_content_hub", "aylamed_roadmap"],
+      effectiveDelivery: resolveAylaVimeoDelivery(row, deliveryControls),
     }));
   const registry = await aylaV210RegistryVideoInputs(
     student,
     forRoadmap ? ["aylamed_roadmap"] : ["aylamed_content_hub", "aylamed_roadmap"],
   );
   let videos = normalizeAylaContentHubVideos([...legacy, ...registry.rows], { examTrack: examTrackId });
-  if (!forRoadmap) {
+  if (!forRoadmap && !forNotes) {
     videos = videos.filter((video) =>
       video.sourceType !== "registry"
         || video.deliveryDestinations.includes("aylamed_content_hub")
@@ -70534,6 +70554,17 @@ function aylaVimeoCatalogAdminActor(auth = {}) {
   };
 }
 
+function aylaVimeoDeliveryControls(db) {
+  return aylaValues(db, "aylaVimeoDeliveryControls");
+}
+
+function aylaVimeoDeliveryAdminView(resource, controls) {
+  return {
+    ...resource,
+    effectiveDelivery: resolveAylaVimeoDelivery(resource, controls),
+  };
+}
+
 function aylaVimeoCatalogModel() {
   return String(process.env.AYLA_VIMEO_CLASSIFIER_MODEL || "gpt-5.6").trim() || "gpt-5.6";
 }
@@ -70714,7 +70745,7 @@ async function ngRunAylaVimeoCatalogClassificationJob(queueContext) {
     aylaSetItem(db, "aylaVimeoCatalogDrafts", currentDraft);
   });
   await queueContext.heartbeat({
-    stage: "researching_medical_topic",
+    stage: "reading_vimeo_lecture_evidence",
     domain_job_id: domainJobId,
     draft_id: draftId,
     title: draft.sourceTitle,
@@ -70727,13 +70758,17 @@ async function ngRunAylaVimeoCatalogClassificationJob(queueContext) {
     error.statusCode = 400;
     throw error;
   }
-  const taxonomyRows = await aylaVimeoCatalogTaxonomy(draft.examTrackId);
+  const [taxonomyRows, contentEvidence] = await Promise.all([
+    aylaVimeoCatalogTaxonomy(draft.examTrackId),
+    fetchVimeoLectureEvidence({ videoId: draft.vimeoId }),
+  ]);
   const request = buildVimeoTopicClassificationRequest(draft, {
     examTrackLabel: examDefinition.label,
     allowedSystems: examDefinition.systems,
     taxonomyRows,
     taxonomyDefinition: aylaContentHubTaxonomyDefinition(draft.examTrackId),
     allowedDomains: aylaVimeoCatalogAllowedDomains(),
+    contentEvidence,
   });
   const model = aylaVimeoCatalogModel();
   const started = Date.now();
@@ -70784,7 +70819,7 @@ async function ngRunAylaVimeoCatalogClassificationJob(queueContext) {
     aylaSetItem(db, "aylaVimeoCatalogDrafts", currentDraft);
     await aylaRecordAiUsage(db, {
       user: domainJob.requestedBy || { id: "aylamed-admin", email: "", name: "AylaMed administrator" },
-      feature: "vimeo_catalog_web_classification",
+      feature: "vimeo_catalog_transcript_web_classification",
       model: ai.raw_model || model,
       usage: ai.usage,
       durationMs: Date.now() - started,
@@ -70831,7 +70866,8 @@ async function aylaQueueVimeoCatalogClassification({
       webSearchRequired: true,
       allowedDomains: aylaVimeoCatalogAllowedDomains(),
       titleIsTopicHeading: true,
-      videoContentInspected: false,
+      vimeoCaptionTranscriptAttempted: true,
+      transcriptStored: false,
     },
     draftIds: eligibleDrafts.map((row) => row.id),
     total: eligibleDrafts.length,
@@ -71041,6 +71077,11 @@ async function aylaSyncVimeoCatalogSource({
 
   const result = await mutateAylaDb(async (db) => {
     aylaEnsureSeedData(db);
+    const permanentlyRemovedVimeoIds = new Set(
+      aylaValues(db, "aylaVimeoRemovalTombstones")
+        .map((row) => String(row.vimeoId || row.videoId || row.video_id || "").trim())
+        .filter(Boolean),
+    );
     const sourceDrafts = aylaValues(db, "aylaVimeoCatalogDrafts")
       .filter((row) => aylaVimeoCatalogDraftSourceMatches(row, resolvedSource));
     const existingDrafts = new Map(
@@ -71066,6 +71107,10 @@ async function aylaSyncVimeoCatalogSource({
     for (const row of manifest) {
       const providerId = String(row.resource?.vimeoId || "");
       if (!providerId) {
+        skipped += 1;
+        continue;
+      }
+      if (permanentlyRemovedVimeoIds.has(providerId)) {
         skipped += 1;
         continue;
       }
@@ -71247,11 +71292,184 @@ app.get("/api/ayla/admin/resources/vimeo-folders", async (req, res) => {
   }
 });
 
+app.get("/api/ayla/admin/resources/vimeo-delivery-controls", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
+    const controls = aylaVimeoDeliveryControls(db)
+      .sort((left, right) => String(left.scope || "").localeCompare(String(right.scope || ""))
+        || String(left.target || "").localeCompare(String(right.target || "")));
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, {
+      controls,
+      summary: summarizeAylaVimeoDeliveryControls(controls),
+      precedence: ["video", "folder", "type", "default"],
+      modes: {
+        active: "Visible in Content Hub and available to Roadmap.",
+        hidden_from_content_hub: "Hidden from Content Hub browsing but available on an assigned Roadmap day.",
+        content_hub_only: "Visible in Content Hub but excluded from new Roadmap scheduling.",
+        disabled_everywhere: "Excluded from Content Hub and new Roadmap scheduling; notes and history are preserved.",
+      },
+      permanent_removal: {
+        separate_action: true,
+        preview_required: true,
+        typed_confirmation_required: true,
+        deletes_vimeo_asset: false,
+      },
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load Vimeo delivery controls");
+  }
+});
+
+app.put("/api/ayla/admin/resources/vimeo-delivery-controls", async (req, res) => {
+  try {
+    const auth = await aylaRequireAdmin(req);
+    const actor = aylaVimeoCatalogAdminActor(auth);
+    const saved = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const proposed = normalizeAylaVimeoDeliveryControl(req.body || {});
+      const existing = aylaGetItem(db, "aylaVimeoDeliveryControls", proposed.id) || {};
+      const next = {
+        ...normalizeAylaVimeoDeliveryControl(req.body || {}, existing),
+        createdAt: existing.createdAt || aylaNow(),
+        createdBy: existing.createdBy || actor,
+        updatedAt: aylaNow(),
+        updatedBy: actor,
+      };
+      aylaSetItem(db, "aylaVimeoDeliveryControls", next);
+      await aylaLog(db, "resource-delivery-control", "Vimeo lecture delivery control updated", {
+        control_id: next.id,
+        scope: next.scope,
+        target: next.target,
+        exam_track_id: next.examTrackId,
+        content_hub_enabled: next.contentHubEnabled,
+        roadmap_enabled: next.roadmapEnabled,
+        actor,
+      });
+      return next;
+    });
+    return aylaSendOk(res, {
+      control: saved,
+      message: "The Vimeo delivery rule was updated. No Vimeo file, note, progress record, or historical assignment was deleted.",
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update Vimeo delivery control");
+  }
+});
+
+app.delete("/api/ayla/admin/resources/vimeo-delivery-controls/:controlId", async (req, res) => {
+  try {
+    const auth = await aylaRequireAdmin(req);
+    const actor = aylaVimeoCatalogAdminActor(auth);
+    const removed = await mutateAylaDb(async (db) => {
+      const existing = aylaGetItem(db, "aylaVimeoDeliveryControls", req.params.controlId);
+      if (!existing) {
+        const error = new Error("Vimeo delivery control not found");
+        error.statusCode = 404;
+        throw error;
+      }
+      aylaDeleteItem(db, "aylaVimeoDeliveryControls", existing.id);
+      await aylaLog(db, "resource-delivery-control", "Vimeo lecture delivery control removed; broader rule restored", {
+        control_id: existing.id,
+        scope: existing.scope,
+        target: existing.target,
+        actor,
+      });
+      return existing;
+    });
+    return aylaSendOk(res, {
+      removed_control: removed,
+      message: "The override was removed. The video now inherits the next broader folder, type, or default rule.",
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to remove Vimeo delivery control");
+  }
+});
+
+app.post("/api/ayla/admin/resources/vimeo-catalog/permanent-removal", async (req, res) => {
+  try {
+    const auth = await aylaRequireAdmin(req);
+    const actor = aylaVimeoCatalogAdminActor(auth);
+    const videoId = String(req.body.video_id || req.body.videoId || req.body.resource_id || req.body.resourceId || "").trim();
+    if (!videoId) return aylaSendError(res, 400, "video_id is required");
+    const commit = req.body.commit === true;
+    const requiredConfirmation = `PERMANENTLY REMOVE ${videoId}`;
+    if (!commit) {
+      const db = await readAylaDb();
+      const impact = previewAylaVimeoPermanentRemoval(db, videoId);
+      if (!impact.active_resources && !impact.catalog_drafts) return aylaSendError(res, 404, "AylaMed Vimeo video not found");
+      res.setHeader("Cache-Control", "private, no-store");
+      return aylaSendOk(res, {
+        preview_only: true,
+        impact,
+        required_confirmation: requiredConfirmation,
+        vimeo_asset_deleted: false,
+        message: "Review the exact impact. Permanent removal deletes the AylaMed catalog record and linked student notes/progress/assignment references, but not the original Vimeo file or immutable audit log.",
+      });
+    }
+    if (String(req.body.confirmation || "") !== requiredConfirmation) {
+      return aylaSendError(res, 409, `Type "${requiredConfirmation}" exactly to continue`);
+    }
+    const result = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const impact = previewAylaVimeoPermanentRemoval(db, videoId);
+      if (!impact.active_resources && !impact.catalog_drafts) {
+        const error = new Error("AylaMed Vimeo video not found");
+        error.statusCode = 404;
+        throw error;
+      }
+      const removal = applyAylaVimeoPermanentRemoval(db, videoId);
+      const timestamp = aylaNow();
+      const tombstone = {
+        id: `AYLA-VIMEO-REMOVED-${String(videoId).replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 120)}`,
+        type: "vimeo_permanent_removal_tombstone",
+        vimeoId: impact.video_id,
+        aliases: removal.aliases,
+        removed: removal.removed,
+        vimeoAssetDeleted: false,
+        immutableAuditHistoryPreserved: true,
+        removedAt: timestamp,
+        removedBy: actor,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      aylaSetItem(db, "aylaVimeoRemovalTombstones", tombstone);
+      await aylaLog(db, "resource-permanent-removal", "AylaMed Vimeo lecture permanently removed after impact preview and typed confirmation", {
+        tombstone_id: tombstone.id,
+        vimeo_id: tombstone.vimeoId,
+        removed: removal.removed,
+        vimeo_asset_deleted: false,
+        immutable_audit_history_preserved: true,
+        actor,
+      });
+      return { ...removal, tombstone };
+    });
+    return aylaSendOk(res, {
+      preview_only: false,
+      removed: result.removed,
+      tombstone: result.tombstone,
+      vimeo_asset_deleted: false,
+      message: "The lecture was permanently removed from AylaMed and cannot be recreated by folder sync. The original Vimeo file and immutable removal audit were preserved.",
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to permanently remove Vimeo lecture");
+  }
+});
+
 app.get("/api/ayla/admin/resources/vimeo-catalog/sources", async (req, res) => {
   try {
     await aylaRequireAdmin(req);
     const db = await readAylaDb();
+    const controls = aylaVimeoDeliveryControls(db);
     const sources = aylaValues(db, "aylaVimeoCatalogSources")
+      .map((source) => aylaVimeoDeliveryAdminView({
+        ...source,
+        sourceData: {
+          folder_id: source.folderId,
+          catalog_source_id: source.id,
+        },
+      }, controls))
       .sort((left, right) => String(left.examTrack || "").localeCompare(String(right.examTrack || ""))
         || String(left.folderName || "").localeCompare(String(right.folderName || "")));
     res.setHeader("Cache-Control", "private, no-store");
@@ -71259,6 +71477,7 @@ app.get("/api/ayla/admin/resources/vimeo-catalog/sources", async (req, res) => {
       build: AYLA_VIMEO_CATALOG_BUILD,
       total: sources.length,
       sources,
+      delivery_control_summary: summarizeAylaVimeoDeliveryControls(controls),
       ongoing_folder_sync: true,
       approval_required: true,
     });
@@ -71499,6 +71718,7 @@ app.get("/api/ayla/admin/resources/vimeo-catalog", async (req, res) => {
   try {
     await aylaRequireAdmin(req);
     const db = await readAylaDb();
+    const deliveryControls = aylaVimeoDeliveryControls(db);
     const requestedExam = String(req.query.exam_track || req.query.examTrack || "").trim();
     const examTrackId = requestedExam ? aylaCanonicalExamTrack(requestedExam) : "";
     if (requestedExam && !examTrackId) return aylaSendError(res, 400, "Unsupported exam_track");
@@ -71554,8 +71774,16 @@ app.get("/api/ayla/admin/resources/vimeo-catalog", async (req, res) => {
       offset,
       has_more: offset + limit < filtered.length,
       summary: vimeoCatalogSummary(scoped),
+      delivery_control_summary: summarizeAylaVimeoDeliveryControls(deliveryControls),
       taxonomy: examTrackId ? aylaContentHubTaxonomyDefinition(examTrackId) : null,
-      drafts: filtered.slice(offset, offset + limit),
+      drafts: filtered.slice(offset, offset + limit)
+        .map((draft) => aylaVimeoDeliveryAdminView({
+          ...draft,
+          sourceData: {
+            folder_id: draft.folderId,
+            catalog_source_id: draft.catalogSourceId,
+          },
+        }, deliveryControls)),
     });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load Vimeo catalog");
@@ -73062,7 +73290,7 @@ async function aylaV212ResolveNotebookSource(db, user, student, rawInput = {}) {
 
   if (kind === "content_video") {
     aylaDashboardEntitlement(db, user, student, "content_hub");
-    const eligible = await aylaV210EligibleVideos(db, student);
+    const eligible = await aylaV210EligibleVideos(db, student, { forNotes: true });
     const video = eligible.videos.find((row) => aylaContentHubVideoMatchesId(row, input.resourceId));
     if (!video) throw aylaV212NotebookError("Content Hub video is not currently available for this exam dashboard", 404, "NOTEBOOK_VIDEO_SOURCE_UNAVAILABLE");
     const assignment = input.assignmentId
