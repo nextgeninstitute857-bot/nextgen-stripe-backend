@@ -30,6 +30,7 @@ test("Vimeo embed domains are normalized to safe unique hostnames", () => {
 
 test("Vimeo allowlist reconciliation uses the documented per-video domain endpoint", async () => {
   const requests = [];
+  const allowed = new Map();
   const result = await ensureVimeoEmbedDomains({
     videoIds: ["12345", "/videos/67890", "unsafe/id"],
     domains: [
@@ -38,37 +39,74 @@ test("Vimeo allowlist reconciliation uses the documented per-video domain endpoi
     ],
     adapters: {
       apiClient: {
+        get: async (requestPath) => {
+          requests.push(`GET ${requestPath}`);
+          if (requestPath.endsWith("/privacy/domains")) {
+            const videoId = requestPath.split("/")[2];
+            return { data: { data: [...(allowed.get(videoId) || [])].map((domain) => ({ domain })) } };
+          }
+          const videoId = requestPath.split("/")[2];
+          return {
+            data: {
+              link: `https://vimeo.com/${videoId}/privatehash${videoId}`,
+              player_embed_url: `https://player.vimeo.com/video/${videoId}?h=privatehash${videoId}`,
+              privacy: { embed: "whitelist", view: "unlisted" },
+            },
+          };
+        },
         put: async (requestPath) => {
-          requests.push(requestPath);
+          requests.push(`PUT ${requestPath}`);
+          const [, , videoId, , , domain] = requestPath.split("/");
+          const values = allowed.get(videoId) || new Set();
+          values.add(decodeURIComponent(domain));
+          allowed.set(videoId, values);
           return { status: 204 };
+        },
+        patch: async (requestPath) => {
+          requests.push(`PATCH ${requestPath}`);
+          return { status: 200 };
         },
       },
     },
   });
   assert.deepEqual(requests, [
-    "/videos/12345/privacy/domains/paleturquoise-quail-255896.hostingersite.com",
-    "/videos/12345/privacy/domains/live.nextgenusmlelms.com",
-    "/videos/67890/privacy/domains/paleturquoise-quail-255896.hostingersite.com",
-    "/videos/67890/privacy/domains/live.nextgenusmlelms.com",
+    "GET /videos/12345",
+    "PUT /videos/12345/privacy/domains/paleturquoise-quail-255896.hostingersite.com",
+    "PUT /videos/12345/privacy/domains/live.nextgenusmlelms.com",
+    "GET /videos/12345/privacy/domains",
+    "GET /videos/12345",
+    "GET /videos/67890",
+    "PUT /videos/67890/privacy/domains/paleturquoise-quail-255896.hostingersite.com",
+    "PUT /videos/67890/privacy/domains/live.nextgenusmlelms.com",
+    "GET /videos/67890/privacy/domains",
+    "GET /videos/67890",
   ]);
   assert.equal(result.requested, 4);
   assert.equal(result.ensured, 4);
   assert.deepEqual(result.ensured_videos, ["12345", "67890"]);
+  assert.deepEqual(result.verified_videos, ["12345", "67890"]);
+  assert.equal(result.video_configs[0].embed_url, "https://player.vimeo.com/video/12345?h=privatehash12345");
   assert.deepEqual(result.failures, []);
 });
 
 test("Vimeo allowlist reconciliation isolates a failed video-domain pair", async () => {
+  const allowed = new Set();
   const result = await ensureVimeoEmbedDomains({
     videoIds: ["12345"],
     domains: ["one.example", "two.example"],
     adapters: {
       apiClient: {
+        get: async (requestPath) => requestPath.endsWith("/privacy/domains")
+          ? { data: { data: [...allowed].map((domain) => ({ domain })) } }
+          : { data: { player_embed_url: "https://player.vimeo.com/video/12345?h=hash", privacy: { embed: "whitelist" } } },
         put: async (requestPath) => {
           if (requestPath.endsWith("/two.example")) {
             throw Object.assign(new Error("Forbidden"), { response: { status: 403 } });
           }
+          allowed.add("one.example");
           return { status: 204 };
         },
+        patch: async () => ({ status: 200 }),
       },
     },
   });
@@ -77,6 +115,42 @@ test("Vimeo allowlist reconciliation isolates a failed video-domain pair", async
   assert.equal(result.failures.length, 1);
   assert.equal(result.failures[0].domain, "two.example");
   assert.equal(result.failures[0].status, 403);
+});
+
+test("Vimeo reconciliation sets whitelist privacy and refuses an unconfirmed domain", async () => {
+  const requests = [];
+  const result = await ensureVimeoEmbedDomains({
+    videoIds: ["12345"],
+    domains: ["allowed.example"],
+    adapters: {
+      apiClient: {
+        get: async (requestPath) => {
+          requests.push(`GET ${requestPath}`);
+          if (requestPath.endsWith("/privacy/domains")) return { data: { data: [] } };
+          return {
+            data: {
+              link: "https://vimeo.com/12345/privatehash",
+              privacy: { embed: requests.filter((value) => value === "GET /videos/12345").length > 1 ? "whitelist" : "public" },
+            },
+          };
+        },
+        patch: async (requestPath, body) => {
+          requests.push(`PATCH ${requestPath} ${body.privacy.embed}`);
+          return { status: 200 };
+        },
+        put: async (requestPath) => {
+          requests.push(`PUT ${requestPath}`);
+          return { status: 204 };
+        },
+      },
+    },
+  });
+  assert.equal(result.privacy_mode_updates, 1);
+  assert.equal(result.ensured, 0);
+  assert.deepEqual(result.verified_videos, []);
+  assert.equal(result.failures[0].domain, "allowed.example");
+  assert.equal(result.video_configs[0].embed_url, "https://player.vimeo.com/video/12345?h=privatehash");
+  assert.ok(requests.includes("PATCH /videos/12345 whitelist"));
 });
 
 test("video references are classified without treating images as videos", () => {

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   AYLA_STEP1_PILOT,
   advanceAylaPilotStudyDate,
+  alignAylaPilotStudyDateToRealDate,
   aylaPilotStudyDate,
   buildAylaMateActivityFeed,
   buildAylaStep1PilotScenarios,
@@ -34,6 +35,31 @@ test("pilot time advances independently and is capped at two weeks", () => {
   assert.equal(aylaPilotStudyDate(advanced).date, "2026-08-03");
   assert.equal(aylaPilotStudyDate(advanceAylaPilotStudyDate(advanced, 14)).dayOffset, 14);
   assert.throws(() => advanceAylaPilotStudyDate({ id: "real-1" }, 1), /Only a private pilot student/);
+});
+
+test("pilot time safely catches up to the real date without rewinding or exceeding its cap", () => {
+  const student = {
+    id: "pilot-1",
+    pilotTest: true,
+    pilotSimulation: { anchorDate: "2026-07-27", dayOffset: 0 },
+  };
+  const aligned = alignAylaPilotStudyDateToRealDate(
+    student,
+    new Date("2026-07-28T12:00:00.000Z"),
+  );
+  assert.equal(aylaPilotStudyDate(aligned).date, "2026-07-28");
+  assert.equal(aylaPilotStudyDate(aligned).dayOffset, 1);
+  const notRewound = alignAylaPilotStudyDateToRealDate(
+    advanceAylaPilotStudyDate(student, 5),
+    new Date("2026-07-28T12:00:00.000Z"),
+  );
+  assert.equal(aylaPilotStudyDate(notRewound).dayOffset, 5);
+  const capped = alignAylaPilotStudyDateToRealDate(
+    student,
+    new Date("2026-08-31T12:00:00.000Z"),
+  );
+  assert.equal(aylaPilotStudyDate(capped).dayOffset, AYLA_STEP1_PILOT.maxDays);
+  assert.equal(alignAylaPilotStudyDateToRealDate({ id: "ordinary" }).id, "ordinary");
 });
 
 test("Ayla notification feed distinguishes delivered work from pending promises and narrates verified reviews", () => {

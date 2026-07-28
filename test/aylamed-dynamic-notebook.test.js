@@ -35,7 +35,7 @@ test("return links stay internal and preserve exact Library pages and embedded v
   }), {
     surface: "library",
     label: "Return to this page",
-    href: "/library/resources/reading%201/pages/pdf-12?assignment_id=assignment+1",
+    href: "/dashboard/library/reading%201/page/pdf%3A12?assignment=assignment+1",
   });
   assert.deepEqual(buildAylaNotebookDeepLink({
     sourceType: "content_video",
@@ -44,10 +44,10 @@ test("return links stay internal and preserve exact Library pages and embedded v
   }), {
     surface: "content_hub",
     label: "Return to 1:23",
-    href: "/content-hub/videos/video-1?t=83",
+    href: "/dashboard/content-hub/video-1?t=83",
   });
   const qbank = buildAylaNotebookDeepLink({ sourceType: "qbank_question", sessionId: "session-1", questionRef: "Q 1" });
-  assert.equal(qbank.href, "/qbank/sessions/session-1/questions/Q%201");
+  assert.equal(qbank.href, "/dashboard/qbank/session/session-1?question=Q+1");
   assert.doesNotMatch(JSON.stringify([qbank]), /https?:|vimeo\.com|player\.vimeo/i);
 });
 
@@ -85,7 +85,7 @@ test("capture creates a clean imported-source block and a separate handwriting-s
   assert.equal(capture.blocks[1].linkedCaptureKey, capture.captureKey);
 
   const safe = sanitizeAylaNotebookBlock(capture.blocks[0], { currentSource: source });
-  assert.equal(safe.returnLink.href, "/content-hub/videos/video-1?t=83");
+  assert.equal(safe.returnLink.href, "/dashboard/content-hub/video-1?t=83");
   assert.equal(safe.timestampLabel, "1:23");
   assert.doesNotMatch(JSON.stringify(safe), /private-vimeo-123|providerVideoId|vimeoId|sourceUrl|https?:/i);
 });
@@ -155,7 +155,7 @@ test("student notebook output strips raw source URLs, provider IDs, and answer-k
       excerpt: "Authorized explanation after submission.",
     },
   });
-  assert.equal(safe.returnLink.href, "/qbank/sessions/session-1/questions/question-1");
+  assert.equal(safe.returnLink.href, "/dashboard/qbank/session/session-1?question=question-1");
   assert.doesNotMatch(JSON.stringify(safe), /private-provider|private-vimeo|sourceUrl|vimeoId|correctAnswer|https?:/i);
 });
 

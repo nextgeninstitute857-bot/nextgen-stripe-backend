@@ -223,6 +223,7 @@ import {
 import {
   AYLA_STEP1_PILOT,
   advanceAylaPilotStudyDate,
+  alignAylaPilotStudyDateToRealDate,
   aylaPilotStudyDate,
   buildAylaMateActivityFeed,
   buildAylaStep1PilotScenarios,
@@ -381,8 +382,14 @@ const AYLA_STARTING_READINESS_BUILD = "v229-starting-readiness-loop";
 const AYLA_SINGLE_ROADMAP_BUILD = "v230-single-roadmap-execution";
 const AYLA_MARKETING_BUILD = "v231-readiness-sharing-referrals";
 const AYLA_VIMEO_CATALOG_BUILD = VIMEO_LIBRARY_CATALOG_BUILD;
-const AYLA_PRIVATE_PILOT_BUILD = "v250-private-pilot-content-delivery";
+const AYLA_PRIVATE_PILOT_BUILD = "v251-live-pilot-flow-recovery";
 const AYLA_STEP1_PILOT_DESTINATION_SCOPE = "private_step1_pilot";
+const AYLA_STEP1_OWNER_CONTENT_AUTHORIZATION = Object.freeze({
+  status: "authorized",
+  actorId: "owner:nextgeninstitute8578",
+  attestedAt: "2026-07-28",
+  scope: "user_uploaded_or_pasted_aylamed_content",
+});
 const aylaPrivatePilotContentActivationState = {
   running: false,
   lastStartedAt: null,
@@ -64712,6 +64719,10 @@ app.get("/api/ayla/students/:id/dashboard", async (req, res) => {
       resources: aylaValues(db, "aylaResources"),
       revisionQueue: aylaValues(db, "aylaRevisionQueue"),
     });
+    const dashboardFlashcards = await Promise.all([...new Map([
+      ...aylaFilterRows(aylaValues(db, "aylaFlashcards"), { studentId: student.id }),
+      ...aylaV189RelevantResources(db, student, ["flashcard"]),
+    ].map((row) => [String(row.id), row])).values()].map(aylaV251HydrateResourceMedia));
 
     return aylaSendOk(res, {
       student: { ...student, phase: recommendation.phase, phasePlan },
@@ -64742,10 +64753,7 @@ app.get("/api/ayla/students/:id/dashboard", async (req, res) => {
         aylaMedFeed,
         aylaMeFeed: aylaMedFeed,
         aylaMateFeed: aylaMedFeed,
-        flashcards: [...new Map([
-          ...aylaFilterRows(aylaValues(db, "aylaFlashcards"), { studentId: student.id }),
-          ...aylaV189RelevantResources(db, student, ["flashcard"]),
-        ].map((row) => [String(row.id), row])).values()],
+        flashcards: dashboardFlashcards,
         assessmentResults: aylaFilterRows(aylaValues(db, "aylaAssessmentResults"), { studentId: student.id }),
         studyPartnerMatches: aylaValues(db, "aylaStudyPartnerMatches").filter((item) => item.studentAId === student.id || item.studentBId === student.id),
       },
@@ -67077,6 +67085,14 @@ function aylaV189CleanText(value = "") {
   return String(value || "").replace(/\u0000/g, "").replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
 }
 
+function aylaStudentTaxonomyLabel(value = "", fallback = "General") {
+  const clean = aylaV189CleanText(value).slice(0, 160);
+  if (!clean || /^\d+$/.test(clean) || /^(?:system|subject|topic)[-_\s]*\d+$/i.test(clean)) {
+    return fallback;
+  }
+  return clean;
+}
+
 function aylaV189NormalizeModerationToken(value = "") {
   return aylaV189CleanText(value)
     .toLowerCase()
@@ -67665,30 +67681,46 @@ async function aylaV250EligibleQbankQuestions(student, {
     return {
       destinationScope,
       warning: null,
-      questions: rows.map((row) => ({
-        id: String(row.id),
-        contentQuestionId: String(row.id),
-        type: "internal_mcq",
-        provider: "AylaMed QBank",
-        examTrackId: aylaCanonicalExamTrack(examTrack),
-        examTrack,
-        resourceNumber: row.display_question_id || row.student_qid || "",
-        questionNumber: row.display_question_id || row.student_qid || "",
-        title: row.topic_key || row.title || "AylaMed QBank practice",
-        system: row.system_key || "General",
-        subsystem: row.subsystem_key || "",
-        topic: row.topic_key || row.title || "QBank practice",
-        subtopic: row.subtopic_key || "",
-        estimatedMinutes: 2,
-        approved: true,
-        status: "active",
-        authorizationStatus: "approved_registry_collection",
-        verificationStatus: "approved_content_registry",
-        sourceAccessMode: "protected",
-        sourceType: "content_registry_qbank",
-        accessScope: "private_pilot",
-        pilotOnly: true,
-      })),
+      questions: rows.map((row) => {
+        const answers = Array.isArray(row.answers) ? row.answers : [];
+        return {
+          id: String(row.id),
+          contentQuestionId: String(row.id),
+          type: "internal_mcq",
+          provider: "AylaMed QBank",
+          examTrackId: aylaCanonicalExamTrack(examTrack),
+          examTrack,
+          resourceNumber: row.display_question_id || row.student_qid || "",
+          questionNumber: row.display_question_id || row.student_qid || "",
+          title: aylaStudentTaxonomyLabel(
+            row.topic_key || row.title,
+            "AylaMed QBank practice",
+          ),
+          system: aylaStudentTaxonomyLabel(row.system_key, "General"),
+          subsystem: aylaStudentTaxonomyLabel(row.subsystem_key, ""),
+          topic: aylaStudentTaxonomyLabel(
+            row.topic_key || row.title,
+            "QBank practice",
+          ),
+          subtopic: aylaStudentTaxonomyLabel(row.subtopic_key, ""),
+          stem: row.question_html || "",
+          options: answers.map((answer) => answer.text_html || ""),
+          correctAnswerIndex: answers.findIndex((answer) =>
+            String(answer.answer_id || "") === String(row.correct_answer_id || "")),
+          explanation: row.explanation_html || "",
+          media: Array.isArray(row.media) ? row.media : [],
+          videos: Array.isArray(row.videos) ? row.videos : [],
+          estimatedMinutes: 2,
+          approved: true,
+          status: "active",
+          authorizationStatus: "approved_registry_collection",
+          verificationStatus: "approved_content_registry",
+          sourceAccessMode: "protected",
+          sourceType: "content_registry_qbank",
+          accessScope: "private_pilot",
+          pilotOnly: true,
+        };
+      }),
     };
   } catch (error) {
     console.warn("AylaMed private-pilot QBank roadmap read unavailable:", error.message);
@@ -67845,7 +67877,7 @@ function aylaV189AssignmentSnapshot(db, resource = {}, options = {}) {
     resourceNumber: resource.resourceNumber || resource.questionNumber || "",
     questionNumber: resource.questionNumber || "",
     title: resource.title || resource.topic || "Assigned resource",
-    system: resource.system || "General",
+    system: aylaStudentTaxonomyLabel(resource.system, "General"),
     subsystem: resource.subsystem || resource.subsystemKey || resource.subsystem_key || "",
     topic: resource.topic || "",
     subtopic: resource.subtopic || resource.subtopicKey || resource.subtopic_key || "",
@@ -67913,6 +67945,8 @@ function aylaV189AssignmentSnapshot(db, resource = {}, options = {}) {
     questions: options.resolveAssessment === false ? (Array.isArray(resource.questions) ? resource.questions : []) : (["assessment", "assessment_blueprint"].includes(aylaV189ResourceType(resource.type)) ? aylaV189ResolveAssessmentQuestions(db, resource) : (Array.isArray(resource.questions) ? resource.questions : [])),
     front: resource.front || "",
     back: resource.back || "",
+    media: Array.isArray(resource.media) ? resource.media : [],
+    videos: Array.isArray(resource.videos) ? resource.videos : [],
     estimatedMinutes: aylaNumber(resource.estimatedMinutes, 15),
     verificationStatus: resource.verificationStatus || "verified",
     cdmCaseId: resource.cdmCaseId || resource.cdm_case_id || (aylaV189ResourceType(resource.type) === "legacy_cdm_case" ? resource.id : ""),
@@ -68000,6 +68034,12 @@ function aylaV189SanitizeAssignmentForStudent(db, assignment = {}) {
   const category = String(copy.category || "");
   copy.items = (Array.isArray(copy.items) ? copy.items : []).map((item) => {
     const next = { ...item };
+    next.media = (Array.isArray(next.media) ? next.media : []).map((media) => {
+      const safe = { ...media };
+      delete safe.object_key;
+      delete safe.objectKey;
+      return safe;
+    }).filter((media) => media.url);
     if (category === "video") {
       const verified = normalizeAylaContentHubVideos([next], { examTrack: next.examTrackId || next.examTrack })[0] || null;
       delete next.vimeoUrl;
@@ -68168,6 +68208,45 @@ function aylaV189SanitizePlanBundle(db, plan, assignments = []) {
     plan: aylaV211SanitizeStoredPlan(db, plan, assignments),
     assignments: assignments.map((row) => aylaV189SanitizeAssignmentForStudent(db, row)),
   };
+}
+
+async function aylaV251SignedMediaRows(media = []) {
+  return (await Promise.all((Array.isArray(media) ? media : []).slice(0, 100).map(async (item) => {
+    const objectKey = String(item?.object_key || item?.objectKey || "").trim();
+    if (!objectKey) {
+      return item?.url ? { ...item, object_key: undefined, objectKey: undefined } : null;
+    }
+    try {
+      return {
+        id: item.id,
+        ref: item.ref,
+        placement: item.placement || "explanation",
+        kind: item.kind || (String(item.content_type || "").startsWith("audio/") ? "audio" : "image"),
+        content_type: item.content_type || "image/*",
+        url: await createPrivateMediaUrl(objectKey, 900),
+        expires_in_seconds: 900,
+      };
+    } catch (error) {
+      console.warn("AylaMed private assignment media signing failed:", error.message);
+      return null;
+    }
+  }))).filter(Boolean);
+}
+
+async function aylaV251HydrateResourceMedia(resource = {}) {
+  return {
+    ...resource,
+    media: await aylaV251SignedMediaRows(resource.media),
+  };
+}
+
+async function aylaV251HydrateAssignmentMedia(assignments = []) {
+  return Promise.all((Array.isArray(assignments) ? assignments : []).map(async (assignment) => ({
+    ...assignment,
+    items: await Promise.all((Array.isArray(assignment.items) ? assignment.items : []).map(
+      (item) => aylaV251HydrateResourceMedia(item),
+    )),
+  })));
 }
 
 function aylaV189CloseLinkedAssignments(db, assignment = {}) {
@@ -69046,9 +69125,11 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   }
 
   const settings = aylaMergeSettings(db.aylaSettings || {});
-  const questionMode = ["external", "internal", "hybrid"].includes(String(student.questionSourcePreference || student.question_source_preference || settings.resources.question_source_mode))
+  const configuredQuestionMode = ["external", "internal", "hybrid"].includes(String(student.questionSourcePreference || student.question_source_preference || settings.resources.question_source_mode))
     ? String(student.questionSourcePreference || student.question_source_preference || settings.resources.question_source_mode)
     : "hybrid";
+  const privatePilotDestinationScope = aylaStep1PilotDestinationScope(student);
+  const questionMode = privatePilotDestinationScope ? "hybrid" : configuredQuestionMode;
   let capacityMinutes = Math.max(60, Math.min(960, aylaNumber(student.dailyHours || student.daily_hours, 3) * 60));
   const studyDay = aylaV189StudyDayStatus(student, date);
   const restRevisionLimit = Math.max(15, Math.min(120, aylaNumber(settings.adaptive?.rest_day_revision_minutes, 35)));
@@ -69159,7 +69240,14 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   };
   const assignments = [];
   const reservedIds = new Set([...completedIds]);
-  const mix = settings.resources.assignment_mix || {};
+  const mix = privatePilotDestinationScope
+    ? {
+        ...(settings.resources.assignment_mix || {}),
+        external_questions: false,
+        internal_mcqs: true,
+        flashcards: true,
+      }
+    : settings.resources.assignment_mix || {};
 
   // 1) Due revision is always considered before new content. Each queue record is linked
   // to the assignment so successful completion closes the exact revision record.
@@ -69462,12 +69550,14 @@ async function aylaV189TomorrowPreview(db, student, date) {
   const existing = aylaValues(db, "aylaDailyPlans").find((plan) => aylaAdaptiveEvidenceMatchesStudent(plan, student) && String(plan.date) === tomorrow && !["cancelled", "superseded"].includes(String(plan.status || "").toLowerCase()));
   if (existing) {
     const assignments = aylaValues(db, "aylaResourceAssignments").filter((row) => String(row.dailyPlanId) === String(existing.id));
-    return { date: tomorrow, ...aylaV189SanitizePlanBundle(db, existing, assignments) };
+    const hydratedAssignments = await aylaV251HydrateAssignmentMedia(assignments);
+    return { date: tomorrow, ...aylaV189SanitizePlanBundle(db, existing, hydratedAssignments) };
   }
   const previewDb = JSON.parse(JSON.stringify(db));
   const previewStudent = aylaGetItem(previewDb, "aylaStudents", student.id) || JSON.parse(JSON.stringify(student));
   const built = await aylaV189BuildDailyPlan(previewDb, previewStudent, tomorrow, { force: false, skipAi: true });
-  return { date: tomorrow, ...aylaV189SanitizePlanBundle(previewDb, built.plan, built.assignments) };
+  const hydratedAssignments = await aylaV251HydrateAssignmentMedia(built.assignments);
+  return { date: tomorrow, ...aylaV189SanitizePlanBundle(previewDb, built.plan, hydratedAssignments) };
 }
 
 function aylaV213TutorStudentRows(db, collection, student, mapper) {
@@ -71076,17 +71166,23 @@ async function ngRunAylaPrivatePilotContentActivation(reason = "startup") {
       aylaStep1PilotCollectionMatches(row)
       && Number(row.question_count || 0) > 0);
     const verifiedCollections = namespaceCollections.filter((row) =>
-      ["owned", "licensed", "authorized"].includes(String(row.source_rights_status || "").toLowerCase())
-      && String(row.source_format || "single_best_answer_v1") === "single_best_answer_v1");
+      String(row.source_format || "single_best_answer_v1") === "single_best_answer_v1");
+    let collectionsOwnerAuthorized = 0;
     let collectionsActivated = 0;
     for (const collection of verifiedCollections) {
-      if (!aylaStep1PilotCollectionNeedsActivation(collection)) continue;
+      const rightsAlreadyVerified = ["owned", "licensed", "authorized"].includes(
+        String(collection.source_rights_status || "").toLowerCase(),
+      );
+      const needsActivation = aylaStep1PilotCollectionNeedsActivation(collection);
+      if (rightsAlreadyVerified && !needsActivation) continue;
       await updateContentCollectionControls({
         collectionId: collection.id,
         status: "approved",
         destinations: aylaStep1PilotCollectionControls(),
-        actorId: "system:private-step1-pilot-activation",
+        sourceRightsStatus: AYLA_STEP1_OWNER_CONTENT_AUTHORIZATION.status,
+        actorId: AYLA_STEP1_OWNER_CONTENT_AUTHORIZATION.actorId,
       });
+      if (!rightsAlreadyVerified) collectionsOwnerAuthorized += 1;
       collectionsActivated += 1;
     }
 
@@ -71115,7 +71211,7 @@ async function ngRunAylaPrivatePilotContentActivation(reason = "startup") {
       aylaPrivatePilotVimeoEmbedDomains(),
     );
     const vimeoEmbedDomainFingerprint = crypto.createHash("sha256")
-      .update(vimeoEmbedDomains.slice().sort().join("\n"))
+      .update(`${AYLA_PRIVATE_PILOT_BUILD}\n${vimeoEmbedDomains.slice().sort().join("\n")}`)
       .digest("hex");
     const activation = await mutateAylaDb(async (db) => {
       const currentCohort = aylaGetItem(db, "aylaPilotCohorts", cohort.id);
@@ -71124,14 +71220,15 @@ async function ngRunAylaPrivatePilotContentActivation(reason = "startup") {
           lecturesApproved: 0,
           flashcardsActivated: 0,
           plansRebuilt: 0,
+          pilotDatesAligned: 0,
           lectureErrors: [],
           vimeoIds: [],
         };
       }
       const actor = {
-        id: "system:private-step1-pilot-activation",
+        id: AYLA_STEP1_OWNER_CONTENT_AUTHORIZATION.actorId,
         email: "",
-        name: "AylaMed private pilot content activation",
+        name: "AylaMed owner-authorized private pilot content activation",
       };
       let flashcardsActivated = 0;
       for (const question of registryFlashcardQuestions) {
@@ -71144,14 +71241,31 @@ async function ngRunAylaPrivatePilotContentActivation(reason = "startup") {
           id,
           type: "flashcard",
           examTrackId: "usmle_step_1",
-          title: question.topic_key || question.title || "AylaMed QBank recall",
-          system: question.system_key || question.taxonomy?.system_key || "General",
-          subsystem: question.subsystem_key || question.taxonomy?.subsystem_key || "",
-          topic: question.topic_key || question.taxonomy?.topic_key || question.title || "QBank recall",
-          subtopic: question.subtopic_key || question.taxonomy?.subtopic_key || "",
+          title: aylaStudentTaxonomyLabel(
+            question.topic_key || question.title,
+            "AylaMed QBank recall",
+          ),
+          system: aylaStudentTaxonomyLabel(
+            question.system_key || question.taxonomy?.system_key,
+            "General",
+          ),
+          subsystem: aylaStudentTaxonomyLabel(
+            question.subsystem_key || question.taxonomy?.subsystem_key,
+            "",
+          ),
+          topic: aylaStudentTaxonomyLabel(
+            question.topic_key || question.taxonomy?.topic_key || question.title,
+            "QBank recall",
+          ),
+          subtopic: aylaStudentTaxonomyLabel(
+            question.subtopic_key || question.taxonomy?.subtopic_key,
+            "",
+          ),
           front: question.question_html || "",
           back: question.correct_answer_html || "",
           explanation: question.explanation_html || "",
+          media: Array.isArray(question.media) ? question.media : [],
+          videos: Array.isArray(question.videos) ? question.videos : [],
           provider: "AylaMed QBank",
           sourceLabel: "AylaMed QBank",
           sourceLabelVisible: true,
@@ -71165,6 +71279,7 @@ async function ngRunAylaPrivatePilotContentActivation(reason = "startup") {
           status: "active",
           verificationStatus: "approved_content_registry",
           authorizationStatus: "approved_registry_collection",
+          ownerAuthorization: AYLA_STEP1_OWNER_CONTENT_AUTHORIZATION,
           sourceAccessMode: "protected",
           accessScope: "private_pilot",
           pilotOnly: true,
@@ -71201,6 +71316,8 @@ async function ngRunAylaPrivatePilotContentActivation(reason = "startup") {
           approved.resource.pilotOnly = true;
           approved.resource.pilotCohortId = currentCohort.id;
           approved.resource.pilotStudentIds = [...new Set(currentCohort.studentIds || [])];
+          approved.resource.authorizationStatus = "authorized";
+          approved.resource.ownerAuthorization = AYLA_STEP1_OWNER_CONTENT_AUTHORIZATION;
           const existingResource = aylaGetItem(db, "aylaResources", approved.resource.id)
             || aylaValues(db, "aylaResources").find((row) =>
               String(row.vimeoId || row.vimeo_id || "") === String(approved.resource.vimeoId))
@@ -71237,9 +71354,32 @@ async function ngRunAylaPrivatePilotContentActivation(reason = "startup") {
           pilotCohortId: currentCohort.id,
         }));
       let plansRebuilt = 0;
+      let pilotDatesAligned = 0;
       for (const studentId of currentCohort.studentIds || []) {
-        const student = aylaGetItem(db, "aylaStudents", studentId);
+        let student = aylaGetItem(db, "aylaStudents", studentId);
         if (!student) continue;
+        const beforePilotDate = aylaPilotStudyDate(student);
+        const alignedStudent = alignAylaPilotStudyDateToRealDate(student, new Date());
+        const afterPilotDate = aylaPilotStudyDate(alignedStudent);
+        if (afterPilotDate.dayOffset > beforePilotDate.dayOffset) {
+          student = {
+            ...alignedStudent,
+            updatedAt: aylaNow(),
+          };
+          aylaSetItem(db, "aylaStudents", student);
+          aylaSetItem(db, "aylaPilotAuditEvents", {
+            id: aylaId("AYLA-PILOT-EVENT"),
+            cohortId: currentCohort.id,
+            studentId: student.id,
+            action: "pilot_study_date_aligned_to_real_date",
+            fromDate: beforePilotDate.date,
+            toDate: afterPilotDate.date,
+            completedHistoryPreserved: true,
+            actorId: actor.id,
+            createdAt: aylaNow(),
+          });
+          pilotDatesAligned += 1;
+        }
         const date = aylaV247StudyDate(student);
         const currentPlan = aylaValues(db, "aylaDailyPlans")
           .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student))
@@ -71278,10 +71418,13 @@ async function ngRunAylaPrivatePilotContentActivation(reason = "startup") {
         reason,
         destinationScope: AYLA_STEP1_PILOT_DESTINATION_SCOPE,
         collectionsActivated,
+        collectionsOwnerAuthorized,
+        ownerAuthorization: AYLA_STEP1_OWNER_CONTENT_AUTHORIZATION,
         qbankQuestionCount,
         lecturesApproved,
         flashcardsActivated,
         plansRebuilt,
+        pilotDatesAligned,
         ordinaryStudentDelivery: false,
         createdAt: aylaNow(),
       });
@@ -71289,6 +71432,7 @@ async function ngRunAylaPrivatePilotContentActivation(reason = "startup") {
         lecturesApproved,
         flashcardsActivated,
         plansRebuilt,
+        pilotDatesAligned,
         lectureErrors,
         vimeoIds: [...new Set(privateLectures
           .map((row) => String(row.vimeoId || row.vimeo_id || "").trim())
@@ -71318,15 +71462,32 @@ async function ngRunAylaPrivatePilotContentActivation(reason = "startup") {
         });
       }
     }
-    if (vimeoEmbed.ensured_videos.length) {
-      const ensuredIds = new Set(vimeoEmbed.ensured_videos.map(String));
+    if (vimeoEmbed.verified_videos?.length) {
+      const ensuredIds = new Set(vimeoEmbed.verified_videos.map(String));
+      const configByVideoId = new Map((vimeoEmbed.video_configs || []).map((row) => [
+        String(row.video_id || ""),
+        row,
+      ]));
       await mutateAylaDb(async (db) => {
         aylaValues(db, "aylaResources")
           .filter((row) => ensuredIds.has(String(row.vimeoId || row.vimeo_id || "")))
           .filter((row) => row.pilotOnly === true || row.accessScope === "private_pilot")
           .forEach((row) => {
+            const config = configByVideoId.get(String(row.vimeoId || row.vimeo_id || ""));
+            if (config?.embed_url) {
+              row.vimeoEmbedUrl = config.embed_url;
+              try {
+                row.vimeoPrivacyHash = new URL(config.embed_url).searchParams.get("h")
+                  || row.vimeoPrivacyHash
+                  || "";
+              } catch {
+                row.vimeoPrivacyHash = row.vimeoPrivacyHash || "";
+              }
+            }
             row.vimeoEmbedDomainFingerprint = vimeoEmbedDomainFingerprint;
             row.vimeoEmbedDomainsEnsuredAt = aylaNow();
+            row.vimeoEmbedPrivacyMode = config?.privacy_embed || "whitelist";
+            row.ownerAuthorization = AYLA_STEP1_OWNER_CONTENT_AUTHORIZATION;
             row.updatedAt = aylaNow();
             aylaSetItem(db, "aylaResources", row);
           });
@@ -71348,14 +71509,17 @@ async function ngRunAylaPrivatePilotContentActivation(reason = "startup") {
       cohortId: cohort.id,
       collectionsMatched: namespaceCollections.length,
       collectionsVerified: verifiedCollections.length,
+      collectionsOwnerAuthorized,
       collectionsActivated,
       unverifiedCollectionsSkipped: namespaceCollections.length - verifiedCollections.length,
+      ownerAuthorization: AYLA_STEP1_OWNER_CONTENT_AUTHORIZATION,
       qbankQuestionCount,
       lecturesApproved: activation.lecturesApproved,
       registryFlashcardQuestions: registryFlashcardQuestions.length,
       flashcardsActivated: activation.flashcardsActivated,
       registryFlashcardError,
       plansRebuilt: activation.plansRebuilt,
+      pilotDatesAligned: activation.pilotDatesAligned,
       lectureErrors: activation.lectureErrors.length,
       vimeoEmbedDomainsEnsured: vimeoEmbed.ensured,
       vimeoEmbedDomainFailures: vimeoEmbed.failures.length,
@@ -73328,7 +73492,8 @@ app.get("/api/ayla/students/:studentId/daily-workspace", async (req, res) => {
       revisionQueue: aylaValues(db, "aylaRevisionQueue"),
     });
     await writeAylaDb(db);
-    const safeBundle = aylaV189SanitizePlanBundle(db, built.plan, built.assignments);
+    const hydratedAssignments = await aylaV251HydrateAssignmentMedia(built.assignments);
+    const safeBundle = aylaV189SanitizePlanBundle(db, built.plan, hydratedAssignments);
     return aylaSendOk(res, { student, date, pilotTime: aylaPilotStudyDate(student), plan: safeBundle.plan, assignments: safeBundle.assignments, stablePlanReused: built.reused, tomorrowPreview, warning, systemProgress, aylaMedFeed, aylaMeFeed: aylaMedFeed, aylaMateFeed: aylaMedFeed, history, historyCounts, recentReadingProgress, recentVideoProgress, recentQuestionAttempts, recentFlashcardReviews, recentAssessments, recentPlans, resourceCounts: Object.values(db.aylaResources || {}).reduce((acc, row) => { const type = aylaV189ResourceType(row.type); acc[type] = (acc[type] || 0) + 1; return acc; }, {}) });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load AylaMed daily workspace");
@@ -73342,7 +73507,8 @@ app.post("/api/ayla/students/:studentId/daily-workspace/rebuild", async (req, re
     const built = await aylaV189BuildDailyPlan(db, student, date, { force: true, includeAssessment: req.body.includeAssessment === true });
     aylaV189RecordActivity(db, student.id, "daily_plan_rebuilt", { date, reason: req.body.reason || "student_request" });
     await writeAylaDb(db);
-    const safeBundle = aylaV189SanitizePlanBundle(db, built.plan, built.assignments);
+    const hydratedAssignments = await aylaV251HydrateAssignmentMedia(built.assignments);
+    const safeBundle = aylaV189SanitizePlanBundle(db, built.plan, hydratedAssignments);
     return aylaSendOk(res, { plan: safeBundle.plan, assignments: safeBundle.assignments, warning: aylaV189BacklogWarning(db, student, date), systemProgress: aylaV189SystemProgress(db, student) });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to rebuild AylaMed daily workspace");
