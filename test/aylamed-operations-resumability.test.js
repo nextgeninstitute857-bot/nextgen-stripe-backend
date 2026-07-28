@@ -246,6 +246,47 @@ test("v217 queue pauses at a heartbeat, resumes safely, and honors the memory ga
   assert.equal(executions, 2);
 });
 
+test("v254 memory gate can pause one lane without blocking safe work", async (t) => {
+  const directory = await temporaryDirectory("nextgen-lane-memory-gate-");
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  let vimeoMemoryHigh = true;
+  const executions = [];
+  const queue = new SafeBackgroundQueue({
+    directory,
+    maxConcurrency: 2,
+    laneConcurrency: { ayla_vimeo_ai: 1, question_zip: 1 },
+    memoryRetryMs: 10,
+    memoryGate: (job) => job?.lane === "ayla_vimeo_ai" && vimeoMemoryHigh,
+  });
+  queue.register("controlled", async ({ job }) => {
+    executions.push(job.lane);
+  });
+  const vimeoId = crypto.randomUUID();
+  const questionId = crypto.randomUUID();
+  await queue.enqueue({
+    id: vimeoId,
+    type: "controlled",
+    lane: "ayla_vimeo_ai",
+    priority: 10,
+  });
+  await queue.enqueue({
+    id: questionId,
+    type: "controlled",
+    lane: "question_zip",
+    priority: 0,
+  });
+  await waitFor(() => queue.get(questionId)?.status === "completed");
+  assert.deepEqual(executions, ["question_zip"]);
+  assert.equal(queue.get(vimeoId).status, "queued");
+  assert.ok(queue.summary().memory_pauses > 0);
+  assert.equal(queue.summary().lane_concurrency.ayla_vimeo_ai, 1);
+
+  vimeoMemoryHigh = false;
+  queue.kick();
+  await waitFor(() => queue.get(vimeoId)?.status === "completed");
+  assert.deepEqual(executions, ["question_zip", "ayla_vimeo_ai"]);
+});
+
 test("v217 resumable ZIP store streams chunks, verifies hashes, leases, and finalization", async (t) => {
   const directory = await temporaryDirectory("nextgen-resumable-upload-");
   t.after(() => fs.rm(directory, { recursive: true, force: true }));

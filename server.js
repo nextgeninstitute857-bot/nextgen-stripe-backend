@@ -365,6 +365,7 @@ import path from "path";
 import { PassThrough } from "node:stream";
 import { pipeline as pipelineStreams } from "node:stream/promises";
 import { createGzip } from "node:zlib";
+import { getHeapStatistics } from "node:v8";
 
 dotenv.config();
 
@@ -387,7 +388,7 @@ const AYLA_PRIVATE_PILOT_BUILD = "v251-live-pilot-flow-recovery";
 const AYLA_STEP1_PILOT_DESTINATION_SCOPE = "private_step1_pilot";
 const AYLA_STEP1_PILOT_VIMEO_FOLDER_ID = "29973623";
 const AYLA_STEP1_PILOT_VIMEO_SOURCE_ID = "AYLA-VIMEO-SOURCE-usmle-step-1-29973623";
-const AYLA_STEP1_VIMEO_PUBLICATION_BUILD = "v253-step1-vimeo-background-taxonomy";
+const AYLA_STEP1_VIMEO_PUBLICATION_BUILD = "v254-step1-vimeo-memory-circuit-breaker";
 const AYLA_STEP1_OWNER_CONTENT_AUTHORIZATION = Object.freeze({
   status: "authorized",
   actorId: "owner:nextgeninstitute8578",
@@ -448,7 +449,7 @@ function aylaStep1PilotVimeoVisibleToStudent(resource = {}, student = {}) {
     || ["vimeo_video", "video_transcript"].includes(type);
   return !isVimeo || aylaStep1PilotVimeoSourceMatches(resource);
 }
-const MEMORY_STABILITY_BUILD = "v252-bounded-recovery-queue";
+const MEMORY_STABILITY_BUILD = "v254-step1-vimeo-memory-circuit-breaker";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -1031,7 +1032,14 @@ const ngContentBackgroundQueue = new SafeBackgroundQueue({
   laneConcurrency: ngMultiQbankConfig.lane_concurrency,
   retryBaseMs: Math.max(1_000, Number(process.env.NEXTGEN_CONTENT_JOB_RETRY_BASE_MS || 15_000) || 15_000),
   memoryRetryMs: Math.max(5_000, Number(process.env.NEXTGEN_CONTENT_JOB_MEMORY_RETRY_MS || 30_000) || 30_000),
-  memoryGate: () => ngBackgroundMemoryIsHigh("content_operations_queue"),
+  memoryGate: (job) => ngBackgroundMemoryIsHigh(
+    job?.lane === "ayla_vimeo_ai" ? "ayla_vimeo_ai_queue" : "content_operations_queue",
+    {
+      heapSoftPercent: job?.lane === "ayla_vimeo_ai"
+        ? NEXTGEN_AYLA_VIMEO_HEAP_SOFT_PERCENT
+        : NEXTGEN_BACKGROUND_HEAP_SOFT_PERCENT,
+    },
+  ),
   persistentStore: ngContentJobStore,
   leaseRetryMs: Math.max(5_000, Math.floor(ngMultiQbankConfig.job_lease_ms / 4)),
   maxRetainedTerminalJobs: NG_CONTENT_JOB_RECOVERY_HISTORY_LIMIT,
@@ -1721,26 +1729,75 @@ async function ngWriteJsonAtomicStreaming(filePath, value, label = "database", {
 
 const NEXTGEN_RENDER_MEMORY_LIMIT_MB = Math.max(256, Number(process.env.NEXTGEN_RENDER_MEMORY_LIMIT_MB || 2048) || 2048);
 const NEXTGEN_BACKGROUND_MEMORY_SOFT_PERCENT = Math.max(50, Math.min(90, Number(process.env.NEXTGEN_BACKGROUND_MEMORY_SOFT_PERCENT || 60) || 60));
+const NEXTGEN_BACKGROUND_HEAP_SOFT_PERCENT = Math.max(
+  50,
+  Math.min(90, Number(process.env.NEXTGEN_BACKGROUND_HEAP_SOFT_PERCENT || 72) || 72),
+);
+const NEXTGEN_AYLA_VIMEO_HEAP_SOFT_PERCENT = Math.max(
+  45,
+  Math.min(
+    80,
+    Number(process.env.NEXTGEN_AYLA_VIMEO_HEAP_SOFT_PERCENT || 62) || 62,
+  ),
+);
+const NEXTGEN_AYLA_VIMEO_HEAP_HARD_PERCENT = Math.max(
+  NEXTGEN_AYLA_VIMEO_HEAP_SOFT_PERCENT + 5,
+  Math.min(
+    92,
+    Number(process.env.NEXTGEN_AYLA_VIMEO_HEAP_HARD_PERCENT || 80) || 80,
+  ),
+);
 
 function ngMemoryStatus() {
   const usage = process.memoryUsage();
+  const heapLimitBytes = Math.max(1, Number(getHeapStatistics().heap_size_limit || 0));
   const limitBytes = NEXTGEN_RENDER_MEMORY_LIMIT_MB * 1024 * 1024;
   return {
     rss: usage.rss,
     rss_mb: Number((usage.rss / 1024 / 1024).toFixed(1)),
     heap_used_mb: Number((usage.heapUsed / 1024 / 1024).toFixed(1)),
+    heap_limit_mb: Number((heapLimitBytes / 1024 / 1024).toFixed(1)),
+    heap_percent: Number((usage.heapUsed / heapLimitBytes * 100).toFixed(1)),
+    heap_headroom_mb: Number((Math.max(0, heapLimitBytes - usage.heapUsed) / 1024 / 1024).toFixed(1)),
     external_mb: Number((usage.external / 1024 / 1024).toFixed(1)),
     limit_mb: NEXTGEN_RENDER_MEMORY_LIMIT_MB,
     percent: Number((usage.rss / limitBytes * 100).toFixed(1)),
     background_soft_percent: NEXTGEN_BACKGROUND_MEMORY_SOFT_PERCENT,
+    background_heap_soft_percent: NEXTGEN_BACKGROUND_HEAP_SOFT_PERCENT,
+    ayla_vimeo_heap_soft_percent: NEXTGEN_AYLA_VIMEO_HEAP_SOFT_PERCENT,
+    ayla_vimeo_heap_hard_percent: NEXTGEN_AYLA_VIMEO_HEAP_HARD_PERCENT,
   };
 }
 
-function ngBackgroundMemoryIsHigh(jobName = "background_job") {
+function ngBackgroundMemoryIsHigh(jobName = "background_job", {
+  heapSoftPercent = NEXTGEN_BACKGROUND_HEAP_SOFT_PERCENT,
+} = {}) {
   const status = ngMemoryStatus();
-  if (status.percent < NEXTGEN_BACKGROUND_MEMORY_SOFT_PERCENT) return false;
-  console.warn(`${jobName} skipped because memory is ${status.rss_mb} MB (${status.percent}% of configured limit)`);
+  const rssHigh = status.percent >= NEXTGEN_BACKGROUND_MEMORY_SOFT_PERCENT;
+  const heapHigh = status.heap_percent >= heapSoftPercent;
+  if (!rssHigh && !heapHigh) return false;
+  console.warn(
+    `${jobName} skipped because RSS is ${status.rss_mb} MB (${status.percent}% of configured limit) `
+    + `and V8 heap is ${status.heap_used_mb} MB (${status.heap_percent}% of heap limit)`,
+  );
   return true;
+}
+
+function ngThrowIfAylaVimeoHeapUnsafe(phase, {
+  responseId = "",
+  responseStatus = "",
+} = {}) {
+  const status = ngMemoryStatus();
+  if (status.heap_percent < NEXTGEN_AYLA_VIMEO_HEAP_HARD_PERCENT) return;
+  const error = new Error(
+    `Vimeo classification paused at ${phase}: V8 heap is ${status.heap_used_mb} MB `
+    + `(${status.heap_percent}% of its limit)`,
+  );
+  error.statusCode = 425;
+  error.openAIResponseId = String(responseId || "");
+  error.openAIResponseStatus = String(responseStatus || "in_progress");
+  error.openAIResponseTerminal = false;
+  throw error;
 }
 
 function ngMergeEmailTemplates(stored = {}) {
@@ -72320,10 +72377,16 @@ async function ngRunAylaVimeoCatalogClassificationJob(queueContext) {
   const resumableResponseId = String(
     draft.lastClassificationQueueJobId === queueJobId
       && draft.classificationStatus === "classifying"
-      ? draft.classificationOpenAIResponseId || ""
+      ? draft.classificationOpenAIResponseId
+        || queueContext.job.progress?.openai_response_id
+        || ""
       : "",
   ).trim();
-  let lastPersistedResponseKey = `${resumableResponseId}:${String(draft.classificationOpenAIResponseStatus || "")}`;
+  let lastPersistedResponseKey = `${resumableResponseId}:${String(
+    draft.classificationOpenAIResponseStatus
+      || queueContext.job.progress?.openai_response_status
+      || "",
+  )}`;
   const onBackgroundUpdate = async (response = {}, details = {}) => {
     const responseId = String(response.id || resumableResponseId || "").trim();
     const responseStatus = String(response.status || "").trim().toLowerCase();
@@ -72339,20 +72402,25 @@ async function ngRunAylaVimeoCatalogClassificationJob(queueContext) {
       ...aylaVimeoCatalogJobProgress(domainJob),
     });
     const responseKey = `${responseId}:${responseStatus}`;
-    if (!responseId || responseKey === lastPersistedResponseKey) return;
-    await mutateAylaDb(async (db) => {
-      const currentDraft = aylaGetItem(db, "aylaVimeoCatalogDrafts", draftId);
-      if (!currentDraft
-        || Number(currentDraft.revision || 0) !== expectedRevision
-        || String(currentDraft.lastClassificationQueueJobId || "") !== queueJobId) return null;
-      currentDraft.classificationOpenAIResponseId = responseId;
-      currentDraft.classificationOpenAIResponseStatus = responseStatus;
-      currentDraft.classificationOpenAIResponseUpdatedAt = aylaNow();
-      currentDraft.updatedAt = aylaNow();
-      aylaSetItem(db, "aylaVimeoCatalogDrafts", currentDraft);
-      return currentDraft;
+    ngThrowIfAylaVimeoHeapUnsafe("openai_web_research", {
+      responseId,
+      responseStatus,
     });
-    lastPersistedResponseKey = responseKey;
+    if (responseId && responseKey !== lastPersistedResponseKey) {
+      await mutateAylaDb(async (db) => {
+        const currentDraft = aylaGetItem(db, "aylaVimeoCatalogDrafts", draftId);
+        if (!currentDraft
+          || Number(currentDraft.revision || 0) !== expectedRevision
+          || String(currentDraft.lastClassificationQueueJobId || "") !== queueJobId) return null;
+        currentDraft.classificationOpenAIResponseId = responseId;
+        currentDraft.classificationOpenAIResponseStatus = responseStatus;
+        currentDraft.classificationOpenAIResponseUpdatedAt = aylaNow();
+        currentDraft.updatedAt = aylaNow();
+        aylaSetItem(db, "aylaVimeoCatalogDrafts", currentDraft);
+        return currentDraft;
+      });
+      lastPersistedResponseKey = responseKey;
+    }
   };
   let ai;
   try {
@@ -72384,6 +72452,7 @@ async function ngRunAylaVimeoCatalogClassificationJob(queueContext) {
     });
   } catch (error) {
     const responseId = String(error.openAIResponseId || resumableResponseId || "").trim();
+    if (Number(error.statusCode || error.status) === 425) throw error;
     if (responseId) {
       await mutateAylaDb(async (db) => {
         const currentDraft = aylaGetItem(db, "aylaVimeoCatalogDrafts", draftId);
@@ -72421,6 +72490,10 @@ async function ngRunAylaVimeoCatalogClassificationJob(queueContext) {
     model: ai.raw_model || model,
     responseId: ai.response_id,
     usage: ai.usage,
+  });
+  ngThrowIfAylaVimeoHeapUnsafe("classification_persistence", {
+    responseId: ai.response_id,
+    responseStatus: "completed",
   });
 
   const settledJob = await mutateAylaDb(async (db) => {

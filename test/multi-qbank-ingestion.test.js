@@ -25,7 +25,7 @@ async function waitFor(check, timeoutMs = 3_000) {
   throw new Error("Timed out waiting for v239 state");
 }
 
-test("v239 defaults to two QBank media lanes with bounded shared capacity", () => {
+test("v254 keeps the Vimeo classifier single-filed on a 2 GB Render service", () => {
   assert.deepEqual(multiQbankIngestionConfig({}), {
     build: "v249-question-zip-directory-cache",
     max_active_jobs: 4,
@@ -33,7 +33,7 @@ test("v239 defaults to two QBank media lanes with bounded shared capacity", () =
       question_zip: 2,
       image_zip: 2,
       video_zip: 2,
-      ayla_vimeo_ai: 2,
+      ayla_vimeo_ai: 1,
     },
     media_workers_per_job: 8,
     media_global_transfer_limit: 12,
@@ -62,9 +62,15 @@ test("v239 defaults to two QBank media lanes with bounded shared capacity", () =
   assert.equal(clamped.media_workers_per_job, 12);
   assert.equal(clamped.media_global_transfer_limit, 24);
   assert.equal(clamped.lane_concurrency.video_zip, 4);
-  assert.equal(clamped.lane_concurrency.ayla_vimeo_ai, 3);
+  assert.equal(clamped.lane_concurrency.ayla_vimeo_ai, 1);
   assert.equal(clamped.vimeo_uploads, 4);
   assert.equal(clamped.postgres_job_state, "authoritative_with_disk_recovery_copy");
+
+  const largerService = multiQbankIngestionConfig({
+    NEXTGEN_RENDER_MEMORY_LIMIT_MB: "4096",
+    AYLA_VIMEO_CLASSIFIER_CONCURRENCY: "20",
+  });
+  assert.equal(largerService.lane_concurrency.ayla_vimeo_ai, 1);
 });
 
 test("adaptive gate reduces new transfers under memory pressure without killing active work", async () => {
@@ -300,10 +306,13 @@ test("v239 server wiring keeps binaries private and serializes only finalization
   const postgres = await fs.readFile(new URL("../lib/content-registry-postgres.js", import.meta.url), "utf8");
   const packageJson = JSON.parse(await fs.readFile(new URL("../package.json", import.meta.url), "utf8"));
   assert.match(server, /const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD/);
-  assert.match(server, /const MEMORY_STABILITY_BUILD = "v252-bounded-recovery-queue"/);
+  assert.match(server, /const MEMORY_STABILITY_BUILD = "v254-step1-vimeo-memory-circuit-breaker"/);
   assert.match(server, /maxRetainedTerminalJobs: NG_CONTENT_JOB_RECOVERY_HISTORY_LIMIT/);
   assert.match(server, /ngBackgroundMemoryIsHigh\("ayla_private_pilot_content_activation"\)/);
   assert.match(server, /laneConcurrency: ngMultiQbankConfig\.lane_concurrency/);
+  assert.match(server, /getHeapStatistics/);
+  assert.match(server, /NEXTGEN_AYLA_VIMEO_HEAP_SOFT_PERCENT/);
+  assert.match(server, /ngThrowIfAylaVimeoHeapUnsafe\("openai_web_research"/);
   assert.match(server, /transferGate: ngMediaTransferGate/);
   assert.match(server, /ngMediaFinalizerGate\.acquire/);
   assert.match(server, /ngVimeoUploadGate\.acquire/);
