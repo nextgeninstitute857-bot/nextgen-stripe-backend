@@ -20,7 +20,11 @@ const registry = fs.readFileSync(
 test("private Step 1 pilot content is scoped through catalog, sessions, and roadmap", () => {
   assert.match(server, /const AYLA_PRIVATE_PILOT_BUILD = "v251-live-pilot-flow-recovery"/);
   assert.match(server, /const AYLA_STEP1_PILOT_DESTINATION_SCOPE = "private_step1_pilot"/);
+  assert.match(server, /const AYLA_STEP1_PILOT_VIMEO_FOLDER_ID = "29973623"/);
+  assert.match(server, /const AYLA_STEP1_PILOT_VIMEO_SOURCE_ID = "AYLA-VIMEO-SOURCE-usmle-step-1-29973623"/);
   assert.match(server, /function aylaStep1PilotDestinationScope\(student = \{\}\)/);
+  assert.match(server, /function aylaStep1PilotVimeoSourceMatches\(row = \{\}\)/);
+  assert.match(server, /function aylaStep1PilotVimeoVisibleToStudent\(resource = \{\}, student = \{\}\)/);
   assert.match(server, /async function aylaV250EligibleQbankQuestions/);
   assert.match(server, /destinationScope: session\.destinationScope \|\| ""/);
   assert.match(server, /const focusedRegistryInternal = focused\(registryQbank\.questions\)/);
@@ -105,12 +109,14 @@ test("private QBank activation disables unscoped delivery and preserves ordinary
   assert.match(activation, /sourceRightsStatus: AYLA_STEP1_OWNER_CONTENT_AUTHORIZATION\.status/);
   assert.match(activation, /collectionsOwnerAuthorized/);
   assert.match(activation, /ready_for_owner_approval/);
+  assert.match(activation, /\.filter\(aylaStep1PilotVimeoSourceMatches\)/);
   assert.match(activation, /sourceType: "content_registry_flashcard"/);
   assert.match(activation, /answerMode: "reveal_only"/);
   assert.match(activation, /flashcardsActivated/);
   assert.match(activation, /aylaQueuePrivatePilotVimeoClassificationRecovery/);
   assert.match(activation, /qbank_taxonomy_now_available/);
   assert.match(activation, /privatePilotClassificationRecoveryCount/);
+  assert.match(activation, /aylaStep1PilotVimeoNeedsResearch/);
   assert.match(activation, /vimeoEmbedDomainFingerprint/);
   assert.match(activation, /row\.pilotOnly === true \|\| row\.accessScope === "private_pilot"/);
   assert.match(activation, /ensureVimeoEmbedDomains/);

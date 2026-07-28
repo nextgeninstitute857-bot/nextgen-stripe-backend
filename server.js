@@ -341,6 +341,7 @@ import {
   isProviderRateLimit,
   multiQbankIngestionConfig,
 } from "./lib/multi-qbank-ingestion.js";
+import { runOpenAIBackgroundResponse } from "./lib/openai-background-responses.js";
 import {
   bulkQbankMediaAliasFingerprint,
   normalizeBulkQbankMediaAliases,
@@ -384,6 +385,9 @@ const AYLA_MARKETING_BUILD = "v231-readiness-sharing-referrals";
 const AYLA_VIMEO_CATALOG_BUILD = VIMEO_LIBRARY_CATALOG_BUILD;
 const AYLA_PRIVATE_PILOT_BUILD = "v251-live-pilot-flow-recovery";
 const AYLA_STEP1_PILOT_DESTINATION_SCOPE = "private_step1_pilot";
+const AYLA_STEP1_PILOT_VIMEO_FOLDER_ID = "29973623";
+const AYLA_STEP1_PILOT_VIMEO_SOURCE_ID = "AYLA-VIMEO-SOURCE-usmle-step-1-29973623";
+const AYLA_STEP1_VIMEO_PUBLICATION_BUILD = "v253-step1-vimeo-background-taxonomy";
 const AYLA_STEP1_OWNER_CONTENT_AUTHORIZATION = Object.freeze({
   status: "authorized",
   actorId: "owner:nextgeninstitute8578",
@@ -409,6 +413,40 @@ function aylaStep1PilotDestinationScope(student = {}) {
       || student.exam,
   );
   return examTrack === "usmle-step-1" ? AYLA_STEP1_PILOT_DESTINATION_SCOPE : "";
+}
+
+function aylaStep1PilotVimeoSourceMatches(row = {}) {
+  const catalogSourceId = String(
+    row.catalogSourceId
+      || row.catalog_source_id
+      || row.sourceData?.catalog_source_id
+      || row.source_data?.catalog_source_id
+      || "",
+  ).trim();
+  const folderId = normalizeVimeoFolderId(
+    row.folderId
+      || row.folder_id
+      || row.sourceData?.folder_id
+      || row.source_data?.folder_id
+      || row.sourceNamespace
+      || row.source_namespace
+      || "",
+  );
+  const sourceNamespace = String(row.sourceNamespace || row.source_namespace || "").trim();
+  return catalogSourceId === AYLA_STEP1_PILOT_VIMEO_SOURCE_ID
+    || folderId === AYLA_STEP1_PILOT_VIMEO_FOLDER_ID
+    || sourceNamespace === `vimeo_folder:${AYLA_STEP1_PILOT_VIMEO_FOLDER_ID}`;
+}
+
+function aylaStep1PilotVimeoVisibleToStudent(resource = {}, student = {}) {
+  if (!aylaStep1PilotDestinationScope(student)) return true;
+  const type = String(resource.type || resource.resourceType || resource.resource_type || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  const isVimeo = Boolean(resource.vimeoId || resource.vimeo_id)
+    || ["vimeo_video", "video_transcript"].includes(type);
+  return !isVimeo || aylaStep1PilotVimeoSourceMatches(resource);
 }
 const MEMORY_STABILITY_BUILD = "v252-bounded-recovery-queue";
 
@@ -9099,6 +9137,11 @@ async function callOpenAIResponsesAPI({
   include = null,
   reasoning = null,
   textFormat = null,
+  background = false,
+  backgroundResponseId = "",
+  backgroundPollIntervalMs = 5_000,
+  backgroundMaximumWaitMs = 30 * 60 * 1000,
+  onBackgroundUpdate = null,
 }) {
   if (!isAIConfigured()) {
     const error = new Error(getAIConfigError());
@@ -9126,26 +9169,39 @@ async function callOpenAIResponsesAPI({
   if (Array.isArray(include) && include.length) payload.include = include;
   if (reasoning && typeof reasoning === "object") payload.reasoning = reasoning;
 
-  try {
-    const response = await axios.post(
-      "https://api.openai.com/v1/responses",
-      payload,
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        timeout: 120000,
-      }
-    );
+  const headers = {
+    Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+    "Content-Type": "application/json",
+  };
 
+  try {
+    const responseData = background
+      ? await runOpenAIBackgroundResponse({
+          httpClient: axios,
+          headers,
+          payload,
+          responseId: backgroundResponseId,
+          createTimeoutMs: 30_000,
+          requestTimeoutMs: 30_000,
+          pollIntervalMs: backgroundPollIntervalMs,
+          maximumWaitMs: backgroundMaximumWaitMs,
+          onUpdate: onBackgroundUpdate,
+        })
+      : (await axios.post(
+          "https://api.openai.com/v1/responses",
+          payload,
+          {
+            headers,
+            timeout: 120000,
+          },
+        )).data;
     return {
-      text: extractAIText(response.data),
-      usage: normalizeAIUsage(response.data?.usage || {}),
+      text: extractAIText(responseData),
+      usage: normalizeAIUsage(responseData?.usage || {}),
       model,
-      raw_model: response.data?.model || model,
-      response_id: response.data?.id || null,
-      output: Array.isArray(response.data?.output) ? response.data.output : [],
+      raw_model: responseData?.model || model,
+      response_id: responseData?.id || null,
+      output: Array.isArray(responseData?.output) ? responseData.output : [],
     };
   } catch (error) {
     const apiMessage =
@@ -9155,7 +9211,10 @@ async function callOpenAIResponsesAPI({
       "OpenAI request failed";
 
     const e = new Error(apiMessage);
-    e.statusCode = error.response?.status || 500;
+    e.statusCode = error.response?.status || error.statusCode || 500;
+    e.openAIResponseId = String(error.openAIResponseId || "");
+    e.openAIResponseStatus = String(error.openAIResponseStatus || "");
+    e.openAIResponseTerminal = error.openAIResponseTerminal === true;
     throw e;
   }
 }
@@ -10239,6 +10298,11 @@ app.get("/health", async (req, res) => {
     aylamed_starting_readiness_build: AYLA_STARTING_READINESS_BUILD,
     aylamed_single_roadmap_build: AYLA_SINGLE_ROADMAP_BUILD,
     aylamed_private_pilot_build: AYLA_PRIVATE_PILOT_BUILD,
+    aylamed_step1_vimeo_publication_build: AYLA_STEP1_VIMEO_PUBLICATION_BUILD,
+    aylamed_step1_vimeo_source: {
+      folder_id: AYLA_STEP1_PILOT_VIMEO_FOLDER_ID,
+      catalog_source_id: AYLA_STEP1_PILOT_VIMEO_SOURCE_ID,
+    },
     aylamed_private_pilot_content_activation: aylaPrivatePilotContentActivationState,
     memory_stability_build: MEMORY_STABILITY_BUILD,
     roadmap_extension_build: ROADMAP_EXTENSION_BUILD,
@@ -67549,6 +67613,7 @@ function aylaV189RelevantResources(db, student, types = []) {
     .filter((resource) => resource.approved !== false && !["disabled", "deleted", "rejected", "archived"].includes(String(resource.status || "").toLowerCase()))
     .filter((resource) => !resource.ownerStudentId || String(resource.ownerStudentId) === String(student.id))
     .filter((resource) => aylaPilotContentVisibleToStudent(resource, student))
+    .filter((resource) => aylaStep1PilotVimeoVisibleToStudent(resource, student))
     .filter((resource) => !selected.size || selected.has(aylaV189ResourceType(resource.type)))
     .filter((resource) => {
       const resourceExam = aylaCanonicalExamTrack(resource.examTrackId || resource.examTrack || resource.exam_track || resource.exam);
@@ -67648,6 +67713,7 @@ async function aylaV210EligibleVideos(db, student, { forRoadmap = false, forNote
     forRoadmap ? ["aylamed_roadmap"] : ["aylamed_content_hub", "aylamed_roadmap"],
   );
   let videos = normalizeAylaContentHubVideos([...legacy, ...registry.rows], { examTrack: examTrackId });
+  videos = videos.filter((video) => aylaStep1PilotVimeoVisibleToStudent(video, student));
   if (!forRoadmap && !forNotes) {
     videos = videos.filter((video) =>
       video.sourceType !== "registry"
@@ -71087,6 +71153,25 @@ function aylaPrivatePilotVimeoEmbedDomains() {
       ];
 }
 
+function aylaStep1PilotVimeoNeedsResearch(row = {}) {
+  if (!aylaStep1PilotVimeoSourceMatches(row)) return false;
+  if (row.folderMembershipStatus === "missing_from_folder") return false;
+  if (row.readyForClassification === false || !row.sourceTitle || !row.vimeoId) return false;
+  if (String(row.reviewStatus || "").toLowerCase() === "approved") return false;
+  const classification = row.classification || {};
+  const alreadyWebGrounded = classification.webSearchPerformed === true
+    && Array.isArray(classification.evidenceSources)
+    && classification.evidenceSources.length > 0;
+  if (alreadyWebGrounded) return false;
+  return [
+    "pending_classification",
+    "classification_failed",
+    "needs_reapproval",
+    "needs_review",
+  ].includes(String(row.status || "").toLowerCase())
+    || ["pending", "failed", "cancelled"].includes(String(row.classificationStatus || "").toLowerCase());
+}
+
 async function aylaQueuePrivatePilotVimeoClassificationRecovery() {
   aylaVimeoTaxonomyCache.delete("usmle-step-1");
   if (!isAIConfigured()) {
@@ -71105,17 +71190,17 @@ async function aylaQueuePrivatePilotVimeoClassificationRecovery() {
   );
   const limit = Math.max(
     1,
-    Math.min(100, Number(process.env.AYLA_PRIVATE_PILOT_VIMEO_RECOVERY_BATCH || 75) || 75),
+    Math.min(100, Number(process.env.AYLA_PRIVATE_PILOT_VIMEO_RECOVERY_BATCH || 50) || 50),
   );
   const candidates = aylaValues(db, "aylaVimeoCatalogDrafts")
     .filter((row) => aylaCanonicalExamTrack(row.examTrackId || row.exam_track_id) === "usmle_step_1")
-    .filter((row) => /boards\s+and\s+beyond/i.test(String(row.folderName || "")))
-    .filter((row) => /step\s*1/i.test(String(row.folderName || "")))
-    .filter((row) => row.folderMembershipStatus !== "missing_from_folder")
-    .filter((row) => String(row.status || "") === "classification_failed")
-    .filter((row) => String(row.reviewStatus || "") !== "approved")
-    .filter((row) => Number(row.privatePilotClassificationRecoveryCount || 0) < 1)
+    .filter(aylaStep1PilotVimeoNeedsResearch)
+    .filter((row) => Number(row.privatePilotClassificationRecoveryCount || 0) < 3)
     .filter((row) => !activeDraftIds.has(String(row.id)))
+    .sort((left, right) =>
+      Number(left.privatePilotClassificationRecoveryCount || 0)
+        - Number(right.privatePilotClassificationRecoveryCount || 0)
+      || String(left.sourceTitle || "").localeCompare(String(right.sourceTitle || "")))
     .slice(0, limit);
   if (!candidates.length) {
     return { eligible: 0, queued: 0, skippedReason: "no_failed_drafts_need_recovery" };
@@ -71128,7 +71213,7 @@ async function aylaQueuePrivatePilotVimeoClassificationRecovery() {
       email: "",
       name: "AylaMed private pilot content activation",
     },
-    catalogSourceId: candidates[0]?.catalogSourceId || "",
+    catalogSourceId: AYLA_STEP1_PILOT_VIMEO_SOURCE_ID,
     trigger: "private_pilot_taxonomy_recovery",
   });
   const failedIds = new Set((queued?.enqueueErrors || []).map((row) => String(row.draftId || "")));
@@ -71327,8 +71412,7 @@ async function ngRunAylaPrivatePilotContentActivation(reason = "startup") {
       }
       const readyDrafts = aylaValues(db, "aylaVimeoCatalogDrafts")
         .filter((row) => aylaCanonicalExamTrack(row.examTrackId || row.exam_track_id) === "usmle_step_1")
-        .filter((row) => /boards\s+and\s+beyond/i.test(String(row.folderName || "")))
-        .filter((row) => /step\s*1/i.test(String(row.folderName || "")))
+        .filter(aylaStep1PilotVimeoSourceMatches)
         .filter((row) => row.folderMembershipStatus !== "missing_from_folder")
         .filter((row) => String(row.reviewStatus || "") !== "approved")
         .filter((row) => row.classification?.approvalReadiness === "ready_for_owner_approval")
@@ -71376,6 +71460,7 @@ async function ngRunAylaPrivatePilotContentActivation(reason = "startup") {
 
       const privateLectures = aylaValues(db, "aylaResources")
         .filter((row) => aylaV189ResourceType(row.type) === "vimeo_video")
+        .filter(aylaStep1PilotVimeoSourceMatches)
         .filter((row) => row.pilotOnly === true || row.accessScope === "private_pilot")
         .filter((row) =>
           String(row.vimeoEmbedDomainFingerprint || "") !== vimeoEmbedDomainFingerprint)
@@ -72138,6 +72223,9 @@ async function ngAylaVimeoCatalogJobTerminal(backgroundJob = {}) {
       draft.status = outcome === "cancelled" ? "pending_classification" : "classification_failed";
       draft.classificationStatus = outcome === "cancelled" ? "cancelled" : "failed";
       draft.classificationError = String(backgroundJob.error || (outcome === "cancelled" ? "Classification cancelled" : "Classification failed")).slice(0, 2000);
+      draft.classificationOpenAIResponseId = null;
+      draft.classificationOpenAIResponseStatus = outcome;
+      draft.classificationOpenAIResponseUpdatedAt = aylaNow();
       draft.revision = Number(draft.revision || 0) + 1;
       draft.updatedAt = aylaNow();
       aylaSetItem(db, "aylaVimeoCatalogDrafts", draft);
@@ -72229,17 +72317,100 @@ async function ngRunAylaVimeoCatalogClassificationJob(queueContext) {
   });
   const model = aylaVimeoCatalogModel();
   const started = Date.now();
-  const ai = await callOpenAIResponsesAPI({
-    model,
-    systemPrompt: request.systemPrompt,
-    userPrompt: request.userPrompt,
-    maxOutputTokens: Math.max(1200, Math.min(4000, Number(process.env.AYLA_VIMEO_CLASSIFIER_MAX_OUTPUT_TOKENS || 2200))),
-    tools: request.tools,
-    toolChoice: request.toolChoice,
-    include: request.include,
-    reasoning: request.reasoning,
-    textFormat: request.textFormat,
-  });
+  const resumableResponseId = String(
+    draft.lastClassificationQueueJobId === queueJobId
+      && draft.classificationStatus === "classifying"
+      ? draft.classificationOpenAIResponseId || ""
+      : "",
+  ).trim();
+  let lastPersistedResponseKey = `${resumableResponseId}:${String(draft.classificationOpenAIResponseStatus || "")}`;
+  const onBackgroundUpdate = async (response = {}, details = {}) => {
+    const responseId = String(response.id || resumableResponseId || "").trim();
+    const responseStatus = String(response.status || "").trim().toLowerCase();
+    await queueContext.heartbeat({
+      stage: "openai_web_research",
+      domain_job_id: domainJobId,
+      draft_id: draftId,
+      title: draft.sourceTitle,
+      openai_response_id: responseId || null,
+      openai_response_status: responseStatus || null,
+      poll_count: Number(details.polls || 0),
+      elapsed_ms: Math.max(0, Number(details.elapsedMs || 0)),
+      ...aylaVimeoCatalogJobProgress(domainJob),
+    });
+    const responseKey = `${responseId}:${responseStatus}`;
+    if (!responseId || responseKey === lastPersistedResponseKey) return;
+    await mutateAylaDb(async (db) => {
+      const currentDraft = aylaGetItem(db, "aylaVimeoCatalogDrafts", draftId);
+      if (!currentDraft
+        || Number(currentDraft.revision || 0) !== expectedRevision
+        || String(currentDraft.lastClassificationQueueJobId || "") !== queueJobId) return null;
+      currentDraft.classificationOpenAIResponseId = responseId;
+      currentDraft.classificationOpenAIResponseStatus = responseStatus;
+      currentDraft.classificationOpenAIResponseUpdatedAt = aylaNow();
+      currentDraft.updatedAt = aylaNow();
+      aylaSetItem(db, "aylaVimeoCatalogDrafts", currentDraft);
+      return currentDraft;
+    });
+    lastPersistedResponseKey = responseKey;
+  };
+  let ai;
+  try {
+    ai = await callOpenAIResponsesAPI({
+      model,
+      systemPrompt: request.systemPrompt,
+      userPrompt: request.userPrompt,
+      maxOutputTokens: Math.max(1200, Math.min(4000, Number(process.env.AYLA_VIMEO_CLASSIFIER_MAX_OUTPUT_TOKENS || 2200))),
+      tools: request.tools,
+      toolChoice: request.toolChoice,
+      include: request.include,
+      reasoning: request.reasoning,
+      textFormat: request.textFormat,
+      background: true,
+      backgroundResponseId: resumableResponseId,
+      backgroundPollIntervalMs: Math.max(
+        2_000,
+        Math.min(30_000, Number(process.env.AYLA_VIMEO_CLASSIFIER_POLL_MS || 5_000) || 5_000),
+      ),
+      backgroundMaximumWaitMs: Math.max(
+        2 * 60 * 1000,
+        Math.min(
+          60 * 60 * 1000,
+          Number(process.env.AYLA_VIMEO_CLASSIFIER_MAX_WAIT_MS || 30 * 60 * 1000)
+            || 30 * 60 * 1000,
+        ),
+      ),
+      onBackgroundUpdate,
+    });
+  } catch (error) {
+    const responseId = String(error.openAIResponseId || resumableResponseId || "").trim();
+    if (responseId) {
+      await mutateAylaDb(async (db) => {
+        const currentDraft = aylaGetItem(db, "aylaVimeoCatalogDrafts", draftId);
+        if (!currentDraft
+          || Number(currentDraft.revision || 0) !== expectedRevision
+          || String(currentDraft.lastClassificationQueueJobId || "") !== queueJobId) return null;
+        if (error.openAIResponseTerminal === true) {
+          currentDraft.classificationLastTerminalOpenAIResponseId = responseId;
+          currentDraft.classificationLastTerminalOpenAIResponseStatus = String(
+            error.openAIResponseStatus || "failed",
+          );
+          currentDraft.classificationOpenAIResponseId = null;
+          currentDraft.classificationOpenAIResponseStatus = "";
+        } else {
+          currentDraft.classificationOpenAIResponseId = responseId;
+          currentDraft.classificationOpenAIResponseStatus = String(
+            error.openAIResponseStatus || currentDraft.classificationOpenAIResponseStatus || "in_progress",
+          );
+        }
+        currentDraft.classificationOpenAIResponseUpdatedAt = aylaNow();
+        currentDraft.updatedAt = aylaNow();
+        aylaSetItem(db, "aylaVimeoCatalogDrafts", currentDraft);
+        return currentDraft;
+      });
+    }
+    throw error;
+  }
   const proposal = safeJsonParseFromAI(ai.text);
   const evidence = extractVimeoWebSearchEvidence(ai.output);
   const classification = normalizeVimeoTopicClassification({
@@ -72269,6 +72440,9 @@ async function ngRunAylaVimeoCatalogClassificationJob(queueContext) {
     currentDraft.classificationStatus = "completed";
     currentDraft.classification = classification;
     currentDraft.classificationError = "";
+    currentDraft.classificationOpenAIResponseId = null;
+    currentDraft.classificationOpenAIResponseStatus = "completed";
+    currentDraft.classificationOpenAIResponseUpdatedAt = aylaNow();
     currentDraft.lastClassificationJobId = domainJobId;
     currentDraft.lastClassificationQueueJobId = queueJobId;
     currentDraft.revision = Number(currentDraft.revision || 0) + 1;
@@ -72354,7 +72528,10 @@ async function aylaQueueVimeoCatalogClassification({
         id: crypto.randomUUID(),
         type: "ayla_vimeo_catalog_classification",
         lane: "ayla_vimeo_ai",
-        maxAttempts: 8,
+        maxAttempts: Math.max(
+          1,
+          Math.min(8, Number(process.env.AYLA_VIMEO_CLASSIFIER_MAX_ATTEMPTS || 4) || 4),
+        ),
         priority: -20,
         idempotencyKey: `ayla-vimeo-classify:${domainJob.id}:${draft.id}:${draft.revision}`,
         payload: {
