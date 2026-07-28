@@ -2,9 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   contentVideoStatus,
+  ensureVimeoEmbedDomains,
   isVideoMediaRef,
   matchVideoReferences,
   matchVideoReferencesByVerifiedAliases,
+  normalizeVimeoEmbedDomains,
   normalizeVerifiedVideoAliases,
   safeVideoEntryName,
 } from "../lib/content-video-vimeo.js";
@@ -12,6 +14,69 @@ import {
 test("Vimeo remains disabled until an access token is configured", () => {
   assert.equal(contentVideoStatus({}).configured, false);
   assert.equal(contentVideoStatus({ VIMEO_ACCESS_TOKEN: " token " }).configured, true);
+});
+
+test("Vimeo embed domains are normalized to safe unique hostnames", () => {
+  assert.deepEqual(normalizeVimeoEmbedDomains([
+    "https://paleturquoise-quail-255896.hostingersite.com/dashboard",
+    "paleturquoise-quail-255896.hostingersite.com",
+    "LIVE.NextGenUSMLELMS.com/",
+    "https://bad domain.example",
+  ]), [
+    "paleturquoise-quail-255896.hostingersite.com",
+    "live.nextgenusmlelms.com",
+  ]);
+});
+
+test("Vimeo allowlist reconciliation uses the documented per-video domain endpoint", async () => {
+  const requests = [];
+  const result = await ensureVimeoEmbedDomains({
+    videoIds: ["12345", "/videos/67890", "unsafe/id"],
+    domains: [
+      "https://paleturquoise-quail-255896.hostingersite.com/dashboard",
+      "live.nextgenusmlelms.com",
+    ],
+    adapters: {
+      apiClient: {
+        put: async (requestPath) => {
+          requests.push(requestPath);
+          return { status: 204 };
+        },
+      },
+    },
+  });
+  assert.deepEqual(requests, [
+    "/videos/12345/privacy/domains/paleturquoise-quail-255896.hostingersite.com",
+    "/videos/12345/privacy/domains/live.nextgenusmlelms.com",
+    "/videos/67890/privacy/domains/paleturquoise-quail-255896.hostingersite.com",
+    "/videos/67890/privacy/domains/live.nextgenusmlelms.com",
+  ]);
+  assert.equal(result.requested, 4);
+  assert.equal(result.ensured, 4);
+  assert.deepEqual(result.ensured_videos, ["12345", "67890"]);
+  assert.deepEqual(result.failures, []);
+});
+
+test("Vimeo allowlist reconciliation isolates a failed video-domain pair", async () => {
+  const result = await ensureVimeoEmbedDomains({
+    videoIds: ["12345"],
+    domains: ["one.example", "two.example"],
+    adapters: {
+      apiClient: {
+        put: async (requestPath) => {
+          if (requestPath.endsWith("/two.example")) {
+            throw Object.assign(new Error("Forbidden"), { response: { status: 403 } });
+          }
+          return { status: 204 };
+        },
+      },
+    },
+  });
+  assert.equal(result.ensured, 1);
+  assert.deepEqual(result.ensured_videos, []);
+  assert.equal(result.failures.length, 1);
+  assert.equal(result.failures[0].domain, "two.example");
+  assert.equal(result.failures[0].status, 403);
 });
 
 test("video references are classified without treating images as videos", () => {
