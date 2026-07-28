@@ -202,6 +202,19 @@ test("self-study sessions preserve the selected source profile while roadmap ses
   assert.equal(sessionFixture("tutor").sourceProfile, null);
 });
 
+test("private pilot QBank sessions retain their destination scope internally", () => {
+  const session = createAylaQbankSession({
+    id: "private-pilot-session",
+    userId: "user-1",
+    studentId: "student-1",
+    examTrack: "usmle-step-1",
+    destinationScope: "PRIVATE_STEP1_PILOT",
+    questions: [{ ref: "one", contentQuestionId: "q1" }],
+  });
+  assert.equal(session.destinationScope, "private_step1_pilot");
+  assert.equal("destination_scope" in sanitizeAylaQbankSession(session), false);
+});
+
 test("roadmap QBank sessions use only the assignment's explicit question identities", () => {
   const question1 = "11111111-1111-4111-8111-111111111111";
   const question2 = "22222222-2222-4222-8222-222222222222";

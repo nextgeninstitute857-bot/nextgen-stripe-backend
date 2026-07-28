@@ -300,10 +300,12 @@ import {
 } from "./lib/media-ingestion-accelerator.js";
 import {
   contentVideoStatus,
+  ensureVimeoEmbedDomains,
   extractReferencedVideos,
   inspectContentVideoEntries,
   matchVideoReferences,
   matchVideoReferencesByVerifiedAliases,
+  normalizeVimeoEmbedDomains,
   normalizeVerifiedVideoAliases,
   openReferencedVideoStream,
   uploadVideoToVimeo,
@@ -379,7 +381,28 @@ const AYLA_STARTING_READINESS_BUILD = "v229-starting-readiness-loop";
 const AYLA_SINGLE_ROADMAP_BUILD = "v230-single-roadmap-execution";
 const AYLA_MARKETING_BUILD = "v231-readiness-sharing-referrals";
 const AYLA_VIMEO_CATALOG_BUILD = VIMEO_LIBRARY_CATALOG_BUILD;
-const AYLA_PRIVATE_PILOT_BUILD = "v247-step1-private-pilot";
+const AYLA_PRIVATE_PILOT_BUILD = "v250-private-pilot-content-delivery";
+const AYLA_STEP1_PILOT_DESTINATION_SCOPE = "private_step1_pilot";
+const aylaPrivatePilotContentActivationState = {
+  running: false,
+  lastStartedAt: null,
+  lastFinishedAt: null,
+  lastSuccessAt: null,
+  lastError: null,
+  lastResult: null,
+};
+
+function aylaStep1PilotDestinationScope(student = {}) {
+  if (student.pilotTest !== true && student.pilot_test !== true) return "";
+  const examTrack = normalizeAylaRegistryExamTrack(
+    student.examTrackId
+      || student.exam_track_id
+      || student.examTrack
+      || student.exam_track
+      || student.exam,
+  );
+  return examTrack === "usmle-step-1" ? AYLA_STEP1_PILOT_DESTINATION_SCOPE : "";
+}
 const MEMORY_STABILITY_BUILD = "v248-copy-on-write-db-mutations";
 
 const allowedOrigins = [
@@ -10191,6 +10214,7 @@ app.get("/health", async (req, res) => {
     aylamed_starting_readiness_build: AYLA_STARTING_READINESS_BUILD,
     aylamed_single_roadmap_build: AYLA_SINGLE_ROADMAP_BUILD,
     aylamed_private_pilot_build: AYLA_PRIVATE_PILOT_BUILD,
+    aylamed_private_pilot_content_activation: aylaPrivatePilotContentActivationState,
     memory_stability_build: MEMORY_STABILITY_BUILD,
     roadmap_extension_build: ROADMAP_EXTENSION_BUILD,
     recording_assignment_build: RECORDING_ASSIGNMENT_BUILD,
@@ -38019,6 +38043,7 @@ async function aylaSelectQbankSessionQuestions({
   filters,
   purpose,
   sourceProfile = "",
+  destinationScope = "",
 } = {}) {
   if (purpose !== "baseline_diagnostic") {
     const selected = await listContentQbankQuestions({
@@ -38029,13 +38054,18 @@ async function aylaSelectQbankSessionQuestions({
       topicKey: filters.topic_key,
       subtopicKey: filters.subtopic_key,
       sourceProfile,
+      destinationScope,
       limit: requestedCount,
       seed: crypto.randomUUID(),
     });
     return { selected, availableSystemKeys: [], selectedSystemKeys: [] };
   }
 
-  const catalog = await getContentQbankCatalog({ examTrack, destination: "aylamed_qbank" });
+  const catalog = await getContentQbankCatalog({
+    examTrack,
+    destination: "aylamed_qbank",
+    destinationScope,
+  });
   const availableSystemKeys = [...new Set(catalog
     .filter((row) => Number(row.question_count || 0) > 0)
     .map((row) => String(row.system_key || row.system || row.system_label || "").trim())
@@ -38053,6 +38083,7 @@ async function aylaSelectQbankSessionQuestions({
       const rows = await listContentQbankQuestions({
         examTrack,
         destination: "aylamed_qbank",
+        destinationScope,
         systemKey,
         limit,
         seed: crypto.randomUUID(),
@@ -38067,6 +38098,7 @@ async function aylaSelectQbankSessionQuestions({
     const fill = await listContentQbankQuestions({
       examTrack,
       destination: "aylamed_qbank",
+      destinationScope,
       limit: Math.min(200, Math.max(requestedCount, requestedCount * 2)),
       seed: crypto.randomUUID(),
     });
@@ -38106,6 +38138,7 @@ app.get("/api/ayla/qbank/catalog", async (req, res) => {
     const auth = await aylaV189RequireStudent(req, String(req.query.student_id || ""), "qbank");
     const access = aylaRequireQbankAccess(auth.db, auth.user, auth.student, req.query.exam_track || req.query.examTrack || "");
     const examTrack = access.exam_track;
+    const destinationScope = aylaStep1PilotDestinationScope(auth.student);
     const presentationPolicy = await getContentQbankPresentationPolicy({ examTrack });
     const sourceProfile = resolveContentQbankStudentSourceProfile(
       presentationPolicy,
@@ -38114,6 +38147,7 @@ app.get("/api/ayla/qbank/catalog", async (req, res) => {
     const catalog = await getContentQbankCatalog({
       examTrack,
       destination: "aylamed_qbank",
+      destinationScope,
       sourceProfile,
     });
     return aylaSendOk(res, {
@@ -38133,6 +38167,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
   try {
     const auth = await aylaV189RequireStudent(req, String(req.body.student_id || req.body.studentId || ""), "qbank");
     const access = aylaRequireQbankAccess(auth.db, auth.user, auth.student, req.body.exam_track || req.body.examTrack || "");
+    const destinationScope = aylaStep1PilotDestinationScope(auth.student);
     const purpose = normalizeAylaQbankPurpose(req.body.purpose || req.body.session_purpose || "practice");
     const requestedCount = Number(req.body.question_count ?? req.body.questionCount ?? 40);
     if (!Number.isInteger(requestedCount) || requestedCount < 1 || requestedCount > 200) {
@@ -38229,6 +38264,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
       roadmapAssignmentId,
       roadmapQuestionIds,
       sourceProfile,
+      destinationScope,
       timeLimitMinutes: req.body.time_limit_minutes ?? req.body.timeLimitMinutes ?? null,
     })).digest("hex");
     if (idempotencyKey) {
@@ -38256,6 +38292,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         questionIds: roadmapQuestionIds,
         examTrack: access.exam_track,
         destination: "aylamed_qbank",
+        destinationScope,
       });
       const byId = new Map(rows.map((row) => [String(row.id || ""), row]));
       const selected = roadmapQuestionIds.map((id) => byId.get(String(id))).filter(Boolean);
@@ -38279,6 +38316,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         filters: effectiveFilters,
         purpose,
         sourceProfile,
+        destinationScope,
       });
     }
     const selected = selection.selected;
@@ -38334,6 +38372,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         origin,
         roadmapAssignmentId,
         sourceProfile,
+        destinationScope,
         timeLimitMinutes: req.body.time_limit_minutes ?? req.body.timeLimitMinutes ?? null,
         entitlement: fresh.entitlement,
       });
@@ -38395,6 +38434,7 @@ app.post("/api/ayla/qbank/sessions/:sessionId/answers", async (req, res) => {
       questionIds: [mapping.contentQuestionId],
       examTrack: session.examTrack,
       destination: "aylamed_qbank",
+      destinationScope: session.destinationScope || "",
       sourceProfile: session.sourceProfile || "",
     });
     if (!question) return aylaSendError(res, 409, "This question is no longer approved for QBank delivery");
@@ -38463,6 +38503,7 @@ app.post("/api/ayla/qbank/sessions/:sessionId/submit", async (req, res) => {
       questionIds: (initial.questions || []).map((row) => row.contentQuestionId),
       examTrack: initial.examTrack,
       destination: "aylamed_qbank",
+      destinationScope: initial.destinationScope || "",
       sourceProfile: initial.sourceProfile || "",
     });
     const reviewById = new Map(reviewQuestions.map((row) => [String(row.id), row]));
@@ -38833,6 +38874,7 @@ async function aylaHandleQbankRevision(req, res, enabled) {
       questionIds: [mapping.contentQuestionId],
       examTrack: initial.examTrack,
       destination: "aylamed_qbank",
+      destinationScope: initial.destinationScope || "",
       sourceProfile: initial.sourceProfile || "",
     });
     const revision = await mutateAylaDb(async (db) => {
@@ -38885,6 +38927,7 @@ async function aylaQbankSavedList(req, res, collection, responseKey) {
       questionIds: rows.map((row) => row.contentQuestionId || row.sourceId),
       examTrack: access.exam_track,
       destination: "aylamed_qbank",
+      destinationScope: aylaStep1PilotDestinationScope(auth.student),
     });
     const byId = new Map(content.map((row) => [String(row.id), row]));
     const items = [];
@@ -62812,6 +62855,7 @@ async function aylaPlayableQbankQuestion(db, session, mapping, rawQuestion = nul
       questionIds: [mapping.contentQuestionId],
       examTrack: session.examTrack,
       destination: "aylamed_qbank",
+      destinationScope: session.destinationScope || "",
       sourceProfile: session.sourceProfile || "",
     });
   }
@@ -62875,6 +62919,7 @@ async function aylaPlayableQbankSession(db, session) {
     questionIds: mappings.map((row) => row.contentQuestionId),
     examTrack: session.examTrack,
     destination: "aylamed_qbank",
+    destinationScope: session.destinationScope || "",
     sourceProfile: session.sourceProfile || "",
   });
   const byId = new Map(content.map((row) => [String(row.id), row]));
@@ -64697,7 +64742,10 @@ app.get("/api/ayla/students/:id/dashboard", async (req, res) => {
         aylaMedFeed,
         aylaMeFeed: aylaMedFeed,
         aylaMateFeed: aylaMedFeed,
-        flashcards: aylaFilterRows(aylaValues(db, "aylaFlashcards"), { studentId: student.id }),
+        flashcards: [...new Map([
+          ...aylaFilterRows(aylaValues(db, "aylaFlashcards"), { studentId: student.id }),
+          ...aylaV189RelevantResources(db, student, ["flashcard"]),
+        ].map((row) => [String(row.id), row])).values()],
         assessmentResults: aylaFilterRows(aylaValues(db, "aylaAssessmentResults"), { studentId: student.id }),
         studyPartnerMatches: aylaValues(db, "aylaStudyPartnerMatches").filter((item) => item.studentAId === student.id || item.studentBId === student.id),
       },
@@ -67571,6 +67619,87 @@ async function aylaV210EligibleVideos(db, student, { forRoadmap = false, forNote
   return { videos, assignments, warning: registry.warning };
 }
 
+async function aylaV250EligibleQbankQuestions(student, {
+  date = aylaDateOnly(),
+  system = "",
+  subsystem = "",
+  topic = "",
+  limit = 24,
+} = {}) {
+  const destinationScope = aylaStep1PilotDestinationScope(student);
+  if (!destinationScope || !contentRegistryStatus().configured) {
+    return { questions: [], destinationScope, warning: null };
+  }
+  const examTrack = normalizeAylaRegistryExamTrack(
+    student.examTrackId
+      || student.exam_track_id
+      || student.examTrack
+      || student.exam_track
+      || student.exam,
+  );
+  if (!examTrack) return { questions: [], destinationScope, warning: "unsupported_student_exam_track" };
+  const requestedLimit = Math.max(1, Math.min(40, Number(limit || 24)));
+  const systemKey = ["", "general"].includes(aylaV189MappingKey(system)) ? "" : aylaV189MappingKey(system);
+  const subsystemKey = aylaV189MappingKey(subsystem);
+  const topicKey = ["", "core review"].includes(aylaV189MappingKey(topic)) ? "" : aylaV189MappingKey(topic);
+  try {
+    let rows = await listContentQbankQuestions({
+      examTrack,
+      destination: "aylamed_qbank",
+      destinationScope,
+      systemKey,
+      subsystemKey,
+      topicKey,
+      limit: requestedLimit,
+      seed: `${student.id}:${date}:${systemKey}:${subsystemKey}:${topicKey}`,
+    });
+    if (!rows.length && (systemKey || subsystemKey || topicKey)) {
+      rows = await listContentQbankQuestions({
+        examTrack,
+        destination: "aylamed_qbank",
+        destinationScope,
+        limit: requestedLimit,
+        seed: `${student.id}:${date}:pilot-qbank-fallback`,
+      });
+    }
+    return {
+      destinationScope,
+      warning: null,
+      questions: rows.map((row) => ({
+        id: String(row.id),
+        contentQuestionId: String(row.id),
+        type: "internal_mcq",
+        provider: "AylaMed QBank",
+        examTrackId: aylaCanonicalExamTrack(examTrack),
+        examTrack,
+        resourceNumber: row.display_question_id || row.student_qid || "",
+        questionNumber: row.display_question_id || row.student_qid || "",
+        title: row.topic_key || row.title || "AylaMed QBank practice",
+        system: row.system_key || "General",
+        subsystem: row.subsystem_key || "",
+        topic: row.topic_key || row.title || "QBank practice",
+        subtopic: row.subtopic_key || "",
+        estimatedMinutes: 2,
+        approved: true,
+        status: "active",
+        authorizationStatus: "approved_registry_collection",
+        verificationStatus: "approved_content_registry",
+        sourceAccessMode: "protected",
+        sourceType: "content_registry_qbank",
+        accessScope: "private_pilot",
+        pilotOnly: true,
+      })),
+    };
+  } catch (error) {
+    console.warn("AylaMed private-pilot QBank roadmap read unavailable:", error.message);
+    return {
+      questions: [],
+      destinationScope,
+      warning: "qbank_registry_temporarily_unavailable",
+    };
+  }
+}
+
 async function aylaV240EligibleCdmCases(db, student, date = aylaDateOnly()) {
   const examTrack = normalizeAylaRegistryExamTrack(
     student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam,
@@ -68458,6 +68587,7 @@ function aylaV189ResolveRevisionResource(db, revision = {}, student = {}) {
     && resource.approved !== false
     && !["disabled", "deleted", "rejected", "archived", "quarantined"].includes(String(resource.status || "").toLowerCase())
     && (!resource.ownerStudentId || String(resource.ownerStudentId) === String(student.id))
+    && aylaPilotContentVisibleToStudent(resource, student)
     && aylaCanonicalExamTrack(resource.examTrackId || resource.examTrack || resource.exam) === studentExam);
   let resourceId = revision.resourceId || revision.resource_id || "";
   if (!resourceId && revision.sourceType === "question") {
@@ -68932,6 +69062,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   const dueRevisions = aylaV189DueRevisionQueue(db, student, date).slice(0, 20);
   const contentHubEnabled = aylaV210StudentFeatureAllowed(db, student, "content_hub");
   const libraryEnabled = aylaV210StudentFeatureAllowed(db, student, "library");
+  const qbankEnabled = aylaV210StudentFeatureAllowed(db, student, "qbank");
   const cdmEnabled = aylaCanonicalExamTrack(
     student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam,
   ) === "mccqe" && aylaV210StudentFeatureAllowed(db, student, "qbank");
@@ -68970,6 +69101,15 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     return prioritize((exact.length ? exact : subsystemWide.length ? subsystemWide : systemWide)
       .filter((row, index, all) => all.findIndex((candidate) => String(candidate.id) === String(row.id)) === index));
   };
+  const registryQbank = qbankEnabled
+    ? await aylaV250EligibleQbankQuestions(student, {
+        date,
+        system: focusSystem,
+        subsystem: focusSubsystem,
+        topic: focusTopic,
+        limit: Math.max(8, Math.min(40, Math.round((capacityMinutes / 32) * questionVolumeFactor))),
+      })
+    : { questions: [], destinationScope: "", warning: null };
 
   const plan = {
     id: aylaId("AYLA-DAY"),
@@ -68992,6 +69132,9 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     contentHubRegistryWarning: contentHub.warning,
     libraryEnabled,
     libraryPageSourceWarning: library.warning,
+    qbankEnabled,
+    qbankRegistryWarning: registryQbank.warning,
+    qbankDestinationScope: registryQbank.destinationScope || null,
     cdmEnabled,
     cdmRegistryWarning: cdm.warning,
     notebookMemory: aylaV190NotebookMemory(db, student),
@@ -69107,8 +69250,18 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   const reading = focused(allRelevant.filter((row) => ["book", "reading", "revision_sheet"].includes(aylaV189ResourceType(row.type))));
   const videos = focused(allRelevant.filter((row) => ["vimeo_video", "video_transcript"].includes(aylaV189ResourceType(row.type))));
   const external = focused(allRelevant.filter((row) => ["external_question", "external_qid_mapping"].includes(aylaV189ResourceType(row.type))));
-  const internal = focused(allRelevant.filter((row) => aylaV189ResourceType(row.type) === "internal_mcq"));
-  const cards = focused(allRelevant.filter((row) => aylaV189ResourceType(row.type) === "flashcard"));
+  const storedInternal = focused(allRelevant.filter((row) => aylaV189ResourceType(row.type) === "internal_mcq"));
+  const focusedRegistryInternal = focused(registryQbank.questions);
+  const internal = [
+    ...(focusedRegistryInternal.length ? focusedRegistryInternal : registryQbank.questions),
+    ...storedInternal,
+  ].filter((row, index, all) =>
+    all.findIndex((candidate) => String(candidate.id) === String(row.id)) === index);
+  const storedCards = allRelevant.filter((row) => aylaV189ResourceType(row.type) === "flashcard");
+  const focusedCards = focused(storedCards);
+  const cards = focusedCards.length
+    ? focusedCards
+    : prioritize(storedCards.filter((row) => row.sourceType === "content_registry_flashcard"));
   const assessments = focused(allRelevant.filter((row) => ["assessment", "assessment_blueprint"].includes(aylaV189ResourceType(row.type))));
   const unused = (rows) => rows.filter((row) => !reservedIds.has(String(row.id)));
   const select = (rows, limit) => aylaV189SelectUnused(unused(rows), reservedIds, limit);
@@ -70744,6 +70897,485 @@ app.get("/api/ayla/admin/resources/coverage", async (req, res) => {
   }
 });
 
+const AYLA_STEP1_PILOT_COLLECTION_NAMESPACE = "uworld-step-1";
+const AYLA_STEP1_PILOT_QBANK_DESTINATIONS = Object.freeze([
+  "aylamed_qbank",
+  "aylamed_roadmap",
+  "aylamed_auto_assessment",
+  "baseline_diagnostic",
+  "revision",
+  "flashcards",
+]);
+
+function aylaStep1PilotCollectionMatches(collection = {}) {
+  const namespace = String(collection.source_namespace || "").toLowerCase();
+  if (namespace === AYLA_STEP1_PILOT_COLLECTION_NAMESPACE) return true;
+  const label = [
+    namespace,
+    collection.source_provider,
+    collection.collection_title,
+    collection.title,
+    collection.name,
+  ].map((value) => String(value || "").toLowerCase()).join(" ");
+  return /\buworld\b/.test(label) && /\bstep[\s_-]*1\b/.test(label);
+}
+
+function aylaStep1PilotCollectionNeedsActivation(collection = {}) {
+  if (String(collection.status || "") !== "approved") return true;
+  const controls = Array.isArray(collection.destination_controls)
+    ? collection.destination_controls
+    : [];
+  return AYLA_STEP1_PILOT_QBANK_DESTINATIONS.some((destination) => {
+    const scoped = controls.some((row) =>
+      row.destination === destination
+      && String(row.destination_scope || "") === AYLA_STEP1_PILOT_DESTINATION_SCOPE
+      && row.enabled === true);
+    const unsafeUnscoped = controls.some((row) =>
+      row.destination === destination
+      && String(row.destination_scope || "") === ""
+      && row.enabled === true);
+    return !scoped || unsafeUnscoped;
+  });
+}
+
+function aylaStep1PilotCollectionControls() {
+  return AYLA_STEP1_PILOT_QBANK_DESTINATIONS.flatMap((destination) => ([
+    {
+      destination,
+      destination_scope: "",
+      enabled: false,
+      settings: {
+        private_pilot_guard: true,
+        ordinary_student_delivery: false,
+      },
+    },
+    {
+      destination,
+      destination_scope: AYLA_STEP1_PILOT_DESTINATION_SCOPE,
+      enabled: true,
+      settings: {
+        private_pilot_guard: true,
+        ordinary_student_delivery: false,
+        plan_id: AYLA_STEP1_PILOT.planId,
+      },
+    },
+  ]));
+}
+
+function aylaPrivatePilotVimeoEmbedDomains() {
+  const configured = String(process.env.AYLA_VIMEO_EMBED_ALLOWED_DOMAINS || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return configured.length
+    ? configured
+    : [
+        "https://paleturquoise-quail-255896.hostingersite.com",
+        "https://live.nextgenusmlelms.com",
+      ];
+}
+
+async function aylaQueuePrivatePilotVimeoClassificationRecovery() {
+  aylaVimeoTaxonomyCache.delete("usmle-step-1");
+  if (!isAIConfigured()) {
+    return {
+      eligible: 0,
+      queued: 0,
+      skippedReason: getAIConfigError(),
+    };
+  }
+  const db = await readAylaDb();
+  const activeDraftIds = new Set(
+    aylaValues(db, "aylaVimeoCatalogJobs")
+      .filter((row) => ["queued", "running"].includes(String(row.status || "").toLowerCase()))
+      .flatMap((row) => Array.isArray(row.draftIds) ? row.draftIds : [])
+      .map(String),
+  );
+  const limit = Math.max(
+    1,
+    Math.min(100, Number(process.env.AYLA_PRIVATE_PILOT_VIMEO_RECOVERY_BATCH || 75) || 75),
+  );
+  const candidates = aylaValues(db, "aylaVimeoCatalogDrafts")
+    .filter((row) => aylaCanonicalExamTrack(row.examTrackId || row.exam_track_id) === "usmle_step_1")
+    .filter((row) => /boards\s+and\s+beyond/i.test(String(row.folderName || "")))
+    .filter((row) => /step\s*1/i.test(String(row.folderName || "")))
+    .filter((row) => row.folderMembershipStatus !== "missing_from_folder")
+    .filter((row) => String(row.status || "") === "classification_failed")
+    .filter((row) => String(row.reviewStatus || "") !== "approved")
+    .filter((row) => Number(row.privatePilotClassificationRecoveryCount || 0) < 1)
+    .filter((row) => !activeDraftIds.has(String(row.id)))
+    .slice(0, limit);
+  if (!candidates.length) {
+    return { eligible: 0, queued: 0, skippedReason: "no_failed_drafts_need_recovery" };
+  }
+  const queued = await aylaQueueVimeoCatalogClassification({
+    examTrackId: "usmle_step_1",
+    drafts: candidates,
+    actor: {
+      id: "system:private-step1-pilot-activation",
+      email: "",
+      name: "AylaMed private pilot content activation",
+    },
+    catalogSourceId: candidates[0]?.catalogSourceId || "",
+    trigger: "private_pilot_taxonomy_recovery",
+  });
+  const failedIds = new Set((queued?.enqueueErrors || []).map((row) => String(row.draftId || "")));
+  const queuedIds = new Set(candidates.map((row) => String(row.id)).filter((id) => !failedIds.has(id)));
+  if (queuedIds.size) {
+    await mutateAylaDb(async (current) => {
+      for (const draftId of queuedIds) {
+        const draft = aylaGetItem(current, "aylaVimeoCatalogDrafts", draftId);
+        if (!draft) continue;
+        draft.privatePilotClassificationRecoveryCount = Number(
+          draft.privatePilotClassificationRecoveryCount || 0,
+        ) + 1;
+        draft.privatePilotClassificationRecoveryQueuedAt = aylaNow();
+        draft.privatePilotClassificationRecoveryReason = "qbank_taxonomy_now_available";
+        draft.updatedAt = aylaNow();
+        aylaSetItem(current, "aylaVimeoCatalogDrafts", draft);
+      }
+    });
+  }
+  return {
+    eligible: candidates.length,
+    queued: queued?.queued || 0,
+    enqueueErrors: queued?.enqueueErrors?.length || 0,
+    jobId: queued?.job?.id || null,
+    skippedReason: null,
+  };
+}
+
+async function ngRunAylaPrivatePilotContentActivation(reason = "startup") {
+  if (aylaPrivatePilotContentActivationState.running) {
+    return { skipped: true, reason: "already_running" };
+  }
+  aylaPrivatePilotContentActivationState.running = true;
+  aylaPrivatePilotContentActivationState.lastStartedAt = aylaNow();
+  try {
+    if (!contentRegistryStatus().configured) {
+      const skipped = { skipped: true, reason: "content_registry_not_configured" };
+      aylaPrivatePilotContentActivationState.lastResult = skipped;
+      return skipped;
+    }
+    const snapshot = await readAylaDb();
+    const cohort = aylaValues(snapshot, "aylaPilotCohorts")
+      .filter((row) => row.private === true && String(row.status || "") === "active")
+      .filter((row) => aylaCanonicalExamTrack(row.examTrackId || row.exam_track_id) === "usmle_step_1")
+      .sort((left, right) => String(right.createdAt || "").localeCompare(String(left.createdAt || "")))[0];
+    if (!cohort) {
+      const skipped = { skipped: true, reason: "no_active_private_step1_pilot" };
+      aylaPrivatePilotContentActivationState.lastResult = skipped;
+      return skipped;
+    }
+
+    const collections = await listContentCollections({
+      examTrack: "usmle-step-1",
+      limit: 200,
+    });
+    const namespaceCollections = collections.filter((row) =>
+      aylaStep1PilotCollectionMatches(row)
+      && Number(row.question_count || 0) > 0);
+    const verifiedCollections = namespaceCollections.filter((row) =>
+      ["owned", "licensed", "authorized"].includes(String(row.source_rights_status || "").toLowerCase())
+      && String(row.source_format || "single_best_answer_v1") === "single_best_answer_v1");
+    let collectionsActivated = 0;
+    for (const collection of verifiedCollections) {
+      if (!aylaStep1PilotCollectionNeedsActivation(collection)) continue;
+      await updateContentCollectionControls({
+        collectionId: collection.id,
+        status: "approved",
+        destinations: aylaStep1PilotCollectionControls(),
+        actorId: "system:private-step1-pilot-activation",
+      });
+      collectionsActivated += 1;
+    }
+
+    const catalog = await getContentQbankCatalog({
+      examTrack: "usmle-step-1",
+      destination: "aylamed_qbank",
+      destinationScope: AYLA_STEP1_PILOT_DESTINATION_SCOPE,
+    });
+    const qbankQuestionCount = catalog.reduce(
+      (sum, row) => sum + Number(row.question_count || 0),
+      0,
+    );
+    let registryFlashcardQuestions = [];
+    let registryFlashcardError = null;
+    try {
+      registryFlashcardQuestions = await listContentRegistryFlashcardQuestions({
+        examTrack: "usmle-step-1",
+        destinationScope: AYLA_STEP1_PILOT_DESTINATION_SCOPE,
+        limit: 100,
+        offset: 0,
+      });
+    } catch (error) {
+      registryFlashcardError = String(error.message || error).slice(0, 500);
+    }
+    const vimeoEmbedDomains = normalizeVimeoEmbedDomains(
+      aylaPrivatePilotVimeoEmbedDomains(),
+    );
+    const vimeoEmbedDomainFingerprint = crypto.createHash("sha256")
+      .update(vimeoEmbedDomains.slice().sort().join("\n"))
+      .digest("hex");
+    const activation = await mutateAylaDb(async (db) => {
+      const currentCohort = aylaGetItem(db, "aylaPilotCohorts", cohort.id);
+      if (!currentCohort || String(currentCohort.status || "") !== "active") {
+        return {
+          lecturesApproved: 0,
+          flashcardsActivated: 0,
+          plansRebuilt: 0,
+          lectureErrors: [],
+          vimeoIds: [],
+        };
+      }
+      const actor = {
+        id: "system:private-step1-pilot-activation",
+        email: "",
+        name: "AylaMed private pilot content activation",
+      };
+      let flashcardsActivated = 0;
+      for (const question of registryFlashcardQuestions) {
+        const id = `AYLA-PILOT-FC-${crypto.createHash("sha256")
+          .update(`${AYLA_STEP1_PILOT_DESTINATION_SCOPE}:${question.id}`)
+          .digest("hex")
+          .slice(0, 24)}`;
+        const existing = aylaGetItem(db, "aylaResources", id) || {};
+        const resource = aylaV189NormalizeResource({
+          id,
+          type: "flashcard",
+          examTrackId: "usmle_step_1",
+          title: question.topic_key || question.title || "AylaMed QBank recall",
+          system: question.system_key || question.taxonomy?.system_key || "General",
+          subsystem: question.subsystem_key || question.taxonomy?.subsystem_key || "",
+          topic: question.topic_key || question.taxonomy?.topic_key || question.title || "QBank recall",
+          subtopic: question.subtopic_key || question.taxonomy?.subtopic_key || "",
+          front: question.question_html || "",
+          back: question.correct_answer_html || "",
+          explanation: question.explanation_html || "",
+          provider: "AylaMed QBank",
+          sourceLabel: "AylaMed QBank",
+          sourceLabelVisible: true,
+          sourceType: "content_registry_flashcard",
+          scope: "published_bank",
+          bucket: "published_bank",
+          readOnly: true,
+          answerMode: "reveal_only",
+          estimatedMinutes: 1,
+          approved: true,
+          status: "active",
+          verificationStatus: "approved_content_registry",
+          authorizationStatus: "approved_registry_collection",
+          sourceAccessMode: "protected",
+          accessScope: "private_pilot",
+          pilotOnly: true,
+          pilotCohortId: currentCohort.id,
+          pilotStudentIds: [...new Set(currentCohort.studentIds || [])],
+        }, existing);
+        if (!resource.front || !resource.back) continue;
+        resource.accessScope = "private_pilot";
+        resource.pilotOnly = true;
+        resource.pilotCohortId = currentCohort.id;
+        resource.pilotStudentIds = [...new Set(currentCohort.studentIds || [])];
+        aylaSetItem(db, "aylaResources", resource);
+        if (!existing.id) flashcardsActivated += 1;
+      }
+      const readyDrafts = aylaValues(db, "aylaVimeoCatalogDrafts")
+        .filter((row) => aylaCanonicalExamTrack(row.examTrackId || row.exam_track_id) === "usmle_step_1")
+        .filter((row) => /boards\s+and\s+beyond/i.test(String(row.folderName || "")))
+        .filter((row) => /step\s*1/i.test(String(row.folderName || "")))
+        .filter((row) => row.folderMembershipStatus !== "missing_from_folder")
+        .filter((row) => String(row.reviewStatus || "") !== "approved")
+        .filter((row) => row.classification?.approvalReadiness === "ready_for_owner_approval")
+        .filter((row) => row.classification?.webSearchPerformed === true)
+        .filter((row) => Array.isArray(row.classification?.evidenceSources) && row.classification.evidenceSources.length)
+        .slice(0, 100);
+      let lecturesApproved = 0;
+      const lectureErrors = [];
+      for (const draft of readyDrafts) {
+        try {
+          const approved = approveVimeoCatalogDraft(draft, {
+            expectedRevision: draft.revision,
+            actor,
+          });
+          approved.resource.accessScope = "private_pilot";
+          approved.resource.pilotOnly = true;
+          approved.resource.pilotCohortId = currentCohort.id;
+          approved.resource.pilotStudentIds = [...new Set(currentCohort.studentIds || [])];
+          const existingResource = aylaGetItem(db, "aylaResources", approved.resource.id)
+            || aylaValues(db, "aylaResources").find((row) =>
+              String(row.vimeoId || row.vimeo_id || "") === String(approved.resource.vimeoId))
+            || {};
+          if (existingResource.id
+            && existingResource.pilotOnly !== true
+            && existingResource.accessScope !== "private_pilot") {
+            throw new Error("Existing Vimeo resource is outside the private pilot scope");
+          }
+          const stored = aylaV190StoreImportedResource(db, approved.resource, existingResource);
+          if (stored.quarantined) {
+            throw new Error(`Approved Vimeo resource failed validation: ${stored.errors.join("; ")}`);
+          }
+          approved.draft.approvedResourceId = stored.resource.id;
+          approved.draft.resourceCreatedAt = stored.resource.createdAt;
+          aylaSetItem(db, "aylaVimeoCatalogDrafts", approved.draft);
+          lecturesApproved += 1;
+        } catch (error) {
+          lectureErrors.push({
+            draftId: draft.id,
+            error: String(error.message || error).slice(0, 500),
+          });
+        }
+      }
+
+      const privateLectures = aylaValues(db, "aylaResources")
+        .filter((row) => aylaV189ResourceType(row.type) === "vimeo_video")
+        .filter((row) => row.pilotOnly === true || row.accessScope === "private_pilot")
+        .filter((row) =>
+          String(row.vimeoEmbedDomainFingerprint || "") !== vimeoEmbedDomainFingerprint)
+        .filter((row) => aylaPilotContentVisibleToStudent(row, {
+          id: currentCohort.studentIds?.[0],
+          pilotTest: true,
+          pilotCohortId: currentCohort.id,
+        }));
+      let plansRebuilt = 0;
+      for (const studentId of currentCohort.studentIds || []) {
+        const student = aylaGetItem(db, "aylaStudents", studentId);
+        if (!student) continue;
+        const date = aylaV247StudyDate(student);
+        const currentPlan = aylaValues(db, "aylaDailyPlans")
+          .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student))
+          .filter((row) => String(row.date || "") === String(date))
+          .filter((row) => !["cancelled", "superseded"].includes(String(row.status || "").toLowerCase()))
+          .sort((left, right) => Number(right.version || 0) - Number(left.version || 0))[0];
+        const currentAssignments = currentPlan
+          ? aylaValues(db, "aylaResourceAssignments").filter((row) =>
+              String(row.dailyPlanId || "") === String(currentPlan.id))
+          : [];
+        const hasQbank = currentAssignments.some((row) =>
+          ["internal_mcq", "internal_mcqs", "qbank"].includes(String(row.category || row.type || "").toLowerCase()));
+        const hasVideo = currentAssignments.some((row) =>
+          String(row.category || row.type || "").toLowerCase() === "video");
+        const hasFlashcards = currentAssignments.some((row) =>
+          String(row.category || row.type || "").toLowerCase() === "flashcards");
+        const needsRebuild = collectionsActivated > 0
+          || lecturesApproved > 0
+          || flashcardsActivated > 0
+          || (qbankQuestionCount > 0 && !hasQbank)
+          || (privateLectures.length > 0 && !hasVideo)
+          || (registryFlashcardQuestions.length > 0 && !hasFlashcards);
+        if (!needsRebuild) continue;
+        const built = await aylaV189BuildDailyPlan(db, student, date, {
+          force: true,
+          includeAssessment: false,
+          skipAi: true,
+        });
+        if (!built.completedHistoryProtected) plansRebuilt += 1;
+      }
+      aylaSetItem(db, "aylaPilotAuditEvents", {
+        id: aylaId("AYLA-PILOT-EVENT"),
+        cohortId: currentCohort.id,
+        action: "private_step1_content_activation_reconciled",
+        actorId: actor.id,
+        reason,
+        destinationScope: AYLA_STEP1_PILOT_DESTINATION_SCOPE,
+        collectionsActivated,
+        qbankQuestionCount,
+        lecturesApproved,
+        flashcardsActivated,
+        plansRebuilt,
+        ordinaryStudentDelivery: false,
+        createdAt: aylaNow(),
+      });
+      return {
+        lecturesApproved,
+        flashcardsActivated,
+        plansRebuilt,
+        lectureErrors,
+        vimeoIds: [...new Set(privateLectures
+          .map((row) => String(row.vimeoId || row.vimeo_id || "").trim())
+          .filter(Boolean))],
+      };
+    });
+    let vimeoEmbed = {
+      video_count: activation.vimeoIds.length,
+      domain_count: 0,
+      requested: 0,
+      ensured: 0,
+      ensured_videos: [],
+      failures: [],
+    };
+    if (activation.vimeoIds.length) {
+      try {
+        vimeoEmbed = await ensureVimeoEmbedDomains({
+          videoIds: activation.vimeoIds,
+          domains: vimeoEmbedDomains,
+        });
+      } catch (error) {
+        vimeoEmbed.failures.push({
+          video_id: null,
+          domain: null,
+          status: Number(error.statusCode || 0) || null,
+          error: String(error.message || error).slice(0, 500),
+        });
+      }
+    }
+    if (vimeoEmbed.ensured_videos.length) {
+      const ensuredIds = new Set(vimeoEmbed.ensured_videos.map(String));
+      await mutateAylaDb(async (db) => {
+        aylaValues(db, "aylaResources")
+          .filter((row) => ensuredIds.has(String(row.vimeoId || row.vimeo_id || "")))
+          .filter((row) => row.pilotOnly === true || row.accessScope === "private_pilot")
+          .forEach((row) => {
+            row.vimeoEmbedDomainFingerprint = vimeoEmbedDomainFingerprint;
+            row.vimeoEmbedDomainsEnsuredAt = aylaNow();
+            row.updatedAt = aylaNow();
+            aylaSetItem(db, "aylaResources", row);
+          });
+      });
+    }
+    let classificationRecovery;
+    try {
+      classificationRecovery = await aylaQueuePrivatePilotVimeoClassificationRecovery();
+    } catch (error) {
+      classificationRecovery = {
+        eligible: 0,
+        queued: 0,
+        skippedReason: String(error.message || error).slice(0, 500),
+      };
+    }
+    const result = {
+      skipped: false,
+      reason,
+      cohortId: cohort.id,
+      collectionsMatched: namespaceCollections.length,
+      collectionsVerified: verifiedCollections.length,
+      collectionsActivated,
+      unverifiedCollectionsSkipped: namespaceCollections.length - verifiedCollections.length,
+      qbankQuestionCount,
+      lecturesApproved: activation.lecturesApproved,
+      registryFlashcardQuestions: registryFlashcardQuestions.length,
+      flashcardsActivated: activation.flashcardsActivated,
+      registryFlashcardError,
+      plansRebuilt: activation.plansRebuilt,
+      lectureErrors: activation.lectureErrors.length,
+      vimeoEmbedDomainsEnsured: vimeoEmbed.ensured,
+      vimeoEmbedDomainFailures: vimeoEmbed.failures.length,
+      classificationRecovery,
+      destinationScope: AYLA_STEP1_PILOT_DESTINATION_SCOPE,
+      ordinaryStudentDelivery: false,
+    };
+    aylaPrivatePilotContentActivationState.lastResult = result;
+    aylaPrivatePilotContentActivationState.lastSuccessAt = aylaNow();
+    aylaPrivatePilotContentActivationState.lastError = null;
+    return result;
+  } catch (error) {
+    aylaPrivatePilotContentActivationState.lastError = String(error.message || error).slice(0, 1000);
+    throw error;
+  } finally {
+    aylaPrivatePilotContentActivationState.running = false;
+    aylaPrivatePilotContentActivationState.lastFinishedAt = aylaNow();
+  }
+}
+
 app.get("/api/ayla/admin/pilot/step1/preview", async (req, res) => {
   try {
     await aylaRequireAdmin(req);
@@ -70753,6 +71385,7 @@ app.get("/api/ayla/admin/pilot/step1/preview", async (req, res) => {
     const qbankCollections = await getContentQbankCatalog({
       examTrack: "usmle-step-1",
       destination: "aylamed_qbank",
+      destinationScope: AYLA_STEP1_PILOT_DESTINATION_SCOPE,
     }).catch(() => []);
     const lectureDrafts = aylaValues(db, "aylaVimeoCatalogDrafts")
       .filter((row) => aylaCanonicalExamTrack(row.examTrackId || row.exam_track_id || row.examTrack || row.exam_track || row.exam) === "usmle_step_1");
@@ -71221,6 +71854,9 @@ async function aylaVimeoCatalogTaxonomy(examTrackId) {
   const promise = getContentQbankCatalog({
     examTrack: registryTrack,
     destination: "aylamed_qbank",
+    destinationScope: registryTrack === "usmle-step-1"
+      ? AYLA_STEP1_PILOT_DESTINATION_SCOPE
+      : "",
   }).then((rows) => Array.isArray(rows) ? rows : []);
   aylaVimeoTaxonomyCache.set(registryTrack, { expiresAt: now + 15 * 60 * 1000, promise });
   try {
@@ -73335,6 +73971,7 @@ app.post("/api/ayla/students/:studentId/flashcard-reviews", async (req, res) => 
       && storedResource.approved !== false
       && !["disabled", "deleted", "rejected", "archived", "quarantined"].includes(String(storedResource.status || "").toLowerCase())
       && (!storedResource.ownerStudentId || String(storedResource.ownerStudentId) === String(student.id))
+      && aylaPilotContentVisibleToStudent(storedResource, student)
       && aylaCanonicalExamTrack(storedResource.examTrackId || storedResource.examTrack || storedResource.exam) === studentExam);
     const legacyResourceAllowed = Boolean(legacyResource && aylaAdaptiveEvidenceMatchesStudent(legacyResource, student));
     const source = assignmentItem || (storedResourceAllowed ? storedResource : null) || (legacyResourceAllowed ? legacyResource : null);
@@ -74491,7 +75128,10 @@ app.post("/api/ayla/students/:studentId/notebooks/:id/generate-flashcards", asyn
     if (!note || String(note.studentId) !== String(student.id)) return aylaSendError(res, 404, "Notebook not found");
     const selectedIds = new Set(aylaCleanArray(req.body.blockIds || req.body.block_ids).map(String));
     const noteBlocks = Array.isArray(note.blocks) ? note.blocks : [];
-    const blocks = noteBlocks.filter((block) => ["numbered_point", "text", "quote"].includes(block.type) && String(block.text || "").trim() && (!selectedIds.size || selectedIds.has(String(block.id)))).slice(0, 30);
+    const blocks = noteBlocks.filter((block) => ["numbered", "numbered_point", "text", "quote"].includes(block.type) && String(block.text || "").trim() && (!selectedIds.size || selectedIds.has(String(block.id)))).slice(0, 30);
+    if (!blocks.length) {
+      return aylaSendError(res, 422, "Add or select at least one saved text, numbered, or quote block before generating flashcards");
+    }
     const created = [];
     for (const [index, block] of blocks.entries()) {
       const heading = [...noteBlocks.slice(0, noteBlocks.indexOf(block))].reverse().find((row) => row.type === "heading" && row.text)?.text || note.topic || note.title;
@@ -74502,8 +75142,31 @@ app.post("/api/ayla/students/:studentId/notebooks/:id/generate-flashcards", asyn
       aylaSetItem(db, "aylaResources", resource); created.push(resource);
     }
     aylaV189RecordActivity(db, student.id, "notebook_flashcards_generated", { notebookId: note.id, count: created.length });
+    let roadmap = null;
+    try {
+      const built = await aylaV189BuildDailyPlan(db, student, aylaV247StudyDate(student), {
+        force: true,
+        includeAssessment: false,
+        skipAi: true,
+      });
+      roadmap = {
+        planId: built.plan?.id || null,
+        version: built.plan?.version || null,
+        cardsAssigned: built.assignments?.filter((row) => row.category === "flashcards")
+          .flatMap((row) => row.resourceIds || [])
+          .filter((id) => created.some((resource) => String(resource.id) === String(id))).length || 0,
+        completedHistoryProtected: built.completedHistoryProtected === true,
+      };
+    } catch (error) {
+      roadmap = { deferred: true, reason: "roadmap_rebuild_temporarily_unavailable" };
+    }
     await writeAylaDb(db);
-    return aylaSendOk(res, { count: created.length, flashcards: created, message: "Personal flashcards were created only from the selected saved note text." }, 201);
+    return aylaSendOk(res, {
+      count: created.length,
+      flashcards: created,
+      roadmap,
+      message: "Personal flashcards were created from saved note text and are now available in the flashcard queue.",
+    }, 201);
   } catch (error) { return aylaSendError(res, error.statusCode || 500, error.message); }
 });
 
@@ -75537,6 +76200,23 @@ app.listen(PORT, () => {
   ngStartZoomRecordingRecoveryScheduler();
   ngStartContentOperationsScheduler();
   ngStartAylaVimeoFolderSyncScheduler();
+  setTimeout(() => {
+    ngRunAylaPrivatePilotContentActivation("startup_private_pilot_reconciliation")
+      .then((result) => console.log("AylaMed private pilot content activation:", result))
+      .catch((error) => console.warn("AylaMed private pilot content activation failed:", error.message));
+  }, 45_000).unref?.();
+  const privatePilotReconciliationIntervalMs = Math.max(
+    5 * 60 * 1000,
+    Math.min(
+      60 * 60 * 1000,
+      Number(process.env.AYLA_PRIVATE_PILOT_RECONCILIATION_INTERVAL_MS || 10 * 60 * 1000)
+        || 10 * 60 * 1000,
+    ),
+  );
+  setInterval(() => {
+    ngRunAylaPrivatePilotContentActivation("scheduled_private_pilot_reconciliation")
+      .catch((error) => console.warn("AylaMed scheduled private pilot reconciliation failed:", error.message));
+  }, privatePilotReconciliationIntervalMs).unref?.();
   console.log(`DATA_DIR=${DATA_DIR}`);
   console.log(`LIVE_DB_PATH=${LIVE_DB_PATH}`);
   console.log(`AYLA_DB_PATH=${AYLA_DB_PATH}`);
