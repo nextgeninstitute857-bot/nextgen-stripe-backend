@@ -643,12 +643,14 @@ test("catalog summary keeps approval readiness and web verification visible", ()
 test("server wiring is draft-first, background researched, and explicit-review only", () => {
   const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
   assert.match(server, /const AYLA_VIMEO_CATALOG_BUILD = VIMEO_LIBRARY_CATALOG_BUILD/);
+  assert.match(server, /v254-step1-vimeo-memory-circuit-breaker/);
   assert.match(server, /laneConcurrency: ngMultiQbankConfig\.lane_concurrency/);
   assert.match(server, /type: "ayla_vimeo_catalog_classification"/);
   assert.match(server, /priority: -20/);
   assert.match(server, /toolChoice: request\.toolChoice/);
   assert.match(server, /background: true/);
   assert.match(server, /backgroundResponseId: resumableResponseId/);
+  assert.match(server, /queueContext\.job\.progress\?\.openai_response_id/);
   assert.match(server, /classificationOpenAIResponseId/);
   assert.match(server, /runOpenAIBackgroundResponse/);
   assert.match(server, /aylaV189ResourceType\(resource\.type\) === "vimeo_video" && aliasTopics\.includes\(topicKey\)/);
