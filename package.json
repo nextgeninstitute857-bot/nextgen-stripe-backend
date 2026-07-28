@@ -4,7 +4,7 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "node --max-old-space-size=1024 server.js",
     "test": "node --test",
     "flashcards:migrate:dry": "node scripts/migrate-flashcards-to-postgres.mjs --dry-run",
     "flashcards:migrate": "node scripts/migrate-flashcards-to-postgres.mjs",

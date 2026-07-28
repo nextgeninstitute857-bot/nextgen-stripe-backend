@@ -85,6 +85,132 @@ test("v217 queue recovers an interrupted persisted job when its input remains", 
   assert.equal(queue.get(id).interrupted_count, 1);
 });
 
+test("recovery queue keeps only a bounded terminal working set while preserving authoritative history", async (t) => {
+  const directory = await temporaryDirectory("nextgen-safe-retention-");
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const timestamp = new Date("2026-07-28T10:00:00.000Z");
+  const rows = new Map(Array.from({ length: 61 }, (_, index) => {
+    const updated = new Date(timestamp.getTime() + index * 1000).toISOString();
+    const status = index === 60 ? "paused" : "completed";
+    const id = `job-${String(index).padStart(3, "0")}`;
+    return [id, {
+      id,
+      type: "import",
+      lane: "question_zip",
+      status,
+      priority: 0,
+      attempts: 1,
+      max_attempts: 3,
+      idempotency_key: "",
+      payload: { domain_job_id: `domain-${index}` },
+      metadata: {},
+      progress: { completed: status === "completed" },
+      checkpoint: {},
+      error: null,
+      interrupted_count: 0,
+      created_at: updated,
+      updated_at: updated,
+      queued_at: updated,
+      started_at: updated,
+      heartbeat_at: updated,
+      finished_at: status === "completed" ? updated : null,
+      next_retry_at: null,
+    }];
+  }));
+  const store = {
+    kind: "postgres",
+    async load() { return [...rows.values()].map((row) => structuredClone(row)); },
+    async save(job) { rows.set(job.id, structuredClone(job)); },
+  };
+  const queue = new SafeBackgroundQueue({
+    directory,
+    persistentStore: store,
+    maxRetainedTerminalJobs: 20,
+  });
+  await queue.initialize();
+  const summary = queue.summary();
+  assert.equal(summary.recovery_source, "postgres");
+  assert.equal(summary.retained_terminal_jobs, 20);
+  assert.equal(summary.retained_jobs, 21);
+  assert.equal(summary.pruned_terminal_jobs, 40);
+  assert.equal(rows.size, 61);
+  const manifest = JSON.parse(await fs.readFile(path.join(directory, "jobs.json"), "utf8"));
+  assert.equal(manifest.jobs.length, 21);
+  assert.ok(manifest.jobs.some((job) => job.status === "paused"));
+});
+
+test("authoritative recovery bypasses an oversized disk manifest and rewrites a bounded copy", async (t) => {
+  const directory = await temporaryDirectory("nextgen-safe-authoritative-");
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  await fs.writeFile(path.join(directory, "jobs.json"), "x".repeat(2 * 1024 * 1024));
+  const timestamp = new Date().toISOString();
+  const store = {
+    kind: "postgres",
+    async load() {
+      return [{
+        id: "authoritative-1",
+        type: "import",
+        lane: "question_zip",
+        status: "completed",
+        priority: 0,
+        attempts: 1,
+        max_attempts: 3,
+        idempotency_key: "",
+        payload: {},
+        metadata: {},
+        progress: { completed: true },
+        checkpoint: {},
+        error: null,
+        interrupted_count: 0,
+        created_at: timestamp,
+        updated_at: timestamp,
+        queued_at: timestamp,
+        started_at: timestamp,
+        heartbeat_at: timestamp,
+        finished_at: timestamp,
+        next_retry_at: null,
+      }];
+    },
+    async save() {},
+  };
+  const queue = new SafeBackgroundQueue({
+    directory,
+    persistentStore: store,
+    maxManifestReadBytes: 1024 * 1024,
+  });
+  await queue.initialize();
+  assert.equal(queue.summary().recovery_source, "postgres");
+  assert.equal(queue.summary().disk_manifest_skipped, null);
+  const manifest = JSON.parse(await fs.readFile(path.join(directory, "jobs.json"), "utf8"));
+  assert.deepEqual(manifest.jobs.map((job) => job.id), ["authoritative-1"]);
+});
+
+test("oversized disk fallback is skipped safely when the authoritative store is unavailable", async (t) => {
+  const directory = await temporaryDirectory("nextgen-safe-disk-limit-");
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  await fs.writeFile(path.join(directory, "jobs.json"), "x".repeat(2 * 1024 * 1024));
+  const warnings = [];
+  const queue = new SafeBackgroundQueue({
+    directory,
+    persistentStore: {
+      kind: "postgres",
+      async load() { throw new Error("temporary database outage"); },
+      async save() {},
+    },
+    maxManifestReadBytes: 1024 * 1024,
+    logger: {
+      warn(...values) { warnings.push(values.join(" ")); },
+      error() {},
+    },
+  });
+  await queue.initialize();
+  assert.equal(queue.summary().recovery_source, "disk");
+  assert.equal(queue.summary().disk_manifest_skipped.reason, "oversized_recovery_manifest");
+  assert.ok(warnings.some((message) => message.includes("safe read limit")));
+  const manifest = JSON.parse(await fs.readFile(path.join(directory, "jobs.json"), "utf8"));
+  assert.deepEqual(manifest.jobs, []);
+});
+
 test("v217 queue pauses at a heartbeat, resumes safely, and honors the memory gate", async (t) => {
   const directory = await temporaryDirectory("nextgen-safe-controls-");
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
