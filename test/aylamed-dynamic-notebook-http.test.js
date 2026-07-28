@@ -237,7 +237,7 @@ test("isolated HTTP flow captures exact pages and timestamps, is idempotent, and
     assert.equal(first.response.status, 201, JSON.stringify(first.payload));
     assert.equal(first.payload.idempotentReplay, false);
     assert.equal(first.payload.notebook.blocks[0].text, "approved murmur page");
-    assert.equal(first.payload.notebook.blocks[0].returnLink.href, "/library/resources/reading-1/pages/pdf-12");
+    assert.equal(first.payload.notebook.blocks[0].returnLink.href, "/dashboard/library/reading-1/page/pdf%3A12");
     assert.equal(first.payload.notebook.blocks[0].visualStyle, "clean");
     assert.equal(first.payload.notebook.blocks[1].visualStyle, "handwriting");
     assert.doesNotMatch(JSON.stringify(first.payload), /Hidden Publisher|Authorized Review Book|sourceUrl|vimeoId|providerVideoId|player\.vimeo/i);
@@ -263,7 +263,7 @@ test("isolated HTTP flow captures exact pages and timestamps, is idempotent, and
     });
     assert.equal(video.response.status, 201, JSON.stringify(video.payload));
     const videoBlock = video.payload.notebook.blocks.find((block) => block.sourceType === "content_video");
-    assert.equal(videoBlock.returnLink.href, "/content-hub/videos/video-1?t=83");
+    assert.equal(videoBlock.returnLink.href, "/dashboard/content-hub/video-1?t=83");
     assert.equal(videoBlock.timestampLabel, "1:23");
     assert.doesNotMatch(JSON.stringify(video.payload), /123456789|vimeoId|providerVideoId|player\.vimeo/i);
 

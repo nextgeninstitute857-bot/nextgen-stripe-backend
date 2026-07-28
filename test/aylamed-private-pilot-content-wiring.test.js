@@ -18,7 +18,7 @@ const registry = fs.readFileSync(
 );
 
 test("private Step 1 pilot content is scoped through catalog, sessions, and roadmap", () => {
-  assert.match(server, /const AYLA_PRIVATE_PILOT_BUILD = "v250-private-pilot-content-delivery"/);
+  assert.match(server, /const AYLA_PRIVATE_PILOT_BUILD = "v251-live-pilot-flow-recovery"/);
   assert.match(server, /const AYLA_STEP1_PILOT_DESTINATION_SCOPE = "private_step1_pilot"/);
   assert.match(server, /function aylaStep1PilotDestinationScope\(student = \{\}\)/);
   assert.match(server, /async function aylaV250EligibleQbankQuestions/);
@@ -101,6 +101,9 @@ test("private QBank activation disables unscoped delivery and preserves ordinary
   assert.match(activation, /\\buworld\\b/);
   assert.match(activation, /ordinaryStudentDelivery: false/);
   assert.match(activation, /source_rights_status/);
+  assert.match(activation, /AYLA_STEP1_OWNER_CONTENT_AUTHORIZATION/);
+  assert.match(activation, /sourceRightsStatus: AYLA_STEP1_OWNER_CONTENT_AUTHORIZATION\.status/);
+  assert.match(activation, /collectionsOwnerAuthorized/);
   assert.match(activation, /ready_for_owner_approval/);
   assert.match(activation, /sourceType: "content_registry_flashcard"/);
   assert.match(activation, /answerMode: "reveal_only"/);
@@ -111,6 +114,11 @@ test("private QBank activation disables unscoped delivery and preserves ordinary
   assert.match(activation, /vimeoEmbedDomainFingerprint/);
   assert.match(activation, /row\.pilotOnly === true \|\| row\.accessScope === "private_pilot"/);
   assert.match(activation, /ensureVimeoEmbedDomains/);
+  assert.match(activation, /vimeoEmbed\.verified_videos/);
+  assert.match(activation, /config\?\.embed_url/);
+  assert.match(activation, /pilotDatesAligned/);
+  assert.match(server, /aylaV251HydrateAssignmentMedia/);
+  assert.match(server, /media: Array\.isArray\(question\.media\)/);
 });
 
 test("flashcard registry SQL does not expose a scoped pilot collection to unscoped LMS reads", () => {
