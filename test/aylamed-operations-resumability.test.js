@@ -418,7 +418,7 @@ test("v217 server exposes only admin operations routes and advances the Ayla sch
   const monitoring = await fs.readFile(new URL("../lib/operations-monitoring.js", import.meta.url), "utf8");
   assert.match(server, /const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile"/);
   assert.match(server, /const AYLA_BACKEND_BUILD = "aylamed-safe-shared-student-profile-v219"/);
-  assert.match(server, /schema_version: 13/);
+  assert.match(server, /schema_version: 14/);
   assert.match(server, /app\.post\("\/admin\/crm\/ai-training\/content-uploads"/);
   assert.match(server, /app\.put\("\/admin\/crm\/ai-training\/content-uploads\/:uploadId\/chunks\/:index"/);
   assert.match(server, /app\.post\("\/admin\/crm\/ai-training\/content-uploads\/:uploadId\/finalize"/);

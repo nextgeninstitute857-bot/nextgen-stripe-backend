@@ -31,7 +31,7 @@ test("private Step 1 pilot content is scoped through catalog, sessions, and road
   assert.match(server, /category === "flashcards"/);
 });
 
-test("all five pilots receive the exact 11-feature matrix while social features stay locked", () => {
+test("all five pilots receive the exact 12-feature matrix while social features stay locked", () => {
   const scenarios = buildAylaStep1PilotScenarios("2026-07-28");
   const plan = {
     id: AYLA_STEP1_PILOT.planId,
@@ -39,7 +39,7 @@ test("all five pilots receive the exact 11-feature matrix while social features 
     is_full_access: false,
   };
   assert.equal(scenarios.length, 5);
-  assert.equal(AYLA_STEP1_PILOT.features.length, 11);
+  assert.equal(AYLA_STEP1_PILOT.features.length, 12);
   for (const [index, scenario] of scenarios.entries()) {
     const userId = `pilot-user-${index + 1}`;
     const studentId = `pilot-student-${index + 1}`;

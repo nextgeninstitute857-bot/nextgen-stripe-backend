@@ -127,7 +127,7 @@ test("v215 applies live plan/demo matrices without rewriting enrollments or lear
 
     const matrix = await api(baseUrl, "/api/ayla/admin/plan-feature-matrix", { adminToken });
     assert.equal(matrix.response.status, 200, JSON.stringify(matrix.payload));
-    assert.equal(matrix.payload.featureCatalog.length, 13);
+    assert.equal(matrix.payload.featureCatalog.length, 14);
     assert.equal(matrix.payload.controls.plan_is_live_feature_authority, true);
     assert.equal(matrix.payload.plans.find((row) => row.plan_id === "paid").features.personal_tutor, false);
 
@@ -202,7 +202,7 @@ test("v215 applies live plan/demo matrices without rewriting enrollments or lear
     const publicPlans = await api(baseUrl, "/api/ayla/plans");
     assert.equal(publicPlans.response.status, 200, JSON.stringify(publicPlans.payload));
     assert.equal(publicPlans.payload.aylaPlans.some((plan) => plan.id === "archive-me"), false);
-    assert.equal(publicPlans.payload.aylaPlans.every((plan) => Object.keys(plan.feature_matrix || {}).length === 13), true);
+    assert.equal(publicPlans.payload.aylaPlans.every((plan) => Object.keys(plan.feature_matrix || {}).length === 14), true);
 
     stored = JSON.parse(await fs.readFile(aylaPath, "utf8"));
     assert.deepEqual(stored.aylaEnrollments.paid, originalPaidEnrollment);
