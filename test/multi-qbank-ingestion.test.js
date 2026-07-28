@@ -296,7 +296,11 @@ test("QBank dashboard groups questions, media, videos, and background stages", (
 test("v239 server wiring keeps binaries private and serializes only finalization", async () => {
   const server = await fs.readFile(new URL("../server.js", import.meta.url), "utf8");
   const postgres = await fs.readFile(new URL("../lib/content-registry-postgres.js", import.meta.url), "utf8");
+  const packageJson = JSON.parse(await fs.readFile(new URL("../package.json", import.meta.url), "utf8"));
   assert.match(server, /const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD/);
+  assert.match(server, /const MEMORY_STABILITY_BUILD = "v252-bounded-recovery-queue"/);
+  assert.match(server, /maxRetainedTerminalJobs: NG_CONTENT_JOB_RECOVERY_HISTORY_LIMIT/);
+  assert.match(server, /ngBackgroundMemoryIsHigh\("ayla_private_pilot_content_activation"\)/);
   assert.match(server, /laneConcurrency: ngMultiQbankConfig\.lane_concurrency/);
   assert.match(server, /transferGate: ngMediaTransferGate/);
   assert.match(server, /ngMediaFinalizerGate\.acquire/);
@@ -307,10 +311,14 @@ test("v239 server wiring keeps binaries private and serializes only finalization
   assert.match(server, /saveContentVideoLinksBatch\(\{/);
   assert.match(server, /app\.get\("\/admin\/crm\/operations\/qbank-ingestion"/);
   assert.match(postgres, /CREATE TABLE IF NOT EXISTS content_background_jobs/);
+  assert.match(postgres, /WITH active_jobs AS/);
+  assert.match(postgres, /recent_terminal_jobs AS/);
+  assert.match(postgres, /LIMIT \$1/);
   assert.match(postgres, /lease_owner TEXT, lease_expires_at TIMESTAMPTZ/);
   assert.match(postgres, /export async function findReusableContentVideos/);
   assert.match(postgres, /export async function saveContentVideoLinksBatch/);
   assert.match(postgres, /INSERT INTO content_question_videos[\s\S]*?jsonb_to_recordset\(\$1::jsonb\)/);
   assert.match(postgres, /background_job_binaries_in_postgres: false/);
   assert.doesNotMatch(postgres, /content_background_jobs[\s\S]*?(?:BYTEA|large object)/i);
+  assert.equal(packageJson.scripts.start, "node --max-old-space-size=1024 server.js");
 });

@@ -410,7 +410,7 @@ function aylaStep1PilotDestinationScope(student = {}) {
   );
   return examTrack === "usmle-step-1" ? AYLA_STEP1_PILOT_DESTINATION_SCOPE : "";
 }
-const MEMORY_STABILITY_BUILD = "v248-copy-on-write-db-mutations";
+const MEMORY_STABILITY_BUILD = "v252-bounded-recovery-queue";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
@@ -937,10 +937,26 @@ const MEDIA_DIR = path.join(DATA_DIR, "media");
 const LIVE_DB_PATH = path.join(DATA_DIR, "live-session-db.json");
 const NG_CONTENT_OPERATIONS_ROOT = path.join(DATA_DIR, "content-operations");
 const ngMultiQbankConfig = multiQbankIngestionConfig();
+const NG_CONTENT_JOB_RECOVERY_HISTORY_LIMIT = Math.max(
+  25,
+  Math.min(
+    250,
+    Number(process.env.NEXTGEN_CONTENT_JOB_RECOVERY_HISTORY_LIMIT || 100) || 100,
+  ),
+);
+const NG_CONTENT_JOB_MANIFEST_READ_MAX_BYTES = Math.max(
+  1024 * 1024,
+  Math.min(
+    64 * 1024 * 1024,
+    Number(process.env.NEXTGEN_CONTENT_JOB_MANIFEST_READ_MAX_BYTES || 16 * 1024 * 1024)
+      || 16 * 1024 * 1024,
+  ),
+);
 const ngContentJobStore = contentRegistryStatus().configured
   ? createContentBackgroundJobStore({
       ownerId: `content-web-${process.pid}-${crypto.randomUUID()}`,
       leaseMs: ngMultiQbankConfig.job_lease_ms,
+      recoveryHistoryLimit: NG_CONTENT_JOB_RECOVERY_HISTORY_LIMIT,
     })
   : null;
 const ngMediaTransferGate = new AdaptiveCapacityGate({
@@ -980,6 +996,8 @@ const ngContentBackgroundQueue = new SafeBackgroundQueue({
   memoryGate: () => ngBackgroundMemoryIsHigh("content_operations_queue"),
   persistentStore: ngContentJobStore,
   leaseRetryMs: Math.max(5_000, Math.floor(ngMultiQbankConfig.job_lease_ms / 4)),
+  maxRetainedTerminalJobs: NG_CONTENT_JOB_RECOVERY_HISTORY_LIMIT,
+  maxManifestReadBytes: NG_CONTENT_JOB_MANIFEST_READ_MAX_BYTES,
 });
 const ngContentUploadStore = contentMediaStatus().configured
   ? new CloudContentUploadStore({
@@ -1664,7 +1682,7 @@ async function ngWriteJsonAtomicStreaming(filePath, value, label = "database", {
 }
 
 const NEXTGEN_RENDER_MEMORY_LIMIT_MB = Math.max(256, Number(process.env.NEXTGEN_RENDER_MEMORY_LIMIT_MB || 2048) || 2048);
-const NEXTGEN_BACKGROUND_MEMORY_SOFT_PERCENT = Math.max(50, Math.min(90, Number(process.env.NEXTGEN_BACKGROUND_MEMORY_SOFT_PERCENT || 70) || 70));
+const NEXTGEN_BACKGROUND_MEMORY_SOFT_PERCENT = Math.max(50, Math.min(90, Number(process.env.NEXTGEN_BACKGROUND_MEMORY_SOFT_PERCENT || 60) || 60));
 
 function ngMemoryStatus() {
   const usage = process.memoryUsage();
@@ -10236,6 +10254,7 @@ app.get("/health", async (req, res) => {
     content_registry: contentRegistryStatus(),
     content_media: contentMediaStatus(),
     content_video: contentVideoStatus(),
+    content_background_queue: ngContentBackgroundQueue.summary(),
     storage_cache: {
       lms_loaded: Boolean(liveDbCache),
       crm_loaded: Boolean(crmReadCache),
@@ -52244,6 +52263,9 @@ let nextGenAutopilotSchedulerRunning = false;
 
 async function runNextGenAutopilotSchedulerOnce() {
   if (nextGenAutopilotSchedulerRunning) return { skipped: true, reason: "already_running" };
+  if (ngBackgroundMemoryIsHigh("community_autopilot_scheduler")) {
+    return { skipped: true, reason: "memory_pressure", memory: ngMemoryStatus() };
+  }
   nextGenAutopilotSchedulerRunning = true;
   try {
     const db = await readCrmDb();
@@ -71139,6 +71161,15 @@ async function ngRunAylaPrivatePilotContentActivation(reason = "startup") {
   if (aylaPrivatePilotContentActivationState.running) {
     return { skipped: true, reason: "already_running" };
   }
+  if (ngBackgroundMemoryIsHigh("ayla_private_pilot_content_activation")) {
+    const skipped = {
+      skipped: true,
+      reason: "memory_pressure",
+      memory: ngMemoryStatus(),
+    };
+    aylaPrivatePilotContentActivationState.lastResult = skipped;
+    return skipped;
+  }
   aylaPrivatePilotContentActivationState.running = true;
   aylaPrivatePilotContentActivationState.lastStartedAt = aylaNow();
   try {
@@ -76095,6 +76126,9 @@ let ngAssessmentAutoReleaseRunning = false;
 
 async function ngRunAssessmentAutoReleaseTick(reason = "interval") {
   if (ngAssessmentAutoReleaseRunning) return { success: true, skipped: true, reason: "already_running" };
+  if (ngBackgroundMemoryIsHigh("assessment_auto_release")) {
+    return { success: true, skipped: true, reason: "memory_pressure", memory: ngMemoryStatus() };
+  }
   ngAssessmentAutoReleaseRunning = true;
   try {
     const db = await readLiveDb();
@@ -76138,6 +76172,9 @@ function ngWeakAttemptNeedsFlashcardSync(db, attempt = {}) {
 
 async function ngRunWeakFlashcardAutomationTick(reason = "interval") {
   if (ngWeakFlashcardAutomationRunning) return { success: true, skipped: true, reason: "already_running" };
+  if (ngBackgroundMemoryIsHigh("weak_flashcard_automation")) {
+    return { success: true, skipped: true, reason: "memory_pressure", memory: ngMemoryStatus() };
+  }
   ngWeakFlashcardAutomationRunning = true;
   try {
     const db = await readLiveDb();
@@ -76221,6 +76258,9 @@ function ngRememberZoomRecordingRecoveryResult(result = {}) {
 async function ngRunZoomRecordingRecoveryTick(reason = "interval") {
   if (!NEXTGEN_ZOOM_RECORDING_RECOVERY_ENABLED) return { success: true, skipped: true, reason: "disabled" };
   if (ngZoomRecordingRecoveryRunning) return { success: true, skipped: true, reason: "already_running" };
+  if (ngBackgroundMemoryIsHigh("zoom_recording_recovery")) {
+    return { success: true, skipped: true, reason: "memory_pressure", memory: ngMemoryStatus() };
+  }
   ngZoomRecordingRecoveryRunning = true;
   ngZoomRecordingRecoveryState.last_started_at = new Date().toISOString();
   try {
