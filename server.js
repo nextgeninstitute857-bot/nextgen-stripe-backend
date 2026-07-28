@@ -12,6 +12,7 @@ import {
   flashcardPostgresStatus,
   shadowWriteFlashcardReview,
 } from "./lib/flashcard-postgres.js";
+import { planCrmDeliveryLockRetention } from "./lib/crm-delivery-lock-retention.js";
 import {
   auditContentMediaLinks,
   auditContentVideoAliasMappings,
@@ -19610,95 +19611,30 @@ async function ngCrmRetentionPruneArchives() {
   return { kept_files: keptFiles, kept_bytes: keptBytes, removed_files: removedFiles, removed_bytes: removedBytes };
 }
 
-function ngCrmCompactDeliveryLock(lock = {}) {
-  if (lock?.compacted === true) return lock;
-
-  const compact = {};
-  const keepFields = [
-    "id",
-    "key",
-    "lock_key",
-    "lockKey",
-    "dedupe_key",
-    "dedupeKey",
-    "message_key",
-    "messageKey",
-    "lead_id",
-    "leadId",
-    "contact_id",
-    "contactId",
-    "conversation_id",
-    "conversationId",
-    "message_id",
-    "messageId",
-    "campaign_id",
-    "campaignId",
-    "template_name",
-    "templateName",
-    "phone",
-    "to",
-    "channel",
-    "type",
-    "status",
-    "scheduled_at",
-    "scheduledAt",
-    "sent_at",
-    "sentAt",
-    "created_at",
-    "createdAt",
-    "updated_at",
-    "updatedAt",
-  ];
-
-  for (const field of keepFields) {
-    if (Object.prototype.hasOwnProperty.call(lock || {}, field)) {
-      compact[field] = lock[field];
-    }
-  }
-
-  compact.compacted = true;
-  compact.compacted_at = nowIso();
-
-  return compact;
-}
-
-function ngCrmRetentionCompactDeliveryLocks(db) {
+async function ngCrmRetentionArchiveDeliveryLocks(db) {
   const locks = Array.isArray(db.message_delivery_locks) ? db.message_delivery_locks : [];
+  const plan = planCrmDeliveryLockRetention(locks, {
+    trigger: CRM_DELIVERY_LOCKS_TRIGGER,
+    keep: CRM_DELIVERY_LOCKS_KEEP_FULL,
+  });
+  if (!plan) return null;
 
-  if (locks.length <= CRM_DELIVERY_LOCKS_TRIGGER) {
-    return null;
-  }
-
-  const indexed = locks.map((item, index) => ({
-    index,
-    score: ngCrmRetentionTimeScore(item, index),
-  }));
-
-  indexed.sort((a, b) => b.score - a.score || b.index - a.index);
-
-  const keepFullIndexes = new Set(
-    indexed.slice(0, CRM_DELIVERY_LOCKS_KEEP_FULL).map((item) => item.index)
+  const archivePath = await ngCrmRetentionArchiveRecords(
+    "message_delivery_locks",
+    plan.archive,
+    "automatic_delivery_lock_retention",
   );
 
-  let compacted = 0;
-
-  db.message_delivery_locks = locks.map((lock, index) => {
-    if (keepFullIndexes.has(index)) return lock;
-    if (lock?.compacted === true) return lock;
-
-    compacted += 1;
-    return ngCrmCompactDeliveryLock(lock);
-  });
-
-  if (!compacted) return null;
+  db.message_delivery_locks = plan.keep;
 
   return {
     section: "message_delivery_locks",
-    action: "compacted_old_records_kept_all",
-    before: locks.length,
-    kept: locks.length,
-    archived: 0,
-    compacted,
+    action: "archived_old_records",
+    before: plan.before,
+    kept: plan.kept,
+    archived: plan.archived,
+    archive_file: archivePath,
+    strategy: plan.strategy,
   };
 }
 
@@ -19731,7 +19667,7 @@ async function ngApplyCrmRetentionGuard(db = {}) {
     });
   }
 
-  const locksReport = ngCrmRetentionCompactDeliveryLocks(db);
+  const locksReport = await ngCrmRetentionArchiveDeliveryLocks(db);
   if (locksReport) report.push(locksReport);
 
   if (report.length) {
