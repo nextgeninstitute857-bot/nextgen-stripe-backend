@@ -647,6 +647,10 @@ test("server wiring is draft-first, background researched, and explicit-review o
   assert.match(server, /type: "ayla_vimeo_catalog_classification"/);
   assert.match(server, /priority: -20/);
   assert.match(server, /toolChoice: request\.toolChoice/);
+  assert.match(server, /background: true/);
+  assert.match(server, /backgroundResponseId: resumableResponseId/);
+  assert.match(server, /classificationOpenAIResponseId/);
+  assert.match(server, /runOpenAIBackgroundResponse/);
   assert.match(server, /aylaV189ResourceType\(resource\.type\) === "vimeo_video" && aliasTopics\.includes\(topicKey\)/);
   assert.match(server, /app\.post\("\/api\/ayla\/admin\/resources\/vimeo-catalog\/classification-jobs"/);
   assert.match(server, /app\.post\("\/api\/ayla\/admin\/resources\/vimeo-catalog\/review"/);

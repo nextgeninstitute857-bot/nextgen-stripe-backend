@@ -33,7 +33,7 @@ test("v239 defaults to two QBank media lanes with bounded shared capacity", () =
       question_zip: 2,
       image_zip: 2,
       video_zip: 2,
-      ayla_vimeo_ai: 1,
+      ayla_vimeo_ai: 2,
     },
     media_workers_per_job: 8,
     media_global_transfer_limit: 12,
@@ -55,12 +55,14 @@ test("v239 defaults to two QBank media lanes with bounded shared capacity", () =
     NEXTGEN_CONTENT_GLOBAL_MEDIA_CONCURRENCY: "200",
     NEXTGEN_CONTENT_VIDEO_JOB_CONCURRENCY: "20",
     NEXTGEN_CONTENT_VIMEO_UPLOAD_CONCURRENCY: "20",
+    AYLA_VIMEO_CLASSIFIER_CONCURRENCY: "20",
   });
   assert.equal(clamped.max_active_jobs, 8);
   assert.equal(clamped.lane_concurrency.image_zip, 4);
   assert.equal(clamped.media_workers_per_job, 12);
   assert.equal(clamped.media_global_transfer_limit, 24);
   assert.equal(clamped.lane_concurrency.video_zip, 4);
+  assert.equal(clamped.lane_concurrency.ayla_vimeo_ai, 3);
   assert.equal(clamped.vimeo_uploads, 4);
   assert.equal(clamped.postgres_job_state, "authoritative_with_disk_recovery_copy");
 });
