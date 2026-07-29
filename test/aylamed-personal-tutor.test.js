@@ -125,6 +125,64 @@ test("strong completion can increase questions without replacing the roadmap", (
   assert.equal(decision.authority.tutorCreatesSecondPlan, false);
 });
 
+test("Personal Tutor suggests an exam-scoped full self-assessment without creating a second roadmap", () => {
+  const decision = buildAylaPersonalTutorDecision(baseInput({
+    student: {
+      examTrackId: "usmle_step_2_ck",
+      targetDate: "2026-08-20",
+      dailyHours: 3,
+      weakAreas: ["Internal Medicine"],
+    },
+    nbmeForms: [{
+      id: "nbme-step-2-ck-form-15",
+      formType: "comprehensive_self_assessment",
+      examTrack: "usmle-step-2",
+      studentEnabled: true,
+    }, {
+      id: "nbme-step-1-form-31",
+      formType: "comprehensive_self_assessment",
+      examTrack: "usmle-step-1",
+      studentEnabled: true,
+    }],
+    nbmeAttempts: [],
+  }));
+  assert.equal(decision.nbmeReadiness.exam_track, "usmle-step-2");
+  assert.equal(decision.nbmeReadiness.available_full_forms, 1);
+  assert.equal(decision.nbmeReadiness.recommendation.form_id, "nbme-step-2-ck-form-15");
+  const recommendation = decision.recommendations.find((row) => row.kind === "self_assessment_readiness");
+  assert.equal(recommendation.planChange, false);
+  assert.equal(recommendation.actionTarget.appRoute, "/dashboard/nbme");
+  assert.equal(decision.authority.tutorCreatesSecondPlan, false);
+});
+
+test("Personal Tutor resumes the exact active self-assessment route", () => {
+  const decision = buildAylaPersonalTutorDecision(baseInput({
+    student: {
+      examTrackId: "usmle_step_2_ck",
+      targetDate: "2026-08-20",
+      dailyHours: 3,
+    },
+    nbmeForms: [{
+      id: "nbme-step-2-ck-form-15",
+      formType: "comprehensive_self_assessment",
+      examTrack: "usmle-step-2",
+      studentEnabled: true,
+    }],
+    nbmeAttempts: [{
+      id: "attempt-active-15",
+      formId: "nbme-step-2-ck-form-15",
+      formType: "comprehensive_self_assessment",
+      title: "Step 2 CK Self-Assessment Form 15",
+      status: "in_progress",
+      examTrack: "usmle-step-2",
+      updatedAt: "2026-07-29T09:00:00.000Z",
+    }],
+  }));
+  const recommendation = decision.recommendations.find((row) => row.kind === "self_assessment_readiness");
+  assert.equal(decision.nbmeReadiness.recommendation.state, "resume_in_progress");
+  assert.equal(recommendation.actionTarget.appRoute, "/dashboard/nbme/attempt/attempt-active-15");
+});
+
 test("cross-system weakness is reported only from repeated verified evidence", () => {
   const decision = buildAylaPersonalTutorDecision(baseInput({
     questionAttempts: [
@@ -248,7 +306,7 @@ test("server wires v213 Personal Tutor into the existing adaptive plan without L
   const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
   assert.match(server, /const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile"/);
   assert.match(server, /const AYLA_BACKEND_BUILD = "aylamed-safe-shared-student-profile-v219"/);
-  assert.match(server, /schema_version: 13/);
+  assert.match(server, /schema_version: 14/);
   assert.match(server, /async function aylaV213PersonalTutorSnapshot/);
   assert.match(server, /app\.get\("\/api\/ayla\/students\/:studentId\/personal-tutor"/);
   assert.match(server, /app\.post\("\/api\/ayla\/students\/:studentId\/personal-tutor\/apply"/);

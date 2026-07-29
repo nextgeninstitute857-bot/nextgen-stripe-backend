@@ -31,6 +31,7 @@ import {
   findReusableContentVideos,
   getContentMediaImportJob,
   getContentMediaReferences,
+  getContentNbmeCollectionQuestions,
   getContentCdmCase,
   getContentVideoImportJob,
   getContentImportJob,
@@ -45,6 +46,7 @@ import {
   listContentOperationalJobs,
   listContentMediaImportAssets,
   listContentMediaImportAssetsForParent,
+  listContentNbmeCollections,
   listExternalQbankAuditEvents,
   listExternalQbankDeliverySessions,
   listContentQbankQuestions,
@@ -202,6 +204,22 @@ import {
   isAylaPersonalTutorPlanningIntent,
   validateAylaPersonalTutorPlanCommand,
 } from "./lib/aylamed-personal-tutor.js";
+import {
+  AYLA_NBME_CENTER_BUILD,
+  assertAylaNbmeExamPlacement,
+  aylaNbmeAttemptQuestion,
+  aylaNbmeHistoryRow,
+  buildAylaNbmeFormRecord,
+  buildAylaNbmeReadinessSnapshot,
+  createAylaNbmeAttempt,
+  finalizeAylaNbmeAttempt,
+  normalizeAylaNbmeExamTrack,
+  normalizeAylaNbmeManifest,
+  parseAylaNbmeCollectionKey,
+  recordAylaNbmeAnswer,
+  sanitizeAylaNbmeAttempt,
+  validateAylaNbmeStudentEnable,
+} from "./lib/aylamed-nbme-center.js";
 import {
   aylaAdaptiveEvidenceMatchesStudent,
   aylaAdaptiveSystemsForStudent,
@@ -34181,7 +34199,7 @@ app.post("/admin/assistant/actions/:id/execute", async (req, res) => {
 const CONTENT_IMPORT_DESTINATIONS = new Set([
   "aylamed_qbank", "lms_assessment", "baseline_diagnostic", "roadmap",
   "content_hub", "marketing", "personal_assessment", "revision", "flashcards", "external_qbank",
-  "aylamed_cdm",
+  "aylamed_cdm", "aylamed_nbme",
 ]);
 
 function ngParseContentDestinations(value) {
@@ -38215,6 +38233,684 @@ function aylaStudentQbankPresentationPolicy(policy = {}, selectedSourceProfile =
     exact_duplicates_count_once: true,
   };
 }
+
+// -----------------------------------------------------------------------------
+// v256: Exam-scoped NBME Center
+// -----------------------------------------------------------------------------
+// The source package is imported through the existing private Content Registry
+// lane with destination `aylamed_nbme`. AylaMed stores only form metadata and
+// resumable student attempts in aylamed-db.json; question bodies and private
+// media remain in PostgreSQL/R2. Every student request is checked against both
+// the owned profile and its exact paid exam entitlement.
+
+const AYLA_NBME_EXAM_TRACKS = Object.freeze([
+  "usmle-step-1",
+  "usmle-step-2",
+  "usmle-step-3",
+]);
+
+function aylaNbmeAccess(db, user, student, requestedExamTrack = "") {
+  const profileExam = normalizeAylaNbmeExamTrack(
+    student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam,
+  );
+  const requested = normalizeAylaNbmeExamTrack(requestedExamTrack || profileExam);
+  if (!profileExam || !requested) {
+    throw Object.assign(new Error("The NBME Center is available only for USMLE Step 1, Step 2 CK, and Step 3 dashboards"), {
+      statusCode: 409,
+      code: "NBME_EXAM_NOT_SUPPORTED",
+    });
+  }
+  if (profileExam !== requested) {
+    throw Object.assign(new Error("The requested self-assessment exam does not match this AylaMed dashboard"), {
+      statusCode: 403,
+      code: "NBME_STUDENT_EXAM_MISMATCH",
+    });
+  }
+  const entitlement = aylaDashboardEntitlement(db, user, student, "nbme_center");
+  const entitlementExam = normalizeAylaNbmeExamTrack(entitlement.exam_track || entitlement.exam_track_id);
+  if (entitlementExam && entitlementExam !== requested) {
+    throw Object.assign(new Error("This self-assessment is outside the active exam entitlement"), {
+      statusCode: 403,
+      code: "NBME_ENTITLEMENT_EXAM_MISMATCH",
+    });
+  }
+  return { ...entitlement, exam_track: requested };
+}
+
+function aylaRevalidateNbmeContext(db, userId, studentId, examTrack) {
+  const rawUser = aylaGetItem(db, "aylaUsers", userId);
+  const student = aylaGetItem(db, "aylaStudents", studentId);
+  if (!rawUser || ["disabled", "deleted"].includes(String(rawUser.status || "").toLowerCase())) {
+    throw Object.assign(new Error("AylaMed user is no longer active"), { statusCode: 401 });
+  }
+  if (!student || String(student.ayla_user_id || student.aylaUserId || student.user_id || student.userId || "") !== String(rawUser.id)) {
+    throw Object.assign(new Error("AylaMed student profile not found"), { statusCode: 404 });
+  }
+  const user = aylaSanitizeUser(rawUser);
+  const entitlement = aylaNbmeAccess(db, user, student, examTrack);
+  return { rawUser, user, student, entitlement };
+}
+
+function aylaOwnedNbmeAttempt(db, user, student, attemptId) {
+  const attempt = aylaGetItem(db, "aylaNbmeAttempts", attemptId);
+  if (!attempt
+    || String(attempt.userId || attempt.user_id || "") !== String(user.id)
+    || String(attempt.studentId || attempt.student_id || "") !== String(student.id)) {
+    throw Object.assign(new Error("Self-assessment attempt not found"), {
+      statusCode: 404,
+      code: "NBME_ATTEMPT_NOT_FOUND",
+    });
+  }
+  assertAylaNbmeExamPlacement(attempt, student.examTrackId || student.exam_track_id || student.exam);
+  return attempt;
+}
+
+function aylaNbmeRegistryRowForForm(rows = [], form = {}) {
+  const collectionId = String(form.collectionId || form.collection_id || "");
+  const collectionKey = String(form.collectionKey || form.collection_key || "");
+  return rows.find((row) => collectionId && String(row.id) === collectionId)
+    || rows.find((row) => collectionKey && String(row.collection_key) === collectionKey)
+    || null;
+}
+
+function aylaNbmeFormWithRegistry(form = {}, registry = null) {
+  if (!registry) return form;
+  return buildAylaNbmeFormRecord({
+    ...form,
+    collectionKey: registry.collection_key,
+    collectionId: registry.id,
+    importedQuestionCount: Number(registry.question_count || 0),
+    registryStatus: registry.status || "draft",
+    rightsStatus: registry.source_rights_status || "unverified",
+    destinationEnabled: registry.destination_enabled === true,
+    studentEnabled: form.studentEnabled === true,
+  }, form);
+}
+
+function aylaPublicNbmeForm(form = {}) {
+  const questionCount = Number(form.importedQuestionCount || 0);
+  const blockSize = Math.max(1, Number(form.blockSize || 50));
+  return {
+    id: form.id,
+    collection_key: form.collectionKey,
+    exam_track: form.examTrack,
+    title: form.title,
+    short_title: form.shortTitle,
+    form_type: form.formType,
+    family: form.family,
+    form_number: form.formNumber,
+    specialty_key: form.specialtyKey || null,
+    specialty_label: form.specialtyLabel || null,
+    question_count: questionCount,
+    expected_question_count: Number(form.expectedQuestionCount || 0),
+    block_size: blockSize,
+    block_count: Math.ceil(questionCount / blockSize),
+    content_complete: questionCount === Number(form.expectedQuestionCount || 0),
+    quality_override: form.qualityOverride === true,
+    enabled: form.studentEnabled === true,
+  };
+}
+
+function aylaAdminNbmeForm(form = {}) {
+  return {
+    ...aylaPublicNbmeForm(form),
+    source_question_count: Number(form.sourceQuestionCount || 0),
+    answer_choice_count: Number(form.answerChoiceCount || 0),
+    media_count: Number(form.mediaCount || 0),
+    missing_explanation_count: Number(form.missingExplanationCount || 0),
+    orphan_answer_count: Number(form.orphanAnswerCount || 0),
+    invalid_answer_key_count: Number(form.invalidAnswerKeyCount || 0),
+    collection_id: form.collectionId || null,
+    content_import_job_id: form.contentImportJobId || null,
+    registry_status: form.registryStatus || "not_imported",
+    rights_status: form.rightsStatus || "unverified",
+    destination_enabled: form.destinationEnabled === true,
+    status: form.status || "private_draft",
+    quality_gate: form.qualityGate || null,
+    quality_override_reason: form.qualityOverrideReason || null,
+    source_sha256: form.sourceSha256 || null,
+    archive_sha256: form.archiveSha256 || null,
+    created_at: form.createdAt || null,
+    updated_at: form.updatedAt || null,
+  };
+}
+
+async function aylaNbmeRegistryRows(examTrack, includePrivate = false) {
+  const normalized = normalizeAylaNbmeExamTrack(examTrack);
+  if (!normalized) return [];
+  return listContentNbmeCollections({ examTrack: normalized, includePrivate });
+}
+
+async function aylaNbmeStudentForms(db, examTrack) {
+  const registryRows = await aylaNbmeRegistryRows(examTrack, false);
+  return aylaValues(db, "aylaNbmeForms")
+    .filter((form) => normalizeAylaNbmeExamTrack(form.examTrack || form.exam_track) === examTrack)
+    .map((form) => aylaNbmeFormWithRegistry(form, aylaNbmeRegistryRowForForm(registryRows, form)))
+    .filter((form) => form.studentEnabled === true)
+    .filter((form) => String(form.registryStatus || "") === "approved" && form.destinationEnabled === true)
+    .sort((left, right) =>
+      String(left.formType).localeCompare(String(right.formType))
+      || String(left.specialtyLabel || "").localeCompare(String(right.specialtyLabel || ""))
+      || Number(left.formNumber || 0) - Number(right.formNumber || 0));
+}
+
+function aylaNbmeAttemptRows(db, student, examTrack) {
+  return aylaValues(db, "aylaNbmeAttempts")
+    .filter((row) => String(row.studentId || row.student_id || "") === String(student.id))
+    .filter((row) => normalizeAylaNbmeExamTrack(row.examTrack || row.exam_track) === examTrack)
+    .sort((left, right) => String(right.updatedAt || right.createdAt || "").localeCompare(String(left.updatedAt || left.createdAt || "")));
+}
+
+async function aylaPlayableNbmeAttempt(attempt, { blockIndex = null } = {}) {
+  const rawQuestions = await getContentNbmeCollectionQuestions({
+    collectionId: attempt.collectionId,
+    examTrack: attempt.examTrack,
+    approvedOnly: true,
+  });
+  const rawById = new Map(rawQuestions.map((row) => [String(row.id), row]));
+  const blocks = Array.isArray(attempt.blocks) ? attempt.blocks : [];
+  const derivedBlock = Math.floor(Math.max(0, Number(attempt.currentQuestionIndex || 0)) / Math.max(1, Number(attempt.blockSize || 50)));
+  const selectedBlock = Math.max(0, Math.min(
+    Math.max(0, blocks.length - 1),
+    blockIndex !== null && blockIndex !== undefined && blockIndex !== "" && Number.isInteger(Number(blockIndex))
+      ? Number(blockIndex)
+      : derivedBlock,
+  ));
+  const selectedRefs = new Set(blocks[selectedBlock]?.questionRefs || []);
+  const mappings = (Array.isArray(attempt.questions) ? attempt.questions : [])
+    .filter((row) => !selectedRefs.size || selectedRefs.has(row.ref));
+  const questions = [];
+  for (const mapping of mappings) {
+    const raw = rawById.get(String(mapping.contentQuestionId)) || null;
+    if (!raw) {
+      questions.push({
+        question_ref: mapping.ref,
+        unavailable: true,
+        message: "This question is no longer approved for delivery.",
+      });
+      continue;
+    }
+    const playable = await ngRegistryQuestionWithPlayableMedia(raw);
+    questions.push(sanitizeAylaQbankQuestion(playable, {
+      session: { ...attempt, mode: "test" },
+      questionRef: mapping.ref,
+    }));
+  }
+  return {
+    build: AYLA_NBME_CENTER_BUILD,
+    attempt: sanitizeAylaNbmeAttempt(attempt),
+    block: {
+      index: selectedBlock,
+      count: blocks.length,
+      question_refs: blocks[selectedBlock]?.questionRefs || [],
+    },
+    questions,
+  };
+}
+
+app.post("/api/ayla/admin/nbme-center/manifests", async (req, res) => {
+  try {
+    const admin = await aylaRequireAdmin(req);
+    const manifest = normalizeAylaNbmeManifest(req.body?.manifest || req.body || {});
+    const result = await mutateAylaDb(async (db) => {
+      const saved = [];
+      for (const row of manifest.forms) {
+        const previous = aylaGetItem(db, "aylaNbmeForms", row.formId) || {};
+        const form = buildAylaNbmeFormRecord({
+          ...previous,
+          ...row,
+          archiveSha256: manifest.archiveSha256,
+          studentEnabled: false,
+        }, previous);
+        aylaSetItem(db, "aylaNbmeForms", form);
+        saved.push(form);
+      }
+      const event = {
+        id: aylaId("AYLA-NBME-EVENT"),
+        type: "source_manifest_registered",
+        archiveSha256: manifest.archiveSha256,
+        formCount: saved.length,
+        exams: [...new Set(saved.map((row) => row.examTrack))],
+        studentVisibility: false,
+        actorId: admin.user?.id || admin.method || "aylamed-admin",
+        createdAt: aylaNow(),
+      };
+      aylaSetItem(db, "aylaNbmeAuditEvents", event);
+      return { saved, event };
+    });
+    return aylaSendOk(res, {
+      build: AYLA_NBME_CENTER_BUILD,
+      count: result.saved.length,
+      forms: result.saved.map(aylaAdminNbmeForm),
+      event: result.event,
+      student_visibility: false,
+      message: "Self-assessment manifest registered as private disabled drafts.",
+    }, 201);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to register the self-assessment manifest");
+  }
+});
+
+app.post("/api/ayla/admin/nbme-center/sync", async (req, res) => {
+  try {
+    const admin = await aylaRequireAdmin(req);
+    const requested = normalizeAylaNbmeExamTrack(req.body?.exam_track || req.body?.examTrack || "");
+    const exams = requested ? [requested] : [...AYLA_NBME_EXAM_TRACKS];
+    const registryRows = (await Promise.all(exams.map((examTrack) => aylaNbmeRegistryRows(examTrack, true)))).flat();
+    const result = await mutateAylaDb(async (db) => {
+      const updated = [];
+      for (const registry of registryRows) {
+        const definition = parseAylaNbmeCollectionKey(registry.collection_key);
+        if (!definition || definition.examTrack !== normalizeAylaNbmeExamTrack(registry.exam_track)) continue;
+        const previous = aylaGetItem(db, "aylaNbmeForms", definition.formId) || {};
+        const form = aylaNbmeFormWithRegistry(buildAylaNbmeFormRecord({
+          ...previous,
+          collectionKey: definition.collectionKey,
+          sourceQuestionCount: previous.sourceQuestionCount || Number(registry.question_count || 0),
+          importedQuestionCount: Number(registry.question_count || 0),
+          studentEnabled: previous.studentEnabled === true,
+        }, previous), registry);
+        aylaSetItem(db, "aylaNbmeForms", form);
+        updated.push(form);
+      }
+      const event = {
+        id: aylaId("AYLA-NBME-EVENT"),
+        type: "content_registry_sync",
+        registryCollectionCount: registryRows.length,
+        formCount: updated.length,
+        exams,
+        actorId: admin.user?.id || admin.method || "aylamed-admin",
+        createdAt: aylaNow(),
+      };
+      aylaSetItem(db, "aylaNbmeAuditEvents", event);
+      return { updated, event };
+    });
+    return aylaSendOk(res, {
+      build: AYLA_NBME_CENTER_BUILD,
+      count: result.updated.length,
+      forms: result.updated.map(aylaAdminNbmeForm),
+      event: result.event,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to synchronize self-assessment forms");
+  }
+});
+
+app.get("/api/ayla/admin/nbme-center", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
+    const requested = normalizeAylaNbmeExamTrack(req.query.exam_track || req.query.examTrack || "");
+    const rows = aylaValues(db, "aylaNbmeForms")
+      .filter((row) => !requested || normalizeAylaNbmeExamTrack(row.examTrack || row.exam_track) === requested)
+      .sort((left, right) => String(left.examTrack).localeCompare(String(right.examTrack))
+        || String(left.formType).localeCompare(String(right.formType))
+        || Number(left.formNumber || 0) - Number(right.formNumber || 0));
+    const registryByExam = new Map();
+    for (const exam of requested ? [requested] : AYLA_NBME_EXAM_TRACKS) {
+      registryByExam.set(exam, await aylaNbmeRegistryRows(exam, true));
+    }
+    const forms = rows.map((form) => aylaNbmeFormWithRegistry(
+      form,
+      aylaNbmeRegistryRowForForm(registryByExam.get(normalizeAylaNbmeExamTrack(form.examTrack)) || [], form),
+    ));
+    return aylaSendOk(res, {
+      build: AYLA_NBME_CENTER_BUILD,
+      count: forms.length,
+      forms: forms.map(aylaAdminNbmeForm),
+      attempts: aylaValues(db, "aylaNbmeAttempts").length,
+      student_visibility_requires_both_gates: true,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load NBME Center administration");
+  }
+});
+
+app.patch("/api/ayla/admin/nbme-center/forms/:formId", async (req, res) => {
+  try {
+    const admin = await aylaRequireAdmin(req);
+    if (typeof req.body?.student_enabled !== "boolean" && typeof req.body?.studentEnabled !== "boolean") {
+      return aylaSendError(res, 400, "student_enabled must be true or false");
+    }
+    const enabled = req.body.student_enabled === true || req.body.studentEnabled === true;
+    if (enabled && String(req.body.confirmation || "") !== String(req.params.formId)) {
+      return aylaSendError(res, 400, "Type the exact form ID to enable this self-assessment");
+    }
+    const initialDb = await readAylaDb();
+    const initial = aylaGetItem(initialDb, "aylaNbmeForms", req.params.formId);
+    if (!initial) return aylaSendError(res, 404, "Self-assessment form not found");
+    const registryRows = await aylaNbmeRegistryRows(initial.examTrack, true);
+    const registry = aylaNbmeRegistryRowForForm(registryRows, initial);
+    const result = await mutateAylaDb(async (db) => {
+      const current = aylaGetItem(db, "aylaNbmeForms", req.params.formId);
+      if (!current) throw Object.assign(new Error("Self-assessment form not found"), { statusCode: 404 });
+      const refreshed = aylaNbmeFormWithRegistry(current, registry);
+      let quality = { allowed: true, override: false, reasons: [] };
+      if (enabled) {
+        quality = validateAylaNbmeStudentEnable(refreshed, {
+          confirmQualityOverride: req.body.confirm_quality_override === true || req.body.confirmQualityOverride === true,
+          qualityOverrideReason: req.body.quality_override_reason || req.body.qualityOverrideReason || "",
+        });
+      }
+      const updated = {
+        ...refreshed,
+        studentEnabled: enabled,
+        status: enabled ? "student_enabled" : refreshed.qualityGate?.ready ? "review_ready" : "private_draft",
+        qualityOverride: enabled && quality.override === true,
+        qualityOverrideReasons: enabled && quality.override ? quality.reasons : [],
+        qualityOverrideReason: enabled && quality.override ? quality.reason : null,
+        enabledBy: enabled ? admin.user?.id || admin.method || "aylamed-admin" : null,
+        enabledAt: enabled ? aylaNow() : null,
+        disabledAt: enabled ? null : aylaNow(),
+        updatedAt: aylaNow(),
+      };
+      aylaSetItem(db, "aylaNbmeForms", updated);
+      const event = {
+        id: aylaId("AYLA-NBME-EVENT"),
+        type: enabled ? "student_form_enabled" : "student_form_disabled",
+        formId: updated.id,
+        examTrack: updated.examTrack,
+        qualityOverride: updated.qualityOverride === true,
+        qualityOverrideReasons: updated.qualityOverrideReasons || [],
+        actorId: admin.user?.id || admin.method || "aylamed-admin",
+        createdAt: aylaNow(),
+      };
+      aylaSetItem(db, "aylaNbmeAuditEvents", event);
+      return { updated, event };
+    });
+    return aylaSendOk(res, {
+      build: AYLA_NBME_CENTER_BUILD,
+      form: aylaAdminNbmeForm(result.updated),
+      event: result.event,
+      student_visibility: result.updated.studentEnabled === true,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update self-assessment visibility");
+  }
+});
+
+app.get("/api/ayla/nbme-center/catalog", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.query.student_id || req.query.studentId || ""), "nbme_center");
+    const access = aylaNbmeAccess(auth.db, auth.user, auth.student, req.query.exam_track || req.query.examTrack || "");
+    const forms = await aylaNbmeStudentForms(auth.db, access.exam_track);
+    const attempts = aylaNbmeAttemptRows(auth.db, auth.student, access.exam_track);
+    const warning = aylaV189BacklogWarning(auth.db, auth.student, aylaDateOnly());
+    const readiness = buildAylaNbmeReadinessSnapshot({
+      student: auth.student,
+      attempts,
+      forms,
+      warning,
+      date: aylaDateOnly(),
+    });
+    return aylaSendOk(res, {
+      build: AYLA_NBME_CENTER_BUILD,
+      exam_track: access.exam_track,
+      forms: {
+        comprehensive: forms.filter((row) => row.formType === "comprehensive_self_assessment").map(aylaPublicNbmeForm),
+        clinical_subject: forms.filter((row) => row.formType === "clinical_subject").map(aylaPublicNbmeForm),
+      },
+      in_progress: attempts.filter((row) => row.status === "in_progress").map(aylaNbmeHistoryRow),
+      history: attempts.filter((row) => row.status === "submitted").slice(0, 20).map(aylaNbmeHistoryRow),
+      readiness,
+      scoring_policy: {
+        backend_authoritative: true,
+        answer_keys_before_submission: false,
+        official_predicted_score: false,
+        pass_guarantee: false,
+      },
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load the NBME Center");
+  }
+});
+
+app.post("/api/ayla/nbme-center/attempts", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.body.student_id || req.body.studentId || ""), "nbme_center");
+    const access = aylaNbmeAccess(auth.db, auth.user, auth.student, req.body.exam_track || req.body.examTrack || "");
+    const formId = String(req.body.form_id || req.body.formId || "").trim();
+    const form = aylaGetItem(auth.db, "aylaNbmeForms", formId);
+    if (!form || form.studentEnabled !== true) return aylaSendError(res, 404, "Self-assessment form not found");
+    assertAylaNbmeExamPlacement(form, access.exam_track);
+    const registryRows = await aylaNbmeRegistryRows(access.exam_track, false);
+    const registry = aylaNbmeRegistryRowForForm(registryRows, form);
+    const currentForm = aylaNbmeFormWithRegistry(form, registry);
+    if (!registry || currentForm.registryStatus !== "approved" || currentForm.destinationEnabled !== true) {
+      return aylaSendError(res, 409, "This self-assessment is no longer approved for student delivery");
+    }
+    const rawQuestions = await getContentNbmeCollectionQuestions({
+      collectionId: currentForm.collectionId,
+      examTrack: access.exam_track,
+      approvedOnly: true,
+    });
+    if (!rawQuestions.length) return aylaSendError(res, 409, "This self-assessment has no approved questions");
+    const idempotencyKey = String(req.headers["idempotency-key"] || req.body.idempotency_key || req.body.idempotencyKey || "").trim().slice(0, 120);
+    const idempotencyFingerprint = crypto.createHash("sha256").update(JSON.stringify({
+      userId: auth.user.id,
+      studentId: auth.student.id,
+      examTrack: access.exam_track,
+      formId: currentForm.id,
+      collectionId: currentForm.collectionId,
+    })).digest("hex");
+    const questionMappings = rawQuestions.map((question) => ({
+      ...question,
+      question_ref: crypto.randomUUID(),
+    }));
+    const mutation = await mutateAylaDb(async (db) => {
+      const fresh = aylaRevalidateNbmeContext(db, auth.user.id, auth.student.id, access.exam_track);
+      const freshForm = aylaGetItem(db, "aylaNbmeForms", currentForm.id);
+      if (!freshForm || freshForm.studentEnabled !== true || String(freshForm.collectionId || "") !== String(currentForm.collectionId)) {
+        throw Object.assign(new Error("This self-assessment changed before the attempt began"), { statusCode: 409 });
+      }
+      const attempts = aylaNbmeAttemptRows(db, fresh.student, access.exam_track);
+      if (idempotencyKey) {
+        const replay = attempts.find((row) => String(row.idempotencyKey || "") === idempotencyKey);
+        if (replay) {
+          if (String(replay.idempotencyFingerprint || "") !== idempotencyFingerprint) {
+            throw Object.assign(new Error("Idempotency key was already used for another self-assessment"), { statusCode: 409 });
+          }
+          return { attempt: replay, replayed: true };
+        }
+      }
+      const active = attempts.find((row) => row.status === "in_progress");
+      if (active) {
+        if (String(active.formId) === String(freshForm.id)) return { attempt: active, replayed: true };
+        throw Object.assign(new Error("Finish or resume the active self-assessment before starting another form"), {
+          statusCode: 409,
+          code: "NBME_ACTIVE_ATTEMPT_EXISTS",
+        });
+      }
+      const attempt = createAylaNbmeAttempt({
+        id: aylaId("AYLA-NBME-ATT"),
+        userId: fresh.user.id,
+        studentId: fresh.student.id,
+        examTrack: access.exam_track,
+        form: freshForm,
+        questions: questionMappings,
+        entitlement: fresh.entitlement,
+        previousAttempts: attempts,
+        idempotencyKey,
+        idempotencyFingerprint,
+      });
+      aylaSetItem(db, "aylaNbmeAttempts", attempt);
+      aylaV189RecordActivity(db, fresh.student.id, "nbme_attempt_started", {
+        attemptId: attempt.id,
+        formId: attempt.formId,
+        examTrack: attempt.examTrack,
+        questionCount: attempt.questionCount,
+      });
+      return { attempt, replayed: false };
+    });
+    return aylaSendOk(res, {
+      ...(await aylaPlayableNbmeAttempt(mutation.attempt, { blockIndex: 0 })),
+      idempotent_replay: mutation.replayed,
+    }, mutation.replayed ? 200 : 201);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to start the self-assessment");
+  }
+});
+
+app.get("/api/ayla/nbme-center/attempts/:attemptId", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.query.student_id || req.query.studentId || ""), "nbme_center");
+    const attempt = aylaOwnedNbmeAttempt(auth.db, auth.user, auth.student, req.params.attemptId);
+    aylaNbmeAccess(auth.db, auth.user, auth.student, attempt.examTrack);
+    return aylaSendOk(res, await aylaPlayableNbmeAttempt(attempt, {
+      blockIndex: req.query.block_index ?? req.query.blockIndex,
+    }));
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load the self-assessment attempt");
+  }
+});
+
+app.put("/api/ayla/nbme-center/attempts/:attemptId/answers", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.body.student_id || req.body.studentId || ""), "nbme_center");
+    const initial = aylaOwnedNbmeAttempt(auth.db, auth.user, auth.student, req.params.attemptId);
+    aylaNbmeAccess(auth.db, auth.user, auth.student, initial.examTrack);
+    const questionRef = String(req.body.question_ref || req.body.questionRef || "").trim();
+    const mapping = aylaNbmeAttemptQuestion(initial, questionRef);
+    if (!mapping) return aylaSendError(res, 404, "Question does not belong to this self-assessment");
+    const rawQuestions = await getContentNbmeCollectionQuestions({
+      collectionId: initial.collectionId,
+      examTrack: initial.examTrack,
+      approvedOnly: true,
+    });
+    const question = rawQuestions.find((row) => String(row.id) === String(mapping.contentQuestionId));
+    if (!question) return aylaSendError(res, 409, "This question is no longer approved for delivery");
+    const selectedAnswerId = Number(req.body.selected_answer_id ?? req.body.selectedAnswerId);
+    if (!question.answers.some((row) => Number(row.answer_id) === selectedAnswerId)) {
+      return aylaSendError(res, 400, "selected_answer_id is not a valid answer choice");
+    }
+    const mutation = await mutateAylaDb(async (db) => {
+      const fresh = aylaRevalidateNbmeContext(db, auth.user.id, auth.student.id, initial.examTrack);
+      const current = aylaOwnedNbmeAttempt(db, fresh.user, fresh.student, initial.id);
+      const currentMapping = aylaNbmeAttemptQuestion(current, questionRef);
+      if (!currentMapping || String(currentMapping.contentQuestionId) !== String(mapping.contentQuestionId)) {
+        throw Object.assign(new Error("Question does not belong to this self-assessment"), { statusCode: 404 });
+      }
+      const recorded = recordAylaNbmeAnswer(current, {
+        questionRef,
+        selectedAnswerId,
+        correctAnswerId: question.correct_answer_id,
+        elapsedMs: req.body.elapsed_ms ?? req.body.elapsedMs,
+        currentQuestionIndex: req.body.current_question_index ?? req.body.currentQuestionIndex,
+        expectedVersion: req.body.expected_version ?? req.body.expectedVersion,
+      });
+      if (!recorded.replayed) aylaSetItem(db, "aylaNbmeAttempts", recorded.attempt);
+      return recorded;
+    });
+    const playable = await ngRegistryQuestionWithPlayableMedia(question);
+    return aylaSendOk(res, {
+      build: AYLA_NBME_CENTER_BUILD,
+      attempt: sanitizeAylaNbmeAttempt(mutation.attempt),
+      question: sanitizeAylaQbankQuestion(playable, {
+        session: { ...mutation.attempt, mode: "test" },
+        questionRef,
+      }),
+      idempotent_replay: mutation.replayed,
+      scoring_released: false,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to save self-assessment progress");
+  }
+});
+
+app.post("/api/ayla/nbme-center/attempts/:attemptId/submit", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.body.student_id || req.body.studentId || ""), "nbme_center");
+    const initial = aylaOwnedNbmeAttempt(auth.db, auth.user, auth.student, req.params.attemptId);
+    aylaNbmeAccess(auth.db, auth.user, auth.student, initial.examTrack);
+    const mutation = await mutateAylaDb(async (db) => {
+      const fresh = aylaRevalidateNbmeContext(db, auth.user.id, auth.student.id, initial.examTrack);
+      const current = aylaOwnedNbmeAttempt(db, fresh.user, fresh.student, initial.id);
+      const finalized = finalizeAylaNbmeAttempt(current, {
+        confirmPartial: req.body.confirm_partial === true || req.body.confirmPartial === true,
+        expectedVersion: req.body.expected_version ?? req.body.expectedVersion,
+      });
+      if (!finalized.replayed) {
+        aylaSetItem(db, "aylaNbmeAttempts", finalized.attempt);
+        const existingSummary = aylaValues(db, "aylaAssessmentAttempts")
+          .find((row) => String(row.nbmeAttemptId || "") === String(finalized.attempt.id));
+        if (!existingSummary) {
+          const summary = {
+            id: aylaId("AYLA-ATT"),
+            studentId: fresh.student.id,
+            userId: fresh.user.id,
+            ...aylaV227ExamFields(fresh.student),
+            nbmeAttemptId: finalized.attempt.id,
+            resourceId: finalized.attempt.collectionId,
+            assessmentNumber: finalized.attempt.collectionKey,
+            title: finalized.attempt.title,
+            system: "Cumulative",
+            topic: finalized.attempt.formType === "clinical_subject" ? finalized.attempt.title : "Comprehensive readiness",
+            scorePercent: finalized.attempt.scorePercent,
+            correct: finalized.attempt.correctCount,
+            incorrect: finalized.attempt.incorrectCount,
+            totalQuestions: finalized.attempt.questionCount,
+            timeSeconds: Math.round(Object.values(finalized.attempt.answers || {})
+              .reduce((sum, row) => sum + Number(row.elapsedMs || 0), 0) / 1_000),
+            weakTopics: [],
+            repeatedErrors: [],
+            assessmentType: `nbme_${finalized.attempt.family}`,
+            tutorReason: "Server-verified full-form readiness evidence",
+            scheduleTrigger: "student_self_assessment",
+            serverVerified: true,
+            scoringVersion: finalized.attempt.scoringVersion,
+            createdAt: finalized.attempt.submittedAt,
+          };
+          aylaSetItem(db, "aylaAssessmentAttempts", summary);
+        }
+        aylaV189RecordActivity(db, fresh.student.id, "nbme_attempt_submitted", {
+          attemptId: finalized.attempt.id,
+          formId: finalized.attempt.formId,
+          examTrack: finalized.attempt.examTrack,
+          scorePercent: finalized.attempt.scorePercent,
+          questionCount: finalized.attempt.questionCount,
+          serverVerified: true,
+        });
+      }
+      return finalized;
+    });
+    const latestDb = await readAylaDb();
+    const current = aylaOwnedNbmeAttempt(latestDb, auth.user, auth.student, initial.id);
+    const forms = await aylaNbmeStudentForms(latestDb, current.examTrack);
+    const readiness = buildAylaNbmeReadinessSnapshot({
+      student: auth.student,
+      attempts: aylaNbmeAttemptRows(latestDb, auth.student, current.examTrack),
+      forms,
+      warning: aylaV189BacklogWarning(latestDb, auth.student, aylaDateOnly()),
+      date: aylaDateOnly(),
+    });
+    return aylaSendOk(res, {
+      ...(await aylaPlayableNbmeAttempt(current, {
+        blockIndex: req.body.block_index ?? req.body.blockIndex,
+      })),
+      readiness,
+      idempotent_replay: mutation.replayed,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to submit the self-assessment");
+  }
+});
+
+app.get("/api/ayla/nbme-center/history", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.query.student_id || req.query.studentId || ""), "nbme_center");
+    const access = aylaNbmeAccess(auth.db, auth.user, auth.student, req.query.exam_track || req.query.examTrack || "");
+    const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 50));
+    const attempts = aylaNbmeAttemptRows(auth.db, auth.student, access.exam_track);
+    return aylaSendOk(res, {
+      build: AYLA_NBME_CENTER_BUILD,
+      exam_track: access.exam_track,
+      total: attempts.length,
+      history: attempts.slice(0, limit).map(aylaNbmeHistoryRow),
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load self-assessment history");
+  }
+});
 
 app.get("/api/ayla/qbank/catalog", async (req, res) => {
   try {
@@ -60631,6 +61327,9 @@ const AYLA_COLLECTIONS = {
   aylaFlashcardReviews: { route: "/api/ayla/flashcard-reviews", prefix: "AYLA-FR", label: "flashcardReview" },
   aylaAssessmentDefinitions: { route: "/api/ayla/assessment-definitions", prefix: "AYLA-DEF", label: "assessmentDefinition" },
   aylaAssessmentAttempts: { route: "/api/ayla/assessment-attempts", prefix: "AYLA-ATT", label: "assessmentAttempt" },
+  aylaNbmeForms: { route: "/api/ayla/admin/nbme-forms", prefix: "AYLA-NBME-FORM", label: "nbmeForm", customPost: true, immutableAdminWrites: true },
+  aylaNbmeAttempts: { route: "/api/ayla/admin/nbme-attempts", prefix: "AYLA-NBME-ATT", label: "nbmeAttempt", customPost: true, immutableAdminWrites: true },
+  aylaNbmeAuditEvents: { route: "/api/ayla/admin/nbme-audit-events", prefix: "AYLA-NBME-EVENT", label: "nbmeAuditEvent", customPost: true, immutableAdminWrites: true },
   aylaConceptMastery: { route: "/api/ayla/concept-mastery", prefix: "AYLA-MAST", label: "conceptMastery" },
   aylaRevisionQueue: { route: "/api/ayla/revision-queue", prefix: "AYLA-REV", label: "revisionItem" },
   aylaActivityHistory: { route: "/api/ayla/activity-history", prefix: "AYLA-ACT", label: "activity" },
@@ -60746,7 +61445,7 @@ const DEFAULT_AYLA_AI_USAGE_SETTINGS = {
 };
 
 const DEFAULT_AYLA_DB = {
-  schema_version: 13,
+  schema_version: 14,
   qbank_state_version: 0,
   aylaUsers: {},
   aylaStudents: {},
@@ -60786,6 +61485,9 @@ const DEFAULT_AYLA_DB = {
   aylaFlashcardReviews: {},
   aylaAssessmentDefinitions: {},
   aylaAssessmentAttempts: {},
+  aylaNbmeForms: {},
+  aylaNbmeAttempts: {},
+  aylaNbmeAuditEvents: {},
   aylaConceptMastery: {},
   aylaRevisionQueue: {},
   aylaActivityHistory: {},
@@ -63080,6 +63782,8 @@ function aylaCascadeDeleteRelatedRecords(db, { studentId = null, diagnosticId = 
     "aylaCdmAttempts",
     "aylaFlashcardReviews",
     "aylaAssessmentAttempts",
+    "aylaNbmeAttempts",
+    "aylaNbmeAuditEvents",
     "aylaConceptMastery",
     "aylaRevisionQueue",
     "aylaActivityHistory",
@@ -63700,6 +64404,12 @@ function aylaEnsureSeedData(db) {
   }, existingDemo || {}));
 
   const existingMonthly = aylaGetItem(db, "aylaPlans", "AYLA-PLAN-MONTHLY");
+  const monthlyFeatures = existingMonthly?.included_features?.length
+    ? [...existingMonthly.included_features]
+    : ["diagnostic", "roadmap", "personal_tutor", "assessments", "nbme_center", "library", "qbank", "revision", "flashcards", "study_partner"];
+  if (monthlyFeatures.includes("assessments") && !monthlyFeatures.includes("nbme_center")) {
+    monthlyFeatures.splice(monthlyFeatures.indexOf("assessments") + 1, 0, "nbme_center");
+  }
   aylaSetItem(db, "aylaPlans", aylaNormalizePlanPayload({
     ...(existingMonthly || {}),
     id: "AYLA-PLAN-MONTHLY",
@@ -63709,7 +64419,7 @@ function aylaEnsureSeedData(db) {
     billing_type: "subscription_monthly",
     price_cents: Number(existingMonthly?.price_cents ?? 10000),
     access_days: 30,
-    included_features: existingMonthly?.included_features?.length ? existingMonthly.included_features : ["diagnostic", "roadmap", "personal_tutor", "assessments", "library", "qbank", "revision", "flashcards", "study_partner"],
+    included_features: monthlyFeatures,
     is_active: existingMonthly?.is_active !== false,
     is_public: existingMonthly?.is_public !== false,
     is_featured: existingMonthly?.is_featured !== false,
@@ -69711,6 +70421,32 @@ async function aylaV213PersonalTutorSnapshot(db, user, student, date = aylaDateO
     serverVerified: row.serverVerified === true,
     createdAt: row.createdAt,
   }));
+  const nbmeAttempts = aylaV213TutorStudentRows(db, "aylaNbmeAttempts", student, (row) => ({
+    id: row.id,
+    formId: row.formId,
+    formType: row.formType,
+    title: row.title,
+    status: row.status,
+    examTrack: row.examTrack,
+    scorePercent: row.scorePercent,
+    questionCount: row.questionCount,
+    answeredCount: row.answeredCount,
+    repeatedItemPercent: row.repeatedItemPercent,
+    readinessSignal: row.readinessSignal,
+    serverVerified: row.serverVerified === true,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    submittedAt: row.submittedAt,
+  }));
+  const nbmeForms = aylaValues(db, "aylaNbmeForms")
+    .filter((row) => normalizeAylaNbmeExamTrack(row.examTrack || row.exam_track)
+      === normalizeAylaNbmeExamTrack(student.examTrackId || student.exam_track_id || student.exam))
+    .map((row) => ({
+      id: row.id,
+      formType: row.formType,
+      examTrack: row.examTrack,
+      studentEnabled: row.studentEnabled === true,
+    }));
   const flashcardReviews = aylaV213TutorStudentRows(db, "aylaFlashcardReviews", student, (row) => ({
     rating: row.rating,
     resourceId: row.resourceId || null,
@@ -69765,6 +70501,8 @@ async function aylaV213PersonalTutorSnapshot(db, user, student, date = aylaDateO
     systemProgress: aylaV189SystemProgress(db, student),
     questionAttempts,
     assessmentAttempts,
+    nbmeAttempts,
+    nbmeForms,
     flashcardReviews,
     conceptMastery,
     revisionItems,

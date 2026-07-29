@@ -281,7 +281,7 @@ test("v219 serves one safe profile contract through isolated LMS and AylaMed sto
     assert.equal(planningOnly.payload.student.dailyHours, 4);
 
     const storedAyla = JSON.parse(await fs.readFile(aylaPath, "utf8"));
-    assert.equal(storedAyla.schema_version, 13);
+    assert.equal(storedAyla.schema_version, 14);
     assert.equal(storedAyla.aylaUsers["ayla-user-1"].role, "student");
     assert.equal(storedAyla.aylaUsers["ayla-user-1"].email, "ayla-profile@example.com");
     assert.equal(storedAyla.aylaStudents["ayla-student-1"].name, "Dr. Sara Ali");

@@ -17,7 +17,7 @@ test("legacy feature names converge to one canonical plan feature", () => {
   assert.equal(normalizeAylaPlanFeature("weak-areas"), "revision");
   assert.equal(normalizeAylaPlanFeature("knowledge_search"), "library");
   assert.deepEqual(normalizeAylaPlanFeatures(["roadmap", "weak_areas", "ai_coach", "knowledge_search"]).features, ["roadmap", "personal_tutor", "library", "revision"]);
-  assert.equal(publicAylaPlanFeatureCatalog().length, 13);
+  assert.equal(publicAylaPlanFeatureCatalog().length, 14);
 });
 
 test("feature patches replace or toggle a matrix and reject unknown controls", () => {
@@ -28,7 +28,7 @@ test("feature patches replace or toggle a matrix and reject unknown controls", (
   });
   const full = applyAylaPlanFeaturePatch(plan, { is_full_access: true });
   assert.equal(full.is_full_access, true);
-  assert.equal(full.included_features.length, 13);
+  assert.equal(full.included_features.length, 14);
   assert.throws(() => applyAylaPlanFeaturePatch(plan, { feature_overrides: { invented_feature: true } }), (error) => error.code === "UNKNOWN_PLAN_FEATURE");
 });
 
@@ -38,7 +38,7 @@ test("matrix rows expose every control with deterministic versioning", () => {
   assert.equal(row.features.diagnostic, true);
   assert.equal(row.features.roadmap, true);
   assert.equal(row.features.qbank, false);
-  assert.equal(Object.keys(row.features).length, 13);
+  assert.equal(Object.keys(row.features).length, 14);
 });
 
 test("stored plan controls override stale enrollment feature snapshots", () => {
@@ -71,7 +71,7 @@ test("server protects plan writes and exposes atomic feature/demo control routes
   const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
   assert.match(server, /const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile"/);
   assert.match(server, /const AYLA_BACKEND_BUILD = "aylamed-safe-shared-student-profile-v219"/);
-  assert.match(server, /schema_version: 13/);
+  assert.match(server, /schema_version: 14/);
   assert.match(server, /app\.get\("\/api\/ayla\/admin\/plan-feature-matrix"/);
   assert.match(server, /app\.put\("\/api\/ayla\/admin\/plans\/:planId\/features"/);
   assert.match(server, /app\.put\("\/api\/ayla\/admin\/demo-controls"/);
