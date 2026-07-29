@@ -257,6 +257,7 @@ test("isolated HTTP flow captures exact pages and timestamps, is idempotent, and
       token,
       body: {
         notebookId: first.payload.notebook.id,
+        pageId: "page-two",
         source: { sourceType: "content_video", resourceId: "video-1", timestampSeconds: 83 },
         noteText: "Opening snap occurs after S2.",
       },
@@ -265,6 +266,7 @@ test("isolated HTTP flow captures exact pages and timestamps, is idempotent, and
     const videoBlock = video.payload.notebook.blocks.find((block) => block.sourceType === "content_video");
     assert.equal(videoBlock.returnLink.href, "/dashboard/content-hub/video-1?t=83");
     assert.equal(videoBlock.timestampLabel, "1:23");
+    assert.equal(videoBlock.pageId, "page-two");
     assert.doesNotMatch(JSON.stringify(video.payload), /123456789|vimeoId|providerVideoId|player\.vimeo/i);
 
     const outsideDuration = await api(baseUrl, "/api/ayla/students/student-1/notebooks/capture", {

@@ -8,6 +8,7 @@ import {
   auditDiagnosticQuestionMedia,
   buildStep1DiagnosticSelection,
   classifyStep1DiagnosticQuestion,
+  diagnosticQuestionMatchProfile,
   diagnosticSessionUsesCurrentBlueprint,
 } from "../lib/aylamed-diagnostic.js";
 
@@ -98,6 +99,35 @@ function fixture(index, { linked = true } = {}) {
   };
 }
 
+function imageReplacementFixture(index, overrides = {}) {
+  const original = fixture(index, { linked: false });
+  const system = classifyStep1DiagnosticQuestion(original);
+  const ref = `replacement-${index + 1}.png`;
+  return {
+    ...original,
+    id: `replacement-question-${index + 1}`,
+    title: `${TITLES[index]} image variant`,
+    exam_track: "usmle_step_1",
+    system_key: system,
+    subsystem_key: overrides.subsystem_key || "",
+    topic_key: overrides.topic_key || TITLES[index],
+    taxonomy: {
+      system_key: system,
+      subsystem_key: overrides.subsystem_key || "",
+      topic_key: overrides.topic_key || TITLES[index],
+      difficulty: overrides.difficulty || "medium",
+    },
+    question_html: `<p>Comparable approved clinical stem</p><img src="${ref}">`,
+    media: [{
+      id: `replacement-media-${index + 1}`,
+      ref,
+      kind: "image",
+      content_type: "image/png",
+      object_key: `private/step-1/${ref}`,
+    }],
+  };
+}
+
 test("numeric source taxonomy is replaced by deterministic Step 1 topic classification", () => {
   assert.equal(classifyStep1DiagnosticQuestion(fixture(0)), "Musculoskeletal");
   assert.equal(classifyStep1DiagnosticQuestion(fixture(14)), "Renal");
@@ -110,6 +140,7 @@ test("all relative inline media must have a private playable attachment", () => 
   const ready = auditDiagnosticQuestionMedia(fixture(0));
   assert.equal(ready.ready, true);
   assert.equal(ready.referenceCount, 1);
+  assert.equal(ready.hasPlayableImage, true);
 
   const broken = auditDiagnosticQuestionMedia(fixture(0, { linked: false }));
   assert.equal(broken.ready, false);
@@ -150,6 +181,50 @@ test("broken figures make the diagnostic fail closed instead of showing unusable
   assert.equal(result.selected.length, 27);
   assert.equal(result.rejectedMissingMediaCount, 13);
   assert.equal(result.rejected.missingMedia.some((row) => row.missingRefs.includes("GFR_A.gif")), true);
+  assert.equal(result.unmatchedReplacementCount, 13);
+});
+
+test("all thirteen broken image slots can be replaced one-for-one only by same-topic playable-image MCQs", () => {
+  const originals = TITLES.map((_, index) => fixture(index, { linked: false }));
+  const replacements = [...IMAGE_REFS.keys()]
+    .map((questionNumber) => imageReplacementFixture(questionNumber - 1));
+  const result = buildStep1DiagnosticSelection(
+    [...originals, ...replacements],
+    {
+      requestedCount: 40,
+      minimumSystems: 12,
+      preferredQuestionIds: originals.map((question) => question.id),
+    },
+  );
+  assert.equal(result.ready, true);
+  assert.equal(result.selected.length, 40);
+  assert.equal(result.governedReplacementCount, 13);
+  assert.equal(result.unmatchedReplacementCount, 0);
+  assert.equal(result.replacements.every((row) => (
+    row.matchLevel === "topic"
+    && row.replacementHasPlayableImage === true
+    && row.imageRequired === true
+  )), true);
+  assert.equal(new Set(result.selected.map((question) => question.id)).size, 40);
+  assert.equal(result.selected.some((question) => question.id === "question-1"), false);
+  assert.equal(result.selected.some((question) => question.id === "replacement-question-1"), true);
+});
+
+test("a playable image from the same system but a different topic cannot fill a broken slot", () => {
+  const original = fixture(0, { linked: false });
+  original.exam_track = "usmle_step_1";
+  const mismatch = imageReplacementFixture(0, { topic_key: "Bone tumors" });
+  const result = buildStep1DiagnosticSelection(
+    [original, mismatch],
+    {
+      requestedCount: 1,
+      minimumSystems: 1,
+      preferredQuestionIds: [original.id],
+    },
+  );
+  assert.equal(diagnosticQuestionMatchProfile(original).system, "Musculoskeletal");
+  assert.equal(result.ready, false);
+  assert.equal(result.unmatchedReplacementCount, 1);
 });
 
 test("stored system overrides feed verified attempts and baseline scoring", () => {
@@ -176,6 +251,8 @@ test("only current mapped diagnostic sessions can answer or submit", () => {
     diagnosticQuality: {
       mediaReady: true,
       taxonomyReady: true,
+      governedReplacementReady: true,
+      unmatchedReplacementCount: 0,
       minimumSystemCount: 1,
     },
   }), true);
@@ -187,6 +264,8 @@ test("only current mapped diagnostic sessions can answer or submit", () => {
     diagnosticQuality: {
       mediaReady: true,
       taxonomyReady: true,
+      governedReplacementReady: true,
+      unmatchedReplacementCount: 0,
       minimumSystemCount: 1,
     },
   }), false);
@@ -198,6 +277,21 @@ test("only current mapped diagnostic sessions can answer or submit", () => {
     diagnosticQuality: {
       mediaReady: false,
       taxonomyReady: true,
+      governedReplacementReady: true,
+      unmatchedReplacementCount: 0,
+      minimumSystemCount: 1,
+    },
+  }), false);
+  assert.equal(diagnosticSessionUsesCurrentBlueprint({
+    purpose: "baseline_diagnostic",
+    diagnosticBlueprintVersion: AYLA_DIAGNOSTIC_BLUEPRINT_VERSION,
+    questions: [{ contentQuestionId: "question-1" }],
+    diagnosticSystemByQuestionId: { "question-1": "Renal" },
+    diagnosticQuality: {
+      mediaReady: true,
+      taxonomyReady: true,
+      governedReplacementReady: false,
+      unmatchedReplacementCount: 1,
       minimumSystemCount: 1,
     },
   }), false);
@@ -208,6 +302,9 @@ test("server gates diagnostic creation, playback, answering and submission throu
   assert.match(server, /buildStep1DiagnosticSelection\(candidates/);
   assert.match(server, /DIAGNOSTIC_CONTENT_NOT_READY/);
   assert.match(server, /media_incomplete_questions: blueprint\.rejectedMissingMediaCount/);
+  assert.match(server, /diagnosticReplacementLineage = selection\.diagnosticReplacementLineage/);
+  assert.match(server, /\/api\/ayla\/admin\/diagnostic\/step1\/media-replacements\/preview/);
+  assert.match(server, /write_performed: false/);
   assert.match(server, /session\.diagnosticSystemByQuestionId = selection\.diagnosticSystemByQuestionId/);
   assert.match(server, /diagnostic_session_superseded/);
   assert.match(server, /ANSWERED_DIAGNOSTIC_REVIEW_REQUIRED/);

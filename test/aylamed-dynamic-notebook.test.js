@@ -74,19 +74,23 @@ test("capture creates a clean imported-source block and a separate handwriting-s
   const capture = createAylaNotebookCaptureBlocks({
     source,
     noteText: "I confuse opening snaps with ejection clicks.",
+    pageId: "page-two",
     idFactory: () => `block-${++id}`,
     now: new Date("2026-07-20T00:00:00.000Z"),
   });
   assert.equal(capture.blocks.length, 2);
   assert.equal(capture.blocks[0].contentOrigin, "approved_source");
   assert.equal(capture.blocks[0].visualStyle, "clean");
+  assert.equal(capture.blocks[0].pageId, "page-two");
   assert.equal(capture.blocks[1].contentOrigin, "student_authored");
   assert.equal(capture.blocks[1].visualStyle, "handwriting");
+  assert.equal(capture.blocks[1].pageId, "page-two");
   assert.equal(capture.blocks[1].linkedCaptureKey, capture.captureKey);
 
   const safe = sanitizeAylaNotebookBlock(capture.blocks[0], { currentSource: source });
   assert.equal(safe.returnLink.href, "/dashboard/content-hub/video-1?t=83");
   assert.equal(safe.timestampLabel, "1:23");
+  assert.equal(safe.pageId, "page-two");
   assert.doesNotMatch(JSON.stringify(safe), /private-vimeo-123|providerVideoId|vimeoId|sourceUrl|https?:/i);
 });
 
@@ -183,7 +187,7 @@ test("server wires v212 capture through the existing entitlement and isolated Ay
   const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
   assert.match(server, /const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile"/);
   assert.match(server, /const AYLA_BACKEND_BUILD = "aylamed-safe-shared-student-profile-v219"/);
-  assert.match(server, /schema_version: 14/);
+  assert.match(server, /schema_version: 15/);
   assert.match(server, /app\.post\("\/api\/ayla\/students\/:studentId\/notebooks\/capture"/);
   assert.match(server, /aylaV189RequireStudent\(req, req\.params\.studentId, "dynamic_notebook"\)/);
   assert.match(server, /async function aylaV212ResolveNotebookSource/);

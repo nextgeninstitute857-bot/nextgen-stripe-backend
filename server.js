@@ -109,6 +109,15 @@ import {
   diagnosticSessionUsesCurrentBlueprint,
 } from "./lib/aylamed-diagnostic.js";
 import {
+  buildAylaCarryContext,
+  buildAylaEngagementMessages,
+  buildAylaExamHandoffState,
+  createAylaExamHandoff,
+  normalizeAylaContinuityExamTrack,
+  normalizeAylaEngagementPreferences,
+  suggestAylaNextExam,
+} from "./lib/aylamed-exam-continuity.js";
+import {
   AYLA_CDM_STATE_COLLECTIONS,
   cdmRoadmapAssignmentCaseId,
   cdmRoadmapAssignmentEligible,
@@ -38162,6 +38171,7 @@ async function aylaSelectQbankSessionQuestions({
   purpose,
   sourceProfile = "",
   destinationScope = "",
+  preferredQuestionIds = [],
 } = {}) {
   if (purpose !== "baseline_diagnostic") {
     const selected = await listContentQbankQuestions({
@@ -38179,16 +38189,30 @@ async function aylaSelectQbankSessionQuestions({
     return { selected, availableSystemKeys: [], selectedSystemKeys: [] };
   }
 
-  const candidates = await listContentQbankQuestions({
+  const listedCandidates = await listContentQbankQuestions({
     examTrack,
     destination: "aylamed_qbank",
     destinationScope,
     limit: Math.min(200, Math.max(requestedCount, requestedCount * 5)),
-    seed: crypto.randomUUID(),
+    seed: `aylamed-step1-diagnostic-v${AYLA_DIAGNOSTIC_BLUEPRINT_VERSION}:${destinationScope || "default"}`,
   });
+  const preferredCandidates = preferredQuestionIds.length
+    ? await getContentQbankQuestions({
+      questionIds: preferredQuestionIds,
+      examTrack,
+      destination: "aylamed_qbank",
+      destinationScope,
+    })
+    : [];
+  const candidates = [...new Map(
+    [...preferredCandidates, ...listedCandidates]
+      .filter((question) => question?.id)
+      .map((question) => [String(question.id), question]),
+  ).values()];
   const blueprint = buildStep1DiagnosticSelection(candidates, {
     requestedCount,
     minimumSystems: Math.min(12, requestedCount),
+    preferredQuestionIds,
   });
   if (!blueprint.ready) {
     const error = new Error(
@@ -38203,6 +38227,10 @@ async function aylaSelectQbankSessionQuestions({
       systems_available: blueprint.availableSystemKeys.length,
       systems_required: blueprint.minimumSystems,
       media_incomplete_questions: blueprint.rejectedMissingMediaCount,
+      governed_replacements: blueprint.governedReplacementCount,
+      unmatched_replacement_slots: blueprint.unmatchedReplacementCount,
+      unavailable_preferred_questions: blueprint.preferredUnavailableCount,
+      replacement_gaps: blueprint.rejected.unmatchedReplacements,
       unclassified_questions: blueprint.rejectedUnclassifiedCount,
       private_drafts_exposed: false,
     };
@@ -38215,6 +38243,7 @@ async function aylaSelectQbankSessionQuestions({
     diagnosticSystemByQuestionId: Object.fromEntries(
       blueprint.selected.map((question) => [String(question.id), question.diagnostic_system]),
     ),
+    diagnosticReplacementLineage: blueprint.replacements,
     blueprintVersion: AYLA_DIAGNOSTIC_BLUEPRINT_VERSION,
     quality: {
       blueprintVersion: AYLA_DIAGNOSTIC_BLUEPRINT_VERSION,
@@ -38226,13 +38255,106 @@ async function aylaSelectQbankSessionQuestions({
       selectedSystemCount: blueprint.selectedSystemKeys.length,
       mediaReferenceCount: blueprint.mediaReferenceCount,
       mediaIncompleteQuestionCount: blueprint.rejectedMissingMediaCount,
+      governedReplacementCount: blueprint.governedReplacementCount,
+      unmatchedReplacementCount: blueprint.unmatchedReplacementCount,
+      preferredUnavailableCount: blueprint.preferredUnavailableCount,
+      selectedImageQuestionCount: blueprint.selectedImageQuestionCount,
       unclassifiedQuestionCount: blueprint.rejectedUnclassifiedCount,
       mediaReady: true,
       taxonomyReady: true,
+      governedReplacementReady: blueprint.unmatchedReplacementCount === 0
+        && blueprint.preferredUnavailableCount === 0,
       privateDraftsExposed: false,
     },
   };
 }
+
+app.get("/api/ayla/admin/diagnostic/step1/media-replacements/preview", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const destinationScope = String(
+      req.query.destination_scope || req.query.destinationScope || "private_step1_pilot",
+    ).trim().slice(0, 120);
+    const sessionId = String(req.query.session_id || req.query.sessionId || "").trim();
+    let preferredQuestionIds = String(
+      req.query.preferred_question_ids || req.query.preferredQuestionIds || "",
+    ).split(",").map((value) => value.trim()).filter(Boolean).slice(0, 40);
+    if (sessionId) {
+      const db = await readAylaDb();
+      const session = aylaGetItem(db, "aylaQbankSessions", sessionId);
+      if (!session || String(session.purpose || "") !== "baseline_diagnostic") {
+        return aylaSendError(res, 404, "Step 1 diagnostic session not found");
+      }
+      if (normalizeAylaQbankExamTrack(session.examTrack) !== "usmle_step_1") {
+        return aylaSendError(res, 409, "This preview only supports a Step 1 diagnostic");
+      }
+      preferredQuestionIds = (Array.isArray(session.questions) ? session.questions : [])
+        .map((mapping) => String(mapping.contentQuestionId || ""))
+        .filter(Boolean)
+        .slice(0, 40);
+    }
+    const listed = await listContentQbankQuestions({
+      examTrack: "usmle_step_1",
+      destination: "aylamed_qbank",
+      destinationScope,
+      limit: 200,
+      seed: `aylamed-step1-diagnostic-v${AYLA_DIAGNOSTIC_BLUEPRINT_VERSION}:${destinationScope || "default"}`,
+    });
+    const preferred = preferredQuestionIds.length
+      ? await getContentQbankQuestions({
+        questionIds: preferredQuestionIds,
+        examTrack: "usmle_step_1",
+        destination: "aylamed_qbank",
+        destinationScope,
+      })
+      : [];
+    const candidates = [...new Map(
+      [...preferred, ...listed]
+        .filter((question) => question?.id)
+        .map((question) => [String(question.id), question]),
+    ).values()];
+    const blueprint = buildStep1DiagnosticSelection(candidates, {
+      requestedCount: 40,
+      minimumSystems: 12,
+      preferredQuestionIds,
+    });
+    const titleById = new Map(candidates.map((question) => [
+      String(question.id),
+      String(question.title || ""),
+    ]));
+    return aylaSendOk(res, {
+      read_only: true,
+      write_performed: false,
+      answer_keys_included: false,
+      question_stems_included: false,
+      private_drafts_exposed: false,
+      session_id: sessionId || null,
+      destination_scope: destinationScope,
+      blueprint_version: AYLA_DIAGNOSTIC_BLUEPRINT_VERSION,
+      ready: blueprint.ready,
+      summary: {
+        required_questions: blueprint.requestedCount,
+        selected_questions: blueprint.selected.length,
+        selected_systems: blueprint.selectedSystemKeys.length,
+        required_systems: blueprint.minimumSystems,
+        broken_media_questions: blueprint.rejectedMissingMediaCount,
+        governed_replacements: blueprint.governedReplacementCount,
+        unmatched_replacement_slots: blueprint.unmatchedReplacementCount,
+        unavailable_preferred_questions: blueprint.preferredUnavailableCount,
+      },
+      replacements: blueprint.replacements.map((row) => ({
+        ...row,
+        originalTitle: titleById.get(row.originalQuestionId) || "",
+        replacementTitle: titleById.get(row.replacementQuestionId) || "",
+      })),
+      gaps: blueprint.rejected.unmatchedReplacements,
+      unavailable_preferred_questions: blueprint.rejected.preferredUnavailable,
+      media_incomplete_questions: blueprint.rejected.missingMedia,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message, error.details || null);
+  }
+});
 
 function aylaRequireCurrentDiagnosticBlueprint(session = {}) {
   if (diagnosticSessionUsesCurrentBlueprint(session)) return;
@@ -38994,6 +39116,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
     const defaultBlockSize = purpose === "baseline_diagnostic" ? 20 : 40;
     const requestedBlockSize = Math.max(1, Math.min(40, Math.trunc(Number(req.body.block_size ?? req.body.blockSize ?? defaultBlockSize) || defaultBlockSize)));
     const idempotencyKey = String(req.headers["idempotency-key"] || req.body.idempotency_key || req.body.idempotencyKey || "").trim().slice(0, 120);
+    let preferredDiagnosticQuestionIds = [];
     if (purpose === "baseline_diagnostic") {
       if (auth.student.serverVerifiedBaseline === true || String(auth.student.onboardingStatus || "") === "complete") {
         return aylaSendError(res, 409, "The verified starting diagnostic is already complete. Use a normal test session for later reassessment.");
@@ -39031,6 +39154,15 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
           },
         );
       }
+      const latestUnansweredLegacy = activeDiagnostics
+        .filter((row) => !diagnosticSessionUsesCurrentBlueprint(row))
+        .sort((left, right) => String(right.updatedAt || right.createdAt || "")
+          .localeCompare(String(left.updatedAt || left.createdAt || "")))[0];
+      preferredDiagnosticQuestionIds = (Array.isArray(latestUnansweredLegacy?.questions)
+        ? latestUnansweredLegacy.questions
+        : [])
+        .map((mapping) => String(mapping.contentQuestionId || ""))
+        .filter(Boolean);
     }
 
     let origin = "personal";
@@ -39163,6 +39295,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         purpose,
         sourceProfile,
         destinationScope,
+        preferredQuestionIds: preferredDiagnosticQuestionIds,
       });
     }
     const selected = selection.selected;
@@ -39280,6 +39413,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
       if (purpose === "baseline_diagnostic") {
         session.diagnosticBlueprintVersion = selection.blueprintVersion;
         session.diagnosticSystemByQuestionId = selection.diagnosticSystemByQuestionId;
+        session.diagnosticReplacementLineage = selection.diagnosticReplacementLineage;
         session.diagnosticQuality = selection.quality;
         session.diagnosticCoverage = {
           availableSystemCount: selection.availableSystemKeys.length,
@@ -61500,6 +61634,9 @@ const AYLA_COLLECTIONS = {
   aylaPasswordResetTokens: { route: "/api/ayla/password-reset-tokens", prefix: "AYLA-RESET", label: "passwordResetToken" },
   aylaPilotCohorts: { route: "/api/ayla/admin/pilot-cohorts", prefix: "AYLA-PILOT", label: "pilotCohort", customPost: true, immutableAdminWrites: true },
   aylaPilotAuditEvents: { route: "/api/ayla/admin/pilot-audit-events", prefix: "AYLA-PILOT-EVENT", label: "pilotAuditEvent", customPost: true, immutableAdminWrites: true },
+  aylaExamHandoffs: { route: "/api/ayla/admin/exam-handoffs", prefix: "AYLA-HANDOFF", label: "examHandoff", customPost: true, immutableAdminWrites: true },
+  aylaEngagementPreferences: { route: "/api/ayla/admin/engagement-preferences", prefix: "AYLA-ENG-PREF", label: "engagementPreference", customPost: true, immutableAdminWrites: true },
+  aylaEngagementDeliveries: { route: "/api/ayla/admin/engagement-deliveries", prefix: "AYLA-ENG-DEL", label: "engagementDelivery", customPost: true, immutableAdminWrites: true },
 
   // v156 separated AylaMed billing/access collections.
   aylaPlans: { route: "/api/ayla/plans", prefix: "AYLA-PLAN", label: "plan" },
@@ -61583,6 +61720,13 @@ const DEFAULT_AYLA_SETTINGS = {
     max_messages_per_10_minutes: 15,
   },
   marketing: DEFAULT_AYLA_MARKETING_SETTINGS,
+  continuity: {
+    email_delivery_enabled: false,
+    coaching_email_default_opt_in: false,
+    max_coaching_emails_per_day: 1,
+    quiet_hours_start: 21,
+    quiet_hours_end: 8,
+  },
 };
 
 const DEFAULT_AYLA_AI_USAGE_SETTINGS = {
@@ -61604,7 +61748,7 @@ const DEFAULT_AYLA_AI_USAGE_SETTINGS = {
 };
 
 const DEFAULT_AYLA_DB = {
-  schema_version: 14,
+  schema_version: 15,
   qbank_state_version: 0,
   aylaUsers: {},
   aylaStudents: {},
@@ -61658,6 +61802,9 @@ const DEFAULT_AYLA_DB = {
   aylaPasswordResetTokens: {},
   aylaPilotCohorts: {},
   aylaPilotAuditEvents: {},
+  aylaExamHandoffs: {},
+  aylaEngagementPreferences: {},
+  aylaEngagementDeliveries: {},
   aylaProfileAuditEvents: {},
   aylaActionLogs: {},
   aylaMarketingCampaigns: {},
@@ -61703,6 +61850,10 @@ function aylaMergeSettings(value = {}) {
     marketing: normalizeAylaMarketingSettings(value?.marketing || {}, {
       current: DEFAULT_AYLA_SETTINGS.marketing,
     }),
+    continuity: {
+      ...DEFAULT_AYLA_SETTINGS.continuity,
+      ...(value?.continuity || {}),
+    },
   };
   merged.demo.included_features = normalizeAylaPlanFeatures(merged.demo.included_features).features;
   return merged;
@@ -65201,6 +65352,7 @@ app.get("/api/ayla/health", async (req, res) => {
       examTracks: AYLA_EXAM_TRACKS,
       storage: { ayla_db_path: AYLA_DB_PATH, separate_from_lms: AYLA_DB_PATH !== LIVE_DB_PATH, separate_from_crm: AYLA_DB_PATH !== CRM_DB_PATH },
       knowledge,
+      continuityEmailRuntime: aylaContinuityEmailRuntimeStatus(db),
       capabilities: {
         adaptive_core_build: AYLA_ADAPTIVE_CORE_BUILD,
         starting_readiness_build: AYLA_STARTING_READINESS_BUILD,
@@ -65253,6 +65405,12 @@ app.get("/api/ayla/health", async (req, res) => {
         multi_exam_student_shell: true,
         persistent_exam_dashboard_switcher: true,
         per_exam_student_state_isolation: true,
+        governed_cross_exam_handoff: true,
+        target_exam_entitlement_required: true,
+        new_target_exam_baseline_required: true,
+        source_scores_never_copied_to_target: true,
+        consent_governed_engagement_email: true,
+        continuity_email_delivery_default_off: true,
         paid_entitlement_overrides_demo_per_exam: true,
         entitlement_aware_feature_navigation: true,
         legacy_enrollment_single_dashboard_binding: true,
@@ -65359,6 +65517,11 @@ app.get("/api/ayla/routes", (req, res) => {
       "GET /api/ayla/students/:studentId/notebooks/search",
       "POST /api/ayla/students/:studentId/notebooks/:id/generate-flashcards",
       "POST /api/ayla/students/:studentId/notebooks/capture",
+      "GET /api/ayla/students/:studentId/continuity",
+      "PUT /api/ayla/students/:studentId/continuity/preferences",
+      "POST /api/ayla/students/:studentId/exam-handoffs",
+      "GET /api/ayla/admin/continuity/engagement-preview",
+      "POST /api/ayla/admin/continuity/engagement-delivery (dry-run by default; typed confirmation required to send)",
       "GET /api/ayla/students/:studentId/personal-tutor",
       "POST /api/ayla/students/:studentId/personal-tutor/apply",
       "GET /api/ayla/students/:studentId/progress",
@@ -65496,16 +65659,782 @@ app.post("/api/ayla/students/:studentId/pathway-estimate", async (req, res) => {
   }
 });
 
+async function aylaContinuityOwnedContext(req, studentId = "") {
+  const auth = await aylaGetAuthenticatedUser(req);
+  const student = aylaGetItem(auth.db, "aylaStudents", studentId);
+  if (!student) throw Object.assign(new Error("AylaMed student profile not found"), { statusCode: 404 });
+  if (!aylaV189StudentOwned(student, auth.user) && auth.user.role !== "admin") {
+    throw Object.assign(new Error("This AylaMed student profile does not belong to the signed-in user"), { statusCode: 403 });
+  }
+  return { ...auth, student };
+}
+
+function aylaContinuityTargetContext(db, user, sourceStudent, targetExamTrack) {
+  const target = normalizeAylaContinuityExamTrack(targetExamTrack);
+  const ownedProfiles = aylaOwnedStudentsForUser(db, user.id);
+  const targetStudent = ownedProfiles.find((student) => (
+    aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam) === target
+  )) || null;
+  let access = { allowed: false, reason: "no_active_exam_entitlement" };
+  if (target) {
+    access = resolveAylaExamFeatureEntitlement({
+      enrollments: aylaValues(db, "aylaEnrollments"),
+      plansById: db.aylaPlans || {},
+      userId: user.id,
+      requestedExamTrack: target,
+      feature: "diagnostic",
+      legacyExamTrack: target,
+      legacyStudentId: targetStudent?.id || `new:${target}`,
+      defaultStudentId: sourceStudent.id,
+      enforceStudentScope: true,
+    });
+  }
+  return {
+    targetExamTrack: target,
+    targetStudent,
+    access,
+    targetEntitled: access.allowed === true
+      && access.explicitly_scoped === true
+      && String(access.exam_track_id || "") === String(target || ""),
+    targetBaselineVerified: targetStudent?.serverVerifiedBaseline === true,
+  };
+}
+
+function aylaContinuitySourceCompletion(student = {}, requested = {}) {
+  if (student.examCompletionVerifiedAt || student.exam_completion_verified_at) return "verified";
+  if (student.examCompletedAt || student.exam_completed_at) return "confirmed";
+  const value = String(
+    requested.sourceCompletionStatus || requested.source_completion_status || "",
+  ).trim().toLowerCase();
+  const acknowledged = requested.confirmSourceExamCompleted === true
+    || requested.confirm_source_exam_completed === true;
+  if (acknowledged && ["confirmed", "completed", "self_reported_completed", "self_reported_passed"].includes(value)) {
+    return value;
+  }
+  return "unconfirmed";
+}
+
+function aylaContinuityCarryContext(db, student) {
+  const assignments = aylaValues(db, "aylaResourceAssignments")
+    .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student));
+  const completedDates = new Set(assignments
+    .filter((row) => String(row.status || "").toLowerCase() === "completed")
+    .map((row) => String(row.completedDate || row.completedAt || row.date || "").slice(0, 10))
+    .filter(Boolean));
+  const missedDates = new Set(assignments
+    .filter((row) => ["missed", "overdue"].includes(String(row.status || "").toLowerCase()))
+    .map((row) => String(row.date || row.scheduledDate || row.dueDate || "").slice(0, 10))
+    .filter(Boolean));
+  const completedMinutes = assignments
+    .filter((row) => String(row.status || "").toLowerCase() === "completed")
+    .map((row) => aylaNumber(row.actualMinutes || row.durationMinutes || row.minutes, 0))
+    .filter((value) => value > 0);
+  const revisionItems = aylaValues(db, "aylaRevisionQueue")
+    .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student))
+    .filter((row) => !["removed", "deleted", "cancelled"].includes(String(row.status || "").toLowerCase()));
+  return buildAylaCarryContext({
+    sourceStudent: student,
+    behaviorEvidence: {
+      completedStudyDays: completedDates.size,
+      missedStudyDays: missedDates.size,
+      averageCompletedMinutes: completedMinutes.length
+        ? Math.round(completedMinutes.reduce((sum, value) => sum + value, 0) / completedMinutes.length)
+        : 0,
+    },
+    revisionItems,
+  });
+}
+
+function aylaContinuityEnrollment(db, user, student) {
+  const examTrackId = aylaCanonicalExamTrack(
+    student.examTrackId || student.exam_track_id || student.exam,
+  );
+  return aylaValues(db, "aylaEnrollments")
+    .filter((row) => String(row.user_id || row.ayla_user_id || "") === String(user.id))
+    .filter((row) => (
+      String(row.student_id || row.studentId || "") === String(student.id)
+      || aylaCanonicalExamTrack(row.exam_track_id || row.examTrackId || row.exam_track || row.exam) === examTrackId
+    ))
+    .sort((left, right) => {
+      const activeDifference = Number(aylaEnrollmentActive(right)) - Number(aylaEnrollmentActive(left));
+      return activeDifference || String(right.updatedAt || right.createdAt || "")
+        .localeCompare(String(left.updatedAt || left.createdAt || ""));
+    })[0] || null;
+}
+
+function aylaContinuityProgressFacts(db, student, now = new Date()) {
+  const dateKey = aylaDateOnly(now);
+  const weekStart = new Date(now.getTime() - 6 * 86400000).toISOString().slice(0, 10);
+  const assignments = aylaValues(db, "aylaResourceAssignments")
+    .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student))
+    .filter((row) => !["cancelled", "superseded", "abandoned"].includes(String(row.status || "").toLowerCase()));
+  const assignmentDate = (row) => String(
+    row.date || row.scheduledDate || row.scheduled_date || row.dueDate || row.due_date || "",
+  ).slice(0, 10);
+  const today = assignments.filter((row) => assignmentDate(row) === dateKey);
+  const thisWeek = assignments.filter((row) => {
+    const date = assignmentDate(row);
+    return date && date >= weekStart && date <= dateKey;
+  });
+  const completed = (row) => String(row.status || "").toLowerCase() === "completed";
+  const assessments = aylaValues(db, "aylaAssessmentAttempts")
+    .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true }))
+    .sort((left, right) => String(left.createdAt || left.submittedAt || "")
+      .localeCompare(String(right.createdAt || right.submittedAt || "")));
+  const firstScore = assessments.length
+    ? aylaNumber(assessments[0].scorePercent ?? assessments[0].score, 0)
+    : null;
+  const lastScore = assessments.length
+    ? aylaNumber(assessments[assessments.length - 1].scorePercent ?? assessments[assessments.length - 1].score, 0)
+    : null;
+  const estimate = aylaV258TutorPathwayEstimate(db, student, dateKey, {
+    assessmentAttempts: [...assessments].reverse(),
+  });
+  const estimatedRange = Array.isArray(estimate?.workload?.estimatedRangeHours)
+    ? estimate.workload.estimatedRangeHours
+    : [];
+  const weeklyAvailableHours = aylaNumber(estimate?.inputs?.dailyHoursAvailable, 0)
+    * aylaNumber(estimate?.inputs?.weeklyStudyDays, 0);
+  const readinessDaysLow = weeklyAvailableHours > 0 && estimatedRange.length === 2
+    ? Math.max(1, Math.ceil((aylaNumber(estimatedRange[0], 0) / weeklyAvailableHours) * 7))
+    : null;
+  const readinessDaysHigh = weeklyAvailableHours > 0 && estimatedRange.length === 2
+    ? Math.max(readinessDaysLow || 1, Math.ceil((aylaNumber(estimatedRange[1], 0) / weeklyAvailableHours) * 7))
+    : null;
+  return {
+    totalTasksToday: today.length,
+    completedTasksToday: today.filter(completed).length,
+    minutesRemainingToday: today
+      .filter((row) => !completed(row))
+      .reduce((sum, row) => sum + aylaNumber(row.durationMinutes || row.minutes, 0), 0),
+    plannedTasksThisWeek: thisWeek.length,
+    completedTasksThisWeek: thisWeek.filter(completed).length,
+    verifiedImprovementPercent: firstScore !== null && lastScore !== null
+      ? Math.round((lastScore - firstScore) * 10) / 10
+      : null,
+    readinessDaysLow,
+    readinessDaysHigh,
+  };
+}
+
+function aylaContinuityPreferenceForStudent(db, student) {
+  const row = aylaValues(db, "aylaEngagementPreferences")
+    .find((item) => String(item.studentId || item.student_id || "") === String(student.id));
+  return normalizeAylaEngagementPreferences(row || {}, {
+    timezone: student.timezone || "UTC",
+  });
+}
+
+function aylaContinuityHandoffView(db, user, sourceStudent, record) {
+  const target = aylaContinuityTargetContext(db, user, sourceStudent, record.targetExamTrack);
+  const state = buildAylaExamHandoffState({
+    sourceExamTrack: record.sourceExamTrack,
+    targetExamTrack: record.targetExamTrack,
+    sourceCompletionStatus: record.sourceCompletionStatus,
+    targetEntitled: target.targetEntitled,
+    targetProfileExists: Boolean(target.targetStudent),
+    targetBaselineVerified: target.targetBaselineVerified,
+  });
+  return {
+    ...record,
+    status: state.state,
+    nextAction: state.nextAction,
+    targetStudentId: target.targetStudent?.id || record.targetStudentId || null,
+    targetEntitled: state.targetEntitled,
+    targetBaselineVerified: state.targetBaselineVerified,
+    targetRoadmapMayUseCarryContext: state.targetRoadmapMayUseCarryContext,
+    sourceScoresCopied: false,
+    sourceAnswersCopied: false,
+    sourceBaselineCopied: false,
+  };
+}
+
+function aylaContinuityLatestHandoff(db, user, student) {
+  const record = aylaValues(db, "aylaExamHandoffs")
+    .filter((row) => String(row.userId || row.user_id || "") === String(user.id))
+    .filter((row) => String(row.sourceStudentId || row.source_student_id || "") === String(student.id))
+    .sort((left, right) => String(right.updatedAt || right.createdAt || "")
+      .localeCompare(String(left.updatedAt || left.createdAt || "")))[0] || null;
+  return record ? aylaContinuityHandoffView(db, user, student, record) : null;
+}
+
+function aylaContinuityIncomingHandoff(db, user, targetExamTrack) {
+  const target = normalizeAylaContinuityExamTrack(targetExamTrack);
+  if (!target || !user?.id) return null;
+  const records = aylaValues(db, "aylaExamHandoffs")
+    .filter((row) => String(row.userId || row.user_id || "") === String(user.id))
+    .filter((row) => normalizeAylaContinuityExamTrack(
+      row.targetExamTrack || row.target_exam_track,
+    ) === target)
+    .sort((left, right) => String(right.updatedAt || right.createdAt || "")
+      .localeCompare(String(left.updatedAt || left.createdAt || "")));
+  for (const record of records) {
+    const sourceStudent = aylaGetItem(
+      db,
+      "aylaStudents",
+      record.sourceStudentId || record.source_student_id,
+    );
+    if (!sourceStudent) continue;
+    const view = aylaContinuityHandoffView(db, user, sourceStudent, record);
+    if (["target_setup_required", "baseline_required", "activated"].includes(view.status)) {
+      return { record, view, sourceStudent };
+    }
+  }
+  return null;
+}
+
+function aylaContinuityPrefillTargetSetup(input = {}, incoming = null) {
+  if (!incoming?.view || incoming.view.status !== "target_setup_required") {
+    return { input: { ...(input || {}) }, appliedFields: [] };
+  }
+  const behavior = incoming.record?.carryContext?.studyBehavior || {};
+  const next = { ...(input || {}) };
+  const appliedFields = [];
+  const setIfMissing = (field, aliases, value) => {
+    const keys = [field, ...aliases];
+    const supplied = keys.some((key) => {
+      const current = next[key];
+      return current !== undefined
+        && current !== null
+        && (!(Array.isArray(current)) || current.length > 0)
+        && String(current).trim() !== "";
+    });
+    if (supplied || value === undefined || value === null || value === "") return;
+    next[field] = value;
+    appliedFields.push(field);
+  };
+  setIfMissing("timezone", [], behavior.timezone);
+  setIfMissing("dailyHours", ["daily_hours"], behavior.dailyHours);
+  setIfMissing("weeklyStudyDays", ["weekly_study_days"], behavior.weeklyStudyDays);
+  setIfMissing("preferredStudyDays", ["preferred_study_days"], behavior.preferredStudyDays);
+  setIfMissing("sessionLength", ["session_length"], behavior.sessionLengthMinutes);
+  setIfMissing("restDay", ["rest_day"], behavior.restDay);
+  next.onboardingPath = "diagnostic_test";
+  next.onboarding_path = "diagnostic_test";
+  next.incomingHandoffId = incoming.record.id;
+  next.incoming_handoff_id = incoming.record.id;
+  return { input: next, appliedFields };
+}
+
+function aylaContinuityActivatedCarryForStudent(db, student) {
+  if (student.serverVerifiedBaseline !== true) return null;
+  const examTrack = aylaCanonicalExamTrack(
+    student.examTrackId || student.exam_track_id || student.exam,
+  );
+  const userId = student.ayla_user_id || student.aylaUserId || student.user_id || student.userId;
+  const user = aylaSanitizeUser(aylaGetItem(db, "aylaUsers", userId));
+  if (!user) return null;
+  const incoming = aylaContinuityIncomingHandoff(db, user, examTrack);
+  if (!incoming || incoming.view.status !== "activated") return null;
+  if (String(incoming.view.targetStudentId || "") !== String(student.id)) return null;
+  return {
+    handoffId: incoming.record.id,
+    sourceExamTrack: incoming.record.sourceExamTrack,
+    revisionReferences: Array.isArray(incoming.record.carryContext?.revisionReferences)
+      ? incoming.record.carryContext.revisionReferences
+      : [],
+    sourceScoresCopied: false,
+    sourceBaselineCopied: false,
+  };
+}
+
+function aylaContinuityEngagementForStudent(db, student, now = new Date()) {
+  const userId = student.ayla_user_id || student.aylaUserId || student.user_id || student.userId;
+  const rawUser = aylaGetItem(db, "aylaUsers", userId);
+  if (!rawUser) return null;
+  const user = aylaSanitizeUser(rawUser);
+  const status = String(user.status || "active").toLowerCase();
+  const email = aylaNormalizeEmail(user.email);
+  if (["disabled", "deleted", "blocked", "suspended"].includes(status) || !email || !email.includes("@")) {
+    return {
+      studentId: student.id,
+      userId: user.id,
+      email: "",
+      examTrackId: aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam),
+      preview: {
+        generatedAt: (now instanceof Date ? now : new Date(now)).toISOString(),
+        messages: [],
+        suppressed: [{
+          kind: "all",
+          reason: email ? "user_account_inactive" : "valid_email_required",
+          messageKey: null,
+        }],
+      },
+    };
+  }
+  return {
+    studentId: student.id,
+    userId: user.id,
+    email,
+    examTrackId: aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam),
+    preview: buildAylaEngagementMessages({
+      now,
+      student,
+      user,
+      enrollment: aylaContinuityEnrollment(db, user, student),
+      progress: aylaContinuityProgressFacts(db, student, now),
+      handoff: aylaContinuityLatestHandoff(db, user, student),
+      preferences: aylaContinuityPreferenceForStudent(db, student),
+      deliveries: aylaValues(db, "aylaEngagementDeliveries")
+        .filter((row) => String(row.studentId || row.student_id || "") === String(student.id)),
+    }),
+  };
+}
+
+function aylaContinuityEmailEnvironmentEnabled() {
+  return String(process.env.AYLA_CONTINUITY_EMAIL_DELIVERY_ENABLED || "false").toLowerCase() === "true";
+}
+
+function aylaContinuityEmailRuntimeStatus(db = {}) {
+  const provider = ngResolveEmailProvider();
+  const runnerEnabled = String(
+    process.env.AYLA_CONTINUITY_EMAIL_RUNNER_ENABLED || "false",
+  ).toLowerCase() === "true";
+  return {
+    environment_enabled: aylaContinuityEmailEnvironmentEnabled(),
+    setting_enabled: db.aylaSettings?.continuity?.email_delivery_enabled === true,
+    provider_configured: Boolean(provider.provider),
+    provider: provider.provider || null,
+    runner_environment_enabled: runnerEnabled,
+    ready: aylaContinuityEmailEnvironmentEnabled()
+      && db.aylaSettings?.continuity?.email_delivery_enabled === true
+      && Boolean(provider.provider),
+  };
+}
+
+function aylaContinuityDeliveryFingerprint(message = {}) {
+  return crypto.createHash("sha256")
+    .update(`${String(message.subject || "")}\u001f${String(message.text || "")}`)
+    .digest("hex");
+}
+
+async function aylaClaimContinuityDelivery({
+  studentId,
+  messageKey,
+  now = new Date(),
+  source = "manual",
+} = {}) {
+  return mutateAylaDb(async (db) => {
+    const runtime = aylaContinuityEmailRuntimeStatus(db);
+    if (!runtime.ready) return { claimed: false, reason: "delivery_not_enabled", runtime };
+    const student = aylaGetItem(db, "aylaStudents", studentId);
+    if (!student) return { claimed: false, reason: "student_not_found", runtime };
+    const candidate = aylaContinuityEngagementForStudent(db, student, now);
+    const message = candidate?.preview?.messages?.find((row) => String(row.messageKey) === String(messageKey));
+    if (!candidate?.email || !message) {
+      return { claimed: false, reason: "message_no_longer_eligible", runtime };
+    }
+    const existing = aylaValues(db, "aylaEngagementDeliveries")
+      .find((row) => String(row.messageKey || row.message_key || "") === String(message.messageKey)) || null;
+    const existingStatus = String(existing?.status || "").toLowerCase();
+    const nowMs = (now instanceof Date ? now : new Date(now)).getTime();
+    const activeClaimExpiresAt = new Date(
+      existing?.claimExpiresAt || existing?.claim_expires_at || 0,
+    ).getTime();
+    if (
+      ["sent", "delivered"].includes(existingStatus)
+      || (existingStatus === "queued" && (
+        !Number.isFinite(activeClaimExpiresAt)
+        || activeClaimExpiresAt > nowMs
+      ))
+    ) {
+      return { claimed: false, reason: "duplicate_or_active_claim", runtime };
+    }
+    const attempts = Math.max(0, Number(existing?.attemptCount || existing?.attempt_count || 0));
+    if (attempts >= 3) return { claimed: false, reason: "retry_limit_reached", runtime };
+    const retryAt = new Date(existing?.nextRetryAt || existing?.next_retry_at || 0).getTime();
+    if (Number.isFinite(retryAt) && retryAt > nowMs) {
+      return { claimed: false, reason: "retry_backoff", runtime };
+    }
+    const queuedAt = new Date(nowMs).toISOString();
+    const delivery = {
+      ...(existing || {}),
+      id: existing?.id || aylaId("AYLA-ENG-DEL"),
+      userId: candidate.userId,
+      studentId: candidate.studentId,
+      examTrackId: candidate.examTrackId,
+      messageKey: message.messageKey,
+      kind: message.kind,
+      category: message.category,
+      channel: "email",
+      localDateKey: message.localDateKey,
+      subject: message.subject,
+      contentFingerprint: aylaContinuityDeliveryFingerprint(message),
+      status: "queued",
+      source: String(source || "manual").slice(0, 80),
+      attemptCount: attempts + 1,
+      queuedAt,
+      claimExpiresAt: new Date(nowMs + 30 * 60 * 1000).toISOString(),
+      nextRetryAt: null,
+      lastError: null,
+      createdAt: existing?.createdAt || queuedAt,
+      updatedAt: queuedAt,
+    };
+    aylaSetItem(db, "aylaEngagementDeliveries", delivery);
+    return {
+      claimed: true,
+      runtime,
+      deliveryId: delivery.id,
+      messageKey: delivery.messageKey,
+      to: candidate.email,
+      subject: message.subject,
+      text: message.text,
+      kind: message.kind,
+      category: message.category,
+    };
+  });
+}
+
+async function aylaFinalizeContinuityDelivery(deliveryId, {
+  sent = false,
+  provider = null,
+  error = null,
+  now = new Date(),
+} = {}) {
+  return mutateAylaDb(async (db) => {
+    const delivery = aylaGetItem(db, "aylaEngagementDeliveries", deliveryId);
+    if (!delivery) return null;
+    const updatedAt = (now instanceof Date ? now : new Date(now)).toISOString();
+    const next = {
+      ...delivery,
+      status: sent ? "sent" : "failed",
+      sentAt: sent ? updatedAt : delivery.sentAt || null,
+      failedAt: sent ? null : updatedAt,
+      provider: sent ? String(provider?.provider || provider?.id || "email").slice(0, 80) : null,
+      providerMessageId: sent
+        ? String(provider?.messageId || provider?.id || "").slice(0, 240) || null
+        : null,
+      lastError: sent ? null : String(error?.message || error || "Email delivery failed").slice(0, 500),
+      nextRetryAt: sent ? null : new Date(new Date(updatedAt).getTime() + 2 * 60 * 60 * 1000).toISOString(),
+      claimExpiresAt: null,
+      updatedAt,
+    };
+    aylaSetItem(db, "aylaEngagementDeliveries", next);
+    return next;
+  });
+}
+
+async function aylaRunContinuityEngagementCycle({
+  dryRun = true,
+  studentId = "",
+  maxMessages = 100,
+  source = "manual",
+  now = new Date(),
+} = {}) {
+  const db = await readAylaDb();
+  const runtime = aylaContinuityEmailRuntimeStatus(db);
+  const cleanStudentId = String(studentId || "").trim();
+  const students = aylaValues(db, "aylaStudents")
+    .filter((student) => !cleanStudentId || String(student.id) === cleanStudentId)
+    .slice(0, 500);
+  const previews = students
+    .map((student) => aylaContinuityEngagementForStudent(db, student, now))
+    .filter(Boolean);
+  const messageRefs = previews
+    .flatMap((entry) => (entry.preview.messages || []).map((message) => ({
+      studentId: entry.studentId,
+      messageKey: message.messageKey,
+      kind: message.kind,
+      category: message.category,
+      subject: message.subject,
+    })))
+    .slice(0, Math.max(1, Math.min(500, Number(maxMessages) || 100)));
+  const summary = {
+    dry_run: dryRun === true,
+    source,
+    generated_at: (now instanceof Date ? now : new Date(now)).toISOString(),
+    runtime,
+    students_checked: students.length,
+    eligible_messages: messageRefs.length,
+    claimed: 0,
+    sent: 0,
+    failed: 0,
+    skipped: 0,
+    deliveries: [],
+  };
+  if (dryRun === true) {
+    summary.previews = previews.map((entry) => ({
+      studentId: entry.studentId,
+      examTrackId: entry.examTrackId,
+      preview: entry.preview,
+    }));
+    return summary;
+  }
+  if (!runtime.ready) {
+    return { ...summary, skipped: messageRefs.length, skip_reason: "delivery_not_enabled" };
+  }
+  for (const ref of messageRefs) {
+    const claim = await aylaClaimContinuityDelivery({
+      studentId: ref.studentId,
+      messageKey: ref.messageKey,
+      now,
+      source,
+    });
+    if (!claim.claimed) {
+      summary.skipped += 1;
+      summary.deliveries.push({
+        studentId: ref.studentId,
+        messageKey: ref.messageKey,
+        status: "skipped",
+        reason: claim.reason,
+      });
+      continue;
+    }
+    summary.claimed += 1;
+    try {
+      const provider = await sendEmailMessage({
+        to: claim.to,
+        subject: claim.subject,
+        text: claim.text,
+      });
+      await aylaFinalizeContinuityDelivery(claim.deliveryId, { sent: true, provider });
+      summary.sent += 1;
+      summary.deliveries.push({
+        studentId: ref.studentId,
+        messageKey: ref.messageKey,
+        deliveryId: claim.deliveryId,
+        status: "sent",
+      });
+    } catch (error) {
+      await aylaFinalizeContinuityDelivery(claim.deliveryId, { sent: false, error });
+      summary.failed += 1;
+      summary.deliveries.push({
+        studentId: ref.studentId,
+        messageKey: ref.messageKey,
+        deliveryId: claim.deliveryId,
+        status: "failed",
+        error: String(error.message || "Email delivery failed").slice(0, 300),
+      });
+    }
+  }
+  return summary;
+}
+
+app.get("/api/ayla/students/:studentId/continuity", async (req, res) => {
+  try {
+    const auth = await aylaContinuityOwnedContext(req, req.params.studentId);
+    const sourceExamTrack = aylaCanonicalExamTrack(
+      auth.student.examTrackId || auth.student.exam_track_id || auth.student.exam,
+    );
+    const suggestedTargetExamTrack = suggestAylaNextExam(sourceExamTrack);
+    const handoffs = aylaValues(auth.db, "aylaExamHandoffs")
+      .filter((row) => String(row.userId || row.user_id || "") === String(auth.user.id))
+      .filter((row) => String(row.sourceStudentId || row.source_student_id || "") === String(auth.student.id))
+      .sort((left, right) => String(right.updatedAt || right.createdAt || "")
+        .localeCompare(String(left.updatedAt || left.createdAt || "")))
+      .map((row) => aylaContinuityHandoffView(auth.db, auth.user, auth.student, row));
+    const preferences = aylaContinuityPreferenceForStudent(auth.db, auth.student);
+    const deliveries = aylaValues(auth.db, "aylaEngagementDeliveries")
+      .filter((row) => String(row.studentId || row.student_id || "") === String(auth.student.id));
+    const engagement = buildAylaEngagementMessages({
+      student: auth.student,
+      user: auth.user,
+      enrollment: aylaContinuityEnrollment(auth.db, auth.user, auth.student),
+      progress: aylaContinuityProgressFacts(auth.db, auth.student),
+      handoff: handoffs[0] || null,
+      preferences,
+      deliveries,
+    });
+    return aylaSendOk(res, {
+      sourceStudentId: auth.student.id,
+      sourceExamTrack,
+      suggestedTargetExamTrack,
+      supportedTargetExamTracks: Object.keys(AYLA_EXAM_REGISTRY)
+        .filter((examTrackId) => examTrackId !== sourceExamTrack),
+      handoffs,
+      preferences,
+      engagementPreview: {
+        ...engagement,
+        deliveryEnabled: auth.db.aylaSettings?.continuity?.email_delivery_enabled === true,
+        previewOnly: true,
+      },
+      policy: {
+        targetEntitlementRequired: true,
+        newTargetBaselineRequired: true,
+        sourceScoresCopied: false,
+        sourceAnswersCopied: false,
+        sourceBaselineCopied: false,
+        revisionContextReferenceOnly: true,
+      },
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.put("/api/ayla/students/:studentId/continuity/preferences", async (req, res) => {
+  try {
+    const initial = await aylaContinuityOwnedContext(req, req.params.studentId);
+    const preference = await mutateAylaDb(async (db) => {
+      const student = aylaGetItem(db, "aylaStudents", initial.student.id);
+      const existing = aylaValues(db, "aylaEngagementPreferences")
+        .find((row) => String(row.studentId || row.student_id || "") === String(student.id)) || {};
+      const normalized = normalizeAylaEngagementPreferences(req.body || {}, {
+        ...existing,
+        timezone: req.body.timezone || existing.timezone || student.timezone || "UTC",
+      });
+      const next = {
+        ...existing,
+        ...normalized,
+        id: existing.id || aylaId("AYLA-ENG-PREF"),
+        userId: initial.user.id,
+        studentId: student.id,
+        createdAt: existing.createdAt || aylaNow(),
+        updatedAt: aylaNow(),
+      };
+      aylaSetItem(db, "aylaEngagementPreferences", next);
+      aylaV189RecordActivity(db, student.id, "engagement_preferences_updated", {
+        coachingEmailOptIn: next.coachingEmailOptIn,
+        weeklySummaryEmailOptIn: next.weeklySummaryEmailOptIn,
+        examTransitionEmailOptIn: next.examTransitionEmailOptIn,
+        reactivationEmailOptIn: next.reactivationEmailOptIn,
+      });
+      return next;
+    });
+    return aylaSendOk(res, { preferences: preference });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.post("/api/ayla/students/:studentId/exam-handoffs", async (req, res) => {
+  try {
+    const initial = await aylaContinuityOwnedContext(req, req.params.studentId);
+    const sourceExamTrack = aylaCanonicalExamTrack(
+      initial.student.examTrackId || initial.student.exam_track_id || initial.student.exam,
+    );
+    const targetExamTrack = normalizeAylaContinuityExamTrack(
+      req.body.targetExamTrack
+        || req.body.target_exam_track
+        || suggestAylaNextExam(sourceExamTrack),
+    );
+    if (!targetExamTrack) {
+      return aylaSendError(res, 400, "Choose a supported target exam for this handoff");
+    }
+    const sourceCompletionStatus = aylaContinuitySourceCompletion(initial.student, req.body);
+    const result = await mutateAylaDb(async (db) => {
+      const sourceStudent = aylaGetItem(db, "aylaStudents", initial.student.id);
+      const target = aylaContinuityTargetContext(db, initial.user, sourceStudent, targetExamTrack);
+      const carryContext = aylaContinuityCarryContext(db, sourceStudent);
+      const duplicate = aylaValues(db, "aylaExamHandoffs").find((row) => (
+        String(row.userId || row.user_id || "") === String(initial.user.id)
+        && String(row.sourceStudentId || row.source_student_id || "") === String(sourceStudent.id)
+        && String(row.targetExamTrack || row.target_exam_track || "") === String(targetExamTrack)
+        && !["cancelled", "completed"].includes(String(row.status || "").toLowerCase())
+      ));
+      const generated = createAylaExamHandoff({
+        idFactory: () => duplicate?.id || aylaId("AYLA-HANDOFF"),
+        userId: initial.user.id,
+        sourceStudentId: sourceStudent.id,
+        targetStudentId: target.targetStudent?.id || "",
+        sourceCompletionStatus,
+        sourceExamTrack,
+        targetExamTrack,
+        targetEntitled: target.targetEntitled,
+        targetProfileExists: Boolean(target.targetStudent),
+        targetBaselineVerified: target.targetBaselineVerified,
+        carryContext,
+      });
+      const handoff = {
+        ...(duplicate || {}),
+        ...generated,
+        createdAt: duplicate?.createdAt || generated.createdAt,
+        updatedAt: aylaNow(),
+      };
+      aylaSetItem(db, "aylaExamHandoffs", handoff);
+      aylaV189RecordActivity(db, sourceStudent.id, "exam_handoff_updated", {
+        handoffId: handoff.id,
+        sourceExamTrack,
+        targetExamTrack,
+        status: handoff.status,
+        targetEntitled: handoff.targetEntitled,
+        targetBaselineRequired: true,
+      });
+      return handoff;
+    });
+    return aylaSendOk(res, {
+      handoff: result,
+      writeScope: "handoff_record_only",
+      targetDashboardCreated: false,
+      sourceScoresCopied: false,
+      sourceAnswersCopied: false,
+      sourceBaselineCopied: false,
+    }, 201);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.get("/api/ayla/admin/continuity/engagement-preview", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const requestedStudentId = String(req.query.student_id || req.query.studentId || "").trim();
+    const preview = await aylaRunContinuityEngagementCycle({
+      dryRun: true,
+      studentId: requestedStudentId,
+      source: "admin_preview",
+    });
+    return aylaSendOk(res, {
+      read_only: true,
+      write_performed: false,
+      email_sent: false,
+      delivery_runtime: preview.runtime,
+      student_count: preview.students_checked,
+      eligible_message_count: preview.eligible_messages,
+      previews: preview.previews,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
+app.post("/api/ayla/admin/continuity/engagement-delivery", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const dryRun = req.body?.dry_run !== false && req.body?.dryRun !== false;
+    if (!dryRun && String(req.body?.confirm || "") !== "SEND_ELIGIBLE_CONTINUITY_EMAILS") {
+      return aylaSendError(
+        res,
+        400,
+        "Typed confirmation SEND_ELIGIBLE_CONTINUITY_EMAILS is required for delivery",
+      );
+    }
+    const result = await aylaRunContinuityEngagementCycle({
+      dryRun,
+      studentId: req.body?.student_id || req.body?.studentId || "",
+      maxMessages: req.body?.max_messages || req.body?.maxMessages || 100,
+      source: dryRun ? "admin_delivery_preview" : "admin_confirmed_delivery",
+    });
+    if (!dryRun && !result.runtime?.ready) {
+      return aylaSendError(res, 409, "Continuity email delivery is not fully enabled", {
+        runtime: result.runtime,
+        email_sent: false,
+      });
+    }
+    return aylaSendOk(res, {
+      ...result,
+      typed_confirmation_required: true,
+      email_sent: result.sent > 0,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message);
+  }
+});
+
 app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
   try {
     const examTrackId = aylaCanonicalExamTrack(req.body.examTrackId || req.body.exam_track_id || req.body.exam || req.body.selectedExam);
     if (!examTrackId) return aylaSendError(res, 400, "Select a supported exam track: USMLE Step 1, USMLE Step 2 CK, USMLE Step 3, PLAB, AMC, MCCQE, or NCLEX");
     const examDefinition = AYLA_EXAM_REGISTRY[examTrackId];
-    const onboarding = normalizeAylaOnboardingSubmission(req.body, { examDefinition });
-    const normalizedInput = { ...req.body, ...onboarding };
     const auth = AYLA_REQUIRE_STUDENT_AUTH ? await aylaGetAuthenticatedUser(req) : null;
     const db = auth?.db || await readAylaDb();
     aylaEnsureSeedData(db);
+    const incomingHandoff = auth?.user?.id
+      ? aylaContinuityIncomingHandoff(db, auth.user, examTrackId)
+      : null;
+    const continuityPrefill = aylaContinuityPrefillTargetSetup(req.body, incomingHandoff);
+    const onboarding = normalizeAylaOnboardingSubmission(continuityPrefill.input, { examDefinition });
+    const normalizedInput = { ...continuityPrefill.input, ...onboarding };
     let setupAccess = null;
     if (auth?.user?.id) {
       const ownedProfiles = aylaOwnedStudentsForUser(db, auth.user.id);
@@ -65539,15 +66468,20 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
       examTrackId,
       exam: examDefinition.label,
       curriculumVersion: examDefinition.curriculumVersion,
-      goalType: req.body.goalType || req.body.goal_type || "Exam Day",
-      examDate: req.body.examDate || req.body.exam_date || "",
-      matchDate: req.body.matchDate || req.body.match_date || "",
-      preferredStudyDays: aylaCleanArray(req.body.preferredStudyDays || req.body.preferred_study_days),
+      goalType: normalizedInput.goalType || normalizedInput.goal_type || "Exam Day",
+      examDate: normalizedInput.examDate || normalizedInput.exam_date || "",
+      matchDate: normalizedInput.matchDate || normalizedInput.match_date || "",
+      preferredStudyDays: aylaCleanArray(normalizedInput.preferredStudyDays || normalizedInput.preferred_study_days),
       weeklyStudyDays: recommendation.weeklyStudyDays,
       selectedWeakAreas: onboarding.selectedWeakAreas,
-      selectedResources: aylaCleanArray(req.body.selectedResources || req.body.resources),
+      selectedResources: aylaCleanArray(normalizedInput.selectedResources || normalizedInput.resources),
       recommendation,
       status: onboarding.onboardingStatus === "diagnostic_pending" ? "Diagnostic Pending" : req.body.status || "Received",
+      incomingHandoffId: incomingHandoff?.record?.id || null,
+      continuityBehaviorPrefillFields: continuityPrefill.appliedFields,
+      sourceScoresCopied: false,
+      sourceAnswersCopied: false,
+      sourceBaselineCopied: false,
       createdAt: aylaNow(),
       updatedAt: aylaNow(),
     };
@@ -65555,6 +66489,10 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
     if (auth?.user?.id) { submission.aylaUserId = auth.user.id; submission.ayla_user_id = auth.user.id; }
     const student = aylaStudentFromDiagnostic({ ...submission, studentId: null, student_id: null }, recommendation);
     if (auth?.user?.id) { student.ayla_user_id = auth.user.id; student.user_id = auth.user.id; }
+    student.incomingHandoffId = incomingHandoff?.record?.id || null;
+    student.continuityBehaviorPrefillFields = continuityPrefill.appliedFields;
+    student.sourceScoresCopied = false;
+    student.sourceBaselineCopied = false;
     const roadmapTasks = aylaBuildRoadmapTasks(student, recommendation);
     const qbankBlock = recommendation.targetType === "match" ? null : aylaBuildQbankBlock(student, recommendation);
     const weakAreaLogs = aylaBuildWeakAreaLogs(student, recommendation);
@@ -65590,6 +66528,29 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
 
     aylaSetItem(db, "aylaDiagnosticSubmissions", submission);
     aylaSetItem(db, "aylaStudents", student);
+    if (incomingHandoff?.record?.id) {
+      const handoff = aylaGetItem(db, "aylaExamHandoffs", incomingHandoff.record.id);
+      if (handoff) {
+        const refreshed = aylaContinuityHandoffView(db, auth.user, incomingHandoff.sourceStudent, {
+          ...handoff,
+          targetStudentId: student.id,
+        });
+        aylaSetItem(db, "aylaExamHandoffs", {
+          ...handoff,
+          targetStudentId: student.id,
+          status: refreshed.status,
+          nextAction: refreshed.nextAction,
+          targetEntitled: refreshed.targetEntitled,
+          targetBaselineVerified: false,
+          targetBaselineRequired: true,
+          behaviorPrefillAppliedFields: continuityPrefill.appliedFields,
+          sourceScoresCopied: false,
+          sourceAnswersCopied: false,
+          sourceBaselineCopied: false,
+          updatedAt: aylaNow(),
+        });
+      }
+    }
     if (auth?.rawUser?.id) aylaBindLegacyEnrollmentScopes(db, auth.rawUser);
     const roadmapOutlineRefresh = aylaV229StoreFutureRoadmapOutline(
       db,
@@ -69920,7 +70881,14 @@ function aylaV189ResourceFocusMatch(resource = {}, system = "", topic = "", subs
   return true;
 }
 
-function aylaV189FocusCandidates(db, student, resources = [], revisions = [], overdue = []) {
+function aylaV189FocusCandidates(
+  db,
+  student,
+  resources = [],
+  revisions = [],
+  overdue = [],
+  continuityReferences = [],
+) {
   const progress = aylaV189SystemProgress(db, student);
   const progressBySystem = new Map(progress.map((row, index) => [aylaV189SystemKey(row.system), { row, index }]));
   const groups = new Map();
@@ -69953,6 +70921,14 @@ function aylaV189FocusCandidates(db, student, resources = [], revisions = [], ov
   revisions.forEach((revision) => touch(revision.system, revision.subsystem, revision.topic, 180, revision.resourceId, "Revision is due today"));
   overdue.forEach((assignment) => touch(assignment.system, assignment.subsystem, assignment.topic, 140, null, "Priority work is overdue"));
   aylaCleanArray(student.weakAreas).forEach((system, index) => touch(system, "", "Core review", 90 - index * 8, null, "Selected weak area"));
+  continuityReferences.forEach((reference) => touch(
+    reference.system,
+    reference.subsystem,
+    reference.topic,
+    12,
+    reference.targetResourceId,
+    "Reference-only prior-exam revision topic; the target baseline remains authoritative",
+  ));
 
   return [...groups.values()]
     .map((row) => ({ ...row, score: Math.round(row.score), resourceIds: row.resourceIds.slice(0, 30), reasons: row.reasons.slice(0, 4) }))
@@ -70136,7 +71112,33 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     ...library.resources,
     ...contentHub.videos,
   ];
-  const focusCandidates = aylaV189FocusCandidates(db, student, allRelevant, dueRevisions, overdue);
+  const continuityCarry = aylaContinuityActivatedCarryForStudent(db, student);
+  const continuityReferences = (continuityCarry?.revisionReferences || [])
+    .map((reference) => {
+      const targetResource = allRelevant.find((resource) => aylaV189ResourceFocusMatch(
+        resource,
+        reference.system,
+        reference.topic,
+        reference.subsystem,
+      ));
+      return targetResource
+        ? {
+            ...reference,
+            targetResourceId: targetResource.id,
+            mappedToTargetResource: true,
+          }
+        : null;
+    })
+    .filter(Boolean)
+    .slice(0, 20);
+  const focusCandidates = aylaV189FocusCandidates(
+    db,
+    student,
+    allRelevant,
+    dueRevisions,
+    overdue,
+    continuityReferences,
+  );
   const tutorProposal = await aylaV189TutorProposal(db, student, date, focusCandidates, allRelevant, options);
   const questionVolumeFactor = tutorProposal.questionVolumeAdjustment === "reduce"
     ? 0.65
@@ -70193,6 +71195,17 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     cdmEnabled,
     cdmRegistryWarning: cdm.warning,
     notebookMemory: aylaV190NotebookMemory(db, student),
+    continuityContext: continuityCarry
+      ? {
+          handoffId: continuityCarry.handoffId,
+          sourceExamTrack: continuityCarry.sourceExamTrack,
+          referenceOnlyTopicsAvailable: continuityCarry.revisionReferences.length,
+          referenceOnlyTopicsMappedToTargetResources: continuityReferences.length,
+          targetBaselineAuthoritative: true,
+          sourceScoresCopied: false,
+          sourceBaselineCopied: false,
+        }
+      : null,
     studyDay,
     tutorBrain: {
       ...tutorProposal,
@@ -76201,6 +77214,7 @@ function aylaV190CleanNoteBlock(block = {}, index = 0) {
   const dataUrl = String(block.dataUrl || block.data_url || "");
   return {
     id: aylaV189CleanText(block.id || aylaId("NB")), type,
+    pageId: aylaV189CleanText(block.pageId || block.page_id || "page-1").slice(0, 180),
     order: index,
     text: aylaV189CleanText(block.text || "").slice(0, 12000),
     number: Math.max(1, aylaNumber(block.number, index + 1)),
@@ -76525,12 +77539,14 @@ async function aylaV212CanonicalNotebookBlocks(db, user, student, rawBlocks = []
       const source = await aylaV212ResolveNotebookSource(db, user, student, cleaned);
       const capture = createAylaNotebookCaptureBlocks({
         source,
+        pageId: cleaned.pageId,
         captureKey: cleaned.captureKey || aylaNotebookSourceFingerprint(source),
         idFactory: () => cleaned.id || aylaId("NB"),
       });
       output.push({
         ...capture.blocks[0],
         id: cleaned.id || capture.blocks[0].id,
+        pageId: cleaned.pageId || capture.blocks[0].pageId,
         order: index,
         color: cleaned.color || capture.blocks[0].color,
         caption: cleaned.caption || capture.blocks[0].caption,
@@ -76662,14 +77678,23 @@ app.post("/api/ayla/students/:studentId/notebooks/capture", async (req, res) => 
           version: notebook.currentVersion || 0,
         };
       }
+      const existingBlocks = Array.isArray(notebook.blocks) ? notebook.blocks : [];
+      const requestedPageId = aylaV189CleanText(
+        req.body.pageId || req.body.page_id || "",
+      ).slice(0, 180);
+      const lastPageId = [...existingBlocks]
+        .reverse()
+        .map((block) => aylaV189CleanText(block.pageId || block.page_id || ""))
+        .find(Boolean);
+      const targetPageId = requestedPageId || lastPageId || "page-1";
       const capture = createAylaNotebookCaptureBlocks({
         source,
         noteText,
         noteColor: req.body.noteColor || req.body.note_color || "navy",
+        pageId: targetPageId,
         captureKey: fingerprint,
         idFactory: () => aylaId("NB"),
       });
-      const existingBlocks = Array.isArray(notebook.blocks) ? notebook.blocks : [];
       if (existingBlocks.length + capture.blocks.length > 200) throw aylaV212NotebookError("A notebook cannot contain more than 200 blocks", 409, "NOTEBOOK_BLOCK_LIMIT");
       notebook.blocks = [...existingBlocks, ...capture.blocks].map((block, index) => ({ ...block, order: index }));
       notebook.updatedAt = aylaNow();
@@ -77919,6 +78944,75 @@ app.post("/admin/recordings/automation-run-now", async (req, res) => {
   }
 });
 
+const AYLA_CONTINUITY_EMAIL_RUNNER_STATE = {
+  started: false,
+  running: false,
+  ticks: 0,
+  lastRunAt: null,
+  lastResult: null,
+};
+let aylaContinuityEmailRunnerTimer = null;
+
+function ngStartAylaContinuityEngagementScheduler() {
+  if (AYLA_CONTINUITY_EMAIL_RUNNER_STATE.started) return;
+  if (String(process.env.AYLA_CONTINUITY_EMAIL_RUNNER_ENABLED || "false").toLowerCase() !== "true") {
+    return;
+  }
+  AYLA_CONTINUITY_EMAIL_RUNNER_STATE.started = true;
+  const intervalMs = Math.max(
+    60 * 60 * 1000,
+    Number(process.env.AYLA_CONTINUITY_EMAIL_RUNNER_INTERVAL_MS || 60 * 60 * 1000)
+      || 60 * 60 * 1000,
+  );
+  const maxMessages = Math.max(
+    1,
+    Math.min(500, Number(process.env.AYLA_CONTINUITY_EMAIL_MAX_PER_CYCLE || 100) || 100),
+  );
+  const run = async () => {
+    if (AYLA_CONTINUITY_EMAIL_RUNNER_STATE.running) return;
+    if (ngBackgroundMemoryIsHigh("aylamed_continuity_email_runner")) return;
+    AYLA_CONTINUITY_EMAIL_RUNNER_STATE.running = true;
+    AYLA_CONTINUITY_EMAIL_RUNNER_STATE.ticks += 1;
+    AYLA_CONTINUITY_EMAIL_RUNNER_STATE.lastRunAt = aylaNow();
+    try {
+      const result = await aylaRunContinuityEngagementCycle({
+        dryRun: false,
+        maxMessages,
+        source: "automatic_hourly_runner",
+      });
+      AYLA_CONTINUITY_EMAIL_RUNNER_STATE.lastResult = {
+        generated_at: result.generated_at,
+        runtime_ready: result.runtime?.ready === true,
+        students_checked: result.students_checked,
+        eligible_messages: result.eligible_messages,
+        sent: result.sent,
+        failed: result.failed,
+        skipped: result.skipped,
+      };
+      if (result.sent || result.failed) {
+        console.log("AylaMed continuity email runner:", AYLA_CONTINUITY_EMAIL_RUNNER_STATE.lastResult);
+      }
+    } catch (error) {
+      AYLA_CONTINUITY_EMAIL_RUNNER_STATE.lastResult = {
+        generated_at: aylaNow(),
+        error: String(error.message || "Continuity email runner failed").slice(0, 500),
+      };
+      console.error("AylaMed continuity email runner error:", error.message);
+    } finally {
+      AYLA_CONTINUITY_EMAIL_RUNNER_STATE.running = false;
+    }
+  };
+  aylaContinuityEmailRunnerTimer = setInterval(run, intervalMs);
+  aylaContinuityEmailRunnerTimer.unref?.();
+  const startupDelayMs = Math.max(
+    60 * 1000,
+    Math.min(intervalMs, Number(process.env.AYLA_CONTINUITY_EMAIL_STARTUP_DELAY_MS || 5 * 60 * 1000)
+      || 5 * 60 * 1000),
+  );
+  setTimeout(run, startupDelayMs).unref?.();
+  console.log(`AylaMed continuity email runner enabled every ${Math.round(intervalMs / 60000)} minutes`);
+}
+
 let ngContentOperationsCleanupTimer = null;
 
 function ngStartContentOperationsScheduler() {
@@ -77961,6 +79055,7 @@ app.listen(PORT, () => {
   ngStartZoomRecordingRecoveryScheduler();
   ngStartContentOperationsScheduler();
   ngStartAylaVimeoFolderSyncScheduler();
+  ngStartAylaContinuityEngagementScheduler();
   setTimeout(() => {
     ngRunAylaPrivatePilotContentActivation("startup_private_pilot_reconciliation")
       .then((result) => console.log("AylaMed private pilot content activation:", result))
