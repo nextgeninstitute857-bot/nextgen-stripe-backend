@@ -1,0 +1,247 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+
+import {
+  AYLA_DIAGNOSTIC_BLUEPRINT_VERSION,
+  applyDiagnosticSystemOverride,
+  auditDiagnosticQuestionMedia,
+  buildStep1DiagnosticSelection,
+  classifyStep1DiagnosticQuestion,
+  diagnosticSessionUsesCurrentBlueprint,
+} from "../lib/aylamed-diagnostic.js";
+
+const TITLES = [
+  "Osteoarthritis",
+  "Postpartum Endometritis",
+  "Inflammatory Bowel Disease",
+  "Ischemic Stroke",
+  "Prostate Cancer",
+  "Digeorge Syndrome",
+  "Hypothyroidism",
+  "Hoarseness",
+  "Callosities And Corns",
+  "Sinusitis",
+  "Intraventricular Hemorrhage",
+  "Cytokines",
+  "Beta Oxidation",
+  "Interstitial Lung Disease",
+  "Diabetic Kidney Disease",
+  "Diabetic Foot",
+  "Diabetes Mellitus",
+  "Peptic Ulcer Disease",
+  "Escherichia Coli",
+  "GFR",
+  "Pituitary Tumors",
+  "Mosaicism",
+  "Lesch Nyhan Syndrome",
+  "Endometriosis",
+  "Pagets Disease Of Bone",
+  "Septic Arthritis",
+  "FSGS",
+  "Bacterial Gene Transfer",
+  "Cardiac Physiology",
+  "Embryologic Derivatives",
+  "Physician Patient Communication",
+  "Peptic Ulcer Disease",
+  "G6PD Deficiency",
+  "Asthma",
+  "Genomic Imprinting",
+  "Genetic Disorders",
+  "Uterine Fibroids",
+  "Laboratory Techniques",
+  "Tetracycline",
+  "Hearing Loss",
+];
+
+const IMAGE_REFS = new Map([
+  [1, ["U23056.png"]],
+  [4, ["highresdefault_U89821.png"]],
+  [6, ["highresdefault_U64133.png"]],
+  [7, ["highresdefault_U63979.png"]],
+  [9, ["highresdefault_L24048.png"]],
+  [10, ["highresdefault_U73734.png"]],
+  [15, ["U51314.jpg"]],
+  [17, ["L18322.jpg"]],
+  [18, ["U41548.png"]],
+  [20, ["GFR_A.gif", "GFR_B.gif", "GFR_C.gif", "GFR_D.gif", "GFR_E.gif"]],
+  [21, [
+    "highresdefault_U36559.jpg",
+    "highresdefault_U36558.jpg",
+    "highresdefault_U36563.jpg",
+    "highresdefault_U36560.jpg",
+    "highresdefault_U36562.jpg",
+  ]],
+  [24, ["U26233.png"]],
+  [26, ["U22059.png"]],
+]);
+
+function fixture(index, { linked = true } = {}) {
+  const questionNumber = index + 1;
+  const refs = IMAGE_REFS.get(questionNumber) || [];
+  return {
+    id: `question-${questionNumber}`,
+    title: TITLES[index],
+    system_key: "1",
+    taxonomy: { system_key: "1", topic_key: TITLES[index] },
+    question_html: `<p>Clinical stem</p>${refs.map((ref) => `<img src="${ref}">`).join("")}`,
+    explanation_html: "<p>Verified explanation</p>",
+    answers: [{ answer_id: 1, text_html: "Choice A" }],
+    media: linked
+      ? refs.map((ref) => ({
+          id: `media-${ref}`,
+          ref,
+          placement: "question",
+          object_key: `private/step-1/${ref}`,
+        }))
+      : [],
+  };
+}
+
+test("numeric source taxonomy is replaced by deterministic Step 1 topic classification", () => {
+  assert.equal(classifyStep1DiagnosticQuestion(fixture(0)), "Musculoskeletal");
+  assert.equal(classifyStep1DiagnosticQuestion(fixture(14)), "Renal");
+  assert.equal(classifyStep1DiagnosticQuestion(fixture(18)), "Microbiology");
+  assert.equal(classifyStep1DiagnosticQuestion(fixture(30)), "Biostatistics and Ethics");
+  assert.equal(classifyStep1DiagnosticQuestion(fixture(38)), "Pharmacology");
+});
+
+test("all relative inline media must have a private playable attachment", () => {
+  const ready = auditDiagnosticQuestionMedia(fixture(0));
+  assert.equal(ready.ready, true);
+  assert.equal(ready.referenceCount, 1);
+
+  const broken = auditDiagnosticQuestionMedia(fixture(0, { linked: false }));
+  assert.equal(broken.ready, false);
+  assert.deepEqual(broken.missingRefs, ["U23056.png"]);
+});
+
+test("an unverified external image URL is not treated as diagnostic-ready", () => {
+  const question = fixture(1);
+  question.question_html = '<img src="https://example.invalid/broken-figure.png">';
+  const audit = auditDiagnosticQuestionMedia(question);
+  assert.equal(audit.ready, false);
+  assert.deepEqual(
+    audit.missingRefs,
+    ["https://example.invalid/broken-figure.png"],
+  );
+});
+
+test("the audited 40-question pilot set spans at least twelve canonical systems when media is linked", () => {
+  const result = buildStep1DiagnosticSelection(
+    TITLES.map((_, index) => fixture(index)),
+    { requestedCount: 40, minimumSystems: 12 },
+  );
+  assert.equal(result.ready, true);
+  assert.equal(result.selected.length, 40);
+  assert.ok(result.selectedSystemKeys.length >= 12);
+  assert.equal(result.rejectedMissingMediaCount, 0);
+  assert.equal(result.selected.some((row) => row.diagnostic_system === "Renal"), true);
+  assert.equal(result.selected.some((row) => row.diagnostic_system === "Reproductive"), true);
+  assert.equal(result.selected.some((row) => row.diagnostic_system === "Biochemistry"), true);
+});
+
+test("broken figures make the diagnostic fail closed instead of showing unusable questions", () => {
+  const result = buildStep1DiagnosticSelection(
+    TITLES.map((_, index) => fixture(index, { linked: false })),
+    { requestedCount: 40, minimumSystems: 12 },
+  );
+  assert.equal(result.ready, false);
+  assert.equal(result.selected.length, 27);
+  assert.equal(result.rejectedMissingMediaCount, 13);
+  assert.equal(result.rejected.missingMedia.some((row) => row.missingRefs.includes("GFR_A.gif")), true);
+});
+
+test("stored system overrides feed verified attempts and baseline scoring", () => {
+  const question = applyDiagnosticSystemOverride(
+    { id: "question-1", system_key: "1", taxonomy: { system_key: "1" } },
+    "Renal",
+  );
+  assert.equal(question.system_key, "Renal");
+  assert.equal(question.taxonomy.system_key, "Renal");
+  assert.equal(question.taxonomy.diagnostic_blueprint_version, AYLA_DIAGNOSTIC_BLUEPRINT_VERSION);
+});
+
+test("only current mapped diagnostic sessions can answer or submit", () => {
+  assert.equal(diagnosticSessionUsesCurrentBlueprint({ purpose: "practice" }), true);
+  assert.equal(diagnosticSessionUsesCurrentBlueprint({
+    purpose: "baseline_diagnostic",
+    diagnosticBlueprintVersion: 1,
+  }), false);
+  assert.equal(diagnosticSessionUsesCurrentBlueprint({
+    purpose: "baseline_diagnostic",
+    diagnosticBlueprintVersion: AYLA_DIAGNOSTIC_BLUEPRINT_VERSION,
+    questions: [{ contentQuestionId: "question-1" }],
+    diagnosticSystemByQuestionId: { "question-1": "Renal" },
+    diagnosticQuality: {
+      mediaReady: true,
+      taxonomyReady: true,
+      minimumSystemCount: 1,
+    },
+  }), true);
+  assert.equal(diagnosticSessionUsesCurrentBlueprint({
+    purpose: "baseline_diagnostic",
+    diagnosticBlueprintVersion: AYLA_DIAGNOSTIC_BLUEPRINT_VERSION,
+    questions: [{ contentQuestionId: "question-1" }],
+    diagnosticSystemByQuestionId: {},
+    diagnosticQuality: {
+      mediaReady: true,
+      taxonomyReady: true,
+      minimumSystemCount: 1,
+    },
+  }), false);
+  assert.equal(diagnosticSessionUsesCurrentBlueprint({
+    purpose: "baseline_diagnostic",
+    diagnosticBlueprintVersion: AYLA_DIAGNOSTIC_BLUEPRINT_VERSION,
+    questions: [{ contentQuestionId: "question-1" }],
+    diagnosticSystemByQuestionId: { "question-1": "Renal" },
+    diagnosticQuality: {
+      mediaReady: false,
+      taxonomyReady: true,
+      minimumSystemCount: 1,
+    },
+  }), false);
+});
+
+test("server gates diagnostic creation, playback, answering and submission through the verified blueprint", () => {
+  const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
+  assert.match(server, /buildStep1DiagnosticSelection\(candidates/);
+  assert.match(server, /DIAGNOSTIC_CONTENT_NOT_READY/);
+  assert.match(server, /media_incomplete_questions: blueprint\.rejectedMissingMediaCount/);
+  assert.match(server, /session\.diagnosticSystemByQuestionId = selection\.diagnosticSystemByQuestionId/);
+  assert.match(server, /diagnostic_session_superseded/);
+  assert.match(server, /ANSWERED_DIAGNOSTIC_REVIEW_REQUIRED/);
+  assert.match(
+    server,
+    /const reviewQuestions = rawReviewQuestions\.map\(\(question\) =>\s*aylaDiagnosticQuestionForSession/,
+  );
+  assert.ok(
+    (server.match(/aylaRequireCurrentDiagnosticBlueprint\(/g) || []).length >= 6,
+    "all diagnostic entry and mutation paths should fail closed on a legacy blueprint",
+  );
+});
+
+test("daily roadmap and Tutor stay diagnostic-only until a verified baseline exists", () => {
+  const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
+  assert.match(server, /title: "Complete your verified 40-question diagnostic"/);
+  assert.match(server, /actionRoute: "\/dashboard\/qbank\?diagnostic=1"/);
+  assert.match(server, /aylaV258CompleteDiagnosticAssignments/);
+  assert.match(server, /completedDiagnosticAssignments/);
+});
+
+test("pilot QBank and recall resources require canonical taxonomy and ready media", () => {
+  const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
+  assert.match(server, /async function aylaV250EligibleQbankQuestions/);
+  assert.match(server, /const canonicalSystem = classifyStep1DiagnosticQuestion\(row\)/);
+  assert.match(server, /const media = auditDiagnosticQuestionMedia\(row\)/);
+  assert.match(server, /qbank_registry_no_media_ready_canonical_questions_for_focus/);
+  assert.match(server, /const canonicalSystem = classifyStep1DiagnosticQuestion\(question\)/);
+});
+
+test("Personal Tutor receives a server-derived Step 1 pace estimate", () => {
+  const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
+  assert.match(server, /function aylaV258TutorPathwayEstimate/);
+  assert.match(server, /uniqueVerifiedQuestions/);
+  assert.match(server, /baselineVerified: student\.serverVerifiedBaseline === true/);
+  assert.match(server, /pathwayEstimate,/);
+});

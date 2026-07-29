@@ -100,6 +100,15 @@ import {
   setAylaQbankQuestionMark,
 } from "./lib/aylamed-qbank.js";
 import {
+  AYLA_DIAGNOSTIC_BLUEPRINT_VERSION,
+  applyDiagnosticSystemOverride,
+  auditDiagnosticQuestionMedia,
+  buildStep1DiagnosticSelection,
+  canonicalStep1DiagnosticSystem,
+  classifyStep1DiagnosticQuestion,
+  diagnosticSessionUsesCurrentBlueprint,
+} from "./lib/aylamed-diagnostic.js";
+import {
   AYLA_CDM_STATE_COLLECTIONS,
   cdmRoadmapAssignmentCaseId,
   cdmRoadmapAssignmentEligible,
@@ -251,6 +260,10 @@ import {
   buildAylaMateActivityFeed,
   buildAylaStep1PilotScenarios,
 } from "./lib/aylamed-pilot.js";
+import {
+  AYLA_PILOT_FLOW_REPAIR_VERSION,
+  buildAylaPilotFlowRepairPlan,
+} from "./lib/aylamed-pilot-repair.js";
 import {
   compareAylaExamPathways,
   estimateAylaExamPathway,
@@ -38166,57 +38179,75 @@ async function aylaSelectQbankSessionQuestions({
     return { selected, availableSystemKeys: [], selectedSystemKeys: [] };
   }
 
-  const catalog = await getContentQbankCatalog({
+  const candidates = await listContentQbankQuestions({
     examTrack,
     destination: "aylamed_qbank",
     destinationScope,
+    limit: Math.min(200, Math.max(requestedCount, requestedCount * 5)),
+    seed: crypto.randomUUID(),
   });
-  const availableSystemKeys = [...new Set(catalog
-    .filter((row) => Number(row.question_count || 0) > 0)
-    .map((row) => String(row.system_key || row.system || row.system_label || "").trim())
-    .filter(Boolean))]
-    .sort((left, right) => left.localeCompare(right))
-    .slice(0, requestedCount);
-  const selectedById = new Map();
-
-  if (availableSystemKeys.length) {
-    const perSystem = Math.max(1, Math.floor(requestedCount / availableSystemKeys.length));
-    let remainder = Math.max(0, requestedCount - perSystem * availableSystemKeys.length);
-    for (const systemKey of availableSystemKeys) {
-      const limit = Math.max(1, perSystem + (remainder > 0 ? 1 : 0));
-      remainder = Math.max(0, remainder - 1);
-      const rows = await listContentQbankQuestions({
-        examTrack,
-        destination: "aylamed_qbank",
-        destinationScope,
-        systemKey,
-        limit,
-        seed: crypto.randomUUID(),
-      });
-      rows.forEach((row) => {
-        if (row?.id && selectedById.size < requestedCount) selectedById.set(String(row.id), row);
-      });
-    }
+  const blueprint = buildStep1DiagnosticSelection(candidates, {
+    requestedCount,
+    minimumSystems: Math.min(12, requestedCount),
+  });
+  if (!blueprint.ready) {
+    const error = new Error(
+      "The verified diagnostic is not ready yet. Every diagnostic question must have complete media and verified Step 1 system placement.",
+    );
+    error.statusCode = 409;
+    error.code = "DIAGNOSTIC_CONTENT_NOT_READY";
+    error.details = {
+      code: error.code,
+      eligible_questions: blueprint.eligibleQuestionCount,
+      required_questions: blueprint.requestedCount,
+      systems_available: blueprint.availableSystemKeys.length,
+      systems_required: blueprint.minimumSystems,
+      media_incomplete_questions: blueprint.rejectedMissingMediaCount,
+      unclassified_questions: blueprint.rejectedUnclassifiedCount,
+      private_drafts_exposed: false,
+    };
+    throw error;
   }
+  return {
+    selected: blueprint.selected,
+    availableSystemKeys: blueprint.availableSystemKeys,
+    selectedSystemKeys: blueprint.selectedSystemKeys,
+    diagnosticSystemByQuestionId: Object.fromEntries(
+      blueprint.selected.map((question) => [String(question.id), question.diagnostic_system]),
+    ),
+    blueprintVersion: AYLA_DIAGNOSTIC_BLUEPRINT_VERSION,
+    quality: {
+      blueprintVersion: AYLA_DIAGNOSTIC_BLUEPRINT_VERSION,
+      requestedQuestionCount: blueprint.requestedCount,
+      eligibleQuestionCount: blueprint.eligibleQuestionCount,
+      selectedQuestionCount: blueprint.selected.length,
+      minimumSystemCount: blueprint.minimumSystems,
+      availableSystemCount: blueprint.availableSystemKeys.length,
+      selectedSystemCount: blueprint.selectedSystemKeys.length,
+      mediaReferenceCount: blueprint.mediaReferenceCount,
+      mediaIncompleteQuestionCount: blueprint.rejectedMissingMediaCount,
+      unclassifiedQuestionCount: blueprint.rejectedUnclassifiedCount,
+      mediaReady: true,
+      taxonomyReady: true,
+      privateDraftsExposed: false,
+    },
+  };
+}
 
-  if (selectedById.size < requestedCount) {
-    const fill = await listContentQbankQuestions({
-      examTrack,
-      destination: "aylamed_qbank",
-      destinationScope,
-      limit: Math.min(200, Math.max(requestedCount, requestedCount * 2)),
-      seed: crypto.randomUUID(),
-    });
-    fill.forEach((row) => {
-      if (row?.id && selectedById.size < requestedCount) selectedById.set(String(row.id), row);
-    });
-  }
+function aylaRequireCurrentDiagnosticBlueprint(session = {}) {
+  if (diagnosticSessionUsesCurrentBlueprint(session)) return;
+  const error = new Error(
+    "This diagnostic is being upgraded to verified media and system coverage. Start or resume it from the diagnostic builder after the content check passes.",
+  );
+  error.statusCode = 409;
+  error.code = "DIAGNOSTIC_BLUEPRINT_UPGRADE_REQUIRED";
+  throw error;
+}
 
-  const selected = [...selectedById.values()].slice(0, requestedCount);
-  const selectedSystemKeys = [...new Set(selected
-    .map((row) => String(row.system_key || row.taxonomy?.system_key || "").trim())
-    .filter(Boolean))].sort((left, right) => left.localeCompare(right));
-  return { selected, availableSystemKeys, selectedSystemKeys };
+function aylaDiagnosticQuestionForSession(session = {}, question = {}) {
+  if (String(session.purpose || "") !== "baseline_diagnostic") return question;
+  const system = session.diagnosticSystemByQuestionId?.[String(question.id || "")];
+  return applyDiagnosticSystemOverride(question, system);
 }
 
 function aylaStudentQbankPresentationPolicy(policy = {}, selectedSourceProfile = "") {
@@ -38967,12 +38998,14 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
       if (auth.student.serverVerifiedBaseline === true || String(auth.student.onboardingStatus || "") === "complete") {
         return aylaSendError(res, 409, "The verified starting diagnostic is already complete. Use a normal test session for later reassessment.");
       }
-      const activeDiagnostic = aylaValues(auth.db, "aylaQbankSessions").find((row) =>
+      const activeDiagnostics = aylaValues(auth.db, "aylaQbankSessions").filter((row) =>
         String(row.userId || "") === String(auth.user.id)
         && String(row.studentId || "") === String(auth.student.id)
         && String(row.examTrack || "") === String(access.exam_track)
         && String(row.purpose || "") === "baseline_diagnostic"
         && String(row.status || "") === "in_progress");
+      const activeDiagnostic = activeDiagnostics.find((row) =>
+        diagnosticSessionUsesCurrentBlueprint(row));
       if (activeDiagnostic) {
         const bundle = await aylaPlayableQbankSession(auth.db, activeDiagnostic);
         return aylaSendOk(res, {
@@ -38983,6 +39016,20 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
           idempotent_replay: true,
           resumed_existing_diagnostic: true,
         });
+      }
+      const answeredLegacyDiagnostic = activeDiagnostics.find((row) =>
+        Object.keys(row.answers && typeof row.answers === "object" ? row.answers : {}).length > 0);
+      if (answeredLegacyDiagnostic) {
+        return aylaSendError(
+          res,
+          409,
+          "An earlier diagnostic contains answers and requires review before it can be upgraded. No answer or baseline was changed.",
+          {
+            code: "ANSWERED_DIAGNOSTIC_REVIEW_REQUIRED",
+            session_id: answeredLegacyDiagnostic.id,
+            answered_question_count: Object.keys(answeredLegacyDiagnostic.answers || {}).length,
+          },
+        );
       }
     }
 
@@ -39057,15 +39104,31 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         && String(row.idempotencyKey || "") === idempotencyKey);
       if (existing) {
         if (String(existing.idempotencyFingerprint || "") !== idempotencyFingerprint) return aylaSendError(res, 409, "Idempotency key was already used for a different QBank session request");
-        aylaRequireQbankAccess(auth.db, auth.user, auth.student, existing.examTrack);
-        const bundle = await aylaPlayableQbankSession(auth.db, existing);
-        return aylaSendOk(res, {
-          ...bundle,
-          requested_question_count: Number(existing.requestedQuestionCount || existing.questionCount || 0),
-          selected_question_count: Number(existing.questionCount || 0),
-          partial_selection: Number(existing.questionCount || 0) < Number(existing.requestedQuestionCount || existing.questionCount || 0),
-          idempotent_replay: true,
-        });
+        const legacyDiagnostic = purpose === "baseline_diagnostic"
+          && !diagnosticSessionUsesCurrentBlueprint(existing);
+        if (!legacyDiagnostic) {
+          aylaRequireQbankAccess(auth.db, auth.user, auth.student, existing.examTrack);
+          const bundle = await aylaPlayableQbankSession(auth.db, existing);
+          return aylaSendOk(res, {
+            ...bundle,
+            requested_question_count: Number(existing.requestedQuestionCount || existing.questionCount || 0),
+            selected_question_count: Number(existing.questionCount || 0),
+            partial_selection: Number(existing.questionCount || 0) < Number(existing.requestedQuestionCount || existing.questionCount || 0),
+            idempotent_replay: true,
+          });
+        }
+        if (Object.keys(existing.answers && typeof existing.answers === "object" ? existing.answers : {}).length > 0) {
+          return aylaSendError(
+            res,
+            409,
+            "An earlier diagnostic contains answers and requires review before it can be upgraded. No answer or baseline was changed.",
+            {
+              code: "ANSWERED_DIAGNOSTIC_REVIEW_REQUIRED",
+              session_id: existing.id,
+              answered_question_count: Object.keys(existing.answers || {}).length,
+            },
+          );
+        }
       }
     }
 
@@ -39109,6 +39172,35 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
     const questionMappings = selected.map((question) => ({ ref: crypto.randomUUID(), contentQuestionId: question.id }));
     const mutation = await mutateAylaDb(async (db) => {
       const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, access.exam_track);
+      let legacyDiagnostics = [];
+      if (purpose === "baseline_diagnostic") {
+        const activeDiagnostics = aylaValues(db, "aylaQbankSessions").filter((row) =>
+          String(row.userId || "") === String(fresh.user.id)
+          && String(row.studentId || "") === String(fresh.student.id)
+          && String(row.examTrack || "") === String(fresh.entitlement.exam_track)
+          && String(row.purpose || "") === "baseline_diagnostic"
+          && String(row.status || "") === "in_progress");
+        const currentDiagnostic = activeDiagnostics.find((row) =>
+          diagnosticSessionUsesCurrentBlueprint(row));
+        if (currentDiagnostic) {
+          return {
+            session: currentDiagnostic,
+            replayed: true,
+            resumedExistingDiagnostic: true,
+          };
+        }
+        const answeredLegacyDiagnostic = activeDiagnostics.find((row) =>
+          Object.keys(row.answers && typeof row.answers === "object" ? row.answers : {}).length > 0);
+        if (answeredLegacyDiagnostic) {
+          const error = new Error(
+            "An earlier diagnostic contains answers and requires review before it can be upgraded. No answer or baseline was changed.",
+          );
+          error.statusCode = 409;
+          error.code = "ANSWERED_DIAGNOSTIC_REVIEW_REQUIRED";
+          throw error;
+        }
+        legacyDiagnostics = activeDiagnostics;
+      }
       if (idempotencyKey) {
         const existing = aylaValues(db, "aylaQbankSessions").find((row) =>
           String(row.userId || "") === String(auth.user.id)
@@ -39120,7 +39212,30 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
             error.statusCode = 409;
             throw error;
           }
-          return { session: existing, replayed: true };
+          if (purpose !== "baseline_diagnostic" || diagnosticSessionUsesCurrentBlueprint(existing)) {
+            return { session: existing, replayed: true };
+          }
+          const answeredCount = Object.keys(
+            existing.answers && typeof existing.answers === "object" ? existing.answers : {},
+          ).length;
+          if (answeredCount > 0) {
+            const error = new Error(
+              "An earlier diagnostic contains answers and requires review before it can be upgraded. No answer or baseline was changed.",
+            );
+            error.statusCode = 409;
+            error.code = "ANSWERED_DIAGNOSTIC_REVIEW_REQUIRED";
+            throw error;
+          }
+          const existingStatus = String(existing.status || "");
+          if (!["in_progress", "abandoned"].includes(existingStatus)) {
+            const error = new Error(
+              "This idempotency key belongs to an earlier diagnostic version. Start the verified diagnostic with a new request.",
+            );
+            error.statusCode = 409;
+            error.code = "LEGACY_DIAGNOSTIC_IDEMPOTENCY_KEY";
+            throw error;
+          }
+          legacyDiagnostics = [...legacyDiagnostics, existing];
         }
       }
       if (roadmapAssignmentId) {
@@ -39163,6 +39278,9 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
       session.idempotencyFingerprint = idempotencyKey ? idempotencyFingerprint : null;
       session.requestedQuestionCount = effectiveRequestedCount;
       if (purpose === "baseline_diagnostic") {
+        session.diagnosticBlueprintVersion = selection.blueprintVersion;
+        session.diagnosticSystemByQuestionId = selection.diagnosticSystemByQuestionId;
+        session.diagnosticQuality = selection.quality;
         session.diagnosticCoverage = {
           availableSystemCount: selection.availableSystemKeys.length,
           selectedSystemCount: selection.selectedSystemKeys.length,
@@ -39170,6 +39288,30 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         };
       }
       aylaSetItem(db, "aylaQbankSessions", session);
+      if (purpose === "baseline_diagnostic") {
+        const supersededAt = aylaNow();
+        const uniqueLegacyDiagnostics = new Map(
+          legacyDiagnostics
+            .filter((row) => row?.id && String(row.id) !== String(session.id))
+            .map((row) => [String(row.id), row]),
+        );
+        for (const legacy of uniqueLegacyDiagnostics.values()) {
+          legacy.status = "abandoned";
+          legacy.abandonedAt = legacy.abandonedAt || supersededAt;
+          legacy.abandonReason = "diagnostic_blueprint_upgrade";
+          legacy.supersededBySessionId = session.id;
+          legacy.supersededIdempotencyKey = legacy.idempotencyKey || null;
+          legacy.idempotencyKey = null;
+          legacy.idempotencyFingerprint = null;
+          legacy.updatedAt = supersededAt;
+          aylaSetItem(db, "aylaQbankSessions", legacy);
+          aylaQbankEvent(db, legacy, "diagnostic_session_superseded", {
+            supersededBySessionId: session.id,
+            reason: legacy.abandonReason,
+            answeredQuestionCount: 0,
+          });
+        }
+      }
       aylaQbankEvent(db, session, "session_created", {
         mode: session.mode,
         purpose: session.purpose,
@@ -39188,9 +39330,10 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
       selected_question_count: mutation.session.questionCount,
       partial_selection: mutation.session.questionCount < effectiveRequestedCount,
       idempotent_replay: mutation.replayed,
+      resumed_existing_diagnostic: mutation.resumedExistingDiagnostic === true,
     }, mutation.replayed ? 200 : 201);
   } catch (error) {
-    return aylaSendError(res, error.statusCode || 500, error.message);
+    return aylaSendError(res, error.statusCode || 500, error.message, error.details || null);
   }
 });
 
@@ -39199,6 +39342,7 @@ app.get("/api/ayla/qbank/sessions/:sessionId", async (req, res) => {
     const auth = await aylaV189RequireStudent(req, String(req.query.student_id || ""), "qbank");
     const session = aylaOwnedQbankSession(auth.db, auth.user, auth.student, req.params.sessionId);
     aylaRequireQbankAccess(auth.db, auth.user, auth.student, session.examTrack);
+    aylaRequireCurrentDiagnosticBlueprint(session);
     return aylaSendOk(res, await aylaPlayableQbankSession(auth.db, session));
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message);
@@ -39210,6 +39354,7 @@ app.post("/api/ayla/qbank/sessions/:sessionId/answers", async (req, res) => {
     const auth = await aylaV189RequireStudent(req, String(req.body.student_id || req.body.studentId || ""), "qbank");
     const session = aylaOwnedQbankSession(auth.db, auth.user, auth.student, req.params.sessionId);
     aylaRequireQbankAccess(auth.db, auth.user, auth.student, session.examTrack);
+    aylaRequireCurrentDiagnosticBlueprint(session);
     const questionRef = String(req.body.question_ref || req.body.questionRef || "").trim();
     const mapping = qbankSessionQuestion(session, questionRef);
     if (!mapping) return aylaSendError(res, 404, "Question does not belong to this QBank session");
@@ -39227,6 +39372,7 @@ app.post("/api/ayla/qbank/sessions/:sessionId/answers", async (req, res) => {
     const mutation = await mutateAylaDb(async (db) => {
       const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, session.examTrack);
       const current = aylaOwnedQbankSession(db, fresh.user, fresh.student, session.id);
+      aylaRequireCurrentDiagnosticBlueprint(current);
       const currentMapping = qbankSessionQuestion(current, questionRef);
       if (!currentMapping || String(currentMapping.contentQuestionId) !== String(mapping.contentQuestionId)) {
         const error = new Error("Question does not belong to this QBank session");
@@ -39282,17 +39428,21 @@ app.post("/api/ayla/qbank/sessions/:sessionId/submit", async (req, res) => {
     const auth = await aylaV189RequireStudent(req, String(req.body.student_id || req.body.studentId || ""), "qbank");
     const initial = aylaOwnedQbankSession(auth.db, auth.user, auth.student, req.params.sessionId);
     aylaRequireQbankAccess(auth.db, auth.user, auth.student, initial.examTrack);
-    const reviewQuestions = await getContentQbankQuestions({
+    aylaRequireCurrentDiagnosticBlueprint(initial);
+    const rawReviewQuestions = await getContentQbankQuestions({
       questionIds: (initial.questions || []).map((row) => row.contentQuestionId),
       examTrack: initial.examTrack,
       destination: "aylamed_qbank",
       destinationScope: initial.destinationScope || "",
       sourceProfile: initial.sourceProfile || "",
     });
+    const reviewQuestions = rawReviewQuestions.map((question) =>
+      aylaDiagnosticQuestionForSession(initial, question));
     const reviewById = new Map(reviewQuestions.map((row) => [String(row.id), row]));
     const mutation = await mutateAylaDb(async (db) => {
       const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, initial.examTrack);
       const current = aylaOwnedQbankSession(db, fresh.user, fresh.student, initial.id);
+      aylaRequireCurrentDiagnosticBlueprint(current);
       if (!canSubmitAylaQbankRoadmapSession(current)) {
         const error = new Error("Answer every assigned question before completing this roadmap QBank block");
         error.statusCode = 409;
@@ -39354,12 +39504,17 @@ app.post("/api/ayla/qbank/sessions/:sessionId/submit", async (req, res) => {
           fresh.student.phasePlan = aylaPhasePlan(fresh.student, baselineRecommendation);
           fresh.student.updatedAt = aylaNow();
           aylaSetItem(db, "aylaStudents", fresh.student);
+          const completedDiagnosticAssignments = aylaV258CompleteDiagnosticAssignments(
+            db,
+            finalized.session,
+          );
           verifiedBaseline = {
             score_percent: baseline.currentScore,
             weak_areas: baseline.weakAreas,
             systems_covered: baseline.diagnosticCoverage.systemsCovered,
             systems_expected: baseline.diagnosticCoverage.systemsExpected,
             mapped_question_count: baseline.diagnosticCoverage.mappedQuestionCount,
+            diagnostic_assignments_completed: completedDiagnosticAssignments,
             server_verified: true,
           };
           aylaV189RecordActivity(db, finalized.session.studentId, "baseline_diagnostic_completed", {
@@ -63660,7 +63815,8 @@ async function aylaPlayableQbankQuestion(db, session, mapping, rawQuestion = nul
       message: "This question is no longer available for delivery.",
     };
   }
-  const playable = await ngRegistryQuestionWithPlayableMedia(raw);
+  const diagnosticQuestion = aylaDiagnosticQuestionForSession(session, raw);
+  const playable = await ngRegistryQuestionWithPlayableMedia(diagnosticQuestion);
   const state = aylaQbankQuestionState(db, session, mapping.contentQuestionId);
   return sanitizeAylaQbankQuestion(playable, {
     session,
@@ -63706,6 +63862,7 @@ function aylaQbankSavedItemSession(db, item) {
 }
 
 async function aylaPlayableQbankSession(db, session) {
+  aylaRequireCurrentDiagnosticBlueprint(session);
   const mappings = Array.isArray(session.questions) ? session.questions : [];
   const content = await getContentQbankQuestions({
     questionIds: mappings.map((row) => row.contentQuestionId),
@@ -68450,33 +68607,48 @@ async function aylaV250EligibleQbankQuestions(student, {
   );
   if (!examTrack) return { questions: [], destinationScope, warning: "unsupported_student_exam_track" };
   const requestedLimit = Math.max(1, Math.min(40, Number(limit || 24)));
-  const systemKey = ["", "general"].includes(aylaV189MappingKey(system)) ? "" : aylaV189MappingKey(system);
-  const subsystemKey = aylaV189MappingKey(subsystem);
-  const topicKey = ["", "core review"].includes(aylaV189MappingKey(topic)) ? "" : aylaV189MappingKey(topic);
+  const requestedSystem = canonicalStep1DiagnosticSystem(system);
+  const topicKey = ["", "core review"].includes(aylaV189MappingKey(topic))
+    ? ""
+    : aylaV189MappingKey(topic);
   try {
-    let rows = await listContentQbankQuestions({
+    const rows = await listContentQbankQuestions({
       examTrack,
       destination: "aylamed_qbank",
       destinationScope,
-      systemKey,
-      subsystemKey,
-      topicKey,
-      limit: requestedLimit,
-      seed: `${student.id}:${date}:${systemKey}:${subsystemKey}:${topicKey}`,
+      limit: Math.min(200, Math.max(80, requestedLimit * 5)),
+      seed: `${student.id}:${date}:${requestedSystem || "discovery"}:${topicKey}`,
     });
-    if (!rows.length && (systemKey || subsystemKey || topicKey)) {
-      rows = await listContentQbankQuestions({
-        examTrack,
-        destination: "aylamed_qbank",
-        destinationScope,
-        limit: requestedLimit,
-        seed: `${student.id}:${date}:pilot-qbank-fallback`,
-      });
-    }
+    const eligible = rows
+      .map((row) => {
+        const canonicalSystem = classifyStep1DiagnosticQuestion(row);
+        const media = auditDiagnosticQuestionMedia(row);
+        if (!canonicalSystem || !media.ready) return null;
+        return applyDiagnosticSystemOverride(row, canonicalSystem);
+      })
+      .filter(Boolean);
+    const systemMatches = requestedSystem
+      ? eligible.filter((row) => String(row.system_key || "") === requestedSystem)
+      : eligible;
+    const topicMatches = topicKey
+      ? systemMatches.filter((row) => {
+          const rowTopic = aylaV189MappingKey(
+            row.topic_key || row.taxonomy?.topic_key || row.title,
+          );
+          if (!rowTopic) return false;
+          return rowTopic === topicKey
+            || rowTopic.includes(topicKey)
+            || topicKey.includes(rowTopic);
+        })
+      : [];
+    const selectedRows = (topicMatches.length ? topicMatches : systemMatches)
+      .slice(0, requestedLimit);
     return {
       destinationScope,
-      warning: null,
-      questions: rows.map((row) => {
+      warning: selectedRows.length
+        ? null
+        : "qbank_registry_no_media_ready_canonical_questions_for_focus",
+      questions: selectedRows.map((row) => {
         const answers = Array.isArray(row.answers) ? row.answers : [];
         return {
           id: String(row.id),
@@ -68491,7 +68663,7 @@ async function aylaV250EligibleQbankQuestions(student, {
             row.topic_key || row.title,
             "AylaMed QBank practice",
           ),
-          system: aylaStudentTaxonomyLabel(row.system_key, "General"),
+          system: row.system_key,
           subsystem: aylaStudentTaxonomyLabel(row.subsystem_key, ""),
           topic: aylaStudentTaxonomyLabel(
             row.topic_key || row.title,
@@ -68826,6 +68998,13 @@ function aylaV189HideQuestionAnswer(question = {}) {
 
 function aylaV189SanitizeAssignmentForStudent(db, assignment = {}) {
   const copy = JSON.parse(JSON.stringify(assignment || {}));
+  if (
+    copy.overdueCarry === true
+    || copy.overdue_carry === true
+    || /^(?:\s*overdue\s*:\s*){2,}/i.test(String(copy.title || ""))
+  ) {
+    copy.title = aylaOverdueTitle(copy.title);
+  }
   const category = String(copy.category || "");
   copy.items = (Array.isArray(copy.items) ? copy.items : []).map((item) => {
     const next = { ...item };
@@ -70034,6 +70213,55 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     updatedAt: aylaNow(),
   };
   const assignments = [];
+  const diagnosticPending = String(student.onboardingPath || student.onboarding_path || "") === "diagnostic_test"
+    && student.serverVerifiedBaseline !== true
+    && String(student.onboardingStatus || student.onboarding_status || "").toLowerCase() !== "complete";
+  if (diagnosticPending) {
+    const diagnosticAssignment = {
+      id: aylaId("AYLA-ASN"),
+      studentId: student.id,
+      userId: student.ayla_user_id || student.user_id || null,
+      ...aylaV227ExamFields(student),
+      dailyPlanId: plan.id,
+      scheduledDate: date,
+      category: "diagnostic",
+      type: "baseline_diagnostic",
+      title: "Complete your verified 40-question diagnostic",
+      system: "Baseline",
+      topic: "Starting readiness and weak-area verification",
+      resourceIds: [],
+      items: [],
+      estimatedMinutes: 60,
+      status: "pending",
+      priority: "Critical",
+      actionRoute: "/dashboard/qbank?diagnostic=1",
+      rationale: "The roadmap will not invent weak areas or assign unrelated study content before your media-ready, system-balanced diagnostic is submitted.",
+      createdAt: aylaNow(),
+      updatedAt: aylaNow(),
+    };
+    assignments.push(diagnosticAssignment);
+    plan.plannedMinutes = diagnosticAssignment.estimatedMinutes;
+    plan.assignmentIds = [diagnosticAssignment.id];
+    plan.systemFocus = "Baseline";
+    plan.subsystemFocus = "";
+    plan.topicFocus = diagnosticAssignment.topic;
+    plan.focusSystem = "Baseline";
+    plan.focusSubsystem = "";
+    plan.focusTopic = diagnosticAssignment.topic;
+    plan.empty = false;
+    plan.message = "Complete the verified starting diagnostic first. AylaMed will build matched videos, MCQs, revision and book work only after the submitted result creates trustworthy weak-area evidence.";
+    plan.missingResourceTypes = [];
+    plan.tutorBrain.selectedFocus = {
+      id: "verified-starting-diagnostic",
+      system: "Baseline",
+      subsystem: "",
+      topic: diagnosticAssignment.topic,
+      reasons: ["A verified baseline is required before adaptive content selection."],
+    };
+    aylaSetItem(db, "aylaDailyPlans", plan);
+    aylaSetItem(db, "aylaResourceAssignments", diagnosticAssignment);
+    return { plan, assignments, reused: false };
+  }
   const reservedIds = new Set([...completedIds]);
   const mix = privatePilotDestinationScope
     ? {
@@ -70322,6 +70550,33 @@ function aylaV189UpdatePlanCompletion(db, planId) {
   return plan;
 }
 
+function aylaV258CompleteDiagnosticAssignments(db, session = {}) {
+  const completedAt = session.submittedAt || aylaNow();
+  const planIds = new Set();
+  let completed = 0;
+  for (const assignment of aylaValues(db, "aylaResourceAssignments")) {
+    if (String(assignment.studentId || "") !== String(session.studentId || "")) continue;
+    if (aylaCanonicalExamTrack(assignment.examTrackId || assignment.examTrack || assignment.exam)
+      !== aylaCanonicalExamTrack(session.examTrack)) continue;
+    if (!["diagnostic", "baseline_diagnostic"].includes(
+      String(assignment.category || assignment.type || "").toLowerCase(),
+    )) continue;
+    if (["completed", "cancelled", "superseded"].includes(
+      String(assignment.status || "").toLowerCase(),
+    )) continue;
+    assignment.status = "completed";
+    assignment.progressPercent = 100;
+    assignment.completedAt = assignment.completedAt || completedAt;
+    assignment.completedBySessionId = session.id;
+    assignment.updatedAt = completedAt;
+    aylaSetItem(db, "aylaResourceAssignments", assignment);
+    if (assignment.dailyPlanId) planIds.add(String(assignment.dailyPlanId));
+    completed += 1;
+  }
+  for (const planId of planIds) aylaV189UpdatePlanCompletion(db, planId);
+  return completed;
+}
+
 function aylaV189MaybeCompleteAssignment(db, assignmentId, historyCollection) {
   if (!assignmentId) return { assignment: null, plan: null, completed: false };
   const assignment = aylaGetItem(db, "aylaResourceAssignments", assignmentId);
@@ -70392,6 +70647,114 @@ async function aylaV213TutorNotebooks(db, user, student) {
     });
   }
   return notebooks;
+}
+
+function aylaV258TutorPathwayEstimate(
+  db,
+  student,
+  date,
+  { questionAttempts = [], assessmentAttempts = [] } = {},
+) {
+  const examTrackId = aylaCanonicalExamTrack(
+    student.examTrackId || student.exam_track_id || student.exam,
+  );
+  const examDate = aylaV189TargetDate(student);
+  if (examTrackId !== "usmle_step_1" || !examDate) return null;
+
+  const allVerifiedQuestions = aylaValues(db, "aylaQuestionAttempts")
+    .filter((row) => aylaAdaptiveEvidenceMatchesStudent(
+      row,
+      student,
+      { verifiedOnly: true },
+    ));
+  const uniqueVerifiedQuestions = new Set(
+    allVerifiedQuestions
+      .map((row) => String(
+        row.resourceId
+          || row.contentQuestionId
+          || row.sourceQuestionId
+          || "",
+      ))
+      .filter(Boolean),
+  );
+  const assignments = aylaValues(db, "aylaResourceAssignments")
+    .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student))
+    .filter((row) => !["cancelled", "superseded", "abandoned"].includes(
+      String(row.status || "").toLowerCase(),
+    ));
+  const assignedVideos = assignments.filter(
+    (row) => String(row.category || "").toLowerCase() === "video",
+  );
+  const assignedReadings = assignments.filter(
+    (row) => String(row.category || "").toLowerCase() === "reading",
+  );
+  const completedRatio = (rows) => {
+    const resourceCompletion = new Map();
+    for (const row of rows) {
+      const ids = [
+        ...(Array.isArray(row.resourceIds) ? row.resourceIds : []),
+        ...(Array.isArray(row.resource_ids) ? row.resource_ids : []),
+        ...(Array.isArray(row.items)
+          ? row.items.map((item) => item?.resourceId || item?.resource_id)
+          : []),
+      ].map(String).filter(Boolean);
+      const keys = ids.length ? ids : [String(row.id || "")].filter(Boolean);
+      for (const id of keys) {
+        const completed = String(row.status || "").toLowerCase() === "completed";
+        resourceCompletion.set(
+          id,
+          resourceCompletion.get(id) === true || completed,
+        );
+      }
+    }
+    if (!resourceCompletion.size) return 0;
+    return Math.round((
+      [...resourceCompletion.values()].filter(Boolean).length
+      / resourceCompletion.size
+    ) * 100);
+  };
+  const latestAssessment = assessmentAttempts.find(
+    (row) => row?.serverVerified === true,
+  ) || null;
+
+  try {
+    return estimateAylaExamPathway({
+      examTrackId,
+      examDate,
+      dailyHoursAvailable: aylaNumber(
+        student.dailyHours || student.daily_hours,
+        0,
+      ),
+      weeklyStudyDays: aylaNumber(
+        student.weeklyStudyDays || student.weekly_study_days,
+        6,
+      ),
+      qbankCompletedPercent: Math.min(
+        100,
+        Math.round((uniqueVerifiedQuestions.size / 3600) * 100),
+      ),
+      lectureCompletedPercent: completedRatio(assignedVideos),
+      readingCompletedPercent: completedRatio(assignedReadings),
+      latestAssessmentPercent: latestAssessment
+        ? aylaNumber(
+          latestAssessment.scorePercent
+            ?? latestAssessment.score_percent
+            ?? latestAssessment.score,
+          0,
+        )
+        : 0,
+      baselineVerified: student.serverVerifiedBaseline === true
+        || Boolean(latestAssessment),
+    }, {
+      today: new Date(`${String(date || aylaDateOnly()).slice(0, 10)}T12:00:00.000Z`),
+    });
+  } catch (error) {
+    console.warn(
+      "Personal Tutor continuing without optional pathway estimate:",
+      error.message,
+    );
+    return null;
+  }
 }
 
 async function aylaV213PersonalTutorSnapshot(db, user, student, date = aylaDateOnly(), options = {}) {
@@ -70498,6 +70861,12 @@ async function aylaV213PersonalTutorSnapshot(db, user, student, date = aylaDateO
   } catch (error) {
     console.warn("Personal Tutor continuing without optional read-only success-story strategies:", error.message);
   }
+  const pathwayEstimate = aylaV258TutorPathwayEstimate(
+    db,
+    student,
+    cleanDate,
+    { questionAttempts, assessmentAttempts },
+  );
   const decision = buildAylaPersonalTutorDecision({
     date: cleanDate,
     student,
@@ -70515,6 +70884,7 @@ async function aylaV213PersonalTutorSnapshot(db, user, student, date = aylaDateO
     revisionItems,
     notebooks,
     successStoryStrategies,
+    pathwayEstimate,
     surfaceProgress: {
       reading: aylaValues(db, "aylaReadingProgress").filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student)).length,
       video: aylaValues(db, "aylaVideoProgress").filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student)).length,
@@ -72086,6 +72456,10 @@ async function ngRunAylaPrivatePilotContentActivation(reason = "startup") {
       };
       let flashcardsActivated = 0;
       for (const question of registryFlashcardQuestions) {
+        const canonicalSystem = classifyStep1DiagnosticQuestion(question);
+        const media = auditDiagnosticQuestionMedia(question);
+        if (!canonicalSystem || !media.ready) continue;
+        const mappedQuestion = applyDiagnosticSystemOverride(question, canonicalSystem);
         const id = `AYLA-PILOT-FC-${crypto.createHash("sha256")
           .update(`${AYLA_STEP1_PILOT_DESTINATION_SCOPE}:${question.id}`)
           .digest("hex")
@@ -72096,28 +72470,27 @@ async function ngRunAylaPrivatePilotContentActivation(reason = "startup") {
           type: "flashcard",
           examTrackId: "usmle_step_1",
           title: aylaStudentTaxonomyLabel(
-            question.topic_key || question.title,
+            mappedQuestion.topic_key || mappedQuestion.title,
             "AylaMed QBank recall",
           ),
-          system: aylaStudentTaxonomyLabel(
-            question.system_key || question.taxonomy?.system_key,
-            "General",
-          ),
+          system: mappedQuestion.system_key,
           subsystem: aylaStudentTaxonomyLabel(
-            question.subsystem_key || question.taxonomy?.subsystem_key,
+            mappedQuestion.subsystem_key || mappedQuestion.taxonomy?.subsystem_key,
             "",
           ),
           topic: aylaStudentTaxonomyLabel(
-            question.topic_key || question.taxonomy?.topic_key || question.title,
+            mappedQuestion.topic_key
+              || mappedQuestion.taxonomy?.topic_key
+              || mappedQuestion.title,
             "QBank recall",
           ),
           subtopic: aylaStudentTaxonomyLabel(
-            question.subtopic_key || question.taxonomy?.subtopic_key,
+            mappedQuestion.subtopic_key || mappedQuestion.taxonomy?.subtopic_key,
             "",
           ),
-          front: question.question_html || "",
-          back: question.correct_answer_html || "",
-          explanation: question.explanation_html || "",
+          front: mappedQuestion.question_html || "",
+          back: mappedQuestion.correct_answer_html || "",
+          explanation: mappedQuestion.explanation_html || "",
           media: Array.isArray(question.media) ? question.media : [],
           videos: Array.isArray(question.videos) ? question.videos : [],
           provider: "AylaMed QBank",
@@ -72727,6 +73100,257 @@ app.post("/api/ayla/admin/pilot/students/:studentId/advance", async (req, res) =
     });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to advance the pilot study date");
+  }
+});
+
+function aylaV258PilotFlowRepairPlan(db, cohort) {
+  return buildAylaPilotFlowRepairPlan({
+    cohort,
+    students: aylaValues(db, "aylaStudents"),
+    dailyPlans: aylaValues(db, "aylaDailyPlans"),
+    assignments: aylaValues(db, "aylaResourceAssignments"),
+    revisionQueue: aylaValues(db, "aylaRevisionQueue"),
+    qbankSessions: aylaValues(db, "aylaQbankSessions"),
+  });
+}
+
+function aylaV258SupersedePilotRecord(
+  db,
+  collection,
+  id,
+  { actorId, reason },
+) {
+  const row = aylaGetItem(db, collection, id);
+  if (!row) return false;
+  const previousStatus = String(row.status || "pending");
+  if (["completed", "cancelled", "superseded", "abandoned"].includes(
+    previousStatus.toLowerCase(),
+  )) return false;
+  row.previousStatus = previousStatus;
+  row.status = "superseded";
+  row.supersededReason = reason;
+  row.supersededBy = actorId;
+  row.supersededAt = aylaNow();
+  row.updatedAt = row.supersededAt;
+  aylaSetItem(db, collection, row);
+  return true;
+}
+
+app.get("/api/ayla/admin/pilot/cohorts/:cohortId/repair-preview", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
+    const cohort = aylaGetItem(db, "aylaPilotCohorts", req.params.cohortId);
+    if (!cohort) return aylaSendError(res, 404, "AylaMed pilot cohort not found");
+    const repair = aylaV258PilotFlowRepairPlan(db, cohort);
+    return aylaSendOk(res, {
+      writePerformed: false,
+      repair,
+      confirmationRequired: `REPAIR ${cohort.id}`,
+      message: repair.blocked
+        ? "The preview found a blocker. No pilot record was changed."
+        : repair.alreadyApplied
+          ? "This exact pilot-flow repair version is already recorded on the cohort."
+          : "Preview only. Completed history, attempts, scores, notebooks, payments, LMS and CRM data will be preserved.",
+    });
+  } catch (error) {
+    return aylaSendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Failed to preview the pilot-flow repair",
+    );
+  }
+});
+
+app.post("/api/ayla/admin/pilot/cohorts/:cohortId/repair", async (req, res) => {
+  try {
+    const admin = await aylaRequireAdmin(req);
+    const requiredConfirmation = `REPAIR ${req.params.cohortId}`;
+    if (String(req.body.confirmation || "") !== requiredConfirmation) {
+      return aylaSendError(
+        res,
+        400,
+        `Type "${requiredConfirmation}" to repair this private pilot cohort`,
+      );
+    }
+    const actorId = admin.user?.id || admin.method || "aylamed-admin";
+    const result = await mutateAylaDb(async (db) => {
+      const cohort = aylaGetItem(db, "aylaPilotCohorts", req.params.cohortId);
+      if (!cohort) {
+        throw Object.assign(
+          new Error("AylaMed pilot cohort not found"),
+          { statusCode: 404 },
+        );
+      }
+      const repair = aylaV258PilotFlowRepairPlan(db, cohort);
+      if (!repair.eligible) {
+        throw Object.assign(
+          new Error(
+            repair.blocked === "answered_legacy_diagnostic_requires_manual_review"
+              ? "A legacy diagnostic contains answers and must be reviewed manually. No pilot record was changed."
+              : "This cohort is not eligible for the private Step 1 pilot-flow repair.",
+          ),
+          {
+            statusCode: 409,
+            details: {
+              repairVersion: repair.version,
+              blocked: repair.blocked,
+              counts: repair.counts,
+            },
+          },
+        );
+      }
+      if (repair.alreadyApplied) {
+        return {
+          writePerformed: false,
+          alreadyApplied: true,
+          repair,
+          rebuilt: [],
+        };
+      }
+
+      const reason = AYLA_PILOT_FLOW_REPAIR_VERSION;
+      let plansSuperseded = 0;
+      let assignmentsSuperseded = 0;
+      let diagnosticsSuperseded = 0;
+      let revisionsSuperseded = 0;
+      let revisionsCanonicalized = 0;
+
+      for (const id of repair.activePlanIds) {
+        if (aylaV258SupersedePilotRecord(
+          db,
+          "aylaDailyPlans",
+          id,
+          { actorId, reason },
+        )) plansSuperseded += 1;
+      }
+      for (const id of repair.unfinishedAssignmentIds) {
+        if (aylaV258SupersedePilotRecord(
+          db,
+          "aylaResourceAssignments",
+          id,
+          { actorId, reason },
+        )) assignmentsSuperseded += 1;
+      }
+      for (const id of repair.zeroAnswerInvalidDiagnosticIds) {
+        if (aylaV258SupersedePilotRecord(
+          db,
+          "aylaQbankSessions",
+          id,
+          { actorId, reason },
+        )) diagnosticsSuperseded += 1;
+      }
+
+      const revisionSupersedeIds = new Set([
+        ...repair.unsafeRevisionIds,
+        ...repair.duplicateRevisionIds,
+      ]);
+      for (const update of repair.canonicalRevisionUpdates) {
+        const revision = aylaGetItem(db, "aylaRevisionQueue", update.id);
+        if (!revision || revisionSupersedeIds.has(String(update.id))) continue;
+        const previousSystem = revision.system || revision.system_key || null;
+        revision.system = update.system;
+        revision.systemKey = update.system;
+        revision.taxonomyRepair = {
+          version: reason,
+          previousSystem,
+          canonicalSystem: update.system,
+          actorId,
+          repairedAt: aylaNow(),
+        };
+        revision.updatedAt = aylaNow();
+        aylaSetItem(db, "aylaRevisionQueue", revision);
+        revisionsCanonicalized += 1;
+      }
+      for (const id of revisionSupersedeIds) {
+        if (aylaV258SupersedePilotRecord(
+          db,
+          "aylaRevisionQueue",
+          id,
+          { actorId, reason },
+        )) revisionsSuperseded += 1;
+      }
+
+      const rebuilt = [];
+      for (const studentId of repair.studentIds) {
+        const student = aylaGetItem(db, "aylaStudents", studentId);
+        if (!student) continue;
+        const date = aylaV247StudyDate(student);
+        const built = await aylaV189BuildDailyPlan(db, student, date, {
+          force: false,
+          includeAssessment: false,
+          skipAi: true,
+        });
+        rebuilt.push({
+          studentId,
+          scenarioKey: student.pilotScenarioKey || null,
+          date,
+          planId: built.plan?.id || null,
+          planReused: built.reused === true,
+          completedHistoryProtected: built.completedHistoryProtected === true,
+          assignmentCount: built.assignments?.length || 0,
+          assignmentCategories: [...new Set(
+            (built.assignments || []).map((row) =>
+              String(row.category || row.type || "").toLowerCase()),
+          )],
+          focusSystem: built.plan?.focusSystem
+            || built.plan?.systemFocus
+            || null,
+        });
+      }
+
+      cohort.pilotFlowRepairVersion = AYLA_PILOT_FLOW_REPAIR_VERSION;
+      cohort.pilotFlowRepairAt = aylaNow();
+      cohort.pilotFlowRepairBy = actorId;
+      cohort.updatedAt = cohort.pilotFlowRepairAt;
+      aylaSetItem(db, "aylaPilotCohorts", cohort);
+      const event = {
+        id: aylaId("AYLA-PILOT-EVENT"),
+        cohortId: cohort.id,
+        action: "private_step1_pilot_flow_repaired",
+        repairVersion: AYLA_PILOT_FLOW_REPAIR_VERSION,
+        actorId,
+        plansSuperseded,
+        assignmentsSuperseded,
+        diagnosticsSuperseded,
+        revisionsSuperseded,
+        revisionsCanonicalized,
+        completedAssignmentsPreserved: repair.counts.completedAssignmentsPreserved,
+        questionAttemptsPreserved: true,
+        assessmentAttemptsPreserved: true,
+        scoresPreserved: true,
+        notebooksPreserved: true,
+        paymentsUntouched: true,
+        lmsUntouched: true,
+        crmUntouched: true,
+        ordinaryStudentsUntouched: true,
+        rebuilt,
+        createdAt: aylaNow(),
+      };
+      aylaSetItem(db, "aylaPilotAuditEvents", event);
+      return {
+        writePerformed: true,
+        alreadyApplied: false,
+        repair,
+        applied: {
+          plansSuperseded,
+          assignmentsSuperseded,
+          diagnosticsSuperseded,
+          revisionsSuperseded,
+          revisionsCanonicalized,
+        },
+        rebuilt,
+        event,
+      };
+    });
+    return aylaSendOk(res, result);
+  } catch (error) {
+    return aylaSendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Failed to repair the private Step 1 pilot flow",
+      error.details,
+    );
   }
 });
 

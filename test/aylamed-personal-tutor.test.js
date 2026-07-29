@@ -84,6 +84,77 @@ test("Personal Tutor chooses the next modality from the one stored roadmap", () 
   assert.equal(navigation.actionTarget.assignmentId, "revision-1");
 });
 
+test("a pending verified diagnostic is the exact next Tutor action", () => {
+  const decision = buildAylaPersonalTutorDecision(baseInput({
+    student: {
+      examTrackId: "usmle_step_1",
+      targetDate: "2026-08-20",
+      dailyHours: 3,
+      onboardingPath: "diagnostic_test",
+      serverVerifiedBaseline: false,
+    },
+    assignments: [assignment("diagnostic-1", "diagnostic", {
+      type: "baseline_diagnostic",
+      priority: "Critical",
+      system: "Baseline",
+      title: "Complete your verified 40-question diagnostic",
+      resourceIds: [],
+      items: [],
+      estimatedMinutes: 60,
+    })],
+  }));
+  assert.equal(decision.nextAction.assignmentId, "diagnostic-1");
+  assert.equal(decision.nextAction.category, "diagnostic");
+  assert.equal(decision.nextAction.modality, "complete");
+  assert.equal(decision.nextAction.returnLink, "/qbank?diagnostic=1");
+  assert.deepEqual(decision.nextAction.actionTarget, {
+    kind: "diagnostic",
+    route: "/dashboard/qbank",
+    query: { diagnostic: "1" },
+    appRoute: "/dashboard/qbank?diagnostic=1",
+  });
+  assert.equal(decision.readinessPace.state, "verified_baseline_required");
+  assert.equal(decision.readinessPace.projectedWorkloadDays, null);
+});
+
+test("Tutor gives an evidence-based pace window without promising a pass", () => {
+  const decision = buildAylaPersonalTutorDecision(baseInput({
+    student: {
+      examTrackId: "usmle_step_1",
+      targetDate: "2026-10-18",
+      dailyHours: 4,
+      weeklyStudyDays: 6,
+      serverVerifiedBaseline: true,
+    },
+    questionAttempts: Array.from({ length: 40 }, (_, index) => ({
+      resourceId: `verified-${index}`,
+      serverVerified: true,
+      outcome: index < 28 ? "correct" : "incorrect",
+      system: "Cardiovascular",
+      topic: "Baseline",
+    })),
+    recentPlans: [
+      { date: "2026-07-19", completionPercent: 90, status: "completed" },
+      { date: "2026-07-18", completionPercent: 80, status: "completed" },
+      { date: "2026-07-17", completionPercent: 85, status: "completed" },
+    ],
+    pathwayEstimate: {
+      exam: { targetDays: 90 },
+      inputs: { dailyHoursAvailable: 4, weeklyStudyDays: 6 },
+      confidence: { level: "high" },
+      workload: { estimatedHours: 240 },
+      milestones: [{ key: "coverage", byDay: 12, title: "Complete the first weak-system repair cycle" }],
+    },
+  }));
+  assert.equal(decision.readinessPace.state, "on_schedule");
+  assert.equal(decision.readinessPace.basis, "observed_completion");
+  assert.equal(decision.readinessPace.projectedWorkloadDays, 83);
+  assert.equal(decision.readinessPace.nextCheckpointDays, 12);
+  assert.equal(decision.readinessPace.passPrediction, false);
+  assert.match(decision.readinessPace.disclaimer, /not a prediction or guarantee of passing/i);
+  assert.equal(decision.recommendations.some((row) => row.kind === "readiness_pace"), true);
+});
+
 test("overload reduces question volume and produces only a version-checked single-roadmap directive", () => {
   const decision = buildAylaPersonalTutorDecision(baseInput({
     warning: { level: "high", backlogMinutes: 400 },
