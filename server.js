@@ -227,6 +227,10 @@ import {
   mergeAylaMistakeFlashcard,
 } from "./lib/aylamed-adaptive-core.js";
 import {
+  aylaOriginalOverdueAssignment,
+  aylaOverdueTitle,
+} from "./lib/aylamed-overdue.js";
+import {
   applyAylaPlanFeaturePatch,
   aylaPlanFeatureMatrixRow,
   normalizeAylaPlanFeatures,
@@ -69928,7 +69932,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
 
   const completedIds = aylaV189CompletedResourceIds(db, student);
   const overdue = aylaV189OverdueAssignments(db, student, date)
-    .filter((row) => String(row.category || "") !== "overdue_review")
+    .filter((row) => aylaOriginalOverdueAssignment(row))
     .filter((row) => !aylaValues(db, "aylaResourceAssignments").some((candidate) => String(candidate.scheduledDate) === String(date) && !["completed", "cancelled", "superseded"].includes(String(candidate.status || "").toLowerCase()) && aylaCleanArray(candidate.linkedAssignmentIds).map(String).includes(String(row.id))))
     .slice(0, 12);
   const dueRevisions = aylaV189DueRevisionQueue(db, student, date).slice(0, 20);
@@ -70092,9 +70096,12 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       id: aylaId("AYLA-ASN"), studentId: student.id, userId: student.ayla_user_id || student.user_id || null,
       ...aylaV227ExamFields(student),
       dailyPlanId: plan.id, scheduledDate: date, category: old.category || "reading", type: old.type || old.category || "reading",
-      title: `Overdue: ${old.title || "Priority assignment"}`, system: old.system || focusSystem, topic: old.topic || focusTopic,
+      title: aylaOverdueTitle(old.title), system: old.system || focusSystem, topic: old.topic || focusTopic,
       resourceIds, items,
-      linkedAssignmentIds: [old.id], estimatedMinutes: Math.max(5, aylaNumber(old.estimatedMinutes, 15)), status: "pending", priority: "Critical",
+      linkedAssignmentIds: [old.id],
+      overdueCarry: true,
+      overdueRootAssignmentId: old.overdueRootAssignmentId || old.id,
+      estimatedMinutes: Math.max(5, aylaNumber(old.estimatedMinutes, 15)), status: "pending", priority: "Critical",
       rationale: `Carried from ${old.scheduledDate || "an earlier day"}. Completing this task closes the original overdue record.`,
       createdAt: aylaNow(), updatedAt: aylaNow(),
     };
