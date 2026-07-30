@@ -17,6 +17,7 @@ import {
   auditContentMediaLinks,
   auditContentVideoAliasMappings,
   auditContentVideoMappings,
+  applyAylaOriginalMcqRepair,
   contentRegistryStatus,
   claimContentImportDraft,
   createContentBackgroundJobStore,
@@ -56,6 +57,7 @@ import {
   listContentTaxonomyAuditEvents,
   listContentTaxonomyReviewQueue,
   normalizeContentSourceProfile,
+  previewAylaOriginalMcqRepair,
   removeContentQuestionTaxonomyOverride,
   recordExternalQbankAuditEvent,
   recordExternalQbankDeliveryAnswer,
@@ -204,6 +206,7 @@ import {
   normalizeAylaLibraryResource,
   normalizeAylaLibraryResources,
   sanitizeAylaHiddenSourceText,
+  searchAylaLibraryPages,
   selectAylaRoadmapReading,
 } from "./lib/aylamed-library.js";
 import {
@@ -397,6 +400,18 @@ import {
   normalizeExamTrack,
   slug as contentSlug,
 } from "./lib/content-import-adapter.js";
+import {
+  aylaPilotLoginFragmentPath,
+  consumeAylaPilotLoginGrant,
+  createAylaPilotLoginGrant,
+} from "./lib/aylamed-pilot-login.js";
+import {
+  appendAylaQbankJournalRecord,
+  applyAylaQbankJournalRecords,
+  clearAylaQbankJournal,
+  createAylaDiagnosticJournalRecord,
+  readAylaQbankJournalRecords,
+} from "./lib/aylamed-qbank-journal.js";
 import { mutateJsonCopyOnWrite } from "./lib/json-copy-on-write.js";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -38283,6 +38298,45 @@ async function aylaSelectQbankSessionQuestions({
   };
 }
 
+app.get("/api/ayla/admin/catalog/image-mcq-repair/preview", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Pragma", "no-cache");
+  try {
+    await aylaRequireAdmin(req);
+    return aylaSendOk(res, await previewAylaOriginalMcqRepair());
+  } catch (error) {
+    return aylaSendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Failed to preview the image-MCQ repair",
+      { ...(error.code ? { code: error.code } : {}), ...(error.details ? { details: error.details } : {}) },
+    );
+  }
+});
+
+app.post("/api/ayla/admin/catalog/image-mcq-repair/apply", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Pragma", "no-cache");
+  try {
+    const admin = await aylaRequireAdmin(req);
+    const result = await applyAylaOriginalMcqRepair({
+      expectedFingerprint: req.body.expected_fingerprint || req.body.expectedFingerprint,
+      confirmation: req.body.confirmation,
+      medicalReviewConfirmed: req.body.medical_review_confirmed === true
+        || req.body.medicalReviewConfirmed === true,
+      actorId: admin.user?.id || admin.method || "aylamed-admin",
+    });
+    return aylaSendOk(res, result);
+  } catch (error) {
+    return aylaSendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Failed to apply the image-MCQ repair",
+      { ...(error.code ? { code: error.code } : {}), ...(error.details ? { details: error.details } : {}) },
+    );
+  }
+});
+
 app.get("/api/ayla/admin/diagnostic/step1/media-replacements/preview", async (req, res) => {
   try {
     await aylaRequireAdmin(req);
@@ -39541,7 +39595,10 @@ app.post("/api/ayla/qbank/sessions/:sessionId/answers", async (req, res) => {
     const selectedAnswerId = Number(req.body.selected_answer_id ?? req.body.selectedAnswerId);
     if (!question.answers.some((row) => Number(row.answer_id) === selectedAnswerId)) return aylaSendError(res, 400, "selected_answer_id is not a valid answer choice");
 
-    const mutation = await mutateAylaDb(async (db) => {
+    const mutateAnswer = session.purpose === "baseline_diagnostic" && session.mode === "test"
+      ? mutateAylaDiagnosticAnswer
+      : mutateAylaDb;
+    const mutation = await mutateAnswer(async (db) => {
       const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, session.examTrack);
       const current = aylaOwnedQbankSession(db, fresh.user, fresh.student, session.id);
       aylaRequireCurrentDiagnosticBlueprint(current);
@@ -39563,7 +39620,7 @@ app.post("/api/ayla/qbank/sessions/:sessionId/answers", async (req, res) => {
         const immediate = recorded.session.mode === "tutor";
         const attemptResult = immediate ? aylaRecordQbankAttempt(db, recorded.session, currentMapping, recorded.answer, question) : null;
         const attempt = attemptResult?.attempt || null;
-        aylaQbankEvent(db, recorded.session, "answer_recorded", immediate
+        const event = aylaQbankEvent(db, recorded.session, "answer_recorded", immediate
           ? { questionRef, correct: recorded.answer.correct, attemptId: attempt?.id || null }
           : { questionRef, resultWithheldUntilSubmit: true });
         if (immediate) {
@@ -39578,6 +39635,14 @@ app.post("/api/ayla/qbank/sessions/:sessionId/answers", async (req, res) => {
             answer_keys_included: false,
           };
         }
+        return {
+          ...recorded,
+          adaptiveUpdate,
+          __diagnosticJournal: immediate ? null : {
+            session: recorded.session,
+            event,
+          },
+        };
       }
       return { ...recorded, adaptiveUpdate };
     });
@@ -61687,6 +61752,10 @@ const AYLA_COLLECTIONS = {
 };
 
 const AYLA_DB_PATH = path.join(DATA_DIR, "aylamed-db.json");
+const AYLA_QBANK_JOURNAL_PATH = String(
+  process.env.AYLA_QBANK_JOURNAL_PATH
+    || path.join(DATA_DIR, "aylamed-diagnostic-answers.jsonl"),
+).trim();
 const AYLA_ADMIN_TOKEN = String(process.env.AYLA_ADMIN_TOKEN || "").trim();
 const AYLA_REQUIRE_STUDENT_AUTH = String(process.env.AYLA_REQUIRE_STUDENT_AUTH || "true").toLowerCase() !== "false";
 
@@ -61838,6 +61907,7 @@ const DEFAULT_AYLA_DB = {
   aylaModerationActions: {},
   aylaStudyPartnerRequests: {},
   aylaPasswordResetTokens: {},
+  aylaPilotLoginTokens: {},
   aylaPilotCohorts: {},
   aylaPilotAuditEvents: {},
   aylaExamHandoffs: {},
@@ -61929,9 +61999,26 @@ async function readAylaDbFromDisk() {
     next.aylaAiUsageSettings = aylaMergeAiUsageSettings(parsed.aylaAiUsageSettings || {});
     next.aylaPlanAiLimits = parsed.aylaPlanAiLimits && typeof parsed.aylaPlanAiLimits === "object" ? parsed.aylaPlanAiLimits : {};
     next.aylaStudentAiOverrides = parsed.aylaStudentAiOverrides && typeof parsed.aylaStudentAiOverrides === "object" ? parsed.aylaStudentAiOverrides : {};
+    const replay = applyAylaQbankJournalRecords(
+      next,
+      await readAylaQbankJournalRecords(AYLA_QBANK_JOURNAL_PATH),
+    );
+    if (replay.applied) {
+      console.log(`Recovered ${replay.applied} durable diagnostic answer journal record(s)`);
+    }
     return next;
   } catch (error) {
-    if (error.code === "ENOENT") return { ...DEFAULT_AYLA_DB, aylaSettings: aylaMergeSettings(), aylaAiUsageSettings: aylaMergeAiUsageSettings() };
+    if (error.code === "ENOENT") {
+      const empty = {
+        ...DEFAULT_AYLA_DB,
+        aylaSettings: aylaMergeSettings(),
+        aylaAiUsageSettings: aylaMergeAiUsageSettings(),
+      };
+      return applyAylaQbankJournalRecords(
+        empty,
+        await readAylaQbankJournalRecords(AYLA_QBANK_JOURNAL_PATH),
+      ).db;
+    }
     console.error("AylaMed DB read error (fail-closed):", error.message);
     throw error;
   }
@@ -61995,6 +62082,7 @@ async function writeAylaDb(db) {
       updatedAt: new Date().toISOString(),
     };
     await ngWriteJsonAtomicStreaming(AYLA_DB_PATH, nextDb, "AylaMed database");
+    await clearAylaQbankJournal(AYLA_QBANK_JOURNAL_PATH);
     aylaDbCache = nextDb;
     aylaDbReadInFlight = null;
   });
@@ -62022,9 +62110,50 @@ async function mutateAylaDb(mutator) {
       };
       await ensureDataDir();
       await ngWriteJsonAtomicStreaming(AYLA_DB_PATH, nextDb, "AylaMed atomic database mutation");
+      await clearAylaQbankJournal(AYLA_QBANK_JOURNAL_PATH);
       aylaDbCache = nextDb;
       aylaDbReadInFlight = null;
       return mutation.result;
+    });
+  aylaWriteQueue = task;
+  return task;
+}
+
+async function mutateAylaDiagnosticAnswer(mutator) {
+  const task = aylaWriteQueue
+    .catch((error) => {
+      console.error("Previous AylaMed write failed; diagnostic journal queue recovered:", error.message);
+    })
+    .then(async () => {
+      const source = aylaDbCache || await readAylaDbFromDisk();
+      const mutation = await mutateJsonCopyOnWrite(source, mutator);
+      const internal = mutation.result?.__diagnosticJournal || null;
+      const result = mutation.result && typeof mutation.result === "object"
+        ? { ...mutation.result }
+        : mutation.result;
+      if (result && typeof result === "object") delete result.__diagnosticJournal;
+      if (!internal) return result;
+
+      const current = mutation.value;
+      const qbankStateVersion = Math.max(0, Number(current.qbank_state_version || 0)) + 1;
+      const nextDb = {
+        ...DEFAULT_AYLA_DB,
+        ...current,
+        schema_version: DEFAULT_AYLA_DB.schema_version,
+        qbank_state_version: qbankStateVersion,
+        aylaSettings: aylaMergeSettings(current.aylaSettings || {}),
+        aylaAiUsageSettings: aylaMergeAiUsageSettings(current.aylaAiUsageSettings || {}),
+        updatedAt: new Date().toISOString(),
+      };
+      const journalRecord = createAylaDiagnosticJournalRecord({
+        session: internal.session,
+        event: internal.event,
+        qbankStateVersion,
+      });
+      await appendAylaQbankJournalRecord(AYLA_QBANK_JOURNAL_PATH, journalRecord);
+      aylaDbCache = nextDb;
+      aylaDbReadInFlight = null;
+      return result;
     });
   aylaWriteQueue = task;
   return task;
@@ -64929,6 +65058,35 @@ function aylaRegisterCrud(collectionKey, config) {
 // -----------------------------------------------------------------------------
 // AYLAMED V156 AUTH ROUTES - separate from LMS users/passwords
 // -----------------------------------------------------------------------------
+function aylaPilotStudentForUser(db, user, requestedStudentId = "") {
+  const owned = aylaValues(db, "aylaStudents")
+    .filter((row) => String(
+      row.ayla_user_id
+        || row.aylaUserId
+        || row.user_id
+        || row.userId
+        || "",
+    ) === String(user?.id || ""));
+  const requested = String(requestedStudentId || "").trim();
+  if (requested) {
+    const student = owned.find((row) => String(row.id) === requested);
+    if (student) return student;
+    const error = new Error("Pilot student profile not found");
+    error.statusCode = 404;
+    throw error;
+  }
+  const preferred = owned.find((row) => String(row.id) === String(user?.studentId || ""));
+  if (preferred) return preferred;
+  if (owned.length === 1) return owned[0];
+  const error = new Error(
+    owned.length
+      ? "student_id is required when a pilot owns more than one profile"
+      : "Pilot student profile not found",
+  );
+  error.statusCode = owned.length ? 400 : 404;
+  throw error;
+}
+
 app.post("/api/ayla/auth/register", async (req, res) => {
   try {
     const email = aylaNormalizeEmail(req.body.email);
@@ -64980,6 +65138,162 @@ app.post("/api/ayla/auth/register", async (req, res) => {
     }, 201);
   } catch (error) {
     return aylaSendError(res, 500, error.message || "Failed to register AylaMed user");
+  }
+});
+
+app.post("/api/ayla/admin/pilot-login-links", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Pragma", "no-cache");
+  try {
+    const admin = await aylaRequireAdmin(req);
+    const requestedEmail = aylaNormalizeEmail(req.body.email);
+    const requestedUserId = String(req.body.user_id || req.body.userId || "").trim();
+    if (!requestedEmail && !requestedUserId) {
+      return aylaSendError(res, 400, "email or user_id is required");
+    }
+
+    const created = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const user = requestedUserId
+        ? aylaGetItem(db, "aylaUsers", requestedUserId)
+        : aylaFindUserByEmail(db, requestedEmail);
+      if (
+        !user
+        || (requestedEmail && aylaNormalizeEmail(user.email) !== requestedEmail)
+      ) {
+        const error = new Error("Pilot account not found");
+        error.statusCode = 404;
+        throw error;
+      }
+      const student = aylaPilotStudentForUser(
+        db,
+        user,
+        req.body.student_id || req.body.studentId,
+      );
+      const expectedConfirmation = `CREATE ONE-TIME LINK FOR ${aylaNormalizeEmail(user.email)}`;
+      if (String(req.body.confirmation || "") !== expectedConfirmation) {
+        const error = new Error(`Type exactly: ${expectedConfirmation}`);
+        error.statusCode = 409;
+        error.code = "PILOT_LOGIN_CONFIRMATION_REQUIRED";
+        throw error;
+      }
+
+      const now = new Date();
+      for (const existing of aylaValues(db, "aylaPilotLoginTokens")) {
+        if (
+          String(existing.userId || "") === String(user.id)
+          && String(existing.studentId || "") === String(student.id)
+          && existing.status === "unused"
+          && !existing.usedAt
+        ) {
+          aylaSetItem(db, "aylaPilotLoginTokens", {
+            ...existing,
+            status: "superseded",
+            supersededAt: now.toISOString(),
+          });
+        }
+      }
+      const grantResult = createAylaPilotLoginGrant({
+        user,
+        student,
+        createdBy: admin.user?.id || admin.method || "aylamed-admin",
+        ttlSeconds: req.body.ttl_seconds ?? req.body.ttlSeconds,
+        now,
+      });
+      aylaSetItem(db, "aylaPilotLoginTokens", grantResult.grant);
+      const audit = {
+        id: aylaId("AYLA-PILOT-EVENT"),
+        cohortId: null,
+        userId: user.id,
+        studentId: student.id,
+        type: "one_time_login_created",
+        payload: {
+          grantId: grantResult.grant.id,
+          expiresAt: grantResult.grant.expiresAt,
+          singleUse: true,
+        },
+        createdAt: now.toISOString(),
+      };
+      aylaSetItem(db, "aylaPilotAuditEvents", audit);
+      return {
+        user: aylaSanitizeUser(user),
+        student: { id: student.id },
+        grant: grantResult.grant,
+        token: grantResult.token,
+      };
+    });
+
+    const publicBase = String(
+      process.env.AYLA_PUBLIC_URL || "https://aylamed.nextgenusmlelms.com",
+    ).replace(/\/$/, "");
+    return aylaSendOk(res, {
+      user: created.user,
+      student: created.student,
+      access_url: `${publicBase}${aylaPilotLoginFragmentPath(created.token)}`,
+      expires_at: created.grant.expiresAt,
+      ttl_seconds: created.grant.ttlSeconds,
+      single_use: true,
+    }, 201);
+  } catch (error) {
+    return aylaSendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Failed to create one-time pilot access",
+      error.code ? { code: error.code } : undefined,
+    );
+  }
+});
+
+app.post("/api/ayla/auth/pilot-exchange", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Pragma", "no-cache");
+  try {
+    const token = String(req.body.token || "").trim();
+    if (!token) return aylaSendError(res, 400, "Pilot access token is required");
+    const consumed = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const result = consumeAylaPilotLoginGrant({
+        grants: aylaValues(db, "aylaPilotLoginTokens"),
+        token,
+        usersById: db.aylaUsers,
+        studentsById: db.aylaStudents,
+        now: new Date(),
+      });
+      aylaSetItem(db, "aylaPilotLoginTokens", result.grant);
+      const user = { ...result.user, lastLoginAt: aylaNow(), updatedAt: aylaNow() };
+      aylaSetItem(db, "aylaUsers", user);
+      aylaSetItem(db, "aylaPilotAuditEvents", {
+        id: aylaId("AYLA-PILOT-EVENT"),
+        cohortId: null,
+        userId: user.id,
+        studentId: result.student.id,
+        type: "one_time_login_consumed",
+        payload: { grantId: result.grant.id, singleUse: true },
+        createdAt: result.grant.usedAt,
+      });
+      return { user, student: result.student };
+    });
+    return aylaSendOk(res, {
+      user: aylaSanitizeUser(consumed.user),
+      student: {
+        id: consumed.student.id,
+        examTrackId: aylaCanonicalExamTrack(
+          consumed.student.examTrackId
+            || consumed.student.exam_track_id
+            || consumed.student.exam,
+        ) || null,
+      },
+      token: aylaSignAuthToken(consumed.user),
+    });
+  } catch (error) {
+    return aylaSendError(
+      res,
+      error.statusCode || 500,
+      error.statusCode === 401
+        ? "Invalid or expired pilot access link"
+        : error.message || "Failed to exchange one-time pilot access",
+      error.code ? { code: error.code } : undefined,
+    );
   }
 });
 
@@ -76339,6 +76653,36 @@ app.get("/api/ayla/students/:studentId/library/resources/:resourceId", async (re
     return aylaSendOk(res, { reader, page_source_warning: eligible.warning });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to open Library reading");
+  }
+});
+
+app.get("/api/ayla/students/:studentId/library/resources/:resourceId/search", async (req, res) => {
+  try {
+    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId, "library");
+    res.setHeader("Cache-Control", "private, no-store");
+    const query = String(req.query.q || req.query.search || "").trim();
+    if (query.length < 2) return aylaSendError(res, 400, "Enter at least two characters to search this book");
+    const eligible = await aylaV211EligibleReadings(db, student);
+    const resource = eligible.resources.find((row) => aylaLibraryResourceMatchesId(row, req.params.resourceId));
+    if (!resource) return aylaSendError(res, 404, "Library reading not found for this exam dashboard");
+    const requestedAssignmentId = String(req.query.assignment_id || req.query.assignmentId || "");
+    const assignment = aylaV211AssignmentForReading(
+      aylaV211ReadingAssignments(db, student),
+      resource,
+      requestedAssignmentId,
+    );
+    if (requestedAssignmentId && !assignment) {
+      return aylaSendError(res, 404, "Reading assignment not found for this student");
+    }
+    const search = searchAylaLibraryPages(resource, query, {
+      examTrack: student.examTrackId || student.exam_track_id || student.exam,
+      studentId: student.id,
+      assignment,
+      limit: req.query.limit,
+    });
+    return aylaSendOk(res, { search });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to search this Library reading");
   }
 });
 
