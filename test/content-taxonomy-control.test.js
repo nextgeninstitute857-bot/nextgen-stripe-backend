@@ -26,7 +26,7 @@ test("taxonomy governance recognizes every supported exam without cross-exam fal
   assert.equal(CONTENT_TAXONOMY_EXAM_TRACKS.length, 7);
 });
 
-test("taxonomy keys are canonical and question overrides require a topic", () => {
+test("taxonomy keys are canonical and approved mappings require the full hierarchy", () => {
   assert.deepEqual(normalizeContentTaxonomy({
     systemKey: "Cardiovascular System",
     topicKey: "Valvular Disease",
@@ -39,7 +39,22 @@ test("taxonomy keys are canonical and question overrides require a topic", () =>
     labels: { short_name: "Cardio" },
   });
   assert.throws(() => normalizeContentTaxonomy({ system_key: "cardiology" }, { requireTopic: true }), /topic_key/);
-  assert.equal(contentTaxonomyIsComplete({ system_key: "cardiology", topic_key: "murmurs" }), true);
+  assert.throws(() => normalizeContentTaxonomy({
+    system_key: "cardiology",
+    topic_key: "murmurs",
+  }, { requireHierarchy: true }), /subsystem_key/);
+  assert.throws(() => normalizeContentTaxonomy({
+    system_key: "cardiology",
+    subsystem_key: "valvular_disease",
+    topic_key: "murmurs",
+  }, { requireHierarchy: true }), /subtopic_key/);
+  assert.equal(contentTaxonomyIsComplete({
+    system_key: "cardiology",
+    subsystem_key: "valvular_disease",
+    topic_key: "murmurs",
+    subtopic_key: "aortic_stenosis",
+  }), true);
+  assert.equal(contentTaxonomyIsComplete({ system_key: "cardiology", topic_key: "murmurs" }), false);
   assert.equal(contentTaxonomyIsComplete({ system_key: "cardiology" }), false);
 });
 
@@ -48,7 +63,22 @@ test("mapping lifecycle distinguishes pending, rejected, disabled, approved, and
   assert.equal(contentTaxonomyMappingReviewState({ id: "1", status: "pending", review_status: "pending" }), "needs_review");
   assert.equal(contentTaxonomyMappingReviewState({ id: "1", status: "rejected", review_status: "rejected" }), "rejected");
   assert.equal(contentTaxonomyMappingReviewState({ id: "1", status: "disabled", review_status: "approved" }), "disabled");
-  assert.equal(contentTaxonomyMappingReviewState({ id: "1", status: "active", review_status: "approved" }), "approved");
+  assert.equal(contentTaxonomyMappingReviewState({
+    id: "1",
+    status: "active",
+    review_status: "approved",
+    system_key: "cardiovascular",
+    subsystem_key: "ischemic_heart_disease",
+    topic_key: "acute_coronary_syndrome",
+    subtopic_key: "myocardial_infarction",
+  }), "approved");
+  assert.equal(contentTaxonomyMappingReviewState({
+    id: "1",
+    status: "active",
+    review_status: "approved",
+    system_key: "cardiovascular",
+    topic_key: "acute_coronary_syndrome",
+  }), "needs_review");
   assert.equal(normalizeContentTaxonomyReviewAction("re-open"), "reopen");
   assert.equal(normalizeContentTaxonomyReviewAction("delete"), null);
 });
@@ -60,7 +90,9 @@ test("coverage validation reports every exam and fails closed on incomplete taxo
       total_questions: 10,
       approved_questions: 8,
       system_classified_questions: 10,
+      subsystem_classified_questions: 9,
       topic_classified_questions: 9,
+      subtopic_classified_questions: 9,
       complete_questions: 9,
       provider_pairs_total: 3,
       provider_pairs_approved: 2,
@@ -71,7 +103,9 @@ test("coverage validation reports every exam and fails closed on incomplete taxo
       total_questions: 4,
       approved_questions: 4,
       system_classified_questions: 4,
+      subsystem_classified_questions: 4,
       topic_classified_questions: 4,
+      subtopic_classified_questions: 4,
       complete_questions: 4,
       question_override_count: 1,
       provider_pairs_total: 2,
