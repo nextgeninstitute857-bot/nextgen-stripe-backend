@@ -586,6 +586,22 @@ test("approval cannot flatten a researched lecture by omitting its subsystem", (
   }), (error) => error.code === "VIMEO_MAPPING_INCOMPLETE");
 });
 
+test("approval cannot omit the learning-objective subtopic", () => {
+  const draft = catalogDraft();
+  const classification = {
+    ...successfulClassification(draft),
+    subtopic: "",
+    qbankTopic: null,
+  };
+  assert.throws(() => approveVimeoCatalogDraft({
+    ...draft,
+    classification,
+    revision: 2,
+  }, {
+    expectedRevision: 2,
+  }), (error) => error.code === "VIMEO_MAPPING_INCOMPLETE");
+});
+
 test("a lecture missing from its managed folder cannot be newly approved or deleted implicitly", () => {
   const draft = catalogDraft();
   const missingDraft = {
@@ -638,6 +654,9 @@ test("catalog summary keeps approval readiness and web verification visible", ()
   assert.equal(summary.hierarchyIncomplete, 1);
   assert.equal(summary.approvedHierarchyComplete, 1);
   assert.equal(summary.bySubsystem["Cardiovascular → Ischemic heart disease"], 2);
+  assert.equal(summary.bySubtopic[
+    "Cardiovascular → Ischemic heart disease → Acute coronary syndrome → Myocardial infarction"
+  ], 2);
 });
 
 test("server wiring is draft-first, background researched, and explicit-review only", () => {
