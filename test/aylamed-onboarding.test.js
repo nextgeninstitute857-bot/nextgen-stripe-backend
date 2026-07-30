@@ -104,6 +104,32 @@ test("submitted diagnostic creates verified per-system baselines without inventi
       q2: { correct: false },
       q3: { correct: true },
     },
+    diagnosticTaxonomyByQuestionId: {
+      one: {
+        system: "Cardiovascular",
+        subsystem: "Cardiac conduction",
+        topic: "AV block",
+        subtopic: "First-degree AV block",
+      },
+      two: {
+        system: "Cardiovascular",
+        subsystem: "Cardiac conduction",
+        topic: "AV block",
+        subtopic: "Second-degree AV block",
+      },
+      three: {
+        system: "Renal",
+        subsystem: "Acid-base physiology",
+        topic: "Metabolic acidosis",
+        subtopic: "Anion gap",
+      },
+      four: {
+        system: "Renal",
+        subsystem: "Acid-base physiology",
+        topic: "Metabolic acidosis",
+        subtopic: "Respiratory compensation",
+      },
+    },
   };
   const questions = [
     { id: "one", taxonomy: { system_key: "cardiovascular" } },
@@ -129,7 +155,36 @@ test("submitted diagnostic creates verified per-system baselines without inventi
   assert.equal(baseline.diagnosticCoverage.mappedQuestionCount, 4);
   assert.equal(baseline.diagnosticCoverage.systemsCovered, 2);
   assert.equal(baseline.diagnosticCoverage.systemsExpected, 5);
+  assert.equal(baseline.diagnosticCoverage.subsystemsSampled, 2);
+  assert.equal(baseline.diagnosticCoverage.topicsSampled, 2);
+  assert.equal(baseline.diagnosticCoverage.subtopicsSampled, 4);
+  assert.equal(baseline.diagnosticCoverage.sampledTaxonomyOnly, true);
+  assert.equal(baseline.diagnosticCoverage.allTopicsTested, false);
+  assert.equal(baseline.diagnosticCoverage.untestedTaxonomyIsUnknown, true);
+  assert.equal(
+    baseline.topicBaselines["Cardiovascular > Cardiac conduction > AV block"].score,
+    50,
+  );
+  assert.equal(
+    baseline.topicBaselines["Renal > Acid-base physiology > Metabolic acidosis"].total,
+    2,
+  );
+  assert.deepEqual(
+    baseline.weakTopicSignals.map((row) => row.topic),
+    ["AV block", "Metabolic acidosis"],
+  );
+  assert.equal(
+    baseline.diagnosticTaxonomyEvidence.topicEvidence
+      .every((row) => row.evidenceScope === "sampled_questions_only"),
+    true,
+  );
+  assert.equal(baseline.diagnosticTaxonomyEvidence.untestedTaxonomyIsUnknown, true);
   assert.equal("Respiratory" in baseline.systemBaselines, false);
+  assert.equal(
+    Object.keys(baseline.topicBaselines)
+      .some((key) => key.includes("Respiratory")),
+    false,
+  );
 });
 
 test("unsubmitted and ordinary practice sessions cannot manufacture a verified baseline", () => {
