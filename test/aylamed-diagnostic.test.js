@@ -181,6 +181,40 @@ test("an unverified external image URL is not treated as diagnostic-ready", () =
   );
 });
 
+test("a required video is ready only when its verified playable mapping exists", () => {
+  const question = fixture(1);
+  question.question_html = '<video src="renal-loop.mp4"></video>';
+  question.videos = [{
+    ref: "renal-loop.mp4",
+    provider_id: "987654",
+    embed_url: "https://player.vimeo.com/video/987654",
+  }];
+  assert.equal(auditDiagnosticQuestionMedia(question).ready, true);
+
+  question.videos = [];
+  assert.equal(auditDiagnosticQuestionMedia(question).ready, false);
+});
+
+test("new diagnostics choose 2026 before 2025 for the same learning slot", () => {
+  const current = {
+    ...rotatingFixture(0),
+    id: "current-question",
+    source_year: 2026,
+  };
+  const prior = {
+    ...rotatingFixture(0),
+    id: "prior-question",
+    source_year: 2025,
+  };
+  const result = buildStep1DiagnosticSelection([prior, current], {
+    requestedCount: 1,
+    minimumSystems: 1,
+    selectionSeed: "year-priority",
+  });
+  assert.equal(result.ready, true);
+  assert.equal(result.selected[0].id, "current-question");
+});
+
 test("the audited 40-question pilot set spans at least twelve canonical systems when media is linked", () => {
   const result = buildStep1DiagnosticSelection(
     TITLES.map((_, index) => fixture(index)),

@@ -33,8 +33,8 @@ test("adaptive systems come from the student's exam registry instead of a Step 1
 test("server-verified mistakes become deterministic private weak-area cards", () => {
   const question = {
     id: "question-1",
-    question_html: "<p>What is the diagnosis?</p>",
-    explanation_html: "<p>The murmur is diagnostic.</p>",
+    question_html: '<p>What is the diagnosis?</p><img src="private/murmur.png" alt="Murmur tracing">',
+    explanation_html: '<p>The murmur is diagnostic.</p><video src="private/murmur.mp4"></video>',
     correct_answer_id: 2,
     answers: [
       { answer_id: 1, text_html: "Choice A" },
@@ -70,6 +70,11 @@ test("server-verified mistakes become deterministic private weak-area cards", ()
   assert.equal(first.examTrackId, "usmle_step_2_ck");
   assert.equal(first.bucket, "weak_area");
   assert.equal(first.back, "<strong>Choice B</strong>");
+  assert.match(first.front, /Murmur tracing/);
+  assert.doesNotMatch(`${first.front}${first.back}${first.explanation}`, /<(?:img|video)\b/i);
+  assert.deepEqual(first.media, []);
+  assert.deepEqual(first.videos, []);
+  assert.equal(first.mediaOmittedForFlashcard, true);
   assert.equal(first.authorizationStatus, "owned");
   assert.equal(first.sourceAccessMode, "protected");
   assert.equal(first.sourceLabelVisible, false);

@@ -260,9 +260,10 @@ test("v218 persistence and routes keep binaries, provider secrets, and answers o
   const postgres = await fs.readFile(new URL("../lib/content-registry-postgres.js", import.meta.url), "utf8");
   const server = await fs.readFile(new URL("../server.js", import.meta.url), "utf8");
   const delivery = await fs.readFile(new URL("../lib/external-qbank-delivery.js", import.meta.url), "utf8");
+  const sessionTableStart = postgres.indexOf("CREATE TABLE IF NOT EXISTS external_qbank_sessions");
   const sessionTables = postgres.slice(
-    postgres.indexOf("CREATE TABLE IF NOT EXISTS external_qbank_sessions"),
-    postgres.indexOf("export async function createContentMediaImportJob"),
+    sessionTableStart,
+    postgres.indexOf("CREATE TABLE IF NOT EXISTS content_background_jobs", sessionTableStart),
   );
   assert.match(sessionTables, /external_qbank_sessions/);
   assert.match(sessionTables, /external_qbank_session_items/);

@@ -13,6 +13,7 @@ import {
   mergeAylaLibraryProgressCollection,
   normalizeAylaLibraryResource,
   sanitizeAylaLibraryResource,
+  searchAylaLibraryPages,
   selectAylaRoadmapReading,
 } from "../lib/aylamed-library.js";
 
@@ -145,6 +146,51 @@ test("page-turn reader returns one page with exact previous and next navigation"
   assert.equal(second.navigation.previous.pdf_page, 12);
   assert.equal(second.navigation.next, null);
   assert.equal(findAylaLibraryPage(resource, "pdf-999"), null);
+});
+
+test("inside-book search returns bounded snippets and page keys without whole-page payloads", () => {
+  const resource = normalizeAylaLibraryResource(reading({
+    coverImageUrl: "https://cdn.example.com/first-aid-cover.jpg",
+    readerPages: [
+      {
+        pdfPage: 12,
+        printedPage: 8,
+        heading: "Systolic murmurs",
+        text: "Aortic stenosis produces a crescendo-decrescendo systolic murmur.",
+        complete: true,
+      },
+      {
+        pdfPage: 13,
+        printedPage: 9,
+        heading: "Diastolic murmurs",
+        text: "Aortic regurgitation produces an early diastolic decrescendo murmur.",
+        complete: true,
+      },
+    ],
+  }));
+  const results = searchAylaLibraryPages(resource, "aortic murmur", {
+    studentId: "student 1",
+    limit: 1,
+  });
+  assert.equal(results.total, 2);
+  assert.equal(results.results.length, 1);
+  assert.equal(results.results[0].page_key, "pdf:12");
+  assert.equal(results.results[0].book_page, 1);
+  assert.match(results.results[0].snippet, /Aortic stenosis/i);
+  assert.equal("content" in results.results[0], false);
+  assert.equal("text" in results.results[0], false);
+  assert.equal(
+    results.results[0].page_path,
+    "/api/ayla/students/student%201/library/resources/reading-1/pages/pdf-12",
+  );
+  assert.equal(
+    sanitizeAylaLibraryResource(resource).cover_image_url,
+    "https://cdn.example.com/first-aid-cover.jpg",
+  );
+  assert.equal(
+    normalizeAylaLibraryResource(reading({ coverImageUrl: "javascript:alert(1)" })).coverImageUrl,
+    null,
+  );
 });
 
 test("student output hides raw source locations and obeys the admin source-label control", () => {
@@ -321,6 +367,7 @@ test("server wires one entitlement-guarded Library into the existing roadmap wit
   assert.match(server, /app\.get\("\/api\/ayla\/students\/:studentId\/library"/);
   assert.match(server, /app\.get\("\/api\/ayla\/students\/:studentId\/library\/resources\/:resourceId"/);
   assert.match(server, /app\.get\("\/api\/ayla\/students\/:studentId\/library\/resources\/:resourceId\/pages\/:pageNumber"/);
+  assert.match(server, /app\.get\("\/api\/ayla\/students\/:studentId\/library\/resources\/:resourceId\/search"/);
   assert.match(server, /app\.post\("\/api\/ayla\/students\/:studentId\/library\/resources\/:resourceId\/progress"/);
   assert.match(server, /aylaV189RequireStudent\(req, req\.params\.studentId, "library"\)/);
   assert.match(server, /function aylaV189BuildDailyPlan[\s\S]*?selectAylaRoadmapReading\(/);
