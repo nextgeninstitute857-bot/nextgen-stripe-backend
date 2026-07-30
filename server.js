@@ -38172,6 +38172,8 @@ async function aylaSelectQbankSessionQuestions({
   sourceProfile = "",
   destinationScope = "",
   preferredQuestionIds = [],
+  selectionSeed = "",
+  questionExposureCounts = {},
 } = {}) {
   if (purpose !== "baseline_diagnostic") {
     const selected = await listContentQbankQuestions({
@@ -38194,7 +38196,8 @@ async function aylaSelectQbankSessionQuestions({
     destination: "aylamed_qbank",
     destinationScope,
     limit: Math.min(200, Math.max(requestedCount, requestedCount * 5)),
-    seed: `aylamed-step1-diagnostic-v${AYLA_DIAGNOSTIC_BLUEPRINT_VERSION}:${destinationScope || "default"}`,
+    seed: selectionSeed
+      || `aylamed-step1-diagnostic-v${AYLA_DIAGNOSTIC_BLUEPRINT_VERSION}:${destinationScope || "default"}`,
   });
   const preferredCandidates = preferredQuestionIds.length
     ? await getContentQbankQuestions({
@@ -38213,6 +38216,8 @@ async function aylaSelectQbankSessionQuestions({
     requestedCount,
     minimumSystems: Math.min(12, requestedCount),
     preferredQuestionIds,
+    selectionSeed,
+    questionExposureCounts,
   });
   if (!blueprint.ready) {
     const error = new Error(
@@ -38244,6 +38249,7 @@ async function aylaSelectQbankSessionQuestions({
       blueprint.selected.map((question) => [String(question.id), question.diagnostic_system]),
     ),
     diagnosticReplacementLineage: blueprint.replacements,
+    diagnosticTaxonomyByQuestionId: blueprint.diagnosticTaxonomyByQuestionId,
     blueprintVersion: AYLA_DIAGNOSTIC_BLUEPRINT_VERSION,
     quality: {
       blueprintVersion: AYLA_DIAGNOSTIC_BLUEPRINT_VERSION,
@@ -38260,6 +38266,14 @@ async function aylaSelectQbankSessionQuestions({
       preferredUnavailableCount: blueprint.preferredUnavailableCount,
       selectedImageQuestionCount: blueprint.selectedImageQuestionCount,
       unclassifiedQuestionCount: blueprint.rejectedUnclassifiedCount,
+      selectionMode: blueprint.selectionMode,
+      selectionSeedHash: blueprint.selectionSeedHash,
+      studentAttemptSeeded: blueprint.studentAttemptSeeded,
+      repeatedQuestionCount: blueprint.repeatedQuestionCount,
+      freshQuestionCount: blueprint.freshQuestionCount,
+      maximumPriorExposure: blueprint.maximumPriorExposure,
+      taxonomyDepthReady: blueprint.taxonomyDepthReady,
+      taxonomyCoverage: blueprint.taxonomyCoverage,
       mediaReady: true,
       taxonomyReady: true,
       governedReplacementReady: blueprint.unmatchedReplacementCount === 0
@@ -39116,7 +39130,6 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
     const defaultBlockSize = purpose === "baseline_diagnostic" ? 20 : 40;
     const requestedBlockSize = Math.max(1, Math.min(40, Math.trunc(Number(req.body.block_size ?? req.body.blockSize ?? defaultBlockSize) || defaultBlockSize)));
     const idempotencyKey = String(req.headers["idempotency-key"] || req.body.idempotency_key || req.body.idempotencyKey || "").trim().slice(0, 120);
-    let preferredDiagnosticQuestionIds = [];
     if (purpose === "baseline_diagnostic") {
       if (auth.student.serverVerifiedBaseline === true || String(auth.student.onboardingStatus || "") === "complete") {
         return aylaSendError(res, 409, "The verified starting diagnostic is already complete. Use a normal test session for later reassessment.");
@@ -39154,15 +39167,6 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
           },
         );
       }
-      const latestUnansweredLegacy = activeDiagnostics
-        .filter((row) => !diagnosticSessionUsesCurrentBlueprint(row))
-        .sort((left, right) => String(right.updatedAt || right.createdAt || "")
-          .localeCompare(String(left.updatedAt || left.createdAt || "")))[0];
-      preferredDiagnosticQuestionIds = (Array.isArray(latestUnansweredLegacy?.questions)
-        ? latestUnansweredLegacy.questions
-        : [])
-        .map((mapping) => String(mapping.contentQuestionId || ""))
-        .filter(Boolean);
     }
 
     let origin = "personal";
@@ -39264,6 +39268,33 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
       }
     }
 
+    const sessionId = aylaId("AYLA-QBS");
+    const diagnosticSelectionSeed = purpose === "baseline_diagnostic"
+      ? `${auth.student.id}:${access.exam_track}:${sessionId}:${crypto.randomUUID()}`
+      : "";
+    const diagnosticQuestionExposureCounts = {};
+    if (purpose === "baseline_diagnostic") {
+      for (const priorSession of aylaValues(auth.db, "aylaQbankSessions")) {
+        if (
+          String(priorSession.userId || "") !== String(auth.user.id)
+          || String(priorSession.studentId || "") !== String(auth.student.id)
+          || String(priorSession.examTrack || "") !== String(access.exam_track)
+          || String(priorSession.purpose || "") !== "baseline_diagnostic"
+        ) {
+          continue;
+        }
+        for (const mapping of Array.isArray(priorSession.questions) ? priorSession.questions : []) {
+          const questionId = String(
+            mapping.contentQuestionId || mapping.content_question_id || "",
+          );
+          if (!questionId) continue;
+          diagnosticQuestionExposureCounts[questionId] = Number(
+            diagnosticQuestionExposureCounts[questionId] || 0,
+          ) + 1;
+        }
+      }
+    }
+
     let selection;
     if (roadmapAssignmentId) {
       const rows = await getContentQbankQuestions({
@@ -39295,13 +39326,13 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         purpose,
         sourceProfile,
         destinationScope,
-        preferredQuestionIds: preferredDiagnosticQuestionIds,
+        selectionSeed: diagnosticSelectionSeed,
+        questionExposureCounts: diagnosticQuestionExposureCounts,
       });
     }
     const selected = selection.selected;
     if (!selected.length) return aylaSendError(res, 409, "No approved QBank questions match this exam track and filter selection");
 
-    const sessionId = aylaId("AYLA-QBS");
     const questionMappings = selected.map((question) => ({ ref: crypto.randomUUID(), contentQuestionId: question.id }));
     const mutation = await mutateAylaDb(async (db) => {
       const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, access.exam_track);
@@ -39414,11 +39445,15 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         session.diagnosticBlueprintVersion = selection.blueprintVersion;
         session.diagnosticSystemByQuestionId = selection.diagnosticSystemByQuestionId;
         session.diagnosticReplacementLineage = selection.diagnosticReplacementLineage;
+        session.diagnosticTaxonomyByQuestionId = selection.diagnosticTaxonomyByQuestionId;
         session.diagnosticQuality = selection.quality;
         session.diagnosticCoverage = {
           availableSystemCount: selection.availableSystemKeys.length,
           selectedSystemCount: selection.selectedSystemKeys.length,
           selectedSystemKeys: selection.selectedSystemKeys,
+          taxonomy: selection.quality.taxonomyCoverage,
+          sampledTaxonomyOnly: true,
+          untestedTaxonomyIsUnknown: true,
         };
       }
       aylaSetItem(db, "aylaQbankSessions", session);
@@ -39452,6 +39487,9 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         questionCount: session.questionCount,
         origin: session.origin,
         sourceProfile: session.sourceProfile || null,
+        diagnosticSelectionMode: session.diagnosticQuality?.selectionMode || null,
+        diagnosticFreshQuestionCount: session.diagnosticQuality?.freshQuestionCount ?? null,
+        diagnosticRepeatedQuestionCount: session.diagnosticQuality?.repeatedQuestionCount ?? null,
       });
       aylaV189RecordActivity(db, session.studentId, "qbank_session_created", { sessionId: session.id, examTrack: session.examTrack, questionCount: session.questionCount, mode: session.mode, purpose: session.purpose });
       return { session, replayed: false };
