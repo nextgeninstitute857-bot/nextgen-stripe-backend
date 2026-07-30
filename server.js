@@ -37693,6 +37693,93 @@ app.get("/admin/crm/ai-training/content-registry/questions/:questionId/taxonomy-
   }
 });
 
+// AylaMed's private Resource Intelligence view may be authenticated with either
+// the bootstrap admin JWT or the narrowly scoped AYLA_ADMIN_TOKEN. Keep that
+// access isolated to content taxonomy instead of broadening legacy CRM routes.
+app.get("/api/ayla/admin/resources/content-taxonomy/coverage", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const requestedExamTrack = String(req.query.exam_track || req.query.examTrack || "").trim();
+    const examTrack = requestedExamTrack ? normalizeContentTaxonomyExamTrack(requestedExamTrack) : null;
+    if (requestedExamTrack && !examTrack) return aylaSendError(res, 400, "Unsupported exam_track");
+    const report = await getContentTaxonomyCoverage({
+      examTracks: examTrack ? [examTrack] : CONTENT_TAXONOMY_EXAM_TRACKS.map((exam) => exam.id),
+    });
+    return aylaSendOk(res, {
+      ...report,
+      validation_contract: {
+        question_complete_when: ["system_key", "subsystem_key", "topic_key", "subtopic_key"],
+        provider_pair_ready_when: "active approved mapping with the complete four-level taxonomy",
+        zero_content_exam_state: "no_content",
+        approval_state_changed: false,
+      },
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load content taxonomy coverage");
+  }
+});
+
+app.get("/api/ayla/admin/resources/content-taxonomy/review-queue", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const requestedExamTrack = String(req.query.exam_track || req.query.examTrack || "").trim();
+    const examTrack = requestedExamTrack ? normalizeContentTaxonomyExamTrack(requestedExamTrack) : "";
+    if (requestedExamTrack && !examTrack) return aylaSendError(res, 400, "Unsupported exam_track");
+    const requestedState = String(req.query.state || req.query.review_state || "").trim();
+    const state = requestedState ? normalizeContentTaxonomyReviewState(requestedState) : "";
+    if (requestedState && !state) return aylaSendError(res, 400, "Unsupported taxonomy review state");
+    const sourceNamespace = String(req.query.source_namespace || req.query.sourceNamespace || "").trim();
+    const queue = await listContentTaxonomyReviewQueue({
+      examTrack,
+      sourceNamespace: sourceNamespace ? contentSlug(sourceNamespace) : "",
+      state,
+      limit: req.query.limit,
+      offset: req.query.offset,
+    });
+    return aylaSendOk(res, {
+      count: queue.length,
+      filters: {
+        exam_track: examTrack || null,
+        source_namespace: sourceNamespace ? contentSlug(sourceNamespace) : null,
+        state: state || null,
+      },
+      queue,
+      review_states: ["unmapped", "needs_review", "approved", "rejected", "disabled"],
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load the content taxonomy review queue");
+  }
+});
+
+app.post("/api/ayla/admin/resources/content-taxonomy/mappings", async (req, res) => {
+  try {
+    const auth = await aylaRequireAdmin(req);
+    const examTrack = normalizeContentTaxonomyExamTrack(req.body.exam_track || req.body.examTrack);
+    const sourceNamespace = contentSlug(req.body.source_namespace || req.body.sourceNamespace);
+    if (!examTrack || sourceNamespace === "unknown") {
+      return aylaSendError(res, 400, "exam_track and source_namespace are required");
+    }
+    const mapping = await upsertContentTaxonomyMapping({
+      examTrack,
+      sourceNamespace,
+      sourceSystemId: req.body.source_system_id ?? req.body.sourceSystemId ?? "",
+      sourceSubjectId: req.body.source_subject_id ?? req.body.sourceSubjectId ?? "",
+      taxonomy: req.body.taxonomy || req.body,
+      actorId: String(auth.user?.id || auth.method || "aylamed-admin"),
+      reviewStatus: "approved",
+      origin: "manual_override",
+      confidence: req.body.confidence,
+      reviewNotes: req.body.review_notes || req.body.reviewNotes || req.body.note || "",
+    });
+    return aylaSendOk(res, {
+      mapping,
+      message: "The complete five-level taxonomy was approved and applied while preserving question-level exceptions.",
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to approve the content taxonomy mapping");
+  }
+});
+
 // -----------------------------------------------------------------------------
 // v218: Headless external QBank delivery
 // -----------------------------------------------------------------------------
