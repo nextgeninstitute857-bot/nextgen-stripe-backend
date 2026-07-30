@@ -414,6 +414,13 @@ import {
   createAylaDiagnosticJournalRecord,
   readAylaQbankJournalRecords,
 } from "./lib/aylamed-qbank-journal.js";
+import {
+  LMS_FULL_TEACHING_PLAN_DAYS,
+  LMS_TEACHING_ACCESS_MODE,
+  lmsPlanUsesTeachingSchedule,
+  reconcileConfirmedTeachingPlanAccess,
+  resolveTeachingPlanExpiry,
+} from "./lib/lms-teaching-access.js";
 import { mutateJsonCopyOnWrite } from "./lib/json-copy-on-write.js";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -435,6 +442,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
+const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
 const ROADMAP_EXTENSION_BUILD = "v221-system-aware-roadmap-extension";
@@ -464,6 +472,16 @@ const aylaPrivatePilotContentActivationState = {
   lastSuccessAt: null,
   lastError: null,
   lastResult: null,
+};
+const ngTeachingAccessReconciliationState = {
+  build: LMS_TEACHING_ACCESS_BUILD,
+  running: false,
+  last_started_at: null,
+  last_finished_at: null,
+  last_success_at: null,
+  last_error: null,
+  last_result: null,
+  last_material_result: null,
 };
 
 function aylaStep1PilotDestinationScope(student = {}) {
@@ -2004,13 +2022,59 @@ async function readLiveDb() {
   return cloneLiveDbForRequest(await liveDbReadInFlight);
 }
 
-async function writeLiveDb(db) {
+function ngPublicTeachingAccessReconciliation(result = {}) {
+  return {
+    source: result.source || null,
+    dry_run: Boolean(result.dry_run),
+    checked_at: result.checked_at || null,
+    changed: Boolean(result.changed),
+    confirmed_enrollment_rows: Number(result.confirmed_enrollment_rows || 0),
+    confirmed_unique_students: Number(result.confirmed_unique_students || 0),
+    at_risk_unique_students: Number(result.at_risk_unique_students || 0),
+    plans_updated: Number(result.plans_updated || 0),
+    enrollments_updated: Number(result.enrollments_updated || 0),
+    auto_expired_restored: Number(result.auto_expired_restored || 0),
+    skipped_manual_revocations: Number(result.skipped_manual_revocations || 0),
+    unresolved_schedules: Number(result.unresolved_schedules || 0),
+    schedules: Array.isArray(result.schedules) ? result.schedules : [],
+  };
+}
+
+function ngApplyTeachingAccessReconciliation(db = {}, {
+  dryRun = false,
+  source = "lms_database_write",
+  updateState = true,
+} = {}) {
+  const result = reconcileConfirmedTeachingPlanAccess(db, {
+    dryRun,
+    source,
+  });
+  const publicResult = ngPublicTeachingAccessReconciliation(result);
+
+  if (updateState) {
+    ngTeachingAccessReconciliationState.last_result = publicResult;
+    if (
+      publicResult.plans_updated > 0
+      || publicResult.enrollments_updated > 0
+      || publicResult.auto_expired_restored > 0
+    ) {
+      ngTeachingAccessReconciliationState.last_material_result = publicResult;
+    }
+  }
+
+  return result;
+}
+
+async function writeLiveDb(db, { teachingAccessSource = "lms_database_write" } = {}) {
   const task = writeQueue
     .catch((error) => {
       console.error("Previous LMS write failed; queue recovered:", error.message);
     })
     .then(async () => {
     await ensureDataDir();
+    const teachingAccess = ngApplyTeachingAccessReconciliation(db, {
+      source: teachingAccessSource,
+    });
     const nextDb = {
       ...DEFAULT_LIVE_DB,
       ...db,
@@ -2026,12 +2090,13 @@ async function writeLiveDb(db) {
     await ngWriteJsonAtomicStreaming(LIVE_DB_PATH, nextDb, "LMS database");
     liveDbCache = nextDb;
     liveDbReadInFlight = null;
+    return teachingAccess;
   });
   writeQueue = task;
   return task;
 }
 
-async function mutateLiveDb(mutator) {
+async function mutateLiveDb(mutator, { teachingAccessSource = "lms_atomic_database_write" } = {}) {
   const task = writeQueue
     .catch((error) => {
       console.error("Previous LMS write failed; atomic mutation queue recovered:", error.message);
@@ -2040,6 +2105,9 @@ async function mutateLiveDb(mutator) {
       const source = liveDbCache || await readLiveDbFromDisk();
       const mutation = await mutateJsonCopyOnWrite(source, mutator);
       const current = mutation.value;
+      ngApplyTeachingAccessReconciliation(current, {
+        source: teachingAccessSource,
+      });
       const nextDb = {
         ...DEFAULT_LIVE_DB,
         ...current,
@@ -2060,6 +2128,37 @@ async function mutateLiveDb(mutator) {
     });
   writeQueue = task;
   return task;
+}
+
+async function ngRunTeachingAccessStartupReconciliation() {
+  if (ngTeachingAccessReconciliationState.running) {
+    return ngTeachingAccessReconciliationState.last_result;
+  }
+
+  const startedAt = new Date().toISOString();
+  ngTeachingAccessReconciliationState.running = true;
+  ngTeachingAccessReconciliationState.last_started_at = startedAt;
+  ngTeachingAccessReconciliationState.last_error = null;
+
+  try {
+    const db = await readLiveDb();
+    const result = ngApplyTeachingAccessReconciliation(db, {
+      source: "startup_teaching_access_reconciliation",
+    });
+    if (result.changed) {
+      await writeLiveDb(db, {
+        teachingAccessSource: "startup_teaching_access_reconciliation_persist",
+      });
+    }
+    ngTeachingAccessReconciliationState.last_success_at = new Date().toISOString();
+    return ngPublicTeachingAccessReconciliation(result);
+  } catch (error) {
+    ngTeachingAccessReconciliationState.last_error = error.message;
+    throw error;
+  } finally {
+    ngTeachingAccessReconciliationState.running = false;
+    ngTeachingAccessReconciliationState.last_finished_at = new Date().toISOString();
+  }
 }
 
 function todayKey(date = new Date()) { return date.toISOString().slice(0, 10); }
@@ -2166,6 +2265,10 @@ function planIncludesFeature(plan, featureKey) {
 }
 
 function getPlanAccessDays(plan) {
+  if (lmsPlanUsesTeachingSchedule(plan || {})) {
+    return LMS_FULL_TEACHING_PLAN_DAYS;
+  }
+
   if (plan?.access_days === null || plan?.access_days === undefined || plan?.access_days === "") {
     return 30;
   }
@@ -2237,10 +2340,7 @@ function ngResolveAdminPaidPlan(db = {}, { courseId = "", requestedPlanId = "" }
 function getExternalLibraryAccess(db, user) {
   const demoSettings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
   const enrollments = Object.values(db.enrollments || {}).filter((enrollment) => {
-    return (
-      String(enrollment.user_id) === String(user.id) &&
-      enrollment.access_granted !== false
-    );
+    return String(enrollment.user_id) === String(user.id);
   });
 
   // Paid access has priority. A plan must explicitly include video_library.
@@ -2251,7 +2351,7 @@ function getExternalLibraryAccess(db, user) {
 
     if (!plan) continue;
     if (plan.is_active === false) continue;
-    if (!isPaidEnrollmentActive(enrollment, plan)) continue;
+    if (!isPaidEnrollmentActive(enrollment, plan, db)) continue;
     if (!planIncludesFeature(plan, "video_library")) continue;
 
     const course = enrollment.course_id
@@ -2259,7 +2359,8 @@ function getExternalLibraryAccess(db, user) {
       : null;
 
     const accessDays = Number(enrollment.access_days || getPlanAccessDays(plan));
-    const accessEndsAt = enrollment.access_expires_at || addDays(new Date(), accessDays).toISOString();
+    const accessEndsAt = ngPaidAccessExpiresAt(enrollment, plan, db)?.toISOString()
+      || addDays(new Date(), accessDays).toISOString();
 
     return {
       allowed: true,
@@ -2397,7 +2498,6 @@ function getStudentFeatureAccess(db, user) {
   const enrollments = Object.values(db.enrollments || {}).filter((enrollment) => {
     return (
       String(enrollment.user_id) === String(user.id) &&
-      enrollment.access_granted !== false &&
       enrollment.is_demo !== true
     );
   });
@@ -2408,7 +2508,7 @@ function getStudentFeatureAccess(db, user) {
       : null;
 
     if (!plan || plan.is_active === false) continue;
-    if (!isPaidEnrollmentActive(enrollment, plan)) continue;
+    if (!isPaidEnrollmentActive(enrollment, plan, db)) continue;
 
     const course = enrollment.course_id
       ? db.courses?.[String(enrollment.course_id)] || null
@@ -2510,7 +2610,7 @@ function ngResolveCourseAccessRecord(db = {}, user = {}, courseId = "") {
 
   const activePaid = paidCandidates.find(({ enrollment }) => {
     const plan = enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null;
-    return isPaidEnrollmentActive(enrollment, plan);
+    return isPaidEnrollmentActive(enrollment, plan, db);
   }) || null;
 
   if (activePaid) {
@@ -2521,7 +2621,7 @@ function ngResolveCourseAccessRecord(db = {}, user = {}, courseId = "") {
       enrollment,
       plan,
       demo_expiry: null,
-      access_expires_at: enrollment.access_expires_at || enrollment.expires_at || enrollment.renewal_due_at || null,
+      access_expires_at: ngPaidAccessExpiresAt(enrollment, plan, db)?.toISOString() || null,
       storage_key: activePaid.storageKey,
       paid_candidates: paidCandidates.length,
       demo_candidates: demoCandidates.length,
@@ -2894,6 +2994,8 @@ function sanitizePlan(plan) {
     course_id: plan.course_id || null,
     included_features: Array.isArray(plan.included_features) ? plan.included_features : [],
     access_days: plan.access_days || null,
+    access_expiry_mode: plan.access_expiry_mode || null,
+    minimum_teaching_days: plan.minimum_teaching_days || null,
     is_active: plan.is_active !== false,
     is_featured: Boolean(plan.is_featured),
     created_at: plan.created_at || null,
@@ -2937,10 +3039,12 @@ function sanitizeAdminEnrollment(enrollment, db) {
   const userInfo = getUserDisplay(db, enrollment.user_id, enrollment.user_name);
   const plan = enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null;
   const isDemo = Boolean(enrollment.is_demo);
-  const accessGranted = enrollment.access_granted !== false;
+  const storedAccessGranted = enrollment.access_granted !== false;
   const demoActive = isDemo ? isDemoEnrollmentActive(enrollment, { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) }) : true;
-  const paidActive = !isDemo ? isPaidEnrollmentActive(enrollment, plan) : false;
-  const daysRemaining = !isDemo ? ngPaidAccessDaysRemaining(enrollment) : null;
+  const effectivePaidExpiry = !isDemo ? ngPaidAccessExpiresAt(enrollment, plan, db) : null;
+  const paidActive = !isDemo ? isPaidEnrollmentActive(enrollment, plan, db) : false;
+  const accessGranted = storedAccessGranted || paidActive;
+  const daysRemaining = !isDemo ? ngPaidAccessDaysRemaining(enrollment, plan, db) : null;
 
   return {
     id: enrollment.id,
@@ -2964,10 +3068,14 @@ function sanitizeAdminEnrollment(enrollment, db) {
     status: !accessGranted ? "revoked" : isDemo ? (demoActive ? "demo_active" : "demo_expired") : (paidActive ? "paid" : "expired"),
     demo_expiry: enrollment.demo_expiry || null,
     access_starts_at: enrollment.access_starts_at || null,
-    access_expires_at: enrollment.access_expires_at || null,
-    expires_at: enrollment.access_expires_at || null,
-    renewal_due_at: enrollment.renewal_due_at || enrollment.access_expires_at || null,
+    access_expires_at: effectivePaidExpiry?.toISOString() || enrollment.access_expires_at || null,
+    expires_at: effectivePaidExpiry?.toISOString() || enrollment.access_expires_at || null,
+    renewal_due_at: effectivePaidExpiry?.toISOString() || enrollment.renewal_due_at || enrollment.access_expires_at || null,
     access_days: enrollment.access_days || (plan ? getPlanAccessDays(plan) : null),
+    access_expiry_mode: enrollment.access_expiry_mode || plan?.access_expiry_mode || null,
+    minimum_teaching_days: enrollment.minimum_teaching_days || plan?.minimum_teaching_days || null,
+    program_teaching_days: enrollment.program_teaching_days || null,
+    program_final_teaching_date: enrollment.program_final_teaching_date || null,
     days_remaining: daysRemaining,
     paid_at: enrollment.paid_at || null,
     revoked_at: enrollment.revoked_at || null,
@@ -4099,8 +4207,7 @@ function createBackendEnrollment(db, { userId, userName, courseId, isDemo, acces
     !isDemo &&
     previous?.id &&
     previous.is_demo !== true &&
-    previous.access_granted !== false &&
-    isPaidEnrollmentActive(previous, previousPlan);
+    isPaidEnrollmentActive(previous, previousPlan, db);
   const nextAccessGranted = previousPaidActive && accessGranted === false ? true : Boolean(accessGranted);
 
   db.enrollments[key] = {
@@ -4127,27 +4234,41 @@ function createBackendEnrollment(db, { userId, userName, courseId, isDemo, acces
   };
   return db.enrollments[key];
 }
-function ngPaidAccessExpiresAt(enrollment = {}) {
+function ngPaidAccessExpiresAt(enrollment = {}, plan = null, db = null) {
+  if (db && lmsPlanUsesTeachingSchedule(plan || {})) {
+    const resolved = resolveTeachingPlanExpiry(db, enrollment, plan);
+    if (resolved.program_expiry_at && resolved.effective_expiry_at) {
+      const effective = new Date(resolved.effective_expiry_at);
+      if (!Number.isNaN(effective.getTime())) return effective;
+    }
+    // A confirmed teaching-schedule plan must fail open while its roadmap is
+    // temporarily unavailable; a stale 30-day timestamp must never revoke it.
+    return null;
+  }
+
   const raw = enrollment.access_expires_at || enrollment.expires_at || enrollment.renewal_due_at || null;
   if (!raw) return null;
   const date = new Date(raw);
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-function ngPaidAccessDaysRemaining(enrollment = {}) {
-  const expiresAt = ngPaidAccessExpiresAt(enrollment);
+function ngPaidAccessDaysRemaining(enrollment = {}, plan = null, db = null) {
+  const expiresAt = ngPaidAccessExpiresAt(enrollment, plan, db);
   if (!expiresAt) return null;
   return Math.ceil((expiresAt.getTime() - Date.now()) / (24 * 60 * 60 * 1000));
 }
 
-function isPaidEnrollmentActive(enrollment = {}, plan = null) {
+function isPaidEnrollmentActive(enrollment = {}, plan = null, db = null) {
   if (!enrollment?.id) return false;
   if (enrollment.is_demo === true) return false;
-  if (enrollment.access_granted === false) return false;
+  if (enrollment.access_granted === false) {
+    const automaticallyExpired = String(enrollment.revoked_reason || "").trim().toLowerCase() === "access_expired";
+    if (!automaticallyExpired || !db || !lmsPlanUsesTeachingSchedule(plan || {})) return false;
+  }
 
   // Existing/manual enrollments without an explicit expiry stay active.
   // New Stripe/free checkout enrollments get access_expires_at at activation time.
-  const expiresAt = ngPaidAccessExpiresAt(enrollment);
+  const expiresAt = ngPaidAccessExpiresAt(enrollment, plan, db);
   if (!expiresAt) return true;
 
   return expiresAt.getTime() >= Date.now();
@@ -4158,12 +4279,32 @@ function ngApplyPaidAccessWindow(db = {}, enrollment = {}, { plan = null, paidAt
   const resolvedPlan = plan || (enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null);
   const now = paidAt ? new Date(paidAt) : new Date();
   const accessDays = getPlanAccessDays(resolvedPlan || {});
+  const usesTeachingSchedule = lmsPlanUsesTeachingSchedule(resolvedPlan || {});
   enrollment.access_granted = true;
   enrollment.is_demo = false;
   enrollment.access_starts_at = enrollment.access_starts_at || now.toISOString();
   enrollment.paid_at = enrollment.paid_at || now.toISOString();
   enrollment.access_days = accessDays;
-  enrollment.access_expires_at = addDays(now, accessDays).toISOString();
+  if (usesTeachingSchedule) {
+    const resolution = resolveTeachingPlanExpiry(db, enrollment, resolvedPlan, { now });
+    const scheduleReady = (
+      resolution.program_expiry_at
+      && Number(resolution.schedule?.teaching_days || 0) >= LMS_FULL_TEACHING_PLAN_DAYS
+    );
+    const fallbackExpiryMs = Math.max(
+      ngPaidAccessExpiresAt(enrollment)?.getTime() || 0,
+      addDays(now, LMS_FULL_TEACHING_PLAN_DAYS).getTime(),
+    );
+    enrollment.access_expires_at = scheduleReady
+      ? resolution.effective_expiry_at
+      : new Date(fallbackExpiryMs).toISOString();
+    enrollment.access_expiry_mode = LMS_TEACHING_ACCESS_MODE;
+    enrollment.minimum_teaching_days = LMS_FULL_TEACHING_PLAN_DAYS;
+    enrollment.program_teaching_days = Number(resolution.schedule?.teaching_days || 0) || null;
+    enrollment.program_final_teaching_date = resolution.schedule?.final_teaching_date || null;
+  } else {
+    enrollment.access_expires_at = addDays(now, accessDays).toISOString();
+  }
   enrollment.renewal_due_at = enrollment.access_expires_at;
   enrollment.revoked_at = null;
   enrollment.revoked_reason = null;
@@ -10412,6 +10553,8 @@ app.get("/health", async (req, res) => {
     success: true,
     message: "Backend running",
     build: NEXTGEN_BACKEND_BUILD,
+    lms_teaching_access_build: LMS_TEACHING_ACCESS_BUILD,
+    lms_teaching_access: ngTeachingAccessReconciliationState,
     content_ingestion_build: CONTENT_INGESTION_BUILD,
     aylamed_adaptive_core_build: AYLA_ADAPTIVE_CORE_BUILD,
     aylamed_starting_readiness_build: AYLA_STARTING_READINESS_BUILD,
@@ -10724,8 +10867,7 @@ function ngGetExternalLibraryAccessForCourse(db, user, requestedCourseId = "") {
     return (
       studentId &&
       String(enrollment.user_id || "") === studentId &&
-      String(enrollment.course_id || "") === cleanCourseId &&
-      enrollment.access_granted !== false
+      String(enrollment.course_id || "") === cleanCourseId
     );
   });
 
@@ -10733,12 +10875,13 @@ function ngGetExternalLibraryAccessForCourse(db, user, requestedCourseId = "") {
     const plan = enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null;
     if (!plan) continue;
     if (plan.is_active === false) continue;
-    if (!isPaidEnrollmentActive(enrollment, plan)) continue;
+    if (!isPaidEnrollmentActive(enrollment, plan, db)) continue;
     if (!planIncludesFeature(plan, "video_library")) continue;
 
     const course = db.courses?.[cleanCourseId] || null;
     const accessDays = Number(enrollment.access_days || getPlanAccessDays(plan));
-    const accessEndsAt = enrollment.access_expires_at || addDays(new Date(), accessDays).toISOString();
+    const accessEndsAt = ngPaidAccessExpiresAt(enrollment, plan, db)?.toISOString()
+      || addDays(new Date(), accessDays).toISOString();
 
     return {
       allowed: true,
@@ -12014,14 +12157,14 @@ app.post("/admin/plans", async (req, res) => {
     const { user } = await requireAdmin(req);
     const db = await readLiveDb();
     const id = uuid();
-    const plan = { id, name: String(req.body.name || "").trim(), description: req.body.description || "", price_cents: req.body.price_cents !== undefined ? Number(req.body.price_cents) : centsFromDollars(req.body.price), currency: String(req.body.currency || "usd").toLowerCase(), billing_type: req.body.billing_type || "one_time", course_id: req.body.course_id || null, included_features: Array.isArray(req.body.included_features) ? req.body.included_features : [], access_days: req.body.access_days || null, is_active: req.body.is_active !== false, is_featured: Boolean(req.body.is_featured), created_by: user.id, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+    const plan = { id, name: String(req.body.name || "").trim(), description: req.body.description || "", price_cents: req.body.price_cents !== undefined ? Number(req.body.price_cents) : centsFromDollars(req.body.price), currency: String(req.body.currency || "usd").toLowerCase(), billing_type: req.body.billing_type || "one_time", course_id: req.body.course_id || null, included_features: Array.isArray(req.body.included_features) ? req.body.included_features : [], access_days: req.body.access_days || null, access_expiry_mode: req.body.access_expiry_mode || null, minimum_teaching_days: req.body.minimum_teaching_days || null, is_active: req.body.is_active !== false, is_featured: Boolean(req.body.is_featured), created_by: user.id, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
     if (!plan.name) return res.status(400).json({ success: false, error: "Plan name is required" });
     if (Number.isNaN(plan.price_cents) || plan.price_cents < 0) return res.status(400).json({ success: false, error: "Plan price is invalid" });
     db.plans[id] = plan; await writeLiveDb(db); res.json({ success: true, plan: sanitizePlan(plan) });
   } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); }
 });
 app.patch("/admin/plans/:planId", async (req, res) => {
-  try { await requireAdmin(req); const db = await readLiveDb(); const p = db.plans[req.params.planId]; if (!p) return res.status(404).json({ success: false, error: "Plan not found" }); const allowed = ["name", "description", "price_cents", "currency", "billing_type", "course_id", "included_features", "access_days", "is_active", "is_featured"]; for (const k of allowed) if (req.body[k] !== undefined) p[k] = req.body[k]; if (p.price_cents !== undefined) p.price_cents = Number(p.price_cents); p.updated_at = new Date().toISOString(); await writeLiveDb(db); res.json({ success: true, plan: sanitizePlan(p) }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); }
+  try { await requireAdmin(req); const db = await readLiveDb(); const p = db.plans[req.params.planId]; if (!p) return res.status(404).json({ success: false, error: "Plan not found" }); const allowed = ["name", "description", "price_cents", "currency", "billing_type", "course_id", "included_features", "access_days", "access_expiry_mode", "minimum_teaching_days", "is_active", "is_featured"]; for (const k of allowed) if (req.body[k] !== undefined) p[k] = req.body[k]; if (p.price_cents !== undefined) p.price_cents = Number(p.price_cents); p.updated_at = new Date().toISOString(); await writeLiveDb(db); res.json({ success: true, plan: sanitizePlan(p) }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); }
 });
 app.delete("/admin/plans/:planId", async (req, res) => { try { await requireAdmin(req); const db = await readLiveDb(); const p = db.plans[req.params.planId]; if (!p) return res.status(404).json({ success: false, error: "Plan not found" }); delete db.plans[req.params.planId]; await writeLiveDb(db); res.json({ success: true, deleted_plan: sanitizePlan(p), message: "Plan deleted. Students/enrollments are not deleted." }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 
@@ -12112,9 +12255,13 @@ app.get("/admin/enrollments/access-priority-audit", async (req, res) => {
           storage_key: storageKey,
           id: enrollment.id,
           access_granted: enrollment.access_granted !== false,
-          active: isPaidEnrollmentActive(enrollment, enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null),
+          active: isPaidEnrollmentActive(enrollment, enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null, db),
           plan_id: enrollment.plan_id || null,
-          access_expires_at: enrollment.access_expires_at || enrollment.expires_at || enrollment.renewal_due_at || null,
+          access_expires_at: ngPaidAccessExpiresAt(
+            enrollment,
+            enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null,
+            db,
+          )?.toISOString() || null,
         })),
         demo: demoCandidates.map(({ storageKey, enrollment }) => ({
           storage_key: storageKey,
@@ -12576,7 +12723,7 @@ function ngBuildBillingIssues(db = {}) {
     if (enrollment.type !== "paid") continue;
     const raw = db.enrollments?.[String(enrollment.id)] || null;
     const plan = raw?.plan_id ? db.plans?.[String(raw.plan_id)] || null : null;
-    if (raw?.access_granted !== false && !isPaidEnrollmentActive(raw, plan)) {
+    if (raw?.access_granted !== false && !isPaidEnrollmentActive(raw, plan, db)) {
       issues.push({ severity: "critical", type: "paid_access_expired_but_not_revoked", message: "Paid access expiry date has passed but access_granted is still true.", enrollment });
     }
   }
@@ -12611,10 +12758,19 @@ async function ngSendBillingNoticeSafe({ db, user, enrollment, course, subject, 
 async function ngRunPaidAccessExpiryCheck({ db, dryRun = false, sendEmails = true, source = "manual" } = {}) {
   const now = new Date();
   const result = { source, dry_run: dryRun, checked: 0, reminders: [], revoked: [], changed: false };
+  const teachingAccess = ngApplyTeachingAccessReconciliation(db, {
+    dryRun,
+    source: `${source}_pre_expiry_protection`,
+    updateState: !dryRun,
+  });
+  result.teaching_access = ngPublicTeachingAccessReconciliation(teachingAccess);
+  if (teachingAccess.changed) result.changed = true;
 
   for (const enrollment of Object.values(db.enrollments || {})) {
-    if (!enrollment?.id || enrollment.is_demo === true || enrollment.access_granted === false) continue;
-    const expiresAt = ngPaidAccessExpiresAt(enrollment);
+    if (!enrollment?.id || enrollment.is_demo === true) continue;
+    const plan = enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null;
+    if (enrollment.access_granted === false && !isPaidEnrollmentActive(enrollment, plan, db)) continue;
+    const expiresAt = ngPaidAccessExpiresAt(enrollment, plan, db);
     if (!expiresAt) continue;
     result.checked += 1;
     const days = Math.ceil((expiresAt.getTime() - now.getTime()) / (24 * 60 * 60 * 1000));
@@ -12890,6 +13046,40 @@ app.get("/admin/billing/status", async (req, res) => {
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
+app.get("/admin/billing/teaching-access-audit", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    const audit = reconcileConfirmedTeachingPlanAccess(db, {
+      dryRun: true,
+      source: "admin_teaching_access_audit",
+    });
+    const rows = audit.rows.map((row) => {
+      const user = row.user_id ? db.users?.[String(row.user_id)] || null : null;
+      const enrollment = row.enrollment_id ? db.enrollments?.[String(row.enrollment_id)] || null : null;
+      return {
+        ...row,
+        student_name: user?.name || enrollment?.user_name || "Student",
+        student_email: user?.email || "",
+        access_granted: enrollment?.access_granted !== false,
+        revoked_reason: enrollment?.revoked_reason || null,
+      };
+    });
+
+    res.json({
+      success: true,
+      build: LMS_TEACHING_ACCESS_BUILD,
+      summary: ngPublicTeachingAccessReconciliation(audit),
+      rows,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to audit teaching-day access",
+    });
+  }
+});
+
 app.get("/admin/billing/issues", async (req, res) => {
   try {
     await requireAdmin(req);
@@ -12993,13 +13183,13 @@ function ngAnyActiveStudentAccess(db = {}, user = {}, { courseId = null } = {}) 
   return Object.values(db.enrollments || {}).some((enrollment) => {
     if (String(enrollment.user_id || "") !== String(user?.id || "")) return false;
     if (cleanCourseId && String(enrollment.course_id || "") !== cleanCourseId) return false;
-    if (enrollment.access_granted === false) return false;
     if (enrollment.is_demo === true) {
+      if (enrollment.access_granted === false) return false;
       const course = enrollment.course_id ? db.courses?.[String(enrollment.course_id)] || null : null;
       return course?.demo_access_enabled !== false && isDemoEnrollmentActive(enrollment, settings);
     }
     const plan = enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null;
-    return isPaidEnrollmentActive(enrollment, plan);
+    return isPaidEnrollmentActive(enrollment, plan, db);
   });
 }
 
@@ -13074,7 +13264,7 @@ function ngMaybeSelfHealDemoEnrollment(db = {}, user = {}, options = {}) {
     const paid = db.enrollments?.[backendEnrollmentKey(cleanCourseId, user.id, "paid")];
     const paidPlan = paid?.plan_id ? db.plans?.[String(paid.plan_id)] || null : null;
 
-    if (paid?.access_granted !== false && isPaidEnrollmentActive(paid, paidPlan)) {
+    if (isPaidEnrollmentActive(paid, paidPlan, db)) {
       result.skipped_count += 1;
       result.details.push({ course_id: cleanCourseId, status: "skipped_paid_active", enrollment_id: paid.id });
       continue;
@@ -13165,7 +13355,7 @@ function ngBuildDemoAccessAudit(db = {}, { courseId = null, includeUsersWithAnyE
     const paid = db.enrollments?.[backendEnrollmentKey(course.id, user.id, "paid")];
     const paidPlan = paid?.plan_id ? db.plans?.[String(paid.plan_id)] || null : null;
     const demo = db.enrollments?.[backendEnrollmentKey(course.id, user.id, "demo")];
-    const activePaid = paid?.access_granted !== false && isPaidEnrollmentActive(paid, paidPlan);
+    const activePaid = isPaidEnrollmentActive(paid, paidPlan, db);
     const activeDemo = demo?.access_granted !== false && demo?.is_demo === true && isDemoEnrollmentActive(demo, settings);
     const hasAnyEnrollment = Object.values(db.enrollments || {}).some((enrollment) => String(enrollment.user_id || "") === String(user.id));
 
@@ -13534,7 +13724,7 @@ app.post("/enrollments/prepare-checkout", async (req, res) => {
 
     // v167 safety: if the student already has active paid/coupon access, do not create
     // a new pending enrollment with access_granted=false over the same key.
-    if (existing?.access_granted !== false && existing?.is_demo !== true && isPaidEnrollmentActive(existing, existingPlan)) {
+    if (existing?.is_demo !== true && isPaidEnrollmentActive(existing, existingPlan, db)) {
       return res.json({
         success: true,
         enrollment: existing,
@@ -13751,7 +13941,7 @@ async function ngCheckoutResultResponse(db = {}, { sessionId = "", user = null, 
   const plan = payment?.plan_id ? db.plans?.[String(payment.plan_id)] || null : (enrollment?.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null);
   const course = payment?.course_id ? db.courses?.[String(payment.course_id)] || null : (enrollment?.course_id ? db.courses?.[String(enrollment.course_id)] || null : null);
   const enrollmentActive = enrollment?.id
-    ? (enrollment.is_demo ? isDemoEnrollmentActive(enrollment, { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) }) : isPaidEnrollmentActive(enrollment, plan))
+    ? (enrollment.is_demo ? isDemoEnrollmentActive(enrollment, { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) }) : isPaidEnrollmentActive(enrollment, plan, db))
     : false;
 
   return {
@@ -13792,7 +13982,7 @@ async function ngHandleStripeCheckoutResultRequest(req, res) {
 
     const enrollment = payment?.enrollment_id ? findEnrollmentById(db, payment.enrollment_id) : null;
     const plan = payment?.plan_id ? db.plans?.[String(payment.plan_id)] || null : (enrollment?.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null);
-    const alreadyActive = enrollment?.id && enrollment.access_granted !== false && !enrollment.is_demo && isPaidEnrollmentActive(enrollment, plan);
+    const alreadyActive = enrollment?.id && !enrollment.is_demo && isPaidEnrollmentActive(enrollment, plan, db);
     const alreadyCompleted = ["completed", "paid", "succeeded"].includes(String(payment?.status || payment?.payment_status || "").toLowerCase());
 
     if (alreadyActive && alreadyCompleted) {
@@ -28876,13 +29066,30 @@ function ngResolveEmailAudience(db = {}, options = {}) {
     for (const user of Object.values(db.users || {})) {
       if (!user?.id || String(user.role || "student").toLowerCase() !== "student") continue;
       const enrollments = Object.values(db.enrollments || {}).filter((enrollment) => String(enrollment.user_id || "") === String(user.id));
-      const activePaid = enrollments.find((enrollment) => enrollment.is_demo !== true && isPaidEnrollmentActive(enrollment, enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null));
+      const activePaid = enrollments.find((enrollment) => enrollment.is_demo !== true && isPaidEnrollmentActive(
+        enrollment,
+        enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null,
+        db,
+      ));
       const activeDemo = enrollments.find((enrollment) => enrollment.is_demo === true && enrollment.access_granted !== false && isDemoEnrollmentActive(enrollment, demoSettings));
       const expiredDemo = enrollments.find((enrollment) => enrollment.is_demo === true && !isDemoEnrollmentActive(enrollment, demoSettings));
-      const courseEnrollment = courseId ? enrollments.find((enrollment) => String(enrollment.course_id || "") === courseId && enrollment.access_granted !== false && (enrollment.is_demo === true ? isDemoEnrollmentActive(enrollment, demoSettings) : isPaidEnrollmentActive(enrollment, enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null))) : null;
+      const courseEnrollment = courseId ? enrollments.find((enrollment) => (
+        String(enrollment.course_id || "") === courseId
+        && (
+          enrollment.is_demo === true
+            ? enrollment.access_granted !== false && isDemoEnrollmentActive(enrollment, demoSettings)
+            : isPaidEnrollmentActive(
+                enrollment,
+                enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null,
+                db,
+              )
+        )
+      )) : null;
       const expiringPaid = enrollments.find((enrollment) => {
-        if (enrollment.is_demo === true || enrollment.access_granted === false) return false;
-        const expires = ngPaidAccessExpiresAt(enrollment);
+        if (enrollment.is_demo === true) return false;
+        const plan = enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null;
+        if (!isPaidEnrollmentActive(enrollment, plan, db)) return false;
+        const expires = ngPaidAccessExpiresAt(enrollment, plan, db);
         if (!expires) return false;
         const remaining = expires.getTime() - now;
         return remaining > 0 && remaining <= 7 * 24 * 60 * 60 * 1000;
@@ -72535,9 +72742,16 @@ function aylaV214LmsCourseTrack(liveDb = {}, enrollment = {}) {
 }
 
 function aylaV214LmsEnrollmentActive(liveDb = {}, enrollment = {}) {
-  if (!enrollment?.id || enrollment.access_granted === false) return false;
-  if (enrollment.is_demo === true) return isDemoEnrollmentActive(enrollment, { ...DEFAULT_DEMO_SETTINGS, ...(liveDb.demoSettings || {}) });
-  return isPaidEnrollmentActive(enrollment, enrollment.plan_id ? liveDb.plans?.[String(enrollment.plan_id)] || null : null);
+  if (!enrollment?.id) return false;
+  if (enrollment.is_demo === true) {
+    return enrollment.access_granted !== false
+      && isDemoEnrollmentActive(enrollment, { ...DEFAULT_DEMO_SETTINGS, ...(liveDb.demoSettings || {}) });
+  }
+  return isPaidEnrollmentActive(
+    enrollment,
+    enrollment.plan_id ? liveDb.plans?.[String(enrollment.plan_id)] || null : null,
+    liveDb,
+  );
 }
 
 function aylaV214SafeLmsLeaderboardEntry(entry = {}) {
@@ -79596,6 +79810,9 @@ function ngStartContentOperationsScheduler() {
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Backend build=${NEXTGEN_BACKEND_BUILD}; JSON body limit=${NEXTGEN_JSON_BODY_LIMIT}; memory soft guard=${NEXTGEN_BACKGROUND_MEMORY_SOFT_PERCENT}% of ${NEXTGEN_RENDER_MEMORY_LIMIT_MB} MB`);
+  ngRunTeachingAccessStartupReconciliation()
+    .then((result) => console.log("LMS teaching-day access reconciliation:", result))
+    .catch((error) => console.error("LMS teaching-day access reconciliation failed:", error.message));
   ngV116StartBackendHeartbeat();
   ngStartEmailQueueRunner();
   ngStartEmailAutomationRunner();
