@@ -1,9 +1,11 @@
 import express from "express";
 import {
   flashcardCapabilities,
+  flashcardTextOnlyHtml,
   scheduleFlashcardReview,
   validateFlashcardContent,
 } from "./lib/flashcard-engine.js";
+import { contentDeliveryPolicySnapshot } from "./lib/content-delivery-priority.js";
 import {
   flashcardMatchesCurrentSystem,
   flashcardPriorityRank,
@@ -37911,6 +37913,7 @@ app.get(`${NG_EXTERNAL_QBANK_ROOT}/site-config`, (req, res) => {
         test: "correct answers and explanations are released only after final session submission",
       },
       media_policy: { images: "short-lived private URLs", videos: "private or unlisted Vimeo embeds" },
+      content_delivery_policy: contentDeliveryPolicySnapshot(),
     });
   } catch (error) {
     return ngExternalQbankSendError(res, error);
@@ -37935,6 +37938,7 @@ app.get(`${NG_EXTERNAL_QBANK_ROOT}/catalog`, async (req, res) => {
       exam_track: examTrack,
       count: catalog.length,
       question_count: catalog.reduce((sum, row) => sum + Number(row.question_count || 0), 0),
+      content_delivery_policy: contentDeliveryPolicySnapshot(),
       catalog,
     });
   } catch (error) {
@@ -38179,6 +38183,30 @@ app.get("/admin/crm/ai-training/external-qbank/audit", async (req, res) => {
   }
 });
 
+function aylaQbankSeenQuestionIds(db, {
+  userId = "",
+  studentId = "",
+  examTrack = "",
+} = {}) {
+  const ids = [];
+  for (const session of aylaValues(db, "aylaQbankSessions")) {
+    if (
+      String(session.userId || "") !== String(userId || "")
+      || String(session.studentId || "") !== String(studentId || "")
+      || String(session.examTrack || "") !== String(examTrack || "")
+    ) {
+      continue;
+    }
+    for (const mapping of Array.isArray(session.questions) ? session.questions : []) {
+      const questionId = String(
+        mapping.contentQuestionId || mapping.content_question_id || "",
+      );
+      if (questionId) ids.push(questionId);
+    }
+  }
+  return [...new Set(ids)];
+}
+
 async function aylaSelectQbankSessionQuestions({
   examTrack,
   requestedCount,
@@ -38189,6 +38217,7 @@ async function aylaSelectQbankSessionQuestions({
   preferredQuestionIds = [],
   selectionSeed = "",
   questionExposureCounts = {},
+  seenQuestionIds = [],
 } = {}) {
   if (purpose !== "baseline_diagnostic") {
     const selected = await listContentQbankQuestions({
@@ -38202,6 +38231,7 @@ async function aylaSelectQbankSessionQuestions({
       destinationScope,
       limit: requestedCount,
       seed: crypto.randomUUID(),
+      seenQuestionIds,
     });
     return { selected, availableSystemKeys: [], selectedSystemKeys: [] };
   }
@@ -38213,6 +38243,7 @@ async function aylaSelectQbankSessionQuestions({
     limit: Math.min(200, Math.max(requestedCount, requestedCount * 5)),
     seed: selectionSeed
       || `aylamed-step1-diagnostic-v${AYLA_DIAGNOSTIC_BLUEPRINT_VERSION}:${destinationScope || "default"}`,
+    seenQuestionIds,
   });
   const preferredCandidates = preferredQuestionIds.length
     ? await getContentQbankQuestions({
@@ -39158,6 +39189,7 @@ app.get("/api/ayla/qbank/catalog", async (req, res) => {
       exam_track: examTrack,
       entitlement: { type: access.entitlement_type, expires_at: access.expires_at || null },
       presentation: aylaStudentQbankPresentationPolicy(presentationPolicy, sourceProfile),
+      content_delivery_policy: contentDeliveryPolicySnapshot(),
       count: catalog.length,
       question_count: catalog.reduce((sum, row) => sum + Number(row.question_count || 0), 0),
       catalog,
@@ -39348,6 +39380,11 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         }
       }
     }
+    const seenQuestionIds = aylaQbankSeenQuestionIds(auth.db, {
+      userId: auth.user.id,
+      studentId: auth.student.id,
+      examTrack: access.exam_track,
+    });
 
     let selection;
     if (roadmapAssignmentId) {
@@ -39371,6 +39408,21 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
           },
         );
       }
+      const staleOrMediaIncomplete = selected.filter((question) =>
+        ![2026, 2025, 2024].includes(Number(question.source_year))
+        || question.media_integrity_verified !== true);
+      if (staleOrMediaIncomplete.length) {
+        return aylaSendError(
+          res,
+          409,
+          "This assignment contains an older or media-incomplete question. Refresh the roadmap so it can select from the current verified pool.",
+          {
+            code: "QBANK_ASSIGNMENT_REFRESH_REQUIRED",
+            affected_questions: staleOrMediaIncomplete.length,
+            content_delivery_policy: contentDeliveryPolicySnapshot(),
+          },
+        );
+      }
       selection = { selected, availableSystemKeys: [], selectedSystemKeys: [] };
     } else {
       selection = await aylaSelectQbankSessionQuestions({
@@ -39382,6 +39434,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         destinationScope,
         selectionSeed: diagnosticSelectionSeed,
         questionExposureCounts: diagnosticQuestionExposureCounts,
+        seenQuestionIds,
       });
     }
     const selected = selection.selected;
@@ -39495,6 +39548,19 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
       session.idempotencyKey = idempotencyKey || null;
       session.idempotencyFingerprint = idempotencyKey ? idempotencyFingerprint : null;
       session.requestedQuestionCount = effectiveRequestedCount;
+      session.contentDeliveryPolicy = contentDeliveryPolicySnapshot();
+      session.contentDeliverySelection = {
+        sourceYearCounts: selected.reduce((counts, question) => {
+          const year = String(Number(question.source_year || 0) || "unknown");
+          counts[year] = Number(counts[year] || 0) + 1;
+          return counts;
+        }, {}),
+        verifiedMediaQuestionCount: selected.filter((question) =>
+          Number(question.required_media_count || 0) > 0).length,
+        brokenMediaQuestionCount: selected.filter((question) =>
+          question.media_integrity_verified === false).length,
+        priorSeenPoolSize: seenQuestionIds.length,
+      };
       if (purpose === "baseline_diagnostic") {
         session.diagnosticBlueprintVersion = selection.blueprintVersion;
         session.diagnosticSystemByQuestionId = selection.diagnosticSystemByQuestionId;
@@ -39544,6 +39610,10 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         diagnosticSelectionMode: session.diagnosticQuality?.selectionMode || null,
         diagnosticFreshQuestionCount: session.diagnosticQuality?.freshQuestionCount ?? null,
         diagnosticRepeatedQuestionCount: session.diagnosticQuality?.repeatedQuestionCount ?? null,
+        contentDeliveryPolicyVersion: session.contentDeliveryPolicy.version,
+        sourceYearCounts: session.contentDeliverySelection.sourceYearCounts,
+        verifiedMediaQuestionCount: session.contentDeliverySelection.verifiedMediaQuestionCount,
+        brokenMediaQuestionCount: session.contentDeliverySelection.brokenMediaQuestionCount,
       });
       aylaV189RecordActivity(db, session.studentId, "qbank_session_created", { sessionId: session.id, examTrack: session.examTrack, questionCount: session.questionCount, mode: session.mode, purpose: session.purpose });
       return { session, replayed: false };
@@ -58685,8 +58755,7 @@ app.get("/student/flashcards/registry", async (req, res) => {
     const progressByCard = new Map(Object.values(db.flashcardProgress || {})
       .filter((item) => String(item.course_id) === courseId && String(item.user_id) === String(user.id))
       .map((item) => [String(item.flashcard_id), item]));
-    const playableQuestions = await Promise.all(questions.map(ngRegistryQuestionWithPlayableMedia));
-    const flashcards = playableQuestions.map((question) => {
+    const flashcards = questions.map((question) => {
       const id = contentRegistryFlashcardId(question.id);
       const progress = progressByCard.get(id) || null;
       return {
@@ -59668,8 +59737,7 @@ app.get("/student/flashcards/review", async (req, res) => {
     const examTrack = ngCourseExamTrack(db, user, courseId);
     if (examTrack !== "unknown" && flashcardCapabilities("lms").qbankSource) {
       const registryQuestions = await listContentRegistryFlashcardQuestions({ examTrack, limit: 40, offset: 0 });
-      const playableRegistryQuestions = await Promise.all(registryQuestions.map(ngRegistryQuestionWithPlayableMedia));
-      cards.push(...playableRegistryQuestions.map((question) => registryQuestionToFlashcard(question, {
+      cards.push(...registryQuestions.map((question) => registryQuestionToFlashcard(question, {
         courseId,
         reviewed: reviewedSet.has(contentRegistryFlashcardId(question.id)),
       })));
@@ -69906,6 +69974,7 @@ async function aylaV250EligibleQbankQuestions(student, {
   subsystem = "",
   topic = "",
   limit = 24,
+  seenQuestionIds = [],
 } = {}) {
   const destinationScope = aylaStep1PilotDestinationScope(student);
   if (!destinationScope || !contentRegistryStatus().configured) {
@@ -69931,6 +70000,7 @@ async function aylaV250EligibleQbankQuestions(student, {
       destinationScope,
       limit: Math.min(200, Math.max(80, requestedLimit * 5)),
       seed: `${student.id}:${date}:${requestedSystem || "discovery"}:${topicKey}`,
+      seenQuestionIds,
     });
     const eligible = rows
       .map((row) => {
@@ -71511,12 +71581,23 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       .filter((row, index, all) => all.findIndex((candidate) => String(candidate.id) === String(row.id)) === index));
   };
   const registryQbank = qbankEnabled
-    ? await aylaV250EligibleQbankQuestions(student, {
+      ? await aylaV250EligibleQbankQuestions(student, {
         date,
         system: focusSystem,
         subsystem: focusSubsystem,
         topic: focusTopic,
         limit: Math.max(8, Math.min(40, Math.round((capacityMinutes / 32) * questionVolumeFactor))),
+        seenQuestionIds: aylaQbankSeenQuestionIds(db, {
+          userId: student.ayla_user_id || student.user_id || "",
+          studentId: student.id,
+          examTrack: normalizeAylaRegistryExamTrack(
+            student.examTrackId
+              || student.exam_track_id
+              || student.examTrack
+              || student.exam_track
+              || student.exam,
+          ),
+        }),
       })
     : { questions: [], destinationScope: "", warning: null };
 
@@ -73853,11 +73934,12 @@ async function ngRunAylaPrivatePilotContentActivation(reason = "startup") {
             mappedQuestion.subtopic_key || mappedQuestion.taxonomy?.subtopic_key,
             "",
           ),
-          front: mappedQuestion.question_html || "",
-          back: mappedQuestion.correct_answer_html || "",
-          explanation: mappedQuestion.explanation_html || "",
-          media: Array.isArray(question.media) ? question.media : [],
-          videos: Array.isArray(question.videos) ? question.videos : [],
+          front: flashcardTextOnlyHtml(mappedQuestion.question_html),
+          back: flashcardTextOnlyHtml(mappedQuestion.correct_answer_html),
+          explanation: flashcardTextOnlyHtml(mappedQuestion.explanation_html),
+          media: [],
+          videos: [],
+          mediaOmittedForFlashcard: true,
           provider: "AylaMed QBank",
           sourceLabel: "AylaMed QBank",
           sourceLabelVisible: true,

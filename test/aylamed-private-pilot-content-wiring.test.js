@@ -124,7 +124,9 @@ test("private QBank activation disables unscoped delivery and preserves ordinary
   assert.match(activation, /config\?\.embed_url/);
   assert.match(activation, /pilotDatesAligned/);
   assert.match(server, /aylaV251HydrateAssignmentMedia/);
-  assert.match(server, /media: Array\.isArray\(question\.media\)/);
+  assert.match(activation, /front: flashcardTextOnlyHtml/);
+  assert.match(activation, /media: \[\]/);
+  assert.match(activation, /videos: \[\]/);
 });
 
 test("flashcard registry SQL does not expose a scoped pilot collection to unscoped LMS reads", () => {

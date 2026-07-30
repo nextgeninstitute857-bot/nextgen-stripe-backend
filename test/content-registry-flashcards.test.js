@@ -23,12 +23,23 @@ test("course labels resolve to an isolated exam track", () => {
 test("approved QBank question becomes a reveal-only card without answer choices", () => {
   const card = registryQuestionToFlashcard({
     id: "question-1", exam_track: "usmle-step-1", student_qid: "NGQ-00000001",
-    question_html: "Clinical vignette", correct_answer_html: "Correct diagnosis",
-    explanation_html: "Explanation", taxonomy: { system_key: "cardiovascular", topic_key: "murmurs" },
+    source_year: 2026,
+    question_html: 'Clinical vignette<img src="private/figure.png" alt="ECG tracing">',
+    correct_answer_html: "Correct diagnosis",
+    explanation_html: '<p>Explanation</p><video src="private/clip.mp4"></video>',
+    media: [{ object_key: "private/figure.png" }],
+    videos: [{ provider_id: "123" }],
+    taxonomy: { system_key: "cardiovascular", topic_key: "murmurs" },
   }, { courseId: "step-1-course", reviewed: true });
   assert.equal(card.answer_mode, "reveal_only");
   assert.deepEqual(card.choices, []);
   assert.equal(card.read_only, true);
   assert.equal(card.reviewed, true);
   assert.equal(card.exam_track, "usmle-step-1");
+  assert.equal(card.source_year, 2026);
+  assert.match(card.front, /ECG tracing/);
+  assert.doesNotMatch(`${card.front}${card.explanation}`, /<(?:img|video)\b/i);
+  assert.deepEqual(card.media, []);
+  assert.deepEqual(card.videos, []);
+  assert.equal(card.media_omitted_for_flashcard, true);
 });
