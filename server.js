@@ -38250,7 +38250,7 @@ async function aylaSelectQbankSessionQuestions({
     ),
     diagnosticReplacementLineage: blueprint.replacements,
     diagnosticTaxonomyByQuestionId: blueprint.diagnosticTaxonomyByQuestionId,
-    blueprintVersion: AYLA_DIAGNOSTIC_BLUEPRINT_VERSION,,
+    blueprintVersion: AYLA_DIAGNOSTIC_BLUEPRINT_VERSION,
     quality: {
       blueprintVersion: AYLA_DIAGNOSTIC_BLUEPRINT_VERSION,
       requestedQuestionCount: blueprint.requestedCount,
