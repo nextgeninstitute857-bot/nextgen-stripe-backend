@@ -128,6 +128,29 @@ function imageReplacementFixture(index, overrides = {}) {
   };
 }
 
+function rotatingFixture(index) {
+  const baseIndex = index % TITLES.length;
+  const variant = Math.floor(index / TITLES.length);
+  const question = fixture(baseIndex);
+  const system = classifyStep1DiagnosticQuestion(question);
+  return {
+    ...question,
+    id: `rotation-question-${index + 1}`,
+    exam_track: "usmle_step_1",
+    system_key: system,
+    subsystem_key: `${system} subsystem ${variant % 5}`,
+    topic_key: `${TITLES[baseIndex]} topic ${variant % 8}`,
+    subtopic_key: `${TITLES[baseIndex]} subtopic ${variant}`,
+    taxonomy: {
+      system_key: system,
+      subsystem_key: `${system} subsystem ${variant % 5}`,
+      topic_key: `${TITLES[baseIndex]} topic ${variant % 8}`,
+      subtopic_key: `${TITLES[baseIndex]} subtopic ${variant}`,
+      difficulty: ["easy", "medium", "hard"][variant % 3],
+    },
+  };
+}
+
 test("numeric source taxonomy is replaced by deterministic Step 1 topic classification", () => {
   assert.equal(classifyStep1DiagnosticQuestion(fixture(0)), "Musculoskeletal");
   assert.equal(classifyStep1DiagnosticQuestion(fixture(14)), "Renal");
@@ -227,6 +250,86 @@ test("a playable image from the same system but a different topic cannot fill a 
   assert.equal(result.unmatchedReplacementCount, 1);
 });
 
+test("student-attempt seeds create different balanced diagnostics while the same seed is resumable", () => {
+  const candidates = Array.from({ length: 400 }, (_, index) => rotatingFixture(index));
+  const first = buildStep1DiagnosticSelection(candidates, {
+    requestedCount: 40,
+    minimumSystems: 12,
+    selectionSeed: "student-a:attempt-1:server-nonce-a",
+  });
+  const replay = buildStep1DiagnosticSelection(candidates, {
+    requestedCount: 40,
+    minimumSystems: 12,
+    selectionSeed: "student-a:attempt-1:server-nonce-a",
+  });
+  const friend = buildStep1DiagnosticSelection(candidates, {
+    requestedCount: 40,
+    minimumSystems: 12,
+    selectionSeed: "student-b:attempt-1:server-nonce-b",
+  });
+  const firstIds = first.selected.map((question) => question.id);
+  const replayIds = replay.selected.map((question) => question.id);
+  const friendIds = friend.selected.map((question) => question.id);
+  const overlap = friendIds.filter((id) => new Set(firstIds).has(id)).length;
+
+  assert.equal(first.ready, true);
+  assert.equal(friend.ready, true);
+  assert.equal(first.studentAttemptSeeded, true);
+  assert.equal(first.selectionMode, "student_attempt_seeded");
+  assert.deepEqual(replayIds, firstIds);
+  assert.notDeepEqual(friendIds, firstIds);
+  assert.ok(overlap < 20, `expected strong anti-sharing variation, received ${overlap} shared questions`);
+  assert.ok(first.selectedSystemKeys.length >= 12);
+  assert.equal(first.taxonomyDepthReady, true);
+  assert.equal(first.taxonomyCoverage.topicMappedQuestionCount, 40);
+  assert.ok(first.taxonomyCoverage.subsystems >= 12);
+  assert.ok(first.taxonomyCoverage.topics >= 20);
+});
+
+test("a later diagnostic prefers unseen questions before repeating student history", () => {
+  const candidates = Array.from({ length: 400 }, (_, index) => rotatingFixture(index));
+  const first = buildStep1DiagnosticSelection(candidates, {
+    requestedCount: 40,
+    minimumSystems: 12,
+    selectionSeed: "student-a:attempt-1:nonce",
+  });
+  const exposures = Object.fromEntries(
+    first.selected.map((question) => [question.id, 1]),
+  );
+  const next = buildStep1DiagnosticSelection(candidates, {
+    requestedCount: 40,
+    minimumSystems: 12,
+    selectionSeed: "student-a:attempt-2:nonce",
+    questionExposureCounts: exposures,
+  });
+  const firstIds = new Set(first.selected.map((question) => question.id));
+  const repeated = next.selected.filter((question) => firstIds.has(question.id));
+
+  assert.equal(next.ready, true);
+  assert.equal(repeated.length, 0);
+  assert.equal(next.repeatedQuestionCount, 0);
+  assert.equal(next.freshQuestionCount, 40);
+  assert.equal(next.maximumPriorExposure, 0);
+});
+
+test("dynamic diagnostics quarantine the thirteen broken image questions instead of fixing them into every test", () => {
+  const broken = [...IMAGE_REFS.keys()]
+    .map((questionNumber) => fixture(questionNumber - 1, { linked: false }));
+  const fresh = Array.from({ length: 400 }, (_, index) => rotatingFixture(index));
+  const result = buildStep1DiagnosticSelection([...broken, ...fresh], {
+    requestedCount: 40,
+    minimumSystems: 12,
+    selectionSeed: "student-c:attempt-1:nonce",
+  });
+  const brokenIds = new Set(broken.map((question) => question.id));
+
+  assert.equal(result.ready, true);
+  assert.equal(result.rejectedMissingMediaCount, 13);
+  assert.equal(result.governedReplacementCount, 0);
+  assert.equal(result.unmatchedReplacementCount, 0);
+  assert.equal(result.selected.some((question) => brokenIds.has(question.id)), false);
+});
+
 test("stored system overrides feed verified attempts and baseline scoring", () => {
   const question = applyDiagnosticSystemOverride(
     { id: "question-1", system_key: "1", taxonomy: { system_key: "1" } },
@@ -252,6 +355,8 @@ test("only current mapped diagnostic sessions can answer or submit", () => {
       mediaReady: true,
       taxonomyReady: true,
       governedReplacementReady: true,
+      studentAttemptSeeded: true,
+      taxonomyDepthReady: true,
       unmatchedReplacementCount: 0,
       minimumSystemCount: 1,
     },
@@ -265,6 +370,8 @@ test("only current mapped diagnostic sessions can answer or submit", () => {
       mediaReady: true,
       taxonomyReady: true,
       governedReplacementReady: true,
+      studentAttemptSeeded: true,
+      taxonomyDepthReady: true,
       unmatchedReplacementCount: 0,
       minimumSystemCount: 1,
     },
@@ -278,6 +385,8 @@ test("only current mapped diagnostic sessions can answer or submit", () => {
       mediaReady: false,
       taxonomyReady: true,
       governedReplacementReady: true,
+      studentAttemptSeeded: true,
+      taxonomyDepthReady: true,
       unmatchedReplacementCount: 0,
       minimumSystemCount: 1,
     },
@@ -291,7 +400,24 @@ test("only current mapped diagnostic sessions can answer or submit", () => {
       mediaReady: true,
       taxonomyReady: true,
       governedReplacementReady: false,
+      studentAttemptSeeded: true,
+      taxonomyDepthReady: true,
       unmatchedReplacementCount: 1,
+      minimumSystemCount: 1,
+    },
+  }), false);
+  assert.equal(diagnosticSessionUsesCurrentBlueprint({
+    purpose: "baseline_diagnostic",
+    diagnosticBlueprintVersion: AYLA_DIAGNOSTIC_BLUEPRINT_VERSION,
+    questions: [{ contentQuestionId: "question-1" }],
+    diagnosticSystemByQuestionId: { "question-1": "Renal" },
+    diagnosticQuality: {
+      mediaReady: true,
+      taxonomyReady: true,
+      governedReplacementReady: true,
+      studentAttemptSeeded: false,
+      taxonomyDepthReady: true,
+      unmatchedReplacementCount: 0,
       minimumSystemCount: 1,
     },
   }), false);
@@ -303,6 +429,14 @@ test("server gates diagnostic creation, playback, answering and submission throu
   assert.match(server, /DIAGNOSTIC_CONTENT_NOT_READY/);
   assert.match(server, /media_incomplete_questions: blueprint\.rejectedMissingMediaCount/);
   assert.match(server, /diagnosticReplacementLineage = selection\.diagnosticReplacementLineage/);
+  assert.match(server, /const diagnosticSelectionSeed = purpose === "baseline_diagnostic"/);
+  assert.match(server, /questionExposureCounts: diagnosticQuestionExposureCounts/);
+  assert.match(server, /selectionSeed: diagnosticSelectionSeed/);
+  assert.doesNotMatch(server, /preferredDiagnosticQuestionIds/);
+  assert.match(server, /session\.diagnosticTaxonomyByQuestionId = selection\.diagnosticTaxonomyByQuestionId/);
+  assert.match(server, /studentAttemptSeeded: blueprint\.studentAttemptSeeded/);
+  assert.match(server, /taxonomyDepthReady: blueprint\.taxonomyDepthReady/);
+  assert.match(server, /untestedTaxonomyIsUnknown: true/);
   assert.match(server, /\/api\/ayla\/admin\/diagnostic\/step1\/media-replacements\/preview/);
   assert.match(server, /write_performed: false/);
   assert.match(server, /session\.diagnosticSystemByQuestionId = selection\.diagnosticSystemByQuestionId/);
