@@ -428,6 +428,17 @@ import {
   reconcileConfirmedTeachingPlanAccess,
   resolveTeachingPlanExpiry,
 } from "./lib/lms-teaching-access.js";
+import {
+  LMS_SESSION_NOTES_BUILD,
+  lmsApplySessionNotePublicationState,
+  lmsAutoPublishSessionNotesEnabled,
+  lmsSynchronizeSessionNoteContent,
+  reconcileLmsSessionNoteInvariants,
+} from "./lib/lms-session-notes.js";
+import {
+  LMS_RECORDING_LABEL_CORRECTIONS_BUILD,
+  reconcileKnownMissedHolidayRecordingLabels,
+} from "./lib/lms-recording-label-corrections.js";
 import { mutateJsonCopyOnWrite } from "./lib/json-copy-on-write.js";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -455,7 +466,9 @@ const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
 const ROADMAP_EXTENSION_BUILD = "v221-system-aware-roadmap-extension";
 const RECORDING_ASSIGNMENT_BUILD = "v222-safe-recording-detach";
 const RECORDING_DUPLICATE_CLEANUP_BUILD = "v223-safe-recording-duplicate-cleanup";
+const RECORDING_LABEL_CORRECTIONS_BUILD = LMS_RECORDING_LABEL_CORRECTIONS_BUILD;
 const STUDENT_NOTES_RESOLVER_BUILD = "v225-course-system-day-notes-resolver";
+const LMS_ASSESSMENT_NOTES_SCOPE_BUILD = "v257-assessment-notes-scopes";
 const AYLA_ADAPTIVE_CORE_BUILD = "v227-verified-adaptive-loop";
 const AYLA_STARTING_READINESS_BUILD = "v229-starting-readiness-loop";
 const AYLA_SINGLE_ROADMAP_BUILD = "v230-single-roadmap-execution";
@@ -2170,6 +2183,90 @@ async function ngRunTeachingAccessStartupReconciliation() {
   }
 }
 
+async function ngRunSessionNotesStartupReconciliation() {
+  if (ngSessionNotesReconciliationState.running) {
+    return ngSessionNotesReconciliationState.last_result;
+  }
+
+  ngSessionNotesReconciliationState.running = true;
+  ngSessionNotesReconciliationState.last_started_at = new Date().toISOString();
+  ngSessionNotesReconciliationState.last_error = null;
+
+  try {
+    const db = await readLiveDb();
+    const result = reconcileLmsSessionNoteInvariants(db, {
+      autoPublish: lmsAutoPublishSessionNotesEnabled(),
+    });
+
+    for (const sessionId of result.session_ids || []) {
+      const note = db.notes?.[sessionId] || Object.values(db.notes || {}).find((item) => (
+        String(item?.session_id || "") === String(sessionId)
+      ));
+      const session = db.liveSessions?.[sessionId] || null;
+      const day = session ? ngFindRoadmapDayForLiveSession(db, session) : null;
+      const published = Boolean(
+        note &&
+        (note.published === true || note.is_published === true) &&
+        !["draft", "unpublished", "archived", "hidden"].includes(String(note.status || "").trim().toLowerCase())
+      );
+
+      if (day && published) {
+        day.session_notes_id = sessionId;
+        day.session_notes_draft_ready = true;
+        day.session_notes_ready = true;
+        day.notes_status = "published";
+        ngEnsureTaskItemOnDay(day, "read_session_notes", "Read the session notes after class.");
+      }
+    }
+
+    if (result.changed) {
+      await writeLiveDb(db, {
+        teachingAccessSource: "startup_session_notes_reconciliation",
+      });
+    }
+
+    ngSessionNotesReconciliationState.last_result = result;
+    ngSessionNotesReconciliationState.last_success_at = new Date().toISOString();
+    return result;
+  } catch (error) {
+    ngSessionNotesReconciliationState.last_error = error.message;
+    throw error;
+  } finally {
+    ngSessionNotesReconciliationState.running = false;
+    ngSessionNotesReconciliationState.last_finished_at = new Date().toISOString();
+  }
+}
+
+async function ngRunRecordingLabelStartupReconciliation() {
+  if (ngRecordingLabelReconciliationState.running) {
+    return ngRecordingLabelReconciliationState.last_result;
+  }
+
+  ngRecordingLabelReconciliationState.running = true;
+  ngRecordingLabelReconciliationState.last_started_at = new Date().toISOString();
+  ngRecordingLabelReconciliationState.last_error = null;
+
+  try {
+    const db = await readLiveDb();
+    const result = reconcileKnownMissedHolidayRecordingLabels(db);
+    if (result.changed) {
+      await writeLiveDb(db, {
+        teachingAccessSource: "startup_recording_label_reconciliation",
+      });
+    }
+
+    ngRecordingLabelReconciliationState.last_result = result;
+    ngRecordingLabelReconciliationState.last_success_at = new Date().toISOString();
+    return result;
+  } catch (error) {
+    ngRecordingLabelReconciliationState.last_error = error.message;
+    throw error;
+  } finally {
+    ngRecordingLabelReconciliationState.running = false;
+    ngRecordingLabelReconciliationState.last_finished_at = new Date().toISOString();
+  }
+}
+
 function todayKey(date = new Date()) { return date.toISOString().slice(0, 10); }
 function addDays(date, days) { const d = new Date(date); d.setDate(d.getDate() + Number(days || 0)); return d; }
 function dateOnly(date) { return date.toISOString().slice(0, 10); }
@@ -3601,9 +3698,19 @@ function sortRecordingsNewestFirst(a, b) {
 }
 
 function sanitizePublicRecording(recording) {
-  const topic = ngDayFirstContentTitle(recording.topic || "", {
-    systemDay: recording.system_day || recording.day_in_system,
-    dayNumber: recording.day_number,
+  const hasLockedLabelCorrection = recording.label_correction_locked === true;
+  const publicTopic = hasLockedLabelCorrection
+    ? recording.corrected_topic || recording.topic || ""
+    : recording.topic || "";
+  const publicSystemDay = hasLockedLabelCorrection
+    ? recording.corrected_system_day || recording.system_day || recording.day_in_system
+    : recording.system_day || recording.day_in_system;
+  const publicDayNumber = hasLockedLabelCorrection
+    ? recording.corrected_day_number || recording.day_number
+    : recording.day_number;
+  const topic = ngDayFirstContentTitle(publicTopic, {
+    systemDay: publicSystemDay,
+    dayNumber: publicDayNumber,
     system: recording.system,
   });
   return {
@@ -3612,9 +3719,9 @@ function sanitizePublicRecording(recording) {
     meeting_id: recording.meeting_id || null,
     uuid: recording.uuid || null,
     topic: topic || null,
-    day_number: recording.day_number || null,
-    instructional_day_number: recording.instructional_day_number || recording.day_number || null,
-    system_day: recording.system_day || recording.day_in_system || null,
+    day_number: publicDayNumber || null,
+    instructional_day_number: recording.instructional_day_number || publicDayNumber || null,
+    system_day: publicSystemDay || null,
     system: recording.system || null,
     start_time: recording.start_time || null,
     duration: recording.duration || null,
@@ -3628,6 +3735,9 @@ function sanitizePublicRecording(recording) {
     published: Boolean(recording.published),
     session_id: recording.session_id || null,
     course_id: recording.course_id || null,
+    label_correction_locked: hasLockedLabelCorrection,
+    label_correction_reason: hasLockedLabelCorrection ? recording.label_correction_reason || null : null,
+    missed_holiday_date: hasLockedLabelCorrection ? recording.missed_holiday_date || null : null,
   };
 }
 
@@ -5989,14 +6099,20 @@ function ngAutoPublishPreparedContentEnabled() {
   return String(process.env.NEXTGEN_AUTO_PUBLISH_SESSION_CONTENT || "false").trim().toLowerCase() === "true";
 }
 
+function ngAutoPublishSessionNotesEnabled() {
+  return lmsAutoPublishSessionNotesEnabled(process.env);
+}
+
 function ngAutoWeeklyAssessmentEnabled() {
   return String(process.env.NEXTGEN_AUTO_WEEKLY_ASSESSMENT || "false").trim().toLowerCase() === "true";
 }
 
-function ngSafeSourceSummary({ mode = "notes", noteIds = [], sessionIds = [], roadmapDayIds = [], system = "", dateFrom = "", dateTo = "", lastDays = null } = {}) {
+function ngSafeSourceSummary({ mode = "notes", scope = "", noteIds = [], sessionIds = [], roadmapDayIds = [], system = "", weekNumber = null, dateFrom = "", dateTo = "", lastDays = null } = {}) {
   const parts = [
     `mode=${mode || "notes"}`,
+    scope ? `scope=${scope}` : "",
     system ? `system=${system}` : "",
+    weekNumber ? `week=${weekNumber}` : "",
     dateFrom || dateTo ? `date_range=${dateFrom || "any"}..${dateTo || "any"}` : "",
     lastDays ? `last_days=${lastDays}` : "",
     noteIds.length ? `notes=${noteIds.length}` : "",
@@ -6298,9 +6414,13 @@ async function ngProcessSessionLearningContent(db, { sessionId, transcriptText =
 
       source: "zoom_transcript",
       auto_imported: true,
-      // Prepared notes stay in draft until admin reviews/publishes.
-      is_published: ngAutoPublishPreparedContentEnabled(),
-      status: ngAutoPublishPreparedContentEnabled() ? "published" : "draft",
+      published: ngAutoPublishSessionNotesEnabled(),
+      is_published: ngAutoPublishSessionNotesEnabled(),
+      status: ngAutoPublishSessionNotesEnabled() ? "published" : "draft",
+      published_at: ngAutoPublishSessionNotesEnabled() ? new Date().toISOString() : null,
+      published_by: ngAutoPublishSessionNotesEnabled() ? "system:zoom-recording-notes-automation" : null,
+      auto_published: ngAutoPublishSessionNotesEnabled(),
+      auto_published_at: ngAutoPublishSessionNotesEnabled() ? new Date().toISOString() : null,
 
       content_processing_status: "notes_ready",
       content_processing_model: cleaned.model || null,
@@ -6313,9 +6433,9 @@ async function ngProcessSessionLearningContent(db, { sessionId, transcriptText =
     if (day) {
       day.session_notes_id = cleanSessionId;
       day.session_notes_draft_ready = true;
-      day.session_notes_ready = ngAutoPublishPreparedContentEnabled();
-      day.notes_status = ngAutoPublishPreparedContentEnabled() ? "published" : "draft";
-      if (ngAutoPublishPreparedContentEnabled()) {
+      day.session_notes_ready = ngAutoPublishSessionNotesEnabled();
+      day.notes_status = ngAutoPublishSessionNotesEnabled() ? "published" : "draft";
+      if (ngAutoPublishSessionNotesEnabled()) {
         ngEnsureTaskItemOnDay(day, "read_session_notes", "Read the session notes after class.");
       }
     }
@@ -9658,7 +9778,7 @@ function ngStrictTranscriptNotesSystemPrompt() {
   return `
 You are cleaning Zoom lecture transcripts for NextGen USMLE.
 
-Your task is to convert the tutor's Zoom transcript into detailed student lecture notes.
+Your task is to convert the tutor's Zoom transcript into detailed, clean student lecture notes that match the established NextGen Day 1 note style.
 
 CRITICAL RULES:
 - Use ONLY the provided transcript.
@@ -9677,14 +9797,24 @@ CRITICAL RULES:
 - Do not include raw timestamps.
 - Do not include speaker labels.
 - Do not write "summary".
-- Return clean lecture notes only.
+- Return clean Markdown lecture notes only.
 
 STYLE TARGET:
-Make the output look like detailed cleaned lecture notes:
-# Lecture Title
-## Main Topic
-### Subtopic
-Short clean paragraphs and bullets.
+The server adds the lecture title once. Do not invent or repeat a different title.
+- If the tutor assigned pages, questions, videos, homework, or review work, begin with:
+  ## Session Task
+  A short faithful sentence followed by bullet points.
+- Use numbered, bold-looking Markdown topic headings:
+  ## 1. Main Topic
+  ## 2. Next Main Topic
+- Use:
+  ### Key question or subtopic
+  for important questions and subtopics.
+- Use **bold** for important medical terms, diagnoses, mechanisms, formulas, and memory points.
+- Use bullets for lists, sequences, comparisons, features, causes, and steps.
+- Keep paragraphs short and readable.
+- Put --- between major numbered topics when it improves readability.
+- Do not add a Conclusion, Summary, Important Takeaways, or Homework section unless the tutor explicitly taught or assigned it.
 
 The output should look like a cleaned transcript converted into notes, not a compressed summary.
 `.trim();
@@ -9699,16 +9829,23 @@ function ngNormalizeStrictNotesPart(text) {
 }
 
 function ngEnsureStrictNotesTitle(notes, metadata = {}) {
-  const text = String(notes || "").trim();
+  let text = String(notes || "").trim();
   if (!text) return "";
-  if (/^#\s+/.test(text)) return text;
 
   const topicTitle = String(metadata?.topic || metadata?.title || "").trim();
-  const finalTitle = topicTitle
-    ? `# ${topicTitle} — Clean Lecture Notes from Zoom Transcript`
-    : "# Clean Lecture Notes from Zoom Transcript";
+  const identity = topicTitle.match(/^(.+?)(?:\s*[—–-]\s*|\s+)day\s*0*(\d{1,3})\b/i);
+  const cleanSystem = String(identity?.[1] || "").trim();
+  const systemDay = Number(identity?.[2] || metadata?.system_day || 0);
+  const finalTitle = cleanSystem && systemDay
+    ? `${cleanSystem} Day ${systemDay}`
+    : topicTitle || "Clean Tutor Notes";
 
-  return `${finalTitle}\n\n${text}`.trim();
+  const firstLine = text.split("\n", 1)[0] || "";
+  if (/^#\s+/.test(firstLine)) {
+    text = text.slice(firstLine.length).replace(/^\n+/, "").trim();
+  }
+
+  return `# ${finalTitle}\n\n${text}`.trim();
 }
 
 async function cleanNotesWithAI({ sourceText, sourceType, metadata = {} }) {
@@ -9746,6 +9883,8 @@ Important:
 - If this part contains MCQ discussion, preserve the question logic and answer reasoning.
 - If this part contains homework, preserve it.
 - If this is not the first part, continue naturally without restarting the whole lecture.
+- Do not add an H1 title; the server adds the lecture title once.
+- Follow the numbered headings, bold terms, short paragraphs, and bullet style exactly.
 
 TRANSCRIPT PART:
 ${chunks[index]}
@@ -10160,8 +10299,12 @@ app.post("/admin/live-sessions/:sessionId/generate-clean-notes", async (req, res
       source: pastedTranscript ? "admin_pasted_zoom_transcript_ai" : "admin_one_button_zoom_transcript_ai",
       clean_notes_style: "strict_transcript_only_detailed",
       auto_imported: existingNote.auto_imported === true || Boolean(zoomImport?.transcriptText || existingNote.transcript_text),
+      published: publish,
       is_published: publish,
       status: publish ? "published" : "draft",
+      published_at: publish ? existingNote.published_at || now : null,
+      published_by: publish ? user?.id || "admin" : null,
+      auto_published: false,
 
       content_processing_status: "completed",
       content_processing_error: null,
@@ -10174,6 +10317,7 @@ app.post("/admin/live-sessions/:sessionId/generate-clean-notes", async (req, res
       updated_at: now,
       updated_by: user?.id || "admin",
     };
+    ngSyncSessionNoteStatusToRoadmap(db, sessionId, db.notes[sessionId]);
 
     if (matchingRecording?.id || matchingRecording?.recording_key) {
       const recordingKey = matchingRecording.id || matchingRecording.recording_key;
@@ -10293,16 +10437,105 @@ function ngCleanDateOnly(value) {
 
 function ngNoteTextForAssessment(note = {}) {
   return String(
-    note.student_notes ||
-    note.cleaned_notes ||
     note.notes ||
+    note.cleaned_notes ||
+    note.student_notes ||
     note.content ||
     ""
   ).trim();
 }
 
+function ngNormalizeNotesAssessmentScope(value = "") {
+  const clean = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (["week", "whole_week", "weekly", "week_notes"].includes(clean)) return "week";
+  if (["system", "whole_system", "system_notes", "cardiology"].includes(clean)) return "system";
+  if (["selected", "selected_sessions", "selected_notes", "sessions"].includes(clean)) return "selected";
+  return "all";
+}
+
+function ngAssessmentNotesCatalog(db, { courseId, includeDrafts = false } = {}) {
+  const cleanCourseId = String(courseId || "").trim();
+  const roadmapDays = cleanCourseId ? ngGetRoadmapDaysForCourse(db, cleanCourseId) : [];
+  const sessions = Object.values(db.liveSessions || {}).filter((session) => (
+    (!cleanCourseId || String(session?.course_id || "") === cleanCourseId) &&
+    !ngSessionIsInternalTestOrHidden(session)
+  ));
+  const sessionById = new Map(sessions.map((session) => [String(session.id || ""), session]));
+  const sessionsByRoadmapDay = new Map();
+  for (const session of sessions) {
+    const dayId = String(session.roadmap_day_id || "").trim();
+    if (dayId && !sessionsByRoadmapDay.has(dayId)) sessionsByRoadmapDay.set(dayId, session);
+  }
+
+  const canonical = [];
+  const seenSessions = new Set();
+  for (const day of roadmapDays) {
+    if (!day || ngRoadmapDayIsNoClass(day)) continue;
+    const requestedSessionId = String(day.live_session_id || day.session_id || "").trim();
+    const session = sessionById.get(requestedSessionId) || sessionsByRoadmapDay.get(String(day.id || "")) || null;
+    if (!session?.id || seenSessions.has(String(session.id))) continue;
+    seenSessions.add(String(session.id));
+    canonical.push({ session, day });
+  }
+
+  // Older courses can have notes and sessions without a populated roadmap.
+  if (!canonical.length) {
+    for (const session of sessions) {
+      if (!session?.id || ngStudentNotesSessionIsNoClass(session)) continue;
+      canonical.push({ session, day: null });
+    }
+  }
+
+  const rows = [];
+  for (const { session, day } of canonical) {
+    const resolved = ngResolveStudentNotesForSession(db, session, {
+      publishedOnly: !includeDrafts,
+    });
+    const note = resolved?.note || null;
+    if (!note) continue;
+    if (!includeDrafts && !ngStudentNotesIsPublished(note)) continue;
+
+    const noteCourseId = note.course_id || session.course_id || day?.course_id || "";
+    if (cleanCourseId && String(noteCourseId) !== cleanCourseId) continue;
+
+    const noteText = ngNoteTextForAssessment(note);
+    if (!noteText) continue;
+
+    const dayNumber = Number(day?.day_number || session.day_number || note.day_number || 0) || null;
+    const weekNumber = Number(
+      day?.week_number ||
+      session.week_number ||
+      note.week_number ||
+      (dayNumber ? Math.ceil(dayNumber / 7) : 0)
+    ) || null;
+    const system = ngNormalizeMasterMapSystemName(
+      day?.system || session.system || note.system || ""
+    );
+
+    rows.push({
+      noteId: resolved.note_key || String(note.id || session.id),
+      sessionId: String(session.id),
+      roadmapDayId: day?.id || session.roadmap_day_id || note.roadmap_day_id || null,
+      dayNumber,
+      weekNumber,
+      date: ngCleanDateOnly(session.scheduled_date || day?.date || note.created_at || note.updated_at || ""),
+      title: day?.title || session.topic || session.title || `Session ${session.id}`,
+      system,
+      published: ngStudentNotesIsPublished(note),
+      text: noteText,
+    });
+  }
+
+  return rows.sort((a, b) => (
+    String(a.date || "").localeCompare(String(b.date || "")) ||
+    Number(a.dayNumber || 0) - Number(b.dayNumber || 0)
+  ));
+}
+
 function ngCollectNotesAssessmentSource(db, {
   courseId,
+  scope = "all",
+  weekNumber = null,
   lastDays = null,
   dateFrom = "",
   dateTo = "",
@@ -10313,7 +10546,9 @@ function ngCollectNotesAssessmentSource(db, {
   maxChars = 60000,
 } = {}) {
   const cleanCourseId = String(courseId || "").trim();
-  const cleanSystem = String(system || "").trim().toLowerCase();
+  const cleanScope = ngNormalizeNotesAssessmentScope(scope);
+  const cleanSystem = system ? ngNormalizeMasterMapSystemName(system).toLowerCase() : "";
+  const requestedWeekNumber = Number(weekNumber || 0) || null;
   const selectedSessionIds = new Set(normalizeIdList(sessionIds));
   const selectedRoadmapDayIds = new Set(normalizeIdList(roadmapDayIds));
 
@@ -10322,59 +10557,43 @@ function ngCollectNotesAssessmentSource(db, {
   const minDate = lastDaysNumber ? dateOnly(addDays(now, -lastDaysNumber + 1)) : ngCleanDateOnly(dateFrom);
   const maxDate = ngCleanDateOnly(dateTo) || dateOnly(now);
 
-  const roadmapDays = cleanCourseId ? ngGetRoadmapDaysForCourse(db, cleanCourseId) : [];
-  const roadmapBySessionId = {};
-  const roadmapById = {};
-  for (const day of roadmapDays) {
-    if (day?.id) roadmapById[String(day.id)] = day;
-    const sid = day?.live_session_id || day?.session_id || "";
-    if (sid) roadmapBySessionId[String(sid)] = day;
+  let rows = ngAssessmentNotesCatalog(db, {
+    courseId: cleanCourseId,
+    includeDrafts,
+  });
+
+  if (selectedSessionIds.size) {
+    rows = rows.filter((row) => selectedSessionIds.has(String(row.sessionId || "")));
+  }
+  if (selectedRoadmapDayIds.size) {
+    rows = rows.filter((row) => selectedRoadmapDayIds.has(String(row.roadmapDayId || "")));
+  }
+  if (minDate) rows = rows.filter((row) => !row.date || row.date >= minDate);
+  if (maxDate) rows = rows.filter((row) => !row.date || row.date <= maxDate);
+  if (cleanSystem) {
+    rows = rows.filter((row) => ngNormalizeMasterMapSystemName(row.system).toLowerCase() === cleanSystem);
   }
 
-  const rows = [];
-  for (const [noteId, note] of Object.entries(db.notes || {})) {
-    const sessionId = String(note.session_id || noteId || "").trim();
-    const session = db.liveSessions?.[sessionId] || null;
-    const day = roadmapBySessionId[sessionId] || (note.roadmap_day_id ? roadmapById[String(note.roadmap_day_id)] : null) || null;
-    const noteCourseId = note.course_id || session?.course_id || day?.course_id || "";
-
-    if (cleanCourseId && String(noteCourseId) !== cleanCourseId) continue;
-    if (!includeDrafts && note.is_published !== true) continue;
-    if (selectedSessionIds.size && !selectedSessionIds.has(sessionId)) continue;
-    if (selectedRoadmapDayIds.size && !selectedRoadmapDayIds.has(String(day?.id || note.roadmap_day_id || ""))) continue;
-
-    const sessionDate = ngCleanDateOnly(session?.scheduled_date || day?.date || note.created_at || note.updated_at || "");
-    if ((minDate || maxDate) && sessionDate) {
-      if (minDate && sessionDate < minDate) continue;
-      if (maxDate && sessionDate > maxDate) continue;
+  let resolvedWeekNumber = requestedWeekNumber;
+  if (cleanScope === "week") {
+    if (!resolvedWeekNumber) {
+      const latestWithWeek = [...rows].reverse().find((row) => Number(row.weekNumber || 0) > 0);
+      resolvedWeekNumber = Number(latestWithWeek?.weekNumber || 0) || null;
     }
-
-    const rowSystem = String(day?.system || note.system || session?.system || "").trim().toLowerCase();
-    if (cleanSystem && rowSystem && rowSystem !== cleanSystem) continue;
-
-    const text = ngNoteTextForAssessment(note);
-    if (!text) continue;
-
-    rows.push({
-      noteId,
-      sessionId,
-      roadmapDayId: day?.id || note.roadmap_day_id || null,
-      dayNumber: day?.day_number || null,
-      weekNumber: day?.week_number || null,
-      date: sessionDate || "",
-      title: day?.title || session?.topic || session?.title || `Session ${sessionId}`,
-      system: day?.system || note.system || session?.system || "",
-      text,
-    });
+    rows = resolvedWeekNumber
+      ? rows.filter((row) => Number(row.weekNumber || 0) === resolvedWeekNumber)
+      : [];
   }
-
-  rows.sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")) || Number(a.dayNumber || 0) - Number(b.dayNumber || 0));
 
   let sourceText = "";
   const used = [];
+  let truncated = false;
   for (const row of rows) {
     const chunk = [`Date: ${row.date || "N/A"}`, `Title: ${row.title}`, row.system ? `System: ${row.system}` : "", row.text].filter(Boolean).join("\n");
-    if (sourceText.length + chunk.length + 10 > Number(maxChars || 60000)) break;
+    if (sourceText.length + chunk.length + 10 > Number(maxChars || 60000)) {
+      truncated = true;
+      break;
+    }
     sourceText += (sourceText ? "\n\n---\n\n" : "") + chunk;
     used.push(row);
   }
@@ -10385,12 +10604,20 @@ function ngCollectNotesAssessmentSource(db, {
     source_note_ids: used.map((row) => row.noteId),
     source_session_ids: used.map((row) => row.sessionId).filter(Boolean),
     source_roadmap_day_ids: used.map((row) => row.roadmapDayId).filter(Boolean),
+    scope: cleanScope,
+    week_number: resolvedWeekNumber,
+    system: cleanSystem ? ngNormalizeMasterMapSystemName(system) : "",
+    available_note_count: rows.length,
+    used_note_count: used.length,
+    truncated,
     source_summary: ngSafeSourceSummary({
       mode: "manual_notes_assessment",
+      scope: cleanScope,
       noteIds: used.map((row) => row.noteId),
       sessionIds: used.map((row) => row.sessionId).filter(Boolean),
       roadmapDayIds: used.map((row) => row.roadmapDayId).filter(Boolean),
       system,
+      weekNumber: resolvedWeekNumber,
       dateFrom: minDate,
       dateTo: maxDate,
       lastDays: lastDaysNumber,
@@ -10418,15 +10645,42 @@ app.post("/admin/assessments/generate-from-notes", async (req, res) => {
       return res.status(404).json({ success: false, error: "Course not found" });
     }
 
+    const selectedSessionIds = req.body.session_ids || req.body.selected_session_ids || [];
+    const selectedRoadmapDayIds = req.body.roadmap_day_ids || req.body.selected_roadmap_day_ids || [];
+    const requestedScope = req.body.scope || req.body.notes_scope || (
+      normalizeIdList(selectedSessionIds).length || normalizeIdList(selectedRoadmapDayIds).length
+        ? "selected"
+        : req.body.system
+          ? "system"
+          : req.body.week_number || req.body.week
+            ? "week"
+            : "all"
+    );
+    const cleanScope = ngNormalizeNotesAssessmentScope(requestedScope);
+    if (cleanScope === "system" && !String(req.body.system || "").trim()) {
+      return res.status(400).json({
+        success: false,
+        error: "Select a system for the whole-system notes assessment.",
+      });
+    }
+    if (cleanScope === "selected" && !normalizeIdList(selectedSessionIds).length && !normalizeIdList(selectedRoadmapDayIds).length) {
+      return res.status(400).json({
+        success: false,
+        error: "Select at least one session note for the selected-notes assessment.",
+      });
+    }
+
     const collected = ngCollectNotesAssessmentSource(db, {
       courseId,
+      scope: cleanScope,
+      weekNumber: req.body.week_number || req.body.week || null,
       lastDays: req.body.last_days || req.body.days || null,
       dateFrom: req.body.date_from || req.body.start_date || "",
       dateTo: req.body.date_to || req.body.end_date || "",
       system: req.body.system || "",
-      sessionIds: req.body.session_ids || req.body.selected_session_ids || [],
-      roadmapDayIds: req.body.roadmap_day_ids || req.body.selected_roadmap_day_ids || [],
-      includeDrafts: req.body.include_drafts !== false,
+      sessionIds: selectedSessionIds,
+      roadmapDayIds: selectedRoadmapDayIds,
+      includeDrafts: req.body.include_drafts === true,
       maxChars: req.body.max_source_chars || 60000,
     });
 
@@ -10452,6 +10706,9 @@ app.post("/admin/assessments/generate-from-notes", async (req, res) => {
         course_name: course.name || "",
         assessment_type: assessmentType,
         source_type: "session_notes",
+        notes_scope: collected.scope,
+        week_number: collected.week_number,
+        system: collected.system,
         source_summary: collected.source_summary,
       },
     });
@@ -10480,6 +10737,11 @@ app.post("/admin/assessments/generate-from-notes", async (req, res) => {
       source_session_ids: collected.source_session_ids,
       source_roadmap_day_ids: collected.source_roadmap_day_ids,
       source_summary: collected.source_summary,
+      source_scope: collected.scope,
+      source_week_number: collected.week_number,
+      source_system: collected.system,
+      source_note_count_available: collected.available_note_count,
+      source_truncated: collected.truncated,
       assessment_type: assessmentType,
       difficulty,
       question_count: result.questions.length,
@@ -10510,6 +10772,11 @@ app.post("/admin/assessments/generate-from-notes", async (req, res) => {
       warnings: result.warnings,
       source_summary: collected.source_summary,
       source_note_count: collected.source_note_ids.length,
+      source_note_count_available: collected.available_note_count,
+      source_scope: collected.scope,
+      source_week_number: collected.week_number,
+      source_system: collected.system,
+      source_truncated: collected.truncated,
       source_length_used: collected.sourceText.length,
       ai_usage: usageLog,
     });
@@ -10579,7 +10846,16 @@ app.get("/health", async (req, res) => {
     roadmap_extension_build: ROADMAP_EXTENSION_BUILD,
     recording_assignment_build: RECORDING_ASSIGNMENT_BUILD,
     recording_duplicate_cleanup_build: RECORDING_DUPLICATE_CLEANUP_BUILD,
+    recording_label_corrections_build: RECORDING_LABEL_CORRECTIONS_BUILD,
+    recording_label_corrections: ngRecordingLabelReconciliationState,
     student_notes_resolver_build: STUDENT_NOTES_RESOLVER_BUILD,
+    lms_session_notes_build: LMS_SESSION_NOTES_BUILD,
+    lms_assessment_notes_scope_build: LMS_ASSESSMENT_NOTES_SCOPE_BUILD,
+    lms_session_notes: {
+      auto_publish_notes: ngAutoPublishSessionNotesEnabled(),
+      auto_publish_session_content: ngAutoPublishPreparedContentEnabled(),
+      reconciliation: ngSessionNotesReconciliationState,
+    },
     data_dir: DATA_DIR,
     live_db_path: LIVE_DB_PATH,
     live_db_exists: liveDbExists,
@@ -11262,6 +11538,79 @@ function ngStudentProfileAuditEvent({ product, userId, changedFields, createdAt 
     created_at: createdAt,
   };
 }
+
+app.get("/admin/assessments/note-source-options", async (req, res) => {
+  try {
+    await requireLmsPermission(req, "lms.assessments.create");
+    const db = await readLiveDb();
+    const courseId = String(req.query.course_id || req.query.courseId || "").trim();
+    if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
+    if (!db.courses?.[courseId]) return res.status(404).json({ success: false, error: "Course not found" });
+
+    const includeDrafts = String(req.query.include_drafts || "").toLowerCase() === "true";
+    const rows = ngAssessmentNotesCatalog(db, { courseId, includeDrafts });
+    const weekMap = new Map();
+    const systemMap = new Map();
+
+    for (const row of rows) {
+      if (row.weekNumber) {
+        const week = weekMap.get(row.weekNumber) || {
+          week_number: row.weekNumber,
+          label: `Week ${row.weekNumber}`,
+          note_count: 0,
+          first_date: row.date || null,
+          last_date: row.date || null,
+          systems: new Set(),
+        };
+        week.note_count += 1;
+        if (row.date && (!week.first_date || row.date < week.first_date)) week.first_date = row.date;
+        if (row.date && (!week.last_date || row.date > week.last_date)) week.last_date = row.date;
+        if (row.system) week.systems.add(row.system);
+        weekMap.set(row.weekNumber, week);
+      }
+
+      const system = ngNormalizeMasterMapSystemName(row.system || "General");
+      const systemRow = systemMap.get(system) || {
+        system,
+        label: `All ${system} notes`,
+        note_count: 0,
+        first_date: row.date || null,
+        last_date: row.date || null,
+      };
+      systemRow.note_count += 1;
+      if (row.date && (!systemRow.first_date || row.date < systemRow.first_date)) systemRow.first_date = row.date;
+      if (row.date && (!systemRow.last_date || row.date > systemRow.last_date)) systemRow.last_date = row.date;
+      systemMap.set(system, systemRow);
+    }
+
+    res.json({
+      success: true,
+      build: LMS_ASSESSMENT_NOTES_SCOPE_BUILD,
+      course_id: courseId,
+      include_drafts: includeDrafts,
+      total_notes: rows.length,
+      scopes: [
+        { value: "week", label: "Whole week notes", requires: "week_number" },
+        { value: "system", label: "Whole system notes", requires: "system" },
+        { value: "all", label: "All course notes", requires: null },
+        { value: "selected", label: "Selected session notes", requires: "session_ids" },
+      ],
+      weeks: [...weekMap.values()]
+        .sort((a, b) => Number(a.week_number) - Number(b.week_number))
+        .map((week) => ({ ...week, systems: [...week.systems] })),
+      systems: [...systemMap.values()].sort((a, b) => a.system.localeCompare(b.system)),
+      sessions: rows.map(({ text, ...row }) => ({
+        ...row,
+        note_length: text.length,
+      })),
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Failed to load assessment note-source options",
+    });
+  }
+});
 
 app.patch("/auth/me", async (req, res) => {
   try {
@@ -12117,6 +12466,7 @@ app.get("/admin/lms-flow/audit", async (req, res) => {
       filters: { course_id: courseId || null },
       config: {
         auto_publish_session_content: ngAutoPublishPreparedContentEnabled(),
+        auto_publish_session_notes: ngAutoPublishSessionNotesEnabled(),
         auto_weekly_assessment: ngAutoWeeklyAssessmentEnabled(),
         demo_settings: { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) },
       },
@@ -14330,6 +14680,12 @@ app.get("/zoom/recordings", async (req, res) => {
         meeting_id: meetingId,
         uuid: meeting.uuid,
         topic: saved.topic || matchedSession?.topic || matchedSession?.title || meeting.topic,
+        corrected_topic: saved.corrected_topic || null,
+        corrected_day_number: saved.corrected_day_number || null,
+        corrected_system_day: saved.corrected_system_day || null,
+        label_correction_locked: saved.label_correction_locked === true,
+        label_correction_reason: saved.label_correction_reason || null,
+        missed_holiday_date: saved.missed_holiday_date || null,
         roadmap_day_id: saved.roadmap_day_id || matchedDay?.id || matchedSession?.roadmap_day_id || null,
         day_number: saved.day_number || matchedDay?.day_number || matchedSession?.day_number || null,
         instructional_day_number: saved.instructional_day_number || matchedDay?.instructional_day_number || matchedDay?.day_number || matchedSession?.instructional_day_number || null,
@@ -15218,6 +15574,7 @@ function buildNotesPayload({ db, sessionId, body = {}, user, publishMode = "save
   const session = db.liveSessions?.[sessionId] || null;
   const roadmapDay = session ? ngFindRoadmapDayForLiveSession(db, session) : null;
   const now = new Date().toISOString();
+  const content = lmsSynchronizeSessionNoteContent(previous, body);
 
   const notesPayload = {
     ...previous,
@@ -15228,7 +15585,7 @@ function buildNotesPayload({ db, sessionId, body = {}, user, publishMode = "save
     instructional_day_number: roadmapDay?.instructional_day_number || roadmapDay?.day_number || session?.instructional_day_number || previous.instructional_day_number || null,
     system_day: roadmapDay?.system_day || roadmapDay?.day_in_system || session?.system_day || previous.system_day || null,
     system: roadmapDay?.system || session?.system || previous.system || null,
-    notes: body.notes !== undefined ? String(body.notes || "") : String(previous.notes || ""),
+    ...content,
     transcript_url: body.transcript_url || previous.transcript_url || null,
     transcript_text: body.transcript_text !== undefined ? String(body.transcript_text || "") : String(previous.transcript_text || ""),
     transcript_raw_vtt: body.transcript_raw_vtt !== undefined ? String(body.transcript_raw_vtt || "") : String(previous.transcript_raw_vtt || ""),
@@ -15239,23 +15596,34 @@ function buildNotesPayload({ db, sessionId, body = {}, user, publishMode = "save
     updated_at: now,
   };
 
-  if (publishMode === "publish" || body.published === true || body.is_published === true) {
-    notesPayload.published = true;
-    notesPayload.is_published = true;
-    notesPayload.published_at = previous.published_at || now;
-    notesPayload.published_by = previous.published_by || user?.id || null;
-    notesPayload.unpublished_at = null;
-    notesPayload.unpublished_by = null;
-  }
+  return lmsApplySessionNotePublicationState(notesPayload, {
+    publishMode,
+    body,
+    userId: user?.id || null,
+    now,
+  });
+}
 
-  if (publishMode === "unpublish" || body.published === false || body.is_published === false) {
-    notesPayload.published = false;
-    notesPayload.is_published = false;
-    notesPayload.unpublished_at = now;
-    notesPayload.unpublished_by = user?.id || null;
-  }
+function ngSyncSessionNoteStatusToRoadmap(db, sessionId, note = {}) {
+  const session = db.liveSessions?.[sessionId] || null;
+  const day = session ? ngFindRoadmapDayForLiveSession(db, session) : null;
+  if (!day) return;
 
-  return notesPayload;
+  const published = Boolean(
+    (note.published === true || note.is_published === true) &&
+    !["draft", "unpublished", "archived", "hidden"].includes(String(note.status || "").trim().toLowerCase())
+  );
+
+  day.session_notes_id = sessionId;
+  day.session_notes_draft_ready = Boolean(
+    note.notes || note.cleaned_notes || note.student_notes || note.transcript_text || note.transcript_url
+  );
+  day.session_notes_ready = published;
+  day.notes_status = published ? "published" : "draft";
+
+  if (published) {
+    ngEnsureTaskItemOnDay(day, "read_session_notes", "Read the session notes after class.");
+  }
 }
 
 async function saveNotesHandler(req, res) {
@@ -15275,6 +15643,7 @@ async function saveNotesHandler(req, res) {
       user,
       publishMode: "save",
     });
+    ngSyncSessionNoteStatusToRoadmap(db, sessionId, db.notes[sessionId]);
 
     let flashcard_sync = null;
     if (db.notes[sessionId]?.published === true || db.notes[sessionId]?.is_published === true) {
@@ -15310,6 +15679,7 @@ async function publishNotesHandler(req, res) {
       user,
       publishMode: "publish",
     });
+    ngSyncSessionNoteStatusToRoadmap(db, sessionId, db.notes[sessionId]);
 
     const crmDb = await readCrmDb().catch(() => ({}));
     const flashcard_sync = await ngAutoGenerateFlashcardsFromPublishedNotes(db, crmDb, {
@@ -15368,6 +15738,7 @@ async function unpublishNotesHandler(req, res) {
       user,
       publishMode: "unpublish",
     });
+    ngSyncSessionNoteStatusToRoadmap(db, sessionId, db.notes[sessionId]);
 
     await writeLiveDb(db);
     res.json({ success: true, message: "Notes unpublished successfully", notes: db.notes[sessionId] });
@@ -80051,6 +80422,24 @@ const ngZoomRecordingRecoveryState = {
   last_error: null,
   last_result: null,
 };
+const ngSessionNotesReconciliationState = {
+  build: LMS_SESSION_NOTES_BUILD,
+  running: false,
+  last_started_at: null,
+  last_finished_at: null,
+  last_success_at: null,
+  last_error: null,
+  last_result: null,
+};
+const ngRecordingLabelReconciliationState = {
+  build: RECORDING_LABEL_CORRECTIONS_BUILD,
+  running: false,
+  last_started_at: null,
+  last_finished_at: null,
+  last_success_at: null,
+  last_error: null,
+  last_result: null,
+};
 
 function ngRememberZoomRecordingRecoveryResult(result = {}) {
   ngZoomRecordingRecoveryState.last_result = result;
@@ -80273,7 +80662,13 @@ app.listen(PORT, () => {
   console.log(`Backend build=${NEXTGEN_BACKEND_BUILD}; JSON body limit=${NEXTGEN_JSON_BODY_LIMIT}; memory soft guard=${NEXTGEN_BACKGROUND_MEMORY_SOFT_PERCENT}% of ${NEXTGEN_RENDER_MEMORY_LIMIT_MB} MB`);
   ngRunTeachingAccessStartupReconciliation()
     .then((result) => console.log("LMS teaching-day access reconciliation:", result))
-    .catch((error) => console.error("LMS teaching-day access reconciliation failed:", error.message));
+    .catch((error) => console.error("LMS teaching-day access reconciliation failed:", error.message))
+    .then(() => ngRunSessionNotesStartupReconciliation())
+    .then((result) => console.log("LMS session-notes reconciliation:", result))
+    .catch((error) => console.error("LMS session-notes reconciliation failed:", error.message))
+    .then(() => ngRunRecordingLabelStartupReconciliation())
+    .then((result) => console.log("LMS recording-label reconciliation:", result))
+    .catch((error) => console.error("LMS recording-label reconciliation failed:", error.message));
   ngV116StartBackendHeartbeat();
   ngStartEmailQueueRunner();
   ngStartEmailAutomationRunner();
