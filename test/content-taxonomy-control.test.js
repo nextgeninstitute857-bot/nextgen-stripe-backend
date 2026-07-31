@@ -189,3 +189,36 @@ test("classifier preflight exercises one real contract without any catalog write
     assert.doesNotMatch(preflight, forbidden);
   }
 });
+
+test("no-credit taxonomy export is authenticated, paginated and read-only", () => {
+  const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
+  const start = server.indexOf("async function aylaNoCreditMcqExportPage");
+  const end = server.indexOf('app.post("/api/ayla/admin/resources/content-taxonomy/mappings"');
+  assert.ok(start >= 0 && end > start, "the bounded no-credit export must be present");
+  const exportRoute = server.slice(start, end);
+
+  assert.match(exportRoute, /app\.get\("\/api\/ayla\/admin\/resources\/content-taxonomy\/no-credit-export"/);
+  assert.match(exportRoute, /await aylaRequireAdmin\(req\)/);
+  assert.match(exportRoute, /Math\.min\(10, Number\(limit\)/);
+  assert.match(exportRoute, /ngListAllContentTaxonomyAttentionPairs/);
+  assert.match(exportRoute, /getContentTaxonomyProviderPairEvidence/);
+  assert.match(exportRoute, /buildContentTaxonomyProviderPairRequest/);
+  assert.match(exportRoute, /evidence_complete/);
+  assert.match(exportRoute, /export_version: "aylamed-no-credit-taxonomy-v1"/);
+  assert.match(exportRoute, /read_only: true/);
+  assert.match(exportRoute, /writes_performed: 0/);
+  assert.match(exportRoute, /queue_jobs_created: 0/);
+
+  for (const forbidden of [
+    /mutateAylaDb/,
+    /aylaSetItem/,
+    /upsertContentTaxonomyMapping/,
+    /ngContentBackgroundQueue\.enqueue/,
+    /aylaQueueVimeoCatalogClassification/,
+    /approveVimeoCatalogDraft/,
+    /aylaV190StoreImportedResource/,
+    /callOpenAIResponsesAPI/,
+  ]) {
+    assert.doesNotMatch(exportRoute, forbidden);
+  }
+});

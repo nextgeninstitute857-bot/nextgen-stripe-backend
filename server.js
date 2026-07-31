@@ -504,7 +504,7 @@ const NEXTGEN_MSK_2026_07_29_SCHEDULE_REPAIR = Object.freeze({
   current_date: "2026-07-31",
   current_day_id_before_repair: "6cacc0bf-7ca2-401e-aeff-a0b67e3ffb1c:day:18:de2a716f-0b6f-4ff0-8e01-d1b696326408",
   current_session_id: "ae8b6eb9-e930-4a83-af64-537253fe42fa",
-  recording_key: "zoom-recording:83509601689:A17uXMYsReyLnQRoG1jgKg:2026-07-30T16:58:41Z",
+  recording_key: String(process.env.NEXTGEN_MSK_2026_07_30_RECORDING_KEY || "").trim(),
   moved_day_id: "6cacc0bf-7ca2-401e-aeff-a0b67e3ffb1c:day:pushed:68d50440-edb7-4f8b-ab2d-b8bc6fc97e2a",
   prefix_rows: Object.freeze([
     { day_id: "6cacc0bf-7ca2-401e-aeff-a0b67e3ffb1c:day:1:ee429d9f-1a2a-463f-89f4-fbfd4fe2a0fc", date: "2026-07-01", holiday: true },
@@ -38630,6 +38630,120 @@ app.get("/api/ayla/admin/resources/content-taxonomy/review-queue", async (req, r
     });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load the content taxonomy review queue");
+  }
+});
+
+async function aylaNoCreditMcqExportPage({ examTrack, offset = 0, limit = 5 } = {}) {
+  const examTrackId = normalizeAylaRegistryExamTrack(examTrack);
+  const examDefinition = examTrackId ? AYLA_EXAM_REGISTRY[examTrackId] : null;
+  if (!examTrack || !examDefinition) {
+    throw Object.assign(new Error("A supported exam_track is required"), { statusCode: 400 });
+  }
+  const safeOffset = Math.max(0, Math.min(5_000, Number(offset) || 0));
+  const safeLimit = Math.max(1, Math.min(10, Number(limit) || 5));
+  const pairs = await ngListAllContentTaxonomyAttentionPairs(examTrack);
+  const pagePairs = pairs.slice(safeOffset, safeOffset + safeLimit);
+  const exportedPairs = [];
+
+  for (const pair of pagePairs) {
+    const pairKey = ngContentTaxonomyPairKey(pair);
+    try {
+      const evidence = await getContentTaxonomyProviderPairEvidence({
+        examTrack,
+        sourceNamespace: pair.source_namespace,
+        sourceSystemId: pair.source_system_id,
+        sourceSubjectId: pair.source_subject_id,
+        limit: 200,
+      });
+      const request = buildContentTaxonomyProviderPairRequest(pair, evidence, {
+        examLabel: examDefinition.label,
+        allowedSystems: examDefinition.systems,
+      });
+      const countMatches = Number(pair.question_count || 0) === Number(evidence.total || 0);
+      exportedPairs.push({
+        pair_key: pairKey,
+        exam_track: examTrack,
+        source_namespace: pair.source_namespace,
+        source_system_id: pair.source_system_id,
+        source_subject_id: pair.source_subject_id,
+        mapping_id: pair.mapping_id || null,
+        mapping_revision: Number(pair.mapping_revision || 0),
+        expected_question_count: Number(pair.question_count || 0),
+        supplied_question_count: request.questions.length,
+        evidence_complete: request.evidenceComplete === true && countMatches,
+        allowed_systems: request.allowedSystems,
+        questions: request.questions,
+        export_error: countMatches
+          ? null
+          : `Question count changed from ${Number(pair.question_count || 0)} to ${Number(evidence.total || 0)}`,
+      });
+    } catch (error) {
+      exportedPairs.push({
+        pair_key: pairKey,
+        exam_track: examTrack,
+        source_namespace: pair.source_namespace,
+        source_system_id: pair.source_system_id,
+        source_subject_id: pair.source_subject_id,
+        mapping_id: pair.mapping_id || null,
+        mapping_revision: Number(pair.mapping_revision || 0),
+        expected_question_count: Number(pair.question_count || 0),
+        supplied_question_count: 0,
+        evidence_complete: false,
+        allowed_systems: [...examDefinition.systems],
+        questions: [],
+        export_error: String(error.message || error).slice(0, 1_000),
+      });
+    }
+  }
+
+  return {
+    exam_track: examTrack,
+    exam_label: examDefinition.label,
+    total_provider_pairs: pairs.length,
+    total_questions: pairs.reduce((sum, pair) => sum + Math.max(0, Number(pair.question_count || 0)), 0),
+    offset: safeOffset,
+    limit: safeLimit,
+    has_more: safeOffset + pagePairs.length < pairs.length,
+    next_offset: safeOffset + pagePairs.length < pairs.length
+      ? safeOffset + pagePairs.length
+      : null,
+    provider_pairs: exportedPairs,
+  };
+}
+
+app.get("/api/ayla/admin/resources/content-taxonomy/no-credit-export", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const requestedExamTrack = String(req.query.exam_track || req.query.examTrack || "").trim();
+    const examTrack = normalizeContentTaxonomyExamTrack(requestedExamTrack);
+    if (!examTrack) return aylaSendError(res, 400, "A supported exam_track is required");
+    const page = await aylaNoCreditMcqExportPage({
+      examTrack,
+      offset: req.query.offset,
+      limit: req.query.limit,
+    });
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, {
+      export_version: "aylamed-no-credit-taxonomy-v1",
+      exported_at: aylaNow(),
+      ...page,
+      safety: {
+        read_only: true,
+        writes_performed: 0,
+        queue_jobs_created: 0,
+        mcq_mappings_changed: 0,
+        vimeo_drafts_changed: 0,
+        approved_resources_changed: 0,
+        pilot_records_changed: 0,
+        student_records_changed: 0,
+      },
+    });
+  } catch (error) {
+    return aylaSendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Failed to prepare the no-credit MCQ evidence export",
+    );
   }
 });
 
