@@ -670,6 +670,10 @@ test("catalog summary keeps approval readiness and web verification visible", ()
 
 test("server wiring is draft-first, background researched, and explicit-review only", () => {
   const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
+  const queueFunction = server.slice(
+    server.indexOf("async function aylaQueueVimeoCatalogClassification"),
+    server.indexOf("function aylaVimeoCatalogSourceId"),
+  );
   assert.match(server, /const AYLA_VIMEO_CATALOG_BUILD = VIMEO_LIBRARY_CATALOG_BUILD/);
   assert.match(server, /v254-step1-vimeo-memory-circuit-breaker/);
   assert.match(server, /laneConcurrency: ngMultiQbankConfig\.lane_concurrency/);
@@ -683,6 +687,15 @@ test("server wiring is draft-first, background researched, and explicit-review o
   assert.match(server, /runOpenAIBackgroundResponse/);
   assert.match(server, /aylaV189ResourceType\(resource\.type\) === "vimeo_video" && aliasTopics\.includes\(topicKey\)/);
   assert.match(server, /app\.post\("\/api\/ayla\/admin\/resources\/vimeo-catalog\/classification-jobs"/);
+  assert.match(server, /app\.get\("\/api\/ayla\/admin\/resources\/classification-status"/);
+  assert.match(server, /app\.post\("\/api\/ayla\/admin\/resources\/vimeo-catalog\/jobs\/:jobId\/resume"/);
+  assert.match(server, /aylaDispatchNextVimeoCatalogDraft/);
+  assert.match(server, /AYLA_VIMEO_DISPATCH_ACTIVE_STATUSES/);
+  assert.match(server, /aylaVimeoCatalogRedispatchPending/);
+  assert.match(server, /not waiting for dispatch recovery/);
+  assert.match(server, /Resume saved Vimeo catalog job|saved Vimeo catalog job resumed/i);
+  assert.match(queueFunction, /await aylaDispatchNextVimeoCatalogDraft\(domainJob\.id\)/);
+  assert.doesNotMatch(queueFunction, /for \(const draft of eligibleDrafts\)/);
   assert.match(server, /app\.post\("\/api\/ayla\/admin\/resources\/vimeo-catalog\/review"/);
   assert.match(server, /taxonomyDefinition: aylaContentHubTaxonomyDefinition\(draft\.examTrackId\)/);
   assert.match(server, /app\.get\("\/api\/ayla\/admin\/resources\/vimeo-folders"/);
