@@ -42,6 +42,7 @@ import {
   getContentQbankPresentationPolicy,
   getContentQbankQuestions,
   getContentRegistryFlashcardQuestion,
+  getContentTaxonomyProviderPairEvidence,
   getContentTaxonomyCoverage,
   getExternalQbankDeliverySession,
   importContentQuestionBatch,
@@ -82,6 +83,11 @@ import {
   normalizeContentTaxonomyReviewAction,
   normalizeContentTaxonomyReviewState,
 } from "./lib/content-taxonomy-control.js";
+import {
+  buildContentTaxonomyProviderPairRequest,
+  contentTaxonomyClassifierMaxOutputTokens,
+  normalizeContentTaxonomyProviderPairClassification,
+} from "./lib/content-taxonomy-classifier.js";
 import {
   AYLA_QBANK_STATE_COLLECTIONS,
   canRevealAylaQbankAnswer,
@@ -382,6 +388,7 @@ import {
   normalizeVimeoTopicClassification,
   rejectVimeoCatalogDraft,
   upsertVimeoCatalogDraft,
+  vimeoClassifierMaxOutputTokens,
   vimeoCatalogSummary,
 } from "./lib/vimeo-library-manifest.js";
 import {
@@ -1113,9 +1120,11 @@ const ngContentBackgroundQueue = new SafeBackgroundQueue({
   retryBaseMs: Math.max(1_000, Number(process.env.NEXTGEN_CONTENT_JOB_RETRY_BASE_MS || 15_000) || 15_000),
   memoryRetryMs: Math.max(5_000, Number(process.env.NEXTGEN_CONTENT_JOB_MEMORY_RETRY_MS || 30_000) || 30_000),
   memoryGate: (job) => ngBackgroundMemoryIsHigh(
-    job?.lane === "ayla_vimeo_ai" ? "ayla_vimeo_ai_queue" : "content_operations_queue",
+    ["ayla_vimeo_ai", "ayla_taxonomy_ai"].includes(job?.lane)
+      ? `${job.lane}_queue`
+      : "content_operations_queue",
     {
-      heapSoftPercent: job?.lane === "ayla_vimeo_ai"
+      heapSoftPercent: ["ayla_vimeo_ai", "ayla_taxonomy_ai"].includes(job?.lane)
         ? NEXTGEN_AYLA_VIMEO_HEAP_SOFT_PERCENT
         : NEXTGEN_BACKGROUND_HEAP_SOFT_PERCENT,
     },
@@ -37495,6 +37504,16 @@ ngContentBackgroundQueue.register("ayla_vimeo_catalog_classification", async (qu
   onTerminal: ngAylaVimeoCatalogJobTerminal,
 });
 
+ngContentBackgroundQueue.register("content_taxonomy_provider_pair_classification", async (queueContext) => {
+  await ngRunContentTaxonomyProviderPairClassificationJob(queueContext);
+}, {
+  canRecover: async (job) => Boolean(
+    contentRegistryStatus().configured
+      && Array.isArray(job.payload?.pairs)
+      && job.payload.pairs.length,
+  ),
+});
+
 app.get("/admin/crm/operations/content-jobs", async (req, res) => {
   try {
     await requireCrmAdmin(req);
@@ -37984,6 +38003,403 @@ app.post("/api/ayla/admin/resources/content-taxonomy/mappings", async (req, res)
     });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to approve the content taxonomy mapping");
+  }
+});
+
+function ngContentTaxonomyClassifierModel() {
+  return String(
+    process.env.AYLA_CONTENT_TAXONOMY_CLASSIFIER_MODEL
+      || process.env.AYLA_VIMEO_CLASSIFIER_MODEL
+      || "gpt-5.6",
+  ).trim() || "gpt-5.6";
+}
+
+function ngContentTaxonomyClassifierOutputTokens() {
+  return contentTaxonomyClassifierMaxOutputTokens(
+    process.env.AYLA_CONTENT_TAXONOMY_CLASSIFIER_MAX_OUTPUT_TOKENS,
+  );
+}
+
+function ngContentTaxonomyPairKey(pair = {}) {
+  return [
+    normalizeContentTaxonomyExamTrack(pair.exam_track || pair.examTrack) || "",
+    String(pair.source_namespace || pair.sourceNamespace || "").trim().toLowerCase(),
+    String(pair.source_system_id ?? pair.sourceSystemId ?? ""),
+    String(pair.source_subject_id ?? pair.sourceSubjectId ?? ""),
+  ].join(":");
+}
+
+function ngContentTaxonomyProgress(job = {}, updates = {}) {
+  const total = Math.max(0, Number(job.total || job.pairs_total || 0));
+  const nextIndex = Math.max(0, Math.min(total, Number(updates.next_index ?? job.next_index ?? 0) || 0));
+  const approved = Math.max(0, Number(updates.approved ?? job.approved ?? 0) || 0);
+  const review = Math.max(0, Number(updates.needs_review ?? job.needs_review ?? 0) || 0);
+  const failed = Math.max(0, Number(updates.failed ?? job.failed ?? 0) || 0);
+  const skipped = Math.max(0, Number(updates.skipped ?? job.skipped ?? 0) || 0);
+  return {
+    ...job,
+    ...updates,
+    total,
+    next_index: nextIndex,
+    processed: Math.min(total, nextIndex),
+    pending: Math.max(0, total - nextIndex),
+    approved,
+    needs_review: review,
+    failed,
+    skipped,
+    percent: total ? Math.min(100, Math.round((nextIndex / total) * 100)) : 100,
+    errors: (Array.isArray(updates.errors) ? updates.errors : Array.isArray(job.errors) ? job.errors : [])
+      .slice(-100),
+  };
+}
+
+function ngContentTaxonomyTransientClassifierError(error = {}) {
+  const status = Number(error.statusCode || error.status || error.response?.status || 0);
+  const message = String(error.message || "").toLowerCase();
+  if (message.includes("max_output_tokens") || message.includes("output token")) return false;
+  return status === 408
+    || status === 409
+    || status === 425
+    || status === 429
+    || status >= 500
+    || message.includes("rate limit")
+    || message.includes("timed out")
+    || message.includes("timeout")
+    || message.includes("socket")
+    || message.includes("network");
+}
+
+async function ngRunContentTaxonomyProviderPairClassificationJob(queueContext) {
+  const payload = queueContext.job.payload || {};
+  const pairs = Array.isArray(payload.pairs) ? payload.pairs : [];
+  if (!pairs.length) {
+    throw Object.assign(new Error("No MCQ provider pairs were supplied"), { statusCode: 400 });
+  }
+  const model = ngContentTaxonomyClassifierModel();
+  let progress = ngContentTaxonomyProgress(queueContext.job.progress || {}, {
+    total: pairs.length,
+  });
+  for (let index = progress.next_index; index < pairs.length; index += 1) {
+    const pair = pairs[index];
+    const pairKey = ngContentTaxonomyPairKey(pair);
+    progress = ngContentTaxonomyProgress(progress, {
+      stage: "reading_pair_evidence",
+      current_index: index,
+      current_pair_key: pairKey,
+      current_question_count: Number(pair.question_count || 0),
+      openai_response_id: null,
+      openai_response_status: null,
+    });
+    await queueContext.heartbeat(progress);
+
+    try {
+      const examTrack = normalizeContentTaxonomyExamTrack(pair.exam_track);
+      const examTrackId = normalizeAylaRegistryExamTrack(examTrack);
+      const examDefinition = examTrackId ? AYLA_EXAM_REGISTRY[examTrackId] : null;
+      if (!examTrack || !examDefinition) {
+        throw Object.assign(new Error("The MCQ provider pair has an unsupported exam track"), {
+          statusCode: 400,
+        });
+      }
+      const evidence = await getContentTaxonomyProviderPairEvidence({
+        examTrack,
+        sourceNamespace: pair.source_namespace,
+        sourceSystemId: pair.source_system_id,
+        sourceSubjectId: pair.source_subject_id,
+        limit: 200,
+      });
+      if (!evidence.total) {
+        progress = ngContentTaxonomyProgress(progress, {
+          next_index: index + 1,
+          skipped: progress.skipped + 1,
+          last_outcome: "skipped_missing_pair",
+        });
+        await queueContext.heartbeat(progress);
+        continue;
+      }
+      if (Number(pair.question_count || 0) !== Number(evidence.total)) {
+        progress = ngContentTaxonomyProgress(progress, {
+          next_index: index + 1,
+          skipped: progress.skipped + 1,
+          last_outcome: "skipped_pair_changed",
+          errors: [
+            ...progress.errors,
+            {
+              pair_key: pairKey,
+              error: `Question count changed from ${Number(pair.question_count || 0)} to ${evidence.total}`,
+            },
+          ],
+        });
+        await queueContext.heartbeat(progress);
+        continue;
+      }
+
+      const request = buildContentTaxonomyProviderPairRequest(pair, evidence, {
+        examLabel: examDefinition.label,
+        allowedSystems: examDefinition.systems,
+      });
+      const resumableResponseId = progress.current_index === index
+        && progress.current_pair_key === pairKey
+        ? String(progress.openai_response_id || "").trim()
+        : "";
+      const started = Date.now();
+      const ai = await callOpenAIResponsesAPI({
+        model,
+        systemPrompt: request.systemPrompt,
+        userPrompt: request.userPrompt,
+        maxOutputTokens: ngContentTaxonomyClassifierOutputTokens(),
+        reasoning: request.reasoning,
+        textFormat: request.textFormat,
+        background: true,
+        backgroundResponseId: resumableResponseId,
+        backgroundPollIntervalMs: Math.max(
+          2_000,
+          Math.min(
+            30_000,
+            Number(process.env.AYLA_CONTENT_TAXONOMY_CLASSIFIER_POLL_MS || 5_000) || 5_000,
+          ),
+        ),
+        backgroundMaximumWaitMs: Math.max(
+          2 * 60 * 1000,
+          Math.min(
+            60 * 60 * 1000,
+            Number(
+              process.env.AYLA_CONTENT_TAXONOMY_CLASSIFIER_MAX_WAIT_MS
+                || 30 * 60 * 1000,
+            ) || 30 * 60 * 1000,
+          ),
+        ),
+        onBackgroundUpdate: async (response = {}, details = {}) => {
+          progress = ngContentTaxonomyProgress(progress, {
+            stage: "openai_pair_classification",
+            current_index: index,
+            current_pair_key: pairKey,
+            openai_response_id: String(response.id || resumableResponseId || "").trim() || null,
+            openai_response_status: String(response.status || "").trim().toLowerCase() || null,
+            poll_count: Number(details.polls || 0),
+            elapsed_ms: Math.max(0, Number(details.elapsedMs || 0)),
+          });
+          await queueContext.heartbeat(progress);
+        },
+      });
+      const classification = normalizeContentTaxonomyProviderPairClassification(
+        safeJsonParseFromAI(ai.text),
+        request,
+      );
+      const autoApprove = payload.auto_approve_high_confidence === true
+        && classification.autoApprovalReady;
+      const reviewNotes = [
+        `Classifier reviewed ${request.questions.length}/${request.expectedQuestionCount} questions in this provider pair.`,
+        `Homogeneous: ${classification.pairHomogeneous ? "yes" : "no"}.`,
+        `Confidence: ${classification.confidencePercent}%.`,
+        classification.reviewReasons.length
+          ? `Review reasons: ${classification.reviewReasons.join(", ")}.`
+          : "All strict automatic-approval gates passed.",
+        classification.outlierQuestionIds.length
+          ? `Outliers: ${classification.outlierQuestionIds.slice(0, 20).join(", ")}.`
+          : "",
+        classification.classificationReason,
+      ].filter(Boolean).join(" ").slice(0, 2_000);
+      const mapping = await upsertContentTaxonomyMapping({
+        examTrack,
+        sourceNamespace: pair.source_namespace,
+        sourceSystemId: pair.source_system_id,
+        sourceSubjectId: pair.source_subject_id,
+        taxonomy: classification.mappingTaxonomy,
+        actorId: String(payload.actor_id || "aylamed-taxonomy-classifier"),
+        reviewStatus: autoApprove ? "approved" : "pending",
+        origin: autoApprove
+          ? "automatic_classification_high_confidence"
+          : "automatic_suggestion",
+        confidence: classification.confidence,
+        reviewNotes,
+      });
+      await mutateAylaDb(async (db) => aylaRecordAiUsage(db, {
+        user: {
+          id: String(payload.actor_id || "aylamed-taxonomy-classifier"),
+          email: String(payload.actor_email || ""),
+          name: String(payload.actor_name || "AylaMed taxonomy classifier"),
+        },
+        feature: "mcq_provider_pair_taxonomy_classification",
+        model: ai.raw_model || model,
+        usage: ai.usage,
+        durationMs: Date.now() - started,
+      }));
+      progress = ngContentTaxonomyProgress(progress, {
+        stage: "pair_settled",
+        next_index: index + 1,
+        approved: progress.approved + (autoApprove && !mapping.suggestion_skipped ? 1 : 0),
+        needs_review: progress.needs_review + (autoApprove ? 0 : 1),
+        last_outcome: autoApprove ? "approved_high_confidence" : "queued_for_review",
+        last_mapping_id: mapping.id || null,
+        openai_response_id: null,
+        openai_response_status: "completed",
+      });
+      await queueContext.heartbeat(progress);
+    } catch (error) {
+      const responseId = String(error.openAIResponseId || "").trim();
+      if (ngContentTaxonomyTransientClassifierError(error)) {
+        progress = ngContentTaxonomyProgress(progress, {
+          stage: "transient_failure_retrying",
+          current_index: index,
+          current_pair_key: pairKey,
+          openai_response_id: error.openAIResponseTerminal === true ? null : responseId || null,
+          openai_response_status: error.openAIResponseTerminal === true
+            ? null
+            : String(error.openAIResponseStatus || "").trim() || null,
+          errors: [
+            ...progress.errors,
+            { pair_key: pairKey, error: String(error.message || error).slice(0, 1_000) },
+          ],
+        });
+        await queueContext.heartbeat(progress);
+        throw error;
+      }
+      progress = ngContentTaxonomyProgress(progress, {
+        stage: "pair_settled",
+        next_index: index + 1,
+        failed: progress.failed + 1,
+        last_outcome: "classification_failed",
+        openai_response_id: null,
+        openai_response_status: String(error.openAIResponseStatus || "failed"),
+        errors: [
+          ...progress.errors,
+          { pair_key: pairKey, error: String(error.message || error).slice(0, 1_000) },
+        ],
+      });
+      await queueContext.heartbeat(progress);
+    }
+  }
+  await queueContext.heartbeat(ngContentTaxonomyProgress(progress, {
+    stage: "completed",
+    next_index: pairs.length,
+    current_index: null,
+    current_pair_key: null,
+    current_question_count: null,
+    openai_response_id: null,
+    openai_response_status: null,
+  }));
+}
+
+async function ngListAllContentTaxonomyAttentionPairs(examTrack) {
+  const rows = [];
+  for (let offset = 0; offset < 5_000; offset += 500) {
+    const batch = await listContentTaxonomyReviewQueue({
+      examTrack,
+      limit: 500,
+      offset,
+    });
+    rows.push(...batch);
+    if (batch.length < 500) break;
+  }
+  return rows
+    .filter((row) => ["unmapped", "needs_review"].includes(String(row.review_state || "")))
+    .map((row) => ({
+      exam_track: normalizeContentTaxonomyExamTrack(row.exam_track) || examTrack,
+      source_namespace: String(row.source_namespace || "").trim().toLowerCase(),
+      source_system_id: String(row.source_system_id ?? ""),
+      source_subject_id: String(row.source_subject_id ?? ""),
+      question_count: Math.max(0, Number(row.question_count || 0)),
+      mapping_id: row.mapping_id || null,
+      mapping_revision: Number(row.revision || 0),
+    }));
+}
+
+app.post("/api/ayla/admin/resources/content-taxonomy/classification-jobs", async (req, res) => {
+  try {
+    const auth = await aylaRequireAdmin(req);
+    if (!isAIConfigured()) return aylaSendError(res, 503, getAIConfigError());
+    const examTrack = normalizeContentTaxonomyExamTrack(
+      req.body.exam_track || req.body.examTrack,
+    );
+    if (!examTrack) return aylaSendError(res, 400, "A supported exam_track is required");
+    const pairs = await ngListAllContentTaxonomyAttentionPairs(examTrack);
+    if (!pairs.length) {
+      return aylaSendError(res, 409, "No unmapped or review-needed MCQ provider pairs remain");
+    }
+    const pairFingerprint = crypto.createHash("sha256")
+      .update(JSON.stringify(pairs.map((pair) => [
+        ngContentTaxonomyPairKey(pair),
+        pair.question_count,
+        pair.mapping_revision,
+      ])))
+      .digest("hex");
+    const actor = aylaVimeoCatalogAdminActor(auth);
+    const autoApproveHighConfidence = req.body.auto_approve_high_confidence === true
+      || req.body.autoApproveHighConfidence === true;
+    const queued = await ngContentBackgroundQueue.enqueue({
+      id: crypto.randomUUID(),
+      type: "content_taxonomy_provider_pair_classification",
+      lane: "ayla_taxonomy_ai",
+      maxAttempts: Math.max(
+        1,
+        Math.min(
+          6,
+          Number(process.env.AYLA_CONTENT_TAXONOMY_CLASSIFIER_MAX_ATTEMPTS || 4) || 4,
+        ),
+      ),
+      priority: -15,
+      idempotencyKey: `ayla-mcq-taxonomy:${examTrack}:${pairFingerprint}`,
+      payload: {
+        exam_track: examTrack,
+        pairs,
+        auto_approve_high_confidence: autoApproveHighConfidence,
+        actor_id: actor.id,
+        actor_email: actor.email,
+        actor_name: actor.name,
+      },
+      metadata: {
+        exam_track: examTrack,
+        provider_pairs: pairs.length,
+        question_count: pairs.reduce((sum, pair) => sum + pair.question_count, 0),
+        pair_fingerprint: pairFingerprint,
+        purpose: "complete_five_level_mcq_taxonomy",
+      },
+    });
+    return aylaSendOk(res, {
+      job: queued.job,
+      provider_pairs: pairs.length,
+      question_count: pairs.reduce((sum, pair) => sum + pair.question_count, 0),
+      auto_approve_high_confidence: autoApproveHighConfidence,
+      poll_url: `/api/ayla/admin/resources/content-taxonomy/classification-jobs/${encodeURIComponent(queued.job.id)}`,
+      message: "Every current provider pair was queued. Only complete, homogeneous, all-question mappings at 97%+ confidence can auto-approve; all other results remain private for review.",
+    }, 202);
+  } catch (error) {
+    return aylaSendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Failed to start MCQ taxonomy classification",
+    );
+  }
+});
+
+app.get("/api/ayla/admin/resources/content-taxonomy/classification-jobs/:jobId", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    await ngContentBackgroundQueue.initialize();
+    const job = ngContentBackgroundQueue.get(req.params.jobId);
+    if (!job || job.type !== "content_taxonomy_provider_pair_classification") {
+      return aylaSendError(res, 404, "MCQ taxonomy classification job not found");
+    }
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, {
+      job,
+      classifier_configuration: {
+        model: ngContentTaxonomyClassifierModel(),
+        max_output_tokens: ngContentTaxonomyClassifierOutputTokens(),
+        reasoning_effort: "low",
+        evidence_limit_per_provider_pair: 200,
+        auto_approval_confidence_percent: 97,
+        complete_hierarchy_required: true,
+        all_questions_in_pair_required: true,
+      },
+    });
+  } catch (error) {
+    return aylaSendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Failed to load the MCQ taxonomy classification job",
+    );
   }
 });
 
@@ -75218,6 +75634,29 @@ function aylaVimeoCatalogModel() {
   return String(process.env.AYLA_VIMEO_CLASSIFIER_MODEL || "gpt-5.6").trim() || "gpt-5.6";
 }
 
+function aylaVimeoCatalogMaxOutputTokens() {
+  return vimeoClassifierMaxOutputTokens(
+    process.env.AYLA_VIMEO_CLASSIFIER_MAX_OUTPUT_TOKENS,
+  );
+}
+
+function aylaVimeoClassificationFailureCode(error = "") {
+  const message = String(error || "").toLowerCase();
+  if (message.includes("max_output_tokens") || message.includes("output token")) {
+    return "openai_output_budget_exhausted";
+  }
+  if (message.includes("rate limit") || message.includes("429")) {
+    return "openai_rate_limited";
+  }
+  if (message.includes("vimeo") && (message.includes("text track") || message.includes("caption"))) {
+    return "vimeo_caption_unavailable";
+  }
+  if (message.includes("timed out") || message.includes("timeout")) {
+    return "classification_timeout";
+  }
+  return "classification_failed";
+}
+
 function aylaVimeoCatalogAllowedDomains() {
   const configured = String(process.env.AYLA_VIMEO_MEDICAL_SOURCE_DOMAINS || "")
     .split(",")
@@ -75330,9 +75769,16 @@ async function ngAylaVimeoCatalogJobTerminal(backgroundJob = {}) {
     if (draft
       && Number(draft.revision || 0) === Number(backgroundJob.payload?.expected_revision)
       && String(draft.lastClassificationQueueJobId || "") === String(backgroundJob.id)) {
+      const terminalError = String(
+        backgroundJob.error
+          || (outcome === "cancelled" ? "Classification cancelled" : "Classification failed"),
+      ).slice(0, 2000);
       draft.status = outcome === "cancelled" ? "pending_classification" : "classification_failed";
       draft.classificationStatus = outcome === "cancelled" ? "cancelled" : "failed";
-      draft.classificationError = String(backgroundJob.error || (outcome === "cancelled" ? "Classification cancelled" : "Classification failed")).slice(0, 2000);
+      draft.classificationError = terminalError;
+      draft.classificationFailureCode = outcome === "cancelled"
+        ? "classification_cancelled"
+        : aylaVimeoClassificationFailureCode(terminalError);
       draft.classificationOpenAIResponseId = null;
       draft.classificationOpenAIResponseStatus = outcome;
       draft.classificationOpenAIResponseUpdatedAt = aylaNow();
@@ -75394,6 +75840,7 @@ async function ngRunAylaVimeoCatalogClassificationJob(queueContext) {
     aylaSetItem(db, "aylaVimeoCatalogJobs", currentJob);
     currentDraft.classificationStatus = "classifying";
     currentDraft.classificationError = "";
+    currentDraft.classificationFailureCode = "";
     currentDraft.lastClassificationJobId = domainJobId;
     currentDraft.lastClassificationQueueJobId = queueJobId;
     currentDraft.updatedAt = aylaNow();
@@ -75481,7 +75928,7 @@ async function ngRunAylaVimeoCatalogClassificationJob(queueContext) {
       model,
       systemPrompt: request.systemPrompt,
       userPrompt: request.userPrompt,
-      maxOutputTokens: Math.max(1200, Math.min(4000, Number(process.env.AYLA_VIMEO_CLASSIFIER_MAX_OUTPUT_TOKENS || 2200))),
+      maxOutputTokens: aylaVimeoCatalogMaxOutputTokens(),
       tools: request.tools,
       toolChoice: request.toolChoice,
       include: request.include,
@@ -75566,6 +76013,7 @@ async function ngRunAylaVimeoCatalogClassificationJob(queueContext) {
     currentDraft.classificationStatus = "completed";
     currentDraft.classification = classification;
     currentDraft.classificationError = "";
+    currentDraft.classificationFailureCode = "";
     currentDraft.classificationOpenAIResponseId = null;
     currentDraft.classificationOpenAIResponseStatus = "completed";
     currentDraft.classificationOpenAIResponseUpdatedAt = aylaNow();
@@ -75619,6 +76067,12 @@ async function aylaQueueVimeoCatalogClassification({
     catalogSourceId: catalogSourceId || null,
     trigger,
     model: aylaVimeoCatalogModel(),
+    classifierConfiguration: {
+      maxOutputTokens: aylaVimeoCatalogMaxOutputTokens(),
+      reasoningEffort: "low",
+      structuredOutput: true,
+      backgroundMode: true,
+    },
     sourcePolicy: {
       webSearchRequired: true,
       allowedDomains: aylaVimeoCatalogAllowedDomains(),
@@ -76619,6 +77073,13 @@ app.get("/api/ayla/admin/resources/vimeo-catalog/jobs/:jobId", async (req, res) 
         total: queueJobs.length,
         counts: queueJobs.reduce((counts, row) => ({ ...counts, [row.status]: Number(counts[row.status] || 0) + 1 }), {}),
         active: queueJobs.filter((row) => ["queued", "running", "retry_wait", "paused", "pause_requested", "cancel_requested"].includes(row.status)),
+      },
+      classifier_configuration: {
+        model: aylaVimeoCatalogModel(),
+        max_output_tokens: aylaVimeoCatalogMaxOutputTokens(),
+        reasoning_effort: "low",
+        structured_output: true,
+        background_mode: true,
       },
       approval_required: true,
     });
