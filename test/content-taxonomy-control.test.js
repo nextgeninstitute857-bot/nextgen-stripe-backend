@@ -150,3 +150,42 @@ test("v209 server and Postgres contracts expose review, override, audit, and all
   assert.match(postgres, /SELECT q\.id FROM content_questions q[\s\S]*?FOR UPDATE[\s\S]*?content_question_taxonomy_overrides/);
   assert.match(postgres, /NOT EXISTS[\s\S]*content_question_taxonomy_overrides/);
 });
+
+test("classifier preflight exercises one real contract without any catalog write path", () => {
+  const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
+  const start = server.indexOf("async function aylaRunNoWriteClassifierPreflight");
+  const end = server.indexOf('app.get("/api/ayla/admin/resources/classification-status"');
+  assert.ok(start >= 0 && end > start, "the bounded classifier preflight must be present");
+  const preflight = server.slice(start, end);
+
+  assert.match(preflight, /app\.post\("\/api\/ayla\/admin\/resources\/classifier-preflight"/);
+  assert.match(preflight, /await aylaRequireAdmin\(req\)/);
+  assert.match(preflight, /target === "mcq"/);
+  assert.match(preflight, /getContentTaxonomyProviderPairEvidence/);
+  assert.match(preflight, /buildContentTaxonomyProviderPairRequest/);
+  assert.match(preflight, /normalizeContentTaxonomyProviderPairClassification/);
+  assert.match(preflight, /fetchVimeoLectureEvidence/);
+  assert.match(preflight, /buildVimeoTopicClassificationRequest/);
+  assert.match(preflight, /normalizeVimeoTopicClassification/);
+  assert.match(preflight, /callOpenAIResponsesAPI/);
+  assert.match(preflight, /background: true/);
+  assert.match(preflight, /Approved Vimeo resources are excluded from classifier preflight/);
+  assert.match(preflight, /preflight_only: true/);
+  assert.match(preflight, /no_write: true/);
+  assert.match(preflight, /writes_performed: 0/);
+  assert.match(preflight, /queue_jobs_created: 0/);
+  assert.match(preflight, /provider_error: providerError/);
+
+  for (const forbidden of [
+    /mutateAylaDb/,
+    /aylaSetItem/,
+    /upsertContentTaxonomyMapping/,
+    /ngContentBackgroundQueue\.enqueue/,
+    /aylaQueueVimeoCatalogClassification/,
+    /approveVimeoCatalogDraft/,
+    /aylaV190StoreImportedResource/,
+    /aylaRecordAiUsage/,
+  ]) {
+    assert.doesNotMatch(preflight, forbidden);
+  }
+});
