@@ -137,6 +137,7 @@ test("v209 server and Postgres contracts expose review, override, audit, and all
   assert.match(server, /api\/ayla\/admin\/resources\/content-taxonomy\/review-queue/);
   assert.match(server, /api\/ayla\/admin\/resources\/content-taxonomy\/mappings/);
   assert.match(server, /api\/ayla\/admin\/resources\/content-taxonomy\/classification-jobs/);
+  assert.match(server, /api\/ayla\/admin\/resources\/classification-status/);
   assert.match(server, /content_taxonomy_provider_pair_classification/);
   assert.match(server, /auto_approve_high_confidence/);
   assert.match(server, /question_complete_when: \["system_key", "subsystem_key", "topic_key", "subtopic_key"\]/);

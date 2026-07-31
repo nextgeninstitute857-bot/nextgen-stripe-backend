@@ -76712,6 +76712,9 @@ function aylaVimeoSettleCatalogJob(db, domainJob, queueJobId, outcome, {
   draftId = "",
   error = "",
 } = {}) {
+  if (String(domainJob.activeQueueJobId || "") === String(queueJobId || "")) {
+    domainJob.activeQueueJobId = null;
+  }
   const settled = new Set(Array.isArray(domainJob.settledQueueJobIds) ? domainJob.settledQueueJobIds : []);
   if (settled.has(String(queueJobId))) return domainJob;
   settled.add(String(queueJobId));
@@ -76751,38 +76754,44 @@ async function ngAylaVimeoCatalogJobCanRecover(backgroundJob = {}) {
 }
 
 async function ngAylaVimeoCatalogJobTerminal(backgroundJob = {}) {
-  if (backgroundJob.status === "completed") return;
-  const outcome = backgroundJob.status === "cancelled" ? "cancelled" : "failed";
-  await mutateAylaDb(async (db) => {
-    const domainJob = aylaGetItem(db, "aylaVimeoCatalogJobs", backgroundJob.payload?.domain_job_id);
-    if (!domainJob) return null;
-    const settled = new Set(Array.isArray(domainJob.settledQueueJobIds) ? domainJob.settledQueueJobIds : []);
-    if (settled.has(String(backgroundJob.id))) return domainJob;
-    const draft = aylaGetItem(db, "aylaVimeoCatalogDrafts", backgroundJob.payload?.draft_id);
-    if (draft
-      && Number(draft.revision || 0) === Number(backgroundJob.payload?.expected_revision)
-      && String(draft.lastClassificationQueueJobId || "") === String(backgroundJob.id)) {
-      const terminalError = String(
-        backgroundJob.error
-          || (outcome === "cancelled" ? "Classification cancelled" : "Classification failed"),
-      ).slice(0, 2000);
-      draft.status = outcome === "cancelled" ? "pending_classification" : "classification_failed";
-      draft.classificationStatus = outcome === "cancelled" ? "cancelled" : "failed";
-      draft.classificationError = terminalError;
-      draft.classificationFailureCode = outcome === "cancelled"
-        ? "classification_cancelled"
-        : aylaVimeoClassificationFailureCode(terminalError);
-      draft.classificationOpenAIResponseId = null;
-      draft.classificationOpenAIResponseStatus = outcome;
-      draft.classificationOpenAIResponseUpdatedAt = aylaNow();
-      draft.revision = Number(draft.revision || 0) + 1;
-      draft.updatedAt = aylaNow();
-      aylaSetItem(db, "aylaVimeoCatalogDrafts", draft);
-    }
-    return aylaVimeoSettleCatalogJob(db, domainJob, backgroundJob.id, outcome, {
-      draftId: backgroundJob.payload?.draft_id,
-      error: backgroundJob.error || (outcome === "cancelled" ? "Classification cancelled" : "Classification failed"),
+  const domainJobId = String(backgroundJob.payload?.domain_job_id || "");
+  if (!domainJobId) return;
+  if (backgroundJob.status !== "completed") {
+    const outcome = backgroundJob.status === "cancelled" ? "cancelled" : "failed";
+    await mutateAylaDb(async (db) => {
+      const domainJob = aylaGetItem(db, "aylaVimeoCatalogJobs", domainJobId);
+      if (!domainJob) return null;
+      const settled = new Set(Array.isArray(domainJob.settledQueueJobIds) ? domainJob.settledQueueJobIds : []);
+      if (settled.has(String(backgroundJob.id))) return domainJob;
+      const draft = aylaGetItem(db, "aylaVimeoCatalogDrafts", backgroundJob.payload?.draft_id);
+      if (draft
+        && Number(draft.revision || 0) === Number(backgroundJob.payload?.expected_revision)
+        && String(draft.lastClassificationQueueJobId || "") === String(backgroundJob.id)) {
+        const terminalError = String(
+          backgroundJob.error
+            || (outcome === "cancelled" ? "Classification cancelled" : "Classification failed"),
+        ).slice(0, 2000);
+        draft.status = outcome === "cancelled" ? "pending_classification" : "classification_failed";
+        draft.classificationStatus = outcome === "cancelled" ? "cancelled" : "failed";
+        draft.classificationError = terminalError;
+        draft.classificationFailureCode = outcome === "cancelled"
+          ? "classification_cancelled"
+          : aylaVimeoClassificationFailureCode(terminalError);
+        draft.classificationOpenAIResponseId = null;
+        draft.classificationOpenAIResponseStatus = outcome;
+        draft.classificationOpenAIResponseUpdatedAt = aylaNow();
+        draft.revision = Number(draft.revision || 0) + 1;
+        draft.updatedAt = aylaNow();
+        aylaSetItem(db, "aylaVimeoCatalogDrafts", draft);
+      }
+      return aylaVimeoSettleCatalogJob(db, domainJob, backgroundJob.id, outcome, {
+        draftId: backgroundJob.payload?.draft_id,
+        error: backgroundJob.error || (outcome === "cancelled" ? "Classification cancelled" : "Classification failed"),
+      });
     });
+  }
+  await aylaDispatchNextVimeoCatalogDraft(domainJobId).catch((error) => {
+    console.warn("AylaMed Vimeo sequential dispatch failed:", error.message);
   });
 }
 
@@ -77034,6 +77043,330 @@ async function ngRunAylaVimeoCatalogClassificationJob(queueContext) {
   });
 }
 
+const AYLA_VIMEO_DISPATCH_ACTIVE_STATUSES = new Set([
+  "queued",
+  "running",
+  "retry_wait",
+  "paused",
+  "pause_requested",
+  "cancel_requested",
+]);
+const aylaVimeoCatalogDispatching = new Set();
+const aylaVimeoCatalogRedispatchPending = new Set();
+
+function aylaVimeoCatalogQueueJobs(domainJobId) {
+  return ngContentBackgroundQueue.list({
+    type: "ayla_vimeo_catalog_classification",
+    limit: 500,
+  }).filter((job) => String(job.metadata?.domain_job_id || "") === String(domainJobId || ""));
+}
+
+function aylaLatestVimeoCatalogJob(db, examTrackId = "") {
+  return aylaValues(db, "aylaVimeoCatalogJobs")
+    .filter((job) => !examTrackId || job.examTrackId === examTrackId)
+    .sort((left, right) => String(
+      right.updatedAt || right.createdAt || "",
+    ).localeCompare(String(
+      left.updatedAt || left.createdAt || "",
+    )))[0] || null;
+}
+
+function aylaVimeoCatalogAdminJob(job) {
+  if (!job) return null;
+  return {
+    ...job,
+    progress: aylaVimeoCatalogJobProgress(job),
+    enqueueErrors: (Array.isArray(job.enqueueErrors) ? job.enqueueErrors : []).slice(-10),
+    errors: (Array.isArray(job.errors) ? job.errors : []).slice(-10),
+    dispatchErrorHistory: (
+      Array.isArray(job.dispatchErrorHistory) ? job.dispatchErrorHistory : []
+    ).slice(-10),
+  };
+}
+
+async function aylaDispatchNextVimeoCatalogDraft(domainJobId, { resume = false } = {}) {
+  const cleanDomainJobId = String(domainJobId || "").trim();
+  if (!cleanDomainJobId) {
+    throw Object.assign(new Error("A Vimeo catalog job id is required"), { statusCode: 400 });
+  }
+  if (aylaVimeoCatalogDispatching.has(cleanDomainJobId)) {
+    aylaVimeoCatalogRedispatchPending.add(cleanDomainJobId);
+    const snapshot = await readAylaDb();
+    return {
+      job: aylaVimeoCatalogAdminJob(
+        aylaGetItem(snapshot, "aylaVimeoCatalogJobs", cleanDomainJobId),
+      ),
+      queueJob: null,
+      deduplicated: true,
+    };
+  }
+
+  aylaVimeoCatalogDispatching.add(cleanDomainJobId);
+  try {
+    await ngContentBackgroundQueue.initialize();
+    if (resume) {
+      await mutateAylaDb(async (db) => {
+        const currentJob = aylaGetItem(db, "aylaVimeoCatalogJobs", cleanDomainJobId);
+        if (!currentJob) {
+          throw Object.assign(new Error("Vimeo catalog classification job not found"), { statusCode: 404 });
+        }
+        if (!["failed_to_enqueue", "dispatch_incomplete"].includes(String(currentJob.status || ""))) {
+          throw Object.assign(new Error("This Vimeo catalog job is not waiting for dispatch recovery"), { statusCode: 409 });
+        }
+        const dispatchErrors = Array.isArray(currentJob.enqueueErrors)
+          ? currentJob.enqueueErrors
+          : [];
+        if (dispatchErrors.length) {
+          currentJob.failedCount = Math.max(
+            0,
+            Number(currentJob.failedCount || 0) - dispatchErrors.length,
+          );
+          currentJob.dispatchErrorHistory = [
+            ...(Array.isArray(currentJob.dispatchErrorHistory)
+              ? currentJob.dispatchErrorHistory
+              : []),
+            ...dispatchErrors.map((row) => ({ ...row, resumedAt: aylaNow() })),
+          ].slice(-200);
+        }
+        currentJob.enqueueErrors = [];
+        currentJob.lastDispatchError = "";
+        currentJob.status = "queued";
+        currentJob.finishedAt = null;
+        currentJob.updatedAt = aylaNow();
+        currentJob.progress = aylaVimeoCatalogJobProgress(currentJob);
+        aylaSetItem(db, "aylaVimeoCatalogJobs", currentJob);
+        return currentJob;
+      });
+    }
+
+    while (true) {
+      const snapshot = await readAylaDb();
+      const domainJob = aylaGetItem(
+        snapshot,
+        "aylaVimeoCatalogJobs",
+        cleanDomainJobId,
+      );
+      if (!domainJob) {
+        throw Object.assign(new Error("Vimeo catalog classification job not found"), { statusCode: 404 });
+      }
+      const queueJobs = aylaVimeoCatalogQueueJobs(cleanDomainJobId);
+      const activeQueueJob = queueJobs.find((job) =>
+        AYLA_VIMEO_DISPATCH_ACTIVE_STATUSES.has(String(job.status || "")));
+      if (activeQueueJob) {
+        const saved = await mutateAylaDb(async (db) => {
+          const currentJob = aylaGetItem(db, "aylaVimeoCatalogJobs", cleanDomainJobId);
+          if (!currentJob) return null;
+          currentJob.queueJobIds = [...new Set([
+            ...(currentJob.queueJobIds || []),
+            ...queueJobs.map((job) => String(job.id)),
+          ])].slice(-5000);
+          currentJob.queuedDraftIds = [...new Set([
+            ...(currentJob.queuedDraftIds || []),
+            ...queueJobs.map((job) => String(job.metadata?.draft_id || "")).filter(Boolean),
+          ])].slice(-5000);
+          currentJob.activeQueueJobId = String(activeQueueJob.id);
+          currentJob.status = activeQueueJob.status === "queued" ? "queued" : "running";
+          currentJob.updatedAt = aylaNow();
+          currentJob.progress = aylaVimeoCatalogJobProgress(currentJob);
+          aylaSetItem(db, "aylaVimeoCatalogJobs", currentJob);
+          return currentJob;
+        });
+        return {
+          job: aylaVimeoCatalogAdminJob(saved),
+          queueJob: activeQueueJob,
+          deduplicated: true,
+        };
+      }
+
+      const progress = aylaVimeoCatalogJobProgress(domainJob);
+      if (progress.processed >= progress.total) {
+        const saved = await mutateAylaDb(async (db) => {
+          const currentJob = aylaGetItem(db, "aylaVimeoCatalogJobs", cleanDomainJobId);
+          if (!currentJob) return null;
+          const currentProgress = aylaVimeoCatalogJobProgress(currentJob);
+          currentJob.progress = currentProgress;
+          currentJob.activeQueueJobId = null;
+          currentJob.status = currentProgress.failed
+            || currentProgress.cancelled
+            || currentProgress.skipped
+            ? "completed_with_review_items"
+            : "completed";
+          currentJob.finishedAt ||= aylaNow();
+          currentJob.updatedAt = aylaNow();
+          aylaSetItem(db, "aylaVimeoCatalogJobs", currentJob);
+          return currentJob;
+        });
+        return { job: aylaVimeoCatalogAdminJob(saved), queueJob: null, deduplicated: false };
+      }
+
+      const knownDraftIds = new Set([
+        ...(Array.isArray(domainJob.queuedDraftIds) ? domainJob.queuedDraftIds : []),
+        ...queueJobs.map((job) => job.metadata?.draft_id),
+      ].map((value) => String(value || "")).filter(Boolean));
+      const nextDraftId = (Array.isArray(domainJob.draftIds) ? domainJob.draftIds : [])
+        .map((value) => String(value || ""))
+        .find((draftId) => draftId && !knownDraftIds.has(draftId));
+      if (!nextDraftId) {
+        const saved = await mutateAylaDb(async (db) => {
+          const currentJob = aylaGetItem(db, "aylaVimeoCatalogJobs", cleanDomainJobId);
+          if (!currentJob) return null;
+          currentJob.status = "dispatch_incomplete";
+          currentJob.lastDispatchError = "No undispatched Vimeo draft remains, but the saved progress is incomplete";
+          currentJob.updatedAt = aylaNow();
+          currentJob.progress = aylaVimeoCatalogJobProgress(currentJob);
+          aylaSetItem(db, "aylaVimeoCatalogJobs", currentJob);
+          return currentJob;
+        });
+        return { job: aylaVimeoCatalogAdminJob(saved), queueJob: null, deduplicated: false };
+      }
+
+      const draft = aylaGetItem(snapshot, "aylaVimeoCatalogDrafts", nextDraftId);
+      if (!draft
+        || draft.examTrackId !== domainJob.examTrackId
+        || draft.folderMembershipStatus === "missing_from_folder"
+        || draft.readyForClassification === false
+        || !draft.sourceTitle
+        || !draft.vimeoId
+        || draft.reviewStatus === "approved") {
+        await mutateAylaDb(async (db) => {
+          const currentJob = aylaGetItem(db, "aylaVimeoCatalogJobs", cleanDomainJobId);
+          if (!currentJob) return null;
+          currentJob.queuedDraftIds = [...new Set([
+            ...(currentJob.queuedDraftIds || []),
+            nextDraftId,
+          ])].slice(-5000);
+          currentJob.skippedCount = Number(currentJob.skippedCount || 0) + 1;
+          currentJob.errors = [
+            ...(Array.isArray(currentJob.errors) ? currentJob.errors : []),
+            {
+              draftId: nextDraftId,
+              queueJobId: null,
+              error: "Draft became ineligible before sequential dispatch",
+              at: aylaNow(),
+            },
+          ].slice(-200);
+          currentJob.progress = aylaVimeoCatalogJobProgress(currentJob);
+          currentJob.updatedAt = aylaNow();
+          aylaSetItem(db, "aylaVimeoCatalogJobs", currentJob);
+          return currentJob;
+        });
+        continue;
+      }
+
+      try {
+        const queued = await ngContentBackgroundQueue.enqueue({
+          id: crypto.randomUUID(),
+          type: "ayla_vimeo_catalog_classification",
+          lane: "ayla_vimeo_ai",
+          maxAttempts: Math.max(
+            1,
+            Math.min(8, Number(process.env.AYLA_VIMEO_CLASSIFIER_MAX_ATTEMPTS || 4) || 4),
+          ),
+          priority: -20,
+          idempotencyKey: `ayla-vimeo-classify:${domainJob.id}:${draft.id}:${draft.revision}`,
+          payload: {
+            domain_job_id: domainJob.id,
+            draft_id: draft.id,
+            expected_revision: Number(draft.revision || 0),
+          },
+          metadata: {
+            domain_job_id: domainJob.id,
+            draft_id: draft.id,
+            exam_track_id: domainJob.examTrackId,
+            catalog_source_id: domainJob.catalogSourceId || null,
+            purpose: "web_grounded_medical_title_classification",
+          },
+        });
+        const saved = await mutateAylaDb(async (db) => {
+          const currentJob = aylaGetItem(db, "aylaVimeoCatalogJobs", cleanDomainJobId);
+          if (!currentJob) return null;
+          currentJob.queueJobIds = [...new Set([
+            ...(currentJob.queueJobIds || []),
+            String(queued.job.id),
+          ])].slice(-5000);
+          currentJob.queuedDraftIds = [...new Set([
+            ...(currentJob.queuedDraftIds || []),
+            nextDraftId,
+          ])].slice(-5000);
+          currentJob.enqueuedCount = Number(currentJob.enqueuedCount || 0) + 1;
+          currentJob.activeQueueJobId = String(queued.job.id);
+          currentJob.status = queued.job.status === "queued" ? "queued" : "running";
+          currentJob.lastDispatchError = "";
+          currentJob.enqueueErrors = [];
+          currentJob.finishedAt = null;
+          currentJob.updatedAt = aylaNow();
+          currentJob.progress = aylaVimeoCatalogJobProgress(currentJob);
+          aylaSetItem(db, "aylaVimeoCatalogJobs", currentJob);
+          return currentJob;
+        });
+        return {
+          job: aylaVimeoCatalogAdminJob(saved),
+          queueJob: queued.job,
+          deduplicated: queued.deduplicated === true,
+        };
+      } catch (error) {
+        const errorMessage = String(error.message || error).slice(0, 1_000);
+        const saved = await mutateAylaDb(async (db) => {
+          const currentJob = aylaGetItem(db, "aylaVimeoCatalogJobs", cleanDomainJobId);
+          if (!currentJob) return null;
+          currentJob.status = "failed_to_enqueue";
+          currentJob.activeQueueJobId = null;
+          currentJob.lastDispatchError = errorMessage;
+          currentJob.enqueueErrors = [
+            ...(Array.isArray(currentJob.enqueueErrors) ? currentJob.enqueueErrors : []),
+            { draftId: nextDraftId, error: errorMessage, at: aylaNow() },
+          ].slice(-200);
+          currentJob.errors = [
+            ...(Array.isArray(currentJob.errors) ? currentJob.errors : []),
+            { draftId: nextDraftId, queueJobId: null, error: errorMessage, at: aylaNow() },
+          ].slice(-200);
+          currentJob.failedAt = aylaNow();
+          currentJob.updatedAt = aylaNow();
+          currentJob.progress = aylaVimeoCatalogJobProgress(currentJob);
+          aylaSetItem(db, "aylaVimeoCatalogJobs", currentJob);
+          return currentJob;
+        });
+        return {
+          job: aylaVimeoCatalogAdminJob(saved),
+          queueJob: null,
+          deduplicated: false,
+          error: errorMessage,
+        };
+      }
+    }
+  } finally {
+    aylaVimeoCatalogDispatching.delete(cleanDomainJobId);
+    if (aylaVimeoCatalogRedispatchPending.delete(cleanDomainJobId)) {
+      setImmediate(() => {
+        aylaDispatchNextVimeoCatalogDraft(cleanDomainJobId).catch((error) => {
+          console.warn("AylaMed Vimeo pending sequential dispatch failed:", error.message);
+        });
+      }).unref?.();
+    }
+  }
+}
+
+async function aylaResumeInterruptedVimeoCatalogDispatches() {
+  await ngContentBackgroundQueue.initialize();
+  const db = await readAylaDb();
+  const candidates = aylaValues(db, "aylaVimeoCatalogJobs")
+    .filter((job) => ["queued", "running"].includes(String(job.status || "")))
+    .filter((job) => aylaVimeoCatalogJobProgress(job).pending > 0)
+    .sort((left, right) => String(left.updatedAt || "").localeCompare(String(right.updatedAt || "")))
+    .slice(0, 10);
+  const results = [];
+  for (const job of candidates) {
+    const dispatched = await aylaDispatchNextVimeoCatalogDraft(job.id);
+    results.push({
+      jobId: job.id,
+      queued: Boolean(dispatched.queueJob),
+      deduplicated: dispatched.deduplicated === true,
+      status: dispatched.job?.status || job.status,
+    });
+  }
+  return results;
+}
+
 async function aylaQueueVimeoCatalogClassification({
   examTrackId,
   drafts = [],
@@ -77081,6 +77414,12 @@ async function aylaQueueVimeoCatalogClassification({
     skippedCount: 0,
     settledQueueJobIds: [],
     queueJobIds: [],
+    queuedDraftIds: [],
+    activeQueueJobId: null,
+    enqueuedCount: 0,
+    enqueueErrors: [],
+    dispatchErrorHistory: [],
+    lastDispatchError: "",
     errors: [],
     requestedBy: actor,
     createdAt: aylaNow(),
@@ -77093,71 +77432,13 @@ async function aylaQueueVimeoCatalogClassification({
     aylaSetItem(current, "aylaVimeoCatalogJobs", domainJob);
     return domainJob;
   });
-  const queuedIds = [];
-  const enqueueErrors = [];
-  for (const draft of eligibleDrafts) {
-    try {
-      const queued = await ngContentBackgroundQueue.enqueue({
-        id: crypto.randomUUID(),
-        type: "ayla_vimeo_catalog_classification",
-        lane: "ayla_vimeo_ai",
-        maxAttempts: Math.max(
-          1,
-          Math.min(8, Number(process.env.AYLA_VIMEO_CLASSIFIER_MAX_ATTEMPTS || 4) || 4),
-        ),
-        priority: -20,
-        idempotencyKey: `ayla-vimeo-classify:${domainJob.id}:${draft.id}:${draft.revision}`,
-        payload: {
-          domain_job_id: domainJob.id,
-          draft_id: draft.id,
-          expected_revision: Number(draft.revision || 0),
-        },
-        metadata: {
-          domain_job_id: domainJob.id,
-          draft_id: draft.id,
-          exam_track_id: examTrackId,
-          catalog_source_id: catalogSourceId || null,
-          purpose: "web_grounded_medical_title_classification",
-        },
-      });
-      queuedIds.push(queued.job.id);
-    } catch (error) {
-      enqueueErrors.push({ draftId: draft.id, error: String(error.message || error).slice(0, 1000) });
-    }
-  }
-  const savedJob = await mutateAylaDb(async (current) => {
-    const currentJob = aylaGetItem(current, "aylaVimeoCatalogJobs", domainJob.id);
-    currentJob.queueJobIds = [...new Set([...(currentJob.queueJobIds || []), ...queuedIds])];
-    currentJob.enqueuedCount = queuedIds.length;
-    currentJob.enqueueErrors = enqueueErrors;
-    if (enqueueErrors.length) {
-      currentJob.failedCount = Number(currentJob.failedCount || 0) + enqueueErrors.length;
-      currentJob.errors = [
-        ...(currentJob.errors || []),
-        ...enqueueErrors.map((row) => ({
-          draftId: row.draftId,
-          queueJobId: null,
-          error: row.error,
-          at: aylaNow(),
-        })),
-      ].slice(-200);
-      currentJob.progress = aylaVimeoCatalogJobProgress(currentJob);
-    }
-    currentJob.updatedAt = aylaNow();
-    if (!queuedIds.length) {
-      currentJob.status = "failed_to_enqueue";
-      currentJob.finishedAt = aylaNow();
-    } else if (currentJob.progress?.processed >= currentJob.progress?.total) {
-      currentJob.status = "completed_with_review_items";
-      currentJob.finishedAt = aylaNow();
-    }
-    aylaSetItem(current, "aylaVimeoCatalogJobs", currentJob);
-    return currentJob;
-  });
+  const dispatched = await aylaDispatchNextVimeoCatalogDraft(domainJob.id);
+  const savedJob = dispatched.job || domainJob;
   return {
     job: savedJob,
-    queued: queuedIds.length,
-    enqueueErrors,
+    scheduled: eligibleDrafts.length,
+    queued: dispatched.queueJob ? 1 : 0,
+    enqueueErrors: savedJob.enqueueErrors || [],
     pollUrl: `/api/ayla/admin/resources/vimeo-catalog/jobs/${encodeURIComponent(domainJob.id)}`,
   };
 }
@@ -78040,6 +78321,7 @@ app.post("/api/ayla/admin/resources/vimeo-catalog/classification-jobs", async (r
     if (!queued) return aylaSendError(res, 409, "No eligible private Vimeo drafts need classification");
     return aylaSendOk(res, {
       job: queued.job,
+      scheduled: queued.scheduled,
       queued: queued.queued,
       enqueue_errors: queued.enqueueErrors,
       poll_url: queued.pollUrl,
@@ -78048,6 +78330,90 @@ app.post("/api/ayla/admin/resources/vimeo-catalog/classification-jobs", async (r
     }, 202);
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to start Vimeo classification");
+  }
+});
+
+app.get("/api/ayla/admin/resources/classification-status", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    await ngContentBackgroundQueue.initialize();
+    const requestedExam = String(
+      req.query.exam_track || req.query.examTrack || "",
+    ).trim();
+    const vimeoExamTrackId = requestedExam ? aylaCanonicalExamTrack(requestedExam) : "";
+    const mcqExamTrack = requestedExam
+      ? normalizeContentTaxonomyExamTrack(requestedExam)
+      : "";
+    if (requestedExam && !vimeoExamTrackId && !mcqExamTrack) {
+      return aylaSendError(res, 400, "Unsupported exam_track");
+    }
+    const db = await readAylaDb();
+    const latestVimeoJob = aylaLatestVimeoCatalogJob(db, vimeoExamTrackId);
+    const vimeoQueueJobs = latestVimeoJob
+      ? aylaVimeoCatalogQueueJobs(latestVimeoJob.id)
+      : [];
+    const latestMcqJob = ngContentBackgroundQueue.list({
+      type: "content_taxonomy_provider_pair_classification",
+      limit: 100,
+    }).find((job) => !mcqExamTrack
+      || String(job.metadata?.exam_track || "") === mcqExamTrack) || null;
+    const vimeoDrafts = aylaValues(db, "aylaVimeoCatalogDrafts")
+      .filter((draft) => !vimeoExamTrackId || draft.examTrackId === vimeoExamTrackId);
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, {
+      checked_at: aylaNow(),
+      mcq: {
+        job: latestMcqJob,
+      },
+      vimeo: {
+        summary: vimeoCatalogSummary(vimeoDrafts),
+        job: aylaVimeoCatalogAdminJob(latestVimeoJob),
+        queue: {
+          total: vimeoQueueJobs.length,
+          counts: vimeoQueueJobs.reduce((counts, row) => ({
+            ...counts,
+            [row.status]: Number(counts[row.status] || 0) + 1,
+          }), {}),
+          active: vimeoQueueJobs.filter((row) =>
+            AYLA_VIMEO_DISPATCH_ACTIVE_STATUSES.has(String(row.status || ""))),
+        },
+      },
+      content_queue: ngContentBackgroundQueue.summary(),
+      safety: {
+        vimeo_results_private_until_review: true,
+        automatic_vimeo_approval: false,
+        student_records_changed: false,
+      },
+    });
+  } catch (error) {
+    return aylaSendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Failed to load classification status",
+    );
+  }
+});
+
+app.post("/api/ayla/admin/resources/vimeo-catalog/jobs/:jobId/resume", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const resumed = await aylaDispatchNextVimeoCatalogDraft(req.params.jobId, {
+      resume: true,
+    });
+    return aylaSendOk(res, {
+      job: resumed.job,
+      queued: resumed.queueJob ? 1 : 0,
+      deduplicated: resumed.deduplicated === true,
+      poll_url: `/api/ayla/admin/resources/vimeo-catalog/jobs/${encodeURIComponent(req.params.jobId)}`,
+      approval_required_after_classification: true,
+      message: "The saved Vimeo catalog job resumed with one bounded worker. Results remain private until review.",
+    }, 202);
+  } catch (error) {
+    return aylaSendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Failed to resume Vimeo classification",
+    );
   }
 });
 
@@ -78061,7 +78427,7 @@ app.get("/api/ayla/admin/resources/vimeo-catalog/jobs/:jobId", async (req, res) 
     const queueJobs = (job.queueJobIds || []).map((id) => ngContentBackgroundQueue.get(id)).filter(Boolean);
     res.setHeader("Cache-Control", "private, no-store");
     return aylaSendOk(res, {
-      job: { ...job, progress: aylaVimeoCatalogJobProgress(job) },
+      job: aylaVimeoCatalogAdminJob(job),
       queue: {
         total: queueJobs.length,
         counts: queueJobs.reduce((counts, row) => ({ ...counts, [row.status]: Number(counts[row.status] || 0) + 1 }), {}),
@@ -81313,6 +81679,13 @@ app.listen(PORT, () => {
   ngStartZoomRecordingRecoveryScheduler();
   ngStartContentOperationsScheduler();
   ngStartAylaVimeoFolderSyncScheduler();
+  setTimeout(() => {
+    aylaResumeInterruptedVimeoCatalogDispatches()
+      .then((results) => {
+        if (results.length) console.log("AylaMed Vimeo sequential dispatch recovery:", results);
+      })
+      .catch((error) => console.warn("AylaMed Vimeo dispatch recovery failed:", error.message));
+  }, 20_000).unref?.();
   ngStartAylaContinuityEngagementScheduler();
   setTimeout(() => {
     ngRunAylaPrivatePilotContentActivation("startup_private_pilot_reconciliation")
