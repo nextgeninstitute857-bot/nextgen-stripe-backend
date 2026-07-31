@@ -439,6 +439,12 @@ import {
   LMS_RECORDING_LABEL_CORRECTIONS_BUILD,
   reconcileKnownMissedHolidayRecordingLabels,
 } from "./lib/lms-recording-label-corrections.js";
+import {
+  LMS_KNOWN_MSK_NOTES_CATCHUP_BUILD,
+  NEXTGEN_KNOWN_MSK_TRANSCRIPT_NOTE_TARGETS,
+  applyKnownMskTranscriptNoteCandidate,
+  inspectKnownMskTranscriptNoteTarget,
+} from "./lib/lms-known-msk-notes-catchup.js";
 import { mutateJsonCopyOnWrite } from "./lib/json-copy-on-write.js";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -2319,6 +2325,193 @@ async function ngRunRecordingLabelStartupReconciliation() {
   } finally {
     ngRecordingLabelReconciliationState.running = false;
     ngRecordingLabelReconciliationState.last_finished_at = new Date().toISOString();
+  }
+}
+
+function ngKnownMskTranscriptSourceText({ note = {}, recording = {}, zoomImport = null } = {}) {
+  return String(
+    note.transcript_text ||
+    note.transcript_raw_vtt ||
+    note.transcript ||
+    note.raw_transcript ||
+    recording.transcript_text ||
+    recording.transcript_raw_vtt ||
+    zoomImport?.transcriptText ||
+    zoomImport?.transcriptRaw ||
+    ""
+  ).trim();
+}
+
+async function ngBuildKnownMskTranscriptNoteCandidate(db = {}, target = {}, inspection = {}) {
+  const session = db.liveSessions?.[target.sessionId] || null;
+  const existingNote = db.notes?.[target.sessionId] || {};
+  const recordingStorageKey = String(inspection.recording_storage_key || "").trim();
+  const matchingRecording = recordingStorageKey ? db.recordings?.[recordingStorageKey] || null : null;
+  if (!session || !matchingRecording) {
+    throw new Error("Exact transcript-backed MSK session or recording is no longer available");
+  }
+
+  let zoomImport = null;
+  let sourceText = ngKnownMskTranscriptSourceText({ note: existingNote, recording: matchingRecording });
+  if (sourceText.length < 300) {
+    const workingDb = {
+      ...db,
+      recordings: {
+        ...(db.recordings || {}),
+        [recordingStorageKey]: { ...matchingRecording },
+      },
+    };
+    zoomImport = await ngTryImportZoomTranscriptForSession(workingDb, {
+      session: { ...session },
+      existingNote: { ...existingNote },
+      matchingRecording: { ...matchingRecording },
+    });
+    sourceText = ngKnownMskTranscriptSourceText({
+      note: existingNote,
+      recording: zoomImport?.recordingPayload || matchingRecording,
+      zoomImport,
+    });
+  }
+
+  const transcriptText = String(stripVttToText(sourceText) || sourceText).trim();
+  if (transcriptText.length < 300) {
+    const detail = zoomImport?.transcriptImportError;
+    throw new Error(
+      typeof detail === "string" && detail.trim()
+        ? `Transcript unavailable: ${detail.trim()}`
+        : "Transcript unavailable or too short",
+    );
+  }
+  if (!isAIConfigured()) throw new Error(getAIConfigError());
+
+  const cleaned = await cleanNotesWithAI({
+    sourceText: transcriptText,
+    sourceType: "zoom_transcript",
+    metadata: {
+      session_id: target.sessionId,
+      course_id: target.courseId,
+      roadmap_day_id: target.roadmapDayId,
+      topic: session.topic || session.title || `MSK — Day ${target.systemDay}`,
+      system: "MSK",
+      system_day: target.systemDay,
+    },
+  });
+  const cleanedNotes = String(cleaned.cleaned_notes || "").trim();
+  if (cleanedNotes.length < 300) throw new Error("AI returned notes that were too short");
+
+  const importedRecording = zoomImport?.recordingPayload || matchingRecording;
+  return {
+    transcriptText,
+    transcriptRawVtt: String(existingNote.transcript_raw_vtt || zoomImport?.transcriptRaw || ""),
+    transcriptUrl: existingNote.transcript_url || importedRecording.transcript_url || matchingRecording.transcript_url || null,
+    transcriptDownloadUrl: existingNote.transcript_download_url || importedRecording.transcript_download_url || matchingRecording.transcript_download_url || null,
+    recordingUrl: existingNote.recording_url || matchingRecording.recording_url || null,
+    cleanedNotes,
+    recordingIdentity: inspection.recording_identity,
+    model: cleaned.model || null,
+    usage: cleaned.usage || null,
+  };
+}
+
+async function ngRunKnownMskTranscriptNotesCatchup(reason = "startup_known_msk_transcript_notes_catchup") {
+  if (ngKnownMskNotesCatchupState.running) return ngKnownMskNotesCatchupState.last_result;
+
+  ngKnownMskNotesCatchupState.running = true;
+  ngKnownMskNotesCatchupState.last_started_at = new Date().toISOString();
+  ngKnownMskNotesCatchupState.last_error = null;
+  const result = {
+    success: true,
+    build: LMS_KNOWN_MSK_NOTES_CATCHUP_BUILD,
+    reason,
+    targeted: NEXTGEN_KNOWN_MSK_TRANSCRIPT_NOTE_TARGETS.length,
+    checked: 0,
+    already_published: 0,
+    generated_and_published: 0,
+    unavailable_or_failed: 0,
+    recordings_changed: 0,
+    deleted_records: 0,
+    details: [],
+  };
+
+  try {
+    for (const target of NEXTGEN_KNOWN_MSK_TRANSCRIPT_NOTE_TARGETS) {
+      result.checked += 1;
+      const baseDetail = {
+        date: target.date,
+        system_day: target.systemDay,
+        session_id: target.sessionId,
+      };
+      try {
+        const db = await readLiveDb();
+        const inspection = inspectKnownMskTranscriptNoteTarget(db, target);
+        if (inspection.status === "already_published") {
+          result.already_published += 1;
+          result.details.push({ ...baseDetail, status: "already_published", note_characters: inspection.note_characters });
+          continue;
+        }
+        if (inspection.status !== "pending") {
+          result.unavailable_or_failed += 1;
+          result.details.push({ ...baseDetail, status: "safe_stop", error: inspection.reason });
+          continue;
+        }
+        if (ngBackgroundMemoryIsHigh("known_msk_transcript_notes_catchup")) {
+          result.unavailable_or_failed += 1;
+          result.details.push({ ...baseDetail, status: "memory_pressure", error: "Deferred because backend memory is above the soft guard" });
+          continue;
+        }
+
+        const candidate = await ngBuildKnownMskTranscriptNoteCandidate(db, target, inspection);
+        const applied = await mutateLiveDb((draft) => {
+          const application = applyKnownMskTranscriptNoteCandidate(draft, {
+            target,
+            candidate,
+            actorId: "system:known-msk-transcript-notes-catchup",
+          });
+          if (application.applied) {
+            ngSyncSessionNoteStatusToRoadmap(draft, target.sessionId, draft.notes?.[target.sessionId] || {});
+          }
+          return application;
+        }, {
+          teachingAccessSource: "known_msk_transcript_notes_catchup",
+        });
+
+        if (applied.applied) {
+          result.generated_and_published += 1;
+          result.details.push({
+            ...baseDetail,
+            status: "generated_and_published",
+            note_characters: applied.note_characters,
+            recording_preserved: applied.recording_preserved === true,
+            deleted_records: 0,
+          });
+        } else if (applied.already_published) {
+          result.already_published += 1;
+          result.details.push({ ...baseDetail, status: "already_published" });
+        } else {
+          result.unavailable_or_failed += 1;
+          result.details.push({ ...baseDetail, status: "safe_stop", error: applied.reason });
+        }
+      } catch (error) {
+        result.unavailable_or_failed += 1;
+        result.details.push({
+          ...baseDetail,
+          status: "not_changed",
+          error: String(error?.message || error || "MSK notes catch-up failed").slice(0, 500),
+        });
+      }
+    }
+
+    result.success = result.unavailable_or_failed === 0;
+    ngKnownMskNotesCatchupState.last_result = result;
+    if (result.success) ngKnownMskNotesCatchupState.last_success_at = new Date().toISOString();
+    if (!result.success) ngKnownMskNotesCatchupState.last_error = `${result.unavailable_or_failed} target(s) were not changed`;
+    return result;
+  } catch (error) {
+    ngKnownMskNotesCatchupState.last_error = String(error?.message || error || "MSK notes catch-up failed").slice(0, 500);
+    throw error;
+  } finally {
+    ngKnownMskNotesCatchupState.running = false;
+    ngKnownMskNotesCatchupState.last_finished_at = new Date().toISOString();
   }
 }
 
@@ -10938,6 +11131,8 @@ app.get("/health", async (req, res) => {
     recording_label_corrections: ngRecordingLabelReconciliationState,
     lms_known_schedule_repair_build: LMS_KNOWN_SCHEDULE_REPAIR_BUILD,
     lms_known_schedule_repair: ngKnownScheduleRepairState,
+    lms_known_msk_notes_catchup_build: LMS_KNOWN_MSK_NOTES_CATCHUP_BUILD,
+    lms_known_msk_notes_catchup: ngKnownMskNotesCatchupState,
     student_notes_resolver_build: STUDENT_NOTES_RESOLVER_BUILD,
     lms_session_notes_build: LMS_SESSION_NOTES_BUILD,
     lms_assessment_notes_scope_build: LMS_ASSESSMENT_NOTES_SCOPE_BUILD,
@@ -81437,6 +81632,15 @@ const ngKnownScheduleRepairState = {
   last_error: null,
   last_result: null,
 };
+const ngKnownMskNotesCatchupState = {
+  build: LMS_KNOWN_MSK_NOTES_CATCHUP_BUILD,
+  running: false,
+  last_started_at: null,
+  last_finished_at: null,
+  last_success_at: null,
+  last_error: null,
+  last_result: null,
+};
 
 function ngRememberZoomRecordingRecoveryResult(result = {}) {
   ngZoomRecordingRecoveryState.last_result = result;
@@ -81668,7 +81872,10 @@ app.listen(PORT, () => {
     .catch((error) => console.error("LMS session-notes reconciliation failed:", error.message))
     .then(() => ngRunRecordingLabelStartupReconciliation())
     .then((result) => console.log("LMS recording-label reconciliation:", result))
-    .catch((error) => console.error("LMS recording-label reconciliation failed:", error.message));
+    .catch((error) => console.error("LMS recording-label reconciliation failed:", error.message))
+    .then(() => ngRunKnownMskTranscriptNotesCatchup())
+    .then((result) => console.log("LMS known MSK transcript-notes catch-up:", result))
+    .catch((error) => console.error("LMS known MSK transcript-notes catch-up failed:", error.message));
   ngV116StartBackendHeartbeat();
   ngStartEmailQueueRunner();
   ngStartEmailAutomationRunner();
