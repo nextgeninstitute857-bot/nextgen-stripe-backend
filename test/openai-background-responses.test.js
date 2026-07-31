@@ -91,6 +91,34 @@ test("terminal provider failures are marked so a queue retry can create a new re
   );
 });
 
+test("terminal incomplete responses preserve the provider output-budget reason", async () => {
+  const httpClient = {
+    async post() {
+      return {
+        data: {
+          id: "resp_incomplete",
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+        },
+      };
+    },
+    async get() {
+      throw new Error("poll should not run");
+    },
+  };
+
+  await assert.rejects(
+    runOpenAIBackgroundResponse({ httpClient }),
+    (error) => {
+      assert.equal(error.message, "max_output_tokens");
+      assert.equal(error.openAIResponseId, "resp_incomplete");
+      assert.equal(error.openAIResponseStatus, "incomplete");
+      assert.equal(error.openAIResponseTerminal, true);
+      return true;
+    },
+  );
+});
+
 test("a response that exceeds the local safety window is cancelled", async () => {
   let currentTime = 0;
   const posts = [];

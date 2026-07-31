@@ -34,6 +34,7 @@ test("v254 keeps the Vimeo classifier single-filed on a 2 GB Render service", ()
       image_zip: 2,
       video_zip: 2,
       ayla_vimeo_ai: 1,
+      ayla_taxonomy_ai: 1,
     },
     media_workers_per_job: 8,
     media_global_transfer_limit: 12,

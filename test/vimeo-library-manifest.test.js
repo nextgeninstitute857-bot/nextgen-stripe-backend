@@ -15,6 +15,7 @@ import {
   rankVimeoQbankTaxonomyCandidates,
   stripVimeoVtt,
   upsertVimeoCatalogDraft,
+  vimeoClassifierMaxOutputTokens,
   vimeoCatalogSummary,
 } from "../lib/vimeo-library-manifest.js";
 
@@ -105,6 +106,14 @@ function successfulClassification(draft = catalogDraft(), overrides = {}) {
     now: new Date("2026-07-25T10:05:00.000Z"),
   });
 }
+
+test("Vimeo classifier reserves a bounded reasoning and structured-output budget", () => {
+  assert.equal(vimeoClassifierMaxOutputTokens(), 25_000);
+  assert.equal(vimeoClassifierMaxOutputTokens(""), 25_000);
+  assert.equal(vimeoClassifierMaxOutputTokens("2200"), 12_000);
+  assert.equal(vimeoClassifierMaxOutputTokens("30000"), 30_000);
+  assert.equal(vimeoClassifierMaxOutputTokens("90000"), 40_000);
+});
 
 test("Vimeo discovery creates private drafts and preserves provider playback metadata", () => {
   const [row] = buildVimeoLibraryManifest([vimeoVideo()], {
