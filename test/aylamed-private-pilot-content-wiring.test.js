@@ -99,6 +99,31 @@ test("private QBank activation disables unscoped delivery and preserves ordinary
     server.indexOf("const AYLA_STEP1_PILOT_COLLECTION_NAMESPACE"),
     server.indexOf('app.get("/api/ayla/admin/pilot/step1/preview"'),
   );
+  const recovery = server.slice(
+    server.indexOf("async function aylaQueuePrivatePilotVimeoClassificationRecovery"),
+    server.indexOf("async function ngRunAylaPrivatePilotContentActivation"),
+  );
+  const pilotActivation = server.slice(
+    server.indexOf("async function ngRunAylaPrivatePilotContentActivation"),
+    server.indexOf('app.get("/api/ayla/admin/pilot/step1/preview"'),
+  );
+  const vimeoDispatch = server.slice(
+    server.indexOf("async function aylaDispatchNextVimeoCatalogDraft"),
+    server.indexOf("async function aylaResumeInterruptedVimeoCatalogDispatches"),
+  );
+  const vimeoTerminal = server.slice(
+    server.indexOf("async function ngAylaVimeoCatalogJobTerminal"),
+    server.indexOf("async function ngRunAylaVimeoCatalogClassificationJob"),
+  );
+  const folderSync = server.slice(
+    server.indexOf("async function aylaSyncVimeoCatalogSource"),
+    server.indexOf('app.get("/api/ayla/admin/resources/vimeo-folders"'),
+  );
+  const startup = server.slice(server.indexOf("app.listen(PORT"));
+  const manualVimeoReview = server.slice(
+    server.indexOf('app.post("/api/ayla/admin/resources/vimeo-catalog/review"'),
+    server.indexOf('app.post("/api/ayla/students/:studentId/personal-tutor/apply"'),
+  );
   assert.match(activation, /destination_scope: ""[\s\S]*enabled: false/);
   assert.match(activation, /destination_scope: AYLA_STEP1_PILOT_DESTINATION_SCOPE[\s\S]*enabled: true/);
   assert.match(activation, /function aylaStep1PilotCollectionMatches/);
@@ -114,9 +139,29 @@ test("private QBank activation disables unscoped delivery and preserves ordinary
   assert.match(activation, /answerMode: "reveal_only"/);
   assert.match(activation, /flashcardsActivated/);
   assert.match(activation, /aylaQueuePrivatePilotVimeoClassificationRecovery/);
-  assert.match(activation, /qbank_taxonomy_now_available/);
-  assert.match(activation, /privatePilotClassificationRecoveryCount/);
-  assert.match(activation, /aylaStep1PilotVimeoNeedsResearch/);
+  assert.match(server, /const AYLA_VIMEO_CLASSIFIER_SAFETY_BUILD = "v266-vimeo-classifier-safety-preflight"/);
+  assert.match(server, /scheduledClassificationRetriesEnabled: false/);
+  assert.match(server, /scheduledFolderClassificationEnabled: false/);
+  assert.match(server, /startupDispatchRecoveryEnabled: false/);
+  assert.match(server, /automaticApprovalEnabled: false/);
+  assert.match(server, /workerMaxAttempts: 1/);
+  assert.match(recovery, /scheduled_vimeo_classification_retries_disabled/);
+  assert.ok(
+    recovery.indexOf("scheduledClassificationRetriesEnabled") < recovery.indexOf("readAylaDb()"),
+    "the hard-disabled recovery guard must run before any catalog read or queue operation",
+  );
+  assert.match(pilotActivation, /lecturesReadyForManualReview/);
+  assert.match(pilotActivation, /automaticVimeoApprovalEnabled/);
+  assert.doesNotMatch(pilotActivation, /approveVimeoCatalogDraft/);
+  assert.match(manualVimeoReview, /approveVimeoCatalogDraft/);
+  assert.match(vimeoDispatch, /maxAttempts: AYLA_VIMEO_CLASSIFIER_SAFETY_POLICY\.workerMaxAttempts/);
+  assert.match(vimeoTerminal, /classifier_worker_failed_no_automatic_retry/);
+  assert.match(vimeoTerminal, /scheduled_vimeo_dispatch_disabled_preflight_required/);
+  assert.match(vimeoTerminal, /\["manual_admin", "folder_sync_manual"\]/);
+  assert.match(vimeoTerminal, /await aylaPauseVimeoCatalogJobForPreflight/);
+  assert.match(folderSync, /reason !== "manual_admin_sync"/);
+  assert.match(folderSync, /scheduled_vimeo_classification_disabled_preflight_required/);
+  assert.doesNotMatch(startup, /aylaResumeInterruptedVimeoCatalogDispatches\(\)/);
   assert.match(activation, /vimeoEmbedDomainFingerprint/);
   assert.match(activation, /row\.pilotOnly === true \|\| row\.accessScope === "private_pilot"/);
   assert.match(activation, /ensureVimeoEmbedDomains/);
