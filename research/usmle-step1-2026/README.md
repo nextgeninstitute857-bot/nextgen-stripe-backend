@@ -68,6 +68,12 @@ No stage in this branch performs production writes.
 - `media/`: original schematic SVG files only; no copied clinical images.
 - future audit tooling: compare a read-only backend export against the five-level matrix and produce missing-topic and missing-media queues.
 
+## Completed research batches
+
+- **Batch 001:** nutrition, anemia, post-bariatric physiology, growth, food insecurity, veterans, disability-related complications, gender-affirming physiology, and geriatric polypharmacy.
+- **Batch 002:** respiratory and renal mechanisms, including tubular transport, renal hemodynamics, acid-base compensation, CKD mineral-bone physiology, pulmonary mechanics, neonatal surfactant deficiency, oxygen transport, and V/Q mismatch.
+- **Batch 003:** cardiovascular and endocrine mechanisms, including aortic-stenosis pressure-volume loops, tamponade ventricular interdependence, dynamic outflow obstruction, AV nodal reentry, primary hyperaldosteronism, DKA potassium balance, pregnancy-related thyroid binding, and 21-hydroxylase deficiency.
+
 ## Required production gate
 
 Before any generated question enters the live QBank, it must pass:
