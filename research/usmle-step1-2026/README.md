@@ -1,0 +1,81 @@
+# AylaMed USMLE Step 1 2026 Original QBank Research
+
+Status: **private research branch only**  
+Production status: **not merged, not deployed, not published to students**
+
+## Objective
+
+Build an original, clinician-reviewable USMLE Step 1 question bank that covers:
+
+`exam -> system -> subsystem -> topic -> subtopic -> learning objective -> media requirement`
+
+The project uses current public USMLE materials as the authoritative blueprint. Licensed proprietary QBank material may be used only to identify broad coverage signals inside the owner's private environment. It must never be copied or closely paraphrased.
+
+## Confirmed 2026 priorities
+
+1. **Enhanced nutrition assessment across all Step exams.** The USMLE announced enhanced nutrition-science content beginning in June 2026. Step 1's published discipline specifications list Nutrition at 15-20%.
+2. **Integrated foundational science.** Step 1 remains organized by system and process, with most items requiring application of foundational mechanisms in clinical contexts.
+3. **Graphic and tabular interpretation.** Public USMLE guidance states that many Step 1 items require interpretation of graphic, tabular, gross-pathology, microscopic, or normal-specimen material.
+4. **Special populations explicitly highlighted in the 2026 public outline:**
+   - older adults and geriatric medicine;
+   - recently returning military personnel, veterans, and families of deployed personnel;
+   - people requiring health and gender-affirming care, including nonbinary and transgender patients;
+   - patients with disabilities;
+   - prescription-drug use and adverse effects.
+5. **Communication and interpersonal skills remain examinable.** Public Step 1 specifications allocate 6-9% to this competency area.
+6. **New 2026 delivery software.** Step 1 now uses fourteen 30-minute blocks with no more than 20 items per block. The total item count and exam length are unchanged. AylaMed practice blocks should support this pacing model.
+
+## Source hierarchy
+
+1. Current USMLE/NBME/FSMB public material
+2. Peer-reviewed consensus statements and current professional guidelines
+3. Government and academic medical sources
+4. Reputable educational reviews
+5. Social-media and forum reports as **unverified signals only**
+
+Social reports never establish that a topic is tested. They can only trigger a check against authoritative sources and the private coverage matrix.
+
+## Copyright and originality controls
+
+Every generated question must:
+
+- use a new clinical scenario and independently selected patient details;
+- use original answer choices and distractor logic;
+- include an independently written explanation and wrong-choice analysis;
+- cite medical sources used to verify the concept;
+- use only original, public-domain, or properly licensed media;
+- carry a similarity-review status before medical review;
+- remain private until clinician approval.
+
+The following are prohibited:
+
+- copying or lightly rewriting UWorld, AMBOSS, NBME, or other proprietary stems;
+- copying explanations, option sets, educational objectives, tables, screenshots, or illustrations;
+- presenting AylaMed as approved, affiliated with, or sponsored by another QBank;
+- automatic publication of generated content.
+
+## Draft lifecycle
+
+`research_seed -> generated_private_draft -> factual_review -> similarity_review -> media_review -> clinician_review -> approved_private -> separately authorized publication`
+
+No stage in this branch performs production writes.
+
+## Current work packages
+
+- `source-register.json`: authoritative and signal sources with evidence status.
+- `priority-deltas.json`: 2026-specific priority matrix and media requirements.
+- `drafts/`: original draft MCQs, answers, explanations, and media specifications.
+- `media/`: original schematic SVG files only; no copied clinical images.
+- future audit tooling: compare a read-only backend export against the five-level matrix and produce missing-topic and missing-media queues.
+
+## Required production gate
+
+Before any generated question enters the live QBank, it must pass:
+
+1. taxonomy completeness;
+2. valid single-best-answer structure;
+3. factual-reference verification;
+4. automated and human similarity review;
+5. media ownership/licence verification;
+6. clinician review and approval;
+7. disabled/private import followed by a separate publication decision.
