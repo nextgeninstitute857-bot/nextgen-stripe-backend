@@ -222,3 +222,14 @@ test("no-credit taxonomy export is authenticated, paginated and read-only", () =
     assert.doesNotMatch(exportRoute, forbidden);
   }
 });
+
+
+test("no-credit taxonomy export uses the internal AylaMed exam key for registry lookup", () => {
+  const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
+  const start = server.indexOf("async function aylaNoCreditMcqExportPage");
+  const end = server.indexOf('app.get("/api/ayla/admin/resources/content-taxonomy/no-credit-export"');
+  assert.ok(start >= 0 && end > start, "the bounded no-credit export helper must be present");
+  const exportHelper = server.slice(start, end);
+  assert.match(exportHelper, /const examTrackId = normalizeAylaShellExamTrack\(examTrack\)/);
+  assert.doesNotMatch(exportHelper, /const examTrackId = normalizeAylaRegistryExamTrack\(examTrack\)/);
+});

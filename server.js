@@ -38634,7 +38634,7 @@ app.get("/api/ayla/admin/resources/content-taxonomy/review-queue", async (req, r
 });
 
 async function aylaNoCreditMcqExportPage({ examTrack, offset = 0, limit = 5 } = {}) {
-  const examTrackId = normalizeAylaRegistryExamTrack(examTrack);
+  const examTrackId = normalizeAylaShellExamTrack(examTrack);
   const examDefinition = examTrackId ? AYLA_EXAM_REGISTRY[examTrackId] : null;
   if (!examTrack || !examDefinition) {
     throw Object.assign(new Error("A supported exam_track is required"), { statusCode: 400 });
