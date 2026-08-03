@@ -1,0 +1,56 @@
+{
+  "schema_version": "aylamed-original-mcq-draft-v1",
+  "batch_id": "usmle-step1-2026-b002-01",
+  "created_at": "2026-08-04T02:23:00+05:00",
+  "status": "private_research_draft",
+  "publication_allowed": false,
+  "copyright_policy": {
+    "origin": "de_novo_from_official_blueprint_and_public_medical_sources",
+    "proprietary_qbank_text_used": false,
+    "proprietary_qbank_media_used": false,
+    "similarity_review_required": true
+  },
+  "questions": [
+    {
+      "draft_id": "AY26-REN-LOOP-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Renal & Urinary System",
+        "subsystem": "Tubular transport and pharmacology",
+        "topic": "Loop diuretics",
+        "subtopic": "NKCC2 blockade and loss of the medullary concentration gradient"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 68-year-old man with acute pulmonary edema receives an intravenous diuretic. During the next several hours, urine output increases substantially, and urinary calcium and magnesium excretion also increase. The accompanying nephron diagram highlights the transporter inhibited by the drug. Which of the following changes most directly produces both the diuresis and the increased divalent-cation excretion?</p>",
+      "options": [
+        {"id": 1, "text_html": "Blockade of apical Na<sup>+</sup>-K<sup>+</sup>-2Cl<sup>−</sup> cotransport in the thick ascending limb, reducing the lumen-positive voltage and medullary hypertonicity"},
+        {"id": 2, "text_html": "Blockade of apical Na<sup>+</sup>-Cl<sup>−</sup> cotransport in the distal convoluted tubule, increasing paracellular calcium loss"},
+        {"id": 3, "text_html": "Inhibition of carbonic anhydrase in the proximal tubule, increasing medullary interstitial osmolality"},
+        {"id": 4, "text_html": "Antagonism of mineralocorticoid receptors in principal cells, eliminating the corticomedullary osmotic gradient"},
+        {"id": 5, "text_html": "Blockade of epithelial sodium channels in collecting-duct principal cells, increasing the lumen-positive potential"}
+      ],
+      "correct_option_id": 1,
+      "explanation_html": "<p>Loop diuretics inhibit the apical NKCC2 cotransporter in the thick ascending limb. This segment normally reabsorbs NaCl without water and helps generate the hypertonic medullary interstitium. Potassium recycling through ROMK creates a lumen-positive voltage that drives paracellular calcium and magnesium reabsorption. NKCC2 blockade therefore impairs urinary concentration and increases calcium and magnesium excretion.</p>",
+      "wrong_choice_explanations": {
+        "2": "Thiazides inhibit NCC in the distal convoluted tubule and generally increase calcium reabsorption rather than calcium loss.",
+        "3": "Carbonic anhydrase inhibition causes bicarbonaturia in the proximal tubule but does not increase medullary interstitial osmolality.",
+        "4": "Mineralocorticoid antagonists act in the collecting duct and are potassium-sparing; they do not eliminate the medullary gradient.",
+        "5": "ENaC blockade makes the lumen less negative and reduces potassium and hydrogen secretion; it does not create a lumen-positive voltage."
+      },
+      "educational_objective": "NKCC2 blockade in the thick ascending limb reduces the medullary concentration gradient and the lumen-positive voltage that normally supports paracellular calcium and magnesium reabsorption.",
+      "media": [{
+        "path": "research/usmle-step1-2026/media/nephron-loop-diuretic-map.svg",
+        "placement": "question",
+        "type": "original_vector_nephron_map",
+        "alt_text": "Nephron schematic highlighting NKCC2 in the thick ascending limb and showing reduced medullary gradient and divalent-cation reabsorption after blockade.",
+        "ownership": "AylaMed original"
+      }],
+      "references": [
+        {"type": "official_exam_blueprint", "citation": "USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.", "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"},
+        {"type": "government_medical_reference", "citation": "StatPearls. Therapeutic Uses of Diuretic Agents. NCBI Bookshelf. Updated 2023.", "url": "https://www.ncbi.nlm.nih.gov/books/NBK557838/"},
+        {"type": "peer_reviewed_review", "citation": "Shankar SS, Brater DC. Loop diuretics: from the Na-K-2Cl transporter to clinical use. Am J Physiol Renal Physiol. 2003;284:F11-F21.", "doi": "10.1152/ajprenal.00119.2002"}
+      ],
+      "review": {"factual": "pending_clinician", "similarity": "pending", "media": "pending", "publication": "blocked"}
+    }
+  ]
+}
