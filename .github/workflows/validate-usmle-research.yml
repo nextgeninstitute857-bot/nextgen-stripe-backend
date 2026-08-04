@@ -34,10 +34,3 @@ jobs:
         run: node scripts/validate-usmle-research-drafts.mjs
       - name: Validate authored balance and student answer shuffling
         run: node scripts/validate-usmle-answer-positions.mjs
-      - name: Export Batch 012 for private full-ZIP originality audit
-        uses: actions/upload-artifact@v4
-        with:
-          name: batch012-audit-input-${{ github.run_id }}
-          path: research/usmle-step1-2026/drafts/batch-012-in-chat-original-20.json
-          if-no-files-found: error
-          retention-days: 1
