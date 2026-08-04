@@ -1,0 +1,97 @@
+name: Install Batch 014 Private Research
+
+on:
+  push:
+    branches:
+      - research/usmle-step1-2026-original-qbank
+    paths:
+      - .tmp/batch014_payload.tar.gz.b64
+
+permissions:
+  contents: write
+
+concurrency:
+  group: install-private-batch-014
+  cancel-in-progress: false
+
+jobs:
+  install-validate-and-commit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: research/usmle-step1-2026-original-qbank
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Decode and verify bounded private payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode .tmp/batch014_payload.tar.gz.b64 > /tmp/batch014_payload.tar.gz
+          echo "cad8acdf32784139301a33bd31e8b904e0651cf814b2b349e398e006271ea922  /tmp/batch014_payload.tar.gz" | sha256sum -c -
+          cat > /tmp/batch014-expected.txt <<'FILES'
+          research/usmle-step1-2026/README.md
+          research/usmle-step1-2026/audits/batch-014-committed-stems.tsv
+          research/usmle-step1-2026/audits/batch-014-in-chat-originality-audit.json
+          research/usmle-step1-2026/audits/batch-014-installation-validation-record.json
+          research/usmle-step1-2026/coverage/batch-014-in-chat-original-20-matrix.json
+          research/usmle-step1-2026/coverage/batch-014-in-chat-original-20-queue.json
+          research/usmle-step1-2026/drafts/batch-014-in-chat-original-20.json
+          research/usmle-step1-2026/media/absence-3hz-thalamic-t-type.svg
+          research/usmle-step1-2026/media/acetaminophen-napqi-glutathione-nac.svg
+          research/usmle-step1-2026/media/ada-scid-datp-ribonucleotide-reductase.svg
+          research/usmle-step1-2026/media/addison-pomc-acth-mc1r.svg
+          research/usmle-step1-2026/media/alzheimer-app-secretase-pathways.svg
+          research/usmle-step1-2026/media/cml-philadelphia-bcr-abl1.svg
+          research/usmle-step1-2026/media/coarctation-intercostal-collaterals.svg
+          research/usmle-step1-2026/media/digeorge-pouch-neural-crest-map.svg
+          research/usmle-step1-2026/media/fap-apc-beta-catenin-destruction.svg
+          research/usmle-step1-2026/media/fh-ldlr-coated-pit-endocytosis.svg
+          research/usmle-step1-2026/media/hemochromatosis-hepcidin-ferroportin.svg
+          research/usmle-step1-2026/media/hemophilia-a-intrinsic-tenase-mixing.svg
+          research/usmle-step1-2026/media/hodgkin-rs-reactive-microenvironment.svg
+          research/usmle-step1-2026/media/huntington-paternal-cag-anticipation.svg
+          research/usmle-step1-2026/media/iga-nephropathy-four-hit-pathway.svg
+          research/usmle-step1-2026/media/men2-ret-thyroid-adrenal-pedigree.svg
+          research/usmle-step1-2026/media/minimal-change-three-modality-panel.svg
+          research/usmle-step1-2026/media/organophosphate-ache-aging-pralidoxime.svg
+          research/usmle-step1-2026/media/type4-rta-aldosterone-ammonium.svg
+          research/usmle-step1-2026/media/vsd-eisenmenger-shunt-reversal.svg
+          FILES
+          tar -tzf /tmp/batch014_payload.tar.gz | sort > /tmp/batch014-actual.txt
+          sort -o /tmp/batch014-expected.txt /tmp/batch014-expected.txt
+          diff -u /tmp/batch014-expected.txt /tmp/batch014-actual.txt
+          if grep -E '(^/|(^|/)\.\.(/|$))' /tmp/batch014-actual.txt; then
+            echo "Unsafe path in Batch 014 payload" >&2
+            exit 1
+          fi
+          mkdir -p /tmp/batch014
+          tar -xzf /tmp/batch014_payload.tar.gz -C /tmp/batch014
+      - name: Install exact private Batch 014 files
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r path; do
+            install -D -m 0644 "/tmp/batch014/$path" "$path"
+          done < /tmp/batch014-expected.txt
+      - name: Run fail-closed research validators
+        run: |
+          node scripts/validate-usmle-research-drafts.mjs
+          node scripts/validate-usmle-answer-positions.mjs
+      - name: Commit validated private research and remove installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name nextgeninstitute857-bot
+          git config user.email nextgeninstitute857-bot@users.noreply.github.com
+          while IFS= read -r path; do
+            git add "$path"
+          done < /tmp/batch014-expected.txt
+          git rm .tmp/batch014_payload.tar.gz.b64 .github/workflows/install-batch014.yml
+          git commit -m "Complete validated in-chat Batch 014 original MCQs"
+          git push origin HEAD:research/usmle-step1-2026-original-qbank
+
+# Private research installation only: no merge, deployment, import, live-QBank write, or publication.
