@@ -37,7 +37,7 @@ jobs:
         run: node scripts/validate-usmle-answer-positions.mjs
 
   install-private-batch-015:
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'research/usmle-step1-2026-original-qbank'
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'research/usmle-step1-2026-original-qbank')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     concurrency:
