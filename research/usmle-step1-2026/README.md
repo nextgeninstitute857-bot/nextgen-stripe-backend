@@ -59,7 +59,7 @@ No stage in this branch performs live QBank writes or automatic publication.
 - Resumed attempts must preserve their original option order.
 - Distractors must be medically plausible and must not reveal the answer through length, grammar, specificity, or obviously opposite wording.
 
-Latest validated authored distribution: **A 14, B 14, C 14, D 13, E 13**. Longest same-position run: **3**.
+Latest validated authored distribution: **A 16, B 15, C 15, D 15, E 15**. Longest same-position run: **3**.
 
 ## Completed batches
 
@@ -71,12 +71,13 @@ Latest validated authored distribution: **A 14, B 14, C 14, D 13, E 13**. Longes
 6. Musculoskeletal, dermatologic, and reproductive mechanisms.
 7. Multisystem foundations, microbiology, pharmacology, biostatistics, communication, and mitochondrial genetics.
 8. First backend-driven media-priority gaps: bilateral vestibular schwannoma/NF2, sarcoid calcitriol physiology, clear-cell RCC/VHL-HIF, ACL biomechanics, sickle functional asplenia, psoriasis IL-23/Th17, allergic bronchopulmonary aspergillosis, and invasive Aspergillus angioinvasion.
+9. Second backend-driven media-priority gaps: dominant superior-division MCA localization, membranous nephropathy spike-and-dome pathology, poststreptococcal glomerulonephritis humps, tension pneumothorax obstructive shock, bullous pemphigoid hemidesmosomes, femoral-neck retinacular blood supply, day-5 myocardial-infarction rupture risk, and anti-TNF tuberculosis reactivation.
 
 ## Current inventory and validation
 
-- **68 original private-draft MCQs**
-- **65 original SVG teaching graphics**
-- **50 draft JSON files**
+- **76 original private-draft MCQs**
+- **73 original SVG teaching graphics**
+- **52 draft JSON files**
 - **0 validation errors**
 - **0 validation warnings**
 - student-delivery shuffle simulation passed
