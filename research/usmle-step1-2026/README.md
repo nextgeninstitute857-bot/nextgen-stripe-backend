@@ -1,7 +1,7 @@
 # AylaMed USMLE Step 1 2026 Original QBank Research
 
 Status: **private research branch only**  
-Production status: **not merged, not deployed, not published to students**
+Production status: **not merged, not deployed, not imported, not published to students**
 
 ## Objective
 
@@ -59,7 +59,7 @@ No stage in this branch performs live QBank writes or automatic publication.
 - Resumed attempts must preserve their original option order.
 - Distractors must be medically plausible and must not reveal the answer through length, grammar, specificity, or obviously opposite wording.
 
-Latest validated authored distribution: **A 24, B 23, C 23, D 23, E 23**. Longest same-position run: **3**.
+Latest validated authored distribution after Batch 013: **A 32, B 31, C 31, D 31, E 31**. Longest same-position run: **3 or fewer**.
 
 ## Completed batches
 
@@ -74,26 +74,33 @@ Latest validated authored distribution: **A 24, B 23, C 23, D 23, E 23**. Longes
 9. Second backend-driven media-priority gaps: dominant superior-division MCA infarction, membranous nephropathy, poststreptococcal glomerulonephritis, tension pneumothorax, bullous pemphigoid, femoral-neck fracture vascular anatomy, day 3-7 myocardial-infarction rupture risk, and anti-TNF tuberculosis reactivation.
 10. First 20-question in-chat accelerated batch: RANKL blockade, pneumococcal opsonization, mu-opioid respiratory signaling, meningococcal LOS/TLR4, Hashimoto Hürthle cells, HIT, antral H. pylori physiology, Graves uptake, S. gallolyticus and colon disease, Lynch mismatch repair, HFrEF neurohormonal remodeling, atrial-fibrillation appendage stasis, BRCA homologous recombination, HSV temporal-limbic disease, fimbrial STIC, hepatorenal hemodynamics, gout inflammasome signaling, EGFR-driven lung adenocarcinoma, myeloma cast nephropathy, and flecainide use dependence.
 11. Second 20-question in-chat accelerated batch: UIP/TGF-beta fibrosis, infantile hemangioma/propranolol, HPV-positive oropharyngeal carcinoma, posterior urethral valves, allergic contact dermatitis, melanoma Breslow depth, Fanconi syndrome, osteosarcoma, EBV infectious mononucleosis, Kaposi sarcoma, osteoarthritis, actinic keratosis, scabies, obstructive atelectasis, keloids, Erb palsy, alpha-1 antitrypsin deficiency, Crohn-associated enteric hyperoxaluria, pituitary chiasmal compression, and pancreatitis fat saponification.
+12. Third 20-question in-chat accelerated batch: aortic-dissection malperfusion, pleural pseudoexudates, ARDS diffuse alveolar damage, scaphoid vascular anatomy, struvite stones, Burkitt MYC, APL differentiation therapy, AL amyloid, falciparum sequestration, carcinoid first-pass physiology, ADPKD aneurysm risk, pheochromocytoma blockade sequence, cerebral toxoplasmosis, acute cholecystitis, beta-thalassemia, preeclampsia, aplastic anemia, primary syphilis, ASD fixed splitting, and aortic-regurgitation pressure-volume physiology.
+13. Fourth 20-question in-chat accelerated batch: Tetralogy hypercyanotic spells, mitral-stenosis gradients, celiac antigen presentation, Wilson copper transport, rheumatoid pannus/RANKL, lupus immune complexes, multiple-sclerosis CNS demyelination, WPW preexcitation, testicular torsion, hyperparathyroid bone signaling, Cushing mineralocorticoid effects, anti-GBM disease, granulomatosis with polyangiitis, Meckel bleeding, Guillain-Barre molecular mimicry, Fragile X silencing, congenital long QT, tuberous-sclerosis mTOR signaling, Whipple disease, and rheumatic-fever molecular mimicry.
 
 ## In-chat 100-question pilot
 
-The in-chat accelerated pilot has completed **40 of 100** planned original questions across Batches 010 and 011. Each 20-question cycle uses the backend ZIP only for coverage signals and full-stem originality screening, then adds de novo questions, original graphics, complete five-level taxonomy, references, distractor rationales, publication blocks, and repository validation.
+The in-chat accelerated pilot has completed **80 of 100** planned original questions across Batches 010-013. Each 20-question cycle uses backend evidence only for coverage signals and originality review, then adds de novo questions, original graphics, complete five-level taxonomy, references, distractor rationales, publication blocks, and repository validation.
 
 A separate bounded API generator remains available but has not been executed and has spent no API credits.
 
 ## Current inventory and validation
 
-- **116 original private-draft MCQs**
-- **113 original SVG teaching graphics / media references**
-- **54 draft JSON files**
-- Batch 011 authored positions: **A 4, B 4, C 4, D 4, E 4**
-- Batch 011 ZIP close-paraphrase flags: **0**
-- Batch 011 maximum ZIP five-gram Jaccard overlap: **0.0506**
-- **0 validation errors**
-- **0 validation warnings**
-- authored-position balance passed
-- student-delivery shuffle simulation passed
-- pilot-generator syntax and bounded dry-run CI passed
+- **156 original private-draft MCQs**
+- **153 original SVG teaching graphics / media references**
+- **94 research JSON files**
+- Batch 012 authored positions: **A 4, B 4, C 4, D 4, E 4**
+- Batch 013 authored positions: **A 4, B 4, C 4, D 4, E 4**
+- intra-batch duplicate flags: **0**
+- authored-position balance passed locally
+- student-delivery shuffle requirement preserved
+- media paths and SVG XML parsing passed locally
+- publication and live-write blocks preserved
+
+## External similarity gate
+
+The title inventory and 786 explicit media-candidate stems were available for targeted screening during Batches 012 and 013. The raw 7,937-stem ZIP was not mounted in this runtime, so these batches deliberately do **not** claim a completed full-export Jaccard result.
+
+Before any disabled import approval, both batches must be rerun against the complete 7,937-stem export and pass automated and human close-paraphrase review. Until then they remain private, draft, and publication-blocked.
 
 ## Required production gate
 
