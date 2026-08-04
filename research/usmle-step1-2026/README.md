@@ -71,7 +71,26 @@ Latest validated authored distribution: **A 16, B 15, C 15, D 15, E 15**. Longes
 6. Musculoskeletal, dermatologic, and reproductive mechanisms.
 7. Multisystem foundations, microbiology, pharmacology, biostatistics, communication, and mitochondrial genetics.
 8. First backend-driven media-priority gaps: bilateral vestibular schwannoma/NF2, sarcoid calcitriol physiology, clear-cell RCC/VHL-HIF, ACL biomechanics, sickle functional asplenia, psoriasis IL-23/Th17, allergic bronchopulmonary aspergillosis, and invasive Aspergillus angioinvasion.
-9. Second backend-driven media-priority gaps: dominant superior-division MCA localization, membranous nephropathy spike-and-dome pathology, poststreptococcal glomerulonephritis humps, tension pneumothorax obstructive shock, bullous pemphigoid hemidesmosomes, femoral-neck retinacular blood supply, day-5 myocardial-infarction rupture risk, and anti-TNF tuberculosis reactivation.
+9. Second backend-driven media-priority gaps: dominant superior-division MCA infarction, membranous nephropathy, poststreptococcal glomerulonephritis, tension pneumothorax, bullous pemphigoid, femoral-neck fracture vascular anatomy, day 3-7 myocardial-infarction rupture risk, and anti-TNF tuberculosis reactivation.
+
+## Accelerated 100-question pilot generator
+
+The private pilot generator has been built and dry-run validated. It uses:
+
+- five bounded planning calls;
+- 100 writer calls;
+- 100 independent reviewer calls;
+- ten concurrent workers;
+- a 220-request hard ceiling;
+- input-token, output-token, and estimated-dollar ceilings;
+- authoritative-domain web research;
+- strict structured JSON output;
+- resumable run state;
+- internal near-duplicate quarantine;
+- automatic A-E authored-position balancing;
+- no live writes, release-draft writes, auto-commits, merges, deployment, import, or publication.
+
+A real generation run requires `OPENAI_API_KEY`, current model pricing variables, configured model names, `AYLA_PILOT_EXECUTE=yes`, and the `--execute` flag. Without both execution switches, only a zero-credit dry run is possible.
 
 ## Current inventory and validation
 
@@ -81,6 +100,7 @@ Latest validated authored distribution: **A 16, B 15, C 15, D 15, E 15**. Longes
 - **0 validation errors**
 - **0 validation warnings**
 - student-delivery shuffle simulation passed
+- 100-question pilot generator syntax and bounded dry-run CI passed
 
 ## Required production gate
 
