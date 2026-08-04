@@ -5,7 +5,7 @@ on:
     branches:
       - research/usmle-step1-2026-original-qbank
     paths:
-      - .tmp/batch014_payload.tar.gz.b64
+      - .tmp/batch014_ready
 
 permissions:
   contents: write
@@ -30,7 +30,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          base64 --decode .tmp/batch014_payload.tar.gz.b64 > /tmp/batch014_payload.tar.gz
+          test "$(find .tmp -maxdepth 1 -type f -name 'batch014_payload.part-*' | wc -l)" -eq 8
+          cat .tmp/batch014_payload.part-* | base64 --decode > /tmp/batch014_payload.tar.gz
           echo "cad8acdf32784139301a33bd31e8b904e0651cf814b2b349e398e006271ea922  /tmp/batch014_payload.tar.gz" | sha256sum -c -
           cat > /tmp/batch014-expected.txt <<'FILES'
           research/usmle-step1-2026/README.md
@@ -90,7 +91,7 @@ jobs:
           while IFS= read -r path; do
             git add "$path"
           done < /tmp/batch014-expected.txt
-          git rm .tmp/batch014_payload.tar.gz.b64 .github/workflows/install-batch014.yml
+          git rm .tmp/batch014_payload.part-* .tmp/batch014_ready .github/workflows/install-batch014.yml
           git commit -m "Complete validated in-chat Batch 014 original MCQs"
           git push origin HEAD:research/usmle-step1-2026-original-qbank
 
