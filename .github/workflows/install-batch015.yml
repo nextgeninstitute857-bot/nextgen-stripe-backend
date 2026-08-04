@@ -6,6 +6,7 @@ on:
       - research/usmle-step1-2026-original-qbank
     paths:
       - .tmp/batch015_payload.part00
+      - .tmp/batch015_trigger
 
 permissions:
   contents: write
@@ -142,7 +143,7 @@ FILES
           git config user.name nextgeninstitute857-bot
           git config user.email nextgeninstitute857-bot@users.noreply.github.com
           git add research/usmle-step1-2026
-          git rm .tmp/batch015_payload.part00 .tmp/batch015_payload.part01 .tmp/batch015_payload.part02 .tmp/batch015_payload.part03 .github/workflows/install-batch015.yml
+          git rm .tmp/batch015_payload.part00 .tmp/batch015_payload.part01 .tmp/batch015_payload.part02 .tmp/batch015_payload.part03 .tmp/batch015_trigger .github/workflows/install-batch015.yml
           git commit -m "Complete Batch 014 ZIP audit and add original USMLE Batch 015"
           git push origin HEAD:research/usmle-step1-2026-original-qbank
 
