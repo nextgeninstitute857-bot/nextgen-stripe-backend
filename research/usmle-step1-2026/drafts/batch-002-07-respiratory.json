@@ -1,1 +1,90 @@
-{"schema_version":"aylamed-original-mcq-draft-v1","batch_id":"usmle-step1-2026-b002-07","created_at":"2026-08-04T02:23:00+05:00","status":"private_research_draft","publication_allowed":false,"copyright_policy":{"origin":"de_novo_from_official_blueprint_and_public_medical_sources","proprietary_qbank_text_used":false,"proprietary_qbank_media_used":false,"similarity_review_required":true},"questions":[{"draft_id":"AY26-RESP-CO-001","exam_track":"usmle-step-1","taxonomy":{"system":"Respiratory System","subsystem":"Oxygen transport","topic":"Carbon monoxide poisoning","subtopic":"Reduced oxygen content and impaired unloading despite normal arterial oxygen tension"},"difficulty":"moderate","stem_html":"<p>Three family members develop headache, nausea, and confusion after using a gasoline-powered generator in an attached garage. One patient's arterial PO<sub>2</sub> is 96 mm Hg, and a conventional pulse oximeter reads 99%, but lactate is increased. The accompanying oxygen-binding curves include the patient's curve. Which mechanism best explains the tissue hypoxia?</p>","options":[{"id":1,"text_html":"Carbon monoxide occupies hemoglobin binding sites and increases the oxygen affinity of remaining sites, reducing both oxygen content and unloading"},{"id":2,"text_html":"Carbon monoxide lowers inspired oxygen tension, reducing dissolved oxygen in plasma without affecting hemoglobin"},{"id":3,"text_html":"Carbon monoxide oxidizes ferrous iron to ferric iron, producing isolated methemoglobinemia"},{"id":4,"text_html":"Carbon monoxide shifts the hemoglobin dissociation curve to the right by increasing 2,3-bisphosphoglycerate binding"},{"id":5,"text_html":"Carbon monoxide selectively inhibits pulmonary diffusion, causing a markedly reduced arterial PO<sub>2</sub>"}],"correct_option_id":1,"explanation_html":"<p>Carbon monoxide binds hemoglobin with very high affinity, removing binding sites from oxygen transport. It also increases the affinity of the remaining oxygenated sites, shifting the dissociation relationship leftward and impairing tissue unloading. Arterial PO<sub>2</sub> reflects dissolved oxygen and can remain normal, and conventional two-wavelength pulse oximetry can be misleading because it does not reliably distinguish oxyhemoglobin from carboxyhemoglobin.</p>","wrong_choice_explanations":{"2":"The principal problem is abnormal hemoglobin binding, not a reduction in inspired oxygen tension.","3":"Methemoglobinemia involves oxidation of heme iron to the ferric state; carbon monoxide primarily forms carboxyhemoglobin.","4":"Carbon monoxide shifts the effective dissociation relationship leftward, not rightward.","5":"Arterial dissolved oxygen may remain normal because alveolar oxygen entry is not the primary defect."},"educational_objective":"Carbon monoxide poisoning reduces oxygen-carrying capacity and impairs oxygen unloading while arterial PO2 may remain normal and conventional pulse oximetry may appear reassuring.","media":[{"path":"research/usmle-step1-2026/media/carbon-monoxide-oxygen-curve.svg","placement":"question","type":"original_vector_dissociation_curve","alt_text":"Oxygen-binding plot showing reduced oxygen-carrying capacity and a left-shifted remaining hemoglobin affinity in carbon monoxide exposure.","ownership":"AylaMed original"}],"references":[{"type":"official_exam_blueprint","citation":"USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.","url":"https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"},{"type":"government_clinical_guidance","citation":"Centers for Disease Control and Prevention. Clinical Guidance for Carbon Monoxide Poisoning. July 8, 2024.","url":"https://www.cdc.gov/carbon-monoxide/hcp/clinical-guidance/index.html"},{"type":"government_public_health","citation":"Centers for Disease Control and Prevention. Carbon Monoxide Poisoning Basics. January 12, 2026.","url":"https://www.cdc.gov/carbon-monoxide/about/index.html"}],"review":{"factual":"pending_clinician","similarity":"pending","media":"pending","publication":"blocked"}}]}
+{
+  "schema_version": "aylamed-original-mcq-draft-v1",
+  "batch_id": "usmle-step1-2026-b002-07",
+  "created_at": "2026-08-04T02:23:00+05:00",
+  "status": "private_research_draft",
+  "publication_allowed": false,
+  "copyright_policy": {
+    "origin": "de_novo_from_official_blueprint_and_public_medical_sources",
+    "proprietary_qbank_text_used": false,
+    "proprietary_qbank_media_used": false,
+    "similarity_review_required": true
+  },
+  "questions": [
+    {
+      "draft_id": "AY26-RESP-CO-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Respiratory System",
+        "subsystem": "Oxygen transport",
+        "topic": "Carbon monoxide poisoning",
+        "subtopic": "Reduced oxygen content and impaired unloading despite normal arterial oxygen tension"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>Three family members develop headache, nausea, and confusion after using a gasoline-powered generator in an attached garage. One patient's arterial PO<sub>2</sub> is 96 mm Hg, and a conventional pulse oximeter reads 99%, but lactate is increased. The accompanying oxygen-binding curves include the patient's curve. Which mechanism best explains the tissue hypoxia?</p>",
+      "options": [
+        {
+          "id": 2,
+          "text_html": "Carbon monoxide lowers inspired oxygen tension, reducing dissolved oxygen in plasma without affecting hemoglobin"
+        },
+        {
+          "id": 5,
+          "text_html": "Carbon monoxide selectively inhibits pulmonary diffusion, causing a markedly reduced arterial PO<sub>2</sub>"
+        },
+        {
+          "id": 1,
+          "text_html": "Carbon monoxide occupies hemoglobin binding sites and increases the oxygen affinity of remaining sites, reducing both oxygen content and unloading"
+        },
+        {
+          "id": 3,
+          "text_html": "Carbon monoxide oxidizes ferrous iron to ferric iron, producing isolated methemoglobinemia"
+        },
+        {
+          "id": 4,
+          "text_html": "Carbon monoxide shifts the hemoglobin dissociation curve to the right by increasing 2,3-bisphosphoglycerate binding"
+        }
+      ],
+      "correct_option_id": 1,
+      "explanation_html": "<p>Carbon monoxide binds hemoglobin with very high affinity, removing binding sites from oxygen transport. It also increases the affinity of the remaining oxygenated sites, shifting the dissociation relationship leftward and impairing tissue unloading. Arterial PO<sub>2</sub> reflects dissolved oxygen and can remain normal, and conventional two-wavelength pulse oximetry can be misleading because it does not reliably distinguish oxyhemoglobin from carboxyhemoglobin.</p>",
+      "wrong_choice_explanations": {
+        "2": "The principal problem is abnormal hemoglobin binding, not a reduction in inspired oxygen tension.",
+        "3": "Methemoglobinemia involves oxidation of heme iron to the ferric state; carbon monoxide primarily forms carboxyhemoglobin.",
+        "4": "Carbon monoxide shifts the effective dissociation relationship leftward, not rightward.",
+        "5": "Arterial dissolved oxygen may remain normal because alveolar oxygen entry is not the primary defect."
+      },
+      "educational_objective": "Carbon monoxide poisoning reduces oxygen-carrying capacity and impairs oxygen unloading while arterial PO2 may remain normal and conventional pulse oximetry may appear reassuring.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/carbon-monoxide-oxygen-curve.svg",
+          "placement": "question",
+          "type": "original_vector_dissociation_curve",
+          "alt_text": "Oxygen-binding plot showing reduced oxygen-carrying capacity and a left-shifted remaining hemoglobin affinity in carbon monoxide exposure.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "government_clinical_guidance",
+          "citation": "Centers for Disease Control and Prevention. Clinical Guidance for Carbon Monoxide Poisoning. July 8, 2024.",
+          "url": "https://www.cdc.gov/carbon-monoxide/hcp/clinical-guidance/index.html"
+        },
+        {
+          "type": "government_public_health",
+          "citation": "Centers for Disease Control and Prevention. Carbon Monoxide Poisoning Basics. January 12, 2026.",
+          "url": "https://www.cdc.gov/carbon-monoxide/about/index.html"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    }
+  ]
+}

@@ -1,1 +1,85 @@
-{"schema_version":"aylamed-original-mcq-draft-v1","batch_id":"usmle-step1-2026-b002-04","created_at":"2026-08-04T02:23:00+05:00","status":"private_research_draft","publication_allowed":false,"copyright_policy":{"origin":"de_novo_from_official_blueprint_and_public_medical_sources","proprietary_qbank_text_used":false,"proprietary_qbank_media_used":false,"similarity_review_required":true},"questions":[{"draft_id":"AY26-REN-CKDMBD-001","exam_track":"usmle-step-1","taxonomy":{"system":"Renal & Urinary System","subsystem":"Mineral and bone metabolism","topic":"Chronic kidney disease-mineral and bone disorder","subtopic":"Phosphate retention, calcitriol deficiency, and secondary hyperparathyroidism"},"difficulty":"moderate","stem_html":"<p>A 58-year-old woman with stage 4 chronic kidney disease has bone pain. Laboratory studies show increased serum phosphate, low-normal calcium, increased parathyroid hormone, and decreased 1,25-dihydroxyvitamin D. The accompanying feedback diagram summarizes the altered pathways. Which sequence best explains the increased parathyroid hormone concentration?</p>","options":[{"id":1,"text_html":"Reduced phosphate excretion and reduced renal 1α-hydroxylation lower ionized calcium, stimulating secondary hyperparathyroidism"},{"id":2,"text_html":"Increased phosphate excretion raises ionized calcium, directly stimulating parathyroid hormone secretion"},{"id":3,"text_html":"Increased calcitriol synthesis decreases intestinal calcium absorption, stimulating parathyroid hyperplasia"},{"id":4,"text_html":"Reduced fibroblast growth factor 23 secretion increases urinary phosphate loss and suppresses parathyroid hormone"},{"id":5,"text_html":"Primary autonomous parathyroid secretion causes the initial decline in glomerular filtration rate"}],"correct_option_id":1,"explanation_html":"<p>Loss of functioning nephron mass reduces phosphate excretion and renal 1α-hydroxylase activity. Phosphate retention and reduced calcitriol lower ionized calcium and diminish negative feedback on the parathyroid glands. The resulting secondary hyperparathyroidism increases bone turnover; fibroblast growth factor 23 also rises as an adaptive phosphaturic signal but becomes insufficient as kidney function declines.</p>","wrong_choice_explanations":{"2":"Advanced CKD causes phosphate retention, not increased phosphate excretion, and a rise in ionized calcium would suppress PTH.","3":"Calcitriol synthesis decreases in CKD; calcitriol normally increases intestinal calcium absorption.","4":"FGF23 generally increases early in CKD and promotes phosphaturia while suppressing calcitriol synthesis.","5":"The laboratory pattern is secondary hyperparathyroidism caused by CKD, not primary autonomous parathyroid disease initiating renal failure."},"educational_objective":"CKD causes phosphate retention and reduced calcitriol production, leading to hypocalcemic signaling and secondary hyperparathyroidism.","media":[{"path":"research/usmle-step1-2026/media/ckd-mbd-feedback.svg","placement":"question","type":"original_vector_feedback_diagram","alt_text":"Feedback diagram showing reduced GFR causing phosphate retention and reduced calcitriol, followed by lower calcium signaling and increased parathyroid hormone.","ownership":"AylaMed original"}],"references":[{"type":"official_exam_blueprint","citation":"USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.","url":"https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"},{"type":"clinical_guideline","citation":"KDIGO. 2017 Clinical Practice Guideline Update for CKD-Mineral and Bone Disorder.","url":"https://kdigo.org/guidelines/ckd-mbd/"}],"review":{"factual":"pending_clinician","similarity":"pending","media":"pending","publication":"blocked"}}]}
+{
+  "schema_version": "aylamed-original-mcq-draft-v1",
+  "batch_id": "usmle-step1-2026-b002-04",
+  "created_at": "2026-08-04T02:23:00+05:00",
+  "status": "private_research_draft",
+  "publication_allowed": false,
+  "copyright_policy": {
+    "origin": "de_novo_from_official_blueprint_and_public_medical_sources",
+    "proprietary_qbank_text_used": false,
+    "proprietary_qbank_media_used": false,
+    "similarity_review_required": true
+  },
+  "questions": [
+    {
+      "draft_id": "AY26-REN-CKDMBD-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Renal & Urinary System",
+        "subsystem": "Mineral and bone metabolism",
+        "topic": "Chronic kidney disease-mineral and bone disorder",
+        "subtopic": "Phosphate retention, calcitriol deficiency, and secondary hyperparathyroidism"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 58-year-old woman with stage 4 chronic kidney disease has bone pain. Laboratory studies show increased serum phosphate, low-normal calcium, increased parathyroid hormone, and decreased 1,25-dihydroxyvitamin D. The accompanying feedback diagram summarizes the altered pathways. Which sequence best explains the increased parathyroid hormone concentration?</p>",
+      "options": [
+        {
+          "id": 5,
+          "text_html": "Primary autonomous parathyroid secretion causes the initial decline in glomerular filtration rate"
+        },
+        {
+          "id": 4,
+          "text_html": "Reduced fibroblast growth factor 23 secretion increases urinary phosphate loss and suppresses parathyroid hormone"
+        },
+        {
+          "id": 2,
+          "text_html": "Increased phosphate excretion raises ionized calcium, directly stimulating parathyroid hormone secretion"
+        },
+        {
+          "id": 1,
+          "text_html": "Reduced phosphate excretion and reduced renal 1α-hydroxylation lower ionized calcium, stimulating secondary hyperparathyroidism"
+        },
+        {
+          "id": 3,
+          "text_html": "Increased calcitriol synthesis decreases intestinal calcium absorption, stimulating parathyroid hyperplasia"
+        }
+      ],
+      "correct_option_id": 1,
+      "explanation_html": "<p>Loss of functioning nephron mass reduces phosphate excretion and renal 1α-hydroxylase activity. Phosphate retention and reduced calcitriol lower ionized calcium and diminish negative feedback on the parathyroid glands. The resulting secondary hyperparathyroidism increases bone turnover; fibroblast growth factor 23 also rises as an adaptive phosphaturic signal but becomes insufficient as kidney function declines.</p>",
+      "wrong_choice_explanations": {
+        "2": "Advanced CKD causes phosphate retention, not increased phosphate excretion, and a rise in ionized calcium would suppress PTH.",
+        "3": "Calcitriol synthesis decreases in CKD; calcitriol normally increases intestinal calcium absorption.",
+        "4": "FGF23 generally increases early in CKD and promotes phosphaturia while suppressing calcitriol synthesis.",
+        "5": "The laboratory pattern is secondary hyperparathyroidism caused by CKD, not primary autonomous parathyroid disease initiating renal failure."
+      },
+      "educational_objective": "CKD causes phosphate retention and reduced calcitriol production, leading to hypocalcemic signaling and secondary hyperparathyroidism.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/ckd-mbd-feedback.svg",
+          "placement": "question",
+          "type": "original_vector_feedback_diagram",
+          "alt_text": "Feedback diagram showing reduced GFR causing phosphate retention and reduced calcitriol, followed by lower calcium signaling and increased parathyroid hormone.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content: Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "clinical_guideline",
+          "citation": "KDIGO. 2017 Clinical Practice Guideline Update for CKD-Mineral and Bone Disorder.",
+          "url": "https://kdigo.org/guidelines/ckd-mbd/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    }
+  ]
+}
