@@ -178,4 +178,4 @@ FILES
 
 # No merge, deployment, import, live-QBank write, or publication step exists here.
 
-# Triggered by user approval to commit Batch 015 to draft PR #52.
+# Triggered by direct Git ref update for Batch 015 installation.
