@@ -1,0 +1,39 @@
+name: Apply USMLE Batch 009
+
+on:
+  push:
+    branches:
+      - research/usmle-step1-2026-original-qbank
+    paths:
+      - .tmp/batch009_payload.tar.gz.b64
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: research/usmle-step1-2026-original-qbank
+          fetch-depth: 1
+      - name: Apply and validate private draft batch
+        shell: bash
+        run: |
+          set -euo pipefail
+          payload=.tmp/batch009_payload.tar.gz.b64
+          if [ ! -f "$payload" ]; then
+            echo "Payload already applied; nothing to do."
+            exit 0
+          fi
+          base64 -d "$payload" > /tmp/batch009.tar.gz
+          tar -xzf /tmp/batch009.tar.gz -C .
+          node scripts/validate-usmle-research-drafts.mjs
+          node scripts/validate-usmle-answer-positions.mjs
+          rm -f "$payload" .github/workflows/apply-usmle-batch009.yml
+          git config user.name nextgeninstitute857-bot
+          git config user.email 285688970+nextgeninstitute857-bot@users.noreply.github.com
+          git add -A
+          git commit -m "Add backend-driven media gap batch 009"
+          git push origin HEAD:research/usmle-step1-2026-original-qbank
