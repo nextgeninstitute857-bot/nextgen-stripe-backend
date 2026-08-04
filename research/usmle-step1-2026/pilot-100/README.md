@@ -51,6 +51,19 @@ AYLA_OUTPUT_USD_PER_MILLION=... \
 node scripts/run-usmle-pilot-generator.mjs --execute
 ```
 
+## Validated status
+
+The first branch-only dry run completed successfully:
+
+- 25 backend-derived priority clusters loaded
+- exactly 100 generation slots planned
+- concurrency fixed at 10
+- request ceiling fixed at 220
+- no API key accessed
+- no API request made
+- no credits spent
+- no live data changed
+
 ## Output lifecycle
 
 Generated content remains in `pilot-100/runs/<run-id>/` and is not counted as release-ready. Promotion into `research/usmle-step1-2026/drafts/` requires a separate controlled step after media production, similarity review, factual review, and clinician approval.
