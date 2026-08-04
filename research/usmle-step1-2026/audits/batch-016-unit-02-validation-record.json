@@ -1,0 +1,27 @@
+{
+  "schema_version": "aylamed-installation-validation-record-v1",
+  "batch_id": "usmle-step1-2026-b016-unit-02-respiratory-infectious",
+  "status": "private_branch_validation",
+  "checked_at": "2026-08-05T04:55:00+05:00",
+  "expected_question_count": 10,
+  "expected_media_count": 10,
+  "answer_position_counts": {"A":2,"B":2,"C":2,"D":2,"E":2},
+  "checks": {
+    "json_parse": true,
+    "five_option_single_best_answer": true,
+    "canonical_taxonomy_path_complete": true,
+    "educational_objective_present": true,
+    "two_or_more_references": true,
+    "wrong_choice_explanations_complete": true,
+    "all_media_paths_present": true,
+    "svg_xml_header_present": true,
+    "media_placed_after_answer": true,
+    "authored_position_balance": true,
+    "student_shuffle_required": true,
+    "prior_aylamed_lexical_scan": true,
+    "full_external_similarity_scan": "pending_raw_research_corpus",
+    "factual_review": "pending_clinician",
+    "publication_blocked": true
+  },
+  "notes": "This validates the second ten-question creation unit of Batch 016. It is not clinician approval and does not authorize import, merge, deployment, or publication."
+}
