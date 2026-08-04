@@ -1,9 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
+import { correctPositionForAttempt } from "./lib/answer-order-policy.mjs";
 
 const root = process.cwd();
 const researchRoot = path.join(root, "research", "usmle-step1-2026");
 const draftsRoot = path.join(researchRoot, "drafts");
+const answerPolicyPath = path.join(researchRoot, "answer-order-policy.json");
 const requiredTaxonomy = ["system", "subsystem", "topic", "subtopic"];
 const proprietaryBrandPattern = /\b(?:uworld|amboss|world\s+qbank)\b/i;
 
@@ -14,7 +16,7 @@ function filesUnder(directory, suffix) {
     return entry.isDirectory()
       ? filesUnder(absolute, suffix)
       : entry.name.endsWith(suffix) ? [absolute] : [];
-  });
+  }).sort();
 }
 
 function text(value) {
@@ -31,13 +33,55 @@ function questionBody(question = {}) {
   ].map(text).join("\n");
 }
 
+function increment(counter, key) {
+  counter[key] = (counter[key] || 0) + 1;
+}
+
 const errors = [];
 const warnings = [];
 const seenIds = new Set();
+const questionRecords = [];
+const authoredPositionCounts = {};
 let questionCount = 0;
 let mediaCount = 0;
+let answerPolicy = null;
 
-for (const filename of filesUnder(draftsRoot, ".json")) {
+try {
+  answerPolicy = JSON.parse(fs.readFileSync(answerPolicyPath, "utf8"));
+} catch (error) {
+  errors.push(`${path.relative(root, answerPolicyPath)}: missing or invalid answer-order policy (${error.message})`);
+}
+
+if (answerPolicy) {
+  const delivery = answerPolicy.student_delivery || {};
+  if (answerPolicy.status !== "private_research_draft") {
+    errors.push("answer-order policy status must remain private_research_draft");
+  }
+  if (answerPolicy.publication_allowed !== false) {
+    errors.push("answer-order policy publication_allowed must be false");
+  }
+  if (delivery.shuffle_required !== true || delivery.shuffle_scope !== "per_question_per_attempt") {
+    errors.push("answer-order policy must require per-question, per-attempt shuffling");
+  }
+  if (delivery.algorithm !== "sha256_rank_v1") {
+    errors.push("answer-order policy algorithm must be sha256_rank_v1");
+  }
+  if (delivery.seed_source !== "server_issued_non_public_attempt_identifier") {
+    errors.push("answer-order policy seed must be a server-issued non-public attempt identifier");
+  }
+  if (delivery.preserve_option_ids !== true || delivery.score_by_option_id_server_side !== true) {
+    errors.push("answer-order policy must preserve option IDs and score server-side by option ID");
+  }
+  if (delivery.expose_correct_option_id_before_submission !== false) {
+    errors.push("correct_option_id must never be exposed before submission");
+  }
+  if (delivery.reuse_order_when_attempt_resumes !== true) {
+    errors.push("resumed attempts must reuse their original option order");
+  }
+}
+
+const draftFiles = filesUnder(draftsRoot, ".json");
+for (const filename of draftFiles) {
   let batch;
   try {
     batch = JSON.parse(fs.readFileSync(filename, "utf8"));
@@ -91,6 +135,12 @@ for (const filename of filesUnder(draftsRoot, ".json")) {
       errors.push(`${pointer}: every option needs text_html`);
     }
 
+    const authoredPosition = options.findIndex(
+      (option) => Number(option?.id) === Number(question.correct_option_id),
+    ) + 1;
+    if (authoredPosition > 0) increment(authoredPositionCounts, String(authoredPosition));
+    questionRecords.push({ pointer, question, optionCount: options.length });
+
     const wrong = question.wrong_choice_explanations || {};
     for (const option of options) {
       if (Number(option.id) === Number(question.correct_option_id)) continue;
@@ -141,11 +191,58 @@ for (const filename of filesUnder(draftsRoot, ".json")) {
   }
 }
 
+const simulatedStudentPositionCounts = {};
+if (answerPolicy && questionRecords.length) {
+  const attempts = Number(answerPolicy.validation?.synthetic_attempts);
+  const tolerance = Number(answerPolicy.validation?.maximum_absolute_position_share_deviation);
+  if (!Number.isInteger(attempts) || attempts < 20 || attempts > 1000) {
+    errors.push("answer-order policy synthetic_attempts must be an integer from 20 to 1000");
+  }
+  if (!Number.isFinite(tolerance) || tolerance <= 0 || tolerance > 0.15) {
+    errors.push("answer-order policy position-share deviation must be greater than 0 and at most 0.15");
+  }
+
+  if (Number.isInteger(attempts) && attempts >= 20 && attempts <= 1000 && Number.isFinite(tolerance)) {
+    const groups = new Map();
+    for (let attemptIndex = 0; attemptIndex < attempts; attemptIndex += 1) {
+      const attemptSeed = `validation-attempt-${attemptIndex + 1}`;
+      for (const record of questionRecords) {
+        const position = correctPositionForAttempt(record.question, attemptSeed);
+        if (!position) {
+          errors.push(`${record.pointer}: shuffled order lost the correct option`);
+          continue;
+        }
+        const group = groups.get(record.optionCount) || { total: 0, counts: {} };
+        group.total += 1;
+        increment(group.counts, String(position));
+        groups.set(record.optionCount, group);
+      }
+    }
+
+    for (const [optionCount, group] of groups.entries()) {
+      const expectedShare = 1 / optionCount;
+      simulatedStudentPositionCounts[String(optionCount)] = group.counts;
+      for (let position = 1; position <= optionCount; position += 1) {
+        const actualShare = (group.counts[String(position)] || 0) / group.total;
+        if (Math.abs(actualShare - expectedShare) > tolerance) {
+          errors.push(
+            `student-facing shuffle is biased for ${optionCount}-option questions at position ${position}: ` +
+            `${actualShare.toFixed(4)} versus expected ${expectedShare.toFixed(4)}`,
+          );
+        }
+      }
+    }
+  }
+}
+
 const summary = {
   research_root: path.relative(root, researchRoot),
-  batches: filesUnder(draftsRoot, ".json").length,
+  batches: draftFiles.length,
   questions: questionCount,
   media_references: mediaCount,
+  authored_correct_position_counts: authoredPositionCounts,
+  student_delivery_shuffle: answerPolicy?.student_delivery?.shuffle_required === true,
+  simulated_student_position_counts: simulatedStudentPositionCounts,
   errors: errors.length,
   warnings: warnings.length,
 };
