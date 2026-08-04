@@ -13,12 +13,12 @@ Current public USMLE materials are the authoritative blueprint. Private QBank ev
 
 ## Backend evidence audit
 
-The authenticated read-only export supplied August 4, 2026 contains:
+The authenticated read-only export patched on August 4, 2026 contains:
 
 - **7,937 question records**
-- **2,647 unique title clusters**
-- **786 explicit media-required candidates**
+- **2,647 unique normalized title clusters**
 - **640 records omitted by the limited evidence route**
+- ZIP SHA-256: `82803c11b441b35cbfd645da17256dcb827c5b072cb8741e53234af9ec8ae27e`
 
 The export drives coverage prioritization and lexical originality screening only.
 
@@ -41,7 +41,7 @@ No stage in this branch performs live QBank writes or automatic publication.
 - Option IDs remain immutable; scoring and correct-answer IDs remain server-side.
 - Resumed attempts preserve their original option order.
 
-Expected distribution after Batch 014: **A 36, B 35, C 35, D 35, E 35**.
+Expected distribution after Batch 015: **A 40, B 39, C 39, D 39, E 39**.
 
 ## Completed research batches
 
@@ -58,37 +58,48 @@ Expected distribution after Batch 014: **A 36, B 35, C 35, D 35, E 35**.
 11. Second accelerated in-chat 20-question block.
 12. Third accelerated in-chat 20-question block.
 13. Fourth accelerated in-chat 20-question block.
-14. Final accelerated in-chat 20-question block: familial hypercholesterolemia; VSD/Eisenmenger physiology; coarctation collaterals; minimal change disease; IgA nephropathy; type IV RTA; hemophilia A; CML; classical Hodgkin lymphoma; 22q11.2 deletion syndrome; ADA-SCID; Alzheimer APP processing; Huntington anticipation; childhood absence epilepsy; organophosphate toxicity; acetaminophen toxicity; FAP; hereditary hemochromatosis; MEN2; and primary adrenal insufficiency.
+14. Final 20-question block of the original accelerated pilot: familial hypercholesterolemia; VSD/Eisenmenger physiology; coarctation collaterals; minimal change disease; IgA nephropathy; type IV RTA; hemophilia A; CML; classical Hodgkin lymphoma; 22q11.2 deletion syndrome; ADA-SCID; Alzheimer APP processing; Huntington anticipation; childhood absence epilepsy; organophosphate toxicity; acetaminophen toxicity; FAP; hereditary hemochromatosis; MEN2; and primary adrenal insufficiency.
+15. First post-pilot expansion block: dilated cardiomyopathy remodeling; glioblastoma hypoxia/VEGF; meningioma origin and psammoma bodies; PSC; PBC; pancreatic desmoplasia; cholera toxin; diphtheria toxin; tetanus; botulism; Wiskott–Aldrich syndrome; Lambert–Eaton syndrome; acromegaly dynamic testing; endometriosis histology; lithium nephrogenic DI; digoxin toxicity; Klinefelter syndrome; Robertsonian Down syndrome; osteoblastic prostate metastases; and warfarin skin necrosis.
 
-## Accelerated 100-question pilot
+## Accelerated-bank status
 
-Batches 010–014 now contain **100 of 100 planned original pilot questions**. Each item includes five-level taxonomy, five answer choices, a single best answer, complete distractor rationales, authoritative verification references, an original SVG teaching graphic, and publication blocks.
+Batches 010–014 completed the planned **100-question pilot**. Batch 015 adds the first **20-question post-pilot expansion**, bringing Batches 010–015 to **120 original questions**.
 
 A separate bounded API generator remains unexecuted and has spent no API credits.
 
-## Expected private inventory after Batch 014
+## Expected private inventory after Batch 015
 
-- **176 original private-draft MCQs**
-- **173 original SVG teaching graphics / media references**
-- **95 draft JSON files**
-- Batch 014 positions: **A 4, B 4, C 4, D 4, E 4**
-- Within-Batch-014 exact duplicate stems: **0**
+- **196 original private-draft MCQs**
+- **193 original SVG teaching graphics / media references**
+- **100 draft JSON files**
+- Batch 015 positions: **A 4, B 4, C 4, D 4, E 4**
+- Within-Batch-015 duplicate flags: **0**
 - Publication and live-write blocks preserved
 
-## Similarity status
+## Full-ZIP lexical similarity status
 
-Batches 012–013 were lexically compared against all 7,937 exported stem signals:
+### Batch 014
 
-- 317,480 external comparisons
-- 0 exact normalized matches
-- 0 quarantine flags at the configured lexical thresholds
-- maximum external five-token Jaccard: 0.025316
-- maximum external character ratio: 54.068%
+- **158,740 external comparisons**
+- exact normalized matches: **0**
+- close-paraphrase quarantine flags: **0**
+- maximum external five-token Jaccard: **0.032258**
+- maximum external character ratio: **52.131%**
 
-This remains lexical screening; human semantic and copyright review is still required.
+### Batch 015
 
-The full 7,937-stem scan for **Batch 014 is pending the user's ZIP patch**. Batch 014 is private and publication-blocked until that scan and subsequent human review pass.
+- **158,740 external comparisons**
+- exact normalized matches: **0**
+- close-paraphrase quarantine flags: **0**
+- maximum external five-token Jaccard: **0.037383**
+- maximum external character ratio: **52.781%**
+
+These are lexical screens only. Human semantic/copyright review, factual review, media review, and clinician approval remain mandatory.
 
 ## Required production gate
 
 Before any question enters the live QBank, it must pass taxonomy completeness, single-best-answer validation, answer-position and shuffle validation, factual-reference verification, full automated and human similarity review, media ownership verification, clinician approval, disabled/private import, and a separate publication decision.
+
+## Batch 015 commit layout
+
+For bounded Git API publication, the 20-question Batch 015 draft is stored in five ordered four-question JSON files. This changes only repository packaging; the validated question content, answer-position distribution, audits, taxonomy, and media references are unchanged.

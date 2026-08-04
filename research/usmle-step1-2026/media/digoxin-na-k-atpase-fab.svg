@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+<title id="title">Digoxin toxicity — original AylaMed teaching diagram</title>
+<desc id="desc">Na⁺/K⁺-ATPase inhibition. Extracellular K⁺ rise + Ca²⁺-driven arrhythmia.</desc>
+<style>
+.bg{fill:#f7f9fc}.panel{fill:#fff;stroke:#26364a;stroke-width:2}.accent{fill:#e9f1ff;stroke:#315a8b;stroke-width:2}
+.title{font:700 34px Arial;fill:#172536}.subtitle{font:700 21px Arial;fill:#315a8b}.body{font:18px Arial;fill:#172536}.small{font:600 15px Arial;fill:#5a6675}
+</style>
+<rect width="1200" height="720" class="bg"/>
+<rect x="30" y="30" width="1140" height="660" rx="28" class="panel"/>
+<text x="70" y="90" class="title">Digoxin toxicity</text>
+<text x="70" y="135" class="small">Original mechanism-focused Step 1 teaching graphic</text>
+<rect x="70" y="180" width="310" height="390" rx="24" class="accent"/>
+<rect x="145" y="235" width="160" height="220" rx="30" fill="#dce9f8" stroke="#315a8b" stroke-width="5"/><path d="M170 290 H280 M170 400 H280" stroke="#a13d3d" stroke-width="9"/><path d="M195 270 L170 290 L195 310 M255 380 L280 400 L255 420" fill="none" stroke="#a13d3d" stroke-width="7"/><text x="225" y="350" text-anchor="middle" font-family="Arial" font-size="18" font-weight="700" fill="#315a8b">Na⁺/K⁺ pump</text>
+<rect x="420" y="180" width="330" height="390" rx="24" class="panel"/>
+<text x="470" y="230" class="subtitle">Mechanism</text><text x="470" y="285" class="body">Na⁺/K⁺-ATPase inhibition</text>
+<path d="M755 375 H805" stroke="#315a8b" stroke-width="7"/><path d="M805 375 l-20 -14 v28 z" fill="#315a8b"/>
+<rect x="820" y="180" width="310" height="390" rx="24" class="panel"/>
+<text x="840" y="230" class="subtitle">Key inference</text><text x="840" y="285" class="body">Extracellular K⁺ rise +</text><text x="840" y="319" class="body">Ca²⁺-driven arrhythmia</text>
+<text x="600" y="645" text-anchor="middle" class="small">AylaMed original SVG — private research draft — publication blocked</text>
+</svg>

@@ -1,6 +1,6 @@
 {
   "schema_version": "aylamed-usmle-originality-audit-v2",
-  "batch_id": "usmle-step1-2026-b014-in-chat-original-20",
+  "batch_id": "usmle-step1-2026-b015-in-chat-original-20",
   "audited_at": "2026-08-04T23:39:08+05:00",
   "source_export": {
     "file_name": "aylamed-qbank-json-no-media-2026-08-04(2).zip",
@@ -15,7 +15,7 @@
     "usage": "lexical similarity screening and coverage prioritization only",
     "runtime_availability": "raw user-patched ZIP mounted and parsed locally"
   },
-  "committed_stems_file": "research/usmle-step1-2026/audits/batch-014-committed-stems.tsv",
+  "committed_stems_file": "research/usmle-step1-2026/audits/batch-015-committed-stems.tsv",
   "methodology": {
     "normalization": "HTML removed; Unicode NFKD; lowercase alphanumeric tokenization; whitespace compacted",
     "external_screen": "Each committed stem compared with all 7,937 exported stem_signal values",
@@ -39,36 +39,36 @@
     "exact_normalized_matches": 0,
     "close_paraphrase_quarantine_flags": 0,
     "maximum_external_five_token_jaccard": {
-      "score": 0.032258,
-      "draft_id": "AY26-B014-TOX-ORGANOPHOSPHATE-001",
-      "source_student_qid": "NGQ-00000473",
-      "source_title": "Antiepileptics"
+      "score": 0.037383,
+      "draft_id": "AY26-B015-REPRO-KLINEFELTER-001",
+      "source_student_qid": "NGQ-00005541",
+      "source_title": "Scabies"
     },
     "maximum_external_four_token_jaccard": {
-      "score": 0.042553,
-      "draft_id": "AY26-B014-TOX-ORGANOPHOSPHATE-001",
-      "source_student_qid": "NGQ-00000473",
-      "source_title": "Antiepileptics"
+      "score": 0.049505,
+      "draft_id": "AY26-B015-NEURO-LEMS-001",
+      "source_student_qid": "NGQ-00007863",
+      "source_title": "Atelectasis"
     },
     "maximum_external_character_ratio_percent": {
-      "score": 52.131,
-      "draft_id": "AY26-B014-ENDO-MEN2-001",
-      "source_student_qid": "NGQ-00006508",
-      "source_title": "Thyroid neoplasms"
+      "score": 52.781,
+      "draft_id": "AY26-B015-NEURO-LEMS-001",
+      "source_student_qid": "NGQ-00006380",
+      "source_title": "Eaton-Lambert syndrome"
     },
     "within_batch_duplicate_flags": 0,
     "maximum_within_batch_five_token_jaccard": {
-      "score": 0.0,
+      "score": 0.013333,
       "pair": [
-        "AY26-B014-CV-FH-001",
-        "AY26-B014-CV-EISENMENGER-001"
+        "AY26-B015-ID-BOTULISM-001",
+        "AY26-B015-RENAL-LITHIUM-NDI-001"
       ]
     },
     "maximum_within_batch_character_ratio_percent": {
-      "score": 50.177,
+      "score": 51.82,
       "pair": [
-        "AY26-B014-RENAL-RTA4-001",
-        "AY26-B014-ENDO-ADDISON-001"
+        "AY26-B015-ID-TETANUS-001",
+        "AY26-B015-ID-BOTULISM-001"
       ]
     },
     "disposition": "No lexical quarantine flags; retain as private drafts pending human similarity, factual, media, and clinician review"
