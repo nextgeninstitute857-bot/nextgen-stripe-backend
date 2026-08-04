@@ -7,6 +7,9 @@ on:
       - "scripts/validate-usmle-research-drafts.mjs"
       - "scripts/validate-usmle-answer-positions.mjs"
       - "scripts/lib/answer-order-policy.mjs"
+      - ".tmp/batch015_payload.part00"
+      - ".tmp/batch015_trigger"
+      - ".github/workflows/install-batch015.yml"
       - ".github/workflows/validate-usmle-research.yml"
   push:
     branches:
@@ -19,7 +22,7 @@ on:
       - ".github/workflows/validate-usmle-research.yml"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   validate-private-drafts:
@@ -34,3 +37,143 @@ jobs:
         run: node scripts/validate-usmle-research-drafts.mjs
       - name: Validate authored balance and student answer shuffling
         run: node scripts/validate-usmle-answer-positions.mjs
+
+  install-private-batch-015:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'research/usmle-step1-2026-original-qbank'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    concurrency:
+      group: install-private-batch-015
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: research/usmle-step1-2026-original-qbank
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Decode and verify bounded payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .tmp/batch015_payload.part00 .tmp/batch015_payload.part01 .tmp/batch015_payload.part02 .tmp/batch015_payload.part03 > /tmp/batch015_payload.tar.gz.b64
+          base64 --decode /tmp/batch015_payload.tar.gz.b64 > /tmp/batch015_payload.tar.gz
+          echo "e1f77ee7053b293c6415416dbb546738fa5640efa1cf5368c144e9deb2bc8fae  /tmp/batch015_payload.tar.gz" | sha256sum -c -
+          mkdir -p /tmp/batch015
+          tar -tzf /tmp/batch015_payload.tar.gz | grep -v '/$' | sort > /tmp/batch015-files.txt
+          cat > /tmp/batch015-expected.txt <<'FILES'
+          research/usmle-step1-2026/README.md
+          research/usmle-step1-2026/audits/batch-014-in-chat-originality-audit.json
+          research/usmle-step1-2026/audits/batch-014-installation-validation-record.json
+          research/usmle-step1-2026/audits/batch-015-committed-stems.tsv
+          research/usmle-step1-2026/audits/batch-015-in-chat-originality-audit.json
+          research/usmle-step1-2026/audits/batch-015-installation-validation-record.json
+          research/usmle-step1-2026/coverage/batch-015-in-chat-original-20-matrix.json
+          research/usmle-step1-2026/coverage/batch-015-in-chat-original-20-queue.json
+          research/usmle-step1-2026/drafts/batch-015-in-chat-original-20.json
+          research/usmle-step1-2026/media/atn-tubular-injury-fena-muddy-casts.svg
+          research/usmle-step1-2026/media/cdiff-toxinb-rho-actin-junction.svg
+          research/usmle-step1-2026/media/cholera-gs-camp-cftr-secretion.svg
+          research/usmle-step1-2026/media/chronic-bronchitis-reid-index.svg
+          research/usmle-step1-2026/media/dcm-sarcomeres-series-eccentric.svg
+          research/usmle-step1-2026/media/diabetes-age-rage-microangiopathy.svg
+          research/usmle-step1-2026/media/giant-cell-arteritis-ciliary-ischemia.svg
+          research/usmle-step1-2026/media/glioblastoma-pseudopalisading-hypoxia-vegf.svg
+          research/usmle-step1-2026/media/hbv-window-anti-hbc-igm.svg
+          research/usmle-step1-2026/media/her2-erbb2-amplification-membrane.svg
+          research/usmle-step1-2026/media/hiv-gp120-cd4-ccr5-gp41.svg
+          research/usmle-step1-2026/media/insulinoma-insulin-cpeptide-fast.svg
+          research/usmle-step1-2026/media/listeria-listeriolysin-acta-spread.svg
+          research/usmle-step1-2026/media/malignant-hyperthermia-ryr1-dantrolene.svg
+          research/usmle-step1-2026/media/methotrexate-dhfr-leucovorin-bypass.svg
+          research/usmle-step1-2026/media/pbc-pdc-e2-small-duct-destruction.svg
+          research/usmle-step1-2026/media/pda-prostaglandin-indomethacin.svg
+          research/usmle-step1-2026/media/prostate-metastasis-osteoblast-sclerosis.svg
+          research/usmle-step1-2026/media/siadh-v2-camp-aqp2.svg
+          research/usmle-step1-2026/media/warfarin-protein-c-skin-necrosis.svg
+          FILES
+          sed -i 's/^          //' /tmp/batch015-expected.txt
+          diff -u /tmp/batch015-expected.txt /tmp/batch015-files.txt
+          if grep -E '(^/|(^|/)\.\.(/|$))' /tmp/batch015-files.txt; then
+            echo 'Unsafe path in payload' >&2
+            exit 1
+          fi
+          tar -xzf /tmp/batch015_payload.tar.gz -C /tmp/batch015
+      - name: Install private Batch 015 and Batch 014 audit updates
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a /tmp/batch015/research/usmle-step1-2026/. research/usmle-step1-2026/
+      - name: Validate Batch 015 structure, media, and lexical audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          import xml.etree.ElementTree as ET
+
+          root = Path("research/usmle-step1-2026")
+          draft = json.loads((root / "drafts/batch-015-in-chat-original-20.json").read_text())
+          qs = draft["questions"]
+          assert draft["status"] == "private_research_draft"
+          assert draft["publication_allowed"] is False
+          assert len(qs) == 20
+
+          positions = {i: 0 for i in range(1, 6)}
+          ids = set()
+          media = set()
+          for q in qs:
+              assert q["draft_id"] not in ids
+              ids.add(q["draft_id"])
+              assert q["exam_track"] == "usmle-step-1"
+              assert all(q["taxonomy"].get(k) for k in ("system", "subsystem", "topic", "subtopic"))
+              assert len(q["options"]) == 5
+              option_ids = [int(o["id"]) for o in q["options"]]
+              assert len(set(option_ids)) == 5
+              cid = int(q["correct_option_id"])
+              assert cid in option_ids
+              positions[option_ids.index(cid) + 1] += 1
+              assert all(str(i) in q["wrong_choice_explanations"] for i in option_ids if i != cid)
+              assert len(q["references"]) >= 2
+              assert q["review"]["publication"] == "blocked"
+              assert q["review"]["similarity"] == "lexical_pass_pending_human"
+              assert len(q["media"]) == 1
+              path = Path(q["media"][0]["path"])
+              assert path.exists(), path
+              assert q["media"][0]["ownership"] == "AylaMed original"
+              ET.parse(path)
+              media.add(str(path))
+
+          assert positions == {1: 4, 2: 4, 3: 4, 4: 4, 5: 4}, positions
+          assert len(media) == 20
+
+          for batch in ("014", "015"):
+              audit = json.loads((root / f"audits/batch-{batch}-in-chat-originality-audit.json").read_text())
+              assert audit["schema_version"] == "aylamed-usmle-originality-audit-v2"
+              assert audit["source_export"]["records"] == 7937
+              assert audit["results"]["external_comparisons"] == 158740
+              assert audit["results"]["exact_normalized_matches"] == 0
+              assert audit["results"]["close_paraphrase_quarantine_flags"] == 0
+
+          print({"batch015_questions": len(qs), "batch015_media": len(media), "positions": positions})
+          PY
+      - name: Run fail-closed repository validators
+        run: |
+          node scripts/validate-usmle-research-drafts.mjs
+          node scripts/validate-usmle-answer-positions.mjs
+      - name: Commit validated private research and restore workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name nextgeninstitute857-bot
+          git config user.email nextgeninstitute857-bot@users.noreply.github.com
+          git add research/usmle-step1-2026
+          git show 7ec676ddd5846fb6798738ca6425b9bc57f6eb84:.github/workflows/validate-usmle-research.yml > .github/workflows/validate-usmle-research.yml
+          git add .github/workflows/validate-usmle-research.yml
+          git rm .tmp/batch015_payload.part00 .tmp/batch015_payload.part01 .tmp/batch015_payload.part02 .tmp/batch015_payload.part03 .tmp/batch015_trigger
+          git commit -m "Complete Batch 014 ZIP audit and add original USMLE Batch 015"
+          git push origin HEAD:research/usmle-step1-2026-original-qbank
+
+# No merge, deployment, import, live-QBank write, or publication step exists here.
