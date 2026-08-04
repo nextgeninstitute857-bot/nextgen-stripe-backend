@@ -1,0 +1,239 @@
+{
+  "schema_version": "aylamed-original-mcq-draft-v1",
+  "batch_id": "usmle-step1-2026-b016-unit-01-cardiorenal-reasoning",
+  "created_at": "2026-08-05T02:00:00+05:00",
+  "status": "private_research_draft",
+  "publication_allowed": false,
+  "generation_method": "in_chat_original_generation_with_canonical_taxonomy_and_backend_coverage_signals",
+  "copyright_policy": {
+    "origin": "de_novo_from_current_public_medical_sources_and_private_coverage_signals",
+    "backend_export_used_for": "topic coverage and lexical similarity screening only",
+    "proprietary_qbank_text_used": false,
+    "proprietary_qbank_options_used": false,
+    "proprietary_qbank_explanations_used": false,
+    "proprietary_qbank_media_used": false,
+    "full_export_similarity_review_required": true
+  },
+  "quality_controls": {
+    "authentic_usmle_reasoning_required": true,
+    "distinct_learning_objectives": true,
+    "plausible_same_family_distractors_required": true,
+    "wrong_choice_explanations_required": true,
+    "authoritative_references_required": true,
+    "answer_neutral_original_media_required": true,
+    "correct_answer_ids_server_side": true,
+    "publication_blocked": true
+  },
+  "questions": [
+    {
+      "draft_id": "AY26-B016U1-CV-SEPTIC-SVO2-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {"system":"Cardiovascular System","subsystem":"Shock and systemic hemodynamics","topic":"Early septic shock","subtopic":"Impaired oxygen extraction and elevated mixed venous oxygen saturation"},
+      "difficulty": "hard",
+      "stem_html": "<p>A 63-year-old man is admitted with fever, confusion, and hypotension due to pyelonephritis. Despite receiving intravenous crystalloid, his mean arterial pressure is 58 mm Hg. His skin is warm, cardiac output is elevated, systemic vascular resistance is decreased, and arterial oxygen saturation is 98%. A pulmonary artery catheter shows an unexpectedly high mixed venous oxygen saturation. Which mechanism best explains this finding?</p>",
+      "options": [
+        {"id":1,"text_html":"Maldistributed microvascular flow and impaired tissue oxygen extraction"},
+        {"id":2,"text_html":"Increased hemoglobin affinity for oxygen caused by respiratory acidosis"},
+        {"id":3,"text_html":"Reduced pulmonary capillary transit time causing an anatomic right-to-left shunt"},
+        {"id":4,"text_html":"Increased systemic arteriovenous oxygen extraction caused by low cardiac output"},
+        {"id":5,"text_html":"Decreased dissolved arterial oxygen despite normal hemoglobin saturation"}
+      ],
+      "correct_option_id": 1,
+      "explanation_html": "<p>Early distributive septic shock can produce high cardiac output and low systemic vascular resistance. Microcirculatory shunting and mitochondrial or cellular extraction defects prevent tissues from removing the expected amount of oxygen, so unusually oxygen-rich blood returns to the right heart and mixed venous oxygen saturation may rise despite global tissue hypoxia. The elevated lactate in this state does not imply that systemic oxygen delivery is adequate.</p>",
+      "wrong_choice_explanations": {"2":"Acidosis shifts the oxyhemoglobin dissociation curve to the right, lowering affinity and facilitating unloading rather than causing venous hyperoxia.","3":"A right-to-left pulmonary shunt lowers arterial oxygen saturation; it does not explain normal arterial saturation with high mixed venous saturation.","4":"Low-output shock increases extraction and lowers mixed venous oxygen saturation.","5":"Dissolved oxygen contributes little to total oxygen content and cannot explain the characteristic high venous saturation."},
+      "educational_objective": "Interpret high mixed venous oxygen saturation in warm septic shock as impaired extraction and maldistributed microvascular flow rather than adequate tissue oxygenation.",
+      "media": [{"path":"research/usmle-step1-2026/media/b016-septic-oxygen-extraction.svg","placement":"explanation","type":"original_vector_hemodynamics","alt_text":"Comparison of oxygen delivery and extraction in normal circulation and distributive shock.","ownership":"AylaMed original"}],
+      "references": [{"type":"official_exam_blueprint","citation":"USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 5, 2026.","url":"https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"},{"type":"government_academic_review","citation":"Shock. StatPearls, NCBI Bookshelf. Accessed August 5, 2026.","url":"https://www.ncbi.nlm.nih.gov/books/NBK531492/"}],
+      "review": {"factual":"pending_clinician","similarity":"pending_full_7937_and_aylamed_bank_scan","media":"pending","publication":"blocked"}
+    },
+    {
+      "draft_id": "AY26-B016U1-CV-CONSTRICTION-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {"system":"Cardiovascular System","subsystem":"Pericardial disease","topic":"Constrictive pericarditis","subtopic":"Exaggerated ventricular interdependence during respiration"},
+      "difficulty": "hard",
+      "stem_html": "<p>A 58-year-old woman who received mediastinal radiation 15 years ago has progressive abdominal distention and exertional dyspnea. Examination shows jugular venous distention that increases with inspiration and an early diastolic sound. Cardiac catheterization shows elevated, nearly equal diastolic pressures in all four chambers. During inspiration, right ventricular systolic pressure rises while left ventricular systolic pressure falls. Which abnormality most directly produces the respiratory pressure discordance?</p>",
+      "options": [
+        {"id":1,"text_html":"Loss of atrioventricular electrical synchrony"},
+        {"id":2,"text_html":"A rigid pericardial shell that forces the ventricles to compete for a fixed intrapericardial volume"},
+        {"id":3,"text_html":"Symmetric amyloid deposition that independently stiffens both ventricular walls"},
+        {"id":4,"text_html":"A large pericardial effusion that collapses the right atrium throughout diastole"},
+        {"id":5,"text_html":"Severe pulmonary arteriolar vasoconstriction that fixes right ventricular afterload"}
+      ],
+      "correct_option_id": 2,
+      "explanation_html": "<p>Constrictive pericarditis encases the heart in a noncompliant shell. Inspiratory augmentation of right-sided filling therefore shifts the interventricular septum leftward and reduces left ventricular filling and systolic pressure. This exaggerated ventricular interdependence produces discordant respiratory changes in ventricular systolic pressures and helps distinguish constriction from restrictive cardiomyopathy, in which the myocardium is stiff but respiratory ventricular coupling is less marked.</p>",
+      "wrong_choice_explanations": {"1":"Electrical dyssynchrony can impair output but does not cause reciprocal respiratory ventricular pressure changes.","3":"Restrictive myocardial disease produces impaired filling but generally preserves concordant respiratory changes in ventricular systolic pressures.","4":"Tamponade can equalize diastolic pressures, but the chronic history, knock, Kussmaul sign, and ventricular discordance indicate constriction.","5":"Fixed pulmonary vascular resistance does not make the left and right ventricles compete within a fixed pericardial volume."},
+      "educational_objective": "Distinguish constrictive pericarditis from myocardial restriction by recognizing respiration-dependent ventricular competition within a fixed pericardial volume.",
+      "media": [{"path":"research/usmle-step1-2026/media/b016-constriction-interdependence.svg","placement":"explanation","type":"original_vector_pressure_trace","alt_text":"Respiratory ventricular pressure discordance produced by constrictive pericardial physiology.","ownership":"AylaMed original"}],
+      "references": [{"type":"official_exam_blueprint","citation":"USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 5, 2026.","url":"https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"},{"type":"government_academic_review","citation":"Constrictive Pericarditis. StatPearls, NCBI Bookshelf. Accessed August 5, 2026.","url":"https://www.ncbi.nlm.nih.gov/books/NBK459314/"}],
+      "review": {"factual":"pending_clinician","similarity":"pending_full_7937_and_aylamed_bank_scan","media":"pending","publication":"blocked"}
+    },
+    {
+      "draft_id": "AY26-B016U1-CV-FICK-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {"system":"Cardiovascular System","subsystem":"Cardiovascular physiology","topic":"Fick principle","subtopic":"Cardiac output from oxygen consumption and arteriovenous oxygen content difference"},
+      "difficulty": "hard",
+      "stem_html": "<p>A 46-year-old man undergoing evaluation for unexplained exertional dyspnea has an oxygen consumption of 250 mL/min. Systemic arterial oxygen content is 200 mL/L and mixed venous oxygen content is 150 mL/L. Assuming steady state and no intracardiac shunt, which cardiac output is most consistent with these measurements?</p>",
+      "options": [
+        {"id":1,"text_html":"1.25 L/min"},
+        {"id":2,"text_html":"2.5 L/min"},
+        {"id":3,"text_html":"5.0 L/min"},
+        {"id":4,"text_html":"7.5 L/min"},
+        {"id":5,"text_html":"12.5 L/min"}
+      ],
+      "correct_option_id": 3,
+      "explanation_html": "<p>The Fick principle states that oxygen consumption equals cardiac output multiplied by the arterial-minus-mixed-venous oxygen content difference. The difference is 50 mL/L, so cardiac output is 250 mL/min divided by 50 mL/L = 5 L/min. Consistent volume units are essential; treating oxygen content as mL/dL without conversion would create a tenfold error.</p>",
+      "wrong_choice_explanations": {"1":"This results from dividing by the arterial oxygen content alone rather than the arteriovenous difference.","2":"This underestimates output by a factor of two and does not satisfy the measured oxygen consumption.","4":"This would require an arteriovenous oxygen difference of approximately 33 mL/L.","5":"This reflects a unit or denominator error and would yield oxygen delivery far above the measured consumption relationship."},
+      "educational_objective": "Apply the Fick principle with consistent units to calculate cardiac output from oxygen consumption and the arteriovenous oxygen content difference.",
+      "media": [{"path":"research/usmle-step1-2026/media/b016-fick-principle.svg","placement":"explanation","type":"original_vector_equation_map","alt_text":"Flow diagram linking oxygen consumption, arteriovenous oxygen difference, and cardiac output.","ownership":"AylaMed original"}],
+      "references": [{"type":"official_exam_blueprint","citation":"USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 5, 2026.","url":"https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"},{"type":"government_academic_review","citation":"Calculating FICK Cardiac Output and Input. StatPearls, NCBI Bookshelf. Accessed August 5, 2026.","url":"https://www.ncbi.nlm.nih.gov/books/NBK606091/"}],
+      "review": {"factual":"pending_clinician","similarity":"pending_full_7937_and_aylamed_bank_scan","media":"pending","publication":"blocked"}
+    },
+    {
+      "draft_id": "AY26-B016U1-REN-INULIN-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {"system":"Renal & Urinary System","subsystem":"Renal clearance physiology","topic":"Measurement of glomerular filtration rate","subtopic":"Inulin clearance with incomplete tubular handling of a comparison solute"},
+      "difficulty": "hard",
+      "stem_html": "<p>During a renal physiology study, a volunteer receives a constant infusion of inulin and substance X. At steady state, urine flow is 1 mL/min. Plasma and urine inulin concentrations are 1 mg/mL and 125 mg/mL, respectively. Plasma and urine concentrations of X are 2 mg/mL and 100 mg/mL, respectively. X is freely filtered and is neither synthesized nor metabolized by the kidney. Which statement best describes the renal handling of X?</p>",
+      "options": [
+        {"id":1,"text_html":"X is completely reabsorbed because its clearance is zero"},
+        {"id":2,"text_html":"X undergoes net secretion because its clearance exceeds renal plasma flow"},
+        {"id":3,"text_html":"X is handled identically to inulin because both are freely filtered"},
+        {"id":4,"text_html":"X undergoes net reabsorption because its clearance is below the glomerular filtration rate"},
+        {"id":5,"text_html":"X undergoes net secretion because its urine concentration exceeds its plasma concentration"}
+      ],
+      "correct_option_id": 4,
+      "explanation_html": "<p>Inulin clearance is (125 × 1)/1 = 125 mL/min, which estimates GFR. Clearance of X is (100 × 1)/2 = 50 mL/min. Because X is freely filtered but has a clearance below GFR, some filtered X must undergo net tubular reabsorption. A urine concentration greater than plasma concentration alone does not prove secretion because water reabsorption concentrates tubular fluid.</p>",
+      "wrong_choice_explanations": {"1":"Complete reabsorption would produce no urinary excretion and a clearance of zero, not 50 mL/min.","2":"The calculated clearance is below GFR and far below renal plasma flow.","3":"Free filtration does not exclude subsequent tubular reabsorption or secretion.","5":"Urine-to-plasma concentration is affected by water handling; clearance relative to GFR identifies net solute handling."},
+      "educational_objective": "Compare a solute's clearance with inulin clearance to determine whether it undergoes net tubular reabsorption or secretion.",
+      "media": [{"path":"research/usmle-step1-2026/media/b016-clearance-comparison.svg","placement":"explanation","type":"original_vector_nephron_math","alt_text":"Clearance scale showing filtration, net reabsorption, and net secretion relative to GFR.","ownership":"AylaMed original"}],
+      "references": [{"type":"official_exam_blueprint","citation":"USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 5, 2026.","url":"https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"},{"type":"government_academic_review","citation":"Physiology, Glomerular Filtration Rate. StatPearls, NCBI Bookshelf. Accessed August 5, 2026.","url":"https://www.ncbi.nlm.nih.gov/books/NBK500032/"}],
+      "review": {"factual":"pending_clinician","similarity":"pending_full_7937_and_aylamed_bank_scan","media":"pending","publication":"blocked"}
+    },
+    {
+      "draft_id": "AY26-B016U1-REN-PAH-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {"system":"Renal & Urinary System","subsystem":"Renal blood flow and clearance","topic":"Para-aminohippurate clearance","subtopic":"Extraction-ratio correction from effective to true renal plasma flow"},
+      "difficulty": "hard",
+      "stem_html": "<p>A healthy volunteer receives a low-dose infusion of para-aminohippurate (PAH). Urine flow is 1 mL/min, urine PAH concentration is 600 mg/dL, and renal arterial plasma PAH concentration is 1 mg/dL. Renal venous plasma PAH concentration is 0.1 mg/dL. Which value is the best estimate of true renal plasma flow?</p>",
+      "options": [
+        {"id":1,"text_html":"540 mL/min"},
+        {"id":2,"text_html":"600 mL/min"},
+        {"id":3,"text_html":"660 mL/min"},
+        {"id":4,"text_html":"900 mL/min"},
+        {"id":5,"text_html":"Approximately 667 mL/min"}
+      ],
+      "correct_option_id": 5,
+      "explanation_html": "<p>PAH clearance gives effective renal plasma flow: (600 mg/dL × 1 mL/min)/(1 mg/dL) = 600 mL/min. The extraction ratio is (arterial − venous)/arterial = (1 − 0.1)/1 = 0.9. True renal plasma flow equals effective flow divided by extraction ratio: 600/0.9 ≈ 667 mL/min. PAH clearance underestimates true flow because a small fraction leaves the kidney in renal venous plasma.</p>",
+      "wrong_choice_explanations": {"1":"This incorrectly multiplies effective flow by the extraction ratio.","2":"This is effective, not extraction-corrected true, renal plasma flow.","3":"This approximates but does not correctly divide by the 0.9 extraction ratio.","4":"This confuses the 90% extraction ratio with a 90% correction added to the clearance."},
+      "educational_objective": "Correct PAH clearance for incomplete renal extraction to distinguish effective from true renal plasma flow.",
+      "media": [{"path":"research/usmle-step1-2026/media/b016-pah-extraction.svg","placement":"explanation","type":"original_vector_renal_flow","alt_text":"Renal arterial, urinary, and renal venous PAH pathways illustrating incomplete extraction.","ownership":"AylaMed original"}],
+      "references": [{"type":"official_exam_blueprint","citation":"USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 5, 2026.","url":"https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"},{"type":"government_academic_review","citation":"Physiology, Renal Blood Flow and Filtration. StatPearls, NCBI Bookshelf. Accessed August 5, 2026.","url":"https://www.ncbi.nlm.nih.gov/books/NBK482248/"}],
+      "review": {"factual":"pending_clinician","similarity":"pending_full_7937_and_aylamed_bank_scan","media":"pending","publication":"blocked"}
+    },
+    {
+      "draft_id": "AY26-B016U1-REN-ATN-FENA-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {"system":"Renal & Urinary System","subsystem":"Acute kidney injury","topic":"Ischemic acute tubular injury","subtopic":"Loss of sodium reabsorption and increased fractional excretion of sodium"},
+      "difficulty": "moderate",
+      "stem_html": "<p>A 71-year-old man undergoes emergency repair of a ruptured abdominal aortic aneurysm complicated by prolonged hypotension. Two days later, urine output is 250 mL/day and serum creatinine has risen from 0.9 to 3.1 mg/dL. Urinalysis shows muddy brown granular casts. He has not received diuretics. Which additional finding is most likely?</p>",
+      "options": [
+        {"id":1,"text_html":"Fractional excretion of sodium greater than 2% due to impaired tubular sodium reabsorption"},
+        {"id":2,"text_html":"Urine osmolality above 500 mOsm/kg due to intact medullary concentration"},
+        {"id":3,"text_html":"Blood urea nitrogen-to-creatinine ratio above 25 due to enhanced proximal urea uptake"},
+        {"id":4,"text_html":"Fractional excretion of sodium below 1% due to avid distal sodium retention"},
+        {"id":5,"text_html":"Numerous dysmorphic erythrocytes caused by glomerular capillary rupture"}
+      ],
+      "correct_option_id": 1,
+      "explanation_html": "<p>Prolonged ischemia causes acute tubular injury, supported by muddy brown casts. Damaged tubular epithelium cannot reabsorb filtered sodium efficiently, so the fractional excretion of sodium usually exceeds 2% when no diuretic confounds the measurement. Tubular dysfunction also impairs urine concentration and reduces the disproportionate urea reabsorption typical of a purely prerenal state.</p>",
+      "wrong_choice_explanations": {"2":"Tubular injury disrupts the concentrating mechanism, so urine osmolality is generally lower than in prerenal azotemia.","3":"A high BUN-to-creatinine ratio reflects preserved proximal reabsorption in prerenal physiology, not established tubular injury.","4":"A low fractional sodium excretion is expected in prerenal azotemia with intact sodium conservation.","5":"Dysmorphic erythrocytes and erythrocyte casts indicate glomerular bleeding rather than ischemic tubular injury."},
+      "educational_objective": "Link ischemic tubular epithelial injury and muddy brown casts to impaired sodium reabsorption, low concentrating ability, and increased fractional sodium excretion.",
+      "media": [{"path":"research/usmle-step1-2026/media/b016-atn-sodium-handling.svg","placement":"explanation","type":"original_vector_nephron_injury","alt_text":"Comparison of preserved sodium reabsorption in prerenal physiology with impaired reabsorption in tubular injury.","ownership":"AylaMed original"}],
+      "references": [{"type":"official_exam_blueprint","citation":"USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 5, 2026.","url":"https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"},{"type":"government_academic_review","citation":"Acute Renal Tubular Necrosis. StatPearls, NCBI Bookshelf. Accessed August 5, 2026.","url":"https://www.ncbi.nlm.nih.gov/books/NBK507815/"}],
+      "review": {"factual":"pending_clinician","similarity":"pending_full_7937_and_aylamed_bank_scan","media":"pending","publication":"blocked"}
+    },
+    {
+      "draft_id": "AY26-B016U1-REN-GITELMAN-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {"system":"Renal & Urinary System","subsystem":"Inherited tubular transport disorders","topic":"Gitelman syndrome","subtopic":"SLC12A3 loss and thiazide-like electrolyte physiology"},
+      "difficulty": "hard",
+      "stem_html": "<p>A 19-year-old woman has intermittent muscle cramps and fatigue. Blood pressure is 98/62 mm Hg. Laboratory studies show potassium 2.8 mEq/L, bicarbonate 33 mEq/L, magnesium 1.2 mg/dL, and increased plasma renin and aldosterone activities. Urinary calcium excretion is low. She denies vomiting, diarrhea, or medication use. Loss of which transporter best explains these findings?</p>",
+      "options": [
+        {"id":1,"text_html":"Na+-K+-2Cl− cotransporter in the thick ascending limb"},
+        {"id":2,"text_html":"Na+-Cl− cotransporter in the distal convoluted tubule"},
+        {"id":3,"text_html":"Epithelial sodium channel in collecting-duct principal cells"},
+        {"id":4,"text_html":"Na+-glucose cotransporter in the proximal tubule"},
+        {"id":5,"text_html":"Vasopressin-regulated aquaporin-2 channel in the collecting duct"}
+      ],
+      "correct_option_id": 2,
+      "explanation_html": "<p>Gitelman syndrome is caused by loss of the thiazide-sensitive Na+-Cl− cotransporter encoded by SLC12A3 in the distal convoluted tubule. Mild salt wasting activates renin and aldosterone, producing hypokalemic metabolic alkalosis. Increased proximal calcium reabsorption causes hypocalciuria, while impaired distal magnesium handling produces hypomagnesemia.</p>",
+      "wrong_choice_explanations": {"1":"NKCC2 loss causes Bartter syndrome, which more often presents earlier and is associated with hypercalciuria rather than hypocalciuria.","3":"ENaC loss causes salt wasting with hyperkalemic metabolic acidosis, whereas gain of ENaC causes hypertension and low renin.","4":"SGLT loss causes renal glucosuria and does not generate this thiazide-like electrolyte pattern.","5":"Aquaporin-2 loss causes nephrogenic diabetes insipidus with dilute polyuria rather than hypokalemic alkalosis."},
+      "educational_objective": "Identify Gitelman syndrome from hypokalemic alkalosis, hypomagnesemia, hypocalciuria, and secondary hyperaldosteronism and localize the defect to distal Na+-Cl− transport.",
+      "media": [{"path":"research/usmle-step1-2026/media/b016-gitelman-dct.svg","placement":"explanation","type":"original_vector_nephron_transport","alt_text":"Distal convoluted tubule transport map showing the thiazide-sensitive sodium chloride cotransporter and magnesium and calcium effects.","ownership":"AylaMed original"}],
+      "references": [{"type":"official_exam_blueprint","citation":"USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 5, 2026.","url":"https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"},{"type":"government_academic_review","citation":"Gitelman Syndrome. StatPearls, NCBI Bookshelf. Accessed August 5, 2026.","url":"https://www.ncbi.nlm.nih.gov/books/NBK459304/"}],
+      "review": {"factual":"pending_clinician","similarity":"pending_full_7937_and_aylamed_bank_scan","media":"pending","publication":"blocked"}
+    },
+    {
+      "draft_id": "AY26-B016U1-REN-DISTAL-RTA-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {"system":"Renal & Urinary System","subsystem":"Acid-base disorders","topic":"Distal renal tubular acidosis","subtopic":"Impaired alpha-intercalated-cell acid secretion and calcium phosphate stones"},
+      "difficulty": "hard",
+      "stem_html": "<p>A 35-year-old woman with Sjögren syndrome has recurrent nephrolithiasis and muscle weakness. Serum studies show potassium 3.0 mEq/L, chloride 114 mEq/L, and bicarbonate 15 mEq/L. Urine pH is 6.4 despite systemic acidemia, and urine ammonium excretion is low. Which cellular defect most directly accounts for both the acid-base disorder and increased stone risk?</p>",
+      "options": [
+        {"id":1,"text_html":"Reduced proximal bicarbonate reclamation with intact distal acidification"},
+        {"id":2,"text_html":"Reduced aldosterone action with impaired potassium and ammonium excretion"},
+        {"id":3,"text_html":"Impaired hydrogen-ion secretion by alpha-intercalated cells, causing alkaline urine and hypocitraturia"},
+        {"id":4,"text_html":"Increased collecting-duct sodium reabsorption with excessive potassium secretion"},
+        {"id":5,"text_html":"Impaired thick ascending limb sodium transport with loss of the medullary gradient"}
+      ],
+      "correct_option_id": 3,
+      "explanation_html": "<p>Distal (type 1) renal tubular acidosis results from impaired hydrogen secretion by alpha-intercalated cells. The kidney cannot lower urine pH appropriately during systemic acidosis. Chronic acidosis promotes citrate reclamation, producing hypocitraturia, while persistently alkaline urine favors calcium phosphate precipitation; together these changes cause nephrolithiasis or nephrocalcinosis. Hypokalemia is common.</p>",
+      "wrong_choice_explanations": {"1":"Proximal RTA permits distal acidification after plasma bicarbonate falls and is less strongly associated with persistently alkaline urine and stones.","2":"Hypoaldosteronism causes type 4 RTA with hyperkalemia, not hypokalemia.","4":"This resembles mineralocorticoid excess and causes metabolic alkalosis rather than non-anion-gap acidosis.","5":"Thick ascending limb dysfunction produces a Bartter-like salt-wasting alkalosis, not failure to acidify urine."},
+      "educational_objective": "Connect failure of distal hydrogen secretion to non-anion-gap acidosis, inappropriately alkaline urine, hypocitraturia, and calcium phosphate stones.",
+      "media": [{"path":"research/usmle-step1-2026/media/b016-distal-rta-stones.svg","placement":"explanation","type":"original_vector_acid_base","alt_text":"Alpha-intercalated-cell acid secretion and urine chemistry changes leading to calcium phosphate stones in distal renal tubular acidosis.","ownership":"AylaMed original"}],
+      "references": [{"type":"official_exam_blueprint","citation":"USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 5, 2026.","url":"https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"},{"type":"government_patient_and_science_reference","citation":"Renal Tubular Acidosis. NIDDK. Accessed August 5, 2026.","url":"https://www.niddk.nih.gov/health-information/kidney-disease/renal-tubular-acidosis"}],
+      "review": {"factual":"pending_clinician","similarity":"pending_full_7937_and_aylamed_bank_scan","media":"pending","publication":"blocked"}
+    },
+    {
+      "draft_id": "AY26-B016U1-REN-FREE-WATER-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {"system":"Renal & Urinary System","subsystem":"Water balance physiology","topic":"Free-water clearance","subtopic":"Negative free-water clearance during vasopressin-mediated water retention"},
+      "difficulty": "hard",
+      "stem_html": "<p>A 67-year-old man with small-cell lung carcinoma has confusion and a serum sodium concentration of 118 mEq/L. Serum osmolality is 250 mOsm/kg, urine osmolality is 500 mOsm/kg, and urine flow is 1 mL/min. Assuming osmolar clearance is calculated as urine osmolality multiplied by urine flow divided by plasma osmolality, which free-water clearance and physiologic interpretation are correct?</p>",
+      "options": [
+        {"id":1,"text_html":"+2 mL/min; excretion of solute-free water"},
+        {"id":2,"text_html":"+1 mL/min; impaired vasopressin action"},
+        {"id":3,"text_html":"0 mL/min; urine is iso-osmotic with plasma"},
+        {"id":4,"text_html":"−1 mL/min; net renal retention of solute-free water"},
+        {"id":5,"text_html":"−2 mL/min; complete absence of osmolar clearance"}
+      ],
+      "correct_option_id": 4,
+      "explanation_html": "<p>Osmolar clearance is (500 × 1)/250 = 2 mL/min. Free-water clearance is urine flow minus osmolar clearance: 1 − 2 = −1 mL/min. A negative value means the kidney is returning solute-free water to the body by excreting urine more concentrated than plasma, consistent with inappropriate vasopressin activity in SIADH.</p>",
+      "wrong_choice_explanations": {"1":"Positive clearance requires urine that is dilute relative to plasma; this urine is twice as concentrated as plasma.","2":"Impaired vasopressin action produces dilute polyuria and positive free-water clearance.","3":"Iso-osmotic urine would have an osmolality near 250 mOsm/kg and free-water clearance of zero.","5":"Osmolar clearance is 2 mL/min, so free-water clearance is negative 1 rather than negative 2 mL/min."},
+      "educational_objective": "Calculate negative free-water clearance from concentrated urine and interpret it as vasopressin-mediated retention of solute-free water.",
+      "media": [{"path":"research/usmle-step1-2026/media/b016-free-water-clearance.svg","placement":"explanation","type":"original_vector_equation_map","alt_text":"Relationship among urine flow, osmolar clearance, and free-water clearance in concentrated urine.","ownership":"AylaMed original"}],
+      "references": [{"type":"official_exam_blueprint","citation":"USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 5, 2026.","url":"https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"},{"type":"government_academic_review","citation":"Physiology, Renal. StatPearls, NCBI Bookshelf. Accessed August 5, 2026.","url":"https://www.ncbi.nlm.nih.gov/books/NBK538339/"}],
+      "review": {"factual":"pending_clinician","similarity":"pending_full_7937_and_aylamed_bank_scan","media":"pending","publication":"blocked"}
+    },
+    {
+      "draft_id": "AY26-B016U1-REN-LITHIUM-NDI-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {"system":"Renal & Urinary System","subsystem":"Water balance disorders","topic":"Lithium-induced nephrogenic diabetes insipidus","subtopic":"ENaC-mediated lithium entry and amiloride therapy"},
+      "difficulty": "hard",
+      "stem_html": "<p>A 42-year-old woman treated with lithium for bipolar disorder develops polyuria and polydipsia. Serum sodium is 148 mEq/L. After water deprivation, urine remains dilute; administration of desmopressin produces little change in urine osmolality. A medication is added that reduces lithium entry into collecting-duct principal cells and improves her symptoms. Which drug was most likely prescribed?</p>",
+      "options": [
+        {"id":1,"text_html":"Acetazolamide"},
+        {"id":2,"text_html":"Furosemide"},
+        {"id":3,"text_html":"Spironolactone"},
+        {"id":4,"text_html":"Hydrochlorothiazide"},
+        {"id":5,"text_html":"Amiloride"}
+      ],
+      "correct_option_id": 5,
+      "explanation_html": "<p>Lithium enters collecting-duct principal cells through epithelial sodium channels and interferes with vasopressin-dependent aquaporin-2 expression and trafficking, causing nephrogenic diabetes insipidus. Amiloride blocks epithelial sodium channels and thereby reduces lithium entry. Thiazides can paradoxically reduce urine volume through mild volume contraction, but they do not directly block principal-cell lithium entry.</p>",
+      "wrong_choice_explanations": {"1":"Acetazolamide causes bicarbonaturia and is not the specific epithelial sodium channel blocker described.","2":"Loop diuretics impair the medullary gradient and can worsen urinary concentrating ability.","3":"Spironolactone blocks mineralocorticoid receptors but does not directly prevent lithium entry through epithelial sodium channels.","4":"Thiazides can lower urine volume in nephrogenic diabetes insipidus, but the mechanism in the stem specifically identifies epithelial sodium channel blockade."},
+      "educational_objective": "Identify amiloride as targeted therapy for lithium-induced nephrogenic diabetes insipidus because it blocks epithelial sodium channel-mediated lithium entry into principal cells.",
+      "media": [{"path":"research/usmle-step1-2026/media/b016-lithium-amiloride.svg","placement":"explanation","type":"original_vector_collecting_duct","alt_text":"Principal-cell diagram showing lithium entry through the epithelial sodium channel and blockade by amiloride.","ownership":"AylaMed original"}],
+      "references": [{"type":"official_exam_blueprint","citation":"USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 5, 2026.","url":"https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"},{"type":"government_patient_and_science_reference","citation":"Diabetes Insipidus. NIDDK. Accessed August 5, 2026.","url":"https://www.niddk.nih.gov/health-information/kidney-disease/diabetes-insipidus"},{"type":"primary_research","citation":"Kortenoeven MLA, et al. Amiloride blocks lithium entry through the sodium channel thereby attenuating the resultant nephrogenic diabetes insipidus. Kidney International. 2009.","url":"https://pubmed.ncbi.nlm.nih.gov/19367330/"}],
+      "review": {"factual":"pending_clinician","similarity":"pending_full_7937_and_aylamed_bank_scan","media":"pending","publication":"blocked"}
+    }
+  ]
+}

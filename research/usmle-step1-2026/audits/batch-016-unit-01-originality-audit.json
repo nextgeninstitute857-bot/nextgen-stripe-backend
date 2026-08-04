@@ -1,0 +1,26 @@
+{
+  "schema_version": "aylamed-usmle-originality-audit-v1",
+  "batch_id": "usmle-step1-2026-b016-unit-01-cardiorenal-reasoning",
+  "audited_at": "2026-08-05T02:45:00+05:00",
+  "methodology": {
+    "generation": "All stems, options, explanations, objectives, and SVGs were created de novo from public medical references and canonical coverage planning.",
+    "prior_aylamed_screen": "Normalized five-token Jaccard comparison against all 176 earlier AylaMed research questions.",
+    "within_unit_screen": "Normalized exact and five-token Jaccard comparison across all 45 new-question pairs.",
+    "temporary_7937_screen": "Pending access to the complete temporary research corpus.",
+    "publication_rule": "No import or publication before full automated and human similarity review."
+  },
+  "results": {
+    "new_stems_checked": 10,
+    "prior_aylamed_stems_checked": 176,
+    "prior_aylamed_comparisons": 1760,
+    "within_unit_comparisons": 45,
+    "exact_duplicates": 0,
+    "maximum_prior_aylamed_fivegram_jaccard": 0.016129032258064516,
+    "maximum_prior_pair": ["AY26-B016U1-CV-SEPTIC-SVO2-001", "AY26-B012-PULM-ARDS-001"],
+    "maximum_within_unit_fivegram_jaccard": 0.018018018018018018,
+    "maximum_within_pair": ["AY26-B016U1-REN-PAH-001", "AY26-B016U1-REN-FREE-WATER-001"],
+    "lexical_quarantine_flags": 0,
+    "full_7937_export_scan_status": "pending",
+    "disposition": "Original private draft; retain publication block pending complete external and human review."
+  }
+}
