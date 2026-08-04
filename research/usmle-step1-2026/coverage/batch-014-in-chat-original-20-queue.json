@@ -1,0 +1,201 @@
+{
+  "schema_version": "aylamed-backend-driven-gap-queue-v1",
+  "batch_id": "usmle-step1-2026-b014-in-chat-original-20-queue",
+  "created_at": "2026-08-04T22:00:00+05:00",
+  "status": "private_research_queue",
+  "publication_allowed": false,
+  "pilot_status": {
+    "accelerated_questions_completed_before_batch": 80,
+    "target_questions_in_batch": 20,
+    "accelerated_pilot_total_after_batch": 100,
+    "research_bank_total_after_batch": 176
+  },
+  "source_export": {
+    "file_name": "aylamed-qbank-json-no-media-2026-08-04(1).zip",
+    "records": 7937,
+    "unique_title_clusters": 2647,
+    "explicit_media_candidates": 786,
+    "use": "coverage frequency, media-priority, and lexical-similarity signals only"
+  },
+  "selection_controls": {
+    "all_learning_objectives_distinct": true,
+    "avoid_batches": "001-013",
+    "full_zip_stem_screen_required_before_commit": true,
+    "within_batch_duplicate_screen_required": true,
+    "original_media_required": true,
+    "answer_positions_required": {"A": 4, "B": 4, "C": 4, "D": 4, "E": 4},
+    "proprietary_text_options_explanations_or_media_used": false,
+    "publication_blocked": true
+  },
+  "entries": [
+    {
+      "rank": 1,
+      "topic": "Familial hypercholesterolemia",
+      "taxonomy": "Cardiovascular System > Lipid metabolism and atherosclerosis > Familial hypercholesterolemia > LDL-receptor-mediated endocytosis",
+      "learning_objective": "Connect impaired hepatic LDL-receptor endocytosis of apoB-100 particles to isolated severe LDL elevation, tendon xanthomas, and premature atherosclerosis.",
+      "media_spec": "Original hepatic LDL-receptor binding, endocytosis, lysosomal processing, and receptor-recycling diagram.",
+      "zip_matching_records": 18
+    },
+    {
+      "rank": 2,
+      "topic": "Ventricular septal defect and Eisenmenger syndrome",
+      "taxonomy": "Cardiovascular System > Congenital heart disease > VSD > Pulmonary vascular remodeling and shunt reversal",
+      "learning_objective": "Explain how chronic pulmonary overcirculation raises pulmonary vascular resistance above systemic resistance and reverses a large VSD shunt.",
+      "media_spec": "Original early left-to-right and late right-to-left pressure-flow schematic.",
+      "zip_matching_records": 11
+    },
+    {
+      "rank": 3,
+      "topic": "Coarctation of the aorta",
+      "taxonomy": "Cardiovascular System > Congenital vascular disease > Coarctation > Intercostal collateral circulation",
+      "learning_objective": "Trace the subclavian-internal thoracic-intercostal collateral pathway responsible for distal perfusion and inferior rib notching.",
+      "media_spec": "Original arterial collateral map around a postductal coarctation.",
+      "zip_matching_records": 8
+    },
+    {
+      "rank": 4,
+      "topic": "Minimal change disease",
+      "taxonomy": "Renal & Urinary System > Glomerular disease > Minimal change disease > Podocyte foot-process effacement",
+      "learning_objective": "Recognize the normal light microscopy, negative immunofluorescence, and diffuse electron-microscopic foot-process effacement pattern.",
+      "media_spec": "Original three-modality renal pathology panel.",
+      "zip_matching_records": 16
+    },
+    {
+      "rank": 5,
+      "topic": "IgA nephropathy",
+      "taxonomy": "Renal & Urinary System > Glomerular disease > IgA nephropathy > Galactose-deficient IgA1 immune complexes",
+      "learning_objective": "Connect galactose-deficient IgA1, antiglycan antibodies, mesangial deposition, and synpharyngitic hematuria.",
+      "media_spec": "Original four-hit immunopathogenesis pathway.",
+      "zip_matching_records": 13
+    },
+    {
+      "rank": 6,
+      "topic": "Type IV renal tubular acidosis",
+      "taxonomy": "Renal & Urinary System > Tubular acid-base disorders > Type IV RTA > Hypoaldosteronism and reduced ammonium excretion",
+      "learning_objective": "Explain hyperkalemic normal-anion-gap acidosis through reduced aldosterone effect, suppressed ammoniagenesis, and low urinary ammonium.",
+      "media_spec": "Original nephron aldosterone-potassium-ammonium pathway.",
+      "zip_matching_records": 9
+    },
+    {
+      "rank": 7,
+      "topic": "Hemophilia A",
+      "taxonomy": "Blood & Immune Systems > Coagulation disorders > Hemophilia A > Factor VIII and intrinsic tenase",
+      "learning_objective": "Interpret isolated prolonged aPTT that corrects on mixing and connect factor VIII deficiency to reduced factor X activation.",
+      "media_spec": "Original mixing-study and intrinsic-tenase diagram.",
+      "zip_matching_records": 12
+    },
+    {
+      "rank": 8,
+      "topic": "Chronic myeloid leukemia",
+      "taxonomy": "Blood & Immune Systems > Myeloproliferative neoplasms > CML > BCR-ABL1 constitutive kinase",
+      "learning_objective": "Relate t(9;22) to a constitutively active BCR-ABL1 tyrosine kinase, basophilia, splenomegaly, and low LAP.",
+      "media_spec": "Original Philadelphia-chromosome fusion diagram.",
+      "zip_matching_records": 18
+    },
+    {
+      "rank": 9,
+      "topic": "Classical Hodgkin lymphoma",
+      "taxonomy": "Blood & Immune Systems > Lymphoid neoplasms > Hodgkin lymphoma > Reed-Sternberg origin and microenvironment",
+      "learning_objective": "Identify germinal-center B-cell origin and cytokine recruitment of the reactive inflammatory background.",
+      "media_spec": "Original Reed-Sternberg microenvironment schematic.",
+      "zip_matching_records": 20
+    },
+    {
+      "rank": 10,
+      "topic": "22q11.2 deletion syndrome",
+      "taxonomy": "Blood & Immune Systems > Primary immunodeficiency > DiGeorge syndrome > Third and fourth pharyngeal pouch failure",
+      "learning_objective": "Link thymic and parathyroid hypoplasia with conotruncal disease through abnormal pouch and neural-crest development.",
+      "media_spec": "Original pharyngeal-pouch derivative map.",
+      "zip_matching_records": 7
+    },
+    {
+      "rank": 11,
+      "topic": "ADA-deficient SCID",
+      "taxonomy": "Blood & Immune Systems > Primary immunodeficiency > SCID > Toxic deoxyadenosine metabolites",
+      "learning_objective": "Explain lymphocyte loss through dATP accumulation and ribonucleotide-reductase inhibition.",
+      "media_spec": "Original purine-metabolism toxicity pathway.",
+      "zip_matching_records": 6
+    },
+    {
+      "rank": 12,
+      "topic": "Alzheimer disease",
+      "taxonomy": "Nervous System > Neurodegeneration > Alzheimer disease > Amyloidogenic APP processing",
+      "learning_objective": "Contrast alpha-secretase processing with beta/gamma-secretase generation of aggregation-prone A-beta 42.",
+      "media_spec": "Original APP membrane-processing diagram.",
+      "zip_matching_records": 22
+    },
+    {
+      "rank": 13,
+      "topic": "Huntington disease",
+      "taxonomy": "Nervous System > Neurodegeneration > Huntington disease > CAG expansion and paternal anticipation",
+      "learning_objective": "Connect paternal CAG-repeat expansion to anticipation, caudate atrophy, chorea, and behavioral change.",
+      "media_spec": "Original repeat-expansion and caudate-anatomy diagram.",
+      "zip_matching_records": 11
+    },
+    {
+      "rank": 14,
+      "topic": "Childhood absence epilepsy",
+      "taxonomy": "Nervous System > Seizure disorders > Absence epilepsy > Thalamic T-type calcium current",
+      "learning_objective": "Recognize 3-Hz spike-wave seizures and the selective T-type calcium-channel action of ethosuximide.",
+      "media_spec": "Original EEG tracing and thalamocortical circuit.",
+      "zip_matching_records": 12
+    },
+    {
+      "rank": 15,
+      "topic": "Organophosphate poisoning",
+      "taxonomy": "Multisystem > Toxicology > Organophosphates > Acetylcholinesterase phosphorylation and aging",
+      "learning_objective": "Distinguish atropine receptor blockade from time-sensitive pralidoxime reactivation of phosphorylated acetylcholinesterase.",
+      "media_spec": "Original enzyme inhibition, reactivation, and aging diagram.",
+      "zip_matching_records": 15
+    },
+    {
+      "rank": 16,
+      "topic": "Acetaminophen toxicity",
+      "taxonomy": "Multisystem > Toxicology > Acetaminophen > NAPQI and glutathione depletion",
+      "learning_objective": "Explain centrilobular injury and N-acetylcysteine rescue through glutathione restoration and NAPQI detoxification.",
+      "media_spec": "Original acetaminophen metabolic pathway.",
+      "zip_matching_records": 17
+    },
+    {
+      "rank": 17,
+      "topic": "Familial adenomatous polyposis",
+      "taxonomy": "Gastrointestinal System > Colorectal neoplasia > FAP > APC-beta-catenin destruction complex",
+      "learning_objective": "Connect APC loss to beta-catenin stabilization, Wnt target transcription, and widespread colorectal adenomas.",
+      "media_spec": "Original APC destruction-complex pathway.",
+      "zip_matching_records": 9
+    },
+    {
+      "rank": 18,
+      "topic": "Hereditary hemochromatosis",
+      "taxonomy": "Gastrointestinal System > Hepatic metabolic disease > Hemochromatosis > Hepcidin-ferroportin regulation",
+      "learning_objective": "Explain high transferrin saturation through inappropriately low hepcidin and persistent ferroportin-mediated iron export.",
+      "media_spec": "Original liver-enterocyte-macrophage iron-homeostasis diagram.",
+      "zip_matching_records": 13
+    },
+    {
+      "rank": 19,
+      "topic": "Multiple endocrine neoplasia type 2",
+      "taxonomy": "Reproductive & Endocrine Systems > Hereditary endocrine neoplasia > MEN2 > Activating RET mutation",
+      "learning_objective": "Connect germline RET activation to medullary thyroid carcinoma, pheochromocytoma, and autosomal dominant inheritance.",
+      "media_spec": "Original RET receptor, pedigree, thyroid, and adrenal diagram.",
+      "zip_matching_records": 9
+    },
+    {
+      "rank": 20,
+      "topic": "Primary adrenal insufficiency",
+      "taxonomy": "Reproductive & Endocrine Systems > Adrenal disorders > Addison disease > POMC-derived melanocortin signaling",
+      "learning_objective": "Explain hyperpigmentation through loss of cortisol feedback and increased POMC-derived ACTH/melanocortin peptides.",
+      "media_spec": "Original HPA feedback and melanocyte-signaling diagram.",
+      "zip_matching_records": 20
+    }
+  ],
+  "aggregate_zip_matching_records": 246,
+  "safety": {
+    "live_qbank_writes": false,
+    "automatic_import": false,
+    "automatic_merge": false,
+    "automatic_deployment": false,
+    "student_visibility": false,
+    "publication_allowed": false
+  }
+}
