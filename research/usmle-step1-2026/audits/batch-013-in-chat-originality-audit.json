@@ -1,36 +1,75 @@
 {
-  "schema_version": "aylamed-usmle-originality-audit-v1",
+  "schema_version": "aylamed-usmle-originality-audit-v2",
   "batch_id": "usmle-step1-2026-b013-in-chat-original-20",
-  "audited_at": "2026-08-04T20:54:00+05:00",
+  "audited_at": "2026-08-04T21:59:23+05:00",
   "source_export": {
     "file_name": "aylamed-qbank-json-no-media-2026-08-04(1).zip",
     "records": 7937,
-    "usage": "coverage prioritization and similarity screening only",
-    "runtime_availability": "summary, title inventory, and 786 media-candidate stems available; raw 7,937-stem ZIP not mounted"
+    "fields_used": [
+      "id",
+      "student_qid",
+      "title",
+      "stem_signal"
+    ],
+    "usage": "lexical similarity screening and coverage prioritization only",
+    "runtime_availability": "raw ZIP mounted and parsed locally"
   },
   "methodology": {
-    "normalization": "lowercase alphanumeric tokenization",
-    "within_batch": "exact and five-token Jaccard comparison across all new stems",
-    "external_screen": "manual targeted comparison against accessible topic-title inventory and media-required candidates",
-    "full_export_threshold": "Full 7,937-stem automated screen required before import approval",
-    "manual_review": "Medical concepts were independently framed and checked for distinct patient details, lead-ins, answer structures, and explanations"
+    "normalization": "HTML removed; Unicode NFKD; lowercase alphanumeric tokenization; whitespace compacted",
+    "external_screen": "Each committed stem compared with all 7,937 exported stem_signal values",
+    "metrics": [
+      "exact normalized equality",
+      "five-token Jaccard",
+      "four-token Jaccard",
+      "RapidFuzz character ratio"
+    ],
+    "quarantine_thresholds": {
+      "exact_normalized_match": true,
+      "five_token_jaccard_greater_than_or_equal": 0.2,
+      "character_ratio_percent_greater_than_or_equal": 75.0
+    },
+    "within_batch": "All 190 stem pairs compared using exact equality, five-token Jaccard, and character ratio",
+    "scope_limit": "This is lexical screening, not a substitute for human semantic/copyright review or clinician review"
   },
   "results": {
     "stems_checked": 20,
-    "within_batch_duplicate_pairs": 0,
-    "max_within_batch_fivegram_jaccard": 0,
-    "max_pair": [
-      null,
-      null
-    ],
-    "targeted_accessible_source_close_paraphrase_flags": 0,
-    "full_7937_export_scan_status": "pending_source_mount",
-    "copyright_disposition": "original private draft; publication blocked"
+    "external_comparisons": 158740,
+    "exact_normalized_matches": 0,
+    "close_paraphrase_quarantine_flags": 0,
+    "maximum_external_five_token_jaccard": {
+      "score": 0.025316,
+      "draft_id": "AY26-B013-GEN-FRAGILEX-001",
+      "source_student_qid": "NGQ-00006296",
+      "source_title": "LDH and glycolysis"
+    },
+    "maximum_external_four_token_jaccard": 0.035714,
+    "maximum_external_character_ratio_percent": {
+      "score": 54.068,
+      "draft_id": "AY26-B013-CV-MITRAL-STENOSIS-001",
+      "source_student_qid": "NGQ-00001494",
+      "source_title": "Mitral stenosis"
+    },
+    "within_batch_duplicate_flags": 0,
+    "maximum_within_batch_five_token_jaccard": {
+      "score": 0.0,
+      "pair": [
+        "AY26-B013-CV-TOF-001",
+        "AY26-B013-CV-MITRAL-STENOSIS-001"
+      ]
+    },
+    "maximum_within_batch_character_ratio_percent": {
+      "score": 52.747,
+      "pair": [
+        "AY26-B013-CV-LONGQT-001",
+        "AY26-B013-GEN-TSC-001"
+      ]
+    },
+    "disposition": "No lexical quarantine flags; retain as private drafts pending human similarity, factual, media, and clinician review"
   },
   "reviewer_notes": [
-    "No proprietary stem, option, explanation, screenshot, or media was copied.",
-    "All graphics were generated in-house as original SVG teaching diagrams.",
-    "A complete external similarity score is deliberately not claimed because the raw ZIP is unavailable in this runtime.",
-    "No import, merge, deployment, or student publication is authorized."
+    "No proprietary stem, option, explanation, screenshot, or media is intentionally copied.",
+    "The source ZIP was used only for coverage signals and lexical comparison.",
+    "Low lexical overlap does not prove semantic originality; human similarity review remains required.",
+    "No import, merge, deployment, student exposure, or publication is authorized."
   ]
 }
