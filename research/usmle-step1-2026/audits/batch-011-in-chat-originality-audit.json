@@ -1,0 +1,163 @@
+{
+  "schema_version": "aylamed-originality-audit-v1",
+  "batch_id": "usmle-step1-2026-b011",
+  "created_at": "2026-08-04T17:55:00+05:00",
+  "source_export": {
+    "record_count": 7937,
+    "use": "coverage and originality screening only"
+  },
+  "controls": {
+    "proprietary_text_copied": false,
+    "manual_distinctness_against_batches_001_010": true,
+    "zip_5gram_jaccard_close_paraphrase_threshold": 0.32
+  },
+  "results": [
+    {
+      "draft_id": "AY26-B011-PULM-UIP-001",
+      "best_zip_5gram_jaccard": 0.0089,
+      "closest_backend_title": "Doxorubicin Cardiotoxicity",
+      "closest_backend_qid": "NGQ-00006293",
+      "close_paraphrase_flag": false
+    },
+    {
+      "draft_id": "AY26-B011-DERM-IH-001",
+      "best_zip_5gram_jaccard": 0.0108,
+      "closest_backend_title": "Primary biliary cholangitis",
+      "closest_backend_qid": "NGQ-00005758",
+      "close_paraphrase_flag": false
+    },
+    {
+      "draft_id": "AY26-B011-ENT-HPVOPSCC-001",
+      "best_zip_5gram_jaccard": 0.0146,
+      "closest_backend_title": "Paradoxical embolism",
+      "closest_backend_qid": "NGQ-00005958",
+      "close_paraphrase_flag": false
+    },
+    {
+      "draft_id": "AY26-B011-RENAL-PUV-001",
+      "best_zip_5gram_jaccard": 0.0506,
+      "closest_backend_title": "Ischemic stroke",
+      "closest_backend_qid": "NGQ-00000598",
+      "close_paraphrase_flag": false
+    },
+    {
+      "draft_id": "AY26-B011-DERM-ACD-001",
+      "best_zip_5gram_jaccard": 0,
+      "closest_backend_title": null,
+      "closest_backend_qid": null,
+      "close_paraphrase_flag": false
+    },
+    {
+      "draft_id": "AY26-B011-DERM-MELANOMA-001",
+      "best_zip_5gram_jaccard": 0,
+      "closest_backend_title": null,
+      "closest_backend_qid": null,
+      "close_paraphrase_flag": false
+    },
+    {
+      "draft_id": "AY26-B011-RENAL-FANCONI-001",
+      "best_zip_5gram_jaccard": 0.0307,
+      "closest_backend_title": "Fanconis syndrome",
+      "closest_backend_qid": "NGQ-00002101",
+      "close_paraphrase_flag": false
+    },
+    {
+      "draft_id": "AY26-B011-MSK-OSTEOSARCOMA-001",
+      "best_zip_5gram_jaccard": 0.0085,
+      "closest_backend_title": "Diabetes mellitus",
+      "closest_backend_qid": "NGQ-00001049",
+      "close_paraphrase_flag": false
+    },
+    {
+      "draft_id": "AY26-B011-IMMUNE-EBVIM-001",
+      "best_zip_5gram_jaccard": 0.0154,
+      "closest_backend_title": "Dilated cardiomyopathy",
+      "closest_backend_qid": "NGQ-00002571",
+      "close_paraphrase_flag": false
+    },
+    {
+      "draft_id": "AY26-B011-DERM-KAPOSI-001",
+      "best_zip_5gram_jaccard": 0.015,
+      "closest_backend_title": "Mallory-weiss syndrome",
+      "closest_backend_qid": "NGQ-00004335",
+      "close_paraphrase_flag": false
+    },
+    {
+      "draft_id": "AY26-B011-MSK-OA-001",
+      "best_zip_5gram_jaccard": 0.0133,
+      "closest_backend_title": "Coronary blood flow",
+      "closest_backend_qid": "NGQ-00001809",
+      "close_paraphrase_flag": false
+    },
+    {
+      "draft_id": "AY26-B011-DERM-AK-001",
+      "best_zip_5gram_jaccard": 0,
+      "closest_backend_title": null,
+      "closest_backend_qid": null,
+      "close_paraphrase_flag": false
+    },
+    {
+      "draft_id": "AY26-B011-DERM-SCABIES-001",
+      "best_zip_5gram_jaccard": 0.0091,
+      "closest_backend_title": "Syphilis",
+      "closest_backend_qid": "NGQ-00003104",
+      "close_paraphrase_flag": false
+    },
+    {
+      "draft_id": "AY26-B011-PULM-ATELECTASIS-001",
+      "best_zip_5gram_jaccard": 0.0254,
+      "closest_backend_title": "Community-Acquired Pneumonia",
+      "closest_backend_qid": "NGQ-00006538",
+      "close_paraphrase_flag": false
+    },
+    {
+      "draft_id": "AY26-B011-DERM-KELOID-001",
+      "best_zip_5gram_jaccard": 0.0217,
+      "closest_backend_title": "Glioblastoma (Multiforme)",
+      "closest_backend_qid": "NGQ-00005645",
+      "close_paraphrase_flag": false
+    },
+    {
+      "draft_id": "AY26-B011-NEURO-ERB-001",
+      "best_zip_5gram_jaccard": 0.0079,
+      "closest_backend_title": "Radial head subluxation",
+      "closest_backend_qid": "NGQ-00005806",
+      "close_paraphrase_flag": false
+    },
+    {
+      "draft_id": "AY26-B011-PULM-A1AT-001",
+      "best_zip_5gram_jaccard": 0,
+      "closest_backend_title": null,
+      "closest_backend_qid": null,
+      "close_paraphrase_flag": false
+    },
+    {
+      "draft_id": "AY26-B011-GI-HYPEROX-001",
+      "best_zip_5gram_jaccard": 0.0144,
+      "closest_backend_title": "Urinary incontinence",
+      "closest_backend_qid": "NGQ-00002270",
+      "close_paraphrase_flag": false
+    },
+    {
+      "draft_id": "AY26-B011-NEURO-PITUITARY-001",
+      "best_zip_5gram_jaccard": 0.011,
+      "closest_backend_title": "Open-ended questions",
+      "closest_backend_qid": "NGQ-00007484",
+      "close_paraphrase_flag": false
+    },
+    {
+      "draft_id": "AY26-B011-GI-PANCREATITIS-001",
+      "best_zip_5gram_jaccard": 0.0161,
+      "closest_backend_title": "Patient safety",
+      "closest_backend_qid": "NGQ-00002288",
+      "close_paraphrase_flag": false
+    }
+  ],
+  "intra_batch_pairs_over_0_15": [],
+  "summary": {
+    "questions": 20,
+    "close_paraphrase_flags": 0,
+    "maximum_zip_5gram_jaccard": 0.0506,
+    "intra_batch_flagged_pairs": 0
+  }
+}
