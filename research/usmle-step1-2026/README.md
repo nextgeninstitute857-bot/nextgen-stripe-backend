@@ -20,7 +20,7 @@ The authenticated read-only export supplied August 4, 2026 contains:
 - **786 explicit media-required candidates**
 - **640 questions omitted by the limited evidence route**
 
-The export drives coverage prioritization only. All AylaMed learner-facing material is independently created from official exam specifications and public medical evidence.
+The export drives coverage prioritization and originality screening only. All AylaMed learner-facing material is independently created from official exam specifications and public medical evidence.
 
 ## 2026 priorities
 
@@ -59,7 +59,7 @@ No stage in this branch performs live QBank writes or automatic publication.
 - Resumed attempts must preserve their original option order.
 - Distractors must be medically plausible and must not reveal the answer through length, grammar, specificity, or obviously opposite wording.
 
-Latest validated authored distribution: **A 20, B 19, C 19, D 19, E 19**. Longest same-position run: **3**.
+Latest validated authored distribution: **A 24, B 23, C 23, D 23, E 23**. Longest same-position run: **3**.
 
 ## Completed batches
 
@@ -73,36 +73,27 @@ Latest validated authored distribution: **A 20, B 19, C 19, D 19, E 19**. Longes
 8. First backend-driven media-priority gaps: bilateral vestibular schwannoma/NF2, sarcoid calcitriol physiology, clear-cell RCC/VHL-HIF, ACL biomechanics, sickle functional asplenia, psoriasis IL-23/Th17, allergic bronchopulmonary aspergillosis, and invasive Aspergillus angioinvasion.
 9. Second backend-driven media-priority gaps: dominant superior-division MCA infarction, membranous nephropathy, poststreptococcal glomerulonephritis, tension pneumothorax, bullous pemphigoid, femoral-neck fracture vascular anatomy, day 3-7 myocardial-infarction rupture risk, and anti-TNF tuberculosis reactivation.
 10. First 20-question in-chat accelerated batch: RANKL blockade, pneumococcal opsonization, mu-opioid respiratory signaling, meningococcal LOS/TLR4, Hashimoto Hürthle cells, HIT, antral H. pylori physiology, Graves uptake, S. gallolyticus and colon disease, Lynch mismatch repair, HFrEF neurohormonal remodeling, atrial-fibrillation appendage stasis, BRCA homologous recombination, HSV temporal-limbic disease, fimbrial STIC, hepatorenal hemodynamics, gout inflammasome signaling, EGFR-driven lung adenocarcinoma, myeloma cast nephropathy, and flecainide use dependence.
+11. Second 20-question in-chat accelerated batch: UIP/TGF-beta fibrosis, infantile hemangioma/propranolol, HPV-positive oropharyngeal carcinoma, posterior urethral valves, allergic contact dermatitis, melanoma Breslow depth, Fanconi syndrome, osteosarcoma, EBV infectious mononucleosis, Kaposi sarcoma, osteoarthritis, actinic keratosis, scabies, obstructive atelectasis, keloids, Erb palsy, alpha-1 antitrypsin deficiency, Crohn-associated enteric hyperoxaluria, pituitary chiasmal compression, and pancreatitis fat saponification.
 
-## Accelerated 100-question pilot generator
+## In-chat 100-question pilot
 
-The private pilot generator has been built and dry-run validated. It uses:
+The in-chat accelerated pilot has completed **40 of 100** planned original questions across Batches 010 and 011. Each 20-question cycle uses the backend ZIP only for coverage signals and full-stem originality screening, then adds de novo questions, original graphics, complete five-level taxonomy, references, distractor rationales, publication blocks, and repository validation.
 
-- five bounded planning calls;
-- 100 writer calls;
-- 100 independent reviewer calls;
-- ten concurrent workers;
-- a 220-request hard ceiling;
-- input-token, output-token, and estimated-dollar ceilings;
-- authoritative-domain web research;
-- strict structured JSON output;
-- resumable run state;
-- internal near-duplicate quarantine;
-- automatic A-E authored-position balancing;
-- no live writes, release-draft writes, auto-commits, merges, deployment, import, or publication.
-
-A real generation run requires `OPENAI_API_KEY`, current model pricing variables, configured model names, `AYLA_PILOT_EXECUTE=yes`, and the `--execute` flag. Without both execution switches, only a zero-credit dry run is possible.
+A separate bounded API generator remains available but has not been executed and has spent no API credits.
 
 ## Current inventory and validation
 
-- **96 original private-draft MCQs**
-- **93 original SVG teaching graphics / media references**
-- **53 draft JSON files**
+- **116 original private-draft MCQs**
+- **113 original SVG teaching graphics / media references**
+- **54 draft JSON files**
+- Batch 011 authored positions: **A 4, B 4, C 4, D 4, E 4**
+- Batch 011 ZIP close-paraphrase flags: **0**
+- Batch 011 maximum ZIP five-gram Jaccard overlap: **0.0506**
 - **0 validation errors**
 - **0 validation warnings**
 - authored-position balance passed
 - student-delivery shuffle simulation passed
-- 100-question pilot generator syntax and bounded dry-run CI passed
+- pilot-generator syntax and bounded dry-run CI passed
 
 ## Required production gate
 
