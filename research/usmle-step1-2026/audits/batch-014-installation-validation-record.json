@@ -3,6 +3,7 @@
   "batch_id": "usmle-step1-2026-b014-in-chat-original-20",
   "status": "private_branch_validation",
   "checked_at": "2026-08-04T21:58:00+05:00",
+  "post_commit_ci_recheck_requested_at": "2026-08-04T22:02:00+05:00",
   "expected_question_count": 20,
   "expected_media_count": 20,
   "answer_position_counts": {
