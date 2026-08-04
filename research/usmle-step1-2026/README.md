@@ -78,8 +78,9 @@ No stage in this branch performs production writes.
 - **Batch 004:** gastrointestinal and nervous-system mechanisms, including achalasia, pancreatic CFTR physiology, portal-systemic collateral anatomy, bile-acid malabsorption, spinal tract localization, basal-ganglia circuitry, neuromuscular-junction physiology, and internuclear ophthalmoplegia.
 - **Batch 005:** hematology and immunology mechanisms, including erythrocyte membrane and redox disorders, thrombotic microangiopathy, primary hemostasis, class switching, phagocyte oxidative killing, terminal complement, and immune-complex disease.
 - **Batch 006:** musculoskeletal, dermatologic, and reproductive mechanisms, including collagen quantity versus quality, dystrophin-mediated sarcolemmal stability, compartment perfusion, pemphigus immunopathology, ovarian failure feedback, androgen-receptor signaling, tubal implantation, and androgenetic molar pregnancy.
+- **Batch 007:** remaining cross-system foundations, including oxygen-dependent aminoglycoside uptake, influenza reassortment, competitive antagonism, saturable phenytoin kinetics, likelihood-ratio reasoning, lead-time bias, qualified interpretation, and mitochondrial heteroplasmy.
 
-Current private-draft inventory: **52 original MCQs and 49 original SVG teaching graphics**.
+Current private-draft inventory: **60 original MCQs and 57 original SVG teaching graphics**.
 
 ## Required production gate
 
