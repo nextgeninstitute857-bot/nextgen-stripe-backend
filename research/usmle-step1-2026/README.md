@@ -23,7 +23,7 @@ The project uses current public USMLE materials as the authoritative blueprint. 
    - patients with disabilities;
    - prescription-drug use and adverse effects.
 5. **Communication and interpersonal skills remain examinable.** Public Step 1 specifications allocate 6-9% to this competency area.
-6. **New 2026 delivery software.** Step 1 now uses fourteen 30-minute blocks with no more than 20 items per block. The total item count and exam length are unchanged. AylaMed practice blocks should support this pacing model.
+6. **New 2026 delivery software.** Step 1 uses fourteen 30-minute blocks with no more than 20 items per block for examinations beginning May 14, 2026. The total item count and exam length are unchanged. AylaMed practice blocks should support this pacing model.
 
 ## Source hierarchy
 
@@ -64,8 +64,10 @@ No stage in this branch performs production writes.
 
 - `source-register.json`: authoritative and signal sources with evidence status.
 - `priority-deltas.json`: 2026-specific priority matrix and media requirements.
-- `drafts/`: original draft MCQs, answers, explanations, and media specifications.
+- `coverage/`: five-level coverage matrices with learning objectives and media requirements.
+- `drafts/`: original draft MCQs, answers, explanations, distractor rationales, references, and review gates.
 - `media/`: original schematic SVG files only; no copied clinical images.
+- `scripts/validate-usmle-research-drafts.mjs`: fail-closed validation of draft status, taxonomy, answer structure, references, media ownership, and publication blocking.
 - future audit tooling: compare a read-only backend export against the five-level matrix and produce missing-topic and missing-media queues.
 
 ## Completed research batches
@@ -73,6 +75,11 @@ No stage in this branch performs production writes.
 - **Batch 001:** nutrition, anemia, post-bariatric physiology, growth, food insecurity, veterans, disability-related complications, gender-affirming physiology, and geriatric polypharmacy.
 - **Batch 002:** respiratory and renal mechanisms, including tubular transport, renal hemodynamics, acid-base compensation, CKD mineral-bone physiology, pulmonary mechanics, neonatal surfactant deficiency, oxygen transport, and V/Q mismatch.
 - **Batch 003:** cardiovascular and endocrine mechanisms, including aortic-stenosis pressure-volume loops, tamponade ventricular interdependence, dynamic outflow obstruction, AV nodal reentry, primary hyperaldosteronism, DKA potassium balance, pregnancy-related thyroid binding, and 21-hydroxylase deficiency.
+- **Batch 004:** gastrointestinal and nervous-system mechanisms, including achalasia, pancreatic CFTR physiology, portal-systemic collateral anatomy, bile-acid malabsorption, spinal tract localization, basal-ganglia circuitry, neuromuscular-junction physiology, and internuclear ophthalmoplegia.
+- **Batch 005:** hematology and immunology mechanisms, including erythrocyte membrane and redox disorders, thrombotic microangiopathy, primary hemostasis, class switching, phagocyte oxidative killing, terminal complement, and immune-complex disease.
+- **Batch 006:** musculoskeletal, dermatologic, and reproductive mechanisms, including collagen quantity versus quality, dystrophin-mediated sarcolemmal stability, compartment perfusion, pemphigus immunopathology, ovarian failure feedback, androgen-receptor signaling, tubal implantation, and androgenetic molar pregnancy.
+
+Current private-draft inventory: **52 original MCQs and 49 original SVG teaching graphics**.
 
 ## Required production gate
 
