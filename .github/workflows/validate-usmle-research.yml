@@ -8,7 +8,6 @@ on:
       - "scripts/validate-usmle-answer-positions.mjs"
       - "scripts/lib/answer-order-policy.mjs"
       - ".tmp/batch015_payload.part00"
-      - ".tmp/batch015_trigger"
       - ".github/workflows/validate-usmle-research.yml"
   push:
     branches:
@@ -52,60 +51,65 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Decode and verify bounded payload
+      - name: Decode and verify bounded Batch 015 payload
         shell: bash
         run: |
           set -euo pipefail
-          cat .tmp/batch015_payload.part00 .tmp/batch015_payload.part01 .tmp/batch015_payload.part02 .tmp/batch015_payload.part03 > /tmp/batch015_payload.tar.gz.b64
+          cat \
+            .tmp/batch015_payload.part00 \
+            .tmp/batch015_payload.part01 \
+            .tmp/batch015_payload.part02_03 \
+            .tmp/batch015_payload.part04_05 \
+            .tmp/batch015_payload.part06_07 \
+            .tmp/batch015_payload.part08_09 \
+            .tmp/batch015_payload.part10_11 \
+            > /tmp/batch015_payload.tar.gz.b64
           base64 --decode /tmp/batch015_payload.tar.gz.b64 > /tmp/batch015_payload.tar.gz
-          test -s /tmp/batch015_payload.tar.gz
-          sha256sum /tmp/batch015_payload.tar.gz
+          echo "4b9b37a7a52e29c8345e306a918000795ac137a55cb5b91772665962e49c7131  /tmp/batch015_payload.tar.gz" | sha256sum -c -
           mkdir -p /tmp/batch015
           tar -tzf /tmp/batch015_payload.tar.gz | grep -v '/$' | sort > /tmp/batch015-files.txt
           cat > /tmp/batch015-expected.txt <<'FILES'
-          research/usmle-step1-2026/README.md
-          research/usmle-step1-2026/audits/batch-014-in-chat-originality-audit.json
-          research/usmle-step1-2026/audits/batch-014-installation-validation-record.json
-          research/usmle-step1-2026/audits/batch-015-committed-stems.tsv
-          research/usmle-step1-2026/audits/batch-015-in-chat-originality-audit.json
-          research/usmle-step1-2026/audits/batch-015-installation-validation-record.json
-          research/usmle-step1-2026/coverage/batch-015-in-chat-original-20-matrix.json
-          research/usmle-step1-2026/coverage/batch-015-in-chat-original-20-queue.json
-          research/usmle-step1-2026/drafts/batch-015-in-chat-original-20.json
-          research/usmle-step1-2026/media/atn-tubular-injury-fena-muddy-casts.svg
-          research/usmle-step1-2026/media/cdiff-toxinb-rho-actin-junction.svg
-          research/usmle-step1-2026/media/cholera-gs-camp-cftr-secretion.svg
-          research/usmle-step1-2026/media/chronic-bronchitis-reid-index.svg
-          research/usmle-step1-2026/media/dcm-sarcomeres-series-eccentric.svg
-          research/usmle-step1-2026/media/diabetes-age-rage-microangiopathy.svg
-          research/usmle-step1-2026/media/giant-cell-arteritis-ciliary-ischemia.svg
-          research/usmle-step1-2026/media/glioblastoma-pseudopalisading-hypoxia-vegf.svg
-          research/usmle-step1-2026/media/hbv-window-anti-hbc-igm.svg
-          research/usmle-step1-2026/media/her2-erbb2-amplification-membrane.svg
-          research/usmle-step1-2026/media/hiv-gp120-cd4-ccr5-gp41.svg
-          research/usmle-step1-2026/media/insulinoma-insulin-cpeptide-fast.svg
-          research/usmle-step1-2026/media/listeria-listeriolysin-acta-spread.svg
-          research/usmle-step1-2026/media/malignant-hyperthermia-ryr1-dantrolene.svg
-          research/usmle-step1-2026/media/methotrexate-dhfr-leucovorin-bypass.svg
-          research/usmle-step1-2026/media/pbc-pdc-e2-small-duct-destruction.svg
-          research/usmle-step1-2026/media/pda-prostaglandin-indomethacin.svg
-          research/usmle-step1-2026/media/prostate-metastasis-osteoblast-sclerosis.svg
-          research/usmle-step1-2026/media/siadh-v2-camp-aqp2.svg
-          research/usmle-step1-2026/media/warfarin-protein-c-skin-necrosis.svg
-          FILES
-          sed -i 's/^          //' /tmp/batch015-expected.txt
+research/usmle-step1-2026/README.md
+research/usmle-step1-2026/audits/batch-014-in-chat-originality-audit.json
+research/usmle-step1-2026/audits/batch-015-committed-stems.tsv
+research/usmle-step1-2026/audits/batch-015-in-chat-originality-audit.json
+research/usmle-step1-2026/audits/batch-015-installation-validation-record.json
+research/usmle-step1-2026/coverage/batch-015-in-chat-original-20-matrix.json
+research/usmle-step1-2026/coverage/batch-015-in-chat-original-20-queue.json
+research/usmle-step1-2026/drafts/batch-015-in-chat-original-20.json
+research/usmle-step1-2026/media/acromegaly-gh-igf1-glucose.svg
+research/usmle-step1-2026/media/botulism-snare-ach-block.svg
+research/usmle-step1-2026/media/cholera-gs-camp-cftr.svg
+research/usmle-step1-2026/media/digoxin-na-k-atpase-fab.svg
+research/usmle-step1-2026/media/dilated-cardiomyopathy-eccentric-remodeling.svg
+research/usmle-step1-2026/media/diphtheria-ef2-adp-ribosylation.svg
+research/usmle-step1-2026/media/down-robertsonian-14-21.svg
+research/usmle-step1-2026/media/endometriosis-ectopic-glands-hemosiderin.svg
+research/usmle-step1-2026/media/glioblastoma-hypoxia-pseudopalisading-vegf.svg
+research/usmle-step1-2026/media/klinefelter-seminiferous-hyalinization.svg
+research/usmle-step1-2026/media/lambert-eaton-presynaptic-calcium.svg
+research/usmle-step1-2026/media/lithium-enac-aqp2-amiloride.svg
+research/usmle-step1-2026/media/meningioma-arachnoid-whorls-psammoma.svg
+research/usmle-step1-2026/media/pancreatic-cancer-desmoplastic-stroma.svg
+research/usmle-step1-2026/media/pbc-pdc-e2-florid-duct.svg
+research/usmle-step1-2026/media/prostate-osteoblastic-metastases.svg
+research/usmle-step1-2026/media/psc-beading-onion-skin.svg
+research/usmle-step1-2026/media/tetanus-synaptobrevin-inhibitory-block.svg
+research/usmle-step1-2026/media/warfarin-protein-c-skin-necrosis.svg
+research/usmle-step1-2026/media/wiskott-wasp-actin-synapse.svg
+FILES
           diff -u /tmp/batch015-expected.txt /tmp/batch015-files.txt
           if grep -E '(^/|(^|/)\.\.(/|$))' /tmp/batch015-files.txt; then
             echo 'Unsafe path in payload' >&2
             exit 1
           fi
           tar -xzf /tmp/batch015_payload.tar.gz -C /tmp/batch015
-      - name: Install private Batch 015 and Batch 014 audit updates
+      - name: Install private Batch 015 and Batch 014 audit update
         shell: bash
         run: |
           set -euo pipefail
           cp -a /tmp/batch015/research/usmle-step1-2026/. research/usmle-step1-2026/
-      - name: Validate Batch 015 structure, media, and lexical audit
+      - name: Validate Batch 015 structure and patched-ZIP audits
         shell: bash
         run: |
           set -euo pipefail
@@ -114,50 +118,46 @@ jobs:
           import json
           import xml.etree.ElementTree as ET
 
-          root = Path("research/usmle-step1-2026")
-          draft = json.loads((root / "drafts/batch-015-in-chat-original-20.json").read_text())
-          qs = draft["questions"]
-          assert draft["status"] == "private_research_draft"
-          assert draft["publication_allowed"] is False
-          assert len(qs) == 20
-
+          root = Path('research/usmle-step1-2026')
+          draft = json.loads((root / 'drafts/batch-015-in-chat-original-20.json').read_text())
+          questions = draft['questions']
+          assert draft['status'] == 'private_research_draft'
+          assert draft['publication_allowed'] is False
+          assert len(questions) == 20
           positions = {i: 0 for i in range(1, 6)}
           ids = set()
           media = set()
-          for q in qs:
-              assert q["draft_id"] not in ids
-              ids.add(q["draft_id"])
-              assert q["exam_track"] == "usmle-step-1"
-              assert all(q["taxonomy"].get(k) for k in ("system", "subsystem", "topic", "subtopic"))
-              assert len(q["options"]) == 5
-              option_ids = [int(o["id"]) for o in q["options"]]
+          for question in questions:
+              assert question['draft_id'] not in ids
+              ids.add(question['draft_id'])
+              assert question['exam_track'] == 'usmle-step-1'
+              assert all(question['taxonomy'].get(key) for key in ('system', 'subsystem', 'topic', 'subtopic'))
+              assert len(question['options']) == 5
+              option_ids = [int(option['id']) for option in question['options']]
               assert len(set(option_ids)) == 5
-              cid = int(q["correct_option_id"])
-              assert cid in option_ids
-              positions[option_ids.index(cid) + 1] += 1
-              assert all(str(i) in q["wrong_choice_explanations"] for i in option_ids if i != cid)
-              assert len(q["references"]) >= 2
-              assert q["review"]["publication"] == "blocked"
-              assert q["review"]["similarity"] == "lexical_pass_pending_human"
-              assert len(q["media"]) == 1
-              path = Path(q["media"][0]["path"])
-              assert path.exists(), path
-              assert q["media"][0]["ownership"] == "AylaMed original"
-              ET.parse(path)
-              media.add(str(path))
-
+              correct_id = int(question['correct_option_id'])
+              assert correct_id in option_ids
+              positions[option_ids.index(correct_id) + 1] += 1
+              assert all(str(option_id) in question['wrong_choice_explanations'] for option_id in option_ids if option_id != correct_id)
+              assert len(question['references']) >= 2
+              assert question['review']['publication'] == 'blocked'
+              assert question['review']['similarity'] == 'lexical_pass_pending_human'
+              assert len(question['media']) == 1
+              media_path = Path(question['media'][0]['path'])
+              assert media_path.exists(), media_path
+              assert question['media'][0]['ownership'] == 'AylaMed original'
+              ET.parse(media_path)
+              media.add(str(media_path))
           assert positions == {1: 4, 2: 4, 3: 4, 4: 4, 5: 4}, positions
           assert len(media) == 20
-
-          for batch in ("014", "015"):
-              audit = json.loads((root / f"audits/batch-{batch}-in-chat-originality-audit.json").read_text())
-              assert audit["schema_version"] == "aylamed-usmle-originality-audit-v2"
-              assert audit["source_export"]["records"] == 7937
-              assert audit["results"]["external_comparisons"] == 158740
-              assert audit["results"]["exact_normalized_matches"] == 0
-              assert audit["results"]["close_paraphrase_quarantine_flags"] == 0
-
-          print({"batch015_questions": len(qs), "batch015_media": len(media), "positions": positions})
+          for batch in ('014', '015'):
+              audit = json.loads((root / f'audits/batch-{batch}-in-chat-originality-audit.json').read_text())
+              assert audit['schema_version'] == 'aylamed-usmle-originality-audit-v2'
+              assert audit['source_export']['records'] == 7937
+              assert audit['results']['external_comparisons'] == 158740
+              assert audit['results']['exact_normalized_matches'] == 0
+              assert audit['results']['close_paraphrase_quarantine_flags'] == 0
+          print({'batch015_questions': len(questions), 'batch015_media': len(media), 'positions': positions})
           PY
       - name: Run fail-closed repository validators
         run: |
@@ -172,7 +172,7 @@ jobs:
           git add research/usmle-step1-2026
           git show 7ec676ddd5846fb6798738ca6425b9bc57f6eb84:.github/workflows/validate-usmle-research.yml > .github/workflows/validate-usmle-research.yml
           git add .github/workflows/validate-usmle-research.yml
-          git rm .tmp/batch015_payload.part00 .tmp/batch015_payload.part01 .tmp/batch015_payload.part02 .tmp/batch015_payload.part03 .tmp/batch015_trigger
+          git rm -f --ignore-unmatch .tmp/batch015_payload.part* .tmp/batch015_trigger
           git commit -m "Complete Batch 014 ZIP audit and add original USMLE Batch 015"
           git push origin HEAD:research/usmle-step1-2026-original-qbank
 
