@@ -1,46 +1,17 @@
 {
-  "schema_version": "aylamed-backend-driven-gap-queue-v1",
-  "batch_id": "usmle-step1-2026-b014-in-chat-original-20-queue",
-  "created_at": "2026-08-04T22:00:00+05:00",
-  "updated_at": "2026-08-04T21:58:00+05:00",
-  "status": "private_research_queue",
+  "schema_version": "aylamed-coverage-matrix-v1",
+  "batch_id": "usmle-step1-2026-b014-in-chat-original-20",
+  "status": "private_research_matrix",
   "publication_allowed": false,
-  "pilot_status": {
-    "accelerated_questions_completed_before_batch": 80,
-    "target_questions_in_batch": 20,
-    "accelerated_pilot_total_after_batch": 100,
-    "research_bank_total_after_batch": 176
-  },
   "source_export": {
-    "file_name": "aylamed-qbank-json-no-media-2026-08-04(1).zip",
     "records": 7937,
     "unique_title_clusters": 2647,
-    "explicit_media_candidates": 786,
-    "use": "coverage frequency, media priority, and later lexical similarity screening only"
-  },
-  "selection_controls": {
-    "all_learning_objectives_distinct": true,
-    "avoid_batches": "001-013",
-    "full_zip_stem_screen_required_before_import_approval": true,
-    "full_zip_scan_status": "pending_user_zip_patch",
-    "private_commit_allowed_while_publication_blocked": true,
-    "within_batch_duplicate_screen_required": true,
-    "original_media_required": true,
-    "answer_positions_required": {
-      "A": 4,
-      "B": 4,
-      "C": 4,
-      "D": 4,
-      "E": 4
-    },
-    "proprietary_text_options_explanations_or_media_used": false,
-    "publication_blocked": true
+    "explicit_media_candidates": 786
   },
   "entries": [
     {
-      "rank": 1,
       "draft_id": "AY26-B014-CV-FH-001",
-      "topic": "Familial hypercholesterolemia",
+      "exam": "USMLE Step 1",
       "taxonomy": {
         "system": "Cardiovascular System",
         "subsystem": "Lipid metabolism and atherosclerosis",
@@ -48,18 +19,12 @@
         "subtopic": "LDL-receptor-mediated endocytosis of apoB-100 particles"
       },
       "learning_objective": "Connect preserved LDL binding but defective coated-pit internalization to impaired hepatic clearance of apoB-100 particles in familial hypercholesterolemia.",
-      "media_spec": [
-        "LDL apoB-100 binds LDLR",
-        "Clathrin-coated pit internalizes complex",
-        "Endosomal release permits LDLR recycling"
-      ],
       "media_path": "research/usmle-step1-2026/media/fh-ldlr-coated-pit-endocytosis.svg",
-      "zip_matching_records": 18
+      "difficulty": "hard"
     },
     {
-      "rank": 2,
       "draft_id": "AY26-B014-CV-EISENMENGER-001",
-      "topic": "Ventricular septal defect and Eisenmenger syndrome",
+      "exam": "USMLE Step 1",
       "taxonomy": {
         "system": "Cardiovascular System",
         "subsystem": "Congenital heart disease",
@@ -67,18 +32,12 @@
         "subtopic": "Pulmonary vascular remodeling and shunt reversal"
       },
       "learning_objective": "Explain Eisenmenger syndrome as reversal of a chronic large VSD shunt after pulmonary vascular resistance exceeds systemic resistance.",
-      "media_spec": [
-        "Large VSD: systemic-to-pulmonary flow",
-        "Pulmonary arteriolar remodeling raises PVR",
-        "PVR exceeds SVR: cyanotic shunt reversal"
-      ],
       "media_path": "research/usmle-step1-2026/media/vsd-eisenmenger-shunt-reversal.svg",
-      "zip_matching_records": 11
+      "difficulty": "hard"
     },
     {
-      "rank": 3,
       "draft_id": "AY26-B014-CV-COARCTATION-001",
-      "topic": "Coarctation of the aorta",
+      "exam": "USMLE Step 1",
       "taxonomy": {
         "system": "Cardiovascular System",
         "subsystem": "Congenital vascular disease",
@@ -86,18 +45,12 @@
         "subtopic": "Intercostal collateral circulation and rib notching"
       },
       "learning_objective": "Trace the subclavian–internal thoracic–intercostal collateral route that bypasses postductal coarctation and produces inferior rib notching.",
-      "media_spec": [
-        "Postductal aortic narrowing",
-        "Subclavian and internal thoracic collaterals enlarge",
-        "Posterior intercostal flow notches inferior ribs"
-      ],
       "media_path": "research/usmle-step1-2026/media/coarctation-intercostal-collaterals.svg",
-      "zip_matching_records": 8
+      "difficulty": "moderate"
     },
     {
-      "rank": 4,
       "draft_id": "AY26-B014-RENAL-MCD-001",
-      "topic": "Minimal change disease",
+      "exam": "USMLE Step 1",
       "taxonomy": {
         "system": "Renal & Urinary System",
         "subsystem": "Glomerular disease",
@@ -105,18 +58,12 @@
         "subtopic": "Podocyte foot-process effacement"
       },
       "learning_objective": "Recognize minimal change disease from the triad of normal light microscopy, negative immunofluorescence, and diffuse podocyte foot-process effacement.",
-      "media_spec": [
-        "Light microscopy: nearly normal",
-        "Immunofluorescence: no immune deposits",
-        "Electron microscopy: diffuse foot-process effacement"
-      ],
       "media_path": "research/usmle-step1-2026/media/minimal-change-three-modality-panel.svg",
-      "zip_matching_records": 16
+      "difficulty": "moderate"
     },
     {
-      "rank": 5,
       "draft_id": "AY26-B014-RENAL-IGA-001",
-      "topic": "IgA nephropathy",
+      "exam": "USMLE Step 1",
       "taxonomy": {
         "system": "Renal & Urinary System",
         "subsystem": "Glomerular disease",
@@ -124,18 +71,12 @@
         "subtopic": "Galactose-deficient IgA1 immune complexes"
       },
       "learning_objective": "Connect galactose-deficient IgA1 and antiglycan antibodies to mesangial immune-complex deposition and synpharyngitic hematuria.",
-      "media_spec": [
-        "Galactose-deficient IgA1 is produced",
-        "Antiglycan antibodies form immune complexes",
-        "Mesangial deposition triggers hematuria"
-      ],
       "media_path": "research/usmle-step1-2026/media/iga-nephropathy-four-hit-pathway.svg",
-      "zip_matching_records": 13
+      "difficulty": "hard"
     },
     {
-      "rank": 6,
       "draft_id": "AY26-B014-RENAL-RTA4-001",
-      "topic": "Type IV renal tubular acidosis",
+      "exam": "USMLE Step 1",
       "taxonomy": {
         "system": "Renal & Urinary System",
         "subsystem": "Tubular acid-base disorders",
@@ -143,18 +84,12 @@
         "subtopic": "Hypoaldosteronism, hyperkalemia, and reduced ammonium excretion"
       },
       "learning_objective": "Explain type IV RTA through reduced aldosterone effect, hyperkalemia-mediated suppression of ammoniagenesis, and low urinary ammonium despite urine pH below 5.5.",
-      "media_spec": [
-        "Low aldosterone effect reduces ENaC-driven voltage",
-        "Potassium retention produces hyperkalemia",
-        "Hyperkalemia suppresses NH3 generation and NH4 excretion"
-      ],
       "media_path": "research/usmle-step1-2026/media/type4-rta-aldosterone-ammonium.svg",
-      "zip_matching_records": 9
+      "difficulty": "hard"
     },
     {
-      "rank": 7,
       "draft_id": "AY26-B014-HEME-HEMOPHILIA-A-001",
-      "topic": "Hemophilia A",
+      "exam": "USMLE Step 1",
       "taxonomy": {
         "system": "Blood & Immune Systems",
         "subsystem": "Coagulation disorders",
@@ -162,18 +97,12 @@
         "subtopic": "Factor VIII and intrinsic tenase"
       },
       "learning_objective": "Interpret a correcting mixing study as factor deficiency and connect hemophilia A to loss of factor VIIIa support for intrinsic tenase.",
-      "media_spec": [
-        "Prolonged aPTT corrects with normal plasma",
-        "Factor VIIIa joins IXa on phospholipid",
-        "Intrinsic tenase activates factor X"
-      ],
       "media_path": "research/usmle-step1-2026/media/hemophilia-a-intrinsic-tenase-mixing.svg",
-      "zip_matching_records": 12
+      "difficulty": "moderate"
     },
     {
-      "rank": 8,
       "draft_id": "AY26-B014-HEME-CML-001",
-      "topic": "Chronic myeloid leukemia",
+      "exam": "USMLE Step 1",
       "taxonomy": {
         "system": "Blood & Immune Systems",
         "subsystem": "Myeloproliferative neoplasms",
@@ -181,18 +110,12 @@
         "subtopic": "BCR-ABL1 constitutive tyrosine kinase"
       },
       "learning_objective": "Relate the Philadelphia chromosome to constitutive BCR-ABL1 kinase signaling and the characteristic chronic-phase CML blood profile.",
-      "media_spec": [
-        "Chromosomes 9 and 22 exchange segments",
-        "BCR joins ABL1",
-        "Constitutive kinase drives granulocytic proliferation"
-      ],
       "media_path": "research/usmle-step1-2026/media/cml-philadelphia-bcr-abl1.svg",
-      "zip_matching_records": 18
+      "difficulty": "moderate"
     },
     {
-      "rank": 9,
       "draft_id": "AY26-B014-HEME-HODGKIN-001",
-      "topic": "Classical Hodgkin lymphoma",
+      "exam": "USMLE Step 1",
       "taxonomy": {
         "system": "Blood & Immune Systems",
         "subsystem": "Lymphoid neoplasms",
@@ -200,18 +123,12 @@
         "subtopic": "Reed-Sternberg B-cell origin and reactive microenvironment"
       },
       "learning_objective": "Recognize classical Hodgkin lymphoma as a sparse Reed-Sternberg-cell neoplasm that builds a cytokine-recruited reactive microenvironment.",
-      "media_spec": [
-        "Rare CD30-positive Reed-Sternberg cell",
-        "Tumor-derived cytokines and chemokines",
-        "Reactive T cells, eosinophils, macrophages dominate mass"
-      ],
       "media_path": "research/usmle-step1-2026/media/hodgkin-rs-reactive-microenvironment.svg",
-      "zip_matching_records": 20
+      "difficulty": "hard"
     },
     {
-      "rank": 10,
       "draft_id": "AY26-B014-IMM-DIGEORGE-001",
-      "topic": "22q11.2 deletion syndrome",
+      "exam": "USMLE Step 1",
       "taxonomy": {
         "system": "Blood & Immune Systems",
         "subsystem": "Primary immunodeficiency",
@@ -219,18 +136,12 @@
         "subtopic": "Third and fourth pharyngeal pouch failure"
       },
       "learning_objective": "Map thymic and parathyroid hypoplasia plus conotruncal disease to 22q11.2-associated third/fourth pouch and neural-crest developmental failure.",
-      "media_spec": [
-        "Third/fourth pouch development fails",
-        "Thymus and parathyroids are hypoplastic",
-        "Neural-crest defect adds conotruncal disease"
-      ],
       "media_path": "research/usmle-step1-2026/media/digeorge-pouch-neural-crest-map.svg",
-      "zip_matching_records": 7
+      "difficulty": "moderate"
     },
     {
-      "rank": 11,
       "draft_id": "AY26-B014-IMM-ADA-SCID-001",
-      "topic": "ADA-deficient severe combined immunodeficiency",
+      "exam": "USMLE Step 1",
       "taxonomy": {
         "system": "Blood & Immune Systems",
         "subsystem": "Primary immunodeficiency",
@@ -238,18 +149,12 @@
         "subtopic": "Deoxyadenosine toxicity and ribonucleotide-reductase inhibition"
       },
       "learning_objective": "Explain ADA-SCID through deoxyadenosine-derived dATP accumulation, ribonucleotide-reductase inhibition, and lymphocyte DNA-synthesis failure.",
-      "media_spec": [
-        "ADA deficiency accumulates deoxyadenosine",
-        "Deoxyadenosine is phosphorylated to dATP",
-        "dATP blocks ribonucleotide reductase in lymphocytes"
-      ],
       "media_path": "research/usmle-step1-2026/media/ada-scid-datp-ribonucleotide-reductase.svg",
-      "zip_matching_records": 6
+      "difficulty": "hard"
     },
     {
-      "rank": 12,
       "draft_id": "AY26-B014-NEURO-ALZHEIMER-001",
-      "topic": "Alzheimer disease",
+      "exam": "USMLE Step 1",
       "taxonomy": {
         "system": "Nervous System",
         "subsystem": "Neurodegeneration",
@@ -257,18 +162,12 @@
         "subtopic": "Amyloidogenic APP processing"
       },
       "learning_objective": "Contrast nonamyloidogenic alpha-secretase processing with beta/gamma-secretase generation of aggregation-prone Aβ42.",
-      "media_spec": [
-        "Alpha-secretase cuts inside Aβ sequence",
-        "Beta-secretase creates amyloidogenic fragment",
-        "Gamma-secretase releases Aβ40 or aggregation-prone Aβ42"
-      ],
       "media_path": "research/usmle-step1-2026/media/alzheimer-app-secretase-pathways.svg",
-      "zip_matching_records": 22
+      "difficulty": "hard"
     },
     {
-      "rank": 13,
       "draft_id": "AY26-B014-NEURO-HUNTINGTON-001",
-      "topic": "Huntington disease",
+      "exam": "USMLE Step 1",
       "taxonomy": {
         "system": "Nervous System",
         "subsystem": "Neurodegeneration",
@@ -276,18 +175,12 @@
         "subtopic": "CAG-repeat expansion and paternal anticipation"
       },
       "learning_objective": "Connect paternal anticipation in Huntington disease to germline CAG expansion and relate the mutation to caudate-predominant neurodegeneration.",
-      "media_spec": [
-        "Affected father carries expanded CAG tract",
-        "Spermatogenesis permits further repeat expansion",
-        "Larger repeat produces earlier caudate degeneration"
-      ],
       "media_path": "research/usmle-step1-2026/media/huntington-paternal-cag-anticipation.svg",
-      "zip_matching_records": 11
+      "difficulty": "moderate"
     },
     {
-      "rank": 14,
       "draft_id": "AY26-B014-NEURO-ABSENCE-001",
-      "topic": "Childhood absence epilepsy",
+      "exam": "USMLE Step 1",
       "taxonomy": {
         "system": "Nervous System",
         "subsystem": "Seizure disorders",
@@ -295,18 +188,12 @@
         "subtopic": "Thalamic T-type calcium current"
       },
       "learning_objective": "Recognize childhood absence epilepsy and link ethosuximide efficacy to blockade of thalamic T-type calcium currents.",
-      "media_spec": [
-        "Brief behavioral arrest with 3-Hz spike-wave EEG",
-        "Thalamocortical neurons use low-threshold bursts",
-        "Ethosuximide reduces T-type calcium current"
-      ],
       "media_path": "research/usmle-step1-2026/media/absence-3hz-thalamic-t-type.svg",
-      "zip_matching_records": 12
+      "difficulty": "moderate"
     },
     {
-      "rank": 15,
       "draft_id": "AY26-B014-TOX-ORGANOPHOSPHATE-001",
-      "topic": "Organophosphate poisoning",
+      "exam": "USMLE Step 1",
       "taxonomy": {
         "system": "Multisystem Processes & Disorders",
         "subsystem": "Toxicology",
@@ -314,18 +201,12 @@
         "subtopic": "Acetylcholinesterase phosphorylation and aging"
       },
       "learning_objective": "Distinguish atropine receptor antagonism from pralidoxime enzyme reactivation and explain the time dependence created by acetylcholinesterase aging.",
-      "media_spec": [
-        "Organophosphate phosphorylates AChE",
-        "Early pralidoxime can remove phosphate",
-        "Aging strengthens bond and blocks reactivation"
-      ],
       "media_path": "research/usmle-step1-2026/media/organophosphate-ache-aging-pralidoxime.svg",
-      "zip_matching_records": 15
+      "difficulty": "hard"
     },
     {
-      "rank": 16,
       "draft_id": "AY26-B014-TOX-ACETAMINOPHEN-001",
-      "topic": "Acetaminophen toxicity",
+      "exam": "USMLE Step 1",
       "taxonomy": {
         "system": "Multisystem Processes & Disorders",
         "subsystem": "Toxicology",
@@ -333,18 +214,12 @@
         "subtopic": "NAPQI formation, glutathione depletion, and N-acetylcysteine"
       },
       "learning_objective": "Explain acetaminophen hepatotoxicity through NAPQI accumulation and identify glutathione restoration as the central rescue mechanism of N-acetylcysteine.",
-      "media_spec": [
-        "Therapeutic pathways conjugate most acetaminophen",
-        "CYP oxidation creates NAPQI when pathways saturate",
-        "N-acetylcysteine restores glutathione detoxification"
-      ],
       "media_path": "research/usmle-step1-2026/media/acetaminophen-napqi-glutathione-nac.svg",
-      "zip_matching_records": 17
+      "difficulty": "moderate"
     },
     {
-      "rank": 17,
       "draft_id": "AY26-B014-GI-FAP-001",
-      "topic": "Familial adenomatous polyposis",
+      "exam": "USMLE Step 1",
       "taxonomy": {
         "system": "Gastrointestinal System",
         "subsystem": "Colorectal neoplasia",
@@ -352,18 +227,12 @@
         "subtopic": "APC–beta-catenin destruction complex"
       },
       "learning_objective": "Connect biallelic APC loss to beta-catenin stabilization, Wnt-target transcription, and the diffuse colorectal adenoma phenotype of FAP.",
-      "media_spec": [
-        "Wild-type APC complex phosphorylates beta-catenin",
-        "APC loss prevents proteasomal targeting",
-        "Nuclear beta-catenin activates crypt proliferation genes"
-      ],
       "media_path": "research/usmle-step1-2026/media/fap-apc-beta-catenin-destruction.svg",
-      "zip_matching_records": 9
+      "difficulty": "hard"
     },
     {
-      "rank": 18,
       "draft_id": "AY26-B014-GI-HEMOCHROMATOSIS-001",
-      "topic": "Hereditary hemochromatosis",
+      "exam": "USMLE Step 1",
       "taxonomy": {
         "system": "Gastrointestinal System",
         "subsystem": "Hepatic metabolic disease",
@@ -371,18 +240,12 @@
         "subtopic": "Hepcidin–ferroportin regulation"
       },
       "learning_objective": "Explain HFE-related iron overload through deficient hepcidin induction and unrestrained ferroportin-mediated intestinal absorption and macrophage iron release.",
-      "media_spec": [
-        "Hepatic HFE signaling should induce hepcidin",
-        "Low hepcidin leaves ferroportin on cell surfaces",
-        "Enterocytes and macrophages export excess iron"
-      ],
       "media_path": "research/usmle-step1-2026/media/hemochromatosis-hepcidin-ferroportin.svg",
-      "zip_matching_records": 13
+      "difficulty": "hard"
     },
     {
-      "rank": 19,
       "draft_id": "AY26-B014-ENDO-MEN2-001",
-      "topic": "Multiple endocrine neoplasia type 2",
+      "exam": "USMLE Step 1",
       "taxonomy": {
         "system": "Reproductive & Endocrine Systems",
         "subsystem": "Hereditary endocrine neoplasia",
@@ -390,18 +253,12 @@
         "subtopic": "Activating RET mutation"
       },
       "learning_objective": "Recognize MEN2 from medullary thyroid carcinoma and pheochromocytoma and identify germline RET activation as the inherited driver.",
-      "media_spec": [
-        "Autosomal dominant activating RET variant",
-        "Thyroid C-cell hyperplasia progresses to MTC",
-        "Adrenal medullary tumors produce catecholamines"
-      ],
       "media_path": "research/usmle-step1-2026/media/men2-ret-thyroid-adrenal-pedigree.svg",
-      "zip_matching_records": 9
+      "difficulty": "moderate"
     },
     {
-      "rank": 20,
       "draft_id": "AY26-B014-ENDO-ADDISON-001",
-      "topic": "Primary adrenal insufficiency",
+      "exam": "USMLE Step 1",
       "taxonomy": {
         "system": "Reproductive & Endocrine Systems",
         "subsystem": "Adrenal disorders",
@@ -409,22 +266,8 @@
         "subtopic": "POMC-derived melanocortin signaling and hyperpigmentation"
       },
       "learning_objective": "Explain hyperpigmentation in primary adrenal insufficiency through loss of cortisol feedback, increased POMC/ACTH production, and melanocortin-1 receptor stimulation.",
-      "media_spec": [
-        "Adrenal cortex fails: cortisol and aldosterone fall",
-        "Loss of feedback raises POMC and ACTH",
-        "ACTH and melanocortin peptides activate MC1R"
-      ],
       "media_path": "research/usmle-step1-2026/media/addison-pomc-acth-mc1r.svg",
-      "zip_matching_records": 20
+      "difficulty": "moderate"
     }
-  ],
-  "aggregate_zip_matching_records": 266,
-  "safety": {
-    "live_qbank_writes": false,
-    "automatic_import": false,
-    "automatic_merge": false,
-    "automatic_deployment": false,
-    "student_visibility": false,
-    "publication_allowed": false
-  }
+  ]
 }

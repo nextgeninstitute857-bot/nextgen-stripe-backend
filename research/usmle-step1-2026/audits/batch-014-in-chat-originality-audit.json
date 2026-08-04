@@ -1,0 +1,36 @@
+{
+  "schema_version": "aylamed-usmle-originality-audit-v1",
+  "batch_id": "usmle-step1-2026-b014-in-chat-original-20",
+  "audited_at": "2026-08-04T21:58:00+05:00",
+  "source_export": {
+    "file_name": "aylamed-qbank-json-no-media-2026-08-04(1).zip",
+    "records": 7937,
+    "usage": "coverage prioritization and pending full lexical-similarity screening",
+    "runtime_availability": "topic/title coverage signals available; user will patch full ZIP after Batch 014 construction"
+  },
+  "methodology": {
+    "generation": "all scenarios, choices, explanations, and SVGs written de novo",
+    "within_batch": "normalized exact comparison and five-token Jaccard across all new stems",
+    "external_screen": "pending complete 7,937-stem ZIP patch",
+    "publication_rule": "no import or publication before full automated and human similarity review"
+  },
+  "results": {
+    "stems_checked": 20,
+    "within_batch_exact_duplicates": 0,
+    "within_batch_duplicate_pairs": 0,
+    "max_within_batch_fivegram_jaccard": 0,
+    "max_pair": [
+      null,
+      null
+    ],
+    "full_7937_export_scan_status": "pending_user_zip_patch",
+    "external_close_paraphrase_flags": "not_yet_computed",
+    "copyright_disposition": "original private draft; publication blocked"
+  },
+  "reviewer_notes": [
+    "No proprietary stem, option, explanation, screenshot, or media was used.",
+    "All graphics are original AylaMed SVG teaching diagrams.",
+    "The full 7,937-stem score is deliberately not claimed before the ZIP is patched.",
+    "No merge, deployment, import, live-QBank write, or student publication is authorized."
+  ]
+}
