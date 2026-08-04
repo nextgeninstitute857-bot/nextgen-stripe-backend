@@ -54,6 +54,16 @@ The following are prohibited:
 - presenting AylaMed as approved, affiliated with, or sponsored by another QBank;
 - automatic publication of generated content.
 
+## Answer-position and distractor controls
+
+- Authored correct-answer positions are balanced across A-E rather than concentrated in A or B.
+- No authored answer position may exceed 30% within an option-count group.
+- The same authored answer position may not repeat more than three consecutive times.
+- Student delivery must reshuffle options independently for each question and attempt using a server-issued non-public attempt identifier.
+- Option IDs remain immutable, scoring occurs server-side by option ID, and `correct_option_id` must not be exposed before submission.
+- A resumed attempt must receive the same option order it had originally.
+- Distractors must remain medically plausible and must not reveal the answer through length, grammar, specificity, or obviously opposite wording.
+
 ## Draft lifecycle
 
 `research_seed -> generated_private_draft -> factual_review -> similarity_review -> media_review -> clinician_review -> approved_private -> separately authorized publication`
@@ -64,10 +74,13 @@ No stage in this branch performs production writes.
 
 - `source-register.json`: authoritative and signal sources with evidence status.
 - `priority-deltas.json`: 2026-specific priority matrix and media requirements.
+- `answer-order-policy.json`: authored-position limits and secure per-attempt student shuffling requirements.
 - `coverage/`: five-level coverage matrices with learning objectives and media requirements.
 - `drafts/`: original draft MCQs, answers, explanations, distractor rationales, references, and review gates.
 - `media/`: original schematic SVG files only; no copied clinical images.
+- `scripts/rebalance-usmle-answer-positions.mjs`: deterministic source-draft rebalancing while preserving option IDs and scoring correctness.
 - `scripts/validate-usmle-research-drafts.mjs`: fail-closed validation of draft status, taxonomy, answer structure, references, media ownership, and publication blocking.
+- `scripts/validate-usmle-answer-positions.mjs`: hard validation of authored answer-position balance and simulated student-facing shuffling.
 - future audit tooling: compare a read-only backend export against the five-level matrix and produce missing-topic and missing-media queues.
 
 ## Completed research batches
@@ -88,8 +101,9 @@ Before any generated question enters the live QBank, it must pass:
 
 1. taxonomy completeness;
 2. valid single-best-answer structure;
-3. factual-reference verification;
-4. automated and human similarity review;
-5. media ownership/licence verification;
-6. clinician review and approval;
-7. disabled/private import followed by a separate publication decision.
+3. authored answer-position balance and secure student-facing shuffling;
+4. factual-reference verification;
+5. automated and human similarity review;
+6. media ownership/licence verification;
+7. clinician review and approval;
+8. disabled/private import followed by a separate publication decision.
