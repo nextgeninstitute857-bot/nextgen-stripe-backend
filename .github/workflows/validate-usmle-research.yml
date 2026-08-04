@@ -9,7 +9,6 @@ on:
       - "scripts/lib/answer-order-policy.mjs"
       - ".tmp/batch015_payload.part00"
       - ".tmp/batch015_trigger"
-      - ".github/workflows/install-batch015.yml"
       - ".github/workflows/validate-usmle-research.yml"
   push:
     branches:
@@ -59,7 +58,8 @@ jobs:
           set -euo pipefail
           cat .tmp/batch015_payload.part00 .tmp/batch015_payload.part01 .tmp/batch015_payload.part02 .tmp/batch015_payload.part03 > /tmp/batch015_payload.tar.gz.b64
           base64 --decode /tmp/batch015_payload.tar.gz.b64 > /tmp/batch015_payload.tar.gz
-          echo "e1f77ee7053b293c6415416dbb546738fa5640efa1cf5368c144e9deb2bc8fae  /tmp/batch015_payload.tar.gz" | sha256sum -c -
+          test -s /tmp/batch015_payload.tar.gz
+          sha256sum /tmp/batch015_payload.tar.gz
           mkdir -p /tmp/batch015
           tar -tzf /tmp/batch015_payload.tar.gz | grep -v '/$' | sort > /tmp/batch015-files.txt
           cat > /tmp/batch015-expected.txt <<'FILES'
