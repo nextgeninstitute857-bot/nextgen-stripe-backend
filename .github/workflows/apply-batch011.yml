@@ -1,0 +1,62 @@
+name: Apply Batch 011 Research Package
+
+on:
+  push:
+    branches:
+      - research/usmle-step1-2026-original-qbank
+    paths:
+      - ".github/workflows/apply-batch011.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-batch011-research
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: research/usmle-step1-2026-original-qbank
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Reassemble and verify payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .tmp/batch011_payload.part0{1,2,3,4,5} > /tmp/batch011.tar.gz.b64
+          base64 -d /tmp/batch011.tar.gz.b64 > /tmp/batch011.tar.gz
+          tar -tzf /tmp/batch011.tar.gz > /tmp/batch011-entries.txt
+          if grep -E '(^/|(^|/)\.\.(/|$))' /tmp/batch011-entries.txt; then
+            echo "Unsafe archive path detected" >&2
+            exit 1
+          fi
+          grep -v '/$' /tmp/batch011-entries.txt > /tmp/batch011-files.txt
+          test "$(wc -l < /tmp/batch011-files.txt)" -eq 23
+          tar -xzf /tmp/batch011.tar.gz -C .
+      - name: Validate complete research bank
+        run: |
+          node scripts/validate-usmle-research-drafts.mjs
+          node scripts/validate-usmle-answer-positions.mjs
+          node scripts/validate-usmle-pilot-generator.mjs
+      - name: Commit complete package and remove transfer files
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .tmp/batch011_payload.part0{1,2,3,4,5}
+          rm -f .github/workflows/apply-batch011.yml
+          git config user.name "nextgeninstitute857-bot"
+          git config user.email "nextgeninstitute857-bot@users.noreply.github.com"
+          git add -A -- research/usmle-step1-2026 .tmp .github/workflows/apply-batch011.yml
+          git diff --cached --check
+          git commit -m "Add Batch 011 original media-first questions"
+          git push origin HEAD:research/usmle-step1-2026-original-qbank
+
+# Temporary branch-only workflow. It deletes itself and all payload parts.
+# It has no merge, deployment, live import, or publication step.
