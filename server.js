@@ -20,6 +20,7 @@ import {
   auditContentVideoAliasMappings,
   auditContentVideoMappings,
   applyAylaOriginalMcqRepair,
+  applyGuardedUworldCleanup,
   contentRegistryStatus,
   claimContentImportDraft,
   createContentBackgroundJobStore,
@@ -61,6 +62,7 @@ import {
   listContentTaxonomyReviewQueue,
   normalizeContentSourceProfile,
   previewAylaOriginalMcqRepair,
+  previewGuardedUworldCleanup,
   removeContentQuestionTaxonomyOverride,
   recordExternalQbankAuditEvent,
   recordExternalQbankDeliveryAnswer,
@@ -335,7 +337,7 @@ import { contentJobMonitoring } from "./lib/content-job-monitoring.js";
 import { ResumableContentUploadStore } from "./lib/resumable-content-upload.js";
 import { CloudContentUploadStore } from "./lib/cloud-content-upload.js";
 import { contentZipSourceExists } from "./lib/content-zip-source.js";
-import { ensureContentR2BrowserCors } from "./lib/content-r2-storage.js";
+import { deleteContentR2Object, ensureContentR2BrowserCors } from "./lib/content-r2-storage.js";
 import { storagePerformanceSnapshot } from "./lib/operations-monitoring.js";
 import {
   contentMediaStatus,
@@ -39891,6 +39893,85 @@ app.post("/api/ayla/admin/catalog/image-mcq-repair/apply", async (req, res) => {
       error.message || "Failed to apply the image-MCQ repair",
       { ...(error.code ? { code: error.code } : {}), ...(error.details ? { details: error.details } : {}) },
     );
+  }
+});
+
+async function ngGuardedUworldCleanupPreview() {
+  const database = await previewGuardedUworldCleanup();
+  const uploads = await ngContentUploadStore.list({ limit: 200 });
+  const archiveCandidates = uploads.filter((upload) =>
+    /^uworld 1\.zip$/i.test(String(upload.original_filename || "").trim())
+    && Number(upload.total_bytes || 0) >= 8 * 1024 ** 3
+    && Number(upload.total_bytes || 0) <= 10 * 1024 ** 3
+    && String(upload.purpose || "") === "question_zip"
+    && String(upload.status || "") === "finalized"
+    && Number(upload.active_leases || 0) === 0);
+  const archive = archiveCandidates.length === 1 ? archiveCandidates[0] : null;
+  const snapshot = {
+    database_fingerprint: database.fingerprint,
+    archive: archive ? {
+      id: archive.id,
+      original_filename: archive.original_filename,
+      total_bytes: Number(archive.total_bytes || 0),
+      fingerprint: archive.fingerprint || "",
+      status: archive.status,
+    } : null,
+  };
+  const fingerprint = crypto.createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
+  return {
+    ready: database.ready && archiveCandidates.length === 1,
+    fingerprint,
+    database,
+    archive: snapshot.archive,
+    checks: {
+      ...database.checks,
+      archive_exact: archiveCandidates.length === 1,
+    },
+    write_performed: false,
+  };
+}
+
+app.get("/api/ayla/admin/catalog/uworld-cleanup/preview", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  try {
+    await aylaRequireAdmin(req);
+    return aylaSendOk(res, await ngGuardedUworldCleanupPreview());
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message, error.details || null);
+  }
+});
+
+app.post("/api/ayla/admin/catalog/uworld-cleanup/apply", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  try {
+    await aylaRequireAdmin(req);
+    const preflight = await ngGuardedUworldCleanupPreview();
+    const expected = String(req.body?.expected_fingerprint || req.body?.expectedFingerprint || "");
+    if (!preflight.ready || !expected || expected !== preflight.fingerprint) {
+      return aylaSendError(res, 409, "UWorld cleanup preflight changed or did not pass; nothing was deleted", { preflight });
+    }
+    const database = await applyGuardedUworldCleanup({
+      expectedFingerprint: preflight.database.fingerprint,
+    });
+    const failedR2Objects = [];
+    for (const objectKey of database.r2_object_keys) {
+      try { await deleteContentR2Object(objectKey); }
+      catch (error) { failedR2Objects.push({ object_key: objectKey, error: String(error.message || error) }); }
+    }
+    let archive;
+    try { archive = await ngContentUploadStore.cancel(preflight.archive.id); }
+    catch (error) { archive = { id: preflight.archive.id, deleted: false, error: String(error.message || error) }; }
+    return aylaSendOk(res, {
+      database: { ...database, r2_object_keys: undefined },
+      media_objects_requested: database.r2_object_keys.length,
+      media_objects_failed: failedR2Objects,
+      archive,
+      storage_cleanup_complete: failedR2Objects.length === 0 && !archive?.error,
+      global_student_access: false,
+      preserved: ["AylaMed student history", "Vimeo", "notes", "recordings", "unrelated AylaMed-owned content"],
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message, error.details || null);
   }
 });
 
