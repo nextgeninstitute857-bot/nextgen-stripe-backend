@@ -78805,6 +78805,102 @@ app.get("/api/ayla/admin/resources/vimeo-catalog/summary", async (req, res) => {
   }
 });
 
+function aylaVimeoNoCreditExportRecord(row = {}) {
+  const classification = row.classification || {};
+  const qbankTopic = classification.qbankTopic || {};
+  const seedMapping = row.seedMapping || {};
+  return {
+    draft_id: String(row.id || "").trim(),
+    revision: Number(row.revision || 0),
+    exam_track_id: String(row.examTrackId || "").trim(),
+    vimeo_id: String(row.vimeoId || "").trim(),
+    source_title: String(row.sourceTitle || "").trim(),
+    source_description: String(row.sourceDescription || "").trim(),
+    folder_id: String(row.folderId || "").trim(),
+    folder_membership_status: String(row.folderMembershipStatus || "present").trim(),
+    status: String(row.status || "").trim(),
+    review_status: String(row.reviewStatus || "").trim(),
+    classification_status: String(row.classificationStatus || "").trim(),
+    seed_mapping: {
+      system: String(seedMapping.system || "").trim(),
+      subsystem: String(seedMapping.subsystem || "").trim(),
+      topic: String(seedMapping.topic || "").trim(),
+      subtopic: String(seedMapping.subtopic || "").trim(),
+    },
+    current_classification: {
+      system: String(classification.medicalSystem || "").trim(),
+      subsystem: String(classification.medicalSubsystem || qbankTopic.subsystemKey || "").trim(),
+      topic: String(classification.canonicalTopic || qbankTopic.topicKey || "").trim(),
+      subtopic: String(classification.subtopic || qbankTopic.subtopicKey || "").trim(),
+      confidence_percent: Number(classification.confidencePercent || 0),
+      approval_readiness: String(classification.approvalReadiness || "").trim(),
+    },
+  };
+}
+
+app.get("/api/ayla/admin/resources/vimeo-catalog/export-link", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const requestedExam = String(req.query.exam_track || req.query.examTrack || "").trim();
+    const examTrackId = requestedExam ? aylaCanonicalExamTrack(requestedExam) : "";
+    if (requestedExam && !examTrackId) return aylaSendError(res, 400, "Unsupported exam_track");
+    const token = jwt.sign({
+      scope: "aylamed_vimeo_catalog_read_only_export",
+      exam_track_id: examTrackId,
+    }, AYLA_AUTH_JWT_SECRET, { expiresIn: "5m" });
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, {
+      download_path: `/api/ayla/admin/resources/vimeo-catalog/export?token=${encodeURIComponent(token)}`,
+      expires_in_seconds: 300,
+      video_only: true,
+      read_only: true,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to prepare the Vimeo export link");
+  }
+});
+
+app.get("/api/ayla/admin/resources/vimeo-catalog/export", async (req, res) => {
+  try {
+    const decoded = jwt.verify(String(req.query.token || ""), AYLA_AUTH_JWT_SECRET);
+    if (decoded?.scope !== "aylamed_vimeo_catalog_read_only_export") {
+      return aylaSendError(res, 403, "Invalid Vimeo export scope");
+    }
+    const examTrackId = String(decoded.exam_track_id || "").trim();
+    const db = await readAylaDb();
+    const drafts = aylaValues(db, "aylaVimeoCatalogDrafts")
+      .filter((row) => !examTrackId || row.examTrackId === examTrackId)
+      .sort((left, right) => String(left.sourceTitle || "").localeCompare(String(right.sourceTitle || "")));
+    const exportedAt = aylaNow();
+    const payload = {
+      export_version: "aylamed-vimeo-catalog-v1",
+      exported_at: exportedAt,
+      exam_track: examTrackId,
+      hierarchy: ["exam", "system", "subsystem", "topic", "subtopic"],
+      safeguards: {
+        read_only: true,
+        writes_performed: 0,
+        vimeo_results_private_until_manual_approval: true,
+        classifier_jobs_started: 0,
+      },
+      vimeo: {
+        record_count: drafts.length,
+        summary: vimeoCatalogSummary(drafts),
+        taxonomy: examTrackId ? aylaContentHubTaxonomyDefinition(examTrackId) : null,
+        records: drafts.map(aylaVimeoNoCreditExportRecord),
+      },
+    };
+    const filename = `aylamed-vimeo-catalog-${exportedAt.slice(0, 10)}.json`;
+    res.setHeader("Cache-Control", "private, no-store");
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    return res.status(200).send(JSON.stringify(payload, null, 2));
+  } catch (error) {
+    const status = ["JsonWebTokenError", "TokenExpiredError"].includes(error?.name) ? 401 : (error.statusCode || 500);
+    return aylaSendError(res, status, status === 401 ? "The Vimeo export link is invalid or expired" : (error.message || "Failed to download the Vimeo catalogue"));
+  }
+});
+
 app.post("/api/ayla/admin/resources/vimeo-catalog/classification-jobs", async (req, res) => {
   try {
     const auth = await aylaRequireAdmin(req);
