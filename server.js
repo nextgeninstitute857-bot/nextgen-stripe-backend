@@ -39880,7 +39880,7 @@ app.post("/api/ayla/admin/catalog/owned-collections/:collectionId/student-access
   try {
     const admin = await aylaRequireAdmin(req);
     const studentId = String(req.body.student_id || req.body.studentId || "").trim().toLowerCase();
-    if (!/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(studentId)) {
+    if (!/^(?:[0-9a-f]{8}-[0-9a-f-]{27}|dx-[0-9]{6}-[0-9a-f]{8})$/i.test(studentId)) {
       return aylaSendError(res, 400, "A valid AylaMed student_id is required");
     }
     const db = await readAylaDb();
