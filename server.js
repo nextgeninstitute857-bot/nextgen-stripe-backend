@@ -60724,8 +60724,7 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday-repair", async (req, res) 
       if (system && systemDay) return masterRows.find((row) => normalizedSystem(row.system) === system && Number(row.system_day) === systemDay) || null;
       return null;
     };
-    const canonicalPacketForDay = (day) => {
-      const row = masterRowForDay(day);
+    const canonicalPacketForDay = (day, row) => {
       if (!row) return null;
       const canonical = ngBuildMarathonDayFromMasterRow({
         courseId,
@@ -60755,7 +60754,22 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday-repair", async (req, res) 
       roadmap_updated_at: sourceRef.roadmap.updated_at || "", anchors,
     });
     const previewToken = crypto.createHash("sha256").update(snapshotInput).digest("hex");
-    const canonicalPackets = activeTail.map(canonicalPacketForDay);
+    const originalPacket = sourceRef.day.original_day_snapshot || {};
+    const originalRow = masterRowForDay(originalPacket);
+    const originalRowIndex = originalRow
+      ? masterRows.findIndex((row) => Number(row.source_index) === Number(originalRow.source_index))
+      : -1;
+    if (originalRowIndex < 0) {
+      return res.status(409).json({
+        success: false,
+        error: "The holiday's original academic packet could not be matched to the stored master map; no repair was attempted",
+      });
+    }
+    const canonicalRows = activeTail.map((day, index) => masterRows[originalRowIndex + index] || null);
+    if (canonicalRows.some((row) => !row)) {
+      return res.status(409).json({ success: false, error: "The stored master map ended before the roadmap tail; no repair was attempted" });
+    }
+    const canonicalPackets = activeTail.map((day, index) => canonicalPacketForDay(day, canonicalRows[index]));
     const unmatched = activeTail.filter((day, index) => !canonicalPackets[index]).map((day) => ({ day_id: day.id, date: day.date, title: day.title }));
     if (unmatched.length) {
       return res.status(409).json({ success: false, error: "Some roadmap days could not be matched to the stored master map; no repair was attempted", unmatched });
@@ -60788,7 +60802,7 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday-repair", async (req, res) 
     const workingDb = clone(sourceDb);
     const ref = ngFindAdminRoadmapDayRef(workingDb, { courseId, dayId: req.params.dayId });
     const workingTail = ref.roadmap.days.slice(ref.index + 1).filter((day) => !ngRoadmapDayIsNoClass(day));
-    const workingPackets = workingTail.map(canonicalPacketForDay);
+    const workingPackets = workingTail.map((day, index) => canonicalPacketForDay(day, canonicalRows[index]));
     if (workingPackets.some((packet) => !packet)) {
       return res.status(409).json({ success: false, error: "Roadmap changed after preview and no longer matches the stored master map. Nothing was saved." });
     }
