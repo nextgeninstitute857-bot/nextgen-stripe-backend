@@ -8,6 +8,7 @@ test("owned catalogue supports exact-student delivery without global publication
   assert.match(server, /AYLA_STUDENT_CATALOG_SCOPE_PREFIX = "student:"/);
   assert.match(server, /function aylaStudentCatalogDestinationScope/);
   assert.match(server, /owned-collections\/:collectionId\/student-access/);
+  assert.match(server, /dx-\[0-9\]\{6\}-\[0-9a-f\]\{8\}/i);
   assert.match(server, /source_profile \|\| ""\) !== "aylamed_original"/);
   assert.match(server, /destination_scope: "", enabled: false/);
   assert.match(server, /destination_scope: destinationScope, enabled: true/);
