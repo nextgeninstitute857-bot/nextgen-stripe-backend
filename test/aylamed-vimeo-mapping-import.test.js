@@ -1,0 +1,62 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import {
+  applyAylaVimeoMappings,
+  validateAylaVimeoMappingImport,
+} from "../lib/aylamed-vimeo-mapping-import.js";
+
+const mappings = Array.from({ length: 491 }, (_, index) => ({
+  vimeo_id: String(1000 + index), source_title: `Lecture ${index}`,
+  proposed_exam: "USMLE Step 1", proposed_system: "Renal",
+  proposed_subsystem: "Physiology", proposed_topic: `Topic ${index}`,
+  proposed_subtopic: `Subtopic ${index}`, confidence_percent: 98,
+  decision: "reviewed_offline", production_action: "none",
+}));
+const drafts = mappings.map((row, index) => ({
+  id: `draft-${index}`, vimeoId: row.vimeo_id, sourceTitle: row.source_title,
+  folderId: "29973623", status: "classification_failed", reviewStatus: "pending",
+  approved: false, revision: 3,
+}));
+
+test("dry-run validates all 491 mappings without writes", () => {
+  const result = validateAylaVimeoMappingImport({ mappings, drafts });
+  assert.equal(result.valid, true);
+  assert.equal(result.mapping_count, 491);
+  assert.equal(result.unique_vimeo_ids, 491);
+  assert.equal(result.safeguards.creates_active_resources, false);
+});
+
+test("dry-run rejects incomplete hierarchy and duplicate IDs", () => {
+  const broken = mappings.map((row) => ({ ...row }));
+  broken[0].proposed_subtopic = "";
+  broken[1].vimeo_id = broken[0].vimeo_id;
+  const result = validateAylaVimeoMappingImport({ mappings: broken, drafts });
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.some((error) => error.includes("subtopic is required")));
+  assert.ok(result.errors.some((error) => error.includes("duplicate vimeo_id")));
+});
+
+test("apply changes hierarchy only and preserves private approval state", () => {
+  const validation = validateAylaVimeoMappingImport({ mappings, drafts });
+  const result = applyAylaVimeoMappings(drafts, validation, { actor: { id: "admin-1" }, now: new Date("2026-08-05T00:00:00Z") });
+  assert.equal(result.updated, 491);
+  assert.equal(result.drafts[0].status, "classification_failed");
+  assert.equal(result.drafts[0].reviewStatus, "pending");
+  assert.equal(result.drafts[0].approved, false);
+  assert.equal(result.drafts[0].classification.subtopic, "Subtopic 0");
+  assert.equal(result.drafts[0].classification.approvalReadiness, "ready_for_owner_approval");
+});
+
+test("server exposes validation-first import with fingerprint and confirmation gates", () => {
+  const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
+  const start = server.indexOf('app.post("/api/ayla/admin/resources/vimeo-catalog/mapping-import"');
+  const end = server.indexOf('app.post("/api/ayla/admin/resources/vimeo-catalog/classification-jobs"', start);
+  const route = server.slice(start, end);
+  assert.ok(start > 0 && end > start);
+  assert.match(route, /expectedFingerprint !== validation\.fingerprint/);
+  assert.match(route, /APPLY_PRIVATE_VIMEO_MAPPINGS_/);
+  assert.match(route, /active_resources_created: 0/);
+  assert.match(route, /classifier_jobs_started: 0/);
+  assert.match(route, /mapped_but_inactive_until_manual_approval/);
+});

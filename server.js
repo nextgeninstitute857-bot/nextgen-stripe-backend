@@ -392,6 +392,11 @@ import {
   vimeoCatalogSummary,
 } from "./lib/vimeo-library-manifest.js";
 import {
+  AYLA_VIMEO_MAPPING_EXPECTED_COUNT,
+  applyAylaVimeoMappings,
+  validateAylaVimeoMappingImport,
+} from "./lib/aylamed-vimeo-mapping-import.js";
+import {
   AdaptiveCapacityGate,
   MULTI_QBANK_INGESTION_BUILD,
   buildQbankIngestionDashboard,
@@ -79146,6 +79151,71 @@ app.get("/api/ayla/admin/resources/vimeo-catalog/export", async (req, res) => {
   } catch (error) {
     const status = ["JsonWebTokenError", "TokenExpiredError"].includes(error?.name) ? 401 : (error.statusCode || 500);
     return aylaSendError(res, status, status === 401 ? "The Vimeo export link is invalid or expired" : (error.message || "Failed to download the Vimeo catalogue"));
+  }
+});
+
+app.post("/api/ayla/admin/resources/vimeo-catalog/mapping-import", async (req, res) => {
+  try {
+    const auth = await aylaRequireAdmin(req);
+    const mappings = Array.isArray(req.body?.mappings) ? req.body.mappings : [];
+    const apply = req.body?.apply === true;
+    const snapshot = await readAylaDb();
+    const drafts = aylaValues(snapshot, "aylaVimeoCatalogDrafts");
+    const validation = validateAylaVimeoMappingImport({ mappings, drafts });
+    const publicValidation = {
+      ...validation,
+      normalized_mappings: undefined,
+      dry_run: !apply,
+    };
+    res.setHeader("Cache-Control", "private, no-store");
+    if (!validation.valid) return aylaSendError(res, 422, "Vimeo mapping import validation failed", publicValidation);
+    if (!apply) return aylaSendOk(res, publicValidation);
+
+    const expectedFingerprint = String(req.body?.expected_fingerprint || req.body?.expectedFingerprint || "").trim();
+    const confirmation = String(req.body?.confirmation || "").trim();
+    if (confirmation !== `APPLY_PRIVATE_VIMEO_MAPPINGS_${AYLA_VIMEO_MAPPING_EXPECTED_COUNT}`) {
+      return aylaSendError(res, 400, `confirmation must be APPLY_PRIVATE_VIMEO_MAPPINGS_${AYLA_VIMEO_MAPPING_EXPECTED_COUNT}`);
+    }
+    if (!expectedFingerprint || expectedFingerprint !== validation.fingerprint) {
+      return aylaSendError(res, 409, "Mapping fingerprint changed after dry-run; validate again before applying");
+    }
+
+    const actor = aylaVimeoCatalogAdminActor(auth);
+    const applied = await mutateAylaDb(async (db) => {
+      const currentDrafts = aylaValues(db, "aylaVimeoCatalogDrafts");
+      const currentValidation = validateAylaVimeoMappingImport({ mappings, drafts: currentDrafts });
+      if (!currentValidation.valid || currentValidation.fingerprint !== expectedFingerprint) {
+        const error = new Error("Catalogue or mapping input changed after dry-run; no mappings were applied");
+        error.statusCode = 409;
+        throw error;
+      }
+      const result = applyAylaVimeoMappings(currentDrafts, currentValidation, { actor });
+      for (const draft of result.drafts) aylaSetItem(db, "aylaVimeoCatalogDrafts", draft);
+      await aylaLog(db, "vimeo-mapping-import", "Private Vimeo catalogue mappings imported", {
+        count: result.updated,
+        fingerprint: result.fingerprint,
+        actor,
+        statuses_preserved: true,
+        approvals_preserved: true,
+        active_resources_created: 0,
+        classifier_jobs_started: 0,
+      });
+      return result;
+    });
+    return aylaSendOk(res, {
+      build: validation.build,
+      applied: true,
+      updated: applied.updated,
+      fingerprint: applied.fingerprint,
+      hierarchy_complete: applied.updated,
+      active_resources_created: 0,
+      approvals_changed: 0,
+      classifier_jobs_started: 0,
+      videos_remain_private: true,
+      scheduler_state: "mapped_but_inactive_until_manual_approval",
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to import Vimeo catalogue mappings");
   }
 });
 
