@@ -78713,6 +78713,9 @@ app.get("/api/ayla/admin/resources/vimeo-catalog", async (req, res) => {
     const search = String(req.query.q || req.query.search || "").trim().toLowerCase().slice(0, 180);
     const limit = Math.max(1, Math.min(200, Number(req.query.limit || 50)));
     const offset = Math.max(0, Number(req.query.offset || 0));
+    const includeSummary = String(
+      req.query.include_summary ?? req.query.includeSummary ?? (offset === 0 ? "true" : "false"),
+    ).toLowerCase() !== "false";
     const scoped = aylaValues(db, "aylaVimeoCatalogDrafts")
       .filter((row) => (!examTrackId || row.examTrackId === examTrackId)
         && (!sourceId || String(row.catalogSourceId || "") === sourceId));
@@ -78753,8 +78756,10 @@ app.get("/api/ayla/admin/resources/vimeo-catalog", async (req, res) => {
       limit,
       offset,
       has_more: offset + limit < filtered.length,
-      summary: vimeoCatalogSummary(scoped),
-      delivery_control_summary: summarizeAylaVimeoDeliveryControls(deliveryControls),
+      summary: includeSummary ? vimeoCatalogSummary(scoped) : null,
+      delivery_control_summary: includeSummary
+        ? summarizeAylaVimeoDeliveryControls(deliveryControls)
+        : null,
       taxonomy: examTrackId ? aylaContentHubTaxonomyDefinition(examTrackId) : null,
       drafts: filtered.slice(offset, offset + limit)
         .map((draft) => aylaVimeoDeliveryAdminView({
@@ -78767,6 +78772,36 @@ app.get("/api/ayla/admin/resources/vimeo-catalog", async (req, res) => {
     });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load Vimeo catalog");
+  }
+});
+
+app.get("/api/ayla/admin/resources/vimeo-catalog/summary", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
+    const requestedExam = String(req.query.exam_track || req.query.examTrack || "").trim();
+    const examTrackId = requestedExam ? aylaCanonicalExamTrack(requestedExam) : "";
+    if (requestedExam && !examTrackId) return aylaSendError(res, 400, "Unsupported exam_track");
+    const sourceId = String(req.query.source_id || req.query.sourceId || "").trim();
+    const drafts = aylaValues(db, "aylaVimeoCatalogDrafts")
+      .filter((row) => (!examTrackId || row.examTrackId === examTrackId)
+        && (!sourceId || String(row.catalogSourceId || "") === sourceId));
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, {
+      build: AYLA_VIMEO_CATALOG_BUILD,
+      checked_at: aylaNow(),
+      summary: vimeoCatalogSummary(drafts),
+      delivery_control_summary: summarizeAylaVimeoDeliveryControls(
+        aylaVimeoDeliveryControls(db),
+      ),
+      read_only: true,
+    });
+  } catch (error) {
+    return aylaSendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Failed to load Vimeo catalog summary",
+    );
   }
 });
 
@@ -79144,7 +79179,10 @@ app.post("/api/ayla/admin/resources/classifier-preflight", async (req, res) => {
 app.get("/api/ayla/admin/resources/classification-status", async (req, res) => {
   try {
     await aylaRequireAdmin(req);
-    await ngContentBackgroundQueue.initialize();
+    // A read-only safety check must never initialize or recover the background
+    // queue. Queue recovery can involve persistent I/O and dispatch scheduling;
+    // the admin page only needs the state already available in this process.
+    const queueReady = ngContentBackgroundQueue.initialized === true;
     const requestedExam = String(
       req.query.exam_track || req.query.examTrack || "",
     ).trim();
@@ -79157,14 +79195,14 @@ app.get("/api/ayla/admin/resources/classification-status", async (req, res) => {
     }
     const db = await readAylaDb();
     const latestVimeoJob = aylaLatestVimeoCatalogJob(db, vimeoExamTrackId);
-    const vimeoQueueJobs = latestVimeoJob
+    const vimeoQueueJobs = queueReady && latestVimeoJob
       ? aylaVimeoCatalogQueueJobs(latestVimeoJob.id)
       : [];
-    const latestMcqJob = ngContentBackgroundQueue.list({
+    const latestMcqJob = queueReady ? ngContentBackgroundQueue.list({
       type: "content_taxonomy_provider_pair_classification",
       limit: 100,
     }).find((job) => !mcqExamTrack
-      || String(job.metadata?.exam_track || "") === mcqExamTrack) || null;
+      || String(job.metadata?.exam_track || "") === mcqExamTrack) || null : null;
     const vimeoDrafts = aylaValues(db, "aylaVimeoCatalogDrafts")
       .filter((draft) => !vimeoExamTrackId || draft.examTrackId === vimeoExamTrackId);
     res.setHeader("Cache-Control", "private, no-store");
@@ -79186,7 +79224,9 @@ app.get("/api/ayla/admin/resources/classification-status", async (req, res) => {
             AYLA_VIMEO_DISPATCH_ACTIVE_STATUSES.has(String(row.status || ""))),
         },
       },
-      content_queue: ngContentBackgroundQueue.summary(),
+      content_queue: queueReady
+        ? ngContentBackgroundQueue.summary()
+        : { initialized: false, recovery_pending: true },
       safety: {
         build: AYLA_VIMEO_CLASSIFIER_SAFETY_BUILD,
         vimeo_results_private_until_review: true,
@@ -79196,6 +79236,7 @@ app.get("/api/ayla/admin/resources/classification-status", async (req, res) => {
         automatic_vimeo_approval: AYLA_VIMEO_CLASSIFIER_SAFETY_POLICY.automaticApprovalEnabled,
         vimeo_worker_max_attempts: AYLA_VIMEO_CLASSIFIER_SAFETY_POLICY.workerMaxAttempts,
         no_write_classifier_preflight: true,
+        read_only_status_initializes_queue: false,
         student_records_changed: false,
       },
     });
