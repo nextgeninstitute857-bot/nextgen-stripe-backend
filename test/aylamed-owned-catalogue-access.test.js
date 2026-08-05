@@ -19,8 +19,15 @@ test("owned catalogue supports exact-student delivery without global publication
 
 test("ordinary full-access students resolve to a stable private catalogue scope", () => {
   assert.match(server, /return pilotScope/);
+  assert.match(server, /dx-\[0-9\]\{6\}-\[0-9a-f\]\{8\}/i);
   assert.match(server, /`\$\{AYLA_STUDENT_CATALOG_SCOPE_PREFIX\}\$\{studentId\}`/);
   assert.ok((server.match(/aylaStudentCatalogDestinationScope\((?:auth\.)?student\)/g) || []).length >= 3);
+});
+
+test("owned catalogue assignment resolves native AylaMed IDs case-insensitively", () => {
+  assert.match(server, /aylaValues\(db, "aylaStudents"\)\.find/);
+  assert.match(server, /row\.id \|\| row\.student_id \|\| row\.studentId/);
+  assert.match(server, /\.trim\(\)\.toLowerCase\(\) === studentId/);
 });
 
 test("owned catalogue importer accepts the existing AylaMed admin session", () => {
