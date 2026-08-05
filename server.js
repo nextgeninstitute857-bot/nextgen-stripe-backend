@@ -586,7 +586,7 @@ function aylaStudentCatalogDestinationScope(student = {}) {
   const pilotScope = aylaStep1PilotDestinationScope(student);
   if (pilotScope) return pilotScope;
   const studentId = String(student.id || student.student_id || student.studentId || "").trim().toLowerCase();
-  return /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(studentId)
+  return /^(?:[0-9a-f]{8}-[0-9a-f-]{27}|dx-[0-9]{6}-[0-9a-f]{8})$/i.test(studentId)
     ? `${AYLA_STUDENT_CATALOG_SCOPE_PREFIX}${studentId}`
     : "";
 }
@@ -39904,7 +39904,9 @@ app.post("/api/ayla/admin/catalog/owned-collections/:collectionId/student-access
       return aylaSendError(res, 400, "A valid AylaMed student_id is required");
     }
     const db = await readAylaDb();
-    const student = aylaGetItem(db, "aylaStudents", studentId);
+    const student = aylaValues(db, "aylaStudents").find((row) => (
+      String(row.id || row.student_id || row.studentId || "").trim().toLowerCase() === studentId
+    )) || null;
     if (!student) return aylaSendError(res, 404, "AylaMed student not found");
     const examTrack = normalizeAylaRegistryExamTrack(
       student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam,
