@@ -10085,14 +10085,16 @@ The server adds the lecture title once. Do not invent or repeat a different titl
 - If the tutor assigned pages, questions, videos, homework, or review work, begin with:
   ## Session Task
   A short faithful sentence followed by bullet points.
-- Use numbered, bold-looking Markdown topic headings:
+- Use numbered Markdown topic headings only for the lecture's major topics:
   ## 1. Main Topic
   ## 2. Next Main Topic
 - Use:
   ### Key question or subtopic
   for important questions and subtopics.
 - Use **bold** for important medical terms, diagnoses, mechanisms, formulas, and memory points.
-- Use bullets for lists, sequences, comparisons, features, causes, and steps.
+- Use normal bullet points for related facts, features, causes, comparisons, examples, and non-sequential explanations.
+- Use numbered points (1., 2., 3.) only when order matters: mechanisms, workflows, tutor-taught sequences, ranked items, or explicit steps.
+- Do not force every paragraph or point into numbering. A natural mixture of short explanatory paragraphs, bullets, and numbered points is required.
 - Keep paragraphs short and readable.
 - Put --- between major numbered topics when it improves readability.
 - Do not add a Conclusion, Summary, Important Takeaways, or Homework section unless the tutor explicitly taught or assigned it.
@@ -10165,7 +10167,7 @@ Important:
 - If this part contains homework, preserve it.
 - If this is not the first part, continue naturally without restarting the whole lecture.
 - Do not add an H1 title; the server adds the lecture title once.
-- Follow the numbered headings, bold terms, short paragraphs, and bullet style exactly.
+- Follow the bold headings, short explanatory paragraphs, bullet points, and numbered points style exactly. Number only major topics and genuinely ordered steps.
 
 TRANSCRIPT PART:
 ${chunks[index]}
@@ -15928,6 +15930,12 @@ async function saveNotesHandler(req, res) {
       user,
       publishMode: "save",
     });
+
+    // Publish substantive transcript-derived notes immediately after save,
+    // while preserving manual drafts and deliberate manual unpublishing.
+    const auto_publish_reconciliation = reconcileLmsSessionNoteInvariants(db, {
+      autoPublish: ngAutoPublishSessionNotesEnabled(),
+    });
     ngSyncSessionNoteStatusToRoadmap(db, sessionId, db.notes[sessionId]);
 
     let flashcard_sync = null;
@@ -15941,7 +15949,15 @@ async function saveNotesHandler(req, res) {
     }
 
     await writeLiveDb(db);
-    res.json({ success: true, message: "Notes saved successfully", notes: db.notes[sessionId], flashcard_sync });
+    res.json({
+      success: true,
+      message: db.notes[sessionId]?.published === true || db.notes[sessionId]?.is_published === true
+        ? "Notes saved and published successfully"
+        : "Notes saved successfully",
+      notes: db.notes[sessionId],
+      flashcard_sync,
+      auto_published: auto_publish_reconciliation.session_ids.includes(sessionId),
+    });
   } catch (e) {
     res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to save notes" });
   }
@@ -18998,14 +19014,14 @@ app.get("/student/notes/sessions", async (req, res) => {
       ? allCourses.filter((course) => String(course.id) === requestedCourseId)
       : allCourses;
 
-    const autoRoadmapSync = ngAutoSyncRoadmapLiveSessionsForCourses(
-      db,
-      coursesToCheck
-        .filter((course) => ngStudentHasCourseAccessStatus(ngStudentEnrollmentStatusForCourse(db, user, course.id).status))
-        .map((course) => course.id),
-      { actorId: user.id || "student_notes_title_sync" }
-    );
-    if (autoRoadmapSync.changed) await writeLiveDb(db);
+    // Student Notes is a read path. Schedule reconciliation here could rewrite
+    // the full database on every page visit and block unrelated requests.
+    const autoRoadmapSync = {
+      checked: 0,
+      changed: false,
+      skipped: true,
+      reason: "student_notes_read_only",
+    };
 
     const bundles = coursesToCheck.map((course) => {
       const access = ngStudentEnrollmentStatusForCourse(db, user, course.id);
