@@ -60382,6 +60382,12 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
       "first_aid_pages", "fa_pages", "first_aid_topics", "uworld_qids", "qids", "resources", "tasks",
       "homework", "learning_objectives", "assessment_id", "assessment_ids", "flashcard_deck_id",
       "video_id", "video_ids", "video_resources", "notes_template", "template", "content_packet_id",
+      "mapped_uworld_qids", "question_ids", "qid_list", "qid_count", "uworld_target", "uworld_task",
+      "live_teaching_topic", "lecture_id", "lecture_title", "video_library_lecture",
+      "video_library_lecture_id", "video_lecture", "library_lecture", "recorded_lecture",
+      "task", "daily_task", "task_items", "community_prompt", "assessment_task", "assessment_day",
+      "flashcard_tags", "resource_links", "video_url", "video_lecture_url", "library_video_url",
+      "system_day", "day_in_system", "day_number", "instructional_day_number",
     ];
     const packetOf = (day) => Object.fromEntries(packetFields.filter((key) => day[key] !== undefined).map((key) => [key, clone(day[key])]));
     const protectedIdentityAndUrls = (item = {}) => Object.fromEntries(Object.entries(item).filter(([key]) => (
@@ -60487,6 +60493,114 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to apply recording-safe retrospective holiday" });
+  }
+});
+
+// Repairs the one known partial packet transfer created by the first
+// retrospective-holiday implementation. The holiday snapshot and the
+// destination rows retain every omitted value, so recovery is deterministic:
+// only the academic fields that were left behind move forward one anchor.
+// Dates and all recording/session identities remain immutable.
+app.post("/admin/roadmap/:dayId/retrospective-holiday-repair", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.roadmap.manage");
+    const sourceDb = await readLiveDb();
+    const clone = (value) => JSON.parse(JSON.stringify(value));
+    const courseId = String(req.body.course_id || req.body.courseId || "").trim();
+    const sourceRef = ngFindAdminRoadmapDayRef(sourceDb, { courseId, dayId: req.params.dayId });
+    if (!sourceRef.roadmap || !sourceRef.day) return res.status(404).json({ success: false, error: "Roadmap item not found" });
+    if (!ngRoadmapDayIsNoClass(sourceRef.day) || !sourceRef.day.original_day_snapshot) {
+      return res.status(409).json({ success: false, error: "Repair requires the applied retrospective holiday and its original snapshot" });
+    }
+
+    const holidayDate = ngKnownScheduleDate(sourceRef.day.date || sourceRef.day.scheduled_date);
+    const activeTail = sourceRef.roadmap.days.slice(sourceRef.index + 1).filter((day) => !ngRoadmapDayIsNoClass(day));
+    if (!activeTail.length) return res.status(409).json({ success: false, error: "No downstream academic packets were found" });
+
+    const repairFields = [
+      "title", "system_day", "day_in_system", "day_number", "instructional_day_number",
+      "mapped_uworld_qids", "question_ids", "qid_list", "qid_count", "uworld_target", "uworld_task",
+      "live_teaching_topic", "lecture_id", "lecture_title", "video_library_lecture",
+      "video_library_lecture_id", "video_lecture", "library_lecture", "recorded_lecture",
+      "task", "daily_task", "task_items", "community_prompt", "assessment_task", "assessment_day",
+      "flashcard_tags", "resource_links", "video_url", "video_lecture_url", "library_video_url",
+    ];
+    const protectedIdentityAndUrls = (item = {}) => Object.fromEntries(Object.entries(item).filter(([key]) => (
+      key === "id" || key === "recording_key" || key === "recording_id" || key === "meeting_id" ||
+      key === "zoom_meeting_id" || key === "session_id" || key.endsWith("_url") || key.endsWith("_urls")
+    )));
+    const beforeRecordings = Object.fromEntries(Object.entries(sourceDb.recordings || {}).map(([id, item]) => [id, protectedIdentityAndUrls(item)]));
+    const beforeSessions = Object.fromEntries(Object.entries(sourceDb.liveSessions || {}).map(([id, item]) => [id, protectedIdentityAndUrls(item)]));
+    const anchors = activeTail.map((day) => ({
+      day_id: String(day.id || ""),
+      date: ngKnownScheduleDate(day.date || day.scheduled_date),
+      session_id: String(day.live_session_id || day.session_id || ""),
+    }));
+    const snapshotInput = JSON.stringify({
+      courseId, holiday_day_id: String(sourceRef.day.id || ""), holidayDate,
+      roadmap_updated_at: sourceRef.roadmap.updated_at || "", anchors,
+    });
+    const previewToken = crypto.createHash("sha256").update(snapshotInput).digest("hex");
+    const sources = [sourceRef.day.original_day_snapshot, ...activeTail.slice(0, -1)];
+    const changes = activeTail.map((day, index) => ({
+      day_id: String(day.id || ""), date: anchors[index].date,
+      from_title: day.title || null, to_title: sources[index]?.title || null,
+      from_system_day: day.system_day ?? day.day_in_system ?? null,
+      to_system_day: sources[index]?.system_day ?? sources[index]?.day_in_system ?? null,
+      session_id: anchors[index].session_id || null,
+    }));
+
+    const dryRun = req.body.dry_run !== false && req.body.apply !== true;
+    if (dryRun) return res.json({
+      success: true, dry_run: true, applied: false, course_id: courseId, holiday_date: holidayDate,
+      preview_token: previewToken, confirmation_required: "APPLY_RETROSPECTIVE_PACKET_REPAIR",
+      affected_days: activeTail.length, recordings_changed: 0, sessions_changed: 0,
+      protected_dates: anchors.map((row) => row.date), changes,
+      message: "Preview only. The repair moves only omitted academic fields; dates, recordings, transcripts, notes, session IDs and URLs remain unchanged.",
+    });
+    if (String(req.body.confirm || "").trim().toUpperCase() !== "APPLY_RETROSPECTIVE_PACKET_REPAIR") {
+      return res.status(400).json({ success: false, error: "Exact confirmation is required: APPLY_RETROSPECTIVE_PACKET_REPAIR" });
+    }
+    if (String(req.body.preview_token || "") !== previewToken) {
+      return res.status(409).json({ success: false, error: "Roadmap changed after preview. Generate a fresh repair preview before applying." });
+    }
+
+    const workingDb = clone(sourceDb);
+    const ref = ngFindAdminRoadmapDayRef(workingDb, { courseId, dayId: req.params.dayId });
+    const workingTail = ref.roadmap.days.slice(ref.index + 1).filter((day) => !ngRoadmapDayIsNoClass(day));
+    const workingSources = [ref.day.original_day_snapshot, ...workingTail.slice(0, -1).map((day) => clone(day))];
+    for (let index = 0; index < workingTail.length; index += 1) {
+      const destination = workingTail[index];
+      const source = workingSources[index] || {};
+      for (const key of repairFields) {
+        if (source[key] === undefined) delete destination[key];
+        else destination[key] = clone(source[key]);
+      }
+      destination.updated_by = user.id;
+      destination.updated_at = new Date().toISOString();
+    }
+
+    const afterRecordings = Object.fromEntries(Object.entries(workingDb.recordings || {}).map(([id, item]) => [id, protectedIdentityAndUrls(item)]));
+    const afterSessions = Object.fromEntries(Object.entries(workingDb.liveSessions || {}).map(([id, item]) => [id, protectedIdentityAndUrls(item)]));
+    if (JSON.stringify(beforeRecordings) !== JSON.stringify(afterRecordings) || JSON.stringify(beforeSessions) !== JSON.stringify(afterSessions)) {
+      return res.status(409).json({ success: false, error: "Safety stop: a recording or session identity changed. Nothing was saved." });
+    }
+    const datesAfter = workingTail.map((day) => ngKnownScheduleDate(day.date || day.scheduled_date));
+    if (JSON.stringify(anchors.map((row) => row.date)) !== JSON.stringify(datesAfter)) {
+      return res.status(409).json({ success: false, error: "Safety stop: a roadmap date changed. Nothing was saved." });
+    }
+
+    ref.roadmap.updated_by = user.id;
+    ref.roadmap.updated_at = new Date().toISOString();
+    workingDb.roadmaps[ref.courseId] = ref.roadmap;
+    await writeLiveDb(workingDb);
+    return res.json({
+      success: true, dry_run: false, applied: true, course_id: courseId, holiday_date: holidayDate,
+      repaired_days: workingTail.length, recordings_changed: 0, sessions_changed: 0, dates_changed: 0,
+      message: "Academic packet alignment repaired. Dates, recordings, transcripts, notes, session IDs and URLs were preserved.",
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to repair retrospective holiday packets" });
   }
 });
 
