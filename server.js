@@ -60345,6 +60345,150 @@ app.post("/admin/roadmap/:dayId/advance-schedule", async (req, res) => {
   }
 });
 
+// Recording-safe retrospective holiday. Unlike push-status, this keeps every
+// existing roadmap day/session/date as the classroom anchor and moves only the
+// academic packet to the next active anchor. The final packet is appended as a
+// new future day. Preview and apply are locked to the same roadmap snapshot.
+app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.roadmap.manage");
+    const sourceDb = await readLiveDb();
+    const courseId = String(req.body.course_id || req.body.courseId || "").trim();
+    const sourceRef = ngFindAdminRoadmapDayRef(sourceDb, { courseId, dayId: req.params.dayId });
+    if (!sourceRef.roadmap || !sourceRef.day) return res.status(404).json({ success: false, error: "Roadmap item not found" });
+
+    const selectedDate = ngKnownScheduleDate(sourceRef.day.date || sourceRef.day.scheduled_date);
+    if (!selectedDate || selectedDate > todayKey()) {
+      return res.status(400).json({ success: false, error: "Retrospective Holiday is only for today or a past roadmap date" });
+    }
+    if (ngRoadmapDayIsNoClass(sourceRef.day)) {
+      return res.status(409).json({ success: false, error: "This roadmap date is already a holiday/cancelled day" });
+    }
+
+    const selectedSessionId = String(sourceRef.day.live_session_id || sourceRef.day.session_id || "").trim();
+    const selectedSession = selectedSessionId ? sourceDb.liveSessions?.[selectedSessionId] : null;
+    if (selectedSession && ngKnownScheduleSessionHasRecording(sourceDb, selectedSession)) {
+      return res.status(409).json({ success: false, error: "Safety stop: the selected no-class date has a recording or transcript", session_id: selectedSessionId });
+    }
+
+    const activeTail = sourceRef.roadmap.days.slice(sourceRef.index).filter((day) => !ngRoadmapDayIsNoClass(day));
+    if (!activeTail.length || String(activeTail[0].id) !== String(sourceRef.day.id)) {
+      return res.status(409).json({ success: false, error: "Safety stop: the selected academic packet could not be anchored" });
+    }
+
+    const packetFields = [
+      "title", "description", "system", "chapter", "topic", "topics", "subsystem", "subtopic",
+      "first_aid_pages", "fa_pages", "first_aid_topics", "uworld_qids", "qids", "resources", "tasks",
+      "homework", "learning_objectives", "assessment_id", "assessment_ids", "flashcard_deck_id",
+      "video_id", "video_ids", "video_resources", "notes_template", "template", "content_packet_id",
+    ];
+    const packetOf = (day) => Object.fromEntries(packetFields.filter((key) => day[key] !== undefined).map((key) => [key, clone(day[key])]));
+    const protectedIdentityAndUrls = (item = {}) => Object.fromEntries(Object.entries(item).filter(([key]) => (
+      key === "id" || key === "recording_key" || key === "recording_id" || key === "meeting_id" ||
+      key === "zoom_meeting_id" || key === "session_id" || key.endsWith("_url") || key.endsWith("_urls")
+    )));
+    const protectedSnapshotsEqual = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+    const anchors = activeTail.map((day) => {
+      const sessionId = String(day.live_session_id || day.session_id || "").trim();
+      const session = sessionId ? sourceDb.liveSessions?.[sessionId] : null;
+      return {
+        day_id: String(day.id || ""), date: ngKnownScheduleDate(day.date || day.scheduled_date), session_id: sessionId,
+        recording_anchor: Boolean(session && ngKnownScheduleSessionHasRecording(sourceDb, session)),
+      };
+    });
+    const snapshotInput = JSON.stringify({ courseId, selected: String(sourceRef.day.id), updated: sourceRef.roadmap.updated_at || "", anchors });
+    const previewToken = crypto.createHash("sha256").update(snapshotInput).digest("hex");
+    const lastDate = anchors.at(-1)?.date;
+    const nextDate = (() => {
+      const cursor = new Date(`${lastDate}T00:00:00Z`);
+      do cursor.setUTCDate(cursor.getUTCDate() + 1); while (sourceRef.roadmap.skip_sundays !== false && cursor.getUTCDay() === 0);
+      return cursor.toISOString().slice(0, 10);
+    })();
+    const changes = activeTail.map((day, index) => ({
+      date: anchors[index].date,
+      day_id: day.id,
+      session_id: anchors[index].session_id || null,
+      recording_preserved_on_date: anchors[index].recording_anchor,
+      from_title: day.title || null,
+      to_title: index === 0 ? "Holiday / No Live Class" : activeTail[index - 1].title || null,
+    }));
+    changes.push({ date: nextDate, day_id: "new_tail_day", session_id: "new_tail_session", recording_preserved_on_date: false, from_title: null, to_title: activeTail.at(-1)?.title || null });
+
+    const dryRun = req.body.dry_run !== false && req.body.apply !== true;
+    if (dryRun) return res.json({
+      success: true, dry_run: true, applied: false, course_id: courseId, selected_date: selectedDate,
+      preview_token: previewToken, confirmation_required: "APPLY_RECORDING_SAFE_HOLIDAY",
+      affected_existing_days: activeTail.length, recording_anchors_preserved: anchors.filter((row) => row.recording_anchor).length,
+      new_final_date: nextDate, changes,
+      message: "Preview only. No data changed. Recordings, transcripts, notes, session IDs, URLs and actual class dates remain fixed.",
+    });
+    if (String(req.body.confirm || "").trim().toUpperCase() !== "APPLY_RECORDING_SAFE_HOLIDAY") {
+      return res.status(400).json({ success: false, error: "Exact confirmation is required: APPLY_RECORDING_SAFE_HOLIDAY" });
+    }
+    if (String(req.body.preview_token || "") !== previewToken) {
+      return res.status(409).json({ success: false, error: "Roadmap changed after preview. Generate a fresh preview before applying." });
+    }
+
+    const workingDb = clone(sourceDb);
+    const ref = ngFindAdminRoadmapDayRef(workingDb, { courseId, dayId: req.params.dayId });
+    const roadmap = ref.roadmap;
+    const workingTail = roadmap.days.slice(ref.index).filter((day) => !ngRoadmapDayIsNoClass(day));
+    const packets = workingTail.map(packetOf);
+    const recordingBefore = Object.fromEntries(Object.entries(sourceDb.recordings || {}).map(([id, recording]) => [id, protectedIdentityAndUrls(recording)]));
+    const sessionBefore = Object.fromEntries(Object.entries(sourceDb.liveSessions || {}).map(([id, session]) => [id, protectedIdentityAndUrls(session)]));
+
+    const holidayDay = ngClearNoClassRoadmapFields(ref.day);
+    Object.assign(holidayDay, {
+      title: "Holiday / No Live Class", description: String(req.body.reason || `No live class was held on ${selectedDate}. The academic sequence was moved forward safely.`),
+      status: "holiday", roadmap_status: "holiday", is_schedule_placeholder: true,
+      original_day_snapshot: clone(sourceRef.day), live_session_id: null, session_id: null,
+      updated_by: user.id, updated_at: new Date().toISOString(),
+    });
+    roadmap.days[ref.index] = holidayDay;
+    for (let index = 1; index < workingTail.length; index += 1) {
+      for (const key of packetFields) delete workingTail[index][key];
+      Object.assign(workingTail[index], clone(packets[index - 1]), { updated_by: user.id, updated_at: new Date().toISOString() });
+    }
+    const lastSource = workingTail.at(-1);
+    const newDay = {
+      ...clone(lastSource), ...clone(packets.at(-1)), id: `${courseId}:day:retrospective:${uuid()}`,
+      date: nextDate, scheduled_date: nextDate, live_session_id: null, session_id: null,
+      status: "scheduled", roadmap_status: "scheduled", is_schedule_placeholder: false,
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString(), updated_by: user.id,
+    };
+    delete newDay.original_day_snapshot;
+    roadmap.days.push(newDay);
+    ngSyncRoadmapSequenceMetadata(workingDb, roadmap, { actorId: user.id });
+    ngSyncLinkedLiveSessionsForRoadmap(workingDb, roadmap, { actorId: user.id });
+
+    for (const [id, before] of Object.entries(recordingBefore)) {
+      if (!workingDb.recordings?.[id] || !protectedSnapshotsEqual(before, protectedIdentityAndUrls(workingDb.recordings[id]))) {
+        return res.status(409).json({ success: false, error: `Safety stop: recording attachment changed for ${id}. Nothing was saved.` });
+      }
+    }
+    for (const row of anchors.filter((item) => item.recording_anchor)) {
+      const before = sessionBefore[row.session_id];
+      const after = workingDb.liveSessions?.[row.session_id];
+      if (!after || ngKnownScheduleDate(after.scheduled_date) !== row.date || !protectedSnapshotsEqual(before, protectedIdentityAndUrls(after))) {
+        return res.status(409).json({ success: false, error: `Safety stop: recorded session anchor changed for ${row.session_id}. Nothing was saved.` });
+      }
+    }
+
+    roadmap.updated_by = user.id;
+    roadmap.updated_at = new Date().toISOString();
+    workingDb.roadmaps[ref.courseId] = roadmap;
+    await writeLiveDb(workingDb);
+    return res.json({
+      success: true, dry_run: false, applied: true, course_id: courseId, selected_date: selectedDate,
+      affected_existing_days: workingTail.length, recording_anchors_preserved: anchors.filter((row) => row.recording_anchor).length,
+      recordings_deleted: 0, notes_deleted: 0, sessions_deleted: 0, students_deleted: 0, new_final_date: nextDate,
+      message: "Retrospective holiday applied. Academic packets moved forward while recordings, transcripts, notes, existing session IDs, URLs and actual class dates remained fixed.",
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to apply recording-safe retrospective holiday" });
+  }
+});
+
 app.post("/admin/roadmap/:dayId/push-status", async (req, res) => {
   try {
     const { user } = await requireLmsPermission(req, "lms.roadmap.manage");
