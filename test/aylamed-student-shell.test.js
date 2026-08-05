@@ -229,3 +229,23 @@ test("server integration keeps v206 and v207 additive while routing v208 through
   assert.match(server, /flashcardCapabilities\("aylamed"\)/);
   assert.match(server, /lms_crm_operational_writes: false/);
 });
+
+test("the owner-approved review account receives an isolated permanent full-access enrollment", () => {
+  const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
+  const seed = server.slice(server.indexOf("function aylaEnsureSeedData"), server.indexOf("function aylaRegisterCrud"));
+
+  assert.match(seed, /94ce0e4a551d49fa9686aea4be5c5ee93d1cd6870ff28bc309d01bfce708ff65/);
+  assert.match(seed, /crypto\.createHash\("sha256"\).*aylaNormalizeEmail/s);
+  assert.doesNotMatch(seed, /hassan\.friend\.aylamed\.test@aylamed\.local/);
+  assert.match(seed, /AYLA-PLAN-INTERNAL-REVIEW/);
+  assert.match(seed, /AYLA_STUDENT_FEATURES\.map\(\(feature\) => feature\.key\)/);
+  assert.match(seed, /exam_tracks: \["usmle_step_1"\]/);
+  assert.match(seed, /is_full_access: true/);
+  assert.match(seed, /is_public: false/);
+  assert.match(seed, /source: "owner_approved_internal_review"/);
+  assert.match(seed, /access_expires_at: "2126-08-05T00:00:00\.000Z"/);
+  assert.match(seed, /aylaEnrollmentKey\(internalReviewUser\.id, planId, "manual", "usmle_step_1"\)/);
+  const demoSeed = seed.slice(seed.indexOf('id: "AYLA-PLAN-DEMO"'), seed.indexOf('const existingMonthly'));
+  assert.match(demoSeed, /included_features: demo\.included_features/);
+  assert.doesNotMatch(demoSeed, /AYLA_STUDENT_FEATURES/);
+});

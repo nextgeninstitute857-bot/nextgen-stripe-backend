@@ -67145,6 +67145,72 @@ function aylaEnsureSeedData(db) {
     status: existingMonthly?.is_active === false ? "inactive" : "active",
   }, existingMonthly || {}));
 
+  // One owner-approved, permanent internal review entitlement. This exact
+  // account is intentionally isolated from public/demo plan controls so that
+  // changing the testing access cannot alter any other student's features.
+  const internalReviewEmailHash = "94ce0e4a551d49fa9686aea4be5c5ee93d1cd6870ff28bc309d01bfce708ff65";
+  const internalReviewUser = aylaValues(db, "aylaUsers").find((user) =>
+    crypto.createHash("sha256").update(aylaNormalizeEmail(user.email || "")).digest("hex") === internalReviewEmailHash);
+  if (internalReviewUser?.id) {
+    const internalReviewStudent = aylaValues(db, "aylaStudents").find((student) =>
+      String(student.ayla_user_id || student.aylaUserId || student.user_id || student.userId || "") === String(internalReviewUser.id)
+      && aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam) === "usmle_step_1");
+    if (internalReviewStudent?.id) {
+      const planId = "AYLA-PLAN-INTERNAL-REVIEW";
+      const existingReviewPlan = aylaGetItem(db, "aylaPlans", planId);
+      const reviewPlan = aylaNormalizePlanPayload({
+        ...(existingReviewPlan || {}),
+        id: planId,
+        name: "AylaMed Internal Review Access",
+        description: "Permanent full-feature access for the owner-approved AylaMed review account.",
+        plan_type: "internal_review",
+        billing_type: "free",
+        price_cents: 0,
+        access_days: 36525,
+        included_features: AYLA_STUDENT_FEATURES.map((feature) => feature.key),
+        exam_tracks: ["usmle_step_1"],
+        is_full_access: true,
+        is_active: true,
+        is_public: false,
+        status: "active",
+      }, existingReviewPlan || {});
+      aylaSetItem(db, "aylaPlans", reviewPlan);
+
+      const enrollmentId = aylaEnrollmentKey(internalReviewUser.id, planId, "manual", "usmle_step_1");
+      const existingReviewEnrollment = aylaGetItem(db, "aylaEnrollments", enrollmentId) || {};
+      const createdAt = existingReviewEnrollment.createdAt || existingReviewEnrollment.created_at || aylaNow();
+      aylaSetItem(db, "aylaEnrollments", {
+        ...existingReviewEnrollment,
+        id: enrollmentId,
+        user_id: internalReviewUser.id,
+        ayla_user_id: internalReviewUser.id,
+        student_id: internalReviewStudent.id,
+        studentId: internalReviewStudent.id,
+        plan_id: planId,
+        plan_name: reviewPlan.name,
+        included_features: [...reviewPlan.included_features],
+        is_full_access: true,
+        type: "manual",
+        is_demo: false,
+        access_granted: true,
+        status: "active",
+        source: "owner_approved_internal_review",
+        exam_track_id: "usmle_step_1",
+        examTrackId: "usmle_step_1",
+        exam_track: "usmle-step-1",
+        legacy_unscoped: false,
+        access_starts_at: existingReviewEnrollment.access_starts_at || createdAt,
+        access_expires_at: "2126-08-05T00:00:00.000Z",
+        revoked_at: null,
+        revoked_reason: null,
+        createdAt,
+        created_at: existingReviewEnrollment.created_at || createdAt,
+        updatedAt: existingReviewEnrollment.updatedAt || createdAt,
+        updated_at: existingReviewEnrollment.updated_at || createdAt,
+      });
+    }
+  }
+
   // Additional subscription plans are retained. Admin feature controls, not a
   // seed-time name heuristic, decide whether a plan is active or public.
 }
