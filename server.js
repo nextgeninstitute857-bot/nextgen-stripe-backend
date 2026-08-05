@@ -392,7 +392,6 @@ import {
   vimeoCatalogSummary,
 } from "./lib/vimeo-library-manifest.js";
 import {
-  AYLA_VIMEO_MAPPING_EXPECTED_COUNT,
   applyAylaVimeoMappings,
   validateAylaVimeoMappingImport,
 } from "./lib/aylamed-vimeo-mapping-import.js";
@@ -79226,8 +79225,9 @@ app.post("/api/ayla/admin/resources/vimeo-catalog/mapping-import", async (req, r
 
     const expectedFingerprint = String(req.body?.expected_fingerprint || req.body?.expectedFingerprint || "").trim();
     const confirmation = String(req.body?.confirmation || "").trim();
-    if (confirmation !== `APPLY_PRIVATE_VIMEO_MAPPINGS_${AYLA_VIMEO_MAPPING_EXPECTED_COUNT}`) {
-      return aylaSendError(res, 400, `confirmation must be APPLY_PRIVATE_VIMEO_MAPPINGS_${AYLA_VIMEO_MAPPING_EXPECTED_COUNT}`);
+    const requiredConfirmation = `APPLY_PRIVATE_VIMEO_MAPPINGS_${validation.expected_count}`;
+    if (confirmation !== requiredConfirmation) {
+      return aylaSendError(res, 400, `confirmation must be ${requiredConfirmation}`);
     }
     if (!expectedFingerprint || expectedFingerprint !== validation.fingerprint) {
       return aylaSendError(res, 409, "Mapping fingerprint changed after dry-run; validate again before applying");

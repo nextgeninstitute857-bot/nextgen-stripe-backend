@@ -27,6 +27,19 @@ test("dry-run validates all 491 mappings without writes", () => {
   assert.equal(result.safeguards.creates_active_resources, false);
 });
 
+test("dry-run follows the complete live catalogue size instead of a fixed count", () => {
+  const expandedMappings = [...mappings, {
+    ...mappings[0], vimeo_id: "2000", source_title: "New future lecture",
+  }];
+  const expandedDrafts = [...drafts, {
+    ...drafts[0], id: "draft-new", vimeoId: "2000", sourceTitle: "New future lecture",
+  }];
+  const result = validateAylaVimeoMappingImport({ mappings: expandedMappings, drafts: expandedDrafts });
+  assert.equal(result.valid, true);
+  assert.equal(result.expected_count, 492);
+  assert.equal(result.mapping_count, 492);
+});
+
 test("dry-run rejects incomplete hierarchy and duplicate IDs", () => {
   const broken = mappings.map((row) => ({ ...row }));
   broken[0].proposed_subtopic = "";
@@ -55,7 +68,7 @@ test("server exposes validation-first import with fingerprint and confirmation g
   const route = server.slice(start, end);
   assert.ok(start > 0 && end > start);
   assert.match(route, /expectedFingerprint !== validation\.fingerprint/);
-  assert.match(route, /APPLY_PRIVATE_VIMEO_MAPPINGS_/);
+  assert.match(route, /APPLY_PRIVATE_VIMEO_MAPPINGS_\$\{validation\.expected_count\}/);
   assert.match(route, /active_resources_created: 0/);
   assert.match(route, /classifier_jobs_started: 0/);
   assert.match(route, /mapped_but_inactive_until_manual_approval/);
