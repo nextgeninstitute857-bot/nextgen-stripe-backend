@@ -40,6 +40,29 @@ test("dry-run follows the complete live catalogue size instead of a fixed count"
   assert.equal(result.mapping_count, 492);
 });
 
+test("dry-run scopes a multi-folder import without requiring existing B&B drafts", () => {
+  const selected = mappings.slice(0, 2).map((row, index) => ({
+    ...row,
+    source_folder_id: index ? "30032209" : "30014230",
+  }));
+  const selectedDrafts = drafts.slice(0, 2).map((row, index) => ({
+    ...row,
+    folderId: index ? "30032209" : "30014230",
+  }));
+  const result = validateAylaVimeoMappingImport({ mappings: selected, drafts: [...drafts, ...selectedDrafts] });
+  assert.equal(result.valid, true);
+  assert.equal(result.expected_count, 2);
+  assert.deepEqual(result.folder_ids, ["30014230", "30032209"]);
+});
+
+test("dry-run rejects excluded Kaplan folder", () => {
+  const kaplanMapping = [{ ...mappings[0], source_folder_id: "30105823" }];
+  const kaplanDraft = [{ ...drafts[0], folderId: "30105823" }];
+  const result = validateAylaVimeoMappingImport({ mappings: kaplanMapping, drafts: kaplanDraft });
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.some((error) => error.includes("not approved")));
+});
+
 test("dry-run rejects incomplete hierarchy and duplicate IDs", () => {
   const broken = mappings.map((row) => ({ ...row }));
   broken[0].proposed_subtopic = "";
