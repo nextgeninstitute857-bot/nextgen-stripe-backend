@@ -60568,11 +60568,10 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
   }
 });
 
-// Repairs the one known partial packet transfer created by the first
-// retrospective-holiday implementation. The holiday snapshot and the
-// destination rows retain every omitted value, so recovery is deterministic:
-// only the academic fields that were left behind move forward one anchor.
-// Dates and all recording/session identities remain immutable.
+// Repairs academic packet fields after a retrospective holiday by rebuilding
+// each downstream packet from the stored master-map row that originally
+// created it. This avoids chaining already-partial destination rows. Dates and
+// all recording/session identities remain immutable.
 app.post("/admin/roadmap/:dayId/retrospective-holiday-repair", async (req, res) => {
   try {
     const { user } = await requireLmsPermission(req, "lms.roadmap.manage");
@@ -60589,14 +60588,59 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday-repair", async (req, res) 
     const activeTail = sourceRef.roadmap.days.slice(sourceRef.index + 1).filter((day) => !ngRoadmapDayIsNoClass(day));
     if (!activeTail.length) return res.status(409).json({ success: false, error: "No downstream academic packets were found" });
 
+    const template = String(sourceRef.roadmap.template || sourceRef.roadmap.settings?.template || NEXTGEN_MASTER_MAP_TEMPLATE_KEY);
+    const masterRows = ngSortMasterRowsForSequence(
+      ngGetStoredMasterRows(sourceDb, template),
+      ngGetStoredMasterSystemSequence(sourceDb, template),
+    );
+    if (!masterRows.length) {
+      return res.status(409).json({ success: false, error: "Stored roadmap master map is unavailable; no repair was attempted" });
+    }
+
     const repairFields = [
-      "title", "system_day", "day_in_system", "day_number", "instructional_day_number",
+      "title", "description", "system", "chapter", "topic", "topics", "subsystem", "subtopic",
+      "first_aid_pages", "fa_pages", "first_aid_topics", "uworld_qids", "qids", "resources", "tasks",
+      "homework", "learning_objectives", "assessment_id", "assessment_ids", "flashcard_deck_id",
+      "video_id", "video_ids", "video_resources", "notes_template", "template", "content_packet_id",
       "mapped_uworld_qids", "question_ids", "qid_list", "qid_count", "uworld_target", "uworld_task",
       "live_teaching_topic", "lecture_id", "lecture_title", "video_library_lecture",
       "video_library_lecture_id", "video_lecture", "library_lecture", "recorded_lecture",
       "task", "daily_task", "task_items", "community_prompt", "assessment_task", "assessment_day",
       "flashcard_tags", "resource_links", "video_url", "video_lecture_url", "library_video_url",
+      "system_day", "day_in_system", "source_master_map_index",
     ];
+    const normalizedSystem = (value) => ngNormalizeMasterMapSystemName(value || "");
+    const masterRowForDay = (day) => {
+      const sourceIndex = Number(day.source_master_map_index || 0) || null;
+      if (sourceIndex) {
+        const indexed = masterRows.find((row) => Number(row.source_index) === sourceIndex);
+        if (indexed) return indexed;
+      }
+      const system = normalizedSystem(day.system || day.chapter);
+      const pages = String(day.first_aid_pages || day.fa_pages || "").trim();
+      if (system && pages) {
+        const byPages = masterRows.find((row) => normalizedSystem(row.system) === system && String(row.first_aid_pages || "").trim() === pages);
+        if (byPages) return byPages;
+      }
+      const systemDay = Number(day.system_day ?? day.day_in_system ?? 0) || null;
+      if (system && systemDay) return masterRows.find((row) => normalizedSystem(row.system) === system && Number(row.system_day) === systemDay) || null;
+      return null;
+    };
+    const canonicalPacketForDay = (day) => {
+      const row = masterRowForDay(day);
+      if (!row) return null;
+      const canonical = ngBuildMarathonDayFromMasterRow({
+        courseId,
+        courseName: sourceDb.courses?.[courseId]?.name || "Course",
+        row,
+        dayNumber: Number(day.day_number || row.day_number || 1) || 1,
+        date: ngKnownScheduleDate(day.date || day.scheduled_date),
+        classTime: day.class_time || day.scheduled_time || ngRoadmapClassTime(sourceRef.roadmap, day),
+        template,
+      });
+      canonical.source_master_map_index = row.source_index || day.source_master_map_index || null;
+      return canonical;
+    };
     const protectedIdentityAndUrls = (item = {}) => Object.fromEntries(Object.entries(item).filter(([key]) => (
       key === "id" || key === "recording_key" || key === "recording_id" || key === "meeting_id" ||
       key === "zoom_meeting_id" || key === "session_id" || key.endsWith("_url") || key.endsWith("_urls")
@@ -60613,12 +60657,18 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday-repair", async (req, res) 
       roadmap_updated_at: sourceRef.roadmap.updated_at || "", anchors,
     });
     const previewToken = crypto.createHash("sha256").update(snapshotInput).digest("hex");
-    const sources = [sourceRef.day.original_day_snapshot, ...activeTail.slice(0, -1)];
+    const canonicalPackets = activeTail.map(canonicalPacketForDay);
+    const unmatched = activeTail.filter((day, index) => !canonicalPackets[index]).map((day) => ({ day_id: day.id, date: day.date, title: day.title }));
+    if (unmatched.length) {
+      return res.status(409).json({ success: false, error: "Some roadmap days could not be matched to the stored master map; no repair was attempted", unmatched });
+    }
     const changes = activeTail.map((day, index) => ({
       day_id: String(day.id || ""), date: anchors[index].date,
-      from_title: day.title || null, to_title: sources[index]?.title || null,
+      from_title: day.title || null, to_title: canonicalPackets[index]?.title || null,
+      from_first_aid_pages: day.first_aid_pages || day.fa_pages || null,
+      to_first_aid_pages: canonicalPackets[index]?.first_aid_pages || null,
       from_system_day: day.system_day ?? day.day_in_system ?? null,
-      to_system_day: sources[index]?.system_day ?? sources[index]?.day_in_system ?? null,
+      to_system_day: canonicalPackets[index]?.system_day ?? canonicalPackets[index]?.day_in_system ?? null,
       session_id: anchors[index].session_id || null,
     }));
 
@@ -60628,7 +60678,7 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday-repair", async (req, res) 
       preview_token: previewToken, confirmation_required: "APPLY_RETROSPECTIVE_PACKET_REPAIR",
       affected_days: activeTail.length, recordings_changed: 0, sessions_changed: 0,
       protected_dates: anchors.map((row) => row.date), changes,
-      message: "Preview only. The repair moves only omitted academic fields; dates, recordings, transcripts, notes, session IDs and URLs remain unchanged.",
+      message: "Preview only. Academic packets will be rebuilt from the stored master map; dates, recordings, transcripts, notes, session IDs and URLs remain unchanged.",
     });
     if (String(req.body.confirm || "").trim().toUpperCase() !== "APPLY_RETROSPECTIVE_PACKET_REPAIR") {
       return res.status(400).json({ success: false, error: "Exact confirmation is required: APPLY_RETROSPECTIVE_PACKET_REPAIR" });
@@ -60640,10 +60690,13 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday-repair", async (req, res) 
     const workingDb = clone(sourceDb);
     const ref = ngFindAdminRoadmapDayRef(workingDb, { courseId, dayId: req.params.dayId });
     const workingTail = ref.roadmap.days.slice(ref.index + 1).filter((day) => !ngRoadmapDayIsNoClass(day));
-    const workingSources = [ref.day.original_day_snapshot, ...workingTail.slice(0, -1).map((day) => clone(day))];
+    const workingPackets = workingTail.map(canonicalPacketForDay);
+    if (workingPackets.some((packet) => !packet)) {
+      return res.status(409).json({ success: false, error: "Roadmap changed after preview and no longer matches the stored master map. Nothing was saved." });
+    }
     for (let index = 0; index < workingTail.length; index += 1) {
       const destination = workingTail[index];
-      const source = workingSources[index] || {};
+      const source = workingPackets[index] || {};
       for (const key of repairFields) {
         if (source[key] === undefined) delete destination[key];
         else destination[key] = clone(source[key]);
@@ -60669,7 +60722,7 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday-repair", async (req, res) 
     return res.json({
       success: true, dry_run: false, applied: true, course_id: courseId, holiday_date: holidayDate,
       repaired_days: workingTail.length, recordings_changed: 0, sessions_changed: 0, dates_changed: 0,
-      message: "Academic packet alignment repaired. Dates, recordings, transcripts, notes, session IDs and URLs were preserved.",
+      message: "Academic packets were rebuilt from the stored master map. Dates, recordings, transcripts, notes, session IDs and URLs were preserved.",
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to repair retrospective holiday packets" });
