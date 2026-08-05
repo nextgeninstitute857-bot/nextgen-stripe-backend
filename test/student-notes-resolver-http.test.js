@@ -333,12 +333,12 @@ test("student notes resolve published legacy records by session, roadmap, or exa
     assert.equal(list.response.status, 200, JSON.stringify(list.payload));
     assert.equal(list.payload.student_notes_resolver_build, "v225-course-system-day-notes-resolver");
     assert.deepEqual(list.payload.sessions.map((item) => item.id), [
-      sessionIds[10],
-      sessionIds[11],
-      sessionIds[12],
       sessionIds[13],
+      sessionIds[12],
+      sessionIds[11],
+      sessionIds[10],
     ]);
-    assert.deepEqual(list.payload.sessions.map((item) => item.system_day), [10, 11, 12, 13]);
+    assert.deepEqual(list.payload.sessions.map((item) => item.system_day), [13, 12, 11, 10]);
     assert.equal(list.payload.sessions.some((item) => item.id === oldDay11Session.id), false);
 
     const day10 = await api(baseUrl, `/live/notes/${sessionIds[10]}`, { token });

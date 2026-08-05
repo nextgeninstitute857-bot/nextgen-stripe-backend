@@ -19049,8 +19049,8 @@ app.get("/student/notes/sessions", async (req, res) => {
 
       const sessions = ngStudentNotesResolvedSessionRows(db, eligibleSessions)
         .sort((a, b) => {
-          return String(a.session?.scheduled_date || "").localeCompare(String(b.session?.scheduled_date || "")) ||
-            String(a.session?.scheduled_time || "").localeCompare(String(b.session?.scheduled_time || ""));
+          return String(b.session?.scheduled_date || "").localeCompare(String(a.session?.scheduled_date || "")) ||
+            String(b.session?.scheduled_time || "").localeCompare(String(a.session?.scheduled_time || ""));
         })
         .map((row) => ngStudentNotesSessionForList(db, row.session, course, row.note));
 
