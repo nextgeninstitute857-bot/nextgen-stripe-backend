@@ -60353,6 +60353,7 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
   try {
     const { user } = await requireLmsPermission(req, "lms.roadmap.manage");
     const sourceDb = await readLiveDb();
+    const clone = (value) => JSON.parse(JSON.stringify(value));
     const courseId = String(req.body.course_id || req.body.courseId || "").trim();
     const sourceRef = ngFindAdminRoadmapDayRef(sourceDb, { courseId, dayId: req.params.dayId });
     if (!sourceRef.roadmap || !sourceRef.day) return res.status(404).json({ success: false, error: "Roadmap item not found" });
