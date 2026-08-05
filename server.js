@@ -21520,6 +21520,22 @@ async function requireCrmAdmin(req) {
   return requireAdmin(req);
 }
 
+async function requireOwnedCatalogAdmin(req) {
+  try {
+    return await requireCrmAdmin(req);
+  } catch (crmError) {
+    try {
+      const aylaAdmin = await aylaRequireAdmin(req);
+      return {
+        ...aylaAdmin,
+        user: aylaAdmin.user || { id: "aylamed-owned-catalog-admin", role: "admin" },
+      };
+    } catch {
+      throw crmError;
+    }
+  }
+}
+
 const TEAM_CRM_READ_PERMISSION_BY_COLLECTION = {
   leads: ["view_leads", "view_assigned_leads", "edit_leads", "send_messages"],
   conversations: ["send_messages", "reply_assigned_conversations", "view_leads", "view_assigned_leads"],
@@ -35497,7 +35513,7 @@ app.post("/admin/crm/ai-training/content-imports/preview", async (req, res) => {
   let upload;
   let jobId = "";
   try {
-    const { user } = await requireCrmAdmin(req);
+    const { user } = await requireOwnedCatalogAdmin(req);
     upload = await ngReceiveOrResolveContentZip(req, ["question_zip"]);
     const examTrack = normalizeExamTrack(upload.fields.exam_track || upload.fields.examTrack);
     const sourceNamespace = contentSlug(upload.fields.source_namespace || upload.fields.sourceNamespace || upload.fields.source_provider || upload.fields.sourceProvider);
@@ -35561,7 +35577,7 @@ app.post("/admin/crm/ai-training/content-imports/preview", async (req, res) => {
 
 app.get("/admin/crm/ai-training/content-imports/:jobId", async (req, res) => {
   try {
-    await requireCrmAdmin(req);
+    await requireOwnedCatalogAdmin(req);
     const job = await getContentImportJob(req.params.jobId);
     if (!job) return res.status(404).json({ success: false, error: "Content import job not found" });
     const snapshot = ngContentBackgroundSnapshot(job.id);
@@ -35582,7 +35598,7 @@ app.post("/admin/crm/ai-training/content-imports/:jobId/import-draft", async (re
   let claimed = null;
   let priorStatus = "";
   try {
-    await requireCrmAdmin(req);
+    await requireOwnedCatalogAdmin(req);
     const existing = await getContentImportJob(req.params.jobId);
     priorStatus = String(existing?.status || "");
     if (!existing) return res.status(404).json({ success: false, error: "Content import job not found" });
@@ -38341,7 +38357,7 @@ app.get("/admin/crm/operations/storage-performance", async (req, res) => {
 
 app.get("/admin/crm/ai-training/content-registry/collections", async (req, res) => {
   try {
-    await requireCrmAdmin(req);
+    await requireOwnedCatalogAdmin(req);
     const examTrack = req.query.exam_track ? normalizeExamTrack(req.query.exam_track) : "";
     const collections = await listContentCollections({
       examTrack: examTrack === "unknown" ? "" : examTrack,

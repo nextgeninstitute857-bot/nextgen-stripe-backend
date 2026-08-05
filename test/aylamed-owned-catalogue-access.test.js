@@ -22,3 +22,13 @@ test("ordinary full-access students resolve to a stable private catalogue scope"
   assert.match(server, /`\$\{AYLA_STUDENT_CATALOG_SCOPE_PREFIX\}\$\{studentId\}`/);
   assert.ok((server.match(/aylaStudentCatalogDestinationScope\((?:auth\.)?student\)/g) || []).length >= 3);
 });
+
+test("owned catalogue importer accepts the existing AylaMed admin session", () => {
+  assert.match(server, /async function requireOwnedCatalogAdmin\(req\)/);
+  assert.match(server, /const aylaAdmin = await aylaRequireAdmin\(req\)/);
+  assert.match(server, /aylamed-owned-catalog-admin/);
+  assert.ok((server.match(/requireOwnedCatalogAdmin\(req\)/g) || []).length >= 5);
+  assert.match(server, /content-imports\/preview[\s\S]{0,300}requireOwnedCatalogAdmin\(req\)/);
+  assert.match(server, /content-imports\/:jobId[\s\S]{0,220}requireOwnedCatalogAdmin\(req\)/);
+  assert.match(server, /content-registry\/collections[\s\S]{0,220}requireOwnedCatalogAdmin\(req\)/);
+});
