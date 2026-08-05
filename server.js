@@ -483,6 +483,7 @@ const AYLA_MARKETING_BUILD = "v231-readiness-sharing-referrals";
 const AYLA_VIMEO_CATALOG_BUILD = VIMEO_LIBRARY_CATALOG_BUILD;
 const AYLA_PRIVATE_PILOT_BUILD = "v251-live-pilot-flow-recovery";
 const AYLA_STEP1_PILOT_DESTINATION_SCOPE = "private_step1_pilot";
+const AYLA_STUDENT_CATALOG_SCOPE_PREFIX = "student:";
 const AYLA_STEP1_PILOT_VIMEO_FOLDER_ID = "29973623";
 const AYLA_STEP1_PILOT_VIMEO_SOURCE_ID = "AYLA-VIMEO-SOURCE-usmle-step-1-29973623";
 const AYLA_STEP1_VIMEO_PUBLICATION_BUILD = "v254-step1-vimeo-memory-circuit-breaker";
@@ -575,6 +576,15 @@ function aylaStep1PilotDestinationScope(student = {}) {
       || student.exam,
   );
   return examTrack === "usmle-step-1" ? AYLA_STEP1_PILOT_DESTINATION_SCOPE : "";
+}
+
+function aylaStudentCatalogDestinationScope(student = {}) {
+  const pilotScope = aylaStep1PilotDestinationScope(student);
+  if (pilotScope) return pilotScope;
+  const studentId = String(student.id || student.student_id || student.studentId || "").trim().toLowerCase();
+  return /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(studentId)
+    ? `${AYLA_STUDENT_CATALOG_SCOPE_PREFIX}${studentId}`
+    : "";
 }
 
 function aylaStep1PilotVimeoSourceMatches(row = {}) {
@@ -39864,6 +39874,63 @@ app.post("/api/ayla/admin/catalog/image-mcq-repair/apply", async (req, res) => {
   }
 });
 
+app.post("/api/ayla/admin/catalog/owned-collections/:collectionId/student-access", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Pragma", "no-cache");
+  try {
+    const admin = await aylaRequireAdmin(req);
+    const studentId = String(req.body.student_id || req.body.studentId || "").trim().toLowerCase();
+    if (!/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(studentId)) {
+      return aylaSendError(res, 400, "A valid AylaMed student_id is required");
+    }
+    const db = await readAylaDb();
+    const student = aylaGetItem(db, "aylaStudents", studentId);
+    if (!student) return aylaSendError(res, 404, "AylaMed student not found");
+    const examTrack = normalizeAylaRegistryExamTrack(
+      student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam,
+    );
+    if (!examTrack) return aylaSendError(res, 409, "Student has no supported exam track");
+    const collections = await listContentCollections({ examTrack, limit: 200 });
+    const collection = collections.find((row) => String(row.id) === String(req.params.collectionId));
+    if (!collection) return aylaSendError(res, 404, "Owned catalogue collection not found for this exam");
+    if (String(collection.source_profile || "") !== "aylamed_original") {
+      return aylaSendError(res, 409, "Only AylaMed-owned original collections can use exact-student access");
+    }
+    const destinationScope = `${AYLA_STUDENT_CATALOG_SCOPE_PREFIX}${studentId}`;
+    const destinations = [
+      "aylamed_qbank",
+      "aylamed_roadmap",
+      "aylamed_auto_assessment",
+      "aylamed_personal_assessment",
+      "baseline_diagnostic",
+      "revision",
+      "flashcards",
+    ].flatMap((destination) => ([
+      { destination, destination_scope: "", enabled: false, settings: { owned_catalogue_guard: true } },
+      { destination, destination_scope: destinationScope, enabled: true, settings: { owned_catalogue_guard: true, student_id: studentId } },
+    ]));
+    const updated = await updateContentCollectionControls({
+      collectionId: collection.id,
+      status: "approved",
+      destinations,
+      sourceProfile: "aylamed_original",
+      sourceRightsStatus: "owned",
+      displayPolicy: { question_id_mode: "internal", source_label_mode: "hidden" },
+      actorId: String(admin.user?.id || admin.method || "aylamed-admin"),
+    });
+    return aylaSendOk(res, {
+      collection: updated,
+      student_id: studentId,
+      destination_scope: destinationScope,
+      global_student_access: false,
+      legacy_catalogue_changed: false,
+      message: "AylaMed-owned catalogue access enabled for this student only.",
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message, error.details || null);
+  }
+});
+
 app.get("/api/ayla/admin/diagnostic/step1/media-replacements/preview", async (req, res) => {
   try {
     await aylaRequireAdmin(req);
@@ -40669,7 +40736,7 @@ app.get("/api/ayla/qbank/catalog", async (req, res) => {
     const auth = await aylaV189RequireStudent(req, String(req.query.student_id || ""), "qbank");
     const access = aylaRequireQbankAccess(auth.db, auth.user, auth.student, req.query.exam_track || req.query.examTrack || "");
     const examTrack = access.exam_track;
-    const destinationScope = aylaStep1PilotDestinationScope(auth.student);
+    const destinationScope = aylaStudentCatalogDestinationScope(auth.student);
     const presentationPolicy = await getContentQbankPresentationPolicy({ examTrack });
     const sourceProfile = resolveContentQbankStudentSourceProfile(
       presentationPolicy,
@@ -40699,7 +40766,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
   try {
     const auth = await aylaV189RequireStudent(req, String(req.body.student_id || req.body.studentId || ""), "qbank");
     const access = aylaRequireQbankAccess(auth.db, auth.user, auth.student, req.body.exam_track || req.body.examTrack || "");
-    const destinationScope = aylaStep1PilotDestinationScope(auth.student);
+    const destinationScope = aylaStudentCatalogDestinationScope(auth.student);
     const purpose = normalizeAylaQbankPurpose(req.body.purpose || req.body.session_purpose || "practice");
     const requestedCount = Number(req.body.question_count ?? req.body.questionCount ?? 40);
     if (!Number.isInteger(requestedCount) || requestedCount < 1 || requestedCount > 200) {
@@ -72329,7 +72396,7 @@ async function aylaV250EligibleQbankQuestions(student, {
   limit = 24,
   seenQuestionIds = [],
 } = {}) {
-  const destinationScope = aylaStep1PilotDestinationScope(student);
+  const destinationScope = aylaStudentCatalogDestinationScope(student);
   if (!destinationScope || !contentRegistryStatus().configured) {
     return { questions: [], destinationScope, warning: null };
   }
