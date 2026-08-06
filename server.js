@@ -659,6 +659,7 @@ function aylaVimeoDraftHierarchyComplete(draft = {}) {
   );
 }
 const MEMORY_STABILITY_BUILD = "v254-step1-vimeo-memory-circuit-breaker";
+ = "v254-step1-vimeo-memory-circuit-breaker";
 
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
