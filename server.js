@@ -617,6 +617,9 @@ function aylaStep1PilotVimeoSourceMatches(row = {}) {
 }
 
 function aylaStep1PilotVimeoVisibleToStudent(resource = {}, student = {}) {
+  const ownerStudentId = String(resource.ownerStudentId || resource.owner_student_id || "").trim();
+  const studentId = String(student.id || student.studentId || student.student_id || "").trim();
+  if (ownerStudentId) return Boolean(studentId && ownerStudentId === studentId);
   if (!aylaStep1PilotDestinationScope(student)) return true;
   const type = String(resource.type || resource.resourceType || resource.resource_type || "")
     .trim()
@@ -626,8 +629,36 @@ function aylaStep1PilotVimeoVisibleToStudent(resource = {}, student = {}) {
     || ["vimeo_video", "video_transcript"].includes(type);
   return !isVimeo || aylaStep1PilotVimeoSourceMatches(resource);
 }
-const MEMORY_STABILITY_BUILD = "v254-step1-vimeo-memory-circuit-breaker";
 
+const AYLA_INTERNAL_REVIEW_EMAIL_HASH = "94ce0e4a551d49fa9686aea4be5c5ee93d1cd6870ff28bc309d01bfce708ff65";
+const AYLA_MANUAL_VIMEO_FOLDER_PUBLICATION = Object.freeze({
+  "30014230": Object.freeze({ label: "Pathoma Step 1", expected: 112 }),
+  "30032209": Object.freeze({ label: "Pixorize Biochemistry 2023", expected: 198 }),
+  "30032227": Object.freeze({ label: "Pixorize Immunology 2023", expected: 88 }),
+  "30036714": Object.freeze({ label: "Pixorize Microbiology 2023", expected: 195 }),
+  "30043950": Object.freeze({ label: "Pixorize Pharmacology 2023", expected: 252 }),
+});
+
+function aylaInternalReviewStudent(db) {
+  const user = aylaValues(db, "aylaUsers").find((row) =>
+    crypto.createHash("sha256").update(aylaNormalizeEmail(row.email || "")).digest("hex") === AYLA_INTERNAL_REVIEW_EMAIL_HASH);
+  if (!user?.id) return null;
+  const student = aylaValues(db, "aylaStudents").find((row) =>
+    String(row.ayla_user_id || row.aylaUserId || row.user_id || row.userId || "") === String(user.id)
+    && aylaCanonicalExamTrack(row.examTrackId || row.exam_track_id || row.exam) === "usmle_step_1");
+  return student ? { user, student } : null;
+}
+
+function aylaVimeoDraftHierarchyComplete(draft = {}) {
+  const classification = draft.classification || {};
+  return Boolean(
+    String(classification.medicalSystem || "").trim()
+    && String(classification.medicalSubsystem || classification.qbankTopic?.subsystemKey || "").trim()
+    && String(classification.canonicalTopic || classification.qbankTopic?.topicKey || "").trim()
+    && String(classification.subtopic || classification.qbankTopic?.subtopicKey || "").trim()
+  );
+}
+const MEMORY_STABILITY_BUILD = "v254-step1-vimeo-memory-circuit-breaker";
 const allowedOrigins = [
   "https://live.nextgenusmlelms.com",
   "https://www.live.nextgenusmlelms.com",
@@ -79879,6 +79910,136 @@ app.get("/api/ayla/admin/resources/vimeo-catalog/jobs/:jobId", async (req, res) 
     });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load Vimeo classification job");
+  }
+});
+
+function aylaManualVimeoFolderPublicationState(db, student) {
+  const resources = aylaValues(db, "aylaResources");
+  return Object.entries(AYLA_MANUAL_VIMEO_FOLDER_PUBLICATION).map(([folderId, config]) => {
+    const drafts = aylaValues(db, "aylaVimeoCatalogDrafts").filter((row) =>
+      normalizeVimeoFolderId(row.folderId || row.folder_id || row.sourceNamespace || row.source_namespace) === folderId
+      && row.folderMembershipStatus !== "missing_from_folder");
+    const owned = resources.filter((row) =>
+      String(row.ownerStudentId || row.owner_student_id || "") === String(student.id)
+      && normalizeVimeoFolderId(row.folderId || row.folder_id || row.sourceData?.folder_id || row.source_data?.folder_id || row.sourceNamespace || row.source_namespace) === folderId);
+    const active = owned.filter((row) => row.approved !== false
+      && !["disabled", "deleted", "rejected", "archived"].includes(String(row.status || "").toLowerCase()));
+    return {
+      folder_id: folderId,
+      label: config.label,
+      expected_count: config.expected,
+      draft_count: drafts.length,
+      mapped_count: drafts.filter(aylaVimeoDraftHierarchyComplete).length,
+      published_count: active.length,
+      state: active.length === config.expected ? "published" : active.length ? "partial" : "unpublished",
+      can_publish: drafts.length === config.expected && drafts.every(aylaVimeoDraftHierarchyComplete),
+    };
+  });
+}
+
+app.get("/api/ayla/admin/resources/vimeo-catalog/folder-publication", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
+    const target = aylaInternalReviewStudent(db);
+    if (!target) return aylaSendError(res, 409, "The owner-approved internal review student is unavailable");
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, {
+      target: { student_id: target.student.id, label: "Owner-approved testing student" },
+      folders: aylaManualVimeoFolderPublicationState(db, target.student),
+      automatic_publication: false,
+      classifiers_started: 0,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load Vimeo folder publication state");
+  }
+});
+
+app.post("/api/ayla/admin/resources/vimeo-catalog/folder-publication", async (req, res) => {
+  try {
+    const auth = await aylaRequireAdmin(req);
+    const folderId = normalizeVimeoFolderId(req.body.folder_id || req.body.folderId || "");
+    const config = AYLA_MANUAL_VIMEO_FOLDER_PUBLICATION[folderId];
+    if (!config) return aylaSendError(res, 400, "This Vimeo folder is not enabled for manual publication");
+    const action = String(req.body.action || "").trim().toLowerCase();
+    if (!['publish', 'unpublish'].includes(action)) return aylaSendError(res, 400, "action must be publish or unpublish");
+    const requiredConfirmation = `${action.toUpperCase()}_VIMEO_FOLDER_${folderId}_${config.expected}`;
+    if (String(req.body.confirmation || "").trim() !== requiredConfirmation) {
+      return aylaSendError(res, 400, `confirmation must be ${requiredConfirmation}`);
+    }
+    const actor = aylaVimeoCatalogAdminActor(auth);
+    const result = await mutateAylaDb(async (db) => {
+      const target = aylaInternalReviewStudent(db);
+      if (!target) throw Object.assign(new Error("The owner-approved internal review student is unavailable"), { statusCode: 409 });
+      const drafts = aylaValues(db, "aylaVimeoCatalogDrafts").filter((row) =>
+        normalizeVimeoFolderId(row.folderId || row.folder_id || row.sourceNamespace || row.source_namespace) === folderId
+        && row.folderMembershipStatus !== "missing_from_folder");
+      if (drafts.length !== config.expected) {
+        throw Object.assign(new Error(`${config.label} contains ${drafts.length} current drafts; expected ${config.expected}`), { statusCode: 409 });
+      }
+      if (action === "publish" && !drafts.every(aylaVimeoDraftHierarchyComplete)) {
+        throw Object.assign(new Error(`${config.label} contains incomplete hierarchy mappings`), { statusCode: 409 });
+      }
+      let changed = 0;
+      if (action === "publish") {
+        for (const draft of drafts) {
+          const resourceId = `vimeo-library-${draft.vimeoId}-student-${target.student.id}`;
+          const approved = approveVimeoCatalogDraft(draft, {
+            expectedRevision: Number(draft.revision || 0),
+            overrides: { resourceId, ownerStudentId: target.student.id },
+            actor,
+          });
+          const canonicalSystem = aylaVimeoCanonicalSystem(approved.resource.examTrackId, approved.resource.system);
+          if (!canonicalSystem) throw Object.assign(new Error(`Invalid system mapping for Vimeo ${draft.vimeoId}`), { statusCode: 400 });
+          approved.resource.system = canonicalSystem;
+          const existing = aylaGetItem(db, "aylaResources", resourceId) || {};
+          const stored = aylaV190StoreImportedResource(db, approved.resource, existing);
+          if (stored.quarantined) throw Object.assign(new Error(`Vimeo ${draft.vimeoId} failed resource validation: ${stored.errors.join("; ")}`), { statusCode: 400 });
+          approved.draft.approvedResourceId = stored.resource.id;
+          approved.draft.resourceCreatedAt = stored.resource.createdAt;
+          aylaSetItem(db, "aylaVimeoCatalogDrafts", approved.draft);
+          changed += 1;
+        }
+      } else {
+        for (const resource of aylaValues(db, "aylaResources")) {
+          const matchesOwner = String(resource.ownerStudentId || resource.owner_student_id || "") === String(target.student.id);
+          const matchesFolder = normalizeVimeoFolderId(resource.folderId || resource.folder_id || resource.sourceData?.folder_id || resource.source_data?.folder_id || resource.sourceNamespace || resource.source_namespace) === folderId;
+          if (!matchesOwner || !matchesFolder || ["disabled", "deleted", "archived"].includes(String(resource.status || "").toLowerCase())) continue;
+          aylaSetItem(db, "aylaResources", {
+            ...resource,
+            status: "disabled",
+            deliveryDestinations: [],
+            unpublishedAt: aylaNow(),
+            unpublishedBy: actor,
+            updatedAt: aylaNow(),
+          });
+          changed += 1;
+        }
+      }
+      await aylaLog(db, "resource-folder-publication", `Vimeo folder ${action}ed for internal review`, {
+        action,
+        folder_id: folderId,
+        folder_name: config.label,
+        count: changed,
+        target_student_id: target.student.id,
+        mappings_preserved: true,
+        classifiers_started: 0,
+        actor,
+      });
+      return { target, changed, folders: aylaManualVimeoFolderPublicationState(db, target.student) };
+    });
+    return aylaSendOk(res, {
+      action,
+      folder_id: folderId,
+      changed: result.changed,
+      target_student_id: result.target.student.id,
+      folders: result.folders,
+      mappings_preserved: true,
+      classifiers_started: 0,
+      automatic_publication: false,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to change Vimeo folder publication");
   }
 });
 
