@@ -337,7 +337,8 @@ import { contentJobMonitoring } from "./lib/content-job-monitoring.js";
 import { ResumableContentUploadStore } from "./lib/resumable-content-upload.js";
 import { CloudContentUploadStore } from "./lib/cloud-content-upload.js";
 import { contentZipSourceExists } from "./lib/content-zip-source.js";
-import { deleteContentR2Object, ensureContentR2BrowserCors } from "./lib/content-r2-storage.js";
+import { inspectGuardedUworldArchives } from "./lib/guarded-uworld-archive.js";
+import { deleteContentR2Object, ensureContentR2BrowserCors, headContentR2Object } from "./lib/content-r2-storage.js";
 import { storagePerformanceSnapshot } from "./lib/operations-monitoring.js";
 import {
   contentMediaStatus,
@@ -39930,33 +39931,54 @@ app.post("/api/ayla/admin/catalog/image-mcq-repair/apply", async (req, res) => {
 async function ngGuardedUworldCleanupPreview() {
   const database = await previewGuardedUworldCleanup();
   const uploads = await ngContentUploadStore.list({ limit: 200 });
-  const archiveCandidates = uploads.filter((upload) =>
-    /^uworld 1\.zip$/i.test(String(upload.original_filename || "").trim())
-    && Number(upload.total_bytes || 0) >= 8 * 1024 ** 3
-    && Number(upload.total_bytes || 0) <= 10 * 1024 ** 3
-    && String(upload.purpose || "") === "question_zip"
-    && String(upload.status || "") === "finalized"
-    && Number(upload.active_leases || 0) === 0);
-  const archive = archiveCandidates.length === 1 ? archiveCandidates[0] : null;
+  const domainJobIds = [database.question_job?.id, database.media_job?.id].filter(Boolean);
+  const jobs = domainJobIds.flatMap((domainJobId) =>
+    ngContentBackgroundJobs(domainJobId)
+      .map((job) => ngContentBackgroundQueue.get(job.id, { includePayload: true }))
+      .filter(Boolean));
+  const archiveInspection = await inspectGuardedUworldArchives({
+    uploads,
+    jobs,
+    expectedFingerprints: [database.question_job?.zip_sha256, database.media_job?.zip_sha256],
+    fallbackFilenames: {
+      [database.question_job?.id || ""]: database.question_job?.original_filename,
+      [database.media_job?.id || ""]: database.media_job?.original_filename,
+    },
+    headObject: headContentR2Object,
+  });
+  const archive = archiveInspection.archive;
+  const archiveDiagnostic = archive || (archiveInspection.candidates.length === 1
+    ? archiveInspection.candidates[0]
+    : null);
   const snapshot = {
     database_fingerprint: database.fingerprint,
-    archive: archive ? {
-      id: archive.id,
-      original_filename: archive.original_filename,
-      total_bytes: Number(archive.total_bytes || 0),
-      fingerprint: archive.fingerprint || "",
-      status: archive.status,
+    archive: archiveDiagnostic ? {
+      upload_ids: archiveDiagnostic.upload_ids,
+      object_key: archiveDiagnostic.object_key,
+      original_filename: archiveDiagnostic.original_filename,
+      total_bytes: Number(archiveDiagnostic.total_bytes || 0),
+      etag: archiveDiagnostic.etag,
+      fingerprint: archiveDiagnostic.fingerprint,
+      purposes: archiveDiagnostic.purposes,
+      job_ids: archiveDiagnostic.job_ids,
     } : null,
   };
   const fingerprint = crypto.createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
   return {
-    ready: database.ready && archiveCandidates.length === 1,
+    ready: database.ready && archiveInspection.ready,
     fingerprint,
     database,
     archive: snapshot.archive,
+    archive_candidates: archiveInspection.candidates,
     checks: {
       ...database.checks,
-      archive_exact: archiveCandidates.length === 1,
+      archive_unique: archiveInspection.exact.length === 1,
+      archive_identity_exact: archiveDiagnostic?.checks?.exact_job_identity === true,
+      archive_r2_verified: archiveDiagnostic?.checks?.r2_head_verified === true,
+      archive_size_exact: archiveDiagnostic?.checks?.archive_size_exact === true,
+      archive_inactive:
+        archiveDiagnostic?.checks?.no_active_leases === true
+        && archiveDiagnostic?.checks?.no_active_jobs === true,
     },
     write_performed: false,
   };
@@ -39989,15 +40011,32 @@ app.post("/api/ayla/admin/catalog/uworld-cleanup/apply", async (req, res) => {
       try { await deleteContentR2Object(objectKey); }
       catch (error) { failedR2Objects.push({ object_key: objectKey, error: String(error.message || error) }); }
     }
-    let archive;
-    try { archive = await ngContentUploadStore.cancel(preflight.archive.id); }
-    catch (error) { archive = { id: preflight.archive.id, deleted: false, error: String(error.message || error) }; }
+    const archive = {
+      object_key: preflight.archive.object_key,
+      upload_ids: preflight.archive.upload_ids,
+      total_bytes: preflight.archive.total_bytes,
+      deleted: false,
+      manifest_updates: [],
+    };
+    try {
+      await deleteContentR2Object(preflight.archive.object_key);
+      archive.deleted = true;
+      for (const uploadId of preflight.archive.upload_ids || []) {
+        try { archive.manifest_updates.push(await ngContentUploadStore.cancel(uploadId)); }
+        catch (error) {
+          if (Number(error.statusCode || 0) !== 404) throw error;
+          archive.manifest_updates.push({ id: uploadId, status: "manifest_missing" });
+        }
+      }
+    } catch (error) {
+      archive.error = String(error.message || error);
+    }
     return aylaSendOk(res, {
       database: { ...database, r2_object_keys: undefined },
       media_objects_requested: database.r2_object_keys.length,
       media_objects_failed: failedR2Objects,
       archive,
-      storage_cleanup_complete: failedR2Objects.length === 0 && !archive?.error,
+      storage_cleanup_complete: failedR2Objects.length === 0 && archive.deleted && !archive.error,
       global_student_access: false,
       preserved: ["AylaMed student history", "Vimeo", "notes", "recordings", "unrelated AylaMed-owned content"],
     });
