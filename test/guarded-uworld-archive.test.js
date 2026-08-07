@@ -49,6 +49,18 @@ test("archive inspection recovers the exact media ZIP from job lineage and live 
   assert.equal(result.archive.checks.exact_job_identity, true);
 });
 
+test("archive inspection recovers from persisted job lineage when the upload manifest expired", async () => {
+  const result = await inspectGuardedUworldArchives({
+    jobs: [exactJob()],
+    expectedFingerprints: [fingerprint],
+    headObject: async () => ({ sizeBytes: bytes, etag }),
+  });
+  assert.equal(result.ready, true);
+  assert.equal(result.archive.object_key, key);
+  assert.deepEqual(result.archive.sources, ["exact_job_lineage"]);
+  assert.deepEqual(result.archive.upload_ids, ["upload-1"]);
+});
+
 test("archive inspection blocks active leases and active exact jobs", async () => {
   const result = await inspectGuardedUworldArchives({
     uploads: [{

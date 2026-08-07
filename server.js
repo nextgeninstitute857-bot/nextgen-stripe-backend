@@ -48,6 +48,7 @@ import {
   getExternalQbankDeliverySession,
   importContentQuestionBatch,
   listContentHubVideos,
+  listContentBackgroundJobsByDomainIds,
   listContentOperationalJobs,
   listContentMediaImportAssets,
   listContentMediaImportAssetsForParent,
@@ -39932,10 +39933,7 @@ async function ngGuardedUworldCleanupPreview() {
   const database = await previewGuardedUworldCleanup();
   const uploads = await ngContentUploadStore.list({ limit: 200 });
   const domainJobIds = [database.question_job?.id, database.media_job?.id].filter(Boolean);
-  const jobs = domainJobIds.flatMap((domainJobId) =>
-    ngContentBackgroundJobs(domainJobId)
-      .map((job) => ngContentBackgroundQueue.get(job.id, { includePayload: true }))
-      .filter(Boolean));
+  const jobs = await listContentBackgroundJobsByDomainIds(domainJobIds);
   const archiveInspection = await inspectGuardedUworldArchives({
     uploads,
     jobs,
