@@ -36,6 +36,9 @@ test("cleanup API requires Ayla admin and exact R2-verified archive", () => {
   assert.match(server, /\/api\/ayla\/admin\/catalog\/uworld-cleanup\/apply/);
   assert.match(server, /await aylaRequireAdmin\(req\)/);
   assert.match(server, /inspectGuardedUworldArchives/);
+  assert.match(registry, /export async function listContentBackgroundJobsByDomainIds/);
+  assert.match(registry, /metadata->>'domain_job_id'=ANY\(\$1::text\[\]\)/);
+  assert.match(server, /const jobs = await listContentBackgroundJobsByDomainIds\(domainJobIds\)/);
   assert.match(server, /headContentR2Object/);
   assert.match(server, /archiveInspection\.exact\.length === 1/);
   assert.match(archive, /\^uworld 1\\\.zip\$/i);
