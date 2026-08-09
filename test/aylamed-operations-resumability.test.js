@@ -384,16 +384,21 @@ test("v217 question import resumes after the last committed batch checkpoint", a
   assert.equal(checkpoint.questions_processed_in_pair, 10);
 
   const resumedSourceIds = [];
+  const progressSnapshots = [];
   const resumed = await importUniversalQuestionZip({
-    inventory, job, batchSize: 10, checkpoint,
+    inventory, job: { ...job, counts: { questions_seen: 25 } }, batchSize: 10, checkpoint,
     onBatch: async ({ rows }) => {
       resumedSourceIds.push(...rows.map((row) => Number(row.sourceItemId)));
       return { created: rows.length, answers: rows.length * 2 };
     },
+    onCheckpoint: async (_next, progress) => progressSnapshots.push(progress),
   });
   assert.deepEqual(resumedSourceIds, Array.from({ length: 15 }, (_, index) => index + 11));
   assert.equal(resumed.totals.questions_seen, 25);
   assert.equal(resumed.totals.collections, 1);
+  assert.equal(progressSnapshots.at(-1).questions_processed, 25);
+  assert.equal(progressSnapshots.at(-1).questions_total, 25);
+  assert.equal(progressSnapshots.at(-1).percent, 99);
 });
 
 test("v217 operational snapshot reports bounded disk/process safety without secrets", async (t) => {
