@@ -150,6 +150,40 @@ test("native preview accepts a question-only JSON array and reports complete tax
   assert.equal(result.taxonomyLedger.controlled_question_taxonomy_records, 1776);
 });
 
+test("native preview reports real byte and question progress through completion", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "aylamed-owned-progress-"));
+  const questionName = "aylamed-owned_questions.json";
+  const questionPath = path.join(directory, questionName);
+  await fs.writeFile(questionPath, JSON.stringify([ownedQuestion()]));
+  const snapshots = [];
+  try {
+    await previewUniversalQuestionZip({
+      inventory: {
+        names: [questionName],
+        extractedJson: new Map([[questionName, questionPath]]),
+        mediaKeys: new Set(),
+        entryCount: 1,
+        uncompressedBytes: 1_024,
+      },
+      examTrack: "usmle-step-1",
+      sourceNamespace: "aylamed-step1-owned-progress",
+      sourceProvider: "AylaMed",
+      collectionTitle: "AylaMed Step 1 progress test",
+      sourceFormat: "single_best_answer_v1",
+      destinations: ["aylamed_qbank"],
+      duplicateLookup: async () => ({ exact: [], source: [] }),
+      onProgress: async (snapshot) => snapshots.push(snapshot),
+    });
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+  assert.ok(snapshots.some((snapshot) => snapshot.stage === "previewing_questions"));
+  assert.equal(snapshots.at(-1).percent, 100);
+  assert.equal(snapshots.at(-1).questions_processed, 1);
+  assert.equal(snapshots.at(-1).questions_total, 1);
+  assert.equal(snapshots.at(-1).bytes_processed, snapshots.at(-1).bytes_total);
+});
+
 test("native preview fails closed when a controlled taxonomy ID is outside the approved ledger", async () => {
   const question = ownedQuestion({
     controlled_taxonomy: {

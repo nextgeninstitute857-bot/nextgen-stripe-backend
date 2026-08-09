@@ -35492,7 +35492,11 @@ async function ngRunContentImportPreview({ jobId, upload, metadata, queueContext
       },
     );
     await queueContext.heartbeat({ stage: "previewing_questions", zip_entries: inventory.entryCount });
-    const preview = await previewUniversalQuestionZip({ inventory, ...metadata });
+    const preview = await previewUniversalQuestionZip({
+      inventory,
+      ...metadata,
+      onProgress: (progress) => queueContext.heartbeat(progress),
+    });
     await queueContext.heartbeat({ stage: "preview_complete", counts: preview.counts });
     await finishContentImportPreview(jobId, {
       ...preview.counts,
