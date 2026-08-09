@@ -42,6 +42,16 @@ test('unverified content may be prepared privately but cannot be approved or ena
   );
 });
 
+test('one mixed media ZIP is uploaded once and processed through private R2 and Vimeo stages', () => {
+  assert.match(server, /content-imports\/:jobId\/media-bundle\/import-draft/);
+  assert.match(server, /content-media-bundle-imports\/:backgroundJobId/);
+  assert.match(server, /type: "content_media_bundle_draft"/);
+  assert.match(server, /lane: "media_bundle_zip"/);
+  assert.match(server, /single_upload: true/);
+  assert.match(server, /ngContentBackgroundQueue\.register\("content_media_bundle_draft"/);
+  assert.match(server, /ngRunContentMediaDraftImport\([\s\S]*?ngRunContentVideoDraftImport/);
+});
+
 test('AylaMed native approval and publication are separate fail-closed gates', () => {
   assert.match(postgres, /AYLAMED_NATIVE_APPROVAL_GATE_BLOCKED/);
   assert.match(postgres, /AYLAMED_NATIVE_APPROVAL_REQUIRED/);
