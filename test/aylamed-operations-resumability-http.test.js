@@ -32,12 +32,13 @@ async function waitForHealth(baseUrl, child, output, timeoutMs = 15_000) {
   throw new Error(`Health timeout\n${output.join("")}`);
 }
 
-async function jsonApi(baseUrl, route, { method = "GET", token = "", body = null } = {}) {
+async function jsonApi(baseUrl, route, { method = "GET", token = "", adminToken = "", body = null } = {}) {
   const response = await fetch(`${baseUrl}${route}`, {
     method,
     headers: {
       ...(body ? { "content-type": "application/json" } : {}),
       ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...(adminToken ? { "x-admin-token": adminToken } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
   });
@@ -91,6 +92,7 @@ test("v217 HTTP flow keeps chunked ZIPs admin-only, resumable, checksummed, and 
       ...process.env,
       PORT: String(port), DATA_DIR: dataDir,
       AUTH_JWT_SECRET: "v217-lms-secret", AYLA_AUTH_JWT_SECRET: "v217-ayla-secret",
+      AYLA_ADMIN_TOKEN: "operations-ayla-admin-token",
       DATABASE_URL: "", OPENAI_API_KEY: "",
       NEXTGEN_CONTENT_UPLOAD_CHUNK_BYTES: String(256 * 1024),
       NEXTGEN_CONTENT_UPLOAD_MAX_CHUNK_BYTES: String(1024 * 1024),
@@ -111,6 +113,43 @@ test("v217 HTTP flow keeps chunked ZIPs admin-only, resumable, checksummed, and 
       method: "POST", body: { original_filename: "questions.zip", total_bytes: bytes.length, sha256: digest },
     });
     assert.equal(unauthorized.response.status, 401, JSON.stringify(unauthorized.payload));
+
+    const wrongScope = await jsonApi(baseUrl, "/admin/crm/ai-training/content-uploads", {
+      method: "POST", adminToken: "operations-ayla-admin-token",
+      body: {
+        original_filename: "questions.zip", total_bytes: bytes.length, sha256: digest,
+        purpose: "question_zip", metadata: { source_provider: "AylaMed", source_profile: "aylamed_original", source_rights_status: "owned", source_namespace: "fixture" },
+      },
+    });
+    assert.equal(wrongScope.response.status, 403, JSON.stringify(wrongScope.payload));
+
+    const aylaCreated = await jsonApi(baseUrl, "/admin/crm/ai-training/content-uploads", {
+      method: "POST", adminToken: "operations-ayla-admin-token",
+      body: {
+        original_filename: "media.zip", total_bytes: bytes.length, sha256: digest,
+        purpose: "media_zip", metadata: { source_provider: "AylaMed", source_profile: "aylamed_original", source_rights_status: "owned", source_namespace: "fixture" },
+      },
+    });
+    assert.equal(aylaCreated.response.status, 201, JSON.stringify(aylaCreated.payload));
+    const aylaUploadId = aylaCreated.payload.upload.id;
+    const aylaStatus = await jsonApi(baseUrl, `/admin/crm/ai-training/content-uploads/${aylaUploadId}`, {
+      adminToken: "operations-ayla-admin-token",
+    });
+    assert.equal(aylaStatus.response.status, 200, JSON.stringify(aylaStatus.payload));
+    const aylaPresign = await jsonApi(baseUrl, `/admin/crm/ai-training/content-uploads/${aylaUploadId}/parts/presign`, {
+      method: "POST", adminToken: "operations-ayla-admin-token", body: { indices: [0] },
+    });
+    assert.equal(aylaPresign.response.status, 409, JSON.stringify(aylaPresign.payload));
+    assert.match(aylaPresign.payload.error, /Direct R2 multipart upload is not configured/);
+    const aylaFinalize = await jsonApi(baseUrl, `/admin/crm/ai-training/content-uploads/${aylaUploadId}/finalize`, {
+      method: "POST", adminToken: "operations-ayla-admin-token", body: {},
+    });
+    assert.equal(aylaFinalize.response.status, 409, JSON.stringify(aylaFinalize.payload));
+    assert.match(aylaFinalize.payload.error, /Upload is incomplete/);
+    const aylaCancelled = await jsonApi(baseUrl, `/admin/crm/ai-training/content-uploads/${aylaUploadId}`, {
+      method: "DELETE", adminToken: "operations-ayla-admin-token",
+    });
+    assert.equal(aylaCancelled.response.status, 200, JSON.stringify(aylaCancelled.payload));
 
     const login = await jsonApi(baseUrl, "/auth/login", {
       method: "POST", body: { email: "operations-admin@example.com", password },

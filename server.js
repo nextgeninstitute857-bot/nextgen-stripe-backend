@@ -35372,9 +35372,43 @@ function ngContentProgressTracker(initialStage = "") {
   };
 }
 
+function ngOwnedMediaUploadScopeError() {
+  return Object.assign(
+    new Error("AylaMed administrator uploads are limited to AylaMed-owned media archives"),
+    { statusCode: 403 },
+  );
+}
+
+async function requireContentUploadAdmin(req, uploadId = "") {
+  const context = await requireOwnedCatalogAdmin(req);
+  if (!context.ownedCatalogOnly) return context;
+
+  const expectedCreator = String(context.user?.id || "");
+  let purpose = req.body?.purpose;
+  let metadata = ngContentUploadMetadata(req.body || {});
+  let createdBy = expectedCreator;
+
+  if (uploadId) {
+    const session = await ngContentUploadStore.read(uploadId);
+    purpose = session?.purpose;
+    metadata = ngContentUploadMetadata(session?.metadata || {});
+    createdBy = String(session?.created_by || "");
+  }
+
+  const isOwnedAylaMedMedia = String(purpose || "").toLowerCase() === "media_zip"
+    && String(metadata.source_provider || "").toLowerCase() === "aylamed"
+    && String(metadata.source_profile || "").toLowerCase() === "aylamed_original"
+    && String(metadata.source_rights_status || "").toLowerCase() === "owned"
+    && Boolean(String(metadata.source_namespace || "").trim());
+  const ownsExistingSession = !uploadId || (expectedCreator && createdBy === expectedCreator);
+
+  if (!isOwnedAylaMedMedia || !ownsExistingSession) throw ngOwnedMediaUploadScopeError();
+  return context;
+}
+
 app.post("/admin/crm/ai-training/content-uploads", async (req, res) => {
   try {
-    const { user } = await requireCrmAdmin(req);
+    const { user } = await requireContentUploadAdmin(req);
     const session = await ngContentUploadStore.create({
       originalFilename: req.body?.original_filename || req.body?.filename,
       totalBytes: req.body?.total_bytes,
@@ -35403,7 +35437,7 @@ app.post("/admin/crm/ai-training/content-uploads", async (req, res) => {
 
 app.put("/admin/crm/ai-training/content-uploads/:uploadId/chunks/:index", async (req, res) => {
   try {
-    await requireCrmAdmin(req);
+    await requireContentUploadAdmin(req, req.params.uploadId);
     if (typeof ngContentUploadStore.writeChunk !== "function") {
       req.resume();
       return res.status(409).json({ success: false, error: "This upload uses direct R2 multipart. Request signed part URLs instead." });
@@ -35423,7 +35457,7 @@ app.put("/admin/crm/ai-training/content-uploads/:uploadId/chunks/:index", async 
 
 app.post("/admin/crm/ai-training/content-uploads/:uploadId/parts/presign", async (req, res) => {
   try {
-    await requireCrmAdmin(req);
+    await requireContentUploadAdmin(req, req.params.uploadId);
     if (typeof ngContentUploadStore.signParts !== "function") {
       return res.status(409).json({ success: false, error: "Direct R2 multipart upload is not configured" });
     }
@@ -35436,7 +35470,7 @@ app.post("/admin/crm/ai-training/content-uploads/:uploadId/parts/presign", async
 
 app.get("/admin/crm/ai-training/content-uploads/:uploadId", async (req, res) => {
   try {
-    await requireCrmAdmin(req);
+    await requireContentUploadAdmin(req, req.params.uploadId);
     return res.json({ success: true, upload: await ngContentUploadStore.get(req.params.uploadId) });
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, error: error.message });
@@ -35445,7 +35479,7 @@ app.get("/admin/crm/ai-training/content-uploads/:uploadId", async (req, res) => 
 
 app.post("/admin/crm/ai-training/content-uploads/:uploadId/finalize", async (req, res) => {
   try {
-    await requireCrmAdmin(req);
+    await requireContentUploadAdmin(req, req.params.uploadId);
     const result = await ngContentUploadStore.finalize(req.params.uploadId, { expectedSha256: req.body?.sha256 });
     return res.json({ success: true, upload: result.session, sha256: result.sha256, fingerprint: result.sha256, deduplicated: result.deduplicated });
   } catch (error) {
@@ -35455,7 +35489,7 @@ app.post("/admin/crm/ai-training/content-uploads/:uploadId/finalize", async (req
 
 app.delete("/admin/crm/ai-training/content-uploads/:uploadId", async (req, res) => {
   try {
-    await requireCrmAdmin(req);
+    await requireContentUploadAdmin(req, req.params.uploadId);
     return res.json({ success: true, upload: await ngContentUploadStore.cancel(req.params.uploadId) });
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, error: error.message });
