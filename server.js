@@ -37077,6 +37077,108 @@ app.get("/admin/crm/ai-training/content-video-imports/:videoJobId", async (req, 
   }
 });
 
+function ngContentMediaDraftReady(job) {
+  return ["draft_imported", "draft_imported_with_warnings"].includes(String(job?.status || ""));
+}
+
+app.post("/admin/crm/ai-training/content-imports/:jobId/media-bundle/import-draft", async (req, res) => {
+  let upload;
+  let mediaJob = null;
+  let videoJob = null;
+  try {
+    const { user } = await requireCrmAdmin(req);
+    if (!contentMediaStatus().configured) {
+      return res.status(503).json({ success: false, error: "Cloudflare R2 is not configured" });
+    }
+    if (!contentVideoStatus().configured) {
+      return res.status(503).json({ success: false, error: "Vimeo access token is not configured" });
+    }
+    const parentJob = await getContentImportJob(req.params.jobId);
+    if (!parentJob) return res.status(404).json({ success: false, error: "Content import job not found" });
+    if (!["draft_imported", "draft_imported_with_warnings"].includes(String(parentJob.status))) {
+      return res.status(409).json({ success: false, error: "Questions must be imported as drafts before media can be attached" });
+    }
+    upload = await ngReceiveOrResolveContentZip(req, ["media_zip"]);
+    mediaJob = await createContentMediaImportJob({
+      id: crypto.randomUUID(), contentImportJobId: parentJob.id, zipSha256: upload.sha256,
+      originalFilename: upload.originalFilename, createdBy: String(user.id),
+    });
+    videoJob = await createContentVideoImportJob({
+      id: crypto.randomUUID(), contentImportJobId: parentJob.id, zipSha256: upload.sha256,
+      originalFilename: upload.originalFilename, createdBy: String(user.id),
+    });
+    const backgroundJob = await ngQueueContentOperation({
+      type: "content_media_bundle_draft",
+      lane: "media_bundle_zip",
+      upload,
+      domainJobId: mediaJob.id,
+      metadata: {
+        video_job_id: videoJob.id,
+        content_import_job_id: parentJob.id,
+        single_upload: true,
+      },
+      maxAttempts: 2,
+    });
+    upload = null;
+    return res.status(202).json({
+      success: true,
+      media_job_id: mediaJob.id,
+      video_job_id: videoJob.id,
+      background_job_id: backgroundJob.id,
+      content_import_job_id: parentJob.id,
+      status: "queued",
+      poll_url: `/admin/crm/ai-training/content-media-bundle-imports/${backgroundJob.id}`,
+      message: "One media ZIP accepted. Images and audio will be stored privately before videos are uploaded privately to Vimeo.",
+    });
+  } catch (error) {
+    if (mediaJob?.id) {
+      await finishContentMediaImportJob(
+        mediaJob.id, "queue_failed", { failed: true, media_bundle: true }, [{ error: error.message }],
+      ).catch(() => {});
+    }
+    if (videoJob?.id) {
+      await finishContentVideoImportJob(
+        videoJob.id, "queue_failed", { failed: true, media_bundle: true }, [{ error: error.message }],
+      ).catch(() => {});
+    }
+    await ngCleanupRejectedContentUpload(upload);
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message || "Combined media ZIP import failed",
+    });
+  }
+});
+
+app.get("/admin/crm/ai-training/content-media-bundle-imports/:backgroundJobId", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const bundleJob = ngContentBackgroundQueue.get(req.params.backgroundJobId);
+    if (!bundleJob || bundleJob.type !== "content_media_bundle_draft") {
+      return res.status(404).json({ success: false, error: "Combined media import job not found" });
+    }
+    const mediaJobId = String(bundleJob.metadata?.domain_job_id || "");
+    const videoJobId = String(bundleJob.metadata?.video_job_id || "");
+    const [mediaJob, videoJob] = await Promise.all([
+      getContentMediaImportJob(mediaJobId),
+      getContentVideoImportJob(videoJobId),
+    ]);
+    const monitoring = contentJobMonitoring([bundleJob], {
+      staleMs: Math.max(30_000, Number(process.env.NEXTGEN_CONTENT_PROGRESS_STALE_MS || 3 * 60 * 1000)),
+    });
+    return res.json({
+      success: true,
+      bundle_job: bundleJob,
+      media_job: mediaJob,
+      video_job: videoJob,
+      monitoring,
+      single_upload: true,
+      storage: { images_and_audio: contentMediaStatus(), videos: contentVideoStatus() },
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
 async function ngBuildContentVideoReconcileAudit(videoJobId) {
   const videoJob = await getContentVideoImportJob(videoJobId);
   if (!videoJob) throw Object.assign(new Error("Video import job not found"), { statusCode: 404 });
@@ -38238,6 +38340,98 @@ ngContentBackgroundQueue.register("content_video_draft", async (queueContext) =>
   onTerminal: (job) => ngContentQueueTerminal(job, (message) => finishContentVideoImportJob(
     job.payload.domain_job_id, "draft_import_failed", { failed: true }, [{ error: message }],
   ), (message) => finishContentVideoImportJob(job.payload.domain_job_id, "draft_import_cancelled", { cancelled: true }, [{ error: message }])),
+});
+
+function ngScaledMediaBundleQueueContext(queueContext, startPercent, endPercent) {
+  const scaleProgress = (progress = {}) => {
+    const input = Number(progress.percent);
+    const percent = Number.isFinite(input)
+      ? Math.round(startPercent + ((Math.max(0, Math.min(100, input)) / 100) * (endPercent - startPercent)))
+      : startPercent;
+    return {
+      ...progress,
+      percent,
+      completed: endPercent === 100 && progress.completed === true,
+      media_bundle: true,
+    };
+  };
+  return {
+    job: queueContext.job,
+    heartbeat: (progress) => queueContext.heartbeat(scaleProgress(progress)),
+    updateCheckpoint: (checkpoint, progress) => queueContext.updateCheckpoint(
+      checkpoint,
+      scaleProgress(progress),
+    ),
+  };
+}
+
+ngContentBackgroundQueue.register("content_media_bundle_draft", async (queueContext) => {
+  const mediaJob = await getContentMediaImportJob(queueContext.job.payload.domain_job_id);
+  if (!mediaJob) throw new Error("Combined media image/audio job no longer exists");
+  const videoJobId = String(queueContext.job.payload.metadata?.video_job_id || "");
+  const videoJob = await getContentVideoImportJob(videoJobId);
+  if (!videoJob) throw new Error("Combined media video job no longer exists");
+  const parentJob = await getContentImportJob(mediaJob.content_import_job_id);
+  if (!parentJob || String(videoJob.content_import_job_id) !== String(parentJob.id)) {
+    throw new Error("Combined media parent import no longer exists or does not match");
+  }
+  const upload = ngQueuedContentUpload(queueContext.job);
+  if (!ngContentMediaDraftReady(mediaJob)) {
+    await ngRunContentMediaDraftImport({
+      mediaJob,
+      parentJob,
+      upload,
+      queueContext: ngScaledMediaBundleQueueContext(queueContext, 0, 50),
+    });
+  } else {
+    await queueContext.heartbeat({
+      stage: "image_audio_import_already_complete",
+      percent: 50,
+      media_bundle: true,
+      movement: true,
+    });
+  }
+  if (!ngContentMediaDraftReady(videoJob)) {
+    await ngRunContentVideoDraftImport({
+      videoJob,
+      parentJob,
+      upload,
+      queueContext: ngScaledMediaBundleQueueContext(queueContext, 50, 100),
+    });
+  }
+}, {
+  canRecover: ngContentQueueCanRecover,
+  onTerminal: (job) => ngContentQueueTerminal(job, async (message) => {
+    const mediaJob = await getContentMediaImportJob(job.payload.domain_job_id).catch(() => null);
+    const videoJob = await getContentVideoImportJob(
+      String(job.payload.metadata?.video_job_id || ""),
+    ).catch(() => null);
+    if (mediaJob && !ngContentMediaDraftReady(mediaJob)) {
+      await finishContentMediaImportJob(
+        mediaJob.id, "draft_import_failed", { failed: true, media_bundle: true }, [{ error: message }],
+      );
+    }
+    if (videoJob && !ngContentMediaDraftReady(videoJob)) {
+      await finishContentVideoImportJob(
+        videoJob.id, "draft_import_failed", { failed: true, media_bundle: true }, [{ error: message }],
+      );
+    }
+  }, async (message) => {
+    const mediaJob = await getContentMediaImportJob(job.payload.domain_job_id).catch(() => null);
+    const videoJob = await getContentVideoImportJob(
+      String(job.payload.metadata?.video_job_id || ""),
+    ).catch(() => null);
+    if (mediaJob && !ngContentMediaDraftReady(mediaJob)) {
+      await finishContentMediaImportJob(
+        mediaJob.id, "draft_import_cancelled", { cancelled: true, media_bundle: true }, [{ error: message }],
+      );
+    }
+    if (videoJob && !ngContentMediaDraftReady(videoJob)) {
+      await finishContentVideoImportJob(
+        videoJob.id, "draft_import_cancelled", { cancelled: true, media_bundle: true }, [{ error: message }],
+      );
+    }
+  }),
 });
 
 ngContentBackgroundQueue.register("ayla_vimeo_catalog_classification", async (queueContext) => {
