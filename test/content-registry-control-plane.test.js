@@ -59,6 +59,7 @@ test('named collections recover their private draft import job after an admin pa
   assert.match(postgres, /j\.source_namespace=c\.source_namespace/);
   assert.match(postgres, /j\.source_profile=c\.source_profile/);
   assert.match(postgres, /COALESCE\(j\.collection_title,''\)=COALESCE\(c\.title,''\)/);
+  assert.match(postgres, /CONCAT\(COALESCE\(j\.collection_title,''\), ': ', c\.collection_key\)/);
   assert.match(postgres, /j\.status IN \('draft_imported','draft_imported_with_warnings'\)/);
 });
 
