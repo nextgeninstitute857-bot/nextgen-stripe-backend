@@ -42,6 +42,20 @@ test('unverified content may be prepared privately but cannot be approved or ena
   );
 });
 
+test('AylaMed native approval and publication are separate fail-closed gates', () => {
+  assert.match(postgres, /AYLAMED_NATIVE_APPROVAL_GATE_BLOCKED/);
+  assert.match(postgres, /AYLAMED_NATIVE_APPROVAL_REQUIRED/);
+  assert.match(postgres, /AYLAMED_NATIVE_PUBLICATION_GATE_BLOCKED/);
+  assert.match(postgres, /taxonomy_complete_count/);
+  assert.match(postgres, /native_answer_shape_ready_count/);
+  assert.match(postgres, /native_publication_ready_count/);
+  assert.match(postgres, /native_media_ready_count/);
+  assert.match(postgres, /delivery_collection\.status='approved'/);
+  assert.match(postgres, /delivery_destination\.enabled=TRUE/);
+  assert.match(server, /content-registry\/collections\/:collectionId\/controls[\s\S]{0,160}requireOwnedCatalogAdmin\(req\)/);
+  assert.match(postgres, /AYLAMED_OWNED_COLLECTION_REQUIRED/);
+});
+
 test('question ID display policy supports internal, source, both, and hidden modes', () => {
   for (const mode of ['internal', 'source', 'both', 'hidden']) assert.match(postgres, new RegExp(`'${mode}'`));
   for (const mode of ['provider', 'neutral', 'hidden']) assert.match(postgres, new RegExp(`'${mode}'`));
