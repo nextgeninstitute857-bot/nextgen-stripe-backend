@@ -21564,6 +21564,7 @@ async function requireOwnedCatalogAdmin(req) {
       return {
         ...aylaAdmin,
         user: aylaAdmin.user || { id: "aylamed-owned-catalog-admin", role: "admin" },
+        ownedCatalogOnly: true,
       };
     } catch {
       throw crmError;
@@ -35498,6 +35499,7 @@ async function ngRunContentImportPreview({ jobId, upload, metadata, queueContext
       missing_media_samples: preview.missingMedia,
       media_quarantine_samples: preview.mediaQuarantine,
       collections: preview.collections,
+      taxonomy_ledger: preview.taxonomyLedger,
     }, preview.errors);
     return preview;
   } catch (error) {
@@ -38408,7 +38410,7 @@ app.get("/admin/crm/ai-training/content-registry/collections", async (req, res) 
 
 app.put("/admin/crm/ai-training/content-registry/collections/:collectionId/controls", async (req, res) => {
   try {
-    const { user } = await requireCrmAdmin(req);
+    const { user, ownedCatalogOnly = false } = await requireOwnedCatalogAdmin(req);
     const collection = await updateContentCollectionControls({
       collectionId: req.params.collectionId,
       status: req.body.status,
@@ -38417,13 +38419,109 @@ app.put("/admin/crm/ai-training/content-registry/collections/:collectionId/contr
       sourceProfile: req.body.source_profile ?? req.body.sourceProfile,
       sourceRightsStatus: req.body.source_rights_status ?? req.body.sourceRightsStatus,
       actorId: String(user.id),
+      ownedOnly: ownedCatalogOnly,
     });
     return res.json({
       success: true, collection,
       message: "Collection controls saved. Content was routed without deleting questions or historical activity.",
     });
   } catch (error) {
-    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+      code: error.code || undefined,
+      details: error.details || undefined,
+    });
+  }
+});
+
+app.post("/admin/crm/ai-training/content-registry/collections/:collectionId/publish-all", async (req, res) => {
+  try {
+    const { user } = await requireOwnedCatalogAdmin(req);
+    const expectedQuestionCount = Number(req.body.expected_question_count ?? req.body.expectedQuestionCount);
+    const requiredConfirmation = `PUBLISH ALL ${expectedQuestionCount}`;
+    if (!Number.isSafeInteger(expectedQuestionCount) || expectedQuestionCount < 1
+      || String(req.body.confirmation || '') !== requiredConfirmation) {
+      return res.status(400).json({
+        success: false,
+        error: 'Publish All requires the exact displayed question count and confirmation.',
+        code: 'AYLAMED_PUBLISH_ALL_CONFIRMATION_REQUIRED',
+      });
+    }
+    const collection = await updateContentCollectionControls({
+      collectionId: req.params.collectionId,
+      destinations: [{
+        destination: 'aylamed_qbank',
+        destination_scope: '',
+        enabled: true,
+        settings: { owned_catalogue_guard: true, published_with_bulk_control: true },
+      }],
+      displayPolicy: { question_id_mode: 'internal', source_label_mode: 'hidden' },
+      actorId: String(user.id),
+      ownedOnly: true,
+      publishAll: true,
+      expectedQuestionCount,
+    });
+    return res.json({
+      success: true,
+      collection,
+      published_question_count: expectedQuestionCount,
+      destination: 'aylamed_qbank',
+      destination_scope: '',
+      message: `Published all ${expectedQuestionCount} eligible AylaMed-owned questions to the AylaMed QBank.`,
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+      code: error.code || undefined,
+      details: error.details || undefined,
+    });
+  }
+});
+
+app.post("/admin/crm/ai-training/content-registry/collections/:collectionId/unpublish-all", async (req, res) => {
+  try {
+    const { user } = await requireOwnedCatalogAdmin(req);
+    const expectedQuestionCount = Number(req.body.expected_question_count ?? req.body.expectedQuestionCount);
+    const requiredConfirmation = `UNPUBLISH ALL ${expectedQuestionCount}`;
+    if (!Number.isSafeInteger(expectedQuestionCount) || expectedQuestionCount < 1
+      || String(req.body.confirmation || '') !== requiredConfirmation) {
+      return res.status(400).json({
+        success: false,
+        error: 'Unpublish All requires the exact displayed question count and confirmation.',
+        code: 'AYLAMED_UNPUBLISH_ALL_CONFIRMATION_REQUIRED',
+      });
+    }
+    const collection = await updateContentCollectionControls({
+      collectionId: req.params.collectionId,
+      destinations: [{
+        destination: 'aylamed_qbank',
+        destination_scope: '',
+        enabled: false,
+        settings: { owned_catalogue_guard: true, unpublished_with_bulk_control: true },
+      }],
+      actorId: String(user.id),
+      ownedOnly: true,
+      unpublishAll: true,
+      expectedQuestionCount,
+    });
+    return res.json({
+      success: true,
+      collection,
+      unpublished_question_count: expectedQuestionCount,
+      destination: 'aylamed_qbank',
+      destination_scope: '',
+      preserved: ['questions', 'answers', 'taxonomy', 'media references', 'source aliases', 'review history'],
+      message: `Unpublished all ${expectedQuestionCount} questions in this named collection without deleting content.`,
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+      code: error.code || undefined,
+      details: error.details || undefined,
+    });
   }
 });
 
