@@ -56,6 +56,23 @@ test('AylaMed native approval and publication are separate fail-closed gates', (
   assert.match(postgres, /AYLAMED_OWNED_COLLECTION_REQUIRED/);
 });
 
+test('AylaMed Publish All is collection-scoped, count-locked, and QBank-only', () => {
+  assert.match(server, /content-registry\/collections\/:collectionId\/publish-all/);
+  assert.match(server, /content-registry\/collections\/:collectionId\/unpublish-all/);
+  assert.match(server, /requiredConfirmation = `PUBLISH ALL \$\{expectedQuestionCount\}`/);
+  assert.match(server, /requiredConfirmation = `UNPUBLISH ALL \$\{expectedQuestionCount\}`/);
+  assert.match(server, /destination: 'aylamed_qbank'/);
+  assert.match(server, /destination_scope: ''/);
+  assert.match(server, /ownedOnly: true/);
+  assert.match(server, /publishAll: true/);
+  assert.match(postgres, /AYLAMED_PUBLISH_ALL_APPROVAL_REQUIRED/);
+  assert.match(postgres, /AYLAMED_BULK_PUBLICATION_COUNT_CHANGED/);
+  assert.match(postgres, /AYLAMED_BULK_PUBLICATION_OWNERSHIP_MISMATCH/);
+  assert.match(postgres, /AYLAMED_PUBLISH_ALL_DESTINATION_REQUIRED/);
+  assert.match(postgres, /AYLAMED_UNPUBLISH_ALL_DESTINATION_REQUIRED/);
+  assert.match(server, /preserved: \['questions', 'answers', 'taxonomy', 'media references', 'source aliases', 'review history'\]/);
+});
+
 test('question ID display policy supports internal, source, both, and hidden modes', () => {
   for (const mode of ['internal', 'source', 'both', 'hidden']) assert.match(postgres, new RegExp(`'${mode}'`));
   for (const mode of ['provider', 'neutral', 'hidden']) assert.match(postgres, new RegExp(`'${mode}'`));
