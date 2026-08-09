@@ -63,12 +63,14 @@ import {
   listContentTaxonomyReviewQueue,
   normalizeContentSourceProfile,
   previewAylaOriginalMcqRepair,
+  previewStep1CollectionTaxonomyRepair,
   previewGuardedUworldCleanup,
   removeContentQuestionTaxonomyOverride,
   recordExternalQbankAuditEvent,
   recordExternalQbankDeliveryAnswer,
   resolveContentQbankStudentSourceProfile,
   reviewContentTaxonomyMapping,
+  repairStep1CollectionTaxonomy,
   saveContentMediaMatchBatch,
   saveContentVideoAsset,
   saveContentVideoLinksBatch,
@@ -38603,6 +38605,64 @@ app.get("/admin/crm/ai-training/content-registry/collections", async (req, res) 
     return res.json({ success: true, count: collections.length, collections });
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/ai-training/content-registry/collections/:collectionId/taxonomy-repair-preview", async (req, res) => {
+  try {
+    await requireOwnedCatalogAdmin(req);
+    const preview = await previewStep1CollectionTaxonomyRepair({
+      collectionId: req.params.collectionId,
+    });
+    return res.json({
+      success: true,
+      preview,
+      message: preview.repair_required
+        ? `${preview.repairable} private questions can be mapped in place without re-uploading or publishing.`
+        : "This collection already has complete taxonomy.",
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+      code: error.code || undefined,
+      details: error.details || undefined,
+    });
+  }
+});
+
+app.post("/admin/crm/ai-training/content-registry/collections/:collectionId/repair-taxonomy", async (req, res) => {
+  try {
+    const { user } = await requireOwnedCatalogAdmin(req);
+    const expectedQuestionCount = Number(req.body.expected_question_count ?? req.body.expectedQuestionCount);
+    const requiredConfirmation = `REPAIR TAXONOMY ${expectedQuestionCount}`;
+    if (!Number.isSafeInteger(expectedQuestionCount) || expectedQuestionCount < 1
+      || String(req.body.confirmation || "") !== requiredConfirmation
+      || !String((req.body.audit_fingerprint ?? req.body.auditFingerprint) || "")) {
+      return res.status(400).json({
+        success: false,
+        error: "Taxonomy repair requires the exact displayed question count, preview fingerprint, and confirmation.",
+        code: "STEP1_TAXONOMY_REPAIR_CONFIRMATION_REQUIRED",
+      });
+    }
+    const repair = await repairStep1CollectionTaxonomy({
+      collectionId: req.params.collectionId,
+      expectedQuestionCount,
+      auditFingerprint: req.body.audit_fingerprint ?? req.body.auditFingerprint,
+      actorId: String(user.id),
+    });
+    return res.json({
+      success: true,
+      repair,
+      message: `Taxonomy repaired for ${repair.taxonomy_complete_count} private questions. Nothing was re-uploaded or published.`,
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+      code: error.code || undefined,
+      details: error.details || undefined,
+    });
   }
 });
 
