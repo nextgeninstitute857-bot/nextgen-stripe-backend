@@ -52,6 +52,16 @@ test('one mixed media ZIP is uploaded once and processed through private R2 and 
   assert.match(server, /ngRunContentMediaDraftImport\([\s\S]*?ngRunContentVideoDraftImport/);
 });
 
+test('named collections recover their private draft import job after an admin page refresh', () => {
+  assert.match(postgres, /recovered_job\.draft_import_job_id/);
+  assert.match(postgres, /recovered_job\.draft_import_job_status/);
+  assert.match(postgres, /j\.exam_track=c\.exam_track/);
+  assert.match(postgres, /j\.source_namespace=c\.source_namespace/);
+  assert.match(postgres, /j\.source_profile=c\.source_profile/);
+  assert.match(postgres, /COALESCE\(j\.collection_title,''\)=COALESCE\(c\.title,''\)/);
+  assert.match(postgres, /j\.status IN \('draft_imported','draft_imported_with_warnings'\)/);
+});
+
 test('AylaMed native approval and publication are separate fail-closed gates', () => {
   assert.match(postgres, /AYLAMED_NATIVE_APPROVAL_GATE_BLOCKED/);
   assert.match(postgres, /AYLAMED_NATIVE_APPROVAL_REQUIRED/);
