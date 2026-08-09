@@ -8,6 +8,9 @@ import {
   validateAdaptedQuestion,
 } from "../lib/content-import-adapter.js";
 import {
+  buildStep1CollectionTaxonomyRepairPreview,
+} from "../lib/content-registry-postgres.js";
+import {
   resolveStep1SourceTaxonomy,
   step1SourceTaxonomyLedgerSummary,
 } from "../lib/step1-source-taxonomy.js";
@@ -104,6 +107,56 @@ test("the approved Step 1 ledger contains the complete 11/27/169 hierarchy and 1
   assert.equal(summary.disciplines, 13);
 });
 
+test("private taxonomy repair preserves approved and delivered shared-question state", () => {
+  const preview = buildStep1CollectionTaxonomyRepairPreview(
+    { id: "collection-1", title: "Imported Step 1", exam_track: "usmle-step-1", status: "draft" },
+    [{
+      id: "question-1",
+      title: "Poststreptococcal Glomerulonephritis",
+      system_key: "1148",
+      subject_key: "116",
+      status: "approved",
+      taxonomy: {},
+      source_data: { source_system_id_raw: "1148", source_subject_id_raw: "116" },
+      has_active_override: false,
+      has_active_delivery: true,
+    }],
+    [{ destination: "aylamed_qbank", destination_scope: "", enabled: false }],
+  ).publicPreview;
+
+  assert.equal(preview.ready, true);
+  assert.deepEqual(preview.blockers, []);
+  assert.equal(preview.approved_question_references, 1);
+  assert.equal(preview.active_delivery_references, 1);
+  assert.deepEqual(preview.notices.sort(), [
+    "active_delivery_reference_preserved",
+    "approved_question_reference_preserved",
+  ]);
+  assert.equal(preview.safeguards.source_metadata_changed, false);
+  assert.equal(preview.safeguards.publication_state_changed, false);
+});
+
+test("private taxonomy repair still blocks active manual taxonomy overrides", () => {
+  const preview = buildStep1CollectionTaxonomyRepairPreview(
+    { id: "collection-1", title: "Imported Step 1", exam_track: "usmle-step-1", status: "draft" },
+    [{
+      id: "question-1",
+      title: "Poststreptococcal Glomerulonephritis",
+      system_key: "1148",
+      subject_key: "116",
+      status: "approved",
+      taxonomy: {},
+      source_data: { source_system_id_raw: "1148", source_subject_id_raw: "116" },
+      has_active_override: true,
+      has_active_delivery: true,
+    }],
+    [],
+  ).publicPreview;
+
+  assert.equal(preview.ready, false);
+  assert.ok(preview.blockers.includes("active_taxonomy_override_present"));
+});
+
 test("the in-place repair is count-locked, preview-locked, private-only, and taxonomy-only", async () => {
   const postgres = await fs.readFile(new URL("../lib/content-registry-postgres.js", import.meta.url), "utf8");
   const server = await fs.readFile(new URL("../server.js", import.meta.url), "utf8");
@@ -113,11 +166,15 @@ test("the in-place repair is count-locked, preview-locked, private-only, and tax
   assert.match(postgres, /STEP1_TAXONOMY_REPAIR_COUNT_CHANGED/);
   assert.match(postgres, /STEP1_TAXONOMY_REPAIR_PREVIEW_CHANGED/);
   assert.match(postgres, /student_destination_enabled/);
-  assert.match(postgres, /approved_or_delivered_question_present/);
+  assert.doesNotMatch(postgres, /blockers\.push\("approved_or_delivered_question_present"\)/);
+  assert.match(postgres, /approved_question_reference_preserved/);
+  assert.match(postgres, /active_delivery_reference_preserved/);
   assert.match(postgres, /questions_created: 0/);
   assert.match(postgres, /answers_changed: 0/);
   assert.match(postgres, /source_ids_changed: 0/);
   assert.match(postgres, /media_changed: 0/);
+  assert.match(postgres, /source_metadata_changed: false/);
   assert.match(postgres, /publication_state_changed: false/);
+  assert.doesNotMatch(postgres, /source_data=COALESCE\(q\.source_data/);
   assert.match(postgres, /Taxonomy verification did not reach 100%; the transaction was rolled back/);
 });
