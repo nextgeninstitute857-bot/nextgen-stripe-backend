@@ -21564,6 +21564,7 @@ async function requireOwnedCatalogAdmin(req) {
       return {
         ...aylaAdmin,
         user: aylaAdmin.user || { id: "aylamed-owned-catalog-admin", role: "admin" },
+        ownedCatalogOnly: true,
       };
     } catch {
       throw crmError;
@@ -35498,6 +35499,7 @@ async function ngRunContentImportPreview({ jobId, upload, metadata, queueContext
       missing_media_samples: preview.missingMedia,
       media_quarantine_samples: preview.mediaQuarantine,
       collections: preview.collections,
+      taxonomy_ledger: preview.taxonomyLedger,
     }, preview.errors);
     return preview;
   } catch (error) {
@@ -38408,7 +38410,7 @@ app.get("/admin/crm/ai-training/content-registry/collections", async (req, res) 
 
 app.put("/admin/crm/ai-training/content-registry/collections/:collectionId/controls", async (req, res) => {
   try {
-    const { user } = await requireCrmAdmin(req);
+    const { user, ownedCatalogOnly = false } = await requireOwnedCatalogAdmin(req);
     const collection = await updateContentCollectionControls({
       collectionId: req.params.collectionId,
       status: req.body.status,
@@ -38417,13 +38419,19 @@ app.put("/admin/crm/ai-training/content-registry/collections/:collectionId/contr
       sourceProfile: req.body.source_profile ?? req.body.sourceProfile,
       sourceRightsStatus: req.body.source_rights_status ?? req.body.sourceRightsStatus,
       actorId: String(user.id),
+      ownedOnly: ownedCatalogOnly,
     });
     return res.json({
       success: true, collection,
       message: "Collection controls saved. Content was routed without deleting questions or historical activity.",
     });
   } catch (error) {
-    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+      code: error.code || undefined,
+      details: error.details || undefined,
+    });
   }
 });
 
