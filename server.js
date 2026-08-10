@@ -670,6 +670,8 @@ const allowedOrigins = [
   "https://www.lms.nextgenusmlelms.com",
   "https://mediumslateblue-otter-394719.hostingersite.com",
   "https://paleturquoise-quail-255896.hostingersite.com",
+  "https://aylamedapp.com",
+  "https://www.aylamedapp.com",
   ...String(process.env.NEXTGEN_CORS_ALLOWED_ORIGINS || "")
     .split(",")
     .map((value) => value.trim().replace(/\/$/, ""))
@@ -68411,7 +68413,7 @@ app.post("/api/ayla/admin/pilot-login-links", async (req, res) => {
     });
 
     const publicBase = String(
-      process.env.AYLA_PUBLIC_URL || "https://aylamed.nextgenusmlelms.com",
+      process.env.AYLA_PUBLIC_URL || "https://aylamedapp.com",
     ).replace(/\/$/, "");
     return aylaSendOk(res, {
       user: created.user,
@@ -69032,6 +69034,7 @@ app.get("/api/ayla/routes", (req, res) => {
       "GET /api/ayla/exams",
       "POST /api/ayla/auth/register",
       "POST /api/ayla/auth/login",
+      "POST /api/ayla/auth/google",
       "POST /api/ayla/auth/forgot-password",
       "POST /api/ayla/auth/reset-password",
       "GET /api/ayla/auth/me",
@@ -76252,8 +76255,8 @@ app.post("/api/ayla/auth/forgot-password", async (req, res) => {
     };
     aylaSetItem(db, "aylaPasswordResetTokens", token);
     await writeAylaDb(db);
-    const base = String(process.env.AYLA_PUBLIC_URL || "https://aylamed.nextgenusmlelms.com").replace(/\/$/, "");
-    const resetUrl = `${base}/?reset_token=${encodeURIComponent(rawToken)}`;
+    const base = String(process.env.AYLA_PUBLIC_URL || "https://aylamedapp.com").replace(/\/$/, "");
+    const resetUrl = `${base}/reset-password?token=${encodeURIComponent(rawToken)}`;
     try {
       await sendEmailMessage({
         to: user.email,
@@ -76829,6 +76832,8 @@ function aylaPrivatePilotVimeoEmbedDomains() {
     ? configured
     : [
         "https://paleturquoise-quail-255896.hostingersite.com",
+        "https://aylamedapp.com",
+        "https://www.aylamedapp.com",
         "https://live.nextgenusmlelms.com",
       ];
 }
