@@ -35431,6 +35431,25 @@ async function requireOwnedMediaBundleAdmin(req, uploadId, parentJob = null, con
   return auth;
 }
 
+async function requireOwnedMediaBundleJobAdmin(req, privateBundleJob, context = null) {
+  const auth = context || await requireOwnedCatalogAdmin(req);
+  if (!privateBundleJob || privateBundleJob.type !== "content_media_bundle_draft") {
+    throw Object.assign(new Error("Combined media import job not found"), { statusCode: 404 });
+  }
+  const uploadId = String(privateBundleJob.payload?.upload_id || "").trim();
+  const parentJob = await getContentImportJob(privateBundleJob.metadata?.content_import_job_id);
+  if (!uploadId || !parentJob) throw ngOwnedMediaUploadScopeError();
+  if (auth.ownedCatalogOnly) {
+    const session = await ngContentUploadStore.read(uploadId).catch(() => null);
+    const isFinalizedMediaArchive = String(session?.purpose || "").toLowerCase() === "media_zip"
+      && String(session?.status || "").toLowerCase() === "finalized";
+    if (!ngOwnedAylaMedImportJob(parentJob) || !isFinalizedMediaArchive) {
+      throw ngOwnedMediaUploadScopeError();
+    }
+  }
+  return { auth, uploadId, parentJob };
+}
+
 app.post("/admin/crm/ai-training/content-uploads", async (req, res) => {
   try {
     const { user } = await requireContentUploadAdmin(req);
@@ -37217,17 +37236,7 @@ app.post("/admin/crm/ai-training/content-imports/:jobId/media-bundle/import-draf
 });
 
 async function ngOwnedMediaBundlePollSnapshot(req, privateBundleJob, auth = null) {
-  const resolvedAuth = auth || await requireOwnedCatalogAdmin(req);
-  if (!privateBundleJob || privateBundleJob.type !== "content_media_bundle_draft") {
-    throw Object.assign(new Error("Combined media import job not found"), { statusCode: 404 });
-  }
-  if (resolvedAuth.ownedCatalogOnly) {
-    const uploadId = String(privateBundleJob.payload?.upload_id || "").trim();
-    if (!uploadId) throw ngOwnedMediaUploadScopeError();
-    const parentJob = await getContentImportJob(privateBundleJob.metadata?.content_import_job_id);
-    if (!parentJob) throw ngOwnedMediaUploadScopeError();
-    await requireOwnedMediaBundleAdmin(req, uploadId, parentJob, resolvedAuth);
-  }
+  await requireOwnedMediaBundleJobAdmin(req, privateBundleJob, auth);
   const bundleJob = ngContentBackgroundQueue.get(privateBundleJob.id);
   const mediaJobId = String(privateBundleJob.metadata?.domain_job_id || "");
   const videoJobId = String(privateBundleJob.metadata?.video_job_id || "");
@@ -37247,6 +37256,16 @@ async function ngOwnedMediaBundlePollSnapshot(req, privateBundleJob, auth = null
     single_upload: true,
     storage: { images_and_audio: contentMediaStatus(), videos: contentVideoStatus() },
   };
+}
+
+function ngLatestOwnedMediaBundleJob(parentJobId) {
+  return ngContentBackgroundQueue.list({
+    type: "content_media_bundle_draft",
+    limit: 500,
+    includePayload: true,
+  }).find((job) => (
+    String(job.metadata?.content_import_job_id || "") === String(parentJobId)
+  ));
 }
 
 app.get("/admin/crm/ai-training/content-media-bundle-imports/:backgroundJobId", async (req, res) => {
@@ -37272,18 +37291,80 @@ app.get("/admin/crm/ai-training/content-imports/:jobId/media-bundle/latest", asy
     if (auth.ownedCatalogOnly && !ngOwnedAylaMedImportJob(parentJob)) {
       throw ngOwnedMediaUploadScopeError();
     }
-    const privateBundleJob = ngContentBackgroundQueue.list({
-      type: "content_media_bundle_draft",
-      limit: 500,
-      includePayload: true,
-    }).find((job) => (
-      String(job.metadata?.content_import_job_id || "") === String(parentJob.id)
-    ));
+    const privateBundleJob = ngLatestOwnedMediaBundleJob(parentJob.id);
     if (!privateBundleJob) {
       return res.status(404).json({ success: false, error: "No combined media import job exists for this collection" });
     }
     return res.json(await ngOwnedMediaBundlePollSnapshot(req, privateBundleJob, auth));
   } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/ai-training/content-imports/:jobId/media-bundle/retry", async (req, res) => {
+  let reacquiredUpload = false;
+  let uploadId = "";
+  let backgroundJobId = "";
+  try {
+    const auth = await requireOwnedCatalogAdmin(req);
+    const parentJob = await getContentImportJob(req.params.jobId);
+    if (!parentJob) {
+      return res.status(404).json({ success: false, error: "Content import job not found" });
+    }
+    if (auth.ownedCatalogOnly && !ngOwnedAylaMedImportJob(parentJob)) {
+      throw ngOwnedMediaUploadScopeError();
+    }
+    const privateBundleJob = ngLatestOwnedMediaBundleJob(parentJob.id);
+    if (!privateBundleJob) {
+      return res.status(404).json({ success: false, error: "No combined media import job exists for this collection" });
+    }
+    ({ uploadId } = await requireOwnedMediaBundleJobAdmin(req, privateBundleJob, auth));
+    backgroundJobId = String(privateBundleJob.id || "");
+
+    // This verifies that the finalized R2 object still exists and renews its
+    // staging TTL. It never uploads bytes or creates another archive.
+    await ngContentUploadStore.resolveFinalized(uploadId, { allowedPurposes: ["media_zip"] });
+
+    const current = ngContentBackgroundQueue.get(backgroundJobId);
+    if (!current) {
+      return res.status(404).json({ success: false, error: "Combined media import job not found" });
+    }
+    const active = ["queued", "running", "retry_wait", "pause_requested", "cancel_requested"]
+      .includes(String(current.status || ""));
+    if (active || current.status === "completed") {
+      const snapshot = await ngOwnedMediaBundlePollSnapshot(req, privateBundleJob, auth);
+      return res.status(current.status === "completed" ? 200 : 202).json({
+        ...snapshot,
+        requeued: false,
+        deduplicated: true,
+        reused_upload_id: uploadId,
+        message: current.status === "completed"
+          ? "Private media matching is already complete. No upload or duplicate job was created."
+          : "Private media matching is already active. The existing job was reused without uploading again.",
+      });
+    }
+    if (current.status !== "failed") {
+      return res.status(409).json({
+        success: false,
+        error: `Media matching cannot be retried from status ${current.status}`,
+      });
+    }
+
+    await ngContentUploadStore.acquire(uploadId, backgroundJobId);
+    reacquiredUpload = true;
+    await ngContentBackgroundQueue.retry(backgroundJobId);
+    const snapshot = await ngOwnedMediaBundlePollSnapshot(req, privateBundleJob, auth);
+    return res.status(202).json({
+      ...snapshot,
+      requeued: true,
+      deduplicated: false,
+      reused_upload_id: uploadId,
+      message: "Failed private media matching was requeued from the finalized Cloudflare R2 ZIP. No upload or duplicate job was created.",
+    });
+  } catch (error) {
+    if (reacquiredUpload && uploadId && backgroundJobId) {
+      await ngContentUploadStore.release(uploadId, backgroundJobId).catch(() => {});
+    }
     return res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
 });
