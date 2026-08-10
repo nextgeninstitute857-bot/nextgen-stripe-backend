@@ -122,6 +122,36 @@ test("v215 applies live plan/demo matrices without rewriting enrollments or lear
     assert.equal(beforeShell.payload.activeDashboard.features.personal_tutor, false);
     assert.equal(beforeShell.payload.activeDashboard.features.content_hub, false);
 
+    const globalTestingBefore = await api(baseUrl, "/api/ayla/admin/global-testing-access", { adminToken });
+    assert.equal(globalTestingBefore.response.status, 200, JSON.stringify(globalTestingBefore.payload));
+    assert.equal(globalTestingBefore.payload.access.enabled, false);
+    assert.equal(globalTestingBefore.payload.access.student_count, 1);
+    assert.equal(globalTestingBefore.payload.access.feature_count, 13);
+
+    const globalTestingEnabled = await api(baseUrl, "/api/ayla/admin/global-testing-access", {
+      method: "POST", adminToken,
+      body: { action: "enable", expected_student_count: 1, confirmation: "ENABLE_ALL_AYLAMED_FEATURES_1" },
+    });
+    assert.equal(globalTestingEnabled.response.status, 200, JSON.stringify(globalTestingEnabled.payload));
+    assert.equal(globalTestingEnabled.payload.access.enabled, true);
+    assert.equal(globalTestingEnabled.payload.access.plans_changed, 0);
+    assert.equal(globalTestingEnabled.payload.access.enrollments_changed, 0);
+
+    const globalTestingShell = await api(baseUrl, "/api/ayla/shell", { token });
+    assert.equal(globalTestingShell.response.status, 200, JSON.stringify(globalTestingShell.payload));
+    assert.equal(Object.values(globalTestingShell.payload.activeDashboard.features).every(Boolean), true);
+    assert.equal(globalTestingShell.payload.activeDashboard.entitlement.type, "testing");
+
+    const globalTestingDisabled = await api(baseUrl, "/api/ayla/admin/global-testing-access", {
+      method: "POST", adminToken,
+      body: { action: "disable", expected_student_count: 1, confirmation: "DISABLE_ALL_AYLAMED_FEATURES_1" },
+    });
+    assert.equal(globalTestingDisabled.response.status, 200, JSON.stringify(globalTestingDisabled.payload));
+    assert.equal(globalTestingDisabled.payload.access.enabled, false);
+    const afterGlobalTesting = await api(baseUrl, "/api/ayla/shell", { token });
+    assert.equal(afterGlobalTesting.payload.activeDashboard.features.personal_tutor, false);
+    assert.equal(afterGlobalTesting.payload.activeDashboard.features.content_hub, false);
+
     const unauthenticated = await api(baseUrl, "/api/ayla/plans/paid", { method: "PUT", body: { included_features: ["roadmap", "qbank", "leaderboard"] } });
     assert.equal(unauthenticated.response.status, 401, JSON.stringify(unauthenticated.payload));
 

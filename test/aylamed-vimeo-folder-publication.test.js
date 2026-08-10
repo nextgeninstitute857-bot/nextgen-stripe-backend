@@ -39,8 +39,8 @@ test("owner-reviewed offline mappings can become student-scoped active resources
 
 test("folder publication is explicit, testing-student scoped, reversible, and classifier-free", () => {
   const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
-  const start = server.indexOf("function aylaManualVimeoFolderPublicationState");
-  const end = server.indexOf('app.post("/api/ayla/admin/resources/vimeo-catalog/review"');
+  const start = server.indexOf('app.get("/api/ayla/admin/resources/vimeo-catalog/folder-publication"');
+  const end = server.indexOf('app.post("/api/ayla/admin/resources/vimeo-catalog/review"', start);
   assert.ok(start >= 0 && end > start);
   const routes = server.slice(start, end);
   assert.match(routes, /folder-publication/);
@@ -53,4 +53,49 @@ test("folder publication is explicit, testing-student scoped, reversible, and cl
   assert.doesNotMatch(routes, /aylaQueueVimeoCatalogClassification/);
   assert.doesNotMatch(routes, /ngContentBackgroundQueue\.enqueue/);
   assert.doesNotMatch(routes, /deleteAyla|\.delete\(|TRUNCATE\s/i);
+});
+
+test("all mapped Content Hub videos have one reversible all-students publication control", () => {
+  const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
+  const start = server.indexOf("function aylaMappedVimeoDraftsForGlobalPublication");
+  const end = server.indexOf("const AYLA_GLOBAL_SHARED_RESOURCE_PUBLICATION", start);
+  assert.ok(start >= 0 && end > start);
+  const routes = server.slice(start, end);
+  assert.match(routes, /global-publication/);
+  assert.match(routes, /scope: "all_students"/);
+  assert.match(routes, /expected_mapped_count/);
+  assert.match(routes, /\$\{action\.toUpperCase\(\)\}_ALL_MAPPED_VIMEO_\$\{expectedMappedCount\}/);
+  assert.match(routes, /deliveryDestinations: \[\]/);
+  assert.match(routes, /mappings_preserved: true/);
+  assert.match(routes, /progress_preserved: true/);
+  assert.match(routes, /schedule_history_preserved: true/);
+  assert.match(routes, /classifiers_started: 0/);
+  assert.doesNotMatch(routes, /aylaQueueVimeoCatalogClassification/);
+  assert.doesNotMatch(routes, /ngContentBackgroundQueue\.enqueue/);
+  assert.doesNotMatch(routes, /deleteAyla|\.delete\(|TRUNCATE\s/i);
+});
+
+test("books and flashcards have reversible all-students publication controls without touching private resources", () => {
+  const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
+  assert.match(server, /AYLA_GLOBAL_SHARED_RESOURCE_PUBLICATION/);
+  assert.match(server, /app\.get\("\/api\/ayla\/admin\/resources\/global-publication\/:kind"/);
+  assert.match(server, /app\.post\("\/api\/ayla\/admin\/resources\/global-publication\/:kind"/);
+  assert.match(server, /student_owned_resources_changed: 0/);
+  assert.match(server, /private_pilot_resources_changed: 0/);
+  assert.match(server, /all_approved_readings/);
+  assert.match(server, /all_approved_flashcards/);
+  assert.match(server, /mappings_preserved: true/);
+  assert.match(server, /progress_preserved: true/);
+  assert.match(server, /schedule_history_preserved: true/);
+});
+
+test("globally published mapped videos remain visible to the permanent pilot testing account", () => {
+  const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
+  const visibility = server.slice(
+    server.indexOf("function aylaStep1PilotVimeoVisibleToStudent"),
+    server.indexOf("const AYLA_INTERNAL_REVIEW_EMAIL_HASH"),
+  );
+  assert.match(visibility, /global_student_publication/);
+  assert.match(visibility, /globalStudentPublication/);
+  assert.match(visibility, /globalStudentPublication \|\| aylaStep1PilotVimeoSourceMatches/);
 });
