@@ -76833,7 +76833,6 @@ function aylaPrivatePilotVimeoEmbedDomains() {
     : [
         "https://paleturquoise-quail-255896.hostingersite.com",
         "https://aylamedapp.com",
-        "https://www.aylamedapp.com",
         "https://live.nextgenusmlelms.com",
       ];
 }
@@ -77285,6 +77284,11 @@ async function ngRunAylaPrivatePilotContentActivation(reason = "startup") {
         skippedReason: String(error.message || error).slice(0, 500),
       };
     }
+    const vimeoEmbedDomainFailureCounts = vimeoEmbed.failures.reduce((summary, row) => {
+      const domain = String(row.domain || "(video-level)").trim() || "(video-level)";
+      summary[domain] = Number(summary[domain] || 0) + 1;
+      return summary;
+    }, {});
     const result = {
       skipped: false,
       reason,
@@ -77305,8 +77309,10 @@ async function ngRunAylaPrivatePilotContentActivation(reason = "startup") {
       plansRebuilt: activation.plansRebuilt,
       pilotDatesAligned: activation.pilotDatesAligned,
       lectureErrors: activation.lectureErrors.length,
+      vimeoEmbedDomainsRequested: normalizeVimeoEmbedDomains(vimeoEmbedDomains),
       vimeoEmbedDomainsEnsured: vimeoEmbed.ensured,
       vimeoEmbedDomainFailures: vimeoEmbed.failures.length,
+      vimeoEmbedDomainFailureCounts,
       classificationRecovery,
       destinationScope: AYLA_STEP1_PILOT_DESTINATION_SCOPE,
       ordinaryStudentDelivery: false,

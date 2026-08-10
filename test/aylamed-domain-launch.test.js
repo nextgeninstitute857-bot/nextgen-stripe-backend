@@ -17,8 +17,9 @@ test("AylaMed links use the production domain and correct password-reset route",
   assert.match(server, /"POST \/api\/ayla\/auth\/google"/);
 });
 
-test("AylaMed Vimeo privacy keeps staging access and adds both production hosts", () => {
+test("AylaMed Vimeo privacy keeps staging access and uses the canonical production host", () => {
   assert.match(server, /function aylaPrivatePilotVimeoEmbedDomains\(\)[\s\S]{0,550}"https:\/\/paleturquoise-quail-255896\.hostingersite\.com"/);
   assert.match(server, /function aylaPrivatePilotVimeoEmbedDomains\(\)[\s\S]{0,600}"https:\/\/aylamedapp\.com"/);
-  assert.match(server, /function aylaPrivatePilotVimeoEmbedDomains\(\)[\s\S]{0,650}"https:\/\/www\.aylamedapp\.com"/);
+  assert.doesNotMatch(server, /function aylaPrivatePilotVimeoEmbedDomains\(\)[\s\S]{0,650}"https:\/\/www\.aylamedapp\.com"/);
+  assert.match(server, /vimeoEmbedDomainFailureCounts/);
 });
