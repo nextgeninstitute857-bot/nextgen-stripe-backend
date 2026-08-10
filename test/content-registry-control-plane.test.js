@@ -52,7 +52,7 @@ test('one mixed media ZIP is uploaded once and processed through private R2 and 
   assert.match(server, /ngRunContentMediaDraftImport\([\s\S]*?ngRunContentVideoDraftImport/);
 });
 
-test('private media recovery follows the exact collection across re-import job IDs but never active student delivery', () => {
+test('private media recovery follows admin collection identity across provider-label drift but never active student delivery', () => {
   const referenceQuery = postgres.slice(
     postgres.indexOf('export async function getContentMediaReferences'),
     postgres.indexOf('export async function createContentVideoImportJob'),
@@ -65,8 +65,8 @@ test('private media recovery follows the exact collection across re-import job I
   assert.doesNotMatch(referenceQuery, /a\.source_data->>'import_job_id'=\$1(?:\s|$)/);
   assert.match(referenceQuery, /a\.exam_track=j\.exam_track/);
   assert.match(referenceQuery, /a\.source_namespace=j\.source_namespace/);
-  assert.match(referenceQuery, /c\.source_provider=j\.source_provider/);
   assert.match(referenceQuery, /c\.source_profile=j\.source_profile/);
+  assert.doesNotMatch(referenceQuery, /c\.source_provider=j\.source_provider/);
   assert.match(referenceQuery, /COALESCE\(j\.collection_title,''\)=COALESCE\(c\.title,''\)/);
   assert.match(referenceQuery, /CONCAT\(COALESCE\(j\.collection_title,''\), ': ', c\.collection_key\)/);
   assert.match(referenceQuery, /FROM scoped_aliases a/);
