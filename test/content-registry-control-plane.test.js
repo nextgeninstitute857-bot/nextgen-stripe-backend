@@ -130,6 +130,22 @@ test('private import image, audio, and video links are collection-scoped while p
   assert.match(videoAudits, /ON input\.source_alias_id IS NULL/g);
 });
 
+test('QBank delivery resolves collection-scoped image, audio, and video links from the selected source alias', () => {
+  const projection = postgres.slice(
+    postgres.indexOf('function qbankQuestionProjection'),
+    postgres.indexOf('export async function listContentQbankQuestions'),
+  );
+  assert.match(postgres, /function contentQuestionDeliveryMediaReadySql/);
+  assert.match(projection, /a\.id AS source_alias_id/);
+  assert.match(projection, /contentQuestionDeliveryMediaReadySql\("q"\)/);
+  assert.match(projection, /FROM content_source_alias_media am/);
+  assert.match(projection, /am\.source_alias_id=delivery\.source_alias_id/);
+  assert.match(projection, /FROM content_source_alias_videos av/);
+  assert.match(projection, /av\.source_alias_id=delivery\.source_alias_id/);
+  assert.match(projection, /source_priority/);
+  assert.match(projection, /DISTINCT ON \(candidate\.media_ref\)/);
+});
+
 test('every question import durably preserves its collection-scoped media manifest on the source alias', () => {
   const importBatch = postgres.slice(
     postgres.indexOf('export async function importContentQuestionBatch'),
@@ -198,6 +214,18 @@ test('AylaMed Publish All is collection-scoped, count-locked, and QBank-only', (
   assert.match(postgres, /AYLAMED_PUBLISH_ALL_DESTINATION_REQUIRED/);
   assert.match(postgres, /AYLAMED_UNPUBLISH_ALL_DESTINATION_REQUIRED/);
   assert.match(server, /preserved: \['questions', 'answers', 'taxonomy', 'media references', 'source aliases', 'review history'\]/);
+});
+
+test('owner-controlled all-students testing release is explicit, reversible, and still structure-gated', () => {
+  assert.match(server, /testingPhaseRelease = req\.body\.testing_phase === true/);
+  assert.match(server, /testingPhaseRelease,/);
+  assert.match(server, /testing_phase_release: testingPhaseRelease/);
+  assert.match(postgres, /testingPhaseRelease = false/);
+  assert.match(postgres, /AYLAMED_TESTING_RELEASE_GATE_BLOCKED/);
+  assert.match(postgres, /answer_shape_ready_count/);
+  assert.match(postgres, /taxonomy_complete_count/);
+  assert.match(postgres, /publishAllRequested && testingPhaseRelease !== true/);
+  assert.match(postgres, /if \(unpublishAllRequested && effectiveDestinationRows/);
 });
 
 test('question ID display policy supports internal, source, both, and hidden modes', () => {

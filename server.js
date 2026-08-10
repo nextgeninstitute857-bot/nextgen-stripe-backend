@@ -631,7 +631,11 @@ function aylaStep1PilotVimeoVisibleToStudent(resource = {}, student = {}) {
     .replace(/[\s-]+/g, "_");
   const isVimeo = Boolean(resource.vimeoId || resource.vimeo_id)
     || ["vimeo_video", "video_transcript"].includes(type);
-  return !isVimeo || aylaStep1PilotVimeoSourceMatches(resource);
+  const globalStudentPublication = resource.globalStudentPublication === true
+    || resource.global_student_publication === true
+    || resource.sourceData?.global_student_publication === true
+    || resource.source_data?.global_student_publication === true;
+  return !isVimeo || globalStudentPublication || aylaStep1PilotVimeoSourceMatches(resource);
 }
 
 const AYLA_INTERNAL_REVIEW_EMAIL_HASH = "94ce0e4a551d49fa9686aea4be5c5ee93d1cd6870ff28bc309d01bfce708ff65";
@@ -38901,6 +38905,7 @@ app.post("/admin/crm/ai-training/content-registry/collections/:collectionId/publ
   try {
     const { user } = await requireOwnedCatalogAdmin(req);
     const expectedQuestionCount = Number(req.body.expected_question_count ?? req.body.expectedQuestionCount);
+    const testingPhaseRelease = req.body.testing_phase === true || req.body.testingPhase === true;
     const requiredConfirmation = `PUBLISH ALL ${expectedQuestionCount}`;
     if (!Number.isSafeInteger(expectedQuestionCount) || expectedQuestionCount < 1
       || String(req.body.confirmation || '') !== requiredConfirmation) {
@@ -38916,12 +38921,17 @@ app.post("/admin/crm/ai-training/content-registry/collections/:collectionId/publ
         destination: 'aylamed_qbank',
         destination_scope: '',
         enabled: true,
-        settings: { owned_catalogue_guard: true, published_with_bulk_control: true },
+        settings: {
+          owned_catalogue_guard: true,
+          published_with_bulk_control: true,
+          testing_phase_release: testingPhaseRelease,
+        },
       }],
       displayPolicy: { question_id_mode: 'internal', source_label_mode: 'hidden' },
       actorId: String(user.id),
       ownedOnly: true,
       publishAll: true,
+      testingPhaseRelease,
       expectedQuestionCount,
     });
     return res.json({
@@ -38930,7 +38940,10 @@ app.post("/admin/crm/ai-training/content-registry/collections/:collectionId/publ
       published_question_count: expectedQuestionCount,
       destination: 'aylamed_qbank',
       destination_scope: '',
-      message: `Published all ${expectedQuestionCount} eligible AylaMed-owned questions to the AylaMed QBank.`,
+      testing_phase_release: testingPhaseRelease,
+      message: testingPhaseRelease
+        ? `Published all ${expectedQuestionCount} questions and their linked media to all students for the owner-controlled testing phase.`
+        : `Published all ${expectedQuestionCount} eligible AylaMed-owned questions to the AylaMed QBank.`,
     });
   } catch (error) {
     return res.status(error.statusCode || 500).json({
@@ -66979,15 +66992,66 @@ function aylaBindLegacyEnrollmentScopes(db, rawUser) {
 }
 
 function aylaBuildStudentShell(db, rawUser, { requestedStudentId = null, requestedExamTrack = null } = {}) {
-  return resolveAylaStudentShell({
+  const students = aylaOwnedStudentsForUser(db, rawUser?.id);
+  const enrollments = aylaValues(db, "aylaEnrollments");
+  const plansById = { ...(db.aylaPlans || {}) };
+  if (db.aylaSettings?.global_testing_access?.enabled === true) {
+    const planId = "AYLA-PLAN-GLOBAL-TESTING";
+    plansById[planId] = {
+      id: planId,
+      name: "AylaMed Global Testing Access",
+      plan_type: "testing",
+      billing_type: "internal_testing",
+      is_full_access: true,
+      included_features: AYLA_STUDENT_FEATURES.map((feature) => feature.key),
+      is_active: true,
+      is_public: false,
+    };
+    for (const student of students) {
+      const examTrackId = aylaCanonicalExamTrack(
+        student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam,
+      );
+      if (!examTrackId) continue;
+      enrollments.push({
+        id: `global-testing:${rawUser?.id || "user"}:${student.id}`,
+        user_id: rawUser?.id,
+        student_id: student.id,
+        plan_id: planId,
+        exam_track_id: examTrackId,
+        type: "testing",
+        status: "active",
+        access_granted: true,
+        is_demo: false,
+      });
+    }
+  }
+  const shell = resolveAylaStudentShell({
     userId: rawUser?.id,
-    students: aylaOwnedStudentsForUser(db, rawUser?.id),
-    enrollments: aylaValues(db, "aylaEnrollments"),
-    plansById: db.aylaPlans || {},
+    students,
+    enrollments,
+    plansById,
     activeStudentId: rawUser?.studentId || null,
     requestedStudentId,
     requestedExamTrack,
   });
+  if (db.aylaSettings?.global_testing_access?.enabled === true) {
+    const enabledFeatures = AYLA_STUDENT_FEATURES.map((feature) => feature.key);
+    for (const dashboard of shell.dashboards || []) {
+      dashboard.entitlement = {
+        ...(dashboard.entitlement || {}),
+        type: "testing",
+        enrollment_id: `global-testing:${rawUser?.id || "user"}:${dashboard.student_id || "student"}`,
+        plan_id: "AYLA-PLAN-GLOBAL-TESTING",
+        plan_name: "AylaMed Global Testing Access",
+        starts_at: db.aylaSettings.global_testing_access.enabled_at || null,
+        expires_at: null,
+        explicitly_scoped: true,
+      };
+      dashboard.features = Object.fromEntries(enabledFeatures.map((feature) => [feature, true]));
+      dashboard.navigation = (dashboard.navigation || []).map((item) => ({ ...item, enabled: true, reason: null }));
+    }
+  }
+  return shell;
 }
 
 function aylaCurrentStudentShell(db, rawUser) {
@@ -67038,6 +67102,19 @@ function aylaDashboardEntitlement(db, user, student, feature = null) {
       enabled_features: AYLA_STUDENT_FEATURES.map((item) => item.key),
     };
   }
+  if (db.aylaSettings?.global_testing_access?.enabled === true) {
+    return {
+      allowed: true,
+      reason: "global_testing_access",
+      exam_track_id: examTrackId,
+      exam_track: normalizeAylaRegistryExamTrack(examTrackId),
+      entitlement_type: "global_testing",
+      student_id: student?.id || null,
+      plan_id: "AYLA-PLAN-GLOBAL-TESTING",
+      feature: feature || null,
+      enabled_features: AYLA_STUDENT_FEATURES.map((item) => item.key),
+    };
+  }
   const access = resolveAylaExamFeatureEntitlement({
     enrollments: aylaValues(db, "aylaEnrollments"),
     plansById: db.aylaPlans || {},
@@ -67082,6 +67159,17 @@ function aylaRequireQbankAccess(db, user, student, requestedExamTrack = "") {
     error.statusCode = 403;
     error.code = "QBANK_STUDENT_EXAM_MISMATCH";
     throw error;
+  }
+  if (db.aylaSettings?.global_testing_access?.enabled === true) {
+    return {
+      allowed: true,
+      reason: "global_testing_access",
+      exam_track: examTrack,
+      student_id: student?.id || null,
+      plan_id: "AYLA-PLAN-GLOBAL-TESTING",
+      feature: "qbank",
+      enabled_features: AYLA_STUDENT_FEATURES.map((item) => item.key),
+    };
   }
   return requireAylaQbankEntitlement({
     enrollments: aylaValues(db, "aylaEnrollments"),
@@ -71423,6 +71511,94 @@ app.get("/api/ayla/admin/plan-feature-matrix", async (req, res) => {
   }
 });
 
+function aylaGlobalTestingAccessState(db) {
+  const control = db.aylaSettings?.global_testing_access || {};
+  const students = aylaValues(db, "aylaStudents")
+    .filter((row) => !["disabled", "deleted", "archived"].includes(String(row.status || "active").toLowerCase()));
+  return {
+    enabled: control.enabled === true,
+    scope: "all_aylamed_students",
+    student_count: students.length,
+    feature_count: AYLA_STUDENT_FEATURES.length,
+    features: AYLA_STUDENT_FEATURES.map((feature) => ({ key: feature.key, label: feature.label })),
+    enabled_at: control.enabled_at || null,
+    disabled_at: control.disabled_at || null,
+    plans_changed: 0,
+    enrollments_changed: 0,
+    payments_changed: 0,
+    learning_history_deleted: false,
+    content_publication_separate: true,
+  };
+}
+
+app.get("/api/ayla/admin/global-testing-access", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
+    aylaEnsureSeedData(db);
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, { access: aylaGlobalTestingAccessState(db) });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load global testing access");
+  }
+});
+
+app.post("/api/ayla/admin/global-testing-access", async (req, res) => {
+  try {
+    const admin = await aylaRequireAdmin(req);
+    const action = String(req.body.action || "").trim().toLowerCase();
+    if (!["enable", "disable"].includes(action)) {
+      return aylaSendError(res, 400, "action must be enable or disable");
+    }
+    const expectedStudentCount = Number(req.body.expected_student_count ?? req.body.expectedStudentCount);
+    const requiredConfirmation = `${action.toUpperCase()}_ALL_AYLAMED_FEATURES_${expectedStudentCount}`;
+    if (!Number.isSafeInteger(expectedStudentCount) || expectedStudentCount < 0
+      || String(req.body.confirmation || "").trim() !== requiredConfirmation) {
+      return aylaSendError(res, 400, `confirmation must be ${requiredConfirmation}`);
+    }
+    const result = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const before = aylaGlobalTestingAccessState(db);
+      if (before.student_count !== expectedStudentCount) {
+        throw Object.assign(
+          new Error(`The AylaMed student count changed from ${expectedStudentCount} to ${before.student_count}. Refresh before continuing.`),
+          { statusCode: 409, code: "AYLAMED_GLOBAL_TESTING_STUDENT_COUNT_CHANGED" },
+        );
+      }
+      const actor = aylaV215AdminAuditActor(admin);
+      const now = aylaNow();
+      db.aylaSettings.global_testing_access = {
+        ...(db.aylaSettings.global_testing_access || {}),
+        enabled: action === "enable",
+        ...(action === "enable"
+          ? { enabled_at: now, enabled_by: actor }
+          : { disabled_at: now, disabled_by: actor }),
+        updated_at: now,
+      };
+      await aylaLog(db, "global_testing_access", `Complete AylaMed feature access ${action}d for all student profiles`, {
+        action,
+        student_count: before.student_count,
+        feature_count: AYLA_STUDENT_FEATURES.length,
+        plans_changed: 0,
+        enrollments_changed: 0,
+        payments_changed: 0,
+        learning_history_deleted: false,
+        actor,
+      });
+      return aylaGlobalTestingAccessState(db);
+    });
+    return aylaSendOk(res, {
+      action,
+      access: result,
+      message: action === "enable"
+        ? `All ${result.feature_count} AylaMed student features are available to all ${result.student_count} student profiles for testing.`
+        : "Global testing access was removed. Normal plan and enrollment access is active again.",
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to change global testing access", error.code ? { code: error.code } : null);
+  }
+});
+
 app.put("/api/ayla/admin/plans/:planId/features", async (req, res) => {
   try {
     const admin = await aylaRequireAdmin(req);
@@ -73075,6 +73251,19 @@ function aylaV189RelevantResources(db, student, types = []) {
   if (!studentExam) return [];
   return aylaValues(db, "aylaResources")
     .filter((resource) => resource.approved !== false && !["disabled", "deleted", "rejected", "archived"].includes(String(resource.status || "").toLowerCase()))
+    .filter((resource) => {
+      const control = String(
+        resource.sourceData?.global_publication_control
+          || resource.source_data?.global_publication_control
+          || "",
+      ).trim();
+      const explicitlyRemoved = ["all_approved_readings", "all_approved_flashcards"].includes(control)
+        && (resource.globalStudentPublication === false
+          || resource.global_student_publication === false
+          || resource.sourceData?.global_student_publication === false
+          || resource.source_data?.global_student_publication === false);
+      return !explicitlyRemoved;
+    })
     .filter((resource) => !resource.ownerStudentId || String(resource.ownerStudentId) === String(student.id))
     .filter((resource) => aylaPilotContentVisibleToStudent(resource, student))
     .filter((resource) => aylaStep1PilotVimeoVisibleToStudent(resource, student))
@@ -80542,6 +80731,340 @@ function aylaManualVimeoFolderPublicationState(db, student) {
     };
   });
 }
+
+function aylaMappedVimeoDraftsForGlobalPublication(db) {
+  const selected = new Map();
+  for (const draft of aylaValues(db, "aylaVimeoCatalogDrafts")) {
+    const vimeoId = String(draft.vimeoId || draft.vimeo_id || "").trim();
+    const draftStatus = String(draft.status || "").trim().toLowerCase();
+    const reviewStatus = String(draft.reviewStatus || draft.review_status || "").trim().toLowerCase();
+    if (!vimeoId
+      || draft.folderMembershipStatus === "missing_from_folder"
+      || ["rejected", "disabled", "deleted", "archived"].includes(draftStatus)
+      || reviewStatus === "rejected"
+      || !aylaVimeoDraftHierarchyComplete(draft)) continue;
+    const existing = selected.get(vimeoId);
+    if (!existing
+      || Number(draft.revision || 0) > Number(existing.revision || 0)
+      || String(draft.updatedAt || draft.updated_at || "") > String(existing.updatedAt || existing.updated_at || "")) {
+      selected.set(vimeoId, draft);
+    }
+  }
+  return [...selected.values()].sort((left, right) =>
+    String(left.folderId || left.folder_id || "").localeCompare(String(right.folderId || right.folder_id || ""))
+    || String(left.sourceTitle || left.source_title || "").localeCompare(String(right.sourceTitle || right.source_title || ""))
+    || String(left.vimeoId || left.vimeo_id || "").localeCompare(String(right.vimeoId || right.vimeo_id || "")));
+}
+
+function aylaGlobalVimeoPublicationState(db) {
+  const drafts = aylaMappedVimeoDraftsForGlobalPublication(db);
+  const eligibleIds = new Set(drafts.map((row) => String(row.vimeoId || row.vimeo_id || "").trim()));
+  const publishedIds = new Set();
+  for (const resource of aylaValues(db, "aylaResources")) {
+    const vimeoId = String(resource.vimeoId || resource.vimeo_id || resource.sourceData?.vimeo_id || resource.source_data?.vimeo_id || "").trim();
+    const ownerStudentId = String(resource.ownerStudentId || resource.owner_student_id || "").trim();
+    const destinations = aylaCleanArray(resource.deliveryDestinations || resource.delivery_destinations);
+    if (!eligibleIds.has(vimeoId)
+      || ownerStudentId
+      || resource.approved === false
+      || ["disabled", "deleted", "rejected", "archived"].includes(String(resource.status || "").toLowerCase())
+      || !destinations.includes("aylamed_content_hub")
+      || !destinations.includes("aylamed_roadmap")) continue;
+    publishedIds.add(vimeoId);
+  }
+  const mappedCount = drafts.length;
+  const publishedCount = publishedIds.size;
+  return {
+    scope: "all_students",
+    mapped_count: mappedCount,
+    published_count: publishedCount,
+    state: mappedCount > 0 && publishedCount === mappedCount
+      ? "published"
+      : publishedCount > 0 ? "partial" : "unpublished",
+    can_publish: mappedCount > 0,
+    automatic_publication: false,
+    classifiers_started: 0,
+    mappings_preserved_on_remove: true,
+    progress_preserved_on_remove: true,
+    schedule_history_preserved_on_remove: true,
+  };
+}
+
+app.get("/api/ayla/admin/resources/vimeo-catalog/global-publication", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, { publication: aylaGlobalVimeoPublicationState(db) });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load all-students Content Hub publication state");
+  }
+});
+
+app.post("/api/ayla/admin/resources/vimeo-catalog/global-publication", async (req, res) => {
+  try {
+    const auth = await aylaRequireAdmin(req);
+    const actor = aylaVimeoCatalogAdminActor(auth);
+    const action = String(req.body.action || "").trim().toLowerCase();
+    if (!["publish", "unpublish"].includes(action)) {
+      return aylaSendError(res, 400, "action must be publish or unpublish");
+    }
+    const expectedMappedCount = Number(req.body.expected_mapped_count ?? req.body.expectedMappedCount);
+    const requiredConfirmation = `${action.toUpperCase()}_ALL_MAPPED_VIMEO_${expectedMappedCount}`;
+    if (!Number.isSafeInteger(expectedMappedCount)
+      || expectedMappedCount < 1
+      || String(req.body.confirmation || "").trim() !== requiredConfirmation) {
+      return aylaSendError(res, 400, `confirmation must be ${requiredConfirmation}`);
+    }
+    const result = await mutateAylaDb(async (db) => {
+      const drafts = aylaMappedVimeoDraftsForGlobalPublication(db);
+      if (drafts.length !== expectedMappedCount) {
+        throw Object.assign(
+          new Error(`The mapped Vimeo catalogue changed from ${expectedMappedCount} to ${drafts.length}. Refresh before continuing.`),
+          { statusCode: 409, code: "AYLAMED_GLOBAL_VIMEO_COUNT_CHANGED" },
+        );
+      }
+      const eligibleIds = new Set(drafts.map((row) => String(row.vimeoId || row.vimeo_id || "").trim()));
+      let changed = 0;
+      if (action === "publish") {
+        for (const draft of drafts) {
+          const vimeoId = String(draft.vimeoId || draft.vimeo_id || "").trim();
+          const existingGlobal = aylaValues(db, "aylaResources").find((resource) => (
+            String(resource.vimeoId || resource.vimeo_id || "").trim() === vimeoId
+            && !String(resource.ownerStudentId || resource.owner_student_id || "").trim()
+          )) || null;
+          const resourceId = String(existingGlobal?.id || `vimeo-library-${vimeoId}-global`);
+          const approved = approveVimeoCatalogDraft(draft, {
+            expectedRevision: Number(draft.revision || 0),
+            overrides: { resourceId, ownerStudentId: "", accessScope: "all_students" },
+            actor,
+          });
+          const canonicalSystem = aylaVimeoCanonicalSystem(approved.resource.examTrackId, approved.resource.system);
+          if (!canonicalSystem) {
+            throw Object.assign(new Error(`Invalid system mapping for Vimeo ${vimeoId}`), { statusCode: 400 });
+          }
+          approved.resource.system = canonicalSystem;
+          approved.resource.globalStudentPublication = true;
+          approved.resource.sourceData = {
+            ...(approved.resource.sourceData || {}),
+            global_student_publication: true,
+            global_publication_control: "all_mapped_content_hub",
+          };
+          const existing = existingGlobal || aylaGetItem(db, "aylaResources", resourceId) || {};
+          const stored = aylaV190StoreImportedResource(db, approved.resource, existing);
+          if (stored.quarantined) {
+            throw Object.assign(
+              new Error(`Vimeo ${vimeoId} failed resource validation: ${stored.errors.join("; ")}`),
+              { statusCode: 400 },
+            );
+          }
+          changed += 1;
+        }
+      } else {
+        for (const resource of aylaValues(db, "aylaResources")) {
+          const vimeoId = String(resource.vimeoId || resource.vimeo_id || resource.sourceData?.vimeo_id || resource.source_data?.vimeo_id || "").trim();
+          const ownerStudentId = String(resource.ownerStudentId || resource.owner_student_id || "").trim();
+          if (!eligibleIds.has(vimeoId)
+            || ownerStudentId
+            || ["disabled", "deleted", "archived"].includes(String(resource.status || "").toLowerCase())) continue;
+          aylaSetItem(db, "aylaResources", {
+            ...resource,
+            status: "disabled",
+            deliveryDestinations: [],
+            unpublishedAt: aylaNow(),
+            unpublishedBy: actor,
+            updatedAt: aylaNow(),
+          });
+          changed += 1;
+        }
+      }
+      await aylaLog(db, "resource-global-publication", `All mapped Content Hub videos ${action}ed for all students`, {
+        action,
+        mapped_count: drafts.length,
+        changed,
+        mappings_preserved: true,
+        progress_preserved: true,
+        schedule_history_preserved: true,
+        classifiers_started: 0,
+        actor,
+      });
+      return { changed, publication: aylaGlobalVimeoPublicationState(db) };
+    });
+    return aylaSendOk(res, {
+      action,
+      changed: result.changed,
+      publication: result.publication,
+      mappings_preserved: true,
+      progress_preserved: true,
+      schedule_history_preserved: true,
+      classifiers_started: 0,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to change all-students Content Hub publication");
+  }
+});
+
+const AYLA_GLOBAL_SHARED_RESOURCE_PUBLICATION = Object.freeze({
+  readings: Object.freeze({
+    label: "books and readings",
+    types: Object.freeze(["book", "reading", "revision_sheet"]),
+    control: "all_approved_readings",
+    destinations: Object.freeze(["aylamed_library", "aylamed_roadmap"]),
+  }),
+  flashcards: Object.freeze({
+    label: "shared flashcards",
+    types: Object.freeze(["flashcard"]),
+    control: "all_approved_flashcards",
+    destinations: Object.freeze(["aylamed_flashcards", "aylamed_roadmap", "aylamed_revision"]),
+  }),
+});
+
+function aylaGlobalSharedResourcePublicationConfig(kind = "") {
+  return AYLA_GLOBAL_SHARED_RESOURCE_PUBLICATION[String(kind || "").trim().toLowerCase()] || null;
+}
+
+function aylaGlobalSharedResourceEligible(db, kind) {
+  const config = aylaGlobalSharedResourcePublicationConfig(kind);
+  if (!config) return [];
+  const types = new Set(config.types);
+  return aylaValues(db, "aylaResources")
+    .filter((resource) => types.has(aylaV189ResourceType(resource.type)))
+    .filter((resource) => resource.approved !== false)
+    .filter((resource) => !["disabled", "deleted", "rejected", "archived", "quarantined"].includes(String(resource.status || "active").toLowerCase()))
+    .filter((resource) => !String(resource.ownerStudentId || resource.owner_student_id || "").trim())
+    .filter((resource) => !aylaPilotContentScope(resource).pilotOnly)
+    .filter((resource) => {
+      if (kind === "flashcards") {
+        return Boolean(String(resource.front || resource.question || resource.title || "").trim()
+          && String(resource.back || resource.answer || resource.explanation || "").trim());
+      }
+      return Boolean(String(resource.title || resource.bookTitle || resource.book_title || "").trim());
+    })
+    .sort((left, right) => String(left.id || "").localeCompare(String(right.id || "")));
+}
+
+function aylaGlobalSharedResourcePublished(resource, config) {
+  const control = String(
+    resource.sourceData?.global_publication_control
+      || resource.source_data?.global_publication_control
+      || "",
+  ).trim();
+  if (control !== config.control) return true;
+  return resource.globalStudentPublication !== false
+    && resource.global_student_publication !== false
+    && resource.sourceData?.global_student_publication !== false
+    && resource.source_data?.global_student_publication !== false;
+}
+
+function aylaGlobalSharedResourcePublicationState(db, kind) {
+  const config = aylaGlobalSharedResourcePublicationConfig(kind);
+  if (!config) return null;
+  const eligible = aylaGlobalSharedResourceEligible(db, kind);
+  const publishedCount = eligible.filter((resource) => aylaGlobalSharedResourcePublished(resource, config)).length;
+  return {
+    kind,
+    label: config.label,
+    scope: "all_students",
+    eligible_count: eligible.length,
+    published_count: publishedCount,
+    state: eligible.length > 0 && publishedCount === eligible.length
+      ? "published"
+      : publishedCount > 0 ? "partial" : "unpublished",
+    can_publish: eligible.length > 0,
+    student_owned_resources_changed: 0,
+    private_pilot_resources_changed: 0,
+    mappings_preserved_on_remove: true,
+    progress_preserved_on_remove: true,
+    schedule_history_preserved_on_remove: true,
+  };
+}
+
+app.get("/api/ayla/admin/resources/global-publication/:kind", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const config = aylaGlobalSharedResourcePublicationConfig(req.params.kind);
+    if (!config) return aylaSendError(res, 400, "kind must be readings or flashcards");
+    const db = await readAylaDb();
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, { publication: aylaGlobalSharedResourcePublicationState(db, req.params.kind) });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load shared-resource publication state");
+  }
+});
+
+app.post("/api/ayla/admin/resources/global-publication/:kind", async (req, res) => {
+  try {
+    const admin = await aylaRequireAdmin(req);
+    const kind = String(req.params.kind || "").trim().toLowerCase();
+    const config = aylaGlobalSharedResourcePublicationConfig(kind);
+    if (!config) return aylaSendError(res, 400, "kind must be readings or flashcards");
+    const action = String(req.body.action || "").trim().toLowerCase();
+    if (!["publish", "unpublish"].includes(action)) return aylaSendError(res, 400, "action must be publish or unpublish");
+    const expectedEligibleCount = Number(req.body.expected_eligible_count ?? req.body.expectedEligibleCount);
+    const requiredConfirmation = `${action.toUpperCase()}_ALL_${kind.toUpperCase()}_${expectedEligibleCount}`;
+    if (!Number.isSafeInteger(expectedEligibleCount) || expectedEligibleCount < 1
+      || String(req.body.confirmation || "").trim() !== requiredConfirmation) {
+      return aylaSendError(res, 400, `confirmation must be ${requiredConfirmation}`);
+    }
+    const actor = aylaV215AdminAuditActor(admin);
+    const result = await mutateAylaDb(async (db) => {
+      const eligible = aylaGlobalSharedResourceEligible(db, kind);
+      if (eligible.length !== expectedEligibleCount) {
+        throw Object.assign(
+          new Error(`The eligible ${config.label} count changed from ${expectedEligibleCount} to ${eligible.length}. Refresh before continuing.`),
+          { statusCode: 409, code: "AYLAMED_GLOBAL_RESOURCE_COUNT_CHANGED" },
+        );
+      }
+      let changed = 0;
+      for (const resource of eligible) {
+        const destinations = new Set(aylaCleanArray(resource.deliveryDestinations || resource.delivery_destinations));
+        if (action === "publish") config.destinations.forEach((destination) => destinations.add(destination));
+        else config.destinations.forEach((destination) => destinations.delete(destination));
+        const next = {
+          ...resource,
+          globalStudentPublication: action === "publish",
+          deliveryDestinations: [...destinations],
+          sourceData: {
+            ...(resource.sourceData || resource.source_data || {}),
+            global_student_publication: action === "publish",
+            global_publication_control: config.control,
+          },
+          updatedAt: aylaNow(),
+          ...(action === "publish"
+            ? { publishedAt: aylaNow(), publishedBy: actor }
+            : { unpublishedAt: aylaNow(), unpublishedBy: actor }),
+        };
+        aylaSetItem(db, "aylaResources", next);
+        changed += 1;
+      }
+      await aylaLog(db, "resource-global-publication", `All approved ${config.label} ${action}ed for all students`, {
+        action,
+        kind,
+        eligible_count: eligible.length,
+        changed,
+        student_owned_resources_changed: 0,
+        private_pilot_resources_changed: 0,
+        mappings_preserved: true,
+        progress_preserved: true,
+        schedule_history_preserved: true,
+        actor,
+      });
+      return { changed, publication: aylaGlobalSharedResourcePublicationState(db, kind) };
+    });
+    return aylaSendOk(res, {
+      action,
+      changed: result.changed,
+      publication: result.publication,
+      student_owned_resources_changed: 0,
+      private_pilot_resources_changed: 0,
+      mappings_preserved: true,
+      progress_preserved: true,
+      schedule_history_preserved: true,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to change shared-resource publication", error.code ? { code: error.code } : null);
+  }
+});
 
 app.get("/api/ayla/admin/resources/vimeo-catalog/folder-publication", async (req, res) => {
   try {
