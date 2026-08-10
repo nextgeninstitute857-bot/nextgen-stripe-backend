@@ -35406,6 +35406,29 @@ async function requireContentUploadAdmin(req, uploadId = "") {
   return context;
 }
 
+function ngOwnedAylaMedImportJob(job = {}) {
+  return String(job?.source_provider || "").toLowerCase() === "aylamed"
+    && String(job?.source_profile || "").toLowerCase() === "aylamed_original"
+    && String(job?.source_rights_status || "").toLowerCase() === "owned"
+    && Boolean(String(job?.source_namespace || "").trim());
+}
+
+async function requireOwnedMediaBundleAdmin(req, uploadId, parentJob = null, context = null) {
+  const auth = context || await requireOwnedCatalogAdmin(req);
+  if (!auth.ownedCatalogOnly) return auth;
+
+  const session = await ngContentUploadStore.read(uploadId);
+  const expectedCreator = String(auth.user?.id || "");
+  const ownsSession = expectedCreator
+    && String(session?.created_by || "") === expectedCreator;
+  const isMediaArchive = String(session?.purpose || "").toLowerCase() === "media_zip";
+
+  if (!ownsSession || !isMediaArchive || (parentJob && !ngOwnedAylaMedImportJob(parentJob))) {
+    throw ngOwnedMediaUploadScopeError();
+  }
+  return auth;
+}
+
 app.post("/admin/crm/ai-training/content-uploads", async (req, res) => {
   try {
     const { user } = await requireContentUploadAdmin(req);
@@ -37123,9 +37146,11 @@ app.post("/admin/crm/ai-training/content-imports/:jobId/media-bundle/import-draf
   let videoJob = null;
   try {
     const uploadId = String(req.body?.upload_id || req.body?.uploadId || "").trim();
-    const { user } = uploadId
-      ? await requireContentUploadAdmin(req, uploadId)
+    const auth = uploadId
+      ? await requireOwnedCatalogAdmin(req)
       : await requireCrmAdmin(req);
+    const { user } = auth;
+    if (uploadId) await requireOwnedMediaBundleAdmin(req, uploadId, null, auth);
     if (!contentMediaStatus().configured) {
       return res.status(503).json({ success: false, error: "Cloudflare R2 is not configured" });
     }
@@ -37134,6 +37159,7 @@ app.post("/admin/crm/ai-training/content-imports/:jobId/media-bundle/import-draf
     }
     const parentJob = await getContentImportJob(req.params.jobId);
     if (!parentJob) return res.status(404).json({ success: false, error: "Content import job not found" });
+    if (uploadId) await requireOwnedMediaBundleAdmin(req, uploadId, parentJob, auth);
     if (!["draft_imported", "draft_imported_with_warnings"].includes(String(parentJob.status))) {
       return res.status(409).json({ success: false, error: "Questions must be imported as drafts before media can be attached" });
     }
@@ -37198,7 +37224,9 @@ app.get("/admin/crm/ai-training/content-media-bundle-imports/:backgroundJobId", 
     if (auth.ownedCatalogOnly) {
       const uploadId = String(bundleJob.payload?.upload_id || "").trim();
       if (!uploadId) throw ngOwnedMediaUploadScopeError();
-      await requireContentUploadAdmin(req, uploadId);
+      const parentJob = await getContentImportJob(bundleJob.metadata?.content_import_job_id);
+      if (!parentJob) throw ngOwnedMediaUploadScopeError();
+      await requireOwnedMediaBundleAdmin(req, uploadId, parentJob, auth);
     }
     const mediaJobId = String(bundleJob.metadata?.domain_job_id || "");
     const videoJobId = String(bundleJob.metadata?.video_job_id || "");

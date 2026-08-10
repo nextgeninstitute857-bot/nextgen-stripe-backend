@@ -39,3 +39,16 @@ test("owned catalogue importer accepts the existing AylaMed admin session", () =
   assert.match(server, /content-imports\/:jobId[\s\S]{0,220}requireOwnedCatalogAdmin\(req\)/);
   assert.match(server, /content-registry\/collections[\s\S]{0,220}requireOwnedCatalogAdmin\(req\)/);
 });
+
+test("staged media handoff is scoped by uploader, media purpose, and owned parent job", () => {
+  assert.match(server, /function ngOwnedAylaMedImportJob\(job = \{\}\)/);
+  assert.match(server, /job\?\.source_provider \|\| ""\)\.toLowerCase\(\) === "aylamed"/);
+  assert.match(server, /job\?\.source_profile \|\| ""\)\.toLowerCase\(\) === "aylamed_original"/);
+  assert.match(server, /job\?\.source_rights_status \|\| ""\)\.toLowerCase\(\) === "owned"/);
+  assert.match(server, /String\(session\?\.created_by \|\| ""\) === expectedCreator/);
+  assert.match(server, /String\(session\?\.purpose \|\| ""\)\.toLowerCase\(\) === "media_zip"/);
+  assert.match(server, /if \(!ownsSession \|\| !isMediaArchive \|\| \(parentJob && !ngOwnedAylaMedImportJob\(parentJob\)\)\)/);
+  assert.match(server, /if \(uploadId\) await requireOwnedMediaBundleAdmin\(req, uploadId, null, auth\)/);
+  assert.match(server, /media-bundle\/import-draft[\s\S]{0,1500}requireOwnedMediaBundleAdmin\(req, uploadId, parentJob, auth\)/);
+  assert.match(server, /content-media-bundle-imports\/:backgroundJobId[\s\S]{0,1500}requireOwnedMediaBundleAdmin\(req, uploadId, parentJob, auth\)/);
+});
