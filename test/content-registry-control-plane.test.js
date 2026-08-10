@@ -52,12 +52,22 @@ test('one mixed media ZIP is uploaded once and processed through private R2 and 
   assert.match(server, /ngRunContentMediaDraftImport\([\s\S]*?ngRunContentVideoDraftImport/);
 });
 
-test('private media recovery includes inactive shared questions but never active student delivery', () => {
+test('private media recovery follows the exact collection across re-import job IDs but never active student delivery', () => {
   const referenceQuery = postgres.slice(
     postgres.indexOf('export async function getContentMediaReferences'),
     postgres.indexOf('export async function createContentVideoImportJob'),
   );
+  assert.match(referenceQuery, /WITH target_job AS/);
+  assert.match(referenceQuery, /FROM content_import_jobs/);
   assert.match(referenceQuery, /a\.source_data->>'import_job_id'=\$1/);
+  assert.match(referenceQuery, /a\.exam_track=j\.exam_track/);
+  assert.match(referenceQuery, /a\.source_namespace=j\.source_namespace/);
+  assert.match(referenceQuery, /c\.source_provider=j\.source_provider/);
+  assert.match(referenceQuery, /c\.source_profile=j\.source_profile/);
+  assert.match(referenceQuery, /COALESCE\(j\.collection_title,''\)=COALESCE\(c\.title,''\)/);
+  assert.match(referenceQuery, /CONCAT\(COALESCE\(j\.collection_title,''\), ': ', c\.collection_key\)/);
+  assert.match(referenceQuery, /FROM scoped_aliases a/);
+  assert.doesNotMatch(referenceQuery, /FROM scoped_aliases a[\s\S]{0,180}a\.source_data->>'import_job_id'=\$1/);
   assert.match(referenceQuery, /delivery_collection\.status='approved'/);
   assert.match(referenceQuery, /delivery_destination\.enabled=TRUE/);
   assert.match(referenceQuery, /delivery_alias\.question_id=q\.id/);
