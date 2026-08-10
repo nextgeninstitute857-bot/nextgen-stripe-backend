@@ -35806,6 +35806,22 @@ async function ngRunContentMediaDraftImport({ mediaJob, parentJob, upload, queue
         directoryCacheKey: inventoryCacheKey,
         onProgress: (progress) => queueContext.heartbeat(trackProgress(progress)),
       });
+      if (!Number(inventory.candidateEntries || 0)
+        || !Number(inventory.candidateUncompressedBytes || 0)) {
+        const entriesScanned = Math.max(0, Number(inventory.entries || 0));
+        const referenceCount = references.length;
+        throw Object.assign(new Error(referenceCount > 0
+          ? `Media ZIP scan completed (${entriesScanned} entries), but no image/audio filename matched the ${referenceCount} private question media references. Review the stored reference paths before retrying; the uploaded ZIP remains reusable.`
+          : `Media ZIP scan completed (${entriesScanned} entries), but this private collection exposes no attachable image/audio references. Restore the import-scoped references before retrying; the uploaded ZIP remains reusable.`), {
+          statusCode: 409,
+          code: "CONTENT_MEDIA_REFERENCE_INVENTORY_EMPTY",
+          details: {
+            entries_scanned: entriesScanned,
+            question_media_references: referenceCount,
+            uploaded_zip_reusable: true,
+          },
+        });
+      }
       inventorySource = "fresh_index";
     }
 

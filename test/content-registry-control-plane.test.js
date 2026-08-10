@@ -52,6 +52,31 @@ test('one mixed media ZIP is uploaded once and processed through private R2 and 
   assert.match(server, /ngRunContentMediaDraftImport\([\s\S]*?ngRunContentVideoDraftImport/);
 });
 
+test('private media recovery includes inactive shared questions but never active student delivery', () => {
+  const referenceQuery = postgres.slice(
+    postgres.indexOf('export async function getContentMediaReferences'),
+    postgres.indexOf('export async function createContentVideoImportJob'),
+  );
+  assert.match(referenceQuery, /a\.source_data->>'import_job_id'=\$1/);
+  assert.match(referenceQuery, /delivery_collection\.status='approved'/);
+  assert.match(referenceQuery, /delivery_destination\.enabled=TRUE/);
+  assert.match(referenceQuery, /delivery_alias\.question_id=q\.id/);
+  assert.match(referenceQuery, /NOT IN \('archived','deleted','quarantined','rejected'\)/);
+  assert.doesNotMatch(referenceQuery, /q\.status='draft'/);
+});
+
+test('an empty media-reference inventory fails with actionable recovery evidence', () => {
+  const mediaImport = server.slice(
+    server.indexOf('async function ngRunContentMediaDraftImport'),
+    server.indexOf('app.post("/admin/crm/ai-training/content-imports/:jobId/media/import-draft"'),
+  );
+  assert.match(mediaImport, /CONTENT_MEDIA_REFERENCE_INVENTORY_EMPTY/);
+  assert.match(mediaImport, /entries_scanned: entriesScanned/);
+  assert.match(mediaImport, /question_media_references: referenceCount/);
+  assert.match(mediaImport, /uploaded_zip_reusable: true/);
+  assert.match(mediaImport, /no image\/audio filename matched/);
+});
+
 test('named collections recover their private draft import job after an admin page refresh', () => {
   assert.match(postgres, /recovered_job\.draft_import_job_id/);
   assert.match(postgres, /recovered_job\.draft_import_job_status/);
