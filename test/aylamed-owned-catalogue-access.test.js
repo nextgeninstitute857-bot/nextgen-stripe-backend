@@ -40,7 +40,7 @@ test("owned catalogue importer accepts the existing AylaMed admin session", () =
   assert.match(server, /content-registry\/collections[\s\S]{0,220}requireOwnedCatalogAdmin\(req\)/);
 });
 
-test("staged media handoff is scoped by uploader, media purpose, and owned parent job", () => {
+test("new staged media handoff is scoped by uploader, media purpose, and owned parent job", () => {
   assert.match(server, /function ngOwnedAylaMedImportJob\(job = \{\}\)/);
   assert.match(server, /job\?\.source_provider \|\| ""\)\.toLowerCase\(\) === "aylamed"/);
   assert.match(server, /job\?\.source_profile \|\| ""\)\.toLowerCase\(\) === "aylamed_original"/);
@@ -50,7 +50,16 @@ test("staged media handoff is scoped by uploader, media purpose, and owned paren
   assert.match(server, /if \(!ownsSession \|\| !isMediaArchive \|\| \(parentJob && !ngOwnedAylaMedImportJob\(parentJob\)\)\)/);
   assert.match(server, /if \(uploadId\) await requireOwnedMediaBundleAdmin\(req, uploadId, null, auth\)/);
   assert.match(server, /media-bundle\/import-draft[\s\S]{0,1500}requireOwnedMediaBundleAdmin\(req, uploadId, parentJob, auth\)/);
-  assert.match(server, /ngOwnedMediaBundlePollSnapshot[\s\S]{0,1200}requireOwnedMediaBundleAdmin\(req, uploadId, parentJob, resolvedAuth\)/);
+});
+
+test("existing matching jobs recover through the owned collection even when the admin login method changes", () => {
+  assert.match(server, /async function requireOwnedMediaBundleJobAdmin\(req, privateBundleJob, context = null\)/);
+  assert.match(server, /requireOwnedMediaBundleJobAdmin[\s\S]{0,1200}ngOwnedAylaMedImportJob\(parentJob\)/);
+  assert.match(server, /isFinalizedMediaArchive[\s\S]{0,200}"media_zip"[\s\S]{0,200}"finalized"/);
+  assert.doesNotMatch(
+    server.match(/async function requireOwnedMediaBundleJobAdmin[\s\S]*?return \{ auth, uploadId, parentJob \};/)?.[0] || "",
+    /created_by|expectedCreator/,
+  );
 });
 
 test("owned media polling authorizes with the private payload but returns a sanitized job", () => {
@@ -61,4 +70,18 @@ test("owned media polling authorizes with the private payload but returns a sani
   assert.match(server, /bundle_job: bundleJob/);
   assert.match(server, /content-imports\/:jobId\/media-bundle\/latest/);
   assert.match(server, /type: "content_media_bundle_draft"[\s\S]{0,120}includePayload: true/);
+});
+
+test("owned media retry requeues the failed job from the finalized R2 archive without duplicating it", () => {
+  assert.match(server, /content-imports\/:jobId\/media-bundle\/retry/);
+  assert.match(server, /resolveFinalized\(uploadId, \{ allowedPurposes: \["media_zip"\] \}\)/);
+  assert.match(server, /ngContentUploadStore\.acquire\(uploadId, backgroundJobId\)/);
+  assert.match(server, /ngContentBackgroundQueue\.retry\(backgroundJobId\)/);
+  assert.match(server, /requeued: true/);
+  assert.match(server, /deduplicated: true/);
+  assert.match(server, /No upload or duplicate job was created/);
+  assert.doesNotMatch(
+    server.match(/app\.post\("\/admin\/crm\/ai-training\/content-imports\/:jobId\/media-bundle\/retry"[\s\S]*?\n\}\);/)?.[0] || "",
+    /ngQueueContentOperation|createContentMediaImportJob|createContentVideoImportJob/,
+  );
 });
