@@ -50,5 +50,15 @@ test("staged media handoff is scoped by uploader, media purpose, and owned paren
   assert.match(server, /if \(!ownsSession \|\| !isMediaArchive \|\| \(parentJob && !ngOwnedAylaMedImportJob\(parentJob\)\)\)/);
   assert.match(server, /if \(uploadId\) await requireOwnedMediaBundleAdmin\(req, uploadId, null, auth\)/);
   assert.match(server, /media-bundle\/import-draft[\s\S]{0,1500}requireOwnedMediaBundleAdmin\(req, uploadId, parentJob, auth\)/);
-  assert.match(server, /content-media-bundle-imports\/:backgroundJobId[\s\S]{0,1500}requireOwnedMediaBundleAdmin\(req, uploadId, parentJob, auth\)/);
+  assert.match(server, /ngOwnedMediaBundlePollSnapshot[\s\S]{0,1200}requireOwnedMediaBundleAdmin\(req, uploadId, parentJob, resolvedAuth\)/);
+});
+
+test("owned media polling authorizes with the private payload but returns a sanitized job", () => {
+  assert.match(server, /async function ngOwnedMediaBundlePollSnapshot\(req, privateBundleJob, auth = null\)/);
+  assert.match(server, /privateBundleJob\.payload\?\.upload_id/);
+  assert.match(server, /const bundleJob = ngContentBackgroundQueue\.get\(privateBundleJob\.id\)/);
+  assert.match(server, /content-media-bundle-imports\/:backgroundJobId[\s\S]{0,500}includePayload: true/);
+  assert.match(server, /bundle_job: bundleJob/);
+  assert.match(server, /content-imports\/:jobId\/media-bundle\/latest/);
+  assert.match(server, /type: "content_media_bundle_draft"[\s\S]{0,120}includePayload: true/);
 });

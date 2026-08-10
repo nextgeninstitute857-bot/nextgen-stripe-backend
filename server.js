@@ -37214,38 +37214,73 @@ app.post("/admin/crm/ai-training/content-imports/:jobId/media-bundle/import-draf
   }
 });
 
+async function ngOwnedMediaBundlePollSnapshot(req, privateBundleJob, auth = null) {
+  const resolvedAuth = auth || await requireOwnedCatalogAdmin(req);
+  if (!privateBundleJob || privateBundleJob.type !== "content_media_bundle_draft") {
+    throw Object.assign(new Error("Combined media import job not found"), { statusCode: 404 });
+  }
+  if (resolvedAuth.ownedCatalogOnly) {
+    const uploadId = String(privateBundleJob.payload?.upload_id || "").trim();
+    if (!uploadId) throw ngOwnedMediaUploadScopeError();
+    const parentJob = await getContentImportJob(privateBundleJob.metadata?.content_import_job_id);
+    if (!parentJob) throw ngOwnedMediaUploadScopeError();
+    await requireOwnedMediaBundleAdmin(req, uploadId, parentJob, resolvedAuth);
+  }
+  const bundleJob = ngContentBackgroundQueue.get(privateBundleJob.id);
+  const mediaJobId = String(privateBundleJob.metadata?.domain_job_id || "");
+  const videoJobId = String(privateBundleJob.metadata?.video_job_id || "");
+  const [mediaJob, videoJob] = await Promise.all([
+    getContentMediaImportJob(mediaJobId),
+    getContentVideoImportJob(videoJobId),
+  ]);
+  const monitoring = contentJobMonitoring([bundleJob], {
+    staleMs: Math.max(30_000, Number(process.env.NEXTGEN_CONTENT_PROGRESS_STALE_MS || 3 * 60 * 1000)),
+  });
+  return {
+    success: true,
+    bundle_job: bundleJob,
+    media_job: mediaJob,
+    video_job: videoJob,
+    monitoring,
+    single_upload: true,
+    storage: { images_and_audio: contentMediaStatus(), videos: contentVideoStatus() },
+  };
+}
+
 app.get("/admin/crm/ai-training/content-media-bundle-imports/:backgroundJobId", async (req, res) => {
   try {
     const auth = await requireOwnedCatalogAdmin(req);
-    const bundleJob = ngContentBackgroundQueue.get(req.params.backgroundJobId);
-    if (!bundleJob || bundleJob.type !== "content_media_bundle_draft") {
-      return res.status(404).json({ success: false, error: "Combined media import job not found" });
+    const privateBundleJob = ngContentBackgroundQueue.get(
+      req.params.backgroundJobId,
+      { includePayload: true },
+    );
+    return res.json(await ngOwnedMediaBundlePollSnapshot(req, privateBundleJob, auth));
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/ai-training/content-imports/:jobId/media-bundle/latest", async (req, res) => {
+  try {
+    const auth = await requireOwnedCatalogAdmin(req);
+    const parentJob = await getContentImportJob(req.params.jobId);
+    if (!parentJob) {
+      return res.status(404).json({ success: false, error: "Content import job not found" });
     }
-    if (auth.ownedCatalogOnly) {
-      const uploadId = String(bundleJob.payload?.upload_id || "").trim();
-      if (!uploadId) throw ngOwnedMediaUploadScopeError();
-      const parentJob = await getContentImportJob(bundleJob.metadata?.content_import_job_id);
-      if (!parentJob) throw ngOwnedMediaUploadScopeError();
-      await requireOwnedMediaBundleAdmin(req, uploadId, parentJob, auth);
+    if (auth.ownedCatalogOnly && !ngOwnedAylaMedImportJob(parentJob)) {
+      throw ngOwnedMediaUploadScopeError();
     }
-    const mediaJobId = String(bundleJob.metadata?.domain_job_id || "");
-    const videoJobId = String(bundleJob.metadata?.video_job_id || "");
-    const [mediaJob, videoJob] = await Promise.all([
-      getContentMediaImportJob(mediaJobId),
-      getContentVideoImportJob(videoJobId),
-    ]);
-    const monitoring = contentJobMonitoring([bundleJob], {
-      staleMs: Math.max(30_000, Number(process.env.NEXTGEN_CONTENT_PROGRESS_STALE_MS || 3 * 60 * 1000)),
-    });
-    return res.json({
-      success: true,
-      bundle_job: bundleJob,
-      media_job: mediaJob,
-      video_job: videoJob,
-      monitoring,
-      single_upload: true,
-      storage: { images_and_audio: contentMediaStatus(), videos: contentVideoStatus() },
-    });
+    const privateBundleJob = ngContentBackgroundQueue.list({
+      type: "content_media_bundle_draft",
+      limit: 500,
+      includePayload: true,
+    }).find((job) => (
+      String(job.metadata?.content_import_job_id || "") === String(parentJob.id)
+    ));
+    if (!privateBundleJob) {
+      return res.status(404).json({ success: false, error: "No combined media import job exists for this collection" });
+    }
+    return res.json(await ngOwnedMediaBundlePollSnapshot(req, privateBundleJob, auth));
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
