@@ -76,6 +76,32 @@ test('private media recovery follows admin collection identity across provider-l
   assert.match(referenceQuery, /delivery_alias\.question_id=q\.id/);
   assert.match(referenceQuery, /NOT IN \('archived','deleted','quarantined','rejected'\)/);
   assert.doesNotMatch(referenceQuery, /q\.status='draft'/);
+  assert.match(referenceQuery, /a\.source_data AS alias_source_data/);
+  assert.match(referenceQuery, /aliasSourceData\.import_media_refs/);
+  assert.match(referenceQuery, /aliasSourceData\.import_media_match_paths/);
+  assert.match(referenceQuery, /aliasSourceData\.import_media_placements/);
+  assert.match(referenceQuery, /aliasSourceData\.import_source_file/);
+  assert.match(referenceQuery, /AS answer_rows/);
+  assert.match(referenceQuery, /extractMediaReferences\(row\.question_html\)/);
+  assert.match(referenceQuery, /extractMediaReferences\(row\.explanation_html\)/);
+  assert.match(referenceQuery, /extractMediaReferences\(answer\?\.text_html\)/);
+  assert.match(referenceQuery, /canonical_inline_fallback/);
+});
+
+test('every question import durably preserves its collection-scoped media manifest on the source alias', () => {
+  const importBatch = postgres.slice(
+    postgres.indexOf('export async function importContentQuestionBatch'),
+    postgres.indexOf('export async function previewStep1CollectionTaxonomyRepair'),
+  );
+  for (const field of [
+    'import_media_refs',
+    'import_media_placements',
+    'import_media_match_paths',
+    'import_source_file',
+    'import_media_manifest_version',
+  ]) assert.match(importBatch, new RegExp(field));
+  assert.match(importBatch, /ON CONFLICT \(exam_track, source_namespace, collection_key, source_item_id\) DO UPDATE SET/);
+  assert.match(importBatch, /source_data=COALESCE\(content_source_aliases\.source_data,'\{\}'::jsonb\) \|\| EXCLUDED\.source_data/);
 });
 
 test('an empty media-reference inventory fails with actionable recovery evidence', () => {
