@@ -37122,7 +37122,10 @@ app.post("/admin/crm/ai-training/content-imports/:jobId/media-bundle/import-draf
   let mediaJob = null;
   let videoJob = null;
   try {
-    const { user } = await requireCrmAdmin(req);
+    const uploadId = String(req.body?.upload_id || req.body?.uploadId || "").trim();
+    const { user } = uploadId
+      ? await requireContentUploadAdmin(req, uploadId)
+      : await requireCrmAdmin(req);
     if (!contentMediaStatus().configured) {
       return res.status(503).json({ success: false, error: "Cloudflare R2 is not configured" });
     }
@@ -37187,10 +37190,15 @@ app.post("/admin/crm/ai-training/content-imports/:jobId/media-bundle/import-draf
 
 app.get("/admin/crm/ai-training/content-media-bundle-imports/:backgroundJobId", async (req, res) => {
   try {
-    await requireCrmAdmin(req);
+    const auth = await requireOwnedCatalogAdmin(req);
     const bundleJob = ngContentBackgroundQueue.get(req.params.backgroundJobId);
     if (!bundleJob || bundleJob.type !== "content_media_bundle_draft") {
       return res.status(404).json({ success: false, error: "Combined media import job not found" });
+    }
+    if (auth.ownedCatalogOnly) {
+      const uploadId = String(bundleJob.payload?.upload_id || "").trim();
+      if (!uploadId) throw ngOwnedMediaUploadScopeError();
+      await requireContentUploadAdmin(req, uploadId);
     }
     const mediaJobId = String(bundleJob.metadata?.domain_job_id || "");
     const videoJobId = String(bundleJob.metadata?.video_job_id || "");
