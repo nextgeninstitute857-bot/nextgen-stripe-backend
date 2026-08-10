@@ -59,7 +59,10 @@ test('private media recovery follows the exact collection across re-import job I
   );
   assert.match(referenceQuery, /WITH target_job AS/);
   assert.match(referenceQuery, /FROM content_import_jobs/);
-  assert.match(referenceQuery, /a\.source_data->>'import_job_id'=\$1/);
+  assert.match(referenceQuery, /WHERE id=\$1::uuid/);
+  assert.match(referenceQuery, /a\.source_data->>'import_job_id'=\$2::text/);
+  assert.match(referenceQuery, /\[contentImportJobId, String\(contentImportJobId \|\| ""\)\]/);
+  assert.doesNotMatch(referenceQuery, /a\.source_data->>'import_job_id'=\$1(?:\s|$)/);
   assert.match(referenceQuery, /a\.exam_track=j\.exam_track/);
   assert.match(referenceQuery, /a\.source_namespace=j\.source_namespace/);
   assert.match(referenceQuery, /c\.source_provider=j\.source_provider/);
