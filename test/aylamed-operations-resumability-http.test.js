@@ -146,6 +146,19 @@ test("v217 HTTP flow keeps chunked ZIPs admin-only, resumable, checksummed, and 
     });
     assert.equal(aylaFinalize.response.status, 409, JSON.stringify(aylaFinalize.payload));
     assert.match(aylaFinalize.payload.error, /Upload is incomplete/);
+    const aylaBundleUnauthorized = await jsonApi(baseUrl, "/admin/crm/ai-training/content-imports/missing-parent/media-bundle/import-draft", {
+      method: "POST", body: { upload_id: aylaUploadId },
+    });
+    assert.equal(aylaBundleUnauthorized.response.status, 401, JSON.stringify(aylaBundleUnauthorized.payload));
+    const aylaBundleAcceptedAuth = await jsonApi(baseUrl, "/admin/crm/ai-training/content-imports/missing-parent/media-bundle/import-draft", {
+      method: "POST", adminToken: "operations-ayla-admin-token", body: { upload_id: aylaUploadId },
+    });
+    assert.equal(aylaBundleAcceptedAuth.response.status, 503, JSON.stringify(aylaBundleAcceptedAuth.payload));
+    assert.match(aylaBundleAcceptedAuth.payload.error, /Cloudflare R2 is not configured/);
+    const aylaBundlePoll = await jsonApi(baseUrl, "/admin/crm/ai-training/content-media-bundle-imports/missing-bundle", {
+      adminToken: "operations-ayla-admin-token",
+    });
+    assert.equal(aylaBundlePoll.response.status, 404, JSON.stringify(aylaBundlePoll.payload));
     const aylaCancelled = await jsonApi(baseUrl, `/admin/crm/ai-training/content-uploads/${aylaUploadId}`, {
       method: "DELETE", adminToken: "operations-ayla-admin-token",
     });
@@ -191,6 +204,10 @@ test("v217 HTTP flow keeps chunked ZIPs admin-only, resumable, checksummed, and 
     assert.equal(finalized.response.status, 200, JSON.stringify(finalized.payload));
     assert.equal(finalized.payload.sha256, digest);
     assert.equal(finalized.payload.upload.status, "finalized");
+    const aylaWrongOwnerBundle = await jsonApi(baseUrl, "/admin/crm/ai-training/content-imports/missing-parent/media-bundle/import-draft", {
+      method: "POST", adminToken: "operations-ayla-admin-token", body: { upload_id: session.id },
+    });
+    assert.equal(aylaWrongOwnerBundle.response.status, 403, JSON.stringify(aylaWrongOwnerBundle.payload));
 
     const operations = await jsonApi(baseUrl, "/admin/crm/operations/content-jobs", { token });
     assert.equal(operations.response.status, 200, JSON.stringify(operations.payload));
