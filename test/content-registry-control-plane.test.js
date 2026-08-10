@@ -228,6 +228,23 @@ test('owner-controlled all-students testing release is explicit, reversible, and
   assert.match(postgres, /if \(unpublishAllRequested && effectiveDestinationRows/);
 });
 
+test('overview uses a bounded read-only QBank publication status instead of the full collection table', () => {
+  assert.match(postgres, /getContentGlobalQbankPublicationState/);
+  assert.match(postgres, /c\.source_profile='aylamed_original'/);
+  assert.match(postgres, /c\.status='approved'/);
+  assert.match(postgres, /destination\.destination='aylamed_qbank'/);
+  assert.match(postgres, /automatic_publication: false/);
+  assert.match(server, /app\.get\("\/api\/ayla\/admin\/qbank\/global-publication"/);
+  assert.match(server, /getContentGlobalQbankPublicationState/);
+  assert.doesNotMatch(
+    server.slice(
+      server.indexOf('app.get("/api/ayla/admin/qbank/global-publication"'),
+      server.indexOf('app.post("/api/ayla/admin/global-testing-access"'),
+    ),
+    /updateContentCollectionControls|publishAllOwnedCollection|changeGlobalTestingAccess/,
+  );
+});
+
 test('question ID display policy supports internal, source, both, and hidden modes', () => {
   for (const mode of ['internal', 'source', 'both', 'hidden']) assert.match(postgres, new RegExp(`'${mode}'`));
   for (const mode of ['provider', 'neutral', 'hidden']) assert.match(postgres, new RegExp(`'${mode}'`));

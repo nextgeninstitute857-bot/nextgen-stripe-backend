@@ -39,6 +39,7 @@ import {
   getContentCdmCase,
   getContentVideoImportJob,
   getContentImportJob,
+  getContentGlobalQbankPublicationState,
   getContentQbankCatalog,
   getContentQbankPresentationPolicy,
   getContentQbankQuestions,
@@ -71540,6 +71541,23 @@ app.get("/api/ayla/admin/global-testing-access", async (req, res) => {
     return aylaSendOk(res, { access: aylaGlobalTestingAccessState(db) });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load global testing access");
+  }
+});
+
+app.get("/api/ayla/admin/qbank/global-publication", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const publication = await getContentGlobalQbankPublicationState({
+      examTrack: "usmle-step-1",
+    });
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, { publication });
+  } catch (error) {
+    return aylaSendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Failed to load all-students QBank publication state",
+    );
   }
 });
 
