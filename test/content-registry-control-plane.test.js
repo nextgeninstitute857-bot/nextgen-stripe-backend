@@ -52,7 +52,7 @@ test('one mixed media ZIP is uploaded once and processed through private R2 and 
   assert.match(server, /ngRunContentMediaDraftImport\([\s\S]*?ngRunContentVideoDraftImport/);
 });
 
-test('private media recovery follows admin collection identity across provider-label drift but never active student delivery', () => {
+test('private media recovery discovers protected questions without mutating active student delivery', () => {
   const referenceQuery = postgres.slice(
     postgres.indexOf('export async function getContentMediaReferences'),
     postgres.indexOf('export async function createContentVideoImportJob'),
@@ -74,6 +74,8 @@ test('private media recovery follows admin collection identity across provider-l
   assert.match(referenceQuery, /delivery_collection\.status='approved'/);
   assert.match(referenceQuery, /delivery_destination\.enabled=TRUE/);
   assert.match(referenceQuery, /delivery_alias\.question_id=q\.id/);
+  assert.match(referenceQuery, /AS student_delivery_protected/);
+  assert.doesNotMatch(referenceQuery, /WHERE LOWER\(COALESCE\(q\.status,''\)\)[\s\S]{0,180}AND NOT EXISTS/);
   assert.match(referenceQuery, /NOT IN \('archived','deleted','quarantined','rejected'\)/);
   assert.doesNotMatch(referenceQuery, /q\.status='draft'/);
   assert.match(referenceQuery, /a\.source_data AS alias_source_data/);
@@ -86,6 +88,46 @@ test('private media recovery follows admin collection identity across provider-l
   assert.match(referenceQuery, /extractMediaReferences\(row\.explanation_html\)/);
   assert.match(referenceQuery, /extractMediaReferences\(answer\?\.text_html\)/);
   assert.match(referenceQuery, /canonical_inline_fallback/);
+  assert.match(referenceQuery, /sourceAliasId: row\.source_alias_id/);
+  assert.match(referenceQuery, /studentDeliveryProtected: row\.student_delivery_protected === true/);
+});
+
+test('private import image, audio, and video links are collection-scoped while protected canonical links remain unchanged', () => {
+  assert.match(postgres, /CREATE TABLE IF NOT EXISTS content_source_alias_media/);
+  assert.match(postgres, /UNIQUE\(source_alias_id, media_ref\)/);
+  assert.match(postgres, /CREATE TABLE IF NOT EXISTS content_source_alias_videos/);
+  const saveMatches = postgres.slice(
+    postgres.indexOf('export async function saveContentMediaMatchBatch'),
+    postgres.indexOf('export async function saveContentMediaMatches'),
+  );
+  assert.match(saveMatches, /INSERT INTO content_source_alias_media/);
+  assert.match(saveMatches, /ON CONFLICT \(source_alias_id, media_ref\) DO UPDATE SET/);
+  assert.match(saveMatches, /student_delivery_protected/);
+  assert.match(saveMatches, /if \(!studentDeliveryProtected\)/);
+  assert.match(saveMatches, /INSERT INTO content_question_media/);
+  assert.match(saveMatches, /protectedAliasLinks/);
+  const saveVideoMatches = postgres.slice(
+    postgres.indexOf('export async function saveContentVideoLinksBatch'),
+    postgres.indexOf('export async function saveContentMediaMatchBatch'),
+  );
+  assert.match(saveVideoMatches, /INSERT INTO content_source_alias_videos/);
+  assert.match(saveVideoMatches, /ON CONFLICT \(source_alias_id,media_ref\) DO UPDATE SET/);
+  assert.match(saveVideoMatches, /if \(!studentDeliveryProtected\)/);
+  assert.match(saveVideoMatches, /if \(match\.studentDeliveryProtected !== true\)/);
+  assert.match(saveVideoMatches, /INSERT INTO content_question_videos/);
+  const mediaAudit = postgres.slice(
+    postgres.indexOf('export async function auditContentMediaLinks'),
+    postgres.indexOf('export async function createContentImportJob'),
+  );
+  assert.match(mediaAudit, /LEFT JOIN content_source_alias_media/);
+  assert.match(mediaAudit, /ON input\.source_alias_id IS NULL/);
+  const videoAudits = postgres.slice(
+    postgres.indexOf('export async function auditContentVideoMappings'),
+    postgres.indexOf('export async function saveContentVideoAsset'),
+  );
+  assert.match(videoAudits, /LEFT JOIN content_source_alias_videos/g);
+  assert.match(videoAudits, /NULLIF\(x\.source_alias_id,''\)::uuid/g);
+  assert.match(videoAudits, /ON input\.source_alias_id IS NULL/g);
 });
 
 test('every question import durably preserves its collection-scoped media manifest on the source alias', () => {
