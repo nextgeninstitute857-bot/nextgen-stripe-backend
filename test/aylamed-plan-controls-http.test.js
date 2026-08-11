@@ -11,6 +11,31 @@ function passwordRecord(password, salt = "plancontrols1234plancontrols1234") {
   return { salt, password_hash: crypto.pbkdf2Sync(password, salt, 120000, 64, "sha512").toString("hex") };
 }
 
+function testingBookResource({ id, title, pdfPage, printedPage }) {
+  return {
+    id,
+    type: "book",
+    title,
+    bookTitle: title,
+    examTrackId: "usmle_step_1",
+    system: "Cardiovascular",
+    topic: "Cardiovascular foundations",
+    pdfPageStart: pdfPage,
+    pdfPageEnd: pdfPage,
+    printedPageStart: printedPage,
+    printedPageEnd: printedPage,
+    readerPages: [{ pdfPage, printedPage, text: `${title} exact-page testing content.`, complete: true }],
+    accessScope: "private_pilot",
+    pilotOnly: true,
+    pilotCohortId: "AYLA-PILOT-161049-2C000388",
+    authorizationStatus: "pending_review",
+    verificationStatus: "pilot_verified_exact_pages",
+    approved: false,
+    status: "needs_rights_review",
+    deliveryDestinations: ["aylamed_library", "aylamed_roadmap"],
+  };
+}
+
 async function freePort() {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
@@ -82,6 +107,26 @@ test("v215 applies live plan/demo matrices without rewriting enrollments or lear
       paid: { id: "paid", user_id: "user-1", student_id: "student-1", plan_id: "paid", exam_track_id: "usmle_step_1", type: "paid", status: "active", access_granted: true, access_starts_at: now, access_expires_at: future, included_features: ["roadmap", "personal_tutor", "content_hub"], is_full_access: true, createdAt: now, updatedAt: now },
       demo: { id: "demo", user_id: "user-1", student_id: "student-1", plan_id: "AYLA-PLAN-DEMO", exam_track_id: "usmle_step_1", type: "demo", is_demo: true, status: "active", access_granted: true, access_starts_at: demoStart, access_expires_at: oldDemoExpiry, included_features: ["personal_tutor"], createdAt: now, updatedAt: now },
     },
+    aylaResources: {
+      "AYLA-PILOT-BOOK-FA2025-CARDIO-304-309": testingBookResource({
+        id: "AYLA-PILOT-BOOK-FA2025-CARDIO-304-309",
+        title: "First Aid 2025 testing reading",
+        pdfPage: 304,
+        printedPage: 283,
+      }),
+      "AYLA-PILOT-BOOK-PATHOMA-CARDIAC-80-84": testingBookResource({
+        id: "AYLA-PILOT-BOOK-PATHOMA-CARDIAC-80-84",
+        title: "Pathoma testing reading",
+        pdfPage: 80,
+        printedPage: 73,
+      }),
+      "AYLA-PILOT-BOOK-UNRELATED": testingBookResource({
+        id: "AYLA-PILOT-BOOK-UNRELATED",
+        title: "Unrelated private reading",
+        pdfPage: 1,
+        printedPage: 1,
+      }),
+    },
     aylaQuestionAttempts: {
       history: { id: "history", studentId: "student-1", serverVerified: true, outcome: "incorrect", system: "Cardiovascular", topic: "Perfusion", createdAt: now },
     },
@@ -127,6 +172,14 @@ test("v215 applies live plan/demo matrices without rewriting enrollments or lear
     assert.equal(globalTestingBefore.payload.access.enabled, false);
     assert.equal(globalTestingBefore.payload.access.student_count, 1);
     assert.equal(globalTestingBefore.payload.access.feature_count, 13);
+    assert.equal(globalTestingBefore.payload.access.testing_books_linked_to_same_action, true);
+    assert.equal(globalTestingBefore.payload.access.testing_book_count, 2);
+    assert.equal(globalTestingBefore.payload.access.testing_books_available_count, 0);
+
+    const readingsBefore = await api(baseUrl, "/api/ayla/admin/resources/global-publication/readings", { adminToken });
+    assert.equal(readingsBefore.response.status, 200, JSON.stringify(readingsBefore.payload));
+    assert.equal(readingsBefore.payload.publication.eligible_count, 2);
+    assert.equal(readingsBefore.payload.publication.published_count, 0);
 
     const globalTestingEnabled = await api(baseUrl, "/api/ayla/admin/global-testing-access", {
       method: "POST", adminToken,
@@ -136,6 +189,21 @@ test("v215 applies live plan/demo matrices without rewriting enrollments or lear
     assert.equal(globalTestingEnabled.payload.access.enabled, true);
     assert.equal(globalTestingEnabled.payload.access.plans_changed, 0);
     assert.equal(globalTestingEnabled.payload.access.enrollments_changed, 0);
+    assert.equal(globalTestingEnabled.payload.access.testing_books_available_count, 2);
+
+    const globalTestingLibrary = await api(baseUrl, "/api/ayla/students/student-1/library", { token });
+    assert.equal(globalTestingLibrary.response.status, 200, JSON.stringify(globalTestingLibrary.payload));
+    assert.equal(globalTestingLibrary.payload.catalog.total, 2);
+    assert.deepEqual(
+      globalTestingLibrary.payload.catalog.resources.map((row) => row.id).sort(),
+      ["AYLA-PILOT-BOOK-FA2025-CARDIO-304-309", "AYLA-PILOT-BOOK-PATHOMA-CARDIAC-80-84"],
+    );
+    assert.equal(globalTestingLibrary.payload.page_source_warning, null);
+
+    let stored = JSON.parse(await fs.readFile(aylaPath, "utf8"));
+    assert.equal(stored.aylaResources["AYLA-PILOT-BOOK-FA2025-CARDIO-304-309"].accessScope, "all_students");
+    assert.equal(stored.aylaResources["AYLA-PILOT-BOOK-PATHOMA-CARDIAC-80-84"].globalStudentPublication, true);
+    assert.equal(stored.aylaResources["AYLA-PILOT-BOOK-UNRELATED"].approved, false);
 
     const globalTestingShell = await api(baseUrl, "/api/ayla/shell", { token });
     assert.equal(globalTestingShell.response.status, 200, JSON.stringify(globalTestingShell.payload));
@@ -148,6 +216,12 @@ test("v215 applies live plan/demo matrices without rewriting enrollments or lear
     });
     assert.equal(globalTestingDisabled.response.status, 200, JSON.stringify(globalTestingDisabled.payload));
     assert.equal(globalTestingDisabled.payload.access.enabled, false);
+    assert.equal(globalTestingDisabled.payload.access.testing_books_available_count, 0);
+    stored = JSON.parse(await fs.readFile(aylaPath, "utf8"));
+    assert.equal(stored.aylaResources["AYLA-PILOT-BOOK-FA2025-CARDIO-304-309"].accessScope, "private_pilot");
+    assert.equal(stored.aylaResources["AYLA-PILOT-BOOK-FA2025-CARDIO-304-309"].pilotOnly, true);
+    assert.equal(stored.aylaResources["AYLA-PILOT-BOOK-PATHOMA-CARDIAC-80-84"].globalStudentPublication, false);
+    assert.equal(stored.aylaResources["AYLA-PILOT-BOOK-UNRELATED"].status, "needs_rights_review");
     const afterGlobalTesting = await api(baseUrl, "/api/ayla/shell", { token });
     assert.equal(afterGlobalTesting.payload.activeDashboard.features.personal_tutor, false);
     assert.equal(afterGlobalTesting.payload.activeDashboard.features.content_hub, false);
@@ -207,7 +281,7 @@ test("v215 applies live plan/demo matrices without rewriting enrollments or lear
     assert.equal(demoChanged.payload.plan.feature_matrix_version, 2);
     assert.equal(demoChanged.payload.demo.duration_days, 14);
     assert.equal(demoChanged.payload.existing_demo_enrollments_adjusted, 0);
-    let stored = JSON.parse(await fs.readFile(aylaPath, "utf8"));
+    stored = JSON.parse(await fs.readFile(aylaPath, "utf8"));
     assert.equal(stored.aylaEnrollments.demo.access_expires_at, oldDemoExpiry);
 
     const demoApplied = await api(baseUrl, "/api/ayla/admin/demo-controls", {
