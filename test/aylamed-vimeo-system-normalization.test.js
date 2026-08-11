@@ -43,6 +43,36 @@ test("reviewed Vimeo display labels normalize to Step 1 app systems", () => {
   }
 });
 
+test("every system label in both reviewed Vimeo imports normalizes", () => {
+  const cases = [
+    ["Nervous System", "Neurology"],
+    ["Cardiovascular", "Cardiovascular"],
+    ["Microbiology", "Microbiology"],
+    ["Endocrine", "Endocrine"],
+    ["Biochemistry", "Biochemistry"],
+    ["Pulmonary", "Respiratory"],
+    ["Hematology and Oncology", "Hematology"],
+    ["Renal", "Renal"],
+    ["Gastrointestinal", "Gastrointestinal"],
+    ["Reproductive", "Reproductive"],
+    ["Musculoskeletal", "Musculoskeletal"],
+    ["Genetics", "Biochemistry"],
+    ["Immunology", "Immunology"],
+    ["Behavioral Science", "Behavioral Science"],
+    ["Biostatistics and Epidemiology", "Biostatistics and Ethics"],
+    ["General Pathology", "Biochemistry"],
+    ["Dermatology", "Musculoskeletal"],
+    ["Embryology", "Biochemistry"],
+    ["Ethics and Communication", "Biostatistics and Ethics"],
+    ["Psychiatry", "Behavioral Science"],
+    ["Cell Biology", "Biochemistry"],
+    ["Pharmacology", "Pharmacology"],
+  ];
+  for (const [system, expected] of cases) {
+    assert.equal(normalize(system), expected, system);
+  }
+});
+
 test("the imported Step 1 ledger composites use subsystem-aware normalization", () => {
   const cases = [
     ["Behavioral/Nervous/Special Senses", "Nervous System", "Neurology"],
@@ -78,4 +108,21 @@ test("every Vimeo approval path supplies the subsystem for composite normalizati
   const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
   const calls = [...server.matchAll(/aylaVimeoCanonicalSystem\(\s*approved\.resource\.examTrackId,\s*approved\.resource\.system,\s*approved\.resource\.subsystem,\s*\)/g)];
   assert.equal(calls.length, 3);
+});
+
+test("global Vimeo publication preflights the full catalogue before storing resources", () => {
+  const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
+  const start = server.indexOf("function aylaPrepareGlobalVimeoPublication");
+  const end = server.indexOf('app.get("/api/ayla/admin/resources/vimeo-catalog/global-publication"', start);
+  const helper = server.slice(start, end);
+  assert.ok(start > 0 && end > start);
+  assert.match(helper, /for \(const draft of drafts\)/);
+  assert.match(helper, /failures\.push/);
+  assert.match(helper, /AYLAMED_GLOBAL_VIMEO_PREFLIGHT_FAILED/);
+
+  const routeStart = server.indexOf('app.post("/api/ayla/admin/resources/vimeo-catalog/global-publication"');
+  const routeEnd = server.indexOf('function aylaGlobalSharedResourcePublicationState', routeStart);
+  const route = server.slice(routeStart, routeEnd);
+  assert.ok(routeStart > 0 && routeEnd > routeStart);
+  assert.ok(route.indexOf("aylaPrepareGlobalVimeoPublication") < route.indexOf("aylaV190StoreImportedResource"));
 });
