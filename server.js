@@ -80822,6 +80822,56 @@ function aylaGlobalVimeoPublicationState(db) {
   };
 }
 
+function aylaPrepareGlobalVimeoPublication(drafts, actor) {
+  const prepared = [];
+  const failures = [];
+  for (const draft of drafts) {
+    const vimeoId = String(draft.vimeoId || draft.vimeo_id || "").trim();
+    try {
+      const approved = approveVimeoCatalogDraft(draft, {
+        expectedRevision: Number(draft.revision || 0),
+        overrides: {
+          resourceId: `vimeo-library-${vimeoId}-global`,
+          ownerStudentId: "",
+          accessScope: "all_students",
+        },
+        actor,
+      });
+      const canonicalSystem = aylaVimeoCanonicalSystem(
+        approved.resource.examTrackId,
+        approved.resource.system,
+        approved.resource.subsystem,
+      );
+      if (!canonicalSystem) {
+        throw Object.assign(new Error("invalid system mapping"), {
+          code: "AYLAMED_VIMEO_SYSTEM_MAPPING_INVALID",
+        });
+      }
+      approved.resource.system = canonicalSystem;
+      prepared.push({ approved, vimeoId });
+    } catch (error) {
+      failures.push({
+        vimeo_id: vimeoId,
+        system: String(draft.classification?.medicalSystem || "").trim(),
+        subsystem: String(draft.classification?.medicalSubsystem || "").trim(),
+        error: String(error.message || error).slice(0, 500),
+      });
+    }
+  }
+  if (failures.length) {
+    const sample = failures.slice(0, 10).map((row) => row.vimeo_id).join(", ");
+    throw Object.assign(
+      new Error(`Content Hub preflight found ${failures.length} invalid Vimeo mapping${failures.length === 1 ? "" : "s"}: ${sample}${failures.length > 10 ? ", …" : ""}`),
+      {
+        statusCode: 400,
+        code: "AYLAMED_GLOBAL_VIMEO_PREFLIGHT_FAILED",
+        failures,
+      },
+    );
+  }
+  return prepared;
+}
+
 app.get("/api/ayla/admin/resources/vimeo-catalog/global-publication", async (req, res) => {
   try {
     await aylaRequireAdmin(req);
@@ -80859,27 +80909,14 @@ app.post("/api/ayla/admin/resources/vimeo-catalog/global-publication", async (re
       const eligibleIds = new Set(drafts.map((row) => String(row.vimeoId || row.vimeo_id || "").trim()));
       let changed = 0;
       if (action === "publish") {
-        for (const draft of drafts) {
-          const vimeoId = String(draft.vimeoId || draft.vimeo_id || "").trim();
+        const prepared = aylaPrepareGlobalVimeoPublication(drafts, actor);
+        for (const { approved, vimeoId } of prepared) {
           const existingGlobal = aylaValues(db, "aylaResources").find((resource) => (
             String(resource.vimeoId || resource.vimeo_id || "").trim() === vimeoId
             && !String(resource.ownerStudentId || resource.owner_student_id || "").trim()
           )) || null;
           const resourceId = String(existingGlobal?.id || `vimeo-library-${vimeoId}-global`);
-          const approved = approveVimeoCatalogDraft(draft, {
-            expectedRevision: Number(draft.revision || 0),
-            overrides: { resourceId, ownerStudentId: "", accessScope: "all_students" },
-            actor,
-          });
-          const canonicalSystem = aylaVimeoCanonicalSystem(
-            approved.resource.examTrackId,
-            approved.resource.system,
-            approved.resource.subsystem,
-          );
-          if (!canonicalSystem) {
-            throw Object.assign(new Error(`Invalid system mapping for Vimeo ${vimeoId}`), { statusCode: 400 });
-          }
-          approved.resource.system = canonicalSystem;
+          approved.resource.id = resourceId;
           approved.resource.globalStudentPublication = true;
           approved.resource.sourceData = {
             ...(approved.resource.sourceData || {}),
@@ -80936,7 +80973,16 @@ app.post("/api/ayla/admin/resources/vimeo-catalog/global-publication", async (re
       classifiers_started: 0,
     });
   } catch (error) {
-    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to change all-students Content Hub publication");
+    return aylaSendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Failed to change all-students Content Hub publication",
+      error.code ? {
+        code: error.code,
+        invalid_count: Array.isArray(error.failures) ? error.failures.length : undefined,
+        invalid_mappings: Array.isArray(error.failures) ? error.failures.slice(0, 50) : undefined,
+      } : null,
+    );
   }
 });
 
