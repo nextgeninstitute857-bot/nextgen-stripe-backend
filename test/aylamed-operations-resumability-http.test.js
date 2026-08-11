@@ -114,55 +114,16 @@ test("v217 HTTP flow keeps chunked ZIPs admin-only, resumable, checksummed, and 
     });
     assert.equal(unauthorized.response.status, 401, JSON.stringify(unauthorized.payload));
 
-    const wrongScope = await jsonApi(baseUrl, "/admin/crm/ai-training/content-uploads", {
+    const legacyKeyRejected = await jsonApi(baseUrl, "/admin/crm/ai-training/content-uploads", {
       method: "POST", adminToken: "operations-ayla-admin-token",
       body: {
         original_filename: "questions.zip", total_bytes: bytes.length, sha256: digest,
         purpose: "question_zip", metadata: { source_provider: "AylaMed", source_profile: "aylamed_original", source_rights_status: "owned", source_namespace: "fixture" },
       },
     });
-    assert.equal(wrongScope.response.status, 403, JSON.stringify(wrongScope.payload));
+    assert.equal(legacyKeyRejected.response.status, 401, JSON.stringify(legacyKeyRejected.payload));
 
-    const aylaCreated = await jsonApi(baseUrl, "/admin/crm/ai-training/content-uploads", {
-      method: "POST", adminToken: "operations-ayla-admin-token",
-      body: {
-        original_filename: "media.zip", total_bytes: bytes.length, sha256: digest,
-        purpose: "media_zip", metadata: { source_provider: "AylaMed", source_profile: "aylamed_original", source_rights_status: "owned", source_namespace: "fixture" },
-      },
-    });
-    assert.equal(aylaCreated.response.status, 201, JSON.stringify(aylaCreated.payload));
-    const aylaUploadId = aylaCreated.payload.upload.id;
-    const aylaStatus = await jsonApi(baseUrl, `/admin/crm/ai-training/content-uploads/${aylaUploadId}`, {
-      adminToken: "operations-ayla-admin-token",
-    });
-    assert.equal(aylaStatus.response.status, 200, JSON.stringify(aylaStatus.payload));
-    const aylaPresign = await jsonApi(baseUrl, `/admin/crm/ai-training/content-uploads/${aylaUploadId}/parts/presign`, {
-      method: "POST", adminToken: "operations-ayla-admin-token", body: { indices: [0] },
-    });
-    assert.equal(aylaPresign.response.status, 409, JSON.stringify(aylaPresign.payload));
-    assert.match(aylaPresign.payload.error, /Direct R2 multipart upload is not configured/);
-    const aylaFinalize = await jsonApi(baseUrl, `/admin/crm/ai-training/content-uploads/${aylaUploadId}/finalize`, {
-      method: "POST", adminToken: "operations-ayla-admin-token", body: {},
-    });
-    assert.equal(aylaFinalize.response.status, 409, JSON.stringify(aylaFinalize.payload));
-    assert.match(aylaFinalize.payload.error, /Upload is incomplete/);
-    const aylaBundleUnauthorized = await jsonApi(baseUrl, "/admin/crm/ai-training/content-imports/missing-parent/media-bundle/import-draft", {
-      method: "POST", body: { upload_id: aylaUploadId },
-    });
-    assert.equal(aylaBundleUnauthorized.response.status, 401, JSON.stringify(aylaBundleUnauthorized.payload));
-    const aylaBundleAcceptedAuth = await jsonApi(baseUrl, "/admin/crm/ai-training/content-imports/missing-parent/media-bundle/import-draft", {
-      method: "POST", adminToken: "operations-ayla-admin-token", body: { upload_id: aylaUploadId },
-    });
-    assert.equal(aylaBundleAcceptedAuth.response.status, 503, JSON.stringify(aylaBundleAcceptedAuth.payload));
-    assert.match(aylaBundleAcceptedAuth.payload.error, /Cloudflare R2 is not configured/);
-    const aylaBundlePoll = await jsonApi(baseUrl, "/admin/crm/ai-training/content-media-bundle-imports/missing-bundle", {
-      adminToken: "operations-ayla-admin-token",
-    });
-    assert.equal(aylaBundlePoll.response.status, 404, JSON.stringify(aylaBundlePoll.payload));
-    const aylaCancelled = await jsonApi(baseUrl, `/admin/crm/ai-training/content-uploads/${aylaUploadId}`, {
-      method: "DELETE", adminToken: "operations-ayla-admin-token",
-    });
-    assert.equal(aylaCancelled.response.status, 200, JSON.stringify(aylaCancelled.payload));
+
 
     const login = await jsonApi(baseUrl, "/auth/login", {
       method: "POST", body: { email: "operations-admin@example.com", password },
@@ -207,7 +168,7 @@ test("v217 HTTP flow keeps chunked ZIPs admin-only, resumable, checksummed, and 
     const aylaWrongOwnerBundle = await jsonApi(baseUrl, "/admin/crm/ai-training/content-imports/missing-parent/media-bundle/import-draft", {
       method: "POST", adminToken: "operations-ayla-admin-token", body: { upload_id: session.id },
     });
-    assert.equal(aylaWrongOwnerBundle.response.status, 403, JSON.stringify(aylaWrongOwnerBundle.payload));
+    assert.equal(aylaWrongOwnerBundle.response.status, 401, JSON.stringify(aylaWrongOwnerBundle.payload));
 
     const operations = await jsonApi(baseUrl, "/admin/crm/operations/content-jobs", { token });
     assert.equal(operations.response.status, 200, JSON.stringify(operations.payload));

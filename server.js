@@ -698,7 +698,6 @@ function getCorsRequestHeaders(req) {
   const defaults = [
     "Content-Type",
     "Authorization",
-    "x-admin-token",
     "x-requested-with",
     "X-Requested-With",
     "Accept",
@@ -766,7 +765,6 @@ const corsOptions = {
   allowedHeaders: [
     "Content-Type",
     "Authorization",
-    "x-admin-token",
     "x-requested-with",
     "X-Requested-With",
     "Accept",
@@ -39233,9 +39231,8 @@ app.get("/admin/crm/ai-training/content-registry/questions/:questionId/taxonomy-
   }
 });
 
-// AylaMed's private Resource Intelligence view may be authenticated with either
-// the bootstrap admin JWT or the narrowly scoped AYLA_ADMIN_TOKEN. Keep that
-// access isolated to content taxonomy instead of broadening legacy CRM routes.
+// AylaMed's private Resource Intelligence view uses the same protected
+// administrator email/password session as the rest of the Control Center.
 app.get("/api/ayla/admin/resources/content-taxonomy/coverage", async (req, res) => {
   try {
     await aylaRequireAdmin(req);
@@ -65116,7 +65113,6 @@ const AYLA_QBANK_JOURNAL_PATH = String(
   process.env.AYLA_QBANK_JOURNAL_PATH
     || path.join(DATA_DIR, "aylamed-diagnostic-answers.jsonl"),
 ).trim();
-const AYLA_ADMIN_TOKEN = String(process.env.AYLA_ADMIN_TOKEN || "").trim();
 const AYLA_REQUIRE_STUDENT_AUTH = String(process.env.AYLA_REQUIRE_STUDENT_AUTH || "true").toLowerCase() !== "false";
 
 const DEFAULT_AYLA_SETTINGS = {
@@ -65533,32 +65529,14 @@ function aylaTemplate(value = "", days = 7) {
   return String(value || "").replace(/\{\{\s*days\s*\}\}/gi, String(days));
 }
 
-function aylaAdminTokenFromRequest(req) {
-  return String(req.headers["x-admin-token"] || req.headers["x-ayla-admin-token"] || "").trim();
-}
-
 async function aylaRequireAdmin(req) {
-  const authorization = String(req.headers.authorization || "").trim();
-  if (authorization) {
-    const context = await getAuthenticatedUser(req);
-    if (String(context?.user?.role || "").toLowerCase() !== "admin") {
-      const error = new Error("AylaMed administrator access required");
-      error.statusCode = 403;
-      throw error;
-    }
-    return { configured: true, method: "bootstrap_admin_jwt", user: context.user };
-  }
-
-  const supplied = aylaAdminTokenFromRequest(req);
-  if (AYLA_ADMIN_TOKEN && supplied === AYLA_ADMIN_TOKEN) {
-    return { configured: true, method: "legacy_admin_token" };
-  }
-
-  {
-    const error = new Error("AylaMed admin authentication required");
-    error.statusCode = 401;
+  const context = await getAuthenticatedUser(req);
+  if (String(context?.user?.role || "").toLowerCase() !== "admin") {
+    const error = new Error("AylaMed administrator access required");
+    error.statusCode = 403;
     throw error;
   }
+  return { configured: true, method: "admin_password_session", user: context.user };
 }
 
 function aylaNow() {
@@ -71546,7 +71524,7 @@ app.get("/api/ayla/public-config", async (req, res) => {
 });
 
 app.get("/api/ayla/admin/settings", async (req, res) => {
-  try { await aylaRequireAdmin(req); const db = await readAylaDb(); aylaEnsureSeedData(db); return aylaSendOk(res, { settings: db.aylaSettings, aiUsageSettings: db.aylaAiUsageSettings, admin_auth_configured: Boolean(AYLA_ADMIN_TOKEN), storage: { ayla_db_path: AYLA_DB_PATH, lms_db_path: LIVE_DB_PATH, crm_db_path: CRM_DB_PATH } }); }
+  try { await aylaRequireAdmin(req); const db = await readAylaDb(); aylaEnsureSeedData(db); return aylaSendOk(res, { settings: db.aylaSettings, aiUsageSettings: db.aylaAiUsageSettings, admin_auth_configured: Boolean(normalizeEmail(process.env.BOOTSTRAP_ADMIN_EMAIL) && String(process.env.BOOTSTRAP_ADMIN_PASSWORD || "")), admin_auth_mode: "email_password", storage: { ayla_db_path: AYLA_DB_PATH, lms_db_path: LIVE_DB_PATH, crm_db_path: CRM_DB_PATH } }); }
   catch (error) { return aylaSendError(res, error.statusCode || 500, error.message); }
 });
 

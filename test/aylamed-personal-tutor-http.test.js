@@ -288,7 +288,6 @@ test("authenticated Personal Tutor rebalances only the versioned adaptive roadma
       DATA_DIR: dataDir,
       AYLA_AUTH_JWT_SECRET: "v213-isolated-smoke-secret",
       AUTH_JWT_SECRET: "v213-isolated-lms-secret",
-      AYLA_ADMIN_TOKEN: "v213-isolated-admin",
       NEXTGEN_AUTO_ZOOM_PREP_ENABLED: "false",
       ZOOM_RECORDING_RECOVERY_ENABLED: "false",
       DATABASE_URL: "",

@@ -174,7 +174,7 @@ test("v214 federates progress read-only and keeps social lifecycle inside AylaMe
     env: {
       ...process.env,
       PORT: String(port), DATA_DIR: dataDir,
-      AYLA_AUTH_JWT_SECRET: "v214-ayla-secret", AUTH_JWT_SECRET: "v214-lms-secret", AYLA_ADMIN_TOKEN: "v214-admin",
+      AYLA_AUTH_JWT_SECRET: "v214-ayla-secret", AUTH_JWT_SECRET: "v214-lms-secret",
       NEXTGEN_AUTO_ZOOM_PREP_ENABLED: "false", ZOOM_RECORDING_RECOVERY_ENABLED: "false", NEXTGEN_BILLING_EXPIRY_RUNNER_ENABLED: "false",
       DATABASE_URL: "", OPENAI_API_KEY: "",
     },

@@ -53,7 +53,7 @@ async function api(baseUrl, route, {
     headers: {
       ...(body ? { "content-type": "application/json" } : {}),
       ...(token ? { authorization: `Bearer ${token}` } : {}),
-      ...(adminToken ? { "x-ayla-admin-token": adminToken } : {}),
+      ...(adminToken ? { authorization: `Bearer ${adminToken}` } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
   });
@@ -88,12 +88,28 @@ test("v231 keeps the readiness-share and referral lifecycle governed inside Ayla
   const crmPath = path.join(dataDir, "crm-db.json");
   const aylaPath = path.join(dataDir, "aylamed-db.json");
   const password = "MarketingReferral9!";
-  const adminToken = "v231-isolated-admin";
+  const adminEmail = "marketing-admin@example.com";
+  const adminPassword = "MarketingAdmin9!";
+  let adminToken = "";
   const now = new Date().toISOString();
   const past = new Date(Date.now() - 86_400_000).toISOString();
   const future = new Date(Date.now() + 14 * 86_400_000).toISOString();
   const accessExpiry = new Date(Date.now() + 365 * 86_400_000).toISOString();
-  const liveSentinel = JSON.stringify({ sentinel: "lms-untouched-v231" }, null, 2);
+  const liveSentinel = JSON.stringify({
+    sentinel: "lms-untouched-v231",
+    users: {
+      admin: {
+        id: "admin",
+        email: adminEmail,
+        name: "Marketing Admin",
+        role: "admin",
+        status: "active",
+        ...passwordRecord(adminPassword, "marketingadminmarketingadmin12"),
+        created_at: now,
+        updated_at: now,
+      },
+    },
+  }, null, 2);
   const crmSentinel = JSON.stringify({
     sentinel: "crm-untouched-v231",
     ai_training_documents: [],
@@ -362,7 +378,6 @@ test("v231 keeps the readiness-share and referral lifecycle governed inside Ayla
       ...process.env,
       PORT: String(port),
       DATA_DIR: dataDir,
-      AYLA_ADMIN_TOKEN: adminToken,
       AYLA_AUTH_JWT_SECRET: "v231-ayla-secret",
       AUTH_JWT_SECRET: "v231-lms-secret",
       STRIPE_WEBHOOK_SECRET: "whsec_v231_test",
@@ -379,6 +394,13 @@ test("v231 keeps the readiness-share and referral lifecycle governed inside Ayla
 
   try {
     await waitForHealth(baseUrl, child, output);
+
+    const adminLogin = await api(baseUrl, "/auth/login", {
+      method: "POST",
+      body: { email: adminEmail, password: adminPassword },
+    });
+    assert.equal(adminLogin.response.status, 200, JSON.stringify(adminLogin.payload));
+    adminToken = adminLogin.payload.token;
 
     const unauthorized = await api(baseUrl, "/api/ayla/admin/marketing");
     assert.equal(unauthorized.response.status, 401, JSON.stringify(unauthorized.payload));

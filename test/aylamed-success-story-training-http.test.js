@@ -133,7 +133,7 @@ test("v216 governs success stories in CRM and feeds only approved outcome-free s
     env: {
       ...process.env,
       PORT: String(port), DATA_DIR: dataDir,
-      AUTH_JWT_SECRET: "v216-lms-secret", AYLA_AUTH_JWT_SECRET: "v216-ayla-secret", AYLA_ADMIN_TOKEN: "v216-ayla-admin",
+      AUTH_JWT_SECRET: "v216-lms-secret", AYLA_AUTH_JWT_SECRET: "v216-ayla-secret",
       NEXTGEN_AUTO_ZOOM_PREP_ENABLED: "false", ZOOM_RECORDING_RECOVERY_ENABLED: "false", NEXTGEN_BILLING_EXPIRY_RUNNER_ENABLED: "false",
       DATABASE_URL: "", OPENAI_API_KEY: "",
     },

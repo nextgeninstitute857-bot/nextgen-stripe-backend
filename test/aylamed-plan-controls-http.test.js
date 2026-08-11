@@ -63,7 +63,7 @@ async function api(baseUrl, route, { method = "GET", token = "", adminToken = ""
     headers: {
       ...(body ? { "content-type": "application/json" } : {}),
       ...(token ? { authorization: `Bearer ${token}` } : {}),
-      ...(adminToken ? { "x-ayla-admin-token": adminToken } : {}),
+      ...(adminToken ? { authorization: `Bearer ${adminToken}` } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
   });
@@ -79,12 +79,28 @@ test("v215 applies live plan/demo matrices without rewriting enrollments or lear
   const crmPath = path.join(dataDir, "crm-db.json");
   const aylaPath = path.join(dataDir, "aylamed-db.json");
   const password = "PlanControls9!";
-  const adminToken = "v215-admin-token";
+  const adminEmail = "plan-controls-admin@example.com";
+  const adminPassword = "PlanControlsAdmin9!";
+  let adminToken = "";
   const now = new Date().toISOString();
   const future = new Date(Date.now() + 365 * 86400000).toISOString();
   const demoStart = new Date(Date.now() - 86400000).toISOString();
   const oldDemoExpiry = new Date(Date.now() + 6 * 86400000).toISOString();
-  const liveSentinel = JSON.stringify({ sentinel: "lms-untouched-v215" }, null, 2);
+  const liveSentinel = JSON.stringify({
+    sentinel: "lms-untouched-v215",
+    users: {
+      admin: {
+        id: "admin",
+        email: adminEmail,
+        name: "Plan Controls Admin",
+        role: "admin",
+        status: "active",
+        ...passwordRecord(adminPassword, "plancontrolsadminplancontrols12"),
+        created_at: now,
+        updated_at: now,
+      },
+    },
+  }, null, 2);
   const crmSentinel = JSON.stringify({ sentinel: "crm-untouched-v215", ai_training_documents: [], ai_training_items: [] }, null, 2);
   const aylaDb = {
     schema_version: 9,
@@ -143,7 +159,7 @@ test("v215 applies live plan/demo matrices without rewriting enrollments or lear
     cwd: path.resolve(new URL("..", import.meta.url).pathname),
     env: {
       ...process.env,
-      PORT: String(port), DATA_DIR: dataDir, AYLA_ADMIN_TOKEN: adminToken,
+      PORT: String(port), DATA_DIR: dataDir,
       AYLA_AUTH_JWT_SECRET: "v215-ayla-secret", AUTH_JWT_SECRET: "v215-lms-secret",
       NEXTGEN_AUTO_ZOOM_PREP_ENABLED: "false", ZOOM_RECORDING_RECOVERY_ENABLED: "false", NEXTGEN_BILLING_EXPIRY_RUNNER_ENABLED: "false",
       DATABASE_URL: "", OPENAI_API_KEY: "",
@@ -155,6 +171,10 @@ test("v215 applies live plan/demo matrices without rewriting enrollments or lear
 
   try {
     await waitForHealth(baseUrl, child, output);
+    const adminLogin = await api(baseUrl, "/auth/login", { method: "POST", body: { email: adminEmail, password: adminPassword } });
+    assert.equal(adminLogin.response.status, 200, JSON.stringify(adminLogin.payload));
+    adminToken = adminLogin.payload.token;
+
     const login = await api(baseUrl, "/api/ayla/auth/login", { method: "POST", body: { email: "plans@example.com", password } });
     assert.equal(login.response.status, 200, JSON.stringify(login.payload));
     const token = login.payload.token;
