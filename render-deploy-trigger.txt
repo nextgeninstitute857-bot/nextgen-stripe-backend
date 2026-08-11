@@ -1,4 +1,4 @@
-Render redeploy requested 2026-08-11 to activate backend main at 22c7c58327b6da7b7d0d9a593958ecf8b021b8d8.
+Render redeploy requested 2026-08-12 to activate backend main at 512013c9fff780774259f09a5112e99f3dd85db6.
 No production data migration or schedule apply is associated with this marker.
-Reason: the automatic Render webhook did not start after PR #106 merged.
-Target build: v262-recorded-revision-attendance-preserve.
+Reason: the automatic Render webhook did not start after PR #110 merged.
+Target build: nbme-zero-taxonomy-adapter.
