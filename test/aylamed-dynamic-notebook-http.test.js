@@ -66,9 +66,25 @@ test("isolated HTTP flow captures exact pages and timestamps, is idempotent, and
   const crmPath = path.join(dataDir, "crm-db.json");
   const aylaPath = path.join(dataDir, "aylamed-db.json");
   const password = "NotebookSmoke9!";
+  const adminEmail = "notebook-admin@example.com";
+  const adminPassword = "NotebookAdmin9!";
   const now = "2020-01-01T00:00:00.000Z";
   const future = "2030-07-20T00:00:00.000Z";
-  const liveSentinel = JSON.stringify({ sentinel: "lms-untouched-v212" });
+  const liveSentinel = JSON.stringify({
+    sentinel: "lms-untouched-v212",
+    users: {
+      admin: {
+        id: "admin",
+        email: adminEmail,
+        name: "Notebook Admin",
+        role: "admin",
+        status: "active",
+        ...passwordRecord(adminPassword, "notebookadminnotebookadmin1234"),
+        created_at: now,
+        updated_at: now,
+      },
+    },
+  });
   const crmSentinel = JSON.stringify({ sentinel: "crm-untouched-v212", ai_training_documents: [], ai_training_items: [] });
   const aylaDb = {
     schema_version: 6,
@@ -201,7 +217,6 @@ test("isolated HTTP flow captures exact pages and timestamps, is idempotent, and
       DATA_DIR: dataDir,
       AYLA_AUTH_JWT_SECRET: "v212-isolated-smoke-secret",
       AUTH_JWT_SECRET: "v212-isolated-lms-secret",
-      AYLA_ADMIN_TOKEN: "v212-isolated-admin",
       NEXTGEN_AUTO_ZOOM_PREP_ENABLED: "false",
       ZOOM_RECORDING_RECOVERY_ENABLED: "false",
       DATABASE_URL: "",
@@ -213,6 +228,13 @@ test("isolated HTTP flow captures exact pages and timestamps, is idempotent, and
 
   try {
     await waitForHealth(baseUrl, child, output);
+    const adminLogin = await api(baseUrl, "/auth/login", {
+      method: "POST",
+      body: { email: adminEmail, password: adminPassword },
+    });
+    assert.equal(adminLogin.response.status, 200, JSON.stringify(adminLogin.payload));
+    const adminToken = adminLogin.payload.token;
+
     const login = await api(baseUrl, "/api/ayla/auth/login", {
       method: "POST",
       body: { email: "notebook-smoke@example.com", password },
@@ -292,7 +314,7 @@ test("isolated HTTP flow captures exact pages and timestamps, is idempotent, and
 
     const revoke = await api(baseUrl, "/api/ayla/resources/reading-1", {
       method: "PUT",
-      headers: { "x-ayla-admin-token": "v212-isolated-admin" },
+      token: adminToken,
       body: { status: "disabled" },
     });
     assert.equal(revoke.response.status, 200, JSON.stringify(revoke.payload));
