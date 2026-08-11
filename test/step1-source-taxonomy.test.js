@@ -99,6 +99,24 @@ test("Step 1 source-shaped rows fail closed when native taxonomy IDs are unknown
   assert.ok(validateAdaptedQuestion(row).includes("taxonomy_topic_not_in_step1_ledger"));
 });
 
+test("a zero system ID is a missing source taxonomy placeholder, not a Step 1 ledger ID", () => {
+  const placeholderQuestion = sourceQuestion({ sysId: 0, subId: 1 });
+  const adapter = resolveContentSourceAdapter(
+    { examTrack: "usmle-step-1" },
+    placeholderQuestion,
+    answers,
+  );
+  const row = adaptUniversalQuestion(placeholderQuestion, answers, {
+    examTrack: "usmle-step-1",
+    sourceNamespace: "aylamed-nbme-step-1-complete",
+    collectionKey: "nbme-1-25",
+  });
+  assert.equal(adapter, CONTENT_SOURCE_ADAPTERS.universalSba);
+  assert.equal(row.sourceData.source_adapter, CONTENT_SOURCE_ADAPTERS.universalSba);
+  assert.equal(row.sourceData.taxonomy_import_ready, undefined);
+  assert.deepEqual(validateAdaptedQuestion(row), []);
+});
+
 test("the approved Step 1 ledger contains the complete 11/27/169 hierarchy and 13 disciplines", () => {
   const summary = step1SourceTaxonomyLedgerSummary();
   assert.equal(summary.systems, 11);
