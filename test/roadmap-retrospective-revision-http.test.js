@@ -228,6 +228,10 @@ test("recorded weekend revision is preserved but hidden while Aug 10 and Aug 11 
     },
     attendance: {
       "attendance-aug-10": { id: "attendance-aug-10", course_id: courseId, session_id: "session-aug-10", roadmap_day_id: aug10.id, user_id: "student-1", status: "present" },
+      ...Object.fromEntries(Array.from({ length: 7 }, (_, index) => {
+        const id = `attendance-revision-${index + 1}`;
+        return [id, { id, course_id: courseId, session_id: revisionSessionId, roadmap_day_id: revisionDayId, user_id: `revision-student-${index + 1}`, status: "present" }];
+      })),
     },
     assessments: {},
     assessmentAttempts: { sentinel: { id: "sentinel", user_id: "student-1", score: 80 } },
@@ -294,7 +298,7 @@ test("recorded weekend revision is preserved but hidden while Aug 10 and Aug 11 
     const preview = await api(baseUrl, route, {
       method: "POST",
       token,
-      body: { course_id: courseId, dry_run: true, archive_selected_revision: true },
+      body: { course_id: courseId, dry_run: true, archive_selected_revision: true, preserve_revision_attendance: true },
     });
     assert.equal(preview.response.status, 200, JSON.stringify(preview.payload));
     assert.equal(preview.payload.dry_run, true);
@@ -302,7 +306,8 @@ test("recorded weekend revision is preserved but hidden while Aug 10 and Aug 11 
     assert.equal(preview.payload.selected_revision.session_id, revisionSessionId);
     assert.deepEqual(preview.payload.selected_revision.recording_keys, [revisionRecordingKey]);
     assert.equal(preview.payload.selected_revision.recordings[0].duration, 2);
-    assert.equal(preview.payload.selected_revision.attendance_count, 0);
+    assert.equal(preview.payload.selected_revision.attendance_count, 7);
+    assert.deepEqual(preview.payload.selected_revision.attendance_keys, Array.from({ length: 7 }, (_, index) => `attendance-revision-${index + 1}`));
     assert.equal(await fs.readFile(livePath, "utf8"), beforeBlocked, "Preview must not modify the database");
 
     const rejected = await api(baseUrl, route, {
@@ -312,9 +317,11 @@ test("recorded weekend revision is preserved but hidden while Aug 10 and Aug 11 
         course_id: courseId,
         apply: true,
         archive_selected_revision: true,
+        preserve_revision_attendance: true,
         preview_token: preview.payload.preview_token,
         expected_revision_session_id: revisionSessionId,
         expected_revision_recording_keys: ["wrong-recording-key"],
+        expected_revision_attendance_keys: preview.payload.selected_revision.attendance_keys,
         confirm: "APPLY_RECORDED_REVISION_HOLIDAY",
       },
     });
@@ -328,9 +335,11 @@ test("recorded weekend revision is preserved but hidden while Aug 10 and Aug 11 
         course_id: courseId,
         apply: true,
         archive_selected_revision: true,
+        preserve_revision_attendance: true,
         preview_token: preview.payload.preview_token,
         expected_revision_session_id: revisionSessionId,
         expected_revision_recording_keys: [revisionRecordingKey],
+        expected_revision_attendance_keys: preview.payload.selected_revision.attendance_keys,
         confirm: "APPLY_RECORDED_REVISION_HOLIDAY",
         reason: "August 8 and 9 were weekend non-teaching days; the short August 8 revision does not count as an MSK day.",
       },
@@ -342,6 +351,7 @@ test("recorded weekend revision is preserved but hidden while Aug 10 and Aug 11 
     assert.equal(applied.payload.recordings_deleted, 0);
     assert.equal(applied.payload.notes_deleted, 0);
     assert.equal(applied.payload.sessions_deleted, 0);
+    assert.equal(applied.payload.attendance_deleted, 0);
     assert.equal(applied.payload.students_deleted, 0);
 
     const saved = JSON.parse(await fs.readFile(livePath, "utf8"));
@@ -386,6 +396,9 @@ test("recorded weekend revision is preserved but hidden while Aug 10 and Aug 11 
     assert.ok(saved.notes["session-aug-10"]);
     assert.equal(saved.notes["session-aug-10"].notes, "Preserve the complete real August 10 lecture notes.");
     assert.ok(saved.attendance["attendance-aug-10"]);
+    for (let index = 1; index <= 7; index += 1) {
+      assert.deepEqual(saved.attendance[`attendance-revision-${index}`], liveDb.attendance[`attendance-revision-${index}`]);
+    }
     assert.ok(saved.users.admin);
     assert.ok(saved.enrollments.sentinel);
     assert.ok(saved.payments.sentinel);
