@@ -2,7 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   AYLA_NBME_CONTENT_DESTINATION,
+  AYLA_NBME_STEP1_REVIEWED_RELEASE_FORM_IDS,
   assertAylaNbmeExamPlacement,
+  assertAylaNbmeReviewedReleaseForm,
   buildAylaNbmeFormRecord,
   buildAylaNbmeReadinessSnapshot,
   createAylaNbmeAttempt,
@@ -76,6 +78,32 @@ test("manifest rejects any declared exam that conflicts with the form identity",
   assert.throws(
     () => assertAylaNbmeExamPlacement(parseAylaNbmeCollectionKey("nbme-2-15"), "usmle-step-1"),
     (error) => error.code === "NBME_FORM_EXAM_MISMATCH",
+  );
+});
+
+test("reviewed release accepts only the six complete Step 1 forms", () => {
+  assert.deepEqual(AYLA_NBME_STEP1_REVIEWED_RELEASE_FORM_IDS, [
+    "nbme-step-1-form-25",
+    "nbme-step-1-form-26",
+    "nbme-step-1-form-28",
+    "nbme-step-1-form-30",
+    "nbme-step-1-form-31",
+    "nbme-step-1-form-32",
+  ]);
+  for (const formId of AYLA_NBME_STEP1_REVIEWED_RELEASE_FORM_IDS) {
+    const formNumber = formId.split("-").at(-1);
+    assert.equal(
+      assertAylaNbmeReviewedReleaseForm(formId, `nbme-1-${formNumber}`).formId,
+      formId,
+    );
+  }
+  assert.throws(
+    () => assertAylaNbmeReviewedReleaseForm("nbme-step-1-form-27", "nbme-1-27"),
+    (error) => error.code === "NBME_RELEASE_FORM_NOT_REVIEWED",
+  );
+  assert.throws(
+    () => assertAylaNbmeReviewedReleaseForm("nbme-step-1-form-25", "nbme-1-26"),
+    (error) => error.code === "NBME_RELEASE_FORM_COLLECTION_MISMATCH",
   );
 });
 
