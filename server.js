@@ -1728,6 +1728,8 @@ const DEFAULT_LIVE_DB = {
 
   assessments: {},
   assessmentAttempts: {},
+  // Server-owned in-progress timers. Submitted attempts remain authoritative.
+  assessmentRuns: {},
   flashcards: {},
 
   // v175 adaptive LMS engine: additive only, does not overwrite legacy progress.
@@ -2084,6 +2086,7 @@ function ngMergeLiveDb(parsed = {}) {
       roadmapProgress: parsed.roadmapProgress || {},
       assessments: parsed.assessments || {},
       assessmentAttempts: parsed.assessmentAttempts || {},
+      assessmentRuns: parsed.assessmentRuns || {},
       flashcards: parsed.flashcards || {},
       weakAreaProfiles: parsed.weakAreaProfiles || {},
       weakAreaHistory: parsed.weakAreaHistory || {},
@@ -7666,6 +7669,85 @@ function isAttemptReleased(attempt) {
   return attempt.released_to_student === true || attempt.review_status === "released";
 }
 
+function ngAssessmentDateMillis(value, { endOfDay = false } = {}) {
+  const clean = String(value || "").trim();
+  if (!clean) return null;
+  const normalized = /^\d{4}-\d{2}-\d{2}$/.test(clean)
+    ? `${clean}T${endOfDay ? "23:59:59.999" : "00:00:00.000"}Z`
+    : clean;
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function ngAssessmentTotalDurationMinutes(assessment = {}) {
+  const explicitTotal = Number(assessment.total_duration_minutes || 0);
+  if (explicitTotal > 0) return explicitTotal;
+  const perBlock = Number(assessment.duration_per_block_minutes || 0);
+  const blockCount = Math.max(1, Number(assessment.block_count || 1));
+  if (assessment.block_mode && perBlock > 0) return perBlock * blockCount;
+  return Math.max(0, Number(assessment.duration_minutes || 0));
+}
+
+function ngAssessmentAvailability(assessment = {}, nowMs = Date.now()) {
+  const startsAt = assessment.starts_at || assessment.start_at || assessment.opens_at || null;
+  const dueAt = assessment.due_at || assessment.ends_at || assessment.deadline || null;
+  const startsAtMs = ngAssessmentDateMillis(startsAt);
+  const dueAtMs = ngAssessmentDateMillis(dueAt, { endOfDay: true });
+  if (startsAtMs !== null && nowMs < startsAtMs) {
+    return { available: false, reason: "not_open", starts_at: startsAt, due_at: dueAt };
+  }
+  if (dueAtMs !== null && nowMs > dueAtMs) {
+    return { available: false, reason: "closed", starts_at: startsAt, due_at: dueAt };
+  }
+  return { available: true, reason: "open", starts_at: startsAt, due_at: dueAt };
+}
+
+function ngAssessmentTimingFromRun(run, assessment = {}, nowMs = Date.now()) {
+  if (!run) return null;
+  const expiresAtMs = ngAssessmentDateMillis(run.expires_at);
+  const durationMinutes = Number(run.total_duration_minutes || ngAssessmentTotalDurationMinutes(assessment) || 0);
+  const remainingSeconds = expiresAtMs === null
+    ? null
+    : Math.max(0, Math.ceil((expiresAtMs - nowMs) / 1000));
+  return {
+    run_id: run.id,
+    status: run.status || "in_progress",
+    server_now: new Date(nowMs).toISOString(),
+    started_at: run.started_at || null,
+    expires_at: run.expires_at || null,
+    total_duration_minutes: durationMinutes || null,
+    total_duration_seconds: durationMinutes > 0 ? Math.round(durationMinutes * 60) : null,
+    remaining_seconds: remainingSeconds,
+    time_expired: remainingSeconds === 0,
+  };
+}
+
+function ngEnsureAssessmentRun(db, { assessment, user, nowMs = Date.now() } = {}) {
+  if (!assessment?.id || !user?.id) return { run: null, timing: null, created: false };
+  db.assessmentRuns = db.assessmentRuns || {};
+  const key = assessmentAttemptKey(assessment.id, user.id);
+  let run = db.assessmentRuns[key] || null;
+  let created = false;
+  if (!run) {
+    const durationMinutes = ngAssessmentTotalDurationMinutes(assessment);
+    run = {
+      id: key,
+      assessment_id: assessment.id,
+      course_id: assessment.course_id,
+      user_id: user.id,
+      status: "in_progress",
+      started_at: new Date(nowMs).toISOString(),
+      expires_at: durationMinutes > 0 ? new Date(nowMs + durationMinutes * 60 * 1000).toISOString() : null,
+      total_duration_minutes: durationMinutes || null,
+      created_at: new Date(nowMs).toISOString(),
+      updated_at: new Date(nowMs).toISOString(),
+    };
+    db.assessmentRuns[key] = run;
+    created = true;
+  }
+  return { run, timing: ngAssessmentTimingFromRun(run, assessment, nowMs), created };
+}
+
 function sanitizeAttemptForStudent(attempt) {
   if (!attempt) return null;
   const released = isAttemptReleased(attempt);
@@ -7678,6 +7760,8 @@ function sanitizeAttemptForStudent(attempt) {
     submitted_at: attempt.submitted_at || null,
     auto_release_at: autoReleaseAt,
     auto_released: attempt.auto_released === true,
+    auto_submitted: attempt.auto_submitted === true,
+    submission_reason: attempt.submission_reason || (attempt.auto_submitted === true ? "time_expired" : "student_submitted"),
     review_status: attempt.review_status || (released ? "released" : "pending_review"),
     released_to_student: released,
     admin_feedback: released ? (attempt.admin_feedback || "") : "",
@@ -7748,6 +7832,8 @@ function sanitizeAssessmentForStudent(assessment, attempt = null) {
     attempt_percentage: released ? attempt?.percentage ?? null : null,
     admin_feedback: released ? attempt?.admin_feedback || "" : "",
     submitted_at: attempt?.submitted_at || null,
+    auto_submitted: attempt?.auto_submitted === true,
+    submission_reason: attempt?.submission_reason || (attempt?.auto_submitted === true ? "time_expired" : null),
     auto_release_at: autoReleaseAt,
     auto_released: attempt?.auto_released === true,
   };
@@ -17625,14 +17711,27 @@ app.get("/student/assessments/:assessmentId/take", async (req, res) => {
       limit: 20,
     });
     const repair = ngRepairBaselineAssessmentAnswerKeyIfNeeded(db, assessment);
-    if (repair.changed || autoRelease.changed || autoRoadmapSync.changed) await writeLiveDb(db);
-
     const existingAttempt = db.assessmentAttempts[assessmentAttemptKey(assessment.id, user.id)] || null;
+    let runResult = { run: null, timing: null, created: false };
+
+    if (!existingAttempt) {
+      const availability = ngAssessmentAvailability(assessment);
+      if (!availability.available) {
+        const message = availability.reason === "not_open"
+          ? "This assessment is not open yet."
+          : "The deadline for this assessment has passed.";
+        return res.status(403).json({ success: false, error: message, availability });
+      }
+      runResult = ngEnsureAssessmentRun(db, { assessment, user });
+    }
+
+    if (repair.changed || autoRelease.changed || autoRoadmapSync.changed || runResult.created) await writeLiveDb(db);
 
     res.json({
       success: true,
       assessment: sanitizeAssessmentForTaking(assessment, existingAttempt),
       existing_attempt: existingAttempt ? sanitizeAttemptForStudent(existingAttempt) : null,
+      timing: existingAttempt ? null : runResult.timing,
       auto_release: autoRelease,
       auto_roadmap_sync: autoRoadmapSync,
     });
@@ -17712,6 +17811,23 @@ app.post("/student/assessments/:assessmentId/submit", async (req, res) => {
       });
     }
 
+    db.assessmentRuns = db.assessmentRuns || {};
+    const runKey = assessmentAttemptKey(assessment.id, user.id);
+    let run = db.assessmentRuns[runKey] || null;
+    if (!run) {
+      const availability = ngAssessmentAvailability(assessment);
+      if (!availability.available) {
+        const message = availability.reason === "not_open"
+          ? "This assessment is not open yet."
+          : "The deadline for this assessment has passed.";
+        return res.status(403).json({ success: false, error: message, availability });
+      }
+      run = ngEnsureAssessmentRun(db, { assessment, user }).run;
+    }
+    const timing = ngAssessmentTimingFromRun(run, assessment);
+    const timeExpired = timing?.time_expired === true;
+    const autoSubmitted = Boolean(req.body.auto_submitted) || timeExpired;
+
     const graded = gradeAssessment(assessment, req.body.answers || {});
     const now = new Date().toISOString();
 
@@ -17739,7 +17855,10 @@ app.post("/student/assessments/:assessmentId/submit", async (req, res) => {
       graded_answers: graded.graded,
       submitted_at: now,
       auto_release_at: new Date(new Date(now).getTime() + NEXTGEN_ASSESSMENT_AUTO_RELEASE_MS).toISOString(),
-      auto_submitted: Boolean(req.body.auto_submitted),
+      auto_submitted: autoSubmitted,
+      submission_reason: autoSubmitted ? "time_expired" : "student_submitted",
+      assessment_started_at: run?.started_at || null,
+      assessment_expires_at: run?.expires_at || null,
       review_status: "pending_review",
       released_to_student: false,
       reviewed_by: null,
@@ -17751,6 +17870,13 @@ app.post("/student/assessments/:assessmentId/submit", async (req, res) => {
     };
 
     db.assessmentAttempts[key] = attempt;
+    if (run) {
+      run.status = "submitted";
+      run.submitted_at = now;
+      run.auto_submitted = autoSubmitted;
+      run.submission_reason = attempt.submission_reason;
+      run.updated_at = now;
+    }
 
     ngUpdateWeakAreaProfileFromAttempt(db, { assessment, attempt, user });
 
@@ -17814,8 +17940,11 @@ app.post("/student/assessments/:assessmentId/submit", async (req, res) => {
 
     res.json({
       success: true,
-      message: "Assessment submitted. Your result will release automatically in one minute.",
+      message: autoSubmitted
+        ? "Time is up. Your assessment was submitted automatically, and your result will release automatically in one minute."
+        : "Assessment submitted. Your result will release automatically in one minute.",
       attempt: sanitizeAttemptForStudent(attempt),
+      timing,
       weak_flashcard_sync,
       auto_release_schedule,
     });
@@ -62870,11 +62999,29 @@ async function ngAutoSyncWeakAreaFlashcardsForStudent(db, crmDb, { courseId, use
   return output;
 }
 
-function ngSanitizeFlashcardForStudent(card = {}, reviewedSet = new Set()) {
+function ngFlashcardReviewedOnDate(progress = null, date = todayKey()) {
+  if (!progress?.reviewed_at) return false;
+  return String(progress.reviewed_at).slice(0, 10) === String(date);
+}
+
+function ngFlashcardIsDueForStudent(card = {}, progress = null, date = todayKey()) {
+  if (ngFlashcardReviewedOnDate(progress, date)) return true;
+  const nextReviewDate = String(progress?.next_review_date || progress?.due_date || "").slice(0, 10);
+  if (nextReviewDate) return nextReviewDate <= String(date);
+  const cardDueDate = String(card?.due_date || "").slice(0, 10);
+  return !cardDueDate || cardDueDate <= String(date);
+}
+
+function ngSanitizeFlashcardForStudent(card = {}, reviewedSet = new Set(), progressByCard = new Map()) {
+  const progress = progressByCard.get(String(card.id)) || null;
   return {
     ...card,
     bucket: ngFlashcardBucket(card),
     reviewed: reviewedSet.has(String(card.id)),
+    reviewed_at: progress?.reviewed_at || null,
+    next_review_date: progress?.next_review_date || progress?.due_date || null,
+    review_count: Math.max(0, Number(progress?.review_count || 0)),
+    last_rating: progress?.rating || progress?.confidence || null,
   };
 }
 
@@ -62933,8 +63080,11 @@ function ngStableStudentDailyFlashcardQueue(db, { courseId, userId, date = today
   const max = Math.max(10, Math.min(40, Number(limit || 28)));
   const key = `${courseId}:${userId}:${date}`;
   const previous = db.adaptiveFlashcardQueues[key] || null;
+  const normalizedCurrentSystem = ngNormalizeMasterMapSystemName(currentSystem || "");
+  const previousSystem = ngNormalizeMasterMapSystemName(previous?.current_system || "");
+  const rebuildForSystemChange = Boolean(previous && normalizedCurrentSystem && previousSystem !== normalizedCurrentSystem);
   const byId = new Map(cards.map((card) => [String(card.id), card]));
-  let selected = (Array.isArray(previous?.card_ids) ? previous.card_ids : [])
+  let selected = (rebuildForSystemChange ? [] : (Array.isArray(previous?.card_ids) ? previous.card_ids : []))
     .map((id) => byId.get(String(id)))
     .filter(Boolean)
     .slice(0, max);
@@ -62948,7 +63098,7 @@ function ngStableStudentDailyFlashcardQueue(db, { courseId, userId, date = today
     return Number(a.day_number || 9999) - Number(b.day_number || 9999) || String(b.created_at || "").localeCompare(String(a.created_at || ""));
   });
 
-  if (!previous) {
+  if (!previous || rebuildForSystemChange) {
     selected = ngPickStudentDailyFlashcardQueue(prioritized, { limit: max });
     selectedIds.clear();
     selected.forEach((card) => selectedIds.add(String(card.id)));
@@ -62996,6 +63146,7 @@ function ngStableStudentDailyFlashcardQueue(db, { courseId, userId, date = today
     course_id: courseId,
     user_id: userId,
     queue_date: date,
+    current_system: normalizedCurrentSystem || null,
     card_ids: cardIds,
     limit: max,
     created_at: previous?.created_at || nowIso(),
@@ -63205,30 +63356,32 @@ app.get("/student/flashcards/review", async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req);
     const db = await readLiveDb();
-    const crmDb = await readCrmDb().catch(() => ({}));
     const courseId = String(req.query.course_id || req.query.courseId || "").trim();
     if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
     const access = ngCourseFeatureAccess(db, user, { courseId, featureKey: "flashcards" });
     if (!access.allowed) return ngBlockLockedFeature(res, "flashcards", access.reason);
 
-    const noteSync = await ngAutoSyncPublishedNotesFlashcardsForCourse(db, crmDb, { courseId, actorId: "student_review_opened" });
-    const weakSync = await ngAutoSyncWeakAreaFlashcardsForStudent(db, crmDb, { courseId, user, actorId: "student_review_opened" });
-    const flashcardSyncChanged = Number(noteSync.created || 0) > 0 || Number(weakSync.created || 0) > 0;
+    // Student reads must stay fast. Note publication, assessment submission,
+    // and the admin backfill endpoints already own card generation.
+    const noteSync = { deferred: true, reason: "generation_does_not_block_student_reads" };
+    const weakSync = { deferred: true, reason: "generation_does_not_block_student_reads" };
 
     const today = todayKey();
     const todayDay = ngFindRoadmapDay(db, { courseId });
     const holidayToday = ngIsNoClassRoadmapDay(todayDay || {});
-    const reviewedSet = new Set(Object.values(db.flashcardProgress || {})
-      .filter((p) => String(p.user_id) === String(user.id) && p.reviewed)
+    const progressByCard = new Map(Object.values(db.flashcardProgress || {})
+      .filter((p) => String(p.course_id || "") === courseId && String(p.user_id) === String(user.id))
+      .map((p) => [String(p.flashcard_id), p]));
+    const reviewedSet = new Set(Array.from(progressByCard.values())
+      .filter((p) => ngFlashcardReviewedOnDate(p, today))
       .map((p) => String(p.flashcard_id)));
 
     let cards = Object.values(db.flashcards || {}).filter((card) => {
       if (!card || card.status === "archived" || card.is_published === false) return false;
       if (String(card.course_id || "") !== courseId) return false;
       if (!ngCardMatchesStudent(card, user.id)) return false;
-      if (card.due_date && String(card.due_date) > today) return false;
-      return true;
-    }).map((card) => ngSanitizeFlashcardForStudent(card, reviewedSet));
+      return ngFlashcardIsDueForStudent(card, progressByCard.get(String(card.id)) || null, today);
+    }).map((card) => ngSanitizeFlashcardForStudent(card, reviewedSet, progressByCard));
 
     // Approved registry questions are a supporting premium bank. They are
     // deliberately appended as published_bank cards so the queue policy can
@@ -63236,10 +63389,18 @@ app.get("/student/flashcards/review", async (req, res) => {
     const examTrack = ngCourseExamTrack(db, user, courseId);
     if (examTrack !== "unknown" && flashcardCapabilities("lms").qbankSource) {
       const registryQuestions = await listContentRegistryFlashcardQuestions({ examTrack, limit: 40, offset: 0 });
-      cards.push(...registryQuestions.map((question) => registryQuestionToFlashcard(question, {
-        courseId,
-        reviewed: reviewedSet.has(contentRegistryFlashcardId(question.id)),
-      })));
+      cards.push(...registryQuestions.map((question) => {
+        const id = contentRegistryFlashcardId(question.id);
+        const progress = progressByCard.get(id) || null;
+        if (!ngFlashcardIsDueForStudent({}, progress, today)) return null;
+        return {
+          ...registryQuestionToFlashcard(question, { courseId, reviewed: reviewedSet.has(id) }),
+          reviewed_at: progress?.reviewed_at || null,
+          next_review_date: progress?.next_review_date || progress?.due_date || null,
+          review_count: Math.max(0, Number(progress?.review_count || 0)),
+          last_rating: progress?.rating || progress?.confidence || null,
+        };
+      }).filter(Boolean));
     }
 
     cards.sort((a, b) => {
@@ -63264,7 +63425,7 @@ app.get("/student/flashcards/review", async (req, res) => {
       currentSystem: String(todayDay?.system || todayDay?.current_system || todayDay?.topic || ""),
     });
     const queueCards = stableQueue.cards;
-    if (flashcardSyncChanged || stableQueue.changed) await writeLiveDb(db);
+    if (stableQueue.changed) await writeLiveDb(db);
     const sections = ngBuildStudentFlashcardSections(queueCards);
     const reviewedCount = queueCards.filter((card) => card.reviewed).length;
     const totalReviewedCount = availableCards.filter((card) => card.reviewed).length;
@@ -63327,12 +63488,17 @@ app.get("/flashcards", async (req, res) => {
     if (req.query.scope) cards = cards.filter((card) => String(card.scope || "daily_topic") === String(req.query.scope));
     if (req.query.system) cards = cards.filter((card) => ngNormalizeMasterMapSystemName(card.system || card.topic || "") === ngNormalizeMasterMapSystemName(req.query.system));
     if (req.query.topic) cards = cards.filter((card) => String(card.topic || card.system || "").toLowerCase().includes(String(req.query.topic).toLowerCase()));
+    const today = todayKey();
+    const progressByCard = new Map(Object.values(db.flashcardProgress || {})
+      .filter((p) => String(p.course_id || "") === courseId && String(p.user_id) === String(user.id))
+      .map((p) => [String(p.flashcard_id), p]));
     if (req.query.due === "true") {
-      const today = todayKey();
-      cards = cards.filter((card) => !card.due_date || String(card.due_date) <= today);
+      cards = cards.filter((card) => ngFlashcardIsDueForStudent(card, progressByCard.get(String(card.id)) || null, today));
     }
-    const reviewed = new Set(Object.values(db.flashcardProgress || {}).filter((p) => String(p.user_id) === String(user.id) && p.reviewed).map((p) => String(p.flashcard_id)));
-    cards = cards.map((card) => ({ ...card, reviewed: reviewed.has(String(card.id)) }));
+    const reviewed = new Set(Array.from(progressByCard.values())
+      .filter((p) => ngFlashcardReviewedOnDate(p, today))
+      .map((p) => String(p.flashcard_id)));
+    cards = cards.map((card) => ngSanitizeFlashcardForStudent(card, reviewed, progressByCard));
     cards.sort((a, b) => Number(a.day_number || 0) - Number(b.day_number || 0));
     res.json({ success: true, count: cards.length, flashcards: cards });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
