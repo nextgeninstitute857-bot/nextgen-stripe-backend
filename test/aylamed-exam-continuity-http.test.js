@@ -73,11 +73,26 @@ test("isolated continuity flow requires target entitlement and baseline, prefill
   const crmPath = path.join(dataDir, "crm-db.json");
   const aylaPath = path.join(dataDir, "aylamed-db.json");
   const password = "ContinuitySmoke9!";
-  const adminToken = "continuity-isolated-admin";
+  const adminEmail = "continuity-admin@example.com";
+  const adminPassword = "ContinuityAdmin9!";
   const now = new Date().toISOString();
   const future = new Date(Date.now() + 365 * 86400000).toISOString();
   const examDate = new Date(Date.now() + 180 * 86400000).toISOString().slice(0, 10);
-  const liveSentinel = JSON.stringify({ sentinel: "lms-untouched-continuity" });
+  const liveSentinel = JSON.stringify({
+    sentinel: "lms-untouched-continuity",
+    users: {
+      admin: {
+        id: "admin",
+        email: adminEmail,
+        name: "Continuity Admin",
+        role: "admin",
+        status: "active",
+        ...passwordRecord(adminPassword, "continuityadmincontinuityadmin12"),
+        created_at: now,
+        updated_at: now,
+      },
+    },
+  });
   const crmSentinel = JSON.stringify({
     sentinel: "crm-untouched-continuity",
     ai_training_documents: [],
@@ -212,7 +227,6 @@ test("isolated continuity flow requires target entitlement and baseline, prefill
       DATA_DIR: dataDir,
       AYLA_AUTH_JWT_SECRET: "continuity-isolated-ayla-secret",
       AUTH_JWT_SECRET: "continuity-isolated-lms-secret",
-      AYLA_ADMIN_TOKEN: adminToken,
       AYLA_CONTINUITY_EMAIL_DELIVERY_ENABLED: "false",
       AYLA_CONTINUITY_EMAIL_RUNNER_ENABLED: "false",
       NEXTGEN_AUTO_ZOOM_PREP_ENABLED: "false",
@@ -232,6 +246,13 @@ test("isolated continuity flow requires target entitlement and baseline, prefill
 
   try {
     await waitForHealth(baseUrl, child, output);
+    const adminLogin = await api(baseUrl, "/auth/login", {
+      method: "POST",
+      body: { email: adminEmail, password: adminPassword },
+    });
+    assert.equal(adminLogin.response.status, 200, JSON.stringify(adminLogin.payload));
+    const adminToken = adminLogin.payload.token;
+
     const login = await api(baseUrl, "/api/ayla/auth/login", {
       method: "POST",
       body: { email: "continuity-smoke@example.com", password },
@@ -312,7 +333,7 @@ test("isolated continuity flow requires target entitlement and baseline, prefill
     const preview = await api(
       baseUrl,
       "/api/ayla/admin/continuity/engagement-preview?studentId=step1-student",
-      { headers: { "x-admin-token": adminToken } },
+      { token: adminToken },
     );
     assert.equal(preview.response.status, 200, JSON.stringify(preview.payload));
     assert.equal(preview.payload.read_only, true);
@@ -322,7 +343,7 @@ test("isolated continuity flow requires target entitlement and baseline, prefill
 
     const blockedSend = await api(baseUrl, "/api/ayla/admin/continuity/engagement-delivery", {
       method: "POST",
-      headers: { "x-admin-token": adminToken },
+      token: adminToken,
       body: {
         dry_run: false,
         confirm: "SEND_ELIGIBLE_CONTINUITY_EMAILS",
