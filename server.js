@@ -482,6 +482,7 @@ const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
 const ROADMAP_EXTENSION_BUILD = "v221-system-aware-roadmap-extension";
+const ROADMAP_RETROSPECTIVE_REVISION_BUILD = "v261-recorded-revision-holiday-shift";
 const RECORDING_ASSIGNMENT_BUILD = "v222-safe-recording-detach";
 const RECORDING_DUPLICATE_CLEANUP_BUILD = "v223-safe-recording-duplicate-cleanup";
 const RECORDING_LABEL_CORRECTIONS_BUILD = LMS_RECORDING_LABEL_CORRECTIONS_BUILD;
@@ -11186,6 +11187,7 @@ app.get("/health", async (req, res) => {
     aylamed_private_pilot_content_activation: aylaPrivatePilotContentActivationState,
     memory_stability_build: MEMORY_STABILITY_BUILD,
     roadmap_extension_build: ROADMAP_EXTENSION_BUILD,
+    roadmap_retrospective_revision_build: ROADMAP_RETROSPECTIVE_REVISION_BUILD,
     recording_assignment_build: RECORDING_ASSIGNMENT_BUILD,
     recording_duplicate_cleanup_build: RECORDING_DUPLICATE_CLEANUP_BUILD,
     recording_label_corrections_build: RECORDING_LABEL_CORRECTIONS_BUILD,
@@ -61181,8 +61183,48 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
 
     const selectedSessionId = String(sourceRef.day.live_session_id || sourceRef.day.session_id || "").trim();
     const selectedSession = selectedSessionId ? sourceDb.liveSessions?.[selectedSessionId] : null;
-    if (selectedSession && ngKnownScheduleSessionHasRecording(sourceDb, selectedSession)) {
-      return res.status(409).json({ success: false, error: "Safety stop: the selected no-class date has a recording or transcript", session_id: selectedSessionId });
+    const selectedHasRecording = Boolean(selectedSession && ngKnownScheduleSessionHasRecording(sourceDb, selectedSession));
+    const archiveSelectedRevision = req.body.archive_selected_revision === true;
+    const selectedRecordingEntries = Object.entries(sourceDb.recordings || {}).filter(([storageKey, recording]) => {
+      if (!recording || !selectedSessionId) return false;
+      if (String(recording.session_id || "").trim() === selectedSessionId) return true;
+      const sessionRecordingKeys = [selectedSession?.recording_key, selectedSession?.recording_id]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean);
+      return sessionRecordingKeys.includes(String(recording.recording_key || recording.id || storageKey || "").trim());
+    });
+    const selectedRecordingKeys = selectedRecordingEntries
+      .map(([storageKey, recording]) => String(recording.recording_key || recording.id || storageKey || "").trim())
+      .filter(Boolean)
+      .sort();
+    const selectedAttendanceCount = Object.values(sourceDb.attendance || {}).filter((attendance) => {
+      return String(attendance?.session_id || attendance?.live_session_id || "").trim() === selectedSessionId;
+    }).length;
+    const selectedNoteRows = Object.entries(sourceDb.notes || {}).filter(([noteKey, note]) => {
+      return String(note?.session_id || noteKey || "").trim() === selectedSessionId;
+    });
+    const selectedHasSubstantiveNotes = selectedNoteRows.some(([, note]) => {
+      const content = String(note?.notes || note?.cleaned_notes || note?.student_notes || note?.transcript_text || "").trim();
+      return content.length >= 300 || note?.published === true || note?.is_published === true;
+    });
+
+    if (selectedHasRecording && !archiveSelectedRevision) {
+      return res.status(409).json({
+        success: false,
+        error: "Safety stop: the selected no-class date has a recording or transcript",
+        session_id: selectedSessionId,
+        revision_override_available: true,
+        message: "Preview again with archive_selected_revision=true only when this was a non-teaching revision recording. The source recording will be preserved and hidden, not deleted.",
+      });
+    }
+    if (selectedHasRecording && archiveSelectedRevision && !selectedRecordingKeys.length) {
+      return res.status(409).json({ success: false, error: "The selected session has a recording reference but no exact stored recording row was found; nothing was changed", session_id: selectedSessionId });
+    }
+    if (selectedHasRecording && archiveSelectedRevision && selectedHasSubstantiveNotes) {
+      return res.status(409).json({ success: false, error: "Safety stop: the selected revision session has substantive or published notes", session_id: selectedSessionId });
+    }
+    if (selectedHasRecording && archiveSelectedRevision && selectedAttendanceCount > 0) {
+      return res.status(409).json({ success: false, error: "Safety stop: the selected revision session has attendance records", session_id: selectedSessionId, attendance_count: selectedAttendanceCount });
     }
 
     const activeTail = sourceRef.roadmap.days.slice(sourceRef.index).filter((day) => !ngRoadmapDayIsNoClass(day));
@@ -61216,7 +61258,24 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
         recording_anchor: Boolean(session && ngKnownScheduleSessionHasRecording(sourceDb, session)),
       };
     });
-    const snapshotInput = JSON.stringify({ courseId, selected: String(sourceRef.day.id), updated: sourceRef.roadmap.updated_at || "", anchors });
+    const selectedRevisionSnapshot = selectedHasRecording && archiveSelectedRevision
+      ? {
+          session_id: selectedSessionId,
+          recording_keys: selectedRecordingKeys,
+          recordings: selectedRecordingEntries.map(([storageKey, recording]) => ({
+            storage_key: storageKey,
+            recording_key: String(recording.recording_key || recording.id || storageKey || ""),
+            meeting_id: String(recording.meeting_id || ""),
+            start_time: String(recording.start_time || ""),
+            duration: recording.duration ?? null,
+            published: recording.published === true,
+            recording_url: String(recording.recording_url || ""),
+            share_url: String(recording.share_url || ""),
+            transcript_url: String(recording.transcript_url || ""),
+          })),
+        }
+      : null;
+    const snapshotInput = JSON.stringify({ courseId, selected: String(sourceRef.day.id), updated: sourceRef.roadmap.updated_at || "", anchors, selectedRevisionSnapshot });
     const previewToken = crypto.createHash("sha256").update(snapshotInput).digest("hex");
     const lastDate = anchors.at(-1)?.date;
     const nextDate = (() => {
@@ -61235,18 +61294,54 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
     changes.push({ date: nextDate, day_id: "new_tail_day", session_id: "new_tail_session", recording_preserved_on_date: false, from_title: null, to_title: activeTail.at(-1)?.title || null });
 
     const dryRun = req.body.dry_run !== false && req.body.apply !== true;
+    const confirmationRequired = selectedRevisionSnapshot
+      ? "APPLY_RECORDED_REVISION_HOLIDAY"
+      : "APPLY_RECORDING_SAFE_HOLIDAY";
     if (dryRun) return res.json({
-      success: true, dry_run: true, applied: false, course_id: courseId, selected_date: selectedDate,
-      preview_token: previewToken, confirmation_required: "APPLY_RECORDING_SAFE_HOLIDAY",
+      success: true, dry_run: true, applied: false, build: ROADMAP_RETROSPECTIVE_REVISION_BUILD, course_id: courseId, selected_date: selectedDate,
+      preview_token: previewToken, confirmation_required: confirmationRequired,
       affected_existing_days: activeTail.length, recording_anchors_preserved: anchors.filter((row) => row.recording_anchor).length,
+      selected_revision: selectedRevisionSnapshot ? {
+        session_id: selectedSessionId,
+        recording_keys: selectedRecordingKeys,
+        recordings: selectedRevisionSnapshot.recordings.map((recording) => ({
+          recording_key: recording.recording_key,
+          meeting_id: recording.meeting_id,
+          start_time: recording.start_time,
+          duration: recording.duration,
+          published: recording.published,
+        })),
+        attendance_count: selectedAttendanceCount,
+        note_rows: selectedNoteRows.length,
+        action: "Preserve the source rows and URLs, unpublish/hide the revision recording, and archive the non-teaching session from student views.",
+      } : null,
       new_final_date: nextDate, changes,
-      message: "Preview only. No data changed. Recordings, transcripts, notes, session IDs, URLs and actual class dates remain fixed.",
+      message: selectedRevisionSnapshot
+        ? "Preview only. No data changed. The non-teaching revision will be hidden without deletion; later academic packets will move forward while dates, recording URLs and existing session IDs remain fixed."
+        : "Preview only. No data changed. Recordings, transcripts, notes, session IDs, URLs and actual class dates remain fixed.",
     });
-    if (String(req.body.confirm || "").trim().toUpperCase() !== "APPLY_RECORDING_SAFE_HOLIDAY") {
-      return res.status(400).json({ success: false, error: "Exact confirmation is required: APPLY_RECORDING_SAFE_HOLIDAY" });
+    if (String(req.body.confirm || "").trim().toUpperCase() !== confirmationRequired) {
+      return res.status(400).json({ success: false, error: `Exact confirmation is required: ${confirmationRequired}` });
     }
     if (String(req.body.preview_token || "") !== previewToken) {
       return res.status(409).json({ success: false, error: "Roadmap changed after preview. Generate a fresh preview before applying." });
+    }
+    if (selectedRevisionSnapshot) {
+      const expectedRevisionSessionId = String(req.body.expected_revision_session_id || "").trim();
+      const expectedRevisionRecordingKeys = (Array.isArray(req.body.expected_revision_recording_keys)
+        ? req.body.expected_revision_recording_keys
+        : [])
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+        .sort();
+      if (expectedRevisionSessionId !== selectedSessionId || JSON.stringify(expectedRevisionRecordingKeys) !== JSON.stringify(selectedRecordingKeys)) {
+        return res.status(409).json({
+          success: false,
+          error: "The revision session or recording set does not exactly match the preview; nothing was changed",
+          actual_revision_session_id: selectedSessionId,
+          actual_revision_recording_keys: selectedRecordingKeys,
+        });
+      }
     }
 
     const workingDb = clone(sourceDb);
@@ -61256,6 +61351,34 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
     const packets = workingTail.map(packetOf);
     const recordingBefore = Object.fromEntries(Object.entries(sourceDb.recordings || {}).map(([id, recording]) => [id, protectedIdentityAndUrls(recording)]));
     const sessionBefore = Object.fromEntries(Object.entries(sourceDb.liveSessions || {}).map(([id, session]) => [id, protectedIdentityAndUrls(session)]));
+
+    if (selectedRevisionSnapshot) {
+      const revisionSession = workingDb.liveSessions?.[selectedSessionId];
+      if (!revisionSession) {
+        return res.status(409).json({ success: false, error: "Revision session disappeared after preview. Nothing was saved." });
+      }
+      revisionSession.archived_from_active = true;
+      revisionSession.no_class_placeholder = true;
+      revisionSession.student_visible = false;
+      revisionSession.cancelled_reason = "weekend_revision_not_a_teaching_day";
+      revisionSession.revision_only = true;
+      revisionSession.updated_by = user.id;
+      revisionSession.updated_at = new Date().toISOString();
+
+      for (const [storageKey] of selectedRecordingEntries) {
+        const revisionRecording = workingDb.recordings?.[storageKey];
+        if (!revisionRecording) {
+          return res.status(409).json({ success: false, error: `Revision recording ${storageKey} disappeared after preview. Nothing was saved.` });
+        }
+        revisionRecording.published = false;
+        revisionRecording.hidden_from_recordings = true;
+        revisionRecording.auto_publish_disabled = true;
+        revisionRecording.revision_only = true;
+        revisionRecording.unpublished_at = revisionRecording.unpublished_at || new Date().toISOString();
+        revisionRecording.updated_by = user.id;
+        revisionRecording.updated_at = new Date().toISOString();
+      }
+    }
 
     const holidayDay = ngClearNoClassRoadmapFields(ref.day);
     Object.assign(holidayDay, {
@@ -61299,8 +61422,10 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
     workingDb.roadmaps[ref.courseId] = roadmap;
     await writeLiveDb(workingDb);
     return res.json({
-      success: true, dry_run: false, applied: true, course_id: courseId, selected_date: selectedDate,
+      success: true, dry_run: false, applied: true, build: ROADMAP_RETROSPECTIVE_REVISION_BUILD, course_id: courseId, selected_date: selectedDate,
       affected_existing_days: workingTail.length, recording_anchors_preserved: anchors.filter((row) => row.recording_anchor).length,
+      revision_recordings_hidden: selectedRevisionSnapshot ? selectedRecordingKeys.length : 0,
+      revision_session_archived: selectedRevisionSnapshot ? selectedSessionId : null,
       recordings_deleted: 0, notes_deleted: 0, sessions_deleted: 0, students_deleted: 0, new_final_date: nextDate,
       message: "Retrospective holiday applied. Academic packets moved forward while recordings, transcripts, notes, existing session IDs, URLs and actual class dates remained fixed.",
     });
