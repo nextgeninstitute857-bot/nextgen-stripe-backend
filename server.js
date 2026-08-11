@@ -482,7 +482,7 @@ const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
 const ROADMAP_EXTENSION_BUILD = "v221-system-aware-roadmap-extension";
-const ROADMAP_RETROSPECTIVE_REVISION_BUILD = "v261-recorded-revision-holiday-shift";
+const ROADMAP_RETROSPECTIVE_REVISION_BUILD = "v262-recorded-revision-attendance-preserve";
 const RECORDING_ASSIGNMENT_BUILD = "v222-safe-recording-detach";
 const RECORDING_DUPLICATE_CLEANUP_BUILD = "v223-safe-recording-duplicate-cleanup";
 const RECORDING_LABEL_CORRECTIONS_BUILD = LMS_RECORDING_LABEL_CORRECTIONS_BUILD;
@@ -61194,9 +61194,11 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
       .map(([storageKey, recording]) => String(recording.recording_key || recording.id || storageKey || "").trim())
       .filter(Boolean)
       .sort();
-    const selectedAttendanceCount = Object.values(sourceDb.attendance || {}).filter((attendance) => {
+    const selectedAttendanceEntries = Object.entries(sourceDb.attendance || {}).filter(([, attendance]) => {
       return String(attendance?.session_id || attendance?.live_session_id || "").trim() === selectedSessionId;
-    }).length;
+    });
+    const selectedAttendanceKeys = selectedAttendanceEntries.map(([key]) => String(key)).sort();
+    const selectedAttendanceCount = selectedAttendanceEntries.length;
     const selectedNoteRows = Object.entries(sourceDb.notes || {}).filter(([noteKey, note]) => {
       return String(note?.session_id || noteKey || "").trim() === selectedSessionId;
     });
@@ -61220,8 +61222,15 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
     if (selectedHasRecording && archiveSelectedRevision && selectedHasSubstantiveNotes) {
       return res.status(409).json({ success: false, error: "Safety stop: the selected revision session has substantive or published notes", session_id: selectedSessionId });
     }
-    if (selectedHasRecording && archiveSelectedRevision && selectedAttendanceCount > 0) {
-      return res.status(409).json({ success: false, error: "Safety stop: the selected revision session has attendance records", session_id: selectedSessionId, attendance_count: selectedAttendanceCount });
+    if (selectedHasRecording && archiveSelectedRevision && selectedAttendanceCount > 0 && req.body.preserve_revision_attendance !== true) {
+      return res.status(409).json({
+        success: false,
+        error: "Safety stop: the selected revision session has attendance records",
+        session_id: selectedSessionId,
+        attendance_count: selectedAttendanceCount,
+        attendance_preservation_available: true,
+        message: "Preview again with preserve_revision_attendance=true. Attendance rows will remain unchanged and must match exactly at apply time.",
+      });
     }
 
     const activeTail = sourceRef.roadmap.days.slice(sourceRef.index).filter((day) => !ngRoadmapDayIsNoClass(day));
@@ -61272,7 +61281,7 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
           })),
         }
       : null;
-    const snapshotInput = JSON.stringify({ courseId, selected: String(sourceRef.day.id), updated: sourceRef.roadmap.updated_at || "", anchors, selectedRevisionSnapshot });
+    const snapshotInput = JSON.stringify({ courseId, selected: String(sourceRef.day.id), updated: sourceRef.roadmap.updated_at || "", anchors, selectedRevisionSnapshot, selectedAttendanceKeys });
     const previewToken = crypto.createHash("sha256").update(snapshotInput).digest("hex");
     const lastDate = anchors.at(-1)?.date;
     const nextDate = (() => {
@@ -61309,8 +61318,9 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
           published: recording.published,
         })),
         attendance_count: selectedAttendanceCount,
+        attendance_keys: selectedAttendanceKeys,
         note_rows: selectedNoteRows.length,
-        action: "Preserve the source rows and URLs, unpublish/hide the revision recording, and archive the non-teaching session from student views.",
+        action: "Preserve the source rows, URLs and attendance, unpublish/hide the revision recording, and archive the non-teaching session from student views.",
       } : null,
       new_final_date: nextDate, changes,
       message: selectedRevisionSnapshot
@@ -61339,6 +61349,23 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
           actual_revision_recording_keys: selectedRecordingKeys,
         });
       }
+      const expectedRevisionAttendanceKeys = (Array.isArray(req.body.expected_revision_attendance_keys)
+        ? req.body.expected_revision_attendance_keys
+        : [])
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+        .sort();
+      if (
+        selectedAttendanceCount > 0 &&
+        (req.body.preserve_revision_attendance !== true || JSON.stringify(expectedRevisionAttendanceKeys) !== JSON.stringify(selectedAttendanceKeys))
+      ) {
+        return res.status(409).json({
+          success: false,
+          error: "The revision attendance set does not exactly match the preview; nothing was changed",
+          actual_revision_attendance_count: selectedAttendanceCount,
+          actual_revision_attendance_keys: selectedAttendanceKeys,
+        });
+      }
     }
 
     const workingDb = clone(sourceDb);
@@ -61348,6 +61375,7 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
     const packets = workingTail.map(packetOf);
     const recordingBefore = Object.fromEntries(Object.entries(sourceDb.recordings || {}).map(([id, recording]) => [id, protectedIdentityAndUrls(recording)]));
     const sessionBefore = Object.fromEntries(Object.entries(sourceDb.liveSessions || {}).map(([id, session]) => [id, protectedIdentityAndUrls(session)]));
+    const selectedAttendanceBefore = Object.fromEntries(selectedAttendanceEntries.map(([key, attendance]) => [key, clone(attendance)]));
 
     if (selectedRevisionSnapshot) {
       const revisionSession = workingDb.liveSessions?.[selectedSessionId];
@@ -61413,6 +61441,11 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
         return res.status(409).json({ success: false, error: `Safety stop: recorded session anchor changed for ${row.session_id}. Nothing was saved.` });
       }
     }
+    for (const [key, before] of Object.entries(selectedAttendanceBefore)) {
+      if (!workingDb.attendance?.[key] || !protectedSnapshotsEqual(before, workingDb.attendance[key])) {
+        return res.status(409).json({ success: false, error: `Safety stop: revision attendance changed for ${key}. Nothing was saved.` });
+      }
+    }
 
     roadmap.updated_by = user.id;
     roadmap.updated_at = new Date().toISOString();
@@ -61423,7 +61456,7 @@ app.post("/admin/roadmap/:dayId/retrospective-holiday", async (req, res) => {
       affected_existing_days: workingTail.length, recording_anchors_preserved: anchors.filter((row) => row.recording_anchor).length,
       revision_recordings_hidden: selectedRevisionSnapshot ? selectedRecordingKeys.length : 0,
       revision_session_archived: selectedRevisionSnapshot ? selectedSessionId : null,
-      recordings_deleted: 0, notes_deleted: 0, sessions_deleted: 0, students_deleted: 0, new_final_date: nextDate,
+      recordings_deleted: 0, notes_deleted: 0, sessions_deleted: 0, attendance_deleted: 0, students_deleted: 0, new_final_date: nextDate,
       message: "Retrospective holiday applied. Academic packets moved forward while recordings, transcripts, notes, existing session IDs, URLs and actual class dates remained fixed.",
     });
   } catch (error) {
