@@ -204,6 +204,7 @@ import {
   resolveAylaVimeoDelivery,
   summarizeAylaVimeoDeliveryControls,
 } from "./lib/aylamed-vimeo-delivery-controls.js";
+import { canonicalAylaVimeoSystem } from "./lib/aylamed-vimeo-system-normalization.js";
 import {
   aylaLibraryStudentTitle,
   aylaLibraryStudentPageRange,
@@ -78385,9 +78386,13 @@ function aylaVimeoCatalogAllowedDomains() {
   return configured.length ? [...new Set(configured)].slice(0, 100) : [...DEFAULT_VIMEO_MEDICAL_SOURCE_DOMAINS];
 }
 
-function aylaVimeoCanonicalSystem(examTrackId, value = "") {
-  const wanted = aylaV189SystemKey(value);
-  return (AYLA_EXAM_REGISTRY[examTrackId]?.systems || []).find((system) => aylaV189SystemKey(system) === wanted) || "";
+function aylaVimeoCanonicalSystem(examTrackId, value = "", subsystem = "") {
+  return canonicalAylaVimeoSystem({
+    examTrackId,
+    system: value,
+    subsystem,
+    allowedSystems: AYLA_EXAM_REGISTRY[examTrackId]?.systems || [],
+  });
 }
 
 async function aylaVimeoCatalogTaxonomy(examTrackId) {
@@ -80866,7 +80871,11 @@ app.post("/api/ayla/admin/resources/vimeo-catalog/global-publication", async (re
             overrides: { resourceId, ownerStudentId: "", accessScope: "all_students" },
             actor,
           });
-          const canonicalSystem = aylaVimeoCanonicalSystem(approved.resource.examTrackId, approved.resource.system);
+          const canonicalSystem = aylaVimeoCanonicalSystem(
+            approved.resource.examTrackId,
+            approved.resource.system,
+            approved.resource.subsystem,
+          );
           if (!canonicalSystem) {
             throw Object.assign(new Error(`Invalid system mapping for Vimeo ${vimeoId}`), { statusCode: 400 });
           }
@@ -81231,7 +81240,11 @@ app.post("/api/ayla/admin/resources/vimeo-catalog/folder-publication", async (re
             overrides: { resourceId, ownerStudentId: target.student.id },
             actor,
           });
-          const canonicalSystem = aylaVimeoCanonicalSystem(approved.resource.examTrackId, approved.resource.system);
+          const canonicalSystem = aylaVimeoCanonicalSystem(
+            approved.resource.examTrackId,
+            approved.resource.system,
+            approved.resource.subsystem,
+          );
           if (!canonicalSystem) throw Object.assign(new Error(`Invalid system mapping for Vimeo ${draft.vimeoId}`), { statusCode: 400 });
           approved.resource.system = canonicalSystem;
           const existing = aylaGetItem(db, "aylaResources", resourceId) || {};
@@ -81319,7 +81332,11 @@ app.post("/api/ayla/admin/resources/vimeo-catalog/review", async (req, res) => {
           overrides: item.overrides || {},
           actor,
         });
-        const canonicalSystem = aylaVimeoCanonicalSystem(approved.resource.examTrackId, approved.resource.system);
+        const canonicalSystem = aylaVimeoCanonicalSystem(
+          approved.resource.examTrackId,
+          approved.resource.system,
+          approved.resource.subsystem,
+        );
         if (!canonicalSystem) {
           const error = new Error(`Approved system must match the ${AYLA_EXAM_REGISTRY[approved.resource.examTrackId]?.label || "exam"} taxonomy`);
           error.statusCode = 400;
