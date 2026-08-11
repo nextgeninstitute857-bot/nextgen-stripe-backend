@@ -222,7 +222,12 @@ test('owner-controlled all-students testing release is explicit, reversible, and
   assert.match(server, /testing_phase_release: testingPhaseRelease/);
   assert.match(postgres, /testingPhaseRelease = false/);
   assert.match(postgres, /AYLAMED_TESTING_RELEASE_GATE_BLOCKED/);
-  assert.match(postgres, /answer_shape_ready_count/);
+  assert.match(postgres, /testing_answer_shape_ready_count/);
+  assert.match(postgres, /five_answer_shape_ready_count/);
+  assert.match(postgres, /COUNT\(\*\) FROM content_answers answer WHERE answer\.question_id=collection_questions\.id\)>=2/);
+  assert.match(postgres, /at least two answer choices, and exactly one correct answer/);
+  assert.match(postgres, /native_answer_shape_ready_count/);
+  assert.match(postgres, /\)=5/);
   assert.match(postgres, /taxonomy_complete_count/);
   assert.match(postgres, /publishAllRequested && testingPhaseRelease !== true/);
   assert.match(postgres, /if \(unpublishAllRequested && effectiveDestinationRows/);
