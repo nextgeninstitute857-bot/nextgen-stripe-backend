@@ -71516,6 +71516,7 @@ function aylaGlobalTestingAccessState(db) {
   const control = db.aylaSettings?.global_testing_access || {};
   const students = aylaValues(db, "aylaStudents")
     .filter((row) => !["disabled", "deleted", "archived"].includes(String(row.status || "active").toLowerCase()));
+  const testingBooks = aylaGlobalTestingBookPublicationState(db);
   return {
     enabled: control.enabled === true,
     scope: "all_aylamed_students",
@@ -71529,6 +71530,9 @@ function aylaGlobalTestingAccessState(db) {
     payments_changed: 0,
     learning_history_deleted: false,
     content_publication_separate: true,
+    testing_books_linked_to_same_action: true,
+    testing_book_count: testingBooks.eligible_count,
+    testing_books_available_count: testingBooks.published_count,
   };
 }
 
@@ -71593,10 +71597,13 @@ app.post("/api/ayla/admin/global-testing-access", async (req, res) => {
           : { disabled_at: now, disabled_by: actor }),
         updated_at: now,
       };
+      const testingBooks = aylaApplyGlobalTestingBookPublication(db, action, actor);
       await aylaLog(db, "global_testing_access", `Complete AylaMed feature access ${action}d for all student profiles`, {
         action,
         student_count: before.student_count,
         feature_count: AYLA_STUDENT_FEATURES.length,
+        testing_books_changed: testingBooks.changed,
+        testing_books_available_count: testingBooks.publication.published_count,
         plans_changed: 0,
         enrollments_changed: 0,
         payments_changed: 0,
@@ -71609,7 +71616,7 @@ app.post("/api/ayla/admin/global-testing-access", async (req, res) => {
       action,
       access: result,
       message: action === "enable"
-        ? `All ${result.feature_count} AylaMed student features are available to all ${result.student_count} student profiles for testing.`
+        ? `All ${result.feature_count} AylaMed student features and ${result.testing_books_available_count} testing books are available to all ${result.student_count} student profiles for testing.`
         : "Global testing access was removed. Normal plan and enrollment access is active again.",
     });
   } catch (error) {
@@ -73280,7 +73287,9 @@ function aylaV189RelevantResources(db, student, types = []) {
           || resource.global_student_publication === false
           || resource.sourceData?.global_student_publication === false
           || resource.source_data?.global_student_publication === false);
-      return !explicitlyRemoved;
+      const privatePilotVisible = aylaPilotContentScope(resource).pilotOnly
+        && aylaPilotContentVisibleToStudent(resource, student);
+      return !explicitlyRemoved || privatePilotVisible;
     })
     .filter((resource) => !resource.ownerStudentId || String(resource.ownerStudentId) === String(student.id))
     .filter((resource) => aylaPilotContentVisibleToStudent(resource, student))
@@ -80937,6 +80946,75 @@ const AYLA_GLOBAL_SHARED_RESOURCE_PUBLICATION = Object.freeze({
   }),
 });
 
+const AYLA_GLOBAL_TESTING_BOOK_IDS = new Set([
+  "AYLA-PILOT-BOOK-FA2025-CARDIO-304-309",
+  "AYLA-PILOT-BOOK-PATHOMA-CARDIAC-80-84",
+]);
+
+function aylaIsGlobalTestingBook(resource = {}) {
+  return AYLA_GLOBAL_TESTING_BOOK_IDS.has(String(resource.id || "").trim());
+}
+
+function aylaGlobalTestingBooks(db) {
+  return aylaValues(db, "aylaResources")
+    .filter(aylaIsGlobalTestingBook)
+    .sort((left, right) => String(left.id || "").localeCompare(String(right.id || "")));
+}
+
+function aylaGlobalTestingBookPublished(resource = {}) {
+  const scope = aylaPilotContentScope(resource);
+  return resource.approved === true
+    && !["disabled", "deleted", "rejected", "archived", "quarantined"].includes(String(resource.status || "active").toLowerCase())
+    && !scope.pilotOnly
+    && resource.globalStudentPublication === true
+    && resource.sourceData?.global_student_publication === true;
+}
+
+function aylaGlobalTestingBookPublicationState(db) {
+  const books = aylaGlobalTestingBooks(db);
+  const publishedCount = books.filter(aylaGlobalTestingBookPublished).length;
+  return {
+    eligible_count: books.length,
+    published_count: publishedCount,
+    state: books.length > 0 && publishedCount === books.length
+      ? "published"
+      : publishedCount > 0 ? "partial" : "unpublished",
+  };
+}
+
+function aylaApplyGlobalTestingBookPublication(db, action, actor) {
+  const publish = action === "enable" || action === "publish";
+  const books = aylaGlobalTestingBooks(db);
+  const destinations = AYLA_GLOBAL_SHARED_RESOURCE_PUBLICATION.readings.destinations;
+  for (const resource of books) {
+    const deliveryDestinations = new Set(aylaCleanArray(resource.deliveryDestinations || resource.delivery_destinations));
+    destinations.forEach((destination) => deliveryDestinations.add(destination));
+    const sourceData = {
+      ...(resource.sourceData || resource.source_data || {}),
+      global_student_publication: publish,
+      global_publication_control: AYLA_GLOBAL_SHARED_RESOURCE_PUBLICATION.readings.control,
+      testing_launch_control: "global_testing_access",
+    };
+    aylaSetItem(db, "aylaResources", {
+      ...resource,
+      approved: true,
+      status: "active",
+      authorizationStatus: "admin_verified",
+      verificationStatus: "pilot_verified_exact_pages",
+      accessScope: publish ? "all_students" : "private_pilot",
+      pilotOnly: !publish,
+      globalStudentPublication: publish,
+      deliveryDestinations: [...deliveryDestinations],
+      sourceData,
+      updatedAt: aylaNow(),
+      ...(publish
+        ? { publishedAt: aylaNow(), publishedBy: actor }
+        : { unpublishedAt: aylaNow(), unpublishedBy: actor }),
+    });
+  }
+  return { changed: books.length, publication: aylaGlobalTestingBookPublicationState(db) };
+}
+
 function aylaGlobalSharedResourcePublicationConfig(kind = "") {
   return AYLA_GLOBAL_SHARED_RESOURCE_PUBLICATION[String(kind || "").trim().toLowerCase()] || null;
 }
@@ -80947,10 +81025,11 @@ function aylaGlobalSharedResourceEligible(db, kind) {
   const types = new Set(config.types);
   return aylaValues(db, "aylaResources")
     .filter((resource) => types.has(aylaV189ResourceType(resource.type)))
-    .filter((resource) => resource.approved !== false)
-    .filter((resource) => !["disabled", "deleted", "rejected", "archived", "quarantined"].includes(String(resource.status || "active").toLowerCase()))
+    .filter((resource) => aylaIsGlobalTestingBook(resource) || resource.approved !== false)
+    .filter((resource) => aylaIsGlobalTestingBook(resource)
+      || !["disabled", "deleted", "rejected", "archived", "quarantined"].includes(String(resource.status || "active").toLowerCase()))
     .filter((resource) => !String(resource.ownerStudentId || resource.owner_student_id || "").trim())
-    .filter((resource) => !aylaPilotContentScope(resource).pilotOnly)
+    .filter((resource) => aylaIsGlobalTestingBook(resource) || !aylaPilotContentScope(resource).pilotOnly)
     .filter((resource) => {
       if (kind === "flashcards") {
         return Boolean(String(resource.front || resource.question || resource.title || "").trim()
@@ -80962,6 +81041,7 @@ function aylaGlobalSharedResourceEligible(db, kind) {
 }
 
 function aylaGlobalSharedResourcePublished(resource, config) {
+  if (aylaIsGlobalTestingBook(resource)) return aylaGlobalTestingBookPublished(resource);
   const control = String(
     resource.sourceData?.global_publication_control
       || resource.source_data?.global_publication_control
@@ -81034,7 +81114,15 @@ app.post("/api/ayla/admin/resources/global-publication/:kind", async (req, res) 
         );
       }
       let changed = 0;
+      let testingBooksApplied = false;
       for (const resource of eligible) {
+        if (kind === "readings" && aylaIsGlobalTestingBook(resource)) {
+          if (!testingBooksApplied) {
+            changed += aylaApplyGlobalTestingBookPublication(db, action, actor).changed;
+            testingBooksApplied = true;
+          }
+          continue;
+        }
         const destinations = new Set(aylaCleanArray(resource.deliveryDestinations || resource.delivery_destinations));
         if (action === "publish") config.destinations.forEach((destination) => destinations.add(destination));
         else config.destinations.forEach((destination) => destinations.delete(destination));
@@ -81055,26 +81143,33 @@ app.post("/api/ayla/admin/resources/global-publication/:kind", async (req, res) 
         aylaSetItem(db, "aylaResources", next);
         changed += 1;
       }
+      const privatePilotResourcesChanged = testingBooksApplied
+        ? aylaGlobalTestingBooks(db).length
+        : 0;
       await aylaLog(db, "resource-global-publication", `All approved ${config.label} ${action}ed for all students`, {
         action,
         kind,
         eligible_count: eligible.length,
         changed,
         student_owned_resources_changed: 0,
-        private_pilot_resources_changed: 0,
+        private_pilot_resources_changed: privatePilotResourcesChanged,
         mappings_preserved: true,
         progress_preserved: true,
         schedule_history_preserved: true,
         actor,
       });
-      return { changed, publication: aylaGlobalSharedResourcePublicationState(db, kind) };
+      return {
+        changed,
+        privatePilotResourcesChanged,
+        publication: aylaGlobalSharedResourcePublicationState(db, kind),
+      };
     });
     return aylaSendOk(res, {
       action,
       changed: result.changed,
       publication: result.publication,
       student_owned_resources_changed: 0,
-      private_pilot_resources_changed: 0,
+      private_pilot_resources_changed: result.privatePilotResourcesChanged,
       mappings_preserved: true,
       progress_preserved: true,
       schedule_history_preserved: true,

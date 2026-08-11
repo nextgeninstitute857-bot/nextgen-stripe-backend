@@ -75,15 +75,21 @@ test("all mapped Content Hub videos have one reversible all-students publication
   assert.doesNotMatch(routes, /deleteAyla|\.delete\(|TRUNCATE\s/i);
 });
 
-test("books and flashcards have reversible all-students publication controls without touching private resources", () => {
+test("the same reversible all-students control includes only the two existing testing books", () => {
   const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
   assert.match(server, /AYLA_GLOBAL_SHARED_RESOURCE_PUBLICATION/);
   assert.match(server, /app\.get\("\/api\/ayla\/admin\/resources\/global-publication\/:kind"/);
   assert.match(server, /app\.post\("\/api\/ayla\/admin\/resources\/global-publication\/:kind"/);
   assert.match(server, /student_owned_resources_changed: 0/);
-  assert.match(server, /private_pilot_resources_changed: 0/);
+  assert.match(server, /private_pilot_resources_changed: result\.privatePilotResourcesChanged/);
   assert.match(server, /all_approved_readings/);
   assert.match(server, /all_approved_flashcards/);
+  assert.match(server, /AYLA-PILOT-BOOK-FA2025-CARDIO-304-309/);
+  assert.match(server, /AYLA-PILOT-BOOK-PATHOMA-CARDIAC-80-84/);
+  assert.match(server, /testing_books_linked_to_same_action: true/);
+  assert.match(server, /aylaApplyGlobalTestingBookPublication\(db, action, actor\)/);
+  assert.match(server, /accessScope: publish \? "all_students" : "private_pilot"/);
+  assert.match(server, /pilotOnly: !publish/);
   assert.match(server, /mappings_preserved: true/);
   assert.match(server, /progress_preserved: true/);
   assert.match(server, /schedule_history_preserved: true/);
