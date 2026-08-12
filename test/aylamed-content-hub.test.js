@@ -353,7 +353,7 @@ test("server and registry wire one entitlement-guarded Content Hub into the exis
   const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
   const postgres = fs.readFileSync(new URL("../lib/content-registry-postgres.js", import.meta.url), "utf8");
   assert.match(server, /const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile"/);
-  assert.match(server, /const AYLA_BACKEND_BUILD = "aylamed-safe-shared-student-profile-v219"/);
+  assert.match(server, /const AYLA_BACKEND_BUILD = "aylamed-multiexam-publication-taxonomy-v220"/);
   assert.match(server, /app\.get\("\/api\/ayla\/students\/:studentId\/content-hub"/);
   assert.match(server, /app\.get\("\/api\/ayla\/students\/:studentId\/content-hub\/videos\/:videoId"/);
   assert.match(server, /app\.post\("\/api\/ayla\/students\/:studentId\/content-hub\/videos\/:videoId\/progress", aylaV210SaveVideoProgress\)/);

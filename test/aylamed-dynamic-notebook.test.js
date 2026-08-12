@@ -186,7 +186,7 @@ test("stale general writes cannot erase newer notebooks or immutable versions", 
 test("server wires v212 capture through the existing entitlement and isolated Ayla mutation boundary", () => {
   const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
   assert.match(server, /const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile"/);
-  assert.match(server, /const AYLA_BACKEND_BUILD = "aylamed-safe-shared-student-profile-v219"/);
+  assert.match(server, /const AYLA_BACKEND_BUILD = "aylamed-multiexam-publication-taxonomy-v220"/);
   assert.match(server, /schema_version: 15/);
   assert.match(server, /app\.post\("\/api\/ayla\/students\/:studentId\/notebooks\/capture"/);
   assert.match(server, /aylaV189RequireStudent\(req, req\.params\.studentId, "dynamic_notebook"\)/);

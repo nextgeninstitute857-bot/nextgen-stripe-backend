@@ -65449,7 +65449,7 @@ function ngStartBillingExpiryRunner() {
 // - Frontend can connect to these routes later with VITE_API_BASE_URL pointing to this backend.
 // -----------------------------------------------------------------------------
 
-const AYLA_BACKEND_BUILD = "aylamed-safe-shared-student-profile-v219";
+const AYLA_BACKEND_BUILD = "aylamed-multiexam-publication-taxonomy-v220";
 const AYLA_MULTIEXAM_BUILD = "aylamed-multiexam-publication-taxonomy-v220";
 
 const AYLA_EXAM_TRACKS = [
@@ -69985,17 +69985,27 @@ app.get("/api/ayla/admin/publication-controls", async (req, res) => {
       video_count: Number(source.folderVideoCount || source.folder_video_count || 0),
     }));
     let qbankCollections = [];
+    let publicationRegistryWarning = null;
     if (contentRegistryStatus().configured) {
-      qbankCollections = (await aylaListAllContentCollections()).map((collection) => ({
-        id: String(collection.id || ""),
-        type: "qbank_collection",
-        exam_track_id: aylaCanonicalExamTrack(collection.exam_track),
-        title: String(collection.title || collection.collection_key || "QBank collection"),
-        folder_id: null,
-        status: collection.status || "draft",
-        question_count: Number(collection.question_count || 0),
-        taxonomy_complete_count: Number(collection.taxonomy_complete_count || 0),
-      }));
+      try {
+        qbankCollections = (await aylaListPublicationPanelContentCollections()).map((collection) => ({
+          id: String(collection.id || ""),
+          type: "qbank_collection",
+          exam_track_id: aylaCanonicalExamTrack(collection.exam_track),
+          title: String(collection.title || collection.collection_key || "QBank collection"),
+          folder_id: null,
+          status: collection.status || "draft",
+          question_count: Number(collection.question_count || 0),
+          taxonomy_complete_count: Number(collection.taxonomy_complete_count || 0),
+        }));
+      } catch (error) {
+        publicationRegistryWarning = {
+          code: error.code === "AYLA_PUBLICATION_REGISTRY_TIMEOUT"
+            ? "qbank_registry_timeout"
+            : "qbank_registry_unavailable",
+          message: "QBank collections could not be loaded. Exam, video, book and flashcard publication controls remain available.",
+        };
+      }
     }
     const nativeResources = [...new Map(
       [...storedResources, ...vimeoFolders, ...qbankCollections]
@@ -70023,6 +70033,7 @@ app.get("/api/ayla/admin/publication-controls", async (req, res) => {
       ...panel,
       available_resources: availableResources,
       supplements: Object.fromEntries(panel.exams.map((exam) => [exam.examTrackId, listAylaExamSupplements(exam.examTrackId)])),
+      publication_registry_warning: publicationRegistryWarning,
     });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load publication controls");
@@ -73774,6 +73785,23 @@ async function aylaListAllContentCollections(examTrack = "") {
     if (page.length < limit) break;
   }
   return rows;
+}
+
+async function aylaListPublicationPanelContentCollections({ timeoutMs = 4000 } = {}) {
+  let timeoutId = null;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      const error = new Error("Content registry timed out while loading publication controls");
+      error.code = "AYLA_PUBLICATION_REGISTRY_TIMEOUT";
+      reject(error);
+    }, Math.max(500, Number(timeoutMs) || 4000));
+    timeoutId.unref?.();
+  });
+  try {
+    return await Promise.race([aylaListAllContentCollections(), timeout]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
 }
 
 function aylaContentCollectionDestinationEnabled(collection, destination, destinationScope = "") {

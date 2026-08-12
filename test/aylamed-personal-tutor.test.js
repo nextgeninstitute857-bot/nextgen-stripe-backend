@@ -376,7 +376,7 @@ test("planning questions stay deterministic while general knowledge questions re
 test("server wires v213 Personal Tutor into the existing adaptive plan without LMS or CRM writes", () => {
   const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
   assert.match(server, /const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile"/);
-  assert.match(server, /const AYLA_BACKEND_BUILD = "aylamed-safe-shared-student-profile-v219"/);
+  assert.match(server, /const AYLA_BACKEND_BUILD = "aylamed-multiexam-publication-taxonomy-v220"/);
   assert.match(server, /schema_version: 15/);
   assert.match(server, /async function aylaV213PersonalTutorSnapshot/);
   assert.match(server, /app\.get\("\/api\/ayla\/students\/:studentId\/personal-tutor"/);

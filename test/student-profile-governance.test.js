@@ -257,7 +257,7 @@ test("policy tells both clients which data is private and which changes require 
 test("server wires v219 through the shared contract without crossing the LMS/Ayla database boundary", () => {
   const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
   assert.match(server, /const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile"/);
-  assert.match(server, /const AYLA_BACKEND_BUILD = "aylamed-safe-shared-student-profile-v219"/);
+  assert.match(server, /const AYLA_BACKEND_BUILD = "aylamed-multiexam-publication-taxonomy-v220"/);
   assert.match(server, /schema_version: 15/);
   assert.match(server, /studentProfileAuditEvents: \{\}/);
   assert.match(server, /aylaProfileAuditEvents: \{\}/);

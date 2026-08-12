@@ -258,7 +258,7 @@ test("v219 serves one safe profile contract through isolated LMS and AylaMed sto
       },
     });
     assert.equal(aylaUpdated.response.status, 200, JSON.stringify(aylaUpdated.payload));
-    assert.equal(aylaUpdated.payload.build, "aylamed-safe-shared-student-profile-v219");
+    assert.equal(aylaUpdated.payload.build, "aylamed-multiexam-publication-taxonomy-v220");
     assert.equal(aylaUpdated.payload.profile.phone, "+12025550123");
     assert.equal(aylaUpdated.payload.profile.phone_verified, false);
     assert.equal(aylaUpdated.payload.user.role, "student");

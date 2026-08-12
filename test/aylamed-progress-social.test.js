@@ -5,7 +5,7 @@ import fs from "node:fs";
 test("server wires v214 through shared read-only LMS/Ayla progress services", () => {
   const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
   assert.match(server, /const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile"/);
-  assert.match(server, /const AYLA_BACKEND_BUILD = "aylamed-safe-shared-student-profile-v219"/);
+  assert.match(server, /const AYLA_BACKEND_BUILD = "aylamed-multiexam-publication-taxonomy-v220"/);
   assert.match(server, /schema_version: 15/);
   assert.match(server, /function ngStudentStudyActivityDates/);
   assert.match(server, /function ngComputeStudentStudyStreakWithFreeze[\s\S]*?computeLearningStreak/);

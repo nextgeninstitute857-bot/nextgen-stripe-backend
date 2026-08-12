@@ -203,7 +203,7 @@ test("non-navigation setup features can still be enforced by the same entitlemen
 
 test("server integration keeps v206 and v207 additive while routing v208 through one guard", () => {
   const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
-  assert.match(server, /const AYLA_BACKEND_BUILD = "aylamed-safe-shared-student-profile-v219"/);
+  assert.match(server, /const AYLA_BACKEND_BUILD = "aylamed-multiexam-publication-taxonomy-v220"/);
   assert.match(server, /schema_version: 15/);
   assert.match(server, /app\.get\("\/api\/ayla\/shell"/);
   assert.match(server, /app\.post\("\/api\/ayla\/shell\/switch"/);
