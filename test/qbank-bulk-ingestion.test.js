@@ -3,6 +3,7 @@ import fs from "node:fs";
 import test from "node:test";
 import {
   MIXED_QBANK_UPLOAD_PURPOSE,
+  contentAuthorizedExternalReleaseAllowed,
   contentRightsAreVerified,
   contentUploadPurposeAllowed,
   normalizeBulkQbankMediaAliases,
@@ -164,6 +165,34 @@ test("rights metadata permits private preparation but distinguishes verified dis
     });
     assert.equal(manifest.rights_verified, true);
   }
+});
+
+test("authorized external release is restricted to the confirmed provider and exam scopes", () => {
+  for (const row of [
+    { source_provider: "Amedex", source_profile: "amedex_style", exam_track: "amc" },
+    { source_provider: "MPlusX", source_profile: "mplusx_style", exam_track: "amc" },
+    { source_provider: "CanadaQBank", source_profile: "canadaqbank_style", exam_track: "mccqe" },
+    { source_provider: "ACE QBank", source_profile: "aceqbank_style", exam_track: "mccqe" },
+    { source_provider: "UWorld", source_profile: "uworld_style", exam_track: "usmle-step-2" },
+    { source_provider: "UWorld", source_profile: "uworld_style", exam_track: "usmle-step-3" },
+  ]) {
+    assert.equal(contentAuthorizedExternalReleaseAllowed({
+      ...row,
+      source_rights_status: "authorized",
+    }), true);
+  }
+  assert.equal(contentAuthorizedExternalReleaseAllowed({
+    source_provider: "UWorld",
+    source_profile: "uworld_style",
+    exam_track: "amc",
+    source_rights_status: "authorized",
+  }), false);
+  assert.equal(contentAuthorizedExternalReleaseAllowed({
+    source_provider: "Amedex",
+    source_profile: "amedex_style",
+    exam_track: "amc",
+    source_rights_status: "unverified",
+  }), false);
 });
 
 test("bulk runner is resumable, checksum-bound, memory-bounded, and never enables delivery", () => {

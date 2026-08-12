@@ -235,6 +235,19 @@ test('owner-controlled all-students testing release is explicit, reversible, and
   assert.match(postgres, /if \(unpublishAllRequested && effectiveDestinationRows/);
 });
 
+test('authorized launch banks use a separate count-locked and reversible release path', () => {
+  assert.match(server, /content-registry\/collections\/:collectionId\/publish-authorized/);
+  assert.match(server, /content-registry\/collections\/:collectionId\/unpublish-authorized/);
+  assert.match(server, /requiredConfirmation = `PUBLISH AUTHORIZED \$\{expectedQuestionCount\}`/);
+  assert.match(server, /requiredConfirmation = `UNPUBLISH AUTHORIZED \$\{expectedQuestionCount\}`/);
+  assert.match(server, /allowAuthorizedExternal: true/);
+  assert.match(server, /requireAuthorizedExternal: true/);
+  assert.match(postgres, /AUTHORIZED_EXTERNAL_COLLECTION_REQUIRED/);
+  assert.match(postgres, /AUTHORIZED_CONTENT_MEDIA_GATE_BLOCKED/);
+  assert.match(postgres, /delivery_media_ready_count/);
+  assert.match(server, /incomplete_required_media_excluded_from_delivery: true/);
+});
+
 test('overview uses a bounded read-only QBank publication status instead of the full collection table', () => {
   assert.match(postgres, /getContentGlobalQbankPublicationState/);
   assert.match(postgres, /c\.source_profile='aylamed_original'/);
