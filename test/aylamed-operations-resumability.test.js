@@ -427,6 +427,8 @@ test("v217 server exposes only admin operations routes and advances the Ayla sch
   assert.match(server, /app\.post\("\/admin\/crm\/ai-training\/content-uploads"/);
   assert.match(server, /app\.put\("\/admin\/crm\/ai-training\/content-uploads\/:uploadId\/chunks\/:index"/);
   assert.match(server, /app\.post\("\/admin\/crm\/ai-training\/content-uploads\/:uploadId\/finalize"/);
+  assert.match(server, /isAuthorizedExternalMedia[\s\S]*purpose[\s\S]*media_zip[\s\S]*ngAuthorizedExternalImportSource\(metadata\)/);
+  assert.match(server, /parentAllowed = ngOwnedAylaMedImportJob\(parentJob\)[\s\S]*ngAuthorizedExternalImportSource\(parentJob\)/);
   assert.match(server, /app\.get\("\/admin\/crm\/operations\/content-jobs"/);
   assert.match(server, /app\.get\("\/admin\/crm\/operations\/storage-performance"/);
   assert.match(server, /requireCrmAdmin\(req\)/);

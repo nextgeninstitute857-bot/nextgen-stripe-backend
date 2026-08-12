@@ -35530,7 +35530,7 @@ function ngContentProgressTracker(initialStage = "") {
 
 function ngOwnedMediaUploadScopeError() {
   return Object.assign(
-    new Error("AylaMed administrator uploads are limited to AylaMed-owned media archives"),
+    new Error("AylaMed administrator media uploads are limited to AylaMed-owned collections or an authorized launch bundle in its confirmed exam track"),
     { statusCode: 403 },
   );
 }
@@ -35580,12 +35580,14 @@ async function requireContentUploadAdmin(req, uploadId = "") {
     && String(metadata.source_profile || "").toLowerCase() === "aylamed_original"
     && String(metadata.source_rights_status || "").toLowerCase() === "owned"
     && Boolean(String(metadata.source_namespace || "").trim());
+  const isAuthorizedExternalMedia = String(purpose || "").toLowerCase() === "media_zip"
+    && ngAuthorizedExternalImportSource(metadata);
   const ownsExistingSession = !uploadId || (expectedCreator && createdBy === expectedCreator);
   const isAuthorizedExternalQuestionBundle = ["question_zip", "mixed_qbank_zip"]
     .includes(String(purpose || "").toLowerCase())
     && ngAuthorizedExternalImportSource(metadata);
 
-  if ((!isOwnedAylaMedMedia && !isAuthorizedExternalQuestionBundle) || !ownsExistingSession) {
+  if ((!isOwnedAylaMedMedia && !isAuthorizedExternalMedia && !isAuthorizedExternalQuestionBundle) || !ownsExistingSession) {
     throw ngAuthorizedExternalContentScopeError();
   }
   return context;
@@ -35608,7 +35610,10 @@ async function requireOwnedMediaBundleAdmin(req, uploadId, parentJob = null, con
     && String(session?.created_by || "") === expectedCreator;
   const isMediaArchive = String(session?.purpose || "").toLowerCase() === "media_zip";
 
-  if (!ownsSession || !isMediaArchive || (parentJob && !ngOwnedAylaMedImportJob(parentJob))) {
+  const parentAllowed = !parentJob
+    || ngOwnedAylaMedImportJob(parentJob)
+    || ngAuthorizedExternalImportSource(parentJob);
+  if (!ownsSession || !isMediaArchive || !parentAllowed) {
     throw ngOwnedMediaUploadScopeError();
   }
   return auth;
@@ -35626,7 +35631,9 @@ async function requireOwnedMediaBundleJobAdmin(req, privateBundleJob, context = 
     const session = await ngContentUploadStore.read(uploadId).catch(() => null);
     const isFinalizedMediaArchive = String(session?.purpose || "").toLowerCase() === "media_zip"
       && String(session?.status || "").toLowerCase() === "finalized";
-    if (!ngOwnedAylaMedImportJob(parentJob) || !isFinalizedMediaArchive) {
+    const parentAllowed = ngOwnedAylaMedImportJob(parentJob)
+      || ngAuthorizedExternalImportSource(parentJob);
+    if (!parentAllowed || !isFinalizedMediaArchive) {
       throw ngOwnedMediaUploadScopeError();
     }
   }
@@ -39197,6 +39204,61 @@ app.post("/admin/crm/ai-training/content-registry/collections/:collectionId/publ
       excluded_for_required_media: Math.max(0, expectedQuestionCount - deliveryReadyCount),
       destination: "aylamed_qbank",
       message: `Approved ${expectedQuestionCount} authorized questions; ${deliveryReadyCount} are delivery-ready and questions with unresolved required media remain excluded.`,
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+      code: error.code || undefined,
+      details: error.details || undefined,
+    });
+  }
+});
+
+app.post("/admin/crm/ai-training/content-registry/collections/:collectionId/approve-authorized", async (req, res) => {
+  try {
+    const { user } = await requireOwnedCatalogAdmin(req);
+    const expectedQuestionCount = Number(req.body.expected_question_count ?? req.body.expectedQuestionCount);
+    const requiredConfirmation = `APPROVE AUTHORIZED ${expectedQuestionCount}`;
+    if (!Number.isSafeInteger(expectedQuestionCount) || expectedQuestionCount < 1
+      || String(req.body.confirmation || "") !== requiredConfirmation) {
+      return res.status(400).json({
+        success: false,
+        error: "Private authorized approval requires the exact displayed question count and confirmation.",
+        code: "AUTHORIZED_CONTENT_PRIVATE_APPROVAL_CONFIRMATION_REQUIRED",
+      });
+    }
+    const collection = await updateContentCollectionControls({
+      collectionId: req.params.collectionId,
+      status: "approved",
+      destinations: [
+        {
+          destination: "aylamed_qbank",
+          destination_scope: "",
+          enabled: false,
+          settings: { authorized_external_private_approval: true },
+        },
+        {
+          destination: "aylamed_cdm",
+          destination_scope: "",
+          enabled: false,
+          settings: { authorized_external_private_approval: true },
+        },
+      ],
+      displayPolicy: { question_id_mode: "internal", source_label_mode: "hidden" },
+      actorId: String(user.id),
+      ownedOnly: true,
+      allowAuthorizedExternal: true,
+      requireAuthorizedExternal: true,
+      approveAuthorized: true,
+      expectedQuestionCount,
+    });
+    return res.json({
+      success: true,
+      collection,
+      approved_question_count: expectedQuestionCount,
+      destinations_enabled: [],
+      message: `Privately approved ${expectedQuestionCount} authorized questions. No student destination was enabled.`,
     });
   } catch (error) {
     return res.status(error.statusCode || 500).json({
