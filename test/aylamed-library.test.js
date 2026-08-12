@@ -363,7 +363,7 @@ test("stale database writes preserve page history and multi-resource assignments
 test("server wires one entitlement-guarded Library into the existing roadmap without CRM writes", () => {
   const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
   assert.match(server, /const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile"/);
-  assert.match(server, /const AYLA_BACKEND_BUILD = "aylamed-safe-shared-student-profile-v219"/);
+  assert.match(server, /const AYLA_BACKEND_BUILD = "aylamed-multiexam-publication-taxonomy-v220"/);
   assert.match(server, /app\.get\("\/api\/ayla\/students\/:studentId\/library"/);
   assert.match(server, /app\.get\("\/api\/ayla\/students\/:studentId\/library\/resources\/:resourceId"/);
   assert.match(server, /app\.get\("\/api\/ayla\/students\/:studentId\/library\/resources\/:resourceId\/pages\/:pageNumber"/);

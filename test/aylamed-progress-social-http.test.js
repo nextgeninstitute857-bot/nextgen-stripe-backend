@@ -191,7 +191,7 @@ test("v214 federates progress read-only and keeps social lifecycle inside AylaMe
 
     const progress = await api(baseUrl, `/api/ayla/students/student-1/progress?date=${today}`, { token });
     assert.equal(progress.response.status, 200, JSON.stringify(progress.payload));
-    assert.equal(progress.payload.build, "aylamed-safe-shared-student-profile-v219");
+    assert.equal(progress.payload.build, "aylamed-multiexam-publication-taxonomy-v220");
     assert.equal(progress.payload.progress.lms.linked, true);
     assert.deepEqual(progress.payload.progress.lms.courses.map((row) => row.course_id), ["course-step1"]);
     assert.equal(progress.payload.progress.streaks.aylamed.study_streak, 1);
