@@ -430,6 +430,7 @@ import {
 import { runOpenAIBackgroundResponse } from "./lib/openai-background-responses.js";
 import {
   bulkQbankMediaAliasFingerprint,
+  contentAuthorizedExternalReleaseAllowed,
   normalizeBulkQbankMediaAliases,
   normalizeContentRightsStatus,
 } from "./lib/qbank-bulk-ingestion.js";
@@ -35534,6 +35535,30 @@ function ngOwnedMediaUploadScopeError() {
   );
 }
 
+function ngAuthorizedExternalContentScopeError() {
+  return Object.assign(
+    new Error("This AylaMed administrator session is limited to AylaMed-owned content or an authorized Amedex, MPlusX, CanadaQBank, ACE QBank, or UWorld launch bundle in its confirmed exam track"),
+    { statusCode: 403, code: "AYLAMED_AUTHORIZED_EXTERNAL_SCOPE_REQUIRED" },
+  );
+}
+
+function ngAuthorizedExternalImportSource(source = {}) {
+  return contentAuthorizedExternalReleaseAllowed(source)
+    && Boolean(String(source?.source_namespace || source?.sourceNamespace || "").trim());
+}
+
+function ngAylaMedAdminImportSourceAllowed(source = {}) {
+  return ngOwnedAylaMedImportJob(source) || ngAuthorizedExternalImportSource(source);
+}
+
+async function requireAylaMedContentJobAdmin(req, job = {}) {
+  const auth = await requireOwnedCatalogAdmin(req);
+  if (auth.ownedCatalogOnly && !ngAylaMedAdminImportSourceAllowed(job)) {
+    throw ngAuthorizedExternalContentScopeError();
+  }
+  return auth;
+}
+
 async function requireContentUploadAdmin(req, uploadId = "") {
   const context = await requireOwnedCatalogAdmin(req);
   if (!context.ownedCatalogOnly) return context;
@@ -35556,8 +35581,13 @@ async function requireContentUploadAdmin(req, uploadId = "") {
     && String(metadata.source_rights_status || "").toLowerCase() === "owned"
     && Boolean(String(metadata.source_namespace || "").trim());
   const ownsExistingSession = !uploadId || (expectedCreator && createdBy === expectedCreator);
+  const isAuthorizedExternalQuestionBundle = ["question_zip", "mixed_qbank_zip"]
+    .includes(String(purpose || "").toLowerCase())
+    && ngAuthorizedExternalImportSource(metadata);
 
-  if (!isOwnedAylaMedMedia || !ownsExistingSession) throw ngOwnedMediaUploadScopeError();
+  if ((!isOwnedAylaMedMedia && !isAuthorizedExternalQuestionBundle) || !ownsExistingSession) {
+    throw ngAuthorizedExternalContentScopeError();
+  }
   return context;
 }
 
@@ -35787,7 +35817,7 @@ app.post("/admin/crm/ai-training/content-imports/preview", async (req, res) => {
   let upload;
   let jobId = "";
   try {
-    const { user } = await requireOwnedCatalogAdmin(req);
+    const { user, ownedCatalogOnly = false } = await requireOwnedCatalogAdmin(req);
     upload = await ngReceiveOrResolveContentZip(req, ["question_zip"]);
     const examTrack = normalizeExamTrack(upload.fields.exam_track || upload.fields.examTrack);
     const sourceNamespace = contentSlug(upload.fields.source_namespace || upload.fields.sourceNamespace || upload.fields.source_provider || upload.fields.sourceProvider);
@@ -35806,6 +35836,13 @@ app.post("/admin/crm/ai-training/content-imports/preview", async (req, res) => {
     if (examTrack === "unknown") throw Object.assign(new Error("exam_track is required"), { statusCode: 400 });
     if (sourceNamespace === "unknown") throw Object.assign(new Error("source_namespace or source_provider is required"), { statusCode: 400 });
     const destinations = ngParseContentDestinations(upload.fields.destinations);
+    if (ownedCatalogOnly && !ngAylaMedAdminImportSourceAllowed({
+      exam_track: examTrack,
+      source_namespace: sourceNamespace,
+      source_provider: sourceProvider,
+      source_profile: sourceProfile,
+      source_rights_status: sourceRightsStatus,
+    })) throw ngAuthorizedExternalContentScopeError();
     const mediaAliases = normalizeBulkQbankMediaAliases(
       upload.fields.media_aliases || upload.fields.mediaAliases || [],
     );
@@ -35851,9 +35888,9 @@ app.post("/admin/crm/ai-training/content-imports/preview", async (req, res) => {
 
 app.get("/admin/crm/ai-training/content-imports/:jobId", async (req, res) => {
   try {
-    await requireOwnedCatalogAdmin(req);
     const job = await getContentImportJob(req.params.jobId);
     if (!job) return res.status(404).json({ success: false, error: "Content import job not found" });
+    await requireAylaMedContentJobAdmin(req, job);
     const snapshot = ngContentBackgroundSnapshot(job.id);
     return res.json({
       success: true,
@@ -35872,10 +35909,10 @@ app.post("/admin/crm/ai-training/content-imports/:jobId/import-draft", async (re
   let claimed = null;
   let priorStatus = "";
   try {
-    await requireOwnedCatalogAdmin(req);
     const existing = await getContentImportJob(req.params.jobId);
     priorStatus = String(existing?.status || "");
     if (!existing) return res.status(404).json({ success: false, error: "Content import job not found" });
+    await requireAylaMedContentJobAdmin(req, existing);
     if (existing.counts?.import_blocked === true || Number(existing.counts?.blocking_issues || 0) > 0) {
       return res.status(409).json({
         success: false,
@@ -36283,10 +36320,10 @@ app.post("/admin/crm/ai-training/content-imports/:jobId/media/import-draft", asy
   let upload;
   let mediaJob = null;
   try {
-    const { user } = await requireCrmAdmin(req);
     if (!contentMediaStatus().configured) return res.status(503).json({ success: false, error: "Cloudflare R2 is not configured" });
     const parentJob = await getContentImportJob(req.params.jobId);
     if (!parentJob) return res.status(404).json({ success: false, error: "Content import job not found" });
+    const { user } = await requireAylaMedContentJobAdmin(req, parentJob);
     if (!["draft_imported", "draft_imported_with_warnings"].includes(String(parentJob.status))) {
       return res.status(409).json({ success: false, error: "Questions must be imported as drafts before media can be attached" });
     }
@@ -36313,9 +36350,11 @@ app.post("/admin/crm/ai-training/content-imports/:jobId/media/import-draft", asy
 
 app.get("/admin/crm/ai-training/content-media-imports/:mediaJobId", async (req, res) => {
   try {
-    await requireCrmAdmin(req);
     const job = await getContentMediaImportJob(req.params.mediaJobId);
     if (!job) return res.status(404).json({ success: false, error: "Media import job not found" });
+    const parentJob = await getContentImportJob(job.content_import_job_id);
+    if (!parentJob) return res.status(404).json({ success: false, error: "Parent content import job not found" });
+    await requireAylaMedContentJobAdmin(req, parentJob);
     const snapshot = ngContentBackgroundSnapshot(job.id);
     return res.json({
       success: true,
@@ -36675,7 +36714,11 @@ app.post("/admin/crm/ai-training/content-media-imports/:mediaJobId/reconcile-edi
 
 app.get("/admin/crm/ai-training/content-media-imports/:mediaJobId/mapping-audit", async (req, res) => {
   try {
-    await requireCrmAdmin(req);
+    const mediaJob = await getContentMediaImportJob(req.params.mediaJobId);
+    if (!mediaJob) return res.status(404).json({ success: false, error: "Media import job not found" });
+    const parentJob = await getContentImportJob(mediaJob.content_import_job_id);
+    if (!parentJob) return res.status(404).json({ success: false, error: "Parent content import job not found" });
+    await requireAylaMedContentJobAdmin(req, parentJob);
     const audit = await ngBuildContentMediaMappingAudit(req.params.mediaJobId);
     return res.json({
       success: true,
@@ -36690,7 +36733,11 @@ app.post("/admin/crm/ai-training/content-media-imports/:mediaJobId/reconcile-dra
   let releaseFinalizer = null;
   let finalizerError = null;
   try {
-    const { user } = await requireCrmAdmin(req);
+    const mediaJob = await getContentMediaImportJob(req.params.mediaJobId);
+    if (!mediaJob) return res.status(404).json({ success: false, error: "Media import job not found" });
+    const parentJob = await getContentImportJob(mediaJob.content_import_job_id);
+    if (!parentJob) return res.status(404).json({ success: false, error: "Parent content import job not found" });
+    const { user } = await requireAylaMedContentJobAdmin(req, parentJob);
     const audit = await ngBuildContentMediaMappingAudit(req.params.mediaJobId);
     const expectedFingerprint = String(req.body?.audit_fingerprint || "");
     if (!expectedFingerprint || expectedFingerprint !== audit.fingerprint) {
@@ -37282,10 +37329,10 @@ app.post("/admin/crm/ai-training/content-imports/:jobId/videos/import-draft", as
   let upload;
   let videoJob = null;
   try {
-    const { user } = await requireCrmAdmin(req);
     if (!contentVideoStatus().configured) return res.status(503).json({ success: false, error: "Vimeo access token is not configured" });
     const parentJob = await getContentImportJob(req.params.jobId);
     if (!parentJob) return res.status(404).json({ success: false, error: "Content import job not found" });
+    const { user } = await requireAylaMedContentJobAdmin(req, parentJob);
     if (!["draft_imported", "draft_imported_with_warnings"].includes(String(parentJob.status))) {
       return res.status(409).json({ success: false, error: "Questions must be imported as drafts before videos can be attached" });
     }
@@ -37309,9 +37356,11 @@ app.post("/admin/crm/ai-training/content-imports/:jobId/videos/import-draft", as
 
 app.get("/admin/crm/ai-training/content-video-imports/:videoJobId", async (req, res) => {
   try {
-    await requireCrmAdmin(req);
     const job = await getContentVideoImportJob(req.params.videoJobId);
     if (!job) return res.status(404).json({ success: false, error: "Video import job not found" });
+    const parentJob = await getContentImportJob(job.content_import_job_id);
+    if (!parentJob) return res.status(404).json({ success: false, error: "Parent content import job not found" });
+    await requireAylaMedContentJobAdmin(req, parentJob);
     const snapshot = ngContentBackgroundSnapshot(job.id);
     return res.json({
       success: true,
@@ -39093,6 +39142,106 @@ app.post("/admin/crm/ai-training/content-registry/collections/:collectionId/publ
       message: testingPhaseRelease
         ? `Published all ${expectedQuestionCount} questions and their linked media to all students for the owner-controlled testing phase.`
         : `Published all ${expectedQuestionCount} eligible AylaMed-owned questions to the AylaMed QBank.`,
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+      code: error.code || undefined,
+      details: error.details || undefined,
+    });
+  }
+});
+
+app.post("/admin/crm/ai-training/content-registry/collections/:collectionId/publish-authorized", async (req, res) => {
+  try {
+    const { user } = await requireOwnedCatalogAdmin(req);
+    const expectedQuestionCount = Number(req.body.expected_question_count ?? req.body.expectedQuestionCount);
+    const requiredConfirmation = `PUBLISH AUTHORIZED ${expectedQuestionCount}`;
+    if (!Number.isSafeInteger(expectedQuestionCount) || expectedQuestionCount < 1
+      || String(req.body.confirmation || "") !== requiredConfirmation) {
+      return res.status(400).json({
+        success: false,
+        error: "Authorized publication requires the exact displayed question count and confirmation.",
+        code: "AUTHORIZED_CONTENT_PUBLICATION_CONFIRMATION_REQUIRED",
+      });
+    }
+    const collection = await updateContentCollectionControls({
+      collectionId: req.params.collectionId,
+      status: "approved",
+      destinations: [{
+        destination: "aylamed_qbank",
+        destination_scope: "",
+        enabled: true,
+        settings: {
+          authorized_external_release: true,
+          published_with_bulk_control: true,
+          incomplete_required_media_excluded_from_delivery: true,
+        },
+      }],
+      displayPolicy: { question_id_mode: "internal", source_label_mode: "hidden" },
+      actorId: String(user.id),
+      ownedOnly: true,
+      allowAuthorizedExternal: true,
+      requireAuthorizedExternal: true,
+      publishAll: true,
+      testingPhaseRelease: true,
+      expectedQuestionCount,
+    });
+    const deliveryReadyCount = Number(collection?.delivery_media_ready_count || 0);
+    return res.json({
+      success: true,
+      collection,
+      approved_question_count: expectedQuestionCount,
+      delivery_ready_question_count: deliveryReadyCount,
+      excluded_for_required_media: Math.max(0, expectedQuestionCount - deliveryReadyCount),
+      destination: "aylamed_qbank",
+      message: `Approved ${expectedQuestionCount} authorized questions; ${deliveryReadyCount} are delivery-ready and questions with unresolved required media remain excluded.`,
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+      code: error.code || undefined,
+      details: error.details || undefined,
+    });
+  }
+});
+
+app.post("/admin/crm/ai-training/content-registry/collections/:collectionId/unpublish-authorized", async (req, res) => {
+  try {
+    const { user } = await requireOwnedCatalogAdmin(req);
+    const expectedQuestionCount = Number(req.body.expected_question_count ?? req.body.expectedQuestionCount);
+    const requiredConfirmation = `UNPUBLISH AUTHORIZED ${expectedQuestionCount}`;
+    if (!Number.isSafeInteger(expectedQuestionCount) || expectedQuestionCount < 1
+      || String(req.body.confirmation || "") !== requiredConfirmation) {
+      return res.status(400).json({
+        success: false,
+        error: "Authorized unpublication requires the exact displayed question count and confirmation.",
+        code: "AUTHORIZED_CONTENT_UNPUBLICATION_CONFIRMATION_REQUIRED",
+      });
+    }
+    const collection = await updateContentCollectionControls({
+      collectionId: req.params.collectionId,
+      destinations: [{
+        destination: "aylamed_qbank",
+        destination_scope: "",
+        enabled: false,
+        settings: { authorized_external_release: true, unpublished_with_bulk_control: true },
+      }],
+      actorId: String(user.id),
+      ownedOnly: true,
+      allowAuthorizedExternal: true,
+      requireAuthorizedExternal: true,
+      unpublishAll: true,
+      expectedQuestionCount,
+    });
+    return res.json({
+      success: true,
+      collection,
+      unpublished_question_count: expectedQuestionCount,
+      preserved: ["questions", "answers", "taxonomy", "media references", "source aliases", "review history"],
+      message: `Unpublished ${expectedQuestionCount} authorized questions without deleting private content or review history.`,
     });
   } catch (error) {
     return res.status(error.statusCode || 500).json({

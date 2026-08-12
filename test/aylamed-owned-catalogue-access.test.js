@@ -40,6 +40,15 @@ test("owned catalogue importer accepts the existing AylaMed admin session", () =
   assert.match(server, /content-registry\/collections[\s\S]{0,220}requireOwnedCatalogAdmin\(req\)/);
 });
 
+test("the same admin may stage only the explicitly authorized launch providers", () => {
+  assert.match(server, /function ngAuthorizedExternalImportSource\(source = \{\}\)/);
+  assert.match(server, /contentAuthorizedExternalReleaseAllowed\(source\)/);
+  assert.match(server, /AYLAMED_AUTHORIZED_EXTERNAL_SCOPE_REQUIRED/);
+  assert.match(server, /\["question_zip", "mixed_qbank_zip"\]/);
+  assert.match(server, /requireAylaMedContentJobAdmin\(req, existing\)/);
+  assert.match(server, /requireAylaMedContentJobAdmin\(req, parentJob\)/);
+});
+
 test("new staged media handoff is scoped by uploader, media purpose, and owned parent job", () => {
   assert.match(server, /function ngOwnedAylaMedImportJob\(job = \{\}\)/);
   assert.match(server, /job\?\.source_provider \|\| ""\)\.toLowerCase\(\) === "aylamed"/);

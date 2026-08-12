@@ -169,6 +169,11 @@ for (const fixture of [
     assert.equal(preview.counts.valid_questions, 1);
     assert.deepEqual(preview.counts.source_adapters, { [fixture.expectedAdapter]: 1 });
     assert.deepEqual(preview.counts.item_formats, { single_best_answer: 1 });
+    if (fixture.examTrack !== "usmle-step-1") {
+      assert.equal(preview.counts.multi_exam_source_taxonomy_questions, 1);
+      assert.equal(preview.counts.taxonomy_ledger_complete, 1);
+      assert.equal(preview.counts.taxonomy_coverage_percent, 100);
+    }
   });
 }
 
