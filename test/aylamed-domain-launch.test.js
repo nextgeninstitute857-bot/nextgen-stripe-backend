@@ -23,3 +23,14 @@ test("AylaMed Vimeo privacy keeps staging access and uses the canonical producti
   assert.doesNotMatch(server, /function aylaPrivatePilotVimeoEmbedDomains\(\)[\s\S]{0,650}"https:\/\/www\.aylamedapp\.com"/);
   assert.match(server, /vimeoEmbedDomainFailureCounts/);
 });
+
+test("USMLE shares one domain family while other exam domains remain API-scoped", () => {
+  assert.match(server, /\.\.\.aylaConfiguredExamOrigins\(process\.env\)/);
+  assert.match(server, /app\.use\("\/api\/ayla"[\s\S]*?aylaExamSiteRequestTrack/);
+  assert.match(server, /app\.get\("\/api\/ayla\/exam-sites"/);
+  assert.match(server, /aylaCurrentStudentShell\(db, rawUser, req\.aylaExamSite\)/);
+  assert.match(server, /usmle_steps_share_one_website: true/);
+  assert.match(server, /non_usmle_websites_are_independently_bound: true/);
+  assert.match(server, /physical_database_copy_per_exam: false/);
+  assert.match(server, /cross_exam_state_copy: false/);
+});

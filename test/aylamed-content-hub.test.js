@@ -9,6 +9,7 @@ import {
   mergeAylaContentHubProgress,
   mergeAylaContentHubProgressCollection,
   normalizeAylaContentHubVideo,
+  normalizeAylaContentHubVideos,
   sanitizeAylaContentHubVideo,
   selectAylaRoadmapVideo,
 } from "../lib/aylamed-content-hub.js";
@@ -61,6 +62,26 @@ test("Vimeo inputs become embedded-player URLs and never require an outbound pub
   assert.equal("vimeoUrl" in student, false);
   assert.equal("provider_id" in student, false);
   assert.equal("provider_uri" in student, false);
+});
+
+test("Step 2 videos can appear in MCCQE only as non-scoring supplemental content", () => {
+  const [video] = normalizeAylaContentHubVideos([{
+    id: "step2-video-1",
+    sourceType: "registry",
+    examTrackId: "usmle_step_2_ck",
+    supplementalForExamTrackId: "mccqe",
+    vimeoId: "123456789",
+    title: "Chest pain triage",
+    system: "Cardiovascular",
+    approved: true,
+    authorizationStatus: "approved_collection",
+  }], { examTrack: "mccqe" });
+  const studentVideo = sanitizeAylaContentHubVideo(video);
+  assert.equal(studentVideo.exam_track_id, "mccqe");
+  assert.equal(studentVideo.source_exam_track_id, "usmle_step_2_ck");
+  assert.equal(studentVideo.supplemental, true);
+  assert.equal(studentVideo.scoring_allowed, false);
+  assert.equal(studentVideo.supplemental_label, "Step 2 CK Supplemental");
 });
 
 test("raw media filenames never become student-facing video titles", () => {
@@ -342,7 +363,8 @@ test("server and registry wire one entitlement-guarded Content Hub into the exis
   assert.match(server, /function aylaV189BuildDailyPlan[\s\S]*?selectAylaRoadmapVideo\(/);
   assert.match(server, /focusSubsystem,/);
   assert.match(server, /subsystem: req\.query\.subsystem \|\| req\.query\.subsystem_key/);
-  assert.match(server, /const pageSize = 500;[\s\S]*?while \(true\)[\s\S]*?offset: rows\.length/);
+  assert.match(server, /const pageSize = 500;[\s\S]*?while \(true\)[\s\S]*?offset: sourceRows\.length/);
+  assert.match(server, /listAylaExamSupplements\(examTrack\)[\s\S]*?supplementalForExamTrackId/);
   assert.doesNotMatch(server, /content_registry_video_limit_reached/);
   assert.match(postgres, /'aylamed_content_hub'/);
   assert.match(postgres, /export async function listContentHubVideos/);

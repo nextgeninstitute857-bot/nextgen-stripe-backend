@@ -63,6 +63,23 @@ test("dry-run rejects excluded Kaplan folder", () => {
   assert.ok(result.errors.some((error) => error.includes("not approved")));
 });
 
+test("new private folder IDs are intake-ready but still require an explicit exam and full hierarchy", () => {
+  const intakeMapping = [{
+    ...mappings[0],
+    source_folder_id: "30159726",
+    proposed_exam: "MCCQE",
+    proposed_system: "Cardiovascular",
+    proposed_subsystem: "Acute Care",
+    proposed_topic: "Chest pain",
+    proposed_subtopic: "Management",
+  }];
+  const intakeDraft = [{ ...drafts[0], folderId: "30159726" }];
+  assert.equal(validateAylaVimeoMappingImport({ mappings: intakeMapping, drafts: intakeDraft }).valid, true);
+  assert.equal(validateAylaVimeoMappingImport({
+    mappings: [{ ...intakeMapping[0], proposed_exam: "" }], drafts: intakeDraft,
+  }).valid, false);
+});
+
 test("dry-run rejects incomplete hierarchy and duplicate IDs", () => {
   const broken = mappings.map((row) => ({ ...row }));
   broken[0].proposed_subtopic = "";
