@@ -35702,6 +35702,32 @@ app.post("/admin/crm/ai-training/content-uploads/:uploadId/parts/presign", async
   }
 });
 
+app.put("/admin/crm/ai-training/content-uploads/:uploadId/parts/:index", async (req, res) => {
+  try {
+    await requireContentUploadAdmin(req, req.params.uploadId);
+    if (typeof ngContentUploadStore.uploadPart !== "function") {
+      req.resume();
+      return res.status(409).json({ success: false, error: "The R2 relay upload is not configured" });
+    }
+    if (!String(req.headers["content-type"] || "").toLowerCase().includes("application/octet-stream")) {
+      req.resume();
+      return res.status(415).json({ success: false, error: "Part Content-Type must be application/octet-stream" });
+    }
+    const contentLength = Number(req.headers["content-length"]);
+    if (!Number.isSafeInteger(contentLength) || contentLength < 1) {
+      req.resume();
+      return res.status(411).json({ success: false, error: "Part Content-Length is required" });
+    }
+    const result = await ngContentUploadStore.uploadPart(req.params.uploadId, req.params.index, req, {
+      contentLength,
+    });
+    return res.status(201).json({ success: true, ...result, transport: "render_r2_relay" });
+  } catch (error) {
+    req.resume();
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
 app.get("/admin/crm/ai-training/content-uploads/:uploadId", async (req, res) => {
   try {
     await requireContentUploadAdmin(req, req.params.uploadId);
