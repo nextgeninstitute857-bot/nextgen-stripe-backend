@@ -207,6 +207,33 @@ test("adapter validates correct answer and explanation", () => {
   assert.equal(row.correctAnswerId, 2);
 });
 
+test("UWorld Step 3 stays in the Step 3 namespace and preserves linked-item context", () => {
+  const row = adaptUniversalQuestion({
+    id: 5239,
+    parentQId: 5238,
+    question: "<p><strong>Item 2 of 2</strong></p><p>What is the best treatment?</p>",
+    explanation: "<p>Step 3 management explanation</p>",
+    corrAns: 2,
+    sysId: 1005,
+    subId: 102,
+  }, [
+    { id: 1, qId: 5239, answerId: 1, answerText: "First option" },
+    { id: 2, qId: 5239, answerId: 2, answerText: "Second option" },
+  ], {
+    examTrack: "usmle-step-3",
+    sourceProvider: "UWorld",
+    sourceNamespace: "uworld-step3-2026-march",
+    collectionKey: "uworldstep3-2026-march",
+    collectionTitle: "UWorld USMLE Step 3 March 2026",
+  });
+  assert.deepEqual(validateAdaptedQuestion(row), []);
+  assert.equal(row.examTrack, "usmle-step-3");
+  assert.equal(row.sourceData.source_exam_track_hint, "usmle-step-3");
+  assert.equal(row.parentSourceId, "5238");
+  assert.equal(row.systemSourceId, "1005");
+  assert.equal(row.subjectSourceId, "102");
+});
+
 test("adapter sanitizes stems, explanations and answers before persistence", () => {
   const row = adaptUniversalQuestion({
     id: 10,

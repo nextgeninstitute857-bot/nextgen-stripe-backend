@@ -182,6 +182,21 @@ import {
   resolveAylaStudentShell,
 } from "./lib/aylamed-student-shell.js";
 import {
+  AYLA_EXAM_SITES,
+  aylaConfiguredExamOrigins,
+  aylaExamSiteRequestTrack,
+  listAylaExamSites,
+  listAylaExamWebsites,
+  resolveAylaExamSite,
+} from "./lib/aylamed-exam-sites.js";
+import {
+  buildAylaPublicationControlPanel,
+  normalizeAylaExamPublicationControl,
+  normalizeAylaResourcePublicationControl,
+  resolveAylaExamPublication,
+} from "./lib/aylamed-exam-publication.js";
+import { listAylaExamSupplements } from "./lib/aylamed-exam-supplements.js";
+import {
   aylaPilotContentScope,
   aylaPilotContentVisibleToStudent,
 } from "./lib/aylamed-pilot-content.js";
@@ -681,6 +696,7 @@ const allowedOrigins = [
   "https://paleturquoise-quail-255896.hostingersite.com",
   "https://aylamedapp.com",
   "https://www.aylamedapp.com",
+  ...aylaConfiguredExamOrigins(process.env),
   ...String(process.env.NEXTGEN_CORS_ALLOWED_ORIGINS || "")
     .split(",")
     .map((value) => value.trim().replace(/\/$/, ""))
@@ -40474,6 +40490,7 @@ function aylaQbankSeenQuestionIds(db, {
 }
 
 async function aylaSelectQbankSessionQuestions({
+  db,
   examTrack,
   requestedCount,
   filters,
@@ -40485,6 +40502,14 @@ async function aylaSelectQbankSessionQuestions({
   questionExposureCounts = {},
   seenQuestionIds = [],
 } = {}) {
+  const publicationDestination = purpose === "baseline_diagnostic" ? "diagnostic" : "qbank";
+  const collectionIds = await aylaPublishedQbankCollectionIds(db, {
+    examTrack,
+    sourceExamTrack: examTrack,
+    destination: publicationDestination,
+    destinationScope,
+    sourceProfile,
+  });
   if (purpose !== "baseline_diagnostic") {
     const selected = await listContentQbankQuestions({
       examTrack,
@@ -40498,6 +40523,7 @@ async function aylaSelectQbankSessionQuestions({
       limit: requestedCount,
       seed: crypto.randomUUID(),
       seenQuestionIds,
+      collectionIds,
     });
     return { selected, availableSystemKeys: [], selectedSystemKeys: [] };
   }
@@ -40510,6 +40536,7 @@ async function aylaSelectQbankSessionQuestions({
     seed: selectionSeed
       || `aylamed-step1-diagnostic-v${AYLA_DIAGNOSTIC_BLUEPRINT_VERSION}:${destinationScope || "default"}`,
     seenQuestionIds,
+    collectionIds,
   });
   const preferredCandidates = preferredQuestionIds.length
     ? await getContentQbankQuestions({
@@ -40517,6 +40544,7 @@ async function aylaSelectQbankSessionQuestions({
       examTrack,
       destination: "aylamed_qbank",
       destinationScope,
+      collectionIds,
     })
     : [];
   const candidates = [...new Map(
@@ -41787,18 +41815,39 @@ app.get("/api/ayla/qbank/catalog", async (req, res) => {
     const auth = await aylaV189RequireStudent(req, String(req.query.student_id || ""), "qbank");
     const access = aylaRequireQbankAccess(auth.db, auth.user, auth.student, req.query.exam_track || req.query.examTrack || "");
     const examTrack = access.exam_track;
+    aylaRequireExamPublished(auth.db, aylaCanonicalExamTrack(examTrack), "qbank");
     const destinationScope = aylaStudentCatalogDestinationScope(auth.student);
     const presentationPolicy = await getContentQbankPresentationPolicy({ examTrack });
     const sourceProfile = resolveContentQbankStudentSourceProfile(
       presentationPolicy,
       req.query.source_profile || req.query.sourceProfile || "",
     );
-    const catalog = await getContentQbankCatalog({
-      examTrack,
-      destination: "aylamed_qbank",
-      destinationScope,
-      sourceProfile,
-    });
+    const sourceExamTracks = [examTrack, ...listAylaExamSupplements(examTrack)
+      .filter((policy) => policy.resource_types.includes("qbank_collection"))
+      .map((policy) => normalizeAylaRegistryExamTrack(policy.source_exam_track))
+      .filter(Boolean)];
+    const catalog = (await Promise.all([...new Set(sourceExamTracks)].map(async (sourceExamTrack) => {
+      const collectionIds = await aylaPublishedQbankCollectionIds(auth.db, {
+        examTrack,
+        sourceExamTrack,
+        destination: "qbank",
+        destinationScope,
+        sourceProfile,
+      });
+      const rows = await getContentQbankCatalog({
+        examTrack: sourceExamTrack,
+        destination: "aylamed_qbank",
+        destinationScope,
+        sourceProfile,
+        collectionIds,
+      });
+      return rows.map((row) => ({
+        ...row,
+        source_exam_track: sourceExamTrack,
+        supplemental: sourceExamTrack !== examTrack,
+        scoring_allowed: sourceExamTrack === examTrack,
+      }));
+    }))).flat();
     return aylaSendOk(res, {
       exam_track: examTrack,
       entitlement: { type: access.entitlement_type, expires_at: access.expires_at || null },
@@ -41819,6 +41868,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
     const access = aylaRequireQbankAccess(auth.db, auth.user, auth.student, req.body.exam_track || req.body.examTrack || "");
     const destinationScope = aylaStudentCatalogDestinationScope(auth.student);
     const purpose = normalizeAylaQbankPurpose(req.body.purpose || req.body.session_purpose || "practice");
+    aylaRequireExamPublished(auth.db, aylaCanonicalExamTrack(access.exam_track), purpose === "baseline_diagnostic" ? "diagnostic" : "qbank");
     const requestedCount = Number(req.body.question_count ?? req.body.questionCount ?? 40);
     if (!Number.isInteger(requestedCount) || requestedCount < 1 || requestedCount > 200) {
       return aylaSendError(res, 400, "question_count must be an integer between 1 and 200");
@@ -42002,11 +42052,19 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
 
     let selection;
     if (roadmapAssignmentId) {
+      const collectionIds = await aylaPublishedQbankCollectionIds(auth.db, {
+        examTrack: access.exam_track,
+        sourceExamTrack: access.exam_track,
+        destination: "roadmap",
+        destinationScope,
+        sourceProfile,
+      });
       const rows = await getContentQbankQuestions({
         questionIds: roadmapQuestionIds,
         examTrack: access.exam_track,
         destination: "aylamed_qbank",
         destinationScope,
+        collectionIds,
       });
       const byId = new Map(rows.map((row) => [String(row.id || ""), row]));
       const selected = roadmapQuestionIds.map((id) => byId.get(String(id))).filter(Boolean);
@@ -42040,6 +42098,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
       selection = { selected, availableSystemKeys: [], selectedSystemKeys: [] };
     } else {
       selection = await aylaSelectQbankSessionQuestions({
+        db: auth.db,
         examTrack: access.exam_track,
         requestedCount: effectiveRequestedCount,
         filters: effectiveFilters,
@@ -65391,6 +65450,7 @@ function ngStartBillingExpiryRunner() {
 // -----------------------------------------------------------------------------
 
 const AYLA_BACKEND_BUILD = "aylamed-safe-shared-student-profile-v219";
+const AYLA_MULTIEXAM_BUILD = "aylamed-multiexam-publication-taxonomy-v220";
 
 const AYLA_EXAM_TRACKS = [
   "USMLE Step 1",
@@ -65404,13 +65464,13 @@ const AYLA_EXAM_TRACKS = [
 ];
 
 const AYLA_EXAM_REGISTRY = Object.freeze({
-  usmle_step_1: { id: "usmle_step_1", label: "USMLE Step 1", aliases: ["step 1", "step1", "usmle step 1"], curriculumVersion: "2026.1", systems: ["Cardiovascular", "Renal", "Respiratory", "Gastrointestinal", "Neurology", "Endocrine", "Reproductive", "Hematology", "Immunology", "Musculoskeletal", "Behavioral Science", "Biochemistry", "Pharmacology", "Microbiology", "Biostatistics and Ethics"] },
-  usmle_step_2_ck: { id: "usmle_step_2_ck", label: "USMLE Step 2 CK", aliases: ["step 2", "step2", "step 2 ck", "usmle step 2 ck"], curriculumVersion: "2026.1", systems: ["Internal Medicine", "Surgery", "Obstetrics and Gynecology", "Pediatrics", "Psychiatry", "Emergency Medicine", "Family Medicine", "Preventive Medicine", "Ethics and Biostatistics"] },
-  usmle_step_3: { id: "usmle_step_3", label: "USMLE Step 3", aliases: ["step 3", "step3", "usmle step 3"], curriculumVersion: "2026.1", systems: ["Internal Medicine", "Surgery", "Pediatrics", "Obstetrics and Gynecology", "Psychiatry", "Emergency Medicine", "Family Medicine", "Preventive Medicine", "Biostatistics and Ethics", "Computer-based Case Simulations"] },
-  plab: { id: "plab", label: "PLAB", aliases: ["plab", "plab 1", "plab1", "professional and linguistic assessments board"], curriculumVersion: "2026.1", systems: ["Medicine", "Surgery", "Emergency Medicine", "Obstetrics and Gynecology", "Pediatrics", "Psychiatry", "General Practice", "Clinical Ethics", "Communication Skills", "Patient Safety", "UK Clinical Guidelines"] },
-  amc: { id: "amc", label: "AMC", aliases: ["amc", "australian medical council", "australia"], curriculumVersion: "2026.1", systems: ["Medicine", "Surgery", "Women's Health", "Child Health", "Mental Health", "Population Health", "Ethics", "Australian Clinical Practice"] },
-  mccqe: { id: "mccqe", label: "MCCQE", aliases: ["mccqe", "mccqe1", "mccqe part 1", "medical council of canada", "canada"], curriculumVersion: "2026.1", systems: ["Family Medicine", "Internal Medicine", "Surgery", "Pediatrics", "Obstetrics and Gynecology", "Psychiatry", "Emergency Medicine", "Preventive Care", "Ethics and Communication"] },
-  nclex: { id: "nclex", label: "NCLEX", aliases: ["nclex", "nclex rn", "nclex-rn", "nursing licensure"], curriculumVersion: "2026.1", systems: ["Management of Care", "Safety and Infection Control", "Health Promotion and Maintenance", "Psychosocial Integrity", "Basic Care and Comfort", "Pharmacological Therapies", "Reduction of Risk Potential", "Physiological Adaptation", "Prioritization and Delegation"] },
+  usmle_step_1: { id: "usmle_step_1", label: "USMLE Step 1", aliases: ["step 1", "step1", "usmle step 1"], curriculumVersion: "2026.1", blueprint: AYLA_EXAM_SITES.usmle_step_1.blueprint, systems: ["Cardiovascular", "Renal", "Respiratory", "Gastrointestinal", "Neurology", "Endocrine", "Reproductive", "Hematology", "Immunology", "Musculoskeletal", "Behavioral Science", "Biochemistry", "Pharmacology", "Microbiology", "Biostatistics and Ethics"] },
+  usmle_step_2_ck: { id: "usmle_step_2_ck", label: "USMLE Step 2 CK", aliases: ["step 2", "step2", "step 2 ck", "usmle step 2 ck"], curriculumVersion: "2026.1", blueprint: AYLA_EXAM_SITES.usmle_step_2_ck.blueprint, systems: ["Internal Medicine", "Surgery", "Obstetrics and Gynecology", "Pediatrics", "Psychiatry", "Emergency Medicine", "Family Medicine", "Preventive Medicine", "Ethics and Biostatistics"] },
+  usmle_step_3: { id: "usmle_step_3", label: "USMLE Step 3", aliases: ["step 3", "step3", "usmle step 3"], curriculumVersion: "2026.1", blueprint: AYLA_EXAM_SITES.usmle_step_3.blueprint, systems: ["Internal Medicine", "Surgery", "Pediatrics", "Obstetrics and Gynecology", "Psychiatry", "Emergency Medicine", "Family Medicine", "Preventive Medicine", "Biostatistics and Ethics", "Computer-based Case Simulations"] },
+  plab: { id: "plab", label: "PLAB", aliases: ["plab", "plab 1", "plab1", "professional and linguistic assessments board"], curriculumVersion: "2026-09", blueprint: AYLA_EXAM_SITES.plab.blueprint, systems: ["Medicine", "Surgery", "Emergency Medicine", "Obstetrics and Gynecology", "Pediatrics", "Psychiatry", "General Practice", "Clinical Ethics", "Communication Skills", "Patient Safety", "UK Clinical Guidelines"] },
+  amc: { id: "amc", label: "AMC", aliases: ["amc", "australian medical council", "australia"], curriculumVersion: "2026.1", blueprint: AYLA_EXAM_SITES.amc.blueprint, systems: ["Medicine", "Surgery", "Women's Health", "Child Health", "Mental Health", "Population Health", "Ethics", "Australian Clinical Practice"] },
+  mccqe: { id: "mccqe", label: "MCCQE", aliases: ["mccqe", "mccqe1", "mccqe part 1", "medical council of canada", "canada"], curriculumVersion: "2026.1", blueprint: AYLA_EXAM_SITES.mccqe.blueprint, systems: ["Family Medicine", "Internal Medicine", "Surgery", "Pediatrics", "Obstetrics and Gynecology", "Psychiatry", "Emergency Medicine", "Preventive Care", "Ethics and Communication"] },
+  nclex: { id: "nclex", label: "NCLEX", aliases: ["nclex", "nclex rn", "nclex-rn", "nursing licensure"], curriculumVersion: "2026-04_to_2029-03", blueprint: AYLA_EXAM_SITES.nclex.blueprint, systems: ["Management of Care", "Safety and Infection Control", "Health Promotion and Maintenance", "Psychosocial Integrity", "Basic Care and Comfort", "Pharmacological Therapies", "Reduction of Risk Potential", "Physiological Adaptation", "Prioritization and Delegation"] },
 });
 
 function aylaCanonicalExamTrack(value = "") {
@@ -65418,6 +65478,39 @@ function aylaCanonicalExamTrack(value = "") {
 }
 
 function aylaExamTrackDefinition(value = "") { const id = aylaCanonicalExamTrack(value); return id ? AYLA_EXAM_REGISTRY[id] : null; }
+
+function aylaRequestExamSite(req) {
+  const requestOrigin = req.headers.origin
+    || req.headers["x-ayla-site-origin"]
+    || req.headers["x-forwarded-host"]
+    || req.headers.host
+    || "";
+  return resolveAylaExamSite(requestOrigin, process.env);
+}
+
+app.use("/api/ayla", (req, res, next) => {
+  const site = aylaRequestExamSite(req);
+  req.aylaExamSite = site;
+  // AylaMed keeps one central admin/control plane for every website. Domain
+  // scope is a student-delivery boundary, not an obstacle to authenticated
+  // administrators managing private content for a different exam site.
+  if (req.path === "/admin" || req.path.startsWith("/admin/")) return next();
+  const requestedExamTrack = aylaExamTrackFromPayload({
+    ...(req.query || {}),
+    ...(req.body && typeof req.body === "object" ? req.body : {}),
+  });
+  try {
+    aylaExamSiteRequestTrack(site, requestedExamTrack);
+    return next();
+  } catch (error) {
+    return res.status(error.statusCode || 403).json({
+      success: false,
+      error: error.message,
+      code: error.code || "EXAM_DOMAIN_SCOPE_MISMATCH",
+      exam_track_id: error.exam_track_id || site.exam_track_id || null,
+    });
+  }
+});
 
 const AYLA_COLLECTIONS = {
   aylaStudents: { route: "/api/ayla/students", prefix: "STU", label: "student" },
@@ -65445,6 +65538,8 @@ const AYLA_COLLECTIONS = {
   aylaVimeoCatalogDrafts: { route: "/api/ayla/admin/resources/vimeo-catalog", prefix: "AYLA-VIMEO-DRAFT", label: "vimeoCatalogDraft", customPost: true, immutableAdminWrites: true },
   aylaVimeoCatalogJobs: { route: "/api/ayla/admin/resources/vimeo-catalog/jobs", prefix: "AYLA-VIMEO-JOB", label: "vimeoCatalogJob", customPost: true, immutableAdminWrites: true },
   aylaVimeoDeliveryControls: { route: "/api/ayla/admin/resources/vimeo-delivery-controls", prefix: "AYLA-VIMEO-DELIVERY", label: "vimeoDeliveryControl", customPost: true, immutableAdminWrites: true },
+  aylaExamPublicationControls: { route: "/api/ayla/admin/publication-controls/exams", prefix: "AYLA-EXAM-PUBLICATION", label: "examPublicationControl", customPost: true, immutableAdminWrites: true },
+  aylaResourcePublicationControls: { route: "/api/ayla/admin/publication-controls/resources", prefix: "AYLA-RESOURCE-PUBLICATION", label: "resourcePublicationControl", customPost: true, immutableAdminWrites: true },
   aylaVimeoRemovalTombstones: { route: "/api/ayla/admin/resources/vimeo-removal-tombstones", prefix: "AYLA-VIMEO-REMOVED", label: "vimeoRemovalTombstone", customPost: true, immutableAdminWrites: true },
   aylaNotebooks: { route: "/api/ayla/notebooks", prefix: "AYLA-NOTE", label: "notebook", customPost: true, immutableAdminWrites: true },
   aylaNotebookVersions: { route: "/api/ayla/notebook-versions", prefix: "AYLA-NV", label: "notebookVersion", customPost: true, immutableAdminWrites: true },
@@ -65616,6 +65711,8 @@ const DEFAULT_AYLA_DB = {
   aylaVimeoCatalogDrafts: {},
   aylaVimeoCatalogJobs: {},
   aylaVimeoDeliveryControls: {},
+  aylaExamPublicationControls: {},
+  aylaResourcePublicationControls: {},
   aylaVimeoRemovalTombstones: {},
   aylaNotebooks: {},
   aylaNotebookVersions: {},
@@ -67535,20 +67632,65 @@ function aylaBuildStudentShell(db, rawUser, { requestedStudentId = null, request
   return shell;
 }
 
-function aylaCurrentStudentShell(db, rawUser) {
+function aylaSiteExamTrackSet(siteContext = {}) {
+  return new Set((siteContext?.allowed_exam_track_ids || [])
+    .map(aylaCanonicalExamTrack)
+    .filter(Boolean));
+}
+
+function aylaFilterStudentShellForSite(shell, siteContext = {}) {
+  const allowed = aylaSiteExamTrackSet(siteContext);
+  if (!allowed.size) return shell;
+  const dashboards = (shell?.dashboards || [])
+    .filter((dashboard) => allowed.has(aylaCanonicalExamTrack(dashboard.exam_track_id)));
+  let activeDashboard = dashboards.find((dashboard) => (
+    aylaCanonicalExamTrack(dashboard.exam_track_id)
+      === aylaCanonicalExamTrack(shell?.active_exam_track_id)
+  )) || null;
+  if (!activeDashboard && !shell?.denied_reason) activeDashboard = dashboards[0] || null;
+  return {
+    ...shell,
+    dashboards,
+    active_dashboard: activeDashboard,
+    active_exam_track_id: activeDashboard?.exam_track_id || null,
+    active_student_id: activeDashboard?.student_id || null,
+    can_switch: dashboards.length > 1,
+    denied_reason: shell?.denied_reason
+      || (activeDashboard ? null : "no_active_exam_entitlement"),
+  };
+}
+
+function aylaCurrentStudentShell(db, rawUser, siteContext = null) {
   const selectedStudent = rawUser?.studentId ? aylaGetItem(db, "aylaStudents", rawUser.studentId) : null;
   const selectedOwned = selectedStudent && String(selectedStudent.ayla_user_id || selectedStudent.aylaUserId || selectedStudent.user_id || selectedStudent.userId || "") === String(rawUser?.id || "");
-  const selectionUser = selectedOwned ? rawUser : { ...rawUser, studentId: null, activeExamTrackId: null, active_exam_track_id: null };
-  const selectedExamTrack = aylaCanonicalExamTrack(
-    rawUser?.activeExamTrackId || rawUser?.active_exam_track_id
+  const forcedExamTrackId = aylaCanonicalExamTrack(siteContext?.exam_track_id);
+  const siteTracks = aylaSiteExamTrackSet(siteContext);
+  const selectedStudentExamTrack = aylaCanonicalExamTrack(
+    selectedStudent?.examTrackId || selectedStudent?.exam_track_id || selectedStudent?.exam,
+  );
+  const selectedMatchesSite = forcedExamTrackId
+    ? selectedStudentExamTrack === forcedExamTrackId
+    : (!siteTracks.size || siteTracks.has(selectedStudentExamTrack));
+  const selectedAvailable = selectedOwned && selectedMatchesSite;
+  const selectionUser = selectedAvailable ? rawUser : { ...rawUser, studentId: null, activeExamTrackId: null, active_exam_track_id: null };
+  const preferredExamTrack = aylaCanonicalExamTrack(
+    forcedExamTrackId
+      || rawUser?.activeExamTrackId
+      || rawUser?.active_exam_track_id
       || (selectedOwned ? selectedStudent.examTrackId || selectedStudent.exam_track_id || selectedStudent.exam : null),
   );
+  const selectedExamTrack = preferredExamTrack
+    && (!siteTracks.size || siteTracks.has(preferredExamTrack))
+    ? preferredExamTrack
+    : null;
   let shell = aylaBuildStudentShell(db, selectionUser, {
-    requestedStudentId: selectedOwned ? selectedStudent.id : null,
+    requestedStudentId: selectedAvailable ? selectedStudent.id : null,
     requestedExamTrack: selectedExamTrack,
   });
-  if (shell.denied_reason || !shell.active_dashboard) shell = aylaBuildStudentShell(db, selectionUser);
-  return shell;
+  if ((shell.denied_reason || !shell.active_dashboard) && !forcedExamTrackId && !selectedExamTrack) {
+    shell = aylaBuildStudentShell(db, selectionUser);
+  }
+  return aylaFilterStudentShellForSite(shell, siteContext);
 }
 
 function aylaPersistShellSelection(db, rawUser, shell) {
@@ -69219,7 +69361,7 @@ app.get("/api/ayla/auth/me", async (req, res) => {
   try {
     const { user, rawUser, db } = await aylaGetAuthenticatedUser(req);
     const legacyBound = aylaBindLegacyEnrollmentScopes(db, rawUser);
-    const shell = aylaCurrentStudentShell(db, rawUser);
+    const shell = aylaCurrentStudentShell(db, rawUser, req.aylaExamSite);
     const selectionChanged = aylaPersistShellSelection(db, rawUser, shell);
     if (legacyBound || selectionChanged) await writeAylaDb(db);
     const linkedStudent = shell.active_student_id ? aylaGetItem(db, "aylaStudents", shell.active_student_id) : null;
@@ -69245,7 +69387,7 @@ app.get("/api/ayla/shell", async (req, res) => {
   try {
     const { rawUser, db } = await aylaGetAuthenticatedUser(req);
     const legacyBound = aylaBindLegacyEnrollmentScopes(db, rawUser);
-    const shell = aylaCurrentStudentShell(db, rawUser);
+    const shell = aylaCurrentStudentShell(db, rawUser, req.aylaExamSite);
     const selectionChanged = aylaPersistShellSelection(db, rawUser, shell);
     if (legacyBound || selectionChanged) await writeAylaDb(db);
     return aylaSendOk(res, { user: aylaSanitizeUser(rawUser), shell, dashboards: shell.dashboards, activeDashboard: shell.active_dashboard });
@@ -69260,7 +69402,10 @@ app.post("/api/ayla/shell/switch", async (req, res) => {
     const legacyBound = aylaBindLegacyEnrollmentScopes(db, rawUser);
     if (legacyBound) await writeAylaDb(db);
     const requestedStudentId = req.body.studentId || req.body.student_id || null;
-    const requestedExamTrack = aylaExamTrackFromPayload(req.body);
+    const requestedExamTrack = aylaExamSiteRequestTrack(
+      req.aylaExamSite,
+      aylaExamTrackFromPayload(req.body),
+    );
     if (!requestedStudentId && !requestedExamTrack) return aylaSendError(res, 400, "studentId or a supported examTrackId is required");
     const shell = aylaBuildStudentShell(db, rawUser, { requestedStudentId, requestedExamTrack });
     if (shell.denied_reason || !shell.active_dashboard) {
@@ -69612,6 +69757,9 @@ app.get("/api/ayla/health", async (req, res) => {
         multi_exam_student_shell: true,
         persistent_exam_dashboard_switcher: true,
         per_exam_student_state_isolation: true,
+        standalone_exam_domain_isolation: true,
+        domain_scoped_content_progress_entitlements: true,
+        future_exam_domains_env_configured: true,
         governed_cross_exam_handoff: true,
         target_exam_entitlement_required: true,
         new_target_exam_baseline_required: true,
@@ -69673,7 +69821,11 @@ app.get("/api/ayla/routes", (req, res) => {
   return aylaSendOk(res, {
     routes: [
       "GET /api/ayla/health",
+      "GET /api/ayla/exam-sites",
       "GET /api/ayla/public-config",
+      "GET /api/ayla/admin/publication-controls",
+      "PUT /api/ayla/admin/publication-controls/exams/:examTrack",
+      "PUT /api/ayla/admin/publication-controls/resources/:resourceType/:resourceId",
       "GET/PUT /api/ayla/admin/settings",
       "GET /api/ayla/admin/plan-feature-matrix",
       "PUT /api/ayla/admin/plans/:planId/features",
@@ -69785,6 +69937,149 @@ app.get("/api/ayla/exams", (req, res) => aylaSendOk(res, {
     diagnosticEvidenceIsServerVerified: true,
   },
 }));
+
+app.get("/api/ayla/exam-sites", (req, res) => aylaSendOk(res, {
+  multiexam_build: AYLA_MULTIEXAM_BUILD,
+  mode: req.aylaExamSite?.mode || "multi_exam_platform",
+  active_site_id: req.aylaExamSite?.site_id || null,
+  active_exam_track_id: req.aylaExamSite?.exam_track_id || null,
+  allowed_exam_track_ids: req.aylaExamSite?.allowed_exam_track_ids || [],
+  websites: listAylaExamWebsites(process.env),
+  sites: listAylaExamSites(process.env),
+  isolation: {
+    physical_database_copy_per_exam: false,
+    shared_identity_platform: true,
+    content_namespaced_per_exam: true,
+    progress_namespaced_per_exam: true,
+    entitlements_namespaced_per_exam: true,
+    usmle_steps_share_one_website: true,
+    non_usmle_websites_are_independently_bound: true,
+    cross_exam_state_copy: false,
+  },
+}));
+
+app.get("/api/ayla/admin/publication-controls", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
+    aylaEnsureSeedData(db);
+    const panel = buildAylaPublicationControlPanel({
+      examControls: aylaValues(db, "aylaExamPublicationControls"),
+      resourceControls: aylaValues(db, "aylaResourcePublicationControls"),
+    });
+    const storedResources = aylaValues(db, "aylaResources").map((resource) => ({
+      id: String(resource.id || ""),
+      type: aylaPublicationResourceType(resource),
+      exam_track_id: aylaCanonicalExamTrack(resource.examTrackId || resource.exam_track_id || resource.exam),
+      title: String(resource.title || resource.bookTitle || resource.provider || "Untitled resource"),
+      folder_id: String(resource.folderId || resource.folder_id || resource.sourceData?.folder_id || "") || null,
+      status: resource.status || "active",
+    }));
+    const vimeoFolders = aylaValues(db, "aylaVimeoCatalogSources").map((source) => ({
+      id: String(source.folderId || source.folder_id || ""),
+      type: "vimeo_folder",
+      exam_track_id: aylaCanonicalExamTrack(source.examTrackId || source.exam_track_id || source.exam),
+      title: String(source.folderName || source.folder_name || `Vimeo folder ${source.folderId || source.folder_id || ""}`),
+      folder_id: String(source.folderId || source.folder_id || "") || null,
+      status: source.enabled === false ? "disabled" : "active",
+      video_count: Number(source.folderVideoCount || source.folder_video_count || 0),
+    }));
+    let qbankCollections = [];
+    if (contentRegistryStatus().configured) {
+      qbankCollections = (await aylaListAllContentCollections()).map((collection) => ({
+        id: String(collection.id || ""),
+        type: "qbank_collection",
+        exam_track_id: aylaCanonicalExamTrack(collection.exam_track),
+        title: String(collection.title || collection.collection_key || "QBank collection"),
+        folder_id: null,
+        status: collection.status || "draft",
+        question_count: Number(collection.question_count || 0),
+        taxonomy_complete_count: Number(collection.taxonomy_complete_count || 0),
+      }));
+    }
+    const nativeResources = [...new Map(
+      [...storedResources, ...vimeoFolders, ...qbankCollections]
+        .filter((resource) => resource.id && resource.exam_track_id && resource.type)
+        .map((resource) => [`${resource.exam_track_id}:${resource.type}:${resource.id}`, resource]),
+    ).values()];
+    const supplementalResources = panel.exams.flatMap((exam) => listAylaExamSupplements(exam.examTrackId)
+      .flatMap((supplement) => nativeResources
+        .filter((resource) => resource.exam_track_id === supplement.source_exam_track
+          && supplement.resource_types.includes(resource.type))
+        .map((resource) => ({
+          ...resource,
+          exam_track_id: exam.examTrackId,
+          source_exam_track_id: supplement.source_exam_track,
+          title: `${resource.title} · ${supplement.label}`,
+          supplemental: true,
+          scoring_allowed: false,
+        }))));
+    const availableResources = [...new Map(
+      [...nativeResources, ...supplementalResources]
+        .map((resource) => [`${resource.exam_track_id}:${resource.type}:${resource.id}`, resource]),
+    ).values()];
+    return aylaSendOk(res, {
+      multiexam_build: AYLA_MULTIEXAM_BUILD,
+      ...panel,
+      available_resources: availableResources,
+      supplements: Object.fromEntries(panel.exams.map((exam) => [exam.examTrackId, listAylaExamSupplements(exam.examTrackId)])),
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load publication controls");
+  }
+});
+
+app.put("/api/ayla/admin/publication-controls/exams/:examTrack", async (req, res) => {
+  try {
+    const admin = await aylaRequireAdmin(req);
+    const result = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const examTrackId = aylaCanonicalExamTrack(req.params.examTrack);
+      const id = `AYLA-EXAM-PUBLICATION-${examTrackId}`;
+      const existing = aylaGetItem(db, "aylaExamPublicationControls", id) || {};
+      const control = normalizeAylaExamPublicationControl({
+        ...req.body,
+        examTrackId,
+      }, existing);
+      control.updatedAt = aylaNow();
+      control.updatedBy = admin.user?.id || admin.method || "admin";
+      control.createdAt = existing.createdAt || control.updatedAt;
+      aylaSetItem(db, "aylaExamPublicationControls", control);
+      return control;
+    });
+    return aylaSendOk(res, { control: result, resource_states_preserved: true, progress_and_history_preserved: true });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update exam publication");
+  }
+});
+
+app.put("/api/ayla/admin/publication-controls/resources/:resourceType/:resourceId", async (req, res) => {
+  try {
+    const admin = await aylaRequireAdmin(req);
+    const result = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const examTrackId = aylaCanonicalExamTrack(req.body.examTrackId || req.body.exam_track_id || req.body.examTrack);
+      const existing = aylaValues(db, "aylaResourcePublicationControls").find((row) =>
+        aylaCanonicalExamTrack(row.examTrackId) === examTrackId
+        && String(row.resourceType) === String(req.params.resourceType)
+        && String(row.resourceId) === String(req.params.resourceId)) || {};
+      const control = normalizeAylaResourcePublicationControl({
+        ...req.body,
+        examTrackId,
+        resourceType: req.params.resourceType,
+        resourceId: req.params.resourceId,
+      }, existing);
+      control.updatedAt = aylaNow();
+      control.updatedBy = admin.user?.id || admin.method || "admin";
+      control.createdAt = existing.createdAt || control.updatedAt;
+      aylaSetItem(db, "aylaResourcePublicationControls", control);
+      return control;
+    });
+    return aylaSendOk(res, { control: result });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update resource publication");
+  }
+});
 
 app.post("/api/ayla/pathway-estimate", (req, res) => {
   try {
@@ -70637,6 +70932,7 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
     const auth = AYLA_REQUIRE_STUDENT_AUTH ? await aylaGetAuthenticatedUser(req) : null;
     const db = auth?.db || await readAylaDb();
     aylaEnsureSeedData(db);
+    aylaRequireExamPublished(db, examTrackId, "diagnostic");
     const incomingHandoff = auth?.user?.id
       ? aylaContinuityIncomingHandoff(db, auth.user, examTrackId)
       : null;
@@ -70886,6 +71182,7 @@ app.post("/api/ayla/generate-roadmap", async (req, res) => {
   try {
     const { student: existingStudent, db } = await aylaV189RequireStudent(req, req.body.studentId, "roadmap");
     aylaEnsureSeedData(db);
+    aylaRequireExamPublished(db, aylaCanonicalExamTrack(existingStudent.examTrackId || existingStudent.exam), "roadmap");
     aylaAssertStudentExamIdentity(existingStudent, req.body);
     const mergedInput = { ...(existingStudent || {}), ...req.body };
     const recommendation = aylaRecommendation(mergedInput);
@@ -71880,6 +72177,12 @@ app.get("/api/ayla/public-config", async (req, res) => {
       .map(aylaPublicPlan);
     const knowledge = await aylaKnowledgeStatus();
     return aylaSendOk(res, {
+      site: {
+        id: req.aylaExamSite?.site_id || null,
+        exam_track_id: req.aylaExamSite?.exam_track_id || null,
+        allowed_exam_track_ids: req.aylaExamSite?.allowed_exam_track_ids || [],
+        branding: req.aylaExamSite?.branding || null,
+      },
       settings: {
         ...settings,
         marketing: publicAylaMarketingSettings(settings.marketing),
@@ -73453,6 +73756,115 @@ function aylaV189ResourceType(value = "") {
   return AYLA_V189_RESOURCE_TYPES.has(clean) ? clean : "book";
 }
 
+function aylaPublicationResourceType(resource = {}) {
+  const type = aylaV189ResourceType(resource.type || resource.resourceType || resource.resource_type);
+  if (["vimeo_video", "video_transcript"].includes(type)) return "video";
+  if (["reading", "book", "revision_sheet"].includes(type)) return "book";
+  if (type === "flashcard") return "flashcard_collection";
+  if (["internal_mcq", "external_question", "assessment", "assessment_blueprint"].includes(type)) return "qbank_collection";
+  return type;
+}
+
+async function aylaListAllContentCollections(examTrack = "") {
+  const rows = [];
+  const limit = 200;
+  while (true) {
+    const page = await listContentCollections({ examTrack, limit, offset: rows.length });
+    rows.push(...page);
+    if (page.length < limit) break;
+  }
+  return rows;
+}
+
+function aylaContentCollectionDestinationEnabled(collection, destination, destinationScope = "") {
+  return (Array.isArray(collection.destination_controls) ? collection.destination_controls : []).some((control) => {
+    const scope = String(control.destination_scope || control.destinationScope || "");
+    return control.enabled === true
+      && String(control.destination || "") === String(destination || "")
+      && (!scope || scope === String(destinationScope || ""));
+  });
+}
+
+async function aylaPublishedQbankCollectionIds(db, {
+  examTrack,
+  sourceExamTrack = examTrack,
+  destination = "qbank",
+  destinationScope = "",
+  sourceProfile = "",
+} = {}) {
+  if (!contentRegistryStatus().configured) return [];
+  const targetExamTrackId = aylaCanonicalExamTrack(examTrack);
+  const sourceRegistryTrack = normalizeAylaRegistryExamTrack(sourceExamTrack);
+  if (!targetExamTrackId || !sourceRegistryTrack) return [];
+  const collections = await aylaListAllContentCollections(sourceRegistryTrack);
+  return collections
+    .filter((collection) => String(collection.status || "") === "approved")
+    .filter((collection) => !sourceProfile || String(collection.source_profile || "") === String(sourceProfile))
+    .filter((collection) => aylaContentCollectionDestinationEnabled(
+      collection,
+      "aylamed_qbank",
+      destinationScope,
+    ))
+    .filter((collection) => aylaPublicationResolution(db, {
+      examTrack: targetExamTrackId,
+      sourceExamTrack: aylaCanonicalExamTrack(collection.exam_track || sourceRegistryTrack),
+      resourceType: "qbank_collection",
+      resourceId: String(collection.id || ""),
+      destination,
+    }).allowed)
+    .map((collection) => String(collection.id || ""))
+    .filter(Boolean);
+}
+
+function aylaPublicationResolution(db, { examTrack, sourceExamTrack, resourceType, resourceId, destination } = {}) {
+  return resolveAylaExamPublication({
+    examTrack,
+    sourceExamTrack,
+    resourceType,
+    resourceId,
+    destination,
+    examControls: aylaValues(db, "aylaExamPublicationControls"),
+    resourceControls: aylaValues(db, "aylaResourcePublicationControls"),
+  });
+}
+
+function aylaResourcePublishedFor(db, resource, examTrack, destination = "content_hub") {
+  const sourceExamTrack = aylaCanonicalExamTrack(
+    resource.sourceExamTrackId || resource.source_exam_track_id
+      || resource.contentExamTrackId || resource.content_exam_track_id
+      || resource.examTrackId || resource.exam_track_id || resource.examTrack || resource.exam_track || resource.exam,
+  );
+  const resourceType = aylaPublicationResourceType(resource);
+  const resourceId = String(resource.id || resource.resourceId || resource.resource_id || "").trim();
+  const direct = aylaPublicationResolution(db, { examTrack, sourceExamTrack, resourceType, resourceId, destination });
+  if (!direct.allowed || resourceType !== "video") return direct;
+  const folderId = String(resource.folderId || resource.folder_id || resource.sourceData?.folder_id || resource.source_data?.folder_id || "").trim();
+  return folderId ? aylaPublicationResolution(db, {
+    examTrack,
+    sourceExamTrack,
+    resourceType: "vimeo_folder",
+    resourceId: folderId,
+    destination,
+  }) : direct;
+}
+
+function aylaRequireExamPublished(db, examTrack, destination) {
+  const resolution = aylaPublicationResolution(db, {
+    examTrack,
+    sourceExamTrack: examTrack,
+    resourceType: "qbank_collection",
+    resourceId: "*",
+    destination,
+  });
+  if (!resolution.exam_enabled) {
+    const error = new Error("This exam is not currently published for new learning activity");
+    error.statusCode = 403;
+    error.code = "EXAM_UNPUBLISHED";
+    throw error;
+  }
+  return resolution;
+}
+
 function aylaV189PageRange(resource = {}) {
   const printedStart = resource.printedPageStart ?? resource.printed_page_start;
   const printedEnd = resource.printedPageEnd ?? resource.printed_page_end;
@@ -73743,7 +74155,7 @@ function aylaV189EnrichResourceMappings(db, resource = {}) {
   return out;
 }
 
-function aylaV189RelevantResources(db, student, types = []) {
+function aylaV189RelevantResources(db, student, types = [], { destination = "content_hub" } = {}) {
   const selected = new Set(types.map(aylaV189ResourceType));
   const staticWeak = aylaCleanArray(student.weakAreas || student.selectedWeakAreas).map((x) => String(x).toLowerCase());
   const dynamicWeak = aylaV189SystemProgress(db, student)
@@ -73777,7 +74189,8 @@ function aylaV189RelevantResources(db, student, types = []) {
     .filter((resource) => !selected.size || selected.has(aylaV189ResourceType(resource.type)))
     .filter((resource) => {
       const resourceExam = aylaCanonicalExamTrack(resource.examTrackId || resource.examTrack || resource.exam_track || resource.exam);
-      return Boolean(resourceExam && resourceExam === studentExam && resource.status !== "quarantined");
+      return Boolean(resourceExam && resource.status !== "quarantined"
+        && aylaResourcePublishedFor(db, resource, studentExam, destination).allowed);
     })
     .map((resource) => {
       const enriched = aylaV189EnrichResourceMappings(db, resource);
@@ -73834,16 +74247,28 @@ async function aylaV210RegistryVideoInputs(student, destinations) {
   if (!examTrack) return { rows: [], warning: "unsupported_student_exam_track" };
   try {
     const rows = [];
-    const pageSize = 500;
-    while (true) {
-      const page = await listContentHubVideos({
-        examTrack,
-        destinations,
-        limit: pageSize,
-        offset: rows.length,
-      });
-      rows.push(...page);
-      if (page.length < pageSize) break;
+    const sourceExams = [examTrack, ...listAylaExamSupplements(examTrack)
+      .filter((policy) => policy.resource_types.includes("video"))
+      .map((policy) => normalizeAylaRegistryExamTrack(policy.source_exam_track))
+      .filter(Boolean)];
+    for (const sourceExamTrack of [...new Set(sourceExams)]) {
+      const sourceRows = [];
+      const pageSize = 500;
+      while (true) {
+        const page = await listContentHubVideos({
+          examTrack: sourceExamTrack,
+          destinations,
+          limit: pageSize,
+          offset: sourceRows.length,
+        });
+        sourceRows.push(...page.map((row) => ({
+          ...row,
+          sourceExamTrackId: normalizeAylaShellExamTrack(sourceExamTrack),
+          supplementalForExamTrackId: sourceExamTrack === examTrack ? null : normalizeAylaShellExamTrack(examTrack),
+        })));
+        if (page.length < pageSize) break;
+      }
+      rows.push(...sourceRows);
     }
     return { rows, warning: null };
   } catch (error) {
@@ -73857,10 +74282,11 @@ async function aylaV210EligibleVideos(db, student, { forRoadmap = false, forNote
     student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam,
   );
   if (!examTrackId) return { videos: [], assignments: [], warning: "unsupported_student_exam_track" };
+  aylaRequireExamPublished(db, examTrackId, forRoadmap ? "roadmap" : forNotes ? "history" : "content_hub");
   const assignments = aylaV210VideoAssignments(db, student);
   const deliveryControls = aylaValues(db, "aylaVimeoDeliveryControls");
   const destination = forNotes ? "notes" : forRoadmap ? "roadmap" : "content_hub";
-  const legacy = aylaV189RelevantResources(db, student, ["vimeo_video", "video_transcript"])
+  const legacy = aylaV189RelevantResources(db, student, ["vimeo_video", "video_transcript"], { destination })
     .filter((row) => aylaVimeoAllowedFor(row, deliveryControls, destination))
     .map((row) => ({
       ...row,
@@ -73873,6 +74299,7 @@ async function aylaV210EligibleVideos(db, student, { forRoadmap = false, forNote
     forRoadmap ? ["aylamed_roadmap"] : ["aylamed_content_hub", "aylamed_roadmap"],
   );
   let videos = normalizeAylaContentHubVideos([...legacy, ...registry.rows], { examTrack: examTrackId });
+  videos = videos.filter((video) => aylaResourcePublishedFor(db, video, examTrackId, destination).allowed);
   videos = videos.filter((video) => aylaStep1PilotVimeoVisibleToStudent(video, student));
   if (!forRoadmap && !forNotes) {
     videos = videos.filter((video) =>
@@ -73883,7 +74310,7 @@ async function aylaV210EligibleVideos(db, student, { forRoadmap = false, forNote
   return { videos, assignments, warning: registry.warning };
 }
 
-async function aylaV250EligibleQbankQuestions(student, {
+async function aylaV250EligibleQbankQuestions(db, student, {
   date = aylaDateOnly(),
   system = "",
   subsystem = "",
@@ -73892,7 +74319,7 @@ async function aylaV250EligibleQbankQuestions(student, {
   seenQuestionIds = [],
 } = {}) {
   const destinationScope = aylaStudentCatalogDestinationScope(student);
-  if (!destinationScope || !contentRegistryStatus().configured) {
+  if (!contentRegistryStatus().configured) {
     return { questions: [], destinationScope, warning: null };
   }
   const examTrack = normalizeAylaRegistryExamTrack(
@@ -73903,26 +74330,53 @@ async function aylaV250EligibleQbankQuestions(student, {
       || student.exam,
   );
   if (!examTrack) return { questions: [], destinationScope, warning: "unsupported_student_exam_track" };
+  const targetExamTrackId = aylaCanonicalExamTrack(examTrack);
   const requestedLimit = Math.max(1, Math.min(40, Number(limit || 24)));
-  const requestedSystem = canonicalStep1DiagnosticSystem(system);
+  const requestedSystem = targetExamTrackId === "usmle_step_1"
+    ? canonicalStep1DiagnosticSystem(system)
+    : aylaV189MappingKey(system);
   const topicKey = ["", "core review"].includes(aylaV189MappingKey(topic))
     ? ""
     : aylaV189MappingKey(topic);
   try {
-    const rows = await listContentQbankQuestions({
-      examTrack,
-      destination: "aylamed_qbank",
-      destinationScope,
-      limit: Math.min(200, Math.max(80, requestedLimit * 5)),
-      seed: `${student.id}:${date}:${requestedSystem || "discovery"}:${topicKey}`,
-      seenQuestionIds,
-    });
+    const sourceExams = [examTrack, ...listAylaExamSupplements(examTrack)
+      .filter((policy) => policy.resource_types.includes("qbank_collection"))
+      .map((policy) => normalizeAylaRegistryExamTrack(policy.source_exam_track))
+      .filter(Boolean)];
+    const rows = (await Promise.all([...new Set(sourceExams)].map(async (sourceExamTrack) => {
+      const collectionIds = await aylaPublishedQbankCollectionIds(db, {
+        examTrack,
+        sourceExamTrack,
+        destination: "roadmap",
+        destinationScope,
+      });
+      const sourceRows = await listContentQbankQuestions({
+        examTrack: sourceExamTrack,
+        destination: "aylamed_qbank",
+        destinationScope,
+        collectionIds,
+        limit: Math.min(200, Math.max(80, requestedLimit * 5)),
+        seed: `${student.id}:${date}:${requestedSystem || "discovery"}:${topicKey}:${sourceExamTrack}`,
+        seenQuestionIds,
+      });
+      return sourceRows.map((row) => ({
+        ...row,
+        source_exam_track: sourceExamTrack,
+        supplemental: sourceExamTrack !== examTrack,
+        scoring_allowed: sourceExamTrack === examTrack,
+      }));
+    }))).flat();
     const eligible = rows
       .map((row) => {
         const canonicalSystem = classifyStep1DiagnosticQuestion(row);
+        const resolvedSystem = targetExamTrackId === "usmle_step_1"
+          ? canonicalSystem
+          : String(row.system_key || row.taxonomy?.system_key || "").trim();
         const media = auditDiagnosticQuestionMedia(row);
-        if (!canonicalSystem || !media.ready) return null;
-        return applyDiagnosticSystemOverride(row, canonicalSystem);
+        if (!resolvedSystem || !media.ready) return null;
+        return targetExamTrackId === "usmle_step_1"
+          ? applyDiagnosticSystemOverride(row, canonicalSystem)
+          : { ...row, system_key: resolvedSystem };
       })
       .filter(Boolean);
     const systemMatches = requestedSystem
@@ -73953,8 +74407,12 @@ async function aylaV250EligibleQbankQuestions(student, {
           contentQuestionId: String(row.id),
           type: "internal_mcq",
           provider: "AylaMed QBank",
-          examTrackId: aylaCanonicalExamTrack(examTrack),
+          examTrackId: targetExamTrackId,
           examTrack,
+          sourceExamTrackId: aylaCanonicalExamTrack(row.source_exam_track),
+          supplemental: row.supplemental === true,
+          supplementalLabel: row.supplemental === true ? "USMLE Step 2 CK Supplemental" : null,
+          scoringAllowed: row.scoring_allowed === true,
           resourceNumber: row.display_question_id || row.student_qid || "",
           questionNumber: row.display_question_id || row.student_qid || "",
           title: aylaStudentTaxonomyLabel(
@@ -73983,7 +74441,7 @@ async function aylaV250EligibleQbankQuestions(student, {
           sourceAccessMode: "protected",
           sourceType: "content_registry_qbank",
           accessScope: "private_pilot",
-          pilotOnly: true,
+          pilotOnly: targetExamTrackId === "usmle_step_1",
         };
       }),
     };
@@ -75392,6 +75850,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     const assignments = aylaValues(db, "aylaResourceAssignments").filter((row) => String(row.dailyPlanId) === String(existing.id));
     return { plan: existing, assignments, reused: true, completedHistoryProtected: true };
   }
+  aylaRequireExamPublished(db, aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam), "roadmap");
   if (existing && !options.force) {
     const assignments = aylaValues(db, "aylaResourceAssignments").filter((row) => String(row.dailyPlanId) === String(existing.id));
     return { plan: existing, assignments, reused: true };
@@ -75496,7 +75955,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       .filter((row, index, all) => all.findIndex((candidate) => String(candidate.id) === String(row.id)) === index));
   };
   const registryQbank = qbankEnabled
-      ? await aylaV250EligibleQbankQuestions(student, {
+      ? await aylaV250EligibleQbankQuestions(db, student, {
         date,
         system: focusSystem,
         subsystem: focusSubsystem,
@@ -78782,6 +79241,7 @@ app.get("/api/ayla/admin/pilot/cohorts/:cohortId/report", async (req, res) => {
 app.get("/api/ayla/students/:studentId/personal-tutor", async (req, res) => {
   try {
     const initial = await aylaV189RequireStudent(req, req.params.studentId, "personal_tutor");
+    aylaRequireExamPublished(initial.db, aylaCanonicalExamTrack(initial.student.examTrackId || initial.student.exam), "personal_tutor");
     const date = aylaV247StudyDate(initial.student, req.query.date);
     const snapshot = await aylaV213AtomicTutorSnapshot(initial, date);
     res.setHeader("Cache-Control", "private, no-store");
@@ -82796,6 +83256,7 @@ app.post("/api/ayla/students/:studentId/flashcard-reviews", async (req, res) => 
 app.post("/api/ayla/students/:studentId/assessment-attempts", async (req, res) => {
   try {
     const { student, db } = await aylaV189RequireStudent(req, req.params.studentId, "assessments");
+    aylaRequireExamPublished(db, aylaCanonicalExamTrack(student.examTrackId || student.exam), "assessment");
     const assignment = aylaGetItem(db, "aylaResourceAssignments", req.body.assignmentId);
     if (!assignment || !aylaAdaptiveEvidenceMatchesStudent(assignment, student) || String(assignment.category || "") !== "assessment") return aylaSendError(res, 404, "Verified assessment assignment not found");
     const assessmentItem = (Array.isArray(assignment.items) ? assignment.items : [])[0];

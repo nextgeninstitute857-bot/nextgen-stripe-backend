@@ -144,6 +144,8 @@ test('QBank delivery resolves collection-scoped image, audio, and video links fr
   assert.match(projection, /av\.source_alias_id=delivery\.source_alias_id/);
   assert.match(projection, /source_priority/);
   assert.match(projection, /DISTINCT ON \(candidate\.media_ref\)/);
+  assert.match(projection, /a\.collection_id=ANY\(/);
+  assert.match(projection, /delivery\.collection_id/);
 });
 
 test('every question import durably preserves its collection-scoped media manifest on the source alias', () => {

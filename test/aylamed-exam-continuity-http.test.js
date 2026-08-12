@@ -110,6 +110,20 @@ test("isolated continuity flow requires target entitlement and baseline, prefill
         quiet_hours_end: 8,
       },
     },
+    aylaExamPublicationControls: {
+      "AYLA-EXAM-PUBLICATION-usmle_step_1": {
+        id: "AYLA-EXAM-PUBLICATION-usmle_step_1",
+        type: "exam_publication_control",
+        examTrackId: "usmle_step_1",
+        enabled: true,
+      },
+      "AYLA-EXAM-PUBLICATION-usmle_step_2_ck": {
+        id: "AYLA-EXAM-PUBLICATION-usmle_step_2_ck",
+        type: "exam_publication_control",
+        examTrackId: "usmle_step_2_ck",
+        enabled: true,
+      },
+    },
     aylaUsers: {
       "user-1": {
         id: "user-1",
@@ -259,6 +273,38 @@ test("isolated continuity flow requires target entitlement and baseline, prefill
     });
     assert.equal(login.response.status, 200, JSON.stringify(login.payload));
     const token = login.payload.token;
+
+    const usmleSites = await api(baseUrl, "/api/ayla/exam-sites", {
+      token,
+      headers: { origin: "https://aylamedapp.com" },
+    });
+    assert.equal(usmleSites.response.status, 200, JSON.stringify(usmleSites.payload));
+    assert.equal(usmleSites.payload.mode, "shared_exam_family");
+    assert.equal(usmleSites.payload.active_site_id, "usmle");
+    assert.deepEqual(usmleSites.payload.allowed_exam_track_ids, [
+      "usmle_step_1",
+      "usmle_step_2_ck",
+      "usmle_step_3",
+    ]);
+    assert.equal(usmleSites.payload.websites.length, 5);
+
+    const usmleShell = await api(baseUrl, "/api/ayla/shell", {
+      token,
+      headers: { origin: "https://aylamedapp.com" },
+    });
+    assert.equal(usmleShell.response.status, 200, JSON.stringify(usmleShell.payload));
+    assert.equal(usmleShell.payload.dashboards.every((dashboard) => (
+      ["usmle_step_1", "usmle_step_2_ck", "usmle_step_3"].includes(dashboard.exam_track_id)
+    )), true);
+
+    const blockedCrossWebsiteSwitch = await api(baseUrl, "/api/ayla/shell/switch", {
+      method: "POST",
+      token,
+      headers: { origin: "https://aylamedapp.com" },
+      body: { examTrackId: "amc" },
+    });
+    assert.equal(blockedCrossWebsiteSwitch.response.status, 403, JSON.stringify(blockedCrossWebsiteSwitch.payload));
+    assert.equal(blockedCrossWebsiteSwitch.payload.code, "EXAM_DOMAIN_SCOPE_MISMATCH");
 
     const initial = await api(baseUrl, "/api/ayla/students/step1-student/continuity", {
       token,
