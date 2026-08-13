@@ -112,6 +112,14 @@ test("publication controls stay available when the QBank registry is unavailable
 
   try {
     await waitForHealth(baseUrl, child, output);
+    for (const route of [
+      "/admin/crm/ai-training/content-registry/collections?limit=200",
+      "/api/ayla/admin/publication-controls",
+      "/api/ayla/admin/qbank/global-publication",
+    ]) {
+      const unauthorized = await api(baseUrl, route);
+      assert.equal(unauthorized.response.status, 401, `${route} must authenticate before any cached read`);
+    }
     const login = await api(baseUrl, "/auth/login", {
       method: "POST",
       body: { email: adminEmail, password: adminPassword },

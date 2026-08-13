@@ -315,6 +315,59 @@ test('collection registry reads are page-first, single-pass, indexed, and cancel
   assert.match(publicationPanelRead, /timeoutMs: remainingMs/);
 });
 
+test('registry snapshots are shared across the table and publication panel and invalidated after writes', () => {
+  const listQuery = postgres.slice(
+    postgres.indexOf('export async function listContentCollections'),
+    postgres.indexOf('export async function getContentGlobalQbankPublicationState'),
+  );
+  const publicationPanelRead = server.slice(
+    server.indexOf('async function aylaListAllContentCollections'),
+    server.indexOf('function aylaContentCollectionDestinationEnabled'),
+  );
+  assert.match(postgres, /createBoundedSnapshotCache/);
+  assert.match(postgres, /NEXTGEN_CONTENT_REGISTRY_SNAPSHOT_TTL_MS/);
+  assert.match(listQuery, /contentRegistryReadSnapshots\.read\(snapshotKey/);
+  assert.match(publicationPanelRead, /listContentCollections\(\{/);
+  assert.doesNotMatch(publicationPanelRead, /queryContentRegistryRead/);
+
+  for (const functionName of [
+    'applyGuardedUworldCleanup',
+    'applyAylaOriginalMcqRepair',
+    'saveContentVideoLinksBatch',
+    'saveContentVideoMatch',
+    'saveContentMediaMatchBatch',
+    'importContentQuestionBatch',
+    'repairStep1CollectionTaxonomy',
+    'updateContentCollectionControls',
+    'upsertContentTaxonomyMapping',
+    'reviewContentTaxonomyMapping',
+    'upsertContentQuestionTaxonomyOverride',
+    'removeContentQuestionTaxonomyOverride',
+  ]) {
+    const start = postgres.indexOf(`export async function ${functionName}`);
+    const end = postgres.indexOf('\nexport ', start + 1);
+    assert.ok(start >= 0, `${functionName} must exist`);
+    assert.match(postgres.slice(start, end < 0 ? undefined : end), /commitContentRegistryMutation/);
+  }
+
+  for (const functionName of [
+    'createContentMediaImportJob',
+    'finishContentMediaImportJob',
+    'createContentVideoImportJob',
+    'finishContentVideoImportJob',
+    'saveContentVideoAsset',
+    'createContentImportJob',
+    'finishContentImportPreview',
+    'setContentImportJobStatus',
+    'claimContentImportDraft',
+  ]) {
+    const start = postgres.indexOf(`export async function ${functionName}`);
+    const end = postgres.indexOf('\nexport ', start + 1);
+    assert.ok(start >= 0, `${functionName} must exist`);
+    assert.match(postgres.slice(start, end < 0 ? undefined : end), /queryContentRegistryMutation/);
+  }
+});
+
 test('question ID display policy supports internal, source, both, and hidden modes', () => {
   for (const mode of ['internal', 'source', 'both', 'hidden']) assert.match(postgres, new RegExp(`'${mode}'`));
   for (const mode of ['provider', 'neutral', 'hidden']) assert.match(postgres, new RegExp(`'${mode}'`));
