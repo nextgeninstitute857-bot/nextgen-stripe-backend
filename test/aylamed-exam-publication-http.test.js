@@ -6,6 +6,7 @@ import fs from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 function passwordRecord(password, salt = "publicationadminpublication1234") {
   return {
@@ -90,7 +91,7 @@ test("publication controls stay available when the QBank registry is unavailable
   const baseUrl = `http://127.0.0.1:${port}`;
   const output = [];
   const child = spawn(process.execPath, ["server.js"], {
-    cwd: path.resolve(new URL("..", import.meta.url).pathname),
+    cwd: fileURLToPath(new URL("..", import.meta.url)),
     env: {
       ...process.env,
       PORT: String(port),
@@ -127,8 +128,11 @@ test("publication controls stay available when the QBank registry is unavailable
     assert.equal(controls.payload.available_resources.some((resource) => resource.id === "amc-book"), true);
     assert.equal(controls.payload.publication_registry_warning.code, "qbank_registry_unavailable");
   } finally {
-    child.kill("SIGTERM");
-    await new Promise((resolve) => child.once("exit", resolve));
+    if (child.exitCode === null) {
+      const exited = new Promise((resolve) => child.once("exit", resolve));
+      child.kill("SIGTERM");
+      await exited;
+    }
     await fs.rm(dataDir, { recursive: true, force: true });
   }
 });
