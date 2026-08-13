@@ -4,6 +4,10 @@ import test from 'node:test';
 
 const postgres = fs.readFileSync(new URL('../lib/content-registry-postgres.js', import.meta.url), 'utf8');
 const server = fs.readFileSync(new URL('../server.js', import.meta.url), 'utf8');
+const readPathIndexes = fs.readFileSync(
+  new URL('../scripts/content-registry-read-path-indexes.sql', import.meta.url),
+  'utf8',
+);
 
 test('exact question identity remains isolated by exam track', () => {
   assert.match(postgres, /UNIQUE\(exam_track, canonical_hash\)/);
@@ -268,6 +272,47 @@ test('overview uses a bounded read-only QBank publication status instead of the 
     ),
     /updateContentCollectionControls|publishAllOwnedCollection|changeGlobalTestingAccess/,
   );
+});
+
+test('collection registry reads are page-first, single-pass, indexed, and cancelled at the database deadline', () => {
+  const listQuery = postgres.slice(
+    postgres.indexOf('export async function listContentCollections'),
+    postgres.indexOf('export async function getContentGlobalQbankPublicationState'),
+  );
+  const readHelper = postgres.slice(
+    postgres.indexOf('function contentRegistryReadTimeoutError'),
+    postgres.indexOf('export function contentRegistryStatus'),
+  );
+  const publicationPanelRead = server.slice(
+    server.indexOf('async function aylaListAllContentCollections'),
+    server.indexOf('function aylaContentCollectionDestinationEnabled'),
+  );
+
+  assert.doesNotMatch(postgres, /idx_content_alias_collection_question/);
+  assert.doesNotMatch(postgres, /idx_content_import_jobs_draft_recovery/);
+  assert.match(readPathIndexes, /CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_content_alias_collection_question/);
+  assert.match(readPathIndexes, /CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_content_import_jobs_draft_recovery/);
+  assert.match(listQuery, /WITH selected_collections AS MATERIALIZED/);
+  assert.match(listQuery, /LIMIT \$\$\{values\.length - 1\} OFFSET \$\$\{values\.length\}/);
+  assert.ok(
+    listQuery.indexOf('LIMIT $${values.length - 1}') < listQuery.indexOf('JOIN content_source_aliases'),
+    'collections must be paged before question/media joins',
+  );
+  assert.match(listQuery, /question_readiness AS MATERIALIZED/);
+  assert.equal((listQuery.match(/contentQuestionMediaReadySql\("q"\)/g) || []).length, 1);
+  assert.match(listQuery, /destination_rollup AS/);
+  assert.doesNotMatch(listQuery, /COUNT\(DISTINCT/);
+
+  assert.match(readHelper, /BEGIN READ ONLY/);
+  assert.match(readHelper, /set_config\('statement_timeout'/);
+  assert.match(readHelper, /error\?\.code === "57014"/);
+  assert.match(readHelper, /client\?\.release\(\)/);
+  assert.match(readHelper, /waitForContentRegistryReadSchema/);
+  assert.match(readHelper, /Content registry is still initializing/);
+  assert.match(listQuery, /safeTimeoutMs - \(Date\.now\(\) - startedAt\)/);
+  assert.doesNotMatch(publicationPanelRead, /Promise\.race/);
+  assert.match(publicationPanelRead, /deadline - Date\.now\(\)/);
+  assert.match(publicationPanelRead, /timeoutMs: remainingMs/);
 });
 
 test('question ID display policy supports internal, source, both, and hidden modes', () => {

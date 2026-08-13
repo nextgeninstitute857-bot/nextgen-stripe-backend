@@ -74013,11 +74013,24 @@ function aylaPublicationResourceType(resource = {}) {
   return type;
 }
 
-async function aylaListAllContentCollections(examTrack = "") {
+async function aylaListAllContentCollections(examTrack = "", { timeoutMs = 4000 } = {}) {
+  const safeTimeoutMs = Math.max(500, Number(timeoutMs) || 4000);
+  const deadline = Date.now() + safeTimeoutMs;
   const rows = [];
   const limit = 200;
   while (true) {
-    const page = await listContentCollections({ examTrack, limit, offset: rows.length });
+    const remainingMs = deadline - Date.now();
+    if (remainingMs < 500) {
+      throw Object.assign(new Error("Content registry timed out while loading publication controls"), {
+        code: "AYLA_PUBLICATION_REGISTRY_TIMEOUT",
+      });
+    }
+    const page = await listContentCollections({
+      examTrack,
+      limit,
+      offset: rows.length,
+      timeoutMs: remainingMs,
+    });
     rows.push(...page);
     if (page.length < limit) break;
   }
@@ -74025,19 +74038,13 @@ async function aylaListAllContentCollections(examTrack = "") {
 }
 
 async function aylaListPublicationPanelContentCollections({ timeoutMs = 4000 } = {}) {
-  let timeoutId = null;
-  const timeout = new Promise((_, reject) => {
-    timeoutId = setTimeout(() => {
-      const error = new Error("Content registry timed out while loading publication controls");
-      error.code = "AYLA_PUBLICATION_REGISTRY_TIMEOUT";
-      reject(error);
-    }, Math.max(500, Number(timeoutMs) || 4000));
-    timeoutId.unref?.();
-  });
   try {
-    return await Promise.race([aylaListAllContentCollections(), timeout]);
-  } finally {
-    if (timeoutId) clearTimeout(timeoutId);
+    return await aylaListAllContentCollections("", { timeoutMs });
+  } catch (error) {
+    if (error.code === "CONTENT_REGISTRY_READ_TIMEOUT") {
+      error.code = "AYLA_PUBLICATION_REGISTRY_TIMEOUT";
+    }
+    throw error;
   }
 }
 
