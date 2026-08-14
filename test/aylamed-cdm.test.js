@@ -132,5 +132,7 @@ test("server keeps CDM delivery separate from QBank scoring and binds it to road
   assert.match(routes, /cdmRoadmapSessionMatchesAssignment/);
   assert.match(routes, /student_self_reviewed_legacy_cdm_practice/);
   assert.match(routes, /scoreGenerated:\s*false/);
+  assert.match(server, /Legacy clinical-decision practice — non-scoring and not part of the current MCCQE format\./);
+  assert.match(routes, /access\.exam_track !== "mccqe"/);
   assert.doesNotMatch(routes, /recordAylaQbankAnswer|finalizeAylaQbankSession|correctAnswerId/);
 });
