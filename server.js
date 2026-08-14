@@ -35444,6 +35444,8 @@ async function ngQueueContentOperation({ type, lane, upload, domainJobId, metada
       payload: {
         file: upload.file,
         source: upload.source || null,
+        sha256: upload.sha256 || null,
+        original_filename: upload.originalFilename || null,
         owned_file: upload.owned === true,
         upload_id: upload.uploadId || null,
         domain_job_id: domainJobId,
@@ -35783,6 +35785,7 @@ function ngQuestionZipRecoveryHeartbeat(queueContext) {
 async function ngRunContentImportPreview({ jobId, upload, metadata, queueContext }) {
   let inventory;
   try {
+    const domainJob = await getContentImportJob(jobId);
     await setContentImportJobStatus(jobId, "previewing");
     await queueContext.heartbeat({ stage: "extracting_zip" });
     inventory = await extractSafeZipInventory(
@@ -35790,7 +35793,7 @@ async function ngRunContentImportPreview({ jobId, upload, metadata, queueContext
       jobId,
       DATA_DIR,
       {
-        directoryCacheKey: ngQuestionZipDirectoryCacheKey(upload),
+        directoryCacheKey: ngQuestionZipDirectoryCacheKey(upload, domainJob || {}),
         onDirectoryCacheProgress: ngQuestionZipRecoveryHeartbeat(queueContext),
       },
     );
@@ -38712,6 +38715,8 @@ function ngQueuedContentUpload(backgroundJob) {
   return {
     file: payload.file,
     source: payload.source || null,
+    sha256: payload.sha256 || null,
+    originalFilename: payload.original_filename || null,
     owned: payload.owned_file === true,
     uploadId: payload.upload_id || null,
   };

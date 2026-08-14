@@ -35,6 +35,12 @@ test("question preview and draft import reuse the fingerprinted R2 directory cac
     (server.match(/onDirectoryCacheProgress: ngQuestionZipRecoveryHeartbeat\(queueContext\)/g) || []).length,
     2,
   );
+  assert.match(
+    server,
+    /const domainJob = await getContentImportJob\(jobId\);[\s\S]*directoryCacheKey: ngQuestionZipDirectoryCacheKey\(upload, domainJob \|\| \{\}\),/,
+  );
+  assert.match(server, /sha256: upload\.sha256 \|\| null,/);
+  assert.match(server, /sha256: payload\.sha256 \|\| null,/);
 });
 
 test("question ZIP directory recovery reports movement without changing the job stage", () => {
