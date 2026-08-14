@@ -202,6 +202,38 @@ test("35,000-entry R2 recovery uses a persistent bulk directory cache across res
   restarted.close();
 });
 
+test("R2 directory recovery resumes after a mid-stream tail-range failure", async (t) => {
+  const archive = buildVirtualZip64(250);
+  const cacheDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "ayla-directory-resume-"));
+  t.after(() => fs.promises.rm(cacheDir, { recursive: true, force: true }));
+  let injectedFailure = false;
+  const zip = await openContentZip({
+    type: "r2",
+    objectKey: "content-staging/interrupted-directory.zip",
+    sizeBytes: archive.sizeBytes,
+    etag: "multipart-directory-etag",
+  }, {
+    autoClose: false,
+    directoryCacheKey: "interrupted-directory-fingerprint",
+    directoryCacheDir: cacheDir,
+    fetchRange: async ({ start, endExclusive }) => {
+      const selected = archive.read(start, endExclusive);
+      if (!injectedFailure) {
+        injectedFailure = true;
+        return Readable.from((async function* interruptedDirectoryRange() {
+          yield selected.subarray(0, 17);
+          throw new Error("simulated R2 directory reset");
+        })());
+      }
+      return Readable.from([selected]);
+    },
+  });
+  assert.equal(await countEntries(zip), 250);
+  assert.equal(injectedFailure, true);
+  assert.equal(zip.contentRecovery.directory_cache.persistent, true);
+  zip.close();
+});
+
 test("ZIP entry opening fails with a bounded, named timeout", async () => {
   const zip = {
     contentRecovery: { entry_open_timeout_ms: 10 },
