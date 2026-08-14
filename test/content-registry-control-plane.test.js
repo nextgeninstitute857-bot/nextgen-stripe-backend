@@ -168,6 +168,16 @@ test('every question import durably preserves its collection-scoped media manife
   assert.match(importBatch, /source_data=COALESCE\(content_source_aliases\.source_data,'\{\}'::jsonb\) \|\| EXCLUDED\.source_data/);
 });
 
+test('question imports collapse canonical duplicates before the answer upsert', () => {
+  const importBatch = postgres.slice(
+    postgres.indexOf('export async function importContentQuestionBatch'),
+    postgres.indexOf('export async function previewStep1CollectionTaxonomyRepair'),
+  );
+  assert.match(importBatch, /const preferredRows = new Map\(\)/);
+  assert.match(importBatch, /const answerPayload = \[\.\.\.preferredRows\.values\(\)\]\.flatMap/);
+  assert.doesNotMatch(importBatch, /const answerPayload = rows\.flatMap/);
+});
+
 test('an empty media-reference inventory fails with actionable recovery evidence', () => {
   const mediaImport = server.slice(
     server.indexOf('async function ngRunContentMediaDraftImport'),
