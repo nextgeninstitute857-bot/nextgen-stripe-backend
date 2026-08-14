@@ -1,0 +1,69 @@
+name: QBank selector Linux validation
+
+on:
+  pull_request:
+    branches:
+      - agent/named-qbank-selector
+
+permissions:
+  contents: read
+
+jobs:
+  node-22-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 3e4422983a1db8affb6c1d29f12a7fd10271dbca
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install candidate dependencies
+        run: npm ci
+      - name: Run focused selector tests
+        run: node --test test/aylamed-adaptive-core.test.js test/aylamed-qbank.test.js
+      - name: Run candidate full suite
+        shell: bash
+        run: |
+          set +e
+          npm test > "$RUNNER_TEMP/candidate.tap" 2>&1
+          echo "candidate_exit=$?" >> "$GITHUB_ENV"
+          set -e
+      - name: Run base full suite
+        shell: bash
+        run: |
+          git worktree add "$RUNNER_TEMP/base" 519a57f6b80807b9b7005e8569c033e6cabde481
+          cd "$RUNNER_TEMP/base"
+          npm ci
+          set +e
+          npm test > "$RUNNER_TEMP/base.tap" 2>&1
+          echo "base_exit=$?" >> "$GITHUB_ENV"
+          set -e
+      - name: Compare exact failures
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          function failures(path) {
+            return [...new Set(fs.readFileSync(path, 'utf8')
+              .split(/\r?\n/)
+              .map((line) => line.match(/^\s*not ok \d+ - (.+)$/)?.[1]?.trim())
+              .filter(Boolean))].sort();
+          }
+          const base = failures(process.env.RUNNER_TEMP + '/base.tap');
+          const candidate = failures(process.env.RUNNER_TEMP + '/candidate.tap');
+          const added = candidate.filter((name) => !base.includes(name));
+          const removed = base.filter((name) => !candidate.includes(name));
+          console.log(JSON.stringify({
+            baseExit: process.env.base_exit,
+            candidateExit: process.env.candidate_exit,
+            baseFailures: base,
+            candidateFailures: candidate,
+            candidateOnly: added,
+            baseOnly: removed
+          }, null, 2));
+          if (added.length) process.exit(1);
+          NODE
