@@ -202,6 +202,51 @@ test("35,000-entry R2 recovery uses a persistent bulk directory cache across res
   restarted.close();
 });
 
+test("legacy directory caches are rebuilt instead of being reused", async (t) => {
+  const archive = buildVirtualZip64(250);
+  const cacheDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "ayla-directory-version-"));
+  t.after(() => fs.promises.rm(cacheDir, { recursive: true, force: true }));
+  const source = {
+    type: "r2",
+    objectKey: "content-staging/versioned-directory.zip",
+    sizeBytes: archive.sizeBytes,
+    etag: "versioned-directory-etag",
+  };
+  const fetchRange = async ({ start, endExclusive }) => (
+    Readable.from([archive.read(start, endExclusive)])
+  );
+
+  const first = await openContentZip(source, {
+    autoClose: false,
+    directoryCacheKey: "versioned-directory-fingerprint",
+    directoryCacheDir: cacheDir,
+    fetchRange,
+  });
+  assert.equal(await countEntries(first), 250);
+  first.close();
+
+  const metadataPath = (await fs.promises.readdir(cacheDir))
+    .map((name) => path.join(cacheDir, name))
+    .find((file) => file.endsWith(".json"));
+  const metadata = JSON.parse(await fs.promises.readFile(metadataPath, "utf8"));
+  await fs.promises.writeFile(metadataPath, `${JSON.stringify({ ...metadata, version: 1 })}\n`);
+
+  let rebuildRangeReads = 0;
+  const rebuilt = await openContentZip(source, {
+    autoClose: false,
+    directoryCacheKey: "versioned-directory-fingerprint",
+    directoryCacheDir: cacheDir,
+    fetchRange: async (range) => {
+      rebuildRangeReads += 1;
+      return fetchRange(range);
+    },
+  });
+  assert.equal(await countEntries(rebuilt), 250);
+  assert.equal(rebuilt.contentRecovery.directory_cache.source, "fresh_r2_persisted");
+  assert.ok(rebuildRangeReads > 0);
+  rebuilt.close();
+});
+
 test("R2 directory recovery resumes after a mid-stream tail-range failure", async (t) => {
   const archive = buildVirtualZip64(250);
   const cacheDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "ayla-directory-resume-"));
