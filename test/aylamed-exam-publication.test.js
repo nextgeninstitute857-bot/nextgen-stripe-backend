@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  assertAylaPublicationGroupMutationAllowed,
   aylaPublicationGroupForResource,
+  aylaPublicationReadinessBlockers,
   buildAylaCompactPublicationGroups,
   buildAylaPublicationControlPanel,
   normalizeAylaExamPublicationControl,
@@ -47,6 +49,40 @@ test("mixed child controls are preserved and surfaced for review", () => {
   assert.equal(groups[0].configured_state, "mixed");
   assert.equal(groups[0].effective_state, "mixed_review_required");
   assert.equal(groups[0].effective_student_access, false);
+});
+
+test("a deliberate folder switch does not become mixed merely because legacy children remain enabled", () => {
+  const groups = buildAylaCompactPublicationGroups({
+    exams: [{ examTrackId: "plab", enabled: true }],
+    availableResources: [
+      { id: "book-1", type: "book", exam_track_id: "plab", title: "Book 1", folder_id: "plab-books", status: "approved", authorization_status: "licensed" },
+      { id: "book-2", type: "book", exam_track_id: "plab", title: "Book 2", folder_id: "plab-books", status: "approved", authorization_status: "licensed" },
+    ],
+    resourceControls: [{ examTrackId: "plab", resourceType: "book_folder", resourceId: "plab-books", enabled: false }],
+  });
+  assert.equal(groups[0].configured_state, "unpublished");
+  assert.equal(groups[0].mixed_state, false);
+  assert.equal(groups[0].effective_student_access, false);
+});
+
+test("readiness gates fail closed for rights, review, taxonomy and missing source-folder evidence", () => {
+  const rights = aylaPublicationReadinessBlockers({
+    id: "plab-book", type: "book", folder_id: "plab-books", status: "approved", authorization_status: "unverified",
+  });
+  assert.match(rights.join("; "), /source authorization is unverified/);
+  const video = buildAylaCompactPublicationGroups({
+    exams: [{ examTrackId: "usmle_step_2_ck", enabled: false }],
+    availableResources: [{
+      id: "step2-videos", type: "vimeo_folder", exam_track_id: "usmle_step_2_ck", status: "active",
+      video_count: 918, review_incomplete_count: 1, taxonomy_incomplete_count: 2, missing_from_folder_count: 3,
+    }],
+  })[0];
+  assert.equal(video.ready, false);
+  assert.throws(
+    () => assertAylaPublicationGroupMutationAllowed(video, true),
+    (error) => error.code === "PUBLICATION_GROUP_NOT_READY" && error.statusCode === 409,
+  );
+  assert.equal(assertAylaPublicationGroupMutationAllowed(video, false), true);
 });
 
 test("exam master publication overrides resources without deleting their state", () => {

@@ -79,6 +79,8 @@ test("publication controls stay available when the QBank registry is unavailable
         type: "book",
         title: "AMC handbook",
         examTrackId: "amc",
+        folderId: "amc-library",
+        authorizationStatus: "pending_review",
         status: "active",
       },
     },
@@ -137,6 +139,22 @@ test("publication controls stay available when the QBank registry is unavailable
     assert.equal(controls.payload.publication_groups.some((group) => group.type === "book_folder" && group.exam_track_id === "amc"), true);
     assert.equal(controls.payload.publication_groups.every((group) => group.type !== "book" && group.type !== "video"), true);
     assert.equal(controls.payload.publication_registry_warning.code, "qbank_registry_unavailable");
+
+    const blockedPublish = await api(baseUrl, "/api/ayla/admin/publication-controls/resources/book_folder/amc-library", {
+      method: "PUT",
+      token: login.payload.token,
+      body: { examTrackId: "amc", enabled: true },
+    });
+    assert.equal(blockedPublish.response.status, 409, JSON.stringify(blockedPublish.payload));
+    assert.match(blockedPublish.payload.error, /source authorization is pending_review/);
+
+    const safeUnpublish = await api(baseUrl, "/api/ayla/admin/publication-controls/resources/book_folder/amc-library", {
+      method: "PUT",
+      token: login.payload.token,
+      body: { examTrackId: "amc", enabled: false },
+    });
+    assert.equal(safeUnpublish.response.status, 200, JSON.stringify(safeUnpublish.payload));
+    assert.equal(safeUnpublish.payload.control.enabled, false);
   } finally {
     if (child.exitCode === null) {
       const exited = new Promise((resolve) => child.once("exit", resolve));

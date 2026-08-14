@@ -191,6 +191,8 @@ import {
   resolveAylaExamSite,
 } from "./lib/aylamed-exam-sites.js";
 import {
+  AYLA_PUBLICATION_GROUP_ORDER,
+  assertAylaPublicationGroupMutationAllowed,
   aylaPublicationGroupForResource,
   buildAylaCompactPublicationGroups,
   buildAylaPublicationControlPanel,
@@ -70325,6 +70327,124 @@ app.get("/api/ayla/exam-sites", (req, res) => aylaSendOk(res, {
   },
 }));
 
+async function aylaPublicationResourceSnapshot(db, panel) {
+  const storedResources = aylaValues(db, "aylaResources").map((resource) => ({
+    id: String(resource.id || ""),
+    type: aylaPublicationResourceType(resource),
+    exam_track_id: aylaCanonicalExamTrack(resource.examTrackId || resource.exam_track_id || resource.exam),
+    title: String(resource.title || resource.bookTitle || resource.provider || "Untitled resource"),
+    folder_id: String(resource.folderId || resource.folder_id || resource.sourceData?.folder_id || "") || null,
+    folder_name: String(resource.folderName || resource.folder_name || resource.sourceData?.folder_name || "") || null,
+    collection_id: String(resource.collectionId || resource.collection_id || resource.sourceData?.collection_id || "") || null,
+    source_namespace: String(resource.sourceNamespace || resource.source_namespace || resource.sourceData?.source_namespace || "") || null,
+    source_provider: String(resource.provider || resource.sourceProvider || resource.source_provider || "") || null,
+    source_bank_collection_key: String(resource.sourceBankCollectionKey || resource.source_bank_collection_key || resource.sourceData?.source_bank_collection_key || "") || null,
+    case_count: aylaPublicationResourceType(resource) === "cdm_program" ? 1 : Number(resource.caseCount || resource.case_count || 0),
+    step_count: Number(resource.cdmStepCount || resource.cdm_step_count || resource.stepCount || resource.step_count || resource.sourceData?.step_count || 0),
+    block_count: Number(resource.blockCount || resource.block_count || resource.sourceData?.block_count || 0),
+    approved: resource.approved,
+    authorization_status: String(resource.authorizationStatus || resource.authorization_status || "") || null,
+    verification_status: String(resource.verificationStatus || resource.verification_status || resource.reviewStatus || resource.review_status || "") || null,
+    required_media_missing_count: Number(resource.requiredMediaMissingCount || resource.required_media_missing_count || resource.blockingMediaMissingCount || resource.blocking_media_missing_count || 0),
+    media_ambiguous_count: Number(resource.mediaAmbiguousCount || resource.media_ambiguous_count || resource.ambiguousMediaCount || resource.ambiguous_media_count || 0),
+    status: resource.status || "active",
+  }));
+  const vimeoDrafts = aylaValues(db, "aylaVimeoCatalogDrafts");
+  const vimeoFolders = aylaValues(db, "aylaVimeoCatalogSources").map((source) => {
+    const summary = vimeoCatalogSummary(vimeoDrafts.filter((row) => aylaVimeoCatalogDraftSourceMatches(row, source)));
+    return {
+      id: String(source.folderId || source.folder_id || ""),
+      type: "vimeo_folder",
+      exam_track_id: aylaCanonicalExamTrack(source.examTrackId || source.exam_track_id || source.exam),
+      title: String(source.folderName || source.folder_name || `Vimeo folder ${source.folderId || source.folder_id || ""}`),
+      folder_id: String(source.folderId || source.folder_id || "") || null,
+      status: source.enabled === false ? "disabled" : "active",
+      video_count: Number(source.folderVideoCount || source.folder_video_count || summary.total || 0),
+      review_incomplete_count: Math.max(0, Number(summary.total || 0) - Number(summary.approved || 0)),
+      taxonomy_incomplete_count: Number(summary.hierarchyIncomplete || 0),
+      missing_from_folder_count: Number(summary.missingFromFolder || 0),
+    };
+  });
+  let qbankCollections = [];
+  let cdmPrograms = [];
+  let publicationRegistryWarning = null;
+  let cdmRegistryWarning = null;
+  if (contentRegistryStatus().configured) {
+    try {
+      qbankCollections = (await aylaListPublicationPanelContentCollections()).map((collection) => ({
+        id: String(collection.id || ""),
+        type: "qbank_collection",
+        exam_track_id: aylaCanonicalExamTrack(collection.exam_track),
+        title: String(collection.title || collection.collection_key || "QBank collection"),
+        folder_id: null,
+        status: collection.status || "draft",
+        question_count: Number(collection.question_count || 0),
+        valid_question_count: Number(collection.valid_question_count ?? collection.question_count ?? 0),
+        taxonomy_complete_count: Number(collection.taxonomy_complete_count || 0),
+        required_media_missing_count: Number(collection.required_media_missing_count || 0),
+        media_ambiguous_count: Number(collection.media_ambiguous_count || 0),
+      }));
+      try {
+        const cases = await listContentCdmCases({ examTrack: "mccqe", destination: "aylamed_cdm", limit: 200, seed: "publication-controls" });
+        const programs = new Map();
+        for (const row of cases) {
+          const collectionId = String(row.collection_id || "ace-legacy-cdm");
+          const sourceLabel = String(row.source_label || "").trim();
+          const displaySource = sourceLabel && sourceLabel !== "Clinical decision source" ? sourceLabel : "ACE";
+          const current = programs.get(collectionId) || {
+            id: collectionId,
+            type: "cdm_program",
+            exam_track_id: "mccqe",
+            title: `${displaySource} Legacy CDM`,
+            folder_id: collectionId,
+            source_provider: displaySource,
+            status: "approved",
+            approved: true,
+            authorization_status: "approved_registry_collection",
+            verification_status: "verified",
+            case_count: 0,
+            step_count: 0,
+          };
+          current.case_count += 1;
+          current.step_count += Number(row.step_count || 0);
+          programs.set(collectionId, current);
+        }
+        cdmPrograms = [...programs.values()];
+      } catch (error) {
+        cdmRegistryWarning = { code: "cdm_registry_unavailable", message: "MCCQE legacy CDM counts could not be loaded; its availability control remains fail-closed." };
+      }
+    } catch (error) {
+      publicationRegistryWarning = {
+        code: error.code === "AYLA_PUBLICATION_REGISTRY_TIMEOUT" ? "qbank_registry_timeout" : "qbank_registry_unavailable",
+        message: "QBank collections could not be loaded. Exam, video, book and flashcard publication controls remain available.",
+      };
+      cdmRegistryWarning = { code: "cdm_registry_unavailable", message: "MCCQE legacy CDM counts were not queried because the content registry is unavailable." };
+    }
+  }
+  const nativeResources = [...new Map(
+    [...storedResources, ...vimeoFolders, ...qbankCollections, ...cdmPrograms]
+      .filter((resource) => resource.id && resource.exam_track_id && resource.type)
+      .map((resource) => [`${resource.exam_track_id}:${resource.type}:${resource.id}`, resource]),
+  ).values()];
+  const supplementalResources = panel.exams.flatMap((exam) => listAylaExamSupplements(exam.examTrackId)
+    .flatMap((supplement) => nativeResources
+      .filter((resource) => resource.exam_track_id === supplement.source_exam_track
+        && supplement.resource_types.includes(resource.type))
+      .map((resource) => ({
+        ...resource,
+        exam_track_id: exam.examTrackId,
+        source_exam_track_id: supplement.source_exam_track,
+        title: `${resource.title} · ${supplement.label}`,
+        supplemental: true,
+        scoring_allowed: false,
+      }))));
+  const availableResources = [...new Map(
+    [...nativeResources, ...supplementalResources]
+      .map((resource) => [`${resource.exam_track_id}:${resource.type}:${resource.id}`, resource]),
+  ).values()];
+  return { availableResources, publicationRegistryWarning, cdmRegistryWarning };
+}
+
 app.get("/api/ayla/admin/publication-controls", async (req, res) => {
   try {
     await aylaRequireAdmin(req);
@@ -70334,74 +70454,7 @@ app.get("/api/ayla/admin/publication-controls", async (req, res) => {
       examControls: aylaValues(db, "aylaExamPublicationControls"),
       resourceControls: aylaValues(db, "aylaResourcePublicationControls"),
     });
-    const storedResources = aylaValues(db, "aylaResources").map((resource) => ({
-      id: String(resource.id || ""),
-      type: aylaPublicationResourceType(resource),
-      exam_track_id: aylaCanonicalExamTrack(resource.examTrackId || resource.exam_track_id || resource.exam),
-      title: String(resource.title || resource.bookTitle || resource.provider || "Untitled resource"),
-      folder_id: String(resource.folderId || resource.folder_id || resource.sourceData?.folder_id || "") || null,
-      folder_name: String(resource.folderName || resource.folder_name || resource.sourceData?.folder_name || "") || null,
-      collection_id: String(resource.collectionId || resource.collection_id || resource.sourceData?.collection_id || "") || null,
-      source_namespace: String(resource.sourceNamespace || resource.source_namespace || resource.sourceData?.source_namespace || "") || null,
-      source_provider: String(resource.provider || resource.sourceProvider || resource.source_provider || "") || null,
-      case_count: aylaPublicationResourceType(resource) === "cdm_program" ? 1 : Number(resource.caseCount || resource.case_count || 0),
-      step_count: Number(resource.stepCount || resource.step_count || resource.sourceData?.step_count || 0),
-      block_count: Number(resource.blockCount || resource.block_count || resource.sourceData?.block_count || 0),
-      status: resource.status || "active",
-    }));
-    const vimeoFolders = aylaValues(db, "aylaVimeoCatalogSources").map((source) => ({
-      id: String(source.folderId || source.folder_id || ""),
-      type: "vimeo_folder",
-      exam_track_id: aylaCanonicalExamTrack(source.examTrackId || source.exam_track_id || source.exam),
-      title: String(source.folderName || source.folder_name || `Vimeo folder ${source.folderId || source.folder_id || ""}`),
-      folder_id: String(source.folderId || source.folder_id || "") || null,
-      status: source.enabled === false ? "disabled" : "active",
-      video_count: Number(source.folderVideoCount || source.folder_video_count || 0),
-    }));
-    let qbankCollections = [];
-    let publicationRegistryWarning = null;
-    if (contentRegistryStatus().configured) {
-      try {
-        qbankCollections = (await aylaListPublicationPanelContentCollections()).map((collection) => ({
-          id: String(collection.id || ""),
-          type: "qbank_collection",
-          exam_track_id: aylaCanonicalExamTrack(collection.exam_track),
-          title: String(collection.title || collection.collection_key || "QBank collection"),
-          folder_id: null,
-          status: collection.status || "draft",
-          question_count: Number(collection.question_count || 0),
-          taxonomy_complete_count: Number(collection.taxonomy_complete_count || 0),
-        }));
-      } catch (error) {
-        publicationRegistryWarning = {
-          code: error.code === "AYLA_PUBLICATION_REGISTRY_TIMEOUT"
-            ? "qbank_registry_timeout"
-            : "qbank_registry_unavailable",
-          message: "QBank collections could not be loaded. Exam, video, book and flashcard publication controls remain available.",
-        };
-      }
-    }
-    const nativeResources = [...new Map(
-      [...storedResources, ...vimeoFolders, ...qbankCollections]
-        .filter((resource) => resource.id && resource.exam_track_id && resource.type)
-        .map((resource) => [`${resource.exam_track_id}:${resource.type}:${resource.id}`, resource]),
-    ).values()];
-    const supplementalResources = panel.exams.flatMap((exam) => listAylaExamSupplements(exam.examTrackId)
-      .flatMap((supplement) => nativeResources
-        .filter((resource) => resource.exam_track_id === supplement.source_exam_track
-          && supplement.resource_types.includes(resource.type))
-        .map((resource) => ({
-          ...resource,
-          exam_track_id: exam.examTrackId,
-          source_exam_track_id: supplement.source_exam_track,
-          title: `${resource.title} · ${supplement.label}`,
-          supplemental: true,
-          scoring_allowed: false,
-        }))));
-    const availableResources = [...new Map(
-      [...nativeResources, ...supplementalResources]
-        .map((resource) => [`${resource.exam_track_id}:${resource.type}:${resource.id}`, resource]),
-    ).values()];
+    const { availableResources, publicationRegistryWarning, cdmRegistryWarning } = await aylaPublicationResourceSnapshot(db, panel);
     const publicationGroups = buildAylaCompactPublicationGroups({
       exams: panel.exams,
       resourceControls: panel.resources,
@@ -70414,6 +70467,7 @@ app.get("/api/ayla/admin/publication-controls", async (req, res) => {
       publication_groups: publicationGroups,
       supplements: Object.fromEntries(panel.exams.map((exam) => [exam.examTrackId, listAylaExamSupplements(exam.examTrackId)])),
       publication_registry_warning: publicationRegistryWarning,
+      cdm_registry_warning: cdmRegistryWarning,
     });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load publication controls");
@@ -70457,6 +70511,27 @@ app.put("/api/ayla/admin/publication-controls/exams/:examTrack", async (req, res
 app.put("/api/ayla/admin/publication-controls/resources/:resourceType/:resourceId", async (req, res) => {
   try {
     const admin = await aylaRequireAdmin(req);
+    const requestedEnabled = req.body.enabled === true || req.body.published === true;
+    const requestedType = String(req.params.resourceType || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_");
+    let validatedGroup = null;
+    if (requestedEnabled && AYLA_PUBLICATION_GROUP_ORDER.includes(requestedType)) {
+      const validationDb = await readAylaDb();
+      aylaEnsureSeedData(validationDb);
+      const validationPanel = buildAylaPublicationControlPanel({
+        examControls: aylaValues(validationDb, "aylaExamPublicationControls"),
+        resourceControls: aylaValues(validationDb, "aylaResourcePublicationControls"),
+      });
+      const { availableResources } = await aylaPublicationResourceSnapshot(validationDb, validationPanel);
+      const requestedExam = aylaCanonicalExamTrack(req.body.examTrackId || req.body.exam_track_id || req.body.examTrack);
+      validatedGroup = buildAylaCompactPublicationGroups({
+        exams: validationPanel.exams,
+        resourceControls: validationPanel.resources,
+        availableResources,
+      }).find((group) => group.exam_track_id === requestedExam
+        && group.type === requestedType
+        && String(group.resource_id) === String(req.params.resourceId));
+      assertAylaPublicationGroupMutationAllowed(validatedGroup, true);
+    }
     const result = await mutateAylaDb(async (db) => {
       aylaEnsureSeedData(db);
       const examTrackId = aylaCanonicalExamTrack(req.body.examTrackId || req.body.exam_track_id || req.body.examTrack);
@@ -70492,7 +70567,12 @@ app.put("/api/ayla/admin/publication-controls/resources/:resourceType/:resourceI
       });
       return { control, changed };
     });
-    return aylaSendOk(res, { control: result.control, changed: result.changed, idempotent_replay: !result.changed });
+    return aylaSendOk(res, {
+      control: result.control,
+      changed: result.changed,
+      idempotent_replay: !result.changed,
+      readiness_gate: validatedGroup ? { passed: true, group_id: validatedGroup.id, blockers: [] } : null,
+    });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update resource publication");
   }
