@@ -1,0 +1,30 @@
+name: QBank selector timing rerun
+
+on:
+  pull_request:
+    branches:
+      - agent/named-qbank-selector
+
+permissions:
+  contents: read
+
+jobs:
+  repeat-timing-sensitive-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 3e4422983a1db8affb6c1d29f12a7fd10271dbca
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Repeat referral lifecycle test three times
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            echo "Attempt $attempt"
+            node --test test/aylamed-marketing-referrals-http.test.js
+          done
