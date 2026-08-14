@@ -55,8 +55,9 @@ test("new staged media handoff is scoped by uploader, media purpose, and owned p
   assert.match(server, /job\?\.source_profile \|\| ""\)\.toLowerCase\(\) === "aylamed_original"/);
   assert.match(server, /job\?\.source_rights_status \|\| ""\)\.toLowerCase\(\) === "owned"/);
   assert.match(server, /String\(session\?\.created_by \|\| ""\) === expectedCreator/);
-  assert.match(server, /String\(session\?\.purpose \|\| ""\)\.toLowerCase\(\) === "media_zip"/);
-  assert.match(server, /if \(!ownsSession \|\| !isMediaArchive \|\| \(parentJob && !ngOwnedAylaMedImportJob\(parentJob\)\)\)/);
+  assert.match(server, /\["media_zip", "mixed_qbank_zip"\][\s\S]{0,120}session\?\.purpose/);
+  assert.match(server, /const parentAllowed = !parentJob[\s\S]{0,180}ngAuthorizedExternalImportSource\(parentJob\)/);
+  assert.match(server, /if \(!ownsSession \|\| !isMediaArchive \|\| !parentAllowed\)/);
   assert.match(server, /if \(uploadId\) await requireOwnedMediaBundleAdmin\(req, uploadId, null, auth\)/);
   assert.match(server, /media-bundle\/import-draft[\s\S]{0,1500}requireOwnedMediaBundleAdmin\(req, uploadId, parentJob, auth\)/);
 });
@@ -83,7 +84,7 @@ test("owned media polling authorizes with the private payload but returns a sani
 
 test("owned media retry requeues the failed job from the finalized R2 archive without duplicating it", () => {
   assert.match(server, /content-imports\/:jobId\/media-bundle\/retry/);
-  assert.match(server, /resolveFinalized\(uploadId, \{ allowedPurposes: \["media_zip"\] \}\)/);
+  assert.match(server, /resolveFinalized\(uploadId, \{ allowedPurposes: \["media_zip", "mixed_qbank_zip"\] \}\)/);
   assert.match(server, /ngContentUploadStore\.acquire\(uploadId, backgroundJobId\)/);
   assert.match(server, /ngContentBackgroundQueue\.retry\(backgroundJobId\)/);
   assert.match(server, /requeued: true/);

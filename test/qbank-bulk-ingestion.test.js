@@ -172,9 +172,14 @@ test("authorized external release is restricted to the confirmed provider and ex
     { source_provider: "Amedex", source_profile: "amedex_style", exam_track: "amc" },
     { source_provider: "MPlusX", source_profile: "mplusx_style", exam_track: "amc" },
     { source_provider: "CanadaQBank", source_profile: "canadaqbank_style", exam_track: "mccqe" },
+    { source_provider: "BMJ OnExamination", source_profile: "other", exam_track: "plab" },
+    { source_provider: "CanadaQBank", source_profile: "canadaqbank_style", exam_track: "plab" },
+    { source_provider: "PassMedicine", source_profile: "other", exam_track: "plab" },
+    { source_provider: "BoardVitals", source_profile: "other", exam_track: "nclex" },
     { source_provider: "ACE QBank", source_profile: "aceqbank_style", exam_track: "mccqe" },
     { source_provider: "UWorld", source_profile: "uworld_style", exam_track: "usmle-step-2" },
     { source_provider: "UWorld", source_profile: "uworld_style", exam_track: "usmle-step-3" },
+    { source_provider: "UWorld", source_profile: "uworld_style", exam_track: "nclex" },
   ]) {
     assert.equal(contentAuthorizedExternalReleaseAllowed({
       ...row,
@@ -191,6 +196,18 @@ test("authorized external release is restricted to the confirmed provider and ex
     source_provider: "Amedex",
     source_profile: "amedex_style",
     exam_track: "amc",
+    source_rights_status: "unverified",
+  }), false);
+  assert.equal(contentAuthorizedExternalReleaseAllowed({
+    source_provider: "BoardVitals",
+    source_profile: "other",
+    exam_track: "plab",
+    source_rights_status: "authorized",
+  }), false);
+  assert.equal(contentAuthorizedExternalReleaseAllowed({
+    source_provider: "PassMedicine",
+    source_profile: "other",
+    exam_track: "plab",
     source_rights_status: "unverified",
   }), false);
 });

@@ -35542,7 +35542,7 @@ function ngOwnedMediaUploadScopeError() {
 
 function ngAuthorizedExternalContentScopeError() {
   return Object.assign(
-    new Error("This AylaMed administrator session is limited to AylaMed-owned content or an authorized Amedex, MPlusX, CanadaQBank, ACE QBank, or UWorld launch bundle in its confirmed exam track"),
+    new Error("This AylaMed administrator session is limited to AylaMed-owned content or an authorized Amedex, MPlusX, BMJ OnExamination, CanadaQBank, ACE QBank, PassMedicine, BoardVitals, or UWorld launch bundle in its confirmed exam track"),
     { statusCode: 403, code: "AYLAMED_AUTHORIZED_EXTERNAL_SCOPE_REQUIRED" },
   );
 }
@@ -35613,7 +35613,8 @@ async function requireOwnedMediaBundleAdmin(req, uploadId, parentJob = null, con
   const expectedCreator = String(auth.user?.id || "");
   const ownsSession = expectedCreator
     && String(session?.created_by || "") === expectedCreator;
-  const isMediaArchive = String(session?.purpose || "").toLowerCase() === "media_zip";
+  const isMediaArchive = ["media_zip", "mixed_qbank_zip"]
+    .includes(String(session?.purpose || "").toLowerCase());
 
   const parentAllowed = !parentJob
     || ngOwnedAylaMedImportJob(parentJob)
@@ -35634,7 +35635,8 @@ async function requireOwnedMediaBundleJobAdmin(req, privateBundleJob, context = 
   if (!uploadId || !parentJob) throw ngOwnedMediaUploadScopeError();
   if (auth.ownedCatalogOnly) {
     const session = await ngContentUploadStore.read(uploadId).catch(() => null);
-    const isFinalizedMediaArchive = String(session?.purpose || "").toLowerCase() === "media_zip"
+    const isFinalizedMediaArchive = ["media_zip", "mixed_qbank_zip"]
+      .includes(String(session?.purpose || "").toLowerCase())
       && String(session?.status || "").toLowerCase() === "finalized";
     const parentAllowed = ngOwnedAylaMedImportJob(parentJob)
       || ngAuthorizedExternalImportSource(parentJob);
@@ -35856,7 +35858,7 @@ app.post("/admin/crm/ai-training/content-imports/preview", async (req, res) => {
   let jobId = "";
   try {
     const { user, ownedCatalogOnly = false } = await requireOwnedCatalogAdmin(req);
-    upload = await ngReceiveOrResolveContentZip(req, ["question_zip"]);
+    upload = await ngReceiveOrResolveContentZip(req, ["question_zip", "mixed_qbank_zip"]);
     const examTrack = normalizeExamTrack(upload.fields.exam_track || upload.fields.examTrack);
     const sourceNamespace = contentSlug(upload.fields.source_namespace || upload.fields.sourceNamespace || upload.fields.source_provider || upload.fields.sourceProvider);
     const sourceProvider = String(upload.fields.source_provider || upload.fields.sourceProvider || "unknown").trim();
@@ -35964,7 +35966,7 @@ app.post("/admin/crm/ai-training/content-imports/:jobId/import-draft", async (re
     if (!["preview_ready", "preview_with_warnings"].includes(String(existing.status))) {
       return res.status(409).json({ success: false, error: `Import job cannot be committed from status ${existing.status}` });
     }
-    upload = await ngReceiveOrResolveContentZip(req, ["question_zip"]);
+    upload = await ngReceiveOrResolveContentZip(req, ["question_zip", "mixed_qbank_zip"]);
     if (String(upload.sha256) !== String(existing.zip_sha256)) {
       await ngCleanupRejectedContentUpload(upload); upload = null;
       return res.status(409).json({ success: false, error: "ZIP checksum does not match the approved preview. Upload the exact same ZIP." });
@@ -37440,7 +37442,7 @@ app.post("/admin/crm/ai-training/content-imports/:jobId/media-bundle/import-draf
     if (!["draft_imported", "draft_imported_with_warnings"].includes(String(parentJob.status))) {
       return res.status(409).json({ success: false, error: "Questions must be imported as drafts before media can be attached" });
     }
-    upload = await ngReceiveOrResolveContentZip(req, ["media_zip"]);
+    upload = await ngReceiveOrResolveContentZip(req, ["media_zip", "mixed_qbank_zip"]);
     mediaJob = await createContentMediaImportJob({
       id: crypto.randomUUID(), contentImportJobId: parentJob.id, zipSha256: upload.sha256,
       originalFilename: upload.originalFilename, createdBy: String(user.id),
@@ -37579,7 +37581,7 @@ app.post("/admin/crm/ai-training/content-imports/:jobId/media-bundle/retry", asy
 
     // This verifies that the finalized R2 object still exists and renews its
     // staging TTL. It never uploads bytes or creates another archive.
-    await ngContentUploadStore.resolveFinalized(uploadId, { allowedPurposes: ["media_zip"] });
+    await ngContentUploadStore.resolveFinalized(uploadId, { allowedPurposes: ["media_zip", "mixed_qbank_zip"] });
 
     const current = ngContentBackgroundQueue.get(backgroundJobId);
     if (!current) {
