@@ -1,11 +1,53 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  aylaPublicationGroupForResource,
+  buildAylaCompactPublicationGroups,
   buildAylaPublicationControlPanel,
   normalizeAylaExamPublicationControl,
   normalizeAylaResourcePublicationControl,
   resolveAylaExamPublication,
 } from "../lib/aylamed-exam-publication.js";
+
+test("book, video and flashcard children collapse to named folder controls", () => {
+  assert.deepEqual(aylaPublicationGroupForResource({ type: "book", id: "book-1", folder_id: "plab-library", folder_name: "PLAB Library" }), {
+    groupType: "book_folder", groupId: "plab-library", title: "PLAB Library",
+  });
+  assert.equal(aylaPublicationGroupForResource({ type: "video", id: "video-1", folder_id: "step2-videos" }).groupType, "vimeo_folder");
+  assert.equal(aylaPublicationGroupForResource({ type: "flashcard_collection", id: "card-1", collection_id: "step2-flash" }).groupId, "step2-flash");
+  assert.equal(aylaPublicationGroupForResource({ type: "cdm_program", id: "case-1", provider: "ACE" }).groupId, "legacy-cdm-ace");
+});
+
+test("compact groups expose configured and effective state without flattening child details", () => {
+  const groups = buildAylaCompactPublicationGroups({
+    exams: [{ examTrackId: "usmle_step_2_ck", enabled: false }],
+    availableResources: [
+      { id: "book-1", type: "book", exam_track_id: "usmle_step_2_ck", title: "Volume 1", folder_id: "step2-library", folder_name: "Step 2 Library", status: "approved" },
+      { id: "book-2", type: "book", exam_track_id: "usmle_step_2_ck", title: "Volume 2", folder_id: "step2-library", folder_name: "Step 2 Library", status: "approved" },
+      { id: "uworld-step2", type: "qbank_collection", exam_track_id: "usmle_step_2_ck", title: "UWorld Step 2 CK March 2026", status: "approved", question_count: 4085, taxonomy_complete_count: 4085 },
+    ],
+  });
+  assert.equal(groups.length, 2);
+  const books = groups.find((group) => group.type === "book_folder");
+  assert.equal(books.resource_count, 2);
+  assert.equal(books.configured_state, "published");
+  assert.equal(books.effective_student_access, false);
+  assert.equal(groups.find((group) => group.type === "qbank_collection").ready, true);
+});
+
+test("mixed child controls are preserved and surfaced for review", () => {
+  const groups = buildAylaCompactPublicationGroups({
+    exams: [{ examTrackId: "plab", enabled: true }],
+    availableResources: [
+      { id: "book-1", type: "book", exam_track_id: "plab", title: "Book 1", folder_id: "plab-books", status: "approved" },
+      { id: "book-2", type: "book", exam_track_id: "plab", title: "Book 2", folder_id: "plab-books", status: "approved" },
+    ],
+    resourceControls: [{ examTrackId: "plab", resourceType: "book", resourceId: "book-2", enabled: false }],
+  });
+  assert.equal(groups[0].configured_state, "mixed");
+  assert.equal(groups[0].effective_state, "mixed_review_required");
+  assert.equal(groups[0].effective_student_access, false);
+});
 
 test("exam master publication overrides resources without deleting their state", () => {
   const exam = normalizeAylaExamPublicationControl({ examTrackId: "amc", enabled: false });

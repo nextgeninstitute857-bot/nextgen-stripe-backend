@@ -134,6 +134,8 @@ test("publication controls stay available when the QBank registry is unavailable
     assert.equal(controls.payload.exams.find((exam) => exam.examTrackId === "usmle_step_1").enabled, true);
     assert.equal(controls.payload.exams.find((exam) => exam.examTrackId === "amc").enabled, false);
     assert.equal(controls.payload.available_resources.some((resource) => resource.id === "amc-book"), true);
+    assert.equal(controls.payload.publication_groups.some((group) => group.type === "book_folder" && group.exam_track_id === "amc"), true);
+    assert.equal(controls.payload.publication_groups.every((group) => group.type !== "book" && group.type !== "video"), true);
     assert.equal(controls.payload.publication_registry_warning.code, "qbank_registry_unavailable");
   } finally {
     if (child.exitCode === null) {
