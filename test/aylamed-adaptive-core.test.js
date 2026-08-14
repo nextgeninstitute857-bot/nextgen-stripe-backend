@@ -19,6 +19,7 @@ test("adaptive evidence is student-owned, exam-isolated, and optionally server-v
   assert.equal(aylaAdaptiveEvidenceMatchesStudent({ studentId: "student-2", examTrack: "usmle-step-2" }, student), false);
   assert.equal(aylaAdaptiveEvidenceMatchesStudent({ studentId: "student-1", serverVerified: false }, student, { verifiedOnly: true }), false);
   assert.equal(aylaAdaptiveEvidenceMatchesStudent({ studentId: "student-1", serverVerified: true }, student, { verifiedOnly: true }), true);
+  assert.equal(aylaAdaptiveEvidenceMatchesStudent({ studentId: "student-1", serverVerified: true, scoringAllowed: false }, student, { verifiedOnly: true }), false);
 });
 
 test("adaptive systems come from the student's exam registry instead of a Step 1 constant", () => {

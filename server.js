@@ -63,6 +63,7 @@ import {
   listContentTaxonomyAuditEvents,
   listContentTaxonomyReviewQueue,
   normalizeContentSourceProfile,
+  resolveContentQbankStudentCollectionIds,
   previewAylaOriginalMcqRepair,
   previewStep1CollectionTaxonomyRepair,
   previewGuardedUworldCleanup,
@@ -40733,6 +40734,7 @@ async function aylaSelectQbankSessionQuestions({
   filters,
   purpose,
   sourceProfile = "",
+  selectedBanks = [],
   destinationScope = "",
   preferredQuestionIds = [],
   selectionSeed = "",
@@ -40740,6 +40742,56 @@ async function aylaSelectQbankSessionQuestions({
   seenQuestionIds = [],
 } = {}) {
   const publicationDestination = purpose === "baseline_diagnostic" ? "diagnostic" : "qbank";
+  if (purpose !== "baseline_diagnostic" && Array.isArray(selectedBanks) && selectedBanks.length) {
+    const banksBySourceExam = new Map();
+    for (const bank of selectedBanks) {
+      const sourceExamTrack = normalizeAylaRegistryExamTrack(bank.source_exam_track || examTrack);
+      if (!sourceExamTrack) continue;
+      if (!banksBySourceExam.has(sourceExamTrack)) banksBySourceExam.set(sourceExamTrack, []);
+      banksBySourceExam.get(sourceExamTrack).push(bank);
+    }
+    const pools = await Promise.all([...banksBySourceExam.entries()].map(async ([sourceExamTrack, banks]) => {
+      const rows = await listContentQbankQuestions({
+        examTrack: sourceExamTrack,
+        destination: "aylamed_qbank",
+        systemKey: filters.system_key,
+        subsystemKey: filters.subsystem_key,
+        topicKey: filters.topic_key,
+        subtopicKey: filters.subtopic_key,
+        sourceProfile,
+        destinationScope,
+        limit: 200,
+        seed: crypto.randomUUID(),
+        seenQuestionIds,
+        collectionIds: banks.map((row) => row.id),
+      });
+      const banksById = new Map(banks.map((row) => [String(row.id), row]));
+      return rows.map((row) => {
+        const bank = banksById.get(String(row.collection_id || ""));
+        return {
+          ...row,
+          source_exam_track: sourceExamTrack,
+          supplemental: bank?.supplemental === true,
+          scoring_allowed: bank?.scoring_allowed !== false,
+        };
+      });
+    }));
+    const selected = [];
+    const seenIds = new Set();
+    for (let index = 0; selected.length < requestedCount; index += 1) {
+      let added = false;
+      for (const poolRows of pools) {
+        const row = poolRows[index];
+        if (!row || seenIds.has(String(row.id))) continue;
+        seenIds.add(String(row.id));
+        selected.push(row);
+        added = true;
+        if (selected.length >= requestedCount) break;
+      }
+      if (!added) break;
+    }
+    return { selected, availableSystemKeys: [], selectedSystemKeys: [] };
+  }
   const collectionIds = await aylaPublishedQbankCollectionIds(db, {
     examTrack,
     sourceExamTrack: examTrack,
@@ -41175,10 +41227,16 @@ function aylaDiagnosticQuestionForSession(session = {}, question = {}) {
   return applyDiagnosticSystemOverride(question, system);
 }
 
-function aylaStudentQbankPresentationPolicy(policy = {}, selectedSourceProfile = "") {
+function aylaStudentQbankPresentationPolicy(
+  policy = {},
+  selectedSourceProfile = "",
+  availableBanks = [],
+  selectedCollectionIds = [],
+) {
   return {
     student_bank_mode: policy.student_bank_mode || "unified_aylamed",
     student_can_choose_source_profile: policy.student_can_choose_source_profile === true,
+    student_can_choose_collections: policy.student_can_choose_collections === true,
     student_brand_label: policy.student_brand_label || "AylaMed QBank",
     selected_source_profile: selectedSourceProfile || null,
     available_source_profiles: (Array.isArray(policy.available_source_profiles)
@@ -41188,6 +41246,19 @@ function aylaStudentQbankPresentationPolicy(policy = {}, selectedSourceProfile =
       question_count: Number(row.question_count || 0),
       collection_count: Number(row.collection_count || 0),
     })),
+    available_banks: (Array.isArray(availableBanks) ? availableBanks : []).map((row) => ({
+      collection_id: row.id,
+      collection_key: row.collection_key,
+      name: row.name,
+      source_provider: row.source_provider,
+      source_year: row.source_year,
+      question_count: Number(row.question_count || 0),
+      source_exam_track: row.source_exam_track,
+      supplemental: row.supplemental === true,
+      scoring_allowed: row.scoring_allowed !== false,
+    })),
+    selected_collection_ids: [...new Set((Array.isArray(selectedCollectionIds)
+      ? selectedCollectionIds : []).map(String).filter(Boolean))],
     roadmap_source_strategy: "all_approved_profiles",
     personal_tutor_source_strategy: "all_approved_profiles",
     exact_duplicates_count_once: true,
@@ -42059,18 +42130,27 @@ app.get("/api/ayla/qbank/catalog", async (req, res) => {
       presentationPolicy,
       req.query.source_profile || req.query.sourceProfile || "",
     );
-    const sourceExamTracks = [examTrack, ...listAylaExamSupplements(examTrack)
-      .filter((policy) => policy.resource_types.includes("qbank_collection"))
-      .map((policy) => normalizeAylaRegistryExamTrack(policy.source_exam_track))
-      .filter(Boolean)];
-    const catalog = (await Promise.all([...new Set(sourceExamTracks)].map(async (sourceExamTrack) => {
-      const collectionIds = await aylaPublishedQbankCollectionIds(auth.db, {
-        examTrack,
-        sourceExamTrack,
-        destination: "qbank",
-        destinationScope,
-        sourceProfile,
-      });
+    const availableBanks = await aylaAvailableQbankBanks(auth.db, {
+      examTrack,
+      destination: "qbank",
+      destinationScope,
+      sourceProfile,
+    });
+    const requestedCollectionIds = aylaRequestedQbankCollectionIds(
+      req.query.collection_ids ?? req.query.collectionIds ?? [],
+    );
+    const selectedCollectionIds = resolveContentQbankStudentCollectionIds(
+      { ...presentationPolicy, available_banks: availableBanks },
+      requestedCollectionIds,
+    );
+    const selectedBanks = availableBanks.filter((row) => selectedCollectionIds.includes(row.id));
+    const banksBySourceExam = new Map();
+    for (const bank of selectedBanks) {
+      if (!banksBySourceExam.has(bank.source_exam_track)) banksBySourceExam.set(bank.source_exam_track, []);
+      banksBySourceExam.get(bank.source_exam_track).push(bank);
+    }
+    const catalog = (await Promise.all([...banksBySourceExam.entries()].map(async ([sourceExamTrack, banks]) => {
+      const collectionIds = banks.map((row) => row.id);
       const rows = await getContentQbankCatalog({
         examTrack: sourceExamTrack,
         destination: "aylamed_qbank",
@@ -42088,7 +42168,12 @@ app.get("/api/ayla/qbank/catalog", async (req, res) => {
     return aylaSendOk(res, {
       exam_track: examTrack,
       entitlement: { type: access.entitlement_type, expires_at: access.expires_at || null },
-      presentation: aylaStudentQbankPresentationPolicy(presentationPolicy, sourceProfile),
+      presentation: aylaStudentQbankPresentationPolicy(
+        presentationPolicy,
+        sourceProfile,
+        availableBanks,
+        selectedCollectionIds,
+      ),
       content_delivery_policy: contentDeliveryPolicySnapshot(),
       count: catalog.length,
       question_count: catalog.reduce((sum, row) => sum + Number(row.question_count || 0), 0),
@@ -42205,6 +42290,25 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         presentationPolicy,
         req.body.source_profile || req.body.sourceProfile || "",
       );
+    let availableBanks = [];
+    let selectedCollectionIds = [];
+    let selectedBanks = [];
+    if (!roadmapAssignmentId && purpose !== "baseline_diagnostic") {
+      availableBanks = await aylaAvailableQbankBanks(auth.db, {
+        examTrack: access.exam_track,
+        destination: "qbank",
+        destinationScope,
+        sourceProfile,
+      });
+      const requestedCollectionIds = aylaRequestedQbankCollectionIds(
+        req.body.collection_ids ?? req.body.collectionIds ?? [],
+      );
+      selectedCollectionIds = resolveContentQbankStudentCollectionIds(
+        { ...presentationPolicy, available_banks: availableBanks },
+        requestedCollectionIds,
+      );
+      selectedBanks = availableBanks.filter((row) => selectedCollectionIds.includes(row.id));
+    }
 
     const idempotencyFingerprint = crypto.createHash("sha256").update(JSON.stringify({
       examTrack: access.exam_track,
@@ -42217,6 +42321,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
       roadmapAssignmentId,
       roadmapQuestionIds,
       sourceProfile,
+      selectedCollectionIds,
       destinationScope,
       timeLimitMinutes: req.body.time_limit_minutes ?? req.body.timeLimitMinutes ?? null,
     })).digest("hex");
@@ -42341,6 +42446,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         filters: effectiveFilters,
         purpose,
         sourceProfile,
+        selectedBanks,
         destinationScope,
         selectionSeed: diagnosticSelectionSeed,
         questionExposureCounts: diagnosticQuestionExposureCounts,
@@ -42350,7 +42456,19 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
     const selected = selection.selected;
     if (!selected.length) return aylaSendError(res, 409, "No approved QBank questions match this exam track and filter selection");
 
-    const questionMappings = selected.map((question) => ({ ref: crypto.randomUUID(), contentQuestionId: question.id }));
+    const questionMappings = selected.map((question) => {
+      const bank = selectedBanks.find((row) => String(row.id) === String(question.collection_id));
+      return {
+        ref: crypto.randomUUID(),
+        contentQuestionId: question.id,
+        collectionId: bank?.id || question.collection_id || null,
+        collectionKey: bank?.collection_key || null,
+        bankName: bank?.name || null,
+        sourceExamTrack: bank?.source_exam_track || question.source_exam_track || access.exam_track,
+        supplemental: bank?.supplemental === true || question.supplemental === true,
+        scoringAllowed: bank?.scoring_allowed !== false && question.scoring_allowed !== false,
+      };
+    });
     const mutation = await mutateAylaDb(async (db) => {
       const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, access.exam_track);
       let legacyDiagnostics = [];
@@ -42451,6 +42569,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         origin,
         roadmapAssignmentId,
         sourceProfile,
+        selectedBanks,
         destinationScope,
         timeLimitMinutes: req.body.time_limit_minutes ?? req.body.timeLimitMinutes ?? null,
         entitlement: fresh.entitlement,
@@ -42517,6 +42636,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         questionCount: session.questionCount,
         origin: session.origin,
         sourceProfile: session.sourceProfile || null,
+        selectedCollectionIds: session.selectedBanks.map((row) => row.collectionId),
         diagnosticSelectionMode: session.diagnosticQuality?.selectionMode || null,
         diagnosticFreshQuestionCount: session.diagnosticQuality?.freshQuestionCount ?? null,
         diagnosticRepeatedQuestionCount: session.diagnosticQuality?.repeatedQuestionCount ?? null,
@@ -42564,13 +42684,7 @@ app.post("/api/ayla/qbank/sessions/:sessionId/answers", async (req, res) => {
     const questionRef = String(req.body.question_ref || req.body.questionRef || "").trim();
     const mapping = qbankSessionQuestion(session, questionRef);
     if (!mapping) return aylaSendError(res, 404, "Question does not belong to this QBank session");
-    const [question] = await getContentQbankQuestions({
-      questionIds: [mapping.contentQuestionId],
-      examTrack: session.examTrack,
-      destination: "aylamed_qbank",
-      destinationScope: session.destinationScope || "",
-      sourceProfile: session.sourceProfile || "",
-    });
+    const [question] = await aylaSessionQbankQuestions(session, [mapping]);
     if (!question) return aylaSendError(res, 409, "This question is no longer approved for QBank delivery");
     const selectedAnswerId = Number(req.body.selected_answer_id ?? req.body.selectedAnswerId);
     if (!question.answers.some((row) => Number(row.answer_id) === selectedAnswerId)) return aylaSendError(res, 400, "selected_answer_id is not a valid answer choice");
@@ -42605,7 +42719,9 @@ app.post("/api/ayla/qbank/sessions/:sessionId/answers", async (req, res) => {
           : { questionRef, resultWithheldUntilSubmit: true });
         if (immediate) {
           aylaV189RecordActivity(db, recorded.session.studentId, "qbank_question_answered", { sessionId: recorded.session.id, questionRef, correct: recorded.answer.correct, examTrack: recorded.session.examTrack });
-          const weakAreas = aylaV227RefreshWeakAreaProjection(db, fresh.student);
+          const weakAreas = currentMapping.scoringAllowed === false
+            ? { count: 0 }
+            : aylaV227RefreshWeakAreaProjection(db, fresh.student);
           adaptiveUpdate = {
             verified_attempts_created: attemptResult?.created ? 1 : 0,
             weak_area_flashcards_created: attemptResult?.flashcardCreated ? 1 : 0,
@@ -42646,13 +42762,7 @@ app.post("/api/ayla/qbank/sessions/:sessionId/submit", async (req, res) => {
     const initial = aylaOwnedQbankSession(auth.db, auth.user, auth.student, req.params.sessionId);
     aylaRequireQbankAccess(auth.db, auth.user, auth.student, initial.examTrack);
     aylaRequireCurrentDiagnosticBlueprint(initial);
-    const rawReviewQuestions = await getContentQbankQuestions({
-      questionIds: (initial.questions || []).map((row) => row.contentQuestionId),
-      examTrack: initial.examTrack,
-      destination: "aylamed_qbank",
-      destinationScope: initial.destinationScope || "",
-      sourceProfile: initial.sourceProfile || "",
-    });
+    const rawReviewQuestions = await aylaSessionQbankQuestions(initial, initial.questions || []);
     const reviewQuestions = rawReviewQuestions.map((question) =>
       aylaDiagnosticQuestionForSession(initial, question));
     const reviewById = new Map(reviewQuestions.map((row) => [String(row.id), row]));
@@ -42763,7 +42873,9 @@ app.post("/api/ayla/qbank/sessions/:sessionId/submit", async (req, res) => {
           questionCount: finalized.session.questionCount,
           purpose: finalized.session.purpose || "practice",
         });
-        const weakAreas = aylaV227RefreshWeakAreaProjection(db, fresh.student);
+        const weakAreas = finalized.session.scoredQuestionCount > 0
+          ? aylaV227RefreshWeakAreaProjection(db, fresh.student)
+          : { count: 0 };
         let startingReadinessReport = null;
         let roadmapOutlineRefresh = null;
         if (baselineRecommendation) {
@@ -68234,6 +68346,12 @@ function aylaRecordQbankAttempt(db, session, mapping, answer, question = {}) {
     resourceId: mapping.contentQuestionId,
     contentQuestionId: mapping.contentQuestionId,
     sourceType: "content_registry_qbank",
+    sourceExamTrack: mapping.sourceExamTrack || session.examTrack,
+    qbankCollectionId: mapping.collectionId || null,
+    qbankCollectionKey: mapping.collectionKey || null,
+    qbankName: mapping.bankName || null,
+    supplemental: mapping.supplemental === true,
+    scoringAllowed: mapping.scoringAllowed !== false,
     selectedAnswerId: answer.selectedAnswerId,
     outcome: answer.correct ? "correct" : "incorrect",
     serverVerified: true,
@@ -68249,7 +68367,7 @@ function aylaRecordQbankAttempt(db, session, mapping, answer, question = {}) {
   aylaSetItem(db, "aylaQuestionAttempts", attempt);
   let revision = null;
   let flashcard = { resource: null, created: false };
-  if (!answer.correct) {
+  if (mapping.scoringAllowed !== false && !answer.correct) {
     flashcard = aylaV227UpsertMistakeFlashcard(db, {
       student: { id: session.studentId, examTrack: session.examTrack },
       examTrack: session.examTrack,
@@ -68269,7 +68387,7 @@ function aylaRecordQbankAttempt(db, session, mapping, answer, question = {}) {
       aylaSetItem(db, "aylaQuestionAttempts", attempt);
       aylaSetItem(db, "aylaRevisionQueue", revision);
     }
-  } else {
+  } else if (mapping.scoringAllowed !== false) {
     aylaRemoveQbankRevisionReason(db, session, mapping, "incorrect_answer");
   }
   return {
@@ -68281,16 +68399,32 @@ function aylaRecordQbankAttempt(db, session, mapping, answer, question = {}) {
   };
 }
 
+async function aylaSessionQbankQuestions(session = {}, mappings = []) {
+  const groups = new Map();
+  for (const mapping of Array.isArray(mappings) ? mappings : []) {
+    const sourceExamTrack = normalizeAylaRegistryExamTrack(
+      mapping.sourceExamTrack || mapping.source_exam_track || session.examTrack,
+    );
+    const collectionId = String(mapping.collectionId || mapping.collection_id || "").trim();
+    const key = `${sourceExamTrack}|${collectionId}`;
+    if (!groups.has(key)) groups.set(key, { sourceExamTrack, collectionId, questionIds: [] });
+    groups.get(key).questionIds.push(mapping.contentQuestionId || mapping.content_question_id);
+  }
+  const rows = await Promise.all([...groups.values()].map((group) => getContentQbankQuestions({
+    questionIds: group.questionIds,
+    examTrack: group.sourceExamTrack,
+    destination: "aylamed_qbank",
+    destinationScope: session.destinationScope || "",
+    sourceProfile: session.sourceProfile || "",
+    collectionIds: group.collectionId ? [group.collectionId] : null,
+  })));
+  return rows.flat();
+}
+
 async function aylaPlayableQbankQuestion(db, session, mapping, rawQuestion = null) {
   let raw = rawQuestion;
   if (!raw) {
-    [raw] = await getContentQbankQuestions({
-      questionIds: [mapping.contentQuestionId],
-      examTrack: session.examTrack,
-      destination: "aylamed_qbank",
-      destinationScope: session.destinationScope || "",
-      sourceProfile: session.sourceProfile || "",
-    });
+    [raw] = await aylaSessionQbankQuestions(session, [mapping]);
   }
   if (!raw) {
     return {
@@ -68350,13 +68484,7 @@ function aylaQbankSavedItemSession(db, item) {
 async function aylaPlayableQbankSession(db, session) {
   aylaRequireCurrentDiagnosticBlueprint(session);
   const mappings = Array.isArray(session.questions) ? session.questions : [];
-  const content = await getContentQbankQuestions({
-    questionIds: mappings.map((row) => row.contentQuestionId),
-    examTrack: session.examTrack,
-    destination: "aylamed_qbank",
-    destinationScope: session.destinationScope || "",
-    sourceProfile: session.sourceProfile || "",
-  });
+  const content = await aylaSessionQbankQuestions(session, mappings);
   const byId = new Map(content.map((row) => [String(row.id), row]));
   const questions = [];
   for (const mapping of mappings) {
@@ -74064,6 +74192,22 @@ async function aylaPublishedQbankCollectionIds(db, {
   destinationScope = "",
   sourceProfile = "",
 } = {}) {
+  return (await aylaPublishedQbankCollections(db, {
+    examTrack,
+    sourceExamTrack,
+    destination,
+    destinationScope,
+    sourceProfile,
+  })).map((collection) => String(collection.id || "")).filter(Boolean);
+}
+
+async function aylaPublishedQbankCollections(db, {
+  examTrack,
+  sourceExamTrack = examTrack,
+  destination = "qbank",
+  destinationScope = "",
+  sourceProfile = "",
+} = {}) {
   if (!contentRegistryStatus().configured) return [];
   const targetExamTrackId = aylaCanonicalExamTrack(examTrack);
   const sourceRegistryTrack = normalizeAylaRegistryExamTrack(sourceExamTrack);
@@ -74084,8 +74228,58 @@ async function aylaPublishedQbankCollectionIds(db, {
       resourceId: String(collection.id || ""),
       destination,
     }).allowed)
-    .map((collection) => String(collection.id || ""))
-    .filter(Boolean);
+    .filter((collection) => String(collection.id || "").trim());
+}
+
+function aylaRequestedQbankCollectionIds(value) {
+  const values = Array.isArray(value) ? value : String(value || "").split(",");
+  return values.map(String).map((item) => item.trim()).filter(Boolean);
+}
+
+async function aylaAvailableQbankBanks(db, {
+  examTrack,
+  destination = "qbank",
+  destinationScope = "",
+  sourceProfile = "",
+} = {}) {
+  const sourceExamTracks = [examTrack, ...listAylaExamSupplements(examTrack)
+    .filter((policy) => policy.resource_types.includes("qbank_collection"))
+    .map((policy) => normalizeAylaRegistryExamTrack(policy.source_exam_track))
+    .filter(Boolean)];
+  const rows = (await Promise.all([...new Set(sourceExamTracks)].map(async (sourceExamTrack) => {
+    const collections = await aylaPublishedQbankCollections(db, {
+      examTrack,
+      sourceExamTrack,
+      destination,
+      destinationScope,
+      sourceProfile,
+    });
+    return collections.map((collection) => {
+      const supplemental = sourceExamTrack !== examTrack;
+      const isMccqeStep2Supplement = normalizeAylaRegistryExamTrack(examTrack) === "mccqe"
+        && normalizeAylaRegistryExamTrack(sourceExamTrack) === "usmle-step-2";
+      return {
+        id: String(collection.id),
+        collection_key: String(collection.collection_key || ""),
+        name: isMccqeStep2Supplement
+          ? "UWorld Step 2 CK — Supplemental, non-scoring"
+          : String(collection.title || collection.collection_key || "Question Bank"),
+        source_provider: String(collection.source_provider || ""),
+        source_profile: String(collection.source_profile || ""),
+        source_year: Number(collection.source_year || 0) || null,
+        question_count: Number(
+          collection.delivery_media_ready_count
+            ?? collection.media_ready_count
+            ?? collection.question_count
+            ?? 0,
+        ),
+        source_exam_track: sourceExamTrack,
+        supplemental,
+        scoring_allowed: !supplemental,
+      };
+    });
+  }))).flat();
+  return [...new Map(rows.map((row) => [row.id, row])).values()];
 }
 
 function aylaPublicationResolution(db, { examTrack, sourceExamTrack, resourceType, resourceId, destination } = {}) {

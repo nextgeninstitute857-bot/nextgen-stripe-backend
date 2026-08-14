@@ -20,7 +20,9 @@ import {
 import {
   contentQbankQuestionDisplay,
   normalizeContentQbankPresentationPolicy,
+  normalizeContentCollectionIds,
   normalizeContentSourceProfile,
+  resolveContentQbankStudentCollectionIds,
   resolveContentQbankStudentSourceProfile,
 } from "../lib/content-registry-postgres.js";
 
@@ -186,6 +188,97 @@ test("session builder deduplicates questions and creates bounded blocks", () => 
   assert.equal(session.questionCount, 3);
   assert.deepEqual(session.blocks.map((block) => block.questionRefs), [["one", "two"], ["three"]]);
   assert.deepEqual(sanitizeAylaQbankSession(session).questions, [{ question_ref: "one" }, { question_ref: "two" }, { question_ref: "three" }]);
+});
+
+test("named-bank mode validates all, individual, and multi-bank selection by collection ID", () => {
+  const bank1 = "11111111-1111-4111-8111-111111111111";
+  const bank2 = "22222222-2222-4222-8222-222222222222";
+  const policy = {
+    ...normalizeContentQbankPresentationPolicy({ student_bank_mode: "named_banks" }, "MCCQE"),
+    available_banks: [
+      { id: bank1, question_count: 3469 },
+      { id: bank2, question_count: 3101 },
+    ],
+  };
+  assert.equal(policy.student_bank_mode, "collection_switchable");
+  assert.equal(policy.student_can_choose_collections, true);
+  assert.deepEqual(resolveContentQbankStudentCollectionIds(policy), [bank1, bank2]);
+  assert.deepEqual(resolveContentQbankStudentCollectionIds(policy, [bank2]), [bank2]);
+  assert.deepEqual(resolveContentQbankStudentCollectionIds(policy, [bank2, bank1, bank2]), [bank2, bank1]);
+  assert.deepEqual(normalizeContentCollectionIds([bank1, "not-a-uuid"]), [bank1]);
+  assert.throws(
+    () => resolveContentQbankStudentCollectionIds(policy, ["not-a-uuid"]),
+    (error) => error.code === "QBANK_COLLECTION_ID_INVALID" && error.statusCode === 400,
+  );
+  assert.throws(
+    () => resolveContentQbankStudentCollectionIds(policy, ["33333333-3333-4333-8333-333333333333"]),
+    (error) => error.code === "QBANK_COLLECTION_UNAVAILABLE" && error.statusCode === 400,
+  );
+  assert.throws(
+    () => resolveContentQbankStudentCollectionIds(
+      { ...policy, student_can_choose_collections: false },
+      [bank1],
+    ),
+    (error) => error.code === "QBANK_COLLECTION_SWITCH_DISABLED" && error.statusCode === 403,
+  );
+});
+
+test("MCCQE supplemental questions retain bank identity and never enter official scoring", () => {
+  const nativeBank = "11111111-1111-4111-8111-111111111111";
+  const supplementalBank = "22222222-2222-4222-8222-222222222222";
+  let session = createAylaQbankSession({
+    id: "mccqe-mixed",
+    userId: "user-1",
+    studentId: "student-1",
+    examTrack: "mccqe",
+    selectedBanks: [
+      { id: nativeBank, collection_key: "cqb-mccque1-2025-db", name: "CanadaQBank MCCQE 2025" },
+      {
+        id: supplementalBank,
+        collection_key: "uworldstep2-2026-march",
+        name: "UWorld Step 2 CK — Supplemental, non-scoring",
+        source_exam_track: "usmle-step-2",
+        supplemental: true,
+        scoring_allowed: false,
+      },
+    ],
+    questions: [
+      { ref: "native", contentQuestionId: "native-q", collectionId: nativeBank, collectionKey: "cqb-mccque1-2025-db", bankName: "CanadaQBank MCCQE 2025" },
+      { ref: "supplement", contentQuestionId: "step2-q", collectionId: supplementalBank, collectionKey: "uworldstep2-2026-march", bankName: "UWorld Step 2 CK — Supplemental, non-scoring", sourceExamTrack: "usmle-step-2", supplemental: true, scoringAllowed: false },
+    ],
+  });
+  session = recordAylaQbankAnswer(session, { questionRef: "native", selectedAnswerId: 1, correctAnswerId: 2 }).session;
+  session = recordAylaQbankAnswer(session, { questionRef: "supplement", selectedAnswerId: 2, correctAnswerId: 2 }).session;
+  const finalized = finalizeAylaQbankSession(session).session;
+  assert.equal(finalized.questionCount, 2);
+  assert.equal(finalized.answeredCount, 2);
+  assert.equal(finalized.scoredQuestionCount, 1);
+  assert.equal(finalized.supplementalQuestionCount, 1);
+  assert.equal(finalized.correctCount, 0);
+  assert.equal(finalized.incorrectCount, 1);
+  assert.equal(finalized.scorePercent, 0);
+  const safe = sanitizeAylaQbankSession(finalized);
+  assert.equal(safe.selected_banks[1].scoring_allowed, false);
+  assert.equal(safe.questions[1].bank.collection_key, "uworldstep2-2026-march");
+  assert.equal(safe.questions[1].bank.supplemental, true);
+});
+
+test("student catalog and session routes carry named-bank IDs without copying supplements", () => {
+  const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
+  const catalogRoute = server.slice(
+    server.indexOf('app.get("/api/ayla/qbank/catalog"'),
+    server.indexOf('app.post("/api/ayla/qbank/sessions"'),
+  );
+  const sessionRoute = server.slice(
+    server.indexOf('app.post("/api/ayla/qbank/sessions"'),
+    server.indexOf('app.get("/api/ayla/qbank/sessions/:sessionId"'),
+  );
+  assert.match(catalogRoute, /resolveContentQbankStudentCollectionIds/);
+  assert.match(catalogRoute, /selectedCollectionIds/);
+  assert.match(sessionRoute, /selectedCollectionIds/);
+  assert.match(sessionRoute, /selectedBanks/);
+  assert.match(server, /UWorld Step 2 CK — Supplemental, non-scoring/);
+  assert.match(server, /scoringAllowed: mapping\.scoringAllowed !== false/);
 });
 
 test("self-study sessions preserve the selected source profile while roadmap sessions may remain combined", () => {
