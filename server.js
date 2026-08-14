@@ -1,10 +1,5 @@
 import express from "express";
 import {
-  publicDeviceRegistration,
-  registerDeviceToken,
-  revokeDeviceTokens,
-} from "./lib/mobile-push-registration.js";
-import {
   flashcardCapabilities,
   flashcardTextOnlyHtml,
   scheduleFlashcardReview,
@@ -1744,8 +1739,6 @@ const DEFAULT_LIVE_DB = {
   emailBroadcasts: [],
   emailAutomationState: {},
   googleAuthUsers: {},
-  // Native app device tokens. Additive and inactive until a push provider is configured.
-  mobileDeviceTokens: {},
 
   roadmaps: {},
   roadmapMasterMaps: {},
@@ -2106,7 +2099,6 @@ function ngMergeLiveDb(parsed = {}) {
       emailBroadcasts: safeArray(parsed.emailBroadcasts),
       emailAutomationState: parsed.emailAutomationState || {},
       googleAuthUsers: parsed.googleAuthUsers || {},
-      mobileDeviceTokens: parsed.mobileDeviceTokens || {},
       roadmaps: parsed.roadmaps || {},
       roadmapMasterMaps: parsed.roadmapMasterMaps || {},
       roadmapProgress: parsed.roadmapProgress || {},
@@ -12133,32 +12125,6 @@ app.patch("/auth/me", async (req, res) => {
       code: error.code || null,
       details: error.details || undefined,
     });
-  }
-});
-
-app.post("/mobile/push/register", async (req, res) => {
-  try {
-    const { user } = await getAuthenticatedUser(req);
-    const db = await readLiveDb();
-    db.mobileDeviceTokens ||= {};
-    const record = registerDeviceToken(db.mobileDeviceTokens, user.id, req.body || {});
-    await writeLiveDb(db);
-    res.status(201).json({ success: true, device: publicDeviceRegistration(record), delivery_configured: false });
-  } catch (error) {
-    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to register device" });
-  }
-});
-
-app.post("/mobile/push/revoke", async (req, res) => {
-  try {
-    const { user } = await getAuthenticatedUser(req);
-    const db = await readLiveDb();
-    db.mobileDeviceTokens ||= {};
-    const revoked = revokeDeviceTokens(db.mobileDeviceTokens, user.id, req.body || {});
-    if (revoked > 0) await writeLiveDb(db);
-    res.json({ success: true, revoked });
-  } catch (error) {
-    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to revoke device" });
   }
 });
 
