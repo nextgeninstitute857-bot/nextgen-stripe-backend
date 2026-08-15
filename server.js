@@ -193,6 +193,7 @@ import {
 import {
   AYLA_PUBLICATION_GROUP_ORDER,
   assertAylaPublicationGroupMutationAllowed,
+  aylaQbankCollectionDeliveryChannel,
   aylaPublicationGroupForResource,
   buildAylaCompactPublicationGroups,
   buildAylaPublicationControlPanel,
@@ -70588,15 +70589,6 @@ async function aylaPublicationResourceSnapshot(db, panel) {
           && control.enabled === true);
         const hasQbankDestination = destinationControls.some((control) => String(control.destination || "") === "aylamed_qbank");
         const hasNbmeDestination = destinationControls.some((control) => String(control.destination || "") === "aylamed_nbme");
-        const collectionFingerprint = `${collection.source_provider || ""} ${collection.source_namespace || ""} ${collection.collection_key || ""} ${collection.title || ""}`.toLowerCase();
-        const internalTestingCollection = /^\s*inter+rnal\b|^\s*internal\b/.test(String(collection.source_provider || "").toLowerCase())
-          || /aylamed_step1_cross_system_preview|internal preview/.test(collectionFingerprint);
-        const step1SimulationAssessment = String(collection.exam_track || "") === "usmle-step-1"
-          && String(collection.source_namespace || "") === "uworld-step-1"
-          && Number(collection.source_year || 0) === 2026
-          && /(?:^|[-_\s])sim(?:ulation)?[-_\s]?[123](?:$|[-_\s])/.test(
-            `${collection.collection_key || ""} ${collection.title || ""}`.toLowerCase(),
-          );
         return {
           id: String(collection.id || ""),
           type: "qbank_collection",
@@ -70609,11 +70601,10 @@ async function aylaPublicationResourceSnapshot(db, panel) {
           source_profile: String(collection.source_profile || "") || null,
           source_year: collection.source_year || null,
           collection_key: String(collection.collection_key || "") || null,
-          delivery_channel: internalTestingCollection
-            ? "internal_testing"
-            : step1SimulationAssessment
-              ? "assessment"
-            : hasNbmeDestination && !hasQbankDestination ? "nbme" : "qbank",
+          delivery_channel: aylaQbankCollectionDeliveryChannel(collection, {
+            hasQbankDestination,
+            hasNbmeDestination,
+          }),
           publication_default_enabled: String(collection.status || "") === "approved" && qbankDestinationEnabled,
           destination_controls: destinationControls,
           status: collection.status || "draft",

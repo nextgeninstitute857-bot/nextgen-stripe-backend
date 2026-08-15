@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   assertAylaPublicationGroupMutationAllowed,
+  aylaQbankCollectionDeliveryChannel,
   aylaPublicationGroupForResource,
   aylaPublicationReadinessBlockers,
   buildAylaCompactPublicationGroups,
@@ -10,6 +11,23 @@ import {
   normalizeAylaResourcePublicationControl,
   resolveAylaExamPublication,
 } from "../lib/aylamed-exam-publication.js";
+
+test("delivery-channel classification preserves real banks and isolates only known assessment containers", () => {
+  assert.equal(aylaQbankCollectionDeliveryChannel({
+    exam_track: "usmle-step-2", source_provider: "Internal qbank",
+    source_namespace: "uworld-step-2", title: "UWorld Step 2 CK 2026",
+  }), "qbank");
+  assert.equal(aylaQbankCollectionDeliveryChannel({
+    exam_track: "usmle-step-1", source_namespace: "step-1-simulation", title: "Simulation 1",
+  }), "internal_testing");
+  assert.equal(aylaQbankCollectionDeliveryChannel({
+    exam_track: "usmle-step-1", source_namespace: "uworld-step-1", source_year: 2026,
+    collection_key: "uworldstep1-2026-mar-sim2", title: "UWorld Step 1 SIM 2",
+  }), "assessment");
+  assert.equal(aylaQbankCollectionDeliveryChannel({
+    exam_track: "usmle-step-2", source_namespace: "nbme-step-2", title: "NBME 10",
+  }, { hasNbmeDestination: true }), "nbme");
+});
 
 test("book, video and flashcard children collapse to named folder controls", () => {
   assert.deepEqual(aylaPublicationGroupForResource({ type: "book", id: "book-1", folder_id: "plab-library", folder_name: "PLAB Library" }), {
