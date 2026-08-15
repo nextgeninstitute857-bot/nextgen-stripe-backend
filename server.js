@@ -70662,7 +70662,7 @@ async function aylaPublicationResourceSnapshot(db, panel) {
     .flatMap((supplement) => nativeResources
       .filter((resource) => resource.exam_track_id === supplement.source_exam_track
         && supplement.resource_types.includes(resource.type)
-        && resource.delivery_channel === "qbank")
+        && (resource.type !== "qbank_collection" || resource.delivery_channel === "qbank"))
       .map((resource) => ({
         ...resource,
         exam_track_id: exam.examTrackId,
