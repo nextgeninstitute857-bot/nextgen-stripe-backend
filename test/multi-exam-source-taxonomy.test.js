@@ -64,8 +64,34 @@ test("the universal importer persists and validates multi-exam taxonomy", () => 
   assert.equal(validateAdaptedQuestion(adapted).length, 0);
 });
 
-test("taxonomy summary covers every non-Step-1 launch exam", () => {
+test("AMBOSS uses its verified provider-wide system ledger across all USMLE banks", () => {
+  for (const examTrack of ["usmle-step-1", "usmle-step-2", "usmle-step-3"]) {
+    const result = multiExamSourceQuestionTaxonomy(question({ sysId: "4,16", subId: "23,42" }), {
+      examTrack,
+      sourceProvider: "AMBOSS",
+      sourceNamespace: `ambossqb-${examTrack}-2025`,
+    });
+    assert.deepEqual(result.errors, [], examTrack);
+    assert.equal(result.taxonomy.labels.system, "Cardiovascular", examTrack);
+    assert.deepEqual(result.taxonomy.provider_tag_ids, ["23", "42"], examTrack);
+    assert.equal(result.taxonomy.review_status, "source_evidence_verified_mapping", examTrack);
+    for (const field of ["system_key", "subsystem_key", "topic_key", "subtopic_key"]) {
+      assert.ok(result.taxonomy[field], `${examTrack}:${field}`);
+    }
+  }
+});
+
+test("an unknown AMBOSS system fails taxonomy validation instead of silently publishing", () => {
+  const result = multiExamSourceQuestionTaxonomy(question({ sysId: 99 }), {
+    examTrack: "usmle-step-2",
+    sourceProvider: "AMBOSS",
+  });
+  assert.deepEqual(result.errors, ["amboss_system_not_in_verified_map"]);
+});
+
+test("taxonomy summary covers every launch exam", () => {
   const summary = multiExamSourceTaxonomySummary();
   assert.deepEqual(summary.hierarchy, ["system", "subsystem", "topic", "subtopic"]);
-  assert.deepEqual(summary.exams, ["usmle-step-2", "usmle-step-3", "amc", "mccqe", "nclex", "plab"]);
+  assert.deepEqual(summary.exams, ["usmle-step-1", "usmle-step-2", "usmle-step-3", "amc", "mccqe", "nclex", "plab"]);
+  assert.equal(summary.amboss_systems, 18);
 });
