@@ -19,6 +19,7 @@ test("server exposes exam and per-resource publication switches and enforces the
   assert.match(server, /aylaListAllContentCollections/);
   assert.match(server, /aylaVimeoCatalogSources/);
   assert.match(server, /const supplementalResources = panel\.exams\.flatMap/);
+  assert.match(server, /resource\.type !== "qbank_collection" \|\| resource\.delivery_channel === "qbank"/);
   assert.match(server, /source_exam_track_id: supplement\.source_exam_track/);
   assert.match(server, /scoring_allowed: false/);
 });
