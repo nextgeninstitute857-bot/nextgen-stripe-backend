@@ -37,7 +37,7 @@ test("compact groups expose configured and effective state without flattening ch
   assert.equal(groups.find((group) => group.type === "qbank_collection").ready, true);
 });
 
-test("question-bank collections collapse by bank name, retain folders, and exclude NBMEs", () => {
+test("question-bank collections collapse by bank name, retain folders, and exclude NBMEs and internal test containers", () => {
   const groups = buildAylaCompactPublicationGroups({
     exams: [{ examTrackId: "usmle_step_2_ck", enabled: true }],
     availableResources: [
@@ -58,6 +58,18 @@ test("question-bank collections collapse by bank name, retain folders, and exclu
         title: "NBME 9", source_provider: "NBME", delivery_channel: "nbme",
         status: "approved", question_count: 200, valid_question_count: 200,
         taxonomy_complete_count: 200, delivery_media_ready_count: 200,
+      },
+      {
+        id: "pilot-preview", type: "qbank_collection", exam_track_id: "usmle_step_2_ck",
+        title: "Internal preview", source_provider: "Internal", delivery_channel: "internal_testing",
+        status: "approved", question_count: 28, valid_question_count: 28,
+        taxonomy_complete_count: 0, delivery_media_ready_count: 28,
+      },
+      {
+        id: "simulation-form", type: "qbank_collection", exam_track_id: "usmle_step_2_ck",
+        title: "Simulation form 1", source_provider: "UWorld", delivery_channel: "assessment",
+        status: "approved", question_count: 160, valid_question_count: 160,
+        taxonomy_complete_count: 0, delivery_media_ready_count: 160,
       },
     ],
   });
