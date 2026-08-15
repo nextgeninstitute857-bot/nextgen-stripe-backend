@@ -138,6 +138,23 @@ function run(command, args, options = {}) {
   });
 }
 
+async function createZip(zipPath, cwd) {
+  const temporaryZipPath = path.join(
+    path.dirname(zipPath),
+    `.${path.basename(zipPath, ".zip")}.${process.pid}.partial.zip`,
+  );
+  try {
+    if (process.platform === "win32") {
+      await run("tar.exe", ["-a", "-c", "-f", temporaryZipPath, "."], { cwd });
+    } else {
+      await run("zip", ["-q", "-r", "-b", "/tmp", temporaryZipPath, "."], { cwd });
+    }
+    await fs.rename(temporaryZipPath, zipPath);
+  } finally {
+    await fs.rm(temporaryZipPath, { force: true });
+  }
+}
+
 async function findFormFiles(formDirectory) {
   const names = await fs.readdir(formDirectory);
   const questionFile = names.find((name) => /\.db_questions\.json$/i.test(name));
@@ -319,6 +336,17 @@ function summarizeForms(forms) {
   };
 }
 
+function isReleaseReadyForm(form) {
+  return form.source_question_count === form.expected_question_count
+    && form.imported_question_count === form.expected_question_count
+    && form.missing_explanations === 0
+    && form.orphan_answers === 0
+    && form.invalid_answer_keys === 0
+    && form.missing_media === 0
+    && form.ambiguous_media === 0
+    && form.corrupt_media === 0;
+}
+
 async function main() {
   const source = path.resolve(argument("--source"));
   const output = path.resolve(argument("--output"));
@@ -337,9 +365,9 @@ async function main() {
     .sort((left, right) => left.localeCompare(right, "en", { numeric: true }));
   if (!formDirectories.length) throw new Error("No recognized self-assessment form directories were found");
   const packageNames = {
-    "usmle-step-1": "aylamed-nbme-step-1",
-    "usmle-step-2": "aylamed-nbme-step-2-ck",
-    "usmle-step-3": "aylamed-nbme-step-3",
+    "usmle-step-1": "aylamed-nbme-step-1-complete",
+    "usmle-step-2": "aylamed-nbme-step-2-complete",
+    "usmle-step-3": "aylamed-nbme-step-3-complete",
   };
   const packageDirectories = {};
   for (const name of Object.values(packageNames)) {
@@ -370,12 +398,27 @@ async function main() {
   };
   await fs.writeFile(path.join(output, "aylamed-nbme-manifest.json"), `${JSON.stringify(publicManifest, null, 2)}\n`, { flag: "wx" });
   for (const [examTrack, packageName] of Object.entries(packageNames)) {
-    const packageForms = forms.filter((row) => row.exam_track === examTrack);
+    const examForms = forms.filter((row) => row.exam_track === examTrack);
+    const packageForms = examForms.filter(isReleaseReadyForm);
+    const excludedForms = examForms.filter((row) => !isReleaseReadyForm(row));
+    for (const form of excludedForms) {
+      await fs.rm(
+        path.join(packageDirectories[packageName], "forms", form.collection_key),
+        { recursive: true, force: true },
+      );
+    }
     const packageManifest = {
       ...publicManifest,
       exam_track: examTrack,
       totals: summarizeForms(packageForms),
       forms: packageForms,
+      excluded_forms: excludedForms.map((form) => ({
+        collection_key: form.collection_key,
+        expected_question_count: form.expected_question_count,
+        source_question_count: form.source_question_count,
+        imported_question_count: form.imported_question_count,
+        missing_explanations: form.missing_explanations,
+      })),
     };
     await fs.writeFile(
       path.join(packageDirectories[packageName], "aylamed-nbme-manifest.json"),
@@ -386,7 +429,7 @@ async function main() {
     // Keep zip's transient working file outside the deliverable directory so
     // an interrupted package build cannot leave a partial archive beside the
     // reviewed outputs.
-    await run("zip", ["-q", "-r", "-b", "/tmp", zipPath, "."], { cwd: packageDirectories[packageName] });
+    await createZip(zipPath, packageDirectories[packageName]);
     packageManifest.package_sha256 = await sha256File(zipPath);
     packageManifest.package_bytes = (await fs.stat(zipPath)).size;
     await fs.writeFile(
