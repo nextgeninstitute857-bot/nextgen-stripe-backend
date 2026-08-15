@@ -11302,6 +11302,7 @@ app.get("/health", async (req, res) => {
     lms_teaching_access_build: LMS_TEACHING_ACCESS_BUILD,
     lms_teaching_access: ngTeachingAccessReconciliationState,
     content_ingestion_build: CONTENT_INGESTION_BUILD,
+    aylamed_nbme_center_build: AYLA_NBME_CENTER_BUILD,
     aylamed_adaptive_core_build: AYLA_ADAPTIVE_CORE_BUILD,
     aylamed_starting_readiness_build: AYLA_STARTING_READINESS_BUILD,
     aylamed_single_roadmap_build: AYLA_SINGLE_ROADMAP_BUILD,

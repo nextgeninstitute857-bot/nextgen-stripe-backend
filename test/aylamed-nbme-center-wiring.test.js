@@ -18,6 +18,7 @@ const packager = fs.readFileSync(
 
 test("v256 wires one private exam-scoped NBME Center through admin, student and registry boundaries", () => {
   assert.match(server, /AYLA_NBME_CENTER_BUILD/);
+  assert.match(server, /aylamed_nbme_center_build:\s*AYLA_NBME_CENTER_BUILD/);
   assert.match(server, /app\.post\("\/api\/ayla\/admin\/nbme-center\/manifests"/);
   assert.match(server, /app\.post\("\/api\/ayla\/admin\/nbme-center\/sync"/);
   assert.match(server, /app\.post\("\/api\/ayla\/admin\/nbme-center\/content-imports\/:jobId\/media\/import-draft"/);

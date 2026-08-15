@@ -1,4 +1,4 @@
-Render redeploy requested 2026-08-15 to activate backend main at a83d599a458e89bb2b76bf3a0eaaca3f64898e3d.
+Render redeploy requested 2026-08-15 to activate backend main after NBME Step 2 and Step 3 release support merged.
 No production data migration or schedule apply is associated with this marker.
-Reason: the automatic Render webhook did not start after PR #130 merged.
-Target build: private-book-media-delivery.
+Reason: production still returned the retired Step-1-only media release guard after PRs #133 and #134 merged.
+Target build: v256-exam-scoped-readiness-center.
