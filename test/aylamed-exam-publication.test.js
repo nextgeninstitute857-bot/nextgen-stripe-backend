@@ -60,7 +60,7 @@ test("question-bank collections collapse by bank name, retain folders, and exclu
     exams: [{ examTrackId: "usmle_step_2_ck", enabled: true }],
     availableResources: [
       {
-        id: "uworld-step2-main", type: "qbank_collection", exam_track_id: "usmle_step_2_ck",
+        id: "uworld-step2-main", type: "qbank_collection", exam_track_id: "usmle_step_2_ck", delivery_channel: "qbank",
         title: "UWorld Step 2 main", source_provider: "UWorld", source_namespace: "step2/main",
         status: "approved", question_count: 4000, valid_question_count: 4000,
         taxonomy_complete_count: 4000, delivery_media_ready_count: 3990,
