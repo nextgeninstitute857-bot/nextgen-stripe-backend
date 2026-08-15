@@ -250,6 +250,14 @@ import {
   collectBookMediaReferences,
 } from "./lib/aylamed-book-media.js";
 import {
+  applyOriginalBookPdf,
+  bookPdfObjectKey,
+  hasPdfSignature,
+  normalizeOriginalBookPdf,
+  parseHttpByteRange,
+  privateBookPdfCatalog,
+} from "./lib/aylamed-book-pdf.js";
+import {
   aylaNotebookSourceFingerprint,
   aylaNotebookTimestampSeconds,
   createAylaNotebookCaptureBlocks,
@@ -370,7 +378,13 @@ import { ResumableContentUploadStore } from "./lib/resumable-content-upload.js";
 import { CloudContentUploadStore } from "./lib/cloud-content-upload.js";
 import { contentZipSourceExists } from "./lib/content-zip-source.js";
 import { inspectGuardedUworldArchives } from "./lib/guarded-uworld-archive.js";
-import { deleteContentR2Object, ensureContentR2BrowserCors, headContentR2Object } from "./lib/content-r2-storage.js";
+import {
+  copyContentR2Object,
+  deleteContentR2Object,
+  ensureContentR2BrowserCors,
+  getContentR2ObjectStream,
+  headContentR2Object,
+} from "./lib/content-r2-storage.js";
 import { storagePerformanceSnapshot } from "./lib/operations-monitoring.js";
 import {
   contentMediaStatus,
@@ -765,7 +779,7 @@ function applyNextGenCors(req, res) {
 
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS,HEAD");
   res.setHeader("Access-Control-Allow-Headers", getCorsRequestHeaders(req));
-  res.setHeader("Access-Control-Expose-Headers", "Content-Type, Authorization, X-NextGen-Backend-Build, X-Request-Id");
+  res.setHeader("Access-Control-Expose-Headers", "Content-Type, Content-Length, Content-Range, Accept-Ranges, ETag, Authorization, X-NextGen-Backend-Build, X-Request-Id");
   res.setHeader("Access-Control-Max-Age", "86400");
   res.setHeader("X-NextGen-Backend-Build", NEXTGEN_BACKEND_BUILD);
 }
@@ -804,7 +818,7 @@ const corsOptions = {
     "x-nextgen-auth",
     "x-nextgen-source",
   ],
-  exposedHeaders: ["Content-Type", "Authorization", "X-NextGen-Backend-Build", "X-Request-Id"],
+  exposedHeaders: ["Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag", "Authorization", "X-NextGen-Backend-Build", "X-Request-Id"],
   optionsSuccessStatus: 204,
 };
 
@@ -35414,6 +35428,7 @@ function ngContentUploadMetadata(body = {}) {
     ).slice(0, 80),
     source_format: String(source.source_format || source.sourceFormat || "").slice(0, 80),
     collection_title: String(source.collection_title || source.collectionTitle || "").slice(0, 240),
+    book_key: String(source.book_key || source.bookKey || "").slice(0, 180),
     destinations: Array.isArray(source.destinations)
       ? source.destinations.slice(0, 20).map((item) => String(item).slice(0, 80))
       : String(source.destinations || "").slice(0, 2_000),
@@ -35598,8 +35613,11 @@ async function requireContentUploadAdmin(req, uploadId = "") {
   const isAuthorizedExternalQuestionBundle = ["question_zip", "mixed_qbank_zip"]
     .includes(String(purpose || "").toLowerCase())
     && ngAuthorizedExternalImportSource(metadata);
+  const isAuthorizedBookPdf = String(purpose || "").toLowerCase() === "book_pdf"
+    && ["owned", "licensed", "authorized"].includes(String(metadata.source_rights_status || "").toLowerCase())
+    && Boolean(String(metadata.book_key || metadata.source_namespace || "").trim());
 
-  if ((!isOwnedAylaMedMedia && !isAuthorizedExternalMedia && !isAuthorizedExternalQuestionBundle) || !ownsExistingSession) {
+  if ((!isOwnedAylaMedMedia && !isAuthorizedExternalMedia && !isAuthorizedExternalQuestionBundle && !isAuthorizedBookPdf) || !ownsExistingSession) {
     throw ngAuthorizedExternalContentScopeError();
   }
   return context;
@@ -78746,6 +78764,131 @@ app.post("/api/ayla/admin/resources/bulk-import", async (req, res) => {
   }
 });
 
+async function aylaReadPrivateObjectPrefix(objectKey, length = 5) {
+  const stream = await getContentR2ObjectStream(objectKey, { start: 0, endExclusive: length });
+  const chunks = [];
+  let bytes = 0;
+  try {
+    for await (const chunk of stream) {
+      const buffer = Buffer.from(chunk);
+      chunks.push(buffer);
+      bytes += buffer.length;
+      if (bytes >= length) break;
+    }
+  } finally {
+    stream.destroy?.();
+  }
+  return Buffer.concat(chunks).subarray(0, length);
+}
+
+app.get("/api/ayla/admin/resources/book-pdfs", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, {
+      books: privateBookPdfCatalog(aylaValues(db, "aylaResources")),
+      storage: contentMediaStatus(),
+      safeguards: {
+        private_r2: true,
+        original_pdf_required_for_page_fidelity: true,
+        publication_changed: false,
+        student_access_changed: false,
+      },
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load private book PDF status");
+  }
+});
+
+app.post("/api/ayla/admin/resources/book-pdf/import", async (req, res) => {
+  let upload = null;
+  let durableObjectKey = "";
+  let durableObjectExisted = false;
+  try {
+    const admin = await aylaRequireAdmin(req);
+    if (!contentMediaStatus().configured) {
+      return aylaSendError(res, 503, "Private Cloudflare R2 media storage is not configured");
+    }
+    const bookKey = aylaBookMediaKey(req.body?.book_key || req.body?.bookKey);
+    const initialDb = await readAylaDb();
+    const prepared = authorizedBookMediaResources(aylaValues(initialDb, "aylaResources"), bookKey);
+    if (!prepared.length) return aylaSendError(res, 404, "Protected book resources were not found");
+
+    upload = await ngReceiveOrResolveContentZip(req, ["book_pdf"]);
+    if (!/\.pdf$/i.test(String(upload.originalFilename || ""))) {
+      return aylaSendError(res, 415, "The original book file must be a PDF");
+    }
+    const stagingObjectKey = String(upload.source?.objectKey || "").trim();
+    if (!stagingObjectKey) return aylaSendError(res, 409, "The finalized private PDF is not available in Cloudflare R2");
+    const signature = await aylaReadPrivateObjectPrefix(stagingObjectKey, 5);
+    if (!hasPdfSignature(signature)) return aylaSendError(res, 415, "The uploaded file does not have a valid PDF signature");
+
+    const fingerprint = String(upload.sha256 || "").trim().toLowerCase();
+    durableObjectKey = bookPdfObjectKey({ bookKey, fingerprint });
+    const priorHead = await headContentR2Object(durableObjectKey).catch(() => null);
+    durableObjectExisted = Boolean(priorHead);
+    const durable = priorHead?.sizeBytes === Number(upload.source?.sizeBytes || 0)
+      ? priorHead
+      : await copyContentR2Object(stagingObjectKey, durableObjectKey, {
+          contentType: "application/pdf",
+          metadata: {
+            book_key: bookKey,
+            upload_fingerprint: fingerprint,
+            access_mode: "protected",
+          },
+        });
+    if (!durable?.sizeBytes) throw Object.assign(new Error("The durable private PDF copy could not be verified"), { statusCode: 502 });
+
+    const importedAt = aylaNow();
+    const applied = await mutateAylaDb(async (db) => {
+      aylaEnsureSeedData(db);
+      const current = authorizedBookMediaResources(aylaValues(db, "aylaResources"), bookKey);
+      if (current.length !== prepared.length) {
+        throw Object.assign(new Error("The book resource set changed during PDF attachment; retry against the current package"), { statusCode: 409 });
+      }
+      const updated = applyOriginalBookPdf(current, {
+        bookKey,
+        objectKey: durableObjectKey,
+        sizeBytes: durable.sizeBytes,
+        fingerprint,
+        originalFilename: upload.originalFilename,
+        importedAt,
+      });
+      for (const resource of updated) aylaSetItem(db, "aylaResources", resource);
+      await aylaLog(db, "resource-pdf", "Original private book PDF attached for page-faithful delivery", {
+        bookKey,
+        resourceCount: updated.length,
+        sizeBytes: durable.sizeBytes,
+        fingerprint,
+        requestedBy: String(admin?.user?.id || admin?.user?.email || "aylamed-admin"),
+        publicationChanged: false,
+        studentAccessChanged: false,
+      });
+      return updated;
+    });
+    upload = null;
+    return aylaSendOk(res, {
+      book_key: bookKey,
+      original_pdf_ready: true,
+      original_filename: prepared[0]?.sourceLabelVisible === false ? "book.pdf" : String(applied[0]?.sourcePdf?.originalFilename || "book.pdf"),
+      resource_count: applied.length,
+      size_bytes: Number(applied[0]?.sourcePdf?.sizeBytes || 0),
+      imported_at: applied[0]?.sourcePdf?.importedAt || importedAt,
+      safeguards: {
+        private_r2: true,
+        object_key_exposed: false,
+        publication_changed: false,
+        student_access_changed: false,
+      },
+    }, 201);
+  } catch (error) {
+    if (durableObjectKey && !durableObjectExisted) await deleteContentR2Object(durableObjectKey).catch(() => {});
+    await ngCleanupRejectedContentUpload(upload);
+    return aylaSendError(res, error.statusCode || 500, error.message || "Private original book PDF import failed");
+  }
+});
+
 app.post("/api/ayla/admin/resources/book-media/import", async (req, res) => {
   let upload = null;
   try {
@@ -83524,6 +83667,47 @@ app.get("/api/ayla/students/:studentId/library/resources/:resourceId", async (re
     return aylaSendOk(res, { reader, page_source_warning: eligible.warning });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to open Library reading");
+  }
+});
+
+app.get("/api/ayla/students/:studentId/library/resources/:resourceId/original.pdf", async (req, res) => {
+  try {
+    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId, "library");
+    const eligible = await aylaV211EligibleReadings(db, student);
+    const resource = eligible.resources.find((row) => aylaLibraryResourceMatchesId(row, req.params.resourceId));
+    if (!resource) return aylaSendError(res, 404, "Library reading not found for this exam dashboard");
+    const requestedAssignmentId = String(req.query.assignment_id || req.query.assignmentId || "");
+    const assignment = aylaV211AssignmentForReading(aylaV211ReadingAssignments(db, student), resource, requestedAssignmentId);
+    if (requestedAssignmentId && !assignment) return aylaSendError(res, 404, "Reading assignment not found for this student");
+    const pdf = normalizeOriginalBookPdf(resource);
+    if (!pdf) return aylaSendError(res, 404, "The original private PDF has not been attached to this book");
+
+    const range = parseHttpByteRange(req.headers.range, pdf.sizeBytes);
+    if (!range) {
+      res.setHeader("Content-Range", `bytes */${pdf.sizeBytes}`);
+      return res.status(416).end();
+    }
+    const length = range.endExclusive - range.start;
+    const safeFilename = String(pdf.originalFilename || "book.pdf").replace(/[^A-Za-z0-9._-]+/g, "-");
+    res.status(range.partial ? 206 : 200);
+    res.setHeader("Cache-Control", "private, no-store, max-age=0");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Accept-Ranges", "bytes");
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Length", String(length));
+    res.setHeader("Content-Disposition", `inline; filename="${safeFilename || "book.pdf"}"`);
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    if (pdf.fingerprint) res.setHeader("ETag", `"${pdf.fingerprint}"`);
+    if (range.partial) res.setHeader("Content-Range", `bytes ${range.start}-${range.endExclusive - 1}/${pdf.sizeBytes}`);
+
+    const stream = await getContentR2ObjectStream(pdf.objectKey, {
+      start: range.start,
+      endExclusive: range.endExclusive,
+    });
+    await pipelineStreams(stream, res);
+  } catch (error) {
+    if (res.headersSent || error?.code === "ERR_STREAM_PREMATURE_CLOSE") return;
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to stream the private book PDF");
   }
 });
 

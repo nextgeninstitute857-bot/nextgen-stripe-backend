@@ -148,6 +148,25 @@ test("page-turn reader returns one page with exact previous and next navigation"
   assert.equal(findAylaLibraryPage(resource, "pdf-999"), null);
 });
 
+test("reader exposes only an entitlement-gated original-PDF path, never its private object key", () => {
+  const resource = normalizeAylaLibraryResource(reading({
+    sourcePdf: {
+      objectKey: "content/book-pdf/first-aid/private.pdf",
+      sizeBytes: 987654,
+      fingerprint: "b".repeat(64),
+      originalFilename: "First Aid 2026.pdf",
+    },
+  }));
+  const reader = buildAylaLibraryReader(resource, { studentId: "student 1" });
+  assert.equal(reader.resource.reader.mode, "original_pdf_page_turn");
+  assert.equal(reader.resource.reader.original_pdf_available, true);
+  assert.equal(
+    reader.resource.reader.original_pdf_path,
+    "/api/ayla/students/student%201/library/resources/reading-1/original.pdf",
+  );
+  assert.doesNotMatch(JSON.stringify(reader), /content\/book-pdf|objectKey|fingerprint/i);
+});
+
 test("reader retains private page media internally without exposing object keys in page payloads", () => {
   const resource = normalizeAylaLibraryResource(reading({
     readerPages: [
