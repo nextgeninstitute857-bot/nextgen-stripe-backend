@@ -148,6 +148,34 @@ test("page-turn reader returns one page with exact previous and next navigation"
   assert.equal(findAylaLibraryPage(resource, "pdf-999"), null);
 });
 
+test("reader retains private page media internally without exposing object keys in page payloads", () => {
+  const resource = normalizeAylaLibraryResource(reading({
+    readerPages: [
+      {
+        pdfPage: 12,
+        printedPage: 8,
+        text: "Approved page twelve.\n\n[Figure: Flow chart]",
+        complete: true,
+        mediaReferences: [{ id: "figure-1", ref: "../Images/flow.svg", alt: "Flow chart" }],
+        media: [{
+          id: "figure-1",
+          ref: "../Images/flow.svg",
+          alt: "Flow chart",
+          objectKey: "content/image/books/flow.svg",
+          contentType: "image/svg+xml",
+        }],
+      },
+      reading().readerPages[1],
+    ],
+  }));
+  assert.equal(resource.readerPages[0].media[0].objectKey, "content/image/books/flow.svg");
+  assert.equal(resource.readerPages[0].mediaReferences[0].ref, "../Images/flow.svg");
+  const page = buildAylaLibraryPage(resource, "pdf-12");
+  assert.equal(page.page.media_count, 1);
+  assert.equal("media" in page.page, false);
+  assert.doesNotMatch(JSON.stringify(page), /content\/image\/books|\.\.\/Images/);
+});
+
 test("inside-book search returns bounded snippets and page keys without whole-page payloads", () => {
   const resource = normalizeAylaLibraryResource(reading({
     coverImageUrl: "https://cdn.example.com/first-aid-cover.jpg",

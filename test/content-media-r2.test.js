@@ -76,6 +76,8 @@ test("media ZIP entry validation accepts image/audio and rejects unsafe or unsup
   assert.equal(safeMediaEntryName("/absolute/private.png"), null);
   assert.equal(safeMediaEntryName("C:\\private.png"), null);
   assert.equal(safeMediaEntryName("active.svg"), null);
+  assert.equal(safeMediaEntryName("books/diagram.svg", { allowSvg: true }), "books/diagram.svg");
+  assert.equal(safeMediaEntryName("../books/diagram.svg", { allowSvg: true }), null);
   assert.equal(safeMediaEntryName("questions.json"), null);
 });
 
