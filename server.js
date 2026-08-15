@@ -41662,9 +41662,16 @@ async function aylaPlayableNbmeAttempt(attempt, { blockIndex = null } = {}) {
   };
 }
 
-const AYLA_NBME_REVIEWED_RELEASE_NAMESPACE = "aylamed-nbme-step-1-complete";
+const AYLA_NBME_REVIEWED_RELEASE_NAMESPACES = Object.freeze({
+  "usmle-step-1": "aylamed-nbme-step-1-complete",
+  "usmle-step-2": "aylamed-nbme-step-2-complete",
+  "usmle-step-3": "aylamed-nbme-step-3-complete",
+});
 
-function aylaAssertReviewedNbmeImportJob(job = null, { requireDraftImported = false } = {}) {
+function aylaAssertReviewedNbmeImportJob(job = null, {
+  requireDraftImported = false,
+  expectedExamTrack = "",
+} = {}) {
   if (!job) {
     throw Object.assign(new Error("Reviewed NBME import job not found"), {
       statusCode: 404,
@@ -41672,15 +41679,23 @@ function aylaAssertReviewedNbmeImportJob(job = null, { requireDraftImported = fa
     });
   }
   const destinations = Array.isArray(job.destinations) ? job.destinations.map((row) => String(row)) : [];
-  const reviewedPackage = normalizeAylaNbmeExamTrack(job.exam_track) === "usmle-step-1"
-    && String(job.source_namespace || "") === AYLA_NBME_REVIEWED_RELEASE_NAMESPACE
+  const examTrack = normalizeAylaNbmeExamTrack(job.exam_track);
+  const expected = expectedExamTrack ? normalizeAylaNbmeExamTrack(expectedExamTrack) : null;
+  const reviewedPackage = examTrack
+    && String(job.source_namespace || "") === AYLA_NBME_REVIEWED_RELEASE_NAMESPACES[examTrack]
     && String(job.source_profile || "") === "other"
     && String(job.source_rights_status || "") === "authorized"
     && destinations.includes("aylamed_nbme");
   if (!reviewedPackage) {
-    throw Object.assign(new Error("This import is not the reviewed six-form Step 1 package"), {
+    throw Object.assign(new Error("This import is not a reviewed NBME package for its exam track"), {
       statusCode: 403,
       code: "NBME_RELEASE_IMPORT_NOT_REVIEWED",
+    });
+  }
+  if (expected && examTrack !== expected) {
+    throw Object.assign(new Error("The reviewed package belongs to a different exam track"), {
+      statusCode: 409,
+      code: "NBME_RELEASE_IMPORT_EXAM_MISMATCH",
     });
   }
   if (requireDraftImported && !["draft_imported", "draft_imported_with_warnings"].includes(String(job.status || ""))) {
@@ -41706,7 +41721,7 @@ app.post("/api/ayla/admin/nbme-center/content-imports/:jobId/media/import-draft"
     if (String(upload.sha256 || "") !== String(parentJob.zip_sha256 || "")) {
       await ngCleanupRejectedContentUpload(upload);
       upload = null;
-      return aylaSendError(res, 409, "Use the exact reviewed six-form ZIP that passed the private preview");
+      return aylaSendError(res, 409, "Use the exact reviewed NBME ZIP that passed the private preview");
     }
     mediaJob = await createContentMediaImportJob({
       id: crypto.randomUUID(),
@@ -41727,7 +41742,10 @@ app.post("/api/ayla/admin/nbme-center/content-imports/:jobId/media/import-draft"
       background_job_id: backgroundJob.id,
       content_import_job_id: parentJob.id,
       status: "queued",
-      reviewed_form_ids: AYLA_NBME_STEP1_REVIEWED_RELEASE_FORM_IDS,
+      exam_track: normalizeAylaNbmeExamTrack(parentJob.exam_track),
+      reviewed_form_ids: normalizeAylaNbmeExamTrack(parentJob.exam_track) === "usmle-step-1"
+        ? AYLA_NBME_STEP1_REVIEWED_RELEASE_FORM_IDS
+        : [],
       message: "Reviewed media accepted for private import. Student access remains disabled.",
     }, 202);
   } catch (error) {
@@ -41782,7 +41800,11 @@ app.put("/api/ayla/admin/nbme-center/collections/:collectionId/release", async (
       return aylaSendError(res, 400, "Type the exact form ID to release this reviewed collection");
     }
     if (form.qualityGate?.ready !== true) {
-      return aylaSendError(res, 409, "This form no longer passes the complete 200-question quality gate");
+      return aylaSendError(
+        res,
+        409,
+        `This form no longer passes its complete ${definition.expectedQuestionCount}-question quality gate`,
+      );
     }
     const collections = await listContentCollections({ examTrack: definition.examTrack, limit: 200 });
     const collection = collections.find((row) => String(row.id) === String(req.params.collectionId));
@@ -41790,11 +41812,15 @@ app.put("/api/ayla/admin/nbme-center/collections/:collectionId/release", async (
       return aylaSendError(res, 409, "The Content Registry collection does not match the reviewed form");
     }
     if (Number(collection.question_count || 0) !== definition.expectedQuestionCount) {
-      return aylaSendError(res, 409, "The reviewed collection must contain exactly 200 questions");
+      return aylaSendError(
+        res,
+        409,
+        `The reviewed collection must contain exactly ${definition.expectedQuestionCount} questions`,
+      );
     }
     const parentJob = aylaAssertReviewedNbmeImportJob(
       await getContentImportJob(collection.draft_import_job_id),
-      { requireDraftImported: true },
+      { requireDraftImported: true, expectedExamTrack: definition.examTrack },
     );
     const registry = aylaNbmeRegistryRowForForm(
       await aylaNbmeRegistryRows(definition.examTrack, true),
@@ -41943,11 +41969,14 @@ app.get("/api/ayla/admin/nbme-center", async (req, res) => {
       form,
       aylaNbmeRegistryRowForForm(registryByExam.get(normalizeAylaNbmeExamTrack(form.examTrack)) || [], form),
     ));
+    const attempts = aylaValues(db, "aylaNbmeAttempts")
+      .filter((attempt) => !requested
+        || normalizeAylaNbmeExamTrack(attempt.examTrack || attempt.exam_track) === requested);
     return aylaSendOk(res, {
       build: AYLA_NBME_CENTER_BUILD,
       count: forms.length,
       forms: forms.map(aylaAdminNbmeForm),
-      attempts: aylaValues(db, "aylaNbmeAttempts").length,
+      attempts: attempts.length,
       student_visibility_requires_both_gates: true,
     });
   } catch (error) {

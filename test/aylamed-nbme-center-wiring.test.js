@@ -29,7 +29,9 @@ test("v256 wires one private exam-scoped NBME Center through admin, student and 
   assert.match(server, /answer_keys_before_submission:\s*false/);
   assert.match(server, /official_predicted_score:\s*false/);
   assert.match(server, /pass_guarantee:\s*false/);
-  assert.match(server, /AYLA_NBME_REVIEWED_RELEASE_NAMESPACE = "aylamed-nbme-step-1-complete"/);
+  assert.match(server, /AYLA_NBME_REVIEWED_RELEASE_NAMESPACES/);
+  assert.match(server, /"usmle-step-2": "aylamed-nbme-step-2-complete"/);
+  assert.match(server, /"usmle-step-3": "aylamed-nbme-step-3-complete"/);
   assert.match(server, /String\(upload\.sha256 \|\| ""\) !== String\(parentJob\.zip_sha256 \|\| ""\)/);
   assert.match(server, /Number\(collection\.question_count \|\| 0\) !== definition\.expectedQuestionCount/);
   assert.match(server, /destination: "aylamed_nbme"/);

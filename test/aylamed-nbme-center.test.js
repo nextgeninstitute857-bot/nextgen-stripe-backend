@@ -81,7 +81,7 @@ test("manifest rejects any declared exam that conflicts with the form identity",
   );
 });
 
-test("reviewed release accepts only the six complete Step 1 forms", () => {
+test("reviewed release keeps Step 1 allowlisted and accepts matching Step 2 and Step 3 forms", () => {
   assert.deepEqual(AYLA_NBME_STEP1_REVIEWED_RELEASE_FORM_IDS, [
     "nbme-step-1-form-25",
     "nbme-step-1-form-26",
@@ -104,6 +104,18 @@ test("reviewed release accepts only the six complete Step 1 forms", () => {
   assert.throws(
     () => assertAylaNbmeReviewedReleaseForm("nbme-step-1-form-25", "nbme-1-26"),
     (error) => error.code === "NBME_RELEASE_FORM_COLLECTION_MISMATCH",
+  );
+  assert.equal(
+    assertAylaNbmeReviewedReleaseForm("nbme-step-2-ck-form-15", "nbme-2-15").examTrack,
+    "usmle-step-2",
+  );
+  assert.equal(
+    assertAylaNbmeReviewedReleaseForm("nbme-step-2-ck-surgery-form-9", "nbme-Surgery-9").formType,
+    "clinical_subject",
+  );
+  assert.equal(
+    assertAylaNbmeReviewedReleaseForm("nbme-step-3-form-8", "nbme-3-8").examTrack,
+    "usmle-step-3",
   );
 });
 
