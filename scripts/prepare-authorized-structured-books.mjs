@@ -104,14 +104,27 @@ function imageReferences(html = "") {
   return [...new Set(refs)];
 }
 
+function imageAttribute(tag = "", name = "") {
+  const match = String(tag).match(new RegExp(`\\b${name}\\s*=\\s*(["'])(.*?)\\1`, "i"));
+  return match ? decodeEntities(match[2]).trim() : "";
+}
+
 function htmlToReaderText(html = "") {
+  const mediaTokens = [];
   let text = String(html || "")
     .replace(/<head\b[\s\S]*?<\/head>/gi, " ")
     .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
     .replace(/<style\b[\s\S]*?<\/style>/gi, " ")
     .replace(/<svg\b[\s\S]*?<\/svg>/gi, " ")
-    .replace(/<img\b[^>]*(?:alt|title)\s*=\s*(["'])(.*?)\1[^>]*>/gi, (_match, _quote, label) => `\n[Figure: ${decodeEntities(label)}]\n`)
-    .replace(/<img\b[^>]*>/gi, "\n[Figure]\n")
+    .replace(/<img\b[^>]*>/gi, (tag) => {
+      const ref = imageAttribute(tag, "src").replace(/^\.\//, "");
+      const label = imageAttribute(tag, "alt") || imageAttribute(tag, "title");
+      const figure = label ? `[Figure: ${label}]` : "[Figure]";
+      if (!ref || ref.startsWith("data:")) return `\n${figure}\n`;
+      const marker = mediaTokens.length.toString(36);
+      mediaTokens.push({ ref, alt: label });
+      return `\n${figure}\uE000${marker}\uE001\n`;
+    })
     .replace(/<br\s*\/?\s*>/gi, "\n")
     .replace(/<\/?(?:p|div|section|article|header|footer|aside|h[1-6]|li|ul|ol|table|tr|blockquote|figure|figcaption|dl|dt|dd)\b[^>]*>/gi, "\n")
     .replace(/<\/?(?:td|th)\b[^>]*>/gi, "\t")
@@ -122,7 +135,18 @@ function htmlToReaderText(html = "") {
     .replace(/ *\n */g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-  return text;
+  return { text, mediaTokens };
+}
+
+function extractPageMedia(text = "", mediaTokens = []) {
+  const mediaReferences = [];
+  const cleaned = String(text).replace(/\uE000([0-9a-z]+)\uE001/g, (_match, token) => {
+    const parsed = mediaTokens[Number.parseInt(token, 36)];
+    if (!parsed?.ref) throw new Error("A generated book media marker could not be decoded");
+    mediaReferences.push({ ref: String(parsed.ref), alt: String(parsed.alt || "") });
+    return "";
+  }).replace(/\n{3,}/g, "\n\n").trim();
+  return { text: cleaned, mediaReferences };
 }
 
 function splitPages(text = "") {
@@ -165,25 +189,56 @@ function findJson(directory) {
 }
 
 function mediaIndex(directory) {
-  const exact = new Set();
-  const names = new Set();
+  const files = [];
+  const byExact = new Map();
+  const bySuffix = new Map();
+  const byName = new Map();
+  const append = (index, key, file) => {
+    if (!key) return;
+    if (!index.has(key)) index.set(key, []);
+    index.get(key).push(file);
+  };
   const walk = (folder) => {
     for (const entry of fs.readdirSync(folder, { withFileTypes: true })) {
       const full = path.join(folder, entry.name);
       if (entry.isDirectory()) walk(full);
       else if (/\.(?:png|jpe?g|gif|webp|svg)$/i.test(entry.name)) {
-        exact.add(path.relative(directory, full).replaceAll("\\", "/").toLowerCase());
-        names.add(entry.name.toLowerCase());
+        const relative = path.relative(directory, full).replaceAll("\\", "/");
+        const file = { absolute: full, relative, archivePath: `media/${relative}` };
+        files.push(file);
+        const exact = relative.toLowerCase();
+        append(byExact, exact, file);
+        append(byName, path.posix.basename(exact), file);
+        const parts = exact.split("/").filter(Boolean);
+        for (let index = 0; index < parts.length; index += 1) {
+          append(bySuffix, parts.slice(index).join("/"), file);
+        }
       }
     }
   };
   walk(directory);
-  return { exact, names };
+  return { files, byExact, bySuffix, byName };
 }
 
 function mediaResolution(ref, index) {
-  const clean = String(ref).split(/[?#]/)[0].replace(/^\.\//, "").replaceAll("\\", "/").toLowerCase();
-  return index.exact.has(clean) || index.names.has(path.posix.basename(clean));
+  const raw = String(ref).split(/[?#]/)[0].replaceAll("\\", "/").toLowerCase();
+  const clean = path.posix.normalize(raw).replace(/^\.\//, "").replace(/^(?:\.\.\/)+/, "").replace(/^\/+/, "");
+  const candidates = new Map();
+  for (const file of [
+    ...(index.byExact.get(clean) || []),
+    ...(index.bySuffix.get(clean) || []),
+  ]) candidates.set(file.relative.toLowerCase(), file);
+  if (!candidates.size) {
+    for (const file of index.byName.get(path.posix.basename(clean)) || []) {
+      candidates.set(file.relative.toLowerCase(), file);
+    }
+  }
+  const files = [...candidates.values()];
+  return {
+    file: files.length === 1 ? files[0] : null,
+    ambiguous: files.length > 1,
+    candidates: files.map((file) => file.relative),
+  };
 }
 
 function packagesForBook(book, resources) {
@@ -226,11 +281,15 @@ for (const book of BOOKS) {
   let skipped = 0;
   let mediaRefs = 0;
   let mediaRefsFound = 0;
+  let mediaRefsAmbiguous = 0;
+  const packagedMedia = new Map();
   for (let index = 0; index < sourceRows.length; index += 1) {
     const row = sourceRows[index] || {};
     const html = String(row.doc ?? row.mainContent ?? "");
-    const text = htmlToReaderText(html);
-    if (text.length < 80) {
+    const converted = htmlToReaderText(html);
+    const text = converted.text;
+    const visibleText = extractPageMedia(text, converted.mediaTokens).text;
+    if (visibleText.length < 80) {
       skipped += 1;
       continue;
     }
@@ -241,18 +300,47 @@ for (const book of BOOKS) {
       continue;
     }
     const refs = imageReferences(html);
-    const found = refs.filter((ref) => mediaResolution(ref, availableMedia)).length;
+    const resolutions = new Map(refs.map((ref) => [ref, mediaResolution(ref, availableMedia)]));
+    const found = [...resolutions.values()].filter((resolution) => resolution.file).length;
+    const ambiguous = [...resolutions.values()].filter((resolution) => resolution.ambiguous).length;
+    for (const resolution of resolutions.values()) {
+      if (resolution.file) packagedMedia.set(resolution.file.relative.toLowerCase(), resolution.file);
+    }
     mediaRefs += refs.length;
     mediaRefsFound += found;
+    mediaRefsAmbiguous += ambiguous;
     const startPage = logicalPage;
-    const readerPages = pages.map((pageText, pageIndex) => ({
-      pdfPage: logicalPage + pageIndex,
-      printedPage: `${index + 1}.${pageIndex + 1}`,
-      heading: title,
-      text: pageText,
-      complete: true,
-      exactReference: `${book.title}, ${book.edition}, source section ${index + 1}`,
-    }));
+    let figureIndex = 0;
+    const placedReferences = new Set();
+    const readerPages = pages.map((pageText, pageIndex) => {
+      const extracted = extractPageMedia(pageText, converted.mediaTokens);
+      return {
+        pdfPage: logicalPage + pageIndex,
+        printedPage: `${index + 1}.${pageIndex + 1}`,
+        heading: title,
+        text: extracted.text,
+        complete: true,
+        exactReference: `${book.title}, ${book.edition}, source section ${index + 1}`,
+        mediaReferences: extracted.mediaReferences.filter((reference) => {
+          if (placedReferences.has(reference.ref)) return false;
+          placedReferences.add(reference.ref);
+          return true;
+        }).map((reference) => {
+          figureIndex += 1;
+          const resolution = resolutions.get(reference.ref) || mediaResolution(reference.ref, availableMedia);
+          return {
+            id: `figure-${figureIndex}`,
+            ref: reference.ref,
+            alt: reference.alt,
+            placement: "inline",
+            order: figureIndex - 1,
+            matchPaths: resolution.file
+              ? [resolution.file.archivePath, resolution.file.relative]
+              : [],
+          };
+        }),
+      };
+    });
     logicalPage += readerPages.length;
     const sourceId = String(row.id ?? row.bookid ?? index + 1);
     const stable = crypto.createHash("sha256").update(`${book.key}:${sourceId}:${row.path ?? row.xpath ?? ""}`).digest("hex").slice(0, 12);
@@ -263,7 +351,7 @@ for (const book of BOOKS) {
       description: "Authorized structured book section prepared for the protected AylaMed reader and roadmap.",
       provider: book.title,
       examTrackId: book.examTrackId,
-      system: classifySystem(title, text),
+      system: classifySystem(title, visibleText),
       topic: title,
       bookTitle: book.title,
       edition: book.edition,
@@ -276,7 +364,7 @@ for (const book of BOOKS) {
       pageRange: `Source section ${index + 1}`,
       exactReference: `${book.title}, ${book.edition}, source section ${index + 1}`,
       readerPages,
-      estimatedMinutes: Math.max(1, Math.min(240, Math.ceil(text.split(/\s+/).length / 180))),
+      estimatedMinutes: Math.max(1, Math.min(240, Math.ceil(visibleText.split(/\s+/).length / 180))),
       authorizationStatus: "authorized",
       verificationStatus: "admin_verified_structured_source",
       sourceAccessMode: "protected",
@@ -302,6 +390,27 @@ for (const book of BOOKS) {
   for (const entry of packages) {
     fs.writeFileSync(path.join(outputRoot, entry.filename), `${JSON.stringify(entry.payload)}\n`);
   }
+  const mediaDirectory = path.join(outputRoot, `${book.key}.media`);
+  fs.rmSync(mediaDirectory, { recursive: true, force: true });
+  for (const file of packagedMedia.values()) {
+    const destination = path.join(mediaDirectory, file.archivePath);
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.copyFileSync(file.absolute, destination);
+  }
+  fs.writeFileSync(path.join(mediaDirectory, "book-media-manifest.json"), `${JSON.stringify({
+    version: "aylamed-private-book-media-v1",
+    private: true,
+    book: { key: book.key, title: book.title, edition: book.edition, exam_track_id: book.examTrackId },
+    resource_count: resources.length,
+    reference_count: mediaRefs,
+    resolved_reference_count: mediaRefsFound,
+    ambiguous_reference_count: mediaRefsAmbiguous,
+    asset_count: packagedMedia.size,
+    assets: [...packagedMedia.values()].map((file) => ({
+      archive_path: file.archivePath,
+      source_relative_path: file.relative,
+    })),
+  }, null, 2)}\n`);
   summary.books.push({
     ...book,
     source_file: path.basename(sourceFile),
@@ -309,10 +418,14 @@ for (const book of BOOKS) {
     resources: resources.length,
     reader_pages: logicalPage - 1,
     skipped_rows: skipped,
-    media_files: availableMedia.exact.size,
+    media_files: availableMedia.files.length,
     media_references: mediaRefs,
     media_references_resolved_in_source: mediaRefsFound,
+    media_references_ambiguous_in_source: mediaRefsAmbiguous,
     delivery_media_missing: mediaRefs,
+    media_package_assets: packagedMedia.size,
+    media_package_directory: path.basename(mediaDirectory),
+    media_package_filename: `${book.key}.media.zip`,
     package_files: packages.map((entry) => entry.filename),
   });
 }
@@ -323,8 +436,19 @@ summary.totals = summary.books.reduce((totals, book) => ({
   media_files: totals.media_files + book.media_files,
   media_references: totals.media_references + book.media_references,
   media_references_resolved_in_source: totals.media_references_resolved_in_source + book.media_references_resolved_in_source,
+  media_references_ambiguous_in_source: totals.media_references_ambiguous_in_source + book.media_references_ambiguous_in_source,
+  media_package_assets: totals.media_package_assets + book.media_package_assets,
   package_files: totals.package_files + book.package_files.length,
-}), { resources: 0, reader_pages: 0, media_files: 0, media_references: 0, media_references_resolved_in_source: 0, package_files: 0 });
+}), {
+  resources: 0,
+  reader_pages: 0,
+  media_files: 0,
+  media_references: 0,
+  media_references_resolved_in_source: 0,
+  media_references_ambiguous_in_source: 0,
+  media_package_assets: 0,
+  package_files: 0,
+});
 
 fs.writeFileSync(path.join(outputRoot, "book-import-summary.json"), `${JSON.stringify(summary, null, 2)}\n`);
 process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);

@@ -245,6 +245,11 @@ import {
   selectAylaRoadmapReading,
 } from "./lib/aylamed-library.js";
 import {
+  applyBookMediaMatches,
+  authorizedBookMediaResources,
+  collectBookMediaReferences,
+} from "./lib/aylamed-book-media.js";
+import {
   aylaNotebookSourceFingerprint,
   aylaNotebookTimestampSeconds,
   createAylaNotebookCaptureBlocks,
@@ -38743,6 +38748,155 @@ async function ngContentQueueTerminal(backgroundJob, finalFailure, cancelled) {
   }
 }
 
+function aylaBookMediaKey(value = "") {
+  const clean = String(value || "").trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9-]{2,179}$/.test(clean)) {
+    throw Object.assign(new Error("A valid prepared book_key is required"), { statusCode: 400 });
+  }
+  return clean;
+}
+
+async function aylaRunPrivateBookMediaImport({ upload, bookKey, queueContext }) {
+  const cleanBookKey = aylaBookMediaKey(bookKey);
+  const initialDb = await readAylaDb();
+  const initial = collectBookMediaReferences(aylaValues(initialDb, "aylaResources"), {
+    bookKey: cleanBookKey,
+  });
+  if (!initial.resources.length) {
+    throw Object.assign(new Error("No protected authorized resources exist for this book"), { statusCode: 404 });
+  }
+  if (!initial.references.length) {
+    throw Object.assign(new Error("Re-import the regenerated book JSON before attaching media"), { statusCode: 409 });
+  }
+
+  const priorCheckpoint = queueContext.job.checkpoint || {};
+  const durableAssets = new Map((Array.isArray(priorCheckpoint.assets) ? priorCheckpoint.assets : [])
+    .map((asset) => [Number(asset.entryIndex), asset])
+    .filter(([entryIndex]) => Number.isInteger(entryIndex) && entryIndex > 0));
+  const directoryCacheKey = `ayla-book-media:${cleanBookKey}:${upload.sha256 || queueContext.job.id}`;
+  const inventory = await inspectMediaZip({
+    zipSource: upload.source || upload.file,
+    references: initial.references,
+    directoryCacheKey,
+    allowSvg: true,
+    onProgress: (progress) => queueContext.heartbeat({
+      ...progress,
+      stage: progress.stage || "indexing_private_book_media",
+      book_key: cleanBookKey,
+      references: initial.references.length,
+      resources: initial.resources.length,
+    }),
+  });
+  if (!inventory.candidateEntries) {
+    throw Object.assign(new Error("The ZIP does not contain any media referenced by this book"), { statusCode: 409 });
+  }
+  await queueContext.updateCheckpoint({
+    ...priorCheckpoint,
+    inventory,
+    assets: [...durableAssets.values()],
+  }, {
+    stage: "uploading_private_book_media",
+    book_key: cleanBookKey,
+    references: initial.references.length,
+    resources: initial.resources.length,
+    files_total: inventory.candidateEntries,
+    files_processed: durableAssets.size,
+    percent: inventory.candidateEntries
+      ? Math.min(99, Math.round((durableAssets.size / inventory.candidateEntries) * 100))
+      : 0,
+  });
+
+  const uploaded = await uploadMediaZipToR2({
+    zipSource: upload.source || upload.file,
+    references: initial.references,
+    examTrack: "books",
+    sourceNamespace: cleanBookKey,
+    importJobId: "aylamed-private-books",
+    mediaImportJobId: String(upload.sha256 || queueContext.job.id).slice(0, 80),
+    inventory,
+    existingAssets: [...durableAssets.values()],
+    directoryCacheKey,
+    allowSvg: true,
+    transferGate: ngMediaTransferGate,
+    onAssets: async (assets, context) => {
+      for (const asset of assets) durableAssets.set(Number(asset.entryIndex), asset);
+      await queueContext.updateCheckpoint({
+        inventory,
+        assets: [...durableAssets.values()].sort((left, right) => Number(left.entryIndex) - Number(right.entryIndex)),
+      }, {
+        ...context.progress,
+        stage: "uploading_private_book_media",
+        book_key: cleanBookKey,
+        references: initial.references.length,
+        resources: initial.resources.length,
+      });
+    },
+    onProgress: (progress) => queueContext.heartbeat({
+      ...progress,
+      stage: "uploading_private_book_media",
+      book_key: cleanBookKey,
+      references: initial.references.length,
+      resources: initial.resources.length,
+    }),
+  });
+  const report = matchMediaReferences(initial.references, uploaded.assets);
+  const importedAt = aylaNow();
+  const applied = await mutateAylaDb(async (db) => {
+    aylaEnsureSeedData(db);
+    const current = authorizedBookMediaResources(aylaValues(db, "aylaResources"), cleanBookKey);
+    if (current.length !== initial.resources.length) {
+      throw Object.assign(new Error("The book resource set changed during media import; retry against the current package"), { statusCode: 409 });
+    }
+    const result = applyBookMediaMatches(current, report, { bookKey: cleanBookKey, importedAt });
+    for (const resource of result.resources) aylaSetItem(db, "aylaResources", resource);
+    await aylaLog(db, "resource-media", "Private book media mapped into protected reader pages", {
+      bookKey: cleanBookKey,
+      ...result.counts,
+      ambiguous: report.ambiguous.length,
+      unreferenced: report.unreferenced.length,
+      publicationChanged: false,
+      studentAccessChanged: false,
+    });
+    return result;
+  });
+  await queueContext.updateCheckpoint({
+    inventory,
+    assets: uploaded.assets,
+    applied: applied.counts,
+  }, {
+    stage: applied.counts.missing || report.ambiguous.length
+      ? "private_book_media_completed_with_review_items"
+      : "private_book_media_ready",
+    book_key: cleanBookKey,
+    files_processed: uploaded.assets.length,
+    files_total: uploaded.candidateEntries,
+    references: initial.references.length,
+    matched: report.matches.length,
+    linked: applied.counts.linked,
+    missing: report.missing.length,
+    ambiguous: report.ambiguous.length,
+    unreferenced: report.unreferenced.length,
+    delivery_ready_resources: applied.counts.deliveryReadyResources,
+    resources: applied.counts.resources,
+    percent: 100,
+    completed: true,
+    publication_changed: false,
+    student_access_changed: false,
+  });
+  return { report, applied };
+}
+
+ngContentBackgroundQueue.register("ayla_book_media_import", async (queueContext) => {
+  await aylaRunPrivateBookMediaImport({
+    upload: ngQueuedContentUpload(queueContext.job),
+    bookKey: queueContext.job.payload?.metadata?.book_key,
+    queueContext,
+  });
+}, {
+  canRecover: ngContentQueueCanRecover,
+  onTerminal: (job) => ngContentQueueTerminal(job),
+});
+
 ngContentBackgroundQueue.register("content_question_preview", async (queueContext) => {
   const payload = queueContext.job.payload;
   await ngRunContentImportPreview({
@@ -75541,7 +75695,7 @@ function aylaV189SanitizePlanBundle(db, plan, assignments = []) {
 }
 
 async function aylaV251SignedMediaRows(media = []) {
-  return (await Promise.all((Array.isArray(media) ? media : []).slice(0, 100).map(async (item) => {
+  return (await Promise.all((Array.isArray(media) ? media : []).slice(0, 250).map(async (item) => {
     const objectKey = String(item?.object_key || item?.objectKey || "").trim();
     if (!objectKey) {
       return item?.url ? { ...item, object_key: undefined, objectKey: undefined } : null;
@@ -75552,7 +75706,10 @@ async function aylaV251SignedMediaRows(media = []) {
         ref: item.ref,
         placement: item.placement || "explanation",
         kind: item.kind || (String(item.content_type || "").startsWith("audio/") ? "audio" : "image"),
-        content_type: item.content_type || "image/*",
+        content_type: item.content_type || item.contentType || "image/*",
+        alt: String(item.alt || "").slice(0, 500),
+        caption: String(item.caption || "").slice(0, 1_000),
+        order: Math.max(0, Number(item.order || 0)),
         url: await createPrivateMediaUrl(objectKey, 900),
         expires_in_seconds: 900,
       };
@@ -78586,6 +78743,77 @@ app.post("/api/ayla/admin/resources/bulk-import", async (req, res) => {
     return aylaSendOk(res, { count: resources.length, quarantinedCount: quarantined.length, resources, quarantine: quarantined.map(({ resource, errors }) => ({ id: resource.id, title: resource.title, errors })) }, 201);
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to bulk-import AylaMed resources");
+  }
+});
+
+app.post("/api/ayla/admin/resources/book-media/import", async (req, res) => {
+  let upload = null;
+  try {
+    const admin = await aylaRequireAdmin(req);
+    if (!contentMediaStatus().configured) {
+      return aylaSendError(res, 503, "Private Cloudflare R2 media storage is not configured");
+    }
+    const bookKey = aylaBookMediaKey(req.body?.book_key || req.body?.bookKey);
+    const db = await readAylaDb();
+    const prepared = collectBookMediaReferences(aylaValues(db, "aylaResources"), { bookKey });
+    if (!prepared.resources.length) return aylaSendError(res, 404, "Protected book resources were not found");
+    if (!prepared.references.length) {
+      return aylaSendError(res, 409, "Re-import the regenerated book JSON before attaching its media ZIP");
+    }
+    upload = await ngReceiveOrResolveContentZip(req, ["book_media_zip"]);
+    const domainJobId = `${bookKey}:${upload.sha256 || crypto.randomUUID()}`;
+    const backgroundJob = await ngQueueContentOperation({
+      type: "ayla_book_media_import",
+      lane: "image_zip",
+      upload,
+      domainJobId,
+      metadata: {
+        book_key: bookKey,
+        resource_count: prepared.resources.length,
+        reference_count: prepared.references.length,
+        requested_by: String(admin?.user?.id || admin?.user?.email || "aylamed-admin"),
+      },
+      maxAttempts: 3,
+    });
+    upload = null;
+    return aylaSendOk(res, {
+      background_job_id: backgroundJob.id,
+      status: backgroundJob.status,
+      book_key: bookKey,
+      resource_count: prepared.resources.length,
+      reference_count: prepared.references.length,
+      poll_url: `/api/ayla/admin/resources/book-media/imports/${backgroundJob.id}`,
+      safeguards: {
+        private_r2: true,
+        publication_changed: false,
+        student_access_changed: false,
+      },
+    }, 202);
+  } catch (error) {
+    await ngCleanupRejectedContentUpload(upload);
+    return aylaSendError(res, error.statusCode || 500, error.message || "Private book media import failed");
+  }
+});
+
+app.get("/api/ayla/admin/resources/book-media/imports/:backgroundJobId", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    await ngContentBackgroundQueue.initialize();
+    const job = ngContentBackgroundQueue.get(req.params.backgroundJobId);
+    if (!job || job.type !== "ayla_book_media_import") {
+      return aylaSendError(res, 404, "Private book media import job not found");
+    }
+    return aylaSendOk(res, {
+      job,
+      storage: contentMediaStatus(),
+      safeguards: {
+        private_r2: true,
+        publication_changed: false,
+        student_access_changed: false,
+      },
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load private book media status");
   }
 });
 
@@ -83347,6 +83575,10 @@ app.get("/api/ayla/students/:studentId/library/resources/:resourceId/pages/:page
       assignment,
     });
     if (!page) return aylaSendError(res, 404, "Exact Library page not found");
+    const privatePage = findAylaLibraryPage(resource, req.params.pageNumber, {
+      examTrack: student.examTrackId || student.exam_track_id || student.exam,
+    });
+    page.page.media = await aylaV251SignedMediaRows(privatePage?.media || []);
     return aylaSendOk(res, { ...page, page_source_warning: eligible.warning });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load Library page");
