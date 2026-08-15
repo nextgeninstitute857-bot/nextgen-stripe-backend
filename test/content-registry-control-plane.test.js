@@ -429,6 +429,31 @@ test('taxonomy mappings are exam and provider namespace scoped and reused on fut
   assert.match(server, /content-registry\/taxonomy-mappings/);
 });
 
+test('QBank taxonomy coverage excludes assessment-only NBME collections', () => {
+  const reviewQueue = postgres.slice(
+    postgres.indexOf('export async function listContentTaxonomyReviewQueue'),
+    postgres.indexOf('export async function getContentTaxonomyProviderPairEvidence'),
+  );
+  const pairEvidence = postgres.slice(
+    postgres.indexOf('export async function getContentTaxonomyProviderPairEvidence'),
+    postgres.indexOf('export async function upsertContentQuestionTaxonomyOverride'),
+  );
+  const coverage = postgres.slice(
+    postgres.indexOf('export async function getContentTaxonomyCoverage'),
+    postgres.indexOf('export async function listContentHubVideos'),
+  );
+
+  for (const query of [reviewQueue, pairEvidence, coverage]) {
+    assert.match(query, /JOIN content_collections/);
+    assert.match(query, /destination='aylamed_qbank'/);
+  }
+  assert.match(coverage, /WITH qbank_questions AS/);
+  assert.match(coverage, /FROM qbank_questions q GROUP BY 1/);
+  assert.doesNotMatch(reviewQueue, /aylamed_nbme/);
+  assert.doesNotMatch(pairEvidence, /aylamed_nbme/);
+  assert.doesNotMatch(coverage, /aylamed_nbme/);
+});
+
 test('specialized CDM cases cannot be claimed by the ordinary MCQ draft importer', () => {
   assert.match(server, /counts\?\.import_blocked === true/);
   assert.match(server, /blocking specialized-format or exam-mapping issue/);
