@@ -180,6 +180,9 @@ test("authorized external release is restricted to the confirmed provider and ex
     { source_provider: "UWorld", source_profile: "uworld_style", exam_track: "usmle-step-2" },
     { source_provider: "UWorld", source_profile: "uworld_style", exam_track: "usmle-step-3" },
     { source_provider: "UWorld", source_profile: "uworld_style", exam_track: "nclex" },
+    { source_provider: "AMBOSS", source_profile: "amboss_style", exam_track: "usmle-step-1" },
+    { source_provider: "AMBOSS", source_profile: "amboss_style", exam_track: "usmle-step-2" },
+    { source_provider: "AMBOSS", source_profile: "amboss_style", exam_track: "usmle-step-3" },
   ]) {
     assert.equal(contentAuthorizedExternalReleaseAllowed({
       ...row,

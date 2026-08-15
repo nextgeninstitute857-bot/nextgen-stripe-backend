@@ -35566,7 +35566,7 @@ function ngOwnedMediaUploadScopeError() {
 
 function ngAuthorizedExternalContentScopeError() {
   return Object.assign(
-    new Error("This AylaMed administrator session is limited to AylaMed-owned content or an authorized Amedex, MPlusX, BMJ OnExamination, CanadaQBank, ACE QBank, PassMedicine, BoardVitals, or UWorld launch bundle in its confirmed exam track"),
+    new Error("This AylaMed administrator session is limited to AylaMed-owned content or an authorized Amedex, MPlusX, BMJ OnExamination, CanadaQBank, ACE QBank, PassMedicine, BoardVitals, UWorld, or AMBOSS launch bundle in its confirmed exam track"),
     { statusCode: 403, code: "AYLAMED_AUTHORIZED_EXTERNAL_SCOPE_REQUIRED" },
   );
 }
