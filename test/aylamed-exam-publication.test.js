@@ -37,6 +37,55 @@ test("compact groups expose configured and effective state without flattening ch
   assert.equal(groups.find((group) => group.type === "qbank_collection").ready, true);
 });
 
+test("question-bank collections collapse by bank name, retain folders, and exclude NBMEs", () => {
+  const groups = buildAylaCompactPublicationGroups({
+    exams: [{ examTrackId: "usmle_step_2_ck", enabled: true }],
+    availableResources: [
+      {
+        id: "uworld-step2-main", type: "qbank_collection", exam_track_id: "usmle_step_2_ck",
+        title: "UWorld Step 2 main", source_provider: "UWorld", source_namespace: "step2/main",
+        status: "approved", question_count: 4000, valid_question_count: 4000,
+        taxonomy_complete_count: 4000, delivery_media_ready_count: 3990,
+      },
+      {
+        id: "uworld-step2-sim", type: "qbank_collection", exam_track_id: "usmle_step_2_ck",
+        title: "UWorld Step 2 simulation", source_provider: "UWorld", source_namespace: "step2/simulations",
+        status: "draft", question_count: 85, valid_question_count: 85,
+        taxonomy_complete_count: 85, delivery_media_ready_count: 85, publication_default_enabled: false,
+      },
+      {
+        id: "nbme-9", type: "qbank_collection", exam_track_id: "usmle_step_2_ck",
+        title: "NBME 9", source_provider: "NBME", delivery_channel: "nbme",
+        status: "approved", question_count: 200, valid_question_count: 200,
+        taxonomy_complete_count: 200, delivery_media_ready_count: 200,
+      },
+    ],
+  });
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].title, "UWorld");
+  assert.equal(groups[0].resource_count, 2);
+  assert.equal(groups[0].folders.length, 2);
+  assert.equal(groups[0].question_count, 4085);
+  assert.equal(groups[0].excluded_question_count, 10);
+  assert.equal(groups[0].configured_state, "mixed");
+});
+
+test("a complete private AMBOSS collection is ready for the bank Publish action", () => {
+  const [group] = buildAylaCompactPublicationGroups({
+    exams: [{ examTrackId: "usmle_step_2_ck", enabled: false }],
+    availableResources: [{
+      id: "amboss-step2", type: "qbank_collection", exam_track_id: "usmle_step_2_ck",
+      title: "AMBOSS Step 2 CK", source_provider: "AMBOSS", source_namespace: "amboss/step2/2025",
+      status: "draft", question_count: 3501, valid_question_count: 3501,
+      taxonomy_complete_count: 3501, delivery_media_ready_count: 3501, publication_default_enabled: false,
+    }],
+  });
+  assert.equal(group.title, "AMBOSS");
+  assert.equal(group.ready, true);
+  assert.equal(group.configured_state, "unpublished");
+  assert.equal(assertAylaPublicationGroupMutationAllowed(group, true), true);
+});
+
 test("mixed child controls are preserved and surfaced for review", () => {
   const groups = buildAylaCompactPublicationGroups({
     exams: [{ examTrackId: "plab", enabled: true }],
@@ -129,6 +178,15 @@ test("Step 2 material is supplemental for MCCQE and never enters readiness scori
   assert.equal(tutor.allowed, true);
   assert.equal(tutor.supplemental, true);
   assert.equal(tutor.scoring_allowed, false);
+
+  const qbank = resolveAylaExamPublication({
+    examTrack: "mccqe", sourceExamTrack: "usmle_step_2_ck", resourceType: "qbank_collection",
+    resourceId: "amboss-step2", destination: "qbank",
+    examControls: [{ examTrackId: "mccqe", enabled: true }],
+  });
+  assert.equal(qbank.allowed, true);
+  assert.equal(qbank.supplemental, true);
+  assert.equal(qbank.scoring_allowed, false);
 
   for (const destination of ["diagnostic", "assessment", "readiness", "scoring", "weakness", "attempt"]) {
     const result = resolveAylaExamPublication({

@@ -70580,19 +70580,38 @@ async function aylaPublicationResourceSnapshot(db, panel) {
   let cdmRegistryWarning = null;
   if (contentRegistryStatus().configured) {
     try {
-      qbankCollections = (await aylaListPublicationPanelContentCollections()).map((collection) => ({
-        id: String(collection.id || ""),
-        type: "qbank_collection",
-        exam_track_id: aylaCanonicalExamTrack(collection.exam_track),
-        title: String(collection.title || collection.collection_key || "QBank collection"),
-        folder_id: null,
-        status: collection.status || "draft",
-        question_count: Number(collection.question_count || 0),
-        valid_question_count: Number(collection.valid_question_count ?? collection.question_count ?? 0),
-        taxonomy_complete_count: Number(collection.taxonomy_complete_count || 0),
-        required_media_missing_count: Number(collection.required_media_missing_count || 0),
-        media_ambiguous_count: Number(collection.media_ambiguous_count || 0),
-      }));
+      qbankCollections = (await aylaListPublicationPanelContentCollections()).map((collection) => {
+        const destinationControls = Array.isArray(collection.destination_controls) ? collection.destination_controls : [];
+        const qbankDestinationEnabled = destinationControls.some((control) =>
+          String(control.destination || "") === "aylamed_qbank"
+          && String(control.destination_scope || "") === ""
+          && control.enabled === true);
+        const hasQbankDestination = destinationControls.some((control) => String(control.destination || "") === "aylamed_qbank");
+        const hasNbmeDestination = destinationControls.some((control) => String(control.destination || "") === "aylamed_nbme");
+        return {
+          id: String(collection.id || ""),
+          type: "qbank_collection",
+          exam_track_id: aylaCanonicalExamTrack(collection.exam_track),
+          title: String(collection.title || collection.collection_key || "QBank collection"),
+          folder_id: String(collection.source_namespace || "") || null,
+          folder_name: String(collection.source_namespace || "") || null,
+          source_namespace: String(collection.source_namespace || "") || null,
+          source_provider: String(collection.source_provider || "") || null,
+          source_profile: String(collection.source_profile || "") || null,
+          source_year: collection.source_year || null,
+          collection_key: String(collection.collection_key || "") || null,
+          delivery_channel: hasNbmeDestination && !hasQbankDestination ? "nbme" : "qbank",
+          publication_default_enabled: String(collection.status || "") === "approved" && qbankDestinationEnabled,
+          destination_controls: destinationControls,
+          status: collection.status || "draft",
+          question_count: Number(collection.question_count || 0),
+          valid_question_count: Number(collection.valid_question_count ?? collection.question_count ?? 0),
+          taxonomy_complete_count: Number(collection.taxonomy_complete_count || 0),
+          delivery_media_ready_count: Number(collection.delivery_media_ready_count || 0),
+          required_media_missing_count: Number(collection.required_media_missing_count || 0),
+          media_ambiguous_count: Number(collection.media_ambiguous_count || 0),
+        };
+      });
       try {
         const cases = await listContentCdmCases({ examTrack: "mccqe", destination: "aylamed_cdm", limit: 200, seed: "publication-controls" });
         const programs = new Map();
@@ -70638,7 +70657,8 @@ async function aylaPublicationResourceSnapshot(db, panel) {
   const supplementalResources = panel.exams.flatMap((exam) => listAylaExamSupplements(exam.examTrackId)
     .flatMap((supplement) => nativeResources
       .filter((resource) => resource.exam_track_id === supplement.source_exam_track
-        && supplement.resource_types.includes(resource.type))
+        && supplement.resource_types.includes(resource.type)
+        && resource.delivery_channel !== "nbme")
       .map((resource) => ({
         ...resource,
         exam_track_id: exam.examTrackId,
@@ -70722,8 +70742,9 @@ app.put("/api/ayla/admin/publication-controls/resources/:resourceType/:resourceI
     const admin = await aylaRequireAdmin(req);
     const requestedEnabled = req.body.enabled === true || req.body.published === true;
     const requestedType = String(req.params.resourceType || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_");
+    const requestedExam = aylaCanonicalExamTrack(req.body.examTrackId || req.body.exam_track_id || req.body.examTrack);
     let validatedGroup = null;
-    if (requestedEnabled && AYLA_PUBLICATION_GROUP_ORDER.includes(requestedType)) {
+    if (AYLA_PUBLICATION_GROUP_ORDER.includes(requestedType)) {
       const validationDb = await readAylaDb();
       aylaEnsureSeedData(validationDb);
       const validationPanel = buildAylaPublicationControlPanel({
@@ -70731,7 +70752,6 @@ app.put("/api/ayla/admin/publication-controls/resources/:resourceType/:resourceI
         resourceControls: aylaValues(validationDb, "aylaResourcePublicationControls"),
       });
       const { availableResources } = await aylaPublicationResourceSnapshot(validationDb, validationPanel);
-      const requestedExam = aylaCanonicalExamTrack(req.body.examTrackId || req.body.exam_track_id || req.body.examTrack);
       validatedGroup = buildAylaCompactPublicationGroups({
         exams: validationPanel.exams,
         resourceControls: validationPanel.resources,
@@ -70739,48 +70759,114 @@ app.put("/api/ayla/admin/publication-controls/resources/:resourceType/:resourceI
       }).find((group) => group.exam_track_id === requestedExam
         && group.type === requestedType
         && String(group.resource_id) === String(req.params.resourceId));
-      assertAylaPublicationGroupMutationAllowed(validatedGroup, true);
+      if (requestedEnabled) assertAylaPublicationGroupMutationAllowed(validatedGroup, true);
+    }
+    const targetResources = validatedGroup?.type === "qbank_collection"
+      ? validatedGroup.resources.map((resource) => ({
+        resourceType: "qbank_collection",
+        resourceId: String(resource.id),
+        sourceExamTrackId: validatedGroup.source_exam_track_id || validatedGroup.exam_track_id,
+      }))
+      : [{
+        resourceType: req.params.resourceType,
+        resourceId: req.params.resourceId,
+        sourceExamTrackId: req.body.sourceExamTrackId || req.body.source_exam_track_id || requestedExam,
+      }];
+    const actorId = admin.user?.id || admin.method || "admin";
+    if (requestedEnabled && validatedGroup?.type === "qbank_collection") {
+      // Fail closed while PostgreSQL approval/destination controls are made
+      // student-ready. If registry activation fails, these explicit false
+      // controls prevent a partially activated bank from leaking through the
+      // legacy inherited-default path.
+      await mutateAylaDb(async (db) => {
+        aylaEnsureSeedData(db);
+        for (const target of targetResources) {
+          const existing = aylaValues(db, "aylaResourcePublicationControls").find((row) =>
+            aylaCanonicalExamTrack(row.examTrackId) === requestedExam
+            && String(row.resourceType) === target.resourceType
+            && String(row.resourceId) === target.resourceId) || {};
+          const control = normalizeAylaResourcePublicationControl({
+            ...existing,
+            examTrackId: requestedExam,
+            resourceType: target.resourceType,
+            resourceId: target.resourceId,
+            sourceExamTrackId: target.sourceExamTrackId,
+            enabled: false,
+            note: `Fail-closed activation for ${validatedGroup.title}`,
+          }, existing);
+          control.updatedAt = aylaNow();
+          control.updatedBy = actorId;
+          control.createdAt = existing.createdAt || control.updatedAt;
+          aylaSetItem(db, "aylaResourcePublicationControls", control);
+        }
+      });
+      for (const target of targetResources) {
+        await updateContentCollectionControls({
+          collectionId: target.resourceId,
+          status: "approved",
+          destinations: [{
+            destination: "aylamed_qbank",
+            destination_scope: "",
+            enabled: true,
+            settings: { publication_group_id: validatedGroup.resource_id, bank_name: validatedGroup.title },
+          }],
+          actorId: String(actorId),
+        });
+      }
     }
     const result = await mutateAylaDb(async (db) => {
       aylaEnsureSeedData(db);
-      const examTrackId = aylaCanonicalExamTrack(req.body.examTrackId || req.body.exam_track_id || req.body.examTrack);
-      const existing = aylaValues(db, "aylaResourcePublicationControls").find((row) =>
-        aylaCanonicalExamTrack(row.examTrackId) === examTrackId
-        && String(row.resourceType) === String(req.params.resourceType)
-        && String(row.resourceId) === String(req.params.resourceId)) || {};
-      const previous = Object.keys(existing).length
-        ? normalizeAylaResourcePublicationControl(existing, existing)
-        : null;
-      const control = normalizeAylaResourcePublicationControl({
-        ...req.body,
-        examTrackId,
-        resourceType: req.params.resourceType,
-        resourceId: req.params.resourceId,
-      }, existing);
-      control.updatedAt = aylaNow();
-      control.updatedBy = admin.user?.id || admin.method || "admin";
-      control.createdAt = existing.createdAt || control.updatedAt;
-      aylaSetItem(db, "aylaResourcePublicationControls", control);
-      const changed = !previous
-        || previous.enabled !== control.enabled
-        || JSON.stringify(previous.destinations) !== JSON.stringify(control.destinations);
-      if (changed) await aylaLog(db, "resource-publication-control", `${control.resourceType}:${control.resourceId} ${control.enabled ? "enabled" : "disabled"}`, {
-        exam_track_id: control.examTrackId,
-        source_exam_track_id: control.sourceExamTrackId,
-        resource_type: control.resourceType,
-        resource_id: control.resourceId,
-        previous_enabled: previous?.enabled ?? null,
-        enabled: control.enabled,
-        destinations: control.destinations,
-        actor: control.updatedBy,
+      const controls = [];
+      let changed = false;
+      for (const target of targetResources) {
+        const existing = aylaValues(db, "aylaResourcePublicationControls").find((row) =>
+          aylaCanonicalExamTrack(row.examTrackId) === requestedExam
+          && String(row.resourceType) === target.resourceType
+          && String(row.resourceId) === target.resourceId) || {};
+        const previous = Object.keys(existing).length
+          ? normalizeAylaResourcePublicationControl(existing, existing)
+          : null;
+        const control = normalizeAylaResourcePublicationControl({
+          ...req.body,
+          examTrackId: requestedExam,
+          resourceType: target.resourceType,
+          resourceId: target.resourceId,
+          sourceExamTrackId: target.sourceExamTrackId,
+          enabled: requestedEnabled,
+        }, existing);
+        control.updatedAt = aylaNow();
+        control.updatedBy = actorId;
+        control.createdAt = existing.createdAt || control.updatedAt;
+        aylaSetItem(db, "aylaResourcePublicationControls", control);
+        const targetChanged = !previous
+          || previous.enabled !== control.enabled
+          || JSON.stringify(previous.destinations) !== JSON.stringify(control.destinations);
+        changed = changed || targetChanged;
+        controls.push(control);
+      }
+      if (changed) await aylaLog(db, "resource-publication-control", `${requestedType}:${req.params.resourceId} ${requestedEnabled ? "enabled" : "disabled"}`, {
+        exam_track_id: requestedExam,
+        source_exam_track_id: validatedGroup?.source_exam_track_id || requestedExam,
+        resource_type: requestedType,
+        resource_id: req.params.resourceId,
+        member_resource_ids: targetResources.map((target) => target.resourceId),
+        enabled: requestedEnabled,
+        actor: actorId,
       });
-      return { control, changed };
+      return { controls, changed };
     });
     return aylaSendOk(res, {
-      control: result.control,
+      control: result.controls[0] || null,
+      controls: result.controls,
       changed: result.changed,
       idempotent_replay: !result.changed,
-      readiness_gate: validatedGroup ? { passed: true, group_id: validatedGroup.id, blockers: [] } : null,
+      readiness_gate: validatedGroup ? {
+        passed: true,
+        group_id: validatedGroup.id,
+        bank_name: validatedGroup.title,
+        member_count: targetResources.length,
+        blockers: [],
+      } : null,
     });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to update resource publication");
