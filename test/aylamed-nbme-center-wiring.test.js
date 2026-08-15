@@ -11,6 +11,10 @@ const shell = fs.readFileSync(
   new URL("../lib/aylamed-student-shell.js", import.meta.url),
   "utf8",
 );
+const packager = fs.readFileSync(
+  new URL("../scripts/prepare-aylamed-nbme-import.mjs", import.meta.url),
+  "utf8",
+);
 
 test("v256 wires one private exam-scoped NBME Center through admin, student and registry boundaries", () => {
   assert.match(server, /AYLA_NBME_CENTER_BUILD/);
@@ -47,4 +51,15 @@ test("v256 persists only assessment metadata and attempts in AylaMed collections
   assert.match(server, /aylaNbmeAuditEvents:/);
   assert.doesNotMatch(server, /aylaNbmeQuestions:/);
   assert.doesNotMatch(server, /aylaNbmeMedia:/);
+});
+
+test("the NBME packager emits production namespaces and excludes incomplete forms from release ZIPs", () => {
+  assert.match(packager, /"usmle-step-1": "aylamed-nbme-step-1-complete"/);
+  assert.match(packager, /"usmle-step-2": "aylamed-nbme-step-2-complete"/);
+  assert.match(packager, /"usmle-step-3": "aylamed-nbme-step-3-complete"/);
+  assert.match(packager, /function isReleaseReadyForm/);
+  assert.match(packager, /const packageForms = examForms\.filter\(isReleaseReadyForm\)/);
+  assert.match(packager, /excluded_forms:/);
+  assert.match(packager, /process\.platform === "win32"/);
+  assert.match(packager, /run\("tar\.exe"/);
 });
