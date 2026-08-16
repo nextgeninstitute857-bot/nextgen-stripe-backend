@@ -122,6 +122,7 @@ import {
   AYLA_PERMANENT_QA,
   buildAylaPermanentQaScenarios,
 } from "./lib/aylamed-qa-accounts.js";
+import { compactAylaPrivatePilotPlans } from "./lib/aylamed-pilot-compaction.js";
 import {
   AYLA_DIAGNOSTIC_BLUEPRINT_VERSION,
   applyDiagnosticSystemOverride,
@@ -79738,6 +79739,19 @@ async function ngRunAylaPrivatePilotContentActivation(reason = "startup") {
     const vimeoEmbedDomainFingerprint = crypto.createHash("sha256")
       .update(`${AYLA_PRIVATE_PILOT_BUILD}\n${vimeoEmbedDomains.slice().sort().join("\n")}`)
       .digest("hex");
+    const privatePilotContentFingerprint = crypto.createHash("sha256")
+      .update(JSON.stringify({
+        build: AYLA_PRIVATE_PILOT_BUILD,
+        cohortId: cohort.id,
+        collections: verifiedCollections.map((row) => String(row.id || "")).sort(),
+        qbankQuestionCount,
+        flashcardQuestionIds: registryFlashcardQuestions
+          .map((row) => String(row.id || row.question_id || ""))
+          .filter(Boolean)
+          .sort(),
+        vimeoEmbedDomainFingerprint,
+      }))
+      .digest("hex");
     const activation = await mutateAylaDb(async (db) => {
       const currentCohort = aylaGetItem(db, "aylaPilotCohorts", cohort.id);
       if (!currentCohort || String(currentCohort.status || "") !== "active") {
@@ -79890,18 +79904,34 @@ async function ngRunAylaPrivatePilotContentActivation(reason = "startup") {
           String(row.category || row.type || "").toLowerCase() === "video");
         const hasFlashcards = currentAssignments.some((row) =>
           String(row.category || row.type || "").toLowerCase() === "flashcards");
-        const needsRebuild = collectionsActivated > 0
+        const contentNeedsRebuild = collectionsActivated > 0
           || lecturesApproved > 0
           || flashcardsActivated > 0
           || (qbankQuestionCount > 0 && !hasQbank)
           || (privateLectures.length > 0 && !hasVideo)
           || (registryFlashcardQuestions.length > 0 && !hasFlashcards);
+        const needsRebuild = contentNeedsRebuild
+          && String(student.privatePilotContentActivationFingerprint || "")
+            !== privatePilotContentFingerprint;
+        if (!contentNeedsRebuild) {
+          if (String(student.privatePilotContentActivationFingerprint || "") !== privatePilotContentFingerprint) {
+            student.privatePilotContentActivationFingerprint = privatePilotContentFingerprint;
+            student.privatePilotContentActivationCheckedAt = aylaNow();
+            student.updatedAt = aylaNow();
+            aylaSetItem(db, "aylaStudents", student);
+          }
+          continue;
+        }
         if (!needsRebuild) continue;
         const built = await aylaV189BuildDailyPlan(db, student, date, {
           force: true,
           includeAssessment: false,
           skipAi: true,
         });
+        student.privatePilotContentActivationFingerprint = privatePilotContentFingerprint;
+        student.privatePilotContentActivationCheckedAt = aylaNow();
+        student.updatedAt = aylaNow();
+        aylaSetItem(db, "aylaStudents", student);
         if (!built.completedHistoryProtected) plansRebuilt += 1;
       }
       aylaSetItem(db, "aylaPilotAuditEvents", {
@@ -87526,8 +87556,21 @@ app.post("/admin/mobile/invitations", async (req, res) => {
 
 async function startNextgenServer() {
   const aylaWarmStartedAt = Date.now();
-  await readAylaDb();
+  const aylaDb = await readAylaDb();
+  const pilotCompaction = compactAylaPrivatePilotPlans(aylaDb);
+  if (pilotCompaction.changed) {
+    aylaSetItem(aylaDb, "aylaPilotAuditEvents", {
+      id: aylaId("AYLA-PILOT-EVENT"),
+      action: "private_pilot_duplicate_plan_compaction",
+      ...pilotCompaction,
+      completedHistoryPreserved: true,
+      ordinaryStudentRecordsChanged: false,
+      createdAt: aylaNow(),
+    });
+    await writeAylaDb(aylaDb);
+  }
   console.log(`AylaMed cache warmed before listen in ${Date.now() - aylaWarmStartedAt} ms`);
+  console.log("AylaMed private pilot plan compaction:", pilotCompaction);
 
   app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
