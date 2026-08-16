@@ -2735,6 +2735,7 @@ function sanitizeUser(user) {
     avatar_url: user.avatar_url || null,
     google_sub: user.google_sub || null,
     verified: user.verified !== false,
+    must_change_password: user.must_change_password === true,
     created_at: user.created_at || null,
     updated_at: user.updated_at || null,
   };
@@ -11943,6 +11944,32 @@ app.get("/auth/me", async (req, res) => {
       success: false,
       error: error.message || "Failed to load current user",
     });
+  }
+});
+
+app.post("/auth/update-password", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const currentPassword = String(req.body.current_password || req.body.currentPassword || req.body.oldPassword || "");
+    const newPassword = String(req.body.new_password || req.body.newPassword || "");
+    if (!currentPassword) return res.status(400).json({ success: false, error: "Current password is required" });
+    if (newPassword.length < 8) return res.status(400).json({ success: false, error: "New password must be at least 8 characters" });
+    const db = await readLiveDb();
+    const rawUser = db.users?.[String(user.id)] || null;
+    if (!rawUser || !verifyPassword(currentPassword, rawUser)) {
+      return res.status(401).json({ success: false, error: "Current password is incorrect" });
+    }
+    const hashed = hashPassword(newPassword);
+    rawUser.salt = hashed.salt;
+    rawUser.password_hash = hashed.password_hash;
+    rawUser.must_change_password = false;
+    rawUser.password_changed_at = nowIso();
+    rawUser.updated_at = nowIso();
+    db.users[rawUser.id] = rawUser;
+    await writeLiveDb(db);
+    return res.json({ success: true, user: sanitizeUser(rawUser), message: "Password updated" });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to update password" });
   }
 });
 
@@ -67581,6 +67608,7 @@ function aylaSanitizeUser(user) {
     country: user.country || "",
     bio: user.bio || "",
     authVersion: Number(user.authVersion || 1),
+    mustChangePassword: user.mustChangePassword === true || user.must_change_password === true,
     createdAt: user.createdAt || user.created_at || null,
     updatedAt: user.updatedAt || user.updated_at || null,
   };
@@ -69900,6 +69928,8 @@ app.post("/api/ayla/auth/update-password", async (req, res) => {
     const hashed = hashPassword(newPassword);
     rawUser.salt = hashed.salt;
     rawUser.password_hash = hashed.password_hash;
+    rawUser.mustChangePassword = false;
+    rawUser.must_change_password = false;
     rawUser.authVersion = Number(rawUser.authVersion || 1) + 1;
     rawUser.updatedAt = aylaNow();
     aylaSetItem(db, "aylaUsers", rawUser);
@@ -86477,6 +86507,425 @@ function ngStartContentOperationsScheduler() {
     ngContentOperationsCleanupTimer.unref?.();
   }
 }
+
+// -----------------------------------------------------------------------------
+// Universal mobile admin — a small, stable API used by the iOS/Android admin
+// app and by the two web control centers. It deliberately exposes no stored
+// Zoom host URL; a fresh host URL is issued only by the existing protected
+// /admin/live-sessions/:id/host-start-link action.
+// -----------------------------------------------------------------------------
+
+function ngAdminMobileDateMs(value) {
+  if (!value) return 0;
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function ngAdminMobilePaymentCompleted(payment = {}) {
+  const status = String(payment.payment_status || payment.status || payment.checkout_status || "").trim().toLowerCase();
+  return ["paid", "completed", "succeeded", "active"].includes(status);
+}
+
+function ngAdminMobilePaymentCents(payment = {}) {
+  return Math.max(0, Number(payment.amount_cents ?? payment.final_amount_cents ?? payment.price_cents ?? 0) || 0);
+}
+
+function ngAdminMobilePaymentDate(payment = {}) {
+  return ngAdminMobileDateMs(payment.paid_at || payment.created_at || payment.createdAt || payment.updated_at || payment.updatedAt);
+}
+
+function ngAdminMobileMonthWindow(now = new Date()) {
+  const start = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+  const end = new Date(now.getFullYear(), now.getMonth() + 1, 1).getTime();
+  return { start, end };
+}
+
+function ngAdminMobilePlanRecurring(plan = {}) {
+  const billing = String(plan.billing_type || plan.plan_type || plan.type || plan.interval || "").toLowerCase();
+  return /month|subscription|recurring/.test(billing);
+}
+
+function ngAdminMobileHasVerifiedSubscription(record = {}) {
+  const status = String(record.subscription_status || record.stripe_subscription_status || "").toLowerCase();
+  if (["cancelled", "canceled", "deleted", "unpaid", "incomplete_expired"].includes(status)) return false;
+  if (record.cancel_at_period_end === true) return false;
+  return Boolean(
+    record.stripe_subscription_id ||
+    record.subscription_id ||
+    record.stripe_subscription ||
+    ["active", "trialing", "past_due"].includes(status)
+  );
+}
+
+function ngAdminMobileRevenueMetrics({ payments = [], enrollments = [], plans = [], enrollmentActive, userIdForEnrollment } = {}) {
+  const now = new Date();
+  const month = ngAdminMobileMonthWindow(now);
+  const planMap = new Map(plans.map((plan) => [String(plan.id || ""), plan]));
+  const completedPayments = payments.filter(ngAdminMobilePaymentCompleted);
+  const monthPayments = completedPayments.filter((payment) => {
+    const date = ngAdminMobilePaymentDate(payment);
+    return date >= month.start && date < month.end;
+  });
+  const recurringEnrollments = enrollments.filter((enrollment) => {
+    const plan = planMap.get(String(enrollment.plan_id || "")) || null;
+    return Boolean(
+      plan &&
+      ngAdminMobilePlanRecurring(plan) &&
+      ngAdminMobileHasVerifiedSubscription(enrollment) &&
+      enrollmentActive(enrollment, plan)
+    );
+  });
+  const uniqueRecurring = new Map();
+  for (const enrollment of recurringEnrollments) {
+    const key = String(userIdForEnrollment(enrollment) || enrollment.id || "");
+    if (!key) continue;
+    const plan = planMap.get(String(enrollment.plan_id || "")) || {};
+    const previous = uniqueRecurring.get(key);
+    if (!previous || Number(plan.price_cents || 0) > Number(previous.plan?.price_cents || 0)) {
+      uniqueRecurring.set(key, { enrollment, plan });
+    }
+  }
+  const subscriptions = [...uniqueRecurring.values()];
+  const monthlyRecurringRevenueCents = subscriptions.reduce((sum, item) => sum + Math.max(0, Number(item.plan.price_cents || 0) || 0), 0);
+  const remainingCommitmentCents = subscriptions.reduce((sum, item) => {
+    const expiry = ngAdminMobileDateMs(item.enrollment.access_expires_at || item.enrollment.expires_at || item.enrollment.renewal_due_at);
+    const remainingDays = expiry ? Math.max(0, Math.ceil((expiry - Date.now()) / 86400000)) : 30;
+    const remainingCycles = Math.max(1, Math.ceil(remainingDays / 30));
+    return sum + remainingCycles * Math.max(0, Number(item.plan.price_cents || 0) || 0);
+  }, 0);
+  const monthCustomerIds = new Set(monthPayments.map((payment) => String(payment.user_id || payment.ayla_user_id || payment.student_id || payment.customer_email || payment.id || "")).filter(Boolean));
+  return {
+    currency: "usd",
+    month_key: new Date(month.start).toISOString().slice(0, 7),
+    monthly_sales_cents: monthPayments.reduce((sum, payment) => sum + ngAdminMobilePaymentCents(payment), 0),
+    monthly_sales_transactions: monthPayments.length,
+    monthly_sales_customers: monthCustomerIds.size,
+    total_collected_cents: completedPayments.reduce((sum, payment) => sum + ngAdminMobilePaymentCents(payment), 0),
+    recurring_subscribers: subscriptions.length,
+    monthly_recurring_revenue_cents: monthlyRecurringRevenueCents,
+    estimated_remaining_recurring_commitment_cents: remainingCommitmentCents,
+    definitions: {
+      monthly_sales: "Completed payments collected during the current calendar month.",
+      recurring_subscribers: "Active enrollments with a verified Stripe subscription identifier; manual and one-time access are excluded.",
+      monthly_recurring_revenue: "The next monthly charge represented by verified active recurring subscriptions.",
+      estimated_remaining_recurring_commitment: "Plan price multiplied by estimated remaining 30-day billing cycles; informational, not recognized revenue.",
+    },
+  };
+}
+
+function ngAdminMobileSessionNote(db = {}, session = {}) {
+  const notes = Object.values(db.notes || {}).filter((note) => String(note?.session_id || note?.live_session_id || note?.id || "") === String(session.id || ""));
+  notes.sort((a, b) => ngAdminMobileDateMs(b.updated_at || b.created_at) - ngAdminMobileDateMs(a.updated_at || a.created_at));
+  const note = notes[0] || null;
+  return {
+    exists: Boolean(note),
+    published: note ? ngStudentNotesIsPublished(note) : false,
+    note_id: note?.id || null,
+    updated_at: note?.updated_at || note?.created_at || null,
+  };
+}
+
+function ngAdminMobileSessionRecording(db = {}, session = {}) {
+  const recordingKeys = [session.recording_key, session.recording_id].map((value) => String(value || "")).filter(Boolean);
+  const recordings = Object.values(db.recordings || {}).filter((recording) => {
+    if (String(recording?.session_id || recording?.live_session_id || "") === String(session.id || "")) return true;
+    return recordingKeys.includes(String(recording?.recording_key || recording?.id || ""));
+  });
+  recordings.sort((a, b) => ngAdminMobileDateMs(b.updated_at || b.created_at || b.start_time) - ngAdminMobileDateMs(a.updated_at || a.created_at || a.start_time));
+  const recording = recordings[0] || null;
+  return {
+    exists: Boolean(recording),
+    attached: Boolean(recording && (recording.session_id || recording.live_session_id)),
+    published: Boolean(recording?.published === true || recording?.is_published === true),
+    recording_id: recording?.id || recording?.recording_key || null,
+    updated_at: recording?.updated_at || recording?.created_at || recording?.start_time || null,
+  };
+}
+
+function ngAdminMobileRoadmapDay(db = {}, session = {}) {
+  const courseId = String(session.course_id || "");
+  const sessionId = String(session.id || "");
+  const sessionDate = String(session.scheduled_date || "");
+  for (const roadmap of Object.values(db.roadmaps || {})) {
+    if (courseId && roadmap.course_id && String(roadmap.course_id) !== courseId) continue;
+    const day = safeArray(roadmap.days).find((item) => (
+      String(item.live_session_id || item.session_id || "") === sessionId ||
+      (sessionDate && String(item.date || item.scheduled_date || "") === sessionDate)
+    ));
+    if (day) return { id: day.id, date: day.date || day.scheduled_date || null, title: day.title || null, status: day.status || day.roadmap_status || "scheduled" };
+  }
+  return null;
+}
+
+function ngAdminMobileSession(db = {}, session = {}) {
+  const course = session.course_id ? db.courses?.[String(session.course_id)] || null : null;
+  const compact = sanitizeLiveSession(session);
+  const noClass = ngStudentNotesSessionIsNoClass(session);
+  return {
+    ...compact,
+    course_name: course?.name || compact.course_name || "Course",
+    no_class: noClass,
+    can_start_as_host: !noClass && hasRealZoomMeetingId(session.zoom_meeting_id),
+    roadmap_day: ngAdminMobileRoadmapDay(db, session),
+    notes_check: ngAdminMobileSessionNote(db, session),
+    recording_check: ngAdminMobileSessionRecording(db, session),
+  };
+}
+
+function ngAdminMobileLmsEnrollmentActive(enrollment = {}, plan = null, db = {}) {
+  return enrollment.is_demo !== true && isPaidEnrollmentActive(enrollment, plan, db);
+}
+
+function ngAdminMobileAylaEnrollmentActive(enrollment = {}) {
+  return aylaEnrollmentActive(enrollment) && !["cancelled", "canceled", "revoked", "expired"].includes(String(enrollment.status || "").toLowerCase());
+}
+
+async function ngAdminMobileDashboardPayload() {
+  const [liveDb, aylaDb] = await Promise.all([readLiveDb(), readAylaDb()]);
+  aylaEnsureSeedData(aylaDb);
+  const lmsPlans = Object.values(liveDb.plans || {});
+  const aylaPlans = aylaValues(aylaDb, "aylaPlans");
+  const lmsRevenue = ngAdminMobileRevenueMetrics({
+    payments: Object.values(liveDb.payments || {}),
+    enrollments: Object.values(liveDb.enrollments || {}),
+    plans: lmsPlans,
+    enrollmentActive: (enrollment, plan) => ngAdminMobileLmsEnrollmentActive(enrollment, plan, liveDb),
+    userIdForEnrollment: (enrollment) => enrollment.user_id || enrollment.student_id,
+  });
+  const aylaRevenue = ngAdminMobileRevenueMetrics({
+    payments: aylaValues(aylaDb, "aylaPayments"),
+    enrollments: aylaValues(aylaDb, "aylaEnrollments"),
+    plans: aylaPlans,
+    enrollmentActive: ngAdminMobileAylaEnrollmentActive,
+    userIdForEnrollment: (enrollment) => enrollment.user_id || enrollment.ayla_user_id,
+  });
+  const today = todayKey();
+  const sessions = Object.values(liveDb.liveSessions || {})
+    .filter((session) => String(session.scheduled_date || "") === today)
+    .sort((a, b) => String(a.scheduled_time || "").localeCompare(String(b.scheduled_time || "")))
+    .map((session) => ngAdminMobileSession(liveDb, session));
+  const activeLmsStudents = new Set(Object.values(liveDb.enrollments || {}).filter((enrollment) => {
+    const plan = enrollment.plan_id ? liveDb.plans?.[String(enrollment.plan_id)] || null : null;
+    return enrollment.is_demo ? isDemoEnrollmentActive(enrollment, { ...DEFAULT_DEMO_SETTINGS, ...(liveDb.demoSettings || {}) }) : isPaidEnrollmentActive(enrollment, plan, liveDb);
+  }).map((enrollment) => String(enrollment.user_id || enrollment.student_id || "")).filter(Boolean)).size;
+  const activeAylaStudents = new Set(aylaValues(aylaDb, "aylaEnrollments").filter(ngAdminMobileAylaEnrollmentActive).map((enrollment) => String(enrollment.user_id || enrollment.ayla_user_id || "")).filter(Boolean)).size;
+  return {
+    success: true,
+    generated_at: nowIso(),
+    today,
+    lms: {
+      revenue: lmsRevenue,
+      active_students: activeLmsStudents,
+      courses: Object.values(liveDb.courses || {}).filter((course) => course.status !== "archived").length,
+      today_sessions: sessions,
+      today_sessions_count: sessions.length,
+    },
+    aylamed: {
+      revenue: aylaRevenue,
+      active_students: activeAylaStudents,
+      users: aylaValues(aylaDb, "aylaUsers").filter((user) => !["deleted", "disabled"].includes(String(user.status || "").toLowerCase())).length,
+      exam_tracks: AYLA_EXAM_TRACKS,
+    },
+    combined: {
+      monthly_sales_cents: lmsRevenue.monthly_sales_cents + aylaRevenue.monthly_sales_cents,
+      recurring_subscribers: lmsRevenue.recurring_subscribers + aylaRevenue.recurring_subscribers,
+      monthly_recurring_revenue_cents: lmsRevenue.monthly_recurring_revenue_cents + aylaRevenue.monthly_recurring_revenue_cents,
+      active_students: activeLmsStudents + activeAylaStudents,
+    },
+    admin_links: {
+      lms: "https://live.nextgenusmlelms.com/admin",
+      aylamed: "https://aylamedapp.com/admin",
+      crm: "https://live.nextgenusmlelms.com/admin/crm",
+      recordings: "https://live.nextgenusmlelms.com/admin/recordings",
+      notes: "https://live.nextgenusmlelms.com/admin",
+    },
+  };
+}
+
+function ngAdminMobileCredentialState(target = {}, delivery = {}) {
+  const now = nowIso();
+  if (delivery.sent === true) {
+    target.credentials_sent_at = now;
+    target.credentials_failed_at = null;
+    target.credentials_error = null;
+  } else if (delivery.attempted === true && delivery.skipped !== true) {
+    target.credentials_failed_at = now;
+    target.credentials_error = String(delivery.error || delivery.reason || "Email was not delivered").slice(0, 500);
+  }
+  return target;
+}
+
+async function ngAdminMobileInviteLms(req, body = {}) {
+  const db = await readLiveDb();
+  const email = normalizeEmail(body.email);
+  const courseId = String(body.course_id || body.courseId || "").trim();
+  const accessDays = Math.max(1, Math.min(3650, Number(body.access_days || body.accessDays || 30) || 30));
+  if (!email) throw Object.assign(new Error("Email is required"), { statusCode: 400 });
+  if (!courseId || !db.courses?.[courseId]) throw Object.assign(new Error("A valid LMS course is required"), { statusCode: 400 });
+  const plan = body.plan_id ? db.plans?.[String(body.plan_id)] || null : null;
+  if (body.plan_id && !plan) throw Object.assign(new Error("Selected LMS plan was not found"), { statusCode: 400 });
+  let user = findUserByEmail(db, email);
+  let temporaryPassword = "";
+  const studentCreated = !user;
+  if (!user) {
+    temporaryPassword = ngGenerateTemporaryPassword();
+    user = createBackendUser({ email, name: String(body.name || email.split("@")[0]).trim(), password: temporaryPassword, role: "student" });
+    user.must_change_password = true;
+    db.users[user.id] = user;
+  }
+  const startsAt = nowIso();
+  const expiresAt = addDays(new Date(startsAt), accessDays).toISOString();
+  const enrollment = createBackendEnrollment(db, {
+    userId: user.id,
+    userName: user.name || email,
+    courseId,
+    isDemo: false,
+    accessGranted: true,
+    planId: plan?.id || null,
+    accessStartsAt: startsAt,
+    accessExpiresAt: expiresAt,
+    accessDays,
+  });
+  enrollment.access_days = accessDays;
+  enrollment.access_starts_at = startsAt;
+  enrollment.access_expires_at = expiresAt;
+  enrollment.renewal_due_at = expiresAt;
+  enrollment.billing_source = "admin_access_invitation";
+  enrollment.invited_by_admin = true;
+  enrollment.updated_at = nowIso();
+  let delivery = { attempted: false, sent: false, skipped: true, reason: "send_email_disabled" };
+  if (body.send_email !== false) {
+    delivery = await ngSendStudentAccessEmailSafe({ db, req, user, enrollment, course: db.courses[courseId], temporaryPassword, reason: "admin_mobile_lms_access_invitation" });
+  }
+  ngAdminMobileCredentialState(enrollment, delivery);
+  db.enrollments[enrollment.id] = enrollment;
+  db.users[user.id] = user;
+  await writeLiveDb(db);
+  return { product: "lms", student_created: studentCreated, user: sanitizeUser(user), enrollment: sanitizeAdminEnrollment(enrollment, db), email_delivery: delivery };
+}
+
+async function ngAdminMobileSendAylaInvite({ db, user, temporaryPassword = "", accessDays = 30, sendEmail = true } = {}) {
+  if (!sendEmail) return { attempted: false, sent: false, skipped: true, reason: "send_email_disabled" };
+  let resetUrl = "";
+  if (!temporaryPassword) {
+    const rawToken = crypto.randomBytes(32).toString("hex");
+    const reset = { id: aylaId("AYLA-RESET"), userId: user.id, email: user.email, tokenHash: aylaV189HashToken(rawToken), expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), usedAt: null, createdAt: aylaNow() };
+    aylaSetItem(db, "aylaPasswordResetTokens", reset);
+    resetUrl = `https://aylamedapp.com/reset-password?token=${encodeURIComponent(rawToken)}`;
+  }
+  const lines = [
+    "Hi Doctor,",
+    "",
+    `Your AylaMed access is ready for ${accessDays} days.`,
+    "",
+    "Open AylaMed:",
+    "https://aylamedapp.com/login",
+    "",
+    "Email:",
+    user.email,
+  ];
+  if (temporaryPassword) lines.push("", "Temporary password:", temporaryPassword, "", "Please change this password after signing in.");
+  else lines.push("", "Use your existing password. If needed, set a new password here:", resetUrl);
+  lines.push("", "AylaMed Team");
+  try {
+    const provider = await sendEmailMessage({ to: user.email, subject: "Your AylaMed access is ready", text: lines.join("\n") });
+    return { attempted: true, sent: true, provider: provider?.provider || null };
+  } catch (error) {
+    return { attempted: true, sent: false, error: error.message || "Email delivery failed" };
+  }
+}
+
+async function ngAdminMobileInviteAyla(body = {}) {
+  const db = await readAylaDb();
+  aylaEnsureSeedData(db);
+  const email = aylaNormalizeEmail(body.email);
+  const accessDays = Math.max(1, Math.min(3650, Number(body.access_days || body.accessDays || 30) || 30));
+  if (!email) throw Object.assign(new Error("Email is required"), { statusCode: 400 });
+  let user = aylaFindUserByEmail(db, email);
+  let temporaryPassword = "";
+  const studentCreated = !user;
+  if (!user) {
+    temporaryPassword = ngGenerateTemporaryPassword();
+    const hashed = hashPassword(temporaryPassword);
+    user = { id: aylaId("AYLA-USER"), email, name: String(body.name || email.split("@")[0]).trim(), phone: "", role: "student", status: "active", mustChangePassword: true, must_change_password: true, authVersion: 1, ...hashed, createdAt: aylaNow(), updatedAt: aylaNow() };
+    aylaSetItem(db, "aylaUsers", user);
+  }
+  const storedPlan = body.ayla_plan_id || body.plan_id ? aylaGetItem(db, "aylaPlans", body.ayla_plan_id || body.plan_id) : null;
+  if ((body.ayla_plan_id || body.plan_id) && !storedPlan) throw Object.assign(new Error("Selected AylaMed plan was not found"), { statusCode: 400 });
+  const plan = aylaNormalizePlanPayload({
+    ...(storedPlan || {}),
+    id: storedPlan?.id || "AYLA-PLAN-MANUAL",
+    name: storedPlan?.name || "Manual AylaMed Access",
+    access_days: accessDays,
+    included_features: body.included_features || storedPlan?.included_features || [],
+    is_full_access: body.is_full_access !== undefined ? body.is_full_access : storedPlan?.is_full_access !== false,
+    exam_tracks: storedPlan?.exam_tracks || (body.exam_track_id ? [body.exam_track_id] : []),
+  });
+  const scope = aylaEnrollmentScopeFromPayload(db, user, body);
+  const enrollment = aylaCreateOrUpdateEnrollment(db, { userId: user.id, plan, type: "manual", source: "admin_access_invitation", accessGranted: true, startsAt: aylaNow(), examTrack: scope.examTrack, studentId: scope.studentId });
+  enrollment.access_days = accessDays;
+  enrollment.invited_by_admin = true;
+  aylaSetItem(db, "aylaEnrollments", enrollment);
+  const delivery = await ngAdminMobileSendAylaInvite({ db, user, temporaryPassword, accessDays, sendEmail: body.send_email !== false });
+  ngAdminMobileCredentialState(enrollment, delivery);
+  aylaSetItem(db, "aylaEnrollments", enrollment);
+  await aylaAccessLog(db, "admin_access_invitation", { userId: user.id, planId: plan.id, enrollmentId: enrollment.id, access_days: accessDays, email_sent: delivery.sent === true });
+  await writeAylaDb(db);
+  return { product: "aylamed", student_created: studentCreated, user: aylaSanitizeUser(user), enrollment, email_delivery: delivery };
+}
+
+app.get("/admin/mobile/dashboard", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    return res.json(await ngAdminMobileDashboardPayload());
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to load mobile admin dashboard" });
+  }
+});
+
+app.get("/admin/mobile/access-options", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const [liveDb, aylaDb] = await Promise.all([readLiveDb(), readAylaDb()]);
+    aylaEnsureSeedData(aylaDb);
+    return res.json({
+      success: true,
+      lms: {
+        courses: Object.values(liveDb.courses || {}).filter((course) => course.status !== "archived").map(sanitizeCourse),
+        plans: Object.values(liveDb.plans || {}).filter((plan) => plan.is_active !== false).map(sanitizePlan),
+      },
+      aylamed: {
+        plans: aylaValues(aylaDb, "aylaPlans").filter((plan) => plan.is_active !== false).map(aylaPublicPlan),
+        exam_tracks: AYLA_EXAM_TRACKS,
+      },
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to load access options" });
+  }
+});
+
+app.post("/admin/mobile/invitations", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const product = String(req.body.product || "lms").trim().toLowerCase();
+    if (!["lms", "aylamed", "both"].includes(product)) return res.status(400).json({ success: false, error: "product must be lms, aylamed, or both" });
+    const results = [];
+    const errors = [];
+    if (["lms", "both"].includes(product)) {
+      try { results.push(await ngAdminMobileInviteLms(req, req.body)); }
+      catch (error) { errors.push({ product: "lms", error: error.message, status: error.statusCode || 500 }); }
+    }
+    if (["aylamed", "both"].includes(product)) {
+      try { results.push(await ngAdminMobileInviteAyla(req.body)); }
+      catch (error) { errors.push({ product: "aylamed", error: error.message, status: error.statusCode || 500 }); }
+    }
+    const success = errors.length === 0;
+    const status = success ? 201 : results.length ? 207 : Math.max(...errors.map((item) => item.status || 500));
+    return res.status(status).json({ success, partial_success: results.length > 0 && errors.length > 0, results, errors });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to create access invitation" });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
