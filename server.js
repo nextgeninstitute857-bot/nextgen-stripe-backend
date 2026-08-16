@@ -75122,7 +75122,10 @@ function aylaV189EnrichResourceMappings(db, resource = {}) {
   return out;
 }
 
-function aylaV189RelevantResources(db, student, types = [], { destination = "content_hub" } = {}) {
+function aylaV189RelevantResources(db, student, types = [], {
+  destination = "content_hub",
+  enrichMappings = true,
+} = {}) {
   const selected = new Set(types.map(aylaV189ResourceType));
   const staticWeak = aylaCleanArray(student.weakAreas || student.selectedWeakAreas).map((x) => String(x).toLowerCase());
   const dynamicWeak = aylaV189SystemProgress(db, student)
@@ -75160,7 +75163,10 @@ function aylaV189RelevantResources(db, student, types = [], { destination = "con
         && aylaResourcePublishedFor(db, resource, studentExam, destination).allowed);
     })
     .map((resource) => {
-      const enriched = aylaV189EnrichResourceMappings(db, resource);
+      // Content Hub videos already carry their approved taxonomy and Vimeo
+      // metadata. Re-scanning every resource for book/video cross-links for
+      // every video turns this path quadratic as the library grows.
+      const enriched = enrichMappings ? aylaV189EnrichResourceMappings(db, resource) : resource;
       let relevance = 0;
       const system = String(enriched.system || "").toLowerCase();
       const topic = String(enriched.topic || "").toLowerCase();
@@ -75253,7 +75259,10 @@ async function aylaV210EligibleVideos(db, student, { forRoadmap = false, forNote
   const assignments = aylaV210VideoAssignments(db, student);
   const deliveryControls = aylaValues(db, "aylaVimeoDeliveryControls");
   const destination = forNotes ? "notes" : forRoadmap ? "roadmap" : "content_hub";
-  const legacy = aylaV189RelevantResources(db, student, ["vimeo_video", "video_transcript"], { destination })
+  const legacy = aylaV189RelevantResources(db, student, ["vimeo_video", "video_transcript"], {
+    destination,
+    enrichMappings: false,
+  })
     .filter((row) => aylaVimeoAllowedFor(row, deliveryControls, destination))
     .map((row) => ({
       ...row,

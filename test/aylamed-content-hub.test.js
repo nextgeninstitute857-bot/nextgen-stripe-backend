@@ -384,6 +384,7 @@ test("server and registry wire one entitlement-guarded Content Hub into the exis
   assert.match(server, /focusSubsystem,/);
   assert.match(server, /subsystem: req\.query\.subsystem \|\| req\.query\.subsystem_key/);
   assert.match(server, /const pageSize = 500;[\s\S]*?while \(true\)[\s\S]*?offset: sourceRows\.length/);
+  assert.match(server, /\["vimeo_video", "video_transcript"\],[\s\S]*?enrichMappings: false/);
   assert.match(server, /listAylaExamSupplements\(examTrack\)[\s\S]*?supplementalForExamTrackId/);
   assert.doesNotMatch(server, /content_registry_video_limit_reached/);
   assert.match(postgres, /'aylamed_content_hub'/);
