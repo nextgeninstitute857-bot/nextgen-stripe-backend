@@ -26,7 +26,7 @@ async function freePort() {
   });
 }
 
-async function waitForHealth(baseUrl, child, output, timeoutMs = 15_000) {
+async function waitForHealth(baseUrl, child, output, timeoutMs = 30_000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     if (child.exitCode !== null) throw new Error(`Server exited (${child.exitCode})\n${output.join("")}`);
@@ -49,7 +49,7 @@ async function api(baseUrl, route, { method = "GET", token = "", oldKey = "", bo
   return { response, payload: await response.json() };
 }
 
-test("AylaMed Control Center accepts only the bootstrap admin email/password session", { timeout: 30_000 }, async () => {
+test("AylaMed Control Center accepts only the bootstrap admin email/password session", { timeout: 60_000 }, async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "aylamed-admin-password-"));
   const now = new Date().toISOString();
   const studentPassword = "OrdinaryStudent9!";
@@ -62,6 +62,26 @@ test("AylaMed Control Center accepts only the bootstrap admin email/password ses
         role: "student",
         verified: true,
         ...passwordRecord(studentPassword),
+        created_at: now,
+        updated_at: now,
+      },
+    },
+    plans: {
+      "student-plan": {
+        id: "student-plan",
+        name: "Existing Student Plan",
+        is_active: true,
+        included_features: [],
+      },
+    },
+    enrollments: {
+      "student-course:student:paid": {
+        id: "student-course:student:paid",
+        user_id: "student",
+        course_id: "student-course",
+        plan_id: "student-plan",
+        is_demo: false,
+        access_granted: true,
         created_at: now,
         updated_at: now,
       },

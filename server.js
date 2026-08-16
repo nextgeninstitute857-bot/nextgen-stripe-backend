@@ -1488,6 +1488,37 @@ Warm regards,
 NextGen USMLE Student Success Team`,
     variables: ["student_name", "student_email", "course_name", "course_phrase", "access_instructions", "dashboard_url", "login_url", "reset_url", "temporary_password", "support_email"],
   },
+  lms_timed_access_invitation: {
+    key: "lms_timed_access_invitation",
+    name: "Timed LMS Access Invitation",
+    category: "Enrollment & Access",
+    description: "Sent when an administrator creates or renews time-limited LMS access and issues a temporary password.",
+    enabled: true,
+    subject: "Your NextGen USMLE LMS access and temporary password",
+    body: `Hi {{student_name}},
+
+An administrator has activated your NextGen USMLE LMS access.
+
+ACCESS REPORT
+Course: {{course_name}}
+Plan: {{plan_name}}
+Access duration: {{access_duration}}
+Access starts: {{access_starts_at}}
+Access expires: {{access_expires_at}}
+
+SIGN-IN DETAILS
+Login page: {{login_url}}
+Email: {{student_email}}
+Temporary password: {{temporary_password}}
+
+You must change this temporary password after signing in. Please keep these credentials private.
+
+If you need assistance, contact {{support_email}}.
+
+Warm regards,
+NextGen USMLE Student Success Team`,
+    variables: ["student_name", "student_email", "course_name", "plan_name", "access_duration", "access_starts_at", "access_expires_at", "login_url", "temporary_password", "support_email"],
+  },
   demo_activated: {
     key: "demo_activated",
     name: "Demo Activated",
@@ -2671,6 +2702,68 @@ function todayKey(date = new Date()) { return date.toISOString().slice(0, 10); }
 function addDays(date, days) { const d = new Date(date); d.setDate(d.getDate() + Number(days || 0)); return d; }
 function dateOnly(date) { return date.toISOString().slice(0, 10); }
 function uuid() { return crypto.randomUUID(); }
+
+const LMS_TIMED_ACCESS_LIMITS = Object.freeze({
+  hour: 24 * 365 * 10,
+  day: 3650,
+  month: 120,
+});
+
+function ngNormalizeTimedAccessUnit(value = "day") {
+  const unit = String(value || "day").trim().toLowerCase().replace(/s$/, "");
+  if (!Object.hasOwn(LMS_TIMED_ACCESS_LIMITS, unit)) {
+    const error = new Error("Access unit must be hours, days, or months.");
+    error.statusCode = 400;
+    throw error;
+  }
+  return unit;
+}
+
+function ngAddCalendarMonths(date, months) {
+  const result = new Date(date);
+  const originalDay = result.getUTCDate();
+  result.setUTCDate(1);
+  result.setUTCMonth(result.getUTCMonth() + Number(months || 0));
+  const lastDay = new Date(Date.UTC(result.getUTCFullYear(), result.getUTCMonth() + 1, 0)).getUTCDate();
+  result.setUTCDate(Math.min(originalDay, lastDay));
+  return result;
+}
+
+function ngResolveTimedAccessWindow(payload = {}, startValue = new Date()) {
+  const unit = ngNormalizeTimedAccessUnit(payload.access_unit || payload.duration_unit || "day");
+  const legacyValue = payload.access_days ?? payload.accessDays;
+  const rawValue = payload.access_duration ?? payload.duration_value ?? payload.access_value ?? legacyValue ?? 30;
+  const value = Number(rawValue);
+  const limit = LMS_TIMED_ACCESS_LIMITS[unit];
+
+  if (!Number.isInteger(value) || value < 1 || value > limit) {
+    const error = new Error(`Access duration must be a whole number between 1 and ${limit} ${unit}${limit === 1 ? "" : "s"}.`);
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const startsAt = new Date(startValue);
+  if (Number.isNaN(startsAt.getTime())) {
+    const error = new Error("Access start time is invalid.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  let expiresAt;
+  if (unit === "hour") expiresAt = new Date(startsAt.getTime() + value * 60 * 60 * 1000);
+  else if (unit === "day") expiresAt = new Date(startsAt.getTime() + value * 24 * 60 * 60 * 1000);
+  else expiresAt = ngAddCalendarMonths(startsAt, value);
+
+  const durationLabel = `${value} ${unit}${value === 1 ? "" : "s"}`;
+  return {
+    value,
+    unit,
+    duration_label: durationLabel,
+    starts_at: startsAt.toISOString(),
+    expires_at: expiresAt.toISOString(),
+    access_days: Math.max(1, Math.ceil((expiresAt.getTime() - startsAt.getTime()) / (24 * 60 * 60 * 1000))),
+  };
+}
 function normalizeArray(value) {
   if (Array.isArray(value)) return value;
   if (typeof value === "string") return value.split("\n").map((x) => x.trim()).filter(Boolean);
@@ -2689,6 +2782,7 @@ function buildPendingZoomId(courseId, label) { return `${PENDING_ZOOM_PREFIX}${c
 
 const AUTH_JWT_SECRET = process.env.AUTH_JWT_SECRET || "CHANGE_THIS_AUTH_SECRET_IN_RENDER_ENV";
 const AUTH_TOKEN_DAYS = 30;
+const LMS_ADMISSION_MODE = "existing_active_students_only";
 
 const EXTERNAL_LIBRARY_URL =
   process.env.EXTERNAL_LIBRARY_URL || "https://lms.nextgenusmlelms.com";
@@ -3580,6 +3674,9 @@ function sanitizeAdminEnrollment(enrollment, db) {
     renewal_due_at: effectivePaidExpiry?.toISOString() || enrollment.renewal_due_at || enrollment.access_expires_at || null,
     access_days: enrollment.access_days || (plan ? getPlanAccessDays(plan) : null),
     access_expiry_mode: enrollment.access_expiry_mode || plan?.access_expiry_mode || null,
+    access_duration: enrollment.access_duration || null,
+    access_duration_value: enrollment.access_duration_value || null,
+    access_duration_unit: enrollment.access_duration_unit || null,
     minimum_teaching_days: enrollment.minimum_teaching_days || plan?.minimum_teaching_days || null,
     program_teaching_days: enrollment.program_teaching_days || null,
     program_final_teaching_date: enrollment.program_final_teaching_date || null,
@@ -3590,6 +3687,10 @@ function sanitizeAdminEnrollment(enrollment, db) {
     progress_percentage: Number(enrollment.progress_percentage || 0),
     created_at: enrollment.created_at || null,
     updated_at: enrollment.updated_at || null,
+    invited_by_admin: enrollment.invited_by_admin === true,
+    credentials_sent_at: enrollment.credentials_sent_at || null,
+    credentials_failed_at: enrollment.credentials_failed_at || null,
+    credentials_error: enrollment.credentials_error || null,
   };
 }
 
@@ -4142,6 +4243,44 @@ function sanitizePublicRecording(recording) {
   };
 }
 
+function ngLmsSignInEligibility(db = {}, user = {}) {
+  const role = String(user?.role || "student").trim().toLowerCase();
+  const status = String(user?.status || "active").trim().toLowerCase();
+  const accountDisabled = (
+    user?.disabled === true ||
+    user?.is_active === false ||
+    ["blocked", "deleted", "disabled", "inactive", "revoked", "suspended"].includes(status)
+  );
+
+  if (accountDisabled) {
+    return { allowed: false, reason: "account_inactive", enrollment: null };
+  }
+
+  if (role !== "student") {
+    return { allowed: true, reason: "authorized_staff_account", enrollment: null };
+  }
+
+  const enrollment = Object.values(db.enrollments || {}).find((candidate) => {
+    if (String(candidate?.user_id || "") !== String(user?.id || "")) return false;
+    if (candidate?.is_demo === true || candidate?.access_granted === false) return false;
+    const plan = candidate?.plan_id ? db.plans?.[String(candidate.plan_id)] || null : null;
+    return isPaidEnrollmentActive(candidate, plan, db);
+  }) || null;
+
+  return enrollment
+    ? { allowed: true, reason: "active_paid_enrollment", enrollment }
+    : { allowed: false, reason: "active_paid_enrollment_required", enrollment: null };
+}
+
+function ngSendLmsAdmissionClosed(res, message = "This portal is available only to existing students with active access.") {
+  return res.status(403).json({
+    success: false,
+    code: "LMS_EXISTING_ACTIVE_STUDENTS_ONLY",
+    admission_mode: LMS_ADMISSION_MODE,
+    error: message,
+  });
+}
+
 function normalizeCouponCode(code) { return String(code || "").trim().toUpperCase(); }
 function centsFromDollars(value) { const n = Number(value || 0); return Number.isNaN(n) ? 0 : Math.max(0, Math.round(n * 100)); }
 function isCouponExpired(coupon) { return Boolean(coupon?.expires_at) && new Date(coupon.expires_at).getTime() < Date.now(); }
@@ -4197,6 +4336,14 @@ async function getAuthenticatedUser(req) {
   if (!user?.id) {
     const e = new Error("User not found");
     e.statusCode = 401;
+    throw e;
+  }
+
+  const eligibility = ngLmsSignInEligibility(db, user);
+  if (!eligibility.allowed) {
+    const e = new Error("This portal is available only to existing students with active access.");
+    e.statusCode = 403;
+    e.code = "LMS_EXISTING_ACTIVE_STUDENTS_ONLY";
     throw e;
   }
 
@@ -4755,6 +4902,13 @@ function createBackendEnrollment(db, { userId, userName, courseId, isDemo, acces
   return db.enrollments[key];
 }
 function ngPaidAccessExpiresAt(enrollment = {}, plan = null, db = null) {
+  if (String(enrollment.access_expiry_mode || "").trim().toLowerCase() === "admin_timed") {
+    const explicitExpiry = enrollment.access_expires_at || enrollment.expires_at || enrollment.renewal_due_at || null;
+    if (!explicitExpiry) return null;
+    const explicitDate = new Date(explicitExpiry);
+    return Number.isNaN(explicitDate.getTime()) ? null : explicitDate;
+  }
+
   if (db && lmsPlanUsesTeachingSchedule(plan || {})) {
     const resolved = resolveTeachingPlanExpiry(db, enrollment, plan);
     if (resolved.program_expiry_at && resolved.effective_expiry_at) {
@@ -11317,6 +11471,7 @@ app.get("/health", async (req, res) => {
     build: NEXTGEN_BACKEND_BUILD,
     lms_teaching_access_build: LMS_TEACHING_ACCESS_BUILD,
     lms_teaching_access: ngTeachingAccessReconciliationState,
+    lms_admission_mode: LMS_ADMISSION_MODE,
     content_ingestion_build: CONTENT_INGESTION_BUILD,
     aylamed_nbme_center_build: AYLA_NBME_CENTER_BUILD,
     aylamed_adaptive_core_build: AYLA_ADAPTIVE_CORE_BUILD,
@@ -11390,8 +11545,10 @@ app.post("/auth/login", async (req, res) => {
       });
     }
 
-    const selfHeal = ngMaybeSelfHealDemoEnrollment(db, user, { source: "auth_login" });
-    if (selfHeal.changed) await writeLiveDb(db);
+    const eligibility = ngLmsSignInEligibility(db, user);
+    if (!eligibility.allowed) {
+      return ngSendLmsAdmissionClosed(res);
+    }
 
     const token = signAuthToken(user);
     const safeUser = sanitizeUser(user);
@@ -11401,7 +11558,7 @@ app.post("/auth/login", async (req, res) => {
       token,
       user: safeUser,
       record: safeUser,
-      demo_access_self_heal: selfHeal,
+      admission_mode: LMS_ADMISSION_MODE,
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({
@@ -11491,6 +11648,11 @@ app.post("/auth/team-invite/accept", async (req, res) => {
 
 app.post("/auth/signup", async (req, res) => {
   try {
+    return ngSendLmsAdmissionClosed(
+      res,
+      "New student registration is closed. Ask NextGen student support about an existing account."
+    );
+
     await ensureBootstrapAdmin();
 
     const email = normalizeEmail(req.body.email);
@@ -12219,25 +12381,19 @@ app.post("/auth/google", async (req, res) => {
     const db = await readLiveDb();
 
     let user = findUserByEmail(db, profile.email);
-    let created = false;
 
     if (!user) {
-      user = createBackendUser({
-        email: profile.email,
-        name: profile.name,
-        role: "student",
-        google_sub: profile.google_sub,
-        avatar_url: profile.picture,
-      });
-
-      created = true;
-    } else {
-      user.google_sub = user.google_sub || profile.google_sub;
-      user.avatar_url = user.avatar_url || profile.picture;
-      user.name = user.name || profile.name;
-      user.verified = true;
-      user.updated_at = new Date().toISOString();
+      return ngSendLmsAdmissionClosed(res);
     }
+
+    const eligibility = ngLmsSignInEligibility(db, user);
+    if (!eligibility.allowed) return ngSendLmsAdmissionClosed(res);
+
+    user.google_sub = user.google_sub || profile.google_sub;
+    user.avatar_url = user.avatar_url || profile.picture;
+    user.name = user.name || profile.name;
+    user.verified = true;
+    user.updated_at = new Date().toISOString();
 
     db.users[user.id] = user;
 
@@ -12251,18 +12407,6 @@ app.post("/auth/google", async (req, res) => {
       updated_at: new Date().toISOString(),
     };
 
-    let welcomeEmail = { attempted: false, sent: false, skipped: true, reason: "existing_google_user" };
-    if (created) {
-      welcomeEmail = await ngSendTransactionalEmailSafe({
-        db,
-        to: user.email,
-        subject: "Your NextGen USMLE account is ready",
-        text: `Hi Doctor,\n\nYour NextGen USMLE account has been created successfully with Google.\n\nLogin: ${ngStudentLoginUrl()}\n\nCreating an account does not activate a demo or paid plan. Return to the plan you selected to complete secure checkout, or choose Try Demo separately.\n\nNextGen USMLE Team`,
-        reason: "student_google_signup_account_created",
-        userId: user.id,
-      });
-    }
-
     await writeLiveDb(db);
 
     const token = signAuthToken(user);
@@ -12273,10 +12417,10 @@ app.post("/auth/google", async (req, res) => {
       token,
       user: safeUser,
       record: safeUser,
-      created,
-      access_granted: false,
+      created: false,
+      access_granted: true,
       demo_started: false,
-      transactional_email: welcomeEmail,
+      admission_mode: LMS_ADMISSION_MODE,
     });
   } catch (error) {
     console.error("Google auth error:", error.response?.data || error.message);
@@ -12300,6 +12444,7 @@ app.post("/auth/google", async (req, res) => {
 
 app.get("/courses", async (req, res) => {
   try {
+    await getAuthenticatedUser(req);
     const db = await readLiveDb();
     let courses = Object.values(db.courses || {}).map(sanitizeCourse);
     if (req.query.status) courses = courses.filter((c) => String(c.status) === String(req.query.status));
@@ -12307,16 +12452,17 @@ app.get("/courses", async (req, res) => {
     if (req.query.category) courses = courses.filter((c) => String(c.category) === String(req.query.category));
     courses.sort(sortNewestFirst);
     res.json({ success: true, count: courses.length, courses });
-  } catch (e) { res.status(500).json({ success: false, error: e.message || "Failed to load courses" }); }
+  } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to load courses" }); }
 });
 
 app.get("/courses/:courseId", async (req, res) => {
   try {
+    await getAuthenticatedUser(req);
     const db = await readLiveDb();
     const course = db.courses[String(req.params.courseId)];
     if (!course || course.status === "archived") return res.status(404).json({ success: false, error: "Course not found" });
     res.json({ success: true, course: sanitizeCourse(course) });
-  } catch (e) { res.status(500).json({ success: false, error: e.message || "Failed to load course" }); }
+  } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to load course" }); }
 });
 
 app.get("/admin/courses", async (req, res) => {
@@ -12854,10 +13000,19 @@ app.delete("/admin/announcements/:announcementId", async (req, res) => {
   } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to delete announcement" }); }
 });
 
-app.get("/demo/settings", async (req, res) => { const db = await readLiveDb(); res.json({ success: true, demo_settings: { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) } }); });
-app.get("/admin/demo/settings", async (req, res) => { try { await requireAdmin(req); const db = await readLiveDb(); res.json({ success: true, demo_settings: { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) } }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.get("/demo/settings", async (req, res) => {
+  res.json({
+    success: true,
+    admission_mode: LMS_ADMISSION_MODE,
+    demo_settings: { ...DEFAULT_DEMO_SETTINGS, enabled: false },
+  });
+});
+app.get("/admin/demo/settings", async (req, res) => { try { await requireAdmin(req); const db = await readLiveDb(); res.json({ success: true, admission_mode: LMS_ADMISSION_MODE, demo_settings: { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}), enabled: false } }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.patch("/admin/demo/settings", async (req, res) => {
   try {
+    await requireAdmin(req);
+    return ngSendLmsAdmissionClosed(res, "Demo access is disabled for this LMS.");
+
     const { user } = await requireAdmin(req);
     const db = await readLiveDb();
     const allowed = ["enabled", "duration_days", "allow_live_classes", "allow_roadmap", "allow_community", "allow_global_community", "allow_study_partner", "allow_assessments", "allow_leaderboard", "allow_flashcards", "allow_recordings", "allow_notes_transcripts", "allow_video_library", "max_live_sessions"];
@@ -13022,11 +13177,7 @@ app.get("/admin/lms-flow/audit", async (req, res) => {
 
 app.get("/features", async (req, res) => { const db = await readLiveDb(); res.json({ success: true, features: Object.values(db.featureCatalog || {}) }); });
 app.get("/plans", async (req, res) => {
-  const db = await readLiveDb();
-  let plans = Object.values(db.plans || {}).filter((p) => p.is_active !== false).map(sanitizePlan);
-  if (req.query.course_id) plans = plans.filter((p) => !p.course_id || String(p.course_id) === String(req.query.course_id));
-  plans.sort((a, b) => a.price_cents - b.price_cents);
-  res.json({ success: true, count: plans.length, plans, features: Object.values(db.featureCatalog || {}) });
+  return ngSendLmsAdmissionClosed(res, "Public plans and self-service enrollment are closed.");
 });
 app.get("/admin/plans", async (req, res) => { try { await requireAdmin(req); const db = await readLiveDb(); res.json({ success: true, plans: Object.values(db.plans || {}).map(sanitizePlan), features: Object.values(db.featureCatalog || {}) }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.post("/admin/plans", async (req, res) => {
@@ -13058,7 +13209,7 @@ app.post("/admin/coupons", async (req, res) => {
 });
 app.patch("/admin/coupons/:couponId", async (req, res) => { try { await requireAdmin(req); const db = await readLiveDb(); const c = db.coupons[req.params.couponId]; if (!c) return res.status(404).json({ success: false, error: "Coupon not found" }); const allowed = ["description", "discount_type", "discount_value", "max_uses", "expires_at", "course_id", "plan_id", "is_active"]; for (const k of allowed) if (req.body[k] !== undefined) c[k] = req.body[k]; if (c.discount_value !== undefined) c.discount_value = Number(c.discount_value); c.updated_at = new Date().toISOString(); await writeLiveDb(db); res.json({ success: true, coupon: sanitizeCoupon(c) }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.delete("/admin/coupons/:couponId", async (req, res) => { try { await requireAdmin(req); const db = await readLiveDb(); const c = db.coupons[req.params.couponId]; if (!c) return res.status(404).json({ success: false, error: "Coupon not found" }); delete db.coupons[req.params.couponId]; await writeLiveDb(db); res.json({ success: true, deleted_coupon: sanitizeCoupon(c) }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
-app.post("/coupons/validate", async (req, res) => { const db = await readLiveDb(); const plan = db.plans[req.body.plan_id]; if (!plan || plan.is_active === false) return res.status(404).json({ success: false, error: "Plan not found or inactive" }); const code = normalizeCouponCode(req.body.coupon_code); const coupon = code ? Object.values(db.coupons || {}).find((c) => c.code === code) : null; if (code && !coupon) return res.status(400).json({ success: false, valid: false, error: "Coupon not found" }); const pricing = buildCheckoutPricing({ plan, coupon, courseId: req.body.course_id }); if (!pricing.valid) return res.status(400).json({ success: false, valid: false, error: pricing.error }); res.json({ success: true, valid: true, coupon: coupon ? sanitizeCoupon(coupon) : null, pricing }); });
+app.post("/coupons/validate", async (req, res) => ngSendLmsAdmissionClosed(res, "Public plans and self-service enrollment are closed."));
 
 
 // -----------------------------------------------------------------------------
@@ -13172,6 +13323,8 @@ app.post("/admin/enrollments", async (req, res) => {
     const email = normalizeEmail(req.body.email || req.body.student_email || req.body.user_email);
     const name = String(req.body.name || req.body.student_name || "Student").trim();
     const isDemo = Boolean(req.body.is_demo || req.body.type === "demo");
+
+    if (isDemo) return ngSendLmsAdmissionClosed(res, "Demo enrollments are disabled for this LMS.");
 
     if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
     if (!email && !req.body.user_id) return res.status(400).json({ success: false, error: "Student email or user_id is required" });
@@ -13287,6 +13440,13 @@ app.patch("/admin/enrollments/:enrollmentId", async (req, res) => {
     const now = new Date().toISOString();
     const requestedStatus = String(req.body.status || req.body.access_status || "").trim().toLowerCase();
     const demoSettings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
+
+    if (
+      ["demo_active", "demo_expired"].includes(requestedStatus) ||
+      req.body.is_demo === true
+    ) {
+      return ngSendLmsAdmissionClosed(res, "Demo enrollments are disabled for this LMS.");
+    }
 
     // v190n: Converting a demo card to paid access must create/update the canonical
     // :paid record. The original demo record remains untouched as history. This
@@ -14345,6 +14505,8 @@ function buildStudentDemoStatus(db, user) {
 
 app.post("/demo/start", async (req, res) => {
   try {
+    return ngSendLmsAdmissionClosed(res, "Demo access is no longer offered.");
+
     const { user } = await getAuthenticatedUser(req);
     const db = await readLiveDb();
     const settings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
@@ -14518,6 +14680,9 @@ app.get("/admin/demo/access-audit", async (req, res) => {
 
 app.post("/admin/demo/repair-access", async (req, res) => {
   try {
+    await requireAdmin(req);
+    return ngSendLmsAdmissionClosed(res, "Demo access repair is disabled for this LMS.");
+
     const { user: adminUser } = await requireAdmin(req);
     const db = await readLiveDb();
     const courseId = req.body.course_id || req.body.courseId || null;
@@ -14590,6 +14755,8 @@ app.post("/admin/demo/repair-access", async (req, res) => {
 
 app.post("/enrollments/prepare-checkout", async (req, res) => {
   try {
+    return ngSendLmsAdmissionClosed(res, "Self-service enrollment and checkout are closed.");
+
     const { user } = await getAuthenticatedUser(req);
     const { course_id } = req.body;
     if (!course_id) return res.status(400).json({ success: false, error: "course_id is required" });
@@ -14676,6 +14843,8 @@ function ngBuildCheckoutCancelUrl(rawCancelUrl = "", context = {}) {
 
 app.post("/stripe/create-checkout", async (req, res) => {
   try {
+    return ngSendLmsAdmissionClosed(res, "Self-service enrollment and checkout are closed.");
+
     const { user } = await getAuthenticatedUser(req);
     const { enrollmentId, studentId, courseId, plan_id = null, coupon_code = null, referral_code = null, ref = null, successUrl, cancelUrl, amount } = req.body;
     if (!enrollmentId || !studentId || !courseId) return res.status(400).json({ success: false, error: "enrollmentId, studentId, courseId required" });
@@ -65131,7 +65300,7 @@ app.patch("/admin/crm/media-library/:id/ayla-usage", async (req, res) => {
 });
 
 function ngGenerateTemporaryPassword() {
-  return `NG-${crypto.randomBytes(4).toString("hex").toUpperCase()}-${Math.floor(1000 + Math.random() * 9000)}`;
+  return `NG-${crypto.randomBytes(6).toString("base64url")}-${crypto.randomInt(1000, 10000)}`;
 }
 
 function ngHashToken(value = "") {
@@ -65139,11 +65308,11 @@ function ngHashToken(value = "") {
 }
 
 function ngStudentLoginUrl() {
-  return process.env.STUDENT_LOGIN_URL || process.env.FRONTEND_LOGIN_URL || "https://live.nextgenusmlelms.com/login";
+  return process.env.STUDENT_LOGIN_URL || process.env.FRONTEND_LOGIN_URL || "https://lms.nextgenusmlelms.com/login";
 }
 
 function ngStudentResetUrl(req, token) {
-  const base = process.env.STUDENT_RESET_PASSWORD_URL || "https://live.nextgenusmlelms.com/reset-password";
+  const base = process.env.STUDENT_RESET_PASSWORD_URL || "https://lms.nextgenusmlelms.com/reset-password";
   const joiner = base.includes("?") ? "&" : "?";
   return `${base}${joiner}token=${encodeURIComponent(token)}`;
 }
@@ -65175,9 +65344,20 @@ function ngLogStudentEmail(db = {}, payload = {}) {
   db.emailLogs = db.emailLogs.slice(0, 500);
 }
 
-async function ngSendStudentAccessEmailSafe({ db, req, user, enrollment = {}, course = {}, temporaryPassword = "", reason = "student_access" } = {}) {
+async function ngSendStudentAccessEmailSafe({
+  db,
+  req,
+  user,
+  enrollment = {},
+  course = {},
+  temporaryPassword = "",
+  reason = "student_access",
+  templateKey = "lms_credentials_access",
+  accessReport = null,
+  force = false,
+} = {}) {
   if (!user?.email) {
-    return { attempted: true, sent: false, error: "Student email is missing", reason, template_key: "lms_credentials_access" };
+    return { attempted: true, sent: false, error: "Student email is missing", reason, template_key: templateKey };
   }
 
   let resetUrl = "";
@@ -65196,13 +65376,31 @@ Please change your password after signing in.`
     : `Use your existing password. If you do not remember it, create a new password here:
 ${resetUrl}`;
 
+  const formatAccessTimestamp = (value) => {
+    const date = value ? new Date(value) : null;
+    if (!date || Number.isNaN(date.getTime())) return "Not specified";
+    return `${date.toLocaleString("en-US", {
+      timeZone: "UTC",
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      timeZoneName: "short",
+    })} (${date.toISOString()})`;
+  };
+
   return ngSendConfiguredEmailSafe({
     db,
-    templateKey: "lms_credentials_access",
+    templateKey,
     to: user.email,
     variables: ngEmailBaseVariables(db, user, {
       course_name: courseName,
       course_phrase: ngEmailCoursePhrase(courseName),
+      plan_name: accessReport?.plan_name || enrollment?.plan_name || "Manual LMS access",
+      access_duration: accessReport?.duration_label || enrollment?.access_duration || "As assigned by administrator",
+      access_starts_at: formatAccessTimestamp(accessReport?.starts_at || enrollment?.access_starts_at),
+      access_expires_at: formatAccessTimestamp(accessReport?.expires_at || enrollment?.access_expires_at),
       temporary_password: temporaryPassword,
       reset_url: resetUrl,
       access_instructions: accessInstructions,
@@ -65210,6 +65408,7 @@ ${resetUrl}`;
     reason,
     userId: user.id,
     enrollmentId: enrollment?.id || null,
+    force,
   });
 }
 
@@ -87091,22 +87290,38 @@ async function ngAdminMobileInviteLms(req, body = {}) {
   const db = await readLiveDb();
   const email = normalizeEmail(body.email);
   const courseId = String(body.course_id || body.courseId || "").trim();
-  const accessDays = Math.max(1, Math.min(3650, Number(body.access_days || body.accessDays || 30) || 30));
-  if (!email) throw Object.assign(new Error("Email is required"), { statusCode: 400 });
+  const accessWindow = ngResolveTimedAccessWindow(body, new Date());
+  if (!email || !email.includes("@")) throw Object.assign(new Error("A valid email is required"), { statusCode: 400 });
   if (!courseId || !db.courses?.[courseId]) throw Object.assign(new Error("A valid LMS course is required"), { statusCode: 400 });
   const plan = body.plan_id ? db.plans?.[String(body.plan_id)] || null : null;
   if (body.plan_id && !plan) throw Object.assign(new Error("Selected LMS plan was not found"), { statusCode: 400 });
   let user = findUserByEmail(db, email);
-  let temporaryPassword = "";
   const studentCreated = !user;
-  if (!user) {
-    temporaryPassword = ngGenerateTemporaryPassword();
-    user = createBackendUser({ email, name: String(body.name || email.split("@")[0]).trim(), password: temporaryPassword, role: "student" });
-    user.must_change_password = true;
-    db.users[user.id] = user;
+  if (user && String(user.role || "student").trim().toLowerCase() !== "student") {
+    throw Object.assign(new Error("This email belongs to a staff account and cannot be used for a student invitation."), { statusCode: 409 });
   }
-  const startsAt = nowIso();
-  const expiresAt = addDays(new Date(startsAt), accessDays).toISOString();
+
+  const temporaryPassword = ngGenerateTemporaryPassword();
+  if (!user) {
+    user = createBackendUser({ email, name: String(body.name || email.split("@")[0]).trim(), password: temporaryPassword, role: "student" });
+  } else {
+    const hashed = hashPassword(temporaryPassword);
+    user.salt = hashed.salt;
+    user.password_hash = hashed.password_hash;
+    if (String(body.name || "").trim()) user.name = String(body.name).trim();
+  }
+
+  user.role = "student";
+  user.status = "active";
+  user.disabled = false;
+  user.is_active = true;
+  user.verified = true;
+  user.must_change_password = true;
+  user.password_reset_token_hash = null;
+  user.password_reset_expires_at = null;
+  user.updated_at = nowIso();
+  db.users[user.id] = user;
+
   const enrollment = createBackendEnrollment(db, {
     userId: user.id,
     userName: user.name || email,
@@ -87114,26 +87329,64 @@ async function ngAdminMobileInviteLms(req, body = {}) {
     isDemo: false,
     accessGranted: true,
     planId: plan?.id || null,
-    accessStartsAt: startsAt,
-    accessExpiresAt: expiresAt,
-    accessDays,
+    accessStartsAt: accessWindow.starts_at,
+    accessExpiresAt: accessWindow.expires_at,
+    accessDays: accessWindow.access_days,
   });
-  enrollment.access_days = accessDays;
-  enrollment.access_starts_at = startsAt;
-  enrollment.access_expires_at = expiresAt;
-  enrollment.renewal_due_at = expiresAt;
+  enrollment.access_days = accessWindow.access_days;
+  enrollment.access_duration = accessWindow.duration_label;
+  enrollment.access_duration_value = accessWindow.value;
+  enrollment.access_duration_unit = accessWindow.unit;
+  enrollment.access_starts_at = accessWindow.starts_at;
+  enrollment.access_expires_at = accessWindow.expires_at;
+  enrollment.renewal_due_at = accessWindow.expires_at;
+  enrollment.access_expiry_mode = "admin_timed";
   enrollment.billing_source = "admin_access_invitation";
   enrollment.invited_by_admin = true;
   enrollment.updated_at = nowIso();
   let delivery = { attempted: false, sent: false, skipped: true, reason: "send_email_disabled" };
   if (body.send_email !== false) {
-    delivery = await ngSendStudentAccessEmailSafe({ db, req, user, enrollment, course: db.courses[courseId], temporaryPassword, reason: "admin_mobile_lms_access_invitation" });
+    delivery = await ngSendStudentAccessEmailSafe({
+      db,
+      req,
+      user,
+      enrollment,
+      course: db.courses[courseId],
+      temporaryPassword,
+      reason: "admin_lms_timed_access_invitation",
+      templateKey: "lms_timed_access_invitation",
+      accessReport: {
+        ...accessWindow,
+        plan_name: plan?.name || "Manual LMS access",
+      },
+      force: true,
+    });
   }
   ngAdminMobileCredentialState(enrollment, delivery);
   db.enrollments[enrollment.id] = enrollment;
   db.users[user.id] = user;
   await writeLiveDb(db);
-  return { product: "lms", student_created: studentCreated, user: sanitizeUser(user), enrollment: sanitizeAdminEnrollment(enrollment, db), email_delivery: delivery };
+  return {
+    product: "lms",
+    student_created: studentCreated,
+    password_reset_required: true,
+    user: sanitizeUser(user),
+    enrollment: sanitizeAdminEnrollment(enrollment, db),
+    access_report: {
+      email,
+      course_id: courseId,
+      course_name: db.courses[courseId]?.name || "Course",
+      plan_id: plan?.id || null,
+      plan_name: plan?.name || "Manual LMS access",
+      duration: accessWindow.duration_label,
+      duration_value: accessWindow.value,
+      duration_unit: accessWindow.unit,
+      starts_at: accessWindow.starts_at,
+      expires_at: accessWindow.expires_at,
+    },
+    temporary_password: body.return_password === true ? temporaryPassword : undefined,
+    email_delivery: delivery,
+  };
 }
 
 async function ngAdminMobileSendAylaInvite({ db, user, temporaryPassword = "", accessDays = 30, sendEmail = true } = {}) {
