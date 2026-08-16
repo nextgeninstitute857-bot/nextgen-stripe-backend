@@ -78035,13 +78035,37 @@ function aylaV213AtomicTutorContext(db, initial) {
 }
 
 async function aylaV213AtomicTutorSnapshot(initial, date) {
+  const cleanDate = String(date || aylaDateOnly()).slice(0, 10);
+  const cachedDb = initial?.db;
+  const cachedStudent = initial?.student;
+  const currentPlan = cachedDb && cachedStudent
+    ? aylaValues(cachedDb, "aylaDailyPlans")
+      .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, cachedStudent))
+      .filter((row) => String(row.date || "").slice(0, 10) === cleanDate)
+      .filter((row) => !["cancelled", "superseded"].includes(String(row.status || "").toLowerCase()))
+      .sort((left, right) => aylaNumber(right.version, 0) - aylaNumber(left.version, 0))[0]
+    : null;
+
+  // A GET for an already-built tutor day is read-only. Reusing the authenticated
+  // database snapshot avoids serializing the full AylaMed store on every page
+  // load and leaves the mutation queue for genuine plan creation or changes.
+  if (currentPlan) {
+    const { user, student } = aylaV213AtomicTutorContext(cachedDb, initial);
+    const snapshot = await aylaV213PersonalTutorSnapshot(cachedDb, user, student, cleanDate);
+    return {
+      ...snapshot,
+      systemProgress: aylaV189SystemProgress(cachedDb, student),
+      warning: aylaV189BacklogWarning(cachedDb, student, cleanDate),
+    };
+  }
+
   return mutateAylaDb(async (db) => {
     const { user, student } = aylaV213AtomicTutorContext(db, initial);
-    const snapshot = await aylaV213PersonalTutorSnapshot(db, user, student, date);
+    const snapshot = await aylaV213PersonalTutorSnapshot(db, user, student, cleanDate);
     return {
       ...snapshot,
       systemProgress: aylaV189SystemProgress(db, student),
-      warning: aylaV189BacklogWarning(db, student, date),
+      warning: aylaV189BacklogWarning(db, student, cleanDate),
     };
   });
 }
