@@ -6,6 +6,7 @@ import fs from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 function passwordRecord(password, salt = "revisionholidaysalt123456789012") {
   return {
@@ -255,7 +256,7 @@ test("recorded weekend revision is preserved but hidden while Aug 10 and Aug 11 
   const baseUrl = `http://127.0.0.1:${port}`;
   const output = [];
   const child = spawn(process.execPath, ["server.js"], {
-    cwd: path.resolve(new URL("..", import.meta.url).pathname),
+    cwd: fileURLToPath(new URL("..", import.meta.url)),
     env: {
       ...process.env,
       PORT: String(port),
