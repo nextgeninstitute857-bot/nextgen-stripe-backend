@@ -21,11 +21,15 @@ test("compact Today workspace returns before history scans and media signing", (
   assert.ok(start >= 0 && end > start);
   const route = server.slice(start, end);
   const compactBranch = route.indexOf("if (compactTodayView)");
+  const fullSystemProgress = route.indexOf("const systemProgress = aylaV189SystemProgress", compactBranch);
   const firstHistoryScan = route.indexOf('aylaValues(db, "aylaActivityHistory")');
   assert.ok(compactBranch >= 0 && firstHistoryScan > compactBranch);
+  assert.ok(fullSystemProgress > compactBranch && firstHistoryScan > fullSystemProgress);
   const compactPath = route.slice(compactBranch, firstHistoryScan);
   assert.match(compactPath, /if \(!built\.reused\) await writeAylaDb\(db\)/);
   assert.match(compactPath, /aylaV189SanitizePlanBundle\(db, built\.plan, built\.assignments\)/);
+  assert.match(compactPath, /systemProgress: \[\]/);
+  assert.doesNotMatch(route.slice(compactBranch, fullSystemProgress), /aylaV189SystemProgress|aylaV189BacklogWarning/);
   assert.doesNotMatch(compactPath, /aylaV251HydrateAssignmentMedia/);
   assert.match(route, /req\.query\.view/);
 });
