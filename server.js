@@ -83422,11 +83422,23 @@ app.get("/api/ayla/students/:studentId/daily-workspace", async (req, res) => {
     aylaEnsureSeedData(db);
     const date = aylaV247StudyDate(student, req.query.date);
     const built = await aylaV189BuildDailyPlan(db, student, date, { force: false });
-    const systemProgress = aylaV189SystemProgress(db, student);
-    const warning = aylaV189BacklogWarning(db, student, date, systemProgress);
     const tomorrowPreview = aylaV189TomorrowPreview(db, student, date);
     const compactTodayView = String(req.query.view || "").trim().toLowerCase() === "today";
     if (compactTodayView) {
+      const overdue = aylaV189OverdueAssignments(db, student, date)
+        .filter((row) => !["superseded", "cancelled"].includes(String(row.status || "").toLowerCase()));
+      const backlogMinutes = overdue.reduce((sum, row) => sum + aylaNumber(row.estimatedMinutes, 0), 0);
+      const dailyHours = Math.max(1, Math.min(16, aylaNumber(student.dailyHours || student.daily_hours, 3)));
+      const warning = overdue.length
+        ? {
+            level: backlogMinutes >= dailyHours * 120 ? "high" : "medium",
+            title: "Your current schedule needs attention.",
+            message: `You have ${overdue.length} overdue assignment${overdue.length === 1 ? "" : "s"} (${Math.round(backlogMinutes / 6) / 10} hours). Complete today's priorities or adjust your study schedule.`,
+            backlogCount: overdue.length,
+            backlogMinutes,
+            dailyCapacityMinutes: dailyHours * 60,
+          }
+        : null;
       if (!built.reused) await writeAylaDb(db);
       const safeBundle = aylaV189SanitizePlanBundle(db, built.plan, built.assignments);
       res.setHeader("Cache-Control", "private, no-store");
@@ -83439,9 +83451,11 @@ app.get("/api/ayla/students/:studentId/daily-workspace", async (req, res) => {
         stablePlanReused: built.reused,
         tomorrowPreview,
         warning,
-        systemProgress,
+        systemProgress: [],
       });
     }
+    const systemProgress = aylaV189SystemProgress(db, student);
+    const warning = aylaV189BacklogWarning(db, student, date, systemProgress);
     const history = aylaValues(db, "aylaActivityHistory").filter((row) => String(row.studentId) === String(student.id)).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 100);
     const recentReadingProgress = aylaValues(db, "aylaReadingProgress").filter((row) => String(row.studentId) === String(student.id)).sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt))).slice(0, 100).map(aylaV211SanitizeReadingProgress);
     const recentVideoProgress = aylaValues(db, "aylaVideoProgress").filter((row) => String(row.studentId) === String(student.id)).sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt))).slice(0, 100);
