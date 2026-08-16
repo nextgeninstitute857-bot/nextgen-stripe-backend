@@ -79520,8 +79520,26 @@ function aylaStep1PilotCollectionMatches(collection = {}) {
   return /\buworld\b/.test(label) && /\bstep[\s_-]*1\b/.test(label);
 }
 
+function aylaStep1OwnerApprovedPublicRelease(collection = {}) {
+  const controls = Array.isArray(collection.destination_controls)
+    ? collection.destination_controls
+    : [];
+  return AYLA_STEP1_PILOT_QBANK_DESTINATIONS.every((destination) =>
+    controls.some((row) =>
+      row.destination === destination
+      && String(row.destination_scope || "") === ""
+      && row.enabled === true
+      && row.settings?.authorized_external_release === true
+      && row.settings?.published_with_bulk_control === true
+      && Boolean(row.settings?.owner_approved_at)));
+}
+
 function aylaStep1PilotCollectionNeedsActivation(collection = {}) {
   if (String(collection.status || "") !== "approved") return true;
+  // Once an owner-approved, fully gated collection is explicitly released to
+  // every required student destination, the private-pilot reconciler must not
+  // silently turn that public release off during its next scheduled pass.
+  if (aylaStep1OwnerApprovedPublicRelease(collection)) return false;
   const controls = Array.isArray(collection.destination_controls)
     ? collection.destination_controls
     : [];
