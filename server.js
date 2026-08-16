@@ -29805,6 +29805,16 @@ function getEmailFromAddress() {
   );
 }
 
+function ngAylaEmailFromAddress() {
+  return (
+    process.env.AYLA_EMAIL_FROM ||
+    process.env.AYLA_RESEND_FROM_EMAIL ||
+    process.env.AYLA_SENDGRID_FROM_EMAIL ||
+    process.env.AYLA_SMTP_FROM ||
+    "AylaMed <support@aylamedapp.com>"
+  );
+}
+
 function extractEmailAddress(value = "") {
   const clean = String(value || "").trim();
   return clean.match(/<([^>]+)>/)?.[1] || clean;
@@ -29850,6 +29860,33 @@ function ngResolveEmailProvider() {
   return { requested: null, provider, available, error: null };
 }
 
+function ngAylaEmailProviderAvailability() {
+  return {
+    smtp: Boolean(process.env.AYLA_SMTP_HOST && process.env.AYLA_SMTP_USER && process.env.AYLA_SMTP_PASS),
+    resend: Boolean(process.env.AYLA_RESEND_API_KEY),
+    sendgrid: Boolean(process.env.AYLA_SENDGRID_API_KEY),
+  };
+}
+
+function ngResolveAylaEmailProvider() {
+  const available = ngAylaEmailProviderAvailability();
+  const requested = ngNormalizeEmailProvider(process.env.AYLA_EMAIL_PROVIDER || process.env.AYLA_MAIL_PROVIDER || "");
+
+  if (requested) {
+    return {
+      requested,
+      provider: available[requested] ? requested : null,
+      available,
+      error: available[requested]
+        ? null
+        : `${requested.toUpperCase()} was selected for AylaMed but its AYLA_* environment variables are incomplete.`,
+    };
+  }
+
+  const provider = available.resend ? "resend" : available.sendgrid ? "sendgrid" : available.smtp ? "smtp" : null;
+  return { requested: null, provider, available, error: null };
+}
+
 function ngMaskEmailLogin(value = "") {
   const clean = String(value || "").trim();
   const at = clean.indexOf("@");
@@ -29880,6 +29917,32 @@ function ngEmailTransportStatus() {
       port: smtpPort,
       secure: smtpSecure,
       user: ngMaskEmailLogin(process.env.SMTP_USER || ""),
+    },
+  };
+}
+
+function ngAylaEmailTransportStatus() {
+  const resolved = ngResolveAylaEmailProvider();
+  const smtpPort = Number(process.env.AYLA_SMTP_PORT || 465);
+  const smtpSecure = process.env.AYLA_SMTP_SECURE === undefined
+    ? smtpPort === 465
+    : String(process.env.AYLA_SMTP_SECURE).toLowerCase() === "true";
+
+  return {
+    configured: Boolean(resolved.provider),
+    provider: resolved.provider,
+    requested_provider: resolved.requested,
+    provider_error: resolved.error,
+    available_providers: resolved.available,
+    from: ngAylaEmailFromAddress(),
+    reply_to: process.env.AYLA_EMAIL_REPLY_TO || process.env.AYLA_REPLY_TO_EMAIL || null,
+    login_url: "https://aylamedapp.com/login",
+    smtp: {
+      configured: resolved.available.smtp,
+      host: process.env.AYLA_SMTP_HOST || null,
+      port: smtpPort,
+      secure: smtpSecure,
+      user: ngMaskEmailLogin(process.env.AYLA_SMTP_USER || ""),
     },
   };
 }
@@ -30258,6 +30321,8 @@ async function ngSendTransactionalEmailSafe({ db, to, subject, text, reason = "t
 
 let ngSmtpTransporterCache = null;
 let ngSmtpTransporterSignature = "";
+let ngAylaSmtpTransporterCache = null;
+let ngAylaSmtpTransporterSignature = "";
 
 async function ngGetSmtpTransporter() {
   const host = String(process.env.SMTP_HOST || "").trim();
@@ -30308,7 +30373,56 @@ async function ngGetSmtpTransporter() {
   return ngSmtpTransporterCache;
 }
 
-function ngEmailTextToHtml(text = "") {
+async function ngGetAylaSmtpTransporter() {
+  const host = String(process.env.AYLA_SMTP_HOST || "").trim();
+  const user = String(process.env.AYLA_SMTP_USER || "").trim();
+  const pass = String(process.env.AYLA_SMTP_PASS || "");
+  const port = Number(process.env.AYLA_SMTP_PORT || 465);
+  const secure = process.env.AYLA_SMTP_SECURE === undefined
+    ? port === 465
+    : String(process.env.AYLA_SMTP_SECURE).toLowerCase() === "true";
+  const requireTLS = process.env.AYLA_SMTP_REQUIRE_TLS === undefined
+    ? port === 587
+    : String(process.env.AYLA_SMTP_REQUIRE_TLS).toLowerCase() === "true";
+
+  if (!host || !user || !pass) {
+    const error = new Error("AYLA_SMTP_HOST, AYLA_SMTP_USER, and AYLA_SMTP_PASS are required for AylaMed SMTP delivery.");
+    error.statusCode = 500;
+    throw error;
+  }
+
+  const signature = [host, port, secure, requireTLS, user, pass].join("|");
+  if (ngAylaSmtpTransporterCache && ngAylaSmtpTransporterSignature === signature) return ngAylaSmtpTransporterCache;
+
+  let nodemailer;
+  try {
+    const imported = await import("nodemailer");
+    nodemailer = imported.default || imported;
+  } catch (error) {
+    const wrapped = new Error(`AylaMed SMTP is selected, but the backend dependency "nodemailer" is missing. Run npm install nodemailer and redeploy. Original error: ${error.message}`);
+    wrapped.statusCode = 500;
+    throw wrapped;
+  }
+
+  ngAylaSmtpTransporterCache = nodemailer.createTransport({
+    host,
+    port,
+    secure,
+    requireTLS,
+    auth: { user, pass },
+    connectionTimeout: Number(process.env.AYLA_SMTP_CONNECTION_TIMEOUT_MS || process.env.SMTP_CONNECTION_TIMEOUT_MS || 20000),
+    greetingTimeout: Number(process.env.AYLA_SMTP_GREETING_TIMEOUT_MS || process.env.SMTP_GREETING_TIMEOUT_MS || 20000),
+    socketTimeout: Number(process.env.AYLA_SMTP_SOCKET_TIMEOUT_MS || process.env.SMTP_SOCKET_TIMEOUT_MS || 30000),
+    tls: {
+      minVersion: "TLSv1.2",
+      servername: host,
+    },
+  });
+  ngAylaSmtpTransporterSignature = signature;
+  return ngAylaSmtpTransporterCache;
+}
+
+function ngEmailTextToHtml(text = "", { brand = "nextgen" } = {}) {
   const escaped = String(text || "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -30317,10 +30431,16 @@ function ngEmailTextToHtml(text = "") {
     .replace(/'/g, "&#039;")
     .replace(/\n/g, "<br />");
   const linked = escaped.replace(/(https?:\/\/[^<\s]+)/g, '<a href="$1" style="color:#1A4FBF;font-weight:700;text-decoration:none;word-break:break-word">$1</a>');
-  return `<div style="margin:0;padding:24px;background:#F6F9FE;font-family:Arial,Helvetica,sans-serif;color:#071426"><div style="max-width:640px;margin:0 auto;background:#FFFFFF;border:1px solid #DAEAFF;border-radius:18px;overflow:hidden;box-shadow:0 14px 40px rgba(26,79,191,.08)"><div style="height:5px;background:linear-gradient(90deg,#06101F,#D4A017,#06101F)"></div><div style="padding:28px"><div style="display:inline-block;padding:7px 12px;border-radius:999px;background:#06101F;color:#D4A017;font-size:11px;font-weight:800;letter-spacing:.14em;text-transform:uppercase;margin-bottom:18px">NextGen USMLE</div><div style="font-size:15px;line-height:1.75">${linked}</div><div style="margin-top:26px;padding-top:18px;border-top:1px solid #E4EEFC;color:#5A718A;font-size:12px">Structured USMLE preparation · Live learning · Smart revision</div></div></div></div>`;
+  const isAyla = String(brand || "").toLowerCase() === "aylamed";
+  const badge = isAyla ? "AylaMed" : "NextGen USMLE";
+  const footer = isAyla
+    ? "Adaptive medical exam preparation · Personal study · Smart revision"
+    : "Structured USMLE preparation · Live learning · Smart revision";
+  const accent = isAyla ? "#0B7A75" : "#D4A017";
+  return `<div style="margin:0;padding:24px;background:#F6F9FE;font-family:Arial,Helvetica,sans-serif;color:#071426"><div style="max-width:640px;margin:0 auto;background:#FFFFFF;border:1px solid #DAEAFF;border-radius:18px;overflow:hidden;box-shadow:0 14px 40px rgba(26,79,191,.08)"><div style="height:5px;background:linear-gradient(90deg,#06101F,${accent},#06101F)"></div><div style="padding:28px"><div style="display:inline-block;padding:7px 12px;border-radius:999px;background:#06101F;color:${accent};font-size:11px;font-weight:800;letter-spacing:.14em;text-transform:uppercase;margin-bottom:18px">${badge}</div><div style="font-size:15px;line-height:1.75">${linked}</div><div style="margin-top:26px;padding-top:18px;border-top:1px solid #E4EEFC;color:#5A718A;font-size:12px">${footer}</div></div></div></div>`;
 }
 
-async function sendEmailMessage({ to, subject = "NextGen USMLE", text = "", from: fromOverride = "", replyTo: replyToOverride = "" }) {
+async function sendEmailMessage({ to, subject = "NextGen USMLE", text = "", from: fromOverride = "", replyTo: replyToOverride = "", transport = "default", brand = "nextgen" }) {
   const recipient = String(Array.isArray(to) ? to[0] : to || "").trim();
   if (!recipient || !recipient.includes("@")) {
     const error = new Error("A valid email recipient is required.");
@@ -30335,26 +30455,37 @@ async function sendEmailMessage({ to, subject = "NextGen USMLE", text = "", from
     throw error;
   }
 
-  const from = String(fromOverride || getEmailFromAddress()).trim() || getEmailFromAddress();
+  const isAylaTransport = String(transport || "").toLowerCase() === "aylamed";
+  const defaultFrom = isAylaTransport ? ngAylaEmailFromAddress() : getEmailFromAddress();
+  const from = String(fromOverride || defaultFrom).trim() || defaultFrom;
   const cleanSubject = String(subject || "NextGen USMLE").trim() || "NextGen USMLE";
-  const replyTo = String(replyToOverride || process.env.EMAIL_REPLY_TO || process.env.REPLY_TO_EMAIL || "").trim() || undefined;
-  const resolved = ngResolveEmailProvider();
+  const replyTo = String(
+    replyToOverride ||
+    (isAylaTransport
+      ? process.env.AYLA_EMAIL_REPLY_TO || process.env.AYLA_REPLY_TO_EMAIL
+      : process.env.EMAIL_REPLY_TO || process.env.REPLY_TO_EMAIL) ||
+    ""
+  ).trim() || undefined;
+  const resolved = isAylaTransport ? ngResolveAylaEmailProvider() : ngResolveEmailProvider();
+  const html = ngEmailTextToHtml(cleanText, { brand: isAylaTransport ? "aylamed" : brand });
 
   if (!resolved.provider) {
-    const error = new Error(resolved.error || "Email sending requires a configured SMTP, Resend, or SendGrid provider.");
+    const error = new Error(resolved.error || (isAylaTransport
+      ? "AylaMed email sending requires AYLA_SMTP_*, AYLA_RESEND_API_KEY, or AYLA_SENDGRID_API_KEY configuration."
+      : "Email sending requires a configured SMTP, Resend, or SendGrid provider."));
     error.statusCode = 500;
     throw error;
   }
 
   if (resolved.provider === "smtp") {
     try {
-      const transporter = await ngGetSmtpTransporter();
+      const transporter = isAylaTransport ? await ngGetAylaSmtpTransporter() : await ngGetSmtpTransporter();
       const info = await transporter.sendMail({
         from,
         to: recipient,
         subject: cleanSubject,
         text: cleanText,
-        html: ngEmailTextToHtml(cleanText),
+        html,
         replyTo,
       });
       return {
@@ -30379,12 +30510,12 @@ async function sendEmailMessage({ to, subject = "NextGen USMLE", text = "", from
         to: [recipient],
         subject: cleanSubject,
         text: cleanText,
-        html: ngEmailTextToHtml(cleanText),
+        html,
         ...(replyTo ? { reply_to: replyTo } : {}),
       },
       {
         headers: {
-          Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+          Authorization: `Bearer ${isAylaTransport ? process.env.AYLA_RESEND_API_KEY : process.env.RESEND_API_KEY}`,
           "Content-Type": "application/json",
         },
         timeout: 30000,
@@ -30402,12 +30533,12 @@ async function sendEmailMessage({ to, subject = "NextGen USMLE", text = "", from
       subject: cleanSubject,
       content: [
         { type: "text/plain", value: cleanText },
-        { type: "text/html", value: ngEmailTextToHtml(cleanText) },
+        { type: "text/html", value: html },
       ],
     },
     {
       headers: {
-        Authorization: `Bearer ${process.env.SENDGRID_API_KEY}`,
+        Authorization: `Bearer ${isAylaTransport ? process.env.AYLA_SENDGRID_API_KEY : process.env.SENDGRID_API_KEY}`,
         "Content-Type": "application/json",
       },
       timeout: 30000,
@@ -65198,7 +65329,7 @@ app.post("/admin/enrollments/:enrollmentId/send-credentials", async (req, res) =
 app.get("/admin/email/status", async (req, res) => {
   try {
     await requireAdmin(req);
-    res.json({ success: true, ...ngEmailTransportStatus() });
+    res.json({ success: true, ...ngEmailTransportStatus(), aylamed: ngAylaEmailTransportStatus() });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
@@ -86873,7 +87004,13 @@ async function ngAdminMobileSendAylaInvite({ db, user, temporaryPassword = "", a
   else lines.push("", "Use your existing password. If needed, set a new password here:", resetUrl);
   lines.push("", "AylaMed Team");
   try {
-    const provider = await sendEmailMessage({ to: user.email, subject: "Your AylaMed access is ready", text: lines.join("\n") });
+    const provider = await sendEmailMessage({
+      to: user.email,
+      subject: "Your AylaMed access is ready",
+      text: lines.join("\n"),
+      transport: "aylamed",
+      brand: "aylamed",
+    });
     return { attempted: true, sent: true, provider: provider?.provider || null };
   } catch (error) {
     return { attempted: true, sent: false, error: error.message || "Email delivery failed" };
@@ -86942,6 +87079,7 @@ app.get("/admin/mobile/access-options", async (req, res) => {
       aylamed: {
         plans: aylaValues(aylaDb, "aylaPlans").filter((plan) => plan.is_active !== false).map(aylaPublicPlan),
         exam_tracks: AYLA_EXAM_TRACKS,
+        email_system: ngAylaEmailTransportStatus(),
       },
     });
   } catch (error) {
