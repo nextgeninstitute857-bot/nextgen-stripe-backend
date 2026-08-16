@@ -41485,6 +41485,18 @@ function aylaStudentQbankPresentationPolicy(
   };
 }
 
+function aylaStudentSelectableQbankPolicy(policy = {}, availableBanks = []) {
+  const hasBanks = (Array.isArray(availableBanks) ? availableBanks : [])
+    .some((row) => Number(row?.question_count || 0) > 0);
+  return {
+    ...policy,
+    student_bank_mode: "collection_switchable",
+    student_can_choose_source_profile: false,
+    student_can_choose_collections: hasBanks,
+    student_brand_label: "Question Bank",
+  };
+}
+
 // -----------------------------------------------------------------------------
 // v256: Exam-scoped NBME Center
 // -----------------------------------------------------------------------------
@@ -42385,11 +42397,12 @@ app.get("/api/ayla/qbank/catalog", async (req, res) => {
       destinationScope,
       sourceProfile,
     });
+    const studentPresentationPolicy = aylaStudentSelectableQbankPolicy(presentationPolicy, availableBanks);
     const requestedCollectionIds = aylaRequestedQbankCollectionIds(
       req.query.collection_ids ?? req.query.collectionIds ?? [],
     );
     const selectedCollectionIds = resolveContentQbankStudentCollectionIds(
-      { ...presentationPolicy, available_banks: availableBanks },
+      { ...studentPresentationPolicy, available_banks: availableBanks },
       requestedCollectionIds,
     );
     const selectedBanks = availableBanks.filter((row) => selectedCollectionIds.includes(row.id));
@@ -42418,7 +42431,7 @@ app.get("/api/ayla/qbank/catalog", async (req, res) => {
       exam_track: examTrack,
       entitlement: { type: access.entitlement_type, expires_at: access.expires_at || null },
       presentation: aylaStudentQbankPresentationPolicy(
-        presentationPolicy,
+        studentPresentationPolicy,
         sourceProfile,
         availableBanks,
         selectedCollectionIds,
@@ -42549,11 +42562,12 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         destinationScope,
         sourceProfile,
       });
+      const studentPresentationPolicy = aylaStudentSelectableQbankPolicy(presentationPolicy, availableBanks);
       const requestedCollectionIds = aylaRequestedQbankCollectionIds(
         req.body.collection_ids ?? req.body.collectionIds ?? [],
       );
       selectedCollectionIds = resolveContentQbankStudentCollectionIds(
-        { ...presentationPolicy, available_banks: availableBanks },
+        { ...studentPresentationPolicy, available_banks: availableBanks },
         requestedCollectionIds,
       );
       selectedBanks = availableBanks.filter((row) => selectedCollectionIds.includes(row.id));
