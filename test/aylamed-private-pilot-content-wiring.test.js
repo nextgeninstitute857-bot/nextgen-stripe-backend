@@ -127,6 +127,11 @@ test("private QBank activation disables unscoped delivery and preserves ordinary
   assert.match(activation, /destination_scope: ""[\s\S]*enabled: false/);
   assert.match(activation, /destination_scope: AYLA_STEP1_PILOT_DESTINATION_SCOPE[\s\S]*enabled: true/);
   assert.match(activation, /function aylaStep1PilotCollectionMatches/);
+  assert.match(activation, /function aylaStep1OwnerApprovedPublicRelease/);
+  assert.match(activation, /authorized_external_release === true/);
+  assert.match(activation, /published_with_bulk_control === true/);
+  assert.match(activation, /owner_approved_at/);
+  assert.match(activation, /if \(aylaStep1OwnerApprovedPublicRelease\(collection\)\) return false/);
   assert.match(activation, /\\buworld\\b/);
   assert.match(activation, /ordinaryStudentDelivery: false/);
   assert.match(activation, /source_rights_status/);
