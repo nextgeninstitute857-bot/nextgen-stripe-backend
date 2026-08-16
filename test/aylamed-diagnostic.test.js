@@ -159,6 +159,54 @@ test("numeric source taxonomy is replaced by deterministic Step 1 topic classifi
   assert.equal(classifyStep1DiagnosticQuestion(fixture(38)), "Pharmacology");
 });
 
+test("reviewed compound source systems resolve through their verified subsystem and discipline labels", () => {
+  const imported = (title, systemKey, subsystem, discipline = "") => ({
+    id: title,
+    title,
+    system_key: systemKey,
+    taxonomy: {
+      system_key: systemKey,
+      discipline,
+      labels: { system: systemKey, subsystem, subtopic: title },
+    },
+  });
+
+  assert.equal(classifyStep1DiagnosticQuestion(imported(
+    "Migraine",
+    "behavioral-nervous-special-senses",
+    "Nervous System",
+    "Pathophysiology",
+  )), "Neurology");
+  assert.equal(classifyStep1DiagnosticQuestion(imported(
+    "Depression",
+    "behavioral-nervous-special-senses",
+    "Psychiatric/Behavioral & Substance Use",
+    "Behavioral Sciences",
+  )), "Behavioral Science");
+  assert.equal(classifyStep1DiagnosticQuestion(imported(
+    "Iron deficiency anemia",
+    "blood-lymphoreticular-immune",
+    "Hematology & Oncology",
+  )), "Hematology");
+  assert.equal(classifyStep1DiagnosticQuestion(imported(
+    "Anaphylaxis",
+    "blood-lymphoreticular-immune",
+    "Allergy & Immunology",
+  )), "Immunology");
+  assert.equal(classifyStep1DiagnosticQuestion(imported(
+    "Haemophilus influenzae",
+    "blood-lymphoreticular-immune",
+    "Infectious Diseases",
+    "Microbiology",
+  )), "Microbiology");
+  assert.equal(classifyStep1DiagnosticQuestion(imported(
+    "Fructose 2 6 biphosphate",
+    "multisystem-processes-disorders",
+    "General Principles",
+    "Biochemistry",
+  )), "Biochemistry");
+});
+
 test("all relative inline media must have a private playable attachment", () => {
   const ready = auditDiagnosticQuestionMedia(fixture(0));
   assert.equal(ready.ready, true);
