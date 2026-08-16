@@ -75430,10 +75430,11 @@ function aylaV189EnrichResourceMappings(db, resource = {}) {
 function aylaV189RelevantResources(db, student, types = [], {
   destination = "content_hub",
   enrichMappings = true,
+  systemProgress = null,
 } = {}) {
   const selected = new Set(types.map(aylaV189ResourceType));
   const staticWeak = aylaCleanArray(student.weakAreas || student.selectedWeakAreas).map((x) => String(x).toLowerCase());
-  const dynamicWeak = aylaV189SystemProgress(db, student)
+  const dynamicWeak = (Array.isArray(systemProgress) ? systemProgress : aylaV189SystemProgress(db, student))
     .filter((row) => row.evidenceCount > 0 || row.weaknessPercent >= 55)
     .slice(0, 4)
     .map((row) => String(row.system || "").toLowerCase());
@@ -76525,11 +76526,14 @@ function aylaV189RequiredResourceKey(resource = {}) {
   return `${type}|${system}|${topic}|${resource.id}`;
 }
 
-function aylaV189RequiredRoadmapWorkload(db, student) {
+function aylaV189RequiredRoadmapWorkload(db, student, systemProgress = null) {
   const completed = aylaV189CompletedResourceIds(db, student);
   const mode = String(student.questionSourcePreference || student.question_source_preference || db.aylaSettings?.resources?.question_source_mode || "hybrid");
   const selectedNames = aylaCleanArray(student.selectedResources).map((value) => aylaV189MappingKey(value));
-  const relevant = aylaV189RelevantResources(db, student)
+  const relevant = aylaV189RelevantResources(db, student, [], {
+    enrichMappings: false,
+    systemProgress,
+  })
     .filter((row) => !completed.has(String(row.id)))
     .filter((row) => {
       const type = aylaV189ResourceType(row.type);
@@ -76590,7 +76594,7 @@ function aylaV189BacklogWarning(db, student, date, systemProgress = aylaV189Syst
   const target = aylaTargetDateInfo(student);
   const dailyHours = Math.max(1, Math.min(16, aylaNumber(student.dailyHours || student.daily_hours, 3)));
   const dailyCapacity = dailyHours * 60;
-  const workload = aylaV189RequiredRoadmapWorkload(db, student);
+  const workload = aylaV189RequiredRoadmapWorkload(db, student, systemProgress);
   const studyDays = aylaV189StudyDaysRemaining(student, target.daysToTarget || 1);
   const requiredDailyMinutes = Math.ceil((workload.totalMinutes + backlogMinutes) / studyDays);
   const requiredHours = Math.max(0.5, Math.round((requiredDailyMinutes / 60) * 10) / 10);
