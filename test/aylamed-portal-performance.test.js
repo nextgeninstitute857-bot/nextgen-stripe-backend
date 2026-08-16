@@ -1,0 +1,31 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import test from "node:test";
+
+const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
+
+test("tomorrow preview is summary-only and never builds or hydrates a future plan", () => {
+  const start = server.indexOf("function aylaV189TomorrowPreview");
+  const end = server.indexOf("\nfunction aylaV213TutorStudentRows", start);
+  assert.ok(start >= 0 && end > start);
+  const preview = server.slice(start, end);
+  assert.doesNotMatch(preview, /aylaV189BuildDailyPlan/);
+  assert.doesNotMatch(preview, /aylaV251HydrateAssignmentMedia/);
+  assert.doesNotMatch(preview, /JSON\.parse\(JSON\.stringify/);
+  assert.match(preview, /Tomorrow adapts after today/);
+});
+
+test("compact Today workspace returns before history scans and media signing", () => {
+  const start = server.indexOf('app.get("/api/ayla/students/:studentId/daily-workspace"');
+  const end = server.indexOf('\napp.post("/api/ayla/students/:studentId/daily-workspace/rebuild"', start);
+  assert.ok(start >= 0 && end > start);
+  const route = server.slice(start, end);
+  const compactBranch = route.indexOf("if (compactTodayView)");
+  const firstHistoryScan = route.indexOf('aylaValues(db, "aylaActivityHistory")');
+  assert.ok(compactBranch >= 0 && firstHistoryScan > compactBranch);
+  const compactPath = route.slice(compactBranch, firstHistoryScan);
+  assert.match(compactPath, /if \(!built\.reused\) await writeAylaDb\(db\)/);
+  assert.match(compactPath, /aylaV189SanitizePlanBundle\(db, built\.plan, built\.assignments\)/);
+  assert.doesNotMatch(compactPath, /aylaV251HydrateAssignmentMedia/);
+  assert.match(route, /req\.query\.view/);
+});
