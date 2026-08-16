@@ -77181,19 +77181,33 @@ function aylaV189MaybeCompleteAssignment(db, assignmentId, historyCollection) {
   return { assignment, plan: aylaV189UpdatePlanCompletion(db, assignment.dailyPlanId), completed };
 }
 
-async function aylaV189TomorrowPreview(db, student, date) {
+function aylaV189TomorrowPreview(db, student, date) {
   const tomorrow = aylaDateOnly(aylaAddDays(new Date(`${date}T12:00:00Z`), 1));
   const existing = aylaValues(db, "aylaDailyPlans").find((plan) => aylaAdaptiveEvidenceMatchesStudent(plan, student) && String(plan.date) === tomorrow && !["cancelled", "superseded"].includes(String(plan.status || "").toLowerCase()));
   if (existing) {
     const assignments = aylaValues(db, "aylaResourceAssignments").filter((row) => String(row.dailyPlanId) === String(existing.id));
-    const hydratedAssignments = await aylaV251HydrateAssignmentMedia(assignments);
-    return { date: tomorrow, ...aylaV189SanitizePlanBundle(db, existing, hydratedAssignments) };
+    const focus = [existing.focusSystem || existing.systemFocus, existing.focusSubsystem || existing.subsystemFocus, existing.focusTopic || existing.topicFocus]
+      .filter(Boolean)
+      .join(" · ");
+    return {
+      date: tomorrow,
+      title: focus ? `Next focus: ${focus}` : "Tomorrow's adaptive plan",
+      focus: focus || "Adaptive plan",
+      description: existing.message || `${assignments.length} verified assignment${assignments.length === 1 ? "" : "s"} ready for tomorrow.`,
+      summary: existing.message || "",
+      assignmentCount: assignments.length,
+      pending: false,
+    };
   }
-  const previewDb = JSON.parse(JSON.stringify(db));
-  const previewStudent = aylaGetItem(previewDb, "aylaStudents", student.id) || JSON.parse(JSON.stringify(student));
-  const built = await aylaV189BuildDailyPlan(previewDb, previewStudent, tomorrow, { force: false, skipAi: true });
-  const hydratedAssignments = await aylaV251HydrateAssignmentMedia(built.assignments);
-  return { date: tomorrow, ...aylaV189SanitizePlanBundle(previewDb, built.plan, hydratedAssignments) };
+  return {
+    date: tomorrow,
+    title: "Tomorrow adapts after today",
+    focus: "Adaptive plan",
+    description: "Complete today's work and AylaMed will prepare the next verified focus from your results.",
+    summary: "Tomorrow's tasks will adjust after today's work is complete.",
+    assignmentCount: 0,
+    pending: true,
+  };
 }
 
 function aylaV213TutorStudentRows(db, collection, student, mapper) {
@@ -83410,6 +83424,24 @@ app.get("/api/ayla/students/:studentId/daily-workspace", async (req, res) => {
     const built = await aylaV189BuildDailyPlan(db, student, date, { force: false });
     const systemProgress = aylaV189SystemProgress(db, student);
     const warning = aylaV189BacklogWarning(db, student, date, systemProgress);
+    const tomorrowPreview = aylaV189TomorrowPreview(db, student, date);
+    const compactTodayView = String(req.query.view || "").trim().toLowerCase() === "today";
+    if (compactTodayView) {
+      if (!built.reused) await writeAylaDb(db);
+      const safeBundle = aylaV189SanitizePlanBundle(db, built.plan, built.assignments);
+      res.setHeader("Cache-Control", "private, no-store");
+      return aylaSendOk(res, {
+        student,
+        date,
+        pilotTime: aylaPilotStudyDate(student),
+        plan: safeBundle.plan,
+        assignments: safeBundle.assignments,
+        stablePlanReused: built.reused,
+        tomorrowPreview,
+        warning,
+        systemProgress,
+      });
+    }
     const history = aylaValues(db, "aylaActivityHistory").filter((row) => String(row.studentId) === String(student.id)).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 100);
     const recentReadingProgress = aylaValues(db, "aylaReadingProgress").filter((row) => String(row.studentId) === String(student.id)).sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt))).slice(0, 100).map(aylaV211SanitizeReadingProgress);
     const recentVideoProgress = aylaValues(db, "aylaVideoProgress").filter((row) => String(row.studentId) === String(student.id)).sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt))).slice(0, 100);
@@ -83430,7 +83462,6 @@ app.get("/api/ayla/students/:studentId/daily-workspace", async (req, res) => {
       dailyPlans: aylaValues(db, "aylaDailyPlans").filter((row) => String(row.studentId) === String(student.id) && String(row.status || "").toLowerCase() !== "superseded").length,
       activityEvents: aylaValues(db, "aylaActivityHistory").filter((row) => String(row.studentId) === String(student.id)).length,
     };
-    const tomorrowPreview = await aylaV189TomorrowPreview(db, student, date);
     const aylaMedFeed = buildAylaMateActivityFeed({
       student,
       date,
@@ -83444,7 +83475,7 @@ app.get("/api/ayla/students/:studentId/daily-workspace", async (req, res) => {
       resources: aylaValues(db, "aylaResources"),
       revisionQueue: aylaValues(db, "aylaRevisionQueue"),
     });
-    await writeAylaDb(db);
+    if (!built.reused) await writeAylaDb(db);
     const hydratedAssignments = await aylaV251HydrateAssignmentMedia(built.assignments);
     const safeBundle = aylaV189SanitizePlanBundle(db, built.plan, hydratedAssignments);
     return aylaSendOk(res, { student, date, pilotTime: aylaPilotStudyDate(student), plan: safeBundle.plan, assignments: safeBundle.assignments, stablePlanReused: built.reused, tomorrowPreview, warning, systemProgress, aylaMedFeed, aylaMeFeed: aylaMedFeed, aylaMateFeed: aylaMedFeed, history, historyCounts, recentReadingProgress, recentVideoProgress, recentQuestionAttempts, recentFlashcardReviews, recentAssessments, recentPlans, resourceCounts: Object.values(db.aylaResources || {}).reduce((acc, row) => { const type = aylaV189ResourceType(row.type); acc[type] = (acc[type] || 0) + 1; return acc; }, {}) });
