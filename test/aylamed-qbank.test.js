@@ -309,7 +309,7 @@ test("student catalog and session routes carry named-bank IDs without copying su
   assert.match(sessionRoute, /aylaStudentSelectableQbankPolicy/);
   assert.match(sessionRoute, /selectedCollectionIds/);
   assert.match(sessionRoute, /selectedBanks/);
-  assert.match(server, /UWorld Step 2 CK — Supplemental, non-scoring/);
+  assert.match(server, /aylaStudentBankName\(collection/);
   assert.match(server, /scoringAllowed: mapping\.scoringAllowed !== false/);
   assert.match(server, /aylaQbankCollectionDeliveryChannel\(collection,[\s\S]*?=== "qbank"/);
   assert.match(server, /filter\(aylaStudentFacingExternalQbankCollection\)/);

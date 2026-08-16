@@ -117,6 +117,11 @@ import {
   sanitizeAylaQbankSession,
   setAylaQbankQuestionMark,
 } from "./lib/aylamed-qbank.js";
+import { aylaStudentBankName } from "./lib/aylamed-bank-names.js";
+import {
+  AYLA_PERMANENT_QA,
+  buildAylaPermanentQaScenarios,
+} from "./lib/aylamed-qa-accounts.js";
 import {
   AYLA_DIAGNOSTIC_BLUEPRINT_VERSION,
   applyDiagnosticSystemOverride,
@@ -69480,6 +69485,25 @@ function aylaEnsureSeedData(db) {
     status: existingMonthly?.is_active === false ? "inactive" : "active",
   }, existingMonthly || {}));
 
+  const existingQaPlan = aylaGetItem(db, "aylaPlans", AYLA_PERMANENT_QA.planId);
+  aylaSetItem(db, "aylaPlans", aylaNormalizePlanPayload({
+    ...(existingQaPlan || {}),
+    id: AYLA_PERMANENT_QA.planId,
+    name: "AylaMed Permanent QA Access",
+    description: "Hidden, non-billing full-feature access for permanent end-to-end exam testing.",
+    plan_type: "qa",
+    billing_type: "internal_testing",
+    price_cents: 0,
+    access_days: 36525,
+    included_features: AYLA_STUDENT_FEATURES.map((feature) => feature.key),
+    exam_tracks: [...AYLA_PERMANENT_QA.examTracks],
+    is_full_access: true,
+    is_active: true,
+    is_public: false,
+    is_featured: false,
+    status: "active",
+  }, existingQaPlan || {}, { strictControls: true }));
+
   // One owner-approved, permanent internal review entitlement. This exact
   // account is intentionally isolated from public/demo plan controls so that
   // changing the testing access cannot alter any other student's features.
@@ -70163,6 +70187,49 @@ app.delete("/api/ayla/users/:id", async (req, res) => {
 // -----------------------------------------------------------------------------
 // AYLAMED V156 BILLING / ACCESS ROUTES - separate from LMS billing records
 // -----------------------------------------------------------------------------
+app.get("/api/ayla/admin/qa/account-scenarios", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const db = await readAylaDb();
+    aylaEnsureSeedData(db);
+    const scenarios = AYLA_PERMANENT_QA.examTracks.flatMap((examTrack) => {
+      const exam = AYLA_EXAM_REGISTRY[examTrack];
+      return buildAylaPermanentQaScenarios({
+        examTrack,
+        examLabel: exam.label,
+        systems: exam.systems,
+      }).map((scenario) => {
+        const user = aylaFindUserByEmail(db, scenario.email);
+        const student = user
+          ? aylaOwnedStudentsForUser(db, user.id).find((row) => aylaCanonicalExamTrack(row.examTrackId || row.exam_track_id || row.exam) === examTrack)
+          : null;
+        const enrollment = user
+          ? aylaValues(db, "aylaEnrollments").find((row) =>
+              String(row.user_id || row.ayla_user_id || "") === String(user.id)
+              && aylaCanonicalExamTrack(row.exam_track_id || row.examTrackId || row.exam) === examTrack
+              && String(row.plan_id || "") === AYLA_PERMANENT_QA.planId)
+          : null;
+        return {
+          ...scenario,
+          user_id: user?.id || null,
+          student_id: student?.id || null,
+          registered: Boolean(user),
+          onboarded: Boolean(student),
+          permanent_access: Boolean(enrollment && aylaEnrollmentActive(enrollment) && !enrollment.access_expires_at),
+        };
+      });
+    });
+    return aylaSendOk(res, {
+      plan_id: AYLA_PERMANENT_QA.planId,
+      count: scenarios.length,
+      scenarios,
+      passwords_stored_or_disclosed: false,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load permanent QA scenarios");
+  }
+});
+
 app.get("/api/ayla/access/:userId", async (req, res) => {
   try {
     const db = await readAylaDb();
@@ -70194,13 +70261,35 @@ app.post("/api/ayla/enrollments/grant-access", async (req, res) => {
     }
 
     if (!userId) return aylaSendError(res, 400, "userId or email is required");
+    const permanentAccess = req.body.permanent_access === true || req.body.permanentAccess === true;
+    const testAccount = req.body.test_account === true || req.body.testAccount === true;
+    if (permanentAccess && String(req.body.confirmation || "") !== "GRANT PERMANENT AYLAMED ACCESS") {
+      return aylaSendError(res, 400, "Type \"GRANT PERMANENT AYLAMED ACCESS\" to create access without an expiry date");
+    }
     const plan = aylaGetItem(db, "aylaPlans", req.body.planId || req.body.plan_id) || aylaNormalizePlanPayload({ id: "AYLA-PLAN-MANUAL", name: "Manual AylaMed Access", plan_type: req.body.type || "manual", price_cents: 0, access_days: Number(req.body.accessDays || req.body.access_days || 30), included_features: req.body.included_features || req.body.features || [], is_full_access: req.body.is_full_access !== false });
     const scope = aylaEnrollmentScopeFromPayload(db, aylaGetItem(db, "aylaUsers", userId) || { id: userId }, req.body);
     const enrollment = aylaCreateOrUpdateEnrollment(db, { userId, plan, type: req.body.type || (aylaPlanIsDemo(plan) ? "demo" : "manual"), source: req.body.source || "admin_grant", accessGranted: true, startsAt: aylaNow(), examTrack: scope.examTrack, studentId: scope.studentId });
-    await aylaAccessLog(db, "admin_grant_access", { userId, planId: plan.id, enrollmentId: enrollment.id, examTrackId: enrollment.exam_track_id, studentId: enrollment.student_id });
+    if (permanentAccess) {
+      enrollment.access_expires_at = null;
+      enrollment.permanent_access = true;
+      enrollment.updatedAt = aylaNow();
+      aylaSetItem(db, "aylaEnrollments", enrollment);
+    }
+    if (testAccount) {
+      const account = aylaGetItem(db, "aylaUsers", userId);
+      if (account) {
+        account.testAccount = true;
+        account.test_account = true;
+        account.excludeFromAnalytics = true;
+        account.exclude_from_analytics = true;
+        account.updatedAt = aylaNow();
+        aylaSetItem(db, "aylaUsers", account);
+      }
+    }
+    await aylaAccessLog(db, "admin_grant_access", { userId, planId: plan.id, enrollmentId: enrollment.id, examTrackId: enrollment.exam_track_id, studentId: enrollment.student_id, permanentAccess, testAccount });
     await aylaLog(db, "access", "AylaMed access granted", { userId, planId: plan.id, enrollmentId: enrollment.id });
     await writeAylaDb(db);
-    return aylaSendOk(res, { enrollment, user: aylaSanitizeUser(aylaGetItem(db, "aylaUsers", userId)) }, 201);
+    return aylaSendOk(res, { enrollment, user: aylaSanitizeUser(aylaGetItem(db, "aylaUsers", userId)), permanent_access: permanentAccess, test_account: testAccount }, 201);
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to grant AylaMed access");
   }
@@ -70490,6 +70579,7 @@ app.get("/api/ayla/routes", (req, res) => {
       "POST /admin/crm/ai-training/success-stories/:storyId/review",
       "GET /admin/crm/ai-training/success-stories/audit",
       "GET /api/ayla/admin/ai-usage/overview",
+      "GET /api/ayla/admin/qa/account-scenarios",
       "POST /api/ayla/ai/coach",
       "GET /api/ayla/students/:studentId/library",
       "GET /api/ayla/students/:studentId/library/resources/:resourceId",
@@ -71823,6 +71913,15 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
     if (auth?.user?.id) { submission.aylaUserId = auth.user.id; submission.ayla_user_id = auth.user.id; }
     const student = aylaStudentFromDiagnostic({ ...submission, studentId: null, student_id: null }, recommendation);
     if (auth?.user?.id) { student.ayla_user_id = auth.user.id; student.user_id = auth.user.id; }
+    if (auth?.rawUser?.testAccount === true || auth?.rawUser?.test_account === true) {
+      student.testAccount = true;
+      student.test_account = true;
+      student.excludeFromAnalytics = true;
+      student.exclude_from_analytics = true;
+      student.excludeFromLeaderboard = true;
+      student.exclude_from_leaderboard = true;
+      student.studyPartnerOptIn = false;
+    }
     student.incomingHandoffId = incomingHandoff?.record?.id || null;
     student.continuityBehaviorPrefillFields = continuityPrefill.appliedFields;
     student.sourceScoresCopied = false;
@@ -74760,9 +74859,10 @@ async function aylaAvailableQbankBanks(db, {
       return {
         id: String(collection.id),
         collection_key: String(collection.collection_key || ""),
-        name: isMccqeStep2Supplement
-          ? "UWorld Step 2 CK — Supplemental, non-scoring"
-          : String(collection.title || collection.collection_key || "Question Bank"),
+        name: aylaStudentBankName(collection, {
+          examTrack: normalizeAylaRegistryExamTrack(examTrack),
+          supplemental: isMccqeStep2Supplement,
+        }),
         source_provider: String(collection.source_provider || ""),
         source_profile: String(collection.source_profile || ""),
         source_year: Number(collection.source_year || 0) || null,
