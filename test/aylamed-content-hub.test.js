@@ -123,6 +123,26 @@ test("duplicate provider videos collapse into deterministic playlist entries", (
   assert.equal(catalog.videos[0].source_label, "Source");
 });
 
+test("Content Hub folders preserve Vimeo names and counts beyond the current page", () => {
+  const catalog = buildAylaContentHubCatalog({
+    examTrack: "usmle_step_1",
+    limit: 1,
+    videos: [
+      legacyVideo({ id: "folder-video-1", vimeoId: "701", vimeoUrl: "", folderId: "vimeo-folder-22", folderName: "01 — General Pathology" }),
+      legacyVideo({ id: "folder-video-2", vimeoId: "702", vimeoUrl: "", folderId: "vimeo-folder-22", folderName: "01 — General Pathology" }),
+      legacyVideo({ id: "folder-video-3", vimeoId: "703", vimeoUrl: "", folderId: "vimeo-folder-23", folderName: "02 — Immunology" }),
+    ],
+  });
+  assert.equal(catalog.videos.length, 1);
+  assert.equal(catalog.playlists.length, 2);
+  assert.deepEqual(catalog.playlists.map((row) => [row.title, row.video_count]), [
+    ["01 — General Pathology", 2],
+    ["02 — Immunology", 1],
+  ]);
+  assert.equal("videos" in catalog.playlists[0], false);
+  assert.equal(catalog.videos[0].playlist_title, "01 — General Pathology");
+});
+
 test("Content Hub exposes a complete exam-aware hierarchy without changing compatibility field names", () => {
   const catalog = buildAylaContentHubCatalog({
     examTrack: "usmle_step_1",
@@ -375,5 +395,7 @@ test("server and registry wire one entitlement-guarded Content Hub into the exis
   assert.match(deliveryQuery, /WHERE q\.exam_track=ANY\(\$1::text\[\]\)/);
   assert.match(deliveryQuery, /q\.taxonomy->>'subsystem_key'/);
   assert.match(deliveryQuery, /primary_subsystem_key AS subsystem_key/);
+  assert.match(deliveryQuery, /source_folder_name/);
+  assert.match(deliveryQuery, /va\.source_data->>'folder_name'/);
   assert.doesNotMatch(deliveryQuery, /va\.exam_track=ANY/);
 });
