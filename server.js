@@ -70174,7 +70174,12 @@ app.post("/api/ayla/auth/login", async (req, res) => {
     user.lastLoginAt = aylaNow();
     user.updatedAt = aylaNow();
     aylaSetItem(db, "aylaUsers", user);
-    await writeAylaDb(db);
+
+    // The AylaMed store can include large approved resource and roadmap
+    // collections. Login must not synchronously rewrite that entire store just
+    // to persist best-effort activity metadata. readAylaDb() returns the live
+    // cached collections, so this update remains visible immediately and is
+    // durably included with the next real AylaMed mutation.
 
     return aylaSendOk(res, { user: aylaSanitizeUser(user), token: aylaSignAuthToken(user) });
   } catch (error) {
@@ -87519,7 +87524,12 @@ app.post("/admin/mobile/invitations", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+async function startNextgenServer() {
+  const aylaWarmStartedAt = Date.now();
+  await readAylaDb();
+  console.log(`AylaMed cache warmed before listen in ${Date.now() - aylaWarmStartedAt} ms`);
+
+  app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Backend build=${NEXTGEN_BACKEND_BUILD}; JSON body limit=${NEXTGEN_JSON_BODY_LIMIT}; memory soft guard=${NEXTGEN_BACKGROUND_MEMORY_SOFT_PERCENT}% of ${NEXTGEN_RENDER_MEMORY_LIMIT_MB} MB`);
   ngRunKnownScheduleStartupReconciliation()
@@ -87570,4 +87580,10 @@ app.listen(PORT, () => {
   console.log(`LIVE_DB_PATH=${LIVE_DB_PATH}`);
   console.log(`AYLA_DB_PATH=${AYLA_DB_PATH}`);
   console.log(`CRM_DB_PATH=${CRM_DB_PATH}`);
+  });
+}
+
+startNextgenServer().catch((error) => {
+  console.error("Backend startup failed while warming the AylaMed database:", error.message);
+  process.exitCode = 1;
 });
