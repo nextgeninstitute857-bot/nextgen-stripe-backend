@@ -246,6 +246,10 @@ import {
   selectAylaRoadmapReading,
 } from "./lib/aylamed-library.js";
 import {
+  searchAylaLibraryGrounding,
+  summarizeAylaLibraryGrounding,
+} from "./lib/aylamed-library-grounding.js";
+import {
   applyBookMediaMatches,
   authorizedBookMediaResources,
   collectBookMediaReferences,
@@ -714,6 +718,10 @@ function aylaVimeoDraftHierarchyComplete(draft = {}) {
 }
 const MEMORY_STABILITY_BUILD = "v254-step1-vimeo-memory-circuit-breaker";
 const allowedOrigins = [
+  "capacitor://localhost",
+  "ionic://localhost",
+  "http://localhost",
+  "https://localhost",
   "https://live.nextgenusmlelms.com",
   "https://www.live.nextgenusmlelms.com",
   "https://lms.nextgenusmlelms.com",
@@ -66007,7 +66015,7 @@ function ngStartBillingExpiryRunner() {
 // Safe integration notes:
 // - Namespaced under /api/ayla so it does not collide with existing LMS/CRM routes.
 // - Uses a physically separate AYLA_DB_PATH (/var/data/aylamed-db.json).
-// - Reads approved education knowledge from CRM AI Training Center without writing to CRM.
+// - Grounds medical answers in approved, authorized, exam-scoped AylaMed Library pages.
 // - Never writes LMS users, enrollments, payments, plans, features, CRM leads, or CRM users.
 // - Frontend can connect to these routes later with VITE_API_BASE_URL pointing to this backend.
 // -----------------------------------------------------------------------------
@@ -67467,154 +67475,17 @@ function aylaBuildFlashcards(student, recommendation = aylaRecommendation(studen
   }));
 }
 
-function aylaKnowledgeExplicitScopes(item = {}) {
-  const raw = item.allowed_apps || item.scopes || item.apps || item.audience_scopes || [];
-  if (Array.isArray(raw)) return raw.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
-  return String(raw || "").split(/[\n,]+/).map((value) => value.trim().toLowerCase()).filter(Boolean);
-}
-
-function aylaTrainingItemEligible(item = {}, document = null) {
-  const active = item.active === true || item.is_active === true;
-  const approval = String(item.approval_status || item.status || "").toLowerCase();
-  const medical = String(item.medical_review_status || "approved").toLowerCase();
-  if (!active || !["approved", "active", "published"].includes(approval)) return false;
-  if (!["approved", "not_required", "", "complete"].includes(medical)) return false;
-  if (item.enforce_in_ai === false) return false;
-
-  const scopes = aylaKnowledgeExplicitScopes(item);
-  if (scopes.length && !scopes.some((scope) => ["all", "aylamed", "ayla", "medical_students", "lms_tutor_ai"].includes(scope))) return false;
-
-  const text = [item.title, item.category, item.source, item.audience, item.tags, item.content, document?.title, document?.category].join(" ").toLowerCase();
-  const educationSignals = ["education", "medical", "usmle", "first aid", "pathoma", "pathology", "physiology", "pharmacology", "anatomy", "biochemistry", "microbiology", "immunology", "cardiology", "renal", "neurology", "exam", "qbank", "revision", "match"].some((signal) => text.includes(signal));
-  const blockedSignals = ["lead objection", "sales script", "pricing objection", "whatsapp template", "campaign", "follow-up automation", "commission", "affiliate"].some((signal) => text.includes(signal));
-  return educationSignals && !blockedSignals;
-}
-
-function aylaKnowledgeTokens(value = "") {
-  return Array.from(new Set(String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").split(/\s+/).filter((token) => token.length > 2)));
-}
-
-function aylaSanitizeTrainingKnowledge(item = {}, document = null, score = 0) {
-  const structured = item.structured && typeof item.structured === "object" ? item.structured : {};
-  const metadata = item.metadata && typeof item.metadata === "object" ? item.metadata : {};
-  const qids = aylaCleanArray(
-    structured.qids ||
-    structured.uworld_qids ||
-    structured.question_ids ||
-    metadata.qids ||
-    metadata.uworld_qids ||
-    item.qids ||
-    item.uworld_qids ||
-    []
-  );
-  const pageStart = structured.page_start ?? structured.start_page ?? metadata.page_start ?? item.page_start ?? null;
-  const pageEnd = structured.page_end ?? structured.end_page ?? metadata.page_end ?? item.page_end ?? null;
-  const pageRange = String(
-    structured.page_range ||
-    structured.pages ||
-    metadata.page_range ||
-    item.page_range ||
-    (pageStart && pageEnd ? `${pageStart}-${pageEnd}` : pageStart || "")
-  ).trim();
-  const videoUrl = String(
-    structured.video_url ||
-    structured.lecture_url ||
-    metadata.video_url ||
-    item.video_url ||
-    item.lecture_url ||
-    ""
-  ).trim();
-  const exactTopic = String(
-    structured.topic ||
-    structured.section_title ||
-    structured.chapter_topic ||
-    metadata.topic ||
-    item.topic ||
-    ""
-  ).trim();
-  const resourceName = String(
-    structured.resource_name ||
-    structured.resource ||
-    metadata.resource_name ||
-    item.resource_name ||
-    document?.title ||
-    ""
-  ).trim();
-  const exactReference = String(
-    structured.exact_reference ||
-    structured.reference ||
-    metadata.exact_reference ||
-    item.exact_reference ||
-    ""
-  ).trim();
-  const timestamp = String(
-    structured.timestamp ||
-    structured.video_timestamp ||
-    metadata.timestamp ||
-    item.timestamp ||
-    ""
-  ).trim();
-
-  const referenceReady = Boolean(
-    pageRange ||
-    qids.length ||
-    videoUrl ||
-    exactReference ||
-    (resourceName && exactTopic)
-  );
-
-  return {
-    id: item.id,
-    document_id: item.document_id || null,
-    document_title: document?.title || null,
-    title: item.title || document?.title || "Education reference",
-    category: item.category || document?.category || "Education Knowledge",
-    tags: Array.isArray(item.tags) ? item.tags : aylaCleanArray(item.tags),
-    content: String(item.content || item.body || item.text || "").slice(0, 6000),
-    structured: Object.keys(structured).length ? structured : null,
-    resource_name: resourceName || null,
-    topic: exactTopic || null,
-    page_range: pageRange || null,
-    qids,
-    video_url: videoUrl || null,
-    video_title: structured.video_title || metadata.video_title || item.video_title || null,
-    timestamp: timestamp || null,
-    exact_reference: exactReference || null,
-    reference_ready: referenceReady,
-    source: "AI Training Center",
-    approval_status: item.approval_status || item.status || "approved",
-    score,
-  };
-}
-
-async function aylaSearchTrainingKnowledge({ query = "", limit = 8 } = {}) {
-  const crmDb = await readAylaCrmSnapshot();
-  const documents = new Map(ensureCrmArray(crmDb, "ai_training_documents").map((doc) => [String(doc.id), doc]));
-  const tokens = aylaKnowledgeTokens(query);
-  const rows = ensureCrmArray(crmDb, "ai_training_items")
-    .map((item) => ({ item, document: documents.get(String(item.document_id || "")) || null }))
-    .filter(({ item, document }) => aylaTrainingItemEligible(item, document))
-    .map(({ item, document }) => {
-      const haystack = [item.title, item.category, item.tags, item.content, item.structured, document?.title, document?.category].join(" ").toLowerCase();
-      let score = 0;
-      for (const token of tokens) {
-        if (String(item.title || "").toLowerCase().includes(token)) score += 12;
-        if (String(document?.title || "").toLowerCase().includes(token)) score += 10;
-        if (haystack.includes(token)) score += 3;
-      }
-      if (String(item.source || "").includes("education")) score += 2;
-      return { item, document, score };
-    })
-    .filter((row) => !tokens.length || row.score > 0)
-    .sort((a, b) => b.score - a.score || String(a.item.title || "").localeCompare(String(b.item.title || "")))
-    .slice(0, Math.max(1, Math.min(20, Number(limit || 8))))
-    .map(({ item, document, score }) => aylaSanitizeTrainingKnowledge(item, document, score));
-  return rows;
+async function aylaSearchExamLibraryKnowledge({ db = null, student = null, query = "", limit = 8 } = {}) {
+  if (!student) return [];
+  const aylaDb = db || await readAylaDb();
+  const examTrack = student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam;
+  const library = await aylaV211EligibleReadings(aylaDb, student, { allowLegacyCrm: false });
+  return searchAylaLibraryGrounding({ resources: library.resources, examTrack, query, limit });
 }
 
 async function aylaKnowledgeForStudent(db, student, recommendation = aylaRecommendation(student), limit = 6) {
   const query = [student.exam, recommendation.phase, recommendation.targetLabel, ...(aylaCleanArray(student.weakAreas)), ...(aylaCleanArray(student.selectedResources))].filter(Boolean).join(" ");
-  return aylaSearchTrainingKnowledge({ query, limit });
+  return aylaSearchExamLibraryKnowledge({ db, student, query, limit });
 }
 
 async function aylaSuccessStoryStrategiesForStudent(student = {}, assignments = [], limit = 3) {
@@ -70276,7 +70147,7 @@ app.get("/api/ayla/health", async (req, res) => {
     const counts = Object.fromEntries(Object.keys(AYLA_COLLECTIONS).map((key) => [key, aylaValues(db, key).length]));
     counts.aylaUsers = aylaValues(db, "aylaUsers").length;
     for (const key of AYLA_MARKETING_COLLECTION_KEYS) counts[key] = aylaValues(db, key).length;
-    const knowledge = await aylaKnowledgeStatus();
+    const knowledge = await aylaKnowledgeStatus(db);
     return aylaSendOk(res, {
       now: aylaNow(),
       counts,
@@ -70497,7 +70368,7 @@ app.get("/api/ayla/routes", (req, res) => {
       "POST /api/ayla/update-roadmap-after-assessment",
       "POST /api/ayla/match-study-partner",
       "POST /api/ayla/knowledge-search",
-      "CRUD routes for AylaMed operational data; knowledge is read-only from CRM AI Training Center",
+      "CRUD routes for AylaMed operational data; medical knowledge is read-only from the exam-scoped AylaMed Library",
       "CRUD routes for AylaMed-only plans, coupons, coupon redemptions, payments, enrollments, access logs, AI usage logs",
     ],
   });
@@ -72272,10 +72143,10 @@ app.post("/api/ayla/knowledge-search", async (req, res) => {
     const q = String(req.body.q || req.body.query || req.body.search || "").trim();
     const recommendation = aylaRecommendation(student);
     const expandedQuery = [q, student?.exam, recommendation?.phase, ...(aylaCleanArray(student?.weakAreas))].filter(Boolean).join(" ");
-    const results = await aylaSearchTrainingKnowledge({ query: expandedQuery, limit: Number(req.body.limit || 8) });
-    return aylaSendOk(res, { count: results.length, available: results.length > 0, source: "CRM AI Training Center", read_only: true, message: results.length ? "Approved AI Training Center knowledge is ready." : "No approved matching medical knowledge was found.", personalizedFor: student?.id || null, results });
+    const results = await aylaSearchExamLibraryKnowledge({ db, student, query: expandedQuery, limit: Number(req.body.limit || 8) });
+    return aylaSendOk(res, { count: results.length, available: results.length > 0, source: "AylaMed Exam Library", read_only: true, exam_track_id: aylaCanonicalExamTrack(student?.examTrackId || student?.exam_track_id || student?.exam), message: results.length ? "Approved exam-library knowledge is ready." : "No approved matching exam-library knowledge was found.", personalizedFor: student?.id || null, results });
   } catch (error) {
-    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to search AI Training Center knowledge");
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to search AylaMed exam-library knowledge");
   }
 });
 
@@ -72285,15 +72156,35 @@ function aylaPublicPlan(plan = {}) {
   return { id: plan.id, name: plan.name, description: plan.description, plan_type: plan.plan_type, billing_type: plan.billing_type, price_cents: Number(plan.price_cents || 0), currency: plan.currency || "usd", access_days: Number(plan.access_days || 0), included_features: matrix.included_features, feature_matrix: matrix.features, feature_matrix_version: matrix.feature_matrix_version, is_full_access: matrix.is_full_access, exam_tracks: aylaCleanArray(plan.exam_tracks).map(aylaCanonicalExamTrack).filter(Boolean), is_demo: Boolean(plan.is_demo), is_featured: Boolean(plan.is_featured), is_active: plan.is_active !== false, is_public: plan.is_public !== false, status: plan.status || "active" };
 }
 
-async function aylaKnowledgeStatus() {
-  const crmDb = await readAylaCrmSnapshot();
-  const documents = ensureCrmArray(crmDb, "ai_training_documents");
-  const documentMap = new Map(documents.map((doc) => [String(doc.id), doc]));
-  const eligible = ensureCrmArray(crmDb, "ai_training_items").filter((item) => aylaTrainingItemEligible(item, documentMap.get(String(item.document_id || "")) || null));
-  const eligibleDocumentIds = new Set(eligible.map((item) => String(item.document_id || "")).filter(Boolean));
-  const successStories = ensureCrmArray(crmDb, "ai_success_stories");
+async function aylaKnowledgeStatus(dbInput = null) {
+  const db = dbInput || await readAylaDb();
+  const allResources = aylaValues(db, "aylaResources");
+  const library = summarizeAylaLibraryGrounding({ resources: allResources });
+  let successStories = [];
+  try {
+    const crmDb = await readAylaCrmSnapshot();
+    successStories = ensureCrmArray(crmDb, "ai_success_stories");
+  } catch (error) {
+    console.warn("AylaMed success-story strategy source unavailable:", error.message);
+  }
   const eligibleSuccessStories = successStories.map(sanitizeAylaSuccessStoryForAdmin).filter((story) => story.consumption_eligible);
-  return { source: "CRM AI Training Center", read_only: true, eligible_items: eligible.length, eligible_documents: eligibleDocumentIds.size, total_training_items: ensureCrmArray(crmDb, "ai_training_items").length, total_documents: documents.length, eligible_success_stories: eligibleSuccessStories.length, total_success_stories: successStories.length, success_story_outcomes_exposed: false, managed_at: "/admin/crm/ai-training" };
+  return {
+    source: "AylaMed Exam Library",
+    source_scope: "approved_authorized_exam_scoped_exact_pages",
+    read_only: true,
+    eligible_items: library.eligible_items,
+    eligible_documents: library.eligible_documents,
+    eligible_books: library.eligible_books,
+    total_training_items: library.eligible_items,
+    total_documents: library.eligible_documents,
+    per_exam: library.per_exam,
+    legacy_crm_links_retained_as_metadata: allResources.filter((resource) => resource.sourceDocumentId || resource.source_document_id).length,
+    eligible_success_stories: eligibleSuccessStories.length,
+    total_success_stories: successStories.length,
+    success_story_source: "CRM AI Training Center — study-process strategies only",
+    success_story_outcomes_exposed: false,
+    managed_at: "/admin/resources",
+  };
 }
 
 const AYLA_MARKETING_COLLECTION_KEYS = Object.freeze([
@@ -72971,7 +72862,7 @@ app.get("/api/ayla/public-config", async (req, res) => {
       .filter((plan) => plan.is_active !== false && plan.is_public !== false)
       .sort((left, right) => Number(aylaPlanIsDemo(right)) - Number(aylaPlanIsDemo(left)) || String(left.name || "").localeCompare(String(right.name || "")))
       .map(aylaPublicPlan);
-    const knowledge = await aylaKnowledgeStatus();
+    const knowledge = await aylaKnowledgeStatus(db);
     return aylaSendOk(res, {
       site: {
         id: req.aylaExamSite?.site_id || null,
@@ -74280,11 +74171,11 @@ app.post("/api/ayla/ai/coach", async (req, res) => {
     if (usageStatus.blocked) return aylaSendError(res, 429, usageStatus.reason, usageStatus);
     const emergency = aylaEmergencyProtectionStatus(db, user.id);
     if (emergency.blocked) return aylaSendError(res, 429, emergency.reason);
-    const knowledge = await aylaSearchTrainingKnowledge({ query: [question, student?.exam, ...(aylaCleanArray(student?.weakAreas))].filter(Boolean).join(" "), limit: 6 });
+    const knowledge = await aylaSearchExamLibraryKnowledge({ db, student, query: [question, student?.exam, ...(aylaCleanArray(student?.weakAreas))].filter(Boolean).join(" "), limit: 6 });
     const context = knowledge.map((item, index) => `[${index + 1}] ${item.title}\n${item.content.slice(0, 1800)}`).join("\n\n");
     const successStrategyContext = (tutorSnapshot.decision.successStoryGuidance?.strategies || []).map((item, index) => `[S${index + 1}] ${item.patternLabel}\n${item.strategySteps.map((step) => `- ${step.action}${step.useWhen ? ` (use when: ${step.useWhen})` : ""}${step.caution ? ` (caution: ${step.caution})` : ""}`).join("\n")}\nApplicability: ${item.applicabilityNotes || "Adapt only when it fits the current roadmap assignment."}\nLimitations: ${item.limitations || "Outcomes vary; this does not promise the same result."}`).join("\n\n");
     const model = String(process.env.AYLA_AI_MODEL || process.env.AI_MODEL || "gpt-4o-mini");
-    const ai = await callOpenAIResponsesAPI({ model, maxOutputTokens: Math.max(500, Math.min(2200, Number(req.body.max_output_tokens || 1200))), systemPrompt: "You are AylaMed, an educational medical exam and Match preparation coach. Use only the supplied approved AI Training Center context for medical facts. Success-story strategy context is advisory study-process evidence only: never treat it as medical fact, expose student identity or outcome details, promise the same score/result, or blindly copy another student's plan. The supplied adaptive roadmap is authoritative: do not create a second schedule, replace its next action, invent resources, or claim that you changed it. Be practical, concise, and explicit when context is insufficient. Do not claim to diagnose or treat a patient. Return plain text.", userPrompt: `Student profile: ${JSON.stringify(student ? { exam: student.exam, targetDate: student.targetDate || student.examDate || student.matchDate, weakAreas: student.weakAreas, phase: student.phase || student.roadmapMode } : {})}\n\nAuthoritative roadmap context: ${JSON.stringify({ engine: tutorSnapshot.decision.engine, plan: tutorSnapshot.decision.generatedFromPlan, nextAction: tutorSnapshot.decision.nextAction, workload: tutorSnapshot.decision.workload, weakPattern: tutorSnapshot.decision.crossSystemWeakTopic })}\n\nApproved medical knowledge context:\n${context || "No approved matching medical context was found."}\n\nApproved anonymized success-story strategy context (advisory only; outcomes deliberately omitted):\n${successStrategyContext || "No approved matching strategy context was found."}\n\nQuestion:\n${question}` });
+    const ai = await callOpenAIResponsesAPI({ model, maxOutputTokens: Math.max(500, Math.min(2200, Number(req.body.max_output_tokens || 1200))), systemPrompt: "You are AylaMed, an educational medical exam and Match preparation coach. Use only the supplied approved, authorized, exam-scoped AylaMed Library pages for medical facts. Never use CRM training items as medical knowledge. Success-story strategy context is advisory study-process evidence only: never treat it as medical fact, expose student identity or outcome details, promise the same score/result, or blindly copy another student's plan. The supplied adaptive roadmap is authoritative: do not create a second schedule, replace its next action, invent resources, or claim that you changed it. Be practical, concise, cite the supplied book/page reference when available, and be explicit when context is insufficient. Do not claim to diagnose or treat a patient. Return plain text.", userPrompt: `Student profile: ${JSON.stringify(student ? { exam: student.exam, targetDate: student.targetDate || student.examDate || student.matchDate, weakAreas: student.weakAreas, phase: student.phase || student.roadmapMode } : {})}\n\nAuthoritative roadmap context: ${JSON.stringify({ engine: tutorSnapshot.decision.engine, plan: tutorSnapshot.decision.generatedFromPlan, nextAction: tutorSnapshot.decision.nextAction, workload: tutorSnapshot.decision.workload, weakPattern: tutorSnapshot.decision.crossSystemWeakTopic })}\n\nApproved medical knowledge context:\n${context || "No approved matching exam-library context was found."}\n\nApproved anonymized success-story strategy context (advisory only; outcomes deliberately omitted):\n${successStrategyContext || "No approved matching strategy context was found."}\n\nQuestion:\n${question}` });
     const log = await aylaRecordAiUsage(db, { user, studentId: student?.id || null, feature: req.body.feature || "ai_coach", model, usage: ai.usage, durationMs: Date.now() - started });
     await writeAylaDb(db);
     const after = aylaUsageStatus(db, user.id);
@@ -74315,7 +74206,7 @@ app.put("/api/ayla/admin/ai-usage/plans/:planId", async (req, res) => { try { aw
 app.put("/api/ayla/admin/ai-usage/students/:userId", async (req, res) => { try { await aylaRequireAdmin(req); const db = await readAylaDb(); aylaEnsureSeedData(db); const mode = ["inherit","custom","unlimited","blocked"].includes(String(req.body.mode)) ? String(req.body.mode) : "inherit"; db.aylaStudentAiOverrides[String(req.params.userId)] = { ...req.body, mode, updatedAt: aylaNow() }; await writeAylaDb(db); return aylaSendOk(res, { user_id: req.params.userId, override: db.aylaStudentAiOverrides[String(req.params.userId)] }); } catch (error) { return aylaSendError(res, error.statusCode || 500, error.message); } });
 app.delete("/api/ayla/admin/ai-usage/students/:userId", async (req, res) => { try { await aylaRequireAdmin(req); const db = await readAylaDb(); delete db.aylaStudentAiOverrides[String(req.params.userId)]; await writeAylaDb(db); return aylaSendOk(res, { user_id: req.params.userId, deleted: true }); } catch (error) { return aylaSendError(res, error.statusCode || 500, error.message); } });
 
-app.get("/api/ayla/admin/storage-safety", async (req, res) => { try { await aylaRequireAdmin(req); const aylaDb = await readAylaDb(); const knowledge = await aylaKnowledgeStatus(); const stat = await fs.stat(AYLA_DB_PATH).catch(()=>null); return aylaSendOk(res, { separation: { ayla_db_path: AYLA_DB_PATH, lms_db_path: LIVE_DB_PATH, crm_db_path: CRM_DB_PATH, ayla_writes_to_lms: false, ayla_writes_to_crm: false, knowledge_read_only_from_crm: true }, ayla_file: stat ? { size_bytes: stat.size, modified_at: stat.mtime.toISOString() } : { missing: true }, ayla_counts: Object.fromEntries(Object.keys(AYLA_COLLECTIONS).map((key)=>[key, aylaValues(aylaDb,key).length])), knowledge }); } catch (error) { return aylaSendError(res, error.statusCode || 500, error.message); } });
+app.get("/api/ayla/admin/storage-safety", async (req, res) => { try { await aylaRequireAdmin(req); const aylaDb = await readAylaDb(); const knowledge = await aylaKnowledgeStatus(aylaDb); const stat = await fs.stat(AYLA_DB_PATH).catch(()=>null); return aylaSendOk(res, { separation: { ayla_db_path: AYLA_DB_PATH, lms_db_path: LIVE_DB_PATH, crm_db_path: CRM_DB_PATH, ayla_writes_to_lms: false, ayla_writes_to_crm: false, medical_knowledge_source: "aylamed_exam_library", knowledge_reads_from_crm: false, crm_success_story_strategy_reads_only: true }, ayla_file: stat ? { size_bytes: stat.size, modified_at: stat.mtime.toISOString() } : { missing: true }, ayla_counts: Object.fromEntries(Object.keys(AYLA_COLLECTIONS).map((key)=>[key, aylaValues(aylaDb,key).length])), knowledge }); } catch (error) { return aylaSendError(res, error.statusCode || 500, error.message); } });
 
 app.post("/api/ayla/admin/backup", async (req, res) => { try { await aylaRequireAdmin(req); await ensureDataDir(); const dir = path.join(DATA_DIR,"backups"); await fs.mkdir(dir,{recursive:true}); const stamp = new Date().toISOString().replace(/[:.]/g,"-"); const backupPath = path.join(dir,`aylamed-db-${stamp}.json`); const db = await readAylaDb(); await ngWriteJsonAtomicStreaming(backupPath, db, "AylaMed backup"); return aylaSendOk(res,{backup_path:backupPath,created_at:aylaNow()}); } catch (error) { return aylaSendError(res,error.statusCode||500,error.message); } });
 
@@ -75398,12 +75289,13 @@ async function aylaV240EligibleCdmCases(db, student, date = aylaDateOnly()) {
   }
 }
 
-async function aylaV211EligibleReadings(db, student) {
+async function aylaV211EligibleReadings(db, student, { allowLegacyCrm = true } = {}) {
   const examTrack = student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam;
   const stored = aylaV189RelevantResources(db, student, ["book", "reading", "revision_sheet"]);
   let crmDb = null;
   let warning = null;
-  if (stored.some((resource) => resource.sourceDocumentId || resource.source_document_id)) {
+  const hasLegacyCrmResources = stored.some((resource) => resource.sourceDocumentId || resource.source_document_id);
+  if (allowLegacyCrm && hasLegacyCrmResources) {
     try {
       crmDb = await readAylaCrmSnapshot();
     } catch (error) {
@@ -75419,8 +75311,13 @@ async function aylaV211EligibleReadings(db, student) {
     if (!itemsByDocumentId.has(documentId)) itemsByDocumentId.set(documentId, []);
     itemsByDocumentId.get(documentId).push(item);
   }
+  if (!allowLegacyCrm && hasLegacyCrmResources) warning = "legacy_crm_page_hydration_disabled_for_medical_grounding";
   const hydrated = stored.map((resource) => {
     if (!resource.sourceDocumentId && !resource.source_document_id) return resource;
+    // A historical CRM source ID is metadata only. When medical grounding is
+    // local-only, keep the resource and let the strict library normalizer
+    // accept it only when complete approved page text is stored in AylaMed.
+    if (!allowLegacyCrm) return resource;
     const documentId = String(resource.sourceDocumentId || resource.source_document_id || "");
     return crmDb ? hydrateAylaLibraryResourceFromCrm({
       documents: [documentsById.get(documentId)].filter(Boolean),

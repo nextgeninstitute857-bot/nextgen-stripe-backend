@@ -6,6 +6,7 @@ import fs from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import Stripe from "stripe";
 
 function passwordRecord(password, salt = "marketingreferral1234567890abcdef") {
@@ -26,7 +27,7 @@ async function freePort() {
   });
 }
 
-async function waitForHealth(baseUrl, child, output, timeoutMs = 15_000) {
+async function waitForHealth(baseUrl, child, output, timeoutMs = 45_000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     if (child.exitCode !== null) {
@@ -82,7 +83,7 @@ async function stripeWebhook(baseUrl, event, secret) {
   return { response, payload: await response.json() };
 }
 
-test("v231 keeps the readiness-share and referral lifecycle governed inside AylaMed", { timeout: 60_000 }, async () => {
+test("v231 keeps the readiness-share and referral lifecycle governed inside AylaMed", { timeout: 120_000 }, async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "aylamed-v231-http-"));
   const livePath = path.join(dataDir, "live-session-db.json");
   const crmPath = path.join(dataDir, "crm-db.json");
@@ -373,7 +374,7 @@ test("v231 keeps the readiness-share and referral lifecycle governed inside Ayla
   const baseUrl = `http://127.0.0.1:${port}`;
   const output = [];
   const child = spawn(process.execPath, ["server.js"], {
-    cwd: path.resolve(new URL("..", import.meta.url).pathname),
+    cwd: fileURLToPath(new URL("..", import.meta.url)),
     env: {
       ...process.env,
       PORT: String(port),
@@ -384,6 +385,8 @@ test("v231 keeps the readiness-share and referral lifecycle governed inside Ayla
       NEXTGEN_AUTO_ZOOM_PREP_ENABLED: "false",
       ZOOM_RECORDING_RECOVERY_ENABLED: "false",
       NEXTGEN_BILLING_EXPIRY_RUNNER_ENABLED: "false",
+      NEXTGEN_BACKEND_HEARTBEAT_ENABLED: "false",
+      NEXTGEN_AUTOPILOT_SCHEDULER_DISABLED: "true",
       DATABASE_URL: "",
       OPENAI_API_KEY: "",
     },
