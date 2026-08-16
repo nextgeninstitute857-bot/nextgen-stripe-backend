@@ -59,6 +59,7 @@ import {
   listContentQbankQuestions,
   listContentRegistryFlashcardQuestions,
   listContentCollections,
+  listContentStudentQbankBanks,
   listContentCdmCases,
   listContentTaxonomyAuditEvents,
   listContentTaxonomyReviewQueue,
@@ -74687,7 +74688,12 @@ async function aylaPublishedQbankCollections(db, {
   const targetExamTrackId = aylaCanonicalExamTrack(examTrack);
   const sourceRegistryTrack = normalizeAylaRegistryExamTrack(sourceExamTrack);
   if (!targetExamTrackId || !sourceRegistryTrack) return [];
-  const collections = await aylaListAllContentCollections(sourceRegistryTrack);
+  const collections = await listContentStudentQbankBanks({
+    examTrack: sourceRegistryTrack,
+    destinationScope,
+    sourceProfile,
+    timeoutMs: 4000,
+  });
   return collections
     .filter((collection) => String(collection.status || "") === "approved")
     .filter((collection) => aylaQbankCollectionDeliveryChannel(collection, {

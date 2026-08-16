@@ -265,6 +265,7 @@ test("MCCQE supplemental questions retain bank identity and never enter official
 
 test("student catalog and session routes carry named-bank IDs without copying supplements", () => {
   const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
+  const postgres = fs.readFileSync(new URL("../lib/content-registry-postgres.js", import.meta.url), "utf8");
   const catalogRoute = server.slice(
     server.indexOf('app.get("/api/ayla/qbank/catalog"'),
     server.indexOf('app.post("/api/ayla/qbank/sessions"'),
@@ -285,6 +286,9 @@ test("student catalog and session routes carry named-bank IDs without copying su
   assert.match(server, /UWorld Step 2 CK — Supplemental, non-scoring/);
   assert.match(server, /scoringAllowed: mapping\.scoringAllowed !== false/);
   assert.match(server, /aylaQbankCollectionDeliveryChannel\(collection,[\s\S]*?=== "qbank"/);
+  assert.match(server, /listContentStudentQbankBanks/);
+  assert.match(postgres, /export async function listContentStudentQbankBanks/);
+  assert.match(postgres, /'student-qbank-banks'/);
 });
 
 test("self-study sessions preserve the selected source profile while roadmap sessions may remain combined", () => {
