@@ -7,7 +7,9 @@ import {
   createAylaQbankSession,
   finalizeAylaQbankSession,
   mergeConcurrentAylaQbankCollection,
+  normalizeAylaQbankDifficulty,
   normalizeAylaQbankExamTrack,
+  normalizeAylaQbankFilters,
   normalizeAylaQbankMode,
   normalizeAylaQbankPurpose,
   qbankRoadmapAssignmentQuestionIds,
@@ -77,6 +79,30 @@ test("AylaMed and Content Registry exam aliases resolve to one canonical boundar
   assert.equal(normalizeAylaQbankExamTrack("usmle_step_3"), "usmle-step-3");
   assert.equal(normalizeAylaQbankMode("assessment mode"), "test");
   assert.equal(normalizeAylaQbankPurpose("take diagnostic"), "baseline_diagnostic");
+  assert.equal(normalizeAylaQbankDifficulty("mixed"), "adaptive");
+  assert.equal(normalizeAylaQbankDifficulty("Hard"), "hard");
+  assert.deepEqual(normalizeAylaQbankFilters({ difficulty: "easy" }), {
+    system_key: "",
+    subsystem_key: "",
+    topic_key: "",
+    subtopic_key: "",
+    difficulty: "easy",
+  });
+  assert.throws(
+    () => normalizeAylaQbankDifficulty("expert"),
+    (error) => error.code === "INVALID_QBANK_DIFFICULTY" && error.statusCode === 400,
+  );
+});
+
+test("student QBank difficulty uses verified item-performance bands in registry selection", () => {
+  const postgres = fs.readFileSync(new URL("../lib/content-registry-postgres.js", import.meta.url), "utf8");
+  const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
+  assert.match(postgres, /peopleTaken/);
+  assert.match(postgres, /correctTaken/);
+  assert.match(postgres, />= 0\.70 THEN 'easy'/);
+  assert.match(postgres, />= 0\.40 THEN 'medium'/);
+  assert.match(postgres, /ELSE 'hard'/);
+  assert.match(server, /difficulty: filters\.difficulty/);
 });
 
 test("unscoped legacy enrollment is restricted to the owned student profile exam", () => {
