@@ -42517,11 +42517,16 @@ app.get("/api/ayla/qbank/catalog", async (req, res) => {
     const examTrack = access.exam_track;
     aylaRequireExamPublished(auth.db, aylaCanonicalExamTrack(examTrack), "qbank");
     const destinationScope = aylaStudentCatalogDestinationScope(auth.student);
-    const presentationPolicy = await getContentQbankPresentationPolicy({ examTrack });
-    const sourceProfile = resolveContentQbankStudentSourceProfile(
-      presentationPolicy,
-      req.query.source_profile || req.query.sourceProfile || "",
-    );
+    const bankSummaryMode = String(req.query.view || "") === "bank_summary";
+    const presentationPolicy = bankSummaryMode
+      ? {}
+      : await getContentQbankPresentationPolicy({ examTrack });
+    const sourceProfile = bankSummaryMode
+      ? ""
+      : resolveContentQbankStudentSourceProfile(
+        presentationPolicy,
+        req.query.source_profile || req.query.sourceProfile || "",
+      );
     const availableBanks = await aylaAvailableQbankBanks(auth.db, {
       examTrack,
       destination: "qbank",
@@ -42542,22 +42547,31 @@ app.get("/api/ayla/qbank/catalog", async (req, res) => {
       if (!banksBySourceExam.has(bank.source_exam_track)) banksBySourceExam.set(bank.source_exam_track, []);
       banksBySourceExam.get(bank.source_exam_track).push(bank);
     }
-    const catalog = (await Promise.all([...banksBySourceExam.entries()].map(async ([sourceExamTrack, banks]) => {
-      const collectionIds = banks.map((row) => row.id);
-      const rows = await getContentQbankCatalog({
-        examTrack: sourceExamTrack,
-        destination: "aylamed_qbank",
-        destinationScope,
-        sourceProfile,
-        collectionIds,
-      });
-      return rows.map((row) => ({
-        ...row,
-        source_exam_track: sourceExamTrack,
-        supplemental: sourceExamTrack !== examTrack,
-        scoring_allowed: sourceExamTrack === examTrack,
-      }));
-    }))).flat();
+    const catalog = bankSummaryMode
+      ? selectedBanks.map((bank) => ({
+        bank_id: bank.id,
+        bank_name: bank.name,
+        source_exam_track: bank.source_exam_track,
+        supplemental: bank.supplemental === true,
+        scoring_allowed: bank.scoring_allowed !== false,
+        question_count: Number(bank.question_count || 0),
+      }))
+      : (await Promise.all([...banksBySourceExam.entries()].map(async ([sourceExamTrack, banks]) => {
+        const collectionIds = banks.map((row) => row.id);
+        const rows = await getContentQbankCatalog({
+          examTrack: sourceExamTrack,
+          destination: "aylamed_qbank",
+          destinationScope,
+          sourceProfile,
+          collectionIds,
+        });
+        return rows.map((row) => ({
+          ...row,
+          source_exam_track: sourceExamTrack,
+          supplemental: sourceExamTrack !== examTrack,
+          scoring_allowed: sourceExamTrack === examTrack,
+        }));
+      }))).flat();
     return aylaSendOk(res, {
       exam_track: examTrack,
       entitlement: { type: access.entitlement_type, expires_at: access.expires_at || null },
@@ -42676,13 +42690,8 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
     }
     const effectiveRequestedCount = roadmapAssignmentId ? roadmapQuestionIds.length : requestedCount;
     const effectiveFilters = roadmapAssignmentId ? normalizeAylaQbankFilters({}) : filters;
-    const presentationPolicy = await getContentQbankPresentationPolicy({ examTrack: access.exam_track });
-    const sourceProfile = roadmapAssignmentId || purpose === "baseline_diagnostic"
-      ? ""
-      : resolveContentQbankStudentSourceProfile(
-        presentationPolicy,
-        req.body.source_profile || req.body.sourceProfile || "",
-      );
+    const presentationPolicy = {};
+    const sourceProfile = "";
     let availableBanks = [];
     let selectedCollectionIds = [];
     let selectedBanks = [];
@@ -74681,6 +74690,10 @@ async function aylaPublishedQbankCollections(db, {
   const collections = await aylaListAllContentCollections(sourceRegistryTrack);
   return collections
     .filter((collection) => String(collection.status || "") === "approved")
+    .filter((collection) => aylaQbankCollectionDeliveryChannel(collection, {
+      hasQbankDestination: true,
+      hasNbmeDestination: false,
+    }) === "qbank")
     .filter((collection) => !sourceProfile || String(collection.source_profile || "") === String(sourceProfile))
     .filter((collection) => aylaContentCollectionDestinationEnabled(
       collection,
