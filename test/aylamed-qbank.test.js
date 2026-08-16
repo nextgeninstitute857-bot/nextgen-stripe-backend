@@ -291,6 +291,7 @@ test("student catalog and session routes carry named-bank IDs without copying su
   assert.match(server, /listContentStudentQbankBanks/);
   assert.match(postgres, /export async function listContentStudentQbankBanks/);
   assert.match(postgres, /'student-qbank-banks'/);
+  assert.match(postgres, /ayla\[\[:space:\]_\-\]\*med/);
 });
 
 test("self-study sessions preserve the selected source profile while roadmap sessions may remain combined", () => {
