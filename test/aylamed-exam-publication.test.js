@@ -29,13 +29,13 @@ test("delivery-channel classification preserves real banks and isolates only kno
   }, { hasNbmeDestination: true }), "nbme");
 });
 
-test("book, video and flashcard children collapse to named folder controls", () => {
+test("current learning resources collapse to named folder controls and legacy CDM stays retired", () => {
   assert.deepEqual(aylaPublicationGroupForResource({ type: "book", id: "book-1", folder_id: "plab-library", folder_name: "PLAB Library" }), {
     groupType: "book_folder", groupId: "plab-library", title: "PLAB Library",
   });
   assert.equal(aylaPublicationGroupForResource({ type: "video", id: "video-1", folder_id: "step2-videos" }).groupType, "vimeo_folder");
   assert.equal(aylaPublicationGroupForResource({ type: "flashcard_collection", id: "card-1", collection_id: "step2-flash" }).groupId, "step2-flash");
-  assert.equal(aylaPublicationGroupForResource({ type: "cdm_program", id: "case-1", provider: "ACE" }).groupId, "legacy-cdm-ace");
+  assert.equal(aylaPublicationGroupForResource({ type: "cdm_program", id: "case-1", provider: "ACE" }), null);
 });
 
 test("compact groups expose configured and effective state without flattening child details", () => {

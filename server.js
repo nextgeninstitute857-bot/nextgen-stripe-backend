@@ -43486,6 +43486,15 @@ function aylaCdmLegacyNotice() {
   };
 }
 
+const AYLA_CURRENT_MCCQE_CDM_ENABLED = false;
+
+app.use("/api/ayla/cdm", (req, res) => aylaSendError(
+  res,
+  410,
+  "Clinical Decision Making cases were removed from the current MCCQE format. Use the current MCCQE MCQ banks instead.",
+  { current_mccqe_format: "230 multiple-choice questions", cdm_removed_from_current_exam: true },
+));
+
 async function aylaPlayableCdmSession(db, session) {
   const sourceCase = await getContentCdmCase({
     caseId: session.caseId,
@@ -66185,7 +66194,7 @@ const DEFAULT_AYLA_SETTINGS = {
     require_verified_mapping: true,
     allow_external_question_ids: true,
     allow_internal_mcqs: true,
-    assignment_mix: { reading: true, video: true, external_questions: true, internal_mcqs: true, cdm_cases: true, flashcards: true, assessments: true },
+    assignment_mix: { reading: true, video: true, external_questions: true, internal_mcqs: true, cdm_cases: false, flashcards: true, assessments: true },
   },
   adaptive: {
     low_completion_days: 3,
@@ -70447,9 +70456,7 @@ async function aylaPublicationResourceSnapshot(db, panel) {
     };
   });
   let qbankCollections = [];
-  let cdmPrograms = [];
   let publicationRegistryWarning = null;
-  let cdmRegistryWarning = null;
   if (contentRegistryStatus().configured) {
     try {
       qbankCollections = (await aylaListPublicationPanelContentCollections()).map((collection) => {
@@ -70487,45 +70494,15 @@ async function aylaPublicationResourceSnapshot(db, panel) {
           media_ambiguous_count: Number(collection.media_ambiguous_count || 0),
         };
       });
-      try {
-        const cases = await listContentCdmCases({ examTrack: "mccqe", destination: "aylamed_cdm", limit: 200, seed: "publication-controls" });
-        const programs = new Map();
-        for (const row of cases) {
-          const collectionId = String(row.collection_id || "ace-legacy-cdm");
-          const sourceLabel = String(row.source_label || "").trim();
-          const displaySource = sourceLabel && sourceLabel !== "Clinical decision source" ? sourceLabel : "ACE";
-          const current = programs.get(collectionId) || {
-            id: collectionId,
-            type: "cdm_program",
-            exam_track_id: "mccqe",
-            title: `${displaySource} Legacy CDM`,
-            folder_id: collectionId,
-            source_provider: displaySource,
-            status: "approved",
-            approved: true,
-            authorization_status: "approved_registry_collection",
-            verification_status: "verified",
-            case_count: 0,
-            step_count: 0,
-          };
-          current.case_count += 1;
-          current.step_count += Number(row.step_count || 0);
-          programs.set(collectionId, current);
-        }
-        cdmPrograms = [...programs.values()];
-      } catch (error) {
-        cdmRegistryWarning = { code: "cdm_registry_unavailable", message: "MCCQE legacy CDM counts could not be loaded; its availability control remains fail-closed." };
-      }
     } catch (error) {
       publicationRegistryWarning = {
         code: error.code === "AYLA_PUBLICATION_REGISTRY_TIMEOUT" ? "qbank_registry_timeout" : "qbank_registry_unavailable",
         message: "QBank collections could not be loaded. Exam, video, book and flashcard publication controls remain available.",
       };
-      cdmRegistryWarning = { code: "cdm_registry_unavailable", message: "MCCQE legacy CDM counts were not queried because the content registry is unavailable." };
     }
   }
   const nativeResources = [...new Map(
-    [...storedResources, ...vimeoFolders, ...qbankCollections, ...cdmPrograms]
+    [...storedResources, ...vimeoFolders, ...qbankCollections]
       .filter((resource) => resource.id && resource.exam_track_id && resource.type)
       .map((resource) => [`${resource.exam_track_id}:${resource.type}:${resource.id}`, resource]),
   ).values()];
@@ -70546,7 +70523,7 @@ async function aylaPublicationResourceSnapshot(db, panel) {
     [...nativeResources, ...supplementalResources]
       .map((resource) => [`${resource.exam_track_id}:${resource.type}:${resource.id}`, resource]),
   ).values()];
-  return { availableResources, publicationRegistryWarning, cdmRegistryWarning };
+  return { availableResources, publicationRegistryWarning };
 }
 
 app.get("/api/ayla/admin/publication-controls", async (req, res) => {
@@ -70558,7 +70535,7 @@ app.get("/api/ayla/admin/publication-controls", async (req, res) => {
       examControls: aylaValues(db, "aylaExamPublicationControls"),
       resourceControls: aylaValues(db, "aylaResourcePublicationControls"),
     });
-    const { availableResources, publicationRegistryWarning, cdmRegistryWarning } = await aylaPublicationResourceSnapshot(db, panel);
+    const { availableResources, publicationRegistryWarning } = await aylaPublicationResourceSnapshot(db, panel);
     const publicationGroups = buildAylaCompactPublicationGroups({
       exams: panel.exams,
       resourceControls: panel.resources,
@@ -70571,7 +70548,6 @@ app.get("/api/ayla/admin/publication-controls", async (req, res) => {
       publication_groups: publicationGroups,
       supplements: Object.fromEntries(panel.exams.map((exam) => [exam.examTrackId, listAylaExamSupplements(exam.examTrackId)])),
       publication_registry_warning: publicationRegistryWarning,
-      cdm_registry_warning: cdmRegistryWarning,
     });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load publication controls");
@@ -76682,9 +76658,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   const contentHubEnabled = aylaV210StudentFeatureAllowed(db, student, "content_hub");
   const libraryEnabled = aylaV210StudentFeatureAllowed(db, student, "library");
   const qbankEnabled = aylaV210StudentFeatureAllowed(db, student, "qbank");
-  const cdmEnabled = aylaCanonicalExamTrack(
-    student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam,
-  ) === "mccqe" && aylaV210StudentFeatureAllowed(db, student, "qbank");
+  const cdmEnabled = AYLA_CURRENT_MCCQE_CDM_ENABLED;
   const storedRelevant = aylaV189RelevantResources(db, student, ["book", "reading", "revision_sheet", "vimeo_video", "video_transcript", "external_question", "external_qid_mapping", "internal_mcq", "flashcard", "assessment", "assessment_blueprint"]);
   const contentHub = contentHubEnabled
     ? await aylaV210EligibleVideos(db, student, { forRoadmap: true })
@@ -76692,9 +76666,6 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   const library = libraryEnabled
     ? await aylaV211EligibleReadings(db, student)
     : { resources: [], warning: null };
-  const cdm = cdmEnabled
-    ? await aylaV240EligibleCdmCases(db, student, date)
-    : { cases: [], warning: null };
   const allRelevant = [
     ...storedRelevant.filter((row) => !["book", "reading", "revision_sheet", "vimeo_video", "video_transcript"].includes(aylaV189ResourceType(row.type))),
     ...library.resources,
@@ -76792,7 +76763,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     qbankRegistryWarning: registryQbank.warning,
     qbankDestinationScope: registryQbank.destinationScope || null,
     cdmEnabled,
-    cdmRegistryWarning: cdm.warning,
+    cdmRegistryWarning: null,
     notebookMemory: aylaV190NotebookMemory(db, student),
     continuityContext: continuityCarry
       ? {
@@ -77086,36 +77057,6 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       rationale: "Original verified MCQs for the same daily focus. Correctness is scored only on the server.",
     });
     else plan.missingResourceTypes.push("internal_mcqs_for_focus");
-  }
-
-  if (mix.cdm_cases !== false && cdmEnabled) {
-    const pick = cdm.cases.slice(0, 1);
-    if (pick.length) {
-      const assignment = aylaV189BuildDailyPlanAddAssignment(
-        db,
-        student,
-        plan,
-        assignments,
-        effectiveCapacity,
-        "cdm_case",
-        pick,
-        `Clinical decision practice: ${pick[0].title}`,
-        {
-          type: "cdm_case",
-          estimatedMinutes: pick[0].estimatedMinutes,
-          system: pick[0].system,
-          subsystem: pick[0].subsystem,
-          topic: pick[0].topic,
-          priority: "High",
-          rationale: "An approved legacy CDM case for written clinical-decision practice. Completion requires every step to be answered and self-reviewed; it does not create an MCCQE score.",
-        },
-      );
-      if (assignment) assignment.cdmCaseId = pick[0].cdmCaseId;
-    } else if (cdm.warning) {
-      plan.missingResourceTypes.push(cdm.warning);
-    } else {
-      plan.missingResourceTypes.push("legacy_cdm_case_for_mccqe");
-    }
   }
 
   if (mix.flashcards !== false) {
