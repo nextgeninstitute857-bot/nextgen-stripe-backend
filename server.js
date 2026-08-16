@@ -77956,14 +77956,16 @@ async function aylaV213PersonalTutorSnapshot(db, user, student, date = aylaDateO
     cleanDate,
     { questionAttempts, assessmentAttempts },
   );
+  const systemProgress = aylaV189SystemProgress(db, student);
+  const warning = aylaV189BacklogWarning(db, student, cleanDate, systemProgress);
   const decision = buildAylaPersonalTutorDecision({
     date: cleanDate,
     student,
     plan: safeBundle.plan,
     assignments: safeBundle.assignments,
     recentPlans,
-    warning: aylaV189BacklogWarning(db, student, cleanDate),
-    systemProgress: aylaV189SystemProgress(db, student),
+    warning,
+    systemProgress,
     questionAttempts,
     assessmentAttempts,
     nbmeAttempts,
@@ -77997,6 +77999,8 @@ async function aylaV213PersonalTutorSnapshot(db, user, student, date = aylaDateO
     date: cleanDate,
     decision,
     startingReadinessReport,
+    systemProgress,
+    warning,
     plan: safeBundle.plan,
     assignments: safeBundle.assignments,
     stablePlanReused: built.reused,
@@ -78051,22 +78055,12 @@ async function aylaV213AtomicTutorSnapshot(initial, date) {
   // load and leaves the mutation queue for genuine plan creation or changes.
   if (currentPlan) {
     const { user, student } = aylaV213AtomicTutorContext(cachedDb, initial);
-    const snapshot = await aylaV213PersonalTutorSnapshot(cachedDb, user, student, cleanDate);
-    return {
-      ...snapshot,
-      systemProgress: aylaV189SystemProgress(cachedDb, student),
-      warning: aylaV189BacklogWarning(cachedDb, student, cleanDate),
-    };
+    return aylaV213PersonalTutorSnapshot(cachedDb, user, student, cleanDate);
   }
 
   return mutateAylaDb(async (db) => {
     const { user, student } = aylaV213AtomicTutorContext(db, initial);
-    const snapshot = await aylaV213PersonalTutorSnapshot(db, user, student, cleanDate);
-    return {
-      ...snapshot,
-      systemProgress: aylaV189SystemProgress(db, student),
-      warning: aylaV189BacklogWarning(db, student, cleanDate),
-    };
+    return aylaV213PersonalTutorSnapshot(db, user, student, cleanDate);
   });
 }
 
