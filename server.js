@@ -59,6 +59,7 @@ import {
   listContentQbankQuestions,
   listContentRegistryFlashcardQuestions,
   listContentCollections,
+  listContentStudentQbankBanks,
   listContentCdmCases,
   listContentTaxonomyAuditEvents,
   listContentTaxonomyReviewQueue,
@@ -74660,6 +74661,17 @@ function aylaContentCollectionDestinationEnabled(collection, destination, destin
   });
 }
 
+function aylaStudentFacingExternalQbankCollection(collection = {}) {
+  const identity = [
+    collection.source_namespace,
+    collection.source_provider,
+    collection.source_profile,
+    collection.collection_key,
+    collection.title,
+  ].map((value) => String(value || "").toLowerCase()).join(" ");
+  return !/(?:^|[^a-z])ayla[\s_-]*med(?:[^a-z]|$)/i.test(identity);
+}
+
 async function aylaPublishedQbankCollectionIds(db, {
   examTrack,
   sourceExamTrack = examTrack,
@@ -74687,9 +74699,15 @@ async function aylaPublishedQbankCollections(db, {
   const targetExamTrackId = aylaCanonicalExamTrack(examTrack);
   const sourceRegistryTrack = normalizeAylaRegistryExamTrack(sourceExamTrack);
   if (!targetExamTrackId || !sourceRegistryTrack) return [];
-  const collections = await aylaListAllContentCollections(sourceRegistryTrack);
+  const collections = await listContentStudentQbankBanks({
+    examTrack: sourceRegistryTrack,
+    destinationScope,
+    sourceProfile,
+    timeoutMs: 4000,
+  });
   return collections
     .filter((collection) => String(collection.status || "") === "approved")
+    .filter(aylaStudentFacingExternalQbankCollection)
     .filter((collection) => aylaQbankCollectionDeliveryChannel(collection, {
       hasQbankDestination: true,
       hasNbmeDestination: false,

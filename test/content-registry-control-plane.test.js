@@ -388,7 +388,8 @@ test('QBank presentation policy is persistent per exam and cannot alter roadmap 
   assert.match(postgres, /student_bank_mode TEXT NOT NULL DEFAULT 'unified_aylamed'/);
   assert.match(server, /content-registry\/qbank-presentation-policy/);
   assert.match(server, /Roadmap and Personal Tutor continue using all approved source profiles/);
-  assert.match(server, /roadmapAssignmentId \|\| purpose === "baseline_diagnostic"\s*\?\s*""/);
+  assert.match(server, /const sourceProfile = ""/);
+  assert.match(server, /if \(!roadmapAssignmentId && purpose !== "baseline_diagnostic"\)/);
 });
 
 test('source learning profiles remain separate from collection question-ID display policy', () => {
