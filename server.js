@@ -129,6 +129,13 @@ import {
   normalizeAylaNclexVariant,
   requireAylaNclexVariant,
 } from "./lib/aylamed-nclex-variant.js";
+import {
+  aylaNclexDiagnosticBlueprint,
+  aylaNclexDiagnosticBlueprintSnapshot,
+  aylaNclexDiagnosticQuestionClientNeed,
+  aylaNclexDiagnosticSystems,
+  aylaNclexDiagnosticTargetPercentages,
+} from "./lib/aylamed-nclex-diagnostic.js";
 import { buildAylaScheduleRisk } from "./lib/aylamed-schedule-risk.js";
 import {
   buildAylaAssessmentLearningGate,
@@ -41263,6 +41270,7 @@ async function aylaSelectQbankSessionQuestions({
   questionExposureCounts = {},
   seenQuestionIds = [],
   allowedCollectionIds = [],
+  examVariant = "",
 } = {}) {
   const publicationDestination = purpose === "baseline_diagnostic" ? "diagnostic" : "qbank";
   if (purpose !== "baseline_diagnostic" && Array.isArray(selectedBanks) && selectedBanks.length) {
@@ -41374,6 +41382,15 @@ async function aylaSelectQbankSessionQuestions({
   ).values()];
   const examTrackId = aylaCanonicalExamTrack(examTrack);
   const examDefinition = AYLA_EXAM_REGISTRY[examTrackId] || {};
+  const nclexBlueprint = examTrackId === "nclex"
+    ? aylaNclexDiagnosticBlueprint(examVariant)
+    : null;
+  if (examTrackId === "nclex" && !nclexBlueprint) {
+    const error = new Error("Choose NCLEX-RN or NCLEX-PN before starting the diagnostic");
+    error.statusCode = 409;
+    error.code = "NCLEX_VARIANT_REQUIRED";
+    throw error;
+  }
   const multiExamMinimumSystems = {
     // A seeded 200-question Step 2 discovery window consistently exposes six
     // or more verified clinical lanes. Requiring a rare seventh lane made a
@@ -41397,24 +41414,31 @@ async function aylaSelectQbankSessionQuestions({
     : buildMultiExamDiagnosticSelection(candidates, {
       requestedCount,
       minimumSystems: Math.min(multiExamMinimumSystems[examTrackId] || 6, requestedCount),
-      allowedSystems: examDefinition.systems || [],
-      resolveSystem: (question) => aylaV227CanonicalSystemForStudent(
-        { examTrack: examTrackId },
-        question.system_label
-          || question.taxonomy?.labels?.system
-          || question.system_key
-          || question.taxonomy?.system_key
-          || question.system,
-        "",
-        question.subsystem_label
-          || question.taxonomy?.labels?.subsystem
-          || question.subsystem_key
-          || question.taxonomy?.subsystem_key
-          || question.subsystem,
-      ),
+      allowedSystems: nclexBlueprint
+        ? aylaNclexDiagnosticSystems(examVariant)
+        : examDefinition.systems || [],
+      resolveSystem: (question) => nclexBlueprint
+        ? aylaNclexDiagnosticQuestionClientNeed(question, examVariant)
+        : aylaV227CanonicalSystemForStudent(
+          { examTrack: examTrackId },
+          question.system_label
+            || question.taxonomy?.labels?.system
+            || question.system_key
+            || question.taxonomy?.system_key
+            || question.system,
+          "",
+          question.subsystem_label
+            || question.taxonomy?.labels?.subsystem
+            || question.subsystem_key
+            || question.taxonomy?.subsystem_key
+            || question.subsystem,
+        ),
       preferredQuestionIds,
       selectionSeed,
       questionExposureCounts,
+      targetPercentBySystem: nclexBlueprint
+        ? aylaNclexDiagnosticTargetPercentages(examVariant)
+        : {},
     });
   if (!blueprint.ready) {
     const error = new Error(
@@ -41435,6 +41459,12 @@ async function aylaSelectQbankSessionQuestions({
       unavailable_preferred_questions: blueprint.preferredUnavailableCount,
       replacement_gaps: blueprint.rejected.unmatchedReplacements,
       unclassified_questions: blueprint.rejectedUnclassifiedCount,
+      official_weighting_ready: blueprint.weightingReady !== false,
+      target_question_counts: blueprint.targetQuestionCountBySystem || null,
+      selected_question_counts: blueprint.selectedQuestionCountBySystem || null,
+      official_blueprint: nclexBlueprint
+        ? aylaNclexDiagnosticBlueprintSnapshot(examVariant)
+        : null,
       private_drafts_exposed: false,
     };
     throw error;
@@ -41448,6 +41478,9 @@ async function aylaSelectQbankSessionQuestions({
     ),
     diagnosticReplacementLineage: blueprint.replacements,
     diagnosticTaxonomyByQuestionId: blueprint.diagnosticTaxonomyByQuestionId,
+    diagnosticBlueprint: nclexBlueprint
+      ? aylaNclexDiagnosticBlueprintSnapshot(examVariant)
+      : null,
     blueprintVersion: AYLA_DIAGNOSTIC_BLUEPRINT_VERSION,
     quality: {
       blueprintVersion: AYLA_DIAGNOSTIC_BLUEPRINT_VERSION,
@@ -41472,6 +41505,16 @@ async function aylaSelectQbankSessionQuestions({
       maximumPriorExposure: blueprint.maximumPriorExposure,
       taxonomyDepthReady: blueprint.taxonomyDepthReady,
       taxonomyCoverage: blueprint.taxonomyCoverage,
+      weightingRequired: Boolean(nclexBlueprint),
+      weightingReady: blueprint.weightingReady !== false,
+      targetPercentBySystem: blueprint.targetPercentBySystem || null,
+      targetQuestionCountBySystem: blueprint.targetQuestionCountBySystem || null,
+      selectedQuestionCountBySystem: blueprint.selectedQuestionCountBySystem || null,
+      officialBlueprintRequired: Boolean(nclexBlueprint),
+      officialBlueprintId: nclexBlueprint?.id || null,
+      officialBlueprintVersion: nclexBlueprint?.version || null,
+      officialBlueprintSource: nclexBlueprint?.sourceUrl || null,
+      examVariant: nclexBlueprint?.variant || null,
       mediaReady: true,
       taxonomyReady: true,
       governedReplacementReady: blueprint.unmatchedReplacementCount === 0
@@ -42930,6 +42973,20 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         sourceProfile,
         student: auth.student,
       });
+      // NCLEX diagnostics may reuse the student's already published RN- or
+      // PN-isolated QBank collections when no separate diagnostic delivery
+      // toggle exists. The subsequent official client-needs classifier,
+      // weighted blueprint, media audit, and exact 40-item selection still
+      // fail closed; this does not expose a private or cross-variant bank.
+      if (purpose === "baseline_diagnostic" && nclexVariant && !availableBanks.length) {
+        availableBanks = (await aylaAvailableQbankBanks(auth.db, {
+          examTrack: access.exam_track,
+          destination: "qbank",
+          destinationScope,
+          sourceProfile,
+          student: auth.student,
+        })).map((bank) => ({ ...bank, diagnostic_reuse_policy: "published_variant_qbank" }));
+      }
       selectedCollectionIds = availableBanks.map((row) => row.id);
       selectedBanks = [...availableBanks];
     }
@@ -43100,6 +43157,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         questionExposureCounts: diagnosticQuestionExposureCounts,
         seenQuestionIds,
         allowedCollectionIds: nclexVariant ? selectedCollectionIds : [],
+        examVariant: nclexVariant || "",
       });
     }
     const selected = selection.selected;
@@ -43255,6 +43313,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         session.diagnosticSystemByQuestionId = selection.diagnosticSystemByQuestionId;
         session.diagnosticReplacementLineage = selection.diagnosticReplacementLineage;
         session.diagnosticTaxonomyByQuestionId = selection.diagnosticTaxonomyByQuestionId;
+        session.diagnosticBlueprint = selection.diagnosticBlueprint || null;
         session.diagnosticQuality = selection.quality;
         session.diagnosticCoverage = {
           availableSystemCount: selection.availableSystemKeys.length,
@@ -71027,7 +71086,25 @@ app.get("/api/ayla/routes", (req, res) => {
 app.get("/api/ayla/exams", (req, res) => aylaSendOk(res, {
   examTracks: Object.values(AYLA_EXAM_REGISTRY).map(({ aliases, ...track }) => ({
     ...track,
-    diagnostic: { questionCount: 40, blockSize: 20, mode: "test", answersSealedUntilSubmit: true },
+    ...(track.id === "nclex" ? {
+      variants: AYLA_NCLEX_VARIANTS.map((variant) => ({
+        ...variant,
+        systems: aylaNclexDiagnosticSystems(variant.key),
+        diagnostic_blueprint: aylaNclexDiagnosticBlueprintSnapshot(variant.key),
+      })),
+    } : {}),
+    diagnostic: {
+      questionCount: 40,
+      blockSize: 20,
+      mode: "test",
+      answersSealedUntilSubmit: true,
+      ...(track.id === "nclex" ? {
+        officialClientNeedsWeighted: true,
+        clientNeedCount: 8,
+        clinicalJudgmentCaseStudyItems: 18,
+        approximateStandaloneClinicalJudgmentPercent: 10,
+      } : {}),
+    },
   })),
   onboarding: {
     paths: AYLA_ONBOARDING_PRESETS.paths,
@@ -72231,7 +72308,16 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
       ? aylaContinuityIncomingHandoff(db, auth.user, examTrackId)
       : null;
     const continuityPrefill = aylaContinuityPrefillTargetSetup(req.body, incomingHandoff);
-    const onboarding = normalizeAylaOnboardingSubmission(continuityPrefill.input, { examDefinition });
+    const onboardingExamDefinition = examVariant
+      ? {
+        ...examDefinition,
+        systems: aylaNclexDiagnosticSystems(examVariant),
+        blueprint: aylaNclexDiagnosticBlueprintSnapshot(examVariant),
+      }
+      : examDefinition;
+    const onboarding = normalizeAylaOnboardingSubmission(continuityPrefill.input, {
+      examDefinition: onboardingExamDefinition,
+    });
     const normalizedInput = {
       ...continuityPrefill.input,
       ...onboarding,
@@ -76549,6 +76635,13 @@ function aylaV189SystemKey(value = "") {
 }
 
 function aylaV227SystemsForStudent(student = {}) {
+  const examTrackId = aylaCanonicalExamTrack(
+    student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam,
+  );
+  if (examTrackId === "nclex") {
+    const variantSystems = aylaNclexDiagnosticSystems(aylaStudentNclexVariant(student));
+    if (variantSystems.length) return variantSystems;
+  }
   return aylaAdaptiveSystemsForStudent(student, AYLA_EXAM_REGISTRY, AYLA_V189_SYSTEMS);
 }
 

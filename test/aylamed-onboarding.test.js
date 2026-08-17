@@ -437,7 +437,7 @@ test("server wires onboarding into the existing isolated diagnostic and QBank ro
   );
 
   assert.match(diagnosticRoute, /aylaContinuityPrefillTargetSetup\(req\.body, incomingHandoff\)/);
-  assert.match(diagnosticRoute, /normalizeAylaOnboardingSubmission\(continuityPrefill\.input, \{ examDefinition \}\)/);
+  assert.match(diagnosticRoute, /normalizeAylaOnboardingSubmission\(continuityPrefill\.input, \{[\s\S]*examDefinition: onboardingExamDefinition,[\s\S]*\}\)/);
   assert.match(diagnosticRoute, /onboarding\.selectedWeakAreas/);
   assert.match(diagnosticRoute, /type: "baseline_diagnostic"/);
   assert.match(qbankCreate, /purpose === "baseline_diagnostic" \? "test"/);
