@@ -39,3 +39,22 @@ test("schedule risk stays on track without backlog or capacity pressure", () => 
   assert.equal(risk.extraDailyMinutes, 0);
   assert.deepEqual(risk.recoveryActions, []);
 });
+
+test("a passed target reports additional study-day delay instead of an unsafe catch-up day", () => {
+  const risk = buildAylaScheduleRisk({
+    backlogCount: 76,
+    backlogMinutes: 682,
+    dailyCapacityMinutes: 180,
+    studyDaysRemaining: 1,
+    targetDate: "2026-08-16",
+    currentDate: "2026-08-17",
+    targetLabel: "Target Day",
+  });
+
+  assert.equal(risk.targetDatePassed, true);
+  assert.equal(risk.studyDaysBehind, 4);
+  assert.equal(risk.extraDailyMinutes, 0);
+  assert.match(risk.message, /has passed/);
+  assert.match(risk.message, /4 additional study days/);
+  assert.doesNotMatch(risk.message, /682 extra minutes/);
+});
