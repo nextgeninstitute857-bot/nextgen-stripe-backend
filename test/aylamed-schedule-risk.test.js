@@ -58,3 +58,21 @@ test("a passed target reports additional study-day delay instead of an unsafe ca
   assert.match(risk.message, /4 additional study days/);
   assert.doesNotMatch(risk.message, /682 extra minutes/);
 });
+
+test("target-day overload requires a schedule reset instead of an extreme same-day catch-up", () => {
+  const risk = buildAylaScheduleRisk({
+    backlogCount: 76,
+    backlogMinutes: 682,
+    dailyCapacityMinutes: 180,
+    studyDaysRemaining: 1,
+    targetDate: "2026-08-16",
+    currentDate: "2026-08-16",
+    targetLabel: "Target Day",
+  });
+
+  assert.equal(risk.targetDatePassed, false);
+  assert.equal(risk.scheduleResetRequired, true);
+  assert.equal(risk.studyDaysBehind, 4);
+  assert.equal(risk.extraDailyMinutes, 0);
+  assert.match(risk.message, /unsafe same-day catch-up/);
+});
