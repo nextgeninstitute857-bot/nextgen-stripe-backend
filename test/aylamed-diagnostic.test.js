@@ -60,6 +60,7 @@ test("MCCQE diagnostic selection uses its exam-owned systems and current secure 
     },
   }), true);
   assert.equal(applyDiagnosticSystemOverride(candidates[0], "Family Medicine", { allowApprovedLabel: true }).system_key, "Family Medicine");
+  assert.equal(applyDiagnosticSystemOverride(candidates[0], "Psychiatry", { allowApprovedLabel: true }).system_key, "Psychiatry");
 });
 
 const TITLES = [
