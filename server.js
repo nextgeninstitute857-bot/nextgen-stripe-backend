@@ -41379,10 +41379,11 @@ async function aylaSelectQbankSessionQuestions({
   const examTrackId = aylaCanonicalExamTrack(examTrack);
   const examDefinition = AYLA_EXAM_REGISTRY[examTrackId] || {};
   const multiExamMinimumSystems = {
-    // The approved Step 2 collections currently expose seven verified
-    // clinical lanes. Requiring an eighth lane made the real diagnostic fail
-    // closed even after the full discovery window confirmed the catalogue.
-    usmle_step_2_ck: 7,
+    // A seeded 200-question Step 2 discovery window consistently exposes six
+    // or more verified clinical lanes. Requiring a rare seventh lane made a
+    // student's diagnostic availability depend on the random attempt seed.
+    // Untested curriculum lanes remain explicitly unknown in the baseline.
+    usmle_step_2_ck: 6,
     usmle_step_3: 8,
     plab: 8,
     amc: 6,
