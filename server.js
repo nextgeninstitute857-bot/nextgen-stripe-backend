@@ -76755,6 +76755,8 @@ function aylaV189BacklogWarning(db, student, date, systemProgress = aylaV189Syst
     studyDaysRemaining: studyDays,
     daysToTarget: target.daysToTarget,
     targetLabel: target.targetLabel,
+    targetDate: target.targetDate,
+    currentDate: date,
     requiredDailyMinutes,
     riskMultiplier: multiplier,
     lowCompletion,
@@ -84218,6 +84220,8 @@ app.get("/api/ayla/students/:studentId/daily-workspace", async (req, res) => {
         studyDaysRemaining: aylaV189StudyDaysRemaining(student, target.daysToTarget || 1),
         daysToTarget: target.daysToTarget,
         targetLabel: target.targetLabel,
+        targetDate: target.targetDate,
+        currentDate: date,
       });
       const warning = compactRisk.level === "on_track" ? null : compactRisk;
       if (!built.reused) await writeAylaDb(db);
