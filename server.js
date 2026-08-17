@@ -76482,8 +76482,8 @@ function aylaV227StudentFacingTopic(student = {}, value = "", system = "General"
 function aylaV227PreferredAdaptiveTopic(primary = "", secondary = "") {
   const first = String(primary || "").trim();
   const fallback = String(secondary || "").trim();
-  const looksLikeQuestionSentence = first.length > 100
-    || (first.split(/\s+/).length > 14 && /[.?!]$/.test(first));
+  const looksLikeQuestionSentence = first.length > 60
+    || first.split(/\s+/).length > 10;
   return looksLikeQuestionSentence && fallback ? fallback : first || fallback;
 }
 
