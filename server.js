@@ -76446,6 +76446,7 @@ function aylaV227StudentFacingTopic(student = {}, value = "", system = "General"
     .replace(/\b\w/g, (character) => character.toUpperCase())
     .trim();
   if (!topic || aylaV189SystemKey(topic) === aylaV189SystemKey(system)) return system;
+  if (aylaV189SystemKey(topic).startsWith(`${aylaV189SystemKey(system)} `)) return topic;
   return `${system} — ${topic}`;
 }
 
