@@ -82,6 +82,20 @@ test("one user receives isolated paid dashboards for two entitled exams", () => 
   assert.equal(shell.dashboards.every((row) => row.navigation.every((item) => item.path.startsWith(`/app/exams/${row.exam_track_id}/`))), true);
 });
 
+test("an NCLEX profile exposes its RN or PN identity in the dashboard shell", () => {
+  const nclexStudent = { ...student("nclex-rn-student", "nclex"), examVariant: "nclex_rn" };
+  const shell = resolveAylaStudentShell({
+    userId: "user-1",
+    students: [nclexStudent],
+    enrollments: [enrollment("nclex-paid", "full", "nclex", { student_id: nclexStudent.id })],
+    plansById: plans,
+    activeStudentId: nclexStudent.id,
+    now,
+  });
+  assert.equal(shell.active_dashboard.label, "NCLEX-RN");
+  assert.equal(shell.active_dashboard.exam_variant, "nclex_rn");
+});
+
 test("paid access is authoritative and demo access cannot add a disabled feature", () => {
   const enrollments = [
     enrollment("demo-access", "demo", "usmle_step_1", { is_demo: true, updatedAt: "2026-07-19T11:00:00.000Z" }),
