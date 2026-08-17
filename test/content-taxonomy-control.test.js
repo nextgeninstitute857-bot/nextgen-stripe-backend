@@ -140,6 +140,11 @@ test("v209 server and Postgres contracts expose review, override, audit, and all
   assert.match(server, /api\/ayla\/admin\/resources\/classification-status/);
   assert.match(server, /content_taxonomy_provider_pair_classification/);
   assert.match(server, /auto_approve_high_confidence/);
+  assert.match(
+    server,
+    /Number\(updates\.total \?\? job\.total \?\? job\.pairs_total \?\? 0\)/,
+    "classification progress must preserve the queued provider-pair total",
+  );
   assert.match(server, /question_complete_when: \["system_key", "subsystem_key", "topic_key", "subtopic_key"\]/);
   assert.match(postgres, /content_taxonomy_audit_events/);
   assert.match(postgres, /content_question_taxonomy_overrides/);

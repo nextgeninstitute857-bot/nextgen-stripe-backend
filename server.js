@@ -40333,7 +40333,10 @@ function ngContentTaxonomyPairKey(pair = {}) {
 }
 
 function ngContentTaxonomyProgress(job = {}, updates = {}) {
-  const total = Math.max(0, Number(job.total || job.pairs_total || 0));
+  const total = Math.max(
+    0,
+    Number(updates.total ?? job.total ?? job.pairs_total ?? 0) || 0,
+  );
   const nextIndex = Math.max(0, Math.min(total, Number(updates.next_index ?? job.next_index ?? 0) || 0));
   const approved = Math.max(0, Number(updates.approved ?? job.approved ?? 0) || 0);
   const review = Math.max(0, Number(updates.needs_review ?? job.needs_review ?? 0) || 0);
