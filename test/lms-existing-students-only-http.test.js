@@ -27,7 +27,7 @@ async function freePort() {
   });
 }
 
-async function waitForHealth(baseUrl, child, output, timeoutMs = 30_000) {
+async function waitForHealth(baseUrl, child, output, timeoutMs = 90_000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     if (child.exitCode !== null) throw new Error(`Server exited (${child.exitCode})\n${output.join("")}`);
@@ -49,8 +49,8 @@ async function api(baseUrl, route, { method = "GET", token = "", body = null } =
   return { response, payload: await response.json() };
 }
 
-test("LMS admits only existing students with active paid access", { timeout: 60_000 }, async () => {
-  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "lms-existing-students-only-"));
+test("premium LMS restores public catalog, account access, and timed invitations", { timeout: 150_000 }, async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "lms-public-site-restored-"));
   const now = new Date().toISOString();
   const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
@@ -165,45 +165,47 @@ test("LMS admits only existing students with active paid access", { timeout: 60_
     await waitForHealth(baseUrl, child, output);
 
     const health = await api(baseUrl, "/health");
-    assert.equal(health.payload.lms_admission_mode, "existing_active_students_only");
+    assert.equal(health.payload.lms_admission_mode, "open");
 
     const signup = await api(baseUrl, "/auth/signup", {
       method: "POST",
       body: { name: "New Student", email: "new@example.com", password, passwordConfirm: password },
     });
-    assert.equal(signup.response.status, 403);
-    assert.equal(signup.payload.code, "LMS_EXISTING_ACTIVE_STUDENTS_ONLY");
+    assert.equal(signup.response.status, 200, JSON.stringify(signup.payload));
+    assert.equal(signup.payload.created, true);
 
     const plans = await api(baseUrl, "/plans");
-    assert.equal(plans.response.status, 403);
+    assert.equal(plans.response.status, 200, JSON.stringify(plans.payload));
+    assert.equal(plans.payload.count, 1);
 
     const demoStart = await api(baseUrl, "/demo/start", { method: "POST", body: { course_id: "course" } });
-    assert.equal(demoStart.response.status, 403);
+    assert.equal(demoStart.response.status, 401);
 
     const demoLogin = await api(baseUrl, "/auth/login", {
       method: "POST",
       body: { email: users.demo.email, password },
     });
-    assert.equal(demoLogin.response.status, 403);
+    assert.equal(demoLogin.response.status, 200, JSON.stringify(demoLogin.payload));
 
     const expiredLogin = await api(baseUrl, "/auth/login", {
       method: "POST",
       body: { email: users.expired.email, password },
     });
-    assert.equal(expiredLogin.response.status, 403);
+    assert.equal(expiredLogin.response.status, 200, JSON.stringify(expiredLogin.payload));
 
     const activeLogin = await api(baseUrl, "/auth/login", {
       method: "POST",
       body: { email: users.active.email, password },
     });
     assert.equal(activeLogin.response.status, 200, JSON.stringify(activeLogin.payload));
-    assert.equal(activeLogin.payload.admission_mode, "existing_active_students_only");
+    assert.equal(activeLogin.payload.admission_mode, "open");
 
     const courses = await api(baseUrl, "/courses", { token: activeLogin.payload.token });
     assert.equal(courses.response.status, 200, JSON.stringify(courses.payload));
 
     const publicCourses = await api(baseUrl, "/courses");
-    assert.equal(publicCourses.response.status, 401);
+    assert.equal(publicCourses.response.status, 200, JSON.stringify(publicCourses.payload));
+    assert.equal(publicCourses.payload.count, 1);
 
     const demoToken = jwt.sign(
       { sub: users.demo.id, email: users.demo.email, role: "student" },
@@ -211,14 +213,15 @@ test("LMS admits only existing students with active paid access", { timeout: 60_
       { expiresIn: "5m" },
     );
     const demoTokenAccess = await api(baseUrl, "/auth/me", { token: demoToken });
-    assert.equal(demoTokenAccess.response.status, 403);
+    assert.equal(demoTokenAccess.response.status, 200, JSON.stringify(demoTokenAccess.payload));
 
     const checkout = await api(baseUrl, "/enrollments/prepare-checkout", {
       method: "POST",
       token: activeLogin.payload.token,
       body: { course_id: "course" },
     });
-    assert.equal(checkout.response.status, 403);
+    assert.equal(checkout.response.status, 200, JSON.stringify(checkout.payload));
+    assert.equal(checkout.payload.already_active, true);
 
     const adminLogin = await api(baseUrl, "/auth/login", {
       method: "POST",

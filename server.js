@@ -2785,7 +2785,7 @@ function buildPendingZoomId(courseId, label) { return `${PENDING_ZOOM_PREFIX}${c
 
 const AUTH_JWT_SECRET = process.env.AUTH_JWT_SECRET || "CHANGE_THIS_AUTH_SECRET_IN_RENDER_ENV";
 const AUTH_TOKEN_DAYS = 30;
-const LMS_ADMISSION_MODE = "existing_active_students_only";
+const LMS_ADMISSION_MODE = "open";
 
 const EXTERNAL_LIBRARY_URL =
   process.env.EXTERNAL_LIBRARY_URL || "https://lms.nextgenusmlelms.com";
@@ -4246,44 +4246,6 @@ function sanitizePublicRecording(recording) {
   };
 }
 
-function ngLmsSignInEligibility(db = {}, user = {}) {
-  const role = String(user?.role || "student").trim().toLowerCase();
-  const status = String(user?.status || "active").trim().toLowerCase();
-  const accountDisabled = (
-    user?.disabled === true ||
-    user?.is_active === false ||
-    ["blocked", "deleted", "disabled", "inactive", "revoked", "suspended"].includes(status)
-  );
-
-  if (accountDisabled) {
-    return { allowed: false, reason: "account_inactive", enrollment: null };
-  }
-
-  if (role !== "student") {
-    return { allowed: true, reason: "authorized_staff_account", enrollment: null };
-  }
-
-  const enrollment = Object.values(db.enrollments || {}).find((candidate) => {
-    if (String(candidate?.user_id || "") !== String(user?.id || "")) return false;
-    if (candidate?.is_demo === true || candidate?.access_granted === false) return false;
-    const plan = candidate?.plan_id ? db.plans?.[String(candidate.plan_id)] || null : null;
-    return isPaidEnrollmentActive(candidate, plan, db);
-  }) || null;
-
-  return enrollment
-    ? { allowed: true, reason: "active_paid_enrollment", enrollment }
-    : { allowed: false, reason: "active_paid_enrollment_required", enrollment: null };
-}
-
-function ngSendLmsAdmissionClosed(res, message = "This portal is available only to existing students with active access.") {
-  return res.status(403).json({
-    success: false,
-    code: "LMS_EXISTING_ACTIVE_STUDENTS_ONLY",
-    admission_mode: LMS_ADMISSION_MODE,
-    error: message,
-  });
-}
-
 function normalizeCouponCode(code) { return String(code || "").trim().toUpperCase(); }
 function centsFromDollars(value) { const n = Number(value || 0); return Number.isNaN(n) ? 0 : Math.max(0, Math.round(n * 100)); }
 function isCouponExpired(coupon) { return Boolean(coupon?.expires_at) && new Date(coupon.expires_at).getTime() < Date.now(); }
@@ -4339,14 +4301,6 @@ async function getAuthenticatedUser(req) {
   if (!user?.id) {
     const e = new Error("User not found");
     e.statusCode = 401;
-    throw e;
-  }
-
-  const eligibility = ngLmsSignInEligibility(db, user);
-  if (!eligibility.allowed) {
-    const e = new Error("This portal is available only to existing students with active access.");
-    e.statusCode = 403;
-    e.code = "LMS_EXISTING_ACTIVE_STUDENTS_ONLY";
     throw e;
   }
 
@@ -11548,10 +11502,8 @@ app.post("/auth/login", async (req, res) => {
       });
     }
 
-    const eligibility = ngLmsSignInEligibility(db, user);
-    if (!eligibility.allowed) {
-      return ngSendLmsAdmissionClosed(res);
-    }
+    const selfHeal = ngMaybeSelfHealDemoEnrollment(db, user, { source: "auth_login" });
+    if (selfHeal.changed) await writeLiveDb(db);
 
     const token = signAuthToken(user);
     const safeUser = sanitizeUser(user);
@@ -11562,6 +11514,7 @@ app.post("/auth/login", async (req, res) => {
       user: safeUser,
       record: safeUser,
       admission_mode: LMS_ADMISSION_MODE,
+      demo_access_self_heal: selfHeal,
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({
@@ -11651,11 +11604,6 @@ app.post("/auth/team-invite/accept", async (req, res) => {
 
 app.post("/auth/signup", async (req, res) => {
   try {
-    return ngSendLmsAdmissionClosed(
-      res,
-      "New student registration is closed. Ask NextGen student support about an existing account."
-    );
-
     await ensureBootstrapAdmin();
 
     const email = normalizeEmail(req.body.email);
@@ -12384,19 +12332,24 @@ app.post("/auth/google", async (req, res) => {
     const db = await readLiveDb();
 
     let user = findUserByEmail(db, profile.email);
+    let created = false;
 
     if (!user) {
-      return ngSendLmsAdmissionClosed(res);
+      user = createBackendUser({
+        email: profile.email,
+        name: profile.name,
+        role: "student",
+        google_sub: profile.google_sub,
+        avatar_url: profile.picture,
+      });
+      created = true;
+    } else {
+      user.google_sub = user.google_sub || profile.google_sub;
+      user.avatar_url = user.avatar_url || profile.picture;
+      user.name = user.name || profile.name;
+      user.verified = true;
+      user.updated_at = new Date().toISOString();
     }
-
-    const eligibility = ngLmsSignInEligibility(db, user);
-    if (!eligibility.allowed) return ngSendLmsAdmissionClosed(res);
-
-    user.google_sub = user.google_sub || profile.google_sub;
-    user.avatar_url = user.avatar_url || profile.picture;
-    user.name = user.name || profile.name;
-    user.verified = true;
-    user.updated_at = new Date().toISOString();
 
     db.users[user.id] = user;
 
@@ -12410,6 +12363,18 @@ app.post("/auth/google", async (req, res) => {
       updated_at: new Date().toISOString(),
     };
 
+    let welcomeEmail = { attempted: false, sent: false, skipped: true, reason: "existing_google_user" };
+    if (created) {
+      welcomeEmail = await ngSendTransactionalEmailSafe({
+        db,
+        to: user.email,
+        subject: "Your NextGen USMLE account is ready",
+        text: `Hi Doctor,\n\nYour NextGen USMLE account has been created successfully with Google.\n\nLogin: ${ngStudentLoginUrl()}\n\nCreating an account does not activate a demo or paid plan. Return to the plan you selected to complete secure checkout, or choose Try Demo separately.\n\nNextGen USMLE Team`,
+        reason: "student_google_signup_account_created",
+        userId: user.id,
+      });
+    }
+
     await writeLiveDb(db);
 
     const token = signAuthToken(user);
@@ -12420,10 +12385,11 @@ app.post("/auth/google", async (req, res) => {
       token,
       user: safeUser,
       record: safeUser,
-      created: false,
-      access_granted: true,
+      created,
+      access_granted: false,
       demo_started: false,
       admission_mode: LMS_ADMISSION_MODE,
+      transactional_email: welcomeEmail,
     });
   } catch (error) {
     console.error("Google auth error:", error.response?.data || error.message);
@@ -12447,7 +12413,6 @@ app.post("/auth/google", async (req, res) => {
 
 app.get("/courses", async (req, res) => {
   try {
-    await getAuthenticatedUser(req);
     const db = await readLiveDb();
     let courses = Object.values(db.courses || {}).map(sanitizeCourse);
     if (req.query.status) courses = courses.filter((c) => String(c.status) === String(req.query.status));
@@ -12460,7 +12425,6 @@ app.get("/courses", async (req, res) => {
 
 app.get("/courses/:courseId", async (req, res) => {
   try {
-    await getAuthenticatedUser(req);
     const db = await readLiveDb();
     const course = db.courses[String(req.params.courseId)];
     if (!course || course.status === "archived") return res.status(404).json({ success: false, error: "Course not found" });
@@ -13004,18 +12968,16 @@ app.delete("/admin/announcements/:announcementId", async (req, res) => {
 });
 
 app.get("/demo/settings", async (req, res) => {
+  const db = await readLiveDb();
   res.json({
     success: true,
     admission_mode: LMS_ADMISSION_MODE,
-    demo_settings: { ...DEFAULT_DEMO_SETTINGS, enabled: false },
+    demo_settings: { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) },
   });
 });
-app.get("/admin/demo/settings", async (req, res) => { try { await requireAdmin(req); const db = await readLiveDb(); res.json({ success: true, admission_mode: LMS_ADMISSION_MODE, demo_settings: { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}), enabled: false } }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
+app.get("/admin/demo/settings", async (req, res) => { try { await requireAdmin(req); const db = await readLiveDb(); res.json({ success: true, admission_mode: LMS_ADMISSION_MODE, demo_settings: { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) } }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.patch("/admin/demo/settings", async (req, res) => {
   try {
-    await requireAdmin(req);
-    return ngSendLmsAdmissionClosed(res, "Demo access is disabled for this LMS.");
-
     const { user } = await requireAdmin(req);
     const db = await readLiveDb();
     const allowed = ["enabled", "duration_days", "allow_live_classes", "allow_roadmap", "allow_community", "allow_global_community", "allow_study_partner", "allow_assessments", "allow_leaderboard", "allow_flashcards", "allow_recordings", "allow_notes_transcripts", "allow_video_library", "max_live_sessions"];
@@ -13180,7 +13142,11 @@ app.get("/admin/lms-flow/audit", async (req, res) => {
 
 app.get("/features", async (req, res) => { const db = await readLiveDb(); res.json({ success: true, features: Object.values(db.featureCatalog || {}) }); });
 app.get("/plans", async (req, res) => {
-  return ngSendLmsAdmissionClosed(res, "Public plans and self-service enrollment are closed.");
+  const db = await readLiveDb();
+  let plans = Object.values(db.plans || {}).filter((p) => p.is_active !== false).map(sanitizePlan);
+  if (req.query.course_id) plans = plans.filter((p) => !p.course_id || String(p.course_id) === String(req.query.course_id));
+  plans.sort((a, b) => a.price_cents - b.price_cents);
+  return res.json({ success: true, count: plans.length, plans, features: Object.values(db.featureCatalog || {}) });
 });
 app.get("/admin/plans", async (req, res) => { try { await requireAdmin(req); const db = await readLiveDb(); res.json({ success: true, plans: Object.values(db.plans || {}).map(sanitizePlan), features: Object.values(db.featureCatalog || {}) }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.post("/admin/plans", async (req, res) => {
@@ -13212,7 +13178,17 @@ app.post("/admin/coupons", async (req, res) => {
 });
 app.patch("/admin/coupons/:couponId", async (req, res) => { try { await requireAdmin(req); const db = await readLiveDb(); const c = db.coupons[req.params.couponId]; if (!c) return res.status(404).json({ success: false, error: "Coupon not found" }); const allowed = ["description", "discount_type", "discount_value", "max_uses", "expires_at", "course_id", "plan_id", "is_active"]; for (const k of allowed) if (req.body[k] !== undefined) c[k] = req.body[k]; if (c.discount_value !== undefined) c.discount_value = Number(c.discount_value); c.updated_at = new Date().toISOString(); await writeLiveDb(db); res.json({ success: true, coupon: sanitizeCoupon(c) }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
 app.delete("/admin/coupons/:couponId", async (req, res) => { try { await requireAdmin(req); const db = await readLiveDb(); const c = db.coupons[req.params.couponId]; if (!c) return res.status(404).json({ success: false, error: "Coupon not found" }); delete db.coupons[req.params.couponId]; await writeLiveDb(db); res.json({ success: true, deleted_coupon: sanitizeCoupon(c) }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
-app.post("/coupons/validate", async (req, res) => ngSendLmsAdmissionClosed(res, "Public plans and self-service enrollment are closed."));
+app.post("/coupons/validate", async (req, res) => {
+  const db = await readLiveDb();
+  const plan = db.plans[req.body.plan_id];
+  if (!plan || plan.is_active === false) return res.status(404).json({ success: false, error: "Plan not found or inactive" });
+  const code = normalizeCouponCode(req.body.coupon_code);
+  const coupon = code ? Object.values(db.coupons || {}).find((c) => c.code === code) : null;
+  if (code && !coupon) return res.status(400).json({ success: false, valid: false, error: "Coupon not found" });
+  const pricing = buildCheckoutPricing({ plan, coupon, courseId: req.body.course_id });
+  if (!pricing.valid) return res.status(400).json({ success: false, valid: false, error: pricing.error });
+  return res.json({ success: true, valid: true, coupon: coupon ? sanitizeCoupon(coupon) : null, pricing });
+});
 
 
 // -----------------------------------------------------------------------------
@@ -13326,8 +13302,6 @@ app.post("/admin/enrollments", async (req, res) => {
     const email = normalizeEmail(req.body.email || req.body.student_email || req.body.user_email);
     const name = String(req.body.name || req.body.student_name || "Student").trim();
     const isDemo = Boolean(req.body.is_demo || req.body.type === "demo");
-
-    if (isDemo) return ngSendLmsAdmissionClosed(res, "Demo enrollments are disabled for this LMS.");
 
     if (!courseId) return res.status(400).json({ success: false, error: "course_id is required" });
     if (!email && !req.body.user_id) return res.status(400).json({ success: false, error: "Student email or user_id is required" });
@@ -13443,13 +13417,6 @@ app.patch("/admin/enrollments/:enrollmentId", async (req, res) => {
     const now = new Date().toISOString();
     const requestedStatus = String(req.body.status || req.body.access_status || "").trim().toLowerCase();
     const demoSettings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
-
-    if (
-      ["demo_active", "demo_expired"].includes(requestedStatus) ||
-      req.body.is_demo === true
-    ) {
-      return ngSendLmsAdmissionClosed(res, "Demo enrollments are disabled for this LMS.");
-    }
 
     // v190n: Converting a demo card to paid access must create/update the canonical
     // :paid record. The original demo record remains untouched as history. This
@@ -14508,8 +14475,6 @@ function buildStudentDemoStatus(db, user) {
 
 app.post("/demo/start", async (req, res) => {
   try {
-    return ngSendLmsAdmissionClosed(res, "Demo access is no longer offered.");
-
     const { user } = await getAuthenticatedUser(req);
     const db = await readLiveDb();
     const settings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
@@ -14683,9 +14648,6 @@ app.get("/admin/demo/access-audit", async (req, res) => {
 
 app.post("/admin/demo/repair-access", async (req, res) => {
   try {
-    await requireAdmin(req);
-    return ngSendLmsAdmissionClosed(res, "Demo access repair is disabled for this LMS.");
-
     const { user: adminUser } = await requireAdmin(req);
     const db = await readLiveDb();
     const courseId = req.body.course_id || req.body.courseId || null;
@@ -14758,8 +14720,6 @@ app.post("/admin/demo/repair-access", async (req, res) => {
 
 app.post("/enrollments/prepare-checkout", async (req, res) => {
   try {
-    return ngSendLmsAdmissionClosed(res, "Self-service enrollment and checkout are closed.");
-
     const { user } = await getAuthenticatedUser(req);
     const { course_id } = req.body;
     if (!course_id) return res.status(400).json({ success: false, error: "course_id is required" });
@@ -14846,8 +14806,6 @@ function ngBuildCheckoutCancelUrl(rawCancelUrl = "", context = {}) {
 
 app.post("/stripe/create-checkout", async (req, res) => {
   try {
-    return ngSendLmsAdmissionClosed(res, "Self-service enrollment and checkout are closed.");
-
     const { user } = await getAuthenticatedUser(req);
     const { enrollmentId, studentId, courseId, plan_id = null, coupon_code = null, referral_code = null, ref = null, successUrl, cancelUrl, amount } = req.body;
     if (!enrollmentId || !studentId || !courseId) return res.status(400).json({ success: false, error: "enrollmentId, studentId, courseId required" });
@@ -65355,11 +65313,11 @@ function ngHashToken(value = "") {
 }
 
 function ngStudentLoginUrl() {
-  return process.env.STUDENT_LOGIN_URL || process.env.FRONTEND_LOGIN_URL || "https://lms.nextgenusmlelms.com/login";
+  return process.env.STUDENT_LOGIN_URL || process.env.FRONTEND_LOGIN_URL || "https://live.nextgenusmlelms.com/login";
 }
 
 function ngStudentResetUrl(req, token) {
-  const base = process.env.STUDENT_RESET_PASSWORD_URL || "https://lms.nextgenusmlelms.com/reset-password";
+  const base = process.env.STUDENT_RESET_PASSWORD_URL || "https://live.nextgenusmlelms.com/reset-password";
   const joiner = base.includes("?") ? "&" : "?";
   return `${base}${joiner}token=${encodeURIComponent(token)}`;
 }
