@@ -84,6 +84,26 @@ test("Personal Tutor chooses the next modality from the one stored roadmap", () 
   assert.equal(navigation.actionTarget.assignmentId, "revision-1");
 });
 
+test("Personal Tutor separates roadmap reasons and readiness advice into complete sentences", () => {
+  const answer = formatAylaPersonalTutorAnswer({
+    nextAction: {
+      assignmentId: "assignment-1",
+      modality: "revise",
+      title: "Review incorrects",
+      reason: "This revision is due from permanent learning history",
+    },
+    workload: { state: "balanced" },
+    nbmeReadiness: {
+      recommendation: {
+        title: "Take your first full self-assessment",
+        reason: "This adds readiness-trend evidence",
+      },
+    },
+  });
+  assert.match(answer, /permanent learning history\. Your current workload/);
+  assert.match(answer, /full self-assessment\. This adds readiness-trend evidence\./);
+});
+
 test("a pending verified diagnostic is the exact next Tutor action", () => {
   const decision = buildAylaPersonalTutorDecision(baseInput({
     student: {
