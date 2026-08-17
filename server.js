@@ -41352,7 +41352,11 @@ async function aylaSelectQbankSessionQuestions({
     examTrack,
     destination: "aylamed_qbank",
     destinationScope,
-    limit: Math.min(200, Math.max(requestedCount, requestedCount * 5)),
+    // A 20-question multi-exam diagnostic needs enough discovery breadth to
+    // represent every required curriculum lane. The earlier 5x window could
+    // randomly miss a valid system in large banks and falsely report that the
+    // diagnostic was unavailable even when thousands of questions were live.
+    limit: Math.min(200, Math.max(requestedCount, requestedCount * 10)),
     seed: selectionSeed
       || `aylamed-${aylaCanonicalExamTrack(examTrack) || "exam"}-diagnostic-v${AYLA_DIAGNOSTIC_BLUEPRINT_VERSION}:${destinationScope || "default"}`,
     seenQuestionIds,

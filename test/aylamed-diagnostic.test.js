@@ -565,6 +565,11 @@ test("server gates diagnostic creation, playback, answering and submission throu
   assert.match(server, /const diagnosticSelectionSeed = purpose === "baseline_diagnostic"/);
   assert.match(server, /questionExposureCounts: diagnosticQuestionExposureCounts/);
   assert.match(server, /selectionSeed: diagnosticSelectionSeed/);
+  assert.match(
+    server,
+    /limit: Math\.min\(200, Math\.max\(requestedCount, requestedCount \* 10\)\)/,
+    "multi-exam diagnostics should use the full 200-question discovery window when needed",
+  );
   assert.doesNotMatch(server, /preferredDiagnosticQuestionIds/);
   assert.match(server, /session\.diagnosticTaxonomyByQuestionId = selection\.diagnosticTaxonomyByQuestionId/);
   assert.match(server, /studentAttemptSeeded: blueprint\.studentAttemptSeeded/);
