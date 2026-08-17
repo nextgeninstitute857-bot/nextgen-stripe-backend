@@ -127,6 +127,7 @@ import {
   AYLA_DIAGNOSTIC_BLUEPRINT_VERSION,
   applyDiagnosticSystemOverride,
   auditDiagnosticQuestionMedia,
+  buildMultiExamDiagnosticSelection,
   buildStep1DiagnosticSelection,
   canonicalStep1DiagnosticSystem,
   classifyStep1DiagnosticQuestion,
@@ -41353,7 +41354,7 @@ async function aylaSelectQbankSessionQuestions({
     destinationScope,
     limit: Math.min(200, Math.max(requestedCount, requestedCount * 5)),
     seed: selectionSeed
-      || `aylamed-step1-diagnostic-v${AYLA_DIAGNOSTIC_BLUEPRINT_VERSION}:${destinationScope || "default"}`,
+      || `aylamed-${aylaCanonicalExamTrack(examTrack) || "exam"}-diagnostic-v${AYLA_DIAGNOSTIC_BLUEPRINT_VERSION}:${destinationScope || "default"}`,
     seenQuestionIds,
     collectionIds,
   });
@@ -41371,16 +41372,49 @@ async function aylaSelectQbankSessionQuestions({
       .filter((question) => question?.id)
       .map((question) => [String(question.id), question]),
   ).values()];
-  const blueprint = buildStep1DiagnosticSelection(candidates, {
-    requestedCount,
-    minimumSystems: Math.min(12, requestedCount),
-    preferredQuestionIds,
-    selectionSeed,
-    questionExposureCounts,
-  });
+  const examTrackId = aylaCanonicalExamTrack(examTrack);
+  const examDefinition = AYLA_EXAM_REGISTRY[examTrackId] || {};
+  const multiExamMinimumSystems = {
+    usmle_step_2_ck: 8,
+    usmle_step_3: 8,
+    plab: 8,
+    amc: 6,
+    mccqe: 6,
+    nclex: 8,
+  };
+  const blueprint = examTrackId === "usmle_step_1"
+    ? buildStep1DiagnosticSelection(candidates, {
+      requestedCount,
+      minimumSystems: Math.min(12, requestedCount),
+      preferredQuestionIds,
+      selectionSeed,
+      questionExposureCounts,
+    })
+    : buildMultiExamDiagnosticSelection(candidates, {
+      requestedCount,
+      minimumSystems: Math.min(multiExamMinimumSystems[examTrackId] || 6, requestedCount),
+      allowedSystems: examDefinition.systems || [],
+      resolveSystem: (question) => aylaV227CanonicalSystemForStudent(
+        { examTrack: examTrackId },
+        question.system_label
+          || question.taxonomy?.labels?.system
+          || question.system_key
+          || question.taxonomy?.system_key
+          || question.system,
+        "",
+        question.subsystem_label
+          || question.taxonomy?.labels?.subsystem
+          || question.subsystem_key
+          || question.taxonomy?.subsystem_key
+          || question.subsystem,
+      ),
+      preferredQuestionIds,
+      selectionSeed,
+      questionExposureCounts,
+    });
   if (!blueprint.ready) {
     const error = new Error(
-      "The verified diagnostic is not ready yet. Every diagnostic question must have complete media and verified Step 1 system placement.",
+      `The verified ${examDefinition.label || "exam"} diagnostic is not ready yet. Every diagnostic question must have complete media and verified exam-system placement.`,
     );
     error.statusCode = 409;
     error.code = "DIAGNOSTIC_CONTENT_NOT_READY";
@@ -41754,7 +41788,9 @@ function aylaRequireCurrentDiagnosticBlueprint(session = {}) {
 function aylaDiagnosticQuestionForSession(session = {}, question = {}) {
   if (String(session.purpose || "") !== "baseline_diagnostic") return question;
   const system = session.diagnosticSystemByQuestionId?.[String(question.id || "")];
-  return applyDiagnosticSystemOverride(question, system);
+  return applyDiagnosticSystemOverride(question, system, {
+    allowApprovedLabel: aylaCanonicalExamTrack(session.examTrack || session.exam_track) !== "usmle_step_1",
+  });
 }
 
 function aylaStudentQbankPresentationPolicy(

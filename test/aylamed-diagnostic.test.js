@@ -6,11 +6,61 @@ import {
   AYLA_DIAGNOSTIC_BLUEPRINT_VERSION,
   applyDiagnosticSystemOverride,
   auditDiagnosticQuestionMedia,
+  buildMultiExamDiagnosticSelection,
   buildStep1DiagnosticSelection,
   classifyStep1DiagnosticQuestion,
   diagnosticQuestionMatchProfile,
   diagnosticSessionUsesCurrentBlueprint,
 } from "../lib/aylamed-diagnostic.js";
+
+test("MCCQE diagnostic selection uses its exam-owned systems and current secure blueprint", () => {
+  const systems = ["Family Medicine", "Surgery", "Pediatrics", "Obstetrics and Gynecology", "Psychiatry", "Preventive Care"];
+  const candidates = Array.from({ length: 24 }, (_, index) => {
+    const system = systems[index % systems.length];
+    return {
+      id: `mccqe-${index + 1}`,
+      title: `MCCQE clinical item ${index + 1}`,
+      exam_track: "mccqe",
+      system_key: `mccqe:${system.toLowerCase().replace(/[^a-z0-9]+/g, "_")}`,
+      taxonomy: {
+        labels: { system, subsystem: "Assessment and Management", topic: `Clinical topic ${index + 1}`, subtopic: "Management" },
+        topic_key: `mccqe:topic:${index + 1}`,
+      },
+      question_html: "<p>Clinical stem</p>",
+      explanation_html: "<p>Verified explanation</p>",
+      answers: [{ answer_id: 1, text_html: "Choice A" }],
+      media: [],
+    };
+  });
+  const result = buildMultiExamDiagnosticSelection(candidates, {
+    requestedCount: 20,
+    minimumSystems: 6,
+    allowedSystems: systems,
+    resolveSystem: (question) => question.taxonomy.labels.system,
+    selectionSeed: "student-mccqe-attempt-1",
+  });
+  assert.equal(result.ready, true);
+  assert.equal(result.selected.length, 20);
+  assert.equal(result.selectedSystemKeys.length, 6);
+  const systemMap = Object.fromEntries(result.selected.map((question) => [question.id, question.diagnostic_system]));
+  assert.equal(diagnosticSessionUsesCurrentBlueprint({
+    purpose: "baseline_diagnostic",
+    examTrack: "mccqe",
+    diagnosticBlueprintVersion: AYLA_DIAGNOSTIC_BLUEPRINT_VERSION,
+    questions: result.selected.map((question) => ({ contentQuestionId: question.id })),
+    diagnosticSystemByQuestionId: systemMap,
+    diagnosticQuality: {
+      mediaReady: true,
+      taxonomyReady: true,
+      governedReplacementReady: true,
+      studentAttemptSeeded: true,
+      taxonomyDepthReady: true,
+      unmatchedReplacementCount: 0,
+      minimumSystemCount: 6,
+    },
+  }), true);
+  assert.equal(applyDiagnosticSystemOverride(candidates[0], "Family Medicine", { allowApprovedLabel: true }).system_key, "Family Medicine");
+});
 
 const TITLES = [
   "Osteoarthritis",
