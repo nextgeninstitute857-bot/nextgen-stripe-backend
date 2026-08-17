@@ -561,6 +561,8 @@ test("server gates diagnostic creation, playback, answering and submission throu
   assert.match(server, /buildStep1DiagnosticSelection\(candidates/);
   assert.match(server, /DIAGNOSTIC_CONTENT_NOT_READY/);
   assert.match(server, /media_incomplete_questions: blueprint\.rejectedMissingMediaCount/);
+  assert.match(server, /usmle_step_2_ck: 7/);
+  assert.match(server, /available_systems: blueprint\.availableSystemKeys/);
   assert.match(server, /diagnosticReplacementLineage = selection\.diagnosticReplacementLineage/);
   assert.match(server, /const diagnosticSelectionSeed = purpose === "baseline_diagnostic"/);
   assert.match(server, /questionExposureCounts: diagnosticQuestionExposureCounts/);
