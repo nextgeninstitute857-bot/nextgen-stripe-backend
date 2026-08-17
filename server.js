@@ -68805,6 +68805,14 @@ function aylaCanonicalQbankEvidence(question = {}, examTrack = "") {
       || question.subsystem
       || "",
   ).trim();
+  const rawTopic = String(question.topic_key || question.taxonomy?.topic_key || question.topic || "").trim();
+  const sourceTopicLabel = String(
+    question.topic_label
+      || question.taxonomy?.labels?.topic
+      || question.taxonomy?.topic_label
+      || question.topic
+      || "",
+  ).trim();
   const canonicalSystem = aylaV227CanonicalSystemForStudent(
     { examTrack: examTrackId },
     sourceSystemLabel || rawSystem,
@@ -68812,15 +68820,19 @@ function aylaCanonicalQbankEvidence(question = {}, examTrack = "") {
     sourceSubsystemLabel,
   ) || aylaV227CanonicalSystemForStudent({ examTrack: examTrackId }, rawSystem, "", sourceSubsystemLabel);
   const system = canonicalSystem || "General";
+  const topic = aylaV227StudentFacingTopic({ examTrack: examTrackId }, sourceTopicLabel || rawTopic, system);
   return {
     rawSystem,
+    rawTopic,
     sourceSystemLabel,
     sourceSubsystemLabel,
+    sourceTopicLabel,
     canonicalSystem,
     taxonomyVerified: Boolean(canonicalSystem),
     question: {
       ...question,
       system_key: system,
+      topic_key: topic,
       taxonomy: {
         ...(question.taxonomy && typeof question.taxonomy === "object" ? question.taxonomy : {}),
         system_key: system,
@@ -68864,6 +68876,8 @@ function aylaRecordQbankAttempt(db, session, mapping, answer, question = {}) {
     sourceSystemId: evidence.rawSystem || null,
     sourceSystemLabel: evidence.sourceSystemLabel || null,
     sourceSubsystemLabel: evidence.sourceSubsystemLabel || null,
+    sourceTopicId: evidence.rawTopic || null,
+    sourceTopicLabel: evidence.sourceTopicLabel || null,
     system: safeQuestion.system_key,
     subsystem: safeQuestion.subsystem_key || safeQuestion.taxonomy?.subsystem_key || "",
     topic: safeQuestion.topic_key || safeQuestion.taxonomy?.topic_key || "",
@@ -76405,13 +76419,34 @@ function aylaV227CanonicalSystemForStudent(student = {}, value = "", fallback = 
     allowedSystems,
   });
   if (directAlias) return directAlias;
-  const namespacedLeaf = String(value || "").split(":").filter(Boolean).pop()?.replace(/_/g, " ") || "";
-  return canonicalAylaVimeoSystem({
-    examTrackId,
-    system: namespacedLeaf,
-    subsystem,
-    allowedSystems,
-  }) || fallback;
+  const namespacedParts = String(value || "").split(":").filter(Boolean);
+  const namespacedCandidates = namespacedParts.length > 1
+    ? [namespacedParts[1], namespacedParts.at(-1)]
+    : namespacedParts;
+  for (const candidate of namespacedCandidates) {
+    const normalized = canonicalAylaVimeoSystem({
+      examTrackId,
+      system: String(candidate || "").replace(/_/g, " "),
+      subsystem,
+      allowedSystems,
+    });
+    if (normalized) return normalized;
+  }
+  return fallback;
+}
+
+function aylaV227StudentFacingTopic(student = {}, value = "", system = "General") {
+  const raw = String(value || "").trim();
+  if (!raw || /^\d+$/.test(raw)) return system;
+  const parts = raw.split(":").filter(Boolean);
+  let topic = parts.length > 1 ? parts.at(-1) : raw;
+  if (/^(?:topic|subtopic)?[-_\s]*uw[-_\s]*sys[-_\s]*\d+/i.test(topic) || /^[a-f0-9-]{24,}$/i.test(topic)) return system;
+  topic = topic
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase())
+    .trim();
+  if (!topic || aylaV189SystemKey(topic) === aylaV189SystemKey(system)) return system;
+  return `${system} — ${topic}`;
 }
 
 function aylaV227ExamFields(student = {}) {
@@ -78359,7 +78394,8 @@ function aylaV214WeakSignals(db = {}, student = {}, lmsContext = null) {
       ? row.sourceSystemLabel || row.sourceSystemId || row.system
       : row.system;
     const system = aylaV227CanonicalSystemForStudent(student, recordedSystem, "General", row.sourceSubsystemLabel || row.subsystem);
-    signals.push({ topic: row.topic || system, system, source: "aylamed_questions", evidenceType: outcome, weaknessScore: outcome === "incorrect" ? 85 : 65, verified: true });
+    const topic = aylaV227StudentFacingTopic(student, row.sourceTopicLabel || row.topic, system);
+    signals.push({ topic, system, source: "aylamed_questions", evidenceType: outcome, weaknessScore: outcome === "incorrect" ? 85 : 65, verified: true });
   }
   const latestFlashcards = new Map();
   aylaValues(db, "aylaFlashcardReviews")
@@ -78478,10 +78514,10 @@ function aylaV214RevisionFeed(db = {}, student = {}, weakSummary = null, date = 
   const add = (input = {}) => {
     const resourceId = String(input.resourceId || input.contentQuestionId || "").trim();
     const recordedSystem = aylaV189SystemKey(input.system) === "general"
-      ? input.sourceSystemLabel || input.sourceSystemId || input.system
+      ? input.sourceSystemLabel || input.sourceSystemId || input.topic || input.system
       : input.system;
     const system = aylaV227CanonicalSystemForStudent(student, recordedSystem, "General", input.sourceSubsystemLabel || input.subsystem);
-    const topic = String(input.topic || system).trim();
+    const topic = aylaV227StudentFacingTopic(student, input.sourceTopicLabel || input.topic, system);
     const key = resourceId ? `resource:${resourceId}` : `${system.toLowerCase()}|${topic.toLowerCase()}|${String(input.sourceId || input.sourceType || "topic")}`;
     const existing = rows.get(key) || {
       id: input.id || `revision:${crypto.createHash("sha256").update(`${studentId}|${key}`).digest("hex").slice(0, 16)}`,
