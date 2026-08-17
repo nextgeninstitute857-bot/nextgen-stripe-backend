@@ -107,7 +107,9 @@ test("server wires the verified adaptive loop without replacing ingestion or com
   assert.match(server, /function aylaRecordQbankAttempt[\s\S]*?serverVerified: true/);
   assert.match(server, /qbank_future_roadmap_refresh_deferred/);
   assert.match(server, /aylaV189BuildDailyPlan\(db, fresh\.student, tomorrow, \{[\s\S]*?force: true[\s\S]*?skipAi: true/);
-  assert.match(server, /if \(existing && String\(existing\.status \|\| ""\)\.toLowerCase\(\) === "completed"\)[\s\S]*?completedHistoryProtected: true/);
+  assert.match(server, /completedDiagnosticCanYieldToAdaptivePlan[\s\S]*?student\.serverVerifiedBaseline === true[\s\S]*?"baseline_diagnostic"[\s\S]*?String\(row\.status \|\| ""\)\.toLowerCase\(\) === "completed"/);
+  assert.match(server, /String\(existing\.status \|\| ""\)\.toLowerCase\(\) === "completed" && !completedDiagnosticCanYieldToAdaptivePlan[\s\S]*?completedHistoryProtected: true/);
+  assert.match(server, /matchingPlans\.length \? Math\.max\(\.\.\.matchingPlans\.map\(\(row\) => aylaNumber\(row\.version, 1\)\)\) \+ 1 : 1/);
   assert.match(server, /function aylaV189UpdatePlanCompletion[\s\S]*?\["completed", "cancelled", "superseded"\]\.includes/);
   assert.match(server, /weakAreaLogs: aylaValues\(db, "aylaWeakAreaLogs"\)[\s\S]*?aylaAdaptiveEvidenceMatchesStudent/);
 });
