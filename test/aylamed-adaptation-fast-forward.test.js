@@ -29,6 +29,8 @@ for (const examVariant of ["nclex_rn", "nclex_pn"]) {
 test("the control learner remains weak instead of receiving invented improvement", () => {
   const result = runAylaAdaptationFastForward({ days: 150, scenario: "stagnant", examVariant: "nclex_rn" });
   assert.equal(result.acceptance.performanceRespondsToEvidence, true);
+  assert.equal(result.acceptance.personalTutorTracksWeakestSystem, true);
+  assert.ok(result.checkpoints[14].expectedWeakestSystems.includes(result.checkpoints[14].tutorWeakSystem));
   assert.ok(result.checkpoints[150].weakAreas.length > 0);
   assert.ok(result.checkpoints[150].averageCardIntervalDays <= 3);
 });
