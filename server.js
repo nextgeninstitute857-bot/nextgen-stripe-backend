@@ -118,6 +118,12 @@ import {
   setAylaQbankQuestionMark,
 } from "./lib/aylamed-qbank.js";
 import { aylaStudentBankName } from "./lib/aylamed-bank-names.js";
+import { buildAylaScheduleRisk } from "./lib/aylamed-schedule-risk.js";
+import {
+  buildAylaAssessmentLearningGate,
+  buildAylaWeakAreaStudyGate,
+} from "./lib/aylamed-assessment-sequencing.js";
+import { buildAylaPlanChangeNotice } from "./lib/aylamed-plan-change-notice.js";
 import {
   AYLA_PERMANENT_QA,
   buildAylaPermanentQaScenarios,
@@ -76270,6 +76276,11 @@ function aylaV211SanitizePlanReadingSources(plan, assignments = []) {
     cleanField(safe.assessmentTutor, "reason", "Adaptive readiness check.");
     cleanField(safe.assessmentTutor, "system", "General");
     cleanField(safe.assessmentTutor, "topic", "General reading");
+    cleanField(safe.changeNotice, "message", "The current or future roadmap changed. Completed work was preserved.");
+    cleanField(safe.changeNotice, "because", "New verified progress changed the adaptive plan.");
+    cleanField(safe.changeNotice, "next", "Open Today to continue the updated plan.");
+    cleanField(safe.changeNotice, "previousFocus", "General");
+    cleanField(safe.changeNotice, "currentFocus", "General");
   }
   return safe;
 }
@@ -76737,32 +76748,20 @@ function aylaV189BacklogWarning(db, student, date, systemProgress = aylaV189Syst
     .map((plan) => aylaNumber(plan.completionPercent, 0));
   const lowCompletion = completionRecent.length >= 3 && completionRecent.every((value) => value < 50);
   const multiplier = Math.max(1, aylaNumber(db.aylaSettings?.adaptive?.backlog_risk_multiplier, 1.15));
-  const capacityRisk = requiredDailyMinutes > dailyCapacity * multiplier;
-  const examNear = target.daysToTarget > 0 && target.daysToTarget <= 30;
-  const severe = capacityRisk && examNear;
-  let level = "on_track";
-  let title = "Your workload is currently manageable.";
-  let message = "Complete today’s priority assignments and AylaMed will keep adapting future work.";
-  if (severe || backlogMinutes >= dailyCapacity * 2) {
-    level = "high";
-    title = `Your ${target.targetLabel || "target date"} is near and work is piling up.`;
-    message = `You have about ${Math.round(backlogMinutes / 6) / 10} hours overdue. At ${dailyHours} hours/day, the deduplicated remaining priority roadmap needs about ${requiredHours} hours/day. Increase study time, move the target date, or reduce lower-priority resources.`;
-  } else if (capacityRisk || lowCompletion || backlogMinutes > 0) {
-    level = "medium";
-    title = "Your current schedule needs attention.";
-    message = `AylaMed estimates about ${requiredHours} hours/day for the deduplicated priority roadmap and due backlog, while your profile currently allows ${dailyHours} hours/day.`;
-  }
-  return {
-    level,
-    title,
-    message,
-    targetDate: target.targetDate,
-    targetLabel: target.targetLabel,
-    daysToTarget: target.daysToTarget,
+  const risk = buildAylaScheduleRisk({
     backlogCount: overdue.length,
     backlogMinutes,
     dailyCapacityMinutes: dailyCapacity,
+    studyDaysRemaining: studyDays,
+    daysToTarget: target.daysToTarget,
+    targetLabel: target.targetLabel,
     requiredDailyMinutes,
+    riskMultiplier: multiplier,
+    lowCompletion,
+  });
+  return {
+    ...risk,
+    targetDate: target.targetDate,
     requiredHours,
     workload: {
       deduplicatedResources: workload.deduplicatedCount,
@@ -76771,7 +76770,6 @@ function aylaV189BacklogWarning(db, student, date, systemProgress = aylaV189Syst
       byType: workload.byType,
     },
     weakSystems: systemProgress.filter((row) => row.weaknessPercent !== null).slice(0, 3).map((row) => row.system),
-    choices: level === "on_track" ? [] : ["Increase daily study time", "Move exam or Match date", "Reduce lower-priority resources", "Keep current plan and accept high-risk status"],
   };
 }
 
@@ -76881,6 +76879,11 @@ function aylaV189AssessmentDecision(db, student, date, options = {}) {
   const recentCutoff = aylaDateOnly(aylaAddDays(new Date(`${date}T12:00:00Z`), -7));
   const recentQuestions = questionAttempts.filter((row) => String(row.createdAt || "").slice(0, 10) >= recentCutoff);
   const recentCards = cardReviews.filter((row) => String(row.createdAt || "").slice(0, 10) >= recentCutoff);
+  const learningCategories = new Set(["reading", "video", "flashcards"]);
+  const completedLearning = completed.filter((row) => learningCategories.has(String(row.category || row.type || "").toLowerCase()));
+  const onboardingPath = String(student.onboardingPath || student.onboarding_path || "").toLowerCase();
+  const startingFresh = onboardingPath === "starting_fresh";
+  const assessmentsCompletedToday = attempts.filter((row) => String(row.createdAt || "").slice(0, 10) === String(date)).length;
 
   const base = {
     status: "monitoring",
@@ -76905,6 +76908,14 @@ function aylaV189AssessmentDecision(db, student, date, options = {}) {
     return typeMatch && systemMatch && topicMatch && age >= 0 && age < withinDays;
   });
 
+  const learningGate = buildAylaAssessmentLearningGate({
+    startingFresh,
+    completedLearningAssignments: completedLearning.length,
+    completedPracticeQuestions: questionAttempts.length,
+    assessmentsCompletedToday,
+  });
+  if (learningGate) return { ...base, ...learningGate };
+
   if (options.includeAssessment === true) {
     return { ...base, status: "due", type: "requested", label: "Tutor-requested checkpoint", reason: "A focused checkpoint was requested. AylaMed will use verified internal MCQs and adapt future work from the exact answers.", trigger: "manual_tutor_request", questionCount: 10 };
   }
@@ -76917,21 +76928,38 @@ function aylaV189AssessmentDecision(db, student, date, options = {}) {
   for (const row of recentQuestions) {
     const system = row.system || prioritySystem;
     const key = aylaV189AssessmentKey(system);
-    if (!weakStats.has(key)) weakStats.set(key, { system, total: 0, correct: 0, hardCards: 0 });
+    if (!weakStats.has(key)) weakStats.set(key, { system, total: 0, correct: 0, hardCards: 0, latestSignalAt: "" });
     const stat = weakStats.get(key);
     stat.total += 1;
     if (String(row.outcome || "").toLowerCase() === "correct") stat.correct += 1;
+    if (String(row.createdAt || "") > stat.latestSignalAt) stat.latestSignalAt = String(row.createdAt || "");
   }
   for (const row of recentCards) {
     const system = row.system || prioritySystem;
     const key = aylaV189AssessmentKey(system);
-    if (!weakStats.has(key)) weakStats.set(key, { system, total: 0, correct: 0, hardCards: 0 });
+    if (!weakStats.has(key)) weakStats.set(key, { system, total: 0, correct: 0, hardCards: 0, latestSignalAt: "" });
     if (["again", "hard"].includes(String(row.rating || "").toLowerCase())) weakStats.get(key).hardCards += 1;
+    if (String(row.createdAt || "") > weakStats.get(key).latestSignalAt) weakStats.get(key).latestSignalAt = String(row.createdAt || "");
   }
   const weakCandidate = [...weakStats.values()]
     .map((row) => ({ ...row, accuracy: row.total ? Math.round((row.correct / row.total) * 100) : 100 }))
     .filter((row) => (row.total >= aylaNumber(policy.weak_question_minimum, 5) && row.accuracy < aylaNumber(policy.weak_accuracy_threshold, 65)) || row.hardCards >= aylaNumber(policy.difficult_flashcard_threshold, 4))
     .sort((a, b) => a.accuracy - b.accuracy || b.hardCards - a.hardCards)[0];
+  const weakStudyAfterSignal = weakCandidate
+    ? completedLearning.filter((row) => {
+        const sameSystem = aylaV189AssessmentKey(row.system) === aylaV189AssessmentKey(weakCandidate.system);
+        const completedAt = String(row.completedAt || row.updatedAt || row.scheduledDate || "");
+        return sameSystem && completedAt >= String(weakCandidate.latestSignalAt || "");
+      })
+    : [];
+  const weakAreaStudyGate = weakCandidate
+    ? buildAylaWeakAreaStudyGate({
+        system: weakCandidate.system,
+        accuracy: weakCandidate.accuracy,
+        completedTargetedLearning: weakStudyAfterSignal.length,
+      })
+    : null;
+  if (weakAreaStudyGate) return { ...base, ...weakAreaStudyGate };
   if (weakCandidate && !recentSameType("weak_area", weakCandidate.system, "", 3)) {
     return { ...base, status: "due", type: "weak_area", label: `${weakCandidate.system} weak-area checkpoint`, reason: `Recent performance shows ${weakCandidate.accuracy}% question accuracy and ${weakCandidate.hardCards} difficult flashcard reviews in ${weakCandidate.system}. A focused assessment is required before adding more load.`, trigger: "performance_weakness", system: weakCandidate.system, questionCount: aylaNumber(policy.weak_area_question_count, 10) };
   }
@@ -77279,6 +77307,8 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   const existingAssignments = existing
     ? aylaValues(db, "aylaResourceAssignments").filter((row) => String(row.dailyPlanId) === String(existing.id))
     : [];
+  const previousPlanSnapshot = existing ? JSON.parse(JSON.stringify(existing)) : null;
+  const previousAssignmentSnapshots = existingAssignments.map((row) => JSON.parse(JSON.stringify(row)));
   const completedDiagnosticCanYieldToAdaptivePlan = Boolean(
     existing
     && String(existing.status || "").toLowerCase() === "completed"
@@ -77513,6 +77543,13 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       topic: diagnosticAssignment.topic,
       reasons: ["A verified baseline is required before adaptive content selection."],
     };
+    plan.changeNotice = buildAylaPlanChangeNotice({
+      previousPlan: previousPlanSnapshot,
+      previousAssignments: previousAssignmentSnapshots,
+      currentPlan: plan,
+      currentAssignments: assignments,
+      reason: options.reason || "adaptive_rebuild",
+    });
     aylaSetItem(db, "aylaDailyPlans", plan);
     aylaSetItem(db, "aylaResourceAssignments", diagnosticAssignment);
     return { plan, assignments, reused: false };
@@ -77611,6 +77648,13 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       ? `${studyDay.dayName} is a protected rest day. Only due revision and critical overdue work were assigned.`
       : `${studyDay.dayName} is your protected rest day. No new content is assigned.`;
     plan.missingResourceTypes = [];
+    plan.changeNotice = buildAylaPlanChangeNotice({
+      previousPlan: previousPlanSnapshot,
+      previousAssignments: previousAssignmentSnapshots,
+      currentPlan: plan,
+      currentAssignments: assignments,
+      reason: options.reason || "adaptive_rebuild",
+    });
     aylaSetItem(db, "aylaDailyPlans", plan);
     assignments.forEach((row) => aylaSetItem(db, "aylaResourceAssignments", row));
     return { plan, assignments, reused: false };
@@ -77752,6 +77796,13 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     ? `Today’s verified plan is saved around one focus: ${[focusSystem, focusSubsystem, focusTopic].filter(Boolean).join(" — ")}. Due revision and overdue work were prioritized before new content.`
     : "No verified resources match today’s focus. Upload/approve books, Vimeo mappings, question banks, flashcards or assessments; AylaMed will not invent references.";
   plan.missingResourceTypes = [...new Set(plan.missingResourceTypes)];
+  plan.changeNotice = buildAylaPlanChangeNotice({
+    previousPlan: previousPlanSnapshot,
+    previousAssignments: previousAssignmentSnapshots,
+    currentPlan: plan,
+    currentAssignments: assignments,
+    reason: options.reason || "adaptive_rebuild",
+  });
   aylaSetItem(db, "aylaDailyPlans", plan);
   assignments.forEach((row) => aylaSetItem(db, "aylaResourceAssignments", row));
   return { plan, assignments, reused: false };
@@ -84114,6 +84165,7 @@ app.post("/api/ayla/students/:studentId/personal-tutor/apply", async (req, res) 
         skipAi: true,
         includeAssessment: validated.directive.includeAssessment,
         tutorDirective: validated.directive,
+        reason: "personal_tutor_recommendation",
       });
       aylaV189RecordActivity(db, student.id, "personal_tutor_recommendation_applied", {
         commandKey: validated.commandKey,
@@ -84125,6 +84177,7 @@ app.post("/api/ayla/students/:studentId/personal-tutor/apply", async (req, res) 
         resultPlanVersion: rebuilt.plan.version,
         date,
         completedHistoryPreserved: true,
+        changeNotice: rebuilt.plan.changeNotice || null,
         engine: AYLA_PERSONAL_TUTOR_ENGINE,
       });
       const snapshot = await aylaV213PersonalTutorSnapshot(db, user, student, date);
@@ -84157,16 +84210,16 @@ app.get("/api/ayla/students/:studentId/daily-workspace", async (req, res) => {
         .filter((row) => !["superseded", "cancelled"].includes(String(row.status || "").toLowerCase()));
       const backlogMinutes = overdue.reduce((sum, row) => sum + aylaNumber(row.estimatedMinutes, 0), 0);
       const dailyHours = Math.max(1, Math.min(16, aylaNumber(student.dailyHours || student.daily_hours, 3)));
-      const warning = overdue.length
-        ? {
-            level: backlogMinutes >= dailyHours * 120 ? "high" : "medium",
-            title: "Your current schedule needs attention.",
-            message: `You have ${overdue.length} overdue assignment${overdue.length === 1 ? "" : "s"} (${Math.round(backlogMinutes / 6) / 10} hours). Complete today's priorities or adjust your study schedule.`,
-            backlogCount: overdue.length,
-            backlogMinutes,
-            dailyCapacityMinutes: dailyHours * 60,
-          }
-        : null;
+      const target = aylaTargetDateInfo(student);
+      const compactRisk = buildAylaScheduleRisk({
+        backlogCount: overdue.length,
+        backlogMinutes,
+        dailyCapacityMinutes: dailyHours * 60,
+        studyDaysRemaining: aylaV189StudyDaysRemaining(student, target.daysToTarget || 1),
+        daysToTarget: target.daysToTarget,
+        targetLabel: target.targetLabel,
+      });
+      const warning = compactRisk.level === "on_track" ? null : compactRisk;
       if (!built.reused) await writeAylaDb(db);
       const safeBundle = aylaV189SanitizePlanBundle(db, built.plan, built.assignments);
       res.setHeader("Cache-Control", "private, no-store");
@@ -84230,8 +84283,9 @@ app.post("/api/ayla/students/:studentId/daily-workspace/rebuild", async (req, re
   try {
     const { student, db } = await aylaV189RequireStudent(req, req.params.studentId, "roadmap");
     const date = aylaV247StudyDate(student, req.body.date);
-    const built = await aylaV189BuildDailyPlan(db, student, date, { force: true, includeAssessment: req.body.includeAssessment === true });
-    aylaV189RecordActivity(db, student.id, "daily_plan_rebuilt", { date, reason: req.body.reason || "student_request" });
+    const reason = req.body.reason || "student_request";
+    const built = await aylaV189BuildDailyPlan(db, student, date, { force: true, includeAssessment: req.body.includeAssessment === true, reason });
+    aylaV189RecordActivity(db, student.id, "daily_plan_rebuilt", { date, reason, changeNotice: built.plan.changeNotice || null });
     await writeAylaDb(db);
     const hydratedAssignments = await aylaV251HydrateAssignmentMedia(built.assignments);
     const safeBundle = aylaV189SanitizePlanBundle(db, built.plan, hydratedAssignments);
