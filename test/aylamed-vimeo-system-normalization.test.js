@@ -33,10 +33,14 @@ test("reviewed Vimeo display labels normalize to Step 1 app systems", () => {
     ["Nervous System", "Neuropathology", "Neurology"],
     ["Hematology and Oncology", "Leukemias and lymphomas", "Hematology"],
     ["Hematology & Oncology", "Acute leukemia", "Hematology"],
+    ["Haematology and Oncology", "Clinical Practice", "Hematology"],
     ["Genetics", "Chromosomal Abnormalities", "Biochemistry"],
     ["Pulmonary", "Pulmonary pathology", "Respiratory"],
     ["General Pathology", "Neoplasia", "Biochemistry"],
     ["Dermatology", "Inflammatory skin disease", "Musculoskeletal"],
+    ["Rheumatology and Orthopaedics", "Clinical Practice", "Musculoskeletal"],
+    ["Female Reproductive and Breast", "Clinical Practice", "Reproductive"],
+    ["Pulmonary and Ear, Nose and Throat", "Clinical Practice", "Respiratory"],
   ];
   for (const [system, subsystem, expected] of cases) {
     assert.equal(normalize(system, subsystem), expected, `${system} / ${subsystem}`);

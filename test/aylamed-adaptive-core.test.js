@@ -111,3 +111,10 @@ test("server wires the verified adaptive loop without replacing ingestion or com
   assert.match(server, /function aylaV189UpdatePlanCompletion[\s\S]*?\["completed", "cancelled", "superseded"\]\.includes/);
   assert.match(server, /weakAreaLogs: aylaValues\(db, "aylaWeakAreaLogs"\)[\s\S]*?aylaAdaptiveEvidenceMatchesStudent/);
 });
+
+test("QBank adaptive evidence uses approved labels and repairs legacy General projections", () => {
+  const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
+  assert.match(server, /function aylaCanonicalQbankEvidence[\s\S]*?question\.taxonomy\?\.labels\?\.system/);
+  assert.match(server, /sourceSystemLabel: evidence\.sourceSystemLabel \|\| null/);
+  assert.match(server, /aylaV189SystemKey\(row\.system\) === "general"[\s\S]*?row\.sourceSystemLabel \|\| row\.sourceSystemId \|\| row\.system/);
+});
