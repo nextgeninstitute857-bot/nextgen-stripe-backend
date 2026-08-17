@@ -119,6 +119,8 @@ test("QBank adaptive evidence uses approved labels and repairs legacy General pr
   assert.match(server, /aylaV189SystemKey\(row\.system\) === "general"[\s\S]*?row\.sourceSystemLabel \|\| row\.sourceSystemId \|\| row\.system/);
   assert.match(server, /function aylaV227StudentFacingTopic[\s\S]*?return `\$\{system\} — \$\{topic\}`/);
   assert.match(server, /aylaV189SystemKey\(topic\)\.startsWith\(`\$\{aylaV189SystemKey\(system\)\} `\)/);
+  assert.match(server, /function aylaV227PreferredAdaptiveTopic[\s\S]*?looksLikeQuestionSentence[\s\S]*?return looksLikeQuestionSentence && fallback/);
+  assert.match(server, /sourceSubtopicLabel: evidence\.sourceSubtopicLabel \|\| null/);
   assert.match(server, /input\.sourceSystemLabel \|\| input\.sourceSystemId \|\| input\.topic \|\| input\.system/);
   assert.match(server, /function aylaScoredQuestionAttempt[\s\S]*?row\.scoringAllowed !== false[\s\S]*?row\.supplemental !== true/);
   assert.match(server, /function aylaV214WeakSignals[\s\S]*?\.filter\(aylaScoredQuestionAttempt\)/);
