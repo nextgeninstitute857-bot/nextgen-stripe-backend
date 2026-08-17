@@ -120,6 +120,9 @@ test("QBank adaptive evidence uses approved labels and repairs legacy General pr
   assert.match(server, /sourceSystemLabel: evidence\.sourceSystemLabel \|\| null/);
   assert.match(server, /aylaV189SystemKey\(row\.system\) === "general"[\s\S]*?row\.sourceSystemLabel \|\| row\.sourceSystemId \|\| row\.system/);
   assert.match(server, /function aylaV227StudentFacingTopic[\s\S]*?return `\$\{system\} — \$\{topic\}`/);
+  assert.match(server, /function aylaV227TruthfulSourceSystemLabel[\s\S]*?examTrackId === "nclex"[\s\S]*?return "NCLEX Clinical Practice"/);
+  assert.match(server, /const system = canonicalSystem \|\| aylaV227TruthfulSourceSystemLabel\([\s\S]*?sourceSystemLabel \|\| rawSystem/);
+  assert.match(server, /const canonicalSystem = aylaV227CanonicalSystemForStudent\(student, recordedSystem, ""[\s\S]*?canonicalSystem \|\| aylaV227TruthfulSourceSystemLabel\(student, recordedSystem\)/);
   assert.match(server, /aylaV189SystemKey\(topic\)\.startsWith\(`\$\{aylaV189SystemKey\(system\)\} `\)/);
   assert.match(server, /function aylaV227PreferredAdaptiveTopic[\s\S]*?looksLikeQuestionSentence[\s\S]*?return looksLikeQuestionSentence && fallback/);
   assert.match(server, /sourceSubtopicLabel: evidence\.sourceSubtopicLabel \|\| null/);

@@ -68874,7 +68874,10 @@ function aylaCanonicalQbankEvidence(question = {}, examTrack = "") {
     "",
     sourceSubsystemLabel,
   ) || aylaV227CanonicalSystemForStudent({ examTrack: examTrackId }, rawSystem, "", sourceSubsystemLabel);
-  const system = canonicalSystem || "General";
+  const system = canonicalSystem || aylaV227TruthfulSourceSystemLabel(
+    { examTrack: examTrackId },
+    sourceSystemLabel || rawSystem,
+  );
   const topicSource = aylaV227PreferredAdaptiveTopic(sourceTopicLabel || rawTopic, sourceSubtopicLabel || rawSubtopic);
   const topic = aylaV227StudentFacingTopic({ examTrack: examTrackId }, topicSource, system);
   return {
@@ -76509,6 +76512,17 @@ function aylaV227CanonicalSystemForStudent(student = {}, value = "", fallback = 
   return fallback;
 }
 
+function aylaV227TruthfulSourceSystemLabel(student = {}, value = "", fallback = "General") {
+  const examTrackId = aylaCanonicalExamTrack(
+    student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam,
+  );
+  const sourceKey = aylaV189SystemKey(value);
+  if (examTrackId === "nclex" && ["nclex clinical practice", "nclex nclex clinical practice"].includes(sourceKey)) {
+    return "NCLEX Clinical Practice";
+  }
+  return fallback;
+}
+
 function aylaV227StudentFacingTopic(student = {}, value = "", system = "General") {
   const raw = String(value || "").trim();
   if (!raw || /^\d+$/.test(raw)) return system;
@@ -78493,7 +78507,8 @@ function aylaV214WeakSignals(db = {}, student = {}, lmsContext = null) {
     const recordedSystem = aylaV189SystemKey(row.system) === "general"
       ? row.sourceSystemLabel || row.sourceSystemId || row.system
       : row.system;
-    const system = aylaV227CanonicalSystemForStudent(student, recordedSystem, "General", row.sourceSubsystemLabel || row.subsystem);
+    const canonicalSystem = aylaV227CanonicalSystemForStudent(student, recordedSystem, "", row.sourceSubsystemLabel || row.subsystem);
+    const system = canonicalSystem || aylaV227TruthfulSourceSystemLabel(student, recordedSystem);
     const topicSource = aylaV227PreferredAdaptiveTopic(
       row.sourceTopicLabel || row.topic,
       row.sourceSubtopicLabel || row.subtopic,
