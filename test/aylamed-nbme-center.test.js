@@ -249,6 +249,8 @@ test("Personal Tutor readiness recommends the correct exam form and defers durin
   });
   assert.equal(baseline.available_full_forms, 1);
   assert.equal(baseline.recommendation.state, "baseline_due");
+  assert.equal(baseline.recommendation.title, "Take your first full self-assessment");
+  assert.match(baseline.recommendation.reason, /server-verified full-form result/);
   assert.equal(baseline.recommendation.form_id, step2.id);
   const overloaded = buildAylaNbmeReadinessSnapshot({
     student: { examTrackId: "usmle_step_2_ck", targetDate: "2026-08-20" },
