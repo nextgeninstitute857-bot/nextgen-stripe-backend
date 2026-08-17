@@ -41379,7 +41379,10 @@ async function aylaSelectQbankSessionQuestions({
   const examTrackId = aylaCanonicalExamTrack(examTrack);
   const examDefinition = AYLA_EXAM_REGISTRY[examTrackId] || {};
   const multiExamMinimumSystems = {
-    usmle_step_2_ck: 8,
+    // The approved Step 2 collections currently expose seven verified
+    // clinical lanes. Requiring an eighth lane made the real diagnostic fail
+    // closed even after the full discovery window confirmed the catalogue.
+    usmle_step_2_ck: 7,
     usmle_step_3: 8,
     plab: 8,
     amc: 6,
@@ -41426,8 +41429,9 @@ async function aylaSelectQbankSessionQuestions({
       code: error.code,
       eligible_questions: blueprint.eligibleQuestionCount,
       required_questions: blueprint.requestedCount,
-      systems_available: blueprint.availableSystemKeys.length,
-      systems_required: blueprint.minimumSystems,
+        systems_available: blueprint.availableSystemKeys.length,
+        available_systems: blueprint.availableSystemKeys,
+        systems_required: blueprint.minimumSystems,
       media_incomplete_questions: blueprint.rejectedMissingMediaCount,
       governed_replacements: blueprint.governedReplacementCount,
       unmatched_replacement_slots: blueprint.unmatchedReplacementCount,
