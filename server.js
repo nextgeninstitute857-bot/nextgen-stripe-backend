@@ -118,6 +118,17 @@ import {
   setAylaQbankQuestionMark,
 } from "./lib/aylamed-qbank.js";
 import { aylaStudentBankName } from "./lib/aylamed-bank-names.js";
+import {
+  AYLA_NCLEX_VARIANTS,
+  assertAylaNclexSessionVariant,
+  aylaNclexVariantCode,
+  aylaNclexVariantLabel,
+  aylaStudentNclexVariant,
+  filterAylaNclexBanksForStudent,
+  isAylaNclexExamTrack,
+  normalizeAylaNclexVariant,
+  requireAylaNclexVariant,
+} from "./lib/aylamed-nclex-variant.js";
 import { buildAylaScheduleRisk } from "./lib/aylamed-schedule-risk.js";
 import {
   buildAylaAssessmentLearningGate,
@@ -41251,6 +41262,7 @@ async function aylaSelectQbankSessionQuestions({
   selectionSeed = "",
   questionExposureCounts = {},
   seenQuestionIds = [],
+  allowedCollectionIds = [],
 } = {}) {
   const publicationDestination = purpose === "baseline_diagnostic" ? "diagnostic" : "qbank";
   if (purpose !== "baseline_diagnostic" && Array.isArray(selectedBanks) && selectedBanks.length) {
@@ -41304,13 +41316,15 @@ async function aylaSelectQbankSessionQuestions({
     }
     return { selected, availableSystemKeys: [], selectedSystemKeys: [] };
   }
-  const collectionIds = await aylaPublishedQbankCollectionIds(db, {
-    examTrack,
-    sourceExamTrack: examTrack,
-    destination: publicationDestination,
-    destinationScope,
-    sourceProfile,
-  });
+  const collectionIds = Array.isArray(allowedCollectionIds) && allowedCollectionIds.length
+    ? [...new Set(allowedCollectionIds.map(String).filter(Boolean))]
+    : await aylaPublishedQbankCollectionIds(db, {
+      examTrack,
+      sourceExamTrack: examTrack,
+      destination: publicationDestination,
+      destinationScope,
+      sourceProfile,
+    });
   if (purpose !== "baseline_diagnostic") {
     const selected = await listContentQbankQuestions({
       examTrack,
@@ -41813,6 +41827,7 @@ function aylaStudentQbankPresentationPolicy(
       source_exam_track: row.source_exam_track,
       supplemental: row.supplemental === true,
       scoring_allowed: row.scoring_allowed !== false,
+      nclex_variant: row.nclex_variant || null,
     })),
     selected_collection_ids: [...new Set((Array.isArray(selectedCollectionIds)
       ? selectedCollectionIds : []).map(String).filter(Boolean))],
@@ -42738,6 +42753,7 @@ app.get("/api/ayla/qbank/catalog", async (req, res) => {
       destination: "qbank",
       destinationScope,
       sourceProfile,
+      student: auth.student,
     });
     const studentPresentationPolicy = aylaStudentSelectableQbankPolicy(presentationPolicy, availableBanks);
     const requestedCollectionIds = aylaRequestedQbankCollectionIds(
@@ -42760,6 +42776,7 @@ app.get("/api/ayla/qbank/catalog", async (req, res) => {
         source_exam_track: bank.source_exam_track,
         supplemental: bank.supplemental === true,
         scoring_allowed: bank.scoring_allowed !== false,
+        nclex_variant: bank.nclex_variant || null,
         question_count: Number(bank.question_count || 0),
       }))
       : (await Promise.all([...banksBySourceExam.entries()].map(async ([sourceExamTrack, banks]) => {
@@ -42780,6 +42797,7 @@ app.get("/api/ayla/qbank/catalog", async (req, res) => {
       }))).flat();
     return aylaSendOk(res, {
       exam_track: examTrack,
+      exam_variant: aylaStudentNclexVariant(auth.student) || null,
       entitlement: { type: access.entitlement_type, expires_at: access.expires_at || null },
       presentation: aylaStudentQbankPresentationPolicy(
         studentPresentationPolicy,
@@ -42793,7 +42811,7 @@ app.get("/api/ayla/qbank/catalog", async (req, res) => {
       catalog,
     });
   } catch (error) {
-    return aylaSendError(res, error.statusCode || 500, error.message);
+    return aylaSendError(res, error.statusCode || 500, error.message, error.details || (error.code ? { code: error.code } : null));
   }
 });
 
@@ -42801,6 +42819,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
   try {
     const auth = await aylaV189RequireStudent(req, String(req.body.student_id || req.body.studentId || ""), "qbank");
     const access = aylaRequireQbankAccess(auth.db, auth.user, auth.student, req.body.exam_track || req.body.examTrack || "");
+    const nclexVariant = requireAylaNclexVariant(auth.student, access.exam_track);
     const destinationScope = aylaStudentCatalogDestinationScope(auth.student);
     const purpose = normalizeAylaQbankPurpose(req.body.purpose || req.body.session_purpose || "practice");
     aylaRequireExamPublished(auth.db, aylaCanonicalExamTrack(access.exam_track), purpose === "baseline_diagnostic" ? "diagnostic" : "qbank");
@@ -42828,6 +42847,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
       const activeDiagnostic = activeDiagnostics.find((row) =>
         diagnosticSessionUsesCurrentBlueprint(row));
       if (activeDiagnostic) {
+        assertAylaNclexSessionVariant(auth.student, activeDiagnostic);
         const bundle = await aylaPlayableQbankSession(auth.db, activeDiagnostic);
         return aylaSendOk(res, {
           ...bundle,
@@ -42880,6 +42900,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         && String(row.roadmapAssignmentId || "") === String(roadmapAssignmentId)
         && String(row.status || "") === "in_progress");
       if (activeRoadmapSession) {
+        assertAylaNclexSessionVariant(auth.student, activeRoadmapSession);
         if (!qbankRoadmapSessionMatchesAssignment(activeRoadmapSession, assignment)) {
           return aylaSendError(res, 409, "This roadmap QBank assignment changed after its earlier session began. Refresh the roadmap before continuing.");
         }
@@ -42901,13 +42922,27 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
     let availableBanks = [];
     let selectedCollectionIds = [];
     let selectedBanks = [];
-    if (!roadmapAssignmentId && purpose !== "baseline_diagnostic") {
+    if (isAylaNclexExamTrack(access.exam_track)) {
       availableBanks = await aylaAvailableQbankBanks(auth.db, {
         examTrack: access.exam_track,
-        destination: "qbank",
+        destination: purpose === "baseline_diagnostic" ? "diagnostic" : roadmapAssignmentId ? "roadmap" : "qbank",
         destinationScope,
         sourceProfile,
+        student: auth.student,
       });
+      selectedCollectionIds = availableBanks.map((row) => row.id);
+      selectedBanks = [...availableBanks];
+    }
+    if (!roadmapAssignmentId && purpose !== "baseline_diagnostic") {
+      if (!availableBanks.length) {
+        availableBanks = await aylaAvailableQbankBanks(auth.db, {
+          examTrack: access.exam_track,
+          destination: "qbank",
+          destinationScope,
+          sourceProfile,
+          student: auth.student,
+        });
+      }
       const studentPresentationPolicy = aylaStudentSelectableQbankPolicy(presentationPolicy, availableBanks);
       const requestedCollectionIds = aylaRequestedQbankCollectionIds(
         req.body.collection_ids ?? req.body.collectionIds ?? [],
@@ -42921,6 +42956,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
 
     const idempotencyFingerprint = crypto.createHash("sha256").update(JSON.stringify({
       examTrack: access.exam_track,
+      examVariant: nclexVariant || null,
       mode: requestedMode,
       purpose,
       requestedCount: effectiveRequestedCount,
@@ -42945,6 +42981,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
           && !diagnosticSessionUsesCurrentBlueprint(existing);
         if (!legacyDiagnostic) {
           aylaRequireQbankAccess(auth.db, auth.user, auth.student, existing.examTrack);
+          assertAylaNclexSessionVariant(auth.student, existing);
           const bundle = await aylaPlayableQbankSession(auth.db, existing);
           return aylaSendOk(res, {
             ...bundle,
@@ -43003,13 +43040,15 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
 
     let selection;
     if (roadmapAssignmentId) {
-      const collectionIds = await aylaPublishedQbankCollectionIds(auth.db, {
-        examTrack: access.exam_track,
-        sourceExamTrack: access.exam_track,
-        destination: "roadmap",
-        destinationScope,
-        sourceProfile,
-      });
+      const collectionIds = nclexVariant
+        ? selectedCollectionIds
+        : await aylaPublishedQbankCollectionIds(auth.db, {
+          examTrack: access.exam_track,
+          sourceExamTrack: access.exam_track,
+          destination: "roadmap",
+          destinationScope,
+          sourceProfile,
+        });
       const rows = await getContentQbankQuestions({
         questionIds: roadmapQuestionIds,
         examTrack: access.exam_track,
@@ -43060,6 +43099,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         selectionSeed: diagnosticSelectionSeed,
         questionExposureCounts: diagnosticQuestionExposureCounts,
         seenQuestionIds,
+        allowedCollectionIds: nclexVariant ? selectedCollectionIds : [],
       });
     }
     const selected = selection.selected;
@@ -43076,10 +43116,19 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         sourceExamTrack: bank?.source_exam_track || question.source_exam_track || access.exam_track,
         supplemental: bank?.supplemental === true || question.supplemental === true,
         scoringAllowed: bank?.scoring_allowed !== false && question.scoring_allowed !== false,
+        nclexVariant: nclexVariant || null,
       };
     });
     const mutation = await mutateAylaDb(async (db) => {
       const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, access.exam_track);
+      const freshNclexVariant = requireAylaNclexVariant(fresh.student, fresh.entitlement.exam_track);
+      if (freshNclexVariant !== nclexVariant) {
+        const error = new Error("The NCLEX program changed while this session was being prepared. Refresh before continuing.");
+        error.statusCode = 409;
+        error.code = "NCLEX_VARIANT_CHANGED";
+        error.details = { code: error.code };
+        throw error;
+      }
       let legacyDiagnostics = [];
       if (purpose === "baseline_diagnostic") {
         const activeDiagnostics = aylaValues(db, "aylaQbankSessions").filter((row) =>
@@ -43185,6 +43234,8 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
       });
       session.idempotencyKey = idempotencyKey || null;
       session.idempotencyFingerprint = idempotencyKey ? idempotencyFingerprint : null;
+      session.nclexVariant = nclexVariant || null;
+      session.nclex_variant = nclexVariant || null;
       session.requestedQuestionCount = effectiveRequestedCount;
       session.contentDeliveryPolicy = contentDeliveryPolicySnapshot();
       session.contentDeliverySelection = {
@@ -43258,6 +43309,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
       return { session, replayed: false };
     });
     const latestDb = await readAylaDb();
+    assertAylaNclexSessionVariant(auth.student, mutation.session);
     const bundle = await aylaPlayableQbankSession(latestDb, mutation.session);
     return aylaSendOk(res, {
       ...bundle,
@@ -43573,14 +43625,17 @@ app.get("/api/ayla/qbank/history", async (req, res) => {
   try {
     const auth = await aylaV189RequireStudent(req, String(req.query.student_id || ""), "qbank");
     const access = aylaRequireQbankAccess(auth.db, auth.user, auth.student, req.query.exam_track || req.query.examTrack || "");
+    const nclexVariant = requireAylaNclexVariant(auth.student, access.exam_track);
     const limit = Math.max(1, Math.min(200, Number(req.query.limit) || 50));
     const offset = Math.max(0, Number(req.query.offset) || 0);
     const rows = aylaValues(auth.db, "aylaQbankSessions")
       .filter((row) => String(row.userId || "") === String(auth.user.id) && String(row.studentId || "") === String(auth.student.id))
       .filter((row) => String(row.examTrack || "") === String(access.exam_track))
+      .filter((row) => !nclexVariant || normalizeAylaNclexVariant(row.nclexVariant || row.nclex_variant) === nclexVariant)
       .sort((a, b) => String(b.submittedAt || b.updatedAt || b.createdAt || "").localeCompare(String(a.submittedAt || a.updatedAt || a.createdAt || "")));
     return aylaSendOk(res, {
       exam_track: access.exam_track,
+      exam_variant: nclexVariant || null,
       total: rows.length,
       limit,
       offset,
@@ -43792,11 +43847,17 @@ async function aylaQbankSavedList(req, res, collection, responseKey) {
   try {
     const auth = await aylaV189RequireStudent(req, String(req.query.student_id || ""), "qbank");
     const access = aylaRequireQbankAccess(auth.db, auth.user, auth.student, req.query.exam_track || req.query.examTrack || "");
+    const nclexVariant = requireAylaNclexVariant(auth.student, access.exam_track);
     const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 50));
     const rows = aylaValues(auth.db, collection)
       .filter((row) => String(row.userId || "") === String(auth.user.id) && String(row.studentId || "") === String(auth.student.id))
       .filter((row) => String(row.examTrack || "") === String(access.exam_track) && !row.deletedAt)
       .filter((row) => collection !== "aylaRevisionQueue" || (String(row.sourceType || "") === "qbank_question" && !["removed", "completed"].includes(String(row.status || "due").toLowerCase())))
+      .filter((row) => {
+        if (!nclexVariant) return true;
+        const saved = aylaQbankSavedItemSession(auth.db, row);
+        return normalizeAylaNclexVariant(saved.session.nclexVariant || saved.session.nclex_variant) === nclexVariant;
+      })
       .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")))
       .slice(0, limit);
     const content = await getContentQbankQuestions({
@@ -43823,7 +43884,7 @@ async function aylaQbankSavedList(req, res, collection, responseKey) {
         question: await aylaPlayableQbankQuestion(auth.db, saved.session, saved.mapping, byId.get(String(row.contentQuestionId || row.sourceId)) || null),
       });
     }
-    return aylaSendOk(res, { exam_track: access.exam_track, count: items.length, [responseKey]: items });
+    return aylaSendOk(res, { exam_track: access.exam_track, exam_variant: nclexVariant || null, count: items.length, [responseKey]: items });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message);
   }
@@ -66467,7 +66528,7 @@ const AYLA_EXAM_REGISTRY = Object.freeze({
   plab: { id: "plab", label: "PLAB", aliases: ["plab", "plab 1", "plab1", "professional and linguistic assessments board"], curriculumVersion: "2026-09", blueprint: AYLA_EXAM_SITES.plab.blueprint, systems: ["Medicine", "Surgery", "Emergency Medicine", "Obstetrics and Gynecology", "Pediatrics", "Psychiatry", "General Practice", "Clinical Ethics", "Communication Skills", "Patient Safety", "UK Clinical Guidelines"] },
   amc: { id: "amc", label: "AMC", aliases: ["amc", "australian medical council", "australia"], curriculumVersion: "2026.1", blueprint: AYLA_EXAM_SITES.amc.blueprint, systems: ["Medicine", "Surgery", "Women's Health", "Child Health", "Mental Health", "Population Health", "Ethics", "Australian Clinical Practice"] },
   mccqe: { id: "mccqe", label: "MCCQE", aliases: ["mccqe", "mccqe1", "mccqe part 1", "medical council of canada", "canada"], curriculumVersion: "2026.1", blueprint: AYLA_EXAM_SITES.mccqe.blueprint, systems: ["Family Medicine", "Internal Medicine", "Surgery", "Pediatrics", "Obstetrics and Gynecology", "Psychiatry", "Emergency Medicine", "Preventive Care", "Ethics and Communication"] },
-  nclex: { id: "nclex", label: "NCLEX", aliases: ["nclex", "nclex rn", "nclex-rn", "nursing licensure"], curriculumVersion: "2026-04_to_2029-03", blueprint: AYLA_EXAM_SITES.nclex.blueprint, systems: ["Management of Care", "Safety and Infection Control", "Health Promotion and Maintenance", "Psychosocial Integrity", "Basic Care and Comfort", "Pharmacological Therapies", "Reduction of Risk Potential", "Physiological Adaptation", "Prioritization and Delegation"] },
+  nclex: { id: "nclex", label: "NCLEX", aliases: ["nclex", "nclex rn", "nclex-rn", "nclex pn", "nclex-pn", "nursing licensure"], variants: AYLA_NCLEX_VARIANTS, curriculumVersion: "2026-04_to_2029-03", blueprint: AYLA_EXAM_SITES.nclex.blueprint, systems: ["Management of Care", "Safety and Infection Control", "Health Promotion and Maintenance", "Psychosocial Integrity", "Basic Care and Comfort", "Pharmacological Therapies", "Reduction of Risk Potential", "Physiological Adaptation", "Prioritization and Delegation"] },
 });
 
 function aylaCanonicalExamTrack(value = "") {
@@ -67364,6 +67425,9 @@ function aylaStudentFromDiagnostic(payload = {}, recommendation = aylaRecommenda
   const preferredStudyDays = aylaCleanArray(payload.preferredStudyDays || payload.preferred_study_days);
   const examTrackId = aylaCanonicalExamTrack(payload.examTrackId || payload.exam_track_id || payload.exam || payload.selectedExam);
   const examDefinition = examTrackId ? AYLA_EXAM_REGISTRY[examTrackId] : null;
+  const examVariant = examTrackId === "nclex"
+    ? normalizeAylaNclexVariant(payload.examVariant || payload.exam_variant || payload.nclexType || payload.nclex_type)
+    : "";
   return {
     id: payload.studentId || payload.student_id || payload.id || aylaId("STU"),
     aylaUserId: payload.aylaUserId || payload.ayla_user_id || payload.user_id || "",
@@ -67371,7 +67435,11 @@ function aylaStudentFromDiagnostic(payload = {}, recommendation = aylaRecommenda
     email: payload.email || "",
     phone: payload.phone || "",
     examTrackId,
-    exam: examDefinition?.label || "Unmapped examination",
+    examVariant: examVariant || null,
+    exam_variant: examVariant || null,
+    nclexType: examVariant ? aylaNclexVariantCode(examVariant) : null,
+    nclex_type: examVariant ? aylaNclexVariantCode(examVariant) : null,
+    exam: examVariant ? aylaNclexVariantLabel(examVariant) : examDefinition?.label || "Unmapped examination",
     curriculumVersion: examDefinition?.curriculumVersion || "",
     timezone: payload.timezone || "",
     goalType: payload.goalType || payload.goal_type || "Exam Day",
@@ -68691,6 +68759,7 @@ function aylaOwnedQbankSession(db, user, student, sessionId) {
     error.statusCode = 404;
     throw error;
   }
+  assertAylaNclexSessionVariant(student, session);
   return session;
 }
 
@@ -68743,6 +68812,8 @@ function aylaUpsertQbankRevision(db, session, mapping, question = {}, reason = "
     userId: session.userId,
     examTrack: session.examTrack,
     examTrackId: aylaCanonicalExamTrack(session.examTrack),
+    nclexVariant: session.nclexVariant || session.nclex_variant || null,
+    nclex_variant: session.nclexVariant || session.nclex_variant || null,
     sourceType: "qbank_question",
     sourceId: mapping.contentQuestionId,
     contentQuestionId: mapping.contentQuestionId,
@@ -72143,6 +72214,15 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
     const examTrackId = aylaCanonicalExamTrack(req.body.examTrackId || req.body.exam_track_id || req.body.exam || req.body.selectedExam);
     if (!examTrackId) return aylaSendError(res, 400, "Select a supported exam track: USMLE Step 1, USMLE Step 2 CK, USMLE Step 3, PLAB, AMC, MCCQE, or NCLEX");
     const examDefinition = AYLA_EXAM_REGISTRY[examTrackId];
+    const examVariant = examTrackId === "nclex"
+      ? normalizeAylaNclexVariant(req.body.examVariant || req.body.exam_variant || req.body.nclexType || req.body.nclex_type)
+      : "";
+    if (examTrackId === "nclex" && !examVariant) {
+      return aylaSendError(res, 400, "Choose NCLEX-RN or NCLEX-PN before creating this dashboard", {
+        code: "NCLEX_VARIANT_REQUIRED",
+        allowed_variants: AYLA_NCLEX_VARIANTS,
+      });
+    }
     const auth = AYLA_REQUIRE_STUDENT_AUTH ? await aylaGetAuthenticatedUser(req) : null;
     const db = auth?.db || await readAylaDb();
     aylaEnsureSeedData(db);
@@ -72152,7 +72232,14 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
       : null;
     const continuityPrefill = aylaContinuityPrefillTargetSetup(req.body, incomingHandoff);
     const onboarding = normalizeAylaOnboardingSubmission(continuityPrefill.input, { examDefinition });
-    const normalizedInput = { ...continuityPrefill.input, ...onboarding };
+    const normalizedInput = {
+      ...continuityPrefill.input,
+      ...onboarding,
+      examVariant: examVariant || null,
+      exam_variant: examVariant || null,
+      nclexType: examVariant ? aylaNclexVariantCode(examVariant) : null,
+      nclex_type: examVariant ? aylaNclexVariantCode(examVariant) : null,
+    };
     let setupAccess = null;
     if (auth?.user?.id) {
       const ownedProfiles = aylaOwnedStudentsForUser(db, auth.user.id);
@@ -72184,7 +72271,7 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
       ...normalizedInput,
       id: aylaId("DX"),
       examTrackId,
-      exam: examDefinition.label,
+      exam: examVariant ? aylaNclexVariantLabel(examVariant) : examDefinition.label,
       curriculumVersion: examDefinition.curriculumVersion,
       goalType: normalizedInput.goalType || normalizedInput.goal_type || "Exam Day",
       examDate: normalizedInput.examDate || normalizedInput.exam_date || "",
@@ -75133,6 +75220,7 @@ async function aylaAvailableQbankBanks(db, {
   destination = "qbank",
   destinationScope = "",
   sourceProfile = "",
+  student = null,
 } = {}) {
   const sourceExamTracks = [examTrack, ...listAylaExamSupplements(examTrack)
     .filter((policy) => policy.resource_types.includes("qbank_collection"))
@@ -75158,6 +75246,8 @@ async function aylaAvailableQbankBanks(db, {
           supplemental: isMccqeStep2Supplement,
         }),
         source_provider: String(collection.source_provider || ""),
+        source_namespace: String(collection.source_namespace || ""),
+        title: String(collection.title || ""),
         source_profile: String(collection.source_profile || ""),
         source_year: Number(collection.source_year || 0) || null,
         question_count: Number(
@@ -75172,7 +75262,8 @@ async function aylaAvailableQbankBanks(db, {
       };
     });
   }))).flat();
-  return [...new Map(rows.map((row) => [row.id, row])).values()];
+  const uniqueRows = [...new Map(rows.map((row) => [row.id, row])).values()];
+  return filterAylaNclexBanksForStudent(uniqueRows, student || {}, examTrack);
 }
 
 function aylaPublicationResolution(db, { examTrack, sourceExamTrack, resourceType, resourceId, destination } = {}) {
@@ -79289,10 +79380,43 @@ app.patch("/api/ayla/account/profile", async (req, res) => {
   }
 });
 
+function aylaApplyNclexVariantToStudent(student = {}, payload = {}, { required = true } = {}) {
+  const examTrackId = aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam);
+  if (examTrackId !== "nclex") return false;
+  const currentVariant = aylaStudentNclexVariant(student);
+  const supplied = payload.examVariant ?? payload.exam_variant ?? payload.nclexType ?? payload.nclex_type;
+  if (supplied === undefined || supplied === null || String(supplied).trim() === "") {
+    if (currentVariant || !required) return false;
+    requireAylaNclexVariant(student, examTrackId);
+  }
+  const requestedVariant = normalizeAylaNclexVariant(supplied);
+  if (!requestedVariant) {
+    const error = new Error("Choose NCLEX-RN or NCLEX-PN");
+    error.statusCode = 400;
+    error.code = "INVALID_NCLEX_VARIANT";
+    error.details = { code: error.code, allowed_variants: AYLA_NCLEX_VARIANTS };
+    throw error;
+  }
+  if (currentVariant && currentVariant !== requestedVariant) {
+    const error = new Error("The NCLEX-RN/PN identity of an existing dashboard cannot be changed. Create the correct separately entitled profile instead.");
+    error.statusCode = 409;
+    error.code = "NCLEX_VARIANT_IMMUTABLE";
+    error.details = { code: error.code, current_variant: currentVariant, requested_variant: requestedVariant };
+    throw error;
+  }
+  student.examVariant = requestedVariant;
+  student.exam_variant = requestedVariant;
+  student.nclexType = aylaNclexVariantCode(requestedVariant);
+  student.nclex_type = aylaNclexVariantCode(requestedVariant);
+  student.exam = aylaNclexVariantLabel(requestedVariant);
+  return currentVariant !== requestedVariant;
+}
+
 app.post("/api/ayla/profile/preview", async (req, res) => {
   try {
     const { student, db } = await aylaV189RequireStudent(req, req.body.studentId);
     const proposed = { ...student };
+    aylaApplyNclexVariantToStudent(proposed, req.body || {});
     const allowed = ["exam", "goalType", "examDate", "matchDate", "dailyHours", "weeklyStudyDays", "restDay", "timezone", "country", "language", "qbankCompleted", "qbankAverage", "studyPartnerOptIn"];
     for (const key of allowed) if (req.body[key] !== undefined) proposed[key] = req.body[key];
     if (req.body.exam !== undefined || req.body.examTrackId !== undefined) {
@@ -79366,6 +79490,7 @@ app.put("/api/ayla/profile", async (req, res) => {
         ? aylaV219ApplyAccountProfile(db, rawUser, accountPatch, { payloadIsCanonical: true, ensureCommunityProfile: true, student })
         : { applied: { changed: false, changedFields: [], phoneChanged: false }, communityProfile: null };
       const oldTarget = aylaV189TargetDate(student);
+      const nclexVariantChanged = aylaApplyNclexVariantToStudent(student, req.body || {});
       const allowedStudent = ["goalType", "examDate", "matchDate", "dailyHours", "weeklyStudyDays", "restDay", "timezone", "country", "language", "qbankCompleted", "qbankAverage", "studyPartnerOptIn"];
       for (const key of allowedStudent) if (req.body[key] !== undefined) student[key] = req.body[key];
       if (req.body.exam !== undefined || req.body.examTrackId !== undefined) {
@@ -79406,7 +79531,7 @@ app.put("/api/ayla/profile", async (req, res) => {
       aylaSetItem(db, "aylaCommunityProfiles", communityProfile);
 
       const newTarget = aylaV189TargetDate(student);
-      const planningChanged = oldTarget !== newTarget || req.body.exam !== undefined || req.body.examTrackId !== undefined || req.body.dailyHours !== undefined || req.body.weeklyStudyDays !== undefined || req.body.restDay !== undefined || req.body.preferredStudyDays !== undefined || req.body.preferred_study_days !== undefined || req.body.questionSourcePreference !== undefined || req.body.weakAreas !== undefined;
+      const planningChanged = nclexVariantChanged || oldTarget !== newTarget || req.body.exam !== undefined || req.body.examTrackId !== undefined || req.body.dailyHours !== undefined || req.body.weeklyStudyDays !== undefined || req.body.restDay !== undefined || req.body.preferredStudyDays !== undefined || req.body.preferred_study_days !== undefined || req.body.questionSourcePreference !== undefined || req.body.weakAreas !== undefined;
       if (planningChanged) {
         const today = aylaDateOnly();
         aylaValues(db, "aylaDailyPlans").filter((row) => String(row.studentId) === String(student.id) && String(row.date || "") >= today && String(row.status || "").toLowerCase() !== "completed").forEach((row) => {
