@@ -40338,10 +40338,25 @@ function ngContentTaxonomyProgress(job = {}, updates = {}) {
     Number(updates.total ?? job.total ?? job.pairs_total ?? 0) || 0,
   );
   const nextIndex = Math.max(0, Math.min(total, Number(updates.next_index ?? job.next_index ?? 0) || 0));
-  const approved = Math.max(0, Number(updates.approved ?? job.approved ?? 0) || 0);
-  const review = Math.max(0, Number(updates.needs_review ?? job.needs_review ?? 0) || 0);
-  const failed = Math.max(0, Number(updates.failed ?? job.failed ?? 0) || 0);
-  const skipped = Math.max(0, Number(updates.skipped ?? job.skipped ?? 0) || 0);
+  let approved = Math.max(0, Number(updates.approved ?? job.approved ?? 0) || 0);
+  let review = Math.max(0, Number(updates.needs_review ?? job.needs_review ?? 0) || 0);
+  let failed = Math.max(0, Number(updates.failed ?? job.failed ?? 0) || 0);
+  let skipped = Math.max(0, Number(updates.skipped ?? job.skipped ?? 0) || 0);
+  let settledOverflow = Math.max(0, approved + review + failed + skipped - nextIndex);
+  if (settledOverflow) {
+    const reduce = (count) => {
+      const reduction = Math.min(count, settledOverflow);
+      settledOverflow -= reduction;
+      return count - reduction;
+    };
+    // A pre-fix recovered job can retain duplicate review-attempt counters even
+    // though its durable next_index was correctly restarted. Reconcile display
+    // counters to the number of provider pairs that actually settled.
+    review = reduce(review);
+    skipped = reduce(skipped);
+    failed = reduce(failed);
+    approved = reduce(approved);
+  }
   return {
     ...job,
     ...updates,
