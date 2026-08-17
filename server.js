@@ -77300,9 +77300,22 @@ function aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, cap
 }
 
 async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), options = {}) {
-  const existing = aylaValues(db, "aylaDailyPlans").find((plan) => aylaAdaptiveEvidenceMatchesStudent(plan, student) && String(plan.date) === String(date) && !["cancelled", "superseded"].includes(String(plan.status || "").toLowerCase()));
-  if (existing && String(existing.status || "").toLowerCase() === "completed") {
-    const assignments = aylaValues(db, "aylaResourceAssignments").filter((row) => String(row.dailyPlanId) === String(existing.id));
+  const matchingPlans = aylaValues(db, "aylaDailyPlans")
+    .filter((plan) => aylaAdaptiveEvidenceMatchesStudent(plan, student) && String(plan.date) === String(date) && !["cancelled", "superseded"].includes(String(plan.status || "").toLowerCase()))
+    .sort((left, right) => aylaNumber(right.version, 0) - aylaNumber(left.version, 0) || String(right.updatedAt || right.createdAt || "").localeCompare(String(left.updatedAt || left.createdAt || "")));
+  const existing = matchingPlans[0] || null;
+  const existingAssignments = existing
+    ? aylaValues(db, "aylaResourceAssignments").filter((row) => String(row.dailyPlanId) === String(existing.id))
+    : [];
+  const completedDiagnosticCanYieldToAdaptivePlan = Boolean(
+    existing
+    && String(existing.status || "").toLowerCase() === "completed"
+    && student.serverVerifiedBaseline === true
+    && existingAssignments.length
+    && existingAssignments.every((row) => ["diagnostic", "baseline_diagnostic"].includes(String(row.category || row.type || "").toLowerCase()) && String(row.status || "").toLowerCase() === "completed"),
+  );
+  if (existing && String(existing.status || "").toLowerCase() === "completed" && !completedDiagnosticCanYieldToAdaptivePlan) {
+    const assignments = existingAssignments;
     return { plan: existing, assignments, reused: true, completedHistoryProtected: true };
   }
   aylaRequireExamPublished(db, aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam), "roadmap");
@@ -77311,7 +77324,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     return { plan: existing, assignments, reused: true };
   }
 
-  if (existing && options.force && String(date) >= aylaDateOnly()) {
+  if (existing && options.force && String(date) >= aylaDateOnly() && String(existing.status || "").toLowerCase() !== "completed") {
     existing.status = "superseded";
     existing.supersededAt = aylaNow();
     existing.updatedAt = aylaNow();
@@ -77431,7 +77444,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     userId: student.ayla_user_id || student.user_id || null,
     ...aylaV227ExamFields(student),
     date,
-    version: existing ? aylaNumber(existing.version, 1) + 1 : 1,
+    version: matchingPlans.length ? Math.max(...matchingPlans.map((row) => aylaNumber(row.version, 1))) + 1 : 1,
     status: "active",
     questionSourceMode: questionMode,
     capacityMinutes,
