@@ -233,6 +233,7 @@ import {
   summarizeAylaVimeoDeliveryControls,
 } from "./lib/aylamed-vimeo-delivery-controls.js";
 import { canonicalAylaVimeoSystem } from "./lib/aylamed-vimeo-system-normalization.js";
+import { canonicalAylaAdaptiveSystem } from "./lib/aylamed-adaptive-system-normalization.js";
 import {
   aylaLibraryStudentTitle,
   aylaLibraryStudentPageRange,
@@ -68920,6 +68921,12 @@ function aylaRecordQbankAttempt(db, session, mapping, answer, question = {}) {
   };
 }
 
+function aylaScoredQuestionAttempt(row = {}) {
+  return row.scoringAllowed !== false
+    && row.scoring_allowed !== false
+    && row.supplemental !== true;
+}
+
 async function aylaSessionQbankQuestions(session = {}, mappings = []) {
   const groups = new Map();
   for (const mapping of Array.isArray(mappings) ? mappings : []) {
@@ -71270,7 +71277,8 @@ app.post("/api/ayla/students/:studentId/pathway-estimate", async (req, res) => {
   try {
     const { student, db } = await aylaV189RequireStudent(req, req.params.studentId, "roadmap");
     const questionAttempts = aylaValues(db, "aylaQuestionAttempts")
-      .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true }));
+      .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true }))
+      .filter(aylaScoredQuestionAttempt);
     const completedQuestionIds = new Set(questionAttempts.map((row) => String(row.resourceId || row.contentQuestionId || row.sourceQuestionId || row.id)));
     const assessmentAttempts = aylaValues(db, "aylaAssessmentAttempts")
       .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true }))
@@ -72299,7 +72307,7 @@ app.get("/api/ayla/students/:id/dashboard", async (req, res) => {
       plan: todayPlan,
       assignments: todayAssignments,
       activityHistory: aylaValues(db, "aylaActivityHistory"),
-      questionAttempts: aylaValues(db, "aylaQuestionAttempts"),
+      questionAttempts: aylaValues(db, "aylaQuestionAttempts").filter(aylaScoredQuestionAttempt),
       flashcardReviews: aylaValues(db, "aylaFlashcardReviews"),
       assessmentAttempts: aylaValues(db, "aylaAssessmentAttempts"),
       resources: aylaValues(db, "aylaResources"),
@@ -76419,6 +76427,13 @@ function aylaV227CanonicalSystemForStudent(student = {}, value = "", fallback = 
     allowedSystems,
   });
   if (directAlias) return directAlias;
+  const adaptiveAlias = canonicalAylaAdaptiveSystem({
+    examTrackId,
+    system: value,
+    subsystem,
+    allowedSystems,
+  });
+  if (adaptiveAlias) return adaptiveAlias;
   const namespacedParts = String(value || "").split(":").filter(Boolean);
   const namespacedCandidates = namespacedParts.length > 1
     ? [namespacedParts[1], namespacedParts.at(-1)]
@@ -76491,6 +76506,7 @@ function aylaV189BaselineFromVerifiedHistory(db, student, system) {
 
   const questionRows = aylaValues(db, "aylaQuestionAttempts")
     .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true }))
+    .filter(aylaScoredQuestionAttempt)
     .filter((row) => aylaV189SystemKey(row.system) === systemKey)
     .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")))
     .slice(0, 10);
@@ -76511,7 +76527,7 @@ function aylaV189CurrentSystemSignals(db, student, system) {
   const signals = [];
 
   aylaValues(db, "aylaQuestionAttempts")
-    .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true }) && aylaV189SystemKey(row.system) === key)
+    .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true }) && aylaScoredQuestionAttempt(row) && aylaV189SystemKey(row.system) === key)
     .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
     .slice(0, 80)
     .forEach((row) => {
@@ -76819,7 +76835,8 @@ function aylaV189AssessmentDecision(db, student, date, options = {}) {
     .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student));
   const completed = assignments.filter((row) => String(row.status || "").toLowerCase() === "completed");
   const questionAttempts = aylaValues(db, "aylaQuestionAttempts")
-    .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true }));
+    .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true }))
+    .filter(aylaScoredQuestionAttempt);
   const cardReviews = aylaValues(db, "aylaFlashcardReviews")
     .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true }));
   const recentCutoff = aylaDateOnly(aylaAddDays(new Date(`${date}T12:00:00Z`), -7));
@@ -77836,7 +77853,8 @@ function aylaV258TutorPathwayEstimate(
       row,
       student,
       { verifiedOnly: true },
-    ));
+    ))
+    .filter(aylaScoredQuestionAttempt);
   const uniqueVerifiedQuestions = new Set(
     allVerifiedQuestions
       .map((row) => String(
@@ -78383,6 +78401,7 @@ function aylaV214WeakSignals(db = {}, student = {}, lmsContext = null) {
   const latestQuestions = new Map();
   aylaValues(db, "aylaQuestionAttempts")
     .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true }))
+    .filter(aylaScoredQuestionAttempt)
     .sort((left, right) => String(right.createdAt || right.updatedAt || "").localeCompare(String(left.createdAt || left.updatedAt || "")))
     .forEach((row) => {
       const key = String(row.resourceId || row.contentQuestionId || row.sourceQuestionId || `${aylaV189SystemKey(row.system)}|${aylaV189MappingKey(row.topic)}`);
@@ -78563,6 +78582,7 @@ function aylaV214RevisionFeed(db = {}, student = {}, weakSummary = null, date = 
   const latestQuestionAttempts = new Map();
   aylaValues(db, "aylaQuestionAttempts")
     .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true }))
+    .filter(aylaScoredQuestionAttempt)
     .sort((left, right) => String(right.createdAt || right.updatedAt || "").localeCompare(String(left.createdAt || left.updatedAt || "")))
     .forEach((row) => {
       const key = String(row.resourceId || row.contentQuestionId || row.sourceQuestionId || `${row.system}|${row.topic}`);
@@ -78621,7 +78641,9 @@ function aylaV214ProgressSnapshot(db = {}, liveDb = {}, user = {}, student = {},
   const assignments = aylaValues(db, "aylaResourceAssignments").filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student));
   const activeAssignments = assignments.filter((row) => !["cancelled", "superseded", "moved"].includes(String(row.status || "").toLowerCase()));
   const completedAssignments = activeAssignments.filter((row) => String(row.status || "").toLowerCase() === "completed");
-  const questionAttempts = aylaValues(db, "aylaQuestionAttempts").filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true }));
+  const questionAttempts = aylaValues(db, "aylaQuestionAttempts")
+    .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true }))
+    .filter(aylaScoredQuestionAttempt);
   const correctQuestions = questionAttempts.filter((row) => String(row.outcome || "").toLowerCase() === "correct").length;
   const systemProgress = aylaV189SystemProgress(db, student);
   return {
@@ -80802,7 +80824,7 @@ app.get("/api/ayla/admin/pilot/cohorts/:cohortId/report", async (req, res) => {
         date: aylaV247StudyDate(student),
         systemProgress,
         activityHistory: filter("aylaActivityHistory"),
-        questionAttempts: filter("aylaQuestionAttempts"),
+        questionAttempts: filter("aylaQuestionAttempts").filter(aylaScoredQuestionAttempt),
         flashcardReviews: filter("aylaFlashcardReviews"),
         assessmentAttempts: filter("aylaAssessmentAttempts"),
         resources: aylaValues(db, "aylaResources"),
@@ -84979,7 +85001,7 @@ app.post("/api/ayla/students/:studentId/assessment-attempts", async (req, res) =
       if (isCorrect) correct += 1;
       else {
         weakTopics.add(question.topic || assignment.topic || "Unspecified concept");
-        const priorIncorrect = aylaValues(db, "aylaQuestionAttempts").some((row) => aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true }) && String(row.resourceId || row.questionNumber) === String(question.resourceId || question.questionNumber || identity) && String(row.outcome || "").toLowerCase() === "incorrect");
+        const priorIncorrect = aylaValues(db, "aylaQuestionAttempts").some((row) => aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true }) && aylaScoredQuestionAttempt(row) && String(row.resourceId || row.questionNumber) === String(question.resourceId || question.questionNumber || identity) && String(row.outcome || "").toLowerCase() === "incorrect");
         if (priorIncorrect) repeatedErrors.add(question.topic || assignment.topic || identity);
       }
       storedAnswers.push({

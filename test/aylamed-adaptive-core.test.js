@@ -120,4 +120,7 @@ test("QBank adaptive evidence uses approved labels and repairs legacy General pr
   assert.match(server, /function aylaV227StudentFacingTopic[\s\S]*?return `\$\{system\} — \$\{topic\}`/);
   assert.match(server, /aylaV189SystemKey\(topic\)\.startsWith\(`\$\{aylaV189SystemKey\(system\)\} `\)/);
   assert.match(server, /input\.sourceSystemLabel \|\| input\.sourceSystemId \|\| input\.topic \|\| input\.system/);
+  assert.match(server, /function aylaScoredQuestionAttempt[\s\S]*?row\.scoringAllowed !== false[\s\S]*?row\.supplemental !== true/);
+  assert.match(server, /function aylaV214WeakSignals[\s\S]*?\.filter\(aylaScoredQuestionAttempt\)/);
+  assert.match(server, /function aylaV214ProgressSnapshot[\s\S]*?\.filter\(aylaScoredQuestionAttempt\)/);
 });
