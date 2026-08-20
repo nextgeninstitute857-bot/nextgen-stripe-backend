@@ -26,7 +26,9 @@ test("compact Today workspace returns before history scans and media signing", (
   assert.ok(compactBranch >= 0 && firstHistoryScan > compactBranch);
   assert.ok(fullSystemProgress > compactBranch && firstHistoryScan > fullSystemProgress);
   const compactPath = route.slice(compactBranch, firstHistoryScan);
-  assert.match(compactPath, /if \(!built\.reused\) await writeAylaDb\(db\)/);
+  assert.doesNotMatch(route, /writeAylaDb\(db\)/);
+  assert.match(route, /mutateAylaRoadmapState/);
+  assert.match(route, /skipAi: true/);
   assert.match(compactPath, /aylaV189SanitizePlanBundle\(db, built\.plan, built\.assignments\)/);
   assert.match(compactPath, /systemProgress: \[\]/);
   assert.doesNotMatch(route.slice(compactBranch, fullSystemProgress), /aylaV189SystemProgress|aylaV189BacklogWarning/);

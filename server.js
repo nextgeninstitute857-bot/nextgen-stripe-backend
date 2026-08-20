@@ -514,6 +514,14 @@ import {
   readAylaQbankJournalRecords,
 } from "./lib/aylamed-qbank-journal.js";
 import {
+  AYLA_ROADMAP_STATE_COLLECTIONS,
+  appendAylaRoadmapJournalRecord,
+  applyAylaRoadmapJournalRecords,
+  clearAylaRoadmapJournal,
+  createAylaRoadmapJournalRecord,
+  readAylaRoadmapJournalRecords,
+} from "./lib/aylamed-roadmap-journal.js";
+import {
   LMS_FULL_TEACHING_PLAN_DAYS,
   LMS_TEACHING_ACCESS_MODE,
   lmsPlanUsesTeachingSchedule,
@@ -41324,7 +41332,7 @@ async function aylaSelectQbankSessionQuestions({
     }
     return { selected, availableSystemKeys: [], selectedSystemKeys: [] };
   }
-  const collectionIds = Array.isArray(allowedCollectionIds) && allowedCollectionIds.length
+  let collectionIds = Array.isArray(allowedCollectionIds) && allowedCollectionIds.length
     ? [...new Set(allowedCollectionIds.map(String).filter(Boolean))]
     : await aylaPublishedQbankCollectionIds(db, {
       examTrack,
@@ -41333,6 +41341,19 @@ async function aylaSelectQbankSessionQuestions({
       destinationScope,
       sourceProfile,
     });
+  if (purpose === "baseline_diagnostic" && !collectionIds.length) {
+    // Diagnostic publication may intentionally have no separate bank toggle.
+    // Reuse only collections already published to this student's QBank; the
+    // diagnostic media, taxonomy, system-balance and weighting gates below
+    // remain unchanged and still fail closed.
+    collectionIds = await aylaPublishedQbankCollectionIds(db, {
+      examTrack,
+      sourceExamTrack: examTrack,
+      destination: "qbank",
+      destinationScope,
+      sourceProfile,
+    });
+  }
   if (purpose !== "baseline_diagnostic") {
     const selected = await listContentQbankQuestions({
       examTrack,
@@ -41352,20 +41373,22 @@ async function aylaSelectQbankSessionQuestions({
     return { selected, availableSystemKeys: [], selectedSystemKeys: [] };
   }
 
-  const listedCandidates = await listContentQbankQuestions({
-    examTrack,
-    destination: "aylamed_qbank",
-    destinationScope,
-    // A 20-question multi-exam diagnostic needs enough discovery breadth to
-    // represent every required curriculum lane. The earlier 5x window could
-    // randomly miss a valid system in large banks and falsely report that the
-    // diagnostic was unavailable even when thousands of questions were live.
-    limit: Math.min(200, Math.max(requestedCount, requestedCount * 10)),
-    seed: selectionSeed
-      || `aylamed-${aylaCanonicalExamTrack(examTrack) || "exam"}-diagnostic-v${AYLA_DIAGNOSTIC_BLUEPRINT_VERSION}:${destinationScope || "default"}`,
-    seenQuestionIds,
-    collectionIds,
-  });
+  const baseDiagnosticSeed = selectionSeed
+    || `aylamed-${aylaCanonicalExamTrack(examTrack) || "exam"}-diagnostic-v${AYLA_DIAGNOSTIC_BLUEPRINT_VERSION}:${destinationScope || "default"}`;
+  // Large banks can legitimately contain all reviewed systems while a single
+  // randomized 200-item window misses a low-frequency category. Four bounded,
+  // deterministic discovery windows prevent that false "not ready" result;
+  // the selector still admits only media-ready, classified questions.
+  const listedCandidates = (await Promise.all(Array.from({ length: 4 }, (_, batch) =>
+    listContentQbankQuestions({
+      examTrack,
+      destination: "aylamed_qbank",
+      destinationScope,
+      limit: Math.min(200, Math.max(requestedCount, requestedCount * 10)),
+      seed: `${baseDiagnosticSeed}:batch-${batch + 1}`,
+      seenQuestionIds,
+      collectionIds,
+    })))).flat();
   const preferredCandidates = preferredQuestionIds.length
     ? await getContentQbankQuestions({
       questionIds: preferredQuestionIds,
@@ -66701,6 +66724,10 @@ const AYLA_QBANK_JOURNAL_PATH = String(
   process.env.AYLA_QBANK_JOURNAL_PATH
     || path.join(DATA_DIR, "aylamed-diagnostic-answers.jsonl"),
 ).trim();
+const AYLA_ROADMAP_JOURNAL_PATH = String(
+  process.env.AYLA_ROADMAP_JOURNAL_PATH
+    || path.join(DATA_DIR, "aylamed-roadmap-state.jsonl"),
+).trim();
 const AYLA_REQUIRE_STUDENT_AUTH = String(process.env.AYLA_REQUIRE_STUDENT_AUTH || "true").toLowerCase() !== "false";
 
 const DEFAULT_AYLA_SETTINGS = {
@@ -66801,6 +66828,7 @@ const DEFAULT_AYLA_AI_USAGE_SETTINGS = {
 const DEFAULT_AYLA_DB = {
   schema_version: 15,
   qbank_state_version: 0,
+  roadmap_state_version: 0,
   aylaUsers: {},
   aylaStudents: {},
   aylaDiagnosticSubmissions: {},
@@ -66952,6 +66980,13 @@ async function readAylaDbFromDisk() {
     if (replay.applied) {
       console.log(`Recovered ${replay.applied} durable diagnostic answer journal record(s)`);
     }
+    const roadmapReplay = applyAylaRoadmapJournalRecords(
+      next,
+      await readAylaRoadmapJournalRecords(AYLA_ROADMAP_JOURNAL_PATH),
+    );
+    if (roadmapReplay.applied) {
+      console.log(`Recovered ${roadmapReplay.applied} durable roadmap journal record(s)`);
+    }
     return next;
   } catch (error) {
     if (error.code === "ENOENT") {
@@ -66960,9 +66995,13 @@ async function readAylaDbFromDisk() {
         aylaSettings: aylaMergeSettings(),
         aylaAiUsageSettings: aylaMergeAiUsageSettings(),
       };
-      return applyAylaQbankJournalRecords(
+      const qbankReplay = applyAylaQbankJournalRecords(
         empty,
         await readAylaQbankJournalRecords(AYLA_QBANK_JOURNAL_PATH),
+      );
+      return applyAylaRoadmapJournalRecords(
+        qbankReplay.db,
+        await readAylaRoadmapJournalRecords(AYLA_ROADMAP_JOURNAL_PATH),
       ).db;
     }
     console.error("AylaMed DB read error (fail-closed):", error.message);
@@ -66994,6 +67033,8 @@ async function writeAylaDb(db) {
     await ensureDataDir();
     const incomingQbankVersion = Math.max(0, Number(db.qbank_state_version || 0));
     const latestQbankVersion = Math.max(0, Number(aylaDbCache?.qbank_state_version || 0));
+    const incomingRoadmapVersion = Math.max(0, Number(db.roadmap_state_version || 0));
+    const latestRoadmapVersion = Math.max(0, Number(aylaDbCache?.roadmap_state_version || 0));
     const preparedDb = { ...db };
     if (aylaDbCache) {
       preparedDb.aylaVideoProgress = mergeAylaContentHubProgressCollection(
@@ -67018,17 +67059,24 @@ async function writeAylaDb(db) {
         preparedDb[key] = mergeConcurrentAylaQbankCollection(aylaDbCache[key], db[key]);
       }
     }
+    if (aylaDbCache && latestRoadmapVersion > incomingRoadmapVersion) {
+      for (const key of AYLA_ROADMAP_STATE_COLLECTIONS) {
+        preparedDb[key] = mergeConcurrentAylaQbankCollection(aylaDbCache[key], db[key]);
+      }
+    }
     const nextDb = {
       ...DEFAULT_AYLA_DB,
       ...preparedDb,
       schema_version: DEFAULT_AYLA_DB.schema_version,
       qbank_state_version: Math.max(incomingQbankVersion, latestQbankVersion),
+      roadmap_state_version: Math.max(incomingRoadmapVersion, latestRoadmapVersion),
       aylaSettings: aylaMergeSettings(preparedDb.aylaSettings || {}),
       aylaAiUsageSettings: aylaMergeAiUsageSettings(preparedDb.aylaAiUsageSettings || {}),
       updatedAt: new Date().toISOString(),
     };
     await ngWriteJsonAtomicStreaming(AYLA_DB_PATH, nextDb, "AylaMed database");
     await clearAylaQbankJournal(AYLA_QBANK_JOURNAL_PATH);
+    await clearAylaRoadmapJournal(AYLA_ROADMAP_JOURNAL_PATH);
     aylaDbCache = nextDb;
     aylaDbReadInFlight = null;
   });
@@ -67050,6 +67098,7 @@ async function mutateAylaDb(mutator) {
         ...current,
         schema_version: DEFAULT_AYLA_DB.schema_version,
         qbank_state_version: Math.max(0, Number(current.qbank_state_version || 0)) + 1,
+        roadmap_state_version: Math.max(0, Number(current.roadmap_state_version || 0)),
         aylaSettings: aylaMergeSettings(current.aylaSettings || {}),
         aylaAiUsageSettings: aylaMergeAiUsageSettings(current.aylaAiUsageSettings || {}),
         updatedAt: new Date().toISOString(),
@@ -67057,6 +67106,7 @@ async function mutateAylaDb(mutator) {
       await ensureDataDir();
       await ngWriteJsonAtomicStreaming(AYLA_DB_PATH, nextDb, "AylaMed atomic database mutation");
       await clearAylaQbankJournal(AYLA_QBANK_JOURNAL_PATH);
+      await clearAylaRoadmapJournal(AYLA_ROADMAP_JOURNAL_PATH);
       aylaDbCache = nextDb;
       aylaDbReadInFlight = null;
       return mutation.result;
@@ -67100,6 +67150,42 @@ async function mutateAylaDiagnosticAnswer(mutator) {
       aylaDbCache = nextDb;
       aylaDbReadInFlight = null;
       return result;
+    });
+  aylaWriteQueue = task;
+  return task;
+}
+
+async function mutateAylaRoadmapState(mutator) {
+  const task = aylaWriteQueue
+    .catch((error) => {
+      console.error("Previous AylaMed write failed; roadmap journal queue recovered:", error.message);
+    })
+    .then(async () => {
+      const source = aylaDbCache || await readAylaDbFromDisk();
+      const mutation = await mutateJsonCopyOnWrite(source, mutator);
+      if (!mutation.changed) return mutation.result;
+      const current = mutation.value;
+      const upserts = {};
+      for (const collection of AYLA_ROADMAP_STATE_COLLECTIONS) {
+        const before = source[collection] && typeof source[collection] === "object" ? source[collection] : {};
+        const after = current[collection] && typeof current[collection] === "object" ? current[collection] : {};
+        upserts[collection] = Object.fromEntries(Object.entries(after)
+          .filter(([id, row]) => before[id] !== row));
+      }
+      const roadmapStateVersion = Math.max(0, Number(current.roadmap_state_version || 0)) + 1;
+      const journalRecord = createAylaRoadmapJournalRecord({ upserts, roadmapStateVersion });
+      await appendAylaRoadmapJournalRecord(AYLA_ROADMAP_JOURNAL_PATH, journalRecord);
+      aylaDbCache = {
+        ...DEFAULT_AYLA_DB,
+        ...current,
+        schema_version: DEFAULT_AYLA_DB.schema_version,
+        roadmap_state_version: roadmapStateVersion,
+        aylaSettings: aylaMergeSettings(current.aylaSettings || {}),
+        aylaAiUsageSettings: aylaMergeAiUsageSettings(current.aylaAiUsageSettings || {}),
+        updatedAt: new Date().toISOString(),
+      };
+      aylaDbReadInFlight = null;
+      return mutation.result;
     });
   aylaWriteQueue = task;
   return task;
@@ -75784,12 +75870,21 @@ function aylaV210AssignmentForVideo(assignments, video, assignmentId = "") {
     .localeCompare(String(left.updatedAt || left.updated_at || left.createdAt || left.created_at || "")))[0] || null;
 }
 
+const AYLA_ROADMAP_REGISTRY_CACHE_TTL_MS = Math.max(
+  15_000,
+  Math.min(300_000, Number(process.env.AYLA_ROADMAP_REGISTRY_CACHE_TTL_MS || 60_000) || 60_000),
+);
+const aylaV210RegistryVideoCache = new Map();
+
 async function aylaV210RegistryVideoInputs(student, destinations) {
   if (!contentRegistryStatus().configured) return { rows: [], warning: null };
   const examTrack = normalizeAylaRegistryExamTrack(
     student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam,
   );
   if (!examTrack) return { rows: [], warning: "unsupported_student_exam_track" };
+  const cacheKey = `${examTrack}:${[...new Set(destinations)].sort().join(",")}`;
+  const cached = aylaV210RegistryVideoCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
   try {
     const rows = [];
     const sourceExams = [examTrack, ...listAylaExamSupplements(examTrack)
@@ -75815,7 +75910,12 @@ async function aylaV210RegistryVideoInputs(student, destinations) {
       }
       rows.push(...sourceRows);
     }
-    return { rows, warning: null };
+    const value = { rows, warning: null };
+    aylaV210RegistryVideoCache.set(cacheKey, {
+      value,
+      expiresAt: Date.now() + AYLA_ROADMAP_REGISTRY_CACHE_TTL_MS,
+    });
+    return value;
   } catch (error) {
     console.warn("AylaMed Content Hub registry read unavailable:", error.message);
     return { rows: [], warning: "content_registry_temporarily_unavailable" };
@@ -75941,10 +76041,25 @@ async function aylaV250EligibleQbankQuestions(db, student, {
             || topicKey.includes(rowTopic);
         })
       : [];
-    const selectedRows = (topicMatches.length ? topicMatches : systemMatches)
+    const matchLevel = topicMatches.length
+      ? "topic"
+      : systemMatches.length
+        ? "system"
+        : eligible.length
+          ? "exam_wide"
+          : "none";
+    // A missing or legacy focus label must not make an otherwise published,
+    // media-ready exam bank disappear. Keep the strict media gate, then fall
+    // back to an exam-wide verified block and report that choice explicitly.
+    const selectedRows = (topicMatches.length
+      ? topicMatches
+      : systemMatches.length
+        ? systemMatches
+        : eligible)
       .slice(0, requestedLimit);
     return {
       destinationScope,
+      matchLevel,
       warning: selectedRows.length
         ? null
         : "qbank_registry_no_media_ready_canonical_questions_for_focus",
@@ -76648,11 +76763,21 @@ function aylaV227SystemsForStudent(student = {}) {
 function aylaV227CanonicalSystemForStudent(student = {}, value = "", fallback = "General", subsystem = "") {
   const wanted = aylaV189SystemKey(value);
   const allowedSystems = aylaV227SystemsForStudent(student);
-  const exact = allowedSystems.find((system) => aylaV189SystemKey(system) === wanted);
-  if (exact) return exact;
   const examTrackId = aylaCanonicalExamTrack(
     student.examTrackId || student.exam_track_id || student.examTrack || student.exam_track || student.exam,
   );
+  const broadAmcUmbrella = examTrackId === "amc" && wanted === "australian clinical practice";
+  const exact = allowedSystems.find((system) => aylaV189SystemKey(system) === wanted);
+  if (exact && !broadAmcUmbrella) return exact;
+  if (broadAmcUmbrella) {
+    const subsystemSystem = canonicalAylaAdaptiveSystem({
+      examTrackId,
+      system: "",
+      subsystem,
+      allowedSystems,
+    });
+    if (subsystemSystem) return subsystemSystem;
+  }
   const directAlias = canonicalAylaVimeoSystem({
     examTrackId,
     system: value,
@@ -77065,6 +77190,10 @@ function aylaV189DaysBetween(fromValue, toValue) {
 
 function aylaV189AssessmentDecision(db, student, date, options = {}) {
   const target = aylaTargetDateInfo(student);
+  const planningDate = String(date || aylaDateOnly()).slice(0, 10);
+  if (target.targetDate && planningDate) {
+    target.daysToTarget = aylaV189DaysBetween(planningDate, target.targetDate);
+  }
   const policy = aylaMergeSettings(db.aylaSettings || {}).assessment_policy || DEFAULT_AYLA_SETTINGS.assessment_policy;
   if (policy.enabled === false) return { status: "disabled", type: "not_due", label: "Smart assessments disabled", reason: "Assessment scheduling is disabled by Admin policy.", trigger: "admin_disabled", system: "General", topic: "", questionCount: 0, daysToTarget: target.daysToTarget };
   const systemProgress = aylaV189SystemProgress(db, student);
@@ -77566,12 +77695,14 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   const qbankEnabled = aylaV210StudentFeatureAllowed(db, student, "qbank");
   const cdmEnabled = AYLA_CURRENT_MCCQE_CDM_ENABLED;
   const storedRelevant = aylaV189RelevantResources(db, student, ["book", "reading", "revision_sheet", "vimeo_video", "video_transcript", "external_question", "external_qid_mapping", "internal_mcq", "flashcard", "assessment", "assessment_blueprint"]);
-  const contentHub = contentHubEnabled
-    ? await aylaV210EligibleVideos(db, student, { forRoadmap: true })
-    : { videos: [], assignments: [], warning: null };
-  const library = libraryEnabled
-    ? await aylaV211EligibleReadings(db, student)
-    : { resources: [], warning: null };
+  const [contentHub, library] = await Promise.all([
+    contentHubEnabled
+      ? aylaV210EligibleVideos(db, student, { forRoadmap: true })
+      : Promise.resolve({ videos: [], assignments: [], warning: null }),
+    libraryEnabled
+      ? aylaV211EligibleReadings(db, student)
+      : Promise.resolve({ resources: [], warning: null }),
+  ]);
   const allRelevant = [
     ...storedRelevant.filter((row) => !["book", "reading", "revision_sheet", "vimeo_video", "video_transcript"].includes(aylaV189ResourceType(row.type))),
     ...library.resources,
@@ -77670,6 +77801,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     qbankDestinationScope: registryQbank.destinationScope || null,
     cdmEnabled,
     cdmRegistryWarning: null,
+    finalReviewMode: false,
     notebookMemory: aylaV190NotebookMemory(db, student),
     continuityContext: continuityCarry
       ? {
@@ -77843,6 +77975,8 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   };
   plan.tutorBrain.authoritativeRoadmapPlanId = plan.id;
   plan.assessmentTutor = assessmentDecision;
+  plan.finalReviewMode = assessmentDecision.daysToTarget >= 0
+    && assessmentDecision.daysToTarget <= aylaNumber(settings.assessment_policy?.final_readiness_days, 7);
 
   // Protected rest days contain only due revision and critical backlog. No normal new content.
   if (!studyDay.isStudyDay) {
@@ -77886,7 +78020,54 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   const workloadFactor = tutorProposal.workloadAdjustment === "reduce" ? 0.82 : tutorProposal.workloadAdjustment === "intensive" ? 1.08 : 1;
   const effectiveCapacity = Math.max(60, Math.min(960, Math.round(capacityMinutes * workloadFactor)));
 
-  if (mix.reading !== false) {
+  // A due assessment or an actual QBank block is reserved before optional new
+  // readings/videos. Previously those resources could consume the whole day,
+  // leaving question-rich exams with no scored practice at all.
+  let assessmentScheduled = false;
+  if (mix.assessments !== false && assessmentDecision.status === "due") {
+    const decision = {
+      ...assessmentDecision,
+      system: assessmentDecision.system && assessmentDecision.system !== "General" ? assessmentDecision.system : focusSystem,
+      subsystem: assessmentDecision.subsystem || focusSubsystem,
+      topic: assessmentDecision.topic || focusTopic,
+    };
+    const smartAssessment = aylaV189SmartAssessmentResource(db, student, decision, assessments, internal, date);
+    if (smartAssessment) {
+      assessmentScheduled = Boolean(aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "assessment", [smartAssessment], smartAssessment.title || decision.label, {
+        estimatedMinutes: smartAssessment.estimatedMinutes,
+        system: smartAssessment.system || focusSystem,
+        subsystem: smartAssessment.subsystem || focusSubsystem,
+        topic: smartAssessment.topic || focusTopic,
+        priority: ["final_readiness", "weak_area"].includes(decision.type) ? "Critical" : "High", assessmentType: decision.type,
+        tutorReason: decision.reason, scheduleTrigger: decision.trigger, rationale: decision.reason,
+        allowOverCapacity: plan.finalReviewMode,
+      }));
+      plan.assessmentTutor = { ...decision, status: assessmentScheduled ? "scheduled_today" : "deferred_capacity", questionCount: Array.isArray(smartAssessment.questions) ? smartAssessment.questions.length : decision.questionCount };
+    } else {
+      plan.assessmentTutor = { ...decision, status: "waiting_for_verified_mcqs", reason: `${decision.reason} Verified internal MCQs are not yet sufficient; AylaMed will not invent questions.` };
+      plan.missingResourceTypes.push("assessment_questions_for_focus");
+    }
+  }
+
+  if (!assessmentScheduled && mix.internal_mcqs !== false && (questionMode === "internal" || questionMode === "hybrid")) {
+    const pick = select(internal, Math.max(1, Math.min(12, Math.round((effectiveCapacity / 45) * questionVolumeFactor))));
+    if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "internal_mcqs", pick, `AylaMed MCQs: ${pick.map((row) => row.questionNumber || row.resourceNumber).filter(Boolean).join(", ")}`, {
+      estimatedMinutes: pick.length * 2,
+      system: focusSystem,
+      subsystem: focusSubsystem,
+      topic: focusTopic,
+      priority: plan.finalReviewMode ? "Critical" : "High",
+      allowOverCapacity: true,
+      rationale: plan.finalReviewMode
+        ? "Final-review QBank practice uses verified questions and repeated weak areas; no broad new content is opened."
+        : registryQbank.matchLevel === "exam_wide"
+          ? "No verified questions matched the current legacy focus label, so AylaMed assigned a transparent exam-wide verified block instead of showing no QBank work."
+          : "Original verified MCQs for the same daily focus. Correctness is scored only on the server.",
+    });
+    else plan.missingResourceTypes.push("internal_mcqs_for_focus");
+  }
+
+  if (!plan.finalReviewMode && mix.reading !== false) {
     const selection = selectAylaRoadmapReading({
       resources: reading,
       examTrack: student.examTrackId || student.exam_track_id || student.exam,
@@ -77909,7 +78090,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     else plan.missingResourceTypes.push(libraryEnabled ? "exact_page_reading_for_focus" : "library_feature_not_enabled");
   }
 
-  if (mix.video !== false && contentHubEnabled) {
+  if (!plan.finalReviewMode && mix.video !== false && contentHubEnabled) {
     const selection = selectAylaRoadmapVideo({
       videos,
       examTrack: student.examTrackId || student.exam_track_id || student.exam,
@@ -77930,32 +78111,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     else plan.missingResourceTypes.push("video_for_focus");
   }
 
-  let assessmentScheduled = false;
-  if (mix.assessments !== false && assessmentDecision.status === "due") {
-    const decision = {
-      ...assessmentDecision,
-      system: assessmentDecision.system && assessmentDecision.system !== "General" ? assessmentDecision.system : focusSystem,
-      subsystem: assessmentDecision.subsystem || focusSubsystem,
-      topic: assessmentDecision.topic || focusTopic,
-    };
-    const smartAssessment = aylaV189SmartAssessmentResource(db, student, decision, assessments, internal, date);
-    if (smartAssessment) {
-      assessmentScheduled = Boolean(aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "assessment", [smartAssessment], smartAssessment.title || decision.label, {
-        estimatedMinutes: smartAssessment.estimatedMinutes,
-        system: smartAssessment.system || focusSystem,
-        subsystem: smartAssessment.subsystem || focusSubsystem,
-        topic: smartAssessment.topic || focusTopic,
-        priority: ["final_readiness", "weak_area"].includes(decision.type) ? "Critical" : "High", assessmentType: decision.type,
-        tutorReason: decision.reason, scheduleTrigger: decision.trigger, rationale: decision.reason,
-      }));
-      plan.assessmentTutor = { ...decision, status: assessmentScheduled ? "scheduled_today" : "deferred_capacity", questionCount: Array.isArray(smartAssessment.questions) ? smartAssessment.questions.length : decision.questionCount };
-    } else {
-      plan.assessmentTutor = { ...decision, status: "waiting_for_verified_mcqs", reason: `${decision.reason} Verified internal MCQs are not yet sufficient; AylaMed will not invent questions.` };
-      plan.missingResourceTypes.push("assessment_questions_for_focus");
-    }
-  }
-
-  if (mix.external_questions !== false && (questionMode === "external" || questionMode === "hybrid")) {
+  if (!plan.finalReviewMode && mix.external_questions !== false && (questionMode === "external" || questionMode === "hybrid")) {
     const pick = select(external, Math.max(1, Math.min(assessmentScheduled ? 8 : 24, Math.round((effectiveCapacity / (assessmentScheduled ? 55 : 32)) * questionVolumeFactor))));
     if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "external_questions", pick, `${pick[0].provider || "External"} assigned IDs: ${pick.map((row) => row.questionNumber || row.resourceNumber).filter(Boolean).join(", ")}`, {
       estimatedMinutes: pick.length * 2,
@@ -77967,19 +78123,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     else plan.missingResourceTypes.push("external_questions_for_focus");
   }
 
-  if (!assessmentScheduled && mix.internal_mcqs !== false && (questionMode === "internal" || questionMode === "hybrid")) {
-    const pick = select(internal, Math.max(1, Math.min(12, Math.round((effectiveCapacity / 45) * questionVolumeFactor))));
-    if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "internal_mcqs", pick, `AylaMed MCQs: ${pick.map((row) => row.questionNumber || row.resourceNumber).filter(Boolean).join(", ")}`, {
-      estimatedMinutes: pick.length * 2,
-      system: focusSystem,
-      subsystem: focusSubsystem,
-      topic: focusTopic,
-      rationale: "Original verified MCQs for the same daily focus. Correctness is scored only on the server.",
-    });
-    else plan.missingResourceTypes.push("internal_mcqs_for_focus");
-  }
-
-  if (mix.flashcards !== false) {
+  if (!plan.finalReviewMode && mix.flashcards !== false) {
     const pick = select(cards, Math.max(1, Math.min(15, Math.round(effectiveCapacity / 20))));
     if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "flashcards", pick, `${pick.length} recall cards — ${focusSystem}`, {
       estimatedMinutes: Math.max(5, pick.length),
@@ -77997,7 +78141,9 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   plan.topicFocus = focusTopic;
   plan.empty = assignments.length === 0;
   plan.message = assignments.length
-    ? `Today’s verified plan is saved around one focus: ${[focusSystem, focusSubsystem, focusTopic].filter(Boolean).join(" — ")}. Due revision and overdue work were prioritized before new content.`
+    ? plan.finalReviewMode
+      ? `Final review is active with ${assessmentDecision.daysToTarget} day${assessmentDecision.daysToTarget === 1 ? "" : "s"} to the target. AylaMed is using due revision, weak-area QBank work and readiness checks without opening broad new reading or video topics.`
+      : `Today’s verified plan is saved around one focus: ${[focusSystem, focusSubsystem, focusTopic].filter(Boolean).join(" — ")}. Due revision and overdue work were prioritized before new content.`
     : "No verified resources match today’s focus. Upload/approve books, Vimeo mappings, question banks, flashcards or assessments; AylaMed will not invent references.";
   plan.missingResourceTypes = [...new Set(plan.missingResourceTypes)];
   plan.changeNotice = buildAylaPlanChangeNotice({
@@ -79114,8 +79260,12 @@ function aylaV189PartnerRequestView(db, request = {}, viewerStudent = {}, liveDb
   };
 }
 
-function aylaV189CommunityProfile(db, user, student) {
-  let profile = aylaValues(db, "aylaCommunityProfiles").find((row) => String(row.userId) === String(user.id));
+function aylaV189CommunityProfile(db, user, student, { persist = true } = {}) {
+  const storedProfile = aylaValues(db, "aylaCommunityProfiles").find((row) => String(row.userId) === String(user.id));
+  // Read-only routes receive a detached profile. readAylaDb intentionally uses
+  // structural sharing, so changing a stored object during a GET would mutate
+  // the in-process cache even when no database write follows.
+  let profile = storedProfile && !persist ? { ...storedProfile } : storedProfile;
   if (!profile) {
     const rawUser = aylaGetItem(db, "aylaUsers", user.id) || user;
     const accountProfile = normalizeStudentProfileRecord(rawUser);
@@ -79139,7 +79289,7 @@ function aylaV189CommunityProfile(db, user, student) {
       createdAt: aylaNow(),
       updatedAt: aylaNow(),
     };
-    aylaSetItem(db, "aylaCommunityProfiles", profile);
+    if (persist) aylaSetItem(db, "aylaCommunityProfiles", profile);
   } else {
     if (!profile.profileVisibility) profile.profileVisibility = "students_only";
     if (profile.discoverable === undefined) profile.discoverable = Boolean(profile.studyPartnerOptIn);
@@ -79564,8 +79714,7 @@ app.post("/api/ayla/profile/preview", async (req, res) => {
 app.get("/api/ayla/profile", async (req, res) => {
   try {
     const { user, rawUser, student, db } = await aylaV189RequireStudent(req);
-    const communityProfile = aylaV189CommunityProfile(db, user, student);
-    await writeAylaDb(db);
+    const communityProfile = aylaV189CommunityProfile(db, user, student, { persist: false });
     res.setHeader("Cache-Control", "private, no-store");
     return aylaSendOk(res, { user: aylaSanitizeUser(rawUser), student, communityProfile, systemProgress: aylaV189SystemProgress(db, student), warning: aylaV189BacklogWarning(db, student, aylaDateOnly()) });
   } catch (error) {
@@ -84437,10 +84586,26 @@ app.post("/api/ayla/students/:studentId/personal-tutor/apply", async (req, res) 
 
 app.get("/api/ayla/students/:studentId/daily-workspace", async (req, res) => {
   try {
-    const { student, db } = await aylaV189RequireStudent(req, req.params.studentId, "roadmap");
-    aylaEnsureSeedData(db);
+    let { student, db } = await aylaV189RequireStudent(req, req.params.studentId, "roadmap");
     const date = aylaV247StudyDate(student, req.query.date);
-    const built = await aylaV189BuildDailyPlan(db, student, date, { force: false });
+    const currentPlan = aylaValues(db, "aylaDailyPlans")
+      .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student))
+      .filter((row) => String(row.date || "") === String(date))
+      .filter((row) => !["cancelled", "superseded"].includes(String(row.status || "").toLowerCase()))
+      .sort((left, right) => aylaNumber(right.version, 0) - aylaNumber(left.version, 0))[0] || null;
+    let built;
+    if (currentPlan) {
+      built = await aylaV189BuildDailyPlan(db, student, date, { force: false, skipAi: true });
+    } else {
+      const studentId = String(student.id);
+      built = await mutateAylaRoadmapState(async (current) => {
+        const currentStudent = aylaGetItem(current, "aylaStudents", studentId);
+        if (!currentStudent) throw Object.assign(new Error("AylaMed student profile not found"), { statusCode: 404 });
+        return aylaV189BuildDailyPlan(current, currentStudent, date, { force: false, skipAi: true });
+      });
+      db = await readAylaDb();
+      student = aylaGetItem(db, "aylaStudents", studentId) || student;
+    }
     const tomorrowPreview = aylaV189TomorrowPreview(db, student, date);
     const compactTodayView = String(req.query.view || "").trim().toLowerCase() === "today";
     if (compactTodayView) {
@@ -84460,7 +84625,6 @@ app.get("/api/ayla/students/:studentId/daily-workspace", async (req, res) => {
         currentDate: date,
       });
       const warning = compactRisk.level === "on_track" ? null : compactRisk;
-      if (!built.reused) await writeAylaDb(db);
       const safeBundle = aylaV189SanitizePlanBundle(db, built.plan, built.assignments);
       res.setHeader("Cache-Control", "private, no-store");
       return aylaSendOk(res, {
@@ -84510,7 +84674,6 @@ app.get("/api/ayla/students/:studentId/daily-workspace", async (req, res) => {
       resources: aylaValues(db, "aylaResources"),
       revisionQueue: aylaValues(db, "aylaRevisionQueue"),
     });
-    if (!built.reused) await writeAylaDb(db);
     const hydratedAssignments = await aylaV251HydrateAssignmentMedia(built.assignments);
     const safeBundle = aylaV189SanitizePlanBundle(db, built.plan, hydratedAssignments);
     return aylaSendOk(res, { student, date, pilotTime: aylaPilotStudyDate(student), plan: safeBundle.plan, assignments: safeBundle.assignments, stablePlanReused: built.reused, tomorrowPreview, warning, systemProgress, aylaMedFeed, aylaMeFeed: aylaMedFeed, aylaMateFeed: aylaMedFeed, history, historyCounts, recentReadingProgress, recentVideoProgress, recentQuestionAttempts, recentFlashcardReviews, recentAssessments, recentPlans, resourceCounts: Object.values(db.aylaResources || {}).reduce((acc, row) => { const type = aylaV189ResourceType(row.type); acc[type] = (acc[type] || 0) + 1; return acc; }, {}) });
@@ -86447,8 +86610,7 @@ app.post("/api/ayla/students/:studentId/notebooks/:id/generate-flashcards", asyn
 app.get("/api/ayla/community/profile", async (req, res) => {
   try {
     const { user, student, db } = await aylaV189RequireStudent(req);
-    const profile = aylaV189CommunityProfile(db, user, student);
-    await writeAylaDb(db);
+    const profile = aylaV189CommunityProfile(db, user, student, { persist: false });
     return aylaSendOk(res, { profile });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message);
@@ -86457,15 +86619,13 @@ app.get("/api/ayla/community/profile", async (req, res) => {
 
 app.get("/api/ayla/community/messages", async (req, res) => {
   try {
-    const { user, student, db } = await aylaV189RequireStudent(req);
-    aylaV189CommunityProfile(db, user, student);
+    const { db } = await aylaV189RequireStudent(req);
     const messages = aylaValues(db, "aylaCommunityMessages")
       .filter((row) => !row.deletedAt && !row.hiddenAt)
       .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
       .slice(0, Math.max(1, Math.min(200, aylaNumber(req.query.limit, 80))))
       .reverse();
     const profiles = Object.fromEntries(aylaValues(db, "aylaCommunityProfiles").map((row) => [String(row.id), row]));
-    await writeAylaDb(db);
     return aylaSendOk(res, { messages: messages.map((row) => ({ ...row, author: profiles[String(row.profileId)] ? { username: profiles[String(row.profileId)].username, displayName: profiles[String(row.profileId)].displayName, profileImageUrl: profiles[String(row.profileId)].profileImageUrl } : { username: row.username || "Doctor" } })) });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message);

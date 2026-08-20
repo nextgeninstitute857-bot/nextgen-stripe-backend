@@ -308,6 +308,19 @@ test("authenticated Personal Tutor rebalances only the versioned adaptive roadma
     assert.equal(login.response.status, 200, JSON.stringify(login.payload));
     const token = login.payload.token;
 
+    const nextDateValue = new Date(`${date}T12:00:00.000Z`);
+    nextDateValue.setUTCDate(nextDateValue.getUTCDate() + 1);
+    const nextDate = nextDateValue.toISOString().slice(0, 10);
+    const storedBeforeWorkspace = await fs.readFile(path.join(dataDir, "aylamed-db.json"), "utf8");
+    const workspace = await api(baseUrl, `/api/ayla/students/student-1/daily-workspace?view=today&date=${nextDate}`, { token });
+    assert.equal(workspace.response.status, 200, JSON.stringify(workspace.payload));
+    assert.equal(workspace.payload.date, nextDate);
+    assert.ok(workspace.payload.plan?.id);
+    const storedAfterWorkspace = await fs.readFile(path.join(dataDir, "aylamed-db.json"), "utf8");
+    assert.equal(storedAfterWorkspace, storedBeforeWorkspace, "opening Today must not rewrite the full AylaMed database");
+    const roadmapJournal = await fs.readFile(path.join(dataDir, "aylamed-roadmap-state.jsonl"), "utf8");
+    assert.match(roadmapJournal, /roadmap_state_v1/);
+
     const first = await api(baseUrl, `/api/ayla/students/student-1/personal-tutor?date=${date}`, { token });
     assert.equal(first.response.status, 200, JSON.stringify(first.payload));
     assert.equal(first.payload.decision.engine, "ayla_adaptive_roadmap_v189");

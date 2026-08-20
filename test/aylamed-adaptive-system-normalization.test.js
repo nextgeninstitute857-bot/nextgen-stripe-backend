@@ -22,6 +22,9 @@ test("clinical source systems normalize across Step 2, Step 3, PLAB and AMC", ()
   assert.equal(normalize("usmle_step_3", "Pregnancy, Childbirth and Puerperium", "Obstetrics and Gynaecology", ["Obstetrics and Gynecology"]), "Obstetrics and Gynecology");
   assert.equal(normalize("plab", "Psychiatry", "Clinical Capability", ["Psychiatry"]), "Psychiatry");
   assert.equal(normalize("amc", "Paediatrics", "Child and Adolescent Health", ["Child Health"]), "Child Health");
+  const amc = ["Medicine", "Surgery", "Women's Health", "Child Health", "Mental Health", "Population Health", "Ethics", "Australian Clinical Practice"];
+  assert.equal(normalize("amc", "", "Cardiology", amc), "Medicine");
+  assert.equal(normalize("amc", "", "Aboriginal and Torres Strait Islander health", amc), "Australian Clinical Practice");
 });
 
 test("NCLEX client-need labels normalize without leaking raw namespaces", () => {
