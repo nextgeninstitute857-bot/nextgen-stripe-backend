@@ -770,6 +770,8 @@ const allowedOrigins = [
   "https://localhost",
   "https://live.nextgenusmlelms.com",
   "https://www.live.nextgenusmlelms.com",
+  "https://nextgenusmle.live",
+  "https://www.nextgenusmle.live",
   "https://lms.nextgenusmlelms.com",
   "https://www.lms.nextgenusmlelms.com",
   "https://mediumslateblue-otter-394719.hostingersite.com",
@@ -1453,7 +1455,7 @@ const DEFAULT_EMAIL_SETTINGS = {
   email_notifications_enabled: true,
   admin_email: "nextgenacademy89@gmail.com",
   sender_name: "NextGen USMLE",
-  reply_to: "support@nextgenusmlelms.com",
+  reply_to: "support@nextgenusmle.live",
   live_class_reminder_minutes: 60,
   demo_expiring_days: 1,
   bulk_send_limit: 250,
@@ -6358,7 +6360,7 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
       commonVariables: {
         recording_title: canonicalTopic || "New Class Recording",
         course_name: course?.name || "Course",
-        recording_url: "https://live.nextgenusmlelms.com/student/recordings",
+        recording_url: "https://nextgenusmle.live/student/recordings",
       },
       dedupeKey: `zoom_recording_auto_published:${recordingKey}`,
       createdBy: "system:zoom-recording-automation",
@@ -14054,7 +14056,7 @@ async function ngRunLiveClassReminderCheck({ db, source = "automatic_runner" } =
         course_name: course?.name || "Course",
         class_date: formatted.date,
         class_time: formatted.time,
-        live_class_url: `https://live.nextgenusmlelms.com/student/live-class/${encodeURIComponent(session.id)}`,
+        live_class_url: `https://nextgenusmle.live/student/live-class/${encodeURIComponent(session.id)}`,
       },
       dedupeKey: stateKey,
       createdBy: "system",
@@ -14823,7 +14825,7 @@ app.get("/enrollments/status", async (req, res) => {
   }
 });
 function ngBuildCheckoutCancelUrl(rawCancelUrl = "", context = {}) {
-  const fallback = "https://live.nextgenusmlelms.com/payment-cancel";
+  const fallback = "https://nextgenusmle.live/payment-cancel";
   try {
     const url = new URL(String(rawCancelUrl || fallback));
     if (context.courseId) url.searchParams.set("course_id", String(context.courseId));
@@ -14936,7 +14938,7 @@ app.post("/stripe/create-checkout", async (req, res) => {
       planId: plan.id,
       couponCode: coupon?.code || "",
     });
-    const session = await stripe.checkout.sessions.create({ mode: "payment", payment_method_types: ["card"], line_items: [{ price_data: { currency: plan.currency || "usd", product_data: { name: plan.name, description: plan.description || "Course enrollment" }, unit_amount: pricing.final_amount_cents }, quantity: 1 }], metadata: { enrollmentId, studentId, courseId, planId: plan.id, couponCode: coupon?.code || "", referralCode: ngAffCode(referral_code || ref || ""), originalAmountCents: String(pricing.original_amount_cents), discountCents: String(pricing.discount_cents), finalAmountCents: String(pricing.final_amount_cents) }, success_url: successUrl || "https://live.nextgenusmlelms.com/payment-success", cancel_url: checkoutCancelUrl });
+    const session = await stripe.checkout.sessions.create({ mode: "payment", payment_method_types: ["card"], line_items: [{ price_data: { currency: plan.currency || "usd", product_data: { name: plan.name, description: plan.description || "Course enrollment" }, unit_amount: pricing.final_amount_cents }, quantity: 1 }], metadata: { enrollmentId, studentId, courseId, planId: plan.id, couponCode: coupon?.code || "", referralCode: ngAffCode(referral_code || ref || ""), originalAmountCents: String(pricing.original_amount_cents), discountCents: String(pricing.discount_cents), finalAmountCents: String(pricing.final_amount_cents) }, success_url: successUrl || "https://nextgenusmle.live/payment-success", cancel_url: checkoutCancelUrl });
     db.payments = db.payments || {};
     db.payments[session.id] = {
       id: session.id,
@@ -15646,7 +15648,7 @@ app.post("/live/recordings/publish", async (req, res) => {
         commonVariables: {
           recording_title: cleanTopic || "New Class Recording",
           course_name: course?.name || "Course",
-          recording_url: "https://live.nextgenusmlelms.com/student/recordings",
+          recording_url: "https://nextgenusmle.live/student/recordings",
         },
         dedupeKey: `new_recording_published:${key}:${now}`,
         createdBy: user.id,
@@ -16400,7 +16402,7 @@ async function publishNotesHandler(req, res) {
           commonVariables: {
             notes_title: session?.topic || session?.title || "New Session Notes",
             course_name: course?.name || "Course",
-            notes_url: "https://live.nextgenusmlelms.com/student/notes",
+            notes_url: "https://nextgenusmle.live/student/notes",
           },
           dedupeKey: `new_notes_published:${sessionId}:${publishedNote.published_at || publishedNote.updated_at}`,
           createdBy: user.id,
@@ -17857,7 +17859,7 @@ app.post("/admin/assessments/:assessmentId/publish", async (req, res) => {
         commonVariables: {
           assessment_title: a.title || "New Assessment",
           course_name: course?.name || "Course",
-          assessment_url: "https://live.nextgenusmlelms.com/student/assessments",
+          assessment_url: "https://nextgenusmle.live/student/assessments",
         },
         dedupeKey: `new_assessment_published:${a.id}:${a.published_at || a.updated_at}`,
         createdBy: user.id,
@@ -21136,12 +21138,12 @@ function createDefaultCrmBrand() {
     id: "brand_nextgen_usmle",
     name: "NextGen USMLE",
     exam_key: "usmle",
-    domain: "live.nextgenusmlelms.com",
+    domain: "nextgenusmle.live",
     logo_url: "",
     primary_color: "#060F1E",
     accent_color: "#10B981",
     default_language: "english",
-    support_email: "support@nextgenusmlelms.com",
+    support_email: "support@nextgenusmle.live",
     whatsapp_number: "",
     status: "active",
     created_at: now,
@@ -27522,7 +27524,7 @@ function ngBuildQuickActionPayload(db = {}, lead = {}, action = "", body = {}) {
   const liveLink = getNextGenConfiguredLiveSessionLink() || ngSalesAssetValue(assets, "liveSessionLink") || lead.live_session_link || lead.session_link || "";
   const sessionTime = body.session_time || ngSalesAssetValue(assets, "sessionTime") || lead.session_time || "1 PM EST";
   const recordingLink = body.recording_link || ngSalesAssetValue(assets, "recordingLink") || lead.recording_link || lead.recording_url || "";
-  const demoLink = body.demo_link || ngSalesAssetValue(assets, "uworldLink") || lead.demo_link || "https://live.nextgenusmlelms.com";
+  const demoLink = body.demo_link || ngSalesAssetValue(assets, "uworldLink") || lead.demo_link || "https://nextgenusmle.live";
   const youtubeLink = body.youtube_link || ngSalesAssetValue(assets, "youtubeLink") || lead.youtube_link || "";
   const communityLink = body.community_link || lead.community_link || lead.telegram_link || "";
   const mentorLink = body.mentor_booking_link || lead.mentor_booking_link || "";
@@ -29689,8 +29691,8 @@ function getLeadVariableValue(name = "", lead = {}, variables = {}, metadata = {
   if (["lead_name", "student_name", "doctor_name", "name"].includes(lowerKey)) return "Doctor";
   if (["exam_type", "exam_track"].includes(lowerKey)) return "USMLE Step 1";
   if (lowerKey === "session_time") return "1 PM EST";
-  if (["live_session_link", "session_link"].includes(lowerKey)) return getNextGenConfiguredLiveSessionLink() || "https://live.nextgenusmlelms.com";
-  if (["demo_link", "recording_link"].includes(lowerKey)) return "https://live.nextgenusmlelms.com";
+  if (["live_session_link", "session_link"].includes(lowerKey)) return getNextGenConfiguredLiveSessionLink() || "https://nextgenusmle.live";
+  if (["demo_link", "recording_link"].includes(lowerKey)) return "https://nextgenusmle.live";
   if (lowerKey === "course_name" || lowerKey === "program_name") return "NextGen USMLE";
   if (lowerKey === "exam_date" || lowerKey === "graduation_year" || lowerKey === "main_difficulty") return "not confirmed";
   return "";
@@ -29978,7 +29980,7 @@ function getEmailFromAddress() {
     process.env.RESEND_FROM_EMAIL ||
     process.env.SENDGRID_FROM_EMAIL ||
     process.env.SMTP_FROM ||
-    "NextGen USMLE <support@nextgenusmlelms.com>"
+    "NextGen USMLE <support@nextgenusmle.live>"
   );
 }
 
@@ -30086,7 +30088,7 @@ function ngEmailTransportStatus() {
     available_providers: resolved.available,
     from: getEmailFromAddress(),
     reply_to: process.env.EMAIL_REPLY_TO || process.env.REPLY_TO_EMAIL || null,
-    reset_url: process.env.STUDENT_RESET_PASSWORD_URL || "https://live.nextgenusmlelms.com/reset-password",
+    reset_url: process.env.STUDENT_RESET_PASSWORD_URL || "https://nextgenusmle.live/reset-password",
     login_url: ngStudentLoginUrl(),
     smtp: {
       configured: resolved.available.smtp,
@@ -30149,8 +30151,8 @@ function ngEmailBaseVariables(db = {}, user = {}, extra = {}) {
     student_name: String(user?.name || user?.full_name || user?.display_name || "Doctor").trim() || "Doctor",
     student_email: normalizeEmail(user?.email || extra.student_email || ""),
     login_url: ngStudentLoginUrl(),
-    dashboard_url: "https://live.nextgenusmlelms.com/student/dashboard",
-    plans_url: "https://live.nextgenusmlelms.com/plans",
+    dashboard_url: "https://nextgenusmle.live/student/dashboard",
+    plans_url: "https://nextgenusmle.live/plans",
     support_email: settings.reply_to || process.env.EMAIL_REPLY_TO || extractEmailAddress(getEmailFromAddress()),
     days_suffix: "s",
     ...extra,
@@ -30447,7 +30449,7 @@ function ngEmailSampleVariables(db = {}) {
     access_expiry: "2026-10-12",
     days_remaining: "3",
     days_suffix: "s",
-    reset_url: "https://live.nextgenusmlelms.com/reset-password?token=secure-preview-token",
+    reset_url: "https://nextgenusmle.live/reset-password?token=secure-preview-token",
     temporary_password: "NG-Preview-4821",
     access_instructions: "Temporary password: NG-Preview-4821\nPlease change your password after signing in.",
     payment_reference: "cs_test_preview_123",
@@ -30456,13 +30458,13 @@ function ngEmailSampleVariables(db = {}) {
     class_title: "Cardiology Day 9",
     class_date: "2026-07-15",
     class_time: "1:00 PM ET",
-    live_class_url: "https://live.nextgenusmlelms.com/student/live-sessions",
+    live_class_url: "https://nextgenusmle.live/student/live-sessions",
     recording_title: "Cardiology Day 9 Recording",
-    recording_url: "https://live.nextgenusmlelms.com/student/recordings",
+    recording_url: "https://nextgenusmle.live/student/recordings",
     notes_title: "Cardiology Day 9 Notes",
-    notes_url: "https://live.nextgenusmlelms.com/student/notes",
+    notes_url: "https://nextgenusmle.live/student/notes",
     assessment_title: "Cardiology Day 9 Assessment",
-    assessment_url: "https://live.nextgenusmlelms.com/student/assessments",
+    assessment_url: "https://nextgenusmle.live/student/assessments",
   });
 }
 
@@ -34025,7 +34027,7 @@ function getTeamPortalBaseUrl() {
     process.env.TEAM_PORTAL_URL ||
     process.env.FRONTEND_URL ||
     process.env.PUBLIC_FRONTEND_URL ||
-    "https://live.nextgenusmlelms.com"
+    "https://nextgenusmle.live"
   ).replace(/\/$/, "");
 }
 
@@ -34459,7 +34461,7 @@ app.post("/admin/crm/me/check-permission", async (req, res) => {
 });
 
 app.post("/admin/crm/team-members/:id/referral-link", async (req, res) => {
-  try { await requireCrmAdmin(req); const db = await readCrmDb(); const member = ensureCrmArray(db, "team_members").find((m) => String(m.id) === String(req.params.id)); if (!member) return res.status(404).json({ success: false, error: "Team member not found" }); let code = member.referral_code || normalizeCrmString(req.body.code || member.name || member.id).toUpperCase().replace(/[^A-Z0-9]+/g, "").slice(0, 12); if (!code) code = `REF${Date.now()}`; member.referral_code = code; let ref = findReferralCode(db, code); if (!ref) { ref = withTimestamps({ id: uuid(), team_member_id: member.id, code, status: "active", commission_rule_id: member.commission_rule_id || null, created_from: "team_member" }); ensureCrmArray(db, "referral_codes").push(ref); } const baseUrl = req.body.base_url || "https://live.nextgenusmlelms.com"; await writeCrmDb(db); res.json({ success: true, code, referral_code: ref, referral_link: `${String(baseUrl).replace(/\/$/, "")}/?ref=${encodeURIComponent(code)}` }); }
+  try { await requireCrmAdmin(req); const db = await readCrmDb(); const member = ensureCrmArray(db, "team_members").find((m) => String(m.id) === String(req.params.id)); if (!member) return res.status(404).json({ success: false, error: "Team member not found" }); let code = member.referral_code || normalizeCrmString(req.body.code || member.name || member.id).toUpperCase().replace(/[^A-Z0-9]+/g, "").slice(0, 12); if (!code) code = `REF${Date.now()}`; member.referral_code = code; let ref = findReferralCode(db, code); if (!ref) { ref = withTimestamps({ id: uuid(), team_member_id: member.id, code, status: "active", commission_rule_id: member.commission_rule_id || null, created_from: "team_member" }); ensureCrmArray(db, "referral_codes").push(ref); } const baseUrl = req.body.base_url || "https://nextgenusmle.live"; await writeCrmDb(db); res.json({ success: true, code, referral_code: ref, referral_link: `${String(baseUrl).replace(/\/$/, "")}/?ref=${encodeURIComponent(code)}` }); }
   catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
@@ -34722,7 +34724,7 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   recording_first_strategy_enabled: true,
   main_cta: "sales_asset_flow",
   secondary_cta: "live_session_recording_uworld_demo_then_google_meet",
-  uworld_library_link: "https://live.nextgenusmlelms.com/demo",
+  uworld_library_link: "https://nextgenusmle.live/demo",
   uworld_library_hours: "150",
   uworld_library_mcqs: "3000+",
   uworld_library_mentor_name: "",
@@ -34736,7 +34738,7 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   live_session_link: getNextGenConfiguredLiveSessionLink(),
   youtube_channel_link: "",
   youtube_proof_link: "",
-  uworld_demo_link: "https://live.nextgenusmlelms.com/demo",
+  uworld_demo_link: "https://nextgenusmle.live/demo",
   live_session_time: "1:00 PM EST",
   default_live_session_time: "1:00 PM EST",
   live_session_timezone: "EST",
@@ -34777,7 +34779,7 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   july_1_marathon_phrase_rule: "Say: We are starting the USMLE Step 1 120-Day Marathon from July 1. Do not say: NextGen is starting.",
   july_1_marathon_system_order: ["Cardiology", "MSK", "Central Nervous System", "Reproductive", "Endocrinology", "GIT", "Renal", "Pulmonology", "Immunology", "Hematology", "Psychiatry"],
   july_1_marathon_excluded_systems: ["Biochemistry", "Biostatistics"],
-  july_1_marathon_demo_link: "https://live.nextgenusmlelms.com/demo",
+  july_1_marathon_demo_link: "https://nextgenusmle.live/demo",
   july_1_marathon_current_batch_rule: "Our current live classes are still going on and the current batch is ending around June 29-30. Students can join now to see Dr. Ahmad’s teaching style. The new 120-Day Marathon starts July 1 with Cardiology first, then MSK and the rest of the roadmap sequence.",
   july_1_marathon_program_flow: "Live First Aid teaching with Dr. Ahmad → mapped UWorld QIDs → matching UWorld Video Library lecture → daily homework/task → recordings + notes → Community Q&A → leaderboard points → daily flashcards → system-end assessments → surprise mentor assessments when needed → Google Meet guidance.",
   assessment_rule: "Do not create assessment after every session. Assessments are after each system/block, surprise mentor assessments when assigned, and final/mixed review assessments when needed.",
@@ -35096,8 +35098,8 @@ function ngApplyTemplateVariables(text, data = {}) {
     .replaceAll("{{lead_name}}", lead.name || lead.full_name || lead.lead_name || "Doc")
     .replaceAll("{{student_name}}", lead.name || lead.full_name || lead.lead_name || "Doc")
     .replaceAll("{{exam_type}}", lead.exam_type || lead.exam || "USMLE")
-    .replaceAll("{{website_link}}", "https://live.nextgenusmlelms.com")
-    .replaceAll("{{demo_link}}", "https://live.nextgenusmlelms.com")
+    .replaceAll("{{website_link}}", "https://nextgenusmle.live")
+    .replaceAll("{{demo_link}}", "https://nextgenusmle.live")
     .replaceAll("{{brand_name}}", "NextGen USMLE");
 }
 
@@ -35145,7 +35147,7 @@ function ngGenerateFallbackReply({ db, agent = null, lead = {}, messages = [], m
 We help students with live USMLE preparation, UWorld video library, structured roadmap, recordings, notes, and demo access.
 
 You can visit:
-https://live.nextgenusmlelms.com
+https://nextgenusmle.live
 
 Before I guide you, may I ask:
 1. Are you preparing for Step 1 or Step 2 CK?
@@ -35168,7 +35170,7 @@ To guide you properly, may I ask:
 3. What is your main difficulty right now — UWorld, First Aid, NBME score, schedule, or revision?
 
 You can also check our LMS/demo access here:
-https://live.nextgenusmlelms.com`,
+https://nextgenusmle.live`,
     intent: lastMessage ? "lead_needs_guidance" : "general_followup",
     next_action: "qualify_lead",
     confidence: 0.78,
@@ -35297,7 +35299,7 @@ async function ngRunFlowCheck({ area = "all", lookbackHours = 24, actor = null, 
           category: "demo_invite",
           template_name: "nextgen_demo_invite",
           language_code: "en_US",
-          body: "Hi Doc, this is NextGen USMLE. You can access our LMS/demo and live session details here: https://live.nextgenusmlelms.com"
+          body: "Hi Doc, this is NextGen USMLE. You can access our LMS/demo and live session details here: https://nextgenusmle.live"
         }
       }));
     }
@@ -46409,7 +46411,7 @@ function ngAffSlug(value = "NG") {
   return `${base}${String(Math.floor(1000 + Math.random() * 9000))}`;
 }
 function ngAffBaseUrl() {
-  return String(process.env.FRONTEND_URL || process.env.PUBLIC_FRONTEND_URL || "https://live.nextgenusmlelms.com").replace(/\/$/, "");
+  return String(process.env.FRONTEND_URL || process.env.PUBLIC_FRONTEND_URL || "https://nextgenusmle.live").replace(/\/$/, "");
 }
 function ngAffiliateLink(code) { return `${ngAffBaseUrl()}/pricing?ref=${encodeURIComponent(code || "")}`; }
 function ngPercent(value, fallback = 0) {
@@ -47507,7 +47509,7 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
     `- Scheduling timezone: always use ${timezone}. Do not mention Pakistan time unless the student asks for it.`,
     "- Price rule: if price/cost/package/payment is asked, answer that pricing depends on plan duration/support needed, do not dump recordings again, and move the lead to Google Meet/admin guidance. Ask preferred time in EST.",
     "- Failed/weak/confused rule: reassure strongly that the student is in the right place; the key is roadmap, mentor feedback, UWorld-style practice, and weak-area correction; then offer recording/live session/UWorld demo and Google Meet guidance when positive.",
-    "- Website/demo rule: send https://live.nextgenusmlelms.com/demo early when explaining the July 1 Marathon. Explain naturally that the demo shows the learning ecosystem/dashboard: roadmap, live classes, recordings, notes, tasks, accountability assessments, progress tracking, leaderboard, community, and Study Partner support.",
+    "- Website/demo rule: send https://nextgenusmle.live/demo early when explaining the July 1 Marathon. Explain naturally that the demo shows the learning ecosystem/dashboard: roadmap, live classes, recordings, notes, tasks, accountability assessments, progress tracking, leaderboard, community, and Study Partner support.",
     "- Google Meet booking: before booking, ask whether the student attended any Dr. Ahmad/NextGen live session before. If yes, ask when and what they thought. Also ask exam timeline and weak areas. Then offer Google Meet mentor consultation. If the student directly gives a time after a Meet offer, confirm once and alert admin once.",
     `- Current latest-message signals: ${JSON.stringify(signals)}`,
     s.sales_style_rule ? `- Admin sales style rule: ${ngAylaSettingsText(s.sales_style_rule, 800)}` : "",
@@ -47736,7 +47738,7 @@ function ngAylaGetSalesAssets(db = {}) {
     "demo_link",
     "demo_url",
     "library_link"
-  ], "https://live.nextgenusmlelms.com/demo");
+  ], "https://nextgenusmle.live/demo");
 
   const youtubeLink = ngAylaFirstNonEmptySetting(s, [
     "youtube_channel_link",
@@ -58309,7 +58311,7 @@ function ng41ResolveAudienceTargets(db, { audience_type = "all_leads", audience_
 
 function ng41BroadcastVariablesForTarget(target = {}, campaign = {}) {
   const name = target.name && !looksLikePhoneOnly(target.name) ? target.name : "Doctor";
-  const link = ng41FirstNonEmpty(campaign.link_url, campaign.live_session_link, campaign.community_link, campaign.website_link, campaign.lms_link, target.link_url, "https://live.nextgenusmlelms.com");
+  const link = ng41FirstNonEmpty(campaign.link_url, campaign.live_session_link, campaign.community_link, campaign.website_link, campaign.lms_link, target.link_url, "https://nextgenusmle.live");
   return {
     student_name: name,
     lead_name: name,
@@ -58352,8 +58354,8 @@ function ng41NormalizeBroadcastCampaign(body = {}, existing = null, brandId = nu
     link_url: body.link_url || existing?.link_url || "",
     live_session_link: body.live_session_link || body.session_link || existing?.live_session_link || "",
     community_link: body.community_link || existing?.community_link || "",
-    website_link: body.website_link || existing?.website_link || "https://live.nextgenusmlelms.com",
-    lms_link: body.lms_link || existing?.lms_link || "https://live.nextgenusmlelms.com",
+    website_link: body.website_link || existing?.website_link || "https://nextgenusmle.live",
+    lms_link: body.lms_link || existing?.lms_link || "https://nextgenusmle.live",
     session_time: body.session_time || existing?.session_time || "1:00 PM EST",
     throttle_count: Math.max(1, Math.min(50, Number(body.throttle_count ?? existing?.throttle_count ?? 10))),
     throttle_minutes: Math.max(1, Math.min(120, Number(body.throttle_minutes ?? existing?.throttle_minutes ?? 10))),
@@ -65564,11 +65566,11 @@ function ngHashToken(value = "") {
 }
 
 function ngStudentLoginUrl() {
-  return process.env.STUDENT_LOGIN_URL || process.env.FRONTEND_LOGIN_URL || "https://live.nextgenusmlelms.com/login";
+  return process.env.STUDENT_LOGIN_URL || process.env.FRONTEND_LOGIN_URL || "https://nextgenusmle.live/login";
 }
 
 function ngStudentResetUrl(req, token) {
-  const base = process.env.STUDENT_RESET_PASSWORD_URL || "https://live.nextgenusmlelms.com/reset-password";
+  const base = process.env.STUDENT_RESET_PASSWORD_URL || "https://nextgenusmle.live/reset-password";
   const joiner = base.includes("?") ? "&" : "?";
   return `${base}${joiner}token=${encodeURIComponent(token)}`;
 }
@@ -68291,8 +68293,8 @@ async function aylaLog(db, type, message, payload = {}) {
 
 const AYLA_AUTH_JWT_SECRET = process.env.AYLA_AUTH_JWT_SECRET || `${AUTH_JWT_SECRET}_aylamed`;
 const AYLA_TOKEN_DAYS = Number(process.env.AYLA_TOKEN_DAYS || 30) || 30;
-const AYLA_DEFAULT_SUCCESS_URL = process.env.AYLA_SUCCESS_URL || "https://live.nextgenusmlelms.com/aylamed/payment-success";
-const AYLA_DEFAULT_CANCEL_URL = process.env.AYLA_CANCEL_URL || "https://live.nextgenusmlelms.com/aylamed/payment-cancel";
+const AYLA_DEFAULT_SUCCESS_URL = process.env.AYLA_SUCCESS_URL || "https://nextgenusmle.live/aylamed/payment-success";
+const AYLA_DEFAULT_CANCEL_URL = process.env.AYLA_CANCEL_URL || "https://nextgenusmle.live/aylamed/payment-cancel";
 
 function aylaNormalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
@@ -80462,7 +80464,7 @@ function aylaPrivatePilotVimeoEmbedDomains() {
     : [
         "https://paleturquoise-quail-255896.hostingersite.com",
         "https://aylamedapp.com",
-        "https://live.nextgenusmlelms.com",
+        "https://nextgenusmle.live",
       ];
 }
 
@@ -88227,11 +88229,11 @@ async function ngAdminMobileDashboardPayload() {
       active_students: activeLmsStudents + activeAylaStudents,
     },
     admin_links: {
-      lms: "https://live.nextgenusmlelms.com/admin",
+      lms: "https://nextgenusmle.live/admin",
       aylamed: "https://aylamedapp.com/admin",
-      crm: "https://live.nextgenusmlelms.com/admin/crm",
-      recordings: "https://live.nextgenusmlelms.com/admin/recordings",
-      notes: "https://live.nextgenusmlelms.com/admin",
+      crm: "https://nextgenusmle.live/admin/crm",
+      recordings: "https://nextgenusmle.live/admin/recordings",
+      notes: "https://nextgenusmle.live/admin",
     },
   };
 }

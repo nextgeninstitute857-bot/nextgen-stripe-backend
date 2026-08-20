@@ -473,6 +473,7 @@ test('student catalog requires ownership, exam entitlement, and approved enabled
 test('credentialed CORS is limited to exact owned LMS origins and explicit environment additions', () => {
   for (const origin of [
     'https://live.nextgenusmlelms.com', 'https://www.live.nextgenusmlelms.com',
+    'https://nextgenusmle.live', 'https://www.nextgenusmle.live',
     'https://lms.nextgenusmlelms.com', 'https://www.lms.nextgenusmlelms.com',
     'https://mediumslateblue-otter-394719.hostingersite.com',
     'https://paleturquoise-quail-255896.hostingersite.com',
@@ -482,4 +483,10 @@ test('credentialed CORS is limited to exact owned LMS origins and explicit envir
   assert.doesNotMatch(server, /http:\/\/localhost:5173/);
   assert.doesNotMatch(server, /host\.endsWith\("\.nextgenusmlelms\.com"\)/);
   assert.doesNotMatch(server, /origin:\s*true/);
+});
+
+test('current LMS links and support replies use the replacement live domain', () => {
+  assert.match(server, /https:\/\/nextgenusmle\.live\/login/);
+  assert.match(server, /https:\/\/nextgenusmle\.live\/student\/live-sessions/);
+  assert.match(server, /support@nextgenusmle\.live/);
 });
