@@ -75887,7 +75887,7 @@ function aylaV210AssignmentForVideo(assignments, video, assignmentId = "") {
 
 const AYLA_ROADMAP_REGISTRY_CACHE_TTL_MS = Math.max(
   15_000,
-  Math.min(300_000, Number(process.env.AYLA_ROADMAP_REGISTRY_CACHE_TTL_MS || 60_000) || 60_000),
+  Math.min(300_000, Number(process.env.AYLA_ROADMAP_REGISTRY_CACHE_TTL_MS || 300_000) || 300_000),
 );
 const aylaV210RegistryVideoCache = new Map();
 
@@ -76970,10 +76970,111 @@ function aylaV189CurrentSystemSignals(db, student, system) {
 }
 
 function aylaV189SystemProgress(db, student) {
+  // Build the student's evidence index once. The previous implementation
+  // scanned every global evidence collection again for every system in the
+  // exam blueprint, which made first-time roadmap requests increasingly slow
+  // as the shared database grew. These buckets preserve the same filtering,
+  // ordering, limits, and scoring while making the work linear.
+  const bySystem = (rows) => {
+    const grouped = new Map();
+    rows.forEach((row) => {
+      const key = aylaV189SystemKey(row.system);
+      if (!grouped.has(key)) grouped.set(key, []);
+      grouped.get(key).push(row);
+    });
+    return grouped;
+  };
+  const questionAttemptsBySystem = bySystem(aylaValues(db, "aylaQuestionAttempts")
+    .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true }) && aylaScoredQuestionAttempt(row)));
+  const flashcardReviewsBySystem = bySystem(aylaValues(db, "aylaFlashcardReviews")
+    .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true })));
+  const assessmentAttemptsBySystem = bySystem(aylaValues(db, "aylaAssessmentAttempts")
+    .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student, { verifiedOnly: true })));
+  const conceptMasteryBySystem = bySystem(aylaValues(db, "aylaConceptMastery")
+    .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student)));
+  const assignmentsBySystem = bySystem(aylaValues(db, "aylaResourceAssignments")
+    .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student)));
+  const globalBaseline = aylaNumber(student.currentScore ?? student.current_score, 0);
+
   return aylaV227SystemsForStudent(student).map((system) => {
+    const key = aylaV189SystemKey(system);
+    const questionRows = questionAttemptsBySystem.get(key) || [];
+    const flashcardRows = flashcardReviewsBySystem.get(key) || [];
+    const assessmentRows = assessmentAttemptsBySystem.get(key) || [];
+    const conceptRows = conceptMasteryBySystem.get(key) || [];
+    const assignmentRows = assignmentsBySystem.get(key) || [];
     const explicit = aylaV189ExplicitBaseline(student, system);
-    const baseline = explicit || aylaV189BaselineFromVerifiedHistory(db, student, system);
-    const current = aylaV189CurrentSystemSignals(db, student, system);
+    let baseline = explicit;
+    if (!baseline && assessmentRows.length) {
+      const row = assessmentRows.slice()
+        .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")))[0];
+      baseline = {
+        percent: Math.round(Math.max(0, Math.min(100, aylaNumber(row.scorePercent, 0)))),
+        source: "first_verified_assessment",
+        recordedAt: row.createdAt || null,
+      };
+    }
+    if (!baseline && questionRows.length >= 5) {
+      const firstBlock = questionRows.slice()
+        .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")))
+        .slice(0, 10);
+      const correct = firstBlock.filter((row) => String(row.outcome || "").toLowerCase() === "correct").length;
+      baseline = {
+        percent: Math.round((correct / firstBlock.length) * 100),
+        source: "first_verified_question_block",
+        recordedAt: firstBlock[firstBlock.length - 1]?.createdAt || null,
+      };
+    }
+    if (!baseline && globalBaseline > 0 && globalBaseline <= 100) {
+      baseline = {
+        percent: Math.round(globalBaseline),
+        source: "diagnostic_global_score",
+        recordedAt: student.baselineRecordedAt || student.createdAt || null,
+      };
+    }
+
+    const signals = [];
+    questionRows.slice()
+      .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
+      .slice(0, 80)
+      .forEach((row) => {
+        const outcome = String(row.outcome || row.result || "").toLowerCase();
+        if (outcome === "correct") signals.push({ value: 100, weight: 1.0, type: "question" });
+        else if (outcome === "guessed") signals.push({ value: 55, weight: 0.8, type: "question" });
+        else if (outcome === "incorrect" || outcome === "review_again") signals.push({ value: 15, weight: 1.0, type: "question" });
+      });
+    flashcardRows.slice()
+      .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
+      .slice(0, 80)
+      .forEach((row) => {
+        const rating = String(row.rating || "").toLowerCase();
+        const value = rating === "easy" ? 95 : rating === "good" ? 78 : rating === "hard" ? 45 : 18;
+        signals.push({ value, weight: 0.55, type: "flashcard" });
+      });
+    assessmentRows.slice()
+      .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
+      .slice(0, 20)
+      .forEach((row) => signals.push({
+        value: Math.max(0, Math.min(100, aylaNumber(row.scorePercent, 0))),
+        weight: 2.25,
+        type: "assessment",
+      }));
+    conceptRows.forEach((row) => signals.push({
+      value: Math.max(0, Math.min(100, aylaNumber(row.masteryPercent ?? row.mastery_percent, 0))),
+      weight: 1.5,
+      type: "concept_mastery",
+    }));
+    const completedAssignments = assignmentRows.filter((row) => String(row.status || "").toLowerCase() === "completed");
+    const assignedAssignments = assignmentRows.filter((row) => !["cancelled", "superseded"].includes(String(row.status || "").toLowerCase()));
+    const totalWeight = signals.reduce((sum, row) => sum + row.weight, 0);
+    const current = {
+      mastery: totalWeight ? Math.round(signals.reduce((sum, row) => sum + row.value * row.weight, 0) / totalWeight) : null,
+      coverage: assignedAssignments.length ? Math.round((completedAssignments.length / assignedAssignments.length) * 100) : 0,
+      signalCount: signals.length,
+      signalTypes: [...new Set(signals.map((row) => row.type))],
+      completedAssignments: completedAssignments.length,
+      assignedAssignments: assignedAssignments.length,
+    };
     const mastery = current.mastery;
     const baselinePercent = baseline?.percent ?? null;
     return {
@@ -77486,8 +77587,9 @@ function aylaV189FocusCandidates(
   revisions = [],
   overdue = [],
   continuityReferences = [],
+  systemProgress = null,
 ) {
-  const progress = aylaV189SystemProgress(db, student);
+  const progress = Array.isArray(systemProgress) ? systemProgress : aylaV189SystemProgress(db, student);
   const progressBySystem = new Map(progress.map((row, index) => [aylaV189SystemKey(row.system), { row, index }]));
   const groups = new Map();
   const touch = (system, subsystem, topic, points = 0, resourceId = null, reason = "") => {
@@ -77701,17 +77803,31 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   const restRevisionLimit = Math.max(15, Math.min(120, aylaNumber(settings.adaptive?.rest_day_revision_minutes, 35)));
   if (!studyDay.isStudyDay) capacityMinutes = Math.min(capacityMinutes, restRevisionLimit);
 
-  const completedIds = aylaV189CompletedResourceIds(db, student);
-  const overdue = aylaV189OverdueAssignments(db, student, date)
+  const studentAssignments = aylaValues(db, "aylaResourceAssignments")
+    .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student));
+  const completedIds = new Set(studentAssignments
+    .filter((row) => String(row.status).toLowerCase() === "completed")
+    .flatMap((row) => aylaCleanArray(row.resourceIds || row.resourceId)));
+  const linkedAssignmentIdsForDate = new Set(studentAssignments
+    .filter((candidate) => String(candidate.scheduledDate) === String(date) && !["completed", "cancelled", "superseded"].includes(String(candidate.status || "").toLowerCase()))
+    .flatMap((candidate) => aylaCleanArray(candidate.linkedAssignmentIds).map(String)));
+  const overdue = studentAssignments
+    .filter((row) => String(row.scheduledDate || "") < String(date || ""))
+    .filter((row) => !["completed", "skipped", "cancelled", "superseded", "moved"].includes(String(row.status || "pending").toLowerCase()))
+    .sort((a, b) => String(a.scheduledDate || "").localeCompare(String(b.scheduledDate || "")))
     .filter((row) => aylaOriginalOverdueAssignment(row))
-    .filter((row) => !aylaValues(db, "aylaResourceAssignments").some((candidate) => String(candidate.scheduledDate) === String(date) && !["completed", "cancelled", "superseded"].includes(String(candidate.status || "").toLowerCase()) && aylaCleanArray(candidate.linkedAssignmentIds).map(String).includes(String(row.id))))
+    .filter((row) => !linkedAssignmentIdsForDate.has(String(row.id)))
     .slice(0, 12);
   const dueRevisions = aylaV189DueRevisionQueue(db, student, date).slice(0, 20);
+  const systemProgress = aylaV189SystemProgress(db, student);
   const contentHubEnabled = aylaV210StudentFeatureAllowed(db, student, "content_hub");
   const libraryEnabled = aylaV210StudentFeatureAllowed(db, student, "library");
   const qbankEnabled = aylaV210StudentFeatureAllowed(db, student, "qbank");
   const cdmEnabled = AYLA_CURRENT_MCCQE_CDM_ENABLED;
-  const storedRelevant = aylaV189RelevantResources(db, student, ["book", "reading", "revision_sheet", "vimeo_video", "video_transcript", "external_question", "external_qid_mapping", "internal_mcq", "flashcard", "assessment", "assessment_blueprint"]);
+  const storedRelevant = aylaV189RelevantResources(db, student, ["book", "reading", "revision_sheet", "vimeo_video", "video_transcript", "external_question", "external_qid_mapping", "internal_mcq", "flashcard", "assessment", "assessment_blueprint"], {
+    enrichMappings: false,
+    systemProgress,
+  });
   planningTimings.history_and_stored_ms = Date.now() - planningStartedAt;
   const [contentHub, library] = await Promise.all([
     contentHubEnabled
@@ -77758,6 +77874,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     dueRevisions,
     overdue,
     continuityReferences,
+    systemProgress,
   );
   const tutorProposal = await aylaV189TutorProposal(db, student, date, focusCandidates, allRelevant, options);
   planningTimings.tutor_ms = Date.now() - planningStartedAt - planningTimings.history_and_stored_ms - planningTimings.content_inputs_ms;

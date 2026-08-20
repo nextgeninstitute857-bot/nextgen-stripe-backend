@@ -45,6 +45,35 @@ test("first-time roadmap plans never load the legacy CRM training snapshot", () 
   assert.doesNotMatch(planner, /aylaV211EligibleReadings\(db, student\)(?!,)/);
 });
 
+test("first-time roadmap planning reuses one evidence and assignment snapshot", () => {
+  const start = server.indexOf("async function aylaV189BuildDailyPlan");
+  const end = server.indexOf("\nfunction aylaV189UpdatePlanCompletion", start);
+  assert.ok(start >= 0 && end > start);
+  const planner = server.slice(start, end);
+  assert.match(planner, /const studentAssignments = aylaValues\(db, "aylaResourceAssignments"\)/);
+  assert.match(planner, /const systemProgress = aylaV189SystemProgress\(db, student\)/);
+  assert.match(planner, /enrichMappings: false/);
+  assert.match(planner, /systemProgress,/);
+  assert.doesNotMatch(planner, /const completedIds = aylaV189CompletedResourceIds/);
+  assert.doesNotMatch(planner, /!aylaValues\(db, "aylaResourceAssignments"\)\.some/);
+});
+
+test("system progress indexes each student evidence collection once", () => {
+  const start = server.indexOf("function aylaV189SystemProgress");
+  const end = server.indexOf("\nfunction aylaV189RequiredResourceKey", start);
+  assert.ok(start >= 0 && end > start);
+  const progress = server.slice(start, end);
+  for (const collection of [
+    "aylaQuestionAttempts",
+    "aylaFlashcardReviews",
+    "aylaAssessmentAttempts",
+    "aylaConceptMastery",
+    "aylaResourceAssignments",
+  ]) {
+    assert.equal(progress.split(`aylaValues(db, "${collection}")`).length - 1, 1);
+  }
+});
+
 test("roadmap journaling clones only its three writable collections", () => {
   const start = server.indexOf("async function mutateAylaRoadmapState");
   const end = server.indexOf("\nasync function readAylaCrmSnapshot", start);
