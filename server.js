@@ -77700,7 +77700,12 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       ? aylaV210EligibleVideos(db, student, { forRoadmap: true })
       : Promise.resolve({ videos: [], assignments: [], warning: null }),
     libraryEnabled
-      ? aylaV211EligibleReadings(db, student)
+      // Roadmap generation is grounded in the approved AylaMed library. Do
+      // not hydrate legacy CRM training documents here: that snapshot is very
+      // large, blocks first-time Today requests, and is not the student's
+      // exam-owned library. The strict normalizer below keeps only locally
+      // complete, approved page-turn resources.
+      ? aylaV211EligibleReadings(db, student, { allowLegacyCrm: false })
       : Promise.resolve({ resources: [], warning: null }),
   ]);
   const allRelevant = [

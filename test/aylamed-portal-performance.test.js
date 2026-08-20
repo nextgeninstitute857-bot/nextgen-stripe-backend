@@ -35,3 +35,12 @@ test("compact Today workspace returns before history scans and media signing", (
   assert.doesNotMatch(compactPath, /aylaV251HydrateAssignmentMedia/);
   assert.match(route, /req\.query\.view/);
 });
+
+test("first-time roadmap plans never load the legacy CRM training snapshot", () => {
+  const start = server.indexOf("async function aylaV189BuildDailyPlan");
+  const end = server.indexOf("\nfunction aylaV189UpdatePlanCompletion", start);
+  assert.ok(start >= 0 && end > start);
+  const planner = server.slice(start, end);
+  assert.match(planner, /aylaV211EligibleReadings\(db, student, \{ allowLegacyCrm: false \}\)/);
+  assert.doesNotMatch(planner, /aylaV211EligibleReadings\(db, student\)(?!,)/);
+});
