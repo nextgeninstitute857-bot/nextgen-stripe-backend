@@ -67162,16 +67162,31 @@ async function mutateAylaRoadmapState(mutator) {
     })
     .then(async () => {
       const source = aylaDbCache || await readAylaDbFromDisk();
-      const mutation = await mutateJsonCopyOnWrite(source, mutator);
-      if (!mutation.changed) return mutation.result;
-      const current = mutation.value;
+      // A daily plan writes only these small roadmap collections. Running the
+      // whole multi-product database through the generic copy-on-write Proxy
+      // makes every Object.values scan proxy thousands of unrelated records.
+      // Isolate the writable collections instead; all other collections keep
+      // their read-only source references and a thrown mutator is rollback-safe.
+      const current = {
+        ...source,
+        ...Object.fromEntries(AYLA_ROADMAP_STATE_COLLECTIONS.map((collection) => [
+          collection,
+          { ...(source[collection] && typeof source[collection] === "object" ? source[collection] : {}) },
+        ])),
+      };
+      const result = await mutator(current);
       const upserts = {};
       for (const collection of AYLA_ROADMAP_STATE_COLLECTIONS) {
         const before = source[collection] && typeof source[collection] === "object" ? source[collection] : {};
         const after = current[collection] && typeof current[collection] === "object" ? current[collection] : {};
+        const removedIds = Object.keys(before).filter((id) => !Object.prototype.hasOwnProperty.call(after, id));
+        if (removedIds.length) {
+          throw new Error(`Roadmap journal mutations cannot delete ${collection} records`);
+        }
         upserts[collection] = Object.fromEntries(Object.entries(after)
           .filter(([id, row]) => before[id] !== row));
       }
+      if (!Object.values(upserts).some((rows) => Object.keys(rows).length)) return result;
       const roadmapStateVersion = Math.max(0, Number(current.roadmap_state_version || 0)) + 1;
       const journalRecord = createAylaRoadmapJournalRecord({ upserts, roadmapStateVersion });
       await appendAylaRoadmapJournalRecord(AYLA_ROADMAP_JOURNAL_PATH, journalRecord);
@@ -67185,7 +67200,7 @@ async function mutateAylaRoadmapState(mutator) {
         updatedAt: new Date().toISOString(),
       };
       aylaDbReadInFlight = null;
-      return mutation.result;
+      return result;
     });
   aylaWriteQueue = task;
   return task;

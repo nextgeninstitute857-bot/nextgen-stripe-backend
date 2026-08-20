@@ -44,3 +44,13 @@ test("first-time roadmap plans never load the legacy CRM training snapshot", () 
   assert.match(planner, /aylaV211EligibleReadings\(db, student, \{ allowLegacyCrm: false \}\)/);
   assert.doesNotMatch(planner, /aylaV211EligibleReadings\(db, student\)(?!,)/);
 });
+
+test("roadmap journaling clones only its three writable collections", () => {
+  const start = server.indexOf("async function mutateAylaRoadmapState");
+  const end = server.indexOf("\nasync function readAylaCrmSnapshot", start);
+  assert.ok(start >= 0 && end > start);
+  const mutation = server.slice(start, end);
+  assert.match(mutation, /Object\.fromEntries\(AYLA_ROADMAP_STATE_COLLECTIONS\.map/);
+  assert.match(mutation, /Roadmap journal mutations cannot delete/);
+  assert.doesNotMatch(mutation, /mutateJsonCopyOnWrite/);
+});
