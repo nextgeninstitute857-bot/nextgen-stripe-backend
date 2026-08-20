@@ -3,11 +3,45 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import {
   AYLA_ONBOARDING_PRESETS,
+  aylaVerifiedDiagnosticPlanCanYield,
   buildAylaStartingReadinessReport,
   buildAylaVerifiedDiagnosticBaseline,
   normalizeAylaOnboardingSubmission,
   reconcileAylaRoadmapOutline,
 } from "../lib/aylamed-onboarding.js";
+
+test("a verified diagnostic releases current and future diagnostic-only roadmap placeholders", () => {
+  const plan = { id: "plan-1", date: "2026-08-28", status: "active" };
+  const assignments = [{ id: "diagnostic-1", category: "diagnostic", status: "pending" }];
+  assert.equal(aylaVerifiedDiagnosticPlanCanYield({
+    plan,
+    assignments,
+    student: { serverVerifiedBaseline: true },
+    date: plan.date,
+    today: "2026-08-21",
+  }), true);
+  assert.equal(aylaVerifiedDiagnosticPlanCanYield({
+    plan,
+    assignments,
+    student: { serverVerifiedBaseline: false },
+    date: plan.date,
+    today: "2026-08-21",
+  }), false);
+  assert.equal(aylaVerifiedDiagnosticPlanCanYield({
+    plan,
+    assignments: [{ category: "internal_mcqs", status: "pending" }],
+    student: { serverVerifiedBaseline: true },
+    date: plan.date,
+    today: "2026-08-21",
+  }), false);
+  assert.equal(aylaVerifiedDiagnosticPlanCanYield({
+    plan: { ...plan, date: "2026-08-20" },
+    assignments,
+    student: { serverVerifiedBaseline: true },
+    date: "2026-08-20",
+    today: "2026-08-21",
+  }), false);
+});
 
 const step1 = {
   id: "usmle_step_1",

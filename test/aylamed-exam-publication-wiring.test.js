@@ -32,7 +32,7 @@ test("MCCQE registry delivery loads Step 2 supplements with non-scoring metadata
   );
   assert.match(videos, /listAylaExamSupplements\(examTrack\)/);
   assert.match(videos, /sourceExamTrackId/);
-  assert.match(videos, /supplementalForExamTrackId/);
+  assert.match(videos, /scopeAylaContentHubVideoForExam/);
   const qbank = server.slice(
     server.indexOf('app.get("/api/ayla/qbank/catalog"'),
     server.indexOf('app.post("/api/ayla/qbank/sessions"'),

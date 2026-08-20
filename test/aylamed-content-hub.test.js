@@ -11,6 +11,7 @@ import {
   normalizeAylaContentHubVideo,
   normalizeAylaContentHubVideos,
   sanitizeAylaContentHubVideo,
+  scopeAylaContentHubVideoForExam,
   selectAylaRoadmapVideo,
 } from "../lib/aylamed-content-hub.js";
 
@@ -65,23 +66,31 @@ test("Vimeo inputs become embedded-player URLs and never require an outbound pub
 });
 
 test("Step 2 videos can appear in MCCQE only as non-scoring supplemental content", () => {
-  const [video] = normalizeAylaContentHubVideos([{
+  const input = scopeAylaContentHubVideoForExam({
     id: "step2-video-1",
-    sourceType: "registry",
+    sourceType: "legacy",
     examTrackId: "usmle_step_2_ck",
-    supplementalForExamTrackId: "mccqe",
     vimeoId: "123456789",
     title: "Chest pain triage",
     system: "Cardiovascular",
     approved: true,
-    authorizationStatus: "approved_collection",
-  }], { examTrack: "mccqe" });
+    authorizationStatus: "owned",
+  }, "mccqe");
+  const [video] = normalizeAylaContentHubVideos([input], { examTrack: "mccqe" });
   const studentVideo = sanitizeAylaContentHubVideo(video);
   assert.equal(studentVideo.exam_track_id, "mccqe");
   assert.equal(studentVideo.source_exam_track_id, "usmle_step_2_ck");
   assert.equal(studentVideo.supplemental, true);
   assert.equal(studentVideo.scoring_allowed, false);
   assert.equal(studentVideo.supplemental_label, "Step 2 CK Supplemental");
+});
+
+test("native videos remain scoring-eligible when delivery scoping matches their exam", () => {
+  const input = scopeAylaContentHubVideoForExam(legacyVideo(), "usmle_step_1");
+  assert.equal(input.sourceExamTrackId, "usmle_step_1");
+  assert.equal(input.supplementalForExamTrackId, null);
+  assert.equal(input.supplemental, false);
+  assert.equal(input.scoringAllowed, true);
 });
 
 test("raw media filenames never become student-facing video titles", () => {
@@ -385,7 +394,8 @@ test("server and registry wire one entitlement-guarded Content Hub into the exis
   assert.match(server, /subsystem: req\.query\.subsystem \|\| req\.query\.subsystem_key/);
   assert.match(server, /const pageSize = 500;[\s\S]*?while \(true\)[\s\S]*?offset: sourceRows\.length/);
   assert.match(server, /\["vimeo_video", "video_transcript"\],[\s\S]*?enrichMappings: false/);
-  assert.match(server, /listAylaExamSupplements\(examTrack\)[\s\S]*?supplementalForExamTrackId/);
+  assert.match(server, /listAylaExamSupplements\(examTrack\)[\s\S]*?scopeAylaContentHubVideoForExam/);
+  assert.match(server, /\.\.\.scopeAylaContentHubVideoForExam\(row, examTrackId\)/);
   assert.doesNotMatch(server, /content_registry_video_limit_reached/);
   assert.match(postgres, /'aylamed_content_hub'/);
   assert.match(postgres, /export async function listContentHubVideos/);

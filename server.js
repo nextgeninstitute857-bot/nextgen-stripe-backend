@@ -182,6 +182,7 @@ import {
 } from "./lib/aylamed-cdm.js";
 import {
   AYLA_ONBOARDING_PRESETS,
+  aylaVerifiedDiagnosticPlanCanYield,
   buildAylaStartingReadinessReport,
   buildAylaVerifiedDiagnosticBaseline,
   normalizeAylaOnboardingSubmission,
@@ -249,6 +250,7 @@ import {
   mergeAylaContentHubProgressCollection,
   normalizeAylaContentHubVideos,
   sanitizeAylaContentHubVideo,
+  scopeAylaContentHubVideoForExam,
   selectAylaRoadmapVideo,
 } from "./lib/aylamed-content-hub.js";
 import {
@@ -76003,11 +76005,10 @@ async function aylaV210RegistryVideoInputs(student, destinations) {
           limit: pageSize,
           offset: sourceRows.length,
         });
-        sourceRows.push(...page.map((row) => ({
+        sourceRows.push(...page.map((row) => scopeAylaContentHubVideoForExam({
           ...row,
           sourceExamTrackId: normalizeAylaShellExamTrack(sourceExamTrack),
-          supplementalForExamTrackId: sourceExamTrack === examTrack ? null : normalizeAylaShellExamTrack(examTrack),
-        })));
+        }, examTrack)));
         if (page.length < pageSize) break;
       }
       rows.push(...sourceRows);
@@ -76039,7 +76040,7 @@ async function aylaV210EligibleVideos(db, student, { forRoadmap = false, forNote
   })
     .filter((row) => aylaVimeoAllowedFor(row, deliveryControls, destination))
     .map((row) => ({
-      ...row,
+      ...scopeAylaContentHubVideoForExam(row, examTrackId),
       sourceType: "legacy",
       deliveryDestinations: ["aylamed_content_hub", "aylamed_roadmap"],
       effectiveDelivery: resolveAylaVimeoDelivery(row, deliveryControls),
@@ -77846,26 +77847,27 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     : [];
   const previousPlanSnapshot = existing ? JSON.parse(JSON.stringify(existing)) : null;
   const previousAssignmentSnapshots = existingAssignments.map((row) => JSON.parse(JSON.stringify(row)));
-  const completedDiagnosticCanYieldToAdaptivePlan = Boolean(
-    existing
-    && String(existing.status || "").toLowerCase() === "completed"
-    && student.serverVerifiedBaseline === true
-    && existingAssignments.length
-    && existingAssignments.every((row) => ["diagnostic", "baseline_diagnostic"].includes(String(row.category || row.type || "").toLowerCase()) && String(row.status || "").toLowerCase() === "completed"),
-  );
-  if (existing && String(existing.status || "").toLowerCase() === "completed" && !completedDiagnosticCanYieldToAdaptivePlan) {
+  const verifiedDiagnosticPlanCanYield = aylaVerifiedDiagnosticPlanCanYield({
+    plan: existing,
+    assignments: existingAssignments,
+    student,
+    date,
+    today: aylaDateOnly(),
+  });
+  if (existing && String(existing.status || "").toLowerCase() === "completed" && !verifiedDiagnosticPlanCanYield) {
     const assignments = existingAssignments;
     return { plan: existing, assignments, reused: true, completedHistoryProtected: true };
   }
   aylaRequireExamPublished(db, aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam), "roadmap");
-  if (existing && !options.force) {
+  const forceRebuild = options.force || verifiedDiagnosticPlanCanYield;
+  if (existing && !forceRebuild) {
     const assignments = aylaValues(db, "aylaResourceAssignments").filter((row) => String(row.dailyPlanId) === String(existing.id));
     return { plan: existing, assignments, reused: true };
   }
   const planningStartedAt = Date.now();
   const planningTimings = {};
 
-  if (existing && options.force && String(date) >= aylaDateOnly() && String(existing.status || "").toLowerCase() !== "completed") {
+  if (existing && forceRebuild && String(date) >= aylaDateOnly() && String(existing.status || "").toLowerCase() !== "completed") {
     existing.status = "superseded";
     existing.supersededAt = aylaNow();
     existing.updatedAt = aylaNow();
