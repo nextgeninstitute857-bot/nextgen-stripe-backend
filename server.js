@@ -77673,6 +77673,8 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     const assignments = aylaValues(db, "aylaResourceAssignments").filter((row) => String(row.dailyPlanId) === String(existing.id));
     return { plan: existing, assignments, reused: true };
   }
+  const planningStartedAt = Date.now();
+  const planningTimings = {};
 
   if (existing && options.force && String(date) >= aylaDateOnly() && String(existing.status || "").toLowerCase() !== "completed") {
     existing.status = "superseded";
@@ -77710,6 +77712,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   const qbankEnabled = aylaV210StudentFeatureAllowed(db, student, "qbank");
   const cdmEnabled = AYLA_CURRENT_MCCQE_CDM_ENABLED;
   const storedRelevant = aylaV189RelevantResources(db, student, ["book", "reading", "revision_sheet", "vimeo_video", "video_transcript", "external_question", "external_qid_mapping", "internal_mcq", "flashcard", "assessment", "assessment_blueprint"]);
+  planningTimings.history_and_stored_ms = Date.now() - planningStartedAt;
   const [contentHub, library] = await Promise.all([
     contentHubEnabled
       ? aylaV210EligibleVideos(db, student, { forRoadmap: true })
@@ -77723,6 +77726,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       ? aylaV211EligibleReadings(db, student, { allowLegacyCrm: false })
       : Promise.resolve({ resources: [], warning: null }),
   ]);
+  planningTimings.content_inputs_ms = Date.now() - planningStartedAt - planningTimings.history_and_stored_ms;
   const allRelevant = [
     ...storedRelevant.filter((row) => !["book", "reading", "revision_sheet", "vimeo_video", "video_transcript"].includes(aylaV189ResourceType(row.type))),
     ...library.resources,
@@ -77756,6 +77760,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     continuityReferences,
   );
   const tutorProposal = await aylaV189TutorProposal(db, student, date, focusCandidates, allRelevant, options);
+  planningTimings.tutor_ms = Date.now() - planningStartedAt - planningTimings.history_and_stored_ms - planningTimings.content_inputs_ms;
   const questionVolumeFactor = tutorProposal.questionVolumeAdjustment === "reduce"
     ? 0.65
     : tutorProposal.questionVolumeAdjustment === "intensive"
@@ -77794,6 +77799,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
         }),
       })
     : { questions: [], destinationScope: "", warning: null };
+  planningTimings.qbank_ms = Date.now() - planningStartedAt - planningTimings.history_and_stored_ms - planningTimings.content_inputs_ms - planningTimings.tutor_ms;
 
   const plan = {
     id: aylaId("AYLA-DAY"),
@@ -78175,6 +78181,16 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   });
   aylaSetItem(db, "aylaDailyPlans", plan);
   assignments.forEach((row) => aylaSetItem(db, "aylaResourceAssignments", row));
+  const planningTotalMs = Date.now() - planningStartedAt;
+  if (planningTotalMs >= 2_000) {
+    console.log("AylaMed first-time roadmap timing", {
+      exam: aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam),
+      date,
+      total_ms: planningTotalMs,
+      ...planningTimings,
+      assembly_ms: Math.max(0, planningTotalMs - Object.values(planningTimings).reduce((sum, value) => sum + value, 0)),
+    });
+  }
   return { plan, assignments, reused: false };
 }
 
