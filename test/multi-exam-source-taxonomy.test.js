@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { adaptUniversalQuestion, validateAdaptedQuestion } from "../lib/content-import-adapter.js";
 import {
+  buildPlabQuestionTaxonomyRepair,
   multiExamSourceQuestionTaxonomy,
   multiExamSourceTaxonomySummary,
+  resolvePlabSourceDiscipline,
 } from "../lib/multi-exam-source-taxonomy.js";
 
 const question = (overrides = {}) => ({
@@ -89,9 +91,66 @@ test("an unknown AMBOSS system fails taxonomy validation instead of silently pub
   assert.deepEqual(result.errors, ["amboss_system_not_in_verified_map"]);
 });
 
+test("PLAB provider discipline ledgers resolve to controlled exam systems", () => {
+  const bmj = multiExamSourceQuestionTaxonomy(question({ sysId: 5657, subId: 0 }), {
+    examTrack: "plab",
+    sourceProvider: "BMJ OnExamination",
+  });
+  assert.deepEqual(bmj.errors, []);
+  assert.equal(bmj.taxonomy.labels.system, "Emergency Medicine");
+  assert.equal(bmj.taxonomy.labels.subsystem, "Emergency and Acute Care");
+  assert.equal(bmj.taxonomy.review_status, "source_evidence_verified_mapping");
+
+  const passMedicine = resolvePlabSourceDiscipline({ sysId: 1, subId: 3 }, {
+    sourceProvider: "PassMedicine",
+  });
+  assert.equal(passMedicine.system, "Clinical Ethics");
+
+  const canadaQbank = resolvePlabSourceDiscipline({ sysId: 16014, subId: 189 }, {
+    sourceProvider: "CanadaQBank",
+  });
+  assert.equal(canadaQbank.system, "Psychiatry");
+});
+
+test("PLAB repair changes only the hierarchy while preserving current topic labels", () => {
+  const repaired = buildPlabQuestionTaxonomyRepair(
+    { sysId: 5666, subId: 0, title: "Question - 1" },
+    {
+      system_key: "plab:medicine",
+      subsystem_key: "plab:medicine:clinical_capability",
+      topic_key: "plab:medicine:antenatal_care",
+      subtopic_key: "plab:medicine:antenatal_care:management",
+      labels: {
+        system: "Medicine",
+        subsystem: "Clinical Capability",
+        topic: "Antenatal care",
+        subtopic: "Management",
+      },
+    },
+    { sourceProvider: "BMJ OnExamination" },
+  );
+  assert.deepEqual(repaired.errors, []);
+  assert.equal(repaired.taxonomy.labels.system, "Obstetrics and Gynecology");
+  assert.equal(repaired.taxonomy.labels.subsystem, "Obstetrics and Gynecology");
+  assert.equal(repaired.taxonomy.labels.topic, "Antenatal care");
+  assert.equal(repaired.taxonomy.labels.subtopic, "Management");
+  assert.equal(repaired.taxonomy.review_status, "source_evidence_verified_mapping");
+});
+
+test("unknown PLAB provider IDs fail closed", () => {
+  const result = multiExamSourceQuestionTaxonomy(question({ sysId: 999999, subId: 999999 }), {
+    examTrack: "plab",
+    sourceProvider: "Unknown PLAB source",
+  });
+  assert.deepEqual(result.errors, ["plab_source_discipline_not_in_verified_map"]);
+});
+
 test("taxonomy summary covers every launch exam", () => {
   const summary = multiExamSourceTaxonomySummary();
   assert.deepEqual(summary.hierarchy, ["system", "subsystem", "topic", "subtopic"]);
   assert.deepEqual(summary.exams, ["usmle-step-1", "usmle-step-2", "usmle-step-3", "amc", "mccqe", "nclex", "plab"]);
   assert.equal(summary.amboss_systems, 18);
+  assert.equal(summary.plab_bmj_disciplines, 22);
+  assert.equal(summary.plab_passmedicine_disciplines, 12);
+  assert.equal(summary.plab_canadaqbank_disciplines, 6);
 });

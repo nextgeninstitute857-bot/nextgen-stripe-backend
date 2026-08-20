@@ -21,6 +21,7 @@ import {
   auditContentVideoMappings,
   applyAylaOriginalMcqRepair,
   applyGuardedUworldCleanup,
+  repairPlabTaxonomy,
   contentRegistryStatus,
   claimContentImportDraft,
   createContentBackgroundJobStore,
@@ -66,6 +67,7 @@ import {
   normalizeContentSourceProfile,
   resolveContentQbankStudentCollectionIds,
   previewAylaOriginalMcqRepair,
+  previewPlabTaxonomyRepair,
   previewStep1CollectionTaxonomyRepair,
   previewGuardedUworldCleanup,
   removeContentQuestionTaxonomyOverride,
@@ -39591,6 +39593,51 @@ app.get("/admin/crm/ai-training/content-registry/collections/:collectionId/taxon
       code: error.code || undefined,
       details: error.details || undefined,
     });
+  }
+});
+
+app.get("/api/ayla/admin/catalog/plab-taxonomy-repair/preview", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Pragma", "no-cache");
+  try {
+    await aylaRequireAdmin(req);
+    return aylaSendOk(res, {
+      read_only: true,
+      write_performed: false,
+      preview: await previewPlabTaxonomyRepair(),
+    });
+  } catch (error) {
+    return aylaSendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Failed to preview the PLAB taxonomy repair",
+      { ...(error.code ? { code: error.code } : {}), ...(error.details ? { details: error.details } : {}) },
+    );
+  }
+});
+
+app.post("/api/ayla/admin/catalog/plab-taxonomy-repair/apply", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Pragma", "no-cache");
+  try {
+    const admin = await aylaRequireAdmin(req);
+    const repair = await repairPlabTaxonomy({
+      expectedQuestionCount: req.body.expected_question_count || req.body.expectedQuestionCount,
+      auditFingerprint: req.body.audit_fingerprint || req.body.auditFingerprint,
+      confirmation: req.body.confirmation,
+      actorId: admin.user?.id || admin.method || "aylamed-admin",
+    });
+    return aylaSendOk(res, {
+      repair,
+      message: "PLAB provider-discipline taxonomy repaired without changing questions, answers, media, publication controls, or student history.",
+    });
+  } catch (error) {
+    return aylaSendError(
+      res,
+      error.statusCode || 500,
+      error.message || "Failed to apply the PLAB taxonomy repair",
+      { ...(error.code ? { code: error.code } : {}), ...(error.details ? { details: error.details } : {}) },
+    );
   }
 });
 
