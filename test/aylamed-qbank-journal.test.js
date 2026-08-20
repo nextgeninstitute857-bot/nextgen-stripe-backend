@@ -10,6 +10,7 @@ import {
   applyAylaQbankJournalRecords,
   clearAylaQbankJournal,
   createAylaDiagnosticJournalRecord,
+  isolateAylaDiagnosticAnswerState,
   readAylaQbankJournalRecords,
 } from "../lib/aylamed-qbank-journal.js";
 
@@ -62,6 +63,26 @@ test("diagnostic answer journal appends checksummed records and replays the late
   assert.equal(Object.keys(replay.db.aylaQbankSessions["diagnostic-session"].answers).length, 2);
   assert.deepEqual(Object.keys(replay.db.aylaQbankEvents).sort(), ["event-1", "event-2"]);
   assert.equal(replay.db.qbank_state_version, 8);
+});
+
+test("diagnostic answer mutation isolates only the session and event collections", () => {
+  const source = {
+    aylaStudents: { student: { id: "student", currentScore: 55 } },
+    aylaQbankSessions: { session: { id: "session", answers: {} } },
+    aylaQbankEvents: { event: { id: "event" } },
+    unrelatedLargeCollection: { keep: { id: "keep" } },
+  };
+  const isolated = isolateAylaDiagnosticAnswerState(source);
+  assert.notEqual(isolated, source);
+  assert.notEqual(isolated.aylaQbankSessions, source.aylaQbankSessions);
+  assert.notEqual(isolated.aylaQbankEvents, source.aylaQbankEvents);
+  assert.equal(isolated.aylaStudents, source.aylaStudents);
+  assert.equal(isolated.unrelatedLargeCollection, source.unrelatedLargeCollection);
+
+  isolated.aylaQbankSessions.session = { id: "session", answers: { question: { selectedAnswerId: 1 } } };
+  isolated.aylaQbankEvents.next = { id: "next" };
+  assert.deepEqual(source.aylaQbankSessions.session.answers, {});
+  assert.equal(source.aylaQbankEvents.next, undefined);
 });
 
 test("journal replay ignores an incomplete final append but preserves earlier fsynced answers", async (t) => {
@@ -168,6 +189,7 @@ test("server journals only baseline test answers and checkpoints on submission",
     /session\.purpose === "baseline_diagnostic" && session\.mode === "test"/,
   );
   assert.match(serverSource, /appendAylaQbankJournalRecord\(AYLA_QBANK_JOURNAL_PATH/);
+  assert.match(serverSource, /isolateAylaDiagnosticAnswerState\(source\)/);
   assert.match(serverSource, /clearAylaQbankJournal\(AYLA_QBANK_JOURNAL_PATH\)/);
   assert.match(serverSource, /const mutation = await mutateAylaDb\(async \(db\) => \{/);
 });

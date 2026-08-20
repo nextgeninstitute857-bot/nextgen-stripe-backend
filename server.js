@@ -509,6 +509,7 @@ import {
   createAylaPilotLoginGrant,
 } from "./lib/aylamed-pilot-login.js";
 import {
+  isolateAylaDiagnosticAnswerState,
   appendAylaQbankJournalRecord,
   applyAylaQbankJournalRecords,
   clearAylaQbankJournal,
@@ -43470,11 +43471,35 @@ app.get("/api/ayla/qbank/sessions/:sessionId", async (req, res) => {
 });
 
 app.post("/api/ayla/qbank/sessions/:sessionId/answers", async (req, res) => {
+  const routeStartedAt = Date.now();
+  let phaseStartedAt = routeStartedAt;
+  const phaseMs = {};
+  let timingPurpose = "unknown";
+  let timingMode = "unknown";
+  const finishPhase = (name) => {
+    const now = Date.now();
+    phaseMs[name] = now - phaseStartedAt;
+    phaseStartedAt = now;
+  };
+  const reportSlowAnswer = (outcome) => {
+    const totalMs = Date.now() - routeStartedAt;
+    if (totalMs < 2_000) return;
+    console.log("AylaMed QBank answer phase timing:", {
+      outcome,
+      purpose: timingPurpose,
+      mode: timingMode,
+      totalMs,
+      phaseMs,
+    });
+  };
   try {
     const auth = await aylaV189RequireStudent(req, String(req.body.student_id || req.body.studentId || ""), "qbank");
     const session = aylaOwnedQbankSession(auth.db, auth.user, auth.student, req.params.sessionId);
+    timingPurpose = String(session.purpose || "practice");
+    timingMode = String(session.mode || "tutor");
     aylaRequireQbankAccess(auth.db, auth.user, auth.student, session.examTrack);
     aylaRequireCurrentDiagnosticBlueprint(session);
+    finishPhase("authenticate_and_load_session");
     const questionRef = String(req.body.question_ref || req.body.questionRef || "").trim();
     const mapping = qbankSessionQuestion(session, questionRef);
     if (!mapping) return aylaSendError(res, 404, "Question does not belong to this QBank session");
@@ -43482,6 +43507,7 @@ app.post("/api/ayla/qbank/sessions/:sessionId/answers", async (req, res) => {
     if (!question) return aylaSendError(res, 409, "This question is no longer approved for QBank delivery");
     const selectedAnswerId = Number(req.body.selected_answer_id ?? req.body.selectedAnswerId);
     if (!question.answers.some((row) => Number(row.answer_id) === selectedAnswerId)) return aylaSendError(res, 400, "selected_answer_id is not a valid answer choice");
+    finishPhase("load_question");
 
     const mutateAnswer = session.purpose === "baseline_diagnostic" && session.mode === "test"
       ? mutateAylaDiagnosticAnswer
@@ -43536,9 +43562,12 @@ app.post("/api/ayla/qbank/sessions/:sessionId/answers", async (req, res) => {
       }
       return { ...recorded, adaptiveUpdate };
     });
+    finishPhase("persist_answer");
     const latestDb = await readAylaDb();
     const current = aylaOwnedQbankSession(latestDb, auth.user, auth.student, session.id);
     const renderedQuestion = await aylaPlayableQbankQuestion(latestDb, current, mapping, question);
+    finishPhase("render_answer");
+    reportSlowAnswer("success");
     return aylaSendOk(res, {
       session: sanitizeAylaQbankSession(current),
       question: renderedQuestion,
@@ -43546,6 +43575,8 @@ app.post("/api/ayla/qbank/sessions/:sessionId/answers", async (req, res) => {
       adaptive_update: mutation.adaptiveUpdate || null,
     });
   } catch (error) {
+    finishPhase("failed_phase");
+    reportSlowAnswer(`error_${Number(error.statusCode || 500)}`);
     return aylaSendError(res, error.statusCode || 500, error.message);
   }
 });
@@ -67173,15 +67204,20 @@ async function mutateAylaDiagnosticAnswer(mutator) {
     })
     .then(async () => {
       const source = aylaDbCache || await readAylaDbFromDisk();
-      const mutation = await mutateJsonCopyOnWrite(source, mutator);
-      const internal = mutation.result?.__diagnosticJournal || null;
-      const result = mutation.result && typeof mutation.result === "object"
-        ? { ...mutation.result }
-        : mutation.result;
+      // A diagnostic answer may update only its session and immutable event.
+      // Proxying the entire multi-product database made every authentication
+      // and entitlement scan walk thousands of unrelated proxied records.
+      // Clone only the writable collections; all other data remains a
+      // read-only snapshot and a thrown mutator leaves the live cache intact.
+      const current = isolateAylaDiagnosticAnswerState(source);
+      const mutationResult = await mutator(current);
+      const internal = mutationResult?.__diagnosticJournal || null;
+      const result = mutationResult && typeof mutationResult === "object"
+        ? { ...mutationResult }
+        : mutationResult;
       if (result && typeof result === "object") delete result.__diagnosticJournal;
       if (!internal) return result;
 
-      const current = mutation.value;
       const qbankStateVersion = Math.max(0, Number(current.qbank_state_version || 0)) + 1;
       const nextDb = {
         ...DEFAULT_AYLA_DB,
