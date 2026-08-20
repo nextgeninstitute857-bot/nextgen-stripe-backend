@@ -20571,7 +20571,11 @@ let crmReadInFlight = null;
 let crmReadOnlySnapshotCache = null;
 let crmReadOnlySnapshotCacheAt = 0;
 let crmReadOnlySnapshotInFlight = null;
-const CRM_READ_ONLY_SNAPSHOT_TTL_MS = Math.max(1000, Math.min(60000, Number(process.env.CRM_READ_ONLY_SNAPSHOT_TTL_MS || 5000)));
+// Personal Tutor consumes only administrator-approved, read-only success-story
+// strategies from this snapshot. CRM writes replace the cache immediately, so
+// a longer read TTL removes repeated multi-megabyte disk reads without hiding
+// an in-app edit or weakening the approval boundary.
+const CRM_READ_ONLY_SNAPSHOT_TTL_MS = Math.max(1000, Math.min(300000, Number(process.env.CRM_READ_ONLY_SNAPSHOT_TTL_MS || 300000)));
 
 function cloneCrmDbForRequest(db) {
   if (!db) return null;
@@ -78552,9 +78556,18 @@ function aylaV258TutorPathwayEstimate(
 }
 
 async function aylaV213PersonalTutorSnapshot(db, user, student, date = aylaDateOnly(), options = {}) {
+  const tutorSnapshotStartedAt = Date.now();
+  let tutorSnapshotLastMark = tutorSnapshotStartedAt;
+  const tutorSnapshotTimings = {};
+  const markTutorSnapshotTiming = (name) => {
+    const now = Date.now();
+    tutorSnapshotTimings[name] = now - tutorSnapshotLastMark;
+    tutorSnapshotLastMark = now;
+  };
   const cleanDate = String(date || aylaDateOnly()).slice(0, 10);
   const built = await aylaV189BuildDailyPlan(db, student, cleanDate, { force: false, ...(options.buildOptions || {}) });
   const safeBundle = aylaV189SanitizePlanBundle(db, built.plan, built.assignments);
+  markTutorSnapshotTiming("plan_ms");
   const recentPlans = aylaValues(db, "aylaDailyPlans")
     .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student))
     .filter((row) => !["cancelled", "superseded"].includes(String(row.status || "").toLowerCase()))
@@ -78632,7 +78645,9 @@ async function aylaV213PersonalTutorSnapshot(db, user, student, date = aylaDateO
     system: row.system,
     topic: row.topic,
   }));
+  markTutorSnapshotTiming("evidence_ms");
   const notebooks = await aylaV213TutorNotebooks(db, user, student);
+  markTutorSnapshotTiming("notebooks_ms");
   let lmsProgress = { linked: false, courses: [], weakSignals: [], read_only: true, lms_writes: false };
   try {
     const liveDb = await readLiveDb();
@@ -78649,12 +78664,14 @@ async function aylaV213PersonalTutorSnapshot(db, user, student, date = aylaDateO
   } catch (error) {
     console.warn("Personal Tutor continuing without optional read-only LMS progress:", error.message);
   }
+  markTutorSnapshotTiming("lms_ms");
   let successStoryStrategies = [];
   try {
     successStoryStrategies = await aylaSuccessStoryStrategiesForStudent(student, safeBundle.assignments, 3);
   } catch (error) {
     console.warn("Personal Tutor continuing without optional read-only success-story strategies:", error.message);
   }
+  markTutorSnapshotTiming("success_stories_ms");
   const pathwayEstimate = aylaV258TutorPathwayEstimate(
     db,
     student,
@@ -78663,6 +78680,7 @@ async function aylaV213PersonalTutorSnapshot(db, user, student, date = aylaDateO
   );
   const systemProgress = aylaV189SystemProgress(db, student);
   const warning = aylaV189BacklogWarning(db, student, cleanDate, systemProgress);
+  markTutorSnapshotTiming("decision_inputs_ms");
   const decision = buildAylaPersonalTutorDecision({
     date: cleanDate,
     student,
@@ -78690,6 +78708,7 @@ async function aylaV213PersonalTutorSnapshot(db, user, student, date = aylaDateO
       linkedLmsCourses: lmsProgress.courses?.length || 0,
     },
   });
+  markTutorSnapshotTiming("decision_ms");
   const recommendation = aylaRecommendation(student);
   const examTrackId = aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam);
   const startingReadinessReport = buildAylaStartingReadinessReport({
@@ -78700,6 +78719,16 @@ async function aylaV213PersonalTutorSnapshot(db, user, student, date = aylaDateO
       .filter((row) => aylaAdaptiveEvidenceMatchesStudent(row, student)),
     examDefinition: examTrackId ? AYLA_EXAM_REGISTRY[examTrackId] : {},
   });
+  markTutorSnapshotTiming("finalize_ms");
+  const tutorSnapshotTotalMs = Date.now() - tutorSnapshotStartedAt;
+  if (tutorSnapshotTotalMs >= 2000) {
+    console.warn("AylaMed Personal Tutor timing", {
+      exam: aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam),
+      date: cleanDate,
+      total_ms: tutorSnapshotTotalMs,
+      ...tutorSnapshotTimings,
+    });
+  }
   return {
     date: cleanDate,
     decision,

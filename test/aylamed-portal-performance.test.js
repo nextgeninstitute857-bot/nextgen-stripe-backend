@@ -74,6 +74,17 @@ test("system progress indexes each student evidence collection once", () => {
   }
 });
 
+test("Personal Tutor keeps approved CRM strategy reads warm and emits bounded timing telemetry", () => {
+  assert.match(server, /CRM_READ_ONLY_SNAPSHOT_TTL_MS \|\| 300000/);
+  const start = server.indexOf("async function aylaV213PersonalTutorSnapshot");
+  const end = server.indexOf("\nfunction aylaV213AtomicTutorContext", start);
+  assert.ok(start >= 0 && end > start);
+  const tutor = server.slice(start, end);
+  assert.match(tutor, /AylaMed Personal Tutor timing/);
+  assert.match(tutor, /success_stories_ms/);
+  assert.doesNotMatch(tutor, /studentId|student_id|email/);
+});
+
 test("roadmap journaling clones only its three writable collections", () => {
   const start = server.indexOf("async function mutateAylaRoadmapState");
   const end = server.indexOf("\nasync function readAylaCrmSnapshot", start);
