@@ -10,7 +10,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v272-whatsapp-webhook-verification"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v273-crm-whatsapp-runtime-credentials"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: statuses\.length \? "message_status" : "ignored_non_message"/);
   assert.ok(
@@ -77,4 +77,26 @@ test("integration edits preserve stored credentials when the UI submits blanks",
   assert.match(updateRoute, /\["api_key", "api_secret", "access_token"\]/);
   assert.match(updateRoute, /if \(!value \|\| value\.includes\("\*\*\*"\)\) delete payload\[key\]/);
   assert.match(updateRoute, /normalizeCrmCollectionPayload\("integrations", payload,/);
+});
+
+test("WhatsApp runtime sends prefer the saved CRM integration credentials", () => {
+  const resolver = server.slice(
+    server.indexOf("async function resolveWhatsAppCloudConfig"),
+    server.indexOf("async function sendWhatsAppCloudMessage"),
+  );
+  const sender = server.slice(
+    server.indexOf("async function sendWhatsAppCloudMessage"),
+    server.indexOf("async function sendTelegramMessage"),
+  );
+
+  assert.match(resolver, /getIntegrationByPlatform\(crmDb, "whatsapp"\)/);
+  assert.match(resolver, /selectedIntegration\?\.api_key/);
+  assert.match(resolver, /selectedIntegration\?\.access_token/);
+  assert.ok(
+    resolver.indexOf("selectedIntegration?.api_key") < resolver.indexOf("process.env.WHATSAPP_ACCESS_TOKEN"),
+    "the stored CRM token must be preferred over the legacy environment fallback",
+  );
+  assert.match(sender, /resolveWhatsAppCloudConfig\(\{ db, integration \}\)/);
+  assert.match(sender, /ngClearWhatsAppProviderBlock\(\)/);
+  assert.match(server, /caption: resolvedCaption,[\s\S]*?db,[\s\S]*?integration,/);
 });
