@@ -100,8 +100,8 @@ test("failed videos honor retry backoff so one provider error cannot block later
 test("server wires global playback reconciliation to startup, health and guarded admin controls", () => {
   assert.match(server, /const AYLA_VIMEO_PLAYBACK_BUILD = "v268-secure-embed-only-playback"/);
   assert.match(server, /allowEmbedOnlyPublicFallback: true/);
-  assert.match(server, /AYLA_VIMEO_PLAYBACK_BATCH_SIZE \|\| 75/);
-  assert.match(server, /AYLA_VIMEO_PLAYBACK_CONCURRENCY \|\| 3/);
+  assert.match(server, /AYLA_VIMEO_PLAYBACK_BATCH_SIZE \|\| 100/);
+  assert.match(server, /AYLA_VIMEO_PLAYBACK_CONCURRENCY \|\| 5/);
   assert.match(server, /async function aylaReconcileVimeoPlaybackBatch/);
   assert.match(server, /ngStartAylaVimeoPlaybackReconciliationScheduler\(\);/);
   assert.match(server, /app\.get\("\/api\/ayla\/admin\/resources\/vimeo-playback\/status"/);
