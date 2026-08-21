@@ -59,22 +59,47 @@ test("approved videos are selected for domain repair without changing learning m
   assert.equal(updated.topic, source.topic);
   assert.equal(updated.scoringAllowed, source.scoringAllowed);
   assert.equal(updated.approved, source.approved);
+
+  const fallback = applyAylaVimeoPlaybackConfig(source, {
+    embed_url: "https://player.vimeo.com/video/123456789",
+    privacy_embed: "public",
+    privacy_view: "disable",
+    allowed_domains: [],
+    fallback_mode: "secure_embed_only_public",
+  }, {
+    fingerprint,
+    domains: ["aylamedapp.com"],
+    updatedAt: "2026-08-21T12:00:00.000Z",
+  });
+  assert.deepEqual(fallback.vimeoEmbedDomains, []);
+  assert.deepEqual(fallback.vimeoEmbedRequestedDomains, ["aylamedapp.com"]);
+  assert.equal(fallback.vimeoEmbedPrivacyMode, "public");
+  assert.equal(fallback.vimeoEmbedFallbackMode, "secure_embed_only_public");
 });
 
 test("failed videos honor retry backoff so one provider error cannot block later batches", () => {
   const now = Date.parse("2026-08-21T12:00:00.000Z");
+  const fingerprint = aylaVimeoPlaybackDomainFingerprint(["aylamedapp.com"], "build-1");
   const deferred = activeVideo({
     vimeoEmbedReconcileNextAttemptAt: "2026-08-21T13:00:00.000Z",
+    vimeoEmbedReconcileFingerprint: fingerprint,
   });
-  assert.deepEqual(selectAylaVimeoPlaybackCandidates({ resources: [deferred], now }), []);
+  assert.deepEqual(selectAylaVimeoPlaybackCandidates({ resources: [deferred], fingerprint, now }), []);
   assert.deepEqual(selectAylaVimeoPlaybackCandidates({
     resources: [deferred],
+    fingerprint: aylaVimeoPlaybackDomainFingerprint(["aylamedapp.com"], "build-2"),
+    now,
+  }), ["123456789"]);
+  assert.deepEqual(selectAylaVimeoPlaybackCandidates({
+    resources: [deferred],
+    fingerprint,
     now: Date.parse("2026-08-21T14:00:00.000Z"),
   }), ["123456789"]);
 });
 
 test("server wires global playback reconciliation to startup, health and guarded admin controls", () => {
-  assert.match(server, /const AYLA_VIMEO_PLAYBACK_BUILD = "v267-global-vimeo-domain-playback"/);
+  assert.match(server, /const AYLA_VIMEO_PLAYBACK_BUILD = "v268-secure-embed-only-playback"/);
+  assert.match(server, /allowEmbedOnlyPublicFallback: true/);
   assert.match(server, /ngStartAylaVimeoPlaybackReconciliationScheduler\(\);/);
   assert.match(server, /app\.get\("\/api\/ayla\/admin\/resources\/vimeo-playback\/status"/);
   assert.match(server, /app\.post\("\/api\/ayla\/admin\/resources\/vimeo-playback\/reconcile"/);

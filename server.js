@@ -595,7 +595,7 @@ const AYLA_SINGLE_ROADMAP_BUILD = "v230-single-roadmap-execution";
 const AYLA_MARKETING_BUILD = "v231-readiness-sharing-referrals";
 const AYLA_VIMEO_CATALOG_BUILD = VIMEO_LIBRARY_CATALOG_BUILD;
 const AYLA_PRIVATE_PILOT_BUILD = "v251-live-pilot-flow-recovery";
-const AYLA_VIMEO_PLAYBACK_BUILD = "v267-global-vimeo-domain-playback";
+const AYLA_VIMEO_PLAYBACK_BUILD = "v268-secure-embed-only-playback";
 const AYLA_VIMEO_PLAYBACK_RECONCILIATION_ENABLED = String(
   process.env.AYLA_VIMEO_PLAYBACK_RECONCILIATION_DISABLED || "false",
 ).toLowerCase() !== "true";
@@ -84023,6 +84023,8 @@ async function ngRunAylaVimeoPlaybackReconciliation(
     const providerResult = await ensureVimeoEmbedDomains({
       videoIds: requestedIds,
       domains,
+      secureEmbedOnly: true,
+      allowEmbedOnlyPublicFallback: true,
     });
     const verifiedIds = new Set((providerResult.verified_videos || []).map(String));
     const failedIds = new Set((providerResult.failures || [])
@@ -84058,11 +84060,13 @@ async function ngRunAylaVimeoPlaybackReconciliation(
             });
             delete next.vimeoEmbedReconcileFailure;
             delete next.vimeoEmbedReconcileNextAttemptAt;
+            delete next.vimeoEmbedReconcileFingerprint;
           } else {
             next = {
               ...original,
               vimeoEmbedReconcileAttemptedAt: updatedAt,
               vimeoEmbedReconcileNextAttemptAt: retryAt,
+              vimeoEmbedReconcileFingerprint: fingerprint,
               vimeoEmbedReconcileFailure: (failuresByVideoId.get(videoId) || []).map((row) => ({
                 status: row.status || null,
                 domain: row.domain || null,
@@ -84100,6 +84104,9 @@ async function ngRunAylaVimeoPlaybackReconciliation(
       resource_rows_updated: persisted.resourceRowsUpdated,
       draft_rows_updated: persisted.draftRowsUpdated,
       privacy_mode_updates: providerResult.privacy_mode_updates || 0,
+      embed_only_view_updates: providerResult.embed_only_view_updates || 0,
+      secure_embed_only_fallback_videos:
+        providerResult.public_embed_fallback_videos?.length || 0,
       failure_statuses: aylaVimeoPlaybackFailureSummary(providerResult.failures),
       domains,
     };
