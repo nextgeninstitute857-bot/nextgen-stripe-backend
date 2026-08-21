@@ -12383,11 +12383,15 @@ app.post("/auth/logout", async (req, res) => {
 ;
 
 async function verifyGoogleIdToken(idToken) {
-  if (!process.env.GOOGLE_CLIENT_ID) { const e = new Error("GOOGLE_CLIENT_ID is missing"); e.statusCode = 500; throw e; }
+  const allowedClientIds = String(process.env.GOOGLE_CLIENT_IDS || process.env.GOOGLE_CLIENT_ID || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (!allowedClientIds.length) { const e = new Error("GOOGLE_CLIENT_ID is missing"); e.statusCode = 500; throw e; }
   if (!idToken) { const e = new Error("Google ID token is required"); e.statusCode = 400; throw e; }
   const response = await axios.get("https://oauth2.googleapis.com/tokeninfo", { params: { id_token: idToken } });
   const profile = response.data;
-  if (String(profile.aud) !== String(process.env.GOOGLE_CLIENT_ID)) { const e = new Error("Google token audience mismatch"); e.statusCode = 401; throw e; }
+  if (!allowedClientIds.includes(String(profile.aud))) { const e = new Error("Google token audience mismatch"); e.statusCode = 401; throw e; }
   if (String(profile.email_verified) !== "true") { const e = new Error("Google email is not verified"); e.statusCode = 401; throw e; }
   return { email: String(profile.email).toLowerCase(), name: profile.name || profile.given_name || String(profile.email).split("@")[0], picture: profile.picture || null, google_sub: profile.sub || null };
 }
