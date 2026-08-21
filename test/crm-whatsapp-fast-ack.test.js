@@ -67,3 +67,14 @@ test("WhatsApp webhook verification accepts the masked CRM integration secret", 
   assert.match(verifier, /expectedTokens\.has\(String\(token\)\)/);
   assert.match(verifier, /process\.env\.WHATSAPP_WEBHOOK_VERIFY_TOKEN/);
 });
+
+test("integration edits preserve stored credentials when the UI submits blanks", () => {
+  const updateRoute = server.slice(
+    server.indexOf('app.put("/admin/crm/integrations/:id"'),
+    server.indexOf('app.delete("/admin/crm/integrations/:id"'),
+  );
+
+  assert.match(updateRoute, /\["api_key", "api_secret", "access_token"\]/);
+  assert.match(updateRoute, /if \(!value \|\| value\.includes\("\*\*\*"\)\) delete payload\[key\]/);
+  assert.match(updateRoute, /normalizeCrmCollectionPayload\("integrations", payload,/);
+});

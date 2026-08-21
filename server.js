@@ -26132,7 +26132,13 @@ app.put("/admin/crm/integrations/:id", async (req, res) => {
     const index = integrations.findIndex((item) => String(item.id) === String(req.params.id));
     if (index < 0) return res.status(404).json({ success: false, error: "Integration not found" });
 
-    integrations[index] = normalizeCrmCollectionPayload("integrations", req.body || {}, integrations[index], integrations[index].brand_id);
+    const payload = { ...(req.body || {}) };
+    for (const key of ["api_key", "api_secret", "access_token"]) {
+      const value = String(payload[key] || "").trim();
+      if (!value || value.includes("***")) delete payload[key];
+    }
+
+    integrations[index] = normalizeCrmCollectionPayload("integrations", payload, integrations[index], integrations[index].brand_id);
     createIntegrationLog(db, { brand_id: integrations[index].brand_id, integration_id: integrations[index].id, platform: integrations[index].platform, action: "update_integration", status: "success", message: "Integration updated", metadata: { updated_by: user.id } });
     await writeCrmDb(db);
     res.json({ success: true, integration: sanitizeIntegrationForResponse(integrations[index]) });
