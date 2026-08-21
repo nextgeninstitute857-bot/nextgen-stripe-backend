@@ -2843,6 +2843,7 @@ function dateOnly(date) { return date.toISOString().slice(0, 10); }
 function uuid() { return crypto.randomUUID(); }
 
 const LMS_TIMED_ACCESS_LIMITS = Object.freeze({
+  minute: 60 * 24 * 365 * 10,
   hour: 24 * 365 * 10,
   day: 3650,
   month: 120,
@@ -2851,7 +2852,7 @@ const LMS_TIMED_ACCESS_LIMITS = Object.freeze({
 function ngNormalizeTimedAccessUnit(value = "day") {
   const unit = String(value || "day").trim().toLowerCase().replace(/s$/, "");
   if (!Object.hasOwn(LMS_TIMED_ACCESS_LIMITS, unit)) {
-    const error = new Error("Access unit must be hours, days, or months.");
+    const error = new Error("Access unit must be minutes, hours, days, or months.");
     error.statusCode = 400;
     throw error;
   }
@@ -2889,7 +2890,8 @@ function ngResolveTimedAccessWindow(payload = {}, startValue = new Date()) {
   }
 
   let expiresAt;
-  if (unit === "hour") expiresAt = new Date(startsAt.getTime() + value * 60 * 60 * 1000);
+  if (unit === "minute") expiresAt = new Date(startsAt.getTime() + value * 60 * 1000);
+  else if (unit === "hour") expiresAt = new Date(startsAt.getTime() + value * 60 * 60 * 1000);
   else if (unit === "day") expiresAt = new Date(startsAt.getTime() + value * 24 * 60 * 60 * 1000);
   else expiresAt = ngAddCalendarMonths(startsAt, value);
 
@@ -2902,6 +2904,67 @@ function ngResolveTimedAccessWindow(payload = {}, startValue = new Date()) {
     expires_at: expiresAt.toISOString(),
     access_days: Math.max(1, Math.ceil((expiresAt.getTime() - startsAt.getTime()) / (24 * 60 * 60 * 1000))),
   };
+}
+
+function ngAdminRecordedAmountCents(payload = {}) {
+  const rawCents = payload.amount_cents ?? payload.recorded_amount_cents;
+  const rawAmount = payload.amount ?? payload.amount_received ?? payload.recorded_amount;
+  const hasCents = rawCents !== undefined && rawCents !== null && String(rawCents).trim() !== "";
+  const hasAmount = rawAmount !== undefined && rawAmount !== null && String(rawAmount).trim() !== "";
+  if (!hasCents && !hasAmount) return null;
+
+  const numeric = Number(hasCents ? rawCents : rawAmount);
+  const cents = hasCents ? numeric : numeric * 100;
+  if (!Number.isFinite(cents) || cents < 0 || cents > 100_000_000) {
+    const error = new Error("Recorded amount must be between 0 and 1,000,000.");
+    error.statusCode = 400;
+    throw error;
+  }
+  return Math.round(cents);
+}
+
+function ngRecordAdminAccessPayment(db, { enrollment, user, plan = null, payload = {}, source = "admin_access" } = {}) {
+  const amountCents = ngAdminRecordedAmountCents(payload);
+  if (!amountCents) return null;
+
+  const now = nowIso();
+  const currency = String(payload.currency || plan?.currency || "usd").trim().toLowerCase();
+  if (!/^[a-z]{3}$/.test(currency)) {
+    const error = new Error("Currency must be a three-letter code such as USD.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const payment = {
+    id: uuid(),
+    enrollment_id: enrollment.id,
+    user_id: user?.id || enrollment.user_id || null,
+    student_id: user?.id || enrollment.user_id || null,
+    course_id: enrollment.course_id || null,
+    plan_id: plan?.id || enrollment.plan_id || null,
+    amount_cents: amountCents,
+    final_amount_cents: amountCents,
+    original_amount_cents: amountCents,
+    discount_cents: 0,
+    currency,
+    status: "completed",
+    payment_status: "completed",
+    payment_method: "admin_recorded",
+    source,
+    paid_at: now,
+    created_at: now,
+    updated_at: now,
+    metadata: { recorded_by_admin: true },
+  };
+
+  db.payments = db.payments || {};
+  db.payments[payment.id] = payment;
+  enrollment.recorded_amount_cents = amountCents;
+  enrollment.recorded_currency = currency;
+  enrollment.total_recorded_amount_cents = Math.max(0, Number(enrollment.total_recorded_amount_cents || 0) || 0) + amountCents;
+  enrollment.last_recorded_payment_id = payment.id;
+  enrollment.last_recorded_amount_at = now;
+  return payment;
 }
 function normalizeArray(value) {
   if (Array.isArray(value)) return value;
@@ -2921,7 +2984,7 @@ function buildPendingZoomId(courseId, label) { return `${PENDING_ZOOM_PREFIX}${c
 
 const AUTH_JWT_SECRET = process.env.AUTH_JWT_SECRET || "CHANGE_THIS_AUTH_SECRET_IN_RENDER_ENV";
 const AUTH_TOKEN_DAYS = 30;
-const LMS_ADMISSION_MODE = "open";
+const LMS_ADMISSION_MODE = "admin_only";
 
 const EXTERNAL_LIBRARY_URL = String(process.env.EXTERNAL_LIBRARY_URL || "").trim();
 const LEGACY_LMS_HOSTNAMES = new Set([
@@ -3831,6 +3894,11 @@ function sanitizeAdminEnrollment(enrollment, db) {
     access_duration: enrollment.access_duration || null,
     access_duration_value: enrollment.access_duration_value || null,
     access_duration_unit: enrollment.access_duration_unit || null,
+    recorded_amount_cents: Number(enrollment.recorded_amount_cents || 0) || 0,
+    total_recorded_amount_cents: Number(enrollment.total_recorded_amount_cents || 0) || 0,
+    recorded_currency: enrollment.recorded_currency || "usd",
+    last_recorded_payment_id: enrollment.last_recorded_payment_id || null,
+    last_recorded_amount_at: enrollment.last_recorded_amount_at || null,
     minimum_teaching_days: enrollment.minimum_teaching_days || plan?.minimum_teaching_days || null,
     program_teaching_days: enrollment.program_teaching_days || null,
     program_final_teaching_date: enrollment.program_final_teaching_date || null,
@@ -11759,6 +11827,13 @@ app.post("/auth/team-invite/accept", async (req, res) => {
 
 app.post("/auth/signup", async (req, res) => {
   try {
+    if (LMS_ADMISSION_MODE === "admin_only") {
+      return res.status(403).json({
+        success: false,
+        error: "New LMS accounts are created by an administrator. Sign in with the emailed credentials.",
+        admission_mode: LMS_ADMISSION_MODE,
+      });
+    }
     await ensureBootstrapAdmin();
 
     const email = normalizeEmail(req.body.email);
@@ -13146,7 +13221,7 @@ app.get("/demo/settings", async (req, res) => {
   res.json({
     success: true,
     admission_mode: LMS_ADMISSION_MODE,
-    demo_settings: { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) },
+    demo_settings: { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}), enabled: false },
   });
 });
 app.get("/admin/demo/settings", async (req, res) => { try { await requireAdmin(req); const db = await readLiveDb(); res.json({ success: true, admission_mode: LMS_ADMISSION_MODE, demo_settings: { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) } }); } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message }); } });
@@ -13591,6 +13666,15 @@ app.patch("/admin/enrollments/:enrollmentId", async (req, res) => {
     const now = new Date().toISOString();
     const requestedStatus = String(req.body.status || req.body.access_status || "").trim().toLowerCase();
     const demoSettings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
+    const hasTimedAccessUpdate = [
+      "access_duration",
+      "duration_value",
+      "access_value",
+      "access_days",
+      "access_unit",
+      "duration_unit",
+    ].some((field) => req.body[field] !== undefined && req.body[field] !== null && String(req.body[field]).trim() !== "");
+    let recordedPayment = null;
 
     // v190n: Converting a demo card to paid access must create/update the canonical
     // :paid record. The original demo record remains untouched as history. This
@@ -13640,15 +13724,15 @@ app.patch("/admin/enrollments/:enrollmentId", async (req, res) => {
           requestedPlanId: req.body.plan_id || enrollment.plan_id || "",
         });
 
-        if (!plan) {
+        if (!plan && !hasTimedAccessUpdate) {
           return res.status(400).json({
             success: false,
             error: "A paid enrollment requires an active paid plan. Create/activate a plan first.",
           });
         }
 
-        enrollment.plan_id = plan.id;
-        if (!enrollment.access_expires_at) {
+        if (plan) enrollment.plan_id = plan.id;
+        if (plan && !hasTimedAccessUpdate && !enrollment.access_expires_at) {
           ngApplyPaidAccessWindow(db, enrollment, {
             plan,
             paidAt: enrollment.paid_at || now,
@@ -13698,12 +13782,33 @@ app.patch("/admin/enrollments/:enrollmentId", async (req, res) => {
     if (req.body.access_expires_at !== undefined) { enrollment.access_expires_at = req.body.access_expires_at || null; enrollment.renewal_due_at = enrollment.access_expires_at; }
     if (req.body.access_days !== undefined) enrollment.access_days = req.body.access_days ? Number(req.body.access_days) : null;
 
+    if (hasTimedAccessUpdate) {
+      const accessWindowMode = String(req.body.access_window_mode || req.body.access_mode || "replace").trim().toLowerCase();
+      const currentExpiry = enrollment.access_expires_at ? new Date(enrollment.access_expires_at) : null;
+      const extendFromCurrent = accessWindowMode === "extend" && currentExpiry && !Number.isNaN(currentExpiry.getTime()) && currentExpiry.getTime() > Date.now();
+      const accessWindow = ngResolveTimedAccessWindow(req.body, extendFromCurrent ? currentExpiry : new Date());
+      enrollment.is_demo = false;
+      enrollment.access_granted = true;
+      enrollment.revoked_at = null;
+      enrollment.revoked_reason = null;
+      enrollment.paid_at = enrollment.paid_at || now;
+      enrollment.access_starts_at = extendFromCurrent ? (enrollment.access_starts_at || now) : accessWindow.starts_at;
+      enrollment.access_expires_at = accessWindow.expires_at;
+      enrollment.renewal_due_at = accessWindow.expires_at;
+      enrollment.access_days = accessWindow.access_days;
+      enrollment.access_duration = accessWindow.duration_label;
+      enrollment.access_duration_value = accessWindow.value;
+      enrollment.access_duration_unit = accessWindow.unit;
+      enrollment.access_expiry_mode = "admin_timed";
+      enrollment.billing_source = accessWindowMode === "extend" ? "admin_access_extension" : "admin_access_update";
+    }
+
     if (enrollment.access_granted !== false) {
       enrollment.revoked_at = null;
       enrollment.revoked_reason = null;
     }
 
-    if (enrollment.is_demo !== true && enrollment.access_granted !== false && req.body.access_expires_at === undefined) {
+    if (enrollment.is_demo !== true && enrollment.access_granted !== false && req.body.access_expires_at === undefined && !hasTimedAccessUpdate && enrollment.access_expiry_mode !== "admin_timed") {
       const plan = ngResolveAdminPaidPlan(db, {
         courseId: enrollment.course_id,
         requestedPlanId: enrollment.plan_id || "",
@@ -13733,6 +13838,14 @@ app.patch("/admin/enrollments/:enrollmentId", async (req, res) => {
       enrollment.user_name = String(req.body.user_name || req.body.student_name || req.body.name || enrollment.user_name || "Student").trim();
     }
 
+    recordedPayment = ngRecordAdminAccessPayment(db, {
+      enrollment,
+      user: db.users?.[String(enrollment.user_id)] || null,
+      plan: enrollment.plan_id ? db.plans?.[String(enrollment.plan_id)] || null : null,
+      payload: req.body,
+      source: hasTimedAccessUpdate ? "admin_access_upgrade" : "admin_payment_record",
+    });
+
     enrollment.updated_at = now;
     db.enrollments[enrollment.id] = enrollment;
 
@@ -13741,6 +13854,7 @@ app.patch("/admin/enrollments/:enrollmentId", async (req, res) => {
     res.json({
       success: true,
       enrollment: sanitizeAdminEnrollment(enrollment, db),
+      payment: recordedPayment ? sanitizePayment(recordedPayment, db) : null,
       source: "admin_enrollment_status_patch_v171",
     });
   } catch (error) {
@@ -14649,6 +14763,13 @@ function buildStudentDemoStatus(db, user) {
 
 app.post("/demo/start", async (req, res) => {
   try {
+    if (LMS_ADMISSION_MODE === "admin_only") {
+      return res.status(403).json({
+        success: false,
+        error: "Public demo access is disabled. Access is issued by an administrator.",
+        admission_mode: LMS_ADMISSION_MODE,
+      });
+    }
     const { user } = await getAuthenticatedUser(req);
     const db = await readLiveDb();
     const settings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
@@ -89389,6 +89510,13 @@ async function ngAdminMobileInviteLms(req, body = {}) {
   enrollment.billing_source = "admin_access_invitation";
   enrollment.invited_by_admin = true;
   enrollment.updated_at = nowIso();
+  const recordedPayment = ngRecordAdminAccessPayment(db, {
+    enrollment,
+    user,
+    plan,
+    payload: body,
+    source: "admin_access_invitation",
+  });
   let delivery = { attempted: false, sent: false, skipped: true, reason: "send_email_disabled" };
   if (body.send_email !== false) {
     delivery = await ngSendStudentAccessEmailSafe({
@@ -89403,6 +89531,8 @@ async function ngAdminMobileInviteLms(req, body = {}) {
       accessReport: {
         ...accessWindow,
         plan_name: plan?.name || "Manual LMS access",
+        amount_cents: recordedPayment?.amount_cents || 0,
+        currency: recordedPayment?.currency || "usd",
       },
       force: true,
     });
@@ -89417,6 +89547,7 @@ async function ngAdminMobileInviteLms(req, body = {}) {
     password_reset_required: true,
     user: sanitizeUser(user),
     enrollment: sanitizeAdminEnrollment(enrollment, db),
+    payment: recordedPayment ? sanitizePayment(recordedPayment, db) : null,
     access_report: {
       email,
       course_id: courseId,
@@ -89428,6 +89559,8 @@ async function ngAdminMobileInviteLms(req, body = {}) {
       duration_unit: accessWindow.unit,
       starts_at: accessWindow.starts_at,
       expires_at: accessWindow.expires_at,
+      amount_cents: recordedPayment?.amount_cents || 0,
+      currency: recordedPayment?.currency || "usd",
     },
     temporary_password: body.return_password === true ? temporaryPassword : undefined,
     email_delivery: delivery,

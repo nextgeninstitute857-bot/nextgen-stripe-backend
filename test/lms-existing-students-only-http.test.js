@@ -49,7 +49,7 @@ async function api(baseUrl, route, { method = "GET", token = "", body = null } =
   return { response, payload: await response.json() };
 }
 
-test("premium LMS restores public catalog, account access, and timed invitations", { timeout: 150_000 }, async () => {
+test("admin-only LMS keeps existing access and supports timed paid invitations", { timeout: 150_000 }, async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "lms-public-site-restored-"));
   const now = new Date().toISOString();
   const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
@@ -165,21 +165,25 @@ test("premium LMS restores public catalog, account access, and timed invitations
     await waitForHealth(baseUrl, child, output);
 
     const health = await api(baseUrl, "/health");
-    assert.equal(health.payload.lms_admission_mode, "open");
+    assert.equal(health.payload.lms_admission_mode, "admin_only");
 
     const signup = await api(baseUrl, "/auth/signup", {
       method: "POST",
       body: { name: "New Student", email: "new@example.com", password, passwordConfirm: password },
     });
-    assert.equal(signup.response.status, 200, JSON.stringify(signup.payload));
-    assert.equal(signup.payload.created, true);
+    assert.equal(signup.response.status, 403, JSON.stringify(signup.payload));
+    assert.equal(signup.payload.admission_mode, "admin_only");
 
     const plans = await api(baseUrl, "/plans");
     assert.equal(plans.response.status, 200, JSON.stringify(plans.payload));
     assert.equal(plans.payload.count, 1);
 
     const demoStart = await api(baseUrl, "/demo/start", { method: "POST", body: { course_id: "course" } });
-    assert.equal(demoStart.response.status, 401);
+    assert.equal(demoStart.response.status, 403);
+
+    const demoSettings = await api(baseUrl, "/demo/settings");
+    assert.equal(demoSettings.response.status, 200, JSON.stringify(demoSettings.payload));
+    assert.equal(demoSettings.payload.demo_settings.enabled, false);
 
     const demoLogin = await api(baseUrl, "/auth/login", {
       method: "POST",
@@ -198,7 +202,14 @@ test("premium LMS restores public catalog, account access, and timed invitations
       body: { email: users.active.email, password },
     });
     assert.equal(activeLogin.response.status, 200, JSON.stringify(activeLogin.payload));
-    assert.equal(activeLogin.payload.admission_mode, "open");
+    assert.equal(activeLogin.payload.admission_mode, "admin_only");
+
+    const authenticatedDemoStart = await api(baseUrl, "/demo/start", {
+      method: "POST",
+      token: activeLogin.payload.token,
+      body: { course_id: "course" },
+    });
+    assert.equal(authenticatedDemoStart.response.status, 403);
 
     const courses = await api(baseUrl, "/courses", { token: activeLogin.payload.token });
     assert.equal(courses.response.status, 200, JSON.stringify(courses.payload));
@@ -239,8 +250,9 @@ test("premium LMS restores public catalog, account access, and timed invitations
         email: "invited-doctor@example.com",
         course_id: "course",
         plan_id: "plan",
-        access_duration: 2,
-        access_unit: "hours",
+        access_duration: 5,
+        access_unit: "minutes",
+        amount: 12.5,
         send_email: false,
         return_password: true,
       },
@@ -251,12 +263,38 @@ test("premium LMS restores public catalog, account access, and timed invitations
     assert.equal(invitation.password_reset_required, true);
     assert.equal(invitation.user.must_change_password, true);
     assert.equal(invitation.enrollment.access_expiry_mode, "admin_timed");
-    assert.equal(invitation.enrollment.access_duration, "2 hours");
-    assert.equal(invitation.access_report.duration_unit, "hour");
+    assert.equal(invitation.enrollment.access_duration, "5 minutes");
+    assert.equal(invitation.enrollment.recorded_amount_cents, 1250);
+    assert.equal(invitation.enrollment.total_recorded_amount_cents, 1250);
+    assert.equal(invitation.access_report.duration_unit, "minute");
+    assert.equal(invitation.payment.amount_cents, 1250);
     assert.match(invitation.temporary_password, /^NG-[A-Za-z0-9_-]{8}-\d{4}$/);
-    const twoHourExpiry = new Date(invitation.access_report.expires_at).getTime();
-    assert.ok(twoHourExpiry > Date.now() + 119 * 60 * 1000);
-    assert.ok(twoHourExpiry < Date.now() + 121 * 60 * 1000);
+    const fiveMinuteExpiry = new Date(invitation.access_report.expires_at).getTime();
+    assert.ok(fiveMinuteExpiry > Date.now() + 4 * 60 * 1000);
+    assert.ok(fiveMinuteExpiry < Date.now() + 6 * 60 * 1000);
+
+    const upgradedAccess = await api(baseUrl, "/admin/enrollments/course%3Aexpired%3Apaid", {
+      method: "PATCH",
+      token: adminLogin.payload.token,
+      body: {
+        status: "active",
+        access_duration: 10,
+        access_unit: "minutes",
+        access_window_mode: "replace",
+        amount: 20,
+      },
+    });
+    assert.equal(upgradedAccess.response.status, 200, JSON.stringify(upgradedAccess.payload));
+    assert.equal(upgradedAccess.payload.enrollment.access_duration, "10 minutes");
+    assert.equal(upgradedAccess.payload.payment.amount_cents, 2000);
+    const upgradedExpiry = new Date(upgradedAccess.payload.enrollment.access_expires_at).getTime();
+    assert.ok(upgradedExpiry > Date.now() + 9 * 60 * 1000);
+    assert.ok(upgradedExpiry < Date.now() + 11 * 60 * 1000);
+
+    const dashboard = await api(baseUrl, "/admin/mobile/dashboard", { token: adminLogin.payload.token });
+    assert.equal(dashboard.response.status, 200, JSON.stringify(dashboard.payload));
+    assert.equal(dashboard.payload.lms.revenue.total_collected_cents, 3250);
+    assert.equal(dashboard.payload.lms.revenue.monthly_sales_cents, 3250);
 
     const invitedLogin = await api(baseUrl, "/auth/login", {
       method: "POST",
