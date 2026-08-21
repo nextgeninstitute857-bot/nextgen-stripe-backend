@@ -172,6 +172,48 @@ test("universal admin dashboard keeps LMS open and grants private minute-level A
     const fiveMinuteExpiry = new Date(aylaInvitation.enrollment.access_expires_at).getTime();
     assert.ok(fiveMinuteExpiry > Date.now() + 4 * 60000 && fiveMinuteExpiry < Date.now() + 6 * 60000);
 
+    const existingStudentInvite = await api(baseUrl, "/admin/mobile/invitations", {
+      method: "POST",
+      token,
+      body: { product: "aylamed", email: "ayla@example.com", name: "Emily", ayla_plan_id: "aylaMonthly", exam_track_id: "usmle_step_1", access_duration: 1, access_unit: "hour", return_password: true, send_email: false },
+    });
+    assert.equal(existingStudentInvite.response.status, 201, JSON.stringify(existingStudentInvite.payload));
+    const existingStudentResult = existingStudentInvite.payload.results[0];
+    assert.equal(existingStudentResult.student_created, false);
+    assert.equal(existingStudentResult.user.name, "Emily");
+    assert.equal(existingStudentResult.user.authVersion, 2);
+    assert.equal(existingStudentResult.password_reset_required, true);
+    assert.ok(existingStudentResult.temporary_password);
+    const existingEnrollmentExpiry = existingStudentResult.enrollment.access_expires_at;
+
+    const existingStudentLogin = await api(baseUrl, "/api/ayla/auth/login", {
+      method: "POST",
+      body: { email: "ayla@example.com", password: existingStudentResult.temporary_password },
+    });
+    assert.equal(existingStudentLogin.response.status, 200, JSON.stringify(existingStudentLogin.payload));
+    assert.equal(existingStudentLogin.payload.user.mustChangePassword, true);
+
+    const credentialsOnlyResend = await api(baseUrl, "/admin/mobile/invitations", {
+      method: "POST",
+      token,
+      body: { product: "aylamed", email: "ayla@example.com", name: "Emily", exam_track_id: "usmle_step_1", preserve_existing_access: true, access_duration: 99, access_unit: "hour", amount: 999, return_password: true, send_email: false },
+    });
+    assert.equal(credentialsOnlyResend.response.status, 201, JSON.stringify(credentialsOnlyResend.payload));
+    const resendResult = credentialsOnlyResend.payload.results[0];
+    assert.equal(resendResult.access_unchanged, true);
+    assert.equal(resendResult.payment, null);
+    assert.equal(resendResult.enrollment.id, existingStudentResult.enrollment.id);
+    assert.equal(resendResult.enrollment.access_expires_at, existingEnrollmentExpiry);
+    assert.ok(resendResult.temporary_password);
+    assert.notEqual(resendResult.temporary_password, existingStudentResult.temporary_password);
+
+    const resentStudentLogin = await api(baseUrl, "/api/ayla/auth/login", {
+      method: "POST",
+      body: { email: "ayla@example.com", password: resendResult.temporary_password },
+    });
+    assert.equal(resentStudentLogin.response.status, 200, JSON.stringify(resentStudentLogin.payload));
+    assert.equal(resentStudentLogin.payload.user.authVersion, 3);
+
     const upgraded = await api(baseUrl, `/api/ayla/enrollments/${encodeURIComponent(aylaInvitation.enrollment.id)}/extend`, {
       method: "POST",
       token,

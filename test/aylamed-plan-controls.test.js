@@ -34,6 +34,8 @@ test("feature patches replace or toggle a matrix and reject unknown controls", (
 
 test("matrix rows expose every control with deterministic versioning", () => {
   const row = aylaPlanFeatureMatrixRow({ id: "demo", name: "Demo", plan_type: "demo", is_demo: true, included_features: ["diagnostic", "roadmap"], feature_matrix_version: 4 });
+  assert.equal(row.id, "demo");
+  assert.equal(row.plan_id, "demo");
   assert.equal(row.feature_matrix_version, 4);
   assert.equal(row.features.diagnostic, true);
   assert.equal(row.features.roadmap, true);

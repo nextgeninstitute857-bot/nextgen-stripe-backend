@@ -89546,26 +89546,28 @@ async function ngAdminMobileInviteLms(req, body = {}) {
 
 async function ngAdminMobileSendAylaInvite({ db, user, temporaryPassword = "", accessReport = null, sendEmail = true } = {}) {
   if (!sendEmail) return { attempted: false, sent: false, skipped: true, reason: "send_email_disabled" };
-  let resetUrl = "";
-  if (!temporaryPassword) {
-    const rawToken = crypto.randomBytes(32).toString("hex");
-    const reset = { id: aylaId("AYLA-RESET"), userId: user.id, email: user.email, tokenHash: aylaV189HashToken(rawToken), expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), usedAt: null, createdAt: aylaNow() };
-    aylaSetItem(db, "aylaPasswordResetTokens", reset);
-    resetUrl = `https://aylamedapp.com/reset-password?token=${encodeURIComponent(rawToken)}`;
-  }
+  if (!temporaryPassword) throw new Error("A temporary password is required for an AylaMed access invitation");
+  const studentName = String(user.name || "Doctor").trim() || "Doctor";
+  const accessLine = accessReport?.preserved === true && accessReport?.expires_at
+    ? `Your AylaMed access is active until ${new Date(accessReport.expires_at).toUTCString()}.`
+    : `Your AylaMed access is ready for ${accessReport?.duration_label || "30 days"}.`;
   const lines = [
-    "Hi Doctor,",
+    `Hi ${studentName},`,
     "",
-    `Your AylaMed access is ready for ${accessReport?.duration_label || "30 days"}.`,
+    accessLine,
     "",
     "Open AylaMed:",
     "https://aylamedapp.com/login",
     "",
     "Email:",
     user.email,
+    "",
+    "Temporary password:",
+    temporaryPassword,
+    "",
+    "Sign in using the email address and temporary password above.",
+    "You must change this temporary password immediately after signing in.",
   ];
-  if (temporaryPassword) lines.push("", "Temporary password:", temporaryPassword, "", "Please change this password after signing in.");
-  else lines.push("", "Use your existing password. If needed, set a new password here:", resetUrl);
   lines.push("", "AylaMed Team");
   try {
     const provider = await sendEmailMessage({
@@ -89581,22 +89583,98 @@ async function ngAdminMobileSendAylaInvite({ db, user, temporaryPassword = "", a
   }
 }
 
+function ngAdminMobilePrepareAylaInviteUser(db, body = {}, email = "") {
+  let user = aylaFindUserByEmail(db, email);
+  const studentCreated = !user;
+  if (user && ["admin", "super_admin"].includes(String(user.role || "").toLowerCase())) {
+    throw Object.assign(new Error("Administrator accounts cannot be converted into student invitations"), { statusCode: 409 });
+  }
+  const temporaryPassword = ngGenerateTemporaryPassword();
+  const hashed = hashPassword(temporaryPassword);
+  const now = aylaNow();
+  if (!user) {
+    user = { id: aylaId("AYLA-USER"), email, name: String(body.name || email.split("@")[0]).trim(), phone: "", role: "student", status: "active", mustChangePassword: true, must_change_password: true, authVersion: 1, ...hashed, createdAt: now, updatedAt: now };
+  } else {
+    const suppliedName = String(body.name || "").trim();
+    user = {
+      ...user,
+      ...(suppliedName ? { name: suppliedName } : {}),
+      email,
+      status: "active",
+      mustChangePassword: true,
+      must_change_password: true,
+      authVersion: Math.max(1, Number(user.authVersion || 1)) + 1,
+      ...hashed,
+      updatedAt: now,
+    };
+  }
+  aylaSetItem(db, "aylaUsers", user);
+  return { user, temporaryPassword, studentCreated };
+}
+
+function ngAdminMobilePreservedAylaEnrollment(db, userId, body = {}) {
+  const requestedValue = aylaExamTrackFromPayload(body);
+  const requestedExamTrack = requestedValue === null || requestedValue === undefined || String(requestedValue).trim() === ""
+    ? null
+    : aylaCanonicalExamTrack(requestedValue);
+  if (requestedValue && !requestedExamTrack) throw Object.assign(new Error("A supported AylaMed exam track is required"), { statusCode: 400 });
+  return aylaValues(db, "aylaEnrollments")
+    .filter((enrollment) => String(enrollment.user_id || enrollment.ayla_user_id || "") === String(userId || ""))
+    .filter((enrollment) => aylaEnrollmentActive(enrollment))
+    .filter((enrollment) => !requestedExamTrack || aylaCanonicalExamTrack(enrollment.exam_track_id || enrollment.examTrackId || enrollment.exam_track || enrollment.exam) === requestedExamTrack)
+    .sort((left, right) => String(right.access_expires_at || "").localeCompare(String(left.access_expires_at || "")))[0] || null;
+}
+
+function ngAdminMobilePreservedAylaAccessReport(enrollment = {}) {
+  return {
+    value: Number(enrollment.access_duration_value || 0) || null,
+    unit: enrollment.access_duration_unit || null,
+    duration_label: enrollment.access_duration || "existing access period",
+    starts_at: enrollment.access_starts_at || enrollment.createdAt || null,
+    expires_at: enrollment.access_expires_at || null,
+    access_days: Math.max(1, Number(enrollment.access_days || 1) || 1),
+    preserved: true,
+  };
+}
+
 async function ngAdminMobileInviteAyla(body = {}) {
   const db = await readAylaDb();
   aylaEnsureSeedData(db);
   const email = aylaNormalizeEmail(body.email);
+  if (!email) throw Object.assign(new Error("Email is required"), { statusCode: 400 });
+  const existingUser = aylaFindUserByEmail(db, email);
+  const preserveExistingAccess = body.preserve_existing_access === true;
+  const preservedEnrollment = preserveExistingAccess && existingUser
+    ? ngAdminMobilePreservedAylaEnrollment(db, existingUser.id, body)
+    : null;
+  if (preserveExistingAccess && !preservedEnrollment) {
+    throw Object.assign(new Error("No active matching AylaMed enrollment was found to preserve"), { statusCode: 404 });
+  }
+  const { user, temporaryPassword, studentCreated } = ngAdminMobilePrepareAylaInviteUser(db, body, email);
+  if (preservedEnrollment) {
+    const accessReport = ngAdminMobilePreservedAylaAccessReport(preservedEnrollment);
+    preservedEnrollment.user_email = user.email;
+    preservedEnrollment.user_name = user.name || email;
+    const delivery = await ngAdminMobileSendAylaInvite({ db, user, temporaryPassword, accessReport, sendEmail: body.send_email !== false });
+    ngAdminMobileCredentialState(preservedEnrollment, delivery);
+    aylaSetItem(db, "aylaEnrollments", preservedEnrollment);
+    await aylaAccessLog(db, "admin_access_credentials_resent", { userId: user.id, planId: preservedEnrollment.plan_id, enrollmentId: preservedEnrollment.id, access_days: accessReport.access_days, duration: accessReport.duration_label, amount_cents: 0, email_sent: delivery.sent === true, access_expiry_preserved: true });
+    await writeAylaDb(db);
+    return {
+      product: "aylamed",
+      student_created: false,
+      password_reset_required: true,
+      access_unchanged: true,
+      user: aylaSanitizeUser(user),
+      enrollment: preservedEnrollment,
+      payment: null,
+      access_report: accessReport,
+      temporary_password: body.return_password === true ? temporaryPassword : undefined,
+      email_delivery: delivery,
+    };
+  }
   const accessWindow = aylaResolveAdminAccessWindow(body, new Date());
   const accessDays = accessWindow.access_days;
-  if (!email) throw Object.assign(new Error("Email is required"), { statusCode: 400 });
-  let user = aylaFindUserByEmail(db, email);
-  let temporaryPassword = "";
-  const studentCreated = !user;
-  if (!user) {
-    temporaryPassword = ngGenerateTemporaryPassword();
-    const hashed = hashPassword(temporaryPassword);
-    user = { id: aylaId("AYLA-USER"), email, name: String(body.name || email.split("@")[0]).trim(), phone: "", role: "student", status: "active", mustChangePassword: true, must_change_password: true, authVersion: 1, ...hashed, createdAt: aylaNow(), updatedAt: aylaNow() };
-    aylaSetItem(db, "aylaUsers", user);
-  }
   const storedPlan = body.ayla_plan_id || body.plan_id ? aylaGetItem(db, "aylaPlans", body.ayla_plan_id || body.plan_id) : null;
   if ((body.ayla_plan_id || body.plan_id) && !storedPlan) throw Object.assign(new Error("Selected AylaMed plan was not found"), { statusCode: 400 });
   const plan = aylaNormalizePlanPayload({
@@ -89627,7 +89705,7 @@ async function ngAdminMobileInviteAyla(body = {}) {
   aylaSetItem(db, "aylaEnrollments", enrollment);
   await aylaAccessLog(db, "admin_access_invitation", { userId: user.id, planId: plan.id, enrollmentId: enrollment.id, access_days: accessDays, duration: accessWindow.duration_label, amount_cents: payment?.amount_cents || 0, email_sent: delivery.sent === true });
   await writeAylaDb(db);
-  return { product: "aylamed", student_created: studentCreated, user: aylaSanitizeUser(user), enrollment, payment, access_report: accessWindow, email_delivery: delivery };
+  return { product: "aylamed", student_created: studentCreated, password_reset_required: true, user: aylaSanitizeUser(user), enrollment, payment, access_report: accessWindow, temporary_password: body.return_password === true ? temporaryPassword : undefined, email_delivery: delivery };
 }
 
 app.get("/admin/mobile/dashboard", async (req, res) => {
