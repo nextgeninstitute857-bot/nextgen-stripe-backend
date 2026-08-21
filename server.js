@@ -601,7 +601,11 @@ const AYLA_VIMEO_PLAYBACK_RECONCILIATION_ENABLED = String(
 ).toLowerCase() !== "true";
 const AYLA_VIMEO_PLAYBACK_BATCH_SIZE = Math.max(
   1,
-  Math.min(100, Number(process.env.AYLA_VIMEO_PLAYBACK_BATCH_SIZE || 25) || 25),
+  Math.min(100, Number(process.env.AYLA_VIMEO_PLAYBACK_BATCH_SIZE || 75) || 75),
+);
+const AYLA_VIMEO_PLAYBACK_CONCURRENCY = Math.max(
+  1,
+  Math.min(5, Number(process.env.AYLA_VIMEO_PLAYBACK_CONCURRENCY || 3) || 3),
 );
 const AYLA_VIMEO_PLAYBACK_INTERVAL_MS = Math.max(
   60_000,
@@ -613,6 +617,7 @@ const aylaVimeoPlaybackReconciliationState = {
   started: false,
   running: false,
   batchSize: AYLA_VIMEO_PLAYBACK_BATCH_SIZE,
+  concurrency: AYLA_VIMEO_PLAYBACK_CONCURRENCY,
   intervalMs: AYLA_VIMEO_PLAYBACK_INTERVAL_MS,
   lastStartedAt: null,
   lastFinishedAt: null,
@@ -83966,6 +83971,53 @@ function aylaVimeoPlaybackFailureSummary(failures = []) {
   }, {});
 }
 
+async function aylaReconcileVimeoPlaybackBatch(videoIds, domains) {
+  const rows = new Array(videoIds.length);
+  let cursor = 0;
+  await Promise.all(Array.from({
+    length: Math.min(AYLA_VIMEO_PLAYBACK_CONCURRENCY, videoIds.length),
+  }, async () => {
+    while (cursor < videoIds.length) {
+      const index = cursor;
+      cursor += 1;
+      rows[index] = await ensureVimeoEmbedDomains({
+        videoIds: [videoIds[index]],
+        domains,
+        secureEmbedOnly: true,
+        allowEmbedOnlyPublicFallback: true,
+      });
+    }
+  }));
+  return rows.reduce((combined, row) => ({
+    video_count: combined.video_count + Number(row.video_count || 0),
+    domain_count: Math.max(combined.domain_count, Number(row.domain_count || 0)),
+    requested: combined.requested + Number(row.requested || 0),
+    ensured: combined.ensured + Number(row.ensured || 0),
+    ensured_videos: [...combined.ensured_videos, ...(row.ensured_videos || [])],
+    verified_videos: [...combined.verified_videos, ...(row.verified_videos || [])],
+    privacy_mode_updates: combined.privacy_mode_updates + Number(row.privacy_mode_updates || 0),
+    embed_only_view_updates: combined.embed_only_view_updates + Number(row.embed_only_view_updates || 0),
+    public_embed_fallback_videos: [
+      ...combined.public_embed_fallback_videos,
+      ...(row.public_embed_fallback_videos || []),
+    ],
+    video_configs: [...combined.video_configs, ...(row.video_configs || [])],
+    failures: [...combined.failures, ...(row.failures || [])],
+  }), {
+    video_count: 0,
+    domain_count: 0,
+    requested: 0,
+    ensured: 0,
+    ensured_videos: [],
+    verified_videos: [],
+    privacy_mode_updates: 0,
+    embed_only_view_updates: 0,
+    public_embed_fallback_videos: [],
+    video_configs: [],
+    failures: [],
+  });
+}
+
 async function ngRunAylaVimeoPlaybackReconciliation(
   reason = "scheduled_vimeo_playback_reconciliation",
   { batchSize = AYLA_VIMEO_PLAYBACK_BATCH_SIZE } = {},
@@ -84020,12 +84072,7 @@ async function ngRunAylaVimeoPlaybackReconciliation(
       return complete;
     }
 
-    const providerResult = await ensureVimeoEmbedDomains({
-      videoIds: requestedIds,
-      domains,
-      secureEmbedOnly: true,
-      allowEmbedOnlyPublicFallback: true,
-    });
+    const providerResult = await aylaReconcileVimeoPlaybackBatch(requestedIds, domains);
     const verifiedIds = new Set((providerResult.verified_videos || []).map(String));
     const failedIds = new Set((providerResult.failures || [])
       .map((row) => String(row.video_id || ""))
