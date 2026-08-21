@@ -772,8 +772,6 @@ const allowedOrigins = [
   "https://www.live.nextgenusmlelms.com",
   "https://nextgenusmle.live",
   "https://www.nextgenusmle.live",
-  "https://lms.nextgenusmlelms.com",
-  "https://www.lms.nextgenusmlelms.com",
   "https://mediumslateblue-otter-394719.hostingersite.com",
   "https://paleturquoise-quail-255896.hostingersite.com",
   "https://aylamedapp.com",
@@ -2826,8 +2824,23 @@ const AUTH_JWT_SECRET = process.env.AUTH_JWT_SECRET || "CHANGE_THIS_AUTH_SECRET_
 const AUTH_TOKEN_DAYS = 30;
 const LMS_ADMISSION_MODE = "open";
 
-const EXTERNAL_LIBRARY_URL =
-  process.env.EXTERNAL_LIBRARY_URL || "https://lms.nextgenusmlelms.com";
+const EXTERNAL_LIBRARY_URL = String(process.env.EXTERNAL_LIBRARY_URL || "").trim();
+const LEGACY_LMS_HOSTNAMES = new Set([
+  "lms.nextgenusmlelms.com",
+  "www.lms.nextgenusmlelms.com",
+]);
+
+function ngSafeExternalLibraryBaseUrl(value = EXTERNAL_LIBRARY_URL) {
+  const candidate = String(value || "").trim();
+  if (!candidate) return "";
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol !== "https:" || LEGACY_LMS_HOSTNAMES.has(parsed.hostname.toLowerCase())) return "";
+    return parsed.href.replace(/\/$/, "");
+  } catch {
+    return "";
+  }
+}
 
 const EXTERNAL_LIBRARY_SSO_SECRET =
   process.env.EXTERNAL_LIBRARY_SSO_SECRET || AUTH_JWT_SECRET;
@@ -11904,6 +11917,14 @@ app.post("/admin/external-library/access-link", async (req, res) => {
       });
     }
 
+    const baseExternalUrl = ngSafeExternalLibraryBaseUrl();
+    if (!baseExternalUrl) {
+      return res.status(503).json({
+        success: false,
+        error: "The external video library is not connected. Ask an administrator to configure the current approved library URL.",
+      });
+    }
+
     const token = signExternalLibraryToken({
       user,
       enrollment: access.enrollment,
@@ -11912,7 +11933,6 @@ app.post("/admin/external-library/access-link", async (req, res) => {
       accessEndsAt: access.accessEndsAt,
     });
 
-    const baseExternalUrl = EXTERNAL_LIBRARY_URL.replace(/\/$/, "");
     const redirect_url = `${baseExternalUrl}/sso-login?token=${encodeURIComponent(token)}`;
     const verify_url = `${baseExternalUrl}/external-library/sso/verify?token=${encodeURIComponent(token)}`;
 
@@ -11965,6 +11985,14 @@ app.post("/student/external-library/access", async (req, res) => {
       });
     }
 
+    const baseExternalUrl = ngSafeExternalLibraryBaseUrl();
+    if (!baseExternalUrl) {
+      return res.status(503).json({
+        success: false,
+        error: "The external video library is not connected. Ask an administrator to configure the current approved library URL.",
+      });
+    }
+
     const pointsResult = access.course?.id && user.role === "student"
       ? ngRecordVideoLibraryOpenForStudent(db, {
           user,
@@ -11989,7 +12017,7 @@ app.post("/student/external-library/access", async (req, res) => {
       accessEndsAt: access.accessEndsAt,
     });
 
-    const redirect_url = `${EXTERNAL_LIBRARY_URL.replace(/\/$/, "")}/sso-login?token=${encodeURIComponent(token)}`;
+    const redirect_url = `${baseExternalUrl}/sso-login?token=${encodeURIComponent(token)}`;
 
     res.json({
       success: true,
@@ -47473,7 +47501,9 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
   const signals = ngAylaLatestMessageSignals(latestInboundText, history);
   const assets = typeof ngAylaGetSalesAssets === "function" ? ngAylaGetSalesAssets(db) : {};
   const timezone = assets.timezone || ngAylaSalesBrainValue(s, "booking_timezone", "EST");
-  const libraryLink = assets.uworldLink || ngAylaSalesBrainValue(s, "uworld_library_link", "https://lms.nextgenusmlelms.com/");
+  const libraryLink = ngSafeExternalLibraryBaseUrl(
+    assets.uworldLink || ngAylaSalesBrainValue(s, "uworld_library_link", ""),
+  );
   const hours = assets.hours || ngAylaSalesBrainValue(s, "uworld_library_hours", "150");
   const mcqs = assets.mcqs || ngAylaSalesBrainValue(s, "uworld_library_mcqs", "3000+");
   const mentorName = assets.mentorName || ngAylaSalesBrainValue(s, "uworld_library_mentor_name", "");
@@ -47500,7 +47530,9 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
     "- Soft program mention: when explaining the program generally, say it is a complete USMLE learning ecosystem that keeps the student guided, accountable, and encouraged. Keep feature explanations short, usually one line or less.",
     "- Never ignore a direct question like what is this/that. Clarify the previous Ayla message first, then continue the sales flow naturally.",
     `- UWorld Video Library pitch: NextGen has around ${hours} hours of detailed UWorld-style video teaching with ${mcqs} MCQs explained in depth. First Aid is integrated with every MCQ, so students learn the concept, FA point, correct/wrong options, option elimination, and weak-area correction. Tell them to click Try Demo for 2 days free access and first lecture of every chapter.`,
-    `- UWorld Library link to share when discussing the library/resource: ${libraryLink}`,
+    libraryLink
+      ? `- UWorld Library link to share when discussing the library/resource: ${libraryLink}`
+      : "- No approved external UWorld Library link is configured. Do not invent or share a legacy LMS link.",
     mentorName ? `- UWorld mentor context: ${mentorName}${mentorTitle ? `, ${mentorTitle}` : ""}, taught detailed UWorld-style content. Mention this naturally only when relevant, not in every reply.` : "",
     "- Mentor authority: refer to the USMLE-focused mentor team naturally. Do not invent or hard-code doctor names unless the admin saved them in AI Control.",
     "- Session recording: offer a recent session recording early so the student can judge the teaching quality and explanation style.",
