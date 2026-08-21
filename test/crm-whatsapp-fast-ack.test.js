@@ -10,7 +10,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v270-whatsapp-fast-ack-reliable-retry"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v271-whatsapp-provider-circuit-breaker"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: statuses\.length \? "message_status" : "ignored_non_message"/);
   assert.ok(
@@ -45,3 +45,12 @@ test("heartbeat scans recent pending leads instead of slicing the first stored l
   assert.doesNotMatch(runner, /\.slice\(0,/);
 });
 
+test("WhatsApp provider authorization failures open a shared circuit breaker", () => {
+  assert.match(server, /const NG_WHATSAPP_PROVIDER_BLOCK =/);
+  assert.match(server, /function ngWhatsAppProviderBlockStatus\(\)/);
+  assert.match(server, /function ngBlockWhatsAppProvider\(/);
+  assert.match(server, /text\.includes\("api access blocked"\)/);
+  assert.match(server, /provider_configuration_blocked: true/);
+  assert.match(server, /if \(!dryRun && ngWhatsAppProviderBlockStatus\(\)\.blocked\) return \[\]/);
+  assert.match(server, /whatsapp_provider_block: ngWhatsAppProviderBlockStatus\(\)/);
+});

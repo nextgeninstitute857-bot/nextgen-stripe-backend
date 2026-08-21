@@ -578,7 +578,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v270-whatsapp-fast-ack-reliable-retry";
+const CRM_AYLA_REPLY_BUILD = "v271-whatsapp-provider-circuit-breaker";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
@@ -11587,6 +11587,7 @@ app.get("/health", async (req, res) => {
       heartbeat_ticks: Number(NG_V116_HEARTBEAT_STATE?.ticks || 0),
       heartbeat_last_finish_at: NG_V116_HEARTBEAT_STATE?.last_finish_at || null,
       heartbeat_has_error: Boolean(NG_V116_HEARTBEAT_STATE?.last_error),
+      whatsapp_provider_block: ngWhatsAppProviderBlockStatus(),
     },
     lms_teaching_access_build: LMS_TEACHING_ACCESS_BUILD,
     lms_teaching_access: ngTeachingAccessReconciliationState,
@@ -30981,6 +30982,32 @@ function extractProviderError(error) {
   return data?.error?.message || data?.description || data?.message || JSON.stringify(data);
 }
 
+// Keep a provider-wide authorization failure from turning one expired/revoked
+// Meta credential into hundreds of repeated sends and AI generations. A Render
+// redeploy (which is required after replacing the token) clears this state.
+const NG_WHATSAPP_PROVIDER_BLOCK = {
+  blocked_until_ms: 0,
+  last_error_at: null,
+  last_error_category: null,
+};
+
+function ngWhatsAppProviderBlockStatus() {
+  const blockedUntilMs = Number(NG_WHATSAPP_PROVIDER_BLOCK.blocked_until_ms || 0);
+  return {
+    blocked: blockedUntilMs > Date.now(),
+    blocked_until: blockedUntilMs ? new Date(blockedUntilMs).toISOString() : null,
+    last_error_at: NG_WHATSAPP_PROVIDER_BLOCK.last_error_at,
+    last_error_category: NG_WHATSAPP_PROVIDER_BLOCK.last_error_category,
+  };
+}
+
+function ngBlockWhatsAppProvider(category = "provider_auth_or_permission", minutes = 15) {
+  NG_WHATSAPP_PROVIDER_BLOCK.blocked_until_ms = Date.now() + Math.max(1, Number(minutes || 15)) * 60000;
+  NG_WHATSAPP_PROVIDER_BLOCK.last_error_at = nowIso();
+  NG_WHATSAPP_PROVIDER_BLOCK.last_error_category = category;
+  return ngWhatsAppProviderBlockStatus();
+}
+
 function classifyWhatsAppProviderFailure(error, providerError = "") {
   const raw = JSON.stringify(error?.response?.data || {}) + " " + String(providerError || error?.message || "");
   const text = raw.toLowerCase();
@@ -31001,8 +31028,14 @@ function classifyWhatsAppProviderFailure(error, providerError = "") {
   if (text.includes("invalid") && (text.includes("phone") || text.includes("recipient") || text.includes("number") || text.includes("to"))) {
     return { category: "invalid_whatsapp_number", whatsapp_status: "invalid_whatsapp_number", retryable: false, suppress_until_fixed: true };
   }
-  if (text.includes("permission") || text.includes("access token") || text.includes("oauth") || status === 401 || status === 403) {
-    return { category: "provider_auth_or_permission", whatsapp_status: "provider_failed", retryable: true, suppress_until_fixed: false };
+  if (text.includes("api access blocked") || text.includes("permission") || text.includes("access token") || text.includes("oauth") || status === 401 || status === 403) {
+    return {
+      category: "provider_auth_or_permission",
+      whatsapp_status: "provider_blocked",
+      retryable: false,
+      suppress_until_fixed: false,
+      provider_configuration_blocked: true,
+    };
   }
   return { category: "provider_failed", whatsapp_status: "provider_failed", retryable: true, suppress_until_fixed: false };
 }
@@ -31294,6 +31327,27 @@ async function sendCrmMessage({
       throw error;
     }
 
+    if (cleanChannel === "whatsapp") {
+      const providerBlock = ngWhatsAppProviderBlockStatus();
+      if (providerBlock.blocked) {
+        return {
+          success: false,
+          sent: false,
+          channel: cleanChannel,
+          provider: cleanChannel,
+          to: finalTo,
+          status: "provider_blocked",
+          error: "WhatsApp provider authorization is temporarily blocked. Replace or re-authorize the Meta access token, then redeploy.",
+          category: "provider_auth_or_permission",
+          whatsapp_status: "provider_blocked",
+          retryable: false,
+          suppress_until_fixed: false,
+          provider_configuration_blocked: true,
+          blocked_until: providerBlock.blocked_until,
+        };
+      }
+    }
+
     const deliveryPayload = {
       lead,
       leadId: lead?.id || leadId || null,
@@ -31422,6 +31476,9 @@ async function sendCrmMessage({
   } catch (error) {
     const providerError = extractProviderError(error);
     const failure = cleanChannel === "whatsapp" ? classifyWhatsAppProviderFailure(error, providerError) : { category: "provider_failed", whatsapp_status: "provider_failed", retryable: true, suppress_until_fixed: false };
+    if (cleanChannel === "whatsapp" && failure.provider_configuration_blocked) {
+      ngBlockWhatsAppProvider(failure.category);
+    }
     const log = createMessageLog(db, {
       ...baseLog,
       status: "failed",
@@ -31460,6 +31517,7 @@ async function sendCrmMessage({
       whatsapp_status: failure.whatsapp_status,
       retryable: failure.retryable,
       suppress_until_fixed: failure.suppress_until_fixed,
+      provider_configuration_blocked: Boolean(failure.provider_configuration_blocked),
       log,
       provider_response: error.response?.data || null,
     };
@@ -49275,6 +49333,19 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
     fallback: "whatsapp",
   });
 
+  if (channel === "whatsapp") {
+    const providerBlock = ngWhatsAppProviderBlockStatus();
+    if (providerBlock.blocked) {
+      return {
+        lead_id: lead.id || lead.lead_id || null,
+        skipped: true,
+        reason: "whatsapp_provider_blocked",
+        provider_configuration_blocked: true,
+        blocked_until: providerBlock.blocked_until,
+      };
+    }
+  }
+
   const inboundFingerprint = ngAiAutoMessageFingerprint(latestInbound);
   const hasOutboundAfterInbound = ngHasOutboundAfterInbound(messages, latestInbound);
 
@@ -49440,7 +49511,9 @@ async function ngAylaRunPendingFullAiAuto({ db, brandId = null, limit = 10, sour
     const inbound = ngLatestInbound(messages);
     if (!inbound) continue;
     if (!force && ngHasOutboundAfterInbound(messages, inbound)) continue;
-    results.push(await ngAylaProcessFullAiAutoForLead({ db, lead, brandId, source, actorId, force }));
+    const result = await ngAylaProcessFullAiAutoForLead({ db, lead, brandId, source, actorId, force });
+    results.push(result);
+    if (result?.provider_configuration_blocked || result?.result?.provider_configuration_blocked) break;
   }
   return results;
 }
@@ -67185,6 +67258,7 @@ function ngV116NoReplyLeadEligible(db = {}, lead = {}) {
 }
 
 async function ngV116RunNoReplyLmsNurture({ db = {}, brandId = null, limit = 20, source = "backend_heartbeat_no_reply_nurture", dryRun = false } = {}) {
+  if (!dryRun && ngWhatsAppProviderBlockStatus().blocked) return [];
   const s = ngAylaPickSettings(db);
   const templateKey = normalizeTemplateLookupKey(s.no_reply_lms_nurture_template_key || s.demo_lms_activation_invite_template_key || "demo_lms_activation_invite");
   const leads = ngAffArray(db, "leads")
@@ -67241,6 +67315,7 @@ async function ngV116RunNoReplyLmsNurture({ db = {}, brandId = null, limit = 20,
       }
       lead.updated_at = nowIso();
       results.push({ lead_id: lead.id, sent, channel, to, template_key: channel === "whatsapp" ? templateKey : null, result });
+      if (result?.provider_configuration_blocked) break;
     } catch (error) {
       lead.no_reply_lms_nurture_status = "failed";
       lead.no_reply_lms_nurture_last_error = error.message;
