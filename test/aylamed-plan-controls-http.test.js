@@ -6,6 +6,7 @@ import fs from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 function passwordRecord(password, salt = "plancontrols1234plancontrols1234") {
   return { salt, password_hash: crypto.pbkdf2Sync(password, salt, 120000, 64, "sha512").toString("hex") };
@@ -156,7 +157,7 @@ test("v215 applies live plan/demo matrices without rewriting enrollments or lear
   const baseUrl = `http://127.0.0.1:${port}`;
   const output = [];
   const child = spawn(process.execPath, ["server.js"], {
-    cwd: path.resolve(new URL("..", import.meta.url).pathname),
+    cwd: fileURLToPath(new URL("..", import.meta.url)),
     env: {
       ...process.env,
       PORT: String(port), DATA_DIR: dataDir,
