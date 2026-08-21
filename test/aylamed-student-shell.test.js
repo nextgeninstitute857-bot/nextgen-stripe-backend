@@ -8,6 +8,7 @@ import {
   normalizeAylaShellExamTrack,
   resolveAylaExamFeatureEntitlement,
   resolveAylaStudentShell,
+  selectAylaReadyDashboardFallback,
 } from "../lib/aylamed-student-shell.js";
 
 const now = new Date("2026-07-19T12:00:00.000Z");
@@ -139,6 +140,25 @@ test("an explicit entitlement creates a setup-required dashboard without inventi
   assert.equal(shell.dashboards.length, 1);
   assert.equal(shell.active_dashboard.profile_status, "setup_required");
   assert.equal(shell.active_dashboard.student_id, null);
+});
+
+test("a stale setup-required selection falls back to an existing ready dashboard", () => {
+  const fallback = selectAylaReadyDashboardFallback({
+    active_dashboard: { exam_track_id: "usmle_step_1", student_id: null, profile_status: "setup_required" },
+    dashboards: [
+      { exam_track_id: "usmle_step_1", student_id: null, profile_status: "setup_required" },
+      { exam_track_id: "mccqe", student_id: "mccqe-student", profile_status: "ready" },
+    ],
+  });
+  assert.deepEqual(fallback, { exam_track_id: "mccqe", student_id: "mccqe-student", profile_status: "ready" });
+  assert.equal(selectAylaReadyDashboardFallback({
+    active_dashboard: { exam_track_id: "mccqe", student_id: "mccqe-student", profile_status: "ready" },
+    dashboards: [],
+  }), null);
+  assert.equal(selectAylaReadyDashboardFallback({
+    active_dashboard: { exam_track_id: "usmle_step_1", student_id: null, profile_status: "setup_required" },
+    dashboards: [{ exam_track_id: "mccqe", student_id: "mccqe-student", profile_status: "ready" }],
+  }, { forcedExamTrackId: "usmle_step_1" }), null);
 });
 
 test("invalid exams, foreign students, and student/exam mismatches never fall back", () => {
