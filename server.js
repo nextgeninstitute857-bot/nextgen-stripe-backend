@@ -35243,10 +35243,13 @@ function ngGenerateFallbackReply({ db, agent = null, lead = {}, messages = [], m
   const lastMessage = String(lastItem.text || lastItem.message || lastItem.message_text || lastItem.body || "").trim();
   const lowerLast = lastMessage.toLowerCase();
   const trainingContext = ngBuildTrainingContext(db, agent);
+  const salesAssets = typeof ngAylaGetSalesAssets === "function" ? ngAylaGetSalesAssets(db || {}) : {};
+  const demoDays = Number(salesAssets.demoDays || 7);
+  const demoLink = salesAssets.uworldLink || "https://nextgenusmle.live/demo";
 
   if (/recording|recordings|recorded|replay|session video|class video|lecture video/.test(lowerLast)) {
     return {
-      reply: "Yes Doctor, recordings are included. If you miss a live class, you can watch the recording later, revise the First Aid-linked teaching points, and complete the matching UWorld QID homework from the roadmap. I can also send you a recent recording/demo link so you can see the teaching style first.",
+      reply: `Yes Doctor, recordings are included. If you miss a live class, you can watch it later, revise the First Aid-linked teaching points, and complete the matching UWorld QID homework from the roadmap. Please take our free ${demoDays}-day demo too and check the quality yourself: ${demoLink}`,
       intent: "recording_question_answered",
       next_action: "send_recording_or_demo",
       confidence: 0.86,
@@ -35256,7 +35259,7 @@ function ngGenerateFallbackReply({ db, agent = null, lead = {}, messages = [], m
 
   if (/roadmap|plan|schedule|curriculum|system/.test(lowerLast)) {
     return {
-      reply: "Doctor, the Step 1 roadmap starts with Cardiology, then MSK, CNS, Repro, Endo, GIT, Renal, Pulmo, Immunology, Hematology, and Psychiatry. Each day connects the First Aid topic, mapped UWorld QIDs, live teaching, matching recording, homework, and revision/assessment task.",
+      reply: `Doctor, the Step 1 roadmap starts with Cardiology, then MSK, CNS, Repro, Endo, GIT, Renal, Pulmo, Immunology, Hematology, and Psychiatry. Each day connects the First Aid topic, mapped UWorld QIDs, live teaching, matching recording, homework, and revision/assessment task, so everything stays organised. Please take our free ${demoDays}-day demo and check the quality yourself: ${demoLink}`,
       intent: "roadmap_question_answered",
       next_action: "offer_demo_or_live_session",
       confidence: 0.86,
@@ -35266,7 +35269,7 @@ function ngGenerateFallbackReply({ db, agent = null, lead = {}, messages = [], m
 
   if (/uworld|u world|library|qbank|mcq|question/.test(lowerLast)) {
     return {
-      reply: "Doctor, our UWorld Video Library has around 150 hours of recorded MCQ teaching and 3000+ UWorld-style MCQs. The mentor explains the concept, First Aid connection, correct option, wrong options, and elimination approach together. You can check it through the LMS demo.",
+      reply: `Doctor, our UWorld Video Library has around 150 hours of recorded MCQ teaching and 3000+ UWorld-style MCQs. The mentor explains the concept, First Aid connection, correct option, wrong options, and elimination approach together. It is a very organised way to study. Please take our free ${demoDays}-day demo and check the quality yourself: ${demoLink}`,
       intent: "uworld_library_question_answered",
       next_action: "send_demo_link",
       confidence: 0.86,
@@ -35281,8 +35284,8 @@ function ngGenerateFallbackReply({ db, agent = null, lead = {}, messages = [], m
 
 We help students with live USMLE preparation, UWorld video library, structured roadmap, recordings, notes, and demo access.
 
-You can visit:
-https://nextgenusmle.live
+Please take our free ${demoDays}-day demo and check the quality yourself:
+${demoLink}
 
 Before I guide you, may I ask:
 1. Are you preparing for Step 1 or Step 2 CK?
@@ -35304,8 +35307,8 @@ To guide you properly, may I ask:
 2. When is your expected exam date?
 3. What is your main difficulty right now — UWorld, First Aid, NBME score, schedule, or revision?
 
-You can also check our LMS/demo access here:
-https://nextgenusmle.live`,
+Please take our free ${demoDays}-day demo and check the quality yourself:
+${demoLink}`,
     intent: lastMessage ? "lead_needs_guidance" : "general_followup",
     next_action: "qualify_lead",
     confidence: 0.78,
@@ -47613,6 +47616,7 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
   );
   const hours = assets.hours || ngAylaSalesBrainValue(s, "uworld_library_hours", "150");
   const mcqs = assets.mcqs || ngAylaSalesBrainValue(s, "uworld_library_mcqs", "3000+");
+  const demoDays = Number(assets.demoDays || 7);
   const mentorName = assets.mentorName || ngAylaSalesBrainValue(s, "uworld_library_mentor_name", "");
   const mentorTitle = assets.mentorTitle || ngAylaSalesBrainValue(s, "uworld_library_mentor_title", "");
   const recordingLink = assets.recordingLink || "";
@@ -47624,6 +47628,8 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
     "- Ayla is a warm, professional NextGen USMLE admissions counselor and sales closer, not a basic support chatbot and not a template sender.",
     "- WhatsApp templates are only a doorway to open/reopen conversation. After the student replies, Ayla must talk freely and naturally inside the 24-hour window.",
     "- Reply style must be human-like: warm opening when natural, short WhatsApp-style lines, no robotic FAQ tone, no passive 'feel free to ask' endings.",
+    "- Never expose internal approval, review, training, CRM, retrieval, or knowledge-grounding language to a student. Say 'our First Aid-integrated teaching' or 'our LMS material', not 'approved material' or 'approval'.",
+    "- When the student is learning about the programme, first explain its practical benefits in warm, enthusiastic language: one organised place for roadmap, live teaching, recordings, questions, weak-area correction, revision, notes, and accountability. Then invite them to take the free demo and include the direct demo link when one is available.",
     "- Conversation-first rule: answer the student’s latest question or concern first. Then move forward with ONE useful next step: live session, session recording, UWorld demo/library, YouTube lectures, exam date/weak area, and then Google Meet mentor consultation when ready.",
     "- Google Meet state lock: once the student has requested Google Meet, shared a preferred time, is waiting for the Google Meet link, or has a scheduled Google Meet, do NOT restart live-session/recording/UWorld/demo/mentor-offer flow. Only acknowledge, answer direct questions, collect/reschedule time, or remind them that the Google Meet link will be sent at meeting time.",
     "- Acknowledgements like thank you/thanks/ok/noted/great/perfect after booking must get a simple acknowledgement or no sales push. Never treat them as a new sales trigger.",
@@ -47636,7 +47642,7 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
     "- Resources rule: explain briefly that the ecosystem connects First Aid, Pathoma concepts, mapped UWorld QIDs, UWorld Video Library, recordings/notes, tasks, assessments for accountability, progress tracking, leaderboard encouragement, Community Q&A, and Study Partner support in one screen/place.",
     "- Soft program mention: when explaining the program generally, say it is a complete USMLE learning ecosystem that keeps the student guided, accountable, and encouraged. Keep feature explanations short, usually one line or less.",
     "- Never ignore a direct question like what is this/that. Clarify the previous Ayla message first, then continue the sales flow naturally.",
-    `- UWorld Video Library pitch: NextGen has around ${hours} hours of detailed UWorld-style video teaching with ${mcqs} MCQs explained in depth. First Aid is integrated with every MCQ, so students learn the concept, FA point, correct/wrong options, option elimination, and weak-area correction. Tell them to click Try Demo for 2 days free access and first lecture of every chapter.`,
+    `- UWorld Video Library pitch: NextGen has around ${hours} hours of detailed UWorld-style video teaching with ${mcqs} MCQs explained in depth. First Aid is integrated with every MCQ, so students learn the concept, FA point, correct/wrong options, option elimination, and weak-area correction. Invite them naturally to take the free ${demoDays}-day demo and share the direct link; do not say two days unless the configured offer is two days.`,
     libraryLink
       ? `- UWorld Library link to share when discussing the library/resource: ${libraryLink}`
       : "- No approved external UWorld Library link is configured. Do not invent or share a legacy LMS link.",
@@ -47648,7 +47654,7 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
     `- Scheduling timezone: always use ${timezone}. Do not mention Pakistan time unless the student asks for it.`,
     "- Price rule: if price/cost/package/payment is asked, answer that pricing depends on plan duration/support needed, do not dump recordings again, and move the lead to Google Meet/admin guidance. Ask preferred time in EST.",
     "- Failed/weak/confused rule: reassure strongly that the student is in the right place; the key is roadmap, mentor feedback, UWorld-style practice, and weak-area correction; then offer recording/live session/UWorld demo and Google Meet guidance when positive.",
-    "- Website/demo rule: send https://nextgenusmle.live/demo early when explaining the July 1 Marathon. Explain naturally that the demo shows the learning ecosystem/dashboard: roadmap, live classes, recordings, notes, tasks, accountability assessments, progress tracking, leaderboard, community, and Study Partner support.",
+    `- Website/demo rule: when a demo is the right next step, use your own natural wording and share ${libraryLink || "https://nextgenusmle.live/demo"}. The configured offer is ${demoDays} days. Explain only the benefits relevant to this person instead of reciting a fixed feature list.`,
     "- Google Meet booking: before booking, ask whether the student attended any Dr. Ahmad/NextGen live session before. If yes, ask when and what they thought. Also ask exam timeline and weak areas. Then offer Google Meet mentor consultation. If the student directly gives a time after a Meet offer, confirm once and alert admin once.",
     `- Current latest-message signals: ${JSON.stringify(signals)}`,
     s.sales_style_rule ? `- Admin sales style rule: ${ngAylaSettingsText(s.sales_style_rule, 800)}` : "",
@@ -47820,6 +47826,17 @@ function ngAylaRecordingTitle(assets = {}) {
 
 function ngAylaGetSalesAssets(db = {}) {
   const s = ngAylaPickSettings(db);
+  // Keep the offer in sync with the configured LMS demo.  The old sales copy
+  // hard-coded a two-day offer even though the LMS is configured for seven
+  // days, which made Ayla contradict the website.
+  const configuredDemoDays = Number(ngAylaFirstNonEmptySetting(
+    s,
+    ["demo_duration_days", "lms_demo_duration_days", "free_demo_days", "demo_days"],
+    "7"
+  ));
+  const demoDays = Number.isFinite(configuredDemoDays)
+    ? Math.max(1, Math.min(60, Math.round(configuredDemoDays)))
+    : 7;
   const timezone = ngAylaFirstNonEmptySetting(s, ["live_session_timezone", "booking_timezone"], "EST");
   const sessionTime = ngAylaFirstNonEmptySetting(
     s,
@@ -47902,6 +47919,7 @@ function ngAylaGetSalesAssets(db = {}) {
     recordingLink,
     recordingMentorName: ngAylaFirstNonEmptySetting(s, ["recording_mentor_name", "session_recording_mentor_name"], ""),
     uworldLink,
+    demoDays,
     youtubeLink,
     hours: ngAylaFirstNonEmptySetting(s, ["uworld_library_hours"], "150"),
     mcqs: ngAylaFirstNonEmptySetting(s, ["uworld_library_mcqs"], "3000+"),
@@ -47981,11 +47999,12 @@ function ngAylaIsShortNonInformational(text = "") {
 
 function ngAylaUworldDemoExplanation(assets = {}, opening = "Doctor, this is our UWorld Video Library demo.") {
   const link = assets.uworldLink ? `\n\nOpen this link and click “Try Demo”:\n${assets.uworldLink}` : "";
+  const demoDays = Number(assets.demoDays || 7);
   return `${opening}
 
-It has around ${assets.hours} hours of recorded MCQ teaching and ${assets.mcqs} UWorld-style MCQs. First Aid is integrated with each MCQ, so you learn the concept, FA point, correct option, wrong options, and elimination approach together.${link}
+It has around ${assets.hours} hours of recorded MCQ teaching and ${assets.mcqs} UWorld-style MCQs. First Aid is integrated with each MCQ, so you learn the concept, FA point, correct option, wrong options, and elimination approach together. It is a very organised way to study because your roadmap, teaching, practice, weak-area correction, and revision stay connected.${link}
 
-The demo gives 2 days of free access, and you can watch the first lecture of every chapter.`;
+Please take our free ${demoDays}-day demo and check the quality yourself. You can watch the first lecture of every chapter and see how the full programme works before deciding.`;
 }
 
 function ngAylaIsRoadmapQuestion(text = "") {
@@ -47999,15 +48018,23 @@ function ngAylaIsResourcesQuestion(text = "") {
 }
 
 function ngAylaRoadmapReply(assets = {}) {
+  const demoDays = Number(assets.demoDays || 7);
+  const demo = assets.uworldLink
+    ? `\n\nPlease take our free ${demoDays}-day demo and check the quality yourself:\n${assets.uworldLink}`
+    : "";
   return `Doctor, the Step 1 roadmap starts with Cardiology and moves system-wise like this: ${ngRoadmapSystemSequenceText()}.
 
-Inside the LMS, this roadmap connects each live topic with First Aid, mapped UWorld QIDs, recordings, notes, tasks, and accountability checks so you can follow everything in one place.`;
+Inside the LMS, this roadmap connects each live topic with First Aid, mapped UWorld QIDs, recordings, notes, tasks, and accountability checks so you can follow everything in one organised place. You always know what to study next and what needs revision.${demo}`;
 }
 
 function ngAylaResourcesReply(assets = {}) {
+  const demoDays = Number(assets.demoDays || 7);
+  const demo = assets.uworldLink
+    ? `\n\nPlease take our free ${demoDays}-day demo and check the quality yourself:\n${assets.uworldLink}`
+    : "";
   return `Doctor, the LMS is a complete USMLE learning ecosystem, not only a video page.
 
-In one place you get roadmap, live classes, recordings, UWorld Video Library, First Aid/UWorld mapping, notes, tasks, accountability assessments, progress tracking, leaderboard encouragement, Community Q&A, and Study Partner support.`;
+In one place you get roadmap, live classes, recordings, UWorld Video Library, First Aid/UWorld mapping, notes, tasks, accountability assessments, progress tracking, weak-area correction, Community Q&A, and Study Partner support. Everything is organised so your preparation is clear and consistent.${demo}`;
 }
 
 function ngAylaProgramWithRoadmapResourcesReply(assets = {}) {
@@ -48015,15 +48042,15 @@ function ngAylaProgramWithRoadmapResourcesReply(assets = {}) {
 
 Recent session recording:
 ${assets.recordingLink}` : "";
-  const demo = assets.uworldLink ? `
-
-UWorld Video Library / LMS demo:
-${assets.uworldLink}` : "";
+  const demoDays = Number(assets.demoDays || 7);
+  const demoLine = assets.uworldLink
+    ? `\n\nPlease take our free ${demoDays}-day demo and check the quality yourself:\n${assets.uworldLink}`
+    : "";
   return `Doctor, NextGen LMS is a complete USMLE learning ecosystem in one place.
 
-You get roadmap, live teaching, recordings, UWorld Video Library, First Aid/UWorld mapping, notes, tasks, accountability assessments, progress tracking, leaderboard encouragement, Community Q&A, and Study Partner support.
+You get a clear roadmap, live teaching, recordings, UWorld Video Library, First Aid/UWorld mapping, notes, tasks, accountability assessments, progress tracking, weak-area correction, Community Q&A, and Study Partner support. The benefit is that everything is organised together, so you always know what to study next, what you missed, and how to improve.
 
-The roadmap starts with Cardiology, then continues: ${ngRoadmapSystemSequenceText()}.${rec}${demo}`;
+The roadmap starts with Cardiology, then continues: ${ngRoadmapSystemSequenceText()}.${rec}${demoLine}`;
 }
 
 function ngAylaApplyGreetingOnce(reply = "", messages = []) {
@@ -48301,9 +48328,13 @@ What time works best for you in ${timezone}?`;
 }
 
 function ngAylaPostRecordingInterestQuestion(assets = {}) {
-  return `Please watch a few minutes and tell me if you like the teaching style.
+  const demoDays = Number(assets.demoDays || 7);
+  const demo = assets.uworldLink
+    ? `\n\nPlease take our free ${demoDays}-day demo as well and check the quality directly:\n${assets.uworldLink}`
+    : "";
+  return `Please watch a few minutes and see how clearly the topic is explained. Our aim is to keep the roadmap, lectures, questions, weak areas, and revision organised in one place.${demo}
 
-Are you interested in joining the live sessions, or would you like a Google Meet mentor consultation for guidance?`;
+Tell me your exam and timeline, and I’ll guide you to the right starting point.`;
 }
 
 
@@ -48731,32 +48762,6 @@ async function ngAylaWaitBeforeAutoSend(db = {}) {
   return ms;
 }
 
-function ngAylaShouldBypassHardSalesRouterForNaturalConversation({ latestInboundText = "", messages = [] } = {}) {
-  const text = String(latestInboundText || "").trim();
-  const lower = text.toLowerCase();
-  if (!lower) return false;
-
-  // Keep deterministic safety/booking guards for these.
-  if (/(stop|unsubscribe|do not message|don't message|dont message|remove me|wrong number|not interested)/i.test(text)) return false;
-  if (/(price|cost|fee|fees|package|payment|discount|charges|how much)/i.test(text)) return false;
-  if (/(google\s*meet|meet|call|book|schedule|connect me|talk to mentor|speak to mentor)/i.test(text)) return false;
-
-  // v96: real student questions must go to OpenAI, not canned router lines.
-  // This includes program explanation, roadmap, UWorld, resources, tutors, demo, LMS, recordings, live class, etc.
-  if (/[?؟]/.test(text)) return true;
-  if (/(program|course|details|detail|included|include|how it works|roadmap|study plan|curriculum|schedule|resources|resource|uworld|u world|qbank|mcq|library|demo|lms|recording|recordings|video|lecture|live session|class|teacher|tutor|mentor|dr\.?\s*ahmad|first aid|pathoma|assessment|nbme|marathon|120)/i.test(text)) return true;
-
-  // v107: acknowledgements like "that's great" were being treated as a sales trigger and Ayla repeated the same offer.
-  // Let OpenAI read the previous message and continue naturally instead of using the hard router.
-  if (/^(that'?s great|thats great|great|ok|okay|sounds good|perfect|nice|yes|yep|sure|alright|fine)$/i.test(text) && safeArray(messages).length > 1) return true;
-
-  // If the student writes more than a very short acknowledgement, let Ayla reason naturally.
-  const words = lower.split(/\s+/).filter(Boolean);
-  if (words.length >= 4) return true;
-
-  return false;
-}
-
 async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }) {
   const cleanMessages = safeArray(messages)
     .filter((m) => ngMessageText(m))
@@ -48768,26 +48773,34 @@ async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }
 
   const latestInboundForRouting = ngLatestInbound(cleanMessages);
   const latestInboundTextForRouting = ngMessageText(latestInboundForRouting || {});
-  const bypassHardRouter = ngAylaShouldBypassHardSalesRouterForNaturalConversation({
-    latestInboundText: latestInboundTextForRouting,
-    messages: cleanMessages,
-  });
+  const activeMeeting = db ? ngAylaFindActiveGoogleMeetAppointment(db, lead) : null;
+  const hasMeetingState = db ? ngAylaLeadGoogleMeetState(lead, activeMeeting) : false;
+  const needsProtectedControl =
+    /\b(stop|unsubscribe|do not message|don't message|dont message|remove me|wrong number|not interested)\b/i.test(latestInboundTextForRouting) ||
+    ngAylaIsPriceQuestion(latestInboundTextForRouting) ||
+    ngAylaIsDirectGoogleMeetRequest(latestInboundTextForRouting) ||
+    (hasMeetingState && ngAylaLooksLikeTimePreference(latestInboundTextForRouting));
 
-  const hardSalesReply = (!bypassHardRouter && db)
+  // Only protected CRM actions use deterministic code. Ordinary conversation
+  // bypasses the old scripted router completely and is written by Ayla below.
+  const backendControlDecision = (db && needsProtectedControl)
     ? ngAylaHardSalesRouter({ db, lead, messages: cleanMessages, channel })
     : null;
 
-  if (hardSalesReply?.reply) {
-    const hardReplyText = ngAylaApplyGreetingOnce(ngCleanAylaStudentReply(hardSalesReply.reply), cleanMessages);
-    if (!ngAylaIsRepeatOfRecentOutbound(hardReplyText, cleanMessages)) {
-      return {
-        reply: hardReplyText,
-        usage: {},
-        model: "nextgen-v58-safe-session-override-cors-fix",
-        hard_router: true,
-        intent: hardSalesReply.intent || "sales_asset_push",
-      };
-    }
+  // Opt-out is the only immediate fixed response: it must be honoured even if
+  // the AI provider is unavailable. All ordinary sales/support conversation is
+  // generated intelligently below.
+  if (backendControlDecision?.intent === "stop_suppression") {
+    return {
+      reply: ngAylaApplyGreetingOnce(
+        ngCleanAylaStudentReply(backendControlDecision.reply || "Understood Doctor. I’ll stop messaging you now."),
+        cleanMessages
+      ),
+      usage: {},
+      model: "nextgen-ayla-safety-control",
+      safety_control: true,
+      intent: backendControlDecision.intent,
+    };
   }
 
   if (!isAIConfigured()) {
@@ -48811,6 +48824,9 @@ async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }
 
   const backendSalesBrain = db ? ngBuildAylaBackendSalesBrain(db, lead, latestInboundText, history) : "";
   const latestSignals = ngAylaLatestMessageSignals(latestInboundText, history);
+  const backendActionContext = backendControlDecision?.intent
+    ? `The backend detected this operational intent: ${backendControlDecision.intent}. Any protected CRM state change has already been applied. Respond naturally based on the conversation and current lead state; do not copy a canned reply.`
+    : "No protected backend action was required for this message.";
 
   const systemPrompt = `You are Ayla, the NextGen USMLE Full AI Auto assistant replying to a medical student lead.
 
@@ -48819,15 +48835,18 @@ Backend-enforced identity:
 - You are not a generic support bot, not a passive FAQ bot, and not a WhatsApp template sender.
 - Templates only open/reopen WhatsApp conversations. Once the student replies, you speak freely, naturally, and intelligently.
 - Never repeat the approved first-message template after the student has replied. Do not answer normal program questions with canned template text. Use the conversation history and explain like a human counselor.
+- Never select from a fixed response script. Reason from the student's exact message, the conversation history, the known lead profile, current programme facts, and current links. Write a fresh response for this person.
 
 Non-negotiable reply style:
 - Keep replies short and readable by default. For UWorld/library/program explanations, use 3-5 short WhatsApp-style lines if needed.
 - Open warmly only once at the start of a new conversation. Do not start every reply with "Hi Doctor". After the first greeting, use "Doctor," / "Yes Doctor," / "Sure Doctor," or answer directly.
 - Never say "prompt response", "I appreciate your prompt response", or talk like you are responding to a prompt. Say "Thank you, Doctor" or continue naturally.
+- Never expose internal approval, review, CRM, training, retrieval, or knowledge-grounding language to a student. Do not say "approved material" or explain the approval process. Say "our First Aid-integrated teaching", "our LMS material", or "our recorded lecture" naturally.
 - The student’s latest message must be answered first. If they ask “what is this/that,” explain the previous Ayla message before continuing the sales flow. If they ask about tutors, roadmap, live sessions, recordings, UWorld, schedule, curriculum, or any normal program detail, answer that exact question first in plain human language.
 - Sound confident, persuasive, doctor-to-doctor, and human.
 - Do not write robotic paragraphs. Do not use markdown headings. Explain clearly when the student asks.
 - Do not end with weak generic filler like "feel free to ask" unless it is paired with a strong next step.
+- When explaining the programme, use warm enthusiasm and explain the practical benefit before asking for a conversion: the roadmap, live teaching, recordings, questions, weak-area correction, notes, revision and accountability are organised together so the student knows what to do next. Invite the student to experience the configured free demo in your own natural words and include the direct demo link when it is relevant and available.
 
 Sales behavior:
 - After answering the student’s latest message, continue the conversation naturally. There is no 2-message or 3-message limit; every new student inbound deserves a fresh contextual reply if no outbound exists after it.
@@ -48842,7 +48861,7 @@ Sales behavior:
 
 Conversation intelligence:
 - If lead is already in Google Meet requested/time collected/waiting for link/scheduled state, do not offer live sessions, recordings, UWorld demo, or Google Meet again. Acknowledge short replies and keep the lead waiting for the meeting/link.
-- If the student says thank you/thanks/ok/noted/great/perfect after Google Meet time is collected, reply only: “You’re welcome Doctor. We’ll share the Google Meet link at the meeting time.”
+- If the student says thank you/thanks/ok/noted/great/perfect after Google Meet time is collected, acknowledge naturally and briefly, while confirming that the meeting link will arrive at the correct time.
 - Do not ask for exam type again if already known.
 - Do not ask for exam date again if already known.
 - Do not ask for weak area again if already known.
@@ -48851,7 +48870,7 @@ Conversation intelligence:
 - Roadmap knowledge: if the student asks roadmap/study plan/curriculum, summarize: structured 120-day system-wise roadmap starting with Cardiology first and continuing through Psychiatry in this order: Cardiology, MSK, Central Nervous System, Reproductive, Endocrinology, GIT, Renal, Pulmonology, Immunology, Hematology, Psychiatry. Explain that each lecture connects First Aid topic + mapped UWorld QIDs from LMS + live teaching + matching recording + homework/tasks + notes/recordings + assessment/revision. Do not say MSK first. Do not explain each day unless asked.
 - Resources knowledge: if the student asks resources, say we use First Aid, UWorld-style QBank/MCQ discussion, Pathoma concepts, and NextGen assessments, connected with MCQ-solving, weak-area review, and exam strategy.
 - Softly mention roadmap/resources in general program explanation even when not asked, but keep it short.
-- Mention the UWorld Video Library naturally when it helps sell value: around 150 hours, 3000+ MCQs, First Aid integrated with every MCQ, MCQ approach, option elimination, concept connection, and weak-area correction. Explain Try Demo: 2 days free access and first lecture of every chapter.
+- Mention the UWorld Video Library naturally when it helps sell value: around 150 hours, 3000+ MCQs, First Aid integrated with every MCQ, MCQ approach, option elimination, concept connection, and weak-area correction. Invite the student to take the configured free demo and see the first lecture of every chapter; do not use a hard-coded demo duration.
 - Share the UWorld library link only as the UWorld Video Library/resource, not as a random website link.
 
 Hard safety/compliance:
@@ -48860,6 +48879,9 @@ Hard safety/compliance:
 - Do not claim official affiliation with USMLE, NBME, UWorld, First Aid, Pathoma, or Sketchy.
 
 ${backendSalesBrain}
+
+Protected backend action context:
+${backendActionContext}
 
 Enforced AI Control Center behavior rules and proof policy:
 ${commandContext || "No AI Control Center command rules found."}
@@ -49828,7 +49850,8 @@ function ngCommunityTrainingContext(db) {
     .map((item) => `Title: ${item.title || item.name || "Training"}\nCategory: ${item.category || "general"}\nContent: ${item.content || item.body || item.text || ""}`)
     .join("\n\n---\n\n");
 
-  const baseContext = useful || "Use NextGen USMLE rules: educational first, no spam, ask Step 1/Step 2, exam date, graduation year, main difficulty, then offer free 2-day LMS demo only after qualification.";
+  const demoDays = Number((typeof ngAylaGetSalesAssets === "function" ? ngAylaGetSalesAssets(db || {}) : {}).demoDays || 7);
+  const baseContext = useful || `Use NextGen USMLE rules: educational first, no spam, ask Step 1/Step 2, exam date, graduation year, main difficulty, then offer the free ${demoDays}-day LMS demo only after qualification.`;
   const learningContext = ngLearningRulesPromptBlock(db, "community");
   return [learningContext, baseContext].filter(Boolean).join("\n\n---\n\n");
 }
@@ -49852,7 +49875,8 @@ function ngBuildCommunityFallbackContent(body = {}) {
   }
 
   if (type === "demo_invite_soft") {
-    return `For serious ${exam} students:\n\nIf you are confused about UWorld, First Aid integration, NBME scores, or a clear daily schedule, you can request the free 2-day NextGen LMS demo.\n\nNo pressure — first tell us your exam date and main difficulty so we can guide you properly.`;
+    const demoDays = Number(body.demo_days || 7);
+    return `For serious ${exam} students:\n\nIf you are confused about UWorld, First Aid integration, NBME scores, or a clear daily schedule, please take the free ${demoDays}-day NextGen LMS demo and check the quality yourself: https://nextgenusmle.live/demo\n\nTell us your exam date and main difficulty so we can guide you properly.`;
   }
 
   if (type === "weekly_plan") {
@@ -50261,7 +50285,7 @@ app.post("/admin/crm/community-intelligence/opportunities/:id/qualify", async (r
       budget_level: req.body?.budget_level ?? opp.budget_level ?? "",
       interest_level: req.body?.interest_level ?? opp.interest_level ?? "medium",
       preferred_contact_method: req.body?.preferred_contact_method ?? opp.preferred_contact_method ?? opp.platform ?? "telegram",
-      recommended_offer: req.body?.recommended_offer ?? opp.recommended_offer ?? "Free 2-day LMS demo",
+      recommended_offer: req.body?.recommended_offer ?? opp.recommended_offer ?? "Free 7-day LMS demo",
       notes: req.body?.notes ?? opp.notes ?? "",
       status: "qualified",
       qualified_at: nowIso(),
@@ -50349,7 +50373,7 @@ app.post("/admin/crm/community-intelligence/opportunities/:id/handoff", async (r
       priority: opp.priority || req.body?.priority || "high",
       reason: req.body?.reason || "Qualified community lead ready for official NextGen follow-up",
       handoff_summary: req.body?.handoff_summary || `Community lead from ${opp.platform || "community"}: ${ngCommunityOpportunityText(opp).slice(0, 600)}`,
-      recommended_next_action: req.body?.recommended_next_action || "Official NextGen account should invite to free 2-day LMS demo or live session, then sales closer follows up.",
+      recommended_next_action: req.body?.recommended_next_action || "Official NextGen account should invite the lead to the free 7-day LMS demo or a live session, then the sales closer follows up.",
       lead_status: req.body?.lead_status || "hot_lead",
       created_by: user.id,
     });
@@ -50393,7 +50417,7 @@ app.post("/admin/crm/community-intelligence/opportunities/:id/send-to-live-conve
       session_title: req.body?.session_title || "",
       plan_id: req.body?.plan_id || null,
       plan_name: req.body?.plan_name || "",
-      demo_offer: req.body?.demo_offer || "Free 2-day LMS demo",
+      demo_offer: req.body?.demo_offer || "Free 7-day LMS demo",
       invite_status: req.body?.invite_status || "draft_needs_approval",
       status: "draft",
       created_by: user.id,
@@ -50401,7 +50425,7 @@ app.post("/admin/crm/community-intelligence/opportunities/:id/send-to-live-conve
 
     ngCommunityArray(db, "live_session_invites").unshift(invite);
 
-    const draftText = `Hi Doctor, based on your exam timeline and difficulty, the official NextGen USMLE team can give you free 2-day LMS demo access and guide you with UWorld + First Aid integrated preparation. Would you like the demo link?`;
+    const draftText = `Hi Doctor, based on your exam timeline and difficulty, please take our free 7-day LMS demo and check the quality yourself. You’ll see how our organised roadmap, live teaching, recordings, UWorld + First Aid integration, weak-area correction, and revision support work together: https://nextgenusmle.live/demo`;
 
     const draft = withTimestamps({
       id: uuid(),
@@ -54304,7 +54328,7 @@ const NG_WEEKLY_CONTENT_CALENDAR = [
   {
     day: "sunday",
     content_type: "soft_demo_invite",
-    label: "Soft free 2-day LMS demo invite",
+    label: "Soft free 7-day LMS demo invite",
     split_answer: false,
     default_time: "10:00",
   },
@@ -54854,7 +54878,7 @@ function ngContentBuildFallbackFromSources({ type = "daily_mcq", topic = "Medica
   }
 
   if (family === "invite") {
-    return `${profile.label} Free Demo Invitation\n\nIf you are preparing for ${profile.label}, you can request a free 2-day LMS demo to see whether the teaching style, roadmap, and community support fit your preparation. Join for a short session first, then decide whether you want guidance from a mentor.`;
+    return `${profile.label} Free Demo Invitation\n\nIf you are preparing for ${profile.label}, please take our free 7-day LMS demo and check the quality yourself. You can see the organised teaching style, roadmap, recordings, community support, and mentor guidance before deciding: https://nextgenusmle.live/demo`;
   }
 
   return `${profile.label} Education Post\n\nTopic: ${cleanTopic}\n\nKey idea: focus on the exact exam task for ${profile.label}.\n\nWhy it matters: students often miss this topic when they memorize facts without connecting them to the clinical clue, safety issue, screening rule, or management decision.\n\nHow to review today: summarize the core point, do one related practice question, and write down the distractor that confused you most.`;
@@ -59322,8 +59346,11 @@ function ngFindOrCreateWebsiteLead(db, { sessionId, visitor = {}, message = "", 
   return lead;
 }
 
-function ngWebsiteAylaFallbackReply(message = "") {
+function ngWebsiteAylaFallbackReply(message = "", db = {}) {
   const text = String(message || "").toLowerCase().trim();
+  const salesAssets = typeof ngAylaGetSalesAssets === "function" ? ngAylaGetSalesAssets(db || {}) : {};
+  const demoDays = Number(salesAssets.demoDays || 7);
+  const demoLink = salesAssets.uworldLink || "https://nextgenusmle.live/demo";
 
   if (/^(hi|hello|hey|salam|assalam)$/.test(text)) {
     return "Hi Doctor, welcome to NextGen USMLE. Are you preparing for Step 1, and when are you planning your exam?";
@@ -59334,11 +59361,11 @@ function ngWebsiteAylaFallbackReply(message = "") {
   }
 
   if (/recording|recordings|recorded|replay|session video|class video|lecture video/.test(text)) {
-    return "Yes Doctor, recordings are part of the support. After live class, students can use the recording to revise the teaching, review the First Aid-linked points, and complete the matching UWorld QID homework. This helps even if you miss a live session.";
+    return `Yes Doctor, recordings are part of the support. After live class, students can use the recording to revise the teaching, review the First Aid-linked points, and complete the matching UWorld QID homework. This helps even if you miss a live session. Please take our free ${demoDays}-day demo too and check the quality yourself: ${demoLink}`;
   }
 
-  if (/demo|trial|free|try|2\s*day|two\s*day/.test(text)) {
-    return "Yes Doctor, the 2-day LMS demo lets you see how the system works before enrolling. You can check the dashboard, roadmap style, live-class flow, and sample video-library access. Open the LMS link and click Try Demo.";
+  if (/demo|trial|free|try|2\s*day|two\s*day|7\s*day|seven\s*day/.test(text)) {
+    return `Yes Doctor, please take our free ${demoDays}-day demo and check the quality yourself. You can see the organised dashboard, roadmap, live-class flow, recordings, notes, and sample video-library access here: ${demoLink}`;
   }
 
   if (/live|session|class|1\s*pm|time|today|zoom|join/.test(text)) {
@@ -59346,18 +59373,18 @@ function ngWebsiteAylaFallbackReply(message = "") {
   }
 
   if (/roadmap|plan|schedule|study|curriculum|system/.test(text)) {
-    return "Doctor, the Step 1 roadmap starts with Cardiology, then MSK, CNS, Reproductive, Endocrinology, GIT, Renal, Pulmonology, Immunology, Hematology, and Psychiatry. Each lecture connects First Aid topics, mapped UWorld QIDs, live teaching, recordings, homework, and revision tasks.";
+    return `Doctor, the Step 1 roadmap starts with Cardiology, then MSK, CNS, Reproductive, Endocrinology, GIT, Renal, Pulmonology, Immunology, Hematology, and Psychiatry. Each lecture connects First Aid topics, mapped UWorld QIDs, live teaching, recordings, homework, and revision tasks, so everything stays organised. Please take our free ${demoDays}-day demo and check the quality yourself: ${demoLink}`;
   }
 
   if (/uworld|u world|library|qbank|mcq|question/.test(text)) {
-    return "Doctor, the UWorld Video Library has around 150 hours of recorded MCQ teaching and 3000+ UWorld-style MCQs. First Aid is integrated with each MCQ, so students learn the concept, correct option, wrong options, and elimination approach together.";
+    return `Doctor, the UWorld Video Library has around 150 hours of recorded MCQ teaching and 3000+ UWorld-style MCQs. First Aid is integrated with each MCQ, so students learn the concept, correct option, wrong options, and elimination approach together. Please take our free ${demoDays}-day demo and check the quality yourself: ${demoLink}`;
   }
 
   if (/price|cost|fee|payment|package|how much/.test(text)) {
     return "Doctor, the best package depends on your exam timeline and the support level you need. First, it is better to check the teaching/demo, then we can arrange mentor guidance so the plan is clear.";
   }
 
-  return "Doctor, I understand. To guide you correctly, tell me: are you preparing for Step 1, and what is your biggest difficulty right now — UWorld, First Aid retention, NBME score, or making a schedule? Also, please share your WhatsApp number or email so we can reach you with the demo/session details if you leave the page.";
+  return `Doctor, I understand. NextGen keeps the roadmap, live teaching, recordings, questions, weak-area correction, revision, and mentor guidance organised in one place. Please take our free ${demoDays}-day demo and check the quality yourself: ${demoLink}\n\nTell me: are you preparing for Step 1 or Step 2, and what is your biggest difficulty right now?`;
 }
 
 // v107: Website chat must become a real CRM conversation and collect contact details.
@@ -59572,7 +59599,7 @@ app.post("/website-chat/ayla", async (req, res) => {
       usage = ai.usage || {};
     } catch (error) {
       aiError = error.message || "AI fallback used";
-      reply = ngWebsiteAylaFallbackReply(message);
+      reply = ngWebsiteAylaFallbackReply(message, db);
     }
 
     reply = ngWebsiteMaybeAddContactAsk(reply, lead);
