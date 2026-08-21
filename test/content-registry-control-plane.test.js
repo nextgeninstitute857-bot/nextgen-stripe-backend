@@ -472,7 +472,6 @@ test('student catalog requires ownership, exam entitlement, and approved enabled
 
 test('credentialed CORS is limited to exact owned LMS origins and explicit environment additions', () => {
   for (const origin of [
-    'https://live.nextgenusmlelms.com', 'https://www.live.nextgenusmlelms.com',
     'https://nextgenusmle.live', 'https://www.nextgenusmle.live',
     'https://mediumslateblue-otter-394719.hostingersite.com',
     'https://paleturquoise-quail-255896.hostingersite.com',

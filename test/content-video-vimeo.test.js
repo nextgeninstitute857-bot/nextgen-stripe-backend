@@ -20,11 +20,11 @@ test("Vimeo embed domains are normalized to safe unique hostnames", () => {
   assert.deepEqual(normalizeVimeoEmbedDomains([
     "https://paleturquoise-quail-255896.hostingersite.com/dashboard",
     "paleturquoise-quail-255896.hostingersite.com",
-    "LIVE.NextGenUSMLELMS.com/",
+    "NEXTGENUSMLE.LIVE/",
     "https://bad domain.example",
   ]), [
     "paleturquoise-quail-255896.hostingersite.com",
-    "live.nextgenusmlelms.com",
+    "nextgenusmle.live",
   ]);
 });
 
@@ -35,7 +35,7 @@ test("Vimeo allowlist reconciliation uses the documented per-video domain endpoi
     videoIds: ["12345", "/videos/67890", "unsafe/id"],
     domains: [
       "https://paleturquoise-quail-255896.hostingersite.com/dashboard",
-      "live.nextgenusmlelms.com",
+      "nextgenusmle.live",
     ],
     adapters: {
       apiClient: {
@@ -72,12 +72,12 @@ test("Vimeo allowlist reconciliation uses the documented per-video domain endpoi
   assert.deepEqual(requests, [
     "GET /videos/12345",
     "PUT /videos/12345/privacy/domains/paleturquoise-quail-255896.hostingersite.com",
-    "PUT /videos/12345/privacy/domains/live.nextgenusmlelms.com",
+    "PUT /videos/12345/privacy/domains/nextgenusmle.live",
     "GET /videos/12345/privacy/domains",
     "GET /videos/12345",
     "GET /videos/67890",
     "PUT /videos/67890/privacy/domains/paleturquoise-quail-255896.hostingersite.com",
-    "PUT /videos/67890/privacy/domains/live.nextgenusmlelms.com",
+    "PUT /videos/67890/privacy/domains/nextgenusmle.live",
     "GET /videos/67890/privacy/domains",
     "GET /videos/67890",
   ]);

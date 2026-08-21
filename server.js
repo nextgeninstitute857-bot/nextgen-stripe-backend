@@ -835,8 +835,6 @@ const allowedOrigins = [
   "ionic://localhost",
   "http://localhost",
   "https://localhost",
-  "https://live.nextgenusmlelms.com",
-  "https://www.live.nextgenusmlelms.com",
   "https://nextgenusmle.live",
   "https://www.nextgenusmle.live",
   "https://mediumslateblue-otter-394719.hostingersite.com",
@@ -28418,7 +28416,7 @@ async function sendSocialMessage({ db, integration, body = {} }) {
   }
 
   if (platform === "email") {
-    const from = body.from || process.env.EMAIL_FROM || process.env.RESEND_FROM_EMAIL || "NextGen USMLE <noreply@nextgenusmlelms.com>";
+    const from = body.from || process.env.EMAIL_FROM || process.env.RESEND_FROM_EMAIL || "NextGen USMLE <support@nextgenusmle.live>";
     const subject = body.subject || "NextGen USMLE";
     if (process.env.RESEND_API_KEY) {
       const response = await axios.post("https://api.resend.com/emails", { from, to: Array.isArray(to) ? to : [to], subject, text }, { headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, "Content-Type": "application/json" }, timeout: 30000 });
@@ -59744,10 +59742,10 @@ function ngLeadStatusSummaryForAlert(lead = {}, messages = []) {
   const blob = ngAylaConversationBlobForAlert(messages);
   const stageBlob = String([lead.status, lead.stage, lead.lead_stage, lead.next_action, lead.google_meet_booking_state, lead.payment_status].join(" ")).toLowerCase();
   const programExplained = Boolean(lead.program_explained || /120[- ]?day|marathon|roadmap|live usmle guidance|program works|mapped uworld|first aid|lms/.test(blob));
-  const demoSent = Boolean(lead.demo_link_sent || /live\.nextgenusmlelms\.com\/demo|try demo|2[- ]?day lms demo/.test(blob));
+  const demoSent = Boolean(lead.demo_link_sent || /nextgenusmle\.live\/(?:demo|try-demo)|try demo|2[- ]?day lms demo/.test(blob));
   const liveInvited = Boolean(lead.live_session_invited || lead.last_session_invite_sent_at || /1:00 pm est|1 pm est|live session|live guidance session|join today's live/.test(blob));
   const recordingSent = Boolean(lead.recording_sent || lead.recording_followup_sent_once || /recording|us06web\.zoom\.us\/rec\/share|session recording/.test(blob));
-  const uworldSent = Boolean(lead.uworld_demo_sent || lead.demo_lms_sent || /lms\.nextgenusmlelms\.com|uworld video library|uworld-style|3000\+|150 hours/.test(blob));
+  const uworldSent = Boolean(lead.uworld_demo_sent || lead.demo_lms_sent || /nextgenusmle\.live\/student\/uworld-library|uworld video library|uworld-style|3000\+|150 hours/.test(blob));
   const meetRequested = Boolean(lead.google_meet_requested || /google_meet_requested|google meet|mentor consultation|preferred.*time/.test(stageBlob + " " + blob));
   const meetTime = Boolean(lead.google_meet_time_collected_at || /google_meet_time_collected|waiting_for_google_meet_link|missing_link|needs_link/.test(stageBlob));
   const payment = lead.pending_payment ? "Pending" : meetTime ? "Google Meet time collected" : meetRequested ? "Google Meet requested" : lead.payment_status || lead.stage || "unknown";
