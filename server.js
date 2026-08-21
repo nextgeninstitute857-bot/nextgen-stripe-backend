@@ -601,11 +601,11 @@ const AYLA_VIMEO_PLAYBACK_RECONCILIATION_ENABLED = String(
 ).toLowerCase() !== "true";
 const AYLA_VIMEO_PLAYBACK_BATCH_SIZE = Math.max(
   1,
-  Math.min(100, Number(process.env.AYLA_VIMEO_PLAYBACK_BATCH_SIZE || 75) || 75),
+  Math.min(100, Number(process.env.AYLA_VIMEO_PLAYBACK_BATCH_SIZE || 100) || 100),
 );
 const AYLA_VIMEO_PLAYBACK_CONCURRENCY = Math.max(
   1,
-  Math.min(5, Number(process.env.AYLA_VIMEO_PLAYBACK_CONCURRENCY || 3) || 3),
+  Math.min(5, Number(process.env.AYLA_VIMEO_PLAYBACK_CONCURRENCY || 5) || 5),
 );
 const AYLA_VIMEO_PLAYBACK_INTERVAL_MS = Math.max(
   60_000,
