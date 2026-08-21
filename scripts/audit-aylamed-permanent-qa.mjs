@@ -11,6 +11,16 @@ const EXAM_TRACKS = Object.freeze({
   NCLEX: "nclex",
 });
 
+const EXAM_ORIGINS = Object.freeze({
+  "USMLE Step 1": "https://aylamedapp.com",
+  "USMLE Step 2 CK": "https://aylamedapp.com",
+  "USMLE Step 3": "https://aylamedapp.com",
+  MCCQE: "https://mccqe.aylamedapp.com",
+  PLAB: "https://plab.aylamedapp.com",
+  AMC: "https://amc.aylamedapp.com",
+  NCLEX: "https://nclex.aylamedapp.com",
+});
+
 function option(name, fallback = "") {
   const prefix = `--${name}=`;
   return process.argv.find((value) => value.startsWith(prefix))?.slice(prefix.length) || fallback;
@@ -39,7 +49,7 @@ function query(path, values = {}) {
   return `${url.pathname.replace(/^\//, "")}${url.search}`;
 }
 
-async function requestJson(baseUrl, path, { token = "", method = "GET", body, timeoutMs = 35_000 } = {}) {
+async function requestJson(baseUrl, path, { token = "", method = "GET", body, timeoutMs = 35_000, headers = {} } = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const startedAt = performance.now();
@@ -49,6 +59,7 @@ async function requestJson(baseUrl, path, { token = "", method = "GET", body, ti
       signal: controller.signal,
       headers: {
         Accept: "application/json",
+        ...headers,
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...(body === undefined ? {} : { "Content-Type": "application/json" }),
       },
@@ -100,10 +111,12 @@ function accountLabel(account) {
 }
 
 async function auditAccount(account, { baseUrl, timeoutMs }) {
+  const headers = { Origin: EXAM_ORIGINS[account.exam] };
   const login = await requestJson(baseUrl, "auth/login", {
     method: "POST",
     body: { email: account.email, password: account.password },
     timeoutMs,
+    headers,
   });
   if (!login.ok || !login.payload?.token) {
     return {
@@ -116,7 +129,7 @@ async function auditAccount(account, { baseUrl, timeoutMs }) {
   }
 
   const token = login.payload.token;
-  const me = await requestJson(baseUrl, "auth/me", { token, timeoutMs });
+  const me = await requestJson(baseUrl, "auth/me", { token, timeoutMs, headers });
   const student = me.payload?.student || me.payload?.data?.student || null;
   const studentId = student?.id || me.payload?.shell?.active_student_id || me.payload?.activeDashboard?.student_id || null;
   const activeExamTrack = student?.examTrackId
@@ -163,7 +176,7 @@ async function auditAccount(account, { baseUrl, timeoutMs }) {
 
   const results = [["auth/login", login], ["auth/me", me]];
   for (const [name, path] of paths) {
-    const result = await requestJson(baseUrl, path, { token, timeoutMs });
+    const result = await requestJson(baseUrl, path, { token, timeoutMs, headers });
     const expectedNbmeDenial = !account.examTrack.startsWith("usmle_step_")
       && ["self-assessment-center", "self-assessment-history"].includes(name)
       && result.status === 409
