@@ -154,7 +154,7 @@ test("Vimeo reconciliation sets whitelist privacy and refuses an unconfirmed dom
 });
 
 test("Vimeo reconciliation falls back to verified secure embed-only playback when domains do not persist", async () => {
-  const privacy = { embed: "public", view: "nobody" };
+  const privacy = { embed: "public", view: "unlisted" };
   const result = await ensureVimeoEmbedDomains({
     videoIds: ["12345"],
     domains: ["aylamedapp.com"],
@@ -185,6 +185,40 @@ test("Vimeo reconciliation falls back to verified secure embed-only playback whe
   assert.equal(result.video_configs[0].privacy_view, "disable");
   assert.equal(result.video_configs[0].privacy_embed, "public");
   assert.equal(result.video_configs[0].fallback_mode, "secure_embed_only_public");
+});
+
+test("private Vimeo videos go directly to verified embed-only playback", async () => {
+  const privacy = { embed: "private", view: "nobody" };
+  let domainWrites = 0;
+  const result = await ensureVimeoEmbedDomains({
+    videoIds: ["12345"],
+    domains: ["aylamedapp.com"],
+    secureEmbedOnly: true,
+    allowEmbedOnlyPublicFallback: true,
+    adapters: {
+      apiClient: {
+        get: async () => ({
+          data: {
+            player_embed_url: "https://player.vimeo.com/video/12345",
+            privacy: { ...privacy },
+          },
+        }),
+        patch: async (_requestPath, body) => {
+          Object.assign(privacy, body.privacy || {});
+          return { status: 200 };
+        },
+        put: async () => {
+          domainWrites += 1;
+          return { status: 204 };
+        },
+      },
+    },
+  });
+  assert.equal(domainWrites, 0);
+  assert.deepEqual(result.verified_videos, ["12345"]);
+  assert.deepEqual(result.public_embed_fallback_videos, ["12345"]);
+  assert.equal(result.video_configs[0].privacy_view, "disable");
+  assert.equal(result.video_configs[0].privacy_embed, "public");
 });
 
 test("video references are classified without treating images as videos", () => {
