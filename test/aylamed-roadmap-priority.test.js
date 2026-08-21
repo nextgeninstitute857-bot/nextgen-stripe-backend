@@ -9,18 +9,21 @@ const planner = server.slice(start, end);
 
 test("verified scored work is reserved before optional new content", () => {
   const qbank = planner.indexOf('"internal_mcqs", pick');
-  const reading = planner.indexOf("if (!plan.finalReviewMode && mix.reading");
-  const video = planner.indexOf("if (!plan.finalReviewMode && mix.video");
+  const reading = planner.indexOf("if (mix.reading !== false)");
+  const video = planner.indexOf("if (mix.video !== false && contentHubEnabled)");
   assert.ok(qbank > 0 && qbank < reading && reading < video);
   assert.match(planner.slice(qbank, reading), /allowOverCapacity: true/);
 });
 
-test("final review opens no broad new reading, video, external IDs, or generic cards", () => {
+test("final review keeps scored work first while permitting only matched support", () => {
   assert.match(planner, /finalReviewMode/);
-  assert.match(planner, /!plan\.finalReviewMode && mix\.reading/);
-  assert.match(planner, /!plan\.finalReviewMode && mix\.video/);
+  assert.match(planner, /const finalReviewReadingAllowed = !plan\.finalReviewMode/);
+  assert.match(planner, /selection\.resumed/);
+  assert.match(planner, /selection\.match_level === "exact_topic"/);
+  assert.match(planner, /if \(mix\.video !== false && contentHubEnabled\)/);
   assert.match(planner, /!plan\.finalReviewMode && mix\.external_questions/);
-  assert.match(planner, /!plan\.finalReviewMode && mix\.flashcards/);
+  assert.match(planner, /if \(mix\.flashcards !== false\)/);
+  assert.match(planner, /targeted final-review support/);
   assert.match(planner, /Final review is active/);
 });
 
