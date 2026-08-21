@@ -578,7 +578,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v272-whatsapp-webhook-verification";
+const CRM_AYLA_REPLY_BUILD = "v273-crm-whatsapp-runtime-credentials";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
@@ -28299,14 +28299,14 @@ async function testSocialIntegration(integration = {}) {
   }
 
   if (platform === "whatsapp") {
-    const token = getIntegrationCredential(integration, "api_key", "WHATSAPP_ACCESS_TOKEN") || process.env.WHATSAPP_ACCESS_TOKEN;
-    const phoneNumberId = integration.phone_number_id || integration.account_id || process.env.WHATSAPP_PHONE_NUMBER_ID;
+    const { token, phoneNumberId } = await resolveWhatsAppCloudConfig({ integration });
     if (!token || !phoneNumberId) {
       const e = new Error("WhatsApp is missing WHATSAPP_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID.");
       e.statusCode = 400;
       throw e;
     }
     const response = await axios.get(`https://graph.facebook.com/v19.0/${phoneNumberId}`, { params: { access_token: token }, timeout: 20000 });
+    ngClearWhatsAppProviderBlock();
     return { message: "WhatsApp Cloud API connection passed", platform, live_connected: true, safe_metadata: { phone_number_id: phoneNumberId, display_phone_number: response.data?.display_phone_number || null }, meta: response.data };
   }
 
@@ -28450,8 +28450,7 @@ async function sendSocialMessage({ db, integration, body = {} }) {
   }
 
   if (platform === "whatsapp") {
-    const token = getIntegrationCredential(integration, "api_key", "WHATSAPP_ACCESS_TOKEN") || process.env.WHATSAPP_ACCESS_TOKEN;
-    const phoneNumberId = integration.phone_number_id || integration.account_id || process.env.WHATSAPP_PHONE_NUMBER_ID;
+    const { token, phoneNumberId } = await resolveWhatsAppCloudConfig({ db, integration });
     if (!token || !phoneNumberId) {
       const e = new Error("WhatsApp is missing WHATSAPP_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID.");
       e.statusCode = 400;
@@ -30123,14 +30122,54 @@ function sanitizeWhatsAppTemplateComponents(components = []) {
     });
 }
 
-async function sendWhatsAppCloudMessage({ to, text = "", templateName = "", languageCode = "en", components = [], mediaUrl = "", mediaId = "", mediaType = "image", caption = "" }) {
-  const token = process.env.WHATSAPP_ACCESS_TOKEN;
-  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+async function resolveWhatsAppCloudConfig({ db = null, integration = null } = {}) {
+  let selectedIntegration = integration;
+
+  if (!selectedIntegration && db) {
+    selectedIntegration = getIntegrationByPlatform(db, "whatsapp");
+  }
+
+  if (!selectedIntegration) {
+    try {
+      const crmDb = await readCrmDb();
+      selectedIntegration = getIntegrationByPlatform(crmDb, "whatsapp");
+    } catch (error) {
+      console.error("WhatsApp CRM credential lookup failed:", error.message);
+    }
+  }
+
+  const tokenCandidates = [
+    selectedIntegration?.api_key,
+    selectedIntegration?.access_token,
+    selectedIntegration?.credentials?.api_key,
+    selectedIntegration?.credentials?.access_token,
+    process.env.WHATSAPP_ACCESS_TOKEN,
+  ];
+  const token = tokenCandidates
+    .map((value) => String(value || "").trim())
+    .find((value) => value && !value.includes("***")) || "";
+  const phoneNumberId = String(
+    selectedIntegration?.phone_number_id ||
+    selectedIntegration?.account_id ||
+    selectedIntegration?.credentials?.phone_number_id ||
+    process.env.WHATSAPP_PHONE_NUMBER_ID ||
+    "",
+  ).trim();
+
+  return {
+    token,
+    phoneNumberId,
+    integrationId: selectedIntegration?.id || null,
+  };
+}
+
+async function sendWhatsAppCloudMessage({ to, text = "", templateName = "", languageCode = "en", components = [], mediaUrl = "", mediaId = "", mediaType = "image", caption = "", db = null, integration = null }) {
+  const { token, phoneNumberId } = await resolveWhatsAppCloudConfig({ db, integration });
 
   if (!token || !phoneNumberId) {
-    const error = new Error("WhatsApp Cloud API is not configured. Add WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID.");
+    const error = new Error("WhatsApp Cloud API is not configured. Save an active WhatsApp CRM integration or add the Render environment variables.");
     error.statusCode = 500;
-    error.hint = "Check Render environment variables and redeploy the backend.";
+    error.hint = "Check the WhatsApp CRM integration first, then the Render environment fallback.";
     throw error;
   }
 
@@ -30186,6 +30225,7 @@ async function sendWhatsAppCloudMessage({ to, text = "", templateName = "", lang
     }
   );
 
+  ngClearWhatsAppProviderBlock();
   return response.data;
 }
 
@@ -31049,6 +31089,13 @@ function ngBlockWhatsAppProvider(category = "provider_auth_or_permission", minut
   return ngWhatsAppProviderBlockStatus();
 }
 
+function ngClearWhatsAppProviderBlock() {
+  NG_WHATSAPP_PROVIDER_BLOCK.blocked_until_ms = 0;
+  NG_WHATSAPP_PROVIDER_BLOCK.last_error_at = null;
+  NG_WHATSAPP_PROVIDER_BLOCK.last_error_category = null;
+  return ngWhatsAppProviderBlockStatus();
+}
+
 function classifyWhatsAppProviderFailure(error, providerError = "") {
   const raw = JSON.stringify(error?.response?.data || {}) + " " + String(providerError || error?.message || "");
   const text = raw.toLowerCase();
@@ -31432,6 +31479,8 @@ async function sendCrmMessage({
         mediaId: resolvedMediaId,
         mediaType: resolvedMediaType || "image",
         caption: resolvedCaption,
+        db,
+        integration,
       });
       providerMessageId = providerResponse?.messages?.[0]?.id || null;
     } else if (cleanChannel === "telegram") {
