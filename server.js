@@ -69317,6 +69317,90 @@ function aylaAccessExpiresAt({ plan, startsAt = aylaNow(), accessDays = null }) 
   return expiry.toISOString();
 }
 
+const AYLA_ADMIN_ACCESS_LIMITS = Object.freeze({
+  minute: 60 * 24 * 365 * 10,
+  hour: 24 * 365 * 10,
+  day: 3650,
+  month: 120,
+});
+
+function aylaResolveAdminAccessWindow(payload = {}, startValue = new Date()) {
+  const unit = String(payload.access_unit || payload.duration_unit || "day").trim().toLowerCase().replace(/s$/, "");
+  if (!Object.hasOwn(AYLA_ADMIN_ACCESS_LIMITS, unit)) {
+    throw Object.assign(new Error("Access unit must be minutes, hours, days, or months."), { statusCode: 400 });
+  }
+  const rawValue = payload.access_duration ?? payload.duration_value ?? payload.access_value ?? payload.access_days ?? payload.accessDays ?? 30;
+  const value = Number(rawValue);
+  const limit = AYLA_ADMIN_ACCESS_LIMITS[unit];
+  if (!Number.isInteger(value) || value < 1 || value > limit) {
+    throw Object.assign(new Error(`Access duration must be a whole number between 1 and ${limit} ${unit}${limit === 1 ? "" : "s"}.`), { statusCode: 400 });
+  }
+  const startsAt = new Date(startValue);
+  if (Number.isNaN(startsAt.getTime())) throw Object.assign(new Error("Access start time is invalid."), { statusCode: 400 });
+  let expiresAt;
+  if (unit === "minute") expiresAt = new Date(startsAt.getTime() + value * 60 * 1000);
+  else if (unit === "hour") expiresAt = new Date(startsAt.getTime() + value * 60 * 60 * 1000);
+  else if (unit === "day") expiresAt = new Date(startsAt.getTime() + value * 24 * 60 * 60 * 1000);
+  else expiresAt = ngAddCalendarMonths(startsAt, value);
+  return {
+    value,
+    unit,
+    duration_label: `${value} ${unit}${value === 1 ? "" : "s"}`,
+    starts_at: startsAt.toISOString(),
+    expires_at: expiresAt.toISOString(),
+    access_days: Math.max(1, Math.ceil((expiresAt.getTime() - startsAt.getTime()) / 86400000)),
+  };
+}
+
+function aylaAdminRecordedAmountCents(payload = {}) {
+  const rawCents = payload.amount_cents ?? payload.recorded_amount_cents;
+  const rawAmount = payload.amount ?? payload.amount_received ?? payload.recorded_amount;
+  const hasCents = rawCents !== undefined && rawCents !== null && String(rawCents).trim() !== "";
+  const hasAmount = rawAmount !== undefined && rawAmount !== null && String(rawAmount).trim() !== "";
+  if (!hasCents && !hasAmount) return null;
+  const cents = Number(hasCents ? rawCents : rawAmount) * (hasCents ? 1 : 100);
+  if (!Number.isFinite(cents) || cents < 0 || cents > 100_000_000) {
+    throw Object.assign(new Error("Recorded amount must be between 0 and 1,000,000."), { statusCode: 400 });
+  }
+  return Math.round(cents);
+}
+
+function aylaRecordAdminAccessPayment(db, { enrollment, user, plan = null, payload = {}, source = "admin_access" } = {}) {
+  const amountCents = aylaAdminRecordedAmountCents(payload);
+  if (!amountCents) return null;
+  const now = aylaNow();
+  const currency = String(payload.currency || plan?.currency || "usd").trim().toLowerCase();
+  if (!/^[a-z]{3}$/.test(currency)) throw Object.assign(new Error("Currency must be a three-letter code such as USD."), { statusCode: 400 });
+  const payment = {
+    id: aylaId("AYLA-PAY"),
+    user_id: user?.id || enrollment.user_id || enrollment.ayla_user_id || null,
+    ayla_user_id: user?.id || enrollment.user_id || enrollment.ayla_user_id || null,
+    enrollment_id: enrollment.id,
+    plan_id: plan?.id || enrollment.plan_id || null,
+    plan_name: plan?.name || enrollment.plan_name || "Manual AylaMed Access",
+    amount_cents: amountCents,
+    final_amount_cents: amountCents,
+    original_amount_cents: amountCents,
+    discount_cents: 0,
+    currency,
+    status: "completed",
+    payment_status: "completed",
+    payment_method: "admin_recorded",
+    source,
+    paid_at: now,
+    createdAt: now,
+    updatedAt: now,
+    metadata: { recorded_by_admin: true },
+  };
+  aylaSetItem(db, "aylaPayments", payment);
+  enrollment.recorded_amount_cents = amountCents;
+  enrollment.recorded_currency = currency;
+  enrollment.total_recorded_amount_cents = Math.max(0, Number(enrollment.total_recorded_amount_cents || 0) || 0) + amountCents;
+  enrollment.last_recorded_payment_id = payment.id;
+  enrollment.last_recorded_amount_at = now;
+  return payment;
+}
+
 function aylaEnrollmentActive(enrollment) {
   return aylaShellEnrollmentActive(enrollment);
 }
@@ -71137,8 +71221,13 @@ function aylaPilotStudentForUser(db, user, requestedStudentId = "") {
   throw error;
 }
 
+const AYLA_PUBLIC_REGISTRATION_ENABLED = String(process.env.AYLA_PUBLIC_REGISTRATION_ENABLED || "false").trim().toLowerCase() === "true";
+
 app.post("/api/ayla/auth/register", async (req, res) => {
   try {
+    if (!AYLA_PUBLIC_REGISTRATION_ENABLED) {
+      return aylaSendError(res, 403, "AylaMed accounts are issued by an administrator. Sign in with the emailed credentials.", { admission_mode: "admin_only" });
+    }
     const email = aylaNormalizeEmail(req.body.email);
     const password = String(req.body.password || "");
     if (!email || !password) return aylaSendError(res, 400, "email and password are required");
@@ -71375,6 +71464,9 @@ app.post("/api/ayla/auth/login", async (req, res) => {
 
 app.post("/api/ayla/auth/google", async (req, res) => {
   try {
+    if (!AYLA_PUBLIC_REGISTRATION_ENABLED) {
+      return aylaSendError(res, 403, "AylaMed uses email and password sign-in only.", { admission_mode: "admin_only" });
+    }
     const profile = await verifyGoogleIdToken(req.body.id_token || req.body.credential);
     const db = await readAylaDb();
     aylaEnsureSeedData(db);
@@ -71736,16 +71828,31 @@ app.post("/api/ayla/enrollments/:id/extend", async (req, res) => {
     aylaEnsureSeedData(db);
     const enrollment = aylaGetItem(db, "aylaEnrollments", req.params.id);
     if (!enrollment) return aylaSendError(res, 404, "AylaMed enrollment not found");
-    const days = Number(req.body.days || req.body.extendDays || 30);
     const base = enrollment.access_expires_at && new Date(enrollment.access_expires_at).getTime() > Date.now() ? new Date(enrollment.access_expires_at) : new Date();
-    enrollment.access_expires_at = new Date(base.getTime() + Math.max(1, days) * 24 * 60 * 60 * 1000).toISOString();
+    const payload = {
+      ...req.body,
+      access_duration: req.body.access_duration ?? req.body.duration_value ?? req.body.days ?? req.body.extendDays ?? 30,
+      access_unit: req.body.access_unit || req.body.duration_unit || "day",
+    };
+    const windowMode = String(req.body.access_window_mode || req.body.access_mode || "extend").trim().toLowerCase();
+    const accessWindow = aylaResolveAdminAccessWindow(payload, windowMode === "replace" ? new Date() : base);
+    enrollment.access_starts_at = windowMode === "replace" ? accessWindow.starts_at : (enrollment.access_starts_at || accessWindow.starts_at);
+    enrollment.access_expires_at = accessWindow.expires_at;
+    enrollment.access_days = accessWindow.access_days;
+    enrollment.access_duration = accessWindow.duration_label;
+    enrollment.access_duration_value = accessWindow.value;
+    enrollment.access_duration_unit = accessWindow.unit;
+    enrollment.access_expiry_mode = "admin_timed";
     enrollment.access_granted = true;
     enrollment.status = "active";
     enrollment.updatedAt = aylaNow();
+    const user = aylaGetItem(db, "aylaUsers", enrollment.user_id || enrollment.ayla_user_id);
+    const plan = enrollment.plan_id ? aylaGetItem(db, "aylaPlans", enrollment.plan_id) : null;
+    const payment = aylaRecordAdminAccessPayment(db, { enrollment, user, plan, payload: req.body, source: "admin_access_upgrade" });
     aylaSetItem(db, "aylaEnrollments", enrollment);
-    await aylaAccessLog(db, "admin_extend_access", { enrollmentId: enrollment.id, days });
+    await aylaAccessLog(db, "admin_extend_access", { enrollmentId: enrollment.id, duration: accessWindow.duration_label, accessWindowMode: windowMode, amountCents: payment?.amount_cents || 0 });
     await writeAylaDb(db);
-    return aylaSendOk(res, { enrollment });
+    return aylaSendOk(res, { enrollment, payment, access_report: accessWindow });
   } catch (error) {
     return aylaSendError(res, 500, error.message || "Failed to extend AylaMed access");
   }
@@ -74555,7 +74662,7 @@ app.get("/api/ayla/public-config", async (req, res) => {
     const settings = aylaMergeSettings(db.aylaSettings || {});
     const days = Math.max(1, Number(settings.demo.duration_days || 7));
     const plans = aylaValues(db, "aylaPlans")
-      .filter((plan) => plan.is_active !== false && plan.is_public !== false)
+      .filter((plan) => plan.is_active !== false && plan.is_public !== false && !aylaPlanIsDemo(plan))
       .sort((left, right) => Number(aylaPlanIsDemo(right)) - Number(aylaPlanIsDemo(left)) || String(left.name || "").localeCompare(String(right.name || "")))
       .map(aylaPublicPlan);
     const knowledge = await aylaKnowledgeStatus(db);
@@ -74571,6 +74678,8 @@ app.get("/api/ayla/public-config", async (req, res) => {
         marketing: publicAylaMarketingSettings(settings.marketing),
         demo: {
           ...settings.demo,
+          enabled: false,
+          homepage_bar_enabled: false,
           duration_days: days,
           homepage_bar_text_rendered: aylaTemplate(settings.demo.homepage_bar_text, days),
           button_text_rendered: aylaTemplate(settings.demo.button_text, days),
@@ -74580,7 +74689,8 @@ app.get("/api/ayla/public-config", async (req, res) => {
       plans,
       featureCatalog: publicAylaPlanFeatureCatalog(),
       knowledge,
-      google_client_id: process.env.GOOGLE_CLIENT_ID || "",
+      admission_mode: "admin_only",
+      google_client_id: "",
     });
   } catch (error) { return aylaSendError(res, 500, error.message || "Failed to load AylaMed public configuration"); }
 });
@@ -89434,7 +89544,7 @@ async function ngAdminMobileInviteLms(req, body = {}) {
   };
 }
 
-async function ngAdminMobileSendAylaInvite({ db, user, temporaryPassword = "", accessDays = 30, sendEmail = true } = {}) {
+async function ngAdminMobileSendAylaInvite({ db, user, temporaryPassword = "", accessReport = null, sendEmail = true } = {}) {
   if (!sendEmail) return { attempted: false, sent: false, skipped: true, reason: "send_email_disabled" };
   let resetUrl = "";
   if (!temporaryPassword) {
@@ -89446,7 +89556,7 @@ async function ngAdminMobileSendAylaInvite({ db, user, temporaryPassword = "", a
   const lines = [
     "Hi Doctor,",
     "",
-    `Your AylaMed access is ready for ${accessDays} days.`,
+    `Your AylaMed access is ready for ${accessReport?.duration_label || "30 days"}.`,
     "",
     "Open AylaMed:",
     "https://aylamedapp.com/login",
@@ -89475,7 +89585,8 @@ async function ngAdminMobileInviteAyla(body = {}) {
   const db = await readAylaDb();
   aylaEnsureSeedData(db);
   const email = aylaNormalizeEmail(body.email);
-  const accessDays = Math.max(1, Math.min(3650, Number(body.access_days || body.accessDays || 30) || 30));
+  const accessWindow = aylaResolveAdminAccessWindow(body, new Date());
+  const accessDays = accessWindow.access_days;
   if (!email) throw Object.assign(new Error("Email is required"), { statusCode: 400 });
   let user = aylaFindUserByEmail(db, email);
   let temporaryPassword = "";
@@ -89500,14 +89611,23 @@ async function ngAdminMobileInviteAyla(body = {}) {
   const scope = aylaEnrollmentScopeFromPayload(db, user, body);
   const enrollment = aylaCreateOrUpdateEnrollment(db, { userId: user.id, plan, type: "manual", source: "admin_access_invitation", accessGranted: true, startsAt: aylaNow(), examTrack: scope.examTrack, studentId: scope.studentId });
   enrollment.access_days = accessDays;
+  enrollment.access_starts_at = accessWindow.starts_at;
+  enrollment.access_expires_at = accessWindow.expires_at;
+  enrollment.access_duration = accessWindow.duration_label;
+  enrollment.access_duration_value = accessWindow.value;
+  enrollment.access_duration_unit = accessWindow.unit;
+  enrollment.access_expiry_mode = "admin_timed";
   enrollment.invited_by_admin = true;
+  enrollment.user_email = user.email;
+  enrollment.user_name = user.name || email;
+  const payment = aylaRecordAdminAccessPayment(db, { enrollment, user, plan, payload: body, source: "admin_access_invitation" });
   aylaSetItem(db, "aylaEnrollments", enrollment);
-  const delivery = await ngAdminMobileSendAylaInvite({ db, user, temporaryPassword, accessDays, sendEmail: body.send_email !== false });
+  const delivery = await ngAdminMobileSendAylaInvite({ db, user, temporaryPassword, accessReport: accessWindow, sendEmail: body.send_email !== false });
   ngAdminMobileCredentialState(enrollment, delivery);
   aylaSetItem(db, "aylaEnrollments", enrollment);
-  await aylaAccessLog(db, "admin_access_invitation", { userId: user.id, planId: plan.id, enrollmentId: enrollment.id, access_days: accessDays, email_sent: delivery.sent === true });
+  await aylaAccessLog(db, "admin_access_invitation", { userId: user.id, planId: plan.id, enrollmentId: enrollment.id, access_days: accessDays, duration: accessWindow.duration_label, amount_cents: payment?.amount_cents || 0, email_sent: delivery.sent === true });
   await writeAylaDb(db);
-  return { product: "aylamed", student_created: studentCreated, user: aylaSanitizeUser(user), enrollment, email_delivery: delivery };
+  return { product: "aylamed", student_created: studentCreated, user: aylaSanitizeUser(user), enrollment, payment, access_report: accessWindow, email_delivery: delivery };
 }
 
 app.get("/admin/mobile/dashboard", async (req, res) => {

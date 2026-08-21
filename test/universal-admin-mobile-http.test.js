@@ -48,7 +48,7 @@ async function api(baseUrl, route, { method = "GET", token = "", body = null } =
   return { response, payload: await response.json() };
 }
 
-test("universal admin dashboard reports sales and verified MRR separately and grants day-based access", { timeout: 100_000 }, async () => {
+test("universal admin dashboard keeps LMS open and grants private minute-level AylaMed access", { timeout: 100_000 }, async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "universal-admin-mobile-"));
   const now = new Date();
   const nowIso = now.toISOString();
@@ -121,6 +121,19 @@ test("universal admin dashboard reports sales and verified MRR separately and gr
     assert.equal(login.response.status, 200, JSON.stringify(login.payload));
     const token = login.payload.token;
 
+    const blockedAylaSignup = await api(baseUrl, "/api/ayla/auth/register", {
+      method: "POST",
+      body: { email: "blocked@example.com", password: "BlockedUser9!" },
+    });
+    assert.equal(blockedAylaSignup.response.status, 403, JSON.stringify(blockedAylaSignup.payload));
+
+    const publicConfig = await api(baseUrl, "/api/ayla/public-config");
+    assert.equal(publicConfig.response.status, 200, JSON.stringify(publicConfig.payload));
+    assert.equal(publicConfig.payload.admission_mode, "admin_only");
+    assert.equal(publicConfig.payload.google_client_id, "");
+    assert.equal(publicConfig.payload.settings.demo.enabled, false);
+    assert.equal(publicConfig.payload.plans.some((plan) => plan.is_demo), false);
+
     const dashboard = await api(baseUrl, "/admin/mobile/dashboard", { token });
     assert.equal(dashboard.response.status, 200, JSON.stringify(dashboard.payload));
     assert.equal(dashboard.payload.lms.revenue.monthly_sales_cents, 42500);
@@ -148,11 +161,30 @@ test("universal admin dashboard reports sales and verified MRR separately and gr
     const aylaInvite = await api(baseUrl, "/admin/mobile/invitations", {
       method: "POST",
       token,
-      body: { product: "aylamed", email: "ayla-invited@example.com", name: "Ayla Invited", ayla_plan_id: "aylaMonthly", access_days: 60, send_email: false },
+      body: { product: "aylamed", email: "ayla-invited@example.com", name: "Ayla Invited", ayla_plan_id: "aylaMonthly", access_duration: 5, access_unit: "minutes", amount: 12.5, send_email: false },
     });
     assert.equal(aylaInvite.response.status, 201, JSON.stringify(aylaInvite.payload));
     assert.equal(aylaInvite.payload.results[0].user.mustChangePassword, true);
-    assert.equal(aylaInvite.payload.results[0].enrollment.access_days, 60);
+    const aylaInvitation = aylaInvite.payload.results[0];
+    assert.equal(aylaInvitation.enrollment.access_duration, "5 minutes");
+    assert.equal(aylaInvitation.enrollment.recorded_amount_cents, 1250);
+    assert.equal(aylaInvitation.payment.amount_cents, 1250);
+    const fiveMinuteExpiry = new Date(aylaInvitation.enrollment.access_expires_at).getTime();
+    assert.ok(fiveMinuteExpiry > Date.now() + 4 * 60000 && fiveMinuteExpiry < Date.now() + 6 * 60000);
+
+    const upgraded = await api(baseUrl, `/api/ayla/enrollments/${encodeURIComponent(aylaInvitation.enrollment.id)}/extend`, {
+      method: "POST",
+      token,
+      body: { access_duration: 10, access_unit: "minutes", access_window_mode: "replace", amount: 20 },
+    });
+    assert.equal(upgraded.response.status, 200, JSON.stringify(upgraded.payload));
+    assert.equal(upgraded.payload.enrollment.access_duration, "10 minutes");
+    assert.equal(upgraded.payload.enrollment.total_recorded_amount_cents, 3250);
+    assert.equal(upgraded.payload.payment.amount_cents, 2000);
+
+    const updatedDashboard = await api(baseUrl, "/admin/mobile/dashboard", { token });
+    assert.equal(updatedDashboard.payload.aylamed.revenue.monthly_sales_cents, 8250);
+    assert.equal(updatedDashboard.payload.aylamed.revenue.total_collected_cents, 8250);
   } finally {
     child.kill("SIGTERM");
     await new Promise((resolve) => {

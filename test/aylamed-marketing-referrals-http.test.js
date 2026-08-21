@@ -380,6 +380,7 @@ test("v231 keeps the readiness-share and referral lifecycle governed inside Ayla
       PORT: String(port),
       DATA_DIR: dataDir,
       AYLA_AUTH_JWT_SECRET: "v231-ayla-secret",
+      AYLA_PUBLIC_REGISTRATION_ENABLED: "true",
       AUTH_JWT_SECRET: "v231-lms-secret",
       STRIPE_WEBHOOK_SECRET: "whsec_v231_test",
       NEXTGEN_AUTO_ZOOM_PREP_ENABLED: "false",
