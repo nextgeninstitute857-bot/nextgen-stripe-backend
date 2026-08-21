@@ -77133,6 +77133,13 @@ function aylaV189AssignmentSnapshot(db, resource = {}, options = {}) {
     provider: resource.provider || "",
     examTrack: resource.examTrack || resource.exam_track || resource.exam || "All",
     examTrackId: resource.examTrackId || resource.exam_track_id || "",
+    sourceExamTrackId: resource.sourceExamTrackId || resource.source_exam_track_id
+      || resource.examTrackId || resource.exam_track_id || "",
+    supplemental: resource.supplemental === true,
+    supplementalLabel: resource.supplemental === true
+      ? resource.supplementalLabel || resource.supplemental_label || "Step 2 CK Supplemental"
+      : null,
+    scoringAllowed: resource.supplemental === true ? false : resource.scoringAllowed !== false,
     curriculumVersion: resource.curriculumVersion || "",
     authorizationStatus: resource.authorizationStatus || "pending_review",
     sourceAccessMode: resource.sourceAccessMode || "protected",
@@ -77594,6 +77601,14 @@ function aylaV189MakeAssignment(db, student, plan, date, category, resources, ti
     system: options.system || snapshots[0]?.system || "General",
     subsystem: options.subsystem || snapshots[0]?.subsystem || "",
     topic: options.topic || snapshots[0]?.topic || "",
+    sourceExamTrackId: snapshots[0]?.sourceExamTrackId || exam.examTrackId,
+    supplemental: snapshots[0]?.supplemental === true,
+    supplementalLabel: snapshots[0]?.supplemental === true
+      ? snapshots[0]?.supplementalLabel || "Step 2 CK Supplemental"
+      : null,
+    scoringAllowed: snapshots[0]?.supplemental === true
+      ? false
+      : snapshots[0]?.scoringAllowed !== false,
     resourceIds: snapshots.map((row) => row.resourceId),
     items: snapshots,
     estimatedMinutes: Math.max(1, Math.round(minutes)),
@@ -79101,12 +79116,29 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       preferredResourceIds: aylaCleanArray(tutorProposal.preferredResourceIds),
     });
     const pick = selection.video ? [selection.video] : [];
-    if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "video", pick, `Watch: ${pick[0].title}`, {
-      system: focusSystem,
-      subsystem: pick[0].subsystem || focusSubsystem,
-      topic: pick[0].topic || focusTopic,
-      rationale: `${selection.resumed ? "Resume" : "Watch"} the ${selection.match_level.replace(/_/g, " ")} verified embedded video for today’s focus; watch position and completion are saved.`,
-    });
+    if (pick.length) {
+      const supplementalPrefix = pick[0].supplemental === true
+        ? "Step 2 CK supplemental — "
+        : "";
+      aylaV189BuildDailyPlanAddAssignment(
+        db,
+        student,
+        plan,
+        assignments,
+        effectiveCapacity,
+        "video",
+        pick,
+        `Watch: ${supplementalPrefix}${pick[0].title}`,
+        {
+          system: focusSystem,
+          subsystem: pick[0].subsystem || focusSubsystem,
+          topic: pick[0].topic || focusTopic,
+          rationale: pick[0].supplemental === true
+            ? `${selection.resumed ? "Resume" : "Watch"} this verified Step 2 CK clinical lecture as a non-scoring MCCQE supplement for today’s ${selection.match_level.replace(/_/g, " ")} focus; watch position and completion are saved, but MCCQE readiness remains MCCQE-specific.`
+            : `${selection.resumed ? "Resume" : "Watch"} the ${selection.match_level.replace(/_/g, " ")} verified embedded video for today’s focus; watch position and completion are saved.`,
+        },
+      );
+    }
     else plan.missingResourceTypes.push("video_for_focus");
   }
 

@@ -85,6 +85,32 @@ test("Step 2 videos can appear in MCCQE only as non-scoring supplemental content
   assert.equal(studentVideo.supplemental_label, "Step 2 CK Supplemental");
 });
 
+test("MCCQE roadmap can select an exact Step 2 clinical supplement without making it scoring evidence", () => {
+  const scoped = scopeAylaContentHubVideoForExam({
+    id: "step2-roadmap-video",
+    type: "vimeo_video",
+    examTrackId: "usmle_step_2_ck",
+    vimeoId: "123456789",
+    title: "Clinical reasoning in family medicine",
+    system: "Family Medicine",
+    topic: "Clinical Reasoning",
+    approved: true,
+    status: "active",
+    authorizationStatus: "owned",
+    deliveryDestinations: ["aylamed_roadmap"],
+  }, "mccqe");
+  const selection = selectAylaRoadmapVideo({
+    examTrack: "mccqe",
+    videos: [scoped],
+    focusSystem: "Family Medicine",
+    focusTopic: "Clinical Reasoning",
+  });
+  assert.equal(selection.match_level, "exact_topic");
+  assert.equal(selection.video.sourceExamTrackId, "usmle_step_2_ck");
+  assert.equal(selection.video.supplemental, true);
+  assert.equal(selection.video.scoringAllowed, false);
+});
+
 test("native videos remain scoring-eligible when delivery scoping matches their exam", () => {
   const input = scopeAylaContentHubVideoForExam(legacyVideo(), "usmle_step_1");
   assert.equal(input.sourceExamTrackId, "usmle_step_1");
@@ -390,6 +416,9 @@ test("server and registry wire one entitlement-guarded Content Hub into the exis
   assert.match(server, /aylaV189RequireStudent\(req, req\.params\.studentId, "content_hub"\)/);
   assert.match(server, /mutateAylaDb\(async \(db\) =>[\s\S]*?aylaDashboardEntitlement\(db, aylaSanitizeUser\(rawUser\), student, "content_hub"\)/);
   assert.match(server, /function aylaV189BuildDailyPlan[\s\S]*?selectAylaRoadmapVideo\(/);
+  assert.match(server, /sourceExamTrackId: snapshots\[0\]\?\.sourceExamTrackId/);
+  assert.match(server, /Step 2 CK supplemental —/);
+  assert.match(server, /MCCQE readiness remains MCCQE-specific/);
   assert.match(server, /focusSubsystem,/);
   assert.match(server, /subsystem: req\.query\.subsystem \|\| req\.query\.subsystem_key/);
   assert.match(server, /const pageSize = 500;[\s\S]*?while \(true\)[\s\S]*?offset: sourceRows\.length/);
