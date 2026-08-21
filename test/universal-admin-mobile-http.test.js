@@ -158,10 +158,26 @@ test("universal admin dashboard keeps LMS open and grants private minute-level A
     const expiryMs = new Date(invite.payload.results[0].enrollment.access_expires_at).getTime();
     assert.ok(expiryMs > Date.now() + 44 * 86400000 && expiryMs < Date.now() + 46 * 86400000);
 
+    const unassignedAylaInvite = await api(baseUrl, "/admin/mobile/invitations", {
+      method: "POST",
+      token,
+      body: { product: "aylamed", email: "unassigned@example.com", access_duration: 5, access_unit: "minutes", send_email: false },
+    });
+    assert.equal(unassignedAylaInvite.response.status, 400, JSON.stringify(unassignedAylaInvite.payload));
+    assert.match(unassignedAylaInvite.payload.errors?.[0]?.error, /choose the exam/i);
+
+    const unassignedNclexVariant = await api(baseUrl, "/admin/mobile/invitations", {
+      method: "POST",
+      token,
+      body: { product: "aylamed", email: "nclex-without-program@example.com", exam_track_id: "nclex", access_duration: 5, access_unit: "minutes", send_email: false },
+    });
+    assert.equal(unassignedNclexVariant.response.status, 400, JSON.stringify(unassignedNclexVariant.payload));
+    assert.match(unassignedNclexVariant.payload.errors?.[0]?.error, /NCLEX-RN or NCLEX-PN/i);
+
     const aylaInvite = await api(baseUrl, "/admin/mobile/invitations", {
       method: "POST",
       token,
-      body: { product: "aylamed", email: "ayla-invited@example.com", name: "Ayla Invited", ayla_plan_id: "aylaMonthly", access_duration: 5, access_unit: "minutes", amount: 12.5, send_email: false },
+      body: { product: "aylamed", email: "ayla-invited@example.com", name: "Ayla Invited", ayla_plan_id: "aylaMonthly", exam_track_id: "usmle_step_1", access_duration: 5, access_unit: "minutes", amount: 12.5, send_email: false },
     });
     assert.equal(aylaInvite.response.status, 201, JSON.stringify(aylaInvite.payload));
     assert.equal(aylaInvite.payload.results[0].user.mustChangePassword, true);

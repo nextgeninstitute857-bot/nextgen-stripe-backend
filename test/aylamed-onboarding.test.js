@@ -118,6 +118,31 @@ test("quick profile accepts only tappable presets and exam-owned systems", () =>
   );
 });
 
+test("quick profile keeps every exam-owned weak system selected by the student", () => {
+  const broadExam = {
+    ...step1,
+    systems: [
+      "Cardiovascular",
+      "Renal",
+      "Respiratory",
+      "Gastrointestinal",
+      "Neurology",
+      "Endocrine",
+      "Hematology",
+      "Immunology",
+    ],
+  };
+  const quick = normalizeAylaOnboardingSubmission({
+    onboardingPath: "quick_profile",
+    studyStage: "first_pass_in_progress",
+    qbankCompleted: 25,
+    qbankAverage: 45,
+    selectedWeakAreas: broadExam.systems,
+  }, { examDefinition: broadExam });
+
+  assert.deepEqual(quick.selectedWeakAreas, broadExam.systems);
+});
+
 test("submitted diagnostic creates verified per-system baselines without inventing untested systems", () => {
   const session = {
     id: "diagnostic-1",

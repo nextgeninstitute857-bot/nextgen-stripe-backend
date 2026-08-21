@@ -142,6 +142,19 @@ test("an explicit entitlement creates a setup-required dashboard without inventi
   assert.equal(shell.active_dashboard.student_id, null);
 });
 
+test("a setup-required NCLEX dashboard inherits the RN or PN program assigned on enrollment", () => {
+  const shell = resolveAylaStudentShell({
+    userId: "user-1",
+    students: [],
+    enrollments: [enrollment("nclex-pn-paid", "full", "nclex", { exam_variant: "nclex_pn" })],
+    plansById: plans,
+    now,
+  });
+  assert.equal(shell.active_dashboard.profile_status, "setup_required");
+  assert.equal(shell.active_dashboard.exam_variant, "nclex_pn");
+  assert.equal(shell.active_dashboard.label, "NCLEX-PN");
+});
+
 test("a stale setup-required selection falls back to an existing ready dashboard", () => {
   const fallback = selectAylaReadyDashboardFallback({
     active_dashboard: { exam_track_id: "usmle_step_1", student_id: null, profile_status: "setup_required" },

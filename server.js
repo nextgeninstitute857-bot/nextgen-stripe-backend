@@ -73424,6 +73424,16 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
         if (!setupAccess.allowed || (!setupAccess.explicitly_scoped && ownedProfiles.length > 0)) {
           return aylaSendError(res, 403, "An active exam-scoped AylaMed enrollment is required before creating another exam dashboard", { reason: setupAccess.reason || "no_active_exam_entitlement", examTrackId });
         }
+        if (examTrackId === "nclex") {
+          const setupEnrollment = setupAccess.enrollment_id ? aylaGetItem(db, "aylaEnrollments", setupAccess.enrollment_id) : null;
+          const assignedVariant = aylaStudentNclexVariant(setupEnrollment || {});
+          if (!assignedVariant) {
+            return aylaSendError(res, 403, "An administrator must assign NCLEX-RN or NCLEX-PN before this dashboard can be created", { reason: "nclex_variant_not_assigned", examTrackId });
+          }
+          if (assignedVariant !== examVariant) {
+            return aylaSendError(res, 403, "This account is assigned to a different NCLEX program", { reason: "nclex_variant_mismatch", examTrackId, assigned_variant: assignedVariant });
+          }
+        }
       }
     }
     const recommendation = aylaRecommendation(normalizedInput);
@@ -89642,8 +89652,21 @@ async function ngAdminMobileInviteAyla(body = {}) {
   aylaEnsureSeedData(db);
   const email = aylaNormalizeEmail(body.email);
   if (!email) throw Object.assign(new Error("Email is required"), { statusCode: 400 });
-  const existingUser = aylaFindUserByEmail(db, email);
   const preserveExistingAccess = body.preserve_existing_access === true;
+  const requestedExamValue = aylaExamTrackFromPayload(body);
+  const requestedExamTrack = requestedExamValue === null || requestedExamValue === undefined || String(requestedExamValue).trim() === ""
+    ? null
+    : aylaCanonicalExamTrack(requestedExamValue);
+  if (!preserveExistingAccess && !requestedExamTrack) {
+    throw Object.assign(new Error("Choose the exam that this AylaMed student is assigned to"), { statusCode: 400, code: "AYLA_EXAM_ASSIGNMENT_REQUIRED" });
+  }
+  const assignedExamVariant = requestedExamTrack === "nclex"
+    ? normalizeAylaNclexVariant(body.exam_variant || body.examVariant || body.nclex_type || body.nclexType)
+    : "";
+  if (!preserveExistingAccess && requestedExamTrack === "nclex" && !assignedExamVariant) {
+    throw Object.assign(new Error("Choose NCLEX-RN or NCLEX-PN for this student"), { statusCode: 400, code: "NCLEX_VARIANT_REQUIRED" });
+  }
+  const existingUser = aylaFindUserByEmail(db, email);
   const preservedEnrollment = preserveExistingAccess && existingUser
     ? ngAdminMobilePreservedAylaEnrollment(db, existingUser.id, body)
     : null;
@@ -89698,6 +89721,12 @@ async function ngAdminMobileInviteAyla(body = {}) {
   enrollment.invited_by_admin = true;
   enrollment.user_email = user.email;
   enrollment.user_name = user.name || email;
+  if (requestedExamTrack === "nclex") {
+    enrollment.exam_variant = assignedExamVariant;
+    enrollment.examVariant = assignedExamVariant;
+    enrollment.nclex_type = aylaNclexVariantCode(assignedExamVariant);
+    enrollment.nclexType = aylaNclexVariantCode(assignedExamVariant);
+  }
   const payment = aylaRecordAdminAccessPayment(db, { enrollment, user, plan, payload: body, source: "admin_access_invitation" });
   aylaSetItem(db, "aylaEnrollments", enrollment);
   const delivery = await ngAdminMobileSendAylaInvite({ db, user, temporaryPassword, accessReport: accessWindow, sendEmail: body.send_email !== false });
