@@ -580,6 +580,7 @@ const RECORDING_ASSIGNMENT_BUILD = "v222-safe-recording-detach";
 const RECORDING_DUPLICATE_CLEANUP_BUILD = "v223-safe-recording-duplicate-cleanup";
 const RECORDING_LABEL_CORRECTIONS_BUILD = LMS_RECORDING_LABEL_CORRECTIONS_BUILD;
 const LMS_KNOWN_SCHEDULE_REPAIR_BUILD = "v260-known-missed-holiday-transactional-recovery";
+const LMS_DERMATOLOGY_CNS_SCHEDULE_REPAIR_BUILD = "v263-dermatology-cns-transactional-schedule-repair";
 const STUDENT_NOTES_RESOLVER_BUILD = "v225-course-system-day-notes-resolver";
 const LMS_ASSESSMENT_NOTES_SCOPE_BUILD = "v257-assessment-notes-scopes";
 const AYLA_ADAPTIVE_CORE_BUILD = "v227-verified-adaptive-loop";
@@ -651,6 +652,34 @@ const NEXTGEN_MSK_2026_07_29_SCHEDULE_REPAIR = Object.freeze({
     { day_id: "6cacc0bf-7ca2-401e-aeff-a0b67e3ffb1c:day:23:d347b0ca-c928-460f-8801-2eed937bf21f", date: "2026-08-07", system_day: 11, pages: "489-492" },
     { day_id: "6cacc0bf-7ca2-401e-aeff-a0b67e3ffb1c:day:24:518211d2-a979-4a33-acfe-916353171060", date: "2026-08-08", system_day: 12, pages: "493-495" },
     { day_id: "6cacc0bf-7ca2-401e-aeff-a0b67e3ffb1c:day:25:452872c2-6d1e-4985-9cbb-d1442b42b46f", date: "2026-08-10", system_day: 13, pages: "496-498" },
+  ]),
+});
+const NEXTGEN_DERMATOLOGY_CNS_2026_08_SCHEDULE_REPAIR = Object.freeze({
+  course_id: "6cacc0bf-7ca2-401e-aeff-a0b67e3ffb1c",
+  insertion_after_date: "2026-08-14",
+  cns_start_date: "2026-08-21",
+  cns_start_session_id: "37301895-5a31-4af8-87b0-2ae52162c9ae",
+  original_cns_day_ids: Object.freeze([
+    "6cacc0bf-7ca2-401e-aeff-a0b67e3ffb1c:day:28:aee5474e-c0ba-4c8d-be9c-d1110f3f2d4c",
+    "6cacc0bf-7ca2-401e-aeff-a0b67e3ffb1c:day:29:77d9db7c-042e-4988-bb4d-0f68368e453d",
+    "6cacc0bf-7ca2-401e-aeff-a0b67e3ffb1c:day:30:579a5ba8-ee68-41cc-9e58-505a3b732946",
+    "6cacc0bf-7ca2-401e-aeff-a0b67e3ffb1c:day:31:c31a8d85-0b6d-4f36-8c1d-f9a07122517c",
+    "6cacc0bf-7ca2-401e-aeff-a0b67e3ffb1c:day:32:b96e4833-2064-40ab-9eeb-6bdf42ff0ef8",
+    "6cacc0bf-7ca2-401e-aeff-a0b67e3ffb1c:day:33:07f524f6-3fcf-4166-b72c-78854bad936e",
+  ]),
+  inserted_rows: Object.freeze([
+    { date: "2026-08-15", type: "teaching", system_day: 1, day_id: "6cacc0bf-7ca2-401e-aeff-a0b67e3ffb1c:day:dermatology:b2a63e8b-bbe1-486a-8ea5-a0150ec12716", session_id: "2aa21d07-415a-44e6-b046-5564ce9527ae" },
+    { date: "2026-08-17", type: "teaching", system_day: 2, day_id: "6cacc0bf-7ca2-401e-aeff-a0b67e3ffb1c:day:dermatology:7cb197f6-dbc8-4a3d-8611-9074eb4b300c", session_id: "8806a5e3-a990-4fe3-b02d-5c45d4feca85" },
+    { date: "2026-08-18", type: "teaching", system_day: 3, day_id: "6cacc0bf-7ca2-401e-aeff-a0b67e3ffb1c:day:dermatology:cd531369-481b-4d07-bc1a-f0f41b5b3558", session_id: "f75c2925-0d93-47bd-9467-3d08a869d143" },
+    { date: "2026-08-19", type: "holiday", system_day: null, day_id: "6cacc0bf-7ca2-401e-aeff-a0b67e3ffb1c:day:holiday:f6e7dda7-da1b-43da-867a-d73325308153", session_id: "a760f71d-7876-4299-8b90-804b65c78c89" },
+    { date: "2026-08-20", type: "teaching", system_day: 4, day_id: "6cacc0bf-7ca2-401e-aeff-a0b67e3ffb1c:day:dermatology:8ca285a5-7c12-48e5-a827-d2ec2bf7934d", session_id: "35b88a22-6ff8-46f7-8426-c7b90330d89d" },
+  ]),
+  tail_session_ids: Object.freeze([
+    "9018518d-11ab-4131-bd0e-bedb272b4d56",
+    "5e48bc03-e8f4-415d-a9a2-a0df379e18ca",
+    "6cbf2ea3-edd9-4c8e-961b-6e6223209bfb",
+    "b0f5db91-9691-4922-9623-e737e19daff0",
+    "21475844-4fcc-4ce3-a74e-2d2b4c138a19",
   ]),
 });
 const aylaPrivatePilotContentActivationState = {
@@ -1400,6 +1429,7 @@ function getNextGenConfiguredLiveSessionLink() {
 const NEXTGEN_STEP1_ROADMAP_SYSTEM_SEQUENCE = [
   "Cardiology",
   "MSK",
+  "Dermatology",
   "Central Nervous System",
   "Reproductive",
   "Endocrinology",
@@ -2735,6 +2765,39 @@ async function ngRunKnownScheduleStartupReconciliation() {
   } finally {
     ngKnownScheduleRepairState.running = false;
     ngKnownScheduleRepairState.last_finished_at = new Date().toISOString();
+  }
+}
+
+async function ngRunDermatologyCnsScheduleStartupReconciliation() {
+  if (ngDermatologyCnsScheduleRepairState.running) {
+    return ngDermatologyCnsScheduleRepairState.last_result;
+  }
+
+  ngDermatologyCnsScheduleRepairState.running = true;
+  ngDermatologyCnsScheduleRepairState.last_started_at = new Date().toISOString();
+  ngDermatologyCnsScheduleRepairState.last_error = null;
+
+  try {
+    const source = await readLiveDb();
+    const mutation = await mutateJsonCopyOnWrite(source, (draft) => ngReconcileKnownDermatologyCnsSchedule(draft, {
+      actorId: "system:dermatology-cns-schedule-repair",
+    }));
+    const result = mutation.result;
+    if (result.changed) {
+      await writeLiveDb(mutation.value, {
+        teachingAccessSource: "startup_dermatology_cns_schedule_reconciliation",
+      });
+    }
+
+    ngDermatologyCnsScheduleRepairState.last_result = result;
+    ngDermatologyCnsScheduleRepairState.last_success_at = new Date().toISOString();
+    return result;
+  } catch (error) {
+    ngDermatologyCnsScheduleRepairState.last_error = error.message;
+    throw error;
+  } finally {
+    ngDermatologyCnsScheduleRepairState.running = false;
+    ngDermatologyCnsScheduleRepairState.last_finished_at = new Date().toISOString();
   }
 }
 
@@ -11502,6 +11565,8 @@ app.get("/health", async (req, res) => {
     recording_label_corrections: ngRecordingLabelReconciliationState,
     lms_known_schedule_repair_build: LMS_KNOWN_SCHEDULE_REPAIR_BUILD,
     lms_known_schedule_repair: ngKnownScheduleRepairState,
+    lms_dermatology_cns_schedule_repair_build: LMS_DERMATOLOGY_CNS_SCHEDULE_REPAIR_BUILD,
+    lms_dermatology_cns_schedule_repair: ngDermatologyCnsScheduleRepairState,
     lms_known_msk_notes_catchup_build: LMS_KNOWN_MSK_NOTES_CATCHUP_BUILD,
     lms_known_msk_notes_catchup: ngKnownMskNotesCatchupState,
     student_notes_resolver_build: STUDENT_NOTES_RESOLVER_BUILD,
@@ -61667,6 +61732,631 @@ function ngReconcileKnownMskMissedHolidaySchedule(db = {}, {
   return result;
 }
 
+function ngReconcileKnownDermatologyCnsSchedule(db = {}, {
+  actorId = "system:dermatology-cns-schedule-repair",
+  now = new Date().toISOString(),
+} = {}) {
+  const rule = NEXTGEN_DERMATOLOGY_CNS_2026_08_SCHEDULE_REPAIR;
+  const protectedBuckets = [
+    "users", "enrollments", "payments", "plans", "recordings", "notes", "flashcards",
+    "flashcardProgress", "assessments", "assessmentAttempts", "roadmapProgress",
+    "dailyTaskProgress", "pointEvents", "weakConceptLogs", "adaptiveAssignments",
+    "adaptiveFlashcardQueues", "attendance", "leaderboard", "liveSessions",
+  ];
+  const result = {
+    build: LMS_DERMATOLOGY_CNS_SCHEDULE_REPAIR_BUILD,
+    checked: true,
+    changed: false,
+    repaired: false,
+    already_correct: false,
+    safe_stop: false,
+    course_id: rule.course_id,
+    dermatology_days: 0,
+    cns_days: 0,
+    cns_start_date: rule.cns_start_date,
+    inserted_schedule_rows: 0,
+    new_tail_sessions_created: 0,
+    original_roadmap_days_preserved: false,
+    original_sessions_preserved: false,
+    original_session_urls_preserved: false,
+    recordings_preserved: false,
+    august_15_recording_preserved: false,
+    august_15_recording_disconnected_from_cns: false,
+    deleted_records: 0,
+    final_teaching_date: null,
+    reason: null,
+  };
+  const safeStop = (reason) => {
+    result.safe_stop = true;
+    result.reason = reason;
+    return result;
+  };
+  const clone = (value) => JSON.parse(JSON.stringify(value));
+  const sameSnapshot = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+  const identityAndUrls = (item = {}) => {
+    const snapshot = {};
+    for (const [key, value] of Object.entries(item || {})) {
+      if (
+        key === "id" || key === "recording_key" || key === "recording_id" ||
+        key === "meeting_id" || key === "zoom_meeting_id" || key === "session_id" ||
+        key.endsWith("_url") || key.endsWith("_urls")
+      ) snapshot[key] = value ?? null;
+    }
+    return snapshot;
+  };
+  const nextScheduleDate = (date) => {
+    const cursor = new Date(`${date}T00:00:00Z`);
+    do cursor.setUTCDate(cursor.getUTCDate() + 1);
+    while (cursor.getUTCDay() === 0);
+    return cursor.toISOString().slice(0, 10);
+  };
+  const academicPacketSnapshot = (day = {}) => ({
+    system: day.system || day.chapter || "",
+    chapter: day.chapter || day.system || "",
+    first_aid_pages: day.first_aid_pages || day.fa_pages || null,
+    first_aid_topics: day.first_aid_topics || "",
+    live_teaching_topic: day.live_teaching_topic || "",
+    lecture_id: day.lecture_id || null,
+    lecture_title: day.lecture_title || "",
+    video_library_lecture: day.video_library_lecture || "",
+    uworld_qids: Array.isArray(day.uworld_qids) ? day.uworld_qids : [],
+    mapped_uworld_qids: Array.isArray(day.mapped_uworld_qids) ? day.mapped_uworld_qids : [],
+    assessment_id: day.assessment_id || null,
+    weekly_assessment_id: day.weekly_assessment_id || null,
+    grand_assessment_id: day.grand_assessment_id || null,
+  });
+  const setSequenceFields = (roadmap) => {
+    for (const { day, scheduleSlotNumber, instructionalDayNumber, systemDay, noClass } of ngRoadmapSequenceEntries(roadmap.days)) {
+      day.schedule_slot_number = scheduleSlotNumber;
+      day.order = scheduleSlotNumber;
+      day.day_number = noClass ? null : instructionalDayNumber;
+      day.instructional_day_number = noClass ? null : instructionalDayNumber;
+      day.system_day = noClass ? null : systemDay;
+      day.day_in_system = noClass ? null : systemDay;
+      day.week_number = noClass ? Math.ceil(scheduleSlotNumber / 7) : Math.ceil(instructionalDayNumber / 7);
+      if (!noClass) day.title = ngRoadmapCanonicalDayTitle(day);
+      day.updated_by = actorId;
+      day.updated_at = now;
+    }
+  };
+  const withDermatology = (sequence) => {
+    const source = Array.isArray(sequence) ? sequence.map((item) => String(item || "").trim()).filter(Boolean) : [];
+    const withoutDerm = source.filter((item) => ngNormalizeMasterMapSystemName(item) !== "Dermatology");
+    const mskIndex = withoutDerm.findIndex((item) => ngNormalizeMasterMapSystemName(item) === "MSK");
+    withoutDerm.splice(mskIndex >= 0 ? mskIndex + 1 : 0, 0, "Dermatology");
+    return withoutDerm;
+  };
+
+  const roadmapEntry = Object.entries(db.roadmaps || {}).find(([key, item]) => (
+    String(key) === rule.course_id || String(item?.course_id || item?.courseId || "") === rule.course_id
+  ));
+  const roadmapKey = roadmapEntry?.[0] || rule.course_id;
+  const roadmap = roadmapEntry?.[1] || null;
+  if (!roadmap || !Array.isArray(roadmap.days) || !roadmap.days.length) {
+    result.reason = "roadmap_not_found";
+    return result;
+  }
+
+  db.liveSessions = db.liveSessions || {};
+  db.recordings = db.recordings || {};
+  const insertedById = new Map(rule.inserted_rows.map((row) => [row.day_id, row]));
+  const existingInsertedDays = roadmap.days.filter((day) => insertedById.has(String(day?.id || "")));
+  const sourceCnsDay1 = roadmap.days.find((day) => String(day?.id || "") === rule.original_cns_day_ids[0]) || null;
+  const alreadyCorrect = Boolean(
+    existingInsertedDays.length === rule.inserted_rows.length &&
+    rule.inserted_rows.every((row) => {
+      const day = existingInsertedDays.find((item) => String(item.id || "") === row.day_id);
+      if (!day || ngKnownScheduleDate(day.date || day.scheduled_date) !== row.date) return false;
+      if (row.type === "holiday") return ngRoadmapDayIsNoClass(day);
+      return ngNormalizeMasterMapSystemName(day.system || day.chapter || "") === "Dermatology" &&
+        Number(day.system_day || day.day_in_system || 0) === Number(row.system_day);
+    }) &&
+    sourceCnsDay1 &&
+    ngKnownScheduleDate(sourceCnsDay1.date || sourceCnsDay1.scheduled_date) === rule.cns_start_date &&
+    ngNormalizeMasterMapSystemName(sourceCnsDay1.system || sourceCnsDay1.chapter || "") === "Central Nervous System" &&
+    Number(sourceCnsDay1.system_day || sourceCnsDay1.day_in_system || 0) === 1 &&
+    String(sourceCnsDay1.live_session_id || sourceCnsDay1.session_id || "") === rule.cns_start_session_id
+  );
+  if (alreadyCorrect) {
+    const teachingDays = roadmap.days.filter((day) => !ngRoadmapDayIsNoClass(day));
+    result.already_correct = true;
+    result.dermatology_days = teachingDays.filter((day) => ngNormalizeMasterMapSystemName(day.system || day.chapter || "") === "Dermatology").length;
+    result.cns_days = teachingDays.filter((day) => ngNormalizeMasterMapSystemName(day.system || day.chapter || "") === "Central Nervous System").length;
+    result.inserted_schedule_rows = rule.inserted_rows.length;
+    result.new_tail_sessions_created = rule.tail_session_ids.filter((id) => Boolean(db.liveSessions[id])).length;
+    result.original_roadmap_days_preserved = true;
+    result.original_sessions_preserved = true;
+    result.original_session_urls_preserved = true;
+    result.recordings_preserved = true;
+    result.august_15_recording_preserved = ngKnownScheduleSessionHasRecording(db, db.liveSessions[rule.inserted_rows[0].session_id] || {});
+    result.august_15_recording_disconnected_from_cns = String(sourceCnsDay1.live_session_id || sourceCnsDay1.session_id || "") !== rule.inserted_rows[0].session_id;
+    result.final_teaching_date = teachingDays.map((day) => ngKnownScheduleDate(day.date)).sort().at(-1) || null;
+    result.reason = "already_correct";
+    return result;
+  }
+  if (existingInsertedDays.length || rule.tail_session_ids.some((id) => Boolean(db.liveSessions[id]))) {
+    return safeStop("partial_previous_dermatology_cns_repair_detected");
+  }
+
+  const expectedDates = [...rule.inserted_rows.map((row) => row.date), rule.cns_start_date];
+  const currentRows = expectedDates.map((date) => ngKnownScheduleDayAt(roadmap, date));
+  for (let index = 0; index < currentRows.length; index += 1) {
+    const day = currentRows[index];
+    if (!day || String(day.id || "") !== rule.original_cns_day_ids[index]) {
+      return safeStop(`cns_calendar_precondition_failed:${expectedDates[index]}`);
+    }
+    if (
+      ngNormalizeMasterMapSystemName(day.system || day.chapter || "") !== "Central Nervous System" ||
+      Number(day.system_day || day.day_in_system || 0) !== index + 1
+    ) return safeStop(`cns_packet_precondition_failed:day_${index + 1}`);
+  }
+  for (const row of rule.inserted_rows) {
+    const day = ngKnownScheduleDayAt(roadmap, row.date);
+    const sessionId = String(day?.live_session_id || day?.session_id || "");
+    if (sessionId !== row.session_id || !db.liveSessions[row.session_id]) {
+      return safeStop(`calendar_session_precondition_failed:${row.date}`);
+    }
+  }
+  if (String(currentRows.at(-1)?.live_session_id || currentRows.at(-1)?.session_id || "") !== rule.cns_start_session_id) {
+    return safeStop("cns_start_session_precondition_failed");
+  }
+  if (!db.liveSessions[rule.cns_start_session_id]) return safeStop("cns_start_session_missing");
+  if (!ngKnownScheduleSessionHasRecording(db, db.liveSessions[rule.inserted_rows[0].session_id])) {
+    return safeStop("dermatology_day_1_recording_precondition_failed");
+  }
+  const holidayRule = rule.inserted_rows.find((row) => row.type === "holiday");
+  if (ngKnownScheduleSessionHasRecording(db, db.liveSessions[holidayRule.session_id])) {
+    return safeStop("august_19_recording_conflicts_with_no_class_day");
+  }
+  const holidayAttendance = Object.values(db.attendance || {}).some((item) => (
+    String(item?.session_id || item?.live_session_id || "") === holidayRule.session_id
+  ));
+  if (holidayAttendance) return safeStop("august_19_attendance_conflicts_with_no_class_day");
+
+  const anchorIndex = roadmap.days.findIndex((day) => ngKnownScheduleDate(day?.date || day?.scheduled_date) === rule.insertion_after_date);
+  if (anchorIndex < 0 || String(roadmap.days[anchorIndex + 1]?.id || "") !== rule.original_cns_day_ids[0]) {
+    return safeStop("insertion_anchor_precondition_failed");
+  }
+  const prefixDays = roadmap.days.slice(0, anchorIndex + 1);
+  const academicSuffixDays = roadmap.days.slice(anchorIndex + 1);
+  if (academicSuffixDays.length < rule.original_cns_day_ids.length || academicSuffixDays.some((day) => ngRoadmapDayIsNoClass(day))) {
+    return safeStop("academic_suffix_precondition_failed");
+  }
+
+  const originalRoadmapDayIds = roadmap.days.map((day) => String(day?.id || "")).filter(Boolean);
+  const originalRoadmapDayIdSet = new Set(originalRoadmapDayIds);
+  const originalSessionIds = Object.keys(db.liveSessions);
+  const originalSessionSnapshots = new Map(originalSessionIds.map((id) => [id, identityAndUrls(db.liveSessions[id])]));
+  const originalRecordingSnapshots = new Map(Object.entries(db.recordings).map(([id, item]) => [id, identityAndUrls(item)]));
+  const originalCounts = Object.fromEntries(protectedBuckets.map((name) => [name, Object.keys(db[name] || {}).length]));
+  const originalDatesByDayId = new Map(roadmap.days.map((day) => [String(day?.id || ""), ngKnownScheduleDate(day?.date || day?.scheduled_date)]));
+  const originalPacketsByDayId = new Map(academicSuffixDays.map((day) => [String(day.id || ""), academicPacketSnapshot(day)]));
+  const originalCnsCount = roadmap.days.filter((day) => (
+    !ngRoadmapDayIsNoClass(day) && ngNormalizeMasterMapSystemName(day.system || day.chapter || "") === "Central Nervous System"
+  )).length;
+  const originalSessionByDate = new Map();
+  for (const day of roadmap.days) {
+    if (ngRoadmapDayIsNoClass(day)) continue;
+    const date = ngKnownScheduleDate(day.date || day.scheduled_date);
+    const sessionId = String(day.live_session_id || day.session_id || "").trim();
+    if (!date || !sessionId || !db.liveSessions[sessionId]) return safeStop(`roadmap_session_missing:${day.id || date}`);
+    if (originalSessionByDate.has(date)) return safeStop(`duplicate_original_classroom_date:${date}`);
+    originalSessionByDate.set(date, sessionId);
+  }
+
+  const artifactStateByDate = new Map(currentRows.slice(0, 5).map((day) => [
+    ngKnownScheduleDate(day.date || day.scheduled_date),
+    {
+      recording_link: day.recording_link || "",
+      notes_link: day.notes_link || "",
+      session_notes_id: day.session_notes_id || null,
+      session_notes_ready: day.session_notes_ready === true,
+      session_notes_draft_ready: day.session_notes_draft_ready === true,
+      notes_status: day.notes_status || "",
+      session_flashcards_ready: day.session_flashcards_ready === true,
+      session_flashcards_draft_ready: day.session_flashcards_draft_ready === true,
+      session_flashcards_count: Number(day.session_flashcards_count || 0),
+      session_flashcards_draft_count: Number(day.session_flashcards_draft_count || 0),
+    },
+  ]));
+  const dermTaskKeys = new Set([
+    "live_attendance", "read_session_notes", "session_flashcards_reviewed",
+    "community_confusion_post", "daily_task_submitted",
+  ]);
+  const buildDermatologyDay = (row) => {
+    const artifact = artifactStateByDate.get(row.date) || {};
+    const title = `Dermatology — Day ${row.system_day}`;
+    const taskItems = ngBuildDefaultTaskItems({}).filter((item) => dermTaskKeys.has(item.key)).map((item) => ({
+      ...item,
+      description: item.key === "live_attendance"
+        ? "Attend the scheduled Dermatology live class."
+        : item.key === "read_session_notes"
+          ? "Read the notes connected to this Dermatology session when published."
+          : item.key === "session_flashcards_reviewed"
+            ? "Review flashcards generated from this Dermatology session."
+            : item.description || "",
+    }));
+    return {
+      id: row.day_id,
+      course_id: rule.course_id,
+      date: row.date,
+      scheduled_date: row.date,
+      system: "Dermatology",
+      chapter: "Dermatology",
+      topic: title,
+      title,
+      description: "Completed live Dermatology teaching day. The matching class recording, notes, and session flashcards remain connected to this calendar day as they are attached or published.",
+      resources: ["Live class", "Class recording", "Class notes", "Session flashcards", "Community Q&A"],
+      resource_links: [],
+      first_aid_topics: "Dermatology",
+      first_aid_pages: null,
+      live_teaching_topic: title,
+      lecture_id: null,
+      lecture_title: "",
+      video_library_lecture: "",
+      uworld_qids: [],
+      mapped_uworld_qids: [],
+      qid_count: 0,
+      uworld_target: "",
+      homework: "Review the connected Dermatology recording and notes, then complete the session flashcards when published.",
+      tasks: clone(taskItems),
+      task_items: taskItems,
+      assessment_task: "",
+      assessment_day: false,
+      assessment_id: null,
+      weekly_assessment_id: null,
+      weekly_assessment_ready: false,
+      grand_assessment_id: null,
+      grand_assessment_ready: false,
+      flashcards_enabled: true,
+      live_session_id: row.session_id,
+      session_id: row.session_id,
+      status: "scheduled",
+      roadmap_status: "scheduled",
+      is_schedule_placeholder: false,
+      is_published: true,
+      published: true,
+      source: "known_dermatology_cns_schedule_repair",
+      created_by: actorId,
+      created_at: now,
+      updated_by: actorId,
+      updated_at: now,
+      ...artifact,
+    };
+  };
+  const insertedDays = rule.inserted_rows.map((row) => {
+    if (row.type === "teaching") return buildDermatologyDay(row);
+    const day = ngClearNoClassRoadmapFields({
+      id: row.day_id,
+      course_id: rule.course_id,
+      date: row.date,
+      scheduled_date: row.date,
+      system: "Dermatology",
+      chapter: "Dermatology",
+      title: "Holiday / No Live Class",
+      description: "No live class was held on 19 August 2026. Dermatology Day 4 continued on 20 August and CNS Day 1 begins on 21 August.",
+      status: "holiday",
+      roadmap_status: "holiday",
+      is_schedule_placeholder: true,
+      is_published: true,
+      published: true,
+      source: "known_dermatology_cns_schedule_repair",
+      created_by: actorId,
+      created_at: now,
+      updated_by: actorId,
+      updated_at: now,
+    });
+    day.title = "Holiday / No Live Class";
+    day.description = "No live class was held on 19 August 2026. Dermatology Day 4 continued on 20 August and CNS Day 1 begins on 21 August.";
+    return day;
+  });
+
+  const desiredRoadmapDays = [...prefixDays, ...insertedDays, ...academicSuffixDays];
+  roadmap.days = desiredRoadmapDays;
+  let cursorDate = rule.inserted_rows.at(-1).date;
+  for (const day of academicSuffixDays) {
+    const fromDate = originalDatesByDayId.get(String(day.id || "")) || "";
+    cursorDate = nextScheduleDate(cursorDate);
+    day.date = cursorDate;
+    day.scheduled_date = cursorDate;
+    day.live_session_id = null;
+    day.session_id = null;
+    day.session_notes_id = null;
+    day.session_notes_ready = false;
+    day.session_notes_draft_ready = false;
+    day.notes_status = "";
+    day.session_flashcards_ready = false;
+    day.session_flashcards_draft_ready = false;
+    day.session_flashcards_count = 0;
+    day.session_flashcards_draft_count = 0;
+    day.recording_link = "";
+    day.notes_link = "";
+    day.status = "scheduled";
+    day.roadmap_status = "scheduled";
+    day.is_schedule_placeholder = false;
+    day.shifted_from_date = fromDate || null;
+    day.schedule_repair = LMS_DERMATOLOGY_CNS_SCHEDULE_REPAIR_BUILD;
+    day.updated_by = actorId;
+    day.updated_at = now;
+  }
+  setSequenceFields(roadmap);
+
+  const selectedSessionIds = new Set();
+  for (const day of prefixDays) {
+    const sessionId = String(day?.live_session_id || day?.session_id || "").trim();
+    if (sessionId) selectedSessionIds.add(sessionId);
+  }
+  const dayBySessionId = new Map();
+  for (const [index, day] of insertedDays.entries()) {
+    const row = rule.inserted_rows[index];
+    const session = db.liveSessions[row.session_id];
+    if (!session) throw new Error(`Dermatology/CNS repair lost classroom ${row.session_id}`);
+    if (selectedSessionIds.has(row.session_id)) throw new Error(`Dermatology/CNS repair selected classroom twice: ${row.session_id}`);
+    selectedSessionIds.add(row.session_id);
+    if (row.type === "holiday") {
+      Object.assign(session, {
+        course_id: rule.course_id,
+        roadmap_day_id: day.id,
+        scheduled_date: row.date,
+        scheduled_time: ngRoadmapClassTime(roadmap, day),
+        scheduled_timezone: ngRoadmapTimezone(roadmap, day),
+        title: "Holiday / No Live Class",
+        topic: "Holiday / No Live Class",
+        status: "cancelled",
+        day_number: null,
+        instructional_day_number: null,
+        system: "Dermatology",
+        system_day: null,
+        archived_from_active: true,
+        no_class_placeholder: true,
+        cancelled_reason: "roadmap_holiday_2026_08_19",
+        updated_by: actorId,
+        updated_at: now,
+      });
+      continue;
+    }
+    const title = ngBuildLiveSessionTitleFromRoadmap(db, roadmap, day);
+    Object.assign(session, {
+      course_id: rule.course_id,
+      roadmap_day_id: day.id,
+      scheduled_date: row.date,
+      scheduled_time: ngRoadmapClassTime(roadmap, day),
+      scheduled_timezone: ngRoadmapTimezone(roadmap, day),
+      title,
+      topic: title,
+      day_number: day.day_number,
+      instructional_day_number: day.instructional_day_number,
+      system: "Dermatology",
+      system_day: day.system_day,
+      archived_from_active: false,
+      no_class_placeholder: false,
+      cancelled_reason: null,
+      updated_by: actorId,
+      updated_at: now,
+    });
+    day.live_session_id = session.id;
+    day.session_id = session.id;
+    dayBySessionId.set(String(session.id), day);
+  }
+
+  let tailSessionIndex = 0;
+  for (const day of academicSuffixDays) {
+    const date = ngKnownScheduleDate(day.date || day.scheduled_date);
+    let sessionId = originalSessionByDate.get(date) || "";
+    if (!sessionId) {
+      sessionId = rule.tail_session_ids[tailSessionIndex] || "";
+      tailSessionIndex += 1;
+      if (!sessionId) throw new Error(`Dermatology/CNS repair has no tail classroom for ${date}`);
+      db.liveSessions[sessionId] = {
+        id: sessionId,
+        course_id: rule.course_id,
+        status: "scheduled",
+        source: "known_dermatology_cns_schedule_tail_extension",
+        created_by: actorId,
+        created_at: now,
+      };
+    }
+    const session = db.liveSessions[sessionId];
+    if (!session) throw new Error(`Dermatology/CNS repair lost shifted classroom ${sessionId}`);
+    if (selectedSessionIds.has(sessionId)) throw new Error(`Dermatology/CNS repair selected classroom twice: ${sessionId}`);
+    selectedSessionIds.add(sessionId);
+    const title = ngBuildLiveSessionTitleFromRoadmap(db, roadmap, day);
+    Object.assign(session, {
+      course_id: rule.course_id,
+      roadmap_day_id: day.id,
+      scheduled_date: date,
+      scheduled_time: ngRoadmapClassTime(roadmap, day),
+      scheduled_timezone: ngRoadmapTimezone(roadmap, day),
+      title,
+      topic: title,
+      day_number: day.day_number,
+      instructional_day_number: day.instructional_day_number,
+      system: day.system || day.chapter || "",
+      system_day: day.system_day,
+      archived_from_active: false,
+      no_class_placeholder: false,
+      cancelled_reason: null,
+      updated_by: actorId,
+      updated_at: now,
+    });
+    day.live_session_id = session.id;
+    day.session_id = session.id;
+    dayBySessionId.set(String(session.id), day);
+  }
+  result.new_tail_sessions_created = tailSessionIndex;
+  if (tailSessionIndex !== rule.tail_session_ids.length) {
+    throw new Error(`Dermatology/CNS repair expected ${rule.tail_session_ids.length} tail classrooms, created ${tailSessionIndex}`);
+  }
+
+  const linkedBuckets = [
+    "recordings", "notes", "flashcards", "flashcardProgress", "assessments",
+    "assessmentAttempts", "roadmapProgress", "dailyTaskProgress", "pointEvents",
+    "weakConceptLogs", "adaptiveAssignments", "adaptiveFlashcardQueues", "attendance",
+  ];
+  for (const bucketName of linkedBuckets) {
+    for (const item of Object.values(db[bucketName] || {})) {
+      if (!item || typeof item !== "object") continue;
+      const sessionId = String(item.session_id || item.live_session_id || "").trim();
+      const day = dayBySessionId.get(sessionId);
+      if (!day) continue;
+      const itemCourseId = String(item.course_id || item.courseId || "").trim();
+      if (itemCourseId && itemCourseId !== rule.course_id) continue;
+      const previousDayId = String(item.roadmap_day_id || item.day_id || "").trim();
+      item.roadmap_day_id = day.id;
+      if (item.day_id !== undefined) item.day_id = day.id;
+      if (Array.isArray(item.source_roadmap_day_ids) && previousDayId) {
+        item.source_roadmap_day_ids = ngReplaceRoadmapDayIdList(item.source_roadmap_day_ids, previousDayId, day.id);
+      }
+      if (ngNormalizeMasterMapSystemName(day.system || day.chapter || "") === "Dermatology") {
+        item.system = "Dermatology";
+        if (bucketName === "recordings") {
+          item.topic = `Dermatology — Day ${day.system_day}`;
+          if (item.title) item.title = `Dermatology — Day ${day.system_day}`;
+        }
+      }
+      item.updated_by = actorId;
+      item.updated_at = now;
+    }
+  }
+
+  const shiftedScheduleMetadata = {};
+  for (const day of academicSuffixDays) {
+    const beforeDate = originalDatesByDayId.get(String(day.id || "")) || "";
+    const afterDate = ngKnownScheduleDate(day.date || day.scheduled_date);
+    if (!beforeDate || beforeDate === afterDate) continue;
+    const partial = ngShiftLinkedScheduleMetadata(db, {
+      courseId: rule.course_id,
+      day,
+      fromDate: beforeDate,
+      toDate: afterDate,
+      actorId,
+    });
+    for (const [name, count] of Object.entries(partial)) {
+      shiftedScheduleMetadata[name] = Number(shiftedScheduleMetadata[name] || 0) + Number(count || 0);
+    }
+  }
+
+  const syncDayArtifacts = (day) => {
+    const sessionId = String(day.live_session_id || day.session_id || "").trim();
+    const session = db.liveSessions[sessionId] || {};
+    const recording = Object.values(db.recordings || {}).find((item) => String(item?.session_id || "") === sessionId) || null;
+    const note = db.notes?.[sessionId] || Object.values(db.notes || {}).find((item) => String(item?.session_id || "") === sessionId) || null;
+    const cards = Object.values(db.flashcards || {}).filter((item) => String(item?.session_id || "") === sessionId);
+    const publishedCards = cards.filter((item) => item.is_published === true || item.published === true || String(item.status || "").toLowerCase() === "published");
+    day.recording_link = recording?.recording_url || session.recording_url || day.recording_link || "";
+    day.notes_link = note?.notes_url || note?.url || day.notes_link || "";
+    day.session_notes_id = note ? sessionId : (day.session_notes_id || null);
+    day.session_notes_draft_ready = Boolean(note && (note.notes || note.cleaned_notes || note.student_notes || note.transcript_text || note.transcript_url));
+    day.session_notes_ready = Boolean(note && (note.published === true || note.is_published === true) && !["draft", "unpublished", "archived", "hidden"].includes(String(note.status || "").toLowerCase()));
+    day.notes_status = day.session_notes_ready ? "published" : day.session_notes_draft_ready ? "draft" : "";
+    day.session_flashcards_count = publishedCards.length;
+    day.session_flashcards_draft_count = cards.length;
+    day.session_flashcards_ready = publishedCards.length > 0;
+    day.session_flashcards_draft_ready = cards.length > 0;
+  };
+  for (const day of [...insertedDays.filter((day) => !ngRoadmapDayIsNoClass(day)), ...academicSuffixDays]) syncDayArtifacts(day);
+
+  const sequenceMetadataSync = ngSyncRoadmapSequenceMetadata(db, roadmap, { actorId });
+  // Some linked-metadata helpers retain historical roadmap references. Keep the
+  // corrected calendar array as the single schedule source of truth.
+  roadmap.days = desiredRoadmapDays;
+  setSequenceFields(roadmap);
+  const teachingDays = roadmap.days.filter((day) => !ngRoadmapDayIsNoClass(day));
+  roadmap.instructional_days = teachingDays.length;
+  roadmap.schedule_slots = roadmap.days.length;
+  roadmap.settings = roadmap.settings || {};
+  roadmap.settings.duration_days = teachingDays.length;
+  roadmap.settings.schedule_slots = roadmap.days.length;
+  roadmap.settings.system_sequence = withDermatology(roadmap.settings.system_sequence || NEXTGEN_STEP1_ROADMAP_SYSTEM_SEQUENCE);
+  if (Array.isArray(roadmap.system_sequence)) roadmap.system_sequence = withDermatology(roadmap.system_sequence);
+  roadmap.dermatology_cns_schedule_repair = {
+    build: LMS_DERMATOLOGY_CNS_SCHEDULE_REPAIR_BUILD,
+    inserted_day_ids: rule.inserted_rows.map((row) => row.day_id),
+    cns_day_1_id: rule.original_cns_day_ids[0],
+    cns_start_date: rule.cns_start_date,
+    preserved_existing_roadmap_days: originalRoadmapDayIds.length,
+    preserved_existing_sessions: originalSessionIds.length,
+    added_tail_session_ids: rule.tail_session_ids,
+    shifted_schedule_metadata: shiftedScheduleMetadata,
+    sequence_metadata_sync: sequenceMetadataSync,
+    applied_by: actorId,
+    applied_at: now,
+  };
+  roadmap.updated_by = actorId;
+  roadmap.updated_at = now;
+  db.roadmaps[roadmapKey] = roadmap;
+
+  const finalDermDays = rule.inserted_rows.filter((row) => row.type === "teaching").map((row) => (
+    roadmap.days.find((day) => String(day.id || "") === row.day_id) || null
+  ));
+  const finalHoliday = roadmap.days.find((day) => String(day.id || "") === holidayRule.day_id) || null;
+  const finalCnsDay1 = roadmap.days.find((day) => String(day.id || "") === rule.original_cns_day_ids[0]) || null;
+  const preservedRoadmapDays = originalRoadmapDayIds.every((id) => roadmap.days.some((day) => String(day?.id || "") === id));
+  const preservedSessionIds = originalSessionIds.every((id) => Boolean(db.liveSessions[id]));
+  const preservedSessionUrls = originalSessionIds.every((id) => sameSnapshot(originalSessionSnapshots.get(id), identityAndUrls(db.liveSessions[id])));
+  const preservedRecordings = Array.from(originalRecordingSnapshots.entries()).every(([id, snapshot]) => (
+    Boolean(db.recordings[id]) && sameSnapshot(snapshot, identityAndUrls(db.recordings[id]))
+  ));
+  const protectedCountsPreserved = protectedBuckets.every((name) => Object.keys(db[name] || {}).length >= Number(originalCounts[name] || 0));
+  const packetsPreserved = Array.from(originalPacketsByDayId.entries()).every(([id, snapshot]) => {
+    const day = roadmap.days.find((item) => String(item?.id || "") === id);
+    return Boolean(day && sameSnapshot(snapshot, academicPacketSnapshot(day)));
+  });
+  const finalCnsCount = teachingDays.filter((day) => ngNormalizeMasterMapSystemName(day.system || day.chapter || "") === "Central Nervous System").length;
+  const activeSessionIds = teachingDays.map((day) => String(day.live_session_id || day.session_id || "")).filter(Boolean);
+  const checks = {
+    four_dermatology_days_inserted: finalDermDays.length === 4 && finalDermDays.every((day, index) => (
+      day && ngKnownScheduleDate(day.date || day.scheduled_date) === rule.inserted_rows.filter((row) => row.type === "teaching")[index].date &&
+      ngNormalizeMasterMapSystemName(day.system || day.chapter || "") === "Dermatology" && Number(day.system_day || 0) === index + 1
+    )),
+    august_19_is_no_class: Boolean(finalHoliday && ngKnownScheduleDate(finalHoliday.date) === holidayRule.date && ngRoadmapDayIsNoClass(finalHoliday)),
+    cns_starts_august_21: Boolean(finalCnsDay1 && ngKnownScheduleDate(finalCnsDay1.date) === rule.cns_start_date && Number(finalCnsDay1.system_day || 0) === 1),
+    cns_day_1_uses_august_21_classroom: String(finalCnsDay1?.live_session_id || finalCnsDay1?.session_id || "") === rule.cns_start_session_id,
+    dermatology_recording_not_on_cns: String(finalCnsDay1?.live_session_id || finalCnsDay1?.session_id || "") !== rule.inserted_rows[0].session_id,
+    august_15_recording_preserved: ngKnownScheduleSessionHasRecording(db, db.liveSessions[rule.inserted_rows[0].session_id] || {}),
+    cns_packet_count_preserved: finalCnsCount === originalCnsCount,
+    every_original_academic_packet_preserved: packetsPreserved,
+    every_original_roadmap_day_preserved: preservedRoadmapDays,
+    every_original_session_preserved: preservedSessionIds,
+    every_original_session_identity_and_url_preserved: preservedSessionUrls,
+    every_recording_identity_and_url_preserved: preservedRecordings,
+    protected_record_counts_not_decreased: protectedCountsPreserved,
+    five_tail_classrooms_created: tailSessionIndex === 5,
+    one_schedule_row_per_date: new Set(roadmap.days.map((day) => ngKnownScheduleDate(day.date || day.scheduled_date))).size === roadmap.days.length,
+    one_active_classroom_per_teaching_day: activeSessionIds.length === teachingDays.length && new Set(activeSessionIds).size === teachingDays.length,
+    expected_schedule_growth: roadmap.days.length === originalRoadmapDayIds.length + rule.inserted_rows.length,
+  };
+  const failed = Object.entries(checks).filter(([, passed]) => passed !== true).map(([name]) => name);
+  if (failed.length) {
+    const diagnostic = {
+      original_days: originalRoadmapDayIds.length,
+      final_days: roadmap.days.length,
+      dermatology: finalDermDays.map((day) => day ? ({ id: day.id, date: day.date, system: day.system, system_day: day.system_day, status: day.status }) : null),
+      holiday: finalHoliday ? ({ id: finalHoliday.id, date: finalHoliday.date, status: finalHoliday.status, placeholder: finalHoliday.is_schedule_placeholder }) : null,
+      cns_day_1: finalCnsDay1 ? ({ id: finalCnsDay1.id, date: finalCnsDay1.date, system_day: finalCnsDay1.system_day, session_id: finalCnsDay1.live_session_id || finalCnsDay1.session_id }) : null,
+    };
+    throw new Error(`Dermatology/CNS transactional schedule verification failed: ${failed.join(", ")}; ${JSON.stringify(diagnostic)}`);
+  }
+
+  result.changed = true;
+  result.repaired = true;
+  result.reason = "repaired_transactionally";
+  result.dermatology_days = 4;
+  result.cns_days = finalCnsCount;
+  result.inserted_schedule_rows = rule.inserted_rows.length;
+  result.original_roadmap_days_preserved = true;
+  result.original_sessions_preserved = true;
+  result.original_session_urls_preserved = true;
+  result.recordings_preserved = true;
+  result.august_15_recording_preserved = true;
+  result.august_15_recording_disconnected_from_cns = true;
+  result.final_teaching_date = teachingDays.map((day) => ngKnownScheduleDate(day.date)).sort().at(-1) || null;
+  result.shifted_schedule_metadata = shiftedScheduleMetadata;
+  result.sequence_metadata_sync = sequenceMetadataSync;
+  result.checks = checks;
+  return result;
+}
+
 function ngResetObjectByCourse(db, key, courseId, shouldRemove = null) {
   const bucket = db[key] || {};
   let removed = 0;
@@ -87814,6 +88504,15 @@ const ngKnownScheduleRepairState = {
   last_error: null,
   last_result: null,
 };
+const ngDermatologyCnsScheduleRepairState = {
+  build: LMS_DERMATOLOGY_CNS_SCHEDULE_REPAIR_BUILD,
+  running: false,
+  last_started_at: null,
+  last_finished_at: null,
+  last_success_at: null,
+  last_error: null,
+  last_result: null,
+};
 const ngKnownMskNotesCatchupState = {
   build: LMS_KNOWN_MSK_NOTES_CATCHUP_BUILD,
   running: false,
@@ -88544,6 +89243,9 @@ async function startNextgenServer() {
   ngRunKnownScheduleStartupReconciliation()
     .then((result) => console.log("LMS known-schedule reconciliation:", result))
     .catch((error) => console.error("LMS known-schedule reconciliation failed:", error.message))
+    .then(() => ngRunDermatologyCnsScheduleStartupReconciliation())
+    .then((result) => console.log("LMS Dermatology/CNS schedule reconciliation:", result))
+    .catch((error) => console.error("LMS Dermatology/CNS schedule reconciliation failed:", error.message))
     .then(() => ngRunTeachingAccessStartupReconciliation())
     .then((result) => console.log("LMS teaching-day access reconciliation:", result))
     .catch((error) => console.error("LMS teaching-day access reconciliation failed:", error.message))

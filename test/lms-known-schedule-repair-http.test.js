@@ -5,6 +5,7 @@ import fs from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const COURSE_ID = "6cacc0bf-7ca2-401e-aeff-a0b67e3ffb1c";
 const BUILD = "v260-known-missed-holiday-transactional-recovery";
@@ -261,7 +262,7 @@ async function withServerFixture(fixture, callback) {
   const baseUrl = `http://127.0.0.1:${port}`;
   const output = [];
   const child = spawn(process.execPath, ["server.js"], {
-    cwd: path.resolve(new URL("..", import.meta.url).pathname),
+    cwd: path.resolve(fileURLToPath(new URL("..", import.meta.url))),
     env: {
       ...process.env,
       PORT: String(port),
@@ -271,6 +272,7 @@ async function withServerFixture(fixture, callback) {
       AYLA_AUTH_JWT_SECRET: "known-schedule-repair-ayla-secret",
       DATABASE_URL: "",
       OPENAI_API_KEY: "",
+      NEXTGEN_MSK_2026_07_30_RECORDING_KEY: RECORDING_KEY,
       NEXTGEN_BACKEND_HEARTBEAT_ENABLED: "false",
       NEXTGEN_AUTO_ZOOM_PREP_ENABLED: "false",
       ZOOM_RECORDING_RECOVERY_ENABLED: "false",
