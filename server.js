@@ -459,6 +459,12 @@ import {
   uploadVideoToVimeo,
 } from "./lib/content-video-vimeo.js";
 import {
+  applyAylaVimeoPlaybackConfig,
+  aylaVimeoPlaybackDomainFingerprint,
+  aylaVimeoProviderId,
+  selectAylaVimeoPlaybackCandidates,
+} from "./lib/aylamed-vimeo-playback-reconciliation.js";
+import {
   contentPathMatchesEdition,
   filterContentAssetsByEdition,
   filterContentReferencesByEdition,
@@ -589,6 +595,32 @@ const AYLA_SINGLE_ROADMAP_BUILD = "v230-single-roadmap-execution";
 const AYLA_MARKETING_BUILD = "v231-readiness-sharing-referrals";
 const AYLA_VIMEO_CATALOG_BUILD = VIMEO_LIBRARY_CATALOG_BUILD;
 const AYLA_PRIVATE_PILOT_BUILD = "v251-live-pilot-flow-recovery";
+const AYLA_VIMEO_PLAYBACK_BUILD = "v267-global-vimeo-domain-playback";
+const AYLA_VIMEO_PLAYBACK_RECONCILIATION_ENABLED = String(
+  process.env.AYLA_VIMEO_PLAYBACK_RECONCILIATION_DISABLED || "false",
+).toLowerCase() !== "true";
+const AYLA_VIMEO_PLAYBACK_BATCH_SIZE = Math.max(
+  1,
+  Math.min(100, Number(process.env.AYLA_VIMEO_PLAYBACK_BATCH_SIZE || 25) || 25),
+);
+const AYLA_VIMEO_PLAYBACK_INTERVAL_MS = Math.max(
+  60_000,
+  Number(process.env.AYLA_VIMEO_PLAYBACK_INTERVAL_MS || 60_000) || 60_000,
+);
+const aylaVimeoPlaybackReconciliationState = {
+  build: AYLA_VIMEO_PLAYBACK_BUILD,
+  enabled: AYLA_VIMEO_PLAYBACK_RECONCILIATION_ENABLED,
+  started: false,
+  running: false,
+  batchSize: AYLA_VIMEO_PLAYBACK_BATCH_SIZE,
+  intervalMs: AYLA_VIMEO_PLAYBACK_INTERVAL_MS,
+  lastStartedAt: null,
+  lastFinishedAt: null,
+  lastSuccessAt: null,
+  lastError: null,
+  lastResult: null,
+};
+let aylaVimeoPlaybackReconciliationTimer = null;
 const AYLA_STEP1_PILOT_DESTINATION_SCOPE = "private_step1_pilot";
 const AYLA_STUDENT_CATALOG_SCOPE_PREFIX = "student:";
 const AYLA_STEP1_PILOT_VIMEO_FOLDER_ID = "29973623";
@@ -11556,6 +11588,8 @@ app.get("/health", async (req, res) => {
       catalog_source_id: AYLA_STEP1_PILOT_VIMEO_SOURCE_ID,
     },
     aylamed_private_pilot_content_activation: aylaPrivatePilotContentActivationState,
+    aylamed_vimeo_playback_build: AYLA_VIMEO_PLAYBACK_BUILD,
+    aylamed_vimeo_playback_reconciliation: aylaVimeoPlaybackReconciliationState,
     memory_stability_build: MEMORY_STABILITY_BUILD,
     roadmap_extension_build: ROADMAP_EXTENSION_BUILD,
     roadmap_retrospective_revision_build: ROADMAP_RETROSPECTIVE_REVISION_BUILD,
@@ -81180,7 +81214,7 @@ function aylaStep1PilotCollectionControls() {
   ]));
 }
 
-function aylaPrivatePilotVimeoEmbedDomains() {
+function aylaVimeoEmbedDomains() {
   const configured = String(process.env.AYLA_VIMEO_EMBED_ALLOWED_DOMAINS || "")
     .split(",")
     .map((value) => value.trim())
@@ -81192,6 +81226,10 @@ function aylaPrivatePilotVimeoEmbedDomains() {
         "https://aylamedapp.com",
         "https://nextgenusmle.live",
       ];
+}
+
+function aylaPrivatePilotVimeoEmbedDomains() {
+  return aylaVimeoEmbedDomains();
 }
 
 function aylaStep1PilotVimeoNeedsResearch(row = {}) {
@@ -83916,6 +83954,188 @@ app.post("/api/ayla/admin/resources/sync-vimeo-library", async (req, res) => {
   }
 });
 
+function aylaVimeoPlaybackRows(db) {
+  return aylaValues(db, "aylaResources");
+}
+
+function aylaVimeoPlaybackFailureSummary(failures = []) {
+  return failures.reduce((summary, row) => {
+    const key = String(row.status || "provider_error");
+    summary[key] = Number(summary[key] || 0) + 1;
+    return summary;
+  }, {});
+}
+
+async function ngRunAylaVimeoPlaybackReconciliation(
+  reason = "scheduled_vimeo_playback_reconciliation",
+  { batchSize = AYLA_VIMEO_PLAYBACK_BATCH_SIZE } = {},
+) {
+  if (!AYLA_VIMEO_PLAYBACK_RECONCILIATION_ENABLED) {
+    return { skipped: true, reason: "disabled" };
+  }
+  if (!contentVideoStatus().configured) {
+    const skipped = { skipped: true, reason: "vimeo_token_not_configured" };
+    aylaVimeoPlaybackReconciliationState.lastResult = skipped;
+    return skipped;
+  }
+  if (aylaVimeoPlaybackReconciliationState.running) {
+    return { skipped: true, reason: "already_running" };
+  }
+  if (ngBackgroundMemoryIsHigh("ayla_vimeo_playback_reconciliation")) {
+    return { skipped: true, reason: "memory_guard" };
+  }
+
+  aylaVimeoPlaybackReconciliationState.running = true;
+  aylaVimeoPlaybackReconciliationState.lastStartedAt = aylaNow();
+  try {
+    const domains = normalizeVimeoEmbedDomains(aylaVimeoEmbedDomains());
+    const fingerprint = aylaVimeoPlaybackDomainFingerprint(
+      domains,
+      AYLA_VIMEO_PLAYBACK_BUILD,
+    );
+    const db = await readAylaDb();
+    const pendingIds = selectAylaVimeoPlaybackCandidates({
+      resources: aylaVimeoPlaybackRows(db),
+      fingerprint,
+      limit: 100_000,
+    });
+    const requestedIds = pendingIds.slice(0, Math.max(
+      1,
+      Math.min(100, Number(batchSize) || AYLA_VIMEO_PLAYBACK_BATCH_SIZE),
+    ));
+    if (!requestedIds.length) {
+      const complete = {
+        skipped: false,
+        reason,
+        complete: true,
+        pending_before: 0,
+        requested_videos: 0,
+        verified_videos: 0,
+        failed_videos: 0,
+        domains,
+      };
+      aylaVimeoPlaybackReconciliationState.lastResult = complete;
+      aylaVimeoPlaybackReconciliationState.lastSuccessAt = aylaNow();
+      aylaVimeoPlaybackReconciliationState.lastError = null;
+      return complete;
+    }
+
+    const providerResult = await ensureVimeoEmbedDomains({
+      videoIds: requestedIds,
+      domains,
+    });
+    const verifiedIds = new Set((providerResult.verified_videos || []).map(String));
+    const failedIds = new Set((providerResult.failures || [])
+      .map((row) => String(row.video_id || ""))
+      .filter(Boolean));
+    const configByVideoId = new Map((providerResult.video_configs || []).map((row) => [
+      String(row.video_id || ""),
+      row,
+    ]));
+    const failuresByVideoId = new Map();
+    for (const failure of providerResult.failures || []) {
+      const videoId = String(failure.video_id || "");
+      if (!videoId) continue;
+      const rows = failuresByVideoId.get(videoId) || [];
+      rows.push(failure);
+      failuresByVideoId.set(videoId, rows);
+    }
+    const updatedAt = aylaNow();
+    const retryAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const persisted = await mutateAylaDb(async (current) => {
+      let resourceRowsUpdated = 0;
+      let draftRowsUpdated = 0;
+      for (const table of ["aylaResources", "aylaVimeoCatalogDrafts"]) {
+        for (const original of aylaValues(current, table)) {
+          const videoId = aylaVimeoProviderId(original);
+          if (!videoId || (!verifiedIds.has(videoId) && !failedIds.has(videoId))) continue;
+          let next = original;
+          if (verifiedIds.has(videoId)) {
+            next = applyAylaVimeoPlaybackConfig(original, configByVideoId.get(videoId) || {}, {
+              fingerprint,
+              domains,
+              updatedAt,
+            });
+            delete next.vimeoEmbedReconcileFailure;
+            delete next.vimeoEmbedReconcileNextAttemptAt;
+          } else {
+            next = {
+              ...original,
+              vimeoEmbedReconcileAttemptedAt: updatedAt,
+              vimeoEmbedReconcileNextAttemptAt: retryAt,
+              vimeoEmbedReconcileFailure: (failuresByVideoId.get(videoId) || []).map((row) => ({
+                status: row.status || null,
+                domain: row.domain || null,
+                error: String(row.error || "Vimeo playback reconciliation failed").slice(0, 500),
+              })),
+              updatedAt,
+            };
+          }
+          aylaSetItem(current, table, next);
+          if (table === "aylaResources") resourceRowsUpdated += 1;
+          else draftRowsUpdated += 1;
+        }
+      }
+      await aylaLog(current, "vimeo-playback-reconciliation", "Vimeo embedded playback domains reconciled", {
+        build: AYLA_VIMEO_PLAYBACK_BUILD,
+        reason,
+        requested_videos: requestedIds.length,
+        verified_videos: verifiedIds.size,
+        failed_videos: failedIds.size,
+        resource_rows_updated: resourceRowsUpdated,
+        draft_rows_updated: draftRowsUpdated,
+        domains,
+      });
+      return { resourceRowsUpdated, draftRowsUpdated };
+    });
+    const result = {
+      skipped: false,
+      reason,
+      complete: pendingIds.length <= verifiedIds.size,
+      pending_before: pendingIds.length,
+      pending_after_estimate: Math.max(0, pendingIds.length - verifiedIds.size),
+      requested_videos: requestedIds.length,
+      verified_videos: verifiedIds.size,
+      failed_videos: failedIds.size,
+      resource_rows_updated: persisted.resourceRowsUpdated,
+      draft_rows_updated: persisted.draftRowsUpdated,
+      privacy_mode_updates: providerResult.privacy_mode_updates || 0,
+      failure_statuses: aylaVimeoPlaybackFailureSummary(providerResult.failures),
+      domains,
+    };
+    aylaVimeoPlaybackReconciliationState.lastResult = result;
+    aylaVimeoPlaybackReconciliationState.lastError = failedIds.size
+      ? `${failedIds.size} Vimeo video(s) deferred for provider retry`
+      : null;
+    if (verifiedIds.size) aylaVimeoPlaybackReconciliationState.lastSuccessAt = aylaNow();
+    return result;
+  } catch (error) {
+    aylaVimeoPlaybackReconciliationState.lastError = String(error.message || error).slice(0, 2000);
+    throw error;
+  } finally {
+    aylaVimeoPlaybackReconciliationState.running = false;
+    aylaVimeoPlaybackReconciliationState.lastFinishedAt = aylaNow();
+  }
+}
+
+function ngStartAylaVimeoPlaybackReconciliationScheduler() {
+  if (!AYLA_VIMEO_PLAYBACK_RECONCILIATION_ENABLED
+    || aylaVimeoPlaybackReconciliationState.started) {
+    return aylaVimeoPlaybackReconciliationTimer;
+  }
+  aylaVimeoPlaybackReconciliationState.started = true;
+  aylaVimeoPlaybackReconciliationTimer = setInterval(() => {
+    ngRunAylaVimeoPlaybackReconciliation()
+      .catch((error) => console.warn("AylaMed Vimeo playback reconciliation failed:", error.message));
+  }, AYLA_VIMEO_PLAYBACK_INTERVAL_MS);
+  aylaVimeoPlaybackReconciliationTimer.unref?.();
+  setTimeout(() => {
+    ngRunAylaVimeoPlaybackReconciliation("startup_vimeo_playback_reconciliation")
+      .catch((error) => console.warn("AylaMed Vimeo startup playback reconciliation failed:", error.message));
+  }, 20_000).unref?.();
+  return aylaVimeoPlaybackReconciliationTimer;
+}
+
 const AYLA_VIMEO_FOLDER_SYNC_ENABLED = String(process.env.AYLA_VIMEO_FOLDER_SYNC_DISABLED || "false").toLowerCase() !== "true";
 const AYLA_VIMEO_FOLDER_RUNNER_INTERVAL_MS = Math.max(
   30 * 60 * 1000,
@@ -84040,6 +84260,35 @@ app.get("/api/ayla/admin/resources/vimeo-catalog/sync-status", async (req, res) 
     });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load Vimeo folder sync status");
+  }
+});
+
+app.get("/api/ayla/admin/resources/vimeo-playback/status", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    return aylaSendOk(res, {
+      ...aylaVimeoPlaybackReconciliationState,
+      domains: normalizeVimeoEmbedDomains(aylaVimeoEmbedDomains()),
+      token_configured: contentVideoStatus().configured,
+    });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load Vimeo playback status");
+  }
+});
+
+app.post("/api/ayla/admin/resources/vimeo-playback/reconcile", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const batchSize = Math.max(1, Math.min(100, Number(
+      req.body.batch_size || req.body.batchSize || AYLA_VIMEO_PLAYBACK_BATCH_SIZE,
+    ) || AYLA_VIMEO_PLAYBACK_BATCH_SIZE));
+    const result = await ngRunAylaVimeoPlaybackReconciliation(
+      "manual_admin_vimeo_playback_reconciliation",
+      { batchSize },
+    );
+    return aylaSendOk(res, result);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to reconcile Vimeo playback");
   }
 });
 
@@ -89268,6 +89517,7 @@ async function startNextgenServer() {
   ngStartZoomRecordingRecoveryScheduler();
   ngStartContentOperationsScheduler();
   ngStartAylaVimeoFolderSyncScheduler();
+  ngStartAylaVimeoPlaybackReconciliationScheduler();
   console.log("AylaMed Vimeo automatic startup dispatch recovery is disabled; explicit admin resume remains available after preflight.");
   ngStartAylaContinuityEngagementScheduler();
   setTimeout(() => {
