@@ -79211,7 +79211,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     else plan.missingResourceTypes.push("internal_mcqs_for_focus");
   }
 
-  if (!plan.finalReviewMode && mix.reading !== false) {
+  if (mix.reading !== false) {
     const selection = selectAylaRoadmapReading({
       resources: reading,
       examTrack: student.examTrackId || student.exam_track_id || student.exam,
@@ -79222,19 +79222,24 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       preferredResourceIds: aylaCleanArray(tutorProposal.preferredResourceIds),
     });
     const pick = selection.resource ? [selection.resource] : [];
-    if (pick.length) {
+    const finalReviewReadingAllowed = !plan.finalReviewMode
+      || selection.resumed
+      || selection.match_level === "exact_topic";
+    if (pick.length && finalReviewReadingAllowed) {
       const readingLabel = pick[0].sourceLabelVisible ? pick[0].bookTitle || pick[0].title : pick[0].title || pick[0].topic || "Approved reading";
       aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "reading", pick, `${selection.resumed ? "Continue" : "Read"}: ${readingLabel} — ${pick[0].pageRange}`, {
         system: focusSystem,
         subsystem: pick[0].subsystem || focusSubsystem,
         topic: pick[0].topic || focusTopic,
-        rationale: `${selection.resumed ? "Resume" : "Open"} the ${selection.match_level.replace(/_/g, " ")} verified page-turn reading for today’s focus. The assignment opens the exact approved pages and completes only after every page is read.`,
+        rationale: plan.finalReviewMode
+          ? `${selection.resumed ? "Resume" : "Review"} this exact-topic verified page-turn reading because it supports the current final-review weakness without opening a broad new chapter.`
+          : `${selection.resumed ? "Resume" : "Open"} the ${selection.match_level.replace(/_/g, " ")} verified page-turn reading for today’s focus. The assignment opens the exact approved pages and completes only after every page is read.`,
       });
     }
-    else plan.missingResourceTypes.push(libraryEnabled ? "exact_page_reading_for_focus" : "library_feature_not_enabled");
+    else if (!plan.finalReviewMode) plan.missingResourceTypes.push(libraryEnabled ? "exact_page_reading_for_focus" : "library_feature_not_enabled");
   }
 
-  if (!plan.finalReviewMode && mix.video !== false && contentHubEnabled) {
+  if (mix.video !== false && contentHubEnabled) {
     const selection = selectAylaRoadmapVideo({
       videos,
       examTrack: student.examTrackId || student.exam_track_id || student.exam,
@@ -79263,7 +79268,9 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
           system: focusSystem,
           subsystem: pick[0].subsystem || focusSubsystem,
           topic: pick[0].topic || focusTopic,
-          rationale: pick[0].supplemental === true
+          rationale: plan.finalReviewMode
+            ? `${selection.resumed ? "Resume" : "Watch"} this verified ${selection.match_level.replace(/_/g, " ")} lecture as targeted final-review support for the same weakness; watch position and completion are saved.`
+            : pick[0].supplemental === true
             ? `${selection.resumed ? "Resume" : "Watch"} this verified Step 2 CK clinical lecture as a non-scoring MCCQE supplement for today’s ${selection.match_level.replace(/_/g, " ")} focus; watch position and completion are saved, but MCCQE readiness remains MCCQE-specific.`
             : `${selection.resumed ? "Resume" : "Watch"} the ${selection.match_level.replace(/_/g, " ")} verified embedded video for today’s focus; watch position and completion are saved.`,
         },
@@ -79284,14 +79291,16 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     else plan.missingResourceTypes.push("external_questions_for_focus");
   }
 
-  if (!plan.finalReviewMode && mix.flashcards !== false) {
+  if (mix.flashcards !== false) {
     const pick = select(cards, Math.max(1, Math.min(15, Math.round(effectiveCapacity / 20))));
     if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "flashcards", pick, `${pick.length} recall cards — ${focusSystem}`, {
       estimatedMinutes: Math.max(5, pick.length),
       system: focusSystem,
       subsystem: focusSubsystem,
       topic: focusTopic,
-      rationale: "Spaced recall for today’s exact focus; Again/Hard responses return through the revision queue.",
+      rationale: plan.finalReviewMode
+        ? "Targeted final-review recall for the same focus; Again/Hard responses remain in the revision queue."
+        : "Spaced recall for today’s exact focus; Again/Hard responses return through the revision queue.",
     });
     else plan.missingResourceTypes.push("flashcards_for_focus");
   }
@@ -79303,7 +79312,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   plan.empty = assignments.length === 0;
   plan.message = assignments.length
     ? plan.finalReviewMode
-      ? `Final review is active with ${assessmentDecision.daysToTarget} day${assessmentDecision.daysToTarget === 1 ? "" : "s"} to the target. AylaMed is using due revision, weak-area QBank work and readiness checks without opening broad new reading or video topics.`
+      ? `Final review is active with ${assessmentDecision.daysToTarget} day${assessmentDecision.daysToTarget === 1 ? "" : "s"} to the target. AylaMed prioritizes due revision, weak-area QBank work and readiness checks, then adds only verified focus-matched lecture, recall or exact-topic reading support that fits the day.`
       : `Today’s verified plan is saved around one focus: ${[focusSystem, focusSubsystem, focusTopic].filter(Boolean).join(" — ")}. Due revision and overdue work were prioritized before new content.`
     : "No verified resources match today’s focus. Upload/approve books, Vimeo mappings, question banks, flashcards or assessments; AylaMed will not invent references.";
   plan.missingResourceTypes = [...new Set(plan.missingResourceTypes)];
