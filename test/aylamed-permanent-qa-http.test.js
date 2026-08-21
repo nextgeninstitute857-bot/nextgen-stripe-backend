@@ -143,8 +143,17 @@ test("permanent QA follows register, admin entitlement, and normal onboarding", 
     assert.equal(shell.payload.activeDashboard.exam_track_id, "usmle_step_1");
     assert.equal(Object.values(shell.payload.activeDashboard.features).every(Boolean), true);
   } finally {
-    child.kill("SIGTERM");
-    await new Promise((resolve) => child.once("exit", resolve));
+    if (child.exitCode === null) {
+      const exited = new Promise((resolve) => child.once("exit", resolve));
+      child.kill("SIGTERM");
+      await Promise.race([
+        exited,
+        new Promise((resolve) => setTimeout(() => {
+          if (child.exitCode === null) child.kill("SIGKILL");
+          resolve();
+        }, 5000)),
+      ]);
+    }
     await fs.rm(dataDir, { recursive: true, force: true });
   }
 });

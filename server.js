@@ -216,6 +216,7 @@ import {
   normalizeAylaShellExamTrack,
   resolveAylaExamFeatureEntitlement,
   resolveAylaStudentShell,
+  selectAylaReadyDashboardFallback,
 } from "./lib/aylamed-student-shell.js";
 import {
   AYLA_EXAM_SITES,
@@ -69632,6 +69633,17 @@ function aylaCurrentStudentShell(db, rawUser, siteContext = null) {
     requestedStudentId: selectedAvailable ? selectedStudent.id : null,
     requestedExamTrack: selectedExamTrack,
   });
+  const readyFallback = selectAylaReadyDashboardFallback(shell, {
+    forcedExamTrackId,
+    selectedProfileAvailable: selectedAvailable,
+    allowedExamTrackIds: [...siteTracks],
+  });
+  if (readyFallback) {
+    shell = aylaBuildStudentShell(db, selectionUser, {
+      requestedStudentId: readyFallback.student_id,
+      requestedExamTrack: readyFallback.exam_track_id,
+    });
+  }
   if ((shell.denied_reason || !shell.active_dashboard) && !forcedExamTrackId && !selectedExamTrack) {
     shell = aylaBuildStudentShell(db, selectionUser);
   }

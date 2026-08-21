@@ -108,6 +108,7 @@ test("Ayla notification feed distinguishes delivered work from pending promises 
   assert.ok(feed.some((row) => row.id === "rolling-plan-no-exam-date"));
   assert.ok(feed.some((row) => row.id === "timezone-needed"));
   assert.ok(feed.some((row) => row.title === "Cardiovascular is improving"));
+  assert.match(feed.find((row) => row.title === "Cardiovascular is improving").message, /\+15 points/);
   const miss = feed.find((row) => row.id === "question-miss-attempt-1");
   assert.equal(miss.status, "recorded");
   assert.match(miss.message, /no mistake card is marked as delivered yet/i);
@@ -117,6 +118,21 @@ test("Ayla notification feed distinguishes delivered work from pending promises 
   const review = feed.find((row) => row.id === "flashcard-review-review-1");
   assert.equal(review.status, "delivered");
   assert.match(review.message, /next recall is scheduled for 2026-07-31/i);
+});
+
+test("Ayla progress notifications derive the displayed change from the two displayed percentages", () => {
+  const feed = buildAylaMateActivityFeed({
+    student: { id: "student-1", examDate: "2026-09-01", timezone: "America/Los_Angeles" },
+    systemProgress: [{
+      system: "Internal Medicine",
+      baselinePercent: 0,
+      masteryPercent: 15,
+      improvementPercent: 0,
+      evidenceCount: 2,
+      trend: "improving",
+    }],
+  });
+  assert.match(feed.find((row) => row.title === "Internal Medicine is improving").message, /0% to 15% \(\+15 points\)/);
 });
 
 test("private pilot content is invisible to ordinary students", () => {
