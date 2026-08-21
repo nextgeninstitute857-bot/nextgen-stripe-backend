@@ -12,6 +12,9 @@ test("AylaMed invitations use a dedicated branded email transport", () => {
   const block = server.slice(start, end);
   assert.match(block, /transport:\s*["']aylamed["']/);
   assert.match(block, /brand:\s*["']aylamed["']/);
+  assert.match(block, /Temporary password:/);
+  assert.match(block, /must change this temporary password immediately/);
+  assert.doesNotMatch(block, /Use your existing password/);
 });
 
 test("AylaMed transport is isolated from the NextGen SMTP account", () => {
