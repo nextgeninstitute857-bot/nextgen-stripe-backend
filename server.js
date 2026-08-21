@@ -578,6 +578,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
+const CRM_AYLA_REPLY_BUILD = "v270-whatsapp-fast-ack-reliable-retry";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
@@ -11577,6 +11578,16 @@ app.get("/health", async (req, res) => {
     success: true,
     message: "Backend running",
     build: NEXTGEN_BACKEND_BUILD,
+    crm_ayla_reply_build: CRM_AYLA_REPLY_BUILD,
+    crm_ayla_reply_engine: {
+      whatsapp_provider_configured: Boolean(process.env.WHATSAPP_ACCESS_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID),
+      ai_provider_configured: isAIConfigured(),
+      heartbeat_started: Boolean(NG_V116_HEARTBEAT_STATE?.started),
+      heartbeat_running: Boolean(NG_V116_HEARTBEAT_STATE?.running),
+      heartbeat_ticks: Number(NG_V116_HEARTBEAT_STATE?.ticks || 0),
+      heartbeat_last_finish_at: NG_V116_HEARTBEAT_STATE?.last_finish_at || null,
+      heartbeat_has_error: Boolean(NG_V116_HEARTBEAT_STATE?.last_error),
+    },
     lms_teaching_access_build: LMS_TEACHING_ACCESS_BUILD,
     lms_teaching_access: ngTeachingAccessReconciliationState,
     lms_admission_mode: LMS_ADMISSION_MODE,
@@ -28550,12 +28561,69 @@ async function handleUniversalWebhook({ req, res, platform, integrationId = null
       ? ensureCrmArray(db, "integrations").find((item) => String(item.id) === String(integrationId))
       : getIntegrationByPlatform(db, cleanPlatform);
 
+    // Meta sends delivery/read status callbacks to the same WhatsApp endpoint.
+    // They are not student messages and must never create blank CRM leads.
+    if (cleanPlatform === "whatsapp") {
+      const value = req.body?.entry?.[0]?.changes?.[0]?.value || req.body?.value || req.body || {};
+      const inboundMessages = Array.isArray(value.messages) ? value.messages : [];
+      const statuses = Array.isArray(value.statuses) ? value.statuses : [];
+
+      if (!inboundMessages.length) {
+        let updatedStatuses = 0;
+        for (const status of statuses) {
+          const messageId = String(status?.id || "").trim();
+          if (!messageId) continue;
+          const log = ensureCrmArray(db, "message_logs").find((item) =>
+            String(item.provider_message_id || item.platform_message_id || "") === messageId
+          );
+          if (!log) continue;
+          log.status = status.status || log.status;
+          log.provider_status = status.status || null;
+          log.provider_response = status;
+          if (status.status === "delivered") log.delivered_at = nowIso();
+          if (status.status === "read") log.read_at = nowIso();
+          log.updated_at = nowIso();
+          updatedStatuses += 1;
+        }
+        if (updatedStatuses) await writeCrmDb(db);
+        return res.status(200).json({
+          success: true,
+          platform: cleanPlatform,
+          event: statuses.length ? "message_status" : "ignored_non_message",
+          statuses_received: statuses.length,
+          statuses_updated: updatedStatuses,
+        });
+      }
+    }
+
     const leadPayload = parseInboundSocialPayload({ platform: cleanPlatform, payload: req.body || {}, integration });
     const inboundText = leadPayload.source_text || "";
     const { lead, created } = upsertSocialLead(db, cleanPlatform, leadPayload);
     const conversation = appendSocialConversation(db, { lead, platform: cleanPlatform, direction: "inbound", text: inboundText, payload: req.body || {}, integration });
     createSocialClientDataEvent(db, { lead, platform: cleanPlatform, payload: leadPayload, integration });
     createIntegrationLog(db, { brand_id: integration?.brand_id || lead.brand_id || null, integration_id: integration?.id || null, platform: cleanPlatform, action: "inbound_webhook", status: "success", message: created ? `Created lead from ${cleanPlatform} inbound webhook` : `Updated lead from ${cleanPlatform} inbound webhook`, metadata: { lead_id: lead.id, conversation_id: conversation.id } });
+
+    // Acknowledge WhatsApp immediately after the inbound message is durable.
+    // AI generation and provider sending happen in the guarded background retry
+    // path so Meta is never kept waiting and a failed inline attempt cannot leave
+    // a stale lock that makes Ayla appear silent.
+    if (cleanPlatform === "whatsapp") {
+      await writeCrmDb(db);
+      res.status(200).json({
+        success: true,
+        platform: cleanPlatform,
+        lead_id: lead.id,
+        created,
+        conversation_id: conversation.id,
+        ai_auto: { queued: true, source: "whatsapp_fast_ack" },
+      });
+      ngScheduleAylaAutoReplyAfterInbound({
+        leadId: lead.id,
+        source: "whatsapp_fast_ack_wakeup",
+        delayMs: 1000,
+      });
+      return;
+    }
 
     let aiAutoResult = null;
     try {
@@ -49355,14 +49423,19 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
 }
 
 async function ngAylaRunPendingFullAiAuto({ db, brandId = null, limit = 10, source = "run_due_ai_auto", actorId = "run_due", force = false } = {}) {
+  const maxResults = Math.max(1, Math.min(50, Number(limit || 10)));
   const candidates = ngAffArray(db, "leads")
     .map(ngNormalizeLeadAiMode)
     .filter((lead) => !brandId || String(lead.brand_id || "") === String(brandId || ""))
-    .filter((lead) => String(lead.ai_mode || lead.automation_mode || "auto").toLowerCase() === "auto")
-    .slice(0, Math.max(1, Math.min(50, Number(limit || 10))));
+    .sort((a, b) => {
+      const bTime = Date.parse(b.last_inbound_at || b.last_message_at || b.updated_at || 0) || 0;
+      const aTime = Date.parse(a.last_inbound_at || a.last_message_at || a.updated_at || 0) || 0;
+      return bTime - aTime;
+    });
 
   const results = [];
   for (const lead of candidates) {
+    if (results.length >= maxResults) break;
     const messages = ngLeadConversationMessages(db, lead.id);
     const inbound = ngLatestInbound(messages);
     if (!inbound) continue;
