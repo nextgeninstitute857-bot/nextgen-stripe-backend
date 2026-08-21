@@ -54,3 +54,16 @@ test("WhatsApp provider authorization failures open a shared circuit breaker", (
   assert.match(server, /if \(!dryRun && ngWhatsAppProviderBlockStatus\(\)\.blocked\) return \[\]/);
   assert.match(server, /whatsapp_provider_block: ngWhatsAppProviderBlockStatus\(\)/);
 });
+
+test("WhatsApp webhook verification accepts the masked CRM integration secret", () => {
+  const verifier = server.slice(
+    server.indexOf("async function getMetaWebhookVerifyTokens"),
+    server.indexOf("function verifyTelegramSecretHeader"),
+  );
+
+  assert.match(verifier, /readCrmDb\(\)/);
+  assert.match(verifier, /ensureCrmArray\(db, "integrations"\)/);
+  assert.match(verifier, /integration\.api_secret/);
+  assert.match(verifier, /expectedTokens\.has\(String\(token\)\)/);
+  assert.match(verifier, /process\.env\.WHATSAPP_WEBHOOK_VERIFY_TOKEN/);
+});

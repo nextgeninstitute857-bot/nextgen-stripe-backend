@@ -28535,12 +28535,47 @@ async function sendSocialMessage({ db, integration, body = {} }) {
   return { message: `${getPlatformConfig(platform).label} is manual-first. Message saved to approval queue as a draft.`, platform, live_sent: false, approval_item: draft };
 }
 
-function verifyMetaWebhook(req, res) {
+async function getMetaWebhookVerifyTokens(req) {
+  const tokens = new Set();
+  const addToken = (value) => {
+    const clean = String(value || "").trim();
+    if (clean && !clean.includes("***")) tokens.add(clean);
+  };
+
+  addToken(process.env.META_VERIFY_TOKEN);
+  addToken(process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN);
+
+  const routePlatform = normalizeSocialPlatform(
+    req.params?.platform || (String(req.path || "").includes("whatsapp") ? "whatsapp" : "facebook"),
+  );
+
+  try {
+    const db = await readCrmDb();
+    const allowedPlatforms = routePlatform === "whatsapp"
+      ? new Set(["whatsapp"])
+      : new Set(["facebook", "instagram"]);
+
+    for (const integration of ensureCrmArray(db, "integrations")) {
+      if (!allowedPlatforms.has(normalizeSocialPlatform(integration.platform))) continue;
+      addToken(integration.webhook_verify_token);
+      addToken(integration.verify_token);
+      addToken(integration.api_secret);
+      addToken(integration.credentials?.webhook_verify_token);
+      addToken(integration.credentials?.verify_token);
+    }
+  } catch (error) {
+    console.error("Meta webhook verification configuration lookup failed:", error.message);
+  }
+
+  return tokens;
+}
+
+async function verifyMetaWebhook(req, res) {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
-  const expected = process.env.META_VERIFY_TOKEN || process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN;
-  if (mode === "subscribe" && token && expected && token === expected) return res.status(200).send(challenge);
+  const expectedTokens = await getMetaWebhookVerifyTokens(req);
+  if (mode === "subscribe" && token && expectedTokens.has(String(token))) return res.status(200).send(challenge);
   return res.status(403).send("Forbidden");
 }
 
