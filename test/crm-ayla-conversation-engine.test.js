@@ -134,6 +134,30 @@ test("quality gate rejects permission loops, repeated questions, duplicate repli
   });
   assert.ok(evaluateAylaConversationDecision({ decision: falseSignup, state, messages: [] }).includes("false_demo_enrollment_claim"));
 
+  const repeatedDemo = decision({
+    state,
+    stage: "demo_experience",
+    intent: "continue_demo",
+    reply: "Great—use the demo again: https://nextgenusmle.live/demo",
+    action: "reply_only",
+    ask_field: "none",
+  });
+  assert.ok(evaluateAylaConversationDecision({
+    decision: repeatedDemo,
+    state: { ...state, completed_actions: ["send_demo"] },
+    messages: [],
+  }).includes("repeated_demo_link_in_reply"));
+
+  const emptyPromise = decision({
+    state,
+    stage: "demo_experience",
+    intent: "continue_demo",
+    reply: "I'll send you the latest recording now.",
+    action: "reply_only",
+    ask_field: "none",
+  });
+  assert.ok(evaluateAylaConversationDecision({ decision: emptyPromise, state, messages: [] }).includes("promises_action_without_dispatch"));
+
   const forcedPriceMeeting = decision({
     state,
     stage: "handoff",
