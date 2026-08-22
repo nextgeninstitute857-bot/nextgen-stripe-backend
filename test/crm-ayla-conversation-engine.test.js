@@ -124,6 +124,19 @@ test("quality gate rejects permission loops, repeated questions, duplicate repli
   assert.ok(violations.includes("near_duplicate_reply"));
   assert.ok(violations.includes("stalled_after_exam_and_need_known"));
 
+  const tourPermission = decision({
+    state,
+    stage: "value_tour",
+    intent: "show_programme",
+    reply: "Would you like me to show you how the programme works?",
+    follow_up: "Please take the demo: https://nextgenusmle.live/demo",
+    action: "send_feature_tour",
+    ask_field: "none",
+    media_keys: ["dashboard", "recordings", "session_notes", "flashcards", "assessments"],
+  });
+  const tourViolations = evaluateAylaConversationDecision({ decision: tourPermission, state, messages: [] });
+  assert.ok(tourViolations.includes("feature_tour_intro_asks_permission"));
+
   const falseSignup = decision({
     state,
     stage: "demo_experience",
