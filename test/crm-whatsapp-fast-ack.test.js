@@ -10,7 +10,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v282-continuous-whatsapp-conversation"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v283-relevant-compact-sales-context"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: "message_status"/);
   assert.match(handler, /event: "ignored_non_message"/);
@@ -191,6 +191,25 @@ test("a public price question does not create or lock a Google Meet handoff", ()
   assert.match(server, /cleanLabel === cleanUrl \? cleanUrl/);
   assert.match(server, /This is an ongoing conversation, so do not greet again/);
   assert.match(server, /alreadyGreeted[\s\S]*?\(hi\|hello\|hey\)\[,!\.، \]\+/);
+});
+
+test("Ayla retrieves compact relevant approved training without duplicating the sales brain", () => {
+  const training = server.slice(
+    server.indexOf("function ngTrainingContextForFullAiAuto"),
+    server.indexOf("function ngLeadConversationMessages"),
+  );
+  const generator = server.slice(
+    server.indexOf("async function ngGenerateStudentAutoReply"),
+    server.indexOf("const latestSignals"),
+  );
+
+  assert.match(training, /b\.score - a\.score/);
+  assert.match(training, /\.slice\(0, 12\)/);
+  assert.match(training, /content\.slice\(0, 1600\)/);
+  assert.match(training, /\.slice\(0, 18000\)/);
+  assert.match(generator, /ngTrainingContextForFullAiAuto\(db, `\$\{latestInboundTextForRouting\}/);
+  assert.match(generator, /includeBackendSalesBrain: false/);
+  assert.match(server, /includeBackendSalesBrain \? ngBuildAylaBackendSalesBrain/);
 });
 
 test("WhatsApp provider authorization failures open a shared circuit breaker", () => {
