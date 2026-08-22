@@ -49823,13 +49823,18 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
       ? ngPickAylaMediaAssetsForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(latestInbound || {}), messages })
       : [];
     const aylaMediaAsset = aylaMediaAssets[0] || null;
+    const featureOverviewRequested = channel === "whatsapp" && ngAylaIsFullFeatureOverviewRequest(ngMessageText(latestInbound || {}));
+    const firstMediaCaption = aylaMediaAsset
+      ? ngRenderAylaMediaCaption(aylaMediaAsset, { lead, reply: featureOverviewRequested ? "" : ai.reply })
+      : "";
+    const outboundText = featureOverviewRequested && aylaMediaAsset ? firstMediaCaption : ai.reply;
 
     const result = await sendCrmMessage({
       db,
       brandId: lead.brand_id || getCrmBrandId(req, db),
       channel,
       to,
-      text: ai.reply,
+      text: outboundText,
       // v96: after inbound, Ayla must answer freely. Do not reuse approved templates for normal chat.
       templateId: null,
       templateVariables: { lead },
@@ -49837,7 +49842,7 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
       mediaUrl: aylaMediaAsset?.public_url || aylaMediaAsset?.relative_url || "",
       mediaId: aylaMediaAsset?.whatsapp_media_id || "",
       mediaType: aylaMediaAsset?.asset_type || "image",
-      caption: aylaMediaAsset ? ngRenderAylaMediaCaption(aylaMediaAsset, { lead, reply: ai.reply }) : "",
+      caption: firstMediaCaption,
       metadata: {
         source: "full_ai_auto",
         ai_auto: true,
@@ -49851,6 +49856,9 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
     if (aylaMediaAsset) ngMarkAylaMediaSent(db, lead, aylaMediaAsset, { source: "full_ai_auto", result });
     if (result?.success !== false && aylaMediaAssets.length > 1) {
       await ngSendAylaAdditionalMediaAssets({ db, assets: aylaMediaAssets, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "full_ai_auto" });
+    }
+    if (result?.success !== false && featureOverviewRequested) {
+      await ngSendAylaFeatureOverviewClosingMessage({ db, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "full_ai_auto" });
     }
 
     const adminAlert = await ngAylaMaybeSendConversationAdminAlert({
@@ -50057,18 +50065,23 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
       ? ngPickAylaMediaAssetsForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(latestInbound || {}), messages })
       : [];
     const aylaMediaAsset = aylaMediaAssets[0] || null;
+    const featureOverviewRequested = channel === "whatsapp" && ngAylaIsFullFeatureOverviewRequest(ngMessageText(latestInbound || {}));
+    const firstMediaCaption = aylaMediaAsset
+      ? ngRenderAylaMediaCaption(aylaMediaAsset, { lead, reply: featureOverviewRequested ? "" : ai.reply })
+      : "";
+    const outboundText = featureOverviewRequested && aylaMediaAsset ? firstMediaCaption : ai.reply;
 
     const sendResult = await sendCrmMessage({
       db,
       brandId: lead.brand_id || brandId || null,
       channel,
       to,
-      text: ai.reply,
+      text: outboundText,
       leadId: lead.id,
       mediaUrl: aylaMediaAsset?.public_url || aylaMediaAsset?.relative_url || "",
       mediaId: aylaMediaAsset?.whatsapp_media_id || "",
       mediaType: aylaMediaAsset?.asset_type || "image",
-      caption: aylaMediaAsset ? ngRenderAylaMediaCaption(aylaMediaAsset, { lead, reply: ai.reply }) : "",
+      caption: firstMediaCaption,
       metadata: {
         source,
         ai_auto: true,
@@ -50082,6 +50095,9 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
     if (aylaMediaAsset) ngMarkAylaMediaSent(db, lead, aylaMediaAsset, { source, result: sendResult });
     if (sendResult?.success !== false && aylaMediaAssets.length > 1) {
       await ngSendAylaAdditionalMediaAssets({ db, assets: aylaMediaAssets, lead, brandId: lead.brand_id || brandId || null, to, source });
+    }
+    if (sendResult?.success !== false && featureOverviewRequested) {
+      await ngSendAylaFeatureOverviewClosingMessage({ db, lead, brandId: lead.brand_id || brandId || null, to, source });
     }
 
     const adminAlert = await ngAylaMaybeSendConversationAdminAlert({
@@ -50535,22 +50551,30 @@ app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
           ? ngPickAylaMediaAssetsForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(inbound || {}), messages })
           : [];
         const aylaMediaAsset = aylaMediaAssets[0] || null;
+        const featureOverviewRequested = channel === "whatsapp" && ngAylaIsFullFeatureOverviewRequest(ngMessageText(inbound || {}));
+        const firstMediaCaption = aylaMediaAsset
+          ? ngRenderAylaMediaCaption(aylaMediaAsset, { lead, reply: featureOverviewRequested ? "" : ai.reply })
+          : "";
+        const outboundText = featureOverviewRequested && aylaMediaAsset ? firstMediaCaption : ai.reply;
         const sendResult = await sendCrmMessage({
           db,
           brandId: lead.brand_id || getCrmBrandId(req, db),
           channel,
           to,
-          text: ai.reply,
+          text: outboundText,
           leadId: lead.id,
           mediaUrl: aylaMediaAsset?.public_url || aylaMediaAsset?.relative_url || "",
           mediaId: aylaMediaAsset?.whatsapp_media_id || "",
           mediaType: aylaMediaAsset?.asset_type || "image",
-          caption: aylaMediaAsset ? ngRenderAylaMediaCaption(aylaMediaAsset, { lead, reply: ai.reply }) : "",
+          caption: firstMediaCaption,
           metadata: { source: "process_ai_auto", ai_auto: true, triggered_by: user.id, latest_inbound_id: inbound.id || null, ayla_media_asset_id: aylaMediaAsset?.id || null, ayla_media_usage_area: aylaMediaAsset?.usage_area || null }
         });
         if (aylaMediaAsset) ngMarkAylaMediaSent(db, lead, aylaMediaAsset, { source: "process_ai_auto", result: sendResult });
         if (sendResult?.success !== false && aylaMediaAssets.length > 1) {
           await ngSendAylaAdditionalMediaAssets({ db, assets: aylaMediaAssets, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "process_ai_auto" });
+        }
+        if (sendResult?.success !== false && featureOverviewRequested) {
+          await ngSendAylaFeatureOverviewClosingMessage({ db, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "process_ai_auto" });
         }
         const adminAlert = await ngAylaMaybeSendConversationAdminAlert({
           db,
@@ -67018,11 +67042,11 @@ function ngRenderAylaMediaCaption(asset = {}, { lead = {}, reply = "" } = {}) {
   if (template) return renderTemplateString(template, { lead, asset, reply });
   const usage = ngNormalizeMediaUsageKey(asset.usage_area || asset.usage || "general");
   const featureCaption = {
-    demo_lms: "📱 Student Dashboard — see today’s class, tasks, roadmap, progress and next best action in one organised place.",
-    recording: "🎥 Recordings Library — revisit every labelled system/day lecture and open its connected notes when your schedule is busy.",
-    session_notes: "📚 Session Notes — review clean tutor-approved notes connected to the exact class, recording, cards and weekly test.",
-    flashcards: "🧠 Adaptive Flashcards — weak areas, session notes and First Aid/class cards return in a focused daily review queue.",
-    assessment: "📝 Assessments & Weak-Area Progress — measure mastery, see improvement and return directly to targeted revision.",
+    demo_lms: "📱 *Student Dashboard & Roadmap*\nYour class, daily tasks, progress and next action appear in one organised place. This keeps every study day clear and prevents important work from being missed.",
+    recording: "🎥 *Recordings Library*\nEvery lecture is labelled by system, day and topic, with its connected notes. If you miss a live class, you can catch up in the correct sequence without losing continuity.",
+    session_notes: "📚 *Session Notes*\nClean tutor-approved notes remain connected to the exact class, recording, mapped questions and revision material. This makes review faster because everything from that session stays together.",
+    flashcards: "🧠 *Adaptive Flashcards & Weak Areas*\nYour performance decides which concepts return for revision. Difficult topics reappear through focused daily flashcards so your study time targets what needs the most attention.",
+    assessment: "📝 *Mentor-Led Assessments*\nSystem-end and progress assessments measure mastery and reveal weaknesses. The results guide targeted revision and help the roadmap respond to your improvement.",
     live_classroom: "🔴 NextGen Live Session — structured teaching connected to the same roadmap, notes and recording.",
     roadmap: "🗺️ 120-Day Roadmap — every system is organised into clear daily learning steps.",
     program_overview: "✨ NextGen USMLE — one organised learning ecosystem from live teaching to weak-area revision.",
@@ -67041,8 +67065,23 @@ async function ngSendAylaAdditionalMediaAssets({ db = {}, assets = [], lead = {}
     });
     ngMarkAylaMediaSent(db, lead, asset, { source: `${source}_feature_media`, result });
     results.push({ asset_id: asset.id, result });
+    await ngAylaSleep(250);
   }
   return results;
+}
+
+function ngAylaFeatureOverviewClosingText(db = {}) {
+  const salesAssets = typeof ngAylaGetSalesAssets === "function" ? ngAylaGetSalesAssets(db || {}) : {};
+  const demoDays = Number(salesAssets.demoDays || 7) || 7;
+  return `Please take our ${demoDays}-day demo and see the organisation and teaching quality for yourself:\nhttps://nextgenusmle.live/demo\n\nFor the clearest experience, attend one live session. If your schedule is limited, watch the matching labelled recording at a convenient time.`;
+}
+
+async function ngSendAylaFeatureOverviewClosingMessage({ db = {}, lead = {}, brandId = null, to = "", source = "ayla_auto_media" } = {}) {
+  const text = ngAylaFeatureOverviewClosingText(db);
+  return sendCrmMessage({
+    db, brandId, channel: "whatsapp", to, text, leadId: lead.id || null,
+    metadata: { source: `${source}_feature_tour_closing`, ai_auto: true, feature_tour_closing: true },
+  });
 }
 
 function ngMarkAylaMediaSent(db = {}, lead = {}, asset = {}, meta = {}) {
