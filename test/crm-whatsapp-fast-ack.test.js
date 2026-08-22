@@ -10,13 +10,36 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v273-crm-whatsapp-runtime-credentials"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v274-natural-whatsapp-greeting"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: statuses\.length \? "message_status" : "ignored_non_message"/);
   assert.ok(
     handler.indexOf("if (!inboundMessages.length)") < handler.indexOf("upsertSocialLead"),
     "status-only callbacks must be returned before lead creation",
   );
+});
+
+test("bare WhatsApp greetings stay conversational before the sales sequence", () => {
+  const signals = server.slice(
+    server.indexOf("function ngAylaLatestMessageSignals"),
+    server.indexOf("function ngBuildAylaBackendSalesBrain"),
+  );
+  const salesBrain = server.slice(
+    server.indexOf("function ngBuildAylaBackendSalesBrain"),
+    server.indexOf("function ngBuildAylaCommandContext"),
+  );
+  const replyPrompt = server.slice(
+    server.indexOf("async function ngGenerateStudentAutoReply"),
+    server.indexOf('app.post("/admin/crm/conversations/:leadId/ai-auto-send"'),
+  );
+
+  assert.match(signals, /bareGreeting/);
+  assert.match(signals, /bare_greeting: bareGreeting/);
+  assert.match(signals, /short_reply: shortReply/);
+  assert.match(salesBrain, /BARE GREETING TURN/);
+  assert.match(salesBrain, /Do not pitch the LMS, demo, live session, recording, UWorld library, Google Meet, pricing/);
+  assert.match(replyPrompt, /Do not begin the sales sequence/);
+  assert.match(replyPrompt, /Do not say "Thank you, Doctor" in response to a bare hello/);
 });
 
 test("WhatsApp inbound messages are persisted and acknowledged before AI work", () => {
