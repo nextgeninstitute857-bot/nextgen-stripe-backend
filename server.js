@@ -578,7 +578,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v279-live-lms-sales-grounding";
+const CRM_AYLA_REPLY_BUILD = "v280-validated-live-pricing";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
@@ -48321,7 +48321,7 @@ function ngAylaFormatPublicPlan(plan = {}) {
   return `${String(plan.name || "Current plan").trim()}: ${amount} ${cadence}${access}`;
 }
 
-async function ngAylaLiveLmsSalesGrounding() {
+async function ngAylaLiveLmsSalesGrounding({ structured = false } = {}) {
   try {
     const liveDb = await readLiveDb();
     const courses = Object.values(liveDb.courses || {})
@@ -48381,10 +48381,81 @@ async function ngAylaLiveLmsSalesGrounding() {
       "- Official pricing/enrollment page: https://nextgenusmle.live/pricing",
       "- Pricing rule: when asked, answer with the approved names and exact USD prices above immediately. Do not invent Basic, Standard, Premium, discounts, tiers, or benefits that are not present. A Google Meet may be offered after the transparent answer, never as a condition for learning the price.",
     ];
-    return facts.join("\n");
+    const snapshot = {
+      context: facts.join("\n"),
+      plans: plans.map((plan) => ({
+        name: String(plan.name || "Current plan").trim(),
+        price_cents: Math.max(0, Number(plan.price_cents || 0)),
+        currency: String(plan.currency || "usd").toLowerCase(),
+        billing_type: String(plan.billing_type || ""),
+        access_days: Number(plan.access_days || 0) || null,
+        public_line: ngAylaFormatPublicPlan(plan),
+      })),
+      pricing_url: "https://nextgenusmle.live/pricing",
+      demo_url: "https://nextgenusmle.live/demo",
+      current_date: now.date_key,
+      course_name: String(course?.name || ""),
+    };
+    return structured ? snapshot : snapshot.context;
   } catch (error) {
-    return `CURRENT LIVE LMS SALES FACTS: unavailable (${String(error?.message || "read failed").slice(0, 120)}). Do not invent current dates, topics, package names, or prices. Use the official pricing page https://nextgenusmle.live/pricing or offer human help.`;
+    const context = `CURRENT LIVE LMS SALES FACTS: unavailable (${String(error?.message || "read failed").slice(0, 120)}). Do not invent current dates, topics, package names, or prices. Use the official pricing page https://nextgenusmle.live/pricing or offer human help.`;
+    const snapshot = { context, plans: [], pricing_url: "https://nextgenusmle.live/pricing", demo_url: "https://nextgenusmle.live/demo", current_date: "", course_name: "" };
+    return structured ? snapshot : context;
   }
+}
+
+function ngAylaPricingDraftIsGrounded(reply = "", snapshot = {}) {
+  const text = String(reply || "").toLowerCase();
+  const plans = safeArray(snapshot.plans);
+  if (!text || !String(snapshot.pricing_url || "") || !text.includes(String(snapshot.pricing_url).toLowerCase())) return false;
+  if (!plans.length) return !/(basic|standard|premium)\s+package|\$\s*\d+/i.test(text);
+  const allowedNames = plans.map((plan) => String(plan.name || "").toLowerCase());
+  const inventedLegacyTier = ["basic package", "standard package", "premium package"]
+    .some((name) => text.includes(name) && !allowedNames.includes(name));
+  if (inventedLegacyTier) return false;
+  return plans.every((plan) => {
+    const name = String(plan.name || "").toLowerCase();
+    const amount = String(Math.max(0, Number(plan.price_cents || 0)) / 100);
+    return Boolean(name && text.includes(name) && text.includes(amount));
+  });
+}
+
+async function ngAylaGenerateGroundedPricingReply({ snapshot = {}, latestMessage = "", demoDays = 7 } = {}) {
+  const plans = safeArray(snapshot.plans);
+  if (!plans.length) {
+    return {
+      reply: `I don’t want to guess a price that may be wrong. Please check the current plans and enrollment options here:\n${snapshot.pricing_url || "https://nextgenusmle.live/pricing"}`,
+      usage: {},
+      model: "nextgen-ayla-live-pricing-safety",
+      fallback: true,
+    };
+  }
+
+  const exactFacts = plans.map((plan) => `- ${plan.public_line}`).join("\n");
+  const result = await callOpenAIResponsesAPI({
+    model: process.env.AI_MODEL || "gpt-4o-mini",
+    systemPrompt: `You are Ayla answering one WhatsApp pricing question naturally and transparently.
+Use only these current live LMS plan facts, with the plan names exactly as written:
+${exactFacts}
+Official pricing/enrollment link: ${snapshot.pricing_url}
+
+Answer the direct question first in 2-5 short WhatsApp lines. Include every plan above, its exact USD price/cadence, and the enrollment link exactly once. Do not mention or invent Basic Package, Standard Package, Premium Package, discounts, weekly mentoring, or other tiers/benefits unless one of those exact phrases exists in the live facts. Do not force a Google Meet. You may briefly mention the free ${Number(demoDays || 7)}-day demo after the enrollment link, but ask at most one question. Write only Ayla's reply.`,
+    userPrompt: `Student's latest message: ${JSON.stringify(String(latestMessage || ""))}`,
+    maxOutputTokens: 170,
+    jsonMode: false,
+  });
+  let reply = ngCleanAylaStudentReply(result.text || "");
+  let fallback = false;
+  if (!ngAylaPricingDraftIsGrounded(reply, snapshot)) {
+    fallback = true;
+    reply = `Absolutely — these are the current live options:\n${plans.map((plan) => `• ${plan.public_line}`).join("\n")}\n\nYou can compare and enroll here:\n${snapshot.pricing_url}`;
+  }
+  return {
+    reply,
+    usage: result.usage || {},
+    model: result.model || process.env.AI_MODEL || "gpt-4o-mini",
+    fallback,
+  };
 }
 
 function ngAylaRecordingTitle(assets = {}) {
@@ -49429,7 +49500,22 @@ Do not mention or pitch any programme, LMS, demo, live session, recording, UWorl
     };
   }
 
-  const liveLmsSalesGrounding = await ngAylaLiveLmsSalesGrounding();
+  const liveLmsSalesSnapshot = await ngAylaLiveLmsSalesGrounding({ structured: true });
+  const liveLmsSalesGrounding = liveLmsSalesSnapshot.context;
+  if (latestSignals.asks_price) {
+    const pricingReply = await ngAylaGenerateGroundedPricingReply({
+      snapshot: liveLmsSalesSnapshot,
+      latestMessage: latestInboundText,
+      demoDays: ngAylaGetSalesAssets(db || {}).demoDays || 7,
+    });
+    return {
+      reply: ngAylaApplyGreetingOnce(pricingReply.reply, cleanMessages),
+      usage: pricingReply.usage || {},
+      model: pricingReply.model || process.env.AI_MODEL || "gpt-4o-mini",
+      fallback: pricingReply.fallback === true,
+      intent: "live_lms_grounded_pricing",
+    };
+  }
   const backendSalesBrain = db ? ngBuildAylaBackendSalesBrain(db, lead, latestInboundText, history) : "";
   const backendActionContext = backendControlDecision?.intent
     ? `The backend detected this operational intent: ${backendControlDecision.intent}. Any protected CRM state change has already been applied. Respond naturally based on the conversation and current lead state; do not copy a canned reply.`
