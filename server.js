@@ -578,7 +578,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v278-exact-conversation-ownership";
+const CRM_AYLA_REPLY_BUILD = "v279-live-lms-sales-grounding";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
@@ -48099,7 +48099,7 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
     "- Google Meet state lock: once the student has requested Google Meet, shared a preferred time, is waiting for the Google Meet link, or has a scheduled Google Meet, do NOT restart live-session/recording/UWorld/demo/mentor-offer flow. Only acknowledge, answer direct questions, collect/reschedule time, or remind them that the Google Meet link will be sent at meeting time.",
     "- Acknowledgements like thank you/thanks/ok/noted/great/perfect after booking must get a simple acknowledgement or no sales push. Never treat them as a new sales trigger.",
     "- Greeting rule: use 'Hi Doctor' only once in a new conversation. After that, answer directly with Doctor / Yes Doctor / Sure Doctor. Never start every reply with Hi Doctor.",
-    "- July 1 Marathon rule: say 'we are starting the USMLE Step 1 120-Day Marathon from July 1'. Do NOT say 'NextGen is starting'. The roadmap starts with Cardiology first, then MSK, Central Nervous System, Reproductive, Endocrinology, GIT, Renal, Pulmonology, Immunology, Hematology, and Psychiatry. Do not include Biochemistry or Biostatistics in this July 1 roadmap unless the student asks why they are excluded.",
+    "- Cohort-date rule: use the current live LMS facts supplied for this reply. July 1, 2026 was the original cohort start and must never be described as upcoming after that date. The roadmap started with Cardiology and continues system-wise; describe the current live system from the LMS instead of repeating an old launch message.",
     "- LMS ecosystem rule: explain NextGen as a complete USMLE learning ecosystem in short human WhatsApp-style lines, not a long feature dump. Say the student gets everything in one place: roadmap, live sessions, recordings, UWorld Video Library, First Aid/UWorld mapping, notes, tasks, accountability assessments, progress tracking, leaderboard encouragement, Community Q&A, and Study Partner support.",
     "- Early value sequence: in the first few real replies after the student engages, naturally cover live sessions at 1:00 PM EST Monday-Friday, recent recording, YouTube/proof when available, UWorld Video Library, LMS/demo/dashboard, then ask whether the student attended any Dr. Ahmad/NextGen session before, ask exam timeline/weak areas, and move toward Google Meet when qualified. Do this slowly and conversationally, not as a dump.",
     ngBuildAylaMediaGuidance(db, lead),
@@ -48117,7 +48117,7 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
     recordingLink ? `- Main recording link available from AI Control: ${recordingLink}` : "- If no recording link is saved, offer to share the session recording rather than inventing a link.",
     liveSessionLink ? `- Live session link available from AI Control: ${liveSessionLink}` : "- If no live-session link is saved or available, say you can send the next live session link when it is available.",
     `- Scheduling timezone: always use ${timezone}. Do not mention Pakistan time unless the student asks for it.`,
-    "- Price rule: if price/cost/package/payment is asked, answer that pricing depends on plan duration/support needed, do not dump recordings again, and move the lead to Google Meet/admin guidance. Ask preferred time in EST.",
+    "- Price rule: if price/cost/package/payment is asked, give the exact active public plan names and USD prices from the current live LMS facts first. Never invent packages. Then provide the official pricing/enrollment link and offer the free demo or optional mentor guidance as one helpful next step.",
     "- Failed/weak/confused rule: reassure strongly that the student is in the right place; the key is roadmap, mentor feedback, UWorld-style practice, and weak-area correction; then offer recording/live session/UWorld demo and Google Meet guidance when positive.",
     `- Website/demo rule: when a demo is the right next step, use your own natural wording and share ${libraryLink || "https://nextgenusmle.live/demo"}. The configured offer is ${demoDays} days. Explain only the benefits relevant to this person instead of reciting a fixed feature list.`,
     "- Google Meet booking: before booking, ask whether the student attended any Dr. Ahmad/NextGen live session before. If yes, ask when and what they thought. Also ask exam timeline and weak areas. Then offer Google Meet mentor consultation. If the student directly gives a time after a Meet offer, confirm once and alert admin once.",
@@ -48282,6 +48282,109 @@ function ngAylaSafeMentorTeamLine(value = "") {
     return "Our USMLE-focused mentor team guides students through live teaching, recordings, roadmap support, and exam strategy.";
   }
   return ngAylaNormalizeMarketingLine(raw, "Our USMLE-focused mentor team guides students through live teaching, recordings, roadmap support, and exam strategy.");
+}
+
+function ngAylaDateTimePartsInZone(date = new Date(), timeZone = "America/New_York") {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(date).reduce((out, part) => {
+      if (part.type !== "literal") out[part.type] = part.value;
+      return out;
+    }, {});
+    return {
+      date_key: `${parts.year}-${parts.month}-${parts.day}`,
+      time_label: `${parts.hour}:${parts.minute}`,
+      timezone: timeZone,
+    };
+  } catch {
+    return { date_key: new Date(date).toISOString().slice(0, 10), time_label: "", timezone: timeZone };
+  }
+}
+
+function ngAylaFormatPublicPlan(plan = {}) {
+  const cents = Math.max(0, Number(plan.price_cents || 0));
+  const currency = String(plan.currency || "usd").toUpperCase();
+  let amount = `${currency} ${(cents / 100).toFixed(2)}`;
+  try {
+    amount = new Intl.NumberFormat("en-US", { style: "currency", currency }).format(cents / 100);
+  } catch {}
+  const billing = String(plan.billing_type || "").toLowerCase();
+  const cadence = billing.includes("month") ? "per month" : "one-time";
+  const access = Number(plan.access_days || 0) > 0 ? `, ${Number(plan.access_days)} days of access` : "";
+  return `${String(plan.name || "Current plan").trim()}: ${amount} ${cadence}${access}`;
+}
+
+async function ngAylaLiveLmsSalesGrounding() {
+  try {
+    const liveDb = await readLiveDb();
+    const courses = Object.values(liveDb.courses || {})
+      .filter((course) => course?.id && course.status !== "archived" && course.status !== "inactive");
+    const course = courses.find((item) => /step\s*1|usmle/i.test(`${item.name || ""} ${item.category || ""}`)) || courses[0] || null;
+    const courseId = String(course?.id || "");
+    const plans = Object.values(liveDb.plans || {})
+      .filter((plan) => plan?.id && plan.is_active !== false && Number(plan.price_cents || 0) > 0)
+      .filter((plan) => !courseId || !plan.course_id || String(plan.course_id) === courseId)
+      .sort((a, b) => Number(a.price_cents || 0) - Number(b.price_cents || 0));
+
+    const now = ngAylaDateTimePartsInZone(new Date(), "America/New_York");
+    const roadmap = courseId ? liveDb.roadmaps?.[courseId] || null : null;
+    const days = safeArray(roadmap?.days)
+      .filter((day) => String(day?.date || day?.scheduled_date || "").slice(0, 10))
+      .sort((a, b) => String(a.date || a.scheduled_date || "").localeCompare(String(b.date || b.scheduled_date || "")));
+    const todayDay = days.find((day) => String(day.date || day.scheduled_date || "").slice(0, 10) === now.date_key) || null;
+    const nextTeachingDay = days.find((day) => {
+      const date = String(day.date || day.scheduled_date || "").slice(0, 10);
+      const status = String(day.status || day.roadmap_status || "").toLowerCase();
+      return date >= now.date_key && !["holiday", "cancelled", "canceled", "no_class"].includes(status) && Boolean(day.system || day.chapter);
+    }) || null;
+    const todayStatus = String(todayDay?.status || todayDay?.roadmap_status || "").toLowerCase();
+    const todayIsTeaching = Boolean(todayDay && !["holiday", "cancelled", "canceled", "no_class"].includes(todayStatus) && (todayDay.system || todayDay.chapter));
+    const activeDay = todayIsTeaching ? todayDay : nextTeachingDay;
+    const activeSessionId = String(activeDay?.live_session_id || activeDay?.session_id || "");
+    const activeSession = activeSessionId
+      ? liveDb.liveSessions?.[activeSessionId] || null
+      : Object.values(liveDb.liveSessions || {}).find((session) => {
+          return String(session?.course_id || "") === courseId &&
+            String(session?.scheduled_date || "") === String(activeDay?.date || activeDay?.scheduled_date || "").slice(0, 10);
+        }) || null;
+    const earliestTeachingDate = days.find((day) => {
+      const status = String(day.status || day.roadmap_status || "").toLowerCase();
+      return !["holiday", "cancelled", "canceled", "no_class"].includes(status) && Boolean(day.system || day.chapter);
+    });
+    const programmeUnderway = Boolean(
+      earliestTeachingDate && String(earliestTeachingDate.date || earliestTeachingDate.scheduled_date || "").slice(0, 10) <= now.date_key
+    );
+
+    const facts = [
+      "CURRENT LIVE LMS SALES FACTS (read from the live LMS for this reply; these override older campaign or training dates):",
+      `- Current Eastern date/time: ${now.date_key}${now.time_label ? ` ${now.time_label}` : ""} America/New_York.`,
+      course ? `- Active course: ${String(course.name || "NextGen live programme").trim()}.` : "- No active course fact is available; do not invent one.",
+      programmeUnderway
+        ? "- The current cohort is already underway. Never say it is about to start on July 1 or that July 1 is upcoming. Explain that a student can join the ongoing organised cycle and use prior recordings/notes where available."
+        : "- The current cohort has not started yet; use only the live date shown here when describing its start.",
+      activeDay
+        ? `- Current/next roadmap item: ${String(activeDay.title || `${activeDay.system || activeDay.chapter || "System"}${activeDay.system_day ? ` Day ${activeDay.system_day}` : ""}`).trim()} on ${String(activeDay.date || activeDay.scheduled_date || "").slice(0, 10)}.`
+        : "- No current roadmap item is available; do not invent a topic or date.",
+      activeSession
+        ? `- Matching live session: ${String(activeSession.status || "scheduled")} on ${activeSession.scheduled_date || ""}${activeSession.scheduled_time ? ` at ${activeSession.scheduled_time} ${activeSession.scheduled_timezone || "America/New_York"}` : ""}.`
+        : "- No matching live-session record is available; do not promise that a session link is live now.",
+      plans.length
+        ? `- Approved public prices: ${plans.map(ngAylaFormatPublicPlan).join(" | ")}.`
+        : "- No active public paid plan is available. Do not invent package names or prices; say the current price is not available and offer human help.",
+      "- Official pricing/enrollment page: https://nextgenusmle.live/pricing",
+      "- Pricing rule: when asked, answer with the approved names and exact USD prices above immediately. Do not invent Basic, Standard, Premium, discounts, tiers, or benefits that are not present. A Google Meet may be offered after the transparent answer, never as a condition for learning the price.",
+    ];
+    return facts.join("\n");
+  } catch (error) {
+    return `CURRENT LIVE LMS SALES FACTS: unavailable (${String(error?.message || "read failed").slice(0, 120)}). Do not invent current dates, topics, package names, or prices. Use the official pricing page https://nextgenusmle.live/pricing or offer human help.`;
+  }
 }
 
 function ngAylaRecordingTitle(assets = {}) {
@@ -48634,6 +48737,10 @@ function ngAylaIsRescheduleOrCancelRequest(text = "") {
 }
 
 function ngAylaLeadGoogleMeetState(lead = {}, appointment = null) {
+  const priceOnlyHandoff = String(lead.google_meet_reason || "").toLowerCase() === "pricing_interest" &&
+    !appointment && !lead.google_meet_appointment_id && !lead.google_meet_time_collected_at;
+  if (priceOnlyHandoff) return false;
+
   const blob = [
     lead.stage, lead.lead_stage, lead.sales_stage, lead.pipeline_stage, lead.status, lead.next_action,
     lead.google_meet_booking_state, lead.google_meet_requested, lead.google_meet_appointment_id,
@@ -48989,11 +49096,9 @@ Our team will confirm the Google Meet link shortly. You will receive the link at
   }
 
   if (asksPrice) {
-    ngAylaCreateGoogleMeetRequest(db, lead, "pricing_interest", latestText);
-    return {
-      intent: "pricing_question_google_meet_handoff",
-      reply: ngAylaPricingReply(assets.timezone || "EST")
-    };
+    // Pricing is public information. Let Ayla answer from the live LMS plan facts.
+    // A price question alone must not create or lock a Google Meet handoff.
+    return null;
   }
 
   if (directGoogleMeetRequest || positiveGoogleMeetContext) {
@@ -49242,7 +49347,6 @@ async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }
   const hasMeetingState = db ? ngAylaLeadGoogleMeetState(lead, activeMeeting) : false;
   const needsProtectedControl =
     /\b(stop|unsubscribe|do not message|don't message|dont message|remove me|wrong number|not interested)\b/i.test(latestInboundTextForRouting) ||
-    ngAylaIsPriceQuestion(latestInboundTextForRouting) ||
     ngAylaIsDirectGoogleMeetRequest(latestInboundTextForRouting) ||
     (hasMeetingState && ngAylaLooksLikeTimePreference(latestInboundTextForRouting));
 
@@ -49286,7 +49390,6 @@ async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }
   const latestInboundText = ngMessageText(latestInbound || {});
   const trainingContext = db ? ngTrainingContextForFullAiAuto(db) : "";
   const commandContext = db ? ngBuildAylaCommandContext(db, lead) : "";
-
   const latestSignals = ngAylaLatestMessageSignals(latestInboundText, history);
 
   // A bare hello is a relationship-opening turn, not a sales turn. Give the model a
@@ -49326,6 +49429,7 @@ Do not mention or pitch any programme, LMS, demo, live session, recording, UWorl
     };
   }
 
+  const liveLmsSalesGrounding = await ngAylaLiveLmsSalesGrounding();
   const backendSalesBrain = db ? ngBuildAylaBackendSalesBrain(db, lead, latestInboundText, history) : "";
   const backendActionContext = backendControlDecision?.intent
     ? `The backend detected this operational intent: ${backendControlDecision.intent}. Any protected CRM state change has already been applied. Respond naturally based on the conversation and current lead state; do not copy a canned reply.`
@@ -49358,7 +49462,7 @@ Sales behavior:
 - After answering the student’s question, move the lead forward naturally: build trust, share/offer session recording, explain the UWorld Video Library, invite to live session, ask exam date/weak area, or offer Google Meet mentor consultation at the right time.
 - Session recordings are still an important proof asset. Do not suppress recording links. If a recording is useful for trust or the student asks about recordings, share it; just keep listening and continue the next turn when the student replies.
 - Never ignore the student’s direct question or instruction. Do not repeat a previous offer when the student asked something else. Answer first, then convert naturally.
-- If the student asks price/cost/package/payment, do NOT give numbers. Move them to Google Meet mentor guidance for program/pricing guidance.
+- If the student asks price/cost/package/payment, answer immediately using only the exact active public plan names and USD prices in the current live LMS facts. Never invent packages or hide public prices behind a Google Meet. Give the official pricing/enrollment link, then offer one relevant next step such as the free demo or optional mentor guidance.
 - If the student is weak, failed, old graduate, delayed, confused, or struggling, reassure first: tell them they are in the right place, explain roadmap/mentor feedback/weak-area correction, then guide to recording/demo/live session.
 - If the student says yes/ok/interested, send the next useful asset unless they asked a question. Do not jump to Google Meet time before value is shown.
 - Always use EST for scheduling unless the student asks for another timezone.
@@ -49383,6 +49487,8 @@ Hard safety/compliance:
 - Do not claim official affiliation with USMLE, NBME, UWorld, First Aid, Pathoma, or Sketchy.
 
 ${backendSalesBrain}
+
+${liveLmsSalesGrounding}
 
 Protected backend action context:
 ${backendActionContext}
