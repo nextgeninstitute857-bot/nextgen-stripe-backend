@@ -10,7 +10,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v279-live-lms-sales-grounding"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v280-validated-live-pricing"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: "message_status"/);
   assert.match(handler, /event: "ignored_non_message"/);
@@ -164,7 +164,7 @@ test("Ayla grounds current cohort and pricing answers in the live LMS", () => {
   assert.match(grounding, /Official pricing\/enrollment page: https:\/\/nextgenusmle\.live\/pricing/);
   assert.match(grounding, /Do not invent Basic, Standard, Premium/);
   assert.match(salesBrain, /give the exact active public plan names and USD prices/);
-  assert.match(replyPrompt, /const liveLmsSalesGrounding = await ngAylaLiveLmsSalesGrounding\(\)/);
+  assert.match(replyPrompt, /const liveLmsSalesSnapshot = await ngAylaLiveLmsSalesGrounding\(\{ structured: true \}\)/);
   assert.match(replyPrompt, /Never invent packages or hide public prices behind a Google Meet/);
   assert.match(replyPrompt, /\$\{liveLmsSalesGrounding\}/);
 });
@@ -183,6 +183,10 @@ test("a public price question does not create or lock a Google Meet handoff", ()
   assert.doesNotMatch(generator, /ngAylaIsPriceQuestion\(latestInboundTextForRouting\)/);
   assert.match(server, /const priceOnlyHandoff =/);
   assert.match(server, /if \(priceOnlyHandoff\) return false/);
+  assert.match(server, /function ngAylaPricingDraftIsGrounded/);
+  assert.match(server, /async function ngAylaGenerateGroundedPricingReply/);
+  assert.match(server, /if \(!ngAylaPricingDraftIsGrounded\(reply, snapshot\)\)/);
+  assert.match(server, /intent: "live_lms_grounded_pricing"/);
 });
 
 test("WhatsApp provider authorization failures open a shared circuit breaker", () => {
