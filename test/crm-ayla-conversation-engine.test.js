@@ -163,7 +163,7 @@ test("support and handoff remain explicit stages instead of restarting the sales
     intent: "login_problem",
     reply: "I’m checking the sign-in problem first. Which email do you use for your NextGen account?",
     action: "support_handoff",
-    ask_field: "none",
+    ask_field: "email",
     memory_patch: {
       name: "Dr Khan",
       exam: "USMLE Step 1",
@@ -175,6 +175,7 @@ test("support and handoff remain explicit stages instead of restarting the sales
   });
   assert.equal(support.stage, "enrolled_support");
   assert.equal(support.action, "support_handoff");
+  assert.equal(support.ask_field, "email");
 
   const handoff = decision({
     stage: "handoff",

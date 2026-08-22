@@ -73,7 +73,7 @@ test("Ayla uses natural discovery and then confidently presents the connected pr
   );
 
   assert.match(generator, /textFormat: aylaConversationTextFormat\(\)/);
-  assert.match(generator, /decision: normalizeAylaConversationDecision/);
+  assert.match(generator, /const decision = normalizeAylaConversationDecision/);
   assert.match(generator, /evaluateAylaConversationDecision/);
   assert.match(generator, /buildAylaConversationRepairPrompt/);
   assert.match(generator, /decision\.action === "send_feature_tour"/);
@@ -82,6 +82,8 @@ test("Ayla uses natural discovery and then confidently presents the connected pr
   assert.match(generator, /process\.env\.AYLA_MODEL \|\| process\.env\.AI_MODEL \|\| "gpt-4o-mini"/);
   assert.match(generator, /safeJsonParseFromAI\(result\.text \|\| "\{\}"\)/);
   assert.doesNotMatch(generator, /parseAIJson/);
+  assert.match(generator, /decision\.action === "send_feature_tour"/);
+  assert.match(generator, /decision\.follow_up = ngAylaFeatureOverviewClosingText/);
 });
 
 test("a positive interested reply triggers the tour only after context is known", () => {
