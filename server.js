@@ -16,6 +16,10 @@ import {
 } from "./lib/flashcard-postgres.js";
 import { planCrmDeliveryLockRetention } from "./lib/crm-delivery-lock-retention.js";
 import {
+  assertWebsiteProductRequest,
+  normalizeLmsEmailFrom,
+} from "./lib/product-boundaries.js";
+import {
   auditContentMediaLinks,
   auditContentVideoAliasMappings,
   auditContentVideoMappings,
@@ -30487,7 +30491,7 @@ async function sendTelegramMessage({ to, text = "", integration = {} }) {
 }
 
 function getEmailFromAddress() {
-  return (
+  return normalizeLmsEmailFrom(
     process.env.EMAIL_FROM ||
     process.env.RESEND_FROM_EMAIL ||
     process.env.SENDGRID_FROM_EMAIL ||
@@ -70064,8 +70068,8 @@ async function aylaLog(db, type, message, payload = {}) {
 
 const AYLA_AUTH_JWT_SECRET = process.env.AYLA_AUTH_JWT_SECRET || `${AUTH_JWT_SECRET}_aylamed`;
 const AYLA_TOKEN_DAYS = Number(process.env.AYLA_TOKEN_DAYS || 30) || 30;
-const AYLA_DEFAULT_SUCCESS_URL = process.env.AYLA_SUCCESS_URL || "https://nextgenusmle.live/aylamed/payment-success";
-const AYLA_DEFAULT_CANCEL_URL = process.env.AYLA_CANCEL_URL || "https://nextgenusmle.live/aylamed/payment-cancel";
+const AYLA_DEFAULT_SUCCESS_URL = process.env.AYLA_SUCCESS_URL || "https://aylamedapp.com/checkout/success";
+const AYLA_DEFAULT_CANCEL_URL = process.env.AYLA_CANCEL_URL || "https://aylamedapp.com/checkout/cancelled";
 
 function aylaNormalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
@@ -90789,6 +90793,7 @@ app.post("/admin/mobile/invitations", async (req, res) => {
     await requireAdmin(req);
     const product = String(req.body.product || "lms").trim().toLowerCase();
     if (!["lms", "aylamed", "both"].includes(product)) return res.status(400).json({ success: false, error: "product must be lms, aylamed, or both" });
+    assertWebsiteProductRequest({ origin: req.get("origin") || "", product });
     const results = [];
     const errors = [];
     if (["lms", "both"].includes(product)) {
