@@ -583,7 +583,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v289-progressive-value-conversation";
+const CRM_AYLA_REPLY_BUILD = "v290-interested-lead-feature-tour";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
@@ -48074,6 +48074,7 @@ function ngAylaLatestMessageSignals(latestInboundText = "", history = "") {
   const all = `${history || ""}\n${latestInboundText || ""}`.toLowerCase();
   const hasStep1 = /\bstep\s*1\b|step1|usmle\s*1/.test(all);
   const hasStep2 = /\bstep\s*2\b|step2|ck/.test(all);
+  const hasOtherExam = /\bstep\s*3\b|step3|\bplab\b|\bamc\b|\bmccqe\b|\bnclex(?:-rn|-pn|\s+rn|\s+pn)?\b/.test(all);
   const hasExamDate = /(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\b20\d{2}\b|\b\d{1,2}\s*(am|pm)\b|exam.*\b\d{1,2}\b)/i.test(all);
   const hasWeakArea = /(weak|difficulty|problem|struggling|fail|failed|attempt|immunology|biochem|pharma|pathology|uworld|nbme|low score|score)/i.test(all);
   const asksPrice = /(price|cost|fee|fees|package|payment|discount|charges|how much)/i.test(text);
@@ -48083,7 +48084,7 @@ function ngAylaLatestMessageSignals(latestInboundText = "", history = "") {
   const mentionsRecording = /(recording|video|lecture|youtube|watch)/i.test(all);
   const mentionsLibrary = /(library|uworld video|lms\.nextgen|150 hours|3000)/i.test(all);
   return {
-    has_exam_type: hasStep1 || hasStep2,
+    has_exam_type: hasStep1 || hasStep2 || hasOtherExam,
     has_exam_date: hasExamDate,
     has_weak_area: hasWeakArea,
     asks_price: asksPrice,
@@ -48197,8 +48198,10 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
       ? "- BARE GREETING TURN — highest priority for this reply: respond like a normal friendly person in one or two short WhatsApp lines. Introduce yourself naturally once and ask one easy discovery question, starting with the student's name when it is unknown. Do not pitch the LMS, demo, live session, recording, UWorld library, Google Meet, pricing, or a feature list on this turn. Do not say 'Thank you, Doctor' merely because the student said hello, and do not overuse exclamation marks."
       : "",
     "- Never expose internal approval, review, training, CRM, retrieval, or knowledge-grounding language to a student. Say 'our First Aid-integrated teaching' or 'our LMS material', not 'approved material' or 'approval'.",
+    "- The admissions WhatsApp number is an intentional contact point. A person who messages it is normally exploring the programme. After the friendly opening, do not repeatedly ask whether they want to learn more; learn their exam and main need, then explain the relevant value confidently.",
     "- When the student is learning about the programme, first explain its practical benefits in warm, enthusiastic language: one organised place for roadmap, live teaching, recordings, questions, weak-area correction, revision, notes, and accountability. Only after the feature explanation, invite them to take the free demo and include the direct demo link.",
-    "- Full feature-overview rule: when a student asks about several features, the complete LMS, or the purpose/benefit of features, use one short professional line per feature. Explain what it does and how it helps the student. Cover dashboard, roadmap, live classes, recordings, session notes, adaptive flashcards, weak-area tracking, and assessments. Then invite the student to the demo. Finally recommend attending one live session, or watching the matching labelled recording when time is limited. Do not place the demo invitation before the explanation.",
+    "- Interested-lead programme-tour rule: once the student's exam and main need are known and they confirm interest, explain how the system works together and let the backend send separate pictures with short captions for dashboard/roadmap, labelled recordings, session notes, baseline diagnostic plus visible weak areas, adaptive flashcards/revision, and later assessments. Do not ask 'Would you like to know more?' again. End with the direct seven-day demo link.",
+    "- Full feature-overview rule: when a student asks about several features, the complete LMS, or the purpose/benefit of features, use one short professional line per feature. Explain what it does and how it helps the student. Cover dashboard, roadmap, live classes, recordings, session notes, baseline diagnostic, adaptive flashcards, visible weak-area tracking, and assessments. Then invite the student to the demo. Finally recommend attending live when possible and using the matching labelled recording whenever their schedule is busy. Do not ask them to choose between live and recording, and do not place the demo invitation before the explanation.",
     "- Conversation-first rule: answer the student’s latest question or concern first. Then move forward with ONE useful next step: live session, session recording, UWorld demo/library, YouTube lectures, exam date/weak area, and then Google Meet mentor consultation when ready.",
     officialExamGuidance,
     "- Google Meet state lock: once the student has requested Google Meet, shared a preferred time, is waiting for the Google Meet link, or has a scheduled Google Meet, do NOT restart live-session/recording/UWorld/demo/mentor-offer flow. Only acknowledge, answer direct questions, collect/reschedule time, or remind them that the Google Meet link will be sent at meeting time.",
@@ -48207,13 +48210,13 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
     "- Cohort-date rule: use the current live LMS facts supplied for this reply. July 1, 2026 was the original cohort start and must never be described as upcoming after that date. The roadmap started with Cardiology and continues system-wise; describe the current live system from the LMS instead of repeating an old launch message.",
     "- LMS ecosystem rule: explain NextGen as a complete USMLE learning ecosystem in short human WhatsApp-style lines, not a long feature dump. Say the student gets everything in one place: roadmap, live sessions, recordings, UWorld Video Library, First Aid/UWorld mapping, notes, tasks, accountability assessments, progress tracking, leaderboard encouragement, Community Q&A, and Study Partner support.",
     "- Consultative discovery: learn the student's name, exam, current stage/challenge, and timeline gradually. Ask at most one useful question in a turn, respond to their answer before asking another, and never interrogate them from a checklist.",
-    "- Listen-before-pitch rule: the student's messages should guide the conversation. Do not force a fixed sequence of live sessions, recordings, UWorld, LMS, demo, exam date, weak areas, and Google Meet. Introduce only the one programme benefit that directly helps the need they just expressed.",
-    "- Progressive value rule: listening must not make the chat dry or passive. After the first greeting, every meaningful lead reply should answer the student and, when natural, add one brief enthusiastic programme benefit or proof point connected to their need. Across several turns, help an interested student understand the organised roadmap, live teaching and labelled recordings, First Aid/UWorld-linked question learning, weak-area flashcards/revision/assessments, and the free demo without repeating or dumping them all at once.",
-    "- Conversion checkpoint: once the student's exam and main need are known, give a compact two-to-four-line picture of how the relevant parts work together, then confidently invite them to experience the seven-day demo or one live/recorded session. Do not let an engaged prospect leave the conversation without understanding why NextGen is different and what concrete next step they can take.",
+    "- Listen-before-pitch rule: the student's messages should guide the conversation during discovery. Do not dump unrelated features before their exam and need are known. Once those are known and the student confirms interest, stop asking permission and give the connected programme tour immediately.",
+    "- Progressive value rule: listening must not make the chat dry or passive. After the first greeting, every meaningful lead reply should answer the student and, when natural, add one brief enthusiastic programme benefit or proof point connected to their need. At the interest checkpoint, clearly connect the organised roadmap, live teaching and labelled recordings, First Aid/UWorld-linked question learning, baseline diagnostic, visible weak areas, targeted flashcards/revision, later assessments, and the free demo.",
+    "- Conversion checkpoint: once the student's exam and main need are known, give a compact two-to-four-line picture of how the relevant parts work together, then confidently invite them to experience the seven-day demo. State that they can attend live whenever possible and use the correctly labelled recording whenever busy; never make them choose one permanently. Do not let an engaged prospect leave the conversation without understanding why NextGen is different and what concrete next step they can take.",
     "- Natural pacing: a normal WhatsApp reply is usually one to three short sentences. Do not send a long feature paragraph unless the student explicitly asks for a complete overview. A simple acknowledgement does not need a new offer, link, picture, or follow-up question.",
     "- Support boundary: if the person is an enrolled student asking for login, access, class, notes, recording, schedule, payment, or technical help, solve or route that support need first. Do not treat a support request as a new sales lead.",
     ngBuildAylaMediaGuidance(db, lead),
-    "- Adaptive weak-area loop: explain naturally that question and assessment performance identifies weak areas; AylaMed then brings those topics back through targeted flashcards, revision, roadmap tasks, and mentor guidance so weak concepts are not simply forgotten.",
+    "- Adaptive weak-area loop: first ask the student to take the baseline diagnostic. Its results and later question/assessment performance identify and visibly show weak areas; AylaMed then brings those topics back through targeted flashcards, revision, roadmap tasks, and mentor guidance, while later assessments verify whether each weakness improved.",
     "- Assessment rule: never say there is an assessment after every session. Say mentor-led accountability assessments are used weekly/weekend when published and after each system/block, with extra targeted checks assigned when a student needs them.",
     "- Resources rule: explain briefly that the ecosystem connects First Aid, Pathoma concepts, mapped UWorld QIDs, UWorld Video Library, recordings/notes, tasks, assessments for accountability, progress tracking, leaderboard encouragement, Community Q&A, and Study Partner support in one screen/place.",
     "- Soft program mention: when explaining the program generally, say it is a complete USMLE learning ecosystem that keeps the student guided, accountable, and encouraged. Keep feature explanations short, usually one line or less.",
@@ -49563,6 +49566,16 @@ function ngAylaEnsureFeatureOverviewConversion(reply = "", latestInboundText = "
   return value.trim();
 }
 
+function ngAylaPrepareInterestedFeatureTourIntro(reply = "") {
+  let value = String(reply || "").trim();
+  value = value
+    .replace(/\s*(?:would you like|do you want|shall i|can i)\b[\s\S]*?[?؟]\s*$/i, "")
+    .replace(/\s*(?:let me know if|feel free to)\b[\s\S]*$/i, "")
+    .trim();
+  if (value) return value;
+  return "Doctor, based on what you shared, NextGen gives you a clear structure and actively tracks what needs improvement. You begin with a baseline diagnostic, then your weak areas are shown and targeted throughout your plan.";
+}
+
 function ngAylaIsRepeatOfRecentOutbound(reply = "", messages = []) {
   const cleanReply = ngAylaNormalizeReplyForRepeat(reply);
   if (!cleanReply) return false;
@@ -49711,6 +49724,11 @@ Do not mention or pitch any programme, LMS, demo, live session, recording, UWorl
       intent: "live_lms_grounded_pricing",
     };
   }
+  const featureTourRequested = channel === "whatsapp" && ngAylaShouldPresentInterestedLeadTour({
+    lead,
+    messages: cleanMessages,
+    latestInboundText,
+  });
   const backendSalesBrain = db ? ngBuildAylaBackendSalesBrain(db, lead, latestInboundText, history, liveLmsSalesSnapshot) : "";
   const backendActionContext = backendControlDecision?.intent
     ? `The backend detected this operational intent: ${backendControlDecision.intent}. Any protected CRM state change has already been applied. Respond naturally based on the conversation and current lead state; do not copy a canned reply.`
@@ -49726,7 +49744,7 @@ Backend-enforced identity:
 - Never select from a fixed response script. Reason from the student's exact message, the conversation history, the known lead profile, current programme facts, and current links. Write a fresh response for this person.
 
 Non-negotiable reply style:
-- Keep replies short and readable by default: normally 1-3 short sentences. When the student explicitly asks for a complete feature overview, use concise one-line bullets so every requested feature has a clear purpose and benefit; this is the exception to the normal length limit.
+- Keep replies short and readable by default: normally 1-3 short sentences. At a programme-tour checkpoint, write only a brief personalised transition because the backend will send the feature pictures and benefits as separate messages.
 - Open warmly only once at the start of a new conversation. Do not start every reply with "Hi Doctor". After the first greeting, use "Doctor," / "Yes Doctor," / "Sure Doctor," or answer directly.
 - Never say "prompt response", "I appreciate your prompt response", or talk like you are responding to a prompt. Say "Thank you, Doctor" or continue naturally.
 - Never expose internal approval, review, CRM, training, retrieval, or knowledge-grounding language to a student. Do not say "approved material" or explain the approval process. Say "our First Aid-integrated teaching", "our LMS material", or "our recorded lecture" naturally.
@@ -49737,21 +49755,21 @@ Non-negotiable reply style:
 - If the latest message is only a greeting, have a normal friendly first exchange: one or two short lines, a natural introduction, and one easy question. Ask the student's name first when it is unknown. Do not begin the sales sequence, mention programme assets, or offer live sessions, recordings, demos, Google Meet, or pricing until the student provides context. Do not say "Thank you, Doctor" in response to a bare hello.
 - That first-greeting behavior applies only before Ayla has ever replied. If an existing student says hello again, use the conversation and lead profile, preserve the known exam/name/needs, and continue naturally without restarting discovery or asking the exam again.
 - When explaining the programme, use warm enthusiasm and explain the practical benefit before asking for a conversion: the roadmap, live teaching, recordings, questions, weak-area correction, notes, revision and accountability are organised together so the student knows what to do next. Invite the student to experience the configured free demo in your own natural words and include the direct demo link when it is relevant and available.
-- For a complete feature-overview request, follow this professional sequence: first explain each requested feature with its student benefit; then invite the student to the configured demo and provide the direct link; finally recommend attending one live session, or watching the matching labelled recording if time is limited. Do not move the demo invitation ahead of the explanation.
+- For a programme tour, follow this professional sequence through the separate backend media cards: dashboard/roadmap; labelled live recordings; connected session notes; baseline diagnostic with visible weak areas; adaptive flashcards/revision; later assessments that verify improvement. The closing message then gives the configured demo link. Tell the student to attend live whenever possible and use the matching labelled recording whenever busy; never ask them to choose one permanently.
 
 Sales behavior:
 - After answering the student’s latest message, continue the conversation naturally. There is no 2-message or 3-message limit; every new student inbound deserves a fresh contextual reply if no outbound exists after it.
-- Use consultative discovery instead of a presentation. Learn the name, exam, current situation/problem, and timeline over separate natural turns. Ask no more than one useful question per reply, and reflect or answer what the student just said before asking it.
-- Do not follow a fixed feature sequence. Mention one feature only when it solves the need in the latest student message. Do not send a demo, recording, live-session invite, picture, price, or Google Meet offer merely because it exists.
-- Consultative does not mean passive. After the first greeting, use warm enthusiasm and add one concise relevant benefit or proof point in each meaningful sales turn when it fits. Over several turns, progressively teach the interested student about roadmap, live teaching/labelled recordings, First Aid/UWorld-linked questions, weak-area flashcards/revision/assessments, and the free demo without repeating or sending one large feature dump.
-- When the exam and main need are known, pause discovery and connect the relevant features in a compact two-to-four-line explanation. End with one confident concrete next step—the seven-day demo, the current live session, a correctly labelled recording, or pricing/enrollment—chosen from the conversation. Do not let the chat fade into generic questions before the student understands the programme's value.
+- Use consultative discovery before the programme-tour checkpoint. Learn the name, exam, current situation/problem, and timeline over separate natural turns. Ask no more than one useful question per reply, and reflect or answer what the student just said before asking it.
+- Messaging this admissions number is already evidence of interest. Never keep asking “Would you like to learn more?” Once the exam and main need are known and the student says yes/interested, stop discovery and confidently explain how the connected programme solves that need.
+- Consultative does not mean passive. After the first greeting, use warm enthusiasm and add a concise relevant benefit in meaningful sales turns. At the programme-tour checkpoint, the backend sends separate feature pictures and captions, so your reply should be a natural personalised introduction to that tour—not another permission question and not one long feature paragraph.
+- When the exam and main need are known, pause discovery and connect the relevant features. End with a confident concrete next step—the seven-day demo, the current live session, a correctly labelled recording, or pricing/enrollment—chosen from the conversation. Do not let the chat fade into generic questions before the student understands the programme's value.
 - If this is an enrolled-student support request, resolve or route the support need first and do not turn the reply into a sales pitch.
 - Use broad reasoning for any weak area or system the student mentions; do not hard-code only MSK or only Cardiology. Adapt to the system named by the student.
 - After answering the student’s question, move the lead forward naturally: build trust, share/offer session recording, explain the UWorld Video Library, invite to live session, ask exam date/weak area, or offer Google Meet mentor consultation at the right time.
 - Session recordings are still an important proof asset. Do not suppress recording links. If a recording is useful for trust or the student asks about recordings, share it; just keep listening and continue the next turn when the student replies.
 - Never send a raw or generic recording link. Before the link, state the exact system, lecture/day number, and topic from CURRENT LIVE LMS SALES FACTS. If those facts are unavailable, say you will share the correctly labelled recording when it is published instead of guessing.
 - Never send a raw or generic live-session link. State the exact session title/system/day plus its live date and time from CURRENT LIVE LMS SALES FACTS before the link. Never invent a missing title, time, or link.
-- Explain the adaptive loop accurately when relevant: MCQ, assessment, and progress results reveal weak areas; those weak topics return through targeted flashcards, revision and roadmap tasks, while mentor guidance and later assessments check whether the weakness improved.
+- Explain the adaptive loop accurately: the student first takes a baseline diagnostic; the dashboard shows the weak areas it identifies; MCQ, assessment, and progress results keep updating those weak areas; targeted flashcards, revision and roadmap tasks bring weak topics back; later assessments check whether each weakness improved.
 - Explain assessments accurately: mentor-led accountability assessments may be published weekly/weekend and after a system/block; targeted assessments can be assigned when needed. Never promise an assessment after every lecture.
 - When a matching privacy-safe LMS image is available, write naturally as if the picture supports the explanation, but never claim that a screenshot or image was sent unless the backend actually attaches one.
 - Never ignore the student’s direct question or instruction. Do not repeat a previous offer when the student asked something else. Answer first, then convert naturally.
@@ -49761,6 +49779,13 @@ Sales behavior:
 - If the student is weak, failed, old graduate, delayed, confused, or struggling, reassure first: tell them they are in the right place, explain roadmap/mentor feedback/weak-area correction, then guide to recording/demo/live session.
 - If the student says yes or interested in response to a specific offer, take only that offered next step. If they say ok, thanks, great, perfect, or noted, acknowledge briefly without sending a new asset or restarting the sales flow.
 - Always use EST for scheduling unless the student asks for another timezone.
+
+${featureTourRequested
+  ? `PROGRAMME-TOUR CHECKPOINT FOR THIS TURN:
+- The student has already shown interest and enough context is known. Do not ask whether they want to know more.
+- Write a warm two-to-four-line transition explaining that NextGen will give them structure and actively track improvement. Mention the baseline diagnostic and that weak areas will be shown and targeted. Do not list every feature because separate pictures and captions will follow automatically.
+- Do not ask a question in this transition. Do not include the demo link here; the final tour message will send it after the feature explanation.`
+  : "No programme-tour checkpoint was detected for this turn. Continue natural discovery or answer the exact question without forcing a feature tour."}
 
 Conversation intelligence:
 - If lead is already in Google Meet requested/time collected/waiting for link/scheduled state, do not offer live sessions, recordings, UWorld demo, or Google Meet again. Acknowledge short replies and keep the lead waiting for the meeting/link.
@@ -49810,20 +49835,18 @@ ${latestInboundText || "No latest inbound message text found."}
 
 Write only Ayla's next message. No markdown headings. No bullet list unless the student asks for details.`;
 
-  const featureOverviewRequested = ngAylaIsFullFeatureOverviewRequest(latestInboundText);
   const result = await callOpenAIResponsesAPI({
     model: process.env.AYLA_MODEL || process.env.AI_MODEL || "gpt-4o-mini",
     systemPrompt,
     userPrompt,
-    maxOutputTokens: featureOverviewRequested ? 300 : 140,
+    maxOutputTokens: featureTourRequested ? 220 : 140,
     jsonMode: false,
   });
 
-  const reply = ngAylaEnsureFeatureOverviewConversion(
-    ngAylaApplyGreetingOnce(ngCleanAylaStudentReply(result.text || ""), cleanMessages),
-    latestInboundText,
-    db || {},
-  );
+  const cleanReply = ngAylaApplyGreetingOnce(ngCleanAylaStudentReply(result.text || ""), cleanMessages);
+  const reply = featureTourRequested
+    ? ngAylaPrepareInterestedFeatureTourIntro(cleanReply)
+    : ngAylaEnsureFeatureOverviewConversion(cleanReply, latestInboundText, db || {});
 
   if (!reply) {
     const error = new Error("AI_EMPTY_REPLY: OpenAI returned an empty reply.");
@@ -49836,6 +49859,8 @@ Write only Ayla's next message. No markdown headings. No bullet list unless the 
     reply,
     usage: result.usage || {},
     model: result.model || process.env.AYLA_MODEL || process.env.AI_MODEL || "gpt-4o-mini",
+    feature_tour_requested: featureTourRequested,
+    live_lms_sales_snapshot: liveLmsSalesSnapshot,
   };
 }
 
@@ -49966,15 +49991,19 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
       message: latestInbound,
       to: req.body?.to || req.body?.recipient || "",
     });
+    const featureTourRequested = channel === "whatsapp" && Boolean(
+      ai.feature_tour_requested || ngAylaIsFullFeatureOverviewRequest(ngMessageText(latestInbound || {}))
+    );
     const aylaMediaAssets = channel === "whatsapp"
-      ? ngPickAylaMediaAssetsForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(latestInbound || {}), messages })
+      ? ngPickAylaMediaAssetsForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(latestInbound || {}), messages, forceFeatureTour: featureTourRequested })
       : [];
     const aylaMediaAsset = aylaMediaAssets[0] || null;
-    const featureOverviewRequested = channel === "whatsapp" && ngAylaIsFullFeatureOverviewRequest(ngMessageText(latestInbound || {}));
     const firstMediaCaption = aylaMediaAsset
-      ? ngRenderAylaMediaCaption(aylaMediaAsset, { lead, reply: featureOverviewRequested ? "" : ai.reply })
+      ? (featureTourRequested
+          ? [ai.reply, ngRenderAylaMediaCaption(aylaMediaAsset, { lead, reply: "" })].filter(Boolean).join("\n\n")
+          : ngRenderAylaMediaCaption(aylaMediaAsset, { lead, reply: ai.reply }))
       : "";
-    const outboundText = featureOverviewRequested && aylaMediaAsset ? firstMediaCaption : ai.reply;
+    const outboundText = featureTourRequested && aylaMediaAsset ? firstMediaCaption : ai.reply;
 
     const result = await sendCrmMessage({
       db,
@@ -50004,8 +50033,8 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
     if (result?.success !== false && aylaMediaAssets.length > 1) {
       await ngSendAylaAdditionalMediaAssets({ db, assets: aylaMediaAssets, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "full_ai_auto", inboundMessageId: ngAiAutoMessageFingerprint(latestInbound) });
     }
-    if (result?.success !== false && featureOverviewRequested) {
-      await ngSendAylaFeatureOverviewClosingMessage({ db, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "full_ai_auto", inboundMessageId: ngAiAutoMessageFingerprint(latestInbound) });
+    if (result?.success !== false && featureTourRequested) {
+      await ngSendAylaFeatureOverviewClosingMessage({ db, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "full_ai_auto", inboundMessageId: ngAiAutoMessageFingerprint(latestInbound), liveSnapshot: ai.live_lms_sales_snapshot || {} });
     }
 
     const adminAlert = await ngAylaMaybeSendConversationAdminAlert({
@@ -50208,15 +50237,19 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
     const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel });
     const replyDelayMs = await ngAylaWaitBeforeAutoSend(db, channel);
     const to = getBestRecipientForChannel({ channel, lead, message: latestInbound });
+    const featureTourRequested = channel === "whatsapp" && Boolean(
+      ai.feature_tour_requested || ngAylaIsFullFeatureOverviewRequest(ngMessageText(latestInbound || {}))
+    );
     const aylaMediaAssets = channel === "whatsapp"
-      ? ngPickAylaMediaAssetsForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(latestInbound || {}), messages })
+      ? ngPickAylaMediaAssetsForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(latestInbound || {}), messages, forceFeatureTour: featureTourRequested })
       : [];
     const aylaMediaAsset = aylaMediaAssets[0] || null;
-    const featureOverviewRequested = channel === "whatsapp" && ngAylaIsFullFeatureOverviewRequest(ngMessageText(latestInbound || {}));
     const firstMediaCaption = aylaMediaAsset
-      ? ngRenderAylaMediaCaption(aylaMediaAsset, { lead, reply: featureOverviewRequested ? "" : ai.reply })
+      ? (featureTourRequested
+          ? [ai.reply, ngRenderAylaMediaCaption(aylaMediaAsset, { lead, reply: "" })].filter(Boolean).join("\n\n")
+          : ngRenderAylaMediaCaption(aylaMediaAsset, { lead, reply: ai.reply }))
       : "";
-    const outboundText = featureOverviewRequested && aylaMediaAsset ? firstMediaCaption : ai.reply;
+    const outboundText = featureTourRequested && aylaMediaAsset ? firstMediaCaption : ai.reply;
 
     const sendResult = await sendCrmMessage({
       db,
@@ -50243,8 +50276,8 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
     if (sendResult?.success !== false && aylaMediaAssets.length > 1) {
       await ngSendAylaAdditionalMediaAssets({ db, assets: aylaMediaAssets, lead, brandId: lead.brand_id || brandId || null, to, source, inboundMessageId: inboundFingerprint });
     }
-    if (sendResult?.success !== false && featureOverviewRequested) {
-      await ngSendAylaFeatureOverviewClosingMessage({ db, lead, brandId: lead.brand_id || brandId || null, to, source, inboundMessageId: inboundFingerprint });
+    if (sendResult?.success !== false && featureTourRequested) {
+      await ngSendAylaFeatureOverviewClosingMessage({ db, lead, brandId: lead.brand_id || brandId || null, to, source, inboundMessageId: inboundFingerprint, liveSnapshot: ai.live_lms_sales_snapshot || {} });
     }
 
     const adminAlert = await ngAylaMaybeSendConversationAdminAlert({
@@ -50694,15 +50727,19 @@ app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
       try {
         const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel });
         const to = getBestRecipientForChannel({ channel, lead, message: inbound });
+        const featureTourRequested = channel === "whatsapp" && Boolean(
+          ai.feature_tour_requested || ngAylaIsFullFeatureOverviewRequest(ngMessageText(inbound || {}))
+        );
         const aylaMediaAssets = channel === "whatsapp"
-          ? ngPickAylaMediaAssetsForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(inbound || {}), messages })
+          ? ngPickAylaMediaAssetsForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(inbound || {}), messages, forceFeatureTour: featureTourRequested })
           : [];
         const aylaMediaAsset = aylaMediaAssets[0] || null;
-        const featureOverviewRequested = channel === "whatsapp" && ngAylaIsFullFeatureOverviewRequest(ngMessageText(inbound || {}));
         const firstMediaCaption = aylaMediaAsset
-          ? ngRenderAylaMediaCaption(aylaMediaAsset, { lead, reply: featureOverviewRequested ? "" : ai.reply })
+          ? (featureTourRequested
+              ? [ai.reply, ngRenderAylaMediaCaption(aylaMediaAsset, { lead, reply: "" })].filter(Boolean).join("\n\n")
+              : ngRenderAylaMediaCaption(aylaMediaAsset, { lead, reply: ai.reply }))
           : "";
-        const outboundText = featureOverviewRequested && aylaMediaAsset ? firstMediaCaption : ai.reply;
+        const outboundText = featureTourRequested && aylaMediaAsset ? firstMediaCaption : ai.reply;
         const sendResult = await sendCrmMessage({
           db,
           brandId: lead.brand_id || getCrmBrandId(req, db),
@@ -50720,8 +50757,8 @@ app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
         if (sendResult?.success !== false && aylaMediaAssets.length > 1) {
           await ngSendAylaAdditionalMediaAssets({ db, assets: aylaMediaAssets, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "process_ai_auto", inboundMessageId: ngAiAutoMessageFingerprint(inbound) });
         }
-        if (sendResult?.success !== false && featureOverviewRequested) {
-          await ngSendAylaFeatureOverviewClosingMessage({ db, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "process_ai_auto", inboundMessageId: ngAiAutoMessageFingerprint(inbound) });
+        if (sendResult?.success !== false && featureTourRequested) {
+          await ngSendAylaFeatureOverviewClosingMessage({ db, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "process_ai_auto", inboundMessageId: ngAiAutoMessageFingerprint(inbound), liveSnapshot: ai.live_lms_sales_snapshot || {} });
         }
         const adminAlert = await ngAylaMaybeSendConversationAdminAlert({
           db,
@@ -67167,8 +67204,33 @@ function ngAylaIsFullFeatureOverviewRequest(text = "") {
   return featureHits >= 3 || /(?:all|complete|main)\s+(?:lms\s+)?features|purpose\s+and\s+benefit|what(?:'s| is)\s+included/.test(value);
 }
 
-function ngPickAylaMediaAssetsForReply(db = {}, { lead = {}, reply = "", latestInboundText = "", messages = [] } = {}) {
-  if (ngAylaIsFullFeatureOverviewRequest(latestInboundText)) {
+function ngAylaShouldPresentInterestedLeadTour({ lead = {}, messages = [], latestInboundText = "" } = {}) {
+  const latest = String(latestInboundText || "").trim();
+  const signals = ngAylaLatestMessageSignals(latest, safeArray(messages).map((message) => ngMessageText(message)).join("\n"));
+  if (signals.bare_greeting || signals.asks_price) return false;
+  if (/(?:stop|unsubscribe|do not message|don't message|wrong number|not interested)/i.test(latest)) return false;
+  if (/(?:can(?:not|'t)\s+(?:log|sign)\s*in|password|reset link|access expired|failed to fetch|not working|technical (?:issue|problem)|session (?:will not|won't|does not|doesn't) (?:open|load|connect))/i.test(latest)) return false;
+  if (ngAylaLeadGoogleMeetState(lead)) return false;
+  if (ngAylaIsFullFeatureOverviewRequest(latest)) return true;
+  if (lead.ayla_program_tour_sent_at) return false;
+
+  const confirmsInterest = /^(?:yes|yeah|yep|interested|i am interested|i'm interested|tell me more|please explain|go ahead|show me|send details|i want to know)(?:[.!?\s]*)$/i.test(latest) ||
+    /\b(?:interested in|want to know about|tell me about)\b/i.test(latest);
+  if (!confirmsInterest) return false;
+
+  const conversation = safeArray(messages).map((message) => ngMessageText(message)).filter(Boolean).join("\n");
+  const leadFacts = [lead.exam, lead.exam_type, lead.exam_track, lead.course, lead.current_stage, lead.main_need, lead.primary_pain, lead.notes, lead.source].join(" ");
+  const context = `${conversation}\n${leadFacts}`;
+  const contextSignals = ngAylaLatestMessageSignals("", context);
+  const examKnown = contextSignals.has_exam_type || /\b(?:usmle|plab|amc|mccqe|nclex)\b/i.test(leadFacts);
+  const needKnown = /(?:self[-\s]?stud|study plan|structure|roadmap|guidance|mentor|weak|struggl|fail|saw\s+(?:an?\s+)?ad|advert|prepar|resource|live class|recording|programme|program)/i.test(context);
+  const latestOutboundText = ngMessageText(ngLatestOutbound(messages) || {});
+  const positiveAnswerToSpecificOffer = /(?:google\s*meet|book\s+(?:a\s+)?meet|shall i send[^?]*(?:recording|link)|would you like[^?]*(?:live session|recording|demo)|start[^?]*(?:seven|7)[-\s]?day demo)/i.test(latestOutboundText);
+  return examKnown && needKnown && !positiveAnswerToSpecificOffer;
+}
+
+function ngPickAylaMediaAssetsForReply(db = {}, { lead = {}, reply = "", latestInboundText = "", messages = [], forceFeatureTour = false } = {}) {
+  if (forceFeatureTour || ngAylaIsFullFeatureOverviewRequest(latestInboundText)) {
     const assets = ngAylaMediaEligibleAssets(db, lead?.brand_id || null);
     const orderedIds = ["nextgen-real-lms-dashboard", "nextgen-real-lms-recordings", "nextgen-real-lms-session-notes", "nextgen-real-lms-flashcards", "nextgen-real-lms-assessments"];
     return orderedIds.map((id) => assets.find((asset) => asset.id === id)).filter(Boolean);
@@ -67188,8 +67250,8 @@ function ngPickAylaMediaAssetsForReply(db = {}, { lead = {}, reply = "", latestI
   return scored[0]?.asset ? [scored[0].asset] : [];
 }
 
-function ngPickAylaMediaAssetForReply(db = {}, { lead = {}, reply = "", latestInboundText = "", messages = [] } = {}) {
-  return ngPickAylaMediaAssetsForReply(db, { lead, reply, latestInboundText, messages })[0] || null;
+function ngPickAylaMediaAssetForReply(db = {}, { lead = {}, reply = "", latestInboundText = "", messages = [], forceFeatureTour = false } = {}) {
+  return ngPickAylaMediaAssetsForReply(db, { lead, reply, latestInboundText, messages, forceFeatureTour })[0] || null;
 }
 
 function ngRenderAylaMediaCaption(asset = {}, { lead = {}, reply = "" } = {}) {
@@ -67197,11 +67259,11 @@ function ngRenderAylaMediaCaption(asset = {}, { lead = {}, reply = "" } = {}) {
   if (template) return renderTemplateString(template, { lead, asset, reply });
   const usage = ngNormalizeMediaUsageKey(asset.usage_area || asset.usage || "general");
   const featureCaption = {
-    demo_lms: "📱 *Student Dashboard & Roadmap*\nYour class, daily tasks, progress and next action appear in one organised place. This keeps every study day clear and prevents important work from being missed.",
+    demo_lms: "📱 *Student Dashboard & Roadmap*\nYour class, daily tasks, progress, visible weak areas and next action appear in one organised place. This keeps every study day clear and shows you exactly what needs attention next.",
     recording: "🎥 *Recordings Library*\nEvery lecture is labelled by system, day and topic, with its connected notes. If you miss a live class, you can catch up in the correct sequence without losing continuity.",
-    session_notes: "📚 *Session Notes*\nClean tutor-approved notes remain connected to the exact class, recording, mapped questions and revision material. This makes review faster because everything from that session stays together.",
-    flashcards: "🧠 *Adaptive Flashcards & Weak Areas*\nYour performance decides which concepts return for revision. Difficult topics reappear through focused daily flashcards so your study time targets what needs the most attention.",
-    assessment: "📝 *Mentor-Led Assessments*\nSystem-end and progress assessments measure mastery and reveal weaknesses. The results guide targeted revision and help the roadmap respond to your improvement.",
+    session_notes: "📚 *Session Notes*\nClean tutor-prepared notes remain connected to the exact class, recording, mapped questions and revision material. This makes review faster because everything from that session stays together.",
+    flashcards: "🧠 *Adaptive Flashcards & Weak Areas*\nYour baseline diagnostic and ongoing performance decide which concepts return for revision. Weak areas are shown to you, then difficult topics reappear through focused flashcards and revision tasks so your study time targets what needs attention.",
+    assessment: "📝 *Baseline Diagnostic & Mentor-Led Assessments*\nYou first take a baseline diagnostic to identify your starting weak areas. Later system and progress assessments check whether those weaknesses improved and guide the next targeted revision in your roadmap.",
     live_classroom: "🔴 NextGen Live Session — structured teaching connected to the same roadmap, notes and recording.",
     roadmap: "🗺️ 120-Day Roadmap — every system is organised into clear daily learning steps.",
     program_overview: "✨ NextGen USMLE — one organised learning ecosystem from live teaching to weak-area revision.",
@@ -67232,15 +67294,19 @@ async function ngSendAylaAdditionalMediaAssets({ db = {}, assets = [], lead = {}
   return results;
 }
 
-function ngAylaFeatureOverviewClosingText(db = {}) {
+function ngAylaFeatureOverviewClosingText(db = {}, liveSnapshot = {}) {
   const salesAssets = typeof ngAylaGetSalesAssets === "function" ? ngAylaGetSalesAssets(db || {}) : {};
   const demoDays = Number(salesAssets.demoDays || 7) || 7;
-  return `Please take our ${demoDays}-day demo and see the organisation and teaching quality for yourself:\nhttps://nextgenusmle.live/demo\n\nFor the clearest experience, attend one live session. If your schedule is limited, watch the matching labelled recording at a convenient time.`;
+  const currentSystem = String(liveSnapshot?.live_session?.system || liveSnapshot?.latest_recording?.system || "").trim();
+  const cycleText = currentSystem
+    ? `The live cycle is currently on ${currentSystem}. You can join this system now, catch up earlier systems through the labelled recordings when you are free, or leave them for the next cycle/final catch-up.`
+    : "You can join the current live system now, catch up earlier systems through the labelled recordings when you are free, or leave them for the next cycle/final catch-up.";
+  return `${cycleText}\n\nPlease take our ${demoDays}-day demo and see the organisation and teaching quality for yourself:\nhttps://nextgenusmle.live/demo\n\nAttend live whenever you can. If you are busy, watch the matching labelled recording when you are free—both stay connected to the same roadmap.`;
 }
 
-async function ngSendAylaFeatureOverviewClosingMessage({ db = {}, lead = {}, brandId = null, to = "", source = "ayla_auto_media", inboundMessageId = "" } = {}) {
-  const text = ngAylaFeatureOverviewClosingText(db);
-  return sendCrmMessage({
+async function ngSendAylaFeatureOverviewClosingMessage({ db = {}, lead = {}, brandId = null, to = "", source = "ayla_auto_media", inboundMessageId = "", liveSnapshot = {} } = {}) {
+  const text = ngAylaFeatureOverviewClosingText(db, liveSnapshot);
+  const result = await sendCrmMessage({
     db, brandId, channel: "whatsapp", to, text, leadId: lead.id || null,
     metadata: {
       source: `${source}_feature_tour_closing`,
@@ -67250,6 +67316,12 @@ async function ngSendAylaFeatureOverviewClosingMessage({ db = {}, lead = {}, bra
       feature_tour_closing: true,
     },
   });
+  if (ngAylaDeliveryActuallySent(result)) {
+    lead.ayla_program_tour_sent_at = nowIso();
+    lead.lms_ecosystem_explained = true;
+    ngEnsureLeadFlowLabels(lead, ["lms_ecosystem_explained", "ayla_program_tour_sent"]);
+  }
+  return result;
 }
 
 function ngMarkAylaMediaSent(db = {}, lead = {}, asset = {}, meta = {}) {
@@ -68086,7 +68158,7 @@ app.post("/admin/prelaunch/flow-test", async (req, res) => {
 // v116: Backend-first Ayla heartbeat and no-reply nurture.
 // Goal: Ayla must not depend on the CRM frontend being open. The server checks for fresh inbound
 // every second (configurable), retries silent inbound replies, drains first-message queues, runs
-// Google Meet/session jobs, and nurtures no-reply leads after a 5-7 hour wait.
+// Google Meet/session jobs, and nurtures conversations that go quiet after a 4-5 hour wait.
 const NG_V116_HEARTBEAT_STATE = {
   started: false,
   running: false,
@@ -68111,7 +68183,7 @@ function ngV116HeartbeatMs() {
 
 function ngV116NoReplyWaitHours(db = {}) {
   const s = ngAylaPickSettings(db);
-  return Math.max(5, Math.min(7, Number(s.no_reply_lms_nurture_wait_hours || process.env.NEXTGEN_NO_REPLY_NURTURE_WAIT_HOURS || 6)));
+  return Math.max(4, Math.min(5, Number(s.no_reply_lms_nurture_wait_hours || process.env.NEXTGEN_NO_REPLY_NURTURE_WAIT_HOURS || 4.5)));
 }
 
 function ngV116LeadCanReceiveAutomation(db = {}, lead = {}) {
@@ -68149,33 +68221,30 @@ function ngV116ClearStaleSilentInboundGuards(db = {}, limit = 50) {
 }
 
 function ngV116NoReplyNurtureText(db = {}, lead = {}) {
-  const assets = ngAylaGetSalesAssets(db);
+  const exam = ng41LeadExamType(lead) || "your exam";
   const parts = [];
-  parts.push("Doctor, I’m sharing this so you can understand the full support even if you are busy.");
-  parts.push("NextGen LMS is a complete USMLE learning ecosystem in one place — roadmap, live classes, recordings, UWorld Video Library, notes, tasks, accountability assessments, progress tracking, leaderboard encouragement, Community Q&A, and Study Partner support.");
-  parts.push(`Our live guidance session is at ${assets.sessionTime || "1:00 PM EST"}. You can join even for 5-10 minutes to see Dr. Ahmad’s teaching style.`);
-  if (assets.recordingLink) parts.push(`Recent recording:\n${assets.recordingLink}`);
-  if (assets.uworldLink) parts.push(`UWorld Video Library / LMS demo:\n${assets.uworldLink}`);
-  if (assets.youtubeLink) parts.push(`YouTube channel:\n${assets.youtubeLink}`);
-  parts.push("After you check this, I can arrange a Google Meet with our mentor so you get guidance based on your exam timeline and weak areas.");
+  parts.push(`Doctor, just checking in about your ${exam} preparation.`);
+  parts.push("NextGen keeps the roadmap, live teaching, labelled recordings, notes and accountability in one organised place. You begin with a baseline diagnostic, your weak areas are shown, and those areas are targeted through adaptive flashcards, revision and later assessments.");
+  parts.push("Attend live whenever you can; if you are busy, catch up from the matching recording when you are free.");
+  parts.push("You can experience the complete system through the free 7-day demo:\nhttps://nextgenusmle.live/demo");
   return parts.join("\n\n");
 }
 
 function ngV116NoReplyLeadEligible(db = {}, lead = {}) {
   const base = ngV116LeadCanReceiveAutomation(db, lead);
   if (!base.ok) return base;
-  const firstAtRaw = lead.first_message_sent_at || lead.first_template_sent_at || lead.last_contacted_at || lead.last_outbound_sent_at || "";
-  if (!firstAtRaw) return { ok: false, reason: "no_first_outbound_yet" };
-  const firstAt = new Date(firstAtRaw).getTime();
-  if (!Number.isFinite(firstAt)) return { ok: false, reason: "invalid_first_outbound_time" };
-  const waitMs = ngV116NoReplyWaitHours(db) * 3600000;
-  if (Date.now() - firstAt < waitMs) return { ok: false, reason: "waiting_5_to_7_hours", wait_ms: Math.max(0, waitMs - (Date.now() - firstAt)) };
   const messages = ngLeadConversationMessages(db, lead.id);
   const latestInbound = ngLatestInbound(messages);
-  if (latestInbound) {
-    const inboundAt = new Date(latestInbound.created_at || latestInbound.received_at || latestInbound.timestamp || 0).getTime();
-    if (Number.isFinite(inboundAt) && inboundAt > firstAt) return { ok: false, reason: "student_replied" };
-  }
+  const latestOutbound = ngLatestOutbound(messages);
+  const firstAtRaw = lead.first_message_sent_at || lead.first_template_sent_at || lead.last_contacted_at || lead.last_outbound_sent_at || "";
+  const latestOutboundRaw = latestOutbound?.created_at || latestOutbound?.sent_at || latestOutbound?.timestamp || firstAtRaw;
+  if (!latestOutboundRaw) return { ok: false, reason: "no_outbound_yet" };
+  const latestOutboundAt = new Date(latestOutboundRaw).getTime();
+  if (!Number.isFinite(latestOutboundAt)) return { ok: false, reason: "invalid_outbound_time" };
+  const latestInboundAt = new Date(latestInbound?.created_at || latestInbound?.received_at || latestInbound?.timestamp || 0).getTime();
+  if (Number.isFinite(latestInboundAt) && latestInboundAt >= latestOutboundAt) return { ok: false, reason: "student_message_waiting_for_reply" };
+  const waitMs = ngV116NoReplyWaitHours(db) * 3600000;
+  if (Date.now() - latestOutboundAt < waitMs) return { ok: false, reason: "waiting_4_to_5_hours", wait_ms: Math.max(0, waitMs - (Date.now() - latestOutboundAt)) };
   if (lead.no_reply_lms_nurture_sent_at && ngIsRecent(lead.no_reply_lms_nurture_sent_at, 24)) return { ok: false, reason: "nurture_already_sent_24h" };
   if (ngRecentlyContactedMinutesAgo(lead, 60)) return { ok: false, reason: "recent_outbound_cooldown" };
   return { ok: true };

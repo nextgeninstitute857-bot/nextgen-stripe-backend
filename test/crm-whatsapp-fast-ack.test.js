@@ -10,7 +10,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v289-progressive-value-conversation"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v290-interested-lead-feature-tour"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: "message_status"/);
   assert.match(handler, /event: "ignored_non_message"/);
@@ -56,7 +56,7 @@ test("bare WhatsApp greetings stay conversational before the sales sequence", ()
   );
 });
 
-test("greetings and short acknowledgements cannot trigger LMS media", () => {
+test("greetings and ordinary acknowledgements cannot trigger LMS media without an interested-lead checkpoint", () => {
   const signals = server.slice(
     server.indexOf("function ngAylaLatestMessageSignals"),
     server.indexOf("function ngBuildAylaBackendSalesBrain"),
@@ -75,6 +75,7 @@ test("greetings and short acknowledgements cannot trigger LMS media", () => {
   assert.match(mediaScore, /let score = 0/);
   assert.doesNotMatch(mediaScore, /let score = Number\(asset\.priority/);
   assert.match(picker, /if \(signals\.greeting_or_short_reply\) return \[\]/);
+  assert.match(picker, /forceFeatureTour \|\| ngAylaIsFullFeatureOverviewRequest/);
   assert.match(picker, /const text = latestInboundText/);
   assert.doesNotMatch(picker, /messages\)\.slice\(-6\)/);
   assert.ok(
@@ -83,7 +84,7 @@ test("greetings and short acknowledgements cannot trigger LMS media", () => {
   );
 });
 
-test("Ayla uses consultative discovery instead of a forced feature sequence", () => {
+test("Ayla uses natural discovery and then confidently presents the connected programme", () => {
   const salesBrain = server.slice(
     server.indexOf("function ngBuildAylaBackendSalesBrain"),
     server.indexOf("function ngBuildAylaCommandContext"),
@@ -96,21 +97,93 @@ test("Ayla uses consultative discovery instead of a forced feature sequence", ()
   assert.match(salesBrain, /Consultative discovery/);
   assert.match(salesBrain, /Ask at most one useful question in a turn/);
   assert.match(salesBrain, /Listen-before-pitch rule/);
-  assert.match(salesBrain, /one programme benefit that directly helps the need/);
+  assert.match(salesBrain, /stop asking permission and give the connected programme tour immediately/);
   assert.match(salesBrain, /Progressive value rule/);
   assert.match(salesBrain, /listening must not make the chat dry or passive/);
   assert.match(salesBrain, /Conversion checkpoint/);
   assert.match(salesBrain, /Do not let an engaged prospect leave the conversation without understanding why NextGen is different/);
+  assert.match(salesBrain, /Interested-lead programme-tour rule/);
+  assert.match(salesBrain, /Do not ask 'Would you like to know more\?' again/);
+  assert.match(salesBrain, /baseline diagnostic plus visible weak areas/);
   assert.match(salesBrain, /Support boundary/);
   assert.doesNotMatch(salesBrain, /Early value sequence/);
   assert.match(generator, /normally 1-3 short sentences/);
-  assert.match(generator, /Use consultative discovery instead of a presentation/);
-  assert.match(generator, /Do not follow a fixed feature sequence/);
+  assert.match(generator, /Use consultative discovery before the programme-tour checkpoint/);
+  assert.match(generator, /Messaging this admissions number is already evidence of interest/);
+  assert.match(generator, /Never keep asking “Would you like to learn more\?”/);
   assert.match(generator, /Consultative does not mean passive/);
-  assert.match(generator, /progressively teach the interested student/);
-  assert.match(generator, /Do not let the chat fade into generic questions/);
+  assert.match(generator, /separate feature pictures and captions/);
+  assert.match(generator, /PROGRAMME-TOUR CHECKPOINT FOR THIS TURN/);
+  assert.match(generator, /feature_tour_requested: featureTourRequested/);
   assert.match(generator, /acknowledge briefly without sending a new asset/);
   assert.match(generator, /process\.env\.AYLA_MODEL \|\| process\.env\.AI_MODEL \|\| "gpt-4o-mini"/);
+});
+
+test("a positive interested reply triggers the tour only after context is known", () => {
+  const helper = server.slice(
+    server.indexOf("function ngAylaShouldPresentInterestedLeadTour"),
+    server.indexOf("function ngPickAylaMediaAssetsForReply"),
+  );
+
+  assert.match(helper, /signals\.bare_greeting \|\| signals\.asks_price/);
+  assert.match(helper, /stop\|unsubscribe\|do not message/);
+  assert.match(helper, /ngAylaLeadGoogleMeetState\(lead\)/);
+  assert.match(helper, /lead\.ayla_program_tour_sent_at/);
+  assert.match(helper, /const confirmsInterest/);
+  assert.match(helper, /tell me more/);
+  assert.match(helper, /const examKnown/);
+  assert.match(helper, /const needKnown/);
+  assert.match(helper, /positiveAnswerToSpecificOffer/);
+  assert.match(helper, /return examKnown && needKnown && !positiveAnswerToSpecificOffer/);
+});
+
+test("interested-lead tour routing behaves correctly for real message sequences", () => {
+  const signalsSource = server.slice(
+    server.indexOf("function ngAylaLatestMessageSignals"),
+    server.indexOf("function ngAylaOfficialExamGuidancePrompt"),
+  );
+  const overviewSource = server.slice(
+    server.indexOf("function ngAylaIsFullFeatureOverviewRequest"),
+    server.indexOf("function ngAylaShouldPresentInterestedLeadTour"),
+  );
+  const helperSource = server.slice(
+    server.indexOf("function ngAylaShouldPresentInterestedLeadTour"),
+    server.indexOf("function ngPickAylaMediaAssetsForReply"),
+  );
+  const build = new Function(
+    "safeArray",
+    "ngMessageText",
+    "ngLatestOutbound",
+    "ngAylaLeadGoogleMeetState",
+    `${signalsSource}\n${overviewSource}\n${helperSource}\nreturn ngAylaShouldPresentInterestedLeadTour;`,
+  );
+  const messageText = (message = {}) => String(message.text || "");
+  const shouldTour = build(
+    (value) => Array.isArray(value) ? value : [],
+    messageText,
+    (messages) => [...messages].reverse().find((message) => message.direction === "outbound" && messageText(message)),
+    (lead) => Boolean(lead.google_meet_booking_state),
+  );
+  const engagedConversation = [
+    { direction: "inbound", text: "I am preparing for Step 1" },
+    { direction: "outbound", text: "How are you preparing right now?" },
+    { direction: "inbound", text: "I am self studying and need structure" },
+    { direction: "outbound", text: "NextGen can organise that. Would you like to learn more?" },
+    { direction: "inbound", text: "Yes" },
+  ];
+
+  assert.equal(shouldTour({ messages: engagedConversation, latestInboundText: "Yes" }), true);
+  assert.equal(shouldTour({ messages: [{ direction: "inbound", text: "Hello" }], latestInboundText: "Hello" }), false);
+  assert.equal(shouldTour({ messages: engagedConversation, latestInboundText: "I cannot log in" }), false);
+  assert.equal(shouldTour({ lead: { ayla_program_tour_sent_at: "2026-08-22T10:00:00Z" }, messages: engagedConversation, latestInboundText: "Yes" }), false);
+  assert.equal(shouldTour({
+    messages: [
+      ...engagedConversation.slice(0, -2),
+      { direction: "outbound", text: "Would you like me to send the 7-day demo link?" },
+      { direction: "inbound", text: "Yes" },
+    ],
+    latestInboundText: "Yes",
+  }), false);
 });
 
 test("official exam eligibility and passing guidance is grounded and only appears on demand", () => {
@@ -273,7 +346,8 @@ test("Ayla explains weak-area adaptation and sends only safe public LMS previews
     server.indexOf("function ngFindCrmMediaAssetForRules"),
   );
 
-  assert.match(salesBrain, /question and assessment performance identifies weak areas/);
+  assert.match(salesBrain, /first ask the student to take the baseline diagnostic/);
+  assert.match(salesBrain, /visibly show weak areas/);
   assert.match(salesBrain, /targeted flashcards, revision, roadmap tasks, and mentor guidance/);
   assert.match(salesBrain, /weekly\/weekend when published and after each system\/block/);
   assert.match(media, /function ngAylaIsSafePublicLmsPreview/);
@@ -290,6 +364,8 @@ test("Ayla explains weak-area adaptation and sends only safe public LMS previews
   assert.match(media, /function ngPickAylaMediaAssetsForReply/);
   assert.match(media, /function ngSendAylaAdditionalMediaAssets/);
   assert.match(media, /Adaptive Flashcards/);
+  assert.match(media, /Baseline Diagnostic & Mentor-Led Assessments/);
+  assert.match(media, /Weak areas are shown to you/);
   assert.match(media, /Mentor-Led Assessments/);
   assert.match(media, /function ngAylaFeatureOverviewClosingText/);
   assert.match(media, /function ngSendAylaFeatureOverviewClosingMessage/);
@@ -298,16 +374,18 @@ test("Ayla explains weak-area adaptation and sends only safe public LMS previews
   assert.match(media, /6 \* 60 \* 60 \* 1000/);
 });
 
-test("a full feature request explains value before demo and offers live-session or recording proof", () => {
+test("an interested lead receives separate feature cards before the demo conversion", () => {
   assert.match(server, /Full feature-overview rule/);
   assert.match(server, /one short professional line per feature/);
-  assert.match(server, /Do not place the demo invitation before the explanation/);
+  assert.match(server, /do not place the demo invitation before the explanation/);
   assert.match(server, /https:\/\/nextgenusmle\.live\/demo/);
-  assert.match(server, /attend one live session/);
+  assert.match(server, /Attend live whenever you can/);
   assert.match(server, /matching labelled recording/);
-  assert.match(server, /featureOverviewRequested \? 300 : 140/);
-  assert.match(server, /featureOverviewRequested \? "" : ai\.reply/);
-  assert.match(server, /featureOverviewRequested && aylaMediaAsset \? firstMediaCaption : ai\.reply/);
+  assert.match(server, /maxOutputTokens: featureTourRequested \? 220 : 140/);
+  assert.match(server, /forceFeatureTour: featureTourRequested/);
+  assert.match(server, /featureTourRequested && aylaMediaAsset \? firstMediaCaption : ai\.reply/);
+  assert.match(server, /liveSnapshot: ai\.live_lms_sales_snapshot \|\| \{\}/);
+  assert.match(server, /ayla_program_tour_sent_at = nowIso\(\)/);
   assert.match(server, /feature_tour_closing/);
 });
 
@@ -370,7 +448,24 @@ test("WhatsApp sales replies stay fast and end with a concrete contextual next s
   assert.match(generator, /one concrete next action that matches the conversation/);
   assert.match(generator, /Do not restart discovery, resend the demo/);
   assert.match(generator, /never invent testimonials/);
-  assert.match(generator, /maxOutputTokens: featureOverviewRequested \? 300 : 140/);
+  assert.match(generator, /maxOutputTokens: featureTourRequested \? 220 : 140/);
+});
+
+test("quiet sales conversations receive one short follow-up after four to five hours", () => {
+  const nurture = server.slice(
+    server.indexOf("// v116: Backend-first Ayla heartbeat and no-reply nurture."),
+    server.indexOf("async function ngV116RunNoReplyLmsNurture"),
+  );
+
+  assert.match(nurture, /4-5 hour wait/);
+  assert.match(nurture, /Math\.max\(4, Math\.min\(5/);
+  assert.match(nurture, /NEXTGEN_NO_REPLY_NURTURE_WAIT_HOURS \|\| 4\.5/);
+  assert.match(nurture, /const latestInbound = ngLatestInbound\(messages\)/);
+  assert.match(nurture, /const latestOutbound = ngLatestOutbound\(messages\)/);
+  assert.match(nurture, /latestInboundAt >= latestOutboundAt/);
+  assert.match(nurture, /waiting_4_to_5_hours/);
+  assert.match(nurture, /free 7-day demo/);
+  assert.match(nurture, /baseline diagnostic/);
 });
 
 test("WhatsApp provider authorization failures open a shared circuit breaker", () => {
