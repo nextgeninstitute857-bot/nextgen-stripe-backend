@@ -578,7 +578,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v275-natural-greeting-single-send";
+const CRM_AYLA_REPLY_BUILD = "v276-durable-whatsapp-fast-ack";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
@@ -20490,6 +20490,7 @@ app.get("/live/debug/storage", async (req, res) => { try { const { user } = awai
 // localStorage for CRM records. Frontend should call these APIs.
 
 const CRM_DB_PATH = path.join(DATA_DIR, "crm-db.json");
+const WHATSAPP_WEBHOOK_JOURNAL_PATH = path.join(DATA_DIR, "whatsapp-webhook-journal.jsonl");
 
 const DEFAULT_CRM_SETTINGS = {
   global_ai_enabled: true,
@@ -28575,6 +28576,227 @@ async function getMetaWebhookVerifyTokens(req) {
   return tokens;
 }
 
+let ngWhatsAppWebhookJournalWriteQueue = Promise.resolve();
+let ngWhatsAppWebhookProcessingQueue = Promise.resolve();
+let ngWhatsAppWebhookRetryTimer = null;
+
+function ngWhatsAppWebhookValue(payload = {}) {
+  return payload?.entry?.[0]?.changes?.[0]?.value || payload?.value || payload || {};
+}
+
+function ngWhatsAppWebhookMessageIds(payload = {}) {
+  const value = ngWhatsAppWebhookValue(payload);
+  return (Array.isArray(value.messages) ? value.messages : [])
+    .map((message) => String(message?.id || "").trim())
+    .filter(Boolean);
+}
+
+async function ngAppendWhatsAppWebhookJournalRecord(record = {}) {
+  const line = `${JSON.stringify(record)}\n`;
+  const task = ngWhatsAppWebhookJournalWriteQueue
+    .catch((error) => console.error("WhatsApp webhook journal write queue recovered:", error.message))
+    .then(async () => {
+      await ensureDataDir();
+      await fs.appendFile(WHATSAPP_WEBHOOK_JOURNAL_PATH, line, "utf8");
+    });
+  ngWhatsAppWebhookJournalWriteQueue = task;
+  return task;
+}
+
+async function ngJournalWhatsAppWebhook({ payload = {}, integrationId = null, kind = "inbound" } = {}) {
+  const entry = {
+    record_type: "queued",
+    id: uuid(),
+    kind,
+    platform: "whatsapp",
+    integration_id: integrationId || null,
+    provider_message_ids: ngWhatsAppWebhookMessageIds(payload),
+    payload,
+    received_at: nowIso(),
+  };
+  await ngAppendWhatsAppWebhookJournalRecord(entry);
+  return entry;
+}
+
+async function ngMarkWhatsAppWebhookJournalEntry(entry, { status = "processed", result = null, error = null } = {}) {
+  await ngAppendWhatsAppWebhookJournalRecord({
+    record_type: status,
+    id: entry?.id || null,
+    kind: entry?.kind || null,
+    result,
+    error: error ? String(error).slice(0, 1000) : null,
+    recorded_at: nowIso(),
+  });
+}
+
+async function ngReadPendingWhatsAppWebhookJournal({ limit = 100 } = {}) {
+  let raw = "";
+  try {
+    raw = await fs.readFile(WHATSAPP_WEBHOOK_JOURNAL_PATH, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
+
+  const queued = new Map();
+  const completed = new Set();
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const record = JSON.parse(line);
+      const id = String(record?.id || "").trim();
+      if (!id) continue;
+      if (record.record_type === "queued") queued.set(id, record);
+      if (record.record_type === "processed" || record.record_type === "duplicate") completed.add(id);
+    } catch (error) {
+      console.warn("Skipped malformed WhatsApp webhook journal line:", error.message);
+    }
+  }
+
+  return Array.from(queued.values())
+    .filter((entry) => !completed.has(String(entry.id || "")))
+    .sort((a, b) => String(a.received_at || "").localeCompare(String(b.received_at || "")))
+    .slice(0, Math.max(1, Math.min(1000, Number(limit || 100))));
+}
+
+function ngFindWhatsAppInboundConversationByProviderId(db, providerMessageIds = []) {
+  const ids = new Set((providerMessageIds || []).map((id) => String(id || "").trim()).filter(Boolean));
+  if (!ids.size) return null;
+  return ensureCrmArray(db, "conversations").find((message) => {
+    if (normalizeSocialPlatform(message.platform || message.source_platform || "") !== "whatsapp") return false;
+    if (normalizeLeadDirection(message.direction || "", "") !== "inbound") return false;
+    const providerId = String(message.platform_message_id || message.provider_message_id || message.message_id || "").trim();
+    return providerId && ids.has(providerId);
+  }) || null;
+}
+
+async function ngProcessWhatsAppStatusJournalEntry(entry, db) {
+  const value = ngWhatsAppWebhookValue(entry.payload || {});
+  const statuses = Array.isArray(value.statuses) ? value.statuses : [];
+  let updatedStatuses = 0;
+  for (const status of statuses) {
+    const messageId = String(status?.id || "").trim();
+    if (!messageId) continue;
+    const log = ensureCrmArray(db, "message_logs").find((item) =>
+      String(item.provider_message_id || item.platform_message_id || "") === messageId
+    );
+    if (!log) continue;
+    log.status = status.status || log.status;
+    log.provider_status = status.status || null;
+    log.provider_response = status;
+    if (status.status === "delivered") log.delivered_at = nowIso();
+    if (status.status === "read") log.read_at = nowIso();
+    log.updated_at = nowIso();
+    updatedStatuses += 1;
+  }
+  if (updatedStatuses) await writeCrmDb(db);
+  await ngMarkWhatsAppWebhookJournalEntry(entry, { result: { statuses_received: statuses.length, statuses_updated: updatedStatuses } });
+  return { statuses_received: statuses.length, statuses_updated: updatedStatuses };
+}
+
+async function ngProcessWhatsAppInboundJournalEntry(entry, db) {
+  const integration = entry.integration_id
+    ? ensureCrmArray(db, "integrations").find((item) => String(item.id) === String(entry.integration_id))
+    : getIntegrationByPlatform(db, "whatsapp");
+  const providerMessageIds = Array.isArray(entry.provider_message_ids) && entry.provider_message_ids.length
+    ? entry.provider_message_ids
+    : ngWhatsAppWebhookMessageIds(entry.payload || {});
+  const duplicate = ngFindWhatsAppInboundConversationByProviderId(db, providerMessageIds);
+  if (duplicate) {
+    await ngMarkWhatsAppWebhookJournalEntry(entry, {
+      status: "duplicate",
+      result: { conversation_id: duplicate.id || null, lead_id: duplicate.lead_id || null },
+    });
+    if (duplicate.lead_id) {
+      ngScheduleAylaAutoReplyAfterInbound({
+        leadId: duplicate.lead_id,
+        source: "whatsapp_journal_duplicate_recovery",
+        delayMs: 1000,
+      });
+    }
+    return { duplicate: true, conversation_id: duplicate.id || null, lead_id: duplicate.lead_id || null };
+  }
+
+  const leadPayload = parseInboundSocialPayload({ platform: "whatsapp", payload: entry.payload || {}, integration });
+  const inboundText = leadPayload.source_text || "";
+  const { lead, created } = upsertSocialLead(db, "whatsapp", leadPayload);
+  const conversationPayload = {
+    ...(entry.payload || {}),
+    platform_message_id: leadPayload.platform_message_id || providerMessageIds[0] || null,
+  };
+  const conversation = appendSocialConversation(db, {
+    lead,
+    platform: "whatsapp",
+    direction: "inbound",
+    text: inboundText,
+    payload: conversationPayload,
+    integration,
+  });
+  createSocialClientDataEvent(db, { lead, platform: "whatsapp", payload: leadPayload, integration });
+  createIntegrationLog(db, {
+    brand_id: integration?.brand_id || lead.brand_id || null,
+    integration_id: integration?.id || null,
+    platform: "whatsapp",
+    action: "inbound_webhook",
+    status: "success",
+    message: created ? "Created lead from whatsapp inbound webhook" : "Updated lead from whatsapp inbound webhook",
+    metadata: { lead_id: lead.id, conversation_id: conversation.id, journal_id: entry.id },
+  });
+
+  await writeCrmDb(db);
+  await ngMarkWhatsAppWebhookJournalEntry(entry, {
+    result: { lead_id: lead.id, conversation_id: conversation.id, created },
+  });
+  ngScheduleAylaAutoReplyAfterInbound({
+    leadId: lead.id,
+    source: "whatsapp_durable_journal_wakeup",
+    delayMs: 1000,
+  });
+  return { lead_id: lead.id, conversation_id: conversation.id, created };
+}
+
+async function ngProcessWhatsAppWebhookJournalEntry(entry) {
+  const db = await readCrmDb();
+  if (entry?.kind === "status") return ngProcessWhatsAppStatusJournalEntry(entry, db);
+  return ngProcessWhatsAppInboundJournalEntry(entry, db);
+}
+
+function ngScheduleWhatsAppWebhookJournalRetry() {
+  if (ngWhatsAppWebhookRetryTimer) return;
+  ngWhatsAppWebhookRetryTimer = setTimeout(() => {
+    ngWhatsAppWebhookRetryTimer = null;
+    ngDrainWhatsAppWebhookJournal({ limit: 100 }).catch((error) => {
+      console.error("WhatsApp webhook journal retry failed:", error.message);
+      ngScheduleWhatsAppWebhookJournalRetry();
+    });
+  }, 15_000);
+  ngWhatsAppWebhookRetryTimer.unref?.();
+}
+
+function ngScheduleWhatsAppWebhookJournalProcessing(entry) {
+  ngWhatsAppWebhookProcessingQueue = ngWhatsAppWebhookProcessingQueue
+    .catch((error) => console.error("WhatsApp webhook processing queue recovered:", error.message))
+    .then(() => ngProcessWhatsAppWebhookJournalEntry(entry))
+    .catch(async (error) => {
+      console.error("WhatsApp webhook journal entry processing failed:", error.message);
+      try {
+        await ngMarkWhatsAppWebhookJournalEntry(entry, { status: "failed", error: error.message });
+      } catch (journalError) {
+        console.error("WhatsApp webhook failure marker could not be written:", journalError.message);
+      }
+      ngScheduleWhatsAppWebhookJournalRetry();
+    });
+  return ngWhatsAppWebhookProcessingQueue;
+}
+
+async function ngDrainWhatsAppWebhookJournal({ limit = 100 } = {}) {
+  await ngWhatsAppWebhookJournalWriteQueue.catch(() => {});
+  const pending = await ngReadPendingWhatsAppWebhookJournal({ limit });
+  for (const entry of pending) ngScheduleWhatsAppWebhookJournalProcessing(entry);
+  await ngWhatsAppWebhookProcessingQueue;
+  return { pending_found: pending.length };
+}
+
 async function verifyMetaWebhook(req, res) {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -28593,49 +28815,67 @@ function verifyTelegramSecretHeader(req) {
 
 async function handleUniversalWebhook({ req, res, platform, integrationId = null }) {
   try {
-    const db = await readCrmDb();
     const requestedPlatform = normalizeSocialPlatform(platform);
     const cleanPlatform = (requestedPlatform === "facebook" || requestedPlatform === "instagram")
       ? (String(req.body?.object || "").toLowerCase().includes("instagram") ? "instagram" : requestedPlatform)
       : requestedPlatform;
-    const integration = integrationId
-      ? ensureCrmArray(db, "integrations").find((item) => String(item.id) === String(integrationId))
-      : getIntegrationByPlatform(db, cleanPlatform);
 
-    // Meta sends delivery/read status callbacks to the same WhatsApp endpoint.
-    // They are not student messages and must never create blank CRM leads.
+    // WhatsApp must acknowledge Meta before touching the multi-megabyte CRM database.
+    // A tiny append-only journal makes the callback durable first; the serialized
+    // background worker then updates CRM state and wakes Ayla exactly once.
     if (cleanPlatform === "whatsapp") {
-      const value = req.body?.entry?.[0]?.changes?.[0]?.value || req.body?.value || req.body || {};
+      const value = ngWhatsAppWebhookValue(req.body || {});
       const inboundMessages = Array.isArray(value.messages) ? value.messages : [];
       const statuses = Array.isArray(value.statuses) ? value.statuses : [];
 
       if (!inboundMessages.length) {
-        let updatedStatuses = 0;
-        for (const status of statuses) {
-          const messageId = String(status?.id || "").trim();
-          if (!messageId) continue;
-          const log = ensureCrmArray(db, "message_logs").find((item) =>
-            String(item.provider_message_id || item.platform_message_id || "") === messageId
-          );
-          if (!log) continue;
-          log.status = status.status || log.status;
-          log.provider_status = status.status || null;
-          log.provider_response = status;
-          if (status.status === "delivered") log.delivered_at = nowIso();
-          if (status.status === "read") log.read_at = nowIso();
-          log.updated_at = nowIso();
-          updatedStatuses += 1;
+        if (statuses.length) {
+          const statusEntry = await ngJournalWhatsAppWebhook({
+            payload: req.body || {},
+            integrationId,
+            kind: "status",
+          });
+          res.status(200).json({
+            success: true,
+            platform: cleanPlatform,
+            event: "message_status",
+            statuses_received: statuses.length,
+            queued: true,
+            journal_id: statusEntry.id,
+          });
+          ngScheduleWhatsAppWebhookJournalProcessing(statusEntry);
+          return;
         }
-        if (updatedStatuses) await writeCrmDb(db);
         return res.status(200).json({
           success: true,
           platform: cleanPlatform,
-          event: statuses.length ? "message_status" : "ignored_non_message",
-          statuses_received: statuses.length,
-          statuses_updated: updatedStatuses,
+          event: "ignored_non_message",
+          statuses_received: 0,
         });
       }
+
+      const inboundEntry = await ngJournalWhatsAppWebhook({
+        payload: req.body || {},
+        integrationId,
+        kind: "inbound",
+      });
+      res.status(200).json({
+        success: true,
+        platform: cleanPlatform,
+        event: "inbound_queued",
+        queued: true,
+        journal_id: inboundEntry.id,
+        provider_message_ids: inboundEntry.provider_message_ids,
+        ai_auto: { queued: true, source: "whatsapp_durable_journal" },
+      });
+      ngScheduleWhatsAppWebhookJournalProcessing(inboundEntry);
+      return;
     }
+
+    const db = await readCrmDb();
+    const integration = integrationId
+      ? ensureCrmArray(db, "integrations").find((item) => String(item.id) === String(integrationId))
+      : getIntegrationByPlatform(db, cleanPlatform);
 
     const leadPayload = parseInboundSocialPayload({ platform: cleanPlatform, payload: req.body || {}, integration });
     const inboundText = leadPayload.source_text || "";
@@ -28643,28 +28883,6 @@ async function handleUniversalWebhook({ req, res, platform, integrationId = null
     const conversation = appendSocialConversation(db, { lead, platform: cleanPlatform, direction: "inbound", text: inboundText, payload: req.body || {}, integration });
     createSocialClientDataEvent(db, { lead, platform: cleanPlatform, payload: leadPayload, integration });
     createIntegrationLog(db, { brand_id: integration?.brand_id || lead.brand_id || null, integration_id: integration?.id || null, platform: cleanPlatform, action: "inbound_webhook", status: "success", message: created ? `Created lead from ${cleanPlatform} inbound webhook` : `Updated lead from ${cleanPlatform} inbound webhook`, metadata: { lead_id: lead.id, conversation_id: conversation.id } });
-
-    // Acknowledge WhatsApp immediately after the inbound message is durable.
-    // AI generation and provider sending happen in the guarded background retry
-    // path so Meta is never kept waiting and a failed inline attempt cannot leave
-    // a stale lock that makes Ayla appear silent.
-    if (cleanPlatform === "whatsapp") {
-      await writeCrmDb(db);
-      res.status(200).json({
-        success: true,
-        platform: cleanPlatform,
-        lead_id: lead.id,
-        created,
-        conversation_id: conversation.id,
-        ai_auto: { queued: true, source: "whatsapp_fast_ack" },
-      });
-      ngScheduleAylaAutoReplyAfterInbound({
-        leadId: lead.id,
-        source: "whatsapp_fast_ack_wakeup",
-        delayMs: 1000,
-      });
-      return;
-    }
 
     let aiAutoResult = null;
     try {
@@ -90155,6 +90373,14 @@ async function startNextgenServer() {
     .then((result) => console.log("LMS known MSK transcript-notes catch-up:", result))
     .catch((error) => console.error("LMS known MSK transcript-notes catch-up failed:", error.message));
   ngV116StartBackendHeartbeat();
+  setTimeout(() => {
+    ngDrainWhatsAppWebhookJournal({ limit: 500 })
+      .then((result) => console.log("WhatsApp webhook journal recovery:", result))
+      .catch((error) => {
+        console.error("WhatsApp webhook journal recovery failed:", error.message);
+        ngScheduleWhatsAppWebhookJournalRetry();
+      });
+  }, 1_000).unref?.();
   ngStartEmailQueueRunner();
   ngStartEmailAutomationRunner();
   ngStartBillingExpiryRunner();
