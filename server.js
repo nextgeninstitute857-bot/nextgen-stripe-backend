@@ -578,7 +578,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v284-fast-concrete-sales-close";
+const CRM_AYLA_REPLY_BUILD = "v285-labelled-sales-media-demo";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
@@ -48078,14 +48078,21 @@ function ngAylaLatestMessageSignals(latestInboundText = "", history = "") {
   };
 }
 
-function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = "", history = "") {
+function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = "", history = "", liveSnapshot = {}) {
   const s = ngAylaPickSettings(db);
   if (s.sales_closer_mode_enabled === false) {
     return "Backend Sales Brain is disabled in AI Control Center.";
   }
 
   const signals = ngAylaLatestMessageSignals(latestInboundText, history);
-  const assets = typeof ngAylaGetSalesAssets === "function" ? ngAylaGetSalesAssets(db) : {};
+  const configuredAssets = typeof ngAylaGetSalesAssets === "function" ? ngAylaGetSalesAssets(db) : {};
+  const assets = {
+    ...configuredAssets,
+    recordingTitle: liveSnapshot?.latest_recording?.title || configuredAssets.recordingTitle || "",
+    recordingLink: liveSnapshot?.latest_recording?.url || configuredAssets.recordingLink || "",
+    liveSessionTitle: liveSnapshot?.live_session?.title || configuredAssets.liveSessionTitle || "",
+    liveSessionLink: liveSnapshot?.live_session?.url || configuredAssets.liveSessionLink || "",
+  };
   const timezone = assets.timezone || ngAylaSalesBrainValue(s, "booking_timezone", "EST");
   const libraryLink = ngSafeExternalLibraryBaseUrl(
     assets.uworldLink || ngAylaSalesBrainValue(s, "uworld_library_link", ""),
@@ -48117,7 +48124,8 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
     "- LMS ecosystem rule: explain NextGen as a complete USMLE learning ecosystem in short human WhatsApp-style lines, not a long feature dump. Say the student gets everything in one place: roadmap, live sessions, recordings, UWorld Video Library, First Aid/UWorld mapping, notes, tasks, accountability assessments, progress tracking, leaderboard encouragement, Community Q&A, and Study Partner support.",
     "- Early value sequence: in the first few real replies after the student engages, naturally cover live sessions at 1:00 PM EST Monday-Friday, recent recording, YouTube/proof when available, UWorld Video Library, LMS/demo/dashboard, then ask whether the student attended any Dr. Ahmad/NextGen session before, ask exam timeline/weak areas, and move toward Google Meet when qualified. Do this slowly and conversationally, not as a dump.",
     ngBuildAylaMediaGuidance(db, lead),
-    "- Assessment rule: never say there is an assessment after every session. Say assessments are after each system/block and surprise mentor assessments can be assigned when needed.",
+    "- Adaptive weak-area loop: explain naturally that question and assessment performance identifies weak areas; AylaMed then brings those topics back through targeted flashcards, revision, roadmap tasks, and mentor guidance so weak concepts are not simply forgotten.",
+    "- Assessment rule: never say there is an assessment after every session. Say mentor-led accountability assessments are used weekly/weekend when published and after each system/block, with extra targeted checks assigned when a student needs them.",
     "- Resources rule: explain briefly that the ecosystem connects First Aid, Pathoma concepts, mapped UWorld QIDs, UWorld Video Library, recordings/notes, tasks, assessments for accountability, progress tracking, leaderboard encouragement, Community Q&A, and Study Partner support in one screen/place.",
     "- Soft program mention: when explaining the program generally, say it is a complete USMLE learning ecosystem that keeps the student guided, accountable, and encouraged. Keep feature explanations short, usually one line or less.",
     "- Never ignore a direct question like what is this/that. Clarify the previous Ayla message first, then continue the sales flow naturally.",
@@ -48127,9 +48135,9 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
       : "- No approved external UWorld Library link is configured. Do not invent or share a legacy LMS link.",
     mentorName ? `- UWorld mentor context: ${mentorName}${mentorTitle ? `, ${mentorTitle}` : ""}, taught detailed UWorld-style content. Mention this naturally only when relevant, not in every reply.` : "",
     "- Mentor authority: refer to the USMLE-focused mentor team naturally. Do not invent or hard-code doctor names unless the admin saved them in AI Control.",
-    "- Session recording: offer a recent session recording early so the student can judge the teaching quality and explanation style.",
-    recordingLink ? `- Main recording link available from AI Control: ${recordingLink}` : "- If no recording link is saved, offer to share the session recording rather than inventing a link.",
-    liveSessionLink ? `- Live session link available from AI Control: ${liveSessionLink}` : "- If no live-session link is saved or available, say you can send the next live session link when it is available.",
+    "- Session recording: offer a recent session recording early so the student can judge the teaching quality and explanation style. Never send a bare or generic recording link: state the exact system, day/lecture number, and topic supplied by the live LMS first.",
+    recordingLink ? `- Named recording available: ${ngAylaRecordingTitle(assets)}. Share it as \"${ngAylaRecordingTitle(assets)}\" followed by this link: ${recordingLink}` : "- If no recording link is saved, offer to share the session recording rather than inventing a link.",
+    liveSessionLink ? `- Named live session available: ${assets.liveSessionTitle || "NextGen live session"}. State this exact session title, date/time from live facts, and then share: ${liveSessionLink}` : "- If no live-session link is saved or available, say you can send the next live session link when it is available.",
     `- Scheduling timezone: always use ${timezone}. Do not mention Pakistan time unless the student asks for it.`,
     "- Price rule: if price/cost/package/payment is asked, give the exact active public plan names and USD prices from the current live LMS facts first. Never invent packages. Then provide the official pricing/enrollment link and offer the free demo or optional mentor guidance as one helpful next step.",
     "- Failed/weak/confused rule: reassure strongly that the student is in the right place; the key is roadmap, mentor feedback, UWorld-style practice, and weak-area correction; then offer recording/live session/UWorld demo and Google Meet guidance when positive.",
@@ -48377,6 +48385,35 @@ async function ngAylaLiveLmsSalesGrounding({ structured = false } = {}) {
           return String(session?.course_id || "") === courseId &&
             String(session?.scheduled_date || "") === String(activeDay?.date || activeDay?.scheduled_date || "").slice(0, 10);
         }) || null;
+    const activeSessionTitle = activeSession
+      ? ngDayFirstContentTitle(activeSession.topic || activeSession.title || "", {
+          systemDay: activeSession.system_day || activeSession.day_in_system || activeDay?.system_day,
+          dayNumber: activeSession.day_number || activeDay?.day_number,
+          system: activeSession.system || activeDay?.system || activeDay?.chapter || "",
+          fallback: activeDay?.title || "",
+        })
+      : "";
+    const activeSessionUrl = String(
+      activeSession?.join_url || activeSession?.meeting_url || activeSession?.zoom_join_url || ""
+    ).trim();
+    const latestPublishedRecording = Object.values(liveDb.recordings || {})
+      .filter((recording) => {
+        const recordingCourseId = String(recording?.course_id || "");
+        const hasPublicUrl = Boolean(recording?.recording_url || recording?.share_url);
+        return recording?.published === true && recording?.hidden_from_recordings !== true && hasPublicUrl &&
+          (!courseId || !recordingCourseId || recordingCourseId === courseId);
+      })
+      .sort(sortRecordingsNewestFirst)[0] || null;
+    const publicRecording = latestPublishedRecording ? sanitizePublicRecording(latestPublishedRecording) : null;
+    const latestRecordingTitle = publicRecording
+      ? ngDayFirstContentTitle(publicRecording.topic || "", {
+          systemDay: publicRecording.system_day,
+          dayNumber: publicRecording.day_number,
+          system: publicRecording.system || "",
+          fallback: publicRecording.system || "Recent live session",
+        })
+      : "";
+    const latestRecordingUrl = String(publicRecording?.recording_url || publicRecording?.share_url || "").trim();
     const earliestTeachingDate = days.find((day) => {
       const status = String(day.status || day.roadmap_status || "").toLowerCase();
       return !["holiday", "cancelled", "canceled", "no_class"].includes(status) && Boolean(day.system || day.chapter);
@@ -48396,8 +48433,11 @@ async function ngAylaLiveLmsSalesGrounding({ structured = false } = {}) {
         ? `- Current/next roadmap item: ${String(activeDay.title || `${activeDay.system || activeDay.chapter || "System"}${activeDay.system_day ? ` Day ${activeDay.system_day}` : ""}`).trim()} on ${String(activeDay.date || activeDay.scheduled_date || "").slice(0, 10)}.`
         : "- No current roadmap item is available; do not invent a topic or date.",
       activeSession
-        ? `- Matching live session: ${String(activeSession.status || "scheduled")} on ${activeSession.scheduled_date || ""}${activeSession.scheduled_time ? ` at ${activeSession.scheduled_time} ${activeSession.scheduled_timezone || "America/New_York"}` : ""}.`
+        ? `- Matching live session: ${activeSessionTitle || "NextGen live session"}; ${String(activeSession.status || "scheduled")} on ${activeSession.scheduled_date || ""}${activeSession.scheduled_time ? ` at ${activeSession.scheduled_time} ${activeSession.scheduled_timezone || "America/New_York"}` : ""}.${activeSessionUrl ? ` Student join link: ${activeSessionUrl}` : " No student join link is published yet."}`
         : "- No matching live-session record is available; do not promise that a session link is live now.",
+      publicRecording
+        ? `- Latest published recording: ${latestRecordingTitle || "Recent live session"}.${latestRecordingUrl ? ` Student recording link: ${latestRecordingUrl}` : ""} When sharing it, always state this exact title before the link.`
+        : "- No published course recording is available; do not invent or send a recording link.",
       plans.length
         ? `- Approved public prices: ${plans.map(ngAylaFormatPublicPlan).join(" | ")}.`
         : "- No active public paid plan is available. Do not invent package names or prices; say the current price is not available and offer human help.",
@@ -48418,6 +48458,25 @@ async function ngAylaLiveLmsSalesGrounding({ structured = false } = {}) {
       demo_url: "https://nextgenusmle.live/demo",
       current_date: now.date_key,
       course_name: String(course?.name || ""),
+      live_session: activeSession ? {
+        id: String(activeSession.id || activeSessionId || ""),
+        title: activeSessionTitle || "NextGen live session",
+        system: String(activeSession.system || activeDay?.system || activeDay?.chapter || ""),
+        system_day: Number(activeSession.system_day || activeSession.day_in_system || activeDay?.system_day || 0) || null,
+        date: String(activeSession.scheduled_date || activeDay?.date || activeDay?.scheduled_date || "").slice(0, 10),
+        time: String(activeSession.scheduled_time || ""),
+        timezone: String(activeSession.scheduled_timezone || "America/New_York"),
+        status: String(activeSession.status || "scheduled"),
+        url: activeSessionUrl,
+      } : null,
+      latest_recording: publicRecording ? {
+        id: String(publicRecording.id || publicRecording.recording_key || ""),
+        title: latestRecordingTitle || "Recent live session",
+        system: String(publicRecording.system || ""),
+        system_day: Number(publicRecording.system_day || 0) || null,
+        date: String(publicRecording.start_time || "").slice(0, 10),
+        url: latestRecordingUrl,
+      } : null,
     };
     return structured ? snapshot : snapshot.context;
   } catch (error) {
@@ -48483,6 +48542,8 @@ Answer the direct question first in 2-5 short WhatsApp lines. This is an ongoing
 }
 
 function ngAylaRecordingTitle(assets = {}) {
+  const exactTitle = String(assets.recordingTitle || assets.latestRecordingTitle || "").trim();
+  if (exactTitle) return exactTitle;
   const mentor = String(assets.recordingMentorName || "").trim();
   return mentor ? `${mentor}'s recent live session recording` : "our recent live session recording";
 }
@@ -48579,7 +48640,9 @@ function ngAylaGetSalesAssets(db = {}) {
     sessionTime,
     sessionDays: ngAylaFirstNonEmptySetting(s, ["live_session_days", "session_days"], "Monday to Friday"),
     liveSessionLink,
+    liveSessionTitle: ngAylaFirstNonEmptySetting(s, ["live_session_title", "current_live_session_title", "daily_live_session_title"], ""),
     recordingLink,
+    recordingTitle: ngAylaFirstNonEmptySetting(s, ["latest_session_recording_title", "session_recording_title", "recording_title", "latest_recording_title"], ""),
     recordingMentorName: ngAylaFirstNonEmptySetting(s, ["recording_mentor_name", "session_recording_mentor_name"], ""),
     uworldLink,
     demoDays,
@@ -48596,7 +48659,7 @@ function ngAylaGetSalesAssets(db = {}) {
     ),
     roadmapSummary: ngAylaNormalizeMarketingLine(
       ngAylaFirstNonEmptySetting(s, ["roadmap_summary", "roadmap_knowledge_summary"], ""),
-      "NextGen LMS is a complete USMLE learning ecosystem in one place. The 120-day Step 1 roadmap starts with Cardiology first and continues with MSK, Central Nervous System, Reproductive, Endocrinology, GIT, Renal, Pulmonology, Immunology, Hematology, and Psychiatry. Students get live teaching, mapped UWorld QIDs, First Aid integration, recordings, tasks, notes, accountability assessments, progress tracking, leaderboard encouragement, Community Q&A, and Study Partner support."
+      `NextGen LMS is a complete USMLE learning ecosystem in one place. The 120-day Step 1 roadmap covers ${NEXTGEN_STEP1_ROADMAP_SYSTEM_SEQUENCE.length} systems in this order: ${ngRoadmapSystemSequenceText()}. Students get live teaching, mapped UWorld QIDs, First Aid integration, recordings, tasks, notes, adaptive weak-area flashcards and revision, mentor-led weekly/weekend and system-end assessments, progress tracking, leaderboard encouragement, Community Q&A, and Study Partner support.`
     ),
     resourcesSummary: ngAylaNormalizeMarketingLine(
       ngAylaFirstNonEmptySetting(s, ["resources_summary", "program_resources_summary"], ""),
@@ -49493,12 +49556,13 @@ async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }
   const trainingContext = db ? ngTrainingContextForFullAiAuto(db, `${latestInboundTextForRouting}\n${history.slice(-1600)}`) : "";
   const commandContext = db ? ngBuildAylaCommandContext(db, lead, { includeBackendSalesBrain: false }) : "";
   const latestSignals = ngAylaLatestMessageSignals(latestInboundText, history);
+  const hasPriorAylaReply = cleanMessages.some((message) => ngIsOutboundMessage(message));
 
   // A bare hello is a relationship-opening turn, not a sales turn. Give the model a
   // small, conflict-free prompt for this one turn so older campaign/training text cannot
   // pull it into an LMS, recording, demo, or live-session pitch. The wording remains
   // generated by Ayla; this is not a scripted reply.
-  if (latestSignals.bare_greeting) {
+  if (latestSignals.bare_greeting && !hasPriorAylaReply) {
     const rawLeadName = String(
       lead?.full_name || lead?.name || lead?.contact_name || lead?.student_name || ""
     ).trim();
@@ -49547,7 +49611,7 @@ Do not mention or pitch any programme, LMS, demo, live session, recording, UWorl
       intent: "live_lms_grounded_pricing",
     };
   }
-  const backendSalesBrain = db ? ngBuildAylaBackendSalesBrain(db, lead, latestInboundText, history) : "";
+  const backendSalesBrain = db ? ngBuildAylaBackendSalesBrain(db, lead, latestInboundText, history, liveLmsSalesSnapshot) : "";
   const backendActionContext = backendControlDecision?.intent
     ? `The backend detected this operational intent: ${backendControlDecision.intent}. Any protected CRM state change has already been applied. Respond naturally based on the conversation and current lead state; do not copy a canned reply.`
     : "No protected backend action was required for this message.";
@@ -49571,6 +49635,7 @@ Non-negotiable reply style:
 - Do not write robotic paragraphs. Do not use markdown headings. Explain clearly when the student asks.
 - Do not end with weak generic filler like "feel free to ask" unless it is paired with a strong next step.
 - If the latest message is only a greeting, have a normal friendly first exchange: one or two short lines, a natural introduction, and one easy question. Ask the student's name first when it is unknown. Do not begin the sales sequence, mention programme assets, or offer live sessions, recordings, demos, Google Meet, or pricing until the student provides context. Do not say "Thank you, Doctor" in response to a bare hello.
+- That first-greeting behavior applies only before Ayla has ever replied. If an existing student says hello again, use the conversation and lead profile, preserve the known exam/name/needs, and continue naturally without restarting discovery or asking the exam again.
 - When explaining the programme, use warm enthusiasm and explain the practical benefit before asking for a conversion: the roadmap, live teaching, recordings, questions, weak-area correction, notes, revision and accountability are organised together so the student knows what to do next. Invite the student to experience the configured free demo in your own natural words and include the direct demo link when it is relevant and available.
 
 Sales behavior:
@@ -49578,6 +49643,11 @@ Sales behavior:
 - Use broad reasoning for any weak area or system the student mentions; do not hard-code only MSK or only Cardiology. Adapt to the system named by the student.
 - After answering the student’s question, move the lead forward naturally: build trust, share/offer session recording, explain the UWorld Video Library, invite to live session, ask exam date/weak area, or offer Google Meet mentor consultation at the right time.
 - Session recordings are still an important proof asset. Do not suppress recording links. If a recording is useful for trust or the student asks about recordings, share it; just keep listening and continue the next turn when the student replies.
+- Never send a raw or generic recording link. Before the link, state the exact system, lecture/day number, and topic from CURRENT LIVE LMS SALES FACTS. If those facts are unavailable, say you will share the correctly labelled recording when it is published instead of guessing.
+- Never send a raw or generic live-session link. State the exact session title/system/day plus its live date and time from CURRENT LIVE LMS SALES FACTS before the link. Never invent a missing title, time, or link.
+- Explain the adaptive loop accurately when relevant: MCQ, assessment, and progress results reveal weak areas; those weak topics return through targeted flashcards, revision and roadmap tasks, while mentor guidance and later assessments check whether the weakness improved.
+- Explain assessments accurately: mentor-led accountability assessments may be published weekly/weekend and after a system/block; targeted assessments can be assigned when needed. Never promise an assessment after every lecture.
+- When a matching privacy-safe LMS image is available, write naturally as if the picture supports the explanation, but never claim that a screenshot or image was sent unless the backend actually attaches one.
 - Never ignore the student’s direct question or instruction. Do not repeat a previous offer when the student asked something else. Answer first, then convert naturally.
 - When a student hesitates after opening the demo or choosing a plan, answer the exact fear with their known exam, timeline, and weak point. Explain why starting now helps, then finish with one concrete next action that matches the conversation (for example, the current enrollment link if they already chose a plan). Do not restart discovery, resend the demo, or end with a vague question such as "Would you like to discuss...?".
 - Use approved proof naturally when it is present in the supplied context, but never invent testimonials or say that "many students improve" without that evidence.
@@ -49594,7 +49664,7 @@ Conversation intelligence:
 - Do not ask for weak area again if already known.
 - If something is missing, ask only one clear question.
 - If enough is known, move to recording/live session/UWorld demo first, then Google Meet mentor consultation after value is shown or if directly requested.
-- Roadmap knowledge: if the student asks roadmap/study plan/curriculum, summarize: structured 120-day system-wise roadmap starting with Cardiology first and continuing through Psychiatry in this order: Cardiology, MSK, Central Nervous System, Reproductive, Endocrinology, GIT, Renal, Pulmonology, Immunology, Hematology, Psychiatry. Explain that each lecture connects First Aid topic + mapped UWorld QIDs from LMS + live teaching + matching recording + homework/tasks + notes/recordings + assessment/revision. Do not say MSK first. Do not explain each day unless asked.
+- Roadmap knowledge: if the student asks roadmap/study plan/curriculum, summarize the structured 120-day plan as ${NEXTGEN_STEP1_ROADMAP_SYSTEM_SEQUENCE.length} systems in this exact current order: ${ngRoadmapSystemSequenceText()}. Explain that each lecture connects First Aid topic + mapped UWorld QIDs from LMS + live teaching + matching recording + homework/tasks + notes/recordings + adaptive flashcards + assessment/revision. Do not say MSK first. Do not omit Dermatology. Do not invent a different system count. Do not explain each day unless asked.
 - Resources knowledge: if the student asks resources, say we use First Aid, UWorld-style QBank/MCQ discussion, Pathoma concepts, and NextGen assessments, connected with MCQ-solving, weak-area review, and exam strategy.
 - Softly mention roadmap/resources in general program explanation even when not asked, but keep it short.
 - Mention the UWorld Video Library naturally when it helps sell value: around 150 hours, 3000+ MCQs, First Aid integrated with every MCQ, MCQ approach, option elimination, concept connection, and weak-area correction. Invite the student to take the configured free demo and see the first lecture of every chapter; do not use a hard-coded demo duration.
@@ -66840,7 +66910,7 @@ function ngNormalizeMediaUsageKey(value = "") {
     leaderboard_points: "leaderboard",
     daily_flashcards: "flashcards",
     flashcard: "flashcards",
-    homepage_course_preview: "program_overview",
+    homepage_course_preview: "demo_lms",
     ayla_program_explanation: "program_overview",
     demo_lms_preview: "demo_lms",
     roadmap_preview: "roadmap",
@@ -66852,8 +66922,18 @@ function ngNormalizeMediaUsageKey(value = "") {
   return map[raw] || raw || "general";
 }
 
+function ngAylaIsSafePublicLmsPreview(asset = {}) {
+  const rawUsage = normalizeCrmLower(asset.usage_area || asset.usage || asset.asset_type || "", "");
+  const allowedUsage = ["homepage_course_preview", "demo_lms_preview", "demo_lms", "course_card"].includes(rawUsage);
+  const publicUrl = String(asset.public_url || asset.relative_url || asset.url || "").trim();
+  const mime = String(asset.mime_type || "").toLowerCase();
+  const type = String(asset.asset_type || "").toLowerCase();
+  const isImage = mime.startsWith("image/") || /\.(png|jpe?g|webp)(?:\?|$)/i.test(publicUrl) || ["homepage_course_preview", "demo_lms_preview", "course_card", "image"].includes(type);
+  return asset.homepage_visible === true && allowedUsage && isImage && Boolean(publicUrl);
+}
+
 function ngAylaMediaEligibleAssets(db = {}, brandId = null) {
-  return ensureCrmArray(db, "media_assets")
+  const storedAssets = ensureCrmArray(db, "media_assets")
     .filter((asset) => asset && asset.status !== "inactive" && asset.status !== "archived" && asset.status !== "deleted")
     .filter((asset) => !brandId || !asset.brand_id || String(asset.brand_id) === String(brandId))
     .filter((asset) => asset.ai_send_enabled === true || asset.auto_send_with_ayla === true || asset.send_when_explaining === true)
@@ -66863,6 +66943,23 @@ function ngAylaMediaEligibleAssets(db = {}, brandId = null) {
       trigger_keywords: uniqueList([...(Array.isArray(asset.trigger_keywords) ? asset.trigger_keywords : normalizeArray(asset.trigger_keywords || asset.keywords || "")), ...safeArray(asset.tags)]),
       priority: Number(asset.priority || 0) || 0,
     }));
+  const adaptiveLmsPreview = {
+    id: "nextgen-lms-adaptive-preview-v2",
+    title: "NextGen LMS Adaptive Learning Preview",
+    asset_type: "image",
+    mime_type: "image/png",
+    public_url: "https://nextgenusmle.live/media/nextgen-lms-adaptive-preview-v2.png",
+    usage_area: "demo_lms",
+    trigger_keywords: ["dashboard", "lms", "demo", "recordings", "flashcards", "weak areas", "assessments", "roadmap", "progress tracking"],
+    priority: 1,
+    ai_send_enabled: true,
+    homepage_visible: true,
+    ai_usage_context: "Privacy-safe representative LMS preview with no student identity. Use while explaining the dashboard, recordings, adaptive flashcards, weak-area tracking, assessments, roadmap, or demo.",
+  };
+  if (!ngAylaIsSafePublicLmsPreview(adaptiveLmsPreview)) return storedAssets;
+  return storedAssets.some((asset) => String(asset.id || "") === adaptiveLmsPreview.id)
+    ? storedAssets
+    : [...storedAssets, adaptiveLmsPreview];
 }
 
 function ngBuildAylaMediaGuidance(db = {}, lead = {}) {
@@ -66928,7 +67025,17 @@ function ngPickAylaMediaAssetForReply(db = {}, { lead = {}, reply = "", latestIn
 function ngRenderAylaMediaCaption(asset = {}, { lead = {}, reply = "" } = {}) {
   const template = String(asset.caption_template || "").trim();
   if (template) return renderTemplateString(template, { lead, asset, reply });
-  return String(reply || "").trim();
+  const usage = ngNormalizeMediaUsageKey(asset.usage_area || asset.usage || "general");
+  const featureCaption = {
+    demo_lms: "📱 NextGen LMS — roadmap, live teaching, recordings, revision and progress in one organised dashboard.",
+    recording: "🎥 Recordings Library — lectures are organised by system, day and topic.",
+    flashcards: "🧠 Adaptive Flashcards — weak areas return for targeted active recall and revision.",
+    assessment: "📝 Mentor-led Assessments — weekly/weekend accountability, system-end checks and targeted follow-up.",
+    live_classroom: "🔴 NextGen Live Session — structured teaching connected to the same roadmap, notes and recording.",
+    roadmap: "🗺️ 120-Day Roadmap — every system is organised into clear daily learning steps.",
+    program_overview: "✨ NextGen USMLE — one organised learning ecosystem from live teaching to weak-area revision.",
+  }[usage] || "";
+  return [featureCaption, String(reply || "").trim()].filter(Boolean).join("\n\n");
 }
 
 function ngMarkAylaMediaSent(db = {}, lead = {}, asset = {}, meta = {}) {
