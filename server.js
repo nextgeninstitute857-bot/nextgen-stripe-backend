@@ -23801,8 +23801,12 @@ app.post("/admin/crm/brand-snapshots/:snapshotId/apply", async (req, res) => {
 
 
 
-// v105 admin-only hard cleanup endpoint for CRM lead/inbox reset.
-// Keeps templates, campaigns, integrations, provider settings, AI training, roadmap, and system settings.
+// v286 admin-only hard cleanup endpoint for a fresh CRM lead test.
+// This deliberately touches CRM lead/activity history only. It never reads or
+// writes the LMS database, so users, enrollments, payments, access, progress,
+// recordings, assessments, and all other LMS learning data remain unchanged.
+// Approved AI training, media, integrations, campaigns, community funnels,
+// team configuration, referral/commission records, and system settings remain.
 app.post("/admin/crm/debug/clear-leads-inbox", async (req, res) => {
   try {
     const ctx = await requireCrmCollectionAccess(req, "leads", "write");
@@ -23815,27 +23819,52 @@ app.post("/admin/crm/debug/clear-leads-inbox", async (req, res) => {
       return res.status(400).json({ success: false, error: "Missing confirmation phrase DELETE CRM" });
     }
 
-    const db = ctx.crmDb;
+    await Promise.allSettled([
+      ngWhatsAppWebhookJournalWriteQueue,
+      ngWhatsAppWebhookProcessingQueue,
+    ]);
+
+    const db = await readCrmDb();
     const keysToClear = [
       "leads",
       "conversations",
+      "crm_message_logs",
       "message_logs",
       "outbound_messages",
       "inbound_messages",
       "outreach_queue",
+      "import_batches",
       "automation_queue",
       "automation_enrollments",
+      "post_import_auto_first_message_runs",
       "appointments",
       "appointment_notes",
       "opportunities",
       "tasks",
+      "followups",
       "handoffs",
+      "client_data_events",
+      "support_tickets",
+      "ticket_messages",
+      "approval_queue",
+      "agent_logs",
+      "integration_logs",
+      "crm_flow_runs",
+      "crm_flow_events",
+      "live_conversion_events",
       "live_session_invites",
       "scheduled_followup_jobs",
       "followup_executions",
+      "ai_actions",
+      "ai_auto_runs",
+      "ai_feedback",
+      "action_logs",
+      "ai_agent_action_logs",
       "whatsapp_windows",
       "daily_session_recovery",
       "duplicate_send_guards",
+      "message_delivery_locks",
+      "suppression_list",
       "lead_scores",
       "crm_sales_briefs",
       "marketing_flow_events",
@@ -23844,10 +23873,33 @@ app.post("/admin/crm/debug/clear-leads-inbox", async (req, res) => {
       "broadcast_queue",
       "broadcast_replies",
       "call_queue",
+      "hot_call_queue",
       "call_logs",
+      "voice_call_logs",
       "future_followups",
-      "form_submissions"
+      "form_submissions",
+      "survey_responses",
+      "review_requests",
+      "website_chat_sessions",
+      "website_chat_events",
+      "media_send_events"
     ];
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const backupDir = path.join(DATA_DIR, "backups");
+    await fs.mkdir(backupDir, { recursive: true });
+    const crmBackupPath = path.join(backupDir, `crm-db-before-fresh-start-${stamp}.json`);
+    await ngWriteJsonAtomicStreaming(crmBackupPath, db, "CRM fresh-start backup");
+
+    let whatsappJournalBackupPath = null;
+    try {
+      whatsappJournalBackupPath = path.join(backupDir, `whatsapp-webhook-journal-before-fresh-start-${stamp}.jsonl`);
+      await fs.copyFile(WHATSAPP_WEBHOOK_JOURNAL_PATH, whatsappJournalBackupPath);
+      await fs.writeFile(WHATSAPP_WEBHOOK_JOURNAL_PATH, "", "utf8");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      whatsappJournalBackupPath = null;
+    }
 
     const before = {};
     for (const key of keysToClear) {
@@ -23873,6 +23925,17 @@ app.post("/admin/crm/debug/clear-leads-inbox", async (req, res) => {
       success: true,
       build: NEXTGEN_BACKEND_BUILD,
       message: "CRM leads, conversations, message logs, queues, and related lead records cleared",
+      crm_backup_path: crmBackupPath,
+      whatsapp_journal_backup_path: whatsappJournalBackupPath,
+      lms_database_untouched: true,
+      preserved: [
+        "lms_users_enrollments_payments_access_progress_and_learning_data",
+        "approved_ai_training_and_learning_rules",
+        "media_assets_and_media_rules",
+        "integrations_and_provider_settings",
+        "campaigns_community_funnels_and_schedules",
+        "team_roles_referrals_commissions_and_system_settings",
+      ],
       cleared_keys: keysToClear,
       before,
       after,
