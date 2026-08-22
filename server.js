@@ -16,6 +16,7 @@ import {
 } from "./lib/flashcard-postgres.js";
 import { planCrmDeliveryLockRetention } from "./lib/crm-delivery-lock-retention.js";
 import {
+  applyAylaConversationNameToLead,
   applyAylaConversationDecision,
   aylaConversationTextFormat,
   buildAylaConversationPrompt,
@@ -33985,12 +33986,15 @@ app.post("/webhooks/whatsapp", async (req, res) => {
           const from = normalizePhoneForWhatsapp(message.from || "");
           const contact = contacts.find((item) => normalizePhoneForWhatsapp(item.wa_id) === from) || contacts[0] || {};
           const text = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || "";
+          const whatsappProfileName = normalizeCrmString(contact.profile?.name || "");
           let lead = findLeadByPhoneOrEmail(db, { phone: from, waId: contact.wa_id });
           if (!lead && from) {
             lead = withTimestamps({
               id: uuid(),
               brand_id: db.settings?.default_brand_id || db.brands?.[0]?.id || null,
-              name: contact.profile?.name || "WhatsApp Lead",
+              name: whatsappProfileName || "WhatsApp Lead",
+              whatsapp_profile_name: whatsappProfileName || null,
+              name_source: whatsappProfileName ? "whatsapp_profile" : "system_placeholder",
               phone: from,
               whatsapp: from,
               wa_id: contact.wa_id || from,
@@ -34000,6 +34004,13 @@ app.post("/webhooks/whatsapp", async (req, res) => {
               conversation_direction: "inbound",
             });
             ensureCrmArray(db, "leads").push(lead);
+          }
+          if (lead && whatsappProfileName) {
+            lead.whatsapp_profile_name = whatsappProfileName;
+            const currentLeadName = normalizeCrmString(lead.full_name || lead.name || lead.contact_name || "");
+            if (!lead.name_source && currentLeadName.toLowerCase() === whatsappProfileName.toLowerCase()) {
+              lead.name_source = "whatsapp_profile";
+            }
           }
           ensureCrmArray(db, "inbound_messages").push(withTimestamps({
             id: uuid(),
@@ -50215,11 +50226,7 @@ function ngAylaCommitConversationTurnAfterDelivery({ lead = {}, ai = {}, sendRes
   if (!lead.exam_type && nextState.facts?.exam && nextState.facts.exam !== "unknown") lead.exam_type = nextState.facts.exam;
   if (!lead.main_need && nextState.facts?.main_need) lead.main_need = nextState.facts.main_need;
   if (!lead.country && nextState.facts?.country) lead.country = nextState.facts.country;
-  const currentName = String(lead.full_name || lead.name || lead.contact_name || "").trim();
-  if ((!currentName || /^(?:doctor|doc|student|lead|unknown|whatsapp user)$/i.test(currentName) || /^\+?[\d\s().-]+$/.test(currentName)) && nextState.facts?.name) {
-    lead.name = nextState.facts.name;
-    lead.full_name = lead.full_name || nextState.facts.name;
-  }
+  applyAylaConversationNameToLead(lead, nextState.facts?.name, nowIso());
   lead.updated_at = nowIso();
   return true;
 }
