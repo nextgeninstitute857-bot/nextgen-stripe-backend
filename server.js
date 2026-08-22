@@ -21378,6 +21378,24 @@ function normalizeCrmCollectionPayload(collection, body = {}, existing = null, b
     base.lead_source = base.lead_source || base.origin;
     base.source_type = base.source_type || base.origin;
     base.created_from = base.created_from || base.origin;
+    base.source_community_id = base.source_community_id || base.community_id || null;
+    base.source_opportunity_id = base.source_opportunity_id || base.community_opportunity_id || null;
+    base.source_detail = normalizeCrmString(base.source_detail || base.source_community || base.community_name || base.campaign_name || "");
+
+    const normalizedExamTrack = ngNormalizeExamTrack(
+      base.exam_track || base.examTrack || base.exam_type || base.exam || base.which_exam || base.program_track || "",
+      "",
+    );
+    base.exam_track = normalizedExamTrack;
+    base.exam_track_label = normalizedExamTrack ? ngExamTrackLabel(normalizedExamTrack) : "";
+    base.exam_type = base.exam_type || base.exam_track_label || "";
+    base.exam_qualification_status = normalizedExamTrack ? "known" : "needs_qualification";
+    base.next_action = normalizeCrmString(base.next_action || (base.last_message ? "review_and_reply" : "qualify_exam"));
+    base.follow_up_status = normalizeCrmLower(
+      base.follow_up_status || (base.last_message ? "needs_first_response" : "needs_qualification"),
+      base.last_message ? "needs_first_response" : "needs_qualification",
+    );
+    base.next_follow_up_at = normalizeCrmString(base.next_follow_up_at || base.follow_up_at || "");
 
     const isAgentOrigin = base.origin === "agent_outreach";
     const isInboundOrigin = !isAgentOrigin;
@@ -28054,12 +28072,16 @@ function upsertSocialLead(db, platform, payload = {}) {
       status: previous.status || previous.lead_status || payload.status || "new",
       lead_status: previous.lead_status || previous.status || payload.lead_status || "new",
     });
+    Object.assign(
+      previous,
+      normalizeCrmCollectionPayload("leads", previous, previous, previous.brand_id || payload.brand_id || null),
+    );
     ensureLeadIdentityFields(previous);
     return { lead: previous, created: false };
   }
 
   const leadId = uuid();
-  const lead = withTimestamps({
+  const rawLead = withTimestamps({
     id: leadId,
     lead_id: leadId,
     brand_id: payload.brand_id || null,
@@ -28079,6 +28101,7 @@ function upsertSocialLead(db, platform, payload = {}) {
     last_inbound_at: now,
     ...compactDefined(payload),
   });
+  const lead = normalizeCrmCollectionPayload("leads", rawLead, null, rawLead.brand_id || null);
 
   ensureLeadIdentityFields(lead);
   leads.push(lead);
@@ -34151,9 +34174,36 @@ app.post("/admin/crm/community-intelligence/opportunities/:id/create-lead", asyn
     if (!opp) return res.status(404).json({ success: false, error: "Opportunity not found" });
     const brandId = opp.brand_id || getCrmBrandId(req, db);
     const payload = parseInboundSocialPayload({ platform: opp.platform || req.body.platform || "other", payload: { ...(opp.raw_payload || {}), ...(req.body || {}), text: req.body.message || opp.detected_text || opp.summary || "" }, integration: null });
-    const { lead, created } = upsertSocialLead(db, payload.platform || opp.platform || "other", { ...payload, brand_id: brandId, source_community_id: opp.community_id || null, source_opportunity_id: opp.id });
+    const examTrack = ngInferExamTrackFromObject(
+      { ...opp, ...payload, ...(req.body || {}) },
+      "",
+    );
+    const sourcePlatform = payload.platform || opp.platform || "other";
+    const { lead, created } = upsertSocialLead(db, sourcePlatform, {
+      ...payload,
+      brand_id: brandId,
+      origin: "community",
+      lead_origin: "community",
+      lead_source: [sourcePlatform, "community"].join("_"),
+      source_type: "community_opportunity",
+      source_detail: opp.community_name || opp.source_community || opp.title || "",
+      source_community: opp.community_name || opp.source_community || "",
+      source_community_id: opp.community_id || null,
+      source_opportunity_id: opp.id,
+      exam_track: examTrack,
+      exam_type: examTrack ? ngExamTrackLabel(examTrack) : "",
+      stage: "needs_reply",
+      lead_stage: "needs_reply",
+      next_action: "review_and_reply",
+      follow_up_status: "needs_first_response",
+      next_follow_up_at: req.body?.next_follow_up_at || nowIso(),
+    });
     opp.lead_id = lead.id;
     opp.status = "lead_created";
+    opp.exam_track = examTrack || opp.exam_track || "";
+    opp.exam_track_label = examTrack ? ngExamTrackLabel(examTrack) : opp.exam_track_label || "";
+    opp.lead_capture_status = "captured";
+    opp.next_action = "review_and_reply";
     opp.updated_at = nowIso();
     await writeCrmDb(db);
     res.json({ success: true, lead: normalizeLeadForResponse(lead), opportunity: opp, created });
@@ -48061,7 +48111,8 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
       ? "- BARE GREETING TURN — highest priority for this reply: respond like a normal friendly person in one or two short WhatsApp lines. Introduce yourself naturally once and ask one easy discovery question, starting with the student's name when it is unknown. Do not pitch the LMS, demo, live session, recording, UWorld library, Google Meet, pricing, or a feature list on this turn. Do not say 'Thank you, Doctor' merely because the student said hello, and do not overuse exclamation marks."
       : "",
     "- Never expose internal approval, review, training, CRM, retrieval, or knowledge-grounding language to a student. Say 'our First Aid-integrated teaching' or 'our LMS material', not 'approved material' or 'approval'.",
-    "- When the student is learning about the programme, first explain its practical benefits in warm, enthusiastic language: one organised place for roadmap, live teaching, recordings, questions, weak-area correction, revision, notes, and accountability. Then invite them to take the free demo and include the direct demo link when one is available.",
+    "- When the student is learning about the programme, first explain its practical benefits in warm, enthusiastic language: one organised place for roadmap, live teaching, recordings, questions, weak-area correction, revision, notes, and accountability. Only after the feature explanation, invite them to take the free demo and include the direct demo link.",
+    "- Full feature-overview rule: when a student asks about several features, the complete LMS, or the purpose/benefit of features, use one short professional line per feature. Explain what it does and how it helps the student. Cover dashboard, roadmap, live classes, recordings, session notes, adaptive flashcards, weak-area tracking, and assessments. Then invite the student to the demo. Finally recommend attending one live session, or watching the matching labelled recording when time is limited. Do not place the demo invitation before the explanation.",
     "- Conversation-first rule: answer the student’s latest question or concern first. Then move forward with ONE useful next step: live session, session recording, UWorld demo/library, YouTube lectures, exam date/weak area, and then Google Meet mentor consultation when ready.",
     "- Google Meet state lock: once the student has requested Google Meet, shared a preferred time, is waiting for the Google Meet link, or has a scheduled Google Meet, do NOT restart live-session/recording/UWorld/demo/mentor-offer flow. Only acknowledge, answer direct questions, collect/reschedule time, or remind them that the Google Meet link will be sent at meeting time.",
     "- Acknowledgements like thank you/thanks/ok/noted/great/perfect after booking must get a simple acknowledgement or no sales push. Never treat them as a new sales trigger.",
@@ -49409,6 +49460,21 @@ function ngAylaNormalizeReplyForRepeat(text = "") {
   return String(text || "").toLowerCase().replace(/https?:\/\/\S+/g, "[link]").replace(/\s+/g, " ").trim();
 }
 
+function ngAylaEnsureFeatureOverviewConversion(reply = "", latestInboundText = "", db = {}) {
+  if (!ngAylaIsFullFeatureOverviewRequest(latestInboundText)) return String(reply || "").trim();
+  const salesAssets = typeof ngAylaGetSalesAssets === "function" ? ngAylaGetSalesAssets(db || {}) : {};
+  const demoDays = Number(salesAssets.demoDays || 7) || 7;
+  const demoLink = "https://nextgenusmle.live/demo";
+  let value = String(reply || "").trim();
+  if (!/nextgenusmle\.live\/demo/i.test(value)) {
+    value += `\n\nPlease explore the complete system through our ${demoDays}-day demo and see the organisation and teaching quality for yourself:\n${demoLink}`;
+  }
+  if (!/(attend|join|experience)[^\n.]{0,80}live session/i.test(value) || !/recording/i.test(value)) {
+    value += "\n\nFor the best experience, attend one live session. If your schedule is limited, watch the matching labelled recording instead.";
+  }
+  return value.trim();
+}
+
 function ngAylaIsRepeatOfRecentOutbound(reply = "", messages = []) {
   const cleanReply = ngAylaNormalizeReplyForRepeat(reply);
   if (!cleanReply) return false;
@@ -49572,7 +49638,7 @@ Backend-enforced identity:
 - Never select from a fixed response script. Reason from the student's exact message, the conversation history, the known lead profile, current programme facts, and current links. Write a fresh response for this person.
 
 Non-negotiable reply style:
-- Keep replies short and readable by default: normally 2-4 short sentences. For UWorld/library/program explanations, use 3-5 short WhatsApp-style lines if needed.
+- Keep replies short and readable by default: normally 2-4 short sentences. When the student explicitly asks for a complete feature overview, use concise one-line bullets so every requested feature has a clear purpose and benefit; this is the exception to the normal length limit.
 - Open warmly only once at the start of a new conversation. Do not start every reply with "Hi Doctor". After the first greeting, use "Doctor," / "Yes Doctor," / "Sure Doctor," or answer directly.
 - Never say "prompt response", "I appreciate your prompt response", or talk like you are responding to a prompt. Say "Thank you, Doctor" or continue naturally.
 - Never expose internal approval, review, CRM, training, retrieval, or knowledge-grounding language to a student. Do not say "approved material" or explain the approval process. Say "our First Aid-integrated teaching", "our LMS material", or "our recorded lecture" naturally.
@@ -49583,6 +49649,7 @@ Non-negotiable reply style:
 - If the latest message is only a greeting, have a normal friendly first exchange: one or two short lines, a natural introduction, and one easy question. Ask the student's name first when it is unknown. Do not begin the sales sequence, mention programme assets, or offer live sessions, recordings, demos, Google Meet, or pricing until the student provides context. Do not say "Thank you, Doctor" in response to a bare hello.
 - That first-greeting behavior applies only before Ayla has ever replied. If an existing student says hello again, use the conversation and lead profile, preserve the known exam/name/needs, and continue naturally without restarting discovery or asking the exam again.
 - When explaining the programme, use warm enthusiasm and explain the practical benefit before asking for a conversion: the roadmap, live teaching, recordings, questions, weak-area correction, notes, revision and accountability are organised together so the student knows what to do next. Invite the student to experience the configured free demo in your own natural words and include the direct demo link when it is relevant and available.
+- For a complete feature-overview request, follow this professional sequence: first explain each requested feature with its student benefit; then invite the student to the configured demo and provide the direct link; finally recommend attending one live session, or watching the matching labelled recording if time is limited. Do not move the demo invitation ahead of the explanation.
 
 Sales behavior:
 - After answering the student’s latest message, continue the conversation naturally. There is no 2-message or 3-message limit; every new student inbound deserves a fresh contextual reply if no outbound exists after it.
@@ -49650,15 +49717,20 @@ ${latestInboundText || "No latest inbound message text found."}
 
 Write only Ayla's next message. No markdown headings. No bullet list unless the student asks for details.`;
 
+  const featureOverviewRequested = ngAylaIsFullFeatureOverviewRequest(latestInboundText);
   const result = await callOpenAIResponsesAPI({
     model: process.env.AI_MODEL || "gpt-4o-mini",
     systemPrompt,
     userPrompt,
-    maxOutputTokens: 140,
+    maxOutputTokens: featureOverviewRequested ? 300 : 140,
     jsonMode: false,
   });
 
-  const reply = ngAylaApplyGreetingOnce(ngCleanAylaStudentReply(result.text || ""), cleanMessages);
+  const reply = ngAylaEnsureFeatureOverviewConversion(
+    ngAylaApplyGreetingOnce(ngCleanAylaStudentReply(result.text || ""), cleanMessages),
+    latestInboundText,
+    db || {},
+  );
 
   if (!reply) {
     const error = new Error("AI_EMPTY_REPLY: OpenAI returned an empty reply.");
@@ -49801,9 +49873,10 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
       message: latestInbound,
       to: req.body?.to || req.body?.recipient || "",
     });
-    const aylaMediaAsset = channel === "whatsapp"
-      ? ngPickAylaMediaAssetForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(latestInbound || {}), messages })
-      : null;
+    const aylaMediaAssets = channel === "whatsapp"
+      ? ngPickAylaMediaAssetsForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(latestInbound || {}), messages })
+      : [];
+    const aylaMediaAsset = aylaMediaAssets[0] || null;
 
     const result = await sendCrmMessage({
       db,
@@ -49830,6 +49903,16 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
       },
     });
     if (aylaMediaAsset) ngMarkAylaMediaSent(db, lead, aylaMediaAsset, { source: "full_ai_auto", result });
+    if (result?.success !== false && aylaMediaAssets.length > 1) {
+      await ngSendAylaAdditionalMediaAssets({
+        db,
+        assets: aylaMediaAssets,
+        lead,
+        brandId: lead.brand_id || getCrmBrandId(req, db),
+        to,
+        source: "full_ai_auto",
+      });
+    }
 
     const adminAlert = await ngAylaMaybeSendConversationAdminAlert({
       db,
@@ -50031,9 +50114,10 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
     const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel });
     const replyDelayMs = await ngAylaWaitBeforeAutoSend(db, channel);
     const to = getBestRecipientForChannel({ channel, lead, message: latestInbound });
-    const aylaMediaAsset = channel === "whatsapp"
-      ? ngPickAylaMediaAssetForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(latestInbound || {}), messages })
-      : null;
+    const aylaMediaAssets = channel === "whatsapp"
+      ? ngPickAylaMediaAssetsForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(latestInbound || {}), messages })
+      : [];
+    const aylaMediaAsset = aylaMediaAssets[0] || null;
 
     const sendResult = await sendCrmMessage({
       db,
@@ -50057,6 +50141,16 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
     });
 
     if (aylaMediaAsset) ngMarkAylaMediaSent(db, lead, aylaMediaAsset, { source, result: sendResult });
+    if (sendResult?.success !== false && aylaMediaAssets.length > 1) {
+      await ngSendAylaAdditionalMediaAssets({
+        db,
+        assets: aylaMediaAssets,
+        lead,
+        brandId: lead.brand_id || brandId || null,
+        to,
+        source,
+      });
+    }
 
     const adminAlert = await ngAylaMaybeSendConversationAdminAlert({
       db,
@@ -50505,9 +50599,10 @@ app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
       try {
         const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel });
         const to = getBestRecipientForChannel({ channel, lead, message: inbound });
-        const aylaMediaAsset = channel === "whatsapp"
-          ? ngPickAylaMediaAssetForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(inbound || {}), messages })
-          : null;
+        const aylaMediaAssets = channel === "whatsapp"
+          ? ngPickAylaMediaAssetsForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(inbound || {}), messages })
+          : [];
+        const aylaMediaAsset = aylaMediaAssets[0] || null;
         const sendResult = await sendCrmMessage({
           db,
           brandId: lead.brand_id || getCrmBrandId(req, db),
@@ -50522,6 +50617,16 @@ app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
           metadata: { source: "process_ai_auto", ai_auto: true, triggered_by: user.id, latest_inbound_id: inbound.id || null, ayla_media_asset_id: aylaMediaAsset?.id || null, ayla_media_usage_area: aylaMediaAsset?.usage_area || null }
         });
         if (aylaMediaAsset) ngMarkAylaMediaSent(db, lead, aylaMediaAsset, { source: "process_ai_auto", result: sendResult });
+        if (sendResult?.success !== false && aylaMediaAssets.length > 1) {
+          await ngSendAylaAdditionalMediaAssets({
+            db,
+            assets: aylaMediaAssets,
+            lead,
+            brandId: lead.brand_id || getCrmBrandId(req, db),
+            to,
+            source: "process_ai_auto",
+          });
+        }
         const adminAlert = await ngAylaMaybeSendConversationAdminAlert({
           db,
           lead,
@@ -55880,6 +55985,22 @@ const NEXTGEN_EXAM_TRACKS = {
     discordEnv: "DISCORD_STEP2_CK_WEBHOOK_URL",
     discordUsername: "Step 2 CK Clinical Cases",
   },
+  usmle_step3: {
+    key: "usmle_step3",
+    label: "USMLE Step 3",
+    aliases: ["step3", "step_3", "usmle_step_3", "usmle step 3", "ccs", "computer based case simulation"],
+    telegramEnv: "TELEGRAM_STEP3_CHAT_ID",
+    discordEnv: "DISCORD_STEP3_WEBHOOK_URL",
+    discordUsername: "USMLE Step 3 Clinical Management",
+  },
+  plab: {
+    key: "plab",
+    label: "PLAB",
+    aliases: ["plab", "plab_1", "plab1", "ukmla", "uk medical licensing", "gmc"],
+    telegramEnv: "TELEGRAM_PLAB_CHAT_ID",
+    discordEnv: "DISCORD_PLAB_WEBHOOK_URL",
+    discordUsername: "PLAB UK Clinical Practice",
+  },
   nclex: {
     key: "nclex",
     label: "NCLEX",
@@ -55920,6 +56041,20 @@ const NEXTGEN_EXAM_GENERATION_PROFILES = {
     audience: "USMLE Step 2 CK candidates",
     style: "clinical vignette, diagnosis, next best step, management, screening, risk factor, emergency/outpatient decision-making",
     forbidden: ["USMLE Step 1 Preparation", "USMLE Step 1", "Step 1 MCQ", "First Aid Step 1", "First Aid", "NCLEX", "MCCQE", "AMC", "nursing clinical judgment"],
+  },
+  usmle_step3: {
+    label: "USMLE Step 3",
+    title: "Daily USMLE Step 3 Clinical Management Case",
+    audience: "USMLE Step 3 candidates",
+    style: "advanced diagnosis and management, prognosis, prevention, longitudinal care, emergency stabilization, ethics, biostatistics, and CCS-style sequencing",
+    forbidden: ["USMLE Step 1 Preparation", "NCLEX", "MCCQE", "AMC", "PLAB", "nursing clinical judgment"],
+  },
+  plab: {
+    label: "PLAB",
+    title: "Daily PLAB UK Clinical Practice Question",
+    audience: "PLAB and UKMLA candidates",
+    style: "UK clinical practice, NHS pathways, GMC professionalism, patient safety, communication, diagnosis, investigations, and safe initial management",
+    forbidden: ["USMLE", "Step 1", "Step 2", "Step 3", "NBME", "UWorld", "NCLEX", "MCCQE", "AMC"],
   },
   nclex: {
     label: "NCLEX",
@@ -55963,6 +56098,10 @@ function ngStrictExamInstruction(trackOrExam = "") {
     ? "This is USMLE Step 1, so mechanism-based basic science is appropriate. Do not use NCLEX, MCCQE, or AMC wording."
     : key === "usmle_step2_ck"
       ? "This is USMLE Step 2 CK only. Do not write Step 1/basic-science-only, NCLEX nursing, MCCQE Canadian, or AMC Australian wording. Do not title it Step 1 or First Aid."
+      : key === "usmle_step3"
+        ? "This is USMLE Step 3 only. Use advanced clinical management, prognosis, prevention, longitudinal care, and CCS-style sequencing. Do not write Step 1 mechanism-only, NCLEX, PLAB, MCCQE, or AMC wording."
+        : key === "plab"
+          ? "This is PLAB/UKMLA only. Use UK clinical practice, NHS pathways, GMC professionalism, patient safety, communication, and safe initial management. Do not use USMLE/NBME/UWorld, NCLEX, MCCQE, or AMC wording."
       : `This is ${profile.label} only. Do NOT write USMLE, Step 1, Step 2 CK, NBME, UWorld, First Aid, or physician-board style wording for this exam.`;
   return [
     `HARD EXAM LOCK: ${profile.label}.`,
@@ -56045,8 +56184,10 @@ function ngNormalizeExamTrack(value = "", fallback = "") {
       return compact === cleanAlias || compact.includes(cleanAlias) || raw.includes(String(alias).toLowerCase());
     })) return track.key;
   }
+  if ((compact.includes("usmle") || compact.includes("step")) && compact.includes("3")) return "usmle_step3";
   if (compact.includes("usmle") && compact.includes("2")) return "usmle_step2_ck";
   if (compact.includes("usmle") && compact.includes("1")) return "usmle_step1";
+  if (compact.includes("plab") || compact.includes("ukmla")) return "plab";
   if (compact.includes("nclex")) return "nclex";
   if (compact.includes("mccqe")) return "mccqe";
   if (compact === "amc" || compact.includes("australia")) return "amc";
@@ -56096,9 +56237,12 @@ function ngResolveExamTrackFromCommunityTarget(item = {}) {
     item.notes,
   ].filter(Boolean).join(" ").toLowerCase();
 
+  if (/step\s*3|step3|ccs|usmle[-_\s]*step[-_\s]*3/.test(hay)) return "usmle_step3";
+  if (/plab|ukmla|uk medical licensing|gmc/.test(hay)) return "plab";
   if (/step\s*2|step2|ck|clinical\s*case|usmle[-_\s]*step[-_\s]*2/.test(hay)) return "usmle_step2_ck";
   if (/nclex|clinical\s*judgment/.test(hay)) return "nclex";
   if (/mccqe|canada|canadian/.test(hay)) return "mccqe";
+  if (/\bamc\b|australia|australian/.test(hay)) return "amc";
   if (/amc|australia|australian/.test(hay)) return "amc";
   if (/step\s*1|step1|daily[-_\s]*mcq|free\s*live|usmle[-_\s]*prep/.test(hay)) return "usmle_step1";
 
@@ -56149,6 +56293,12 @@ function ngInferExamTrackFromObject(obj = {}, fallback = "") {
     obj.platform_target,
     obj.channel,
     obj.source_channel,
+    obj.detected_text,
+    obj.summary,
+    obj.message,
+    obj.text,
+    obj.last_message,
+    obj.source_text,
     obj.notes,
     obj.instructions,
   ];
@@ -56175,6 +56325,8 @@ function ngDefaultTopicForExamTrack(track = "") {
   const label = ngExamTrackLabel(key);
   if (key === "usmle_step1") return "USMLE Step 1 high-yield roadmap";
   if (key === "usmle_step2_ck") return "USMLE Step 2 CK clinical case roadmap";
+  if (key === "usmle_step3") return "USMLE Step 3 clinical management and CCS roadmap";
+  if (key === "plab") return "PLAB UK clinical practice roadmap";
   if (key === "nclex") return "NCLEX clinical judgment roadmap";
   if (key === "mccqe") return "MCCQE clinical decision roadmap";
   if (key === "amc") return "AMC clinical reasoning roadmap";
@@ -56203,6 +56355,28 @@ MCQs must be clinically realistic with 5 options A-E and one best answer. Focus 
 Do not generate Step 1 mechanism-only questions unless the mechanism directly changes diagnosis or management.
 Do not generate NCLEX nursing delegation/SATA wording, MCCQE Canadian-specific framing, or AMC Australian-specific framing.
 For question posts, hide the answer and explanation. For answer posts, provide the correct option, explanation, why other options are wrong, and a high-yield takeaway.`
+    },
+    usmle_step3: {
+      prompt_key: "usmle_step3_prompt_v1",
+      syllabus_focus: ["advanced clinical management", "prognosis", "prevention", "longitudinal care", "emergency stabilization", "ethics", "biostatistics", "CCS sequencing"],
+      instruction: [
+        "You are generating educational community content for USMLE Step 3 candidates.",
+        "Use Step 3 style only: advanced diagnosis and management, prognosis, prevention, longitudinal care, emergency stabilization, ethics, biostatistics, and CCS-style sequencing.",
+        "MCQs must be clinically realistic with 5 options A-E and one best answer. Cases should test safe next management across time, including inpatient, outpatient, emergency, and follow-up decisions.",
+        "Do not generate Step 1 mechanism-only questions, NCLEX nursing questions, PLAB/NHS-specific questions, MCCQE Canadian framing, or AMC Australian framing.",
+        "For question posts, hide the answer and explanation. For answer posts, provide the correct option, explanation, why other options are wrong, and a Step 3 management takeaway.",
+      ].join("\n"),
+    },
+    plab: {
+      prompt_key: "plab_prompt_v1",
+      syllabus_focus: ["UK clinical practice", "NHS pathways", "GMC professionalism", "patient safety", "communication", "diagnosis", "investigations", "safe initial management"],
+      instruction: [
+        "You are generating educational community content for PLAB and UKMLA candidates.",
+        "Use UK clinical practice style only: NHS pathways, GMC professionalism, patient safety, communication, diagnosis, investigations, and safe initial management.",
+        "MCQs should be practical UK clinical vignettes with one best answer and emphasis on safe initial action, escalation, consent, safeguarding, and professional duties.",
+        "Do not generate USMLE/NBME/UWorld wording, NCLEX nursing-priority questions, MCCQE Canadian framing, or AMC Australian framing.",
+        "For question posts, hide the answer and explanation. For answer posts, provide the correct option, explanation, why other options are wrong, and a concise UK-practice takeaway.",
+      ].join("\n"),
     },
     nclex: {
       prompt_key: "nclex_prompt_v1",
@@ -56258,6 +56432,8 @@ function ngSourceMatchesExamTrack(source = {}, track = "") {
   if (!hay.trim()) return false;
   if (key === "usmle_step1") return /step\s*1|usmle\s*1|first aid|pathoma|sketchy|uworld|basic science|nbme/i.test(hay) && !/step\s*2|nclex|mccqe|amc|australia/i.test(hay);
   if (key === "usmle_step2_ck") return /step\s*2|step2|ck|clinical case|medicine|surgery|obgyn|pediatrics|psychiatry/i.test(hay) && !/nclex|mccqe|amc|australia/i.test(hay);
+  if (key === "usmle_step3") return /step\s*3|step3|ccs|advanced management|longitudinal care/i.test(hay) && !/nclex|mccqe|amc|plab|ukmla/i.test(hay);
+  if (key === "plab") return /plab|ukmla|gmc|nhs|uk clinical|united kingdom/i.test(hay) && !/nclex|mccqe|amc|usmle/i.test(hay);
   if (key === "nclex") return /nclex|nursing|clinical judgment|delegation|prioritization|sata|next gen nclex/i.test(hay);
   if (key === "mccqe") return /mccqe|canada|canadian|family medicine|preventive/i.test(hay);
   if (key === "amc") return /\bamc\b|australia|australian|primary care|rural|emergency/i.test(hay);
@@ -66834,6 +67010,7 @@ const NG_AYLA_MEDIA_USAGE_DEFINITIONS = [
   { key: "assessment", label: "Assessments", keywords: ["assessment", "assessments", "system-end", "surprise assessment", "incorrect", "score"] },
   { key: "leaderboard", label: "Leaderboard", keywords: ["leaderboard", "points", "task points", "accountability", "motivation", "rank"] },
   { key: "flashcards", label: "Daily Flashcards", keywords: ["flashcard", "flashcards", "active recall", "recall", "daily card"] },
+  { key: "session_notes", label: "Session Notes", keywords: ["session notes", "class notes", "tutor notes", "clean notes", "notes"] },
   { key: "roadmap", label: "Roadmap", keywords: ["roadmap", "system-wise", "msk", "120 days", "daily plan", "schedule"] },
   { key: "demo_lms", label: "LMS Demo", keywords: ["demo", "website", "dashboard", "lms", "try demo", "platform"] },
   { key: "free_community", label: "Free Community", keywords: ["free community", "community invite", "telegram", "discord"] },
@@ -66856,6 +67033,8 @@ function ngNormalizeMediaUsageKey(value = "") {
     leaderboard_points: "leaderboard",
     daily_flashcards: "flashcards",
     flashcard: "flashcards",
+    notes: "session_notes",
+    class_notes: "session_notes",
     homepage_course_preview: "demo_lms",
     ayla_program_explanation: "program_overview",
     demo_lms_preview: "demo_lms",
@@ -66879,8 +67058,14 @@ function ngAylaIsSafePublicLmsPreview(asset = {}) {
 }
 
 function ngAylaMediaEligibleAssets(db = {}, brandId = null) {
+  const blockedPreview = (asset = {}) => {
+    const id = String(asset.id || "").toLowerCase();
+    const url = String(asset.public_url || asset.relative_url || asset.url || "").toLowerCase();
+    return id === "nextgen-lms-adaptive-preview-v2" || url.includes("nextgen-lms-adaptive-preview-v2.png");
+  };
   const storedAssets = ensureCrmArray(db, "media_assets")
     .filter((asset) => asset && asset.status !== "inactive" && asset.status !== "archived" && asset.status !== "deleted")
+    .filter((asset) => !blockedPreview(asset))
     .filter((asset) => !brandId || !asset.brand_id || String(asset.brand_id) === String(brandId))
     .filter((asset) => asset.ai_send_enabled === true || asset.auto_send_with_ayla === true || asset.send_when_explaining === true)
     .map((asset) => ({
@@ -66889,9 +67074,57 @@ function ngAylaMediaEligibleAssets(db = {}, brandId = null) {
       trigger_keywords: uniqueList([...(Array.isArray(asset.trigger_keywords) ? asset.trigger_keywords : normalizeArray(asset.trigger_keywords || asset.keywords || "")), ...safeArray(asset.tags)]),
       priority: Number(asset.priority || 0) || 0,
     }));
-  // Only owner-approved Media Library assets may be sent. Do not inject a
-  // synthetic LMS preview: an inaccurate mockup can confuse prospective students.
-  return storedAssets;
+  const realLmsAssets = [
+    {
+      id: "nextgen-real-lms-dashboard",
+      title: "NextGen Student Dashboard",
+      public_url: "https://nextgenusmle.live/media/nextgen-lms-dashboard-real-preview.png",
+      usage_area: "demo_lms",
+      trigger_keywords: ["dashboard", "roadmap", "today's focus", "next class", "progress", "lms", "demo"],
+      ai_usage_context: "Real-LMS-style privacy-safe dashboard preview showing next class, roadmap, tasks, progress and next best action.",
+    },
+    {
+      id: "nextgen-real-lms-recordings",
+      title: "NextGen Recordings Library",
+      public_url: "https://nextgenusmle.live/media/nextgen-lms-recordings-real-preview.png",
+      usage_area: "recording",
+      trigger_keywords: ["recording", "recordings", "replay", "watch later", "lecture notes"],
+      ai_usage_context: "Real-LMS-style privacy-safe recordings preview with system/day labels and linked lecture notes.",
+    },
+    {
+      id: "nextgen-real-lms-session-notes",
+      title: "NextGen Session Notes",
+      public_url: "https://nextgenusmle.live/media/nextgen-lms-session-notes-real-preview.png",
+      usage_area: "session_notes",
+      trigger_keywords: ["session notes", "class notes", "clean notes", "tutor notes", "notes"],
+      ai_usage_context: "Real-LMS-style privacy-safe session-notes preview connected to the exact class, recording, cards and test.",
+    },
+    {
+      id: "nextgen-real-lms-flashcards",
+      title: "NextGen Adaptive Flashcards",
+      public_url: "https://nextgenusmle.live/media/nextgen-lms-flashcards-real-preview.png",
+      usage_area: "flashcards",
+      trigger_keywords: ["flashcards", "adaptive", "weak areas", "revision", "daily review"],
+      ai_usage_context: "Real-LMS-style privacy-safe flashcard preview mixing weak areas, session notes and First Aid/class cards.",
+    },
+    {
+      id: "nextgen-real-lms-assessments",
+      title: "NextGen Assessments and Weak-Area Progress",
+      public_url: "https://nextgenusmle.live/media/nextgen-lms-assessments-real-preview.png",
+      usage_area: "assessment",
+      trigger_keywords: ["assessment", "assessments", "weak areas", "mastery", "improvement", "diagnostic"],
+      ai_usage_context: "Real-LMS-style privacy-safe assessment preview showing mastery, improvement and targeted review.",
+    },
+  ].map((asset, index) => ({
+    ...asset,
+    asset_type: "image",
+    mime_type: "image/png",
+    status: "active",
+    ai_send_enabled: true,
+    homepage_visible: true,
+    priority: 20 - index,
+  }));
+  return [...realLmsAssets, ...storedAssets.filter((asset) => !realLmsAssets.some((approved) => approved.id === asset.id))];
 }
 
 function ngBuildAylaMediaGuidance(db = {}, lead = {}) {
@@ -66943,15 +67176,44 @@ function ngAylaRecentMediaUsageBlocked(lead = {}, usage = "") {
   return Date.now() - new Date(last).getTime() < 6 * 60 * 60 * 1000;
 }
 
-function ngPickAylaMediaAssetForReply(db = {}, { lead = {}, reply = "", latestInboundText = "", messages = [] } = {}) {
+function ngAylaIsFullFeatureOverviewRequest(text = "") {
+  const value = String(text || "").toLowerCase();
+  const featureHits = [
+    /dashboard/,
+    /roadmap|study plan/,
+    /live class|live session/,
+    /recording/,
+    /session notes|class notes/,
+    /flashcard/,
+    /weak.area|mastery/,
+    /assessment|diagnostic/,
+  ].filter((pattern) => pattern.test(value)).length;
+  return featureHits >= 3 || /(?:all|complete|main)\s+(?:lms\s+)?features|purpose\s+and\s+benefit|what(?:'s| is)\s+included/.test(value);
+}
+
+function ngPickAylaMediaAssetsForReply(db = {}, { lead = {}, reply = "", latestInboundText = "", messages = [] } = {}) {
   const text = [reply, latestInboundText, safeArray(messages).slice(-6).map(ngMessageText).join("\n")].join("\n");
   const assets = ngAylaMediaEligibleAssets(db, lead?.brand_id || null);
+  if (ngAylaIsFullFeatureOverviewRequest(latestInboundText)) {
+    const orderedIds = [
+      "nextgen-real-lms-dashboard",
+      "nextgen-real-lms-recordings",
+      "nextgen-real-lms-session-notes",
+      "nextgen-real-lms-flashcards",
+      "nextgen-real-lms-assessments",
+    ];
+    return orderedIds.map((id) => assets.find((asset) => asset.id === id)).filter(Boolean);
+  }
   const scored = assets
     .map((asset) => ({ asset, usage: ngNormalizeMediaUsageKey(asset.usage_area || "general"), score: ngMediaTextMatchScore(text, asset) }))
     .filter((x) => x.score >= 5)
     .filter((x) => !ngAylaRecentMediaUsageBlocked(lead, x.usage))
     .sort((a, b) => b.score - a.score || Number(b.asset.priority || 0) - Number(a.asset.priority || 0));
-  return scored[0]?.asset || null;
+  return scored[0]?.asset ? [scored[0].asset] : [];
+}
+
+function ngPickAylaMediaAssetForReply(db = {}, { lead = {}, reply = "", latestInboundText = "", messages = [] } = {}) {
+  return ngPickAylaMediaAssetsForReply(db, { lead, reply, latestInboundText, messages })[0] || null;
 }
 
 function ngRenderAylaMediaCaption(asset = {}, { lead = {}, reply = "" } = {}) {
@@ -66959,15 +67221,44 @@ function ngRenderAylaMediaCaption(asset = {}, { lead = {}, reply = "" } = {}) {
   if (template) return renderTemplateString(template, { lead, asset, reply });
   const usage = ngNormalizeMediaUsageKey(asset.usage_area || asset.usage || "general");
   const featureCaption = {
-    demo_lms: "📱 NextGen LMS — roadmap, live teaching, recordings, revision and progress in one organised dashboard.",
-    recording: "🎥 Recordings Library — lectures are organised by system, day and topic.",
-    flashcards: "🧠 Adaptive Flashcards — weak areas return for targeted active recall and revision.",
-    assessment: "📝 Mentor-led Assessments — weekly/weekend accountability, system-end checks and targeted follow-up.",
+    demo_lms: "📱 Student Dashboard — see today’s class, tasks, roadmap, progress and next best action in one organised place.",
+    recording: "🎥 Recordings Library — revisit every labelled system/day lecture and open its connected notes when your schedule is busy.",
+    session_notes: "📚 Session Notes — review clean tutor-approved notes connected to the exact class, recording, cards and weekly test.",
+    flashcards: "🧠 Adaptive Flashcards — weak areas, session notes and First Aid/class cards return in a focused daily review queue.",
+    assessment: "📝 Assessments & Weak-Area Progress — measure mastery, see improvement and return directly to targeted revision.",
     live_classroom: "🔴 NextGen Live Session — structured teaching connected to the same roadmap, notes and recording.",
     roadmap: "🗺️ 120-Day Roadmap — every system is organised into clear daily learning steps.",
     program_overview: "✨ NextGen USMLE — one organised learning ecosystem from live teaching to weak-area revision.",
   }[usage] || "";
   return [featureCaption, String(reply || "").trim()].filter(Boolean).join("\n\n");
+}
+
+async function ngSendAylaAdditionalMediaAssets({ db = {}, assets = [], lead = {}, brandId = null, to = "", source = "ayla_auto_media" } = {}) {
+  const results = [];
+  for (const asset of safeArray(assets).slice(1, 5)) {
+    const caption = ngRenderAylaMediaCaption(asset, { lead, reply: "" });
+    const result = await sendCrmMessage({
+      db,
+      brandId,
+      channel: "whatsapp",
+      to,
+      text: caption,
+      leadId: lead.id || null,
+      mediaUrl: asset.public_url || asset.relative_url || "",
+      mediaId: asset.whatsapp_media_id || "",
+      mediaType: asset.asset_type || "image",
+      caption,
+      metadata: {
+        source: `${source}_feature_media`,
+        ai_auto: true,
+        ayla_media_asset_id: asset.id || null,
+        ayla_media_usage_area: asset.usage_area || null,
+      },
+    });
+    ngMarkAylaMediaSent(db, lead, asset, { source: `${source}_feature_media`, result });
+    results.push({ asset_id: asset.id, result });
+  }
+  return results;
 }
 
 function ngMarkAylaMediaSent(db = {}, lead = {}, asset = {}, meta = {}) {
