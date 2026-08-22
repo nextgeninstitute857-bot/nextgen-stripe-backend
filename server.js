@@ -578,7 +578,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v280-validated-live-pricing";
+const CRM_AYLA_REPLY_BUILD = "v281-whatsapp-safe-sales-links";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
@@ -48199,6 +48199,15 @@ ${proofLines.length ? proofLines.join("\n") : "No approved public review item fo
 function ngCleanAylaStudentReply(text = "") {
   let reply = String(text || "").trim();
 
+  // WhatsApp already linkifies plain URLs. Markdown link syntax can be parsed as
+  // part of the URL and produce a broken destination such as `](https://...)`.
+  // Preserve a useful human label while always sending the real URL as plain text.
+  reply = reply.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/gi, (_match, label, url) => {
+    const cleanLabel = String(label || "").trim();
+    const cleanUrl = String(url || "").trim();
+    return cleanLabel === cleanUrl ? cleanUrl : `${cleanLabel}: ${cleanUrl}`;
+  });
+
   // v46: remove language that makes Ayla sound like she is talking about an AI prompt.
   reply = reply.replace(/I\s+appreciate\s+your\s+prompt\s+response[.!]?/gi, "Thank you, Doctor.");
   reply = reply.replace(/your\s+prompt\s+response/gi, "your reply");
@@ -48445,6 +48454,7 @@ Answer the direct question first in 2-5 short WhatsApp lines. Include every plan
     jsonMode: false,
   });
   let reply = ngCleanAylaStudentReply(result.text || "");
+  reply = reply.replace(/\s*(?:Do you have|Is there) any other questions?\??\s*$/i, "").trim();
   let fallback = false;
   if (!ngAylaPricingDraftIsGrounded(reply, snapshot)) {
     fallback = true;

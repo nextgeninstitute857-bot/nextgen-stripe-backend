@@ -10,7 +10,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v280-validated-live-pricing"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v281-whatsapp-safe-sales-links"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: "message_status"/);
   assert.match(handler, /event: "ignored_non_message"/);
@@ -187,6 +187,8 @@ test("a public price question does not create or lock a Google Meet handoff", ()
   assert.match(server, /async function ngAylaGenerateGroundedPricingReply/);
   assert.match(server, /if \(!ngAylaPricingDraftIsGrounded\(reply, snapshot\)\)/);
   assert.match(server, /intent: "live_lms_grounded_pricing"/);
+  assert.match(server, /WhatsApp already linkifies plain URLs/);
+  assert.match(server, /cleanLabel === cleanUrl \? cleanUrl/);
 });
 
 test("WhatsApp provider authorization failures open a shared circuit breaker", () => {
