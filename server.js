@@ -50142,6 +50142,12 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
         ? ["pricing_question_forced_handoff"]
         : []
     ),
+    ...(
+      /\bfailed to fetch\b/i.test(latestInboundText)
+      && /(?:which|what|any|specific).{0,45}error/i.test(String(candidate.reply || ""))
+        ? ["reasks_stated_support_error"]
+        : []
+    ),
   ]);
 
   let { result, decision } = await requestDecision("Understand the complete conversation and produce Ayla's next structured decision now.");
