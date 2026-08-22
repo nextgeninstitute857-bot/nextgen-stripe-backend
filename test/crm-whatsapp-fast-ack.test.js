@@ -10,7 +10,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v288-consultative-whatsapp-conversation"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v289-progressive-value-conversation"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: "message_status"/);
   assert.match(handler, /event: "ignored_non_message"/);
@@ -97,11 +97,18 @@ test("Ayla uses consultative discovery instead of a forced feature sequence", ()
   assert.match(salesBrain, /Ask at most one useful question in a turn/);
   assert.match(salesBrain, /Listen-before-pitch rule/);
   assert.match(salesBrain, /one programme benefit that directly helps the need/);
+  assert.match(salesBrain, /Progressive value rule/);
+  assert.match(salesBrain, /listening must not make the chat dry or passive/);
+  assert.match(salesBrain, /Conversion checkpoint/);
+  assert.match(salesBrain, /Do not let an engaged prospect leave the conversation without understanding why NextGen is different/);
   assert.match(salesBrain, /Support boundary/);
   assert.doesNotMatch(salesBrain, /Early value sequence/);
   assert.match(generator, /normally 1-3 short sentences/);
   assert.match(generator, /Use consultative discovery instead of a presentation/);
   assert.match(generator, /Do not follow a fixed feature sequence/);
+  assert.match(generator, /Consultative does not mean passive/);
+  assert.match(generator, /progressively teach the interested student/);
+  assert.match(generator, /Do not let the chat fade into generic questions/);
   assert.match(generator, /acknowledge briefly without sending a new asset/);
   assert.match(generator, /process\.env\.AYLA_MODEL \|\| process\.env\.AI_MODEL \|\| "gpt-4o-mini"/);
 });
