@@ -578,7 +578,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v281-whatsapp-safe-sales-links";
+const CRM_AYLA_REPLY_BUILD = "v282-continuous-whatsapp-conversation";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
@@ -48448,7 +48448,7 @@ Use only these current live LMS plan facts, with the plan names exactly as writt
 ${exactFacts}
 Official pricing/enrollment link: ${snapshot.pricing_url}
 
-Answer the direct question first in 2-5 short WhatsApp lines. Include every plan above, its exact USD price/cadence, and the enrollment link exactly once. Do not mention or invent Basic Package, Standard Package, Premium Package, discounts, weekly mentoring, or other tiers/benefits unless one of those exact phrases exists in the live facts. Do not force a Google Meet. You may briefly mention the free ${Number(demoDays || 7)}-day demo after the enrollment link, but ask at most one question. Write only Ayla's reply.`,
+Answer the direct question first in 2-5 short WhatsApp lines. This is an ongoing conversation, so do not greet again. Include every plan above, its exact USD price/cadence, and the enrollment link exactly once. Do not mention or invent Basic Package, Standard Package, Premium Package, discounts, weekly mentoring, or other tiers/benefits unless one of those exact phrases exists in the live facts. Do not force a Google Meet. You may briefly mention the free ${Number(demoDays || 7)}-day demo after the enrollment link, but ask at most one question. Write only Ayla's reply.`,
     userPrompt: `Student's latest message: ${JSON.stringify(String(latestMessage || ""))}`,
     maxOutputTokens: 170,
     jsonMode: false,
@@ -48709,6 +48709,7 @@ function ngAylaApplyGreetingOnce(reply = "", messages = []) {
   const alreadyGreeted = outbound.some((m) => /\b(hi|hello|hey)\s+doctor\b/i.test(ngMessageText(m))) || outbound.length > 0;
   if (!alreadyGreeted) return text;
   text = text.replace(/^\s*(hi|hello|hey)\s+doctor[,!.، ]*/i, "Doctor, ");
+  text = text.replace(/^\s*(hi|hello|hey)[,!.، ]+/i, "");
   text = text.replace(/^\s*i hope you are doing well[,!.، ]*doctor[,!.، ]*/i, "Doctor, ");
   text = text.replace(/^\s*doctor,\s*doctor,/i, "Doctor,");
   return text.trim();
