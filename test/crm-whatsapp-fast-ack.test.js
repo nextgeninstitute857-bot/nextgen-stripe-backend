@@ -207,7 +207,9 @@ test("Ayla explains weak-area adaptation and sends only safe public LMS previews
   assert.match(media, /function ngPickAylaMediaAssetsForReply/);
   assert.match(media, /function ngSendAylaAdditionalMediaAssets/);
   assert.match(media, /Adaptive Flashcards/);
-  assert.match(media, /Assessments & Weak-Area Progress/);
+  assert.match(media, /Mentor-Led Assessments/);
+  assert.match(media, /function ngAylaFeatureOverviewClosingText/);
+  assert.match(media, /function ngSendAylaFeatureOverviewClosingMessage/);
   assert.match(media, /6 \* 60 \* 60 \* 1000/);
 });
 
@@ -219,6 +221,9 @@ test("a full feature request explains value before demo and offers live-session 
   assert.match(server, /attend one live session/);
   assert.match(server, /matching labelled recording/);
   assert.match(server, /featureOverviewRequested \? 300 : 140/);
+  assert.match(server, /featureOverviewRequested \? "" : ai\.reply/);
+  assert.match(server, /featureOverviewRequested && aylaMediaAsset \? firstMediaCaption : ai\.reply/);
+  assert.match(server, /feature_tour_closing/);
 });
 
 test("a public price question does not create or lock a Google Meet handoff", () => {
