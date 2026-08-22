@@ -10,7 +10,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v274-natural-whatsapp-greeting"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v275-natural-greeting-single-send"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: statuses\.length \? "message_status" : "ignored_non_message"/);
   assert.ok(
@@ -40,6 +40,23 @@ test("bare WhatsApp greetings stay conversational before the sales sequence", ()
   assert.match(salesBrain, /Do not pitch the LMS, demo, live session, recording, UWorld library, Google Meet, pricing/);
   assert.match(replyPrompt, /Do not begin the sales sequence/);
   assert.match(replyPrompt, /Do not say "Thank you, Doctor" in response to a bare hello/);
+  assert.match(replyPrompt, /if \(latestSignals\.bare_greeting\)/);
+  assert.match(replyPrompt, /intent: "natural_bare_greeting"/);
+  assert.match(replyPrompt, /Do not mention or pitch any programme, LMS, demo, live session, recording, UWorld, Google Meet, price, feature, or offer/);
+  assert.ok(
+    replyPrompt.indexOf("if (latestSignals.bare_greeting)") < replyPrompt.indexOf("const backendSalesBrain"),
+    "the greeting-only AI turn must run before the sales brain is constructed",
+  );
+});
+
+test("AI generation keeps one long-lived lock per inbound message", () => {
+  const guard = server.slice(
+    server.indexOf("const NG_AI_AUTO_COOLDOWN_SECONDS"),
+    server.indexOf("function ngNormalizeLeadAiMode"),
+  );
+
+  assert.match(guard, /const NG_AI_AUTO_LOCK_TTL_SECONDS = Number\(process\.env\.AI_AUTO_LOCK_TTL_SECONDS \|\| 180\)/);
+  assert.match(guard, /ttlSeconds: options\.lockTtlSeconds \|\| NG_AI_AUTO_LOCK_TTL_SECONDS/);
 });
 
 test("WhatsApp inbound messages are persisted and acknowledged before AI work", () => {
