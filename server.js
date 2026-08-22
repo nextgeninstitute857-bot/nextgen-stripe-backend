@@ -21393,6 +21393,24 @@ function normalizeCrmCollectionPayload(collection, body = {}, existing = null, b
     base.lead_source = base.lead_source || base.origin;
     base.source_type = base.source_type || base.origin;
     base.created_from = base.created_from || base.origin;
+    base.source_community_id = base.source_community_id || base.community_id || null;
+    base.source_opportunity_id = base.source_opportunity_id || base.community_opportunity_id || null;
+    base.source_detail = normalizeCrmString(base.source_detail || base.source_community || base.community_name || base.campaign_name || "");
+
+    const normalizedExamTrack = ngNormalizeExamTrack(
+      base.exam_track || base.examTrack || base.exam_type || base.exam || base.which_exam || base.program_track || "",
+      "",
+    );
+    base.exam_track = normalizedExamTrack;
+    base.exam_track_label = normalizedExamTrack ? ngExamTrackLabel(normalizedExamTrack) : "";
+    base.exam_type = base.exam_type || base.exam_track_label || "";
+    base.exam_qualification_status = normalizedExamTrack ? "known" : "needs_qualification";
+    base.next_action = normalizeCrmString(base.next_action || (base.last_message ? "review_and_reply" : "qualify_exam"));
+    base.follow_up_status = normalizeCrmLower(
+      base.follow_up_status || (base.last_message ? "needs_first_response" : "needs_qualification"),
+      base.last_message ? "needs_first_response" : "needs_qualification",
+    );
+    base.next_follow_up_at = normalizeCrmString(base.next_follow_up_at || base.follow_up_at || "");
 
     const isAgentOrigin = base.origin === "agent_outreach";
     const isInboundOrigin = !isAgentOrigin;
@@ -28132,12 +28150,16 @@ function upsertSocialLead(db, platform, payload = {}) {
       status: previous.status || previous.lead_status || payload.status || "new",
       lead_status: previous.lead_status || previous.status || payload.lead_status || "new",
     });
+    Object.assign(
+      previous,
+      normalizeCrmCollectionPayload("leads", previous, previous, previous.brand_id || payload.brand_id || null),
+    );
     ensureLeadIdentityFields(previous);
     return { lead: previous, created: false };
   }
 
   const leadId = uuid();
-  const lead = withTimestamps({
+  const rawLead = withTimestamps({
     id: leadId,
     lead_id: leadId,
     brand_id: payload.brand_id || null,
@@ -28157,6 +28179,7 @@ function upsertSocialLead(db, platform, payload = {}) {
     last_inbound_at: now,
     ...compactDefined(payload),
   });
+  const lead = normalizeCrmCollectionPayload("leads", rawLead, null, rawLead.brand_id || null);
 
   ensureLeadIdentityFields(lead);
   leads.push(lead);
@@ -34240,9 +34263,33 @@ app.post("/admin/crm/community-intelligence/opportunities/:id/create-lead", asyn
     if (!opp) return res.status(404).json({ success: false, error: "Opportunity not found" });
     const brandId = opp.brand_id || getCrmBrandId(req, db);
     const payload = parseInboundSocialPayload({ platform: opp.platform || req.body.platform || "other", payload: { ...(opp.raw_payload || {}), ...(req.body || {}), text: req.body.message || opp.detected_text || opp.summary || "" }, integration: null });
-    const { lead, created } = upsertSocialLead(db, payload.platform || opp.platform || "other", { ...payload, brand_id: brandId, source_community_id: opp.community_id || null, source_opportunity_id: opp.id });
+    const examTrack = ngInferExamTrackFromObject({ ...opp, ...payload, ...(req.body || {}) }, "");
+    const sourcePlatform = payload.platform || opp.platform || "other";
+    const { lead, created } = upsertSocialLead(db, sourcePlatform, {
+      ...payload,
+      brand_id: brandId,
+      origin: "community",
+      lead_origin: "community",
+      lead_source: [sourcePlatform, "community"].join("_"),
+      source_type: "community_opportunity",
+      source_detail: opp.community_name || opp.source_community || opp.title || "",
+      source_community: opp.community_name || opp.source_community || "",
+      source_community_id: opp.community_id || null,
+      source_opportunity_id: opp.id,
+      exam_track: examTrack,
+      exam_type: examTrack ? ngExamTrackLabel(examTrack) : "",
+      stage: "needs_reply",
+      lead_stage: "needs_reply",
+      next_action: "review_and_reply",
+      follow_up_status: "needs_first_response",
+      next_follow_up_at: req.body?.next_follow_up_at || nowIso(),
+    });
     opp.lead_id = lead.id;
     opp.status = "lead_created";
+    opp.exam_track = examTrack || opp.exam_track || "";
+    opp.exam_track_label = examTrack ? ngExamTrackLabel(examTrack) : opp.exam_track_label || "";
+    opp.lead_capture_status = "captured";
+    opp.next_action = "review_and_reply";
     opp.updated_at = nowIso();
     await writeCrmDb(db);
     res.json({ success: true, lead: normalizeLeadForResponse(lead), opportunity: opp, created });
@@ -51523,27 +51570,45 @@ function ngCreateLeadFromCommunityOpportunity(db, req, opp, user = null) {
     },
     integration: null,
   });
+  const examTrack = ngInferExamTrackFromObject({ ...opp, ...payload, ...(req.body || {}) }, "");
+  const sourcePlatform = payload.platform || opp.platform || "telegram";
 
-  const { lead, created } = upsertSocialLead(db, payload.platform || opp.platform || "telegram", {
+  const { lead, created } = upsertSocialLead(db, sourcePlatform, {
     ...payload,
     brand_id: brandId,
+    origin: "community",
+    lead_origin: "community",
+    lead_source: [sourcePlatform, "community"].join("_"),
     source: "community_intelligence",
-    source_platform: opp.platform || "telegram",
+    source_type: "community_opportunity",
+    source_platform: sourcePlatform,
+    source_detail: opp.community_name || opp.source_community || opp.title || "",
+    source_community: opp.community_name || opp.source_community || "",
     source_community_id: opp.community_id || null,
     source_community_name: opp.community_name || "",
     source_opportunity_id: opp.id,
-    exam_type: opp.exam_type || req.body?.exam_type || null,
+    exam_track: examTrack,
+    exam_type: examTrack ? ngExamTrackLabel(examTrack) : opp.exam_type || req.body?.exam_type || null,
     exam_date: opp.exam_date || req.body?.exam_date || null,
     graduation_year: opp.graduation_year || req.body?.graduation_year || null,
     gap_type: opp.gap_type || req.body?.gap_type || null,
     pain_points: opp.pain_points || opp.detected_text || "",
     interest_level: opp.interest_level || req.body?.interest_level || "medium",
     consent_to_contact: opp.consent_to_contact || req.body?.consent_to_contact === true,
+    stage: "needs_reply",
+    lead_stage: "needs_reply",
+    next_action: "review_and_reply",
+    follow_up_status: "needs_first_response",
+    next_follow_up_at: req.body?.next_follow_up_at || nowIso(),
   });
 
   opp.lead_id = lead.id;
   opp.converted_lead_id = lead.id;
   opp.status = "lead_created";
+  opp.exam_track = examTrack || opp.exam_track || "";
+  opp.exam_track_label = examTrack ? ngExamTrackLabel(examTrack) : opp.exam_track_label || "";
+  opp.lead_capture_status = "captured";
+  opp.next_action = "review_and_reply";
   opp.updated_by = user?.id || opp.updated_by || null;
   opp.updated_at = nowIso();
 
@@ -56594,6 +56659,22 @@ const NEXTGEN_EXAM_TRACKS = {
     discordEnv: "DISCORD_STEP2_CK_WEBHOOK_URL",
     discordUsername: "Step 2 CK Clinical Cases",
   },
+  usmle_step3: {
+    key: "usmle_step3",
+    label: "USMLE Step 3",
+    aliases: ["step3", "step_3", "usmle_step_3", "usmle step 3", "ccs", "computer based case simulation"],
+    telegramEnv: "TELEGRAM_STEP3_CHAT_ID",
+    discordEnv: "DISCORD_STEP3_WEBHOOK_URL",
+    discordUsername: "USMLE Step 3 Clinical Management",
+  },
+  plab: {
+    key: "plab",
+    label: "PLAB",
+    aliases: ["plab", "plab_1", "plab1", "ukmla", "uk medical licensing", "gmc"],
+    telegramEnv: "TELEGRAM_PLAB_CHAT_ID",
+    discordEnv: "DISCORD_PLAB_WEBHOOK_URL",
+    discordUsername: "PLAB UK Clinical Practice",
+  },
   nclex: {
     key: "nclex",
     label: "NCLEX",
@@ -56634,6 +56715,20 @@ const NEXTGEN_EXAM_GENERATION_PROFILES = {
     audience: "USMLE Step 2 CK candidates",
     style: "clinical vignette, diagnosis, next best step, management, screening, risk factor, emergency/outpatient decision-making",
     forbidden: ["USMLE Step 1 Preparation", "USMLE Step 1", "Step 1 MCQ", "First Aid Step 1", "First Aid", "NCLEX", "MCCQE", "AMC", "nursing clinical judgment"],
+  },
+  usmle_step3: {
+    label: "USMLE Step 3",
+    title: "Daily USMLE Step 3 Clinical Management Case",
+    audience: "USMLE Step 3 candidates",
+    style: "advanced diagnosis and management, prognosis, prevention, longitudinal care, emergency stabilization, ethics, biostatistics, and CCS-style sequencing",
+    forbidden: ["USMLE Step 1 Preparation", "NCLEX", "MCCQE", "AMC", "PLAB", "nursing clinical judgment"],
+  },
+  plab: {
+    label: "PLAB",
+    title: "Daily PLAB UK Clinical Practice Question",
+    audience: "PLAB and UKMLA candidates",
+    style: "UK clinical practice, NHS pathways, GMC professionalism, patient safety, communication, diagnosis, investigations, and safe initial management",
+    forbidden: ["USMLE", "Step 1", "Step 2", "Step 3", "NBME", "UWorld", "NCLEX", "MCCQE", "AMC"],
   },
   nclex: {
     label: "NCLEX",
@@ -56677,6 +56772,10 @@ function ngStrictExamInstruction(trackOrExam = "") {
     ? "This is USMLE Step 1, so mechanism-based basic science is appropriate. Do not use NCLEX, MCCQE, or AMC wording."
     : key === "usmle_step2_ck"
       ? "This is USMLE Step 2 CK only. Do not write Step 1/basic-science-only, NCLEX nursing, MCCQE Canadian, or AMC Australian wording. Do not title it Step 1 or First Aid."
+      : key === "usmle_step3"
+        ? "This is USMLE Step 3 only. Use advanced clinical management, prognosis, prevention, longitudinal care, and CCS-style sequencing. Do not write Step 1 mechanism-only, NCLEX, PLAB, MCCQE, or AMC wording."
+        : key === "plab"
+          ? "This is PLAB/UKMLA only. Use UK clinical practice, NHS pathways, GMC professionalism, patient safety, communication, and safe initial management. Do not use USMLE/NBME/UWorld, NCLEX, MCCQE, or AMC wording."
       : `This is ${profile.label} only. Do NOT write USMLE, Step 1, Step 2 CK, NBME, UWorld, First Aid, or physician-board style wording for this exam.`;
   return [
     `HARD EXAM LOCK: ${profile.label}.`,
@@ -56759,8 +56858,10 @@ function ngNormalizeExamTrack(value = "", fallback = "") {
       return compact === cleanAlias || compact.includes(cleanAlias) || raw.includes(String(alias).toLowerCase());
     })) return track.key;
   }
+  if ((compact.includes("usmle") || compact.includes("step")) && compact.includes("3")) return "usmle_step3";
   if (compact.includes("usmle") && compact.includes("2")) return "usmle_step2_ck";
   if (compact.includes("usmle") && compact.includes("1")) return "usmle_step1";
+  if (compact.includes("plab") || compact.includes("ukmla")) return "plab";
   if (compact.includes("nclex")) return "nclex";
   if (compact.includes("mccqe")) return "mccqe";
   if (compact === "amc" || compact.includes("australia")) return "amc";
@@ -56810,10 +56911,12 @@ function ngResolveExamTrackFromCommunityTarget(item = {}) {
     item.notes,
   ].filter(Boolean).join(" ").toLowerCase();
 
+  if (/step\s*3|step3|ccs|usmle[-_\s]*step[-_\s]*3/.test(hay)) return "usmle_step3";
+  if (/plab|ukmla|uk medical licensing|gmc/.test(hay)) return "plab";
   if (/step\s*2|step2|ck|clinical\s*case|usmle[-_\s]*step[-_\s]*2/.test(hay)) return "usmle_step2_ck";
   if (/nclex|clinical\s*judgment/.test(hay)) return "nclex";
   if (/mccqe|canada|canadian/.test(hay)) return "mccqe";
-  if (/amc|australia|australian/.test(hay)) return "amc";
+  if (/\bamc\b|australia|australian/.test(hay)) return "amc";
   if (/step\s*1|step1|daily[-_\s]*mcq|free\s*live|usmle[-_\s]*prep/.test(hay)) return "usmle_step1";
 
   return ngNormalizeExamTrack(item.exam_track || item.examTrack || item.track || item.exam_type || "", "usmle_step1");
@@ -56863,6 +56966,12 @@ function ngInferExamTrackFromObject(obj = {}, fallback = "") {
     obj.platform_target,
     obj.channel,
     obj.source_channel,
+    obj.detected_text,
+    obj.summary,
+    obj.message,
+    obj.text,
+    obj.last_message,
+    obj.source_text,
     obj.notes,
     obj.instructions,
   ];
@@ -56889,6 +56998,8 @@ function ngDefaultTopicForExamTrack(track = "") {
   const label = ngExamTrackLabel(key);
   if (key === "usmle_step1") return "USMLE Step 1 high-yield roadmap";
   if (key === "usmle_step2_ck") return "USMLE Step 2 CK clinical case roadmap";
+  if (key === "usmle_step3") return "USMLE Step 3 clinical management and CCS roadmap";
+  if (key === "plab") return "PLAB UK clinical practice roadmap";
   if (key === "nclex") return "NCLEX clinical judgment roadmap";
   if (key === "mccqe") return "MCCQE clinical decision roadmap";
   if (key === "amc") return "AMC clinical reasoning roadmap";
@@ -56917,6 +57028,28 @@ MCQs must be clinically realistic with 5 options A-E and one best answer. Focus 
 Do not generate Step 1 mechanism-only questions unless the mechanism directly changes diagnosis or management.
 Do not generate NCLEX nursing delegation/SATA wording, MCCQE Canadian-specific framing, or AMC Australian-specific framing.
 For question posts, hide the answer and explanation. For answer posts, provide the correct option, explanation, why other options are wrong, and a high-yield takeaway.`
+    },
+    usmle_step3: {
+      prompt_key: "usmle_step3_prompt_v1",
+      syllabus_focus: ["advanced clinical management", "prognosis", "prevention", "longitudinal care", "emergency stabilization", "ethics", "biostatistics", "CCS sequencing"],
+      instruction: [
+        "You are generating educational community content for USMLE Step 3 candidates.",
+        "Use Step 3 style only: advanced diagnosis and management, prognosis, prevention, longitudinal care, emergency stabilization, ethics, biostatistics, and CCS-style sequencing.",
+        "MCQs must be clinically realistic with 5 options A-E and one best answer. Cases should test safe next management across time, including inpatient, outpatient, emergency, and follow-up decisions.",
+        "Do not generate Step 1 mechanism-only questions, NCLEX nursing questions, PLAB/NHS-specific questions, MCCQE Canadian framing, or AMC Australian framing.",
+        "For question posts, hide the answer and explanation. For answer posts, provide the correct option, explanation, why other options are wrong, and a Step 3 management takeaway.",
+      ].join("\n"),
+    },
+    plab: {
+      prompt_key: "plab_prompt_v1",
+      syllabus_focus: ["UK clinical practice", "NHS pathways", "GMC professionalism", "patient safety", "communication", "diagnosis", "investigations", "safe initial management"],
+      instruction: [
+        "You are generating educational community content for PLAB and UKMLA candidates.",
+        "Use UK clinical practice style only: NHS pathways, GMC professionalism, patient safety, communication, diagnosis, investigations, and safe initial management.",
+        "MCQs should be practical UK clinical vignettes with one best answer and emphasis on safe initial action, escalation, consent, safeguarding, and professional duties.",
+        "Do not generate USMLE/NBME/UWorld wording, NCLEX nursing-priority questions, MCCQE Canadian framing, or AMC Australian framing.",
+        "For question posts, hide the answer and explanation. For answer posts, provide the correct option, explanation, why other options are wrong, and a concise UK-practice takeaway.",
+      ].join("\n"),
     },
     nclex: {
       prompt_key: "nclex_prompt_v1",
@@ -56972,6 +57105,8 @@ function ngSourceMatchesExamTrack(source = {}, track = "") {
   if (!hay.trim()) return false;
   if (key === "usmle_step1") return /step\s*1|usmle\s*1|first aid|pathoma|sketchy|uworld|basic science|nbme/i.test(hay) && !/step\s*2|nclex|mccqe|amc|australia/i.test(hay);
   if (key === "usmle_step2_ck") return /step\s*2|step2|ck|clinical case|medicine|surgery|obgyn|pediatrics|psychiatry/i.test(hay) && !/nclex|mccqe|amc|australia/i.test(hay);
+  if (key === "usmle_step3") return /step\s*3|step3|ccs|advanced management|longitudinal care/i.test(hay) && !/nclex|mccqe|amc|plab|ukmla/i.test(hay);
+  if (key === "plab") return /plab|ukmla|gmc|nhs|uk clinical|united kingdom/i.test(hay) && !/nclex|mccqe|amc|usmle/i.test(hay);
   if (key === "nclex") return /nclex|nursing|clinical judgment|delegation|prioritization|sata|next gen nclex/i.test(hay);
   if (key === "mccqe") return /mccqe|canada|canadian|family medicine|preventive/i.test(hay);
   if (key === "amc") return /\bamc\b|australia|australian|primary care|rural|emergency/i.test(hay);
