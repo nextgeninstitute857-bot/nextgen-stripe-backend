@@ -10,12 +10,17 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v275-natural-greeting-single-send"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v276-durable-whatsapp-fast-ack"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
-  assert.match(handler, /event: statuses\.length \? "message_status" : "ignored_non_message"/);
+  assert.match(handler, /event: "message_status"/);
+  assert.match(handler, /event: "ignored_non_message"/);
   assert.ok(
     handler.indexOf("if (!inboundMessages.length)") < handler.indexOf("upsertSocialLead"),
     "status-only callbacks must be returned before lead creation",
+  );
+  assert.ok(
+    handler.indexOf('event: "ignored_non_message"') < handler.indexOf("readCrmDb"),
+    "empty WhatsApp callbacks must be acknowledged before loading CRM state",
   );
 });
 
@@ -59,18 +64,39 @@ test("AI generation keeps one long-lived lock per inbound message", () => {
   assert.match(guard, /ttlSeconds: options\.lockTtlSeconds \|\| NG_AI_AUTO_LOCK_TTL_SECONDS/);
 });
 
-test("WhatsApp inbound messages are persisted and acknowledged before AI work", () => {
+test("WhatsApp inbound messages are journaled and acknowledged before CRM or AI work", () => {
   const handler = server.slice(
     server.indexOf("async function handleUniversalWebhook"),
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(handler, /source: "whatsapp_fast_ack"/);
-  assert.match(handler, /source: "whatsapp_fast_ack_wakeup"/);
-  assert.match(handler, /delayMs: 1000/);
+  assert.match(handler, /ngJournalWhatsAppWebhook/);
+  assert.match(handler, /event: "inbound_queued"/);
+  assert.match(handler, /source: "whatsapp_durable_journal"/);
   assert.ok(
-    handler.indexOf('source: "whatsapp_fast_ack"') < handler.indexOf("let aiAutoResult = null"),
-    "WhatsApp must return before the inline AI path",
+    handler.indexOf("ngJournalWhatsAppWebhook") < handler.indexOf("readCrmDb"),
+    "WhatsApp must be journaled before the large CRM database is read",
+  );
+  assert.ok(
+    handler.indexOf('event: "inbound_queued"') < handler.indexOf("readCrmDb"),
+    "WhatsApp must return before CRM or AI processing",
+  );
+});
+
+test("WhatsApp journal recovery deduplicates provider message IDs and wakes Ayla after persistence", () => {
+  const journal = server.slice(
+    server.indexOf("let ngWhatsAppWebhookJournalWriteQueue"),
+    server.indexOf("async function verifyMetaWebhook"),
+  );
+
+  assert.match(journal, /WHATSAPP_WEBHOOK_JOURNAL_PATH/);
+  assert.match(journal, /record_type: "queued"/);
+  assert.match(journal, /record_type === "processed" \|\| record\.record_type === "duplicate"/);
+  assert.match(journal, /ngFindWhatsAppInboundConversationByProviderId/);
+  assert.match(journal, /source: "whatsapp_durable_journal_wakeup"/);
+  assert.ok(
+    journal.indexOf("await writeCrmDb(db)") < journal.indexOf("source: \"whatsapp_durable_journal_wakeup\""),
+    "Ayla must only wake after the inbound CRM record is durable",
   );
 });
 
