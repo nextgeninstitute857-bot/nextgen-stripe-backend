@@ -15,6 +15,7 @@ import {
   shadowWriteFlashcardReview,
 } from "./lib/flashcard-postgres.js";
 import { planCrmDeliveryLockRetention } from "./lib/crm-delivery-lock-retention.js";
+import { resolveLmsSmtpAuthMethod } from "./lib/email-auth.js";
 import {
   assertWebsiteProductRequest,
   normalizeLmsEmailFrom,
@@ -31056,6 +31057,7 @@ async function ngGetSmtpTransporter() {
     secure,
     requireTLS,
     auth: { user, pass },
+    authMethod: resolveLmsSmtpAuthMethod(process.env.SMTP_AUTH_METHOD),
     connectionTimeout: Number(process.env.SMTP_CONNECTION_TIMEOUT_MS || 20000),
     greetingTimeout: Number(process.env.SMTP_GREETING_TIMEOUT_MS || 20000),
     socketTimeout: Number(process.env.SMTP_SOCKET_TIMEOUT_MS || 30000),
