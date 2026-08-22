@@ -3094,7 +3094,6 @@ function ngResolveAdminPaidPlan(db = {}, { courseId = "", requestedPlanId = "" }
 }
 
 function getExternalLibraryAccess(db, user) {
-  const demoSettings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
   const enrollments = Object.values(db.enrollments || {}).filter((enrollment) => {
     return String(enrollment.user_id) === String(user.id);
   });
@@ -3127,34 +3126,6 @@ function getExternalLibraryAccess(db, user) {
       accessEndsAt,
       source: "paid",
     };
-  }
-
-  // v168: demo access to the external UL/UWorld library follows the admin demo settings.
-  if (demoSettings.enabled !== false && demoSettings.allow_video_library === true) {
-    for (const enrollment of enrollments.filter((item) => item.is_demo === true)) {
-      if (!isDemoEnrollmentActive(enrollment, demoSettings)) continue;
-
-      const course = enrollment.course_id
-        ? db.courses?.[String(enrollment.course_id)] || null
-        : null;
-
-      if (course?.demo_access_enabled === false) continue;
-
-      const accessDays = Number(enrollment.access_days || demoSettings.duration_days || 7);
-      const accessEndsAt = enrollment.demo_expiry
-        ? new Date(`${enrollment.demo_expiry}T23:59:59`).toISOString()
-        : addDays(new Date(), accessDays).toISOString();
-
-      return {
-        allowed: true,
-        enrollment,
-        plan: null,
-        course,
-        accessDays,
-        accessEndsAt,
-        source: "demo",
-      };
-    }
   }
 
   return {
@@ -11917,7 +11888,6 @@ function ngGetExternalLibraryAccessForCourse(db, user, requestedCourseId = "") {
     return getExternalLibraryAccess(db, user);
   }
 
-  const demoSettings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
   const studentId = String(user?.id || "").trim();
 
   const enrollments = Object.values(db.enrollments || {}).filter((enrollment) => {
@@ -11949,30 +11919,6 @@ function ngGetExternalLibraryAccessForCourse(db, user, requestedCourseId = "") {
       accessEndsAt,
       source: "paid",
     };
-  }
-
-  if (demoSettings.enabled !== false && demoSettings.allow_video_library === true) {
-    for (const enrollment of enrollments.filter((item) => item.is_demo === true)) {
-      if (!isDemoEnrollmentActive(enrollment, demoSettings)) continue;
-
-      const course = db.courses?.[cleanCourseId] || null;
-      if (course?.demo_access_enabled === false) continue;
-
-      const accessDays = Number(enrollment.access_days || demoSettings.duration_days || 7);
-      const accessEndsAt = enrollment.demo_expiry
-        ? new Date(`${enrollment.demo_expiry}T23:59:59`).toISOString()
-        : addDays(new Date(), accessDays).toISOString();
-
-      return {
-        allowed: true,
-        enrollment,
-        plan: null,
-        course,
-        accessDays,
-        accessEndsAt,
-        source: "demo",
-      };
-    }
   }
 
   return {

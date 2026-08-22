@@ -96,7 +96,7 @@ test("premium LMS restores public catalog, account access, and timed invitations
       course: { id: "course", name: "Existing Student Course", status: "active" },
     },
     plans: {
-      plan: { id: "plan", name: "Active Plan", is_active: true, included_features: [] },
+      plan: { id: "plan", name: "Active Plan", is_active: true, included_features: ["video_library"] },
     },
     enrollments: {
       "course:active:paid": {
@@ -155,6 +155,8 @@ test("premium LMS restores public catalog, account access, and timed invitations
       NEXTGEN_AUTO_ZOOM_PREP_ENABLED: "false",
       ZOOM_RECORDING_RECOVERY_ENABLED: "false",
       NEXTGEN_BILLING_EXPIRY_RUNNER_ENABLED: "false",
+      EXTERNAL_LIBRARY_URL: "https://lectureslibrary.online",
+      EXTERNAL_LIBRARY_SSO_SECRET: "recorded-library-sso-test-secret",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -187,6 +189,13 @@ test("premium LMS restores public catalog, account access, and timed invitations
     });
     assert.equal(demoLogin.response.status, 200, JSON.stringify(demoLogin.payload));
 
+    const demoLibrary = await api(baseUrl, "/student/external-library/access", {
+      method: "POST",
+      token: demoLogin.payload.token,
+      body: { course_id: "course" },
+    });
+    assert.equal(demoLibrary.response.status, 403, JSON.stringify(demoLibrary.payload));
+
     const expiredLogin = await api(baseUrl, "/auth/login", {
       method: "POST",
       body: { email: users.expired.email, password },
@@ -199,6 +208,14 @@ test("premium LMS restores public catalog, account access, and timed invitations
     });
     assert.equal(activeLogin.response.status, 200, JSON.stringify(activeLogin.payload));
     assert.equal(activeLogin.payload.admission_mode, "open");
+
+    const activeLibrary = await api(baseUrl, "/student/external-library/access", {
+      method: "POST",
+      token: activeLogin.payload.token,
+      body: { course_id: "course" },
+    });
+    assert.equal(activeLibrary.response.status, 200, JSON.stringify(activeLibrary.payload));
+    assert.match(activeLibrary.payload.redirect_url, /^https:\/\/lectureslibrary\.online\/sso-login\?token=/);
 
     const courses = await api(baseUrl, "/courses", { token: activeLogin.payload.token });
     assert.equal(courses.response.status, 200, JSON.stringify(courses.payload));
