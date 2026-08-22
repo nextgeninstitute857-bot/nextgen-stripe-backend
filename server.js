@@ -50127,28 +50127,31 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
     };
   };
 
-  let { result, decision } = await requestDecision("Understand the complete conversation and produce Ayla's next structured decision now.");
-  let violations = evaluateAylaConversationDecision({
-    decision,
-    state,
-    messages: cleanMessages.map((message) => ({
-      role: ngIsOutboundMessage(message) ? "assistant" : "student",
-      text: ngMessageText(message),
-    })),
-  });
+  const decisionMessages = cleanMessages.map((message) => ({
+    role: ngIsOutboundMessage(message) ? "assistant" : "student",
+    text: ngMessageText(message),
+  }));
+  const decisionViolations = (candidate) => uniqueList([
+    ...evaluateAylaConversationDecision({ decision: candidate, state, messages: decisionMessages }),
+    ...(
+      ngAylaIsPriceQuestion(latestInboundText)
+      && (
+        ["begin_human_handoff", "continue_human_handoff"].includes(candidate.action)
+        || /\b(?:schedule|book|arrange).{0,40}(?:meeting|consultation|call)\b/i.test(String(candidate.reply || ""))
+      )
+        ? ["pricing_question_forced_handoff"]
+        : []
+    ),
+  ]);
 
-  if (violations.length) {
+  let { result, decision } = await requestDecision("Understand the complete conversation and produce Ayla's next structured decision now.");
+  let violations = decisionViolations(decision);
+
+  for (let repairAttempt = 0; violations.length && repairAttempt < 2; repairAttempt += 1) {
     const repaired = await requestDecision(buildAylaConversationRepairPrompt({ violations, priorDecision: decision, state }));
     result = repaired.result;
     decision = repaired.decision;
-    violations = evaluateAylaConversationDecision({
-      decision,
-      state,
-      messages: cleanMessages.map((message) => ({
-        role: ngIsOutboundMessage(message) ? "assistant" : "student",
-        text: ngMessageText(message),
-      })),
-    });
+    violations = decisionViolations(decision);
   }
 
   if (violations.length) {

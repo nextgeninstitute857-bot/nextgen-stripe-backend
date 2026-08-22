@@ -123,6 +123,26 @@ test("quality gate rejects permission loops, repeated questions, duplicate repli
   assert.ok(violations.includes("permission_loop"));
   assert.ok(violations.includes("near_duplicate_reply"));
   assert.ok(violations.includes("stalled_after_exam_and_need_known"));
+
+  const falseSignup = decision({
+    state,
+    stage: "demo_experience",
+    intent: "join_demo",
+    reply: "I've signed you up for the 7-day demo.",
+    action: "reply_only",
+    ask_field: "none",
+  });
+  assert.ok(evaluateAylaConversationDecision({ decision: falseSignup, state, messages: [] }).includes("false_demo_enrollment_claim"));
+
+  const forcedPriceMeeting = decision({
+    state,
+    stage: "handoff",
+    intent: "pricing_question",
+    reply: "The price is $100. Let me arrange a meeting.",
+    action: "begin_human_handoff",
+    ask_field: "none",
+  });
+  assert.ok(evaluateAylaConversationDecision({ decision: forcedPriceMeeting, state, messages: [] }).includes("pricing_question_forced_handoff"));
 });
 
 test("known facts and completed actions are persisted and cannot be requested or dispatched again", () => {
@@ -160,6 +180,17 @@ test("known facts and completed actions are persisted and cannot be requested or
     reply: "You can start the seven-day demo now.",
   }, createAylaConversationState());
   assert.match(firstDemo.reply, /https:\/\/nextgenusmle\.live\/demo/);
+
+  const tourBeforeDemo = normalizeAylaConversationDecision({
+    ...decision(),
+    action: "send_demo",
+    reply: "Start the demo here.",
+  }, {
+    ...createAylaConversationState(),
+    facts: { exam: "USMLE Step 1", main_need: "Needs structure" },
+  });
+  assert.equal(tourBeforeDemo.action, "send_feature_tour");
+  assert.equal(tourBeforeDemo.stage, "value_tour");
 });
 
 test("prompt treats Training Center text as facts, not as executable conversation rules", () => {
