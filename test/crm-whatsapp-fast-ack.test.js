@@ -196,11 +196,29 @@ test("Ayla explains weak-area adaptation and sends only safe public LMS previews
   assert.match(media, /function ngAylaIsSafePublicLmsPreview/);
   assert.match(media, /\["homepage_course_preview", "demo_lms_preview", "demo_lms", "course_card"\]/);
   assert.match(media, /asset\.homepage_visible === true/);
-  assert.doesNotMatch(media, /nextgen-lms-adaptive-preview-v2\.png/);
-  assert.match(media, /Only owner-approved Media Library assets may be sent/);
+  assert.match(media, /blockedPreview/);
+  assert.match(media, /nextgen-lms-adaptive-preview-v2\.png/);
+  assert.match(media, /nextgen-lms-dashboard-real-preview\.png/);
+  assert.match(media, /nextgen-lms-recordings-real-preview\.png/);
+  assert.match(media, /nextgen-lms-session-notes-real-preview\.png/);
+  assert.match(media, /nextgen-lms-flashcards-real-preview\.png/);
+  assert.match(media, /nextgen-lms-assessments-real-preview\.png/);
+  assert.match(media, /function ngAylaIsFullFeatureOverviewRequest/);
+  assert.match(media, /function ngPickAylaMediaAssetsForReply/);
+  assert.match(media, /function ngSendAylaAdditionalMediaAssets/);
   assert.match(media, /Adaptive Flashcards/);
-  assert.match(media, /Mentor-led Assessments/);
+  assert.match(media, /Assessments & Weak-Area Progress/);
   assert.match(media, /6 \* 60 \* 60 \* 1000/);
+});
+
+test("a full feature request explains value before demo and offers live-session or recording proof", () => {
+  assert.match(server, /Full feature-overview rule/);
+  assert.match(server, /one short professional line per feature/);
+  assert.match(server, /Do not place the demo invitation before the explanation/);
+  assert.match(server, /https:\/\/nextgenusmle\.live\/demo/);
+  assert.match(server, /attend one live session/);
+  assert.match(server, /matching labelled recording/);
+  assert.match(server, /featureOverviewRequested \? 300 : 140/);
 });
 
 test("a public price question does not create or lock a Google Meet handoff", () => {
@@ -262,7 +280,7 @@ test("WhatsApp sales replies stay fast and end with a concrete contextual next s
   assert.match(generator, /one concrete next action that matches the conversation/);
   assert.match(generator, /Do not restart discovery, resend the demo/);
   assert.match(generator, /never invent testimonials/);
-  assert.match(generator, /maxOutputTokens: 140/);
+  assert.match(generator, /maxOutputTokens: featureOverviewRequested \? 300 : 140/);
 });
 
 test("WhatsApp provider authorization failures open a shared circuit breaker", () => {
