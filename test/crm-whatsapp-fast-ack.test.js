@@ -10,7 +10,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v277-inbound-scoped-ai-dedupe"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v278-exact-conversation-ownership"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: "message_status"/);
   assert.match(handler, /event: "ignored_non_message"/);
@@ -123,6 +123,24 @@ test("heartbeat scans recent pending leads instead of slicing the first stored l
   assert.match(runner, /\.sort\(\(a, b\) =>/);
   assert.match(runner, /if \(results\.length >= maxResults\) break/);
   assert.doesNotMatch(runner, /\.slice\(0,/);
+});
+
+test("AI conversation history never borrows explicitly owned messages from a duplicate phone lead", () => {
+  const history = server.slice(
+    server.indexOf("function ngLeadConversationMessages"),
+    server.indexOf("function ngMessageText"),
+  );
+
+  assert.match(history, /const explicitLeadIds = \[/);
+  assert.match(history, /if \(explicitLeadIds\.length\) return explicitLeadIds\.includes\(id\)/);
+  assert.ok(
+    history.indexOf("if (explicitLeadIds.length) return explicitLeadIds.includes(id)") < history.indexOf("if (!leadPhones.length) return false"),
+    "an explicit lead owner must be decided before the legacy phone-number fallback",
+  );
+  assert.ok(
+    history.indexOf("item.crm_lead_id") < history.indexOf("if (explicitLeadIds.length)"),
+    "all known explicit CRM ownership fields must be considered",
+  );
 });
 
 test("WhatsApp provider authorization failures open a shared circuit breaker", () => {
