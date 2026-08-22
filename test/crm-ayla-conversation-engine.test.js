@@ -92,6 +92,7 @@ test("programme interest advances from discovery to one complete feature tour wi
   state = applyAylaConversationDecision({ state, decision: tour, now: "2026-08-22T10:03:00.000Z" });
   assert.equal(state.stage, "value_tour");
   assert.ok(state.completed_actions.includes("send_feature_tour"));
+  assert.ok(state.completed_actions.includes("send_demo"));
   assert.equal(state.facts.main_need, "Studying alone and needs a structured programme");
 
   const accidentalRepeat = normalizeAylaConversationDecision({ ...tour, state }, state);
@@ -143,6 +144,22 @@ test("known facts and completed actions are persisted and cannot be requested or
   assert.equal(normalized.ask_field, "none");
   assert.equal(normalized.action, "reply_only");
   assert.deepEqual(normalized.media_keys, []);
+
+  const demoAfterTour = normalizeAylaConversationDecision({
+    ...decision(),
+    action: "send_demo",
+    reply: "Great—start whenever you are ready.",
+    follow_up: "null",
+  }, { ...state, completed_actions: ["send_feature_tour"] });
+  assert.equal(demoAfterTour.action, "reply_only");
+  assert.equal(demoAfterTour.follow_up, null);
+
+  const firstDemo = normalizeAylaConversationDecision({
+    ...decision(),
+    action: "send_demo",
+    reply: "You can start the seven-day demo now.",
+  }, createAylaConversationState());
+  assert.match(firstDemo.reply, /https:\/\/nextgenusmle\.live\/demo/);
 });
 
 test("prompt treats Training Center text as facts, not as executable conversation rules", () => {
