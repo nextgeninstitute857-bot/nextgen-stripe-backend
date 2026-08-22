@@ -49855,10 +49855,10 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
     });
     if (aylaMediaAsset) ngMarkAylaMediaSent(db, lead, aylaMediaAsset, { source: "full_ai_auto", result });
     if (result?.success !== false && aylaMediaAssets.length > 1) {
-      await ngSendAylaAdditionalMediaAssets({ db, assets: aylaMediaAssets, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "full_ai_auto" });
+      await ngSendAylaAdditionalMediaAssets({ db, assets: aylaMediaAssets, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "full_ai_auto", inboundMessageId: ngAiAutoMessageFingerprint(latestInbound) });
     }
     if (result?.success !== false && featureOverviewRequested) {
-      await ngSendAylaFeatureOverviewClosingMessage({ db, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "full_ai_auto" });
+      await ngSendAylaFeatureOverviewClosingMessage({ db, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "full_ai_auto", inboundMessageId: ngAiAutoMessageFingerprint(latestInbound) });
     }
 
     const adminAlert = await ngAylaMaybeSendConversationAdminAlert({
@@ -50094,10 +50094,10 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
 
     if (aylaMediaAsset) ngMarkAylaMediaSent(db, lead, aylaMediaAsset, { source, result: sendResult });
     if (sendResult?.success !== false && aylaMediaAssets.length > 1) {
-      await ngSendAylaAdditionalMediaAssets({ db, assets: aylaMediaAssets, lead, brandId: lead.brand_id || brandId || null, to, source });
+      await ngSendAylaAdditionalMediaAssets({ db, assets: aylaMediaAssets, lead, brandId: lead.brand_id || brandId || null, to, source, inboundMessageId: inboundFingerprint });
     }
     if (sendResult?.success !== false && featureOverviewRequested) {
-      await ngSendAylaFeatureOverviewClosingMessage({ db, lead, brandId: lead.brand_id || brandId || null, to, source });
+      await ngSendAylaFeatureOverviewClosingMessage({ db, lead, brandId: lead.brand_id || brandId || null, to, source, inboundMessageId: inboundFingerprint });
     }
 
     const adminAlert = await ngAylaMaybeSendConversationAdminAlert({
@@ -50571,10 +50571,10 @@ app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
         });
         if (aylaMediaAsset) ngMarkAylaMediaSent(db, lead, aylaMediaAsset, { source: "process_ai_auto", result: sendResult });
         if (sendResult?.success !== false && aylaMediaAssets.length > 1) {
-          await ngSendAylaAdditionalMediaAssets({ db, assets: aylaMediaAssets, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "process_ai_auto" });
+          await ngSendAylaAdditionalMediaAssets({ db, assets: aylaMediaAssets, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "process_ai_auto", inboundMessageId: ngAiAutoMessageFingerprint(inbound) });
         }
         if (sendResult?.success !== false && featureOverviewRequested) {
-          await ngSendAylaFeatureOverviewClosingMessage({ db, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "process_ai_auto" });
+          await ngSendAylaFeatureOverviewClosingMessage({ db, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "process_ai_auto", inboundMessageId: ngAiAutoMessageFingerprint(inbound) });
         }
         const adminAlert = await ngAylaMaybeSendConversationAdminAlert({
           db,
@@ -67054,7 +67054,7 @@ function ngRenderAylaMediaCaption(asset = {}, { lead = {}, reply = "" } = {}) {
   return [featureCaption, String(reply || "").trim()].filter(Boolean).join("\n\n");
 }
 
-async function ngSendAylaAdditionalMediaAssets({ db = {}, assets = [], lead = {}, brandId = null, to = "", source = "ayla_auto_media" } = {}) {
+async function ngSendAylaAdditionalMediaAssets({ db = {}, assets = [], lead = {}, brandId = null, to = "", source = "ayla_auto_media", inboundMessageId = "" } = {}) {
   const results = [];
   for (const asset of safeArray(assets).slice(1, 5)) {
     const caption = ngRenderAylaMediaCaption(asset, { lead, reply: "" });
@@ -67063,7 +67063,8 @@ async function ngSendAylaAdditionalMediaAssets({ db = {}, assets = [], lead = {}
       mediaUrl: asset.public_url || asset.relative_url || "", mediaId: asset.whatsapp_media_id || "", mediaType: asset.asset_type || "image", caption,
       metadata: {
         source: `${source}_feature_media`,
-        delivery_purpose: `${source}_feature_media_${asset.id || asset.usage_area || "card"}`,
+        delivery_purpose: `${source}_feature_media_${inboundMessageId || "turn"}_${asset.id || asset.usage_area || "card"}`,
+        inbound_message_id: inboundMessageId || null,
         ai_auto: true,
         ayla_media_asset_id: asset.id || null,
         ayla_media_usage_area: asset.usage_area || null,
@@ -67082,11 +67083,17 @@ function ngAylaFeatureOverviewClosingText(db = {}) {
   return `Please take our ${demoDays}-day demo and see the organisation and teaching quality for yourself:\nhttps://nextgenusmle.live/demo\n\nFor the clearest experience, attend one live session. If your schedule is limited, watch the matching labelled recording at a convenient time.`;
 }
 
-async function ngSendAylaFeatureOverviewClosingMessage({ db = {}, lead = {}, brandId = null, to = "", source = "ayla_auto_media" } = {}) {
+async function ngSendAylaFeatureOverviewClosingMessage({ db = {}, lead = {}, brandId = null, to = "", source = "ayla_auto_media", inboundMessageId = "" } = {}) {
   const text = ngAylaFeatureOverviewClosingText(db);
   return sendCrmMessage({
     db, brandId, channel: "whatsapp", to, text, leadId: lead.id || null,
-    metadata: { source: `${source}_feature_tour_closing`, ai_auto: true, feature_tour_closing: true },
+    metadata: {
+      source: `${source}_feature_tour_closing`,
+      delivery_purpose: `${source}_feature_tour_closing_${inboundMessageId || "turn"}`,
+      inbound_message_id: inboundMessageId || null,
+      ai_auto: true,
+      feature_tour_closing: true,
+    },
   });
 }
 

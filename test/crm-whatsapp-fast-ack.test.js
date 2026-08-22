@@ -210,7 +210,8 @@ test("Ayla explains weak-area adaptation and sends only safe public LMS previews
   assert.match(media, /Mentor-Led Assessments/);
   assert.match(media, /function ngAylaFeatureOverviewClosingText/);
   assert.match(media, /function ngSendAylaFeatureOverviewClosingMessage/);
-  assert.match(media, /delivery_purpose: `\$\{source\}_feature_media_\$\{asset\.id/);
+  assert.match(media, /delivery_purpose: `\$\{source\}_feature_media_\$\{inboundMessageId/);
+  assert.match(media, /delivery_purpose: `\$\{source\}_feature_tour_closing_\$\{inboundMessageId/);
   assert.match(media, /6 \* 60 \* 60 \* 1000/);
 });
 
