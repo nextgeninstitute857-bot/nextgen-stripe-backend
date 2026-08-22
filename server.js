@@ -578,7 +578,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v283-relevant-compact-sales-context";
+const CRM_AYLA_REPLY_BUILD = "v284-fast-concrete-sales-close";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
@@ -28911,7 +28911,7 @@ async function handleUniversalWebhook({ req, res, platform, integrationId = null
           ngAffArray(db, "ai_actions").unshift({ id: uuid(), title: "WhatsApp template required for Full AI Auto", area: "whatsapp", type: "template_required", status: "pending_approval", lead_id: lead.id, payload: { lead_id: lead.id, channel }, created_at: ngAffNow(), updated_at: ngAffNow() });
         } else {
           const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel });
-          const replyDelayMs = await ngAylaWaitBeforeAutoSend(db);
+          const replyDelayMs = await ngAylaWaitBeforeAutoSend(db, channel);
           const to = getBestRecipientForChannel({ channel, lead, message: latestInbound });
           const sendResult = await sendCrmMessage({
             db,
@@ -49407,7 +49407,7 @@ function ngAylaIsRepeatOfRecentOutbound(reply = "", messages = []) {
   return outbound.some((m) => ngAylaNormalizeReplyForRepeat(ngMessageText(m)) === cleanReply);
 }
 
-function ngAylaAutoReplyDelayMs(db = {}) {
+function ngAylaAutoReplyDelayMs(db = {}, channel = "") {
   const s = db ? ngAylaPickSettings(db) : {};
   const fixed = Number(s.ai_auto_reply_delay_seconds ?? 4);
   const min = Number(s.ai_auto_reply_delay_min_seconds ?? 3);
@@ -49415,15 +49415,21 @@ function ngAylaAutoReplyDelayMs(db = {}) {
   const lo = Number.isFinite(min) ? Math.max(0, min) : 3;
   const hi = Number.isFinite(max) ? Math.max(lo, max) : 5;
   const seconds = Number.isFinite(fixed) ? Math.max(lo, Math.min(hi, fixed)) : (lo + Math.random() * Math.max(0, hi - lo));
-  return Math.round(seconds * 1000);
+  const configuredMs = Math.round(seconds * 1000);
+  // A short pause feels natural in WhatsApp, but a multi-second artificial wait
+  // only makes a real AI/network delay feel worse. Other channels retain their
+  // configured pacing.
+  return normalizeSocialPlatform(channel) === "whatsapp"
+    ? Math.min(configuredMs, 1200)
+    : configuredMs;
 }
 
 function ngAylaSleep(ms = 0) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
 
-async function ngAylaWaitBeforeAutoSend(db = {}) {
-  const ms = ngAylaAutoReplyDelayMs(db);
+async function ngAylaWaitBeforeAutoSend(db = {}, channel = "") {
+  const ms = ngAylaAutoReplyDelayMs(db, channel);
   if (ms > 0) await ngAylaSleep(ms);
   return ms;
 }
@@ -49556,7 +49562,7 @@ Backend-enforced identity:
 - Never select from a fixed response script. Reason from the student's exact message, the conversation history, the known lead profile, current programme facts, and current links. Write a fresh response for this person.
 
 Non-negotiable reply style:
-- Keep replies short and readable by default. For UWorld/library/program explanations, use 3-5 short WhatsApp-style lines if needed.
+- Keep replies short and readable by default: normally 2-4 short sentences. For UWorld/library/program explanations, use 3-5 short WhatsApp-style lines if needed.
 - Open warmly only once at the start of a new conversation. Do not start every reply with "Hi Doctor". After the first greeting, use "Doctor," / "Yes Doctor," / "Sure Doctor," or answer directly.
 - Never say "prompt response", "I appreciate your prompt response", or talk like you are responding to a prompt. Say "Thank you, Doctor" or continue naturally.
 - Never expose internal approval, review, CRM, training, retrieval, or knowledge-grounding language to a student. Do not say "approved material" or explain the approval process. Say "our First Aid-integrated teaching", "our LMS material", or "our recorded lecture" naturally.
@@ -49573,6 +49579,8 @@ Sales behavior:
 - After answering the student’s question, move the lead forward naturally: build trust, share/offer session recording, explain the UWorld Video Library, invite to live session, ask exam date/weak area, or offer Google Meet mentor consultation at the right time.
 - Session recordings are still an important proof asset. Do not suppress recording links. If a recording is useful for trust or the student asks about recordings, share it; just keep listening and continue the next turn when the student replies.
 - Never ignore the student’s direct question or instruction. Do not repeat a previous offer when the student asked something else. Answer first, then convert naturally.
+- When a student hesitates after opening the demo or choosing a plan, answer the exact fear with their known exam, timeline, and weak point. Explain why starting now helps, then finish with one concrete next action that matches the conversation (for example, the current enrollment link if they already chose a plan). Do not restart discovery, resend the demo, or end with a vague question such as "Would you like to discuss...?".
+- Use approved proof naturally when it is present in the supplied context, but never invent testimonials or say that "many students improve" without that evidence.
 - If the student asks price/cost/package/payment, answer immediately using only the exact active public plan names and USD prices in the current live LMS facts. Never invent packages or hide public prices behind a Google Meet. Give the official pricing/enrollment link, then offer one relevant next step such as the free demo or optional mentor guidance.
 - If the student is weak, failed, old graduate, delayed, confused, or struggling, reassure first: tell them they are in the right place, explain roadmap/mentor feedback/weak-area correction, then guide to recording/demo/live session.
 - If the student says yes/ok/interested, send the next useful asset unless they asked a question. Do not jump to Google Meet time before value is shown.
@@ -49630,7 +49638,7 @@ Write only Ayla's next message. No markdown headings. No bullet list unless the 
     model: process.env.AI_MODEL || "gpt-4o-mini",
     systemPrompt,
     userPrompt,
-    maxOutputTokens: 180,
+    maxOutputTokens: 140,
     jsonMode: false,
   });
 
@@ -49770,7 +49778,7 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
     }
 
     const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel });
-    const replyDelayMs = await ngAylaWaitBeforeAutoSend(db);
+    const replyDelayMs = await ngAylaWaitBeforeAutoSend(db, channel);
     const to = getBestRecipientForChannel({
       channel,
       lead,
@@ -50005,7 +50013,7 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
 
   try {
     const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel });
-    const replyDelayMs = await ngAylaWaitBeforeAutoSend(db);
+    const replyDelayMs = await ngAylaWaitBeforeAutoSend(db, channel);
     const to = getBestRecipientForChannel({ channel, lead, message: latestInbound });
     const aylaMediaAsset = channel === "whatsapp"
       ? ngPickAylaMediaAssetForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(latestInbound || {}), messages })

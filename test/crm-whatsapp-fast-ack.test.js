@@ -10,7 +10,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v283-relevant-compact-sales-context"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v284-fast-concrete-sales-close"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: "message_status"/);
   assert.match(handler, /event: "ignored_non_message"/);
@@ -210,6 +210,25 @@ test("Ayla retrieves compact relevant approved training without duplicating the 
   assert.match(generator, /ngTrainingContextForFullAiAuto\(db, `\$\{latestInboundTextForRouting\}/);
   assert.match(generator, /includeBackendSalesBrain: false/);
   assert.match(server, /includeBackendSalesBrain \? ngBuildAylaBackendSalesBrain/);
+});
+
+test("WhatsApp sales replies stay fast and end with a concrete contextual next step", () => {
+  const pacing = server.slice(
+    server.indexOf("function ngAylaAutoReplyDelayMs"),
+    server.indexOf("async function ngGenerateStudentAutoReply"),
+  );
+  const generator = server.slice(
+    server.indexOf("async function ngGenerateStudentAutoReply"),
+    server.indexOf('app.post("/admin/crm/conversations/:leadId/ai-auto-send"'),
+  );
+
+  assert.match(pacing, /normalizeSocialPlatform\(channel\) === "whatsapp"/);
+  assert.match(pacing, /Math\.min\(configuredMs, 1200\)/);
+  assert.match(generator, /When a student hesitates after opening the demo or choosing a plan/);
+  assert.match(generator, /one concrete next action that matches the conversation/);
+  assert.match(generator, /Do not restart discovery, resend the demo/);
+  assert.match(generator, /never invent testimonials/);
+  assert.match(generator, /maxOutputTokens: 140/);
 });
 
 test("WhatsApp provider authorization failures open a shared circuit breaker", () => {
