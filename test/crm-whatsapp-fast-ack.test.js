@@ -10,7 +10,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v284-fast-concrete-sales-close"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v285-labelled-sales-media-demo"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: "message_status"/);
   assert.match(handler, /event: "ignored_non_message"/);
@@ -45,7 +45,9 @@ test("bare WhatsApp greetings stay conversational before the sales sequence", ()
   assert.match(salesBrain, /Do not pitch the LMS, demo, live session, recording, UWorld library, Google Meet, pricing/);
   assert.match(replyPrompt, /Do not begin the sales sequence/);
   assert.match(replyPrompt, /Do not say "Thank you, Doctor" in response to a bare hello/);
-  assert.match(replyPrompt, /if \(latestSignals\.bare_greeting\)/);
+  assert.match(replyPrompt, /const hasPriorAylaReply = cleanMessages\.some/);
+  assert.match(replyPrompt, /if \(latestSignals\.bare_greeting && !hasPriorAylaReply\)/);
+  assert.match(replyPrompt, /If an existing student says hello again/);
   assert.match(replyPrompt, /intent: "natural_bare_greeting"/);
   assert.match(replyPrompt, /Do not mention or pitch any programme, LMS, demo, live session, recording, UWorld, Google Meet, price, feature, or offer/);
   assert.ok(
@@ -163,10 +165,42 @@ test("Ayla grounds current cohort and pricing answers in the live LMS", () => {
   assert.match(grounding, /Never say.*July 1.*upcoming/);
   assert.match(grounding, /Official pricing\/enrollment page: https:\/\/nextgenusmle\.live\/pricing/);
   assert.match(grounding, /Do not invent Basic, Standard, Premium/);
+  assert.match(grounding, /latestPublishedRecording/);
+  assert.match(grounding, /Latest published recording/);
+  assert.match(grounding, /When sharing it, always state this exact title before the link/);
+  assert.match(grounding, /live_session:/);
+  assert.match(grounding, /latest_recording:/);
   assert.match(salesBrain, /give the exact active public plan names and USD prices/);
   assert.match(replyPrompt, /const liveLmsSalesSnapshot = await ngAylaLiveLmsSalesGrounding\(\{ structured: true \}\)/);
   assert.match(replyPrompt, /Never invent packages or hide public prices behind a Google Meet/);
+  assert.match(replyPrompt, /Never send a raw or generic recording link/);
+  assert.match(replyPrompt, /Never send a raw or generic live-session link/);
+  assert.match(replyPrompt, /Do not omit Dermatology/);
+  assert.match(replyPrompt, /Do not invent a different system count/);
   assert.match(replyPrompt, /\$\{liveLmsSalesGrounding\}/);
+});
+
+test("Ayla explains weak-area adaptation and sends only safe public LMS previews", () => {
+  const salesBrain = server.slice(
+    server.indexOf("function ngBuildAylaBackendSalesBrain"),
+    server.indexOf("function ngBuildAylaCommandContext"),
+  );
+  const media = server.slice(
+    server.indexOf("const NG_AYLA_MEDIA_USAGE_DEFINITIONS"),
+    server.indexOf("function ngFindCrmMediaAssetForRules"),
+  );
+
+  assert.match(salesBrain, /question and assessment performance identifies weak areas/);
+  assert.match(salesBrain, /targeted flashcards, revision, roadmap tasks, and mentor guidance/);
+  assert.match(salesBrain, /weekly\/weekend when published and after each system\/block/);
+  assert.match(media, /function ngAylaIsSafePublicLmsPreview/);
+  assert.match(media, /\["homepage_course_preview", "demo_lms_preview", "demo_lms", "course_card"\]/);
+  assert.match(media, /asset\.homepage_visible === true/);
+  assert.match(media, /nextgen-lms-adaptive-preview-v2\.png/);
+  assert.match(media, /Privacy-safe representative LMS preview with no student identity/);
+  assert.match(media, /Adaptive Flashcards/);
+  assert.match(media, /Mentor-led Assessments/);
+  assert.match(media, /6 \* 60 \* 60 \* 1000/);
 });
 
 test("a public price question does not create or lock a Google Meet handoff", () => {
