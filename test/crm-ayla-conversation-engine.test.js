@@ -32,8 +32,12 @@ test("self-reported student name replaces a WhatsApp profile label but not an ad
   assert.equal(legacyProfileLead.name, "Sara");
 
   const manuallyNamedLead = { name: "Dr Ayesha", name_source: "manual" };
-  assert.equal(applyAylaConversationNameToLead(manuallyNamedLead, "Sara"), false);
+  assert.equal(applyAylaConversationNameToLead(manuallyNamedLead, "Sara", undefined, { source: "conversation_self_reported" }), false);
   assert.equal(manuallyNamedLead.name, "Dr Ayesha");
+
+  const legacyProviderLead = { name: "Next Gen Scholars" };
+  assert.equal(applyAylaConversationNameToLead(legacyProviderLead, "Sara", undefined, { source: "conversation_self_reported" }), true);
+  assert.equal(legacyProviderLead.name, "Sara");
 });
 
 test("a directly stated name becomes durable conversation memory even if the model omits the memory patch", () => {
@@ -49,6 +53,7 @@ test("a directly stated name becomes durable conversation memory even if the mod
     ],
   });
   assert.equal(initial.facts.name, "Sara");
+  assert.equal(initial.fact_sources.name, "conversation_self_reported");
 
   const afterDecision = applyAylaConversationDecision({
     state: initial,
@@ -67,12 +72,14 @@ test("a directly stated name becomes durable conversation memory even if the mod
     now: "2026-08-22T13:31:00.000Z",
   });
   assert.equal(afterDecision.facts.name, "Sara");
+  assert.equal(afterDecision.fact_sources.name, "conversation_self_reported");
 
   const later = createAylaConversationState({
     lead: { ayla_conversation_state: afterDecision },
     messages: [{ role: "student", text: "How much does it cost?" }],
   });
   assert.equal(later.facts.name, "Sara");
+  assert.equal(later.fact_sources.name, "conversation_self_reported");
 
   const explicitLater = createAylaConversationState({
     lead: { name: "WhatsApp Lead", name_source: "system_placeholder" },
