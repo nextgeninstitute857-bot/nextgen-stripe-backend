@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   AYLA_CONVERSATION_DECISION_SCHEMA,
+  applyAylaConversationNameToLead,
   applyAylaConversationDecision,
   aylaConversationTextFormat,
   buildAylaConversationPrompt,
@@ -10,6 +11,30 @@ import {
   evaluateAylaConversationDecision,
   normalizeAylaConversationDecision,
 } from "../lib/crm-ayla-conversation-engine.js";
+
+test("self-reported student name replaces a WhatsApp profile label but not an admin name", () => {
+  const profileLead = {
+    name: "Next Gen Scholars",
+    whatsapp_profile_name: "Next Gen Scholars",
+    name_source: "whatsapp_profile",
+  };
+  assert.equal(applyAylaConversationNameToLead(profileLead, "Sara", "2026-08-22T13:30:00.000Z"), true);
+  assert.equal(profileLead.name, "Sara");
+  assert.equal(profileLead.full_name, "Sara");
+  assert.equal(profileLead.contact_name, "Sara");
+  assert.equal(profileLead.name_source, "conversation_self_reported");
+
+  const legacyProfileLead = {
+    name: "Next Gen Scholars",
+    whatsapp_profile_name: "Next Gen Scholars",
+  };
+  assert.equal(applyAylaConversationNameToLead(legacyProfileLead, "Sara"), true);
+  assert.equal(legacyProfileLead.name, "Sara");
+
+  const manuallyNamedLead = { name: "Dr Ayesha", name_source: "manual" };
+  assert.equal(applyAylaConversationNameToLead(manuallyNamedLead, "Sara"), false);
+  assert.equal(manuallyNamedLead.name, "Dr Ayesha");
+});
 
 function decision(overrides = {}) {
   return normalizeAylaConversationDecision({
