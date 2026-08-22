@@ -578,7 +578,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v282-continuous-whatsapp-conversation";
+const CRM_AYLA_REPLY_BUILD = "v283-relevant-compact-sales-context";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
@@ -47634,12 +47634,26 @@ function ngNormalizeLeadAiMode(lead = {}) {
   return lead;
 }
 
-function ngTrainingContextForFullAiAuto(db) {
-  return ngReadArray(db, "ai_training_items")
+function ngTrainingContextForFullAiAuto(db, query = "") {
+  const stopWords = new Set(["about", "after", "again", "before", "could", "doctor", "from", "have", "just", "more", "please", "should", "that", "their", "there", "these", "they", "this", "what", "when", "where", "which", "with", "would", "your"]);
+  const terms = [...new Set((String(query || "").toLowerCase().match(/[a-z0-9]{3,}/g) || []).filter((term) => !stopWords.has(term)))].slice(0, 24);
+  const items = ngReadArray(db, "ai_training_items")
     .filter((item) => item.active !== false && item.enforce_in_ai !== false)
-    .slice(0, 30)
-    .map((item) => `## ${item.title || item.category || item.id}\n${item.content || item.training_content || ""}`)
-    .join("\n\n");
+    .map((item, index) => {
+      const title = String(item.title || item.category || item.id || "Approved knowledge");
+      const content = String(item.content || item.training_content || "");
+      const titleSearch = title.toLowerCase();
+      const contentSearch = content.toLowerCase();
+      const score = terms.reduce((sum, term) => sum + (titleSearch.includes(term) ? 6 : 0) + (contentSearch.includes(term) ? 1 : 0), 0);
+      return { item, index, title, content, score };
+    })
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .slice(0, 12);
+
+  return items
+    .map(({ title, content }) => `## ${title.slice(0, 180)}\n${content.slice(0, 1600)}`)
+    .join("\n\n")
+    .slice(0, 18000);
 }
 
 function ngLeadConversationMessages(db, leadId) {
@@ -48132,12 +48146,12 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
   return lines.join("\n");
 }
 
-function ngBuildAylaCommandContext(db = {}, lead = {}) {
+function ngBuildAylaCommandContext(db = {}, lead = {}, { includeBackendSalesBrain = true } = {}) {
   const s = ngAylaPickSettings(db);
   const proof = ngAylaApprovedProofItems(db, lead);
   const ownerCommandContext = ngAylaOwnerLiveCommandContext(s);
   const campaignCommandContext = ngAylaCampaignCommandContext(db, lead);
-  const backendSalesBrainContext = ngBuildAylaBackendSalesBrain(db, lead);
+  const backendSalesBrainContext = includeBackendSalesBrain ? ngBuildAylaBackendSalesBrain(db, lead) : "";
   const commandBlocks = [
     s.global_ai_command,
     s.command_instructions,
@@ -48175,7 +48189,7 @@ ${ownerCommandContext || "No active Owner Live Command saved in AI Control."}
 
 ${campaignCommandContext || "No campaign-specific command found for this lead."}
 
-${backendSalesBrainContext}
+${backendSalesBrainContext ? `${backendSalesBrainContext}\n` : ""}
 
 ${todaySessionContext}
 
@@ -49470,8 +49484,8 @@ async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }
 
   const latestInbound = ngLatestInbound(cleanMessages);
   const latestInboundText = ngMessageText(latestInbound || {});
-  const trainingContext = db ? ngTrainingContextForFullAiAuto(db) : "";
-  const commandContext = db ? ngBuildAylaCommandContext(db, lead) : "";
+  const trainingContext = db ? ngTrainingContextForFullAiAuto(db, `${latestInboundTextForRouting}\n${history.slice(-1600)}`) : "";
+  const commandContext = db ? ngBuildAylaCommandContext(db, lead, { includeBackendSalesBrain: false }) : "";
   const latestSignals = ngAylaLatestMessageSignals(latestInboundText, history);
 
   // A bare hello is a relationship-opening turn, not a sales turn. Give the model a
