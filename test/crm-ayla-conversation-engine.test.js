@@ -36,6 +36,51 @@ test("self-reported student name replaces a WhatsApp profile label but not an ad
   assert.equal(manuallyNamedLead.name, "Dr Ayesha");
 });
 
+test("a directly stated name becomes durable conversation memory even if the model omits the memory patch", () => {
+  const initial = createAylaConversationState({
+    lead: {
+      name: "Next Gen Scholars",
+      whatsapp_profile_name: "Next Gen Scholars",
+      name_source: "whatsapp_profile",
+    },
+    messages: [
+      { role: "assistant", text: "Hi there! May I ask your name?" },
+      { role: "student", text: "I'm Sara." },
+    ],
+  });
+  assert.equal(initial.facts.name, "Sara");
+
+  const afterDecision = applyAylaConversationDecision({
+    state: initial,
+    decision: decision({
+      reply: "Great to meet you, Sara! Which exam are you preparing for?",
+      ask_field: "exam",
+      memory_patch: {
+        name: null,
+        exam: "unknown",
+        timeline: null,
+        main_need: null,
+        country: null,
+        student_type: "prospective",
+      },
+    }),
+    now: "2026-08-22T13:31:00.000Z",
+  });
+  assert.equal(afterDecision.facts.name, "Sara");
+
+  const later = createAylaConversationState({
+    lead: { ayla_conversation_state: afterDecision },
+    messages: [{ role: "student", text: "How much does it cost?" }],
+  });
+  assert.equal(later.facts.name, "Sara");
+
+  const explicitLater = createAylaConversationState({
+    lead: { name: "WhatsApp Lead", name_source: "system_placeholder" },
+    messages: [{ role: "student", text: "My name is Sara." }],
+  });
+  assert.equal(explicitLater.facts.name, "Sara");
+});
+
 function decision(overrides = {}) {
   return normalizeAylaConversationDecision({
     stage: "discovery",
