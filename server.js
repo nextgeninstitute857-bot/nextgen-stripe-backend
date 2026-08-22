@@ -61147,7 +61147,7 @@ app.post("/website-chat/ayla", async (req, res) => {
       contact: extractedContact,
       whatsapp_first_message_result: whatsappFirstMessageResult,
       quick_actions: [
-        { key: "start_demo", label: "Start 2-Day LMS Demo", url: "/try-demo" },
+        { key: "start_demo", label: "Start 7-Day LMS Demo", url: "/try-demo" },
         { key: "live_session", label: "Today’s live session time?" },
         { key: "roadmap", label: "Explain the roadmap" },
         { key: "mentor", label: "Book mentor guidance" },
