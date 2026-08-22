@@ -10,7 +10,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v276-durable-whatsapp-fast-ack"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v277-inbound-scoped-ai-dedupe"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: "message_status"/);
   assert.match(handler, /event: "ignored_non_message"/);
@@ -62,6 +62,20 @@ test("AI generation keeps one long-lived lock per inbound message", () => {
 
   assert.match(guard, /const NG_AI_AUTO_LOCK_TTL_SECONDS = Number\(process\.env\.AI_AUTO_LOCK_TTL_SECONDS \|\| 180\)/);
   assert.match(guard, /ttlSeconds: options\.lockTtlSeconds \|\| NG_AI_AUTO_LOCK_TTL_SECONDS/);
+});
+
+test("AI delivery dedupe scopes each reply to its inbound message instead of the reusable worker attempt", () => {
+  const deliveryPurpose = server.slice(
+    server.indexOf("function ngBuildDeliveryPurpose"),
+    server.indexOf("function ngBuildDeliveryDedupeKey"),
+  );
+
+  assert.match(deliveryPurpose, /metadata\.ai_auto === true && metadata\.inbound_message_id/);
+  assert.match(deliveryPurpose, /`ai_auto_reply:\$\{metadata\.inbound_message_id\}`/);
+  assert.ok(
+    deliveryPurpose.indexOf("aiInboundPurpose") < deliveryPurpose.indexOf("metadata.source"),
+    "the unique inbound fingerprint must take precedence over the repeated attempt source",
+  );
 });
 
 test("WhatsApp inbound messages are journaled and acknowledged before CRM or AI work", () => {

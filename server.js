@@ -578,7 +578,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v276-durable-whatsapp-fast-ack";
+const CRM_AYLA_REPLY_BUILD = "v277-inbound-scoped-ai-dedupe";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
@@ -31393,8 +31393,17 @@ function ngDeliveryIdentity({ lead = null, leadId = null, to = "" } = {}) {
 }
 
 function ngBuildDeliveryPurpose({ templateId = null, metadata = {} } = {}) {
+  // Every AI reply is one action for one specific inbound message. Worker retry
+  // names repeat across the whole day (attempt_1, attempt_2, ...), so using the
+  // source as the purpose incorrectly blocks later turns in the conversation.
+  // Scoping to the provider/CRM inbound fingerprint still deduplicates retries
+  // of the same turn while allowing the student's next message to be answered.
+  const aiInboundPurpose = metadata.ai_auto === true && metadata.inbound_message_id
+    ? `ai_auto_reply:${metadata.inbound_message_id}`
+    : "";
   const candidates = [
     metadata.delivery_purpose,
+    aiInboundPurpose,
     metadata.daily_live_session_action,
     metadata.google_meet_action,
     metadata.quick_action,
