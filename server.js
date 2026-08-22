@@ -48887,7 +48887,9 @@ function ngAylaApplyGreetingOnce(reply = "", messages = []) {
   const alreadyGreeted = outbound.some((m) => /\b(hi|hello|hey)\s+doctor\b/i.test(ngMessageText(m))) || outbound.length > 0;
   if (!alreadyGreeted) return text;
   text = text.replace(/^\s*(hi|hello|hey)\s+doctor[,!.، ]*/i, "Doctor, ");
-  text = text.replace(/^\s*(hi|hello|hey)[,!.، ]+/i, "");
+  // Remove the complete salutation, not just the first word. Removing only
+  // "Hi" from "Hi there!" produced the broken live reply "there! How can...".
+  text = text.replace(/^\s*(hi|hello|hey)(?:\s+there)?[,!.، ]+/i, "");
   text = text.replace(/^\s*i hope you are doing well[,!.، ]*doctor[,!.، ]*/i, "Doctor, ");
   text = text.replace(/^\s*doctor,\s*doctor,/i, "Doctor,");
   return text.trim();
@@ -50455,12 +50457,12 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
       ? ngPickAylaMediaAssetsForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(latestInbound || {}), messages, forceFeatureTour: featureTourRequested, requestedAssetKeys: ai.media_asset_keys || [] })
       : [];
     const aylaMediaAsset = aylaMediaAssets[0] || null;
-    const firstMediaCaption = aylaMediaAsset
-      ? (featureTourRequested
-          ? [ai.reply, ngRenderAylaMediaCaption(aylaMediaAsset, { lead, reply: "" })].filter(Boolean).join("\n\n")
-          : ngRenderAylaMediaCaption(aylaMediaAsset, { lead, reply: ai.reply }))
-      : "";
-    const outboundText = featureTourRequested && aylaMediaAsset ? firstMediaCaption : ai.reply;
+    const { firstMediaCaption, outboundText } = ngBuildAylaMediaDeliveryCopy({
+      asset: aylaMediaAsset,
+      lead,
+      reply: ai.reply,
+      featureTourRequested,
+    });
 
     const result = await sendCrmMessage({
       db,
@@ -50703,12 +50705,12 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
       ? ngPickAylaMediaAssetsForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(latestInbound || {}), messages, forceFeatureTour: featureTourRequested, requestedAssetKeys: ai.media_asset_keys || [] })
       : [];
     const aylaMediaAsset = aylaMediaAssets[0] || null;
-    const firstMediaCaption = aylaMediaAsset
-      ? (featureTourRequested
-          ? [ai.reply, ngRenderAylaMediaCaption(aylaMediaAsset, { lead, reply: "" })].filter(Boolean).join("\n\n")
-          : ngRenderAylaMediaCaption(aylaMediaAsset, { lead, reply: ai.reply }))
-      : "";
-    const outboundText = featureTourRequested && aylaMediaAsset ? firstMediaCaption : ai.reply;
+    const { firstMediaCaption, outboundText } = ngBuildAylaMediaDeliveryCopy({
+      asset: aylaMediaAsset,
+      lead,
+      reply: ai.reply,
+      featureTourRequested,
+    });
 
     const sendResult = await sendCrmMessage({
       db,
@@ -51195,12 +51197,12 @@ app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
           ? ngPickAylaMediaAssetsForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(inbound || {}), messages, forceFeatureTour: featureTourRequested, requestedAssetKeys: ai.media_asset_keys || [] })
           : [];
         const aylaMediaAsset = aylaMediaAssets[0] || null;
-        const firstMediaCaption = aylaMediaAsset
-          ? (featureTourRequested
-              ? [ai.reply, ngRenderAylaMediaCaption(aylaMediaAsset, { lead, reply: "" })].filter(Boolean).join("\n\n")
-              : ngRenderAylaMediaCaption(aylaMediaAsset, { lead, reply: ai.reply }))
-          : "";
-        const outboundText = featureTourRequested && aylaMediaAsset ? firstMediaCaption : ai.reply;
+        const { firstMediaCaption, outboundText } = ngBuildAylaMediaDeliveryCopy({
+          asset: aylaMediaAsset,
+          lead,
+          reply: ai.reply,
+          featureTourRequested,
+        });
         const sendResult = await sendCrmMessage({
           db,
           brandId: lead.brand_id || getCrmBrandId(req, db),
@@ -67754,6 +67756,40 @@ function ngRenderAylaMediaCaption(asset = {}, { lead = {}, reply = "" } = {}) {
   return [featureCaption, String(reply || "").trim()].filter(Boolean).join("\n\n");
 }
 
+function ngAylaSafeWhatsAppMediaCaption(value = "", maxChars = 900) {
+  const text = String(value || "").trim();
+  const limit = Math.max(120, Math.min(1024, Number(maxChars || 900)));
+  if (text.length <= limit) return text;
+
+  const candidate = text.slice(0, limit).trim();
+  const sentenceEnds = [...candidate.matchAll(/[.!?](?=\s|$)/g)];
+  const lastSentenceEnd = sentenceEnds.at(-1)?.index;
+  if (Number.isInteger(lastSentenceEnd) && lastSentenceEnd >= Math.floor(limit * 0.55)) {
+    return candidate.slice(0, lastSentenceEnd + 1).trim();
+  }
+
+  const lastSpace = candidate.lastIndexOf(" ");
+  const safe = candidate.slice(0, lastSpace >= Math.floor(limit * 0.55) ? lastSpace : limit).trim();
+  return /[.!?]$/.test(safe) ? safe : `${safe.replace(/[,;:]$/, "")}.`;
+}
+
+function ngBuildAylaMediaDeliveryCopy({ asset = null, lead = {}, reply = "", featureTourRequested = false } = {}) {
+  const cleanReply = String(reply || "").trim();
+  if (!asset) return { firstMediaCaption: "", outboundText: cleanReply };
+
+  const approvedFeatureCaption = ngRenderAylaMediaCaption(asset, { lead, reply: "" });
+  // During the five-card tour the first picture carries the short personalised
+  // introduction plus its approved feature caption. For a single relevant
+  // picture, the AI reply itself is the caption. Appending the approved caption
+  // and the AI reply repeated the same benefit and exceeded WhatsApp's media
+  // caption allowance, which caused a sentence to be cut in production.
+  const caption = featureTourRequested
+    ? [cleanReply, approvedFeatureCaption].filter(Boolean).join("\n\n")
+    : (cleanReply || approvedFeatureCaption);
+  const firstMediaCaption = ngAylaSafeWhatsAppMediaCaption(caption);
+  return { firstMediaCaption, outboundText: firstMediaCaption };
+}
+
 async function ngSendAylaAdditionalMediaAssets({ db = {}, assets = [], lead = {}, brandId = null, to = "", source = "ayla_auto_media", inboundMessageId = "" } = {}) {
   const results = [];
   for (const asset of safeArray(assets).slice(1, 5)) {
@@ -67772,8 +67808,13 @@ async function ngSendAylaAdditionalMediaAssets({ db = {}, assets = [], lead = {}
     });
     ngMarkAylaMediaSent(db, lead, asset, { source: `${source}_feature_media`, result });
     results.push({ asset_id: asset.id, result });
-    await ngAylaSleep(250);
+    // A natural pause also keeps Meta from presenting several media messages
+    // out of order while it is still fetching the previous image.
+    await ngAylaSleep(650);
   }
+  // Plain-text closings are processed faster than remote image media. Give the
+  // final assessment card time to settle before the demo invitation is sent.
+  if (results.length) await ngAylaSleep(3000);
   return results;
 }
 
