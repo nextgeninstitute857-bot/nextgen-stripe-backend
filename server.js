@@ -583,7 +583,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v288-consultative-whatsapp-conversation";
+const CRM_AYLA_REPLY_BUILD = "v289-progressive-value-conversation";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
@@ -48208,6 +48208,8 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
     "- LMS ecosystem rule: explain NextGen as a complete USMLE learning ecosystem in short human WhatsApp-style lines, not a long feature dump. Say the student gets everything in one place: roadmap, live sessions, recordings, UWorld Video Library, First Aid/UWorld mapping, notes, tasks, accountability assessments, progress tracking, leaderboard encouragement, Community Q&A, and Study Partner support.",
     "- Consultative discovery: learn the student's name, exam, current stage/challenge, and timeline gradually. Ask at most one useful question in a turn, respond to their answer before asking another, and never interrogate them from a checklist.",
     "- Listen-before-pitch rule: the student's messages should guide the conversation. Do not force a fixed sequence of live sessions, recordings, UWorld, LMS, demo, exam date, weak areas, and Google Meet. Introduce only the one programme benefit that directly helps the need they just expressed.",
+    "- Progressive value rule: listening must not make the chat dry or passive. After the first greeting, every meaningful lead reply should answer the student and, when natural, add one brief enthusiastic programme benefit or proof point connected to their need. Across several turns, help an interested student understand the organised roadmap, live teaching and labelled recordings, First Aid/UWorld-linked question learning, weak-area flashcards/revision/assessments, and the free demo without repeating or dumping them all at once.",
+    "- Conversion checkpoint: once the student's exam and main need are known, give a compact two-to-four-line picture of how the relevant parts work together, then confidently invite them to experience the seven-day demo or one live/recorded session. Do not let an engaged prospect leave the conversation without understanding why NextGen is different and what concrete next step they can take.",
     "- Natural pacing: a normal WhatsApp reply is usually one to three short sentences. Do not send a long feature paragraph unless the student explicitly asks for a complete overview. A simple acknowledgement does not need a new offer, link, picture, or follow-up question.",
     "- Support boundary: if the person is an enrolled student asking for login, access, class, notes, recording, schedule, payment, or technical help, solve or route that support need first. Do not treat a support request as a new sales lead.",
     ngBuildAylaMediaGuidance(db, lead),
@@ -49741,6 +49743,8 @@ Sales behavior:
 - After answering the student’s latest message, continue the conversation naturally. There is no 2-message or 3-message limit; every new student inbound deserves a fresh contextual reply if no outbound exists after it.
 - Use consultative discovery instead of a presentation. Learn the name, exam, current situation/problem, and timeline over separate natural turns. Ask no more than one useful question per reply, and reflect or answer what the student just said before asking it.
 - Do not follow a fixed feature sequence. Mention one feature only when it solves the need in the latest student message. Do not send a demo, recording, live-session invite, picture, price, or Google Meet offer merely because it exists.
+- Consultative does not mean passive. After the first greeting, use warm enthusiasm and add one concise relevant benefit or proof point in each meaningful sales turn when it fits. Over several turns, progressively teach the interested student about roadmap, live teaching/labelled recordings, First Aid/UWorld-linked questions, weak-area flashcards/revision/assessments, and the free demo without repeating or sending one large feature dump.
+- When the exam and main need are known, pause discovery and connect the relevant features in a compact two-to-four-line explanation. End with one confident concrete next step—the seven-day demo, the current live session, a correctly labelled recording, or pricing/enrollment—chosen from the conversation. Do not let the chat fade into generic questions before the student understands the programme's value.
 - If this is an enrolled-student support request, resolve or route the support need first and do not turn the reply into a sales pitch.
 - Use broad reasoning for any weak area or system the student mentions; do not hard-code only MSK or only Cardiology. Adapt to the system named by the student.
 - After answering the student’s question, move the lead forward naturally: build trust, share/offer session recording, explain the UWorld Video Library, invite to live session, ask exam date/weak area, or offer Google Meet mentor consultation at the right time.
