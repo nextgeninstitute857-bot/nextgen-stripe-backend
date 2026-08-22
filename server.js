@@ -15,6 +15,15 @@ import {
   shadowWriteFlashcardReview,
 } from "./lib/flashcard-postgres.js";
 import { planCrmDeliveryLockRetention } from "./lib/crm-delivery-lock-retention.js";
+import {
+  applyAylaConversationDecision,
+  aylaConversationTextFormat,
+  buildAylaConversationPrompt,
+  buildAylaConversationRepairPrompt,
+  createAylaConversationState,
+  evaluateAylaConversationDecision,
+  normalizeAylaConversationDecision,
+} from "./lib/crm-ayla-conversation-engine.js";
 import { resolveLmsSmtpAuthMethod } from "./lib/email-auth.js";
 import {
   assertWebsiteProductRequest,
@@ -583,7 +592,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v291-qualified-human-handoff";
+const CRM_AYLA_REPLY_BUILD = "v292-structured-conversation-engine";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
@@ -47653,7 +47662,7 @@ function ngTrainingContextForFullAiAuto(db, query = "") {
   const stopWords = new Set(["about", "after", "again", "before", "could", "doctor", "from", "have", "just", "more", "please", "should", "that", "their", "there", "these", "they", "this", "what", "when", "where", "which", "with", "would", "your"]);
   const terms = [...new Set((String(query || "").toLowerCase().match(/[a-z0-9]{3,}/g) || []).filter((term) => !stopWords.has(term)))].slice(0, 24);
   const items = ngReadArray(db, "ai_training_items")
-    .filter((item) => item.active !== false && item.enforce_in_ai !== false)
+    .filter((item) => ngTrainingItemAllowedForAiUse(item) && item.enforce_in_ai !== false)
     .map((item, index) => {
       const title = String(item.title || item.category || item.id || "Approved knowledge");
       const content = String(item.content || item.training_content || "");
@@ -47666,7 +47675,7 @@ function ngTrainingContextForFullAiAuto(db, query = "") {
     .slice(0, 12);
 
   return items
-    .map(({ title, content }) => `## ${title.slice(0, 180)}\n${content.slice(0, 1600)}`)
+    .map(({ title, content }) => `## REFERENCE FACTS: ${title.slice(0, 180)}\n${content.slice(0, 1600)}`)
     .join("\n\n")
     .slice(0, 18000);
 }
@@ -49736,7 +49745,7 @@ async function ngAylaWaitBeforeAutoSend(db = {}, channel = "") {
   return ms;
 }
 
-async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }) {
+async function ngLegacyStudentAutoReply({ db = null, lead, messages, channel }) {
   const cleanMessages = safeArray(messages)
     .filter((m) => ngMessageText(m))
     .slice(-12);
@@ -50000,6 +50009,297 @@ Write only Ayla's next message. No markdown headings. No bullet list unless the 
   };
 }
 
+// v292: one stateful AI conversation engine owns all ordinary CRM dialogue.
+// The legacy phrase router above remains temporarily for rollback inspection, but
+// this is the only generator used by WhatsApp auto-reply call sites. Deterministic
+// code is limited to opt-out and protected handoff mutations; it no longer chooses
+// sales copy or advances the programme journey through keyword checkpoints.
+async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [], channel = "whatsapp" }) {
+  const cleanMessages = safeArray(messages)
+    .filter((message) => ngMessageText(message))
+    .slice(-18);
+  const latestInbound = ngLatestInbound(cleanMessages);
+  const latestInboundText = ngMessageText(latestInbound || {}).trim();
+  if (!latestInboundText) {
+    const error = new Error("AYLA_CONVERSATION_NO_INBOUND: No student message is available.");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const activeMeeting = db ? ngAylaFindActiveGoogleMeetAppointment(db, lead) : null;
+  const hasMeetingState = db ? ngAylaLeadGoogleMeetState(lead, activeMeeting) : false;
+  const collectingMeetingQualification = hasMeetingState && /^collect_google_meet_(?:name|country|exam|concern)$/i.test(String(lead?.next_action || ""));
+  const needsProtectedControl =
+    /\b(stop|unsubscribe|do not message|don't message|dont message|remove me|wrong number|not interested)\b/i.test(latestInboundText) ||
+    ngAylaIsDirectGoogleMeetRequest(latestInboundText) ||
+    collectingMeetingQualification ||
+    (hasMeetingState && ngAylaLooksLikeTimePreference(latestInboundText));
+  const protectedDecision = db && needsProtectedControl
+    ? ngAylaHardSalesRouter({ db, lead, messages: cleanMessages, channel })
+    : null;
+
+  if (protectedDecision?.intent === "stop_suppression") {
+    const stoppedState = createAylaConversationState({ lead, messages: cleanMessages });
+    lead.ayla_conversation_state = {
+      ...stoppedState,
+      stage: "stopped",
+      completed_actions: uniqueList([...(stoppedState.completed_actions || []), "stop"]),
+      last_intent: "opt_out",
+      last_action: "stop",
+      turn_count: Number(stoppedState.turn_count || 0) + 1,
+      updated_at: nowIso(),
+    };
+    return {
+      reply: "Understood. I’ll stop messaging you now.",
+      usage: {},
+      model: "nextgen-ayla-safety-control",
+      safety_control: true,
+      intent: "opt_out",
+      conversation_stage: "stopped",
+    };
+  }
+
+  if (!isAIConfigured()) {
+    const error = new Error("AYLA_AI_NOT_CONFIGURED: OpenAI is required for the stateful CRM conversation engine.");
+    error.statusCode = 503;
+    error.code = "AYLA_AI_NOT_CONFIGURED";
+    throw error;
+  }
+
+  const state = createAylaConversationState({ lead, messages: cleanMessages });
+  const liveSnapshot = await ngAylaLiveLmsSalesGrounding({ structured: true });
+  const historyText = cleanMessages.map((message) => ngMessageText(message)).join("\n");
+  // Training Center material is reference knowledge only in v292. Behavioural
+  // instructions stored in those records cannot override this controller.
+  const approvedKnowledge = db
+    ? ngTrainingContextForFullAiAuto(db, `${latestInboundText}\n${historyText.slice(-3000)}`)
+    : "";
+  const mediaGuidance = db ? ngBuildAylaMediaGuidance(db, lead) : "";
+  const officialExamGuidance = ngAylaOfficialExamGuidancePrompt(latestInboundText, historyText);
+  const protectedActionContext = protectedDecision?.intent
+    ? `The backend already applied protected intent ${protectedDecision.intent}. Continue naturally from the updated lead state. Do not repeat a canned backend reply.`
+    : hasMeetingState
+      ? "A human-handoff or Google Meet state already exists. Continue it without restarting sales discovery."
+      : "None.";
+
+  const systemPrompt = buildAylaConversationPrompt({
+    state,
+    lead,
+    messages: cleanMessages.map((message) => ({
+      role: ngIsOutboundMessage(message) ? "assistant" : "student",
+      text: ngMessageText(message),
+    })),
+    latestMessage: latestInboundText,
+    liveFacts: liveSnapshot.context || "",
+    approvedKnowledge,
+    officialExamGuidance,
+    mediaGuidance,
+    protectedActionContext,
+  });
+
+  const model = process.env.AYLA_MODEL || process.env.AI_MODEL || "gpt-4o-mini";
+  const requestDecision = async (userPrompt) => {
+    const result = await callOpenAIResponsesAPI({
+      model,
+      systemPrompt,
+      userPrompt,
+      maxOutputTokens: 750,
+      textFormat: aylaConversationTextFormat(),
+    });
+    const parsed = parseAIJson(result.text || "{}");
+    return {
+      result,
+      decision: normalizeAylaConversationDecision(parsed, state),
+    };
+  };
+
+  let { result, decision } = await requestDecision("Understand the complete conversation and produce Ayla's next structured decision now.");
+  let violations = evaluateAylaConversationDecision({
+    decision,
+    state,
+    messages: cleanMessages.map((message) => ({
+      role: ngIsOutboundMessage(message) ? "assistant" : "student",
+      text: ngMessageText(message),
+    })),
+  });
+
+  if (violations.length) {
+    const repaired = await requestDecision(buildAylaConversationRepairPrompt({ violations, priorDecision: decision, state }));
+    result = repaired.result;
+    decision = repaired.decision;
+    violations = evaluateAylaConversationDecision({
+      decision,
+      state,
+      messages: cleanMessages.map((message) => ({
+        role: ngIsOutboundMessage(message) ? "assistant" : "student",
+        text: ngMessageText(message),
+      })),
+    });
+  }
+
+  if (violations.length) {
+    const error = new Error(`AYLA_CONVERSATION_QUALITY_REJECTED: ${violations.join(", ")}`);
+    error.statusCode = 502;
+    error.code = "AYLA_CONVERSATION_QUALITY_REJECTED";
+    throw error;
+  }
+
+  if (decision.action === "begin_human_handoff" && db && !lead.google_meet_requested) {
+    ngAylaCreateGoogleMeetRequest(db, lead, "ai_conversation_handoff", latestInboundText, cleanMessages);
+    const handoffField = ngAylaNextHandoffQualificationField(ngAylaHumanHandoffContext(lead, cleanMessages));
+    lead.next_action = handoffField ? `collect_google_meet_${handoffField}` : "collect_google_meet_time";
+  }
+
+  const nextState = applyAylaConversationDecision({
+    state,
+    decision,
+    responseId: result.response_id || null,
+    now: nowIso(),
+  });
+
+  const featureTourRequested = channel === "whatsapp" && decision.action === "send_feature_tour";
+  return {
+    reply: ngAylaApplyGreetingOnce(ngCleanAylaStudentReply(decision.reply), cleanMessages),
+    follow_up: decision.follow_up ? ngCleanAylaStudentReply(decision.follow_up) : null,
+    usage: result.usage || {},
+    model: result.model || model,
+    response_id: result.response_id || null,
+    intent: decision.intent,
+    action: decision.action,
+    ask_field: decision.ask_field,
+    media_asset_keys: decision.media_keys,
+    feature_tour_requested: featureTourRequested,
+    live_lms_sales_snapshot: liveSnapshot,
+    conversation_stage: nextState.stage,
+    conversation_state: nextState,
+    conversation_engine: CRM_AYLA_REPLY_BUILD,
+  };
+}
+
+function ngAylaCommitConversationTurnAfterDelivery({ lead = {}, ai = {}, sendResults = [] } = {}) {
+  const results = safeArray(sendResults).filter(Boolean);
+  const delivered = results.length > 0 && results.every((result) => ngAylaDeliveryActuallySent(result));
+  if (!delivered || !ai.conversation_state) return false;
+
+  const nextState = ai.conversation_state;
+  lead.ayla_conversation_state = nextState;
+  lead.ayla_conversation_engine = CRM_AYLA_REPLY_BUILD;
+  lead.ayla_conversation_stage = nextState.stage;
+  lead.ayla_last_conversation_intent = ai.intent || nextState.last_intent || null;
+  if (!lead.exam && nextState.facts?.exam && nextState.facts.exam !== "unknown") lead.exam = nextState.facts.exam;
+  if (!lead.exam_type && nextState.facts?.exam && nextState.facts.exam !== "unknown") lead.exam_type = nextState.facts.exam;
+  if (!lead.main_need && nextState.facts?.main_need) lead.main_need = nextState.facts.main_need;
+  if (!lead.country && nextState.facts?.country) lead.country = nextState.facts.country;
+  const currentName = String(lead.full_name || lead.name || lead.contact_name || "").trim();
+  if ((!currentName || /^(?:doctor|doc|student|lead|unknown|whatsapp user)$/i.test(currentName) || /^\+?[\d\s().-]+$/.test(currentName)) && nextState.facts?.name) {
+    lead.name = nextState.facts.name;
+    lead.full_name = lead.full_name || nextState.facts.name;
+  }
+  lead.updated_at = nowIso();
+  return true;
+}
+
+// Admin-only, no-send conversation evaluation. It exercises the same live AI,
+// approved knowledge and LMS grounding as WhatsApp, but keeps its lead/messages
+// in memory and never writes CRM/LMS data or contacts a student.
+app.post("/admin/crm/ayla-conversation/simulate", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const turns = safeArray(req.body?.turns)
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+      .slice(0, 12);
+    if (!turns.length) return res.status(400).json({ success: false, error: "Provide at least one student turn" });
+
+    const sourceDb = await readCrmDb();
+    const simDb = {
+      ...sourceDb,
+      leads: [],
+      conversations: [],
+      crm_message_logs: [],
+      message_logs: [],
+      inbound_messages: [],
+      outbound_messages: [],
+      appointments: [],
+      handoffs: [],
+      call_queue: [],
+      hot_call_queue: [],
+      tasks: [],
+      support_tickets: [],
+      ticket_messages: [],
+      ai_auto_runs: [],
+      ai_actions: [],
+      agent_logs: [],
+      action_logs: [],
+      media_send_events: [],
+    };
+    const lead = {
+      id: `ayla-simulation-${uuid()}`,
+      brand_id: req.body?.brand_id || sourceDb.settings?.default_brand_id || null,
+      status: "new_lead",
+      source: "admin_no_send_simulation",
+      ...(req.body?.lead && typeof req.body.lead === "object" ? req.body.lead : {}),
+    };
+    const messages = [];
+    const transcript = [];
+
+    for (let index = 0; index < turns.length; index += 1) {
+      const inbound = {
+        id: `sim-in-${index + 1}`,
+        direction: "inbound",
+        channel: "whatsapp",
+        text: turns[index],
+        created_at: new Date(Date.now() + index * 2000).toISOString(),
+      };
+      messages.push(inbound);
+      transcript.push({ role: "student", text: turns[index] });
+      const ai = await ngGenerateStudentAutoReply({ db: simDb, lead, messages, channel: "whatsapp" });
+      // The simulator has no provider delivery by design. Advance only its
+      // isolated in-memory state so later simulated turns see the same memory.
+      lead.ayla_conversation_state = ai.conversation_state;
+      const outbound = {
+        id: `sim-out-${index + 1}`,
+        direction: "outbound",
+        channel: "whatsapp",
+        text: ai.reply,
+        created_at: new Date(Date.now() + index * 2000 + 1000).toISOString(),
+      };
+      messages.push(outbound);
+      transcript.push({
+        role: "ayla",
+        text: ai.reply,
+        follow_up: ai.follow_up || null,
+        action: ai.action || "reply_only",
+        stage: ai.conversation_stage || null,
+        ask_field: ai.ask_field || "none",
+        media_keys: ai.media_asset_keys || [],
+        intent: ai.intent || null,
+      });
+      if (ai.follow_up) {
+        messages.push({
+          id: `sim-follow-up-${index + 1}`,
+          direction: "outbound",
+          channel: "whatsapp",
+          text: ai.follow_up,
+          created_at: new Date(Date.now() + index * 2000 + 1200).toISOString(),
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      no_send: true,
+      persisted: false,
+      contacted_student: false,
+      engine: CRM_AYLA_REPLY_BUILD,
+      transcript,
+      final_state: lead.ayla_conversation_state || null,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message, code: error.code || null });
+  }
+});
+
 app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
   let aiAutoLockKey = null;
 
@@ -50127,11 +50427,9 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
       message: latestInbound,
       to: req.body?.to || req.body?.recipient || "",
     });
-    const featureTourRequested = channel === "whatsapp" && Boolean(
-      ai.feature_tour_requested || ngAylaIsFullFeatureOverviewRequest(ngMessageText(latestInbound || {}))
-    );
+    const featureTourRequested = channel === "whatsapp" && Boolean(ai.feature_tour_requested);
     const aylaMediaAssets = channel === "whatsapp"
-      ? ngPickAylaMediaAssetsForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(latestInbound || {}), messages, forceFeatureTour: featureTourRequested })
+      ? ngPickAylaMediaAssetsForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(latestInbound || {}), messages, forceFeatureTour: featureTourRequested, requestedAssetKeys: ai.media_asset_keys || [] })
       : [];
     const aylaMediaAsset = aylaMediaAssets[0] || null;
     const firstMediaCaption = aylaMediaAsset
@@ -50165,13 +50463,17 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
         ayla_media_usage_area: aylaMediaAsset?.usage_area || null,
       },
     });
+    const conversationSendResults = [result];
     if (aylaMediaAsset) ngMarkAylaMediaSent(db, lead, aylaMediaAsset, { source: "full_ai_auto", result });
     if (result?.success !== false && aylaMediaAssets.length > 1) {
-      await ngSendAylaAdditionalMediaAssets({ db, assets: aylaMediaAssets, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "full_ai_auto", inboundMessageId: ngAiAutoMessageFingerprint(latestInbound) });
+      const extraMediaResults = await ngSendAylaAdditionalMediaAssets({ db, assets: aylaMediaAssets, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "full_ai_auto", inboundMessageId: ngAiAutoMessageFingerprint(latestInbound) });
+      conversationSendResults.push(...extraMediaResults.map((item) => item.result).filter(Boolean));
     }
     if (result?.success !== false && featureTourRequested) {
-      await ngSendAylaFeatureOverviewClosingMessage({ db, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "full_ai_auto", inboundMessageId: ngAiAutoMessageFingerprint(latestInbound), liveSnapshot: ai.live_lms_sales_snapshot || {} });
+      const closingResult = await ngSendAylaFeatureOverviewClosingMessage({ db, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "full_ai_auto", inboundMessageId: ngAiAutoMessageFingerprint(latestInbound), liveSnapshot: ai.live_lms_sales_snapshot || {}, closingText: ai.follow_up || "" });
+      conversationSendResults.push(closingResult);
     }
+    ngAylaCommitConversationTurnAfterDelivery({ lead, ai, sendResults: conversationSendResults });
 
     const adminAlert = await ngAylaMaybeSendConversationAdminAlert({
       db,
@@ -50373,11 +50675,9 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
     const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel });
     const replyDelayMs = await ngAylaWaitBeforeAutoSend(db, channel);
     const to = getBestRecipientForChannel({ channel, lead, message: latestInbound });
-    const featureTourRequested = channel === "whatsapp" && Boolean(
-      ai.feature_tour_requested || ngAylaIsFullFeatureOverviewRequest(ngMessageText(latestInbound || {}))
-    );
+    const featureTourRequested = channel === "whatsapp" && Boolean(ai.feature_tour_requested);
     const aylaMediaAssets = channel === "whatsapp"
-      ? ngPickAylaMediaAssetsForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(latestInbound || {}), messages, forceFeatureTour: featureTourRequested })
+      ? ngPickAylaMediaAssetsForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(latestInbound || {}), messages, forceFeatureTour: featureTourRequested, requestedAssetKeys: ai.media_asset_keys || [] })
       : [];
     const aylaMediaAsset = aylaMediaAssets[0] || null;
     const firstMediaCaption = aylaMediaAsset
@@ -50408,13 +50708,17 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
       },
     });
 
+    const conversationSendResults = [sendResult];
     if (aylaMediaAsset) ngMarkAylaMediaSent(db, lead, aylaMediaAsset, { source, result: sendResult });
     if (sendResult?.success !== false && aylaMediaAssets.length > 1) {
-      await ngSendAylaAdditionalMediaAssets({ db, assets: aylaMediaAssets, lead, brandId: lead.brand_id || brandId || null, to, source, inboundMessageId: inboundFingerprint });
+      const extraMediaResults = await ngSendAylaAdditionalMediaAssets({ db, assets: aylaMediaAssets, lead, brandId: lead.brand_id || brandId || null, to, source, inboundMessageId: inboundFingerprint });
+      conversationSendResults.push(...extraMediaResults.map((item) => item.result).filter(Boolean));
     }
     if (sendResult?.success !== false && featureTourRequested) {
-      await ngSendAylaFeatureOverviewClosingMessage({ db, lead, brandId: lead.brand_id || brandId || null, to, source, inboundMessageId: inboundFingerprint, liveSnapshot: ai.live_lms_sales_snapshot || {} });
+      const closingResult = await ngSendAylaFeatureOverviewClosingMessage({ db, lead, brandId: lead.brand_id || brandId || null, to, source, inboundMessageId: inboundFingerprint, liveSnapshot: ai.live_lms_sales_snapshot || {}, closingText: ai.follow_up || "" });
+      conversationSendResults.push(closingResult);
     }
+    ngAylaCommitConversationTurnAfterDelivery({ lead, ai, sendResults: conversationSendResults });
 
     const adminAlert = await ngAylaMaybeSendConversationAdminAlert({
       db,
@@ -50863,11 +51167,9 @@ app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
       try {
         const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel });
         const to = getBestRecipientForChannel({ channel, lead, message: inbound });
-        const featureTourRequested = channel === "whatsapp" && Boolean(
-          ai.feature_tour_requested || ngAylaIsFullFeatureOverviewRequest(ngMessageText(inbound || {}))
-        );
+        const featureTourRequested = channel === "whatsapp" && Boolean(ai.feature_tour_requested);
         const aylaMediaAssets = channel === "whatsapp"
-          ? ngPickAylaMediaAssetsForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(inbound || {}), messages, forceFeatureTour: featureTourRequested })
+          ? ngPickAylaMediaAssetsForReply(db, { lead, reply: ai.reply, latestInboundText: ngMessageText(inbound || {}), messages, forceFeatureTour: featureTourRequested, requestedAssetKeys: ai.media_asset_keys || [] })
           : [];
         const aylaMediaAsset = aylaMediaAssets[0] || null;
         const firstMediaCaption = aylaMediaAsset
@@ -50889,13 +51191,17 @@ app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
           caption: firstMediaCaption,
           metadata: { source: "process_ai_auto", ai_auto: true, triggered_by: user.id, latest_inbound_id: inbound.id || null, ayla_media_asset_id: aylaMediaAsset?.id || null, ayla_media_usage_area: aylaMediaAsset?.usage_area || null }
         });
+        const conversationSendResults = [sendResult];
         if (aylaMediaAsset) ngMarkAylaMediaSent(db, lead, aylaMediaAsset, { source: "process_ai_auto", result: sendResult });
         if (sendResult?.success !== false && aylaMediaAssets.length > 1) {
-          await ngSendAylaAdditionalMediaAssets({ db, assets: aylaMediaAssets, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "process_ai_auto", inboundMessageId: ngAiAutoMessageFingerprint(inbound) });
+          const extraMediaResults = await ngSendAylaAdditionalMediaAssets({ db, assets: aylaMediaAssets, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "process_ai_auto", inboundMessageId: ngAiAutoMessageFingerprint(inbound) });
+          conversationSendResults.push(...extraMediaResults.map((item) => item.result).filter(Boolean));
         }
         if (sendResult?.success !== false && featureTourRequested) {
-          await ngSendAylaFeatureOverviewClosingMessage({ db, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "process_ai_auto", inboundMessageId: ngAiAutoMessageFingerprint(inbound), liveSnapshot: ai.live_lms_sales_snapshot || {} });
+          const closingResult = await ngSendAylaFeatureOverviewClosingMessage({ db, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "process_ai_auto", inboundMessageId: ngAiAutoMessageFingerprint(inbound), liveSnapshot: ai.live_lms_sales_snapshot || {}, closingText: ai.follow_up || "" });
+          conversationSendResults.push(closingResult);
         }
+        ngAylaCommitConversationTurnAfterDelivery({ lead, ai, sendResults: conversationSendResults });
         const adminAlert = await ngAylaMaybeSendConversationAdminAlert({
           db,
           lead,
@@ -67373,9 +67679,20 @@ function ngAylaShouldPresentInterestedLeadTour({ lead = {}, messages = [], lates
   return examKnown && needKnown && !positiveAnswerToSpecificOffer;
 }
 
-function ngPickAylaMediaAssetsForReply(db = {}, { lead = {}, reply = "", latestInboundText = "", messages = [], forceFeatureTour = false } = {}) {
+function ngPickAylaMediaAssetsForReply(db = {}, { lead = {}, reply = "", latestInboundText = "", messages = [], forceFeatureTour = false, requestedAssetKeys = [] } = {}) {
+  const assets = ngAylaMediaEligibleAssets(db, lead?.brand_id || null);
+  const assetIdByKey = {
+    dashboard: "nextgen-real-lms-dashboard",
+    recordings: "nextgen-real-lms-recordings",
+    session_notes: "nextgen-real-lms-session-notes",
+    flashcards: "nextgen-real-lms-flashcards",
+    assessments: "nextgen-real-lms-assessments",
+  };
+  const explicitlyRequested = uniqueList(safeArray(requestedAssetKeys))
+    .map((key) => assets.find((asset) => asset.id === assetIdByKey[String(key || "").trim()]))
+    .filter(Boolean);
+  if (explicitlyRequested.length) return explicitlyRequested;
   if (forceFeatureTour || ngAylaIsFullFeatureOverviewRequest(latestInboundText)) {
-    const assets = ngAylaMediaEligibleAssets(db, lead?.brand_id || null);
     const orderedIds = ["nextgen-real-lms-dashboard", "nextgen-real-lms-recordings", "nextgen-real-lms-session-notes", "nextgen-real-lms-flashcards", "nextgen-real-lms-assessments"];
     return orderedIds.map((id) => assets.find((asset) => asset.id === id)).filter(Boolean);
   }
@@ -67385,7 +67702,6 @@ function ngPickAylaMediaAssetsForReply(db = {}, { lead = {}, reply = "", latestI
   // Media must answer the current turn. Older conversation text can contain a stale
   // feature keyword and must not cause an unrelated image to be sent now.
   const text = latestInboundText;
-  const assets = ngAylaMediaEligibleAssets(db, lead?.brand_id || null);
   const scored = assets
     .map((asset) => ({ asset, usage: ngNormalizeMediaUsageKey(asset.usage_area || "general"), score: ngMediaTextMatchScore(text, asset) }))
     .filter((x) => x.score >= 5)
@@ -67394,8 +67710,8 @@ function ngPickAylaMediaAssetsForReply(db = {}, { lead = {}, reply = "", latestI
   return scored[0]?.asset ? [scored[0].asset] : [];
 }
 
-function ngPickAylaMediaAssetForReply(db = {}, { lead = {}, reply = "", latestInboundText = "", messages = [], forceFeatureTour = false } = {}) {
-  return ngPickAylaMediaAssetsForReply(db, { lead, reply, latestInboundText, messages, forceFeatureTour })[0] || null;
+function ngPickAylaMediaAssetForReply(db = {}, { lead = {}, reply = "", latestInboundText = "", messages = [], forceFeatureTour = false, requestedAssetKeys = [] } = {}) {
+  return ngPickAylaMediaAssetsForReply(db, { lead, reply, latestInboundText, messages, forceFeatureTour, requestedAssetKeys })[0] || null;
 }
 
 function ngRenderAylaMediaCaption(asset = {}, { lead = {}, reply = "" } = {}) {
@@ -67448,8 +67764,8 @@ function ngAylaFeatureOverviewClosingText(db = {}, liveSnapshot = {}) {
   return `${cycleText}\n\nPlease take our ${demoDays}-day demo and see the organisation and teaching quality for yourself:\nhttps://nextgenusmle.live/demo\n\nAttend live whenever you can. If you are busy, watch the matching labelled recording when you are free—both stay connected to the same roadmap.`;
 }
 
-async function ngSendAylaFeatureOverviewClosingMessage({ db = {}, lead = {}, brandId = null, to = "", source = "ayla_auto_media", inboundMessageId = "", liveSnapshot = {} } = {}) {
-  const text = ngAylaFeatureOverviewClosingText(db, liveSnapshot);
+async function ngSendAylaFeatureOverviewClosingMessage({ db = {}, lead = {}, brandId = null, to = "", source = "ayla_auto_media", inboundMessageId = "", liveSnapshot = {}, closingText = "" } = {}) {
+  const text = String(closingText || "").trim() || ngAylaFeatureOverviewClosingText(db, liveSnapshot);
   const result = await sendCrmMessage({
     db, brandId, channel: "whatsapp", to, text, leadId: lead.id || null,
     metadata: {

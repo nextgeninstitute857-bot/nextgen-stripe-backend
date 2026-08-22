@@ -10,7 +10,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v291-qualified-human-handoff"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v292-structured-conversation-engine"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: "message_status"/);
   assert.match(handler, /event: "ignored_non_message"/);
@@ -25,35 +25,17 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
 });
 
 test("bare WhatsApp greetings stay conversational before the sales sequence", () => {
-  const signals = server.slice(
-    server.indexOf("function ngAylaLatestMessageSignals"),
-    server.indexOf("function ngBuildAylaBackendSalesBrain"),
-  );
-  const salesBrain = server.slice(
-    server.indexOf("function ngBuildAylaBackendSalesBrain"),
-    server.indexOf("function ngBuildAylaCommandContext"),
-  );
   const replyPrompt = server.slice(
     server.indexOf("async function ngGenerateStudentAutoReply"),
     server.indexOf('app.post("/admin/crm/conversations/:leadId/ai-auto-send"'),
   );
 
-  assert.match(signals, /bareGreeting/);
-  assert.match(signals, /bare_greeting: bareGreeting/);
-  assert.match(signals, /short_reply: shortReply/);
-  assert.match(salesBrain, /BARE GREETING TURN/);
-  assert.match(salesBrain, /Do not pitch the LMS, demo, live session, recording, UWorld library, Google Meet, pricing/);
-  assert.match(replyPrompt, /Do not begin the sales sequence/);
-  assert.match(replyPrompt, /Do not say "Thank you, Doctor" in response to a bare hello/);
-  assert.match(replyPrompt, /const hasPriorAylaReply = cleanMessages\.some/);
-  assert.match(replyPrompt, /if \(latestSignals\.bare_greeting\)/);
-  assert.match(replyPrompt, /If an existing student says hello again/);
-  assert.match(replyPrompt, /intent: "natural_bare_greeting"/);
-  assert.match(replyPrompt, /Do not mention or pitch any programme, LMS, demo, live session, recording, UWorld, Google Meet, price, feature, or offer/);
-  assert.ok(
-    replyPrompt.indexOf("if (latestSignals.bare_greeting)") < replyPrompt.indexOf("const backendSalesBrain"),
-    "the greeting-only AI turn must run before the sales brain is constructed",
-  );
+  assert.match(replyPrompt, /createAylaConversationState/);
+  assert.match(replyPrompt, /buildAylaConversationPrompt/);
+  assert.match(replyPrompt, /normalizeAylaConversationDecision/);
+  assert.match(replyPrompt, /evaluateAylaConversationDecision/);
+  assert.doesNotMatch(replyPrompt, /if \(latestSignals\.bare_greeting\)/);
+  assert.doesNotMatch(replyPrompt, /const confirmsInterest/);
 });
 
 test("greetings and ordinary acknowledgements cannot trigger LMS media without an interested-lead checkpoint", () => {
@@ -85,37 +67,18 @@ test("greetings and ordinary acknowledgements cannot trigger LMS media without a
 });
 
 test("Ayla uses natural discovery and then confidently presents the connected programme", () => {
-  const salesBrain = server.slice(
-    server.indexOf("function ngBuildAylaBackendSalesBrain"),
-    server.indexOf("function ngBuildAylaCommandContext"),
-  );
   const generator = server.slice(
     server.indexOf("async function ngGenerateStudentAutoReply"),
     server.indexOf('app.post("/admin/crm/conversations/:leadId/ai-auto-send"'),
   );
 
-  assert.match(salesBrain, /Consultative discovery/);
-  assert.match(salesBrain, /Ask at most one useful question in a turn/);
-  assert.match(salesBrain, /Listen-before-pitch rule/);
-  assert.match(salesBrain, /stop asking permission and give the connected programme tour immediately/);
-  assert.match(salesBrain, /Progressive value rule/);
-  assert.match(salesBrain, /listening must not make the chat dry or passive/);
-  assert.match(salesBrain, /Conversion checkpoint/);
-  assert.match(salesBrain, /Do not let an engaged prospect leave the conversation without understanding why NextGen is different/);
-  assert.match(salesBrain, /Interested-lead programme-tour rule/);
-  assert.match(salesBrain, /Do not ask 'Would you like to know more\?' again/);
-  assert.match(salesBrain, /baseline diagnostic plus visible weak areas/);
-  assert.match(salesBrain, /Support boundary/);
-  assert.doesNotMatch(salesBrain, /Early value sequence/);
-  assert.match(generator, /normally 1-3 short sentences/);
-  assert.match(generator, /Use consultative discovery before the programme-tour checkpoint/);
-  assert.match(generator, /Messaging this admissions number is already evidence of interest/);
-  assert.match(generator, /Never keep asking “Would you like to learn more\?”/);
-  assert.match(generator, /Consultative does not mean passive/);
-  assert.match(generator, /separate feature pictures and captions/);
-  assert.match(generator, /PROGRAMME-TOUR CHECKPOINT FOR THIS TURN/);
-  assert.match(generator, /feature_tour_requested: featureTourRequested/);
-  assert.match(generator, /acknowledge briefly without sending a new asset/);
+  assert.match(generator, /textFormat: aylaConversationTextFormat\(\)/);
+  assert.match(generator, /decision: normalizeAylaConversationDecision/);
+  assert.match(generator, /evaluateAylaConversationDecision/);
+  assert.match(generator, /buildAylaConversationRepairPrompt/);
+  assert.match(generator, /decision\.action === "send_feature_tour"/);
+  assert.match(generator, /lead\.ayla_conversation_state = nextState/);
+  assert.match(generator, /media_asset_keys: decision\.media_keys/);
   assert.match(generator, /process\.env\.AYLA_MODEL \|\| process\.env\.AI_MODEL \|\| "gpt-4o-mini"/);
 });
 
@@ -306,10 +269,6 @@ test("Ayla grounds current cohort and pricing answers in the live LMS", () => {
     server.indexOf("async function ngAylaLiveLmsSalesGrounding"),
     server.indexOf("function ngAylaRecordingTitle"),
   );
-  const salesBrain = server.slice(
-    server.indexOf("function ngBuildAylaBackendSalesBrain"),
-    server.indexOf("function ngBuildAylaCommandContext"),
-  );
   const replyPrompt = server.slice(
     server.indexOf("async function ngGenerateStudentAutoReply"),
     server.indexOf('app.post("/admin/crm/conversations/:leadId/ai-auto-send"'),
@@ -326,14 +285,11 @@ test("Ayla grounds current cohort and pricing answers in the live LMS", () => {
   assert.match(grounding, /When sharing it, always state this exact title before the link/);
   assert.match(grounding, /live_session:/);
   assert.match(grounding, /latest_recording:/);
-  assert.match(salesBrain, /give the exact active public plan names and USD prices/);
-  assert.match(replyPrompt, /const liveLmsSalesSnapshot = await ngAylaLiveLmsSalesGrounding\(\{ structured: true \}\)/);
-  assert.match(replyPrompt, /Never invent packages or hide public prices behind a Google Meet/);
-  assert.match(replyPrompt, /Never send a raw or generic recording link/);
-  assert.match(replyPrompt, /Never send a raw or generic live-session link/);
-  assert.match(replyPrompt, /Do not omit Dermatology/);
-  assert.match(replyPrompt, /Do not invent a different system count/);
-  assert.match(replyPrompt, /\$\{liveLmsSalesGrounding\}/);
+  assert.match(replyPrompt, /const liveSnapshot = await ngAylaLiveLmsSalesGrounding\(\{ structured: true \}\)/);
+  assert.match(replyPrompt, /liveFacts: liveSnapshot\.context/);
+  assert.match(replyPrompt, /officialExamGuidance/);
+  assert.match(replyPrompt, /approvedKnowledge/);
+  assert.match(replyPrompt, /mediaGuidance/);
 });
 
 test("Ayla explains weak-area adaptation and sends only safe public LMS previews", () => {
@@ -425,7 +381,9 @@ test("human handoff follows programme value and sends admins a qualified meeting
   assert.match(router, /ngAylaCaptureHandoffQualificationReply/);
   assert.match(router, /ngAylaCreateGoogleMeetAppointmentFromPreference\(db, lead, timePreference, latestText, cleanMessages\)/);
   assert.match(generator, /collectingMeetingQualification/);
-  assert.match(generator, /Current human-handoff readiness/);
+  assert.match(generator, /decision\.action === "begin_human_handoff"/);
+  assert.match(generator, /ngAylaNextHandoffQualificationField/);
+  assert.match(generator, /protectedActionContext/);
   assert.match(alerts, /GOOGLE MEET HANDOFF BOOKED/);
   assert.match(alerts, /Country\/place:/);
   assert.match(alerts, /Main reason for meeting:/);
@@ -465,16 +423,19 @@ test("Ayla retrieves compact relevant approved training without duplicating the 
   );
   const generator = server.slice(
     server.indexOf("async function ngGenerateStudentAutoReply"),
-    server.indexOf("const latestSignals"),
+    server.indexOf("const mediaGuidance", server.indexOf("async function ngGenerateStudentAutoReply")),
   );
 
+  assert.match(training, /ngTrainingItemAllowedForAiUse/);
   assert.match(training, /b\.score - a\.score/);
   assert.match(training, /\.slice\(0, 12\)/);
   assert.match(training, /content\.slice\(0, 1600\)/);
   assert.match(training, /\.slice\(0, 18000\)/);
-  assert.match(generator, /ngTrainingContextForFullAiAuto\(db, `\$\{latestInboundTextForRouting\}/);
-  assert.match(generator, /includeBackendSalesBrain: false/);
-  assert.match(server, /includeBackendSalesBrain \? ngBuildAylaBackendSalesBrain/);
+  assert.match(training, /REFERENCE FACTS/);
+  assert.match(generator, /ngTrainingContextForFullAiAuto\(db, `\$\{latestInboundText\}/);
+  assert.match(generator, /Training Center material is reference knowledge only/);
+  assert.doesNotMatch(generator, /ngBuildAylaBackendSalesBrain/);
+  assert.doesNotMatch(generator, /ngBuildAylaCommandContext/);
 });
 
 test("WhatsApp sales replies stay fast and end with a concrete contextual next step", () => {
@@ -489,11 +450,11 @@ test("WhatsApp sales replies stay fast and end with a concrete contextual next s
 
   assert.match(pacing, /normalizeSocialPlatform\(channel\) === "whatsapp"/);
   assert.match(pacing, /Math\.min\(configuredMs, 1200\)/);
-  assert.match(generator, /When a student hesitates after opening the demo or choosing a plan/);
-  assert.match(generator, /one concrete next action that matches the conversation/);
-  assert.match(generator, /Do not restart discovery, resend the demo/);
-  assert.match(generator, /never invent testimonials/);
-  assert.match(generator, /maxOutputTokens: featureTourRequested \? 220 : 140/);
+  assert.match(generator, /maxOutputTokens: 750/);
+  assert.match(generator, /textFormat: aylaConversationTextFormat\(\)/);
+  assert.match(generator, /if \(violations\.length\)/);
+  assert.match(generator, /AYLA_CONVERSATION_QUALITY_REJECTED/);
+  assert.match(generator, /follow_up: decision\.follow_up/);
 });
 
 test("quiet sales conversations receive one short follow-up after four to five hours", () => {
@@ -567,4 +528,29 @@ test("WhatsApp runtime sends prefer the saved CRM integration credentials", () =
   assert.match(sender, /resolveWhatsAppCloudConfig\(\{ db, integration \}\)/);
   assert.match(sender, /ngClearWhatsAppProviderBlock\(\)/);
   assert.match(server, /caption: resolvedCaption,[\s\S]*?db,[\s\S]*?integration,/);
+});
+
+test("admin Ayla simulation uses the real conversation engine without sending or persisting", () => {
+  const start = server.indexOf('app.post("/admin/crm/ayla-conversation/simulate"');
+  const end = server.indexOf('app.post("/admin/crm/conversations/:leadId/ai-auto-send"', start);
+  assert.ok(start > 0 && end > start);
+  const route = server.slice(start, end);
+  assert.match(route, /await ngGenerateStudentAutoReply/);
+  assert.match(route, /no_send: true/);
+  assert.match(route, /persisted: false/);
+  assert.doesNotMatch(route, /sendCrmMessage\s*\(/);
+  assert.doesNotMatch(route, /writeCrmDb\s*\(/);
+});
+
+test("Ayla conversation memory commits only after every dispatched part is accepted", () => {
+  const helper = server.slice(
+    server.indexOf("function ngAylaCommitConversationTurnAfterDelivery"),
+    server.indexOf("// Admin-only, no-send conversation evaluation"),
+  );
+  assert.match(helper, /results\.every\(\(result\) => ngAylaDeliveryActuallySent\(result\)\)/);
+  assert.match(helper, /if \(!delivered \|\| !ai\.conversation_state\) return false/);
+  assert.match(helper, /lead\.ayla_conversation_state = nextState/);
+  assert.match(server, /conversationSendResults\.push\(\.\.\.extraMediaResults/);
+  assert.match(server, /conversationSendResults\.push\(closingResult\)/);
+  assert.match(server, /ngAylaCommitConversationTurnAfterDelivery\(\{ lead, ai, sendResults: conversationSendResults \}\)/);
 });
