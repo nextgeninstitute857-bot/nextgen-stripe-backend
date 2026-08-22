@@ -67061,7 +67061,13 @@ async function ngSendAylaAdditionalMediaAssets({ db = {}, assets = [], lead = {}
     const result = await sendCrmMessage({
       db, brandId, channel: "whatsapp", to, text: caption, leadId: lead.id || null,
       mediaUrl: asset.public_url || asset.relative_url || "", mediaId: asset.whatsapp_media_id || "", mediaType: asset.asset_type || "image", caption,
-      metadata: { source: `${source}_feature_media`, ai_auto: true, ayla_media_asset_id: asset.id || null, ayla_media_usage_area: asset.usage_area || null },
+      metadata: {
+        source: `${source}_feature_media`,
+        delivery_purpose: `${source}_feature_media_${asset.id || asset.usage_area || "card"}`,
+        ai_auto: true,
+        ayla_media_asset_id: asset.id || null,
+        ayla_media_usage_area: asset.usage_area || null,
+      },
     });
     ngMarkAylaMediaSent(db, lead, asset, { source: `${source}_feature_media`, result });
     results.push({ asset_id: asset.id, result });
