@@ -80,6 +80,8 @@ test("Ayla uses natural discovery and then confidently presents the connected pr
   assert.match(generator, /lead\.ayla_conversation_state = nextState/);
   assert.match(generator, /media_asset_keys: decision\.media_keys/);
   assert.match(generator, /process\.env\.AYLA_MODEL \|\| process\.env\.AI_MODEL \|\| "gpt-4o-mini"/);
+  assert.match(generator, /safeJsonParseFromAI\(result\.text \|\| "\{\}"\)/);
+  assert.doesNotMatch(generator, /parseAIJson/);
 });
 
 test("a positive interested reply triggers the tour only after context is known", () => {
