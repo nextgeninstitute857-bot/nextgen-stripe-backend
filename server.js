@@ -578,7 +578,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v277-inbound-scoped-ai-dedupe";
+const CRM_AYLA_REPLY_BUILD = "v278-exact-conversation-ownership";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
@@ -47674,18 +47674,29 @@ function ngLeadConversationMessages(db, leadId) {
     .filter(Boolean);
 
   const sameLead = (item = {}) => {
-    const itemLeadIds = [
+    // A provider phone number is useful for attaching legacy messages that were saved
+    // before CRM lead IDs were added. It must never override an explicit owner, though.
+    // Duplicate CRM profiles can legitimately share the same WhatsApp number; allowing
+    // the phone fallback in that case makes the old profile answer the new profile's
+    // inbound message with stale names and context.
+    const explicitLeadIds = [
       item.lead_id,
       item.leadId,
       item.lead,
       item.contact_id,
       item.contactId,
       item.crm_lead_id,
-      item.conversation_id,
       item.thread_lead_id,
-    ].map((value) => String(value || ""));
+    ]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
 
-    if (itemLeadIds.includes(id)) return true;
+    if (explicitLeadIds.length) return explicitLeadIds.includes(id);
+
+    // Some older conversation records used conversation_id as the lead ID, while
+    // newer providers use an unrelated thread ID. Accept an exact match but otherwise
+    // leave the record eligible for the legacy phone fallback below.
+    if (String(item.conversation_id || "").trim() === id) return true;
 
     if (!leadPhones.length) return false;
 
