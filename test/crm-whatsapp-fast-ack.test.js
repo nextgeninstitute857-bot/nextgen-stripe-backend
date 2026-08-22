@@ -10,7 +10,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v287-natural-conversation-exam-guidance"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v288-consultative-whatsapp-conversation"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: "message_status"/);
   assert.match(handler, /event: "ignored_non_message"/);
@@ -75,12 +75,35 @@ test("greetings and short acknowledgements cannot trigger LMS media", () => {
   assert.match(mediaScore, /let score = 0/);
   assert.doesNotMatch(mediaScore, /let score = Number\(asset\.priority/);
   assert.match(picker, /if \(signals\.greeting_or_short_reply\) return \[\]/);
-  assert.match(picker, /const text = \[reply, latestInboundText\]\.join/);
+  assert.match(picker, /const text = latestInboundText/);
   assert.doesNotMatch(picker, /messages\)\.slice\(-6\)/);
   assert.ok(
     picker.indexOf("ngAylaIsFullFeatureOverviewRequest") < picker.indexOf("signals.greeting_or_short_reply"),
     "an explicit full feature request remains eligible for its requested feature tour",
   );
+});
+
+test("Ayla uses consultative discovery instead of a forced feature sequence", () => {
+  const salesBrain = server.slice(
+    server.indexOf("function ngBuildAylaBackendSalesBrain"),
+    server.indexOf("function ngBuildAylaCommandContext"),
+  );
+  const generator = server.slice(
+    server.indexOf("async function ngGenerateStudentAutoReply"),
+    server.indexOf('app.post("/admin/crm/conversations/:leadId/ai-auto-send"'),
+  );
+
+  assert.match(salesBrain, /Consultative discovery/);
+  assert.match(salesBrain, /Ask at most one useful question in a turn/);
+  assert.match(salesBrain, /Listen-before-pitch rule/);
+  assert.match(salesBrain, /one programme benefit that directly helps the need/);
+  assert.match(salesBrain, /Support boundary/);
+  assert.doesNotMatch(salesBrain, /Early value sequence/);
+  assert.match(generator, /normally 1-3 short sentences/);
+  assert.match(generator, /Use consultative discovery instead of a presentation/);
+  assert.match(generator, /Do not follow a fixed feature sequence/);
+  assert.match(generator, /acknowledge briefly without sending a new asset/);
+  assert.match(generator, /process\.env\.AYLA_MODEL \|\| process\.env\.AI_MODEL \|\| "gpt-4o-mini"/);
 });
 
 test("official exam eligibility and passing guidance is grounded and only appears on demand", () => {
