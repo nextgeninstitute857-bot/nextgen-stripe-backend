@@ -10,7 +10,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v286-natural-conversation-guard"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v287-natural-conversation-exam-guidance"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: "message_status"/);
   assert.match(handler, /event: "ignored_non_message"/);
@@ -81,6 +81,32 @@ test("greetings and short acknowledgements cannot trigger LMS media", () => {
     picker.indexOf("ngAylaIsFullFeatureOverviewRequest") < picker.indexOf("signals.greeting_or_short_reply"),
     "an explicit full feature request remains eligible for its requested feature tour",
   );
+});
+
+test("official exam eligibility and passing guidance is grounded and only appears on demand", () => {
+  const guidance = server.slice(
+    server.indexOf("function ngAylaOfficialExamGuidancePrompt"),
+    server.indexOf("function ngBuildAylaBackendSalesBrain"),
+  );
+  const salesBrain = server.slice(
+    server.indexOf("function ngBuildAylaBackendSalesBrain"),
+    server.indexOf("function ngBuildAylaCommandContext"),
+  );
+
+  assert.match(guidance, /if \(!asksGuidance\) return ""/);
+  assert.match(guidance, /Step 2 CK is 218/);
+  assert.match(guidance, /Step 3 is 200/);
+  assert.match(guidance, /ECFMG Sponsor Note/);
+  assert.match(guidance, /PLAB 1 does not have one permanent numeric pass mark/);
+  assert.match(guidance, /250 described as the pass mark/);
+  assert.match(guidance, /pass score of 439/);
+  assert.match(guidance, /0\.00 logits for NCLEX-RN/);
+  assert.match(guidance, /-0\.18 logits for NCLEX-PN/);
+  assert.match(guidance, /Distinguish where an exam can be taken from the country\/jurisdiction/);
+  assert.match(guidance, /Do not make a final legal\/regulatory eligibility determination/);
+  assert.match(guidance, /Share at most one most-relevant official source link/);
+  assert.match(salesBrain, /const officialExamGuidance = ngAylaOfficialExamGuidancePrompt/);
+  assert.match(salesBrain, /officialExamGuidance/);
 });
 
 test("AI generation keeps one long-lived lock per inbound message", () => {

@@ -583,7 +583,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v286-natural-conversation-guard";
+const CRM_AYLA_REPLY_BUILD = "v287-natural-conversation-exam-guidance";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
@@ -48096,6 +48096,69 @@ function ngAylaLatestMessageSignals(latestInboundText = "", history = "") {
   };
 }
 
+function ngAylaOfficialExamGuidancePrompt(latestInboundText = "", history = "") {
+  const latest = String(latestInboundText || "").toLowerCase();
+  const context = `${history || ""}\n${latestInboundText || ""}`.toLowerCase();
+  const asksGuidance = /(what\s+is|how\s+(?:do|can|to)|eligib|qualif|requirement|apply|application|pass(?:ing)?\s+(?:score|mark|standard)|minimum\s+score|exam\s+(?:score|sequence|roadmap|pathway)|roadmap|pathway|steps?|countr|accepted|recognis|recogniz|licen[cs]|registration|attempts?)/i.test(latest);
+  if (!asksGuidance) return "";
+
+  const requested = {
+    usmle: /(usmle|step\s*[123]|ecfmg|american|united states|\busa\b)/i.test(context),
+    plab: /(plab|gmc|united kingdom|\buk\b)/i.test(context),
+    amc: /(\bamc\b|australia|australian medical council)/i.test(context),
+    mccqe: /(mccqe|medical council of canada|canada|carms|\blmcc\b|\bnac\b)/i.test(context),
+    nclex: /(nclex|nursing|registered nurse|practical nurse|\brn\b|\bpn\b)/i.test(context),
+  };
+  const hasNamedExam = Object.values(requested).some(Boolean);
+  const sections = [];
+
+  if (requested.usmle || !hasNamedExam) sections.push(`USMLE / ECFMG (official facts verified 2026-08-22):
+- This is the United States physician licensing/residency pathway. Step 1 and Step 2 CK are delivered internationally; Step 3 is administered only in the US and its territories.
+- Current minimums: Step 1 is reported pass/fail; Step 2 CK is 218 for tests on/after 2025-07-01; Step 3 is 200. Do not present the old Step 1 three-digit standard as the student's reported score.
+- IMG Step 1/2 eligibility: the medical school and graduation years must carry an ECFMG Sponsor Note in the World Directory and the applicant must meet ECFMG criteria. From January 2026, IMGs apply for all Steps through FSMB; ECFMG still decides Certification eligibility.
+- ECFMG Certification sequence: eligible school/Sponsor Note -> Application for ECFMG Certification and identity/credential verification -> pass Step 1 and Step 2 CK -> satisfy the applicable ECFMG Pathway, including OET Medicine, or hold a still-valid former Step 2 CS pass -> final diploma/credentials verified. Step 3 additionally requires Step 1 + Step 2 CK, a qualifying medical degree, and valid ECFMG Certification for IMGs.
+- Never tell a student only 'you are not eligible'. Explain the missing condition and the official next step. Do not guarantee certification, residency, visa, Match success, or state licensure.
+- Sources: https://www.usmle.org/2026-bulletin-information-addendum ; https://www.usmle.org/scores-transcripts/examination-results-and-scoring ; https://pathways-staff.ecfmg.org/2026ib/certification-requirements.html`);
+
+  if (requested.plab || !hasNamedExam) sections.push(`PLAB / GMC (official facts verified 2026-08-22):
+- This is a route for doctors qualified abroad to seek GMC registration with a licence to practise in the United Kingdom.
+- Before PLAB: create GMC Online and show an acceptable primary medical qualification and acceptable English evidence. Then pass PLAB 1 (180 single-best-answer questions) and PLAB 2 (clinical OSCE), then apply for GMC registration and meet the remaining registration requirements.
+- PLAB 1 does not have one permanent numeric pass mark. GMC sets the pass mark for each sitting with the Angoff method and reports that sitting's required score. Never invent a fixed PLAB pass score.
+- Explain the route to satisfy a missing requirement; do not guarantee GMC registration or employment.
+- Sources: https://www.gmc-uk.org/registration-and-licensing/join-our-registers/plab/a-guide-to-the-plab-test ; https://www.gmc-uk.org/registration-and-licensing/join-our-registers/plab/plab-1-guide/your-results`);
+
+  if (requested.amc || !hasNamedExam) sections.push(`AMC (official facts verified 2026-08-22):
+- This is an Australian medical-registration assessment pathway. The Standard Pathway is generally for eligible international medical graduates who are not eligible for the Competent Authority or Specialist pathways.
+- Standard sequence: check medical school/degree eligibility -> AMC account and initial portfolio/primary-source verification -> pass AMC CAT MCQ -> pass AMC Clinical OR complete an AMC-accredited workplace-based assessment -> AMC Certificate -> meet Medical Board of Australia registration requirements.
+- AMC CAT MCQ results are reported on a 0-500 scale with 250 described as the pass mark; AMC introduced a slightly higher underlying standard in 2026 while retaining 250 as the reported pass mark.
+- Do not guarantee a pathway, job, visa, WBA place, or registration.
+- Sources: https://www.amc.org.au/pathways/standard-pathway/ ; https://www.amc.org.au/pathways/standard-pathway/amc-assessments/mcq-examination/`);
+
+  if (requested.mccqe || !hasNamedExam) sections.push(`MCCQE / Canada (official facts verified 2026-08-22):
+- This is Canada's national medical-knowledge and clinical-decision-making examination and is one requirement used for Canadian residency/LMCC/licensure pathways; provincial/territorial regulators make licensing decisions.
+- Eligibility includes an acceptable Canadian school, an eligible US osteopathic school, or a World Directory school with a Canada Sponsor Note. IMGs create physiciansapply.ca, submit source verification for the medical degree, apply, receive acceptance, then schedule during the eligibility window.
+- Current format: 230 MCQs in two sections. The official 2025 result scale is 300-600 and the official sample Statement of Results shows a pass score of 439. Because MCC changed the scale in 2025, verify the current MCC scoring page before quoting a number.
+- Maximum four attempts; after the third failed attempt there is a one-year wait before a fourth. A passed MCCQE cannot be retaken.
+- For residency, explain separately that IMG requirements can also include the NAC Examination, CaRMS and province/program-specific conditions; passing MCCQE alone does not guarantee residency or a licence.
+- Sources: https://mcc.ca/examinations-assessments/mccqe/ ; https://mcc.ca/examinations-assessments/mccqe/eligibility-and-application/ ; https://mcc.ca/wp-content/uploads/SOR-MCCQE-Part-I-2025.pdf`);
+
+  if (requested.nclex || !hasNamedExam) sections.push(`NCLEX-RN / NCLEX-PN (official facts verified 2026-08-22):
+- NCLEX is the adaptive entry-to-practice nursing exam used through participating nursing regulatory bodies. Eligibility and licensure come from the student's chosen nursing regulatory body/jurisdiction, not from Ayla or the exam alone.
+- Sequence: choose/apply to the nursing regulatory body -> meet its education, credential and other requirements -> register for NCLEX and receive Authorization to Test -> schedule and take the correct RN or PN exam -> complete any remaining jurisdiction licensing requirements.
+- It is not a simple percentage exam. Current official passing standards through 2029-03-31 are 0.00 logits for NCLEX-RN and -0.18 logits for NCLEX-PN. Never convert these into an invented percentage or number of correct questions.
+- Keep RN and PN guidance separated. Do not promise eligibility, a licence, immigration, or employment.
+- Sources: https://www.nclex.com/passing-standard.page ; https://www.nclex.com/register.page`);
+
+  return [
+    "ON-DEMAND OFFICIAL EXAM GUIDANCE — use only because the student's latest turn asked about eligibility, requirements, pass score, pathway, recognition, or application:",
+    "- Answer the direct question first in simple language. Ask one clarifying question only when their school, graduation status, profession, target jurisdiction, or exam is needed.",
+    "- Distinguish where an exam can be taken from the country/jurisdiction whose licensing pathway uses it.",
+    "- Do not make a final legal/regulatory eligibility determination. Say what appears to be missing, give the steps to satisfy it, and recommend confirmation with the named regulator before paying or applying.",
+    "- Share at most one most-relevant official source link unless the student asks for full sources. Do not turn this answer into a programme pitch.",
+    ...sections,
+  ].join("\n");
+}
+
 function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = "", history = "", liveSnapshot = {}) {
   const s = ngAylaPickSettings(db);
   if (s.sales_closer_mode_enabled === false) {
@@ -48122,6 +48185,7 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
   const mentorTitle = assets.mentorTitle || ngAylaSalesBrainValue(s, "uworld_library_mentor_title", "");
   const recordingLink = assets.recordingLink || "";
   const liveSessionLink = assets.liveSessionLink || "";
+  const officialExamGuidance = ngAylaOfficialExamGuidancePrompt(latestInboundText, history);
 
   const lines = [
     "BACKEND-ENFORCED NEXTGEN SALES BRAIN (highest priority after safety/opt-out/compliance):",
@@ -48136,6 +48200,7 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
     "- When the student is learning about the programme, first explain its practical benefits in warm, enthusiastic language: one organised place for roadmap, live teaching, recordings, questions, weak-area correction, revision, notes, and accountability. Only after the feature explanation, invite them to take the free demo and include the direct demo link.",
     "- Full feature-overview rule: when a student asks about several features, the complete LMS, or the purpose/benefit of features, use one short professional line per feature. Explain what it does and how it helps the student. Cover dashboard, roadmap, live classes, recordings, session notes, adaptive flashcards, weak-area tracking, and assessments. Then invite the student to the demo. Finally recommend attending one live session, or watching the matching labelled recording when time is limited. Do not place the demo invitation before the explanation.",
     "- Conversation-first rule: answer the student’s latest question or concern first. Then move forward with ONE useful next step: live session, session recording, UWorld demo/library, YouTube lectures, exam date/weak area, and then Google Meet mentor consultation when ready.",
+    officialExamGuidance,
     "- Google Meet state lock: once the student has requested Google Meet, shared a preferred time, is waiting for the Google Meet link, or has a scheduled Google Meet, do NOT restart live-session/recording/UWorld/demo/mentor-offer flow. Only acknowledge, answer direct questions, collect/reschedule time, or remind them that the Google Meet link will be sent at meeting time.",
     "- Acknowledgements like thank you/thanks/ok/noted/great/perfect after booking must get a simple acknowledgement or no sales push. Never treat them as a new sales trigger.",
     "- Greeting rule: use 'Hi Doctor' only once in a new conversation. After that, answer directly with Doctor / Yes Doctor / Sure Doctor. Never start every reply with Hi Doctor.",
