@@ -10,7 +10,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v285-labelled-sales-media-demo"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v286-natural-conversation-guard"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: "message_status"/);
   assert.match(handler, /event: "ignored_non_message"/);
@@ -46,13 +46,40 @@ test("bare WhatsApp greetings stay conversational before the sales sequence", ()
   assert.match(replyPrompt, /Do not begin the sales sequence/);
   assert.match(replyPrompt, /Do not say "Thank you, Doctor" in response to a bare hello/);
   assert.match(replyPrompt, /const hasPriorAylaReply = cleanMessages\.some/);
-  assert.match(replyPrompt, /if \(latestSignals\.bare_greeting && !hasPriorAylaReply\)/);
+  assert.match(replyPrompt, /if \(latestSignals\.bare_greeting\)/);
   assert.match(replyPrompt, /If an existing student says hello again/);
   assert.match(replyPrompt, /intent: "natural_bare_greeting"/);
   assert.match(replyPrompt, /Do not mention or pitch any programme, LMS, demo, live session, recording, UWorld, Google Meet, price, feature, or offer/);
   assert.ok(
     replyPrompt.indexOf("if (latestSignals.bare_greeting)") < replyPrompt.indexOf("const backendSalesBrain"),
     "the greeting-only AI turn must run before the sales brain is constructed",
+  );
+});
+
+test("greetings and short acknowledgements cannot trigger LMS media", () => {
+  const signals = server.slice(
+    server.indexOf("function ngAylaLatestMessageSignals"),
+    server.indexOf("function ngBuildAylaBackendSalesBrain"),
+  );
+  const mediaScore = server.slice(
+    server.indexOf("function ngMediaTextMatchScore"),
+    server.indexOf("function ngAylaRecentMediaUsageBlocked"),
+  );
+  const picker = server.slice(
+    server.indexOf("function ngPickAylaMediaAssetsForReply"),
+    server.indexOf("function ngPickAylaMediaAssetForReply"),
+  );
+
+  assert.match(signals, /replace\(\/\[\\u200B-\\u200D\\uFEFF\]\/g, ""\)/);
+  assert.match(signals, /thanks\|thank\\s\*you\|great\|perfect\|noted/);
+  assert.match(mediaScore, /let score = 0/);
+  assert.doesNotMatch(mediaScore, /let score = Number\(asset\.priority/);
+  assert.match(picker, /if \(signals\.greeting_or_short_reply\) return \[\]/);
+  assert.match(picker, /const text = \[reply, latestInboundText\]\.join/);
+  assert.doesNotMatch(picker, /messages\)\.slice\(-6\)/);
+  assert.ok(
+    picker.indexOf("ngAylaIsFullFeatureOverviewRequest") < picker.indexOf("signals.greeting_or_short_reply"),
+    "an explicit full feature request remains eligible for its requested feature tour",
   );
 });
 
