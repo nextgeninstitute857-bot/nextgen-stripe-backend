@@ -25,6 +25,10 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
 });
 
 test("bare WhatsApp greetings stay conversational before the sales sequence", () => {
+  const greetingGuard = server.slice(
+    server.indexOf("function ngAylaApplyGreetingOnce"),
+    server.indexOf("function ngAylaClarifyPreviousMessageReply"),
+  );
   const replyPrompt = server.slice(
     server.indexOf("async function ngGenerateStudentAutoReply"),
     server.indexOf('app.post("/admin/crm/conversations/:leadId/ai-auto-send"'),
@@ -34,6 +38,7 @@ test("bare WhatsApp greetings stay conversational before the sales sequence", ()
   assert.match(replyPrompt, /buildAylaConversationPrompt/);
   assert.match(replyPrompt, /normalizeAylaConversationDecision/);
   assert.match(replyPrompt, /evaluateAylaConversationDecision/);
+  assert.match(greetingGuard, /\(\?:\\s\+there\)\?/);
   assert.doesNotMatch(replyPrompt, /if \(latestSignals\.bare_greeting\)/);
   assert.doesNotMatch(replyPrompt, /const confirmsInterest/);
 });
@@ -323,6 +328,10 @@ test("Ayla explains weak-area adaptation and sends only safe public LMS previews
   assert.match(media, /function ngAylaIsFullFeatureOverviewRequest/);
   assert.match(media, /function ngPickAylaMediaAssetsForReply/);
   assert.match(media, /function ngSendAylaAdditionalMediaAssets/);
+  assert.match(media, /function ngAylaSafeWhatsAppMediaCaption/);
+  assert.match(media, /function ngBuildAylaMediaDeliveryCopy/);
+  assert.match(media, /cleanReply \|\| approvedFeatureCaption/);
+  assert.match(media, /await ngAylaSleep\(3000\)/);
   assert.match(media, /Adaptive Flashcards/);
   assert.match(media, /Baseline Diagnostic & Mentor-Led Assessments/);
   assert.match(media, /Weak areas are shown to you/);
@@ -343,7 +352,7 @@ test("an interested lead receives separate feature cards before the demo convers
   assert.match(server, /matching labelled recording/);
   assert.match(server, /maxOutputTokens: featureTourRequested \? 220 : 140/);
   assert.match(server, /forceFeatureTour: featureTourRequested/);
-  assert.match(server, /featureTourRequested && aylaMediaAsset \? firstMediaCaption : ai\.reply/);
+  assert.match(server, /ngBuildAylaMediaDeliveryCopy\(\{/);
   assert.match(server, /liveSnapshot: ai\.live_lms_sales_snapshot \|\| \{\}/);
   assert.match(server, /ayla_program_tour_sent_at = nowIso\(\)/);
   assert.match(server, /feature_tour_closing/);
@@ -417,7 +426,7 @@ test("a public price question does not create or lock a Google Meet handoff", ()
   assert.match(server, /WhatsApp already linkifies plain URLs/);
   assert.match(server, /cleanLabel === cleanUrl \? cleanUrl/);
   assert.match(server, /This is an ongoing conversation, so do not greet again/);
-  assert.match(server, /alreadyGreeted[\s\S]*?\(hi\|hello\|hey\)\[,!\.، \]\+/);
+  assert.match(server, /alreadyGreeted[\s\S]*?\(hi\|hello\|hey\)\(\?:\\s\+there\)\?/);
 });
 
 test("Ayla retrieves compact relevant approved training without duplicating the sales brain", () => {
