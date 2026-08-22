@@ -10,7 +10,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v290-interested-lead-feature-tour"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v291-qualified-human-handoff"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: "message_status"/);
   assert.match(handler, /event: "ignored_non_message"/);
@@ -387,6 +387,51 @@ test("an interested lead receives separate feature cards before the demo convers
   assert.match(server, /liveSnapshot: ai\.live_lms_sales_snapshot \|\| \{\}/);
   assert.match(server, /ayla_program_tour_sent_at = nowIso\(\)/);
   assert.match(server, /feature_tour_closing/);
+});
+
+test("human handoff follows programme value and sends admins a qualified meeting summary", () => {
+  const handoff = server.slice(
+    server.indexOf("function ngAylaHandoffExamLabel"),
+    server.indexOf("function ngAylaPostRecordingInterestQuestion"),
+  );
+  const router = server.slice(
+    server.indexOf("function ngAylaHardSalesRouter"),
+    server.indexOf("function ngAylaNormalizeReplyForRepeat"),
+  );
+  const alerts = server.slice(
+    server.indexOf("function ngAylaAdminAlertNumbers"),
+    server.indexOf('app.get("/admin/crm/ai-command/admin-alerts/settings"'),
+  );
+  const generator = server.slice(
+    server.indexOf("async function ngGenerateStudentAutoReply"),
+    server.indexOf('app.post("/admin/crm/conversations/:leadId/ai-auto-send"'),
+  );
+
+  assert.match(server, /Human-handoff sequence/);
+  assert.match(server, /do not proactively offer a Google Meet before Ayla has explained the programme/);
+  assert.match(server, /A direct student request for a human is always respected/);
+  assert.match(handoff, /function ngAylaHumanHandoffContext/);
+  assert.match(handoff, /programme and roadmap/);
+  assert.match(handoff, /7-day demo/);
+  assert.match(handoff, /labelled recording/);
+  assert.match(handoff, /diagnostic and weak-area adaptation/);
+  assert.match(handoff, /function ngAylaNextHandoffQualificationField/);
+  assert.match(handoff, /collect_google_meet_\$\{field\}/);
+  assert.match(handoff, /Which country or city are you joining from/);
+  assert.match(handoff, /main concern you want the mentor to help you solve/);
+  assert.match(server, /student_country: handoffContext\.country/);
+  assert.match(server, /programme_coverage: handoffContext\.coverage/);
+  assert.match(server, /qualified_meeting_booked_waiting_link/);
+  assert.match(router, /ngAylaCaptureHandoffQualificationReply/);
+  assert.match(router, /ngAylaCreateGoogleMeetAppointmentFromPreference\(db, lead, timePreference, latestText, cleanMessages\)/);
+  assert.match(generator, /collectingMeetingQualification/);
+  assert.match(generator, /Current human-handoff readiness/);
+  assert.match(alerts, /GOOGLE MEET HANDOFF BOOKED/);
+  assert.match(alerts, /Country\/place:/);
+  assert.match(alerts, /Main reason for meeting:/);
+  assert.match(alerts, /Already explained\/shared by Ayla:/);
+  assert.match(alerts, /without making the student repeat what Ayla already covered/);
+  assert.match(alerts, /for \(const to of numbers\)/);
 });
 
 test("a public price question does not create or lock a Google Meet handoff", () => {

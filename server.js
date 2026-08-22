@@ -583,7 +583,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v290-interested-lead-feature-tour";
+const CRM_AYLA_REPLY_BUILD = "v291-qualified-human-handoff";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
@@ -48234,7 +48234,7 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
     "- Price rule: if price/cost/package/payment is asked, give the exact active public plan names and USD prices from the current live LMS facts first. Never invent packages. Then provide the official pricing/enrollment link and offer the free demo or optional mentor guidance as one helpful next step.",
     "- Failed/weak/confused rule: reassure strongly that the student is in the right place; the key is roadmap, mentor feedback, UWorld-style practice, and weak-area correction; then offer recording/live session/UWorld demo and Google Meet guidance when positive.",
     `- Website/demo rule: when a demo is the right next step, use your own natural wording and share ${libraryLink || "https://nextgenusmle.live/demo"}. The configured offer is ${demoDays} days. Explain only the benefits relevant to this person instead of reciting a fixed feature list.`,
-    "- Google Meet booking: before booking, ask whether the student attended any Dr. Ahmad/NextGen live session before. If yes, ask when and what they thought. Also ask exam timeline and weak areas. Then offer Google Meet mentor consultation. If the student directly gives a time after a Meet offer, confirm once and alert admin once.",
+    "- Human-handoff sequence: do not proactively offer a Google Meet before Ayla has explained the programme and shared the seven-day demo plus a live-session or correctly labelled recording path. A direct student request for a human is always respected. Before booking, collect any missing name, country/place, exam, main concern and preferred time. After the time is collected, notify the configured admin contacts with those details and exactly what Ayla already explained so the student does not repeat the conversation.",
     `- Current latest-message signals: ${JSON.stringify(signals)}`,
     s.sales_style_rule ? `- Admin sales style rule: ${ngAylaSettingsText(s.sales_style_rule, 800)}` : "",
     s.uworld_video_library_rule ? `- Admin UWorld rule: ${ngAylaSettingsText(s.uworld_video_library_rule, 900)}` : "",
@@ -49085,9 +49085,10 @@ Your preferred time is already noted for ${when}. You will receive the Google Me
   return null;
 }
 
-function ngAylaCreateGoogleMeetRequest(db = {}, lead = {}, reason = "google_meet_requested", sourceText = "") {
+function ngAylaCreateGoogleMeetRequest(db = {}, lead = {}, reason = "google_meet_requested", sourceText = "", messages = []) {
   if (!db || !lead?.id) return null;
   const now = typeof nowIso === "function" ? nowIso() : new Date().toISOString();
+  const context = ngAylaHumanHandoffContext(lead, messages);
   lead.status = lead.status === "paid" || lead.status === "converted" ? lead.status : "hot_lead";
   lead.lead_stage = "google_meet_requested";
   lead.stage = "google_meet_requested";
@@ -49126,8 +49127,9 @@ function ngAylaCreateGoogleMeetRequest(db = {}, lead = {}, reason = "google_meet
     priority: reason === "pricing_interest" ? "high" : "normal",
     handoff_type: "google_meet",
     requested_action: "schedule_google_meet",
-    handoff_summary: sourceText || existingHandoff?.handoff_summary || "Student is ready for Google Meet mentor guidance.",
-    recommended_next_action: "Ask preferred time in EST and schedule Google Meet mentor consultation.",
+    handoff_summary: `Student requested mentor guidance. Exam: ${context.exam || "not collected"}. Country/place: ${context.country || "not collected"}. Main concern: ${context.concern || sourceText || "not collected"}. Already covered by Ayla: ${context.coverage.join(", ") || "not confirmed"}.`,
+    recommended_next_action: "Collect any missing name, country/place, exam, concern and preferred time in EST, then schedule the Google Meet consultation without repeating information Ayla already covered.",
+    qualification: context,
     source: reason,
   }, existingHandoff || {});
   if (existingHandoff) Object.assign(existingHandoff, handoffPayload); else handoffs.push(handoffPayload);
@@ -49148,6 +49150,101 @@ function ngAylaGoogleMeetBookingReply(timezone = "EST") {
   return `Sure Doctor, I’ll arrange a Google Meet mentor consultation for you.
 
 What time works best for you in ${timezone}?`;
+}
+
+function ngAylaHandoffExamLabel(lead = {}, messages = []) {
+  const stored = String(lead.exam_type || lead.exam || lead.exam_track || lead.course || "").trim();
+  if (stored) return stored;
+  const text = safeArray(messages).map((message) => ngMessageText(message)).join("\n");
+  const matches = [
+    [/\bstep\s*1\b|\bstep1\b|usmle\s*1/i, "USMLE Step 1"],
+    [/\bstep\s*2\b|\bstep2\b|step\s*2\s*ck|\bck\b/i, "USMLE Step 2 CK"],
+    [/\bstep\s*3\b|\bstep3\b/i, "USMLE Step 3"],
+    [/\bplab\b/i, "PLAB"],
+    [/\bamc\b/i, "AMC"],
+    [/\bmccqe\b/i, "MCCQE"],
+    [/\bnclex[-\s]?(?:rn|pn)?\b/i, "NCLEX"],
+  ];
+  return matches.find(([pattern]) => pattern.test(text))?.[1] || "";
+}
+
+function ngAylaHandoffConcern(lead = {}, messages = []) {
+  const stored = String(lead.google_meet_concern || lead.main_need || lead.primary_pain || lead.current_challenge || "").trim();
+  if (stored) return stored.slice(0, 500);
+  const candidate = [...safeArray(messages)]
+    .reverse()
+    .filter((message) => !ngIsOutboundMessage(message))
+    .map((message) => ngMessageText(message).trim())
+    .find((text) => text.length >= 8 && /(?:self[-\s]?stud|need|weak|struggl|fail|score|structure|roadmap|guidance|schedule|resource|exam|prepar)/i.test(text));
+  return String(candidate || "").slice(0, 500);
+}
+
+function ngAylaHumanHandoffContext(lead = {}, messages = []) {
+  const conversation = safeArray(messages).map((message) => ngMessageText(message)).filter(Boolean).join("\n").toLowerCase();
+  const rawName = String(ng41LeadName(lead) || "").trim();
+  const studentName = /^(?:student|doctor|doc|unknown|whatsapp user)$/i.test(rawName) || /^\+?[\d\s().-]+$/.test(rawName) ? "" : rawName;
+  const country = String(lead.country || lead.country_name || lead.location || lead.city || lead.google_meet_country || "").trim();
+  const exam = ngAylaHandoffExamLabel(lead, messages);
+  const concern = ngAylaHandoffConcern(lead, messages);
+  const coverage = [
+    lead.ayla_program_tour_sent_at || lead.lms_ecosystem_explained || /roadmap|programme|program|learning ecosystem/.test(conversation) ? "programme and roadmap" : "",
+    lead.demo_link_sent || /nextgenusmle\.live\/demo/.test(conversation) ? "7-day demo" : "",
+    lead.live_session_invited || /live session|live class/.test(conversation) ? "live session" : "",
+    lead.recording_sent || /labelled recording|labeled recording|recording library|recording link/.test(conversation) ? "labelled recording" : "",
+    /baseline diagnostic|weak areas|adaptive flashcards/.test(conversation) ? "diagnostic and weak-area adaptation" : "",
+  ].filter(Boolean);
+  const valueShown = coverage.includes("programme and roadmap") && coverage.some((item) => ["7-day demo", "live session", "labelled recording"].includes(item));
+  return { student_name: studentName, country, exam, concern, coverage, value_shown: valueShown };
+}
+
+function ngAylaNextHandoffQualificationField(context = {}) {
+  if (!context.student_name) return "name";
+  if (!context.country) return "country";
+  if (!context.exam) return "exam";
+  if (!context.concern) return "concern";
+  return "";
+}
+
+function ngAylaHandoffQualificationReply(lead = {}, messages = []) {
+  const field = ngAylaNextHandoffQualificationField(ngAylaHumanHandoffContext(lead, messages));
+  if (!field) {
+    lead.next_action = "collect_google_meet_time";
+    return ngAylaGoogleMeetBookingReply("EST");
+  }
+  lead.next_action = `collect_google_meet_${field}`;
+  const prompts = {
+    name: "Before I book it, what name should I use for your meeting?",
+    country: "Which country or city are you joining from? This helps our mentor understand your pathway and time zone.",
+    exam: "Which exam are you preparing for?",
+    concern: "What is the main concern you want the mentor to help you solve in the meeting?",
+  };
+  return `Of course Doctor. ${prompts[field]}`;
+}
+
+function ngAylaCaptureHandoffQualificationReply(lead = {}, latestText = "") {
+  const value = String(latestText || "").trim().slice(0, 500);
+  const action = String(lead.next_action || "").toLowerCase();
+  if (!value) return false;
+  if (action === "collect_google_meet_name" && !/^(?:yes|no|ok|okay|sure)$/i.test(value)) {
+    lead.full_name = value;
+    lead.name = value;
+    lead.contact_name = value;
+  } else if (action === "collect_google_meet_country") {
+    lead.country = value;
+    lead.google_meet_country = value;
+  } else if (action === "collect_google_meet_exam") {
+    const exam = ngAylaHandoffExamLabel({}, [{ direction: "inbound", text: value }]);
+    if (!exam) return false;
+    lead.exam_type = exam;
+    lead.exam = exam;
+  } else if (action === "collect_google_meet_concern") {
+    lead.google_meet_concern = value;
+    lead.main_need = lead.main_need || value;
+  } else {
+    return false;
+  }
+  lead.updated_at = nowIso();
+  return true;
 }
 
 function ngAylaPostRecordingInterestQuestion(assets = {}) {
@@ -49206,8 +49303,9 @@ function ngAylaParsePreferredGoogleMeetTime(text = "") {
   return { date: `${y}-${m}-${d}`, time: `${hh}:${mm}`, start_time: `${y}-${m}-${d}T${hh}:${mm}:00`, timezone: "America/New_York" };
 }
 
-function ngAylaCreateGoogleMeetAppointmentFromPreference(db = {}, lead = {}, preference = null, sourceText = "") {
+function ngAylaCreateGoogleMeetAppointmentFromPreference(db = {}, lead = {}, preference = null, sourceText = "", messages = []) {
   if (!db || !lead?.id || !preference) return null;
+  const handoffContext = ngAylaHumanHandoffContext(lead, messages);
   const existing = ensureCrmArray(db, "appointments").find((item) => String(item.lead_id || "") === String(lead.id || "") && ["scheduled", "missing_link", "needs_link", "rescheduled"].includes(String(item.status || "").toLowerCase()));
   const payload = withTimestamps({
     ...(existing || {}),
@@ -49219,6 +49317,10 @@ function ngAylaCreateGoogleMeetAppointmentFromPreference(db = {}, lead = {}, pre
     student_name: ng41LeadName(lead),
     student_email: ng41LeadEmail(lead),
     student_phone: ng41LeadPhone(lead),
+    student_country: handoffContext.country,
+    exam_type: handoffContext.exam,
+    main_concern: handoffContext.concern,
+    programme_coverage: handoffContext.coverage,
     phone: ng41LeadPhone(lead),
     email: ng41LeadEmail(lead),
     appointment_type: "google_meet_mentor_consultation",
@@ -49236,8 +49338,8 @@ function ngAylaCreateGoogleMeetAppointmentFromPreference(db = {}, lead = {}, pre
     google_meet_requested: true,
     link_send_scheduled: false,
     google_meet_link_send_scheduled: false,
-    conversation_summary: sourceText || "Student shared preferred time for Google Meet mentor consultation.",
-    notes: sourceText || existing?.notes || "Preferred Google Meet time collected by Ayla.",
+    conversation_summary: `Meeting booked after Ayla conversation. Student message: ${sourceText || "preferred time provided"}. Exam: ${handoffContext.exam || "not collected"}. Country/place: ${handoffContext.country || "not collected"}. Main concern: ${handoffContext.concern || "not collected"}. Already explained/shared: ${handoffContext.coverage.join(", ") || "not confirmed"}.`,
+    notes: `Ayla-qualified handoff. Do not repeat material already covered: ${handoffContext.coverage.join(", ") || "none confirmed"}.`,
     next_action: "admin_paste_google_meet_link",
     source: "ayla_google_meet_booking_bridge",
   }, existing || {});
@@ -49251,6 +49353,18 @@ function ngAylaCreateGoogleMeetAppointmentFromPreference(db = {}, lead = {}, pre
   lead.waiting_for_google_meet_link = true;
   lead.live_session_automation_paused_until_google_meet = true;
   lead.updated_at = nowIso();
+  const handoff = ensureCrmArray(db, "handoffs").find((item) => String(item.id || "") === String(lead.handoff_id || "") || String(item.lead_id || "") === String(lead.id || ""));
+  if (handoff) {
+    handoff.status = "qualified_meeting_booked_waiting_link";
+    handoff.appointment_id = payload.id;
+    handoff.scheduled_date = preference.date;
+    handoff.scheduled_time = preference.time;
+    handoff.timezone = preference.timezone || "America/New_York";
+    handoff.qualification = handoffContext;
+    handoff.handoff_summary = payload.conversation_summary;
+    handoff.recommended_next_action = "Add or confirm the Google Meet link, then continue from Ayla's summary without repeating discovery.";
+    handoff.updated_at = nowIso();
+  }
   return payload;
 }
 
@@ -49308,8 +49422,20 @@ function ngAylaHardSalesRouter({ db = {}, lead = {}, messages = [], channel = "w
     ? ngAylaParsePreferredGoogleMeetTime(latestText)
     : null;
 
+  const collectingHandoffQualification = /^collect_google_meet_(?:name|country|exam|concern)$/i.test(String(lead.next_action || ""));
+  if (collectingHandoffQualification) {
+    ngAylaCaptureHandoffQualificationReply(lead, latestText);
+    const reply = ngAylaHandoffQualificationReply(lead, cleanMessages);
+    return {
+      intent: String(lead.next_action || "").includes("collect_google_meet_time")
+        ? "google_meet_qualification_complete_collect_time"
+        : "google_meet_qualification_collect_details",
+      reply,
+    };
+  }
+
   if (timePreference) {
-    const appointment = ngAylaCreateGoogleMeetAppointmentFromPreference(db, lead, timePreference, latestText);
+    const appointment = ngAylaCreateGoogleMeetAppointmentFromPreference(db, lead, timePreference, latestText, cleanMessages);
     ngAylaMarkGoogleMeetLockedLead(lead, appointment);
     return {
       intent: "google_meet_time_collected_missing_link",
@@ -49353,10 +49479,10 @@ Our team will confirm the Google Meet link shortly. You will receive the link at
   }
 
   if (directGoogleMeetRequest || positiveGoogleMeetContext) {
-    ngAylaCreateGoogleMeetRequest(db, lead, "google_meet_requested", latestText);
+    ngAylaCreateGoogleMeetRequest(db, lead, "google_meet_requested", latestText, cleanMessages);
     return {
       intent: "google_meet_requested",
-      reply: ngAylaGoogleMeetBookingReply(assets.timezone || "EST")
+      reply: ngAylaHandoffQualificationReply(lead, cleanMessages)
     };
   }
 
@@ -49623,9 +49749,11 @@ async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }
   const latestInboundTextForRouting = ngMessageText(latestInboundForRouting || {});
   const activeMeeting = db ? ngAylaFindActiveGoogleMeetAppointment(db, lead) : null;
   const hasMeetingState = db ? ngAylaLeadGoogleMeetState(lead, activeMeeting) : false;
+  const collectingMeetingQualification = hasMeetingState && /^collect_google_meet_(?:name|country|exam|concern)$/i.test(String(lead?.next_action || ""));
   const needsProtectedControl =
     /\b(stop|unsubscribe|do not message|don't message|dont message|remove me|wrong number|not interested)\b/i.test(latestInboundTextForRouting) ||
     ngAylaIsDirectGoogleMeetRequest(latestInboundTextForRouting) ||
+    collectingMeetingQualification ||
     (hasMeetingState && ngAylaLooksLikeTimePreference(latestInboundTextForRouting));
 
   // Only protected CRM actions use deterministic code. Ordinary conversation
@@ -49729,6 +49857,7 @@ Do not mention or pitch any programme, LMS, demo, live session, recording, UWorl
     messages: cleanMessages,
     latestInboundText,
   });
+  const humanHandoffContext = ngAylaHumanHandoffContext(lead, cleanMessages);
   const backendSalesBrain = db ? ngBuildAylaBackendSalesBrain(db, lead, latestInboundText, history, liveLmsSalesSnapshot) : "";
   const backendActionContext = backendControlDecision?.intent
     ? `The backend detected this operational intent: ${backendControlDecision.intent}. Any protected CRM state change has already been applied. Respond naturally based on the conversation and current lead state; do not copy a canned reply.`
@@ -49763,6 +49892,7 @@ Sales behavior:
 - Messaging this admissions number is already evidence of interest. Never keep asking “Would you like to learn more?” Once the exam and main need are known and the student says yes/interested, stop discovery and confidently explain how the connected programme solves that need.
 - Consultative does not mean passive. After the first greeting, use warm enthusiasm and add a concise relevant benefit in meaningful sales turns. At the programme-tour checkpoint, the backend sends separate feature pictures and captions, so your reply should be a natural personalised introduction to that tour—not another permission question and not one long feature paragraph.
 - When the exam and main need are known, pause discovery and connect the relevant features. End with a confident concrete next step—the seven-day demo, the current live session, a correctly labelled recording, or pricing/enrollment—chosen from the conversation. Do not let the chat fade into generic questions before the student understands the programme's value.
+- Human handoff comes after value is demonstrated. Do not proactively offer Google Meet until the programme/roadmap has been explained and the student has received the demo plus a live-session or labelled-recording path. If the student directly requests a human, respect it immediately. The protected booking flow will collect any missing name, country/place, exam, concern and preferred time, then alert the admins with a complete summary.
 - If this is an enrolled-student support request, resolve or route the support need first and do not turn the reply into a sales pitch.
 - Use broad reasoning for any weak area or system the student mentions; do not hard-code only MSK or only Cardiology. Adapt to the system named by the student.
 - After answering the student’s question, move the lead forward naturally: build trust, share/offer session recording, explain the UWorld Video Library, invite to live session, ask exam date/weak area, or offer Google Meet mentor consultation at the right time.
@@ -49786,6 +49916,12 @@ ${featureTourRequested
 - Write a warm two-to-four-line transition explaining that NextGen will give them structure and actively track improvement. Mention the baseline diagnostic and that weak areas will be shown and targeted. Do not list every feature because separate pictures and captions will follow automatically.
 - Do not ask a question in this transition. Do not include the demo link here; the final tour message will send it after the feature explanation.`
   : "No programme-tour checkpoint was detected for this turn. Continue natural discovery or answer the exact question without forcing a feature tour."}
+
+Current human-handoff readiness:
+${JSON.stringify(humanHandoffContext)}
+${humanHandoffContext.value_shown
+  ? "Ayla has shown enough programme value to offer human guidance naturally if it fits the student's request."
+  : "Do not proactively offer Google Meet yet. Continue the programme/demo/live-or-recording experience first, unless the student directly asks for a human."}
 
 Conversation intelligence:
 - If lead is already in Google Meet requested/time collected/waiting for link/scheduled state, do not offer live sessions, recordings, UWorld demo, or Google Meet again. Acknowledge short replies and keep the lead waiting for the meeting/link.
@@ -60896,14 +61032,22 @@ function ngAylaAdminAlertAlreadySent(db = {}, { type = "", lead = null, appointm
 
 function ngAylaBuildAdminHotLeadAlertText({ type = "hot_lead_interested", lead = null, appointment = null, latestInboundText = "", intent = "", messages = [] } = {}) {
   const label = String(type || "alert").replace(/_/g, " ").toUpperCase();
-  const leadName = ng41LeadName(lead || {}) || appointment?.student_name || "Student";
+  const handoff = ngAylaHumanHandoffContext(lead || {}, messages);
+  const leadName = handoff.student_name || ng41LeadName(lead || {}) || appointment?.student_name || "Student";
   const leadPhone = ng41LeadPhone(lead || {}) || appointment?.student_phone || appointment?.phone || "";
   const leadEmail = ng41LeadEmail(lead || {}) || appointment?.student_email || appointment?.email || "";
   const appointmentTime = appointment ? ngGoogleMeetAppointmentDisplayDateTime(appointment, "EST") : "";
+  const country = appointment?.student_country || handoff.country || "Not collected";
+  const exam = appointment?.exam_type || handoff.exam || "Not collected";
+  const concern = appointment?.main_concern || handoff.concern || "Not collected";
+  const coverage = safeArray(appointment?.programme_coverage).length ? appointment.programme_coverage : handoff.coverage;
+  const headline = String(type || "").toLowerCase() === "google_meet_time_collected"
+    ? "📅 GOOGLE MEET HANDOFF BOOKED"
+    : "🚨 NEXTGEN HOT LEAD ALERT";
   const sourceLine = intent ? `\nAI intent: ${intent}` : "";
   const latestLine = latestInboundText ? `\n\nLatest student message:\n${String(latestInboundText).slice(0, 900)}` : "";
 
-  return `🚨 NEXTGEN HOT LEAD ALERT\n\nType: ${label}\nStudent: ${leadName}\nWhatsApp: ${leadPhone || "—"}\nEmail: ${leadEmail || "—"}${appointmentTime ? `\nGoogle Meet time: ${appointmentTime}` : ""}${sourceLine}\n\nStatus:\n${ngLeadStatusSummaryForAlert(lead || {}, messages)}${latestLine}\n\nAction needed: Open CRM, check the conversation, and handle Google Meet / payment / human follow-up.`;
+  return `${headline}\n\nType: ${label}\nStudent: ${leadName}\nCountry/place: ${country}\nExam: ${exam}\nWhatsApp: ${leadPhone || "—"}\nEmail: ${leadEmail || "—"}${appointmentTime ? `\nMeeting time: ${appointmentTime}` : ""}\nMain reason for meeting: ${concern}\nAlready explained/shared by Ayla: ${coverage.join(", ") || "Not confirmed"}${sourceLine}\n\nStatus:\n${ngLeadStatusSummaryForAlert(lead || {}, messages)}${latestLine}\n\nAction needed: Open the CRM conversation, add/confirm the meeting link, and continue from this summary without making the student repeat what Ayla already covered.`;
 }
 
 async function ngAylaMaybeSendConversationAdminAlert({ db = {}, lead = null, appointment = null, ai = {}, latestInbound = null, source = "ai_auto" } = {}) {
