@@ -578,7 +578,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v273-crm-whatsapp-runtime-credentials";
+const CRM_AYLA_REPLY_BUILD = "v274-natural-whatsapp-greeting";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
@@ -47796,6 +47796,7 @@ function ngAylaSalesBrainValue(settings = {}, key, fallback = "") {
 
 function ngAylaLatestMessageSignals(latestInboundText = "", history = "") {
   const text = String(latestInboundText || "").toLowerCase();
+  const cleanLatest = String(latestInboundText || "").trim();
   const all = `${history || ""}\n${latestInboundText || ""}`.toLowerCase();
   const hasStep1 = /\bstep\s*1\b|step1|usmle\s*1/.test(all);
   const hasStep2 = /\bstep\s*2\b|step2|ck/.test(all);
@@ -47803,7 +47804,8 @@ function ngAylaLatestMessageSignals(latestInboundText = "", history = "") {
   const hasWeakArea = /(weak|difficulty|problem|struggling|fail|failed|attempt|immunology|biochem|pharma|pathology|uworld|nbme|low score|score)/i.test(all);
   const asksPrice = /(price|cost|fee|fees|package|payment|discount|charges|how much)/i.test(text);
   const wantsMentor = /(mentor|call|meet|guidance|guide|talk|speak|book|schedule|yes|ok|okay|interested)/i.test(text);
-  const greetingOnly = /^(hi|hello|hey|salam|assalam|how are you|details|yes|ok|okay|interested|step\s*1|step\s*2|step1|step2|ck)\.?$/i.test(String(latestInboundText || "").trim());
+  const bareGreeting = /^(hi+|hello+|hey+|salam|assalam(?:u\s*alaikum)?|how are you)[.!?\s]*$/i.test(cleanLatest);
+  const shortReply = /^(details|yes|ok|okay|interested|step\s*1|step\s*2|step1|step2|ck)[.!?\s]*$/i.test(cleanLatest);
   const mentionsRecording = /(recording|video|lecture|youtube|watch)/i.test(all);
   const mentionsLibrary = /(library|uworld video|lms\.nextgen|150 hours|3000)/i.test(all);
   return {
@@ -47812,7 +47814,9 @@ function ngAylaLatestMessageSignals(latestInboundText = "", history = "") {
     has_weak_area: hasWeakArea,
     asks_price: asksPrice,
     wants_mentor: wantsMentor,
-    greeting_or_short_reply: greetingOnly,
+    bare_greeting: bareGreeting,
+    short_reply: shortReply,
+    greeting_or_short_reply: bareGreeting || shortReply,
     recording_already_mentioned: mentionsRecording,
     library_already_mentioned: mentionsLibrary,
   };
@@ -47844,6 +47848,9 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
     "- Ayla is a warm, professional NextGen USMLE admissions counselor and sales closer, not a basic support chatbot and not a template sender.",
     "- WhatsApp templates are only a doorway to open/reopen conversation. After the student replies, Ayla must talk freely and naturally inside the 24-hour window.",
     "- Reply style must be human-like: warm opening when natural, short WhatsApp-style lines, no robotic FAQ tone, no passive 'feel free to ask' endings.",
+    signals.bare_greeting
+      ? "- BARE GREETING TURN — highest priority for this reply: respond like a normal friendly person in one or two short WhatsApp lines. Introduce yourself naturally once and ask one easy discovery question, starting with the student's name when it is unknown. Do not pitch the LMS, demo, live session, recording, UWorld library, Google Meet, pricing, or a feature list on this turn. Do not say 'Thank you, Doctor' merely because the student said hello, and do not overuse exclamation marks."
+      : "",
     "- Never expose internal approval, review, training, CRM, retrieval, or knowledge-grounding language to a student. Say 'our First Aid-integrated teaching' or 'our LMS material', not 'approved material' or 'approval'.",
     "- When the student is learning about the programme, first explain its practical benefits in warm, enthusiastic language: one organised place for roadmap, live teaching, recordings, questions, weak-area correction, revision, notes, and accountability. Then invite them to take the free demo and include the direct demo link when one is available.",
     "- Conversation-first rule: answer the student’s latest question or concern first. Then move forward with ONE useful next step: live session, session recording, UWorld demo/library, YouTube lectures, exam date/weak area, and then Google Meet mentor consultation when ready.",
@@ -49062,6 +49069,7 @@ Non-negotiable reply style:
 - Sound confident, persuasive, doctor-to-doctor, and human.
 - Do not write robotic paragraphs. Do not use markdown headings. Explain clearly when the student asks.
 - Do not end with weak generic filler like "feel free to ask" unless it is paired with a strong next step.
+- If the latest message is only a greeting, have a normal friendly first exchange: one or two short lines, a natural introduction, and one easy question. Ask the student's name first when it is unknown. Do not begin the sales sequence, mention programme assets, or offer live sessions, recordings, demos, Google Meet, or pricing until the student provides context. Do not say "Thank you, Doctor" in response to a bare hello.
 - When explaining the programme, use warm enthusiasm and explain the practical benefit before asking for a conversion: the roadmap, live teaching, recordings, questions, weak-area correction, notes, revision and accountability are organised together so the student knows what to do next. Invite the student to experience the configured free demo in your own natural words and include the direct demo link when it is relevant and available.
 
 Sales behavior:
