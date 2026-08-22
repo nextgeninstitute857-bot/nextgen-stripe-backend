@@ -50107,9 +50107,23 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
       textFormat: aylaConversationTextFormat(),
     });
     const parsed = safeJsonParseFromAI(result.text || "{}");
+    const decision = normalizeAylaConversationDecision(parsed, state);
+    // The model decides whether the full tour is appropriate and writes its
+    // personalised introduction. Fixed delivery invariants belong to the
+    // backend: every tour must finish with the configured demo/catch-up
+    // closing, so one omitted URL can never abort the whole conversation.
+    if (
+      decision.action === "send_feature_tour"
+      && (
+        !/https:\/\/nextgenusmle\.live\/demo\b/i.test(String(decision.follow_up || ""))
+        || /[?？]/.test(String(decision.follow_up || ""))
+      )
+    ) {
+      decision.follow_up = ngAylaFeatureOverviewClosingText(db || {}, liveSnapshot);
+    }
     return {
       result,
-      decision: normalizeAylaConversationDecision(parsed, state),
+      decision,
     };
   };
 
