@@ -196,8 +196,8 @@ test("Ayla explains weak-area adaptation and sends only safe public LMS previews
   assert.match(media, /function ngAylaIsSafePublicLmsPreview/);
   assert.match(media, /\["homepage_course_preview", "demo_lms_preview", "demo_lms", "course_card"\]/);
   assert.match(media, /asset\.homepage_visible === true/);
-  assert.match(media, /nextgen-lms-adaptive-preview-v2\.png/);
-  assert.match(media, /Privacy-safe representative LMS preview with no student identity/);
+  assert.doesNotMatch(media, /nextgen-lms-adaptive-preview-v2\.png/);
+  assert.match(media, /Only owner-approved Media Library assets may be sent/);
   assert.match(media, /Adaptive Flashcards/);
   assert.match(media, /Mentor-led Assessments/);
   assert.match(media, /6 \* 60 \* 60 \* 1000/);

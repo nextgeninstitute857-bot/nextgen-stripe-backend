@@ -66943,23 +66943,9 @@ function ngAylaMediaEligibleAssets(db = {}, brandId = null) {
       trigger_keywords: uniqueList([...(Array.isArray(asset.trigger_keywords) ? asset.trigger_keywords : normalizeArray(asset.trigger_keywords || asset.keywords || "")), ...safeArray(asset.tags)]),
       priority: Number(asset.priority || 0) || 0,
     }));
-  const adaptiveLmsPreview = {
-    id: "nextgen-lms-adaptive-preview-v2",
-    title: "NextGen LMS Adaptive Learning Preview",
-    asset_type: "image",
-    mime_type: "image/png",
-    public_url: "https://nextgenusmle.live/media/nextgen-lms-adaptive-preview-v2.png",
-    usage_area: "demo_lms",
-    trigger_keywords: ["dashboard", "lms", "demo", "recordings", "flashcards", "weak areas", "assessments", "roadmap", "progress tracking"],
-    priority: 1,
-    ai_send_enabled: true,
-    homepage_visible: true,
-    ai_usage_context: "Privacy-safe representative LMS preview with no student identity. Use while explaining the dashboard, recordings, adaptive flashcards, weak-area tracking, assessments, roadmap, or demo.",
-  };
-  if (!ngAylaIsSafePublicLmsPreview(adaptiveLmsPreview)) return storedAssets;
-  return storedAssets.some((asset) => String(asset.id || "") === adaptiveLmsPreview.id)
-    ? storedAssets
-    : [...storedAssets, adaptiveLmsPreview];
+  // Only owner-approved Media Library assets may be sent. Do not inject a
+  // synthetic LMS preview: an inaccurate mockup can confuse prospective students.
+  return storedAssets;
 }
 
 function ngBuildAylaMediaGuidance(db = {}, lead = {}) {
