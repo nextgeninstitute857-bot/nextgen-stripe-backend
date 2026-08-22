@@ -594,6 +594,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
 const CRM_AYLA_REPLY_BUILD = "v292-structured-conversation-engine";
+const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
@@ -11565,6 +11566,7 @@ app.get("/health", async (req, res) => {
     message: "Backend running",
     build: NEXTGEN_BACKEND_BUILD,
     crm_ayla_reply_build: CRM_AYLA_REPLY_BUILD,
+    crm_multiexam_lead_capture_build: CRM_MULTIEXAM_LEAD_CAPTURE_BUILD,
     crm_ayla_reply_engine: {
       whatsapp_provider_configured: Boolean(process.env.WHATSAPP_ACCESS_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID),
       ai_provider_configured: isAIConfigured(),
