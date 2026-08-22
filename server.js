@@ -583,7 +583,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v287-natural-conversation-exam-guidance";
+const CRM_AYLA_REPLY_BUILD = "v288-consultative-whatsapp-conversation";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
 const CONTENT_TAXONOMY_BUILD = "v209-content-taxonomy-governance";
@@ -48206,7 +48206,10 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
     "- Greeting rule: use 'Hi Doctor' only once in a new conversation. After that, answer directly with Doctor / Yes Doctor / Sure Doctor. Never start every reply with Hi Doctor.",
     "- Cohort-date rule: use the current live LMS facts supplied for this reply. July 1, 2026 was the original cohort start and must never be described as upcoming after that date. The roadmap started with Cardiology and continues system-wise; describe the current live system from the LMS instead of repeating an old launch message.",
     "- LMS ecosystem rule: explain NextGen as a complete USMLE learning ecosystem in short human WhatsApp-style lines, not a long feature dump. Say the student gets everything in one place: roadmap, live sessions, recordings, UWorld Video Library, First Aid/UWorld mapping, notes, tasks, accountability assessments, progress tracking, leaderboard encouragement, Community Q&A, and Study Partner support.",
-    "- Early value sequence: in the first few real replies after the student engages, naturally cover live sessions at 1:00 PM EST Monday-Friday, recent recording, YouTube/proof when available, UWorld Video Library, LMS/demo/dashboard, then ask whether the student attended any Dr. Ahmad/NextGen session before, ask exam timeline/weak areas, and move toward Google Meet when qualified. Do this slowly and conversationally, not as a dump.",
+    "- Consultative discovery: learn the student's name, exam, current stage/challenge, and timeline gradually. Ask at most one useful question in a turn, respond to their answer before asking another, and never interrogate them from a checklist.",
+    "- Listen-before-pitch rule: the student's messages should guide the conversation. Do not force a fixed sequence of live sessions, recordings, UWorld, LMS, demo, exam date, weak areas, and Google Meet. Introduce only the one programme benefit that directly helps the need they just expressed.",
+    "- Natural pacing: a normal WhatsApp reply is usually one to three short sentences. Do not send a long feature paragraph unless the student explicitly asks for a complete overview. A simple acknowledgement does not need a new offer, link, picture, or follow-up question.",
+    "- Support boundary: if the person is an enrolled student asking for login, access, class, notes, recording, schedule, payment, or technical help, solve or route that support need first. Do not treat a support request as a new sales lead.",
     ngBuildAylaMediaGuidance(db, lead),
     "- Adaptive weak-area loop: explain naturally that question and assessment performance identifies weak areas; AylaMed then brings those topics back through targeted flashcards, revision, roadmap tasks, and mentor guidance so weak concepts are not simply forgotten.",
     "- Assessment rule: never say there is an assessment after every session. Say mentor-led accountability assessments are used weekly/weekend when published and after each system/block, with extra targeted checks assigned when a student needs them.",
@@ -48599,7 +48602,7 @@ async function ngAylaGenerateGroundedPricingReply({ snapshot = {}, latestMessage
 
   const exactFacts = plans.map((plan) => `- ${plan.public_line}`).join("\n");
   const result = await callOpenAIResponsesAPI({
-    model: process.env.AI_MODEL || "gpt-4o-mini",
+    model: process.env.AYLA_MODEL || process.env.AI_MODEL || "gpt-4o-mini",
     systemPrompt: `You are Ayla answering one WhatsApp pricing question naturally and transparently.
 Use only these current live LMS plan facts, with the plan names exactly as written:
 ${exactFacts}
@@ -49667,7 +49670,7 @@ async function ngGenerateStudentAutoReply({ db = null, lead, messages, channel }
       ? rawLeadName
       : "";
     const greetingResult = await callOpenAIResponsesAPI({
-      model: process.env.AI_MODEL || "gpt-4o-mini",
+      model: process.env.AYLA_MODEL || process.env.AI_MODEL || "gpt-4o-mini",
       systemPrompt: `You are Ayla having a natural WhatsApp exchange with a person who has only said hello.
 Reply like a warm, friendly human in one or two short lines. ${hasPriorAylaReply ? "You have spoken before, so welcome them back without introducing yourself again and ask how you can help today." : `Introduce yourself naturally once. ${knownLeadName ? `Their name is ${knownLeadName}; use it naturally and ask which exam they are preparing for.` : "You do not know their name, so ask their name as your one easy question."}`}
 Do not mention or pitch any programme, LMS, demo, live session, recording, UWorld, Google Meet, price, feature, or offer. Do not call them Doctor before you know who they are. Do not say thank you for reaching out. Do not use marketing language or more than one question. Write a fresh reply rather than copying an example.`,
@@ -49685,7 +49688,7 @@ Do not mention or pitch any programme, LMS, demo, live session, recording, UWorl
     return {
       reply: greetingReply,
       usage: greetingResult.usage || {},
-      model: greetingResult.model || process.env.AI_MODEL || "gpt-4o-mini",
+      model: greetingResult.model || process.env.AYLA_MODEL || process.env.AI_MODEL || "gpt-4o-mini",
       intent: "natural_bare_greeting",
     };
   }
@@ -49721,7 +49724,7 @@ Backend-enforced identity:
 - Never select from a fixed response script. Reason from the student's exact message, the conversation history, the known lead profile, current programme facts, and current links. Write a fresh response for this person.
 
 Non-negotiable reply style:
-- Keep replies short and readable by default: normally 2-4 short sentences. When the student explicitly asks for a complete feature overview, use concise one-line bullets so every requested feature has a clear purpose and benefit; this is the exception to the normal length limit.
+- Keep replies short and readable by default: normally 1-3 short sentences. When the student explicitly asks for a complete feature overview, use concise one-line bullets so every requested feature has a clear purpose and benefit; this is the exception to the normal length limit.
 - Open warmly only once at the start of a new conversation. Do not start every reply with "Hi Doctor". After the first greeting, use "Doctor," / "Yes Doctor," / "Sure Doctor," or answer directly.
 - Never say "prompt response", "I appreciate your prompt response", or talk like you are responding to a prompt. Say "Thank you, Doctor" or continue naturally.
 - Never expose internal approval, review, CRM, training, retrieval, or knowledge-grounding language to a student. Do not say "approved material" or explain the approval process. Say "our First Aid-integrated teaching", "our LMS material", or "our recorded lecture" naturally.
@@ -49736,6 +49739,9 @@ Non-negotiable reply style:
 
 Sales behavior:
 - After answering the student’s latest message, continue the conversation naturally. There is no 2-message or 3-message limit; every new student inbound deserves a fresh contextual reply if no outbound exists after it.
+- Use consultative discovery instead of a presentation. Learn the name, exam, current situation/problem, and timeline over separate natural turns. Ask no more than one useful question per reply, and reflect or answer what the student just said before asking it.
+- Do not follow a fixed feature sequence. Mention one feature only when it solves the need in the latest student message. Do not send a demo, recording, live-session invite, picture, price, or Google Meet offer merely because it exists.
+- If this is an enrolled-student support request, resolve or route the support need first and do not turn the reply into a sales pitch.
 - Use broad reasoning for any weak area or system the student mentions; do not hard-code only MSK or only Cardiology. Adapt to the system named by the student.
 - After answering the student’s question, move the lead forward naturally: build trust, share/offer session recording, explain the UWorld Video Library, invite to live session, ask exam date/weak area, or offer Google Meet mentor consultation at the right time.
 - Session recordings are still an important proof asset. Do not suppress recording links. If a recording is useful for trust or the student asks about recordings, share it; just keep listening and continue the next turn when the student replies.
@@ -49749,7 +49755,7 @@ Sales behavior:
 - Use approved proof naturally when it is present in the supplied context, but never invent testimonials or say that "many students improve" without that evidence.
 - If the student asks price/cost/package/payment, answer immediately using only the exact active public plan names and USD prices in the current live LMS facts. Never invent packages or hide public prices behind a Google Meet. Give the official pricing/enrollment link, then offer one relevant next step such as the free demo or optional mentor guidance.
 - If the student is weak, failed, old graduate, delayed, confused, or struggling, reassure first: tell them they are in the right place, explain roadmap/mentor feedback/weak-area correction, then guide to recording/demo/live session.
-- If the student says yes/ok/interested, send the next useful asset unless they asked a question. Do not jump to Google Meet time before value is shown.
+- If the student says yes or interested in response to a specific offer, take only that offered next step. If they say ok, thanks, great, perfect, or noted, acknowledge briefly without sending a new asset or restarting the sales flow.
 - Always use EST for scheduling unless the student asks for another timezone.
 
 Conversation intelligence:
@@ -49762,7 +49768,7 @@ Conversation intelligence:
 - If enough is known, move to recording/live session/UWorld demo first, then Google Meet mentor consultation after value is shown or if directly requested.
 - Roadmap knowledge: if the student asks roadmap/study plan/curriculum, summarize the structured 120-day plan as ${NEXTGEN_STEP1_ROADMAP_SYSTEM_SEQUENCE.length} systems in this exact current order: ${ngRoadmapSystemSequenceText()}. Explain that each lecture connects First Aid topic + mapped UWorld QIDs from LMS + live teaching + matching recording + homework/tasks + notes/recordings + adaptive flashcards + assessment/revision. Do not say MSK first. Do not omit Dermatology. Do not invent a different system count. Do not explain each day unless asked.
 - Resources knowledge: if the student asks resources, say we use First Aid, UWorld-style QBank/MCQ discussion, Pathoma concepts, and NextGen assessments, connected with MCQ-solving, weak-area review, and exam strategy.
-- Softly mention roadmap/resources in general program explanation even when not asked, but keep it short.
+- Mention roadmap/resources in a general programme explanation only when it is relevant to the need the student expressed; never add them to a greeting or simple acknowledgement.
 - Mention the UWorld Video Library naturally when it helps sell value: around 150 hours, 3000+ MCQs, First Aid integrated with every MCQ, MCQ approach, option elimination, concept connection, and weak-area correction. Invite the student to take the configured free demo and see the first lecture of every chapter; do not use a hard-coded demo duration.
 - Share the UWorld library link only as the UWorld Video Library/resource, not as a random website link.
 
@@ -49802,7 +49808,7 @@ Write only Ayla's next message. No markdown headings. No bullet list unless the 
 
   const featureOverviewRequested = ngAylaIsFullFeatureOverviewRequest(latestInboundText);
   const result = await callOpenAIResponsesAPI({
-    model: process.env.AI_MODEL || "gpt-4o-mini",
+    model: process.env.AYLA_MODEL || process.env.AI_MODEL || "gpt-4o-mini",
     systemPrompt,
     userPrompt,
     maxOutputTokens: featureOverviewRequested ? 300 : 140,
@@ -49825,7 +49831,7 @@ Write only Ayla's next message. No markdown headings. No bullet list unless the 
   return {
     reply,
     usage: result.usage || {},
-    model: result.model || process.env.AI_MODEL || "gpt-4o-mini",
+    model: result.model || process.env.AYLA_MODEL || process.env.AI_MODEL || "gpt-4o-mini",
   };
 }
 
@@ -67168,7 +67174,7 @@ function ngPickAylaMediaAssetsForReply(db = {}, { lead = {}, reply = "", latestI
 
   // Media must answer the current turn. Older conversation text can contain a stale
   // feature keyword and must not cause an unrelated image to be sent now.
-  const text = [reply, latestInboundText].join("\n");
+  const text = latestInboundText;
   const assets = ngAylaMediaEligibleAssets(db, lead?.brand_id || null);
   const scored = assets
     .map((asset) => ({ asset, usage: ngNormalizeMediaUsageKey(asset.usage_area || "general"), score: ngMediaTextMatchScore(text, asset) }))
