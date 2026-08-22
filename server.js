@@ -50106,7 +50106,7 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
       maxOutputTokens: 750,
       textFormat: aylaConversationTextFormat(),
     });
-    const parsed = parseAIJson(result.text || "{}");
+    const parsed = safeJsonParseFromAI(result.text || "{}");
     return {
       result,
       decision: normalizeAylaConversationDecision(parsed, state),
