@@ -50226,7 +50226,9 @@ function ngAylaCommitConversationTurnAfterDelivery({ lead = {}, ai = {}, sendRes
   if (!lead.exam_type && nextState.facts?.exam && nextState.facts.exam !== "unknown") lead.exam_type = nextState.facts.exam;
   if (!lead.main_need && nextState.facts?.main_need) lead.main_need = nextState.facts.main_need;
   if (!lead.country && nextState.facts?.country) lead.country = nextState.facts.country;
-  applyAylaConversationNameToLead(lead, nextState.facts?.name, nowIso());
+  applyAylaConversationNameToLead(lead, nextState.facts?.name, nowIso(), {
+    source: nextState.fact_sources?.name,
+  });
   lead.updated_at = nowIso();
   return true;
 }
