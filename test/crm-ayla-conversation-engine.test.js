@@ -169,7 +169,7 @@ test("programme interest advances from discovery to one complete feature tour wi
   state = applyAylaConversationDecision({ state, decision: tour, now: "2026-08-22T10:03:00.000Z" });
   assert.equal(state.stage, "value_tour");
   assert.ok(state.completed_actions.includes("send_feature_tour"));
-  assert.ok(state.completed_actions.includes("send_demo"));
+  assert.ok(!state.completed_actions.includes("send_demo"));
   assert.equal(state.facts.main_need, "Studying alone and needs a structured programme");
 
   const accidentalRepeat = normalizeAylaConversationDecision({ ...tour, state }, state);
@@ -365,6 +365,57 @@ test("known facts and completed actions are persisted and cannot be requested or
   });
   assert.equal(tourBeforeDemo.action, "send_feature_tour");
   assert.equal(tourBeforeDemo.stage, "value_tour");
+});
+
+test("an explicit demo acceptance always receives the direct link after the feature tour", () => {
+  const state = {
+    ...createAylaConversationState(),
+    stage: "demo_experience",
+    facts: {
+      name: "Sara",
+      exam: "USMLE Step 1",
+      timeline: null,
+      main_need: "Needs structure",
+      country: null,
+      student_type: "prospective",
+    },
+    completed_actions: ["send_feature_tour", "send_demo"],
+    turn_count: 5,
+  };
+  const messages = [
+    { role: "assistant", text: "Please take our seven-day demo: https://nextgenusmle.live/demo" },
+    { role: "student", text: "Yes, I want to try the demo before paying." },
+  ];
+  const normalized = normalizeAylaConversationDecision({
+    ...decision(),
+    stage: "demo_experience",
+    intent: "accept_demo",
+    reply: "Great choice—open the demo here.",
+    action: "send_demo",
+    ask_field: "none",
+  }, state, { messages, latestMessage: messages.at(-1).text });
+
+  assert.equal(normalized.action, "send_demo");
+  assert.match(normalized.reply, /https:\/\/nextgenusmle\.live\/demo/);
+  assert.deepEqual(evaluateAylaConversationDecision({ decision: normalized, state, messages }), []);
+});
+
+test("a fresh prospective lead is asked for their name before other discovery fields", () => {
+  const state = createAylaConversationState();
+  const messages = [{ role: "student", text: "Hi" }];
+  const skippedName = decision({
+    state,
+    reply: "Hi! Which exam are you preparing for?",
+    ask_field: "exam",
+  });
+  assert.ok(evaluateAylaConversationDecision({ decision: skippedName, state, messages }).includes("new_lead_name_not_requested"));
+
+  const asksName = decision({
+    state,
+    reply: "Hi, I’m Ayla. What name should I use for you?",
+    ask_field: "name",
+  });
+  assert.deepEqual(evaluateAylaConversationDecision({ decision: asksName, state, messages }), []);
 });
 
 test("prompt treats Training Center text as facts, not as executable conversation rules", () => {

@@ -593,7 +593,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v294-student-lead-catcher";
+const CRM_AYLA_REPLY_BUILD = "v295-conversion-completion";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
@@ -37473,7 +37473,7 @@ app.get("/admin/crm/ai-training/content-media-imports/:mediaJobId", async (req, 
   }
 });
 
-function ngContentMediaAuditFingerprint(mediaJob, assets, report, linkAudit) {
+function ngContentMediaAuditFingerprint(mediaJob, assets, report, linkAudit, storageAudit = null) {
   const digest = crypto.createHash("sha256");
   digest.update(String(mediaJob?.id || ""));
   digest.update("\u0000");
@@ -37495,7 +37495,56 @@ function ngContentMediaAuditFingerprint(mediaJob, assets, report, linkAudit) {
   digest.update(`\nexisting:${linkAudit?.exactMatches?.length || 0}`);
   digest.update(`\nrepairable:${linkAudit?.missingMatches?.length || 0}`);
   digest.update(`\nconflicts:${linkAudit?.conflictingMatches?.length || 0}`);
+  digest.update(`\nstorage-present:${storageAudit?.present || 0}`);
+  digest.update(`\nstorage-missing:${storageAudit?.missing?.length || 0}`);
+  digest.update(`\nstorage-size-mismatch:${storageAudit?.sizeMismatches?.length || 0}`);
   return digest.digest("hex");
+}
+
+async function ngAuditContentMediaObjectStorage(matches = [], { concurrency = 16 } = {}) {
+  const assets = [...new Map((matches || [])
+    .map((match) => match?.asset)
+    .filter((asset) => String(asset?.objectKey || "").trim())
+    .map((asset) => [String(asset.objectKey), asset])).values()];
+  const missing = [];
+  const sizeMismatches = [];
+  let present = 0;
+  let cursor = 0;
+  const workers = Array.from({
+    length: Math.min(Math.max(1, Number(concurrency) || 1), assets.length || 1),
+  }, async () => {
+    while (cursor < assets.length) {
+      const asset = assets[cursor++];
+      try {
+        const head = await headContentR2Object(asset.objectKey);
+        const expectedSize = Number(asset.sizeBytes || 0);
+        if (expectedSize > 0 && Number(head.sizeBytes || 0) !== expectedSize) {
+          sizeMismatches.push({
+            objectKey: asset.objectKey,
+            originalName: asset.originalName,
+            expectedSize,
+            actualSize: Number(head.sizeBytes || 0),
+          });
+        } else {
+          present += 1;
+        }
+      } catch (error) {
+        missing.push({
+          objectKey: asset.objectKey,
+          originalName: asset.originalName,
+          error: String(error?.name || error?.Code || "not_found"),
+        });
+      }
+    }
+  });
+  await Promise.all(workers);
+  return {
+    checked: assets.length,
+    present,
+    missing,
+    sizeMismatches,
+    verified: missing.length === 0 && sizeMismatches.length === 0 && present === assets.length,
+  };
 }
 
 async function ngBuildContentMediaMappingAudit(mediaJobId) {
@@ -37514,8 +37563,11 @@ async function ngBuildContentMediaMappingAudit(mediaJobId) {
     listContentMediaImportAssetsForParent(parentJob.id),
   ]);
   const report = matchMediaReferences(references, assets);
-  const linkAudit = await auditContentMediaLinks(report.matches);
-  const fingerprint = ngContentMediaAuditFingerprint(mediaJob, assets, report, linkAudit);
+  const [linkAudit, storageAudit] = await Promise.all([
+    auditContentMediaLinks(report.matches),
+    ngAuditContentMediaObjectStorage(report.matches),
+  ]);
+  const fingerprint = ngContentMediaAuditFingerprint(mediaJob, assets, report, linkAudit, storageAudit);
   const sourceMediaJobIds = [...new Set(assets
     .map((asset) => String(asset.mediaImportJobId || ""))
     .filter(Boolean))];
@@ -37526,6 +37578,7 @@ async function ngBuildContentMediaMappingAudit(mediaJobId) {
     assets,
     report,
     linkAudit,
+    storageAudit,
     fingerprint,
     sourceMediaJobIds,
   };
@@ -37540,6 +37593,7 @@ function ngPublicContentMediaMappingAudit(audit) {
     linkAudit,
     fingerprint,
     sourceMediaJobIds,
+    storageAudit,
   } = audit;
   return {
     media_job_id: mediaJob.id,
@@ -37559,7 +37613,12 @@ function ngPublicContentMediaMappingAudit(audit) {
     remaining_missing: report.missing.length,
     remaining_ambiguous: report.ambiguous.length,
     projected_unreferenced: report.unreferenced.length,
-    no_binary_reupload_required: true,
+    binary_storage_verified: storageAudit.verified,
+    binary_objects_checked: storageAudit.checked,
+    binary_objects_present: storageAudit.present,
+    binary_objects_missing: storageAudit.missing.length,
+    binary_objects_size_mismatched: storageAudit.sizeMismatches.length,
+    no_binary_reupload_required: storageAudit.verified,
     deletes_uploaded_objects: false,
     binary_objects_deleted: 0,
     overwrites_existing_links: false,
@@ -37578,6 +37637,16 @@ function ngPublicContentMediaMappingAudit(audit) {
     conflict_samples: linkAudit.conflictingMatches.slice(0, 50).map((item) => ({
       student_qid: item.studentQid,
       media_ref: item.mediaRef,
+    })),
+    missing_object_samples: storageAudit.missing.slice(0, 50).map((item) => ({
+      original_name: item.originalName,
+      object_key: item.objectKey,
+    })),
+    size_mismatch_samples: storageAudit.sizeMismatches.slice(0, 50).map((item) => ({
+      original_name: item.originalName,
+      object_key: item.objectKey,
+      expected_size: item.expectedSize,
+      actual_size: item.actualSize,
     })),
   };
 }
@@ -37848,6 +37917,14 @@ app.post("/admin/crm/ai-training/content-media-imports/:mediaJobId/reconcile-dra
       return res.status(409).json({
         success: false,
         error: "The media mapping audit changed. Refresh the dry-run audit before applying repairs.",
+      });
+    }
+    if (!audit.storageAudit?.verified) {
+      return res.status(409).json({
+        success: false,
+        error: "The media links exist in the database, but one or more binary files are missing or the wrong size in storage. Restore those files before reconciling links.",
+        binary_objects_missing: audit.storageAudit?.missing?.length || 0,
+        binary_objects_size_mismatched: audit.storageAudit?.sizeMismatches?.length || 0,
       });
     }
     releaseFinalizer = await ngMediaFinalizerGate.acquire({
@@ -49224,8 +49301,8 @@ function ngAylaCreateGoogleMeetRequest(db = {}, lead = {}, reason = "google_meet
     priority: reason === "pricing_interest" ? "high" : "normal",
     handoff_type: "google_meet",
     requested_action: "schedule_google_meet",
-    handoff_summary: `Student requested mentor guidance. Exam: ${context.exam || "not collected"}. Country/place: ${context.country || "not collected"}. Main concern: ${context.concern || sourceText || "not collected"}. Already covered by Ayla: ${context.coverage.join(", ") || "not confirmed"}.`,
-    recommended_next_action: "Collect any missing name, country/place, exam, concern and preferred time in EST, then schedule the Google Meet consultation without repeating information Ayla already covered.",
+    handoff_summary: `Student requested mentor guidance. Name: ${context.student_name || "not collected"}. Email: ${context.email || "not collected"}. Exam: ${context.exam || "not collected"}. Country/place: ${context.country || "not collected"}. Main concern: ${context.concern || sourceText || "not collected"}. Already covered by Ayla: ${context.coverage.join(", ") || "not confirmed"}.`,
+    recommended_next_action: "Collect any missing name, email, country/place, exam, concern, and preferred date/time with timezone; then schedule the Google Meet consultation without repeating information Ayla already covered.",
     qualification: context,
     source: reason,
   }, existingHandoff || {});
@@ -49243,10 +49320,10 @@ The best option depends on your exam timeline, weak areas, and whether you need 
 I can arrange a Google Meet mentor consultation so you can get the correct option clearly. What time works best for you in ${timezone}?`;
 }
 
-function ngAylaGoogleMeetBookingReply(timezone = "EST") {
+function ngAylaGoogleMeetBookingReply() {
   return `Sure Doctor, I’ll arrange a Google Meet mentor consultation for you.
 
-What time works best for you in ${timezone}?`;
+What date and time work best for you, and which time zone should I use?`;
 }
 
 function ngAylaHandoffExamLabel(lead = {}, messages = []) {
@@ -49279,7 +49356,9 @@ function ngAylaHandoffConcern(lead = {}, messages = []) {
 function ngAylaHumanHandoffContext(lead = {}, messages = []) {
   const conversation = safeArray(messages).map((message) => ngMessageText(message)).filter(Boolean).join("\n").toLowerCase();
   const rawName = String(ng41LeadName(lead) || "").trim();
-  const studentName = /^(?:student|doctor|doc|unknown|whatsapp user)$/i.test(rawName) || /^\+?[\d\s().-]+$/.test(rawName) ? "" : rawName;
+  const studentName = /^(?:student|doctor|doc|unknown|whatsapp (?:user|lead)|next\s*gen(?:eration)?(?:\s+(?:academy|institute|scholars|usmle))?|business)$/i.test(rawName) || /^\+?[\d\s().-]+$/.test(rawName) ? "" : rawName;
+  const rawEmail = String(ng41LeadEmail(lead) || "").trim().toLowerCase();
+  const email = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(rawEmail) ? rawEmail : "";
   const country = String(lead.country || lead.country_name || lead.location || lead.city || lead.google_meet_country || "").trim();
   const exam = ngAylaHandoffExamLabel(lead, messages);
   const concern = ngAylaHandoffConcern(lead, messages);
@@ -49291,11 +49370,12 @@ function ngAylaHumanHandoffContext(lead = {}, messages = []) {
     /baseline diagnostic|weak areas|adaptive flashcards/.test(conversation) ? "diagnostic and weak-area adaptation" : "",
   ].filter(Boolean);
   const valueShown = coverage.includes("programme and roadmap") && coverage.some((item) => ["7-day demo", "live session", "labelled recording"].includes(item));
-  return { student_name: studentName, country, exam, concern, coverage, value_shown: valueShown };
+  return { student_name: studentName, email, country, exam, concern, coverage, value_shown: valueShown };
 }
 
 function ngAylaNextHandoffQualificationField(context = {}) {
   if (!context.student_name) return "name";
+  if (!context.email) return "email";
   if (!context.country) return "country";
   if (!context.exam) return "exam";
   if (!context.concern) return "concern";
@@ -49306,11 +49386,12 @@ function ngAylaHandoffQualificationReply(lead = {}, messages = []) {
   const field = ngAylaNextHandoffQualificationField(ngAylaHumanHandoffContext(lead, messages));
   if (!field) {
     lead.next_action = "collect_google_meet_time";
-    return ngAylaGoogleMeetBookingReply("EST");
+    return ngAylaGoogleMeetBookingReply();
   }
   lead.next_action = `collect_google_meet_${field}`;
   const prompts = {
     name: "Before I book it, what name should I use for your meeting?",
+    email: "Which email address should I use for your meeting confirmation?",
     country: "Which country or city are you joining from? This helps our mentor understand your pathway and time zone.",
     exam: "Which exam are you preparing for?",
     concern: "What is the main concern you want the mentor to help you solve in the meeting?",
@@ -49326,6 +49407,13 @@ function ngAylaCaptureHandoffQualificationReply(lead = {}, latestText = "") {
     lead.full_name = value;
     lead.name = value;
     lead.contact_name = value;
+    lead.name_source = "conversation_self_reported";
+  } else if (action === "collect_google_meet_email") {
+    const email = value.toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return false;
+    lead.email = email;
+    lead.contact_email = email;
+    lead.google_meet_email = email;
   } else if (action === "collect_google_meet_country") {
     lead.country = value;
     lead.google_meet_country = value;
@@ -49360,6 +49448,21 @@ function ngAylaLooksLikeTimePreference(text = "") {
   return /(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\b\d{1,2}(:\d{2})?\s*(am|pm)\b|morning|evening|night|afternoon)/i.test(t);
 }
 
+function ngAylaMeetingTimezoneFromText(text = "") {
+  const value = String(text || "").trim();
+  const mappings = [
+    [/\b(?:est|edt|eastern(?:\s+time)?)\b/i, { timezone: "America/New_York", label: "Eastern Time" }],
+    [/\b(?:cst|cdt|central(?:\s+time)?)\b/i, { timezone: "America/Chicago", label: "Central Time" }],
+    [/\b(?:mst|mdt|mountain(?:\s+time)?)\b/i, { timezone: "America/Denver", label: "Mountain Time" }],
+    [/\b(?:pst|pdt|pacific(?:\s+time)?)\b/i, { timezone: "America/Los_Angeles", label: "Pacific Time" }],
+    [/\b(?:utc|gmt)\b/i, { timezone: "UTC", label: "UTC" }],
+    [/\b(?:pkt|pakistan(?:\s+time)?)\b/i, { timezone: "Asia/Karachi", label: "Pakistan Time" }],
+    [/\b(?:india(?:n)?(?:\s+standard)?\s+time|ist)\b/i, { timezone: "Asia/Kolkata", label: "India Time" }],
+    [/\b(?:uk|british|bst)(?:\s+time)?\b/i, { timezone: "Europe/London", label: "UK Time" }],
+  ];
+  return mappings.find(([pattern]) => pattern.test(value))?.[1] || null;
+}
+
 function ngAylaNextDateForWeekday(weekdayIndex, base = new Date()) {
   const d = new Date(base);
   const current = d.getDay();
@@ -49371,6 +49474,7 @@ function ngAylaNextDateForWeekday(weekdayIndex, base = new Date()) {
 
 function ngAylaParsePreferredGoogleMeetTime(text = "") {
   const t = String(text || "").toLowerCase();
+  const timezone = ngAylaMeetingTimezoneFromText(text);
   const now = new Date();
   let date = new Date(now);
   if (/tomorrow/i.test(t)) date.setDate(date.getDate() + 1);
@@ -49397,7 +49501,13 @@ function ngAylaParsePreferredGoogleMeetTime(text = "") {
   const d = String(date.getDate()).padStart(2, "0");
   const hh = String(hour).padStart(2, "0");
   const mm = String(minute).padStart(2, "0");
-  return { date: `${y}-${m}-${d}`, time: `${hh}:${mm}`, start_time: `${y}-${m}-${d}T${hh}:${mm}:00`, timezone: "America/New_York" };
+  return {
+    date: `${y}-${m}-${d}`,
+    time: `${hh}:${mm}`,
+    start_time: `${y}-${m}-${d}T${hh}:${mm}:00`,
+    timezone: timezone?.timezone || "",
+    timezone_label: timezone?.label || "",
+  };
 }
 
 function ngAylaCreateGoogleMeetAppointmentFromPreference(db = {}, lead = {}, preference = null, sourceText = "", messages = []) {
@@ -49429,8 +49539,9 @@ function ngAylaCreateGoogleMeetAppointmentFromPreference(db = {}, lead = {}, pre
     scheduled_date: preference.date,
     scheduled_time: preference.time,
     start_time: preference.start_time,
-    timezone: preference.timezone || "America/New_York",
-    timezone_str: preference.timezone || "America/New_York",
+    timezone: preference.timezone,
+    timezone_str: preference.timezone,
+    timezone_label: preference.timezone_label || preference.timezone,
     reminder_minutes_before: 5,
     google_meet_requested: true,
     link_send_scheduled: false,
@@ -49456,7 +49567,8 @@ function ngAylaCreateGoogleMeetAppointmentFromPreference(db = {}, lead = {}, pre
     handoff.appointment_id = payload.id;
     handoff.scheduled_date = preference.date;
     handoff.scheduled_time = preference.time;
-    handoff.timezone = preference.timezone || "America/New_York";
+    handoff.timezone = preference.timezone;
+    handoff.timezone_label = preference.timezone_label || preference.timezone;
     handoff.qualification = handoffContext;
     handoff.handoff_summary = payload.conversation_summary;
     handoff.recommended_next_action = "Add or confirm the Google Meet link, then continue from Ayla's summary without repeating discovery.";
@@ -49518,8 +49630,12 @@ function ngAylaHardSalesRouter({ db = {}, lead = {}, messages = [], channel = "w
   const timePreference = (leadWaitingForGoogleMeetTime || previousOfferedGoogleMeet || leadHasGoogleMeetStateLock) && ngAylaLooksLikeTimePreference(latestText)
     ? ngAylaParsePreferredGoogleMeetTime(latestText)
     : null;
+  const pendingTimePreference = lead.google_meet_pending_preference && typeof lead.google_meet_pending_preference === "object"
+    ? lead.google_meet_pending_preference
+    : null;
+  const pendingTimezone = pendingTimePreference ? ngAylaMeetingTimezoneFromText(latestText) : null;
 
-  const collectingHandoffQualification = /^collect_google_meet_(?:name|country|exam|concern)$/i.test(String(lead.next_action || ""));
+  const collectingHandoffQualification = /^collect_google_meet_(?:name|email|country|exam|concern)$/i.test(String(lead.next_action || ""));
   if (collectingHandoffQualification) {
     ngAylaCaptureHandoffQualificationReply(lead, latestText);
     const reply = ngAylaHandoffQualificationReply(lead, cleanMessages);
@@ -49531,12 +49647,38 @@ function ngAylaHardSalesRouter({ db = {}, lead = {}, messages = [], channel = "w
     };
   }
 
+  if (pendingTimePreference && pendingTimezone) {
+    const completedPreference = {
+      ...pendingTimePreference,
+      timezone: pendingTimezone.timezone,
+      timezone_label: pendingTimezone.label,
+    };
+    const appointment = ngAylaCreateGoogleMeetAppointmentFromPreference(db, lead, completedPreference, latestText, cleanMessages);
+    delete lead.google_meet_pending_preference;
+    ngAylaMarkGoogleMeetLockedLead(lead, appointment);
+    return {
+      intent: "google_meet_time_collected_missing_link",
+      reply: `Great Doctor, I have noted your preferred Google Meet time for ${completedPreference.date} at ${completedPreference.time} ${completedPreference.timezone_label}.
+
+Our team will confirm the Google Meet link shortly. You will receive the link at the meeting time.`
+    };
+  }
+
   if (timePreference) {
+    if (!timePreference.timezone) {
+      lead.next_action = "collect_google_meet_time";
+      lead.google_meet_pending_preference = timePreference;
+      lead.updated_at = nowIso();
+      return {
+        intent: "google_meet_time_missing_timezone",
+        reply: "That date and time works. Which time zone should I use for it?"
+      };
+    }
     const appointment = ngAylaCreateGoogleMeetAppointmentFromPreference(db, lead, timePreference, latestText, cleanMessages);
     ngAylaMarkGoogleMeetLockedLead(lead, appointment);
     return {
       intent: "google_meet_time_collected_missing_link",
-      reply: `Great Doctor, I have noted your preferred Google Meet time for ${timePreference.date} at ${timePreference.time} EST.
+      reply: `Great Doctor, I have noted your preferred Google Meet time for ${timePreference.date} at ${timePreference.time} ${timePreference.timezone_label || timePreference.timezone}.
 
 Our team will confirm the Google Meet link shortly. You will receive the link at the meeting time.`
     };
@@ -49846,12 +49988,15 @@ async function ngLegacyStudentAutoReply({ db = null, lead, messages, channel }) 
   const latestInboundTextForRouting = ngMessageText(latestInboundForRouting || {});
   const activeMeeting = db ? ngAylaFindActiveGoogleMeetAppointment(db, lead) : null;
   const hasMeetingState = db ? ngAylaLeadGoogleMeetState(lead, activeMeeting) : false;
-  const collectingMeetingQualification = hasMeetingState && /^collect_google_meet_(?:name|country|exam|concern)$/i.test(String(lead?.next_action || ""));
+  const collectingMeetingQualification = hasMeetingState && /^collect_google_meet_(?:name|email|country|exam|concern)$/i.test(String(lead?.next_action || ""));
   const needsProtectedControl =
     /\b(stop|unsubscribe|do not message|don't message|dont message|remove me|wrong number|not interested)\b/i.test(latestInboundTextForRouting) ||
     ngAylaIsDirectGoogleMeetRequest(latestInboundTextForRouting) ||
     collectingMeetingQualification ||
-    (hasMeetingState && ngAylaLooksLikeTimePreference(latestInboundTextForRouting));
+    (hasMeetingState && (
+      ngAylaLooksLikeTimePreference(latestInboundTextForRouting)
+      || (lead?.google_meet_pending_preference && ngAylaMeetingTimezoneFromText(latestInboundTextForRouting))
+    ));
 
   // Only protected CRM actions use deterministic code. Ordinary conversation
   // bypasses the old scripted router completely and is written by Ayla below.
@@ -50116,12 +50261,15 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
 
   const activeMeeting = db ? ngAylaFindActiveGoogleMeetAppointment(db, lead) : null;
   const hasMeetingState = db ? ngAylaLeadGoogleMeetState(lead, activeMeeting) : false;
-  const collectingMeetingQualification = hasMeetingState && /^collect_google_meet_(?:name|country|exam|concern)$/i.test(String(lead?.next_action || ""));
+  const collectingMeetingQualification = hasMeetingState && /^collect_google_meet_(?:name|email|country|exam|concern)$/i.test(String(lead?.next_action || ""));
   const needsProtectedControl =
     /\b(stop|unsubscribe|do not message|don't message|dont message|remove me|wrong number|not interested)\b/i.test(latestInboundText) ||
     ngAylaIsDirectGoogleMeetRequest(latestInboundText) ||
     collectingMeetingQualification ||
-    (hasMeetingState && ngAylaLooksLikeTimePreference(latestInboundText));
+    (hasMeetingState && (
+      ngAylaLooksLikeTimePreference(latestInboundText)
+      || (lead?.google_meet_pending_preference && ngAylaMeetingTimezoneFromText(latestInboundText))
+    ));
   const protectedDecision = db && needsProtectedControl
     ? ngAylaHardSalesRouter({ db, lead, messages: cleanMessages, channel })
     : null;
@@ -50165,7 +50313,7 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
   const mediaGuidance = db ? ngBuildAylaMediaGuidance(db, lead) : "";
   const officialExamGuidance = ngAylaOfficialExamGuidancePrompt(latestInboundText, historyText);
   const protectedActionContext = protectedDecision?.intent
-    ? `The backend already applied protected intent ${protectedDecision.intent}. Continue naturally from the updated lead state. Do not repeat a canned backend reply.`
+    ? `The backend already applied protected intent ${protectedDecision.intent}. Continue naturally from the updated lead state. The current protected next action is ${String(lead.next_action || "none")}; ask only for that missing meeting detail when it is a collection action. Protected outcome facts: ${String(protectedDecision.reply || "none")}. Write fresh natural wording rather than copying a canned backend reply.`
     : hasMeetingState
       ? "A human-handoff or Google Meet state already exists. Continue it without restarting sales discovery."
       : "None.";
@@ -50195,7 +50343,13 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
       textFormat: aylaConversationTextFormat(),
     });
     const parsed = safeJsonParseFromAI(result.text || "{}");
-    const decision = normalizeAylaConversationDecision(parsed, state);
+    const decision = normalizeAylaConversationDecision(parsed, state, {
+      messages: cleanMessages.map((message) => ({
+        role: ngIsOutboundMessage(message) ? "assistant" : "student",
+        text: ngMessageText(message),
+      })),
+      latestMessage: latestInboundText,
+    });
     // The model decides whether the full tour is appropriate and writes its
     // personalised introduction. Fixed delivery invariants belong to the
     // backend: every tour must finish with the configured demo/catch-up
@@ -50236,6 +50390,14 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
         ? ["reasks_stated_support_error"]
         : []
     ),
+    ...(() => {
+      const required = String(lead.next_action || "").match(/^collect_google_meet_(name|email|country|exam|concern|time)$/i)?.[1]?.toLowerCase();
+      if (!required) return [];
+      const expectedAskField = required === "concern" ? "main_need" : required === "time" ? "preferred_time" : required;
+      if (!["begin_human_handoff", "continue_human_handoff"].includes(candidate.action)) return [`handoff_missing_required_action:${required}`];
+      if (candidate.ask_field !== expectedAskField) return [`handoff_wrong_required_field:${required}`];
+      return [];
+    })(),
   ]);
 
   let { result, decision } = await requestDecision("Understand the complete conversation and produce Ayla's next structured decision now.");
@@ -50304,6 +50466,10 @@ function ngAylaCommitConversationTurnAfterDelivery({ lead = {}, ai = {}, sendRes
   applyAylaConversationNameToLead(lead, nextState.facts?.name, nowIso(), {
     source: nextState.fact_sources?.name,
   });
+  if (nextState.last_action === "send_demo") {
+    lead.demo_link_sent = true;
+    lead.demo_link_sent_at = lead.demo_link_sent_at || nowIso();
+  }
   lead.updated_at = nowIso();
   return true;
 }
@@ -81134,7 +81300,17 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       const supplementalPrefix = pick[0].supplemental === true
         ? "Step 2 CK supplemental — "
         : "";
-      aylaV189BuildDailyPlanAddAssignment(
+      const videoAssignmentOptions = {
+        system: focusSystem,
+        subsystem: pick[0].subsystem || focusSubsystem,
+        topic: pick[0].topic || focusTopic,
+        rationale: plan.finalReviewMode
+          ? `${selection.resumed ? "Resume" : "Watch"} this verified ${selection.match_level.replace(/_/g, " ")} lecture as targeted final-review support for the same weakness; watch position and completion are saved.`
+          : pick[0].supplemental === true
+          ? `${selection.resumed ? "Resume" : "Watch"} this verified Step 2 CK clinical lecture as a non-scoring MCCQE supplement for today’s ${selection.match_level.replace(/_/g, " ")} focus; watch position and completion are saved, but MCCQE readiness remains MCCQE-specific.`
+          : `${selection.resumed ? "Resume" : "Watch"} the ${selection.match_level.replace(/_/g, " ")} verified embedded video for today’s focus; watch position and completion are saved.`,
+      };
+      let videoAssignment = aylaV189BuildDailyPlanAddAssignment(
         db,
         student,
         plan,
@@ -81143,17 +81319,26 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
         "video",
         pick,
         `Watch: ${supplementalPrefix}${pick[0].title}`,
-        {
-          system: focusSystem,
-          subsystem: pick[0].subsystem || focusSubsystem,
-          topic: pick[0].topic || focusTopic,
-          rationale: plan.finalReviewMode
-            ? `${selection.resumed ? "Resume" : "Watch"} this verified ${selection.match_level.replace(/_/g, " ")} lecture as targeted final-review support for the same weakness; watch position and completion are saved.`
-            : pick[0].supplemental === true
-            ? `${selection.resumed ? "Resume" : "Watch"} this verified Step 2 CK clinical lecture as a non-scoring MCCQE supplement for today’s ${selection.match_level.replace(/_/g, " ")} focus; watch position and completion are saved, but MCCQE readiness remains MCCQE-specific.`
-            : `${selection.resumed ? "Resume" : "Watch"} the ${selection.match_level.replace(/_/g, " ")} verified embedded video for today’s focus; watch position and completion are saved.`,
-        },
+        videoAssignmentOptions,
       );
+      // One overdue QBank block must not silently consume the entire day and
+      // make an otherwise verified lecture disappear. Permit one bounded
+      // QBank-plus-video day while still respecting the existing 35% hard
+      // over-capacity ceiling. Larger overloads remain deferred.
+      if (!videoAssignment && plan.plannedMinutes < effectiveCapacity) {
+        videoAssignment = aylaV189BuildDailyPlanAddAssignment(
+          db,
+          student,
+          plan,
+          assignments,
+          effectiveCapacity,
+          "video",
+          pick,
+          `Watch: ${supplementalPrefix}${pick[0].title}`,
+          { ...videoAssignmentOptions, allowOverCapacity: true },
+        );
+      }
+      if (!videoAssignment) plan.missingResourceTypes.push("video_deferred_by_capacity");
     }
     else plan.missingResourceTypes.push("video_for_focus");
   }

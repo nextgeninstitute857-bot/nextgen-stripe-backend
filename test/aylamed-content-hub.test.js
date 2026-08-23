@@ -335,6 +335,36 @@ test("roadmap assignment respects subsystem boundaries before topic scoring", ()
   assert.equal(selected.match_level, "exact_topic");
 });
 
+test("roadmap falls back to a verified system lecture when the QBank subsystem is more specific", () => {
+  const systemWide = legacyVideo({
+    id: "micro-system-wide",
+    vimeoId: "558",
+    vimeoUrl: "",
+    system: "Microbiology",
+    subsystem: "",
+    topic: "High-yield microbiology",
+    deliveryDestinations: ["aylamed_roadmap"],
+  });
+  const unrelated = legacyVideo({
+    id: "renal-unrelated",
+    vimeoId: "559",
+    vimeoUrl: "",
+    system: "Renal",
+    subsystem: "Bacteria",
+    topic: "Bacteria",
+    deliveryDestinations: ["aylamed_roadmap"],
+  });
+  const selected = selectAylaRoadmapVideo({
+    examTrack: "usmle_step_1",
+    videos: [unrelated, systemWide],
+    focusSystem: "Microbiology",
+    focusSubsystem: "Bacteria",
+    focusTopic: "Bacteria",
+  });
+  assert.equal(selected.video.id, "micro-system-wide");
+  assert.equal(selected.match_level, "system");
+});
+
 test("roadmap and catalog filters recognize approved medical and QBank topic aliases", () => {
   const aliased = legacyVideo({
     id: "aliased",
@@ -419,6 +449,8 @@ test("server and registry wire one entitlement-guarded Content Hub into the exis
   assert.match(server, /sourceExamTrackId: snapshots\[0\]\?\.sourceExamTrackId/);
   assert.match(server, /Step 2 CK supplemental —/);
   assert.match(server, /MCCQE readiness remains MCCQE-specific/);
+  assert.match(server, /video_deferred_by_capacity/);
+  assert.match(server, /plan\.plannedMinutes < effectiveCapacity[\s\S]*?allowOverCapacity: true/);
   assert.match(server, /focusSubsystem,/);
   assert.match(server, /subsystem: req\.query\.subsystem \|\| req\.query\.subsystem_key/);
   assert.match(server, /const pageSize = 500;[\s\S]*?while \(true\)[\s\S]*?offset: sourceRows\.length/);
