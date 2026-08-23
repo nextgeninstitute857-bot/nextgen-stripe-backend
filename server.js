@@ -5,7 +5,10 @@ import {
   scheduleFlashcardReview,
   validateFlashcardContent,
 } from "./lib/flashcard-engine.js";
-import { contentDeliveryPolicySnapshot } from "./lib/content-delivery-priority.js";
+import {
+  CONTENT_DELIVERY_SOURCE_YEARS,
+  contentDeliveryPolicySnapshot,
+} from "./lib/content-delivery-priority.js";
 import {
   flashcardMatchesCurrentSystem,
   flashcardPriorityRank,
@@ -43976,7 +43979,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         );
       }
       const staleOrMediaIncomplete = selected.filter((question) =>
-        ![2026, 2025, 2024].includes(Number(question.source_year))
+        !CONTENT_DELIVERY_SOURCE_YEARS.includes(Number(question.source_year))
         || question.media_integrity_verified !== true);
       if (staleOrMediaIncomplete.length) {
         return aylaSendError(
@@ -70482,8 +70485,32 @@ function aylaRecommendation(input = {}) {
   };
 }
 
+const AYLA_REST_DAY_OPTIONS = Object.freeze([
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+  "Sunday",
+]);
+
+function aylaNormalizeRestDay(value, { strict = false } = {}) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const normalized = AYLA_REST_DAY_OPTIONS.find((day) => day.toLowerCase() === raw.toLowerCase());
+  if (normalized) return normalized;
+  if (!strict) return "";
+  const error = new Error("Rest day must be empty or a valid weekday");
+  error.statusCode = 400;
+  error.code = "INVALID_REST_DAY";
+  error.details = { allowed_rest_days: ["", ...AYLA_REST_DAY_OPTIONS] };
+  throw error;
+}
+
 function aylaStudentFromDiagnostic(payload = {}, recommendation = aylaRecommendation(payload)) {
   const preferredStudyDays = aylaCleanArray(payload.preferredStudyDays || payload.preferred_study_days);
+  const restDay = aylaNormalizeRestDay(payload.restDay ?? payload.rest_day);
   const examTrackId = aylaCanonicalExamTrack(payload.examTrackId || payload.exam_track_id || payload.exam || payload.selectedExam);
   const examDefinition = examTrackId ? AYLA_EXAM_REGISTRY[examTrackId] : null;
   const examVariant = examTrackId === "nclex"
@@ -70512,7 +70539,7 @@ function aylaStudentFromDiagnostic(payload = {}, recommendation = aylaRecommenda
     weeklyStudyDays: recommendation.weeklyStudyDays,
     preferredStudyDays,
     sessionLength: aylaNumber(payload.sessionLength ?? payload.session_length, 50),
-    restDay: payload.restDay || payload.rest_day || "",
+    restDay,
     targetScore: aylaNumber(payload.targetScore ?? payload.target_score, 65),
     currentScore: aylaNumber(payload.currentScore ?? payload.current_score, 0),
     qbankCompleted: aylaNumber(payload.qbankCompleted ?? payload.qbank_completed, 0),
@@ -70634,10 +70661,9 @@ function aylaIsStudyDay(student, date) {
   const preferred = aylaCleanArray(student.preferredStudyDays);
   const name = aylaDayName(date);
   if (preferred.length) return preferred.includes(name);
-  if (student.restDay && name === student.restDay) return false;
-  const weeklyDays = Math.max(1, Math.min(7, aylaNumber(student.weeklyStudyDays, 6)));
-  const defaultOrder = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-  return defaultOrder.indexOf(name) < weeklyDays;
+  const restDay = aylaNormalizeRestDay(student.restDay || student.rest_day);
+  if (restDay && name === restDay) return false;
+  return true;
 }
 
 function aylaBuildRoadmapTasks(student, recommendation = aylaRecommendation(student)) {
@@ -80267,12 +80293,12 @@ function aylaV189BacklogWarning(db, student, date, systemProgress = aylaV189Syst
 function aylaV189StudyDayStatus(student, date) {
   const dayName = aylaDayName(new Date(`${date}T12:00:00Z`));
   const preferred = aylaCleanArray(student.preferredStudyDays || student.preferred_study_days);
-  const restDay = String(student.restDay || student.rest_day || "").trim().toLowerCase();
+  const restDay = aylaNormalizeRestDay(student.restDay || student.rest_day);
   if (preferred.length) {
     const allowed = preferred.some((day) => String(day).toLowerCase() === dayName.toLowerCase());
     return { isStudyDay: allowed, dayName, reason: allowed ? "preferred_study_day" : "outside_preferred_study_days" };
   }
-  if (restDay && dayName.toLowerCase() === restDay) return { isStudyDay: false, dayName, reason: "protected_rest_day" };
+  if (restDay && dayName === restDay) return { isStudyDay: false, dayName, reason: "protected_rest_day" };
   return { isStudyDay: true, dayName, reason: "scheduled_study_day" };
 }
 
@@ -82932,6 +82958,11 @@ app.post("/api/ayla/profile/preview", async (req, res) => {
     aylaApplyNclexVariantToStudent(proposed, req.body || {});
     const allowed = ["exam", "goalType", "examDate", "matchDate", "dailyHours", "weeklyStudyDays", "restDay", "timezone", "country", "language", "qbankCompleted", "qbankAverage", "studyPartnerOptIn"];
     for (const key of allowed) if (req.body[key] !== undefined) proposed[key] = req.body[key];
+    if (req.body.restDay !== undefined) {
+      proposed.restDay = aylaNormalizeRestDay(req.body.restDay, { strict: true });
+      proposed.preferredStudyDays = [];
+      proposed.weeklyStudyDays = proposed.restDay ? 6 : 7;
+    }
     if (req.body.exam !== undefined || req.body.examTrackId !== undefined) {
       const track = aylaExamTrackDefinition(req.body.examTrackId || req.body.exam);
       if (!track) return aylaSendError(res, 400, "Unsupported exam track");
@@ -82940,7 +82971,7 @@ app.post("/api/ayla/profile/preview", async (req, res) => {
       proposed.examTrackId = track.id; proposed.exam = track.label; proposed.curriculumVersion = track.curriculumVersion;
     }
     if (req.body.availability !== undefined) proposed.availability = aylaCleanArray(req.body.availability);
-    if (req.body.preferredStudyDays !== undefined || req.body.preferred_study_days !== undefined) proposed.preferredStudyDays = aylaCleanArray(req.body.preferredStudyDays ?? req.body.preferred_study_days);
+    if (req.body.restDay === undefined && (req.body.preferredStudyDays !== undefined || req.body.preferred_study_days !== undefined)) proposed.preferredStudyDays = aylaCleanArray(req.body.preferredStudyDays ?? req.body.preferred_study_days);
     if (req.body.weakAreas !== undefined) proposed.weakAreas = aylaCleanArray(req.body.weakAreas);
     if (req.body.selectedResources !== undefined) proposed.selectedResources = aylaCleanArray(req.body.selectedResources);
     if (["external", "internal", "hybrid"].includes(String(req.body.questionSourcePreference))) proposed.questionSourcePreference = String(req.body.questionSourcePreference);
@@ -83005,6 +83036,11 @@ app.put("/api/ayla/profile", async (req, res) => {
       const nclexVariantChanged = aylaApplyNclexVariantToStudent(student, req.body || {});
       const allowedStudent = ["goalType", "examDate", "matchDate", "dailyHours", "weeklyStudyDays", "restDay", "timezone", "country", "language", "qbankCompleted", "qbankAverage", "studyPartnerOptIn"];
       for (const key of allowedStudent) if (req.body[key] !== undefined) student[key] = req.body[key];
+      if (req.body.restDay !== undefined) {
+        student.restDay = aylaNormalizeRestDay(req.body.restDay, { strict: true });
+        student.preferredStudyDays = [];
+        student.weeklyStudyDays = student.restDay ? 6 : 7;
+      }
       if (req.body.exam !== undefined || req.body.examTrackId !== undefined) {
         const track = aylaExamTrackDefinition(req.body.examTrackId || req.body.exam);
         if (!track) throw Object.assign(new Error("Unsupported exam track"), { statusCode: 400 });
@@ -83020,7 +83056,7 @@ app.put("/api/ayla/profile", async (req, res) => {
         student.curriculumVersion = track.curriculumVersion;
       }
       if (req.body.availability !== undefined) student.availability = aylaCleanArray(req.body.availability);
-      if (req.body.preferredStudyDays !== undefined || req.body.preferred_study_days !== undefined) student.preferredStudyDays = aylaCleanArray(req.body.preferredStudyDays ?? req.body.preferred_study_days);
+      if (req.body.restDay === undefined && (req.body.preferredStudyDays !== undefined || req.body.preferred_study_days !== undefined)) student.preferredStudyDays = aylaCleanArray(req.body.preferredStudyDays ?? req.body.preferred_study_days);
       if (req.body.weakAreas !== undefined) student.weakAreas = aylaCleanArray(req.body.weakAreas);
       if (req.body.selectedResources !== undefined) student.selectedResources = aylaCleanArray(req.body.selectedResources);
       if (["external", "internal", "hybrid"].includes(String(req.body.questionSourcePreference))) student.questionSourcePreference = String(req.body.questionSourcePreference);

@@ -28,7 +28,7 @@ test("year is the delivery priority and media presence never changes ranking", (
     has_verified_media: true,
   });
   assert.equal(currentText, currentMedia);
-  assert.ok(currentText < priorMedia);
+  assert.equal(priorMedia, Number.POSITIVE_INFINITY);
   assert.equal(contentDeliveryPriorityRank({ source_year: 2023 }), Number.POSITIVE_INFINITY);
 });
 
@@ -39,15 +39,16 @@ test("repeat avoidance operates inside the same source year", () => {
       < contentDeliveryPriorityRank({ id: "seen-2026", source_year: 2026 }, { seenQuestionIds: seen }),
   );
   assert.ok(
-    contentDeliveryPriorityRank({ id: "seen-2026", source_year: 2026 }, { seenQuestionIds: seen })
-      < contentDeliveryPriorityRank({ id: "fresh-2025", source_year: 2025 }, { seenQuestionIds: seen }),
+    contentDeliveryPriorityRank({ id: "fresh-2025", source_year: 2025 }, { seenQuestionIds: seen })
+      === Number.POSITIVE_INFINITY,
   );
 });
 
 test("policy snapshot describes media integrity as an eligibility gate, not a preference", () => {
   const policy = contentDeliveryPolicySnapshot();
   assert.equal(policy.version, CONTENT_DELIVERY_POLICY_VERSION);
-  assert.deepEqual(policy.source_year_priority, [2026, 2025, 2024]);
+  assert.deepEqual(policy.source_year_priority, [2026]);
+  assert.equal(policy.fallback_strategy, "no_prior_year_fallback");
   assert.equal(policy.media_changes_ranking, false);
   assert.equal(policy.media_integrity_rule, "required_media_must_be_verified_and_playable");
   assert.equal(policy.incomplete_or_quarantined_media_excluded, true);

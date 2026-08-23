@@ -451,9 +451,10 @@ test("server and registry wire one entitlement-guarded Content Hub into the exis
   assert.match(server, /MCCQE readiness remains MCCQE-specific/);
   assert.match(server, /video_deferred_by_capacity/);
   assert.match(server, /plan\.plannedMinutes < effectiveCapacity[\s\S]*?allowOverCapacity: true/);
-  assert.match(server, /const restDay = String\(student\.restDay \|\| student\.rest_day \|\| ""\)/);
-  assert.match(server, /if \(restDay && dayName\.toLowerCase\(\) === restDay\)/);
-  assert.match(server, /restDay: payload\.restDay \|\| payload\.rest_day \|\| ""/);
+  assert.match(server, /function aylaNormalizeRestDay\(/);
+  assert.match(server, /if \(restDay && dayName === restDay\)/);
+  assert.match(server, /const restDay = aylaNormalizeRestDay\(payload\.restDay \?\? payload\.rest_day\)/);
+  assert.match(server, /if \(req\.body\.restDay !== undefined\)[\s\S]*?student\.weeklyStudyDays = student\.restDay \? 6 : 7/);
   assert.doesNotMatch(server, /restDay: payload\.restDay \|\| payload\.rest_day \|\| "Sunday"/);
   assert.match(server, /focusSubsystem,/);
   assert.match(server, /subsystem: req\.query\.subsystem \|\| req\.query\.subsystem_key/);
