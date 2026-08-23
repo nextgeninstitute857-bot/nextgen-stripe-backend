@@ -10,7 +10,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v294-student-lead-catcher"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v295-conversion-completion"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: "message_status"/);
   assert.match(handler, /event: "ignored_non_message"/);
@@ -386,8 +386,13 @@ test("human handoff follows programme value and sends admins a qualified meeting
   assert.match(handoff, /diagnostic and weak-area adaptation/);
   assert.match(handoff, /function ngAylaNextHandoffQualificationField/);
   assert.match(handoff, /collect_google_meet_\$\{field\}/);
+  assert.match(handoff, /Which email address should I use for your meeting confirmation/);
   assert.match(handoff, /Which country or city are you joining from/);
   assert.match(handoff, /main concern you want the mentor to help you solve/);
+  assert.match(server, /What date and time work best for you, and which time zone should I use/);
+  assert.match(server, /function ngAylaMeetingTimezoneFromText/);
+  assert.match(server, /google_meet_time_missing_timezone/);
+  assert.match(server, /timezone_label: preference\.timezone_label/);
   assert.match(server, /student_country: handoffContext\.country/);
   assert.match(server, /programme_coverage: handoffContext\.coverage/);
   assert.match(server, /qualified_meeting_booked_waiting_link/);

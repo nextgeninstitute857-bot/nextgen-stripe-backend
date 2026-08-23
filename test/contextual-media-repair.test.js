@@ -27,6 +27,10 @@ test("contextual media repair is audit-first and fingerprint guarded", () => {
   );
   assert.match(server, /expectedFingerprint !== audit\.fingerprint/);
   assert.match(server, /Wait for the media import to finish before auditing its draft links/);
+  assert.match(server, /ngAuditContentMediaObjectStorage\(report\.matches\)/);
+  assert.match(server, /binary_storage_verified: storageAudit\.verified/);
+  assert.match(server, /no_binary_reupload_required: storageAudit\.verified/);
+  assert.match(server, /if \(!audit\.storageAudit\?\.verified\)/);
 });
 
 test("R2 reconciliation inserts only missing draft links without publishing or overwriting", () => {
