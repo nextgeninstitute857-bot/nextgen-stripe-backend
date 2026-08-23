@@ -596,7 +596,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v296-live-offer-alerts";
+const CRM_AYLA_REPLY_BUILD = "v297-country-coupons-followups";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
@@ -4408,6 +4408,15 @@ function validateCouponForPlan({ coupon, plan, courseId }) {
   if (coupon.course_id && String(coupon.course_id) !== String(courseId || plan.course_id || "")) return { valid: false, error: "Coupon is not valid for this course" };
   return { valid: true, error: null };
 }
+function ngCouponAssignedToCheckoutUser(coupon = {}, user = {}) {
+  const assignedEmail = normalizeEmail(coupon.assigned_email || "");
+  const userEmail = normalizeEmail(user.email || user.user_email || "");
+  if (assignedEmail && assignedEmail !== userEmail) return false;
+  const assignedPhone = String(coupon.assigned_phone_digits || "").replace(/\D/g, "");
+  const userPhone = String(user.phone_digits || user.phone_e164 || user.whatsapp_phone || user.phone || "").replace(/\D/g, "");
+  if (assignedPhone && userPhone && assignedPhone !== userPhone) return false;
+  return true;
+}
 function buildCheckoutPricing({ plan, coupon, courseId }) {
   const original = Number(plan.price_cents || 0);
   const validation = coupon ? validateCouponForPlan({ coupon, plan, courseId }) : { valid: true };
@@ -5285,6 +5294,38 @@ async function ngHandleStripeCheckoutCompleted(event = {}, req = null) {
   }
 
   const affiliate = await ngFinalizeAffiliateAfterStripePayment(db.payments[paymentId]);
+  const completedCouponCode = normalizeCouponCode(db.payments[paymentId]?.coupon_code || "");
+  const completedCoupon = completedCouponCode
+    ? Object.values(db.coupons || {}).find((candidate) => normalizeCouponCode(candidate?.code || "") === completedCouponCode) || null
+    : null;
+  if (completedCoupon?.id) {
+    db.couponRedemptions = db.couponRedemptions || {};
+    const existingRedemption = Object.values(db.couponRedemptions).find((item) =>
+      String(item.payment_id || "") === String(paymentId)
+        || (String(item.coupon_id || "") === String(completedCoupon.id) && String(item.enrollment_id || "") === String(enrollment.id))
+    ) || null;
+    if (!existingRedemption) {
+      completedCoupon.used_count = Number(completedCoupon.used_count || 0) + 1;
+      completedCoupon.updated_at = nowIso();
+      const redemptionId = uuid();
+      db.couponRedemptions[redemptionId] = {
+        id: redemptionId,
+        coupon_id: completedCoupon.id,
+        coupon_code: completedCoupon.code,
+        country_offer_issuance_id: completedCoupon.country_offer_issuance_id || null,
+        crm_lead_id: completedCoupon.crm_lead_id || null,
+        payment_id: paymentId,
+        plan_id: planId || null,
+        enrollment_id: enrollment.id,
+        student_id: studentId,
+        course_id: courseId,
+        original_amount_cents: Number(db.payments[paymentId]?.original_amount_cents || 0),
+        discount_cents: Number(db.payments[paymentId]?.discount_cents || 0),
+        final_amount_cents: Number(db.payments[paymentId]?.final_amount_cents || 0),
+        redeemed_at: paidAt,
+      };
+    }
+  }
   const billingEvent = ngUpsertBillingEvent(db, event, "processed", {
     action: "checkout_completed_access_granted",
     payment_id: paymentId,
@@ -5297,7 +5338,10 @@ async function ngHandleStripeCheckoutCompleted(event = {}, req = null) {
   });
 
   await writeLiveDb(db);
-  return { action: "checkout_completed_access_granted", payment: sanitizePayment(db.payments[paymentId], db), enrollment: sanitizeAdminEnrollment(enrollment, db), billing_event: billingEvent, access_email: accessEmail, payment_email: paymentEmail, enrollment_email: enrollmentEmail };
+  const countryOfferSync = completedCoupon?.id
+    ? await ngSyncCrmCountryCouponRedemption({ coupon: completedCoupon, payment: db.payments[paymentId], enrollment, user }).catch((error) => ({ success: false, error: error.message }))
+    : { skipped: true, reason: "no_country_offer_coupon" };
+  return { action: "checkout_completed_access_granted", payment: sanitizePayment(db.payments[paymentId], db), enrollment: sanitizeAdminEnrollment(enrollment, db), billing_event: billingEvent, access_email: accessEmail, payment_email: paymentEmail, enrollment_email: enrollmentEmail, country_offer_sync: countryOfferSync };
 }
 
 async function ngHandleStripeCheckoutExpired(event = {}) {
@@ -14969,7 +15013,9 @@ app.post("/stripe/create-checkout", async (req, res) => {
     const course = db.courses?.[String(courseId)] || null;
     if (!course || course.status === "archived") return res.status(404).json({ success: false, error: "Selected course not found or inactive" });
     if (plan.course_id && String(plan.course_id) !== String(courseId)) return res.status(400).json({ success: false, error: "Selected plan is connected to a different course. Please reopen the plan from the correct course." });
-    const code = normalizeCouponCode(coupon_code); const coupon = code ? Object.values(db.coupons || {}).find((c) => c.code === code) : null; const pricing = buildCheckoutPricing({ plan, coupon, courseId }); if (!pricing.valid) return res.status(400).json({ success: false, error: pricing.error });
+    const code = normalizeCouponCode(coupon_code); const coupon = code ? Object.values(db.coupons || {}).find((c) => c.code === code) : null;
+    if (coupon && !ngCouponAssignedToCheckoutUser(coupon, user)) return res.status(403).json({ success: false, error: "This private coupon belongs to another student" });
+    const pricing = buildCheckoutPricing({ plan, coupon, courseId }); if (!pricing.valid) return res.status(400).json({ success: false, error: pricing.error });
     if (pricing.final_amount_cents <= 0) {
       const enrollment = createBackendEnrollment(db, { userId: studentId, userName: user.name || user.email || "Student", courseId, isDemo: false, accessGranted: true, planId: plan.id });
       ngApplyPaidAccessWindow(db, enrollment, { plan, paidAt: new Date().toISOString(), source: coupon?.id ? "coupon_checkout" : "free_checkout" });
@@ -14997,7 +15043,27 @@ app.post("/stripe/create-checkout", async (req, res) => {
         created_at: new Date().toISOString(),
         paid_at: new Date().toISOString(),
       };
-      if (coupon?.id) { coupon.used_count = Number(coupon.used_count || 0) + 1; coupon.updated_at = new Date().toISOString(); db.couponRedemptions[uuid()] = { id: uuid(), coupon_id: coupon.id, coupon_code: coupon.code, plan_id: plan.id, enrollment_id: enrollment.id, student_id: studentId, course_id: courseId, original_amount_cents: pricing.original_amount_cents, discount_cents: pricing.discount_cents, final_amount_cents: 0, redeemed_at: new Date().toISOString() }; }
+      if (coupon?.id) {
+        coupon.used_count = Number(coupon.used_count || 0) + 1;
+        coupon.updated_at = new Date().toISOString();
+        const redemptionId = uuid();
+        db.couponRedemptions[redemptionId] = {
+          id: redemptionId,
+          coupon_id: coupon.id,
+          coupon_code: coupon.code,
+          country_offer_issuance_id: coupon.country_offer_issuance_id || null,
+          crm_lead_id: coupon.crm_lead_id || null,
+          payment_id: paymentId,
+          plan_id: plan.id,
+          enrollment_id: enrollment.id,
+          student_id: studentId,
+          course_id: courseId,
+          original_amount_cents: pricing.original_amount_cents,
+          discount_cents: pricing.discount_cents,
+          final_amount_cents: 0,
+          redeemed_at: new Date().toISOString(),
+        };
+      }
       if (ngAffCode(referral_code || ref || "")) { const crmDb = ngAffiliateStore(await readCrmDb()); const affiliate = ngFindAffiliateByCode(crmDb, referral_code || ref); if (affiliate) { const commission = ngCreateCommissionLedgerEntry({ db: crmDb, affiliate, payment: db.payments[paymentId], attribution: { student_id: studentId, course_id: courseId, plan_id: plan.id }, source: "free_checkout" }); crmDb.referral_attributions.unshift({ id: uuid(), affiliate_id: affiliate.id, affiliate_name: affiliate.name, referral_code: affiliate.referral_code, student_id: studentId, course_id: courseId, plan_id: plan.id, payment_id: paymentId, commission_id: commission.id, status: "converted", created_at: new Date().toISOString(), updated_at: new Date().toISOString() }); await writeCrmDb(crmDb); } }
       const checkoutUser = db.users?.[String(studentId)] || user || null;
       const accessEmail = checkoutUser
@@ -15044,7 +15110,10 @@ app.post("/stripe/create-checkout", async (req, res) => {
           })
         : { attempted: false, sent: false, skipped: true, reason: "student_user_missing" };
       await writeLiveDb(db);
-      return res.json({ success: true, free_checkout: true, url: null, plan: sanitizePlan(plan), pricing, access_grant: { granted: true, method: "backend_enrollment_granted", enrollment_id: enrollment.id }, access_email: accessEmail, payment_email: paymentEmail, enrollment_email: enrollmentEmail, message: "Access granted without Stripe checkout." });
+      const countryOfferSync = coupon?.id
+        ? await ngSyncCrmCountryCouponRedemption({ coupon, payment: db.payments[paymentId], enrollment, user: checkoutUser }).catch((error) => ({ success: false, error: error.message }))
+        : { skipped: true, reason: "no_coupon" };
+      return res.json({ success: true, free_checkout: true, url: null, plan: sanitizePlan(plan), pricing, access_grant: { granted: true, method: "backend_enrollment_granted", enrollment_id: enrollment.id }, access_email: accessEmail, payment_email: paymentEmail, enrollment_email: enrollmentEmail, country_offer_sync: countryOfferSync, message: "Access granted without Stripe checkout." });
     }
     const checkoutCancelUrl = ngBuildCheckoutCancelUrl(cancelUrl, {
       courseId,
@@ -21545,8 +21614,9 @@ function normalizeCrmCollectionPayload(collection, body = {}, existing = null, b
     base.coupon_code = normalizeCrmString(base.coupon_code || base.code || "").toUpperCase();
     base.code = base.coupon_code || base.code || "";
     base.discount_type = normalizeCrmLower(base.discount_type, "percentage") || "percentage";
+    if (base.discount_type === "fixed_usd") base.discount_type = "fixed";
     base.discount_percent = Number(base.discount_percent || base.discount_value || 0);
-    base.discount_amount_usd = Number(base.discount_amount_usd || 0);
+    base.discount_amount_usd = Number(base.discount_amount_usd || base.discount_amount || 0);
     base.country = normalizeCrmString(base.country || "");
     base.region = normalizeCrmLower(base.region, "global") || "global";
     base.language = normalizeCrmLower(base.language, "english") || "english";
@@ -21556,6 +21626,9 @@ function normalizeCrmCollectionPayload(collection, body = {}, existing = null, b
     base.recommended_offer = normalizeCrmString(base.recommended_offer || "");
     base.usage_limit = base.usage_limit ? Number(base.usage_limit) : null;
     base.used_count = Number(base.used_count || 0);
+    base.auto_issue_one_time = base.auto_issue_one_time === true;
+    base.one_time_expiry_hours = Math.max(1, Math.min(720, Number(base.one_time_expiry_hours || 72)));
+    base.approval_status = normalizeCrmLower(base.approval_status, base.approval_required === false ? "approved" : "pending") || "pending";
     base.approval_required = base.approval_required !== false;
     base.active = base.active !== false;
     base.status = base.active ? "active" : "inactive";
@@ -21915,6 +21988,7 @@ function collectionResponseName(collection) {
     ai_usage: "usage",
     country_strategies: "country_strategies",
     coupon_rules: "coupon_rules",
+    country_offer_issuances: "country_offer_issuances",
     followups: "followups",
     templates: "templates",
     message_templates: "templates",
@@ -23997,6 +24071,18 @@ registerCrmCrudRoutes({ route: "/admin/crm/conversations", collection: "conversa
 registerCrmCrudRoutes({ route: "/admin/crm/community-posts", collection: "community_posts", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/country-strategies", collection: "country_strategies", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/coupon-rules", collection: "coupon_rules", brandScoped: true });
+app.get("/admin/crm/country-offer-issuances", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const records = filterCrmRecords(req, ensureCrmArray(db, "country_offer_issuances"), brandId)
+      .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
+    res.json({ success: true, country_offer_issuances: records, count: records.length });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
 registerCrmCrudRoutes({ route: "/admin/crm/strategies", collection: "ai_strategies", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/ai-strategies", collection: "ai_strategies", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/followup-rules", collection: "followups", brandScoped: true });
@@ -28962,7 +29048,7 @@ async function handleUniversalWebhook({ req, res, platform, integrationId = null
           aiAutoResult = { sent: false, skipped: true, reason: "whatsapp_template_required", channel, requires_template: true };
           ngAffArray(db, "ai_actions").unshift({ id: uuid(), title: "WhatsApp template required for Full AI Auto", area: "whatsapp", type: "template_required", status: "pending_approval", lead_id: lead.id, payload: { lead_id: lead.id, channel }, created_at: ngAffNow(), updated_at: ngAffNow() });
         } else {
-          const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel });
+          const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel, allowOperationalActions: true });
           const replyDelayMs = await ngAylaWaitBeforeAutoSend(db, channel);
           const to = getBestRecipientForChannel({ channel, lead, message: latestInbound });
           const sendResult = await sendCrmMessage({
@@ -33114,12 +33200,17 @@ function ngLeadIsPaidOrGroupAddedForLiveSession(lead = {}) {
 function ngDailyLiveSessionEligibleLead(db = {}, lead = {}, settings = {}) {
   if (!lead?.id) return false;
   const stage = normalizeCrmLeadStageValue(lead.stage || lead.lead_stage || lead.status || "new_lead", "new_lead");
-  if (settings.daily_session_exclude_paid !== false && (["paid", "paid_enrolled", "enrolled", "converted"].includes(stage) || ngLeadIsPaidOrGroupAddedForLiveSession(lead))) return false;
+  // These are hard stop conditions. A saved setting must never resume sales
+  // messages after enrollment, payment, opt-out, or a clear lack of interest.
+  if (["paid", "paid_enrolled", "enrolled", "converted"].includes(stage) || ngLeadIsPaidOrGroupAddedForLiveSession(lead)) return false;
   if (settings.daily_session_exclude_group_added !== false && (lead.group_added || lead.added_to_group || lead.added_to_paid_group || lead.paid_group_added || lead.whatsapp_group_added || lead.student_group_added)) return false;
   if (lead.live_session_automation_excluded || lead.exclude_from_live_session_flow || lead.exclude_daily_live_session) return false;
   if (settings.daily_session_exclude_active_google_meet !== false && (lead.live_session_automation_paused_until_google_meet || ngAylaLeadGoogleMeetState(lead, ngAylaFindActiveGoogleMeetAppointment(db, lead)))) return false;
-  if (settings.daily_session_exclude_not_interested !== false && ["not_interested", "lost", "unsubscribed"].includes(stage)) return false;
-  if (settings.daily_session_exclude_suppressed !== false && (lead.suppressed || lead.ai_suppressed || ng41IsSuppressed(db, lead))) return false;
+  if (["not_interested", "lost", "unsubscribed"].includes(stage)) return false;
+  if (lead.suppressed || lead.ai_suppressed || ng41IsSuppressed(db, lead)) return false;
+  const programmeValueShown = Boolean(lead.ayla_program_tour_sent_at || lead.lms_ecosystem_explained)
+    || safeArray(lead?.ayla_conversation_state?.completed_actions).includes("send_feature_tour");
+  if (!programmeValueShown) return false;
   if (!ng41LeadPhone(lead) && !lead.email) return false;
   if (["new_lead", "first_message_sent"].includes(stage) && settings.daily_session_send_to_new_leads === false) return false;
   if (["interested", "session_today", "hot_lead", "google_meet_requested"].includes(stage) && settings.daily_session_send_to_interested === false) return false;
@@ -35479,7 +35570,7 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   daily_session_invite_template_key: "daily_live_session_invite",
   daily_session_send_recording_to_no_reply: true,
   daily_session_exclude_active_google_meet: false,
-  daily_session_exclude_not_interested: false,
+  daily_session_exclude_not_interested: true,
   no_reply_mark_after_days: 2,
   google_meet_followup_for_no_reply: true,
   admin_whatsapp_alerts_enabled: true,
@@ -48640,18 +48731,283 @@ function ngAylaSalesFeatureLabel(value = "") {
   return labels[key] || "";
 }
 
-function ngAylaApprovedCountryOfferForSales({ crmDb = null, liveDb = {}, lead = {}, messages = [] } = {}) {
-  if (!crmDb) return null;
-  const conversationCountry = String(
-    lead?.ayla_conversation_state?.facts?.country
-      || lead.country
-      || lead.country_name
-      || lead.location
+function ngAylaCountrySourceIsConfirmed(value = "") {
+  return [
+    "conversation_self_reported",
+    "student_conversation",
+    "student_profile",
+    "lead_form_explicit",
+    "manual",
+    "admin",
+    "checkout",
+  ].includes(String(value || "").trim().toLowerCase());
+}
+
+function ngAylaConfirmedCountryForSales(lead = {}) {
+  const stateCountry = String(lead?.ayla_conversation_state?.facts?.country || "").trim();
+  const stateSource = String(lead?.ayla_conversation_state?.fact_sources?.country || "").trim().toLowerCase();
+  if (stateCountry && ngAylaCountrySourceIsConfirmed(stateSource)) {
+    return { country: stateCountry, source: stateSource };
+  }
+  const leadCountry = String(lead.country || lead.country_name || lead.location || "").trim();
+  const leadSource = String(lead.country_source || lead.country_confirmation_source || "").trim().toLowerCase();
+  if (leadCountry && (lead.country_confirmed === true || ngAylaCountrySourceIsConfirmed(leadSource))) {
+    return { country: leadCountry, source: leadSource || "confirmed" };
+  }
+  return null;
+}
+
+function ngAylaCountryHintForSales(lead = {}) {
+  const hint = detectCountryFromPhone(ng41LeadPhone(lead || {}));
+  return hint?.country ? { country: hint.country, source: "phone_calling_code_hint" } : null;
+}
+
+function ngAylaOfferExamForSales(lead = {}, messages = []) {
+  return String(
+    lead?.ayla_conversation_state?.facts?.exam
+      || lead.exam_type
+      || lead.exam
+      || ngAylaHumanHandoffContext(lead || {}, messages).exam
       || ""
   ).trim();
-  const detectedCountry = detectCountryFromPhone(ng41LeadPhone(lead || {})).country || "";
-  const country = conversationCountry || detectedCountry;
-  if (!country) return null;
+}
+
+function ngAylaApprovedCountryRuleForSales({ crmDb = null, country = "", exam = "" } = {}) {
+  if (!crmDb || !country) return null;
+  const countryKey = String(country).trim().toLowerCase();
+  const examKey = String(exam || "").trim().toLowerCase();
+  return ensureCrmArray(crmDb, "coupon_rules").find((candidate) => {
+    if (candidate?.active === false || String(candidate?.status || "active").toLowerCase() === "inactive") return false;
+    if (candidate?.ai_can_mention === false) return false;
+    if (candidate?.approval_required !== false && String(candidate?.approval_status || "").toLowerCase() !== "approved") return false;
+    if (candidate?.valid_until && new Date(candidate.valid_until).getTime() < Date.now()) return false;
+    const ruleCountry = String(candidate?.country || "").trim().toLowerCase();
+    const ruleExam = String(candidate?.exam_type || "").trim().toLowerCase();
+    if (!ruleCountry || ruleCountry !== countryKey) return false;
+    if (ruleExam && ruleExam !== "any" && examKey && !examKey.includes(ruleExam) && !ruleExam.includes(examKey)) return false;
+    const discountType = String(candidate?.discount_type || "percentage").toLowerCase();
+    const discountValue = Number(discountType === "fixed" || discountType === "fixed_usd"
+      ? candidate?.discount_amount_usd || candidate?.discount_amount || candidate?.discount_value
+      : candidate?.discount_percent || candidate?.discount_value);
+    return Number.isFinite(discountValue) && discountValue > 0;
+  }) || null;
+}
+
+function ngAylaCountryOfferPublicDetails({ country = "", code = "", coupon = {}, rule = {}, issuance = null } = {}) {
+  const discountTypeRaw = String(coupon.discount_type || rule.discount_type || "percentage").toLowerCase();
+  const discountType = ["fixed", "fixed_usd"].includes(discountTypeRaw) ? "fixed" : "percentage";
+  const discountValue = Number(coupon.discount_value ?? (discountType === "fixed"
+    ? rule.discount_amount_usd ?? rule.discount_amount
+    : rule.discount_percent) ?? 0);
+  if (!Number.isFinite(discountValue) || discountValue <= 0) return null;
+  return {
+    country,
+    code,
+    discount_type: discountType,
+    discount_value: discountValue,
+    one_time: Number(coupon.max_uses || 0) === 1 || Boolean(issuance),
+    expires_at: coupon.expires_at || issuance?.expires_at || null,
+    issuance_id: issuance?.id || coupon.country_offer_issuance_id || null,
+    public_line: discountType === "fixed"
+      ? `${country}: ${code} gives USD ${discountValue.toFixed(2)} off${Number(coupon.max_uses || 0) === 1 || issuance ? " and can be used once" : ""}`
+      : `${country}: ${code} gives ${Math.min(100, discountValue)}% off${Number(coupon.max_uses || 0) === 1 || issuance ? " and can be used once" : ""}`,
+  };
+}
+
+function ngAylaConversationRequestsCountryOffer(messages = []) {
+  return safeArray(messages)
+    .filter((message) => !ngIsOutboundMessage(message))
+    .slice(-8)
+    .some((message) => /\b(?:coupon|discount|promo(?:tion)?|regional (?:price|pricing|offer)|country (?:price|pricing|offer)|student offer|special offer|too expensive|cannot afford|can't afford|cant afford|budget)\b/i.test(ngMessageText(message)));
+}
+
+function ngAylaLatestInboundRequestsCountryOffer(messages = []) {
+  const latest = ngLatestInbound(safeArray(messages));
+  return /\b(?:coupon|discount|promo(?:tion)?|regional (?:price|pricing|offer)|country (?:price|pricing|offer)|student offer|special offer|too expensive|cannot afford|can't afford|cant afford|budget)\b/i.test(ngMessageText(latest || {}));
+}
+
+async function ngAylaEnsureOneTimeCountryOffer({ crmDb = null, lead = {}, messages = [], state = null } = {}) {
+  if (!crmDb || !lead?.id || !ngAylaConversationRequestsCountryOffer(messages)) return null;
+  if (lead.country_offer_shared_at && !ngAylaLatestInboundRequestsCountryOffer(messages)) return null;
+  const effectiveLead = state ? { ...lead, ayla_conversation_state: state } : lead;
+  const confirmed = ngAylaConfirmedCountryForSales(effectiveLead);
+  const valueWasShown = safeArray(state?.completed_actions || lead?.ayla_conversation_state?.completed_actions).includes("send_feature_tour")
+    || Boolean(lead.ayla_program_tour_sent_at);
+  if (!confirmed || !valueWasShown) return null;
+  const exam = ngAylaOfferExamForSales(effectiveLead, messages);
+  const rule = ngAylaApprovedCountryRuleForSales({ crmDb, country: confirmed.country, exam });
+  if (!rule || rule.auto_issue_one_time !== true) return null;
+
+  const liveDb = await readLiveDb();
+  liveDb.coupons = liveDb.coupons || {};
+  const existingCoupon = Object.values(liveDb.coupons).find((coupon) =>
+    String(coupon?.crm_lead_id || "") === String(lead.id)
+      && String(coupon?.crm_country_offer_rule_id || "") === String(rule.id || "")
+      && coupon?.is_active !== false
+      && !isCouponExpired(coupon)
+      && (!coupon.max_uses || Number(coupon.used_count || 0) < Number(coupon.max_uses))
+  ) || null;
+  if (existingCoupon) {
+    let existingIssuance = ensureCrmArray(crmDb, "country_offer_issuances").find((item) => String(item.coupon_id || "") === String(existingCoupon.id)) || null;
+    if (!existingIssuance) {
+      existingIssuance = {
+        id: existingCoupon.country_offer_issuance_id || uuid(),
+        brand_id: lead.brand_id || null,
+        lead_id: lead.id,
+        lead_name: ng41LeadName(lead) || null,
+        lead_email: existingCoupon.assigned_email || null,
+        lead_phone: ng41LeadPhone(lead) || null,
+        country: confirmed.country,
+        country_source: confirmed.source,
+        exam_type: exam || null,
+        coupon_rule_id: rule.id || null,
+        coupon_id: existingCoupon.id,
+        coupon_code: existingCoupon.code,
+        discount_type: existingCoupon.discount_type,
+        discount_value: existingCoupon.discount_value,
+        max_uses: 1,
+        used_count: Number(existingCoupon.used_count || 0),
+        status: "issued",
+        expires_at: existingCoupon.expires_at || null,
+        created_at: existingCoupon.created_at || nowIso(),
+        updated_at: nowIso(),
+      };
+      ensureCrmArray(crmDb, "country_offer_issuances").unshift(existingIssuance);
+      await writeCrmDb(crmDb);
+    }
+    return ngAylaCountryOfferPublicDetails({ country: confirmed.country, code: existingCoupon.code, coupon: existingCoupon, rule, issuance: existingIssuance });
+  }
+
+  const prefix = normalizeCouponCode(rule.coupon_prefix || rule.coupon_code || rule.code || confirmed.country)
+    .replace(/[^A-Z0-9]/g, "")
+    .slice(0, 10) || "NEXTGEN";
+  let code = "";
+  for (let attempt = 0; attempt < 10 && !code; attempt += 1) {
+    const candidate = `${prefix}-${uuid().replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+    if (!Object.values(liveDb.coupons).some((coupon) => normalizeCouponCode(coupon?.code || "") === candidate)) code = candidate;
+  }
+  if (!code) throw new Error("AYLA_COUNTRY_COUPON_CODE_GENERATION_FAILED");
+
+  const discountTypeRaw = String(rule.discount_type || "percentage").toLowerCase();
+  const discountType = ["fixed", "fixed_usd"].includes(discountTypeRaw) ? "fixed" : "percentage";
+  const discountValue = Number(discountType === "fixed"
+    ? rule.discount_amount_usd || rule.discount_amount || rule.discount_value
+    : rule.discount_percent || rule.discount_value);
+  const expiryHours = Math.max(1, Math.min(720, Number(rule.one_time_expiry_hours || 72)));
+  const expiresAt = new Date(Date.now() + expiryHours * 60 * 60 * 1000).toISOString();
+  const issuanceId = uuid();
+  const couponId = uuid();
+  const coupon = {
+    id: couponId,
+    code,
+    description: `Private one-time ${confirmed.country} offer generated by Ayla`,
+    discount_type: discountType,
+    discount_value: discountValue,
+    max_uses: 1,
+    used_count: 0,
+    expires_at: expiresAt,
+    course_id: rule.course_id || null,
+    plan_id: rule.plan_id || null,
+    is_active: true,
+    created_by: "crm_ayla_country_offer",
+    crm_lead_id: lead.id,
+    crm_country_offer_rule_id: rule.id || null,
+    country_offer_issuance_id: issuanceId,
+    assigned_email: normalizeEmail(lead.email || lead.lead_email || lead.contact_email || "") || null,
+    assigned_phone_digits: getImportLeadPhoneDigits(lead) || null,
+    created_at: nowIso(),
+    updated_at: nowIso(),
+  };
+  liveDb.coupons[couponId] = coupon;
+  await writeLiveDb(liveDb);
+
+  const issuance = {
+    id: issuanceId,
+    brand_id: lead.brand_id || null,
+    lead_id: lead.id,
+    lead_name: ng41LeadName(lead) || null,
+    lead_email: coupon.assigned_email,
+    lead_phone: ng41LeadPhone(lead) || null,
+    country: confirmed.country,
+    country_source: confirmed.source,
+    exam_type: exam || null,
+    coupon_rule_id: rule.id || null,
+    coupon_id: couponId,
+    coupon_code: code,
+    discount_type: discountType,
+    discount_value: discountValue,
+    max_uses: 1,
+    used_count: 0,
+    status: "issued",
+    expires_at: expiresAt,
+    enrollment_id: null,
+    student_id: null,
+    created_at: nowIso(),
+    updated_at: nowIso(),
+  };
+  ensureCrmArray(crmDb, "country_offer_issuances").unshift(issuance);
+  lead.country_offer_issuance_id = issuanceId;
+  lead.country_offer_coupon_code = code;
+  lead.country_offer_issued_at = issuance.created_at;
+  lead.country_offer_status = "issued";
+  lead.updated_at = nowIso();
+  await writeCrmDb(crmDb);
+  return ngAylaCountryOfferPublicDetails({ country: confirmed.country, code, coupon, rule, issuance });
+}
+
+async function ngSyncCrmCountryCouponRedemption({ coupon = {}, payment = {}, enrollment = {}, user = {} } = {}) {
+  const issuanceId = String(coupon.country_offer_issuance_id || "");
+  const crmLeadId = String(coupon.crm_lead_id || "");
+  if (!issuanceId && !crmLeadId) return { skipped: true, reason: "not_a_crm_country_offer" };
+  const crmDb = await readCrmDb();
+  const issuance = ensureCrmArray(crmDb, "country_offer_issuances").find((item) =>
+    (issuanceId && String(item.id || "") === issuanceId)
+      || String(item.coupon_id || "") === String(coupon.id || "")
+      || normalizeCouponCode(item.coupon_code || "") === normalizeCouponCode(coupon.code || "")
+  ) || null;
+  const redeemedAt = payment.paid_at || nowIso();
+  if (issuance) {
+    issuance.status = "redeemed";
+    issuance.used_count = Math.max(1, Number(coupon.used_count || issuance.used_count || 1));
+    issuance.redeemed_at = issuance.redeemed_at || redeemedAt;
+    issuance.payment_id = payment.id || payment.payment_id || null;
+    issuance.student_id = enrollment.user_id || enrollment.student_id || payment.student_id || user.id || null;
+    issuance.student_email = normalizeEmail(user.email || payment.student_email || "") || null;
+    issuance.enrollment_id = enrollment.id || payment.enrollment_id || null;
+    issuance.course_id = enrollment.course_id || payment.course_id || null;
+    issuance.plan_id = enrollment.plan_id || payment.plan_id || null;
+    issuance.updated_at = nowIso();
+  }
+  const lead = ensureCrmArray(crmDb, "leads").find((item) => String(item.id || "") === (crmLeadId || String(issuance?.lead_id || ""))) || null;
+  if (lead) {
+    lead.country_offer_status = "redeemed";
+    lead.country_offer_redeemed_at = lead.country_offer_redeemed_at || redeemedAt;
+    lead.lms_student_id = enrollment.user_id || enrollment.student_id || payment.student_id || user.id || lead.lms_student_id || null;
+    lead.lms_enrollment_id = enrollment.id || payment.enrollment_id || lead.lms_enrollment_id || null;
+    lead.lms_payment_id = payment.id || payment.payment_id || lead.lms_payment_id || null;
+    lead.enrollment_status = "active";
+    lead.student_status = "active";
+    lead.has_active_enrollment = true;
+    lead.stage = "paid_enrolled";
+    lead.lead_stage = "paid_enrolled";
+    lead.status = "converted";
+    lead.updated_at = nowIso();
+  }
+  await writeCrmDb(crmDb);
+  return {
+    success: true,
+    issuance_id: issuance?.id || issuanceId || null,
+    lead_id: lead?.id || crmLeadId || null,
+    enrollment_id: enrollment.id || payment.enrollment_id || null,
+    student_id: enrollment.user_id || enrollment.student_id || payment.student_id || user.id || null,
+  };
+}
+
+function ngAylaApprovedCountryOfferForSales({ crmDb = null, liveDb = {}, lead = {}, messages = [] } = {}) {
+  if (!crmDb) return null;
+  const confirmed = ngAylaConfirmedCountryForSales(lead);
+  if (!confirmed?.country) return null;
+  const country = confirmed.country;
   const exam = String(
     lead?.ayla_conversation_state?.facts?.exam
       || lead.exam_type
@@ -48659,34 +49015,25 @@ function ngAylaApprovedCountryOfferForSales({ crmDb = null, liveDb = {}, lead = 
       || ngAylaHumanHandoffContext(lead || {}, messages).exam
       || ""
   ).trim();
-  const countryKey = country.toLowerCase();
-  const examKey = exam.toLowerCase();
-  const rule = ensureCrmArray(crmDb, "coupon_rules").find((candidate) => {
-    if (candidate?.active === false || String(candidate?.status || "active").toLowerCase() === "inactive") return false;
-    if (candidate?.approval_required !== false && String(candidate?.approval_status || "").toLowerCase() !== "approved") return false;
-    const ruleCountry = String(candidate?.country || "").trim().toLowerCase();
-    const ruleExam = String(candidate?.exam_type || "").trim().toLowerCase();
-    if (!ruleCountry || ruleCountry !== countryKey) return false;
-    if (ruleExam && ruleExam !== "any" && examKey && !examKey.includes(ruleExam) && !ruleExam.includes(examKey)) return false;
-    return Boolean(candidate?.coupon_code || candidate?.code);
-  }) || null;
+  const rule = ngAylaApprovedCountryRuleForSales({ crmDb, country, exam });
   if (!rule) return null;
+  const issuance = ensureCrmArray(crmDb, "country_offer_issuances").find((candidate) =>
+    String(candidate.lead_id || "") === String(lead.id || "")
+      && String(candidate.coupon_rule_id || "") === String(rule.id || "")
+      && !["redeemed", "expired", "revoked"].includes(String(candidate.status || "issued").toLowerCase())
+  ) || null;
+  const issuedCode = normalizeCouponCode(issuance?.coupon_code || "");
+  const issuedCoupon = issuedCode
+    ? Object.values(liveDb.coupons || {}).find((candidate) => normalizeCouponCode(candidate?.code || "") === issuedCode) || null
+    : null;
+  if (issuedCoupon && issuedCoupon.is_active !== false && !isCouponExpired(issuedCoupon) && (!issuedCoupon.max_uses || Number(issuedCoupon.used_count || 0) < Number(issuedCoupon.max_uses))) {
+    return ngAylaCountryOfferPublicDetails({ country, code: issuedCode, coupon: issuedCoupon, rule, issuance });
+  }
   const code = normalizeCouponCode(rule.coupon_code || rule.code || "");
   const coupon = Object.values(liveDb.coupons || {}).find((candidate) => normalizeCouponCode(candidate?.code || "") === code) || null;
   if (!coupon || coupon.is_active === false || isCouponExpired(coupon)) return null;
   if (coupon.max_uses && Number(coupon.used_count || 0) >= Number(coupon.max_uses)) return null;
-  const discountType = String(coupon.discount_type || rule.discount_type || "percentage").toLowerCase();
-  const discountValue = Number(coupon.discount_value ?? rule.discount_percent ?? rule.discount_amount_usd ?? 0);
-  if (!Number.isFinite(discountValue) || discountValue <= 0) return null;
-  return {
-    country,
-    code,
-    discount_type: discountType,
-    discount_value: discountValue,
-    public_line: discountType === "fixed"
-      ? `${country}: ${code} gives USD ${discountValue.toFixed(2)} off`
-      : `${country}: ${code} gives ${Math.min(100, discountValue)}% off`,
-  };
+  return ngAylaCountryOfferPublicDetails({ country, code, coupon, rule });
 }
 
 async function ngAylaLiveLmsSalesGrounding({ structured = false, crmDb = null, lead = null, messages = [] } = {}) {
@@ -48708,6 +49055,8 @@ async function ngAylaLiveLmsSalesGrounding({ structured = false, crmDb = null, l
       .map(ngAylaSalesFeatureLabel)
       .filter(Boolean)));
     const countryOffer = ngAylaApprovedCountryOfferForSales({ crmDb, liveDb, lead: lead || {}, messages });
+    const confirmedCountry = ngAylaConfirmedCountryForSales(lead || {});
+    const countryHint = confirmedCountry ? null : ngAylaCountryHintForSales(lead || {});
 
     const now = ngAylaDateTimePartsInZone(new Date(), "America/New_York");
     const roadmap = courseId ? liveDb.roadmaps?.[courseId] || null : null;
@@ -48791,7 +49140,11 @@ async function ngAylaLiveLmsSalesGrounding({ structured = false, crmDb = null, l
         : "- No plan-feature list is currently available; do not invent included products.",
       countryOffer
         ? `- Approved country offer for this lead: ${countryOffer.public_line}. This code exists as an active LMS coupon and may be shared with this lead.`
-        : "- No approved live country discount is available for this lead. Never invent or generate a coupon. If regional pricing is requested, collect the country and route the student to the mentor/admin for confirmation.",
+        : confirmedCountry
+          ? `- Confirmed student country: ${confirmedCountry.country}. No approved live country discount is currently available for this lead. Never invent a coupon; route regional-pricing requests to the mentor/admin.`
+          : countryHint
+            ? `- Country is not confirmed. The phone calling code only suggests ${countryHint.country}; do not treat that as proof and do not share a country discount. Ask naturally where the student is currently based.`
+            : "- Country is not confirmed. Ask naturally where the student is currently based before any regional pricing. Never invent a coupon.",
       "- Official pricing/enrollment page: https://nextgenusmle.live/pricing",
       "- Pricing rule: when asked, answer with the approved names and exact USD prices above immediately. Do not invent Basic, Standard, Premium, discounts, tiers, or benefits that are not present. A Google Meet may be offered after the transparent answer, never as a condition for learning the price.",
     ];
@@ -48808,6 +49161,8 @@ async function ngAylaLiveLmsSalesGrounding({ structured = false, crmDb = null, l
       })),
       active_plan_features: activePlanFeatures,
       country_offer: countryOffer,
+      confirmed_country: confirmedCountry?.country || null,
+      country_hint: countryHint?.country || null,
       pricing_url: "https://nextgenusmle.live/pricing",
       demo_url: "https://nextgenusmle.live/demo",
       current_date: now.date_key,
@@ -50337,7 +50692,7 @@ Write only Ayla's next message. No markdown headings. No bullet list unless the 
 // this is the only generator used by WhatsApp auto-reply call sites. Deterministic
 // code is limited to opt-out and protected handoff mutations; it no longer chooses
 // sales copy or advances the programme journey through keyword checkpoints.
-async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [], channel = "whatsapp" }) {
+async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [], channel = "whatsapp", allowOperationalActions = false }) {
   const cleanMessages = safeArray(messages)
     .filter((message) => ngMessageText(message))
     .slice(-18);
@@ -50393,7 +50748,11 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
   }
 
   const state = createAylaConversationState({ lead, messages: cleanMessages });
-  const liveSnapshot = await ngAylaLiveLmsSalesGrounding({ structured: true, crmDb: db, lead, messages: cleanMessages });
+  let promptState = state;
+  if (db && allowOperationalActions) {
+    await ngAylaEnsureOneTimeCountryOffer({ crmDb: db, lead, messages: cleanMessages, state });
+  }
+  let liveSnapshot = await ngAylaLiveLmsSalesGrounding({ structured: true, crmDb: db, lead, messages: cleanMessages });
   const historyText = cleanMessages.map((message) => ngMessageText(message)).join("\n");
   // Training Center material is reference knowledge only in v292. Behavioural
   // instructions stored in those records cannot override this controller.
@@ -50408,20 +50767,21 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
       ? "A human-handoff or Google Meet state already exists. Continue it without restarting sales discovery."
       : "None.";
 
-  const systemPrompt = buildAylaConversationPrompt({
-    state,
-    lead,
-    messages: cleanMessages.map((message) => ({
-      role: ngIsOutboundMessage(message) ? "assistant" : "student",
-      text: ngMessageText(message),
-    })),
-    latestMessage: latestInboundText,
-    liveFacts: liveSnapshot.context || "",
-    approvedKnowledge,
-    officialExamGuidance,
-    mediaGuidance,
-    protectedActionContext,
-  });
+  const buildCurrentSystemPrompt = () => buildAylaConversationPrompt({
+      state: promptState,
+      lead,
+      messages: cleanMessages.map((message) => ({
+        role: ngIsOutboundMessage(message) ? "assistant" : "student",
+        text: ngMessageText(message),
+      })),
+      latestMessage: latestInboundText,
+      liveFacts: liveSnapshot.context || "",
+      approvedKnowledge,
+      officialExamGuidance,
+      mediaGuidance,
+      protectedActionContext,
+    });
+  let systemPrompt = buildCurrentSystemPrompt();
 
   const model = process.env.AYLA_MODEL || process.env.AI_MODEL || "gpt-4o-mini";
   const requestDecision = async (userPrompt) => {
@@ -50480,6 +50840,15 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
         ? ["reasks_stated_support_error"]
         : []
     ),
+    ...(
+      liveSnapshot.country_offer?.code
+      && ngAylaConversationRequestsCountryOffer(cleanMessages)
+      && !lead.country_offer_shared_at
+      && !String(candidate.reply || "").toUpperCase().includes(String(liveSnapshot.country_offer.code).toUpperCase())
+      && !String(candidate.follow_up || "").toUpperCase().includes(String(liveSnapshot.country_offer.code).toUpperCase())
+        ? ["approved_country_coupon_not_shared"]
+        : []
+    ),
     ...(() => {
       const required = String(lead.next_action || "").match(/^collect_google_meet_(name|email|country|exam|concern|time)$/i)?.[1]?.toLowerCase();
       if (!required) return [];
@@ -50491,6 +50860,25 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
   ]);
 
   let { result, decision } = await requestDecision("Understand the complete conversation and produce Ayla's next structured decision now.");
+  let newlyConfirmedOfferCountry = null;
+  if (
+    db
+    && allowOperationalActions
+    && decision.memory_patch?.country
+    && decision.action !== "send_feature_tour"
+    && !liveSnapshot.country_offer
+  ) {
+    const provisionalState = applyAylaConversationDecision({ state, decision, responseId: result.response_id || null, now: nowIso() });
+    const issuedOffer = await ngAylaEnsureOneTimeCountryOffer({ crmDb: db, lead, messages: cleanMessages, state: provisionalState });
+    if (issuedOffer) {
+      promptState = provisionalState;
+      newlyConfirmedOfferCountry = provisionalState.facts?.country || decision.memory_patch.country;
+      liveSnapshot = await ngAylaLiveLmsSalesGrounding({ structured: true, crmDb: db, lead: { ...lead, ayla_conversation_state: provisionalState }, messages: cleanMessages });
+      systemPrompt = buildCurrentSystemPrompt();
+      ({ result, decision } = await requestDecision("The student has now confirmed their country and the live facts contain their exact private offer. Reply naturally with that exact one-time code now."));
+      if (!decision.memory_patch?.country && newlyConfirmedOfferCountry) decision.memory_patch.country = newlyConfirmedOfferCountry;
+    }
+  }
   let violations = decisionViolations(decision);
 
   for (let repairAttempt = 0; violations.length && repairAttempt < 2; repairAttempt += 1) {
@@ -50552,13 +50940,23 @@ function ngAylaCommitConversationTurnAfterDelivery({ lead = {}, ai = {}, sendRes
   if (!lead.exam && nextState.facts?.exam && nextState.facts.exam !== "unknown") lead.exam = nextState.facts.exam;
   if (!lead.exam_type && nextState.facts?.exam && nextState.facts.exam !== "unknown") lead.exam_type = nextState.facts.exam;
   if (!lead.main_need && nextState.facts?.main_need) lead.main_need = nextState.facts.main_need;
-  if (!lead.country && nextState.facts?.country) lead.country = nextState.facts.country;
+  if (nextState.facts?.country && ngAylaCountrySourceIsConfirmed(nextState.fact_sources?.country)) {
+    lead.country = nextState.facts.country;
+    lead.country_confirmed = true;
+    lead.country_source = nextState.fact_sources.country;
+    lead.country_confirmed_at = lead.country_confirmed_at || nowIso();
+  }
   applyAylaConversationNameToLead(lead, nextState.facts?.name, nowIso(), {
     source: nextState.fact_sources?.name,
   });
   if (nextState.last_action === "send_demo") {
     lead.demo_link_sent = true;
     lead.demo_link_sent_at = lead.demo_link_sent_at || nowIso();
+  }
+  const countryOfferCode = String(ai.live_lms_sales_snapshot?.country_offer?.code || "").trim();
+  if (countryOfferCode && `${ai.reply || ""}\n${ai.follow_up || ""}`.toUpperCase().includes(countryOfferCode.toUpperCase())) {
+    lead.country_offer_shared_at = lead.country_offer_shared_at || nowIso();
+    lead.country_offer_status = lead.country_offer_status === "redeemed" ? "redeemed" : "shared";
   }
   lead.updated_at = nowIso();
   return true;
@@ -50784,7 +51182,7 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
       });
     }
 
-    const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel });
+    const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel, allowOperationalActions: true });
     const replyDelayMs = await ngAylaWaitBeforeAutoSend(db, channel);
     const to = getBestRecipientForChannel({
       channel,
@@ -51037,7 +51435,7 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
   }
 
   try {
-    const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel });
+    const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel, allowOperationalActions: true });
     const replyDelayMs = await ngAylaWaitBeforeAutoSend(db, channel);
     const to = getBestRecipientForChannel({ channel, lead, message: latestInbound });
     const featureTourRequested = channel === "whatsapp" && Boolean(ai.feature_tour_requested);
@@ -51530,7 +51928,7 @@ app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
       }
 
       try {
-        const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel });
+        const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel, allowOperationalActions: true });
         const to = getBestRecipientForChannel({ channel, lead, message: inbound });
         const featureTourRequested = channel === "whatsapp" && Boolean(ai.feature_tour_requested);
         const aylaMediaAssets = channel === "whatsapp"

@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import {
+  applyAylaConversationDecision,
+  createAylaConversationState,
+} from "../lib/crm-ayla-conversation-engine.js";
 
 const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
 const conversationEngine = fs.readFileSync(new URL("../lib/crm-ayla-conversation-engine.js", import.meta.url), "utf8");
@@ -11,7 +15,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v296-live-offer-alerts"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v297-country-coupons-followups"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: "message_status"/);
   assert.match(handler, /event: "ignored_non_message"/);
@@ -295,7 +299,7 @@ test("Ayla grounds current cohort and pricing answers in the live LMS", () => {
   assert.match(grounding, /When sharing it, always state this exact title before the link/);
   assert.match(grounding, /live_session:/);
   assert.match(grounding, /latest_recording:/);
-  assert.match(replyPrompt, /const liveSnapshot = await ngAylaLiveLmsSalesGrounding\(\{ structured: true, crmDb: db, lead, messages: cleanMessages \}\)/);
+  assert.match(replyPrompt, /let liveSnapshot = await ngAylaLiveLmsSalesGrounding\(\{ structured: true, crmDb: db, lead, messages: cleanMessages \}\)/);
   assert.match(replyPrompt, /liveFacts: liveSnapshot\.context/);
   assert.match(replyPrompt, /officialExamGuidance/);
   assert.match(replyPrompt, /approvedKnowledge/);
@@ -414,7 +418,7 @@ test("human handoff follows programme value and sends admins a qualified meeting
   assert.match(alerts, /for \(const to of numbers\)/);
 });
 
-test("Ayla treats QBank, lecture and live-class enquiries as product leads without inventing discounts", () => {
+test("Ayla treats QBank, lecture and live-class enquiries as product leads with controlled country offers", () => {
   const grounding = server.slice(
     server.indexOf("function ngAylaSalesFeatureLabel"),
     server.indexOf("function ngAylaPricingDraftIsGrounded"),
@@ -431,10 +435,85 @@ test("Ayla treats QBank, lecture and live-class enquiries as product leads witho
   assert.match(grounding, /plan\.is_public !== false/);
   assert.match(grounding, /\["inactive", "archived", "closed"\]/);
   assert.match(grounding, /ngAylaApprovedCountryOfferForSales/);
-  assert.match(grounding, /if \(!ruleCountry \|\| ruleCountry !== countryKey\) return false/);
-  assert.match(grounding, /No approved live country discount is available/);
-  assert.match(grounding, /Never invent or generate a coupon/);
+  assert.match(grounding, /ngAylaConfirmedCountryForSales/);
+  assert.match(grounding, /phone calling code only suggests/);
+  assert.match(grounding, /Never invent a coupon/);
   assert.match(conversationEngine, /Treat a request for only QBank access, recorded lectures, or live classes as genuine product interest/);
+});
+
+test("country discounts require confirmation and generated codes are private, expiring and one-use", () => {
+  const countryOffers = server.slice(
+    server.indexOf("function ngAylaCountrySourceIsConfirmed"),
+    server.indexOf("async function ngAylaLiveLmsSalesGrounding"),
+  );
+  const generator = server.slice(
+    server.indexOf("async function ngGenerateStudentAutoReply"),
+    server.indexOf("// Admin-only, no-send conversation evaluation"),
+  );
+
+  assert.match(countryOffers, /phone_calling_code_hint/);
+  assert.match(countryOffers, /rule\.auto_issue_one_time !== true/);
+  assert.match(countryOffers, /max_uses: 1/);
+  assert.match(countryOffers, /assigned_email/);
+  assert.match(countryOffers, /country_offer_issuances/);
+  assert.match(countryOffers, /status = "redeemed"/);
+  assert.match(generator, /allowOperationalActions = false/);
+  assert.match(generator, /ngAylaEnsureOneTimeCountryOffer/);
+  assert.match(generator, /approved_country_coupon_not_shared/);
+  assert.match(generator, /const provisionalState = applyAylaConversationDecision/);
+  assert.match(generator, /The student has now confirmed their country and the live facts contain their exact private offer/);
+  assert.match(conversationEngine, /A phone calling code is only a location hint, never proof of country/);
+  assert.match(conversationEngine, /nextFactSources\.country = "conversation_self_reported"/);
+  assert.match(conversationEngine, /Current live LMS facts contain this student's approved private one-time country coupon/);
+});
+
+test("phone-derived countries stay unconfirmed until a student or admin confirms them", () => {
+  const inferred = createAylaConversationState({
+    lead: { country: "Pakistan", phone: "+923001234567" },
+    messages: [{ role: "student", text: "Can I get a regional discount?" }],
+  });
+  assert.equal(inferred.facts.country, null);
+
+  const manuallyConfirmed = createAylaConversationState({
+    lead: { country: "Pakistan", country_confirmed: true, country_source: "admin" },
+    messages: [],
+  });
+  assert.equal(manuallyConfirmed.facts.country, "Pakistan");
+
+  const learned = applyAylaConversationDecision({
+    state: inferred,
+    decision: {
+      stage: "discovery",
+      intent: "country_answer",
+      action: "reply_only",
+      ask_field: "none",
+      media_keys: [],
+      memory_patch: { country: "Nigeria", exam: "unknown", student_type: "unknown" },
+    },
+  });
+  assert.equal(learned.facts.country, "Nigeria");
+  assert.equal(learned.fact_sources.country, "conversation_self_reported");
+});
+
+test("daily live and recording follow-ups hard-stop for enrolled, opted-out and not-interested leads", () => {
+  const eligibility = server.slice(
+    server.indexOf("function ngDailyLiveSessionEligibleLead"),
+    server.indexOf("function ngDailyLiveSessionAlreadySent"),
+  );
+  const scheduler = server.slice(
+    server.indexOf("function ngDailyLiveSessionActionNow"),
+    server.indexOf("function ngGoogleMeetAppointmentDateTime"),
+  );
+
+  assert.match(eligibility, /\["paid", "paid_enrolled", "enrolled", "converted"\]/);
+  assert.match(eligibility, /\["not_interested", "lost", "unsubscribed"\]/);
+  assert.doesNotMatch(eligibility, /daily_session_exclude_not_interested !== false/);
+  assert.match(eligibility, /programmeValueShown/);
+  assert.match(eligibility, /completed_actions\)\.includes\("send_feature_tour"\)/);
+  assert.match(scheduler, /daily_session_invite/);
+  assert.match(scheduler, /five_minute_reminder/);
+  assert.match(scheduler, /session_link/);
+  assert.match(scheduler, /post_session_recording/);
 });
 
 test("a public price question does not create or lock a Google Meet handoff", () => {
