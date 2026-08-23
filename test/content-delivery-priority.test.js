@@ -5,6 +5,7 @@ import {
   CONTENT_DELIVERY_POLICY_VERSION,
   contentDeliveryPolicySnapshot,
   contentDeliveryPriorityRank,
+  contentDeliverySourceYearsForExam,
   inferContentSourceYear,
 } from "../lib/content-delivery-priority.js";
 
@@ -44,6 +45,27 @@ test("repeat avoidance operates inside the same source year", () => {
   );
 });
 
+test("verified prior-year fallback is limited to PLAB and AMC", () => {
+  assert.deepEqual(contentDeliverySourceYearsForExam("usmle_step_1"), [2026]);
+  assert.deepEqual(contentDeliverySourceYearsForExam("mccqe"), [2026]);
+  assert.deepEqual(contentDeliverySourceYearsForExam("plab"), [2026, 2025, 2024]);
+  assert.deepEqual(contentDeliverySourceYearsForExam("AMC"), [2026, 2025, 2024]);
+  assert.equal(
+    contentDeliveryPriorityRank(
+      { id: "plab-fallback", exam_track: "plab", source_year: 2025 },
+      { examTrack: "plab" },
+    ),
+    10,
+  );
+  assert.equal(
+    contentDeliveryPriorityRank(
+      { id: "step1-old", exam_track: "usmle_step_1", source_year: 2025 },
+      { examTrack: "usmle_step_1" },
+    ),
+    Number.POSITIVE_INFINITY,
+  );
+});
+
 test("policy snapshot describes media integrity as an eligibility gate, not a preference", () => {
   const policy = contentDeliveryPolicySnapshot();
   assert.equal(policy.version, CONTENT_DELIVERY_POLICY_VERSION);
@@ -52,4 +74,10 @@ test("policy snapshot describes media integrity as an eligibility gate, not a pr
   assert.equal(policy.media_changes_ranking, false);
   assert.equal(policy.media_integrity_rule, "required_media_must_be_verified_and_playable");
   assert.equal(policy.incomplete_or_quarantined_media_excluded, true);
+
+  const plabPolicy = contentDeliveryPolicySnapshot({ examTrack: "plab" });
+  assert.deepEqual(plabPolicy.source_year_priority, [2026, 2025, 2024]);
+  assert.equal(plabPolicy.fallback_strategy, "approved_exam_specific_fallback_when_2026_unavailable");
+  assert.equal(plabPolicy.fallback_requires_mapped_taxonomy, true);
+  assert.equal(plabPolicy.fallback_requires_verified_media, true);
 });
