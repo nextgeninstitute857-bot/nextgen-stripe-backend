@@ -40,9 +40,16 @@ test("community opportunities become traceable exam-specific leads", () => {
   assert.match(route, /source_community_id/);
   assert.match(route, /source_opportunity_id/);
   assert.match(route, /lead_source: \[sourcePlatform, "community"\]\.join\("_"\)/);
-  assert.match(route, /follow_up_status: "needs_first_response"/);
-  assert.match(route, /next_follow_up_at: req\.body\?\.next_follow_up_at \|\| nowIso\(\)/);
-  assert.match(route, /next_action: "review_and_reply"/);
+  assert.match(route, /const canContact = Boolean/);
+  assert.match(route, /consent_to_contact: canContact/);
+  assert.match(route, /can_message: canContact/);
+  assert.match(route, /outreach_mode: canContact \? "manual_first" : "public_reply_manual_first"/);
+  assert.match(route, /conversation_direction: canContact \? "outbound" : "prospect_discovered"/);
+  assert.match(route, /automation_enabled: false/);
+  assert.match(route, /followup_enabled: false/);
+  assert.match(route, /follow_up_status: canContact \? "manual_first_response" : "needs_context_review"/);
+  assert.match(route, /next_follow_up_at: canContact \? req\.body\?\.next_follow_up_at \|\| nowIso\(\) : ""/);
+  assert.match(route, /next_action: canContact \? "review_and_reply" : "review_context_and_reply_publicly"/);
 });
 
 test("lead normalization preserves source, exam qualification, and follow-up state", () => {

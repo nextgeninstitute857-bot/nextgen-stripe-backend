@@ -34267,6 +34267,7 @@ app.post("/admin/crm/community-intelligence/opportunities/:id/create-lead", asyn
     const payload = parseInboundSocialPayload({ platform: opp.platform || req.body.platform || "other", payload: { ...(opp.raw_payload || {}), ...(req.body || {}), text: req.body.message || opp.detected_text || opp.summary || "" }, integration: null });
     const examTrack = ngInferExamTrackFromObject({ ...opp, ...payload, ...(req.body || {}) }, "");
     const sourcePlatform = payload.platform || opp.platform || "other";
+    const canContact = Boolean(opp.consent_to_contact || req.body?.consent_to_contact === true);
     const { lead, created } = upsertSocialLead(db, sourcePlatform, {
       ...payload,
       brand_id: brandId,
@@ -34280,18 +34281,33 @@ app.post("/admin/crm/community-intelligence/opportunities/:id/create-lead", asyn
       source_opportunity_id: opp.id,
       exam_track: examTrack,
       exam_type: examTrack ? ngExamTrackLabel(examTrack) : "",
-      stage: "needs_reply",
-      lead_stage: "needs_reply",
-      next_action: "review_and_reply",
-      follow_up_status: "needs_first_response",
-      next_follow_up_at: req.body?.next_follow_up_at || nowIso(),
+      consent_to_contact: canContact,
+      opt_in_status: canContact ? "community_consent" : "not_granted",
+      can_message: canContact,
+      contact_permission: canContact ? "granted" : "not_granted",
+      outreach_mode: canContact ? "manual_first" : "public_reply_manual_first",
+      conversation_direction: canContact ? "outbound" : "prospect_discovered",
+      last_message_direction: "community_discovery",
+      client_reached_out: false,
+      inbound_first: false,
+      agent_initiated: false,
+      outbound_first: false,
+      ai_mode: "draft",
+      automation_enabled: false,
+      followup_enabled: false,
+      stage: canContact ? "needs_reply" : "new_lead",
+      lead_stage: canContact ? "needs_reply" : "new_lead",
+      next_action: canContact ? "review_and_reply" : "review_context_and_reply_publicly",
+      follow_up_status: canContact ? "manual_first_response" : "needs_context_review",
+      next_follow_up_at: canContact ? req.body?.next_follow_up_at || nowIso() : "",
     });
+    if (!canContact) lead.last_inbound_at = null;
     opp.lead_id = lead.id;
     opp.status = "lead_created";
     opp.exam_track = examTrack || opp.exam_track || "";
     opp.exam_track_label = examTrack ? ngExamTrackLabel(examTrack) : opp.exam_track_label || "";
     opp.lead_capture_status = "captured";
-    opp.next_action = "review_and_reply";
+    opp.next_action = canContact ? "review_and_reply" : "review_context_and_reply_publicly";
     opp.updated_at = nowIso();
     await writeCrmDb(db);
     res.json({ success: true, lead: normalizeLeadForResponse(lead), opportunity: opp, created });
@@ -51574,6 +51590,7 @@ function ngCreateLeadFromCommunityOpportunity(db, req, opp, user = null) {
   });
   const examTrack = ngInferExamTrackFromObject({ ...opp, ...payload, ...(req.body || {}) }, "");
   const sourcePlatform = payload.platform || opp.platform || "telegram";
+  const canContact = Boolean(opp.consent_to_contact || req.body?.consent_to_contact === true);
 
   const { lead, created } = upsertSocialLead(db, sourcePlatform, {
     ...payload,
@@ -51596,13 +51613,27 @@ function ngCreateLeadFromCommunityOpportunity(db, req, opp, user = null) {
     gap_type: opp.gap_type || req.body?.gap_type || null,
     pain_points: opp.pain_points || opp.detected_text || "",
     interest_level: opp.interest_level || req.body?.interest_level || "medium",
-    consent_to_contact: opp.consent_to_contact || req.body?.consent_to_contact === true,
-    stage: "needs_reply",
-    lead_stage: "needs_reply",
-    next_action: "review_and_reply",
-    follow_up_status: "needs_first_response",
-    next_follow_up_at: req.body?.next_follow_up_at || nowIso(),
+    consent_to_contact: canContact,
+    opt_in_status: canContact ? "community_consent" : "not_granted",
+    can_message: canContact,
+    contact_permission: canContact ? "granted" : "not_granted",
+    outreach_mode: canContact ? "manual_first" : "public_reply_manual_first",
+    conversation_direction: canContact ? "outbound" : "prospect_discovered",
+    last_message_direction: "community_discovery",
+    client_reached_out: false,
+    inbound_first: false,
+    agent_initiated: false,
+    outbound_first: false,
+    ai_mode: "draft",
+    automation_enabled: false,
+    followup_enabled: false,
+    stage: canContact ? "needs_reply" : "new_lead",
+    lead_stage: canContact ? "needs_reply" : "new_lead",
+    next_action: canContact ? "review_and_reply" : "review_context_and_reply_publicly",
+    follow_up_status: canContact ? "manual_first_response" : "needs_context_review",
+    next_follow_up_at: canContact ? req.body?.next_follow_up_at || nowIso() : "",
   });
+  if (!canContact) lead.last_inbound_at = null;
 
   opp.lead_id = lead.id;
   opp.converted_lead_id = lead.id;
@@ -51610,7 +51641,7 @@ function ngCreateLeadFromCommunityOpportunity(db, req, opp, user = null) {
   opp.exam_track = examTrack || opp.exam_track || "";
   opp.exam_track_label = examTrack ? ngExamTrackLabel(examTrack) : opp.exam_track_label || "";
   opp.lead_capture_status = "captured";
-  opp.next_action = "review_and_reply";
+  opp.next_action = canContact ? "review_and_reply" : "review_context_and_reply_publicly";
   opp.updated_by = user?.id || opp.updated_by || null;
   opp.updated_at = nowIso();
 
