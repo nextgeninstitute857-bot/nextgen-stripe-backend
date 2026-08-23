@@ -27,7 +27,7 @@ test("contextual media repair is audit-first and fingerprint guarded", () => {
   );
   assert.match(server, /expectedFingerprint !== audit\.fingerprint/);
   assert.match(server, /Wait for the media import to finish before auditing its draft links/);
-  assert.match(server, /ngAuditContentMediaObjectStorage\(report\.matches\)/);
+  assert.match(server, /ngAuditContentMediaObjectStorage\(\[[\s\S]*?\.\.\.linkAudit\.exactMatches,[\s\S]*?\.\.\.linkAudit\.missingMatches/);
   assert.match(server, /binary_storage_verified: storageAudit\.verified/);
   assert.match(server, /no_binary_reupload_required: storageAudit\.verified/);
   assert.match(server, /if \(!audit\.storageAudit\?\.verified\)/);
@@ -43,6 +43,8 @@ test("R2 reconciliation inserts only missing draft links without publishing or o
   assert.doesNotMatch(r2Repair, /deleteR2Object/);
   assert.match(registry, /export async function auditContentMediaLinks/);
   assert.match(registry, /LEFT JOIN content_question_media qm/);
+  assert.match(registry, /linked_object_key/);
+  assert.match(registry, /linkedAssetByKey/);
 });
 
 test("R2 repair pools completed sibling packages and uses canonical plus alias editions", () => {

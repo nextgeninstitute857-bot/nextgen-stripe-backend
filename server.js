@@ -37563,9 +37563,10 @@ async function ngBuildContentMediaMappingAudit(mediaJobId) {
     listContentMediaImportAssetsForParent(parentJob.id),
   ]);
   const report = matchMediaReferences(references, assets);
-  const [linkAudit, storageAudit] = await Promise.all([
-    auditContentMediaLinks(report.matches),
-    ngAuditContentMediaObjectStorage(report.matches),
+  const linkAudit = await auditContentMediaLinks(report.matches);
+  const storageAudit = await ngAuditContentMediaObjectStorage([
+    ...linkAudit.exactMatches,
+    ...linkAudit.missingMatches,
   ]);
   const fingerprint = ngContentMediaAuditFingerprint(mediaJob, assets, report, linkAudit, storageAudit);
   const sourceMediaJobIds = [...new Set(assets
