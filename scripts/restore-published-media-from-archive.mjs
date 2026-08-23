@@ -18,6 +18,7 @@ const apply = String(process.env.CONTENT_MEDIA_RESTORE_APPLY || "").trim().toLow
 const concurrency = Math.max(1, Math.min(12, Number(process.env.CONTENT_MEDIA_RESTORE_CONCURRENCY || 6)));
 const expectedAssets = Math.max(0, Number(process.env.CONTENT_MEDIA_RESTORE_EXPECTED_ASSETS || 0));
 const reuseWorkDirectory = String(process.env.CONTENT_MEDIA_RESTORE_REUSE_WORK_DIR || "").trim().toLowerCase() === "true";
+const allowUnmatched = String(process.env.CONTENT_MEDIA_RESTORE_ALLOW_UNMATCHED || "").trim().toLowerCase() === "true";
 const databaseUrl = String(process.env.DATABASE_URL || "").trim();
 const workDirectory = path.resolve(
   process.env.CONTENT_MEDIA_RESTORE_WORK_DIR || `/tmp/aylamed-media-restore-${collectionId || "invalid"}`,
@@ -148,6 +149,7 @@ for (const asset of assets) {
   if (!candidates.length) unmatched.push({
     objectKey: asset.object_key,
     originalName: asset.original_name,
+    expectedSize: asset.sizeBytes,
     reason: (localByBasename.get(asset.basename) || []).length ? "checksum_mismatch" : "filename_missing",
   });
   else planned.push({ asset, file: candidates[0] });
@@ -156,7 +158,7 @@ for (const asset of assets) {
 if (expectedAssets > 0 && assets.length !== expectedAssets) {
   throw new Error(`Published asset count changed: expected ${expectedAssets}, found ${assets.length}; nothing restored`);
 }
-if (apply && unmatched.length > 0) {
+if (apply && unmatched.length > 0 && !allowUnmatched) {
   console.log(`MEDIA_RESTORE_RESULT ${JSON.stringify({
     success: false,
     apply,
@@ -205,8 +207,18 @@ await concurrentMap(planned, async ({ asset, file }, index) => {
   if ((index + 1) % 250 === 0) console.log(JSON.stringify({ stage: "restore", checked: index + 1, total: planned.length, ...counters }));
 }, concurrency);
 
+let unmatchedAlreadyPresent = 0;
+const unresolvedUnmatched = [];
+await concurrentMap(unmatched, async (item) => {
+  const head = await headContentR2Object(item.objectKey).catch(() => null);
+  if (head && Number(head.sizeBytes || 0) === item.expectedSize) unmatchedAlreadyPresent += 1;
+  else unresolvedUnmatched.push(item);
+}, concurrency);
+
 const result = {
-  success: apply && unmatched.length === 0 && counters.failed === 0 && counters.verified === assets.length,
+  success: apply
+    && counters.failed === 0
+    && counters.verified + unmatchedAlreadyPresent === assets.length,
   apply,
   collectionId,
   archiveObjectKey,
@@ -214,8 +226,10 @@ const result = {
   publishedAssets: assets.length,
   matchedByFilenameAndSha256: planned.length,
   unmatched: unmatched.length,
+  unmatchedAlreadyPresent,
+  unresolvedUnmatched: unresolvedUnmatched.length,
   ...counters,
-  unmatchedSamples: unmatched.slice(0, 25),
+  unmatchedSamples: unresolvedUnmatched.slice(0, 25),
   failureSamples: failures.slice(0, 25),
   temporaryFilesRetained: true,
 };
