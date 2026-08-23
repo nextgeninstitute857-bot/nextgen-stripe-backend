@@ -11,7 +11,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v295-conversion-completion"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v296-live-offer-alerts"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: "message_status"/);
   assert.match(handler, /event: "ignored_non_message"/);
