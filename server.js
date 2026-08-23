@@ -29834,6 +29834,8 @@ function getProviderStatus() {
   const hasEmail = Boolean(process.env.SMTP_HOST || process.env.SENDGRID_API_KEY || process.env.RESEND_API_KEY);
   const hasFacebook = Boolean(process.env.META_PAGE_ACCESS_TOKEN || process.env.FACEBOOK_PAGE_ACCESS_TOKEN);
   const hasInstagram = Boolean(process.env.INSTAGRAM_ACCESS_TOKEN || process.env.INSTAGRAM_PAGE_ACCESS_TOKEN || process.env.META_PAGE_ACCESS_TOKEN);
+  const facebookVerified = hasFacebook && ["1", "true", "yes"].includes(String(process.env.META_PAGE_CONNECTION_VERIFIED || "").trim().toLowerCase());
+  const instagramVerified = hasInstagram && ["1", "true", "yes"].includes(String(process.env.INSTAGRAM_CONNECTION_VERIFIED || "").trim().toLowerCase());
 
   return {
     whatsapp: {
@@ -29895,32 +29897,40 @@ function getProviderStatus() {
       channel: "facebook",
       name: "Facebook Messenger / Page",
       configured: hasFacebook,
-      ready: hasFacebook,
-      enabled: hasFacebook,
+      ready: facebookVerified,
+      enabled: facebookVerified,
       supports: ["text", "webhook", "automation"],
-      status: hasFacebook ? "active" : "manual_first",
-      notes: "Facebook/Meta sending may require app permissions and app review.",
+      status: facebookVerified ? "active" : hasFacebook ? "permission_check_required" : "manual_first",
+      notes: facebookVerified
+        ? "Facebook Page credentials and live permission check are verified."
+        : hasFacebook
+          ? "Facebook credentials are saved, but live Page permissions are not verified."
+          : "Facebook/Meta sending requires Page credentials, app permissions, and any required app review.",
     },
     messenger: {
       key: "messenger",
       channel: "messenger",
       name: "Facebook Messenger",
       configured: hasFacebook,
-      ready: hasFacebook,
-      enabled: hasFacebook,
+      ready: facebookVerified,
+      enabled: facebookVerified,
       supports: ["text", "automation"],
-      status: hasFacebook ? "active" : "manual_first",
+      status: facebookVerified ? "active" : hasFacebook ? "permission_check_required" : "manual_first",
     },
     instagram: {
       key: "instagram",
       channel: "instagram",
       name: "Instagram DM",
       configured: hasInstagram,
-      ready: hasInstagram,
-      enabled: hasInstagram,
+      ready: instagramVerified,
+      enabled: instagramVerified,
       supports: ["text", "webhook", "automation"],
-      status: hasInstagram ? "active" : "manual_first",
-      notes: "Instagram/Meta sending may require app permissions and app review.",
+      status: instagramVerified ? "active" : hasInstagram ? "permission_check_required" : "manual_first",
+      notes: instagramVerified
+        ? "Instagram credentials and live messaging permission check are verified."
+        : hasInstagram
+          ? "Instagram credentials are saved, but the professional account link and live messaging permissions are not verified."
+          : "Instagram messaging requires a professional account, Meta permissions, and any required app review.",
     },
     discord: {
       key: "discord",
