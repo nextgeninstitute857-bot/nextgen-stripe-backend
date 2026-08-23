@@ -12,7 +12,7 @@ const flashcards = fs.readFileSync(
   "utf8",
 );
 
-test("the registry persists source year and restricts new delivery to 2026, 2025, and 2024", () => {
+test("the registry persists source year and restricts new delivery to 2026 only", () => {
   assert.match(registry, /content_import_jobs ADD COLUMN IF NOT EXISTS source_year SMALLINT/);
   assert.match(registry, /content_collections ADD COLUMN IF NOT EXISTS source_year SMALLINT/);
   assert.match(registry, /CONTENT_DELIVERY_SOURCE_YEARS\.join\(","\)/);

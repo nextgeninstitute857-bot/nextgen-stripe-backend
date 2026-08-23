@@ -6,6 +6,7 @@ import fs from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 function passwordRecord(password, salt) {
   return { salt, password_hash: crypto.pbkdf2Sync(password, salt, 120000, 64, "sha512").toString("hex") };
@@ -136,7 +137,7 @@ test("v219 serves one safe profile contract through isolated LMS and AylaMed sto
   const baseUrl = `http://127.0.0.1:${port}`;
   const output = [];
   const child = spawn(process.execPath, ["server.js"], {
-    cwd: path.resolve(new URL("..", import.meta.url).pathname),
+    cwd: fileURLToPath(new URL("..", import.meta.url)),
     env: {
       ...process.env,
       PORT: String(port), DATA_DIR: dataDir,
@@ -279,6 +280,30 @@ test("v219 serves one safe profile contract through isolated LMS and AylaMed sto
     const planningOnly = await api(baseUrl, "/api/ayla/profile", { method: "PUT", token: aylaToken, body: { studentId: "ayla-student-1", dailyHours: 4 } });
     assert.equal(planningOnly.response.status, 200, JSON.stringify(planningOnly.payload));
     assert.equal(planningOnly.payload.student.dailyHours, 4);
+
+    const chosenRestDay = await api(baseUrl, "/api/ayla/profile", {
+      method: "PUT", token: aylaToken,
+      body: { studentId: "ayla-student-1", restDay: "Friday", weeklyStudyDays: 2, preferredStudyDays: ["Monday"] },
+    });
+    assert.equal(chosenRestDay.response.status, 200, JSON.stringify(chosenRestDay.payload));
+    assert.equal(chosenRestDay.payload.student.restDay, "Friday");
+    assert.equal(chosenRestDay.payload.student.weeklyStudyDays, 6);
+    assert.deepEqual(chosenRestDay.payload.student.preferredStudyDays, []);
+
+    const noRestDay = await api(baseUrl, "/api/ayla/profile", {
+      method: "PUT", token: aylaToken,
+      body: { studentId: "ayla-student-1", restDay: "" },
+    });
+    assert.equal(noRestDay.response.status, 200, JSON.stringify(noRestDay.payload));
+    assert.equal(noRestDay.payload.student.restDay, "");
+    assert.equal(noRestDay.payload.student.weeklyStudyDays, 7);
+
+    const invalidRestDay = await api(baseUrl, "/api/ayla/profile", {
+      method: "PUT", token: aylaToken,
+      body: { studentId: "ayla-student-1", restDay: "Someday" },
+    });
+    assert.equal(invalidRestDay.response.status, 400, JSON.stringify(invalidRestDay.payload));
+    assert.equal(invalidRestDay.payload.details.code, "INVALID_REST_DAY");
 
     const storedAyla = JSON.parse(await fs.readFile(aylaPath, "utf8"));
     assert.equal(storedAyla.schema_version, 15);
