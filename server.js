@@ -6,8 +6,8 @@ import {
   validateFlashcardContent,
 } from "./lib/flashcard-engine.js";
 import {
+  contentDeliveryRecordAllowed,
   contentDeliveryPolicySnapshot,
-  contentDeliverySourceYearsForExam,
 } from "./lib/content-delivery-priority.js";
 import {
   flashcardMatchesCurrentSystem,
@@ -44260,7 +44260,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         );
       }
       const staleOrMediaIncomplete = selected.filter((question) =>
-        !contentDeliverySourceYearsForExam(access.exam_track).includes(Number(question.source_year))
+        !contentDeliveryRecordAllowed(question)
         || question.media_integrity_verified !== true);
       if (staleOrMediaIncomplete.length) {
         return aylaSendError(
