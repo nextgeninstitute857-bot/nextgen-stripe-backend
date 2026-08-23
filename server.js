@@ -60686,7 +60686,8 @@ function ng41DetectFutureIntent(text = "") {
     "later", "next week", "week later", "after a week", "after one week", "after 1 week",
     "next month", "month later", "after a month", "after one month", "after 1 month",
     "september", "october", "november", "december", "january", "february", "march", "april", "may", "june", "july", "august",
-    "tomorrow", "busy", "not now", "start next", "upcoming month",
+    "tomorrow", "busy", "not now", "start next", "upcoming month", "available on", "available at", "available from",
+    "contact me", "reach me", "message me", "call me", "in a few months",
   ]);
 }
 
@@ -60704,21 +60705,76 @@ function ng41AddDaysIso(days = 0) {
 function ng41ResolveFutureFollowupDate(text = "") {
   const lower = normalizeCrmLower(text || "");
   if (!lower) return null;
-  if (lower.includes("tomorrow")) return ng41AddDaysIso(1);
-  if (lower.includes("next week") || lower.includes("week later") || lower.includes("after a week") || lower.includes("after one week") || lower.includes("after 1 week")) return ng41AddDaysIso(7);
-  if (lower.includes("next month") || lower.includes("month later") || lower.includes("after a month") || lower.includes("after one month") || lower.includes("after 1 month") || lower.includes("upcoming month")) return ng41AddDaysIso(30);
+
+  const timeMatch = lower.match(/\b(?:at\s*)?(\d{1,2})(?::([0-5]\d))?\s*(am|pm)\b/);
+  const promisedHour = timeMatch ? ((Number(timeMatch[1]) % 12) + (timeMatch[3] === "pm" ? 12 : 0)) : 9;
+  const promisedMinute = timeMatch ? Number(timeMatch[2] || 0) : 0;
+
+  const asFutureIso = (year, monthIndex, day = 1, hour = 9, minute = 0) => {
+    const value = new Date(Date.UTC(Number(year), Number(monthIndex), Number(day), Number(hour), Number(minute), 0));
+    return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  };
+  const now = new Date();
+  const addPromisedDays = (days) => {
+    const date = new Date();
+    date.setDate(date.getDate() + Number(days || 0));
+    date.setHours(promisedHour, promisedMinute, 0, 0);
+    return date.toISOString();
+  };
+  const isoDate = lower.match(/\b(20\d{2})[-/]([01]?\d)[-/]([0-3]?\d)(?:[ t,]+([0-2]?\d)(?::([0-5]\d))?)?\b/);
+  if (isoDate) return asFutureIso(isoDate[1], Number(isoDate[2]) - 1, isoDate[3], isoDate[4] || promisedHour, isoDate[5] || promisedMinute);
 
   const months = [
     ["january", 0], ["february", 1], ["march", 2], ["april", 3], ["may", 4], ["june", 5],
     ["july", 6], ["august", 7], ["september", 8], ["october", 9], ["november", 10], ["december", 11],
   ];
+  const monthPattern = months.map(([name]) => name).join("|");
+  const dayMonth = lower.match(new RegExp(`\\b([0-3]?\\d)(?:st|nd|rd|th)?\\s+(${monthPattern})(?:[,\\s]+(20\\d{2}))?\\b`));
+  const monthDay = lower.match(new RegExp(`\\b(${monthPattern})\\s+([0-3]?\\d)(?:st|nd|rd|th)?(?:[,\\s]+(20\\d{2}))?\\b`));
+  const explicit = dayMonth
+    ? { day: Number(dayMonth[1]), monthName: dayMonth[2], year: Number(dayMonth[3] || now.getFullYear()) }
+    : monthDay
+      ? { day: Number(monthDay[2]), monthName: monthDay[1], year: Number(monthDay[3] || now.getFullYear()) }
+      : null;
+  if (explicit) {
+    const monthIndex = months.find(([name]) => name === explicit.monthName)?.[1];
+    let year = explicit.year;
+    let result = asFutureIso(year, monthIndex, explicit.day, promisedHour, promisedMinute);
+    if (!dayMonth?.[3] && !monthDay?.[3] && new Date(result).getTime() < now.getTime() - 86400000) {
+      year += 1;
+      result = asFutureIso(year, monthIndex, explicit.day, promisedHour, promisedMinute);
+    }
+    return result;
+  }
+
+  const relative = lower.match(/\b(?:in|after)\s+(\d{1,3})\s+(day|days|week|weeks|month|months)\b/);
+  if (relative) {
+    const count = Math.max(1, Number(relative[1]));
+    const unit = relative[2];
+    if (unit.startsWith("day")) return addPromisedDays(count);
+    if (unit.startsWith("week")) return addPromisedDays(count * 7);
+    const date = new Date();
+    date.setMonth(date.getMonth() + count);
+    date.setHours(promisedHour, promisedMinute, 0, 0);
+    return date.toISOString();
+  }
+
+  if (timeMatch && ng41Contains(lower, ["available", "contact me", "reach me", "message me", "call me"])) {
+    const candidate = new Date();
+    candidate.setHours(promisedHour, promisedMinute, 0, 0);
+    if (candidate.getTime() <= Date.now()) candidate.setDate(candidate.getDate() + 1);
+    return candidate.toISOString();
+  }
+
+  if (lower.includes("tomorrow")) return addPromisedDays(1);
+  if (lower.includes("next week") || lower.includes("week later") || lower.includes("after a week") || lower.includes("after one week") || lower.includes("after 1 week")) return addPromisedDays(7);
+  if (lower.includes("next month") || lower.includes("month later") || lower.includes("after a month") || lower.includes("after one month") || lower.includes("after 1 month") || lower.includes("upcoming month")) return addPromisedDays(30);
   const found = months.find(([name]) => lower.includes(name));
   if (found) {
-    const now = new Date();
     let year = now.getFullYear();
-    const candidate = new Date(Date.UTC(year, found[1], 1, 9, 0, 0));
+    const candidate = new Date(Date.UTC(year, found[1], 1, promisedHour, promisedMinute, 0));
     if (candidate.getTime() < now.getTime() - 86400000) year += 1;
-    return new Date(Date.UTC(year, found[1], 1, 9, 0, 0)).toISOString();
+    return new Date(Date.UTC(year, found[1], 1, promisedHour, promisedMinute, 0)).toISOString();
   }
   return null;
 }
@@ -60798,7 +60854,14 @@ function ng41UpsertFutureFollowup(db, lead = {}, payload = {}) {
   const dueAt = payload.due_at || payload.follow_up_at || payload.follow_up_date || null;
   if (!leadId || !dueAt) return null;
   const list = ensureCrmArray(db, "future_followups");
-  const activeExisting = list.find((item) => String(item.lead_id || "") === String(leadId) && ["scheduled", "due"].includes(item.status || "scheduled"));
+  const followupType = payload.follow_up_type || "template_or_call";
+  const activeExisting = list.find((item) => {
+    if (String(item.lead_id || "") !== String(leadId) || !["scheduled", "due"].includes(item.status || "scheduled")) return false;
+    if (payload.replace_active === true) return true;
+    const sameDate = String(item.due_at || item.follow_up_at || "").slice(0, 16) === String(dueAt).slice(0, 16);
+    const sameType = String(item.follow_up_type || "template_or_call") === String(followupType);
+    return sameDate && sameType;
+  });
   const item = withTimestamps({
     ...(activeExisting || {}),
     id: activeExisting?.id || uuid(),
@@ -60808,20 +60871,34 @@ function ng41UpsertFutureFollowup(db, lead = {}, payload = {}) {
     phone: ng41LeadPhone(lead),
     email: ng41LeadEmail(lead),
     exam_type: ng41LeadExamType(lead),
+    country: payload.country || lead.country || lead.country_name || lead.location || activeExisting?.country || "",
+    region: payload.region || lead.region || activeExisting?.region || "",
+    timezone: payload.timezone || lead.timezone || lead.time_zone || activeExisting?.timezone || "",
+    campaign_id: lead.campaign_id || activeExisting?.campaign_id || null,
+    campaign_name: lead.campaign_name || lead.campaign || activeExisting?.campaign_name || "",
     due_at: dueAt,
     follow_up_at: dueAt,
     follow_up_date: String(dueAt).slice(0, 10),
     reason: payload.reason || activeExisting?.reason || "Student asked to be contacted later",
     student_intent: payload.student_intent || activeExisting?.student_intent || "future_start",
     preferred_channel: payload.preferred_channel || activeExisting?.preferred_channel || "whatsapp",
-    follow_up_type: payload.follow_up_type || activeExisting?.follow_up_type || "template_or_call",
+    follow_up_type: followupType || activeExisting?.follow_up_type || "template_or_call",
     status: payload.status || activeExisting?.status || "scheduled",
     source: payload.source || activeExisting?.source || "ai_detected",
     original_text: payload.original_text || activeExisting?.original_text || "",
   }, activeExisting);
   if (activeExisting) Object.assign(activeExisting, item); else list.push(item);
-  lead.next_follow_up_at = dueAt;
+  const nextActive = list
+    .filter((entry) => String(entry.lead_id || "") === String(leadId) && ["scheduled", "due"].includes(entry.status || "scheduled"))
+    .sort((a, b) => new Date(a.due_at || a.follow_up_at || 0).getTime() - new Date(b.due_at || b.follow_up_at || 0).getTime())[0];
+  lead.next_follow_up_at = nextActive?.due_at || nextActive?.follow_up_at || dueAt;
   lead.next_action = "future_followup_scheduled";
+  if (String(item.student_intent || "").includes("promised_availability") || String(item.follow_up_type || "").includes("promised_availability")) {
+    lead.availability_status = "available_later";
+    lead.availability_promised_at = dueAt;
+    lead.availability_note = item.reason;
+    lead.labels = uniqueList([...(Array.isArray(lead.labels) ? lead.labels : []), "promised_availability", "future_followup_scheduled"]);
+  }
   lead.updated_at = nowIso();
   return item;
 }
@@ -61414,6 +61491,60 @@ function ng41BuildDailySalesBrief(db) {
   return summary;
 }
 
+async function ng41SendDueFutureFollowupReminders(db, { limit = 25, dryRun = false, source = "future_followup_scheduler" } = {}) {
+  ng41EnsureGrowthCollections(db);
+  const now = Date.now();
+  const dueItems = ensureCrmArray(db, "future_followups")
+    .filter((item) => ["scheduled", "due"].includes(item.status || "scheduled"))
+    .filter((item) => new Date(item.due_at || item.follow_up_at || 0).getTime() <= now)
+    .filter((item) => !item.admin_reminder_sent_at)
+    .sort((a, b) => String(a.due_at || a.follow_up_at || "").localeCompare(String(b.due_at || b.follow_up_at || "")))
+    .slice(0, Math.max(1, Number(limit || 25)));
+  const results = [];
+
+  for (const item of dueItems) {
+    item.status = "due";
+    item.last_admin_reminder_attempt_at = nowIso();
+    item.updated_at = nowIso();
+    const lead = getLeadByAnyId(db, item.lead_id) || {
+      id: item.lead_id, name: item.name, phone: item.phone, email: item.email,
+      country: item.country, exam_type: item.exam_type,
+    };
+    if (dryRun) {
+      results.push({ id: item.id, lead_id: item.lead_id, dry_run: true });
+      continue;
+    }
+    let dueLabel = String(item.due_at || item.follow_up_at || "");
+    try {
+      dueLabel = new Date(item.due_at || item.follow_up_at).toLocaleString("en-US", {
+        timeZone: item.timezone || "America/New_York", dateStyle: "medium", timeStyle: "short",
+      });
+    } catch (_) { /* Keep the stored timestamp when a lead timezone is invalid. */ }
+    const message = [
+      "⏰ Promised availability reminder", "",
+      `👤 ${ng41LeadName(lead) || item.name || "Student"}`,
+      item.country || lead.country ? `🌍 ${item.country || lead.country}` : "",
+      item.exam_type || ng41LeadExamType(lead) ? `📚 ${item.exam_type || ng41LeadExamType(lead)}` : "",
+      `🗓️ Promised time: ${dueLabel}`,
+      item.phone || ng41LeadPhone(lead) ? `📱 ${item.phone || ng41LeadPhone(lead)}` : "",
+      "", `💬 Remember: ${item.reason || item.original_text || "Student asked to be contacted at this time."}`,
+      "", "➡️ Open Promised Availability in the CRM, contact the student, then mark it Handled.",
+    ].filter(Boolean).join("\n");
+    const alert = await ngSendAdminWhatsAppAlert(db, {
+      type: "promised_availability_due", lead, text: message,
+      meta: { source, followup_id: item.id, due_at: item.due_at || item.follow_up_at },
+    });
+    if (Number(alert?.sent || 0) > 0) {
+      item.admin_reminder_sent_at = nowIso();
+      item.admin_reminder_error = null;
+    } else {
+      item.admin_reminder_error = alert?.reason || "admin_alert_not_sent";
+    }
+    results.push({ id: item.id, lead_id: item.lead_id, sent: Number(alert?.sent || 0), error: item.admin_reminder_error || null });
+  }
+  return { checked: dueItems.length, sent: results.filter((item) => item.sent > 0).length, results };
+}
+
 // Growth summary / daily command center.
 app.get("/admin/crm/growth/summary", async (req, res) => {
   try {
@@ -61740,7 +61871,17 @@ app.get("/admin/crm/future-followups", async (req, res) => {
     const now = Date.now();
     let items = ensureCrmArray(db, "future_followups").sort((a, b) => String(a.due_at || "").localeCompare(String(b.due_at || "")));
     if (dueOnly) items = items.filter((item) => ["scheduled", "due"].includes(item.status || "scheduled") && new Date(item.due_at || item.follow_up_at || 0).getTime() <= now);
-    res.json({ success: true, followups: items, count: items.length });
+    if (req.query.country) items = items.filter((item) => normalizeCrmLower(item.country || item.country_name || item.location || "") === normalizeCrmLower(req.query.country));
+    if (req.query.status) items = items.filter((item) => String(item.status || "scheduled") === String(req.query.status));
+    if (req.query.lead_id) items = items.filter((item) => String(item.lead_id || "") === String(req.query.lead_id));
+    if (req.query.from) items = items.filter((item) => new Date(item.due_at || item.follow_up_at || 0).getTime() >= new Date(req.query.from).getTime());
+    if (req.query.to) items = items.filter((item) => new Date(item.due_at || item.follow_up_at || 0).getTime() <= new Date(req.query.to).getTime());
+    const countries = Object.entries(items.reduce((acc, item) => {
+      const country = item.country || item.country_name || item.location || "Country not known";
+      acc[country] = Number(acc[country] || 0) + 1;
+      return acc;
+    }, {})).map(([country, count]) => ({ country, count })).sort((a, b) => b.count - a.count);
+    res.json({ success: true, followups: items, count: items.length, countries });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
@@ -61763,8 +61904,34 @@ app.patch("/admin/crm/future-followups/:id", async (req, res) => {
     const item = ensureCrmArray(db, "future_followups").find((x) => String(x.id) === String(req.params.id));
     if (!item) return res.status(404).json({ success: false, error: "Future follow-up not found" });
     Object.assign(item, req.body || {}, { updated_at: nowIso() });
+    const lead = getLeadByAnyId(db, item.lead_id);
+    if (lead) {
+      const nextActive = ensureCrmArray(db, "future_followups")
+        .filter((entry) => String(entry.lead_id || "") === String(lead.id || "") && ["scheduled", "due"].includes(entry.status || "scheduled"))
+        .sort((a, b) => new Date(a.due_at || a.follow_up_at || 0).getTime() - new Date(b.due_at || b.follow_up_at || 0).getTime())[0];
+      lead.next_follow_up_at = nextActive?.due_at || nextActive?.follow_up_at || null;
+      if (!nextActive) {
+        lead.availability_status = "handled";
+        lead.next_action = lead.next_action === "future_followup_scheduled" ? "review_lead" : lead.next_action;
+      }
+      lead.updated_at = nowIso();
+    }
     await writeCrmDb(db);
     res.json({ success: true, followup: item });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+app.post("/admin/crm/future-followups/run-due-reminders", async (req, res) => {
+  try {
+    await requireAutomationRunPermission(req);
+    const db = await readCrmDb();
+    const result = await ng41SendDueFutureFollowupReminders(db, {
+      limit: Number(req.body.limit || req.query.limit || 25),
+      dryRun: req.body.dry_run === true || req.query.dry_run === "true",
+      source: req.body.source || "manual_or_cron",
+    });
+    await writeCrmDb(db);
+    res.json({ success: true, ...result });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
@@ -91845,6 +92012,39 @@ app.post("/admin/live-sessions/auto-prepare-now", async (req, res) => {
   }
 });
 
+let ngFutureFollowupReminderTimer = null;
+let ngFutureFollowupReminderRunning = false;
+
+async function ngRunFutureFollowupReminderTick(reason = "interval") {
+  if (ngFutureFollowupReminderRunning) return { success: true, skipped: true, reason: "already_running" };
+  if (ngBackgroundMemoryIsHigh("future_followup_reminders")) return { success: true, skipped: true, reason: "memory_pressure" };
+  ngFutureFollowupReminderRunning = true;
+  try {
+    const db = await readCrmDb();
+    const result = await ng41SendDueFutureFollowupReminders(db, { limit: 25, source: reason });
+    if (result.checked) await writeCrmDb(db);
+    return { success: true, reason, ...result };
+  } catch (error) {
+    console.error("Promised availability reminder tick failed:", error.message);
+    return { success: false, reason, error: error.message };
+  } finally {
+    ngFutureFollowupReminderRunning = false;
+  }
+}
+
+function ngStartFutureFollowupReminderScheduler() {
+  if (ngFutureFollowupReminderTimer) return ngFutureFollowupReminderTimer;
+  const intervalMs = Math.max(60000, Number(process.env.CRM_FUTURE_FOLLOWUP_REMINDER_INTERVAL_MS || 600000));
+  ngFutureFollowupReminderTimer = setInterval(() => {
+    ngRunFutureFollowupReminderTick("interval").catch((error) => console.error("Promised availability reminder scheduler failed:", error.message));
+  }, intervalMs);
+  if (typeof ngFutureFollowupReminderTimer.unref === "function") ngFutureFollowupReminderTimer.unref();
+  setTimeout(() => {
+    ngRunFutureFollowupReminderTick("startup").catch((error) => console.error("Promised availability startup reminder failed:", error.message));
+  }, 30000);
+  return ngFutureFollowupReminderTimer;
+}
+
 let ngAssessmentAutoReleaseTimer = null;
 let ngAssessmentAutoReleaseRunning = false;
 
@@ -92871,6 +93071,7 @@ async function startNextgenServer() {
   ngStartEmailAutomationRunner();
   ngStartBillingExpiryRunner();
   ngStartAutoZoomPrepareScheduler();
+  ngStartFutureFollowupReminderScheduler();
   ngStartAssessmentAutoReleaseScheduler();
   ngStartWeakFlashcardAutomationScheduler();
   ngStartZoomRecordingRecoveryScheduler();
