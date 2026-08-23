@@ -82,6 +82,10 @@ test("uploads a profile photo through Meta resumable upload and returns its hand
   assert.equal(uploaded.handle, "profile-picture-handle");
   assert.equal(calls.length, 2);
   assert.equal(calls[0].config.params.file_length, Buffer.byteLength("photo-bytes"));
+  assert.equal(calls[0].config.params.access_token, "secret-token");
+  assert.equal(calls[0].config.headers, undefined);
+  assert.equal(calls[1].config.headers.Authorization, "OAuth secret-token");
+  assert.equal(calls[1].config.headers["Content-Type"], "application/octet-stream");
   assert.equal(calls[1].config.headers.file_offset, "0");
   assert.equal(calls[1].body.toString(), "photo-bytes");
 });
@@ -137,5 +141,12 @@ test("reads the live Meta profile and compares it with the submitted fields", as
 
   assert.equal(loaded.profile_picture_url, remote.profile_picture_url);
   assert.equal(whatsappBusinessProfileMatches(remote, loaded), true);
+  assert.equal(
+    whatsappBusinessProfileMatches(
+      { ...remote, websites: ["https://nextgenusmle.live"] },
+      { ...loaded, websites: ["https://nextgenusmle.live/"] },
+    ),
+    true,
+  );
   assert.equal(whatsappBusinessProfileMatches({ ...remote, about: "Different" }, loaded), false);
 });
