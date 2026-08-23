@@ -30382,6 +30382,7 @@ const WHATSAPP_TEMPLATE_NAME_ALIASES = {
   session_recording_video: "nextgen_recording_notes_ready",
   community_fallback_invite: "community_fallback_invite",
   nextgen_mentor_meeting_confirmation: "nextgen_mentor_meeting_confirmation",
+  google_meet_confirmation: "nextgen_mentor_meeting_confirmation",
   mentor_booking: "nextgen_mentor_meeting_confirmation",
   mentor_call_offer: "nextgen_mentor_meeting_confirmation",
   nextgen_payment_ready_followup: "nextgen_payment_ready_followup",
@@ -30463,11 +30464,27 @@ function safeTemplateValue(value = "") {
   return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
+function normalizeGoogleMeetCode(value = "") {
+  const raw = safeTemplateValue(value);
+  if (!raw) return "";
+  if (/^[a-z]{3}-[a-z]{4}-[a-z]{3}$/i.test(raw)) return raw.toLowerCase();
+  try {
+    const parsed = new URL(raw);
+    if (String(parsed.hostname || "").toLowerCase() !== "meet.google.com") return "";
+    const code = String(parsed.pathname || "").split("/").filter(Boolean)[0] || "";
+    return /^[a-z]{3}-[a-z]{4}-[a-z]{3}$/i.test(code) ? code.toLowerCase() : "";
+  } catch {
+    return "";
+  }
+}
+
 function getLeadVariableValue(name = "", lead = {}, variables = {}, metadata = {}) {
   const key = String(name || "").trim();
   const lowerKey = key.toLowerCase();
   const direct = key.split(".").reduce((acc, part) => (acc && acc[part] !== undefined ? acc[part] : undefined), variables);
-  if (direct !== undefined && direct !== null && safeTemplateValue(direct) !== "") return safeTemplateValue(direct);
+  if (direct !== undefined && direct !== null && safeTemplateValue(direct) !== "") {
+    return lowerKey === "meeting_code" ? normalizeGoogleMeetCode(direct) : safeTemplateValue(direct);
+  }
 
   const source = { ...(metadata || {}), ...(lead || {}) };
   const aliases = {
@@ -30493,6 +30510,7 @@ function getLeadVariableValue(name = "", lead = {}, variables = {}, metadata = {
     session_link: ["session_link", "live_session_link", "zoom_link", "live_link", "link_url", "url", "default_link"],
     recording_link: ["recording_link", "recording_url", "recording", "link_url", "url", "default_link"],
     mentor_booking_link: ["mentor_booking_link", "booking_link", "appointment_link", "mentor_link", "calendar_link", "link_url", "url", "default_link"],
+    meeting_code: ["meeting_code", "google_meet_code", "google_meet_link", "meeting_link", "join_url", "appointment_link", "link_url", "url"],
     community_link: ["community_link", "telegram_link", "whatsapp_group_link", "group_link", "community_url", "link_url", "url", "default_link"],
     proof_link: ["proof_link", "testimonial_link", "review_link", "trustpilot_link", "proof_url", "link_url", "url", "default_link"],
     youtube_link: ["youtube_link", "youtube_url", "proof_link"],
@@ -30506,6 +30524,11 @@ function getLeadVariableValue(name = "", lead = {}, variables = {}, metadata = {
     if (value !== undefined && value !== null && safeTemplateValue(value) !== "") {
       const clean = safeTemplateValue(value);
       if (["lead_name", "student_name", "doctor_name", "name"].includes(lowerKey) && looksLikePhoneOnly(clean)) continue;
+      if (lowerKey === "meeting_code") {
+        const code = normalizeGoogleMeetCode(clean);
+        if (!code) continue;
+        return code;
+      }
       return clean;
     }
   }
@@ -30603,6 +30626,7 @@ const REQUIRED_WHATSAPP_LINK_VARIABLES = new Set([
   "session_link",
   "recording_link",
   "mentor_booking_link",
+  "meeting_code",
   "community_link",
   "proof_link",
   "demo_link",
@@ -30670,8 +30694,6 @@ function resolveWhatsAppTemplateVariableOrder({ template = null, metadata = {} }
 
 function buildWhatsAppTemplateComponents({ template = null, lead = null, variables = {}, metadata = {} } = {}) {
   const names = resolveWhatsAppTemplateVariableOrder({ template, metadata });
-  if (!names.length) return [];
-
   const params = names.map((name) => {
     const value = getLeadVariableValue(name, lead || {}, variables || {}, metadata || {});
     const cleanValue = safeTemplateValue(value);
@@ -30693,10 +30715,30 @@ function buildWhatsAppTemplateComponents({ template = null, lead = null, variabl
     };
   });
 
-  return [{
+  const components = params.length ? [{
     type: "body",
     parameters: params,
-  }];
+  }] : [];
+
+  const lookupKeys = getWhatsAppTemplateLookupKeys({ template, metadata })
+    .map((key) => WHATSAPP_TEMPLATE_NAME_ALIASES[key] || key);
+  if (lookupKeys.includes("nextgen_mentor_meeting_confirmation")) {
+    const meetingCode = getLeadVariableValue("meeting_code", lead || {}, variables || {}, metadata || {});
+    if (!meetingCode) {
+      const error = new Error("Missing WhatsApp template variable: meeting_code for nextgen_mentor_meeting_confirmation");
+      error.statusCode = 400;
+      error.hint = "Add a valid Google Meet link before sending the mentor meeting confirmation.";
+      throw error;
+    }
+    components.push({
+      type: "button",
+      sub_type: "url",
+      index: "0",
+      parameters: [{ type: "text", text: meetingCode }],
+    });
+  }
+
+  return components;
 }
 
 function sanitizeWhatsAppTemplateComponents(components = []) {
@@ -33761,7 +33803,7 @@ async function ngSendGoogleMeetAppointmentMessage({ db = {}, appointment = {}, a
   const whatsappWindowOpen = channel !== "whatsapp" || ngWithinHours(latestInbound?.created_at || latestInbound?.received_at || latestInbound?.timestamp, 24);
   const settings = ngAylaPickSettings(db);
   const templateMap = {
-    confirmation: settings.google_meet_confirmation_template_key || "google_meet_confirmation",
+    confirmation: settings.google_meet_confirmation_template_key || "nextgen_mentor_meeting_confirmation",
     five_minute_reminder: settings.google_meet_5min_reminder_template_key || "google_meet_5min_reminder",
     link_now: settings.google_meet_link_now_template_key || "google_meet_link_now",
   };
