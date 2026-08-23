@@ -177,6 +177,66 @@ test("programme interest advances from discovery to one complete feature tour wi
   assert.deepEqual(accidentalRepeat.media_keys, []);
 });
 
+test("an interested inbound lead advances to the feature tour once name and exam are known", () => {
+  const state = createAylaConversationState({
+    lead: {
+      status: "new",
+      exam: "USMLE Step 1",
+      ayla_conversation_state: {
+        stage: "discovery",
+        facts: {
+          name: "Sara",
+          exam: "USMLE Step 1",
+          timeline: null,
+          main_need: null,
+          country: null,
+          student_type: "prospective",
+        },
+        turn_count: 1,
+      },
+    },
+  });
+
+  const passive = decision({
+    state,
+    reply: "Thanks for confirming, Sara. How can I help?",
+    action: "reply_only",
+    ask_field: "none",
+  });
+  assert.ok(
+    evaluateAylaConversationDecision({ decision: passive, state, messages: [] })
+      .includes("prospective_lead_not_advanced_to_feature_tour"),
+  );
+
+  const tour = decision({
+    state,
+    stage: "value_tour",
+    intent: "show_step_1_programme",
+    reply: "Great to meet you, Sara. For Step 1, NextGen keeps your teaching, daily roadmap and weak-area improvement connected so you always know the next useful task.",
+    follow_up: "Please take the seven-day demo and see the organisation for yourself: https://nextgenusmle.live/demo Attend live when you can, and use the matching labelled recording whenever you are busy.",
+    action: "send_feature_tour",
+    ask_field: "none",
+    media_keys: ["dashboard"],
+    memory_patch: {
+      name: "Sara",
+      exam: "USMLE Step 1",
+      timeline: null,
+      main_need: null,
+      country: null,
+      student_type: "prospective",
+    },
+  });
+  assert.deepEqual(tour.media_keys, ["dashboard", "recordings", "session_notes", "flashcards", "assessments"]);
+  assert.deepEqual(evaluateAylaConversationDecision({ decision: tour, state, messages: [] }), []);
+
+  const demoBeforeTour = normalizeAylaConversationDecision({
+    ...passive,
+    action: "send_demo",
+    reply: "Start the seven-day demo now.",
+  }, state);
+  assert.equal(demoBeforeTour.action, "send_feature_tour");
+});
+
 test("quality gate rejects permission loops, repeated questions, duplicate replies and stalled discovery", () => {
   const state = createAylaConversationState({
     lead: {
