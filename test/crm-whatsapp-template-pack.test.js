@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 
 import {
   NEXTGEN_WHATSAPP_TEMPLATE_PACK,
@@ -22,6 +23,11 @@ test("the managed WhatsApp pack contains the approved six templates", () => {
   );
   assert.equal(NEXTGEN_WHATSAPP_TEMPLATE_PACK.some((item) => item.body.includes("1 PM")), false);
   assert.equal(NEXTGEN_WHATSAPP_TEMPLATE_PACK.some((item) => item.body.includes("USMLE Step 1")), false);
+  const meeting = NEXTGEN_WHATSAPP_TEMPLATE_PACK.find((item) => item.key === "nextgen_mentor_meeting_confirmation");
+  assert.equal(meeting?.button?.text, "Join Meeting");
+  assert.equal(meeting?.button?.url, "https://meet.google.com/{{meeting_code}}");
+  assert.equal(meeting?.button?.dynamic, true);
+  assert.equal(meeting?.button?.variable, "meeting_code");
 });
 
 test("reconciliation archives obsolete definitions without deleting history", () => {
@@ -57,4 +63,13 @@ test("live Meta inventory is the only source of approved status", () => {
   assert.equal(synced.templates.find((item) => item.key === "nextgen_warm_welcome")?.meta_approved, true);
   assert.equal(synced.templates.find((item) => item.key === "nextgen_live_session_invite")?.meta_approved, false);
   assert.equal(synced.templates.find((item) => item.key === "nextgen_recording_notes_ready")?.meta_status, "draft");
+});
+
+test("mentor meeting template sends a validated dynamic Google Meet button", () => {
+  const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
+  assert.match(server, /function normalizeGoogleMeetCode/);
+  assert.match(server, /sub_type: "url"/);
+  assert.match(server, /parameters: \[\{ type: "text", text: meetingCode \}\]/);
+  assert.match(server, /Add a valid Google Meet link before sending the mentor meeting confirmation/);
+  assert.match(server, /confirmation: settings\.google_meet_confirmation_template_key \|\| "nextgen_mentor_meeting_confirmation"/);
 });
