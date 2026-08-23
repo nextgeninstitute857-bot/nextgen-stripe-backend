@@ -28,6 +28,14 @@ import {
   evaluateAylaConversationDecision,
   normalizeAylaConversationDecision,
 } from "./lib/crm-ayla-conversation-engine.js";
+import {
+  fetchWhatsAppBusinessProfile,
+  fetchWhatsAppPhoneIdentity,
+  normalizeWhatsAppBusinessProfile,
+  publishWhatsAppBusinessProfile,
+  uploadWhatsAppProfilePicture,
+  whatsappBusinessProfileMatches,
+} from "./lib/whatsapp-business-profile.js";
 import { resolveLmsSmtpAuthMethod } from "./lib/email-auth.js";
 import {
   assertWebsiteProductRequest,
@@ -11614,6 +11622,7 @@ app.get("/health", async (req, res) => {
     build: NEXTGEN_BACKEND_BUILD,
     crm_ayla_reply_build: CRM_AYLA_REPLY_BUILD,
     crm_multiexam_lead_capture_build: CRM_MULTIEXAM_LEAD_CAPTURE_BUILD,
+    crm_whatsapp_business_profile_build: "v298-meta-profile-sync",
     crm_ayla_reply_engine: {
       whatsapp_provider_configured: Boolean(process.env.WHATSAPP_ACCESS_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID),
       ai_provider_configured: isAIConfigured(),
@@ -24119,6 +24128,187 @@ registerCrmCrudRoutes({ route: "/admin/crm/brand-snapshots", collection: "brand_
 registerCrmCrudRoutes({ route: "/admin/crm/snapshot-items", collection: "snapshot_items", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/media-assets", collection: "media_assets", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/media-library", collection: "media_assets", brandScoped: true });
+
+function whatsappProfileGraphVersion() {
+  return String(process.env.WHATSAPP_GRAPH_API_VERSION || process.env.META_GRAPH_API_VERSION || "v19.0").trim();
+}
+
+function whatsappProfileMetaAppId() {
+  return String(
+    process.env.WHATSAPP_META_APP_ID ||
+      process.env.META_APP_ID ||
+      process.env.FACEBOOK_APP_ID ||
+      "4536058860015817",
+  ).trim();
+}
+
+function crmSavedWhatsAppProfile(db, phoneNumberId, brandId = null) {
+  return ensureCrmArray(db, "whatsapp_business_profiles").find((item) => {
+    if (String(item.phone_number_id || "") !== String(phoneNumberId || "")) return false;
+    return !brandId || !item.brand_id || String(item.brand_id) === String(brandId);
+  }) || null;
+}
+
+app.get("/admin/crm/whatsapp-business-profile/live", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const { token, phoneNumberId } = await resolveWhatsAppCloudConfig({ db });
+    if (!token || !phoneNumberId) {
+      const error = new Error("WhatsApp Cloud API is not configured. Add the phone number ID and access token first.");
+      error.statusCode = 503;
+      throw error;
+    }
+
+    const version = whatsappProfileGraphVersion();
+    const [profile, identity] = await Promise.all([
+      fetchWhatsAppBusinessProfile({ axiosClient: axios, token, phoneNumberId, version }),
+      fetchWhatsAppPhoneIdentity({ axiosClient: axios, token, phoneNumberId, version }),
+    ]);
+    const saved = crmSavedWhatsAppProfile(db, phoneNumberId, brandId);
+
+    res.json({
+      success: true,
+      source: "meta_live",
+      profile: {
+        ...normalizeWhatsAppBusinessProfile(profile),
+        profile_picture_url: profile.profile_picture_url || "",
+      },
+      identity: {
+        phone_number_id: phoneNumberId,
+        display_phone_number: identity.display_phone_number || "",
+        verified_name: identity.verified_name || "",
+        quality_rating: identity.quality_rating || "UNKNOWN",
+        name_status: identity.name_status || (identity.verified_name ? "APPROVED" : "UNKNOWN"),
+        code_verification_status: identity.code_verification_status || "UNKNOWN",
+      },
+      sync: {
+        status: saved?.status || "meta_live",
+        last_synced_at: saved?.last_synced_at || null,
+        last_verified_at: nowIso(),
+      },
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+      meta_code: error.metaCode || null,
+      meta_subcode: error.metaSubcode || null,
+    });
+  }
+});
+
+app.post("/admin/crm/whatsapp-business-profile/publish", async (req, res) => {
+  try {
+    const admin = await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const { token, phoneNumberId } = await resolveWhatsAppCloudConfig({ db });
+    if (!token || !phoneNumberId) {
+      const error = new Error("WhatsApp Cloud API is not configured. Add the phone number ID and access token first.");
+      error.statusCode = 503;
+      throw error;
+    }
+
+    const version = whatsappProfileGraphVersion();
+    let uploadedPhoto = null;
+    if (req.body?.profile_picture_data_url) {
+      uploadedPhoto = await uploadWhatsAppProfilePicture({
+        axiosClient: axios,
+        token,
+        appId: whatsappProfileMetaAppId(),
+        dataUrl: req.body.profile_picture_data_url,
+        fileName: req.body.profile_picture_file_name || "nextgen-usmle-whatsapp-profile",
+        version,
+      });
+    }
+
+    const requestedProfile = normalizeWhatsAppBusinessProfile(req.body || {});
+    await publishWhatsAppBusinessProfile({
+      axiosClient: axios,
+      token,
+      phoneNumberId,
+      profile: requestedProfile,
+      profilePictureHandle: uploadedPhoto?.handle || "",
+      version,
+    });
+
+    const [remoteProfile, identity] = await Promise.all([
+      fetchWhatsAppBusinessProfile({ axiosClient: axios, token, phoneNumberId, version }),
+      fetchWhatsAppPhoneIdentity({ axiosClient: axios, token, phoneNumberId, version }),
+    ]);
+    const fieldsVerified = whatsappBusinessProfileMatches(requestedProfile, remoteProfile);
+    const now = nowIso();
+    const profiles = ensureCrmArray(db, "whatsapp_business_profiles");
+    const existing = crmSavedWhatsAppProfile(db, phoneNumberId, brandId);
+    const stored = {
+      ...(existing || {}),
+      id: existing?.id || uuid(),
+      brand_id: brandId || existing?.brand_id || null,
+      phone_number_id: phoneNumberId,
+      display_name: identity.verified_name || existing?.display_name || "",
+      display_phone_number: identity.display_phone_number || existing?.display_phone_number || "",
+      ...normalizeWhatsAppBusinessProfile(remoteProfile),
+      profile_picture_url: remoteProfile.profile_picture_url || existing?.profile_picture_url || "",
+      status: fieldsVerified ? "live_synced" : "meta_acknowledged_pending_readback",
+      meta_acknowledged: true,
+      fields_verified: fieldsVerified,
+      photo_uploaded: Boolean(uploadedPhoto),
+      last_synced_at: now,
+      last_verified_at: now,
+      updated_at: now,
+      created_at: existing?.created_at || now,
+    };
+    if (existing) profiles[profiles.indexOf(existing)] = stored;
+    else profiles.unshift(stored);
+
+    createCrmActionLog(db, {
+      brand_id: brandId,
+      agent_name: "WhatsApp Business Profile",
+      action_type: "whatsapp_business_profile_publish",
+      channel: "whatsapp",
+      status: fieldsVerified ? "completed" : "pending_readback",
+      approval_status: "approved",
+      input_text: "Admin published the WhatsApp business identity through Meta Cloud API.",
+      output_text: fieldsVerified
+        ? "Meta confirmed and the live business profile matched the submitted fields."
+        : "Meta acknowledged the update; live readback is still catching up.",
+      created_by: admin?.user?.id || admin?.user?.email || admin?.id || null,
+    });
+    await writeCrmDb(db);
+
+    res.json({
+      success: true,
+      message: fieldsVerified
+        ? "WhatsApp business profile published and verified on Meta."
+        : "Meta accepted the profile. The live WhatsApp readback is still updating.",
+      profile: stored,
+      identity: {
+        phone_number_id: phoneNumberId,
+        display_phone_number: identity.display_phone_number || "",
+        verified_name: identity.verified_name || "",
+        quality_rating: identity.quality_rating || "UNKNOWN",
+        name_status: identity.name_status || (identity.verified_name ? "APPROVED" : "UNKNOWN"),
+        code_verification_status: identity.code_verification_status || "UNKNOWN",
+      },
+      sync: {
+        status: stored.status,
+        fields_verified: fieldsVerified,
+        photo_uploaded: Boolean(uploadedPhoto),
+        last_synced_at: now,
+      },
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+      meta_code: error.metaCode || null,
+      meta_subcode: error.metaSubcode || null,
+    });
+  }
+});
+
 registerCrmCrudRoutes({ route: "/admin/crm/whatsapp-business-profiles", collection: "whatsapp_business_profiles", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/marketing-flow-events", collection: "marketing_flow_events", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/lead-flow-labels", collection: "lead_flow_labels", brandScoped: true });
