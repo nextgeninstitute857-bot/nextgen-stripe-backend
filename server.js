@@ -24135,7 +24135,7 @@ registerCrmCrudRoutes({ route: "/admin/crm/media-assets", collection: "media_ass
 registerCrmCrudRoutes({ route: "/admin/crm/media-library", collection: "media_assets", brandScoped: true });
 
 function whatsappProfileGraphVersion() {
-  return String(process.env.WHATSAPP_GRAPH_API_VERSION || process.env.META_GRAPH_API_VERSION || "v19.0").trim();
+  return String(process.env.WHATSAPP_GRAPH_API_VERSION || process.env.META_GRAPH_API_VERSION || "v26.0").trim();
 }
 
 function whatsappProfileMetaAppId() {
@@ -29967,7 +29967,7 @@ app.post("/admin/crm/flows/bootstrap-default", async (req, res) => {
 // frontend contract.
 
 const CRM_AUTOMATION_CRON_SECRET = process.env.CRM_AUTOMATION_CRON_SECRET || process.env.ADMIN_API_SECRET || AUTH_JWT_SECRET;
-const WHATSAPP_GRAPH_VERSION = process.env.WHATSAPP_GRAPH_VERSION || "v20.0";
+const WHATSAPP_GRAPH_VERSION = process.env.WHATSAPP_GRAPH_VERSION || process.env.WHATSAPP_GRAPH_API_VERSION || process.env.META_GRAPH_API_VERSION || "v26.0";
 
 function normalizeAutomationChannel(value = "whatsapp") {
   const clean = String(value || "whatsapp").trim().toLowerCase().replace(/[^a-z0-9_]+/g, "_");
@@ -33046,50 +33046,70 @@ app.post("/admin/crm/providers/test-send", async (req, res) => {
   }
 });
 
-function getWhatsAppBusinessAccountId(db = {}) {
+function getWhatsAppBusinessAccountIdCandidates(db = {}) {
   const integration = getIntegrationByPlatform(db, "whatsapp") || {};
-  return String(
-    integration.business_account_id ||
-      integration.whatsapp_business_account_id ||
-      integration.waba_id ||
-      integration.credentials?.business_account_id ||
-      integration.credentials?.whatsapp_business_account_id ||
-      integration.credentials?.waba_id ||
-      process.env.WHATSAPP_BUSINESS_ACCOUNT_ID ||
-      process.env.WHATSAPP_WABA_ID ||
-      "",
-  ).trim();
+  return [
+    process.env.WHATSAPP_BUSINESS_ACCOUNT_ID,
+    process.env.WHATSAPP_WABA_ID,
+    integration.whatsapp_business_account_id,
+    integration.waba_id,
+    integration.waba_account_id,
+    integration.whatsapp_asset_id,
+    integration.asset_id,
+    integration.credentials?.whatsapp_business_account_id,
+    integration.credentials?.waba_id,
+    integration.credentials?.waba_account_id,
+    integration.credentials?.whatsapp_asset_id,
+    integration.credentials?.asset_id,
+    integration.business_account_id,
+    integration.credentials?.business_account_id,
+  ].map((value) => String(value || "").trim()).filter((value, index, all) => value && all.indexOf(value) === index);
 }
 
 async function fetchLiveMetaWhatsAppTemplates(db = {}) {
   const { token } = await resolveWhatsAppCloudConfig({ db });
-  const businessAccountId = getWhatsAppBusinessAccountId(db);
-  if (!token || !businessAccountId) {
+  const businessAccountIds = getWhatsAppBusinessAccountIdCandidates(db);
+  if (!token || !businessAccountIds.length) {
     const error = new Error("WhatsApp template inventory is not configured. Add the access token and WhatsApp Business Account ID.");
     error.statusCode = 503;
     throw error;
   }
 
-  const collected = [];
-  let after = "";
-  for (let page = 0; page < 5; page += 1) {
-    const response = await axios.get(
-      `https://graph.facebook.com/${WHATSAPP_GRAPH_VERSION}/${encodeURIComponent(businessAccountId)}/message_templates`,
-      {
-        headers: { Authorization: `Bearer ${token}` },
-        params: {
-          fields: "id,name,status,category,language",
-          limit: 100,
-          ...(after ? { after } : {}),
-        },
-        timeout: 20000,
-      },
-    );
-    collected.push(...(Array.isArray(response.data?.data) ? response.data.data : []));
-    after = String(response.data?.paging?.cursors?.after || "").trim();
-    if (!after || !response.data?.paging?.next) break;
+  let lastError = null;
+  for (const businessAccountId of businessAccountIds) {
+    try {
+      const collected = [];
+      let after = "";
+      for (let page = 0; page < 5; page += 1) {
+        const response = await axios.get(
+          `https://graph.facebook.com/${WHATSAPP_GRAPH_VERSION}/${encodeURIComponent(businessAccountId)}/message_templates`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+            params: {
+              fields: "id,name,status,category,language",
+              limit: 100,
+              ...(after ? { after } : {}),
+            },
+            timeout: 20000,
+          },
+        );
+        collected.push(...(Array.isArray(response.data?.data) ? response.data.data : []));
+        after = String(response.data?.paging?.cursors?.after || "").trim();
+        if (!after || !response.data?.paging?.next) break;
+      }
+      return normalizeMetaTemplateInventory(collected);
+    } catch (error) {
+      lastError = error;
+      if (![400, 404].includes(Number(error.response?.status || 0))) throw error;
+    }
   }
-  return normalizeMetaTemplateInventory(collected);
+
+  const metaError = lastError?.response?.data?.error || {};
+  const error = new Error(metaError.message || lastError?.message || "Meta rejected every configured WhatsApp Business Account ID.");
+  error.statusCode = Number(lastError?.response?.status || 502);
+  error.metaCode = metaError.code || null;
+  error.metaSubcode = metaError.error_subcode || null;
+  throw error;
 }
 
 app.get("/admin/crm/message-templates/meta-live", async (req, res) => {
@@ -33114,7 +33134,12 @@ app.get("/admin/crm/message-templates/meta-live", async (req, res) => {
       synced_at: new Date().toISOString(),
     });
   } catch (error) {
-    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+      meta_code: error.metaCode || error.response?.data?.error?.code || null,
+      meta_subcode: error.metaSubcode || error.response?.data?.error?.error_subcode || null,
+    });
   }
 });
 
