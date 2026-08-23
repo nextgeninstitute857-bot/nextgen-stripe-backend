@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 
 const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
+const conversationEngine = fs.readFileSync(new URL("../lib/crm-ayla-conversation-engine.js", import.meta.url), "utf8");
 
 test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads", () => {
   const handler = server.slice(
@@ -294,7 +295,7 @@ test("Ayla grounds current cohort and pricing answers in the live LMS", () => {
   assert.match(grounding, /When sharing it, always state this exact title before the link/);
   assert.match(grounding, /live_session:/);
   assert.match(grounding, /latest_recording:/);
-  assert.match(replyPrompt, /const liveSnapshot = await ngAylaLiveLmsSalesGrounding\(\{ structured: true \}\)/);
+  assert.match(replyPrompt, /const liveSnapshot = await ngAylaLiveLmsSalesGrounding\(\{ structured: true, crmDb: db, lead, messages: cleanMessages \}\)/);
   assert.match(replyPrompt, /liveFacts: liveSnapshot\.context/);
   assert.match(replyPrompt, /officialExamGuidance/);
   assert.match(replyPrompt, /approvedKnowledge/);
@@ -402,12 +403,38 @@ test("human handoff follows programme value and sends admins a qualified meeting
   assert.match(generator, /decision\.action === "begin_human_handoff"/);
   assert.match(generator, /ngAylaNextHandoffQualificationField/);
   assert.match(generator, /protectedActionContext/);
-  assert.match(alerts, /GOOGLE MEET HANDOFF BOOKED/);
-  assert.match(alerts, /Country\/place:/);
-  assert.match(alerts, /Main reason for meeting:/);
-  assert.match(alerts, /Already explained\/shared by Ayla:/);
-  assert.match(alerts, /without making the student repeat what Ayla already covered/);
+  assert.match(alerts, /Meeting ready — NextGen lead/);
+  assert.match(alerts, /Student wants a NextGen resource/);
+  assert.match(alerts, /Interested in:/);
+  assert.match(alerts, /Ayla has already explained/);
+  assert.match(alerts, /Continue personally from here without asking the student to repeat/);
+  assert.doesNotMatch(alerts, /AI intent:/);
+  assert.doesNotMatch(alerts, /Status:\\n/);
+  assert.doesNotMatch(alerts, /No\/unknown/);
   assert.match(alerts, /for \(const to of numbers\)/);
+});
+
+test("Ayla treats QBank, lecture and live-class enquiries as product leads without inventing discounts", () => {
+  const grounding = server.slice(
+    server.indexOf("function ngAylaSalesFeatureLabel"),
+    server.indexOf("function ngAylaPricingDraftIsGrounded"),
+  );
+  const alerts = server.slice(
+    server.indexOf("function ngAylaProductInterestLabels"),
+    server.indexOf('app.get("/admin/crm/ai-command/admin-alerts/settings"'),
+  );
+
+  assert.match(alerts, /Question bank/);
+  assert.match(alerts, /Recorded lectures/);
+  assert.match(alerts, /Live classes/);
+  assert.match(alerts, /return "product_interest"/);
+  assert.match(grounding, /plan\.is_public !== false/);
+  assert.match(grounding, /\["inactive", "archived", "closed"\]/);
+  assert.match(grounding, /ngAylaApprovedCountryOfferForSales/);
+  assert.match(grounding, /if \(!ruleCountry \|\| ruleCountry !== countryKey\) return false/);
+  assert.match(grounding, /No approved live country discount is available/);
+  assert.match(grounding, /Never invent or generate a coupon/);
+  assert.match(conversationEngine, /Treat a request for only QBank access, recorded lectures, or live classes as genuine product interest/);
 });
 
 test("a public price question does not create or lock a Google Meet handoff", () => {

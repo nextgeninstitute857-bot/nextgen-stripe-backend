@@ -48620,7 +48620,76 @@ function ngAylaFormatPublicPlan(plan = {}) {
   return `${String(plan.name || "Current plan").trim()}: ${amount} ${cadence}${access}`;
 }
 
-async function ngAylaLiveLmsSalesGrounding({ structured = false } = {}) {
+function ngAylaSalesFeatureLabel(value = "") {
+  const key = String(value || "").trim().toLowerCase();
+  const labels = {
+    live_classes: "live classes",
+    recordings: "recorded lectures",
+    video_library: "video library",
+    notes_transcripts: "session notes and transcripts",
+    assessments: "assessments",
+    flashcards: "flashcards",
+    roadmap: "structured roadmap",
+    support: "student support",
+    mini_mock: "mini-mock assessments",
+    community: "student community",
+    global_community: "global student community",
+    study_partner: "study partners",
+    leaderboard: "leaderboard",
+  };
+  return labels[key] || "";
+}
+
+function ngAylaApprovedCountryOfferForSales({ crmDb = null, liveDb = {}, lead = {}, messages = [] } = {}) {
+  if (!crmDb) return null;
+  const conversationCountry = String(
+    lead?.ayla_conversation_state?.facts?.country
+      || lead.country
+      || lead.country_name
+      || lead.location
+      || ""
+  ).trim();
+  const detectedCountry = detectCountryFromPhone(ng41LeadPhone(lead || {})).country || "";
+  const country = conversationCountry || detectedCountry;
+  if (!country) return null;
+  const exam = String(
+    lead?.ayla_conversation_state?.facts?.exam
+      || lead.exam_type
+      || lead.exam
+      || ngAylaHumanHandoffContext(lead || {}, messages).exam
+      || ""
+  ).trim();
+  const countryKey = country.toLowerCase();
+  const examKey = exam.toLowerCase();
+  const rule = ensureCrmArray(crmDb, "coupon_rules").find((candidate) => {
+    if (candidate?.active === false || String(candidate?.status || "active").toLowerCase() === "inactive") return false;
+    if (candidate?.approval_required !== false && String(candidate?.approval_status || "").toLowerCase() !== "approved") return false;
+    const ruleCountry = String(candidate?.country || "").trim().toLowerCase();
+    const ruleExam = String(candidate?.exam_type || "").trim().toLowerCase();
+    if (!ruleCountry || ruleCountry !== countryKey) return false;
+    if (ruleExam && ruleExam !== "any" && examKey && !examKey.includes(ruleExam) && !ruleExam.includes(examKey)) return false;
+    return Boolean(candidate?.coupon_code || candidate?.code);
+  }) || null;
+  if (!rule) return null;
+  const code = normalizeCouponCode(rule.coupon_code || rule.code || "");
+  const coupon = Object.values(liveDb.coupons || {}).find((candidate) => normalizeCouponCode(candidate?.code || "") === code) || null;
+  if (!coupon || coupon.is_active === false || isCouponExpired(coupon)) return null;
+  if (coupon.max_uses && Number(coupon.used_count || 0) >= Number(coupon.max_uses)) return null;
+  const discountType = String(coupon.discount_type || rule.discount_type || "percentage").toLowerCase();
+  const discountValue = Number(coupon.discount_value ?? rule.discount_percent ?? rule.discount_amount_usd ?? 0);
+  if (!Number.isFinite(discountValue) || discountValue <= 0) return null;
+  return {
+    country,
+    code,
+    discount_type: discountType,
+    discount_value: discountValue,
+    public_line: discountType === "fixed"
+      ? `${country}: ${code} gives USD ${discountValue.toFixed(2)} off`
+      : `${country}: ${code} gives ${Math.min(100, discountValue)}% off`,
+  };
+}
+
+async function ngAylaLiveLmsSalesGrounding({ structured = false, crmDb = null, lead = null, messages = [] } = {}) {
   try {
     const liveDb = await readLiveDb();
     const courses = Object.values(liveDb.courses || {})
@@ -48628,9 +48697,17 @@ async function ngAylaLiveLmsSalesGrounding({ structured = false } = {}) {
     const course = courses.find((item) => /step\s*1|usmle/i.test(`${item.name || ""} ${item.category || ""}`)) || courses[0] || null;
     const courseId = String(course?.id || "");
     const plans = Object.values(liveDb.plans || {})
-      .filter((plan) => plan?.id && plan.is_active !== false && Number(plan.price_cents || 0) > 0)
+      .filter((plan) => plan?.id
+        && plan.is_active !== false
+        && plan.is_public !== false
+        && !["inactive", "archived", "closed"].includes(String(plan.status || "active").toLowerCase())
+        && Number(plan.price_cents || 0) > 0)
       .filter((plan) => !courseId || !plan.course_id || String(plan.course_id) === courseId)
       .sort((a, b) => Number(a.price_cents || 0) - Number(b.price_cents || 0));
+    const activePlanFeatures = uniqueList(plans.flatMap((plan) => safeArray(plan.included_features)
+      .map(ngAylaSalesFeatureLabel)
+      .filter(Boolean)));
+    const countryOffer = ngAylaApprovedCountryOfferForSales({ crmDb, liveDb, lead: lead || {}, messages });
 
     const now = ngAylaDateTimePartsInZone(new Date(), "America/New_York");
     const roadmap = courseId ? liveDb.roadmaps?.[courseId] || null : null;
@@ -48709,6 +48786,12 @@ async function ngAylaLiveLmsSalesGrounding({ structured = false } = {}) {
       plans.length
         ? `- Approved public prices: ${plans.map(ngAylaFormatPublicPlan).join(" | ")}.`
         : "- No active public paid plan is available. Do not invent package names or prices; say the current price is not available and offer human help.",
+      activePlanFeatures.length
+        ? `- Features present in the active public plans: ${activePlanFeatures.join(", ")}.`
+        : "- No plan-feature list is currently available; do not invent included products.",
+      countryOffer
+        ? `- Approved country offer for this lead: ${countryOffer.public_line}. This code exists as an active LMS coupon and may be shared with this lead.`
+        : "- No approved live country discount is available for this lead. Never invent or generate a coupon. If regional pricing is requested, collect the country and route the student to the mentor/admin for confirmation.",
       "- Official pricing/enrollment page: https://nextgenusmle.live/pricing",
       "- Pricing rule: when asked, answer with the approved names and exact USD prices above immediately. Do not invent Basic, Standard, Premium, discounts, tiers, or benefits that are not present. A Google Meet may be offered after the transparent answer, never as a condition for learning the price.",
     ];
@@ -48720,8 +48803,11 @@ async function ngAylaLiveLmsSalesGrounding({ structured = false } = {}) {
         currency: String(plan.currency || "usd").toLowerCase(),
         billing_type: String(plan.billing_type || ""),
         access_days: Number(plan.access_days || 0) || null,
+        included_features: safeArray(plan.included_features),
         public_line: ngAylaFormatPublicPlan(plan),
       })),
+      active_plan_features: activePlanFeatures,
+      country_offer: countryOffer,
       pricing_url: "https://nextgenusmle.live/pricing",
       demo_url: "https://nextgenusmle.live/demo",
       current_date: now.date_key,
@@ -48749,7 +48835,7 @@ async function ngAylaLiveLmsSalesGrounding({ structured = false } = {}) {
     return structured ? snapshot : snapshot.context;
   } catch (error) {
     const context = `CURRENT LIVE LMS SALES FACTS: unavailable (${String(error?.message || "read failed").slice(0, 120)}). Do not invent current dates, topics, package names, or prices. Use the official pricing page https://nextgenusmle.live/pricing or offer human help.`;
-    const snapshot = { context, plans: [], pricing_url: "https://nextgenusmle.live/pricing", demo_url: "https://nextgenusmle.live/demo", current_date: "", course_name: "" };
+    const snapshot = { context, plans: [], active_plan_features: [], country_offer: null, pricing_url: "https://nextgenusmle.live/pricing", demo_url: "https://nextgenusmle.live/demo", current_date: "", course_name: "" };
     return structured ? snapshot : context;
   }
 }
@@ -50082,7 +50168,7 @@ Do not mention or pitch any programme, LMS, demo, live session, recording, UWorl
     };
   }
 
-  const liveLmsSalesSnapshot = await ngAylaLiveLmsSalesGrounding({ structured: true });
+  const liveLmsSalesSnapshot = await ngAylaLiveLmsSalesGrounding({ structured: true, crmDb: db, lead, messages: cleanMessages });
   const liveLmsSalesGrounding = liveLmsSalesSnapshot.context;
   if (latestSignals.asks_price) {
     const pricingReply = await ngAylaGenerateGroundedPricingReply({
@@ -50307,7 +50393,7 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
   }
 
   const state = createAylaConversationState({ lead, messages: cleanMessages });
-  const liveSnapshot = await ngAylaLiveLmsSalesGrounding({ structured: true });
+  const liveSnapshot = await ngAylaLiveLmsSalesGrounding({ structured: true, crmDb: db, lead, messages: cleanMessages });
   const historyText = cleanMessages.map((message) => ngMessageText(message)).join("\n");
   // Training Center material is reference knowledge only in v292. Behavioural
   // instructions stored in those records cannot override this controller.
@@ -61584,40 +61670,6 @@ function ngAylaAdminAlertPhoneKey(value = "") {
   return d.length >= 10 ? d.slice(-10) : d;
 }
 
-function ngAylaConversationBlobForAlert(messages = []) {
-  return safeArray(messages)
-    .map((m) => ngMessageText(m))
-    .filter(Boolean)
-    .join("\n")
-    .toLowerCase();
-}
-
-function ngLeadStatusSummaryForAlert(lead = {}, messages = []) {
-  const blob = ngAylaConversationBlobForAlert(messages);
-  const stageBlob = String([lead.status, lead.stage, lead.lead_stage, lead.next_action, lead.google_meet_booking_state, lead.payment_status].join(" ")).toLowerCase();
-  const programExplained = Boolean(lead.program_explained || /120[- ]?day|marathon|roadmap|live usmle guidance|program works|mapped uworld|first aid|lms/.test(blob));
-  const demoSent = Boolean(lead.demo_link_sent || /nextgenusmle\.live\/(?:demo|try-demo)|try demo|2[- ]?day lms demo/.test(blob));
-  const liveInvited = Boolean(lead.live_session_invited || lead.last_session_invite_sent_at || /1:00 pm est|1 pm est|live session|live guidance session|join today's live/.test(blob));
-  const recordingSent = Boolean(lead.recording_sent || lead.recording_followup_sent_once || /recording|us06web\.zoom\.us\/rec\/share|session recording/.test(blob));
-  const uworldSent = Boolean(lead.uworld_demo_sent || lead.demo_lms_sent || /nextgenusmle\.live\/student\/uworld-library|uworld video library|uworld-style|3000\+|150 hours/.test(blob));
-  const meetRequested = Boolean(lead.google_meet_requested || /google_meet_requested|google meet|mentor consultation|preferred.*time/.test(stageBlob + " " + blob));
-  const meetTime = Boolean(lead.google_meet_time_collected_at || /google_meet_time_collected|waiting_for_google_meet_link|missing_link|needs_link/.test(stageBlob));
-  const payment = lead.pending_payment ? "Pending" : meetTime ? "Google Meet time collected" : meetRequested ? "Google Meet requested" : lead.payment_status || lead.stage || "unknown";
-  return [
-    `Program explained: ${programExplained ? "Yes" : "No/unknown"}`,
-    `Attended Dr. Ahmad/NextGen session before: ${lead.attended_dr_ahmad_session === true || lead.attended_nextgen_session === true || /attended.*(dr\.?\s*ahmad|nextgen).*session|joined.*(dr\.?\s*ahmad|nextgen).*session|previous marathon|part of nextgen/i.test(blob) ? "Yes/likely" : lead.attended_dr_ahmad_session === false || lead.attended_nextgen_session === false ? "No" : "Unknown"}`,
-    `Previous session feedback: ${lead.previous_session_feedback || lead.dr_ahmad_session_feedback || "Unknown"}`,
-    `Demo link sent: ${demoSent ? "Yes" : "No/unknown"}`,
-    `Live session invited: ${liveInvited ? "Yes" : "No/unknown"}`,
-    `Session attended: ${lead.session_attended ? "Yes" : "No/unknown"}`,
-    `Recording sent: ${recordingSent ? "Yes" : "No/unknown"}`,
-    `UWorld/LMS link sent: ${uworldSent ? "Yes" : "No/unknown"}`,
-    `Google Meet: ${meetTime ? "Time collected / waiting for link" : meetRequested ? "Requested" : "No/unknown"}`,
-    `Interested 120-Day: ${lead.interested_120_day || String(lead.stage || "") === "interested_120_day" || /120[- ]?day|july 1|marathon/.test(blob) ? "Yes/likely" : "No/unknown"}`,
-    `Payment: ${payment}`,
-  ].join("\\n");
-}
-
 async function ngSendAdminWhatsAppAlert(db = {}, { type = "alert", lead = null, appointment = null, text = "", meta = {} } = {}) {
   const s = ngAylaPickSettings(db);
   if (s.admin_whatsapp_alerts_enabled === false) return { enabled: false, sent: 0, results: [] };
@@ -61632,7 +61684,20 @@ async function ngSendAdminWhatsAppAlert(db = {}, { type = "alert", lead = null, 
   if (!numbers.length) return { enabled: true, sent: 0, skipped: true, reason: "admin_number_is_same_as_lead_number", results: [] };
   const leadName = ng41LeadName(lead || {}) || appointment?.student_name || "Student";
   const appointmentTime = appointment ? ngGoogleMeetAppointmentDisplayDateTime(appointment, "EST") : "";
-  const body = text || `🚨 ${type.replace(/_/g, " ").toUpperCase()}\n\nStudent: ${leadName}\nPhone: ${leadPhone}${appointmentTime ? `\nTime: ${appointmentTime}` : ""}\n\nStatus:\n${ngLeadStatusSummaryForAlert(lead || {}, lead?.id ? ngLeadConversationMessages(db, lead.id) : [])}\n\nNext action: Please review this lead in CRM.`;
+  const leadMessages = lead?.id ? ngLeadConversationMessages(db, lead.id) : [];
+  const latestInboundText = ngMessageText(ngLatestInbound(leadMessages) || {}).trim();
+  const interests = ngAylaProductInterestLabels({ lead: lead || {}, latestInboundText, messages: leadMessages });
+  const body = text || [
+    appointment ? "📅 NextGen meeting update" : "🔔 NextGen student update",
+    "",
+    `👤 ${leadName}`,
+    leadPhone ? `📱 ${leadPhone}` : "",
+    appointmentTime ? `🕐 ${appointmentTime}` : "",
+    interests.length ? `🎯 Interested in: ${interests.join(", ")}` : "",
+    latestInboundText ? `💬 Latest message: “${latestInboundText.slice(0, 320)}”` : "",
+    "",
+    "➡️ Please continue personally from here. The student should not need to repeat anything.",
+  ].filter((line) => line !== "").join("\n");
   const results = [];
   for (const to of numbers) {
     try {
@@ -61654,7 +61719,43 @@ async function ngSendAdminWhatsAppAlert(db = {}, { type = "alert", lead = null, 
 }
 
 
-function ngAylaAdminAlertTypeForIntent(intent = "", lead = {}, appointment = null) {
+function ngAylaProductInterestLabels({ lead = {}, latestInboundText = "", messages = [] } = {}) {
+  const rememberedNeed = lead?.ayla_conversation_state?.facts?.main_need || "";
+  const text = [
+    latestInboundText,
+    rememberedNeed,
+    lead.main_need,
+    lead.main_concern,
+    lead.google_meet_reason,
+    ...safeArray(messages).filter((message) => !ngIsOutboundMessage(message)).slice(-4).map((message) => ngMessageText(message)),
+  ].filter(Boolean).join(" ").toLowerCase();
+  const labels = [];
+  if (/\b(?:q\s*-?\s*bank|question\s*bank|uworld|amboss|mcqs?)\b/i.test(text)) labels.push("Question bank");
+  if (/\b(?:recordings?|recorded\s+(?:classes|lectures?|sessions?)|video\s+(?:classes|lectures?|library)|lectures?)\b/i.test(text)) labels.push("Recorded lectures");
+  if (/\b(?:live\s+(?:class|classes|session|sessions|lecture|lectures)|join\s+(?:the\s+)?class)\b/i.test(text)) labels.push("Live classes");
+  if (/\b(?:demo|trial)\b/i.test(text)) labels.push("7-day demo");
+  if (/\b(?:full\s+(?:programme|program|package)|complete\s+(?:programme|program)|roadmap)\b/i.test(text)) labels.push("Complete programme");
+  return uniqueList(labels);
+}
+
+function ngAylaReadableAlertCoverage(values = []) {
+  const labels = {
+    "programme and roadmap": "Programme structure and roadmap",
+    "program and roadmap": "Programme structure and roadmap",
+    "7-day demo": "7-day demo",
+    "labelled recording": "Labelled recording",
+    "diagnostic and weak-area adaptation": "Diagnostic, weak-area tracking and flashcards",
+    "live session": "Live-session option",
+    pricing: "Current pricing",
+  };
+  return uniqueList(safeArray(values).map((value) => {
+    const clean = String(value || "").trim();
+    if (!clean) return "";
+    return labels[clean.toLowerCase()] || clean.replace(/_/g, " ").replace(/^./, (letter) => letter.toUpperCase());
+  }).filter(Boolean));
+}
+
+function ngAylaAdminAlertTypeForIntent(intent = "", lead = {}, appointment = null, latestInboundText = "", messages = []) {
   const cleanIntent = String(intent || "").toLowerCase();
   const leadState = String([
     lead.status,
@@ -61672,6 +61773,7 @@ function ngAylaAdminAlertTypeForIntent(intent = "", lead = {}, appointment = nul
 
   if (cleanIntent.includes("pricing") || leadState.includes("pricing")) return "pricing_interest";
   if (cleanIntent.includes("google_meet_requested") || leadState.includes("google_meet_requested") || leadState.includes("schedule_google_meet")) return "google_meet_requested";
+  if (ngAylaProductInterestLabels({ lead, latestInboundText, messages }).length) return "product_interest";
   if (leadState.includes("hot") || leadState.includes("human_needed") || lead.human_needed) return "hot_lead_interested";
   return "";
 }
@@ -61684,6 +61786,7 @@ function ngAylaAdminAlertEnabledForType(db = {}, type = "") {
   if (clean === "google_meet_requested" && s.admin_whatsapp_alert_google_meet_requests_enabled === false) return false;
   if (clean === "google_meet_time_collected" && s.admin_whatsapp_alert_google_meet_time_collected_enabled === false) return false;
   if (clean === "pricing_interest" && s.admin_whatsapp_alert_pricing_interest_enabled === false) return false;
+  if (clean === "product_interest" && s.admin_whatsapp_alert_hot_leads_enabled === false) return false;
   return true;
 }
 
@@ -61719,32 +61822,63 @@ function ngAylaAdminAlertAlreadySent(db = {}, { type = "", lead = null, appointm
 }
 
 function ngAylaBuildAdminHotLeadAlertText({ type = "hot_lead_interested", lead = null, appointment = null, latestInboundText = "", intent = "", messages = [] } = {}) {
-  const label = String(type || "alert").replace(/_/g, " ").toUpperCase();
   const handoff = ngAylaHumanHandoffContext(lead || {}, messages);
   const leadName = handoff.student_name || ng41LeadName(lead || {}) || appointment?.student_name || "Student";
   const leadPhone = ng41LeadPhone(lead || {}) || appointment?.student_phone || appointment?.phone || "";
   const leadEmail = ng41LeadEmail(lead || {}) || appointment?.student_email || appointment?.email || "";
   const appointmentTime = appointment ? ngGoogleMeetAppointmentDisplayDateTime(appointment, "EST") : "";
-  const country = appointment?.student_country || handoff.country || "Not collected";
-  const exam = appointment?.exam_type || handoff.exam || "Not collected";
-  const concern = appointment?.main_concern || handoff.concern || "Not collected";
-  const coverage = safeArray(appointment?.programme_coverage).length ? appointment.programme_coverage : handoff.coverage;
-  const headline = String(type || "").toLowerCase() === "google_meet_time_collected"
-    ? "📅 GOOGLE MEET HANDOFF BOOKED"
-    : "🚨 NEXTGEN HOT LEAD ALERT";
-  const sourceLine = intent ? `\nAI intent: ${intent}` : "";
-  const latestLine = latestInboundText ? `\n\nLatest student message:\n${String(latestInboundText).slice(0, 900)}` : "";
+  const country = appointment?.student_country || handoff.country || "";
+  const exam = appointment?.exam_type || handoff.exam || "";
+  const concern = appointment?.main_concern || handoff.concern || "";
+  const coverage = ngAylaReadableAlertCoverage(
+    safeArray(appointment?.programme_coverage).length ? appointment.programme_coverage : handoff.coverage
+  );
+  const interests = ngAylaProductInterestLabels({ lead: lead || {}, latestInboundText, messages });
+  const cleanType = String(type || "").toLowerCase();
+  const headline = cleanType === "google_meet_time_collected"
+    ? "📅 Meeting ready — NextGen lead"
+    : cleanType === "google_meet_requested"
+      ? "📞 Student wants to speak with us"
+      : cleanType === "pricing_interest"
+        ? "💰 Student asked about pricing"
+        : cleanType === "product_interest"
+          ? "🎯 Student wants a NextGen resource"
+          : "🚨 Hot lead — please follow up";
+  const detailLines = [
+    `👤 ${leadName}`,
+    country ? `🌍 ${country}` : "",
+    exam ? `📚 ${exam}` : "",
+    interests.length ? `🎯 Interested in: ${interests.join(" + ")}` : concern ? `🎯 Main need: ${concern}` : "",
+    leadPhone ? `📱 ${leadPhone}` : "",
+    leadEmail ? `✉️ ${leadEmail}` : "",
+    appointmentTime ? `🗓️ ${appointmentTime}` : "",
+  ].filter(Boolean);
+  const latestLine = latestInboundText
+    ? `\n\n💬 Latest message\n“${String(latestInboundText).replace(/\s+/g, " ").trim().slice(0, 700)}”`
+    : "";
+  const coverageBlock = coverage.length
+    ? `\n\n✅ Ayla has already explained\n${coverage.map((item) => `• ${item}`).join("\n")}`
+    : "";
+  const nextAction = cleanType === "google_meet_time_collected"
+    ? "Confirm the meeting, add or verify the meeting link, and continue from this summary."
+    : cleanType === "google_meet_requested"
+      ? "Contact the student and arrange the requested conversation."
+      : cleanType === "pricing_interest"
+        ? "Follow up on the option they prefer. Use only active LMS prices and only an approved country offer."
+        : cleanType === "product_interest"
+          ? "Message the student and help them choose the right available live-class, recorded-lecture or QBank option."
+          : "Continue personally from here without asking the student to repeat what Ayla already learned.";
 
-  return `${headline}\n\nType: ${label}\nStudent: ${leadName}\nCountry/place: ${country}\nExam: ${exam}\nWhatsApp: ${leadPhone || "—"}\nEmail: ${leadEmail || "—"}${appointmentTime ? `\nMeeting time: ${appointmentTime}` : ""}\nMain reason for meeting: ${concern}\nAlready explained/shared by Ayla: ${coverage.join(", ") || "Not confirmed"}${sourceLine}\n\nStatus:\n${ngLeadStatusSummaryForAlert(lead || {}, messages)}${latestLine}\n\nAction needed: Open the CRM conversation, add/confirm the meeting link, and continue from this summary without making the student repeat what Ayla already covered.`;
+  return `${headline}\n\n${detailLines.join("\n")}${latestLine}${coverageBlock}\n\n➡️ Next step\n${nextAction}`;
 }
 
 async function ngAylaMaybeSendConversationAdminAlert({ db = {}, lead = null, appointment = null, ai = {}, latestInbound = null, source = "ai_auto" } = {}) {
-  const type = ngAylaAdminAlertTypeForIntent(ai?.intent || "", lead || {}, appointment || null);
+  const latestInboundText = ngMessageText(latestInbound || {});
+  const leadMessagesForAlert = lead?.id ? ngLeadConversationMessages(db, lead.id) : [];
+  const type = ngAylaAdminAlertTypeForIntent(ai?.intent || "", lead || {}, appointment || null, latestInboundText, leadMessagesForAlert);
   if (!type) return { enabled: true, skipped: true, reason: "not_hot_or_google_meet_intent" };
   if (!ngAylaAdminAlertEnabledForType(db, type)) return { enabled: false, skipped: true, reason: "admin_alert_type_disabled", type };
 
-  const latestInboundText = ngMessageText(latestInbound || {});
-  const leadMessagesForAlert = lead?.id ? ngLeadConversationMessages(db, lead.id) : [];
   const meta = {
     source,
     type,
