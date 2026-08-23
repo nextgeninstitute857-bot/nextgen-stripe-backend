@@ -36,6 +36,11 @@ import {
   uploadWhatsAppProfilePicture,
   whatsappBusinessProfileMatches,
 } from "./lib/whatsapp-business-profile.js";
+import {
+  NEXTGEN_WHATSAPP_TEMPLATE_PACK,
+  normalizeMetaTemplateInventory,
+  reconcileNextGenWhatsAppTemplatePack,
+} from "./lib/crm-whatsapp-template-pack.js";
 import { resolveLmsSmtpAuthMethod } from "./lib/email-auth.js";
 import {
   assertWebsiteProductRequest,
@@ -27969,14 +27974,14 @@ function ngMarkConversationHandledByOutbound(db = {}, leadOrId = null, options =
 }
 
 const NEXTGEN_QUICK_ACTION_TEMPLATE_KEYS = {
-  first_message: ["meta_ad_first_message", "meta_first_message", "first_message_intro", "greeting_exam_type_question"],
-  reminder: ["five_min_live_session_reminder", "five_minute_reminder", "live_session_1pm_reminder"],
-  session_link: ["live_session_link_now", "live_session_1pm_reminder", "live_session_invite_broadcast"],
-  recording: ["recording_followup_after_session", "post_live_notes_recording_followup"],
+  first_message: ["nextgen_warm_welcome"],
+  reminder: ["nextgen_live_five_minute_reminder"],
+  session_link: ["nextgen_live_session_invite"],
+  recording: ["nextgen_recording_notes_ready"],
   testimonial: ["proof_testimonial_message", "proof_testimonial"],
   uworld_demo: ["uworld_video_library_soft_pitch", "demo_lms_activation_invite", "two_day_lms_demo_access"],
   community: ["community_fallback_invite"],
-  mentor: ["mentor_call_offer", "mentor_booking", "mentor_call_followup"],
+  mentor: ["nextgen_mentor_meeting_confirmation"],
 };
 
 function ngFindTemplateForQuickAction(db = {}, action = "") {
@@ -27999,14 +28004,14 @@ function ngBuildQuickActionPayload(db = {}, lead = {}, action = "", body = {}) {
   const cleanAction = normalizeTemplateLookupKey(action || body.quick_action || body.action || "");
   const assets = typeof ngAylaGetSalesAssets === "function" ? ngAylaGetSalesAssets(db) : {};
   const liveLink = getNextGenConfiguredLiveSessionLink() || ngSalesAssetValue(assets, "liveSessionLink") || lead.live_session_link || lead.session_link || "";
-  const sessionTime = body.session_time || ngSalesAssetValue(assets, "sessionTime") || lead.session_time || "1 PM EST";
+  const sessionTime = body.session_time || ngSalesAssetValue(assets, "sessionTime") || lead.session_time || "";
   const recordingLink = body.recording_link || ngSalesAssetValue(assets, "recordingLink") || lead.recording_link || lead.recording_url || "";
   const demoLink = body.demo_link || ngSalesAssetValue(assets, "uworldLink") || lead.demo_link || "https://nextgenusmle.live";
   const youtubeLink = body.youtube_link || ngSalesAssetValue(assets, "youtubeLink") || lead.youtube_link || "";
   const communityLink = body.community_link || lead.community_link || lead.telegram_link || "";
   const mentorLink = body.mentor_booking_link || lead.mentor_booking_link || "";
   const name = getLeadVariableValue("student_name", lead, {}, {}) || "Doctor";
-  const examType = getLeadVariableValue("exam_type", lead, {}, {}) || "USMLE Step 1";
+  const examType = getLeadVariableValue("exam_type", lead, {}, {}) || "";
 
   const messages = {
     first_message: `Hi ${name}, this is NextGen USMLE. You reached out regarding ${examType} preparation. We have a live guidance session at ${sessionTime}, where you can see Dr. Ahmad's teaching style and understand how the program works.`,
@@ -28039,6 +28044,8 @@ function ngBuildQuickActionPayload(db = {}, lead = {}, action = "", body = {}) {
       lead_name: name,
       student_name: name,
       doctor_name: name,
+      name: name === "Doctor" ? "" : name,
+      exam: examType,
       exam_type: examType,
       exam_track: examType,
       session_time: sessionTime,
@@ -30352,24 +30359,33 @@ function createMessageLog(db, payload = {}) {
 }
 
 const WHATSAPP_TEMPLATE_NAME_ALIASES = {
-  meta_ad_first_message: "meta_ad_first_message",
-  meta_first_message: "meta_ad_first_message",
-  first_message_intro: "meta_ad_first_message",
-  greeting_exam_type_question: "greeting_exam_type_question",
-  exam_type_question: "greeting_exam_type_question",
-  sunday_first_message: "greeting_exam_type_question",
-  five_min_live_session_reminder: "five_minute_reminder",
-  five_minute_reminder: "five_minute_reminder",
-  live_session_1pm_reminder: "live_session_link_now",
-  live_session_link_now: "live_session_link_now",
-  next_day_missed_session: "next_day_missed_session",
-  sorry_you_missed_session: "sorry_you_missed_session",
-  recording_followup_after_session: "recording_followup_after_session",
-  post_live_notes_recording_followup: "recording_followup_after_session",
+  nextgen_warm_welcome: "nextgen_warm_welcome",
+  meta_ad_first_message: "nextgen_warm_welcome",
+  meta_first_message: "nextgen_warm_welcome",
+  first_message_intro: "nextgen_warm_welcome",
+  greeting_exam_type_question: "nextgen_warm_welcome",
+  exam_type_question: "nextgen_warm_welcome",
+  sunday_first_message: "nextgen_warm_welcome",
+  nextgen_live_five_minute_reminder: "nextgen_live_five_minute_reminder",
+  five_min_live_session_reminder: "nextgen_live_five_minute_reminder",
+  five_minute_reminder: "nextgen_live_five_minute_reminder",
+  nextgen_live_session_invite: "nextgen_live_session_invite",
+  live_session_1pm_reminder: "nextgen_live_session_invite",
+  live_session_link_now: "nextgen_live_session_invite",
+  daily_live_session_invite: "nextgen_live_session_invite",
+  live_session_invitation: "nextgen_live_session_invite",
+  nextgen_recording_notes_ready: "nextgen_recording_notes_ready",
+  next_day_missed_session: "nextgen_recording_notes_ready",
+  sorry_you_missed_session: "nextgen_recording_notes_ready",
+  recording_followup_after_session: "nextgen_recording_notes_ready",
+  post_live_notes_recording_followup: "nextgen_recording_notes_ready",
+  session_recording_video: "nextgen_recording_notes_ready",
   community_fallback_invite: "community_fallback_invite",
-  mentor_booking: "mentor_call_offer",
-  mentor_call_offer: "mentor_call_offer",
-  enrollment_help_after_interest: "enrollment_help_after_interest",
+  nextgen_mentor_meeting_confirmation: "nextgen_mentor_meeting_confirmation",
+  mentor_booking: "nextgen_mentor_meeting_confirmation",
+  mentor_call_offer: "nextgen_mentor_meeting_confirmation",
+  nextgen_payment_ready_followup: "nextgen_payment_ready_followup",
+  enrollment_help_after_interest: "nextgen_payment_ready_followup",
   uworld_video_library_soft_pitch: "uworld_video_library_soft_pitch",
   post_demo_interest_check: "post_demo_interest_check",
   stop_opt_out: "stop_opt_out",
@@ -30459,6 +30475,7 @@ function getLeadVariableValue(name = "", lead = {}, variables = {}, metadata = {
     student_name: ["student_name", "lead_name", "doctor_name", "name", "full_name", "first_name", "display_name", "profile_name", "whatsapp_name"],
     doctor_name: ["doctor_name", "student_name", "lead_name", "name", "full_name", "first_name", "display_name", "profile_name", "whatsapp_name"],
     name: ["name", "full_name", "student_name", "lead_name", "doctor_name", "first_name", "display_name", "profile_name", "whatsapp_name"],
+    exam: ["exam", "exam_type", "exam_track", "which_exam", "track", "program_track", "course_name"],
     exam_type: ["exam_type", "exam_track", "exam", "which_exam", "track", "program_track", "course_name"],
     exam_track: ["exam_track", "exam_type", "exam", "which_exam", "track", "program_track", "course_name"],
     exam_date: ["exam_date", "exam_timeline", "planned_exam_date", "target_exam_date"],
@@ -30466,6 +30483,11 @@ function getLeadVariableValue(name = "", lead = {}, variables = {}, metadata = {
     main_difficulty: ["main_difficulty", "difficulty", "pain_points", "study_problem", "main_problem"],
     course_name: ["course_name", "program_name", "interested_program"],
     program_name: ["program_name", "course_name", "interested_program"],
+    programme: ["programme", "program_name", "course_name", "interested_program", "exam", "exam_type", "exam_track"],
+    topic: ["topic", "session_topic", "live_topic", "lecture_topic", "session_name", "full_session_name"],
+    full_session_name: ["full_session_name", "session_name", "recording_name", "recording_title", "lecture_title", "topic"],
+    time: ["time", "session_time", "live_session_time", "appointment_time", "fixed_run_time", "live_time"],
+    date: ["date", "meeting_date", "appointment_date", "session_date", "scheduled_date"],
     session_time: ["session_time", "live_session_time", "appointment_time", "fixed_run_time", "live_time"],
     live_session_link: ["live_session_link", "session_link", "zoom_link", "live_link", "link_url", "url", "default_link"],
     session_link: ["session_link", "live_session_link", "zoom_link", "live_link", "link_url", "url", "default_link"],
@@ -30488,12 +30510,10 @@ function getLeadVariableValue(name = "", lead = {}, variables = {}, metadata = {
     }
   }
 
-  if (["lead_name", "student_name", "doctor_name", "name"].includes(lowerKey)) return "Doctor";
-  if (["exam_type", "exam_track"].includes(lowerKey)) return "USMLE Step 1";
-  if (lowerKey === "session_time") return "1 PM EST";
+  if (["lead_name", "student_name", "doctor_name"].includes(lowerKey)) return "Doctor";
   if (["live_session_link", "session_link"].includes(lowerKey)) return getNextGenConfiguredLiveSessionLink() || "https://nextgenusmle.live";
   if (["demo_link", "recording_link"].includes(lowerKey)) return "https://nextgenusmle.live";
-  if (lowerKey === "course_name" || lowerKey === "program_name") return "NextGen USMLE";
+  if (lowerKey === "course_name" || lowerKey === "program_name") return "NextGen";
   if (lowerKey === "exam_date" || lowerKey === "graduation_year" || lowerKey === "main_difficulty") return "not confirmed";
   return "";
 }
@@ -30524,6 +30544,13 @@ function extractNumberedTemplateVariableCount(templateText = "") {
 }
 
 const WHATSAPP_TEMPLATE_VARIABLE_ORDERS = {
+  nextgen_warm_welcome: ["name", "exam"],
+  nextgen_live_session_invite: ["name", "topic", "time"],
+  nextgen_live_five_minute_reminder: ["name", "topic"],
+  nextgen_recording_notes_ready: ["name", "full_session_name"],
+  nextgen_payment_ready_followup: ["name", "programme"],
+  nextgen_mentor_meeting_confirmation: ["name", "date", "time"],
+
   meta_ad_first_message: ["student_name", "exam_type", "session_time"],
   meta_first_message: ["student_name", "exam_type", "session_time"],
   first_message_intro: ["student_name", "exam_type", "session_time"],
@@ -30580,6 +30607,16 @@ const REQUIRED_WHATSAPP_LINK_VARIABLES = new Set([
   "proof_link",
   "demo_link",
   "payment_link",
+]);
+
+const REQUIRED_NEXTGEN_WHATSAPP_TEMPLATE_VARIABLES = new Set([
+  "name",
+  "exam",
+  "topic",
+  "time",
+  "full_session_name",
+  "programme",
+  "date",
 ]);
 
 function getWhatsAppTemplateLookupKeys({ template = null, metadata = {} } = {}) {
@@ -30639,7 +30676,10 @@ function buildWhatsAppTemplateComponents({ template = null, lead = null, variabl
     const value = getLeadVariableValue(name, lead || {}, variables || {}, metadata || {});
     const cleanValue = safeTemplateValue(value);
 
-    if (!cleanValue && REQUIRED_WHATSAPP_LINK_VARIABLES.has(String(name || "").toLowerCase())) {
+    if (!cleanValue && (
+      REQUIRED_WHATSAPP_LINK_VARIABLES.has(String(name || "").toLowerCase()) ||
+      REQUIRED_NEXTGEN_WHATSAPP_TEMPLATE_VARIABLES.has(String(name || "").toLowerCase())
+    )) {
       const templateName = getWhatsAppTemplateName({ template, metadata }) || metadata.template_key || template?.key || "selected template";
       const error = new Error(`Missing WhatsApp template variable: ${name} for ${templateName}`);
       error.statusCode = 400;
@@ -32406,20 +32446,23 @@ function ngCanSendAutoFirstMessage(db, lead = {}) {
   if (!ngLeadLooksLikeMetaCampaignLead(lead) && !queuedByImportOrAdmin) return { ok: false, reason: "not_queued_for_first_message" };
 
   if (lead.first_message_sent_at || lead.first_template_sent_at || stage === "first_message_sent") return { ok: false, reason: "first_message_already_marked_sent" };
-  if (ngLeadHasOutboundTemplate(db, lead, ["meta_ad_first_message", "first_message_intro", "meta_first_message", "greeting_exam_type_question", "exam_type_question", "sunday_first_message", "welcome_demo_invite"])) return { ok: false, reason: "first_message_already_logged" };
+  if (ngLeadHasOutboundTemplate(db, lead, ["nextgen_warm_welcome", "meta_ad_first_message", "first_message_intro", "meta_first_message", "greeting_exam_type_question", "exam_type_question", "sunday_first_message", "welcome_demo_invite"])) return { ok: false, reason: "first_message_already_logged" };
   return { ok: true, reason: "eligible" };
 }
 
 function ngFirstMessageVariablesForLead(lead = {}) {
   const rawName = safeTemplateValue(lead.student_name || lead.lead_name || lead.name || lead.full_name || lead.first_name || lead.whatsapp_name || lead.profile_name || "");
   const studentName = rawName && !looksLikePhoneOnly(rawName) ? rawName : "Doctor";
+  const exam = safeTemplateValue(lead.exam || lead.exam_type || lead.exam_track || lead.program_track || lead.course_name || "");
   return {
+    name: rawName && !looksLikePhoneOnly(rawName) ? rawName : "",
     student_name: studentName,
     lead_name: studentName,
     doctor_name: studentName,
-    exam_type: safeTemplateValue(lead.exam_type || lead.exam_track || lead.exam || lead.program_track || "USMLE Step 1"),
-    exam_track: safeTemplateValue(lead.exam_track || lead.exam_type || lead.exam || "USMLE Step 1"),
-    session_time: safeTemplateValue(lead.session_time || lead.live_session_time || lead.fixed_run_time || "1:00 PM EST"),
+    exam,
+    exam_type: exam,
+    exam_track: exam,
+    session_time: safeTemplateValue(lead.session_time || lead.live_session_time || lead.fixed_run_time || ""),
   };
 }
 
@@ -32473,18 +32516,16 @@ function ngResolveAutoFirstMessageTemplateKey(db = {}, lead = {}) {
   const settingsPreferred = normalizeTemplateLookupKey(settings.first_message_template_key || settings.meta_first_message_template_key || settings.default_first_message_template_key || "");
   if (settingsPreferred) return WHATSAPP_TEMPLATE_NAME_ALIASES[settingsPreferred] || settingsPreferred;
 
-  // v95: use the already-approved Meta first-message template by default for all first outreach.
-  // This is safest for cold WhatsApp messages because it opens a conversation with an approved Marketing template.
-  if (ngIsSundayNoLiveSessionDay(db)) return "greeting_exam_type_question";
-  return "meta_ad_first_message";
+  // The welcome template is exam-neutral and safe on both teaching and rest days.
+  return "nextgen_warm_welcome";
 }
 
 function ngGetOfficialWhatsAppTemplateNameForKey(templateKey = "") {
   const clean = normalizeTemplateLookupKey(templateKey);
-  return WHATSAPP_TEMPLATE_NAME_ALIASES[clean] || clean || "meta_ad_first_message";
+  return WHATSAPP_TEMPLATE_NAME_ALIASES[clean] || clean || "nextgen_warm_welcome";
 }
 
-function ngAutoFirstVirtualTemplate(templateKey = "meta_ad_first_message", existingTemplate = null) {
+function ngAutoFirstVirtualTemplate(templateKey = "nextgen_warm_welcome", existingTemplate = null) {
   const key = ngGetOfficialWhatsAppTemplateNameForKey(templateKey);
   if (existingTemplate) {
     return {
@@ -32500,47 +32541,27 @@ function ngAutoFirstVirtualTemplate(templateKey = "meta_ad_first_message", exist
     };
   }
 
-  if (key === "greeting_exam_type_question") {
-    return {
-      id: key,
-      key,
-      template_key: key,
-      name: "Greeting Exam Type Question",
-      channel: "whatsapp",
-      body: "Hi Doctor, welcome to NextGen USMLE. Are you preparing for Step 1 or Step 2 CK?",
-      provider_template_name: key,
-      meta_template_name: key,
-      whatsapp_template_name: key,
-      language_code: "en",
-      meta_language: "en",
-      whatsapp_language: "en",
-      variables: [],
-    };
-  }
-
+  const definition = NEXTGEN_WHATSAPP_TEMPLATE_PACK.find((item) => item.key === key) || NEXTGEN_WHATSAPP_TEMPLATE_PACK[0];
   return {
     id: key,
     key,
     template_key: key,
-    name: "Meta Ad First Message",
+    name: definition.name,
     channel: "whatsapp",
-    body: "Hi Doctor {{student_name}}, this is NextGen USMLE. You reached out about {{exam_type}} preparation. We have a live guidance session today at {{session_time}} to explain the program and mentor teaching style. Can you join?",
-    provider_template_name: "meta_ad_first_message",
-    meta_template_name: "meta_ad_first_message",
-    whatsapp_template_name: "meta_ad_first_message",
-    language_code: "en",
-    meta_language: "en",
-    whatsapp_language: "en",
-    variables: ["student_name", "exam_type", "session_time"],
+    body: definition.body,
+    provider_template_name: definition.key,
+    meta_template_name: definition.key,
+    whatsapp_template_name: definition.key,
+    language_code: "en_US",
+    meta_language: "en_US",
+    whatsapp_language: "en_US",
+    variables: [...definition.variables],
   };
 }
 
-function ngAutoFirstFallbackTextForTemplate(templateKey = "meta_ad_first_message") {
-  const clean = normalizeTemplateLookupKey(templateKey);
-  if (clean === "greeting_exam_type_question" || clean === "exam_type_question" || clean === "sunday_first_message") {
-    return "Hi Doctor, welcome to NextGen USMLE. Are you preparing for Step 1 or Step 2 CK?";
-  }
-  return "Hi Doctor {{student_name}}, this is NextGen USMLE. You reached out about {{exam_type}} preparation. We have a live guidance session today at {{session_time}} to explain the program and mentor teaching style. Can you join?";
+function ngAutoFirstFallbackTextForTemplate(templateKey = "nextgen_warm_welcome") {
+  const key = ngGetOfficialWhatsAppTemplateNameForKey(templateKey);
+  return NEXTGEN_WHATSAPP_TEMPLATE_PACK.find((item) => item.key === key)?.body || NEXTGEN_WHATSAPP_TEMPLATE_PACK[0].body;
 }
 
 async function ngSendAutoFirstMessageForLead({ db, lead, brandId = null, actorId = "system", source = "auto_first_message", dryRun = false } = {}) {
@@ -32626,7 +32647,8 @@ function ngGetBulkFirstMessageSettings(db = {}, overrides = {}) {
 function ngFirstMessageSentTodayCount(db = {}, dateKey = todayKey()) {
   return ensureCrmArray(db, "message_logs").filter((log) => {
     const meta = log.metadata || {};
-    const isFirst = normalizeTemplateLookupKey(meta.quick_action || meta.source || log.template_id || meta.template_key || "").includes("first_message") || normalizeTemplateLookupKey(meta.template_key || log.template_id || "") === "meta_ad_first_message";
+    const firstTemplateKey = normalizeTemplateLookupKey(meta.template_key || log.template_id || "");
+    const isFirst = normalizeTemplateLookupKey(meta.quick_action || meta.source || log.template_id || meta.template_key || "").includes("first_message") || ["meta_ad_first_message", "nextgen_warm_welcome"].includes(firstTemplateKey);
     const isSent = ["sent", "delivered", "queued"].includes(normalizeCrmLower(log.status || "", ""));
     const logDate = String(log.sent_at || log.created_at || log.created || "").slice(0, 10);
     return isFirst && isSent && logDate === dateKey;
@@ -33024,10 +33046,86 @@ app.post("/admin/crm/providers/test-send", async (req, res) => {
   }
 });
 
+function getWhatsAppBusinessAccountId(db = {}) {
+  const integration = getIntegrationByPlatform(db, "whatsapp") || {};
+  return String(
+    integration.business_account_id ||
+      integration.whatsapp_business_account_id ||
+      integration.waba_id ||
+      integration.credentials?.business_account_id ||
+      integration.credentials?.whatsapp_business_account_id ||
+      integration.credentials?.waba_id ||
+      process.env.WHATSAPP_BUSINESS_ACCOUNT_ID ||
+      process.env.WHATSAPP_WABA_ID ||
+      "",
+  ).trim();
+}
+
+async function fetchLiveMetaWhatsAppTemplates(db = {}) {
+  const { token } = await resolveWhatsAppCloudConfig({ db });
+  const businessAccountId = getWhatsAppBusinessAccountId(db);
+  if (!token || !businessAccountId) {
+    const error = new Error("WhatsApp template inventory is not configured. Add the access token and WhatsApp Business Account ID.");
+    error.statusCode = 503;
+    throw error;
+  }
+
+  const collected = [];
+  let after = "";
+  for (let page = 0; page < 5; page += 1) {
+    const response = await axios.get(
+      `https://graph.facebook.com/${WHATSAPP_GRAPH_VERSION}/${encodeURIComponent(businessAccountId)}/message_templates`,
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        params: {
+          fields: "id,name,status,category,language",
+          limit: 100,
+          ...(after ? { after } : {}),
+        },
+        timeout: 20000,
+      },
+    );
+    collected.push(...(Array.isArray(response.data?.data) ? response.data.data : []));
+    after = String(response.data?.paging?.cursors?.after || "").trim();
+    if (!after || !response.data?.paging?.next) break;
+  }
+  return normalizeMetaTemplateInventory(collected);
+}
+
+app.get("/admin/crm/message-templates/meta-live", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const liveTemplates = await fetchLiveMetaWhatsAppTemplates(db);
+    const reconciled = reconcileNextGenWhatsAppTemplatePack(db.message_templates, {
+      liveTemplates,
+      liveWasChecked: true,
+    });
+    db.message_templates = reconciled.templates;
+    await writeCrmDb(db);
+    res.json({
+      success: true,
+      source: "meta_live",
+      templates: liveTemplates,
+      total: liveTemplates.length,
+      approved: liveTemplates.filter((item) => ["APPROVED", "ACTIVE"].includes(item.status)).length,
+      nextgen_pack_approved: reconciled.liveApprovedCount,
+      nextgen_pack_total: NEXTGEN_WHATSAPP_TEMPLATE_PACK.length,
+      synced_at: new Date().toISOString(),
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
 app.get("/admin/crm/message-templates", async (req, res) => {
   try {
     await requireCrmAdmin(req);
     const db = await readCrmDb();
+    const beforeTemplates = JSON.stringify(ensureCrmArray(db, "message_templates"));
+    const reconciled = reconcileNextGenWhatsAppTemplatePack(db.message_templates);
+    db.message_templates = reconciled.templates;
+    if (JSON.stringify(db.message_templates) !== beforeTemplates) await writeCrmDb(db);
     const brandId = getCrmBrandId(req, db);
     const templates = filterCrmRecords(req, ensureCrmArray(db, "message_templates"), brandId);
     res.json({ success: true, templates, count: templates.length });
@@ -33061,12 +33159,17 @@ app.put("/admin/crm/message-templates/:id", async (req, res) => {
 
 app.delete("/admin/crm/message-templates/:id", async (req, res) => {
   try {
-    await requireCrmAdmin(req);
+    const { user } = await requireCrmAdmin(req);
     const db = await readCrmDb();
-    const before = ensureCrmArray(db, "message_templates").length;
-    db.message_templates = ensureCrmArray(db, "message_templates").filter((item) => String(item.id) !== String(req.params.id));
+    const template = ensureCrmArray(db, "message_templates").find((item) => String(item.id) === String(req.params.id));
+    if (!template) return res.status(404).json({ success: false, error: "Message template not found" });
+    template.active = false;
+    template.status = "archived";
+    template.archived_by = user.id;
+    template.archived_at = new Date().toISOString();
+    template.updated_at = template.archived_at;
     await writeCrmDb(db);
-    res.json({ success: true, deleted: db.message_templates.length < before });
+    res.json({ success: true, archived: true, template });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
@@ -33291,7 +33394,9 @@ async function ngRunNoSessionRecordingFallback({ db = {}, brandId = null, limit 
         templateId,
         templateVariables: {
           lead,
+          name: ng41LeadName(lead) || "",
           student_name: ng41LeadName(lead) || "Doctor",
+          full_session_name: ngAylaRecordingTitle(assets),
           exam_type: ng41LeadExamType(lead) || "USMLE",
           session_time: assets.sessionTime,
           recording_link: assets.recordingLink,
@@ -33446,10 +33551,10 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
   if (!action) return { action: null, processed: 0, sent: 0, skipped: 0, results: [], reason: "not_due_now" };
   const assets = ngAylaGetSalesAssets(db);
   const templateMap = {
-    daily_session_invite: settings.daily_session_invite_template_key || "daily_live_session_invite",
-    five_minute_reminder: settings.session_reminder_template_key || "five_minute_reminder",
-    session_link: settings.session_link_template_key || "live_session_link_now",
-    post_session_recording: settings.post_session_recording_template_key || "recording_followup_after_session",
+    daily_session_invite: settings.daily_session_invite_template_key || "nextgen_live_session_invite",
+    five_minute_reminder: settings.session_reminder_template_key || "nextgen_live_five_minute_reminder",
+    session_link: settings.session_link_template_key || "nextgen_live_session_invite",
+    post_session_recording: settings.post_session_recording_template_key || "nextgen_recording_notes_ready",
   };
   const leads = ensureCrmArray(db, "leads")
     .filter((lead) => !brandId || String(lead.brand_id || "") === String(brandId || ""))
@@ -33485,7 +33590,11 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
         templateId,
         templateVariables: {
           lead,
+          name: ng41LeadName(lead) || "",
           student_name: ng41LeadName(lead) || "Doctor",
+          topic: assets.liveSessionTitle || "",
+          time: assets.sessionTime || "",
+          full_session_name: ngAylaRecordingTitle(assets),
           exam_type: ng41LeadExamType(lead) || "USMLE",
           session_time: assets.sessionTime,
           live_session_link: assets.liveSessionLink,
@@ -35719,10 +35828,11 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   daily_live_session_flow_enabled: true,
   live_session_days: "Monday to Friday",
   session_reminder_minutes: 5,
-  session_reminder_template_key: "five_minute_reminder",
-  session_link_template_key: "live_session_link_now",
-  post_session_recording_template_key: "recording_followup_after_session",
-  next_day_followup_template_key: "next_day_missed_session",
+  first_message_template_key: "nextgen_warm_welcome",
+  session_reminder_template_key: "nextgen_live_five_minute_reminder",
+  session_link_template_key: "nextgen_live_session_invite",
+  post_session_recording_template_key: "nextgen_recording_notes_ready",
+  next_day_followup_template_key: "nextgen_recording_notes_ready",
   post_session_followup_delay_minutes: 120,
   daily_session_send_to_new_leads: true,
   daily_session_send_to_interested: true,
@@ -35740,7 +35850,7 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   company_proof_line: "Next Generation USMLE has been actively teaching USMLE students for around 2-3 years.",
   student_success_line: "Students from our community are progressing every month through structured live teaching, recordings, and mentor support.",
   sunday_fallback_message: "On Sunday, share the recording and UWorld demo first, then invite to the next Monday-Friday live session.",
-  recording_template_key: "session_recording_video",
+  recording_template_key: "nextgen_recording_notes_ready",
   sales_style_rule: "Open warmly once and talk like a human counselor. Answer the student’s exact question first, then move the lead through live session, recent recording, UWorld demo, YouTube lectures, then Google Meet mentor consultation. Do not dump assets when the student asks a direct question. Do not start every reply with Hi Doctor.",
   uworld_video_library_rule: "Present the UWorld Video Library as a major NextGen advantage: around 150 hours, 3000+ UWorld-style MCQs explained in depth, First Aid side-by-side, helping students learn MCQ approach, option elimination, concept connection, and weak-area correction. Share the UWorld library link when relevant.",
   mentor_sales_rule: "Use mentor authority naturally only when useful. Do not invent doctor names. Student-facing wording must say Google Meet / Google Meet mentor consultation, not call.",
@@ -35757,7 +35867,7 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   assessment_rule: "Do not create assessment after every session. Assessments are after each system/block, surprise mentor assessments when assigned, and final/mixed review assessments when needed.",
   flashcards_enabled: true,
   media_library_enabled: true,
-  daily_session_invite_template_key: "daily_live_session_invite",
+  daily_session_invite_template_key: "nextgen_live_session_invite",
   daily_session_send_recording_to_no_reply: true,
   daily_session_exclude_active_google_meet: false,
   daily_session_exclude_not_interested: true,
@@ -35893,6 +36003,23 @@ function ngEnsureAiStore(db) {
     ...(db.ai_orchestration_settings || db.assistant_settings || {})
   };
 
+  for (const settingKey of [
+    "first_message_template_key",
+    "meta_first_message_template_key",
+    "default_first_message_template_key",
+    "session_reminder_template_key",
+    "session_link_template_key",
+    "post_session_recording_template_key",
+    "next_day_followup_template_key",
+    "recording_template_key",
+    "daily_session_invite_template_key",
+  ]) {
+    const current = normalizeTemplateLookupKey(db.ai_orchestration_settings[settingKey] || "");
+    if (current && WHATSAPP_TEMPLATE_NAME_ALIASES[current]) {
+      db.ai_orchestration_settings[settingKey] = WHATSAPP_TEMPLATE_NAME_ALIASES[current];
+    }
+  }
+
   if (!Array.isArray(db.ai_training_items)) {
     db.ai_training_items = [];
   }
@@ -35922,6 +36049,7 @@ function ngEnsureAiStore(db) {
   }
 
   ngEnsureArray(db, "message_templates");
+  db.message_templates = reconcileNextGenWhatsAppTemplatePack(db.message_templates).templates;
   ngEnsureArray(db, "ai_agent_action_logs");
   ngEnsureArray(db, "assistant_reports");
   ngEnsureArray(db, "assistant_actions");
@@ -46066,7 +46194,7 @@ app.get("/admin/crm/assistant/owner-command", async (req, res) => {
       owner_dont_rule: db.ai_orchestration_settings.owner_dont_rule || "",
       command_priority_mode: db.ai_orchestration_settings.command_priority_mode || "owner_first",
       sunday_template_router_active: ngIsSundayNoLiveSessionDay(db),
-      sunday_first_template: ngIsSundayNoLiveSessionDay(db) ? "greeting_exam_type_question" : "meta_ad_first_message",
+      sunday_first_template: "nextgen_warm_welcome",
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
