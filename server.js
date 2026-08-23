@@ -6,8 +6,8 @@ import {
   validateFlashcardContent,
 } from "./lib/flashcard-engine.js";
 import {
-  CONTENT_DELIVERY_SOURCE_YEARS,
   contentDeliveryPolicySnapshot,
+  contentDeliverySourceYearsForExam,
 } from "./lib/content-delivery-priority.js";
 import {
   flashcardMatchesCurrentSystem,
@@ -41798,7 +41798,7 @@ app.get(`${NG_EXTERNAL_QBANK_ROOT}/site-config`, (req, res) => {
         test: "correct answers and explanations are released only after final session submission",
       },
       media_policy: { images: "short-lived private URLs", videos: "private or unlisted Vimeo embeds" },
-      content_delivery_policy: contentDeliveryPolicySnapshot(),
+      content_delivery_policy: contentDeliveryPolicySnapshot({ examTrack: auth.claims.exam_track }),
     });
   } catch (error) {
     return ngExternalQbankSendError(res, error);
@@ -41823,7 +41823,7 @@ app.get(`${NG_EXTERNAL_QBANK_ROOT}/catalog`, async (req, res) => {
       exam_track: examTrack,
       count: catalog.length,
       question_count: catalog.reduce((sum, row) => sum + Number(row.question_count || 0), 0),
-      content_delivery_policy: contentDeliveryPolicySnapshot(),
+      content_delivery_policy: contentDeliveryPolicySnapshot({ examTrack }),
       catalog,
     });
   } catch (error) {
@@ -43699,7 +43699,7 @@ app.get("/api/ayla/qbank/catalog", async (req, res) => {
         availableBanks,
         selectedCollectionIds,
       ),
-      content_delivery_policy: contentDeliveryPolicySnapshot(),
+      content_delivery_policy: contentDeliveryPolicySnapshot({ examTrack }),
       count: catalog.length,
       question_count: catalog.reduce((sum, row) => sum + Number(row.question_count || 0), 0),
       catalog,
@@ -43979,7 +43979,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         );
       }
       const staleOrMediaIncomplete = selected.filter((question) =>
-        !CONTENT_DELIVERY_SOURCE_YEARS.includes(Number(question.source_year))
+        !contentDeliverySourceYearsForExam(access.exam_track).includes(Number(question.source_year))
         || question.media_integrity_verified !== true);
       if (staleOrMediaIncomplete.length) {
         return aylaSendError(
@@ -43989,7 +43989,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
           {
             code: "QBANK_ASSIGNMENT_REFRESH_REQUIRED",
             affected_questions: staleOrMediaIncomplete.length,
-            content_delivery_policy: contentDeliveryPolicySnapshot(),
+            content_delivery_policy: contentDeliveryPolicySnapshot({ examTrack: access.exam_track }),
           },
         );
       }
@@ -44146,7 +44146,7 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
       session.nclexVariant = nclexVariant || null;
       session.nclex_variant = nclexVariant || null;
       session.requestedQuestionCount = effectiveRequestedCount;
-      session.contentDeliveryPolicy = contentDeliveryPolicySnapshot();
+      session.contentDeliveryPolicy = contentDeliveryPolicySnapshot({ examTrack: access.exam_track });
       session.contentDeliverySelection = {
         sourceYearCounts: selected.reduce((counts, question) => {
           const year = String(Number(question.source_year || 0) || "unknown");

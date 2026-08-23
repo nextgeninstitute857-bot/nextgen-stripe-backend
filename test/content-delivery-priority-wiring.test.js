@@ -12,10 +12,11 @@ const flashcards = fs.readFileSync(
   "utf8",
 );
 
-test("the registry persists source year and restricts new delivery to 2026 only", () => {
+test("the registry persists source year and applies exam-scoped delivery years", () => {
   assert.match(registry, /content_import_jobs ADD COLUMN IF NOT EXISTS source_year SMALLINT/);
   assert.match(registry, /content_collections ADD COLUMN IF NOT EXISTS source_year SMALLINT/);
-  assert.match(registry, /CONTENT_DELIVERY_SOURCE_YEARS\.join\(","\)/);
+  assert.match(registry, /contentDeliverySourceYearsForExam\(examTrack\)\.join\(","\)/);
+  assert.match(registry, /contentDeliveryFallbackTaxonomyReadySql/);
   assert.match(
     registry,
     /ORDER BY delivery\.source_year DESC,\s*CASE WHEN q\.id=ANY\(\$11::uuid\[\]\) THEN 1 ELSE 0 END/,
@@ -31,9 +32,9 @@ test("required media is a fail-closed eligibility check and never a ranking sign
 });
 
 test("QBank catalog, session creation, roadmap selection, diagnostics, and flashcards share the policy", () => {
-  assert.match(server, /content_delivery_policy: contentDeliveryPolicySnapshot\(\)/);
+  assert.match(server, /content_delivery_policy: contentDeliveryPolicySnapshot\(\{ examTrack/);
   assert.match(server, /seenQuestionIds: aylaQbankSeenQuestionIds\(db/);
-  assert.match(server, /session\.contentDeliveryPolicy = contentDeliveryPolicySnapshot\(\)/);
+  assert.match(server, /session\.contentDeliveryPolicy = contentDeliveryPolicySnapshot\(\{ examTrack: access\.exam_track \}\)/);
   assert.match(server, /seenQuestionIds,\s*\}\);/);
   assert.match(registry, /ORDER BY delivery\.source_year DESC, q\.student_qid, q\.id/);
 });
