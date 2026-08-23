@@ -451,6 +451,8 @@ test("server and registry wire one entitlement-guarded Content Hub into the exis
   assert.match(server, /MCCQE readiness remains MCCQE-specific/);
   assert.match(server, /video_deferred_by_capacity/);
   assert.match(server, /plan\.plannedMinutes < effectiveCapacity[\s\S]*?allowOverCapacity: true/);
+  assert.match(server, /const restDay = String\(student\.restDay \|\| student\.rest_day \|\| ""\)/);
+  assert.match(server, /if \(restDay && dayName\.toLowerCase\(\) === restDay\)/);
   assert.match(server, /focusSubsystem,/);
   assert.match(server, /subsystem: req\.query\.subsystem \|\| req\.query\.subsystem_key/);
   assert.match(server, /const pageSize = 500;[\s\S]*?while \(true\)[\s\S]*?offset: sourceRows\.length/);

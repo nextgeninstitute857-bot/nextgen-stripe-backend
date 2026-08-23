@@ -80266,12 +80266,12 @@ function aylaV189BacklogWarning(db, student, date, systemProgress = aylaV189Syst
 function aylaV189StudyDayStatus(student, date) {
   const dayName = aylaDayName(new Date(`${date}T12:00:00Z`));
   const preferred = aylaCleanArray(student.preferredStudyDays || student.preferred_study_days);
-  const restDay = String(student.restDay || student.rest_day || "Sunday").toLowerCase();
+  const restDay = String(student.restDay || student.rest_day || "").trim().toLowerCase();
   if (preferred.length) {
     const allowed = preferred.some((day) => String(day).toLowerCase() === dayName.toLowerCase());
     return { isStudyDay: allowed, dayName, reason: allowed ? "preferred_study_day" : "outside_preferred_study_days" };
   }
-  if (dayName.toLowerCase() === restDay) return { isStudyDay: false, dayName, reason: "protected_rest_day" };
+  if (restDay && dayName.toLowerCase() === restDay) return { isStudyDay: false, dayName, reason: "protected_rest_day" };
   return { isStudyDay: true, dayName, reason: "scheduled_study_day" };
 }
 
