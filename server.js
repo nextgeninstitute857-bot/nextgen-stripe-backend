@@ -23,6 +23,11 @@ import {
   buildRevenueOsSnapshot,
 } from "./lib/crm-revenue-os.js";
 import {
+  extractClickToWhatsAppAttribution,
+  fetchMetaAdsSnapshot,
+  metaAdsReadiness,
+} from "./lib/crm-meta-ads.js";
+import {
   applyAylaConversationNameToLead,
   applyAylaConversationDecision,
   aylaConversationTextFormat,
@@ -20698,6 +20703,7 @@ const DEFAULT_CRM_DB = {
   ad_sets: [],
   ad_creatives: [],
   ad_performance_logs: [],
+  meta_ads_last_sync: null,
   ad_ai_recommendations: [],
   ad_ai_actions: [],
   brand_snapshots: [],
@@ -20876,6 +20882,7 @@ async function readCrmDbFromDisk() {
       ad_sets: Array.isArray(parsed.ad_sets) ? parsed.ad_sets : [],
       ad_creatives: Array.isArray(parsed.ad_creatives) ? parsed.ad_creatives : [],
       ad_performance_logs: Array.isArray(parsed.ad_performance_logs) ? parsed.ad_performance_logs : [],
+      meta_ads_last_sync: parsed.meta_ads_last_sync && typeof parsed.meta_ads_last_sync === "object" ? parsed.meta_ads_last_sync : null,
       ad_ai_recommendations: Array.isArray(parsed.ad_ai_recommendations) ? parsed.ad_ai_recommendations : [],
       ad_ai_actions: Array.isArray(parsed.ad_ai_actions) ? parsed.ad_ai_actions : [],
       brand_snapshots: Array.isArray(parsed.brand_snapshots) ? parsed.brand_snapshots : [],
@@ -21422,6 +21429,7 @@ function normalizeCrmLeadOrigin(value = "", body = {}) {
   const text = [value, body.origin, body.lead_origin, body.lead_source, body.source, body.source_type, body.created_from, body.import_source]
     .map((x) => String(x || "").toLowerCase())
     .join(" ");
+  if (text.includes("click_to_whatsapp") || text.includes("ctwa")) return "click_to_whatsapp_ad";
   if (text.includes("meta") || text.includes("lead form") || text.includes("lead_form") || text.includes("facebook lead")) return "meta_lead_form";
   if (text.includes("agent") || text.includes("outreach") || text.includes("manual outbound")) return "agent_outreach";
   if (text.includes("community") || text.includes("group")) return "community";
@@ -21434,7 +21442,16 @@ function isCrmMetaLeadPayload(body = {}) {
   const text = [body.origin, body.lead_origin, body.lead_source, body.source, body.source_type, body.created_from, body.import_source, body.campaign_name]
     .map((x) => String(x || "").toLowerCase())
     .join(" ");
-  return text.includes("meta") || text.includes("lead form") || text.includes("lead_form") || text.includes("facebook lead");
+  return Boolean(
+    body.meta_ctwa_clid
+    || body.meta_ad_id
+    || text.includes("click_to_whatsapp")
+    || text.includes("ctwa")
+    || text.includes("meta")
+    || text.includes("lead form")
+    || text.includes("lead_form")
+    || text.includes("facebook lead")
+  );
 }
 
 function normalizeCrmCollectionPayload(collection, body = {}, existing = null, brandId = null) {
@@ -24134,6 +24151,155 @@ registerCrmCrudRoutes({ route: "/admin/crm/testimonials", collection: "testimoni
 registerCrmCrudRoutes({ route: "/admin/crm/testimonial-permissions", collection: "testimonial_permissions", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/review-platform-links", collection: "review_platform_links", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/review-followups", collection: "review_followups", brandScoped: true });
+function ngUpsertMetaAdsRecord(db, { collection, brandId, match, payload }) {
+  const records = ensureCrmArray(db, collection);
+  const existing = records.find(match) || null;
+  const normalized = normalizeCrmCollectionPayload(
+    collection,
+    {
+      ...(existing || {}),
+      ...payload,
+      id: existing?.id || uuid(),
+      brand_id: existing?.brand_id || brandId || null,
+    },
+    existing,
+    existing?.brand_id || brandId || null,
+  );
+
+  if (existing) Object.assign(existing, normalized);
+  else records.unshift(normalized);
+  return existing || normalized;
+}
+
+function ngUpsertMetaAdsSnapshot(db, snapshot, brandId) {
+  const accountIds = new Map();
+  const campaignIds = new Map();
+  const adSetIds = new Map();
+
+  for (const account of safeArray(snapshot.accounts)) {
+    const row = ngUpsertMetaAdsRecord(db, {
+      collection: "ad_accounts",
+      brandId,
+      match: (item) => String(item.meta_account_id || item.account_id || "") === String(account.meta_account_id || ""),
+      payload: account,
+    });
+    accountIds.set(String(account.meta_account_id || ""), row.id);
+  }
+
+  for (const campaign of safeArray(snapshot.campaigns)) {
+    const row = ngUpsertMetaAdsRecord(db, {
+      collection: "ad_campaigns",
+      brandId,
+      match: (item) => String(item.meta_campaign_id || item.provider_campaign_id || "") === String(campaign.meta_campaign_id || ""),
+      payload: {
+        ...campaign,
+        ad_account_id: accountIds.get(String(campaign.meta_account_id || "")) || null,
+      },
+    });
+    campaignIds.set(String(campaign.meta_campaign_id || ""), row.id);
+  }
+
+  for (const adSet of safeArray(snapshot.ad_sets)) {
+    const row = ngUpsertMetaAdsRecord(db, {
+      collection: "ad_sets",
+      brandId,
+      match: (item) => String(item.meta_ad_set_id || item.provider_ad_set_id || "") === String(adSet.meta_ad_set_id || ""),
+      payload: {
+        ...adSet,
+        ad_campaign_id: campaignIds.get(String(adSet.meta_campaign_id || "")) || null,
+        campaign_id: campaignIds.get(String(adSet.meta_campaign_id || "")) || null,
+      },
+    });
+    adSetIds.set(String(adSet.meta_ad_set_id || ""), row.id);
+  }
+
+  for (const creative of safeArray(snapshot.creatives)) {
+    ngUpsertMetaAdsRecord(db, {
+      collection: "ad_creatives",
+      brandId,
+      match: (item) => String(item.meta_ad_id || item.provider_ad_id || "") === String(creative.meta_ad_id || ""),
+      payload: {
+        ...creative,
+        ad_campaign_id: campaignIds.get(String(creative.meta_campaign_id || "")) || null,
+        campaign_id: campaignIds.get(String(creative.meta_campaign_id || "")) || null,
+        ad_set_id: adSetIds.get(String(creative.meta_ad_set_id || "")) || null,
+      },
+    });
+  }
+
+  for (const insight of safeArray(snapshot.insights)) {
+    const insightKey = [insight.meta_campaign_id, insight.date_start, insight.date_stop].map((value) => String(value || "")).join(":");
+    ngUpsertMetaAdsRecord(db, {
+      collection: "ad_performance_logs",
+      brandId,
+      match: (item) => [item.meta_campaign_id, item.date_start, item.date_stop].map((value) => String(value || "")).join(":") === insightKey,
+      payload: {
+        ...insight,
+        ad_campaign_id: campaignIds.get(String(insight.meta_campaign_id || "")) || null,
+        campaign_id: campaignIds.get(String(insight.meta_campaign_id || "")) || null,
+      },
+    });
+  }
+
+  db.meta_ads_last_sync = {
+    status: "success",
+    synced_at: snapshot.synced_at || nowIso(),
+    date_preset: snapshot.date_preset || "last_30d",
+    accounts: safeArray(snapshot.accounts).length,
+    campaigns: safeArray(snapshot.campaigns).length,
+    ad_sets: safeArray(snapshot.ad_sets).length,
+    creatives: safeArray(snapshot.creatives).length,
+    insights: safeArray(snapshot.insights).length,
+  };
+
+  return db.meta_ads_last_sync;
+}
+
+app.get("/admin/crm/meta-ads/readiness", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const readiness = metaAdsReadiness(process.env);
+    res.json({
+      success: true,
+      readiness,
+      last_sync: db.meta_ads_last_sync || null,
+      live_records: {
+        accounts: ensureCrmArray(db, "ad_accounts").filter((item) => item.source === "meta_live").length,
+        campaigns: ensureCrmArray(db, "ad_campaigns").filter((item) => item.source === "meta_live").length,
+        ad_sets: ensureCrmArray(db, "ad_sets").filter((item) => item.source === "meta_live").length,
+        creatives: ensureCrmArray(db, "ad_creatives").filter((item) => item.source === "meta_live").length,
+      },
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/meta-ads/sync", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const allowedDatePresets = new Set(["today", "yesterday", "last_7d", "last_14d", "last_30d", "this_month", "last_month", "maximum"]);
+    const requestedDatePreset = normalizeCrmString(req.body?.date_preset || "last_30d").toLowerCase();
+    const datePreset = allowedDatePresets.has(requestedDatePreset) ? requestedDatePreset : "last_30d";
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const snapshot = await fetchMetaAdsSnapshot({ axiosClient: axios, env: process.env, datePreset });
+    const sync = ngUpsertMetaAdsSnapshot(db, snapshot, brandId);
+    await writeCrmDb(db);
+    res.json({ success: true, sync });
+  } catch (error) {
+    const metaError = error?.response?.data?.error;
+    const safeMessage = normalizeCrmString(metaError?.message || error.message || "Meta Ads sync failed");
+    res.status(error.statusCode || error?.response?.status || 500).json({
+      success: false,
+      error: safeMessage,
+      meta_code: metaError?.code || null,
+      meta_subcode: metaError?.error_subcode || null,
+    });
+  }
+});
+
 registerCrmCrudRoutes({ route: "/admin/crm/ad-accounts", collection: "ad_accounts", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/ad-campaigns", collection: "ad_campaigns", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/ad-sets", collection: "ad_sets", brandScoped: true });
@@ -28262,6 +28428,7 @@ function parseInboundSocialPayload({ platform, payload = {}, integration = null 
   let phone = "";
   let platformMessageId = "";
   let recipientId = "";
+  let paidAttribution = {};
 
   if (cleanPlatform === "telegram") {
     const message = body.message || body.edited_message || body.channel_post || {};
@@ -28289,6 +28456,7 @@ function parseInboundSocialPayload({ platform, payload = {}, integration = null 
     displayName = contact.profile?.name || body.name || externalUserId;
     chatId = externalUserId;
     platformMessageId = message.id || body.message_id || "";
+    paidAttribution = extractClickToWhatsAppAttribution(body);
   } else if (cleanPlatform === "facebook" || cleanPlatform === "instagram") {
     const meta = extractMetaText({ platform: cleanPlatform, payload: body });
     text = meta.messageText;
@@ -28373,6 +28541,7 @@ function parseInboundSocialPayload({ platform, payload = {}, integration = null 
     opt_in_status: cleanPlatform === "whatsapp" ? "platform_inbound" : "platform_inbound",
     status: "new",
     lead_status: "new",
+    ...paidAttribution,
   });
 }
 
