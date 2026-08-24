@@ -1,4 +1,4 @@
-Render redeploy requested 2026-08-15 to activate backend main after NBME Step 2 and Step 3 release support merged.
+Render redeploy requested 2026-08-24 after recording-system protection merged.
 No production data migration or schedule apply is associated with this marker.
-Reason: production still returned the retired Step-1-only media release guard after PRs #133 and #134 merged.
-Target build: v256-exam-scoped-readiness-center.
+Reason: production was still serving the previous backend after PR #263 merged.
+Target build: v299-recording-system-mismatch-guard.
