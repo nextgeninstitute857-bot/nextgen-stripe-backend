@@ -46,8 +46,10 @@ import {
   reconcileNextGenWhatsAppTemplatePack,
 } from "./lib/crm-whatsapp-template-pack.js";
 import {
+  acceptInboundWhatsAppCall,
   extractWhatsAppCallEvents,
   mergeWhatsAppCallLog,
+  redactWhatsAppCallMediaPayload,
   safeWhatsAppCallEvent,
   whatsappAiCallingReadiness,
 } from "./lib/whatsapp-ai-calling.js";
@@ -29260,8 +29262,9 @@ async function handleUniversalWebhook({ req, res, platform, integrationId = null
       const callEvents = extractWhatsAppCallEvents(req.body || {});
 
       if (callEvents.length) {
+        const connectorResult = await acceptInboundWhatsAppCall({ payload: req.body || {} });
         const callEntry = await ngJournalWhatsAppWebhook({
-          payload: req.body || {},
+          payload: redactWhatsAppCallMediaPayload(req.body || {}),
           integrationId,
           kind: "call",
         });
@@ -29270,6 +29273,7 @@ async function handleUniversalWebhook({ req, res, platform, integrationId = null
           platform: cleanPlatform,
           event: "call_event",
           calls_received: callEvents.length,
+          calls_connected: connectorResult.accepted.length,
           queued: true,
           journal_id: callEntry.id,
           provider_call_ids: callEntry.provider_call_ids,
