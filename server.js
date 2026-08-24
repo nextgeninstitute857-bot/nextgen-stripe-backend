@@ -600,6 +600,11 @@ import {
   reconcileKnownMissedHolidayRecordingLabels,
 } from "./lib/lms-recording-label-corrections.js";
 import {
+  LMS_RECORDING_SYSTEM_GUARD_BUILD,
+  explicitRecordingSystem,
+  reconcilePublishedRecordingSystemMismatches,
+} from "./lib/lms-recording-system-guard.js";
+import {
   LMS_KNOWN_MSK_NOTES_CATCHUP_BUILD,
   NEXTGEN_KNOWN_MSK_TRANSCRIPT_NOTE_TARGETS,
   applyKnownMskTranscriptNoteCandidate,
@@ -636,6 +641,7 @@ const ROADMAP_RETROSPECTIVE_REVISION_BUILD = "v262-recorded-revision-attendance-
 const RECORDING_ASSIGNMENT_BUILD = "v222-safe-recording-detach";
 const RECORDING_DUPLICATE_CLEANUP_BUILD = "v223-safe-recording-duplicate-cleanup";
 const RECORDING_LABEL_CORRECTIONS_BUILD = LMS_RECORDING_LABEL_CORRECTIONS_BUILD;
+const RECORDING_SYSTEM_GUARD_BUILD = LMS_RECORDING_SYSTEM_GUARD_BUILD;
 const LMS_KNOWN_SCHEDULE_REPAIR_BUILD = "v260-known-missed-holiday-transactional-recovery";
 const LMS_DERMATOLOGY_CNS_SCHEDULE_REPAIR_BUILD = "v263-dermatology-cns-transactional-schedule-repair";
 const STUDENT_NOTES_RESOLVER_BUILD = "v225-course-system-day-notes-resolver";
@@ -1094,7 +1100,7 @@ const metaCapiAcceptedEventIds = new Map();
 function ngMetaCapiConfig() {
   return {
     token: String(process.env.META_CAPI_TOKEN || "").trim(),
-    pixelId: String(process.env.META_PIXEL_ID || "").trim(),
+    pixelId: String(process.env.META_PIXEL_ID || "991919400268717").trim(),
     graphVersion: String(process.env.META_GRAPH_VERSION || "v25.0").trim().replace(/^\/+|\/+$/g, "") || "v25.0",
     testEventCode: String(process.env.META_TEST_EVENT_CODE || "").trim(),
   };
@@ -2631,6 +2637,65 @@ async function ngRunRecordingLabelStartupReconciliation() {
   } finally {
     ngRecordingLabelReconciliationState.running = false;
     ngRecordingLabelReconciliationState.last_finished_at = new Date().toISOString();
+  }
+}
+
+async function ngFetchRecentZoomMeetingsForSystemGuard() {
+  const token = await getZoomAccessToken();
+  const meetings = [];
+  const seen = new Set();
+  const now = new Date();
+
+  for (let offset = 0; offset < 150; offset += 30) {
+    const toDate = addDays(now, -offset);
+    const fromDate = addDays(toDate, -29);
+    const response = await axios.get("https://api.zoom.us/v2/users/me/recordings", {
+      headers: { Authorization: `Bearer ${token}` },
+      params: {
+        from: todayKey(fromDate),
+        to: todayKey(toDate),
+        page_size: 300,
+      },
+    });
+
+    for (const meeting of response.data?.meetings || []) {
+      const identity = `${String(meeting.uuid || "").trim()}::${String(meeting.start_time || "").trim()}`;
+      if (!identity || seen.has(identity)) continue;
+      seen.add(identity);
+      meetings.push(meeting);
+    }
+  }
+
+  return meetings;
+}
+
+async function ngRunRecordingSystemGuardStartupReconciliation() {
+  if (ngRecordingSystemGuardState.running) return ngRecordingSystemGuardState.last_result;
+
+  ngRecordingSystemGuardState.running = true;
+  ngRecordingSystemGuardState.last_started_at = new Date().toISOString();
+  ngRecordingSystemGuardState.last_error = null;
+
+  try {
+    const [db, meetings] = await Promise.all([
+      readLiveDb(),
+      ngFetchRecentZoomMeetingsForSystemGuard(),
+    ]);
+    const result = reconcilePublishedRecordingSystemMismatches(db, meetings);
+    if (result.changed) {
+      await writeLiveDb(db, {
+        teachingAccessSource: "startup_recording_system_guard",
+      });
+    }
+    ngRecordingSystemGuardState.last_result = result;
+    ngRecordingSystemGuardState.last_success_at = new Date().toISOString();
+    return result;
+  } catch (error) {
+    ngRecordingSystemGuardState.last_error = error.message;
+    throw error;
+  } finally {
+    ngRecordingSystemGuardState.running = false;
+    ngRecordingSystemGuardState.last_finished_at = new Date().toISOString();
   }
 }
 
@@ -4400,6 +4465,7 @@ function sanitizePublicRecording(recording) {
     instructional_day_number: recording.instructional_day_number || publicDayNumber || null,
     system_day: publicSystemDay || null,
     system: recording.system || null,
+    source_topic: recording.source_topic || null,
     start_time: recording.start_time || null,
     duration: recording.duration || null,
     recording_url: recording.recording_url || recording.share_url || null,
@@ -11679,6 +11745,8 @@ app.get("/health", async (req, res) => {
     recording_duplicate_cleanup_build: RECORDING_DUPLICATE_CLEANUP_BUILD,
     recording_label_corrections_build: RECORDING_LABEL_CORRECTIONS_BUILD,
     recording_label_corrections: ngRecordingLabelReconciliationState,
+    recording_system_guard_build: RECORDING_SYSTEM_GUARD_BUILD,
+    recording_system_guard: ngRecordingSystemGuardState,
     lms_known_schedule_repair_build: LMS_KNOWN_SCHEDULE_REPAIR_BUILD,
     lms_known_schedule_repair: ngKnownScheduleRepairState,
     lms_dermatology_cns_schedule_repair_build: LMS_DERMATOLOGY_CNS_SCHEDULE_REPAIR_BUILD,
@@ -15535,12 +15603,29 @@ app.post("/zoom/webhook", async (req, res) => {
 app.get("/zoom/recordings", async (req, res) => {
   try {
     const token = await getZoomAccessToken();
-    const to = todayKey();
-    const from = todayKey(addDays(new Date(), -30));
+    const requestedTo = String(req.query.to || "").trim();
+    const requestedFrom = String(req.query.from || "").trim();
+    const validDate = (value) => /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(new Date(`${value}T00:00:00Z`).getTime());
+    const to = validDate(requestedTo) ? requestedTo : todayKey();
+    const from = validDate(requestedFrom) ? requestedFrom : todayKey(addDays(new Date(`${to}T00:00:00Z`), -30));
+    const rangeDays = Math.round((new Date(`${to}T00:00:00Z`).getTime() - new Date(`${from}T00:00:00Z`).getTime()) / 86400000);
+    if (rangeDays < 0 || rangeDays > 31) {
+      return res.status(400).json({ success: false, error: "Zoom recording searches must use a date range of 31 days or fewer." });
+    }
+    const pageSize = Math.max(1, Math.min(300, Number(req.query.page_size || 100) || 100));
+    const nextPageToken = String(req.query.next_page_token || "").trim();
 
     const response = await axios.get(
-      `https://api.zoom.us/v2/users/me/recordings?from=${from}&to=${to}&page_size=100`,
-      { headers: { Authorization: `Bearer ${token}` } }
+      "https://api.zoom.us/v2/users/me/recordings",
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        params: {
+          from,
+          to,
+          page_size: pageSize,
+          ...(nextPageToken ? { next_page_token: nextPageToken } : {}),
+        },
+      }
     );
 
     const db = await readLiveDb();
@@ -15580,6 +15665,7 @@ app.get("/zoom/recordings", async (req, res) => {
         meeting_id: meetingId,
         uuid: meeting.uuid,
         topic: saved.topic || matchedSession?.topic || matchedSession?.title || meeting.topic,
+        source_topic: meeting.topic || null,
         corrected_topic: saved.corrected_topic || null,
         corrected_day_number: saved.corrected_day_number || null,
         corrected_system_day: saved.corrected_system_day || null,
@@ -15606,7 +15692,16 @@ app.get("/zoom/recordings", async (req, res) => {
       });
     }).filter(Boolean);
 
-    res.json({ success: true, from, to, count: recordings.length, recordings });
+    res.json({
+      success: true,
+      from,
+      to,
+      count: recordings.length,
+      page_count: Number(response.data?.page_count || recordings.length),
+      total_records: Number(response.data?.total_records || recordings.length),
+      next_page_token: response.data?.next_page_token || null,
+      recordings,
+    });
   } catch (e) {
     res.status(500).json({ success: false, error: e.response?.data || e.message });
   }
@@ -15696,6 +15791,23 @@ app.post("/live/recordings/publish", async (req, res) => {
       requestedSessionId !== previousSessionId
     );
 
+    const sourceTopic = String(
+      req.body.source_topic || previous.source_topic || legacy.source_topic || "",
+    ).trim();
+    const sourceSystem = explicitRecordingSystem(sourceTopic);
+    const targetSystem = explicitRecordingSystem(
+      session?.system || session?.topic || session?.title || "",
+    );
+    if (explicitSessionSelection && sourceSystem && targetSystem && sourceSystem !== targetSystem) {
+      return res.status(409).json({
+        success: false,
+        error: `This Zoom recording is labelled ${sourceSystem}, but the selected session is ${targetSystem}. The assignment was blocked to protect students from the wrong lecture.`,
+        source_topic: sourceTopic,
+        source_system: sourceSystem,
+        target_system: targetSystem,
+      });
+    }
+
     const requestedCourseId = String(req.body.course_id || "").trim();
     const sessionCourseId = String(session?.course_id || "").trim();
 
@@ -15784,6 +15896,7 @@ app.post("/live/recordings/publish", async (req, res) => {
       system_day: roadmapDay?.system_day || roadmapDay?.day_in_system || session?.system_day || previousSystemDay,
       system: roadmapDay?.system || session?.system || previousSystem,
       topic: cleanTopic,
+      source_topic: sourceTopic || previous.source_topic || legacy.source_topic || null,
       start_time: req.body.start_time || previous.start_time || legacy.start_time || null,
       duration: req.body.duration || previous.duration || legacy.duration || null,
       recording_url: recordingUrl,
@@ -19526,6 +19639,7 @@ function ngResolveStudentNotesForSession(db = {}, session = null, { publishedOnl
       targetRoadmapDayId &&
       String(note.roadmap_day_id || note.day_id || "").trim() === targetRoadmapDayId
     );
+
     const sourceSessionRoadmapMatch = Boolean(
       targetRoadmapDayId &&
       String(sourceSession?.roadmap_day_id || "").trim() === targetRoadmapDayId
@@ -92661,6 +92775,15 @@ const ngRecordingLabelReconciliationState = {
   last_error: null,
   last_result: null,
 };
+const ngRecordingSystemGuardState = {
+  build: RECORDING_SYSTEM_GUARD_BUILD,
+  running: false,
+  last_started_at: null,
+  last_finished_at: null,
+  last_success_at: null,
+  last_error: null,
+  last_result: null,
+};
 const ngKnownScheduleRepairState = {
   build: LMS_KNOWN_SCHEDULE_REPAIR_BUILD,
   running: false,
@@ -93529,6 +93652,9 @@ async function startNextgenServer() {
     .then(() => ngRunRecordingLabelStartupReconciliation())
     .then((result) => console.log("LMS recording-label reconciliation:", result))
     .catch((error) => console.error("LMS recording-label reconciliation failed:", error.message))
+    .then(() => ngRunRecordingSystemGuardStartupReconciliation())
+    .then((result) => console.log("LMS recording-system guard:", result))
+    .catch((error) => console.error("LMS recording-system guard failed:", error.message))
     .then(() => ngRunKnownMskTranscriptNotesCatchup())
     .then((result) => console.log("LMS known MSK transcript-notes catch-up:", result))
     .catch((error) => console.error("LMS known MSK transcript-notes catch-up failed:", error.message));
