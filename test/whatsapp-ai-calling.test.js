@@ -3,8 +3,11 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
+  acceptInboundWhatsAppCall,
   extractWhatsAppCallEvents,
+  extractWhatsAppCallOffers,
   mergeWhatsAppCallLog,
+  redactWhatsAppCallMediaPayload,
   whatsappAiCallingReadiness,
 } from "../lib/whatsapp-ai-calling.js";
 
@@ -79,7 +82,6 @@ test("Canadian WhatsApp number reports inbound-only and stays disabled by defaul
     WHATSAPP_ACCESS_TOKEN: "configured",
     WHATSAPP_PHONE_NUMBER_ID: "pn-1",
     WHATSAPP_BUSINESS_NUMBER: "+18254255646",
-    OPENAI_API_KEY: "configured",
   });
 
   assert.equal(readiness.messaging_configured, true);
@@ -87,7 +89,7 @@ test("Canadian WhatsApp number reports inbound-only and stays disabled by defaul
   assert.equal(readiness.outbound_business_initiated_supported, false);
   assert.equal(readiness.inbound_ready, false);
   assert.ok(readiness.blockers.includes("Meta calls webhook subscription has not been confirmed."));
-  assert.ok(readiness.blockers.includes("A SIP target or WebRTC media bridge is not configured."));
+  assert.ok(readiness.blockers.includes("LiveKit WhatsApp connector credentials are missing."));
   assert.ok(readiness.blockers.includes("Live AI answering remains safely disabled until the controlled test."));
 });
 
@@ -97,15 +99,97 @@ test("inbound readiness requires every external control", () => {
     WHATSAPP_PHONE_NUMBER_ID: "pn-1",
     WHATSAPP_BUSINESS_NUMBER: "+18254255646",
     WHATSAPP_CALLING_WEBHOOK_ENABLED: "true",
-    WHATSAPP_CALLING_SIP_URI: "sip:proj_test@sip.api.openai.com;transport=tls",
     WHATSAPP_AI_CALLING_ENABLED: "true",
-    OPENAI_API_KEY: "configured",
-    OPENAI_REALTIME_MODEL: "gpt-realtime-2.1-mini",
+    LIVEKIT_URL: "https://ayla-whatsapp-voice.livekit.cloud",
+    LIVEKIT_API_KEY: "configured",
+    LIVEKIT_API_SECRET: "configured",
+    LIVEKIT_WHATSAPP_AGENT_NAME: "ayla-whatsapp-voice-agent",
   });
 
   assert.equal(readiness.inbound_ready, true);
-  assert.equal(readiness.media_mode, "sip");
+  assert.equal(readiness.media_mode, "livekit_whatsapp_connector");
   assert.deepEqual(readiness.blockers, []);
+});
+
+test("extracts the SDP offer only for the transient connector handoff", () => {
+  const offers = extractWhatsAppCallOffers({
+    entry: [{ changes: [{ value: {
+      metadata: { phone_number_id: "pn-1" },
+      calls: [{
+        id: "wacid.test-1",
+        from: "12025550123",
+        event: "connect",
+        session: { sdp_type: "offer", sdp: "private-session-description" },
+      }],
+    } }] }],
+  });
+
+  assert.equal(offers.length, 1);
+  assert.equal(offers[0].provider_call_id, "wacid.test-1");
+  assert.equal(offers[0].phone_number_id, "pn-1");
+  assert.equal(offers[0].sdp, "private-session-description");
+});
+
+test("removes SDP before a WhatsApp call webhook is journaled", () => {
+  const safe = redactWhatsAppCallMediaPayload({
+    entry: [{ changes: [{ value: {
+      calls: [{ id: "call-1", session: { sdp_type: "offer", sdp: "private-session-description" } }],
+    } }] }],
+  });
+
+  assert.doesNotMatch(JSON.stringify(safe), /private-session-description/);
+  assert.equal(safe.entry[0].changes[0].value.calls[0].session.sdp_present, true);
+  assert.equal(extractWhatsAppCallEvents(safe)[0].has_sdp, true);
+});
+
+test("accepts an inbound WhatsApp call into a private random LiveKit room", async () => {
+  const accepted = [];
+  const connector = {
+    acceptWhatsAppCall: async (options) => {
+      accepted.push(options);
+      return { roomName: options.roomName };
+    },
+  };
+
+  const result = await acceptInboundWhatsAppCall({
+    payload: {
+      entry: [{ changes: [{ value: {
+        metadata: { phone_number_id: "pn-1" },
+        calls: [{
+          id: "wacid.secret-call-id",
+          from: "12025550123",
+          event: "connect",
+          session: { sdp_type: "offer", sdp: "private-session-description" },
+        }],
+      } }] }],
+    },
+    env: {
+      WHATSAPP_ACCESS_TOKEN: "meta-token",
+      WHATSAPP_PHONE_NUMBER_ID: "pn-1",
+      WHATSAPP_CALLING_WEBHOOK_ENABLED: "true",
+      WHATSAPP_AI_CALLING_ENABLED: "true",
+      LIVEKIT_URL: "https://ayla-whatsapp-voice.livekit.cloud",
+      LIVEKIT_API_KEY: "livekit-key",
+      LIVEKIT_API_SECRET: "livekit-secret",
+      LIVEKIT_WHATSAPP_AGENT_NAME: "ayla-whatsapp-voice-agent",
+    },
+    connector,
+    SessionDescriptionClass: class SessionDescription {
+      constructor(input) { Object.assign(this, input); }
+    },
+    randomId: () => "random-room-token",
+  });
+
+  assert.equal(result.accepted.length, 1);
+  assert.equal(accepted.length, 1);
+  assert.equal(accepted[0].roomName, "whatsapp-inbound-random-room-token");
+  assert.equal(accepted[0].participantIdentity, "whatsapp-caller-random-room-token");
+  assert.deepEqual(accepted[0].agents, [{ agentName: "ayla-whatsapp-voice-agent" }]);
+  assert.equal(accepted[0].waitUntilAnswered, false);
+  assert.equal(accepted[0].sdp.type, "offer");
+  assert.equal(accepted[0].sdp.sdp, "private-session-description");
+  assert.doesNotMatch(`${accepted[0].roomName} ${accepted[0].participantIdentity} ${accepted[0].participantMetadata}`, /12025550123|secret-call-id/);
+  assert.match(accepted[0].participantMetadata, /"recording":"disabled"/);
 });
 
 test("the live WhatsApp webhook journals calls before the non-message exit", async () => {
@@ -117,5 +201,6 @@ test("the live WhatsApp webhook journals calls before the non-message exit", asy
   assert.ok(callBranch > handlerStart);
   assert.ok(ignoredBranch > callBranch);
   assert.match(server.slice(handlerStart, ignoredBranch), /kind: "call"/);
+  assert.match(server.slice(handlerStart, ignoredBranch), /acceptInboundWhatsAppCall/);
   assert.match(server, /recording_enabled = false/);
 });
