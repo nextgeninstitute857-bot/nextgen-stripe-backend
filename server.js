@@ -45,6 +45,12 @@ import {
   normalizeMetaTemplateInventory,
   reconcileNextGenWhatsAppTemplatePack,
 } from "./lib/crm-whatsapp-template-pack.js";
+import {
+  extractWhatsAppCallEvents,
+  mergeWhatsAppCallLog,
+  safeWhatsAppCallEvent,
+  whatsappAiCallingReadiness,
+} from "./lib/whatsapp-ai-calling.js";
 import { resolveLmsSmtpAuthMethod } from "./lib/email-auth.js";
 import {
   assertWebsiteProductRequest,
@@ -28930,6 +28936,12 @@ function ngWhatsAppWebhookMessageIds(payload = {}) {
     .filter(Boolean);
 }
 
+function ngWhatsAppWebhookCallIds(payload = {}) {
+  return extractWhatsAppCallEvents(payload)
+    .map((event) => String(event.provider_call_id || "").trim())
+    .filter(Boolean);
+}
+
 async function ngAppendWhatsAppWebhookJournalRecord(record = {}) {
   const line = `${JSON.stringify(record)}\n`;
   const task = ngWhatsAppWebhookJournalWriteQueue
@@ -28950,6 +28962,7 @@ async function ngJournalWhatsAppWebhook({ payload = {}, integrationId = null, ki
     platform: "whatsapp",
     integration_id: integrationId || null,
     provider_message_ids: ngWhatsAppWebhookMessageIds(payload),
+    provider_call_ids: ngWhatsAppWebhookCallIds(payload),
     payload,
     received_at: nowIso(),
   };
@@ -29094,9 +29107,87 @@ async function ngProcessWhatsAppInboundJournalEntry(entry, db) {
   return { lead_id: lead.id, conversation_id: conversation.id, created };
 }
 
+async function ngProcessWhatsAppCallJournalEntry(entry, db) {
+  const events = extractWhatsAppCallEvents(entry.payload || {});
+  const callLogs = ensureCrmArray(db, "call_logs");
+  const callEvents = ensureCrmArray(db, "whatsapp_call_events");
+  const results = [];
+
+  for (const event of events) {
+    const from = normalizePhoneForWhatsapp(event.from || "");
+    let lead = from ? findLeadByPhoneOrEmail(db, { phone: from, waId: from }) : null;
+    if (!lead && from) {
+      lead = withTimestamps({
+        id: uuid(),
+        brand_id: db.settings?.default_brand_id || db.brands?.[0]?.id || null,
+        name: "WhatsApp caller",
+        name_source: "system_placeholder",
+        phone: from,
+        whatsapp: from,
+        wa_id: from,
+        source: "whatsapp_call",
+        source_platform: "whatsapp",
+        status: "new",
+        conversation_direction: "inbound",
+      });
+      ensureCrmArray(db, "leads").push(lead);
+    }
+
+    const existingIndex = callLogs.findIndex((item) =>
+      String(item.provider_call_id || item.call_id || "") === String(event.provider_call_id || "")
+    );
+    const existing = existingIndex >= 0 ? callLogs[existingIndex] : {};
+    const merged = mergeWhatsAppCallLog(existing, event);
+    merged.id = existing.id || uuid();
+    merged.lead_id = existing.lead_id || lead?.id || null;
+    merged.brand_id = existing.brand_id || lead?.brand_id || db.settings?.default_brand_id || null;
+    merged.consent_direction = "student_initiated";
+    merged.ai_answering_enabled = whatsappAiCallingReadiness(process.env).inbound_ready;
+    merged.recording_enabled = false;
+    merged.recording_notice_required = true;
+    if (existingIndex >= 0) callLogs[existingIndex] = merged;
+    else callLogs.unshift(merged);
+
+    callEvents.unshift(withTimestamps({
+      id: uuid(),
+      lead_id: merged.lead_id,
+      call_log_id: merged.id,
+      provider_call_id: merged.provider_call_id,
+      provider: "whatsapp_cloud_api",
+      event: event.event,
+      status: event.status,
+      direction: event.direction,
+      has_sdp: event.has_sdp,
+      sdp_type: event.sdp_type,
+      error_codes: event.error_codes,
+      payload: safeWhatsAppCallEvent(event),
+    }));
+
+    if (lead) {
+      lead.last_call_at = event.timestamp || nowIso();
+      lead.last_call_status = event.status;
+      lead.last_activity_at = event.timestamp || nowIso();
+      lead.updated_at = nowIso();
+    }
+    results.push({
+      provider_call_id: merged.provider_call_id,
+      call_log_id: merged.id,
+      lead_id: merged.lead_id,
+      status: merged.status,
+    });
+  }
+
+  if (events.length) await writeCrmDb(db);
+  await ngMarkWhatsAppWebhookJournalEntry(entry, {
+    result: { calls_received: events.length, results },
+  });
+  return { calls_received: events.length, results };
+}
+
 async function ngProcessWhatsAppWebhookJournalEntry(entry) {
   const db = await readCrmDb();
   if (entry?.kind === "status") return ngProcessWhatsAppStatusJournalEntry(entry, db);
+  if (entry?.kind === "call") return ngProcessWhatsAppCallJournalEntry(entry, db);
   return ngProcessWhatsAppInboundJournalEntry(entry, db);
 }
 
@@ -29166,6 +29257,26 @@ async function handleUniversalWebhook({ req, res, platform, integrationId = null
       const value = ngWhatsAppWebhookValue(req.body || {});
       const inboundMessages = Array.isArray(value.messages) ? value.messages : [];
       const statuses = Array.isArray(value.statuses) ? value.statuses : [];
+      const callEvents = extractWhatsAppCallEvents(req.body || {});
+
+      if (callEvents.length) {
+        const callEntry = await ngJournalWhatsAppWebhook({
+          payload: req.body || {},
+          integrationId,
+          kind: "call",
+        });
+        res.status(200).json({
+          success: true,
+          platform: cleanPlatform,
+          event: "call_event",
+          calls_received: callEvents.length,
+          queued: true,
+          journal_id: callEntry.id,
+          provider_call_ids: callEntry.provider_call_ids,
+        });
+        ngScheduleWhatsAppWebhookJournalProcessing(callEntry);
+        return;
+      }
 
       if (!inboundMessages.length) {
         if (statuses.length) {
@@ -61934,6 +62045,7 @@ app.patch("/admin/crm/future-followups/:id", async (req, res) => {
 });
 
 function ngRevenueOsCallProviderStatus() {
+  const whatsapp = whatsappAiCallingReadiness(process.env);
   const twilioConfigured = Boolean(
     String(process.env.TWILIO_ACCOUNT_SID || "").trim()
     && String(process.env.TWILIO_AUTH_TOKEN || "").trim()
@@ -61944,12 +62056,14 @@ function ngRevenueOsCallProviderStatus() {
     && String(process.env.TELNYX_PHONE_NUMBER || process.env.TELNYX_FROM_NUMBER || "").trim()
   );
   return {
-    provider: twilioConfigured ? "twilio" : telnyxConfigured ? "telnyx" : "not_configured",
-    configured: twilioConfigured || telnyxConfigured,
+    provider: whatsapp.messaging_configured ? "whatsapp_cloud_api" : twilioConfigured ? "twilio" : telnyxConfigured ? "telnyx" : "not_configured",
+    configured: whatsapp.inbound_ready || twilioConfigured || telnyxConfigured,
     inbound_number: String(
-      process.env.TWILIO_PHONE_NUMBER || process.env.TWILIO_FROM_NUMBER
+      whatsapp.business_number
+      || process.env.TWILIO_PHONE_NUMBER || process.env.TWILIO_FROM_NUMBER
       || process.env.TELNYX_PHONE_NUMBER || process.env.TELNYX_FROM_NUMBER || ""
     ).trim(),
+    whatsapp,
   };
 }
 
@@ -62082,8 +62196,26 @@ app.get("/admin/crm/calling/status", async (req, res) => {
       ...provider,
       queue_open: ensureCrmArray(db, "call_queue").filter((item) => !["closed", "converted", "not_interested"].includes(String(item.status || "").toLowerCase())).length,
       calls_logged: ensureCrmArray(db, "call_logs").length,
+      recent_calls: ensureCrmArray(db, "call_logs").slice(0, 25).map((item) => ({
+        id: item.id,
+        lead_id: item.lead_id || null,
+        provider_call_id: item.provider_call_id || item.call_id || null,
+        provider: item.provider || null,
+        direction: item.direction || null,
+        from: item.from || null,
+        to: item.to || null,
+        status: item.status || null,
+        outcome: item.outcome || null,
+        duration_seconds: Number(item.duration_seconds || 0),
+        started_at: item.started_at || item.created_at || null,
+        connected_at: item.connected_at || null,
+        ended_at: item.ended_at || null,
+        recording_enabled: item.recording_enabled === true,
+      })),
       live_calling_enabled: provider.configured,
-      safety: provider.configured ? "Provider credentials found. Verify consent, recording notice and caller ID before outbound activation." : "No live call will be placed until a telephony provider and business number are configured.",
+      safety: provider.whatsapp?.inbound_ready
+        ? "Inbound WhatsApp AI answering is enabled for a controlled student-initiated call. Recording remains off."
+        : "No AI call will be answered until Meta calls webhooks, the realtime media path and the final activation switch are all confirmed.",
     });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
