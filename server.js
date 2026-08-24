@@ -19,6 +19,10 @@ import {
 } from "./lib/flashcard-postgres.js";
 import { planCrmDeliveryLockRetention } from "./lib/crm-delivery-lock-retention.js";
 import {
+  buildLeadRevenueJourney,
+  buildRevenueOsSnapshot,
+} from "./lib/crm-revenue-os.js";
+import {
   applyAylaConversationNameToLead,
   applyAylaConversationDecision,
   aylaConversationTextFormat,
@@ -61123,7 +61127,15 @@ function ng41ProcessInboundMessageForGrowth(db, { lead = null, text = "", from =
   const score = ng41ScoreLead(db, lead);
   if (score.score >= 55) ng41EnsureCallQueue(db, lead, "hot_score", source);
   ng41EnsureDailySessionRecovery(db, lead);
-  return { window: windowRecord, followup, score };
+  lead.revenue_journey = buildLeadRevenueJourney({
+    lead,
+    messages: ng41LeadMessages(db, lead.id),
+    payments: ensureCrmArray(db, "payments"),
+    appointments: ensureCrmArray(db, "appointments"),
+  });
+  lead.behavior_score = Number(score.score || 0);
+  lead.behavior_score_reasons = score.reasons || [];
+  return { window: windowRecord, followup, score, revenue_journey: lead.revenue_journey };
 }
 
 function ng41BuildLeadProfile(db, lead = {}) {
@@ -61919,6 +61931,163 @@ app.patch("/admin/crm/future-followups/:id", async (req, res) => {
     await writeCrmDb(db);
     res.json({ success: true, followup: item });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
+function ngRevenueOsCallProviderStatus() {
+  const twilioConfigured = Boolean(
+    String(process.env.TWILIO_ACCOUNT_SID || "").trim()
+    && String(process.env.TWILIO_AUTH_TOKEN || "").trim()
+    && String(process.env.TWILIO_PHONE_NUMBER || process.env.TWILIO_FROM_NUMBER || "").trim()
+  );
+  const telnyxConfigured = Boolean(
+    String(process.env.TELNYX_API_KEY || "").trim()
+    && String(process.env.TELNYX_PHONE_NUMBER || process.env.TELNYX_FROM_NUMBER || "").trim()
+  );
+  return {
+    provider: twilioConfigured ? "twilio" : telnyxConfigured ? "telnyx" : "not_configured",
+    configured: twilioConfigured || telnyxConfigured,
+    inbound_number: String(
+      process.env.TWILIO_PHONE_NUMBER || process.env.TWILIO_FROM_NUMBER
+      || process.env.TELNYX_PHONE_NUMBER || process.env.TELNYX_FROM_NUMBER || ""
+    ).trim(),
+  };
+}
+
+function ngRevenueOsMessages(db = {}) {
+  const seen = new Set();
+  return [
+    ...ensureCrmArray(db, "message_logs"),
+    ...ensureCrmArray(db, "conversations"),
+    ...ensureCrmArray(db, "inbound_messages"),
+    ...ensureCrmArray(db, "outbound_messages"),
+  ].filter((item) => {
+    const key = String(item.id || item.message_id || item.provider_message_id || "").trim()
+      || `${item.lead_id || item.contact_id || ""}:${item.created_at || item.sent_at || item.received_at || ""}:${item.text || item.body || item.message || ""}`;
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function ngRevenueOsEligibleOwners(db = {}) {
+  return [
+    ...ensureCrmArray(db, "team_members"),
+    ...ensureCrmArray(db, "agents").filter((item) => !/ai|bot/i.test(String(item.agent_type || item.role || ""))),
+  ].filter((item) => !["inactive", "disabled", "suspended", "archived"].includes(String(item.status || "active").toLowerCase()));
+}
+
+function ngRevenueOsAutoAssign(db = {}, lead = {}) {
+  if (lead.owner_id || lead.assigned_agent_id || lead.assigned_to_id || lead.assigned_team_member_id) return null;
+  const owners = ngRevenueOsEligibleOwners(db);
+  if (!owners.length) return null;
+  const assignments = ensureCrmArray(db, "revenue_os_assignments");
+  const counts = new Map(owners.map((owner) => [String(owner.id), 0]));
+  for (const item of assignments) {
+    const key = String(item.owner_id || "");
+    if (counts.has(key)) counts.set(key, counts.get(key) + 1);
+  }
+  const selected = [...owners].sort((a, b) => (counts.get(String(a.id)) || 0) - (counts.get(String(b.id)) || 0))[0];
+  if (!selected?.id) return null;
+  const assignment = withTimestamps({
+    id: uuid(), lead_id: lead.id || lead.lead_id, owner_id: selected.id,
+    owner_name: selected.name || selected.full_name || selected.email || "Team member",
+    source: "revenue_os_round_robin", status: "active",
+  });
+  assignments.push(assignment);
+  lead.owner_id = selected.id;
+  lead.owner_name = assignment.owner_name;
+  lead.assigned_agent_id = selected.id;
+  lead.assigned_agent_name = assignment.owner_name;
+  lead.assigned_at = nowIso();
+  lead.updated_at = nowIso();
+  return assignment;
+}
+
+async function ngRevenueOsPayload({ rebuild = false, assignUnassigned = false } = {}) {
+  const [db, liveDb] = await Promise.all([readCrmDb(), readLiveDb()]);
+  ng41EnsureGrowthCollections(db);
+  const messages = ngRevenueOsMessages(db);
+  const livePayments = Object.values(liveDb.payments || {});
+  const crmPayments = ensureCrmArray(db, "payments");
+  const allPayments = [...crmPayments, ...livePayments];
+  const appointments = ensureCrmArray(db, "appointments");
+  let assigned = 0;
+  if (rebuild) {
+    for (const lead of ensureCrmArray(db, "leads")) {
+      const id = String(lead.id || lead.lead_id || "");
+      const leadConversation = messages.filter((item) => String(item.lead_id || item.leadId || item.contact_id || "") === id);
+      lead.revenue_journey = buildLeadRevenueJourney({ lead, messages: leadConversation, payments: allPayments, appointments });
+      const score = ng41ScoreLead(db, lead);
+      lead.behavior_score = Number(score?.score || lead.lead_score || 0);
+      lead.behavior_score_reasons = score?.reasons || [];
+      if (assignUnassigned && ngRevenueOsAutoAssign(db, lead)) assigned += 1;
+    }
+  }
+  const plans = Object.values(liveDb.plans || {});
+  const recurring = ngAdminMobileRevenueMetrics({
+    payments: livePayments,
+    enrollments: Object.values(liveDb.enrollments || {}),
+    plans,
+    enrollmentActive: (enrollment, plan) => ngAdminMobileLmsEnrollmentActive(enrollment, plan, liveDb),
+    userIdForEnrollment: (enrollment) => enrollment.user_id || enrollment.student_id,
+  });
+  const snapshot = buildRevenueOsSnapshot({
+    leads: ensureCrmArray(db, "leads"), messages,
+    payments: crmPayments, livePayments,
+    appointments,
+    futureFollowups: ensureCrmArray(db, "future_followups"),
+    callQueue: ensureCrmArray(db, "call_queue"),
+    callLogs: ensureCrmArray(db, "call_logs"),
+    aiLearning: ensureCrmArray(db, "ai_learning_events"),
+    aiUsage: ensureCrmArray(db, "ai_usage"),
+    handoffs: ensureCrmArray(db, "handoffs"),
+    adPerformance: ensureCrmArray(db, "ad_performance_logs"),
+    recurring,
+    callProvider: ngRevenueOsCallProviderStatus(),
+  });
+  if (rebuild) await writeCrmDb(db);
+  return { snapshot, assigned };
+}
+
+app.get("/admin/crm/revenue-os/overview", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const { snapshot } = await ngRevenueOsPayload();
+    res.json({ success: true, ...snapshot });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.post("/admin/crm/revenue-os/rebuild", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const { snapshot, assigned } = await ngRevenueOsPayload({
+      rebuild: true,
+      assignUnassigned: req.body?.assign_unassigned !== false,
+    });
+    res.json({ success: true, assigned, ...snapshot });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+app.get("/admin/crm/calling/status", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const provider = ngRevenueOsCallProviderStatus();
+    res.json({
+      success: true,
+      ...provider,
+      queue_open: ensureCrmArray(db, "call_queue").filter((item) => !["closed", "converted", "not_interested"].includes(String(item.status || "").toLowerCase())).length,
+      calls_logged: ensureCrmArray(db, "call_logs").length,
+      live_calling_enabled: provider.configured,
+      safety: provider.configured ? "Provider credentials found. Verify consent, recording notice and caller ID before outbound activation." : "No live call will be placed until a telephony provider and business number are configured.",
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
 });
 
 app.post("/admin/crm/future-followups/run-due-reminders", async (req, res) => {
