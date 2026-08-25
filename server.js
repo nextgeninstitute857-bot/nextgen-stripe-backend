@@ -632,7 +632,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v302-sales-rehearsal-proof";
+const CRM_AYLA_REPLY_BUILD = "v303-sales-controller-invariants";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
