@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   AYLA_CONVERSATION_DECISION_SCHEMA,
+  aylaExplicitHumanHandoffRequest,
+  aylaExplicitProductPurchaseRequest,
   applyAylaConversationNameToLead,
   applyAylaConversationDecision,
   aylaConversationTextFormat,
@@ -317,6 +319,87 @@ test("quality gate rejects permission loops, repeated questions, duplicate repli
     ask_field: "none",
   });
   assert.ok(evaluateAylaConversationDecision({ decision: forcedPriceMeeting, state, messages: [] }).includes("pricing_question_forced_handoff"));
+});
+
+test("demo, LMS, class, recording, price and discount interest never starts a premature human handoff", () => {
+  const state = {
+    ...createAylaConversationState(),
+    stage: "demo_experience",
+    facts: {
+      name: "Dr Emily",
+      exam: "USMLE Step 1",
+      timeline: null,
+      main_need: "Needs an organised programme",
+      country: "Pakistan",
+      student_type: "prospective",
+    },
+    completed_actions: ["send_feature_tour"],
+    turn_count: 5,
+  };
+
+  for (const text of [
+    "Can I see the LMS and attend a class first?",
+    "Please share a recording so I can check the teaching.",
+    "How much does the programme cost?",
+    "Do you have a Pakistan discount?",
+    "I want this programme.",
+    "Can you guide me?",
+  ]) {
+    assert.equal(aylaExplicitHumanHandoffRequest(text), false, text);
+    const candidate = decision({
+      state,
+      stage: "handoff",
+      intent: "student_interest",
+      reply: "I can arrange a mentor meeting. Which email should I use?",
+      action: "begin_human_handoff",
+      ask_field: "email",
+    });
+    const violations = evaluateAylaConversationDecision({ decision: candidate, state, messages: [{ role: "student", text }] });
+    assert.ok(violations.includes("premature_handoff_without_explicit_request"), text);
+  }
+});
+
+test("explicit mentor requests and unlisted product purchase requests may begin handoff", () => {
+  const state = {
+    ...createAylaConversationState(),
+    stage: "demo_experience",
+    facts: {
+      name: "Dr Emily",
+      exam: "USMLE Step 1",
+      timeline: null,
+      main_need: "Needs an organised programme",
+      country: "Pakistan",
+      student_type: "prospective",
+    },
+    completed_actions: ["send_feature_tour"],
+    turn_count: 5,
+  };
+  const handoff = decision({
+    state,
+    stage: "handoff",
+    intent: "explicit_mentor_booking",
+    reply: "Absolutely. Which email should I use for your mentor-call confirmation?",
+    action: "begin_human_handoff",
+    ask_field: "email",
+  });
+
+  for (const text of [
+    "Please book a mentor call tomorrow at 7 PM PKT.",
+    "Can I speak with your mentor?",
+    "I would like a Google Meet consultation.",
+  ]) {
+    assert.equal(aylaExplicitHumanHandoffRequest(text), true, text);
+    assert.ok(!evaluateAylaConversationDecision({ decision: handoff, state, messages: [{ role: "student", text }] })
+      .includes("premature_handoff_without_explicit_request"), text);
+  }
+
+  assert.equal(aylaExplicitProductPurchaseRequest("I want QBank only."), true);
+  assert.equal(aylaExplicitProductPurchaseRequest("How much is QBank only?"), false);
+  assert.ok(!evaluateAylaConversationDecision({
+    decision: handoff,
+    state,
+    messages: [{ role: "student", text: "I want QBank only." }],
+  }).includes("premature_handoff_without_explicit_request"));
 });
 
 test("known facts and completed actions are persisted and cannot be requested or dispatched again", () => {

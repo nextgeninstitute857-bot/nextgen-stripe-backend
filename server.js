@@ -28,6 +28,7 @@ import {
   metaAdsReadiness,
 } from "./lib/crm-meta-ads.js";
 import {
+  aylaExplicitHumanHandoffRequest,
   applyAylaConversationNameToLead,
   applyAylaConversationDecision,
   aylaConversationTextFormat,
@@ -50369,8 +50370,7 @@ function ngAylaLastOutboundOfferedGoogleMeet(text = "") {
 }
 
 function ngAylaIsDirectGoogleMeetRequest(text = "") {
-  const t = String(text || "").trim().toLowerCase();
-  return /(connect me|let'?s connect|let connect|connect with mentor|connect to mentor|book.*mentor|book.*meet|schedule.*meet|schedule.*mentor|google\s*meet|mentor consultation|i want guidance|want guidance|guide me|talk to mentor|speak to mentor|call me|i want it|i want this|arrange.*mentor|arrange.*meet)/i.test(t);
+  return aylaExplicitHumanHandoffRequest(text);
 }
 
 function ngAylaIsPositiveShortReply(text = "") {
