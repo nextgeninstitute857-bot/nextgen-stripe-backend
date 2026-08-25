@@ -512,6 +512,26 @@ test("phone-derived countries stay unconfirmed until a student or admin confirms
   assert.equal(learned.fact_sources.country, "conversation_self_reported");
 });
 
+test("campaign country is used only as a friendly confirmation hint", () => {
+  const countryGrounding = server.slice(
+    server.indexOf("function ngAylaCountrySourceIsConfirmed"),
+    server.indexOf("function ngAylaPricingDraftIsGrounded"),
+  );
+
+  assert.match(countryGrounding, /function ngAylaCampaignCountryHintForSales/);
+  assert.match(countryGrounding, /campaign_country_hint/);
+  assert.match(countryGrounding, /looks like you came through our .* campaign/i);
+  assert.match(countryGrounding, /is that where you're currently based/i);
+  assert.match(countryGrounding, /do not treat that as proof/i);
+  assert.doesNotMatch(
+    countryGrounding.slice(
+      countryGrounding.indexOf("function ngAylaCountrySourceIsConfirmed"),
+      countryGrounding.indexOf("function ngAylaCountryHintForSales"),
+    ),
+    /campaign_country_hint/,
+  );
+});
+
 test("daily live and recording follow-ups hard-stop for enrolled, opted-out and not-interested leads", () => {
   const eligibility = server.slice(
     server.indexOf("function ngDailyLiveSessionEligibleLead"),

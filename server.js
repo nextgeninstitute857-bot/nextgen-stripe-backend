@@ -49550,6 +49550,52 @@ function ngAylaCountryHintForSales(lead = {}) {
   return hint?.country ? { country: hint.country, source: "phone_calling_code_hint" } : null;
 }
 
+function ngAylaCampaignCountryHintForSales(db = {}, lead = {}) {
+  const campaign = ngFindCampaignForLeadCommand(db, lead);
+  if (!campaign) return null;
+
+  const listValues = [
+    campaign.target_countries,
+    campaign.countries,
+    campaign.country_targets,
+    campaign.geo_locations?.countries,
+  ].flatMap((value) => Array.isArray(value) ? value : []).map((value) => String(value || "").trim()).filter(Boolean);
+  if (new Set(listValues.map((value) => value.toLowerCase())).size > 1) return null;
+
+  const explicitValue = String(
+    listValues[0]
+      || campaign.target_country
+      || campaign.country
+      || campaign.ad_country
+      || campaign.geo_country
+      || lead.campaign_country
+      || lead.ad_country
+      || lead.target_country
+      || ""
+  ).trim();
+  const campaignLabel = String(campaign.name || campaign.title || campaign.campaign_name || "").trim();
+  const sourceText = explicitValue || campaignLabel;
+  if (!sourceText) return null;
+
+  const knownCountries = [
+    ["United States", /\b(?:US|USA|United States(?: of America)?)\b/i],
+    ["Canada", /\bCanada\b/i],
+    ["United Kingdom", /\b(?:UK|United Kingdom|Britain)\b/i],
+    ["Pakistan", /\bPakistan\b/i],
+    ["India", /\bIndia\b/i],
+    ["Nigeria", /\bNigeria\b/i],
+    ["Saudi Arabia", /\b(?:Saudi Arabia|KSA)\b/i],
+    ["United Arab Emirates", /\b(?:United Arab Emirates|UAE)\b/i],
+    ["Qatar", /\bQatar\b/i],
+    ["Egypt", /\bEgypt\b/i],
+    ["Sudan", /\bSudan\b/i],
+    ["Australia", /\bAustralia\b/i],
+  ];
+  const matched = knownCountries.find(([, pattern]) => pattern.test(sourceText));
+  const country = matched?.[0] || (explicitValue && !/[;,|]/.test(explicitValue) ? explicitValue : "");
+  return country ? { country, source: "campaign_country_hint", campaign: campaignLabel || null } : null;
+}
+
 function ngAylaOfferExamForSales(lead = {}, messages = []) {
   return String(
     lead?.ayla_conversation_state?.facts?.exam
@@ -49880,7 +49926,8 @@ async function ngAylaLiveLmsSalesGrounding({ structured = false, crmDb = null, l
       .filter(Boolean)));
     const countryOffer = ngAylaApprovedCountryOfferForSales({ crmDb, liveDb, lead: lead || {}, messages });
     const confirmedCountry = ngAylaConfirmedCountryForSales(lead || {});
-    const countryHint = confirmedCountry ? null : ngAylaCountryHintForSales(lead || {});
+    const campaignCountryHint = confirmedCountry ? null : ngAylaCampaignCountryHintForSales(crmDb || {}, lead || {});
+    const countryHint = confirmedCountry ? null : campaignCountryHint || ngAylaCountryHintForSales(lead || {});
 
     const now = ngAylaDateTimePartsInZone(new Date(), "America/New_York");
     const roadmap = courseId ? liveDb.roadmaps?.[courseId] || null : null;
@@ -49966,6 +50013,8 @@ async function ngAylaLiveLmsSalesGrounding({ structured = false, crmDb = null, l
         ? `- Approved country offer for this lead: ${countryOffer.public_line}.${countryOffer.expires_at ? ` It expires at ${countryOffer.expires_at}.` : ""} ${countryOffer.simulated === true ? "This is a non-redeemable no-send rehearsal code used only to prove the conversation; never present it as a live checkout coupon." : "This code exists as an active LMS coupon and may be shared with this lead."}`
         : confirmedCountry
           ? `- Confirmed student country: ${confirmedCountry.country}. No approved live country discount is currently available for this lead. Never invent a coupon; route regional-pricing requests to the mentor/admin.`
+          : countryHint?.source === "campaign_country_hint"
+            ? `- Country is not confirmed. It looks like you came through our ${countryHint.country} campaign. Ask once, naturally: “It looks like you came through our ${countryHint.country} campaign—is that where you're currently based?” Do not treat that as proof and do not share a country discount until the student confirms.`
           : countryHint
             ? `- Country is not confirmed. The phone calling code only suggests ${countryHint.country}; do not treat that as proof and do not share a country discount. Ask naturally where the student is currently based.`
             : "- Country is not confirmed. Ask naturally where the student is currently based before any regional pricing. Never invent a coupon.",
@@ -49987,6 +50036,7 @@ async function ngAylaLiveLmsSalesGrounding({ structured = false, crmDb = null, l
       country_offer: countryOffer,
       confirmed_country: confirmedCountry?.country || null,
       country_hint: countryHint?.country || null,
+      country_hint_source: countryHint?.source || null,
       pricing_url: "https://nextgenusmle.live/pricing",
       demo_url: "https://nextgenusmle.live/demo",
       current_date: now.date_key,
