@@ -89,7 +89,9 @@ test("Canadian WhatsApp number reports inbound-only and stays disabled by defaul
   assert.equal(readiness.outbound_business_initiated_supported, false);
   assert.equal(readiness.inbound_ready, false);
   assert.ok(readiness.blockers.includes("Meta calls webhook subscription has not been confirmed."));
+  assert.ok(readiness.blockers.includes("OpenAI Realtime credentials are missing."));
   assert.ok(readiness.blockers.includes("LiveKit WhatsApp connector credentials are missing."));
+  assert.ok(readiness.blockers.includes("The Ayla LiveKit voice worker has not been deployed and verified."));
   assert.ok(readiness.blockers.includes("Live AI answering remains safely disabled until the controlled test."));
 });
 
@@ -100,10 +102,12 @@ test("inbound readiness requires every external control", () => {
     WHATSAPP_BUSINESS_NUMBER: "+18254255646",
     WHATSAPP_CALLING_WEBHOOK_ENABLED: "true",
     WHATSAPP_AI_CALLING_ENABLED: "true",
+    OPENAI_API_KEY: "configured",
     LIVEKIT_URL: "https://ayla-whatsapp-voice.livekit.cloud",
     LIVEKIT_API_KEY: "configured",
     LIVEKIT_API_SECRET: "configured",
     LIVEKIT_WHATSAPP_AGENT_NAME: "ayla-whatsapp-voice-agent",
+    LIVEKIT_WHATSAPP_AGENT_DEPLOYED: "true",
   });
 
   assert.equal(readiness.inbound_ready, true);
@@ -168,10 +172,12 @@ test("accepts an inbound WhatsApp call into a private random LiveKit room", asyn
       WHATSAPP_PHONE_NUMBER_ID: "pn-1",
       WHATSAPP_CALLING_WEBHOOK_ENABLED: "true",
       WHATSAPP_AI_CALLING_ENABLED: "true",
+      OPENAI_API_KEY: "configured",
       LIVEKIT_URL: "https://ayla-whatsapp-voice.livekit.cloud",
       LIVEKIT_API_KEY: "livekit-key",
       LIVEKIT_API_SECRET: "livekit-secret",
       LIVEKIT_WHATSAPP_AGENT_NAME: "ayla-whatsapp-voice-agent",
+      LIVEKIT_WHATSAPP_AGENT_DEPLOYED: "true",
     },
     connector,
     SessionDescriptionClass: class SessionDescription {
