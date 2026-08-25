@@ -15,7 +15,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v299-handoff-memory-readiness"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v300-handoff-time-readiness"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: "message_status"/);
   assert.match(handler, /event: "ignored_non_message"/);
@@ -683,6 +683,16 @@ test("human handoff reuses conversation memory and a student-stated email before
   assert.match(request, /lead\.google_meet_email = context\.email/);
   assert.match(request, /lead\.google_meet_country = context\.country/);
   assert.match(request, /lead\.google_meet_concern = context\.concern/);
+});
+
+test("an explicit mentor booking captures a supplied date, time and timezone before asking again", () => {
+  const routerStart = server.indexOf("function ngAylaHardSalesRouter");
+  const routerEnd = server.indexOf("function ngAylaNormalizeReplyForRepeat", routerStart);
+  const router = server.slice(routerStart, routerEnd);
+  assert.match(router, /const directTimePreference = !missingQualification && ngAylaLooksLikeTimePreference\(latestText\)/);
+  assert.match(router, /ngAylaCreateGoogleMeetAppointmentFromPreference\(db, lead, directTimePreference/);
+  assert.match(router, /google_meet_time_collected_missing_link/);
+  assert.match(router, /google_meet_pending_preference = directTimePreference/);
 });
 
 test("Ayla conversation memory commits only after every dispatched part is accepted", () => {

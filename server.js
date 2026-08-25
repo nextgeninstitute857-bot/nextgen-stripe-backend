@@ -632,7 +632,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v299-handoff-memory-readiness";
+const CRM_AYLA_REPLY_BUILD = "v300-handoff-time-readiness";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
@@ -51004,6 +51004,29 @@ Our team will confirm the Google Meet link shortly. You will receive the link at
 
   if (directGoogleMeetRequest || positiveGoogleMeetContext) {
     ngAylaCreateGoogleMeetRequest(db, lead, "google_meet_requested", latestText, cleanMessages);
+    const missingQualification = ngAylaNextHandoffQualificationField(ngAylaHumanHandoffContext(lead, cleanMessages));
+    const directTimePreference = !missingQualification && ngAylaLooksLikeTimePreference(latestText)
+      ? ngAylaParsePreferredGoogleMeetTime(latestText)
+      : null;
+    if (directTimePreference && !directTimePreference.timezone) {
+      lead.next_action = "collect_google_meet_time";
+      lead.google_meet_pending_preference = directTimePreference;
+      lead.updated_at = nowIso();
+      return {
+        intent: "google_meet_time_missing_timezone",
+        reply: "That date and time works. Which time zone should I use for it?",
+      };
+    }
+    if (directTimePreference?.timezone) {
+      const appointment = ngAylaCreateGoogleMeetAppointmentFromPreference(db, lead, directTimePreference, latestText, cleanMessages);
+      ngAylaMarkGoogleMeetLockedLead(lead, appointment);
+      return {
+        intent: "google_meet_time_collected_missing_link",
+        reply: `Great Doctor, I have noted your preferred Google Meet time for ${directTimePreference.date} at ${directTimePreference.time} ${directTimePreference.timezone_label || directTimePreference.timezone}.
+
+Our team will confirm the Google Meet link shortly. You will receive the link at the meeting time.`,
+      };
+    }
     return {
       intent: "google_meet_requested",
       reply: ngAylaHandoffQualificationReply(lead, cleanMessages)
