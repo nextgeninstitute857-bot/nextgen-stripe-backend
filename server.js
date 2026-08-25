@@ -632,7 +632,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v301-sales-rehearsal-readiness";
+const CRM_AYLA_REPLY_BUILD = "v302-sales-rehearsal-proof";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
@@ -49824,7 +49824,7 @@ async function ngSyncCrmCountryCouponRedemption({ coupon = {}, payment = {}, enr
 function ngAylaApprovedCountryOfferForSales({ crmDb = null, liveDb = {}, lead = {}, messages = [] } = {}) {
   if (!crmDb) return null;
   if (
-    String(lead?.source || "") === "admin_no_send_simulation"
+    (String(lead?.source || "") === "admin_no_send_simulation" || lead?.ayla_no_send_simulation === true)
     && lead?.ayla_simulated_country_offer?.simulated === true
     && lead?.ayla_simulated_country_offer?.redeemable === false
   ) return lead.ayla_simulated_country_offer;
@@ -49962,7 +49962,7 @@ async function ngAylaLiveLmsSalesGrounding({ structured = false, crmDb = null, l
         ? `- Features present in the active public plans: ${activePlanFeatures.join(", ")}.`
         : "- No plan-feature list is currently available; do not invent included products.",
       countryOffer
-        ? `- Approved country offer for this lead: ${countryOffer.public_line}. This code exists as an active LMS coupon and may be shared with this lead.`
+        ? `- Approved country offer for this lead: ${countryOffer.public_line}.${countryOffer.expires_at ? ` It expires at ${countryOffer.expires_at}.` : ""} ${countryOffer.simulated === true ? "This is a non-redeemable no-send rehearsal code used only to prove the conversation; never present it as a live checkout coupon." : "This code exists as an active LMS coupon and may be shared with this lead."}`
         : confirmedCountry
           ? `- Confirmed student country: ${confirmedCountry.country}. No approved live country discount is currently available for this lead. Never invent a coupon; route regional-pricing requests to the mentor/admin.`
           : countryHint
@@ -51747,6 +51747,34 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
         ? ["approved_country_coupon_not_shared"]
         : []
     ),
+    ...(
+      liveSnapshot.country_offer?.discount_type === "percentage"
+      && ngAylaConversationRequestsCountryOffer(cleanMessages)
+      && !new RegExp(`\\b${Number(liveSnapshot.country_offer.discount_value || 0)}\\s*%`).test(`${candidate.reply || ""}\n${candidate.follow_up || ""}`)
+        ? ["approved_country_discount_not_stated"]
+        : []
+    ),
+    ...(
+      liveSnapshot.country_offer?.one_time === true
+      && ngAylaConversationRequestsCountryOffer(cleanMessages)
+      && !/\b(?:one[ -]time|use(?:d)? once|single[ -]use)\b/i.test(`${candidate.reply || ""}\n${candidate.follow_up || ""}`)
+        ? ["approved_country_offer_not_marked_one_time"]
+        : []
+    ),
+    ...(
+      liveSnapshot.country_offer?.expires_at
+      && ngAylaConversationRequestsCountryOffer(cleanMessages)
+      && !/\b(?:expire[sd]?|valid (?:for|until)|72\s*hours?)\b/i.test(`${candidate.reply || ""}\n${candidate.follow_up || ""}`)
+        ? ["approved_country_offer_expiry_not_stated"]
+        : []
+    ),
+    ...(
+      /\b(?:attend|join|try|see)\b.{0,50}\b(?:live\s+class|class|live\s+session)\b/i.test(latestInboundText)
+      && liveSnapshot.live_session?.url
+      && !`${candidate.reply || ""}\n${candidate.follow_up || ""}`.includes(liveSnapshot.live_session.url)
+        ? ["live_class_preview_missing_current_session"]
+        : []
+    ),
     ...(() => {
       const required = String(lead.next_action || "").match(/^collect_google_meet_(name|email|country|exam|concern|time)$/i)?.[1]?.toLowerCase();
       if (!required) return [];
@@ -51901,6 +51929,7 @@ app.post("/admin/crm/ayla-conversation/simulate", async (req, res) => {
       status: "new_lead",
       source: "admin_no_send_simulation",
       ...(req.body?.lead && typeof req.body.lead === "object" ? req.body.lead : {}),
+      ayla_no_send_simulation: true,
     };
     const messages = [];
     const transcript = [];

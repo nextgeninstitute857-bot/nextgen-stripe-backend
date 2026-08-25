@@ -1,4 +1,4 @@
 Render redeploy requested 2026-08-25 after Ayla explicit-handoff protection merged.
 No production data migration, CRM record mutation, or schedule apply is associated with this marker.
 Reason: production was still serving the previous conversation controller after PRs #266 and #267 merged.
-Target CRM build: v301-sales-rehearsal-readiness.
+Target CRM build: v302-sales-rehearsal-proof.

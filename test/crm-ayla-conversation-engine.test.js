@@ -350,6 +350,19 @@ test("quality gate prevents weak sales endings and treats an LMS preview request
     messages: [{ role: "student", text: "What makes the programme different?" }],
   }).includes("unsolicited_demo_resend_offer"));
 
+  const repeatedDemoLink = decision({
+    state,
+    stage: "demo_experience",
+    reply: "Explore the seven-day demo again: https://nextgenusmle.live/demo",
+    action: "reply_only",
+    ask_field: "none",
+  });
+  assert.ok(evaluateAylaConversationDecision({
+    decision: repeatedDemoLink,
+    state,
+    messages: [{ role: "student", text: "How does weak-area tracking work?" }],
+  }).includes("repeated_demo_link_after_feature_tour"));
+
   const vagueEnding = decision({
     state,
     stage: "demo_experience",
@@ -361,6 +374,7 @@ test("quality gate prevents weak sales endings and treats an LMS preview request
   const endingViolations = evaluateAylaConversationDecision({ decision: vagueEnding, state, messages: [] });
   assert.ok(endingViolations.includes("vague_handback_ending"));
   assert.ok(endingViolations.includes("incomplete_follow_up"));
+  assert.ok(endingViolations.includes("unexpected_follow_up_outside_feature_tour"));
 
   const unavailablePreview = decision({
     state,
