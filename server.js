@@ -632,7 +632,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v298-explicit-handoff-readiness";
+const CRM_AYLA_REPLY_BUILD = "v299-handoff-memory-readiness";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
@@ -50495,6 +50495,29 @@ function ngAylaCreateGoogleMeetRequest(db = {}, lead = {}, reason = "google_meet
   if (!db || !lead?.id) return null;
   const now = typeof nowIso === "function" ? nowIso() : new Date().toISOString();
   const context = ngAylaHumanHandoffContext(lead, messages);
+  if (context.student_name && !ng41LeadName(lead)) {
+    lead.name = context.student_name;
+    lead.full_name = context.student_name;
+    lead.contact_name = context.student_name;
+    lead.name_source = "conversation_self_reported";
+  }
+  if (context.email && !ng41LeadEmail(lead)) {
+    lead.email = context.email;
+    lead.contact_email = context.email;
+    lead.google_meet_email = context.email;
+  }
+  if (context.country && !lead.country) {
+    lead.country = context.country;
+    lead.google_meet_country = context.country;
+  }
+  if (context.exam && !lead.exam && !lead.exam_type) {
+    lead.exam = context.exam;
+    lead.exam_type = context.exam;
+  }
+  if (context.concern && !lead.main_need && !lead.google_meet_concern) {
+    lead.main_need = context.concern;
+    lead.google_meet_concern = context.concern;
+  }
   lead.status = lead.status === "paid" || lead.status === "converted" ? lead.status : "hot_lead";
   lead.lead_stage = "google_meet_requested";
   lead.stage = "google_meet_requested";
@@ -50575,7 +50598,17 @@ function ngAylaHandoffExamLabel(lead = {}, messages = []) {
 }
 
 function ngAylaHandoffConcern(lead = {}, messages = []) {
-  const stored = String(lead.google_meet_concern || lead.main_need || lead.primary_pain || lead.current_challenge || "").trim();
+  const conversationState = lead.ayla_conversation_state && typeof lead.ayla_conversation_state === "object"
+    ? lead.ayla_conversation_state
+    : {};
+  const stored = String(
+    lead.google_meet_concern
+    || lead.main_need
+    || lead.primary_pain
+    || lead.current_challenge
+    || conversationState.facts?.main_need
+    || "",
+  ).trim();
   if (stored) return stored.slice(0, 500);
   const candidate = [...safeArray(messages)]
     .reverse()
@@ -50587,12 +50620,32 @@ function ngAylaHandoffConcern(lead = {}, messages = []) {
 
 function ngAylaHumanHandoffContext(lead = {}, messages = []) {
   const conversation = safeArray(messages).map((message) => ngMessageText(message)).filter(Boolean).join("\n").toLowerCase();
-  const rawName = String(ng41LeadName(lead) || "").trim();
+  const conversationState = lead.ayla_conversation_state && typeof lead.ayla_conversation_state === "object"
+    ? lead.ayla_conversation_state
+    : {};
+  const rememberedFacts = conversationState.facts && typeof conversationState.facts === "object"
+    ? conversationState.facts
+    : {};
+  const rawName = String(rememberedFacts.name || ng41LeadName(lead) || "").trim();
   const studentName = /^(?:student|doctor|doc|unknown|whatsapp (?:user|lead)|next\s*gen(?:eration)?(?:\s+(?:academy|institute|scholars|usmle))?|business)$/i.test(rawName) || /^\+?[\d\s().-]+$/.test(rawName) ? "" : rawName;
   const rawEmail = String(ng41LeadEmail(lead) || "").trim().toLowerCase();
-  const email = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(rawEmail) ? rawEmail : "";
-  const country = String(lead.country || lead.country_name || lead.location || lead.city || lead.google_meet_country || "").trim();
-  const exam = ngAylaHandoffExamLabel(lead, messages);
+  const conversationEmail = [...safeArray(messages)]
+    .reverse()
+    .filter((message) => !ngIsOutboundMessage(message))
+    .map((message) => ngMessageText(message).match(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i)?.[0]?.toLowerCase() || "")
+    .find(Boolean) || "";
+  const email = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(rawEmail) ? rawEmail : conversationEmail;
+  const country = String(
+    lead.country
+    || lead.country_name
+    || lead.location
+    || lead.city
+    || lead.google_meet_country
+    || rememberedFacts.country
+    || "",
+  ).trim();
+  const rememberedExam = String(rememberedFacts.exam || "").trim();
+  const exam = rememberedExam && rememberedExam !== "unknown" ? rememberedExam : ngAylaHandoffExamLabel(lead, messages);
   const concern = ngAylaHandoffConcern(lead, messages);
   const coverage = [
     lead.ayla_program_tour_sent_at || lead.lms_ecosystem_explained || /roadmap|programme|program|learning ecosystem/.test(conversation) ? "programme and roadmap" : "",

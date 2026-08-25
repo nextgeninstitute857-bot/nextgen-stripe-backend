@@ -15,7 +15,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v298-explicit-handoff-readiness"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v299-handoff-memory-readiness"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: "message_status"/);
   assert.match(handler, /event: "ignored_non_message"/);
@@ -664,6 +664,25 @@ test("admin Ayla simulation uses the real conversation engine without sending or
   assert.match(route, /persisted: false/);
   assert.doesNotMatch(route, /sendCrmMessage\s*\(/);
   assert.doesNotMatch(route, /writeCrmDb\s*\(/);
+});
+
+test("human handoff reuses conversation memory and a student-stated email before asking again", () => {
+  const contextStart = server.indexOf("function ngAylaHumanHandoffContext");
+  const contextEnd = server.indexOf("function ngAylaNextHandoffQualificationField", contextStart);
+  const context = server.slice(contextStart, contextEnd);
+  assert.match(context, /lead\.ayla_conversation_state/);
+  assert.match(context, /rememberedFacts\.name/);
+  assert.match(context, /rememberedFacts\.country/);
+  assert.match(context, /rememberedFacts\.exam/);
+  assert.match(context, /filter\(\(message\) => !ngIsOutboundMessage\(message\)\)/);
+  assert.ok(context.includes("conversationEmail"));
+
+  const requestStart = server.indexOf("function ngAylaCreateGoogleMeetRequest");
+  const requestEnd = server.indexOf("function ngAylaGoogleMeetBookingReply", requestStart);
+  const request = server.slice(requestStart, requestEnd);
+  assert.match(request, /lead\.google_meet_email = context\.email/);
+  assert.match(request, /lead\.google_meet_country = context\.country/);
+  assert.match(request, /lead\.google_meet_concern = context\.concern/);
 });
 
 test("Ayla conversation memory commits only after every dispatched part is accepted", () => {
