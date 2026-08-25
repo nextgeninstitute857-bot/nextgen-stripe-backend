@@ -15,7 +15,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v303-sales-controller-invariants"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v304-sales-final-proof"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: "message_status"/);
   assert.match(handler, /event: "ignored_non_message"/);
@@ -461,6 +461,7 @@ test("country discounts require confirmation and generated codes are private, ex
   assert.match(countryOffers, /-REHEARSAL/);
   assert.match(countryOffers, /redeemable: false/);
   assert.match(countryOffers, /ayla_no_send_simulation === true/);
+  assert.match(countryOffers, /lead\.country_offer_shared_at && !ngAylaLatestInboundRequestsCountryOffer\(messages\)/);
   const dryRunStart = countryOffers.indexOf("if (dryRun)");
   const liveReadStart = countryOffers.indexOf("const liveDb = await readLiveDb()", dryRunStart);
   assert.ok(dryRunStart > 0 && liveReadStart > dryRunStart);
@@ -475,6 +476,7 @@ test("country discounts require confirmation and generated codes are private, ex
   assert.match(generator, /approved_country_offer_not_marked_one_time/);
   assert.match(generator, /approved_country_offer_expiry_not_stated/);
   assert.match(generator, /live_class_preview_missing_current_session/);
+  assert.match(generator, /live_class_link_status_not_explained/);
   assert.match(generator, /const provisionalState = applyAylaConversationDecision/);
   assert.match(generator, /The student has now confirmed their country and the live facts contain their exact private offer/);
   assert.match(conversationEngine, /A phone calling code is only a location hint, never proof of country/);
@@ -681,6 +683,7 @@ test("admin Ayla simulation uses the real conversation engine without sending or
   assert.match(route, /allowOperationalActions: true/);
   assert.match(route, /dryRunOperationalActions: true/);
   assert.match(route, /ayla_no_send_simulation: true/);
+  assert.match(route, /shared_in_no_send_rehearsal/);
   assert.doesNotMatch(route, /sendCrmMessage\s*\(/);
   assert.doesNotMatch(route, /writeCrmDb\s*\(/);
 });

@@ -632,7 +632,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v303-sales-controller-invariants";
+const CRM_AYLA_REPLY_BUILD = "v304-sales-final-proof";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
@@ -49823,6 +49823,7 @@ async function ngSyncCrmCountryCouponRedemption({ coupon = {}, payment = {}, enr
 
 function ngAylaApprovedCountryOfferForSales({ crmDb = null, liveDb = {}, lead = {}, messages = [] } = {}) {
   if (!crmDb) return null;
+  if (lead.country_offer_shared_at && !ngAylaLatestInboundRequestsCountryOffer(messages)) return null;
   if (
     (String(lead?.source || "") === "admin_no_send_simulation" || lead?.ayla_no_send_simulation === true)
     && lead?.ayla_simulated_country_offer?.simulated === true
@@ -51775,6 +51776,14 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
         ? ["live_class_preview_missing_current_session"]
         : []
     ),
+    ...(
+      /\b(?:attend|join|try|see)\b.{0,50}\b(?:live\s+class|class|live\s+session)\b/i.test(latestInboundText)
+      && liveSnapshot.live_session
+      && !liveSnapshot.live_session.url
+      && !/\b(?:join )?link\b.{0,45}\b(?:not (?:published|available)|isn'?t (?:published|available)|once (?:it is|it'?s) published|when (?:it is|it'?s) published)\b/i.test(`${candidate.reply || ""}\n${candidate.follow_up || ""}`)
+        ? ["live_class_link_status_not_explained"]
+        : []
+    ),
     ...(() => {
       const required = String(lead.next_action || "").match(/^collect_google_meet_(name|email|country|exam|concern|time)$/i)?.[1]?.toLowerCase();
       if (!required) return [];
@@ -51981,6 +51990,14 @@ app.post("/admin/crm/ayla-conversation/simulate", async (req, res) => {
           text: ai.follow_up,
           created_at: new Date(Date.now() + index * 2000 + 1200).toISOString(),
         });
+      }
+      const simulatedOfferCode = String(ai.live_lms_sales_snapshot?.country_offer?.code || "").trim();
+      if (
+        simulatedOfferCode
+        && `${ai.reply || ""}\n${ai.follow_up || ""}`.toUpperCase().includes(simulatedOfferCode.toUpperCase())
+      ) {
+        lead.country_offer_shared_at = lead.country_offer_shared_at || nowIso();
+        lead.country_offer_status = "shared_in_no_send_rehearsal";
       }
     }
 

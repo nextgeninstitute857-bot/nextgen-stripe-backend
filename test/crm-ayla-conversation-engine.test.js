@@ -337,18 +337,31 @@ test("quality gate prevents weak sales endings and treats an LMS preview request
     turn_count: 5,
   };
 
-  const resendOffer = decision({
-    state,
-    stage: "demo_experience",
+  const resendOffer = {
+    ...decision({
+      state,
+      stage: "demo_experience",
+      reply: "That structure is what keeps your preparation organised.",
+      action: "reply_only",
+      ask_field: "none",
+    }),
     reply: "That structure is what keeps your preparation organised. Would you like me to send the demo link again?",
-    action: "reply_only",
-    ask_field: "none",
-  });
+  };
   assert.ok(evaluateAylaConversationDecision({
     decision: resendOffer,
     state,
     messages: [{ role: "student", text: "What makes the programme different?" }],
   }).includes("unsolicited_demo_resend_offer"));
+
+  const demoInvitation = {
+    ...resendOffer,
+    reply: "That is how the adaptive loop stays focused. Would you like to see a demo?",
+  };
+  assert.ok(evaluateAylaConversationDecision({
+    decision: demoInvitation,
+    state,
+    messages: [{ role: "student", text: "What makes the programme different?" }],
+  }).includes("unsolicited_demo_invitation_after_feature_tour"));
 
   const repeatedDemoLink = {
     ...decision({
@@ -373,6 +386,17 @@ test("quality gate prevents weak sales endings and treats an LMS preview request
   }, state, { messages: [{ role: "student", text: "How does weak-area tracking work?" }] });
   assert.equal(controllerCleaned.reply, "Your roadmap keeps weak areas visible.");
   assert.equal(controllerCleaned.follow_up, null);
+
+  const compoundDiscovery = {
+    ...decision({
+      state: createAylaConversationState(),
+      reply: "Which exam are you preparing for?",
+      ask_field: "exam",
+    }),
+    reply: "Which exam are you preparing for, and what challenge are you facing?",
+  };
+  assert.ok(evaluateAylaConversationDecision({ decision: compoundDiscovery, state: createAylaConversationState(), messages: [] })
+    .includes("multiple_discovery_questions_in_one_turn"));
 
   const vagueEnding = {
     ...decision({
