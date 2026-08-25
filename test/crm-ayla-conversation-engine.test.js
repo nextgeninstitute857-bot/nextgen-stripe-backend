@@ -321,6 +321,70 @@ test("quality gate rejects permission loops, repeated questions, duplicate repli
   assert.ok(evaluateAylaConversationDecision({ decision: forcedPriceMeeting, state, messages: [] }).includes("pricing_question_forced_handoff"));
 });
 
+test("quality gate prevents weak sales endings and treats an LMS preview request as a real demo request", () => {
+  const state = {
+    ...createAylaConversationState(),
+    stage: "demo_experience",
+    facts: {
+      name: "Dr Emily",
+      exam: "USMLE Step 1",
+      timeline: null,
+      main_need: "Needs an organised programme",
+      country: "Pakistan",
+      student_type: "prospective",
+    },
+    completed_actions: ["send_feature_tour"],
+    turn_count: 5,
+  };
+
+  const resendOffer = decision({
+    state,
+    stage: "demo_experience",
+    reply: "That structure is what keeps your preparation organised. Would you like me to send the demo link again?",
+    action: "reply_only",
+    ask_field: "none",
+  });
+  assert.ok(evaluateAylaConversationDecision({
+    decision: resendOffer,
+    state,
+    messages: [{ role: "student", text: "What makes the programme different?" }],
+  }).includes("unsolicited_demo_resend_offer"));
+
+  const vagueEnding = decision({
+    state,
+    stage: "demo_experience",
+    reply: "You can use live classes and labelled recordings. Feel free to reach out if you have questions.",
+    follow_up: "Your next step is to open the programme and compare the live and recorded flow,",
+    action: "reply_only",
+    ask_field: "none",
+  });
+  const endingViolations = evaluateAylaConversationDecision({ decision: vagueEnding, state, messages: [] });
+  assert.ok(endingViolations.includes("vague_handback_ending"));
+  assert.ok(endingViolations.includes("incomplete_follow_up"));
+
+  const unavailablePreview = decision({
+    state,
+    stage: "demo_experience",
+    reply: "I can't show the LMS directly, but I can explain it.",
+    action: "reply_only",
+    ask_field: "none",
+  });
+  const previewMessages = [{ role: "student", text: "Can I see the LMS before I pay?" }];
+  const previewViolations = evaluateAylaConversationDecision({ decision: unavailablePreview, state, messages: previewMessages });
+  assert.ok(previewViolations.includes("falsely_unavailable_lms_preview"));
+  assert.ok(previewViolations.includes("lms_preview_missing_demo_link"));
+
+  const preview = normalizeAylaConversationDecision({
+    ...unavailablePreview,
+    reply: "Yes—use the seven-day demo to inspect the real working LMS.",
+    action: "send_demo",
+  }, state, { messages: previewMessages, latestMessage: previewMessages.at(-1).text });
+  assert.equal(preview.action, "send_demo");
+  assert.match(preview.reply, /https:\/\/nextgenusmle\.live\/demo/);
+  assert.ok(!evaluateAylaConversationDecision({ decision: preview, state, messages: previewMessages })
+    .includes("lms_preview_missing_demo_link"));
+});
+
 test("demo, LMS, class, recording, price and discount interest never starts a premature human handoff", () => {
   const state = {
     ...createAylaConversationState(),

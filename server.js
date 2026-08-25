@@ -632,7 +632,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v300-handoff-time-readiness";
+const CRM_AYLA_REPLY_BUILD = "v301-sales-rehearsal-readiness";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
@@ -49614,7 +49614,7 @@ function ngAylaLatestInboundRequestsCountryOffer(messages = []) {
   return /\b(?:coupon|discount|promo(?:tion)?|regional (?:price|pricing|offer)|country (?:price|pricing|offer)|student offer|special offer|too expensive|cannot afford|can't afford|cant afford|budget)\b/i.test(ngMessageText(latest || {}));
 }
 
-async function ngAylaEnsureOneTimeCountryOffer({ crmDb = null, lead = {}, messages = [], state = null } = {}) {
+async function ngAylaEnsureOneTimeCountryOffer({ crmDb = null, lead = {}, messages = [], state = null, dryRun = false } = {}) {
   if (!crmDb || !lead?.id || !ngAylaConversationRequestsCountryOffer(messages)) return null;
   if (lead.country_offer_shared_at && !ngAylaLatestInboundRequestsCountryOffer(messages)) return null;
   const effectiveLead = state ? { ...lead, ayla_conversation_state: state } : lead;
@@ -49625,6 +49625,36 @@ async function ngAylaEnsureOneTimeCountryOffer({ crmDb = null, lead = {}, messag
   const exam = ngAylaOfferExamForSales(effectiveLead, messages);
   const rule = ngAylaApprovedCountryRuleForSales({ crmDb, country: confirmed.country, exam });
   if (!rule || rule.auto_issue_one_time !== true) return null;
+
+  if (dryRun) {
+    const prefix = normalizeCouponCode(rule.coupon_prefix || rule.coupon_code || rule.code || confirmed.country)
+      .replace(/[^A-Z0-9]/g, "")
+      .slice(0, 10) || "NEXTGEN";
+    const discountTypeRaw = String(rule.discount_type || "percentage").toLowerCase();
+    const discountType = ["fixed", "fixed_usd"].includes(discountTypeRaw) ? "fixed" : "percentage";
+    const discountValue = Number(discountType === "fixed"
+      ? rule.discount_amount_usd || rule.discount_amount || rule.discount_value
+      : rule.discount_percent || rule.discount_value);
+    const expiryHours = Math.max(1, Math.min(720, Number(rule.one_time_expiry_hours || 72)));
+    const expiresAt = new Date(Date.now() + expiryHours * 60 * 60 * 1000).toISOString();
+    const rehearsalOffer = ngAylaCountryOfferPublicDetails({
+      country: confirmed.country,
+      code: `${prefix}-REHEARSAL`,
+      coupon: {
+        discount_type: discountType,
+        discount_value: discountValue,
+        max_uses: 1,
+        expires_at: expiresAt,
+      },
+      rule,
+      issuance: {
+        id: "no-send-rehearsal",
+        expires_at: expiresAt,
+      },
+    });
+    if (rehearsalOffer) lead.ayla_simulated_country_offer = { ...rehearsalOffer, simulated: true, redeemable: false };
+    return lead.ayla_simulated_country_offer || null;
+  }
 
   const liveDb = await readLiveDb();
   liveDb.coupons = liveDb.coupons || {};
@@ -49793,6 +49823,11 @@ async function ngSyncCrmCountryCouponRedemption({ coupon = {}, payment = {}, enr
 
 function ngAylaApprovedCountryOfferForSales({ crmDb = null, liveDb = {}, lead = {}, messages = [] } = {}) {
   if (!crmDb) return null;
+  if (
+    String(lead?.source || "") === "admin_no_send_simulation"
+    && lead?.ayla_simulated_country_offer?.simulated === true
+    && lead?.ayla_simulated_country_offer?.redeemable === false
+  ) return lead.ayla_simulated_country_offer;
   const confirmed = ngAylaConfirmedCountryForSales(lead);
   if (!confirmed?.country) return null;
   const country = confirmed.country;
@@ -51555,7 +51590,7 @@ Write only Ayla's next message. No markdown headings. No bullet list unless the 
 // this is the only generator used by WhatsApp auto-reply call sites. Deterministic
 // code is limited to opt-out and protected handoff mutations; it no longer chooses
 // sales copy or advances the programme journey through keyword checkpoints.
-async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [], channel = "whatsapp", allowOperationalActions = false }) {
+async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [], channel = "whatsapp", allowOperationalActions = false, dryRunOperationalActions = false }) {
   const cleanMessages = safeArray(messages)
     .filter((message) => ngMessageText(message))
     .slice(-18);
@@ -51613,7 +51648,7 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
   const state = createAylaConversationState({ lead, messages: cleanMessages });
   let promptState = state;
   if (db && allowOperationalActions) {
-    await ngAylaEnsureOneTimeCountryOffer({ crmDb: db, lead, messages: cleanMessages, state });
+    await ngAylaEnsureOneTimeCountryOffer({ crmDb: db, lead, messages: cleanMessages, state, dryRun: dryRunOperationalActions });
   }
   let liveSnapshot = await ngAylaLiveLmsSalesGrounding({ structured: true, crmDb: db, lead, messages: cleanMessages });
   const historyText = cleanMessages.map((message) => ngMessageText(message)).join("\n");
@@ -51732,7 +51767,7 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
     && !liveSnapshot.country_offer
   ) {
     const provisionalState = applyAylaConversationDecision({ state, decision, responseId: result.response_id || null, now: nowIso() });
-    const issuedOffer = await ngAylaEnsureOneTimeCountryOffer({ crmDb: db, lead, messages: cleanMessages, state: provisionalState });
+    const issuedOffer = await ngAylaEnsureOneTimeCountryOffer({ crmDb: db, lead, messages: cleanMessages, state: provisionalState, dryRun: dryRunOperationalActions });
     if (issuedOffer) {
       promptState = provisionalState;
       newlyConfirmedOfferCountry = provisionalState.facts?.country || decision.memory_patch.country;
@@ -51858,6 +51893,7 @@ app.post("/admin/crm/ayla-conversation/simulate", async (req, res) => {
       agent_logs: [],
       action_logs: [],
       media_send_events: [],
+      country_offer_issuances: [],
     };
     const lead = {
       id: `ayla-simulation-${uuid()}`,
@@ -51879,7 +51915,14 @@ app.post("/admin/crm/ayla-conversation/simulate", async (req, res) => {
       };
       messages.push(inbound);
       transcript.push({ role: "student", text: turns[index] });
-      const ai = await ngGenerateStudentAutoReply({ db: simDb, lead, messages, channel: "whatsapp" });
+      const ai = await ngGenerateStudentAutoReply({
+        db: simDb,
+        lead,
+        messages,
+        channel: "whatsapp",
+        allowOperationalActions: true,
+        dryRunOperationalActions: true,
+      });
       // The simulator has no provider delivery by design. Advance only its
       // isolated in-memory state so later simulated turns see the same memory.
       lead.ayla_conversation_state = ai.conversation_state;

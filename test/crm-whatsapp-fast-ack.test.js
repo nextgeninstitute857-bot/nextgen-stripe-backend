@@ -15,7 +15,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v300-handoff-time-readiness"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v301-sales-rehearsal-readiness"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: "message_status"/);
   assert.match(handler, /event: "ignored_non_message"/);
@@ -457,6 +457,16 @@ test("country discounts require confirmation and generated codes are private, ex
   assert.match(countryOffers, /assigned_email/);
   assert.match(countryOffers, /country_offer_issuances/);
   assert.match(countryOffers, /status = "redeemed"/);
+  assert.match(countryOffers, /if \(dryRun\)/);
+  assert.match(countryOffers, /-REHEARSAL/);
+  assert.match(countryOffers, /redeemable: false/);
+  const dryRunStart = countryOffers.indexOf("if (dryRun)");
+  const liveReadStart = countryOffers.indexOf("const liveDb = await readLiveDb()", dryRunStart);
+  assert.ok(dryRunStart > 0 && liveReadStart > dryRunStart);
+  const dryRunBranch = countryOffers.slice(dryRunStart, liveReadStart);
+  assert.doesNotMatch(dryRunBranch, /readLiveDb\s*\(/);
+  assert.doesNotMatch(dryRunBranch, /writeLiveDb\s*\(/);
+  assert.doesNotMatch(dryRunBranch, /writeCrmDb\s*\(/);
   assert.match(generator, /allowOperationalActions = false/);
   assert.match(generator, /ngAylaEnsureOneTimeCountryOffer/);
   assert.match(generator, /approved_country_coupon_not_shared/);
@@ -662,6 +672,9 @@ test("admin Ayla simulation uses the real conversation engine without sending or
   assert.match(route, /await ngGenerateStudentAutoReply/);
   assert.match(route, /no_send: true/);
   assert.match(route, /persisted: false/);
+  assert.match(route, /country_offer_issuances: \[\]/);
+  assert.match(route, /allowOperationalActions: true/);
+  assert.match(route, /dryRunOperationalActions: true/);
   assert.doesNotMatch(route, /sendCrmMessage\s*\(/);
   assert.doesNotMatch(route, /writeCrmDb\s*\(/);
 });
