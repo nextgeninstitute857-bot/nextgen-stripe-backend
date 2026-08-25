@@ -1100,7 +1100,7 @@ const metaCapiAcceptedEventIds = new Map();
 function ngMetaCapiConfig() {
   return {
     token: String(process.env.META_CAPI_TOKEN || "").trim(),
-    pixelId: String(process.env.META_PIXEL_ID || "991919400268717").trim(),
+    pixelId: String(process.env.META_PIXEL_ID || "1388825176707854").trim(),
     graphVersion: String(process.env.META_GRAPH_VERSION || "v25.0").trim().replace(/^\/+|\/+$/g, "") || "v25.0",
     testEventCode: String(process.env.META_TEST_EVENT_CODE || "").trim(),
   };
@@ -92657,9 +92657,13 @@ async function ngRunAssessmentAutoReleaseTick(reason = "interval") {
 
 function ngStartAssessmentAutoReleaseScheduler() {
   if (ngAssessmentAutoReleaseTimer) return ngAssessmentAutoReleaseTimer;
+  const intervalMs = Math.max(
+    60 * 1000,
+    Number(process.env.ASSESSMENT_AUTO_RELEASE_INTERVAL_MS || 60 * 1000) || 60 * 1000,
+  );
   ngAssessmentAutoReleaseTimer = setInterval(() => {
     ngRunAssessmentAutoReleaseTick("interval").catch((error) => console.error("Assessment auto-release scheduler failed:", error.message));
-  }, 15000);
+  }, intervalMs);
   if (typeof ngAssessmentAutoReleaseTimer.unref === "function") ngAssessmentAutoReleaseTimer.unref();
   setTimeout(() => {
     ngRunAssessmentAutoReleaseTick("startup").catch((error) => console.error("Assessment startup auto-release failed:", error.message));
@@ -93686,11 +93690,11 @@ async function startNextgenServer() {
       .catch((error) => console.warn("AylaMed private pilot content activation failed:", error.message));
   }, 45_000).unref?.();
   const privatePilotReconciliationIntervalMs = Math.max(
-    5 * 60 * 1000,
+    60 * 60 * 1000,
     Math.min(
-      60 * 60 * 1000,
-      Number(process.env.AYLA_PRIVATE_PILOT_RECONCILIATION_INTERVAL_MS || 10 * 60 * 1000)
-        || 10 * 60 * 1000,
+      24 * 60 * 60 * 1000,
+      Number(process.env.AYLA_PRIVATE_PILOT_RECONCILIATION_INTERVAL_MS || 6 * 60 * 60 * 1000)
+        || 6 * 60 * 60 * 1000,
     ),
   );
   setInterval(() => {
