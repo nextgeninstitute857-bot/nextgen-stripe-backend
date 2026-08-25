@@ -350,27 +350,40 @@ test("quality gate prevents weak sales endings and treats an LMS preview request
     messages: [{ role: "student", text: "What makes the programme different?" }],
   }).includes("unsolicited_demo_resend_offer"));
 
-  const repeatedDemoLink = decision({
-    state,
-    stage: "demo_experience",
+  const repeatedDemoLink = {
+    ...decision({
+      state,
+      stage: "demo_experience",
+      reply: "Your roadmap keeps weak areas visible.",
+      action: "reply_only",
+      ask_field: "none",
+    }),
     reply: "Explore the seven-day demo again: https://nextgenusmle.live/demo",
-    action: "reply_only",
-    ask_field: "none",
-  });
+  };
   assert.ok(evaluateAylaConversationDecision({
     decision: repeatedDemoLink,
     state,
     messages: [{ role: "student", text: "How does weak-area tracking work?" }],
   }).includes("repeated_demo_link_after_feature_tour"));
 
-  const vagueEnding = decision({
-    state,
-    stage: "demo_experience",
-    reply: "You can use live classes and labelled recordings. Feel free to reach out if you have questions.",
+  const controllerCleaned = normalizeAylaConversationDecision({
+    ...repeatedDemoLink,
+    reply: "Your roadmap keeps weak areas visible. Explore the demo again: https://nextgenusmle.live/demo",
+    follow_up: "A second unnecessary message.",
+  }, state, { messages: [{ role: "student", text: "How does weak-area tracking work?" }] });
+  assert.equal(controllerCleaned.reply, "Your roadmap keeps weak areas visible.");
+  assert.equal(controllerCleaned.follow_up, null);
+
+  const vagueEnding = {
+    ...decision({
+      state,
+      stage: "demo_experience",
+      reply: "You can use live classes and labelled recordings. Feel free to reach out if you have questions.",
+      action: "reply_only",
+      ask_field: "none",
+    }),
     follow_up: "Your next step is to open the programme and compare the live and recorded flow,",
-    action: "reply_only",
-    ask_field: "none",
-  });
+  };
   const endingViolations = evaluateAylaConversationDecision({ decision: vagueEnding, state, messages: [] });
   assert.ok(endingViolations.includes("vague_handback_ending"));
   assert.ok(endingViolations.includes("incomplete_follow_up"));
