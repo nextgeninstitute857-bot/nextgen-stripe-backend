@@ -610,6 +610,7 @@ import {
 import {
   LMS_RECORDING_SYSTEM_GUARD_BUILD,
   explicitRecordingSystem,
+  preservesExplicitSystemOverride,
   reconcilePublishedRecordingSystemMismatches,
 } from "./lib/lms-recording-system-guard.js";
 import {
@@ -15807,7 +15808,13 @@ app.post("/live/recordings/publish", async (req, res) => {
     const targetSystem = explicitRecordingSystem(
       session?.system || session?.topic || session?.title || "",
     );
-    if (explicitSessionSelection && sourceSystem && targetSystem && sourceSystem !== targetSystem) {
+    const reusesReviewedAssignment = Boolean(
+      explicitSessionSelection &&
+      previousSessionId &&
+      requestedSessionId === previousSessionId &&
+      explicitRecordingSystem(previous.system || previous.topic || legacy.system || legacy.topic) === targetSystem,
+    );
+    if (explicitSessionSelection && sourceSystem && targetSystem && sourceSystem !== targetSystem && !reusesReviewedAssignment) {
       return res.status(409).json({
         success: false,
         error: `This Zoom recording is labelled ${sourceSystem}, but the selected session is ${targetSystem}. The assignment was blocked to protect students from the wrong lecture.`,
