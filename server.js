@@ -52,6 +52,13 @@ import {
   reconcileNextGenWhatsAppTemplatePack,
 } from "./lib/crm-whatsapp-template-pack.js";
 import {
+  buildNextGenAdminAlertText,
+  buildNextGenAdminAlertTemplatePayload,
+  getNextGenAdminAlertMetaTemplateDefinition,
+  NEXTGEN_ADMIN_WHATSAPP_ALERT_TEMPLATE_LANGUAGE,
+  NEXTGEN_ADMIN_WHATSAPP_ALERT_TEMPLATE_NAME,
+} from "./lib/crm-admin-whatsapp-alert-template.js";
+import {
   acceptInboundWhatsAppCall,
   extractWhatsAppCallEvents,
   mergeWhatsAppCallLog,
@@ -11721,6 +11728,7 @@ app.get("/health", async (req, res) => {
       heartbeat_last_finish_at: NG_V116_HEARTBEAT_STATE?.last_finish_at || null,
       heartbeat_has_error: Boolean(NG_V116_HEARTBEAT_STATE?.last_error),
       whatsapp_provider_block: ngWhatsAppProviderBlockStatus(),
+      admin_whatsapp_alert_template: nextgenAdminWhatsAppTemplateState,
     },
     lms_teaching_access_build: LMS_TEACHING_ACCESS_BUILD,
     lms_teaching_access: ngTeachingAccessReconciliationState,
@@ -30371,6 +30379,15 @@ app.post("/admin/crm/flows/bootstrap-default", async (req, res) => {
 
 const CRM_AUTOMATION_CRON_SECRET = process.env.CRM_AUTOMATION_CRON_SECRET || process.env.ADMIN_API_SECRET || AUTH_JWT_SECRET;
 const WHATSAPP_GRAPH_VERSION = process.env.WHATSAPP_GRAPH_VERSION || process.env.WHATSAPP_GRAPH_API_VERSION || process.env.META_GRAPH_API_VERSION || "v26.0";
+const NEXTGEN_WHATSAPP_BUSINESS_ACCOUNT_ID = "916985444290332";
+const NEXTGEN_ADMIN_WHATSAPP_TEMPLATE_REFRESH_MS = 5 * 60 * 1000;
+let nextgenAdminWhatsAppTemplateState = {
+  name: NEXTGEN_ADMIN_WHATSAPP_ALERT_TEMPLATE_NAME,
+  status: "not_checked",
+  checked_at: null,
+  submitted_at: null,
+  error: null,
+};
 
 function normalizeAutomationChannel(value = "whatsapp") {
   const clean = String(value || "whatsapp").trim().toLowerCase().replace(/[^a-z0-9_]+/g, "_");
@@ -33508,6 +33525,7 @@ function getWhatsAppBusinessAccountIdCandidates(db = {}) {
     integration.credentials?.asset_id,
     integration.business_account_id,
     integration.credentials?.business_account_id,
+    NEXTGEN_WHATSAPP_BUSINESS_ACCOUNT_ID,
   ].map((value) => String(value || "").trim()).filter((value, index, all) => value && all.indexOf(value) === index);
 }
 
@@ -33556,6 +33574,115 @@ async function fetchLiveMetaWhatsAppTemplates(db = {}) {
   error.metaSubcode = metaError.error_subcode || null;
   throw error;
 }
+
+function ngSetAdminWhatsAppTemplateState(patch = {}) {
+  nextgenAdminWhatsAppTemplateState = {
+    ...nextgenAdminWhatsAppTemplateState,
+    ...patch,
+    name: NEXTGEN_ADMIN_WHATSAPP_ALERT_TEMPLATE_NAME,
+    checked_at: new Date().toISOString(),
+  };
+  return nextgenAdminWhatsAppTemplateState;
+}
+
+async function ensureNextGenAdminWhatsAppTemplateInMeta(db = {}, { force = false } = {}) {
+  const checkedAtMs = Date.parse(nextgenAdminWhatsAppTemplateState.checked_at || "") || 0;
+  const isFresh = checkedAtMs > 0 && Date.now() - checkedAtMs < NEXTGEN_ADMIN_WHATSAPP_TEMPLATE_REFRESH_MS;
+  if (!force && isFresh && !["not_checked", "failed"].includes(nextgenAdminWhatsAppTemplateState.status)) {
+    return nextgenAdminWhatsAppTemplateState;
+  }
+
+  try {
+    const liveTemplates = await fetchLiveMetaWhatsAppTemplates(db);
+    const existing = liveTemplates.find((item) => (
+      String(item?.name || "").trim().toLowerCase() === NEXTGEN_ADMIN_WHATSAPP_ALERT_TEMPLATE_NAME
+      && String(item?.language || "").trim().toLowerCase() === NEXTGEN_ADMIN_WHATSAPP_ALERT_TEMPLATE_LANGUAGE.toLowerCase()
+    ));
+    if (existing) {
+      const metaStatus = String(existing.status || "UNKNOWN").trim().toUpperCase();
+      return ngSetAdminWhatsAppTemplateState({
+        status: metaStatus.toLowerCase(),
+        meta_status: metaStatus,
+        template_id: existing.id || null,
+        category: existing.category || "UTILITY",
+        submitted_at: nextgenAdminWhatsAppTemplateState.submitted_at,
+        error: null,
+      });
+    }
+
+    const { token } = await resolveWhatsAppCloudConfig({ db });
+    const businessAccountIds = getWhatsAppBusinessAccountIdCandidates(db);
+    const definition = getNextGenAdminAlertMetaTemplateDefinition();
+    let lastError = null;
+    for (const businessAccountId of businessAccountIds) {
+      try {
+        const response = await axios.post(
+          `https://graph.facebook.com/${WHATSAPP_GRAPH_VERSION}/${encodeURIComponent(businessAccountId)}/message_templates`,
+          definition,
+          {
+            headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+            timeout: 30000,
+          },
+        );
+        return ngSetAdminWhatsAppTemplateState({
+          status: "submitted",
+          meta_status: String(response.data?.status || "PENDING").toUpperCase(),
+          template_id: response.data?.id || null,
+          category: definition.category,
+          business_account_id: businessAccountId,
+          submitted_at: new Date().toISOString(),
+          error: null,
+        });
+      } catch (error) {
+        lastError = error;
+        const message = String(error.response?.data?.error?.message || error.message || "");
+        if (/already exists|duplicate/i.test(message)) {
+          const refreshed = await fetchLiveMetaWhatsAppTemplates(db);
+          const duplicate = refreshed.find((item) => String(item?.name || "").trim().toLowerCase() === NEXTGEN_ADMIN_WHATSAPP_ALERT_TEMPLATE_NAME);
+          if (duplicate) {
+            const metaStatus = String(duplicate.status || "UNKNOWN").trim().toUpperCase();
+            return ngSetAdminWhatsAppTemplateState({
+              status: metaStatus.toLowerCase(),
+              meta_status: metaStatus,
+              template_id: duplicate.id || null,
+              category: duplicate.category || definition.category,
+              business_account_id: businessAccountId,
+              error: null,
+            });
+          }
+        }
+        if (![400, 404].includes(Number(error.response?.status || 0))) throw error;
+      }
+    }
+
+    const metaError = lastError?.response?.data?.error || {};
+    const error = new Error(metaError.message || lastError?.message || "Meta rejected the admin alert template submission.");
+    error.statusCode = Number(lastError?.response?.status || 502);
+    throw error;
+  } catch (error) {
+    ngSetAdminWhatsAppTemplateState({
+      status: "failed",
+      meta_status: null,
+      error: String(error.response?.data?.error?.message || error.message || "Template sync failed").slice(0, 500),
+    });
+    throw error;
+  }
+}
+
+app.post("/admin/crm/message-templates/admin-alert/sync-meta", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const template = await ensureNextGenAdminWhatsAppTemplateInMeta(db, { force: true });
+    res.json({ success: true, template });
+  } catch (error) {
+    res.status(error.statusCode || error.response?.status || 500).json({
+      success: false,
+      error: error.response?.data?.error?.message || error.message,
+      template: nextgenAdminWhatsAppTemplateState,
+    });
+  }
+});
 
 app.get("/admin/crm/message-templates/meta-live", async (req, res) => {
   try {
@@ -63423,6 +63550,58 @@ function ngAylaAdminAlertPhoneKey(value = "") {
   return d.length >= 10 ? d.slice(-10) : d;
 }
 
+function ngAylaAdminAlertTemplateLabel(type = "") {
+  const clean = String(type || "").toLowerCase();
+  if (clean === "google_meet_time_collected") return "Meeting time collected";
+  if (clean === "google_meet_requested") return "Student requested Google Meet guidance";
+  if (clean === "pricing_interest") return "Student asked about pricing";
+  if (clean === "product_interest") return "Student wants a NextGen resource";
+  if (clean === "test_alert") return "Admin alert test";
+  return "Hot lead needs follow-up";
+}
+
+function ngAylaAdminAlertTemplateNextStep(type = "") {
+  const clean = String(type || "").toLowerCase();
+  if (clean === "google_meet_time_collected") return "Confirm the meeting and add or verify the Google Meet link in the CRM.";
+  if (clean === "google_meet_requested") return "Open the CRM and arrange the requested Google Meet conversation.";
+  if (clean === "pricing_interest") return "Open the CRM and follow up using only active LMS prices and an approved country offer.";
+  if (clean === "product_interest") return "Open the CRM and help the student choose the correct live-class, recording or QBank option.";
+  if (clean === "test_alert") return "No action is needed. This confirms that admin WhatsApp alerts are working.";
+  return "Open the CRM and continue personally without asking the student to repeat information.";
+}
+
+function ngAylaAdminAlertTemplatePayload({ type = "alert", lead = null, appointment = null, text = "", messages = [] } = {}) {
+  const handoff = ngAylaHumanHandoffContext(lead || {}, messages);
+  const leadName = handoff.student_name || ng41LeadName(lead || {}) || appointment?.student_name || "Student";
+  const leadPhone = ng41LeadPhone(lead || {}) || appointment?.student_phone || appointment?.phone || "";
+  const leadEmail = handoff.email || ng41LeadEmail(lead || {}) || appointment?.student_email || appointment?.email || "";
+  const country = appointment?.student_country || handoff.country || "";
+  const exam = appointment?.exam_type || handoff.exam || ng41LeadExamType(lead || {}) || "";
+  const latestInboundText = ngMessageText(ngLatestInbound(messages) || {}).trim();
+  const interests = ngAylaProductInterestLabels({ lead: lead || {}, latestInboundText, messages });
+  const coverage = ngAylaReadableAlertCoverage(handoff.coverage);
+  const appointmentTime = appointment ? ngGoogleMeetAppointmentDisplayDateTime(appointment, "EST") : "";
+  const isTest = String(type || "").toLowerCase() === "test_alert";
+
+  const values = {
+    templateName: process.env.NEXTGEN_ADMIN_WHATSAPP_ALERT_TEMPLATE_NAME || NEXTGEN_ADMIN_WHATSAPP_ALERT_TEMPLATE_NAME,
+    languageCode: process.env.NEXTGEN_ADMIN_WHATSAPP_ALERT_TEMPLATE_LANGUAGE || NEXTGEN_ADMIN_WHATSAPP_ALERT_TEMPLATE_LANGUAGE,
+    alertLabel: ngAylaAdminAlertTemplateLabel(type),
+    studentName: isTest ? "Test student — no real student data" : leadName,
+    contactLabel: isTest ? "Test only" : [leadPhone, leadEmail].filter(Boolean).join(" · ") || "Not provided",
+    examCountryLabel: [exam, country].filter(Boolean).join(" · ") || "Not provided",
+    interestsLabel: isTest ? "Admin alert delivery test" : interests.join(" + ") || handoff.concern || "Not provided",
+    latestMessage: isTest ? "This is a delivery test; no student data is included." : latestInboundText || "No recent message was available.",
+    coverageLabel: isTest ? "Template delivery path" : coverage.join("; ") || "Not provided",
+    meetingTime: appointmentTime || "Not scheduled",
+    nextStep: ngAylaAdminAlertTemplateNextStep(type),
+  };
+  return {
+    ...buildNextGenAdminAlertTemplatePayload(values),
+    fallbackText: buildNextGenAdminAlertText(values),
+  };
+}
+
 async function ngSendAdminWhatsAppAlert(db = {}, { type = "alert", lead = null, appointment = null, text = "", meta = {} } = {}) {
   const s = ngAylaPickSettings(db);
   if (s.admin_whatsapp_alerts_enabled === false) return { enabled: false, sent: 0, results: [] };
@@ -63435,29 +63614,56 @@ async function ngSendAdminWhatsAppAlert(db = {}, { type = "alert", lead = null, 
   });
   if (!rawNumbers.length) return { enabled: true, sent: 0, skipped: true, reason: "no_admin_whatsapp_numbers", results: [] };
   if (!numbers.length) return { enabled: true, sent: 0, skipped: true, reason: "admin_number_is_same_as_lead_number", results: [] };
-  const leadName = ng41LeadName(lead || {}) || appointment?.student_name || "Student";
-  const appointmentTime = appointment ? ngGoogleMeetAppointmentDisplayDateTime(appointment, "EST") : "";
   const leadMessages = lead?.id ? ngLeadConversationMessages(db, lead.id) : [];
-  const latestInboundText = ngMessageText(ngLatestInbound(leadMessages) || {}).trim();
-  const interests = ngAylaProductInterestLabels({ lead: lead || {}, latestInboundText, messages: leadMessages });
-  const body = text || [
-    appointment ? "📅 NextGen meeting update" : "🔔 NextGen student update",
-    "",
-    `👤 ${leadName}`,
-    leadPhone ? `📱 ${leadPhone}` : "",
-    appointmentTime ? `🕐 ${appointmentTime}` : "",
-    interests.length ? `🎯 Interested in: ${interests.join(", ")}` : "",
-    latestInboundText ? `💬 Latest message: “${latestInboundText.slice(0, 320)}”` : "",
-    "",
-    "➡️ Please continue personally from here. The student should not need to repeat anything.",
-  ].filter((line) => line !== "").join("\n");
+  const templatePayload = ngAylaAdminAlertTemplatePayload({ type, lead, appointment, text, messages: leadMessages });
+  let templateState = nextgenAdminWhatsAppTemplateState;
+  try {
+    templateState = await ensureNextGenAdminWhatsAppTemplateInMeta(db);
+  } catch (error) {
+    console.warn("NextGen admin WhatsApp template check failed; preserving free-form fallback:", error.message);
+  }
+  const templateIsApproved = ["approved", "active"].includes(String(templateState?.status || templateState?.meta_status || "").toLowerCase());
   const results = [];
   for (const to of numbers) {
     try {
-      const raw = await sendWhatsAppCloudMessage({ to, text: body });
-      results.push({ to, success: true, raw });
+      let raw;
+      let deliveryMode = "freeform_fallback";
+      if (templateIsApproved) {
+        try {
+          raw = await sendWhatsAppCloudMessage({
+            to,
+            templateName: templatePayload.templateName,
+            languageCode: templatePayload.languageCode,
+            components: templatePayload.components,
+            db,
+          });
+          deliveryMode = "template";
+        } catch (templateError) {
+          raw = await sendWhatsAppCloudMessage({ to, text: templatePayload.fallbackText, db });
+          deliveryMode = "freeform_fallback_after_template_error";
+          raw = { fallback: raw, template_error: templateError.response?.data || templateError.message };
+        }
+      } else {
+        raw = await sendWhatsAppCloudMessage({ to, text: templatePayload.fallbackText, db });
+      }
+      results.push({
+        to,
+        success: true,
+        delivery_mode: deliveryMode,
+        template_name: templatePayload.templateName,
+        template_status: templateState?.status || "unknown",
+        raw,
+      });
     } catch (error) {
-      results.push({ to, success: false, error: error.message, provider_response: error.response?.data || null });
+      results.push({
+        to,
+        success: false,
+        delivery_mode: templateIsApproved ? "template_and_fallback_failed" : "freeform_fallback",
+        template_name: templatePayload.templateName,
+        template_status: templateState?.status || "unknown",
+        error: error.message,
+        provider_response: error.response?.data || null,
+      });
     }
   }
   ensureCrmArray(db, "marketing_flow_events").push(withTimestamps({
@@ -63465,7 +63671,7 @@ async function ngSendAdminWhatsAppAlert(db = {}, { type = "alert", lead = null, 
     lead_id: lead?.id || appointment?.lead_id || null,
     channel: "whatsapp",
     status: results.some((r) => r.success) ? "sent" : "failed",
-    message: body,
+    message: templatePayload.fallbackText,
     metadata: { type, appointment_id: appointment?.id || null, dedupe_key: meta?.dedupe_key || null, meta, results },
   }));
   return { enabled: true, sent: results.filter((r) => r.success).length, results };
@@ -93878,6 +94084,12 @@ async function startNextgenServer() {
     .then((result) => console.log("LMS known MSK transcript-notes catch-up:", result))
     .catch((error) => console.error("LMS known MSK transcript-notes catch-up failed:", error.message));
   ngV116StartBackendHeartbeat();
+  setTimeout(() => {
+    readCrmDb()
+      .then((crmDb) => ensureNextGenAdminWhatsAppTemplateInMeta(crmDb, { force: true }))
+      .then((result) => console.log("NextGen admin WhatsApp alert template:", result))
+      .catch((error) => console.warn("NextGen admin WhatsApp alert template sync failed; free-form fallback remains active:", error.message));
+  }, 5_000).unref?.();
   setTimeout(() => {
     ngDrainWhatsAppWebhookJournal({ limit: 500 })
       .then((result) => console.log("WhatsApp webhook journal recovery:", result))
