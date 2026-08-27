@@ -24371,6 +24371,25 @@ function ngUpsertMetaAdsSnapshot(db, snapshot, brandId) {
     });
   }
 
+  for (const lead of ensureCrmArray(db, "leads")) {
+    const metaAdId = String(lead.meta_ad_id || "").trim();
+    if (!metaAdId) continue;
+    const creative = ensureCrmArray(db, "ad_creatives").find((item) => (
+      String(item.meta_ad_id || item.provider_ad_id || "") === metaAdId
+    ));
+    if (!creative) continue;
+    const campaign = ensureCrmArray(db, "ad_campaigns").find((item) => (
+      String(item.id || "") === String(creative.ad_campaign_id || creative.campaign_id || "")
+      || String(item.meta_campaign_id || item.provider_campaign_id || "") === String(creative.meta_campaign_id || "")
+    ));
+    lead.meta_ad_name = creative.name || creative.ad_name || lead.meta_ad_name || "";
+    lead.meta_campaign_id = campaign?.meta_campaign_id || creative.meta_campaign_id || lead.meta_campaign_id || null;
+    lead.campaign_id = campaign?.id || creative.ad_campaign_id || creative.campaign_id || lead.campaign_id || null;
+    lead.campaign_name = campaign?.name || campaign?.campaign_name || lead.campaign_name || "";
+    lead.meta_attribution_synced_at = snapshot.synced_at || nowIso();
+    lead.updated_at = nowIso();
+  }
+
   db.meta_ads_last_sync = {
     status: "success",
     synced_at: snapshot.synced_at || nowIso(),
@@ -35002,6 +35021,32 @@ app.get("/webhooks/whatsapp", (req, res) => {
   return res.sendStatus(403);
 });
 
+function ngApplyClickToWhatsAppAttribution(db, lead, message = {}) {
+  if (!lead) return {};
+  const attribution = extractClickToWhatsAppAttribution({ message });
+  if (!attribution.meta_ctwa_clid && !attribution.meta_ad_id) return {};
+
+  const creative = ensureCrmArray(db, "ad_creatives").find((item) => (
+    String(item.meta_ad_id || item.provider_ad_id || "") === String(attribution.meta_ad_id || "")
+  ));
+  const campaign = creative
+    ? ensureCrmArray(db, "ad_campaigns").find((item) => (
+      String(item.id || "") === String(creative.ad_campaign_id || creative.campaign_id || "")
+      || String(item.meta_campaign_id || item.provider_campaign_id || "") === String(creative.meta_campaign_id || "")
+    ))
+    : null;
+
+  Object.assign(lead, attribution, {
+    meta_campaign_id: campaign?.meta_campaign_id || creative?.meta_campaign_id || lead.meta_campaign_id || null,
+    campaign_id: campaign?.id || creative?.ad_campaign_id || creative?.campaign_id || lead.campaign_id || null,
+    campaign_name: campaign?.name || campaign?.campaign_name || lead.campaign_name || "",
+    meta_ad_name: creative?.name || creative?.ad_name || lead.meta_ad_name || "",
+    meta_attributed_at: lead.meta_attributed_at || nowIso(),
+    updated_at: nowIso(),
+  });
+  return attribution;
+}
+
 app.post("/webhooks/whatsapp", async (req, res) => {
   try {
     const db = await readCrmDb();
@@ -35019,6 +35064,7 @@ app.post("/webhooks/whatsapp", async (req, res) => {
           const contact = contacts.find((item) => normalizePhoneForWhatsapp(item.wa_id) === from) || contacts[0] || {};
           const text = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || "";
           const whatsappProfileName = normalizeCrmString(contact.profile?.name || "");
+          const paidAttribution = extractClickToWhatsAppAttribution({ message });
           let lead = findLeadByPhoneOrEmail(db, { phone: from, waId: contact.wa_id });
           if (!lead && from) {
             lead = withTimestamps({
@@ -35034,9 +35080,11 @@ app.post("/webhooks/whatsapp", async (req, res) => {
               source_platform: "whatsapp",
               status: "new",
               conversation_direction: "inbound",
+              ...paidAttribution,
             });
             ensureCrmArray(db, "leads").push(lead);
           }
+          if (lead) ngApplyClickToWhatsAppAttribution(db, lead, message);
           if (lead && whatsappProfileName) {
             lead.whatsapp_profile_name = whatsappProfileName;
             const currentLeadName = normalizeCrmString(lead.full_name || lead.name || lead.contact_name || "");
@@ -35056,6 +35104,7 @@ app.post("/webhooks/whatsapp", async (req, res) => {
             text,
             provider_message_id: message.id || null,
             provider_response: message,
+            ...paidAttribution,
             status: "received",
             received_at: nowIso(),
           }));
@@ -35070,6 +35119,7 @@ app.post("/webhooks/whatsapp", async (req, res) => {
             to: value.metadata?.display_phone_number || value.metadata?.phone_number_id || "",
             text,
             provider_message_id: message.id || null,
+            ...paidAttribution,
             status: "received",
             received_at: nowIso(),
           }));
