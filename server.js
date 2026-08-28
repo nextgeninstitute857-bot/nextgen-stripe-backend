@@ -43,6 +43,8 @@ import {
 import { recordAylaPaymentFollowup, aylaPaymentFollowupEligibility } from "./lib/crm-conversation-followup.js";
 import { experienceWaitHours, experienceDeliveryAccepted, experienceResourcesFromDelivery, recordExperienceShares, recordExperienceResponse, acknowledgeExperienceConversation, experienceFollowupEligibility, buildExperienceCheckinPrompt } from "./lib/crm-experience-followup.js";
 import { runExperienceCheckin } from "./lib/crm-experience-scheduler.js";
+import { updateDemoAccess } from "./lib/demo-admin.js";
+import { ensureDemoInvitation, findDemoInvitation, trackDemoLinks, recordDemoInvitationSent, recordDemoInvitationOpened, recordDemoActivation, demoAttributionForEnrollment } from "./lib/crm-demo-attribution.js";
 import {
   fetchWhatsAppBusinessProfile,
   fetchWhatsAppPhoneIdentity,
@@ -13505,6 +13507,37 @@ app.post("/coupons/validate", async (req, res) => {
 // Admin Enrollments + Payments
 // -----------------------------------------------------------------------------
 
+// Demo administration uses the same canonical LMS records as Enrollments.
+// It must never convert a trial into paid access or touch a separate paid row.
+app.get("/admin/demo-enrollments", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    const crmDb = await readCrmDbSnapshotOnly().catch(() => null);
+    const enrollments = Object.values(db.enrollments || {})
+      .filter((row) => row.is_demo === true)
+      .map((row) => ({ ...sanitizeAdminEnrollment(row, db), demo_attribution: crmDb ? demoAttributionForEnrollment(crmDb, row.id) : null }))
+      .sort(sortNewestFirst);
+    res.json({ success: true, demo_enrollments: enrollments, count: enrollments.length, attribution_available: Boolean(crmDb) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Could not load demo enrollments" });
+  }
+});
+
+app.patch("/admin/demo-enrollments/:enrollmentId", async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const db = await readLiveDb();
+    const enrollment = findEnrollmentById(db, req.params.enrollmentId);
+    if (!enrollment) return res.status(404).json({ success: false, error: "Demo enrollment not found" });
+    updateDemoAccess(enrollment, req.body || {});
+    await writeLiveDb(db);
+    res.json({ success: true, enrollment: sanitizeAdminEnrollment(enrollment, db) });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message || "Could not update demo access" });
+  }
+});
+
 app.get("/admin/enrollments", async (req, res) => {
   try {
     await requireAdmin(req);
@@ -14783,11 +14816,29 @@ function buildStudentDemoStatus(db, user) {
   };
 }
 
+// No student information is returned by this public, attribution-only endpoint.
+// A page open is explicitly not an enrollment or proof that a person watched.
+app.post("/demo/invitation-opened", async (req, res) => {
+  try {
+    assertWebsiteProductRequest({ origin: req.get("origin") || "", product: "lms" });
+    const token = String(req.body?.ayla_invite || "");
+    if (!/^[A-Za-z0-9_-]{32}$/.test(token)) return res.sendStatus(204);
+    const match = findDemoInvitation(await readCrmDbSnapshotOnly(), token);
+    if (!match || match.invite.opened_at) return res.sendStatus(204);
+    await mutateCrmDb((crmDb) => { recordDemoInvitationOpened(crmDb, token); });
+    res.sendStatus(204);
+  } catch (error) {
+    res.status(error.statusCode || 503).json({ success: false, error: "Invitation tracking unavailable" });
+  }
+});
+
 app.post("/demo/start", async (req, res) => {
   try {
+    assertWebsiteProductRequest({ origin: req.get("origin") || "", product: "lms" });
     const { user } = await getAuthenticatedUser(req);
     const db = await readLiveDb();
     const settings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
+    const hadDemoBefore = Object.values(db.enrollments || {}).some((row) => row.is_demo === true && String(row.user_id) === String(user.id));
 
     if (!settings.enabled) {
       return res.status(403).json({ success: false, error: "Demo access is disabled" });
@@ -14894,6 +14945,19 @@ app.post("/demo/start", async (req, res) => {
     await writeLiveDb(db);
 
     const status = buildStudentDemoStatus(db, user);
+    let demoAttribution = { status: "unattributed" };
+    if (/^[A-Za-z0-9_-]{32}$/.test(String(req.body?.ayla_invite || ""))) {
+      try {
+        // Only after the real LMS save succeeds. CRM outages cannot revoke or
+        // block access; never count the browser click or a self-report here.
+        demoAttribution = await mutateCrmDb((crmDb) => recordDemoActivation({
+          db: crmDb, token: String(req.body.ayla_invite), user, enrollments, hadDemoBefore,
+        }));
+      } catch (error) {
+        console.warn("Demo activation attribution could not be saved:", error.message);
+        demoAttribution = { status: "unavailable" };
+      }
+    }
 
     res.json({
       success: true,
@@ -14910,6 +14974,9 @@ app.post("/demo/start", async (req, res) => {
       demo_expiry: status.demo_expiry || demoExpiry,
       demo_status: status,
       transactional_email: demoEmail,
+      // No CRM identity or campaign data is exposed to the public student.
+      attribution_status: demoAttribution.status,
+      new_demo_student: createdCount > 0 && !hadDemoBefore,
       source: "backend",
       message: allCoursesRequested
         ? "Demo access granted for all active demo-enabled courses"
@@ -32461,7 +32528,7 @@ async function sendCrmMessage({
   });
   const variables = { ...(templateVariables || {}), lead: lead || templateVariables?.lead || {} };
   const finalSubject = renderTemplateString(subject || template?.subject || "", variables) || "NextGen USMLE";
-  const finalText = renderTemplateString(text || template?.body || template?.message || "", variables);
+  let finalText = renderTemplateString(text || template?.body || template?.message || "", variables);
   const finalTo = getBestRecipientForChannel({ channel: cleanChannel, to, lead });
   const integration = getIntegrationByPlatform(db, cleanChannel) || { id: null, platform: cleanChannel, brand_id: brandId };
   const resolvedWhatsAppTemplateName = cleanChannel === "whatsapp" && !forceFreeformAiAuto ? getWhatsAppTemplateName({ template, metadata }) : "";
@@ -32472,7 +32539,15 @@ async function sendCrmMessage({
   const resolvedMediaUrl = normalizeCrmString(mediaUrl || metadata.media_url || metadata.mediaUrl || metadata.image_url || metadata.imageUrl || metadata.public_url || "");
   const resolvedMediaId = normalizeCrmString(mediaId || metadata.media_id || metadata.mediaId || metadata.whatsapp_media_id || "");
   const resolvedMediaType = normalizeCrmLower(mediaType || metadata.media_type || metadata.mediaType || (resolvedMediaUrl || resolvedMediaId ? "image" : ""), "");
-  const resolvedCaption = normalizeCrmString(caption || metadata.caption || finalText || "");
+  let resolvedCaption = normalizeCrmString(caption || metadata.caption || finalText || "");
+  // Keep the AI's words, only personalise actual NextGen demo URLs. Static
+  // Meta template buttons remain unchanged and are not falsely marked tracked.
+  let demoInvite = null;
+  if (lead && !resolvedWhatsAppTemplateName && /https:\/\/nextgenusmle\.live\/(?:try-demo|demo)\b/i.test(`${finalText}\n${resolvedCaption}`)) {
+    demoInvite = ensureDemoInvitation(lead);
+    finalText = trackDemoLinks(finalText, demoInvite);
+    resolvedCaption = trackDemoLinks(resolvedCaption, demoInvite);
+  }
 
   const baseLog = {
     brand_id: brandId,
@@ -32645,6 +32720,14 @@ async function sendCrmMessage({
         const sentNow = nowIso();
         lead.last_contacted_at = sentNow;
         lead.last_outbound_sent_at = sentNow;
+        if (demoInvite && providerMessageId) {
+          try {
+            const deliveredText = cleanChannel === "whatsapp" && (resolvedMediaUrl || resolvedMediaId) ? resolvedCaption : finalText;
+            recordDemoInvitationSent({ lead, invite: demoInvite, text: deliveredText, channel: cleanChannel, providerMessageId, sentBy: forceFreeformAiAuto ? "ayla" : "team", now: sentNow });
+          } catch (error) {
+            console.warn("Demo invitation tracking failed after accepted delivery:", error.message);
+          }
+        }
       }
       if (cleanChannel === "whatsapp" && !providerResponse?.manual_first) {
         ngUpdateLeadWhatsAppSendStatus(lead, { success: true, quick_action: metadata?.quick_action || metadata?.source || "message" });
