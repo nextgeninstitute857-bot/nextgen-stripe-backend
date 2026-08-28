@@ -27,6 +27,8 @@ import {
   fetchMetaAdsSnapshot,
   metaAdsReadiness,
 } from "./lib/crm-meta-ads.js";
+import { createMetaReportingRunner, metaReportingStatus, prepareMetaDailyLedger, saveMetaPerformanceSnapshot } from "./lib/crm-meta-ads-reporting.js";
+import { experienceQueueRows, experienceTemplateProposal } from "./lib/crm-experience-reporting.js";
 import {
   aylaExplicitHumanHandoffRequest,
   aylaPendingStudentText,
@@ -20906,6 +20908,9 @@ const DEFAULT_CRM_DB = {
   ad_creatives: [],
   ad_performance_logs: [],
   meta_ads_last_sync: null,
+  meta_ads_sync_state: null,
+  meta_ads_performance: null,
+  meta_ads_rollup_archive: [],
   ad_ai_recommendations: [],
   ad_ai_actions: [],
   brand_snapshots: [],
@@ -24429,12 +24434,14 @@ function ngUpsertMetaAdsSnapshot(db, snapshot, brandId) {
     });
   }
 
-  for (const insight of safeArray(snapshot.insights)) {
+  prepareMetaDailyLedger(db, snapshot, brandId);
+  for (const insight of safeArray(snapshot.daily_insights)) {
     const insightKey = [insight.meta_campaign_id, insight.date_start, insight.date_stop].map((value) => String(value || "")).join(":");
     ngUpsertMetaAdsRecord(db, {
       collection: "ad_performance_logs",
       brandId,
-      match: (item) => [item.meta_campaign_id, item.date_start, item.date_stop].map((value) => String(value || "")).join(":") === insightKey,
+      match: (item) => item.source === "meta_live" && String(item.meta_account_id) === String(insight.meta_account_id) && (!item.brand_id || item.brand_id === brandId)
+        && [item.meta_campaign_id, item.date_start, item.date_stop].map((value) => String(value || "")).join(":") === insightKey,
       payload: {
         ...insight,
         ad_campaign_id: campaignIds.get(String(insight.meta_campaign_id || "")) || null,
@@ -24462,6 +24469,7 @@ function ngUpsertMetaAdsSnapshot(db, snapshot, brandId) {
     lead.updated_at = nowIso();
   }
 
+  saveMetaPerformanceSnapshot(db, snapshot, brandId);
   db.meta_ads_last_sync = {
     status: "success",
     synced_at: snapshot.synced_at || nowIso(),
@@ -24471,9 +24479,23 @@ function ngUpsertMetaAdsSnapshot(db, snapshot, brandId) {
     ad_sets: safeArray(snapshot.ad_sets).length,
     creatives: safeArray(snapshot.creatives).length,
     insights: safeArray(snapshot.insights).length,
+    ad_insights: safeArray(snapshot.ad_insights).length,
+    daily_insights: safeArray(snapshot.daily_insights).length,
   };
 
   return db.meta_ads_last_sync;
+}
+
+const ngRunMetaReporting = createMetaReportingRunner({
+  read: readCrmDb, mutate: mutateCrmDb,
+  fetchSnapshot: ({ datePreset }) => fetchMetaAdsSnapshot({ axiosClient: axios, env: process.env, datePreset }),
+  applySnapshot: (db, snapshot) => ngUpsertMetaAdsSnapshot(db, snapshot, db.brands?.find((brand) => brand.domain === "nextgenusmle.live")?.id || "brand_nextgen_usmle"),
+});
+
+function ngStartMetaReporting() {
+  const tick = () => ngRunMetaReporting().catch(() => console.warn("Meta reporting worker could not save its status; next tick will retry."));
+  setTimeout(tick, 30_000).unref?.();
+  setInterval(tick, 60_000).unref?.();
 }
 
 app.get("/admin/crm/meta-ads/readiness", async (req, res) => {
@@ -24485,6 +24507,8 @@ app.get("/admin/crm/meta-ads/readiness", async (req, res) => {
       success: true,
       readiness,
       last_sync: db.meta_ads_last_sync || null,
+      automation: metaReportingStatus(db),
+      performance: db.meta_ads_performance?.brand_id === getCrmBrandId(req, db) ? db.meta_ads_performance : null,
       live_records: {
         accounts: ensureCrmArray(db, "ad_accounts").filter((item) => item.source === "meta_live").length,
         campaigns: ensureCrmArray(db, "ad_campaigns").filter((item) => item.source === "meta_live").length,
@@ -24503,20 +24527,13 @@ app.post("/admin/crm/meta-ads/sync", async (req, res) => {
     const allowedDatePresets = new Set(["today", "yesterday", "last_7d", "last_14d", "last_30d", "this_month", "last_month", "maximum"]);
     const requestedDatePreset = normalizeCrmString(req.body?.date_preset || "last_30d").toLowerCase();
     const datePreset = allowedDatePresets.has(requestedDatePreset) ? requestedDatePreset : "last_30d";
-    const db = await readCrmDb();
-    const brandId = getCrmBrandId(req, db);
-    const snapshot = await fetchMetaAdsSnapshot({ axiosClient: axios, env: process.env, datePreset });
-    const sync = ngUpsertMetaAdsSnapshot(db, snapshot, brandId);
-    await writeCrmDb(db);
-    res.json({ success: true, sync });
+    const result = await ngRunMetaReporting({ force: true, datePreset });
+    if (result.skipped) return res.status(409).json({ success: false, error: result.reason === "not_configured" ? "Connect the read-only Meta token and ad account first." : "A reporting refresh is already in progress. Please check again shortly." });
+    res.status(result.success ? 200 : 502).json(result);
   } catch (error) {
-    const metaError = error?.response?.data?.error;
-    const safeMessage = normalizeCrmString(metaError?.message || error.message || "Meta Ads sync failed");
-    res.status(error.statusCode || error?.response?.status || 500).json({
+    res.status(error.statusCode || 500).json({
       success: false,
-      error: safeMessage,
-      meta_code: metaError?.code || null,
-      meta_subcode: metaError?.error_subcode || null,
+      error: "Meta reporting could not refresh. Previous figures are retained.",
     });
   }
 });
@@ -71546,14 +71563,15 @@ app.get("/admin/crm/automation/experience-followups", async (req, res) => {
     await requireCrmAdmin(req);
     const db = await readCrmDb();
     const brandId = getCrmBrandId(req, db);
-    const rows = ngAffArray(db, "leads").filter((lead) => (!brandId || String(lead.brand_id || "") === String(brandId)) && safeArray(lead.ayla_experience_followups).length)
-      .slice(0, 100).map((lead) => {
-        const context = ngExperienceContext(db, lead.id);
-        const check = context.blocked ? { ok: false, reason: context.blocked } : experienceFollowupEligibility(context);
-        return { lead_id: lead.id, name: lead.name || lead.full_name || "", eligible: check.ok, reason: check.reason, experiences: lead.ayla_experience_followups };
-      });
+    const leads = filterCrmRecords(req, ngAffArray(db, "leads"), brandId).filter((lead) => safeArray(lead.ayla_experience_followups).length);
+    const offset = Math.max(0, Number.parseInt(req.query.offset, 10) || 0);
+    const blocked = !ngV116HeartbeatEnabled() ? "heartbeat_disabled" : ngWhatsAppProviderBlockStatus().blocked ? "provider_blocked" : !isAIConfigured() ? "ai_unavailable" : null;
+    const rows = experienceQueueRows({ leads: leads.slice(offset, offset + 100), logs: ngAffArray(db, "message_logs"),
+      context: (leadId) => ngExperienceContext(db, leadId), eligibility: experienceFollowupEligibility, blocked });
     const settings = ngAylaPickSettings(db);
-    return res.json({ success: true, enabled: ngExperienceFollowupsEnabled(settings), wait_hours: experienceWaitHours(settings.experience_followup_wait_hours || process.env.NEXTGEN_EXPERIENCE_FOLLOWUP_WAIT_HOURS), outside_window: "approved_experience_template_required", rows });
+    return res.json({ success: true, enabled: ngExperienceFollowupsEnabled(settings), wait_hours: experienceWaitHours(settings.experience_followup_wait_hours || process.env.NEXTGEN_EXPERIENCE_FOLLOWUP_WAIT_HOURS),
+      outside_window: "approved_experience_template_required", rows, total: leads.length, offset, next_offset: offset + rows.length < leads.length ? offset + rows.length : null,
+      worker: { enabled: ngV116HeartbeatEnabled(), blocked, last_tick_at: NG_V116_HEARTBEAT_STATE.last_tick_at || null }, template_proposal: experienceTemplateProposal });
   } catch (error) { return res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
@@ -94452,6 +94470,7 @@ async function startNextgenServer() {
     .then((result) => console.log("LMS known MSK transcript-notes catch-up:", result))
     .catch((error) => console.error("LMS known MSK transcript-notes catch-up failed:", error.message));
   ngV116StartBackendHeartbeat();
+  ngStartMetaReporting();
   setTimeout(() => {
     readCrmDb()
       .then((crmDb) => ensureNextGenAdminWhatsAppTemplateInMeta(crmDb, { force: true }))
