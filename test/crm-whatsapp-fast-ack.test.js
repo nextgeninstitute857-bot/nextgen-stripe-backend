@@ -599,7 +599,7 @@ test("Ayla retrieves compact relevant approved training without duplicating the 
   assert.doesNotMatch(generator, /ngBuildAylaCommandContext/);
 });
 
-test("WhatsApp sales replies stay fast and end with a concrete contextual next step", () => {
+test("WhatsApp sales replies retain bounded output, short pacing and a contextual next step", () => {
   const pacing = server.slice(
     server.indexOf("function ngAylaAutoReplyDelayMs"),
     server.indexOf("async function ngGenerateStudentAutoReply"),
@@ -611,7 +611,11 @@ test("WhatsApp sales replies stay fast and end with a concrete contextual next s
 
   assert.match(pacing, /normalizeSocialPlatform\(channel\) === "whatsapp"/);
   assert.match(pacing, /Math\.min\(configuredMs, 1200\)/);
-  assert.match(generator, /maxOutputTokens: 750/);
+  // The decision now includes evidence-backed payment and experience memory.
+  // Bound structured output separately from the short student-facing reply.
+  const structuredBudget = Number(generator.match(/maxOutputTokens: (\d+)/)?.[1]);
+  assert.ok(structuredBudget > 0 && structuredBudget <= 1500);
+  assert.match(conversationEngine, /reply: String\(raw.reply \?\? ""\).trim\(\).slice\(0, 1200\)/);
   assert.match(generator, /textFormat: aylaConversationTextFormat\(\)/);
   assert.match(generator, /if \(violations\.length\)/);
   assert.match(generator, /AYLA_CONVERSATION_QUALITY_REJECTED/);
@@ -748,5 +752,5 @@ test("Ayla conversation memory commits only after every dispatched part is accep
   assert.match(helper, /lead\.ayla_conversation_state = nextState/);
   assert.match(server, /conversationSendResults\.push\(\.\.\.extraMediaResults/);
   assert.match(server, /conversationSendResults\.push\(closingResult\)/);
-  assert.match(server, /ngAylaCommitConversationTurnAfterDelivery\(\{ lead, ai, sendResults: conversationSendResults \}\)/);
+  assert.match(server, /ngAylaCommitConversationTurnAfterDelivery\(\{ db, lead, ai, sendResults: conversationSendResults \}\)/);
 });

@@ -41,6 +41,8 @@ import {
   normalizeAylaConversationDecision,
 } from "./lib/crm-ayla-conversation-engine.js";
 import { recordAylaPaymentFollowup, aylaPaymentFollowupEligibility } from "./lib/crm-conversation-followup.js";
+import { experienceWaitHours, experienceDeliveryAccepted, experienceResourcesFromDelivery, recordExperienceShares, recordExperienceResponse, acknowledgeExperienceConversation, experienceFollowupEligibility, buildExperienceCheckinPrompt } from "./lib/crm-experience-followup.js";
+import { runExperienceCheckin } from "./lib/crm-experience-scheduler.js";
 import {
   fetchWhatsAppBusinessProfile,
   fetchWhatsAppPhoneIdentity,
@@ -32646,6 +32648,19 @@ async function sendCrmMessage({
       }
       if (cleanChannel === "whatsapp" && !providerResponse?.manual_first) {
         ngUpdateLeadWhatsAppSendStatus(lead, { success: true, quick_action: metadata?.quick_action || metadata?.source || "message" });
+        // Managed template buttons are actually sent even though the normal
+        // text body is ignored. Capture those exact demo/recording invitations.
+        if (resolvedWhatsAppTemplateName) {
+          try {
+            ngAylaRecordExperienceDelivery({ db, lead, inbound: ngLatestInbound(ngLeadConversationMessages(db, lead.id)) || {},
+              sendResults: [{ channel: "whatsapp", status: "sent", log, provider_response: providerResponse }],
+            });
+          } catch (error) {
+            // A tracking failure must not turn a successful provider send into
+            // a reported send failure and cause an unnecessary retry.
+            console.warn("Experience invitation tracking failed:", error.message);
+          }
+        }
       }
     }
 
@@ -34239,6 +34254,17 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
       if (result.skipped || result.duplicate_blocked) {
         results.push({ lead_id: lead.id, skipped: true, reason: result.reason || "duplicate_message_blocked", action, template_id: templateId });
         continue;
+      }
+      // Keep the experience record tied to an accepted, exactly labelled
+      // recording. Failed/queued messages and generic fallback labels do not count.
+      if (!experienceDeliveryAccepted(result)) {
+        results.push({ lead_id: lead.id, sent: false, reason: result.reason || result.error || "provider_not_sent", action, template_id: templateId });
+        continue;
+      }
+      if (action === "post_session_recording" && (assets.recordingTitle || assets.latestRecordingTitle)) {
+        ngAylaRecordExperienceDelivery({ db, lead, inbound: latestInbound || {}, sendResults: [result],
+          snapshot: { latest_recording: { title: assets.recordingTitle || assets.latestRecordingTitle, url: assets.recordingLink } },
+        });
       }
       ngUpdateNoReplyLeadStatus(db, lead);
       if (action === "daily_session_invite") { lead.last_session_invite_sent_at = nowIso(); lead.live_session_invited = true; ngEnsureLeadFlowLabels(lead, ["daily_session_invited", "live_session_invited"]); }
@@ -51940,7 +51966,7 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
       model,
       systemPrompt,
       userPrompt,
-      maxOutputTokens: 1100,
+      maxOutputTokens: 1500,
       textFormat: aylaConversationTextFormat(),
     });
     const parsed = safeJsonParseFromAI(result.text || "{}");
@@ -52115,11 +52141,37 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
     payment_followup: decision.payment_followup,
     payment_followup_inbound: latestInbound,
     payment_followup_student_text: aylaPendingStudentText(cleanMessages),
+    experience_response: decision.experience_response,
   };
 }
 
-function ngAylaCommitConversationTurnAfterDelivery({ lead = {}, ai = {}, sendResults = [] } = {}) {
+function ngAylaRecordExperienceDelivery({ db = {}, lead = {}, snapshot = {}, sendResults = [], inbound = {} } = {}) {
+  const session = snapshot.live_session;
+  let startsAt = null;
+  if (session?.date && session?.time && session?.timezone) {
+    try {
+      // Invalid timezones are unverified, not silently converted to a fallback.
+      new Intl.DateTimeFormat("en", { timeZone: session.timezone }).format();
+      startsAt = getSessionStartUtc(session.date, session.time, session.timezone)?.toISOString() || null;
+    } catch { /* Keep an unverified class out of the timed check-in queue. */ }
+  }
+  const settings = ngAylaPickSettings(db);
+  const resources = experienceResourcesFromDelivery({
+    snapshot: { ...snapshot, live_session: session ? { ...session, starts_at: startsAt } : null },
+    results: sendResults,
+    demoDays: ngAylaGetSalesAssets(db).demoDays,
+    templateDefinitions: NEXTGEN_WHATSAPP_TEMPLATE_PACK,
+  });
+  return recordExperienceShares({ lead, resources, inbound,
+    waitHours: experienceWaitHours(settings.experience_followup_wait_hours || process.env.NEXTGEN_EXPERIENCE_FOLLOWUP_WAIT_HOURS),
+  });
+}
+
+function ngAylaCommitConversationTurnAfterDelivery({ db = {}, lead = {}, ai = {}, sendResults = [] } = {}) {
   const results = safeArray(sendResults).filter(Boolean);
+  // A partially failed feature tour may still have shared a usable link. Only
+  // actual provider-accepted log text (never a planned reply) schedules it.
+  ngAylaRecordExperienceDelivery({ db, lead, snapshot: ai.live_lms_sales_snapshot || {}, sendResults: results, inbound: ai.payment_followup_inbound || {} });
   const delivered = results.length > 0 && results.every((result) => ngAylaDeliveryActuallySent(result));
   if (!delivered || !ai.conversation_state) return false;
 
@@ -52148,6 +52200,12 @@ function ngAylaCommitConversationTurnAfterDelivery({ lead = {}, ai = {}, sendRes
     studentText: ai.payment_followup_student_text || "",
     now: nowIso(),
   });
+  const experienceResponded = recordExperienceResponse({ lead, response: ai.experience_response, inbound: ai.payment_followup_inbound || {}, studentText: ai.payment_followup_student_text || "" });
+  if (experienceResponded && ai.experience_response?.outcome === "remind_later") {
+    const item = lead.ayla_experience_followups.find((row) => row.id === ai.experience_response.item_id);
+    ngReviewExperienceFollowup(db, lead, item, "experience_requested_time_review");
+  }
+  acknowledgeExperienceConversation({ lead, inbound: ai.payment_followup_inbound || {} });
   if (nextState.last_action === "send_demo") {
     lead.demo_link_sent = true;
     lead.demo_link_sent_at = lead.demo_link_sent_at || nowIso();
@@ -52228,6 +52286,12 @@ app.post("/admin/crm/ayla-conversation/simulate", async (req, res) => {
       // The simulator has no provider delivery by design. Advance only its
       // isolated in-memory state so later simulated turns see the same memory.
       lead.ayla_conversation_state = ai.conversation_state;
+      recordExperienceResponse({ lead, response: ai.experience_response, inbound, studentText: turns[index] });
+      acknowledgeExperienceConversation({ lead, inbound });
+      // Isolated simulated delivery only: never a provider call or CRM write.
+      ngAylaRecordExperienceDelivery({ db: simDb, lead, snapshot: ai.live_lms_sales_snapshot || {}, inbound,
+        sendResults: [{ channel: "whatsapp", status: "sent", log: { text: `${ai.reply || ""}\n${ai.follow_up || ""}`, sent_at: nowIso(), provider_message_id: `simulated-${index}` } }],
+      });
       const outbound = {
         id: `sim-out-${index + 1}`,
         direction: "outbound",
@@ -52245,6 +52309,7 @@ app.post("/admin/crm/ayla-conversation/simulate", async (req, res) => {
         ask_field: ai.ask_field || "none",
         media_keys: ai.media_asset_keys || [],
         intent: ai.intent || null,
+        experience_response: ai.experience_response || null,
       });
       if (ai.follow_up) {
         messages.push({
@@ -52452,7 +52517,7 @@ app.post("/admin/crm/conversations/:leadId/ai-auto-send", async (req, res) => {
       const closingResult = await ngSendAylaFeatureOverviewClosingMessage({ db, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "full_ai_auto", inboundMessageId: ngAiAutoMessageFingerprint(latestInbound), liveSnapshot: ai.live_lms_sales_snapshot || {}, closingText: ai.follow_up || "" });
       conversationSendResults.push(closingResult);
     }
-    ngAylaCommitConversationTurnAfterDelivery({ lead, ai, sendResults: conversationSendResults });
+    ngAylaCommitConversationTurnAfterDelivery({ db, lead, ai, sendResults: conversationSendResults });
 
     const adminAlert = await ngAylaMaybeSendConversationAdminAlert({
       db,
@@ -52698,7 +52763,7 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
       const closingResult = await ngSendAylaFeatureOverviewClosingMessage({ db, lead, brandId: lead.brand_id || brandId || null, to, source, inboundMessageId: inboundFingerprint, liveSnapshot: ai.live_lms_sales_snapshot || {}, closingText: ai.follow_up || "" });
       conversationSendResults.push(closingResult);
     }
-    ngAylaCommitConversationTurnAfterDelivery({ lead, ai, sendResults: conversationSendResults });
+    ngAylaCommitConversationTurnAfterDelivery({ db, lead, ai, sendResults: conversationSendResults });
 
     const adminAlert = await ngAylaMaybeSendConversationAdminAlert({
       db,
@@ -53181,7 +53246,7 @@ app.post("/admin/crm/automation/process-ai-auto", async (req, res) => {
           const closingResult = await ngSendAylaFeatureOverviewClosingMessage({ db, lead, brandId: lead.brand_id || getCrmBrandId(req, db), to, source: "process_ai_auto", inboundMessageId: ngAiAutoMessageFingerprint(inbound), liveSnapshot: ai.live_lms_sales_snapshot || {}, closingText: ai.follow_up || "" });
           conversationSendResults.push(closingResult);
         }
-        ngAylaCommitConversationTurnAfterDelivery({ lead, ai, sendResults: conversationSendResults });
+        ngAylaCommitConversationTurnAfterDelivery({ db, lead, ai, sendResults: conversationSendResults });
         const adminAlert = await ngAylaMaybeSendConversationAdminAlert({
           db,
           lead,
@@ -71282,6 +71347,77 @@ function ngV116ClearStaleSilentInboundGuards(db = {}, limit = 50) {
   return results;
 }
 
+function ngExperienceContext(db, leadId) {
+  const lead = getLeadByAnyId(db, leadId);
+  const settings = ngAylaPickSettings(db);
+  const messages = lead ? ngLeadConversationMessages(db, lead.id) : [];
+  const channel = lead ? resolveCrmChannelForConversation({ requestedChannel: lead.current_channel || lead.last_channel || lead.source_platform || lead.platform || "whatsapp", lead, fallback: "whatsapp" }) : "whatsapp";
+  const disabled = settings.experience_followup_enabled === false || String(process.env.NEXTGEN_EXPERIENCE_FOLLOWUP_ENABLED || "true").toLowerCase() === "false";
+  return { db, lead: lead || {}, messages, channel, latestInbound: ngLatestInbound(messages), latestOutbound: ngLatestOutbound(messages), futureFollowups: ngAffArray(db, "future_followups"),
+    blocked: !lead ? "lead_missing" : disabled ? "experience_followup_disabled" : ng41IsSuppressed(db, lead) ? "suppressed" : ngAylaFindActiveGoogleMeetAppointment(db, lead) ? "mentor_handoff_active" : null,
+  };
+}
+
+function ngReviewExperienceFollowup(db, lead, item, reason) {
+  item.review_reason = reason;
+  const actions = ensureCrmArray(db, "ai_actions");
+  if (actions.some((row) => row.type === reason && String(row.lead_id) === String(lead.id) && row.payload?.experience_id === item.id && row.status !== "resolved")) return;
+  actions.unshift(withTimestamps({ id: uuid(), lead_id: lead.id, area: "whatsapp", type: reason, status: "pending_approval",
+    title: reason === "experience_template_required" ? "Programme check-in needs an approved WhatsApp template" : reason === "experience_requested_time_review" ? "Confirm the student's requested check-in date and time" : "Please review this programme check-in",
+    payload: { experience_id: item.id, resource_title: item.title, shared_at: item.shared_at, due_at: item.due_at, requested_time: item.requested_time || null, original_words: item.evidence || null, reason },
+  }));
+}
+
+async function ngRunExperienceFollowups({ limit = 3, source = "backend_experience_checkin" } = {}) {
+  if (ngWhatsAppProviderBlockStatus().blocked || !isAIConfigured()) return [];
+  const db = await readCrmDb();
+  const candidates = ngAffArray(db, "leads").map((lead) => {
+    if (!safeArray(lead.ayla_experience_followups).length) return null;
+    const context = ngExperienceContext(db, lead.id);
+    if (context.blocked) return null;
+    const check = experienceFollowupEligibility(context);
+    return check.ok || (["experience_template_required", "delivery_reserved_needs_review", "needs_delivery_review"].includes(check.reason) && check.item?.review_reason !== check.reason) ? lead.id : null;
+  }).filter(Boolean).slice(0, Math.max(1, Math.min(10, Number(limit || 3))));
+  const results = [];
+  for (const leadId of candidates) {
+    const result = await runExperienceCheckin({
+      leadId, read: readCrmDb, mutate: mutateCrmDb, context: ngExperienceContext,
+      lock: (lead, item) => ngTryLockAiAuto({ lead, inbound: { id: `experience-${item.id}` }, channel: "whatsapp", ttlSeconds: NG_AI_AUTO_LOCK_TTL_SECONDS }),
+      unlock: ngReleaseAiAutoLock, review: ngReviewExperienceFollowup,
+      generate: async (context, item) => {
+        const result = await callOpenAIResponsesAPI({ model: process.env.AYLA_MODEL || process.env.AI_MODEL || "gpt-4o-mini",
+          systemPrompt: buildExperienceCheckinPrompt({ item, name: context.lead.ayla_conversation_state?.facts?.name || context.lead.name || "", messages: context.messages.slice(-8).map((m) => ({ role: ngIsOutboundMessage(m) ? "ayla" : "student", text: ngMessageText(m) })) }),
+          userPrompt: "Write the one programme-experience check-in now.", maxOutputTokens: 350,
+          textFormat: { type: "json_schema", name: "ayla_experience_checkin", strict: true, schema: { type: "object", additionalProperties: false, required: ["reply"], properties: { reply: { type: "string" } } } },
+        });
+        return safeJsonParseFromAI(result.text || "{}")?.reply || "";
+      },
+      send: ({ db, lead, item, reply }) => sendCrmMessage({ db, brandId: lead.brand_id || null, leadId: lead.id, channel: "whatsapp", to: getBestRecipientForChannel({ channel: "whatsapp", lead }), text: reply,
+        // No welcome/payment template substitution. Eligibility permits only
+        // free-form within the student's current 24-hour service window.
+        templateId: null, metadata: { source, delivery_purpose: `experience_checkin_${item.id}`, delivery_date_key: item.id, experience_id: item.id },
+      }),
+    });
+    results.push(result);
+  }
+  return results;
+}
+
+app.get("/admin/crm/automation/experience-followups", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const rows = ngAffArray(db, "leads").filter((lead) => (!brandId || String(lead.brand_id || "") === String(brandId)) && safeArray(lead.ayla_experience_followups).length)
+      .slice(0, 100).map((lead) => {
+        const context = ngExperienceContext(db, lead.id);
+        const check = context.blocked ? { ok: false, reason: context.blocked } : experienceFollowupEligibility(context);
+        return { lead_id: lead.id, name: lead.name || lead.full_name || "", eligible: check.ok, reason: check.reason, experiences: lead.ayla_experience_followups };
+      });
+    return res.json({ success: true, wait_hours: experienceWaitHours(ngAylaPickSettings(db).experience_followup_wait_hours || process.env.NEXTGEN_EXPERIENCE_FOLLOWUP_WAIT_HOURS), outside_window: "approved_experience_template_required", rows });
+  } catch (error) { return res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
 function ngV116NoReplyNurtureText(db = {}, lead = {}) {
   const exam = ng41LeadExamType(lead) || "your exam";
   const name = ng41LeadName(lead) || "there";
@@ -71408,6 +71544,7 @@ async function ngV116RunBackendHeartbeatTick({ source = "backend_heartbeat" } = 
     let noReplyResults = [];
     let dailySessionResult = null;
     let googleMeetResult = null;
+    let runExperienceChecks = false;
     const now = Date.now();
     if (now - ngV116LastFirstMessageRunAt >= Math.max(5000, Number(process.env.NEXTGEN_HEARTBEAT_FIRST_MESSAGE_MS || 15000))) {
       ngV116LastFirstMessageRunAt = now;
@@ -71421,17 +71558,22 @@ async function ngV116RunBackendHeartbeatTick({ source = "backend_heartbeat" } = 
     }
     if (now - ngV116LastScheduledRunAt >= Math.max(30000, Number(process.env.NEXTGEN_HEARTBEAT_SCHEDULED_MS || 60000))) {
       ngV116LastScheduledRunAt = now;
+      runExperienceChecks = true;
       noReplyResults = await ngV116RunNoReplyLmsNurture({ db, limit: Math.max(1, Math.min(50, Number(process.env.NEXTGEN_HEARTBEAT_NO_REPLY_LIMIT || 20))), source: `${source}_no_reply_nurture` });
       dailySessionResult = await ngRunDailyLiveSessionScheduler({ db, limit: Math.max(1, Math.min(100, Number(process.env.NEXTGEN_HEARTBEAT_DAILY_SESSION_LIMIT || 50))), dryRun: false, source: `${source}_daily_session` });
       googleMeetResult = await ngRunGoogleMeetAppointmentScheduler({ db, limit: Math.max(1, Math.min(50, Number(process.env.NEXTGEN_HEARTBEAT_GOOGLE_MEET_LIMIT || 25))), dryRun: false, source: `${source}_google_meet` });
     }
     const changed = clearResults.length || aiResults.length || firstMessageResults.length || noReplyResults.length || Number(dailySessionResult?.processed || 0) || Number(googleMeetResult?.processed || 0);
     if (changed) await writeCrmDb(db);
+    // Run after the older heartbeat snapshot is saved. This worker uses fresh,
+    // atomic mutations; never overwrite it with that earlier snapshot.
+    const experienceResults = runExperienceChecks ? await ngRunExperienceFollowups() : [];
     NG_V116_HEARTBEAT_STATE.last_finish_at = nowIso();
     NG_V116_HEARTBEAT_STATE.last_error = null;
     NG_V116_HEARTBEAT_STATE.last_ai_results = aiResults.slice(-20);
     NG_V116_HEARTBEAT_STATE.last_first_message_results = firstMessageResults.slice(-20);
     NG_V116_HEARTBEAT_STATE.last_no_reply_results = noReplyResults.slice(-20);
+    NG_V116_HEARTBEAT_STATE.last_experience_results = experienceResults;
     NG_V116_HEARTBEAT_STATE.last_daily_session_result = dailySessionResult;
     NG_V116_HEARTBEAT_STATE.last_google_meet_result = googleMeetResult;
     return { success: true, tick, changed: Boolean(changed), clear_results: clearResults.length, ai_auto: aiResults.length, first_messages: firstMessageResults.length, no_reply: noReplyResults.length, daily_session_processed: dailySessionResult?.processed || 0, google_meet_processed: googleMeetResult?.processed || 0 };
