@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { fetchMetaAdsSnapshot, metaReportingDateRange, normalizeMetaCampaignInsight } from "../lib/crm-meta-ads.js";
-import { createMetaReportingRunner, metaReportingConfig, metaReportingStatus, prepareMetaDailyLedger, saveMetaPerformanceSnapshot } from "../lib/crm-meta-ads-reporting.js";
+import { createMetaReportingRunner, metaReportingConfig, metaReportingStatus, prepareMetaDailyLedger, saveMetaPerformanceSnapshot, preserveMetaReportingForLegacyWrite } from "../lib/crm-meta-ads-reporting.js";
 
 const env = { META_ADS_ACCESS_TOKEN: "synthetic-private-token", META_AD_ACCOUNT_ID: "123" };
 const now = Date.parse("2026-08-28T20:30:00Z");
@@ -130,4 +130,15 @@ test("malformed or truncated Meta results cannot be displayed as a successful ze
   await assert.rejects(fetchMetaAdsSnapshot({ env, axiosClient: { get: async () => ({ data: {} }) } }), /incomplete/);
   await assert.rejects(fetchMetaAdsSnapshot({ env, axiosClient: { get: async () => ({ data: { data: [], paging: { next: "https://graph.facebook.com/v26.0/more" } } }) } }), /pagination limit/);
   await assert.rejects(fetchMetaAdsSnapshot({ env, axiosClient: { get: async () => ({ data: { data: [], paging: { next: "https://evil.example/more" } } }) } }), /invalid paging/);
+});
+
+test("legacy heartbeat saves cannot wipe a newer reporting lease, snapshot or ledger", () => {
+  const current = { meta_ads_sync_state: { lease_id: "new-lease" }, meta_ads_performance: { synced_at: "new" }, meta_ads_last_sync: { synced_at: "new" }, meta_ads_rollup_archive: [{ id: "archived" }], ad_performance_logs: [{ id: "new-daily", source: "meta_live", spend_usd: 15 }], leads: [{ id: "current-lead" }] };
+  const incoming = { meta_ads_sync_state: null, meta_ads_performance: null, ad_performance_logs: [{ id: "manual", spend_usd: 4 }], leads: [{ id: "incoming-lead" }] };
+  const safe = { ...incoming, ...preserveMetaReportingForLegacyWrite(current, incoming) };
+  assert.equal(safe.meta_ads_sync_state.lease_id, "new-lease");
+  assert.equal(safe.meta_ads_performance.synced_at, "new");
+  assert.equal(safe.ad_performance_logs.length, 2);
+  assert.deepEqual(safe.leads, incoming.leads, "this narrow guard must not rewrite unrelated lead data");
+  assert.deepEqual(preserveMetaReportingForLegacyWrite({}, incoming), {});
 });

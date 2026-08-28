@@ -27,7 +27,7 @@ import {
   fetchMetaAdsSnapshot,
   metaAdsReadiness,
 } from "./lib/crm-meta-ads.js";
-import { createMetaReportingRunner, metaReportingStatus, prepareMetaDailyLedger, saveMetaPerformanceSnapshot } from "./lib/crm-meta-ads-reporting.js";
+import { createMetaReportingRunner, metaReportingStatus, prepareMetaDailyLedger, saveMetaPerformanceSnapshot, preserveMetaReportingForLegacyWrite } from "./lib/crm-meta-ads-reporting.js";
 import { experienceQueueRows, experienceTemplateProposal } from "./lib/crm-experience-reporting.js";
 import {
   aylaExplicitHumanHandoffRequest,
@@ -21498,6 +21498,7 @@ async function writeCrmDb(db) {
     const nextDb = {
       ...DEFAULT_CRM_DB,
       ...db,
+      ...preserveMetaReportingForLegacyWrite(crmReadCache || {}, db),
       settings: { ...DEFAULT_CRM_SETTINGS, ...(db.settings || {}) },
       model_pricing: Array.isArray(db.model_pricing) && db.model_pricing.length ? db.model_pricing : DEFAULT_CRM_MODEL_PRICING,
       updated_at: nowIso(),
