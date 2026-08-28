@@ -40,3 +40,9 @@ test('genuine direct preview requests still receive the link, including after a 
     assert.deepEqual(evaluateAylaConversationDecision({decision, state, messages}), [], text);
   }
 });
+
+test('a genuine demo request is not allowed to become a mistaken support detour', () => {
+  const result = check('I am Sarah preparing for Step 1 in the US. Please send the seven-day demo link now so I can try the LMS.');
+  assert.ok(result.violations.includes('explicit_demo_acceptance_misclassified_as_support'));
+  assert.ok(result.violations.includes('explicit_demo_acceptance_missing_link'));
+});
