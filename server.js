@@ -1,4 +1,6 @@
 import express from "express";
+import { normalizeLearningCorrection, reviewedLearningRules, learningGuidance, learningEvidence, preserveLearningRecords } from "./lib/crm-reviewed-learning.js";
+import { EXPERIENCE_TEMPLATE, experienceTemplateSubmission } from "./lib/crm-experience-template.js";
 import {
   flashcardCapabilities,
   flashcardTextOnlyHtml,
@@ -21499,6 +21501,7 @@ async function writeCrmDb(db) {
       ...DEFAULT_CRM_DB,
       ...db,
       ...preserveMetaReportingForLegacyWrite(crmReadCache || {}, db),
+      ...preserveLearningRecords(crmReadCache || {}, db),
       settings: { ...DEFAULT_CRM_SETTINGS, ...(db.settings || {}) },
       model_pricing: Array.isArray(db.model_pricing) && db.model_pricing.length ? db.model_pricing : DEFAULT_CRM_MODEL_PRICING,
       updated_at: nowIso(),
@@ -31202,6 +31205,7 @@ function getWhatsAppTemplateLookupKeys({ template = null, metadata = {} } = {}) 
 function resolveWhatsAppTemplateVariableOrder({ template = null, metadata = {} } = {}) {
   const lookupKeys = getWhatsAppTemplateLookupKeys({ template, metadata });
   const templateName = normalizeTemplateLookupKey(getWhatsAppTemplateName({ template, metadata }));
+  if (templateName === EXPERIENCE_TEMPLATE.name) return ["name", "experience_title"];
   if (templateName) lookupKeys.unshift(templateName);
 
   for (const rawKey of lookupKeys) {
@@ -33720,7 +33724,7 @@ function getWhatsAppBusinessAccountIdCandidates(db = {}) {
   ].map((value) => String(value || "").trim()).filter((value, index, all) => value && all.indexOf(value) === index);
 }
 
-async function fetchLiveMetaWhatsAppTemplates(db = {}) {
+async function fetchLiveMetaWhatsAppTemplates(db = {}, { withAccount = false } = {}) {
   const { token } = await resolveWhatsAppCloudConfig({ db });
   const businessAccountIds = getWhatsAppBusinessAccountIdCandidates(db);
   if (!token || !businessAccountIds.length) {
@@ -33740,7 +33744,7 @@ async function fetchLiveMetaWhatsAppTemplates(db = {}) {
           {
             headers: { Authorization: `Bearer ${token}` },
             params: {
-              fields: "id,name,status,category,language",
+              fields: "id,name,status,category,language,components",
               limit: 100,
               ...(after ? { after } : {}),
             },
@@ -33751,7 +33755,8 @@ async function fetchLiveMetaWhatsAppTemplates(db = {}) {
         after = String(response.data?.paging?.cursors?.after || "").trim();
         if (!after || !response.data?.paging?.next) break;
       }
-      return normalizeMetaTemplateInventory(collected);
+      const inventory = normalizeMetaTemplateInventory(collected);
+      return withAccount ? { templates: inventory, businessAccountId } : inventory;
     } catch (error) {
       lastError = error;
       if (![400, 404].includes(Number(error.response?.status || 0))) throw error;
@@ -52084,6 +52089,7 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
     ? ngTrainingContextForFullAiAuto(db, `${latestInboundText}\n${historyText.slice(-3000)}`)
     : "";
   const mediaGuidance = db ? ngBuildAylaMediaGuidance(db, lead) : "";
+  const reviewedRules = db ? reviewedLearningRules(db, lead.brand_id || db.settings?.default_brand_id || db.brands?.[0]?.id || null) : [];
   const officialExamGuidance = ngAylaOfficialExamGuidancePrompt(latestInboundText, historyText);
   const protectedActionContext = protectedDecision?.intent
     ? `The backend already applied protected intent ${protectedDecision.intent}. Continue naturally from the updated lead state. The current protected next action is ${String(lead.next_action || "none")}; ask only for that missing meeting detail when it is a collection action. Protected outcome facts: ${String(protectedDecision.reply || "none")}. Write fresh natural wording rather than copying a canned backend reply.`
@@ -52101,6 +52107,7 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
       latestMessage: latestInboundText,
       liveFacts: liveSnapshot.context || "",
       approvedKnowledge,
+      reviewedLearning: learningGuidance(reviewedRules),
       officialExamGuidance,
       mediaGuidance,
       protectedActionContext,
@@ -52286,6 +52293,7 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
     turn_goal: decision.turn_goal,
     conversation_state: nextState,
     conversation_engine: CRM_AYLA_REPLY_BUILD,
+    learning_evidence: learningEvidence(reviewedRules, { model: result.model || model }),
     payment_followup: decision.payment_followup,
     payment_followup_inbound: latestInbound,
     payment_followup_student_text: aylaPendingStudentText(cleanMessages),
@@ -52326,6 +52334,7 @@ function ngAylaCommitConversationTurnAfterDelivery({ db = {}, lead = {}, ai = {}
   const nextState = ai.conversation_state;
   lead.ayla_conversation_state = nextState;
   lead.ayla_conversation_engine = CRM_AYLA_REPLY_BUILD;
+  lead.ayla_learning_evidence = ai.learning_evidence || null;
   lead.ayla_conversation_stage = nextState.stage;
   lead.ayla_last_conversation_intent = ai.intent || nextState.last_intent || null;
   if (!lead.exam && nextState.facts?.exam && nextState.facts.exam !== "unknown") lead.exam = nextState.facts.exam;
@@ -52404,7 +52413,7 @@ app.post("/admin/crm/ayla-conversation/simulate", async (req, res) => {
     };
     const lead = {
       id: `ayla-simulation-${uuid()}`,
-      brand_id: req.body?.brand_id || sourceDb.settings?.default_brand_id || null,
+      brand_id: getCrmBrandId(req, sourceDb),
       status: "new_lead",
       source: "admin_no_send_simulation",
       ...(req.body?.lead && typeof req.body.lead === "object" ? req.body.lead : {}),
@@ -52412,6 +52421,16 @@ app.post("/admin/crm/ayla-conversation/simulate", async (req, res) => {
     };
     const messages = [];
     const transcript = [];
+
+    // Candidate coaching is permitted only in this authenticated, no-send,
+    // no-persistence sandbox. It never creates a live approved rule.
+    if (typeof req.body?.learning_trial === "string" && req.body.learning_trial.trim()) {
+      simDb.approved_learning_rules = [...safeArray(sourceDb.approved_learning_rules), {
+        id: "no-send-candidate-coaching", brand_id: lead.brand_id || null, area: "marketing",
+        title: "Candidate coaching (rehearsal only)", rule_text: req.body.learning_trial.trim().slice(0, 1600),
+        status: "approved", admin_approved: true, approved_by: "no-send-rehearsal", approved_at: nowIso(), priority: 100,
+      }];
+    }
 
     for (let index = 0; index < turns.length; index += 1) {
       const inbound = {
@@ -52458,6 +52477,7 @@ app.post("/admin/crm/ayla-conversation/simulate", async (req, res) => {
         media_keys: ai.media_asset_keys || [],
         intent: ai.intent || null,
         experience_response: ai.experience_response || null,
+        learning_evidence: ai.learning_evidence || null,
       });
       if (ai.follow_up) {
         messages.push({
@@ -70036,6 +70056,7 @@ function ngLearningRulesPromptBlock(db = {}, area = "marketing") {
 
 function ngCreateApprovedLearningRule(db = {}, payload = {}, actor = null) {
   const area = ngNormalizeLearningArea(payload.area || payload.scope || payload.learning_area || "marketing");
+  const reviewed = (payload.status || "approved") === "approved" && payload.approved !== false;
   const record = withTimestamps({
     id: payload.id || uuid(),
     brand_id: payload.brand_id || null,
@@ -70045,9 +70066,10 @@ function ngCreateApprovedLearningRule(db = {}, payload = {}, actor = null) {
     rule_text: ngLearningRuleText(payload) || normalizeCrmString(payload.rule_text || ""),
     category: payload.category || (area === "community" ? "community_behavior" : "sales_behavior"),
     status: payload.status || "approved",
-    approved: payload.approved !== false,
-    admin_approved: true,
-    override_behavior: payload.override_behavior !== false,
+    approved: reviewed,
+    admin_approved: reviewed,
+    override_behavior: reviewed && payload.override_behavior !== false,
+    is_active: payload.is_active !== false,
     priority: Number(payload.priority ?? payload.override_priority ?? 80),
     source: payload.source || "admin_correction",
     source_event_id: payload.source_event_id || null,
@@ -70056,14 +70078,15 @@ function ngCreateApprovedLearningRule(db = {}, payload = {}, actor = null) {
     corrected_example: payload.corrected_example || payload.corrected_reply || "",
     applies_to: payload.applies_to || payload.condition || "Use when relevant to the lead/community context.",
     created_by: actor?.id || payload.created_by || "admin",
-    approved_by: actor?.id || payload.approved_by || "admin",
-    approved_at: payload.approved_at || nowIso(),
+    approved_by: reviewed ? actor?.id || "admin" : null,
+    approved_at: reviewed ? nowIso() : null,
   });
   ensureCrmArray(db, "approved_learning_rules").unshift(record);
   return record;
 }
 
 function ngRecordLearningCorrection(db = {}, payload = {}, actor = null, defaultArea = "marketing") {
+  payload = normalizeLearningCorrection(payload);
   const area = ngNormalizeLearningArea(payload.area || payload.scope || defaultArea);
   const mistake = withTimestamps({
     id: payload.id || uuid(),
@@ -70080,8 +70103,8 @@ function ngRecordLearningCorrection(db = {}, payload = {}, actor = null, default
     admin_note: payload.admin_note || payload.notes || "",
     status: payload.status || "approved",
     created_by: actor?.id || "admin",
-    approved_by: actor?.id || "admin",
-    approved_at: nowIso(),
+    approved_by: payload.status === "pending_review" ? null : actor?.id || "admin",
+    approved_at: payload.status === "pending_review" ? null : nowIso(),
   });
 
   if (area === "community") ensureCrmArray(db, "community_learning_events").unshift(mistake);
@@ -70107,7 +70130,8 @@ app.get("/admin/crm/ai-sales-learning/approved-rules", async (req, res) => {
     await requireCrmAdmin(req);
     const db = await readCrmDb();
     const area = req.query.area || req.query.scope || "all";
-    let rules = ensureCrmArray(db, "approved_learning_rules").filter((item) => item.status !== "archived" && item.status !== "deleted");
+    const brandId = getCrmBrandId(req, db);
+    let rules = ensureCrmArray(db, "approved_learning_rules").filter((item) => String(item.brand_id || "") === String(brandId || "") && item.status !== "archived" && item.status !== "deleted");
     if (area !== "all") rules = rules.filter((item) => ngLearningRuleAreaMatches(item, area));
     rules.sort((a, b) => Number(b.priority || 0) - Number(a.priority || 0) || String(b.updated_at || b.created_at || "").localeCompare(String(a.updated_at || a.created_at || "")));
     res.json({ success: true, rules, approved_rules: rules, count: rules.length });
@@ -70120,9 +70144,9 @@ app.post("/admin/crm/ai-sales-learning/approved-rules", async (req, res) => {
     const db = await readCrmDb();
     const ruleText = ngLearningRuleText(req.body || {});
     if (!ruleText) return res.status(400).json({ success: false, error: "rule_text is required" });
-    const rule = ngCreateApprovedLearningRule(db, req.body || {}, user);
-    await writeCrmDb(db);
-    res.json({ success: true, rule, message: "Approved learning rule saved. It will override Ayla/community behavior when relevant." });
+    const brandId = getCrmBrandId(req, db);
+    const rule = await mutateCrmDb(current => ngCreateApprovedLearningRule(current, { ...req.body, brand_id: brandId }, user));
+    res.json({ success: true, rule, message: "Reviewed coaching saved. It will guide relevant conversations without overriding facts, support or consent." });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
@@ -70136,6 +70160,12 @@ app.put("/admin/crm/ai-sales-learning/approved-rules/:id", async (req, res) => {
       area: ngNormalizeLearningArea(req.body.area || req.body.scope || rule.area || "marketing"),
       scope: ngNormalizeLearningArea(req.body.scope || req.body.area || rule.scope || rule.area || "marketing"),
       rule_text: ngLearningRuleText(req.body || {}) || rule.rule_text,
+      brand_id: getCrmBrandId(req, db),
+      admin_approved: (req.body.status || rule.status) === "approved",
+      approved: (req.body.status || rule.status) === "approved",
+      override_behavior: (req.body.status || rule.status) === "approved",
+      approved_by: (req.body.status || rule.status) === "approved" ? user.id : null,
+      approved_at: (req.body.status || rule.status) === "approved" ? nowIso() : null,
       updated_by: user.id,
       updated_at: nowIso(),
     });
@@ -70153,6 +70183,12 @@ app.patch("/admin/crm/ai-sales-learning/approved-rules/:id", async (req, res) =>
       area: ngNormalizeLearningArea(req.body.area || req.body.scope || rule.area || "marketing"),
       scope: ngNormalizeLearningArea(req.body.scope || req.body.area || rule.scope || rule.area || "marketing"),
       rule_text: ngLearningRuleText(req.body || {}) || rule.rule_text,
+      brand_id: getCrmBrandId(req, db),
+      admin_approved: (req.body.status || rule.status) === "approved",
+      approved: (req.body.status || rule.status) === "approved",
+      override_behavior: (req.body.status || rule.status) === "approved",
+      approved_by: (req.body.status || rule.status) === "approved" ? user.id : null,
+      approved_at: (req.body.status || rule.status) === "approved" ? nowIso() : null,
       updated_by: user.id,
       updated_at: nowIso(),
     });
@@ -70201,9 +70237,9 @@ app.post("/admin/crm/ai-sales-learning/mistake-corrections", async (req, res) =>
   try {
     const { user } = await requireCrmAdmin(req);
     const db = await readCrmDb();
-    const result = ngRecordLearningCorrection(db, req.body || {}, user, req.body.area || "marketing");
-    await writeCrmDb(db);
-    res.json({ success: true, ...result, message: "Correction saved and approved as an override rule." });
+    const payload = normalizeLearningCorrection({ ...req.body, brand_id: getCrmBrandId(req, db) });
+    const result = await mutateCrmDb(current => ngRecordLearningCorrection(current, payload, user, payload.area || "marketing"));
+    res.json({ success: true, ...result, message: result.rule.status === "pending_review" ? "Correction saved for owner review. It is not active yet." : "Reviewed correction saved for relevant conversations." });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
@@ -71503,13 +71539,75 @@ function ngExperienceFollowupsEnabled(settings = {}) {
     && (settings.experience_followup_enabled === true || env === "true");
 }
 
+let NG_EXPERIENCE_TEMPLATE_CACHE = { checkedAt: null, template: null, error: null };
+async function ngRefreshExperienceTemplate(db, force = false) {
+  if (!force && Date.now() - Date.parse(NG_EXPERIENCE_TEMPLATE_CACHE.checkedAt || "") < 120000) return NG_EXPERIENCE_TEMPLATE_CACHE;
+  try {
+    const inventory = await fetchLiveMetaWhatsAppTemplates(db, { withAccount: true });
+    NG_EXPERIENCE_TEMPLATE_CACHE = { checkedAt: nowIso(), businessAccountId: inventory.businessAccountId, template: inventory.templates.find(row => row.name === EXPERIENCE_TEMPLATE.name && row.language === EXPERIENCE_TEMPLATE.language) || null, error: null };
+  } catch {
+    // Do not retain an approved cached status after a provider error.
+    NG_EXPERIENCE_TEMPLATE_CACHE = { checkedAt: null, template: null, error: "Could not verify the template with Meta." };
+  }
+  return NG_EXPERIENCE_TEMPLATE_CACHE;
+}
+
+function ngExperienceTemplatePolicy(db) {
+  const settings = ngAylaPickSettings(db);
+  if (!settings.experience_template_owner_approved_at) return null;
+  return { ...NG_EXPERIENCE_TEMPLATE_CACHE, ownerApproved: true, enabled: settings.experience_template_enabled === true };
+}
+
+app.post("/admin/crm/automation/experience-template/submit", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    if (req.body?.confirmation !== EXPERIENCE_TEMPLATE.name) return res.status(400).json({ success: false, error: "Confirm the exact check-in template before submitting it to Meta." });
+    const db = await readCrmDb();
+    const live = await ngRefreshExperienceTemplate(db, true);
+    if (live.error) return res.status(503).json({ success: false, error: live.error });
+    let providerTemplate = live.template;
+    if (providerTemplate && providerTemplate.components?.find(row => row.type === "BODY")?.text !== EXPERIENCE_TEMPLATE.body) return res.status(409).json({ success: false, error: "Meta already has different wording under this name. Review it before making any change." });
+    if (!providerTemplate) {
+      const { token } = await resolveWhatsAppCloudConfig({ db });
+      const account = live.businessAccountId;
+      if (!token || !account) return res.status(503).json({ success: false, error: "WhatsApp template submission is not configured." });
+      const response = await axios.post(`https://graph.facebook.com/${WHATSAPP_GRAPH_VERSION}/${encodeURIComponent(account)}/message_templates`, experienceTemplateSubmission(), { headers: { Authorization: `Bearer ${token}` }, timeout: 20000 });
+      providerTemplate = { id: response.data?.id || null, status: response.data?.status || "PENDING" };
+      NG_EXPERIENCE_TEMPLATE_CACHE = { checkedAt: null, template: null, error: null };
+    }
+    await mutateCrmDb(current => {
+      const settings = current.settings ||= {};
+      settings.experience_template_owner_approved_at = nowIso();
+      settings.experience_template_owner_approved_by = user.id;
+      settings.experience_template_enabled = false;
+    });
+    return res.json({ success: true, submitted: true, status: providerTemplate.status, enabled: false, message: "Submitted for Meta review. Sending remains off until approval, consent and a controlled delivery test are checked." });
+  } catch (error) { return res.status(error.statusCode || 502).json({ success: false, error: error.statusCode ? error.message : error.response?.data?.error?.message || "Meta submission could not be confirmed. Refresh status before trying again." }); }
+});
+
+app.get("/admin/crm/ai-sales-learning/status", async (req, res) => {
+  try {
+    await requireCrmAdmin(req);
+    const db = await readCrmDb();
+    const brandId = getCrmBrandId(req, db);
+    const rules = reviewedLearningRules(db, brandId);
+    const records = ensureCrmArray(db, "approved_learning_rules").filter(row => String(row.brand_id || "") === String(brandId || "") && !["archived", "deleted"].includes(row.status));
+    const evidence = ensureCrmArray(db, "leads").filter(row => String(row.brand_id || "") === String(brandId || ""))
+      .map(row => row.ayla_learning_evidence).filter(row => row?.rule_count > 0).sort((a, b) => String(b.at).localeCompare(String(a.at)));
+    res.json({ success: true, engine_connected: true, method: "reviewed_guidance_not_model_training", reviewed_rules: rules.length,
+      pending_review: records.filter(row => row.status === "pending_review").length, saved_rules: records.length,
+      delivered_conversations_with_coaching: evidence.length, last_used_at: evidence[0]?.at || null,
+      measured_improvement: null, note: "Saved corrections are not automatic model training. Review them, run a no-send rehearsal, and compare the replies. Inclusion in a reply is evidence of use, not proof of better quality." });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
 function ngExperienceContext(db, leadId) {
   const lead = getLeadByAnyId(db, leadId);
   const settings = ngAylaPickSettings(db);
   const messages = lead ? ngLeadConversationMessages(db, lead.id) : [];
   const channel = lead ? resolveCrmChannelForConversation({ requestedChannel: lead.current_channel || lead.last_channel || lead.source_platform || lead.platform || "whatsapp", lead, fallback: "whatsapp" }) : "whatsapp";
   const disabled = !ngExperienceFollowupsEnabled(settings);
-  return { db, lead: lead || {}, messages, channel, latestInbound: ngLatestInbound(messages), latestOutbound: ngLatestOutbound(messages), futureFollowups: ngAffArray(db, "future_followups"),
+  return { db, lead: lead || {}, messages, channel, latestInbound: ngLatestInbound(messages), latestOutbound: ngLatestOutbound(messages), futureFollowups: ngAffArray(db, "future_followups"), templatePolicy: ngExperienceTemplatePolicy(db),
     blocked: !lead ? "lead_missing" : disabled ? "experience_followup_disabled" : ng41IsSuppressed(db, lead) ? "suppressed" : ngAylaFindActiveGoogleMeetAppointment(db, lead) ? "mentor_handoff_active" : null,
   };
 }
@@ -71527,6 +71625,7 @@ function ngReviewExperienceFollowup(db, lead, item, reason) {
 async function ngRunExperienceFollowups({ limit = 3, source = "backend_experience_checkin" } = {}) {
   if (ngWhatsAppProviderBlockStatus().blocked || !isAIConfigured()) return [];
   const db = await readCrmDb();
+  if (ngAylaPickSettings(db).experience_template_enabled === true) await ngRefreshExperienceTemplate(db);
   const candidates = ngAffArray(db, "leads").map((lead) => {
     if (!safeArray(lead.ayla_experience_followups).length) return null;
     const context = ngExperienceContext(db, lead.id);
@@ -71548,10 +71647,13 @@ async function ngRunExperienceFollowups({ limit = 3, source = "backend_experienc
         });
         return safeJsonParseFromAI(result.text || "{}")?.reply || "";
       },
-      send: ({ db, lead, item, reply }) => sendCrmMessage({ db, brandId: lead.brand_id || null, leadId: lead.id, channel: "whatsapp", to: getBestRecipientForChannel({ channel: "whatsapp", lead }), text: reply,
-        // No welcome/payment template substitution. Eligibility permits only
-        // free-form within the student's current 24-hour service window.
-        templateId: null, metadata: { source, delivery_purpose: `experience_checkin_${item.id}`, delivery_date_key: item.id, experience_id: item.id },
+      send: ({ db, lead, item, reply, template }) => sendCrmMessage({ db, brandId: lead.brand_id || null, leadId: lead.id, channel: "whatsapp", to: getBestRecipientForChannel({ channel: "whatsapp", lead }), text: reply,
+        templateVariables: template ? { name: template.components[0].parameters[0].text, experience_title: template.components[0].parameters[1].text } : {},
+        // The only allowed out-of-window payload is the exact verified check-in.
+        // Never substitute a welcome, payment, or free-form message.
+        templateId: null, metadata: { source, delivery_purpose: `experience_checkin_${item.id}`, delivery_date_key: item.id, experience_id: item.id,
+          ...(template ? { whatsapp_template_name: template.templateName, language_code: template.languageCode } : {}),
+        },
       }),
     });
     results.push(result);
@@ -71572,7 +71674,8 @@ app.get("/admin/crm/automation/experience-followups", async (req, res) => {
     const settings = ngAylaPickSettings(db);
     return res.json({ success: true, enabled: ngExperienceFollowupsEnabled(settings), wait_hours: experienceWaitHours(settings.experience_followup_wait_hours || process.env.NEXTGEN_EXPERIENCE_FOLLOWUP_WAIT_HOURS),
       outside_window: "approved_experience_template_required", rows, total: leads.length, offset, next_offset: offset + rows.length < leads.length ? offset + rows.length : null,
-      worker: { enabled: ngV116HeartbeatEnabled(), blocked, last_tick_at: NG_V116_HEARTBEAT_STATE.last_tick_at || null }, template_proposal: experienceTemplateProposal });
+      worker: { enabled: ngV116HeartbeatEnabled(), blocked, last_tick_at: NG_V116_HEARTBEAT_STATE.last_tick_at || null }, template_proposal: experienceTemplateProposal,
+      template_status: { ...(await ngRefreshExperienceTemplate(db)), enabled: settings.experience_template_enabled === true, owner_approved: Boolean(settings.experience_template_owner_approved_at) } });
   } catch (error) { return res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 

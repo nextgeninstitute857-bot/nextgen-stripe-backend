@@ -367,7 +367,7 @@ test("production wiring remains separate from payment flow, with a read-only adm
   assert.match(source, /runExperienceCheckin\(\{[\s\S]*?mutate: mutateCrmDb/);
   assert.match(source, /app.get\("\/admin\/crm\/automation\/experience-followups"/);
   assert.match(source, /outside_window: "approved_experience_template_required"/);
-  const activation = source.slice(source.indexOf("function ngExperienceFollowupsEnabled"), source.indexOf("function ngExperienceContext"));
+  const activation = source.slice(source.indexOf("function ngExperienceFollowupsEnabled"), source.indexOf("let NG_EXPERIENCE_TEMPLATE_CACHE"));
   const enabled = new Function("settings", "process", `${activation}; return ngExperienceFollowupsEnabled(settings);`);
   for (const [settings, env, expected] of [
     [{}, {}, false],
@@ -381,4 +381,31 @@ test("production wiring remains separate from payment flow, with a read-only adm
   const runner = source.slice(source.indexOf("async function ngRunExperienceFollowups"), source.indexOf('app.get("/admin/crm/automation/experience-followups"'));
   assert.match(runner, /templateId: null/);
   assert.doesNotMatch(runner, /nextgen_warm_welcome|nextgen_payment_ready_followup/);
+});
+
+test("outside-window scheduler uses the exact approved template, never an AI draft, and sends only once", async () => {
+  const { EXPERIENCE_TEMPLATE } = await import("../lib/crm-experience-template.js");
+  const later = Date.parse(incoming.created_at) + 24 * 3600000;
+  const h = harness({ now: () => later });
+  h.db.leads[0].phone = "+447700900123";
+  h.db.leads[0].whatsapp_followup_consent = { status: "granted", scope: "programme_experience", source: "student_message", evidence: "Please check back about the demo", recorded_at: incoming.created_at };
+  const originalContext = h.deps.context;
+  h.deps.context = (db, id) => ({ ...originalContext(db, id), templatePolicy: { enabled: true, ownerApproved: true, checkedAt: new Date(later).toISOString(), template: { id: "test-meta-template", name: EXPERIENCE_TEMPLATE.name, language: "en_US", status: "APPROVED", category: "MARKETING", components: [{ type: "BODY", text: EXPERIENCE_TEMPLATE.body }] } } });
+  const originalSend = h.deps.send;
+  let template;
+  h.deps.send = (args) => { template = args.template; return originalSend(args); };
+  assert.equal((await h.run()).sent, true);
+  assert.equal(h.generated, 0);
+  assert.equal(template.templateName, EXPERIENCE_TEMPLATE.name);
+  assert.match(h.db.sent[0], /Reply STOP/);
+  assert.equal((await h.run()).sent, false);
+  assert.equal(h.db.sent.length, 1);
+});
+
+test("a reply-window boundary crossed during generation cannot send free text outside 24 hours", async () => {
+  let clock = Date.parse(incoming.created_at) + 24 * 3600000 - 1;
+  const h = harness({ now: () => clock });
+  h.deps.generate = async (_, item) => { clock += 10; return `Have you had a chance to watch ${item.title}?`; };
+  assert.equal((await h.run()).sent, false);
+  assert.equal(h.db.sent.length, 0);
 });
