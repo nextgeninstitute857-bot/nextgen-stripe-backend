@@ -45,7 +45,7 @@ The development workspace has no configured OpenAI API key, so the new experienc
 - After deployment, rerun the same three synthetic turns using Ayla & Calls → Run no-send rehearsal. Require name retention, step clarification and a direct current-facts answer to payment/duration.
 - Also rehearse explicit demo re-request, country then region, a busy student, and support. Do not send to real leads for this check.
 - Rehearse share recording → not yet → current live-session offer; share demo → used/liked → enrollment options; partly watched → useful continuation; negative feedback → concern first; single mentor-call offer → natural acceptance; later-date request → preserved review item. Verify exact labels and no invented viewing or enrollment.
-- Set `NEXTGEN_EXPERIENCE_FOLLOWUP_ENABLED=false` if deploying for a no-send rehearsal before enabling automated check-ins. Scheduler work runs after the older heartbeat snapshot has been saved, so it is not overwritten by that snapshot.
+- This release defaults the **new proactive experience check-ins off** for the authorized no-send rehearsal. Explicit `experience_followup_enabled: true` or `NEXTGEN_EXPERIENCE_FOLLOWUP_ENABLED=true` is required to enable them after verification; either explicit false setting still blocks sends. Existing inbound replies and live/recording reminders are unchanged. The read-only queue reports the effective enabled state and wait hours. Scheduler work runs after the older heartbeat snapshot has been saved, so it is not overwritten by that snapshot.
 - Verify root/login/demo and CRM still load; no student data migrations are part of this change.
 - Do not claim a recording was watched, a demo activated, payment received or an enrollment completed from a link/message being sent.
 

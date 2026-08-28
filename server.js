@@ -71347,12 +71347,20 @@ function ngV116ClearStaleSilentInboundGuards(db = {}, limit = 50) {
   return results;
 }
 
+function ngExperienceFollowupsEnabled(settings = {}) {
+  // Release in rehearsal mode. New proactive sends require an explicit enable;
+  // existing inbound replies and live/recording reminders are unchanged.
+  const env = String(process.env.NEXTGEN_EXPERIENCE_FOLLOWUP_ENABLED || "").toLowerCase();
+  return settings.experience_followup_enabled !== false && env !== "false"
+    && (settings.experience_followup_enabled === true || env === "true");
+}
+
 function ngExperienceContext(db, leadId) {
   const lead = getLeadByAnyId(db, leadId);
   const settings = ngAylaPickSettings(db);
   const messages = lead ? ngLeadConversationMessages(db, lead.id) : [];
   const channel = lead ? resolveCrmChannelForConversation({ requestedChannel: lead.current_channel || lead.last_channel || lead.source_platform || lead.platform || "whatsapp", lead, fallback: "whatsapp" }) : "whatsapp";
-  const disabled = settings.experience_followup_enabled === false || String(process.env.NEXTGEN_EXPERIENCE_FOLLOWUP_ENABLED || "true").toLowerCase() === "false";
+  const disabled = !ngExperienceFollowupsEnabled(settings);
   return { db, lead: lead || {}, messages, channel, latestInbound: ngLatestInbound(messages), latestOutbound: ngLatestOutbound(messages), futureFollowups: ngAffArray(db, "future_followups"),
     blocked: !lead ? "lead_missing" : disabled ? "experience_followup_disabled" : ng41IsSuppressed(db, lead) ? "suppressed" : ngAylaFindActiveGoogleMeetAppointment(db, lead) ? "mentor_handoff_active" : null,
   };
@@ -71414,7 +71422,8 @@ app.get("/admin/crm/automation/experience-followups", async (req, res) => {
         const check = context.blocked ? { ok: false, reason: context.blocked } : experienceFollowupEligibility(context);
         return { lead_id: lead.id, name: lead.name || lead.full_name || "", eligible: check.ok, reason: check.reason, experiences: lead.ayla_experience_followups };
       });
-    return res.json({ success: true, wait_hours: experienceWaitHours(ngAylaPickSettings(db).experience_followup_wait_hours || process.env.NEXTGEN_EXPERIENCE_FOLLOWUP_WAIT_HOURS), outside_window: "approved_experience_template_required", rows });
+    const settings = ngAylaPickSettings(db);
+    return res.json({ success: true, enabled: ngExperienceFollowupsEnabled(settings), wait_hours: experienceWaitHours(settings.experience_followup_wait_hours || process.env.NEXTGEN_EXPERIENCE_FOLLOWUP_WAIT_HOURS), outside_window: "approved_experience_template_required", rows });
   } catch (error) { return res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 

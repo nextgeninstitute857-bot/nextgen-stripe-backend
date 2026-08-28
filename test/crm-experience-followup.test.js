@@ -279,6 +279,15 @@ test("production wiring remains separate from payment flow, with a read-only adm
   assert.match(source, /runExperienceCheckin\(\{[\s\S]*?mutate: mutateCrmDb/);
   assert.match(source, /app.get\("\/admin\/crm\/automation\/experience-followups"/);
   assert.match(source, /outside_window: "approved_experience_template_required"/);
+  const activation = source.slice(source.indexOf("function ngExperienceFollowupsEnabled"), source.indexOf("function ngExperienceContext"));
+  const enabled = new Function("settings", "process", `${activation}; return ngExperienceFollowupsEnabled(settings);`);
+  for (const [settings, env, expected] of [
+    [{}, {}, false],
+    [{ experience_followup_enabled: true }, {}, true],
+    [{}, { NEXTGEN_EXPERIENCE_FOLLOWUP_ENABLED: "true" }, true],
+    [{ experience_followup_enabled: false }, { NEXTGEN_EXPERIENCE_FOLLOWUP_ENABLED: "true" }, false],
+    [{ experience_followup_enabled: true }, { NEXTGEN_EXPERIENCE_FOLLOWUP_ENABLED: "false" }, false],
+  ]) assert.equal(enabled(settings, { env }), expected);
   assert.match(source, /const experienceResults = runExperienceChecks \? await ngRunExperienceFollowups/);
   assert.match(source, /const templateKey = "nextgen_payment_ready_followup"/);
   const runner = source.slice(source.indexOf("async function ngRunExperienceFollowups"), source.indexOf('app.get("/admin/crm/automation/experience-followups"'));
