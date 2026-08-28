@@ -32952,8 +32952,48 @@ function ngCanSendAutoFirstMessage(db, lead = {}) {
   if (!ngLeadLooksLikeMetaCampaignLead(lead) && !queuedByImportOrAdmin) return { ok: false, reason: "not_queued_for_first_message" };
 
   if (lead.first_message_sent_at || lead.first_template_sent_at || stage === "first_message_sent") return { ok: false, reason: "first_message_already_marked_sent" };
+  // Inbound conversations belong to the conversational responder, not the legacy
+  // bulk welcome worker. Never race an inbound reply or restart an existing chat.
+  if (ngFirstMessageConversationStarted(db, lead)) return { ok: false, reason: "first_message_conversation_already_started" };
   if (ngLeadHasOutboundTemplate(db, lead, ["nextgen_warm_welcome", "meta_ad_first_message", "first_message_intro", "meta_first_message", "greeting_exam_type_question", "exam_type_question", "sunday_first_message", "welcome_demo_invite"])) return { ok: false, reason: "first_message_already_logged" };
+
+  // Validate before batching and before dry-run reports readiness. An unknown
+  // exam must never become a guessed Step 1 value or abort the backend heartbeat.
+  try {
+    const { templateKey, template } = ngAutoFirstTemplateForLead(db, lead);
+    buildWhatsAppTemplateComponents({
+      template, lead, variables: ngFirstMessageVariablesForLead(lead),
+      metadata: { template_key: templateKey, template_name: ngGetOfficialWhatsAppTemplateNameForKey(templateKey) },
+    });
+  } catch (error) {
+    return { ok: false, reason: "first_message_template_not_ready", error: error.message };
+  }
   return { ok: true, reason: "eligible" };
+}
+
+function ngFirstMessageConversationStarted(db, lead = {}) {
+  const leadId = getStableLeadId(lead) || lead.id || lead.lead_id;
+  return ngLeadConversationMessages(db, leadId).some((message) => {
+    const channel = String(message.channel || message.platform || "").toLowerCase();
+    if (channel && channel !== "whatsapp") return false;
+    const status = String(message.delivery_status || message.status || "").toLowerCase();
+    if (["failed", "blocked", "suppressed", "error", "skipped", "draft", "pending_approval"].includes(status)) return false;
+    if (ngIsInboundMessage(message)) return true;
+    return ngIsOutboundMessage(message) && Boolean(
+      ["accepted", "queued", "sent", "delivered", "read"].includes(status)
+      || message.sent_at || message.delivered_at || message.read_at
+    );
+  });
+}
+
+function ngAutoFirstTemplateForLead(db, lead) {
+  const templateKey = ngResolveAutoFirstMessageTemplateKey(db, lead);
+  const storedTemplate =
+    getMessageTemplateByKey(db, templateKey) ||
+    getMessageTemplateByKey(db, templateKey.toUpperCase()) ||
+    getMessageTemplateByKey(db, ngGetOfficialWhatsAppTemplateNameForKey(templateKey)) ||
+    (templateKey === "meta_ad_first_message" ? getMessageTemplateByKey(db, "META_AD_FIRST_MESSAGE") : null);
+  return { templateKey, template: ngAutoFirstVirtualTemplate(templateKey, storedTemplate) };
 }
 
 function ngFirstMessageVariablesForLead(lead = {}) {
@@ -33081,13 +33121,7 @@ async function ngSendAutoFirstMessageForLead({ db, lead, brandId = null, actorId
     return { success: true, sent: false, skipped: true, reason: allowed.reason, lead_id: lead?.id || null };
   }
 
-  const templateKey = ngResolveAutoFirstMessageTemplateKey(db, lead);
-  const storedTemplate =
-    getMessageTemplateByKey(db, templateKey) ||
-    getMessageTemplateByKey(db, templateKey.toUpperCase()) ||
-    getMessageTemplateByKey(db, ngGetOfficialWhatsAppTemplateNameForKey(templateKey)) ||
-    (templateKey === "meta_ad_first_message" ? getMessageTemplateByKey(db, "META_AD_FIRST_MESSAGE") : null);
-  const template = ngAutoFirstVirtualTemplate(templateKey, storedTemplate);
+  const { templateKey, template } = ngAutoFirstTemplateForLead(db, lead);
   const vars = { ...ngFirstMessageVariablesForLead(lead), ai_control_command_context: ngBuildAylaCommandContext(db, lead).slice(0, 3000) };
   const fallbackText = ngAutoFirstFallbackTextForTemplate(templateKey);
   const to = getBestRecipientForChannel({ channel: "whatsapp", lead });
@@ -33120,7 +33154,8 @@ async function ngSendAutoFirstMessageForLead({ db, lead, brandId = null, actorId
     },
   });
 
-  if (result.success) {
+  const actuallySent = ngAylaDeliveryActuallySent(result);
+  if (actuallySent) {
     const now = nowIso();
     lead.stage = "first_message_sent";
     lead.lead_stage = "first_message_sent";
@@ -33133,7 +33168,7 @@ async function ngSendAutoFirstMessageForLead({ db, lead, brandId = null, actorId
     lead.updated_at = now;
   }
 
-  return { ...result, sent: Boolean(result.success && !result.skipped), lead_id: lead.id || lead.lead_id, template_key: templateKey, sunday_template_router: ngIsSundayNoLiveSessionDay(db), live_session_timing: ngLiveSessionTimingStateNow(db) };
+  return { ...result, sent: actuallySent, lead_id: lead.id || lead.lead_id, template_key: templateKey, sunday_template_router: ngIsSundayNoLiveSessionDay(db), live_session_timing: ngLiveSessionTimingStateNow(db) };
 }
 
 function ngGetBulkFirstMessageSettings(db = {}, overrides = {}) {
@@ -33216,7 +33251,18 @@ async function ngRunDueAutoFirstMessages({ db, brandId = null, limit = 25, actor
   let failedCount = 0;
 
   for (const lead of leads) {
-    const result = await ngSendAutoFirstMessageForLead({ db, lead, brandId: brandId || lead.brand_id || null, actorId, source: "run_due_auto_first_message", dryRun });
+    let result;
+    try {
+      result = await ngSendAutoFirstMessageForLead({ db, lead, brandId: brandId || lead.brand_id || null, actorId, source: "run_due_auto_first_message", dryRun });
+    } catch (error) {
+      // A malformed lead or provider exception must not prevent live-session,
+      // nurture, handoff and other background checks from running this tick.
+      result = { success: false, sent: false, reason: "first_message_send_failed", category: "first_message_error" };
+      if (!dryRun) {
+        lead.first_message_error = String(error?.message || "First message failed").slice(0, 500);
+        lead.first_message_failed_at = nowIso();
+      }
+    }
     if (result.sent) sentCount += 1;
     if (result.success === false) failedCount += 1;
     results.push({
