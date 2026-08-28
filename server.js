@@ -652,7 +652,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v308-live-session-link-safety";
+const CRM_AYLA_REPLY_BUILD = "v309-noon-eastern-live-schedule";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
@@ -12973,6 +12973,239 @@ app.patch("/admin/live-sessions/:sessionId", async (req, res) => {
     await writeLiveDb(db);
     res.json({ success: true, session: sanitizeLiveSession(session) });
   } catch (e) { res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to update live session" }); }
+});
+
+const NEXTGEN_LIVE_CLASS_TIME = "12:00";
+const NEXTGEN_LIVE_CLASS_TIME_LABEL = "12:00 PM Eastern";
+const NEXTGEN_LIVE_CLASS_TIMEZONE = "America/New_York";
+const NEXTGEN_LIVE_CLASS_TIME_CONFIRMATION = "SHIFT_LIVE_SESSIONS_TO_NOON_EASTERN";
+
+function ngEasternDateKey(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: NEXTGEN_LIVE_CLASS_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date).reduce((output, part) => {
+    if (part.type !== "literal") output[part.type] = part.value;
+    return output;
+  }, {});
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+function ngDateKeyPlusDays(dateKey = "", days = 0) {
+  const parsed = new Date(`${String(dateKey || "").slice(0, 10)}T12:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return "";
+  parsed.setUTCDate(parsed.getUTCDate() + Number(days || 0));
+  return parsed.toISOString().slice(0, 10);
+}
+
+function ngReplaceNoonEasternTimeCopy(value = "") {
+  return String(value || "")
+    .replace(/12:55\s*PM\s*(?:EST|ET|Eastern(?:\s+Time)?)/gi, "11:55 AM Eastern")
+    .replace(/1(?::00)?\s*PM\s*(?:EST|ET|Eastern(?:\s+Time)?)/gi, NEXTGEN_LIVE_CLASS_TIME_LABEL)
+    .replace(/Monday\s*(?:to|[-–—])\s*Friday(?=\s+at\s+12:00\s*PM\s+Eastern)/gi, "on scheduled roadmap teaching days");
+}
+
+function ngLegacyLiveClassTime(value = "") {
+  const clean = String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
+  return clean === "13:00" || /^1(?::00)? pm (?:est|et|eastern(?: time)?)$/.test(clean);
+}
+
+function ngRewriteNoonEasternValues(target, key = "") {
+  if (!target || typeof target !== "object") return 0;
+  let changed = 0;
+  const timeKeys = new Set(["class_time", "session_time", "live_session_time", "default_live_session_time", "run_at_time", "fixed_run_time", "live_time"]);
+  for (const [field, original] of Object.entries(target)) {
+    if (typeof original === "string") {
+      let next = ngReplaceNoonEasternTimeCopy(original);
+      if (timeKeys.has(field) && ngLegacyLiveClassTime(original)) {
+        next = original.trim() === "13:00" ? NEXTGEN_LIVE_CLASS_TIME : NEXTGEN_LIVE_CLASS_TIME_LABEL;
+      }
+      if (["live_session_days", "session_days"].includes(field) && /^Monday\s*(?:to|[-–—])\s*Friday$/i.test(original.trim())) {
+        next = "Scheduled roadmap teaching days";
+      }
+      if (next !== original) {
+        target[field] = next;
+        changed += 1;
+      }
+    } else if (original && typeof original === "object") {
+      changed += ngRewriteNoonEasternValues(original, field || key);
+    }
+  }
+  return changed;
+}
+
+function ngApplyNoonEasternScheduleShift({ liveDb = {}, crmDb = {}, courseId = "", effectiveDate = "", actorId = "system" } = {}) {
+  const now = nowIso();
+  const report = {
+    course_id: String(courseId || ""),
+    effective_date: String(effectiveDate || "").slice(0, 10),
+    scheduled_time: NEXTGEN_LIVE_CLASS_TIME,
+    scheduled_timezone: NEXTGEN_LIVE_CLASS_TIMEZONE,
+    courses_updated: 0,
+    roadmaps_updated: 0,
+    roadmap_days_updated: 0,
+    live_sessions_updated: 0,
+    recording_sessions_preserved: 0,
+    prepared_sessions: [],
+    crm_settings_updated: 0,
+    crm_records_updated: 0,
+    crm_text_fields_updated: 0,
+  };
+
+  const course = liveDb.courses?.[report.course_id] || Object.values(liveDb.courses || {}).find((item) => String(item?.id || "") === report.course_id);
+  if (course) {
+    course.class_time = NEXTGEN_LIVE_CLASS_TIME;
+    course.scheduled_timezone = NEXTGEN_LIVE_CLASS_TIMEZONE;
+    if (course.schedule && typeof course.schedule === "object") course.schedule.class_time = NEXTGEN_LIVE_CLASS_TIME;
+    if (course.settings && typeof course.settings === "object") course.settings.class_time = NEXTGEN_LIVE_CLASS_TIME;
+    course.updated_by = actorId;
+    course.updated_at = now;
+    report.courses_updated = 1;
+  }
+
+  for (const roadmap of Object.values(liveDb.roadmaps || {})) {
+    if (String(roadmap?.course_id || roadmap?.courseId || "") !== report.course_id) continue;
+    roadmap.class_time = NEXTGEN_LIVE_CLASS_TIME;
+    roadmap.scheduled_timezone = NEXTGEN_LIVE_CLASS_TIMEZONE;
+    roadmap.settings = { ...(roadmap.settings || {}), class_time: NEXTGEN_LIVE_CLASS_TIME, timezone: NEXTGEN_LIVE_CLASS_TIMEZONE };
+    roadmap.updated_by = actorId;
+    roadmap.updated_at = now;
+    report.roadmaps_updated += 1;
+    for (const day of Array.isArray(roadmap.days) ? roadmap.days : []) {
+      if (String(day?.date || "").slice(0, 10) < report.effective_date || ngRoadmapDayIsNoClass(day)) continue;
+      day.class_time = NEXTGEN_LIVE_CLASS_TIME;
+      day.scheduled_time = NEXTGEN_LIVE_CLASS_TIME;
+      day.scheduled_timezone = NEXTGEN_LIVE_CLASS_TIMEZONE;
+      day.updated_by = actorId;
+      day.updated_at = now;
+      report.roadmap_days_updated += 1;
+    }
+  }
+
+  for (const session of Object.values(liveDb.liveSessions || {})) {
+    if (String(session?.course_id || "") !== report.course_id) continue;
+    if (String(session?.scheduled_date || "").slice(0, 10) < report.effective_date) continue;
+    if (["completed", "cancelled", "canceled", "archived", "hidden", "deleted"].includes(String(session?.status || "scheduled").toLowerCase())) continue;
+    if (session.recording_url || session.recording_id || session.transcript_url || session.transcript_imported) {
+      report.recording_sessions_preserved += 1;
+      continue;
+    }
+    if (hasRealZoomMeetingId(session.zoom_meeting_id) || session.zoom_join_url || session.zoom_meeting_url) {
+      report.prepared_sessions.push({
+        id: session.id,
+        title: session.title || session.topic || "Live Class",
+        date: session.scheduled_date,
+        time: session.scheduled_time,
+        zoom_meeting_id: session.zoom_meeting_id || null,
+      });
+      continue;
+    }
+    session.scheduled_time = NEXTGEN_LIVE_CLASS_TIME;
+    session.scheduled_timezone = NEXTGEN_LIVE_CLASS_TIMEZONE;
+    session.updated_by = actorId;
+    session.updated_at = now;
+    report.live_sessions_updated += 1;
+  }
+
+  crmDb.settings = { ...(crmDb.settings || {}) };
+  const settingsBefore = JSON.stringify(crmDb.settings);
+  ngRewriteNoonEasternValues(crmDb.settings);
+  crmDb.settings.live_session_time = NEXTGEN_LIVE_CLASS_TIME_LABEL;
+  crmDb.settings.default_live_session_time = NEXTGEN_LIVE_CLASS_TIME_LABEL;
+  crmDb.settings.live_session_timezone = NEXTGEN_LIVE_CLASS_TIMEZONE;
+  crmDb.settings.live_session_days = "Scheduled roadmap teaching days";
+  crmDb.settings.updated_by = actorId;
+  crmDb.settings.updated_at = now;
+  report.crm_settings_updated = settingsBefore === JSON.stringify(crmDb.settings) ? 0 : 1;
+
+  const activeMarketingCollections = [
+    "live_conversion_settings",
+    "campaigns",
+    "broadcast_campaigns",
+    "crm_flows",
+    "automation_flows",
+    "followup_rules",
+    "ai_agents",
+    "message_templates",
+    "whatsapp_templates",
+    "quick_replies",
+    "community_content_posts",
+    "community_content_roadmaps",
+    "ai_sales_learning_approved_rules",
+  ];
+  for (const collection of activeMarketingCollections) {
+    for (const record of Array.isArray(crmDb[collection]) ? crmDb[collection] : []) {
+      const fieldsChanged = ngRewriteNoonEasternValues(record);
+      if (!fieldsChanged) continue;
+      record.updated_by = actorId;
+      record.updated_at = now;
+      report.crm_records_updated += 1;
+      report.crm_text_fields_updated += fieldsChanged;
+    }
+  }
+
+  for (const settings of Array.isArray(crmDb.live_conversion_settings) ? crmDb.live_conversion_settings : []) {
+    if (settings.session_time !== NEXTGEN_LIVE_CLASS_TIME) {
+      settings.session_time = NEXTGEN_LIVE_CLASS_TIME;
+      settings.live_session_time = NEXTGEN_LIVE_CLASS_TIME;
+      settings.updated_by = actorId;
+      settings.updated_at = now;
+      report.crm_records_updated += 1;
+    }
+  }
+
+  return report;
+}
+
+app.post("/admin/live-sessions/shift-to-noon-eastern", async (req, res) => {
+  try {
+    const { user } = await requireLmsPermission(req, "lms.live_sessions.manage");
+    const sourceLiveDb = await readLiveDb();
+    const sourceCrmDb = await readCrmDb();
+    const requestedCourseId = String(req.body.course_id || req.body.courseId || "").trim();
+    const course = requestedCourseId
+      ? sourceLiveDb.courses?.[requestedCourseId] || Object.values(sourceLiveDb.courses || {}).find((item) => String(item?.id || "") === requestedCourseId)
+      : Object.values(sourceLiveDb.courses || {}).find((item) => /120-day usmle step 1 marathon/i.test(String(item?.name || item?.title || "")));
+    if (!course?.id) return res.status(404).json({ success: false, error: "The 120-Day USMLE Step 1 Marathon course was not found." });
+
+    const effectiveDate = String(req.body.effective_date || req.body.effectiveDate || ngDateKeyPlusDays(ngEasternDateKey(new Date()), 1)).slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveDate)) return res.status(400).json({ success: false, error: "effective_date must use YYYY-MM-DD." });
+
+    const liveDb = JSON.parse(JSON.stringify(sourceLiveDb));
+    const crmDb = JSON.parse(JSON.stringify(sourceCrmDb));
+    const report = ngApplyNoonEasternScheduleShift({ liveDb, crmDb, courseId: course.id, effectiveDate, actorId: user.id });
+    const preview = req.body.preview !== false;
+
+    if (preview) {
+      return res.json({ success: true, preview: true, changed: false, course: sanitizeCourse(course), report, confirmation_required: NEXTGEN_LIVE_CLASS_TIME_CONFIRMATION });
+    }
+    if (String(req.body.confirm || "").trim().toUpperCase() !== NEXTGEN_LIVE_CLASS_TIME_CONFIRMATION) {
+      return res.status(400).json({ success: false, error: `confirm must be ${NEXTGEN_LIVE_CLASS_TIME_CONFIRMATION}.`, report });
+    }
+    if (report.prepared_sessions.length) {
+      return res.status(409).json({ success: false, error: "One or more future Zoom meetings are already prepared. Their Zoom start time must be changed before the LMS schedule can be shifted safely.", report });
+    }
+
+    liveDb.liveSessionScheduleChanges = Array.isArray(liveDb.liveSessionScheduleChanges) ? liveDb.liveSessionScheduleChanges : [];
+    liveDb.liveSessionScheduleChanges.unshift({
+      id: uuid(),
+      course_id: course.id,
+      effective_date: effectiveDate,
+      from_time: "13:00",
+      to_time: NEXTGEN_LIVE_CLASS_TIME,
+      timezone: NEXTGEN_LIVE_CLASS_TIMEZONE,
+      report,
+      applied_by: user.id,
+      applied_at: nowIso(),
+    });
+    await writeLiveDb(liveDb);
+    await writeCrmDb(crmDb);
+    res.json({ success: true, preview: false, changed: true, course: sanitizeCourse(liveDb.courses?.[course.id] || course), report, message: `Future live sessions now begin at ${NEXTGEN_LIVE_CLASS_TIME_LABEL}. Roadmap, LMS, CRM AI, and active marketing settings were updated without moving recordings or notes.` });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ success: false, error: e.message || "Failed to shift live sessions to noon Eastern" });
+  }
 });
 
 app.post("/admin/live-sessions/:sessionId/host-start-link", async (req, res) => {
@@ -31937,7 +32170,7 @@ function ngEmailSampleVariables(db = {}) {
     amount: "$225.00 USD",
     class_title: "Cardiology Day 9",
     class_date: "2026-07-15",
-    class_time: "1:00 PM ET",
+    class_time: "12:00 PM Eastern",
     live_class_url: "https://nextgenusmle.live/student/live-sessions",
     recording_title: "Cardiology Day 9 Recording",
     recording_url: "https://nextgenusmle.live/student/recordings",
@@ -34149,7 +34382,7 @@ function ngBuildNoSessionRecordingFallbackText({ db = {}, settings = {}, assets 
     return custom
       .replace(/{{\s*student_name\s*}}/gi, ng41LeadName(lead) || "Doctor")
       .replace(/{{\s*recording_link\s*}}/gi, assets.recordingLink || "")
-      .replace(/{{\s*session_time\s*}}/gi, assets.sessionTime || "1 PM EST")
+      .replace(/{{\s*session_time\s*}}/gi, assets.sessionTime || NEXTGEN_LIVE_CLASS_TIME_LABEL)
       .replace(/{{\s*demo_link\s*}}/gi, assets.uworldLink || "")
       .trim();
   }
@@ -34158,7 +34391,7 @@ function ngBuildNoSessionRecordingFallbackText({ db = {}, settings = {}, assets 
     ? `\n\nYou can watch this recent session recording for now:\n${assets.recordingLink}`
     : "\n\nYou can continue with the recent recording/demo for now, and I’ll share the recording link as soon as it is available.";
 
-  return `Doctor, today’s ${assets.sessionTime || "1 PM EST"} live session is not available because the mentor/doctor is not available today.${recordingLine}\n\nIf you like the teaching style, I can arrange a Google Meet mentor consultation for guidance. Or if you prefer to wait for tomorrow’s live session, I’ll update you tomorrow.`;
+  return `Doctor, today’s ${assets.sessionTime || NEXTGEN_LIVE_CLASS_TIME_LABEL} live session is not available because the mentor/doctor is not available today.${recordingLine}\n\nIf you like the teaching style, I can arrange a Google Meet mentor consultation for guidance. Or if you prefer to wait for tomorrow’s live session, I’ll update you tomorrow.`;
 }
 
 async function ngRunNoSessionRecordingFallback({ db = {}, brandId = null, limit = 50, dryRun = false, source = "session_override", override = null, dateKey = ngDailySessionDateKey(new Date()) } = {}) {
@@ -34256,7 +34489,7 @@ function ngDailyLiveSessionActionNow(settings = {}, date = new Date(), session =
   if (!session?.id || !sessionDate || sessionDate !== dateKey) return null;
   if (["cancelled", "canceled", "archived", "hidden", "deleted"].includes(String(session.status || "").toLowerCase())) return null;
   const reminderMinutes = Number(settings.session_reminder_minutes || settings.default_session_reminder_minutes || 5);
-  const [sessionHour = 13, sessionMinute = 0] = String(session.time || session.scheduled_time || "13:00")
+  const [sessionHour = 12, sessionMinute = 0] = String(session.time || session.scheduled_time || NEXTGEN_LIVE_CLASS_TIME)
     .split(":")
     .map((value) => Number(value));
   if (!Number.isFinite(sessionHour) || !Number.isFinite(sessionMinute)) return null;
@@ -36699,13 +36932,13 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   youtube_channel_link: "",
   youtube_proof_link: "",
   uworld_demo_link: "https://nextgenusmle.live/demo",
-  live_session_time: "1:00 PM EST",
-  default_live_session_time: "1:00 PM EST",
-  live_session_timezone: "EST",
+  live_session_time: "12:00 PM Eastern",
+  default_live_session_time: "12:00 PM Eastern",
+  live_session_timezone: "America/New_York",
   mentor_team_line: "",
   company_line: "Next Generation USMLE has been actively teaching USMLE students for around 2-3 years.",
   daily_live_session_flow_enabled: true,
-  live_session_days: "Monday to Friday",
+  live_session_days: "Scheduled roadmap teaching days",
   session_reminder_minutes: 5,
   first_message_template_key: "nextgen_warm_welcome",
   session_reminder_template_key: "nextgen_live_five_minute_reminder",
@@ -49446,7 +49679,7 @@ function ngAylaDefaultCampaignCommandContext(db = {}, lead = {}) {
   const sessionTime = ngAylaFirstNonEmptySetting(
     settings,
     ["default_live_session_time", "live_session_time", "session_time", "fixed_run_time"],
-    "1:00 PM EST"
+    NEXTGEN_LIVE_CLASS_TIME_LABEL
   );
 
   const liveLink = ngAylaFirstNonEmptySetting(
@@ -50736,7 +50969,7 @@ function ngAylaGetSalesAssets(db = {}) {
     settings: s,
     timezone,
     sessionTime,
-    sessionDays: ngAylaFirstNonEmptySetting(s, ["live_session_days", "session_days"], "Monday to Friday"),
+    sessionDays: ngAylaFirstNonEmptySetting(s, ["live_session_days", "session_days"], "Scheduled roadmap teaching days"),
     liveSessionLink,
     liveSessionTitle: ngAylaFirstNonEmptySetting(s, ["live_session_title", "current_live_session_title", "daily_live_session_title"], ""),
     recordingLink,
@@ -51588,7 +51821,7 @@ Our team will confirm the Google Meet link shortly. You will receive the link at
   if (acknowledgementOnly && !directGoogleMeetRequest && !positiveGoogleMeetContext && !leadHasGoogleMeetStateLock) {
     const alreadySharedUworld = ngAylaHasSentAsset(sentText, ["uworld video library", "150 hours", "3000+", "try demo", "lms.nextgen"]);
     const alreadySharedRecording = ngAylaHasSentAsset(sentText, ["recording", "recordings", assets.recordingLink]);
-    const alreadySharedLive = ngAylaHasSentAsset(sentText, ["live session", "1 pm est", "1:00 pm est"]);
+    const alreadySharedLive = ngAylaHasSentAsset(sentText, ["live session", "12 pm eastern", "12:00 pm eastern", "1 pm est", "1:00 pm est"]);
     if (alreadySharedUworld || alreadySharedRecording || alreadySharedLive) {
       return {
         intent: "acknowledgement_continue_conversation",
@@ -51716,7 +51949,7 @@ Are you preparing for Step 1 or Step 2?`
     };
   }
 
-  if (examInText && !ngAylaHasSentAsset(sentText, ["live session", "1 pm est", "1:00 pm est"])) {
+  if (examInText && !ngAylaHasSentAsset(sentText, ["live session", "12 pm eastern", "12:00 pm eastern", "1 pm est", "1:00 pm est"])) {
     return {
       intent: "exam_known_invite_live",
       reply: `Great Doctor. For ${examInText}, we have live USMLE guidance sessions ${assets.sessionDays} at ${assets.sessionTime}.
@@ -51777,7 +52010,7 @@ After that, you can join the next ${assets.sessionDays} ${assets.sessionTime} li
       };
     }
 
-    if (!ngAylaHasSentAsset(sentText, ["live session", "1 pm est", "1:00 pm est"])) {
+    if (!ngAylaHasSentAsset(sentText, ["live session", "12 pm eastern", "12:00 pm eastern", "1 pm est", "1:00 pm est"])) {
       return {
         intent: "proactive_live_invite",
         reply: `Doctor, we have live USMLE guidance sessions ${assets.sessionDays} at ${assets.sessionTime}.
@@ -62469,7 +62702,7 @@ function ng41BroadcastVariablesForTarget(target = {}, campaign = {}) {
     lead_name: name,
     doctor_name: name,
     exam_type: target.exam_type || campaign.exam_type || "USMLE Step 1",
-    session_time: campaign.session_time || "1:00 PM EST",
+    session_time: campaign.session_time || NEXTGEN_LIVE_CLASS_TIME_LABEL,
     live_session_link: campaign.live_session_link || campaign.session_link || link,
     session_link: campaign.session_link || campaign.live_session_link || link,
     community_link: campaign.community_link || link,
@@ -62508,7 +62741,7 @@ function ng41NormalizeBroadcastCampaign(body = {}, existing = null, brandId = nu
     community_link: body.community_link || existing?.community_link || "",
     website_link: body.website_link || existing?.website_link || "https://nextgenusmle.live",
     lms_link: body.lms_link || existing?.lms_link || "https://nextgenusmle.live",
-    session_time: body.session_time || existing?.session_time || "1:00 PM EST",
+    session_time: body.session_time || existing?.session_time || NEXTGEN_LIVE_CLASS_TIME_LABEL,
     throttle_count: Math.max(1, Math.min(50, Number(body.throttle_count ?? existing?.throttle_count ?? 10))),
     throttle_minutes: Math.max(1, Math.min(120, Number(body.throttle_minutes ?? existing?.throttle_minutes ?? 10))),
     daily_cap: Math.max(1, Math.min(1000, Number(body.daily_cap ?? existing?.daily_cap ?? 200))),
@@ -63625,8 +63858,8 @@ function ngWebsiteAylaFallbackReply(message = "", db = {}) {
     return `Yes Doctor, please take our free ${demoDays}-day demo and check the quality yourself. You can see the organised dashboard, roadmap, live-class flow, recordings, notes, and sample video-library access here: ${demoLink}`;
   }
 
-  if (/live|session|class|1\s*pm|time|today|zoom|join/.test(text)) {
-    return "Doctor, our live guidance sessions are normally Monday to Friday at 1 PM EST. Students can join even for 5-10 minutes to see the teaching style. If the class is missed, we guide them with a recording and next session.";
+  if (/live|session|class|(?:1|12)\s*pm|time|today|zoom|join/.test(text)) {
+    return "Doctor, our live guidance sessions run on scheduled roadmap teaching days at 12:00 PM Eastern. Students can join even for 5-10 minutes to see the teaching style. If the class is missed, we guide them with the matching recording and next session.";
   }
 
   if (/roadmap|plan|schedule|study|curriculum|system/.test(text)) {
@@ -64975,8 +65208,8 @@ function ngRoadmapClassTime(roadmap = {}, day = {}) {
     day.scheduled_time ||
     roadmap.class_time ||
     roadmap.settings?.class_time ||
-    "13:00"
-  ).trim() || "13:00";
+    NEXTGEN_LIVE_CLASS_TIME
+  ).trim() || NEXTGEN_LIVE_CLASS_TIME;
 }
 
 function ngRoadmapTimezone(roadmap = {}, day = {}) {
@@ -68519,7 +68752,7 @@ app.post("/admin/roadmap/apply-marathon-template", async (req, res) => {
     const courseId = String(req.body.course_id || req.body.courseId || "").trim();
     if (!courseId || !db.courses[courseId]) return res.status(404).json({ success: false, error: "Valid course_id is required" });
     const startDateRaw = req.body.start_date || req.body.startDate || "2026-07-01";
-    const classTime = String(req.body.class_time || req.body.scheduled_time || "13:00").trim();
+    const classTime = String(req.body.class_time || req.body.scheduled_time || NEXTGEN_LIVE_CLASS_TIME).trim();
     const timezone = String(req.body.timezone || req.body.scheduled_timezone || DEFAULT_TIMEZONE).trim() || DEFAULT_TIMEZONE;
     const skipSundays = req.body.skip_sundays !== false;
     const recreateSessions = req.body.recreate_live_sessions !== false && req.body.create_live_sessions !== false;
