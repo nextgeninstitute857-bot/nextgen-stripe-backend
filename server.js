@@ -1,4 +1,5 @@
 import express from "express";
+import { inboxActivityCounts, hasInboxContent, uniqueInboxMessages, applyWhatsAppReceipt } from "./lib/crm-inbox-indicators.js";
 import { normalizeLearningCorrection, reviewedLearningRules, learningGuidance, learningEvidence, preserveLearningRecords } from "./lib/crm-reviewed-learning.js";
 import { EXPERIENCE_TEMPLATE, experienceTemplateSubmission } from "./lib/crm-experience-template.js";
 import {
@@ -27013,14 +27014,15 @@ app.get("/admin/crm/conversations/:leadId", async (req, res) => {
         .filter((item) => String(item.lead_id || "") === String(resolvedLeadId))
         .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
 
+    const inboxMessages = ngInboxMessagesForLead(db, lead, messages);
     res.json({
       success: true,
       lead: lead || null,
       lead_id: resolvedLeadId,
       query_key: rawKey,
-      conversations: messages,
-      messages,
-      count: messages.length,
+      conversations: inboxMessages,
+      messages: inboxMessages,
+      count: inboxMessages.length,
       read_state: markReadResult,
       sources: { unified_thread: true, includes: ["conversations", "message_logs", "inbound_messages", "outbound_messages"] },
     });
@@ -28292,6 +28294,7 @@ function ngReadStateMessageBelongsToLead(message = {}, lead = {}) {
     .map((x) => String(x || ""))
     .filter(Boolean);
   if (leadIds.length && messageLeadIds.some((id) => leadIds.includes(id))) return true;
+  if (messageLeadIds.length) return false; // An explicit different owner wins over a shared phone.
 
   const leadPhones = ngReadStateLeadPhones(lead);
   const messagePhones = [message.phone, message.whatsapp, message.whatsapp_phone, message.phone_number, message.mobile, message.to, message.from, message.recipient, message.sender, message.wa_id, message.customer_phone, message.lead_phone, message.contact_phone]
@@ -28483,6 +28486,13 @@ function ngBuildQuickActionPayload(db = {}, lead = {}, action = "", body = {}) {
   };
 }
 
+function ngInboxMessagesForLead(db, lead, messages) {
+  if (!lead) return uniqueInboxMessages(messages);
+  return uniqueInboxMessages([...messages, ...["message_logs", "crm_message_logs", "inbound_messages", "conversations"].flatMap(collection =>
+    ensureCrmArray(db, collection).filter(message => !ngMessageText(message) && hasInboxContent(message) && ngReadStateMessageBelongsToLead(message, lead))
+  )]);
+}
+
 function buildConversationInbox(db) {
   const leads = ensureCrmArray(db, "leads").map(normalizeLeadForResponse);
 
@@ -28567,7 +28577,9 @@ function buildConversationInbox(db) {
         .filter((message) => String(message.lead_id || "") === String(leadId))
         .sort((a, b) => String(a.created_at || a.timestamp || "").localeCompare(String(b.created_at || b.timestamp || "")));
 
-    const newestFirst = [...leadMessages].sort((a, b) => {
+    const inboxMessages = ngInboxMessagesForLead(db, lead, leadMessages);
+    const activityCounts = inboxActivityCounts(lead, inboxMessages);
+    const newestFirst = [...inboxMessages].sort((a, b) => {
       const at = new Date(a.created_at || a.received_at || a.sent_at || a.timestamp || a.updated_at || 0).getTime();
       const bt = new Date(b.created_at || b.received_at || b.sent_at || b.timestamp || b.updated_at || 0).getTime();
       return bt - at;
@@ -28584,11 +28596,13 @@ function buildConversationInbox(db) {
       platform: normalizeLeadSourcePlatform(lead),
       source_platform: normalizeLeadSourcePlatform(lead),
       platform_icon: normalizeLeadSourcePlatform(lead),
-      messages: leadMessages,
-      message_count: leadMessages.length,
+      messages: inboxMessages,
+      message_count: inboxMessages.length,
       last_message: lastMessage?.message_text || lastMessage?.text || lastMessage?.body || lastMessage?.message || lead.last_message || "",
       last_message_at: lastMessage?.created_at || lastMessage?.received_at || lastMessage?.sent_at || lastMessage?.timestamp || lead.last_message_at || lead.updated_at || lead.created_at || null,
       unread_count: unreadCount,
+      ...activityCounts,
+      profile_picture_url: lead.profile_picture_url || lead.profile_image_url || lead.avatar_url || lead.photo_url || null,
       status: lead.status || lead.lead_status || "new",
       lead_status: lead.lead_status || lead.status || "new",
       assigned_agent: lead.assigned_agent_name || lead.assigned_agent || lead.assigned_agent_id || "Unassigned",
@@ -28641,6 +28655,7 @@ function buildConversationInbox(db) {
       messages: allMessages,
       message_count: allMessages.length,
       unread_count: ngInboxUnreadCountForLead({ lead: newest, messages: allMessages }),
+      ...inboxActivityCounts({}, allMessages),
       status: betterStatus,
       lead_status: betterLeadStatus,
       ai_mode: newest.ai_mode || existing.ai_mode || row.ai_mode || "auto",
@@ -29446,13 +29461,7 @@ async function ngProcessWhatsAppStatusJournalEntry(entry, db) {
       String(item.provider_message_id || item.platform_message_id || "") === messageId
     );
     if (!log) continue;
-    log.status = status.status || log.status;
-    log.provider_status = status.status || null;
-    log.provider_response = status;
-    if (status.status === "delivered") log.delivered_at = nowIso();
-    if (status.status === "read") log.read_at = nowIso();
-    log.updated_at = nowIso();
-    updatedStatuses += 1;
+    if (applyWhatsAppReceipt(log, status)) updatedStatuses += 1;
   }
   if (updatedStatuses) await writeCrmDb(db);
   await ngMarkWhatsAppWebhookJournalEntry(entry, { result: { statuses_received: statuses.length, statuses_updated: updatedStatuses } });
@@ -29921,7 +29930,7 @@ app.get("/admin/crm/conversation-inbox", async (req, res) => {
       if (platform && item.platform !== platform) return false;
       if (status && String(item.status || "").toLowerCase() !== status) return false;
       if (direction && item.direction !== direction) return false;
-      if (unreadOnly && Number(item.unread_count || 0) <= 0) return false;
+      if (unreadOnly && Number(item.admin_unread_count ?? item.unread_count ?? 0) <= 0) return false;
       return true;
     });
 
@@ -29932,7 +29941,8 @@ app.get("/admin/crm/conversation-inbox", async (req, res) => {
       scoped: !ctx.crm_admin,
       summary: {
         total: conversations.length,
-        unread: conversations.filter((item) => Number(item.unread_count || 0) > 0).length,
+        unread: conversations.filter((item) => Number(item.admin_unread_count ?? item.unread_count ?? 0) > 0).length,
+        unread_messages: conversations.reduce((sum, item) => sum + Number(item.admin_unread_count ?? item.unread_count ?? 0), 0),
         whatsapp: conversations.filter((item) => item.platform === "whatsapp").length,
         telegram: conversations.filter((item) => item.platform === "telegram").length,
         email: conversations.filter((item) => item.platform === "email").length,
@@ -35323,12 +35333,7 @@ app.post("/webhooks/whatsapp", async (req, res) => {
           const messageId = status.id;
           const log = ensureCrmArray(db, "message_logs").find((item) => String(item.provider_message_id || "") === String(messageId || ""));
           if (log) {
-            log.status = status.status || log.status;
-            log.provider_status = status.status || null;
-            log.provider_response = status;
-            if (status.status === "delivered") log.delivered_at = nowIso();
-            if (status.status === "read") log.read_at = nowIso();
-            log.updated_at = nowIso();
+            applyWhatsAppReceipt(log, status);
           }
         }
       }
