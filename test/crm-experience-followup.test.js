@@ -10,7 +10,7 @@ import {
 import { runExperienceCheckin } from "../lib/crm-experience-scheduler.js";
 import { NEXTGEN_WHATSAPP_TEMPLATE_PACK } from "../lib/crm-whatsapp-template-pack.js";
 import { mutateJsonCopyOnWrite } from "../lib/json-copy-on-write.js";
-import { createAylaConversationState, normalizeAylaConversationDecision, evaluateAylaConversationDecision, buildAylaConversationPrompt, aylaExplicitHumanHandoffRequest } from "../lib/crm-ayla-conversation-engine.js";
+import { createAylaConversationState, normalizeAylaConversationDecision, evaluateAylaConversationDecision, buildAylaConversationPrompt, aylaExplicitHumanHandoffRequest, aylaConversationTextFormat, AYLA_CONVERSATION_DECISION_SCHEMA } from "../lib/crm-ayla-conversation-engine.js";
 
 const shared = "2026-08-27T14:00:00Z";
 const now = Date.parse("2026-08-27T20:00:00Z");
@@ -111,6 +111,46 @@ test("all experience outcomes require the student's words and a real shared item
   const lead = freshLead();
   assert.ok(experienceResponseViolations({ response: response({ id: "never-shared" }), items: lead.ayla_experience_followups, studentText: "I watched it and liked it" }).includes("experience_resource_not_shared"));
   assert.ok(experienceResponseViolations({ response: response(lead.ayla_experience_followups[0]), items: lead.ayla_experience_followups, studentText: "Not yet" }).includes("experience_missing_student_evidence"));
+});
+
+test("a first recording request cannot create feedback or abort an otherwise valid reply", () => {
+  const text = "Hi, I'm Sarah, preparing for USMLE Step 1 in the United States. I work nights and would like to watch a recording.";
+  const messages = [{ role: "student", text }];
+  const state = createAylaConversationState({ lead: {}, messages });
+  for (const outcome of ["not_used", "used", "partly_used", "remind_later"]) {
+    const decision = normalizeAylaConversationDecision({
+      turn_goal: "resource_request", action: "send_recording", reply: `Here is ${resource.title}: ${resource.url}`,
+      experience_response: { item_id: "invented-live-catalogue-id", outcome, feedback: "positive", evidence: null, requested_time: "tomorrow" },
+    }, state, { messages });
+    assert.deepEqual(decision.experience_response, { item_id: null, outcome: "none", feedback: "unknown", evidence: null, requested_time: null });
+    assert.ok(!evaluateAylaConversationDecision({ state, decision, messages }).some((v) => v.startsWith("experience_")));
+    const lead = {};
+    assert.equal(recordExperienceResponse({ lead, response: decision.experience_response, studentText: text, inbound: { id: "first-request" } }), false);
+    assert.equal(lead.ayla_experience_followups, undefined);
+  }
+});
+
+test("structured generation limits feedback to actual shared IDs without mutating the global schema", () => {
+  const lead = freshLead();
+  const item = lead.ayla_experience_followups[0];
+  const schemaBefore = JSON.stringify(AYLA_CONVERSATION_DECISION_SCHEMA);
+  const first = aylaConversationTextFormat().schema.properties.experience_response.properties;
+  assert.deepEqual(first.item_id.enum, [null]);
+  assert.deepEqual(first.outcome.enum, ["none"]);
+  assert.deepEqual(first.evidence.enum, [null]);
+  const next = aylaConversationTextFormat({ experiences: [item] }).schema.properties.experience_response.properties;
+  assert.deepEqual(next.item_id.enum, [null, item.id]);
+  assert.ok(next.outcome.enum.includes("partly_used"));
+  assert.equal(next.evidence.enum, undefined);
+  assert.equal(JSON.stringify(AYLA_CONVERSATION_DECISION_SCHEMA), schemaBefore);
+  const text = "Not yet, my shift ran late.";
+  const state = createAylaConversationState({ lead });
+  const good = normalizeAylaConversationDecision({ experience_response: response(item, "not_used", text, "unknown") }, state);
+  assert.equal(good.experience_response.outcome, "not_used");
+  assert.deepEqual(experienceResponseViolations({ response: good.experience_response, items: [item], studentText: text }), []);
+  const bad = normalizeAylaConversationDecision({ experience_response: response({ id: "invented" }, "used", "I watched it", "positive") }, state);
+  assert.ok(experienceResponseViolations({ response: bad.experience_response, items: [item], studentText: text }).includes("experience_resource_not_shared"));
+  assert.ok(experienceResponseViolations({ response: bad.experience_response, items: [item], studentText: text }).includes("experience_missing_student_evidence"));
 });
 
 test("an answered thanks is not use and does not silently cancel the timer; an unanswered new message blocks it", () => {

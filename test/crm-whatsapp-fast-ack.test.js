@@ -15,7 +15,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v305-request-first-conversation"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v306-experience-feedback-guard"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: "message_status"/);
   assert.match(handler, /event: "ignored_non_message"/);
@@ -82,7 +82,7 @@ test("Ayla uses natural discovery and then confidently presents the connected pr
     server.indexOf('app.post("/admin/crm/conversations/:leadId/ai-auto-send"'),
   );
 
-  assert.match(generator, /textFormat: aylaConversationTextFormat\(\)/);
+  assert.match(generator, /textFormat: aylaConversationTextFormat\(promptState\)/);
   assert.match(generator, /const decision = normalizeAylaConversationDecision/);
   assert.match(generator, /evaluateAylaConversationDecision/);
   assert.match(generator, /buildAylaConversationRepairPrompt/);
@@ -616,7 +616,7 @@ test("WhatsApp sales replies retain bounded output, short pacing and a contextua
   const structuredBudget = Number(generator.match(/maxOutputTokens: (\d+)/)?.[1]);
   assert.ok(structuredBudget > 0 && structuredBudget <= 1500);
   assert.match(conversationEngine, /reply: String\(raw.reply \?\? ""\).trim\(\).slice\(0, 1200\)/);
-  assert.match(generator, /textFormat: aylaConversationTextFormat\(\)/);
+  assert.match(generator, /textFormat: aylaConversationTextFormat\(promptState\)/);
   assert.match(generator, /if \(violations\.length\)/);
   assert.match(generator, /AYLA_CONVERSATION_QUALITY_REJECTED/);
   assert.match(generator, /follow_up: decision\.follow_up/);

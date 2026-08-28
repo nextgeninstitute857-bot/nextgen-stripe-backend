@@ -62,3 +62,11 @@ The existing six-template pack and live/recording reminders remain separate. Use
 ## Method
 
 Used official OpenAI guidance on clear instruction priority, structured memory and task-specific evaluations with historical failure cases: https://developers.openai.com/api/docs/guides/prompt-engineering , https://developers.openai.com/api/docs/guides/structured-outputs and https://developers.openai.com/api/docs/guides/evaluation-best-practices . No model/provider switch is included.
+
+## Post-deployment recording-request correction (28 August 2026)
+
+PR #279 was verified live as `v305-request-first-conversation`. The four-turn Daniel rehearsal retained the name, clarified the USMLE step, answered programme/payment questions and introduced the feature tour. A separate first-turn Sarah recording request was rejected by the new experience metadata guard (`experience_resource_not_shared`, `experience_missing_student_evidence`) before any resource had been shared. No WhatsApp message was sent.
+
+The follow-up candidate `v306-experience-feedback-guard` restricts structured feedback IDs to the resources actually shared with the lead. With no prior delivery, the only allowed tracking outcome is `none`. Normalization also discards impossible first-request feedback; existing-resource feedback still requires an exact current-student quote and valid item ID. This does not disable the content/conversation quality gate or record a false viewing outcome. The prompt distinguishes a first request from feedback. The five-card tour, six-hour timing and disabled-by-default proactive sender are unchanged.
+
+144 isolated regression tests pass, including the reproduced first-request defect and checks that genuine feedback still requires evidence. Syntax and whitespace checks pass. Live-model retesting of the correction remains a separate release gate; unit tests are not delivery or prose-quality proof.
