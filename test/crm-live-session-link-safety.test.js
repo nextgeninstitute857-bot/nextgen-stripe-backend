@@ -90,6 +90,7 @@ test("daily messages name the exact session and never fall back to an old Zoom U
 });
 
 test("scheduler and AI source use only the exact live LMS link", () => {
+  assert.match(server, /CRM_AYLA_REPLY_BUILD = "v308-live-session-link-safety"/);
   assert.match(server, /reason: "matching_live_session_link_not_released"/);
   assert.match(server, /today_session: todaySession \?/);
   assert.match(server, /liveSessionLink: liveSnapshot\?\.live_session\?\.url \|\| ""/);
