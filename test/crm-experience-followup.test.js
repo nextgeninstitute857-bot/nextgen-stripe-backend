@@ -13,7 +13,7 @@ import { mutateJsonCopyOnWrite } from "../lib/json-copy-on-write.js";
 import { createAylaConversationState, normalizeAylaConversationDecision, evaluateAylaConversationDecision, buildAylaConversationPrompt, aylaExplicitHumanHandoffRequest } from "../lib/crm-ayla-conversation-engine.js";
 
 const shared = "2026-08-27T14:00:00Z";
-const now = Date.parse("2026-08-28T08:00:00Z");
+const now = Date.parse("2026-08-27T20:00:00Z");
 const incoming = { id: "synthetic-in-1", created_at: "2026-08-27T13:59:00Z", text: "Please send the recording" };
 const outgoing = { id: "synthetic-out-1", created_at: shared };
 const resource = { kind: "recording", id: "cns-day2", title: "Central Nervous System — Day 2", url: "https://nextgenusmle.live/recording/cns-day2", channel: "whatsapp" };
@@ -53,7 +53,7 @@ test("sharing stores exact resource and pending timer, not watched/activated/enr
   assert.equal(lead.enrolled, undefined);
   assert.equal(eligible(lead).ok, true, "unpaid/not_enrolled must not be mistaken for paid/enrolled");
   assert.equal(eligible(lead, { now: now - 1 }).reason, "not_due");
-  assert.equal(experienceWaitHours(undefined), 18);
+  assert.equal(experienceWaitHours(undefined), 6);
   assert.equal(experienceWaitHours(4.5), 6);
   assert.equal(experienceWaitHours(24), 24);
 });
@@ -241,7 +241,7 @@ test("a new student reply, human takeover or outbound during AI generation cance
 });
 
 test("outside the window creates a single review task and never invokes AI or provider", async () => {
-  const h = harness({ now: () => now + 8 * 3600000 });
+  const h = harness({ now: () => Date.parse(incoming.created_at) + 24 * 3600000 });
   for (let i = 0; i < 3; i++) assert.equal((await h.run()).reason, "experience_template_required");
   assert.equal(h.db.reviews.length, 1);
   assert.equal(h.generated, 0);
