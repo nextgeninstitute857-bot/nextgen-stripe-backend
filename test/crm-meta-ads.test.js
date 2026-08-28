@@ -181,8 +181,10 @@ test("CRM routes ingest CTWA attribution and expose admin-only live Meta sync", 
   assert.match(whatsappWebhook, /meta_attributed_at/);
   assert.match(server, /click_to_whatsapp_ad/);
   assert.match(syncRoute, /await requireCrmAdmin\(req\)/);
-  assert.match(syncRoute, /fetchMetaAdsSnapshot/);
-  assert.match(syncRoute, /ngUpsertMetaAdsSnapshot/);
+  assert.match(syncRoute, /ngRunMetaReporting/);
+  assert.match(syncImplementation, /fetchMetaAdsSnapshot/);
+  assert.match(syncImplementation, /ngUpsertMetaAdsSnapshot/);
+  assert.match(syncImplementation, /mutate: mutateCrmDb/);
   assert.match(syncImplementation, /meta_attribution_synced_at/);
   assert.doesNotMatch(syncRoute, /access_token\s*:/);
 });
