@@ -34248,14 +34248,18 @@ async function ngRunNoSessionRecordingFallback({ db = {}, brandId = null, limit 
   return { action, processed: results.length, sent: results.filter((r) => r.sent).length, skipped: results.filter((r) => r.skipped).length, results, override };
 }
 
-function ngDailyLiveSessionActionNow(settings = {}, date = new Date()) {
+function ngDailyLiveSessionActionNow(settings = {}, date = new Date(), session = null) {
   const tz = "America/New_York";
-  const { weekday, hour, minute } = ngDailySessionTimeParts(date, tz);
-  const day = String(weekday || "").toLowerCase();
-  if (day.startsWith("sat") || day.startsWith("sun")) return null;
+  const { hour, minute } = ngDailySessionTimeParts(date, tz);
+  const dateKey = ngDailySessionDateKey(date);
+  const sessionDate = String(session?.date || session?.scheduled_date || "").slice(0, 10);
+  if (!session?.id || !sessionDate || sessionDate !== dateKey) return null;
+  if (["cancelled", "canceled", "archived", "hidden", "deleted"].includes(String(session.status || "").toLowerCase())) return null;
   const reminderMinutes = Number(settings.session_reminder_minutes || settings.default_session_reminder_minutes || 5);
-  const sessionHour = 13;
-  const sessionMinute = 0;
+  const [sessionHour = 13, sessionMinute = 0] = String(session.time || session.scheduled_time || "13:00")
+    .split(":")
+    .map((value) => Number(value));
+  if (!Number.isFinite(sessionHour) || !Number.isFinite(sessionMinute)) return null;
   const total = hour * 60 + minute;
   const sessionTotal = sessionHour * 60 + sessionMinute;
   if (total >= 7 * 60 && total < sessionTotal - reminderMinutes) return "daily_session_invite";
@@ -34333,19 +34337,29 @@ function ngDailyLiveSessionAlreadySent(db = {}, lead = {}, action = "", dateKey 
 }
 
 function ngDailyLiveSessionText(action = "", assets = {}, lead = {}) {
-  const name = ng41LeadName(lead) || "Doctor";
+  const sessionTitle = String(assets.liveSessionTitle || "").trim();
+  const sessionDate = String(assets.liveSessionDate || "").trim();
+  const sessionTime = String(assets.sessionTime || "").trim();
+  const sessionLabel = [sessionTitle, sessionDate ? `on ${sessionDate}` : "", sessionTime ? `at ${sessionTime}` : ""]
+    .filter(Boolean)
+    .join(" ");
   if (action === "no_session_recording_fallback") {
     return ngBuildNoSessionRecordingFallbackText({ assets, lead });
   }
+  if (action === "daily_session_invite") {
+    return `Doctor, today’s live class is ${sessionLabel || "not fully named yet"}.\n\nI’ll send a reminder 5 minutes before class and release the matching link when the session starts.`;
+  }
   if (action === "five_minute_reminder") {
-    return `Doctor, our live USMLE guidance session starts in 5 minutes.\n\nPlease join even for 5-10 minutes to see the mentor’s teaching style. I’ll share the link at session time.`;
+    return `Doctor, ${sessionLabel || "today’s live class"} starts in 5 minutes.\n\nPlease be ready. I’ll share the matching link when the session starts.`;
   }
   if (action === "session_link") {
-    const link = assets.liveSessionLink || "I’ll share the Zoom link as soon as it is available.";
-    return `Doctor, the live session is starting now.\n\nJoin here:\n${link}\n\nEven 5-10 minutes is enough to understand the teaching style.`;
+    return `Doctor, ${sessionLabel || "the live class"} is starting now.\n\nJoin here:\n${assets.liveSessionLink}\n\nEven 5-10 minutes is enough to understand the teaching style.`;
   }
-  const rec = assets.recordingLink ? `\n\nRecording:\n${assets.recordingLink}` : "";
-  return `Doctor, I’m sharing the recent live-session recording so you can check the teaching quality.${rec}\n\nDid you like the teaching style? Are you interested in joining the live sessions, or would you like a Google Meet mentor consultation for guidance?`;
+  const recordingTitle = String(assets.recordingTitle || assets.latestRecordingTitle || "").trim();
+  const rec = assets.recordingLink && recordingTitle
+    ? `\n\n${recordingTitle}\nRecording:\n${assets.recordingLink}`
+    : "";
+  return `Doctor, I’m sharing the correctly labelled recording so you can check the teaching quality.${rec}\n\nDid you like the teaching style? Are you interested in joining the live sessions, or would you like a Google Meet mentor consultation for guidance?`;
 }
 
 async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit = 50, dryRun = false, source = "run_due" } = {}) {
@@ -34357,9 +34371,27 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
   if (ngLiveSessionOverrideIsCancelled(override)) {
     return ngRunNoSessionRecordingFallback({ db, brandId, limit, dryRun, source, override, dateKey });
   }
-  const action = ngDailyLiveSessionActionNow(settings, nowDate);
+  const liveSnapshot = await ngAylaLiveLmsSalesGrounding({ structured: true, crmDb: db });
+  const todaySession = liveSnapshot.today_session || null;
+  const action = ngDailyLiveSessionActionNow(settings, nowDate, todaySession);
   if (!action) return { action: null, processed: 0, sent: 0, skipped: 0, results: [], reason: "not_due_now" };
-  const assets = ngAylaGetSalesAssets(db);
+  const configuredAssets = ngAylaGetSalesAssets(db);
+  const assets = {
+    ...configuredAssets,
+    liveSessionTitle: String(todaySession?.title || "").trim(),
+    liveSessionDate: String(todaySession?.date || "").trim(),
+    sessionTime: [String(todaySession?.time || "").trim(), String(todaySession?.timezone || "").trim()].filter(Boolean).join(" ") || configuredAssets.sessionTime,
+    liveSessionLink: String(todaySession?.url || "").trim(),
+    recordingTitle: String(liveSnapshot.latest_recording?.title || "").trim(),
+    latestRecordingTitle: String(liveSnapshot.latest_recording?.title || "").trim(),
+    recordingLink: String(liveSnapshot.latest_recording?.url || "").trim(),
+  };
+  if (action === "session_link" && !assets.liveSessionLink) {
+    return { action, processed: 0, sent: 0, skipped: 0, reason: "matching_live_session_link_not_released" };
+  }
+  if (action === "post_session_recording" && (!assets.recordingLink || !assets.recordingTitle)) {
+    return { action, processed: 0, sent: 0, skipped: 0, reason: "labelled_recording_not_available" };
+  }
   const templateMap = {
     daily_session_invite: settings.daily_session_invite_template_key || "nextgen_live_session_invite",
     five_minute_reminder: settings.session_reminder_template_key || "nextgen_live_five_minute_reminder",
@@ -49620,7 +49652,9 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
     recordingTitle: liveSnapshot?.latest_recording?.title || configuredAssets.recordingTitle || "",
     recordingLink: liveSnapshot?.latest_recording?.url || configuredAssets.recordingLink || "",
     liveSessionTitle: liveSnapshot?.live_session?.title || configuredAssets.liveSessionTitle || "",
-    liveSessionLink: liveSnapshot?.live_session?.url || configuredAssets.liveSessionLink || "",
+    // A configured/default Zoom URL can belong to an earlier class. Only the
+    // exact live LMS session may release a student link, and only in its class window.
+    liveSessionLink: liveSnapshot?.live_session?.url || "",
   };
   const timezone = assets.timezone || ngAylaSalesBrainValue(s, "booking_timezone", "EST");
   const libraryLink = ngSafeExternalLibraryBaseUrl(
@@ -50298,6 +50332,43 @@ function ngAylaApprovedCountryOfferForSales({ crmDb = null, liveDb = {}, lead = 
   return ngAylaCountryOfferPublicDetails({ country, code, coupon, rule });
 }
 
+function ngAylaTrustedLiveSessionJoinLink(session = {}, nowDate = new Date()) {
+  const status = String(session.status || "scheduled").toLowerCase();
+  const meetingId = String(session.zoom_meeting_id || session.meeting_id || "").trim();
+  const start = getSessionStartUtc(
+    session.scheduled_date,
+    session.scheduled_time,
+    session.scheduled_timezone || DEFAULT_TIMEZONE,
+  );
+  const startMs = start?.getTime?.() || 0;
+  const durationMs = Math.max(1, Number(session.duration_minutes || DEFAULT_ZOOM_DURATION_MINUTES) || DEFAULT_ZOOM_DURATION_MINUTES) * 60 * 1000;
+  const nowMs = new Date(nowDate).getTime();
+  const inReleaseWindow = Boolean(startMs && nowMs >= startMs && nowMs <= startMs + durationMs);
+  const statusAllowsEntry = !["completed", "cancelled", "canceled", "archived", "hidden", "deleted"].includes(status);
+  const candidate = hasRealZoomMeetingId(meetingId) ? ngManualLiveJoinUrl(session) : null;
+  const inspection = candidate ? ngInspectZoomAttendeeJoinUrl(candidate, { meetingId }) : null;
+  const released = Boolean(statusAllowsEntry && inReleaseWindow && inspection?.valid === true);
+  return {
+    url: released ? String(candidate) : "",
+    released,
+    reason: !statusAllowsEntry
+      ? `status_${status}`
+      : !startMs
+        ? "invalid_session_start"
+        : nowMs < startMs
+          ? "not_started"
+          : nowMs > startMs + durationMs
+            ? "session_window_ended"
+            : !hasRealZoomMeetingId(meetingId)
+              ? "meeting_not_prepared"
+              : inspection?.valid !== true
+                ? "meeting_link_mismatch"
+                : "released",
+    opens_at: start ? start.toISOString() : null,
+    closes_at: startMs ? new Date(startMs + durationMs).toISOString() : null,
+  };
+}
+
 async function ngAylaLiveLmsSalesGrounding({ structured = false, crmDb = null, lead = null, messages = [] } = {}) {
   try {
     const liveDb = await readLiveDb();
@@ -50321,38 +50392,54 @@ async function ngAylaLiveLmsSalesGrounding({ structured = false, crmDb = null, l
     const campaignCountryHint = confirmedCountry ? null : ngAylaCampaignCountryHintForSales(crmDb || {}, lead || {});
     const countryHint = confirmedCountry ? null : campaignCountryHint || ngAylaCountryHintForSales(lead || {});
 
-    const now = ngAylaDateTimePartsInZone(new Date(), "America/New_York");
+    const nowDate = new Date();
+    const now = ngAylaDateTimePartsInZone(nowDate, "America/New_York");
     const roadmap = courseId ? liveDb.roadmaps?.[courseId] || null : null;
     const days = safeArray(roadmap?.days)
       .filter((day) => String(day?.date || day?.scheduled_date || "").slice(0, 10))
       .sort((a, b) => String(a.date || a.scheduled_date || "").localeCompare(String(b.date || b.scheduled_date || "")));
-    const todayDay = days.find((day) => String(day.date || day.scheduled_date || "").slice(0, 10) === now.date_key) || null;
-    const nextTeachingDay = days.find((day) => {
+    const teachingDays = days.filter((day) => {
       const date = String(day.date || day.scheduled_date || "").slice(0, 10);
       const status = String(day.status || day.roadmap_status || "").toLowerCase();
       return date >= now.date_key && !["holiday", "cancelled", "canceled", "no_class"].includes(status) && Boolean(day.system || day.chapter);
+    });
+    const sessionForDay = (day) => {
+      if (!day) return null;
+      const id = String(day.live_session_id || day.session_id || "").trim();
+      if (id && liveDb.liveSessions?.[id]) return liveDb.liveSessions[id];
+      const date = String(day.date || day.scheduled_date || "").slice(0, 10);
+      return Object.values(liveDb.liveSessions || {}).find((session) => (
+        String(session?.course_id || "") === courseId && String(session?.scheduled_date || "").slice(0, 10) === date
+      )) || null;
+    };
+    const todayDay = teachingDays.find((day) => String(day.date || day.scheduled_date || "").slice(0, 10) === now.date_key) || null;
+    const todaySession = sessionForDay(todayDay);
+    const activeDay = teachingDays.find((day) => {
+      const date = String(day.date || day.scheduled_date || "").slice(0, 10);
+      if (date > now.date_key) return true;
+      const session = sessionForDay(day);
+      if (!session) return true;
+      const status = String(session.status || "scheduled").toLowerCase();
+      if (["completed", "cancelled", "canceled", "archived", "hidden", "deleted"].includes(status)) return false;
+      const start = getSessionStartUtc(session.scheduled_date, session.scheduled_time, session.scheduled_timezone || DEFAULT_TIMEZONE);
+      const durationMs = Math.max(1, Number(session.duration_minutes || DEFAULT_ZOOM_DURATION_MINUTES) || DEFAULT_ZOOM_DURATION_MINUTES) * 60 * 1000;
+      return !start || nowDate.getTime() <= start.getTime() + durationMs;
     }) || null;
-    const todayStatus = String(todayDay?.status || todayDay?.roadmap_status || "").toLowerCase();
-    const todayIsTeaching = Boolean(todayDay && !["holiday", "cancelled", "canceled", "no_class"].includes(todayStatus) && (todayDay.system || todayDay.chapter));
-    const activeDay = todayIsTeaching ? todayDay : nextTeachingDay;
     const activeSessionId = String(activeDay?.live_session_id || activeDay?.session_id || "");
-    const activeSession = activeSessionId
-      ? liveDb.liveSessions?.[activeSessionId] || null
-      : Object.values(liveDb.liveSessions || {}).find((session) => {
-          return String(session?.course_id || "") === courseId &&
-            String(session?.scheduled_date || "") === String(activeDay?.date || activeDay?.scheduled_date || "").slice(0, 10);
-        }) || null;
-    const activeSessionTitle = activeSession
-      ? ngDayFirstContentTitle(activeSession.topic || activeSession.title || "", {
-          systemDay: activeSession.system_day || activeSession.day_in_system || activeDay?.system_day,
-          dayNumber: activeSession.day_number || activeDay?.day_number,
-          system: activeSession.system || activeDay?.system || activeDay?.chapter || "",
-          fallback: activeDay?.title || "",
+    const activeSession = sessionForDay(activeDay);
+    const titleForSessionDay = (session, day) => session
+      ? ngDayFirstContentTitle(session.topic || session.title || "", {
+          systemDay: session.system_day || session.day_in_system || day?.system_day,
+          dayNumber: session.day_number || day?.day_number,
+          system: session.system || day?.system || day?.chapter || "",
+          fallback: day?.title || "",
         })
       : "";
-    const activeSessionUrl = String(
-      activeSession?.join_url || activeSession?.meeting_url || activeSession?.zoom_join_url || ""
-    ).trim();
+    const activeSessionTitle = titleForSessionDay(activeSession, activeDay);
+    const todaySessionTitle = titleForSessionDay(todaySession, todayDay);
+    const activeSessionLink = ngAylaTrustedLiveSessionJoinLink(activeSession || {}, nowDate);
+    const activeSessionUrl = activeSessionLink.url;
+    const todaySessionLink = ngAylaTrustedLiveSessionJoinLink(todaySession || {}, nowDate);
     const latestPublishedRecording = Object.values(liveDb.recordings || {})
       .filter((recording) => {
         const recordingCourseId = String(recording?.course_id || "");
@@ -50390,7 +50477,7 @@ async function ngAylaLiveLmsSalesGrounding({ structured = false, crmDb = null, l
         ? `- Current/next roadmap item: ${String(activeDay.title || `${activeDay.system || activeDay.chapter || "System"}${activeDay.system_day ? ` Day ${activeDay.system_day}` : ""}`).trim()} on ${String(activeDay.date || activeDay.scheduled_date || "").slice(0, 10)}.`
         : "- No current roadmap item is available; do not invent a topic or date.",
       activeSession
-        ? `- Matching live session: ${activeSessionTitle || "NextGen live session"}; ${String(activeSession.status || "scheduled")} on ${activeSession.scheduled_date || ""}${activeSession.scheduled_time ? ` at ${activeSession.scheduled_time} ${activeSession.scheduled_timezone || "America/New_York"}` : ""}.${activeSessionUrl ? ` Student join link: ${activeSessionUrl}` : " No student join link is published yet."}`
+        ? `- Matching live session: ${activeSessionTitle || "NextGen live session"}; ${String(activeSession.status || "scheduled")} on ${activeSession.scheduled_date || ""}${activeSession.scheduled_time ? ` at ${activeSession.scheduled_time} ${activeSession.scheduled_timezone || "America/New_York"}` : ""}.${activeSessionUrl ? ` Student join link: ${activeSessionUrl}` : ` No student join link is released now (${activeSessionLink.reason}). The exact matching Zoom link may be shared only from the stated session start through its class window; never reuse a previous session link.`}`
         : "- No matching live-session record is available; do not promise that a session link is live now.",
       publicRecording
         ? `- Latest published recording: ${latestRecordingTitle || "Recent live session"}.${latestRecordingUrl ? ` Student recording link: ${latestRecordingUrl}` : ""} When sharing it, always state this exact title before the link.`
@@ -50443,6 +50530,21 @@ async function ngAylaLiveLmsSalesGrounding({ structured = false, crmDb = null, l
         timezone: String(activeSession.scheduled_timezone || "America/New_York"),
         status: String(activeSession.status || "scheduled"),
         url: activeSessionUrl,
+        link_release_state: activeSessionLink.reason,
+        link_opens_at: activeSessionLink.opens_at,
+      } : null,
+      today_session: todaySession ? {
+        id: String(todaySession.id || todayDay?.live_session_id || todayDay?.session_id || ""),
+        title: todaySessionTitle || "NextGen live session",
+        system: String(todaySession.system || todayDay?.system || todayDay?.chapter || ""),
+        system_day: Number(todaySession.system_day || todaySession.day_in_system || todayDay?.system_day || 0) || null,
+        date: String(todaySession.scheduled_date || todayDay?.date || todayDay?.scheduled_date || "").slice(0, 10),
+        time: String(todaySession.scheduled_time || ""),
+        timezone: String(todaySession.scheduled_timezone || "America/New_York"),
+        status: String(todaySession.status || "scheduled"),
+        url: todaySessionLink.url,
+        link_release_state: todaySessionLink.reason,
+        link_opens_at: todaySessionLink.opens_at,
       } : null,
       latest_recording: publicRecording ? {
         id: String(publicRecording.id || publicRecording.recording_key || ""),
@@ -50459,6 +50561,27 @@ async function ngAylaLiveLmsSalesGrounding({ structured = false, crmDb = null, l
     const snapshot = { context, plans: [], active_plan_features: [], country_offer: null, pricing_url: "https://nextgenusmle.live/pricing", demo_url: "https://nextgenusmle.live/demo", current_date: "", course_name: "" };
     return structured ? snapshot : context;
   }
+}
+
+function ngAylaLiveSessionLinkViolations(text = "", snapshot = {}) {
+  const value = String(text || "");
+  const urls = uniqueList(
+    (value.match(/https:\/\/[^\s<>()]*zoom\.us\/j\/[^\s<>()]+/gi) || [])
+      .map((url) => url.replace(/[.,;!?]+$/g, "")),
+  );
+  if (!urls.length) return [];
+
+  const session = snapshot.live_session || null;
+  const approvedUrl = String(session?.url || "").trim();
+  if (!approvedUrl) return ["live_session_link_not_released_for_exact_session"];
+  if (urls.some((url) => url !== approvedUrl)) return ["wrong_or_stale_live_session_link"];
+
+  const title = String(session?.title || "").trim();
+  const date = String(session?.date || "").trim();
+  const violations = [];
+  if (!title || !value.includes(title)) violations.push("live_session_link_missing_exact_session_name");
+  if (!date || !value.includes(date)) violations.push("live_session_link_missing_exact_session_date");
+  return violations;
 }
 
 function ngAylaPricingDraftIsGrounded(reply = "", snapshot = {}) {
@@ -52018,6 +52141,13 @@ Write only Ayla's next message. No markdown headings. No bullet list unless the 
     error.code = "AI_EMPTY_REPLY";
     throw error;
   }
+  const liveLinkViolations = ngAylaLiveSessionLinkViolations(reply, liveLmsSalesSnapshot);
+  if (liveLinkViolations.length) {
+    const error = new Error(`AYLA_LIVE_SESSION_LINK_REJECTED: ${liveLinkViolations.join(", ")}`);
+    error.statusCode = 502;
+    error.code = "AYLA_LIVE_SESSION_LINK_REJECTED";
+    throw error;
+  }
 
   return {
     reply,
@@ -52168,6 +52298,7 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
   }));
   const decisionViolations = (candidate) => uniqueList([
     ...evaluateAylaConversationDecision({ decision: candidate, state, messages: decisionMessages }),
+    ...ngAylaLiveSessionLinkViolations(`${candidate.reply || ""}\n${candidate.follow_up || ""}`, liveSnapshot),
     ...(
       ngAylaIsPriceQuestion(latestInboundText)
       && !aylaExplicitHumanHandoffRequest(latestInboundText)

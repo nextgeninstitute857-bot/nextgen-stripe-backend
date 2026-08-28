@@ -1,0 +1,101 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import test from "node:test";
+
+const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
+const between = (start, end) => server.slice(server.indexOf(start), server.indexOf(end));
+
+test("Ayla rejects unreleased, stale, and unnamed Zoom links", () => {
+  const source = between("function ngAylaLiveSessionLinkViolations", "function ngAylaPricingDraftIsGrounded");
+  const violations = new Function("uniqueList", `${source}; return ngAylaLiveSessionLinkViolations;`)((items) => [...new Set(items)]);
+  const exact = "https://us06web.zoom.us/j/22222222222?pwd=correct";
+  const snapshot = { live_session: { title: "Central Nervous System — Day 7", date: "2026-08-29", url: exact } };
+
+  assert.deepEqual(violations("Tomorrow: https://us06web.zoom.us/j/11111111111?pwd=old", { live_session: { ...snapshot.live_session, url: "" } }), ["live_session_link_not_released_for_exact_session"]);
+  assert.deepEqual(violations("Central Nervous System — Day 7 on 2026-08-29 https://us06web.zoom.us/j/11111111111?pwd=old", snapshot), ["wrong_or_stale_live_session_link"]);
+  assert.deepEqual(violations(`Join ${exact}`, snapshot), ["live_session_link_missing_exact_session_name", "live_session_link_missing_exact_session_date"]);
+  assert.deepEqual(violations(`Central Nervous System — Day 7 on 2026-08-29\n${exact}`, snapshot), []);
+});
+
+test("the trusted Zoom link is released only during its exact class window", () => {
+  const source = between("function ngAylaTrustedLiveSessionJoinLink", "async function ngAylaLiveLmsSalesGrounding");
+  const trusted = new Function(
+    "getSessionStartUtc",
+    "DEFAULT_TIMEZONE",
+    "DEFAULT_ZOOM_DURATION_MINUTES",
+    "hasRealZoomMeetingId",
+    "ngManualLiveJoinUrl",
+    "ngInspectZoomAttendeeJoinUrl",
+    `${source}; return ngAylaTrustedLiveSessionJoinLink;`,
+  )(
+    (date, time) => new Date(`${date}T${time}:00Z`),
+    "UTC",
+    120,
+    (id) => /^\d{11}$/.test(String(id)),
+    (session) => session.zoom_join_url,
+    (url, { meetingId }) => ({ valid: url.includes(meetingId) }),
+  );
+  const session = {
+    id: "day-7",
+    status: "scheduled",
+    scheduled_date: "2026-08-29",
+    scheduled_time: "13:00",
+    scheduled_timezone: "UTC",
+    duration_minutes: 120,
+    zoom_meeting_id: "22222222222",
+    zoom_join_url: "https://us06web.zoom.us/j/22222222222?pwd=correct",
+  };
+
+  assert.equal(trusted(session, new Date("2026-08-29T12:59:59Z")).reason, "not_started");
+  assert.equal(trusted(session, new Date("2026-08-29T12:59:59Z")).url, "");
+  assert.equal(trusted(session, new Date("2026-08-29T13:00:00Z")).url, session.zoom_join_url);
+  assert.equal(trusted({ ...session, status: "completed" }, new Date("2026-08-29T13:10:00Z")).url, "");
+  assert.equal(trusted({ ...session, zoom_join_url: "https://us06web.zoom.us/j/11111111111?pwd=old" }, new Date("2026-08-29T13:10:00Z")).reason, "meeting_link_mismatch");
+});
+
+test("daily session timing follows the real LMS date and includes Saturday classes", () => {
+  const source = between("function ngDailyLiveSessionActionNow", "function ngLeadIsPaidOrGroupAddedForLiveSession");
+  const actionNow = new Function(
+    "ngDailySessionTimeParts",
+    "ngDailySessionDateKey",
+    `${source}; return ngDailyLiveSessionActionNow;`,
+  )(() => ({ weekday: "Saturday", hour: 12, minute: 55 }), () => "2026-08-29");
+  const saturday = { id: "day-7", date: "2026-08-29", time: "13:00", status: "scheduled" };
+
+  assert.equal(actionNow({}, new Date(), saturday), "five_minute_reminder");
+  assert.equal(actionNow({}, new Date(), { ...saturday, date: "2026-08-28" }), null);
+  assert.equal(actionNow({}, new Date(), { ...saturday, status: "cancelled" }), null);
+});
+
+test("daily messages name the exact session and never fall back to an old Zoom URL", () => {
+  const source = between("function ngDailyLiveSessionText", "async function ngRunDailyLiveSessionScheduler");
+  const textFor = new Function(
+    "ngBuildNoSessionRecordingFallbackText",
+    `${source}; return ngDailyLiveSessionText;`,
+  )(() => "fallback");
+  const assets = {
+    liveSessionTitle: "Central Nervous System — Day 7 — Neurology / CNS",
+    liveSessionDate: "2026-08-29",
+    sessionTime: "13:00 America/New_York",
+    liveSessionLink: "https://us06web.zoom.us/j/22222222222?pwd=correct",
+    recordingTitle: "Central Nervous System — Day 6 — Neurology / CNS",
+    recordingLink: "https://us06web.zoom.us/rec/share/cns-day-6",
+  };
+
+  assert.match(textFor("five_minute_reminder", assets), /Central Nervous System — Day 7/);
+  assert.match(textFor("five_minute_reminder", assets), /2026-08-29/);
+  assert.match(textFor("session_link", assets), /22222222222/);
+  assert.match(textFor("post_session_recording", assets), /Central Nervous System — Day 6/);
+  assert.doesNotMatch(textFor("post_session_recording", assets), /recent live-session recording/);
+});
+
+test("scheduler and AI source use only the exact live LMS link", () => {
+  assert.match(server, /reason: "matching_live_session_link_not_released"/);
+  assert.match(server, /today_session: todaySession \?/);
+  assert.match(server, /liveSessionLink: liveSnapshot\?\.live_session\?\.url \|\| ""/);
+  assert.match(server, /ngAylaLiveSessionLinkViolations\(`\$\{candidate\.reply/);
+  assert.doesNotMatch(
+    between("function ngBuildAylaBackendSalesBrain", "function ngBuildAylaCommandContext"),
+    /liveSnapshot\?\.live_session\?\.url \|\| configuredAssets\.liveSessionLink/,
+  );
+});
