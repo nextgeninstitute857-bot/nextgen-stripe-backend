@@ -215,6 +215,54 @@ test("check-in copy asks about the exact resource and does not send extra links"
   assert.match(buildExperienceCheckinPrompt({ item }), /no claim they watched\/enrolled/);
 });
 
+test("polite mentor requests start the supported handoff instead of denying it", () => {
+  const state = createAylaConversationState({ lead: freshLead() });
+  for (const text of [
+    "Could I have a call with a mentor before deciding?",
+    "May I please get a consultation with your mentor?",
+    "Can I have a call with a mentor?",
+    "What is the price, and could I have a call with a mentor?",
+  ]) {
+    assert.equal(aylaExplicitHumanHandoffRequest(text), true, text);
+    const messages = [{ role: "student", text }];
+    const denied = normalizeAylaConversationDecision({ turn_goal: "specific_answer", action: "reply_only", reply: "I cannot arrange a call directly at this moment." }, state, { messages });
+    assert.ok(evaluateAylaConversationDecision({ state, decision: denied, messages }).includes("requested_mentor_handoff_not_started"));
+    const handoff = normalizeAylaConversationDecision({ turn_goal: "human_handoff", action: "begin_human_handoff", ask_field: "email", intent: "pricing_question", reply: "What email should we use for your mentor request?" }, state, { messages });
+    const violations = evaluateAylaConversationDecision({ state, decision: handoff, messages });
+    assert.ok(!violations.includes("requested_mentor_handoff_not_started"));
+    assert.ok(!violations.includes("premature_handoff_without_explicit_request"));
+    assert.ok(!violations.includes("pricing_question_forced_handoff"));
+  }
+  for (const text of ["I don't want a mentor call", "No call please", "I watched the mentor's video", "I might want a call later, not now"]) {
+    assert.equal(aylaExplicitHumanHandoffRequest(text), false, text);
+  }
+});
+
+test("not-yet feedback does not resend a long recording URL, but explicit resend still works", () => {
+  const state = createAylaConversationState({ lead: freshLead() });
+  for (const [text, repeats] of [["Not yet, my shift ran late.", true], ["Please send the recording link again.", false]]) {
+    const messages = [{ role: "student", text }];
+    const decision = normalizeAylaConversationDecision({ turn_goal: "specific_answer", action: "reply_only", reply: `Here is ${resource.title}: ${resource.url}` }, state, { messages });
+    assert.equal(evaluateAylaConversationDecision({ state, decision, messages }).includes("unsolicited_recording_link_repeat"), repeats);
+  }
+});
+
+test("the live rehearsal's vague resource/help endings cannot pass as a useful next step", () => {
+  const state = createAylaConversationState({ lead: freshLead() });
+  for (const reply of [
+    "Let me know if you need more resources or assistance!",
+    "Let me know if you want another recording or have any questions about your preparation!",
+    "Let me know how I can assist you further!",
+  ]) {
+    const decision = normalizeAylaConversationDecision({ turn_goal: "specific_answer", action: "reply_only", reply }, state);
+    assert.ok(evaluateAylaConversationDecision({ state, decision, messages: [{ role: "student", text: "Not yet" }] }).includes("vague_handback_ending"));
+  }
+  const prompt = buildAylaConversationPrompt({ state });
+  assert.match(prompt, /used or partly used/);
+  assert.match(prompt, /pause\/replay/);
+  assert.match(prompt, /collects a request, not a confirmed appointment/);
+});
+
 test("a natural acceptance of one mentor-call offer works, but liking a recording or declining does not book a handoff", () => {
   const state = createAylaConversationState({ lead: { name: "Test Student", exam: "USMLE Step 1" } });
   const offer = "Would you like a call with our mentor?";
