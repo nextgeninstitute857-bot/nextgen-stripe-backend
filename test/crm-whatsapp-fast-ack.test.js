@@ -15,7 +15,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v304-sales-final-proof"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v305-request-first-conversation"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: "message_status"/);
   assert.match(handler, /event: "ignored_non_message"/);
@@ -618,7 +618,7 @@ test("WhatsApp sales replies stay fast and end with a concrete contextual next s
   assert.match(generator, /follow_up: decision\.follow_up/);
 });
 
-test("quiet sales conversations receive one short follow-up after four to five hours", () => {
+test("only an explicit payment commitment qualifies for the four-to-five-hour follow-up", () => {
   const nurture = server.slice(
     server.indexOf("// v116: Backend-first Ayla heartbeat and no-reply nurture."),
     server.indexOf("async function ngV116RunNoReplyLmsNurture"),
@@ -631,8 +631,9 @@ test("quiet sales conversations receive one short follow-up after four to five h
   assert.match(nurture, /const latestOutbound = ngLatestOutbound\(messages\)/);
   assert.match(nurture, /latestInboundAt >= latestOutboundAt/);
   assert.match(nurture, /waiting_4_to_5_hours/);
-  assert.match(nurture, /free 7-day demo/);
-  assert.match(nurture, /baseline diagnostic/);
+  assert.match(nurture, /aylaPaymentFollowupEligibility/);
+  assert.match(nurture, /if \(!permission.ok\) return permission/);
+  assert.doesNotMatch(nurture, /free 7-day demo|baseline diagnostic/);
 });
 
 test("WhatsApp provider authorization failures open a shared circuit breaker", () => {

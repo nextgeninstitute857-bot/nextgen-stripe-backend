@@ -29,6 +29,8 @@ import {
 } from "./lib/crm-meta-ads.js";
 import {
   aylaExplicitHumanHandoffRequest,
+  aylaPendingStudentText,
+  canonicalAylaCountry,
   applyAylaConversationNameToLead,
   applyAylaConversationDecision,
   aylaConversationTextFormat,
@@ -38,6 +40,7 @@ import {
   evaluateAylaConversationDecision,
   normalizeAylaConversationDecision,
 } from "./lib/crm-ayla-conversation-engine.js";
+import { recordAylaPaymentFollowup, aylaPaymentFollowupEligibility } from "./lib/crm-conversation-followup.js";
 import {
   fetchWhatsAppBusinessProfile,
   fetchWhatsAppPhoneIdentity,
@@ -640,7 +643,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v304-sales-final-proof";
+const CRM_AYLA_REPLY_BUILD = "v305-request-first-conversation";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
@@ -48771,6 +48774,18 @@ function ngTryLockAiAuto({ lead = {}, inbound = {}, channel = "", ttlSeconds = N
   const key = ngAiAutoGuardKey({ lead, inbound, channel });
   const now = Date.now();
   const existing = ngAiAutoLocks.get(key);
+  const leadId = String(lead.id || lead.lead_id || lead.phone || lead.email || "unknown_lead");
+  const resolvedChannel = normalizeCrmSendChannel(channel || "auto");
+  for (const [otherKey, other] of ngAiAutoLocks) {
+    const age = now - Number(other.started_at || 0);
+    if (age >= NG_AI_AUTO_LOCK_TTL_SECONDS * 1000) {
+      ngAiAutoLocks.delete(otherKey);
+      continue;
+    }
+    if (otherKey !== key && String(other.lead_id) === leadId && other.channel === resolvedChannel) {
+      return { locked: false, key, reason: "ai_auto_previous_turn_processing", wait_ms: NG_AI_AUTO_LOCK_TTL_SECONDS * 1000 - age };
+    }
+  }
 
   if (existing && now - Number(existing.started_at || 0) < Number(ttlSeconds || NG_AI_AUTO_COOLDOWN_SECONDS) * 1000) {
     return {
@@ -48783,7 +48798,7 @@ function ngTryLockAiAuto({ lead = {}, inbound = {}, channel = "", ttlSeconds = N
 
   ngAiAutoLocks.set(key, {
     key,
-    lead_id: lead.id || lead.lead_id || null,
+    lead_id: leadId,
     fingerprint: ngAiAutoMessageFingerprint(inbound),
     channel: normalizeCrmSendChannel(channel || "auto"),
     started_at: now,
@@ -49060,18 +49075,21 @@ function ngHasOutboundAfterInbound(messages = [], inbound = null) {
   const inboundFingerprint = ngAiAutoMessageFingerprint(inbound);
   return safeArray(messages).some((message) => {
     if (!ngIsOutboundMessage(message) || !ngMessageText(message)) return false;
+    if (["failed", "blocked", "suppressed", "error", "skipped"].includes(String(message.delivery_status || message.status || "").toLowerCase())) return false;
     const outTime = ngMessageTimeMs(message);
-    // v106: WhatsApp/webhook timestamps can land in the same second. Do not treat an older/same-second outbound as a reply to the latest inbound unless metadata explicitly links it.
-    if (inboundTime && outTime && outTime > inboundTime + 1000) return true;
     const meta = message.metadata || message.meta || {};
-    return Boolean(
+    const explicitlyLinked = meta.latest_inbound_id || meta.inbound_message_id || message.ai_auto_inbound_fingerprint;
+    if (explicitlyLinked) return Boolean(
       inboundFingerprint &&
       (
-        String(meta.latest_inbound_id || "") === String(inbound.id || "") ||
+        (meta.latest_inbound_id && inbound.id && String(meta.latest_inbound_id) === String(inbound.id)) ||
         String(meta.inbound_message_id || "") === String(inboundFingerprint) ||
         String(message.ai_auto_inbound_fingerprint || "") === String(inboundFingerprint)
       )
     );
+    // A late reply to an older turn must not swallow the next student message.
+    // Timestamp fallback remains for human/legacy messages without reply IDs.
+    return Boolean(inboundTime && outTime && outTime > inboundTime + 1000);
   });
 }
 function ngWithinHours(dateValue, hours = 24) {
@@ -49716,12 +49734,12 @@ function ngAylaCountrySourceIsConfirmed(value = "") {
 }
 
 function ngAylaConfirmedCountryForSales(lead = {}) {
-  const stateCountry = String(lead?.ayla_conversation_state?.facts?.country || "").trim();
+  const stateCountry = canonicalAylaCountry(lead?.ayla_conversation_state?.facts?.country);
   const stateSource = String(lead?.ayla_conversation_state?.fact_sources?.country || "").trim().toLowerCase();
   if (stateCountry && ngAylaCountrySourceIsConfirmed(stateSource)) {
     return { country: stateCountry, source: stateSource };
   }
-  const leadCountry = String(lead.country || lead.country_name || lead.location || "").trim();
+  const leadCountry = canonicalAylaCountry(lead.country || lead.country_name || lead.location);
   const leadSource = String(lead.country_source || lead.country_confirmation_source || "").trim().toLowerCase();
   if (leadCountry && (lead.country_confirmed === true || ngAylaCountrySourceIsConfirmed(leadSource))) {
     return { country: leadCountry, source: leadSource || "confirmed" };
@@ -51922,7 +51940,7 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
       model,
       systemPrompt,
       userPrompt,
-      maxOutputTokens: 750,
+      maxOutputTokens: 1100,
       textFormat: aylaConversationTextFormat(),
     });
     const parsed = safeJsonParseFromAI(result.text || "{}");
@@ -52091,8 +52109,12 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
     feature_tour_requested: featureTourRequested,
     live_lms_sales_snapshot: liveSnapshot,
     conversation_stage: nextState.stage,
+    turn_goal: decision.turn_goal,
     conversation_state: nextState,
     conversation_engine: CRM_AYLA_REPLY_BUILD,
+    payment_followup: decision.payment_followup,
+    payment_followup_inbound: latestInbound,
+    payment_followup_student_text: aylaPendingStudentText(cleanMessages),
   };
 }
 
@@ -52109,6 +52131,7 @@ function ngAylaCommitConversationTurnAfterDelivery({ lead = {}, ai = {}, sendRes
   if (!lead.exam && nextState.facts?.exam && nextState.facts.exam !== "unknown") lead.exam = nextState.facts.exam;
   if (!lead.exam_type && nextState.facts?.exam && nextState.facts.exam !== "unknown") lead.exam_type = nextState.facts.exam;
   if (!lead.main_need && nextState.facts?.main_need) lead.main_need = nextState.facts.main_need;
+  if (nextState.facts?.region) lead.region = nextState.facts.region;
   if (nextState.facts?.country && ngAylaCountrySourceIsConfirmed(nextState.fact_sources?.country)) {
     lead.country = nextState.facts.country;
     lead.country_confirmed = true;
@@ -52117,6 +52140,13 @@ function ngAylaCommitConversationTurnAfterDelivery({ lead = {}, ai = {}, sendRes
   }
   applyAylaConversationNameToLead(lead, nextState.facts?.name, nowIso(), {
     source: nextState.fact_sources?.name,
+  });
+  recordAylaPaymentFollowup({
+    lead,
+    decision: ai,
+    inbound: ai.payment_followup_inbound || {},
+    studentText: ai.payment_followup_student_text || "",
+    now: nowIso(),
   });
   if (nextState.last_action === "send_demo") {
     lead.demo_link_sent = true;
@@ -52511,20 +52541,8 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
     (lead.ai_mode_set === true || lead.automation_mode_set === true || lead.mode_locked === true || lead.ai_mode_manually_set === true) &&
     (aiMode === "manual" || aiMode === "draft" || aiMode === "ai_draft");
 
-  // Full AI Auto is default. v103: inbound webhook wakeups can revive Ayla automatically,
-  // because imported/test leads were often left in Manual/AI Draft and the bot appeared silent.
-  const sourceText = String(source || "").toLowerCase();
-  const isInboundWebhookWakeup = /webhook|inbound|wakeup/.test(sourceText);
-  const forceAutoOnInbound = String(process.env.NEXTGEN_AYLA_FORCE_AUTO_ON_INBOUND || "true").toLowerCase() !== "false";
-  if (explicitlyManualOrDraft && isInboundWebhookWakeup && forceAutoOnInbound) {
-    lead.ai_mode = "auto";
-    lead.automation_mode = "auto";
-    lead.ai_mode_set = false;
-    lead.automation_mode_set = false;
-    lead.mode_locked = false;
-    lead.ai_mode_manually_set = false;
-    lead.updated_at = ngAffNow();
-  } else if (explicitlyManualOrDraft) {
+  // A human takeover must stay manual when the student sends another message.
+  if (explicitlyManualOrDraft) {
     return { lead_id: lead.id || lead.lead_id || null, skipped: true, reason: "explicit_manual_or_draft_mode", ai_mode: aiMode };
   }
 
@@ -52537,6 +52555,10 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
   const latestOutbound = ngLatestOutbound(messages);
 
   if (!latestInbound) return { lead_id: lead.id || lead.lead_id || null, skipped: true, reason: "no_inbound" };
+  const quietForMs = Date.now() - ngMessageTimeMs(latestInbound);
+  if (quietForMs >= 0 && quietForMs < 2000) {
+    return { lead_id: lead.id, skipped: true, reason: "collecting_student_message_fragments", wait_ms: 2000 - quietForMs };
+  }
 
   const channel = resolveCrmChannelForConversation({
     requestedChannel: lead.current_channel || lead.last_channel || lead.source_platform || lead.platform || "auto",
@@ -52574,7 +52596,7 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
   const inboundTime = new Date(latestInbound.created_at || latestInbound.received_at || latestInbound.timestamp || 0).getTime();
   const outboundTime = new Date(latestOutbound?.created_at || latestOutbound?.sent_at || latestOutbound?.timestamp || 0).getTime();
 
-  if (!force && latestOutbound && Number.isFinite(outboundTime) && Number.isFinite(inboundTime) && outboundTime > inboundTime + 1000) {
+  if (!force && hasOutboundAfterInbound) {
     return {
       lead_id: lead.id || lead.lead_id || null,
       skipped: true,
@@ -52623,6 +52645,15 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
   try {
     const ai = await ngGenerateStudentAutoReply({ db, lead, messages, channel, allowOperationalActions: true });
     const replyDelayMs = await ngAylaWaitBeforeAutoSend(db, channel);
+    const latestDb = await readCrmDb();
+    const currentLead = getLeadByAnyId(latestDb, lead.id);
+    const currentInbound = ngLatestInbound(ngLeadConversationMessages(latestDb, lead.id));
+    if (!currentLead || ngAiAutoMessageFingerprint(currentInbound || {}) !== inboundFingerprint
+      || ["manual", "draft", "ai_draft"].includes(String(currentLead.ai_mode || currentLead.automation_mode || "auto").toLowerCase())
+      || currentLead.opted_out || currentLead.do_not_contact || currentLead.stop_requested) {
+      ngReleaseAiAutoLock(duplicateGuard.lock_key);
+      return { lead_id: lead.id, skipped: true, reason: "conversation_changed_before_send" };
+    }
     const to = getBestRecipientForChannel({ channel, lead, message: latestInbound });
     const featureTourRequested = channel === "whatsapp" && Boolean(ai.feature_tour_requested);
     const aylaMediaAssets = channel === "whatsapp"
@@ -52760,7 +52791,7 @@ function ngScheduleAylaAutoReplyAfterInbound({ leadId, source = "webhook_ai_auto
   // were too slow, so the student saw silence until refreshing or until a later run-due pass.
   // We still keep idempotency by re-reading the DB before every attempt and stopping if a
   // real outbound already exists after the latest inbound.
-  const firstDelay = Number.isFinite(Number(delayMs)) ? Math.max(1000, Number(delayMs)) : 1500;
+  const firstDelay = Number.isFinite(Number(delayMs)) ? Math.max(2200, Number(delayMs)) : 2200;
   const attempts = [firstDelay, 7000, 18000, 45000];
 
   attempts.forEach((waitMs, index) => {
@@ -71253,20 +71284,23 @@ function ngV116ClearStaleSilentInboundGuards(db = {}, limit = 50) {
 
 function ngV116NoReplyNurtureText(db = {}, lead = {}) {
   const exam = ng41LeadExamType(lead) || "your exam";
-  const parts = [];
-  parts.push(`Doctor, just checking in about your ${exam} preparation.`);
-  parts.push("NextGen keeps the roadmap, live teaching, labelled recordings, notes and accountability in one organised place. You begin with a baseline diagnostic, your weak areas are shown, and those areas are targeted through adaptive flashcards, revision and later assessments.");
-  parts.push("Attend live whenever you can; if you are busy, catch up from the matching recording when you are free.");
-  parts.push("You can experience the complete system through the free 7-day demo:\nhttps://nextgenusmle.live/demo");
-  return parts.join("\n\n");
+  const name = ng41LeadName(lead) || "there";
+  return `Hi ${name} 👋 You mentioned you were ready to enrol for ${exam}. Do you need help with the payment step?`;
 }
 
 function ngV116NoReplyLeadEligible(db = {}, lead = {}) {
   const base = ngV116LeadCanReceiveAutomation(db, lead);
   if (!base.ok) return base;
+  if (["manual", "draft", "ai_draft"].includes(String(lead.ai_mode || lead.automation_mode || "auto").toLowerCase())) return { ok: false, reason: "manual_or_draft_mode" };
   const messages = ngLeadConversationMessages(db, lead.id);
   const latestInbound = ngLatestInbound(messages);
   const latestOutbound = ngLatestOutbound(messages);
+  const permission = aylaPaymentFollowupEligibility({
+    lead, latestInbound, latestOutbound,
+    futureFollowups: ngAffArray(db, "future_followups"),
+    waitHours: ngV116NoReplyWaitHours(db),
+  });
+  if (!permission.ok) return permission;
   const firstAtRaw = lead.first_message_sent_at || lead.first_template_sent_at || lead.last_contacted_at || lead.last_outbound_sent_at || "";
   const latestOutboundRaw = latestOutbound?.created_at || latestOutbound?.sent_at || latestOutbound?.timestamp || firstAtRaw;
   if (!latestOutboundRaw) return { ok: false, reason: "no_outbound_yet" };
@@ -71283,8 +71317,9 @@ function ngV116NoReplyLeadEligible(db = {}, lead = {}) {
 
 async function ngV116RunNoReplyLmsNurture({ db = {}, brandId = null, limit = 20, source = "backend_heartbeat_no_reply_nurture", dryRun = false } = {}) {
   if (!dryRun && ngWhatsAppProviderBlockStatus().blocked) return [];
-  const s = ngAylaPickSettings(db);
-  const templateKey = normalizeTemplateLookupKey(s.no_reply_lms_nurture_template_key || s.demo_lms_activation_invite_template_key || "demo_lms_activation_invite");
+  // Do not silently fall back to the broad demo/welcome template for payment
+  // follow-ups. Outside the window this exact approved template is required.
+  const templateKey = "nextgen_payment_ready_followup";
   const leads = ngAffArray(db, "leads")
     .filter((lead) => !brandId || String(lead.brand_id || "") === String(brandId || ""))
     .filter((lead) => ngV116NoReplyLeadEligible(db, lead).ok)
@@ -71306,19 +71341,16 @@ async function ngV116RunNoReplyLmsNurture({ db = {}, brandId = null, limit = 20,
         to,
         text,
         leadId: lead.id,
-        templateId: channel === "whatsapp" ? templateKey : null,
+        templateId: channel === "whatsapp" && !ngWithinHours(ngLatestInbound(ngLeadConversationMessages(db, lead.id))?.created_at, 24) ? templateKey : null,
         templateVariables: {
           lead,
+          name: ng41LeadName(lead) || "Doctor",
+          programme: ng41LeadExamType(lead) || "NextGen programme",
           student_name: ng41LeadName(lead) || "Doctor",
-          exam_type: ng41LeadExamType(lead) || "USMLE Step 1",
-          session_time: ngAylaGetSalesAssets(db).sessionTime,
-          recording_link: ngAylaGetSalesAssets(db).recordingLink,
-          demo_link: ngAylaGetSalesAssets(db).uworldLink,
-          live_session_link: ngAylaGetSalesAssets(db).liveSessionLink,
         },
         metadata: {
           source,
-          delivery_purpose: "no_reply_lms_ecosystem_nurture",
+          delivery_purpose: "payment_ready_followup",
           template_key: templateKey,
           whatsapp_template_name: templateKey,
           no_reply_nurture: true,
@@ -71326,13 +71358,11 @@ async function ngV116RunNoReplyLmsNurture({ db = {}, brandId = null, limit = 20,
       });
       const sent = ngAylaDeliveryActuallySent(result);
       if (sent) {
+        lead.ayla_payment_followup.sent_at = nowIso();
         lead.no_reply_lms_nurture_sent_at = nowIso();
         lead.no_reply_lms_nurture_status = "sent";
         lead.no_reply_lms_nurture_template_key = templateKey;
-        lead.lms_ecosystem_explained = true;
-        lead.stage = lead.stage === "new_lead" || lead.stage === "first_message_sent" ? "no_reply" : lead.stage;
-        lead.next_action = "continue_daily_live_session_and_google_meet_nurture";
-        ngEnsureLeadFlowLabels(lead, ["lms_ecosystem_explained", "no_reply_nurture_sent"]);
+        ngEnsureLeadFlowLabels(lead, ["payment_ready_followup_sent"]);
       } else {
         lead.no_reply_lms_nurture_status = "retry_later";
         lead.no_reply_lms_nurture_last_error = result?.error || result?.reason || result?.status || "not_sent";
