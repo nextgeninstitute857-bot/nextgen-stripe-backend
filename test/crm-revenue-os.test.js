@@ -67,3 +67,32 @@ test("snapshot exposes smart views, attribution, SLA, recurring revenue and hone
   assert.equal(snapshot.smart_views.find((view) => view.key === "payment_rescue").count, 1);
   assert.equal(snapshot.attribution[0].source, "meta");
 });
+
+test("AI outcome counts use accepted reply metadata, not only the legacy sent_by field", () => {
+  const snapshot = buildRevenueOsSnapshot({
+    leads: [{ id: "one" }, { id: "two" }],
+    messages: [
+      { id: "log-a", provider_message_id: "wamid.a", lead_id: "one", direction: "outbound", status: "sent", sent_by: "system", text: "Hello", metadata: { source: "full_ai_auto" } },
+      { id: "conversation-a", provider_message_id: "wamid.a", lead_id: "one", direction: "outbound", status: "delivered", text: "Hello", metadata: { ai_auto: true } },
+      { id: "log-b", lead_id: "two", direction: "outbound", status: "queued", text: "Here is the recording", metadata: { source: "process_ai_auto" } },
+    ],
+  });
+  assert.equal(snapshot.ai.ai_messages, 2);
+  assert.equal(snapshot.ai.conversations_handled, 2);
+});
+
+test("human replies, drafts, failures and missing-owner records never inflate AI results", () => {
+  const base = { lead_id: "one", direction: "outbound", text: "Hello", metadata: { ai_auto: true } };
+  const snapshot = buildRevenueOsSnapshot({
+    leads: [{ id: "one" }],
+    messages: [
+      ...["failed", "draft", "blocked", "suppressed", "skipped", "error", "pending_approval"].map((status) => ({ ...base, id: status, status, sent_at: "2026-08-28T10:00:00Z" })),
+      { ...base, id: "unknown-state" },
+      { ...base, id: "human", status: "sent", sent_by: "support@email.example", metadata: {} },
+      { ...base, id: "orphan", lead_id: "removed-lead", status: "sent" },
+      { ...base, id: "inbound", direction: "inbound", status: "read" },
+    ],
+  });
+  assert.equal(snapshot.ai.ai_messages, 0);
+  assert.equal(snapshot.ai.conversations_handled, 0);
+});
