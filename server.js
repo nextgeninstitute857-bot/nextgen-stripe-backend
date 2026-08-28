@@ -22711,6 +22711,10 @@ function registerCrmCrudRoutes({ route, collection, brandScoped = true }) {
       } else if (collection === "conversations") {
         record = ensureCrmArray(db, collection).find((item) => String(item.id) === String(req.params.id));
         if (!record) {
+          // This route is registered before the specialised CRM routes. Admin
+          // lead threads must use the unified logs, not stale conversation copies.
+          // Preserve record-ID lookups and the existing team-scoped read path.
+          if (ctx.crm_admin) return await ngSendCrmConversationThread(req, res, ctx);
           let conversations = ensureCrmArray(db, "conversations")
             .filter((item) => String(item.lead_id) === String(req.params.id))
             .sort((a, b) => String(a.created_at || a.timestamp || "").localeCompare(String(b.created_at || b.timestamp || "")));
@@ -26996,11 +27000,14 @@ app.get("/admin/crm/integrations/:id/logs", async (req, res) => {
 });
 
 // Client data / conversation / handoff backend
-app.get("/admin/crm/conversations/:leadId", async (req, res) => {
+// Called by the first registered conversations/:id route, after access checks.
+// Do not register another GET with the same URL shape: Express would shadow it.
+async function ngSendCrmConversationThread(req, res, ctx) {
   try {
-    const { user } = await requireCrmAdmin(req);
-    const db = await readCrmDb();
-    const rawKey = String(req.params.leadId || "").trim();
+    if (!ctx.crm_admin) return res.status(403).json({ success: false, error: "CRM admin access required" });
+    const { user } = ctx;
+    const db = ctx.crmDb;
+    const rawKey = String(req.params.id || "").trim();
     const lead = getLeadByAnyId(db, rawKey);
     const resolvedLeadId = lead?.id || lead?.lead_id || rawKey;
     let markReadResult = { changed: false };
@@ -27029,7 +27036,7 @@ app.get("/admin/crm/conversations/:leadId", async (req, res) => {
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
-});
+}
 
 
 app.post("/admin/crm/conversations/:leadId/mark-read", async (req, res) => {
