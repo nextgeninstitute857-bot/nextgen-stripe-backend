@@ -70,3 +70,11 @@ PR #279 was verified live as `v305-request-first-conversation`. The four-turn Da
 The follow-up candidate `v306-experience-feedback-guard` restricts structured feedback IDs to the resources actually shared with the lead. With no prior delivery, the only allowed tracking outcome is `none`. Normalization also discards impossible first-request feedback; existing-resource feedback still requires an exact current-student quote and valid item ID. This does not disable the content/conversation quality gate or record a false viewing outcome. The prompt distinguishes a first request from feedback. The five-card tour, six-hour timing and disabled-by-default proactive sender are unchanged.
 
 144 isolated regression tests pass, including the reproduced first-request defect and checks that genuine feedback still requires evidence. Syntax and whitespace checks pass. Live-model retesting of the correction remains a separate release gate; unit tests are not delivery or prose-quality proof.
+
+## Live-model findings and final handoff correction
+
+The v306 no-send rehearsal completed the four-turn recording/not-yet/partial/negative conversation and the feature-tour/demo-resend/positive-feedback sequence. It also exposed an explicit polite mentor request being missed: “Could I have a call with a mentor before deciding?” produced a false capability denial. The existing handoff matcher only covered “can I have,” and the decision guard prevented premature handoff but did not require a requested handoff.
+
+Candidate `v307-experience-handoff-quality` accepts polite can/could/may requests, requires the existing handoff action for explicit consent, and permits a combined price-and-mentor request without conflicting with the no-forced-price-handoff rule. Refusals and “later/not now” remain protected. It also catches the observed vague endings and unsolicited repeated recording URLs, while preserving explicit resends. The AI prompt now guides partial-view feedback and practical help for recording pace. No fixed sales reply script or new booking system is introduced.
+
+147 targeted regressions pass. No live messages, bookings, payments or student records were created by these rehearsals. The final deployed build still needs its live-model replay before any new proactive sending is enabled.

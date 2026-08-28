@@ -645,7 +645,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v306-experience-feedback-guard";
+const CRM_AYLA_REPLY_BUILD = "v307-experience-handoff-quality";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
@@ -52004,6 +52004,7 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
     ...evaluateAylaConversationDecision({ decision: candidate, state, messages: decisionMessages }),
     ...(
       ngAylaIsPriceQuestion(latestInboundText)
+      && !aylaExplicitHumanHandoffRequest(latestInboundText)
       && (
         ["begin_human_handoff", "continue_human_handoff"].includes(candidate.action)
         || /\b(?:schedule|book|arrange).{0,40}(?:meeting|consultation|call)\b/i.test(String(candidate.reply || ""))
