@@ -117,7 +117,10 @@ test("Ayla uses strict structured output for one coherent conversation decision"
   const format = aylaConversationTextFormat();
   assert.equal(format.type, "json_schema");
   assert.equal(format.strict, true);
-  assert.equal(format.schema, AYLA_CONVERSATION_DECISION_SCHEMA);
+  assert.notEqual(format.schema, AYLA_CONVERSATION_DECISION_SCHEMA);
+  assert.deepEqual(format.schema.required, AYLA_CONVERSATION_DECISION_SCHEMA.required);
+  assert.deepEqual(format.schema.properties.action, AYLA_CONVERSATION_DECISION_SCHEMA.properties.action);
+  assert.deepEqual(format.schema.properties.experience_response.properties.item_id.enum, [null]);
   assert.equal(format.schema.additionalProperties, false);
   assert.ok(format.schema.required.includes("memory_patch"));
   assert.ok(format.schema.required.includes("action"));

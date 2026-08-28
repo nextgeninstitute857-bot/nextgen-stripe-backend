@@ -645,7 +645,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v305-request-first-conversation";
+const CRM_AYLA_REPLY_BUILD = "v306-experience-feedback-guard";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
@@ -51967,7 +51967,7 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
       systemPrompt,
       userPrompt,
       maxOutputTokens: 1500,
-      textFormat: aylaConversationTextFormat(),
+      textFormat: aylaConversationTextFormat(promptState),
     });
     const parsed = safeJsonParseFromAI(result.text || "{}");
     const decision = normalizeAylaConversationDecision(parsed, state, {
