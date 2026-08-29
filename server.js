@@ -652,7 +652,7 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
 const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
-const CRM_AYLA_REPLY_BUILD = "v309-noon-eastern-live-schedule";
+const CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
@@ -28733,6 +28733,15 @@ function ngInboxMessagesForLead(db, lead, messages) {
   )]);
 }
 
+function ngInboxAutomatedDeliveryFailure(message = {}) {
+  const status = String(message.status || message.delivery_status || message.provider_status || "").toLowerCase();
+  const metadata = message.metadata || {};
+  const source = String(message.source || metadata.source || "").toLowerCase();
+  const action = String(metadata.daily_live_session_action || message.daily_live_session_action || "").toLowerCase();
+  return ["failed", "error", "not_sent", "undelivered", "provider_failed", "provider_blocked"].includes(status) &&
+    (Boolean(action) || ["daily_live_session_scheduler", "no_session_today_override"].includes(source));
+}
+
 function buildConversationInbox(db) {
   const leads = ensureCrmArray(db, "leads").map(normalizeLeadForResponse);
 
@@ -28819,7 +28828,9 @@ function buildConversationInbox(db) {
 
     const inboxMessages = ngInboxMessagesForLead(db, lead, leadMessages);
     const activityCounts = inboxActivityCounts(lead, inboxMessages);
-    const newestFirst = [...inboxMessages].sort((a, b) => {
+    // Failed scheduler attempts remain in the returned audit data, but they are not
+    // student-facing messages and must not replace the real chat preview or ordering.
+    const newestFirst = inboxMessages.filter((message) => !ngInboxAutomatedDeliveryFailure(message)).sort((a, b) => {
       const at = new Date(a.created_at || a.received_at || a.sent_at || a.timestamp || a.updated_at || 0).getTime();
       const bt = new Date(b.created_at || b.received_at || b.sent_at || b.timestamp || b.updated_at || 0).getTime();
       return bt - at;
@@ -34406,8 +34417,8 @@ async function ngRunNoSessionRecordingFallback({ db = {}, brandId = null, limit 
 
   const results = [];
   for (const lead of leads) {
-    if (ngDailyLiveSessionAlreadySent(db, lead, action, dateKey)) {
-      results.push({ lead_id: lead.id, skipped: true, reason: "no_session_update_already_sent_today" });
+    if (ngDailyLiveSessionAlreadyAttempted(db, lead, action, dateKey)) {
+      results.push({ lead_id: lead.id, skipped: true, reason: "no_session_update_already_attempted_today" });
       continue;
     }
     const recentCooldownMinutes = Math.max(1, Number(settings.daily_session_recent_send_cooldown_minutes || 10));
@@ -34427,6 +34438,7 @@ async function ngRunNoSessionRecordingFallback({ db = {}, brandId = null, limit 
       continue;
     }
 
+    const attempt = ngStartDailyLiveSessionAttempt(db, lead, action, dateKey, source);
     try {
       const result = await sendCrmMessage({
         db,
@@ -34458,15 +34470,23 @@ async function ngRunNoSessionRecordingFallback({ db = {}, brandId = null, limit 
       });
 
       if (result.skipped || result.duplicate_blocked) {
+        ngFinishDeliveryLock(attempt, "skipped", { reason: result.reason || "duplicate_message_blocked" });
         results.push({ lead_id: lead.id, skipped: true, reason: result.reason || "duplicate_message_blocked", action, template_id: templateId });
         continue;
       }
+      if (!experienceDeliveryAccepted(result)) {
+        ngFinishDeliveryLock(attempt, "failed", { reason: result.reason || result.error || "provider_not_sent", message_log_id: result.log?.id || null });
+        results.push({ lead_id: lead.id, sent: false, reason: result.reason || result.error || "provider_not_sent", action, template_id: templateId, message_id: result.log?.id || null });
+        continue;
+      }
+      ngFinishDeliveryLock(attempt, "sent", { message_log_id: result.log?.id || null });
       lead.last_no_session_update_sent_at = nowIso();
       lead.no_session_update_date = dateKey;
       lead.next_action = "wait_for_recording_feedback_google_meet_or_tomorrow_live_session";
       lead.updated_at = nowIso();
       results.push({ lead_id: lead.id, sent: Boolean(result.success || result.queued), action, template_id: templateId, message_id: result.log?.id || null });
     } catch (error) {
+      ngFinishDeliveryLock(attempt, "failed", { reason: error.message });
       results.push({ lead_id: lead.id, sent: false, error: error.message, action, template_id: templateId });
     }
   }
@@ -34560,13 +34580,35 @@ function ngDailyLiveSessionEligibleLead(db = {}, lead = {}, settings = {}) {
   return true;
 }
 
-function ngDailyLiveSessionAlreadySent(db = {}, lead = {}, action = "", dateKey = "") {
-  return ensureCrmArray(db, "message_logs").some((log) => {
-    return String(log.lead_id || "") === String(lead.id || "") &&
-      String(log.metadata?.daily_live_session_action || "") === String(action) &&
-      String(log.metadata?.daily_live_session_date || "") === String(dateKey) &&
-      !["failed", "error"].includes(String(log.status || ""));
+function ngDailyLiveSessionAttemptMatches(row = {}, lead = {}, action = "", dateKey = "") {
+  const metadata = row.metadata || {};
+  return String(row.lead_id || "") === String(lead.id || "") &&
+    String(metadata.daily_live_session_action || row.daily_live_session_action || "") === String(action) &&
+    String(metadata.daily_live_session_date || row.daily_live_session_date || "") === String(dateKey);
+}
+
+function ngDailyLiveSessionAlreadyAttempted(db = {}, lead = {}, action = "", dateKey = "") {
+  return ["message_logs", "message_delivery_locks"].some((collection) =>
+    ensureCrmArray(db, collection).some((row) => ngDailyLiveSessionAttemptMatches(row, lead, action, dateKey))
+  );
+}
+
+function ngStartDailyLiveSessionAttempt(db = {}, lead = {}, action = "", dateKey = "", source = "run_due") {
+  const attempt = withTimestamps({
+    id: uuid(),
+    delivery_dedupe_key: ["daily-live-session-action", lead.id || "unknown", dateKey, action].join("|"),
+    lead_id: lead.id || null,
+    channel: normalizeAutomationChannel(lead.current_channel || lead.last_channel || lead.source_platform || lead.platform || "whatsapp"),
+    status: "claimed",
+    metadata: {
+      source: "daily_live_session_attempt_guard",
+      scheduler_source: source,
+      daily_live_session_action: action,
+      daily_live_session_date: dateKey,
+    },
   });
+  ensureCrmArray(db, "message_delivery_locks").push(attempt);
+  return attempt;
 }
 
 function ngDailyLiveSessionText(action = "", assets = {}, lead = {}) {
@@ -34637,8 +34679,8 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
     .slice(0, Math.max(1, Math.min(200, Number(limit || 50))));
   const results = [];
   for (const lead of leads) {
-    if (ngDailyLiveSessionAlreadySent(db, lead, action, dateKey)) {
-      results.push({ lead_id: lead.id, skipped: true, reason: "already_sent_today" });
+    if (ngDailyLiveSessionAlreadyAttempted(db, lead, action, dateKey)) {
+      results.push({ lead_id: lead.id, skipped: true, reason: "already_attempted_today" });
       continue;
     }
     const recentCooldownMinutes = Math.max(1, Number(settings.daily_session_recent_send_cooldown_minutes || 10));
@@ -34655,6 +34697,7 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
       results.push({ lead_id: lead.id, dry_run: true, action, template_id: templateId, text });
       continue;
     }
+    const attempt = ngStartDailyLiveSessionAttempt(db, lead, action, dateKey, source);
     try {
       const result = await sendCrmMessage({
         db,
@@ -34686,15 +34729,18 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
         },
       });
       if (result.skipped || result.duplicate_blocked) {
+        ngFinishDeliveryLock(attempt, "skipped", { reason: result.reason || "duplicate_message_blocked" });
         results.push({ lead_id: lead.id, skipped: true, reason: result.reason || "duplicate_message_blocked", action, template_id: templateId });
         continue;
       }
       // Keep the experience record tied to an accepted, exactly labelled
       // recording. Failed/queued messages and generic fallback labels do not count.
       if (!experienceDeliveryAccepted(result)) {
+        ngFinishDeliveryLock(attempt, "failed", { reason: result.reason || result.error || "provider_not_sent", message_log_id: result.log?.id || null });
         results.push({ lead_id: lead.id, sent: false, reason: result.reason || result.error || "provider_not_sent", action, template_id: templateId });
         continue;
       }
+      ngFinishDeliveryLock(attempt, "sent", { message_log_id: result.log?.id || null });
       if (action === "post_session_recording" && (assets.recordingTitle || assets.latestRecordingTitle)) {
         ngAylaRecordExperienceDelivery({ db, lead, inbound: latestInbound || {}, sendResults: [result],
           snapshot: { latest_recording: { title: assets.recordingTitle || assets.latestRecordingTitle, url: assets.recordingLink } },
@@ -34715,6 +34761,7 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
       ng41EnsureDailySessionRecovery(db, lead);
       results.push({ lead_id: lead.id, sent: Boolean(result.success || result.queued), action, template_id: templateId, message_id: result.log?.id || null });
     } catch (error) {
+      ngFinishDeliveryLock(attempt, "failed", { reason: error.message });
       results.push({ lead_id: lead.id, sent: false, error: error.message, action, template_id: templateId });
     }
   }

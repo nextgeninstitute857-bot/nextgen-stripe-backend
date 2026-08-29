@@ -71,5 +71,5 @@ test("admin apply requires explicit confirmation and blocks prepared Zoom meetin
   assert.match(server, /SHIFT_LIVE_SESSIONS_TO_NOON_EASTERN/);
   assert.match(server, /report\.prepared_sessions\.length/);
   assert.match(server, /Recordings, notes|without moving recordings or notes/);
-  assert.match(server, /CRM_AYLA_REPLY_BUILD = "v309-noon-eastern-live-schedule"/);
+  assert.match(server, /CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard"/);
 });
