@@ -17,6 +17,19 @@ test("Ayla rejects unreleased, stale, and unnamed Zoom links", () => {
   assert.deepEqual(violations(`Central Nervous System — Day 7 on 2026-08-29\n${exact}`, snapshot), []);
 });
 
+test("Ayla accepts only the latest published recording with its exact LMS title", () => {
+  const source = between("function ngAylaRecordingLinkViolations", "function ngAylaPricingDraftIsGrounded");
+  const violations = new Function("uniqueList", `${source}; return ngAylaRecordingLinkViolations;`)((items) => [...new Set(items)]);
+  const exact = "https://us06web.zoom.us/rec/play/cns-day-6";
+  const title = "Central Nervous System — Day 6 — Neurology / CNS";
+  const snapshot = { latest_recording: { title, url: exact } };
+
+  assert.deepEqual(violations(`Old recording: https://us06web.zoom.us/rec/share/june-17`, snapshot), ["wrong_or_stale_recording_link"]);
+  assert.deepEqual(violations(`Recording: ${exact}`, snapshot), ["recording_link_missing_exact_title"]);
+  assert.deepEqual(violations(`${title}\nRecording:\n${exact}`, snapshot), []);
+  assert.deepEqual(violations(`Old recording: https://us06web.zoom.us/rec/share/june-17`, { latest_recording: null }), ["recording_link_not_published"]);
+});
+
 test("the trusted Zoom link is released only during its exact class window", () => {
   const source = between("function ngAylaTrustedLiveSessionJoinLink", "async function ngAylaLiveLmsSalesGrounding");
   const trusted = new Function(
@@ -95,6 +108,9 @@ test("scheduler and AI source use only the exact live LMS link", () => {
   assert.match(server, /today_session: todaySession \?/);
   assert.match(server, /liveSessionLink: liveSnapshot\?\.live_session\?\.url \|\| ""/);
   assert.match(server, /ngAylaLiveSessionLinkViolations\(`\$\{candidate\.reply/);
+  assert.match(server, /ngAylaRecordingLinkViolations\(`\$\{candidate\.reply/);
+  assert.match(server, /recording_fallback_missing_exact_title_or_link/);
+  assert.match(server, /latestRecordingTitle: String\(liveSnapshot\.latest_recording\?\.title/);
   assert.doesNotMatch(
     between("function ngBuildAylaBackendSalesBrain", "function ngBuildAylaCommandContext"),
     /liveSnapshot\?\.live_session\?\.url \|\| configuredAssets\.liveSessionLink/,
