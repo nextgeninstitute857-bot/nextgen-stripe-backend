@@ -15,7 +15,7 @@ test("WhatsApp webhook ignores Meta status callbacks before creating CRM leads",
     server.indexOf('app.get("/webhooks/social/:platform/:integrationId?"'),
   );
 
-  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v307-experience-handoff-quality"/);
+  assert.match(server, /const CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard"/);
   assert.match(handler, /if \(!inboundMessages\.length\)/);
   assert.match(handler, /event: "message_status"/);
   assert.match(handler, /event: "ignored_non_message"/);
@@ -535,7 +535,7 @@ test("campaign country is used only as a friendly confirmation hint", () => {
 test("daily live and recording follow-ups hard-stop for enrolled, opted-out and not-interested leads", () => {
   const eligibility = server.slice(
     server.indexOf("function ngDailyLiveSessionEligibleLead"),
-    server.indexOf("function ngDailyLiveSessionAlreadySent"),
+    server.indexOf("function ngDailyLiveSessionAttemptMatches"),
   );
   const scheduler = server.slice(
     server.indexOf("function ngDailyLiveSessionActionNow"),
