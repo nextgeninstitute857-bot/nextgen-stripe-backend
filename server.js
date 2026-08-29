@@ -27232,8 +27232,16 @@ app.get("/admin/crm/integrations/:id/logs", async (req, res) => {
   }
 });
 
+const NG_LEGACY_RECORDING_PRESENTATION_TITLES = [
+  {
+    url: "https://us06web.zoom.us/rec/share/AW1KwcAeK20HQ7ASMM6SHqWQLxaHhogYrxCncn4hAvY2un-ie-AhudnMDQ_x1HAH.Ibb30_naRGaA9bue",
+    title: "Wrong legacy recording link — NextGen Institute's Personal Meeting Room — Jun 17, 2026",
+  },
+];
+
 function ngConversationRecordingTitleIndex(liveDb = {}) {
-  return Object.values(liveDb.recordings || {})
+  return [
+    ...Object.values(liveDb.recordings || {})
     .flatMap((recording) => {
       const title = ngDayFirstContentTitle(recording?.topic || recording?.title || "", {
         systemDay: recording?.system_day,
@@ -27245,8 +27253,10 @@ function ngConversationRecordingTitleIndex(liveDb = {}) {
         .map((url) => String(url || "").trim())
         .filter(Boolean)
         .map((url) => ({ url, title }));
-    })
-    .filter((item) => item.title)
+    }),
+    ...NG_LEGACY_RECORDING_PRESENTATION_TITLES,
+  ]
+    .filter((item) => item.url && item.title)
     .sort((a, b) => b.url.length - a.url.length);
 }
 

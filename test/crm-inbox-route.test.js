@@ -12,7 +12,7 @@ function sourceBetween(start, end) {
   return server.slice(from, to);
 }
 const crud = sourceBetween('function registerCrmCrudRoutes(', 'const NEXTGEN_IMPORT_PHONE_COUNTRY_RULES');
-const thread = sourceBetween('function ngConversationRecordingTitleIndex(', 'app.post("/admin/crm/conversations/:leadId/mark-read"');
+const thread = sourceBetween('const NG_LEGACY_RECORDING_PRESENTATION_TITLES', 'app.post("/admin/crm/conversations/:leadId/mark-read"');
 
 function fixture({ admin = true, denied = false } = {}) {
   const lead = { id: 'lead-1', name: 'Synthetic Student' };
@@ -51,7 +51,7 @@ function fixture({ admin = true, denied = false } = {}) {
     await route.handler({ params: { id }, query }, response);
     return response;
   }
-  return { get, counters, delivered, original };
+  return { get, counters, delivered, original, context };
 }
 
 test('the first registered lead-thread route returns provider receipts and media, not the old sent-only copy', async () => {
@@ -66,6 +66,14 @@ test('the first registered lead-thread route returns provider receipts and media
   assert.equal(result.body.read_state.changed, true);
   assert.deepEqual(f.counters, { writes: 1, reads: 1, unified: 1 });
   assert.doesNotMatch(server, /app\.get\("\/admin\/crm\/conversations\/:leadId"/);
+});
+
+test('the known wrong legacy Zoom share is labelled honestly instead of receiving the current LMS title', async () => {
+  const f = fixture();
+  const legacyUrl = 'https://us06web.zoom.us/rec/share/AW1KwcAeK20HQ7ASMM6SHqWQLxaHhogYrxCncn4hAvY2un-ie-AhudnMDQ_x1HAH.Ibb30_naRGaA9bue?from=hub';
+  const titleIndex = f.context.ngConversationRecordingTitleIndex({ recordings: {} });
+  const labelled = f.context.ngConversationMessageWithRecordingTitle({ message_text: `Recording:\n${legacyUrl}` }, titleIndex);
+  assert.equal(labelled.presentation_recording_title, "Wrong legacy recording link — NextGen Institute's Personal Meeting Room — Jun 17, 2026");
 });
 
 test('read-only polling does not mark the thread read or write the CRM', async () => {
