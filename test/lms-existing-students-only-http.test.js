@@ -169,6 +169,22 @@ test("premium LMS restores public catalog, account access, and timed invitations
     const health = await api(baseUrl, "/health");
     assert.equal(health.payload.lms_admission_mode, "open");
 
+    const existingInstantDemo = await api(baseUrl, "/demo/instant-start", {
+      method: "POST",
+      body: { email: users.demo.email, all_courses: true },
+    });
+    assert.equal(existingInstantDemo.response.status, 200, JSON.stringify(existingInstantDemo.payload));
+    assert.equal(existingInstantDemo.payload.existing_account, true);
+    assert.equal(existingInstantDemo.payload.requires_password, true);
+    assert.equal(existingInstantDemo.payload.token, undefined);
+
+    const invalidInstantDemo = await api(baseUrl, "/demo/instant-start", {
+      method: "POST",
+      body: { email: "not-an-email" },
+    });
+    assert.equal(invalidInstantDemo.response.status, 400, JSON.stringify(invalidInstantDemo.payload));
+    assert.equal(invalidInstantDemo.payload.code, "INVALID_EMAIL");
+
     const signup = await api(baseUrl, "/auth/signup", {
       method: "POST",
       body: { name: "New Student", email: "new@example.com", password, passwordConfirm: password },
