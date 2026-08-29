@@ -28700,7 +28700,7 @@ function ngMarkConversationHandledByOutbound(db = {}, leadOrId = null, options =
 const NEXTGEN_QUICK_ACTION_TEMPLATE_KEYS = {
   first_message: ["nextgen_warm_welcome"],
   reminder: ["nextgen_live_five_minute_reminder"],
-  session_link: ["nextgen_live_session_invite"],
+  session_link: ["nextgen_live_session_link"],
   recording: ["nextgen_recording_notes_ready"],
   testimonial: ["proof_testimonial_message", "proof_testimonial"],
   uworld_demo: ["uworld_video_library_soft_pitch", "demo_lms_activation_invite", "two_day_lms_demo_access"],
@@ -31228,8 +31228,9 @@ const WHATSAPP_TEMPLATE_NAME_ALIASES = {
   five_min_live_session_reminder: "nextgen_live_five_minute_reminder",
   five_minute_reminder: "nextgen_live_five_minute_reminder",
   nextgen_live_session_invite: "nextgen_live_session_invite",
-  live_session_1pm_reminder: "nextgen_live_session_invite",
-  live_session_link_now: "nextgen_live_session_invite",
+  nextgen_live_session_link: "nextgen_live_session_link",
+  live_session_1pm_reminder: "nextgen_live_session_link",
+  live_session_link_now: "nextgen_live_session_link",
   daily_live_session_invite: "nextgen_live_session_invite",
   live_session_invitation: "nextgen_live_session_invite",
   nextgen_recording_notes_ready: "nextgen_recording_notes_ready",
@@ -31428,6 +31429,7 @@ const WHATSAPP_TEMPLATE_VARIABLE_ORDERS = {
   nextgen_warm_welcome: ["name", "exam"],
   nextgen_live_session_invite: ["name", "topic", "time"],
   nextgen_live_five_minute_reminder: ["name", "topic"],
+  nextgen_live_session_link: ["name", "topic", "live_session_link"],
   nextgen_recording_notes_ready: ["name", "full_session_name"],
   nextgen_payment_ready_followup: ["name", "programme"],
   nextgen_mentor_meeting_confirmation: ["name", "date", "time"],
@@ -34600,6 +34602,26 @@ function ngDailyLiveSessionActionNow(settings = {}, date = new Date(), session =
   return null;
 }
 
+function ngDailyLiveSessionTimeLabel(session = {}, fallback = "") {
+  const rawTime = String(session?.time || session?.scheduled_time || "").trim();
+  const rawTimezone = String(session?.timezone || session?.scheduled_timezone || "").trim();
+  const match = /^(\d{1,2}):(\d{2})/.exec(rawTime);
+  if (!match) return String(fallback || [rawTime, rawTimezone].filter(Boolean).join(" ")).trim();
+
+  const hour24 = Number(match[1]);
+  const minute = Number(match[2]);
+  if (!Number.isInteger(hour24) || hour24 < 0 || hour24 > 23 || !Number.isInteger(minute) || minute < 0 || minute > 59) {
+    return String(fallback || [rawTime, rawTimezone].filter(Boolean).join(" ")).trim();
+  }
+
+  const hour12 = hour24 % 12 || 12;
+  const meridiem = hour24 >= 12 ? "PM" : "AM";
+  const timezoneLabel = /^(america\/new_york|est|edt|eastern(?: time)?)$/i.test(rawTimezone)
+    ? "Eastern"
+    : rawTimezone;
+  return `${hour12}:${String(minute).padStart(2, "0")} ${meridiem}${timezoneLabel ? ` ${timezoneLabel}` : ""}`;
+}
+
 
 function ngLeadIsPaidOrGroupAddedForLiveSession(lead = {}) {
   const blob = JSON.stringify({
@@ -34648,9 +34670,8 @@ function ngDailyLiveSessionEligibleLead(db = {}, lead = {}, settings = {}) {
   if (settings.daily_session_exclude_active_google_meet !== false && (lead.live_session_automation_paused_until_google_meet || ngAylaLeadGoogleMeetState(lead, ngAylaFindActiveGoogleMeetAppointment(db, lead)))) return false;
   if (["not_interested", "lost", "unsubscribed"].includes(stage)) return false;
   if (lead.suppressed || lead.ai_suppressed || ng41IsSuppressed(db, lead)) return false;
-  const programmeValueShown = Boolean(lead.ayla_program_tour_sent_at || lead.lms_ecosystem_explained)
-    || safeArray(lead?.ayla_conversation_state?.completed_actions).includes("send_feature_tour");
-  if (!programmeValueShown) return false;
+  // Every future consenting lead should receive the scheduled live-session
+  // sequence. Do not require an earlier programme-tour message first.
   if (!ng41LeadPhone(lead) && !lead.email) return false;
   if (["new_lead", "first_message_sent"].includes(stage) && settings.daily_session_send_to_new_leads === false) return false;
   if (["interested", "session_today", "hot_lead", "google_meet_requested"].includes(stage) && settings.daily_session_send_to_interested === false) return false;
@@ -34733,7 +34754,7 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
     ...configuredAssets,
     liveSessionTitle: String(todaySession?.title || "").trim(),
     liveSessionDate: String(todaySession?.date || "").trim(),
-    sessionTime: [String(todaySession?.time || "").trim(), String(todaySession?.timezone || "").trim()].filter(Boolean).join(" ") || configuredAssets.sessionTime,
+    sessionTime: ngDailyLiveSessionTimeLabel(todaySession, configuredAssets.sessionTime),
     liveSessionLink: String(todaySession?.url || "").trim(),
     recordingTitle: String(liveSnapshot.latest_recording?.title || "").trim(),
     latestRecordingTitle: String(liveSnapshot.latest_recording?.title || "").trim(),
@@ -34748,7 +34769,7 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
   const templateMap = {
     daily_session_invite: settings.daily_session_invite_template_key || "nextgen_live_session_invite",
     five_minute_reminder: settings.session_reminder_template_key || "nextgen_live_five_minute_reminder",
-    session_link: settings.session_link_template_key || "nextgen_live_session_invite",
+    session_link: settings.session_link_template_key || "nextgen_live_session_link",
     post_session_recording: settings.post_session_recording_template_key || "nextgen_recording_notes_ready",
   };
   const leads = ensureCrmArray(db, "leads")
@@ -37067,7 +37088,7 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   session_reminder_minutes: 5,
   first_message_template_key: "nextgen_warm_welcome",
   session_reminder_template_key: "nextgen_live_five_minute_reminder",
-  session_link_template_key: "nextgen_live_session_invite",
+  session_link_template_key: "nextgen_live_session_link",
   post_session_recording_template_key: "nextgen_recording_notes_ready",
   next_day_followup_template_key: "nextgen_recording_notes_ready",
   post_session_followup_delay_minutes: 120,
@@ -37106,7 +37127,7 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   media_library_enabled: true,
   daily_session_invite_template_key: "nextgen_live_session_invite",
   daily_session_send_recording_to_no_reply: true,
-  daily_session_exclude_active_google_meet: false,
+  daily_session_exclude_active_google_meet: true,
   daily_session_exclude_not_interested: true,
   no_reply_mark_after_days: 2,
   google_meet_followup_for_no_reply: true,
