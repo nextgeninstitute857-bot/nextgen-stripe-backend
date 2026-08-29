@@ -116,3 +116,13 @@ test("scheduler and AI source use only the exact live LMS link", () => {
     /liveSnapshot\?\.live_session\?\.url \|\| configuredAssets\.liveSessionLink/,
   );
 });
+
+test("first Meta replies must carry the current session, one recording, and one qualification question", () => {
+  assert.match(server, /isFirstMetaReply/);
+  assert.match(server, /meta_first_reply_missing_exact_session_title/);
+  assert.match(server, /meta_first_reply_missing_revised_time/);
+  assert.match(server, /meta_first_reply_did_not_dispatch_recording/);
+  assert.match(server, /meta_first_reply_missing_current_recording_link/);
+  assert.match(server, /meta_first_reply_needs_one_question/);
+  assert.match(server, /meta_first_reply_needs_qualifying_field/);
+});

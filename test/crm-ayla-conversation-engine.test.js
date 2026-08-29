@@ -619,6 +619,30 @@ test("a fresh prospective lead is asked for their name before other discovery fi
   assert.deepEqual(evaluateAylaConversationDecision({ decision: asksName, state, messages }), []);
 });
 
+test("a first Meta lead reply matches the ad promise and asks a useful qualification question", () => {
+  const lead = { meta_ad_id: "working-doctor-v2", meta_campaign_id: "step1-pilot" };
+  const messages = [{ role: "student", text: "Hi, can I get more information?" }];
+  const prompt = buildAylaConversationPrompt({
+    lead,
+    messages,
+    liveFacts: "Next: Central Nervous System — Day 8 at 12 PM Eastern. Latest recording: Central Nervous System — Day 7 https://zoom.us/rec/play/current",
+  });
+  assert.match(prompt, /CLICK-TO-WHATSAPP FIRST RESPONSE/);
+  assert.match(prompt, /choose send_recording/);
+  assert.match(prompt, /12 PM Eastern/);
+  assert.match(prompt, /exactly one useful qualification question/);
+
+  const state = createAylaConversationState({ lead, messages });
+  const metaReply = decision({
+    state,
+    action: "send_recording",
+    ask_field: "exam",
+    reply: "Central Nervous System — Day 8 is at 12 PM Eastern. Central Nervous System — Day 7: https://zoom.us/rec/play/current Which USMLE step are you preparing for?",
+  });
+  const violations = evaluateAylaConversationDecision({ decision: metaReply, state, messages, lead });
+  assert.ok(!violations.includes("new_lead_name_not_requested"));
+});
+
 test("prompt treats Training Center text as facts, not as executable conversation rules", () => {
   const prompt = buildAylaConversationPrompt({
     state: createAylaConversationState(),
