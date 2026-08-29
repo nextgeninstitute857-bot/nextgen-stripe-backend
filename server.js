@@ -28739,6 +28739,7 @@ function ngInboxAutomatedDeliveryFailure(message = {}) {
   const source = String(message.source || metadata.source || "").toLowerCase();
   const action = String(metadata.daily_live_session_action || message.daily_live_session_action || "").toLowerCase();
   const automated = Boolean(
+    !source ||
     action ||
     metadata.scheduler_source ||
     metadata.automation_step_id ||
