@@ -52671,10 +52671,36 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
     role: ngIsOutboundMessage(message) ? "assistant" : "student",
     text: ngMessageText(message),
   }));
+  const isFirstMetaReply = Boolean(
+    lead.meta_ad_id
+    || lead.meta_campaign_id
+    || lead.meta_adset_id
+    || lead.meta_referral?.ad_id,
+  ) && !cleanMessages.some((message) => ngIsOutboundMessage(message));
   const decisionViolations = (candidate) => uniqueList([
-    ...evaluateAylaConversationDecision({ decision: candidate, state, messages: decisionMessages }),
+    ...evaluateAylaConversationDecision({ decision: candidate, state, messages: decisionMessages, lead }),
     ...ngAylaLiveSessionLinkViolations(`${candidate.reply || ""}\n${candidate.follow_up || ""}`, liveSnapshot),
     ...ngAylaRecordingLinkViolations(`${candidate.reply || ""}\n${candidate.follow_up || ""}`, liveSnapshot),
+    ...(() => {
+      if (!isFirstMetaReply) return [];
+      const text = `${candidate.reply || ""}\n${candidate.follow_up || ""}`.trim();
+      const wordsOnly = text.replace(/https?:\/\/\S+/gi, "");
+      const firstReplyViolations = [];
+      const session = liveSnapshot.live_session;
+      const recording = liveSnapshot.latest_recording;
+      if (session?.title && !text.includes(session.title)) firstReplyViolations.push("meta_first_reply_missing_exact_session_title");
+      if (session && !/\b12(?::00)?\s*(?:pm|p\.m\.)\s*(?:eastern|est|et)\b/i.test(wordsOnly)) {
+        firstReplyViolations.push("meta_first_reply_missing_revised_time");
+      }
+      if (recording?.url && candidate.action !== "send_recording") firstReplyViolations.push("meta_first_reply_did_not_dispatch_recording");
+      if (recording?.title && !text.includes(recording.title)) firstReplyViolations.push("meta_first_reply_missing_exact_recording_title");
+      if (recording?.url && !text.includes(recording.url)) firstReplyViolations.push("meta_first_reply_missing_current_recording_link");
+      if ((wordsOnly.match(/[?？]/g) || []).length !== 1) firstReplyViolations.push("meta_first_reply_needs_one_question");
+      if (!["exam", "timeline", "main_need", "country"].includes(candidate.ask_field)) {
+        firstReplyViolations.push("meta_first_reply_needs_qualifying_field");
+      }
+      return firstReplyViolations;
+    })(),
     ...(
       ngAylaIsPriceQuestion(latestInboundText)
       && !aylaExplicitHumanHandoffRequest(latestInboundText)
