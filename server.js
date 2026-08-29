@@ -28735,6 +28735,7 @@ function ngInboxMessagesForLead(db, lead, messages) {
 
 function ngInboxAutomatedDeliveryFailure(message = {}) {
   const status = String(message.status || message.delivery_status || message.provider_status || "").toLowerCase();
+  const failed = Boolean(message.provider_error || message.error) || ["failed", "error", "not_sent", "undelivered", "provider_failed", "provider_blocked"].includes(status);
   const metadata = message.metadata || {};
   const source = String(metadata.source || message.source || "").toLowerCase();
   const action = String(metadata.daily_live_session_action || message.daily_live_session_action || "").toLowerCase();
@@ -28750,8 +28751,7 @@ function ngInboxAutomatedDeliveryFailure(message = {}) {
     /(^|_)(auto|automation|scheduler)(_|$)/.test(source) ||
     ["no_session_today_override", "process_ai_auto", "ayla_auto_wakeup", "webhook_ai_auto_wakeup", "universal_social_webhook_wakeup", "social_webhook_full_ai_auto"].includes(source)
   );
-  return ["failed", "error", "not_sent", "undelivered", "provider_failed", "provider_blocked"].includes(status) &&
-    automated;
+  return failed && automated;
 }
 
 function buildConversationInbox(db) {
