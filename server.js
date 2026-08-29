@@ -34692,6 +34692,17 @@ function ngDailyLiveSessionAlreadyAttempted(db = {}, lead = {}, action = "", dat
   );
 }
 
+function ngDailyLiveSessionPendingLeadBatch(db = {}, settings = {}, { brandId = null, action = "", dateKey = "", limit = 50 } = {}) {
+  const batchLimit = Math.max(1, Math.min(200, Number(limit || 50)));
+  return ensureCrmArray(db, "leads")
+    .filter((lead) => !brandId || String(lead.brand_id || "") === String(brandId || ""))
+    .filter((lead) => ngDailyLiveSessionEligibleLead(db, lead, settings))
+    // Remove completed claims before applying the batch limit. Otherwise every
+    // heartbeat rechecks the same first page and later eligible leads never run.
+    .filter((lead) => !ngDailyLiveSessionAlreadyAttempted(db, lead, action, dateKey))
+    .slice(0, batchLimit);
+}
+
 function ngStartDailyLiveSessionAttempt(db = {}, lead = {}, action = "", dateKey = "", source = "run_due") {
   const attempt = withTimestamps({
     id: uuid(),
@@ -34772,10 +34783,7 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
     session_link: settings.session_link_template_key || "nextgen_live_session_link",
     post_session_recording: settings.post_session_recording_template_key || "nextgen_recording_notes_ready",
   };
-  const leads = ensureCrmArray(db, "leads")
-    .filter((lead) => !brandId || String(lead.brand_id || "") === String(brandId || ""))
-    .filter((lead) => ngDailyLiveSessionEligibleLead(db, lead, settings))
-    .slice(0, Math.max(1, Math.min(200, Number(limit || 50))));
+  const leads = ngDailyLiveSessionPendingLeadBatch(db, settings, { brandId, action, dateKey, limit });
   const results = [];
   for (const lead of leads) {
     if (ngDailyLiveSessionAlreadyAttempted(db, lead, action, dateKey)) {

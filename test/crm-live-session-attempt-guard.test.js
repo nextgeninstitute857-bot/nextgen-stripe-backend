@@ -61,6 +61,33 @@ test("scheduler code finishes failed claims and never depends on successful logs
   assert.doesNotMatch(server, /function ngDailyLiveSessionAlreadySent/);
 });
 
+test("daily live-session batches advance past leads already attempted today", () => {
+  const batchSource = server.slice(
+    server.indexOf("function ngDailyLiveSessionPendingLeadBatch"),
+    server.indexOf("function ngStartDailyLiveSessionAttempt"),
+  );
+  const pendingBatch = new Function(
+    "ensureCrmArray",
+    "ngDailyLiveSessionEligibleLead",
+    "ngDailyLiveSessionAlreadyAttempted",
+    `${batchSource}; return ngDailyLiveSessionPendingLeadBatch;`,
+  )(
+    (db, collection) => db[collection] || [],
+    (_db, lead) => lead.eligible !== false,
+    (db, lead, action, dateKey) => (db.attempted || []).includes(`${lead.id}|${action}|${dateKey}`),
+  );
+  const dateKey = "2026-08-30";
+  const action = "daily_session_invite";
+  const leads = Array.from({ length: 120 }, (_, index) => ({ id: `lead-${index + 1}`, eligible: true }));
+  const attempted = leads.slice(0, 50).map((lead) => `${lead.id}|${action}|${dateKey}`);
+
+  const secondBatch = pendingBatch({ leads, attempted }, {}, { action, dateKey, limit: 50 });
+
+  assert.equal(secondBatch.length, 50);
+  assert.equal(secondBatch[0].id, "lead-51");
+  assert.equal(secondBatch[49].id, "lead-100");
+});
+
 test("failed deliveries stay in audit data and do not replace the real inbox preview", () => {
   const inbox = server.slice(server.indexOf("function ngInboxFailedDeliveryRecord"), server.indexOf("function parseInboundSocialPayload"));
   const helperSource = server.slice(server.indexOf("function ngInboxFailedDeliveryRecord"), server.indexOf("function buildConversationInbox"));
