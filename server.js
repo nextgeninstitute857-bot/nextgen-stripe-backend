@@ -67311,6 +67311,7 @@ function ngReconcileKnownCnsDay7Holiday(db = {}, {
     notes_deleted: 0,
     sessions_deleted: 0,
     attendance_deleted: 0,
+    holiday_attendance_preserved: 0,
     students_deleted: 0,
     reason: null,
   };
@@ -67352,6 +67353,7 @@ function ngReconcileKnownCnsDay7Holiday(db = {}, {
   if (alreadyCorrect) {
     const teachingDays = roadmap.days.filter((day) => !ngRoadmapDayIsNoClass(day));
     result.already_correct = true;
+    result.holiday_attendance_preserved = Number(roadmap.cns_day7_aug29_holiday_repair?.holiday_attendance_preserved || 0);
     result.final_teaching_date = teachingDays.map((day) => ngKnownScheduleDate(day.date || day.scheduled_date)).sort().at(-1) || null;
     result.reason = "already_correct";
     return result;
@@ -67372,11 +67374,12 @@ function ngReconcileKnownCnsDay7Holiday(db = {}, {
     return safeStop("august_29_session_precondition_failed");
   }
   if (ngKnownScheduleSessionHasRecording(db, selectedSession)) return safeStop("august_29_recording_conflicts_with_holiday");
-  const selectedAttendance = Object.values(db.attendance).filter((item) => (
+  const selectedAttendance = Object.entries(db.attendance).filter(([, item]) => (
     String(item?.session_id || item?.live_session_id || "") === rule.holiday_session_id ||
     String(item?.roadmap_day_id || item?.day_id || "") === rule.holiday_day_id
   ));
-  if (selectedAttendance.length) return safeStop("august_29_attendance_conflicts_with_holiday");
+  const selectedAttendanceBefore = new Map(selectedAttendance.map(([key, item]) => [key, clone(item)]));
+  result.holiday_attendance_preserved = selectedAttendance.length;
   const selectedNotes = Object.entries(db.notes).filter(([key, note]) => (
     String(note?.session_id || note?.live_session_id || key || "") === rule.holiday_session_id ||
     String(note?.roadmap_day_id || note?.day_id || "") === rule.holiday_day_id
@@ -67539,6 +67542,7 @@ function ngReconcileKnownCnsDay7Holiday(db = {}, {
     sequence_metadata_sync: sequenceMetadataSync,
     live_session_sync: liveSessionSync,
     announcement_id: announcement?.id || null,
+    holiday_attendance_preserved: selectedAttendance.length,
     applied_by: actorId,
     applied_at: now,
   };
@@ -67554,6 +67558,9 @@ function ngReconcileKnownCnsDay7Holiday(db = {}, {
   const recordingsPreserved = Array.from(recordingSnapshotsBefore.entries()).every(([id, snapshot]) => (
     Boolean(db.recordings[id]) && sameSnapshot(snapshot, identityAndUrls(db.recordings[id]))
   ));
+  const holidayAttendancePreserved = Array.from(selectedAttendanceBefore.entries()).every(([key, snapshot]) => (
+    Boolean(db.attendance[key]) && sameSnapshot(snapshot, db.attendance[key])
+  ));
   const recordedAnchorsPreserved = anchors.filter((row) => row.recording_anchor).every((row) => {
     const session = db.liveSessions[row.session_id];
     return Boolean(session && ngKnownScheduleDate(session.scheduled_date) === row.date);
@@ -67568,6 +67575,7 @@ function ngReconcileKnownCnsDay7Holiday(db = {}, {
     every_original_session_identity_and_url_preserved: sessionIdentitiesPreserved,
     every_recording_identity_and_url_preserved: recordingsPreserved,
     every_recorded_session_anchor_preserved: recordedAnchorsPreserved,
+    every_holiday_attendance_record_preserved: holidayAttendancePreserved,
     protected_record_counts_not_decreased: protectedCountsPreserved,
   };
   const failed = Object.entries(checks).filter(([, passed]) => passed !== true).map(([name]) => name);

@@ -203,7 +203,18 @@ function buildFixture() {
     },
     flashcards: {}, flashcardProgress: {}, assessments: {}, assessmentAttempts: {}, roadmapProgress: {},
     dailyTaskProgress: {}, pointEvents: {}, weakConceptLogs: {}, adaptiveAssignments: {},
-    adaptiveFlashcardQueues: {}, attendance: {}, leaderboard: {}, announcements: {},
+    adaptiveFlashcardQueues: {},
+    attendance: {
+      "saturday-attendance-audit": {
+        id: "saturday-attendance-audit",
+        session_id: SATURDAY_SESSION_ID,
+        roadmap_day_id: SATURDAY_DAY_ID,
+        user_id: "student-audit",
+        joined_at: "2026-08-29T16:00:00.000Z",
+        source: "provider_audit",
+      },
+    },
+    leaderboard: {}, announcements: {},
   };
 }
 
@@ -285,10 +296,12 @@ test("startup turns August 29 into a holiday and moves CNS Day 7 to Monday witho
     assert.equal(report.recordings_deleted, 0);
     assert.equal(report.notes_deleted, 0);
     assert.equal(report.sessions_deleted, 0);
+    assert.equal(report.holiday_attendance_preserved, 1);
     assert.equal(report.checks.august_29_is_holiday, true);
     assert.equal(report.checks.monday_is_cns_day_7, true);
     assert.equal(report.checks.every_recording_identity_and_url_preserved, true);
     assert.equal(report.checks.every_recorded_session_anchor_preserved, true);
+    assert.equal(report.checks.every_holiday_attendance_record_preserved, true);
 
     const roadmapResponse = await fetch(`${server.baseUrl}/roadmap/course/${COURSE_ID}`);
     const publicRoadmap = await roadmapResponse.json();
@@ -315,6 +328,7 @@ test("startup turns August 29 into a holiday and moves CNS Day 7 to Monday witho
     assert.equal(saved.liveSessions[SATURDAY_SESSION_ID].status, "cancelled");
     assert.equal(saved.liveSessions[SATURDAY_SESSION_ID].student_visible, false);
     assert.equal(saved.liveSessions[SATURDAY_SESSION_ID].archived_from_active, true);
+    assert.deepEqual(saved.attendance["saturday-attendance-audit"], fixture.attendance["saturday-attendance-audit"]);
     assert.equal(saved.liveSessions[RECORDED_SESSION_ID].scheduled_date, "2026-09-01");
     assert.equal(saved.recordings[RECORDING_ID].recording_url, RECORDING_URL);
     assert.equal(saved.notes[RECORDED_SESSION_ID].roadmap_day_id, `${COURSE_ID}:day:37:test-cns-9`);
