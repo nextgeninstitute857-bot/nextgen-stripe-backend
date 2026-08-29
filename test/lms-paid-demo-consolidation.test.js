@@ -108,9 +108,20 @@ test("a pending paid checkout does not cancel a legitimate demo", () => {
   assert.equal(db.enrollments[DEMO_ID].access_granted, true);
 });
 
-test("an explicitly created post-payment demo is not treated as stale upgrade history", () => {
+test("active paid access archives a same-course demo even when that demo was created later", () => {
   const db = fixture();
   db.enrollments[DEMO_ID].created_at = "2026-08-20T00:00:00.000Z";
+
+  assert.equal(demoPredatesPaidActivation(db, db.enrollments[DEMO_ID], db.enrollments[PAID_ID]), true);
+  assert.equal(reconcilePaidDemoEnrollments(db).changed, true);
+  assert.equal(db.enrollments[DEMO_ID].access_granted, false);
+});
+
+test("a new demo can remain after a genuinely expired paid term", () => {
+  const db = fixture();
+  db.enrollments[DEMO_ID].created_at = "2026-08-20T00:00:00.000Z";
+  db.enrollments[PAID_ID].access_expires_at = "2026-08-01T00:00:00.000Z";
+  db.enrollments[PAID_ID].renewal_due_at = "2026-08-01T00:00:00.000Z";
 
   assert.equal(demoPredatesPaidActivation(db, db.enrollments[DEMO_ID], db.enrollments[PAID_ID]), false);
   assert.equal(reconcilePaidDemoEnrollments(db).changed, false);
