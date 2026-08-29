@@ -61,17 +61,12 @@ test("scheduler code finishes failed claims and never depends on successful logs
   assert.doesNotMatch(server, /function ngDailyLiveSessionAlreadySent/);
 });
 
-test("failed automated deliveries do not replace the real inbox preview", () => {
-  const inbox = server.slice(server.indexOf("function ngInboxAutomatedDeliveryFailure"), server.indexOf("function parseInboundSocialPayload"));
-  const helperSource = server.slice(server.indexOf("function ngInboxAutomatedDeliveryFailure"), server.indexOf("function buildConversationInbox"));
-  const isAutomatedFailure = new Function(`${helperSource}; return ngInboxAutomatedDeliveryFailure;`)();
-  assert.equal(isAutomatedFailure({ status: "failed", metadata: { source: "daily_live_session_scheduler", daily_live_session_action: "post_session_recording" } }), true);
-  assert.equal(isAutomatedFailure({ status: "failed", metadata: { source: "full_ai_auto", ai_auto: true } }), true);
-  assert.equal(isAutomatedFailure({ status: "failed", metadata: {} }), true);
-  assert.equal(isAutomatedFailure({ status: "failed", source: "whatsapp", metadata: {} }), true);
-  assert.equal(isAutomatedFailure({ status: "logged", provider_error: "Provider rejected", source: "whatsapp", metadata: {} }), true);
-  assert.equal(isAutomatedFailure({ status: "logged", provider_error: "Provider rejected", source: "whatsapp", metadata: { source: "compact_conversations_inbox" } }), false);
-  assert.equal(isAutomatedFailure({ status: "failed", source: "whatsapp", metadata: { source: "compact_conversations_inbox" } }), false);
-  assert.equal(isAutomatedFailure({ status: "failed", metadata: { source: "compact_conversations_inbox" } }), false);
-  assert.match(inbox, /inboxMessages\.filter\(\(message\) => !ngInboxAutomatedDeliveryFailure\(message\)\)/);
+test("failed deliveries stay in audit data and do not replace the real inbox preview", () => {
+  const inbox = server.slice(server.indexOf("function ngInboxFailedDeliveryRecord"), server.indexOf("function parseInboundSocialPayload"));
+  const helperSource = server.slice(server.indexOf("function ngInboxFailedDeliveryRecord"), server.indexOf("function buildConversationInbox"));
+  const isFailedDelivery = new Function(`${helperSource}; return ngInboxFailedDeliveryRecord;`)();
+  assert.equal(isFailedDelivery({ status: "failed" }), true);
+  assert.equal(isFailedDelivery({ status: "logged", provider_error: "Provider rejected" }), true);
+  assert.equal(isFailedDelivery({ status: "delivered" }), false);
+  assert.match(inbox, /inboxMessages\.filter\(\(message\) => !ngInboxFailedDeliveryRecord\(message\)\)/);
 });

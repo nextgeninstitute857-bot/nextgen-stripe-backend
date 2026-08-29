@@ -28733,25 +28733,10 @@ function ngInboxMessagesForLead(db, lead, messages) {
   )]);
 }
 
-function ngInboxAutomatedDeliveryFailure(message = {}) {
+function ngInboxFailedDeliveryRecord(message = {}) {
   const status = String(message.status || message.delivery_status || message.provider_status || "").toLowerCase();
-  const failed = Boolean(message.provider_error || message.error) || ["failed", "error", "not_sent", "undelivered", "provider_failed", "provider_blocked"].includes(status);
-  const metadata = message.metadata || {};
-  const source = String(metadata.source || message.source || "").toLowerCase();
-  const action = String(metadata.daily_live_session_action || message.daily_live_session_action || "").toLowerCase();
-  const transportOnlySource = ["whatsapp", "telegram", "email", "facebook", "messenger", "instagram", "discord", "reddit", "linkedin", "youtube", "tiktok", "twitter", "sms", "webchat", "other"].includes(source);
-  const automated = Boolean(
-    !source ||
-    transportOnlySource ||
-    action ||
-    metadata.scheduler_source ||
-    metadata.automation_step_id ||
-    metadata.ai_auto === true ||
-    metadata.full_ai_auto === true ||
-    /(^|_)(auto|automation|scheduler)(_|$)/.test(source) ||
-    ["no_session_today_override", "process_ai_auto", "ayla_auto_wakeup", "webhook_ai_auto_wakeup", "universal_social_webhook_wakeup", "social_webhook_full_ai_auto"].includes(source)
-  );
-  return failed && automated;
+  return Boolean(message.provider_error || message.error) ||
+    ["failed", "error", "not_sent", "undelivered", "provider_failed", "provider_blocked"].includes(status);
 }
 
 function buildConversationInbox(db) {
@@ -28842,7 +28827,7 @@ function buildConversationInbox(db) {
     const activityCounts = inboxActivityCounts(lead, inboxMessages);
     // Failed scheduler attempts remain in the returned audit data, but they are not
     // student-facing messages and must not replace the real chat preview or ordering.
-    const newestFirst = inboxMessages.filter((message) => !ngInboxAutomatedDeliveryFailure(message)).sort((a, b) => {
+    const newestFirst = inboxMessages.filter((message) => !ngInboxFailedDeliveryRecord(message)).sort((a, b) => {
       const at = new Date(a.created_at || a.received_at || a.sent_at || a.timestamp || a.updated_at || 0).getTime();
       const bt = new Date(b.created_at || b.received_at || b.sent_at || b.timestamp || b.updated_at || 0).getTime();
       return bt - at;
