@@ -68,6 +68,8 @@ test("failed automated deliveries do not replace the real inbox preview", () => 
   assert.equal(isAutomatedFailure({ status: "failed", metadata: { source: "daily_live_session_scheduler", daily_live_session_action: "post_session_recording" } }), true);
   assert.equal(isAutomatedFailure({ status: "failed", metadata: { source: "full_ai_auto", ai_auto: true } }), true);
   assert.equal(isAutomatedFailure({ status: "failed", metadata: {} }), true);
+  assert.equal(isAutomatedFailure({ status: "failed", source: "whatsapp", metadata: {} }), true);
+  assert.equal(isAutomatedFailure({ status: "failed", source: "whatsapp", metadata: { source: "compact_conversations_inbox" } }), false);
   assert.equal(isAutomatedFailure({ status: "failed", metadata: { source: "compact_conversations_inbox" } }), false);
   assert.match(inbox, /inboxMessages\.filter\(\(message\) => !ngInboxAutomatedDeliveryFailure\(message\)\)/);
 });
