@@ -28736,10 +28736,12 @@ function ngInboxMessagesForLead(db, lead, messages) {
 function ngInboxAutomatedDeliveryFailure(message = {}) {
   const status = String(message.status || message.delivery_status || message.provider_status || "").toLowerCase();
   const metadata = message.metadata || {};
-  const source = String(message.source || metadata.source || "").toLowerCase();
+  const source = String(metadata.source || message.source || "").toLowerCase();
   const action = String(metadata.daily_live_session_action || message.daily_live_session_action || "").toLowerCase();
+  const transportOnlySource = ["whatsapp", "telegram", "email", "facebook", "messenger", "instagram", "discord", "reddit", "linkedin", "youtube", "tiktok", "twitter", "sms", "webchat", "other"].includes(source);
   const automated = Boolean(
     !source ||
+    transportOnlySource ||
     action ||
     metadata.scheduler_source ||
     metadata.automation_step_id ||
