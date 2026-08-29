@@ -28738,8 +28738,17 @@ function ngInboxAutomatedDeliveryFailure(message = {}) {
   const metadata = message.metadata || {};
   const source = String(message.source || metadata.source || "").toLowerCase();
   const action = String(metadata.daily_live_session_action || message.daily_live_session_action || "").toLowerCase();
+  const automated = Boolean(
+    action ||
+    metadata.scheduler_source ||
+    metadata.automation_step_id ||
+    metadata.ai_auto === true ||
+    metadata.full_ai_auto === true ||
+    /(^|_)(auto|automation|scheduler)(_|$)/.test(source) ||
+    ["no_session_today_override", "process_ai_auto", "ayla_auto_wakeup", "webhook_ai_auto_wakeup", "universal_social_webhook_wakeup", "social_webhook_full_ai_auto"].includes(source)
+  );
   return ["failed", "error", "not_sent", "undelivered", "provider_failed", "provider_blocked"].includes(status) &&
-    (Boolean(action) || ["daily_live_session_scheduler", "no_session_today_override"].includes(source));
+    automated;
 }
 
 function buildConversationInbox(db) {
