@@ -89,7 +89,7 @@ test("daily messages name the exact session and never fall back to an old Zoom U
   const assets = {
     liveSessionTitle: "Central Nervous System — Day 7 — Neurology / CNS",
     liveSessionDate: "2026-08-29",
-    sessionTime: "13:00 America/New_York",
+    sessionTime: "1:00 PM Eastern",
     liveSessionLink: "https://us06web.zoom.us/j/22222222222?pwd=correct",
     recordingTitle: "Central Nervous System — Day 6 — Neurology / CNS",
     recordingLink: "https://us06web.zoom.us/rec/share/cns-day-6",
@@ -100,6 +100,22 @@ test("daily messages name the exact session and never fall back to an old Zoom U
   assert.match(textFor("session_link", assets), /22222222222/);
   assert.match(textFor("post_session_recording", assets), /Central Nervous System — Day 6/);
   assert.doesNotMatch(textFor("post_session_recording", assets), /recent live-session recording/);
+});
+
+test("daily session time is formatted for students", () => {
+  const source = between("function ngDailyLiveSessionTimeLabel", "function ngLeadIsPaidOrGroupAddedForLiveSession");
+  const label = new Function(`${source}; return ngDailyLiveSessionTimeLabel;`)();
+
+  assert.equal(label({ time: "12:00", timezone: "America/New_York" }), "12:00 PM Eastern");
+  assert.equal(label({ scheduled_time: "09:05", scheduled_timezone: "America/New_York" }), "9:05 AM Eastern");
+  assert.equal(label({}, "12:00 PM Eastern"), "12:00 PM Eastern");
+});
+
+test("the scheduler uses the dedicated approved link template", () => {
+  const scheduler = between("async function ngRunDailyLiveSessionScheduler", "function ngGoogleMeetAppointmentDateTime");
+  assert.match(server, /nextgen_live_session_link: \["name", "topic", "live_session_link"\]/);
+  assert.match(scheduler, /session_link: settings\.session_link_template_key \|\| "nextgen_live_session_link"/);
+  assert.match(scheduler, /sessionTime: ngDailyLiveSessionTimeLabel/);
 });
 
 test("scheduler and AI source use only the exact live LMS link", () => {

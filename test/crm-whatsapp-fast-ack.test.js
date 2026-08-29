@@ -545,12 +545,44 @@ test("daily live and recording follow-ups hard-stop for enrolled, opted-out and 
   assert.match(eligibility, /\["paid", "paid_enrolled", "enrolled", "converted"\]/);
   assert.match(eligibility, /\["not_interested", "lost", "unsubscribed"\]/);
   assert.doesNotMatch(eligibility, /daily_session_exclude_not_interested !== false/);
-  assert.match(eligibility, /programmeValueShown/);
-  assert.match(eligibility, /completed_actions\)\.includes\("send_feature_tour"\)/);
+  assert.doesNotMatch(eligibility, /programmeValueShown/);
+  assert.doesNotMatch(eligibility, /completed_actions\)\.includes\("send_feature_tour"\)/);
   assert.match(scheduler, /daily_session_invite/);
   assert.match(scheduler, /five_minute_reminder/);
   assert.match(scheduler, /session_link/);
   assert.match(scheduler, /post_session_recording/);
+});
+
+test("every reachable future lead enters the daily live-session sequence", () => {
+  const source = server.slice(
+    server.indexOf("function ngLeadIsPaidOrGroupAddedForLiveSession"),
+    server.indexOf("function ngDailyLiveSessionAttemptMatches"),
+  );
+  const eligible = new Function(
+    "normalizeCrmLeadStageValue",
+    "ngAylaLeadGoogleMeetState",
+    "ngAylaFindActiveGoogleMeetAppointment",
+    "ng41IsSuppressed",
+    "ng41LeadPhone",
+    `${source}; return ngDailyLiveSessionEligibleLead;`,
+  )(
+    (value, fallback) => value || fallback,
+    (lead) => Boolean(lead.google_meet_active),
+    () => null,
+    () => false,
+    (lead) => lead.phone || "",
+  );
+
+  const settings = {
+    daily_session_send_to_new_leads: true,
+    daily_session_send_to_interested: true,
+    daily_session_send_to_no_reply: true,
+    daily_session_exclude_active_google_meet: true,
+  };
+  assert.equal(eligible({}, { id: "future", stage: "new_lead", phone: "+15550000001" }, settings), true);
+  assert.equal(eligible({}, { id: "paid", stage: "paid", phone: "+15550000002" }, settings), false);
+  assert.equal(eligible({}, { id: "opted-out", stage: "unsubscribed", phone: "+15550000003" }, settings), false);
+  assert.equal(eligible({}, { id: "meet", stage: "new_lead", phone: "+15550000004", google_meet_active: true }, settings), false);
 });
 
 test("a public price question does not create or lock a Google Meet handoff", () => {
