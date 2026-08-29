@@ -31,6 +31,7 @@ import {
   metaAdsReadiness,
 } from "./lib/crm-meta-ads.js";
 import { createMetaReportingRunner, metaReportingStatus, prepareMetaDailyLedger, saveMetaPerformanceSnapshot, preserveMetaReportingForLegacyWrite } from "./lib/crm-meta-ads-reporting.js";
+import { buildMetaConversionOutcomes } from "./lib/crm-meta-conversion-outcomes.js";
 import { experienceQueueRows, experienceTemplateProposal } from "./lib/crm-experience-reporting.js";
 import {
   aylaExplicitHumanHandoffRequest,
@@ -24744,13 +24745,21 @@ app.get("/admin/crm/meta-ads/readiness", async (req, res) => {
   try {
     await requireCrmAdmin(req);
     const db = await readCrmDb();
+    const liveDb = await readLiveDb();
+    const brandId = getCrmBrandId(req, db);
     const readiness = metaAdsReadiness(process.env);
+    const crmOutcomes = buildMetaConversionOutcomes({
+      leads: ensureCrmArray(db, "leads"),
+      payments: [...ensureCrmArray(db, "payments"), ...buildDerivedPayments(liveDb)],
+      brandId,
+    });
     res.json({
       success: true,
       readiness,
       last_sync: db.meta_ads_last_sync || null,
       automation: metaReportingStatus(db),
-      performance: db.meta_ads_performance?.brand_id === getCrmBrandId(req, db) ? db.meta_ads_performance : null,
+      performance: db.meta_ads_performance?.brand_id === brandId ? db.meta_ads_performance : null,
+      crm_outcomes: crmOutcomes,
       live_records: {
         accounts: ensureCrmArray(db, "ad_accounts").filter((item) => item.source === "meta_live").length,
         campaigns: ensureCrmArray(db, "ad_campaigns").filter((item) => item.source === "meta_live").length,
@@ -34447,17 +34456,28 @@ function ngBuildNoSessionRecordingFallbackText({ db = {}, settings = {}, assets 
       .trim();
   }
 
-  const recordingLine = assets.recordingLink
-    ? `\n\nYou can watch this recent session recording for now:\n${assets.recordingLink}`
-    : "\n\nYou can continue with the recent recording/demo for now, and I’ll share the recording link as soon as it is available.";
+  const recordingTitle = String(assets.recordingTitle || assets.latestRecordingTitle || "").trim();
+  const recordingLine = assets.recordingLink && recordingTitle
+    ? `\n\n${recordingTitle}\nRecording:\n${assets.recordingLink}`
+    : "";
 
   return `Doctor, today’s ${assets.sessionTime || NEXTGEN_LIVE_CLASS_TIME_LABEL} live session is not available because the mentor/doctor is not available today.${recordingLine}\n\nIf you like the teaching style, I can arrange a Google Meet mentor consultation for guidance. Or if you prefer to wait for tomorrow’s live session, I’ll update you tomorrow.`;
 }
 
 async function ngRunNoSessionRecordingFallback({ db = {}, brandId = null, limit = 50, dryRun = false, source = "session_override", override = null, dateKey = ngDailySessionDateKey(new Date()) } = {}) {
   const settings = ngAylaPickSettings(db);
-  const assets = ngAylaGetSalesAssets(db);
+  const configuredAssets = ngAylaGetSalesAssets(db);
+  const liveSnapshot = await ngAylaLiveLmsSalesGrounding({ structured: true, crmDb: db });
+  const assets = {
+    ...configuredAssets,
+    recordingTitle: String(liveSnapshot.latest_recording?.title || "").trim(),
+    latestRecordingTitle: String(liveSnapshot.latest_recording?.title || "").trim(),
+    recordingLink: String(liveSnapshot.latest_recording?.url || "").trim(),
+  };
   const action = "no_session_recording_fallback";
+  if (!assets.recordingTitle || !assets.recordingLink) {
+    return { action, processed: 0, sent: 0, skipped: 0, reason: "labelled_recording_not_available", results: [], override };
+  }
   const templateIdDefault = settings.no_session_recording_template_key || settings.no_session_today_template_key || "no_session_recording_fallback";
   const leads = ensureCrmArray(db, "leads")
     .filter((lead) => !brandId || String(lead.brand_id || "") === String(brandId || ""))
@@ -34481,6 +34501,15 @@ async function ngRunNoSessionRecordingFallback({ db = {}, brandId = null, limit 
     const whatsappWindowOpen = channel !== "whatsapp" || ngWithinHours(latestInbound?.created_at || latestInbound?.received_at || latestInbound?.timestamp, 24);
     const templateId = channel === "whatsapp" && !whatsappWindowOpen ? templateIdDefault : null;
     const text = ngBuildNoSessionRecordingFallbackText({ db, settings, assets, override, lead });
+    if (!text.includes(assets.recordingTitle) || !text.includes(assets.recordingLink)) {
+      results.push({ lead_id: lead.id, skipped: true, reason: "recording_fallback_missing_exact_title_or_link" });
+      continue;
+    }
+    const recordingViolations = ngAylaRecordingLinkViolations(text, liveSnapshot);
+    if (recordingViolations.length) {
+      results.push({ lead_id: lead.id, skipped: true, reason: recordingViolations.join(",") });
+      continue;
+    }
 
     if (dryRun) {
       results.push({ lead_id: lead.id, dry_run: true, action, template_id: templateId, text });
@@ -50913,6 +50942,22 @@ function ngAylaLiveSessionLinkViolations(text = "", snapshot = {}) {
   return violations;
 }
 
+function ngAylaRecordingLinkViolations(text = "", snapshot = {}) {
+  const value = String(text || "");
+  const approvedUrl = String(snapshot.latest_recording?.url || "").trim();
+  const urls = uniqueList(
+    (value.match(/https:\/\/[^\s<>()]+/gi) || [])
+      .map((url) => url.replace(/[.,;!?]+$/g, ""))
+      .filter((url) => /zoom\.us\/rec\/(?:play|share)\//i.test(url) || (approvedUrl && url === approvedUrl)),
+  );
+  if (!urls.length) return [];
+  if (!approvedUrl) return ["recording_link_not_published"];
+  if (urls.some((url) => url !== approvedUrl)) return ["wrong_or_stale_recording_link"];
+
+  const title = String(snapshot.latest_recording?.title || "").trim();
+  return title && value.includes(title) ? [] : ["recording_link_missing_exact_title"];
+}
+
 function ngAylaPricingDraftIsGrounded(reply = "", snapshot = {}) {
   const text = String(reply || "").toLowerCase();
   const plans = safeArray(snapshot.plans);
@@ -52471,10 +52516,11 @@ Write only Ayla's next message. No markdown headings. No bullet list unless the 
     throw error;
   }
   const liveLinkViolations = ngAylaLiveSessionLinkViolations(reply, liveLmsSalesSnapshot);
-  if (liveLinkViolations.length) {
-    const error = new Error(`AYLA_LIVE_SESSION_LINK_REJECTED: ${liveLinkViolations.join(", ")}`);
+  const recordingLinkViolations = ngAylaRecordingLinkViolations(reply, liveLmsSalesSnapshot);
+  if (liveLinkViolations.length || recordingLinkViolations.length) {
+    const error = new Error(`AYLA_LIVE_ASSET_LINK_REJECTED: ${[...liveLinkViolations, ...recordingLinkViolations].join(", ")}`);
     error.statusCode = 502;
-    error.code = "AYLA_LIVE_SESSION_LINK_REJECTED";
+    error.code = "AYLA_LIVE_ASSET_LINK_REJECTED";
     throw error;
   }
 
@@ -52628,6 +52674,7 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
   const decisionViolations = (candidate) => uniqueList([
     ...evaluateAylaConversationDecision({ decision: candidate, state, messages: decisionMessages }),
     ...ngAylaLiveSessionLinkViolations(`${candidate.reply || ""}\n${candidate.follow_up || ""}`, liveSnapshot),
+    ...ngAylaRecordingLinkViolations(`${candidate.reply || ""}\n${candidate.follow_up || ""}`, liveSnapshot),
     ...(
       ngAylaIsPriceQuestion(latestInboundText)
       && !aylaExplicitHumanHandoffRequest(latestInboundText)
