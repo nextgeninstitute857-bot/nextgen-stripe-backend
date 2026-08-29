@@ -535,6 +535,10 @@ import {
   selectAylaVimeoPlaybackCandidates,
 } from "./lib/aylamed-vimeo-playback-reconciliation.js";
 import {
+  reconcilePaidDemoEnrollments,
+  supersedeDemoEnrollmentsForPaidAccess,
+} from "./lib/lms-paid-demo-consolidation.js";
+import {
   contentPathMatchesEdition,
   filterContentAssetsByEdition,
   filterContentReferencesByEdition,
@@ -652,7 +656,8 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v220-instant-email-demo";
+const NEXTGEN_BACKEND_BUILD = "v221-paid-demo-consolidation";
+const LMS_PAID_DEMO_CONSOLIDATION_BUILD = "v221-paid-demo-consolidation";
 const CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
@@ -826,6 +831,15 @@ const ngTeachingAccessReconciliationState = {
   last_error: null,
   last_result: null,
   last_material_result: null,
+};
+const ngPaidDemoConsolidationState = {
+  build: LMS_PAID_DEMO_CONSOLIDATION_BUILD,
+  running: false,
+  last_started_at: null,
+  last_finished_at: null,
+  last_success_at: null,
+  last_error: null,
+  last_result: null,
 };
 
 function aylaStep1PilotDestinationScope(student = {}) {
@@ -2614,6 +2628,37 @@ async function ngRunTeachingAccessStartupReconciliation() {
   }
 }
 
+async function ngRunPaidDemoStartupConsolidation() {
+  if (ngPaidDemoConsolidationState.running) {
+    return ngPaidDemoConsolidationState.last_result;
+  }
+
+  ngPaidDemoConsolidationState.running = true;
+  ngPaidDemoConsolidationState.last_started_at = new Date().toISOString();
+  ngPaidDemoConsolidationState.last_error = null;
+
+  try {
+    const db = await readLiveDb();
+    const result = reconcilePaidDemoEnrollments(db, {
+      source: "startup_paid_demo_consolidation",
+    });
+    if (result.changed) {
+      await writeLiveDb(db, {
+        teachingAccessSource: "startup_paid_demo_consolidation_persist",
+      });
+    }
+    ngPaidDemoConsolidationState.last_result = result;
+    ngPaidDemoConsolidationState.last_success_at = new Date().toISOString();
+    return result;
+  } catch (error) {
+    ngPaidDemoConsolidationState.last_error = error.message;
+    throw error;
+  } finally {
+    ngPaidDemoConsolidationState.running = false;
+    ngPaidDemoConsolidationState.last_finished_at = new Date().toISOString();
+  }
+}
+
 async function ngRunSessionNotesStartupReconciliation() {
   if (ngSessionNotesReconciliationState.running) {
     return ngSessionNotesReconciliationState.last_result;
@@ -4013,6 +4058,9 @@ function sanitizeAdminEnrollment(enrollment, db) {
     paid_at: enrollment.paid_at || null,
     revoked_at: enrollment.revoked_at || null,
     revoked_reason: enrollment.revoked_reason || null,
+    superseded_by_enrollment_id: enrollment.superseded_by_enrollment_id || null,
+    superseded_at: enrollment.superseded_at || null,
+    superseded_source: enrollment.superseded_source || null,
     progress_percentage: Number(enrollment.progress_percentage || 0),
     created_at: enrollment.created_at || null,
     updated_at: enrollment.updated_at || null,
@@ -5279,6 +5327,11 @@ function ngApplyPaidAccessWindow(db = {}, enrollment = {}, { plan = null, paidAt
   enrollment.updated_at = new Date().toISOString();
   db.enrollments = db.enrollments || {};
   db.enrollments[enrollment.id] = enrollment;
+  supersedeDemoEnrollmentsForPaidAccess(db, enrollment, {
+    source,
+    paidAt: now.toISOString(),
+    at: enrollment.updated_at,
+  });
   return enrollment;
 }
 
@@ -11813,6 +11866,8 @@ app.get("/health", async (req, res) => {
     },
     lms_teaching_access_build: LMS_TEACHING_ACCESS_BUILD,
     lms_teaching_access: ngTeachingAccessReconciliationState,
+    lms_paid_demo_consolidation_build: LMS_PAID_DEMO_CONSOLIDATION_BUILD,
+    lms_paid_demo_consolidation: ngPaidDemoConsolidationState,
     lms_admission_mode: LMS_ADMISSION_MODE,
     content_ingestion_build: CONTENT_INGESTION_BUILD,
     aylamed_nbme_center_build: AYLA_NBME_CENTER_BUILD,
@@ -13852,6 +13907,10 @@ app.get("/admin/enrollments", async (req, res) => {
     const db = await readLiveDb();
     let enrollments = Object.values(db.enrollments || {}).map((item) => sanitizeAdminEnrollment(item, db));
 
+    if (String(req.query.include_superseded || "").toLowerCase() !== "true") {
+      enrollments = enrollments.filter((item) => !item.superseded_by_enrollment_id);
+    }
+
     if (req.query.course_id) {
       enrollments = enrollments.filter((item) => String(item.course_id) === String(req.query.course_id));
     }
@@ -14212,6 +14271,13 @@ app.patch("/admin/enrollments/:enrollmentId", async (req, res) => {
 
     enrollment.updated_at = now;
     db.enrollments[enrollment.id] = enrollment;
+    if (enrollment.is_demo !== true && enrollment.access_granted !== false) {
+      supersedeDemoEnrollmentsForPaidAccess(db, enrollment, {
+        source: "admin_enrollment_patch",
+        paidAt: enrollment.paid_at || enrollment.access_starts_at || now,
+        at: now,
+      });
+    }
 
     await writeLiveDb(db);
 
@@ -14502,12 +14568,23 @@ async function ngRunPaidAccessExpiryCheck({ db, dryRun = false, sendEmails = tru
 async function ngRunDemoEmailLifecycleCheck({ db, source = "automatic_runner" } = {}) {
   const settings = ngGetEmailSettings(db);
   db.emailAutomationState = db.emailAutomationState || {};
-  const result = { source, checked: 0, expiring: 0, expired: 0, changed: false };
+  const consolidation = reconcilePaidDemoEnrollments(db, {
+    source: `${source}_pre_demo_notice`,
+  });
+  const result = {
+    source,
+    checked: 0,
+    expiring: 0,
+    expired: 0,
+    superseded: consolidation.superseded_demo_count,
+    changed: consolidation.changed,
+  };
   const now = Date.now();
   const expiringDays = Math.max(1, Number(settings.demo_expiring_days || 1));
 
   for (const enrollment of Object.values(db.enrollments || {})) {
     if (!enrollment?.id || enrollment.is_demo !== true || !enrollment.demo_expiry) continue;
+    if (enrollment.access_granted === false || enrollment.superseded_by_enrollment_id) continue;
     result.checked += 1;
 
     const expiry = getDemoExpiryDateTime(enrollment.demo_expiry);
@@ -95758,6 +95835,9 @@ async function startNextgenServer() {
     .then(() => ngRunTeachingAccessStartupReconciliation())
     .then((result) => console.log("LMS teaching-day access reconciliation:", result))
     .catch((error) => console.error("LMS teaching-day access reconciliation failed:", error.message))
+    .then(() => ngRunPaidDemoStartupConsolidation())
+    .then((result) => console.log("LMS paid/demo consolidation:", result))
+    .catch((error) => console.error("LMS paid/demo consolidation failed:", error.message))
     .then(() => ngRunSessionNotesStartupReconciliation())
     .then((result) => console.log("LMS session-notes reconciliation:", result))
     .catch((error) => console.error("LMS session-notes reconciliation failed:", error.message))
