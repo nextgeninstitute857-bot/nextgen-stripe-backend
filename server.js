@@ -666,6 +666,7 @@ const RECORDING_LABEL_CORRECTIONS_BUILD = LMS_RECORDING_LABEL_CORRECTIONS_BUILD;
 const RECORDING_SYSTEM_GUARD_BUILD = LMS_RECORDING_SYSTEM_GUARD_BUILD;
 const LMS_KNOWN_SCHEDULE_REPAIR_BUILD = "v260-known-missed-holiday-transactional-recovery";
 const LMS_DERMATOLOGY_CNS_SCHEDULE_REPAIR_BUILD = "v263-dermatology-cns-transactional-schedule-repair";
+const LMS_CNS_DAY7_HOLIDAY_REPAIR_BUILD = "v269-cns-day7-aug29-holiday";
 const STUDENT_NOTES_RESOLVER_BUILD = "v225-course-system-day-notes-resolver";
 const LMS_ASSESSMENT_NOTES_SCOPE_BUILD = "v257-assessment-notes-scopes";
 const AYLA_ADAPTIVE_CORE_BUILD = "v227-verified-adaptive-loop";
@@ -797,6 +798,16 @@ const NEXTGEN_DERMATOLOGY_CNS_2026_08_SCHEDULE_REPAIR = Object.freeze({
     "b0f5db91-9691-4922-9623-e737e19daff0",
     "21475844-4fcc-4ce3-a74e-2d2b4c138a19",
   ]),
+});
+const NEXTGEN_CNS_DAY7_2026_08_29_HOLIDAY_REPAIR = Object.freeze({
+  course_id: "6cacc0bf-7ca2-401e-aeff-a0b67e3ffb1c",
+  holiday_date: "2026-08-29",
+  holiday_day_id: "6cacc0bf-7ca2-401e-aeff-a0b67e3ffb1c:day:35:c248b193-b5d4-4951-aed2-c14e65be4d85",
+  holiday_session_id: "09637d55-ef9d-488b-be8c-71aca212d27a",
+  replacement_date: "2026-08-31",
+  replacement_day_id: "6cacc0bf-7ca2-401e-aeff-a0b67e3ffb1c:day:36:326cf4d1-3ee5-4980-9ddf-f9e901b77baa",
+  replacement_session_id: "c6a25c20-8a65-4910-93be-6950f5113123",
+  new_tail_day_id: "6cacc0bf-7ca2-401e-aeff-a0b67e3ffb1c:day:retrospective:2026-08-29-holiday",
 });
 const aylaPrivatePilotContentActivationState = {
   running: false,
@@ -2971,6 +2982,37 @@ async function ngRunDermatologyCnsScheduleStartupReconciliation() {
   } finally {
     ngDermatologyCnsScheduleRepairState.running = false;
     ngDermatologyCnsScheduleRepairState.last_finished_at = new Date().toISOString();
+  }
+}
+
+async function ngRunCnsDay7HolidayStartupReconciliation() {
+  if (ngCnsDay7HolidayRepairState.running) return ngCnsDay7HolidayRepairState.last_result;
+
+  ngCnsDay7HolidayRepairState.running = true;
+  ngCnsDay7HolidayRepairState.last_started_at = new Date().toISOString();
+  ngCnsDay7HolidayRepairState.last_error = null;
+
+  try {
+    const source = await readLiveDb();
+    const mutation = await mutateJsonCopyOnWrite(source, (draft) => ngReconcileKnownCnsDay7Holiday(draft, {
+      actorId: "system:cns-day7-aug29-holiday-repair",
+    }));
+    const result = mutation.result;
+    if (result.changed) {
+      await writeLiveDb(mutation.value, {
+        teachingAccessSource: "startup_cns_day7_aug29_holiday_reconciliation",
+      });
+    }
+
+    ngCnsDay7HolidayRepairState.last_result = result;
+    ngCnsDay7HolidayRepairState.last_success_at = new Date().toISOString();
+    return result;
+  } catch (error) {
+    ngCnsDay7HolidayRepairState.last_error = error.message;
+    throw error;
+  } finally {
+    ngCnsDay7HolidayRepairState.running = false;
+    ngCnsDay7HolidayRepairState.last_finished_at = new Date().toISOString();
   }
 }
 
@@ -11774,6 +11816,8 @@ app.get("/health", async (req, res) => {
     lms_known_schedule_repair: ngKnownScheduleRepairState,
     lms_dermatology_cns_schedule_repair_build: LMS_DERMATOLOGY_CNS_SCHEDULE_REPAIR_BUILD,
     lms_dermatology_cns_schedule_repair: ngDermatologyCnsScheduleRepairState,
+    lms_cns_day7_holiday_repair_build: LMS_CNS_DAY7_HOLIDAY_REPAIR_BUILD,
+    lms_cns_day7_holiday_repair: ngCnsDay7HolidayRepairState,
     lms_known_msk_notes_catchup_build: LMS_KNOWN_MSK_NOTES_CATCHUP_BUILD,
     lms_known_msk_notes_catchup: ngKnownMskNotesCatchupState,
     student_notes_resolver_build: STUDENT_NOTES_RESOLVER_BUILD,
@@ -67245,6 +67289,305 @@ function ngReconcileKnownDermatologyCnsSchedule(db = {}, {
   return result;
 }
 
+function ngReconcileKnownCnsDay7Holiday(db = {}, {
+  actorId = "system:cns-day7-aug29-holiday-repair",
+  now = new Date().toISOString(),
+} = {}) {
+  const rule = NEXTGEN_CNS_DAY7_2026_08_29_HOLIDAY_REPAIR;
+  const result = {
+    build: LMS_CNS_DAY7_HOLIDAY_REPAIR_BUILD,
+    checked: true,
+    changed: false,
+    repaired: false,
+    already_correct: false,
+    safe_stop: false,
+    course_id: rule.course_id,
+    holiday_date: rule.holiday_date,
+    replacement_date: rule.replacement_date,
+    final_teaching_date: null,
+    affected_existing_days: 0,
+    recording_anchors_preserved: 0,
+    recordings_deleted: 0,
+    notes_deleted: 0,
+    sessions_deleted: 0,
+    attendance_deleted: 0,
+    students_deleted: 0,
+    reason: null,
+  };
+  const safeStop = (reason) => {
+    result.safe_stop = true;
+    result.reason = reason;
+    return result;
+  };
+  const clone = (value) => JSON.parse(JSON.stringify(value));
+  const sameSnapshot = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+  const identityAndUrls = (item = {}) => Object.fromEntries(Object.entries(item || {}).filter(([key]) => (
+    key === "id" || key === "recording_key" || key === "recording_id" || key === "meeting_id" ||
+    key === "zoom_meeting_id" || key === "session_id" || key.endsWith("_url") || key.endsWith("_urls")
+  )));
+  const isCnsDay = (day, systemDay) => (
+    ngNormalizeMasterMapSystemName(day?.system || day?.chapter || "") === "Central Nervous System" &&
+    Number(day?.system_day || day?.day_in_system || 0) === Number(systemDay)
+  );
+  const roadmapEntry = Object.entries(db.roadmaps || {}).find(([key, item]) => (
+    String(key) === rule.course_id || String(item?.course_id || item?.courseId || "") === rule.course_id
+  ));
+  const roadmapKey = roadmapEntry?.[0] || rule.course_id;
+  const roadmap = roadmapEntry?.[1] || null;
+  if (!roadmap || !Array.isArray(roadmap.days) || !roadmap.days.length) return safeStop("roadmap_not_found");
+
+  db.liveSessions = db.liveSessions || {};
+  db.recordings = db.recordings || {};
+  db.notes = db.notes || {};
+  db.attendance = db.attendance || {};
+
+  const holidayDay = roadmap.days.find((day) => String(day?.id || "") === rule.holiday_day_id) || null;
+  const replacementDay = roadmap.days.find((day) => String(day?.id || "") === rule.replacement_day_id) || null;
+  const appendedDay = roadmap.days.find((day) => String(day?.id || "") === rule.new_tail_day_id) || null;
+  const alreadyCorrect = Boolean(
+    holidayDay && ngKnownScheduleDate(holidayDay.date || holidayDay.scheduled_date) === rule.holiday_date && ngRoadmapDayIsNoClass(holidayDay) &&
+    replacementDay && ngKnownScheduleDate(replacementDay.date || replacementDay.scheduled_date) === rule.replacement_date && isCnsDay(replacementDay, 7) &&
+    appendedDay
+  );
+  if (alreadyCorrect) {
+    const teachingDays = roadmap.days.filter((day) => !ngRoadmapDayIsNoClass(day));
+    result.already_correct = true;
+    result.final_teaching_date = teachingDays.map((day) => ngKnownScheduleDate(day.date || day.scheduled_date)).sort().at(-1) || null;
+    result.reason = "already_correct";
+    return result;
+  }
+
+  if (!holidayDay || ngKnownScheduleDate(holidayDay.date || holidayDay.scheduled_date) !== rule.holiday_date || !isCnsDay(holidayDay, 7)) {
+    return safeStop("august_29_cns_day_7_precondition_failed");
+  }
+  if (ngRoadmapDayIsNoClass(holidayDay)) return safeStop("partial_holiday_repair_detected");
+  if (
+    !replacementDay || ngKnownScheduleDate(replacementDay.date || replacementDay.scheduled_date) !== rule.replacement_date ||
+    !isCnsDay(replacementDay, 8)
+  ) return safeStop("august_31_cns_day_8_precondition_failed");
+  if (appendedDay) return safeStop("unexpected_tail_day_before_repair");
+
+  const selectedSession = db.liveSessions[rule.holiday_session_id] || null;
+  if (!selectedSession || String(holidayDay.live_session_id || holidayDay.session_id || "") !== rule.holiday_session_id) {
+    return safeStop("august_29_session_precondition_failed");
+  }
+  if (ngKnownScheduleSessionHasRecording(db, selectedSession)) return safeStop("august_29_recording_conflicts_with_holiday");
+  const selectedAttendance = Object.values(db.attendance).filter((item) => (
+    String(item?.session_id || item?.live_session_id || "") === rule.holiday_session_id ||
+    String(item?.roadmap_day_id || item?.day_id || "") === rule.holiday_day_id
+  ));
+  if (selectedAttendance.length) return safeStop("august_29_attendance_conflicts_with_holiday");
+  const selectedNotes = Object.entries(db.notes).filter(([key, note]) => (
+    String(note?.session_id || note?.live_session_id || key || "") === rule.holiday_session_id ||
+    String(note?.roadmap_day_id || note?.day_id || "") === rule.holiday_day_id
+  ));
+  const selectedHasSubstantiveNotes = selectedNotes.some(([, note]) => {
+    const content = String(note?.notes || note?.cleaned_notes || note?.student_notes || note?.transcript_text || "").trim();
+    return content.length >= 300 || note?.published === true || note?.is_published === true;
+  });
+  if (selectedHasSubstantiveNotes) return safeStop("august_29_notes_conflict_with_holiday");
+  if (String(replacementDay.live_session_id || replacementDay.session_id || "") !== rule.replacement_session_id || !db.liveSessions[rule.replacement_session_id]) {
+    return safeStop("august_31_session_precondition_failed");
+  }
+
+  const holidayIndex = roadmap.days.findIndex((day) => String(day?.id || "") === rule.holiday_day_id);
+  const activeTail = roadmap.days.slice(holidayIndex).filter((day) => !ngRoadmapDayIsNoClass(day));
+  if (!activeTail.length || String(activeTail[0]?.id || "") !== rule.holiday_day_id || String(activeTail[1]?.id || "") !== rule.replacement_day_id) {
+    return safeStop("academic_tail_precondition_failed");
+  }
+  const packetFields = [
+    "title", "description", "system", "chapter", "topic", "topics", "subsystem", "subtopic",
+    "first_aid_pages", "fa_pages", "first_aid_topics", "uworld_qids", "qids", "resources", "tasks",
+    "homework", "learning_objectives", "assessment_id", "assessment_ids", "flashcard_deck_id",
+    "video_id", "video_ids", "video_resources", "notes_template", "template", "content_packet_id",
+    "mapped_uworld_qids", "question_ids", "qid_list", "qid_count", "uworld_target", "uworld_task",
+    "live_teaching_topic", "lecture_id", "lecture_title", "video_library_lecture",
+    "video_library_lecture_id", "video_lecture", "library_lecture", "recorded_lecture",
+    "task", "daily_task", "task_items", "community_prompt", "assessment_task", "assessment_day",
+    "flashcard_tags", "resource_links", "video_url", "video_lecture_url", "library_video_url",
+    "system_day", "day_in_system", "day_number", "instructional_day_number",
+  ];
+  const packetOf = (day) => Object.fromEntries(packetFields.filter((key) => day[key] !== undefined).map((key) => [key, clone(day[key])]));
+  const packets = activeTail.map(packetOf);
+  const anchors = activeTail.map((day) => {
+    const sessionId = String(day.live_session_id || day.session_id || "").trim();
+    const session = sessionId ? db.liveSessions[sessionId] : null;
+    return {
+      day_id: String(day.id || ""),
+      date: ngKnownScheduleDate(day.date || day.scheduled_date),
+      session_id: sessionId,
+      recording_anchor: Boolean(session && ngKnownScheduleSessionHasRecording(db, session)),
+    };
+  });
+  const lastDate = anchors.at(-1)?.date;
+  const nextDate = (() => {
+    const cursor = new Date(`${lastDate}T00:00:00Z`);
+    do cursor.setUTCDate(cursor.getUTCDate() + 1); while (roadmap.skip_sundays !== false && cursor.getUTCDay() === 0);
+    return cursor.toISOString().slice(0, 10);
+  })();
+  if (!lastDate || roadmap.days.some((day) => ngKnownScheduleDate(day.date || day.scheduled_date) === nextDate)) {
+    return safeStop("new_final_date_conflict");
+  }
+
+  const protectedBuckets = [
+    "users", "enrollments", "payments", "plans", "recordings", "notes", "flashcards",
+    "flashcardProgress", "assessments", "assessmentAttempts", "roadmapProgress", "dailyTaskProgress",
+    "pointEvents", "weakConceptLogs", "adaptiveAssignments", "adaptiveFlashcardQueues", "attendance", "leaderboard",
+  ];
+  const countsBefore = Object.fromEntries(protectedBuckets.map((name) => [name, Object.keys(db[name] || {}).length]));
+  const sessionIdsBefore = Object.keys(db.liveSessions);
+  const sessionSnapshotsBefore = new Map(sessionIdsBefore.map((id) => [id, identityAndUrls(db.liveSessions[id])]));
+  const recordingSnapshotsBefore = new Map(Object.entries(db.recordings).map(([id, recording]) => [id, identityAndUrls(recording)]));
+
+  selectedSession.status = "cancelled";
+  selectedSession.archived_from_active = true;
+  selectedSession.no_class_placeholder = true;
+  selectedSession.student_visible = false;
+  selectedSession.cancelled_reason = "verified_holiday_2026_08_29";
+  selectedSession.updated_by = actorId;
+  selectedSession.updated_at = now;
+
+  const originalHolidaySnapshot = clone(holidayDay);
+  ngClearNoClassRoadmapFields(holidayDay);
+  Object.assign(holidayDay, {
+    title: "Holiday / No Live Class",
+    description: "Saturday, 29 August 2026 was a verified holiday. CNS Day 7 continues on Monday, 31 August 2026.",
+    system: "",
+    chapter: "",
+    topic: "",
+    system_day: null,
+    day_in_system: null,
+    day_number: null,
+    instructional_day_number: null,
+    status: "holiday",
+    roadmap_status: "holiday",
+    is_schedule_placeholder: true,
+    original_day_snapshot: originalHolidaySnapshot,
+    live_session_id: null,
+    session_id: null,
+    updated_by: actorId,
+    updated_at: now,
+  });
+  roadmap.days[holidayIndex] = holidayDay;
+  for (let index = 1; index < activeTail.length; index += 1) {
+    for (const key of packetFields) delete activeTail[index][key];
+    Object.assign(activeTail[index], clone(packets[index - 1]), { updated_by: actorId, updated_at: now });
+  }
+  const lastSource = activeTail.at(-1);
+  const newDay = {
+    ...clone(lastSource),
+    ...clone(packets.at(-1)),
+    id: rule.new_tail_day_id,
+    date: nextDate,
+    scheduled_date: nextDate,
+    live_session_id: null,
+    session_id: null,
+    status: "scheduled",
+    roadmap_status: "scheduled",
+    is_schedule_placeholder: false,
+    created_at: now,
+    updated_at: now,
+    updated_by: actorId,
+  };
+  delete newDay.original_day_snapshot;
+  roadmap.days.push(newDay);
+  for (const { day, scheduleSlotNumber, instructionalDayNumber, systemDay, noClass } of ngRoadmapSequenceEntries(roadmap.days)) {
+    day.schedule_slot_number = scheduleSlotNumber;
+    day.order = scheduleSlotNumber;
+    day.day_number = noClass ? null : instructionalDayNumber;
+    day.instructional_day_number = noClass ? null : instructionalDayNumber;
+    day.system_day = noClass ? null : systemDay;
+    day.day_in_system = noClass ? null : systemDay;
+    day.week_number = noClass ? Math.ceil(scheduleSlotNumber / 7) : Math.ceil(instructionalDayNumber / 7);
+    if (!noClass) day.title = ngRoadmapCanonicalDayTitle(day);
+  }
+  const teachingDaysAfterRepair = roadmap.days.filter((day) => !ngRoadmapDayIsNoClass(day));
+  roadmap.instructional_days = teachingDaysAfterRepair.length;
+  roadmap.schedule_slots = roadmap.days.length;
+  roadmap.settings = roadmap.settings || {};
+  roadmap.settings.duration_days = teachingDaysAfterRepair.length;
+  roadmap.settings.schedule_slots = roadmap.days.length;
+  const sequenceMetadataSync = ngSyncRoadmapSequenceMetadata(db, roadmap, { actorId });
+  const liveSessionSync = ngSyncLinkedLiveSessionsForRoadmap(db, roadmap, { actorId });
+
+  const announcement = ngUpsertCourseAnnouncement(db, {
+    notification_key: `roadmap_holiday:${rule.course_id}:${rule.holiday_day_id}`,
+    course_id: rule.course_id,
+    type: "class_update",
+    priority: "high",
+    title: "Saturday holiday — CNS Day 7 moved to Monday",
+    content: "Saturday, 29 August is a holiday. Central Nervous System Day 7 is now scheduled for Monday, 31 August at 12:00 PM Eastern. The remaining roadmap has moved forward safely.",
+    action_url: "/student/live-sessions",
+    action_label: "View updated schedule",
+    created_by: actorId,
+    updated_by: actorId,
+    metadata: {
+      roadmap_day_id: rule.holiday_day_id,
+      replacement_day_id: rule.replacement_day_id,
+      replacement_date: rule.replacement_date,
+      status: "holiday",
+      verified: true,
+    },
+  });
+
+  roadmap.cns_day7_aug29_holiday_repair = {
+    build: LMS_CNS_DAY7_HOLIDAY_REPAIR_BUILD,
+    holiday_day_id: rule.holiday_day_id,
+    replacement_day_id: rule.replacement_day_id,
+    new_tail_day_id: rule.new_tail_day_id,
+    new_final_date: nextDate,
+    sequence_metadata_sync: sequenceMetadataSync,
+    live_session_sync: liveSessionSync,
+    announcement_id: announcement?.id || null,
+    applied_by: actorId,
+    applied_at: now,
+  };
+  roadmap.updated_by = actorId;
+  roadmap.updated_at = now;
+  db.roadmaps[roadmapKey] = roadmap;
+
+  const finalHoliday = roadmap.days.find((day) => String(day?.id || "") === rule.holiday_day_id) || null;
+  const finalReplacement = roadmap.days.find((day) => String(day?.id || "") === rule.replacement_day_id) || null;
+  const finalTail = roadmap.days.find((day) => String(day?.id || "") === rule.new_tail_day_id) || null;
+  const sessionsPreserved = sessionIdsBefore.every((id) => Boolean(db.liveSessions[id]));
+  const sessionIdentitiesPreserved = sessionIdsBefore.every((id) => sameSnapshot(sessionSnapshotsBefore.get(id), identityAndUrls(db.liveSessions[id])));
+  const recordingsPreserved = Array.from(recordingSnapshotsBefore.entries()).every(([id, snapshot]) => (
+    Boolean(db.recordings[id]) && sameSnapshot(snapshot, identityAndUrls(db.recordings[id]))
+  ));
+  const recordedAnchorsPreserved = anchors.filter((row) => row.recording_anchor).every((row) => {
+    const session = db.liveSessions[row.session_id];
+    return Boolean(session && ngKnownScheduleDate(session.scheduled_date) === row.date);
+  });
+  const protectedCountsPreserved = protectedBuckets.every((name) => Object.keys(db[name] || {}).length >= Number(countsBefore[name] || 0));
+  const checks = {
+    august_29_is_holiday: Boolean(finalHoliday && ngKnownScheduleDate(finalHoliday.date) === rule.holiday_date && ngRoadmapDayIsNoClass(finalHoliday)),
+    monday_is_cns_day_7: Boolean(finalReplacement && ngKnownScheduleDate(finalReplacement.date) === rule.replacement_date && isCnsDay(finalReplacement, 7)),
+    final_packet_appended: Boolean(finalTail && ngKnownScheduleDate(finalTail.date) === nextDate),
+    old_saturday_session_hidden: selectedSession.student_visible === false && selectedSession.archived_from_active === true,
+    every_original_session_preserved: sessionsPreserved,
+    every_original_session_identity_and_url_preserved: sessionIdentitiesPreserved,
+    every_recording_identity_and_url_preserved: recordingsPreserved,
+    every_recorded_session_anchor_preserved: recordedAnchorsPreserved,
+    protected_record_counts_not_decreased: protectedCountsPreserved,
+  };
+  const failed = Object.entries(checks).filter(([, passed]) => passed !== true).map(([name]) => name);
+  if (failed.length) throw new Error(`CNS Day 7 holiday transactional verification failed: ${failed.join(", ")}`);
+
+  const teachingDays = roadmap.days.filter((day) => !ngRoadmapDayIsNoClass(day));
+  result.changed = true;
+  result.repaired = true;
+  result.reason = "repaired_transactionally";
+  result.affected_existing_days = activeTail.length;
+  result.recording_anchors_preserved = anchors.filter((row) => row.recording_anchor).length;
+  result.final_teaching_date = teachingDays.map((day) => ngKnownScheduleDate(day.date || day.scheduled_date)).sort().at(-1) || null;
+  result.new_final_date = nextDate;
+  result.sequence_metadata_sync = sequenceMetadataSync;
+  result.live_session_sync = liveSessionSync;
+  result.announcement_id = announcement?.id || null;
+  result.checks = checks;
+  return result;
+}
+
 function ngResetObjectByCourse(db, key, courseId, shouldRemove = null) {
   const bucket = db[key] || {};
   let removed = 0;
@@ -94291,6 +94634,15 @@ const ngDermatologyCnsScheduleRepairState = {
   last_error: null,
   last_result: null,
 };
+const ngCnsDay7HolidayRepairState = {
+  build: LMS_CNS_DAY7_HOLIDAY_REPAIR_BUILD,
+  running: false,
+  last_started_at: null,
+  last_finished_at: null,
+  last_success_at: null,
+  last_error: null,
+  last_result: null,
+};
 const ngKnownMskNotesCatchupState = {
   build: LMS_KNOWN_MSK_NOTES_CATCHUP_BUILD,
   running: false,
@@ -95132,6 +95484,9 @@ async function startNextgenServer() {
     .then(() => ngRunDermatologyCnsScheduleStartupReconciliation())
     .then((result) => console.log("LMS Dermatology/CNS schedule reconciliation:", result))
     .catch((error) => console.error("LMS Dermatology/CNS schedule reconciliation failed:", error.message))
+    .then(() => ngRunCnsDay7HolidayStartupReconciliation())
+    .then((result) => console.log("LMS CNS Day 7 holiday reconciliation:", result))
+    .catch((error) => console.error("LMS CNS Day 7 holiday reconciliation failed:", error.message))
     .then(() => ngRunTeachingAccessStartupReconciliation())
     .then((result) => console.log("LMS teaching-day access reconciliation:", result))
     .catch((error) => console.error("LMS teaching-day access reconciliation failed:", error.message))
