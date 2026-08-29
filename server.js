@@ -652,7 +652,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v219-safe-shared-student-profile";
+const NEXTGEN_BACKEND_BUILD = "v220-instant-email-demo";
 const CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
@@ -1736,6 +1736,31 @@ Use this time to explore the roadmap, live-class flow, assessments, flashcards, 
 Warm regards,
 NextGen USMLE Student Success Team`,
     variables: ["student_name", "course_name", "course_phrase", "expiry_date", "dashboard_url", "plans_url", "support_email"],
+  },
+  instant_demo_credentials: {
+    key: "instant_demo_credentials",
+    name: "Instant Demo Credentials",
+    category: "Demo Lifecycle",
+    description: "Sent when a new visitor starts the one-field LMS demo and receives their reusable login details.",
+    enabled: true,
+    subject: "Your NextGen USMLE demo login details",
+    body: `Hi Doctor,
+
+Your {{demo_days}}-day NextGen USMLE LMS demo is ready.
+
+Your first visit is opening automatically. For your next visit, use these secure login details:
+
+Email: {{student_email}}
+Password: {{temporary_password}}
+
+Open your student dashboard:
+{{dashboard_url}}
+
+Your demo access ends on {{expiry_date}}. Please keep your password private. You can change it anytime from your student account.
+
+Warm regards,
+NextGen USMLE Student Success Team`,
+    variables: ["student_email", "temporary_password", "demo_days", "expiry_date", "dashboard_url", "support_email"],
   },
   demo_expiring: {
     key: "demo_expiring",
@@ -15112,6 +15137,241 @@ app.post("/demo/invitation-opened", async (req, res) => {
     res.sendStatus(204);
   } catch (error) {
     res.status(error.statusCode || 503).json({ success: false, error: "Invitation tracking unavailable" });
+  }
+});
+
+const NG_INSTANT_DEMO_RATE_WINDOW_MS = 15 * 60 * 1000;
+const NG_INSTANT_DEMO_EMAIL_LIMIT = 6;
+const NG_INSTANT_DEMO_IP_LIMIT = 30;
+const ngInstantDemoRateBuckets = new Map();
+const ngInstantDemoEmailLocks = new Map();
+
+function ngInstantDemoClientIp(req) {
+  return String(req.headers["x-forwarded-for"] || req.ip || req.socket?.remoteAddress || "unknown")
+    .split(",")[0]
+    .trim()
+    .slice(0, 96) || "unknown";
+}
+
+function ngTakeInstantDemoRateLimit(req, res, email) {
+  const now = Date.now();
+  for (const [key, bucket] of ngInstantDemoRateBuckets.entries()) {
+    if (!bucket || Number(bucket.expires_at || 0) <= now) ngInstantDemoRateBuckets.delete(key);
+  }
+
+  const emailHash = crypto.createHash("sha256").update(email).digest("hex").slice(0, 24);
+  const keys = [
+    { key: `email:${emailHash}`, limit: NG_INSTANT_DEMO_EMAIL_LIMIT },
+    { key: `ip:${ngInstantDemoClientIp(req)}`, limit: NG_INSTANT_DEMO_IP_LIMIT },
+  ];
+
+  for (const item of keys) {
+    const bucket = ngInstantDemoRateBuckets.get(item.key);
+    if (bucket && bucket.count >= item.limit && bucket.expires_at > now) {
+      const retryAfter = Math.max(1, Math.ceil((bucket.expires_at - now) / 1000));
+      res.setHeader("Retry-After", String(retryAfter));
+      return false;
+    }
+  }
+
+  for (const item of keys) {
+    const existing = ngInstantDemoRateBuckets.get(item.key);
+    ngInstantDemoRateBuckets.set(item.key, existing && existing.expires_at > now
+      ? { ...existing, count: existing.count + 1 }
+      : { count: 1, expires_at: now + NG_INSTANT_DEMO_RATE_WINDOW_MS });
+  }
+  return true;
+}
+
+async function ngWithInstantDemoEmailLock(email, task) {
+  const previous = ngInstantDemoEmailLocks.get(email) || Promise.resolve();
+  let releaseCurrent;
+  const current = new Promise((resolve) => { releaseCurrent = resolve; });
+  ngInstantDemoEmailLocks.set(email, current);
+  await previous.catch(() => {});
+  try {
+    return await task();
+  } finally {
+    releaseCurrent();
+    if (ngInstantDemoEmailLocks.get(email) === current) ngInstantDemoEmailLocks.delete(email);
+  }
+}
+
+app.post("/demo/instant-start", async (req, res) => {
+  try {
+    assertWebsiteProductRequest({ origin: req.get("origin") || "", product: "lms" });
+    const email = normalizeEmail(req.body?.email || "");
+
+    if (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
+      return res.status(400).json({ success: false, code: "INVALID_EMAIL", error: "Enter a valid email address" });
+    }
+
+    if (!ngTakeInstantDemoRateLimit(req, res, email)) {
+      return res.status(429).json({
+        success: false,
+        code: "INSTANT_DEMO_RATE_LIMITED",
+        error: "Too many demo requests. Please wait a few minutes and try again.",
+      });
+    }
+
+    const result = await ngWithInstantDemoEmailLock(email, async () => {
+      const db = await readLiveDb();
+      const existingUser = findUserByEmail(db, email);
+
+      if (existingUser) {
+        return {
+          success: true,
+          build: NEXTGEN_BACKEND_BUILD,
+          account_created: false,
+          existing_account: true,
+          requires_password: true,
+          message: "This email already has an account. Enter your password to continue.",
+        };
+      }
+
+      const settings = { ...DEFAULT_DEMO_SETTINGS, ...(db.demoSettings || {}) };
+      if (settings.enabled === false) {
+        const error = new Error("Demo access is currently unavailable");
+        error.statusCode = 403;
+        error.code = "DEMO_DISABLED";
+        throw error;
+      }
+
+      const emailStatus = ngEmailTransportStatus();
+      if (!emailStatus.configured) {
+        const error = new Error("Demo credential email is temporarily unavailable. Please try again shortly.");
+        error.statusCode = 503;
+        error.code = "EMAIL_NOT_CONFIGURED";
+        throw error;
+      }
+
+      const courses = getDemoCourseCandidates(db, {
+        ...(req.body || {}),
+        all_courses: true,
+        course_scope: "all_active",
+      });
+      if (!courses.length) {
+        const error = new Error("No active demo-enabled courses were found");
+        error.statusCode = 404;
+        error.code = "DEMO_COURSES_UNAVAILABLE";
+        throw error;
+      }
+
+      const temporaryPassword = ngGenerateTemporaryPassword();
+      const user = createBackendUser({
+        email,
+        name: "Doctor",
+        password: temporaryPassword,
+        role: "student",
+      });
+      user.must_change_password = false;
+      user.instant_demo_created_at = new Date().toISOString();
+      db.users = db.users || {};
+      db.enrollments = db.enrollments || {};
+      db.users[user.id] = user;
+
+      const demoDays = Math.max(1, Number(settings.duration_days || 7));
+      const demoExpiry = dateOnly(addDays(new Date(), demoDays));
+      const enrollmentBody = {
+        ...(req.body || {}),
+        all_courses: true,
+        course_scope: "all_active",
+        source: req.body?.source || "website_instant_demo",
+        intent: req.body?.intent || "demo_interest",
+      };
+      const enrollments = courses.map((course) => {
+        const enrollment = createBackendEnrollment(db, {
+          userId: user.id,
+          userName: user.name,
+          courseId: String(course.id),
+          isDemo: true,
+          accessGranted: true,
+          demoExpiry,
+        });
+        enrichDemoEnrollment(enrollment, enrollmentBody, "website_instant_demo");
+        return {
+          ...enrollment,
+          course_name: course.name || "Course",
+          status: "demo_active",
+          created: true,
+        };
+      });
+
+      const credentialEmail = await ngSendConfiguredEmailSafe({
+        db,
+        templateKey: "instant_demo_credentials",
+        to: user.email,
+        variables: ngEmailBaseVariables(db, user, {
+          temporary_password: temporaryPassword,
+          demo_days: demoDays,
+          expiry_date: demoExpiry,
+        }),
+        reason: "instant_demo_credentials",
+        userId: user.id,
+        enrollmentId: enrollments[0]?.id || null,
+        force: true,
+      });
+
+      if (credentialEmail.sent !== true) {
+        const error = new Error("We could not email your login details. Please check the address and try again.");
+        error.statusCode = 502;
+        error.code = "DEMO_CREDENTIAL_EMAIL_FAILED";
+        throw error;
+      }
+
+      await writeLiveDb(db);
+
+      let attributionStatus = "unattributed";
+      if (/^[A-Za-z0-9_-]{32}$/.test(String(req.body?.ayla_invite || ""))) {
+        try {
+          const attribution = await mutateCrmDb((crmDb) => recordDemoActivation({
+            db: crmDb,
+            token: String(req.body.ayla_invite),
+            user,
+            enrollments,
+            hadDemoBefore: false,
+          }));
+          attributionStatus = attribution.status;
+        } catch (error) {
+          console.warn("Instant demo attribution could not be saved:", error.message);
+          attributionStatus = "unavailable";
+        }
+      }
+
+      const safeUser = sanitizeUser(user);
+      const status = buildStudentDemoStatus(db, user);
+      return {
+        success: true,
+        build: NEXTGEN_BACKEND_BUILD,
+        account_created: true,
+        existing_account: false,
+        requires_password: false,
+        token: signAuthToken(user),
+        user: safeUser,
+        record: safeUser,
+        created: true,
+        created_count: enrollments.length,
+        count: enrollments.length,
+        enrollments,
+        enrollment: enrollments[0] || null,
+        demo_settings: settings,
+        demo_expiry: status.demo_expiry || demoExpiry,
+        demo_status: status,
+        transactional_email: { attempted: true, sent: true, template_key: "instant_demo_credentials" },
+        attribution_status: attributionStatus,
+        new_demo_student: true,
+        source: "backend",
+        message: "Your demo is ready. Opening your student dashboard now.",
+      };
+    });
+
+    return res.json(result);
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      code: error.code || "INSTANT_DEMO_FAILED",
+      error: error.message || "Failed to start demo",
+    });
   }
 });
 
