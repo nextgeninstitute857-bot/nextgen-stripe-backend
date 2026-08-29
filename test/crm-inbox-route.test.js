@@ -12,11 +12,12 @@ function sourceBetween(start, end) {
   return server.slice(from, to);
 }
 const crud = sourceBetween('function registerCrmCrudRoutes(', 'const NEXTGEN_IMPORT_PHONE_COUNTRY_RULES');
-const thread = sourceBetween('async function ngSendCrmConversationThread(', 'app.post("/admin/crm/conversations/:leadId/mark-read"');
+const thread = sourceBetween('function ngConversationRecordingTitleIndex(', 'app.post("/admin/crm/conversations/:leadId/mark-read"');
 
 function fixture({ admin = true, denied = false } = {}) {
   const lead = { id: 'lead-1', name: 'Synthetic Student' };
-  const original = { id: 'copy-1', lead_id: lead.id, message_text: 'Dashboard', status: 'sent', provider_message_id: 'wamid-1' };
+  const recordingUrl = 'https://us06web.zoom.us/rec/share/cns-day-6';
+  const original = { id: 'copy-1', lead_id: lead.id, message_text: `Recording:\n${recordingUrl}`, status: 'sent', provider_message_id: 'wamid-1' };
   const delivered = { ...original, id: 'log-1', status: 'delivered', delivered_at: '2026-08-28T12:00:00Z', metadata: { media_url: 'https://nextgenusmle.live/media/dashboard.png' } };
   const db = { leads: [lead], conversations: [original], message_logs: [delivered] };
   const counters = { writes: 0, reads: 0, unified: 0 };
@@ -35,6 +36,8 @@ function fixture({ admin = true, denied = false } = {}) {
     writeCrmDb: async () => { counters.writes++; },
     ngLeadConversationMessages: (data, key) => { counters.unified++; return [...data.message_logs, ...data.conversations].filter(item => item.lead_id === key); },
     ngInboxMessagesForLead: (_data, _lead, messages) => uniqueInboxMessages(messages),
+    readLiveDb: async () => ({ recordings: { 'recording-1': { topic: 'Neurology / CNS', system: 'Central Nervous System', system_day: 6, recording_url: recordingUrl } } }),
+    ngDayFirstContentTitle: (topic, { systemDay, system }) => `${system} — Day ${systemDay} — ${topic}`,
     applyTeamScopeToRecords: () => [],
     crmRecordVisibleToTeam: () => false,
   });
@@ -59,6 +62,7 @@ test('the first registered lead-thread route returns provider receipts and media
   assert.equal(result.body.conversations.length, 1);
   assert.equal(result.body.conversations[0].status, 'delivered');
   assert.equal(result.body.conversations[0].metadata.media_url, f.delivered.metadata.media_url);
+  assert.equal(result.body.conversations[0].presentation_recording_title, 'Central Nervous System — Day 6 — Neurology / CNS');
   assert.equal(result.body.read_state.changed, true);
   assert.deepEqual(f.counters, { writes: 1, reads: 1, unified: 1 });
   assert.doesNotMatch(server, /app\.get\("\/admin\/crm\/conversations\/:leadId"/);

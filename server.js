@@ -27232,6 +27232,47 @@ app.get("/admin/crm/integrations/:id/logs", async (req, res) => {
   }
 });
 
+function ngConversationRecordingTitleIndex(liveDb = {}) {
+  return Object.values(liveDb.recordings || {})
+    .flatMap((recording) => {
+      const title = ngDayFirstContentTitle(recording?.topic || recording?.title || "", {
+        systemDay: recording?.system_day,
+        dayNumber: recording?.day_number,
+        system: recording?.system || "",
+        fallback: recording?.system || "Live Session Recording",
+      });
+      return [recording?.recording_url, recording?.share_url, recording?.play_url]
+        .map((url) => String(url || "").trim())
+        .filter(Boolean)
+        .map((url) => ({ url, title }));
+    })
+    .filter((item) => item.title)
+    .sort((a, b) => b.url.length - a.url.length);
+}
+
+function ngConversationMessageWithRecordingTitle(message = {}, recordingTitles = []) {
+  const body = String(
+    message.message_text || message.text || message.body || message.message || message.content || ""
+  );
+  const match = recordingTitles.find((item) => body.includes(item.url));
+  if (!match) return message;
+  return {
+    ...message,
+    presentation_recording_title: match.title,
+  };
+}
+
+async function ngConversationMessagesWithRecordingTitles(messages = []) {
+  try {
+    const liveDb = await readLiveDb();
+    const recordingTitles = ngConversationRecordingTitleIndex(liveDb);
+    return messages.map((message) => ngConversationMessageWithRecordingTitle(message, recordingTitles));
+  } catch {
+    // The CRM thread must remain available even if the LMS recording catalog is temporarily unavailable.
+    return messages;
+  }
+}
+
 // Client data / conversation / handoff backend
 // Called by the first registered conversations/:id route, after access checks.
 // Do not register another GET with the same URL shape: Express would shadow it.
@@ -27255,14 +27296,15 @@ async function ngSendCrmConversationThread(req, res, ctx) {
         .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
 
     const inboxMessages = ngInboxMessagesForLead(db, lead, messages);
+    const labelledInboxMessages = await ngConversationMessagesWithRecordingTitles(inboxMessages);
     res.json({
       success: true,
       lead: lead || null,
       lead_id: resolvedLeadId,
       query_key: rawKey,
-      conversations: inboxMessages,
-      messages: inboxMessages,
-      count: inboxMessages.length,
+      conversations: labelledInboxMessages,
+      messages: labelledInboxMessages,
+      count: labelledInboxMessages.length,
       read_state: markReadResult,
       sources: { unified_thread: true, includes: ["conversations", "message_logs", "inbound_messages", "outbound_messages"] },
     });
