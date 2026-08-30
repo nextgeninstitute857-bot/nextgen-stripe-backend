@@ -21,7 +21,7 @@ test("Meta forms preserve their real acquisition platform", () => {
   assert.ok(source.indexOf('return "facebook"') < source.indexOf('return "meta"'));
 });
 
-test("AylaMed organic lead engine stays draft and covers every exam and source", () => {
+test("AylaMed organic lead watch is active and covers every exam and source", () => {
   assert.match(server, /AYLAMED_LEAD_ENGINE_EXAMS/);
   for (const exam of ["usmle_step1", "usmle_step2_ck", "usmle_step3", "plab", "amc", "mccqe", "nclex"]) {
     assert.match(server, new RegExp(`key: "${exam}"`));
@@ -30,7 +30,7 @@ test("AylaMed organic lead engine stays draft and covers every exam and source",
     assert.match(server, new RegExp(`key: "${platform}"`));
   }
   assert.match(server, /\/admin\/crm\/lead-engine\/aylamed\/bootstrap/);
-  assert.match(server, /status: "draft"/);
+  assert.match(server, /status: "active"/);
   assert.match(server, /approval_mode: "draft_only"/);
   assert.match(server, /automation_enabled: false/);
   assert.match(server, /outreach_strategy: "organic_intent_monitoring"/);
