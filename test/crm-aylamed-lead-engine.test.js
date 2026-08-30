@@ -21,7 +21,7 @@ test("Meta forms preserve their real acquisition platform", () => {
   assert.ok(source.indexOf('return "facebook"') < source.indexOf('return "meta"'));
 });
 
-test("AylaMed lead engine bootstrap stays draft and covers every exam and source", () => {
+test("AylaMed organic lead engine stays draft and covers every exam and source", () => {
   assert.match(server, /AYLAMED_LEAD_ENGINE_EXAMS/);
   for (const exam of ["usmle_step1", "usmle_step2_ck", "usmle_step3", "plab", "amc", "mccqe", "nclex"]) {
     assert.match(server, new RegExp(`key: "${exam}"`));
@@ -33,7 +33,23 @@ test("AylaMed lead engine bootstrap stays draft and covers every exam and source
   assert.match(server, /status: "draft"/);
   assert.match(server, /approval_mode: "draft_only"/);
   assert.match(server, /automation_enabled: false/);
-  assert.match(server, /marketing_consent/);
+  assert.match(server, /outreach_strategy: "organic_intent_monitoring"/);
+  assert.match(server, /lookback_days: 30/);
+  assert.match(server, /paid_ads_enabled: false/);
+  assert.match(server, /\/login\?\$\{utm\.toString\(\)\}/);
+  assert.match(server, /form_id: null/);
+});
+
+test("AylaMed public readiness and demo form is removed by the safe bootstrap", () => {
+  const bootstrap = server.slice(
+    server.indexOf('app.post("/admin/crm/lead-engine/aylamed/bootstrap"'),
+    server.indexOf('app.post("/public/crm/forms/:formId/submit"'),
+  );
+  assert.match(bootstrap, /form_aylamed_exam_readiness/);
+  assert.match(bootstrap, /aylamed-exam-readiness-demo/);
+  assert.match(bootstrap, /forms_removed: formsRemoved/);
+  assert.match(bootstrap, /public_signup_enabled: false/);
+  assert.doesNotMatch(server, /function buildAylaMedLeadEngineForm/);
 });
 
 test("AylaMed records attribution through an explicit post-registration CRM bridge", () => {
