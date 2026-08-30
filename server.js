@@ -657,7 +657,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v222-demo-current-focus";
+const NEXTGEN_BACKEND_BUILD = "v223-aylamed-diagnostic-onboarding";
 const LMS_PAID_DEMO_CONSOLIDATION_BUILD = "v221-paid-demo-consolidation";
 const CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
@@ -77429,10 +77429,11 @@ app.post("/api/ayla/auth/google", async (req, res) => {
 app.get("/api/ayla/auth/me", async (req, res) => {
   try {
     const { user, rawUser, db } = await aylaGetAuthenticatedUser(req);
+    const diagnosticProfiles = aylaEnsureUserEnrollmentDiagnosticProfiles(db, rawUser);
     const legacyBound = aylaBindLegacyEnrollmentScopes(db, rawUser);
     const shell = aylaCurrentStudentShell(db, rawUser, req.aylaExamSite);
     const selectionChanged = aylaPersistShellSelection(db, rawUser, shell);
-    if (legacyBound || selectionChanged) await writeAylaDb(db);
+    if (diagnosticProfiles.changed || legacyBound || selectionChanged) await writeAylaDb(db);
     const linkedStudent = shell.active_student_id ? aylaGetItem(db, "aylaStudents", shell.active_student_id) : null;
     const activeEnrollments = aylaUserActiveEnrollments(db, user.id);
     res.setHeader("Cache-Control", "private, no-store");
@@ -77442,7 +77443,21 @@ app.get("/api/ayla/auth/me", async (req, res) => {
       profile: sanitizeStudentProfileForOwner(rawUser),
       profile_policy: studentProfilePolicy(),
       activeEnrollments,
-      student: linkedStudent ? { id: linkedStudent.id, examTrackId: aylaCanonicalExamTrack(linkedStudent.examTrackId || linkedStudent.exam_track_id || linkedStudent.exam), exam: linkedStudent.exam || null, goalType: linkedStudent.goalType || null } : null,
+      student: linkedStudent ? {
+        id: linkedStudent.id,
+        examTrackId: aylaCanonicalExamTrack(linkedStudent.examTrackId || linkedStudent.exam_track_id || linkedStudent.exam),
+        exam: linkedStudent.exam || null,
+        goalType: linkedStudent.goalType || null,
+        examDate: linkedStudent.examDate || linkedStudent.exam_date || null,
+        targetDate: linkedStudent.targetDate || linkedStudent.target_date || null,
+        timezone: linkedStudent.timezone || null,
+        dailyHours: linkedStudent.dailyHours || linkedStudent.daily_hours || null,
+        weeklyStudyDays: linkedStudent.weeklyStudyDays || linkedStudent.weekly_study_days || null,
+        restDay: linkedStudent.restDay || linkedStudent.rest_day || null,
+        onboardingPath: linkedStudent.onboardingPath || linkedStudent.onboarding_path || null,
+        onboardingStatus: linkedStudent.onboardingStatus || linkedStudent.onboarding_status || null,
+        serverVerifiedBaseline: linkedStudent.serverVerifiedBaseline === true || linkedStudent.server_verified_baseline === true,
+      } : null,
       shell,
       dashboards: shell.dashboards,
       activeDashboard: shell.active_dashboard,
@@ -77455,10 +77470,11 @@ app.get("/api/ayla/auth/me", async (req, res) => {
 app.get("/api/ayla/shell", async (req, res) => {
   try {
     const { rawUser, db } = await aylaGetAuthenticatedUser(req);
+    const diagnosticProfiles = aylaEnsureUserEnrollmentDiagnosticProfiles(db, rawUser);
     const legacyBound = aylaBindLegacyEnrollmentScopes(db, rawUser);
     const shell = aylaCurrentStudentShell(db, rawUser, req.aylaExamSite);
     const selectionChanged = aylaPersistShellSelection(db, rawUser, shell);
-    if (legacyBound || selectionChanged) await writeAylaDb(db);
+    if (diagnosticProfiles.changed || legacyBound || selectionChanged) await writeAylaDb(db);
     return aylaSendOk(res, { user: aylaSanitizeUser(rawUser), shell, dashboards: shell.dashboards, activeDashboard: shell.active_dashboard });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Failed to load the AylaMed student shell");
@@ -79323,7 +79339,10 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
     if (auth?.user?.id) {
       const ownedProfiles = aylaOwnedStudentsForUser(db, auth.user.id);
       const existingDashboard = ownedProfiles.find((row) => aylaCanonicalExamTrack(row.examTrackId || row.exam_track_id || row.exam) === examTrackId) || null;
-      if (existingDashboard) {
+      const existingDashboardRequiresDiagnostic = existingDashboard
+        ? aylaProfileRequiresVerifiedDiagnostic(existingDashboard)
+        : false;
+      if (existingDashboard && !existingDashboardRequiresDiagnostic) {
         return aylaSendError(res, 409, "An AylaMed dashboard already exists for this exam. Switch to that dashboard instead of creating another profile.", { reason: "dashboard_already_exists", studentId: existingDashboard.id, examTrackId });
       }
       if (auth.user.role === "admin") {
@@ -79336,7 +79355,7 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
           requestedExamTrack: examTrackId,
           feature: "diagnostic",
           legacyExamTrack: examTrackId,
-          legacyStudentId: `new:${examTrackId}`,
+          legacyStudentId: existingDashboard?.id || `new:${examTrackId}`,
           defaultStudentId: ownedProfiles.length ? auth.rawUser.studentId || null : null,
           enforceStudentScope: true,
         });
@@ -79381,7 +79400,23 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
     };
 
     if (auth?.user?.id) { submission.aylaUserId = auth.user.id; submission.ayla_user_id = auth.user.id; }
-    const student = aylaStudentFromDiagnostic({ ...submission, studentId: null, student_id: null }, recommendation);
+    const existingPendingStudent = auth?.user?.id
+      ? aylaOwnedStudentsForUser(db, auth.user.id).find((row) => (
+        aylaCanonicalExamTrack(row.examTrackId || row.exam_track_id || row.exam) === examTrackId
+        && aylaProfileRequiresVerifiedDiagnostic(row)
+      )) || null
+      : null;
+    const normalizedStudent = aylaStudentFromDiagnostic({
+      ...(existingPendingStudent || {}),
+      ...submission,
+      studentId: existingPendingStudent?.id || null,
+      student_id: existingPendingStudent?.id || null,
+      id: existingPendingStudent?.id || undefined,
+      createdAt: existingPendingStudent?.createdAt || submission.createdAt,
+    }, recommendation);
+    const student = existingPendingStudent
+      ? { ...existingPendingStudent, ...normalizedStudent, id: existingPendingStudent.id, createdAt: existingPendingStudent.createdAt }
+      : normalizedStudent;
     if (auth?.user?.id) { student.ayla_user_id = auth.user.id; student.user_id = auth.user.id; }
     if (auth?.rawUser?.testAccount === true || auth?.rawUser?.test_account === true) {
       student.testAccount = true;
@@ -95659,6 +95694,169 @@ function ngAdminMobilePreservedAylaAccessReport(enrollment = {}) {
   };
 }
 
+function aylaProfileRequiresVerifiedDiagnostic(student = {}) {
+  return String(student.onboardingPath || student.onboarding_path || "").toLowerCase() === "diagnostic_test"
+    && student.serverVerifiedBaseline !== true
+    && student.server_verified_baseline !== true
+    && String(student.onboardingStatus || student.onboarding_status || "").toLowerCase() !== "complete";
+}
+
+function aylaEnsureEnrollmentDiagnosticProfile(db, { user = null, enrollment = null, examTrack = null, examVariant = "" } = {}) {
+  const examTrackId = aylaCanonicalExamTrack(
+    examTrack
+      || enrollment?.exam_track_id
+      || enrollment?.examTrackId
+      || enrollment?.exam_track
+      || enrollment?.exam,
+  );
+  if (!user?.id || !enrollment?.id || !examTrackId || !aylaEnrollmentActive(enrollment)) {
+    return { changed: false, created: false, required: false, student: null };
+  }
+
+  const ownedProfiles = aylaOwnedStudentsForUser(db, user.id)
+    .filter((student) => aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam) === examTrackId)
+    .sort((left, right) => String(right.updatedAt || right.createdAt || "").localeCompare(String(left.updatedAt || left.createdAt || "")));
+  let student = ownedProfiles.find((row) => String(row.id || "") === String(enrollment.student_id || enrollment.studentId || ""))
+    || ownedProfiles[0]
+    || null;
+  let created = false;
+  let recovered = false;
+  let changed = false;
+
+  if (!student && user.email) {
+    const normalizedEmail = aylaNormalizeEmail(user.email);
+    const recoverableProfiles = aylaValues(db, "aylaStudents")
+      .filter((row) => aylaNormalizeEmail(row.email) === normalizedEmail)
+      .filter((row) => aylaCanonicalExamTrack(row.examTrackId || row.exam_track_id || row.exam) === examTrackId)
+      .filter((row) => {
+        const previousOwnerId = row.ayla_user_id || row.aylaUserId || row.user_id || row.userId || "";
+        if (!previousOwnerId || String(previousOwnerId) === String(user.id)) return true;
+        const previousOwner = aylaGetItem(db, "aylaUsers", previousOwnerId);
+        return !previousOwner || ["deleted", "disabled", "inactive"].includes(String(previousOwner.status || "").toLowerCase());
+      })
+      .sort((left, right) => String(right.updatedAt || right.createdAt || "").localeCompare(String(left.updatedAt || left.createdAt || "")));
+    student = recoverableProfiles[0] || null;
+    if (student) {
+      student.aylaUserId = user.id;
+      student.ayla_user_id = user.id;
+      student.user_id = user.id;
+      student.email = normalizedEmail;
+      student.recoveredFromPriorAccount = true;
+      student.recovered_from_prior_account = true;
+      student.recoveredAt = aylaNow();
+      student.recovered_at = student.recoveredAt;
+      if (student.serverVerifiedBaseline !== true && student.server_verified_baseline !== true) {
+        student.onboardingPath = "diagnostic_test";
+        student.onboarding_path = "diagnostic_test";
+        student.onboardingStatus = "diagnostic_pending";
+        student.onboarding_status = "diagnostic_pending";
+        student.studyStage = "diagnostic_pending";
+      }
+      student.updatedAt = aylaNow();
+      aylaSetItem(db, "aylaStudents", student);
+      recovered = true;
+      changed = true;
+    }
+  }
+
+  if (!student) {
+    const normalizedVariant = examTrackId === "nclex"
+      ? normalizeAylaNclexVariant(
+        examVariant
+          || enrollment.exam_variant
+          || enrollment.examVariant
+          || enrollment.nclex_type
+          || enrollment.nclexType,
+      )
+      : "";
+    const pendingInput = {
+      aylaUserId: user.id,
+      ayla_user_id: user.id,
+      user_id: user.id,
+      studentName: user.name || user.email || "Student",
+      name: user.name || user.email || "Student",
+      email: user.email || "",
+      examTrackId,
+      examVariant: normalizedVariant || null,
+      onboardingPath: "diagnostic_test",
+      onboardingStatus: "diagnostic_pending",
+      studyStage: "diagnostic_pending",
+      baselineSource: "awaiting_verified_diagnostic",
+      baselineConfidence: "pending",
+      serverVerifiedBaseline: false,
+      goalType: "Exam Day",
+      dailyHours: 4,
+      weeklyStudyDays: 6,
+      restDay: "Sunday",
+      status: "Active",
+    };
+    student = aylaStudentFromDiagnostic(pendingInput, aylaRecommendation(pendingInput));
+    student.ayla_user_id = user.id;
+    student.user_id = user.id;
+    student.provisionedBy = "active_enrollment_diagnostic_requirement";
+    student.provisioned_by = "active_enrollment_diagnostic_requirement";
+    if (user.testAccount === true || user.test_account === true) {
+      student.testAccount = true;
+      student.test_account = true;
+      student.excludeFromAnalytics = true;
+      student.exclude_from_analytics = true;
+      student.excludeFromLeaderboard = true;
+      student.exclude_from_leaderboard = true;
+      student.studyPartnerOptIn = false;
+    }
+    aylaSetItem(db, "aylaStudents", student);
+    created = true;
+    changed = true;
+  }
+
+  if (String(enrollment.student_id || enrollment.studentId || "") !== String(student.id)) {
+    enrollment.student_id = student.id;
+    enrollment.studentId = student.id;
+    enrollment.exam_track_id = examTrackId;
+    enrollment.examTrackId = examTrackId;
+    enrollment.exam_track = normalizeAylaRegistryExamTrack(examTrackId);
+    enrollment.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaEnrollments", enrollment);
+    changed = true;
+  }
+
+  if (created || !user.studentId) {
+    user.studentId = student.id;
+    user.activeExamTrackId = examTrackId;
+    delete user.active_exam_track_id;
+    user.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaUsers", user);
+    changed = true;
+  }
+
+  return {
+    changed,
+    created,
+    recovered,
+    required: aylaProfileRequiresVerifiedDiagnostic(student),
+    student,
+  };
+}
+
+function aylaEnsureUserEnrollmentDiagnosticProfiles(db, user = {}) {
+  const results = [];
+  const seenExamTracks = new Set();
+  for (const enrollment of aylaUserActiveEnrollments(db, user.id)) {
+    const examTrackId = aylaCanonicalExamTrack(
+      enrollment.exam_track_id || enrollment.examTrackId || enrollment.exam_track || enrollment.exam,
+    );
+    if (!examTrackId || seenExamTracks.has(examTrackId)) continue;
+    seenExamTracks.add(examTrackId);
+    results.push(aylaEnsureEnrollmentDiagnosticProfile(db, { user, enrollment, examTrack: examTrackId }));
+  }
+  return {
+    changed: results.some((result) => result.changed),
+    created: results.filter((result) => result.created).length,
+    required: results.filter((result) => result.required).length,
+    results,
+  };
+}
+
 async function ngAdminMobileInviteAyla(body = {}) {
   const db = await readAylaDb();
   aylaEnsureSeedData(db);
@@ -95687,6 +95885,12 @@ async function ngAdminMobileInviteAyla(body = {}) {
   }
   const { user, temporaryPassword, studentCreated } = ngAdminMobilePrepareAylaInviteUser(db, body, email);
   if (preservedEnrollment) {
+    const diagnosticProfile = aylaEnsureEnrollmentDiagnosticProfile(db, {
+      user,
+      enrollment: preservedEnrollment,
+      examTrack: requestedExamTrack || preservedEnrollment.exam_track_id || preservedEnrollment.examTrackId,
+      examVariant: assignedExamVariant,
+    });
     const accessReport = ngAdminMobilePreservedAylaAccessReport(preservedEnrollment);
     preservedEnrollment.user_email = user.email;
     preservedEnrollment.user_name = user.name || email;
@@ -95702,6 +95906,10 @@ async function ngAdminMobileInviteAyla(body = {}) {
       access_unchanged: true,
       user: aylaSanitizeUser(user),
       enrollment: preservedEnrollment,
+      diagnostic_profile: diagnosticProfile.student,
+      diagnostic_profile_created: diagnosticProfile.created,
+      diagnostic_profile_recovered: diagnosticProfile.recovered,
+      diagnostic_required: diagnosticProfile.required,
       payment: null,
       access_report: accessReport,
       temporary_password: body.return_password === true ? temporaryPassword : undefined,
@@ -95739,6 +95947,12 @@ async function ngAdminMobileInviteAyla(body = {}) {
     enrollment.nclex_type = aylaNclexVariantCode(assignedExamVariant);
     enrollment.nclexType = aylaNclexVariantCode(assignedExamVariant);
   }
+  const diagnosticProfile = aylaEnsureEnrollmentDiagnosticProfile(db, {
+    user,
+    enrollment,
+    examTrack: requestedExamTrack,
+    examVariant: assignedExamVariant,
+  });
   const payment = aylaRecordAdminAccessPayment(db, { enrollment, user, plan, payload: body, source: "admin_access_invitation" });
   aylaSetItem(db, "aylaEnrollments", enrollment);
   const delivery = await ngAdminMobileSendAylaInvite({ db, user, temporaryPassword, accessReport: accessWindow, sendEmail: body.send_email !== false });
@@ -95746,7 +95960,7 @@ async function ngAdminMobileInviteAyla(body = {}) {
   aylaSetItem(db, "aylaEnrollments", enrollment);
   await aylaAccessLog(db, "admin_access_invitation", { userId: user.id, planId: plan.id, enrollmentId: enrollment.id, access_days: accessDays, duration: accessWindow.duration_label, amount_cents: payment?.amount_cents || 0, email_sent: delivery.sent === true });
   await writeAylaDb(db);
-  return { product: "aylamed", student_created: studentCreated, password_reset_required: true, user: aylaSanitizeUser(user), enrollment, payment, access_report: accessWindow, temporary_password: body.return_password === true ? temporaryPassword : undefined, email_delivery: delivery };
+  return { product: "aylamed", student_created: studentCreated, password_reset_required: true, user: aylaSanitizeUser(user), enrollment, diagnostic_profile: diagnosticProfile.student, diagnostic_profile_created: diagnosticProfile.created, diagnostic_profile_recovered: diagnosticProfile.recovered, diagnostic_required: diagnosticProfile.required, payment, access_report: accessWindow, temporary_password: body.return_password === true ? temporaryPassword : undefined, email_delivery: delivery };
 }
 
 app.get("/admin/mobile/dashboard", async (req, res) => {

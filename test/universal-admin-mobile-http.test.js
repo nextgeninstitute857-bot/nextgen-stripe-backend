@@ -88,6 +88,27 @@ test("universal admin dashboard keeps LMS open and grants private minute-level A
   await fs.writeFile(path.join(dataDir, "aylamed-db.json"), JSON.stringify({
     schema_version: 15,
     aylaUsers: { aylaRecurring: { id: "aylaRecurring", email: "ayla@example.com", name: "Ayla Student", role: "student", status: "active", authVersion: 1, ...passwordRecord("AylaUser9!"), createdAt: nowIso, updatedAt: nowIso } },
+    aylaStudents: {
+      returningProfile: {
+        id: "returningProfile",
+        aylaUserId: "removedPriorAccount",
+        ayla_user_id: "removedPriorAccount",
+        user_id: "removedPriorAccount",
+        name: "Returning Student",
+        email: "returning@example.com",
+        examTrackId: "usmle_step_1",
+        exam: "USMLE Step 1",
+        examDate: "2027-02-10",
+        timezone: "Asia/Karachi",
+        dailyHours: 6,
+        restDay: "Sunday",
+        currentScore: 58,
+        weakAreas: ["Cardiology", "Neurology"],
+        serverVerifiedBaseline: false,
+        createdAt: oldIso,
+        updatedAt: oldIso,
+      },
+    },
     aylaPlans: { aylaMonthly: { id: "aylaMonthly", name: "Ayla Monthly", plan_type: "monthly", billing_type: "subscription_monthly", price_cents: 5000, access_days: 30, is_active: true, is_public: true, is_full_access: true, included_features: [] } },
     aylaEnrollments: { aylaEnrollment: { id: "aylaEnrollment", user_id: "aylaRecurring", ayla_user_id: "aylaRecurring", plan_id: "aylaMonthly", access_granted: true, status: "active", stripe_subscription_id: "sub_ayla_1", subscription_status: "active", access_expires_at: futureIso, createdAt: nowIso } },
     aylaPayments: { aylaPayment: { id: "aylaPayment", user_id: "aylaRecurring", plan_id: "aylaMonthly", amount_cents: 5000, payment_status: "completed", paid_at: nowIso } },
@@ -177,7 +198,7 @@ test("universal admin dashboard keeps LMS open and grants private minute-level A
     const aylaInvite = await api(baseUrl, "/admin/mobile/invitations", {
       method: "POST",
       token,
-      body: { product: "aylamed", email: "ayla-invited@example.com", name: "Ayla Invited", ayla_plan_id: "aylaMonthly", exam_track_id: "usmle_step_1", access_duration: 5, access_unit: "minutes", amount: 12.5, send_email: false },
+      body: { product: "aylamed", email: "ayla-invited@example.com", name: "Ayla Invited", ayla_plan_id: "aylaMonthly", exam_track_id: "usmle_step_1", access_duration: 5, access_unit: "minutes", amount: 12.5, return_password: true, send_email: false },
     });
     assert.equal(aylaInvite.response.status, 201, JSON.stringify(aylaInvite.payload));
     assert.equal(aylaInvite.payload.results[0].user.mustChangePassword, true);
@@ -185,8 +206,63 @@ test("universal admin dashboard keeps LMS open and grants private minute-level A
     assert.equal(aylaInvitation.enrollment.access_duration, "5 minutes");
     assert.equal(aylaInvitation.enrollment.recorded_amount_cents, 1250);
     assert.equal(aylaInvitation.payment.amount_cents, 1250);
+    assert.equal(aylaInvitation.diagnostic_profile_created, true);
+    assert.equal(aylaInvitation.diagnostic_required, true);
+    assert.equal(aylaInvitation.diagnostic_profile.onboardingPath, "diagnostic_test");
+    assert.equal(aylaInvitation.diagnostic_profile.onboardingStatus, "diagnostic_pending");
+    assert.equal(aylaInvitation.enrollment.student_id, aylaInvitation.diagnostic_profile.id);
     const fiveMinuteExpiry = new Date(aylaInvitation.enrollment.access_expires_at).getTime();
     assert.ok(fiveMinuteExpiry > Date.now() + 4 * 60000 && fiveMinuteExpiry < Date.now() + 6 * 60000);
+
+    const invitedStudentLogin = await api(baseUrl, "/api/ayla/auth/login", {
+      method: "POST",
+      body: { email: "ayla-invited@example.com", password: aylaInvitation.temporary_password },
+    });
+    assert.equal(invitedStudentLogin.response.status, 200, JSON.stringify(invitedStudentLogin.payload));
+    const invitedStudentMe = await api(baseUrl, "/api/ayla/auth/me", { token: invitedStudentLogin.payload.token });
+    assert.equal(invitedStudentMe.response.status, 200, JSON.stringify(invitedStudentMe.payload));
+    assert.equal(invitedStudentMe.payload.student.id, aylaInvitation.diagnostic_profile.id);
+    assert.equal(invitedStudentMe.payload.student.onboardingStatus, "diagnostic_pending");
+    assert.equal(invitedStudentMe.payload.activeDashboard.profile_status, "diagnostic_required");
+    assert.equal(invitedStudentMe.payload.activeDashboard.onboarding_required.required, true);
+
+    const completedSetup = await api(baseUrl, "/api/ayla/diagnostic-submissions", {
+      method: "POST",
+      token: invitedStudentLogin.payload.token,
+      body: {
+        examTrackId: "usmle_step_1",
+        onboardingPath: "diagnostic_test",
+        goalType: "Exam Day",
+        examDate: "2027-01-15",
+        timezone: "America/New_York",
+        dailyHours: 4,
+        weeklyStudyDays: 6,
+        restDay: "Sunday",
+        studyStage: "diagnostic_pending",
+        selectedWeakAreas: [],
+      },
+    });
+    assert.equal(completedSetup.response.status, 201, JSON.stringify(completedSetup.payload));
+    assert.equal(completedSetup.payload.student.id, aylaInvitation.diagnostic_profile.id, "onboarding must complete the provisioned profile instead of creating a duplicate");
+    const storedAfterSetup = JSON.parse(await fs.readFile(path.join(dataDir, "aylamed-db.json"), "utf8"));
+    const invitedProfiles = Object.values(storedAfterSetup.aylaStudents || {}).filter((row) => row.email === "ayla-invited@example.com");
+    assert.equal(invitedProfiles.length, 1);
+
+    const returningInvite = await api(baseUrl, "/admin/mobile/invitations", {
+      method: "POST",
+      token,
+      body: { product: "aylamed", email: "returning@example.com", name: "Returning Student", ayla_plan_id: "aylaMonthly", exam_track_id: "usmle_step_1", access_duration: 30, access_unit: "days", return_password: true, send_email: false },
+    });
+    assert.equal(returningInvite.response.status, 201, JSON.stringify(returningInvite.payload));
+    const returningResult = returningInvite.payload.results[0];
+    assert.equal(returningResult.diagnostic_profile_created, false);
+    assert.equal(returningResult.diagnostic_profile_recovered, true);
+    assert.equal(returningResult.diagnostic_profile.id, "returningProfile");
+    assert.equal(returningResult.diagnostic_profile.currentScore, 58);
+    assert.deepEqual(returningResult.diagnostic_profile.weakAreas, ["Cardiology", "Neurology"]);
+    assert.equal(returningResult.diagnostic_profile.examDate, "2027-02-10");
+    assert.equal(returningResult.diagnostic_profile.ayla_user_id, returningResult.user.id);
+    assert.equal(returningResult.diagnostic_required, true);
 
     const existingStudentInvite = await api(baseUrl, "/admin/mobile/invitations", {
       method: "POST",
@@ -200,7 +276,10 @@ test("universal admin dashboard keeps LMS open and grants private minute-level A
     assert.equal(existingStudentResult.user.authVersion, 2);
     assert.equal(existingStudentResult.password_reset_required, true);
     assert.ok(existingStudentResult.temporary_password);
+    assert.equal(existingStudentResult.diagnostic_profile_created, true);
+    assert.equal(existingStudentResult.diagnostic_required, true);
     const existingEnrollmentExpiry = existingStudentResult.enrollment.access_expires_at;
+    const existingDiagnosticProfileId = existingStudentResult.diagnostic_profile.id;
 
     const existingStudentLogin = await api(baseUrl, "/api/ayla/auth/login", {
       method: "POST",
@@ -220,6 +299,8 @@ test("universal admin dashboard keeps LMS open and grants private minute-level A
     assert.equal(resendResult.payment, null);
     assert.equal(resendResult.enrollment.id, existingStudentResult.enrollment.id);
     assert.equal(resendResult.enrollment.access_expires_at, existingEnrollmentExpiry);
+    assert.equal(resendResult.diagnostic_profile_created, false);
+    assert.equal(resendResult.diagnostic_profile.id, existingDiagnosticProfileId);
     assert.ok(resendResult.temporary_password);
     assert.notEqual(resendResult.temporary_password, existingStudentResult.temporary_password);
 

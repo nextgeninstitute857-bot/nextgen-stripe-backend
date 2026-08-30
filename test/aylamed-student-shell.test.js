@@ -142,6 +142,27 @@ test("an explicit entitlement creates a setup-required dashboard without inventi
   assert.equal(shell.active_dashboard.student_id, null);
 });
 
+test("a provisioned pending profile exposes one required diagnostic dashboard", () => {
+  const pending = student("pending-step-1", "usmle_step_1");
+  pending.onboardingPath = "diagnostic_test";
+  pending.onboardingStatus = "diagnostic_pending";
+  pending.serverVerifiedBaseline = false;
+  const shell = resolveAylaStudentShell({
+    userId: "user-1",
+    students: [pending],
+    enrollments: [enrollment("pending-paid", "full", "usmle_step_1", { student_id: pending.id })],
+    plansById: plans,
+    activeStudentId: pending.id,
+    now,
+  });
+  assert.equal(shell.dashboards.length, 1);
+  assert.equal(shell.active_dashboard.student_id, pending.id);
+  assert.equal(shell.active_dashboard.profile_status, "diagnostic_required");
+  assert.equal(shell.active_dashboard.onboarding_required.required, true);
+  assert.equal(shell.active_dashboard.onboarding_required.type, "baseline_diagnostic");
+  assert.equal(shell.active_dashboard.onboarding_required.route, "/diagnostic?exam=usmle_step_1");
+});
+
 test("a setup-required NCLEX dashboard inherits the RN or PN program assigned on enrollment", () => {
   const shell = resolveAylaStudentShell({
     userId: "user-1",
