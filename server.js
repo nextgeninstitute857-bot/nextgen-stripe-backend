@@ -22215,11 +22215,14 @@ function normalizeCrmLeadSource(value = "", body = {}) {
     .join(" ");
 
   if (text.includes("whatsapp") || text.includes("wa_")) return "whatsapp";
-  if (text.includes("meta") || text.includes("facebook lead") || text.includes("lead form") || text.includes("lead_form")) return "whatsapp";
-  if (text.includes("telegram")) return "telegram";
-  if (text.includes("email") || text.includes("mail")) return "email";
+  // Preserve the advertising source separately from the channel used to reply.
+  // A Meta lead form is not a WhatsApp lead unless the payload explicitly says
+  // click-to-WhatsApp/WhatsApp above.
   if (text.includes("instagram")) return "instagram";
   if (text.includes("facebook")) return "facebook";
+  if (text.includes("meta") || text.includes("lead form") || text.includes("lead_form")) return "meta";
+  if (text.includes("telegram")) return "telegram";
+  if (text.includes("email") || text.includes("mail")) return "email";
   if (text.includes("linkedin")) return "linkedin";
   if (text.includes("reddit")) return "reddit";
   if (text.includes("discord")) return "discord";
@@ -22259,6 +22262,8 @@ function normalizeCrmLeadOrigin(value = "", body = {}) {
     .map((x) => String(x || "").toLowerCase())
     .join(" ");
   if (text.includes("click_to_whatsapp") || text.includes("ctwa")) return "click_to_whatsapp_ad";
+  if (text.includes("aylamed_registration")) return "aylamed_registration";
+  if (text.includes("form_submission")) return "form_submission";
   if (text.includes("meta") || text.includes("lead form") || text.includes("lead_form") || text.includes("facebook lead")) return "meta_lead_form";
   if (text.includes("agent") || text.includes("outreach") || text.includes("manual outbound")) return "agent_outreach";
   if (text.includes("community") || text.includes("group")) return "community";
@@ -22634,7 +22639,9 @@ function normalizeCrmCollectionPayload(collection, body = {}, existing = null, b
     base.status = normalizeCrmLower(base.status, "draft") || "draft";
     base.form_type = normalizeCrmLower(base.form_type || base.type, collection === "forms" ? "lead_capture" : "survey");
     base.fields = Array.isArray(base.fields) ? base.fields : [];
-    base.create_lead_on_submit = base.create_lead_on_submit !== false;
+    base.create_lead_on_submit = base.create_lead_on_submit !== undefined
+      ? base.create_lead_on_submit !== false
+      : base.auto_create_lead !== false;
     base.default_pipeline_id = base.default_pipeline_id || null;
     base.default_stage_key = normalizeCrmLower(base.default_stage_key || "new_lead", "new_lead");
   }
@@ -24615,14 +24622,200 @@ app.post("/admin/crm/tasks/:id/complete", async (req, res) => {
   }
 });
 
+const AYLAMED_LEAD_ENGINE_EXAMS = [
+  { key: "usmle_step1", aylaKey: "usmle_step_1", label: "USMLE Step 1", host: "aylamedapp.com" },
+  { key: "usmle_step2_ck", aylaKey: "usmle_step_2_ck", label: "USMLE Step 2 CK", host: "aylamedapp.com" },
+  { key: "usmle_step3", aylaKey: "usmle_step_3", label: "USMLE Step 3", host: "aylamedapp.com" },
+  { key: "plab", aylaKey: "plab", label: "PLAB", host: "plab.aylamedapp.com" },
+  { key: "amc", aylaKey: "amc", label: "AMC", host: "amc.aylamedapp.com" },
+  { key: "mccqe", aylaKey: "mccqe", label: "MCCQE", host: "mccqe.aylamedapp.com" },
+  { key: "nclex", aylaKey: "nclex", label: "NCLEX", host: "nclex.aylamedapp.com" },
+];
+
+const AYLAMED_LEAD_ENGINE_PLATFORMS = [
+  { key: "facebook", label: "Facebook", sourceType: "meta_form" },
+  { key: "instagram", label: "Instagram", sourceType: "meta_form" },
+  { key: "reddit", label: "Reddit", sourceType: "community" },
+];
+
+function buildAylaMedLeadEngineForm(brandId, existing = null) {
+  return normalizeCrmCollectionPayload("forms", {
+    id: existing?.id || "form_aylamed_exam_readiness",
+    brand_id: brandId,
+    title: "AylaMed Exam Readiness & Demo",
+    name: "AylaMed Exam Readiness & Demo",
+    slug: "aylamed-exam-readiness-demo",
+    form_type: "demo_registration",
+    type: "demo_registration",
+    status: existing?.status || "draft",
+    description: "Qualify students for the correct AylaMed exam diagnostic, adaptive plan and demo.",
+    brand: "AylaMed",
+    exam_brand: "AylaMed",
+    redirect_url: "https://aylamedapp.com/?register=1",
+    thank_you_message: "Thank you. Continue to AylaMed to start your exam diagnostic and adaptive plan.",
+    create_lead_on_submit: true,
+    auto_create_lead: true,
+    auto_create_task: true,
+    auto_add_to_pipeline: true,
+    default_stage_key: "new_lead",
+    tags: ["aylamed", "exam_readiness", "demo_interest"],
+    fields: [
+      { id: "full_name", label: "Full Name", type: "text", required: true, placeholder: "Your name" },
+      { id: "email", label: "Email", type: "email", required: true, placeholder: "your@email.com" },
+      { id: "phone", label: "WhatsApp / Phone", type: "phone", required: false, placeholder: "+1..." },
+      { id: "exam_type", label: "Exam", type: "select", required: true, options: AYLAMED_LEAD_ENGINE_EXAMS.map((exam) => exam.label) },
+      { id: "exam_date", label: "Expected Exam Date", type: "date", required: false },
+      { id: "main_difficulty", label: "Main Difficulty", type: "textarea", required: true, placeholder: "What is slowing your preparation down?" },
+      { id: "marketing_consent", label: "Send me useful exam-plan and demo reminders", type: "checkbox", required: false, options: ["Yes, I agree"] },
+    ],
+    questions: undefined,
+  }, existing, brandId);
+}
+
+function buildAylaMedLeadEngineCampaign({ brandId, formId, exam, platform, existing = null }) {
+  const campaignKey = `aylamed_${exam.key}_${platform.key}_lead_engine`;
+  const utm = new URLSearchParams({
+    register: "1",
+    exam: exam.aylaKey,
+    utm_source: platform.key,
+    utm_medium: platform.key === "reddit" ? "community" : "paid_social",
+    utm_campaign: campaignKey,
+  });
+  const manualRule = platform.key === "reddit"
+    ? "Find relevant public exam questions and prepare a useful public reply for human approval. Never scrape private data or send unsolicited direct messages."
+    : "Capture only students who submit the approved form or start a conversation. Keep all advertising and outreach changes under human approval.";
+  return normalizeCrmCollectionPayload("campaigns", {
+    id: existing?.id || `campaign_${campaignKey}`,
+    brand_id: brandId,
+    name: `AylaMed ${exam.label} — ${platform.label}`,
+    campaign_key: campaignKey,
+    status: existing?.status || "draft",
+    channel: platform.key,
+    source_type: platform.sourceType,
+    exam_track: exam.key,
+    ayla_exam_track: exam.aylaKey,
+    approval_mode: "draft_only",
+    send_mode: "safe_queue",
+    default_ai_mode: "draft",
+    ai_mode: "draft",
+    automation_mode: "draft",
+    automation_enabled: false,
+    daily_limit: Number(existing?.daily_limit || 25),
+    personalization_enabled: true,
+    form_id: formId,
+    landing_url: `https://${exam.host}/?${utm.toString()}`,
+    campaign_command: existing?.campaign_command || `${manualRule} Qualify for ${exam.label}, expected exam date, preparation difficulty and diagnostic interest. Measure qualified leads, diagnostic completion, mentor bookings and paid enrollment.`,
+    ai_must_do: existing?.ai_must_do || "Preserve campaign and source attribution. Ask one clear question at a time. Route the student to the correct AylaMed exam diagnostic.",
+    ai_must_not_do: existing?.ai_must_not_do || "Do not promise a pass, invent outcomes, auto-publish ads, spam communities or contact anyone without permission.",
+    handoff_rules: existing?.handoff_rules || "Handoff for pricing exceptions, payment, complaints, refunds, mentor requests or clinical/personal advice.",
+    stop_rules: existing?.stop_rules || "Stop immediately for unsubscribe, wrong person, no consent, not interested or already enrolled.",
+    qualification_flow: existing?.qualification_flow || "1) Confirm exam. 2) Ask expected date. 3) Ask main difficulty. 4) Offer the matching diagnostic and adaptive plan.",
+    fallback_strategy: existing?.fallback_strategy || "Offer one useful public resource or the readiness diagnostic; do not repeat messages.",
+    followup_timing_notes: existing?.followup_timing_notes || "No automatic follow-up until the platform connection, consent, templates and landing path are verified.",
+    is_aylamed_lead_engine: true,
+  }, existing, brandId);
+}
+
+app.post("/admin/crm/lead-engine/aylamed/bootstrap", async (req, res) => {
+  try {
+    const { user } = await requireCrmAdmin(req);
+    const result = await mutateCrmDb((db) => {
+      const brands = ensureCrmArray(db, "brands");
+      let brand = brands.find((item) => item.id === "brand_aylamed" || String(item.name || "").toLowerCase() === "aylamed");
+      const brandWasCreated = !brand;
+      brand = normalizeCrmCollectionPayload("brands", {
+        id: brand?.id || "brand_aylamed",
+        name: "AylaMed",
+        exam_key: "multi_exam",
+        domain: "aylamedapp.com",
+        primary_color: "#071A2F",
+        accent_color: "#14B8A6",
+        default_language: "english",
+        support_email: "support@aylamedapp.com",
+        status: brand?.status || "active",
+      }, brand);
+      if (brandWasCreated) brands.push(brand);
+      else Object.assign(brands.find((item) => item.id === brand.id), brand);
+
+      const forms = ensureCrmArray(db, "forms");
+      const existingFormIndex = forms.findIndex((item) => item.id === "form_aylamed_exam_readiness" || item.slug === "aylamed-exam-readiness-demo");
+      const existingForm = existingFormIndex >= 0 ? forms[existingFormIndex] : null;
+      const form = buildAylaMedLeadEngineForm(brand.id, existingForm);
+      if (existingFormIndex >= 0) forms[existingFormIndex] = form;
+      else forms.push(form);
+
+      const campaigns = ensureCrmArray(db, "campaigns");
+      let campaignsCreated = 0;
+      let campaignsUpdated = 0;
+      for (const exam of AYLAMED_LEAD_ENGINE_EXAMS) {
+        for (const platform of AYLAMED_LEAD_ENGINE_PLATFORMS) {
+          const campaignKey = `aylamed_${exam.key}_${platform.key}_lead_engine`;
+          const existingIndex = campaigns.findIndex((item) => item.campaign_key === campaignKey || item.id === `campaign_${campaignKey}`);
+          const existing = existingIndex >= 0 ? campaigns[existingIndex] : null;
+          const campaign = buildAylaMedLeadEngineCampaign({ brandId: brand.id, formId: form.id, exam, platform, existing });
+          if (existingIndex >= 0) {
+            campaigns[existingIndex] = campaign;
+            campaignsUpdated += 1;
+          } else {
+            campaigns.push(campaign);
+            campaignsCreated += 1;
+          }
+        }
+      }
+
+      ensureCrmArray(db, "integration_logs").unshift(withTimestamps({
+        id: uuid(),
+        brand_id: brand.id,
+        platform: "multi_channel",
+        action: "aylamed_lead_engine_bootstrap",
+        status: "success",
+        message: "AylaMed seven-exam lead engine drafts prepared",
+        metadata: {
+          campaigns_created: campaignsCreated,
+          campaigns_updated: campaignsUpdated,
+          form_status: form.status,
+          activated: false,
+          actor_id: user.id,
+        },
+      }));
+
+      return {
+        brand,
+        form,
+        campaigns_created: campaignsCreated,
+        campaigns_updated: campaignsUpdated,
+        campaign_total: AYLAMED_LEAD_ENGINE_EXAMS.length * AYLAMED_LEAD_ENGINE_PLATFORMS.length,
+      };
+    });
+
+    return res.json({
+      success: true,
+      ...result,
+      activated: false,
+      message: "AylaMed lead engine drafts are ready. Review platform connections, form and campaigns before activation.",
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to prepare AylaMed lead engine" });
+  }
+});
+
 app.post("/public/crm/forms/:formId/submit", async (req, res) => {
   try {
     const db = await readCrmDb();
     const form = ensureCrmArray(db, "forms").find((item) => String(item.id) === String(req.params.formId) || String(item.slug) === String(req.params.formId));
-    if (!form || form.status !== "active") return res.status(404).json({ success: false, error: "Form not found or inactive" });
+    if (!form || !["active", "published"].includes(String(form.status || "").toLowerCase())) return res.status(404).json({ success: false, error: "Form not found or inactive" });
 
     const answers = req.body.answers || req.body || {};
     const brandId = form.brand_id || db.settings?.default_brand_id || null;
+    const marketingAttribution = answers.marketing_attribution || req.body.marketing_attribution || {};
+    const sourcePlatform = normalizeCrmLeadSource(
+      marketingAttribution.utm_source || answers.utm_source || req.body.source_platform || "form",
+      { ...marketingAttribution, ...answers, origin: "form_submission" },
+    );
+    const marketingConsent = answers.marketing_consent === true
+      || answers.marketing_consent === "true"
+      || answers.marketing_consent === "yes"
+      || answers.marketing_consent === "Yes, I agree";
     let lead = null;
 
     if (form.create_lead_on_submit !== false) {
@@ -24633,15 +24826,32 @@ app.post("/public/crm/forms/:formId/submit", async (req, res) => {
         whatsapp: answers.whatsapp || answers.phone || "",
         phone: answers.phone || answers.whatsapp || "",
         country: answers.country || "",
-        platform: "form",
-        source_platform: "form",
+        platform: sourcePlatform,
+        source_platform: sourcePlatform,
+        channel: answers.phone || answers.whatsapp ? "whatsapp" : "email",
+        current_channel: answers.phone || answers.whatsapp ? "whatsapp" : "email",
+        preferred_channel: answers.phone || answers.whatsapp ? "whatsapp" : "email",
+        origin: "form_submission",
+        lead_origin: "form_submission",
+        lead_source: sourcePlatform,
+        source_type: "form_submission",
+        source_detail: [marketingAttribution.utm_campaign, marketingAttribution.utm_medium, marketingAttribution.utm_content].filter(Boolean).join(" · "),
+        campaign_key: marketingAttribution.utm_campaign || answers.utm_campaign || "",
         status: "new",
         exam_type: answers.exam_type || answers.exam || "",
         exam_date: answers.exam_date || "",
         exam_timeline: answers.exam_timeline || "",
         pain_points: answers.pain_points || answers.weak_subjects || "",
         conversation_summary: JSON.stringify(answers).slice(0, 1000),
-        opt_in_status: "form_submission",
+        marketing_attribution: marketingAttribution,
+        opt_in_status: marketingConsent ? "explicit_form_opt_in" : "form_no_marketing_opt_in",
+        consent_to_contact: marketingConsent,
+        can_message: marketingConsent,
+        marketing_consent: marketingConsent,
+        consent_source: marketingConsent ? "crm_form" : "",
+        consent_at: marketingConsent ? nowIso() : "",
+        automation_enabled: false,
+        ai_mode: "draft",
       }, null, brandId);
 
       const existing = findExistingSocialLead(db, "email", leadPayload);
@@ -24664,7 +24874,8 @@ app.post("/public/crm/forms/:formId/submit", async (req, res) => {
       submitted_by_name: answers.name || answers.full_name || "",
       submitted_by_email: answers.email || "",
       answers,
-      source_platform: "form",
+      source_platform: sourcePlatform,
+      marketing_attribution: marketingAttribution,
       status: "submitted",
     }, null, brandId);
 
@@ -77142,6 +77353,113 @@ function aylaPilotStudentForUser(db, user, requestedStudentId = "") {
 
 const AYLA_PUBLIC_REGISTRATION_ENABLED = String(process.env.AYLA_PUBLIC_REGISTRATION_ENABLED || "false").trim().toLowerCase() === "true";
 
+function normalizeAylaMarketingAttribution(input = {}, req = null) {
+  const source = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+  const clean = (value, max = 300) => String(value || "").trim().slice(0, max);
+  const result = {};
+  for (const key of [
+    "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term",
+    "fbclid", "gclid", "rdt_cid", "campaign_id", "ad_id", "adset_id",
+    "landing_page", "referrer", "captured_at",
+  ]) {
+    const value = clean(source[key], key === "landing_page" || key === "referrer" ? 800 : 300);
+    if (value) result[key] = value;
+  }
+  if (!result.landing_page) result.landing_page = clean(req?.get?.("referer") || req?.headers?.referer, 800);
+
+  let sourceHint = clean(result.utm_source || source.source || "").toLowerCase();
+  if (["fb", "facebook_ads", "facebookads"].includes(sourceHint)) sourceHint = "facebook";
+  if (["ig", "instagram_ads", "instagramads"].includes(sourceHint)) sourceHint = "instagram";
+  if (!sourceHint && result.fbclid) sourceHint = "meta";
+  if (!sourceHint && result.rdt_cid) sourceHint = "reddit";
+  if (!sourceHint && result.gclid) sourceHint = "google";
+  result.source_platform = normalizeCrmLeadSource(sourceHint || "website", {
+    source_platform: sourceHint || "website",
+    origin: "aylamed_registration",
+  });
+  result.captured_at = result.captured_at || nowIso();
+  return result;
+}
+
+async function upsertAylaMarketingLead(input = {}) {
+  const attribution = normalizeAylaMarketingAttribution(input.marketingAttribution || {});
+  const email = aylaNormalizeEmail(input.email);
+  if (!email) return { tracked: false, reason: "missing_email" };
+
+  return mutateCrmDb((crmDb) => {
+    const brands = ensureCrmArray(crmDb, "brands");
+    let brand = brands.find((item) => item.id === "brand_aylamed" || String(item.name || "").toLowerCase() === "aylamed");
+    if (!brand) {
+      brand = normalizeCrmCollectionPayload("brands", {
+        id: "brand_aylamed",
+        name: "AylaMed",
+        exam_key: "multi_exam",
+        domain: "aylamedapp.com",
+        primary_color: "#071A2F",
+        accent_color: "#14B8A6",
+        default_language: "english",
+        support_email: "support@aylamedapp.com",
+        status: "active",
+      });
+      brands.push(brand);
+    }
+
+    const campaign = ensureCrmArray(crmDb, "campaigns").find((item) => (
+      String(item.campaign_key || item.id || "") === String(attribution.utm_campaign || input.campaignId || "")
+    ));
+    const leads = ensureCrmArray(crmDb, "leads");
+    const existing = leads.find((item) => item.brand_id === brand.id && normalizeEmail(item.email || "") === email);
+    const marketingConsent = input.marketingConsent === true || existing?.consent_to_contact === true;
+    const examTrack = ngNormalizeExamTrack(input.examTrackId || input.exam_track || "", "");
+    const sourcePlatform = attribution.source_platform || "website";
+    const sourceDetail = [attribution.utm_campaign, attribution.utm_medium, attribution.utm_content].filter(Boolean).join(" · ");
+    const payload = normalizeCrmCollectionPayload("leads", {
+      id: existing?.id || uuid(),
+      brand_id: brand.id,
+      name: input.name || existing?.name || "AylaMed Student",
+      email,
+      phone: input.phone || existing?.phone || "",
+      source_platform: sourcePlatform,
+      platform: sourcePlatform,
+      channel: "email",
+      current_channel: existing?.current_channel || "email",
+      preferred_channel: existing?.preferred_channel || "email",
+      origin: "aylamed_registration",
+      lead_origin: "aylamed_registration",
+      lead_source: sourcePlatform,
+      source_type: "aylamed_registration",
+      created_from: "aylamed_registration",
+      source_detail: sourceDetail || existing?.source_detail || "AylaMed website registration",
+      campaign_id: campaign?.id || existing?.campaign_id || null,
+      campaign_name: campaign?.name || attribution.utm_campaign || existing?.campaign_name || "",
+      campaign_key: campaign?.campaign_key || attribution.utm_campaign || existing?.campaign_key || "",
+      exam_track: examTrack || existing?.exam_track || "",
+      ayla_user_id: input.userId || existing?.ayla_user_id || null,
+      ayla_plan_id: input.planId || existing?.ayla_plan_id || null,
+      status: existing?.status || "new",
+      stage: existing?.stage || "account_created",
+      next_action: existing?.next_action || "complete_diagnostic",
+      follow_up_status: existing?.follow_up_status || (marketingConsent ? "consented_registration" : "no_marketing_consent"),
+      marketing_attribution: attribution,
+      opt_in_status: marketingConsent ? "explicit_registration_opt_in" : "account_only_no_marketing_opt_in",
+      consent_to_contact: marketingConsent,
+      can_message: marketingConsent,
+      marketing_consent: marketingConsent,
+      consent_source: marketingConsent ? "aylamed_registration" : existing?.consent_source || "",
+      consent_at: marketingConsent ? existing?.consent_at || nowIso() : existing?.consent_at || "",
+      client_reached_out: true,
+      conversation_direction: "inbound",
+      ai_mode: "draft",
+      automation_enabled: false,
+      tags: uniqueList([...(existing?.tags || []), "aylamed", "website_registration", ...(examTrack ? [examTrack] : [])]),
+    }, existing, brand.id);
+
+    if (existing) Object.assign(existing, payload);
+    else leads.push(payload);
+    return { tracked: true, lead_id: payload.id, brand_id: brand.id, source_platform: sourcePlatform };
+  });
+}
+
 app.post("/api/ayla/auth/register", async (req, res) => {
   try {
     if (!AYLA_PUBLIC_REGISTRATION_ENABLED) {
@@ -77170,6 +77488,10 @@ app.post("/api/ayla/auth/register", async (req, res) => {
       timezone: String(req.body.timezone || "").trim(),
       country: String(req.body.country || "").trim(),
       bio: String(req.body.bio || "").trim(),
+      marketingAttribution: normalizeAylaMarketingAttribution(req.body.marketingAttribution || req.body.marketing_attribution || {}, req),
+      marketingConsent: req.body.marketingConsent === true,
+      marketingExamTrackId: String(req.body.examTrackId || req.body.exam_track_id || "").trim(),
+      marketingPlanId: String(req.body.planId || req.body.plan_id || "").trim(),
       authVersion: 1,
       ...hashed,
       createdAt: aylaNow(),
@@ -77392,12 +77714,18 @@ app.post("/api/ayla/auth/google", async (req, res) => {
     let user = aylaFindUserByEmail(db, profile.email);
     const created = !user;
     if (!user) {
-      user = { id: aylaId("AYLA-USER"), email: profile.email, name: profile.name, phone: "", role: "student", status: "active", studentId: null, publicUsername: "", profileImageUrl: profile.picture || "", google_sub: profile.google_sub, authProvider: "google", authVersion: 1, createdAt: aylaNow(), updatedAt: aylaNow() };
+      user = { id: aylaId("AYLA-USER"), email: profile.email, name: profile.name, phone: "", role: "student", status: "active", studentId: null, publicUsername: "", profileImageUrl: profile.picture || "", google_sub: profile.google_sub, authProvider: "google", marketingAttribution: normalizeAylaMarketingAttribution(req.body.marketingAttribution || req.body.marketing_attribution || {}, req), marketingConsent: req.body.marketingConsent === true, marketingExamTrackId: String(req.body.examTrackId || req.body.exam_track_id || "").trim(), marketingPlanId: String(req.body.planId || req.body.plan_id || "").trim(), authVersion: 1, createdAt: aylaNow(), updatedAt: aylaNow() };
     } else {
       if (["disabled", "deleted"].includes(String(user.status || "").toLowerCase())) return aylaSendError(res, 403, "AylaMed user is disabled");
       user.name = user.name || profile.name;
       user.profileImageUrl = user.profileImageUrl || profile.picture || "";
       user.google_sub = user.google_sub || profile.google_sub;
+      if (req.body.registrationIntent === true) {
+        user.marketingAttribution = normalizeAylaMarketingAttribution(req.body.marketingAttribution || req.body.marketing_attribution || {}, req);
+        user.marketingConsent = user.marketingConsent === true || req.body.marketingConsent === true;
+        user.marketingExamTrackId = String(req.body.examTrackId || req.body.exam_track_id || user.marketingExamTrackId || "").trim();
+        user.marketingPlanId = String(req.body.planId || req.body.plan_id || user.marketingPlanId || "").trim();
+      }
       user.lastLoginAt = aylaNow();
       user.updatedAt = aylaNow();
     }
@@ -77423,6 +77751,40 @@ app.post("/api/ayla/auth/google", async (req, res) => {
     });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message || "Google sign-in failed");
+  }
+});
+
+// Explicit bridge: AylaMed registration remains independent from CRM storage.
+// The signed-in browser calls this only after the account exists, so a failed
+// CRM write can never corrupt or roll back the student's AylaMed account.
+app.post("/api/ayla/marketing/crm-lead", async (req, res) => {
+  try {
+    const { rawUser, db } = await aylaGetAuthenticatedUser(req);
+    const marketingAttribution = normalizeAylaMarketingAttribution(
+      req.body.marketingAttribution || req.body.marketing_attribution || rawUser.marketingAttribution || {},
+      req,
+    );
+    rawUser.marketingAttribution = marketingAttribution;
+    rawUser.marketingConsent = rawUser.marketingConsent === true || req.body.marketingConsent === true;
+    rawUser.marketingExamTrackId = String(req.body.examTrackId || req.body.exam_track_id || rawUser.marketingExamTrackId || "").trim();
+    rawUser.marketingPlanId = String(req.body.planId || req.body.plan_id || rawUser.marketingPlanId || "").trim();
+    rawUser.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaUsers", rawUser);
+    await writeAylaDb(db);
+
+    const crmAttribution = await upsertAylaMarketingLead({
+      userId: rawUser.id,
+      name: rawUser.name,
+      email: rawUser.email,
+      phone: rawUser.phone,
+      examTrackId: rawUser.marketingExamTrackId,
+      planId: rawUser.marketingPlanId,
+      marketingConsent: rawUser.marketingConsent === true,
+      marketingAttribution,
+    });
+    return aylaSendOk(res, { crm_attribution: crmAttribution });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message || "Failed to record AylaMed CRM attribution");
   }
 });
 
