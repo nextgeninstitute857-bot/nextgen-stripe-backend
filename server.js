@@ -50,6 +50,7 @@ import { recordAylaPaymentFollowup, aylaPaymentFollowupEligibility } from "./lib
 import { experienceWaitHours, experienceDeliveryAccepted, experienceResourcesFromDelivery, recordExperienceShares, recordExperienceResponse, acknowledgeExperienceConversation, experienceFollowupEligibility, buildExperienceCheckinPrompt } from "./lib/crm-experience-followup.js";
 import { runExperienceCheckin } from "./lib/crm-experience-scheduler.js";
 import { updateDemoAccess } from "./lib/demo-admin.js";
+import { selectStudentCurrentRoadmapDay } from "./lib/lms-current-roadmap-day.js";
 import { ensureDemoInvitation, findDemoInvitation, trackDemoLinks, recordDemoInvitationSent, recordDemoInvitationOpened, recordDemoActivation, demoAttributionForEnrollment } from "./lib/crm-demo-attribution.js";
 import {
   fetchWhatsAppBusinessProfile,
@@ -656,7 +657,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v221-paid-demo-consolidation";
+const NEXTGEN_BACKEND_BUILD = "v222-demo-current-focus";
 const LMS_PAID_DEMO_CONSOLIDATION_BUILD = "v221-paid-demo-consolidation";
 const CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
@@ -7618,8 +7619,8 @@ function buildProgressSummary({ db, courseId, userId }) {
 
   const total = teachingDays.length;
   const completed = teachingDays.filter((d) => completedIds.has(d.id)).length;
-  const today = todayKey();
-  const todayDay = days.find((d) => d.date === today) || teachingDays.find((d) => !completedIds.has(d.id)) || teachingDays[0] || null;
+  const today = ngDailySessionDateKey(new Date(), roadmap?.settings?.timezone || "America/New_York");
+  const todayDay = selectStudentCurrentRoadmapDay({ days, teachingDays, today });
   const completedSystems = Array.from(new Set(teachingDays.filter((d) => completedIds.has(d.id)).map((d) => d.system || d.chapter).filter(Boolean)));
   const currentSystem = todayDay?.system || todayDay?.chapter || null;
   return {
@@ -17763,8 +17764,9 @@ function ngFindRoadmapDay(db, { courseId, dayId, dayNumber }) {
   const days = (roadmap?.days || []).filter((d) => d.is_published !== false);
   if (dayId) return days.find((day) => String(day.id) === String(dayId)) || null;
   if (dayNumber) return days.find((day) => String(day.day_number) === String(dayNumber)) || null;
-  const today = todayKey();
-  return days.find((day) => day.date === today) || days[0] || null;
+  const today = ngDailySessionDateKey(new Date(), roadmap?.settings?.timezone || "America/New_York");
+  const teachingDays = days.filter((day) => !ngIsNoClassRoadmapDay(day) && !ngRoadmapDayIsNoClass(day));
+  return selectStudentCurrentRoadmapDay({ days, teachingDays, today });
 }
 
 function ngSanitizeDailyTaskPacket(db, { courseId, userId, day }) {
