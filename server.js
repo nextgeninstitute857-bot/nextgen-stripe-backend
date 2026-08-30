@@ -24652,7 +24652,7 @@ function buildAylaMedLeadEngineCampaign({ brandId, exam, platform, existing = nu
     brand_id: brandId,
     name: `AylaMed ${exam.label} — ${platform.label}`,
     campaign_key: campaignKey,
-    status: "draft",
+    status: "active",
     channel: platform.key,
     source_type: platform.sourceType,
     exam_track: exam.key,
@@ -24740,7 +24740,7 @@ app.post("/admin/crm/lead-engine/aylamed/bootstrap", async (req, res) => {
           forms_removed: formsRemoved,
           public_signup_enabled: false,
           paid_ads_enabled: false,
-          activated: false,
+          activated: true,
           actor_id: user.id,
         },
       }));
@@ -24757,8 +24757,8 @@ app.post("/admin/crm/lead-engine/aylamed/bootstrap", async (req, res) => {
     return res.json({
       success: true,
       ...result,
-      activated: false,
-      message: "AylaMed organic lead-monitoring drafts are ready. Public signup and demo capture remain disabled.",
+      activated: true,
+      message: "AylaMed organic lead watch is active. Public signup, demo capture, paid ads and automatic outreach remain disabled.",
     });
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to prepare AylaMed lead engine" });
