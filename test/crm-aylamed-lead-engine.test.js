@@ -40,6 +40,23 @@ test("AylaMed organic lead watch is active and covers every exam and source", ()
   assert.match(server, /form_id: null/);
 });
 
+test("AylaMed organic lead watch targets genuine beginners and limits live sessions to Step 1", () => {
+  const builder = server.slice(
+    server.indexOf("function buildAylaMedLeadEngineCampaign"),
+    server.indexOf('app.post("/admin/crm/lead-engine/aylamed/bootstrap"'),
+  );
+
+  assert.match(builder, /looking for study resources/);
+  assert.match(builder, /lost about how to prepare/);
+  assert.match(builder, /just starting and asks for direction/);
+  assert.match(builder, /already have all the resources they need/);
+  assert.match(builder, /only want a revision tweak, resource comparison or minor optimization/);
+  assert.match(builder, /isStepOne = exam\.key === "usmle_step1"/);
+  assert.match(builder, /For USMLE Step 1 only/);
+  assert.match(builder, /Do not offer live sessions outside USMLE Step 1/);
+  assert.match(builder, /live_session_eligible: isStepOne/);
+});
+
 test("AylaMed public readiness and demo form is removed by the safe bootstrap", () => {
   const bootstrap = server.slice(
     server.indexOf('app.post("/admin/crm/lead-engine/aylamed/bootstrap"'),

@@ -24640,13 +24640,17 @@ const AYLAMED_LEAD_ENGINE_PLATFORMS = [
 
 function buildAylaMedLeadEngineCampaign({ brandId, exam, platform, existing = null }) {
   const campaignKey = `aylamed_${exam.key}_${platform.key}_lead_engine`;
+  const isStepOne = exam.key === "usmle_step1";
   const utm = new URLSearchParams({
     exam: exam.aylaKey,
     utm_source: platform.key,
     utm_medium: "organic_community",
     utm_campaign: campaignKey,
   });
-  const manualRule = "Review public posts from the last 30 days where a student explicitly asks for exam guidance or says they are starting their journey. Save only the public post link, visible username, date, exam and stated need. Prepare one gentle reply or message for human approval; never auto-send.";
+  const manualRule = "Review public posts from the last 30 days where a student is looking for study resources, says they are lost about how to prepare, or is just starting and asks for direction. Skip students who say they already have all the resources they need and only want a revision tweak, resource comparison or minor optimization. Save only the public post link, visible username, date, exam and stated need. Prepare one gentle reply or message for human approval; never auto-send.";
+  const liveSessionRule = isStepOne
+    ? "For USMLE Step 1 only, also qualify a student who explicitly asks for live teaching, live classes or live study sessions."
+    : `Do not qualify ${exam.label} prospects only because they ask for live sessions; AylaMed live-session outreach is limited to USMLE Step 1.`;
   return normalizeCrmCollectionPayload("campaigns", {
     id: existing?.id || `campaign_${campaignKey}`,
     brand_id: brandId,
@@ -24667,15 +24671,16 @@ function buildAylaMedLeadEngineCampaign({ brandId, exam, platform, existing = nu
     personalization_enabled: true,
     form_id: null,
     landing_url: `https://${exam.host}/login?${utm.toString()}`,
-    campaign_command: `${manualRule} Qualify only clear ${exam.label} intent. Measure reviewed prospects, approved outreach, replies and meetings; do not use paid-ad metrics for this workflow.`,
-    ai_must_do: "Preserve the public source link and stated need. Explain why the prospect appears relevant. Draft one short, respectful, non-promotional first contact for human review.",
-    ai_must_not_do: "Do not run ads, scrape private data, create a public signup or demo, auto-send messages, mass-contact users, promise a pass or contact anyone without human approval.",
+    campaign_command: `${manualRule} ${liveSessionRule} Qualify only clear ${exam.label} intent. Measure reviewed prospects, approved outreach, replies and meetings; do not use paid-ad metrics for this workflow.`,
+    ai_must_do: "Preserve the public source link and stated need. Identify the exact qualifying signal: needs resources, lost at the beginning, just starting, or Step 1 live-session interest. Draft one short, respectful, non-promotional first contact for human review.",
+    ai_must_not_do: "Do not select students who already have all required resources and only want revision optimization. Do not offer live sessions outside USMLE Step 1. Do not run ads, scrape private data, create a public signup or demo, auto-send messages, mass-contact users, promise a pass or contact anyone without human approval.",
     handoff_rules: existing?.handoff_rules || "Handoff for pricing exceptions, payment, complaints, refunds, mentor requests or clinical/personal advice.",
     stop_rules: existing?.stop_rules || "Stop immediately for unsubscribe, wrong person, no consent, not interested or already enrolled.",
-    qualification_flow: "1) Public post is no older than 30 days. 2) Exam intent is explicit. 3) Student asks for guidance or says they are starting. 4) Human reviews the source. 5) Send at most one gentle contact if approved.",
+    qualification_flow: `1) Public post is no older than 30 days. 2) ${exam.label} intent is explicit. 3) Student needs resources, is lost about preparation or is just starting and asks for direction.${isStepOne ? " Step 1 live-session interest also qualifies." : " Live-session interest alone does not qualify."} 4) Exclude students who already have all resources and only want optimization. 5) Human reviews the source. 6) Send at most one gentle contact if approved.`,
     fallback_strategy: "If the post is unclear, old, private, promotional or already answered, skip it. Never manufacture a reason to contact someone.",
     followup_timing_notes: "No automatic follow-up. If there is no reply, stop. Continue only after the student responds or the admin explicitly approves another contact.",
     outreach_strategy: "organic_intent_monitoring",
+    live_session_eligible: isStepOne,
     lookback_days: 30,
     paid_ads_enabled: false,
     is_aylamed_lead_engine: true,
@@ -24733,7 +24738,7 @@ app.post("/admin/crm/lead-engine/aylamed/bootstrap", async (req, res) => {
         platform: "multi_channel",
         action: "aylamed_lead_engine_bootstrap",
         status: "success",
-        message: "AylaMed seven-exam organic intent-monitoring drafts prepared",
+        message: "AylaMed seven-exam organic intent-monitoring lists activated",
         metadata: {
           campaigns_created: campaignsCreated,
           campaigns_updated: campaignsUpdated,
