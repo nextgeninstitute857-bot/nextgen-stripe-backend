@@ -24633,63 +24633,26 @@ const AYLAMED_LEAD_ENGINE_EXAMS = [
 ];
 
 const AYLAMED_LEAD_ENGINE_PLATFORMS = [
-  { key: "facebook", label: "Facebook", sourceType: "meta_form" },
-  { key: "instagram", label: "Instagram", sourceType: "meta_form" },
-  { key: "reddit", label: "Reddit", sourceType: "community" },
+  { key: "facebook", label: "Facebook", sourceType: "organic_community" },
+  { key: "instagram", label: "Instagram", sourceType: "organic_community" },
+  { key: "reddit", label: "Reddit", sourceType: "organic_community" },
 ];
 
-function buildAylaMedLeadEngineForm(brandId, existing = null) {
-  return normalizeCrmCollectionPayload("forms", {
-    id: existing?.id || "form_aylamed_exam_readiness",
-    brand_id: brandId,
-    title: "AylaMed Exam Readiness & Demo",
-    name: "AylaMed Exam Readiness & Demo",
-    slug: "aylamed-exam-readiness-demo",
-    form_type: "demo_registration",
-    type: "demo_registration",
-    status: existing?.status || "draft",
-    description: "Qualify students for the correct AylaMed exam diagnostic, adaptive plan and demo.",
-    brand: "AylaMed",
-    exam_brand: "AylaMed",
-    redirect_url: "https://aylamedapp.com/?register=1",
-    thank_you_message: "Thank you. Continue to AylaMed to start your exam diagnostic and adaptive plan.",
-    create_lead_on_submit: true,
-    auto_create_lead: true,
-    auto_create_task: true,
-    auto_add_to_pipeline: true,
-    default_stage_key: "new_lead",
-    tags: ["aylamed", "exam_readiness", "demo_interest"],
-    fields: [
-      { id: "full_name", label: "Full Name", type: "text", required: true, placeholder: "Your name" },
-      { id: "email", label: "Email", type: "email", required: true, placeholder: "your@email.com" },
-      { id: "phone", label: "WhatsApp / Phone", type: "phone", required: false, placeholder: "+1..." },
-      { id: "exam_type", label: "Exam", type: "select", required: true, options: AYLAMED_LEAD_ENGINE_EXAMS.map((exam) => exam.label) },
-      { id: "exam_date", label: "Expected Exam Date", type: "date", required: false },
-      { id: "main_difficulty", label: "Main Difficulty", type: "textarea", required: true, placeholder: "What is slowing your preparation down?" },
-      { id: "marketing_consent", label: "Send me useful exam-plan and demo reminders", type: "checkbox", required: false, options: ["Yes, I agree"] },
-    ],
-    questions: undefined,
-  }, existing, brandId);
-}
-
-function buildAylaMedLeadEngineCampaign({ brandId, formId, exam, platform, existing = null }) {
+function buildAylaMedLeadEngineCampaign({ brandId, exam, platform, existing = null }) {
   const campaignKey = `aylamed_${exam.key}_${platform.key}_lead_engine`;
   const utm = new URLSearchParams({
-    register: "1",
     exam: exam.aylaKey,
     utm_source: platform.key,
-    utm_medium: platform.key === "reddit" ? "community" : "paid_social",
+    utm_medium: "organic_community",
     utm_campaign: campaignKey,
   });
-  const manualRule = platform.key === "reddit"
-    ? "Find relevant public exam questions and prepare a useful public reply for human approval. Never scrape private data or send unsolicited direct messages."
-    : "Capture only students who submit the approved form or start a conversation. Keep all advertising and outreach changes under human approval.";
+  const manualRule = "Review public posts from the last 30 days where a student explicitly asks for exam guidance or says they are starting their journey. Save only the public post link, visible username, date, exam and stated need. Prepare one gentle reply or message for human approval; never auto-send.";
   return normalizeCrmCollectionPayload("campaigns", {
     id: existing?.id || `campaign_${campaignKey}`,
     brand_id: brandId,
     name: `AylaMed ${exam.label} — ${platform.label}`,
     campaign_key: campaignKey,
-    status: existing?.status || "draft",
+    status: "draft",
     channel: platform.key,
     source_type: platform.sourceType,
     exam_track: exam.key,
@@ -24702,16 +24665,19 @@ function buildAylaMedLeadEngineCampaign({ brandId, formId, exam, platform, exist
     automation_enabled: false,
     daily_limit: Number(existing?.daily_limit || 25),
     personalization_enabled: true,
-    form_id: formId,
-    landing_url: `https://${exam.host}/?${utm.toString()}`,
-    campaign_command: existing?.campaign_command || `${manualRule} Qualify for ${exam.label}, expected exam date, preparation difficulty and diagnostic interest. Measure qualified leads, diagnostic completion, mentor bookings and paid enrollment.`,
-    ai_must_do: existing?.ai_must_do || "Preserve campaign and source attribution. Ask one clear question at a time. Route the student to the correct AylaMed exam diagnostic.",
-    ai_must_not_do: existing?.ai_must_not_do || "Do not promise a pass, invent outcomes, auto-publish ads, spam communities or contact anyone without permission.",
+    form_id: null,
+    landing_url: `https://${exam.host}/login?${utm.toString()}`,
+    campaign_command: `${manualRule} Qualify only clear ${exam.label} intent. Measure reviewed prospects, approved outreach, replies and meetings; do not use paid-ad metrics for this workflow.`,
+    ai_must_do: "Preserve the public source link and stated need. Explain why the prospect appears relevant. Draft one short, respectful, non-promotional first contact for human review.",
+    ai_must_not_do: "Do not run ads, scrape private data, create a public signup or demo, auto-send messages, mass-contact users, promise a pass or contact anyone without human approval.",
     handoff_rules: existing?.handoff_rules || "Handoff for pricing exceptions, payment, complaints, refunds, mentor requests or clinical/personal advice.",
     stop_rules: existing?.stop_rules || "Stop immediately for unsubscribe, wrong person, no consent, not interested or already enrolled.",
-    qualification_flow: existing?.qualification_flow || "1) Confirm exam. 2) Ask expected date. 3) Ask main difficulty. 4) Offer the matching diagnostic and adaptive plan.",
-    fallback_strategy: existing?.fallback_strategy || "Offer one useful public resource or the readiness diagnostic; do not repeat messages.",
-    followup_timing_notes: existing?.followup_timing_notes || "No automatic follow-up until the platform connection, consent, templates and landing path are verified.",
+    qualification_flow: "1) Public post is no older than 30 days. 2) Exam intent is explicit. 3) Student asks for guidance or says they are starting. 4) Human reviews the source. 5) Send at most one gentle contact if approved.",
+    fallback_strategy: "If the post is unclear, old, private, promotional or already answered, skip it. Never manufacture a reason to contact someone.",
+    followup_timing_notes: "No automatic follow-up. If there is no reply, stop. Continue only after the student responds or the admin explicitly approves another contact.",
+    outreach_strategy: "organic_intent_monitoring",
+    lookback_days: 30,
+    paid_ads_enabled: false,
     is_aylamed_lead_engine: true,
   }, existing, brandId);
 }
@@ -24738,11 +24704,9 @@ app.post("/admin/crm/lead-engine/aylamed/bootstrap", async (req, res) => {
       else Object.assign(brands.find((item) => item.id === brand.id), brand);
 
       const forms = ensureCrmArray(db, "forms");
-      const existingFormIndex = forms.findIndex((item) => item.id === "form_aylamed_exam_readiness" || item.slug === "aylamed-exam-readiness-demo");
-      const existingForm = existingFormIndex >= 0 ? forms[existingFormIndex] : null;
-      const form = buildAylaMedLeadEngineForm(brand.id, existingForm);
-      if (existingFormIndex >= 0) forms[existingFormIndex] = form;
-      else forms.push(form);
+      const formsBefore = forms.length;
+      db.forms = forms.filter((item) => item.id !== "form_aylamed_exam_readiness" && item.slug !== "aylamed-exam-readiness-demo");
+      const formsRemoved = formsBefore - db.forms.length;
 
       const campaigns = ensureCrmArray(db, "campaigns");
       let campaignsCreated = 0;
@@ -24752,7 +24716,7 @@ app.post("/admin/crm/lead-engine/aylamed/bootstrap", async (req, res) => {
           const campaignKey = `aylamed_${exam.key}_${platform.key}_lead_engine`;
           const existingIndex = campaigns.findIndex((item) => item.campaign_key === campaignKey || item.id === `campaign_${campaignKey}`);
           const existing = existingIndex >= 0 ? campaigns[existingIndex] : null;
-          const campaign = buildAylaMedLeadEngineCampaign({ brandId: brand.id, formId: form.id, exam, platform, existing });
+          const campaign = buildAylaMedLeadEngineCampaign({ brandId: brand.id, exam, platform, existing });
           if (existingIndex >= 0) {
             campaigns[existingIndex] = campaign;
             campaignsUpdated += 1;
@@ -24769,11 +24733,13 @@ app.post("/admin/crm/lead-engine/aylamed/bootstrap", async (req, res) => {
         platform: "multi_channel",
         action: "aylamed_lead_engine_bootstrap",
         status: "success",
-        message: "AylaMed seven-exam lead engine drafts prepared",
+        message: "AylaMed seven-exam organic intent-monitoring drafts prepared",
         metadata: {
           campaigns_created: campaignsCreated,
           campaigns_updated: campaignsUpdated,
-          form_status: form.status,
+          forms_removed: formsRemoved,
+          public_signup_enabled: false,
+          paid_ads_enabled: false,
           activated: false,
           actor_id: user.id,
         },
@@ -24781,7 +24747,7 @@ app.post("/admin/crm/lead-engine/aylamed/bootstrap", async (req, res) => {
 
       return {
         brand,
-        form,
+        forms_removed: formsRemoved,
         campaigns_created: campaignsCreated,
         campaigns_updated: campaignsUpdated,
         campaign_total: AYLAMED_LEAD_ENGINE_EXAMS.length * AYLAMED_LEAD_ENGINE_PLATFORMS.length,
@@ -24792,7 +24758,7 @@ app.post("/admin/crm/lead-engine/aylamed/bootstrap", async (req, res) => {
       success: true,
       ...result,
       activated: false,
-      message: "AylaMed lead engine drafts are ready. Review platform connections, form and campaigns before activation.",
+      message: "AylaMed organic lead-monitoring drafts are ready. Public signup and demo capture remain disabled.",
     });
   } catch (error) {
     return res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to prepare AylaMed lead engine" });
