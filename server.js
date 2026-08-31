@@ -660,7 +660,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 const NEXTGEN_BACKEND_BUILD = "v223-aylamed-diagnostic-onboarding";
 const LMS_PAID_DEMO_CONSOLIDATION_BUILD = "v221-paid-demo-consolidation";
 const CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard";
-const CRM_LIVE_SESSION_SCHEDULER_BUILD = "v311-full-class-window-link-recovery";
+const CRM_LIVE_SESSION_SCHEDULER_BUILD = "v312-provider-failure-retry";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
@@ -35260,9 +35260,29 @@ function ngDailyLiveSessionAttemptMatches(row = {}, lead = {}, action = "", date
     String(metadata.daily_live_session_date || row.daily_live_session_date || "") === String(dateKey);
 }
 
+function ngDailyLiveSessionAttemptBlocksRetry(db = {}, row = {}) {
+  const failedStatuses = new Set(["failed", "error", "provider_blocked", "undelivered", "rejected"]);
+  const status = String(row.status || row.provider_status || "").trim().toLowerCase();
+  if (failedStatuses.has(status)) return false;
+
+  // Provider acceptance can later be reversed by an asynchronous WhatsApp
+  // webhook. Do not let the earlier scheduler/delivery lock hide that final
+  // failure and permanently suppress the same-day recovery retry.
+  const messageLogId = String(row.message_log_id || "").trim();
+  if (messageLogId) {
+    const messageLog = ensureCrmArray(db, "message_logs").find((log) => String(log.id || "") === messageLogId);
+    const finalStatus = String(messageLog?.status || messageLog?.provider_status || "").trim().toLowerCase();
+    if (failedStatuses.has(finalStatus)) return false;
+  }
+
+  return ["claimed", "sending", "queued", "queued_for_approval", "sent", "delivered", "read", "success", "accepted"].includes(status);
+}
+
 function ngDailyLiveSessionAlreadyAttempted(db = {}, lead = {}, action = "", dateKey = "") {
   return ["message_logs", "message_delivery_locks"].some((collection) =>
-    ensureCrmArray(db, collection).some((row) => ngDailyLiveSessionAttemptMatches(row, lead, action, dateKey))
+    ensureCrmArray(db, collection).some((row) =>
+      ngDailyLiveSessionAttemptMatches(row, lead, action, dateKey) && ngDailyLiveSessionAttemptBlocksRetry(db, row)
+    )
   );
 }
 

@@ -25,19 +25,39 @@ const helpers = new Function(
   (value) => value,
 );
 
-test("a failed provider log blocks another automated attempt for the same lead, action, and day", () => {
+test("a final provider failure permits a same-day recovery retry", () => {
   const lead = { id: "lead-1", current_channel: "whatsapp" };
   const db = {
     message_logs: [{
+      id: "failed-log-1",
       lead_id: lead.id,
       status: "failed",
       metadata: { daily_live_session_action: "post_session_recording", daily_live_session_date: "2026-08-28" },
     }],
+    message_delivery_locks: [{
+      lead_id: lead.id,
+      status: "sent",
+      message_log_id: "failed-log-1",
+      metadata: { daily_live_session_action: "post_session_recording", daily_live_session_date: "2026-08-28" },
+    }],
   };
 
-  assert.equal(helpers.ngDailyLiveSessionAlreadyAttempted(db, lead, "post_session_recording", "2026-08-28"), true);
+  assert.equal(helpers.ngDailyLiveSessionAlreadyAttempted(db, lead, "post_session_recording", "2026-08-28"), false);
   assert.equal(helpers.ngDailyLiveSessionAlreadyAttempted(db, lead, "session_link", "2026-08-28"), false);
   assert.equal(helpers.ngDailyLiveSessionAlreadyAttempted(db, lead, "post_session_recording", "2026-08-29"), false);
+});
+
+test("accepted or in-flight delivery attempts still block duplicate sends", () => {
+  const lead = { id: "lead-1", current_channel: "whatsapp" };
+  const metadata = { daily_live_session_action: "session_link", daily_live_session_date: "2026-08-31" };
+
+  assert.equal(helpers.ngDailyLiveSessionAlreadyAttempted({
+    message_logs: [{ id: "sent-log", lead_id: lead.id, status: "delivered", metadata }],
+  }, lead, "session_link", "2026-08-31"), true);
+
+  assert.equal(helpers.ngDailyLiveSessionAlreadyAttempted({
+    message_delivery_locks: [{ lead_id: lead.id, status: "claimed", metadata }],
+  }, lead, "session_link", "2026-08-31"), true);
 });
 
 test("the scheduler claims an action before provider delivery and the claim is durable", () => {
