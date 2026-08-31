@@ -110,8 +110,10 @@ test("daily messages name the exact session and never fall back to an old Zoom U
   assert.match(textFor("session_link", assets), /22222222222/);
   assert.match(textFor("post_session_recording", assets), /Central Nervous System — Day 6/);
   assert.doesNotMatch(textFor("post_session_recording", assets), /recent live-session recording/);
-  assert.match(textFor("post_session_recording", assets), /if you missed today’s live class, the recording is now ready/i);
-  assert.match(textFor("post_session_recording", assets), /what you thought of the teaching style/);
+  assert.match(textFor("post_session_recording", assets), /in case you missed today’s live session, you can catch up here/i);
+  assert.match(textFor("post_session_recording", assets), /how you liked the teaching style/i);
+  assert.match(textFor("post_session_recording", assets), /join the program/i);
+  assert.match(textFor("post_session_recording", assets), /book a mentor call/i);
   assert.doesNotMatch(textFor("post_session_recording", assets), /correctly labelled|matching recording|Google Meet|interested in joining/i);
 });
 

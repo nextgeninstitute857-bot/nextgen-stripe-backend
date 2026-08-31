@@ -32,8 +32,10 @@ test("the managed WhatsApp pack contains the eight campaign templates", () => {
   assert.deepEqual(sessionLink?.variables, ["name", "topic", "live_session_link"]);
   const recordingLink = NEXTGEN_WHATSAPP_TEMPLATE_PACK.find((item) => item.key === "nextgen_class_recording_link");
   assert.deepEqual(recordingLink?.variables, ["name", "full_session_name", "recording_link"]);
-  assert.match(recordingLink?.body || "", /If you missed today’s live class/);
-  assert.match(recordingLink?.body || "", /what you thought of the teaching style/);
+  assert.match(recordingLink?.body || "", /In case you missed today’s live session, you can catch up here/);
+  assert.match(recordingLink?.body || "", /how you liked the teaching style/);
+  assert.match(recordingLink?.body || "", /join the program/);
+  assert.match(recordingLink?.body || "", /book a mentor call/);
   assert.doesNotMatch(recordingLink?.body || "", /correctly labelled|Google Meet|interested in joining/i);
   const meeting = NEXTGEN_WHATSAPP_TEMPLATE_PACK.find((item) => item.key === "nextgen_mentor_meeting_confirmation");
   assert.equal(meeting?.button?.text, "Join Meeting");
