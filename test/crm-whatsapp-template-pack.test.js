@@ -51,6 +51,8 @@ test("the managed WhatsApp pack contains the eight campaign templates", () => {
   const sessionLink = NEXTGEN_WHATSAPP_TEMPLATE_PACK.find((item) => item.key === "nextgen_live_session_link");
   assert.deepEqual(sessionLink?.variables, ["name", "topic", "live_session_link"]);
   assert.match(sessionLink?.body || "", /Join the live class here/);
+  assert.match(sessionLink?.body || "", /See you in class\.$/);
+  assert.doesNotMatch(sessionLink?.body || "", /{{live_session_link}}$/);
   assert.doesNotMatch(sessionLink?.body || "", /Even 5|experience the NextGen teaching style/i);
   const recordingLink = NEXTGEN_WHATSAPP_TEMPLATE_PACK.find((item) => item.key === "nextgen_class_recording_link");
   assert.deepEqual(recordingLink?.variables, ["name", "full_session_name", "recording_link"]);
