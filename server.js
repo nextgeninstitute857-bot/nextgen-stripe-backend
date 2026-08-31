@@ -660,7 +660,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 const NEXTGEN_BACKEND_BUILD = "v223-aylamed-diagnostic-onboarding";
 const LMS_PAID_DEMO_CONSOLIDATION_BUILD = "v221-paid-demo-consolidation";
 const CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard";
-const CRM_LIVE_SESSION_SCHEDULER_BUILD = "v313-exact-session-recording-loop";
+const CRM_LIVE_SESSION_SCHEDULER_BUILD = "v314-recording-template-preflight";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
@@ -35361,6 +35361,14 @@ function ngDailyLiveSessionPendingLeadBatch(db = {}, settings = {}, { brandId = 
     .slice(0, batchLimit);
 }
 
+function ngScheduledWhatsAppTemplateIsApproved(db = {}, templateKey = "") {
+  const template = getMessageTemplateByKey(db, templateKey);
+  if (!template || template.active === false || template.is_active === false) return false;
+  if (template.meta_approved === true) return true;
+  return [template.meta_status, template.status]
+    .some((value) => ["approved", "active"].includes(String(value || "").trim().toLowerCase()));
+}
+
 function ngStartDailyLiveSessionAttempt(db = {}, lead = {}, action = "", dateKey = "", source = "run_due") {
   const attempt = withTimestamps({
     id: uuid(),
@@ -35461,6 +35469,16 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
     const whatsappWindowOpen = channel !== "whatsapp" || ngWithinHours(latestInbound?.created_at || latestInbound?.received_at || latestInbound?.timestamp, 24);
     const templateId = channel === "whatsapp" && !whatsappWindowOpen ? templateMap[action] : null;
     const text = ngDailyLiveSessionText(action, assets, lead);
+    if (templateId && !ngScheduledWhatsAppTemplateIsApproved(db, templateId)) {
+      results.push({
+        lead_id: lead.id,
+        skipped: true,
+        reason: "whatsapp_template_not_approved_yet",
+        action,
+        template_id: templateId,
+      });
+      continue;
+    }
     if (dryRun) {
       results.push({ lead_id: lead.id, dry_run: true, action, template_id: templateId, text });
       continue;
