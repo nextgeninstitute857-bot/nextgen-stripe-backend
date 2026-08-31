@@ -660,6 +660,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 const NEXTGEN_BACKEND_BUILD = "v223-aylamed-diagnostic-onboarding";
 const LMS_PAID_DEMO_CONSOLIDATION_BUILD = "v221-paid-demo-consolidation";
 const CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard";
+const CRM_LIVE_SESSION_SCHEDULER_BUILD = "v311-full-class-window-link-recovery";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
@@ -11852,6 +11853,7 @@ app.get("/health", async (req, res) => {
     message: "Backend running",
     build: NEXTGEN_BACKEND_BUILD,
     crm_ayla_reply_build: CRM_AYLA_REPLY_BUILD,
+    crm_live_session_scheduler_build: CRM_LIVE_SESSION_SCHEDULER_BUILD,
     crm_multiexam_lead_capture_build: CRM_MULTIEXAM_LEAD_CAPTURE_BUILD,
     crm_whatsapp_business_profile_build: "v298-meta-profile-sync",
     crm_ayla_reply_engine: {
@@ -35160,9 +35162,16 @@ function ngDailyLiveSessionActionNow(settings = {}, date = new Date(), session =
   if (!Number.isFinite(sessionHour) || !Number.isFinite(sessionMinute)) return null;
   const total = hour * 60 + minute;
   const sessionTotal = sessionHour * 60 + sessionMinute;
+  const sessionDurationMinutes = Math.max(
+    1,
+    Number(session.duration_minutes || DEFAULT_ZOOM_DURATION_MINUTES) || DEFAULT_ZOOM_DURATION_MINUTES,
+  );
   if (total >= 7 * 60 && total < sessionTotal - reminderMinutes) return "daily_session_invite";
   if (total >= sessionTotal - reminderMinutes && total < sessionTotal) return "five_minute_reminder";
-  if (total >= sessionTotal && total <= sessionTotal + 15) return "session_link";
+  // Keep recovering the link for the full class window. The trusted-link
+  // resolver below applies the same session duration and rejects stale,
+  // mismatched, or unreleased Zoom links before anything can be sent.
+  if (total >= sessionTotal && total <= sessionTotal + sessionDurationMinutes) return "session_link";
   if (total >= sessionTotal + Number(settings.post_session_followup_delay_minutes || 120) && total <= sessionTotal + Number(settings.post_session_followup_delay_minutes || 120) + 90) return "post_session_recording";
   return null;
 }

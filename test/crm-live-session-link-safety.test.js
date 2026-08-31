@@ -68,14 +68,20 @@ test("the trusted Zoom link is released only during its exact class window", () 
 
 test("daily session timing follows the real LMS date and includes Saturday classes", () => {
   const source = between("function ngDailyLiveSessionActionNow", "function ngLeadIsPaidOrGroupAddedForLiveSession");
+  let clock = { weekday: "Saturday", hour: 12, minute: 55 };
   const actionNow = new Function(
     "ngDailySessionTimeParts",
     "ngDailySessionDateKey",
+    "DEFAULT_ZOOM_DURATION_MINUTES",
     `${source}; return ngDailyLiveSessionActionNow;`,
-  )(() => ({ weekday: "Saturday", hour: 12, minute: 55 }), () => "2026-08-29");
-  const saturday = { id: "day-7", date: "2026-08-29", time: "13:00", status: "scheduled" };
+  )(() => clock, () => "2026-08-29", 120);
+  const saturday = { id: "day-7", date: "2026-08-29", time: "13:00", status: "scheduled", duration_minutes: 120 };
 
   assert.equal(actionNow({}, new Date(), saturday), "five_minute_reminder");
+  clock = { weekday: "Saturday", hour: 13, minute: 16 };
+  assert.equal(actionNow({}, new Date(), saturday), "session_link");
+  clock = { weekday: "Saturday", hour: 14, minute: 59 };
+  assert.equal(actionNow({}, new Date(), saturday), "session_link");
   assert.equal(actionNow({}, new Date(), { ...saturday, date: "2026-08-28" }), null);
   assert.equal(actionNow({}, new Date(), { ...saturday, status: "cancelled" }), null);
 });
@@ -120,6 +126,8 @@ test("the scheduler uses the dedicated approved link template", () => {
 
 test("scheduler and AI source use only the exact live LMS link", () => {
   assert.match(server, /CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard"/);
+  assert.match(server, /CRM_LIVE_SESSION_SCHEDULER_BUILD = "v311-full-class-window-link-recovery"/);
+  assert.match(server, /crm_live_session_scheduler_build: CRM_LIVE_SESSION_SCHEDULER_BUILD/);
   assert.match(server, /reason: "matching_live_session_link_not_released"/);
   assert.match(server, /today_session: todaySession \?/);
   assert.match(server, /liveSessionLink: liveSnapshot\?\.live_session\?\.url \|\| ""/);
