@@ -660,7 +660,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 const NEXTGEN_BACKEND_BUILD = "v223-aylamed-diagnostic-onboarding";
 const LMS_PAID_DEMO_CONSOLIDATION_BUILD = "v221-paid-demo-consolidation";
 const CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard";
-const CRM_LIVE_SESSION_SCHEDULER_BUILD = "v312-provider-failure-retry";
+const CRM_LIVE_SESSION_SCHEDULER_BUILD = "v313-exact-session-recording-loop";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
@@ -4578,7 +4578,40 @@ function sortRecordingsNewestFirst(a, b) {
   return recordingDate(b).localeCompare(recordingDate(a));
 }
 
-function sanitizePublicRecording(recording) {
+function ngPublicRecordingNotesMeta(db = {}, recording = {}) {
+  const sessionId = String(recording.session_id || recording.live_session_id || "").trim();
+  const session = sessionId
+    ? db.liveSessions?.[sessionId] || {
+        id: sessionId,
+        course_id: recording.course_id || null,
+        roadmap_day_id: recording.roadmap_day_id || null,
+        system: recording.system || null,
+        system_day: recording.system_day || recording.day_in_system || null,
+        day_number: recording.day_number || null,
+      }
+    : null;
+  const resolved = session
+    ? ngResolveStudentNotesForSession(db, session, { publishedOnly: true })
+    : null;
+  const note = resolved?.note || null;
+  const notesAvailable = Boolean(
+    note && ngStudentNotesIsPublished(note) && ngStudentNotesVisibleText(note),
+  );
+
+  return {
+    notes_available: notesAvailable,
+    has_notes: notesAvailable,
+    notes_status: notesAvailable ? "available" : "preparing",
+    notes_meta: {
+      available: notesAvailable,
+      published: notesAvailable,
+      notes_available: notesAvailable,
+      updated_at: notesAvailable ? note.updated_at || note.published_at || note.created_at || null : null,
+    },
+  };
+}
+
+function sanitizePublicRecording(recording, notesMeta = {}) {
   const hasLockedLabelCorrection = recording.label_correction_locked === true;
   const publicTopic = hasLockedLabelCorrection
     ? recording.corrected_topic || recording.topic || ""
@@ -4617,6 +4650,15 @@ function sanitizePublicRecording(recording) {
     published: Boolean(recording.published),
     session_id: recording.session_id || null,
     course_id: recording.course_id || null,
+    notes_available: notesMeta.notes_available === true,
+    has_notes: notesMeta.has_notes === true,
+    notes_status: notesMeta.notes_status || "preparing",
+    notes_meta: notesMeta.notes_meta || {
+      available: false,
+      published: false,
+      notes_available: false,
+      updated_at: null,
+    },
     label_correction_locked: hasLockedLabelCorrection,
     label_correction_reason: hasLockedLabelCorrection ? recording.label_correction_reason || null : null,
     missed_holiday_date: hasLockedLabelCorrection ? recording.missed_holiday_date || null : null,
@@ -6590,6 +6632,7 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
   const matchedSession = effectiveMatch.exact ? effectiveMatch.session : null;
   const matchedDay = matchedSession ? ngFindRoadmapDayForLiveSession(db, matchedSession) : null;
   const canAutoPublish = Boolean(
+    ngAutoPublishPreparedContentEnabled() &&
     matchedSession?.id &&
     matchedSession.course_id &&
     videoFile &&
@@ -17252,7 +17295,12 @@ app.get("/live/recordings", async (req, res) => {
     if (requestedCourseId) recordings = recordings.filter((recording) => String(recording.course_id || "") === requestedCourseId);
 
     recordings.sort(sortRecordingsNewestFirst);
-    res.json({ success: true, count: recordings.length, recordings: recordings.map(sanitizePublicRecording), auto_roadmap_sync: autoRoadmapSync });
+    res.json({
+      success: true,
+      count: recordings.length,
+      recordings: recordings.map((recording) => sanitizePublicRecording(recording, ngPublicRecordingNotesMeta(db, recording))),
+      auto_roadmap_sync: autoRoadmapSync,
+    });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, error: error.message || "Failed to load live recordings" });
   }
@@ -17285,7 +17333,12 @@ app.get("/live/recordings/published", async (req, res) => {
 
     recordings.sort(sortRecordingsNewestFirst);
 
-    res.json({ success: true, count: recordings.length, recordings: recordings.map(sanitizePublicRecording), auto_roadmap_sync: autoRoadmapSync });
+    res.json({
+      success: true,
+      count: recordings.length,
+      recordings: recordings.map((recording) => sanitizePublicRecording(recording, ngPublicRecordingNotesMeta(db, recording))),
+      auto_roadmap_sync: autoRoadmapSync,
+    });
   } catch (e) {
     res.status(e.statusCode || 500).json({ success: false, error: e.message });
   }
@@ -35176,7 +35229,14 @@ function ngDailyLiveSessionActionNow(settings = {}, date = new Date(), session =
   // resolver below applies the same session duration and rejects stale,
   // mismatched, or unreleased Zoom links before anything can be sent.
   if (total >= sessionTotal && total <= sessionTotal + sessionDurationMinutes) return "session_link";
-  if (total >= sessionTotal + Number(settings.post_session_followup_delay_minutes || 120) && total <= sessionTotal + Number(settings.post_session_followup_delay_minutes || 120) + 90) return "post_session_recording";
+  const recordingFollowupStart = Math.max(
+    sessionTotal + sessionDurationMinutes + 1,
+    sessionTotal + Number(settings.post_session_followup_delay_minutes || 120),
+  );
+  // Keep checking through the rest of the class day. Zoom processing can take
+  // longer than the old 90-minute window; the scheduler below still refuses to
+  // send until this exact session's labelled recording is published.
+  if (total >= recordingFollowupStart) return "post_session_recording";
   return null;
 }
 
@@ -35342,7 +35402,7 @@ function ngDailyLiveSessionText(action = "", assets = {}, lead = {}) {
   const rec = assets.recordingLink && recordingTitle
     ? `\n\n${recordingTitle}\nRecording:\n${assets.recordingLink}`
     : "";
-  return `Doctor, today’s class recording is ready.${rec}\n\nWhen you’ve had a chance to watch it, let me know what you thought of the teaching style.`;
+  return `Doctor, if you missed today’s live class, the recording is now ready.${rec}\n\nWhen you’ve had a chance to watch it, let me know what you thought of the teaching style.`;
 }
 
 async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit = 50, dryRun = false, source = "run_due" } = {}) {
@@ -35365,15 +35425,15 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
     liveSessionDate: String(todaySession?.date || "").trim(),
     sessionTime: ngDailyLiveSessionTimeLabel(todaySession, configuredAssets.sessionTime),
     liveSessionLink: String(todaySession?.url || "").trim(),
-    recordingTitle: String(liveSnapshot.latest_recording?.title || "").trim(),
-    latestRecordingTitle: String(liveSnapshot.latest_recording?.title || "").trim(),
-    recordingLink: String(liveSnapshot.latest_recording?.url || "").trim(),
+    recordingTitle: String(liveSnapshot.today_recording?.title || "").trim(),
+    latestRecordingTitle: String(liveSnapshot.today_recording?.title || "").trim(),
+    recordingLink: String(liveSnapshot.today_recording?.url || "").trim(),
   };
   if (action === "session_link" && !assets.liveSessionLink) {
     return { action, processed: 0, sent: 0, skipped: 0, reason: "matching_live_session_link_not_released" };
   }
   if (action === "post_session_recording" && (!assets.recordingLink || !assets.recordingTitle)) {
-    return { action, processed: 0, sent: 0, skipped: 0, reason: "labelled_recording_not_available" };
+    return { action, processed: 0, sent: 0, skipped: 0, reason: "exact_session_recording_not_published_yet" };
   }
   const configuredRecordingTemplate = normalizeTemplateLookupKey(settings.post_session_recording_template_key || "");
   const templateMap = {
@@ -51433,15 +51493,24 @@ async function ngAylaLiveLmsSalesGrounding({ structured = false, crmDb = null, l
     const activeSessionLink = ngAylaTrustedLiveSessionJoinLink(activeSession || {}, nowDate);
     const activeSessionUrl = activeSessionLink.url;
     const todaySessionLink = ngAylaTrustedLiveSessionJoinLink(todaySession || {}, nowDate);
-    const latestPublishedRecording = Object.values(liveDb.recordings || {})
+    const publishedRecordings = Object.values(liveDb.recordings || {})
       .filter((recording) => {
         const recordingCourseId = String(recording?.course_id || "");
         const hasPublicUrl = Boolean(recording?.recording_url || recording?.share_url);
         return recording?.published === true && recording?.hidden_from_recordings !== true && hasPublicUrl &&
           (!courseId || !recordingCourseId || recordingCourseId === courseId);
       })
-      .sort(sortRecordingsNewestFirst)[0] || null;
+      .sort(sortRecordingsNewestFirst);
+    const latestPublishedRecording = publishedRecordings[0] || null;
+    const todaySessionId = String(todaySession?.id || todayDay?.live_session_id || todayDay?.session_id || "").trim();
+    // A post-class message must never fall back to yesterday's "latest"
+    // recording. Wait until the recording linked to this exact LMS session is
+    // published, even when Zoom processing finishes later in the evening.
+    const todayPublishedRecording = todaySessionId
+      ? publishedRecordings.find((recording) => String(recording?.session_id || "").trim() === todaySessionId) || null
+      : null;
     const publicRecording = latestPublishedRecording ? sanitizePublicRecording(latestPublishedRecording) : null;
+    const todayPublicRecording = todayPublishedRecording ? sanitizePublicRecording(todayPublishedRecording) : null;
     const latestRecordingTitle = publicRecording
       ? ngDayFirstContentTitle(publicRecording.topic || "", {
           systemDay: publicRecording.system_day,
@@ -51546,6 +51615,20 @@ async function ngAylaLiveLmsSalesGrounding({ structured = false, crmDb = null, l
         system_day: Number(publicRecording.system_day || 0) || null,
         date: String(publicRecording.start_time || "").slice(0, 10),
         url: latestRecordingUrl,
+      } : null,
+      today_recording: todayPublicRecording ? {
+        id: String(todayPublicRecording.id || todayPublicRecording.recording_key || ""),
+        session_id: String(todayPublicRecording.session_id || ""),
+        title: ngDayFirstContentTitle(todayPublicRecording.topic || "", {
+          systemDay: todayPublicRecording.system_day,
+          dayNumber: todayPublicRecording.day_number,
+          system: todayPublicRecording.system || "",
+          fallback: todayPublicRecording.system || "Today's live session",
+        }),
+        system: String(todayPublicRecording.system || ""),
+        system_day: Number(todayPublicRecording.system_day || 0) || null,
+        date: String(todayPublicRecording.start_time || "").slice(0, 10),
+        url: String(todayPublicRecording.recording_url || todayPublicRecording.share_url || "").trim(),
       } : null,
     };
     return structured ? snapshot : snapshot.context;
