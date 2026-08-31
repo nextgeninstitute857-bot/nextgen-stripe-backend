@@ -35410,7 +35410,7 @@ function ngDailyLiveSessionText(action = "", assets = {}, lead = {}) {
   const rec = assets.recordingLink && recordingTitle
     ? `\n\n${recordingTitle}\nRecording:\n${assets.recordingLink}`
     : "";
-  return `Doctor, if you missed today’s live class, the recording is now ready.${rec}\n\nWhen you’ve had a chance to watch it, let me know what you thought of the teaching style.`;
+  return `Doctor, in case you missed today’s live session, you can catch up here.${rec}\n\nLet us know how you liked the teaching style. Would you like to join the program, or should I book a mentor call for you?`;
 }
 
 async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit = 50, dryRun = false, source = "run_due" } = {}) {
