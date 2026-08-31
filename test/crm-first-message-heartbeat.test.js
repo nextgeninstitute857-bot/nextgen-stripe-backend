@@ -12,7 +12,7 @@ function between(start, end) {
   return server.slice(a, b);
 }
 const source = [
-  between("function ngCanSendAutoFirstMessage", "function ngGetAssistantTimeZone"),
+  between("function ngLeadEligibleForFallbackWelcome", "function ngGetAssistantTimeZone"),
   between("async function ngSendAutoFirstMessageForLead", "const ngPostImportFirstMessageJobKeys"),
   between("function ngAylaDeliveryActuallySent", "function ngAylaMarkProcessedOnlyIfDelivered"),
   between("function ngLeadConversationMessages", "function ngHasOutboundAfterInbound"),
@@ -98,6 +98,31 @@ test("an existing WhatsApp inbound is left to the conversational responder", asy
     assert.equal(result.reason, "first_message_conversation_already_started");
     assert.equal(h.sends.length, 0);
   }
+});
+
+test("a WhatsApp ad lead uses the organised conversation flow instead of a welcome template", async () => {
+  const h = harness();
+  const lead = makeLead("open-window", {
+    queue_first_message: false,
+    campaign_id: "meta-click-to-whatsapp",
+    source: "meta whatsapp ad",
+  });
+  const result = await h.ngSendAutoFirstMessageForLead({ db: { leads: [lead] }, lead });
+  assert.equal(result.reason, "welcome_fallback_not_explicitly_queued");
+  assert.equal(h.sends.length, 0);
+});
+
+test("an explicitly queued lead-form contact may use the fallback welcome doorway", async () => {
+  const h = harness();
+  const lead = makeLead("lead-form", {
+    queue_first_message: false,
+    campaign_id: "meta-lead-form",
+    source: "meta lead_form",
+    first_message_queue_status: "queued",
+  });
+  const result = await h.ngSendAutoFirstMessageForLead({ db: { leads: [lead] }, lead });
+  assert.equal(result.sent, true);
+  assert.equal(h.sends.length, 1);
 });
 
 test("accepted conversational replies prevent duplicate welcomes", () => {
