@@ -33975,6 +33975,37 @@ function ngLeadExplicitlyQueuedForFirstMessage(lead = {}) {
   );
 }
 
+function ngLeadEligibleForFallbackWelcome(lead = {}) {
+  const queueStatus = normalizeCrmLower(lead.first_message_queue_status || lead.first_message_status || lead.first_template_status || "", "");
+  const sourceText = [
+    lead.origin,
+    lead.lead_origin,
+    lead.lead_source,
+    lead.source,
+    lead.source_type,
+    lead.source_platform,
+    lead.created_from,
+    lead.import_source,
+    lead.first_message_queue_source,
+    lead.opt_in_status,
+  ].map((x) => String(x || "").toLowerCase()).join(" ");
+
+  return Boolean(
+    lead.queue_first_message === true ||
+    lead.send_first_message_after_import === true ||
+    lead.first_message_after_import === true ||
+    ["queued", "pending", "retry_later", "failed", "failed_needs_fix"].includes(queueStatus) ||
+    sourceText.includes("lead form") ||
+    sourceText.includes("lead_form") ||
+    sourceText.includes("instant form") ||
+    sourceText.includes("instant_form") ||
+    sourceText.includes("import_confirm") ||
+    sourceText.includes("console_import_test") ||
+    sourceText.includes("requested_contact") ||
+    sourceText.includes("admin_queue")
+  );
+}
+
 function ngCanSendAutoFirstMessage(db, lead = {}) {
   const stage = normalizeCrmLeadStageValue(lead.stage || lead.lead_stage || lead.sales_stage || lead.pipeline_stage || lead.status || "new_lead", "new_lead");
   const status = normalizeCrmLower(lead.status || lead.lead_status || "new", "new");
@@ -33996,6 +34027,12 @@ function ngCanSendAutoFirstMessage(db, lead = {}) {
   if (["invalid_whatsapp_number", "possible_no_whatsapp", "needs_country_code", "not_sendable"].includes(normalizeCrmLower(lead.whatsapp_status || lead.whatsapp_validation_status || "", ""))) return { ok: false, reason: lead.whatsapp_status || "whatsapp_not_sendable" };
   if (["needs_country_code", "invalid_phone"].includes(normalizeCrmLower(lead.phone_import_status || lead.phone_import_category || "", ""))) return { ok: false, reason: lead.phone_import_status || "phone_import_not_ready" };
   if (!leadHasRecipientForChannel(lead, "whatsapp")) return { ok: false, reason: "no_whatsapp_recipient" };
+
+  // The welcome template is not part of the normal click-to-WhatsApp flow.
+  // A person who has messaged us belongs to the conversational responder, and
+  // a Meta campaign label alone must never queue a template. Keep this doorway
+  // only for explicit lead-form/import/admin outreach with no inbound chat.
+  if (!ngLeadEligibleForFallbackWelcome(lead)) return { ok: false, reason: "welcome_fallback_not_explicitly_queued" };
 
   // v95: every imported/new lead may receive the first approved template unless admin turned it off.
   // We no longer require the lead source to literally contain Meta/campaign.
