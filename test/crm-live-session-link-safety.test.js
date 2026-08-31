@@ -106,6 +106,9 @@ test("daily messages name the exact session and never fall back to an old Zoom U
   assert.match(textFor("session_link", assets), /22222222222/);
   assert.match(textFor("post_session_recording", assets), /Central Nervous System — Day 6/);
   assert.doesNotMatch(textFor("post_session_recording", assets), /recent live-session recording/);
+  assert.match(textFor("post_session_recording", assets), /today’s class recording is ready/);
+  assert.match(textFor("post_session_recording", assets), /what you thought of the teaching style/);
+  assert.doesNotMatch(textFor("post_session_recording", assets), /correctly labelled|matching recording|Google Meet|interested in joining/i);
 });
 
 test("daily session time is formatted for students", () => {
@@ -117,10 +120,12 @@ test("daily session time is formatted for students", () => {
   assert.equal(label({}, "12:00 PM Eastern"), "12:00 PM Eastern");
 });
 
-test("the scheduler uses the dedicated approved link template", () => {
+test("the scheduler uses dedicated approved link templates", () => {
   const scheduler = between("async function ngRunDailyLiveSessionScheduler", "function ngGoogleMeetAppointmentDateTime");
   assert.match(server, /nextgen_live_session_link: \["name", "topic", "live_session_link"\]/);
   assert.match(scheduler, /session_link: settings\.session_link_template_key \|\| "nextgen_live_session_link"/);
+  assert.match(scheduler, /configuredRecordingTemplate !== "nextgen_recording_notes_ready"/);
+  assert.match(scheduler, /: "nextgen_class_recording_link"/);
   assert.match(scheduler, /sessionTime: ngDailyLiveSessionTimeLabel/);
 });
 
