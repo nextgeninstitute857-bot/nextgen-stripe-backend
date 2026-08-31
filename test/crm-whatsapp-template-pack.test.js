@@ -8,8 +8,8 @@ import {
   reconcileNextGenWhatsAppTemplatePack,
 } from "../lib/crm-whatsapp-template-pack.js";
 
-test("the managed WhatsApp pack contains the seven campaign templates", () => {
-  assert.equal(NEXTGEN_WHATSAPP_TEMPLATE_PACK.length, 7);
+test("the managed WhatsApp pack contains the eight campaign templates", () => {
+  assert.equal(NEXTGEN_WHATSAPP_TEMPLATE_PACK.length, 8);
   assert.deepEqual(
     NEXTGEN_WHATSAPP_TEMPLATE_PACK.map((item) => item.key),
     [
@@ -17,6 +17,7 @@ test("the managed WhatsApp pack contains the seven campaign templates", () => {
       "nextgen_live_session_invite",
       "nextgen_live_five_minute_reminder",
       "nextgen_live_session_link",
+      "nextgen_class_recording_link",
       "nextgen_recording_notes_ready",
       "nextgen_payment_ready_followup",
       "nextgen_mentor_meeting_confirmation",
@@ -29,6 +30,10 @@ test("the managed WhatsApp pack contains the seven campaign templates", () => {
   assert.equal(NEXTGEN_WHATSAPP_TEMPLATE_PACK.every((item) => item.variables.length === 0 || item.body.includes("{{")), true);
   const sessionLink = NEXTGEN_WHATSAPP_TEMPLATE_PACK.find((item) => item.key === "nextgen_live_session_link");
   assert.deepEqual(sessionLink?.variables, ["name", "topic", "live_session_link"]);
+  const recordingLink = NEXTGEN_WHATSAPP_TEMPLATE_PACK.find((item) => item.key === "nextgen_class_recording_link");
+  assert.deepEqual(recordingLink?.variables, ["name", "full_session_name", "recording_link"]);
+  assert.match(recordingLink?.body || "", /what you thought of the teaching style/);
+  assert.doesNotMatch(recordingLink?.body || "", /correctly labelled|Google Meet|interested in joining/i);
   const meeting = NEXTGEN_WHATSAPP_TEMPLATE_PACK.find((item) => item.key === "nextgen_mentor_meeting_confirmation");
   assert.equal(meeting?.button?.text, "Join Meeting");
   assert.equal(meeting?.button?.url, "https://meet.google.com/{{meeting_code}}");
@@ -43,11 +48,11 @@ test("reconciliation archives obsolete definitions without deleting history", ()
   ];
   const result = reconcileNextGenWhatsAppTemplatePack(existing, { now: "2026-08-23T00:00:00.000Z" });
 
-  assert.equal(result.templates.length, 9);
+  assert.equal(result.templates.length, 10);
   assert.equal(result.templates.find((item) => item.id === "old-demo")?.status, "archived");
   assert.equal(result.templates.find((item) => item.id === "old-demo")?.active, false);
   assert.equal(result.templates.find((item) => item.id === "history")?.status, "active");
-  assert.equal(result.templates.filter((item) => item.managed_by === "nextgen_whatsapp_template_pack").length, 7);
+  assert.equal(result.templates.filter((item) => item.managed_by === "nextgen_whatsapp_template_pack").length, 8);
 });
 
 test("live Meta inventory is the only source of approved status", () => {

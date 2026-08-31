@@ -29268,7 +29268,7 @@ const NEXTGEN_QUICK_ACTION_TEMPLATE_KEYS = {
   first_message: ["nextgen_warm_welcome"],
   reminder: ["nextgen_live_five_minute_reminder"],
   session_link: ["nextgen_live_session_link"],
-  recording: ["nextgen_recording_notes_ready"],
+  recording: ["nextgen_class_recording_link"],
   testimonial: ["proof_testimonial_message", "proof_testimonial"],
   uworld_demo: ["uworld_video_library_soft_pitch", "demo_lms_activation_invite", "two_day_lms_demo_access"],
   community: ["community_fallback_invite"],
@@ -29297,6 +29297,7 @@ function ngBuildQuickActionPayload(db = {}, lead = {}, action = "", body = {}) {
   const liveLink = getNextGenConfiguredLiveSessionLink() || ngSalesAssetValue(assets, "liveSessionLink") || lead.live_session_link || lead.session_link || "";
   const sessionTime = body.session_time || ngSalesAssetValue(assets, "sessionTime") || lead.session_time || "";
   const recordingLink = body.recording_link || ngSalesAssetValue(assets, "recordingLink") || lead.recording_link || lead.recording_url || "";
+  const recordingTitle = body.recording_title || body.full_session_name || ngSalesAssetValue(assets, "recordingTitle") || ngSalesAssetValue(assets, "latestRecordingTitle") || lead.recording_title || "Today’s class recording";
   const demoLink = body.demo_link || ngSalesAssetValue(assets, "uworldLink") || lead.demo_link || "https://nextgenusmle.live";
   const youtubeLink = body.youtube_link || ngSalesAssetValue(assets, "youtubeLink") || lead.youtube_link || "";
   const communityLink = body.community_link || lead.community_link || lead.telegram_link || "";
@@ -29308,7 +29309,7 @@ function ngBuildQuickActionPayload(db = {}, lead = {}, action = "", body = {}) {
     first_message: `Hi ${name}, this is NextGen USMLE. You reached out regarding ${examType} preparation. We have a live guidance session at ${sessionTime}, where you can see Dr. Ahmad's teaching style and understand how the program works.`,
     reminder: `Doctor, quick reminder — our live guidance session starts at ${sessionTime}. Please be ready. ${liveLink ? `Here is the joining link: ${liveLink}` : "I will share the joining link shortly."}\n\nAfter the session, we can arrange a Google Meet with our mentor for proper guidance based on your timeline and weak areas.`,
     session_link: `Doctor, here is today's live session link:\n${liveLink || "Live session link is not configured yet."}\n\nEven if you join for just 5–10 minutes, you will understand Dr. Ahmad's teaching style and how the program works. After that, let's arrange a Google Meet with our mentor so you get personal guidance.`,
-    recording: `Doctor, here is a recent session recording so you can see the teaching style:\n${recordingLink || "Recording link is not configured yet."}\n\nAfter you watch even a few minutes, we can arrange a Google Meet with our mentor and guide you based on your exam timeline and weak areas.`,
+    recording: `Doctor, today’s class recording is ready.\n\n${recordingTitle}\n\nWatch here:\n${recordingLink || "Recording link is not configured yet."}\n\nWhen you’ve had a chance to watch it, let me know what you thought of the teaching style.`,
     testimonial: `Doctor, you can also review NextGen teaching/proof here:${youtubeLink ? `\n${youtubeLink}` : "\nYouTube/proof link is not configured yet."}\n\nThe main idea is structured guidance, accountability, and support instead of preparing alone.`,
     uworld_demo: `Doctor, our LMS is a complete USMLE learning ecosystem in one place: roadmap, live sessions, recordings, UWorld Video Library, notes, tasks, accountability assessments, progress tracking, leaderboard encouragement, Community Q&A, and Study Partner support.\n\nYou can check the LMS/UWorld library here:\n${demoLink}`,
     community: `Doctor, I can also add you to our free ${examType} community where we share guidance, session updates, and study direction.${communityLink ? `\n${communityLink}` : ""}`,
@@ -29342,6 +29343,7 @@ function ngBuildQuickActionPayload(db = {}, lead = {}, action = "", body = {}) {
       session_time: sessionTime,
       live_session_link: liveLink,
       session_link: liveLink,
+      full_session_name: recordingTitle,
       recording_link: recordingLink,
       demo_link: demoLink,
       lms_link: demoLink,
@@ -31800,12 +31802,13 @@ const WHATSAPP_TEMPLATE_NAME_ALIASES = {
   live_session_link_now: "nextgen_live_session_link",
   daily_live_session_invite: "nextgen_live_session_invite",
   live_session_invitation: "nextgen_live_session_invite",
+  nextgen_class_recording_link: "nextgen_class_recording_link",
   nextgen_recording_notes_ready: "nextgen_recording_notes_ready",
-  next_day_missed_session: "nextgen_recording_notes_ready",
-  sorry_you_missed_session: "nextgen_recording_notes_ready",
-  recording_followup_after_session: "nextgen_recording_notes_ready",
-  post_live_notes_recording_followup: "nextgen_recording_notes_ready",
-  session_recording_video: "nextgen_recording_notes_ready",
+  next_day_missed_session: "nextgen_class_recording_link",
+  sorry_you_missed_session: "nextgen_class_recording_link",
+  recording_followup_after_session: "nextgen_class_recording_link",
+  post_live_notes_recording_followup: "nextgen_class_recording_link",
+  session_recording_video: "nextgen_class_recording_link",
   community_fallback_invite: "community_fallback_invite",
   nextgen_mentor_meeting_confirmation: "nextgen_mentor_meeting_confirmation",
   google_meet_confirmation: "nextgen_mentor_meeting_confirmation",
@@ -31997,6 +32000,7 @@ const WHATSAPP_TEMPLATE_VARIABLE_ORDERS = {
   nextgen_live_session_invite: ["name", "topic", "time"],
   nextgen_live_five_minute_reminder: ["name", "topic"],
   nextgen_live_session_link: ["name", "topic", "live_session_link"],
+  nextgen_class_recording_link: ["name", "full_session_name", "recording_link"],
   nextgen_recording_notes_ready: ["name", "full_session_name"],
   nextgen_payment_ready_followup: ["name", "programme"],
   nextgen_mentor_meeting_confirmation: ["name", "date", "time"],
@@ -35338,7 +35342,7 @@ function ngDailyLiveSessionText(action = "", assets = {}, lead = {}) {
   const rec = assets.recordingLink && recordingTitle
     ? `\n\n${recordingTitle}\nRecording:\n${assets.recordingLink}`
     : "";
-  return `Doctor, I’m sharing the correctly labelled recording so you can check the teaching quality.${rec}\n\nDid you like the teaching style? Are you interested in joining the live sessions, or would you like a Google Meet mentor consultation for guidance?`;
+  return `Doctor, today’s class recording is ready.${rec}\n\nWhen you’ve had a chance to watch it, let me know what you thought of the teaching style.`;
 }
 
 async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit = 50, dryRun = false, source = "run_due" } = {}) {
@@ -35371,11 +35375,14 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
   if (action === "post_session_recording" && (!assets.recordingLink || !assets.recordingTitle)) {
     return { action, processed: 0, sent: 0, skipped: 0, reason: "labelled_recording_not_available" };
   }
+  const configuredRecordingTemplate = normalizeTemplateLookupKey(settings.post_session_recording_template_key || "");
   const templateMap = {
     daily_session_invite: settings.daily_session_invite_template_key || "nextgen_live_session_invite",
     five_minute_reminder: settings.session_reminder_template_key || "nextgen_live_five_minute_reminder",
     session_link: settings.session_link_template_key || "nextgen_live_session_link",
-    post_session_recording: settings.post_session_recording_template_key || "nextgen_recording_notes_ready",
+    post_session_recording: configuredRecordingTemplate && configuredRecordingTemplate !== "nextgen_recording_notes_ready"
+      ? settings.post_session_recording_template_key
+      : "nextgen_class_recording_link",
   };
   const leads = ngDailyLiveSessionPendingLeadBatch(db, settings, { brandId, action, dateKey, limit });
   const results = [];
@@ -37691,8 +37698,8 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   first_message_template_key: "nextgen_warm_welcome",
   session_reminder_template_key: "nextgen_live_five_minute_reminder",
   session_link_template_key: "nextgen_live_session_link",
-  post_session_recording_template_key: "nextgen_recording_notes_ready",
-  next_day_followup_template_key: "nextgen_recording_notes_ready",
+  post_session_recording_template_key: "nextgen_class_recording_link",
+  next_day_followup_template_key: "nextgen_class_recording_link",
   post_session_followup_delay_minutes: 120,
   daily_session_send_to_new_leads: true,
   daily_session_send_to_interested: true,
@@ -37710,11 +37717,11 @@ const NEXTGEN_AI_DEFAULT_SETTINGS = {
   company_proof_line: "Next Generation USMLE has been actively teaching USMLE students for around 2-3 years.",
   student_success_line: "Students from our community are progressing every month through structured live teaching, recordings, and mentor support.",
   sunday_fallback_message: "On Sunday, share the recording and UWorld demo first, then invite to the next Monday-Friday live session.",
-  recording_template_key: "nextgen_recording_notes_ready",
+  recording_template_key: "nextgen_class_recording_link",
   sales_style_rule: "Open warmly once and talk like a human counselor. Answer the student’s exact question first, then move the lead through live session, recent recording, UWorld demo, YouTube lectures, then Google Meet mentor consultation. Do not dump assets when the student asks a direct question. Do not start every reply with Hi Doctor.",
   uworld_video_library_rule: "Present the UWorld Video Library as a major NextGen advantage: around 150 hours, 3000+ UWorld-style MCQs explained in depth, First Aid side-by-side, helping students learn MCQ approach, option elimination, concept connection, and weak-area correction. Share the UWorld library link when relevant.",
   mentor_sales_rule: "Use mentor authority naturally only when useful. Do not invent doctor names. Student-facing wording must say Google Meet / Google Meet mentor consultation, not call.",
-  recording_sales_rule: "Send session recording early and proactively. Ask: did you like the teaching style, and are you interested in live sessions or Google Meet mentor guidance? If the response is positive, move to Google Meet booking.",
+  recording_sales_rule: "Share the exact latest recording with its full LMS title. Keep the message warm and concise. Ask only what the student thought of the teaching style. Offer live sessions or Google Meet mentor guidance only after the student responds positively; do not stack multiple questions.",
   failed_student_reassurance_rule: "If a student failed, is weak, delayed, confused, or old graduate, reassure strongly: they are in the right place; the key is roadmap, mentor feedback, UWorld-style practice, and weak-area correction. Then guide them through recording/live session/UWorld demo and offer Google Meet mentor consultation when positive or directly requested.",
   july_1_marathon_mode_enabled: true,
   july_1_marathon_start_date: "2026-07-01",
@@ -37877,6 +37884,11 @@ function ngEnsureAiStore(db) {
     const current = normalizeTemplateLookupKey(db.ai_orchestration_settings[settingKey] || "");
     if (current && WHATSAPP_TEMPLATE_NAME_ALIASES[current]) {
       db.ai_orchestration_settings[settingKey] = WHATSAPP_TEMPLATE_NAME_ALIASES[current];
+    }
+  }
+  for (const recordingSettingKey of ["post_session_recording_template_key", "next_day_followup_template_key", "recording_template_key"]) {
+    if (normalizeTemplateLookupKey(db.ai_orchestration_settings[recordingSettingKey] || "") === "nextgen_recording_notes_ready") {
+      db.ai_orchestration_settings[recordingSettingKey] = "nextgen_class_recording_link";
     }
   }
 
