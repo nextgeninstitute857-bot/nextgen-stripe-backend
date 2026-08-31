@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 
 import {
+  buildNextGenWhatsAppMetaTemplateSubmission,
+  NEXTGEN_WHATSAPP_ACTIVE_TEMPLATE_KEYS,
   NEXTGEN_WHATSAPP_TEMPLATE_PACK,
+  nextGenWhatsAppProviderTemplateName,
   normalizeMetaTemplateInventory,
   reconcileNextGenWhatsAppTemplatePack,
 } from "../lib/crm-whatsapp-template-pack.js";
@@ -28,6 +31,8 @@ test("the managed WhatsApp pack contains the eight campaign templates", () => {
   const canonical = reconcileNextGenWhatsAppTemplatePack([]).templates.filter((item) => item.managed_by === "nextgen_whatsapp_template_pack");
   assert.equal(canonical.every((item) => item.language_code === "en" && item.meta_language === "en"), true);
   assert.equal(NEXTGEN_WHATSAPP_TEMPLATE_PACK.every((item) => item.variables.length === 0 || item.body.includes("{{")), true);
+  assert.equal(NEXTGEN_WHATSAPP_ACTIVE_TEMPLATE_KEYS.length, 7);
+  assert.equal(NEXTGEN_WHATSAPP_ACTIVE_TEMPLATE_KEYS.includes("nextgen_warm_welcome"), false);
   const welcome = NEXTGEN_WHATSAPP_TEMPLATE_PACK.find((item) => item.key === "nextgen_warm_welcome");
   assert.equal(welcome?.campaign_slot, "fallback_first_outreach");
   assert.equal(welcome?.fallback_only, true);
@@ -37,6 +42,7 @@ test("the managed WhatsApp pack contains the eight campaign templates", () => {
   assert.equal(storedWelcome?.fallback_only, true);
   assert.equal(storedWelcome?.normal_sequence, false);
   const invite = NEXTGEN_WHATSAPP_TEMPLATE_PACK.find((item) => item.key === "nextgen_live_session_invite");
+  assert.equal(nextGenWhatsAppProviderTemplateName(invite), "nextgen_live_session_invite_v2");
   assert.match(invite?.body || "", /remind you again five minutes before/i);
   assert.doesNotMatch(invite?.body || "", /experience our teaching quality|organised programme/i);
   const reminder = NEXTGEN_WHATSAPP_TEMPLATE_PACK.find((item) => item.key === "nextgen_live_five_minute_reminder");
@@ -63,6 +69,26 @@ test("the managed WhatsApp pack contains the eight campaign templates", () => {
   assert.equal(meeting?.button?.url, "https://meet.google.com/{{meeting_code}}");
   assert.equal(meeting?.button?.dynamic, true);
   assert.equal(meeting?.button?.variable, "meeting_code");
+});
+
+test("the seven approved rewrites produce positional Meta submissions without the fallback welcome", () => {
+  const active = NEXTGEN_WHATSAPP_TEMPLATE_PACK.filter((item) => NEXTGEN_WHATSAPP_ACTIVE_TEMPLATE_KEYS.includes(item.key));
+  assert.equal(active.length, 7);
+  for (const definition of active) {
+    const submission = buildNextGenWhatsAppMetaTemplateSubmission(definition);
+    assert.equal(submission.name, nextGenWhatsAppProviderTemplateName(definition));
+    assert.match(submission.language, /^en/);
+    assert.ok(["MARKETING", "UTILITY"].includes(submission.category));
+    const body = submission.components.find((item) => item.type === "BODY");
+    assert.ok(body?.text);
+    assert.doesNotMatch(body.text, /{{\s*[A-Za-z_]/);
+    assert.match(body.text, /\{\{1\}\}/);
+    assert.equal(body.example.body_text[0].length, definition.variables.length);
+  }
+  const mentor = buildNextGenWhatsAppMetaTemplateSubmission(active.find((item) => item.key === "nextgen_mentor_meeting_confirmation"));
+  const mentorButton = mentor.components.find((item) => item.type === "BUTTONS")?.buttons?.[0];
+  assert.equal(mentorButton?.url, "https://meet.google.com/{{1}}");
+  assert.deepEqual(mentorButton?.example, ["abc-defg-hij"]);
 });
 
 test("reconciliation archives obsolete definitions without deleting history", () => {
