@@ -61,7 +61,10 @@ import {
   whatsappBusinessProfileMatches,
 } from "./lib/whatsapp-business-profile.js";
 import {
+  buildNextGenWhatsAppMetaTemplateSubmission,
+  NEXTGEN_WHATSAPP_ACTIVE_TEMPLATE_KEYS,
   NEXTGEN_WHATSAPP_TEMPLATE_PACK,
+  nextGenWhatsAppProviderTemplateName,
   normalizeMetaTemplateInventory,
   reconcileNextGenWhatsAppTemplatePack,
 } from "./lib/crm-whatsapp-template-pack.js";
@@ -34889,6 +34892,104 @@ app.get("/admin/crm/message-templates/meta-live", async (req, res) => {
       error: error.message,
       meta_code: error.metaCode || error.response?.data?.error?.code || null,
       meta_subcode: error.metaSubcode || error.response?.data?.error?.error_subcode || null,
+    });
+  }
+});
+
+app.post("/admin/crm/message-templates/nextgen-pack/submit-meta", async (req, res) => {
+  const confirmationPhrase = "submit-seven-active-nextgen-templates-without-welcome";
+  try {
+    const { user } = await requireCrmAdmin(req);
+    if (String(req.body?.confirmation || "") !== confirmationPhrase) {
+      return res.status(400).json({ success: false, error: "Confirm the exact seven-template submission without the fallback welcome." });
+    }
+
+    const requestedKeys = Array.isArray(req.body?.template_keys) ? req.body.template_keys.map((key) => String(key)) : [];
+    const expectedKeys = [...NEXTGEN_WHATSAPP_ACTIVE_TEMPLATE_KEYS];
+    if (requestedKeys.length !== expectedKeys.length || expectedKeys.some((key) => !requestedKeys.includes(key)) || requestedKeys.includes("nextgen_warm_welcome")) {
+      return res.status(400).json({ success: false, error: "The submission must contain exactly the seven active templates and must exclude nextgen_warm_welcome." });
+    }
+
+    const db = await readCrmDb();
+    const live = await fetchLiveMetaWhatsAppTemplates(db, { withAccount: true });
+    const { token } = await resolveWhatsAppCloudConfig({ db });
+    if (!token || !live.businessAccountId) return res.status(503).json({ success: false, error: "WhatsApp template submission is not configured." });
+
+    const liveByName = new Map(live.templates.map((item) => [String(item.name || "").trim().toLowerCase(), item]));
+    const definitions = expectedKeys.map((key) => NEXTGEN_WHATSAPP_TEMPLATE_PACK.find((item) => item.key === key)).filter(Boolean);
+    const results = [];
+    const provisionalLive = [...live.templates];
+
+    for (const definition of definitions) {
+      const submission = buildNextGenWhatsAppMetaTemplateSubmission(definition);
+      const providerName = nextGenWhatsAppProviderTemplateName(definition);
+      const existing = liveByName.get(providerName.toLowerCase());
+      const desiredBody = submission.components.find((component) => component.type === "BODY")?.text || "";
+      const existingBody = existing?.components?.find((component) => String(component.type || "").toUpperCase() === "BODY")?.text || "";
+
+      if (existing) {
+        if (existingBody !== desiredBody) {
+          results.push({ key: definition.key, provider_name: providerName, success: false, status: "conflict", error: "Meta already has different wording under this versioned name." });
+        } else {
+          results.push({ key: definition.key, provider_name: providerName, success: true, status: String(existing.status || "UNKNOWN").toUpperCase(), existing: true, template_id: existing.id || null });
+        }
+        continue;
+      }
+
+      try {
+        const response = await axios.post(
+          `https://graph.facebook.com/${WHATSAPP_GRAPH_VERSION}/${encodeURIComponent(live.businessAccountId)}/message_templates`,
+          submission,
+          { headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, timeout: 30000 },
+        );
+        const status = String(response.data?.status || "PENDING").toUpperCase();
+        const templateId = response.data?.id || null;
+        results.push({ key: definition.key, provider_name: providerName, success: true, status, existing: false, template_id: templateId });
+        provisionalLive.push({ id: templateId, name: providerName, status, category: submission.category, language: submission.language, components: submission.components });
+      } catch (error) {
+        results.push({
+          key: definition.key,
+          provider_name: providerName,
+          success: false,
+          status: "submission_failed",
+          error: String(error.response?.data?.error?.message || error.message || "Meta submission failed").slice(0, 500),
+          meta_code: error.response?.data?.error?.code || null,
+          meta_subcode: error.response?.data?.error?.error_subcode || null,
+        });
+      }
+    }
+
+    const reconciled = reconcileNextGenWhatsAppTemplatePack(db.message_templates, {
+      liveTemplates: provisionalLive,
+      liveWasChecked: true,
+    });
+    db.message_templates = reconciled.templates;
+    ensureCrmArray(db, "message_template_submission_runs").unshift(withTimestamps({
+      id: uuid(),
+      submitted_by: user.id,
+      confirmation: confirmationPhrase,
+      welcome_excluded: true,
+      template_keys: expectedKeys,
+      results,
+    }));
+    await writeCrmDb(db);
+
+    const failures = results.filter((item) => !item.success);
+    return res.status(failures.length ? 207 : 200).json({
+      success: failures.length === 0,
+      submitted: results.filter((item) => item.success && !item.existing).length,
+      already_registered: results.filter((item) => item.success && item.existing).length,
+      failed: failures.length,
+      welcome_excluded: true,
+      results,
+      message: failures.length ? "Some templates need review before Meta submission is complete." : "Seven active templates are registered with Meta. Sending still waits for Meta approval.",
+    });
+  } catch (error) {
+    return res.status(error.statusCode || error.response?.status || 500).json({
+      success: false,
+      error: error.response?.data?.error?.message || error.message,
+      meta_code: error.response?.data?.error?.code || null,
+      meta_subcode: error.response?.data?.error?.error_subcode || null,
     });
   }
 });
