@@ -82,6 +82,10 @@ test("daily session timing follows the real LMS date and includes Saturday class
   assert.equal(actionNow({}, new Date(), saturday), "session_link");
   clock = { weekday: "Saturday", hour: 14, minute: 59 };
   assert.equal(actionNow({}, new Date(), saturday), "session_link");
+  clock = { weekday: "Saturday", hour: 15, minute: 1 };
+  assert.equal(actionNow({}, new Date(), saturday), "post_session_recording");
+  clock = { weekday: "Saturday", hour: 23, minute: 59 };
+  assert.equal(actionNow({}, new Date(), saturday), "post_session_recording");
   assert.equal(actionNow({}, new Date(), { ...saturday, date: "2026-08-28" }), null);
   assert.equal(actionNow({}, new Date(), { ...saturday, status: "cancelled" }), null);
 });
@@ -106,7 +110,7 @@ test("daily messages name the exact session and never fall back to an old Zoom U
   assert.match(textFor("session_link", assets), /22222222222/);
   assert.match(textFor("post_session_recording", assets), /Central Nervous System — Day 6/);
   assert.doesNotMatch(textFor("post_session_recording", assets), /recent live-session recording/);
-  assert.match(textFor("post_session_recording", assets), /today’s class recording is ready/);
+  assert.match(textFor("post_session_recording", assets), /if you missed today’s live class, the recording is now ready/i);
   assert.match(textFor("post_session_recording", assets), /what you thought of the teaching style/);
   assert.doesNotMatch(textFor("post_session_recording", assets), /correctly labelled|matching recording|Google Meet|interested in joining/i);
 });
@@ -127,11 +131,14 @@ test("the scheduler uses dedicated approved link templates", () => {
   assert.match(scheduler, /configuredRecordingTemplate !== "nextgen_recording_notes_ready"/);
   assert.match(scheduler, /: "nextgen_class_recording_link"/);
   assert.match(scheduler, /sessionTime: ngDailyLiveSessionTimeLabel/);
+  assert.match(scheduler, /liveSnapshot\.today_recording\?\.title/);
+  assert.match(scheduler, /liveSnapshot\.today_recording\?\.url/);
+  assert.doesNotMatch(scheduler, /recordingTitle: String\(liveSnapshot\.latest_recording/);
 });
 
 test("scheduler and AI source use only the exact live LMS link", () => {
   assert.match(server, /CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard"/);
-  assert.match(server, /CRM_LIVE_SESSION_SCHEDULER_BUILD = "v312-provider-failure-retry"/);
+  assert.match(server, /CRM_LIVE_SESSION_SCHEDULER_BUILD = "v313-exact-session-recording-loop"/);
   assert.match(server, /crm_live_session_scheduler_build: CRM_LIVE_SESSION_SCHEDULER_BUILD/);
   assert.match(server, /reason: "matching_live_session_link_not_released"/);
   assert.match(server, /today_session: todaySession \?/);
@@ -144,6 +151,11 @@ test("scheduler and AI source use only the exact live LMS link", () => {
     between("function ngBuildAylaBackendSalesBrain", "function ngBuildAylaCommandContext"),
     /liveSnapshot\?\.live_session\?\.url \|\| configuredAssets\.liveSessionLink/,
   );
+});
+
+test("Zoom recovery does not publish a recording while prepared-content publication is disabled", () => {
+  const upsert = between("async function upsertZoomRecordingFromObject", "function ngFindRoadmapDayForLiveSession");
+  assert.match(upsert, /const canAutoPublish = Boolean\(\s*ngAutoPublishPreparedContentEnabled\(\) &&/);
 });
 
 test("first Meta replies must carry the current session, one recording, and one qualification question", () => {
