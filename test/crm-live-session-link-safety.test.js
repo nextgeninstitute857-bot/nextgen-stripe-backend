@@ -137,6 +137,8 @@ test("the scheduler uses dedicated approved link templates", () => {
   assert.match(scheduler, /liveSnapshot\.today_recording\?\.url/);
   assert.doesNotMatch(scheduler, /recordingTitle: String\(liveSnapshot\.latest_recording/);
   assert.match(scheduler, /ngScheduledWhatsAppTemplateIsApproved\(db, templateId\)/);
+  assert.match(scheduler, /ngRefreshDailySessionMetaTemplateApprovals\(db\)/);
+  assert.match(scheduler, /whatsapp_template_inventory_unavailable/);
   assert.match(scheduler, /whatsapp_template_not_approved_yet/);
 });
 
@@ -148,13 +150,26 @@ test("scheduled WhatsApp sends wait quietly until the exact Meta template is app
   )((db, key) => db.templates?.[key] || null);
 
   assert.equal(isApproved({ templates: { recording: { status: "draft", meta_status: "draft", active: true } } }, "recording"), false);
+  assert.equal(isApproved({ templates: { recording: { status: "active", meta_status: "draft", active: true } } }, "recording"), false);
   assert.equal(isApproved({ templates: { recording: { status: "active", meta_status: "APPROVED", active: true } } }, "recording"), true);
+  assert.equal(isApproved({ templates: { recording: { status: "draft", provider_status: "ACTIVE", active: true } } }, "recording"), true);
+  assert.equal(isApproved({ templates: { recording: { status: "active", whatsapp_approved: true, active: true } } }, "recording"), true);
   assert.equal(isApproved({ templates: { recording: { meta_approved: true, active: true } } }, "recording"), true);
+});
+
+test("urgent LMS-clock reminder and start-link phases bypass the generic outbound cooldown", () => {
+  const source = between("function ngDailyLiveSessionActionBypassesRecentCooldown", "function ngStartDailyLiveSessionAttempt");
+  const bypasses = new Function(`${source}; return ngDailyLiveSessionActionBypassesRecentCooldown;`)();
+
+  assert.equal(bypasses("five_minute_reminder"), true);
+  assert.equal(bypasses("session_link"), true);
+  assert.equal(bypasses("daily_session_invite"), false);
+  assert.equal(bypasses("post_session_recording"), false);
 });
 
 test("scheduler and AI source use only the exact live LMS link", () => {
   assert.match(server, /CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard"/);
-  assert.match(server, /CRM_LIVE_SESSION_SCHEDULER_BUILD = "v314-recording-template-preflight"/);
+  assert.match(server, /CRM_LIVE_SESSION_SCHEDULER_BUILD = "v315-lms-clock-meta-live-preflight"/);
   assert.match(server, /crm_live_session_scheduler_build: CRM_LIVE_SESSION_SCHEDULER_BUILD/);
   assert.match(server, /reason: "matching_live_session_link_not_released"/);
   assert.match(server, /today_session: todaySession \?/);
