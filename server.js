@@ -663,7 +663,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 const NEXTGEN_BACKEND_BUILD = "v223-aylamed-diagnostic-onboarding";
 const LMS_PAID_DEMO_CONSOLIDATION_BUILD = "v221-paid-demo-consolidation";
 const CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard";
-const CRM_LIVE_SESSION_SCHEDULER_BUILD = "v315-lms-clock-meta-live-preflight";
+const CRM_LIVE_SESSION_SCHEDULER_BUILD = "v316-lms-session-link-setting-lock";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
@@ -38188,6 +38188,13 @@ function ngEnsureAiStore(db) {
       db.ai_orchestration_settings[settingKey] = WHATSAPP_TEMPLATE_NAME_ALIASES[current];
     }
   }
+  // A stale admin tab can still submit the invitation template in the
+  // session-link slot. That template has no link variable and must never be
+  // used for the exact LMS start-link phase. Keep the invitation in its own
+  // daily invite slot and make the start-link mapping self-healing.
+  if (normalizeTemplateLookupKey(db.ai_orchestration_settings.session_link_template_key || "") === "nextgen_live_session_invite") {
+    db.ai_orchestration_settings.session_link_template_key = "nextgen_live_session_link";
+  }
   for (const recordingSettingKey of ["post_session_recording_template_key", "next_day_followup_template_key", "recording_template_key"]) {
     if (normalizeTemplateLookupKey(db.ai_orchestration_settings[recordingSettingKey] || "") === "nextgen_recording_notes_ready") {
       db.ai_orchestration_settings[recordingSettingKey] = "nextgen_class_recording_link";
@@ -38833,6 +38840,7 @@ app.put("/admin/assistant/settings", async (req, res) => {
       updated_by: user.id,
       updated_at: ngNowIso()
     };
+    ngEnsureAiStore(db);
 
     await writeCrmDb(db);
     res.json({ success: true, settings: db.ai_orchestration_settings });
@@ -48344,6 +48352,7 @@ app.put("/admin/crm/assistant/settings", async (req, res) => {
       updated_by: user.id,
       updated_at: ngNowIso()
     };
+    ngEnsureAiStore(db);
 
     await writeCrmDb(db);
     res.json({ success: true, settings: db.ai_orchestration_settings });
@@ -65732,6 +65741,7 @@ app.post("/admin/crm/ai-command/admin-alerts/settings", async (req, res) => {
     db.ai_settings.fourth_admin_whatsapp = normalized[3] || "";
     db.settings = { ...(db.settings || {}), ...db.ai_settings };
     db.ai_orchestration_settings = { ...(db.ai_orchestration_settings || {}), ...db.ai_settings };
+    ngEnsureAiStore(db);
     await writeCrmDb(db);
     res.json({ success: true, settings: { admin_whatsapp_alert_numbers: normalized, admin_whatsapp_alerts_enabled: db.ai_settings.admin_whatsapp_alerts_enabled } });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
