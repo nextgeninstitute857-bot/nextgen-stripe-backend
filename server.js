@@ -635,6 +635,11 @@ import {
   reconcilePublishedRecordingSystemMismatches,
 } from "./lib/lms-recording-system-guard.js";
 import {
+  LMS_RECORDING_AUTO_PUBLISH_BUILD,
+  lmsCanAutoPublishRecording,
+  lmsAutoPublishRecordingsEnabled,
+} from "./lib/lms-recording-auto-publish.js";
+import {
   LMS_KNOWN_MSK_NOTES_CATCHUP_BUILD,
   NEXTGEN_KNOWN_MSK_TRANSCRIPT_NOTE_TARGETS,
   applyKnownMskTranscriptNoteCandidate,
@@ -674,6 +679,7 @@ const RECORDING_ASSIGNMENT_BUILD = "v222-safe-recording-detach";
 const RECORDING_DUPLICATE_CLEANUP_BUILD = "v223-safe-recording-duplicate-cleanup";
 const RECORDING_LABEL_CORRECTIONS_BUILD = LMS_RECORDING_LABEL_CORRECTIONS_BUILD;
 const RECORDING_SYSTEM_GUARD_BUILD = LMS_RECORDING_SYSTEM_GUARD_BUILD;
+const RECORDING_AUTO_PUBLISH_BUILD = LMS_RECORDING_AUTO_PUBLISH_BUILD;
 const LMS_KNOWN_SCHEDULE_REPAIR_BUILD = "v260-known-missed-holiday-transactional-recovery";
 const LMS_DERMATOLOGY_CNS_SCHEDULE_REPAIR_BUILD = "v263-dermatology-cns-transactional-schedule-repair";
 const LMS_CNS_DAY7_HOLIDAY_REPAIR_BUILD = "v269-cns-day7-aug29-holiday";
@@ -6634,15 +6640,11 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
     : exactMatch;
   const matchedSession = effectiveMatch.exact ? effectiveMatch.session : null;
   const matchedDay = matchedSession ? ngFindRoadmapDayForLiveSession(db, matchedSession) : null;
-  const canAutoPublish = Boolean(
-    ngAutoPublishPreparedContentEnabled() &&
-    matchedSession?.id &&
-    matchedSession.course_id &&
-    videoFile &&
-    String(videoFile.status || "completed").toLowerCase() === "completed" &&
-    !previous.unpublished_at &&
-    previous.auto_publish_disabled !== true
-  );
+  const canAutoPublish = lmsCanAutoPublishRecording({
+    matchedSession,
+    videoFile,
+    previous,
+  });
   const becamePublished = previous.published !== true && canAutoPublish;
   const canonicalTopic = ngDayFirstContentTitle(
     matchedSession?.topic || matchedSession?.title || object.topic || previous.topic || "Live Session Recording",
@@ -6831,6 +6833,17 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
     }
   }
 
+  // Publishing the exact recording must also release any substantive,
+  // transcript-derived notes already prepared for this session. This covers
+  // recovery of recordings that finished processing before publication was
+  // restored, as well as the normal webhook path.
+  const notesPublicationResult = reconcileLmsSessionNoteInvariants(db, {
+    autoPublish: ngAutoPublishSessionNotesEnabled(),
+  });
+  if (sessionId && notesPublicationResult.session_ids.includes(sessionId)) {
+    ngSyncSessionNoteStatusToRoadmap(db, sessionId, db.notes?.[sessionId]);
+  }
+
   return {
     recordingPayload: db.recordings[recordingKey] || recordingPayload,
     sessionId,
@@ -6841,6 +6854,8 @@ async function upsertZoomRecordingFromObject({ db, object, accessToken = null, f
     learningContentResult,
     exactMatch: effectiveMatch,
     autoPublished: becamePublished,
+    notesPublicationResult,
+    notesAutoPublished: Number(notesPublicationResult.auto_published || 0),
     emailNotification,
   };
 }
@@ -11941,6 +11956,7 @@ app.get("/health", async (req, res) => {
     recording_label_corrections: ngRecordingLabelReconciliationState,
     recording_system_guard_build: RECORDING_SYSTEM_GUARD_BUILD,
     recording_system_guard: ngRecordingSystemGuardState,
+    recording_auto_publish_build: RECORDING_AUTO_PUBLISH_BUILD,
     lms_known_schedule_repair_build: LMS_KNOWN_SCHEDULE_REPAIR_BUILD,
     lms_known_schedule_repair: ngKnownScheduleRepairState,
     lms_dermatology_cns_schedule_repair_build: LMS_DERMATOLOGY_CNS_SCHEDULE_REPAIR_BUILD,
@@ -11954,6 +11970,7 @@ app.get("/health", async (req, res) => {
     lms_assessment_notes_scope_build: LMS_ASSESSMENT_NOTES_SCOPE_BUILD,
     lms_session_notes: {
       auto_publish_notes: ngAutoPublishSessionNotesEnabled(),
+      auto_publish_recordings: lmsAutoPublishRecordingsEnabled(),
       auto_publish_session_content: ngAutoPublishPreparedContentEnabled(),
       reconciliation: ngSessionNotesReconciliationState,
     },
@@ -13827,6 +13844,7 @@ app.get("/admin/lms-flow/audit", async (req, res) => {
       build: NEXTGEN_BACKEND_BUILD,
       filters: { course_id: courseId || null },
       config: {
+        auto_publish_recordings: lmsAutoPublishRecordingsEnabled(),
         auto_publish_session_content: ngAutoPublishPreparedContentEnabled(),
         auto_publish_session_notes: ngAutoPublishSessionNotesEnabled(),
         auto_weekly_assessment: ngAutoWeeklyAssessmentEnabled(),
@@ -95784,6 +95802,7 @@ async function ngRunZoomRecordingRecoveryTick(reason = "interval") {
       .slice(0, 12);
     let imported = 0;
     let autoPublished = 0;
+    let notesAutoPublished = 0;
     const details = [];
     for (const meeting of meetings) {
       const existing = Object.values(db.recordings || {}).find((recording) => {
@@ -95798,15 +95817,17 @@ async function ngRunZoomRecordingRecoveryTick(reason = "interval") {
       const result = await upsertZoomRecordingFromObject({ db, object: meeting, accessToken: token, forceImportTranscript: true });
       imported += 1;
       if (result.autoPublished) autoPublished += 1;
+      notesAutoPublished += Number(result.notesAutoPublished || 0);
       details.push({
         meeting_id: String(meeting.id || ""),
         session_id: result.sessionId || null,
         exact_match: result.exactMatch?.exact === true,
         auto_published: result.autoPublished === true,
+        notes_auto_published: Number(result.notesAutoPublished || 0),
       });
     }
     if (imported) await writeLiveDb(db);
-    return ngRememberZoomRecordingRecoveryResult({ success: true, reason, checked: meetings.length, imported, auto_published: autoPublished, details });
+    return ngRememberZoomRecordingRecoveryResult({ success: true, reason, checked: meetings.length, imported, auto_published: autoPublished, notes_auto_published: notesAutoPublished, details });
   } catch (error) {
     const errorMessage = error.response?.data?.message || error.message;
     console.error("Zoom recording recovery tick failed:", errorMessage);

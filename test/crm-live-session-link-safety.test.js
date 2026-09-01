@@ -197,9 +197,12 @@ test("scheduler and AI source use only the exact live LMS link", () => {
   );
 });
 
-test("Zoom recovery does not publish a recording while prepared-content publication is disabled", () => {
+test("Zoom recovery publishes exact recordings independently of prepared-content review", () => {
   const upsert = between("async function upsertZoomRecordingFromObject", "function ngFindRoadmapDayForLiveSession");
-  assert.match(upsert, /const canAutoPublish = Boolean\(\s*ngAutoPublishPreparedContentEnabled\(\) &&/);
+  assert.match(upsert, /const canAutoPublish = lmsCanAutoPublishRecording\(\{/);
+  assert.doesNotMatch(upsert, /const canAutoPublish = Boolean\(\s*ngAutoPublishPreparedContentEnabled\(\) &&/);
+  assert.match(upsert, /reconcileLmsSessionNoteInvariants\(db, \{\s*autoPublish: ngAutoPublishSessionNotesEnabled\(\)/);
+  assert.match(upsert, /notesAutoPublished: Number\(notesPublicationResult\.auto_published \|\| 0\)/);
 });
 
 test("first Meta replies must carry the current session, one recording, and one qualification question", () => {
