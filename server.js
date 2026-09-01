@@ -663,7 +663,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 const NEXTGEN_BACKEND_BUILD = "v223-aylamed-diagnostic-onboarding";
 const LMS_PAID_DEMO_CONSOLIDATION_BUILD = "v221-paid-demo-consolidation";
 const CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard";
-const CRM_LIVE_SESSION_SCHEDULER_BUILD = "v314-recording-template-preflight";
+const CRM_LIVE_SESSION_SCHEDULER_BUILD = "v315-lms-clock-meta-live-preflight";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
@@ -35502,9 +35502,64 @@ function ngDailyLiveSessionPendingLeadBatch(db = {}, settings = {}, { brandId = 
 function ngScheduledWhatsAppTemplateIsApproved(db = {}, templateKey = "") {
   const template = getMessageTemplateByKey(db, templateKey);
   if (!template || template.active === false || template.is_active === false) return false;
-  if (template.meta_approved === true) return true;
-  return [template.meta_status, template.status]
+  if (template.meta_approved === true || template.whatsapp_approved === true || template.is_meta_approved === true) return true;
+  // `status: active` only means the CRM record is enabled. It is not evidence
+  // that Meta has approved the provider template. Counting it as approval made
+  // the scheduler retry missing templates every minute and created a wall of
+  // failed WhatsApp logs instead of a clear preflight result.
+  return [template.meta_status, template.provider_status, template.whatsapp_status]
     .some((value) => ["approved", "active"].includes(String(value || "").trim().toLowerCase()));
+}
+
+let NG_DAILY_SESSION_META_TEMPLATE_CACHE = {
+  checked_at: null,
+  live_templates: null,
+  error: null,
+};
+
+async function ngRefreshDailySessionMetaTemplateApprovals(db = {}, { force = false } = {}) {
+  const checkedAtMs = Date.parse(NG_DAILY_SESSION_META_TEMPLATE_CACHE.checked_at || "") || 0;
+  const fresh = !force && checkedAtMs > 0 && Date.now() - checkedAtMs < 120000;
+  let liveTemplates = fresh && Array.isArray(NG_DAILY_SESSION_META_TEMPLATE_CACHE.live_templates)
+    ? NG_DAILY_SESSION_META_TEMPLATE_CACHE.live_templates
+    : null;
+
+  if (!liveTemplates) {
+    try {
+      liveTemplates = await fetchLiveMetaWhatsAppTemplates(db);
+      NG_DAILY_SESSION_META_TEMPLATE_CACHE = {
+        checked_at: nowIso(),
+        live_templates: liveTemplates,
+        error: null,
+      };
+    } catch (error) {
+      NG_DAILY_SESSION_META_TEMPLATE_CACHE = {
+        checked_at: nowIso(),
+        live_templates: null,
+        error: String(error.message || "Meta template inventory unavailable").slice(0, 300),
+      };
+      return { verified: false, error: NG_DAILY_SESSION_META_TEMPLATE_CACHE.error };
+    }
+  }
+
+  const reconciled = reconcileNextGenWhatsAppTemplatePack(db.message_templates, {
+    liveTemplates,
+    liveWasChecked: true,
+  });
+  db.message_templates = reconciled.templates;
+  return {
+    verified: true,
+    checked_at: NG_DAILY_SESSION_META_TEMPLATE_CACHE.checked_at,
+    approved: reconciled.liveApprovedCount,
+  };
+}
+
+function ngDailyLiveSessionActionBypassesRecentCooldown(action = "") {
+  // These two messages are tied to exact LMS clock windows. The normal
+  // anti-interruption cooldown must not delay the start link after a successful
+  // five-minute reminder (or suppress the reminder after an earlier invite).
+  // Per-action/date delivery locks still prevent duplicate successful sends.
+  return ["five_minute_reminder", "session_link"].includes(String(action || ""));
 }
 
 function ngStartDailyLiveSessionAttempt(db = {}, lead = {}, action = "", dateKey = "", source = "run_due") {
@@ -35591,6 +35646,19 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
       : "nextgen_class_recording_link",
   };
   const leads = ngDailyLiveSessionPendingLeadBatch(db, settings, { brandId, action, dateKey, limit });
+  const scheduledTemplateKey = templateMap[action] || null;
+  const closedWhatsAppTemplateNeeded = Boolean(scheduledTemplateKey && leads.some((lead) => {
+    const channel = resolveCrmChannelForConversation({ requestedChannel: lead.current_channel || lead.last_channel || lead.source_platform || lead.platform || "whatsapp", lead, fallback: "whatsapp" });
+    if (channel !== "whatsapp") return false;
+    const latestInbound = ngLatestInbound(ngLeadConversationMessages(db, lead.id));
+    return !ngWithinHours(latestInbound?.created_at || latestInbound?.received_at || latestInbound?.timestamp, 24);
+  }));
+  // Approval can change in Meta without anyone opening the CRM. Refresh the
+  // live inventory on a short cache whenever this run needs an out-of-window
+  // template, then fail closed if Meta cannot be checked.
+  const templateApprovalSync = closedWhatsAppTemplateNeeded
+    ? await ngRefreshDailySessionMetaTemplateApprovals(db)
+    : { verified: true, not_required: true };
   const results = [];
   for (const lead of leads) {
     if (ngDailyLiveSessionAlreadyAttempted(db, lead, action, dateKey)) {
@@ -35598,7 +35666,7 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
       continue;
     }
     const recentCooldownMinutes = Math.max(1, Number(settings.daily_session_recent_send_cooldown_minutes || 10));
-    if (ngRecentlyContactedMinutesAgo(lead, recentCooldownMinutes)) {
+    if (!ngDailyLiveSessionActionBypassesRecentCooldown(action) && ngRecentlyContactedMinutesAgo(lead, recentCooldownMinutes)) {
       results.push({ lead_id: lead.id, skipped: true, reason: "recent_outbound_cooldown", cooldown_minutes: recentCooldownMinutes });
       continue;
     }
@@ -35607,6 +35675,17 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
     const whatsappWindowOpen = channel !== "whatsapp" || ngWithinHours(latestInbound?.created_at || latestInbound?.received_at || latestInbound?.timestamp, 24);
     const templateId = channel === "whatsapp" && !whatsappWindowOpen ? templateMap[action] : null;
     const text = ngDailyLiveSessionText(action, assets, lead);
+    if (templateId && !templateApprovalSync.verified) {
+      results.push({
+        lead_id: lead.id,
+        skipped: true,
+        reason: "whatsapp_template_inventory_unavailable",
+        action,
+        template_id: templateId,
+        error: templateApprovalSync.error || null,
+      });
+      continue;
+    }
     if (templateId && !ngScheduledWhatsAppTemplateIsApproved(db, templateId)) {
       results.push({
         lead_id: lead.id,
@@ -35689,7 +35768,14 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
       results.push({ lead_id: lead.id, sent: false, error: error.message, action, template_id: templateId });
     }
   }
-  return { action, processed: results.length, sent: results.filter((r) => r.sent).length, skipped: results.filter((r) => r.skipped).length, results };
+  return {
+    action,
+    processed: results.length,
+    sent: results.filter((r) => r.sent).length,
+    skipped: results.filter((r) => r.skipped).length,
+    template_approval_sync: templateApprovalSync,
+    results,
+  };
 }
 
 
