@@ -142,6 +142,19 @@ test("the scheduler uses dedicated approved link templates", () => {
   assert.match(scheduler, /whatsapp_template_not_approved_yet/);
 });
 
+test("the exact session-link slot self-heals if a stale admin save restores the invite template", () => {
+  const ensureStore = between("function ngEnsureAiStore", "function ngGetProviderStatusFromEnv");
+
+  assert.match(ensureStore, /session_link_template_key/);
+  assert.match(ensureStore, /=== "nextgen_live_session_invite"/);
+  assert.match(ensureStore, /session_link_template_key = "nextgen_live_session_link"/);
+
+  const settingsRoutes = between('app.get("/admin/assistant/settings"', 'app.post("/admin/assistant/chat"');
+  const crmSettingsRoutes = between('app.get("/admin/crm/assistant/settings"', 'app.get("/admin/crm/assistant/owner-command"');
+  assert.match(settingsRoutes, /ngEnsureAiStore\(db\);\s*\n\s*await writeCrmDb\(db\)/);
+  assert.match(crmSettingsRoutes, /ngEnsureAiStore\(db\);\s*\n\s*await writeCrmDb\(db\)/);
+});
+
 test("scheduled WhatsApp sends wait quietly until the exact Meta template is approved", () => {
   const source = between("function ngScheduledWhatsAppTemplateIsApproved", "function ngStartDailyLiveSessionAttempt");
   const isApproved = new Function(
@@ -169,7 +182,7 @@ test("urgent LMS-clock reminder and start-link phases bypass the generic outboun
 
 test("scheduler and AI source use only the exact live LMS link", () => {
   assert.match(server, /CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard"/);
-  assert.match(server, /CRM_LIVE_SESSION_SCHEDULER_BUILD = "v315-lms-clock-meta-live-preflight"/);
+  assert.match(server, /CRM_LIVE_SESSION_SCHEDULER_BUILD = "v316-lms-session-link-setting-lock"/);
   assert.match(server, /crm_live_session_scheduler_build: CRM_LIVE_SESSION_SCHEDULER_BUILD/);
   assert.match(server, /reason: "matching_live_session_link_not_released"/);
   assert.match(server, /today_session: todaySession \?/);
