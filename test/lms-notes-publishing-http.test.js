@@ -243,6 +243,7 @@ test("manual Day 10 edits publish the corrected content and assessment scopes ex
     const health = await waitForHealth(baseUrl, child, output);
     assert.equal(health.lms_session_notes_build, "v256-session-notes-publish-invariants");
     assert.equal(health.lms_session_notes.auto_publish_notes, true);
+    assert.equal(health.lms_session_notes.auto_publish_recordings, true);
     assert.equal(health.lms_session_notes.auto_publish_session_content, false);
     assert.equal(health.lms_assessment_notes_scope_build, "v257-assessment-notes-scopes");
 
