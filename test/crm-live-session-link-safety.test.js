@@ -142,6 +142,59 @@ test("the scheduler uses dedicated approved link templates", () => {
   assert.match(scheduler, /whatsapp_template_not_approved_yet/);
 });
 
+test("a blocked live-session phase is visible once and updates only when its state changes", () => {
+  const source = between("function ngRecordDailyLiveSessionPhaseState", "async function ngRunDailyLiveSessionScheduler");
+  const recordState = new Function(
+    "getMessageTemplateByKey",
+    "normalizeCrmString",
+    "ensureCrmArray",
+    "withTimestamps",
+    "nowIso",
+    `${source}; return ngRecordDailyLiveSessionPhaseState;`,
+  )(
+    (db, key) => (db.message_templates || []).find((item) => item.key === key),
+    (value) => String(value || "").trim(),
+    (db, key) => {
+      if (!Array.isArray(db[key])) db[key] = [];
+      return db[key];
+    },
+    (item) => ({ ...item, created_at: "2026-09-02T16:00:00.000Z", updated_at: "2026-09-02T16:00:00.000Z" }),
+    () => "2026-09-02T16:00:00.000Z",
+  );
+  const db = {
+    message_templates: [{ key: "nextgen_live_session_link", provider_template_name: "nextgen_live_session_link_v3" }],
+  };
+  const payload = {
+    dateKey: "2026-09-02",
+    action: "session_link",
+    assets: { liveSessionTitle: "Central Nervous System — Day 9", sessionTime: "12:00 PM Eastern" },
+    templateKey: "nextgen_live_session_link",
+    results: [{ lead_id: "hidden", skipped: true, reason: "whatsapp_template_not_approved_yet" }],
+  };
+
+  assert.equal(recordState(db, payload), true);
+  assert.equal(recordState(db, payload), false);
+  assert.equal(db.action_logs.length, 1);
+  assert.equal(db.action_logs[0].status, "pending");
+  assert.match(db.action_logs[0].description, /waiting for Meta template approval/i);
+  assert.match(db.action_logs[0].description, /nextgen_live_session_link_v3/);
+  assert.doesNotMatch(db.action_logs[0].description, /hidden/);
+});
+
+test("the backend rechecks urgent LMS live-session delivery every ten seconds", () => {
+  const heartbeat = between("let ngV116LastFirstMessageRunAt", "function ngV116StartBackendHeartbeat");
+
+  assert.match(server, /NEXTGEN_DAILY_SESSION_META_TEMPLATE_CACHE_MS \|\| 10000/);
+  assert.match(server, /meta_last_synced_at: _volatileMetaSyncTime/);
+  assert.match(heartbeat, /NEXTGEN_HEARTBEAT_DAILY_SESSION_MS \|\| 10000/);
+  assert.match(heartbeat, /ngV116LastDailySessionRunAt/);
+  assert.match(heartbeat, /dailySessionResult = await ngRunDailyLiveSessionScheduler/);
+  assert.doesNotMatch(
+    between("if (now - ngV116LastScheduledRunAt", "const changed ="),
+    /ngRunDailyLiveSessionScheduler/,
+  );
+});
+
 test("the exact session-link slot self-heals if a stale admin save restores the invite template", () => {
   const ensureStore = between("function ngEnsureAiStore", "function ngGetProviderStatusFromEnv");
 
@@ -189,9 +242,9 @@ test("Zoom is prepared before the five-minute reminder window opens", () => {
 
 test("scheduler and AI source use only the exact live LMS link", () => {
   assert.match(server, /CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard"/);
-  assert.match(server, /CRM_LIVE_SESSION_SCHEDULER_BUILD = "v316-lms-session-link-setting-lock"/);
+  assert.match(server, /CRM_LIVE_SESSION_SCHEDULER_BUILD = "v317-fast-template-activation-recovery"/);
   assert.match(server, /crm_live_session_scheduler_build: CRM_LIVE_SESSION_SCHEDULER_BUILD/);
-  assert.match(server, /reason: "matching_live_session_link_not_released"/);
+  assert.match(server, /const reason = "matching_live_session_link_not_released"/);
   assert.match(server, /today_session: todaySession \?/);
   assert.match(server, /liveSessionLink: liveSnapshot\?\.live_session\?\.url \|\| ""/);
   assert.match(server, /ngAylaLiveSessionLinkViolations\(`\$\{candidate\.reply/);
