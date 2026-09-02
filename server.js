@@ -646,6 +646,7 @@ import {
   inspectKnownMskTranscriptNoteTarget,
 } from "./lib/lms-known-msk-notes-catchup.js";
 import { mutateJsonCopyOnWrite } from "./lib/json-copy-on-write.js";
+import { estimateStripeProcessingFeeCents as estimatePartnerStripeProcessingFeeCents } from "./lib/partner-commission.js";
 import cors from "cors";
 import dotenv from "dotenv";
 import Stripe from "stripe";
@@ -5429,6 +5430,19 @@ async function ngFinalizeAffiliateAfterStripePayment(payment = {}) {
     if (!affiliate) return { skipped: true, reason: "affiliate_not_found" };
 
     const existing = ensureCrmArray(crmDb, "referral_attributions").find((item) => String(item.payment_id || "") === String(payment.id || ""));
+    const existingCommission = ensureCrmArray(crmDb, "commission_ledger").find((item) =>
+      String(item.affiliate_id || "") === String(affiliate.id) &&
+      String(item.payment_id || "") === String(payment.id || "")
+    );
+    if (existingCommission) {
+      if (existing) {
+        existing.status = "converted";
+        existing.commission_id = existingCommission.id;
+        existing.updated_at = new Date().toISOString();
+        await writeCrmDb(crmDb);
+      }
+      return { success: true, commission_id: existingCommission.id, duplicate_prevented: true };
+    }
     const commission = ngCreateCommissionLedgerEntry({
       db: crmDb,
       affiliate,
@@ -5506,6 +5520,12 @@ async function ngHandleStripeCheckoutCompleted(event = {}, req = null) {
   enrollment.plan_id = planId || enrollment.plan_id || null;
   ngApplyPaidAccessWindow(db, enrollment, { plan, paidAt, source: "stripe_webhook_checkout_completed" });
 
+  const grossPaymentCents = Number(session.amount_total ?? payment.amount_cents ?? metadata.finalAmountCents ?? 0) || 0;
+  const stripeFee = await ngResolveStripeProcessingFee({
+    paymentIntentId: session.payment_intent || payment.stripe_payment_intent || null,
+    grossCents: grossPaymentCents,
+  });
+
   db.payments[paymentId] = {
     ...payment,
     id: paymentId,
@@ -5518,12 +5538,17 @@ async function ngHandleStripeCheckoutCompleted(event = {}, req = null) {
     course_id: courseId,
     plan_id: planId || null,
     plan_name: plan?.name || payment.plan_name || "Plan",
+    billing_type: plan?.billing_type || payment.billing_type || metadata.billingType || "one_time",
+    package_value_cents: Number(payment.package_value_cents || metadata.packageValueCents || plan?.package_value_cents || plan?.total_value_cents || 0) || 0,
     coupon_code: payment.coupon_code || metadata.couponCode || null,
     referral_code: payment.referral_code || metadata.referralCode || null,
     original_amount_cents: Number(payment.original_amount_cents ?? metadata.originalAmountCents ?? session.amount_subtotal ?? session.amount_total ?? 0) || 0,
     discount_cents: Number(payment.discount_cents ?? metadata.discountCents ?? 0) || 0,
-    amount_cents: Number(session.amount_total ?? payment.amount_cents ?? metadata.finalAmountCents ?? 0) || 0,
-    final_amount_cents: Number(session.amount_total ?? payment.final_amount_cents ?? metadata.finalAmountCents ?? 0) || 0,
+    amount_cents: grossPaymentCents,
+    final_amount_cents: grossPaymentCents,
+    stripe_processing_fee_cents: stripeFee.fee_cents,
+    stripe_fee_source: stripeFee.source,
+    net_revenue_cents: Math.max(0, grossPaymentCents - stripeFee.fee_cents),
     currency: String(session.currency || payment.currency || plan?.currency || "usd").toLowerCase(),
     status: "completed",
     payment_status: "completed",
@@ -15988,7 +16013,7 @@ app.post("/stripe/create-checkout", async (req, res) => {
       planId: plan.id,
       couponCode: coupon?.code || "",
     });
-    const session = await stripe.checkout.sessions.create({ mode: "payment", payment_method_types: ["card"], line_items: [{ price_data: { currency: plan.currency || "usd", product_data: { name: plan.name, description: plan.description || "Course enrollment" }, unit_amount: pricing.final_amount_cents }, quantity: 1 }], metadata: { enrollmentId, studentId, courseId, planId: plan.id, couponCode: coupon?.code || "", referralCode: ngAffCode(referral_code || ref || ""), originalAmountCents: String(pricing.original_amount_cents), discountCents: String(pricing.discount_cents), finalAmountCents: String(pricing.final_amount_cents) }, success_url: successUrl || "https://nextgenusmle.live/payment-success", cancel_url: checkoutCancelUrl });
+    const session = await stripe.checkout.sessions.create({ mode: "payment", payment_method_types: ["card"], line_items: [{ price_data: { currency: plan.currency || "usd", product_data: { name: plan.name, description: plan.description || "Course enrollment" }, unit_amount: pricing.final_amount_cents }, quantity: 1 }], metadata: { enrollmentId, studentId, courseId, planId: plan.id, couponCode: coupon?.code || "", referralCode: ngAffCode(referral_code || ref || ""), billingType: plan.billing_type || "one_time", packageValueCents: String(plan.package_value_cents || plan.total_value_cents || 0), originalAmountCents: String(pricing.original_amount_cents), discountCents: String(pricing.discount_cents), finalAmountCents: String(pricing.final_amount_cents) }, success_url: successUrl || "https://nextgenusmle.live/payment-success", cancel_url: checkoutCancelUrl });
     db.payments = db.payments || {};
     db.payments[session.id] = {
       id: session.id,
@@ -16000,6 +16025,8 @@ app.post("/stripe/create-checkout", async (req, res) => {
       course_id: courseId,
       plan_id: plan.id,
       plan_name: plan.name || "Plan",
+      billing_type: plan.billing_type || "one_time",
+      package_value_cents: Number(plan.package_value_cents || plan.total_value_cents || 0) || 0,
       coupon_code: coupon?.code || null,
       original_amount_cents: pricing.original_amount_cents,
       discount_cents: pricing.discount_cents,
@@ -21548,6 +21575,8 @@ const DEFAULT_CRM_DB = {
   community_reply_drafts: [],
   community_watch_keywords: [],
   community_rules: [],
+  partner_outreach: [],
+  partner_channel_setup: [],
   team_members: [],
   roles: [],
   role_permissions: [],
@@ -23136,6 +23165,8 @@ const TEAM_CRM_READ_PERMISSION_BY_COLLECTION = {
   conversations: ["send_messages", "reply_assigned_conversations", "view_leads", "view_assigned_leads"],
   communities: ["community_intelligence", "manage_community_intelligence", "view_leads", "view_assigned_leads"],
   community_posts: ["community_intelligence", "manage_community_intelligence"],
+  partner_outreach: ["community_intelligence", "manage_community_intelligence", "view_leads", "view_assigned_leads"],
+  partner_channel_setup: ["community_intelligence", "manage_community_intelligence"],
   tasks: ["manage_tasks", "create_followups", "view_leads", "view_assigned_leads"],
   followups: ["create_followups", "view_leads", "view_assigned_leads"],
   appointments: ["manage_appointments", "view_leads", "view_assigned_leads"],
@@ -23164,6 +23195,8 @@ const TEAM_CRM_WRITE_PERMISSION_BY_COLLECTION = {
   ticket_messages: ["create_internal_notes", "reply_assigned_conversations"],
   communities: ["community_intelligence", "manage_community_intelligence"],
   community_posts: ["community_intelligence", "manage_community_intelligence"],
+  partner_outreach: ["community_intelligence", "manage_community_intelligence"],
+  partner_channel_setup: ["community_intelligence", "manage_community_intelligence"],
 };
 
 const TEAM_CRM_MODULE_BY_COLLECTION = {
@@ -23171,6 +23204,8 @@ const TEAM_CRM_MODULE_BY_COLLECTION = {
   conversations: ["inbox", "conversation_inbox", "conversations"],
   communities: ["communities", "community_intelligence", "geo_communities"],
   community_posts: ["communities", "community_intelligence"],
+  partner_outreach: ["partner_outreach", "community_intelligence", "communities"],
+  partner_channel_setup: ["partner_outreach", "community_intelligence", "communities"],
   tasks: ["tasks"],
   followups: ["tasks", "followups"],
   appointments: ["appointments", "appointments_calendar"],
@@ -25197,6 +25232,8 @@ registerCrmCrudRoutes({ route: "/admin/crm/leads", collection: "leads", brandSco
 registerCrmCrudRoutes({ route: "/admin/crm/support-tickets", collection: "support_tickets", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/ticket-messages", collection: "ticket_messages", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/communities", collection: "communities", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/partner-outreach", collection: "partner_outreach", brandScoped: true });
+registerCrmCrudRoutes({ route: "/admin/crm/partner-channel-setup", collection: "partner_channel_setup", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/campaigns", collection: "campaigns", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/training", collection: "ai_training", brandScoped: true });
 registerCrmCrudRoutes({ route: "/admin/crm/templates", collection: "message_templates", brandScoped: true });
@@ -49881,15 +49918,22 @@ app.post("/admin/copilot/chat", async (req, res) => {
 
 const NEXTGEN_AFFILIATE_DEFAULT_RULE = {
   id: "default_affiliate_rule",
-  name: "Default Affiliate Rule",
+  name: "NextGen Community Partner Rule",
   status: "active",
   currency: "usd",
-  upfront_rate_percent: 10,
-  monthly_rate_percent: 10,
-  monthly_commission_mode: "split_until_cap", // split_until_cap | first_payment_only | recurring_limited
-  max_commission_months: 3,
-  hold_days: 7,
+  upfront_rate_percent: 20,
+  monthly_rate_percent: 20,
+  commission_basis: "net_after_stripe_processing_fee",
+  monthly_commission_mode: "recurring_limited", // split_until_cap | first_payment_only | recurring_limited
+  max_commission_months: 4,
+  hold_days: 30,
   payout_mode: "manual_approval",
+  payout_schedule: "monthly_on_or_around_15th",
+  payout_method: "stripe_instant_payout",
+  instant_payout_fee_percent: 1.5,
+  minimum_payout_cents: 2500,
+  attribution_window_days: 30,
+  terms_version: "2026-09-01",
   created_at: null,
   updated_at: null,
 };
@@ -49915,7 +49959,7 @@ function ngAffSlug(value = "NG") {
 function ngAffBaseUrl() {
   return String(process.env.FRONTEND_URL || process.env.PUBLIC_FRONTEND_URL || "https://nextgenusmle.live").replace(/\/$/, "");
 }
-function ngAffiliateLink(code) { return `${ngAffBaseUrl()}/pricing?ref=${encodeURIComponent(code || "")}`; }
+function ngAffiliateLink(code) { return `${ngAffBaseUrl()}/plans?ref=${encodeURIComponent(code || "")}`; }
 function ngPercent(value, fallback = 0) {
   const n = Number(value ?? fallback);
   return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : fallback;
@@ -49931,8 +49975,17 @@ function ngAffiliateStore(db) {
   ngAffArray(db, "team_ai_usage_rollups");
   ngAffArray(db, "ai_auto_runs");
 
-  if (!db.commission_rules.some((rule) => String(rule.id) === NEXTGEN_AFFILIATE_DEFAULT_RULE.id)) {
+  const defaultRuleIndex = db.commission_rules.findIndex((rule) => String(rule.id) === NEXTGEN_AFFILIATE_DEFAULT_RULE.id);
+  if (defaultRuleIndex < 0) {
     db.commission_rules.push({ ...NEXTGEN_AFFILIATE_DEFAULT_RULE, created_at: ngAffNow(), updated_at: ngAffNow() });
+  } else {
+    const existingRule = db.commission_rules[defaultRuleIndex];
+    db.commission_rules[defaultRuleIndex] = {
+      ...existingRule,
+      ...NEXTGEN_AFFILIATE_DEFAULT_RULE,
+      created_at: existingRule.created_at || ngAffNow(),
+      updated_at: existingRule.updated_at || ngAffNow(),
+    };
   }
   return db;
 }
@@ -49973,6 +50026,18 @@ function ngNormalizeAffiliatePayload(db, body = {}, existing = {}, actor = null)
 
   const type = String(body.type || existing.type || body.affiliate_type || existing.affiliate_type || "pure_affiliate");
   const isStaffAffiliate = Boolean(body.is_staff_affiliate ?? existing.is_staff_affiliate ?? body.team_member_id ?? existing.team_member_id);
+  const termsLocked = Boolean(existing.commission_terms_locked ?? body.commission_terms_locked ?? false);
+  const requestedRate = body.commission_rate ?? body.upfront_rate_percent;
+  const requestedMonthlyRate = body.commission_rate ?? body.monthly_rate_percent ?? requestedRate;
+  const upfrontRate = termsLocked
+    ? ngPercent(existing.upfront_rate_percent, NEXTGEN_AFFILIATE_DEFAULT_RULE.upfront_rate_percent)
+    : ngPercent(requestedRate, existing.upfront_rate_percent ?? NEXTGEN_AFFILIATE_DEFAULT_RULE.upfront_rate_percent);
+  const monthlyRate = termsLocked
+    ? ngPercent(existing.monthly_rate_percent, upfrontRate)
+    : ngPercent(requestedMonthlyRate, existing.monthly_rate_percent ?? upfrontRate);
+  const commissionMode = termsLocked
+    ? String(existing.monthly_commission_mode || NEXTGEN_AFFILIATE_DEFAULT_RULE.monthly_commission_mode)
+    : String(body.commission_type || body.monthly_commission_mode || existing.monthly_commission_mode || NEXTGEN_AFFILIATE_DEFAULT_RULE.monthly_commission_mode);
 
   return {
     ...existing,
@@ -49992,12 +50057,26 @@ function ngNormalizeAffiliatePayload(db, body = {}, existing = {}, actor = null)
     referral_link: ngAffiliateLink(code),
     status: body.status || existing.status || "active",
     commission_rule_id: body.commission_rule_id ?? existing.commission_rule_id ?? NEXTGEN_AFFILIATE_DEFAULT_RULE.id,
-    upfront_rate_percent: ngPercent(body.upfront_rate_percent, existing.upfront_rate_percent ?? 10),
-    monthly_rate_percent: ngPercent(body.monthly_rate_percent, existing.monthly_rate_percent ?? 10),
-    monthly_commission_mode: body.monthly_commission_mode || existing.monthly_commission_mode || "split_until_cap",
-    package_value_cents: ngAffMoney(body.package_value_cents ?? existing.package_value_cents ?? 0),
+    upfront_rate_percent: upfrontRate,
+    monthly_rate_percent: monthlyRate,
+    monthly_commission_mode: commissionMode,
+    max_commission_months: Number(existing.max_commission_months ?? body.max_commission_months ?? NEXTGEN_AFFILIATE_DEFAULT_RULE.max_commission_months),
+    package_value_cents: ngAffMoney(body.expected_package_value_cents ?? body.package_value_cents ?? existing.package_value_cents ?? 0),
     max_commission_cents: ngAffMoney(body.max_commission_cents ?? existing.max_commission_cents ?? 0),
-    payout_method: body.payout_method || existing.payout_method || "manual",
+    commission_basis: existing.commission_basis || body.commission_basis || NEXTGEN_AFFILIATE_DEFAULT_RULE.commission_basis,
+    commission_terms_locked: Boolean(existing.commission_terms_locked ?? body.commission_terms_locked ?? false),
+    commission_terms_locked_at: existing.commission_terms_locked_at || (body.commission_terms_locked ? ngAffNow() : null),
+    terms_version: existing.terms_version || body.terms_version || NEXTGEN_AFFILIATE_DEFAULT_RULE.terms_version,
+    agreement_accepted_at: existing.agreement_accepted_at || body.agreement_accepted_at || null,
+    payout_method: body.payout_method || existing.payout_method || NEXTGEN_AFFILIATE_DEFAULT_RULE.payout_method,
+    instant_payout_fee_percent: ngPercent(
+      existing.instant_payout_fee_percent ?? body.instant_payout_fee_percent,
+      NEXTGEN_AFFILIATE_DEFAULT_RULE.instant_payout_fee_percent,
+    ),
+    hold_days: Number(existing.hold_days ?? body.hold_days ?? NEXTGEN_AFFILIATE_DEFAULT_RULE.hold_days),
+    payout_schedule: existing.payout_schedule || body.payout_schedule || NEXTGEN_AFFILIATE_DEFAULT_RULE.payout_schedule,
+    attribution_window_days: Number(existing.attribution_window_days ?? body.attribution_window_days ?? NEXTGEN_AFFILIATE_DEFAULT_RULE.attribution_window_days),
+    minimum_payout_cents: ngAffMoney(existing.minimum_payout_cents ?? body.minimum_payout_cents ?? NEXTGEN_AFFILIATE_DEFAULT_RULE.minimum_payout_cents),
     notes: body.notes ?? existing.notes ?? "",
     crm_access_enabled: false, // affiliate portal is separate; staff access stays on team member record
     lms_access_enabled: false,
@@ -50021,15 +50100,50 @@ function ngAffiliatePublic(affiliate = {}) {
     referral_link: affiliate.referral_link || ngAffiliateLink(affiliate.referral_code || affiliate.code),
     status: affiliate.status || "active",
     commission_rule_id: affiliate.commission_rule_id || NEXTGEN_AFFILIATE_DEFAULT_RULE.id,
-    upfront_rate_percent: Number(affiliate.upfront_rate_percent ?? 10),
-    monthly_rate_percent: Number(affiliate.monthly_rate_percent ?? 10),
-    monthly_commission_mode: affiliate.monthly_commission_mode || "split_until_cap",
+    upfront_rate_percent: Number(affiliate.upfront_rate_percent ?? NEXTGEN_AFFILIATE_DEFAULT_RULE.upfront_rate_percent),
+    monthly_rate_percent: Number(affiliate.monthly_rate_percent ?? NEXTGEN_AFFILIATE_DEFAULT_RULE.monthly_rate_percent),
+    monthly_commission_mode: affiliate.monthly_commission_mode || NEXTGEN_AFFILIATE_DEFAULT_RULE.monthly_commission_mode,
+    max_commission_months: Number(affiliate.max_commission_months ?? NEXTGEN_AFFILIATE_DEFAULT_RULE.max_commission_months),
     package_value_cents: Number(affiliate.package_value_cents || 0),
     max_commission_cents: Number(affiliate.max_commission_cents || 0),
-    payout_method: affiliate.payout_method || "manual",
+    commission_basis: affiliate.commission_basis || NEXTGEN_AFFILIATE_DEFAULT_RULE.commission_basis,
+    commission_terms_locked: Boolean(affiliate.commission_terms_locked),
+    commission_terms_locked_at: affiliate.commission_terms_locked_at || null,
+    terms_version: affiliate.terms_version || NEXTGEN_AFFILIATE_DEFAULT_RULE.terms_version,
+    agreement_accepted_at: affiliate.agreement_accepted_at || null,
+    payout_method: affiliate.payout_method || NEXTGEN_AFFILIATE_DEFAULT_RULE.payout_method,
+    instant_payout_fee_percent: Number(affiliate.instant_payout_fee_percent ?? NEXTGEN_AFFILIATE_DEFAULT_RULE.instant_payout_fee_percent),
+    hold_days: Number(affiliate.hold_days ?? NEXTGEN_AFFILIATE_DEFAULT_RULE.hold_days),
+    payout_schedule: affiliate.payout_schedule || NEXTGEN_AFFILIATE_DEFAULT_RULE.payout_schedule,
+    attribution_window_days: Number(affiliate.attribution_window_days ?? NEXTGEN_AFFILIATE_DEFAULT_RULE.attribution_window_days),
+    minimum_payout_cents: Number(affiliate.minimum_payout_cents ?? NEXTGEN_AFFILIATE_DEFAULT_RULE.minimum_payout_cents),
     created_at: affiliate.created_at || null,
     updated_at: affiliate.updated_at || null,
   };
+}
+function ngEstimateStripeProcessingFeeCents(amountCents = 0) {
+  return estimatePartnerStripeProcessingFeeCents(amountCents);
+}
+async function ngResolveStripeProcessingFee({ paymentIntentId = null, grossCents = 0 } = {}) {
+  const estimated = ngEstimateStripeProcessingFeeCents(grossCents);
+  const id = typeof paymentIntentId === "string" ? paymentIntentId : paymentIntentId?.id;
+  if (!id || !process.env.STRIPE_SECRET_KEY) {
+    return { fee_cents: estimated, source: "estimated_2_9_percent_plus_30_cents" };
+  }
+
+  try {
+    const intent = await stripe.paymentIntents.retrieve(id, { expand: ["latest_charge.balance_transaction"] });
+    let balanceTransaction = intent?.latest_charge?.balance_transaction || null;
+    if (typeof balanceTransaction === "string") balanceTransaction = await stripe.balanceTransactions.retrieve(balanceTransaction);
+    const exact = Number(balanceTransaction?.fee);
+    if (Number.isFinite(exact) && exact >= 0) {
+      return { fee_cents: ngAffMoney(exact), source: "stripe_balance_transaction" };
+    }
+  } catch (error) {
+    console.warn("Stripe fee lookup fell back to estimate:", error.message);
+  }
+
+  return { fee_cents: estimated, source: "estimated_2_9_percent_plus_30_cents" };
 }
 function ngGetExistingCommissionTotal(db, affiliateId, studentId, planId) {
   return ngAffArray(db, "commission_ledger")
@@ -50045,7 +50159,8 @@ function ngCalculateCommission({ db, affiliate, rule, amountCents, packageValueC
 
   if (amount <= 0) return { commission_cents: 0, commission_rate_percent: 0, cap_cents: 0, remaining_cap_cents: 0, mode };
 
-  if (String(billingType).includes("month") || String(billingType).includes("recurring") || mode !== "upfront_full") {
+  const recurringBilling = /month|recurring|subscription|installment/i.test(String(billingType));
+  if (recurringBilling) {
     const cap = ngAffMoney(affiliate?.max_commission_cents || Math.round(packageValue * (monthlyRate / 100)));
     const already = ngGetExistingCommissionTotal(db, affiliate.id, studentId, planId);
     const remaining = Math.max(0, cap - already);
@@ -50053,11 +50168,11 @@ function ngCalculateCommission({ db, affiliate, rule, amountCents, packageValueC
     let raw = Math.round(amount * (monthlyRate / 100));
     if (mode === "first_payment_only" && Number(paymentNumber || 1) > 1) raw = 0;
     if (mode === "recurring_limited") {
-      const maxMonths = Number(rule?.max_commission_months || affiliate?.max_commission_months || 3);
+      const maxMonths = Number(affiliate?.max_commission_months || rule?.max_commission_months || 4);
       if (Number(paymentNumber || 1) > maxMonths) raw = 0;
     }
 
-    const commission = Math.min(raw, remaining || raw);
+    const commission = mode === "split_until_cap" ? Math.min(raw, remaining) : raw;
     return { commission_cents: ngAffMoney(commission), commission_rate_percent: monthlyRate, cap_cents: cap, remaining_cap_cents: remaining, mode };
   }
 
@@ -50069,11 +50184,25 @@ function ngCreateCommissionLedgerEntry({ db, affiliate, payment = {}, attributio
   if (!affiliate?.id) throw new Error("Affiliate is required for commission entry");
 
   const rule = ngGetAffiliateRule(db, affiliate);
-  const amountCents = ngAffMoney(payment.amount_cents ?? payment.final_amount_cents ?? payment.price_cents ?? 0);
+  const grossPaymentCents = ngAffMoney(payment.amount_cents ?? payment.final_amount_cents ?? payment.price_cents ?? 0);
+  const suppliedStripeFee = payment.stripe_processing_fee_cents ?? payment.stripe_fee_cents ?? payment.metadata?.stripe_processing_fee_cents;
+  const stripeProcessingFeeCents = suppliedStripeFee === undefined || suppliedStripeFee === null
+    ? ngEstimateStripeProcessingFeeCents(grossPaymentCents)
+    : Math.min(grossPaymentCents, ngAffMoney(suppliedStripeFee));
+  const commissionableNetRevenueCents = Math.max(0, grossPaymentCents - stripeProcessingFeeCents);
   const billingType = payment.billing_type || payment.plan_billing_type || payment.metadata?.billing_type || "one_time";
-  const packageValueCents = ngAffMoney(payment.package_value_cents || payment.metadata?.package_value_cents || affiliate.package_value_cents || amountCents);
+  const packageValueCents = ngAffMoney(payment.package_value_cents || payment.metadata?.package_value_cents || affiliate.package_value_cents || grossPaymentCents);
   const paymentNumber = Number(payment.payment_number || payment.metadata?.payment_number || 1);
-  const calc = ngCalculateCommission({ db, affiliate, rule, amountCents, packageValueCents, billingType, studentId: payment.student_id || payment.user_id, planId: payment.plan_id, paymentNumber });
+  const calc = ngCalculateCommission({ db, affiliate, rule, amountCents: commissionableNetRevenueCents, packageValueCents, billingType, studentId: payment.student_id || payment.user_id, planId: payment.plan_id, paymentNumber });
+  const instantPayoutFeePercent = ngPercent(affiliate.instant_payout_fee_percent, rule.instant_payout_fee_percent ?? 1.5);
+  const instantPayoutFeeCents = ngAffMoney(Math.round(calc.commission_cents * (instantPayoutFeePercent / 100)));
+  const partnerNetPayoutCents = Math.max(0, calc.commission_cents - instantPayoutFeeCents);
+  const holdDays = Math.max(0, Number(affiliate.hold_days ?? rule.hold_days ?? 30));
+  const eligibleBaseCandidate = new Date(payment.paid_at || payment.created_at || ngAffNow());
+  const eligibleBaseMs = Number.isFinite(eligibleBaseCandidate.getTime())
+    ? eligibleBaseCandidate.getTime()
+    : Date.now();
+  const eligibleAt = new Date(eligibleBaseMs + holdDays * 86400000).toISOString();
 
   const entry = {
     id: uuid(),
@@ -50089,15 +50218,27 @@ function ngCreateCommissionLedgerEntry({ db, affiliate, payment = {}, attributio
     plan_name: payment.plan_name || "Plan",
     billing_type: billingType,
     payment_number: paymentNumber,
-    amount_cents: amountCents,
+    amount_cents: grossPaymentCents,
+    gross_payment_cents: grossPaymentCents,
+    stripe_processing_fee_cents: stripeProcessingFeeCents,
+    stripe_fee_source: payment.stripe_fee_source || payment.metadata?.stripe_fee_source || (suppliedStripeFee === undefined || suppliedStripeFee === null ? "estimated_2_9_percent_plus_30_cents" : "recorded"),
+    commissionable_net_revenue_cents: commissionableNetRevenueCents,
+    commission_basis: "net_after_stripe_processing_fee",
     commission_rate_percent: calc.commission_rate_percent,
     commission_cents: calc.commission_cents,
+    gross_commission_cents: calc.commission_cents,
+    instant_payout_fee_percent: instantPayoutFeePercent,
+    instant_payout_fee_cents: instantPayoutFeeCents,
+    partner_net_payout_cents: partnerNetPayoutCents,
     cap_cents: calc.cap_cents,
     remaining_cap_cents_before_payment: calc.remaining_cap_cents,
     commission_mode: calc.mode,
     status: calc.commission_cents > 0 ? "pending" : "zero",
     approval_status: "pending",
     payout_status: "unpaid",
+    eligible_at: eligibleAt,
+    hold_days: holdDays,
+    terms_version: affiliate.terms_version || rule.terms_version || NEXTGEN_AFFILIATE_DEFAULT_RULE.terms_version,
     source,
     metadata: { payment, attribution, rule_id: rule.id },
     created_at: ngAffNow(),
@@ -50111,25 +50252,87 @@ function ngAffiliateDashboard(db, affiliate) {
   const code = ngAffCode(affiliate?.referral_code || affiliate?.code || "");
   const attributions = ngAffArray(db, "referral_attributions").filter((item) => String(item.affiliate_id) === String(affiliate.id) || ngAffCode(item.referral_code) === code);
   const commissions = ngAffArray(db, "commission_ledger").filter((item) => String(item.affiliate_id) === String(affiliate.id) || ngAffCode(item.referral_code) === code);
-  const sum = (status) => commissions.filter((x) => !status || x.status === status || x.payout_status === status || x.approval_status === status).reduce((s, x) => s + ngAffMoney(x.commission_cents), 0);
+  const matching = (status) => commissions.filter((item) => !status || item.status === status || item.payout_status === status || item.approval_status === status);
+  const sum = (rows, key, fallback = "") => rows.reduce((total, item) => total + ngAffMoney(item[key] ?? (fallback ? item[fallback] : 0)), 0);
+  const grossCommission = (item) => ngAffMoney(item.gross_commission_cents ?? item.commission_cents);
+  const instantPayoutFee = (item) => ngAffMoney(item.instant_payout_fee_cents ?? Math.round(grossCommission(item) * (Number(item.instant_payout_fee_percent ?? affiliate.instant_payout_fee_percent ?? 1.5) / 100)));
+  const netPayout = (item) => ngAffMoney(item.partner_net_payout_cents ?? (grossCommission(item) - instantPayoutFee(item)));
+  const sumBy = (rows, getter) => rows.reduce((total, item) => total + getter(item), 0);
+  const maskEmail = (value = "") => {
+    const [local, domain] = String(value || "").split("@");
+    if (!domain) return value ? "Referred student" : "";
+    return `${local.slice(0, 1) || "*"}***@${domain}`;
+  };
+  const publicAttributions = attributions.slice(0, 100).map((item) => ({
+    id: item.id,
+    student: maskEmail(item.student_email) || (item.student_id ? `Student ${String(item.student_id).slice(-6)}` : "Referred student"),
+    plan_id: item.plan_id || null,
+    course_id: item.course_id || null,
+    status: item.status || "pending",
+    created_at: item.created_at || null,
+  }));
+  const publicCommissions = commissions.slice(0, 100).map((item) => ({
+    id: item.id,
+    student: maskEmail(item.student_email) || (item.student_id ? `Student ${String(item.student_id).slice(-6)}` : "Referred student"),
+    plan_name: item.plan_name || "NextGen plan",
+    billing_type: item.billing_type || "one_time",
+    gross_payment_cents: ngAffMoney(item.gross_payment_cents ?? item.amount_cents),
+    stripe_processing_fee_cents: ngAffMoney(item.stripe_processing_fee_cents),
+    stripe_fee_source: item.stripe_fee_source || "recorded",
+    commissionable_net_revenue_cents: ngAffMoney(item.commissionable_net_revenue_cents ?? item.amount_cents),
+    commission_rate_percent: Number(item.commission_rate_percent || 0),
+    gross_commission_cents: ngAffMoney(item.gross_commission_cents ?? item.commission_cents),
+    instant_payout_fee_percent: Number(item.instant_payout_fee_percent ?? affiliate.instant_payout_fee_percent ?? 1.5),
+    instant_payout_fee_cents: ngAffMoney(item.instant_payout_fee_cents ?? Math.round(ngAffMoney(item.gross_commission_cents ?? item.commission_cents) * (Number(item.instant_payout_fee_percent ?? affiliate.instant_payout_fee_percent ?? 1.5) / 100))),
+    partner_net_payout_cents: ngAffMoney(item.partner_net_payout_cents ?? (ngAffMoney(item.gross_commission_cents ?? item.commission_cents) - ngAffMoney(item.instant_payout_fee_cents ?? Math.round(ngAffMoney(item.gross_commission_cents ?? item.commission_cents) * (Number(item.instant_payout_fee_percent ?? affiliate.instant_payout_fee_percent ?? 1.5) / 100))))),
+    status: item.status || "pending",
+    approval_status: item.approval_status || "pending",
+    payout_status: item.payout_status || "unpaid",
+    eligible_at: item.eligible_at || null,
+    created_at: item.created_at || null,
+    paid_at: item.paid_at || null,
+    payout_reference: item.payout_reference || "",
+  }));
+  const pendingRows = matching("pending");
+  const approvedRows = matching("approved");
+  const paidRows = matching("paid");
   return {
     affiliate: ngAffiliatePublic(affiliate),
     referral_code: code,
     referral_link: ngAffiliateLink(code),
     counts: {
-      referrals: attributions.length,
+      referrals: new Set(attributions.map((item) => String(item.student_id || item.student_email || item.lead_id || item.id))).size,
       paid_students: new Set(commissions.filter((c) => ngAffMoney(c.amount_cents) > 0).map((c) => String(c.student_id || c.payment_id))).size,
       commissions: commissions.length,
     },
     totals: {
-      referred_revenue_cents: commissions.reduce((s, x) => s + ngAffMoney(x.amount_cents), 0),
-      pending_commission_cents: sum("pending"),
-      approved_commission_cents: sum("approved"),
-      paid_commission_cents: sum("paid"),
-      total_commission_cents: commissions.reduce((s, x) => s + ngAffMoney(x.commission_cents), 0),
+      referred_revenue_cents: sum(commissions, "gross_payment_cents", "amount_cents"),
+      stripe_processing_fees_cents: sum(commissions, "stripe_processing_fee_cents"),
+      commissionable_net_revenue_cents: sum(commissions, "commissionable_net_revenue_cents", "amount_cents"),
+      pending_commission_cents: sum(pendingRows, "commission_cents"),
+      pending_net_payout_cents: sumBy(pendingRows, netPayout),
+      approved_commission_cents: sum(approvedRows, "commission_cents"),
+      approved_net_payout_cents: sumBy(approvedRows, netPayout),
+      paid_commission_cents: sum(paidRows, "commission_cents"),
+      paid_net_payout_cents: sumBy(paidRows, netPayout),
+      instant_payout_fees_cents: sumBy(commissions, instantPayoutFee),
+      total_commission_cents: sum(commissions, "commission_cents"),
+      total_net_payout_cents: sumBy(commissions, netPayout),
     },
-    attributions: attributions.slice(0, 100),
-    commissions: commissions.slice(0, 100),
+    program_terms: {
+      commission_rate_percent: Number(affiliate.upfront_rate_percent ?? 20),
+      commission_basis: affiliate.commission_basis || "net_after_stripe_processing_fee",
+      instant_payout_fee_percent: Number(affiliate.instant_payout_fee_percent ?? 1.5),
+      hold_days: Number(affiliate.hold_days ?? 30),
+      payout_schedule: affiliate.payout_schedule || "monthly_on_or_around_15th",
+      minimum_payout_cents: Number(affiliate.minimum_payout_cents ?? 2500),
+      attribution_window_days: Number(affiliate.attribution_window_days ?? 30),
+      terms_version: affiliate.terms_version || NEXTGEN_AFFILIATE_DEFAULT_RULE.terms_version,
+      locked: Boolean(affiliate.commission_terms_locked),
+      locked_at: affiliate.commission_terms_locked_at || null,
+    },
+    attributions: publicAttributions,
+    commissions: publicCommissions,
   };
 }
 function ngGetManagedTeamMemberIds(crmDb, managerMember) {
@@ -50262,6 +50465,42 @@ app.get("/affiliate/me", async (req, res) => {
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
+app.post("/affiliate/referral-code", async (req, res) => {
+  try {
+    const { user } = await getAuthenticatedUser(req);
+    const db = ngAffiliateStore(await readCrmDb());
+    const affiliate = ngFindAffiliateForUser(db, user);
+    if (!affiliate) return res.status(404).json({ success: false, error: "Affiliate profile not found" });
+
+    const currentCode = ngAffCode(affiliate.referral_code || affiliate.code || "");
+    const hasTrackingHistory = ngAffArray(db, "referral_attributions").some((item) => String(item.affiliate_id) === String(affiliate.id)) ||
+      ngAffArray(db, "commission_ledger").some((item) => String(item.affiliate_id) === String(affiliate.id));
+    if (hasTrackingHistory) {
+      return res.status(409).json({ success: false, error: "Your master code is fixed after the first tracked referral", referral_code: currentCode, referral_link: ngAffiliateLink(currentCode) });
+    }
+
+    let nextCode = ngAffCode(req.body?.referral_code || req.body?.code || "") || ngAffSlug(affiliate.name || affiliate.email || "NG");
+    if (nextCode.length < 4) return res.status(400).json({ success: false, error: "Referral code must contain at least 4 letters or numbers" });
+    const duplicate = ngAffArray(db, "affiliates").find((item) => String(item.id) !== String(affiliate.id) && ngAffCode(item.referral_code || item.code) === nextCode);
+    if (duplicate) return res.status(409).json({ success: false, error: "That referral code is already in use" });
+
+    affiliate.referral_code = nextCode;
+    affiliate.code = nextCode;
+    affiliate.referral_link = ngAffiliateLink(nextCode);
+    affiliate.updated_at = ngAffNow();
+    let codeRecord = ngAffArray(db, "referral_codes").find((item) => String(item.affiliate_id) === String(affiliate.id));
+    if (!codeRecord) {
+      codeRecord = { id: uuid(), affiliate_id: affiliate.id, status: "active", created_at: ngAffNow() };
+      db.referral_codes.unshift(codeRecord);
+    }
+    codeRecord.referral_code = nextCode;
+    codeRecord.code = nextCode;
+    codeRecord.updated_at = ngAffNow();
+    await writeCrmDb(db);
+    res.json({ success: true, referral_code: nextCode, referral_link: ngAffiliateLink(nextCode), affiliate: ngAffiliatePublic(affiliate) });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
+});
+
 app.get("/affiliate/dashboard", async (req, res) => {
   try {
     const { user } = await getAuthenticatedUser(req);
@@ -50323,9 +50562,25 @@ app.put("/admin/crm/commissions/:id/:action", async (req, res) => {
     const item = db.commission_ledger.find((x) => String(x.id) === String(req.params.id));
     if (!item) return res.status(404).json({ success: false, error: "Commission not found" });
     const action = String(req.params.action || "").toLowerCase();
-    if (action === "approve") { item.approval_status = "approved"; item.status = "approved"; item.approved_by = user.id; item.approved_at = ngAffNow(); }
+    if (action === "approve") {
+      if (item.eligible_at && new Date(item.eligible_at).getTime() > Date.now()) {
+        return res.status(409).json({ success: false, error: `Commission remains in the refund/chargeback hold until ${item.eligible_at}` });
+      }
+      item.approval_status = "approved"; item.status = "approved"; item.approved_by = user.id; item.approved_at = ngAffNow();
+    }
     else if (action === "reject") { item.approval_status = "rejected"; item.status = "rejected"; item.rejected_by = user.id; item.rejected_at = ngAffNow(); item.reject_reason = req.body?.reason || ""; }
-    else if (action === "mark-paid" || action === "paid") { item.payout_status = "paid"; item.status = "paid"; item.paid_by = user.id; item.paid_at = ngAffNow(); item.payout_reference = req.body?.payout_reference || ""; }
+    else if (action === "mark-paid" || action === "paid") {
+      if (item.approval_status !== "approved") return res.status(409).json({ success: false, error: "Approve this commission before marking it paid" });
+      item.gross_commission_cents = ngAffMoney(item.gross_commission_cents ?? item.commission_cents);
+      item.instant_payout_fee_percent = Number(item.instant_payout_fee_percent ?? NEXTGEN_AFFILIATE_DEFAULT_RULE.instant_payout_fee_percent);
+      item.instant_payout_fee_cents = ngAffMoney(item.instant_payout_fee_cents ?? Math.round(item.gross_commission_cents * (item.instant_payout_fee_percent / 100)));
+      item.partner_net_payout_cents = Math.max(0, item.gross_commission_cents - item.instant_payout_fee_cents);
+      item.payout_status = "paid";
+      item.status = "paid";
+      item.paid_by = user.id;
+      item.paid_at = ngAffNow();
+      item.payout_reference = req.body?.payout_reference || "";
+    }
     else return res.status(400).json({ success: false, error: "Invalid commission action" });
     item.updated_at = ngAffNow();
     await writeCrmDb(db);
