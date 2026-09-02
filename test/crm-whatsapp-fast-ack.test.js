@@ -585,6 +585,15 @@ test("every reachable future lead enters the daily live-session sequence", () =>
   assert.equal(eligible({}, { id: "meet", stage: "new_lead", phone: "+15550000004", google_meet_active: true }, settings), false);
 });
 
+test("admin no-send conversation simulation returns success without provider delivery state", () => {
+  const simulatorStart = server.indexOf('// Admin-only, no-send conversation evaluation');
+  const simulatorEnd = server.indexOf('app.post("/admin/crm/conversations/:leadId/ai-auto-send"', simulatorStart);
+  assert.ok(simulatorStart > 0 && simulatorEnd > simulatorStart);
+  const simulator = server.slice(simulatorStart, simulatorEnd);
+  assert.match(simulator, /res\.status\(200\)\.json\(\{\s*success: true,/);
+  assert.doesNotMatch(simulator, /sent\.sent/);
+});
+
 test("mentor booking notifies the student and admins without recording false sends", () => {
   const meetingFlow = server.slice(
     server.indexOf("function ngGoogleMeetAppointmentDateTime"),

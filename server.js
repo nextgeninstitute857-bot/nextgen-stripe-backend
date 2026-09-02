@@ -54569,8 +54569,8 @@ app.post("/admin/crm/ayla-conversation/simulate", async (req, res) => {
       }
     }
 
-    res.status(sent.sent ? 200 : 502).json({
-      success: sent.sent,
+    res.status(200).json({
+      success: true,
       no_send: true,
       persisted: false,
       contacted_student: false,
