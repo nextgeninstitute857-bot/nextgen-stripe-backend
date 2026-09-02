@@ -668,7 +668,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 const NEXTGEN_BACKEND_BUILD = "v223-aylamed-diagnostic-onboarding";
 const LMS_PAID_DEMO_CONSOLIDATION_BUILD = "v221-paid-demo-consolidation";
 const CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard";
-const CRM_LIVE_SESSION_SCHEDULER_BUILD = "v318-visible-template-activation-recovery";
+const CRM_LIVE_SESSION_SCHEDULER_BUILD = "v319-visible-template-activation-recovery";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
@@ -35726,7 +35726,7 @@ function ngRecordDailyLiveSessionPhaseState(db = {}, {
   if (existing) {
     Object.assign(existing, state, { state_fingerprint: fingerprint, updated_at: nowIso() });
   } else {
-    rows.push(withTimestamps({ id: rowId, ...state, state_fingerprint: fingerprint }));
+    rows.unshift(withTimestamps({ id: rowId, ...state, state_fingerprint: fingerprint }));
   }
   return true;
 }
