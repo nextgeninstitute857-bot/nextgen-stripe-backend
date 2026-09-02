@@ -36054,7 +36054,7 @@ function ngGoogleMeetAppointmentText(action = "link_now", appointment = {}, db =
     return `Great news, ${name} 🎉 Your NextGen mentor call is confirmed for ${displayDateTime}.\n\nSave your private Google Meet link here:\n${link}\n\nAyla will remind you again five minutes before the call.`;
   }
   if (action === "five_minute_reminder") {
-    return `Doctor, your Google Meet mentor consultation starts in 5 minutes.\n\nPlease be ready. I will send the Google Meet link at the meeting time.`;
+    return `Doctor, your NextGen mentor call starts in 5 minutes. ⏰\n\nPlease join with your private Google Meet link:\n${link}`;
   }
   return `Doctor, your Google Meet mentor consultation is starting now.\n\nPlease join here:\n${link}`;
 }
@@ -52927,7 +52927,7 @@ You will receive it at the meeting time.`
       intent: "google_meet_link_question_waiting_admin",
       reply: `Doctor, our team is confirming the Google Meet link for ${when}.
 
-You will receive the link at the meeting time.`
+I’ll send the private link here as soon as our team confirms it.`
     };
   }
 
@@ -53412,7 +53412,7 @@ function ngAylaHardSalesRouter({ db = {}, lead = {}, messages = [], channel = "w
       intent: "google_meet_time_collected_missing_link",
       reply: `Great Doctor, I have noted your preferred Google Meet time for ${completedPreference.date} at ${completedPreference.time} ${completedPreference.timezone_label}.
 
-Our team will confirm the Google Meet link shortly. You will receive the link at the meeting time.`
+Our team will add the private Google Meet link shortly. I’ll send it to you as soon as it is confirmed.`
     };
   }
 
@@ -53432,7 +53432,7 @@ Our team will confirm the Google Meet link shortly. You will receive the link at
       intent: "google_meet_time_collected_missing_link",
       reply: `Great Doctor, I have noted your preferred Google Meet time for ${timePreference.date} at ${timePreference.time} ${timePreference.timezone_label || timePreference.timezone}.
 
-Our team will confirm the Google Meet link shortly. You will receive the link at the meeting time.`
+Our team will add the private Google Meet link shortly. I’ll send it to you as soon as it is confirmed.`
     };
   }
 
@@ -53491,7 +53491,7 @@ Our team will confirm the Google Meet link shortly. You will receive the link at
         intent: "google_meet_time_collected_missing_link",
         reply: `Great Doctor, I have noted your preferred Google Meet time for ${directTimePreference.date} at ${directTimePreference.time} ${directTimePreference.timezone_label || directTimePreference.timezone}.
 
-Our team will confirm the Google Meet link shortly. You will receive the link at the meeting time.`,
+Our team will add the private Google Meet link shortly. I’ll send it to you as soon as it is confirmed.`,
       };
     }
     return {
@@ -65954,7 +65954,7 @@ function ngAylaAdminAlertTemplateLabel(type = "") {
 function ngAylaAdminAlertTemplateNextStep(type = "") {
   const clean = String(type || "").toLowerCase();
   if (clean === "google_meet_booked_confirmation_failed") return "The Meet link is saved, but WhatsApp did not confirm the student message. Open the CRM and resend the confirmation.";
-  if (clean === "google_meet_booked") return "The meeting is confirmed. Open the CRM to review the student details and join at the scheduled time.";
+  if (clean === "google_meet_booked") return "The meeting is confirmed. Use the saved Meet link and open the CRM to review the student details before joining.";
   if (clean === "google_meet_time_collected") return "Confirm the meeting and add or verify the Google Meet link in the CRM.";
   if (clean === "google_meet_requested") return "Open the CRM and arrange the requested Google Meet conversation.";
   if (clean === "pricing_interest") return "Open the CRM and follow up using only active LMS prices and an approved country offer.";
