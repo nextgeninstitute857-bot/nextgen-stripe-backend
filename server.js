@@ -52350,7 +52350,7 @@ function ngAylaRepairLiveResourceGrounding(decision = {}, snapshot = {}, latestM
     const time = String(session.time || "").trim();
     const timezone = String(session.timezone || "").trim();
     const schedule = `${date ? ` on ${date}` : ""}${time ? ` at ${time}${timezone ? ` ${timezone}` : ""}` : ""}`;
-    const statusLine = `The direct join link is not available yet; I’ll share it when it is published. The next session is ${sessionTitle}${schedule}.`;
+    const statusLine = `The direct join link is not available yet and will appear once it is published. The next session is ${sessionTitle}${schedule}.`;
     repaired.reply = `${String(repaired.reply || "").trim()}${String(repaired.reply || "").trim() ? "\n\n" : ""}${statusLine}`;
   }
 
