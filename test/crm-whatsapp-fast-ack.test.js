@@ -774,6 +774,9 @@ test("feature-tour delivery never stalls on a permission question", () => {
   assert.match(generator, /decision\.action === "send_feature_tour" && \/\[\?？\]\//);
   assert.match(generator, /I’ll show you how NextGen keeps/);
   assert.match(generator, /The five parts below work together/);
+  assert.match(generator, /const examLabel = normalizeCrmString/);
+  assert.match(generator, /const studentName = normalizeCrmString/);
+  assert.doesNotMatch(generator, /const (?:examLabel|studentName) = cleanText/);
 });
 
 test("human handoff reuses conversation memory and a student-stated email before asking again", () => {

@@ -54061,11 +54061,12 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
       decision.follow_up = ngAylaFeatureOverviewClosingText(db || {}, liveSnapshot);
     }
     if (decision.action === "send_feature_tour" && /[?？]/.test(String(decision.reply || ""))) {
-      const examLabel = cleanText(
+      const examLabel = normalizeCrmString(
         decision.memory_patch?.exam || promptState?.facts?.exam || lead.exam_track || lead.exam || "your exam",
-        80,
-      );
-      const studentName = cleanText(decision.memory_patch?.name || promptState?.facts?.name || lead.name || "", 80);
+      ).slice(0, 80);
+      const studentName = normalizeCrmString(
+        decision.memory_patch?.name || promptState?.facts?.name || lead.name || "",
+      ).slice(0, 80);
       decision.reply = `${studentName ? `${studentName}, ` : ""}I’ll show you how NextGen keeps ${examLabel} preparation organised around your schedule. The five parts below work together, so you can attend live when possible and catch up without losing your place.`;
     }
     return {
