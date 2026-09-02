@@ -755,10 +755,19 @@ test("Ayla deterministically repairs exact recording labels and unreleased live-
   assert.match(helper, /The direct join link is not available yet and will appear once it is published/);
   assert.match(helper, /The next session is/);
 
+  const endingRepairStart = server.indexOf("function ngAylaRemoveVagueHandback");
+  const endingRepairEnd = server.indexOf("function ngAylaPricingDraftIsGrounded", endingRepairStart);
+  assert.ok(endingRepairStart > helperStart && endingRepairEnd > endingRepairStart);
+  const endingRepair = server.slice(endingRepairStart, endingRepairEnd);
+  assert.match(endingRepair, /vagueHandback/);
+  assert.match(endingRepair, /follow_up: cleanPart/);
+
   const generatorStart = server.indexOf("async function ngGenerateStudentAutoReply");
   const generatorEnd = server.indexOf('app.post("/admin/crm/ayla-conversation/simulate"', generatorStart);
   const generator = server.slice(generatorStart, generatorEnd);
   assert.match(generator, /violations\.every/);
+  assert.match(generator, /"vague_handback_ending"/);
+  assert.match(generator, /ngAylaRemoveVagueHandback\(decision\)/);
   assert.match(generator, /ngAylaRepairLiveResourceGrounding\(decision, liveSnapshot, latestInboundText\)/);
   assert.ok(
     generator.indexOf("ngAylaRepairLiveResourceGrounding(decision, liveSnapshot, latestInboundText)")
