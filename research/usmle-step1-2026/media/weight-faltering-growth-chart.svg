@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="650" viewBox="0 0 980 650" role="img" aria-labelledby="title desc">
+  <title id="title">Pediatric growth pattern with weight faltering</title>
+  <desc id="desc">Original percentile-style chart showing weight crossing downward first, followed later by length, while head circumference remains stable.</desc>
+  <rect width="980" height="650" fill="#ffffff"/>
+  <text x="490" y="42" text-anchor="middle" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#173f4c">Longitudinal growth pattern</text>
+  <line x1="110" y1="530" x2="880" y2="530" stroke="#284b55" stroke-width="3"/>
+  <line x1="110" y1="90" x2="110" y2="530" stroke="#284b55" stroke-width="3"/>
+  <g font-family="Arial, sans-serif" font-size="16" fill="#284b55">
+    <text x="110" y="564" text-anchor="middle">3</text><text x="260" y="564" text-anchor="middle">6</text><text x="410" y="564" text-anchor="middle">9</text><text x="560" y="564" text-anchor="middle">12</text><text x="710" y="564" text-anchor="middle">15</text><text x="860" y="564" text-anchor="middle">18</text>
+    <text x="485" y="600" text-anchor="middle">Age (months)</text>
+    <text transform="translate(34 315) rotate(-90)" text-anchor="middle">Relative percentile channel</text>
+    <text x="85" y="515" text-anchor="end">5th</text><text x="85" y="415" text-anchor="end">10th</text><text x="85" y="315" text-anchor="end">25th</text><text x="85" y="215" text-anchor="end">50th</text><text x="85" y="115" text-anchor="end">75th</text>
+  </g>
+  <g stroke="#d7e5e8" stroke-width="1" stroke-dasharray="6 6">
+    <line x1="110" y1="500" x2="880" y2="500"/><line x1="110" y1="400" x2="880" y2="400"/><line x1="110" y1="300" x2="880" y2="300"/><line x1="110" y1="200" x2="880" y2="200"/><line x1="110" y1="100" x2="880" y2="100"/>
+  </g>
+  <path d="M110 200 C250 198 390 205 520 215 C650 230 760 250 860 300" fill="none" stroke="#2f6f9d" stroke-width="7"/>
+  <path d="M110 205 C245 215 350 245 455 320 C570 405 710 470 860 495" fill="none" stroke="#c64848" stroke-width="8"/>
+  <path d="M110 195 C260 190 410 195 560 198 C690 202 780 200 860 205" fill="none" stroke="#36915f" stroke-width="7"/>
+  <g font-family="Arial, sans-serif" font-size="17" font-weight="700">
+    <line x1="620" y1="105" x2="675" y2="105" stroke="#36915f" stroke-width="7"/><text x="690" y="111" fill="#286a46">Head circumference</text>
+    <line x1="620" y1="143" x2="675" y2="143" stroke="#2f6f9d" stroke-width="7"/><text x="690" y="149" fill="#214f70">Length</text>
+    <line x1="620" y1="181" x2="675" y2="181" stroke="#c64848" stroke-width="8"/><text x="690" y="187" fill="#923535">Weight</text>
+  </g>
+  <rect x="555" y="360" width="300" height="105" rx="16" fill="#fff4e5" stroke="#c17a17" stroke-width="2"/>
+  <text x="705" y="391" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#85520c">Typical inadequate-intake sequence</text>
+  <text x="705" y="421" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#85520c">weight falls first → length later</text>
+  <text x="705" y="447" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#85520c">head growth is relatively preserved</text>
+</svg>

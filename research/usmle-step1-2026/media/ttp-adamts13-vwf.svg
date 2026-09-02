@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 520" role="img" aria-labelledby="title desc">
+<title id="title">ADAMTS13 cleavage of von Willebrand factor</title><desc id="desc">Normal cleavage of ultra-large von Willebrand factor contrasted with persistent platelet-rich strings in severe ADAMTS13 deficiency.</desc>
+<rect width="940" height="520" fill="#ffffff"/>
+<text x="40" y="45" font-family="Arial" font-size="28" font-weight="700">Ultra-large VWF multimer processing</text>
+<text x="75" y="92" font-family="Arial" font-size="21" font-weight="700">Normal ADAMTS13 activity</text>
+<line x1="70" y1="130" x2="870" y2="130" stroke="#7c3aed" stroke-width="8"/>
+<circle cx="170" cy="130" r="18" fill="#f59e0b"/><circle cx="300" cy="130" r="18" fill="#f59e0b"/><circle cx="430" cy="130" r="18" fill="#f59e0b"/>
+<path d="M520 90 l25 25 -25 25 -25 -25z" fill="#bfdbfe" stroke="#1d4ed8" stroke-width="4"/>
+<text x="480" y="75" font-family="Arial" font-size="17">ADAMTS13</text>
+<line x1="545" y1="130" x2="620" y2="130" stroke="#ffffff" stroke-width="13"/>
+<text x="640" y="135" font-family="Arial" font-size="18">shorter, less adhesive multimers</text>
+<text x="75" y="245" font-family="Arial" font-size="21" font-weight="700">Severe deficiency</text>
+<path d="M70 300 C190 245 285 355 400 300 S610 245 870 300" fill="none" stroke="#7c3aed" stroke-width="9"/>
+<g fill="#f59e0b" stroke="#92400e" stroke-width="3"><circle cx="160" cy="278" r="22"/><circle cx="250" cy="316" r="22"/><circle cx="355" cy="310" r="22"/><circle cx="470" cy="274" r="22"/><circle cx="580" cy="305" r="22"/><circle cx="700" cy="285" r="22"/></g>
+<text x="90" y="390" font-family="Arial" font-size="19">Persistent platelet-rich strings in small vessels</text>
+<path d="M220 425 H720" stroke="#374151" stroke-width="5"/>
+<polygon points="330,410 350,425 330,440" fill="#ef4444"/><polygon points="520,410 540,425 520,440" fill="#ef4444"/>
+<text x="285" y="480" font-family="Arial" font-size="19">Erythrocyte shearing → schistocytes</text>
+</svg>

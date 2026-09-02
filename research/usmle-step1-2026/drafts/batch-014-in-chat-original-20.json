@@ -1,0 +1,1428 @@
+{
+  "schema_version": "aylamed-original-mcq-draft-v1",
+  "batch_id": "usmle-step1-2026-b014-in-chat-original-20",
+  "created_at": "2026-08-04T22:00:00+05:00",
+  "status": "private_research_draft",
+  "publication_allowed": false,
+  "generation_method": "in_chat_original_generation_with_backend_coverage_signals",
+  "copyright_policy": {
+    "origin": "de_novo_from_current_public_medical_sources_and_private_coverage_signals",
+    "backend_export_used_for": "topic frequency and later lexical similarity screening only",
+    "proprietary_qbank_text_used": false,
+    "proprietary_qbank_options_used": false,
+    "proprietary_qbank_explanations_used": false,
+    "proprietary_qbank_media_used": false,
+    "full_export_similarity_review_required": true
+  },
+  "quality_controls": {
+    "distinct_learning_objectives": true,
+    "plausible_distractors_required": true,
+    "wrong_choice_explanations_required": true,
+    "authoritative_references_required": true,
+    "original_media_required": true,
+    "correct_answer_ids_server_side": true,
+    "publication_blocked": true
+  },
+  "questions": [
+    {
+      "draft_id": "AY26-B014-CV-FH-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Cardiovascular System",
+        "subsystem": "Lipid metabolism and atherosclerosis",
+        "topic": "Familial hypercholesterolemia",
+        "subtopic": "LDL-receptor-mediated endocytosis of apoB-100 particles"
+      },
+      "difficulty": "hard",
+      "stem_html": "<p>A 19-year-old man is evaluated after his father has a myocardial infarction at age 38. His fasting LDL cholesterol is 332 mg/dL and triglycerides are normal. Firm nodules are present along both Achilles tendons. Cultured hepatocytes bind fluorescently labeled LDL normally at the cell surface, but the receptor-ligand complexes fail to cluster in coated pits and remain on the plasma membrane. Which cellular process is primarily defective?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Clathrin-mediated internalization of LDL receptor–apoB-100 complexes"
+        },
+        {
+          "id": 2,
+          "text_html": "Lysosomal hydrolysis of cholesteryl esters after normal endocytosis"
+        },
+        {
+          "id": 3,
+          "text_html": "Transfer of cholesterol from HDL to VLDL by cholesteryl ester transfer protein"
+        },
+        {
+          "id": 4,
+          "text_html": "Assembly of apoB-48-containing chylomicrons in intestinal enterocytes"
+        },
+        {
+          "id": 5,
+          "text_html": "Hydrolysis of circulating triglycerides by lipoprotein lipase"
+        }
+      ],
+      "correct_option_id": 1,
+      "explanation_html": "<p>The phenotype is familial hypercholesterolemia with isolated severe LDL elevation, tendon xanthomas, and premature coronary disease. Preserved ligand binding with failure to enter coated pits localizes the defect to receptor internalization. LDL receptor–bound apoB-100 particles normally cluster in clathrin-coated pits, enter endosomes, release LDL at low pH, and allow receptor recycling. Failure of this step markedly reduces hepatic LDL clearance.</p>",
+      "wrong_choice_explanations": {
+        "2": "Defective lysosomal acid lipase causes intracellular cholesteryl-ester accumulation after uptake and is associated with hepatic disease rather than preserved surface-bound LDL that cannot enter coated pits.",
+        "3": "CETP exchanges cholesteryl esters and triglycerides between lipoproteins; it does not mediate hepatic LDL-receptor internalization.",
+        "4": "ApoB-48 and chylomicron assembly concern dietary lipid transport and would prominently affect triglycerides.",
+        "5": "Lipoprotein lipase clears triglyceride-rich particles; deficiency produces severe hypertriglyceridemia rather than isolated LDL elevation."
+      },
+      "educational_objective": "Connect preserved LDL binding but defective coated-pit internalization to impaired hepatic clearance of apoB-100 particles in familial hypercholesterolemia.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/fh-ldlr-coated-pit-endocytosis.svg",
+          "placement": "question",
+          "type": "original_vector_cellular_transport",
+          "alt_text": "Connect preserved LDL binding but defective coated-pit internalization to impaired hepatic clearance of apoB-100 particles in familial hypercholesterolemia.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "gene_review",
+          "citation": "Familial Hypercholesterolemia. GeneReviews. Updated January 30, 2025. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK174884/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending_full_7937_stem_scan",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B014-CV-EISENMENGER-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Cardiovascular System",
+        "subsystem": "Congenital heart disease",
+        "topic": "Ventricular septal defect and Eisenmenger syndrome",
+        "subtopic": "Pulmonary vascular remodeling and shunt reversal"
+      },
+      "difficulty": "hard",
+      "stem_html": "<p>A 27-year-old woman with an unrepaired large ventricular septal defect develops progressive exertional dyspnea, digital clubbing, and resting oxygen saturation of 84%. The loud holosystolic murmur documented in childhood is now faint, and the pulmonic component of S2 is accentuated. Echocardiography shows bidirectional flow across the defect. Which hemodynamic change most directly produced the current right-to-left component?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Progressive fall in systemic vascular resistance caused by chronic anemia"
+        },
+        {
+          "id": 2,
+          "text_html": "Pulmonary arteriolar remodeling that raised pulmonary vascular resistance above systemic vascular resistance"
+        },
+        {
+          "id": 3,
+          "text_html": "Spontaneous reduction in the size of the ventricular septal defect"
+        },
+        {
+          "id": 4,
+          "text_html": "Development of severe left ventricular outflow obstruction"
+        },
+        {
+          "id": 5,
+          "text_html": "Acute closure of the ductus arteriosus"
+        }
+      ],
+      "correct_option_id": 2,
+      "explanation_html": "<p>A large VSD initially produces left-to-right flow because systemic pressure exceeds pulmonary pressure. Chronic pulmonary overcirculation causes medial hypertrophy and intimal proliferation in pulmonary arterioles. Once pulmonary vascular resistance becomes sufficiently high, right-sided pressure approaches or exceeds systemic pressure and the shunt becomes bidirectional or right-to-left, producing cyanosis and clubbing. The murmur can become softer as the ventricular pressure gradient narrows.</p>",
+      "wrong_choice_explanations": {
+        "1": "Lower systemic resistance can transiently favor right-to-left flow, but the defining irreversible mechanism of Eisenmenger physiology is severe pulmonary vascular remodeling.",
+        "3": "A smaller VSD would restrict flow and increase the pressure gradient rather than create pulmonary hypertension with shunt reversal.",
+        "4": "Left ventricular outflow obstruction is not the expected acquired consequence of a large VSD and does not explain progressive pulmonary hypertension.",
+        "5": "Ductal closure is a neonatal event and does not explain adult reversal of a VSD shunt."
+      },
+      "educational_objective": "Explain Eisenmenger syndrome as reversal of a chronic large VSD shunt after pulmonary vascular resistance exceeds systemic resistance.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/vsd-eisenmenger-shunt-reversal.svg",
+          "placement": "question",
+          "type": "original_vector_pressure_flow",
+          "alt_text": "Explain Eisenmenger syndrome as reversal of a chronic large VSD shunt after pulmonary vascular resistance exceeds systemic resistance.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "government_academic_review",
+          "citation": "Ventricular Septal Defect. StatPearls. Updated October 16, 2024. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK470330/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending_full_7937_stem_scan",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B014-CV-COARCTATION-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Cardiovascular System",
+        "subsystem": "Congenital vascular disease",
+        "topic": "Coarctation of the aorta",
+        "subtopic": "Intercostal collateral circulation and rib notching"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 34-year-old man has headaches and exertional leg fatigue. Blood pressure is 176/92 mm Hg in both arms and 112/70 mm Hg in the legs. Femoral pulses are delayed. Chest radiography shows inferior notching of ribs 4 through 8. Which collateral pathway most directly accounts for the rib changes and distal aortic perfusion?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Common carotid arteries to vertebral arteries to the basilar artery"
+        },
+        {
+          "id": 2,
+          "text_html": "Pulmonary arteries to bronchial arteries to pulmonary veins"
+        },
+        {
+          "id": 3,
+          "text_html": "Subclavian arteries to internal thoracic arteries to anterior and posterior intercostal arteries to the descending aorta"
+        },
+        {
+          "id": 4,
+          "text_html": "Celiac artery to inferior phrenic arteries to the ascending aorta"
+        },
+        {
+          "id": 5,
+          "text_html": "External iliac arteries to inferior epigastric arteries to the aortic arch"
+        }
+      ],
+      "correct_option_id": 3,
+      "explanation_html": "<p>Postductal coarctation distal to the left subclavian artery creates upper-extremity hypertension and lower-extremity hypoperfusion. Blood bypasses the narrowing through enlarged subclavian-derived internal thoracic and intercostal channels. High flow in the posterior intercostal arteries erodes the inferior rib margins, producing rib notching.</p>",
+      "wrong_choice_explanations": {
+        "1": "Carotid-vertebrobasilar flow supplies the brain and does not bypass aortic coarctation to perfuse the descending aorta.",
+        "2": "Bronchial-pulmonary collateral flow does not generate the classic intercostal rib notching.",
+        "4": "Celiac and inferior phrenic arteries are distal to the usual lesion and cannot provide the principal proximal-to-distal bypass.",
+        "5": "This pathway begins distal to the obstruction and does not connect the subclavian circulation to the descending thoracic aorta."
+      },
+      "educational_objective": "Trace the subclavian–internal thoracic–intercostal collateral route that bypasses postductal coarctation and produces inferior rib notching.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/coarctation-intercostal-collaterals.svg",
+          "placement": "question",
+          "type": "original_vector_vascular_anatomy",
+          "alt_text": "Trace the subclavian–internal thoracic–intercostal collateral route that bypasses postductal coarctation and produces inferior rib notching.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "government_academic_review",
+          "citation": "Coarctation of the Aorta. StatPearls. Updated December 11, 2024. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK430913/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending_full_7937_stem_scan",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B014-RENAL-MCD-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Renal & Urinary System",
+        "subsystem": "Glomerular disease",
+        "topic": "Minimal change disease",
+        "subtopic": "Podocyte foot-process effacement"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 6-year-old boy develops periorbital edema 1 week after an upper respiratory illness. Urinalysis shows 4+ protein without blood, serum albumin is low, and complement levels are normal. He rapidly enters remission after glucocorticoid therapy. Which renal biopsy pattern is most likely?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Diffuse capillary-wall thickening with granular IgG and subepithelial deposits"
+        },
+        {
+          "id": 2,
+          "text_html": "Segmental sclerosis in selected glomeruli with podocyte loss"
+        },
+        {
+          "id": 3,
+          "text_html": "Mesangial proliferation with dominant IgA deposition"
+        },
+        {
+          "id": 4,
+          "text_html": "Nearly normal light microscopy, negative immunofluorescence, and diffuse foot-process effacement on electron microscopy"
+        },
+        {
+          "id": 5,
+          "text_html": "Linear IgG staining of glomerular basement membranes with crescent formation"
+        }
+      ],
+      "correct_option_id": 4,
+      "explanation_html": "<p>Minimal change disease is the prototypic steroid-responsive nephrotic syndrome of childhood. Light microscopy is normal or nearly normal, immunofluorescence lacks immune-complex deposition, and electron microscopy shows diffuse effacement of podocyte foot processes. Functional podocyte injury increases albumin permeability without producing a visible immune deposit.</p>",
+      "wrong_choice_explanations": {
+        "1": "This pattern describes membranous nephropathy.",
+        "2": "This describes focal segmental glomerulosclerosis, which is less consistently steroid responsive and shows segmental scar formation.",
+        "3": "Mesangial IgA deposition causes IgA nephropathy, usually with hematuria rather than isolated nephrotic syndrome.",
+        "5": "Linear IgG and crescents indicate anti-GBM disease."
+      },
+      "educational_objective": "Recognize minimal change disease from the triad of normal light microscopy, negative immunofluorescence, and diffuse podocyte foot-process effacement.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/minimal-change-three-modality-panel.svg",
+          "placement": "question",
+          "type": "original_vector_pathology_panel",
+          "alt_text": "Recognize minimal change disease from the triad of normal light microscopy, negative immunofluorescence, and diffuse podocyte foot-process effacement.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "government_academic_review",
+          "citation": "Minimal Change Disease. StatPearls. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK560639/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending_full_7937_stem_scan",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B014-RENAL-IGA-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Renal & Urinary System",
+        "subsystem": "Glomerular disease",
+        "topic": "IgA nephropathy",
+        "subtopic": "Galactose-deficient IgA1 immune complexes"
+      },
+      "difficulty": "hard",
+      "stem_html": "<p>A 17-year-old boy has visible hematuria beginning 24 hours after the onset of pharyngitis. Serum complement concentrations are normal. Kidney biopsy shows mesangial hypercellularity and granular mesangial IgA deposition. Which sequence best describes the disease mechanism?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Antibody binding to a uniformly distributed type IV collagen antigen in the glomerular basement membrane"
+        },
+        {
+          "id": 2,
+          "text_html": "Subepithelial deposition of antibodies directed against podocyte phospholipase A2 receptor"
+        },
+        {
+          "id": 3,
+          "text_html": "Neutrophil activation by proteinase-3 antibodies with pauci-immune capillary necrosis"
+        },
+        {
+          "id": 4,
+          "text_html": "Failure to clear streptococcal immune complexes followed by subepithelial hump formation"
+        },
+        {
+          "id": 5,
+          "text_html": "Production of galactose-deficient IgA1, formation of antiglycan autoantibodies, and mesangial deposition of circulating immune complexes"
+        }
+      ],
+      "correct_option_id": 5,
+      "explanation_html": "<p>IgA nephropathy is associated with aberrantly O-glycosylated, galactose-deficient IgA1. Antibodies recognize these altered hinge-region glycans, creating circulating immune complexes that deposit in the mesangium and activate inflammatory pathways. Hematuria occurring during or within a few days of a mucosal infection is characteristic.</p>",
+      "wrong_choice_explanations": {
+        "1": "Direct anti-type IV collagen binding causes anti-GBM disease and linear immunofluorescence.",
+        "2": "Anti-PLA2R immune deposits produce primary membranous nephropathy and nephrotic proteinuria.",
+        "3": "PR3-ANCA is associated with granulomatosis with polyangiitis and pauci-immune glomerulonephritis.",
+        "4": "Poststreptococcal glomerulonephritis follows infection after a latent period and typically lowers complement."
+      },
+      "educational_objective": "Connect galactose-deficient IgA1 and antiglycan antibodies to mesangial immune-complex deposition and synpharyngitic hematuria.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/iga-nephropathy-four-hit-pathway.svg",
+          "placement": "question",
+          "type": "original_vector_immunopathogenesis",
+          "alt_text": "Connect galactose-deficient IgA1 and antiglycan antibodies to mesangial immune-complex deposition and synpharyngitic hematuria.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "peer_reviewed_mechanism",
+          "citation": "Autoantibodies targeting galactose-deficient IgA1 associate with progression of IgA nephropathy. J Am Soc Nephrol. 2012. Accessed August 4, 2026.",
+          "url": "https://pubmed.ncbi.nlm.nih.gov/22904352/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending_full_7937_stem_scan",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B014-RENAL-RTA4-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Renal & Urinary System",
+        "subsystem": "Tubular acid-base disorders",
+        "topic": "Type IV renal tubular acidosis",
+        "subtopic": "Hypoaldosteronism, hyperkalemia, and reduced ammonium excretion"
+      },
+      "difficulty": "hard",
+      "stem_html": "<p>A 63-year-old man with diabetic nephropathy takes lisinopril. Laboratory studies show potassium 6.0 mEq/L, chloride 113 mEq/L, bicarbonate 17 mEq/L, and a normal anion gap. Urine pH is 5.1 and the urine anion gap is positive. Which mechanism best explains the impaired net acid excretion?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Hyperkalemia suppresses proximal ammoniagenesis while reduced aldosterone effect lowers distal potassium and hydrogen secretion"
+        },
+        {
+          "id": 2,
+          "text_html": "Failure of proximal bicarbonate reabsorption causes bicarbonaturia despite severe hypobicarbonatemia"
+        },
+        {
+          "id": 3,
+          "text_html": "Autoimmune destruction of alpha-intercalated cells prevents urine pH from falling below 5.5"
+        },
+        {
+          "id": 4,
+          "text_html": "Urease-positive bacteria consume urinary hydrogen ions and generate ammonium"
+        },
+        {
+          "id": 5,
+          "text_html": "Excess aldosterone stimulates ENaC and creates an exaggerated lumen-negative potential"
+        }
+      ],
+      "correct_option_id": 1,
+      "explanation_html": "<p>Type IV RTA results from aldosterone deficiency or resistance, commonly in diabetic kidney disease and with renin-angiotensin-system blockade. Reduced ENaC-driven lumen negativity impairs distal potassium and hydrogen secretion. The resulting hyperkalemia suppresses proximal ammonia generation, so urinary ammonium excretion falls. Urine can still be acidic because the limitation is inadequate ammonium buffer rather than complete inability to secrete hydrogen ions.</p>",
+      "wrong_choice_explanations": {
+        "2": "Proximal type II RTA causes bicarbonate wasting and is usually associated with low potassium rather than hyperkalemia.",
+        "3": "Distal type I RTA causes inappropriately alkaline urine and is usually associated with hypokalemia.",
+        "4": "Urease-producing infection alkalinizes urine but does not cause the characteristic hyperkalemic RTA physiology.",
+        "5": "Excess aldosterone would increase potassium and hydrogen excretion rather than produce hyperkalemia and acidosis."
+      },
+      "educational_objective": "Explain type IV RTA through reduced aldosterone effect, hyperkalemia-mediated suppression of ammoniagenesis, and low urinary ammonium despite urine pH below 5.5.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/type4-rta-aldosterone-ammonium.svg",
+          "placement": "question",
+          "type": "original_vector_nephron_pathway",
+          "alt_text": "Explain type IV RTA through reduced aldosterone effect, hyperkalemia-mediated suppression of ammoniagenesis, and low urinary ammonium despite urine pH below 5.5.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "government_academic_review",
+          "citation": "Renal Tubular Acidosis. StatPearls. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK519044/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending_full_7937_stem_scan",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B014-HEME-HEMOPHILIA-A-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Blood & Immune Systems",
+        "subsystem": "Coagulation disorders",
+        "topic": "Hemophilia A",
+        "subtopic": "Factor VIII and intrinsic tenase"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 9-year-old boy has recurrent painful knee swelling after minor trauma. Platelet count and prothrombin time are normal, but activated partial thromboplastin time is prolonged and immediately corrects after mixing patient plasma 1:1 with normal plasma. Factor VIII activity is markedly reduced. Which reaction is most directly impaired?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Conversion of fibrinogen to fibrin by thrombin"
+        },
+        {
+          "id": 2,
+          "text_html": "Factor IXa–factor VIIIa complex activation of factor X on a phospholipid surface"
+        },
+        {
+          "id": 3,
+          "text_html": "Tissue factor–factor VIIa activation of factor X"
+        },
+        {
+          "id": 4,
+          "text_html": "Platelet adhesion to subendothelial collagen through von Willebrand factor"
+        },
+        {
+          "id": 5,
+          "text_html": "Gamma-carboxylation of factors II, VII, IX, and X"
+        }
+      ],
+      "correct_option_id": 2,
+      "explanation_html": "<p>Factor VIIIa is the cofactor for factor IXa in the intrinsic tenase complex. Together on an activated phospholipid surface, they efficiently activate factor X. Factor VIII deficiency therefore prolongs aPTT and causes deep-tissue and joint bleeding. Correction on mixing indicates a factor deficiency rather than a persistent inhibitor.</p>",
+      "wrong_choice_explanations": {
+        "1": "Thrombin cleaves fibrinogen downstream of both intrinsic and extrinsic factor X activation.",
+        "3": "The tissue factor–VIIa complex is part of the extrinsic pathway and is reflected more directly by PT.",
+        "4": "Defective von Willebrand-mediated adhesion produces mucocutaneous bleeding and may secondarily lower factor VIII but is not the core lesion here.",
+        "5": "Vitamin K–dependent gamma-carboxylation affects multiple factors and usually prolongs PT before causing an isolated aPTT abnormality."
+      },
+      "educational_objective": "Interpret a correcting mixing study as factor deficiency and connect hemophilia A to loss of factor VIIIa support for intrinsic tenase.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/hemophilia-a-intrinsic-tenase-mixing.svg",
+          "placement": "question",
+          "type": "original_vector_coagulation",
+          "alt_text": "Interpret a correcting mixing study as factor deficiency and connect hemophilia A to loss of factor VIIIa support for intrinsic tenase.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "government_academic_reference",
+          "citation": "Coagulation Tests. Clinical Methods. NCBI Bookshelf. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK265/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending_full_7937_stem_scan",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B014-HEME-CML-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Blood & Immune Systems",
+        "subsystem": "Myeloproliferative neoplasms",
+        "topic": "Chronic myeloid leukemia",
+        "subtopic": "BCR-ABL1 constitutive tyrosine kinase"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 55-year-old man has early satiety and a spleen palpable 8 cm below the costal margin. Leukocyte count is 148,000/mm3 with neutrophils, myelocytes, metamyelocytes, and increased basophils. Leukocyte alkaline phosphatase activity is low. Cytogenetic analysis detects t(9;22)(q34;q11.2). Which molecular consequence drives this disorder?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Loss of a DNA mismatch-repair protein"
+        },
+        {
+          "id": 2,
+          "text_html": "Constitutive activation of a receptor serine-threonine kinase"
+        },
+        {
+          "id": 3,
+          "text_html": "Formation of a BCR-ABL1 fusion protein with constitutive tyrosine-kinase activity"
+        },
+        {
+          "id": 4,
+          "text_html": "Overexpression of BCL2 due to an immunoglobulin enhancer"
+        },
+        {
+          "id": 5,
+          "text_html": "Loss of retinoic-acid receptor signaling with promyelocyte arrest"
+        }
+      ],
+      "correct_option_id": 3,
+      "explanation_html": "<p>The Philadelphia chromosome creates the BCR-ABL1 fusion gene. Its protein product is a constitutively active tyrosine kinase that promotes myeloid proliferation and survival. The broad granulocytic maturation spectrum, basophilia, splenomegaly, and low LAP distinguish CML from a reactive leukemoid response.</p>",
+      "wrong_choice_explanations": {
+        "1": "Mismatch-repair loss causes microsatellite instability, not the Philadelphia chromosome myeloproliferative phenotype.",
+        "2": "BCR-ABL1 is a nonreceptor tyrosine kinase rather than a serine-threonine kinase.",
+        "4": "BCL2 overexpression from t(14;18) is characteristic of follicular lymphoma.",
+        "5": "PML-RARA from t(15;17) causes acute promyelocytic leukemia."
+      },
+      "educational_objective": "Relate the Philadelphia chromosome to constitutive BCR-ABL1 kinase signaling and the characteristic chronic-phase CML blood profile.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/cml-philadelphia-bcr-abl1.svg",
+          "placement": "question",
+          "type": "original_vector_cytogenetics",
+          "alt_text": "Relate the Philadelphia chromosome to constitutive BCR-ABL1 kinase signaling and the characteristic chronic-phase CML blood profile.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "government_academic_review",
+          "citation": "Chronic Myelogenous Leukemia. StatPearls. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK531459/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending_full_7937_stem_scan",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B014-HEME-HODGKIN-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Blood & Immune Systems",
+        "subsystem": "Lymphoid neoplasms",
+        "topic": "Classical Hodgkin lymphoma",
+        "subtopic": "Reed-Sternberg B-cell origin and reactive microenvironment"
+      },
+      "difficulty": "hard",
+      "stem_html": "<p>A 24-year-old woman has painless cervical lymphadenopathy, pruritus, and a mediastinal mass. Lymph-node biopsy shows scattered large binucleate cells with prominent nucleoli that express CD30 and CD15 with weak PAX5 staining. Most cells in the specimen are small T lymphocytes, eosinophils, plasma cells, and macrophages. Why do nonmalignant cells comprise most of the mass?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "The malignant cells cannot synthesize DNA and are replaced by proliferating stromal fibroblasts"
+        },
+        {
+          "id": 2,
+          "text_html": "Antibody-coated tumor cells activate complement and undergo immediate lysis"
+        },
+        {
+          "id": 3,
+          "text_html": "An occult bacterial infection independently recruits the inflammatory cells"
+        },
+        {
+          "id": 4,
+          "text_html": "Reed-Sternberg cells secrete cytokines and chemokines that recruit and sustain a reactive cellular microenvironment"
+        },
+        {
+          "id": 5,
+          "text_html": "All surrounding lymphocytes are clonally transformed precursors of Reed-Sternberg cells"
+        }
+      ],
+      "correct_option_id": 4,
+      "explanation_html": "<p>Classical Reed-Sternberg cells are rare neoplastic cells derived in most cases from germinal-center B cells. They produce cytokines and chemokines that attract T cells, eosinophils, macrophages, plasma cells, and other supportive cells. The reactive microenvironment provides survival signals and accounts for most of the lymph-node mass.</p>",
+      "wrong_choice_explanations": {
+        "1": "Reed-Sternberg cells are proliferative neoplastic cells; the background is not merely replacement by fibroblasts.",
+        "2": "Complement-mediated lysis is not the defining mechanism that creates the Hodgkin microenvironment.",
+        "3": "The inflammatory background is orchestrated by tumor-cell signaling and does not require a separate bacterial infection.",
+        "5": "The surrounding cells are predominantly reactive and polyclonal, not all malignant precursors."
+      },
+      "educational_objective": "Recognize classical Hodgkin lymphoma as a sparse Reed-Sternberg-cell neoplasm that builds a cytokine-recruited reactive microenvironment.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/hodgkin-rs-reactive-microenvironment.svg",
+          "placement": "question",
+          "type": "original_vector_tumor_microenvironment",
+          "alt_text": "Recognize classical Hodgkin lymphoma as a sparse Reed-Sternberg-cell neoplasm that builds a cytokine-recruited reactive microenvironment.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "government_academic_review",
+          "citation": "Reed-Sternberg Cells. StatPearls. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK542333/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending_full_7937_stem_scan",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B014-IMM-DIGEORGE-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Blood & Immune Systems",
+        "subsystem": "Primary immunodeficiency",
+        "topic": "22q11.2 deletion syndrome",
+        "subtopic": "Third and fourth pharyngeal pouch failure"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A newborn has truncus arteriosus and develops tetany on the second day of life. Calcium is low, parathyroid hormone is low, and chest radiography shows no thymic shadow. Flow cytometry shows markedly reduced mature T lymphocytes. Which developmental defect best explains this combination?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Failure of first pharyngeal arch cartilage formation"
+        },
+        {
+          "id": 2,
+          "text_html": "Persistence of the thyroglossal duct"
+        },
+        {
+          "id": 3,
+          "text_html": "Failure of neural tube closure at the cranial neuropore"
+        },
+        {
+          "id": 4,
+          "text_html": "Defective migration of primordial germ cells to the gonadal ridge"
+        },
+        {
+          "id": 5,
+          "text_html": "Abnormal development of the third and fourth pharyngeal pouches associated with impaired neural-crest contribution to conotruncal structures"
+        }
+      ],
+      "correct_option_id": 5,
+      "explanation_html": "<p>The third pharyngeal pouch gives rise to the thymus and inferior parathyroids, and the fourth contributes to the superior parathyroids. A 22q11.2 deletion disrupts pouch development and neural-crest-dependent conotruncal formation, producing T-cell deficiency, hypocalcemia, and conotruncal cardiac disease.</p>",
+      "wrong_choice_explanations": {
+        "1": "First-arch defects affect mandibular and middle-ear structures rather than thymus, parathyroids, and conotruncal septation.",
+        "2": "A persistent thyroglossal duct causes a midline neck cyst and does not explain immunodeficiency.",
+        "3": "Neural tube closure failure produces cranial or spinal dysraphism, not this pouch-derivative pattern.",
+        "4": "Primordial germ-cell migration affects gonadal development, not thymic and parathyroid formation."
+      },
+      "educational_objective": "Map thymic and parathyroid hypoplasia plus conotruncal disease to 22q11.2-associated third/fourth pouch and neural-crest developmental failure.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/digeorge-pouch-neural-crest-map.svg",
+          "placement": "question",
+          "type": "original_vector_embryology",
+          "alt_text": "Map thymic and parathyroid hypoplasia plus conotruncal disease to 22q11.2-associated third/fourth pouch and neural-crest developmental failure.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "gene_review",
+          "citation": "22q11.2 Deletion Syndrome. GeneReviews. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK1523/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending_full_7937_stem_scan",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B014-IMM-ADA-SCID-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Blood & Immune Systems",
+        "subsystem": "Primary immunodeficiency",
+        "topic": "ADA-deficient severe combined immunodeficiency",
+        "subtopic": "Deoxyadenosine toxicity and ribonucleotide-reductase inhibition"
+      },
+      "difficulty": "hard",
+      "stem_html": "<p>A 4-month-old infant has persistent oral candidiasis, chronic diarrhea, pneumonia, and failure to thrive. The thymic shadow is absent, and circulating T, B, and NK lymphocytes are all markedly reduced. Erythrocytes contain high concentrations of deoxyadenosine nucleotides. Which biochemical event most directly impairs lymphocyte proliferation?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Accumulated dATP inhibits ribonucleotide reductase and prevents balanced deoxynucleotide synthesis"
+        },
+        {
+          "id": 2,
+          "text_html": "Accumulated adenosine activates telomerase and forces premature lymphocyte senescence"
+        },
+        {
+          "id": 3,
+          "text_html": "Failure to convert hypoxanthine to uric acid depletes tetrahydrofolate"
+        },
+        {
+          "id": 4,
+          "text_html": "Excess inosine competitively inhibits DNA polymerase only in neutrophils"
+        },
+        {
+          "id": 5,
+          "text_html": "Loss of purine salvage causes isolated B-cell apoptosis without T-cell involvement"
+        }
+      ],
+      "correct_option_id": 1,
+      "explanation_html": "<p>Adenosine deaminase normally deaminates adenosine and deoxyadenosine. Deficiency permits deoxyadenosine accumulation and phosphorylation to dATP. High dATP inhibits ribonucleotide reductase, disrupting deoxynucleotide production and DNA synthesis. Immature lymphocytes are especially susceptible, producing severe combined T-, B-, and NK-cell deficiency.</p>",
+      "wrong_choice_explanations": {
+        "2": "Telomerase activation is not the principal lymphotoxic mechanism of ADA deficiency.",
+        "3": "Hypoxanthine oxidation is handled by xanthine oxidase and is not the core lesion in ADA-SCID.",
+        "4": "The toxic metabolite affects lymphocyte development broadly rather than selectively inhibiting neutrophil DNA polymerase.",
+        "5": "ADA deficiency causes combined immunodeficiency involving multiple lymphocyte lineages, not isolated B-cell loss."
+      },
+      "educational_objective": "Explain ADA-SCID through deoxyadenosine-derived dATP accumulation, ribonucleotide-reductase inhibition, and lymphocyte DNA-synthesis failure.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/ada-scid-datp-ribonucleotide-reductase.svg",
+          "placement": "question",
+          "type": "original_vector_purine_metabolism",
+          "alt_text": "Explain ADA-SCID through deoxyadenosine-derived dATP accumulation, ribonucleotide-reductase inhibition, and lymphocyte DNA-synthesis failure.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "gene_review",
+          "citation": "Adenosine Deaminase Deficiency. GeneReviews. Revised December 4, 2025. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK1483/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending_full_7937_stem_scan",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B014-NEURO-ALZHEIMER-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Nervous System",
+        "subsystem": "Neurodegeneration",
+        "topic": "Alzheimer disease",
+        "subtopic": "Amyloidogenic APP processing"
+      },
+      "difficulty": "hard",
+      "stem_html": "<p>A 52-year-old woman develops progressive impairment of recent memory and executive function. Her mother and two maternal uncles had dementia before age 60. Genetic testing identifies a pathogenic variant near an amyloid precursor protein cleavage site that increases the Aβ42-to-Aβ40 ratio. Which processing pathway generates the aggregation-prone peptide?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Initial cleavage of APP by alpha-secretase followed by lysosomal proteolysis"
+        },
+        {
+          "id": 2,
+          "text_html": "Sequential cleavage of APP by beta-secretase and gamma-secretase"
+        },
+        {
+          "id": 3,
+          "text_html": "Proteasomal cleavage of tau followed by extracellular phosphorylation"
+        },
+        {
+          "id": 4,
+          "text_html": "Direct conversion of apolipoprotein E into an amyloid peptide"
+        },
+        {
+          "id": 5,
+          "text_html": "Caspase cleavage of presenilin followed by alpha-secretase activation"
+        }
+      ],
+      "correct_option_id": 2,
+      "explanation_html": "<p>In the amyloidogenic pathway, beta-secretase cleaves APP outside the membrane and gamma-secretase cleaves the remaining transmembrane fragment, generating Aβ peptides. Aβ42 is more aggregation prone than Aβ40. Alpha-secretase cuts within the Aβ sequence and therefore prevents formation of intact Aβ.</p>",
+      "wrong_choice_explanations": {
+        "1": "Alpha-secretase processing is nonamyloidogenic because it cleaves within the Aβ region.",
+        "3": "Tau undergoes abnormal phosphorylation and forms intracellular tangles, but it is not the precursor of Aβ.",
+        "4": "APOE modifies Alzheimer risk and amyloid handling but is not proteolytically converted into Aβ.",
+        "5": "Presenilin is a catalytic component of gamma-secretase; this sequence does not describe APP amyloidogenesis."
+      },
+      "educational_objective": "Contrast nonamyloidogenic alpha-secretase processing with beta/gamma-secretase generation of aggregation-prone Aβ42.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/alzheimer-app-secretase-pathways.svg",
+          "placement": "question",
+          "type": "original_vector_membrane_processing",
+          "alt_text": "Contrast nonamyloidogenic alpha-secretase processing with beta/gamma-secretase generation of aggregation-prone Aβ42.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "government_academic_review",
+          "citation": "Amyloid Beta Peptide. StatPearls. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK459119/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending_full_7937_stem_scan",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B014-NEURO-HUNTINGTON-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Nervous System",
+        "subsystem": "Neurodegeneration",
+        "topic": "Huntington disease",
+        "subtopic": "CAG-repeat expansion and paternal anticipation"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 31-year-old man develops irritability, depression, and involuntary dance-like movements. MRI shows caudate atrophy with enlargement of the frontal horns of the lateral ventricles. His father developed similar symptoms at age 49. Molecular testing confirms an expanded CAG tract in HTT. Which process best explains the son&#x27;s earlier onset?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Maternal mitochondrial heteroplasmy"
+        },
+        {
+          "id": 2,
+          "text_html": "Genomic imprinting that silences the maternal HTT allele"
+        },
+        {
+          "id": 3,
+          "text_html": "Further CAG expansion during paternal gametogenesis"
+        },
+        {
+          "id": 4,
+          "text_html": "Somatic deletion of both HTT alleles in striatal neurons"
+        },
+        {
+          "id": 5,
+          "text_html": "X-linked transmission with lyonization"
+        }
+      ],
+      "correct_option_id": 3,
+      "explanation_html": "<p>Huntington disease is an autosomal dominant CAG-repeat disorder. The repeat is unstable, especially during spermatogenesis, and may expand when transmitted by an affected father. Larger repeats generally produce earlier onset, generating paternal anticipation.</p>",
+      "wrong_choice_explanations": {
+        "1": "Huntington disease is caused by a nuclear HTT repeat expansion, not mitochondrial inheritance.",
+        "2": "HTT is not expressed through the parent-of-origin silencing pattern described.",
+        "4": "The disease is a toxic gain-of-function repeat disorder rather than a biallelic somatic deletion.",
+        "5": "HTT is on chromosome 4, not the X chromosome."
+      },
+      "educational_objective": "Connect paternal anticipation in Huntington disease to germline CAG expansion and relate the mutation to caudate-predominant neurodegeneration.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/huntington-paternal-cag-anticipation.svg",
+          "placement": "question",
+          "type": "original_vector_genetics_neuroanatomy",
+          "alt_text": "Connect paternal anticipation in Huntington disease to germline CAG expansion and relate the mutation to caudate-predominant neurodegeneration.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "gene_review",
+          "citation": "Huntington Disease. GeneReviews. Updated 2026. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK1305/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending_full_7937_stem_scan",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B014-NEURO-ABSENCE-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Nervous System",
+        "subsystem": "Seizure disorders",
+        "topic": "Childhood absence epilepsy",
+        "subtopic": "Thalamic T-type calcium current"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 7-year-old girl has dozens of daily episodes in which she abruptly stops speaking, stares, and resumes activity 8 seconds later without confusion. Hyperventilation in clinic provokes an event. EEG shows generalized 3-Hz spike-and-wave discharges. Which drug action most selectively treats this seizure type?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Enhancement of GABA degradation in the cerebral cortex"
+        },
+        {
+          "id": 2,
+          "text_html": "Persistent activation of voltage-gated sodium channels"
+        },
+        {
+          "id": 3,
+          "text_html": "Blockade of NMDA receptors in hippocampal neurons"
+        },
+        {
+          "id": 4,
+          "text_html": "Reduction of low-threshold T-type calcium currents in thalamic neurons"
+        },
+        {
+          "id": 5,
+          "text_html": "Inhibition of peripheral acetylcholinesterase"
+        }
+      ],
+      "correct_option_id": 4,
+      "explanation_html": "<p>Typical childhood absence seizures arise from hypersynchronous thalamocortical oscillation and show a classic 3-Hz spike-wave pattern. Ethosuximide reduces low-threshold T-type calcium currents in thalamic neurons, disrupting burst firing. It is selective for absence seizures and does not treat generalized tonic-clonic seizures.</p>",
+      "wrong_choice_explanations": {
+        "1": "Increasing GABA degradation would reduce inhibitory signaling and is not the mechanism of ethosuximide.",
+        "2": "Persistent sodium-channel activation promotes excitability rather than suppressing absence seizures.",
+        "3": "NMDA antagonism is not the selective first-line mechanism for uncomplicated childhood absence epilepsy.",
+        "5": "Peripheral acetylcholinesterase has no role in the thalamocortical circuit generating absence seizures."
+      },
+      "educational_objective": "Recognize childhood absence epilepsy and link ethosuximide efficacy to blockade of thalamic T-type calcium currents.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/absence-3hz-thalamic-t-type.svg",
+          "placement": "question",
+          "type": "original_vector_eeg_circuit",
+          "alt_text": "Recognize childhood absence epilepsy and link ethosuximide efficacy to blockade of thalamic T-type calcium currents.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "government_academic_review",
+          "citation": "Ethosuximide. StatPearls. Updated July 2, 2024. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK544244/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending_full_7937_stem_scan",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B014-TOX-ORGANOPHOSPHATE-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Multisystem Processes & Disorders",
+        "subsystem": "Toxicology",
+        "topic": "Organophosphate poisoning",
+        "subtopic": "Acetylcholinesterase phosphorylation and aging"
+      },
+      "difficulty": "hard",
+      "stem_html": "<p>A farm worker is brought to the emergency department after pesticide exposure. He has miosis, bronchorrhea, wheezing, vomiting, diarrhea, bradycardia, muscle fasciculations, and confusion. Atropine is given immediately, followed by pralidoxime. Why does the benefit of pralidoxime decrease when administration is substantially delayed?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Atropine irreversibly occupies all nicotinic receptors"
+        },
+        {
+          "id": 2,
+          "text_html": "Acetylcholine is depleted from presynaptic terminals"
+        },
+        {
+          "id": 3,
+          "text_html": "Muscarinic receptors are internalized and cannot be reactivated"
+        },
+        {
+          "id": 4,
+          "text_html": "Pralidoxime is converted into an acetylcholinesterase inhibitor"
+        },
+        {
+          "id": 5,
+          "text_html": "The phosphorylated acetylcholinesterase complex undergoes aging, strengthening the bond and preventing oxime-mediated reactivation"
+        }
+      ],
+      "correct_option_id": 5,
+      "explanation_html": "<p>Organophosphates phosphorylate acetylcholinesterase. Pralidoxime can remove the phosphate group and regenerate the enzyme if given before aging. With time, dealkylation of the inhibited complex strengthens the phosphorus-enzyme bond, making reactivation ineffective. Atropine still treats muscarinic receptor effects but does not restore the enzyme or reverse nicotinic weakness.</p>",
+      "wrong_choice_explanations": {
+        "1": "Atropine is a reversible muscarinic antagonist and does not occupy nicotinic receptors.",
+        "2": "Acetylcholine accumulates because its degradation is blocked.",
+        "3": "Receptor internalization is not the reason pralidoxime loses efficacy.",
+        "4": "Pralidoxime is an oxime reactivator rather than a pro-inhibitor of acetylcholinesterase."
+      },
+      "educational_objective": "Distinguish atropine receptor antagonism from pralidoxime enzyme reactivation and explain the time dependence created by acetylcholinesterase aging.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/organophosphate-ache-aging-pralidoxime.svg",
+          "placement": "question",
+          "type": "original_vector_toxicology",
+          "alt_text": "Distinguish atropine receptor antagonism from pralidoxime enzyme reactivation and explain the time dependence created by acetylcholinesterase aging.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "government_academic_review",
+          "citation": "Organophosphate Toxicity. StatPearls. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK470430/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending_full_7937_stem_scan",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B014-TOX-ACETAMINOPHEN-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Multisystem Processes & Disorders",
+        "subsystem": "Toxicology",
+        "topic": "Acetaminophen toxicity",
+        "subtopic": "NAPQI formation, glutathione depletion, and N-acetylcysteine"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 22-year-old woman presents 10 hours after ingesting a large amount of acetaminophen. She initially had nausea but now feels better. Serum testing indicates a toxic exposure, and N-acetylcysteine is started. Which action of this antidote most directly limits hepatic injury?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Replenishment of cysteine and glutathione capacity for detoxification of the reactive metabolite NAPQI"
+        },
+        {
+          "id": 2,
+          "text_html": "Competitive inhibition of cyclooxygenase in hepatocytes"
+        },
+        {
+          "id": 3,
+          "text_html": "Blockade of intestinal acetaminophen absorption by opioid receptors"
+        },
+        {
+          "id": 4,
+          "text_html": "Activation of UDP-glucuronosyltransferase through nuclear thyroid receptors"
+        },
+        {
+          "id": 5,
+          "text_html": "Neutralization of acetaminophen by circulating immunoglobulin"
+        }
+      ],
+      "correct_option_id": 1,
+      "explanation_html": "<p>A small fraction of acetaminophen is oxidized by cytochrome P450 to NAPQI. In overdose, sulfation and glucuronidation saturate and hepatic glutathione is depleted, allowing NAPQI to bind cellular proteins, especially in centrilobular hepatocytes. N-acetylcysteine supplies cysteine for glutathione synthesis and can also support direct reduction and alternative metabolism of the toxic intermediate.</p>",
+      "wrong_choice_explanations": {
+        "2": "Cyclooxygenase inhibition is related to analgesic action and does not detoxify NAPQI.",
+        "3": "Opioid receptors do not mediate acetaminophen absorption.",
+        "4": "N-acetylcysteine does not act through thyroid receptors to induce glucuronidation.",
+        "5": "No clinically relevant antibody neutralization mechanism is involved."
+      },
+      "educational_objective": "Explain acetaminophen hepatotoxicity through NAPQI accumulation and identify glutathione restoration as the central rescue mechanism of N-acetylcysteine.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/acetaminophen-napqi-glutathione-nac.svg",
+          "placement": "question",
+          "type": "original_vector_metabolic_pathway",
+          "alt_text": "Explain acetaminophen hepatotoxicity through NAPQI accumulation and identify glutathione restoration as the central rescue mechanism of N-acetylcysteine.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "government_academic_review",
+          "citation": "Acetaminophen Toxicity. StatPearls. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK441917/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending_full_7937_stem_scan",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B014-GI-FAP-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Colorectal neoplasia",
+        "topic": "Familial adenomatous polyposis",
+        "subtopic": "APC–beta-catenin destruction complex"
+      },
+      "difficulty": "hard",
+      "stem_html": "<p>A 16-year-old boy undergoes colonoscopy because his father had colectomy at age 25. Hundreds of adenomatous polyps carpet the colon. Genetic testing identifies a germline loss-of-function variant in APC. Which intracellular consequence initiates adenoma formation?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Failure of mismatch repair leading directly to microsatellite instability"
+        },
+        {
+          "id": 2,
+          "text_html": "Failure of the APC destruction complex to degrade beta-catenin, allowing nuclear Wnt-target transcription"
+        },
+        {
+          "id": 3,
+          "text_html": "Constitutive activation of a receptor tyrosine kinase in colonic endocrine cells"
+        },
+        {
+          "id": 4,
+          "text_html": "Loss of SMAD4-mediated response to transforming growth factor beta as the obligatory first hit"
+        },
+        {
+          "id": 5,
+          "text_html": "Excessive degradation of beta-catenin with suppression of crypt proliferation"
+        }
+      ],
+      "correct_option_id": 2,
+      "explanation_html": "<p>APC is a tumor suppressor in the beta-catenin destruction complex with proteins including GSK3β. When APC function is lost, beta-catenin escapes phosphorylation and proteasomal degradation, accumulates in the nucleus, and activates Wnt-responsive proliferative genes. A second somatic hit in the remaining APC allele initiates widespread adenoma formation.</p>",
+      "wrong_choice_explanations": {
+        "1": "Mismatch-repair defects characterize Lynch syndrome rather than classic FAP.",
+        "3": "RET and other receptor tyrosine kinases drive different hereditary tumor syndromes.",
+        "4": "TGF-beta pathway loss can occur later in colorectal progression but is not the defining initiating lesion of FAP.",
+        "5": "APC loss stabilizes rather than accelerates degradation of beta-catenin."
+      },
+      "educational_objective": "Connect biallelic APC loss to beta-catenin stabilization, Wnt-target transcription, and the diffuse colorectal adenoma phenotype of FAP.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/fap-apc-beta-catenin-destruction.svg",
+          "placement": "question",
+          "type": "original_vector_cell_signaling",
+          "alt_text": "Connect biallelic APC loss to beta-catenin stabilization, Wnt-target transcription, and the diffuse colorectal adenoma phenotype of FAP.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "gene_review",
+          "citation": "APC-Associated Polyposis Conditions. GeneReviews. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK1345/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending_full_7937_stem_scan",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B014-GI-HEMOCHROMATOSIS-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Hepatic metabolic disease",
+        "topic": "Hereditary hemochromatosis",
+        "subtopic": "Hepcidin–ferroportin regulation"
+      },
+      "difficulty": "hard",
+      "stem_html": "<p>A 52-year-old man has fatigue, bronze skin, diabetes, second- and third-metacarpophalangeal arthropathy, and elevated aminotransferases. Transferrin saturation is 82% and ferritin is markedly elevated. He is homozygous for HFE C282Y. Which regulatory abnormality most directly causes progressive iron loading?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Excess hepcidin causes ferroportin degradation and traps iron in enterocytes"
+        },
+        {
+          "id": 2,
+          "text_html": "Defective transferrin synthesis prevents iron delivery to hepatocytes"
+        },
+        {
+          "id": 3,
+          "text_html": "Inappropriately low hepcidin permits persistent ferroportin-mediated iron export from enterocytes and macrophages"
+        },
+        {
+          "id": 4,
+          "text_html": "Loss of ferritin synthesis releases all intracellular iron into plasma"
+        },
+        {
+          "id": 5,
+          "text_html": "Excess erythropoietin blocks duodenal iron absorption"
+        }
+      ],
+      "correct_option_id": 3,
+      "explanation_html": "<p>HFE participates in hepatic iron sensing and hepcidin induction. In HFE-related hemochromatosis, hepcidin is inappropriately low for body iron stores. Ferroportin therefore remains active on enterocytes and macrophages, increasing dietary iron entry and recycled iron release into plasma. Transferrin saturation rises, followed by parenchymal iron deposition and organ injury.</p>",
+      "wrong_choice_explanations": {
+        "1": "High hepcidin would reduce plasma iron by degrading ferroportin; the disease involves inadequate hepcidin signaling.",
+        "2": "Low transferrin would not explain the characteristic high transferrin saturation and increased absorption.",
+        "4": "Ferritin may rise as a storage response; absent ferritin synthesis is not the HFE mechanism.",
+        "5": "Erythropoietic drive can suppress hepcidin, but HFE hemochromatosis is not caused by erythropoietin blocking absorption."
+      },
+      "educational_objective": "Explain HFE-related iron overload through deficient hepcidin induction and unrestrained ferroportin-mediated intestinal absorption and macrophage iron release.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/hemochromatosis-hepcidin-ferroportin.svg",
+          "placement": "question",
+          "type": "original_vector_iron_homeostasis",
+          "alt_text": "Explain HFE-related iron overload through deficient hepcidin induction and unrestrained ferroportin-mediated intestinal absorption and macrophage iron release.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "gene_review",
+          "citation": "HFE-Related Hemochromatosis. GeneReviews. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK1440/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending_full_7937_stem_scan",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B014-ENDO-MEN2-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Reproductive & Endocrine Systems",
+        "subsystem": "Hereditary endocrine neoplasia",
+        "topic": "Multiple endocrine neoplasia type 2",
+        "subtopic": "Activating RET mutation"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 29-year-old woman has a thyroid nodule, episodic headache, diaphoresis, and severe hypertension. Her father had medullary thyroid carcinoma and a paternal aunt had pheochromocytoma. Fine-needle aspiration of the thyroid lesion shows calcitonin-positive cells. Which inherited molecular alteration is most likely?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Loss-of-function mutation of MEN1 encoding menin"
+        },
+        {
+          "id": 2,
+          "text_html": "Loss-of-function mutation of VHL with hypoxia-inducible-factor stabilization"
+        },
+        {
+          "id": 3,
+          "text_html": "Loss-of-function mutation of APC"
+        },
+        {
+          "id": 4,
+          "text_html": "Germline gain-of-function mutation of the RET receptor tyrosine kinase"
+        },
+        {
+          "id": 5,
+          "text_html": "Mitochondrial mutation affecting succinate dehydrogenase in every MEN2 family"
+        }
+      ],
+      "correct_option_id": 4,
+      "explanation_html": "<p>MEN2 is an autosomal dominant syndrome caused by activating germline RET variants. MEN2A and MEN2B carry high risk of medullary thyroid carcinoma and pheochromocytoma; MEN2A can also include primary hyperparathyroidism. Pheochromocytoma should be evaluated and treated before thyroid surgery to avoid catecholamine crisis.</p>",
+      "wrong_choice_explanations": {
+        "1": "MEN1 loss causes parathyroid, pituitary, and pancreatic endocrine tumors rather than the classic medullary thyroid–pheochromocytoma combination.",
+        "2": "VHL loss can cause pheochromocytoma but is associated with hemangioblastomas and clear-cell renal carcinoma, not familial medullary thyroid carcinoma.",
+        "3": "APC loss causes familial adenomatous polyposis.",
+        "5": "Succinate-dehydrogenase variants cause some hereditary paraganglioma syndromes but are not the defining cause of MEN2."
+      },
+      "educational_objective": "Recognize MEN2 from medullary thyroid carcinoma and pheochromocytoma and identify germline RET activation as the inherited driver.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/men2-ret-thyroid-adrenal-pedigree.svg",
+          "placement": "question",
+          "type": "original_vector_receptor_pedigree",
+          "alt_text": "Recognize MEN2 from medullary thyroid carcinoma and pheochromocytoma and identify germline RET activation as the inherited driver.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "gene_review",
+          "citation": "Multiple Endocrine Neoplasia Type 2. GeneReviews. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK1257/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending_full_7937_stem_scan",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-B014-ENDO-ADDISON-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Reproductive & Endocrine Systems",
+        "subsystem": "Adrenal disorders",
+        "topic": "Primary adrenal insufficiency",
+        "subtopic": "POMC-derived melanocortin signaling and hyperpigmentation"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 36-year-old woman has progressive fatigue, weight loss, salt craving, postural dizziness, and diffuse darkening of palmar creases and oral mucosa. Sodium is 126 mEq/L, potassium is 5.8 mEq/L, morning cortisol is low, and ACTH is markedly elevated. Which mechanism causes the hyperpigmentation?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Excess aldosterone directly activates melanocortin-1 receptors"
+        },
+        {
+          "id": 2,
+          "text_html": "Low ACTH increases tyrosinase expression through a feedback-independent pathway"
+        },
+        {
+          "id": 3,
+          "text_html": "Adrenal androgens are converted to melanin in keratinocytes"
+        },
+        {
+          "id": 4,
+          "text_html": "Renin stimulates melanocytes through angiotensin II receptors"
+        },
+        {
+          "id": 5,
+          "text_html": "Loss of cortisol feedback increases POMC production, generating ACTH and melanocortin peptides that stimulate melanocyte MC1 receptors"
+        }
+      ],
+      "correct_option_id": 5,
+      "explanation_html": "<p>Primary adrenal failure lowers cortisol and aldosterone. Loss of cortisol negative feedback increases CRH, POMC transcription, and ACTH. ACTH shares melanocortin activity in its amino-terminal sequence, and POMC processing also generates melanocyte-stimulating peptides. Activation of melanocortin-1 receptors increases melanin, particularly in mucosa and pressure or friction areas.</p>",
+      "wrong_choice_explanations": {
+        "1": "Aldosterone is deficient in primary adrenal insufficiency and does not mediate pigmentation through MC1R.",
+        "2": "ACTH is elevated, not low, and its melanocortin activity is central to the finding.",
+        "3": "Adrenal androgen conversion is not the mechanism of Addison-associated pigmentation.",
+        "4": "Renin rises because of mineralocorticoid deficiency but does not directly create the characteristic pigmentation."
+      },
+      "educational_objective": "Explain hyperpigmentation in primary adrenal insufficiency through loss of cortisol feedback, increased POMC/ACTH production, and melanocortin-1 receptor stimulation.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/addison-pomc-acth-mc1r.svg",
+          "placement": "question",
+          "type": "original_vector_endocrine_feedback",
+          "alt_text": "Explain hyperpigmentation in primary adrenal insufficiency through loss of cortisol feedback, increased POMC/ACTH production, and melanocortin-1 receptor stimulation.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_exam_blueprint",
+          "citation": "USMLE. Step 1 Exam Content Outline and Specifications. Accessed August 4, 2026.",
+          "url": "https://www.usmle.org/exam-resources/step-1-materials/step-1-content-outline-and-specifications"
+        },
+        {
+          "type": "government_academic_reference",
+          "citation": "Abbreviated Tests of Endocrine Function. Clinical Methods. NCBI Bookshelf. Accessed August 4, 2026.",
+          "url": "https://www.ncbi.nlm.nih.gov/books/NBK704/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending_full_7937_stem_scan",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    }
+  ]
+}

@@ -1,0 +1,796 @@
+{
+  "schema_version": "aylamed-original-mcq-draft-v1",
+  "batch_id": "usmle-step1-2026-b001",
+  "created_at": "2026-08-04T01:45:00+05:00",
+  "status": "private_research_draft",
+  "publication_allowed": false,
+  "copyright_policy": {
+    "origin": "de_novo_from_public_blueprint_and_medical_sources",
+    "proprietary_qbank_text_used": false,
+    "proprietary_qbank_media_used": false,
+    "similarity_review_required": true
+  },
+  "questions": [
+    {
+      "draft_id": "AY26-NUT-REFEED-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Multisystem Processes & Disorders",
+        "subsystem": "Nutrition and metabolic health",
+        "topic": "Refeeding physiology",
+        "subtopic": "Insulin-driven intracellular electrolyte shifts"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 47-year-old man with alcohol use disorder is admitted after eating almost nothing for 10 days. His body mass index is 15 kg/m<sup>2</sup>. Continuous high-carbohydrate enteral feeding is started. Twenty-four hours later, he develops generalized weakness and shallow respirations. Laboratory studies show a serum phosphate concentration of 0.8 mg/dL, potassium of 2.9 mEq/L, and magnesium of 1.3 mg/dL. The accompanying graph shows the change in serum phosphate after feeding was initiated. Which of the following mechanisms best explains this patient's electrolyte abnormalities?</p>",
+      "options": [
+        {
+          "id": 2,
+          "text_html": "Insulin-stimulated cellular uptake of phosphate, potassium, and magnesium during renewed anabolism"
+        },
+        {
+          "id": 5,
+          "text_html": "Aldosterone deficiency causing urinary sodium retention and potassium loss"
+        },
+        {
+          "id": 4,
+          "text_html": "Release of intracellular phosphate during accelerated tissue catabolism"
+        },
+        {
+          "id": 3,
+          "text_html": "Reduced calcitriol production causing abrupt intestinal phosphate malabsorption"
+        },
+        {
+          "id": 1,
+          "text_html": "Increased parathyroid hormone secretion causing renal phosphate wasting"
+        }
+      ],
+      "correct_option_id": 2,
+      "explanation_html": "<p>Severe undernutrition depletes total-body phosphate, potassium, magnesium, and thiamine even when initial serum concentrations are not markedly abnormal. A carbohydrate load increases insulin secretion, which drives glucose and electrolytes into cells and accelerates ATP and phosphorylated-intermediate synthesis. The resulting hypophosphatemia can impair diaphragmatic function, myocardial function, and oxygen delivery.</p>",
+      "wrong_choice_explanations": {
+        "1": "Parathyroid hormone can increase renal phosphate excretion, but it does not explain the characteristic rapid fall in phosphate, potassium, and magnesium immediately after refeeding.",
+        "3": "Reduced calcitriol causes a more gradual disturbance of mineral metabolism and would not produce this coordinated intracellular shift after carbohydrate administration.",
+        "4": "Tissue catabolism releases intracellular phosphate; refeeding changes metabolism toward insulin-driven anabolism and intracellular uptake.",
+        "5": "Aldosterone deficiency causes hyperkalemia rather than hypokalemia and does not explain severe hypophosphatemia."
+      },
+      "educational_objective": "Refeeding syndrome is caused by insulin-driven intracellular shifts of phosphate, potassium, and magnesium in a patient with depleted total-body stores.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/refeeding-phosphate-timeline.svg",
+          "placement": "question",
+          "type": "original_vector_graph",
+          "alt_text": "Line graph showing a sharp decline in serum phosphate during the first 24 hours after enteral feeding begins.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_priority",
+          "citation": "USMLE. Enhancements to Nutrition Content on USMLE Step Exams Coming in June 2026.",
+          "url": "https://www.usmle.org/enhancements-nutrition-content-usmle-step-exams-coming-june-2026"
+        },
+        {
+          "type": "medical_consensus",
+          "citation": "da Silva JSV et al. ASPEN Consensus Recommendations for Refeeding Syndrome. Nutr Clin Pract. 2020;35:178-195.",
+          "doi": "10.1002/ncp.10474"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-HEME-B12-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Blood & Lymphoreticular/Immune Systems",
+        "subsystem": "Anemia",
+        "topic": "Megaloblastic anemia",
+        "subtopic": "Vitamin B12 deficiency after terminal ileal disease"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 62-year-old woman with Crohn disease underwent resection of the terminal ileum 3 years ago. She now has fatigue, decreased vibration sensation in both feet, and a hemoglobin concentration of 9.8 g/dL with a mean corpuscular volume of 112 fL. Serum homocysteine and methylmalonic acid concentrations are increased. The accompanying pathway diagram highlights several vitamin-dependent reactions. Which reaction is directly impaired by the deficient vitamin in this patient?</p>",
+      "options": [
+        {
+          "id": 3,
+          "text_html": "Carboxylation of propionyl-CoA to methylmalonyl-CoA"
+        },
+        {
+          "id": 4,
+          "text_html": "Hydroxylation of proline residues in collagen"
+        },
+        {
+          "id": 5,
+          "text_html": "Conversion of dUMP to dTMP using methylene tetrahydrofolate"
+        },
+        {
+          "id": 2,
+          "text_html": "Conversion of pyruvate to acetyl-CoA"
+        },
+        {
+          "id": 1,
+          "text_html": "Conversion of methylmalonyl-CoA to succinyl-CoA"
+        }
+      ],
+      "correct_option_id": 1,
+      "explanation_html": "<p>Vitamin B12 is absorbed in the terminal ileum after binding intrinsic factor. It is required by methylmalonyl-CoA mutase for conversion of methylmalonyl-CoA to succinyl-CoA and by methionine synthase for remethylation of homocysteine. Deficiency therefore increases both methylmalonic acid and homocysteine and can cause posterior-column and corticospinal-tract dysfunction.</p>",
+      "wrong_choice_explanations": {
+        "2": "Pyruvate dehydrogenase requires thiamine, lipoic acid, CoA, FAD, and NAD+.",
+        "3": "Propionyl-CoA carboxylase requires biotin.",
+        "4": "Proline hydroxylation requires vitamin C.",
+        "5": "Thymidylate synthase uses a folate derivative; impaired DNA synthesis occurs in both folate and B12 deficiency, but this reaction is not directly B12-dependent."
+      },
+      "educational_objective": "Terminal ileal disease can cause vitamin B12 deficiency, which impairs methylmalonyl-CoA mutase and methionine synthase reactions.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/b12-folate-pathway.svg",
+          "placement": "question",
+          "type": "original_vector_pathway",
+          "alt_text": "Simplified pathway showing vitamin B12-dependent methylmalonyl-CoA mutase and methionine synthase reactions.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "government_medical",
+          "citation": "NIH Office of Dietary Supplements. Vitamin B12 Fact Sheet for Health Professionals.",
+          "url": "https://ods.od.nih.gov/factsheets/VitaminB12-HealthProfessional/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-HEME-IRON-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Blood & Lymphoreticular/Immune Systems",
+        "subsystem": "Anemia",
+        "topic": "Nutritional anemia",
+        "subtopic": "Iron deficiency laboratory pattern"
+      },
+      "difficulty": "easy",
+      "stem_html": "<p>A 29-year-old woman has progressive fatigue and pica. Menstrual periods last 8 days and require frequent pad changes. Hemoglobin is 9.2 g/dL and mean corpuscular volume is 70 fL. The accompanying table shows her iron studies. Which process most directly accounts for the low mean corpuscular volume?</p>",
+      "options": [
+        {
+          "id": 3,
+          "text_html": "Macrophage iron sequestration caused by increased hepcidin"
+        },
+        {
+          "id": 1,
+          "text_html": "Reduced heme synthesis due to depletion of available iron"
+        },
+        {
+          "id": 2,
+          "text_html": "Impaired globin-chain synthesis due to an inherited beta-globin mutation"
+        },
+        {
+          "id": 5,
+          "text_html": "Premature erythrocyte destruction caused by membrane instability"
+        },
+        {
+          "id": 4,
+          "text_html": "Defective DNA synthesis caused by impaired thymidylate production"
+        }
+      ],
+      "correct_option_id": 1,
+      "explanation_html": "<p>Chronic menstrual blood loss depletes storage iron. Low ferritin, low serum iron, increased total iron-binding capacity, and low transferrin saturation support iron deficiency. Inadequate iron limits heme production, so erythroid precursors undergo additional divisions before reaching the target intracellular hemoglobin concentration, producing microcytosis.</p>",
+      "wrong_choice_explanations": {
+        "2": "Beta-thalassemia can cause microcytosis but usually has normal or increased iron stores and a relatively high red-cell count for the degree of anemia.",
+        "3": "Inflammation-mediated hepcidin elevation produces low serum iron with low or normal TIBC and normal or increased ferritin.",
+        "4": "Impaired DNA synthesis causes megaloblastic macrocytosis.",
+        "5": "Membrane defects cause hemolysis and do not produce this iron-study pattern."
+      },
+      "educational_objective": "Iron deficiency produces low ferritin and serum iron, high TIBC, low transferrin saturation, and microcytosis due to reduced heme synthesis.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/iron-studies-table.svg",
+          "placement": "question",
+          "type": "original_vector_table",
+          "alt_text": "Iron studies showing low ferritin and serum iron with high total iron-binding capacity and low transferrin saturation.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "government_medical",
+          "citation": "NIH Office of Dietary Supplements. Iron Fact Sheet for Health Professionals.",
+          "url": "https://ods.od.nih.gov/factsheets/Iron-HealthProfessional/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-GI-BYPASS-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Malabsorption and altered anatomy",
+        "topic": "Post-bariatric nutrient deficiency",
+        "subtopic": "Iron absorption after Roux-en-Y gastric bypass"
+      },
+      "difficulty": "easy",
+      "stem_html": "<p>A 41-year-old woman develops fatigue and exertional dyspnea 18 months after Roux-en-Y gastric bypass. Laboratory studies show microcytic anemia and low ferritin. The accompanying diagram shows her postoperative anatomy. Reduced exposure of dietary iron to which region most directly contributes to this deficiency?</p>",
+      "options": [
+        {
+          "id": 5,
+          "text_html": "Rectum"
+        },
+        {
+          "id": 3,
+          "text_html": "Terminal ileum"
+        },
+        {
+          "id": 1,
+          "text_html": "Gastric fundus"
+        },
+        {
+          "id": 4,
+          "text_html": "Ascending colon"
+        },
+        {
+          "id": 2,
+          "text_html": "Duodenum and proximal jejunum"
+        }
+      ],
+      "correct_option_id": 2,
+      "explanation_html": "<p>Most nonheme iron absorption occurs in the duodenum and proximal jejunum. Roux-en-Y gastric bypass reduces delivery of food to this region and also decreases gastric acid exposure, which normally helps solubilize and reduce iron for uptake.</p>",
+      "wrong_choice_explanations": {
+        "1": "The stomach contributes acid but is not the principal site of iron absorption.",
+        "3": "The terminal ileum is the principal site of intrinsic factor-vitamin B12 absorption and bile-acid reabsorption.",
+        "4": "The colon absorbs water and electrolytes but is not the major site of iron uptake.",
+        "5": "The rectum does not have a meaningful role in dietary iron absorption."
+      },
+      "educational_objective": "Roux-en-Y gastric bypass predisposes to iron deficiency by bypassing the duodenum and proximal jejunum and reducing gastric acid exposure.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/roux-en-y-anatomy.svg",
+          "placement": "question",
+          "type": "original_vector_anatomy",
+          "alt_text": "Simplified Roux-en-Y gastric bypass anatomy with a small gastric pouch, alimentary limb, bypassed stomach and duodenum, and jejunojejunostomy.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "peer_reviewed_review",
+          "citation": "Mechanick JI et al. Clinical Practice Guidelines for the Perioperative Nutrition, Metabolic, and Nonsurgical Support of Patients Undergoing Bariatric Procedures. Endocr Pract. 2019.",
+          "doi": "10.4158/GL-2019-0406"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-GI-DUMP-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Gastrointestinal System",
+        "subsystem": "Postprandial physiology",
+        "topic": "Dumping syndrome",
+        "subtopic": "Late postprandial hypoglycemia after gastric surgery"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 56-year-old man underwent partial gastrectomy 8 months ago. Two hours after drinking a sweetened beverage, he develops tremor, diaphoresis, palpitations, and confusion. Plasma glucose is 46 mg/dL. The accompanying curve compares his postprandial glucose response with that of a healthy control. Which mechanism best explains these symptoms?</p>",
+      "options": [
+        {
+          "id": 2,
+          "text_html": "Rapid intestinal glucose delivery followed by an exaggerated insulin response"
+        },
+        {
+          "id": 3,
+          "text_html": "Failure of glucagon release caused by vagal nerve injury"
+        },
+        {
+          "id": 5,
+          "text_html": "Reduced gastric acid causing impaired glucose transport"
+        },
+        {
+          "id": 4,
+          "text_html": "Autoimmune destruction of pancreatic beta cells"
+        },
+        {
+          "id": 1,
+          "text_html": "Delayed carbohydrate absorption caused by pancreatic exocrine insufficiency"
+        }
+      ],
+      "correct_option_id": 2,
+      "explanation_html": "<p>Late dumping syndrome occurs 1-3 hours after a meal. Rapid delivery and absorption of carbohydrate produce a high early glucose peak and an exaggerated incretin and insulin response, followed by reactive hypoglycemia. Early dumping occurs sooner and is driven mainly by osmotic fluid movement into the intestinal lumen.</p>",
+      "wrong_choice_explanations": {
+        "1": "Pancreatic insufficiency causes fat and protein malabsorption rather than an early glucose spike followed by hypoglycemia.",
+        "3": "Glucagon impairment is not the characteristic mechanism of postgastrectomy dumping syndrome.",
+        "4": "Type 1 diabetes causes persistent hyperglycemia without treatment rather than meal-triggered reactive hypoglycemia.",
+        "5": "Reduced acid does not explain the exaggerated glucose and insulin pattern."
+      },
+      "educational_objective": "Late dumping syndrome is reactive hypoglycemia caused by rapid glucose delivery and an exaggerated insulin response after gastric surgery.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/late-dumping-glucose-curve.svg",
+          "placement": "question",
+          "type": "original_vector_graph",
+          "alt_text": "Postprandial glucose curve showing an early high glucose peak followed by hypoglycemia in a postgastrectomy patient.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "peer_reviewed_consensus",
+          "citation": "Scarpellini E et al. International consensus on the diagnosis and management of dumping syndrome. Nat Rev Endocrinol. 2020;16:448-466.",
+          "doi": "10.1038/s41574-020-0357-5"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-SOC-FOOD-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Social Sciences",
+        "subsystem": "Health equity and access",
+        "topic": "Food and nutrition insecurity",
+        "subtopic": "Respectful screening response and referral"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 44-year-old woman with type 2 diabetes has recurrent hypoglycemia. She says, “Near the end of the month I sometimes skip meals so my children can eat.” Which response by the physician is most appropriate?</p>",
+      "options": [
+        {
+          "id": 3,
+          "text_html": "“Your family should purchase less expensive foods with a lower glycemic index.”"
+        },
+        {
+          "id": 1,
+          "text_html": "“You need to follow the meal plan more carefully or your diabetes will remain uncontrolled.”"
+        },
+        {
+          "id": 2,
+          "text_html": "“Would it be okay if we discuss your access to food and connect you with resources while we adjust your treatment plan?”"
+        },
+        {
+          "id": 4,
+          "text_html": "“I will document nonadherence and reassess you after you can eat three meals daily.”"
+        },
+        {
+          "id": 5,
+          "text_html": "“Insulin is unsafe for anyone who has difficulty following a prescribed diet.”"
+        }
+      ],
+      "correct_option_id": 2,
+      "explanation_html": "<p>The patient has disclosed food insecurity. The best response is nonjudgmental, asks permission, recognizes the immediate safety problem, adapts treatment to the patient's circumstances, and offers connection to appropriate resources. Blaming language and assumptions can reduce trust and worsen care.</p>",
+      "wrong_choice_explanations": {
+        "1": "This response blames the patient and ignores the structural cause of missed meals.",
+        "3": "It offers unsolicited advice and assumes that food choice, rather than inadequate access, is the primary problem.",
+        "4": "Labeling the patient nonadherent fails to address a disclosed social determinant and immediate hypoglycemia risk.",
+        "5": "Treatment should be individualized; food insecurity requires risk reduction and support, not a categorical statement."
+      },
+      "educational_objective": "A positive food-insecurity disclosure should prompt respectful assessment, treatment adaptation, and referral rather than blame or assumptions.",
+      "media": [],
+      "references": [
+        {
+          "type": "peer_reviewed_consensus",
+          "citation": "Eisenberg DM et al. Proposed Nutrition Competencies for Medical Students and Physician Trainees. JAMA Netw Open. 2024;7:e2435425.",
+          "doi": "10.1001/jamanetworkopen.2024.35425"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending",
+        "media": "not_required",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-NEURO-AUDIO-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Nervous System & Special Senses",
+        "subsystem": "Hearing disorders",
+        "topic": "Noise-induced hearing loss",
+        "subtopic": "Cochlear injury after repeated blast and weapons exposure"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 35-year-old military veteran reports gradually progressive difficulty understanding speech in noisy rooms. He had repeated exposure to weapons fire despite inconsistent hearing protection. Otoscopic examination is normal. The accompanying audiogram shows bilateral sensorineural hearing loss with a prominent notch near 4 kHz. Damage to which structure most directly causes this pattern?</p>",
+      "options": [
+        {
+          "id": 2,
+          "text_html": "Ossicles of the middle ear"
+        },
+        {
+          "id": 4,
+          "text_html": "Chorda tympani fibers"
+        },
+        {
+          "id": 1,
+          "text_html": "Outer hair cells near the basal turn of the cochlea"
+        },
+        {
+          "id": 5,
+          "text_html": "Eustachian tube epithelium"
+        },
+        {
+          "id": 3,
+          "text_html": "Hair cells in the vestibular macula"
+        }
+      ],
+      "correct_option_id": 1,
+      "explanation_html": "<p>Repeated high-intensity noise damages cochlear hair cells, especially outer hair cells in the basal cochlea that encode high frequencies. Noise-induced hearing loss is sensorineural and commonly produces a 3-6 kHz notch, often centered near 4 kHz.</p>",
+      "wrong_choice_explanations": {
+        "2": "Ossicular damage produces conductive hearing loss with an air-bone gap.",
+        "3": "Vestibular hair-cell injury causes balance symptoms rather than an isolated high-frequency hearing notch.",
+        "4": "Chorda tympani injury affects taste and parasympathetic salivary function.",
+        "5": "Eustachian tube dysfunction causes middle-ear pressure abnormalities and conductive loss."
+      },
+      "educational_objective": "Noise-induced hearing loss reflects damage to outer hair cells in the basal cochlea and produces a characteristic high-frequency audiometric notch.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/noise-notch-audiogram.svg",
+          "placement": "question",
+          "type": "original_vector_audiogram",
+          "alt_text": "Bilateral audiogram showing a sensorineural hearing threshold notch centered near 4 kHz.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_outline",
+          "citation": "USMLE Content Outline (2026): recently returning military personnel, veterans, and hearing loss including noise-induced hearing loss.",
+          "url": "https://www.usmle.org/sites/default/files/2022-01/USMLE_Content_Outline_0.pdf"
+        },
+        {
+          "type": "government_medical",
+          "citation": "NIOSH. Occupational Noise Exposure.",
+          "url": "https://www.cdc.gov/niosh/noise/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-NEURO-AD-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Nervous System & Special Senses",
+        "subsystem": "Spinal cord disorders",
+        "topic": "Disability-related secondary complications",
+        "subtopic": "Autonomic dysreflexia after high spinal cord injury"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 27-year-old man with a chronic complete spinal cord injury at T4 develops a pounding headache and profuse sweating above the level of injury. Blood pressure is 210/110 mm Hg and pulse is 48/min. His urinary catheter tubing is kinked. The accompanying schematic shows autonomic pathways above and below the lesion. Which mechanism best explains the severe hypertension?</p>",
+      "options": [
+        {
+          "id": 3,
+          "text_html": "Increased intracranial pressure activates the Cushing reflex"
+        },
+        {
+          "id": 1,
+          "text_html": "Loss of descending inhibition permits massive sympathetic discharge below the lesion"
+        },
+        {
+          "id": 2,
+          "text_html": "Loss of sympathetic output causes unopposed systemic vasodilation"
+        },
+        {
+          "id": 4,
+          "text_html": "Adrenal failure reduces catecholamine clearance"
+        },
+        {
+          "id": 5,
+          "text_html": "Vagal denervation directly increases sinoatrial node firing"
+        }
+      ],
+      "correct_option_id": 1,
+      "explanation_html": "<p>A noxious stimulus below a high spinal lesion can trigger intense sympathetic activity and vasoconstriction below the lesion. Descending inhibitory signals cannot cross the injury. Baroreceptors detect hypertension and increase vagal tone, producing bradycardia, but compensatory vasodilation is effective mainly above the lesion.</p>",
+      "wrong_choice_explanations": {
+        "2": "The key event is excessive, not absent, sympathetic activity below the lesion.",
+        "3": "The clinical trigger and chronic high spinal injury indicate autonomic dysreflexia rather than increased intracranial pressure.",
+        "4": "Adrenal failure causes hypotension and does not explain the lesion-dependent autonomic pattern.",
+        "5": "Vagal activation slows the heart; it does not generate the severe peripheral vasoconstriction."
+      },
+      "educational_objective": "Autonomic dysreflexia is unrestrained sympathetic discharge below a spinal lesion, with reflex bradycardia and limited compensatory vasodilation above the lesion.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/autonomic-dysreflexia-circuit.svg",
+          "placement": "question",
+          "type": "original_vector_schematic",
+          "alt_text": "Schematic showing a T4 lesion, afferent bladder stimulus, sympathetic vasoconstriction below the lesion, and vagal bradycardia.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_outline",
+          "citation": "USMLE Content Outline (2026): patients with disabilities and autonomic dysreflexia after spinal cord injury.",
+          "url": "https://www.usmle.org/sites/default/files/2022-01/USMLE_Content_Outline_0.pdf"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-ENDO-GAHT-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Endocrine System",
+        "subsystem": "Sex steroid physiology",
+        "topic": "Gender-affirming hormone therapy",
+        "subtopic": "Testosterone-associated erythrocytosis"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A 29-year-old transgender man has received testosterone therapy for 18 months. He feels well, but a routine complete blood count shows a hematocrit of 55%, increased from 43% before therapy. Which physiologic effect of testosterone most directly contributes to this finding?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Increased erythropoietin signaling and erythroid marrow activity"
+        },
+        {
+          "id": 4,
+          "text_html": "Direct inhibition of red-cell membrane turnover"
+        },
+        {
+          "id": 3,
+          "text_html": "Reduced renal oxygen sensing due to inhibition of hypoxia-inducible factor"
+        },
+        {
+          "id": 5,
+          "text_html": "Suppression of intrinsic factor secretion"
+        },
+        {
+          "id": 2,
+          "text_html": "Increased hepcidin production with sequestration of iron in macrophages"
+        }
+      ],
+      "correct_option_id": 1,
+      "explanation_html": "<p>Androgens increase erythropoiesis through effects that include increased erythropoietin signaling, enhanced marrow responsiveness, and altered iron regulation. Erythrocytosis is therefore a recognized physiologic adverse effect of testosterone exposure. The question assesses hormone physiology without treating gender identity as pathology.</p>",
+      "wrong_choice_explanations": {
+        "2": "Increased hepcidin would restrict iron availability and oppose erythropoiesis; androgens tend to reduce hepcidin activity.",
+        "3": "Inhibition of hypoxia-inducible signaling would reduce erythropoietin rather than increase red-cell mass.",
+        "4": "A longer red-cell lifespan is not the principal mechanism of testosterone-associated erythrocytosis.",
+        "5": "Intrinsic factor is relevant to vitamin B12 absorption, not the direct erythropoietic effect of testosterone."
+      },
+      "educational_objective": "Testosterone can increase hematocrit by enhancing erythropoietin signaling, marrow erythropoiesis, and iron availability.",
+      "media": [],
+      "references": [
+        {
+          "type": "official_outline",
+          "citation": "USMLE Content Outline (2026): populations requiring health and gender-affirming care.",
+          "url": "https://www.usmle.org/sites/default/files/2022-01/USMLE_Content_Outline_0.pdf"
+        },
+        {
+          "type": "clinical_guideline",
+          "citation": "Hembree WC et al. Endocrine Treatment of Gender-Dysphoric/Gender-Incongruent Persons. J Clin Endocrinol Metab. 2017;102:3869-3903.",
+          "doi": "10.1210/jc.2017-01658"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending",
+        "media": "not_required",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-GERI-ANTICHOL-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Multisystem Processes & Disorders",
+        "subsystem": "Adverse effects of therapy",
+        "topic": "Polypharmacy",
+        "subtopic": "Anticholinergic burden in older adults"
+      },
+      "difficulty": "easy",
+      "stem_html": "<p>A 78-year-old woman develops confusion, blurred vision, dry mouth, constipation, and urinary retention after an over-the-counter sleep medication is added to her chronic oxybutynin and amitriptyline therapy. The combined effect of these medications is primarily due to antagonism of which receptor?</p>",
+      "options": [
+        {
+          "id": 4,
+          "text_html": "Dopamine D2 receptor"
+        },
+        {
+          "id": 2,
+          "text_html": "Nicotinic acetylcholine receptor at the neuromuscular junction"
+        },
+        {
+          "id": 5,
+          "text_html": "GABA-A receptor"
+        },
+        {
+          "id": 3,
+          "text_html": "Alpha-1 adrenergic receptor"
+        },
+        {
+          "id": 1,
+          "text_html": "Muscarinic acetylcholine receptor"
+        }
+      ],
+      "correct_option_id": 1,
+      "explanation_html": "<p>Diphenhydramine, oxybutynin, and amitriptyline all have antimuscarinic effects. Their cumulative anticholinergic burden can cause delirium, blurred vision, xerostomia, constipation, and urinary retention. Older adults are particularly vulnerable because of altered pharmacokinetics, reduced physiologic reserve, and greater central nervous system sensitivity.</p>",
+      "wrong_choice_explanations": {
+        "2": "Neuromuscular nicotinic blockade causes skeletal muscle weakness or paralysis, not this classic antimuscarinic syndrome.",
+        "3": "Alpha-1 blockade can cause orthostatic hypotension but not dry mouth, urinary retention, and blurred vision as a unified syndrome.",
+        "4": "D2 blockade causes extrapyramidal effects and hyperprolactinemia.",
+        "5": "GABA-A agonism causes sedation and respiratory depression but does not explain the peripheral antimuscarinic findings."
+      },
+      "educational_objective": "Multiple medications with antimuscarinic activity can produce cumulative anticholinergic toxicity, especially in older adults.",
+      "media": [],
+      "references": [
+        {
+          "type": "official_outline",
+          "citation": "USMLE Content Outline (2026): older adulthood, polypharmacy, and prescription-drug use.",
+          "url": "https://www.usmle.org/sites/default/files/2022-01/USMLE_Content_Outline_0.pdf"
+        },
+        {
+          "type": "professional_consensus",
+          "citation": "American Geriatrics Society 2023 updated AGS Beers Criteria. J Am Geriatr Soc. 2023;71:2052-2081.",
+          "doi": "10.1111/jgs.18372"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending",
+        "media": "not_required",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-NEURO-THIAMINE-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Nervous System & Special Senses",
+        "subsystem": "Metabolic and nutritional neurologic disorders",
+        "topic": "Thiamine deficiency",
+        "subtopic": "Impaired pyruvate oxidation after glucose administration"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>A severely malnourished man is given an intravenous dextrose solution. Several hours later, he develops confusion, gait instability, and bilateral abduction deficits. Serum lactate is increased. Reduced activity of which enzyme most directly contributes to the increased lactate concentration?</p>",
+      "options": [
+        {
+          "id": 2,
+          "text_html": "Glucose-6-phosphatase"
+        },
+        {
+          "id": 4,
+          "text_html": "Succinate dehydrogenase"
+        },
+        {
+          "id": 1,
+          "text_html": "Pyruvate dehydrogenase"
+        },
+        {
+          "id": 3,
+          "text_html": "Fructose-1,6-bisphosphatase"
+        },
+        {
+          "id": 5,
+          "text_html": "HMG-CoA reductase"
+        }
+      ],
+      "correct_option_id": 1,
+      "explanation_html": "<p>Thiamine pyrophosphate is required by pyruvate dehydrogenase, alpha-ketoglutarate dehydrogenase, branched-chain alpha-ketoacid dehydrogenase, and transketolase. Deficient pyruvate dehydrogenase activity diverts pyruvate toward lactate, particularly after a glucose load. The neurologic triad suggests Wernicke encephalopathy.</p>",
+      "wrong_choice_explanations": {
+        "2": "Glucose-6-phosphatase deficiency causes fasting hypoglycemia and lactic acidosis through a different mechanism and is not thiamine-dependent.",
+        "3": "Fructose-1,6-bisphosphatase participates in gluconeogenesis and does not require thiamine.",
+        "4": "Succinate dehydrogenase uses FAD and is part of both the citric acid cycle and electron transport chain.",
+        "5": "HMG-CoA reductase controls cholesterol synthesis and is not thiamine-dependent."
+      },
+      "educational_objective": "Thiamine deficiency impairs pyruvate dehydrogenase, causing pyruvate diversion to lactate after carbohydrate administration.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/thiamine-pyruvate-pathway.svg",
+          "placement": "explanation",
+          "type": "original_vector_pathway",
+          "alt_text": "Pathway showing pyruvate conversion to acetyl-CoA by thiamine-dependent pyruvate dehydrogenase and diversion to lactate when activity is reduced.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "government_medical",
+          "citation": "NIH Office of Dietary Supplements. Thiamin Fact Sheet for Health Professionals.",
+          "url": "https://ods.od.nih.gov/factsheets/Thiamin-HealthProfessional/"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    },
+    {
+      "draft_id": "AY26-PEDS-GROWTH-001",
+      "exam_track": "usmle-step-1",
+      "taxonomy": {
+        "system": "Human Development",
+        "subsystem": "Infancy and childhood",
+        "topic": "Growth and nutrition",
+        "subtopic": "Weight faltering from inadequate caloric intake"
+      },
+      "difficulty": "moderate",
+      "stem_html": "<p>An 18-month-old boy is evaluated for poor growth. He is active and has a normal physical examination. The accompanying growth chart shows that weight crossed downward through two major percentile lines before length declined; head circumference remains near its previous percentile. His parent later explains that formula has sometimes been diluted so it lasts longer. Which mechanism best explains the growth pattern?</p>",
+      "options": [
+        {
+          "id": 1,
+          "text_html": "Inadequate caloric intake initially reducing weight gain before linear growth and head growth"
+        },
+        {
+          "id": 2,
+          "text_html": "Growth hormone deficiency causing early loss of head-circumference velocity"
+        },
+        {
+          "id": 3,
+          "text_html": "Constitutional growth delay causing proportional reduction in all growth parameters"
+        },
+        {
+          "id": 4,
+          "text_html": "Skeletal dysplasia causing preserved weight with reduced length"
+        },
+        {
+          "id": 5,
+          "text_html": "Congenital infection causing isolated acceleration of weight gain"
+        }
+      ],
+      "correct_option_id": 1,
+      "explanation_html": "<p>Inadequate energy intake typically affects weight first. With continued deprivation, linear growth slows, while head circumference is relatively preserved until malnutrition is severe or prolonged. The disclosure also indicates food insecurity and unsafe formula dilution, which should be addressed without blame.</p>",
+      "wrong_choice_explanations": {
+        "2": "Growth hormone deficiency primarily slows linear growth while weight is often preserved or increased; head circumference is not usually the earliest parameter affected.",
+        "3": "Constitutional delay follows a stable lower growth channel rather than abrupt weight crossing caused by inadequate intake.",
+        "4": "Skeletal dysplasia causes disproportionate short stature rather than weight decline preceding length decline.",
+        "5": "Congenital infection can impair multiple growth parameters and does not explain the sequence or dietary history."
+      },
+      "educational_objective": "Inadequate caloric intake causes weight faltering before impaired linear growth, with head circumference relatively preserved until severe prolonged malnutrition.",
+      "media": [
+        {
+          "path": "research/usmle-step1-2026/media/weight-faltering-growth-chart.svg",
+          "placement": "question",
+          "type": "original_vector_growth_chart",
+          "alt_text": "Longitudinal pediatric growth chart showing weight falling across percentiles before length, with preserved head circumference.",
+          "ownership": "AylaMed original"
+        }
+      ],
+      "references": [
+        {
+          "type": "official_outline",
+          "citation": "USMLE Content Outline (2026): infancy and childhood growth, nutrition, screening, and preventive care.",
+          "url": "https://www.usmle.org/sites/default/files/2022-01/USMLE_Content_Outline_0.pdf"
+        },
+        {
+          "type": "peer_reviewed_consensus",
+          "citation": "Eisenberg DM et al. Proposed Nutrition Competencies for Medical Students and Physician Trainees. JAMA Netw Open. 2024;7:e2435425.",
+          "doi": "10.1001/jamanetworkopen.2024.35425"
+        }
+      ],
+      "review": {
+        "factual": "pending_clinician",
+        "similarity": "pending",
+        "media": "pending",
+        "publication": "blocked"
+      }
+    }
+  ]
+}

@@ -1,0 +1,82 @@
+{
+  "schema_version": "aylamed-usmle-originality-audit-v2",
+  "batch_id": "usmle-step1-2026-b015-in-chat-original-20",
+  "audited_at": "2026-08-04T23:39:08+05:00",
+  "source_export": {
+    "file_name": "aylamed-qbank-json-no-media-2026-08-04(2).zip",
+    "sha256": "82803c11b441b35cbfd645da17256dcb827c5b072cb8741e53234af9ec8ae27e",
+    "records": 7937,
+    "fields_used": [
+      "id",
+      "student_qid",
+      "title",
+      "stem_signal"
+    ],
+    "usage": "lexical similarity screening and coverage prioritization only",
+    "runtime_availability": "raw user-patched ZIP mounted and parsed locally"
+  },
+  "committed_stems_file": "research/usmle-step1-2026/audits/batch-015-committed-stems.tsv",
+  "methodology": {
+    "normalization": "HTML removed; Unicode NFKD; lowercase alphanumeric tokenization; whitespace compacted",
+    "external_screen": "Each committed stem compared with all 7,937 exported stem_signal values",
+    "metrics": [
+      "exact normalized equality",
+      "five-token Jaccard",
+      "four-token Jaccard",
+      "RapidFuzz character ratio"
+    ],
+    "quarantine_thresholds": {
+      "exact_normalized_match": true,
+      "five_token_jaccard_greater_than_or_equal": 0.2,
+      "character_ratio_percent_greater_than_or_equal": 75.0
+    },
+    "within_batch": "All 190 stem pairs compared using exact equality, five-token Jaccard, and character ratio",
+    "scope_limit": "Lexical screening is not a substitute for human semantic/copyright review or clinician review"
+  },
+  "results": {
+    "stems_checked": 20,
+    "external_comparisons": 158740,
+    "exact_normalized_matches": 0,
+    "close_paraphrase_quarantine_flags": 0,
+    "maximum_external_five_token_jaccard": {
+      "score": 0.037383,
+      "draft_id": "AY26-B015-REPRO-KLINEFELTER-001",
+      "source_student_qid": "NGQ-00005541",
+      "source_title": "Scabies"
+    },
+    "maximum_external_four_token_jaccard": {
+      "score": 0.049505,
+      "draft_id": "AY26-B015-NEURO-LEMS-001",
+      "source_student_qid": "NGQ-00007863",
+      "source_title": "Atelectasis"
+    },
+    "maximum_external_character_ratio_percent": {
+      "score": 52.781,
+      "draft_id": "AY26-B015-NEURO-LEMS-001",
+      "source_student_qid": "NGQ-00006380",
+      "source_title": "Eaton-Lambert syndrome"
+    },
+    "within_batch_duplicate_flags": 0,
+    "maximum_within_batch_five_token_jaccard": {
+      "score": 0.013333,
+      "pair": [
+        "AY26-B015-ID-BOTULISM-001",
+        "AY26-B015-RENAL-LITHIUM-NDI-001"
+      ]
+    },
+    "maximum_within_batch_character_ratio_percent": {
+      "score": 51.82,
+      "pair": [
+        "AY26-B015-ID-TETANUS-001",
+        "AY26-B015-ID-BOTULISM-001"
+      ]
+    },
+    "disposition": "No lexical quarantine flags; retain as private drafts pending human similarity, factual, media, and clinician review"
+  },
+  "reviewer_notes": [
+    "No proprietary stem, option, explanation, screenshot, or media is intentionally copied.",
+    "The source ZIP was used only for coverage signals and lexical comparison.",
+    "Low lexical overlap does not prove semantic originality; human similarity review remains required.",
+    "No import, merge, deployment, student exposure, or publication is authorized."
+  ]
+}

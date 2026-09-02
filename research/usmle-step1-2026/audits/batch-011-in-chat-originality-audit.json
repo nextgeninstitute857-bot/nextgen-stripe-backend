@@ -1,0 +1,173 @@
+{
+  "schema_version": "aylamed-originality-audit-v1",
+  "batch_id": "usmle-step1-2026-b011-in-chat-20",
+  "status": "private_research_audit",
+  "publication_allowed": false,
+  "export_checked": {
+    "records": 7937,
+    "use": "coverage and close-paraphrase screening only; no export wording copied"
+  },
+  "controls": {
+    "proprietary_options_used": false,
+    "proprietary_explanations_used": false,
+    "proprietary_media_used": false,
+    "all_scenarios_de_novo": true,
+    "topic_level_distinctness_against_batches_001_010": true
+  },
+  "question_results": [
+    {
+      "draft_id": "AY26-B011-PULM-UIP-001",
+      "max_4gram_jaccard": 0.0244,
+      "closest_export_student_qid": "NGQ-00005122",
+      "closest_export_title": "Chronic heart failure",
+      "decision": "pass_no_close_paraphrase"
+    },
+    {
+      "draft_id": "AY26-B011-VASC-IH-001",
+      "max_4gram_jaccard": 0.005,
+      "closest_export_student_qid": "NGQ-00001774",
+      "closest_export_title": "Generalized anxiety disorder",
+      "decision": "pass_no_close_paraphrase"
+    },
+    {
+      "draft_id": "AY26-B011-ONC-HPVOP-001",
+      "max_4gram_jaccard": 0.015,
+      "closest_export_student_qid": "NGQ-00007882",
+      "closest_export_title": "G Protein-coupled Receptor 2nd Messengers",
+      "decision": "pass_no_close_paraphrase"
+    },
+    {
+      "draft_id": "AY26-B011-RENAL-PUV-001",
+      "max_4gram_jaccard": 0.0079,
+      "closest_export_student_qid": "NGQ-00004836",
+      "closest_export_title": "Polycystic kidney disease",
+      "decision": "pass_no_close_paraphrase"
+    },
+    {
+      "draft_id": "AY26-B011-DERM-ACD-001",
+      "max_4gram_jaccard": 0.0,
+      "closest_export_student_qid": "NGQ-00000005",
+      "closest_export_title": "Vitamin b12 deficiency",
+      "decision": "pass_no_close_paraphrase"
+    },
+    {
+      "draft_id": "AY26-B011-DERM-MEL-001",
+      "max_4gram_jaccard": 0.006,
+      "closest_export_student_qid": "NGQ-00003697",
+      "closest_export_title": "Nonmelanoma skin cancer",
+      "decision": "pass_no_close_paraphrase"
+    },
+    {
+      "draft_id": "AY26-B011-RENAL-FANCONI-001",
+      "max_4gram_jaccard": 0.0065,
+      "closest_export_student_qid": "NGQ-00001408",
+      "closest_export_title": "Dna replication",
+      "decision": "pass_no_close_paraphrase"
+    },
+    {
+      "draft_id": "AY26-B011-MSK-OSTEOSARC-001",
+      "max_4gram_jaccard": 0.0174,
+      "closest_export_student_qid": "NGQ-00000669",
+      "closest_export_title": "Heart transplantation",
+      "decision": "pass_no_close_paraphrase"
+    },
+    {
+      "draft_id": "AY26-B011-HEME-EBV-001",
+      "max_4gram_jaccard": 0.026,
+      "closest_export_student_qid": "NGQ-00005784",
+      "closest_export_title": "Infectious mononucleosis",
+      "decision": "pass_no_close_paraphrase"
+    },
+    {
+      "draft_id": "AY26-B011-HEME-KAPOSI-001",
+      "max_4gram_jaccard": 0.0113,
+      "closest_export_student_qid": "NGQ-00005018",
+      "closest_export_title": "G6PD deficiency",
+      "decision": "pass_no_close_paraphrase"
+    },
+    {
+      "draft_id": "AY26-B011-MSK-OA-001",
+      "max_4gram_jaccard": 0.025,
+      "closest_export_student_qid": "NGQ-00003584",
+      "closest_export_title": "Aging",
+      "decision": "pass_no_close_paraphrase"
+    },
+    {
+      "draft_id": "AY26-B011-DERM-AK-001",
+      "max_4gram_jaccard": 0.0081,
+      "closest_export_student_qid": "NGQ-00001287",
+      "closest_export_title": "Confounding, effect modification, bias, errors",
+      "decision": "pass_no_close_paraphrase"
+    },
+    {
+      "draft_id": "AY26-B011-DERM-SCABIES-001",
+      "max_4gram_jaccard": 0.0082,
+      "closest_export_student_qid": "NGQ-00002520",
+      "closest_export_title": "Alzheimer disease",
+      "decision": "pass_no_close_paraphrase"
+    },
+    {
+      "draft_id": "AY26-B011-PULM-ATELECT-001",
+      "max_4gram_jaccard": 0.0208,
+      "closest_export_student_qid": "NGQ-00007863",
+      "closest_export_title": "Atelectasis",
+      "decision": "pass_no_close_paraphrase"
+    },
+    {
+      "draft_id": "AY26-B011-DERM-KELOID-001",
+      "max_4gram_jaccard": 0.0235,
+      "closest_export_student_qid": "NGQ-00000368",
+      "closest_export_title": "Endocarditis",
+      "decision": "pass_no_close_paraphrase"
+    },
+    {
+      "draft_id": "AY26-B011-NEURO-ERB-001",
+      "max_4gram_jaccard": 0.0066,
+      "closest_export_student_qid": "NGQ-00003091",
+      "closest_export_title": "Hip fracture",
+      "decision": "pass_no_close_paraphrase"
+    },
+    {
+      "draft_id": "AY26-B011-PULM-A1AT-001",
+      "max_4gram_jaccard": 0.0149,
+      "closest_export_student_qid": "NGQ-00007838",
+      "closest_export_title": "Female genital tract histology",
+      "decision": "pass_no_close_paraphrase"
+    },
+    {
+      "draft_id": "AY26-B011-GI-CROHN-OXALATE-001",
+      "max_4gram_jaccard": 0.0119,
+      "closest_export_student_qid": "NGQ-00007258",
+      "closest_export_title": "Mycoplasma and Hemolysis",
+      "decision": "pass_no_close_paraphrase"
+    },
+    {
+      "draft_id": "AY26-B011-ENDO-PITMACRO-001",
+      "max_4gram_jaccard": 0.0187,
+      "closest_export_student_qid": "NGQ-00005085",
+      "closest_export_title": "Vitamin A deficiency",
+      "decision": "pass_no_close_paraphrase"
+    },
+    {
+      "draft_id": "AY26-B011-GI-PANCREATITIS-001",
+      "max_4gram_jaccard": 0.021,
+      "closest_export_student_qid": "NGQ-00003671",
+      "closest_export_title": "Pancreatic cancer",
+      "decision": "pass_no_close_paraphrase"
+    }
+  ],
+  "internal_batch_max_similarity": {
+    "ratio": 0.1361,
+    "draft_ids": [
+      "AY26-B011-DERM-ACD-001",
+      "AY26-B011-DERM-KELOID-001"
+    ],
+    "decision": "pass"
+  },
+  "summary": {
+    "questions": 20,
+    "passed_export_close_paraphrase": 20,
+    "manual_review": 0,
+    "original_media_files": 20
+  }
+}

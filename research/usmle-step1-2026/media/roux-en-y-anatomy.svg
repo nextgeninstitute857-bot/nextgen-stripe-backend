@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="650" viewBox="0 0 900 650" role="img" aria-labelledby="title desc">
+  <title id="title">Roux-en-Y gastric bypass anatomy</title>
+  <desc id="desc">Original simplified anatomy showing a small gastric pouch connected to an alimentary jejunal limb while the remaining stomach and duodenum are bypassed.</desc>
+  <rect width="900" height="650" fill="#ffffff"/>
+  <text x="450" y="42" text-anchor="middle" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#173f4c">Roux-en-Y gastric bypass</text>
+  <path d="M270 100 C205 115 180 185 205 255 C225 310 275 328 315 290 C350 255 350 170 316 122 C305 107 289 99 270 100Z" fill="#f6c6b6" stroke="#a8523a" stroke-width="4"/>
+  <path d="M255 103 C238 121 235 152 247 178 C259 201 282 205 300 189 C318 173 320 133 303 109Z" fill="#ffe8df" stroke="#a8523a" stroke-width="4"/>
+  <text x="275" y="145" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" font-weight="700" fill="#7a3728">Small pouch</text>
+  <path d="M315 290 C390 300 424 330 430 390" fill="none" stroke="#d28d3e" stroke-width="24" stroke-linecap="round"/>
+  <path d="M430 390 C430 490 545 515 585 430 C625 345 555 300 490 325" fill="none" stroke="#d28d3e" stroke-width="24" stroke-linecap="round"/>
+  <path d="M320 258 C375 245 410 262 445 300" fill="none" stroke="#9da8ad" stroke-width="20" stroke-linecap="round" stroke-dasharray="10 10"/>
+  <path d="M445 300 C475 330 490 360 490 395" fill="none" stroke="#9da8ad" stroke-width="20" stroke-linecap="round" stroke-dasharray="10 10"/>
+  <circle cx="490" cy="395" r="16" fill="#ffffff" stroke="#2f6f7d" stroke-width="4"/>
+  <line x1="490" y1="395" x2="610" y2="395" stroke="#2f6f7d" stroke-width="3"/>
+  <text x="625" y="390" font-family="Arial, sans-serif" font-size="17" font-weight="700" fill="#173f4c">Jejunojejunostomy</text>
+  <line x1="345" y1="330" x2="200" y2="380" stroke="#2f6f7d" stroke-width="3"/>
+  <text x="190" y="385" text-anchor="end" font-family="Arial, sans-serif" font-size="17" font-weight="700" fill="#173f4c">Alimentary limb</text>
+  <line x1="405" y1="275" x2="590" y2="205" stroke="#7c8b90" stroke-width="3"/>
+  <text x="605" y="195" font-family="Arial, sans-serif" font-size="17" font-weight="700" fill="#5e6e73">Bypassed stomach</text>
+  <text x="605" y="220" font-family="Arial, sans-serif" font-size="16" fill="#5e6e73">and duodenum</text>
+  <rect x="560" y="500" width="270" height="92" rx="16" fill="#eef7f8" stroke="#2f6f7d" stroke-width="2"/>
+  <text x="695" y="532" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" font-weight="700" fill="#173f4c">Iron absorption decreases</text>
+  <text x="695" y="560" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#365e68">Less food contact with the</text>
+  <text x="695" y="582" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#365e68">duodenum and proximal jejunum</text>
+</svg>
