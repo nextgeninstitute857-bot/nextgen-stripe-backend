@@ -33516,11 +33516,18 @@ async function sendCrmMessage({
   });
   const variables = { ...(templateVariables || {}), lead: lead || templateVariables?.lead || {} };
   const finalSubject = renderTemplateString(subject || template?.subject || "", variables) || "NextGen USMLE";
-  let finalText = renderTemplateString(text || template?.body || template?.message || "", variables);
+  const templateBody = template?.body || template?.message || "";
+  let finalText = renderTemplateString(text || templateBody, variables);
   const finalTo = getBestRecipientForChannel({ channel: cleanChannel, to, lead });
   const integration = getIntegrationByPlatform(db, cleanChannel) || { id: null, platform: cleanChannel, brand_id: brandId };
   const resolvedWhatsAppTemplateName = cleanChannel === "whatsapp" && !forceFreeformAiAuto ? getWhatsAppTemplateName({ template, metadata }) : "";
   const resolvedWhatsAppLanguageCode = cleanChannel === "whatsapp" && !forceFreeformAiAuto ? getWhatsAppLanguageCode({ template, metadata }) : "";
+  // A WhatsApp template's provider body is the message the student actually
+  // receives. Keep the audit log aligned with that body instead of recording
+  // a different free-form fallback that Meta never sent.
+  if (resolvedWhatsAppTemplateName && templateBody) {
+    finalText = renderTemplateString(templateBody, variables);
+  }
   const resolvedWhatsAppComponents = cleanChannel === "whatsapp" && !forceFreeformAiAuto
     ? buildWhatsAppTemplateComponents({ template, lead, variables, metadata })
     : [];
@@ -35019,10 +35026,13 @@ app.get("/admin/crm/message-templates", async (req, res) => {
     const beforeTemplates = JSON.stringify(ensureCrmArray(db, "message_templates"));
     const reconciled = reconcileNextGenWhatsAppTemplatePack(db.message_templates);
     db.message_templates = reconciled.templates;
+    const metaSync = await ngRefreshDailySessionMetaTemplateApprovals(db, {
+      force: String(req.query?.sync_meta || "").toLowerCase() === "true",
+    });
     if (JSON.stringify(db.message_templates) !== beforeTemplates) await writeCrmDb(db);
     const brandId = getCrmBrandId(req, db);
     const templates = filterCrmRecords(req, ensureCrmArray(db, "message_templates"), brandId);
-    res.json({ success: true, templates, count: templates.length });
+    res.json({ success: true, templates, count: templates.length, meta_sync: metaSync });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
@@ -35483,7 +35493,14 @@ function ngDailyLiveSessionAttemptMatches(row = {}, lead = {}, action = "", date
 function ngDailyLiveSessionAttemptBlocksRetry(db = {}, row = {}) {
   const failedStatuses = new Set(["failed", "error", "provider_blocked", "undelivered", "rejected"]);
   const status = String(row.status || row.provider_status || "").trim().toLowerCase();
-  if (failedStatuses.has(status)) return false;
+  const providerError = String(row.provider_error || row.error || "").trim().toLowerCase();
+  if (failedStatuses.has(status)) {
+    // Meta's ecosystem-engagement rejection is a recipient-level marketing
+    // safety stop, not a transient outage. Repeating the same template every
+    // few minutes only creates more failures and can damage account quality.
+    if (providerError.includes("healthy ecosystem engagement")) return true;
+    return false;
+  }
 
   // Provider acceptance can later be reversed by an asynchronous WhatsApp
   // webhook. Do not let the earlier scheduler/delivery lock hide that final
@@ -35492,7 +35509,11 @@ function ngDailyLiveSessionAttemptBlocksRetry(db = {}, row = {}) {
   if (messageLogId) {
     const messageLog = ensureCrmArray(db, "message_logs").find((log) => String(log.id || "") === messageLogId);
     const finalStatus = String(messageLog?.status || messageLog?.provider_status || "").trim().toLowerCase();
-    if (failedStatuses.has(finalStatus)) return false;
+    const finalProviderError = String(messageLog?.provider_error || messageLog?.error || "").trim().toLowerCase();
+    if (failedStatuses.has(finalStatus)) {
+      if (finalProviderError.includes("healthy ecosystem engagement")) return true;
+      return false;
+    }
   }
 
   return ["claimed", "sending", "queued", "queued_for_approval", "sent", "delivered", "read", "success", "accepted"].includes(status);
@@ -95191,7 +95212,7 @@ for (const [collectionKey, config] of Object.entries(AYLA_COLLECTIONS)) {
 
 
 // -----------------------------------------------------------------------------
-// v179: Permanent 5-minute auto Zoom preparation guard
+// v179: Permanent pre-class auto Zoom preparation guard
 // -----------------------------------------------------------------------------
 // Purpose:
 // - Automatically creates/opens Zoom exactly near class time so admins do not
@@ -95200,7 +95221,9 @@ for (const [collectionKey, config] of Object.entries(AYLA_COLLECTIONS)) {
 // - Preserves students, enrollments, payments, notes, recordings, roadmap data.
 // - Does not recreate Zoom if a real meeting already exists.
 const NEXTGEN_AUTO_ZOOM_PREP_ENABLED = String(process.env.NEXTGEN_AUTO_ZOOM_PREP_ENABLED || "true").toLowerCase() !== "false";
-const NEXTGEN_AUTO_ZOOM_PREP_MINUTES_BEFORE = Number(process.env.NEXTGEN_AUTO_ZOOM_PREP_MINUTES_BEFORE || 5) || 5;
+// Prepare ten minutes before the five-minute WhatsApp reminder. This removes
+// the old race where reminder delivery and Zoom creation began together.
+const NEXTGEN_AUTO_ZOOM_PREP_MINUTES_BEFORE = Number(process.env.NEXTGEN_AUTO_ZOOM_PREP_MINUTES_BEFORE || 15) || 15;
 const NEXTGEN_AUTO_ZOOM_PREP_GRACE_MINUTES_AFTER = Number(process.env.NEXTGEN_AUTO_ZOOM_PREP_GRACE_MINUTES_AFTER || 15) || 15;
 const NEXTGEN_AUTO_ZOOM_PREP_INTERVAL_MS = Math.max(15000, Number(process.env.NEXTGEN_AUTO_ZOOM_PREP_INTERVAL_MS || 30000) || 30000);
 const NEXTGEN_AUTO_ZOOM_PREP_MAX_PER_TICK = Math.max(1, Number(process.env.NEXTGEN_AUTO_ZOOM_PREP_MAX_PER_TICK || 3) || 3);

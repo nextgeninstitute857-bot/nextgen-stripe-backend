@@ -180,6 +180,13 @@ test("urgent LMS-clock reminder and start-link phases bypass the generic outboun
   assert.equal(bypasses("post_session_recording"), false);
 });
 
+test("Zoom is prepared before the five-minute reminder window opens", () => {
+  assert.match(
+    server,
+    /NEXTGEN_AUTO_ZOOM_PREP_MINUTES_BEFORE = Number\(process\.env\.NEXTGEN_AUTO_ZOOM_PREP_MINUTES_BEFORE \|\| 15\) \|\| 15/,
+  );
+});
+
 test("scheduler and AI source use only the exact live LMS link", () => {
   assert.match(server, /CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard"/);
   assert.match(server, /CRM_LIVE_SESSION_SCHEDULER_BUILD = "v316-lms-session-link-setting-lock"/);
