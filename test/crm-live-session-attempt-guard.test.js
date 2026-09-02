@@ -47,6 +47,23 @@ test("a final provider failure permits a same-day recovery retry", () => {
   assert.equal(helpers.ngDailyLiveSessionAlreadyAttempted(db, lead, "post_session_recording", "2026-08-29"), false);
 });
 
+test("Meta healthy-ecosystem rejection blocks repeated same-day attempts", () => {
+  const lead = { id: "lead-1", current_channel: "whatsapp" };
+  const metadata = { daily_live_session_action: "post_session_recording", daily_live_session_date: "2026-09-01" };
+  const db = {
+    message_logs: [{
+      id: "engagement-failure",
+      lead_id: lead.id,
+      status: "failed",
+      provider_error: "This message was not delivered to maintain healthy ecosystem engagement.",
+      metadata,
+    }],
+  };
+
+  assert.equal(helpers.ngDailyLiveSessionAlreadyAttempted(db, lead, "post_session_recording", "2026-09-01"), true);
+  assert.equal(helpers.ngDailyLiveSessionAlreadyAttempted(db, lead, "post_session_recording", "2026-09-02"), false);
+});
+
 test("accepted or in-flight delivery attempts still block duplicate sends", () => {
   const lead = { id: "lead-1", current_channel: "whatsapp" };
   const metadata = { daily_live_session_action: "session_link", daily_live_session_date: "2026-08-31" };

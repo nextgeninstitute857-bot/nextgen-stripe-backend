@@ -44,6 +44,18 @@ test('failure is explicit and cannot be undone by a late sent event', () => {
   assert.equal(log.status, 'delivered');
 });
 
+test('failure receipts retain Meta error code and details for diagnosis', () => {
+  const log = { provider_message_id: 'm2', status: 'sent' };
+  applyWhatsAppReceipt(log, {
+    id: 'm2',
+    status: 'failed',
+    errors: [{ code: 131049, message: 'This message was not delivered to maintain healthy ecosystem engagement.', error_data: { details: 'Meta delivery protection' } }],
+  });
+  assert.equal(log.provider_error_code, 131049);
+  assert.equal(log.provider_error_details, 'Meta delivery protection');
+  assert.match(log.provider_error, /healthy ecosystem engagement/);
+});
+
 test('both WhatsApp webhook paths use the same receipt handling; inbox adds separate counts', () => {
   const server = fs.readFileSync(new URL('../server.js', import.meta.url), 'utf8');
   assert.equal((server.match(/applyWhatsAppReceipt\(log, status\)/g) || []).length, 2);
