@@ -52357,6 +52357,22 @@ function ngAylaRepairLiveResourceGrounding(decision = {}, snapshot = {}, latestM
   return repaired;
 }
 
+function ngAylaRemoveVagueHandback(decision = {}) {
+  const vagueHandback = /(?:feel free to\b|let me know (?:how i can (?:help|assist)|if (?:you (?:need|want|have)|there are))|do not hesitate to (?:reach out|ask)|i(?:'m| am) here if you (?:need|want|have))\b/i;
+  const cleanPart = (value) => String(value || "")
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((part) => part.trim())
+    .filter((part) => part && !vagueHandback.test(part))
+    .join(" ")
+    .trim();
+
+  return {
+    ...decision,
+    reply: cleanPart(decision.reply),
+    follow_up: cleanPart(decision.follow_up) || null,
+  };
+}
+
 function ngAylaPricingDraftIsGrounded(reply = "", snapshot = {}) {
   const text = String(reply || "").toLowerCase();
   const plans = safeArray(snapshot.plans);
@@ -54209,17 +54225,19 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
     violations = decisionViolations(decision);
   }
 
-  // The live-resource labels and link-release status are safety-critical LMS
-  // facts, not sales copy. If the model's two natural-language repairs still
-  // miss only those facts, add the exact live labels deterministically and
-  // validate the complete decision once more before delivery.
+  // Live-resource labels, link-release status and a concrete ending are
+  // safety-critical. If the model's two natural-language repairs still miss
+  // only those details, repair them deterministically and validate the whole
+  // decision once more before delivery.
   if (
     violations.length
     && violations.every((item) => [
       "recording_link_missing_exact_title",
       "live_class_link_status_not_explained",
+      "vague_handback_ending",
     ].includes(item))
   ) {
+    if (violations.includes("vague_handback_ending")) decision = ngAylaRemoveVagueHandback(decision);
     decision = ngAylaRepairLiveResourceGrounding(decision, liveSnapshot, latestInboundText);
     violations = decisionViolations(decision);
   }
