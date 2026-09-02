@@ -129,12 +129,16 @@ test("daily session time is formatted for students", () => {
   assert.equal(label({}, "12:00 PM Eastern"), "12:00 PM Eastern");
 });
 
-test("the scheduler uses dedicated approved link templates", () => {
+test("the scheduler prefers direct templates and safely falls back to approved normal templates", () => {
   const scheduler = between("async function ngRunDailyLiveSessionScheduler", "function ngGoogleMeetAppointmentDateTime");
   assert.match(server, /nextgen_live_session_link: \["name", "topic", "live_session_link"\]/);
   assert.match(scheduler, /session_link: settings\.session_link_template_key \|\| "nextgen_live_session_link"/);
   assert.match(scheduler, /configuredRecordingTemplate !== "nextgen_recording_notes_ready"/);
   assert.match(scheduler, /: "nextgen_class_recording_link"/);
+  assert.match(scheduler, /session_link: \["nextgen_live_five_minute_reminder"\]/);
+  assert.match(scheduler, /post_session_recording: \["nextgen_recording_notes_ready"\]/);
+  assert.match(scheduler, /scheduledTemplateCandidates\.find\(\(key\) => ngScheduledWhatsAppTemplateIsApproved\(db, key\)\)/);
+  assert.match(scheduler, /approved_template_fallback: usedApprovedFallbackTemplate/);
   assert.match(scheduler, /sessionTime: ngDailyLiveSessionTimeLabel/);
   assert.match(scheduler, /liveSnapshot\.today_recording\?\.title/);
   assert.match(scheduler, /liveSnapshot\.today_recording\?\.url/);
@@ -144,6 +148,21 @@ test("the scheduler uses dedicated approved link templates", () => {
   assert.match(scheduler, /whatsapp_template_inventory_unavailable/);
   assert.match(scheduler, /whatsapp_template_not_approved_yet/);
   assert.match(scheduler, /ngRecordDailyLiveSessionPhaseState\(db, \{[\s\S]*templateKey: scheduledTemplateKey,[\s\S]*results,/);
+});
+
+test("the five-minute free-form reminder includes the released direct class link", () => {
+  const source = between("function ngDailyLiveSessionText", "function ngRecordDailyLiveSessionPhaseState");
+  const textFor = new Function("ngBuildNoSessionRecordingFallbackText", `${source}; return ngDailyLiveSessionText;`)(() => "fallback");
+  const output = textFor("five_minute_reminder", {
+    liveSessionTitle: "Central Nervous System — Day 10",
+    liveSessionDate: "2026-09-03",
+    sessionTime: "12:00 PM Eastern",
+    liveSessionLink: "https://example.com/current-class",
+  });
+
+  assert.match(output, /starts in 5 minutes/);
+  assert.match(output, /https:\/\/example\.com\/current-class/);
+  assert.doesNotMatch(output, /when the session starts/);
 });
 
 test("a blocked live-session phase is visible once and updates only when its state changes", () => {
