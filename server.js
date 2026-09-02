@@ -35679,7 +35679,10 @@ function ngDailyLiveSessionText(action = "", assets = {}, lead = {}) {
     return `Doctor, today’s live class is ${sessionLabel || "not fully named yet"}.\n\nI’ll send a reminder 5 minutes before class and release the matching link when the session starts.`;
   }
   if (action === "five_minute_reminder") {
-    return `Doctor, ${sessionLabel || "today’s live class"} starts in 5 minutes.\n\nPlease be ready. I’ll share the matching link when the session starts.`;
+    const joinLine = assets.liveSessionLink
+      ? `\n\nJoin here:\n${assets.liveSessionLink}`
+      : "\n\nOpen Live Sessions in your LMS—the matching class button becomes available five minutes before class.";
+    return `Doctor, ${sessionLabel || "today’s live class"} starts in 5 minutes.${joinLine}`;
   }
   if (action === "session_link") {
     return `Doctor, ${sessionLabel || "the live class"} is starting now.\n\nJoin here:\n${assets.liveSessionLink}\n\nEven 5-10 minutes is enough to understand the teaching style.`;
@@ -35814,8 +35817,21 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
       : "nextgen_class_recording_link",
   };
   const leads = ngDailyLiveSessionPendingLeadBatch(db, settings, { brandId, action, dateKey, limit });
-  const scheduledTemplateKey = templateMap[action] || null;
-  const closedWhatsAppTemplateNeeded = Boolean(scheduledTemplateKey && leads.some((lead) => {
+  const preferredScheduledTemplateKey = templateMap[action] || null;
+  const approvedFallbackTemplates = {
+    // The approved five-minute reminder has a stable Open Live Sessions button.
+    // It is a safe outside-window fallback while Meta reviews the direct-link
+    // template; the exact session URL is still used for open conversations.
+    session_link: ["nextgen_live_five_minute_reminder"],
+    // This approved template opens the labelled recording/notes library. The
+    // direct recording URL remains the normal within-window message.
+    post_session_recording: ["nextgen_recording_notes_ready"],
+  };
+  const scheduledTemplateCandidates = uniqueList([
+    preferredScheduledTemplateKey,
+    ...(approvedFallbackTemplates[action] || []),
+  ].filter(Boolean));
+  const closedWhatsAppTemplateNeeded = Boolean(preferredScheduledTemplateKey && leads.some((lead) => {
     const channel = resolveCrmChannelForConversation({ requestedChannel: lead.current_channel || lead.last_channel || lead.source_platform || lead.platform || "whatsapp", lead, fallback: "whatsapp" });
     if (channel !== "whatsapp") return false;
     const latestInbound = ngLatestInbound(ngLeadConversationMessages(db, lead.id));
@@ -35827,6 +35843,14 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
   const templateApprovalSync = closedWhatsAppTemplateNeeded
     ? await ngRefreshDailySessionMetaTemplateApprovals(db)
     : { verified: true, not_required: true };
+  const scheduledTemplateKey = closedWhatsAppTemplateNeeded && templateApprovalSync.verified
+    ? scheduledTemplateCandidates.find((key) => ngScheduledWhatsAppTemplateIsApproved(db, key)) || preferredScheduledTemplateKey
+    : preferredScheduledTemplateKey;
+  const usedApprovedFallbackTemplate = Boolean(
+    scheduledTemplateKey
+    && preferredScheduledTemplateKey
+    && scheduledTemplateKey !== preferredScheduledTemplateKey,
+  );
   let databaseChanged = Boolean(templateApprovalSync.changed);
   const results = [];
   for (const lead of leads) {
@@ -35842,7 +35866,7 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
     const channel = resolveCrmChannelForConversation({ requestedChannel: lead.current_channel || lead.last_channel || lead.source_platform || lead.platform || "whatsapp", lead, fallback: "whatsapp" });
     const latestInbound = ngLatestInbound(ngLeadConversationMessages(db, lead.id));
     const whatsappWindowOpen = channel !== "whatsapp" || ngWithinHours(latestInbound?.created_at || latestInbound?.received_at || latestInbound?.timestamp, 24);
-    const templateId = channel === "whatsapp" && !whatsappWindowOpen ? templateMap[action] : null;
+    const templateId = channel === "whatsapp" && !whatsappWindowOpen ? scheduledTemplateKey : null;
     const text = ngDailyLiveSessionText(action, assets, lead);
     if (templateId && !templateApprovalSync.verified) {
       results.push({
@@ -35866,7 +35890,7 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
       continue;
     }
     if (dryRun) {
-      results.push({ lead_id: lead.id, dry_run: true, action, template_id: templateId, text });
+      results.push({ lead_id: lead.id, dry_run: true, action, template_id: templateId, text, approved_template_fallback: usedApprovedFallbackTemplate });
       continue;
     }
     const attempt = ngStartDailyLiveSessionAttempt(db, lead, action, dateKey, source);
@@ -35898,6 +35922,8 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
           daily_live_session_action: action,
           daily_live_session_date: dateKey,
           template_key: templateId,
+          preferred_template_key: preferredScheduledTemplateKey,
+          approved_template_fallback: usedApprovedFallbackTemplate,
           scheduler_source: source,
         },
       });
@@ -35932,7 +35958,7 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
       lead.next_action = action === "post_session_recording" ? "await_recording_feedback_or_google_meet_interest" : "daily_live_session_flow";
       lead.updated_at = nowIso();
       ng41EnsureDailySessionRecovery(db, lead);
-      results.push({ lead_id: lead.id, sent: Boolean(result.success || result.queued), action, template_id: templateId, message_id: result.log?.id || null });
+      results.push({ lead_id: lead.id, sent: Boolean(result.success || result.queued), action, template_id: templateId, preferred_template_id: preferredScheduledTemplateKey, approved_template_fallback: usedApprovedFallbackTemplate, message_id: result.log?.id || null });
     } catch (error) {
       ngFinishDeliveryLock(attempt, "failed", { reason: error.message });
       results.push({ lead_id: lead.id, sent: false, error: error.message, action, template_id: templateId });
@@ -35955,6 +35981,9 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
     skipped: results.filter((r) => r.skipped).length,
     changed: databaseChanged,
     template_approval_sync: templateApprovalSync,
+    preferred_template_key: preferredScheduledTemplateKey,
+    selected_template_key: scheduledTemplateKey,
+    approved_template_fallback: usedApprovedFallbackTemplate,
     results,
   };
 }
