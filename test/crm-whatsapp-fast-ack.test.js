@@ -767,6 +767,15 @@ test("Ayla deterministically repairs exact recording labels and unreleased live-
   );
 });
 
+test("feature-tour delivery never stalls on a permission question", () => {
+  const generatorStart = server.indexOf("async function ngGenerateStudentAutoReply");
+  const generatorEnd = server.indexOf('app.post("/admin/crm/ayla-conversation/simulate"', generatorStart);
+  const generator = server.slice(generatorStart, generatorEnd);
+  assert.match(generator, /decision\.action === "send_feature_tour" && \/\[\?？\]\//);
+  assert.match(generator, /I’ll show you how NextGen keeps/);
+  assert.match(generator, /The five parts below work together/);
+});
+
 test("human handoff reuses conversation memory and a student-stated email before asking again", () => {
   const contextStart = server.indexOf("function ngAylaHumanHandoffContext");
   const contextEnd = server.indexOf("function ngAylaNextHandoffQualificationField", contextStart);
