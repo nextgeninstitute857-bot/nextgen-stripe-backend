@@ -520,6 +520,46 @@ test("explicit mentor requests and unlisted product purchase requests may begin 
   }).includes("premature_handoff_without_explicit_request"));
 });
 
+test("Meta-ad handoff keeps the requested meeting and shares the real demo link first", () => {
+  const state = {
+    ...createAylaConversationState(),
+    stage: "demo_experience",
+    facts: {
+      name: "Dr Emily",
+      exam: "USMLE Step 1",
+      timeline: null,
+      main_need: "Needs an organised programme",
+      country: "United States",
+      student_type: "prospective",
+    },
+    completed_actions: [],
+    turn_count: 2,
+  };
+  const messages = [{ role: "student", text: "Please book a mentor call for me." }];
+  const lead = { meta_ad_id: "ad-123" };
+  const missingLink = decision({
+    state,
+    stage: "handoff",
+    intent: "explicit_mentor_booking",
+    reply: "Absolutely. Which email should I use for your mentor-call confirmation?",
+    action: "begin_human_handoff",
+    ask_field: "email",
+  });
+  assert.ok(evaluateAylaConversationDecision({ decision: missingLink, state, messages, lead })
+    .includes("meta_ad_handoff_missing_demo_link"));
+
+  const withLink = decision({
+    state,
+    stage: "handoff",
+    intent: "explicit_mentor_booking",
+    reply: "Absolutely. You can also explore the real seven-day LMS demo here: https://nextgenusmle.live/demo Which email should I use for your mentor-call confirmation?",
+    action: "begin_human_handoff",
+    ask_field: "email",
+  });
+  assert.ok(!evaluateAylaConversationDecision({ decision: withLink, state, messages, lead })
+    .includes("meta_ad_handoff_missing_demo_link"));
+});
+
 test("known facts and completed actions are persisted and cannot be requested or dispatched again", () => {
   const state = createAylaConversationState({
     lead: {
@@ -643,6 +683,7 @@ test("a first Meta lead reply matches the ad promise and asks a useful qualifica
   assert.match(prompt, /CLICK-TO-WHATSAPP FIRST RESPONSE/);
   assert.match(prompt, /choose send_recording/);
   assert.match(prompt, /12 PM Eastern/);
+  assert.match(prompt, /https:\/\/nextgenusmle\.live\/demo/);
   assert.match(prompt, /exactly one useful qualification question/);
 
   const state = createAylaConversationState({ lead, messages });
@@ -650,7 +691,7 @@ test("a first Meta lead reply matches the ad promise and asks a useful qualifica
     state,
     action: "send_recording",
     ask_field: "exam",
-    reply: "Central Nervous System — Day 8 is at 12 PM Eastern. Central Nervous System — Day 7: https://zoom.us/rec/play/current Which USMLE step are you preparing for?",
+    reply: "Central Nervous System — Day 8 is at 12 PM Eastern. Central Nervous System — Day 7: https://zoom.us/rec/play/current Explore the seven-day LMS demo: https://nextgenusmle.live/demo Which USMLE step are you preparing for?",
   });
   const violations = evaluateAylaConversationDecision({ decision: metaReply, state, messages, lead });
   assert.ok(!violations.includes("new_lead_name_not_requested"));

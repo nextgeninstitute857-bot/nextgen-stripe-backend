@@ -35965,12 +35965,17 @@ function ngGoogleMeetAppointmentDateTime(appointment = {}) {
   const date = normalizeCrmString(appointment.date || appointment.appointment_date || appointment.scheduled_date || "");
   const time = normalizeCrmString(appointment.time || appointment.appointment_time || appointment.scheduled_time || "");
   const start = normalizeCrmString(appointment.start_time || appointment.starts_at || appointment.scheduled_at || "");
+  const timezone = normalizeCrmString(appointment.timezone || appointment.timezone_str || DEFAULT_TIMEZONE) || DEFAULT_TIMEZONE;
+  if (date && time) {
+    try {
+      const zoned = getSessionStartUtc(date, time, timezone);
+      if (zoned) return zoned;
+    } catch {
+      // Fall back to an explicitly offset timestamp or the legacy parser below.
+    }
+  }
   if (start) {
     const d = new Date(start);
-    if (!Number.isNaN(d.getTime())) return d;
-  }
-  if (date && time) {
-    const d = new Date(`${date}T${time.length === 5 ? `${time}:00` : time}`);
     if (!Number.isNaN(d.getTime())) return d;
   }
   return null;
@@ -36022,18 +36027,31 @@ function ngGoogleMeetAppointmentDisplayTime(appointment = {}) {
   return `${hour12}:${minute} ${suffix}`;
 }
 
-function ngGoogleMeetAppointmentDisplayDateTime(appointment = {}, timezone = "EST") {
+function ngGoogleMeetAppointmentTimezoneLabel(appointment = {}) {
+  const timezone = normalizeCrmString(appointment.timezone || appointment.timezone_str || DEFAULT_TIMEZONE) || DEFAULT_TIMEZONE;
+  const labels = {
+    "America/New_York": "Eastern Time",
+    "America/Toronto": "Eastern Time",
+    "Asia/Karachi": "Pakistan Time",
+    "Europe/London": "UK Time",
+    UTC: "UTC",
+  };
+  return labels[timezone] || timezone;
+}
+
+function ngGoogleMeetAppointmentDisplayDateTime(appointment = {}, timezone = "") {
   const date = ngGoogleMeetAppointmentDisplayDate(appointment);
   const time = ngGoogleMeetAppointmentDisplayTime(appointment);
-  return `${date}${time ? ` at ${time} ${timezone}` : ""}`;
+  const timezoneLabel = timezone || ngGoogleMeetAppointmentTimezoneLabel(appointment);
+  return `${date}${time ? ` at ${time} ${timezoneLabel}` : ""}`;
 }
 
 function ngGoogleMeetAppointmentText(action = "link_now", appointment = {}, db = {}) {
   const name = ngGoogleMeetAppointmentStudentName(db, appointment);
   const link = ngGoogleMeetAppointmentLink(appointment);
-  const displayDateTime = ngGoogleMeetAppointmentDisplayDateTime(appointment, "EST");
+  const displayDateTime = ngGoogleMeetAppointmentDisplayDateTime(appointment);
   if (action === "confirmation") {
-    return `Great Doctor, your Google Meet mentor consultation is confirmed for ${displayDateTime}.\n\nWe’ll share the Google Meet link at the meeting time.`;
+    return `Great news, ${name} 🎉 Your NextGen mentor call is confirmed for ${displayDateTime}.\n\nSave your private Google Meet link here:\n${link}\n\nAyla will remind you again five minutes before the call.`;
   }
   if (action === "five_minute_reminder") {
     return `Doctor, your Google Meet mentor consultation starts in 5 minutes.\n\nPlease be ready. I will send the Google Meet link at the meeting time.`;
@@ -36045,7 +36063,8 @@ function ngGoogleMeetAppointmentAlreadySent(db = {}, appointment = {}, action = 
   return ensureCrmArray(db, "message_logs").some((log) => {
     return String(log.metadata?.google_meet_appointment_id || "") === String(appointment.id || "") &&
       String(log.metadata?.google_meet_action || "") === String(action || "") &&
-      !["failed", "error"].includes(String(log.status || ""));
+      ["sent", "delivered", "read"].includes(String(log.status || "").toLowerCase()) &&
+      Boolean(log.provider_message_id || log.sent_at || log.delivered_at || log.read_at);
   });
 }
 
@@ -36083,7 +36102,7 @@ async function ngSendGoogleMeetAppointmentMessage({ db = {}, appointment = {}, a
       appointment_time: appointment.time || appointment.scheduled_time || String(appointment.start_time || "").slice(11, 16),
       appointment_display_date: ngGoogleMeetAppointmentDisplayDate(appointment),
       appointment_display_time: ngGoogleMeetAppointmentDisplayTime(appointment),
-      appointment_display_datetime: ngGoogleMeetAppointmentDisplayDateTime(appointment, "EST"),
+      appointment_display_datetime: ngGoogleMeetAppointmentDisplayDateTime(appointment),
     },
     leadId: appointment.lead_id || lead?.id || null,
     metadata: {
@@ -36093,7 +36112,15 @@ async function ngSendGoogleMeetAppointmentMessage({ db = {}, appointment = {}, a
       template_key: templateId,
     },
   });
-  return { sent: true, message_id: result.log?.id || null, template_id: templateId, channel };
+  const sent = experienceDeliveryAccepted(result);
+  return {
+    sent,
+    skipped: !sent,
+    reason: sent ? null : (result.reason || result.error || "provider_not_sent"),
+    message_id: result.log?.id || null,
+    template_id: templateId,
+    channel,
+  };
 }
 
 async function ngRunGoogleMeetAppointmentScheduler({ db = {}, brandId = null, limit = 50, dryRun = false, source = "run_due" } = {}) {
@@ -36121,7 +36148,7 @@ async function ngRunGoogleMeetAppointmentScheduler({ db = {}, brandId = null, li
     for (const action of actions) {
       try {
         const sent = await ngSendGoogleMeetAppointmentMessage({ db, appointment: item, action, brandId, dryRun });
-        if (!dryRun) {
+        if (!dryRun && sent.sent) {
           if (action === "five_minute_reminder") item.google_meet_5min_reminder_sent_at = nowIso();
           if (action === "link_now") {
             item.google_meet_link_sent_at = nowIso();
@@ -36302,6 +36329,8 @@ app.post("/admin/crm/google-meet-command-center/save-link", async (req, res) => 
       item.time = body.time || item.time || item.scheduled_time || "";
       item.scheduled_date = item.date;
       item.scheduled_time = item.time;
+      item.timezone = body.timezone || item.timezone || item.timezone_str || "America/New_York";
+      item.timezone_str = item.timezone;
       if (item.date && item.time) item.start_time = `${item.date}T${item.time}:00`;
     }
 
@@ -36324,9 +36353,41 @@ app.post("/admin/crm/google-meet-command-center/save-link", async (req, res) => 
       lead.updated_at = nowIso();
     }
 
-    const adminAlert = await ngSendAdminWhatsAppAlert(db, { type: "google_meet_booked", lead, appointment: item });
+    let studentConfirmation = { sent: false, skipped: true, reason: "missing_time" };
+    if (ngGoogleMeetAppointmentDateTime(item)) {
+      if (ngGoogleMeetAppointmentAlreadySent(db, item, "confirmation")) {
+        studentConfirmation = { sent: false, skipped: true, reason: "already_sent" };
+      } else {
+        try {
+          studentConfirmation = await ngSendGoogleMeetAppointmentMessage({
+            db,
+            appointment: item,
+            action: "confirmation",
+            brandId: item.brand_id || brandId,
+          });
+          if (studentConfirmation.sent) item.google_meet_confirmation_sent_at = nowIso();
+        } catch (error) {
+          studentConfirmation = { sent: false, skipped: true, reason: error.message };
+        }
+      }
+    }
+
+    const confirmationAccepted = studentConfirmation.sent || studentConfirmation.reason === "already_sent";
+    const adminAlert = await ngSendAdminWhatsAppAlert(db, {
+      type: confirmationAccepted ? "google_meet_booked" : "google_meet_booked_confirmation_failed",
+      lead,
+      appointment: item,
+    });
     await writeCrmDb(db);
-    res.json({ success: true, appointment: enrichAppointment(db, item), admin_alert: adminAlert, message: "Google Meet link saved and scheduled for meeting time" });
+    res.json({
+      success: true,
+      appointment: enrichAppointment(db, item),
+      student_confirmation: studentConfirmation,
+      admin_alert: adminAlert,
+      message: studentConfirmation.sent
+        ? "Google Meet link saved; the student and admins were notified"
+        : "Google Meet link saved and scheduled; check the student confirmation status",
+    });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
@@ -36380,11 +36441,15 @@ app.post("/admin/crm/appointments/:id/send-link-now", async (req, res) => {
     if (!item) return res.status(404).json({ success: false, error: "Appointment not found" });
     if (!ngGoogleMeetAppointmentLink(item)) return res.status(400).json({ success: false, error: "Paste Google Meet link before sending" });
     const sent = await ngSendGoogleMeetAppointmentMessage({ db, appointment: item, action: "link_now", brandId: item.brand_id || getCrmBrandId(req, db) });
-    item.google_meet_link_sent_at = nowIso();
-    item.link_send_status = "sent";
+    if (sent.sent) {
+      item.google_meet_link_sent_at = nowIso();
+      item.link_send_status = "sent";
+    } else {
+      item.link_send_status = "not_sent";
+    }
     item.updated_at = nowIso();
     await writeCrmDb(db);
-    res.json({ success: true, sent, appointment: enrichAppointment(db, item) });
+    res.status(sent.sent ? 200 : 502).json({ success: sent.sent, sent, appointment: enrichAppointment(db, item) });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
 
@@ -36395,15 +36460,15 @@ app.post("/admin/crm/appointments/:id/send-confirmation", async (req, res) => {
     const item = ensureCrmArray(db, "appointments").find((appointment) => String(appointment.id) === String(req.params.id));
     if (!item) return res.status(404).json({ success: false, error: "Appointment not found" });
     const sent = await ngSendGoogleMeetAppointmentMessage({ db, appointment: item, action: "confirmation", brandId: item.brand_id || getCrmBrandId(req, db) });
-    item.google_meet_confirmation_sent_at = nowIso();
+    if (sent.sent) item.google_meet_confirmation_sent_at = nowIso();
     item.updated_at = nowIso();
     await writeCrmDb(db);
     res.json({
       success: true,
       sent,
       appointment: enrichAppointment(db, item),
-      appointment_display_datetime: ngGoogleMeetAppointmentDisplayDateTime(item, "EST"),
-      message: "Google Meet confirmation sent successfully",
+      appointment_display_datetime: ngGoogleMeetAppointmentDisplayDateTime(item),
+      message: sent.sent ? "Google Meet confirmation sent successfully" : "Google Meet confirmation was not accepted by WhatsApp",
     });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, error: error.message }); }
 });
@@ -54124,6 +54189,7 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
       const firstReplyViolations = [];
       const session = liveSnapshot.live_session;
       const recording = liveSnapshot.latest_recording;
+      if (!/https:\/\/nextgenusmle\.live\/demo\b/i.test(text)) firstReplyViolations.push("meta_first_reply_missing_demo_link");
       if (session?.title && !text.includes(session.title)) firstReplyViolations.push("meta_first_reply_missing_exact_session_title");
       if (session && !/\b12(?::00)?\s*(?:pm|p\.m\.)\s*(?:eastern|est|et)\b/i.test(wordsOnly)) {
         firstReplyViolations.push("meta_first_reply_missing_revised_time");
@@ -54361,7 +54427,11 @@ function ngAylaCommitConversationTurnAfterDelivery({ db = {}, lead = {}, ai = {}
     ngReviewExperienceFollowup(db, lead, item, "experience_requested_time_review");
   }
   acknowledgeExperienceConversation({ lead, inbound: ai.payment_followup_inbound || {} });
-  if (nextState.last_action === "send_demo") {
+  const acceptedDeliveryText = results
+    .filter((result) => experienceDeliveryAccepted(result))
+    .map((result) => String(result.log?.text || result.text || ""))
+    .join("\n");
+  if (nextState.last_action === "send_demo" || /https:\/\/nextgenusmle\.live\/demo\b/i.test(acceptedDeliveryText)) {
     lead.demo_link_sent = true;
     lead.demo_link_sent_at = lead.demo_link_sent_at || nowIso();
   }
@@ -54496,8 +54566,8 @@ app.post("/admin/crm/ayla-conversation/simulate", async (req, res) => {
       }
     }
 
-    res.json({
-      success: true,
+    res.status(sent.sent ? 200 : 502).json({
+      success: sent.sent,
       no_send: true,
       persisted: false,
       contacted_student: false,
@@ -65871,6 +65941,8 @@ function ngAylaAdminAlertPhoneKey(value = "") {
 
 function ngAylaAdminAlertTemplateLabel(type = "") {
   const clean = String(type || "").toLowerCase();
+  if (clean === "google_meet_booked_confirmation_failed") return "Mentor call booked — student confirmation needs attention";
+  if (clean === "google_meet_booked") return "Mentor call booked";
   if (clean === "google_meet_time_collected") return "Meeting time collected";
   if (clean === "google_meet_requested") return "Student requested Google Meet guidance";
   if (clean === "pricing_interest") return "Student asked about pricing";
@@ -65881,6 +65953,8 @@ function ngAylaAdminAlertTemplateLabel(type = "") {
 
 function ngAylaAdminAlertTemplateNextStep(type = "") {
   const clean = String(type || "").toLowerCase();
+  if (clean === "google_meet_booked_confirmation_failed") return "The Meet link is saved, but WhatsApp did not confirm the student message. Open the CRM and resend the confirmation.";
+  if (clean === "google_meet_booked") return "The meeting is confirmed. Open the CRM to review the student details and join at the scheduled time.";
   if (clean === "google_meet_time_collected") return "Confirm the meeting and add or verify the Google Meet link in the CRM.";
   if (clean === "google_meet_requested") return "Open the CRM and arrange the requested Google Meet conversation.";
   if (clean === "pricing_interest") return "Open the CRM and follow up using only active LMS prices and an approved country offer.";
@@ -65899,7 +65973,7 @@ function ngAylaAdminAlertTemplatePayload({ type = "alert", lead = null, appointm
   const latestInboundText = ngMessageText(ngLatestInbound(messages) || {}).trim();
   const interests = ngAylaProductInterestLabels({ lead: lead || {}, latestInboundText, messages });
   const coverage = ngAylaReadableAlertCoverage(handoff.coverage);
-  const appointmentTime = appointment ? ngGoogleMeetAppointmentDisplayDateTime(appointment, "EST") : "";
+  const appointmentTime = appointment ? ngGoogleMeetAppointmentDisplayDateTime(appointment) : "";
   const isTest = String(type || "").toLowerCase() === "test_alert";
 
   const values = {
@@ -66104,7 +66178,7 @@ function ngAylaBuildAdminHotLeadAlertText({ type = "hot_lead_interested", lead =
   const leadName = handoff.student_name || ng41LeadName(lead || {}) || appointment?.student_name || "Student";
   const leadPhone = ng41LeadPhone(lead || {}) || appointment?.student_phone || appointment?.phone || "";
   const leadEmail = ng41LeadEmail(lead || {}) || appointment?.student_email || appointment?.email || "";
-  const appointmentTime = appointment ? ngGoogleMeetAppointmentDisplayDateTime(appointment, "EST") : "";
+  const appointmentTime = appointment ? ngGoogleMeetAppointmentDisplayDateTime(appointment) : "";
   const country = appointment?.student_country || handoff.country || "";
   const exam = appointment?.exam_type || handoff.exam || "";
   const concern = appointment?.main_concern || handoff.concern || "";
@@ -66113,8 +66187,12 @@ function ngAylaBuildAdminHotLeadAlertText({ type = "hot_lead_interested", lead =
   );
   const interests = ngAylaProductInterestLabels({ lead: lead || {}, latestInboundText, messages });
   const cleanType = String(type || "").toLowerCase();
-  const headline = cleanType === "google_meet_time_collected"
-    ? "📅 Meeting ready — NextGen lead"
+  const headline = cleanType === "google_meet_booked_confirmation_failed"
+    ? "⚠️ Mentor call booked — student confirmation needs attention"
+    : cleanType === "google_meet_booked"
+      ? "✅ Mentor call booked — NextGen lead"
+    : cleanType === "google_meet_time_collected"
+      ? "📅 Meeting ready — NextGen lead"
     : cleanType === "google_meet_requested"
       ? "📞 Student wants to speak with us"
       : cleanType === "pricing_interest"
