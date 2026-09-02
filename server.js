@@ -52262,7 +52262,7 @@ async function ngAylaLiveLmsSalesGrounding({ structured = false, crmDb = null, l
         ? `- Current/next roadmap item: ${String(activeDay.title || `${activeDay.system || activeDay.chapter || "System"}${activeDay.system_day ? ` Day ${activeDay.system_day}` : ""}`).trim()} on ${String(activeDay.date || activeDay.scheduled_date || "").slice(0, 10)}.`
         : "- No current roadmap item is available; do not invent a topic or date.",
       activeSession
-        ? `- Matching live session: ${activeSessionTitle || "NextGen live session"}; ${String(activeSession.status || "scheduled")} on ${activeSession.scheduled_date || ""}${activeSession.scheduled_time ? ` at ${activeSession.scheduled_time} ${activeSession.scheduled_timezone || "America/New_York"}` : ""}.${activeSessionUrl ? ` Student join link: ${activeSessionUrl}` : ` No student join link is released now (${activeSessionLink.reason}). The exact matching Zoom link may be shared only from the stated session start through its class window; never reuse a previous session link.`}`
+        ? `- Matching live session: ${activeSessionTitle || "NextGen live session"}; ${String(activeSession.status || "scheduled")} on ${activeSession.scheduled_date || ""}${activeSession.scheduled_time ? ` at ${activeSession.scheduled_time} ${activeSession.scheduled_timezone || "America/New_York"}` : ""}.${activeSessionUrl ? ` Student join link: ${activeSessionUrl}` : ` No student join link is released now (${activeSessionLink.reason}). The exact matching Zoom link is prepared shortly before class and opens to students five minutes before the stated start time; never reuse a previous session link.`}`
         : "- No matching live-session record is available; do not promise that a session link is live now.",
       publicRecording
         ? `- Latest published recording: ${latestRecordingTitle || "Recent live session"}.${latestRecordingUrl ? ` Student recording link: ${latestRecordingUrl}` : ""} When sharing it, always state this exact title before the link.`
@@ -52420,14 +52420,14 @@ function ngAylaRepairLiveResourceGrounding(decision = {}, snapshot = {}, latestM
 
   const askedForLiveClass = /\b(?:attend|join|try|see)\b.{0,50}\b(?:live\s+class|class|live\s+session)\b/i.test(String(latestMessage || ""));
   const session = snapshot.live_session || null;
-  const liveStatusAlreadyExplained = /\b(?:join )?link\b.{0,45}\b(?:not (?:published|available)|isn'?t (?:published|available)|once (?:it is|it'?s) published|when (?:it is|it'?s) published)\b/i.test(combined());
+  const liveStatusAlreadyExplained = /\b(?:join )?link\b.{0,70}\b(?:not (?:published|available)|isn'?t (?:published|available)|once (?:it is|it'?s) published|when (?:it is|it'?s) published|opens? (?:five|5) minutes? before)\b/i.test(combined());
   if (askedForLiveClass && session && !String(session.url || "").trim() && !liveStatusAlreadyExplained) {
     const sessionTitle = String(session.title || "today's live session").trim();
     const date = String(session.date || "").trim();
     const time = String(session.time || "").trim();
     const timezone = String(session.timezone || "").trim();
     const schedule = `${date ? ` on ${date}` : ""}${time ? ` at ${time}${timezone ? ` ${timezone}` : ""}` : ""}`;
-    const statusLine = `The direct join link is not available yet and will appear once it is published. The next session is ${sessionTitle}${schedule}.`;
+    const statusLine = `The next session is ${sessionTitle}${schedule}. Its private join link opens five minutes before class, and I’ll send it then.`;
     repaired.reply = `${String(repaired.reply || "").trim()}${String(repaired.reply || "").trim() ? "\n\n" : ""}${statusLine}`;
   }
 
@@ -54089,6 +54089,12 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
   }
 
   const state = createAylaConversationState({ lead, messages: cleanMessages });
+  const forceFeatureTourForThisTurn = channel === "whatsapp" && ngAylaShouldPresentInterestedLeadTour({
+    lead,
+    messages: cleanMessages,
+    latestInboundText,
+  });
+  const asksForClassOrRecordingPreview = /\b(?:see|watch|join|attend|try|send|share|open|access)\b.{0,80}\b(?:live\s+(?:class|session)|class|session|recordings?|replay)\b|\b(?:live\s+(?:class|session)|class|session|recordings?|replay)\b.{0,80}\b(?:see|watch|join|attend|try|send|share|open|access|link)\b/i.test(latestInboundText);
   let promptState = state;
   if (db && allowOperationalActions) {
     await ngAylaEnsureOneTimeCountryOffer({ crmDb: db, lead, messages: cleanMessages, state, dryRun: dryRunOperationalActions });
@@ -54143,6 +54149,36 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
       })),
       latestMessage: latestInboundText,
     });
+    if (forceFeatureTourForThisTurn) {
+      const examLabel = normalizeCrmString(
+        decision.memory_patch?.exam || promptState?.facts?.exam || lead.exam_track || lead.exam || "your exam",
+      ).slice(0, 80);
+      const studentName = normalizeCrmString(
+        decision.memory_patch?.name || promptState?.facts?.name || lead.name || "",
+      ).slice(0, 80);
+      decision.action = "send_feature_tour";
+      decision.stage = "value_tour";
+      decision.turn_goal = "programme_overview";
+      decision.ask_field = "none";
+      decision.media_keys = ["dashboard", "recordings", "session_notes", "flashcards", "assessments"];
+      decision.reply = `${studentName ? `${studentName}, ` : ""}NextGen keeps ${examLabel} preparation organised around your real schedule. You begin with a baseline diagnostic, then the LMS shows your weak areas and keeps targeting them while every live class, labelled recording, note, question, flashcard and assessment stays connected to one clear roadmap.`;
+      decision.follow_up = ngAylaFeatureOverviewClosingText(db || {}, liveSnapshot);
+    } else if (asksForClassOrRecordingPreview && liveSnapshot.latest_recording?.url) {
+      const session = liveSnapshot.live_session || null;
+      const sessionLine = session
+        ? `The next live class is ${session.title}${session.date ? ` on ${session.date}` : ""}${session.time ? ` at ${session.time} ${session.timezone || "America/New_York"}` : ""}. ${session.url ? `You can join here:\n${session.url}` : "Its private join link opens five minutes before class, and I’ll send it then."}`
+        : "I’ll also keep you updated with the next correctly labelled live-class link.";
+      const demoLine = state.completed_actions?.includes("send_feature_tour")
+        ? ""
+        : `\n\nYou can also explore the complete LMS through the free seven-day demo:\n${liveSnapshot.demo_url || "https://nextgenusmle.live/demo"}`;
+      decision.action = "send_recording";
+      decision.stage = "demo_experience";
+      decision.turn_goal = "resource_request";
+      decision.ask_field = "none";
+      decision.media_keys = ["recordings"];
+      decision.reply = `Absolutely, Doctor. ${sessionLine}\n\nYou can watch this correctly labelled recording now:\n${liveSnapshot.latest_recording.title}\n${liveSnapshot.latest_recording.url}${demoLine}`;
+      decision.follow_up = null;
+    }
     // The model decides whether the full tour is appropriate and writes its
     // personalised introduction. Fixed delivery invariants belong to the
     // backend: every tour must finish with the configured demo/catch-up
@@ -54263,7 +54299,7 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
       /\b(?:attend|join|try|see)\b.{0,50}\b(?:live\s+class|class|live\s+session)\b/i.test(latestInboundText)
       && liveSnapshot.live_session
       && !liveSnapshot.live_session.url
-      && !/\b(?:join )?link\b.{0,45}\b(?:not (?:published|available)|isn'?t (?:published|available)|once (?:it is|it'?s) published|when (?:it is|it'?s) published)\b/i.test(`${candidate.reply || ""}\n${candidate.follow_up || ""}`)
+      && !/\b(?:join )?link\b.{0,70}\b(?:not (?:published|available)|isn'?t (?:published|available)|once (?:it is|it'?s) published|when (?:it is|it'?s) published|opens? (?:five|5) minutes? before)\b/i.test(`${candidate.reply || ""}\n${candidate.follow_up || ""}`)
         ? ["live_class_link_status_not_explained"]
         : []
     ),
@@ -72867,10 +72903,11 @@ function ngAylaShouldPresentInterestedLeadTour({ lead = {}, messages = [], lates
   if (/(?:can(?:not|'t)\s+(?:log|sign)\s*in|password|reset link|access expired|failed to fetch|not working|technical (?:issue|problem)|session (?:will not|won't|does not|doesn't) (?:open|load|connect))/i.test(latest)) return false;
   if (ngAylaLeadGoogleMeetState(lead)) return false;
   if (ngAylaIsFullFeatureOverviewRequest(latest)) return true;
-  if (lead.ayla_program_tour_sent_at) return false;
+  const completedActions = safeArray(lead.ayla_conversation_state?.completed_actions);
+  if (lead.ayla_program_tour_sent_at || completedActions.includes("send_feature_tour")) return false;
 
   const confirmsInterest = /^(?:yes|yeah|yep|interested|i am interested|i'm interested|tell me more|please explain|go ahead|show me|send details|i want to know)(?:[.!?\s]*)$/i.test(latest) ||
-    /\b(?:interested in|want to know about|tell me about)\b/i.test(latest);
+    /\b(?:(?:i am|i'm|im|we are|we're)\s+)?interested\b|\b(?:want to know about|tell me about)\b/i.test(latest);
   if (!confirmsInterest) return false;
 
   const conversation = safeArray(messages).map((message) => ngMessageText(message)).filter(Boolean).join("\n");

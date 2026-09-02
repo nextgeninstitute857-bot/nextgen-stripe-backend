@@ -106,6 +106,7 @@ test("a positive interested reply triggers the tour only after context is known"
   assert.match(helper, /stop\|unsubscribe\|do not message/);
   assert.match(helper, /ngAylaLeadGoogleMeetState\(lead\)/);
   assert.match(helper, /lead\.ayla_program_tour_sent_at/);
+  assert.match(helper, /completedActions\.includes\("send_feature_tour"\)/);
   assert.match(helper, /const confirmsInterest/);
   assert.match(helper, /tell me more/);
   assert.match(helper, /const examKnown/);
@@ -150,9 +151,22 @@ test("interested-lead tour routing behaves correctly for real message sequences"
   ];
 
   assert.equal(shouldTour({ messages: engagedConversation, latestInboundText: "Yes" }), true);
+  assert.equal(shouldTour({
+    messages: [
+      { direction: "inbound", text: "Hi, I am preparing for USMLE Step 1" },
+      { direction: "outbound", text: "What support would help you most?" },
+      { direction: "inbound", text: "I am interested, but how is your programme different?" },
+    ],
+    latestInboundText: "I am interested, but how is your programme different?",
+  }), true);
   assert.equal(shouldTour({ messages: [{ direction: "inbound", text: "Hello" }], latestInboundText: "Hello" }), false);
   assert.equal(shouldTour({ messages: engagedConversation, latestInboundText: "I cannot log in" }), false);
   assert.equal(shouldTour({ lead: { ayla_program_tour_sent_at: "2026-08-22T10:00:00Z" }, messages: engagedConversation, latestInboundText: "Yes" }), false);
+  assert.equal(shouldTour({
+    lead: { ayla_conversation_state: { completed_actions: ["send_feature_tour"] } },
+    messages: engagedConversation,
+    latestInboundText: "Yes",
+  }), false);
   assert.equal(shouldTour({
     messages: [
       ...engagedConversation.slice(0, -2),
@@ -585,6 +599,22 @@ test("every reachable future lead enters the daily live-session sequence", () =>
   assert.equal(eligible({}, { id: "meet", stage: "new_lead", phone: "+15550000004", google_meet_active: true }, settings), false);
 });
 
+test("interested and preview requests are repaired into the complete sales experience", () => {
+  const generator = server.slice(
+    server.indexOf("async function ngGenerateStudentAutoReply"),
+    server.indexOf('app.post("/admin/crm/conversations/:leadId/ai-auto-send"'),
+  );
+
+  assert.match(generator, /forceFeatureTourForThisTurn/);
+  assert.match(generator, /asksForClassOrRecordingPreview/);
+  assert.match(generator, /decision\.action = "send_feature_tour"/);
+  assert.match(generator, /\["dashboard", "recordings", "session_notes", "flashcards", "assessments"\]/);
+  assert.match(generator, /decision\.action = "send_recording"/);
+  assert.match(generator, /correctly labelled recording/);
+  assert.match(generator, /private join link opens five minutes before class/);
+  assert.match(generator, /https:\/\/nextgenusmle\.live\/demo/);
+});
+
 test("admin no-send conversation simulation returns success without provider delivery state", () => {
   const simulatorStart = server.indexOf('// Admin-only, no-send conversation evaluation');
   const simulatorEnd = server.indexOf('app.post("/admin/crm/conversations/:leadId/ai-auto-send"', simulatorStart);
@@ -789,7 +819,8 @@ test("Ayla deterministically repairs exact recording labels and unreleased live-
   const helper = server.slice(helperStart, helperEnd);
   assert.match(helper, /recordingTitle/);
   assert.match(helper, /replace\(recordingUrl, labelledUrl\)/);
-  assert.match(helper, /The direct join link is not available yet and will appear once it is published/);
+  assert.match(helper, /private join link opens five minutes before class/);
+  assert.doesNotMatch(helper, /until session starts|once it is published/);
   assert.match(helper, /The next session is/);
 
   const endingRepairStart = server.indexOf("function ngAylaRemoveVagueHandback");
