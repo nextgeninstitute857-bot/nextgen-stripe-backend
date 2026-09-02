@@ -752,8 +752,8 @@ test("Ayla deterministically repairs exact recording labels and unreleased live-
   const helper = server.slice(helperStart, helperEnd);
   assert.match(helper, /recordingTitle/);
   assert.match(helper, /replace\(recordingUrl, labelledUrl\)/);
-  assert.match(helper, /The direct join link for/);
-  assert.match(helper, /is not available yet; I’ll share it when it is published/);
+  assert.match(helper, /The direct join link is not available yet; I’ll share it when it is published/);
+  assert.match(helper, /The next session is/);
 
   const generatorStart = server.indexOf("async function ngGenerateStudentAutoReply");
   const generatorEnd = server.indexOf('app.post("/admin/crm/ayla-conversation/simulate"', generatorStart);
