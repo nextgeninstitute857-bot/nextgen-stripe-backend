@@ -52322,6 +52322,41 @@ function ngAylaRecordingLinkViolations(text = "", snapshot = {}) {
   return title && value.includes(title) ? [] : ["recording_link_missing_exact_title"];
 }
 
+function ngAylaRepairLiveResourceGrounding(decision = {}, snapshot = {}, latestMessage = "") {
+  const repaired = { ...decision };
+  const recording = snapshot.latest_recording || null;
+  const recordingUrl = String(recording?.url || "").trim();
+  const recordingTitle = String(recording?.title || "").trim();
+  const combined = () => `${repaired.reply || ""}\n${repaired.follow_up || ""}`;
+
+  // A model may correctly select the newest live recording but omit its long
+  // LMS title. Keep the conversational wording and repair only the grounded
+  // label immediately before the already-approved URL.
+  if (recordingUrl && recordingTitle && combined().includes(recordingUrl) && !combined().includes(recordingTitle)) {
+    const labelledUrl = `${recordingTitle}\n${recordingUrl}`;
+    if (String(repaired.reply || "").includes(recordingUrl)) {
+      repaired.reply = String(repaired.reply || "").replace(recordingUrl, labelledUrl);
+    } else {
+      repaired.follow_up = String(repaired.follow_up || "").replace(recordingUrl, labelledUrl);
+    }
+  }
+
+  const askedForLiveClass = /\b(?:attend|join|try|see)\b.{0,50}\b(?:live\s+class|class|live\s+session)\b/i.test(String(latestMessage || ""));
+  const session = snapshot.live_session || null;
+  const liveStatusAlreadyExplained = /\b(?:join )?link\b.{0,45}\b(?:not (?:published|available)|isn'?t (?:published|available)|once (?:it is|it'?s) published|when (?:it is|it'?s) published)\b/i.test(combined());
+  if (askedForLiveClass && session && !String(session.url || "").trim() && !liveStatusAlreadyExplained) {
+    const sessionTitle = String(session.title || "today's live session").trim();
+    const date = String(session.date || "").trim();
+    const time = String(session.time || "").trim();
+    const timezone = String(session.timezone || "").trim();
+    const schedule = `${date ? ` on ${date}` : ""}${time ? ` at ${time}${timezone ? ` ${timezone}` : ""}` : ""}`;
+    const statusLine = `The direct join link for ${sessionTitle}${schedule} is not available yet; I’ll share it when it is published.`;
+    repaired.reply = `${String(repaired.reply || "").trim()}${String(repaired.reply || "").trim() ? "\n\n" : ""}${statusLine}`;
+  }
+
+  return repaired;
+}
+
 function ngAylaPricingDraftIsGrounded(reply = "", snapshot = {}) {
   const text = String(reply || "").toLowerCase();
   const plans = safeArray(snapshot.plans);
@@ -54162,6 +54197,21 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
     const repaired = await requestDecision(buildAylaConversationRepairPrompt({ violations, priorDecision: decision, state }));
     result = repaired.result;
     decision = repaired.decision;
+    violations = decisionViolations(decision);
+  }
+
+  // The live-resource labels and link-release status are safety-critical LMS
+  // facts, not sales copy. If the model's two natural-language repairs still
+  // miss only those facts, add the exact live labels deterministically and
+  // validate the complete decision once more before delivery.
+  if (
+    violations.length
+    && violations.every((item) => [
+      "recording_link_missing_exact_title",
+      "live_class_link_status_not_explained",
+    ].includes(item))
+  ) {
+    decision = ngAylaRepairLiveResourceGrounding(decision, liveSnapshot, latestInboundText);
     violations = decisionViolations(decision);
   }
 
