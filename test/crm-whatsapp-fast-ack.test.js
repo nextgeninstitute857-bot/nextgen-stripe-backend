@@ -604,7 +604,9 @@ test("mentor booking notifies the student and admins without recording false sen
   assert.match(meetingFlow, /\["sent", "delivered", "read"\]\.includes/);
   assert.match(meetingFlow, /five_minute_reminder[\s\S]*Please join with your private Google Meet link/);
   assert.match(server, /I’ll send it to you as soon as it is confirmed/);
-  assert.doesNotMatch(server, /You will receive the link at the meeting time/);
+  assert.doesNotMatch(server, /You will receive (?:it|the Google Meet link|the link) at the meeting time/);
+  assert.match(server, /google_meet_link_question_link_ready[\s\S]*Please save your private link here/);
+  assert.match(server, /nextStepWithLink[\s\S]*Meet link:/);
   assert.match(meetingFlow, /google_meet_booked_confirmation_failed/);
   assert.match(adminAlerts, /google_meet_booked.*Mentor call booked/);
   assert.match(adminAlerts, /google_meet_booked_confirmation_failed.*student confirmation needs attention/);

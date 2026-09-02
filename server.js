@@ -51461,7 +51461,7 @@ function ngBuildAylaBackendSalesBrain(db = {}, lead = {}, latestInboundText = ""
     "- Full feature-overview rule: when a student asks about several features, the complete LMS, or the purpose/benefit of features, use one short professional line per feature. Explain what it does and how it helps the student. Cover dashboard, roadmap, live classes, recordings, session notes, baseline diagnostic, adaptive flashcards, visible weak-area tracking, and assessments. Then invite the student to the demo. Finally recommend attending live when possible and using the matching labelled recording whenever their schedule is busy. Do not ask them to choose between live and recording, and do not place the demo invitation before the explanation.",
     "- Conversation-first rule: answer the student’s latest question or concern first. Then move forward with ONE useful next step: live session, session recording, UWorld demo/library, YouTube lectures, exam date/weak area, and then Google Meet mentor consultation when ready.",
     officialExamGuidance,
-    "- Google Meet state lock: once the student has requested Google Meet, shared a preferred time, is waiting for the Google Meet link, or has a scheduled Google Meet, do NOT restart live-session/recording/UWorld/demo/mentor-offer flow. Only acknowledge, answer direct questions, collect/reschedule time, or remind them that the Google Meet link will be sent at meeting time.",
+    "- Google Meet state lock: once the student has requested Google Meet, shared a preferred time, is waiting for the Google Meet link, or has a scheduled Google Meet, do NOT restart live-session/recording/UWorld/demo/mentor-offer flow. Only acknowledge, answer direct questions, collect/reschedule time, or explain that the private Google Meet link will be sent immediately after the team confirms it.",
     "- Acknowledgements like thank you/thanks/ok/noted/great/perfect after booking must get a simple acknowledgement or no sales push. Never treat them as a new sales trigger.",
     "- Greeting rule: use 'Hi Doctor' only once in a new conversation. After that, answer directly with Doctor / Yes Doctor / Sure Doctor. Never start every reply with Hi Doctor.",
     "- Cohort-date rule: use the current live LMS facts supplied for this reply. July 1, 2026 was the original cohort start and must never be described as upcoming after that date. The roadmap started with Cardiology and continues system-wise; describe the current live system from the LMS instead of repeating an old launch message.",
@@ -52920,7 +52920,7 @@ function ngAylaGoogleMeetLockedReply({ latestText = "", lead = {}, appointment =
         intent: "google_meet_link_question_link_ready",
         reply: `Doctor, your Google Meet link is ready and scheduled for ${when}.
 
-You will receive it at the meeting time.`
+Please save your private link here:\n${link}\n\nI’ll remind you again five minutes before the call.`
       };
     }
     return {
@@ -52932,11 +52932,14 @@ I’ll send the private link here as soon as our team confirms it.`
   }
 
   if (ngAylaIsPriceQuestion(latestText)) {
+    const confirmedLink = link
+      ? `\n\nYour private Google Meet link is already confirmed:\n${link}`
+      : "\n\nOur team will add the private Google Meet link shortly. I’ll send it to you as soon as it is confirmed.";
     return {
       intent: "pricing_after_google_meet_time_collected",
       reply: `Doctor, the mentor/admin will explain the best plan and price clearly in your Google Meet.
 
-Your preferred time is already noted for ${when}. You will receive the Google Meet link at the meeting time.`
+Your preferred time is already noted for ${when}.${confirmedLink}`
     };
   }
 
@@ -65974,7 +65977,13 @@ function ngAylaAdminAlertTemplatePayload({ type = "alert", lead = null, appointm
   const interests = ngAylaProductInterestLabels({ lead: lead || {}, latestInboundText, messages });
   const coverage = ngAylaReadableAlertCoverage(handoff.coverage);
   const appointmentTime = appointment ? ngGoogleMeetAppointmentDisplayDateTime(appointment) : "";
+  const appointmentLink = appointment ? ngGoogleMeetAppointmentLink(appointment) : "";
   const isTest = String(type || "").toLowerCase() === "test_alert";
+  const cleanType = String(type || "").toLowerCase();
+  const nextStep = ngAylaAdminAlertTemplateNextStep(type);
+  const nextStepWithLink = appointmentLink && ["google_meet_booked", "google_meet_booked_confirmation_failed"].includes(cleanType)
+    ? `${nextStep} Meet link: ${appointmentLink}`
+    : nextStep;
 
   const values = {
     templateName: process.env.NEXTGEN_ADMIN_WHATSAPP_ALERT_TEMPLATE_NAME || NEXTGEN_ADMIN_WHATSAPP_ALERT_TEMPLATE_NAME,
@@ -65987,7 +65996,7 @@ function ngAylaAdminAlertTemplatePayload({ type = "alert", lead = null, appointm
     latestMessage: isTest ? "This is a delivery test; no student data is included." : latestInboundText || "No recent message was available.",
     coverageLabel: isTest ? "Template delivery path" : coverage.join("; ") || "Not provided",
     meetingTime: appointmentTime || "Not scheduled",
-    nextStep: ngAylaAdminAlertTemplateNextStep(type),
+    nextStep: nextStepWithLink,
   };
   return {
     ...buildNextGenAdminAlertTemplatePayload(values),
