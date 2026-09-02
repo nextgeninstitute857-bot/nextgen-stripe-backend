@@ -242,7 +242,7 @@ test("Zoom is prepared before the five-minute reminder window opens", () => {
 
 test("scheduler and AI source use only the exact live LMS link", () => {
   assert.match(server, /CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard"/);
-  assert.match(server, /CRM_LIVE_SESSION_SCHEDULER_BUILD = "v318-visible-template-activation-recovery"/);
+  assert.match(server, /CRM_LIVE_SESSION_SCHEDULER_BUILD = "v319-visible-template-activation-recovery"/);
   assert.match(server, /crm_live_session_scheduler_build: CRM_LIVE_SESSION_SCHEDULER_BUILD/);
   assert.match(server, /const reason = "matching_live_session_link_not_released"/);
   assert.match(server, /today_session: todaySession \?/);
