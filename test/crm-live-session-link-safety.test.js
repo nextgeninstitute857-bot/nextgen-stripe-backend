@@ -283,8 +283,9 @@ test("Zoom recovery publishes exact recordings independently of prepared-content
   assert.match(upsert, /notesAutoPublished: Number\(notesPublicationResult\.auto_published \|\| 0\)/);
 });
 
-test("first Meta replies must carry the current session, one recording, and one qualification question", () => {
+test("first Meta replies must carry the demo, current session, one recording, and one qualification question", () => {
   assert.match(server, /isFirstMetaReply/);
+  assert.match(server, /meta_first_reply_missing_demo_link/);
   assert.match(server, /meta_first_reply_missing_exact_session_title/);
   assert.match(server, /meta_first_reply_missing_revised_time/);
   assert.match(server, /meta_first_reply_did_not_dispatch_recording/);

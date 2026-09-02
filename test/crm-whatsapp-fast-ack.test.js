@@ -585,6 +585,29 @@ test("every reachable future lead enters the daily live-session sequence", () =>
   assert.equal(eligible({}, { id: "meet", stage: "new_lead", phone: "+15550000004", google_meet_active: true }, settings), false);
 });
 
+test("mentor booking notifies the student and admins without recording false sends", () => {
+  const meetingFlow = server.slice(
+    server.indexOf("function ngGoogleMeetAppointmentDateTime"),
+    server.indexOf("function ngUpsertTodayLiveSessionOverride"),
+  );
+  const adminAlerts = server.slice(
+    server.indexOf("function ngAylaAdminAlertTemplateLabel"),
+    server.indexOf("async function ngSendAdminWhatsAppAlert"),
+  );
+
+  assert.match(meetingFlow, /getSessionStartUtc\(date, time, timezone\)/);
+  assert.match(meetingFlow, /student_confirmation: studentConfirmation/);
+  assert.match(meetingFlow, /ngGoogleMeetAppointmentAlreadySent\(db, item, "confirmation"\)/);
+  assert.match(meetingFlow, /if \(studentConfirmation\.sent\) item\.google_meet_confirmation_sent_at/);
+  assert.match(meetingFlow, /if \(!dryRun && sent\.sent\)/);
+  assert.match(meetingFlow, /const sent = experienceDeliveryAccepted\(result\)/);
+  assert.match(meetingFlow, /\["sent", "delivered", "read"\]\.includes/);
+  assert.match(meetingFlow, /google_meet_booked_confirmation_failed/);
+  assert.match(adminAlerts, /google_meet_booked.*Mentor call booked/);
+  assert.match(adminAlerts, /google_meet_booked_confirmation_failed.*student confirmation needs attention/);
+  assert.match(adminAlerts, /google_meet_booked.*The meeting is confirmed/);
+});
+
 test("a public price question does not create or lock a Google Meet handoff", () => {
   const router = server.slice(
     server.indexOf("function ngAylaHardSalesRouter"),
