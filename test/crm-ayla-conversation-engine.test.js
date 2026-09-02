@@ -599,6 +599,19 @@ test("an explicit demo acceptance always receives the direct link after the feat
   assert.equal(normalized.action, "send_demo");
   assert.match(normalized.reply, /https:\/\/nextgenusmle\.live\/demo/);
   assert.deepEqual(evaluateAylaConversationDecision({ decision: normalized, state, messages }), []);
+
+  const repairedReplyOnly = normalizeAylaConversationDecision({
+    ...decision(),
+    stage: "demo_experience",
+    intent: "accept_demo",
+    reply: "Great choice—start whenever you are ready.",
+    action: "reply_only",
+    ask_field: "none",
+  }, { ...state, completed_actions: ["send_feature_tour"] }, { messages, latestMessage: messages.at(-1).text });
+
+  assert.equal(repairedReplyOnly.action, "send_demo");
+  assert.equal(repairedReplyOnly.stage, "demo_experience");
+  assert.match(repairedReplyOnly.reply, /https:\/\/nextgenusmle\.live\/demo/);
 });
 
 test("a fresh prospective lead is asked for their name before other discovery fields", () => {
