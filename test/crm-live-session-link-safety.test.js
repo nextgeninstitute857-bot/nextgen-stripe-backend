@@ -174,11 +174,11 @@ test("a blocked live-session phase is visible once and updates only when its sta
 
   assert.equal(recordState(db, payload), true);
   assert.equal(recordState(db, payload), false);
-  assert.equal(db.action_logs.length, 1);
-  assert.equal(db.action_logs[0].status, "pending");
-  assert.match(db.action_logs[0].description, /waiting for Meta template approval/i);
-  assert.match(db.action_logs[0].description, /nextgen_live_session_link_v3/);
-  assert.doesNotMatch(db.action_logs[0].description, /hidden/);
+  assert.equal(db.assistant_actions.length, 1);
+  assert.equal(db.assistant_actions[0].status, "pending");
+  assert.match(db.assistant_actions[0].description, /waiting for Meta template approval/i);
+  assert.match(db.assistant_actions[0].description, /nextgen_live_session_link_v3/);
+  assert.doesNotMatch(db.assistant_actions[0].description, /hidden/);
 });
 
 test("the backend rechecks urgent LMS live-session delivery every ten seconds", () => {
@@ -242,7 +242,7 @@ test("Zoom is prepared before the five-minute reminder window opens", () => {
 
 test("scheduler and AI source use only the exact live LMS link", () => {
   assert.match(server, /CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard"/);
-  assert.match(server, /CRM_LIVE_SESSION_SCHEDULER_BUILD = "v317-fast-template-activation-recovery"/);
+  assert.match(server, /CRM_LIVE_SESSION_SCHEDULER_BUILD = "v318-visible-template-activation-recovery"/);
   assert.match(server, /crm_live_session_scheduler_build: CRM_LIVE_SESSION_SCHEDULER_BUILD/);
   assert.match(server, /const reason = "matching_live_session_link_not_released"/);
   assert.match(server, /today_session: todaySession \?/);
