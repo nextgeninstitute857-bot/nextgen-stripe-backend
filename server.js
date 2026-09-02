@@ -669,7 +669,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 const NEXTGEN_BACKEND_BUILD = "v223-aylamed-diagnostic-onboarding";
 const LMS_PAID_DEMO_CONSOLIDATION_BUILD = "v221-paid-demo-consolidation";
 const CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard";
-const CRM_LIVE_SESSION_SCHEDULER_BUILD = "v320-critical-preclass-recovery";
+const CRM_LIVE_SESSION_SCHEDULER_BUILD = "v321-postclass-recording-recovery";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
@@ -35414,7 +35414,9 @@ function ngDailyLiveSessionActionNow(settings = {}, date = new Date(), session =
   const dateKey = ngDailySessionDateKey(date);
   const sessionDate = String(session?.date || session?.scheduled_date || "").slice(0, 10);
   if (!session?.id || !sessionDate || sessionDate !== dateKey) return null;
-  if (["cancelled", "canceled", "archived", "hidden", "deleted"].includes(String(session.status || "").toLowerCase())) return null;
+  const sessionStatus = String(session.status || "").toLowerCase();
+  if (["cancelled", "canceled", "archived", "hidden", "deleted"].includes(sessionStatus)) return null;
+  const sessionCompleted = ["completed", "ended", "past"].includes(sessionStatus);
   const reminderMinutes = Number(settings.session_reminder_minutes || settings.default_session_reminder_minutes || 5);
   const [sessionHour = 12, sessionMinute = 0] = String(session.time || session.scheduled_time || NEXTGEN_LIVE_CLASS_TIME)
     .split(":")
@@ -35426,12 +35428,12 @@ function ngDailyLiveSessionActionNow(settings = {}, date = new Date(), session =
     1,
     Number(session.duration_minutes || DEFAULT_ZOOM_DURATION_MINUTES) || DEFAULT_ZOOM_DURATION_MINUTES,
   );
-  if (total >= 7 * 60 && total < sessionTotal - reminderMinutes) return "daily_session_invite";
-  if (total >= sessionTotal - reminderMinutes && total < sessionTotal) return "five_minute_reminder";
+  if (!sessionCompleted && total >= 7 * 60 && total < sessionTotal - reminderMinutes) return "daily_session_invite";
+  if (!sessionCompleted && total >= sessionTotal - reminderMinutes && total < sessionTotal) return "five_minute_reminder";
   // Keep recovering the link for the full class window. The trusted-link
   // resolver below applies the same session duration and rejects stale,
   // mismatched, or unreleased Zoom links before anything can be sent.
-  if (total >= sessionTotal && total <= sessionTotal + sessionDurationMinutes) return "session_link";
+  if (!sessionCompleted && total >= sessionTotal && total <= sessionTotal + sessionDurationMinutes) return "session_link";
   const recordingFollowupStart = Math.max(
     sessionTotal + sessionDurationMinutes + 1,
     sessionTotal + Number(settings.post_session_followup_delay_minutes || 120),
@@ -35935,6 +35937,16 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
       ngFinishDeliveryLock(attempt, "failed", { reason: error.message });
       results.push({ lead_id: lead.id, sent: false, error: error.message, action, template_id: templateId });
     }
+  }
+  if (!dryRun) {
+    databaseChanged = ngRecordDailyLiveSessionPhaseState(db, {
+      brandId,
+      dateKey,
+      action,
+      assets,
+      templateKey: scheduledTemplateKey,
+      results,
+    }) || databaseChanged;
   }
   return {
     action,

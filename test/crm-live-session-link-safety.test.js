@@ -86,6 +86,9 @@ test("daily session timing follows the real LMS date and includes Saturday class
   assert.equal(actionNow({}, new Date(), saturday), "post_session_recording");
   clock = { weekday: "Saturday", hour: 23, minute: 59 };
   assert.equal(actionNow({}, new Date(), saturday), "post_session_recording");
+  assert.equal(actionNow({}, new Date(), { ...saturday, status: "completed" }), "post_session_recording");
+  clock = { weekday: "Saturday", hour: 13, minute: 16 };
+  assert.equal(actionNow({}, new Date(), { ...saturday, status: "completed" }), null);
   assert.equal(actionNow({}, new Date(), { ...saturday, date: "2026-08-28" }), null);
   assert.equal(actionNow({}, new Date(), { ...saturday, status: "cancelled" }), null);
 });
@@ -140,6 +143,7 @@ test("the scheduler uses dedicated approved link templates", () => {
   assert.match(scheduler, /ngRefreshDailySessionMetaTemplateApprovals\(db\)/);
   assert.match(scheduler, /whatsapp_template_inventory_unavailable/);
   assert.match(scheduler, /whatsapp_template_not_approved_yet/);
+  assert.match(scheduler, /ngRecordDailyLiveSessionPhaseState\(db, \{[\s\S]*templateKey: scheduledTemplateKey,[\s\S]*results,/);
 });
 
 test("a blocked live-session phase is visible once and updates only when its state changes", () => {
@@ -256,7 +260,7 @@ test("LMS-clock messages run before non-urgent AI work and survive memory pressu
 
 test("scheduler and AI source use only the exact live LMS link", () => {
   assert.match(server, /CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard"/);
-  assert.match(server, /CRM_LIVE_SESSION_SCHEDULER_BUILD = "v320-critical-preclass-recovery"/);
+  assert.match(server, /CRM_LIVE_SESSION_SCHEDULER_BUILD = "v321-postclass-recording-recovery"/);
   assert.match(server, /crm_live_session_scheduler_build: CRM_LIVE_SESSION_SCHEDULER_BUILD/);
   assert.match(server, /const reason = "matching_live_session_link_not_released"/);
   assert.match(server, /today_session: todaySession \?/);
