@@ -668,7 +668,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 const NEXTGEN_BACKEND_BUILD = "v223-aylamed-diagnostic-onboarding";
 const LMS_PAID_DEMO_CONSOLIDATION_BUILD = "v221-paid-demo-consolidation";
 const CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard";
-const CRM_LIVE_SESSION_SCHEDULER_BUILD = "v317-fast-template-activation-recovery";
+const CRM_LIVE_SESSION_SCHEDULER_BUILD = "v318-visible-template-activation-recovery";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
@@ -35697,7 +35697,9 @@ function ngRecordDailyLiveSessionPhaseState(db = {}, {
     `${sent} sent, ${skipped} skipped, ${failed} failed`,
   ].filter(Boolean);
   const rowId = ["daily-live-session-phase", brandId || "all", dateKey, action].join("|");
-  const rows = ensureCrmArray(db, "action_logs");
+  // The CRM Action Logs screen reads assistant_actions first. Keep this
+  // operational phase row there so an approval blocker is visible immediately.
+  const rows = ensureCrmArray(db, "assistant_actions");
   const existing = rows.find((item) => String(item.id || "") === rowId);
   const state = {
     action: "daily_live_session_phase_status",
