@@ -669,7 +669,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 const NEXTGEN_BACKEND_BUILD = "v223-aylamed-diagnostic-onboarding";
 const LMS_PAID_DEMO_CONSOLIDATION_BUILD = "v221-paid-demo-consolidation";
 const CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard";
-const CRM_LIVE_SESSION_SCHEDULER_BUILD = "v319-visible-template-activation-recovery";
+const CRM_LIVE_SESSION_SCHEDULER_BUILD = "v320-critical-preclass-recovery";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
@@ -74001,15 +74001,45 @@ let ngV116LastDailySessionRunAt = 0;
 async function ngV116RunBackendHeartbeatTick({ source = "backend_heartbeat" } = {}) {
   if (!ngV116HeartbeatEnabled()) return { skipped: true, reason: "disabled" };
   if (NG_V116_HEARTBEAT_STATE.running) return { skipped: true, reason: "previous_tick_running" };
-  if (ngBackgroundMemoryIsHigh("crm_backend_heartbeat")) {
-    return { skipped: true, reason: "memory_pressure", memory: ngMemoryStatus() };
-  }
+  const memoryPressure = ngBackgroundMemoryIsHigh("crm_backend_heartbeat");
   NG_V116_HEARTBEAT_STATE.running = true;
   NG_V116_HEARTBEAT_STATE.ticks += 1;
   NG_V116_HEARTBEAT_STATE.last_tick_at = nowIso();
   const tick = NG_V116_HEARTBEAT_STATE.ticks;
   try {
     const db = await readCrmDb();
+    // LMS-clock messages are time critical. Run them before general AI work and
+    // keep them alive even when the background memory guard pauses non-urgent
+    // jobs. Per-phase delivery locks still prevent duplicate sends.
+    const dailySessionIntervalMs = Math.max(
+      5000,
+      Math.min(60000, Number(process.env.NEXTGEN_HEARTBEAT_DAILY_SESSION_MS || 10000) || 10000),
+    );
+    let dailySessionResult = null;
+    const now = Date.now();
+    if (now - ngV116LastDailySessionRunAt >= dailySessionIntervalMs) {
+      ngV116LastDailySessionRunAt = now;
+      dailySessionResult = await ngRunDailyLiveSessionScheduler({
+        db,
+        limit: Math.max(1, Math.min(100, Number(process.env.NEXTGEN_HEARTBEAT_DAILY_SESSION_LIMIT || 50))),
+        dryRun: false,
+        source: `${source}_daily_session`,
+      });
+    }
+    if (memoryPressure) {
+      if (dailySessionResult?.changed) await writeCrmDb(db);
+      NG_V116_HEARTBEAT_STATE.last_finish_at = nowIso();
+      NG_V116_HEARTBEAT_STATE.last_error = null;
+      if (dailySessionResult) NG_V116_HEARTBEAT_STATE.last_daily_session_result = dailySessionResult;
+      return {
+        success: true,
+        tick,
+        changed: Boolean(dailySessionResult?.changed),
+        non_urgent_skipped: "memory_pressure",
+        memory: ngMemoryStatus(),
+        daily_session_processed: dailySessionResult?.processed || 0,
+      };
+    }
     const clearResults = ngV116ClearStaleSilentInboundGuards(db, 80);
     const aiResults = await ngAylaRunPendingFullAiAuto({
       db,
@@ -74021,10 +74051,8 @@ async function ngV116RunBackendHeartbeatTick({ source = "backend_heartbeat" } = 
     });
     let firstMessageResults = [];
     let noReplyResults = [];
-    let dailySessionResult = null;
     let googleMeetResult = null;
     let runExperienceChecks = false;
-    const now = Date.now();
     if (now - ngV116LastFirstMessageRunAt >= Math.max(5000, Number(process.env.NEXTGEN_HEARTBEAT_FIRST_MESSAGE_MS || 15000))) {
       ngV116LastFirstMessageRunAt = now;
       firstMessageResults = await ngRunDueAutoFirstMessages({
@@ -74033,19 +74061,6 @@ async function ngV116RunBackendHeartbeatTick({ source = "backend_heartbeat" } = 
         limit: Math.max(1, Math.min(25, Number(process.env.NEXTGEN_HEARTBEAT_FIRST_MESSAGE_LIMIT || 10))),
         actorId: "backend_heartbeat",
         dryRun: false,
-      });
-    }
-    const dailySessionIntervalMs = Math.max(
-      5000,
-      Math.min(60000, Number(process.env.NEXTGEN_HEARTBEAT_DAILY_SESSION_MS || 10000) || 10000),
-    );
-    if (now - ngV116LastDailySessionRunAt >= dailySessionIntervalMs) {
-      ngV116LastDailySessionRunAt = now;
-      dailySessionResult = await ngRunDailyLiveSessionScheduler({
-        db,
-        limit: Math.max(1, Math.min(100, Number(process.env.NEXTGEN_HEARTBEAT_DAILY_SESSION_LIMIT || 50))),
-        dryRun: false,
-        source: `${source}_daily_session`,
       });
     }
     if (now - ngV116LastScheduledRunAt >= Math.max(30000, Number(process.env.NEXTGEN_HEARTBEAT_SCHEDULED_MS || 60000))) {
@@ -95767,10 +95782,9 @@ async function ngRunAutoZoomPrepareTick(reason = "interval") {
     return { success: true, enabled: true, skipped: true, reason: "already_running" };
   }
 
-  if (ngBackgroundMemoryIsHigh("auto_zoom_prepare")) {
-    return { success: true, enabled: true, skipped: true, reason: "memory_pressure", memory: ngMemoryStatus() };
-  }
-
+  // This is a small, time-critical LMS operation. Do not let the broad
+  // background-work memory guard suppress the only 15-minute preparation
+  // window for the day's exact Zoom meeting.
   ngAutoZoomPrepRunning = true;
   const startedAt = new Date().toISOString();
   const nowMs = Date.now();
