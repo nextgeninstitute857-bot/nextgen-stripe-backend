@@ -745,6 +745,28 @@ test("admin Ayla simulation uses the real conversation engine without sending or
   assert.doesNotMatch(route, /writeCrmDb\s*\(/);
 });
 
+test("Ayla deterministically repairs exact recording labels and unreleased live-link status", () => {
+  const helperStart = server.indexOf("function ngAylaRepairLiveResourceGrounding");
+  const helperEnd = server.indexOf("function ngAylaPricingDraftIsGrounded", helperStart);
+  assert.ok(helperStart > 0 && helperEnd > helperStart);
+  const helper = server.slice(helperStart, helperEnd);
+  assert.match(helper, /recordingTitle/);
+  assert.match(helper, /replace\(recordingUrl, labelledUrl\)/);
+  assert.match(helper, /The direct join link for/);
+  assert.match(helper, /is not available yet; I’ll share it when it is published/);
+
+  const generatorStart = server.indexOf("async function ngGenerateStudentAutoReply");
+  const generatorEnd = server.indexOf('app.post("/admin/crm/ayla-conversation/simulate"', generatorStart);
+  const generator = server.slice(generatorStart, generatorEnd);
+  assert.match(generator, /violations\.every/);
+  assert.match(generator, /ngAylaRepairLiveResourceGrounding\(decision, liveSnapshot, latestInboundText\)/);
+  assert.ok(
+    generator.indexOf("ngAylaRepairLiveResourceGrounding(decision, liveSnapshot, latestInboundText)")
+      < generator.indexOf("AYLA_CONVERSATION_QUALITY_REJECTED"),
+    "the grounded fallback must run before a student-facing reply is rejected",
+  );
+});
+
 test("human handoff reuses conversation memory and a student-stated email before asking again", () => {
   const contextStart = server.indexOf("function ngAylaHumanHandoffContext");
   const contextEnd = server.indexOf("function ngAylaNextHandoffQualificationField", contextStart);
