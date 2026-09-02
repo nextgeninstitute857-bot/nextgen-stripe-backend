@@ -668,7 +668,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 const NEXTGEN_BACKEND_BUILD = "v223-aylamed-diagnostic-onboarding";
 const LMS_PAID_DEMO_CONSOLIDATION_BUILD = "v221-paid-demo-consolidation";
 const CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard";
-const CRM_LIVE_SESSION_SCHEDULER_BUILD = "v316-lms-session-link-setting-lock";
+const CRM_LIVE_SESSION_SCHEDULER_BUILD = "v317-fast-template-activation-recovery";
 const CRM_MULTIEXAM_LEAD_CAPTURE_BUILD = "v293-all-seven-exam-lead-capture";
 const LMS_TEACHING_ACCESS_BUILD = "v255-course-teaching-day-access";
 const CONTENT_INGESTION_BUILD = MULTI_QBANK_INGESTION_BUILD;
@@ -35558,7 +35558,8 @@ let NG_DAILY_SESSION_META_TEMPLATE_CACHE = {
 
 async function ngRefreshDailySessionMetaTemplateApprovals(db = {}, { force = false } = {}) {
   const checkedAtMs = Date.parse(NG_DAILY_SESSION_META_TEMPLATE_CACHE.checked_at || "") || 0;
-  const fresh = !force && checkedAtMs > 0 && Date.now() - checkedAtMs < 120000;
+  const cacheMs = Math.max(5000, Math.min(120000, Number(process.env.NEXTGEN_DAILY_SESSION_META_TEMPLATE_CACHE_MS || 10000) || 10000));
+  const fresh = !force && checkedAtMs > 0 && Date.now() - checkedAtMs < cacheMs;
   let liveTemplates = fresh && Array.isArray(NG_DAILY_SESSION_META_TEMPLATE_CACHE.live_templates)
     ? NG_DAILY_SESSION_META_TEMPLATE_CACHE.live_templates
     : null;
@@ -35581,6 +35582,11 @@ async function ngRefreshDailySessionMetaTemplateApprovals(db = {}, { force = fal
     }
   }
 
+  const stableTemplateState = (records = []) => JSON.stringify(records.map((record) => {
+    const { meta_last_synced_at: _volatileMetaSyncTime, ...stable } = record || {};
+    return stable;
+  }));
+  const beforeTemplates = stableTemplateState(ensureCrmArray(db, "message_templates"));
   const reconciled = reconcileNextGenWhatsAppTemplatePack(db.message_templates, {
     liveTemplates,
     liveWasChecked: true,
@@ -35590,6 +35596,7 @@ async function ngRefreshDailySessionMetaTemplateApprovals(db = {}, { force = fal
     verified: true,
     checked_at: NG_DAILY_SESSION_META_TEMPLATE_CACHE.checked_at,
     approved: reconciled.liveApprovedCount,
+    changed: stableTemplateState(db.message_templates) !== beforeTemplates,
   };
 }
 
@@ -35645,6 +35652,83 @@ function ngDailyLiveSessionText(action = "", assets = {}, lead = {}) {
   return `Doctor, in case you missed today’s live session, you can catch up here.${rec}\n\nLet us know how you liked the teaching style. Would you like to join the program, or should I book a mentor call for you?`;
 }
 
+function ngRecordDailyLiveSessionPhaseState(db = {}, {
+  brandId = null,
+  dateKey = "",
+  action = "",
+  assets = {},
+  templateKey = null,
+  results = [],
+  reason = "",
+} = {}) {
+  if (!dateKey || !action || (!reason && !results.length)) return false;
+
+  const sent = results.filter((item) => item.sent).length;
+  const skipped = results.filter((item) => item.skipped).length;
+  const failed = results.filter((item) => item.sent === false || item.error).length;
+  const reasons = [...new Set(results.map((item) => item.reason || item.error).filter(Boolean))];
+  const primaryReason = reason || reasons[0] || "";
+  const waitingReasons = new Set([
+    "matching_live_session_link_not_released",
+    "exact_session_recording_not_published_yet",
+    "whatsapp_template_inventory_unavailable",
+    "whatsapp_template_not_approved_yet",
+  ]);
+  const waiting = waitingReasons.has(primaryReason) || reasons.some((item) => waitingReasons.has(item));
+  const status = failed > 0 ? "failed" : waiting ? "pending" : sent > 0 && skipped === 0 ? "completed" : "skipped";
+  const phaseLabels = {
+    daily_session_invite: "Daily session invitation",
+    five_minute_reminder: "Five-minute reminder",
+    session_link: "Live-session link",
+    post_session_recording: "Recording and notes follow-up",
+  };
+  const reasonLabels = {
+    matching_live_session_link_not_released: "waiting for the exact LMS classroom link",
+    exact_session_recording_not_published_yet: "waiting for the exact recording and notes to publish",
+    whatsapp_template_inventory_unavailable: "unable to verify Meta template approval",
+    whatsapp_template_not_approved_yet: "waiting for Meta template approval",
+  };
+  const template = templateKey ? getMessageTemplateByKey(db, templateKey) : null;
+  const providerTemplate = normalizeCrmString(template?.provider_template_name || template?.meta_template_name || template?.name || templateKey || "");
+  const descriptionParts = [
+    reasonLabels[primaryReason] || primaryReason,
+    providerTemplate ? `Template: ${providerTemplate}` : "",
+    assets.liveSessionTitle || assets.recordingTitle || "",
+    `${sent} sent, ${skipped} skipped, ${failed} failed`,
+  ].filter(Boolean);
+  const rowId = ["daily-live-session-phase", brandId || "all", dateKey, action].join("|");
+  const rows = ensureCrmArray(db, "action_logs");
+  const existing = rows.find((item) => String(item.id || "") === rowId);
+  const state = {
+    action: "daily_live_session_phase_status",
+    type: "automation",
+    channel: "whatsapp",
+    status,
+    title: `${phaseLabels[action] || action}: ${status}`,
+    description: descriptionParts.join(" · "),
+    reason: primaryReason || null,
+    daily_live_session_action: action,
+    daily_live_session_date: dateKey,
+    session_title: assets.liveSessionTitle || assets.recordingTitle || null,
+    session_time: assets.sessionTime || null,
+    template_key: templateKey || null,
+    provider_template_name: providerTemplate || null,
+    sent,
+    skipped,
+    failed,
+    brand_id: brandId || null,
+  };
+  const fingerprint = JSON.stringify(state);
+  if (existing && existing.state_fingerprint === fingerprint) return false;
+
+  if (existing) {
+    Object.assign(existing, state, { state_fingerprint: fingerprint, updated_at: nowIso() });
+  } else {
+    rows.push(withTimestamps({ id: rowId, ...state, state_fingerprint: fingerprint }));
+  }
+  return true;
+}
+
 async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit = 50, dryRun = false, source = "run_due" } = {}) {
   const settings = ngAylaPickSettings(db);
   if (settings.daily_live_session_flow_enabled === false) return { action: null, processed: 0, sent: 0, skipped: 0, results: [], reason: "disabled" };
@@ -35670,10 +35754,14 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
     recordingLink: String(liveSnapshot.today_recording?.url || "").trim(),
   };
   if (action === "session_link" && !assets.liveSessionLink) {
-    return { action, processed: 0, sent: 0, skipped: 0, reason: "matching_live_session_link_not_released" };
+    const reason = "matching_live_session_link_not_released";
+    const changed = ngRecordDailyLiveSessionPhaseState(db, { brandId, dateKey, action, assets, reason });
+    return { action, processed: 0, sent: 0, skipped: 0, changed, reason };
   }
   if (action === "post_session_recording" && (!assets.recordingLink || !assets.recordingTitle)) {
-    return { action, processed: 0, sent: 0, skipped: 0, reason: "exact_session_recording_not_published_yet" };
+    const reason = "exact_session_recording_not_published_yet";
+    const changed = ngRecordDailyLiveSessionPhaseState(db, { brandId, dateKey, action, assets, reason });
+    return { action, processed: 0, sent: 0, skipped: 0, changed, reason };
   }
   const configuredRecordingTemplate = normalizeTemplateLookupKey(settings.post_session_recording_template_key || "");
   const templateMap = {
@@ -35698,6 +35786,7 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
   const templateApprovalSync = closedWhatsAppTemplateNeeded
     ? await ngRefreshDailySessionMetaTemplateApprovals(db)
     : { verified: true, not_required: true };
+  let databaseChanged = Boolean(templateApprovalSync.changed);
   const results = [];
   for (const lead of leads) {
     if (ngDailyLiveSessionAlreadyAttempted(db, lead, action, dateKey)) {
@@ -35740,6 +35829,7 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
       continue;
     }
     const attempt = ngStartDailyLiveSessionAttempt(db, lead, action, dateKey, source);
+    databaseChanged = true;
     try {
       const result = await sendCrmMessage({
         db,
@@ -35812,6 +35902,7 @@ async function ngRunDailyLiveSessionScheduler({ db = {}, brandId = null, limit =
     processed: results.length,
     sent: results.filter((r) => r.sent).length,
     skipped: results.filter((r) => r.skipped).length,
+    changed: databaseChanged,
     template_approval_sync: templateApprovalSync,
     results,
   };
@@ -43841,6 +43932,14 @@ function ngContentTaxonomyProgress(job = {}, updates = {}) {
     failed = reduce(failed);
     approved = reduce(approved);
   }
+  databaseChanged = ngRecordDailyLiveSessionPhaseState(db, {
+    brandId,
+    dateKey,
+    action,
+    assets,
+    templateKey: scheduledTemplateKey,
+    results,
+  }) || databaseChanged;
   return {
     ...job,
     ...updates,
@@ -73640,6 +73739,7 @@ async function ngV116RunNoReplyLmsNurture({ db = {}, brandId = null, limit = 20,
 
 let ngV116LastFirstMessageRunAt = 0;
 let ngV116LastScheduledRunAt = 0;
+let ngV116LastDailySessionRunAt = 0;
 
 async function ngV116RunBackendHeartbeatTick({ source = "backend_heartbeat" } = {}) {
   if (!ngV116HeartbeatEnabled()) return { skipped: true, reason: "disabled" };
@@ -73678,14 +73778,26 @@ async function ngV116RunBackendHeartbeatTick({ source = "backend_heartbeat" } = 
         dryRun: false,
       });
     }
+    const dailySessionIntervalMs = Math.max(
+      5000,
+      Math.min(60000, Number(process.env.NEXTGEN_HEARTBEAT_DAILY_SESSION_MS || 10000) || 10000),
+    );
+    if (now - ngV116LastDailySessionRunAt >= dailySessionIntervalMs) {
+      ngV116LastDailySessionRunAt = now;
+      dailySessionResult = await ngRunDailyLiveSessionScheduler({
+        db,
+        limit: Math.max(1, Math.min(100, Number(process.env.NEXTGEN_HEARTBEAT_DAILY_SESSION_LIMIT || 50))),
+        dryRun: false,
+        source: `${source}_daily_session`,
+      });
+    }
     if (now - ngV116LastScheduledRunAt >= Math.max(30000, Number(process.env.NEXTGEN_HEARTBEAT_SCHEDULED_MS || 60000))) {
       ngV116LastScheduledRunAt = now;
       runExperienceChecks = true;
       noReplyResults = await ngV116RunNoReplyLmsNurture({ db, limit: Math.max(1, Math.min(50, Number(process.env.NEXTGEN_HEARTBEAT_NO_REPLY_LIMIT || 20))), source: `${source}_no_reply_nurture` });
-      dailySessionResult = await ngRunDailyLiveSessionScheduler({ db, limit: Math.max(1, Math.min(100, Number(process.env.NEXTGEN_HEARTBEAT_DAILY_SESSION_LIMIT || 50))), dryRun: false, source: `${source}_daily_session` });
       googleMeetResult = await ngRunGoogleMeetAppointmentScheduler({ db, limit: Math.max(1, Math.min(50, Number(process.env.NEXTGEN_HEARTBEAT_GOOGLE_MEET_LIMIT || 25))), dryRun: false, source: `${source}_google_meet` });
     }
-    const changed = clearResults.length || aiResults.length || firstMessageResults.length || noReplyResults.length || Number(dailySessionResult?.processed || 0) || Number(googleMeetResult?.processed || 0);
+    const changed = clearResults.length || aiResults.length || firstMessageResults.length || noReplyResults.length || dailySessionResult?.changed || Number(googleMeetResult?.processed || 0);
     if (changed) await writeCrmDb(db);
     // Run after the older heartbeat snapshot is saved. This worker uses fresh,
     // atomic mutations; never overwrite it with that earlier snapshot.
@@ -73696,7 +73808,7 @@ async function ngV116RunBackendHeartbeatTick({ source = "backend_heartbeat" } = 
     NG_V116_HEARTBEAT_STATE.last_first_message_results = firstMessageResults.slice(-20);
     NG_V116_HEARTBEAT_STATE.last_no_reply_results = noReplyResults.slice(-20);
     NG_V116_HEARTBEAT_STATE.last_experience_results = experienceResults;
-    NG_V116_HEARTBEAT_STATE.last_daily_session_result = dailySessionResult;
+    if (dailySessionResult) NG_V116_HEARTBEAT_STATE.last_daily_session_result = dailySessionResult;
     NG_V116_HEARTBEAT_STATE.last_google_meet_result = googleMeetResult;
     return { success: true, tick, changed: Boolean(changed), clear_results: clearResults.length, ai_auto: aiResults.length, first_messages: firstMessageResults.length, no_reply: noReplyResults.length, daily_session_processed: dailySessionResult?.processed || 0, google_meet_processed: googleMeetResult?.processed || 0 };
   } catch (error) {
@@ -73722,7 +73834,7 @@ function ngV116StartBackendHeartbeat() {
   setTimeout(() => {
     ngV116RunBackendHeartbeatTick({ source: "backend_startup" }).catch((error) => console.error("v116 heartbeat startup error:", error.message));
   }, 15000);
-  console.log(`v116 backend heartbeat started: every ${intervalMs}ms for inbound/AI; scheduled jobs every ${Math.max(30000, Number(process.env.NEXTGEN_HEARTBEAT_SCHEDULED_MS || 60000))}ms`);
+  console.log(`v116 backend heartbeat started: every ${intervalMs}ms for inbound/AI and LMS live-session recovery; other scheduled jobs every ${Math.max(30000, Number(process.env.NEXTGEN_HEARTBEAT_SCHEDULED_MS || 60000))}ms`);
   return NG_V116_HEARTBEAT_STATE;
 }
 
