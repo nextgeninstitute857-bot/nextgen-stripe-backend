@@ -11950,6 +11950,12 @@ app.get("/health", async (req, res) => {
       heartbeat_ticks: Number(NG_V116_HEARTBEAT_STATE?.ticks || 0),
       heartbeat_last_finish_at: NG_V116_HEARTBEAT_STATE?.last_finish_at || null,
       heartbeat_has_error: Boolean(NG_V116_HEARTBEAT_STATE?.last_error),
+      heartbeat_last_ai_results: safeArray(NG_V116_HEARTBEAT_STATE?.last_ai_results).slice(-20).map((item = {}) => ({
+        sent: item.sent === true,
+        queued: item.queued === true,
+        skipped: item.skipped === true,
+        reason: item.reason || item.result?.reason || (item.error ? "error" : null),
+      })),
       whatsapp_provider_block: ngWhatsAppProviderBlockStatus(),
       admin_whatsapp_alert_template: nextgenAdminWhatsAppTemplateState,
     },
