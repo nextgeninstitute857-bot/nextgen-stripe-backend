@@ -207,9 +207,10 @@ test("universal admin dashboard keeps LMS open and grants private minute-level A
     assert.equal(aylaInvitation.enrollment.recorded_amount_cents, 1250);
     assert.equal(aylaInvitation.payment.amount_cents, 1250);
     assert.equal(aylaInvitation.diagnostic_profile_created, true);
-    assert.equal(aylaInvitation.diagnostic_required, true);
-    assert.equal(aylaInvitation.diagnostic_profile.onboardingPath, "diagnostic_test");
-    assert.equal(aylaInvitation.diagnostic_profile.onboardingStatus, "diagnostic_pending");
+    assert.equal(aylaInvitation.diagnostic_required, false);
+    assert.equal(aylaInvitation.starting_choice_required, true);
+    assert.equal(aylaInvitation.diagnostic_profile.onboardingPath, "starting_choice_pending");
+    assert.equal(aylaInvitation.diagnostic_profile.onboardingStatus, "setup_pending");
     assert.equal(aylaInvitation.enrollment.student_id, aylaInvitation.diagnostic_profile.id);
     const fiveMinuteExpiry = new Date(aylaInvitation.enrollment.access_expires_at).getTime();
     assert.ok(fiveMinuteExpiry > Date.now() + 4 * 60000 && fiveMinuteExpiry < Date.now() + 6 * 60000);
@@ -222,9 +223,10 @@ test("universal admin dashboard keeps LMS open and grants private minute-level A
     const invitedStudentMe = await api(baseUrl, "/api/ayla/auth/me", { token: invitedStudentLogin.payload.token });
     assert.equal(invitedStudentMe.response.status, 200, JSON.stringify(invitedStudentMe.payload));
     assert.equal(invitedStudentMe.payload.student.id, aylaInvitation.diagnostic_profile.id);
-    assert.equal(invitedStudentMe.payload.student.onboardingStatus, "diagnostic_pending");
-    assert.equal(invitedStudentMe.payload.activeDashboard.profile_status, "diagnostic_required");
+    assert.equal(invitedStudentMe.payload.student.onboardingStatus, "setup_pending");
+    assert.equal(invitedStudentMe.payload.activeDashboard.profile_status, "setup_required");
     assert.equal(invitedStudentMe.payload.activeDashboard.onboarding_required.required, true);
+    assert.equal(invitedStudentMe.payload.activeDashboard.onboarding_required.type, "starting_choice");
 
     const completedSetup = await api(baseUrl, "/api/ayla/diagnostic-submissions", {
       method: "POST",
@@ -244,6 +246,8 @@ test("universal admin dashboard keeps LMS open and grants private minute-level A
     });
     assert.equal(completedSetup.response.status, 201, JSON.stringify(completedSetup.payload));
     assert.equal(completedSetup.payload.student.id, aylaInvitation.diagnostic_profile.id, "onboarding must complete the provisioned profile instead of creating a duplicate");
+    assert.equal(completedSetup.payload.student.onboardingPath, "diagnostic_test");
+    assert.equal(completedSetup.payload.student.onboardingStatus, "diagnostic_pending");
     const storedAfterSetup = JSON.parse(await fs.readFile(path.join(dataDir, "aylamed-db.json"), "utf8"));
     const invitedProfiles = Object.values(storedAfterSetup.aylaStudents || {}).filter((row) => row.email === "ayla-invited@example.com");
     assert.equal(invitedProfiles.length, 1);
@@ -262,7 +266,8 @@ test("universal admin dashboard keeps LMS open and grants private minute-level A
     assert.deepEqual(returningResult.diagnostic_profile.weakAreas, ["Cardiology", "Neurology"]);
     assert.equal(returningResult.diagnostic_profile.examDate, "2027-02-10");
     assert.equal(returningResult.diagnostic_profile.ayla_user_id, returningResult.user.id);
-    assert.equal(returningResult.diagnostic_required, true);
+    assert.equal(returningResult.diagnostic_required, false);
+    assert.equal(returningResult.starting_choice_required, true);
 
     const existingStudentInvite = await api(baseUrl, "/admin/mobile/invitations", {
       method: "POST",
@@ -277,7 +282,8 @@ test("universal admin dashboard keeps LMS open and grants private minute-level A
     assert.equal(existingStudentResult.password_reset_required, true);
     assert.ok(existingStudentResult.temporary_password);
     assert.equal(existingStudentResult.diagnostic_profile_created, true);
-    assert.equal(existingStudentResult.diagnostic_required, true);
+    assert.equal(existingStudentResult.diagnostic_required, false);
+    assert.equal(existingStudentResult.starting_choice_required, true);
     const existingEnrollmentExpiry = existingStudentResult.enrollment.access_expires_at;
     const existingDiagnosticProfileId = existingStudentResult.diagnostic_profile.id;
 

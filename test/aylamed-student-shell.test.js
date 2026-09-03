@@ -163,6 +163,25 @@ test("a provisioned pending profile exposes one required diagnostic dashboard", 
   assert.equal(shell.active_dashboard.onboarding_required.route, "/diagnostic?exam=usmle_step_1");
 });
 
+test("an invited profile requires a starting choice without forcing the diagnostic path", () => {
+  const pending = student("pending-mccqe", "mccqe");
+  pending.onboardingPath = "starting_choice_pending";
+  pending.onboardingStatus = "setup_pending";
+  pending.serverVerifiedBaseline = false;
+  const shell = resolveAylaStudentShell({
+    userId: "user-1",
+    students: [pending],
+    enrollments: [enrollment("pending-paid", "full", "mccqe", { student_id: pending.id })],
+    plansById: plans,
+    activeStudentId: pending.id,
+    now,
+  });
+  assert.equal(shell.active_dashboard.profile_status, "setup_required");
+  assert.equal(shell.active_dashboard.onboarding_required.required, true);
+  assert.equal(shell.active_dashboard.onboarding_required.type, "starting_choice");
+  assert.equal(shell.active_dashboard.onboarding_required.route, "/diagnostic?exam=mccqe");
+});
+
 test("a setup-required NCLEX dashboard inherits the RN or PN program assigned on enrollment", () => {
   const shell = resolveAylaStudentShell({
     userId: "user-1",
