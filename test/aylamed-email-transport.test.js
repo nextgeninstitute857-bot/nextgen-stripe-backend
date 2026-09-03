@@ -14,6 +14,8 @@ test("AylaMed invitations use a dedicated branded email transport", () => {
   assert.match(block, /brand:\s*["']aylamed["']/);
   assert.match(block, /Temporary password:/);
   assert.match(block, /must change this temporary password immediately/);
+  assert.match(block, /aylaExamLoginUrl\(examTrackId, process\.env\)/);
+  assert.doesNotMatch(block, /"https:\/\/aylamedapp\.com\/login"/);
   assert.doesNotMatch(block, /Use your existing password/);
 });
 

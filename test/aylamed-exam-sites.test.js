@@ -5,11 +5,21 @@ import {
   AYLA_EXAM_SITE_BRANDING,
   AYLA_EXAM_WEBSITES,
   aylaConfiguredExamOrigins,
+  aylaExamLoginUrl,
   aylaExamSiteRequestTrack,
   listAylaExamSites,
   listAylaExamWebsites,
   resolveAylaExamSite,
 } from "../lib/aylamed-exam-sites.js";
+
+test("access email login URLs follow the student's assigned exam website", () => {
+  assert.equal(aylaExamLoginUrl("mccqe", {}), "https://mccqe.aylamedapp.com/login");
+  assert.equal(aylaExamLoginUrl("usmle_step_1", {}), "https://aylamedapp.com/login");
+  assert.equal(
+    aylaExamLoginUrl("mccqe", { AYLA_MCCQE_PUBLIC_URL: "https://mccqe.example.com/" }),
+    "https://mccqe.example.com/login",
+  );
+});
 
 const env = {
   AYLA_USMLE_PUBLIC_URL: "https://usmle.example.test",
