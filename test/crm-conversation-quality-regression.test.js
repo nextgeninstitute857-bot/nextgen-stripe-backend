@@ -165,5 +165,30 @@ test("automatic reply path rechecks the conversation before sending and respects
   assert.ok(path.includes("collecting_student_message_fragments"));
   assert.ok(path.indexOf("conversation_changed_before_send") > path.indexOf("await ngGenerateStudentAutoReply"));
   assert.ok(path.indexOf("conversation_changed_before_send") < path.indexOf("await sendCrmMessage"));
+  assert.match(path, /ngLeadHasExplicitManualOrDraftMode\(currentLead\)/);
+  assert.doesNotMatch(path, /\["manual", "draft", "ai_draft"\]\.includes\(String\(currentLead\.ai_mode/);
   assert.doesNotMatch(path, /NEXTGEN_AYLA_FORCE_AUTO_ON_INBOUND|lead.ai_mode = "auto"/);
+});
+
+test("default draft leads enter the existing live auto conversation while explicit human control remains protected", () => {
+  const source = server.slice(
+    server.indexOf("function ngLeadHasExplicitManualOrDraftMode"),
+    server.indexOf("function ngTrainingContextForFullAiAuto"),
+  );
+  const helpers = new Function(`${source}; return { ngLeadHasExplicitManualOrDraftMode, ngNormalizeLeadAiMode };`)();
+
+  const freshInboundLead = { id: "india-lead", ai_mode: "draft", automation_mode: "draft" };
+  helpers.ngNormalizeLeadAiMode(freshInboundLead);
+  assert.equal(freshInboundLead.ai_mode, "auto");
+  assert.equal(freshInboundLead.automation_mode, "auto");
+
+  const humanControlledLead = {
+    id: "manual-lead",
+    ai_mode: "draft",
+    automation_mode: "draft",
+    ai_mode_set: true,
+  };
+  helpers.ngNormalizeLeadAiMode(humanControlledLead);
+  assert.equal(humanControlledLead.ai_mode, "draft");
+  assert.equal(helpers.ngLeadHasExplicitManualOrDraftMode(humanControlledLead), true);
 });
