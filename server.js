@@ -50922,8 +50922,21 @@ function ngAylaMarkProcessedOnlyIfDelivered({ lead = {}, inbound = {}, channel =
   return delivered;
 }
 
+function ngLeadHasExplicitManualOrDraftMode(lead = {}) {
+  const mode = String(lead.ai_mode || lead.automation_mode || "auto").toLowerCase();
+  const modeWasExplicitlySet =
+    lead.ai_mode_set === true ||
+    lead.automation_mode_set === true ||
+    lead.mode_locked === true ||
+    lead.ai_mode_manually_set === true;
+  return modeWasExplicitlySet && ["manual", "draft", "ai_draft"].includes(mode);
+}
+
 function ngNormalizeLeadAiMode(lead = {}) {
-  if (!lead.ai_mode && !lead.automation_mode) {
+  // Inbound conversations have always belonged to Full AI Auto unless a human
+  // explicitly took control. CRM normalization historically stored new leads as
+  // "draft" without any explicit-mode flag; that default must not silence them.
+  if (!ngLeadHasExplicitManualOrDraftMode(lead)) {
     lead.ai_mode = "auto";
     lead.automation_mode = "auto";
   }
@@ -54906,9 +54919,7 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
   ngNormalizeLeadAiMode(lead);
 
   const aiMode = String(lead.ai_mode || lead.automation_mode || "auto").toLowerCase();
-  const explicitlyManualOrDraft =
-    (lead.ai_mode_set === true || lead.automation_mode_set === true || lead.mode_locked === true || lead.ai_mode_manually_set === true) &&
-    (aiMode === "manual" || aiMode === "draft" || aiMode === "ai_draft");
+  const explicitlyManualOrDraft = ngLeadHasExplicitManualOrDraftMode(lead);
 
   // A human takeover must stay manual when the student sends another message.
   if (explicitlyManualOrDraft) {
@@ -55018,7 +55029,7 @@ async function ngAylaProcessFullAiAutoForLead({ db, leadId = null, lead: provide
     const currentLead = getLeadByAnyId(latestDb, lead.id);
     const currentInbound = ngLatestInbound(ngLeadConversationMessages(latestDb, lead.id));
     if (!currentLead || ngAiAutoMessageFingerprint(currentInbound || {}) !== inboundFingerprint
-      || ["manual", "draft", "ai_draft"].includes(String(currentLead.ai_mode || currentLead.automation_mode || "auto").toLowerCase())
+      || ngLeadHasExplicitManualOrDraftMode(currentLead)
       || currentLead.opted_out || currentLead.do_not_contact || currentLead.stop_requested) {
       ngReleaseAiAutoLock(duplicateGuard.lock_key);
       return { lead_id: lead.id, skipped: true, reason: "conversation_changed_before_send" };
