@@ -158,6 +158,12 @@ test("late replies and failed messages do not hide a newer unanswered student me
   assert.equal(answered([{ ...late, metadata: { latest_inbound_id: "b" } }], incoming), true);
   assert.equal(answered([{ ...late, metadata: { latest_inbound_id: "b" }, status: "failed" }], incoming), false);
   assert.equal(answered([{ ...late, metadata: {} }], incoming), true);
+  assert.equal(answered([{
+    direction: "outbound",
+    text: "Doctor, today's class is starting now.",
+    created_at: "2026-08-28T08:00:10Z",
+    metadata: { source: "daily_live_session_scheduler", daily_live_session_action: "session_link" },
+  }], incoming), false);
 });
 
 test("automatic reply path rechecks the conversation before sending and respects human takeover", () => {
