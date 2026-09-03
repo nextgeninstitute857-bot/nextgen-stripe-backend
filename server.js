@@ -51118,6 +51118,12 @@ function ngHasOutboundAfterInbound(messages = [], inbound = null) {
     if (["failed", "blocked", "suppressed", "error", "skipped"].includes(String(message.delivery_status || message.status || "").toLowerCase())) return false;
     const outTime = ngMessageTimeMs(message);
     const meta = message.metadata || message.meta || {};
+    const outboundSource = String(meta.source || message.source || "").trim().toLowerCase();
+    const dailySessionAction = String(meta.daily_live_session_action || message.daily_live_session_action || "").trim().toLowerCase();
+    // A scheduled class notice is useful, but it is not an answer to the
+    // student's question. Keep the conversational reply pending even when a
+    // class invite, reminder, link, or recording was sent afterward.
+    if (outboundSource === "daily_live_session_scheduler" || (dailySessionAction && outboundSource.includes("daily_live_session"))) return false;
     const explicitlyLinked = meta.latest_inbound_id || meta.inbound_message_id || message.ai_auto_inbound_fingerprint;
     if (explicitlyLinked) return Boolean(
       inboundFingerprint &&
