@@ -80754,10 +80754,10 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
     if (auth?.user?.id) {
       const ownedProfiles = aylaOwnedStudentsForUser(db, auth.user.id);
       const existingDashboard = ownedProfiles.find((row) => aylaCanonicalExamTrack(row.examTrackId || row.exam_track_id || row.exam) === examTrackId) || null;
-      const existingDashboardRequiresDiagnostic = existingDashboard
-        ? aylaProfileRequiresVerifiedDiagnostic(existingDashboard)
+      const existingDashboardAcceptsOnboarding = existingDashboard
+        ? aylaProfileRequiresVerifiedDiagnostic(existingDashboard) || aylaProfileRequiresStartingChoice(existingDashboard)
         : false;
-      if (existingDashboard && !existingDashboardRequiresDiagnostic) {
+      if (existingDashboard && !existingDashboardAcceptsOnboarding) {
         return aylaSendError(res, 409, "An AylaMed dashboard already exists for this exam. Switch to that dashboard instead of creating another profile.", { reason: "dashboard_already_exists", studentId: existingDashboard.id, examTrackId });
       }
       if (auth.user.role === "admin") {
@@ -80818,7 +80818,7 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
     const existingPendingStudent = auth?.user?.id
       ? aylaOwnedStudentsForUser(db, auth.user.id).find((row) => (
         aylaCanonicalExamTrack(row.examTrackId || row.exam_track_id || row.exam) === examTrackId
-        && aylaProfileRequiresVerifiedDiagnostic(row)
+        && (aylaProfileRequiresVerifiedDiagnostic(row) || aylaProfileRequiresStartingChoice(row))
       )) || null
       : null;
     const normalizedStudent = aylaStudentFromDiagnostic({
@@ -80832,6 +80832,8 @@ app.post("/api/ayla/diagnostic-submissions", async (req, res) => {
     const student = existingPendingStudent
       ? { ...existingPendingStudent, ...normalizedStudent, id: existingPendingStudent.id, createdAt: existingPendingStudent.createdAt }
       : normalizedStudent;
+    student.startingChoiceSelectedAt = submission.createdAt;
+    student.starting_choice_selected_at = submission.createdAt;
     if (auth?.user?.id) { student.ayla_user_id = auth.user.id; student.user_id = auth.user.id; }
     if (auth?.rawUser?.testAccount === true || auth?.rawUser?.test_account === true) {
       student.testAccount = true;
@@ -97121,6 +97123,22 @@ function aylaProfileRequiresVerifiedDiagnostic(student = {}) {
     && String(student.onboardingStatus || student.onboarding_status || "").toLowerCase() !== "complete";
 }
 
+function aylaProfileRequiresStartingChoice(student = {}) {
+  return String(student.onboardingPath || student.onboarding_path || "").toLowerCase() === "starting_choice_pending"
+    || String(student.onboardingStatus || student.onboarding_status || "").toLowerCase() === "setup_pending";
+}
+
+function aylaProfileHasSelectedStartingPath(db, student = {}) {
+  if (student.startingChoiceSelectedAt || student.starting_choice_selected_at) return true;
+  const studentId = String(student.id || student.studentId || student.student_id || "");
+  if (!studentId) return false;
+  return aylaValues(db, "aylaDiagnosticSubmissions").some((row) => String(row.studentId || row.student_id || "") === studentId)
+    || aylaValues(db, "aylaQbankSessions").some((row) => (
+      String(row.studentId || row.student_id || "") === studentId
+      && String(row.purpose || "") === "baseline_diagnostic"
+    ));
+}
+
 function aylaEnsureEnrollmentDiagnosticProfile(db, { user = null, enrollment = null, examTrack = null, examVariant = "" } = {}) {
   const examTrackId = aylaCanonicalExamTrack(
     examTrack
@@ -97142,6 +97160,30 @@ function aylaEnsureEnrollmentDiagnosticProfile(db, { user = null, enrollment = n
   let created = false;
   let recovered = false;
   let changed = false;
+
+  const setStartingChoicePending = (target) => {
+    target.onboardingPath = "starting_choice_pending";
+    target.onboarding_path = "starting_choice_pending";
+    target.onboardingStatus = "setup_pending";
+    target.onboarding_status = "setup_pending";
+    target.studyStage = "not_specified";
+    target.baselineSource = "awaiting_starting_choice";
+    target.baselineConfidence = "pending";
+    target.serverVerifiedBaseline = false;
+    target.server_verified_baseline = false;
+  };
+
+  if (
+    student
+    && String(student.provisionedBy || student.provisioned_by || "") === "active_enrollment_diagnostic_requirement"
+    && aylaProfileRequiresVerifiedDiagnostic(student)
+    && !aylaProfileHasSelectedStartingPath(db, student)
+  ) {
+    setStartingChoicePending(student);
+    student.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaStudents", student);
+    changed = true;
+  }
 
   if (!student && user.email) {
     const normalizedEmail = aylaNormalizeEmail(user.email);
@@ -97165,12 +97207,12 @@ function aylaEnsureEnrollmentDiagnosticProfile(db, { user = null, enrollment = n
       student.recovered_from_prior_account = true;
       student.recoveredAt = aylaNow();
       student.recovered_at = student.recoveredAt;
-      if (student.serverVerifiedBaseline !== true && student.server_verified_baseline !== true) {
-        student.onboardingPath = "diagnostic_test";
-        student.onboarding_path = "diagnostic_test";
-        student.onboardingStatus = "diagnostic_pending";
-        student.onboarding_status = "diagnostic_pending";
-        student.studyStage = "diagnostic_pending";
+      if (
+        student.serverVerifiedBaseline !== true
+        && student.server_verified_baseline !== true
+        && !["diagnostic_test", "quick_profile", "starting_fresh"].includes(String(student.onboardingPath || student.onboarding_path || "").toLowerCase())
+      ) {
+        setStartingChoicePending(student);
       }
       student.updatedAt = aylaNow();
       aylaSetItem(db, "aylaStudents", student);
@@ -97198,10 +97240,10 @@ function aylaEnsureEnrollmentDiagnosticProfile(db, { user = null, enrollment = n
       email: user.email || "",
       examTrackId,
       examVariant: normalizedVariant || null,
-      onboardingPath: "diagnostic_test",
-      onboardingStatus: "diagnostic_pending",
-      studyStage: "diagnostic_pending",
-      baselineSource: "awaiting_verified_diagnostic",
+      onboardingPath: "starting_choice_pending",
+      onboardingStatus: "setup_pending",
+      studyStage: "not_specified",
+      baselineSource: "awaiting_starting_choice",
       baselineConfidence: "pending",
       serverVerifiedBaseline: false,
       goalType: "Exam Day",
@@ -97254,6 +97296,7 @@ function aylaEnsureEnrollmentDiagnosticProfile(db, { user = null, enrollment = n
     created,
     recovered,
     required: aylaProfileRequiresVerifiedDiagnostic(student),
+    setupRequired: aylaProfileRequiresStartingChoice(student),
     student,
   };
 }
@@ -97337,6 +97380,7 @@ async function ngAdminMobileInviteAyla(body = {}) {
       diagnostic_profile_created: diagnosticProfile.created,
       diagnostic_profile_recovered: diagnosticProfile.recovered,
       diagnostic_required: diagnosticProfile.required,
+      starting_choice_required: diagnosticProfile.setupRequired,
       payment: null,
       access_report: accessReport,
       temporary_password: body.return_password === true ? temporaryPassword : undefined,
@@ -97394,7 +97438,7 @@ async function ngAdminMobileInviteAyla(body = {}) {
   aylaSetItem(db, "aylaEnrollments", enrollment);
   await aylaAccessLog(db, "admin_access_invitation", { userId: user.id, planId: plan.id, enrollmentId: enrollment.id, access_days: accessDays, duration: accessWindow.duration_label, amount_cents: payment?.amount_cents || 0, email_sent: delivery.sent === true });
   await writeAylaDb(db);
-  return { product: "aylamed", student_created: studentCreated, password_reset_required: true, user: aylaSanitizeUser(user), enrollment, diagnostic_profile: diagnosticProfile.student, diagnostic_profile_created: diagnosticProfile.created, diagnostic_profile_recovered: diagnosticProfile.recovered, diagnostic_required: diagnosticProfile.required, payment, access_report: accessWindow, temporary_password: body.return_password === true ? temporaryPassword : undefined, email_delivery: delivery };
+  return { product: "aylamed", student_created: studentCreated, password_reset_required: true, user: aylaSanitizeUser(user), enrollment, diagnostic_profile: diagnosticProfile.student, diagnostic_profile_created: diagnosticProfile.created, diagnostic_profile_recovered: diagnosticProfile.recovered, diagnostic_required: diagnosticProfile.required, starting_choice_required: diagnosticProfile.setupRequired, payment, access_report: accessWindow, temporary_password: body.return_password === true ? temporaryPassword : undefined, email_delivery: delivery };
 }
 
 app.get("/admin/mobile/dashboard", async (req, res) => {
