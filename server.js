@@ -51113,13 +51113,23 @@ function ngHasOutboundAfterInbound(messages = [], inbound = null) {
   if (!inbound) return false;
   const inboundTime = ngMessageTimeMs(inbound);
   const inboundFingerprint = ngAiAutoMessageFingerprint(inbound);
+  const isDailySessionNotice = (message = {}) => {
+    const meta = message.metadata || message.meta || {};
+    const source = String(meta.source || message.source || "").trim().toLowerCase();
+    const action = String(meta.daily_live_session_action || message.daily_live_session_action || "").trim().toLowerCase();
+    if (source === "daily_live_session_scheduler" || (action && source.includes("daily_live_session"))) return true;
+
+    // Older CRM mirror rows did not retain scheduler metadata. Recognize only
+    // the exact operational wording produced by ngDailyLiveSessionText.
+    const text = ngMessageText(message).replace(/[’]/g, "'").replace(/\s+/g, " ").trim().toLowerCase();
+    return Boolean(
+      (text.includes("today's live class is") && text.includes("i'll send a reminder 5 minutes before class")) ||
+      (text.includes("starts in 5 minutes") && (text.includes("open live sessions") || text.includes("join here:"))) ||
+      (text.includes("is starting now") && (text.includes("here's your class link:") || (text.includes("join here:") && text.includes("even 5-10 minutes is enough"))))
+    );
+  };
   const operationalOutboundTexts = new Set(safeArray(messages)
-    .filter((message) => {
-      const meta = message.metadata || message.meta || {};
-      const source = String(meta.source || message.source || "").trim().toLowerCase();
-      const action = String(meta.daily_live_session_action || message.daily_live_session_action || "").trim().toLowerCase();
-      return source === "daily_live_session_scheduler" || (action && source.includes("daily_live_session"));
-    })
+    .filter(isDailySessionNotice)
     .map((message) => ngMessageText(message))
     .filter(Boolean));
   return safeArray(messages).some((message) => {
@@ -51127,12 +51137,10 @@ function ngHasOutboundAfterInbound(messages = [], inbound = null) {
     if (["failed", "blocked", "suppressed", "error", "skipped"].includes(String(message.delivery_status || message.status || "").toLowerCase())) return false;
     const outTime = ngMessageTimeMs(message);
     const meta = message.metadata || message.meta || {};
-    const outboundSource = String(meta.source || message.source || "").trim().toLowerCase();
-    const dailySessionAction = String(meta.daily_live_session_action || message.daily_live_session_action || "").trim().toLowerCase();
     // A scheduled class notice is useful, but it is not an answer to the
     // student's question. Keep the conversational reply pending even when a
     // class invite, reminder, link, or recording was sent afterward.
-    if (outboundSource === "daily_live_session_scheduler" || (dailySessionAction && outboundSource.includes("daily_live_session")) || operationalOutboundTexts.has(ngMessageText(message))) return false;
+    if (isDailySessionNotice(message) || operationalOutboundTexts.has(ngMessageText(message))) return false;
     const explicitlyLinked = meta.latest_inbound_id || meta.inbound_message_id || message.ai_auto_inbound_fingerprint;
     if (explicitlyLinked) return Boolean(
       inboundFingerprint &&

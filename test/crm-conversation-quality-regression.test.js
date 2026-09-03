@@ -177,6 +177,18 @@ test("late replies and failed messages do not hide a newer unanswered student me
     created_at: "2026-08-28T08:00:11Z",
     metadata: { source: "conversation_mirror" },
   }], incoming), false);
+  assert.equal(answered([{
+    id: "legacy-unlabelled-class-notice",
+    direction: "outbound",
+    text: "Doctor, Central Nervous System — Day 10 is starting now.\n\nJoin here:\nhttps://example.test/live\n\nEven 5-10 minutes is enough to understand the teaching style.",
+    created_at: "2026-08-28T08:00:12Z",
+  }], incoming), false);
+  assert.equal(answered([{
+    id: "real-answer",
+    direction: "outbound",
+    text: "The programme combines live teaching, recordings, QBank practice, and a personalised roadmap.",
+    created_at: "2026-08-28T08:00:12Z",
+  }], incoming), true);
 });
 
 test("automatic reply path rechecks the conversation before sending and respects human takeover", () => {
