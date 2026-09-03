@@ -51113,6 +51113,15 @@ function ngHasOutboundAfterInbound(messages = [], inbound = null) {
   if (!inbound) return false;
   const inboundTime = ngMessageTimeMs(inbound);
   const inboundFingerprint = ngAiAutoMessageFingerprint(inbound);
+  const operationalOutboundTexts = new Set(safeArray(messages)
+    .filter((message) => {
+      const meta = message.metadata || message.meta || {};
+      const source = String(meta.source || message.source || "").trim().toLowerCase();
+      const action = String(meta.daily_live_session_action || message.daily_live_session_action || "").trim().toLowerCase();
+      return source === "daily_live_session_scheduler" || (action && source.includes("daily_live_session"));
+    })
+    .map((message) => ngMessageText(message))
+    .filter(Boolean));
   return safeArray(messages).some((message) => {
     if (!ngIsOutboundMessage(message) || !ngMessageText(message)) return false;
     if (["failed", "blocked", "suppressed", "error", "skipped"].includes(String(message.delivery_status || message.status || "").toLowerCase())) return false;
@@ -51123,7 +51132,7 @@ function ngHasOutboundAfterInbound(messages = [], inbound = null) {
     // A scheduled class notice is useful, but it is not an answer to the
     // student's question. Keep the conversational reply pending even when a
     // class invite, reminder, link, or recording was sent afterward.
-    if (outboundSource === "daily_live_session_scheduler" || (dailySessionAction && outboundSource.includes("daily_live_session"))) return false;
+    if (outboundSource === "daily_live_session_scheduler" || (dailySessionAction && outboundSource.includes("daily_live_session")) || operationalOutboundTexts.has(ngMessageText(message))) return false;
     const explicitlyLinked = meta.latest_inbound_id || meta.inbound_message_id || message.ai_auto_inbound_fingerprint;
     if (explicitlyLinked) return Boolean(
       inboundFingerprint &&

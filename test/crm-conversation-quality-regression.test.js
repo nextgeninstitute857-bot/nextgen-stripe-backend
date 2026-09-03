@@ -164,6 +164,19 @@ test("late replies and failed messages do not hide a newer unanswered student me
     created_at: "2026-08-28T08:00:10Z",
     metadata: { source: "daily_live_session_scheduler", daily_live_session_action: "session_link" },
   }], incoming), false);
+  assert.equal(answered([{
+    id: "scheduled-log",
+    direction: "outbound",
+    text: "Doctor, today's class is starting now.",
+    created_at: "2026-08-28T08:00:10Z",
+    metadata: { source: "daily_live_session_scheduler", daily_live_session_action: "session_link" },
+  }, {
+    id: "conversation-mirror",
+    direction: "outbound",
+    text: "Doctor, today's class is starting now.",
+    created_at: "2026-08-28T08:00:11Z",
+    metadata: { source: "conversation_mirror" },
+  }], incoming), false);
 });
 
 test("automatic reply path rechecks the conversation before sending and respects human takeover", () => {
