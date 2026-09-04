@@ -16,9 +16,10 @@ test("verified scored work is reserved before optional new content", () => {
   assert.match(planner.slice(qbank, external), /allowOverCapacity: !balancePolicy\.enabled/);
   assert.match(planner, /buildAylaRoadmapBalancePolicy/);
   assert.match(planner, /priorityCarryCapMinutes/);
-  assert.match(planner, /filter\(\(\{ category \}\) => category === "flashcards"\)/);
+  assert.match(planner, /filter\(\(\{ category, resource \}\) => category === "flashcards" && aylaRoadmapReviewCardEligible\(resource\)\)/);
   assert.match(planner, /groupedRevision = true/);
   assert.match(planner, /overdueFlashcardGroups/);
+  assert.match(planner, /aylaRoadmapReviewCardEligible/);
   assert.match(planner, /linkedAssignmentIds = selectedOverdueFlashcards/);
   assert.match(planner, /individualOverdue = balancePolicy\.enabled/);
 });

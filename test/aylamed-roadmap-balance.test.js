@@ -5,6 +5,8 @@ import {
   AYLA_MCCQE_ROADMAP_BALANCE_VERSION,
   aylaRoadmapFitsWithin,
   aylaRoadmapQuestionTarget,
+  aylaRoadmapReviewCardEligible,
+  aylaRoadmapReviewCardIssue,
   buildAylaRoadmapBalancePolicy,
 } from "../lib/aylamed-roadmap-balance.js";
 
@@ -63,4 +65,26 @@ test("other exam tracks retain their existing adaptive capacity behavior", () =>
   assert.equal(policy.hardDailyCap, false);
   assert.equal(policy.effectiveCapacityMinutes, 194);
   assert.equal(aylaRoadmapQuestionTarget(policy), null);
+});
+
+test("MCCQE review blocks count only cards the student can actually study", () => {
+  const valid = {
+    front: "What finding most strongly supports Turner syndrome?",
+    back: "Short stature with gonadal dysgenesis.",
+    provider: "AylaMed",
+  };
+  const questionStem = {
+    front: `${"Clinical detail ".repeat(92)}Which of the following is most likely?`,
+    back: "A",
+    provider: "AylaMed",
+  };
+  const external = {
+    front: "Recall the key diagnostic clue.",
+    back: "The verified clue.",
+    provider: "UWorld",
+  };
+
+  assert.equal(aylaRoadmapReviewCardEligible(valid), true);
+  assert.equal(aylaRoadmapReviewCardIssue(questionStem), "full_question_stem");
+  assert.equal(aylaRoadmapReviewCardIssue(external), "external_source_review_required");
 });
