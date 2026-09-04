@@ -422,6 +422,7 @@ import {
   AYLA_MCCQE_ROADMAP_BALANCE_VERSION,
   aylaRoadmapFitsWithin,
   aylaRoadmapQuestionTarget,
+  aylaRoadmapReviewCardEligible,
   buildAylaRoadmapBalancePolicy,
   isMccqeRoadmapTrack,
 } from "./lib/aylamed-roadmap-balance.js";
@@ -674,7 +675,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v226-mccqe-roadmap-single-review-block";
+const NEXTGEN_BACKEND_BUILD = "v227-mccqe-roadmap-reviewable-card-count";
 const LMS_PAID_DEMO_CONSOLIDATION_BUILD = "v221-paid-demo-consolidation";
 const CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard";
 const CRM_LIVE_SESSION_SCHEDULER_BUILD = "v321-postclass-recording-recovery";
@@ -86505,7 +86506,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   if (balancePolicy.enabled) {
     const flashcardGroups = new Map();
     resolvedRevisions
-      .filter(({ category }) => category === "flashcards")
+      .filter(({ category, resource }) => category === "flashcards" && aylaRoadmapReviewCardEligible(resource))
       .forEach((candidate) => {
         const key = String(candidate.resource.id);
         const current = flashcardGroups.get(key) || { resource: candidate.resource, revisions: [] };
@@ -86526,6 +86527,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
           : sourceIds.map((resourceId) => allRelevant.find((row) => String(row.id) === resourceId))
         )
           .filter((resource) => resource?.id)
+          .filter((resource) => aylaRoadmapReviewCardEligible(resource))
           .filter((resource, index, rows) => rows.findIndex((candidate) => String(candidate.id) === String(resource.id)) === index);
         return { assignment: old, resources };
       })
