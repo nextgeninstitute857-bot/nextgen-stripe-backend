@@ -16,6 +16,7 @@ test("verified scored work is reserved before optional new content", () => {
   assert.match(planner.slice(qbank, external), /allowOverCapacity: !balancePolicy\.enabled/);
   assert.match(planner, /buildAylaRoadmapBalancePolicy/);
   assert.match(planner, /priorityCarryCapMinutes/);
+  assert.match(planner, /filter\(\(\{ category \}\) => category === "flashcards"\)/);
   assert.match(planner, /groupedRevision = true/);
 });
 
