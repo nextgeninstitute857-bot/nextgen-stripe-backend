@@ -674,7 +674,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v225-mccqe-roadmap-flashcard-grouping";
+const NEXTGEN_BACKEND_BUILD = "v226-mccqe-roadmap-single-review-block";
 const LMS_PAID_DEMO_CONSOLIDATION_BUILD = "v221-paid-demo-consolidation";
 const CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard";
 const CRM_LIVE_SESSION_SCHEDULER_BUILD = "v321-postclass-recording-recovery";
@@ -86449,8 +86449,8 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     : settings.resources.assignment_mix || {};
 
   // 1) Due revision remains first, but MCCQE keeps all revision and overdue carry
-  // inside 35% of the student's day. Due flashcards become one bounded review block
-  // so many small cards cannot visually or mathematically crowd out QBank and lecture.
+  // inside 35% of the student's day. Due and overdue flashcards become one bounded
+  // review block so many small cards cannot crowd out QBank and lecture.
   const assignedRevisionIds = new Set();
   const priorityCarryCeiling = balancePolicy.enabled
     ? balancePolicy.priorityCarryCapMinutes
@@ -86501,6 +86501,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     }
   }
 
+  const selectedOverdueFlashcardIds = new Set();
   if (balancePolicy.enabled) {
     const flashcardGroups = new Map();
     resolvedRevisions
@@ -86511,14 +86512,49 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
         current.revisions.push(candidate.revision);
         flashcardGroups.set(key, current);
       });
+    const overdueFlashcardGroups = overdue
+      .filter((old) => String(old.category || old.type || "").toLowerCase() === "flashcards")
+      .map((old) => {
+        const sourceItems = Array.isArray(old.items) ? old.items : [];
+        const sourceIds = aylaCleanArray(old.resourceIds).map(String);
+        const resources = (sourceItems.length
+          ? sourceItems.map((item) => ({
+              ...item,
+              id: item.id || item.resourceId,
+              type: "flashcard",
+            }))
+          : sourceIds.map((resourceId) => allRelevant.find((row) => String(row.id) === resourceId))
+        )
+          .filter((resource) => resource?.id)
+          .filter((resource, index, rows) => rows.findIndex((candidate) => String(candidate.id) === String(resource.id)) === index);
+        return { assignment: old, resources };
+      })
+      .filter((row) => row.resources.length);
     const remainingPriorityMinutes = Math.max(0, priorityCarryCeiling - plan.plannedMinutes);
-    const selectedGroups = [...flashcardGroups.values()].slice(
-      0,
-      Math.min(balancePolicy.dueFlashcardCap, Math.floor(remainingPriorityMinutes)),
-    );
-    if (selectedGroups.length && remainingPriorityMinutes >= 5) {
-      const resources = selectedGroups.map((row) => row.resource);
-      const revisions = selectedGroups.flatMap((row) => row.revisions);
+    const reviewCardBudget = Math.min(balancePolicy.dueFlashcardCap, Math.floor(remainingPriorityMinutes));
+    const resourcesById = new Map();
+    const selectedRevisions = [];
+    const selectedOverdueFlashcards = [];
+
+    // Oldest unfinished recall work enters the one review block first. An old
+    // assignment is included only when all of its cards fit, so completing the
+    // block can safely close that exact original assignment.
+    for (const group of overdueFlashcardGroups) {
+      const newResources = group.resources.filter((resource) => !resourcesById.has(String(resource.id)));
+      if (resourcesById.size + newResources.length > reviewCardBudget) continue;
+      newResources.forEach((resource) => resourcesById.set(String(resource.id), resource));
+      selectedOverdueFlashcards.push(group.assignment);
+    }
+    for (const group of flashcardGroups.values()) {
+      const key = String(group.resource.id);
+      if (!resourcesById.has(key) && resourcesById.size >= reviewCardBudget) continue;
+      if (!resourcesById.has(key)) resourcesById.set(key, group.resource);
+      selectedRevisions.push(...group.revisions);
+    }
+
+    const resources = [...resourcesById.values()];
+    if (resources.length && remainingPriorityMinutes >= 5) {
+      const revisions = selectedRevisions;
       const systems = [...new Set(revisions.map((row) => row.system).filter(Boolean))];
       const estimatedMinutes = Math.max(5, Math.min(balancePolicy.dueFlashcardCap, resources.length));
       const assignment = aylaV189BuildDailyPlanAddAssignment(
@@ -86529,12 +86565,12 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
         effectiveCapacity,
         "flashcards",
         resources,
-        `${resources.length} due recall card${resources.length === 1 ? "" : "s"}`,
+        `${resources.length} priority review card${resources.length === 1 ? "" : "s"}`,
         {
           priority: "Critical",
           system: systems.length === 1 ? systems[0] : "Mixed review",
           topic: "Spaced repetition due review",
-          rationale: "One time-boxed review block combines due recall cards so revision cannot crowd out today’s MCCQE questions and lecture.",
+          rationale: "One time-boxed review block combines due and overdue recall cards so revision cannot crowd out today’s MCCQE questions and lecture.",
           estimatedMinutes,
           maxTotalMinutes: priorityCarryCeiling,
         },
@@ -86543,16 +86579,24 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
         assignment.revisionQueueIds = revisions.map((row) => row.id);
         assignment.revisionSourceType = "flashcard";
         assignment.groupedRevision = true;
+        assignment.linkedAssignmentIds = selectedOverdueFlashcards.map((row) => row.id);
+        assignment.overdueCarry = selectedOverdueFlashcards.length > 0;
+        assignment.overdueRootAssignmentIds = selectedOverdueFlashcards.map((row) => row.overdueRootAssignmentId || row.id);
         revisions.forEach((revision) => markRevisionAssigned(revision, assignment));
+        selectedOverdueFlashcards.forEach((old) => selectedOverdueFlashcardIds.add(String(old.id)));
         resources.forEach((resource) => reservedIds.add(String(resource.id)));
       }
     }
   }
 
-  // 2) Carry overdue work as individual actionable assignments so completing it closes
-  // the exact original assignment instead of leaving a repeated combined backlog card.
-  let assignedOverdueCount = 0;
-  for (const old of overdue) {
+  // 2) Non-flashcard overdue work remains individually actionable. MCCQE flashcard
+  // carry is already represented by the single review block above; any that did not
+  // fit is deferred instead of returning as a wall of separate cards.
+  let assignedOverdueCount = selectedOverdueFlashcardIds.size;
+  const individualOverdue = balancePolicy.enabled
+    ? overdue.filter((old) => String(old.category || old.type || "").toLowerCase() !== "flashcards")
+    : overdue;
+  for (const old of individualOverdue) {
     if (balancePolicy.enabled) {
       if (plan.plannedMinutes >= priorityCarryCeiling) break;
     } else if (plan.plannedMinutes >= capacityMinutes * 1.1) break;
