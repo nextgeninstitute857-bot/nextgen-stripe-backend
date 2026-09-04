@@ -70,6 +70,7 @@ import { recordAylaPaymentFollowup, aylaPaymentFollowupEligibility } from "./lib
 import { experienceWaitHours, experienceDeliveryAccepted, experienceResourcesFromDelivery, recordExperienceShares, recordExperienceResponse, acknowledgeExperienceConversation, experienceFollowupEligibility, buildExperienceCheckinPrompt } from "./lib/crm-experience-followup.js";
 import { runExperienceCheckin } from "./lib/crm-experience-scheduler.js";
 import { MCCQE_DEMO_SOURCE, mccqeDemoEnabled, validateMccqeDemoRequest, mccqeDemoIssuanceId, findMccqeDemoReplay, mccqeDemoPurchaseState, mccqeDemoEmailAccepted, mccqeDemoResource, mccqeDemoSendEligibility, cancelMccqeDemoSales, createMccqeDemoOutboundGuard, preserveMccqeDemoLedgerSnapshot } from "./lib/crm-aylamed-demo-lifecycle.js";
+import { buildMccqeOperationalContext, validateMccqeAutomaticOutbound } from "./lib/crm-aylamed-operational-context.js";
 import { updateDemoAccess } from "./lib/demo-admin.js";
 import { selectStudentCurrentRoadmapDay } from "./lib/lms-current-roadmap-day.js";
 import { ensureDemoInvitation, findDemoInvitation, trackDemoLinks, recordDemoInvitationSent, recordDemoInvitationOpened, recordDemoActivation, demoAttributionForEnrollment } from "./lib/crm-demo-attribution.js";
@@ -34123,6 +34124,18 @@ async function sendCrmMessage({
     let providerResponse = null;
     let providerMessageId = null;
 
+    if (effectiveBrandId === AYLAMED_BRAND_ID && ngCrmOutboundIsAutomated({ metadata, enrollmentId, flowId, runId, queueId })) {
+      const operationalContext = await ngAylaVerifiedMccqeConversationContext(lead || {});
+      const freshCheck = validateMccqeAutomaticOutbound({ lead: lead || {}, messages: lead ? ngLeadConversationMessages(db, lead.id) : [],
+        operationalContext, text: finalText, subject: finalSubject, mediaUrl: resolvedMediaUrl, mediaId: resolvedMediaId, templateName: resolvedWhatsAppTemplateName });
+      if (!freshCheck.ok) {
+        const error = new Error("AylaMed message requires review because the current account or demo context changed.");
+        error.statusCode = 409; error.code = freshCheck.reason;
+        error.hint = safeArray(freshCheck.violations).join(", ") || freshCheck.reason;
+        throw error;
+      }
+    }
+
     if (cleanChannel === "whatsapp") {
       providerResponse = await sendWhatsAppCloudMessage({
         to: finalTo,
@@ -54686,7 +54699,20 @@ Write only Ayla's next message. No markdown headings. No bullet list unless the 
 // this is the only generator used by WhatsApp auto-reply call sites. Deterministic
 // code is limited to opt-out and protected handoff mutations; it no longer chooses
 // sales copy or advances the programme journey through keyword checkpoints.
+async function ngAylaVerifiedMccqeConversationContext(lead = {}) {
+  if (lead.brand_id !== AYLAMED_BRAND_ID) return {};
+  try {
+    await aylaWriteQueue;
+    const [crmDb, aylaDb] = await Promise.all([readCrmDb(), readAylaDb()]);
+    return buildMccqeOperationalContext({ crmDb, aylaDb, lead });
+  } catch {
+    // Read failures leave status unverified; they never become "not issued".
+    return {};
+  }
+}
+
 async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [], channel = "whatsapp", allowOperationalActions = false, dryRunOperationalActions = false }) {
+  const isAylaMed = lead.brand_id === AYLAMED_BRAND_ID;
   const cleanMessages = safeArray(messages)
     .filter((message) => ngMessageText(message))
     .slice(-18);
@@ -54698,12 +54724,12 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
     throw error;
   }
 
-  const activeMeeting = db ? ngAylaFindActiveGoogleMeetAppointment(db, lead) : null;
-  const hasMeetingState = db ? ngAylaLeadGoogleMeetState(lead, activeMeeting) : false;
+  const activeMeeting = !isAylaMed && db ? ngAylaFindActiveGoogleMeetAppointment(db, lead) : null;
+  const hasMeetingState = !isAylaMed && db ? ngAylaLeadGoogleMeetState(lead, activeMeeting) : false;
   const collectingMeetingQualification = hasMeetingState && /^collect_google_meet_(?:name|email|country|exam|concern)$/i.test(String(lead?.next_action || ""));
   const needsProtectedControl =
     /\b(stop|unsubscribe|do not message|don't message|dont message|remove me|wrong number|not interested)\b/i.test(latestInboundText) ||
-    ngAylaIsDirectGoogleMeetRequest(latestInboundText) ||
+    (!isAylaMed && ngAylaIsDirectGoogleMeetRequest(latestInboundText)) ||
     collectingMeetingQualification ||
     (hasMeetingState && (
       ngAylaLooksLikeTimePreference(latestInboundText)
@@ -54742,27 +54768,27 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
   }
 
   const state = createAylaConversationState({ lead, messages: cleanMessages });
-  const forceFeatureTourForThisTurn = channel === "whatsapp" && ngAylaShouldPresentInterestedLeadTour({
+  const forceFeatureTourForThisTurn = !isAylaMed && channel === "whatsapp" && ngAylaShouldPresentInterestedLeadTour({
     lead,
     messages: cleanMessages,
     latestInboundText,
   });
   const asksForClassOrRecordingPreview = /\b(?:see|watch|join|attend|try|send|share|open|access)\b.{0,80}\b(?:live\s+(?:class|session)|class|session|recordings?|replay)\b|\b(?:live\s+(?:class|session)|class|session|recordings?|replay)\b.{0,80}\b(?:see|watch|join|attend|try|send|share|open|access|link)\b/i.test(latestInboundText);
   let promptState = state;
-  if (db && allowOperationalActions) {
+  if (!isAylaMed && db && allowOperationalActions) {
     await ngAylaEnsureOneTimeCountryOffer({ crmDb: db, lead, messages: cleanMessages, state, dryRun: dryRunOperationalActions });
   }
-  let liveSnapshot = await ngAylaLiveLmsSalesGrounding({ structured: true, crmDb: db, lead, messages: cleanMessages });
+  let liveSnapshot = isAylaMed ? { context: "" } : await ngAylaLiveLmsSalesGrounding({ structured: true, crmDb: db, lead, messages: cleanMessages });
   const historyText = cleanMessages.map((message) => ngMessageText(message)).join("\n");
   // Training Center material is reference knowledge only in v292. Behavioural
   // instructions stored in those records cannot override this controller.
-  const approvedKnowledge = db
+  const approvedKnowledge = !isAylaMed && db
     ? ngTrainingContextForFullAiAuto(db, `${latestInboundText}\n${historyText.slice(-3000)}`)
     : "";
-  const mediaGuidance = db ? ngBuildAylaMediaGuidance(db, lead) : "";
-  const reviewedRules = db ? reviewedLearningRules(db, lead.brand_id || db.settings?.default_brand_id || db.brands?.[0]?.id || null) : [];
-  const officialExamGuidance = ngAylaOfficialExamGuidancePrompt(latestInboundText, historyText);
-  const protectedActionContext = protectedDecision?.intent
+  const mediaGuidance = !isAylaMed && db ? ngBuildAylaMediaGuidance(db, lead) : "";
+  const reviewedRules = !isAylaMed && db ? reviewedLearningRules(db, lead.brand_id || db.settings?.default_brand_id || db.brands?.[0]?.id || null) : [];
+  const officialExamGuidance = isAylaMed ? "" : ngAylaOfficialExamGuidancePrompt(latestInboundText, historyText);
+  let protectedActionContext = isAylaMed ? {} : protectedDecision?.intent
     ? `The backend already applied protected intent ${protectedDecision.intent}. Continue naturally from the updated lead state. The current protected next action is ${String(lead.next_action || "none")}; ask only for that missing meeting detail when it is a collection action. Protected outcome facts: ${String(protectedDecision.reply || "none")}. Write fresh natural wording rather than copying a canned backend reply.`
     : hasMeetingState
       ? "A human-handoff or Google Meet state already exists. Continue it without restarting sales discovery."
@@ -54786,7 +54812,13 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
   let systemPrompt = buildCurrentSystemPrompt();
 
   const model = process.env.AYLA_MODEL || process.env.AI_MODEL || "gpt-4o-mini";
+  let responsePaidTransition = false;
   const requestDecision = async (userPrompt) => {
+    if (isAylaMed) {
+      protectedActionContext = await ngAylaVerifiedMccqeConversationContext(lead);
+      systemPrompt = buildCurrentSystemPrompt();
+    }
+    const paidWhenRequested = isAylaMed && protectedActionContext.paid === true;
     const result = await callOpenAIResponsesAPI({
       model,
       systemPrompt,
@@ -54795,7 +54827,11 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
       textFormat: aylaConversationTextFormat(promptState),
     });
     const parsed = safeJsonParseFromAI(result.text || "{}");
+    if (isAylaMed) protectedActionContext = await ngAylaVerifiedMccqeConversationContext(lead);
+    responsePaidTransition = isAylaMed && !paidWhenRequested && protectedActionContext.paid === true;
     const decision = normalizeAylaConversationDecision(parsed, state, {
+      lead,
+      protectedActionContext,
       messages: cleanMessages.map((message) => ({
         role: ngIsOutboundMessage(message) ? "assistant" : "student",
         text: ngMessageText(message),
@@ -54870,8 +54906,11 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
     || lead.meta_adset_id
     || lead.meta_referral?.ad_id,
   ) && !cleanMessages.some((message) => ngIsOutboundMessage(message));
-  const decisionViolations = (candidate) => uniqueList([
-    ...evaluateAylaConversationDecision({ decision: candidate, state, messages: decisionMessages, lead }),
+  const decisionViolations = (candidate) => isAylaMed
+    ? uniqueList([...evaluateAylaConversationDecision({ decision: candidate, state, messages: decisionMessages, lead, protectedActionContext }),
+      ...(responsePaidTransition ? ["aylamed_paid_context_changed"] : [])])
+    : uniqueList([
+    ...evaluateAylaConversationDecision({ decision: candidate, state, messages: decisionMessages, lead, protectedActionContext }),
     ...ngAylaLiveSessionLinkViolations(`${candidate.reply || ""}\n${candidate.follow_up || ""}`, liveSnapshot),
     ...ngAylaRecordingLinkViolations(`${candidate.reply || ""}\n${candidate.follow_up || ""}`, liveSnapshot),
     ...(() => {
@@ -54969,7 +55008,8 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
   let { result, decision } = await requestDecision("Understand the complete conversation and produce Ayla's next structured decision now.");
   let newlyConfirmedOfferCountry = null;
   if (
-    db
+    !isAylaMed
+    && db
     && allowOperationalActions
     && decision.memory_patch?.country
     && decision.action !== "send_feature_tour"
@@ -54989,7 +55029,7 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
   let violations = decisionViolations(decision);
 
   for (let repairAttempt = 0; violations.length && repairAttempt < 2; repairAttempt += 1) {
-    const repaired = await requestDecision(buildAylaConversationRepairPrompt({ violations, priorDecision: decision, state }));
+    const repaired = await requestDecision(buildAylaConversationRepairPrompt({ violations, priorDecision: decision, state, lead, protectedActionContext }));
     result = repaired.result;
     decision = repaired.decision;
     violations = decisionViolations(decision);

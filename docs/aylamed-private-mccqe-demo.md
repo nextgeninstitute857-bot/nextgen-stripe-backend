@@ -24,12 +24,12 @@ Late authorization failures get a durable cooldown and retry budget; provider un
 ## Work still required before activation
 
 1. Verify the signed-in administrator CRM, the actual Canadian WhatsApp asset ownership, isolated provider readiness and AylaMed display-name status. Historical unverified asset IDs must not be used.
-2. Connect server orchestration to the new brand-specific protected operational context and the deliberate inbound qualification-to-invitation action. The prompt module is prepared, but this automatic action path is not wired. The current pilot is administrator-triggered only.
+2. Connect the deliberate inbound qualification-to-invitation action and a verified prospect-context contract. Server orchestration now supplies authoritative operational facts to prompt, normalization, validation and repair; the final automatic sender rechecks them before dispatch. Completely unverified/accountless automatic sends deliberately fail closed. The current invitation pilot is administrator-triggered only; broad automatic conversations must remain disabled.
 3. Exercise a controlled recipient end-to-end: received email, correct MCCQE starting choices, exact access expiry, one WhatsApp check-in, and purchase suppression. Do not use real prospects for smoke tests.
 4. Create/review the campaign in the AylaMed account, not the old NextGen draft, and obtain an explicit budget/duration before publication.
 
 ## Verification checkpoint
 
-On 4 September 2026, 174 targeted regression tests passed in one combined run, with no skipped tests. Coverage includes isolated HTTP + local SMTP, concurrent/replayed invitations, existing passwords, paid access, restart recovery, uncertain delivery, forged sender capabilities, purchase races, exam domains, brand routing, existing NextGen conversations and experience follow-ups. Server syntax and whitespace checks also passed. No production recipients were contacted by these tests.
+On 4 September 2026, 188 targeted regression tests passed in one combined run, with no skipped tests. Coverage includes isolated HTTP + local SMTP, concurrent/replayed invitations, existing passwords, paid access, restart recovery, uncertain delivery, forged sender capabilities, purchase races, exam domains, brand routing, existing NextGen conversations and experience follow-ups. Added coverage confirms independently verified payment survives unknown/legacy/malformed demo records, unknown is distinct from not-issued, payment during generation forces repair, and a final central sender guard blocks stale sales/demo claims. Server syntax and whitespace checks also passed. No production recipients were contacted by these tests.
 
 New health markers (only after a future deployment): `crm_mccqe_demo_build: "v1-private-five-hour-lifecycle"` and boolean `crm_mccqe_demo_enabled`. The marker does not establish that the automatic inbound action path is complete.
