@@ -674,7 +674,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v224-mccqe-roadmap-balance";
+const NEXTGEN_BACKEND_BUILD = "v225-mccqe-roadmap-flashcard-grouping";
 const LMS_PAID_DEMO_CONSOLIDATION_BUILD = "v221-paid-demo-consolidation";
 const CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard";
 const CRM_LIVE_SESSION_SCHEDULER_BUILD = "v321-postclass-recording-recovery";
@@ -86475,7 +86475,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   };
 
   const individualRevisions = balancePolicy.enabled
-    ? resolvedRevisions.filter(({ revision }) => String(revision.sourceType || "").toLowerCase() !== "flashcard")
+    ? resolvedRevisions.filter(({ category }) => category !== "flashcards")
     : resolvedRevisions;
   for (const { revision, resource, category } of individualRevisions) {
     if (plan.plannedMinutes >= priorityCarryCeiling) break;
@@ -86504,7 +86504,7 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   if (balancePolicy.enabled) {
     const flashcardGroups = new Map();
     resolvedRevisions
-      .filter(({ revision }) => String(revision.sourceType || "").toLowerCase() === "flashcard")
+      .filter(({ category }) => category === "flashcards")
       .forEach((candidate) => {
         const key = String(candidate.resource.id);
         const current = flashcardGroups.get(key) || { resource: candidate.resource, revisions: [] };
