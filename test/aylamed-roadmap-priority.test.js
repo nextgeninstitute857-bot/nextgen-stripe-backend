@@ -9,10 +9,14 @@ const planner = server.slice(start, end);
 
 test("verified scored work is reserved before optional new content", () => {
   const qbank = planner.indexOf('"internal_mcqs", pick');
-  const reading = planner.indexOf("if (mix.reading !== false)");
+  const external = planner.indexOf("if (balancePolicy.enabled) scheduleExternalQuestions()");
   const video = planner.indexOf("if (mix.video !== false && contentHubEnabled)");
-  assert.ok(qbank > 0 && qbank < reading && reading < video);
-  assert.match(planner.slice(qbank, reading), /allowOverCapacity: true/);
+  const reading = planner.indexOf("if (balancePolicy.enabled) scheduleReading()");
+  assert.ok(qbank > 0 && qbank < external && external < video && video < reading);
+  assert.match(planner.slice(qbank, external), /allowOverCapacity: !balancePolicy\.enabled/);
+  assert.match(planner, /buildAylaRoadmapBalancePolicy/);
+  assert.match(planner, /priorityCarryCapMinutes/);
+  assert.match(planner, /groupedRevision = true/);
 });
 
 test("final review keeps scored work first while permitting only matched support", () => {
@@ -21,7 +25,7 @@ test("final review keeps scored work first while permitting only matched support
   assert.match(planner, /selection\.resumed/);
   assert.match(planner, /selection\.match_level === "exact_topic"/);
   assert.match(planner, /if \(mix\.video !== false && contentHubEnabled\)/);
-  assert.match(planner, /!plan\.finalReviewMode && mix\.external_questions/);
+  assert.match(planner, /plan\.finalReviewMode \|\| mix\.external_questions === false/);
   assert.match(planner, /if \(mix\.flashcards !== false\)/);
   assert.match(planner, /targeted final-review support/);
   assert.match(planner, /Final review is active/);
@@ -42,4 +46,13 @@ test("legacy focus mismatches use a transparent verified exam-wide QBank fallbac
   assert.match(eligible, /matchLevel/);
   assert.match(eligible, /"exam_wide"/);
   assert.match(planner, /registryQbank\.matchLevel === "exam_wide"/);
+});
+
+test("active MCCQE plans upgrade once while completed history remains protected", () => {
+  const completedGuard = planner.indexOf('String(existing.status || "").toLowerCase() === "completed"');
+  const upgradeGuard = planner.indexOf("const balanceUpgradeRequired");
+  const reuseGuard = planner.indexOf("if (existing && !forceRebuild)");
+  assert.ok(completedGuard > 0 && completedGuard < upgradeGuard && upgradeGuard < reuseGuard);
+  assert.match(planner, /AYLA_MCCQE_ROADMAP_BALANCE_VERSION/);
+  assert.match(planner, /forceRebuild = options\.force \|\| verifiedDiagnosticPlanCanYield \|\| balanceUpgradeRequired/);
 });

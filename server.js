@@ -419,6 +419,13 @@ import {
   aylaOverdueTitle,
 } from "./lib/aylamed-overdue.js";
 import {
+  AYLA_MCCQE_ROADMAP_BALANCE_VERSION,
+  aylaRoadmapFitsWithin,
+  aylaRoadmapQuestionTarget,
+  buildAylaRoadmapBalancePolicy,
+  isMccqeRoadmapTrack,
+} from "./lib/aylamed-roadmap-balance.js";
+import {
   applyAylaPlanFeaturePatch,
   aylaPlanFeatureMatrixRow,
   normalizeAylaPlanFeatures,
@@ -667,7 +674,7 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "");
 
-const NEXTGEN_BACKEND_BUILD = "v223-aylamed-diagnostic-onboarding";
+const NEXTGEN_BACKEND_BUILD = "v224-mccqe-roadmap-balance";
 const LMS_PAID_DEMO_CONSOLIDATION_BUILD = "v221-paid-demo-consolidation";
 const CRM_AYLA_REPLY_BUILD = "v310-crm-session-retry-guard";
 const CRM_LIVE_SESSION_SCHEDULER_BUILD = "v321-postclass-recording-recovery";
@@ -86113,8 +86120,15 @@ function aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, cap
   const rows = (Array.isArray(resources) ? resources : [resources]).filter(Boolean);
   if (!rows.length) return null;
   const assignment = aylaV189MakeAssignment(db, student, plan, plan.date, category, rows, title, options);
-  const allowance = options.allowOverCapacity ? capacityMinutes * 1.35 : capacityMinutes * 1.08;
-  if (assignments.length && plan.plannedMinutes + assignment.estimatedMinutes > allowance) return null;
+  const hardDailyCap = plan.balancePolicy?.hardDailyCap === true;
+  const allowance = Number.isFinite(Number(options.maxTotalMinutes))
+    ? Number(options.maxTotalMinutes)
+    : hardDailyCap
+      ? capacityMinutes
+      : options.allowOverCapacity
+        ? capacityMinutes * 1.35
+        : capacityMinutes * 1.08;
+  if (!aylaRoadmapFitsWithin(plan.plannedMinutes, assignment.estimatedMinutes, allowance)) return null;
   assignments.push(assignment);
   plan.plannedMinutes += assignment.estimatedMinutes;
   return assignment;
@@ -86142,7 +86156,13 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     return { plan: existing, assignments, reused: true, completedHistoryProtected: true };
   }
   aylaRequireExamPublished(db, aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam), "roadmap");
-  const forceRebuild = options.force || verifiedDiagnosticPlanCanYield;
+  const balanceUpgradeRequired = Boolean(
+    existing
+    && isMccqeRoadmapTrack(student.examTrackId || student.exam_track_id || student.exam)
+    && String(existing.balancePolicy?.version || "") !== AYLA_MCCQE_ROADMAP_BALANCE_VERSION
+    && String(date) >= aylaDateOnly(),
+  );
+  const forceRebuild = options.force || verifiedDiagnosticPlanCanYield || balanceUpgradeRequired;
   if (existing && !forceRebuild) {
     const assignments = aylaValues(db, "aylaResourceAssignments").filter((row) => String(row.dailyPlanId) === String(existing.id));
     return { plan: existing, assignments, reused: true };
@@ -86255,6 +86275,15 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     : tutorProposal.questionVolumeAdjustment === "intensive"
       ? 1.2
       : 1;
+  const workloadFactor = tutorProposal.workloadAdjustment === "reduce" ? 0.82 : tutorProposal.workloadAdjustment === "intensive" ? 1.08 : 1;
+  const roadmapExamTrack = aylaCanonicalExamTrack(student.examTrackId || student.exam_track_id || student.exam);
+  const balancePolicy = buildAylaRoadmapBalancePolicy({
+    examTrack: roadmapExamTrack,
+    capacityMinutes,
+    isStudyDay: studyDay.isStudyDay,
+    workloadFactor,
+  });
+  const effectiveCapacity = balancePolicy.effectiveCapacityMinutes;
   const selectedFocus = focusCandidates.find((row) => String(row.id) === String(tutorProposal.focusCandidateId)) || focusCandidates[0] || { system: aylaCleanArray(student.weakAreas)[0] || "General", topic: "Core review", id: null, reasons: [] };
   const focusSystem = selectedFocus.system || "General";
   const focusSubsystem = selectedFocus.subsystem || "";
@@ -86300,6 +86329,8 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     status: "active",
     questionSourceMode: questionMode,
     capacityMinutes,
+    effectiveCapacityMinutes: effectiveCapacity,
+    balancePolicy,
     plannedMinutes: 0,
     completionPercent: 0,
     assignmentIds: [],
@@ -86377,6 +86408,8 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     };
     assignments.push(diagnosticAssignment);
     plan.plannedMinutes = diagnosticAssignment.estimatedMinutes;
+    plan.totalMinutes = diagnosticAssignment.estimatedMinutes;
+    plan.completedMinutes = 0;
     plan.assignmentIds = [diagnosticAssignment.id];
     plan.systemFocus = "Baseline";
     plan.subsystemFocus = "";
@@ -86415,17 +86448,37 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       }
     : settings.resources.assignment_mix || {};
 
-  // 1) Due revision is always considered before new content. Each queue record is linked
-  // to the assignment so successful completion closes the exact revision record.
-  for (const revision of dueRevisions) {
-    if (plan.plannedMinutes >= capacityMinutes) break;
+  // 1) Due revision remains first, but MCCQE keeps all revision and overdue carry
+  // inside 35% of the student's day. Due flashcards become one bounded review block
+  // so many small cards cannot visually or mathematically crowd out QBank and lecture.
+  const assignedRevisionIds = new Set();
+  const priorityCarryCeiling = balancePolicy.enabled
+    ? balancePolicy.priorityCarryCapMinutes
+    : capacityMinutes;
+  const resolvedRevisions = dueRevisions.map((revision) => {
     let resource = aylaV189ResolveRevisionResource(db, revision, student);
-    if (!resource) continue;
+    if (!resource) return null;
     const category = aylaV189CategoryForResource(resource, revision);
     if (category === "reading") {
       resource = library.resources.find((row) => aylaLibraryResourceMatchesId(row, resource.id)) || null;
-      if (!resource) continue;
+      if (!resource) return null;
     }
+    return { revision, resource, category };
+  }).filter(Boolean);
+  const markRevisionAssigned = (revision, assignment) => {
+    assignedRevisionIds.add(String(revision.id));
+    revision.status = "assigned";
+    revision.assignedDate = date;
+    revision.assignedAssignmentId = assignment.id;
+    revision.updatedAt = aylaNow();
+    aylaSetItem(db, "aylaRevisionQueue", revision);
+  };
+
+  const individualRevisions = balancePolicy.enabled
+    ? resolvedRevisions.filter(({ revision }) => String(revision.sourceType || "").toLowerCase() !== "flashcard")
+    : resolvedRevisions;
+  for (const { revision, resource, category } of individualRevisions) {
+    if (plan.plannedMinutes >= priorityCarryCeiling) break;
     const title = revision.sourceType === "flashcard"
       ? `Due flashcard review: ${resource.title || revision.topic || "Recall card"}`
       : revision.sourceType === "question"
@@ -86438,23 +86491,71 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       rationale: `This item is due from permanent revision history (${revision.sourceType || "review"}).`,
       estimatedMinutes: Math.max(5, Math.min(30, aylaNumber(resource.estimatedMinutes, 12))),
       allowOverCapacity: true,
+      maxTotalMinutes: balancePolicy.enabled ? priorityCarryCeiling : undefined,
     });
     if (assignment) {
       assignment.revisionQueueIds = [revision.id];
       assignment.revisionSourceType = revision.sourceType || "";
-      revision.status = "assigned";
-      revision.assignedDate = date;
-      revision.assignedAssignmentId = assignment.id;
-      revision.updatedAt = aylaNow();
-      aylaSetItem(db, "aylaRevisionQueue", revision);
+      markRevisionAssigned(revision, assignment);
       reservedIds.add(String(resource.id));
+    }
+  }
+
+  if (balancePolicy.enabled) {
+    const flashcardGroups = new Map();
+    resolvedRevisions
+      .filter(({ revision }) => String(revision.sourceType || "").toLowerCase() === "flashcard")
+      .forEach((candidate) => {
+        const key = String(candidate.resource.id);
+        const current = flashcardGroups.get(key) || { resource: candidate.resource, revisions: [] };
+        current.revisions.push(candidate.revision);
+        flashcardGroups.set(key, current);
+      });
+    const remainingPriorityMinutes = Math.max(0, priorityCarryCeiling - plan.plannedMinutes);
+    const selectedGroups = [...flashcardGroups.values()].slice(
+      0,
+      Math.min(balancePolicy.dueFlashcardCap, Math.floor(remainingPriorityMinutes)),
+    );
+    if (selectedGroups.length && remainingPriorityMinutes >= 5) {
+      const resources = selectedGroups.map((row) => row.resource);
+      const revisions = selectedGroups.flatMap((row) => row.revisions);
+      const systems = [...new Set(revisions.map((row) => row.system).filter(Boolean))];
+      const estimatedMinutes = Math.max(5, Math.min(balancePolicy.dueFlashcardCap, resources.length));
+      const assignment = aylaV189BuildDailyPlanAddAssignment(
+        db,
+        student,
+        plan,
+        assignments,
+        effectiveCapacity,
+        "flashcards",
+        resources,
+        `${resources.length} due recall card${resources.length === 1 ? "" : "s"}`,
+        {
+          priority: "Critical",
+          system: systems.length === 1 ? systems[0] : "Mixed review",
+          topic: "Spaced repetition due review",
+          rationale: "One time-boxed review block combines due recall cards so revision cannot crowd out today’s MCCQE questions and lecture.",
+          estimatedMinutes,
+          maxTotalMinutes: priorityCarryCeiling,
+        },
+      );
+      if (assignment) {
+        assignment.revisionQueueIds = revisions.map((row) => row.id);
+        assignment.revisionSourceType = "flashcard";
+        assignment.groupedRevision = true;
+        revisions.forEach((revision) => markRevisionAssigned(revision, assignment));
+        resources.forEach((resource) => reservedIds.add(String(resource.id)));
+      }
     }
   }
 
   // 2) Carry overdue work as individual actionable assignments so completing it closes
   // the exact original assignment instead of leaving a repeated combined backlog card.
+  let assignedOverdueCount = 0;
   for (const old of overdue) {
-    if (plan.plannedMinutes >= capacityMinutes * 1.1) break;
+    if (balancePolicy.enabled) {
+      if (plan.plannedMinutes >= priorityCarryCeiling) break;
+    } else if (plan.plannedMinutes >= capacityMinutes * 1.1) break;
     let items = Array.isArray(old.items) ? JSON.parse(JSON.stringify(old.items)) : [];
     let resourceIds = aylaCleanArray(old.resourceIds).map(String);
     if (String(old.category || "").toLowerCase() === "reading") {
@@ -86463,6 +86564,8 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       items = exactResources.map((resource) => aylaV189AssignmentSnapshot(db, resource));
       resourceIds = items.map((item) => String(item.resourceId));
     }
+    const carryMinutes = Math.max(5, aylaNumber(old.estimatedMinutes, 15));
+    if (balancePolicy.enabled && !aylaRoadmapFitsWithin(plan.plannedMinutes, carryMinutes, priorityCarryCeiling)) continue;
     const carry = {
       id: aylaId("AYLA-ASN"), studentId: student.id, userId: student.ayla_user_id || student.user_id || null,
       ...aylaV227ExamFields(student),
@@ -86472,14 +86575,18 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       linkedAssignmentIds: [old.id],
       overdueCarry: true,
       overdueRootAssignmentId: old.overdueRootAssignmentId || old.id,
-      estimatedMinutes: Math.max(5, aylaNumber(old.estimatedMinutes, 15)), status: "pending", priority: "Critical",
+      estimatedMinutes: carryMinutes, status: "pending", priority: "Critical",
       rationale: `Carried from ${old.scheduledDate || "an earlier day"}. Completing this task closes the original overdue record.`,
       createdAt: aylaNow(), updatedAt: aylaNow(),
     };
     assignments.push(carry);
     plan.plannedMinutes += carry.estimatedMinutes;
+    assignedOverdueCount += 1;
     carry.resourceIds.forEach((id) => reservedIds.add(String(id)));
   }
+  plan.priorityCarryMinutes = plan.plannedMinutes;
+  plan.deferredRevisionCount = Math.max(0, dueRevisions.length - assignedRevisionIds.size);
+  plan.deferredOverdueCount = Math.max(0, overdue.length - assignedOverdueCount);
 
   const rawAssessmentDecision = aylaV189AssessmentDecision(db, student, date, options);
   const assessmentDecision = {
@@ -86496,6 +86603,8 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   // Protected rest days contain only due revision and critical backlog. No normal new content.
   if (!studyDay.isStudyDay) {
     plan.assignmentIds = assignments.map((row) => row.id);
+    plan.totalMinutes = plan.plannedMinutes;
+    plan.completedMinutes = 0;
     plan.empty = assignments.length === 0;
     plan.message = assignments.length
       ? `${studyDay.dayName} is a protected rest day. Only due revision and critical overdue work were assigned.`
@@ -86532,9 +86641,6 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   const unused = (rows) => rows.filter((row) => !reservedIds.has(String(row.id)));
   const select = (rows, limit) => aylaV189SelectUnused(unused(rows), reservedIds, limit);
 
-  const workloadFactor = tutorProposal.workloadAdjustment === "reduce" ? 0.82 : tutorProposal.workloadAdjustment === "intensive" ? 1.08 : 1;
-  const effectiveCapacity = Math.max(60, Math.min(960, Math.round(capacityMinutes * workloadFactor)));
-
   // A due assessment or an actual QBank block is reserved before optional new
   // readings/videos. Previously those resources could consume the whole day,
   // leaving question-rich exams with no scored practice at all.
@@ -86564,25 +86670,57 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     }
   }
 
+  const balancedQuestionTarget = aylaRoadmapQuestionTarget(balancePolicy, questionVolumeFactor);
+  let internalQuestionsAssigned = 0;
   if (!assessmentScheduled && mix.internal_mcqs !== false && (questionMode === "internal" || questionMode === "hybrid")) {
-    const pick = select(internal, Math.max(1, Math.min(12, Math.round((effectiveCapacity / 45) * questionVolumeFactor))));
-    if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "internal_mcqs", pick, `AylaMed MCQs: ${pick.map((row) => row.questionNumber || row.resourceNumber).filter(Boolean).join(", ")}`, {
-      estimatedMinutes: pick.length * 2,
+    const internalQuestionLimit = balancedQuestionTarget
+      || Math.max(1, Math.min(12, Math.round((effectiveCapacity / 45) * questionVolumeFactor)));
+    const pick = select(internal, internalQuestionLimit);
+    if (pick.length) {
+      const assignment = aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "internal_mcqs", pick, `AylaMed MCQs: ${pick.map((row) => row.questionNumber || row.resourceNumber).filter(Boolean).join(", ")}`, {
+      estimatedMinutes: pick.length * balancePolicy.questionMinutesPerItem,
       system: focusSystem,
       subsystem: focusSubsystem,
       topic: focusTopic,
       priority: plan.finalReviewMode ? "Critical" : "High",
-      allowOverCapacity: true,
+      allowOverCapacity: !balancePolicy.enabled,
       rationale: plan.finalReviewMode
         ? "Final-review QBank practice uses verified questions and repeated weak areas; no broad new content is opened."
         : registryQbank.matchLevel === "exam_wide"
           ? "No verified questions matched the current legacy focus label, so AylaMed assigned a transparent exam-wide verified block instead of showing no QBank work."
           : "Original verified MCQs for the same daily focus. Correctness is scored only on the server.",
-    });
+      });
+      if (assignment) internalQuestionsAssigned = pick.length;
+    }
     else plan.missingResourceTypes.push("internal_mcqs_for_focus");
   }
 
-  if (mix.reading !== false) {
+  const scheduleExternalQuestions = () => {
+    if (plan.finalReviewMode || mix.external_questions === false || !["external", "hybrid"].includes(questionMode)) return;
+    const balancedRemaining = balancePolicy.enabled
+      ? Math.max(0, (balancedQuestionTarget || 0) - internalQuestionsAssigned)
+      : null;
+    const limit = balancePolicy.enabled
+      ? balancedRemaining
+      : Math.max(1, Math.min(assessmentScheduled ? 8 : 24, Math.round((effectiveCapacity / (assessmentScheduled ? 55 : 32)) * questionVolumeFactor)));
+    if (limit <= 0) return;
+    const pick = select(external, limit);
+    if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "external_questions", pick, `${pick[0].provider || "External"} assigned IDs: ${pick.map((row) => row.questionNumber || row.resourceNumber).filter(Boolean).join(", ")}`, {
+      estimatedMinutes: pick.length * balancePolicy.questionMinutesPerItem,
+      system: focusSystem,
+      subsystem: focusSubsystem,
+      topic: focusTopic,
+      rationale: `Verified external question numbers mapped to ${focusSystem}${focusTopic ? ` — ${focusTopic}` : ""}.`,
+    });
+    else plan.missingResourceTypes.push("external_questions_for_focus");
+  };
+
+  // MCCQE completes its protected question allocation before optional content.
+  // Other exam tracks keep their existing ordering below.
+  if (balancePolicy.enabled) scheduleExternalQuestions();
+
+  const scheduleReading = () => {
+    if (mix.reading === false) return;
     const selection = selectAylaRoadmapReading({
       resources: reading,
       examTrack: student.examTrackId || student.exam_track_id || student.exam,
@@ -86608,7 +86746,9 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
       });
     }
     else if (!plan.finalReviewMode) plan.missingResourceTypes.push(libraryEnabled ? "exact_page_reading_for_focus" : "library_feature_not_enabled");
-  }
+  };
+
+  if (!balancePolicy.enabled) scheduleReading();
 
   if (mix.video !== false && contentHubEnabled) {
     const selection = selectAylaRoadmapVideo({
@@ -86647,11 +86787,9 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
         `Watch: ${supplementalPrefix}${pick[0].title}`,
         videoAssignmentOptions,
       );
-      // One overdue QBank block must not silently consume the entire day and
-      // make an otherwise verified lecture disappear. Permit one bounded
-      // QBank-plus-video day while still respecting the existing 35% hard
-      // over-capacity ceiling. Larger overloads remain deferred.
-      if (!videoAssignment && plan.plannedMinutes < effectiveCapacity) {
+      // Existing exam plans retain their bounded QBank-plus-video allowance.
+      // MCCQE never retries above the student's declared daily capacity.
+      if (!balancePolicy.enabled && !videoAssignment && plan.plannedMinutes < effectiveCapacity) {
         videoAssignment = aylaV189BuildDailyPlanAddAssignment(
           db,
           student,
@@ -86669,17 +86807,9 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
     else plan.missingResourceTypes.push("video_for_focus");
   }
 
-  if (!plan.finalReviewMode && mix.external_questions !== false && (questionMode === "external" || questionMode === "hybrid")) {
-    const pick = select(external, Math.max(1, Math.min(assessmentScheduled ? 8 : 24, Math.round((effectiveCapacity / (assessmentScheduled ? 55 : 32)) * questionVolumeFactor))));
-    if (pick.length) aylaV189BuildDailyPlanAddAssignment(db, student, plan, assignments, effectiveCapacity, "external_questions", pick, `${pick[0].provider || "External"} assigned IDs: ${pick.map((row) => row.questionNumber || row.resourceNumber).filter(Boolean).join(", ")}`, {
-      estimatedMinutes: pick.length * 2,
-      system: focusSystem,
-      subsystem: focusSubsystem,
-      topic: focusTopic,
-      rationale: `Verified external question numbers mapped to ${focusSystem}${focusTopic ? ` — ${focusTopic}` : ""}.`,
-    });
-    else plan.missingResourceTypes.push("external_questions_for_focus");
-  }
+  if (balancePolicy.enabled) scheduleReading();
+
+  if (!balancePolicy.enabled) scheduleExternalQuestions();
 
   if (mix.flashcards !== false) {
     const pick = select(cards, Math.max(1, Math.min(15, Math.round(effectiveCapacity / 20))));
@@ -86696,6 +86826,8 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   }
 
   plan.assignmentIds = assignments.map((row) => row.id);
+  plan.totalMinutes = plan.plannedMinutes;
+  plan.completedMinutes = 0;
   plan.systemFocus = focusSystem;
   plan.subsystemFocus = focusSubsystem;
   plan.topicFocus = focusTopic;
@@ -86703,7 +86835,9 @@ async function aylaV189BuildDailyPlan(db, student, date = aylaDateOnly(), option
   plan.message = assignments.length
     ? plan.finalReviewMode
       ? `Final review is active with ${assessmentDecision.daysToTarget} day${assessmentDecision.daysToTarget === 1 ? "" : "s"} to the target. AylaMed prioritizes due revision, weak-area QBank work and readiness checks, then adds only verified focus-matched lecture, recall or exact-topic reading support that fits the day.`
-      : `Today’s verified plan is saved around one focus: ${[focusSystem, focusSubsystem, focusTopic].filter(Boolean).join(" — ")}. Due revision and overdue work were prioritized before new content.`
+      : balancePolicy.enabled
+        ? `Today’s MCCQE plan is balanced around ${[focusSystem, focusSubsystem, focusTopic].filter(Boolean).join(" — ")}. Due revision and overdue work are time-boxed, QBank and a matched lecture are protected, and optional reading and new flashcards are added only when they fit your available time.`
+        : `Today’s verified plan is saved around one focus: ${[focusSystem, focusSubsystem, focusTopic].filter(Boolean).join(" — ")}. Due revision and overdue work were prioritized before new content.`
     : "No verified resources match today’s focus. Upload/approve books, Vimeo mappings, question banks, flashcards or assessments; AylaMed will not invent references.";
   plan.missingResourceTypes = [...new Set(plan.missingResourceTypes)];
   plan.changeNotice = buildAylaPlanChangeNotice({
@@ -86734,7 +86868,18 @@ function aylaV189UpdatePlanCompletion(db, planId) {
   if (["completed", "cancelled", "superseded"].includes(String(plan.status || "").toLowerCase())) return plan;
   const assignments = aylaValues(db, "aylaResourceAssignments").filter((row) => String(row.dailyPlanId) === String(planId) && String(row.status || "").toLowerCase() !== "superseded");
   const completed = assignments.filter((row) => String(row.status || "").toLowerCase() === "completed").length;
-  plan.completionPercent = assignments.length ? Math.round((completed / assignments.length) * 100) : 0;
+  const totalMinutes = assignments.reduce((sum, row) => sum + Math.max(1, aylaNumber(row.estimatedMinutes, 1)), 0);
+  const completedMinutes = assignments.reduce((sum, row) => {
+    const minutes = Math.max(1, aylaNumber(row.estimatedMinutes, 1));
+    const isCompleted = String(row.status || "").toLowerCase() === "completed";
+    const progress = isCompleted ? 100 : Math.max(0, Math.min(100, aylaNumber(row.progressPercent, 0)));
+    return sum + (minutes * progress / 100);
+  }, 0);
+  plan.completionPercent = plan.balancePolicy?.enabled === true
+    ? totalMinutes ? Math.round((completedMinutes / totalMinutes) * 100) : 0
+    : assignments.length ? Math.round((completed / assignments.length) * 100) : 0;
+  plan.completedMinutes = Math.round(completedMinutes);
+  plan.totalMinutes = Math.round(totalMinutes);
   plan.completedAssignments = completed;
   plan.totalAssignments = assignments.length;
   if (assignments.length && completed === assignments.length) {
