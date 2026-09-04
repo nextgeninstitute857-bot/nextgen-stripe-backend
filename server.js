@@ -11951,6 +11951,7 @@ app.get("/health", async (req, res) => {
     crm_ayla_reply_build: CRM_AYLA_REPLY_BUILD,
     crm_live_session_scheduler_build: CRM_LIVE_SESSION_SCHEDULER_BUILD,
     crm_multiexam_lead_capture_build: CRM_MULTIEXAM_LEAD_CAPTURE_BUILD,
+    crm_exam_inbox_routing_build: "v322-exam-inboxes-zero-ai-filter",
     crm_whatsapp_business_profile_build: "v298-meta-profile-sync",
     crm_ayla_reply_engine: {
       whatsapp_provider_configured: Boolean(process.env.WHATSAPP_ACCESS_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID),
