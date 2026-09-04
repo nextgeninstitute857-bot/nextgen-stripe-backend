@@ -1,6 +1,6 @@
 # AylaMed Meta and CRM production wiring
 
-This release separates AylaMed/MCCQE records from existing NextGen/USMLE records. It does not contain access tokens and does not create Meta assets. Complete the provider-side assignments below before deployment.
+This release separates AylaMed/MCCQE records from existing NextGen/USMLE records. It does not contain access tokens and does not create Meta assets. The code can be deployed with AylaMed automatic outbound disabled; complete the provider-side assignments below before activating the AylaMed connection.
 
 ## Confirmed assets
 
@@ -105,6 +105,8 @@ Automatic AylaMed replies are fail-closed by default because the current convers
 ```text
 AYLAMED_AI_AUTO_SEND_ENABLED=true
 ```
+
+The same switch covers automated follow-ups and meeting reminders. Legacy NextGen welcome and daily-class schedulers remain restricted to NextGen even when the switch is enabled; AylaMed needs its own approved flow. Unknown or conflicting recipient assets enter manual review. The unified administrator inbox explicitly requests `brand_id=all`; default and named-brand views remain scoped. The health endpoint reports `crm_brand_routing_build=v1-aylamed-meta-crm-isolation` for deployment verification.
 
 ## Still unresolved outside this repository
 
