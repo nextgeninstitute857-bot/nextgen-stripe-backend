@@ -65,6 +65,24 @@ test("campaign and ad reporting use separate totals; no-delivery is zero only af
   assert.equal(db.meta_ads_performance.ads[0].performance.spend_amount, 15);
   assert.equal(db.meta_ads_performance.ads[1].performance.spend_amount, 0);
   assert.equal(db.meta_ads_performance.ads[1].performance.no_delivery, true);
+  assert.equal(db.meta_ads_performance_by_brand.nextgen.brand_id, "nextgen");
+});
+
+test("brand performance snapshots coexist and keep the legacy singleton on NextGen", () => {
+  const db = {};
+  saveMetaPerformanceSnapshot(db, snapshot(), "brand_nextgen_usmle");
+  saveMetaPerformanceSnapshot(db, {
+    ...snapshot(),
+    accounts: [{ ...account, meta_account_id: "1594776822351544" }],
+    campaigns: snapshot().campaigns.map((row) => ({ ...row, meta_account_id: "1594776822351544" })),
+    creatives: snapshot().creatives.map((row) => ({ ...row, meta_account_id: "1594776822351544" })),
+    insights: snapshot().insights.map((row) => ({ ...row, meta_account_id: "1594776822351544" })),
+    ad_insights: snapshot().ad_insights.map((row) => ({ ...row, meta_account_id: "1594776822351544" })),
+  }, "brand_aylamed");
+
+  assert.equal(db.meta_ads_performance_by_brand.brand_nextgen_usmle.brand_id, "brand_nextgen_usmle");
+  assert.equal(db.meta_ads_performance_by_brand.brand_aylamed.brand_id, "brand_aylamed");
+  assert.equal(db.meta_ads_performance.brand_id, "brand_nextgen_usmle");
 });
 
 function harness(fetchSnapshot = async () => snapshot()) {
@@ -132,12 +150,28 @@ test("malformed or truncated Meta results cannot be displayed as a successful ze
   await assert.rejects(fetchMetaAdsSnapshot({ env, axiosClient: { get: async () => ({ data: { data: [], paging: { next: "https://evil.example/more" } } }) } }), /invalid paging/);
 });
 
+test("multi-account sync fails closed when the token cannot see every configured account", async () => {
+  const multiEnv = {
+    META_ADS_ACCESS_TOKEN: "synthetic-private-token",
+    META_AD_ACCOUNT_IDS: "1575781874561019,1594776822351544",
+  };
+  const axiosClient = {
+    get: async () => ({ data: { data: [{ id: "act_1575781874561019", account_id: "1575781874561019" }] } }),
+  };
+  await assert.rejects(
+    fetchMetaAdsSnapshot({ env: multiEnv, axiosClient }),
+    /one or more configured Meta ad accounts/i,
+  );
+});
+
 test("legacy heartbeat saves cannot wipe a newer reporting lease, snapshot or ledger", () => {
-  const current = { meta_ads_sync_state: { lease_id: "new-lease" }, meta_ads_performance: { synced_at: "new" }, meta_ads_last_sync: { synced_at: "new" }, meta_ads_rollup_archive: [{ id: "archived" }], ad_performance_logs: [{ id: "new-daily", source: "meta_live", spend_usd: 15 }], leads: [{ id: "current-lead" }] };
+  const current = { meta_ads_sync_state: { lease_id: "new-lease" }, meta_ads_performance: { synced_at: "new" }, meta_ads_performance_by_brand: { brand_aylamed: { synced_at: "new-ayla" } }, meta_ads_last_sync: { synced_at: "new" }, meta_ads_last_sync_by_brand: { brand_aylamed: { synced_at: "new-ayla" } }, meta_ads_rollup_archive: [{ id: "archived" }], ad_performance_logs: [{ id: "new-daily", source: "meta_live", spend_usd: 15 }], leads: [{ id: "current-lead" }] };
   const incoming = { meta_ads_sync_state: null, meta_ads_performance: null, ad_performance_logs: [{ id: "manual", spend_usd: 4 }], leads: [{ id: "incoming-lead" }] };
   const safe = { ...incoming, ...preserveMetaReportingForLegacyWrite(current, incoming) };
   assert.equal(safe.meta_ads_sync_state.lease_id, "new-lease");
   assert.equal(safe.meta_ads_performance.synced_at, "new");
+  assert.equal(safe.meta_ads_performance_by_brand.brand_aylamed.synced_at, "new-ayla");
+  assert.equal(safe.meta_ads_last_sync_by_brand.brand_aylamed.synced_at, "new-ayla");
   assert.equal(safe.ad_performance_logs.length, 2);
   assert.deepEqual(safe.leads, incoming.leads, "this narrow guard must not rewrite unrelated lead data");
   assert.deepEqual(preserveMetaReportingForLegacyWrite({}, incoming), {});

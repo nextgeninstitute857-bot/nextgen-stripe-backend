@@ -31,9 +31,20 @@ import {
   metaAdsReadiness,
 } from "./lib/crm-meta-ads.js";
 import { createMetaReportingRunner, metaReportingStatus, prepareMetaDailyLedger, saveMetaPerformanceSnapshot, preserveMetaReportingForLegacyWrite } from "./lib/crm-meta-ads-reporting.js";
+import {
+  AYLAMED_BRAND_ID,
+  NEXTGEN_BRAND_ID,
+  chooseBrandSafeIdentityMatch,
+  extractInboundIntegrationIdentity,
+  inboundBrandRequiresManualReview,
+  partitionMetaAdsSnapshotByBrand,
+  providerEnvFallbackAllowed,
+  resolveInboundBrandContext,
+  selectBrandIntegration,
+} from "./lib/crm-brand-routing.js";
 import { buildMetaConversionOutcomes } from "./lib/crm-meta-conversion-outcomes.js";
 import { experienceQueueRows, experienceTemplateProposal } from "./lib/crm-experience-reporting.js";
-import { applyLeadInboxRouting } from "./lib/crm-lead-routing.js";
+import { applyLeadInboxRouting, inferLeadExamTrack } from "./lib/crm-lead-routing.js";
 import {
   aylaExplicitHumanHandoffRequest,
   aylaPendingStudentText,
@@ -21652,6 +21663,8 @@ const DEFAULT_CRM_DB = {
   meta_ads_last_sync: null,
   meta_ads_sync_state: null,
   meta_ads_performance: null,
+  meta_ads_performance_by_brand: {},
+  meta_ads_last_sync_by_brand: {},
   meta_ads_rollup_archive: [],
   ad_ai_recommendations: [],
   ad_ai_actions: [],
@@ -21832,6 +21845,8 @@ async function readCrmDbFromDisk() {
       ad_creatives: Array.isArray(parsed.ad_creatives) ? parsed.ad_creatives : [],
       ad_performance_logs: Array.isArray(parsed.ad_performance_logs) ? parsed.ad_performance_logs : [],
       meta_ads_last_sync: parsed.meta_ads_last_sync && typeof parsed.meta_ads_last_sync === "object" ? parsed.meta_ads_last_sync : null,
+      meta_ads_performance_by_brand: parsed.meta_ads_performance_by_brand && typeof parsed.meta_ads_performance_by_brand === "object" ? parsed.meta_ads_performance_by_brand : {},
+      meta_ads_last_sync_by_brand: parsed.meta_ads_last_sync_by_brand && typeof parsed.meta_ads_last_sync_by_brand === "object" ? parsed.meta_ads_last_sync_by_brand : {},
       ad_ai_recommendations: Array.isArray(parsed.ad_ai_recommendations) ? parsed.ad_ai_recommendations : [],
       ad_ai_actions: Array.isArray(parsed.ad_ai_actions) ? parsed.ad_ai_actions : [],
       brand_snapshots: Array.isArray(parsed.brand_snapshots) ? parsed.brand_snapshots : [],
@@ -22594,6 +22609,11 @@ function normalizeCrmCollectionPayload(collection, body = {}, existing = null, b
     base.account_name = normalizeCrmString(base.account_name || base.name || `${base.platform} Account`);
     base.name = base.account_name;
     base.account_id = normalizeCrmString(base.account_id || base.username || "");
+    base.phone_number_id = normalizeCrmString(base.phone_number_id || base.credentials?.phone_number_id || "");
+    base.whatsapp_business_account_id = normalizeCrmString(base.whatsapp_business_account_id || base.waba_id || base.credentials?.whatsapp_business_account_id || base.credentials?.waba_id || "");
+    base.shared_brand_ids = Array.isArray(base.shared_brand_ids) ? uniqueList(base.shared_brand_ids) : normalizeArray(base.shared_brand_ids || base.shared_brands || []);
+    base.shared_number_test = base.shared_number_test === true;
+    base.default_inbound_brand_id = normalizeCrmString(base.default_inbound_brand_id || "");
     base.status = normalizeCrmLower(base.status, "not_connected") || "not_connected";
     base.rate_limit = Number(base.rate_limit || 60);
     base.auto_sync = base.auto_sync !== false;
@@ -25325,7 +25345,8 @@ function ngUpsertMetaAdsSnapshot(db, snapshot, brandId) {
     const row = ngUpsertMetaAdsRecord(db, {
       collection: "ad_accounts",
       brandId,
-      match: (item) => String(item.meta_account_id || item.account_id || "") === String(account.meta_account_id || ""),
+      match: (item) => String(item.brand_id || "") === String(brandId || "")
+        && String(item.meta_account_id || item.account_id || "") === String(account.meta_account_id || ""),
       payload: account,
     });
     accountIds.set(String(account.meta_account_id || ""), row.id);
@@ -25335,7 +25356,8 @@ function ngUpsertMetaAdsSnapshot(db, snapshot, brandId) {
     const row = ngUpsertMetaAdsRecord(db, {
       collection: "ad_campaigns",
       brandId,
-      match: (item) => String(item.meta_campaign_id || item.provider_campaign_id || "") === String(campaign.meta_campaign_id || ""),
+      match: (item) => String(item.brand_id || "") === String(brandId || "")
+        && String(item.meta_campaign_id || item.provider_campaign_id || "") === String(campaign.meta_campaign_id || ""),
       payload: {
         ...campaign,
         ad_account_id: accountIds.get(String(campaign.meta_account_id || "")) || null,
@@ -25348,7 +25370,8 @@ function ngUpsertMetaAdsSnapshot(db, snapshot, brandId) {
     const row = ngUpsertMetaAdsRecord(db, {
       collection: "ad_sets",
       brandId,
-      match: (item) => String(item.meta_ad_set_id || item.provider_ad_set_id || "") === String(adSet.meta_ad_set_id || ""),
+      match: (item) => String(item.brand_id || "") === String(brandId || "")
+        && String(item.meta_ad_set_id || item.provider_ad_set_id || "") === String(adSet.meta_ad_set_id || ""),
       payload: {
         ...adSet,
         ad_campaign_id: campaignIds.get(String(adSet.meta_campaign_id || "")) || null,
@@ -25362,7 +25385,8 @@ function ngUpsertMetaAdsSnapshot(db, snapshot, brandId) {
     ngUpsertMetaAdsRecord(db, {
       collection: "ad_creatives",
       brandId,
-      match: (item) => String(item.meta_ad_id || item.provider_ad_id || "") === String(creative.meta_ad_id || ""),
+      match: (item) => String(item.brand_id || "") === String(brandId || "")
+        && String(item.meta_ad_id || item.provider_ad_id || "") === String(creative.meta_ad_id || ""),
       payload: {
         ...creative,
         ad_campaign_id: campaignIds.get(String(creative.meta_campaign_id || "")) || null,
@@ -25389,15 +25413,21 @@ function ngUpsertMetaAdsSnapshot(db, snapshot, brandId) {
   }
 
   for (const lead of ensureCrmArray(db, "leads")) {
+    if (lead.brand_id && String(lead.brand_id) !== String(brandId)) continue;
     const metaAdId = String(lead.meta_ad_id || "").trim();
     if (!metaAdId) continue;
     const creative = ensureCrmArray(db, "ad_creatives").find((item) => (
+      String(item.brand_id || "") === String(brandId || "")
+      &&
       String(item.meta_ad_id || item.provider_ad_id || "") === metaAdId
     ));
     if (!creative) continue;
     const campaign = ensureCrmArray(db, "ad_campaigns").find((item) => (
-      String(item.id || "") === String(creative.ad_campaign_id || creative.campaign_id || "")
-      || String(item.meta_campaign_id || item.provider_campaign_id || "") === String(creative.meta_campaign_id || "")
+      String(item.brand_id || "") === String(brandId || "")
+      && (
+        String(item.id || "") === String(creative.ad_campaign_id || creative.campaign_id || "")
+        || String(item.meta_campaign_id || item.provider_campaign_id || "") === String(creative.meta_campaign_id || "")
+      )
     ));
     lead.meta_ad_name = creative.name || creative.ad_name || lead.meta_ad_name || "";
     lead.meta_campaign_id = campaign?.meta_campaign_id || creative.meta_campaign_id || lead.meta_campaign_id || null;
@@ -25408,7 +25438,8 @@ function ngUpsertMetaAdsSnapshot(db, snapshot, brandId) {
   }
 
   saveMetaPerformanceSnapshot(db, snapshot, brandId);
-  db.meta_ads_last_sync = {
+  const brandSync = {
+    brand_id: brandId,
     status: "success",
     synced_at: snapshot.synced_at || nowIso(),
     date_preset: snapshot.date_preset || "last_30d",
@@ -25420,14 +25451,30 @@ function ngUpsertMetaAdsSnapshot(db, snapshot, brandId) {
     ad_insights: safeArray(snapshot.ad_insights).length,
     daily_insights: safeArray(snapshot.daily_insights).length,
   };
+  db.meta_ads_last_sync_by_brand = {
+    ...(db.meta_ads_last_sync_by_brand || {}),
+    [brandId]: brandSync,
+  };
+  if (!db.meta_ads_last_sync || db.meta_ads_last_sync.brand_id === brandId || brandId === NEXTGEN_BRAND_ID) {
+    db.meta_ads_last_sync = brandSync;
+  }
 
-  return db.meta_ads_last_sync;
+  return brandSync;
+}
+
+function ngUpsertMetaAdsSnapshots(db, snapshot) {
+  const groups = partitionMetaAdsSnapshotByBrand(snapshot, process.env);
+  const syncByBrand = {};
+  for (const group of groups) {
+    syncByBrand[group.brand_id] = ngUpsertMetaAdsSnapshot(db, group.snapshot, group.brand_id);
+  }
+  return { status: "success", brands: syncByBrand };
 }
 
 const ngRunMetaReporting = createMetaReportingRunner({
   read: readCrmDb, mutate: mutateCrmDb,
   fetchSnapshot: ({ datePreset }) => fetchMetaAdsSnapshot({ axiosClient: axios, env: process.env, datePreset }),
-  applySnapshot: (db, snapshot) => ngUpsertMetaAdsSnapshot(db, snapshot, db.brands?.find((brand) => brand.domain === "nextgenusmle.live")?.id || "brand_nextgen_usmle"),
+  applySnapshot: (db, snapshot) => ngUpsertMetaAdsSnapshots(db, snapshot),
 });
 
 function ngStartMetaReporting() {
@@ -25451,15 +25498,15 @@ app.get("/admin/crm/meta-ads/readiness", async (req, res) => {
     res.json({
       success: true,
       readiness,
-      last_sync: db.meta_ads_last_sync || null,
+      last_sync: db.meta_ads_last_sync_by_brand?.[brandId] || (db.meta_ads_last_sync?.brand_id === brandId ? db.meta_ads_last_sync : null),
       automation: metaReportingStatus(db),
-      performance: db.meta_ads_performance?.brand_id === brandId ? db.meta_ads_performance : null,
+      performance: db.meta_ads_performance_by_brand?.[brandId] || (db.meta_ads_performance?.brand_id === brandId ? db.meta_ads_performance : null),
       crm_outcomes: crmOutcomes,
       live_records: {
-        accounts: ensureCrmArray(db, "ad_accounts").filter((item) => item.source === "meta_live").length,
-        campaigns: ensureCrmArray(db, "ad_campaigns").filter((item) => item.source === "meta_live").length,
-        ad_sets: ensureCrmArray(db, "ad_sets").filter((item) => item.source === "meta_live").length,
-        creatives: ensureCrmArray(db, "ad_creatives").filter((item) => item.source === "meta_live").length,
+        accounts: ensureCrmArray(db, "ad_accounts").filter((item) => item.source === "meta_live" && item.brand_id === brandId).length,
+        campaigns: ensureCrmArray(db, "ad_campaigns").filter((item) => item.source === "meta_live" && item.brand_id === brandId).length,
+        ad_sets: ensureCrmArray(db, "ad_sets").filter((item) => item.source === "meta_live" && item.brand_id === brandId).length,
+        creatives: ensureCrmArray(db, "ad_creatives").filter((item) => item.source === "meta_live" && item.brand_id === brandId).length,
       },
     });
   } catch (error) {
@@ -25512,7 +25559,9 @@ function whatsappProfileMetaAppId() {
 function crmSavedWhatsAppProfile(db, phoneNumberId, brandId = null) {
   return ensureCrmArray(db, "whatsapp_business_profiles").find((item) => {
     if (String(item.phone_number_id || "") !== String(phoneNumberId || "")) return false;
-    return !brandId || !item.brand_id || String(item.brand_id) === String(brandId);
+    if (!brandId) return true;
+    if (String(item.brand_id || "") === String(brandId)) return true;
+    return brandId === NEXTGEN_BRAND_ID && !item.brand_id;
   }) || null;
 }
 
@@ -25521,7 +25570,7 @@ app.get("/admin/crm/whatsapp-business-profile/live", async (req, res) => {
     await requireCrmAdmin(req);
     const db = await readCrmDb();
     const brandId = getCrmBrandId(req, db);
-    const { token, phoneNumberId } = await resolveWhatsAppCloudConfig({ db });
+    const { token, phoneNumberId } = await resolveWhatsAppCloudConfig({ db, brandId });
     if (!token || !phoneNumberId) {
       const error = new Error("WhatsApp Cloud API is not configured. Add the phone number ID and access token first.");
       error.statusCode = 503;
@@ -25571,7 +25620,7 @@ app.post("/admin/crm/whatsapp-business-profile/publish", async (req, res) => {
     const admin = await requireCrmAdmin(req);
     const db = await readCrmDb();
     const brandId = getCrmBrandId(req, db);
-    const { token, phoneNumberId } = await resolveWhatsAppCloudConfig({ db });
+    const { token, phoneNumberId } = await resolveWhatsAppCloudConfig({ db, brandId });
     if (!token || !phoneNumberId) {
       const error = new Error("WhatsApp Cloud API is not configured. Add the phone number ID and access token first.");
       error.statusCode = 503;
@@ -25586,7 +25635,7 @@ app.post("/admin/crm/whatsapp-business-profile/publish", async (req, res) => {
         token,
         appId: whatsappProfileMetaAppId(),
         dataUrl: req.body.profile_picture_data_url,
-        fileName: req.body.profile_picture_file_name || "nextgen-usmle-whatsapp-profile",
+        fileName: req.body.profile_picture_file_name || (brandId === AYLAMED_BRAND_ID ? "aylamed-whatsapp-profile" : "nextgen-usmle-whatsapp-profile"),
         version,
       });
     }
@@ -28097,7 +28146,7 @@ app.post("/admin/crm/conversations/:leadId/quick-action", async (req, res) => {
 
     createIntegrationLog(db, {
       brand_id: brandId,
-      integration_id: getIntegrationByPlatform(db, channel)?.id || null,
+      integration_id: getIntegrationByPlatform(db, channel, { brandId })?.id || null,
       platform: channel,
       action: "admin_quick_action",
       status: result.success ? "success" : result.queued ? "queued" : "error",
@@ -29025,9 +29074,69 @@ function getBackendPublicUrl() {
   return String(process.env.BACKEND_PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || "").replace(/\/$/, "");
 }
 
-function getIntegrationByPlatform(db, platform) {
-  const clean = normalizeSocialPlatform(platform);
-  return ensureCrmArray(db, "integrations").find((item) => normalizeSocialPlatform(item.platform) === clean) || null;
+function getIntegrationByPlatform(db, platform, selectors = {}) {
+  return selectBrandIntegration(ensureCrmArray(db, "integrations"), normalizeSocialPlatform(platform), selectors);
+}
+
+function ngResolveInboundIntegration(db, platform, payload = {}, explicitIntegration = null) {
+  if (explicitIntegration) return explicitIntegration;
+  const cleanPlatform = normalizeSocialPlatform(platform);
+  const identity = extractInboundIntegrationIdentity(cleanPlatform, payload);
+  if (identity.phone_number_id) {
+    const exact = getIntegrationByPlatform(db, cleanPlatform, { phoneNumberId: identity.phone_number_id });
+    if (exact) return exact;
+    if (String(process.env.WHATSAPP_PHONE_NUMBER_ID || "").trim() === String(identity.phone_number_id)) {
+      return getIntegrationByPlatform(db, cleanPlatform);
+    }
+    return null;
+  }
+  if (identity.account_id) {
+    return getIntegrationByPlatform(db, cleanPlatform, { accountId: identity.account_id });
+  }
+  return getIntegrationByPlatform(db, cleanPlatform);
+}
+
+function ngApplyInboundBrandContext(db, platform, rawPayload, leadPayload, integration = null) {
+  const cleanPlatform = normalizeSocialPlatform(platform);
+  const identity = extractInboundIntegrationIdentity(cleanPlatform, rawPayload || {});
+  const selectedIntegration = ngResolveInboundIntegration(db, cleanPlatform, rawPayload || {}, integration);
+  const creative = leadPayload?.meta_ad_id
+    ? ensureCrmArray(db, "ad_creatives").find((item) => (
+        String(item.meta_ad_id || item.provider_ad_id || "") === String(leadPayload.meta_ad_id || "")
+      ))
+    : null;
+  const examTrack = inferLeadExamTrack(leadPayload || {});
+  let resolved = resolveInboundBrandContext({
+    platform: cleanPlatform,
+    integration: selectedIntegration,
+    targetedIntegration: selectedIntegration,
+    creativeBrandId: creative?.brand_id || "",
+    examTrack,
+    defaultBrandId: db.settings?.default_brand_id || db.brands?.[0]?.id || NEXTGEN_BRAND_ID,
+  });
+
+  // Meta normally includes CTWA referral data only on the first message. On a
+  // later generic reply to the shared number, retain the brand of one unique
+  // existing contact instead of creating a new lead under the default brand.
+  if (["integration_inbound_default", "crm_default", "shared_integration_ambiguous"].includes(resolved.reason)) {
+    const identityMatches = matchingSocialLeads(db, cleanPlatform, { ...(leadPayload || {}), brand_id: "" });
+    const existingContact = chooseBrandSafeIdentityMatch(identityMatches, "");
+    if (existingContact?.brand_id) {
+      resolved = { brand_id: existingContact.brand_id, reason: "existing_contact_brand" };
+    } else if (new Set(identityMatches.map((item) => String(item.brand_id || "").trim()).filter(Boolean)).size > 1) {
+      resolved = { brand_id: "", reason: "cross_brand_identity_ambiguous" };
+    }
+  }
+
+  if (resolved.brand_id) leadPayload.brand_id = resolved.brand_id;
+  if (examTrack) leadPayload.exam_track = examTrack;
+  leadPayload.brand_resolution_source = resolved.reason;
+  leadPayload.brand_routing_review_required = inboundBrandRequiresManualReview(resolved.reason);
+  if (identity.phone_number_id) leadPayload.recipient_phone_number_id = identity.phone_number_id;
+  if (identity.display_phone_number) leadPayload.recipient_display_phone_number = identity.display_phone_number;
+  if (identity.account_id) leadPayload.recipient_account_id = identity.account_id;
+  if (selectedIntegration?.id) leadPayload.source_integration_id = selectedIntegration.id;
+  return { integration: selectedIntegration, resolved };
 }
 
 function getStableLeadId(lead = {}) {
@@ -29233,16 +29342,18 @@ function extractMetaText({ platform, payload = {} }) {
 
 function getMetaTokenForPlatform(platform, integration = {}) {
   const cleanPlatform = normalizeSocialPlatform(platform);
+  const savedToken = getIntegrationCredential(integration, "access_token")
+    || getIntegrationCredential(integration, "api_key");
+  if (savedToken) return savedToken;
+  if (!providerEnvFallbackAllowed(integration)) return "";
   if (cleanPlatform === "instagram") {
     return (
-      getIntegrationCredential(integration, "api_key", "INSTAGRAM_PAGE_ACCESS_TOKEN") ||
       process.env.INSTAGRAM_PAGE_ACCESS_TOKEN ||
       process.env.META_PAGE_ACCESS_TOKEN ||
       ""
     );
   }
   return (
-    getIntegrationCredential(integration, "api_key", "META_PAGE_ACCESS_TOKEN") ||
     process.env.META_PAGE_ACCESS_TOKEN ||
     process.env.FACEBOOK_PAGE_ACCESS_TOKEN ||
     ""
@@ -29251,10 +29362,19 @@ function getMetaTokenForPlatform(platform, integration = {}) {
 
 function getMetaAccountIdForPlatform(platform, integration = {}) {
   const cleanPlatform = normalizeSocialPlatform(platform);
+  const savedAccountId = String(
+    integration.account_id
+    || integration.credentials?.account_id
+    || integration.page_id
+    || integration.credentials?.page_id
+    || "",
+  ).trim();
+  if (savedAccountId) return savedAccountId;
+  if (!providerEnvFallbackAllowed(integration)) return "";
   if (cleanPlatform === "instagram") {
-    return integration.account_id || process.env.INSTAGRAM_BUSINESS_ACCOUNT_ID || process.env.INSTAGRAM_ACCOUNT_ID || "me";
+    return process.env.INSTAGRAM_BUSINESS_ACCOUNT_ID || process.env.INSTAGRAM_ACCOUNT_ID || "me";
   }
-  return integration.account_id || process.env.FACEBOOK_PAGE_ID || "me";
+  return process.env.FACEBOOK_PAGE_ID || "me";
 }
 
 
@@ -29507,6 +29627,7 @@ function buildConversationInbox(db) {
   }
 
   function inboxContactKey(lead = {}) {
+    const brandKey = normalizeCrmString(lead.brand_id || "unassigned").toLowerCase();
     const phone = inboxPhoneDigits(
       lead.whatsapp ||
       lead.whatsapp_phone ||
@@ -29517,10 +29638,10 @@ function buildConversationInbox(db) {
       lead.wa_id ||
       ""
     );
-    if (phone) return `phone:${phone}`;
+    if (phone) return `${brandKey}:phone:${phone}`;
 
     const email = normalizeEmail(lead.email || lead.student_email || lead.customer_email || "");
-    if (email) return `email:${email}`;
+    if (email) return `${brandKey}:email:${email}`;
 
     const platformContact = normalizeCrmString(
       lead.platform_contact_id ||
@@ -29530,9 +29651,9 @@ function buildConversationInbox(db) {
       lead.facebook_id ||
       ""
     ).toLowerCase();
-    if (platformContact) return `platform:${platformContact}`;
+    if (platformContact) return `${brandKey}:platform:${platformContact}`;
 
-    return `lead:${getStableLeadId(lead)}`;
+    return `${brandKey}:lead:${getStableLeadId(lead)}`;
   }
 
   function genericInboxName(value = "") {
@@ -29599,6 +29720,7 @@ function buildConversationInbox(db) {
     return {
       conversation_id: lead.conversation_id || leadId,
       lead_id: leadId,
+      brand_id: lead.brand_id || null,
       lead_name: lead.name || lead.display_name || "Unknown Lead",
       contact: lead.email || lead.phone || lead.whatsapp || lead.whatsapp_phone || lead.platform_contact_id || "",
       platform: normalizeLeadSourcePlatform(lead),
@@ -29817,9 +29939,12 @@ function parseInboundSocialPayload({ platform, payload = {}, integration = null 
   });
 }
 
-function findExistingSocialLead(db, platform, payload = {}) {
+function matchingSocialLeads(db, platform, payload = {}) {
   const cleanPlatform = normalizeSocialPlatform(platform);
   const leads = ensureCrmArray(db, "leads");
+  const possiblePhones = [payload.phone, payload.whatsapp, payload.whatsapp_phone, payload.wa_id]
+    .map(normalizePhoneForWhatsapp)
+    .filter(Boolean);
   const possibleIds = [
     payload.email,
     payload.phone,
@@ -29841,8 +29966,14 @@ function findExistingSocialLead(db, platform, payload = {}) {
     payload[`${cleanPlatform}_chat_id`],
   ].map((item) => String(item || "").trim()).filter(Boolean);
 
-  return leads.find((lead) => {
+  const matches = leads.filter((lead) => {
     if (payload.email && normalizeEmail(lead.email) === normalizeEmail(payload.email)) return true;
+    if (possiblePhones.length) {
+      const leadPhones = [lead.phone, lead.whatsapp, lead.whatsapp_phone, lead.whatsapp_number, lead.mobile, lead.contact_number, lead.wa_id]
+        .map(normalizePhoneForWhatsapp)
+        .filter(Boolean);
+      if (possiblePhones.some((phone) => leadPhones.includes(phone))) return true;
+    }
     return possibleIds.some((value) => {
       return [
         lead.phone,
@@ -29864,7 +29995,15 @@ function findExistingSocialLead(db, platform, payload = {}) {
         lead[`${cleanPlatform}_chat_id`],
       ].map((x) => String(x || "").trim()).includes(value);
     });
-  }) || null;
+  });
+  return matches;
+}
+
+function findExistingSocialLead(db, platform, payload = {}) {
+  return chooseBrandSafeIdentityMatch(
+    matchingSocialLeads(db, platform, payload),
+    payload.brand_id || "",
+  );
 }
 
 function upsertSocialLead(db, platform, payload = {}) {
@@ -29938,7 +30077,7 @@ function appendSocialConversation(db, { lead, platform, direction = "inbound", t
   const message = withTimestamps({
     id: uuid(),
     conversation_id: lead?.conversation_id || leadId || uuid(),
-    brand_id: lead?.brand_id || integration?.brand_id || null,
+    brand_id: lead ? (lead.brand_id || null) : (integration?.brand_id || null),
     lead_id: leadId || null,
     platform: cleanPlatform,
     source_platform: cleanPlatform,
@@ -29948,6 +30087,8 @@ function appendSocialConversation(db, { lead, platform, direction = "inbound", t
     text: msgText,
     platform_message_id: payload?.message_id || payload?.platform_message_id || payload?.entry?.[0]?.messaging?.[0]?.message?.mid || null,
     platform_contact_id: lead?.platform_contact_id || lead?.[`${cleanPlatform}_id`] || null,
+    brand_resolution_source: lead?.brand_resolution_source || payload?.brand_resolution_source || null,
+    recipient_phone_number_id: lead?.recipient_phone_number_id || payload?.recipient_phone_number_id || null,
     raw_payload: payload || {},
     sent_by: normalizeLeadDirection(direction, "inbound") === "outbound" ? "system" : "lead",
     status: normalizeLeadDirection(direction, "inbound") === "outbound" ? "sent" : "received",
@@ -30052,7 +30193,7 @@ function createSocialClientDataEvent(db, { lead, platform, payload = {}, integra
   const event = withTimestamps({
     id: uuid(),
     lead_id: lead?.id || null,
-    brand_id: lead?.brand_id || integration?.brand_id || null,
+    brand_id: lead ? (lead.brand_id || null) : (integration?.brand_id || null),
     agent_id: null,
     event_type: `${normalizeSocialPlatform(platform)}_inbound_capture`,
     source: normalizeSocialPlatform(platform),
@@ -30486,9 +30627,10 @@ async function ngProcessWhatsAppStatusJournalEntry(entry, db) {
 }
 
 async function ngProcessWhatsAppInboundJournalEntry(entry, db) {
-  const integration = entry.integration_id
+  const explicitIntegration = entry.integration_id
     ? ensureCrmArray(db, "integrations").find((item) => String(item.id) === String(entry.integration_id))
-    : getIntegrationByPlatform(db, "whatsapp");
+    : null;
+  let integration = ngResolveInboundIntegration(db, "whatsapp", entry.payload || {}, explicitIntegration);
   const providerMessageIds = Array.isArray(entry.provider_message_ids) && entry.provider_message_ids.length
     ? entry.provider_message_ids
     : ngWhatsAppWebhookMessageIds(entry.payload || {});
@@ -30509,6 +30651,7 @@ async function ngProcessWhatsAppInboundJournalEntry(entry, db) {
   }
 
   const leadPayload = parseInboundSocialPayload({ platform: "whatsapp", payload: entry.payload || {}, integration });
+  integration = ngApplyInboundBrandContext(db, "whatsapp", entry.payload || {}, leadPayload, integration).integration;
   const inboundText = leadPayload.source_text || "";
   const { lead, created } = upsertSocialLead(db, "whatsapp", leadPayload);
   const conversationPayload = {
@@ -30525,7 +30668,7 @@ async function ngProcessWhatsAppInboundJournalEntry(entry, db) {
   });
   createSocialClientDataEvent(db, { lead, platform: "whatsapp", payload: leadPayload, integration });
   createIntegrationLog(db, {
-    brand_id: integration?.brand_id || lead.brand_id || null,
+    brand_id: lead.brand_id || null,
     integration_id: integration?.id || null,
     platform: "whatsapp",
     action: "inbound_webhook",
@@ -30551,14 +30694,25 @@ async function ngProcessWhatsAppCallJournalEntry(entry, db) {
   const callLogs = ensureCrmArray(db, "call_logs");
   const callEvents = ensureCrmArray(db, "whatsapp_call_events");
   const results = [];
+  const explicitIntegration = entry.integration_id
+    ? ensureCrmArray(db, "integrations").find((item) => String(item.id) === String(entry.integration_id))
+    : null;
+  const integration = ngResolveInboundIntegration(db, "whatsapp", entry.payload || {}, explicitIntegration);
 
   for (const event of events) {
     const from = normalizePhoneForWhatsapp(event.from || "");
-    let lead = from ? findLeadByPhoneOrEmail(db, { phone: from, waId: from }) : null;
+    const routingSeed = { phone: from, whatsapp: from, wa_id: from };
+    const { resolved } = ngApplyInboundBrandContext(db, "whatsapp", entry.payload || {}, routingSeed, integration);
+    let lead = from ? findLeadByPhoneOrEmail(db, {
+      phone: from,
+      waId: from,
+      brandId: routingSeed.brand_id || "",
+      avoidCrossBrandCollision: true,
+    }) : null;
     if (!lead && from) {
       lead = withTimestamps({
         id: uuid(),
-        brand_id: db.settings?.default_brand_id || db.brands?.[0]?.id || null,
+        brand_id: routingSeed.brand_id || null,
         name: "WhatsApp caller",
         name_source: "system_placeholder",
         phone: from,
@@ -30568,6 +30722,9 @@ async function ngProcessWhatsAppCallJournalEntry(entry, db) {
         source_platform: "whatsapp",
         status: "new",
         conversation_direction: "inbound",
+        source_integration_id: integration?.id || null,
+        recipient_phone_number_id: routingSeed.recipient_phone_number_id || null,
+        brand_resolution_source: resolved.reason,
       });
       ensureCrmArray(db, "leads").push(lead);
     }
@@ -30579,7 +30736,7 @@ async function ngProcessWhatsAppCallJournalEntry(entry, db) {
     const merged = mergeWhatsAppCallLog(existing, event);
     merged.id = existing.id || uuid();
     merged.lead_id = existing.lead_id || lead?.id || null;
-    merged.brand_id = existing.brand_id || lead?.brand_id || db.settings?.default_brand_id || null;
+    merged.brand_id = existing.brand_id || lead?.brand_id || routingSeed.brand_id || null;
     merged.consent_direction = "student_initiated";
     merged.ai_answering_enabled = whatsappAiCallingReadiness(process.env).inbound_ready;
     merged.recording_enabled = false;
@@ -30589,6 +30746,7 @@ async function ngProcessWhatsAppCallJournalEntry(entry, db) {
 
     callEvents.unshift(withTimestamps({
       id: uuid(),
+      brand_id: merged.brand_id || null,
       lead_id: merged.lead_id,
       call_log_id: merged.id,
       provider_call_id: merged.provider_call_id,
@@ -30764,16 +30922,18 @@ async function handleUniversalWebhook({ req, res, platform, integrationId = null
     }
 
     const db = await readCrmDb();
-    const integration = integrationId
+    const explicitIntegration = integrationId
       ? ensureCrmArray(db, "integrations").find((item) => String(item.id) === String(integrationId))
-      : getIntegrationByPlatform(db, cleanPlatform);
+      : null;
+    let integration = ngResolveInboundIntegration(db, cleanPlatform, req.body || {}, explicitIntegration);
 
     const leadPayload = parseInboundSocialPayload({ platform: cleanPlatform, payload: req.body || {}, integration });
+    integration = ngApplyInboundBrandContext(db, cleanPlatform, req.body || {}, leadPayload, integration).integration;
     const inboundText = leadPayload.source_text || "";
     const { lead, created } = upsertSocialLead(db, cleanPlatform, leadPayload);
     const conversation = appendSocialConversation(db, { lead, platform: cleanPlatform, direction: "inbound", text: inboundText, payload: req.body || {}, integration });
     createSocialClientDataEvent(db, { lead, platform: cleanPlatform, payload: leadPayload, integration });
-    createIntegrationLog(db, { brand_id: integration?.brand_id || lead.brand_id || null, integration_id: integration?.id || null, platform: cleanPlatform, action: "inbound_webhook", status: "success", message: created ? `Created lead from ${cleanPlatform} inbound webhook` : `Updated lead from ${cleanPlatform} inbound webhook`, metadata: { lead_id: lead.id, conversation_id: conversation.id } });
+    createIntegrationLog(db, { brand_id: lead.brand_id || null, integration_id: integration?.id || null, platform: cleanPlatform, action: "inbound_webhook", status: "success", message: created ? `Created lead from ${cleanPlatform} inbound webhook` : `Updated lead from ${cleanPlatform} inbound webhook`, metadata: { lead_id: lead.id, conversation_id: conversation.id, brand_resolution_source: leadPayload.brand_resolution_source || null } });
 
     let aiAutoResult = null;
     try {
@@ -30826,7 +30986,7 @@ async function handleUniversalWebhook({ req, res, platform, integrationId = null
         }
       }
     } catch (aiError) {
-      createIntegrationLog(db, { brand_id: integration?.brand_id || lead.brand_id || null, integration_id: integration?.id || null, platform: cleanPlatform, action: "full_ai_auto_webhook", status: "failed", message: aiError.message, metadata: { lead_id: lead.id, conversation_id: conversation.id } });
+      createIntegrationLog(db, { brand_id: lead.brand_id || null, integration_id: integration?.id || null, platform: cleanPlatform, action: "full_ai_auto_webhook", status: "failed", message: aiError.message, metadata: { lead_id: lead.id, conversation_id: conversation.id } });
       aiAutoResult = { sent: false, error: aiError.message };
     }
 
@@ -30903,6 +31063,7 @@ app.post("/admin/crm/integrations/:id/capture", async (req, res) => {
 
     const platform = normalizeSocialPlatform(integration.platform);
     const leadPayload = { ...parseInboundSocialPayload({ platform, payload: req.body || {}, integration }), ...compactDefined(normalizeClientDataPayload(req.body || {})) };
+    ngApplyInboundBrandContext(db, platform, req.body || {}, leadPayload, integration);
     const { lead, created } = upsertSocialLead(db, platform, leadPayload);
     const conversation = appendSocialConversation(db, { lead, platform, direction: req.body.direction || "manual_capture", text: leadPayload.source_text || req.body.notes || "", payload: req.body || {}, integration });
     createSocialClientDataEvent(db, { lead, platform, payload: leadPayload, integration });
@@ -31027,7 +31188,7 @@ app.post("/admin/crm/conversations/:leadId/send", async (req, res) => {
 
     createIntegrationLog(db, {
       brand_id: brandId,
-      integration_id: getIntegrationByPlatform(db, channel)?.id || null,
+      integration_id: getIntegrationByPlatform(db, channel, { brandId })?.id || null,
       platform: channel,
       action: "admin_send_message",
       status: result.success ? "success" : result.queued ? "queued" : "error",
@@ -31808,14 +31969,16 @@ function normalizePhoneForWhatsapp(value = "") {
   return digits;
 }
 
-function findLeadByPhoneOrEmail(db, { phone = "", email = "", waId = "" } = {}) {
+function findLeadByPhoneOrEmail(db, { phone = "", email = "", waId = "", brandId = "", avoidCrossBrandCollision = false } = {}) {
   const cleanPhone = normalizePhoneForWhatsapp(phone || waId);
   const cleanEmail = normalizeEmail(email || "");
-  return ensureCrmArray(db, "leads").find((lead) => {
+  const matches = ensureCrmArray(db, "leads").filter((lead) => {
     const phones = [lead.phone, lead.whatsapp, lead.whatsapp_number, lead.mobile, lead.contact_number, lead.wa_id].map(normalizePhoneForWhatsapp).filter(Boolean);
     const emails = [lead.email, lead.student_email, lead.customer_email].map(normalizeEmail).filter(Boolean);
     return (cleanPhone && phones.includes(cleanPhone)) || (cleanEmail && emails.includes(cleanEmail));
-  }) || null;
+  });
+  if (brandId || avoidCrossBrandCollision) return chooseBrandSafeIdentityMatch(matches, brandId);
+  return matches[0] || null;
 }
 
 function renderTemplateString(template = "", variables = {}) {
@@ -32335,28 +32498,37 @@ function sanitizeWhatsAppTemplateComponents(components = []) {
     });
 }
 
-async function resolveWhatsAppCloudConfig({ db = null, integration = null } = {}) {
+async function resolveWhatsAppCloudConfig({ db = null, integration = null, brandId = "" } = {}) {
   let selectedIntegration = integration;
 
   if (!selectedIntegration && db) {
-    selectedIntegration = getIntegrationByPlatform(db, "whatsapp");
+    selectedIntegration = brandId
+      ? getIntegrationByPlatform(db, "whatsapp", { brandId })
+      : getIntegrationByPlatform(db, "whatsapp");
   }
 
   if (!selectedIntegration) {
     try {
       const crmDb = await readCrmDb();
-      selectedIntegration = getIntegrationByPlatform(crmDb, "whatsapp");
+      selectedIntegration = brandId
+        ? getIntegrationByPlatform(crmDb, "whatsapp", { brandId })
+        : getIntegrationByPlatform(crmDb, "whatsapp");
     } catch (error) {
       console.error("WhatsApp CRM credential lookup failed:", error.message);
     }
   }
 
+  if (!selectedIntegration && brandId && brandId !== NEXTGEN_BRAND_ID) {
+    return { token: "", phoneNumberId: "", integrationId: null };
+  }
+
+  const allowGlobalProviderFallback = providerEnvFallbackAllowed(selectedIntegration, brandId);
   const tokenCandidates = [
     selectedIntegration?.api_key,
     selectedIntegration?.access_token,
     selectedIntegration?.credentials?.api_key,
     selectedIntegration?.credentials?.access_token,
-    process.env.WHATSAPP_ACCESS_TOKEN,
+    allowGlobalProviderFallback ? process.env.WHATSAPP_ACCESS_TOKEN : "",
   ];
   const token = tokenCandidates
     .map((value) => String(value || "").trim())
@@ -32365,7 +32537,7 @@ async function resolveWhatsAppCloudConfig({ db = null, integration = null } = {}
     selectedIntegration?.phone_number_id ||
     selectedIntegration?.account_id ||
     selectedIntegration?.credentials?.phone_number_id ||
-    process.env.WHATSAPP_PHONE_NUMBER_ID ||
+    (allowGlobalProviderFallback ? process.env.WHATSAPP_PHONE_NUMBER_ID : "") ||
     "",
   ).trim();
 
@@ -32376,8 +32548,10 @@ async function resolveWhatsAppCloudConfig({ db = null, integration = null } = {}
   };
 }
 
-async function sendWhatsAppCloudMessage({ to, text = "", templateName = "", languageCode = "en", components = [], mediaUrl = "", mediaId = "", mediaType = "image", caption = "", db = null, integration = null }) {
-  const { token, phoneNumberId } = await resolveWhatsAppCloudConfig({ db, integration });
+async function sendWhatsAppCloudMessage({ to, text = "", templateName = "", languageCode = "en", components = [], mediaUrl = "", mediaId = "", mediaType = "image", caption = "", db = null, integration = null, brandId = "" }) {
+  const { token, phoneNumberId } = brandId
+    ? await resolveWhatsAppCloudConfig({ db, integration, brandId })
+    : await resolveWhatsAppCloudConfig({ db, integration });
 
   if (!token || !phoneNumberId) {
     const error = new Error("WhatsApp Cloud API is not configured. Save an active WhatsApp CRM integration or add the Render environment variables.");
@@ -33588,7 +33762,11 @@ async function sendCrmMessage({
   const templateBody = template?.body || template?.message || "";
   let finalText = renderTemplateString(text || templateBody, variables);
   const finalTo = getBestRecipientForChannel({ channel: cleanChannel, to, lead });
-  const integration = getIntegrationByPlatform(db, cleanChannel) || { id: null, platform: cleanChannel, brand_id: brandId };
+  const effectiveBrandId = lead?.brand_id || brandId || null;
+  const selectedIntegration = effectiveBrandId
+    ? getIntegrationByPlatform(db, cleanChannel, { brandId: effectiveBrandId })
+    : getIntegrationByPlatform(db, cleanChannel);
+  const integration = selectedIntegration || { id: null, platform: cleanChannel, brand_id: effectiveBrandId };
   const resolvedWhatsAppTemplateName = cleanChannel === "whatsapp" && !forceFreeformAiAuto ? getWhatsAppTemplateName({ template, metadata }) : "";
   const resolvedWhatsAppLanguageCode = cleanChannel === "whatsapp" && !forceFreeformAiAuto ? getWhatsAppLanguageCode({ template, metadata }) : "";
   // A WhatsApp template's provider body is the message the student actually
@@ -33614,7 +33792,7 @@ async function sendCrmMessage({
   }
 
   const baseLog = {
-    brand_id: brandId,
+    brand_id: effectiveBrandId,
     channel: cleanChannel,
     provider: cleanChannel,
     lead_id: lead?.id || leadId || null,
@@ -33650,6 +33828,16 @@ async function sendCrmMessage({
     if (!finalTo) {
       const error = new Error(`Recipient is required for ${cleanChannel}.`);
       error.statusCode = 400;
+      throw error;
+    }
+
+    if (
+      effectiveBrandId === AYLAMED_BRAND_ID
+      && ["whatsapp", "facebook", "instagram"].includes(cleanChannel)
+      && !selectedIntegration
+    ) {
+      const error = new Error(`AylaMed ${cleanChannel} integration is not configured for this brand.`);
+      error.statusCode = 503;
       throw error;
     }
 
@@ -33719,6 +33907,7 @@ async function sendCrmMessage({
         caption: resolvedCaption,
         db,
         integration,
+        brandId: effectiveBrandId,
       });
       providerMessageId = providerResponse?.messages?.[0]?.id || null;
     } else if (cleanChannel === "telegram") {
@@ -36858,12 +37047,16 @@ function ngApplyClickToWhatsAppAttribution(db, lead, message = {}) {
   ));
   const campaign = creative
     ? ensureCrmArray(db, "ad_campaigns").find((item) => (
-      String(item.id || "") === String(creative.ad_campaign_id || creative.campaign_id || "")
-      || String(item.meta_campaign_id || item.provider_campaign_id || "") === String(creative.meta_campaign_id || "")
+      (!creative.brand_id || String(item.brand_id || "") === String(creative.brand_id))
+      && (
+        String(item.id || "") === String(creative.ad_campaign_id || creative.campaign_id || "")
+        || String(item.meta_campaign_id || item.provider_campaign_id || "") === String(creative.meta_campaign_id || "")
+      )
     ))
     : null;
 
   Object.assign(lead, attribution, {
+    brand_id: lead.brand_id || creative?.brand_id || null,
     meta_campaign_id: campaign?.meta_campaign_id || creative?.meta_campaign_id || lead.meta_campaign_id || null,
     campaign_id: campaign?.id || creative?.ad_campaign_id || creative?.campaign_id || lead.campaign_id || null,
     campaign_name: campaign?.name || campaign?.campaign_name || lead.campaign_name || "",
@@ -36892,11 +37085,27 @@ app.post("/webhooks/whatsapp", async (req, res) => {
           const text = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || "";
           const whatsappProfileName = normalizeCrmString(contact.profile?.name || "");
           const paidAttribution = extractClickToWhatsAppAttribution({ message });
-          let lead = findLeadByPhoneOrEmail(db, { phone: from, waId: contact.wa_id });
+          const messagePayload = { value: { ...value, contacts: [contact], messages: [message] } };
+          const routingSeed = {
+            ...paidAttribution,
+            phone: from,
+            whatsapp: from,
+            wa_id: contact.wa_id || from,
+            source_text: text,
+            last_message: text,
+          };
+          const { integration, resolved } = ngApplyInboundBrandContext(db, "whatsapp", messagePayload, routingSeed, null);
+          const routedBrandId = routingSeed.brand_id || "";
+          let lead = findLeadByPhoneOrEmail(db, {
+            phone: from,
+            waId: contact.wa_id,
+            brandId: routedBrandId,
+            avoidCrossBrandCollision: true,
+          });
           if (!lead && from) {
             lead = withTimestamps({
               id: uuid(),
-              brand_id: db.settings?.default_brand_id || db.brands?.[0]?.id || null,
+              brand_id: routedBrandId || null,
               name: whatsappProfileName || "WhatsApp Lead",
               whatsapp_profile_name: whatsappProfileName || null,
               name_source: whatsappProfileName ? "whatsapp_profile" : "system_placeholder",
@@ -36907,11 +37116,23 @@ app.post("/webhooks/whatsapp", async (req, res) => {
               source_platform: "whatsapp",
               status: "new",
               conversation_direction: "inbound",
+              brand_resolution_source: resolved.reason,
+              recipient_phone_number_id: routingSeed.recipient_phone_number_id || null,
+              source_integration_id: integration?.id || null,
+              exam_track: routingSeed.exam_track || null,
               ...paidAttribution,
             });
             ensureCrmArray(db, "leads").push(lead);
           }
           if (lead) ngApplyClickToWhatsAppAttribution(db, lead, message);
+          if (lead) {
+            if (!lead.brand_id && routedBrandId) lead.brand_id = routedBrandId;
+            lead.brand_resolution_source = resolved.reason || lead.brand_resolution_source;
+            lead.brand_routing_review_required = routingSeed.brand_routing_review_required === true;
+            lead.recipient_phone_number_id = lead.recipient_phone_number_id || routingSeed.recipient_phone_number_id || null;
+            lead.source_integration_id = lead.source_integration_id || integration?.id || null;
+            applyLeadInboxRouting(lead, { text, at: nowIso() });
+          }
           if (lead && whatsappProfileName) {
             lead.whatsapp_profile_name = whatsappProfileName;
             const currentLeadName = normalizeCrmString(lead.full_name || lead.name || lead.contact_name || "");
@@ -36921,7 +37142,7 @@ app.post("/webhooks/whatsapp", async (req, res) => {
           }
           ensureCrmArray(db, "inbound_messages").push(withTimestamps({
             id: uuid(),
-            brand_id: lead?.brand_id || db.settings?.default_brand_id || null,
+            brand_id: lead?.brand_id || null,
             channel: "whatsapp",
             provider: "whatsapp",
             direction: "inbound",
@@ -36931,13 +37152,16 @@ app.post("/webhooks/whatsapp", async (req, res) => {
             text,
             provider_message_id: message.id || null,
             provider_response: message,
+            source_integration_id: integration?.id || null,
+            brand_resolution_source: resolved.reason,
+            recipient_phone_number_id: routingSeed.recipient_phone_number_id || null,
             ...paidAttribution,
             status: "received",
             received_at: nowIso(),
           }));
           ensureCrmArray(db, "message_logs").push(withTimestamps({
             id: uuid(),
-            brand_id: lead?.brand_id || db.settings?.default_brand_id || null,
+            brand_id: lead?.brand_id || null,
             channel: "whatsapp",
             provider: "whatsapp",
             direction: "inbound",
@@ -36946,19 +37170,24 @@ app.post("/webhooks/whatsapp", async (req, res) => {
             to: value.metadata?.display_phone_number || value.metadata?.phone_number_id || "",
             text,
             provider_message_id: message.id || null,
+            source_integration_id: integration?.id || null,
+            brand_resolution_source: resolved.reason,
+            recipient_phone_number_id: routingSeed.recipient_phone_number_id || null,
             ...paidAttribution,
             status: "received",
             received_at: nowIso(),
           }));
 
-          ng41ProcessInboundMessageForGrowth(db, {
-            lead,
-            text,
-            from,
-            channel: "whatsapp",
-            provider_message_id: message.id || null,
-            source: "whatsapp_webhook",
-          });
+          if (!lead?.brand_routing_review_required) {
+            ng41ProcessInboundMessageForGrowth(db, {
+              lead,
+              text,
+              from,
+              channel: "whatsapp",
+              provider_message_id: message.id || null,
+              source: "whatsapp_webhook",
+            });
+          }
 
           // v94: wake Ayla after inbound WhatsApp messages. This fixes the case where
           // the inbox shows a new student message but Full AI Auto does not answer until manual trigger.
@@ -50890,6 +51119,31 @@ function ngShouldSkipAiAutoForInbound(lead = {}, inbound = {}, options = {}) {
       ai_credits_used: 0,
     };
   }
+  if (lead.brand_routing_review_required === true || inboundBrandRequiresManualReview(lead.brand_resolution_source)) {
+    lead.brand_routing_review_required = true;
+    lead.brand_routing_review_at = lead.brand_routing_review_at || nowIso();
+    lead.updated_at = nowIso();
+    return {
+      skip: true,
+      reason: "brand_routing_requires_manual_review",
+      inbox_bucket: lead.inbox_bucket || "unassigned",
+      ai_credits_used: 0,
+    };
+  }
+  // The existing automatic conversation engine still contains NextGen/USMLE
+  // links. Keep newly separated AylaMed leads manual until its own approved
+  // prompt/assets are configured and an operator explicitly enables auto-send.
+  if (lead.brand_id === AYLAMED_BRAND_ID && String(process.env.AYLAMED_AI_AUTO_SEND_ENABLED || "false").toLowerCase() !== "true") {
+    lead.aylamed_ai_auto_pending_configuration = true;
+    lead.aylamed_ai_auto_blocked_at = nowIso();
+    lead.updated_at = nowIso();
+    return {
+      skip: true,
+      reason: "aylamed_brand_assets_not_enabled",
+      inbox_bucket: lead.inbox_bucket || "exam:mccqe",
+      ai_credits_used: 0,
+    };
+  }
   if (lead.ai_suppressed === true || lead.suppressed === true || lead.stop_requested === true || lead.do_not_contact === true || lead.opted_out === true || lead.opt_out === true || lead.unsubscribed === true) {
     return { skip: true, reason: "lead_ai_suppressed", ai_credits_used: 0 };
   }
@@ -51047,6 +51301,13 @@ function ngLeadConversationMessages(db, leadId) {
   ]
     .map((value) => String(value || "").replace(/\D/g, ""))
     .filter(Boolean);
+  const leadBrandId = String(lead.brand_id || "").trim();
+  const phoneBrandIds = new Set(leads.filter((candidate) => {
+    const candidatePhones = [candidate.phone, candidate.whatsapp, candidate.whatsapp_phone, candidate.phone_number, candidate.mobile, candidate.contact, candidate.wa_id]
+      .map((value) => String(value || "").replace(/\D/g, ""))
+      .filter(Boolean);
+    return candidatePhones.some((phone) => leadPhones.includes(phone));
+  }).map((candidate) => String(candidate.brand_id || "").trim()).filter(Boolean));
 
   const sameLead = (item = {}) => {
     // A provider phone number is useful for attaching legacy messages that were saved
@@ -51074,6 +51335,9 @@ function ngLeadConversationMessages(db, leadId) {
     if (String(item.conversation_id || "").trim() === id) return true;
 
     if (!leadPhones.length) return false;
+    const itemBrandId = String(item.brand_id || "").trim();
+    if (leadBrandId && itemBrandId && itemBrandId !== leadBrandId) return false;
+    if (leadBrandId && !itemBrandId && phoneBrandIds.size > 1) return false;
 
     const itemPhones = [
       item.phone,
