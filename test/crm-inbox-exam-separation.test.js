@@ -4,6 +4,10 @@ import fs from "node:fs";
 
 const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
 
+test("health exposes the exam-inbox routing release for deployment checks", () => {
+  assert.match(server, /crm_exam_inbox_routing_build: "v322-exam-inboxes-zero-ai-filter"/);
+});
+
 test("conversation inbox exposes persistent exam and filtered routing fields", () => {
   const inboxBuilder = server.slice(
     server.indexOf("function buildConversationInbox"),
@@ -31,4 +35,3 @@ test("inbound webhooks classify before the AI reply generator", () => {
   assert.match(guard, /ai_credits_used: 0/);
   assert.ok(webhook.indexOf("ngShouldSkipAiAutoForInbound") < webhook.indexOf("ngGenerateStudentAutoReply"));
 });
-
