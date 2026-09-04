@@ -104,11 +104,13 @@ test("daily live-session batches advance past leads already attempted today", ()
     server.indexOf("function ngStartDailyLiveSessionAttempt"),
   );
   const pendingBatch = new Function(
+    "NEXTGEN_BRAND_ID",
     "ensureCrmArray",
     "ngDailyLiveSessionEligibleLead",
     "ngDailyLiveSessionAlreadyAttempted",
     `${batchSource}; return ngDailyLiveSessionPendingLeadBatch;`,
   )(
+    "brand_nextgen_usmle",
     (db, collection) => db[collection] || [],
     (_db, lead) => lead.eligible !== false,
     (db, lead, action, dateKey) => (db.attempted || []).includes(`${lead.id}|${action}|${dateKey}`),

@@ -234,9 +234,10 @@ test("the exact session-link slot self-heals if a stale admin save restores the 
 test("scheduled WhatsApp sends wait quietly until the exact Meta template is approved", () => {
   const source = between("function ngScheduledWhatsAppTemplateIsApproved", "function ngStartDailyLiveSessionAttempt");
   const isApproved = new Function(
+    "NEXTGEN_BRAND_ID",
     "getMessageTemplateByKey",
     `${source}; return ngScheduledWhatsAppTemplateIsApproved;`,
-  )((db, key) => db.templates?.[key] || null);
+  )("brand_nextgen_usmle", (db, key) => db.templates?.[key] || null);
 
   assert.equal(isApproved({ templates: { recording: { status: "draft", meta_status: "draft", active: true } } }, "recording"), false);
   assert.equal(isApproved({ templates: { recording: { status: "active", meta_status: "draft", active: true } } }, "recording"), false);

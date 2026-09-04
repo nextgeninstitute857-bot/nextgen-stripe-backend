@@ -8,6 +8,7 @@ import { updateDemoAccess } from '../lib/demo-admin.js';
 import { experienceResourcesFromDelivery, recordExperienceShares } from '../lib/crm-experience-followup.js';
 import { buildLeadRevenueJourney } from '../lib/crm-revenue-os.js';
 import { assertWebsiteProductRequest } from '../lib/product-boundaries.js';
+import { AYLAMED_BRAND_ID, aylaOutboundContentSafety, integrationSupportsBrand } from '../lib/crm-brand-routing.js';
 
 const now = '2026-08-28T16:00:00.000Z';
 function fixture({ sent = true, ...extra } = {}) {
@@ -216,10 +217,11 @@ test('real demo activation HTTP flow attributes saved access, is idempotent, and
 
 test('real sender personalises accepted free-form text/captions, never templates or failed sends', async () => {
   const source = fs.readFileSync(new URL('../server.js', import.meta.url), 'utf8');
-  const sender = source.slice(source.indexOf('async function sendCrmMessage({'), source.indexOf('function normalizeAutomationEnrollment(', source.indexOf('async function sendCrmMessage({')));
+  const sender = source.slice(source.indexOf('function ngCrmOutboundIsAutomated('), source.indexOf('function normalizeAutomationEnrollment(', source.indexOf('async function sendCrmMessage({')));
   let fail = false;
   let payload;
   const context = vm.createContext({
+    process: { env: {} }, AYLAMED_BRAND_ID, aylaOutboundContentSafety, integrationSupportsBrand,
     console, ensureDemoInvitation: (lead) => ensureDemoInvitation(lead, now), trackDemoLinks, recordDemoInvitationSent,
     getMessageTemplateByKey: () => ({}), getLeadByAnyId: (db, id) => db.leads.find((row) => row.id === id),
     ngAylaOutboundCommandMetadata: () => ({}), resolveCrmChannel: ({ requestedChannel }) => requestedChannel,
@@ -253,4 +255,17 @@ test('real sender personalises accepted free-form text/captions, never templates
   assert.equal((await send(failed)).success, false);
   assert.equal(failed.demo_tracking, undefined);
   assert.equal(failed.demo_invitations[0].sent_at, null);
+  fail = false;
+  for (const metadata of [
+    { ai_auto: true },
+    { source: 'heartbeat_no_reply_nurture' },
+    { source: 'experience_checkin' },
+    { source: 'google_meet_command_center', google_meet_action: 'link_now' },
+  ]) {
+    payload = undefined;
+    const result = await send({ id: 'ayla-test', brand_id: AYLAMED_BRAND_ID }, { text: 'Your study session is ready.', metadata });
+    assert.equal(result.success, false);
+    assert.match(result.error, /AylaMed automatic outbound is disabled/);
+    assert.equal(payload, undefined, 'disabled AylaMed automation must never reach the provider');
+  }
 });

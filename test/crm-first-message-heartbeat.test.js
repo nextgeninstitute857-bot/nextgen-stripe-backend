@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import fs from "node:fs";
+import { NEXTGEN_BRAND_ID, AYLAMED_BRAND_ID } from "../lib/crm-brand-routing.js";
 
 // Execute the actual server functions without starting HTTP, timers, databases
 // or providers. Every send below is an in-memory fake.
@@ -22,11 +23,12 @@ const clean = (v) => String(v || "").trim();
 const array = (db, key) => Array.isArray(db[key]) ? db[key] : (db[key] = []);
 const makeLead = (id = "one", overrides = {}) => ({
   id, name: "Test Student", exam: "USMLE Step 1", phone: "+15555550123",
-  brand_id: "nextgen", stage: "new_lead", ai_mode: "auto", queue_first_message: true, ...overrides,
+  brand_id: NEXTGEN_BRAND_ID, stage: "new_lead", ai_mode: "auto", queue_first_message: true, ...overrides,
 });
 function harness(send = async () => ({ success: true, status: "sent" })) {
   const sends = [];
   const deps = {
+    NEXTGEN_BRAND_ID,
     process: { env: {} },
     normalizeCrmLeadStageValue: clean, normalizeCrmLower: clean, normalizeCrmLeadAiMode: clean,
     ngLeadExplicitlyQueuedForFirstMessage: (l) => l.queue_first_message,
@@ -197,9 +199,18 @@ test("opt-outs, enrollment and owner pause still block the welcome", async () =>
 
 test("brand-scoped batches never send another product's welcome", async () => {
   const h = harness();
-  const db = { leads: [makeLead("ayla", { brand_id: "aylamed" }), makeLead("lms")] };
-  const results = await h.ngRunDueAutoFirstMessages({ db, brandId: "nextgen" });
+  const db = { leads: [makeLead("ayla", { brand_id: AYLAMED_BRAND_ID }), makeLead("lms")] };
+  const results = await h.ngRunDueAutoFirstMessages({ db, brandId: NEXTGEN_BRAND_ID });
   assert.equal(results.length, 1);
   assert.equal(results[0].lead_id, "lms");
   assert.equal(h.sends.length, 1);
+});
+
+test("unscoped heartbeat and direct welcome never send NextGen assets to AylaMed", async () => {
+  const h = harness();
+  const lead = makeLead("ayla", { brand_id: AYLAMED_BRAND_ID });
+  const db = { leads: [lead] };
+  assert.equal((await h.ngSendAutoFirstMessageForLead({ db, lead })).reason, "brand_assets_not_configured");
+  assert.equal((await h.ngRunDueAutoFirstMessages({ db })).length, 0);
+  assert.equal(h.sends.length, 0);
 });

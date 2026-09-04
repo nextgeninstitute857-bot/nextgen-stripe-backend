@@ -111,6 +111,24 @@ test("reconciliation archives obsolete definitions without deleting history", ()
   assert.equal(result.templates.filter((item) => item.managed_by === "nextgen_whatsapp_template_pack").length, 8);
 });
 
+test("NextGen reconciliation never mutates an AylaMed template with the same key", () => {
+  const aylaTemplate = {
+    id: "ayla-same-key",
+    brand_id: "brand_aylamed",
+    key: "nextgen_warm_welcome",
+    body: "AylaMed MCCQE reviewed copy",
+    active: true,
+    status: "active",
+  };
+  const result = reconcileNextGenWhatsAppTemplatePack([aylaTemplate], { now: "2026-09-04T00:00:00.000Z" });
+  const preserved = result.templates.find((item) => item.id === aylaTemplate.id);
+  const managed = result.templates.find((item) => item.managed_by === "nextgen_whatsapp_template_pack" && item.key === aylaTemplate.key);
+
+  assert.deepEqual(preserved, aylaTemplate);
+  assert.equal(managed?.brand_id, "brand_nextgen_usmle");
+  assert.notEqual(managed?.id, aylaTemplate.id);
+});
+
 test("live Meta inventory is the only source of approved status", () => {
   const firstPass = reconcileNextGenWhatsAppTemplatePack([]);
   assert.equal(firstPass.templates.some((item) => item.meta_approved), false);
