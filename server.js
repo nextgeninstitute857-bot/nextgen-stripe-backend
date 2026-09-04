@@ -33,6 +33,7 @@ import {
 import { createMetaReportingRunner, metaReportingStatus, prepareMetaDailyLedger, saveMetaPerformanceSnapshot, preserveMetaReportingForLegacyWrite } from "./lib/crm-meta-ads-reporting.js";
 import { buildMetaConversionOutcomes } from "./lib/crm-meta-conversion-outcomes.js";
 import { experienceQueueRows, experienceTemplateProposal } from "./lib/crm-experience-reporting.js";
+import { applyLeadInboxRouting } from "./lib/crm-lead-routing.js";
 import {
   aylaExplicitHumanHandoffRequest,
   aylaPendingStudentText,
@@ -29573,6 +29574,8 @@ function buildConversationInbox(db) {
 
   const rows = leads.map((lead) => {
     const leadId = getStableLeadId(lead);
+    const examTrack = ngInferExamTrackFromObject(lead);
+    const isFiltered = lead.inbox_bucket === "filtered" || lead.irrelevant_filter_active === true || lead.lead_relevance === "irrelevant";
     const leadMessages = typeof ngLeadConversationMessages === "function"
       ? ngLeadConversationMessages(db, leadId)
       : ensureCrmArray(db, "conversations")
@@ -29614,6 +29617,13 @@ function buildConversationInbox(db) {
       client_reached_out: lead.client_reached_out !== false,
       agent_initiated: Boolean(lead.agent_initiated),
       ai_mode: lead.ai_mode || lead.automation_mode || "auto",
+      exam_track: examTrack || null,
+      exam_track_label: examTrack ? ngExamTrackLabel(examTrack) : "Unassigned",
+      inbox_bucket: isFiltered ? "filtered" : (lead.inbox_bucket || (examTrack ? `exam:${examTrack}` : "unassigned")),
+      lead_relevance: lead.lead_relevance || "unknown",
+      ai_suppressed: isFiltered,
+      ai_suppressed_reason: lead.ai_suppressed_reason || null,
+      irrelevant_reason: lead.irrelevant_reason || null,
       duplicate_contact_key: inboxContactKey(lead),
     };
   });
@@ -29884,6 +29894,7 @@ function upsertSocialLead(db, platform, payload = {}) {
       previous,
       normalizeCrmCollectionPayload("leads", previous, previous, previous.brand_id || payload.brand_id || null),
     );
+    applyLeadInboxRouting(previous, { text: inboundText, at: now });
     ensureLeadIdentityFields(previous);
     return { lead: previous, created: false };
   }
@@ -29911,6 +29922,7 @@ function upsertSocialLead(db, platform, payload = {}) {
   });
   const lead = normalizeCrmCollectionPayload("leads", rawLead, null, rawLead.brand_id || null);
 
+  applyLeadInboxRouting(lead, { text: inboundText, at: now });
   ensureLeadIdentityFields(lead);
   leads.push(lead);
   return { lead, created: true };
@@ -30928,12 +30940,14 @@ app.get("/admin/crm/conversation-inbox", async (req, res) => {
     const platform = req.query.platform ? normalizeSocialPlatform(req.query.platform) : null;
     const status = req.query.status ? String(req.query.status).toLowerCase() : null;
     const direction = req.query.direction ? normalizeLeadDirection(req.query.direction, "") : null;
+    const inboxBucket = req.query.inbox_bucket ? String(req.query.inbox_bucket).toLowerCase() : null;
     const unreadOnly = String(req.query.unread || "false").toLowerCase() === "true";
 
     const filtered = conversations.filter((item) => {
       if (platform && item.platform !== platform) return false;
       if (status && String(item.status || "").toLowerCase() !== status) return false;
       if (direction && item.direction !== direction) return false;
+      if (inboxBucket && String(item.inbox_bucket || "").toLowerCase() !== inboxBucket) return false;
       if (unreadOnly && Number(item.admin_unread_count ?? item.unread_count ?? 0) <= 0) return false;
       return true;
     });
@@ -30952,6 +30966,8 @@ app.get("/admin/crm/conversation-inbox", async (req, res) => {
         email: conversations.filter((item) => item.platform === "email").length,
         facebook: conversations.filter((item) => item.platform === "facebook").length,
         instagram: conversations.filter((item) => item.platform === "instagram").length,
+        filtered: conversations.filter((item) => item.inbox_bucket === "filtered").length,
+        unassigned: conversations.filter((item) => item.inbox_bucket === "unassigned").length,
         exam_tracks: ngExamTrackSummary(conversations),
       },
     });
@@ -50856,6 +50872,26 @@ function ngReleaseAiAutoLock(key = "") {
 function ngShouldSkipAiAutoForInbound(lead = {}, inbound = {}, options = {}) {
   const fingerprint = ngAiAutoMessageFingerprint(inbound);
   if (!fingerprint) return { skip: false };
+
+  const relevance = applyLeadInboxRouting(lead, {
+    text: ngMessageText(inbound),
+    at: inbound.created_at || inbound.received_at || inbound.timestamp || nowIso(),
+  });
+  if (relevance.suppress_ai || lead.irrelevant_filter_active === true) {
+    lead.last_ai_suppressed_message_id = fingerprint;
+    lead.last_ai_suppressed_at = nowIso();
+    lead.updated_at = nowIso();
+    return {
+      skip: true,
+      reason: "irrelevant_lead_filtered",
+      irrelevant_reason: lead.irrelevant_reason || relevance.reason || "irrelevant_solicitation",
+      inbox_bucket: "filtered",
+      ai_credits_used: 0,
+    };
+  }
+  if (lead.ai_suppressed === true || lead.suppressed === true || lead.stop_requested === true || lead.do_not_contact === true || lead.opted_out === true || lead.opt_out === true || lead.unsubscribed === true) {
+    return { skip: true, reason: "lead_ai_suppressed", ai_credits_used: 0 };
+  }
 
   if (lead.last_ai_auto_replied_message_id && String(lead.last_ai_auto_replied_message_id) === fingerprint) {
     if (options.forceReprocess === true || options.force === true || options.debugForce === true) {
