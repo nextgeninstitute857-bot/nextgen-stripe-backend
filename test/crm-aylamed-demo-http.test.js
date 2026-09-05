@@ -48,7 +48,7 @@ async function localSmtp() {
   return { port, accepted, setReject: (value) => { reject = value; }, close: async () => { for (const socket of sockets) socket.destroy(); await new Promise((resolve) => server.close(resolve)); } };
 }
 
-test("private CRM demo HTTP flow issues once, preserves accounts and paid access, recovers linkage, and holds uncertain email", { timeout: 160000 }, async () => {
+test("private CRM demo HTTP flow issues once, preserves accounts and paid access, recovers linkage, and holds uncertain email", { timeout: 200000 }, async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "crm-mccqe-demo-http-"));
   const smtp = await localSmtp();
   const now = new Date().toISOString(), future = new Date(Date.now() + 30 * 86400000).toISOString();
@@ -56,7 +56,8 @@ test("private CRM demo HTTP flow issues once, preserves accounts and paid access
   const lead = (id, email, extra = {}) => ({ id, email, name: id, brand_id: "brand_aylamed", exam_track: "mccqe", source_platform: "whatsapp", current_channel: "whatsapp",
     phone: "+18250000001", ai_mode: "auto", status: "new_lead", stage: "new_lead", created_at: now, ...extra });
   const leads = [lead("new", "new@example.com"), lead("existing", "existing@example.com"), lead("paid", "paid@example.com"),
-    lead("uncertain", "uncertain@example.com"), lead("legacy", "new@example.com", { brand_id: "brand_nextgen_usmle", exam_track: "usmle_step1" })];
+    lead("uncertain", "uncertain@example.com"), lead("pilot", "pilot@example.com"), lead("pilot-outside", "pilot-outside@example.com"),
+    lead("legacy", "new@example.com", { brand_id: "brand_nextgen_usmle", exam_track: "usmle_step1" })];
   const liveDb = { users: { admin: { id: "admin", email: "admin@example.com", name: "Admin", role: "admin", verified: true, ...passwordRecord(adminPassword) } }, courses: {}, plans: {}, enrollments: {}, payments: {}, liveSessions: {} };
   const crmDb = { brands: [{ id: "brand_aylamed", name: "AylaMed" }, { id: "brand_nextgen_usmle", name: "NextGen" }], leads,
     settings: { default_brand_id: "brand_aylamed" }, message_logs: leads.map((row) => ({ id: `in-${row.id}`, lead_id: row.id, brand_id: row.brand_id, channel: "whatsapp", direction: "inbound", text: "Please email my MCCQE demo", created_at: now })), ai_training_documents: [], ai_training_items: [] };
@@ -70,9 +71,12 @@ test("private CRM demo HTTP flow issues once, preserves accounts and paid access
   await fs.writeFile(path.join(dir, "aylamed-db.json"), JSON.stringify(aylaDb));
   let child, token = "", baseUrl, output = [];
   async function stop() { if (!child || child.exitCode !== null) return; const ended = new Promise((resolve) => child.once("exit", resolve)); child.kill(); await ended; }
-  async function start(enabled = true, intakeEnabled = false) {
+  async function start(enabled = true, intakeEnabled = false, pilotLeadId = undefined) {
     const port = await freePort(); baseUrl = `http://127.0.0.1:${port}`; output = [];
-    child = spawn(process.execPath, ["server.js"], { cwd: fileURLToPath(new URL("..", import.meta.url)), env: { ...process.env,
+    const inheritedEnv = { ...process.env };
+    delete inheritedEnv.AYLAMED_MCCQE_DEMO_PILOT_LEAD_ID;
+    child = spawn(process.execPath, ["server.js"], { cwd: fileURLToPath(new URL("..", import.meta.url)), env: { ...inheritedEnv,
+      ...(pilotLeadId === undefined ? {} : { AYLAMED_MCCQE_DEMO_PILOT_LEAD_ID: pilotLeadId }),
       PORT: String(port), DATA_DIR: dir, DATABASE_URL: "", AUTH_JWT_SECRET: "demo-http-secret", AYLA_AUTH_JWT_SECRET: "demo-http-ayla-secret",
       AYLAMED_MCCQE_DEMO_FLOW_ENABLED: String(enabled), AYLAMED_AI_AUTO_SEND_ENABLED: "false", OPENAI_API_KEY: "",
       AYLAMED_MCCQE_WHATSAPP_INTAKE_ENABLED: String(intakeEnabled), AYLAMED_META_APP_SECRET: "local-http-intake-secret",
@@ -203,5 +207,41 @@ test("private CRM demo HTTP flow issues once, preserves accounts and paid access
     assert.equal(smtp.accepted.length, 3);
     await api("/admin/crm/conversations/wa-new/ai-auto-send", { method: "POST", body: { force: true } });
     assert.equal(smtp.accepted.length, 3);
+
+    // The optional exact-lead pilot narrows existing admin authority. Neither
+    // the signed-intake nor broad automatic WhatsApp flag is needed or enabled.
+    await stop(); await start(true, false, "pilot");
+    const health = (await api("/health")).payload;
+    assert.equal(health.crm_mccqe_demo_pilot_restricted, true);
+    assert.equal(health.crm_mccqe_whatsapp_intake_enabled, false);
+    assert.deepEqual(Object.keys(health).filter((key) => /^crm_mccqe_demo_pilot/.test(key)), ["crm_mccqe_demo_pilot_restricted"]);
+    assert.equal(health.AYLAMED_MCCQE_DEMO_PILOT_LEAD_ID, undefined);
+    const outside = await api("/admin/mobile/invitations", { method: "POST", body: body("pilot-outside") });
+    assert.equal(outside.status, 409);
+    for (const product of ["both", "lms"]) {
+      const mixed = await api("/admin/mobile/invitations", { method: "POST", body: body("pilot", { product }) });
+      assert.equal(mixed.status, 400);
+    }
+    stored = await read("aylamed-db.json");
+    assert.equal(Object.values(stored.aylaUsers).some((row) => row.email === "pilot-outside@example.com"), false);
+    assert.equal(Object.values(stored.aylaCrmDemoIssuances).some((row) => row.crm_lead_id === "pilot-outside"), false);
+    assert.equal(smtp.accepted.length, 3);
+    const permitted = await api("/admin/mobile/invitations", { method: "POST", body: body("pilot") });
+    assert.equal(permitted.status, 201, JSON.stringify(permitted.payload));
+    assert.equal(permitted.payload.results[0].issued, true);
+    assert.equal(smtp.accepted.length, 4);
+    stored = await read("aylamed-db.json");
+    const pilotIssuance = Object.values(stored.aylaCrmDemoIssuances).find((row) => row.crm_lead_id === "pilot");
+    assert.equal(Date.parse(pilotIssuance.expires_at) - Date.parse(pilotIssuance.starts_at), 5 * 3600000);
+    assert.equal((await api("/admin/mobile/invitations", { method: "POST", body: body("pilot") })).payload.results[0].idempotent_replay, true);
+    assert.equal(smtp.accepted.length, 4);
+
+    await stop(); await start(true, false, " ");
+    assert.equal((await api("/health")).payload.crm_mccqe_demo_pilot_restricted, true);
+    assert.equal((await api("/admin/mobile/invitations", { method: "POST", body: body("pilot") })).status, 409);
+    assert.equal(smtp.accepted.length, 4);
+    stored = await read("aylamed-db.json");
+    assert.equal(stored.aylaCrmDemoIssuances[pilotIssuance.id].expires_at, pilotIssuance.expires_at);
+    assert.equal(stored.aylaEnrollments[pilotIssuance.enrollment_id].access_expires_at, pilotIssuance.expires_at);
   } finally { await stop(); await smtp.close(); await fs.rm(dir, { recursive: true, force: true }); }
 });

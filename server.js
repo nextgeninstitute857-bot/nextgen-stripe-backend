@@ -72,6 +72,7 @@ import { runExperienceCheckin } from "./lib/crm-experience-scheduler.js";
 import { MCCQE_DEMO_SOURCE, mccqeDemoEnabled, validateMccqeDemoRequest, mccqeDemoIssuanceId, findMccqeDemoReplay, mccqeDemoPurchaseState, mccqeDemoEmailAccepted, mccqeDemoResource, mccqeDemoSendEligibility, cancelMccqeDemoSales, createMccqeDemoOutboundGuard, preserveMccqeDemoLedgerSnapshot } from "./lib/crm-aylamed-demo-lifecycle.js";
 import { buildMccqeOperationalContext, validateMccqeAutomaticOutbound } from "./lib/crm-aylamed-operational-context.js";
 import { mccqeWhatsAppIntakeEnabled, mccqeMetaInboundProof, mccqeInboundDisposition, assessMccqeWhatsAppIntake } from "./lib/crm-aylamed-whatsapp-intake.js";
+import { mccqeDemoPilotStatus, mccqeDemoPilotEligibility, assertMccqeDemoPilotLead, assertMccqeDemoDispatchAllowed } from "./lib/crm-aylamed-demo-lifecycle.js";
 import { updateDemoAccess } from "./lib/demo-admin.js";
 import { selectStudentCurrentRoadmapDay } from "./lib/lms-current-roadmap-day.js";
 import { ensureDemoInvitation, findDemoInvitation, trackDemoLinks, recordDemoInvitationSent, recordDemoInvitationOpened, recordDemoActivation, demoAttributionForEnrollment } from "./lib/crm-demo-attribution.js";
@@ -11980,6 +11981,7 @@ app.get("/health", async (req, res) => {
     crm_brand_routing_build: CRM_BRAND_ROUTING_BUILD,
     crm_mccqe_demo_build: "v1-private-five-hour-lifecycle",
     crm_mccqe_demo_enabled: mccqeDemoEnabled(),
+    crm_mccqe_demo_pilot_restricted: mccqeDemoPilotStatus().restricted,
     crm_mccqe_whatsapp_intake_build: "v1-signed-prospect-private-demo",
     crm_mccqe_whatsapp_intake_enabled: mccqeWhatsAppIntakeEnabled(),
     crm_mccqe_inbound_signature_configured: Boolean(String(process.env.AYLAMED_META_APP_SECRET || "").trim()),
@@ -32724,7 +32726,7 @@ async function resolveWhatsAppCloudConfig({ db = null, integration = null, brand
   };
 }
 
-async function sendWhatsAppCloudMessage({ to, text = "", templateName = "", languageCode = "en", components = [], mediaUrl = "", mediaId = "", mediaType = "image", caption = "", db = null, integration = null, brandId = "" }) {
+async function sendWhatsAppCloudMessage({ to, text = "", templateName = "", languageCode = "en", components = [], mediaUrl = "", mediaId = "", mediaType = "image", caption = "", db = null, integration = null, brandId = "", privateMccqeLeadId = null }) {
   const { token, phoneNumberId } = brandId
     ? await resolveWhatsAppCloudConfig({ db, integration, brandId })
     : await resolveWhatsAppCloudConfig({ db, integration });
@@ -32776,6 +32778,7 @@ async function sendWhatsAppCloudMessage({ to, text = "", templateName = "", lang
     payload.text = { preview_url: false, body: cleanText };
   }
 
+  if (privateMccqeLeadId !== null) assertMccqeDemoDispatchAllowed(privateMccqeLeadId);
   const response = await axios.post(
     `https://graph.facebook.com/${WHATSAPP_GRAPH_VERSION}/${phoneNumberId}/messages`,
     payload,
@@ -33468,7 +33471,7 @@ function ngEmailTextToHtml(text = "", { brand = "nextgen" } = {}) {
   return `<div style="margin:0;padding:24px;background:#F6F9FE;font-family:Arial,Helvetica,sans-serif;color:#071426"><div style="max-width:640px;margin:0 auto;background:#FFFFFF;border:1px solid #DAEAFF;border-radius:18px;overflow:hidden;box-shadow:0 14px 40px rgba(26,79,191,.08)"><div style="height:5px;background:linear-gradient(90deg,#06101F,${accent},#06101F)"></div><div style="padding:28px"><div style="display:inline-block;padding:7px 12px;border-radius:999px;background:#06101F;color:${accent};font-size:11px;font-weight:800;letter-spacing:.14em;text-transform:uppercase;margin-bottom:18px">${badge}</div><div style="font-size:15px;line-height:1.75">${linked}</div><div style="margin-top:26px;padding-top:18px;border-top:1px solid #E4EEFC;color:#5A718A;font-size:12px">${footer}</div></div></div></div>`;
 }
 
-async function sendEmailMessage({ to, subject = "NextGen USMLE", text = "", from: fromOverride = "", replyTo: replyToOverride = "", transport = "default", brand = "nextgen" }) {
+async function sendEmailMessage({ to, subject = "NextGen USMLE", text = "", from: fromOverride = "", replyTo: replyToOverride = "", transport = "default", brand = "nextgen", privateMccqeLeadId = null }) {
   const recipient = String(Array.isArray(to) ? to[0] : to || "").trim();
   if (!recipient || !recipient.includes("@")) {
     const error = new Error("A valid email recipient is required.");
@@ -33508,6 +33511,7 @@ async function sendEmailMessage({ to, subject = "NextGen USMLE", text = "", from
   if (resolved.provider === "smtp") {
     try {
       const transporter = isAylaTransport ? await ngGetAylaSmtpTransporter() : await ngGetSmtpTransporter();
+      if (privateMccqeLeadId !== null) assertMccqeDemoDispatchAllowed(privateMccqeLeadId);
       const info = await transporter.sendMail({
         from,
         to: recipient,
@@ -33531,6 +33535,7 @@ async function sendEmailMessage({ to, subject = "NextGen USMLE", text = "", from
   }
 
   if (resolved.provider === "resend") {
+    if (privateMccqeLeadId !== null) assertMccqeDemoDispatchAllowed(privateMccqeLeadId);
     const response = await axios.post(
       "https://api.resend.com/emails",
       {
@@ -33552,6 +33557,7 @@ async function sendEmailMessage({ to, subject = "NextGen USMLE", text = "", from
     return { provider: "resend", ...response.data };
   }
 
+  if (privateMccqeLeadId !== null) assertMccqeDemoDispatchAllowed(privateMccqeLeadId);
   const response = await axios.post(
     "https://api.sendgrid.com/v3/mail/send",
     {
@@ -34149,6 +34155,7 @@ async function sendCrmMessage({
     }
 
     if (cleanChannel === "whatsapp") {
+      if (demoAuthorization.ok) assertMccqeDemoDispatchAllowed(lead?.id);
       providerResponse = await sendWhatsAppCloudMessage({
         to: finalTo,
         text: finalText,
@@ -34162,6 +34169,7 @@ async function sendCrmMessage({
         db,
         integration,
         brandId: effectiveBrandId,
+        ...(demoAuthorization.ok ? { privateMccqeLeadId: lead.id } : {}),
       });
       providerMessageId = providerResponse?.messages?.[0]?.id || null;
     } else if (cleanChannel === "telegram") {
@@ -54713,6 +54721,7 @@ Write only Ayla's next message. No markdown headings. No bullet list unless the 
 // below alone handles signed qualification and email authorization without AI.
 async function ngAylaProcessMccqeWhatsAppIntake({ db, lead, latestInbound, allowOperationalActions = false, dryRunOperationalActions = false }) {
   if (!mccqeWhatsAppIntakeEnabled()) return null;
+  if (!mccqeDemoPilotEligibility(lead?.id).ok) return null;
   await aylaWriteQueue;
   const [crmDb, aylaDb] = await Promise.all([readCrmDb(), readAylaDb()]);
   const currentLead = ensureCrmArray(crmDb, "leads").find((row) => row.id === lead.id && row.brand_id === AYLAMED_BRAND_ID);
@@ -74804,8 +74813,9 @@ function ngExperienceContext(db, leadId) {
   const channel = lead ? resolveCrmChannelForConversation({ requestedChannel: lead.current_channel || lead.last_channel || lead.source_platform || lead.platform || "whatsapp", lead, fallback: "whatsapp" }) : "whatsapp";
   const privateDemo = lead?.brand_id === AYLAMED_BRAND_ID && safeArray(lead?.ayla_experience_followups).some((item) => item.kind === "aylamed_demo");
   const disabled = privateDemo ? !mccqeDemoEnabled() : !ngExperienceFollowupsEnabled(settings);
+  const pilot = privateDemo ? mccqeDemoPilotEligibility(lead.id) : { ok: true };
   return { db, lead: lead || {}, messages, channel, latestInbound: ngLatestInbound(messages), latestOutbound: ngLatestOutbound(messages), futureFollowups: ngAffArray(db, "future_followups"), templatePolicy: ngExperienceTemplatePolicy(db),
-    blocked: !lead ? "lead_missing" : disabled ? "experience_followup_disabled" : ng41IsSuppressed(db, lead) ? "suppressed" : ngAylaFindActiveGoogleMeetAppointment(db, lead) ? "mentor_handoff_active" : null,
+    blocked: !lead ? "lead_missing" : disabled ? "experience_followup_disabled" : !pilot.ok ? pilot.reason : ng41IsSuppressed(db, lead) ? "suppressed" : ngAylaFindActiveGoogleMeetAppointment(db, lead) ? "mentor_handoff_active" : null,
   };
 }
 
@@ -97915,7 +97925,7 @@ async function ngAdminMobileInviteLms(req, body = {}) {
   };
 }
 
-async function ngAdminMobileSendAylaInvite({ db, user, temporaryPassword = "", accessReport = null, examTrackId = "", sendEmail = true, existingAccount = false, requireAcceptedDelivery = false } = {}) {
+async function ngAdminMobileSendAylaInvite({ db, user, temporaryPassword = "", accessReport = null, examTrackId = "", sendEmail = true, existingAccount = false, requireAcceptedDelivery = false, privateMccqeLeadId = null } = {}) {
   if (!sendEmail) return { attempted: false, sent: false, skipped: true, reason: "send_email_disabled" };
   if (!temporaryPassword && !existingAccount) throw new Error("A temporary password is required for an AylaMed access invitation");
   const studentName = String(user.name || "Doctor").trim() || "Doctor";
@@ -97949,6 +97959,7 @@ async function ngAdminMobileSendAylaInvite({ db, user, temporaryPassword = "", a
       text: lines.join("\n"),
       transport: "aylamed",
       brand: "aylamed",
+      ...(privateMccqeLeadId !== null ? { privateMccqeLeadId } : {}),
     });
     const accepted = !requireAcceptedDelivery || mccqeDemoEmailAccepted(provider, user.email);
     return { attempted: true, sent: accepted, provider: provider?.provider || null,
@@ -98236,6 +98247,7 @@ async function ngReconcileAylaMccqeDemoCrmLinks({ force = false, userId = null }
   if (!issuances.length) return;
   await mutateCrmDb((crmDb) => {
     for (const issuance of issuances) {
+      if (!mccqeDemoPilotEligibility(issuance.crm_lead_id).ok) continue;
       const lead = ensureCrmArray(crmDb, "leads").find((row) => row.id === issuance.crm_lead_id && row.brand_id === AYLAMED_BRAND_ID);
       if (!lead || normalizeEmail(lead.email) !== issuance.email || (lead.ayla_user_id && lead.ayla_user_id !== issuance.user_id)) continue;
       lead.ayla_user_id = issuance.user_id;
@@ -98270,6 +98282,8 @@ async function ngReconcileAylaMccqeDemoCrmLinks({ force = false, userId = null }
 async function ngAylaMccqeDemoBeforeSend({ context, item }) {
   if (item?.kind !== "aylamed_demo") return { ok: true };
   if (!mccqeDemoEnabled()) return { ok: false, reason: "aylamed_demo_flow_disabled" };
+  const pilot = mccqeDemoPilotEligibility(context.lead?.id);
+  if (!pilot.ok) return pilot;
   await aylaWriteQueue.catch(() => {});
   const aylaDb = await readAylaDb();
   const result = mccqeDemoSendEligibility({ db: aylaDb, lead: context.lead, item });
@@ -98279,6 +98293,7 @@ async function ngAylaMccqeDemoBeforeSend({ context, item }) {
 
 async function ngAdminCrmInviteMccqeDemo(body = {}, { whatsappRequest = null } = {}) {
   if (!mccqeDemoEnabled()) throw Object.assign(new Error("The private MCCQE CRM demo flow is not enabled."), { statusCode: 409 });
+  assertMccqeDemoPilotLead(String(body.crm_lead_id || ""));
   if (whatsappRequest && !mccqeWhatsAppIntakeEnabled()) throw Object.assign(new Error("WhatsApp private-demo intake is disabled."), { statusCode: 409 });
   const crmDb = await readCrmDb();
   const lead = ensureCrmArray(crmDb, "leads").find((row) => row.id === String(body.crm_lead_id || ""));
@@ -98302,6 +98317,7 @@ async function ngAdminCrmInviteMccqeDemo(body = {}, { whatsappRequest = null } =
       .every((key) => checked.request?.[key] === whatsappRequest[key]);
   };
   const prepared = await mutateAylaDb(async (db) => {
+    assertMccqeDemoDispatchAllowed(lead.id);
     // Read-only CRM check while the Ayla reservation queue is held. Never wait
     // for aylaWriteQueue or mutate CRM here: that would invert the queues.
     if (whatsappRequest && !verifyWhatsAppRequest(await readCrmDb(), db)) {
@@ -98376,12 +98392,13 @@ async function ngAdminCrmInviteMccqeDemo(body = {}, { whatsappRequest = null } =
   const currentLead = ensureCrmArray(beforeEmailCrm, "leads").find((row) => row.id === lead.id);
   const purchase = mccqeDemoPurchaseState(beforeEmailDb, prepared.user.id);
   const eligibleLead = currentLead?.brand_id === AYLAMED_BRAND_ID && normalizeEmail(currentLead.email) === request.email
+    && mccqeDemoEnabled() && mccqeDemoPilotEligibility(currentLead?.id).ok
     && ngV116LeadCanReceiveAutomation(beforeEmailCrm, currentLead).ok && !currentLead.brand_routing_review_required && !currentLead.irrelevant_filter_active
     && verifyWhatsAppRequest(beforeEmailCrm, beforeEmailDb, prepared.issuance.id);
   const delivery = !eligibleLead || purchase.paid || purchase.active_access
     ? { attempted: false, sent: false, status: "cancelled", reason: purchase.paid ? "purchased" : "context_changed" }
     : await ngAdminMobileSendAylaInvite({ user: prepared.user, temporaryPassword: prepared.temporaryPassword,
-      existingAccount: !prepared.studentCreated, accessReport: prepared.access, examTrackId: "mccqe", requireAcceptedDelivery: true });
+      existingAccount: !prepared.studentCreated, accessReport: prepared.access, examTrackId: "mccqe", requireAcceptedDelivery: true, privateMccqeLeadId: lead.id });
   const issuance = await mutateAylaDb((db) => {
     const item = db.aylaCrmDemoIssuances?.[prepared.issuance.id];
     if (!item || item.email_delivery_status !== "reserved") return item;

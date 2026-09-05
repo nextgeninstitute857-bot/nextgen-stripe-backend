@@ -138,6 +138,7 @@ const inviter = server.slice(server.indexOf("async function ngAdminCrmInviteMccq
 function harness(f, { sent = true, beforeReserve = () => {}, beforeEmail = () => {} } = {}) {
   let serial = Promise.resolve(), sends = 0, creates = 0, n = 0, reserveCalls = 0;
   const context = vm.createContext({ ...intake, ...lifecycle, buildMccqeOperationalContext, console,
+    assertMccqeDemoDispatchAllowed: (id) => lifecycle.assertMccqeDemoDispatchAllowed(id, { ...process.env, AYLAMED_MCCQE_DEMO_FLOW_ENABLED: "true" }),
     mccqeDemoEnabled: () => true, mccqeWhatsAppIntakeEnabled: () => true,
     process: { env: { AYLAMED_MCCQE_DEMO_FLOW_ENABLED: "true", AYLAMED_MCCQE_WHATSAPP_INTAKE_ENABLED: "true", AYLAMED_META_APP_SECRET: secret } },
     AYLAMED_BRAND_ID: "brand_aylamed", aylaWriteQueue: Promise.resolve(),
@@ -174,6 +175,55 @@ test("actual server processor reuses existing invitation reservation once, fixes
   assert.equal(record.whatsapp_sender, "18250000001"); assert.equal(record.email_ownership_verified, false);
   await h.run(); assert.equal(h.sends(), 1); assert.equal(h.creates(), 1);
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE-CREDENTIAL|private-password-hash/);
+});
+
+test("pilot scope blocks signed intake and rechecks queued reservation and pre-email runtime changes", async (t) => {
+  const key = "AYLAMED_MCCQE_DEMO_PILOT_LEAD_ID", present = Object.hasOwn(process.env, key), previous = process.env[key];
+  t.after(() => { if (present) process.env[key] = previous; else delete process.env[key]; });
+  process.env[key] = "other-lead";
+  const outside = fixture(), blocked = harness(outside);
+  assert.equal(intake.assessMccqeWhatsAppIntake(outside).reason, "aylamed_demo_pilot_lead_restricted");
+  assert.equal(await blocked.run(), null);
+  assert.equal(blocked.creates(), 0); assert.equal(blocked.sends(), 0);
+  for (const phase of ["reservation", "email"]) {
+    process.env[key] = "lead-1";
+    let reserved = null;
+    const f = fixture(), h = harness(f, {
+      beforeReserve: () => { if (phase === "reservation") process.env[key] = "other-lead"; },
+      beforeEmail: () => {
+        if (phase === "email" && !reserved && Object.keys(f.aylaDb.aylaCrmDemoIssuances).length) {
+          reserved = structuredClone(f.aylaDb);
+          process.env[key] = "other-lead";
+        }
+      },
+    });
+    if (phase === "reservation") { await assert.rejects(h.run(), /pilot scope/); assert.equal(h.creates(), 0); }
+    else await h.run();
+    assert.equal(h.sends(), 0);
+    if (phase === "email") {
+      const before = Object.values(reserved.aylaCrmDemoIssuances)[0];
+      const after = f.aylaDb.aylaCrmDemoIssuances[before.id];
+      assert.equal(before.email_delivery_status, "reserved");
+      assert.equal(after.email_delivery_status, "cancelled");
+      assert.equal(after.starts_at, before.starts_at); assert.equal(after.expires_at, before.expires_at);
+      assert.equal(Date.parse(after.expires_at) - Date.parse(after.starts_at), 5 * 3600000);
+      assert.deepEqual(f.aylaDb.aylaUsers, reserved.aylaUsers);
+      assert.deepEqual(f.aylaDb.aylaEnrollments, reserved.aylaEnrollments);
+      process.env[key] = "lead-1";
+      const snapshot = JSON.stringify(f.aylaDb);
+      const replay = await h.context.ngAdminCrmInviteMccqeDemo({
+        crm_lead_id: f.lead.id, brand_id: "brand_aylamed", email: before.email,
+        exam_track_id: "mccqe", idempotency_key: before.request_key,
+      });
+      assert.equal(replay.idempotent_replay, true); assert.equal(replay.issued, false);
+      assert.equal(JSON.stringify(f.aylaDb), snapshot);
+      assert.equal(h.sends(), 0); assert.equal(h.creates(), 1);
+    }
+  }
+  process.env[key] = "lead-1";
+  const eligible = harness(fixture());
+  await eligible.run();
+  assert.equal(eligible.sends(), 1);
 });
 
 test("actual automatic reservation rejects existing or newly-racing paid accounts without linking or enumeration", async () => {

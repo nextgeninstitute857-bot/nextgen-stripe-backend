@@ -2,14 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
-import { createMccqeDemoOutboundGuard, mccqeDemoSendEligibility, mccqeDemoResource } from "../lib/crm-aylamed-demo-lifecycle.js";
+import { createMccqeDemoOutboundGuard, mccqeDemoSendEligibility, mccqeDemoResource, assertMccqeDemoDispatchAllowed } from "../lib/crm-aylamed-demo-lifecycle.js";
 import { aylaOutboundContentSafety } from "../lib/crm-brand-routing.js";
 import { buildMccqeOperationalContext, validateMccqeAutomaticOutbound } from "../lib/crm-aylamed-operational-context.js";
 
 const server = fs.readFileSync(new URL("../server.js", import.meta.url), "utf8");
 const source = server.slice(server.indexOf("async function sendCrmMessage({"), server.indexOf("\nfunction normalizeAutomationEnrollment", server.indexOf("async function sendCrmMessage({")));
 
-function harness() {
+function harness({ beforeOperationalRead = async () => {} } = {}) {
   const now = Date.now(), starts = new Date(now - 6 * 3600000).toISOString(), expires = new Date(now - 3600000).toISOString();
   const issuance = { id: "issuance", crm_lead_id: "lead", brand_id: "brand_aylamed", user_id: "user", enrollment_id: "enrollment", email: "doctor@example.com",
     exam_track_id: "mccqe", starts_at: starts, expires_at: expires, login_url: "https://mccqe.aylamedapp.com/login", email_delivery_status: "accepted", status: "issued", email_delivery_at: starts };
@@ -22,6 +22,7 @@ function harness() {
   let calls = 0;
   const guard = createMccqeDemoOutboundGuard({ verify: ({ context, item: current }) => mccqeDemoSendEligibility({ db: store, lead: context.lead, item: current, now }) });
   const context = vm.createContext({
+    assertMccqeDemoDispatchAllowed: (id) => assertMccqeDemoDispatchAllowed(id, { ...process.env, AYLAMED_MCCQE_DEMO_FLOW_ENABLED: "true" }),
     process: { env: { AYLAMED_AI_AUTO_SEND_ENABLED: "false" } }, AYLAMED_BRAND_ID: "brand_aylamed", ngMccqeDemoOutboundGuard: guard,
     getLeadByAnyId: (value, id) => value.leads.find((row) => row.id === id), getMessageTemplateByKey: () => null,
     ngAylaOutboundCommandMetadata: () => ({}), resolveCrmChannel: ({ requestedChannel }) => requestedChannel,
@@ -30,7 +31,7 @@ function harness() {
     getWhatsAppTemplateName: () => "", getWhatsAppLanguageCode: () => "", buildWhatsAppTemplateComponents: () => [],
     normalizeCrmString: (value) => String(value || "").trim(), normalizeCrmLower: (value) => String(value || "").toLowerCase(),
     ngCrmOutboundIsAutomated: ({ metadata }) => /auto|experience|scheduler/.test(metadata?.source || ""), aylaOutboundContentSafety, integrationSupportsBrand: () => true,
-    ngAylaVerifiedMccqeConversationContext: async (currentLead) => buildMccqeOperationalContext({ crmDb: db, aylaDb: store, lead: currentLead, now }),
+    ngAylaVerifiedMccqeConversationContext: async (currentLead) => { await beforeOperationalRead(); return buildMccqeOperationalContext({ crmDb: db, aylaDb: store, lead: currentLead, now }); },
     validateMccqeAutomaticOutbound, ngLeadConversationMessages: () => [], safeArray: (value) => Array.isArray(value) ? value : [],
     ngWhatsAppProviderBlockStatus: () => ({ blocked: false }), ngFindRecentDuplicateDelivery: () => null,
     ngStartDeliveryLock: () => ({ delivery_dedupe_key: "dedupe" }), ngFinishDeliveryLock: () => {},
@@ -64,6 +65,20 @@ test("actual central sender permits only one reserved, verified demo capability 
   assert.equal((await h.send({ aylaDemoAuthorization: authorization })).success, false);
   assert.equal(h.calls(), 1);
   assert.equal((await h.send()).success, false);
+});
+
+test("actual central sender cannot use private capability after pilot scope changes during final context read", async (t) => {
+  const key = "AYLAMED_MCCQE_DEMO_PILOT_LEAD_ID", present = Object.hasOwn(process.env, key), previous = process.env[key];
+  t.after(() => { if (present) process.env[key] = previous; else delete process.env[key]; });
+  process.env[key] = "lead";
+  const h = harness({ beforeOperationalRead: async () => { await Promise.resolve(); process.env[key] = "other-lead"; } });
+  const authorization = h.issue();
+  assert.equal((await h.send({ aylaDemoAuthorization: authorization })).success, false);
+  assert.equal(h.calls(), 0);
+  process.env[key] = " ";
+  const nextgen = harness(); nextgen.lead.brand_id = "brand_nextgen_usmle";
+  assert.equal((await nextgen.send({ text: "Your NextGen update" })).success, true);
+  assert.equal(nextgen.calls(), 1);
 });
 
 test("actual central sender rejects unrelated lead, changed issuance and purchase after authorization", async () => {
