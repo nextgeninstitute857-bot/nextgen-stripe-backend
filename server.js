@@ -71,6 +71,7 @@ import { experienceWaitHours, experienceDeliveryAccepted, experienceResourcesFro
 import { runExperienceCheckin } from "./lib/crm-experience-scheduler.js";
 import { MCCQE_DEMO_SOURCE, mccqeDemoEnabled, validateMccqeDemoRequest, mccqeDemoIssuanceId, findMccqeDemoReplay, mccqeDemoPurchaseState, mccqeDemoEmailAccepted, mccqeDemoResource, mccqeDemoSendEligibility, cancelMccqeDemoSales, createMccqeDemoOutboundGuard, preserveMccqeDemoLedgerSnapshot } from "./lib/crm-aylamed-demo-lifecycle.js";
 import { buildMccqeOperationalContext, validateMccqeAutomaticOutbound } from "./lib/crm-aylamed-operational-context.js";
+import { mccqeWhatsAppIntakeEnabled, mccqeMetaInboundProof, mccqeInboundDisposition, assessMccqeWhatsAppIntake } from "./lib/crm-aylamed-whatsapp-intake.js";
 import { updateDemoAccess } from "./lib/demo-admin.js";
 import { selectStudentCurrentRoadmapDay } from "./lib/lms-current-roadmap-day.js";
 import { ensureDemoInvitation, findDemoInvitation, trackDemoLinks, recordDemoInvitationSent, recordDemoInvitationOpened, recordDemoActivation, demoAttributionForEnrollment } from "./lib/crm-demo-attribution.js";
@@ -1179,6 +1180,9 @@ app.use(express.json({
     // signature verification remains possible without changing other routes.
     if (String(req.originalUrl || req.url || "").split("?")[0] === "/zoom/webhook") {
       req.zoomRawBody = Buffer.from(buffer || "");
+    }
+    if (/^\/webhooks\/(?:whatsapp|social\/whatsapp(?:\/[^/]+)?)\/?$/.test(String(req.originalUrl || req.url || "").split("?")[0])) {
+      req.aylamedMetaRawBody = Buffer.from(buffer || "");
     }
   },
 }));
@@ -11976,6 +11980,9 @@ app.get("/health", async (req, res) => {
     crm_brand_routing_build: CRM_BRAND_ROUTING_BUILD,
     crm_mccqe_demo_build: "v1-private-five-hour-lifecycle",
     crm_mccqe_demo_enabled: mccqeDemoEnabled(),
+    crm_mccqe_whatsapp_intake_build: "v1-signed-prospect-private-demo",
+    crm_mccqe_whatsapp_intake_enabled: mccqeWhatsAppIntakeEnabled(),
+    crm_mccqe_inbound_signature_configured: Boolean(String(process.env.AYLAMED_META_APP_SECRET || "").trim()),
     crm_exam_inbox_routing_build: "v322-exam-inboxes-zero-ai-filter",
     crm_whatsapp_business_profile_build: "v298-meta-profile-sync",
     crm_ayla_reply_engine: {
@@ -30660,7 +30667,7 @@ async function ngAppendWhatsAppWebhookJournalRecord(record = {}) {
   return task;
 }
 
-async function ngJournalWhatsAppWebhook({ payload = {}, integrationId = null, kind = "inbound" } = {}) {
+async function ngJournalWhatsAppWebhook({ payload = {}, integrationId = null, kind = "inbound", providerAuth = null } = {}) {
   const entry = {
     record_type: "queued",
     id: uuid(),
@@ -30671,6 +30678,7 @@ async function ngJournalWhatsAppWebhook({ payload = {}, integrationId = null, ki
     provider_call_ids: ngWhatsAppWebhookCallIds(payload),
     payload,
     received_at: nowIso(),
+    aylamed_provider_auth: providerAuth,
   };
   await ngAppendWhatsAppWebhookJournalRecord(entry);
   return entry;
@@ -30787,6 +30795,9 @@ async function ngProcessWhatsAppInboundJournalEntry(entry, db) {
     payload: conversationPayload,
     integration,
   });
+  if (lead.brand_id === AYLAMED_BRAND_ID && entry.aylamed_provider_auth) {
+    conversation.aylamed_inbound_proof = entry.aylamed_provider_auth;
+  }
   createSocialClientDataEvent(db, { lead, platform: "whatsapp", payload: leadPayload, integration });
   createIntegrationLog(db, {
     brand_id: lead.brand_id || null,
@@ -31031,6 +31042,7 @@ async function handleUniversalWebhook({ req, res, platform, integrationId = null
         payload: req.body || {},
         integrationId,
         kind: "inbound",
+        providerAuth: mccqeMetaInboundProof({ rawBody: req.aylamedMetaRawBody, signature: req.headers?.["x-hub-signature-256"], secret: process.env.AYLAMED_META_APP_SECRET }),
       });
       res.status(200).json({
         success: true,
@@ -34127,7 +34139,7 @@ async function sendCrmMessage({
     if (effectiveBrandId === AYLAMED_BRAND_ID && ngCrmOutboundIsAutomated({ metadata, enrollmentId, flowId, runId, queueId })) {
       const operationalContext = await ngAylaVerifiedMccqeConversationContext(lead || {});
       const freshCheck = validateMccqeAutomaticOutbound({ lead: lead || {}, messages: lead ? ngLeadConversationMessages(db, lead.id) : [],
-        operationalContext, text: finalText, subject: finalSubject, mediaUrl: resolvedMediaUrl, mediaId: resolvedMediaId, templateName: resolvedWhatsAppTemplateName });
+        operationalContext, to: finalTo, text: finalText, subject: finalSubject, mediaUrl: resolvedMediaUrl, mediaId: resolvedMediaId, templateName: resolvedWhatsAppTemplateName });
       if (!freshCheck.ok) {
         const error = new Error("AylaMed message requires review because the current account or demo context changed.");
         error.statusCode = 409; error.code = freshCheck.reason;
@@ -54696,15 +54708,70 @@ Write only Ayla's next message. No markdown headings. No bullet list unless the 
 
 // v292: one stateful AI conversation engine owns all ordinary CRM dialogue.
 // The legacy phrase router above remains temporarily for rollback inspection, but
-// this is the only generator used by WhatsApp auto-reply call sites. Deterministic
-// code is limited to opt-out and protected handoff mutations; it no longer chooses
-// sales copy or advances the programme journey through keyword checkpoints.
+// This is the shared generator used by WhatsApp auto-reply call sites. NextGen
+// retains its stateful model journey. The opt-in AylaMed private-demo controller
+// below alone handles signed qualification and email authorization without AI.
+async function ngAylaProcessMccqeWhatsAppIntake({ db, lead, latestInbound, allowOperationalActions = false, dryRunOperationalActions = false }) {
+  if (!mccqeWhatsAppIntakeEnabled()) return null;
+  await aylaWriteQueue;
+  const [crmDb, aylaDb] = await Promise.all([readCrmDb(), readAylaDb()]);
+  const currentLead = ensureCrmArray(crmDb, "leads").find((row) => row.id === lead.id && row.brand_id === AYLAMED_BRAND_ID);
+  const accountContext = buildMccqeOperationalContext({ crmDb, aylaDb, lead: currentLead || {} });
+  if (accountContext.paid === true || ["issued", "active", "expired"].includes(accountContext.demo?.status)) return null; // Known access stays with the account-aware engine; never restart the invitation sequence.
+  const expectedInboundId = String(latestInbound?.platform_message_id || latestInbound?.provider_message_id || latestInbound?.id || "");
+  let assessment = assessMccqeWhatsAppIntake({ crmDb, aylaDb, lead: currentLead || {}, secret: process.env.AYLAMED_META_APP_SECRET, expectedInboundId });
+  const canMutate = allowOperationalActions && !dryRunOperationalActions && !lead.ayla_no_send_simulation;
+  if (currentLead && !ngV116LeadCanReceiveAutomation(crmDb, currentLead).ok) assessment = { action: "review", reason: "lead_suppressed", reply: "Your request needs team review before any access changes." };
+  if (canMutate) {
+    // Persist no model-derived authorization. Each retry re-reads signed student
+    // evidence; the invitation ledger provides the external-send reservation.
+    assessment = await mutateCrmDb((current) => {
+      const saved = ensureCrmArray(current, "leads").find((row) => row.id === lead.id && row.brand_id === AYLAMED_BRAND_ID);
+      let checked = assessMccqeWhatsAppIntake({ crmDb: current, aylaDb, lead: saved || {}, secret: process.env.AYLAMED_META_APP_SECRET, expectedInboundId });
+      if (!saved || !ngV116LeadCanReceiveAutomation(current, saved).ok) checked = { action: "review", reason: "lead_suppressed", reply: "Your request needs team review before any access changes." };
+      if (saved) {
+        saved.aylamed_whatsapp_intake = { action: checked.action, reason: checked.reason, source_inbound_id: expectedInboundId, updated_at: nowIso() };
+        if (["invite", "replay"].includes(checked.action)) { saved.email = checked.request.email; saved.exam_track = "mccqe"; }
+        if (checked.action === "ignore") saved.irrelevant_filter_active = true;
+        if (checked.action === "stop") { saved.stop_requested = true; saved.do_not_contact = true; }
+        if (checked.action === "review" && checked.reason !== "lead_suppressed") {
+          const actions = ensureCrmArray(current, "ai_actions");
+          if (!actions.some((item) => item.type === "aylamed_demo_review" && item.lead_id === saved.id && item.status === "pending_approval")) {
+            actions.unshift({ id: uuid(), brand_id: AYLAMED_BRAND_ID, lead_id: saved.id, type: "aylamed_demo_review", status: "pending_approval",
+              title: "Review private MCCQE demo request", payload: { reason: checked.reason }, created_at: nowIso() });
+          }
+        }
+      }
+      return checked;
+    });
+  }
+  if (["ignore", "stop"].includes(assessment.action)) {
+    const error = new Error("This AylaMed enquiry does not require an automatic response.");
+    error.code = `AYLAMED_MCCQE_${assessment.action.toUpperCase()}`; error.statusCode = 409; throw error;
+  }
+  let reply = assessment.reply;
+  if (canMutate && ["invite", "replay"].includes(assessment.action)) {
+    const result = await ngAdminCrmInviteMccqeDemo({ ...assessment.request, product: "aylamed", crm_demo: true }, { whatsappRequest: assessment.request });
+    reply = result.issued ? "Your private MCCQE demo invitation was sent by email. The five-hour access window is fixed; replying here does not restart it."
+      : "Your private demo request needs a team check. Please wait for help here before trying again.";
+  }
+  if (canMutate && db) {
+    const refreshed = ensureCrmArray(await readCrmDb(), "leads").find((row) => row.id === lead.id && row.brand_id === AYLAMED_BRAND_ID);
+    if (refreshed) for (const key of ["email", "exam_track", "ayla_user_id", "aylamed_demo", "ayla_experience_followups", "aylamed_whatsapp_intake"]) {
+      if (refreshed[key] !== undefined) lead[key] = refreshed[key];
+    }
+  }
+  return { reply, action: "reply_only", model: "aylamed-verified-private-demo-controller", usage: {}, safety_control: true,
+    feature_tour_requested: false, media_asset_keys: [], follow_up: null, conversation_stage: "discovery", intent: assessment.reason,
+    payment_followup: { disposition: "none" }, experience_response: { outcome: "none" } };
+}
+
 async function ngAylaVerifiedMccqeConversationContext(lead = {}) {
   if (lead.brand_id !== AYLAMED_BRAND_ID) return {};
   try {
     await aylaWriteQueue;
     const [crmDb, aylaDb] = await Promise.all([readCrmDb(), readAylaDb()]);
-    return buildMccqeOperationalContext({ crmDb, aylaDb, lead });
+    return buildMccqeOperationalContext({ crmDb, aylaDb, lead, allowProspect: mccqeWhatsAppIntakeEnabled(), secret: process.env.AYLAMED_META_APP_SECRET });
   } catch {
     // Read failures leave status unverified; they never become "not issued".
     return {};
@@ -54722,6 +54789,14 @@ async function ngGenerateStudentAutoReply({ db = null, lead = {}, messages = [],
     const error = new Error("AYLA_CONVERSATION_NO_INBOUND: No student message is available.");
     error.statusCode = 400;
     throw error;
+  }
+  if (isAylaMed && mccqeInboundDisposition(latestInboundText) === "irrelevant") {
+    const error = new Error("Irrelevant AylaMed enquiry: no model or invitation action required.");
+    error.statusCode = 409; error.code = "AYLAMED_MCCQE_IRRELEVANT"; throw error;
+  }
+  if (isAylaMed && channel === "whatsapp" && mccqeWhatsAppIntakeEnabled()) {
+    const intake = await ngAylaProcessMccqeWhatsAppIntake({ db, lead, latestInbound, allowOperationalActions, dryRunOperationalActions });
+    if (intake) return intake;
   }
 
   const activeMeeting = !isAylaMed && db ? ngAylaFindActiveGoogleMeetAppointment(db, lead) : null;
@@ -98202,8 +98277,9 @@ async function ngAylaMccqeDemoBeforeSend({ context, item }) {
   return result;
 }
 
-async function ngAdminCrmInviteMccqeDemo(body = {}) {
+async function ngAdminCrmInviteMccqeDemo(body = {}, { whatsappRequest = null } = {}) {
   if (!mccqeDemoEnabled()) throw Object.assign(new Error("The private MCCQE CRM demo flow is not enabled."), { statusCode: 409 });
+  if (whatsappRequest && !mccqeWhatsAppIntakeEnabled()) throw Object.assign(new Error("WhatsApp private-demo intake is disabled."), { statusCode: 409 });
   const crmDb = await readCrmDb();
   const lead = ensureCrmArray(crmDb, "leads").find((row) => row.id === String(body.crm_lead_id || ""));
   const request = validateMccqeDemoRequest(body, lead || {});
@@ -98211,11 +98287,26 @@ async function ngAdminCrmInviteMccqeDemo(body = {}) {
     throw Object.assign(new Error("This lead is stopped, paid, filtered, or awaiting ownership review."), { statusCode: 409 });
   }
   const inbound = ngLatestInbound(ngLeadConversationMessages(crmDb, lead.id));
-  const sourceInboundId = String(inbound?.id || inbound?.provider_message_id || inbound?.message_id || "");
+  const sourceInboundId = whatsappRequest?.source_inbound_id || String(inbound?.id || inbound?.provider_message_id || inbound?.message_id || "");
   if (!sourceInboundId) throw Object.assign(new Error("A student conversation is required before issuing this CRM demo."), { statusCode: 409 });
   if (!ngAylaEmailTransportStatus().configured) throw Object.assign(new Error("AylaMed email delivery must be configured before issuing the demo."), { statusCode: 503 });
 
-  const prepared = await mutateAylaDb((db) => {
+  const verifyWhatsAppRequest = (currentCrm, currentAyla, reservedIssuanceId = "") => {
+    if (!whatsappRequest) return true;
+    if (!mccqeWhatsAppIntakeEnabled()) return false;
+    const currentLead = ensureCrmArray(currentCrm, "leads").find((row) => row.id === lead.id && row.brand_id === AYLAMED_BRAND_ID);
+    if (!currentLead || !ngV116LeadCanReceiveAutomation(currentCrm, currentLead).ok) return false;
+    const checked = assessMccqeWhatsAppIntake({ crmDb: currentCrm, aylaDb: currentAyla, lead: currentLead,
+      secret: process.env.AYLAMED_META_APP_SECRET, expectedInboundId: whatsappRequest.source_inbound_id, reservedIssuanceId });
+    return ["invite", "replay"].includes(checked.action) && ["idempotency_key", "email", "source_inbound_id", "request_inbound_id", "confirmation_inbound_id", "whatsapp_sender", "whatsapp_phone_number_id", "whatsapp_integration_id"]
+      .every((key) => checked.request?.[key] === whatsappRequest[key]);
+  };
+  const prepared = await mutateAylaDb(async (db) => {
+    // Read-only CRM check while the Ayla reservation queue is held. Never wait
+    // for aylaWriteQueue or mutate CRM here: that would invert the queues.
+    if (whatsappRequest && !verifyWhatsAppRequest(await readCrmDb(), db)) {
+      throw Object.assign(new Error("This private demo request needs team review."), { statusCode: 409, code: "AYLAMED_MCCQE_REQUEST_REVIEW" });
+    }
     const existingUser = aylaFindUserByEmail(db, request.email);
     const replay = findMccqeDemoReplay(db, request, existingUser?.id || "");
     if (replay) return { replay: true, issuance: { ...replay } };
@@ -98251,6 +98342,10 @@ async function ngAdminCrmInviteMccqeDemo(body = {}) {
       source_inbound_id: sourceInboundId, starts_at: access.starts_at, expires_at: access.expires_at,
       login_url: aylaExamLoginUrl("mccqe", process.env), email_delivery_status: "reserved", status: "email_reserved",
       reserved_at: aylaNow(), created_at: aylaNow(), student_created: studentCreated };
+    if (whatsappRequest) Object.assign(issuance, { whatsapp_sender: whatsappRequest.whatsapp_sender,
+      whatsapp_phone_number_id: whatsappRequest.whatsapp_phone_number_id, whatsapp_integration_id: whatsappRequest.whatsapp_integration_id,
+      request_inbound_id: whatsappRequest.request_inbound_id, confirmation_inbound_id: whatsappRequest.confirmation_inbound_id,
+      email_evidence: "student_confirmed_delivery_address", email_ownership_verified: false, initiation: "verified_whatsapp_private_demo_request" });
     enrollment.crm_demo_issuance_id = id;
     aylaSetItem(db, "aylaEnrollments", enrollment);
     db.aylaCrmDemoIssuances ||= {};
@@ -98281,7 +98376,8 @@ async function ngAdminCrmInviteMccqeDemo(body = {}) {
   const currentLead = ensureCrmArray(beforeEmailCrm, "leads").find((row) => row.id === lead.id);
   const purchase = mccqeDemoPurchaseState(beforeEmailDb, prepared.user.id);
   const eligibleLead = currentLead?.brand_id === AYLAMED_BRAND_ID && normalizeEmail(currentLead.email) === request.email
-    && ngV116LeadCanReceiveAutomation(beforeEmailCrm, currentLead).ok && !currentLead.brand_routing_review_required && !currentLead.irrelevant_filter_active;
+    && ngV116LeadCanReceiveAutomation(beforeEmailCrm, currentLead).ok && !currentLead.brand_routing_review_required && !currentLead.irrelevant_filter_active
+    && verifyWhatsAppRequest(beforeEmailCrm, beforeEmailDb, prepared.issuance.id);
   const delivery = !eligibleLead || purchase.paid || purchase.active_access
     ? { attempted: false, sent: false, status: "cancelled", reason: purchase.paid ? "purchased" : "context_changed" }
     : await ngAdminMobileSendAylaInvite({ user: prepared.user, temporaryPassword: prepared.temporaryPassword,

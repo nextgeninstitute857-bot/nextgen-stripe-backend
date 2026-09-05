@@ -100,7 +100,7 @@ For the test profile, use:
 
 A WhatsApp profile belongs to the phone number, not to an individual CRM brand. Publishing AylaMed details to the shared Canadian number immediately changes the public profile seen by existing NextGen chats on that number.
 
-Automatic AylaMed replies are fail-closed by default because the current conversation engine still contains NextGen/USMLE copy and `nextgenusmle.live` links. Keep AylaMed messages in manual review until a brand-specific prompt, templates, links and product facts are installed. Only then set:
+Automatic AylaMed replies are fail-closed by default. Local follow-up work adds a separate AylaMed prompt, authoritative account facts and a signed WhatsApp qualification-to-private-demo controller; see [the private MCCQE pilot](aylamed-private-mccqe-demo.md). These local changes do not establish production provider readiness or display-name approval. Keep AylaMed messages in manual review until the controlled-recipient flow and brand-specific providers/templates are verified. Only then consider enabling:
 
 ```text
 AYLAMED_AI_AUTO_SEND_ENABLED=true

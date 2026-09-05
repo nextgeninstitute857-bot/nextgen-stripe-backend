@@ -70,11 +70,12 @@ test("private CRM demo HTTP flow issues once, preserves accounts and paid access
   await fs.writeFile(path.join(dir, "aylamed-db.json"), JSON.stringify(aylaDb));
   let child, token = "", baseUrl, output = [];
   async function stop() { if (!child || child.exitCode !== null) return; const ended = new Promise((resolve) => child.once("exit", resolve)); child.kill(); await ended; }
-  async function start(enabled = true) {
+  async function start(enabled = true, intakeEnabled = false) {
     const port = await freePort(); baseUrl = `http://127.0.0.1:${port}`; output = [];
     child = spawn(process.execPath, ["server.js"], { cwd: fileURLToPath(new URL("..", import.meta.url)), env: { ...process.env,
       PORT: String(port), DATA_DIR: dir, DATABASE_URL: "", AUTH_JWT_SECRET: "demo-http-secret", AYLA_AUTH_JWT_SECRET: "demo-http-ayla-secret",
       AYLAMED_MCCQE_DEMO_FLOW_ENABLED: String(enabled), AYLAMED_AI_AUTO_SEND_ENABLED: "false", OPENAI_API_KEY: "",
+      AYLAMED_MCCQE_WHATSAPP_INTAKE_ENABLED: String(intakeEnabled), AYLAMED_META_APP_SECRET: "local-http-intake-secret",
       WHATSAPP_ACCESS_TOKEN: "", WHATSAPP_PHONE_NUMBER_ID: "", AYLA_EMAIL_PROVIDER: "smtp", AYLA_EMAIL_FROM: "AylaMed <support@aylamedapp.com>",
       AYLA_SMTP_HOST: "127.0.0.1", AYLA_SMTP_PORT: String(smtp.port), AYLA_SMTP_SECURE: "false", AYLA_SMTP_USER: "local-test", AYLA_SMTP_PASS: "local-test",
       AYLA_RESEND_API_KEY: "", AYLA_SENDGRID_API_KEY: "", NEXTGEN_BACKEND_HEARTBEAT_ENABLED: "false", NEXTGEN_AUTO_ZOOM_PREP_ENABLED: "false",
@@ -161,5 +162,46 @@ test("private CRM demo HTTP flow issues once, preserves accounts and paid access
     const off = await api("/admin/mobile/invitations", { method: "POST", body: body("new") });
     assert.equal(off.status, 409); assert.equal(smtp.accepted.length, 2);
     assert.equal((await api("/health")).payload.crm_mccqe_demo_enabled, false);
+
+    // Exercise real raw-body verification, durable webhook proof, the existing
+    // controller and invitation email transport. WhatsApp sending stays OFF.
+    await stop();
+    crm = await read("crm-db.json");
+    crm.leads.push(lead("wa-new", "", { phone: "+18250000003", whatsapp: "+18250000003", wa_id: "18250000003", source_integration_id: "wa-test", recipient_phone_number_id: "777000111", exam_track: "mccqe" }));
+    crm.integrations = [{ id: "wa-test", platform: "whatsapp", brand_id: "brand_aylamed", phone_number_id: "777000111", account_id: "777000111", status: "connected" }];
+    await fs.writeFile(path.join(dir, "crm-db.json"), JSON.stringify(crm));
+    await start(true, true);
+    for (const [index, text] of ["I am a doctor preparing for MCCQE.", "Please send me the MCCQE demo at wa-new@example.test.", "I confirm wa-new@example.test is my email."].entries()) {
+      const payload = { object: "whatsapp_business_account", entry: [{ id: "777222333", changes: [{ field: "messages", value: {
+        messaging_product: "whatsapp", metadata: { phone_number_id: "777000111" }, contacts: [{ wa_id: "18250000003", profile: { name: "Test Doctor" } }],
+        messages: [{ id: `wamid.http-${index}`, from: "18250000003", type: "text", timestamp: String(Math.floor(Date.now() / 1000)), text: { body: text } }],
+      } }] }] };
+      const raw = JSON.stringify(payload), signature = `sha256=${crypto.createHmac("sha256", "local-http-intake-secret").update(raw).digest("hex")}`;
+      const posted = await fetch(baseUrl + "/webhooks/whatsapp", { method: "POST", headers: { "content-type": "application/json", "x-hub-signature-256": signature }, body: raw });
+      assert.equal(posted.status, 200);
+      const deadline = Date.now() + 12000;
+      while (Date.now() < deadline) {
+        crm = await read("crm-db.json");
+        if (crm.conversations?.some((row) => row.platform_message_id === `wamid.http-${index}`)) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      const saved = crm.conversations.find((row) => row.platform_message_id === `wamid.http-${index}`);
+      assert.ok(saved?.aylamed_inbound_proof, "server-created signature proof must persist");
+      assert.equal(saved.lead_id, "wa-new");
+    }
+    // This authenticated existing action invokes the actual controller. The
+    // freeform WhatsApp step is expected to remain disabled after local SMTP.
+    await api("/admin/crm/conversations/wa-new/ai-auto-send", { method: "POST", body: { force: true } });
+    stored = await read("aylamed-db.json");
+    const automatic = Object.values(stored.aylaCrmDemoIssuances).find((row) => row.email === "wa-new@example.test");
+    assert.ok(automatic, "signed, confirmed request should reach the existing invitation ledger");
+    assert.equal(automatic.email_delivery_status, "accepted");
+    assert.equal(automatic.initiation, "verified_whatsapp_private_demo_request");
+    assert.equal(automatic.email_ownership_verified, false);
+    assert.equal(automatic.whatsapp_sender, "18250000003");
+    assert.equal(Date.parse(automatic.expires_at) - Date.parse(automatic.starts_at), 5 * 3600000);
+    assert.equal(smtp.accepted.length, 3);
+    await api("/admin/crm/conversations/wa-new/ai-auto-send", { method: "POST", body: { force: true } });
+    assert.equal(smtp.accepted.length, 3);
   } finally { await stop(); await smtp.close(); await fs.rm(dir, { recursive: true, force: true }); }
 });

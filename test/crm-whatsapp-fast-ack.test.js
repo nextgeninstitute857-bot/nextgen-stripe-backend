@@ -313,7 +313,7 @@ test("Ayla grounds current cohort and pricing answers in the live LMS", () => {
   assert.match(grounding, /When sharing it, always state this exact title before the link/);
   assert.match(grounding, /live_session:/);
   assert.match(grounding, /latest_recording:/);
-  assert.match(replyPrompt, /let liveSnapshot = await ngAylaLiveLmsSalesGrounding\(\{ structured: true, crmDb: db, lead, messages: cleanMessages \}\)/);
+  assert.match(replyPrompt, /let liveSnapshot = isAylaMed \? \{ context: "" \} : await ngAylaLiveLmsSalesGrounding\(\{ structured: true, crmDb: db, lead, messages: cleanMessages \}\)/);
   assert.match(replyPrompt, /liveFacts: liveSnapshot\.context/);
   assert.match(replyPrompt, /officialExamGuidance/);
   assert.match(replyPrompt, /approvedKnowledge/);

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { buildMccqeOperationalContext } from "../lib/crm-aylamed-operational-context.js";
+import { mccqeInboundDisposition, mccqeWhatsAppIntakeEnabled } from "../lib/crm-aylamed-whatsapp-intake.js";
 import * as engine from "../lib/crm-ayla-conversation-engine.js";
 
 function fixture() {
@@ -91,7 +92,7 @@ function pipelineHarness(f, drafts, onModel = () => {}) {
     return engine[name](...args);
   };
   const context = vm.createContext({
-    ...engine, AYLAMED_BRAND_ID: "brand_aylamed", CRM_AYLA_REPLY_BUILD: "test", buildMccqeOperationalContext,
+    ...engine, AYLAMED_BRAND_ID: "brand_aylamed", CRM_AYLA_REPLY_BUILD: "test", buildMccqeOperationalContext, mccqeInboundDisposition, mccqeWhatsAppIntakeEnabled,
     aylaWriteQueue: Promise.resolve(), readCrmDb: async () => f.crmDb,
     readAylaDb: async () => { reads++; if (f.readError) throw new Error("store unavailable"); return f.aylaDb; },
     process: { env: { AYLAMED_AI_AUTO_SEND_ENABLED: "false" } }, safeArray: (value) => Array.isArray(value) ? value : [],

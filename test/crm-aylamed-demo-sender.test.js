@@ -114,3 +114,27 @@ test("actual central final guard preserves manual Ayla messages and existing Nex
   assert.equal((await legacy.send({ text: "Your NextGen preparation plan is ready." })).success, true);
   assert.equal(legacy.calls(), 1);
 });
+
+test("actual central sender keeps signed-demo recipient binding after the prospect becomes an account", async () => {
+  const h = harness(); h.enableBroadForTest();
+  Object.assign(h.store.aylaCrmDemoIssuances.issuance, { whatsapp_sender: "18250000000", whatsapp_phone_number_id: "123", whatsapp_integration_id: "shared" });
+  Object.assign(h.lead, { recipient_phone_number_id: "123", source_integration_id: "shared" });
+  const wrong = await h.send({ to: "+18250009999" });
+  assert.equal(wrong.success, false); assert.equal(wrong.hint, "aylamed_demo_recipient_mismatch"); assert.equal(h.calls(), 0);
+  h.lead.recipient_phone_number_id = "456";
+  assert.equal((await h.send()).success, false); assert.equal(h.calls(), 0);
+});
+
+test("malformed, uncertain or ambiguous trial records cannot discard the signed recipient binding", async () => {
+  for (const change of [
+    (h) => { h.store.aylaCrmDemoIssuances.issuance.enrollment_id = "missing"; },
+    (h) => { h.store.aylaCrmDemoIssuances.issuance.email_delivery_status = "uncertain"; },
+    (h) => { h.store.aylaCrmDemoIssuances.other = { ...h.store.aylaCrmDemoIssuances.issuance, id: "other", whatsapp_sender: "18250009999" }; },
+  ]) {
+    const h = harness(); h.enableBroadForTest();
+    Object.assign(h.store.aylaCrmDemoIssuances.issuance, { whatsapp_sender: "18250000000", whatsapp_phone_number_id: "123", whatsapp_integration_id: "shared" });
+    Object.assign(h.lead, { recipient_phone_number_id: "123", source_integration_id: "shared" }); change(h);
+    const result = await h.send({ to: "+18250009999", text: "I can help with your preparation." });
+    assert.equal(result.success, false); assert.equal(result.hint, "aylamed_demo_recipient_mismatch"); assert.equal(h.calls(), 0);
+  }
+});
