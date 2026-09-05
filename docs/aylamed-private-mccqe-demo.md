@@ -1,6 +1,6 @@
 # Private MCCQE CRM demo pilot
 
-Status: local implementation, not deployed or enabled. This extends the existing administrator invitation, WhatsApp inbound controller and experience-follow-up paths; it is not a replacement CRM.
+This extends the existing administrator invitation, WhatsApp inbound controller and experience-follow-up paths; it is not a replacement CRM. Deployment and activation must be verified separately: the historical checkpoints below are test evidence, not current production status.
 
 ## Feature boundary
 
@@ -12,6 +12,20 @@ Status: local implementation, not deployed or enabled. This extends the existing
 - The server fixes access to exactly five hours from persisted issuance. Replays do not restart the clock, reset an existing password, or send another email.
 - New accounts use the existing credential invitation helper. Existing accounts retain their current password and authentication version. No credentials are returned by this mode.
 - The private enrollment uses `source: "crm_mccqe_demo"`, the MCCQE website and the existing starting-choice setup. It does not create a public signup/demo offer.
+
+## Optional exact-lead restriction
+
+The local pilot-restriction patch adds `AYLAMED_MCCQE_DEMO_PILOT_LEAD_ID`. It has no default target and does not enable any feature. Set it only to the actual CRM lead ID identified from the authorized tester's genuine inbound conversation; do not create a synthetic lead or substitute an email, phone number or guessed ID.
+
+- **Absent:** preserves the existing behavior for all otherwise eligible demo leads. Removing this variable while the demo flag is ON therefore broadens eligibility again.
+- **Present:** trims only the configured value, then requires an exact, case-sensitive lead ID. Lists, wildcards, embedded whitespace, empty/whitespace-only values and malformed values fail closed. A malformed present value does not mean unrestricted.
+- Existing demo, intake, identity, entitlement, stop, takeover, delivery and provider requirements still apply. A matching ID alone is never authorization.
+- The restriction applies before invitation reservation, immediately before email delivery, to signed intake, all-lead expiry candidate scans, authoritative send checks, and single-use capability issuance/consumption. Email and WhatsApp providers check again after awaited configuration, immediately before the provider action.
+- Reconciliation does not restore or dispatch non-pilot follow-ups while restricted. Existing non-pilot accounts, access, issuance records and queued follow-ups are retained, not deleted or cancelled solely for being outside the pilot. They remain subject to the original safeguards if the scope later changes.
+- If scope changes after reservation, the reserved account and original five-hour window remain intact; a blocked/cancelled or uncertain delivery is not automatically resent and replay never restarts access. It needs administrator review, not a new key or ordinary-invitation fallback.
+- Public health reports only `crm_mccqe_demo_pilot_restricted: true|false`, never the configured lead ID. The boolean also stays true for malformed configuration, so it does not prove that a valid target is ready.
+
+For an **administrator-controlled single-lead test**, keep both `AYLAMED_MCCQE_WHATSAPP_INTAKE_ENABLED` and `AYLAMED_AI_AUTO_SEND_ENABLED` OFF, configure the exact verified lead restriction, and enable the existing demo-flow flag only after readiness review. This is **not an email-only switch**: the same target's accepted issuance may subsequently receive its eligible five-hour expiry WhatsApp check-in through the existing narrow capability. Other leads cannot issue or send a private demo while restricted. The Meta signing secret is needed for signed automatic intake, not for the authenticated administrator action. No flags, secrets, pilot IDs or live recipients are configured by the local tests.
 
 ## Signed WhatsApp qualification (local, disabled)
 
