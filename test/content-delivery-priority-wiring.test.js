@@ -22,7 +22,7 @@ test("the registry persists source year and applies provider-scoped delivery yea
   assert.match(registry, /contentDeliveryFallbackTaxonomyReadySql/);
   assert.match(
     registry,
-    /ORDER BY delivery\.source_year DESC,\s*CASE WHEN q\.id=ANY\(\$11::uuid\[\]\) THEN 1 ELSE 0 END/,
+    /ORDER BY delivery\.source_year DESC,\s*CASE WHEN q\.id=ANY\(\$8::uuid\[\]\) THEN 1 ELSE 0 END/,
   );
 });
 

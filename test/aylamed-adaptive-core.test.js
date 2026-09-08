@@ -105,8 +105,14 @@ test("server wires the verified adaptive loop without replacing ingestion or com
   assert.match(server, /function aylaV227SystemsForStudent[\s\S]*?aylaAdaptiveSystemsForStudent\(student, AYLA_EXAM_REGISTRY/);
   assert.match(server, /function aylaRecordQbankAttempt[\s\S]*?aylaV227UpsertMistakeFlashcard/);
   assert.match(server, /function aylaRecordQbankAttempt[\s\S]*?serverVerified: true/);
-  assert.match(server, /qbank_future_roadmap_refresh_deferred/);
-  assert.match(server, /aylaV189BuildDailyPlan\(db, fresh\.student, tomorrow, \{[\s\S]*?force: true[\s\S]*?skipAi: true/);
+  const submitRoute = server.slice(
+    server.indexOf('app.post("/api/ayla/qbank/sessions/:sessionId/submit"'),
+    server.indexOf('app.get("/api/ayla/qbank/history"'),
+  );
+  assert.match(submitRoute, /await mutateAylaDb\(async \(db\) => \{[\s\S]*?const futureRoadmap = \{ status: "queued", date: tomorrow \};[\s\S]*?finalized\.session\.adaptation = \{[\s\S]*?\.\.\.futureRoadmap,[\s\S]*?aylaSetItem\(db, "aylaQbankSessions", finalized\.session\)/);
+  assert.doesNotMatch(submitRoute, /aylaV189BuildDailyPlan\(/);
+  assert.match(server, /async function aylaDrainQbankAdaptation\(\)[\s\S]*?runAylaQbankAdaptation\(\{[\s\S]*?readDb: readAylaDb,[\s\S]*?mutateDb: mutateAylaDb,[\s\S]*?aylaV189BuildDailyPlan\(db, student, date, \{[\s\S]*?force: true,[\s\S]*?skipAi: true/);
+  assert.match(server, /setInterval\(aylaDrainQbankAdaptation, 15_000\)/);
   assert.match(server, /const verifiedDiagnosticPlanCanYield = aylaVerifiedDiagnosticPlanCanYield\(\{[\s\S]*?plan: existing,[\s\S]*?assignments: existingAssignments,[\s\S]*?student,[\s\S]*?date,[\s\S]*?today: aylaDateOnly\(\)/);
   assert.match(server, /String\(existing\.status \|\| ""\)\.toLowerCase\(\) === "completed" && !verifiedDiagnosticPlanCanYield[\s\S]*?completedHistoryProtected: true/);
   assert.match(server, /matchingPlans\.length \? Math\.max\(\.\.\.matchingPlans\.map\(\(row\) => aylaNumber\(row\.version, 1\)\)\) \+ 1 : 1/);

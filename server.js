@@ -139,6 +139,7 @@ import {
   getContentImportJob,
   getContentGlobalQbankPublicationState,
   getContentQbankCatalog,
+  getContentQbankFacets,
   getContentQbankPresentationPolicy,
   getContentQbankQuestions,
   getContentRegistryFlashcardQuestion,
@@ -629,7 +630,6 @@ import {
 } from "./lib/aylamed-pilot-login.js";
 import {
   isolateAylaDiagnosticAnswerState,
-  appendAylaQbankJournalRecord,
   applyAylaQbankJournalRecords,
   clearAylaQbankJournal,
   createAylaDiagnosticJournalRecord,
@@ -637,12 +637,18 @@ import {
 } from "./lib/aylamed-qbank-journal.js";
 import {
   AYLA_ROADMAP_STATE_COLLECTIONS,
-  appendAylaRoadmapJournalRecord,
   applyAylaRoadmapJournalRecords,
   clearAylaRoadmapJournal,
-  createAylaRoadmapJournalRecord,
   readAylaRoadmapJournalRecords,
 } from "./lib/aylamed-roadmap-journal.js";
+import {
+  appendAylaStateJournal,
+  applyAylaStateJournal,
+  checkpointAylaState,
+  createAylaStateJournalRecord,
+  readAylaStateJournal,
+  syncAylaDirectory,
+} from "./lib/aylamed-state-journal.js";
 import {
   LMS_FULL_TEACHING_PLAN_DAYS,
   LMS_TEACHING_ACCESS_MODE,
@@ -679,6 +685,10 @@ import {
   inspectKnownMskTranscriptNoteTarget,
 } from "./lib/lms-known-msk-notes-catchup.js";
 import { mutateJsonCopyOnWrite } from "./lib/json-copy-on-write.js";
+import { prepareAylaQbankBatch } from "./lib/aylamed-qbank-batch.js";
+import { runAylaQbankAdaptation } from "./lib/aylamed-qbank-adaptation.js";
+import { aylaQbankFilterHistory } from "./lib/aylamed-qbank-history.js";
+import { mergeAylaQbankFacets } from "./lib/aylamed-qbank-facets.js";
 import { estimateStripeProcessingFeeCents as estimatePartnerStripeProcessingFeeCents } from "./lib/partner-commission.js";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -45545,9 +45555,15 @@ async function aylaSelectQbankSessionQuestions({
   selectionSeed = "",
   questionExposureCounts = {},
   seenQuestionIds = [],
+  history = undefined,
   allowedCollectionIds = [],
   examVariant = "",
 } = {}) {
+  // An empty published bank set is an entitlement/publication boundary, never
+  // a request to discover generic banks (especially across NCLEX RN/PN).
+  if (purpose !== "baseline_diagnostic" && !selectedBanks.length && !allowedCollectionIds.length) {
+    return { selected: [], availableSystemKeys: [], selectedSystemKeys: [] };
+  }
   const publicationDestination = purpose === "baseline_diagnostic" ? "diagnostic" : "qbank";
   if (purpose !== "baseline_diagnostic" && Array.isArray(selectedBanks) && selectedBanks.length) {
     const banksBySourceExam = new Map();
@@ -45566,6 +45582,9 @@ async function aylaSelectQbankSessionQuestions({
         topicKey: filters.topic_key,
         subtopicKey: filters.subtopic_key,
         difficulty: filters.difficulty,
+        selectionPaths: filters.selection_paths,
+        status: filters.status || "all",
+        history,
         sourceProfile,
         destinationScope,
         limit: 200,
@@ -45631,6 +45650,9 @@ async function aylaSelectQbankSessionQuestions({
       topicKey: filters.topic_key,
       subtopicKey: filters.subtopic_key,
       difficulty: filters.difficulty,
+      selectionPaths: filters.selection_paths,
+      status: filters.status || "all",
+      history,
       sourceProfile,
       destinationScope,
       limit: requestedCount,
@@ -47149,6 +47171,45 @@ app.get("/api/ayla/qbank/catalog", async (req, res) => {
   }
 });
 
+async function aylaQbankFacetsForLearner(req, res, selectionCount = false) {
+  try {
+    const input = selectionCount ? req.body : req.query;
+    const auth = await aylaV189RequireStudent(req, String(input.student_id || input.studentId || ""), "qbank");
+    const access = aylaRequireQbankAccess(auth.db, auth.user, auth.student, input.exam_track || input.examTrack || "");
+    const examVariant = requireAylaNclexVariant(auth.student, access.exam_track);
+    aylaRequireExamPublished(auth.db, aylaCanonicalExamTrack(access.exam_track), "qbank");
+    const destinationScope = aylaStudentCatalogDestinationScope(auth.student);
+    const sourceProfile = "";
+    const availableBanks = await aylaAvailableQbankBanks(auth.db, {
+      examTrack: access.exam_track, destination: "qbank", destinationScope, sourceProfile, student: auth.student,
+    });
+    const requested = aylaRequestedQbankCollectionIds(input.collection_ids ?? input.collectionIds ?? []);
+    const selectedIds = resolveContentQbankStudentCollectionIds({
+      ...aylaStudentSelectableQbankPolicy({}, availableBanks), available_banks: availableBanks,
+    }, requested);
+    const filters = normalizeAylaQbankFilters(selectionCount ? (input.filters || {}) : { difficulty: input.difficulty, status: input.status });
+    const history = aylaQbankFilterHistory(aylaValues(auth.db, "aylaQbankSessions"), {
+      userId: auth.user.id, studentId: auth.student.id, examTrack: access.exam_track, examVariant,
+    });
+    const groups = new Map();
+    for (const bank of availableBanks.filter(row => selectedIds.includes(row.id))) {
+      if (!groups.has(bank.source_exam_track)) groups.set(bank.source_exam_track, []);
+      groups.get(bank.source_exam_track).push(bank.id);
+    }
+    const facets = mergeAylaQbankFacets(await Promise.all([...groups].map(([examTrack, collectionIds]) => getContentQbankFacets({
+      examTrack, collectionIds, destination: "aylamed_qbank", destinationScope, sourceProfile, filters, history,
+    }))), { examTrack: access.exam_track });
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, selectionCount
+      ? { question_count: facets.question_count, taxonomy_version: facets.taxonomy_version }
+      : { ...facets, exam_track: access.exam_track, exam_variant: examVariant || null });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message, error.code ? { code: error.code } : null);
+  }
+}
+app.get("/api/ayla/qbank/facets", (req, res) => aylaQbankFacetsForLearner(req, res));
+app.post("/api/ayla/qbank/selection-count", (req, res) => aylaQbankFacetsForLearner(req, res, true));
+
 app.post("/api/ayla/qbank/sessions", async (req, res) => {
   try {
     const auth = await aylaV189RequireStudent(req, String(req.body.student_id || req.body.studentId || ""), "qbank");
@@ -47447,6 +47508,9 @@ app.post("/api/ayla/qbank/sessions", async (req, res) => {
         selectionSeed: diagnosticSelectionSeed,
         questionExposureCounts: diagnosticQuestionExposureCounts,
         seenQuestionIds,
+        history: aylaQbankFilterHistory(aylaValues(auth.db, "aylaQbankSessions"), {
+          userId: auth.user.id, studentId: auth.student.id, examTrack: access.exam_track, examVariant: nclexVariant,
+        }),
         allowedCollectionIds: nclexVariant ? selectedCollectionIds : [],
         examVariant: nclexVariant || "",
       });
@@ -47797,6 +47861,34 @@ app.post("/api/ayla/qbank/sessions/:sessionId/answers", async (req, res) => {
   }
 });
 
+app.post("/api/ayla/qbank/sessions/:sessionId/drafts", async (req, res) => {
+  try {
+    const auth = await aylaV189RequireStudent(req, String(req.body.student_id || req.body.studentId || ""), "qbank");
+    const initial = aylaOwnedQbankSession(auth.db, auth.user, auth.student, req.params.sessionId);
+    aylaRequireQbankAccess(auth.db, auth.user, auth.student, initial.examTrack);
+    const requestedRefs = new Set((Array.isArray(req.body.answers) ? req.body.answers : []).map(row => row?.question_ref));
+    const requestedMappings = (initial.questions || []).filter(row => requestedRefs.has(row.ref));
+    const questions = requestedMappings.length ? await aylaSessionQbankQuestions(initial, requestedMappings) : [];
+    const mutation = await mutateAylaDb((db) => {
+      const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, initial.examTrack);
+      const current = aylaOwnedQbankSession(db, fresh.user, fresh.student, initial.id);
+      const prepared = prepareAylaQbankBatch(current, { operation: "drafts", body: req.body, questions });
+      if (!prepared.replayed) aylaSetItem(db, "aylaQbankSessions", prepared.session);
+      return { replayed: prepared.replayed };
+    });
+    const latestDb = await readAylaDb();
+    const session = aylaOwnedQbankSession(latestDb, auth.user, auth.student, initial.id);
+    const byId = new Map(questions.map(row => [String(row.id), row]));
+    const changedQuestions = [];
+    for (const mapping of (session.questions || []).filter(row => requestedRefs.has(row.ref))) {
+      changedQuestions.push(await aylaPlayableQbankQuestion(latestDb, session, mapping, byId.get(String(mapping.contentQuestionId)) || null));
+    }
+    return aylaSendOk(res, { session: sanitizeAylaQbankSession(session), questions: changedQuestions, idempotent_replay: mutation.replayed });
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.message, error.code ? { code: error.code } : null);
+  }
+});
+
 app.post("/api/ayla/qbank/sessions/:sessionId/submit", async (req, res) => {
   try {
     const auth = await aylaV189RequireStudent(req, String(req.body.student_id || req.body.studentId || ""), "qbank");
@@ -47811,13 +47903,14 @@ app.post("/api/ayla/qbank/sessions/:sessionId/submit", async (req, res) => {
       const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, initial.examTrack);
       const current = aylaOwnedQbankSession(db, fresh.user, fresh.student, initial.id);
       aylaRequireCurrentDiagnosticBlueprint(current);
-      if (!canSubmitAylaQbankRoadmapSession(current)) {
+      const prepared = prepareAylaQbankBatch(current, { operation: "submit", body: req.body, questions: reviewQuestions });
+      if (!canSubmitAylaQbankRoadmapSession(prepared.session)) {
         const error = new Error("Answer every assigned question before completing this roadmap QBank block");
         error.statusCode = 409;
         error.code = "ROADMAP_QBANK_INCOMPLETE";
         throw error;
       }
-      const finalized = finalizeAylaQbankSession(current);
+      const finalized = finalizeAylaQbankSession(prepared.session);
       let adaptiveUpdate = null;
       if (!finalized.replayed) {
         aylaSetItem(db, "aylaQbankSessions", finalized.session);
@@ -47942,26 +48035,11 @@ app.post("/api/ayla/qbank/sessions/:sessionId/submit", async (req, res) => {
           });
         }
         const tomorrow = aylaDateOnly(aylaAddDays(new Date(), 1));
-        let futureRoadmap = { status: "deferred_safe_retry", date: tomorrow };
-        try {
-          const rebuilt = await aylaV189BuildDailyPlan(db, fresh.student, tomorrow, {
-            force: true,
-            includeAssessment: false,
-            skipAi: true,
-          });
-          futureRoadmap = {
-            status: rebuilt.completedHistoryProtected ? "completed_history_protected" : rebuilt.reused ? "reused" : "refreshed",
-            date: tomorrow,
-            plan_id: rebuilt.plan?.id || null,
-            version: rebuilt.plan?.version || null,
-          };
-        } catch (error) {
-          aylaV189RecordActivity(db, finalized.session.studentId, "qbank_future_roadmap_refresh_deferred", {
-            sessionId: finalized.session.id,
-            date: tomorrow,
-            reason: "safe_retry_required",
-          });
-        }
+        const futureRoadmap = { status: "queued", date: tomorrow };
+        finalized.session.adaptation = {
+          ...futureRoadmap, attempts: 0, nextAttemptAt: 0, updatedAt: aylaNow(),
+        };
+        aylaSetItem(db, "aylaQbankSessions", finalized.session);
         adaptiveUpdate = {
           verified_attempts_created: attemptResults.filter((row) => row.created).length,
           weak_area_flashcards_created: attemptResults.filter((row) => row.flashcardCreated).length,
@@ -47997,7 +48075,7 @@ app.post("/api/ayla/qbank/sessions/:sessionId/submit", async (req, res) => {
       adaptive_update: mutation.adaptiveUpdate || null,
     });
   } catch (error) {
-    return aylaSendError(res, error.statusCode || 500, error.message);
+    return aylaSendError(res, error.statusCode || 500, error.message, error.code ? { code: error.code } : null);
   }
 });
 
@@ -75453,6 +75531,10 @@ const AYLA_ROADMAP_JOURNAL_PATH = String(
   process.env.AYLA_ROADMAP_JOURNAL_PATH
     || path.join(DATA_DIR, "aylamed-roadmap-state.jsonl"),
 ).trim();
+const AYLA_STATE_JOURNAL_PATH = path.join(DATA_DIR, "aylamed-state-deltas.jsonl");
+const AYLA_STATE_CHECKPOINT_IDLE_MS = Math.max(10_000, Math.min(3_600_000, Number(process.env.AYLA_STATE_CHECKPOINT_IDLE_MS || 60_000) || 60_000));
+const AYLA_STATE_CHECKPOINT_BYTES = Math.max(256 * 1024, Math.min(64 * 1024 * 1024, Number(process.env.AYLA_STATE_CHECKPOINT_BYTES || 8 * 1024 * 1024) || 8 * 1024 * 1024));
+const AYLA_STATE_CHECKPOINT_RECORDS = Math.max(10, Math.min(10_000, Number(process.env.AYLA_STATE_CHECKPOINT_RECORDS || 500) || 500));
 const AYLA_REQUIRE_STUDENT_AUTH = String(process.env.AYLA_REQUIRE_STUDENT_AUTH || "true").toLowerCase() !== "false";
 
 const DEFAULT_AYLA_SETTINGS = {
@@ -75639,6 +75721,154 @@ const DEFAULT_AYLA_DB = {
 let aylaWriteQueue = Promise.resolve();
 let aylaDbCache = null;
 let aylaDbReadInFlight = null;
+let aylaStateJournalBytes = 0;
+let aylaStateJournalRecords = 0;
+let aylaStateCheckpointTimer = null;
+let aylaLastMutationAt = 0;
+
+async function aylaRecoverStateJournal(db) {
+  const journal = await readAylaStateJournal(AYLA_STATE_JOURNAL_PATH);
+  const replay = applyAylaStateJournal(db, journal.records);
+  aylaStateJournalBytes = journal.bytes;
+  aylaStateJournalRecords = journal.records.length;
+  if (replay.applied) console.log(`Recovered ${replay.applied} durable AylaMed state delta(s)`);
+  return replay.db;
+}
+
+async function aylaCheckpointState(db) {
+  await checkpointAylaState({
+    db,
+    snapshotPath: AYLA_DB_PATH,
+    journalPath: AYLA_STATE_JOURNAL_PATH,
+    writeSnapshot: (file, value) => ngWriteJsonAtomicStreaming(file, value, "AylaMed state checkpoint"),
+    clearLegacy: async () => {
+      await clearAylaQbankJournal(AYLA_QBANK_JOURNAL_PATH);
+      await clearAylaRoadmapJournal(AYLA_ROADMAP_JOURNAL_PATH);
+    },
+  });
+  aylaStateJournalBytes = 0;
+  aylaStateJournalRecords = 0;
+}
+
+function aylaScheduleStateCheckpoint() {
+  if (aylaStateCheckpointTimer) clearTimeout(aylaStateCheckpointTimer);
+  aylaStateCheckpointTimer = null;
+  if (aylaStateJournalBytes < AYLA_STATE_CHECKPOINT_BYTES && aylaStateJournalRecords < AYLA_STATE_CHECKPOINT_RECORDS) return;
+  aylaStateCheckpointTimer = setTimeout(() => {
+    aylaStateCheckpointTimer = null;
+    const task = aylaWriteQueue.catch(() => {}).then(async () => {
+      if (aylaStateJournalBytes < AYLA_STATE_CHECKPOINT_BYTES && aylaStateJournalRecords < AYLA_STATE_CHECKPOINT_RECORDS) return;
+      if (Date.now() - aylaLastMutationAt < AYLA_STATE_CHECKPOINT_IDLE_MS) {
+        aylaScheduleStateCheckpoint();
+        return;
+      }
+      try { await aylaCheckpointState(await readAylaDb()); }
+      catch (error) {
+        // A snapshot rename can succeed even if subsequent journal clearing
+        // fails. Reload durable state before another version is assigned.
+        aylaDbCache = null;
+        aylaDbReadInFlight = null;
+        console.error("AylaMed idle checkpoint failed; durable journal retained:", error.message);
+        aylaScheduleStateCheckpoint();
+      }
+    });
+    aylaWriteQueue = task;
+  }, AYLA_STATE_CHECKPOINT_IDLE_MS);
+  aylaStateCheckpointTimer.unref?.();
+}
+
+async function aylaPersistStateDelta(source, nextDb) {
+  nextDb.state_journal_version = Number(source.state_journal_version || 0) + 1;
+  const record = createAylaStateJournalRecord(source, nextDb);
+  try {
+    // A delta needs a durable base. New empty installations checkpoint once;
+    // established installations already have this snapshot on persistent disk.
+    try { await fs.access(AYLA_DB_PATH); }
+    catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      await aylaCheckpointState(source);
+    }
+    const appended = await appendAylaStateJournal(AYLA_STATE_JOURNAL_PATH, record);
+    aylaStateJournalBytes += appended.bytes;
+    aylaStateJournalRecords += 1;
+  } catch (error) {
+    aylaDbCache = null;
+    aylaDbReadInFlight = null;
+    throw error;
+  }
+  aylaDbCache = nextDb;
+  aylaDbReadInFlight = null;
+  aylaLastMutationAt = Date.now();
+  aylaScheduleStateCheckpoint();
+}
+
+async function aylaCreateDurableBackup({ checkpoint = false } = {}) {
+  const task = aylaWriteQueue.catch(() => {}).then(async () => {
+    await ensureDataDir();
+    const directory = path.join(DATA_DIR, "backups");
+    await fs.mkdir(directory, { recursive: true });
+    const createdAt = new Date().toISOString();
+    const backupPath = path.join(directory, `aylamed-db-${createdAt.replace(/[:.]/g, "-")}-${crypto.randomUUID()}.json`);
+    // Reload durable state while writes are excluded. Legacy route callers can
+    // hold mutable request snapshots, which must not leak into a backup.
+    const durable = await readAylaDbFromDisk();
+    await ngWriteJsonAtomicStreaming(backupPath, durable, "AylaMed complete durable backup");
+    await syncAylaDirectory(directory);
+    if (checkpoint) {
+      try { await aylaCheckpointState(durable); }
+      catch (error) { aylaDbCache = null; aylaDbReadInFlight = null; throw error; }
+    }
+    aylaDbCache = durable;
+    aylaDbReadInFlight = null;
+    return {
+      backup_path: backupPath,
+      created_at: createdAt,
+      state_journal_version: Number(durable.state_journal_version || 0),
+      standalone_snapshot: true,
+      primary_checkpoint_updated: checkpoint,
+    };
+  });
+  aylaWriteQueue = task;
+  return task;
+}
+
+async function aylaEnsureStateJournalUpgradeBackup() {
+  const current = await readAylaDb();
+  if (Number(current.state_journal_version || 0) > 0) {
+    return { skipped: true, reason: "state_journal_already_initialized" };
+  }
+  // Run before compaction or listen. The queued helper includes replayed legacy
+  // answer/roadmap journals and fsyncs a standalone snapshot in DATA_DIR/backups.
+  // Propagate failures so an upgrade cannot accept traffic without recovery data.
+  const backup = await aylaCreateDurableBackup();
+  await mutateAylaDb((db) => {
+    if (Number(db.state_journal_version || 0) > 0) return;
+    db.state_journal_migration = {
+      backup_path: backup.backup_path,
+      backed_up_at: backup.created_at,
+      standalone_snapshot: true,
+    };
+  });
+  // The durable migration delta initializes the unified version even on an
+  // otherwise idle installation, preventing another full backup on restart.
+  return { ...backup, skipped: false };
+}
+
+async function aylaStateJournalStatus(db) {
+  const stat = await fs.stat(AYLA_STATE_JOURNAL_PATH).catch((error) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  return {
+    path: AYLA_STATE_JOURNAL_PATH,
+    size_bytes: stat?.size || 0,
+    state_journal_version: Number(db.state_journal_version || 0),
+    checkpoint_idle_ms: AYLA_STATE_CHECKPOINT_IDLE_MS,
+    checkpoint_threshold_bytes: AYLA_STATE_CHECKPOINT_BYTES,
+    checkpoint_threshold_records: AYLA_STATE_CHECKPOINT_RECORDS,
+    backup_includes_durable_deltas: true,
+  };
+}
 
 function aylaMergeSettings(value = {}) {
   const merged = {
@@ -75685,9 +75915,13 @@ function cloneAylaDbForRequest(db) {
 }
 
 async function readAylaDbFromDisk() {
+  let snapshotMissing = false;
   try {
     await ensureDataDir();
-    const raw = await fs.readFile(AYLA_DB_PATH, "utf8");
+    const raw = await fs.readFile(AYLA_DB_PATH, "utf8").catch((error) => {
+      snapshotMissing = error.code === "ENOENT";
+      throw error;
+    });
     const parsed = JSON.parse(raw);
     const next = { ...DEFAULT_AYLA_DB, ...parsed };
     next.schema_version = Math.max(Number(parsed.schema_version || 0), Number(DEFAULT_AYLA_DB.schema_version || 0));
@@ -75713,9 +75947,11 @@ async function readAylaDbFromDisk() {
     if (roadmapReplay.applied) {
       console.log(`Recovered ${roadmapReplay.applied} durable roadmap journal record(s)`);
     }
-    return next;
+    return await aylaRecoverStateJournal(next);
   } catch (error) {
-    if (error.code === "ENOENT") {
+    if (snapshotMissing) {
+      const pending = await readAylaStateJournal(AYLA_STATE_JOURNAL_PATH, { repairTail: false });
+      if (pending.records.length) throw Object.assign(new Error("AylaMed state checkpoint is missing while durable deltas exist; restore the checkpoint before continuing"), { statusCode: 503, code: "AYLA_STATE_CHECKPOINT_MISSING" });
       const empty = {
         ...DEFAULT_AYLA_DB,
         aylaSettings: aylaMergeSettings(),
@@ -75725,10 +75961,10 @@ async function readAylaDbFromDisk() {
         empty,
         await readAylaQbankJournalRecords(AYLA_QBANK_JOURNAL_PATH),
       );
-      return applyAylaRoadmapJournalRecords(
+      return await aylaRecoverStateJournal(applyAylaRoadmapJournalRecords(
         qbankReplay.db,
         await readAylaRoadmapJournalRecords(AYLA_ROADMAP_JOURNAL_PATH),
-      ).db;
+      ).db);
     }
     console.error("AylaMed DB read error (fail-closed):", error.message);
     throw error;
@@ -75757,6 +75993,15 @@ async function writeAylaDb(db) {
     })
     .then(async () => {
     await ensureDataDir();
+    const latestState = aylaDbCache || await readAylaDb();
+    const latestStateVersion = Number(latestState.state_journal_version || 0);
+    if (Number(db.state_journal_version || 0) !== latestStateVersion) {
+      // Never checkpoint a stale whole-state snapshot over acknowledged deltas.
+      aylaDbCache = null;
+      aylaDbReadInFlight = null;
+      throw Object.assign(new Error("AylaMed state changed while saving. Refresh and retry."), { statusCode: 409, code: "AYLA_STATE_CHANGED" });
+    }
+    aylaDbCache = latestState;
     const incomingQbankVersion = Math.max(0, Number(db.qbank_state_version || 0));
     const latestQbankVersion = Math.max(0, Number(aylaDbCache?.qbank_state_version || 0));
     const incomingRoadmapVersion = Math.max(0, Number(db.roadmap_state_version || 0));
@@ -75794,15 +76039,15 @@ async function writeAylaDb(db) {
       ...DEFAULT_AYLA_DB,
       ...preparedDb,
       schema_version: DEFAULT_AYLA_DB.schema_version,
+      state_journal_version: latestStateVersion + 1,
       qbank_state_version: Math.max(incomingQbankVersion, latestQbankVersion),
       roadmap_state_version: Math.max(incomingRoadmapVersion, latestRoadmapVersion),
       aylaSettings: aylaMergeSettings(preparedDb.aylaSettings || {}),
       aylaAiUsageSettings: aylaMergeAiUsageSettings(preparedDb.aylaAiUsageSettings || {}),
       updatedAt: new Date().toISOString(),
     };
-    await ngWriteJsonAtomicStreaming(AYLA_DB_PATH, nextDb, "AylaMed database");
-    await clearAylaQbankJournal(AYLA_QBANK_JOURNAL_PATH);
-    await clearAylaRoadmapJournal(AYLA_ROADMAP_JOURNAL_PATH);
+    try { await aylaCheckpointState(nextDb); }
+    catch (error) { aylaDbCache = null; aylaDbReadInFlight = null; throw error; }
     aylaDbCache = nextDb;
     aylaDbReadInFlight = null;
   });
@@ -75816,25 +76061,22 @@ async function mutateAylaDb(mutator) {
       console.error("Previous AylaMed write failed; atomic mutation queue recovered:", error.message);
     })
     .then(async () => {
-      const source = aylaDbCache || await readAylaDbFromDisk();
+      const source = await readAylaDb();
       const mutation = await mutateJsonCopyOnWrite(source, mutator);
+      if (!mutation.changed) return mutation.result;
       const current = mutation.value;
       const nextDb = {
         ...DEFAULT_AYLA_DB,
         ...current,
         schema_version: DEFAULT_AYLA_DB.schema_version,
         qbank_state_version: Math.max(0, Number(current.qbank_state_version || 0)) + 1,
-        roadmap_state_version: Math.max(0, Number(current.roadmap_state_version || 0)),
+        roadmap_state_version: Math.max(0, Number(current.roadmap_state_version || 0))
+          + Number(AYLA_ROADMAP_STATE_COLLECTIONS.some((key) => source[key] !== current[key])),
         aylaSettings: aylaMergeSettings(current.aylaSettings || {}),
         aylaAiUsageSettings: aylaMergeAiUsageSettings(current.aylaAiUsageSettings || {}),
         updatedAt: new Date().toISOString(),
       };
-      await ensureDataDir();
-      await ngWriteJsonAtomicStreaming(AYLA_DB_PATH, nextDb, "AylaMed atomic database mutation");
-      await clearAylaQbankJournal(AYLA_QBANK_JOURNAL_PATH);
-      await clearAylaRoadmapJournal(AYLA_ROADMAP_JOURNAL_PATH);
-      aylaDbCache = nextDb;
-      aylaDbReadInFlight = null;
+      await aylaPersistStateDelta(source, nextDb);
       return mutation.result;
     });
   aylaWriteQueue = task;
@@ -75847,7 +76089,7 @@ async function mutateAylaDiagnosticAnswer(mutator) {
       console.error("Previous AylaMed write failed; diagnostic journal queue recovered:", error.message);
     })
     .then(async () => {
-      const source = aylaDbCache || await readAylaDbFromDisk();
+      const source = await readAylaDb();
       // A diagnostic answer may update only its session and immutable event.
       // Proxying the entire multi-product database made every authentication
       // and entitlement scan walk thousands of unrelated proxied records.
@@ -75872,14 +76114,12 @@ async function mutateAylaDiagnosticAnswer(mutator) {
         aylaAiUsageSettings: aylaMergeAiUsageSettings(current.aylaAiUsageSettings || {}),
         updatedAt: new Date().toISOString(),
       };
-      const journalRecord = createAylaDiagnosticJournalRecord({
+      createAylaDiagnosticJournalRecord({
         session: internal.session,
         event: internal.event,
         qbankStateVersion,
       });
-      await appendAylaQbankJournalRecord(AYLA_QBANK_JOURNAL_PATH, journalRecord);
-      aylaDbCache = nextDb;
-      aylaDbReadInFlight = null;
+      await aylaPersistStateDelta(source, nextDb);
       return result;
     });
   aylaWriteQueue = task;
@@ -75892,20 +76132,31 @@ async function mutateAylaRoadmapState(mutator) {
       console.error("Previous AylaMed write failed; roadmap journal queue recovered:", error.message);
     })
     .then(async () => {
-      const source = aylaDbCache || await readAylaDbFromDisk();
+      const source = await readAylaDb();
       // A daily plan writes only these small roadmap collections. Running the
       // whole multi-product database through the generic copy-on-write Proxy
       // makes every Object.values scan proxy thousands of unrelated records.
-      // Isolate the writable collections instead; all other collections keep
-      // their read-only source references and a thrown mutator is rollback-safe.
-      const current = {
-        ...source,
-        ...Object.fromEntries(AYLA_ROADMAP_STATE_COLLECTIONS.map((collection) => [
-          collection,
-          { ...(source[collection] && typeof source[collection] === "object" ? source[collection] : {}) },
-        ])),
-      };
-      const result = await mutator(current);
+      // Draft only writable collections, including their existing nested rows.
+      // Shallow map copies share rows with source and would both lose journal
+      // deltas and leak failed mutations into the cache. Accessors also track
+      // a mutator replacing a whole collection without proxying content reads.
+      const writable = Object.fromEntries(AYLA_ROADMAP_STATE_COLLECTIONS.map((collection) => [
+        collection,
+        source[collection] && typeof source[collection] === "object" ? source[collection] : {},
+      ]));
+      const mutation = await mutateJsonCopyOnWrite(writable, async (draft) => {
+        const current = { ...source };
+        for (const collection of AYLA_ROADMAP_STATE_COLLECTIONS) {
+          Object.defineProperty(current, collection, {
+            enumerable: true,
+            get: () => draft[collection],
+            set: (value) => { draft[collection] = value; },
+          });
+        }
+        return mutator(current);
+      });
+      const current = { ...source, ...mutation.value };
+      const result = mutation.result;
       const upserts = {};
       for (const collection of AYLA_ROADMAP_STATE_COLLECTIONS) {
         const before = source[collection] && typeof source[collection] === "object" ? source[collection] : {};
@@ -75919,9 +76170,7 @@ async function mutateAylaRoadmapState(mutator) {
       }
       if (!Object.values(upserts).some((rows) => Object.keys(rows).length)) return result;
       const roadmapStateVersion = Math.max(0, Number(current.roadmap_state_version || 0)) + 1;
-      const journalRecord = createAylaRoadmapJournalRecord({ upserts, roadmapStateVersion });
-      await appendAylaRoadmapJournalRecord(AYLA_ROADMAP_JOURNAL_PATH, journalRecord);
-      aylaDbCache = {
+      const nextDb = {
         ...DEFAULT_AYLA_DB,
         ...current,
         schema_version: DEFAULT_AYLA_DB.schema_version,
@@ -75930,7 +76179,7 @@ async function mutateAylaRoadmapState(mutator) {
         aylaAiUsageSettings: aylaMergeAiUsageSettings(current.aylaAiUsageSettings || {}),
         updatedAt: new Date().toISOString(),
       };
-      aylaDbReadInFlight = null;
+      await aylaPersistStateDelta(source, nextDb);
       return result;
     });
   aylaWriteQueue = task;
@@ -84113,9 +84362,14 @@ app.put("/api/ayla/admin/ai-usage/plans/:planId", async (req, res) => { try { aw
 app.put("/api/ayla/admin/ai-usage/students/:userId", async (req, res) => { try { await aylaRequireAdmin(req); const db = await readAylaDb(); aylaEnsureSeedData(db); const mode = ["inherit","custom","unlimited","blocked"].includes(String(req.body.mode)) ? String(req.body.mode) : "inherit"; db.aylaStudentAiOverrides[String(req.params.userId)] = { ...req.body, mode, updatedAt: aylaNow() }; await writeAylaDb(db); return aylaSendOk(res, { user_id: req.params.userId, override: db.aylaStudentAiOverrides[String(req.params.userId)] }); } catch (error) { return aylaSendError(res, error.statusCode || 500, error.message); } });
 app.delete("/api/ayla/admin/ai-usage/students/:userId", async (req, res) => { try { await aylaRequireAdmin(req); const db = await readAylaDb(); delete db.aylaStudentAiOverrides[String(req.params.userId)]; await writeAylaDb(db); return aylaSendOk(res, { user_id: req.params.userId, deleted: true }); } catch (error) { return aylaSendError(res, error.statusCode || 500, error.message); } });
 
-app.get("/api/ayla/admin/storage-safety", async (req, res) => { try { await aylaRequireAdmin(req); const aylaDb = await readAylaDb(); const knowledge = await aylaKnowledgeStatus(aylaDb); const stat = await fs.stat(AYLA_DB_PATH).catch(()=>null); return aylaSendOk(res, { separation: { ayla_db_path: AYLA_DB_PATH, lms_db_path: LIVE_DB_PATH, crm_db_path: CRM_DB_PATH, ayla_writes_to_lms: false, ayla_writes_to_crm: false, medical_knowledge_source: "aylamed_exam_library", knowledge_reads_from_crm: false, crm_success_story_strategy_reads_only: true }, ayla_file: stat ? { size_bytes: stat.size, modified_at: stat.mtime.toISOString() } : { missing: true }, ayla_counts: Object.fromEntries(Object.keys(AYLA_COLLECTIONS).map((key)=>[key, aylaValues(aylaDb,key).length])), knowledge }); } catch (error) { return aylaSendError(res, error.statusCode || 500, error.message); } });
+app.get("/api/ayla/admin/storage-safety", async (req, res) => { try { await aylaRequireAdmin(req); const aylaDb = await readAylaDb(); const knowledge = await aylaKnowledgeStatus(aylaDb); const stat = await fs.stat(AYLA_DB_PATH).catch(()=>null); return aylaSendOk(res, { separation: { ayla_db_path: AYLA_DB_PATH, lms_db_path: LIVE_DB_PATH, crm_db_path: CRM_DB_PATH, ayla_writes_to_lms: false, ayla_writes_to_crm: false, medical_knowledge_source: "aylamed_exam_library", knowledge_reads_from_crm: false, crm_success_story_strategy_reads_only: true }, ayla_file: stat ? { size_bytes: stat.size, modified_at: stat.mtime.toISOString() } : { missing: true }, state_journal: await aylaStateJournalStatus(aylaDb), ayla_counts: Object.fromEntries(Object.keys(AYLA_COLLECTIONS).map((key)=>[key, aylaValues(aylaDb,key).length])), knowledge }); } catch (error) { return aylaSendError(res, error.statusCode || 500, error.message); } });
 
-app.post("/api/ayla/admin/backup", async (req, res) => { try { await aylaRequireAdmin(req); await ensureDataDir(); const dir = path.join(DATA_DIR,"backups"); await fs.mkdir(dir,{recursive:true}); const stamp = new Date().toISOString().replace(/[:.]/g,"-"); const backupPath = path.join(dir,`aylamed-db-${stamp}.json`); const db = await readAylaDb(); await ngWriteJsonAtomicStreaming(backupPath, db, "AylaMed backup"); return aylaSendOk(res,{backup_path:backupPath,created_at:aylaNow()}); } catch (error) { return aylaSendError(res,error.statusCode||500,error.message); } });
+app.post("/api/ayla/admin/backup", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    return aylaSendOk(res, await aylaCreateDurableBackup({ checkpoint: req.body?.checkpoint === true }));
+  } catch (error) { return aylaSendError(res, error.statusCode || 500, error.message); }
+});
 
 app.get("/api/ayla/admin/legacy-migration/preview", async (req,res)=>{ try { await aylaRequireAdmin(req); const live=await readLiveDb(); const counts={}; for (const key of [...Object.keys(AYLA_COLLECTIONS),"aylaUsers"]) counts[key]=aylaValues(live,key).length; return aylaSendOk(res,{source:LIVE_DB_PATH,destination:AYLA_DB_PATH,read_only:true,counts,message:"Preview only. No LMS or CRM record was changed."}); } catch(error){ return aylaSendError(res,error.statusCode||500,error.message); } });
 app.post("/api/ayla/admin/legacy-migration/copy", async (req,res)=>{ try { await aylaRequireAdmin(req); const live=await readLiveDb(); const db=await readAylaDb(); const copied={}; for (const key of [...Object.keys(AYLA_COLLECTIONS),"aylaUsers"]) { aylaEnsureCollection(db,key); let count=0; for (const item of aylaValues(live,key)) { if (!aylaGetItem(db,key,item.id)) { aylaSetItem(db,key,item); count+=1; } } copied[key]=count; } await writeAylaDb(db); return aylaSendOk(res,{copied,source_unchanged:true,message:"Only legacy AylaMed records were copied. live-session-db.json and crm-db.json were not modified."}); } catch(error){ return aylaSendError(res,error.statusCode||500,error.message); } });
@@ -98600,8 +98854,34 @@ app.post("/admin/mobile/invitations", async (req, res) => {
   }
 });
 
+let aylaQbankAdaptationRunning = false;
+async function aylaDrainQbankAdaptation() {
+  if (aylaQbankAdaptationRunning) return;
+  aylaQbankAdaptationRunning = true;
+  try {
+    await runAylaQbankAdaptation({
+      readDb: readAylaDb,
+      mutateDb: mutateAylaDb,
+      buildPlan: (db, student, date, session) => {
+        if (normalizeAylaQbankExamTrack(student.examTrackId || student.exam) !== session.examTrack) {
+          throw new Error("Student exam changed before study plan refresh");
+        }
+        return aylaV189BuildDailyPlan(db, student, date, {
+          force: true, includeAssessment: false, skipAi: true,
+        });
+      },
+    });
+  } catch (error) {
+    console.warn("AylaMed QBank adaptation remains queued for recovery:", error.code || error.message);
+  } finally {
+    aylaQbankAdaptationRunning = false;
+  }
+}
+
 async function startNextgenServer() {
   const aylaWarmStartedAt = Date.now();
+  const upgradeBackup = await aylaEnsureStateJournalUpgradeBackup();
+  if (!upgradeBackup.skipped) console.log("AylaMed state journal upgrade recovery backup:", upgradeBackup);
   const aylaDb = await readAylaDb();
   const pilotCompaction = compactAylaPrivatePilotPlans(aylaDb);
   if (pilotCompaction.changed) {
@@ -98619,6 +98899,10 @@ async function startNextgenServer() {
   console.log("AylaMed private pilot plan compaction:", pilotCompaction);
 
   app.listen(PORT, () => {
+  if (process.env.AYLA_QBANK_ADAPTATION_ENABLED !== "false") {
+    setTimeout(aylaDrainQbankAdaptation, 2_000).unref?.();
+    setInterval(aylaDrainQbankAdaptation, 15_000).unref?.();
+  }
   console.log(`Server running on port ${PORT}`);
   console.log(`Backend build=${NEXTGEN_BACKEND_BUILD}; JSON body limit=${NEXTGEN_JSON_BODY_LIMIT}; memory soft guard=${NEXTGEN_BACKGROUND_MEMORY_SOFT_PERCENT}% of ${NEXTGEN_RENDER_MEMORY_LIMIT_MB} MB`);
   ngRunKnownScheduleStartupReconciliation()

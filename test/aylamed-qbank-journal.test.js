@@ -182,13 +182,14 @@ test("a complete 40-answer diagnostic replays without a full database checkpoint
   assert.equal(replay.db.qbank_state_version, 40);
 });
 
-test("server journals only baseline test answers and checkpoints on submission", () => {
+test("server retains legacy diagnostic recovery and routes current saves to the ordered state journal", () => {
   const serverSource = fsSync.readFileSync(new URL("../server.js", import.meta.url), "utf8");
   assert.match(
     serverSource,
     /session\.purpose === "baseline_diagnostic" && session\.mode === "test"/,
   );
-  assert.match(serverSource, /appendAylaQbankJournalRecord\(AYLA_QBANK_JOURNAL_PATH/);
+  assert.match(serverSource, /readAylaQbankJournalRecords\(AYLA_QBANK_JOURNAL_PATH/);
+  assert.match(serverSource, /appendAylaStateJournal\(AYLA_STATE_JOURNAL_PATH/);
   assert.match(serverSource, /isolateAylaDiagnosticAnswerState\(source\)/);
   assert.match(serverSource, /clearAylaQbankJournal\(AYLA_QBANK_JOURNAL_PATH\)/);
   assert.match(serverSource, /const mutation = await mutateAylaDb\(async \(db\) => \{/);
