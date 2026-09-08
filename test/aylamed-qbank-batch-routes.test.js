@@ -10,10 +10,10 @@ import { createAylaQbankSession, finalizeAylaQbankSession, canSubmitAylaQbankRoa
 // Execute the real route bodies, with only the external auth/content/store
 // boundaries replaced. This catches missing response codes and submit wiring
 // that pure session tests cannot observe.
-function harness() {
+function harness({ examTrack = "plab", questionPolicies = [] } = {}) {
   const questions = [1, 2].map(id => ({ id: `q${id}`, correct_answer_id: 2, explanation_html: "sealed", answers: [{ answer_id: 1 }, { answer_id: 2 }] }));
-  let db = { aylaQbankSessions: { s: createAylaQbankSession({ id: "s", studentId: "student", userId: "user", examTrack: "plab", mode: "test",
-    questions: questions.map((q, i) => ({ ref: `r${i + 1}`, contentQuestionId: q.id })) }) }, attempts: {} };
+  let db = { aylaQbankSessions: { s: createAylaQbankSession({ id: "s", studentId: "student", userId: "user", examTrack, mode: "test",
+    questions: questions.map((q, i) => ({ ref: `r${i + 1}`, contentQuestionId: q.id, ...questionPolicies[i] })) }) }, attempts: {} };
   const routes = new Map();
   const user = { id: "user" }, student = { id: "student" };
   const owned = (state, u, p, id) => {
@@ -103,3 +103,38 @@ test("batch submission keeps incomplete roadmap blocks open with no partial grad
   assert.equal(Object.keys(state().aylaQbankSessions.s.answers).length, 0);
   assert.equal(Object.keys(state().attempts).length, 0);
 });
+
+for (const scenario of [
+  { name: "all scored", policies: [{}, {}], answers: [1, 2], counts: [1, 1, 0], scored: 2, supplemental: 0, score: 50 },
+  { name: "partially answered", policies: [{}, {}], answers: [2], counts: [1, 0, 1], scored: 2, supplemental: 0, score: 50 },
+  { name: "mixed native and supplemental", policies: [{}, { scoringAllowed: false, supplemental: true }], answers: [1, 2], counts: [0, 1, 0], scored: 1, supplemental: 1, score: 0 },
+  { name: "supplemental only", policies: [{ scoringAllowed: false, supplemental: true }, { scoringAllowed: false, supplemental: true }], answers: [1, 2], counts: [0, 0, 0], scored: 0, supplemental: 2, score: null },
+  { name: "unanswered", policies: [{}, {}], answers: [], counts: [0, 0, 2], scored: 2, supplemental: 0, score: 0 },
+]) {
+  test(`real submit route reports consistent ${scenario.name} totals and idempotent replay`, async () => {
+    const { request, state } = harness({ examTrack: "mccqe", questionPolicies: scenario.policies });
+    const body = { idempotency_key: `submit-${scenario.name}`, expected_draft_version: 0,
+      answers: scenario.answers.map((choice, index) => ({ question_ref: `r${index + 1}`, selected_answer_id: choice })) };
+    const final = await request("submit", body);
+    assert.equal(final.status, 200);
+    const session = final.body.session;
+    assert.equal(session.status, "submitted");
+    assert.equal(session.answered_count, scenario.answers.length);
+    assert.equal(session.scored_question_count, scenario.scored);
+    assert.equal(session.supplemental_question_count, scenario.supplemental);
+    assert.deepEqual([session.correct_count, session.incorrect_count, session.unanswered_count], scenario.counts);
+    assert.equal(session.correct_count + session.incorrect_count + session.unanswered_count, session.scored_question_count);
+    assert.equal(session.score_percent, scenario.score);
+    for (const [index, selected] of scenario.answers.entries()) {
+      assert.equal(final.body.questions[index].result.correct, selected === 2);
+      assert.equal(final.body.questions[index].correct_answer_id, 2);
+    }
+    assert.equal(Object.keys(state().attempts).length, scenario.answers.length);
+    const beforeReplay = JSON.stringify(state());
+    const replay = await request("submit", body);
+    assert.equal(replay.status, 200);
+    assert.equal(replay.body.idempotent_replay, true);
+    assert.deepEqual(replay.body.session, session);
+    assert.equal(JSON.stringify(state()), beforeReplay);
+  });
+}
