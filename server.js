@@ -219,6 +219,7 @@ import {
   sanitizeAylaQbankSession,
   setAylaQbankQuestionMark,
 } from "./lib/aylamed-qbank.js";
+import { projectStudentQbankStem, projectStudentQbankHintMedia } from "./lib/aylamed-qbank-student-html.js";
 import { aylaStudentBankName } from "./lib/aylamed-bank-names.js";
 import {
   AYLA_NCLEX_VARIANTS,
@@ -48475,11 +48476,13 @@ async function aylaPlayableCdmSession(db, session) {
     }
     const playable = await ngRegistryQuestionWithPlayableMedia(rawStep);
     const revealKey = Boolean(response);
-    const visibleMedia = (playable.media || []).filter((item) => {
+    const stem = projectStudentQbankStem(playable.question_html);
+    const projected = projectStudentQbankHintMedia(playable, stem, revealKey);
+    const visibleMedia = (projected.media || []).filter((item) => {
       const placement = String(item.placement || "explanation");
       return placement === "question" || revealKey;
     });
-    const visibleVideos = (playable.videos || []).filter((item) => {
+    const visibleVideos = (projected.videos || []).filter((item) => {
       const placement = String(item.placement || "explanation");
       return placement === "question" || revealKey;
     });
@@ -48488,7 +48491,7 @@ async function aylaPlayableCdmSession(db, session) {
       content_question_id: mapping.contentQuestionId,
       position: index + 1,
       title: rawStep.title || `Step ${index + 1}`,
-      question_html: rawStep.question_html,
+      question_html: stem.html,
       explanation_html: revealKey ? rawStep.explanation_html : null,
       max_responses: Number(rawStep.max_responses || mapping.maxResponses || 1),
       has_dangerous_acts_in_key: revealKey ? rawStep.has_dangerous_acts === true : null,
