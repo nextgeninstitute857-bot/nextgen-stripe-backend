@@ -50,3 +50,39 @@ test('NCLEX variant evidence comes from every source alias and cannot default am
   assert.equal(scope([source('NCLEX RN')], { nclex_variant: 'unverified' }).classification_blocked_reason, 'nclex_variant_missing');
   assert.deepEqual(scope([source('Generic NCLEX')]).allowed_systems, []);
 });
+
+test('shared NCLEX eligibility requires independently identified RN and PN collections', () => {
+  const source = (title, collection_id) => ({ collection_title: title, collection_id, qbank_registered: true });
+  const rn = source('NCLEX RN', 'rn-bank'), pn = source('NCLEX PN', 'pn-bank');
+  const scope = (sources, data = {}) => questionTaxonomyVariantScope({ exam_track: 'nclex', review_sources: sources, source_data: data });
+  const shared = scope([rn, pn]);
+  assert.equal(shared.shared_classification_allowed, true);
+  assert.deepEqual(shared.shared_nclex_variants, ['nclex_pn', 'nclex_rn']);
+  assert.equal(shared.shared_allowed_systems.length, 6);
+  assert.ok(shared.shared_allowed_systems.includes('Physiological Adaptation'));
+  for (const label of ['Management of Care', 'Coordinated Care', 'Pharmacological Therapies', 'Pharmacological and Parenteral Therapies']) assert.ok(!shared.shared_allowed_systems.includes(label));
+  assert.equal(shared.nclex_variant, null); assert.equal(shared.classification_blocked_reason, 'nclex_variant_conflict');
+  for (const [sources, data] of [
+    [[rn], {}], [[source('NCLEX RN and PN', 'mixed')], {}], [[rn, { ...pn, collection_id: 'rn-bank' }], {}],
+    [[rn, { ...pn, qbank_registered: false }], {}], [[rn, pn, source('NCLEX unspecified', 'unknown')], {}],
+    [[rn, { ...pn, collection_id: null }], {}], [[rn, pn], { nclex_variant: 'unknown' }],
+    [[rn, pn], { exam_variant: 'NCLEX RN and PN' }],
+  ]) {
+    const result = scope(sources, data); assert.equal(result.shared_classification_allowed, false); assert.deepEqual(result.shared_allowed_systems, []);
+  }
+  assert.equal(scope([rn, pn], { nclex_variant: 'nclex_rn' }).shared_classification_allowed, true);
+});
+
+test('shared manifests explicitly bind both variants and reject variant-specific categories', () => {
+  const common = { ...taxonomy(), system_key: 'physiological_adaptation', labels: { ...taxonomy().labels, system: 'Physiological Adaptation' } };
+  const sharedItem = { ...item(), taxonomy: common, nclex_variants: ['nclex_rn', 'nclex_pn'] };
+  const make = patch => ({ ...manifest(), exam_track: 'nclex', items: [{ ...sharedItem, ...patch }] });
+  const normalized = normalizeQuestionTaxonomyReviewManifest(make({}), []);
+  assert.deepEqual(normalized.items[0].nclex_variants, ['nclex_pn', 'nclex_rn']); assert.equal(normalized.items[0].nclex_variant, undefined);
+  for (const patch of [{ nclex_variants: null }, { nclex_variants: [] }, { nclex_variants: ['nclex_rn'] }, { nclex_variants: ['nclex_rn', 'nclex_rn'] }, { nclex_variants: ['RN', 'PN'] }, { nclex_variant: 'nclex_rn' }]) assert.throws(() => normalizeQuestionTaxonomyReviewManifest(make(patch), []));
+  for (const system of ['Management of Care', 'Coordinated Care', 'Pharmacological Therapies', 'Pharmacological and Parenteral Therapies']) {
+    const t = { ...common, system_key: system.toLowerCase().replace(/ /g, '_'), labels: { ...common.labels, system } };
+    assert.throws(() => normalizeQuestionTaxonomyReviewManifest(make({ taxonomy: t }), []), /allowed exam system/);
+  }
+  assert.throws(() => normalizeQuestionTaxonomyReviewManifest({ ...make({}), exam_track: 'usmle_step_1' }, ['Physiological Adaptation']), /Shared NCLEX/);
+});

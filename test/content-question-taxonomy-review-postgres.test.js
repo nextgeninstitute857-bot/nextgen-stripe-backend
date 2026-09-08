@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 import { exportQuestionTaxonomyReviewPage, reviewQuestionTaxonomyBatch } from '../lib/content-question-taxonomy-review.js';
-import { contentQbankFacetsQuery } from '../lib/content-registry-postgres.js';
+import { contentQbankFacetsQuery, contentQbankFacetQuery } from '../lib/content-registry-postgres.js';
 import { buildAylaQbankFacetTree } from '../lib/aylamed-qbank-facets.js';
 const runtime = process.env.AYLA_TEST_PGLITE_PATH;
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
@@ -181,6 +181,39 @@ test('PostgreSQL reviewed question workflow preserves content and enforces atomi
       const freshRn = (await page({ examTrack: 'nclex', questionIds: [rn.id] })).questions[0];
       const wrong = { exam_track: 'nclex', review_id: id(9102), items: [{ ...reviewed(freshRn, 'Coordinated Care'), nclex_variant: 'nclex_pn', expected_override_revision: 1 }] };
       await assert.rejects(preview(wrong), { statusCode: 409 });
+    });
+    await t.test('explicit shared review preserves both bank selections and rejects stale or ambiguous provenance', async () => {
+      await reset(6);
+      await db.exec(`UPDATE content_questions SET exam_track='nclex'; UPDATE content_collections SET title='NCLEX RN bank';`);
+      await db.query(`INSERT INTO content_collections SELECT $1,destinations,status,source_profile,source_namespace,source_provider,'pn','NCLEX PN bank',source_year,approved_at,created_at FROM content_collections LIMIT 1`, [id(1001)]);
+      await db.query(`INSERT INTO content_collection_destinations VALUES ($1,'aylamed_qbank',true,'')`, [id(1001)]);
+      for (let n = 1; n <= 6; n++) await db.query(`INSERT INTO content_source_aliases(id,question_id,collection_id,source_namespace,source_item_id) VALUES ($1,$2,$3,'second-source',$4)`, [id(2500+n), id(n), id(1001), String(n)]);
+      const exported = await page({ examTrack: 'nclex' }), before = await immutableState();
+      assert.ok(exported.questions.every(q => q.shared_classification_allowed && q.classification_blocked_reason === 'nclex_variant_conflict'));
+      const systems = exported.questions[0].shared_allowed_systems; assert.equal(systems.length, 6);
+      const input = { exam_track: 'nclex', review_id: id(9200), items: exported.questions.map((q, i) => ({ question_id: q.id,
+        expected_evidence_fingerprint: q.evidence_fingerprint, nclex_variants: q.shared_nclex_variants,
+        taxonomy: { ...taxonomy(), system_key: systems[i].toLowerCase().replace(/ /g, '_'), labels: { ...taxonomy().labels, system: systems[i] } },
+        reason: 'Explicit review of a common category for both independently evidenced source variants.' })) };
+      const dry = await preview(input); assert.equal(await count('content_question_taxonomy_overrides'), 0);
+      await db.query('UPDATE content_collections SET title=$2 WHERE id=$1', [id(1001), 'Ambiguous NCLEX RN and PN bank']);
+      await assert.rejects(apply(input, dry), { statusCode: 422 }); assert.equal(await count('content_question_taxonomy_imports'), 0);
+      await db.query('UPDATE content_collections SET title=$2 WHERE id=$1', [id(1001), 'NCLEX PN bank']);
+      const applied = await apply(input, dry); assert.equal(applied.updated_count, 6); assert.deepEqual(await immutableState(), before);
+      for (const collection of [id(1000), id(1001)]) {
+        const opts = { examTrack: 'nclex', collectionIds: [collection] }, query = contentQbankFacetsQuery(opts);
+        const tree = buildAylaQbankFacetTree((await db.query(query.sql, query.values)).rows, { examTrack: 'nclex' });
+        assert.equal(tree.question_count, 6); assert.equal(tree.coverage.reviewed_question_count, 6);
+        assert.deepEqual(tree.nodes.map(n => n.label).sort(), [...systems].sort());
+        for (const item of input.items) {
+          const path = Object.fromEntries(['system_key', 'subsystem_key', 'topic_key', 'subtopic_key'].map(k => [k, item.taxonomy[k]]));
+          const selection = contentQbankFacetQuery({ ...opts, filters: { selection_paths: [path] } });
+          assert.deepEqual((await db.query('SELECT q.id ' + selection.sql, selection.values)).rows.map(q => q.id), [item.question_id]);
+        }
+      }
+      const replay = await apply(input, dry); assert.equal(replay.replayed, true); assert.equal(await count('content_taxonomy_audit_events'), 6);
+      const refreshed = await page({ examTrack: 'nclex' });
+      assert.ok(refreshed.questions.every(q => q.override.revision === 1 && q.taxonomy.review_status === 'approved'));
     });
   } finally { await db.close(); }
 });
