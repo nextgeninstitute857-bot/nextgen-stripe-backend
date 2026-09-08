@@ -57,6 +57,14 @@ function proposal(overrides = {}) {
   };
 }
 
+test('unknown outlier IDs cannot silently pass the automatic approval gate', () => {
+  const request = buildContentTaxonomyProviderPairRequest(pair(), evidence(), { allowedSystems: ['Hematology'] });
+  const result = normalizeContentTaxonomyProviderPairClassification(proposal({ outlier_question_ids: ['not-in-evidence'] }), request);
+  assert.equal(result.autoApprovalReady, false);
+  assert.deepEqual(result.unknownOutlierQuestionIds, ['not-in-evidence']);
+  assert.ok(result.reviewReasons.includes('unknown_outlier_question_ids'));
+});
+
 test("taxonomy classifier uses a bounded output budget suitable for reasoning", () => {
   assert.equal(contentTaxonomyClassifierMaxOutputTokens(), 12_000);
   assert.equal(contentTaxonomyClassifierMaxOutputTokens("2000"), 8_000);
