@@ -384,6 +384,7 @@ import {
   searchAylaLibraryPages,
   selectAylaRoadmapReading,
 } from "./lib/aylamed-library.js";
+import { buildAylaOpenReadingCatalog, normalizeAylaOpenReading } from "./lib/aylamed-open-reading.js";
 import {
   searchAylaLibraryGrounding,
   summarizeAylaLibraryGrounding,
@@ -84442,6 +84443,7 @@ const AYLA_V189_SYSTEMS = [
 const AYLA_V189_RESOURCE_TYPES = new Set([
   "book",
   "reading",
+  "external_reading",
   "vimeo_video",
   "video_transcript",
   "external_question",
@@ -84642,7 +84644,7 @@ function aylaPublicationResourceType(resource = {}) {
   if (["legacy_cdm_case", "cdm_program", "clinical_decision_program"].includes(rawType)) return "cdm_program";
   const type = aylaV189ResourceType(rawType);
   if (["vimeo_video", "video_transcript"].includes(type)) return "video";
-  if (["reading", "book", "revision_sheet"].includes(type)) return "book";
+  if (["reading", "book", "revision_sheet", "external_reading"].includes(type)) return "book";
   if (type === "flashcard") return "flashcard_collection";
   if (["internal_mcq", "external_question", "assessment", "assessment_blueprint"].includes(type)) return "qbank_collection";
   return type;
@@ -85010,6 +85012,13 @@ function aylaV189NormalizeResource(payload = {}, existing = {}) {
     createdAt: existing.createdAt || payload.createdAt || aylaNow(),
     updatedAt: aylaNow(),
   };
+  if (type === "external_reading") {
+    // Open-reference rights and editorial approval must be explicit; the legacy
+    // resource defaults must not turn an incomplete import into a published book.
+    resource.approved = (payload.approved ?? existing.approved) === true;
+    resource.status = aylaV189CleanText(payload.status || existing.status || "draft").toLowerCase();
+    resource.verificationStatus = aylaV189CleanText(payload.verificationStatus || payload.verification_status || existing.verificationStatus || existing.verification_status || "pending_review");
+  }
   resource.vimeoEmbedUrl = aylaV189VimeoEmbed(resource);
   resource.isolationStatus = examTrackId ? "track_locked" : "quarantined_missing_or_invalid_exam_track";
   return resource;
@@ -85020,6 +85029,7 @@ function aylaV190ResourceValidation(resource = {}) {
   if (!resource.examTrackId || !AYLA_EXAM_REGISTRY[resource.examTrackId]) errors.push("A valid examTrackId is required");
   if (!String(resource.system || "").trim() || String(resource.system).toLowerCase() === "general") errors.push("A track-specific system is required");
   if (!String(resource.topic || "").trim()) errors.push("A topic is required");
+  if (resource.type === "external_reading" && !normalizeAylaOpenReading(resource, { examTrack: resource.examTrackId, requireApproval: false })) errors.push("External readings require a supported open publisher URL, visible attribution, license, exam and verified rights metadata");
   if (["external_question", "internal_mcq"].includes(aylaV189ResourceType(resource.type)) && !String(resource.questionNumber || resource.resourceNumber || "").trim()) errors.push("Original question number or QID is required");
   if (aylaV189ResourceType(resource.type) === "vimeo_video" && !String(resource.vimeoId || resource.vimeoUrl || "").trim()) errors.push("Vimeo ID or URL is required");
   if (["book", "reading", "vimeo_video", "video_transcript"].includes(aylaV189ResourceType(resource.type)) && !["authorized", "admin_verified", "licensed", "owned"].includes(String(resource.authorizationStatus || "").toLowerCase())) errors.push("Authorization status must be verified for books and videos");
@@ -94908,6 +94918,16 @@ app.get("/api/ayla/students/:studentId/library", async (req, res) => {
       limit: req.query.limit,
       offset: req.query.offset,
     });
+    const openReadings = buildAylaOpenReadingCatalog(
+      aylaV189RelevantResources(db, student, ["external_reading"], { enrichMappings: false, systemProgress: [] }),
+      { examTrack: student.examTrackId || student.exam_track_id || student.exam, filters: {
+        system: req.query.system || req.query.system_key, topic: req.query.topic || req.query.topic_key,
+        search: req.query.search || req.query.q,
+      } },
+    );
+    catalog.external_readings = openReadings.resources;
+    catalog.external_reading_count = openReadings.resources.length;
+    catalog.facets.systems = [...new Set([...catalog.facets.systems, ...openReadings.systems])].sort();
     return aylaSendOk(res, {
       catalog,
       page_source_warning: eligible.warning,
