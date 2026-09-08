@@ -505,7 +505,9 @@ test("server wires onboarding into the existing isolated diagnostic and QBank ro
   assert.match(qbankSubmit, /verified_baseline: verifiedBaseline/);
   assert.match(qbankSubmit, /aylaV229StoreFutureRoadmapOutline/);
   assert.match(qbankSubmit, /starting_readiness_report: startingReadinessReport/);
-  assert.match(qbankSubmit, /aylaV189BuildDailyPlan\(db, fresh\.student, tomorrow/);
+  assert.match(qbankSubmit, /const futureRoadmap = \{ status: "queued", date: tomorrow \};[\s\S]*?finalized\.session\.adaptation = \{[\s\S]*?\.\.\.futureRoadmap,[\s\S]*?aylaSetItem\(db, "aylaQbankSessions", finalized\.session\)/);
+  assert.doesNotMatch(qbankSubmit, /aylaV189BuildDailyPlan\(/);
+  assert.match(server, /runAylaQbankAdaptation\(\{[\s\S]*?readDb: readAylaDb,[\s\S]*?mutateDb: mutateAylaDb,[\s\S]*?aylaV189BuildDailyPlan\(db, student, date/);
   assert.match(diagnosticRoute, /buildAylaStartingReadinessReport/);
   assert.doesNotMatch(server, /aylaDeleteItem\(db, "aylaRoadmapTasks"/);
 });

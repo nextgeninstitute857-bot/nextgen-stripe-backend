@@ -92,6 +92,63 @@ test("concurrent queued writes and a throwing mutator preserve every successful 
   assert.equal(recovered.aylaQbankSessions.s.answers.bad, undefined);
 });
 
+test("roadmap assignment of an existing revision and new plan durably replays together", async (t) => {
+  const f = await fixture(t, { aylaRevisionQueue: { r: { id: "r", status: "due", links: {} } } });
+  const app = await persistenceHarness(f.directory); t.after(app.stop);
+  const before = await app.read();
+  const result = await app.roadmap((db) => {
+    const revision = db.aylaRevisionQueue.r;
+    revision.status = "assigned";
+    revision.assignedAssignmentId = "a";
+    revision.links.planId = "p";
+    db.aylaRevisionQueue.r = revision;
+    db.aylaDailyPlans.p = { id: "p", status: "pending" };
+    db.aylaResourceAssignments.a = { id: "a", planId: "p", revisionId: "r" };
+    return revision;
+  });
+  assert.equal(before.aylaRevisionQueue.r.status, "due");
+  assert.equal(result.status, "assigned");
+  const restart = await persistenceHarness(f.directory); t.after(restart.stop);
+  const recovered = await restart.read();
+  assert.deepEqual(recovered.aylaRevisionQueue.r, {
+    id: "r", status: "assigned", assignedAssignmentId: "a", links: { planId: "p" },
+  });
+  assert.equal(recovered.aylaDailyPlans.p.status, "pending");
+  assert.equal(recovered.aylaResourceAssignments.a.revisionId, "r");
+  assert.equal(recovered.state_journal_version, 1);
+  assert.equal(recovered.roadmap_state_version, 1);
+});
+
+test("roadmap existing-row-only edits advance durable versions while reads remain no-ops", async (t) => {
+  const f = await fixture(t, { aylaRevisionQueue: { r: { id: "r", status: "due" } } });
+  const app = await persistenceHarness(f.directory); t.after(app.stop);
+  await app.roadmap((db) => { db.aylaRevisionQueue.r.status = "assigned"; });
+  await app.roadmap((db) => db.aylaRevisionQueue.r);
+  const restart = await persistenceHarness(f.directory); t.after(restart.stop);
+  const recovered = await restart.read();
+  assert.equal(recovered.aylaRevisionQueue.r.status, "assigned");
+  assert.equal(recovered.state_journal_version, 1);
+  assert.equal(recovered.roadmap_state_version, 1);
+});
+
+test("throwing roadmap mutations roll back existing nested rows and replacement collections", async (t) => {
+  const f = await fixture(t, { aylaRevisionQueue: { r: { id: "r", status: "due", links: {} } } });
+  const app = await persistenceHarness(f.directory); t.after(app.stop);
+  await assert.rejects(app.roadmap((db) => {
+    db.aylaRevisionQueue.r.status = "assigned";
+    db.aylaRevisionQueue.r.links.assignmentId = "bad";
+    db.aylaDailyPlans = { bad: { id: "bad" } };
+    throw new Error("abort roadmap");
+  }), /abort roadmap/);
+  assert.deepEqual((await app.read()).aylaRevisionQueue.r, { id: "r", status: "due", links: {} });
+  await app.roadmap((db) => { db.aylaDailyPlans = { good: { id: "good" } }; });
+  const restart = await persistenceHarness(f.directory); t.after(restart.stop);
+  const recovered = await restart.read();
+  assert.deepEqual(recovered.aylaRevisionQueue.r, { id: "r", status: "due", links: {} });
+  assert.deepEqual(recovered.aylaDailyPlans, { good: { id: "good" } });
+  assert.equal(recovered.state_journal_version, 1);
+});
+
 test("partial append failure truncates and syncs back to the previous record before version reuse", async (t) => {
   const f = await fixture(t); const first = transition({}, "first");
   await appendAylaStateJournal(f.journal, first.record);

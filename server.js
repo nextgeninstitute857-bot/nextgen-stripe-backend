@@ -76102,16 +76102,27 @@ async function mutateAylaRoadmapState(mutator) {
       // A daily plan writes only these small roadmap collections. Running the
       // whole multi-product database through the generic copy-on-write Proxy
       // makes every Object.values scan proxy thousands of unrelated records.
-      // Isolate the writable collections instead; all other collections keep
-      // their read-only source references and a thrown mutator is rollback-safe.
-      const current = {
-        ...source,
-        ...Object.fromEntries(AYLA_ROADMAP_STATE_COLLECTIONS.map((collection) => [
-          collection,
-          { ...(source[collection] && typeof source[collection] === "object" ? source[collection] : {}) },
-        ])),
-      };
-      const result = await mutator(current);
+      // Draft only writable collections, including their existing nested rows.
+      // Shallow map copies share rows with source and would both lose journal
+      // deltas and leak failed mutations into the cache. Accessors also track
+      // a mutator replacing a whole collection without proxying content reads.
+      const writable = Object.fromEntries(AYLA_ROADMAP_STATE_COLLECTIONS.map((collection) => [
+        collection,
+        source[collection] && typeof source[collection] === "object" ? source[collection] : {},
+      ]));
+      const mutation = await mutateJsonCopyOnWrite(writable, async (draft) => {
+        const current = { ...source };
+        for (const collection of AYLA_ROADMAP_STATE_COLLECTIONS) {
+          Object.defineProperty(current, collection, {
+            enumerable: true,
+            get: () => draft[collection],
+            set: (value) => { draft[collection] = value; },
+          });
+        }
+        return mutator(current);
+      });
+      const current = { ...source, ...mutation.value };
+      const result = mutation.result;
       const upserts = {};
       for (const collection of AYLA_ROADMAP_STATE_COLLECTIONS) {
         const before = source[collection] && typeof source[collection] === "object" ? source[collection] : {};
