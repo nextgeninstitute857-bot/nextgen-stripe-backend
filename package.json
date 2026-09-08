@@ -24,6 +24,7 @@
     "livekit-server-sdk": "2.18.0",
     "mime-types": "^3.0.2",
     "nodemailer": "^9.0.3",
+    "parse5": "8.0.1",
     "pdf-parse": "^1.1.1",
     "pg": "^8.16.3",
     "stream-chain": "^2.2.5",
