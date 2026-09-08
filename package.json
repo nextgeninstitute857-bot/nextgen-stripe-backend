@@ -10,6 +10,11 @@
     "flashcards:migrate": "node scripts/migrate-flashcards-to-postgres.mjs",
     "flashcards:verify": "node scripts/verify-flashcard-postgres.mjs"
   },
+  "overrides": {
+    "@aws-sdk/core@3.883.0": {
+      "fast-xml-parser": "5.11.1"
+    }
+  },
   "dependencies": {
     "@aws-sdk/client-s3": "3.883.0",
     "@aws-sdk/lib-storage": "3.883.0",
