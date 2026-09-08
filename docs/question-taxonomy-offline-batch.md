@@ -22,7 +22,7 @@ The tool accepts one evidence page of up to 100 questions. It records question-c
 
 Missing explanation/choices/correct-answer references and blocked or inconsistent NCLEX RN/PN provenance stay held. NCLEX uses each question's exact exported variant and system list. Source images/audio/video are not fetched or sent as media. Their HTML references and media flags are retained, and returned proposals cannot dismiss a detected media flag. A clinician must inspect any referenced media independently before review.
 
-Full stems, all choices and complete explanations are retained as original HTML. Complete outer tables are also separated into ordered HTML blocks, including nested tables; malformed table markup remains unchanged and flagged. This is conservative extraction, not a general HTML parser or sanitizer. The prompt explicitly treats every source field as untrusted data. Never render generated HTML without the existing authenticated safe renderer.
+Full stems, all choices and complete explanations are sent once per section as `original_html`, with each choice's original answer ID. Every table, including nested tables, remains verbatim inside that HTML; separate table copies and alternate table-free views are not sent. Styles, whitespace and clinical wording are unchanged. Malformed table markup and media references remain flagged. The original evidence export stays unchanged on disk and must be retained with the preparation artifacts. This is conservative markup inspection, not a general HTML parser or sanitizer. The prompt explicitly treats every source field as untrusted data. Never render generated HTML without the existing authenticated safe renderer.
 
 ## Validate separately obtained results
 

@@ -43,8 +43,12 @@ test('preparation preserves complete long clinical evidence, tables, choices and
   assert.ok(!request.body.input[0].content[0].text.includes(secretMarker));
   const source = JSON.parse(request.body.input[1].content[0].text).untrusted_question_evidence;
   assert.equal(source.documents.stem.original_html, stem);
-  assert.equal(source.documents.stem.tables_html.length, 1);
-  assert.ok(source.documents.stem.html_without_tables.includes('[TABLE 1]'));
+  assert.equal(jsonl.split(secretMarker).length - 1, 1, 'Untrusted source text is sent only once');
+  assert.match(request.body.input[0].content[0].text, /Complete tables remain inside the original HTML/);
+  for (const section of [source.documents.stem, source.documents.explanation, ...source.documents.choices]) {
+    assert.equal(Object.hasOwn(section, 'tables_html'), false);
+    assert.equal(Object.hasOwn(section, 'html_without_tables'), false);
+  }
   assert.equal(source.documents.explanation.original_html, q.explanation_html);
   assert.equal(source.documents.choices[0].original_html, q.answers[0].text_html);
   assert.equal(source.correct_answer_id, 1); assert.equal(source.evidence_fingerprint, fingerprint);
@@ -53,6 +57,42 @@ test('preparation preserves complete long clinical evidence, tables, choices and
   assert.match(manifest.estimate.method, /heuristic only/);
   assert.equal(manifest.estimate.price_estimate, null);
   assert.equal(manifest.estimate.model_compatibility_verified, false);
+});
+
+test('wire payload retains exact original sections and answer associations without mirror copies or input mutation', () => {
+  const stem = '  <style>.clinical{white-space:pre}</style><p>STEM_ONCE: μg / m² 🩺</p><table><tr><th>Finding</th><th>Value</th></tr><tr><td>STEM_TABLE_ONCE<table><tr><td>NESTED_ONCE</td></tr></table></td><td>2.5</td></tr></table>\n';
+  const explanation = '<p>EXPLANATION_ONCE</p><table><tr><td>EXPLANATION_TABLE_ONCE</td></tr></table><img src="source-image.png"><table>Unclosed';
+  const choices = [{ answer_id: 'choice-B', text_html: '<table><tr><td>CHOICE_B_ONCE</td><td>1</td></tr></table>' },
+    { answer_id: 9, text_html: '\n<p>CHOICE_NINE_ONCE</p><audio src="source-audio.mp3"></audio> ' }];
+  const evidence = page([question(1, { question_html: stem, explanation_html: explanation, answers: choices, correct_answer_id: 'choice-B' })]);
+  const original = JSON.stringify(evidence);
+  const prepared = prepareQuestionTaxonomyBatch(evidence, { model: 'explicit-fixture-model' });
+  const request = JSON.parse(prepared.jsonl);
+  const source = JSON.parse(request.body.input[1].content[0].text).untrusted_question_evidence;
+  assert.equal(source.documents.stem.original_html, stem);
+  assert.equal(source.documents.explanation.original_html, explanation);
+  assert.deepEqual(source.documents.choices.map(row => ({ answer_id: row.answer_id, text_html: row.original_html })), choices);
+  assert.equal(source.correct_answer_id, 'choice-B');
+  assert.equal(source.documents.explanation.malformed_table_markup, true);
+  assert.deepEqual(source.media_flags, ['img', 'audio']);
+  assert.equal(source.media_review_required, true);
+  assert.equal(prepared.manifest.expected[0].malformed_table_markup, true);
+  for (const marker of ['STEM_ONCE', 'STEM_TABLE_ONCE', 'NESTED_ONCE', 'EXPLANATION_ONCE', 'EXPLANATION_TABLE_ONCE', 'CHOICE_B_ONCE', 'CHOICE_NINE_ONCE']) {
+    assert.equal(prepared.jsonl.split(marker).length - 1, 1, marker);
+  }
+  assert.doesNotMatch(prepared.jsonl, /html_without_tables|tables_html/);
+  assert.equal(JSON.stringify(evidence), original, 'Private evidence is not mutated');
+});
+
+test('a complete section that fits the request cap is not held because of redundant copies', () => {
+  const html = `<table><tr><td>${'Large synthetic section. '.repeat(3500)}</td></tr></table>`;
+  assert.ok(Buffer.byteLength(html) * 2 > LIMITS.requestBytes);
+  const prepared = prepare([question(1, { question_html: html })]);
+  assert.equal(prepared.manifest.prepared_count, 1);
+  assert.equal(prepared.manifest.held_count, 0);
+  assert.ok(prepared.manifest.expected[0].request_bytes < LIMITS.requestBytes);
+  const source = JSON.parse(JSON.parse(prepared.jsonl).body.input[1].content[0].text).untrusted_question_evidence;
+  assert.equal(source.documents.stem.original_html, html);
 });
 
 test('nested tables and malformed markup preserve every original byte and media flags', () => {
@@ -190,7 +230,8 @@ test('CLI runs offline, preserves source privately, refuses overwrites and gives
   const cli = fileURLToPath(new URL('../scripts/question-taxonomy-batch.mjs', import.meta.url));
   const fixture = path.join(directory, 'evidence.json'); const target = path.join(directory, 'batch');
   const sentinel = 'PRIVATE_CLINICAL_MARKER';
-  await fs.writeFile(fixture, JSON.stringify(page([question(1, { question_html: sentinel })])));
+  const originalEvidence = JSON.stringify(page([question(1, { question_html: sentinel })]));
+  await fs.writeFile(fixture, originalEvidence);
   const denyNetwork = path.join(directory, 'deny-network.mjs');
   await fs.writeFile(denyNetwork, `import http from 'node:http'; import https from 'node:https'; import net from 'node:net'; import tls from 'node:tls'; import dns from 'node:dns'; import {syncBuiltinESMExports} from 'node:module';
     const deny = () => { throw new Error('Network is forbidden in the offline CLI test'); };
@@ -200,6 +241,7 @@ test('CLI runs offline, preserves source privately, refuses overwrites and gives
   const run = args => spawnSync(process.execPath, ['--import', pathToFileURL(denyNetwork).href, cli, ...args], { encoding: 'utf8', env: { ...process.env, OPENAI_API_KEY: 'NO_NETWORK_TEST_SENTINEL' } });
   const argumentsList = ['prepare', '--input', fixture, '--out-dir', target, '--model', 'explicit-fixture-model'];
   let execution = run(argumentsList); assert.equal(execution.status, 0, execution.stderr);
+  assert.equal(await fs.readFile(fixture, 'utf8'), originalEvidence, 'CLI retains the original private evidence export unchanged');
   assert.ok(!execution.stdout.includes(sentinel)); assert.ok(!execution.stderr.includes(sentinel));
   assert.ok((await fs.readFile(path.join(target, 'requests.jsonl'), 'utf8')).includes(sentinel));
   execution = run(argumentsList); assert.equal(execution.status, 1);
