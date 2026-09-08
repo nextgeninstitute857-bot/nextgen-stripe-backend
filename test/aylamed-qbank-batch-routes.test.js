@@ -30,7 +30,7 @@ function harness() {
     aylaOwnedQbankSession: owned,
     aylaRequireQbankAccess: () => {}, aylaRequireCurrentDiagnosticBlueprint: () => {},
     aylaRevalidateQbankContext: () => ({ user, student }),
-    aylaSessionQbankQuestions: async () => questions,
+    aylaSessionQbankQuestions: async (s, mappings) => questions.filter(q => mappings.some(row => row.contentQuestionId === q.id)),
     aylaDiagnosticQuestionForSession: (s, q) => q,
     mutateAylaDb: async fn => { const prepared = await mutateJsonCopyOnWrite(db, fn); db = prepared.value; return prepared.result; },
     prepareAylaQbankBatch, finalizeAylaQbankSession, canSubmitAylaQbankRoadmapSession, qbankSessionQuestion,
@@ -44,6 +44,8 @@ function harness() {
     aylaV227RefreshWeakAreaProjection: () => ({ count: 1 }),
     aylaDateOnly: () => "2026-09-09", aylaAddDays: () => new Date(), aylaNow: () => new Date().toISOString(),
     readAylaDb: async () => db,
+    sanitizeAylaQbankSession,
+    aylaPlayableQbankQuestion: async (state, s, mapping, raw) => sanitizeAylaQbankQuestion(raw, { session: s, questionRef: mapping.ref }),
     aylaPlayableQbankSession: async (state, s) => ({ session: sanitizeAylaQbankSession(s), questions: questions.map((q, i) => sanitizeAylaQbankQuestion(q, { session: s, questionRef: `r${i + 1}` })) }),
     aylaSendOk: (res, body) => ({ status: 200, body }),
     aylaSendError: (res, status, message, details) => ({ status, body: { message, details } }),
@@ -63,6 +65,7 @@ test("real draft and submit routes seal drafts, return version conflicts, and fi
   assert.equal(saved.status, 200);
   assert.equal(saved.body.session.draft_version, 1);
   assert.equal(saved.body.questions[0].correct_answer_id, null);
+  assert.equal(saved.body.questions.length, 1, "autosave delivers only changed questions");
   assert.equal(Object.keys(state().attempts).length, 0);
   const conflict = await request("submit", { ...body, idempotency_key: "stale-submit" });
   assert.equal(conflict.status, 409);

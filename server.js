@@ -45559,6 +45559,11 @@ async function aylaSelectQbankSessionQuestions({
   allowedCollectionIds = [],
   examVariant = "",
 } = {}) {
+  // An empty published bank set is an entitlement/publication boundary, never
+  // a request to discover generic banks (especially across NCLEX RN/PN).
+  if (purpose !== "baseline_diagnostic" && !selectedBanks.length && !allowedCollectionIds.length) {
+    return { selected: [], availableSystemKeys: [], selectedSystemKeys: [] };
+  }
   const publicationDestination = purpose === "baseline_diagnostic" ? "diagnostic" : "qbank";
   if (purpose !== "baseline_diagnostic" && Array.isArray(selectedBanks) && selectedBanks.length) {
     const banksBySourceExam = new Map();
@@ -47861,7 +47866,9 @@ app.post("/api/ayla/qbank/sessions/:sessionId/drafts", async (req, res) => {
     const auth = await aylaV189RequireStudent(req, String(req.body.student_id || req.body.studentId || ""), "qbank");
     const initial = aylaOwnedQbankSession(auth.db, auth.user, auth.student, req.params.sessionId);
     aylaRequireQbankAccess(auth.db, auth.user, auth.student, initial.examTrack);
-    const questions = await aylaSessionQbankQuestions(initial, initial.questions || []);
+    const requestedRefs = new Set((Array.isArray(req.body.answers) ? req.body.answers : []).map(row => row?.question_ref));
+    const requestedMappings = (initial.questions || []).filter(row => requestedRefs.has(row.ref));
+    const questions = requestedMappings.length ? await aylaSessionQbankQuestions(initial, requestedMappings) : [];
     const mutation = await mutateAylaDb((db) => {
       const fresh = aylaRevalidateQbankContext(db, auth.user.id, auth.student.id, initial.examTrack);
       const current = aylaOwnedQbankSession(db, fresh.user, fresh.student, initial.id);
@@ -47871,7 +47878,12 @@ app.post("/api/ayla/qbank/sessions/:sessionId/drafts", async (req, res) => {
     });
     const latestDb = await readAylaDb();
     const session = aylaOwnedQbankSession(latestDb, auth.user, auth.student, initial.id);
-    return aylaSendOk(res, { ...(await aylaPlayableQbankSession(latestDb, session)), idempotent_replay: mutation.replayed });
+    const byId = new Map(questions.map(row => [String(row.id), row]));
+    const changedQuestions = [];
+    for (const mapping of (session.questions || []).filter(row => requestedRefs.has(row.ref))) {
+      changedQuestions.push(await aylaPlayableQbankQuestion(latestDb, session, mapping, byId.get(String(mapping.contentQuestionId)) || null));
+    }
+    return aylaSendOk(res, { session: sanitizeAylaQbankSession(session), questions: changedQuestions, idempotent_replay: mutation.replayed });
   } catch (error) {
     return aylaSendError(res, error.statusCode || 500, error.message, error.code ? { code: error.code } : null);
   }

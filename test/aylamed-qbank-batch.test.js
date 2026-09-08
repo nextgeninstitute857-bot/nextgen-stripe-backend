@@ -74,3 +74,10 @@ test("status filters cannot expose unsubmitted test correctness or other student
   assert.deepEqual(aylaQbankFilterHistory([final, { ...final, studentId: "someone-else" }], scope).incorrectQuestionIds, ["q1"]);
   assert.deepEqual(aylaQbankFilterHistory([final], { ...scope, examTrack: "plab" }).seenQuestionIds, []);
 });
+
+test("submitting an old tutor session cannot replace a more recent correct attempt", () => {
+  const base = { ...session(), mode: "tutor", status: "submitted" };
+  const old = { ...base, submittedAt: "2026-09-08T12:00:00Z", answers: { r1: { answeredAt: "2026-09-08T08:00:00Z", correct: false } } };
+  const newer = { ...base, submittedAt: "2026-09-08T10:00:00Z", answers: { r1: { answeredAt: "2026-09-08T10:00:00Z", correct: true } } };
+  assert.deepEqual(aylaQbankFilterHistory([newer, old], { userId: "u1", studentId: "student1", examTrack: "usmle-step-1" }).incorrectQuestionIds, []);
+});
