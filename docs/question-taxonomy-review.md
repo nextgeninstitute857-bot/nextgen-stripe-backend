@@ -55,7 +55,11 @@ Source records also contain safe collection identity fields and a source-file ba
 
 For NCLEX, the page `allowed_systems` is empty. Each question receives the RN or PN categories from the existing reviewed diagnostic blueprint only when all participating QBank source aliases have resolvable, agreeing variant provenance. Collection namespace/title/key/provider/profile and import filename are considered; question clinical wording is never used to infer a variant. Explicit retained question variant hints must agree.
 
-Missing and conflicting provenance returns `classification_blocked_reason: nclex_variant_missing` or `nclex_variant_conflict`, an empty system list, and null `nclex_variant`. These rows remain exportable for source review but cannot be applied. A canonical question shared by conflicting RN/PN sources must be adjudicated before assigning a global taxonomy.
+Missing and conflicting provenance returns `classification_blocked_reason: nclex_variant_missing` or `nclex_variant_conflict`, an empty system list, and null `nclex_variant`. These rows cannot use the single-variant review operation.
+
+A canonical question with separate, individually unambiguous RN and PN source collections can additionally return `shared_classification_allowed: true`, `shared_nclex_variants: ["nclex_pn", "nclex_rn"]`, and `shared_allowed_systems`. After reviewing its full evidence and the appropriateness of the same four-level path for both variants, submit `nclex_variants: ["nclex_pn", "nclex_rn"]` instead of `nclex_variant`. The shared system must be in the exact intersection of both diagnostic blueprints. Management/Coordinated Care and the differing pharmacology categories are excluded; they need variant-specific representation and cannot be forced into a common category. Lower clinical labels still require explicit review for both audiences.
+
+Every registered alias must identify exactly one variant. Missing provenance, a single collection labelled RN and PN, conflicting identities within one collection, and ambiguous retained variant hints remain blocked. Preview and apply recheck the source evidence and its fingerprint inside the existing guarded transaction. Shared classification does not create questions, duplicate records, change bank membership or grant student access. Single-variant clients retain their existing guard and behavior; shared review is opt-in.
 
 ## Prepare and preview a reviewed batch
 
@@ -88,7 +92,7 @@ Missing and conflicting provenance returns `classification_blocked_reason: nclex
 
 Supply 1–100 unique question UUIDs. Keys must exactly equal the lowercase underscore-normalized label. Every label is required, at most 140 characters; sentinel, raw identifier, and stem-shaped labels are rejected. The system label must exactly match an allowed system. Lower clinical labels still require substantive review; structural validation does not establish medical correctness.
 
-An existing active override requires the item's explicit `expected_override_revision` from export. NCLEX items additionally require the exact exported `nclex_variant`. Omit that field for other exams. Each item requires a 10–2,000-character review reason; the authenticated admin identity supplies the actor, never a caller-provided reviewer identity.
+An existing active override requires the item's explicit `expected_override_revision` from export. NCLEX items additionally require the exact exported `nclex_variant`, or the explicit pair of `nclex_variants` for eligible shared review described above. Omit both fields for other exams. Each item requires a 10–2,000-character review reason; the authenticated admin identity supplies the actor, never a caller-provided reviewer identity.
 
 Preview returns `valid`, `dry_run`, `applied`, `review_id`, `exam_track`, `fingerprint`, `count`, `updated_count`, `unchanged_count`, and `rows`. Each row includes question UUID, before/after taxonomy, `action` (`update` or `unchanged`), current override revision, review reason, and evidence fingerprint. Preview makes no table, audit, or classification writes.
 
