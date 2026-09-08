@@ -15,6 +15,7 @@ import {
   qbankRoadmapAssignmentQuestionIds,
   qbankRoadmapSessionMatchesAssignment,
   recordAylaQbankAnswer,
+  qbankSessionHistoryRow,
   resolveAylaQbankEntitlement,
   sanitizeAylaQbankQuestion,
   sanitizeAylaQbankSession,
@@ -539,11 +540,66 @@ test("final scoring counts unanswered questions without fabricating answer attem
   const finalized = finalizeAylaQbankSession(first).session;
   assert.equal(finalized.answeredCount, 1);
   assert.equal(finalized.correctCount, 1);
-  assert.equal(finalized.incorrectCount, 2);
+  assert.equal(finalized.incorrectCount, 0);
   assert.equal(finalized.unansweredCount, 2);
   assert.equal(finalized.scorePercent, 33.33);
   assert.equal(Object.keys(finalized.answers).length, 1);
   assert.equal(finalizeAylaQbankSession(finalized).replayed, true);
+});
+
+test("supplemental-only DTOs expose their scoring basis before submit and preserve a null final score", () => {
+  let session = sessionFixture("test", 2);
+  session.questions = session.questions.map(row => ({ ...row, scoringAllowed: false, supplemental: true }));
+  const pending = sanitizeAylaQbankSession(session);
+  assert.equal(pending.scored_question_count, 0);
+  assert.equal(pending.supplemental_question_count, 2);
+  assert.equal(pending.score_percent, null);
+  session = recordAylaQbankAnswer(session, { questionRef: "ref-1", selectedAnswerId: 2, correctAnswerId: 2 }).session;
+  session = finalizeAylaQbankSession(session).session;
+  const before = JSON.stringify(session);
+  const safe = sanitizeAylaQbankSession(session);
+  const history = qbankSessionHistoryRow(session);
+  assert.equal(safe.answered_count, 1);
+  assert.equal(safe.score_percent, null);
+  assert.equal(history.score_percent, null);
+  assert.equal(history.scored_question_count, 0);
+  assert.equal(history.supplemental_question_count, 2);
+  assert.equal(JSON.stringify(session), before);
+});
+
+test("legacy submitted results derive consistent counters from answer keys without rewriting stored history", () => {
+  const partial = recordAylaQbankAnswer(sessionFixture("test", 3), {
+    questionRef: "ref-1", selectedAnswerId: 2, correctAnswerId: 2,
+  }).session;
+  const legacy = finalizeAylaQbankSession(partial).session;
+  legacy.incorrectCount = 2; // Earlier writers included unanswered in incorrect.
+  delete legacy.answers["ref-1"].questionRef;
+  const before = JSON.stringify(legacy);
+  const safe = sanitizeAylaQbankSession(legacy);
+  assert.deepEqual([safe.correct_count, safe.incorrect_count, safe.unanswered_count], [1, 0, 2]);
+  assert.equal(safe.score_percent, 33.33);
+  assert.equal(qbankSessionHistoryRow(legacy).incorrect_count, 0);
+  assert.equal(finalizeAylaQbankSession(legacy).session, legacy);
+  assert.equal(finalizeAylaQbankSession(legacy).replayed, true);
+  assert.equal(JSON.stringify(legacy), before);
+});
+
+test("compact legacy history without question mappings retains its stored score", () => {
+  const safe = qbankSessionHistoryRow({ id: "legacy", status: "submitted", questionCount: 3,
+    answeredCount: 1, correctCount: 1, incorrectCount: 2, unansweredCount: 2, scorePercent: 33.33 });
+  assert.equal(safe.score_percent, 33.33);
+  assert.equal(safe.scored_question_count, 3);
+  assert.equal(safe.supplemental_question_count, 0);
+  assert.deepEqual([safe.correct_count, safe.incorrect_count, safe.unanswered_count], [1, 0, 2]);
+  const emptyMapping = qbankSessionHistoryRow({ id: "empty-mapping", status: "submitted", questions: [],
+    questionCount: 2, answeredCount: 2, correctCount: 1, incorrectCount: 1, scorePercent: 50 });
+  assert.equal(emptyMapping.score_percent, 50);
+  assert.equal(emptyMapping.scored_question_count, 2);
+  const supplemental = qbankSessionHistoryRow({ id: "legacy-supplemental", status: "submitted",
+    questionCount: 2, supplementalQuestionCount: 2, answeredCount: 2, scorePercent: null });
+  assert.equal(supplemental.score_percent, null);
+  assert.equal(supplemental.scored_question_count, 0);
+  assert.equal(supplemental.supplemental_question_count, 2);
 });
 
 test("stale general AylaMed writes cannot roll back newer QBank state", () => {
