@@ -55,6 +55,7 @@ export async function persistenceHarness(directory, overrides = {}) {
   const factory = new Function(...Object.keys(bindings), `${source.slice(start, helpersEnd)}\n${source.slice(readStart, end)}\nreturn {
     read: readAylaDb, mutate: mutateAylaDb, diagnostic: mutateAylaDiagnosticAnswer,
     roadmap: mutateAylaRoadmapState, checkpoint: writeAylaDb, backup: aylaCreateDurableBackup,
+    upgradeBackup: aylaEnsureStateJournalUpgradeBackup,
     flush: () => aylaWriteQueue,
     stop: () => { if (aylaStateCheckpointTimer) clearTimeout(aylaStateCheckpointTimer); }
   };`);

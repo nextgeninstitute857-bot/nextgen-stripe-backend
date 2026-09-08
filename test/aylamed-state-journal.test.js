@@ -9,6 +9,7 @@ import {
   readAylaStateJournal, checkpointAylaState,
 } from "../lib/aylamed-state-journal.js";
 import { appendAylaQbankJournalRecord, createAylaDiagnosticJournalRecord } from "../lib/aylamed-qbank-journal.js";
+import { appendAylaRoadmapJournalRecord, createAylaRoadmapJournalRecord } from "../lib/aylamed-roadmap-journal.js";
 import { atomicSnapshot, persistenceHarness } from "./helpers/aylamed-state-persistence-harness.js";
 
 async function fixture(t, initial = {}) {
@@ -90,6 +91,60 @@ test("concurrent queued writes and a throwing mutator preserve every successful 
   const recovered = applyAylaStateJournal(JSON.parse(await fs.readFile(app.snapshotPath)), (await readAylaStateJournal(f.journal)).records).db;
   assert.equal(Object.keys(recovered.aylaQbankSessions.s.answers).length, 12);
   assert.equal(recovered.aylaQbankSessions.s.answers.bad, undefined);
+});
+
+test("first journal upgrade backs up pending legacy answers and plans once, before accepting writes", async (t) => {
+  const f = await fixture(t);
+  await appendAylaQbankJournalRecord(path.join(f.directory, "diagnostic.jsonl"), createAylaDiagnosticJournalRecord({
+    session: { id: "diag", purpose: "baseline_diagnostic", mode: "test", answers: { pending: 2 } },
+    event: { id: "e", sessionId: "diag" }, qbankStateVersion: 1,
+  }));
+  await appendAylaRoadmapJournalRecord(path.join(f.directory, "roadmap.jsonl"), createAylaRoadmapJournalRecord({
+    upserts: { aylaDailyPlans: { p: { id: "p", status: "pending" } } }, roadmapStateVersion: 1,
+  }));
+  const app = await persistenceHarness(f.directory); t.after(app.stop);
+  const result = await app.upgradeBackup();
+  assert.equal(result.skipped, false);
+  assert.equal(result.standalone_snapshot, true);
+  assert.equal(path.dirname(result.backup_path), path.join(f.directory, "backups"));
+  const backup = JSON.parse(await fs.readFile(result.backup_path, "utf8"));
+  assert.equal(backup.aylaQbankSessions.diag.answers.pending, 2);
+  assert.equal(backup.aylaQbankEvents.e.sessionId, "diag");
+  assert.equal(backup.aylaDailyPlans.p.status, "pending");
+  assert.equal(Number(backup.state_journal_version || 0), 0);
+  const restart = await persistenceHarness(f.directory); t.after(restart.stop);
+  assert.equal((await restart.read()).state_journal_version, 1);
+  assert.equal((await restart.read()).state_journal_migration.backup_path, result.backup_path);
+  assert.equal((await restart.upgradeBackup()).skipped, true);
+  assert.equal((await fs.readdir(path.join(f.directory, "backups"))).length, 1);
+});
+
+test("initialized journal state skips upgrade backup without touching the backup directory", async (t) => {
+  const f = await fixture(t, { state_journal_version: 7 });
+  const app = await persistenceHarness(f.directory, {
+    ngWriteJsonAtomicStreaming: async () => { throw new Error("unexpected backup write"); },
+  }); t.after(app.stop);
+  assert.deepEqual(await app.upgradeBackup(), { skipped: true, reason: "state_journal_already_initialized" });
+  assert.equal((await app.read()).state_journal_version, 7);
+  await assert.rejects(fs.access(path.join(f.directory, "backups")), { code: "ENOENT" });
+});
+
+test("upgrade backup failure prevents journal initialization and is awaited before startup compaction or listen", async (t) => {
+  const f = await fixture(t);
+  const app = await persistenceHarness(f.directory, {
+    ngWriteJsonAtomicStreaming: async () => { throw new Error("backup disk unavailable"); },
+  }); t.after(app.stop);
+  await assert.rejects(app.upgradeBackup(), /backup disk unavailable/);
+  assert.equal(Number((await app.read()).state_journal_version || 0), 0);
+  assert.equal((await app.read()).state_journal_migration, undefined);
+  assert.equal((await readAylaStateJournal(f.journal)).records.length, 0);
+  const source = await fs.readFile(new URL("../server.js", import.meta.url), "utf8");
+  const startup = source.slice(source.indexOf("async function startNextgenServer()"));
+  const backupAt = startup.indexOf("await aylaEnsureStateJournalUpgradeBackup()");
+  const compactionAt = startup.indexOf("compactAylaPrivatePilotPlans(aylaDb)");
+  const listenAt = startup.indexOf("app.listen(PORT");
+  assert.ok(backupAt > 0 && compactionAt > backupAt && listenAt > compactionAt);
+  assert.doesNotMatch(startup.slice(0, compactionAt), /\bcatch\b/);
 });
 
 test("roadmap assignment of an existing revision and new plan durably replays together", async (t) => {

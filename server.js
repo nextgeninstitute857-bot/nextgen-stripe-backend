@@ -75832,6 +75832,28 @@ async function aylaCreateDurableBackup({ checkpoint = false } = {}) {
   return task;
 }
 
+async function aylaEnsureStateJournalUpgradeBackup() {
+  const current = await readAylaDb();
+  if (Number(current.state_journal_version || 0) > 0) {
+    return { skipped: true, reason: "state_journal_already_initialized" };
+  }
+  // Run before compaction or listen. The queued helper includes replayed legacy
+  // answer/roadmap journals and fsyncs a standalone snapshot in DATA_DIR/backups.
+  // Propagate failures so an upgrade cannot accept traffic without recovery data.
+  const backup = await aylaCreateDurableBackup();
+  await mutateAylaDb((db) => {
+    if (Number(db.state_journal_version || 0) > 0) return;
+    db.state_journal_migration = {
+      backup_path: backup.backup_path,
+      backed_up_at: backup.created_at,
+      standalone_snapshot: true,
+    };
+  });
+  // The durable migration delta initializes the unified version even on an
+  // otherwise idle installation, preventing another full backup on restart.
+  return { ...backup, skipped: false };
+}
+
 async function aylaStateJournalStatus(db) {
   const stat = await fs.stat(AYLA_STATE_JOURNAL_PATH).catch((error) => {
     if (error.code === "ENOENT") return null;
@@ -98858,6 +98880,8 @@ async function aylaDrainQbankAdaptation() {
 
 async function startNextgenServer() {
   const aylaWarmStartedAt = Date.now();
+  const upgradeBackup = await aylaEnsureStateJournalUpgradeBackup();
+  if (!upgradeBackup.skipped) console.log("AylaMed state journal upgrade recovery backup:", upgradeBackup);
   const aylaDb = await readAylaDb();
   const pilotCompaction = compactAylaPrivatePilotPlans(aylaDb);
   if (pilotCompaction.changed) {
