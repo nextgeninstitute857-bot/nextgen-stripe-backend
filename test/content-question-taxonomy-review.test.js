@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeReviewedQuestionTaxonomy, normalizeQuestionTaxonomyReviewManifest, questionTaxonomyEvidenceFingerprint, questionTaxonomyVariantScope } from '../lib/content-question-taxonomy-review.js';
+import { NCLEX_VARIANT_TAXONOMY_KIND, nclexTaxonomySourceBinding } from '../lib/content-nclex-variant-taxonomy.js';
 const taxonomy = () => ({ system_key: 'cardiovascular', subsystem_key: 'valvular_disease', topic_key: 'aortic_stenosis', subtopic_key: 'diagnosis', labels: { system: 'Cardiovascular', subsystem: 'Valvular disease', topic: 'Aortic stenosis', subtopic: 'Diagnosis' } });
 const item = () => ({ question_id: '00000000-0000-4000-8000-000000000001', expected_evidence_fingerprint: 'a'.repeat(64), taxonomy: taxonomy(), reason: 'Reviewed the complete question and explanation.' });
 const manifest = () => ({ exam_track: 'usmle_step_1', review_id: '00000000-0000-4000-8000-000000000002', items: [item()] });
@@ -85,4 +86,27 @@ test('shared manifests explicitly bind both variants and reject variant-specific
     assert.throws(() => normalizeQuestionTaxonomyReviewManifest(make({ taxonomy: t }), []), /allowed exam system/);
   }
   assert.throws(() => normalizeQuestionTaxonomyReviewManifest({ ...make({}), exam_track: 'usmle_step_1' }, ['Physiological Adaptation']), /Shared NCLEX/);
+});
+
+test('variant-specific manifests require both complete exam-correct paths and exact source bindings', () => {
+  const path = system => ({ ...taxonomy(), system_key: system.toLowerCase().replace(/ /g, '_'), labels: { ...taxonomy().labels, system } });
+  const rn = nclexTaxonomySourceBinding({ collection_id: '00000000-0000-4000-8000-000000000010', collection_title: 'NCLEX RN', source_namespace: 'rn' }, 'nclex_rn');
+  const pn = nclexTaxonomySourceBinding({ collection_id: '00000000-0000-4000-8000-000000000011', collection_title: 'NCLEX PN', source_namespace: 'pn' }, 'nclex_pn');
+  const make = () => ({ ...manifest(), exam_track: 'nclex', items: [{ ...item(), nclex_variants: ['nclex_rn', 'nclex_pn'], taxonomy: {
+    kind: NCLEX_VARIANT_TAXONOMY_KIND, paths: { nclex_rn: path('Management of Care'), nclex_pn: path('Coordinated Care') }, source_bindings: [rn, pn],
+  } }] });
+  const normalized = normalizeQuestionTaxonomyReviewManifest(make(), []);
+  assert.deepEqual(normalizeQuestionTaxonomyReviewManifest(normalized, []), normalized);
+  for (const mutate of [
+    m => delete m.items[0].taxonomy.paths.nclex_pn,
+    m => { m.items[0].taxonomy.paths.nclex_pn = path('Management of Care'); },
+    m => delete m.items[0].taxonomy.paths.nclex_rn.labels.subtopic,
+    m => { m.items[0].taxonomy.source_bindings = [rn]; },
+    m => { m.items[0].taxonomy.source_bindings = [rn, { ...pn, collection_id: rn.collection_id }]; },
+    m => { m.items[0].taxonomy.source_bindings = [rn, pn, rn]; },
+    m => { m.items[0].taxonomy.source_bindings[0] = { ...rn, unreviewed: 'extra' }; },
+    m => { m.items[0].taxonomy.source_bindings[0] = { ...rn, source_file: 'C:\\private\\rn.json' }; },
+    m => { delete m.items[0].nclex_variants; m.items[0].nclex_variant = 'nclex_rn'; },
+    m => { m.exam_track = 'plab'; },
+  ]) { const m = make(); mutate(m); assert.throws(() => normalizeQuestionTaxonomyReviewManifest(m, [])); }
 });
