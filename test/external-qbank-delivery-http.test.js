@@ -5,6 +5,7 @@ import fs from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const CLIENT_SECRET = "external-http-client-secret-that-is-long-enough";
 const ALLOWED_ORIGIN = "https://nclex-site.example.com";
@@ -59,7 +60,7 @@ test("v218 HTTP boundary allows an external site only on its QBank routes", { ti
     token_version: 1,
   }];
   const child = spawn(process.execPath, ["server.js"], {
-    cwd: path.resolve(new URL("..", import.meta.url).pathname),
+    cwd: fileURLToPath(new URL("..", import.meta.url)),
     env: {
       ...process.env,
       PORT: String(port),

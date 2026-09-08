@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 import { exportQuestionTaxonomyReviewPage, reviewQuestionTaxonomyBatch } from '../lib/content-question-taxonomy-review.js';
-import { contentQbankFacetsQuery, contentQbankFacetQuery } from '../lib/content-registry-postgres.js';
+import { contentQbankFacetsQuery, contentQbankFacetQuery, contentQbankQuestionsQuery, contentQbankCatalogQuery, contentQbankQuestionDisplay } from '../lib/content-registry-postgres.js';
+import { NCLEX_VARIANT_TAXONOMY_KIND } from '../lib/content-nclex-variant-taxonomy.js';
 import { buildAylaQbankFacetTree } from '../lib/aylamed-qbank-facets.js';
 const runtime = process.env.AYLA_TEST_PGLITE_PATH;
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
@@ -214,6 +215,79 @@ test('PostgreSQL reviewed question workflow preserves content and enforces atomi
       const replay = await apply(input, dry); assert.equal(replay.replayed, true); assert.equal(await count('content_taxonomy_audit_events'), 6);
       const refreshed = await page({ examTrack: 'nclex' });
       assert.ok(refreshed.questions.every(q => q.override.revision === 1 && q.taxonomy.review_status === 'approved'));
+    });
+    await t.test('shared variant paths agree across facets, counts, catalog and delivery with safe provenance fallback', async () => {
+      await reset(2);
+      await db.exec(`UPDATE content_questions SET exam_track='nclex'; UPDATE content_collections SET title='NCLEX RN bank';`);
+      await db.query(`INSERT INTO content_collections SELECT $1,destinations,status,source_profile,source_namespace,source_provider,'pn','NCLEX PN bank',source_year,approved_at,created_at FROM content_collections LIMIT 1`, [id(1001)]);
+      await db.query(`INSERT INTO content_collection_destinations VALUES ($1,'aylamed_qbank',true,'')`, [id(1001)]);
+      for (let n = 1; n <= 2; n++) await db.query(`INSERT INTO content_source_aliases(id,question_id,collection_id,source_namespace,source_item_id) VALUES ($1,$2,$3,'second-source',$4)`, [id(2500+n), id(n), id(1001), String(n)]);
+      for (const [collection,variant] of [[1000,'RN'],[1001,'PN']]) await db.query(`UPDATE content_source_aliases SET source_data=$2 WHERE collection_id=$1`, [id(collection), { import_source_file: `C:\\archive\\NCLEX ${variant} questions.json` }]);
+      // Use the full delivery schema as well as the lightweight facet schema.
+      await db.exec(`ALTER TABLE content_collections ADD COLUMN display_policy jsonb DEFAULT '{}';
+        ALTER TABLE content_media_assets ADD COLUMN media_kind text, ADD COLUMN content_type text;
+        ALTER TABLE content_source_alias_media ADD COLUMN placement text, ADD COLUMN created_at timestamptz;
+        ALTER TABLE content_source_alias_videos ADD COLUMN placement text, ADD COLUMN created_at timestamptz;
+        ALTER TABLE content_question_media ADD COLUMN placement text, ADD COLUMN created_at timestamptz;
+        ALTER TABLE content_question_videos ADD COLUMN placement text, ADD COLUMN created_at timestamptz;`);
+      const exported = await page({ examTrack: 'nclex' }), before = await immutableState();
+      const path = (system, i) => ({ ...taxonomy(i ? 'aortic_regurgitation' : undefined), system_key: system.toLowerCase().replace(/ /g, '_'), labels: { ...taxonomy(i ? 'aortic_regurgitation' : undefined).labels, system } });
+      const input = { exam_track: 'nclex', review_id: id(9300), items: exported.questions.map((q,i) => ({
+        question_id: q.id, expected_evidence_fingerprint: q.evidence_fingerprint, nclex_variants: q.shared_nclex_variants,
+        taxonomy: { kind: NCLEX_VARIANT_TAXONOMY_KIND, paths: {
+          nclex_rn: path(i ? 'Pharmacological and Parenteral Therapies' : 'Management of Care', i),
+          nclex_pn: path(i ? 'Pharmacological Therapies' : 'Coordinated Care', i),
+        }, source_bindings: q.shared_source_bindings }, reason: 'Reviewed both synthetic exam paths and complete original source bindings.',
+      })) };
+      assert.ok(input.items.every(item => item.taxonomy.source_bindings.every(b => b.source_file.startsWith('NCLEX '))));
+      const invalid = structuredClone(input); invalid.items[0].taxonomy.source_bindings[0].source_item_id = 'unreviewed';
+      await assert.rejects(preview(invalid), { statusCode: 409 });
+      const dry = await preview(input); assert.equal(await count('content_question_taxonomy_overrides'), 0);
+      await apply(input, dry); assert.deepEqual(await immutableState(), before);
+      const queryRows = async query => (await db.query(query.sql, query.values)).rows;
+      for (const [variant,collection] of [['nclex_rn',1000],['nclex_pn',1001]]) {
+        const opts = { examTrack: 'nclex', collectionIds: [id(collection)] };
+        const tree = buildAylaQbankFacetTree(await queryRows(contentQbankFacetsQuery(opts)), opts);
+        assert.equal(tree.question_count, 2); assert.equal(tree.coverage.reviewed_question_count, 2);
+        assert.deepEqual(tree.nodes.map(n => n.label).sort(), input.items.map(i => i.taxonomy.paths[variant].labels.system).sort());
+        const catalog = await queryRows(contentQbankCatalogQuery(opts)); assert.equal(catalog.reduce((n,r) => n+r.question_count,0), 2);
+        for (const item of input.items) {
+          const expected = item.taxonomy.paths[variant], selection = Object.fromEntries(['system_key','subsystem_key','topic_key','subtopic_key'].map(k=>[k,expected[k]]));
+          const countQuery = contentQbankFacetQuery({ ...opts, filters: { selection_paths: [selection] } });
+          assert.deepEqual((await db.query('SELECT q.id '+countQuery.sql,countQuery.values)).rows.map(q=>q.id), [item.question_id]);
+          const rows = await queryRows(contentQbankQuestionsQuery({ ...opts, selectionPaths: [selection], seed: 'stable' }));
+          assert.deepEqual(rows.map(q=>q.id),[item.question_id]);
+          const projected = contentQbankQuestionDisplay(rows[0]);
+          for (const key of ['system_key','subsystem_key','topic_key','subtopic_key','labels']) assert.deepEqual(projected.taxonomy[key],expected[key]);
+          assert.equal(projected.taxonomy.review_status,'approved');assert.equal(projected.taxonomy.review_id,input.review_id);
+          assert.ok(!JSON.stringify(projected).includes('source_bindings'));assert.ok(!JSON.stringify(projected).includes('fallback_taxonomy'));
+          assert.ok(catalog.some(row=>row.system_key===expected.system_key&&row.subtopic_key===expected.subtopic_key));
+          const otherVariant = variant==='nclex_rn'?'nclex_pn':'nclex_rn';
+          assert.equal((await queryRows(contentQbankQuestionsQuery({ ...opts, systemKey: item.taxonomy.paths[otherVariant].system_key, seed:'stable' }))).length,0);
+        }
+      }
+      const both = { examTrack:'nclex',collectionIds:[id(1000),id(1001)] };
+      const delivered = await queryRows(contentQbankQuestionsQuery({ ...both,seed:'stable' }));assert.equal(delivered.length,2);
+      const bothCatalog = await queryRows(contentQbankCatalogQuery(both));
+      assert.deepEqual(bothCatalog.map(r=>r.system_key).sort(),delivered.map(r=>r.system_key).sort());
+      const replay = await apply(input,dry);assert.equal(replay.replayed,true);assert.equal(await count('content_taxonomy_audit_events'),2);
+      const fresh = await page({examTrack:'nclex'});
+      const same = { ...input,review_id:id(9301),items:input.items.map((i,n)=>({...i,expected_evidence_fingerprint:fresh.questions[n].evidence_fingerprint,expected_override_revision:1})) };
+      assert.equal((await preview(same)).unchanged_count,2);
+      // A source identity change does not inherit the old variant's approval.
+      await db.query(`UPDATE content_source_aliases SET source_item_id='changed' WHERE collection_id=$1 AND question_id=$2`,[id(1001),id(1)]);
+      const pnOpts={examTrack:'nclex',collectionIds:[id(1001)]};
+      const changed = buildAylaQbankFacetTree(await queryRows(contentQbankFacetsQuery(pnOpts)),pnOpts);
+      assert.equal(changed.question_count,2);assert.equal(changed.coverage.reviewed_question_count,1);
+      const fallback = (await queryRows(contentQbankQuestionsQuery({...pnOpts,seed:'stable'}))).find(q=>q.id===id(1));assert.deepEqual(fallback.taxonomy,{});
+      // Renaming a collection also invalidates its binding, preserving access.
+      await db.query(`UPDATE content_collections SET title='Renamed NCLEX PN' WHERE id=$1`,[id(1001)]);
+      const renamed = buildAylaQbankFacetTree(await queryRows(contentQbankFacetsQuery(pnOpts)),pnOpts);
+      assert.equal(renamed.question_count,2);assert.equal(renamed.coverage.reviewed_question_count,0);
+      const rnOpts={examTrack:'nclex',collectionIds:[id(1000)]};
+      assert.equal(buildAylaQbankFacetTree(await queryRows(contentQbankFacetsQuery(rnOpts)),rnOpts).coverage.reviewed_question_count,2);
+      await db.query(`UPDATE content_collection_destinations SET enabled=false WHERE collection_id=$1`,[id(1001)]);
+      assert.equal((await queryRows(contentQbankQuestionsQuery({...pnOpts,seed:'stable'}))).length,0);
     });
   } finally { await db.close(); }
 });

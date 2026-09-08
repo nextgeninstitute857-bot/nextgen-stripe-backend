@@ -48,7 +48,7 @@ test('PostgreSQL executes facet and selection predicates against adversarial eli
     await db.exec(`
       ALTER TABLE content_questions ADD COLUMN student_qid text, ADD COLUMN question_html text, ADD COLUMN explanation_html text, ADD COLUMN correct_answer_id int;
       ALTER TABLE content_collections ADD COLUMN display_policy jsonb DEFAULT '{}';
-      ALTER TABLE content_source_aliases ADD COLUMN source_item_id text;
+      ALTER TABLE content_source_aliases ADD COLUMN source_item_id text, ADD COLUMN source_namespace text, ADD COLUMN source_data jsonb DEFAULT '{}';
       CREATE TABLE content_answers (question_id uuid,answer_id int,text_html text);
       ALTER TABLE content_media_assets ADD COLUMN media_kind text, ADD COLUMN content_type text;
       ALTER TABLE content_source_alias_media ADD COLUMN placement text, ADD COLUMN created_at timestamptz;
