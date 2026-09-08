@@ -92,5 +92,6 @@ test("roadmap journaling clones only its three writable collections", () => {
   const mutation = server.slice(start, end);
   assert.match(mutation, /Object\.fromEntries\(AYLA_ROADMAP_STATE_COLLECTIONS\.map/);
   assert.match(mutation, /Roadmap journal mutations cannot delete/);
-  assert.doesNotMatch(mutation, /mutateJsonCopyOnWrite/);
+  assert.match(mutation, /mutateJsonCopyOnWrite\(writable,/);
+  assert.doesNotMatch(mutation, /mutateJsonCopyOnWrite\(source,/);
 });

@@ -687,6 +687,7 @@ import {
 import { mutateJsonCopyOnWrite } from "./lib/json-copy-on-write.js";
 import { prepareAylaQbankBatch } from "./lib/aylamed-qbank-batch.js";
 import { runAylaQbankAdaptation } from "./lib/aylamed-qbank-adaptation.js";
+import { createAylaResourceMappingIndex } from "./lib/aylamed-resource-mapping-index.js";
 import { aylaQbankFilterHistory } from "./lib/aylamed-qbank-history.js";
 import { mergeAylaQbankFacets } from "./lib/aylamed-qbank-facets.js";
 import { estimateStripeProcessingFeeCents as estimatePartnerStripeProcessingFeeCents } from "./lib/partner-commission.js";
@@ -85090,20 +85091,17 @@ function aylaV189MappingKey(value = "") {
   return aylaV189CleanText(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
-function aylaV189EnrichResourceMappings(db, resource = {}) {
-  const out = { ...resource };
-  const resourceExam = aylaCanonicalExamTrack(resource.examTrackId || resource.examTrack || resource.exam_track || resource.exam);
-  const all = aylaValues(db, "aylaResources").filter((row) => row.approved !== false && row.status !== "quarantined" && aylaCanonicalExamTrack(row.examTrackId || row.examTrack || row.exam_track || row.exam) === resourceExam && !["disabled", "deleted", "rejected", "archived"].includes(String(row.status || "").toLowerCase()));
-  const topicKey = aylaV189MappingKey(resource.topic);
-  const systemKey = aylaV189MappingKey(resource.system);
-  const subsystemKey = aylaV189MappingKey(resource.subsystem);
-  const exactMatch = (row) =>
-    aylaV189MappingKey(row.topic) === topicKey
-    && aylaV189MappingKey(row.system) === systemKey
-    && (!subsystemKey || aylaV189MappingKey(row.subsystem) === subsystemKey);
+function aylaV189ResourceMappingIndex(db) {
+  return createAylaResourceMappingIndex(aylaValues(db, "aylaResources"), {
+    examTrack: aylaCanonicalExamTrack,
+    resourceType: aylaV189ResourceType,
+    mappingKey: aylaV189MappingKey,
+  });
+}
 
-  let book = out.mappedBookResourceId ? all.find((row) => String(row.id) === String(out.mappedBookResourceId)) : null;
-  if (!book && topicKey) book = all.find((row) => ["book", "reading", "revision_sheet"].includes(aylaV189ResourceType(row.type)) && exactMatch(row));
+function aylaV189EnrichResourceMappings(db, resource = {}, mappingIndex = null) {
+  const out = { ...resource };
+  const { book, video } = (mappingIndex || aylaV189ResourceMappingIndex(db)).resolve(resource);
   if (book) {
     out.mappedBookResourceId = out.mappedBookResourceId || book.id;
     out.mappedBookTitle = out.mappedBookTitle || book.bookTitle || book.title || "";
@@ -85112,8 +85110,6 @@ function aylaV189EnrichResourceMappings(db, resource = {}) {
     out.mappingStatus = out.mappingStatus || "verified_exact_topic_link";
   }
 
-  let video = out.mappedVideoResourceId ? all.find((row) => String(row.id) === String(out.mappedVideoResourceId)) : null;
-  if (!video && topicKey) video = all.find((row) => ["vimeo_video", "video_transcript"].includes(aylaV189ResourceType(row.type)) && exactMatch(row));
   if (video) {
     out.mappedVideoResourceId = out.mappedVideoResourceId || video.id;
     out.mappedVideoTitle = out.mappedVideoTitle || video.title || "";
@@ -85140,6 +85136,7 @@ function aylaV189RelevantResources(db, student, types = [], {
   const preferred = aylaCleanArray(student.selectedResources).map((x) => String(x).toLowerCase());
   const studentExam = aylaCanonicalExamTrack(student.examTrackId || student.exam || student.examTrack || student.exam_track);
   if (!studentExam) return [];
+  let mappingIndex = null;
   return aylaValues(db, "aylaResources")
     .filter((resource) => resource.approved !== false && !["disabled", "deleted", "rejected", "archived"].includes(String(resource.status || "").toLowerCase()))
     .filter((resource) => {
@@ -85170,7 +85167,8 @@ function aylaV189RelevantResources(db, student, types = [], {
       // Content Hub videos already carry their approved taxonomy and Vimeo
       // metadata. Re-scanning every resource for book/video cross-links for
       // every video turns this path quadratic as the library grows.
-      const enriched = enrichMappings ? aylaV189EnrichResourceMappings(db, resource) : resource;
+      if (enrichMappings && !mappingIndex) mappingIndex = aylaV189ResourceMappingIndex(db);
+      const enriched = enrichMappings ? aylaV189EnrichResourceMappings(db, resource, mappingIndex) : resource;
       let relevance = 0;
       const system = String(enriched.system || "").toLowerCase();
       const topic = String(enriched.topic || "").toLowerCase();

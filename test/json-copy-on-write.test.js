@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { mutateJsonCopyOnWrite } from "../lib/json-copy-on-write.js";
+import { mutateJsonCopyOnWrite, mutateJsonCollectionsCopyOnWrite } from "../lib/json-copy-on-write.js";
 
 test("copy-on-write mutation preserves untouched branches", async () => {
   const source = {
@@ -66,4 +66,37 @@ test("copy-on-write mutation leaves the source unchanged when the mutator fails"
   );
 
   assert.deepEqual(source, { nested: { value: 1 }, rows: [{ id: 1 }] });
+});
+
+test("scoped copy-on-write isolates nested records and collection replacement while keeping content references", async () => {
+  const source = { resources: { book: { pages: ["content"] } }, rows: { r: { status: "due" } }, plans: {} };
+  const mutation = await mutateJsonCollectionsCopyOnWrite(source, ["rows", "plans"], draft => {
+    assert.equal(draft.resources, source.resources);
+    draft.rows.r.status = "assigned";
+    draft.plans = { p: { id: "p" } };
+    return draft.rows.r;
+  });
+  assert.equal(source.rows.r.status, "due");
+  assert.deepEqual(source.plans, {});
+  assert.equal(mutation.value.rows.r.status, "assigned");
+  assert.deepEqual(mutation.value.plans, { p: { id: "p" } });
+  assert.equal(mutation.value.resources, source.resources);
+  assert.equal(mutation.result, mutation.value.rows.r);
+  const readOnly = await mutateJsonCollectionsCopyOnWrite(source, ["rows"], draft => draft.rows.r);
+  assert.equal(readOnly.changed, false);
+  assert.equal(readOnly.value, source);
+});
+
+test("scoped drafts reject out-of-scope replacement and roll back declared changes on failure", async () => {
+  const source = { resources: { book: { pages: ["content"] } }, rows: { r: { status: "due" } } };
+  await assert.rejects(mutateJsonCollectionsCopyOnWrite(source, ["rows"], draft => {
+    draft.rows.r.status = "assigned";
+    draft.resources = {};
+  }), TypeError);
+  assert.equal(source.rows.r.status, "due");
+  await assert.rejects(mutateJsonCollectionsCopyOnWrite(source, ["rows"], draft => {
+    draft.rows.r.status = "assigned";
+    throw new Error("abort scoped mutation");
+  }), /abort scoped mutation/);
+  assert.equal(source.rows.r.status, "due");
 });
