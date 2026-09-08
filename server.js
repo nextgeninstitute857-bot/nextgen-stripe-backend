@@ -145,8 +145,10 @@ import {
   getContentRegistryFlashcardQuestion,
   getContentTaxonomyProviderPairEvidence,
   getContentTaxonomyCoverage,
+  getContentQuestionTaxonomyReviewPage,
   getExternalQbankDeliverySession,
   importContentQuestionBatch,
+  importContentQuestionTaxonomyReview,
   listContentHubVideos,
   listContentBackgroundJobsByDomainIds,
   listContentOperationalJobs,
@@ -44577,6 +44579,42 @@ app.get("/api/ayla/admin/resources/content-taxonomy/no-credit-export", async (re
   }
 });
 
+app.get("/api/ayla/admin/resources/content-taxonomy/questions", async (req, res) => {
+  try {
+    await aylaRequireAdmin(req);
+    const examTrack = normalizeContentTaxonomyExamTrack(req.query.exam_track);
+    const definition = AYLA_EXAM_REGISTRY[normalizeAylaShellExamTrack(examTrack)];
+    if (!examTrack || !definition) return aylaSendError(res, 400, "A supported exam_track is required");
+    if (req.query.question_ids !== undefined && typeof req.query.question_ids !== "string") return aylaSendError(res, 400, "question_ids must be a comma-separated UUID list");
+    const page = await getContentQuestionTaxonomyReviewPage({
+      examTrack, allowedSystems: definition.systems,
+      limit: req.query.limit ?? 100, after: req.query.after || "",
+      sourceNamespace: req.query.source_namespace || "",
+      questionIds: req.query.question_ids === undefined ? undefined : req.query.question_ids.split(",").map(value => value.trim()),
+    });
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, page);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.statusCode ? error.message : "Failed to export question review evidence", error.details || null);
+  }
+});
+
+app.post("/api/ayla/admin/resources/content-taxonomy/question-mapping-import", async (req, res) => {
+  try {
+    const auth = await aylaRequireAdmin(req);
+    const examTrack = normalizeContentTaxonomyExamTrack(req.body.exam_track);
+    const definition = AYLA_EXAM_REGISTRY[normalizeAylaShellExamTrack(examTrack)];
+    if (!examTrack || !definition) return aylaSendError(res, 400, "A supported exam_track is required");
+    const result = await importContentQuestionTaxonomyReview({ ...req.body, exam_track: examTrack }, {
+      allowedSystems: definition.systems, actorId: String(auth.user?.id || auth.method || "aylamed-admin"),
+    });
+    res.setHeader("Cache-Control", "private, no-store");
+    return aylaSendOk(res, result);
+  } catch (error) {
+    return aylaSendError(res, error.statusCode || 500, error.statusCode ? error.message : "Failed to save reviewed question classifications", error.details || null);
+  }
+});
+
 app.post("/api/ayla/admin/resources/content-taxonomy/mappings", async (req, res) => {
   try {
     const auth = await aylaRequireAdmin(req);
@@ -44654,14 +44692,6 @@ function ngContentTaxonomyProgress(job = {}, updates = {}) {
     failed = reduce(failed);
     approved = reduce(approved);
   }
-  databaseChanged = ngRecordDailyLiveSessionPhaseState(db, {
-    brandId,
-    dateKey,
-    action,
-    assets,
-    templateKey: scheduledTemplateKey,
-    results,
-  }) || databaseChanged;
   return {
     ...job,
     ...updates,
