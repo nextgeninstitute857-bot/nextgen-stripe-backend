@@ -47174,7 +47174,9 @@ async function aylaQbankFacetsForLearner(req, res, selectionCount = false) {
       examTrack: access.exam_track, destination: "qbank", destinationScope, sourceProfile, student: auth.student,
     });
     const requested = aylaRequestedQbankCollectionIds(input.collection_ids ?? input.collectionIds ?? []);
-    const selectedIds = resolveContentQbankStudentCollectionIds({ available_banks: availableBanks }, requested);
+    const selectedIds = resolveContentQbankStudentCollectionIds({
+      ...aylaStudentSelectableQbankPolicy({}, availableBanks), available_banks: availableBanks,
+    }, requested);
     const filters = normalizeAylaQbankFilters(selectionCount ? (input.filters || {}) : { difficulty: input.difficulty, status: input.status });
     const history = aylaQbankFilterHistory(aylaValues(auth.db, "aylaQbankSessions"), {
       userId: auth.user.id, studentId: auth.student.id, examTrack: access.exam_track, examVariant,
@@ -98671,7 +98673,7 @@ async function aylaDrainQbankAdaptation() {
         if (normalizeAylaQbankExamTrack(student.examTrackId || student.exam) !== session.examTrack) {
           throw new Error("Student exam changed before study plan refresh");
         }
-        return aylaV189BuildDailyPlan(db, student, date < aylaDateOnly() ? aylaDateOnly(aylaAddDays(new Date(), 1)) : date, {
+        return aylaV189BuildDailyPlan(db, student, date, {
           force: true, includeAssessment: false, skipAi: true,
         });
       },

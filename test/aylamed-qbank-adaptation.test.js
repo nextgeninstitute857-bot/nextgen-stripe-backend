@@ -64,3 +64,19 @@ test("a failed builder cannot publish partial plan changes or remove saved resul
   assert.equal(saved.aylaQuestionAttempts.saved.id, "saved");
   assert.equal(saved.aylaQbankSessions.s.status, "submitted");
 });
+
+test("a job recovered after midnight updates tomorrow and preserves today's active plan", async () => {
+  let builtDate;
+  const ctx = fixture(async (draft, student, date) => {
+    builtDate = date;
+    draft.aylaDailyPlans[date] = { id: date };
+    return { plan: { id: date } };
+  });
+  ctx.now = () => Date.parse("2026-09-09T01:00:00Z");
+  await ctx.mutateDb(draft => { draft.aylaDailyPlans["2026-09-09"] = { id: "today", status: "in_progress" }; });
+  assert.equal((await runAylaQbankAdaptation(ctx)).status, "ready");
+  assert.equal(builtDate, "2026-09-10");
+  const saved = await ctx.readDb();
+  assert.equal(saved.aylaDailyPlans["2026-09-09"].status, "in_progress");
+  assert.equal(saved.aylaQbankSessions.s.adaptation.date, "2026-09-10");
+});

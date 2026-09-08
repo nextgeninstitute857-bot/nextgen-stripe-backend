@@ -426,7 +426,7 @@ test("server keeps exact roadmap QBank identity through create, resume, and comp
   assert.match(createRoute, /qbankRoadmapSessionMatchesAssignment\(activeRoadmapSession, assignment\)/);
   assert.match(createRoute, /getContentQbankQuestions\(\{\s*questionIds: roadmapQuestionIds/s);
   assert.match(createRoute, /private_drafts_exposed: false/);
-  assert.match(submitRoute, /canSubmitAylaQbankRoadmapSession\(current\)/);
+  assert.match(submitRoute, /canSubmitAylaQbankRoadmapSession\(prepared\.session\)/);
   assert.match(submitRoute, /assignmentIsActive/);
   assert.match(submitRoute, /qbankRoadmapSessionMatchesAssignment\(finalized\.session, assignment\)/);
 });

@@ -88,3 +88,15 @@ test("real draft route refuses wrong student, foreign session and partial invali
   assert.equal(invalid.status, 400);
   assert.equal(state().aylaQbankSessions.s.draftAnswers, undefined);
 });
+
+test("batch submission keeps incomplete roadmap blocks open with no partial grading", async () => {
+  const { request, state } = harness();
+  Object.assign(state().aylaQbankSessions.s, { origin: "roadmap", roadmapAssignmentId: "assignment" });
+  const result = await request("submit", { idempotency_key: "incomplete", expected_draft_version: 0,
+    answers: [{ question_ref: "r1", selected_answer_id: 1 }] });
+  assert.equal(result.status, 409);
+  assert.equal(result.body.details.code, "ROADMAP_QBANK_INCOMPLETE");
+  assert.equal(state().aylaQbankSessions.s.status, "in_progress");
+  assert.equal(Object.keys(state().aylaQbankSessions.s.answers).length, 0);
+  assert.equal(Object.keys(state().attempts).length, 0);
+});
