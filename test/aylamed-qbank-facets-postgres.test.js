@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 import { contentQbankFacetQuery, contentQbankFacetsQuery, contentQbankQuestionsQuery, contentQbankSelectionPredicate } from '../lib/content-registry-postgres.js';
 import { buildAylaQbankFacetTree } from '../lib/aylamed-qbank-facets.js';
+import { nclexTaxonomySourceBinding } from '../lib/content-nclex-variant-taxonomy.js';
 
 // Optional local PostgreSQL/WASM runtime; never connects to a service or loads
 // production credentials. Unit tests have no additional package dependency.
@@ -135,5 +136,55 @@ test('PostgreSQL executes facet and selection predicates against adversarial eli
       const delivered=(await db.query(delivery.sql,delivery.values)).rows.map(row=>row.id).sort();
       assert.deepEqual(delivered,(await ids({filters,history})).sort());
     }
+
+    // Older approved banks must retain the same question after its flat
+    // taxonomy becomes a reviewed, source-bound RN/PN path envelope.
+    const sharedId=uuid(3001), original=taxonomy('source-nursing','original');
+    const shared={kind:'nclex_variant_paths_v1',source:'question_override',review_status:'approved',
+      review_id:uuid(3900),fallback_taxonomy:original,paths:{},source_bindings:[]};
+    const sources=[];
+    for(const [index,variant] of ['nclex_rn','nclex_pn'].entries()){
+      const source={collection_id:uuid(3101+index),collection_title:`BoardVitals ${variant}`,collection_key:`bv-${variant}`,
+        source_provider:'BoardVitals',source_profile:'other',source_namespace:`bv-${variant}-2025`,source_item_id:'123',source_file:''};
+      sources.push(source);
+      shared.paths[variant]=taxonomy(variant,'reviewed');
+      shared.source_bindings.push(nclexTaxonomySourceBinding(source,variant));
+      await db.query('INSERT INTO content_collections (id,status,source_profile,source_namespace,source_provider,collection_key,title,source_year,approved_at,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,2025,NOW(),NOW())',
+        [source.collection_id,'approved',source.source_profile,source.source_namespace,source.source_provider,source.collection_key,source.collection_title]);
+      await db.query("INSERT INTO content_collection_destinations VALUES ($1,'aylamed_qbank',TRUE,'')",[source.collection_id]);
+    }
+    await db.query("INSERT INTO content_questions (id,exam_track,status,system_key,taxonomy,source_data,media_refs,title,correct_answer_id) VALUES ($1,'nclex','approved','source-nursing',$2,'{}','[]','Shared nursing question',1)",[sharedId,original]);
+    await db.query("INSERT INTO content_answers VALUES ($1,1,'Answer')",[sharedId]);
+    for(const [index,source] of sources.entries())await db.query('INSERT INTO content_source_aliases (id,question_id,collection_id,created_at,source_namespace,source_item_id,source_data) VALUES ($1,$2,$3,NOW(),$4,$5,$6)',
+      [uuid(3201+index),sharedId,source.collection_id,source.source_namespace,source.source_item_id,{}]);
+    async function nursingIds(source,filters={}){
+      const q=contentQbankFacetQuery({examTrack:'nclex',collectionIds:[source.collection_id],filters});
+      return (await db.query('SELECT q.id '+q.sql,q.values)).rows.map(r=>r.id);
+    }
+    for(const source of sources)assert.deepEqual(await nursingIds(source),[sharedId]);
+    await db.query('UPDATE content_questions SET taxonomy=$1 WHERE id=$2',[shared,sharedId]);
+    for(const [index,source] of sources.entries()){
+      const variant=['nclex_rn','nclex_pn'][index], selection_paths=[{system_key:variant}];
+      assert.deepEqual(await nursingIds(source),[sharedId],'2025 bank visibility must survive reviewed variant mapping');
+      assert.deepEqual(await nursingIds(source,{selection_paths}),[sharedId]);
+      assert.deepEqual(await nursingIds(source,{selection_paths:[{system_key:index?'nclex_rn':'nclex_pn'}]}),[]);
+      const facet=contentQbankFacetsQuery({examTrack:'nclex',collectionIds:[source.collection_id]});
+      const tree=buildAylaQbankFacetTree((await db.query(facet.sql,facet.values)).rows,{examTrack:'nclex'});
+      assert.equal(tree.question_count,1);
+      assert.equal(tree.nodes[0].selection_path.system_key,variant);
+      const delivery=contentQbankQuestionsQuery({examTrack:'nclex',collectionIds:[source.collection_id],selectionPaths:selection_paths,limit:5,seed:'older-bank'});
+      const delivered=(await db.query(delivery.sql,delivery.values)).rows;
+      assert.deepEqual(delivered.map(r=>r.id),[sharedId]);
+      assert.equal(delivered[0].taxonomy.system_key,variant);
+    }
+    // Changed provenance falls back to the original path; incomplete fallback
+    // and disabled destinations still cannot enter an older-bank test.
+    await db.query("UPDATE content_source_aliases SET source_item_id='changed' WHERE question_id=$1",[sharedId]);
+    for(const source of sources){assert.deepEqual(await nursingIds(source),[sharedId]);assert.deepEqual(await nursingIds(source,{selection_paths:[{system_key:'source-nursing'}]}),[sharedId]);}
+    await db.query('UPDATE content_questions SET taxonomy=$1 WHERE id=$2',[{...shared,fallback_taxonomy:{system_key:'source-nursing'}},sharedId]);
+    for(const source of sources)assert.deepEqual(await nursingIds(source),[]);
+    await db.query('UPDATE content_questions SET taxonomy=$1 WHERE id=$2',[shared,sharedId]);
+    await db.query('UPDATE content_collection_destinations SET enabled=FALSE WHERE collection_id=ANY($1::uuid[])',[sources.map(s=>s.collection_id)]);
+    for(const source of sources)assert.deepEqual(await nursingIds(source),[]);
   } finally { await db.close(); }
 });
